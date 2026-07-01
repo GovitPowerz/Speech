@@ -12,10 +12,13 @@ weight packer/unpacker. Deliver both the Rust implementation (crate `speech`) an
 reference port (package `speech`) so the packer is cross-checked from two independent directions
 against the same real artifact.
 
-**Single acceptance test:** parsing `1_worker_1.config`, applying the `adim_coeff` scaling, and
-packing the flat weight vector reproduces `NNweights_config1.bin` (269,384 bytes) byte-for-byte;
-and reading that `.bin` and re-writing it reproduces the input bytes exactly. Both must hold in
-Rust and in Python, and the two flat vectors must be identical.
+**Acceptance (two bit-exact goldens):** (1) taking the structured config-domain weights from
+`BestConfigStruct`, applying `adim_coeff`, and packing the flat vector reproduces the paired
+nnet-domain `nnet_best[:33671]` byte-for-byte; (2) reading `NNweights_config1.bin` (269,384 bytes)
+and re-writing it reproduces the input bytes exactly. Both must hold in Rust and in Python. NOTE:
+the `.config` text file carries only hyperparameters + sizes + a `weightsFile` pointer, not the
+weights - so the packer/adim golden is sourced from the `save_net` `.mat`'s `BestConfigStruct` +
+`nnet_best` (see sections 4, 8-9), not from the `.config`.
 
 This is Phase 0a only. Phase 0b (cost laws, segmentation, scoring, VRCTS/STM I/O) is a separate
 later cycle with its own spec.
@@ -25,7 +28,7 @@ later cycle with its own spec.
 | # | Decision | Choice |
 |---|----------|--------|
 | 1 | Cycle scope | Phase 0a alone (byte-parity). 0b is the next cycle. |
-| 2 | Golden fixtures | Vendor the real artifacts into `tests/reference_data/` (committed): `NNweights_config1.bin` (~269 KB), `1_worker_1.config` (~3 KB), and the 16-byte empty `weightsDerivatives_*.mat`. Tests run in CI. |
+| 2 | Golden fixtures | Vendor into `tests/reference_data/phase0/` (committed): the real `NNweights_config1.bin` (~269 KB) and `1_worker_1.config` (~3 KB), PLUS derived binary fixtures extracted from the `save_net` `.mat` by a committed prep script (`scripts/extract_phase0_fixtures.py`, scipy): `best_config_domain.bin` (the structured config-domain weight rows) + `best_config_manifest.json` (row names/shapes) + `best_net_flat.bin` (the paired nnet-domain flat vector `nnet_best[:33671]`). Tests run in CI. |
 | 3 | Model scope | NNType 0 (BLSTM) only - the OpenSAD15 artifact is NNType 0. NNType 1/2 ordering is out of scope. |
 | 4 | `.mat` I/O | `io::matfile` stays deferred to Phase 1. Weight files travel through the custom `.bin` format, not matio (despite some `.mat` extensions). |
 | 5 | TOML schema | `legacy_config` parses the legacy format exhaustively for the load-bearing keys; the native TOML schema models only the ~25 Phase-0 keys and grows later. Native config stays TOML-first with `legacy_config` as a one-way importer. |
@@ -67,12 +70,27 @@ Authoritative source: C++ `ConfigFile.cpp`.
 - Vectors are comma-separated (e.g. `LSTMNeuronNb 23,24,24`). The `val*count` repeat syntax exists
   in the typed getters.
 
-**Load-bearing keys for 0a (NNType 0):** `NNType`, `LSTMNeuronNb`, `LSTMSubSampling`,
-`OutputNeuronNb`, `OutputSubSampling`, `PeepholesActive`, the per-block families
-`AlgName_[Forward|Backward]_Layer_i_LSTMBlock_j_{Input,Forget,Output}GateWeights` and `_CellWeight`
-(each value is a comma-separated f64 list = one full matrix ROW of length `ncols`),
-`AlgName_Output_Layer_i_Neuron_j_Weights`, `AlgName_NormalizeInputMean`, `AlgName_NormalizeInputStd`,
-plus the `AlgName_LID_`-prefixed twins where present. Config stores config-domain (adim-scaled) rows.
+IMPORTANT (verified against the real `1_worker_1.config`, 76 lines / 2.9 KB): the `.config` TEXT
+file holds hyperparameters + structural sizes + a `BLSTM_weightsFile` POINTER - it does NOT contain
+the weight matrices (33,671 doubles cannot fit in 2.9 KB). The text-file key prefix is the `algName`
+value `BLSTM_` (e.g. `BLSTM_LSTMNeuronNb`). The `AlgName_` literal prefix appears only in the
+in-memory struct / `.mat` (see below).
+
+**Load-bearing `.config` keys for 0a (NNType 0), all `BLSTM_`-prefixed:** `BLSTM_NNType` (0),
+`BLSTM_LSTMNeuronNb` (`23,24,24`), `BLSTM_LSTMSubSampling` (`4,1`), `BLSTM_OutputNeuronNb`
+(`48,12,1`), `BLSTM_OutputSubSampling` (`1,1`), `BLSTM_NNetInputSize` (23), the six peephole flags
+`BLSTM_[Forward|Backward]_Is{Cells,Gates,GatesRecurrent}PeepholesActive`, `BLSTM_weightsFile`, and
+the cost keys `BLSTM_CostLaw{Speech,NoSpeech}` / `..Param..` / `..Thresh..`. The parser reads these
+into the typed `NnetSpec` + `Config`; the weight VALUES do not come from here.
+
+**Structured weight source (for the packer/adim golden):** the `save_net` `.mat`
+(`LSTM_15-Oct-2015_BLSTM_OpenSAD15.mat`) holds `BestConfigStruct`, a struct whose fields
+`AlgName_[Forward|Backward]_Layer_i_LSTMBlock_j_{Input,Forget,Output}GateWeights` / `_CellWeight`
+(one per block j = neuron row, value = a config-domain row of length `ncols`),
+`AlgName_Output_Layer_i_Neuron_j_Weights`, and `AlgName_NormalizeInput{Mean,Std}` ARE the structured
+config-domain weights, and `nnet_best` (padded to 50000, first 33,671 real) is the paired nnet-domain
+flat vector. These are loaded with scipy in the Python oracle and extracted into the committed binary
+fixtures (Decision 2). `BestConfigStruct` stores config-domain (adim-scaled) rows.
 
 ## 5. The `config <-> nnet` `adim_coeff` seam (exact, HIGHEST RISK)
 
@@ -174,49 +192,70 @@ For `LSTMNeuronNb=[23,24,24]`, `LSTMSubSampling=[4,1]`, `OutputNeuronNb=[48,12,1
     `_`-continuation, `#`-comments)
   - typed getters: scalar, comma-vector, and the `AlgName_*` weight-row families
 - `src/rust/src/config.rs` - typed model + the seam + the packer
-  - `Config` / `NnetSpec` (`LSTMNeuronNb`, subsampling, output sizes, peepholes, prefix)
-  - `Nnet` (per-layer `output_size x ncols` matrices for forward/backward/output + mean/std)
-  - `config_to_nnet(&LegacyConfig, &NnetSpec) -> Nnet` (applies `adim_coeff` decode)
+  - `NnetSpec` (from the `.config`: `LSTMNeuronNb`, subsampling, output sizes/subsampling, input
+    size, peephole flags) + `Config` (adds cost keys, `weightsFile`)
+  - `StructuredWeights` (config-domain per-block rows: forward/backward layers x blocks x
+    `{input,forget,output,cell}` rows, output-neuron rows, mean, std) - the in-memory form of
+    `BestConfigStruct`, populated from the committed fixture
+  - `Nnet` (nnet-domain per-layer `output_size x ncols` matrices for forward/backward/output +
+    mean/std)
+  - `config_to_nnet(&StructuredWeights, &NnetSpec) -> Nnet` (applies `adim_coeff` decode)
   - `nnet_to_flat(&Nnet) -> Vec<f64>` (the 13-block packer; no scaling)
   - `flat_to_nnet(&[f64], &NnetSpec) -> Nnet` (inverse packer)
-  - `nnet_to_config` / helper for the encode direction
   - `element_count(&NnetSpec) -> usize`
+- `src/rust/src/legacy_config.rs`
+  - `parse_legacy_config(text) -> LegacyConfig` + `NnetSpec`/`Config` extraction (sizes, peephole
+    flags, cost keys). NO weight rows come from here.
 
 **Python (package `speech`):**
 
-- `src/python/speech/weight_bridge.py` - the reference oracle
-  - `read_bin(path) -> tuple[int,int,NDArray]` (`struct.unpack('<qq')` + `np.frombuffer('<f8')`)
-  - `write_bin(rows, cols, data, path)`
-  - `config_to_nnet(cfg, spec)` / `nnet_to_flat(nnet)` (numpy port; row-major via `X.reshape(-1)`
-    on `X`, NOT `X.T`)
+- `src/python/speech/weight_bridge.py` - the numpy reference oracle
+  - `read_bin(path) -> tuple[int,int,NDArray]` (`struct.unpack('<qq')` + `np.frombuffer('<f8')`);
+    `write_bin(rows, cols, data, path)`
+  - `config_to_nnet(structured, spec)` / `nnet_to_flat(nnet)` / `flat_to_nnet(flat, spec)` (numpy;
+    row-major via `X.reshape(-1)` on `X`, NOT `X.T`); `element_count(spec)`
 - `src/python/speech/config_bridge.py`
-  - `parse_legacy_config(text) -> dict` (last-wins) + weight-row extraction
-
-Each side independently packs `1_worker_1.config` and compares to `NNweights_config1.bin`.
+  - `parse_legacy_config(text) -> dict` (last-wins) + `NnetSpec` extraction
+- `scripts/extract_phase0_fixtures.py` (committed prep + ground-truth oracle, scipy)
+  - `scipy.io.loadmat` the `save_net` `.mat`; extract `BestConfigStruct`'s structured config-domain
+    rows -> `best_config_domain.bin` + `best_config_manifest.json`; extract `nnet_best[:33671]`
+    (assert `nnet_best[33671:]` all zero) -> `best_net_flat.bin`. Before emitting, ASSERT the numpy
+    `nnet_to_flat(config_to_nnet(structured, spec)) == nnet_best[:33671]` bit-for-bit - this is the
+    authoritative check that the extraction + adim + packer reproduce the real flat net.
 
 ## 9. Golden fixtures, strategy, and acceptance
 
-**Vendored into `tests/reference_data/` (committed):**
-- `NNweights_config1.bin` (269,384 bytes) - primary golden.
-- `1_worker_1.config` (~3 KB) - the source config.
-- `weightsDerivatives_bestNNWeight_1_..._worker_1.mat` (16 bytes) - the empty-file guard fixture.
+**Vendored into `tests/reference_data/phase0/` (committed):**
+- `NNweights_config1.bin` (269,384 bytes) - real `.bin` codec golden.
+- `1_worker_1.config` (~3 KB) - real config-parse golden.
+- `best_config_domain.bin` + `best_config_manifest.json` - the structured config-domain weight rows
+  from `BestConfigStruct` (emitted by the prep script).
+- `best_net_flat.bin` (269,384 bytes) - the paired nnet-domain flat vector `nnet_best[:33671]`.
 
-Source path (local, git-ignored):
-`/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/`.
+Source (local, git-ignored): `.bin`/`.config` under
+`/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/`;
+the `.mat` at `.../Optimizer_V6.2.2/save_net/LSTM_15-Oct-2015_BLSTM_OpenSAD15.mat`. The prep script
+regenerates the derived fixtures from these.
 
 **Tests (Rust `tests/` + Python `tests/`):**
-1. `.bin` header decode: rows==33671, cols==1, size==269384.
+1. `.bin` header decode: `read_matrix(NNweights_config1.bin)` -> rows==33671, cols==1; file size
+   ==269384.
 2. `.bin` round-trip: `read_matrix` then `write_matrix` == input bytes.
-3. Empty-file guard: the 16-byte fixture errors (`rows*cols <= 0`).
-4. Element count: `element_count(spec)` == 33671 for the paired config's dims.
-5. Whole-pipeline (the acceptance): `parse(1_worker_1.config)` -> `config_to_nnet` -> `nnet_to_flat`
-   == `read_weight_vector(NNweights_config1.bin)` bit-for-bit (`==` on `f64`, not approx).
-6. Tail: `flat[-46:-23]` (mean) and `flat[-23:]` (std, all `> 0`).
-7. Inverse: `flat_to_nnet(read_weight_vector(...), spec)` then `nnet_to_flat` round-trips.
-8. Cross-language: Rust flat vector == Python flat vector == `.bin` payload (a Python test loads a
-   Rust-emitted vector, or both compare to the fixture).
-9. Output-layer adim asymmetry: an explicit assertion that the output layer uses
-   `sqrt(out*sub)` with no next-term (a targeted unit test on `adim_coeff`).
+3. Short/empty guard: a 16-byte header with `rows*cols == 0` (constructed in-test) errors.
+4. Config parse: `parse(1_worker_1.config)` -> `NnetSpec` with `LSTMNeuronNb==[23,24,24]`,
+   `LSTMSubSampling==[4,1]`, `OutputNeuronNb==[48,12,1]`, `OutputSubSampling==[1,1]`,
+   `NNetInputSize==23`, all six peephole flags `true`, cost laws `"log"`/`"log"`.
+5. Element count: `element_count(spec)` == 33671 == `read_matrix(NNweights_config1.bin).rows`.
+6. Packer bijection (no adim): `flat_to_nnet(read_weight_vector(NNweights_config1.bin), spec)` then
+   `nnet_to_flat` == the input flat, bit-for-bit. Tail: `flat[-46:-23]` (mean), `flat[-23:]` (std,
+   all `> 0`).
+7. THE acceptance (adim + pack): load `best_config_domain.bin` + manifest into `StructuredWeights`,
+   `config_to_nnet` (adim), `nnet_to_flat` == `read_weight_vector(best_net_flat.bin)` bit-for-bit
+   (`==` on `f64`, not approx).
+8. adim output-layer asymmetry: a targeted unit test on a small hand-built net asserting the output
+   layer uses `sqrt(out*sub)` with NO next-term (and that the bias column is exempt from scaling).
+9. Cross-language agreement: Rust and Python both reproduce the fixtures in tests 6 and 7 (both `==`
+   the committed goldens), so the two independent implementations agree by transitivity.
 
 ## 10. Risks and pitfalls (must be pinned by tests)
 
