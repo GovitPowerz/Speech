@@ -1,8 +1,5 @@
-# NOTE: workspace members lists only "." for now; Task 5 adds "speech-py" when
-# that crate is created. Listing a not-yet-existing member here would break
-# `cargo build` in this task.
 [workspace]
-members = ["."]
+members = [".", "speech-py"]
 
 [package]
 name = "speech"

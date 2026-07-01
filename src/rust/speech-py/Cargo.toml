@@ -1,0 +1,17 @@
+[package]
+name = "speech-py"
+version = "0.1.0"
+edition = "2024"
+description = "PyO3 bindings for the speech engine"
+
+[lib]
+name = "speech_rs"
+crate-type = ["cdylib", "lib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+speech = { path = ".." }
+pyo3 = { version = "0.28" }
+numpy = "0.28"

@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "speech-rs"
+requires-python = ">=3.14"
+version = "0.1.0"
+description = "PyO3 bindings for the speech engine"
+
+[tool.maturin]
+features = ["extension-module"]
