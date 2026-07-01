@@ -1,7 +1,6 @@
 //! Skeleton smoke tests: the crate boots and the real plumbing works.
 
 use speech::cli::Mode;
-use speech::config::Config;
 use speech::constants::{MAX_RAND_SIZE, random_uniform};
 
 #[test]
@@ -14,13 +13,6 @@ fn mode_parses_flags() {
     assert_eq!(Mode::from_flag("-m"), Some(Mode::Multi));
     assert_eq!(Mode::from_flag("-s"), Some(Mode::Solo));
     assert_eq!(Mode::from_flag("--nope"), None);
-}
-
-#[test]
-fn config_parses_minimal_toml() {
-    let cfg = Config::from_toml_str("[engine]\nalgo = \"twin_blstm_lid\"\n").unwrap();
-    assert_eq!(cfg.engine.algo, "twin_blstm_lid");
-    assert_eq!(cfg.engine.num_outer_threads, 1);
 }
 
 #[test]

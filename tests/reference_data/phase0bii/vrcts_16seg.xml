@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AudioDoc name="PRCTS_CHI_BE_0000263500_03.ed" path="/Users/Govit/Documents/AudioFiles/PRCTS_CHI_BE_0000263500_03.ed.wav">
+<ProcList>
+<Proc name="vrcts_part" version="1.3"/>
+</ProcList>
+<ChannelList>
+<Channel num="1" sigdur="120.00" spdur="81.79"/>
+</ChannelList>
+<SpeakerList>
+<Speaker ch="1" dur="81.79" gender="1" spkid="1"/>
+</SpeakerList>
+<SegmentList>
+<SpeechSegment ch="1" sconf="1.00" stime="2.180" etime="3.883" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="4.680" etime="13.384" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="14.280" etime="23.384" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="25.580" etime="28.234" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="30.931" etime="32.684" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="35.780" etime="40.581" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="43.780" etime="60.334" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="62.630" etime="66.334" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="68.130" etime="75.884" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="76.480" etime="80.234" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="81.181" etime="84.784" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="85.931" etime="92.234" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="102.030" etime="104.884" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="108.280" etime="111.134" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="111.980" etime="115.234" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="117.580" etime="119.999" spkid="1"/>
+</SegmentList>
+</AudioDoc>
