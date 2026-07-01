@@ -257,6 +257,180 @@ pub fn update_segmentation(
     smooth_segmentation(seg, cfg);
 }
 
+/// Single-threshold, COL-vector decision, then `sanitize` only (NO smoothing).
+///
+/// Direct port of `Segmenter::LID2Segmentation` (`Segmenter.cpp:999-1055`, the
+/// active `threshMax` branch; the `threshMin` second pass is commented out in the
+/// legacy and reproduced as such). `results[k]` is the legacy `results(k, 0)` -
+/// the COL vector, `length = results.rows()`. This is the load-bearing
+/// orientation asymmetry vs [`update_segmentation`], which reads the ROW vector
+/// `results(0, k)`. Only `thresh_max` is used: no area gating, no hysteresis.
+///
+/// Rising: `r(ii) >= thresh_max && r(ii-1) < thresh_max` -> linear-interp
+/// `begin`, `hasBegun` immediately (no area). Falling: `r(ii) <= thresh_max &&
+/// r(ii-1) > thresh_max` -> linear-interp `end`. On `begin < end` label + reset
+/// (NO re-run-rising-after-label, unlike `update_segmentation`); else reset. The
+/// INIT `r(0) >= thresh_max` sets `begin = 0` but NOT `hasBegun`, and the loop's
+/// rising is guarded by `begin < 0`, so a begin-at-0 that never re-crosses
+/// produces no segment (nor a tail) - a legacy quirk reproduced verbatim. TAIL
+/// uses `results.len()` (the legacy `results.size()` = rows*cols, equal to
+/// `length` for a col vector).
+pub fn lid_to_segmentation(
+    seg: &mut Segmentation,
+    results: &[f64],
+    class: SegClass,
+    off: f64,
+    dt: f64,
+    thresh_max: f64,
+) {
+    let mut begin = -1.0f64;
+    let mut end = -1.0f64;
+    let mut has_begun = false;
+    let mut has_ended = false;
+    let length = results.len();
+
+    if length > 0 && results[0] >= thresh_max {
+        begin = 0.0;
+    }
+
+    for ii in 1..length {
+        let r = results[ii];
+        let r_prev = results[ii - 1];
+
+        if !has_begun && begin < 0.0 && r >= thresh_max && r_prev < thresh_max {
+            begin = dt * (ii as f64 - (r - thresh_max) / (r - r_prev));
+            has_begun = true;
+        }
+
+        if has_begun {
+            if end < 0.0 && r <= thresh_max && r_prev > thresh_max {
+                end = dt * (ii as f64 - (r - thresh_max) / (r - r_prev));
+                has_ended = true;
+            }
+            if has_ended {
+                if begin < end {
+                    seg.label_segment(begin + off, end + off, class);
+                }
+                begin = -1.0;
+                end = -1.0;
+                has_begun = false;
+                has_ended = false;
+            }
+        }
+    }
+
+    if has_begun {
+        end = dt * results.len() as f64;
+        seg.label_segment(begin + off, end + off, class);
+    }
+
+    seg.sanitize();
+}
+
+/// Per-frame training targets from a reference segmentation
+/// (`Segmenter::getTargets`, `:659-707`). Returns `n_rows` targets (the legacy
+/// `targets(ii, 0)`); the frame count is passed explicitly since the legacy sizes
+/// `targets` externally to match `results.rows()` (there is no such matrix in the
+/// Rust signature). `reference` maps to the legacy `seg._Reference.at(chan)` (a
+/// boundary list ending with the `End` sentinel); `seg` (the hypothesis) is
+/// carried only for signature parity with the spec and is unused here.
+///
+/// For each row `ii`, `t = ii*time_step + time_offset`; advance `it_ref` while
+/// `it_ref+1` is not the sentinel-past-end AND `(it_ref+1).begin <= t`.
+///
+/// - `back_prop_wer >= 0`: SPEECH/SUBSTITUTION -> `1 - 0.1*time_step/dur_seg`
+///   with `dur_seg = max(next-cur, time_step)` (only when `it_ref+1` exists);
+///   EXCLUDED -> `-0.5`; INSERTION -> `0.1*time_step/dur_seg` (only when `it_ref+1`
+///   exists); else the two neighbor-window branches (a following SPEECH/SUBST
+///   window opening within `_BackPropWER`, or a preceding one still open), else
+///   `time_step/100`.
+/// - `back_prop_wer < 0`: `it_ref.ty == class || (class==SPEECH &&
+///   it_ref.ty==SUBSTITUTION)` -> `1.0`; EXCLUDED -> `-0.5`; else `0.0`.
+///
+/// The default-initialized `targets(ii,0)` is `0.0` (Eigen zero-init); the two
+/// `back_prop_wer >= 0` branches that guard on `it_ref+1 != end()` leave the entry
+/// at `0.0` when the guard fails, which this port reproduces via a `0.0`-filled
+/// buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn get_targets(
+    _seg: &Segmentation,
+    reference: &Segmentation,
+    time_step: f64,
+    time_offset: f64,
+    back_prop_wer: f64,
+    class: SegClass,
+    n_rows: usize,
+) -> Vec<f64> {
+    let mut targets = vec![0.0f64; n_rows];
+    let refs = reference.segments();
+    if refs.is_empty() {
+        return targets;
+    }
+    let len = refs.len();
+    let mut idx = 0usize;
+
+    for (ii, target) in targets.iter_mut().enumerate() {
+        let t = ii as f64 * time_step + time_offset;
+        while idx + 1 < len && refs[idx + 1].begin <= t {
+            idx += 1;
+        }
+        let ty = refs[idx].ty;
+
+        if back_prop_wer >= 0.0 {
+            if ty == SegClass::Speech || ty == SegClass::Substitution {
+                if idx + 1 < len {
+                    let mut dur_seg = refs[idx + 1].begin - refs[idx].begin;
+                    if dur_seg < time_step {
+                        dur_seg = time_step;
+                    }
+                    *target = 1.0 - 0.1 * time_step / dur_seg;
+                }
+            } else if ty == SegClass::Excluded {
+                *target = -0.5;
+            } else if ty == SegClass::Insertion {
+                if idx + 1 < len {
+                    let mut dur_seg = refs[idx + 1].begin - refs[idx].begin;
+                    if dur_seg < time_step {
+                        dur_seg = time_step;
+                    }
+                    *target = 0.1 * time_step / dur_seg;
+                }
+            } else if idx + 1 < len
+                && idx + 2 < len
+                && (refs[idx + 1].ty == SegClass::Speech
+                    || refs[idx + 1].ty == SegClass::Substitution)
+                && refs[idx + 1].begin - back_prop_wer <= t
+            {
+                let mut dur_seg = refs[idx + 2].begin - refs[idx + 1].begin;
+                if dur_seg < time_step {
+                    dur_seg = time_step;
+                }
+                *target = 1.0 - 0.1 * time_step / dur_seg;
+            } else if idx != 0
+                && (refs[idx - 1].ty == SegClass::Speech
+                    || refs[idx - 1].ty == SegClass::Substitution)
+                && refs[idx].begin + back_prop_wer >= t
+            {
+                let mut dur_seg = refs[idx].begin - refs[idx - 1].begin;
+                if dur_seg < time_step {
+                    dur_seg = time_step;
+                }
+                *target = 1.0 - 0.1 * time_step / dur_seg;
+            } else {
+                *target = time_step / 100.0;
+            }
+        } else if ty == class || (class == SegClass::Speech && ty == SegClass::Substitution) {
+            *target = 1.0;
+        } else if ty == SegClass::Excluded {
+            *target = -0.5;
+        } else {
+            *target = 0.0;
+        }
+    }
+
+    targets
+}
+
 /// The fixed 8-step smoothing pipeline (`Segmenter.cpp:709-723`).
 pub fn smooth_segmentation(seg: &mut Segmentation, cfg: &SegmenterConfig) {
     seg.sanitize();
