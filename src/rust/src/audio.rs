@@ -68,6 +68,132 @@ impl Audio {
     }
 }
 
+/// Windowing coefficients (legacy `getWindowingCoefficients`, `Helpers.hpp:222-272`).
+///
+/// Returns `None` for `size <= 1`, `"none"`, unrecognized kinds, and the
+/// `"uniform"` + `normalized == false` combination (load-bearing legacy quirk:
+/// uniform is only materialized when normalized, otherwise it falls through
+/// to the empty/`None` branch -- i.e. rectangular/no windowing). `normalized`
+/// divides the whole vector by the coefficient sum (computed as accumulated
+/// during generation, matching the legacy `adim`).
+pub fn windowing_coefficients(
+    kind: &str,
+    normalized: bool,
+    size: usize,
+    extra_param: f64,
+) -> Option<Vec<f64>> {
+    if size <= 1 || kind == "none" {
+        return None;
+    }
+    let mut coeff = vec![0.0_f64; size];
+    let mut adim = 0.0_f64;
+    match kind {
+        "hamming" => {
+            let constant = 2.0 * std::f64::consts::PI / (size as f64 - 1.0);
+            for (ii, c) in coeff.iter_mut().enumerate() {
+                let v = 0.54 - 0.46 * (constant * ii as f64).cos();
+                *c = v;
+                adim += v;
+            }
+        }
+        "hann" => {
+            let constant = 2.0 * std::f64::consts::PI / (size as f64 - 1.0);
+            for (ii, c) in coeff.iter_mut().enumerate() {
+                let v = 0.5 - 0.5 * (constant * ii as f64).cos();
+                *c = v;
+                adim += v;
+            }
+        }
+        "hHCw" => {
+            let extra_param = extra_param.clamp(0.0, 1.0);
+            let size1 = f64::round(extra_param * size as f64) as usize;
+            let size2 = size - size1;
+            let constant1 = 2.0 * std::f64::consts::PI / (2.0 * size1 as f64 - 1.0);
+            let constant2 = 2.0 * std::f64::consts::PI / (4.0 * size2 as f64 - 1.0);
+            for (ii, c) in coeff.iter_mut().enumerate().take(size1) {
+                let v = 0.54 - 0.46 * (constant1 * ii as f64).cos();
+                *c = v;
+                adim += v;
+            }
+            for (ii, c) in coeff.iter_mut().enumerate().skip(size1) {
+                let v = (constant2 * (ii - size1) as f64).cos();
+                *c = v;
+                adim += v;
+            }
+        }
+        "uniform" if normalized => {
+            coeff.fill(1.0);
+            adim = size as f64;
+        }
+        _ => return None,
+    }
+    if normalized {
+        for c in coeff.iter_mut() {
+            *c /= adim;
+        }
+    }
+    Some(coeff)
+}
+
+/// Start/end taps into `coeffs` for kernel index `ii` out of `len` positions.
+/// Shared edge-truncation arithmetic for `convolution_horiz`/`convolution_vert`
+/// (legacy `Convolution`/`ConvolutionVert`, `Helpers.hpp:164-220`). `coeffs` has
+/// `2*half_window+1` taps; the source-index math is done in `isize` (the legacy
+/// unsigned-wraparound trick for the left edge, ported with signed arithmetic
+/// yielding identical final indices).
+fn conv_taps(ii: usize, len: usize, half_window: isize) -> (isize, usize, usize) {
+    let ii = ii as isize;
+    let len = len as isize;
+    let (begin1, begin2) = if ii < half_window {
+        let begin2 = half_window - ii;
+        (-begin2, begin2)
+    } else {
+        (ii - half_window, 0)
+    };
+    let end = if ii + half_window < len {
+        2 * half_window
+    } else {
+        len - 1 - begin1
+    };
+    (begin1, begin2 as usize, end as usize)
+}
+
+/// `Convolution` (`Helpers.hpp:164-191`): in-place 1xN horizontal convolution.
+/// Edge positions truncate the kernel without renormalizing (missing taps are
+/// simply dropped, not redistributed) -- a load-bearing legacy quirk.
+pub fn convolution_horiz(row: &mut Array2<f64>, coeffs: &[f64]) {
+    let half_window = ((coeffs.len() - 1) / 2) as isize;
+    let cols = row.ncols();
+    let copy: Vec<f64> = row.row(0).to_vec();
+    for ii in 0..cols {
+        let (begin1, begin2, end) = conv_taps(ii, cols, half_window);
+        let mut acc = 0.0;
+        for jj in begin2..=end {
+            acc += copy[(begin1 + jj as isize) as usize] * coeffs[jj];
+        }
+        row[[0, ii]] = acc;
+    }
+}
+
+/// `ConvolutionVert` (`Helpers.hpp:193-220`): in-place T x B vertical convolution
+/// (convolves down time/rows, independently per column). Same edge-truncation
+/// contract as `convolution_horiz`.
+pub fn convolution_vert(mat: &mut Array2<f64>, coeffs: &[f64]) {
+    let half_window = ((coeffs.len() - 1) / 2) as isize;
+    let (rows, cols) = mat.dim();
+    let copy = mat.clone();
+    for ii in 0..rows {
+        let (begin1, begin2, end) = conv_taps(ii, rows, half_window);
+        for kk in 0..cols {
+            let mut acc = 0.0;
+            for jj in begin2..=end {
+                acc += copy[[(begin1 + jj as isize) as usize, kk]] * coeffs[jj];
+            }
+            mat[[ii, kk]] = acc;
+        }
+    }
+}
+
 /// Per-channel normalize: `adim = (2*rms + max_abs)/2`, floored at `1e-3`, then divide.
 /// `AudioStruct.cpp:121-126`.
 pub fn normalize_channels(data: &mut Array2<f64>) {
