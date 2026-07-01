@@ -1,0 +1,71 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "brew_versions": {
+    "gcc": "16.1.0",
+    "eigen@3": "3.4.1",
+    "libsndfile": "1.2.2_1",
+    "libmatio": "1.5.30_1",
+    "boost": "1.90.0_1",
+    "png++": "0.2.10",
+    "sse2neon": "1.9.1"
+  },
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "constants": {
+    "offset_sec": 0.35,
+    "max_dur_sec": 2.0,
+    "preemph": 0.97,
+    "noise_ratio": 0.001
+  },
+  "source_wav": {
+    "path": "PRCTS_RUS_RU_0000263489_01.wav",
+    "excerpt_frames": [
+      240000,
+      264000
+    ],
+    "channels": 2,
+    "samplerate": 8000,
+    "subtype": "PCM_16"
+  },
+  "dumps": {
+    "sig_norm.bin": {
+      "rows": 2,
+      "cols": 16001
+    },
+    "sig_preemph.bin": {
+      "rows": 2,
+      "cols": 16001
+    },
+    "sig_noise.bin": {
+      "rows": 2,
+      "cols": 16001
+    },
+    "win_hamming_257.bin": {
+      "rows": 1,
+      "cols": 257
+    },
+    "win_hann_257.bin": {
+      "rows": 1,
+      "cols": 257
+    },
+    "win_hhcw_257.bin": {
+      "rows": 1,
+      "cols": 257
+    },
+    "win_conv_norm_7.bin": {
+      "rows": 1,
+      "cols": 7
+    },
+    "synth_20x50.bin": {
+      "rows": 20,
+      "cols": 50
+    }
+  },
+  "anchor": {
+    "dump": "sig_norm.bin",
+    "index": [
+      0,
+      0
+    ],
+    "value_hex": "0x1.809dbda6cf509p-10"
+  }
+}
