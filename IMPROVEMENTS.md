@@ -63,6 +63,23 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   clone (non-mutating) whereas `toFile_VRCTS` mutates its `_Classification` in place; revisit if any
   caller relies on the write-time sanitize side effect.
 
+- **[0b-ii] `compute_errors` Pass 1b reads one past the ref End sentinel (UB)** --
+  `Segmentation::compute_errors` (`Segmentation.cpp:370-382`) sets
+  `length = (long)((itEndRef-1).begin / timeStep) + 1`, so the final `ii` makes `currentTime` land
+  exactly on the last ref boundary (= `audioDuration`); the advance loop `(itRef+1 != itEndRef) && ...`
+  then walks `itRef` to the End sentinel (`itEndRef-1`), after which line 382
+  `durationSeg = (itRef+1).begin - itRef.begin` dereferences the **past-the-end** iterator `itEndRef`
+  -- undefined behavior in C++, reading adjacent deque memory. `durationSeg` is only USED in the
+  Speech/Substitution and Insertion coverage branches; when `itRef` is at End the flow falls into the
+  final `else` (delay-only) branch and `durationSeg` is discarded. *Port:* our Pass 1b defers the
+  `it_ref+1` read into those two branches (where `it_ref+1` is always in bounds), giving the identical
+  result without the OOB panic. This is a **bounds guard beyond the legacy** (behavior-preserving, not a
+  numeric change). *Revisit:* nothing to fix numerically; the guard can stay -- it merely removes UB the
+  legacy relied on by luck. Related open item: the Pass-2 `(itRef+1)` / `(it+1)` accesses at
+  `Segmentation.cpp:430-446` are guarded in the legacy only by the `!= END` scorable predicate (the
+  sentinel makes them unreachable); the port relies on the same predicate rather than adding a redundant
+  bounds check.
+
 ### Forward-noted (add the entry when the phase reproduces it)
 
 - **[0b-ii] `updateSegmentation` tail uses `results.size()` (rows*cols), not `length`** -- correct

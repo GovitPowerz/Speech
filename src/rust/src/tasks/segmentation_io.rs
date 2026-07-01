@@ -9,6 +9,300 @@ use anyhow::Result;
 
 use super::segmentation::{SegClass, Segmentation};
 
+/// Per-class detection errors. Raw SECONDS during accumulation, fractions after
+/// normalization. Mirrors the legacy `ErrorStats { _Pmiss, _Pfa, _ErrorRate }`
+/// (`Segmentation.h`).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct ErrorStats {
+    pub pmiss: f64,
+    pub pfa: f64,
+    pub error_rate: f64,
+}
+
+/// Word-error-rate / coverage / delay tallies from Pass 1.
+///
+/// `coverage_penalty`/`delay_penalty` are added beyond the pinned interface: the
+/// legacy `WordErrorRate` struct carries `_CoveragePenalty`/`_DelayPenalty`
+/// (`Segmentation.cpp:386-402`) and Pass 1b fills them, so they belong here.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct WerStats {
+    pub nb_words: i64,
+    pub corrects: i64,
+    pub subs: i64,
+    pub dels: i64,
+    pub ins: i64,
+    pub coverage_penalty: f64,
+    pub delay_penalty: f64,
+}
+
+/// Result of [`compute_errors`]: per-class errors, the reference label counts,
+/// and optional WER stats.
+///
+/// `label_counts` is added beyond the pinned interface: it is the `update_count`
+/// result (the sole output of the no-reference legacy branch, and the
+/// normalization denominators in the reference branch), so callers need it.
+#[derive(Debug, Clone)]
+pub struct ScoreReport {
+    pub per_class: [ErrorStats; 23],
+    pub label_counts: [f64; 23],
+    pub wer: Option<WerStats>,
+}
+
+/// Score `hyp` against an optional `reference`. Direct port of
+/// `Segmentation::compute_errors` (`Segmentation.cpp:288-517`), single-channel.
+///
+/// All display-only `_LogStream` logging is dropped. `hyp` is sanitized in place
+/// (the legacy sanitizes the classification channel too). The reference is
+/// cloned so the caller's copy is untouched: Pass 1 reads the ORIGINAL ref
+/// types, Pass 2 mutates the clone (`Substitution -> Speech`, `Insertion ->
+/// Other`) before counting.
+///
+/// - No reference: `hyp.sanitize()`, return its `update_count` as
+///   `label_counts`, no per-class errors, `wer = None`.
+/// - With reference: Pass 1 (WER, only when `nb_words >= 0`) over the original
+///   ref types, then Pass 2 (per-class Pfa/Pmiss/ErrorRate) over the modified
+///   ref.
+///
+/// Bounds notes vs the legacy: the C++ walk relies on the `End` sentinel always
+/// being present so `it+1`/`itRef+1`/`it-1`/`itRef-1` never dereference past the
+/// deque ends. That invariant holds here too (`Segmentation` always ends with
+/// the `End` sentinel and `it` starts at index 1 in Pass 2, so `it-1` is valid);
+/// the accesses are transcribed directly without extra guards.
+pub fn compute_errors(
+    hyp: &mut Segmentation,
+    reference: Option<&Segmentation>,
+    nb_words: i64,
+) -> ScoreReport {
+    let reference = match reference {
+        None => {
+            // Branch A (legacy 290-302): labelling only.
+            hyp.sanitize();
+            let label_counts = hyp.update_count();
+            return ScoreReport {
+                per_class: [ErrorStats::default(); 23],
+                label_counts,
+                wer: None,
+            };
+        }
+        Some(r) => r,
+    };
+
+    // Branch B (legacy 303-497).
+    hyp.sanitize();
+    let mut refc = reference.clone();
+
+    // Pass 1 (WER): only when nb_words >= 0. Reads the ORIGINAL ref types.
+    let wer = if nb_words >= 0 {
+        Some(compute_wer(&refc, hyp, nb_words))
+    } else {
+        None
+    };
+
+    // Pass 2 (labelling errors): mutate the ref clone, recount, walk.
+    refc.modify_type(SegClass::Substitution, SegClass::Speech);
+    refc.modify_type(SegClass::Insertion, SegClass::Other);
+    let label_counts = refc.update_count();
+
+    let mut per_class = [ErrorStats::default(); 23];
+    compute_label_errors(&refc, hyp, &mut per_class);
+
+    // Normalization (legacy 456-476): j from OTHER (0) up to but excluding
+    // EXCLUDED (21).
+    let dur = refc.audio_duration();
+    let count_excluded = label_counts[SegClass::Excluded as usize];
+    for j in 0..(SegClass::Excluded as usize) {
+        let count = label_counts[j];
+        let count_others = dur - count - count_excluded;
+        per_class[j].error_rate = if dur - count_excluded > 0.0 {
+            per_class[j].error_rate / (dur - count_excluded)
+        } else {
+            0.0
+        };
+        per_class[j].pmiss = if count > 0.0 {
+            per_class[j].pmiss / count
+        } else {
+            0.0
+        };
+        per_class[j].pfa = if count_others > 0.0 {
+            per_class[j].pfa / count_others
+        } else {
+            0.0
+        };
+    }
+
+    ScoreReport {
+        per_class,
+        label_counts,
+        wer,
+    }
+}
+
+/// Pass 1 (WER + coverage/delay). Transcribes `Segmentation.cpp:312-405` over the
+/// ORIGINAL-typed reference (`refc`) and `hyp`. `it`/`itRef` are indices.
+fn compute_wer(refc: &Segmentation, hyp: &Segmentation, nb_words: i64) -> WerStats {
+    let r = refc.segments();
+    let h = hyp.segments();
+    let end_ref = r.len(); // itEndRef
+    let end_hyp = h.len(); // itEnd
+
+    let mut wer = WerStats {
+        nb_words,
+        dels: nb_words, // _Deletions = _NbWords
+        ..WerStats::default()
+    };
+
+    // Pass 1a (legacy 313-369): word counts.
+    let mut it_ref = 0usize;
+    let mut it = 0usize;
+    while it_ref + 1 != end_ref && it + 1 != end_hyp {
+        let ref_ty = r[it_ref].ty;
+        if ref_ty == SegClass::Speech || ref_ty == SegClass::Substitution {
+            if h[it].ty == SegClass::Speech {
+                if h[it + 1].begin <= r[it_ref].begin {
+                    it += 1;
+                } else if h[it + 1].begin < r[it_ref + 1].begin {
+                    it += 1;
+                    it_ref += 1;
+                } else if h[it].begin > r[it_ref].begin {
+                    it_ref += 1;
+                } else {
+                    wer.dels -= 1;
+                    if r[it_ref].ty == SegClass::Speech {
+                        wer.corrects += 1;
+                    } else {
+                        wer.subs += 1;
+                    }
+                    it_ref += 1;
+                }
+            } else if h[it + 1].begin <= r[it_ref].begin {
+                it += 1;
+            } else {
+                it_ref += 1;
+            }
+        } else if ref_ty == SegClass::Insertion {
+            if h[it].ty == SegClass::Speech {
+                if h[it + 1].begin <= r[it_ref].begin {
+                    it += 1;
+                } else if h[it + 1].begin <= r[it_ref + 1].begin {
+                    wer.ins += 1;
+                    it += 1;
+                    it_ref += 1;
+                } else if h[it].begin >= r[it_ref + 1].begin {
+                    it_ref += 1;
+                } else {
+                    wer.ins += 1;
+                    it_ref += 1;
+                }
+            } else if h[it + 1].begin <= r[it_ref + 1].begin {
+                it += 1;
+            } else {
+                it_ref += 1;
+            }
+        } else {
+            it_ref += 1;
+        }
+    }
+
+    // Pass 1b (legacy 370-405): coverage + delay.
+    let time_step = 1e-4;
+    // length = (long)((itEndRef-1).begin / time_step) + 1
+    let length = (r[end_ref - 1].begin / time_step) as i64 + 1;
+    let mut it_ref = 0usize;
+    let mut it = 0usize;
+    for ii in 0..length {
+        let current_time = ii as f64 * time_step;
+        while it_ref + 1 != end_ref && r[it_ref + 1].begin <= current_time {
+            it_ref += 1;
+        }
+        while it + 1 != end_hyp && h[it + 1].begin <= current_time {
+            it += 1;
+        }
+        let ref_ty = r[it_ref].ty;
+        // Legacy computes `durationSeg = (itRef+1).begin - itRef.begin` here
+        // (`Segmentation.cpp:382`). On the final `ii`, `current_time` lands on
+        // the last ref boundary, advancing `it_ref` to the End sentinel; the
+        // legacy then dereferences the past-the-end iterator (UB) but only USES
+        // `durationSeg` in the Speech/Sub and Insertion branches, never in the
+        // End branch. We defer the `it_ref+1` read into those branches (where
+        // `it_ref+1` is always in bounds), avoiding the OOB while preserving the
+        // result. See IMPROVEMENTS.md.
+        if ref_ty == SegClass::Speech || ref_ty == SegClass::Substitution {
+            if h[it].ty != SegClass::Speech {
+                let duration_seg = r[it_ref + 1].begin - r[it_ref].begin;
+                wer.coverage_penalty += if duration_seg <= time_step {
+                    1.0
+                } else {
+                    time_step / duration_seg
+                };
+            }
+        } else if ref_ty == SegClass::Insertion {
+            if h[it].ty != SegClass::Other {
+                let duration_seg = r[it_ref + 1].begin - r[it_ref].begin;
+                wer.coverage_penalty += if duration_seg <= time_step {
+                    1.0
+                } else {
+                    time_step / duration_seg
+                };
+                wer.delay_penalty += time_step / 100.0;
+            }
+        } else if h[it].ty == SegClass::Speech {
+            wer.delay_penalty += time_step / 100.0;
+        }
+    }
+
+    wer
+}
+
+/// Pass 2 two-pointer merge (legacy 426-454): accumulate raw-seconds errors into
+/// `per_class`. `refc` is post-modify (never Substitution in practice; the SUB
+/// clause is kept for faithfulness). `it` starts at index 1 (`begin()+1`).
+fn compute_label_errors(refc: &Segmentation, hyp: &Segmentation, per_class: &mut [ErrorStats; 23]) {
+    let r = refc.segments();
+    let h = hyp.segments();
+    let end_ref = r.len();
+    let end_hyp = h.len();
+
+    let mut it_ref = 0usize;
+    let mut it = 1usize;
+    while it_ref != end_ref && it != end_hyp {
+        if r[it_ref].begin <= h[it].begin {
+            let ref_ty = r[it_ref].ty;
+            let prev_hyp = h[it - 1].ty;
+            let scorable = ref_ty != SegClass::End
+                && ref_ty != SegClass::Excluded
+                && ref_ty != prev_hyp
+                && !(prev_hyp == SegClass::Speech && ref_ty == SegClass::Substitution);
+            if scorable {
+                let error = if h[it].begin > r[it_ref + 1].begin {
+                    r[it_ref + 1].begin - r[it_ref].begin
+                } else {
+                    h[it].begin - r[it_ref].begin
+                };
+                per_class[ref_ty as usize].pmiss += error;
+                per_class[prev_hyp as usize].error_rate += error;
+                per_class[prev_hyp as usize].pfa += error;
+            }
+            it_ref += 1;
+        } else {
+            let hyp_ty = h[it].ty;
+            let prev_ref = r[it_ref - 1].ty;
+            let scorable =
+                hyp_ty != SegClass::End && prev_ref != SegClass::Excluded && prev_ref != hyp_ty;
+            if scorable {
+                let error = if r[it_ref].begin > h[it + 1].begin {
+                    h[it + 1].begin - h[it].begin
+                } else {
+                    r[it_ref].begin - h[it].begin
+                };
+                per_class[prev_ref as usize].pmiss += error;
+                per_class[hyp_ty as usize].error_rate += error;
+                per_class[hyp_ty as usize].pfa += error;
+            }
+            it += 1;
+        }
+    }
+}
+
 /// Sum of `(next.begin - it.begin)` over SPEECH segments.
 /// Direct port of the `speechDuration` accumulator in `Segmentation::toFile_VRCTS`
 /// (`Segmentation.cpp:546-551`).
