@@ -65,7 +65,9 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
 
 - **[0b-ii] `compute_errors` Pass 1b reads one past the ref End sentinel (UB)** --
   `Segmentation::compute_errors` (`Segmentation.cpp:370-382`) sets
-  `length = (long)((itEndRef-1).begin / timeStep) + 1`, so the final `ii` makes `currentTime` land
+  `length = ((long)((itEndRef-1).begin)) / timeStep + 1` (the `(long)` cast is unary and binds to
+  `.begin`, truncating the duration to whole seconds BEFORE dividing by `timeStep`; the port
+  reproduces this via `begin.trunc()` ahead of the division), so the final `ii` makes `currentTime` land
   exactly on the last ref boundary (= `audioDuration`); the advance loop `(itRef+1 != itEndRef) && ...`
   then walks `itRef` to the End sentinel (`itEndRef-1`), after which line 382
   `durationSeg = (itRef+1).begin - itRef.begin` dereferences the **past-the-end** iterator `itEndRef`

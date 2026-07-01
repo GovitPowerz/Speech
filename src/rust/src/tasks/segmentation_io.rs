@@ -205,8 +205,11 @@ fn compute_wer(refc: &Segmentation, hyp: &Segmentation, nb_words: i64) -> WerSta
 
     // Pass 1b (legacy 370-405): coverage + delay.
     let time_step = 1e-4;
-    // length = (long)((itEndRef-1).begin / time_step) + 1
-    let length = (r[end_ref - 1].begin / time_step) as i64 + 1;
+    // length = ((long)((itEndRef-1).begin)) / timeStep + 1
+    // The C++ `(long)` cast is unary and binds to `.begin` (higher precedence
+    // than `/`), truncating the duration to whole seconds BEFORE dividing.
+    // `.trunc()` reproduces `(long)begin` since `begin` is non-negative.
+    let length = (r[end_ref - 1].begin.trunc() / time_step) as i64 + 1;
     let mut it_ref = 0usize;
     let mut it = 0usize;
     for ii in 0..length {

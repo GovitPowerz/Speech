@@ -146,3 +146,35 @@ fn pass1_wer_exact_match() {
     assert_abs_diff_eq!(wer.coverage_penalty, 0.0, epsilon = 1e-12);
     assert_abs_diff_eq!(wer.delay_penalty, 0.0, epsilon = 1e-12);
 }
+
+/// Pass 1b `length` formula, non-integer duration (review fix pin).
+///
+/// Legacy `Segmentation.cpp:371`: `long length = ((long)(itEndRef-1)->_BeginTime)/timeStep+1`.
+/// The `(long)` cast is unary and binds to `_BeginTime` (tighter than `/`), so
+/// the duration is truncated to WHOLE SECONDS first, then divided by
+/// `timeStep`. A naive `(begin / time_step) as i64 + 1` divides first and
+/// truncates the quotient instead -- a numeric divergence for any non-integer
+/// duration.
+///
+/// ref = `Other@[0,10.5)` (no labelling -> single OTHER span), hyp = SPEECH
+/// throughout `[0,10.5)`. Every one of the `length` frames therefore hits the
+/// final `else` branch (`ref_ty == Other`, `hyp.ty == Speech`):
+/// `delay_penalty += time_step/100.0`; `coverage_penalty` is never touched.
+///
+/// Fixed length = `(10.5.trunc()/1e-4) as i64 + 1 = (10/1e-4)+1 = 100001`.
+///   delay_penalty = 100001 * (1e-4/100) = 100001 * 1e-6 = 0.100001.
+/// Buggy length (divide-first) = `(10.5/1e-4) as i64 + 1 = 105000+1 = 105001`.
+///   delay_penalty = 105001 * 1e-6 = 0.105001 (what this test catches).
+#[test]
+fn pass1b_length_truncates_duration_to_whole_seconds() {
+    let refseg = Segmentation::new(10.5);
+    let mut hyp = Segmentation::new(10.5);
+    hyp.label_segment(0.0, 10.5, SegClass::Speech);
+
+    let report = compute_errors(&mut hyp, Some(&refseg), 0);
+
+    let wer = report.wer.expect("nb_words >= 0 must yield WER stats");
+    // Epsilon widened to 1e-7: a 100k-term f64 sum accrues float error beyond 1e-12.
+    assert_abs_diff_eq!(wer.delay_penalty, 0.100_001, epsilon = 1e-7);
+    assert_abs_diff_eq!(wer.coverage_penalty, 0.0, epsilon = 1e-7);
+}
