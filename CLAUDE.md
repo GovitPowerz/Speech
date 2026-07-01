@@ -40,7 +40,7 @@ The Rust crate (`src/rust/`) is the engine: a Cargo workspace with the core `spe
 
 ### Rust module map (`src/rust/src/`)
 
-Each module ships as a compiling stub: a doc-comment naming its legacy source and responsibility, plus key public signatures with `todo!()` or trivial bodies.
+Each module ships as a compiling stub: a doc-comment naming its legacy source and responsibility, plus key public signatures with `todo!()` or trivial bodies (the modules marked Implemented (Phase 0a) below are the exception - they have real bodies).
 
 | Rust module | Legacy source | Responsibility |
 |-------------|---------------|----------------|

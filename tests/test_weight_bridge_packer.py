@@ -20,6 +20,10 @@ def test_element_count() -> None:
 
 
 def test_full_pipeline_matches_flat() -> None:
+    # Determinism/integrity guard only: the golden here is self-derived via this same Python
+    # path. The load-bearing independent check is the Rust full_pipeline_matches_flat in
+    # src/rust/tests/phase0_packer.rs, which reproduces the same fixture via an independent
+    # implementation (true cross-language agreement).
     structured, spec = weight_bridge.load_structured(REF / "best_config_manifest.json", REF / "best_config_domain.bin")
     flat = weight_bridge.nnet_to_flat(weight_bridge.config_to_nnet(structured, spec), spec)
     golden = weight_bridge.read_weight_vector(REF / "best_net_flat.bin")

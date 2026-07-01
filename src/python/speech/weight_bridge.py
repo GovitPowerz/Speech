@@ -91,6 +91,10 @@ def _out_adim(spec: dict, i: int) -> float:
 def _apply_adim(mat: np.ndarray, adim: float) -> np.ndarray:
     # divide every column by adim EXCEPT the last (bias) column.
     out = mat / adim
+    # Bias restored to its ORIGINAL value here. Legacy MATLAB config2network.m instead
+    # recomputes it as (config/adim)*adim, which can differ from the original by up to
+    # 1 ULP on ~34 biases. Harmless for Phase 0a (Rust and Python agree exactly); flagged
+    # for the Phase-2 inference-vs-legacy golden.
     out[:, -1] = mat[:, -1]
     return out
 

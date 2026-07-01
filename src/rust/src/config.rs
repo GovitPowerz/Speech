@@ -145,6 +145,10 @@ fn apply_adim(mat: &[f64], ncols: usize, adim: f64) -> Vec<f64> {
         for x in row.iter_mut() {
             *x /= adim;
         }
+        // Bias restored to its ORIGINAL value here. Legacy MATLAB config2network.m instead
+        // recomputes it as (config/adim)*adim, which can differ from the original by up to
+        // 1 ULP on ~34 biases. Harmless for Phase 0a (Rust and Python agree exactly); flagged
+        // for the Phase-2 inference-vs-legacy golden.
         row[ncols - 1] = bias;
     }
     out
