@@ -24,7 +24,7 @@ uv run maturin develop --release --manifest-path src/rust/speech-py/Cargo.toml
 uv sync                            # Install dependencies (Python >=3.14)
 uv sync --group dev                # Include dev tools (pytest, ruff, mypy, hypothesis, maturin)
 uv run pytest tests                # Run all tests
-uv run pytest tests/test_smoke.py::test_import -v
+uv run pytest tests/test_smoke.py::test_package_imports -v
 
 # -- Utility Scripts (from repo root) --
 ./build.sh                         # Build Rust binary + PyO3 bindings
@@ -115,7 +115,7 @@ This repo currently compiles as stubs, so two warning/typecheck suppressions are
 
 ## Conventions
 
-- **Rust**: Edition 2024, `nalgebra`/`ndarray` for linear algebra, release profile with LTO. Engine deps include `rustfft`/`realfft`, `symphonia`, `rayon`, `byteorder`/`bytemuck`, `matfile`, `quick-xml`, `serde`/`toml`. `speech-py` uses `pyo3` + `numpy`.
+- **Rust**: Edition 2024, `nalgebra`/`ndarray` for linear algebra, release profile with LTO. Engine deps include `rustfft`/`realfft`, `symphonia`, `rayon`, `byteorder`/`bytemuck`, `quick-xml`, `serde`/`toml`; `matfile` lands in Phase 1 when `io/matfile.rs` is implemented. `speech-py` uses `pyo3` + `numpy`.
 - **Python**: Python >=3.14, ruff (line-length 160, target py314; select E,F,I,W,UP,B,SIM), mypy strict mode, uv package manager. Dev tools in `[dependency-groups]` (not `[project.optional-dependencies]`). Core deps: numpy, scipy, pandas, pyarrow, pydantic, matplotlib, rich, soundfile, cma.
 - **Testing (Python)**: pytest, hypothesis (property-based). Golden reference fixtures under `tests/reference_data/`, added per roadmap phase. Round-trip property tests are mandatory for the weight bridge.
 - **Testing (Rust)**: unit tests (inline `#[cfg(test)]`, proptest property tests), integration tests (`src/rust/tests/`). Dev-deps: `approx`, `proptest`, `rstest`, `tempfile`. Validation is golden-file bit-for-bit against the git-ignored `legacy/` oracle.
