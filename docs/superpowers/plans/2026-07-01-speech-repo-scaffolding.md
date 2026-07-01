@@ -781,8 +781,11 @@ The engine skeleton: workspace + core crate, the full module tree as compiling s
 - [ ] **Step 1: Write `src/rust/Cargo.toml`**
 
 ```toml
+# NOTE: workspace members lists only "." for now; Task 5 adds "speech-py" when
+# that crate is created. Listing a not-yet-existing member here would break
+# `cargo build` in this task.
 [workspace]
-members = [".", "speech-py"]
+members = ["."]
 
 [package]
 name = "speech"
@@ -1317,6 +1320,15 @@ Adds the binding crate producing module `speech_rs`, and the `build.sh`/`check_a
 **Interfaces:**
 - Consumes: crate `speech` (`speech::version`) from Task 4.
 - Produces: importable Python module `speech_rs` with `speech_rs.version() -> str`.
+
+- [ ] **Step 0: Register `speech-py` in the workspace**
+
+Task 4 created `src/rust/Cargo.toml` with `members = ["."]`. Edit that line to add the new member (and drop the now-obsolete NOTE comment about it):
+
+```toml
+[workspace]
+members = [".", "speech-py"]
+```
 
 - [ ] **Step 1: Write `src/rust/speech-py/Cargo.toml`**
 
