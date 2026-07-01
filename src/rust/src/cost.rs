@@ -332,6 +332,11 @@ impl CostLaw {
     /// A frame whose target row is all `< 0` contributes nothing (no on-class).
     /// Each term is scaled by `classes_ponderations[kk]` (when present) and by
     /// `10 * (1 - target)` when `back_prop_wer` is set.
+    ///
+    /// Accumulation order is COLUMN-MAJOR (outer kk/classes, inner jj/frames) to
+    /// match CostLaw.cpp:219-231 bit-exactly: f64 addition is not associative, so
+    /// summing in a different order can diverge in the last bit(s) for batches
+    /// with 2+ on-class terms across different columns.
     pub fn compute_cost(&self, outputs: &[f64], onehot_target: &[f64], n_classes: usize) -> f64 {
         let use_pond = !self.classes_ponderations.is_empty();
         if use_pond && self.classes_ponderations.len() < n_classes {
@@ -339,8 +344,8 @@ impl CostLaw {
         }
         let mut cost = 0.0;
         let n_frames = outputs.len() / n_classes;
-        for jj in 0..n_frames {
-            for kk in 0..n_classes {
+        for kk in 0..n_classes {
+            for jj in 0..n_frames {
                 let idx = jj * n_classes + kk;
                 let target = onehot_target[idx];
                 if target > 0.5 {

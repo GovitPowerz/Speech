@@ -40,6 +40,45 @@ fn cost_is_cross_entropy_over_on_class() {
 }
 
 #[test]
+fn cost_accumulates_column_major_bit_exact() {
+    // 3 frames x 2 classes; on-class entries at (frame0,class0), (frame1,class1),
+    // (frame2,class0). f64 addition is not associative, so the accumulation order
+    // matters: legacy CostLaw.cpp:219-231 sums column-by-column (outer kk, inner jj),
+    // not row-by-row. These specific values were found to diverge in the last bit(s)
+    // between row-major and column-major summation.
+    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM");
+    let outputs = vec![
+        0.276841,
+        0.759708,
+        0.8187500000000001,
+        0.805755,
+        0.495479,
+        0.8323560000000001,
+    ];
+    let target = vec![1.0, -1.0, -1.0, 1.0, 1.0, -1.0];
+    let cost = law.compute_cost(&outputs, &target, 2);
+
+    // Column-major reference: sum class0's on-class terms first (frame0, frame2),
+    // then class1's (frame1) -- same order as the legacy double loop.
+    let mut expected = 0.0f64;
+    expected += -(outputs[0].max(1e-24)).ln(); // (frame0, class0)
+    expected += -(outputs[4].max(1e-24)).ln(); // (frame2, class0)
+    expected += -(outputs[3].max(1e-24)).ln(); // (frame1, class1)
+
+    assert_eq!(cost, expected);
+
+    // Sanity: row-major summation of the same terms gives a different f64 (pins the bug).
+    let mut row_major = 0.0f64;
+    row_major += -(outputs[0].max(1e-24)).ln(); // (frame0, class0)
+    row_major += -(outputs[3].max(1e-24)).ln(); // (frame1, class1)
+    row_major += -(outputs[4].max(1e-24)).ln(); // (frame2, class0)
+    assert_ne!(
+        expected, row_major,
+        "test fixture no longer exercises order-dependence"
+    );
+}
+
+#[test]
 fn cost_clamps_tiny_output_to_1e_24() {
     // output below 1e-24 is clamped up before the log (legacy: value<1e-24 => 1e-24).
     let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM");
