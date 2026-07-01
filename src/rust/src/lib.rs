@@ -3,7 +3,12 @@
 //! Rust port of the legacy C++ `FastSpeechProcessing` engine. The Python
 //! optimizer/orchestrator drives this crate via the `speech-py` PyO3 bindings.
 //! See CLAUDE.md and docs/superpowers/specs/2026-07-01-speech-repo-setup-design.md.
-#![allow(dead_code, unused_variables)] // scaffolding: remove as modules land
+//
+// Crate-root scaffolding allow removed (Phase 0a): the still-stub modules
+// (audio, engine, features, nn, tasks, cli, main) build clean under
+// `-D warnings` as-is. If a future stub introduces genuine dead code /
+// unused params, add a narrow `#[allow(...)]` on that item instead of
+// reinstating a crate-wide blanket.
 
 pub mod audio;
 pub mod cli;

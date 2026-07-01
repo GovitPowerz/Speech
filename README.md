@@ -2,7 +2,7 @@
 
 Speech Activity Detection (SAD) and spoken Language Identification (LID) engine. It is a port of the legacy `FastSpeechProcessing` system: a C++ forward+gradient engine becomes a **Rust engine** (crate + binary `speech`), and a MATLAB optimizer becomes a **Python optimizer/orchestrator** (package `speech`). The two talk in-process through a PyO3 bridge (`speech_rs`). The port targets bit-level parity against the legacy oracle, validated layer by layer.
 
-**Status: scaffold.** The full module tree compiles and is wired end to end, but the modules are typed stubs with target-accurate signatures and doc-comments, not ported algorithms. The SAD/LID/feature/NN behavior described below is the target the Roadmap builds toward, not what runs today. Each algorithm lands as its own roadmap phase, golden-tested against the legacy before it is trusted.
+**Status: scaffold, Phase 0a landed.** The full module tree compiles and is wired end to end. Phase 0a (the byte-parity I/O foundation: `.bin` codec, legacy `.config` parser, adim seam + flat weight packer) is real, tested logic -- see Roadmap. Everything else remains typed stubs with target-accurate signatures and doc-comments, not ported algorithms. The SAD/LID/feature/NN behavior described below is the target the Roadmap builds toward, not what runs today. Each algorithm lands as its own roadmap phase, golden-tested against the legacy before it is trusted.
 
 ## Quick Start
 
@@ -131,7 +131,9 @@ The flat-weight layout and `adim_coeff` scaling live once in Rust (not duplicate
 
 The port lands in phases, leading with the lowest-risk, highest-leverage layer (pure logic + I/O) so everything downstream stands on golden-tested ground.
 
-- **Phase 0 - pure-logic + I/O parity (first).** `config`/`legacy_config` parsers, the `io::binary`/`matfile` codecs, `tasks::segmenter`/`segmentation_io` decision logic, and cost primitives. Golden-tested bit-for-bit.
+- **Phase 0 - pure-logic + I/O parity (first).**
+  - **Phase 0a - byte-parity foundation (done).** The `io::binary` `.bin` codec and the `legacy_config`/`config_bridge` parser are golden-tested bit-for-bit against the real `NNweights_config1.bin` and `1_worker_1.config`. The `config`/`weight_bridge` adim seam + flat weight packer is cross-language-validated (Rust-pack == Python-pack) and source-verified against `config2weights.m` (element count, bijection, adim invariants, normalize-tail vs a real `.bin`); an independent legacy golden pack does not exist yet (`nnet_best` is a CMA-ES genome, not a weight-pack), so the end-to-end bit-exact packer/adim golden is deferred to the end-to-end inference-output parity milestone (inference on a real `.bin` matched against the legacy VRCTS segmentations; see Phase 4 below).
+  - **Phase 0b - decision logic (pending).** `tasks::segmenter`/`segmentation_io` decision logic and cost primitives. Golden-tested bit-for-bit.
 - **Phase 1 - features.** Audio I/O, FFT, Mel/MFCC/deltas/SDC, LTSV, TDC, streaming stats. Golden vs legacy `.mat` dumps.
 - **Phase 2 - NN forward.** Layers, BLSTM, network container, activations. Forward-parity vs the `BLSTM_Forward` oracle.
 - **Phase 3 - training/optimizers.** BPTT gradients, iRPROP-, and the Python optimizer zoo (SMORMS3, QuantumPSO, CMA-ES, and friends). Gradient parity vs `BLSTM_Backward` + finite diff.
