@@ -27,6 +27,13 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   above-threshold cubic law switches its `A`/`B` coefficient formulas on the law-name STRING
   (`square`/`cubic` vs `linear`/`log`). Fragile and surprising. *Fix candidate:* refactor to explicit
   per-law types after parity.
+- **[0b-i] Softmax `compute_deltas` ponderation-scaling asymmetry** (`cost.rs` `compute_deltas`, from
+  `CostLaw.cpp:358-419`): the WER path scales EACH element by its own class's ponderation
+  (`_ClassesPonderations(0,kk)`, per `kk`); the non-WER path instead captures a single ponderation
+  from the frame's on-class column and scales the WHOLE frame row by it (`deltas.row(jj) *=
+  ponderation`, `CostLaw.cpp:417`). The two paths disagree on granularity for no reason apparent in
+  the math; reproduced verbatim (see `cost.rs` doc-comment on `compute_deltas`). *Fix candidate:*
+  make the non-WER path scale per-element like the WER path, after parity.
 
 ### Forward-noted (add the entry when the phase reproduces it)
 

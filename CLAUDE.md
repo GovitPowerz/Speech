@@ -40,7 +40,7 @@ The Rust crate (`src/rust/`) is the engine: a Cargo workspace with the core `spe
 
 ### Rust module map (`src/rust/src/`)
 
-Each module ships as a compiling stub: a doc-comment naming its legacy source and responsibility, plus key public signatures with `todo!()` or trivial bodies (the modules marked Implemented (Phase 0a) below are the exception - they have real bodies).
+Each module ships as a compiling stub: a doc-comment naming its legacy source and responsibility, plus key public signatures with `todo!()` or trivial bodies (the modules marked Implemented (Phase 0a) or Implemented (Phase 0b-i) below are the exception - they have real bodies).
 
 | Rust module | Legacy source | Responsibility |
 |-------------|---------------|----------------|
@@ -61,10 +61,11 @@ Each module ships as a compiling stub: a doc-comment naming its legacy source an
 | `nn/layers.rs` | `LSTMLayer.*`, `SRNLayer.*`, `CWRNNLayer.*`, `NeuronLayer.*`, `Convolutional*.*` | `Layer` impls: peephole LSTM (12-row peephole, `[i|f|o|g]` gates), SRN, Clockwork-RNN, dense, forward-only conv. |
 | `nn/activations.rs` | `ActivationFunctions.h` | Active (overridden) activations: asinh cell/output, `sigmoid(0.1z)` gates, softmax. |
 | `nn/train.rs` | `Rprop.cpp`, `Trainer.h` | iRPROP- on the flat weight vector (inverted sign convention, weight-backtracking). |
-| `cost.rs` | `CostLaw.*` | Piecewise speech/no-speech cost primitives + multiclass softmax cross-entropy with ignore-mask. |
+| `cost.rs` | `CostLaw.*` | Implemented (Phase 0b-i): 7 piecewise VAD cost laws (linear/square/cubic/log/sqrt, below+above-thresh) + multiclass softmax cross-entropy with ignore-mask, ported bit-exactly incl. the double-read and LogLaw quirks (see IMPROVEMENTS.md). |
 | `tasks/segmenter.rs` | `Segmenter.*` | `Segmenter` trait + decision logic (hysteresis-with-area, single-threshold LID, 7-step smoothing). Pure logic, golden-test first. |
 | `tasks/sad.rs` | `BLSTMSignalSegmenter.*`, `BLSTMSpectralSegmenter.*`, `BLSTMSpectralLID.*` | SAD segmenters: BLSTM over signal/spectral/LTSV features -> per-frame posterior. |
 | `tasks/lid.rs` | `TwinBLSTMSpectralLID.*` | Twin/Siamese LID: SAD + LID BLSTM (+ optional CNN), per-segment language accumulation, argmax, confusion. |
+| `tasks/segmentation.rs` | `Segmentation.*` | Implemented (Phase 0b-i): boundary-list `Segmentation` container (`SegClass` + `Segment`) with `label_segment`/`sanitize`/`suppress_short`/`add_padding`/`modify_type`/`update_count`, ported from `Segmentation.cpp`. |
 | `tasks/segmentation_io.rs` | `Segmentation.*` | Segment container + primitives (sanitize 1e-4s, suppress-short, padding), error/WER/LID scoring, VRCTS XML + STM/TRS loaders. |
 | `tasks/vrcts.rs` | `VRCTSpart.*` | External-tool adapter behind the `Segmenter` trait. |
 | `io/binary.rs` | `Helpers.hpp` (`BinaryFile2Vector`/`Matrix2BinaryFile`) | Implemented (Phase 0a): weight `.bin` codec (i64 LE rows, i64 LE cols, f64 LE column-major), byte-exact-validated against the real `NNweights_config1.bin`. The MATLAB seam. |
