@@ -11,7 +11,10 @@
 use std::path::PathBuf;
 
 use speech::tasks::segmentation::{SegClass, Segmentation};
-use speech::tasks::segmentation_io::{load_vrcts, to_vrcts_string, write_vrcts};
+use speech::tasks::segmentation_io::{
+    load_ref_csv, load_ref_stm, load_vrcts, to_ascii_string, to_vrcts_string, write_ascii,
+    write_vrcts,
+};
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data/phase0bii")
@@ -138,4 +141,107 @@ fn write_file_matches_string() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     let in_mem = to_vrcts_string(&seg, "CONSTRUCTED", "/tmp/constructed.wav");
     assert_eq!(on_disk, in_mem);
+}
+
+/// Extract the `[begin, end)` spans of segments of class `ty`.
+fn spans_of(seg: &Segmentation, ty: SegClass) -> Vec<(f64, f64)> {
+    let segs = seg.segments();
+    let mut spans = Vec::new();
+    for i in 0..segs.len().saturating_sub(1) {
+        if segs[i].ty == ty {
+            spans.push((segs[i].begin, segs[i + 1].begin));
+        }
+    }
+    spans
+}
+
+/// `load_ref_stm` on the real 2-channel `ref.stm`, channel 0 (STM ch 1). The
+/// first data line is an `excluded_region`, then SPEECH segments (transcript
+/// lines whose `second` starts with `first`). We assert the leading EXCLUDED and
+/// the first few SPEECH spans, all well-separated so no adjacent-merge ambiguity.
+#[test]
+fn stm_channel0_leading_spans() {
+    let raw = std::fs::read_to_string(ref_dir().join("ref.stm")).unwrap();
+    let seg = load_ref_stm(&raw, 0, 0.0, 1.0e9, true);
+
+    // Leading EXCLUDED region.
+    let excl = spans_of(&seg, SegClass::Excluded);
+    assert!(!excl.is_empty(), "expected an EXCLUDED region");
+    assert!(
+        (excl[0].0 - 0.000).abs() < EPS && (excl[0].1 - 4.450).abs() < EPS,
+        "first EXCLUDED span = {:?}, want (0.000, 4.450)",
+        excl[0]
+    );
+
+    // First few SPEECH spans (each bounded by a non-transcribed gap).
+    let sp = spans_of(&seg, SegClass::Speech);
+    let expected_head = [(4.450, 6.680), (7.580, 8.970), (12.090, 14.010)];
+    for (i, e) in expected_head.iter().enumerate() {
+        assert!(
+            (sp[i].0 - e.0).abs() < EPS && (sp[i].1 - e.1).abs() < EPS,
+            "SPEECH span {i} = {:?}, want {e:?}",
+            sp[i]
+        );
+    }
+}
+
+/// `load_ref_csv`: `S` counts a word and (conf>=thresh) labels SUBSTITUTION; `I`
+/// labels INSERTION but does NOT count a word. `end` carries the extra `-1e-4`.
+#[test]
+fn csv_substitution_insertion_and_nb_words() {
+    let (seg, nb_words) = load_ref_csv("0,1.0,S,0.9\n1.0,2.0,I,0.5\n", 0.0, 1.0e9, 0.0);
+    assert_eq!(nb_words, 1, "S counts, I does not");
+
+    let sub = spans_of(&seg, SegClass::Substitution);
+    assert_spans(&sub, &[(0.0, 0.9999)]);
+    let ins = spans_of(&seg, SegClass::Insertion);
+    assert_spans(&ins, &[(1.0, 1.9999)]);
+}
+
+/// The `conf < pruning_thresh` gate: the line still counts toward `nb_words`
+/// (that increment precedes the gate) but produces NO labeled segment.
+#[test]
+fn csv_pruning_thresh_gate() {
+    // conf 0.3 < thresh 0.5: counts a word, but is not labeled.
+    let (seg, nb_words) = load_ref_csv("0,1.0,C,0.3\n", 0.0, 1.0e9, 0.5);
+    assert_eq!(nb_words, 1, "C counts a word even when pruned");
+    assert!(
+        spans_of(&seg, SegClass::Speech).is_empty(),
+        "pruned line must not be labeled SPEECH"
+    );
+}
+
+/// `to_ascii_string`: two lines per segment. Line 1 carries `it.begin`, line 2
+/// carries `next.begin - 1e-3`, BOTH with the current segment's `ty as i32`,
+/// chan hardcoded `1`, times at 3 decimals.
+#[test]
+fn ascii_two_lines_per_segment() {
+    let mut seg = Segmentation::new(10.0);
+    seg.label_segment(1.0, 3.0, SegClass::Speech);
+    // Boundary list: [Other@0.0, Speech@1.0, Other@3.0, End@10.0].
+    let expected = concat!(
+        "1 0.000 0\n",
+        "1 0.999 0\n",
+        "1 1.000 1\n",
+        "1 2.999 1\n",
+        "1 3.000 0\n",
+        "1 9.999 0\n",
+    );
+    assert_eq!(to_ascii_string(&seg), expected);
+}
+
+/// `write_ascii` writes exactly what `to_ascii_string` produces.
+#[test]
+fn ascii_write_file_matches_string() {
+    let mut seg = Segmentation::new(10.0);
+    seg.label_segment(1.0, 3.0, SegClass::Speech);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.txt");
+    write_ascii(&seg, &path).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        to_ascii_string(&seg)
+    );
 }

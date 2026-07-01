@@ -137,3 +137,152 @@ pub fn load_vrcts(text: &str, off: f64, dur: f64) -> Segmentation {
     seg.sanitize();
     seg
 }
+
+/// Load a reference [`Segmentation`] from STM text, single-channel projection.
+/// Direct port of `Segmentation::load_ref_from_stm` (`Segmentation.cpp:616-635`).
+///
+/// Each line is parsed as 7 whitespace tokens
+/// `first(str) line_chan(int) second(str) beg(f64) end(f64) third(str) fourth(str)`;
+/// a line whose 7-token parse fails is skipped (this is how the `;;` header lines
+/// are dropped -- `line_chan` fails to parse `;;`). `line_chan` is 1-based; after
+/// `line_chan -= 1` the line is processed only when `line_chan == chan` (the
+/// legacy fills `_Reference.at(line_chan)` guarded by `line_chan < _ChannelNb`;
+/// our per-channel API narrows that to an equality on `chan`).
+///
+/// A line is SPEECH iff `second.starts_with(first)` (the legacy
+/// `second.compare(0, first.length(), first) == 0`); else it is EXCLUDED iff
+/// `exclude_nontrans && second == "excluded_region"`. Both require the window
+/// guard `end >= off && beg < off + dur`. `beg`/`end` are shifted by `-off`
+/// before labeling. `sanitize()` runs after all lines.
+pub fn load_ref_stm(
+    text: &str,
+    chan: usize,
+    off: f64,
+    dur: f64,
+    exclude_nontrans: bool,
+) -> Segmentation {
+    let mut seg = Segmentation::new(dur);
+
+    for line in text.lines() {
+        let mut tok = line.split_whitespace();
+        let (first, line_chan, second, beg, end) = match (
+            tok.next(),
+            tok.next().and_then(|t| t.parse::<i64>().ok()),
+            tok.next(),
+            tok.next().and_then(|t| t.parse::<f64>().ok()),
+            tok.next().and_then(|t| t.parse::<f64>().ok()),
+        ) {
+            (Some(first), Some(line_chan), Some(second), Some(beg), Some(end)) => {
+                (first, line_chan, second, beg, end)
+            }
+            _ => continue,
+        };
+        // The legacy parse also requires `third` and `fourth` tokens; a line with
+        // fewer than 7 whitespace tokens fails the extraction and is skipped.
+        if tok.next().is_none() || tok.next().is_none() {
+            continue;
+        }
+
+        let line_chan = line_chan - 1; // STM is 1-based.
+        if line_chan != chan as i64 {
+            continue;
+        }
+
+        let in_window = end >= off && beg < off + dur;
+        if second.starts_with(first) && in_window {
+            seg.label_segment(beg - off, end - off, SegClass::Speech);
+        } else if exclude_nontrans && second == "excluded_region" && in_window {
+            seg.label_segment(beg - off, end - off, SegClass::Excluded);
+        }
+    }
+    seg.sanitize();
+    seg
+}
+
+/// Load a reference [`Segmentation`] from CSV text, returning `(seg, nb_words)`.
+/// Direct port of `Segmentation::load_ref_from_csv` (`Segmentation.cpp:745-806`).
+///
+/// NOTE: the pinned interface omitted `pruning_thresh`; it is added here because
+/// the legacy `_PruningThresh` gate (`Segmentation.cpp:786`) is load-bearing --
+/// it decides whether a parsed line is labeled at all. See task-6-report.md.
+///
+/// Lines starting with `#` are skipped. Each remaining line has its commas
+/// replaced by spaces and is parsed as `beg(f64) end(f64) type(str) conf(f64)`;
+/// a failed parse skips the line. Within the window `end >= off && beg < off +
+/// dur`: `nb_words` is incremented for every `type != "I"` line (this precedes,
+/// and is independent of, the confidence gate); `beg -= off` and
+/// `end = end - 1e-4 - off` (the extra `-1e-4` on `end` only). Then, iff
+/// `conf >= pruning_thresh`, the line is labeled `C -> Speech`, `S ->
+/// Substitution`, `I -> Insertion`, else `Excluded`. `sanitize()` runs after.
+///
+/// `nb_words` is a plain counter from 0: the legacy seeds `_NbWords = 0` when it
+/// is `< 0`, which makes the loop's `< 0 -> 1` branch dead; reproduced as a
+/// count of in-window non-`"I"` lines.
+pub fn load_ref_csv(text: &str, off: f64, dur: f64, pruning_thresh: f64) -> (Segmentation, i64) {
+    let mut seg = Segmentation::new(dur);
+    let mut nb_words: i64 = 0;
+
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let spaced = line.replace(',', " ");
+        let mut tok = spaced.split_whitespace();
+        let (beg, end, ty, conf) = match (
+            tok.next().and_then(|t| t.parse::<f64>().ok()),
+            tok.next().and_then(|t| t.parse::<f64>().ok()),
+            tok.next(),
+            tok.next().and_then(|t| t.parse::<f64>().ok()),
+        ) {
+            (Some(beg), Some(end), Some(ty), Some(conf)) => (beg, end, ty, conf),
+            _ => continue,
+        };
+
+        if end >= off && beg < off + dur {
+            if ty != "I" {
+                nb_words += 1;
+            }
+            let beg = beg - off;
+            let end = end - 1e-4 - off;
+            if conf >= pruning_thresh {
+                let class = match ty {
+                    "C" => SegClass::Speech,
+                    "S" => SegClass::Substitution,
+                    "I" => SegClass::Insertion,
+                    _ => SegClass::Excluded,
+                };
+                seg.label_segment(beg, end, class);
+            }
+        }
+    }
+    seg.sanitize();
+    (seg, nb_words)
+}
+
+/// Serialize `seg` as the legacy ASCII segmentation. Direct port of
+/// `Segmentation::toFile_ASCII` (`Segmentation.cpp:519-529`), single-channel
+/// (`chan` hardcoded `1`), offset folded to `0.0`.
+///
+/// `toFile_ASCII` sanitizes the channel before writing; we sanitize a clone so
+/// the caller's `seg` is not mutated. Each segment `it` (with `it + 1` before the
+/// sentinel) emits TWO lines, both carrying the CURRENT segment's `ty as i32`:
+/// line 1 at `it.begin`, line 2 at `next.begin - 1e-3`, times at 3 decimals
+/// (`%f.3s` == `%.3f`).
+pub fn to_ascii_string(seg: &Segmentation) -> String {
+    let mut seg = seg.clone();
+    seg.sanitize();
+    let segs = seg.segments();
+    let mut out = String::new();
+    for i in 0..segs.len().saturating_sub(1) {
+        let code = segs[i].ty as i32;
+        out.push_str(&format!("1 {:.3} {code}\n", segs[i].begin));
+        out.push_str(&format!("1 {:.3} {code}\n", segs[i + 1].begin - 1e-3));
+    }
+    out
+}
+
+/// Write `seg` as legacy ASCII to `out`. Wraps [`to_ascii_string`].
+pub fn write_ascii(seg: &Segmentation, out: &Path) -> Result<()> {
+    std::fs::write(out, to_ascii_string(seg))?;
+    Ok(())
+}
