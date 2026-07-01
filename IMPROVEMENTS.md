@@ -34,12 +34,19 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   ponderation`, `CostLaw.cpp:417`). The two paths disagree on granularity for no reason apparent in
   the math; reproduced verbatim (see `cost.rs` doc-comment on `compute_deltas`). *Fix candidate:*
   make the non-WER path scale per-element like the WER path, after parity.
+- **[0b-i] `suppress_short` no-advance-after-erase** (`src/rust/src/tasks/segmentation.rs`
+  `suppress_short`, from `Segmentation.cpp:245-282`): after any erase branch, the loop does NOT
+  advance `i` -- the erased slot shifts the next segment into the current index, which must be
+  re-tested (a naive `i += 1` would silently drop a merged-in short segment). Confirmed INTENDED:
+  the dedicated `suppress_short_no_advance_after_erase` test locks this behavior in. *Why deferred:*
+  load-bearing for legacy parity -- changing the advance semantics would change which segments get
+  merged/split on real goldens. *Fix candidate:* once end-to-end parity holds, confirm/simplify the
+  re-test-after-merge control flow (e.g. an explicit worklist) instead of the implicit no-advance
+  loop.
 
 ### Forward-noted (add the entry when the phase reproduces it)
 
 - **[0b-ii] `updateSegmentation` tail uses `results.size()` (rows*cols), not `length`** -- correct
   only for a pure row-vector; note when 0b-ii lands.
-- **[0b-ii] `suppressShortSegments` no-advance-after-erase** -- re-tests the merged segment; confirm
-  intended vs bug at 0b-ii.
 - **[3/4] `CostFunctionCalib` nnet_out-before-assignment** (Python optimizer) -- a real
   use-before-assign bug flagged in the setup analysis; fix when the Python training loop is ported.

@@ -2,7 +2,7 @@
 
 Speech Activity Detection (SAD) and spoken Language Identification (LID) engine. It is a port of the legacy `FastSpeechProcessing` system: a C++ forward+gradient engine becomes a **Rust engine** (crate + binary `speech`), and a MATLAB optimizer becomes a **Python optimizer/orchestrator** (package `speech`). The two talk in-process through a PyO3 bridge (`speech_rs`). The port targets bit-level parity against the legacy oracle, validated layer by layer.
 
-**Status: scaffold, Phase 0a landed.** The full module tree compiles and is wired end to end. Phase 0a (the byte-parity I/O foundation: `.bin` codec, legacy `.config` parser, adim seam + flat weight packer) is real, tested logic -- see Roadmap. Everything else remains typed stubs with target-accurate signatures and doc-comments, not ported algorithms. The SAD/LID/feature/NN behavior described below is the target the Roadmap builds toward, not what runs today. Each algorithm lands as its own roadmap phase, golden-tested against the legacy before it is trusted.
+**Status: scaffold, phases landing incrementally.** The full module tree compiles and is wired end to end. The phases marked done in the Roadmap / architecture table are real, tested logic; the remaining modules are typed stubs with target-accurate signatures and doc-comments, not ported algorithms. The SAD/LID/feature/NN behavior described below is the target the Roadmap builds toward, not what runs today. Each algorithm lands as its own roadmap phase, golden-tested against the legacy before it is trusted.
 
 ## Quick Start
 
