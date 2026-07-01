@@ -1,0 +1,12 @@
+{
+ "prefix": "BLSTM",
+ "keys": {
+  "BLSTM_CostLawSpeech": "linear",
+  "BLSTM_CostLawNoSpeech": "linear",
+  "BLSTM_CostPonderation": "0.2",
+  "BLSTM_CostLawParamSpeech": "0",
+  "BLSTM_CostLawParamNoSpeech": "0",
+  "BLSTM_CostLawThreshSpeech": "1",
+  "BLSTM_CostLawThreshNoSpeech": "0"
+ }
+}
