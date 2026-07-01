@@ -1,0 +1,42 @@
+# NOTE: workspace members lists only "." for now; Task 5 adds "speech-py" when
+# that crate is created. Listing a not-yet-existing member here would break
+# `cargo build` in this task.
+[workspace]
+members = ["."]
+
+[package]
+name = "speech"
+version = "0.1.0"
+edition = "2024"
+description = "SAD + spoken Language Identification engine (Rust port of FastSpeechProcessing)"
+
+[[bin]]
+name = "speech"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+toml = "0.9"
+indexmap = { version = "2", features = ["serde"] }
+nalgebra = "0.35"
+ndarray = "0.16"
+rayon = "1.10"
+byteorder = "1.5"
+bytemuck = "1"
+rustfft = "6"
+realfft = "3"
+symphonia = { version = "0.5", features = ["wav", "flac", "ogg", "vorbis"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+[dev-dependencies]
+approx = "0.5"
+rstest = "0.26"
+proptest = "1"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
