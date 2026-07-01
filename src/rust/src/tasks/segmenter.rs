@@ -95,25 +95,33 @@ impl SegmenterConfig {
     }
 }
 
-/// Hysteresis-with-area decision over the ROW vector `results`, then smoothing.
+/// The RAW hysteresis-with-area decision over the ROW vector `results`, WITHOUT
+/// smoothing. Returns the pre-smoothing, pre-sanitize labeled segments as
+/// `(begin + off, end + off, class as i32)`, one entry per legacy
+/// `label_segment` call, in emission order.
 ///
-/// Direct port of `Segmenter::updateSegmentation` (:725-845). `results[k]` is the
+/// Direct port of the decision body of `Segmenter::updateSegmentation`
+/// (:725-845): the INIT check, the rising/falling hysteresis with area gating,
+/// the re-run-rising-after-label, and the `results.size()` tail. This isolates
+/// the decision math so it can be cross-checked bit-for-bit against the numpy
+/// oracle (`speech.scoring.update_segmentation_oracle`). `results[k]` is the
 /// legacy `results(0, k)`; `dt` is `timeStep`, `off` is `timeOffset`. The TAIL
 /// uses `results.len()` (the legacy `results.size()` = rows*cols, equal to
 /// `length` only for a pure row vector - reproduced quirk, logged in
 /// IMPROVEMENTS.md).
-pub fn update_segmentation(
-    seg: &mut Segmentation,
+pub fn update_segmentation_raw(
     results: &[f64],
     class: SegClass,
     off: f64,
     dt: f64,
     cfg: &SegmenterConfig,
-) {
+) -> Vec<(f64, f64, i32)> {
     let t_r = cfg.rising;
     let a_r = cfg.area_rising;
     let t_f = cfg.falling;
     let a_f = cfg.area_falling;
+
+    let mut segments: Vec<(f64, f64, i32)> = Vec::new();
 
     let mut begin = -1.0f64;
     let mut end = -1.0f64;
@@ -193,7 +201,7 @@ pub fn update_segmentation(
 
             if has_ended {
                 if begin < end {
-                    seg.label_segment(begin + off, end + off, class);
+                    segments.push((begin + off, end + off, class as i32));
                     begin = -1.0;
                     begin_area = -1.0;
                     has_begun = false;
@@ -222,9 +230,30 @@ pub fn update_segmentation(
 
     if has_begun {
         end = dt * results.len() as f64;
-        seg.label_segment(begin + off, end + off, class);
+        segments.push((begin + off, end + off, class as i32));
     }
 
+    segments
+}
+
+/// Hysteresis-with-area decision over the ROW vector `results`, then smoothing.
+///
+/// Runs [`update_segmentation_raw`] (the exact legacy decision body) and replays
+/// its labeled segments into `seg` via `label_segment` in emission order, then
+/// applies the fixed smoothing pipeline. Behaviour-identical to the pre-refactor
+/// monolithic port of `Segmenter::updateSegmentation` (:725-845).
+pub fn update_segmentation(
+    seg: &mut Segmentation,
+    results: &[f64],
+    class: SegClass,
+    off: f64,
+    dt: f64,
+    cfg: &SegmenterConfig,
+) {
+    for (begin, end, code) in update_segmentation_raw(results, class, off, dt, cfg) {
+        debug_assert_eq!(code, class as i32);
+        seg.label_segment(begin, end, class);
+    }
     smooth_segmentation(seg, cfg);
 }
 

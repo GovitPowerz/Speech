@@ -1,7 +1,9 @@
-//! Segmenter decision tests (hand-computed from synthetic results rows).
+//! Segmenter decision tests (hand-computed from synthetic results rows) plus the
+//! Rust==Python differential cross-check over the deterministic fixture cases.
 
+use serde::Deserialize;
 use speech::tasks::segmentation::{SegClass, Segmentation};
-use speech::tasks::segmenter::{SegmenterConfig, update_segmentation};
+use speech::tasks::segmenter::{SegmenterConfig, update_segmentation, update_segmentation_raw};
 
 fn cfg_no_smooth() -> SegmenterConfig {
     // area 0 so a single crossing triggers; padding/min all 0 so smoothing is a no-op.
@@ -60,4 +62,86 @@ fn config_parses_seg_golden() {
     assert_eq!(cfg.padding, [0.2, 0.0, 0.3, 0.4]);
     assert_eq!(cfg.min_silence, [0.3, 0.5]);
     assert_eq!(cfg.min_speech, [0.0, 0.3, 0.4]);
+}
+
+#[derive(Deserialize)]
+struct OracleParams {
+    rising: f64,
+    area_rising: f64,
+    falling: f64,
+    area_falling: f64,
+    dt: f64,
+    off: f64,
+}
+
+#[derive(Deserialize)]
+struct OracleCase {
+    row: Vec<f64>,
+    params: OracleParams,
+    expected: Vec<[f64; 3]>,
+}
+
+/// Cross-check the Rust raw decision against the numpy oracle bit-for-bit over
+/// the deterministic fixture cases (`update_seg_cases.json`). This pins
+/// Rust == Python on random inputs (the differential oracle that caught the
+/// 0b-i softmax bug). Isolates the decision math: no smoothing on either side.
+#[test]
+fn oracle_cross_check_bit_exact() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase0bii/update_seg_cases.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let cases: Vec<OracleCase> = serde_json::from_str(&text).unwrap();
+    assert!(
+        cases.len() >= 20,
+        "expected >= 20 cases, got {}",
+        cases.len()
+    );
+
+    for (idx, case) in cases.iter().enumerate() {
+        // Area 0 for smoothing is irrelevant here: update_segmentation_raw does
+        // no smoothing. Padding/min unused by the decision.
+        let cfg = SegmenterConfig {
+            rising: case.params.rising,
+            area_rising: case.params.area_rising,
+            falling: case.params.falling,
+            area_falling: case.params.area_falling,
+            padding: [0.0; 4],
+            min_speech: [0.0; 3],
+            min_silence: [0.0; 2],
+        };
+        let got = update_segmentation_raw(
+            &case.row,
+            SegClass::Speech,
+            case.params.off,
+            case.params.dt,
+            &cfg,
+        );
+        assert_eq!(
+            got.len(),
+            case.expected.len(),
+            "case {idx}: segment count mismatch (rust {} vs python {})",
+            got.len(),
+            case.expected.len()
+        );
+        for (si, ((begin, end, code), exp)) in got.iter().zip(case.expected.iter()).enumerate() {
+            // Bit-for-bit: raw f64 bit patterns must match the Python oracle.
+            assert_eq!(
+                begin.to_bits(),
+                exp[0].to_bits(),
+                "case {idx} seg {si}: begin {begin:?} != {:?}",
+                exp[0]
+            );
+            assert_eq!(
+                end.to_bits(),
+                exp[1].to_bits(),
+                "case {idx} seg {si}: end {end:?} != {:?}",
+                exp[1]
+            );
+            assert_eq!(
+                *code, exp[2] as i32,
+                "case {idx} seg {si}: code {code} != {}",
+                exp[2] as i32
+            );
+        }
+    }
 }
