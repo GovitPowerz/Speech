@@ -20,7 +20,7 @@
 - ASCII only in code/comments/docs; no em-dashes/en-dashes/smart quotes.
 - Fixtures live in `tests/reference_data/phase0b/` (committed). Legacy source (local, git-ignored): `/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Release/bin/test_costlaws.mat`, `test_costlaws_deriv.mat`; `src/CostLaw.{h,cpp}`, `src/Segmentation.{cpp,h}`.
 - Spec: `docs/superpowers/specs/2026-07-01-phase-0b-i-cost-container-design.md`.
-- Legacy Quirks backlog: CLAUDE.md `## Legacy Quirks & Deferred Fixes` already lists the 0b-i entries (double-read, LogLaw asymmetry, AboveThreshCubic routing). Task 6 confirms they match the implemented code.
+- Legacy Quirks backlog lives in `IMPROVEMENTS.md` (NOT CLAUDE.md; CLAUDE.md only points to it). It already lists the 0b-i entries (double-read, LogLaw asymmetry, AboveThreshCubic routing). Task 6 confirms they match the implemented code.
 
 ---
 
@@ -236,7 +236,7 @@ fn deriv_sweep_bit_exact() {
 //!
 //! Ported bit-exactly from legacy C++: CostLaw.{h,cpp}. Preserves the double-read
 //! quirk, the LogLaw cost/deriv asymmetry, and the AboveThreshCubic name routing
-//! (see CLAUDE.md Legacy Quirks). See design spec section 3.
+//! (see IMPROVEMENTS.md Legacy Quirks). See design spec section 3.
 
 use indexmap::IndexMap;
 
@@ -677,15 +677,15 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 **Files:**
 - Modify: `CLAUDE.md`, `README.md`
 
-- [ ] **Step 1: Update `CLAUDE.md`.** In the Rust architecture table, change the `cost.rs` and `tasks/segmentation.rs` rows from stub descriptions to "Implemented (Phase 0b-i): <one line>". Confirm the `## Legacy Quirks & Deferred Fixes` entries for `[0b-i]` (double-read, LogLaw asymmetry, AboveThreshCubic routing) match the implemented code (file/line references accurate); adjust wording if needed. ASCII only; `LC_ALL=C grep -n '[^ -~]' CLAUDE.md` returns nothing.
+- [ ] **Step 1: Update `CLAUDE.md` + `IMPROVEMENTS.md`.** In CLAUDE.md's Rust architecture table, change the `cost.rs` and `tasks/segmentation.rs` rows from stub descriptions to "Implemented (Phase 0b-i): <one line>". In `IMPROVEMENTS.md`, confirm the `[0b-i]` Legacy Quirks entries (double-read, LogLaw asymmetry, AboveThreshCubic routing) match the implemented code (file/line references accurate); adjust wording if needed. ASCII only; `LC_ALL=C grep -n '[^ -~]' CLAUDE.md IMPROVEMENTS.md` returns nothing.
 
 - [ ] **Step 2: Update `README.md`.** Mark Phase 0b-i done in the roadmap: cost laws golden-tested bit-for-bit vs `test_costlaws.mat`; the Segmentation container unit-tested. Leave 0b-ii pending. ASCII only.
 
 - [ ] **Step 3: Verify + commit**
 
 ```bash
-LC_ALL=C grep -n '[^ -~]' CLAUDE.md README.md; echo "ascii checked"
-git add CLAUDE.md README.md
+LC_ALL=C grep -n '[^ -~]' CLAUDE.md README.md IMPROVEMENTS.md; echo "ascii checked"
+git add CLAUDE.md README.md IMPROVEMENTS.md
 git commit -m "docs(phase0b-i): mark cost + container implemented; confirm quirks backlog
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
