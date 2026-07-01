@@ -5,6 +5,7 @@
 
 pub mod lid;
 pub mod sad;
+pub mod segmentation;
 pub mod segmentation_io;
 pub mod segmenter;
 pub mod vrcts;
