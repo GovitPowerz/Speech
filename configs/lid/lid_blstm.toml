@@ -1,0 +1,29 @@
+# Canonical TOML config for a Twin-BLSTM LID run.
+# Mirrors a subset of the legacy ConfigFiles/LID_BLSTM.config (Algo_choice 6).
+# Full legacy-key coverage lands in Phase 0 alongside the legacy_config importer.
+
+[engine]
+algo = "twin_blstm_lid"          # legacy Algo_choice 6
+num_outer_threads = 1
+num_inner_threads = 1
+results_file = "MultiConfigResults.mat"
+
+[audio]
+offset = 0.0                     # legacy Audio_offset
+max_duration = 120.0             # legacy Audio_max_duration
+
+[decision]
+thresh_rising = 0.6              # legacy BLSTM_decision_thresh_rising
+area_rising = 0.0
+thresh_falling = 0.3795068189162301
+area_falling = 0.0
+
+[spectrum]
+order = 9                        # legacy BLSTM_spectrum_order
+shift = 0.025                    # legacy BLSTM_spectrum_shift
+temporal_convolution_type = "hamming"
+
+[preprocess]
+preemph_ratio = -0.97            # legacy BLSTM_preemph_ratio
+noise_seed = 3
+noise_ratio = 0.02921428128844371

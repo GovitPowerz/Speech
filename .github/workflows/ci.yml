@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.check }})
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/rust
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: fmt
+            command: cargo fmt --all -- --check
+          - check: clippy
+            command: cargo clippy --all-targets -- -D warnings
+          - check: test
+            command: cargo test --release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/rust
+      - name: ${{ matrix.check }}
+        run: ${{ matrix.command }}
+
+  python-lint:
+    name: Python (${{ matrix.check }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: lint
+            command: uv run ruff check src/python tests
+          - check: format
+            command: uv run ruff format --check src/python tests
+          - check: typecheck
+            command: uv run mypy src/python tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: ${{ matrix.check }}
+        run: ${{ matrix.command }}
+
+  python-test:
+    name: Python (test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Run tests
+        run: uv run pytest tests -v
+
+  python-pyo3:
+    name: Python (pyo3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/rust
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Build PyO3 module
+        run: uv run maturin develop --release --manifest-path src/rust/speech-py/Cargo.toml
+      - name: Import check
+        run: uv run python -c "import speech_rs; print(speech_rs.version())"
