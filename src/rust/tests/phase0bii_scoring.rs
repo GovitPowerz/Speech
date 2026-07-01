@@ -6,6 +6,7 @@
 //! comments and asserted to `1e-12`.
 
 use approx::assert_abs_diff_eq;
+use serde::Deserialize;
 use speech::tasks::segmentation::{SegClass, Segmentation};
 use speech::tasks::segmentation_io::compute_errors;
 
@@ -177,4 +178,85 @@ fn pass1b_length_truncates_duration_to_whole_seconds() {
     // Epsilon widened to 1e-7: a 100k-term f64 sum accrues float error beyond 1e-12.
     assert_abs_diff_eq!(wer.delay_penalty, 0.100_001, epsilon = 1e-7);
     assert_abs_diff_eq!(wer.coverage_penalty, 0.0, epsilon = 1e-7);
+}
+
+/// Map a raw i32 class code (as emitted in the JSON fixtures) to `SegClass`.
+/// Only the codes used by the emitter (Speech/Substitution/Insertion/Excluded)
+/// plus Other/End need mapping; anything else is a fixture bug.
+fn code_to_segclass(code: i32) -> SegClass {
+    match code {
+        0 => SegClass::Other,
+        1 => SegClass::Speech,
+        19 => SegClass::Insertion,
+        20 => SegClass::Substitution,
+        21 => SegClass::Excluded,
+        22 => SegClass::End,
+        other => panic!("unexpected class code {other} in fixture"),
+    }
+}
+
+#[derive(Deserialize)]
+struct ScoringCase {
+    ref_spans: Vec<[f64; 3]>,
+    hyp_spans: Vec<[f64; 3]>,
+    audio_duration: f64,
+    expected: Vec<[f64; 3]>,
+}
+
+fn build_seg(dur: f64, spans: &[[f64; 3]]) -> Segmentation {
+    let mut seg = Segmentation::new(dur);
+    for s in spans {
+        seg.label_segment(s[0], s[1], code_to_segclass(s[2] as i32));
+    }
+    seg.sanitize();
+    seg
+}
+
+/// Cross-check the Rust `compute_errors` Pass 2 against the numpy oracle
+/// bit-for-bit over the deterministic fixture cases (`compute_errors_cases.json`).
+/// `nb_words = -1` gates out Pass 1, isolating the Pass-2 two-pointer walk +
+/// normalization (the differential oracle that caught the 0b-i softmax bug).
+#[test]
+fn oracle_cross_check_bit_exact() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase0bii/compute_errors_cases.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let cases: Vec<ScoringCase> = serde_json::from_str(&text).unwrap();
+    assert!(cases.len() >= 8, "expected >= 8 cases, got {}", cases.len());
+
+    for (idx, case) in cases.iter().enumerate() {
+        let refseg = build_seg(case.audio_duration, &case.ref_spans);
+        let mut hyp = build_seg(case.audio_duration, &case.hyp_spans);
+        let report = compute_errors(&mut hyp, Some(&refseg), -1);
+
+        assert_eq!(
+            case.expected.len(),
+            23,
+            "case {idx}: expected 23 per-class rows"
+        );
+        for (j, exp) in case.expected.iter().enumerate() {
+            let got = report.per_class[j];
+            assert_eq!(
+                got.pmiss.to_bits(),
+                exp[0].to_bits(),
+                "case {idx} class {j}: pmiss {} != {}",
+                got.pmiss,
+                exp[0]
+            );
+            assert_eq!(
+                got.pfa.to_bits(),
+                exp[1].to_bits(),
+                "case {idx} class {j}: pfa {} != {}",
+                got.pfa,
+                exp[1]
+            );
+            assert_eq!(
+                got.error_rate.to_bits(),
+                exp[2].to_bits(),
+                "case {idx} class {j}: error_rate {} != {}",
+                got.error_rate,
+                exp[2]
+            );
+        }
+    }
 }
