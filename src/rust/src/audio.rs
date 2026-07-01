@@ -194,6 +194,196 @@ pub fn convolution_vert(mat: &mut Array2<f64>, coeffs: &[f64]) {
     }
 }
 
+/// Extract a windowed frame centred on `index` into a caller-owned reused buffer
+/// (`AudioStruct::getSequence`, AudioStruct.cpp:456-485). `buf` is `1 x (2*half_window+1)`.
+///
+/// Load-bearing quirks ported verbatim:
+/// - Outer guard `index < frames` else NO-OP: the buffer is left untouched, so the
+///   caller (the framing driver) consumes whatever STALE contents it held.
+/// - Branch order is LEFT edge first, then right edge, then interior.
+/// - Left edge (`index < half_window`) does NOT zero the buffer -- only the block
+///   copy region is overwritten, the left pad keeps its prior (stale) contents.
+/// - Right edge (`index >= frames - half_window`) DOES zero the buffer first.
+/// - DC offset (if `dc_offset`): mean over the FULL `2w+1` buffer INCLUDING any pad,
+///   subtracted from the full buffer.
+/// - Window multiply is applied LAST and only if `coeffs` is `Some`.
+pub fn get_sequence(
+    data: &Array2<f64>,
+    chan: usize,
+    index: usize,
+    half_window: usize,
+    dc_offset: bool,
+    coeffs: Option<&[f64]>,
+    buf: &mut Array2<f64>,
+) {
+    let frames = data.ncols();
+    if index >= frames {
+        return; // NO-OP: caller consumes the stale buffer.
+    }
+    let cols = buf.ncols();
+    let (beg_win, nb_elem, beg_data) = if index < half_window {
+        (half_window - index, half_window + index + 1, 0usize)
+    } else if index >= frames - half_window {
+        for v in buf.iter_mut() {
+            *v = 0.0;
+        }
+        // Legacy computes `half_window - index + frames` in unsigned modular
+        // arithmetic (underflows then wraps back). Reordered here to avoid the
+        // intermediate underflow; the final count is identical (always positive).
+        (0usize, frames + half_window - index, index - half_window)
+    } else {
+        (0usize, cols, index - half_window)
+    };
+    for k in 0..nb_elem {
+        buf[[0, beg_win + k]] = data[[chan, beg_data + k]];
+    }
+    if dc_offset {
+        let mut sum = 0.0;
+        for v in buf.iter() {
+            sum += *v;
+        }
+        let mean = sum / cols as f64;
+        for v in buf.iter_mut() {
+            *v -= mean;
+        }
+    }
+    if let Some(coeffs) = coeffs {
+        for (k, v) in buf.iter_mut().enumerate() {
+            *v *= coeffs[k];
+        }
+    }
+}
+
+/// Framing driver: segment periodogram estimates over `[begin, end]`
+/// (`AudioStruct::computeSegmentPeriodogramEstimates`, AudioStruct.cpp:512-584,
+/// with the MelFilterBank tail dropped -- this port takes an empty bank).
+///
+/// `window_size = 1 << p`, `signal_window_size = window_size / 2` (the half-window
+/// for `get_sequence`), `full_signal_window_size = window_size + 1` (buffer width),
+/// `periodogram_length = signal_window_size + 1`.
+///
+/// Load-bearing quirks:
+/// - `frame_nb` is an inclusive-count ceil-divide: `span = end - begin + 1`; if
+///   `span` divides `shift` exactly then `span / shift` else `span / shift + 1`.
+/// - ONE pair of reused buffers, zero-initialised ONCE before the loop -- the stale
+///   contents carry across frames (so an `index >= frames` no-op or a left-edge pad
+///   sees the previous frame's data). Matches the OMP-thread-local buffers under a
+///   single-thread strict build.
+/// - Main loop: `jj` from `begin` while `jj <= end - shift`, stepping `2 * shift`;
+///   two frames per FFT at rows `(jj - begin) / shift` and `+1`.
+/// - Odd `frame_nb` tail: the last frame is packed as BOTH signals and its row is
+///   written TWICE (the second write is the P2 formula, silently clobbering P1).
+/// - Temporal convolution applied AFTER the loop iff `conv` len > 1.
+// Argument list mirrors the legacy `computeSegmentPeriodogramEstimates` seam (p,
+// shift, chan, dc_offset, window, temporal-conv, begin, end); bundling into a
+// struct would obscure the parity mapping, so keep the flat signature.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_segment_periodogram_estimates(
+    audio: &Audio,
+    p: u32,
+    shift: usize,
+    chan: usize,
+    dc_offset: bool,
+    coeffs: Option<&[f64]>,
+    conv: Option<&[f64]>,
+    begin: usize,
+    end: usize,
+) -> Array2<f64> {
+    let window_size = 1usize << p;
+    let signal_window_size = window_size / 2;
+    let full_signal_window_size = window_size + 1;
+    let periodogram_length = signal_window_size + 1;
+
+    let span = end - begin + 1;
+    let frame_nb = if (span / shift) * shift == span {
+        span / shift
+    } else {
+        span / shift + 1
+    };
+
+    let mut periodogram = Array2::<f64>::zeros((frame_nb, periodogram_length));
+    let gfft = crate::features::fft::Gfft::new(p);
+
+    // ONE pair of reused buffers, zero-initialised ONCE (stale semantics).
+    let mut buf1 = Array2::<f64>::zeros((1, full_signal_window_size));
+    let mut buf2 = Array2::<f64>::zeros((1, full_signal_window_size));
+
+    // Main loop: two frames per FFT. `end - shift` may underflow if end < shift;
+    // guard so the loop simply does not run (the odd tail then fills row 0).
+    if end >= shift {
+        let mut jj = begin;
+        while jj <= end - shift {
+            get_sequence(
+                &audio.data,
+                chan,
+                jj,
+                signal_window_size,
+                dc_offset,
+                coeffs,
+                &mut buf1,
+            );
+            get_sequence(
+                &audio.data,
+                chan,
+                jj + shift,
+                signal_window_size,
+                dc_offset,
+                coeffs,
+                &mut buf2,
+            );
+            let current_frame = (jj - begin) / shift;
+            let (b1, b2) = (buf1.row(0).to_vec(), buf2.row(0).to_vec());
+            crate::features::fft::compute_two_real_periodogram(
+                &gfft,
+                window_size,
+                &b1,
+                &b2,
+                &mut periodogram,
+                current_frame,
+                current_frame + 1,
+            );
+            jj += 2 * shift;
+        }
+    }
+
+    // Odd number of periodogram estimates: pack the last frame as BOTH signals,
+    // writing the same row twice (second write = P2, clobbering P1). The legacy
+    // allocates a FRESH zeroed buffer here (NOT the loop's stale buffer), so a
+    // left-edge tail keeps a genuinely zero pad -- reproduce that.
+    if (frame_nb / 2) * 2 != frame_nb {
+        let current_frame = frame_nb - 1;
+        let jj = current_frame * shift + begin;
+        let mut tail = Array2::<f64>::zeros((1, full_signal_window_size));
+        get_sequence(
+            &audio.data,
+            chan,
+            jj,
+            signal_window_size,
+            dc_offset,
+            coeffs,
+            &mut tail,
+        );
+        let b1 = tail.row(0).to_vec();
+        crate::features::fft::compute_two_real_periodogram(
+            &gfft,
+            window_size,
+            &b1,
+            &b1,
+            &mut periodogram,
+            current_frame,
+            current_frame,
+        );
+    }
+
+    if let Some(conv) = conv
+        && conv.len() > 1
+    {
+        convolution_vert(&mut periodogram, conv);
+    }
+
+    periodogram
+}
+
 /// Per-channel normalize: `adim = (2*rms + max_abs)/2`, floored at `1e-3`, then divide.
 /// `AudioStruct.cpp:121-126`.
 pub fn normalize_channels(data: &mut Array2<f64>) {

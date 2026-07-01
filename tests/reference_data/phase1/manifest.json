@@ -59,6 +59,14 @@
       "rows": 20,
       "cols": 50
     },
+    "fft_in_2.bin": {
+      "rows": 1,
+      "cols": 4
+    },
+    "fft_out_2.bin": {
+      "rows": 1,
+      "cols": 4
+    },
     "fft_in_4.bin": {
       "rows": 1,
       "cols": 8
@@ -82,6 +90,26 @@
     "fft_out_256.bin": {
       "rows": 1,
       "cols": 512
+    },
+    "perio_p8_s80_chan1.bin": {
+      "rows": 201,
+      "cols": 129
+    },
+    "perio_p8_s80_chan2.bin": {
+      "rows": 201,
+      "cols": 129
+    },
+    "perio_conv_p8_s80_chan1.bin": {
+      "rows": 201,
+      "cols": 129
+    },
+    "perio_conv_p8_s80_chan2.bin": {
+      "rows": 201,
+      "cols": 129
+    },
+    "perio_odd_chan1.bin": {
+      "rows": 5,
+      "cols": 129
     }
   },
   "anchor": {
@@ -95,5 +123,16 @@
   "spectrum_order_clamp": {
     "value": 19,
     "source": "legacy/src/BLSTMSpectralSegmenter.cpp:199-203 (Max=20 at :598-599)"
+  },
+  "periodogram": {
+    "p": 8,
+    "shift": 80,
+    "dc_offset": true,
+    "window": "hamming_257",
+    "temporal_conv": "hann_norm_7",
+    "begin": 0,
+    "end_full": 16000,
+    "perio_odd_end": 399,
+    "perio_odd_frame_nb": 5
   }
 }

@@ -50,12 +50,35 @@ EXPECTED_SHAPES = {
     "win_hhcw_257.bin": (1, 257),
     "win_conv_norm_7.bin": (1, 7),
     "synth_20x50.bin": (20, 50),
+    "fft_in_2.bin": (1, 4),
+    "fft_out_2.bin": (1, 4),
     "fft_in_4.bin": (1, 8),
     "fft_out_4.bin": (1, 8),
     "fft_in_8.bin": (1, 16),
     "fft_out_8.bin": (1, 16),
     "fft_in_256.bin": (1, 512),
     "fft_out_256.bin": (1, 512),
+    # Two-real periodogram (p=8 -> length 129; full end=16000 -> frameNb=201).
+    "perio_p8_s80_chan1.bin": (201, 129),
+    "perio_p8_s80_chan2.bin": (201, 129),
+    "perio_conv_p8_s80_chan1.bin": (201, 129),
+    "perio_conv_p8_s80_chan2.bin": (201, 129),
+    # Odd-frame-count variant (end=399 -> frameNb=5).
+    "perio_odd_chan1.bin": (5, 129),
+}
+
+# Periodogram framing params + odd-variant end (kept in sync with main.cpp). The
+# Rust golden reads perio_odd_end so both sides agree on the odd-frame end value.
+PERIODOGRAM = {
+    "p": 8,
+    "shift": 80,
+    "dc_offset": True,
+    "window": "hamming_257",
+    "temporal_conv": "hann_norm_7",
+    "begin": 0,
+    "end_full": 16000,
+    "perio_odd_end": 399,
+    "perio_odd_frame_nb": 5,
 }
 
 # Verified against legacy/src/BLSTMSpectralSegmenter.cpp:199-203 (clamp is Max-1)
@@ -120,6 +143,7 @@ def main() -> None:
         "dumps": inventory,
         "anchor": anchor,
         "spectrum_order_clamp": SPECTRUM_ORDER_CLAMP,
+        "periodogram": PERIODOGRAM,
     }
 
     manifest_path = FIXTURE_DIR / "manifest.json"

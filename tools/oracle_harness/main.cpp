@@ -15,6 +15,7 @@
 #include "AudioStruct.h"
 #include "CorpusItem.h"
 #include "Helpers.hpp"
+#include "MelFilterBank.h"
 #include "fft.hpp"
 
 // Constants ALL later tasks reuse (kept in sync with the harness manifest).
@@ -22,6 +23,13 @@ static const double OFFSET_SEC = 0.35;   // offset skip: round(rate*0.35) frames
 static const double MAX_DUR_SEC = 2.0;   // duration cap: round(rate*2.0+1) samples
 static const double PREEMPH = 0.97;
 static const double NOISE_RATIO = 0.001;
+
+// Periodogram framing parameters (kept in sync with the manifest + Rust golden).
+static const long PERIO_P = 8;           // window_size = 1<<p = 256; half_window = 128
+static const long PERIO_SHIFT = 80;      // window_shift
+// Odd-frame-count variant: end chosen so frameNb = ceil((end-begin+1)/shift) is odd.
+// begin=0, end=399 -> (399-0+1)/80 = 5 exactly -> frameNb=5 (odd). Asserted below.
+static const long long PERIO_ODD_END = 399;
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -107,7 +115,9 @@ int main(int argc, char** argv) {
         Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
         FactoryInit<GFFTList<GFFT, Min, Max>::Result>::apply(gfft_factory);
 
-        const unsigned powers[] = {2u, 3u, 8u};
+        // P=1 (N=2) folded in from Task 4 review: exercises the DanielsonLanczos<2>
+        // hard-coded base block directly (no recursion). Same synthetic-row scheme.
+        const unsigned powers[] = {1u, 2u, 3u, 8u};
         for (unsigned p : powers) {
             const int n = 1 << p;
             Eigen::MatrixXd in(1, 2 * n);
@@ -128,6 +138,66 @@ int main(int argc, char** argv) {
             ++dumps;
             delete[] data;
             delete gfft;
+        }
+    }
+
+    // --- Two-real periodogram + framing driver -------------------------------
+    // legacy: AudioStruct.cpp:456-584 (getSequence / computeTwoRealPeriodogram /
+    // computeSegmentPeriodogramEstimates). Run on the SAME preemph+noise audio as
+    // above, per channel, p=8 shift=80 DC-offset TRUE, hamming-257 window, EMPTY
+    // MelFilterBank (default ctor -> notEmpty()==false), begin=0 end=frames-1.
+    // Two temporal-convolution variants: empty (no conv) and the normalized hann-7
+    // kernel (ConvolutionVert gated on cols()>1). Plus one odd-frame-count variant.
+    {
+        const unsigned Min = 1;
+        const unsigned Max = 20;
+        Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+        FactoryInit<GFFTList<GFFT, Min, Max>::Result>::apply(gfft_factory);
+
+        MelFilterBank emptyMel;  // default ctor: _IsBuilt == false -> notEmpty() false
+        Eigen::MatrixXd win = getWindowingCoefficients("hamming", false, 257, 0.83333);
+        Eigen::MatrixXd noConv;  // empty 0x0 -> cols()==0, ConvolutionVert skipped
+        Eigen::MatrixXd hann7 = getWindowingCoefficients("hann", true, 7);  // 1x7 kernel
+
+        const long long frames = audio.getFrameCount();
+        const long long endFull = frames - 1;
+
+        // No temporal convolution, both channels.
+        audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 0, true, win,
+                                                 emptyMel, gfft_factory, noConv, 0, endFull);
+        Matrix2BinaryFile(out + "perio_p8_s80_chan1.bin", audio._Periodogram);
+        ++dumps;
+        audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 1, true, win,
+                                                 emptyMel, gfft_factory, noConv, 0, endFull);
+        Matrix2BinaryFile(out + "perio_p8_s80_chan2.bin", audio._Periodogram);
+        ++dumps;
+
+        // With the normalized hann-7 temporal convolution (kernel cols()==7 > 1).
+        audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 0, true, win,
+                                                 emptyMel, gfft_factory, hann7, 0, endFull);
+        Matrix2BinaryFile(out + "perio_conv_p8_s80_chan1.bin", audio._Periodogram);
+        ++dumps;
+        audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 1, true, win,
+                                                 emptyMel, gfft_factory, hann7, 0, endFull);
+        Matrix2BinaryFile(out + "perio_conv_p8_s80_chan2.bin", audio._Periodogram);
+        ++dumps;
+
+        // Odd-frame-count variant (chan 0, no conv). Assert oddness in-harness.
+        {
+            long long begin = 0;
+            long long end = PERIO_ODD_END;
+            long long span = end - begin + 1;
+            long long frameNb = (span / PERIO_SHIFT) * PERIO_SHIFT == span
+                                    ? span / PERIO_SHIFT
+                                    : span / PERIO_SHIFT + 1;
+            if ((frameNb / 2) * 2 == frameNb) {
+                std::cerr << "FATAL: perio_odd expected odd frameNb, got " << frameNb << "\n";
+                return 1;
+            }
+            audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 0, true, win,
+                                                     emptyMel, gfft_factory, noConv, begin, end);
+            Matrix2BinaryFile(out + "perio_odd_chan1.bin", audio._Periodogram);
+            ++dumps;
         }
     }
 

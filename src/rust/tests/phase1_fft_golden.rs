@@ -9,10 +9,11 @@ mod common;
 
 use speech::features::fft::{Gfft, sin_series};
 
-/// Bit-exact parity against the legacy GFFT dumps for N in {4, 8, 256}.
+/// Bit-exact parity against the legacy GFFT dumps for N in {2, 4, 8, 256}.
+/// P=1 (N=2) exercises the DanielsonLanczos<2> hard-coded base block directly.
 #[test]
 fn gfft_matches_oracle_bitexact() {
-    for p in [2u32, 3, 8] {
+    for p in [1u32, 2, 3, 8] {
         let n = 1usize << p;
         let mut data = common::load_bin(&format!("fft_in_{n}.bin")).row(0).to_vec();
         Gfft::new(p).fft(&mut data);

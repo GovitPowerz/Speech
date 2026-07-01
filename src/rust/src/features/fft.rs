@@ -13,6 +13,8 @@
 
 use std::f64::consts::PI;
 
+use ndarray::Array2;
+
 /// Legacy `Sin<B,A,double>::value()` == `(A*PI/B) * SinCosSeries<2,34,B,A>::value()`.
 ///
 /// The series is `S(M) = 1 - ((x*x)/M)/(M+1) * S(M+2)` with base `S(34) = 1`, and
@@ -55,6 +57,56 @@ impl Gfft {
         assert_eq!(data.len(), 2 * n, "data len must be 2 * (1 << p)");
         scramble(data, n);
         danielson_lanczos(data, n);
+    }
+}
+
+/// Two real signals through one complex FFT, unpacked into two periodogram rows
+/// (`AudioStruct::computeTwoRealPeriodogram`, AudioStruct.cpp:487-510).
+///
+/// `n == full_window_size == 1 << p` (the gfft's complex-point count). `sig1`/`sig2`
+/// carry `n + 1` samples but only the FIRST `n` are packed -- the last sample is
+/// silently dropped (load-bearing legacy quirk: the caller's windowed buffers are
+/// `n + 1` wide, this call is `n` wide). `sig1` -> real part, `sig2` -> imaginary
+/// part, interleaved `[re0, im0, re1, im1, ...]`, then one negative-exponent FFT.
+///
+/// Unpack over `size_1 = 2n`, `size_2 = 2n + 1`, `coeff_norm = 2 * size_1 = 4n`:
+/// DC bins are `data[0]^2 / n` (sig1) and `data[1]^2 / n` (sig2); the spectrum loop
+/// runs `ii = 2, 4, ..., n` INCLUSIVE (Nyquist) writing column `ii / 2` of each row
+/// with the four exact quadratic expressions transcribed from the legacy.
+pub fn compute_two_real_periodogram(
+    gfft: &Gfft,
+    n: usize,
+    sig1: &[f64],
+    sig2: &[f64],
+    out: &mut Array2<f64>,
+    row1: usize,
+    row2: usize,
+) {
+    let size_1 = 2 * n;
+    let size_2 = 2 * n + 1;
+
+    // Pack the FIRST n samples only (the (n+1)th of each buffer is dropped).
+    let mut data = vec![0.0_f64; size_1];
+    for ii in 0..n {
+        data[2 * ii] = sig1[ii];
+        data[2 * ii + 1] = sig2[ii];
+    }
+
+    gfft.fft(&mut data);
+
+    let coeff_norm = (2 * size_1) as f64; // == 4n
+    out[[row1, 0]] = (data[0] * data[0]) / n as f64;
+    out[[row2, 0]] = (data[1] * data[1]) / n as f64;
+    let mut ii = 2usize;
+    while ii <= n {
+        out[[row1, ii / 2]] = ((data[ii] + data[size_1 - ii]) * (data[ii] + data[size_1 - ii])
+            + (data[ii + 1] - data[size_2 - ii]) * (data[ii + 1] - data[size_2 - ii]))
+            / coeff_norm;
+        out[[row2, ii / 2]] = ((data[ii + 1] + data[size_2 - ii])
+            * (data[ii + 1] + data[size_2 - ii])
+            + (data[size_1 - ii] - data[ii]) * (data[size_1 - ii] - data[ii]))
+            / coeff_norm;
+        ii += 2;
     }
 }
 
