@@ -44,29 +44,24 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   re-test-after-merge control flow (e.g. an explicit worklist) instead of the implicit no-advance
   loop.
 
-- **[0b-ii] VRCTS `spdur`/`dur` unresolved `iof::fmtr` rounding quirk** (`segmentation_io.rs`
-  `to_vrcts_string`/`speech_duration`, from `Segmentation.cpp:546-551,575,578`): `speechDuration` is
-  a plain `f64` sum of `(next.begin - it.begin)` over SPEECH segments; the legacy writer formats it
-  with `iof::fmtr("%f.2s")`. For the real fixture `vrcts_16seg.xml`, the exact sum (verified in both
-  Python `Decimal` and Rust) is `81.772`, which any standard `%.2f`-equivalent rounds to `81.77` -
-  but the fixture's `spdur`/`dur` read `81.79`, a 0.02s gap unexplained by fixed-point rounding,
-  trailing-zero-stripping, float32 accumulation, or a merged/dropped segment (all gaps between
-  segments are >= 0.596s, ruling out a suppress-short/merge explanation). `iof::fmtr` is an external
-  library (`#include "iof/io.hpp"`, `-I /usr/local/include/iof`) not vendored in `legacy/` and not
-  present anywhere on this machine; a compiled `Debug/bin/fsp` with symbols exists in the sibling
-  `FastSpeechProcessing-legacy` checkout, and disassembling `iof::iof_private::process1FmtSpec` /
-  `setStreamFormat` / `outputAdvanced<double>` did not reach a conclusive answer for the `%f.2s`
-  token's precision semantics before this task's time-box. Our `to_vrcts_string` recomputes
-  `spdur`/`dur` as the straight sum-then-round-to-2-decimals (matching the legacy algorithm's
-  *source*, not its *output* on this one fixture); `stime`/`etime` (`%f.4s` -> 3 displayed decimals)
-  and `sigdur` (direct `audio_duration`, no derived sum) round-trip byte-exact on all 3 fixtures.
-  Net effect: `vrcts_1seg.xml` and `vrcts_empty.xml` round-trip byte-exact; `vrcts_16seg.xml` round-trips
-  exact except `spdur`/`dur` (`81.77` vs fixture's `81.79`). *Fix candidate:* either recover `iof`'s
-  actual source (likely needs the original build environment/vendor drop) and port its `%f.Ns`
-  algorithm exactly, or - if `iof::fmtr` turns out to just be buggy/lossy on this input - decide
-  whether `spdur`/`dur` are load-bearing anywhere downstream (they look display-only: not consumed by
-  `load_from_vrcts`, which only reads `SpeechSegment stime`/`etime`) and drop the parity requirement
-  for these two display fields specifically.
+- **[0b-ii] VRCTS writer byte-golden deferred; fixtures are external `vrcts_part` reference input**
+  (`segmentation_io.rs` `to_vrcts_string`/`write_vrcts`, from `Segmentation.cpp:543-588`): the engine's
+  `toFile_VRCTS` formats `stime`/`etime` with `iof::fmtr("%f.4s")` and `sigdur`/`spdur`/`dur` with
+  `%f.2s`. `iof::fmtr`'s `%f.Ns` was resolved (by disassembling the vendored `Debug/bin/fsp` -- the `iof`
+  headers are not on disk) to be exactly `std::fixed` + `precision(N)`, i.e. `%.Nf`; the fixture's own
+  `sigdur="120.00"` independently confirms `%f.2s` -> 2 decimals. So the faithful writer emits
+  **4-decimal** segment times. The committed fixtures (`vrcts_{1seg,empty,16seg}.xml`) instead show
+  **3-decimal** times and a `spdur` (16seg: `81.79`) that is NOT the sum of their own printed durations
+  (`81.772`): they are external `vrcts_part` output used as engine INPUT via `load_from_vrcts` (which
+  reads only `SpeechSegment` times and ignores `spdur`), not `toFile_VRCTS` output. Legacy `spdur` is the
+  sum of post-`sanitize` (4-decimal round-half-away, same-type-merged) SPEECH durations over the engine's
+  full-precision internal boundaries -- unreproducible from the fixtures' rounded strings. *Validation:*
+  `load_vrcts` is golden-tested for load correctness against the 3 fixtures; `to_vrcts_string` is
+  unit-tested on a constructed `Segmentation` with hand-computed 4-decimal bytes. *Deferred:* the
+  writer-vs-real-engine byte golden waits on the end-to-end inference-output parity milestone (README
+  Roadmap Phase 4), when a real engine-produced `.xml` exists to match. *Minor:* our writer sanitizes a
+  clone (non-mutating) whereas `toFile_VRCTS` mutates its `_Classification` in place; revisit if any
+  caller relies on the write-time sanitize side effect.
 
 ### Forward-noted (add the entry when the phase reproduces it)
 

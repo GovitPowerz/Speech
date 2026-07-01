@@ -24,10 +24,18 @@ fn speech_duration(seg: &Segmentation) -> f64 {
 }
 
 /// Serialize `seg` as a VRCTS XML document. Direct port of
-/// `Segmentation::toFile_VRCTS` (`Segmentation.cpp:568-587`), single-channel
+/// `Segmentation::toFile_VRCTS` (`Segmentation.cpp:543-587`), single-channel
 /// (`chan = 1`), offset folded to `0.0` (this container has no `_AudioOffset`
 /// field).
+///
+/// `toFile_VRCTS` calls `sanitize()` on the channel before summing/printing
+/// (`Segmentation.cpp:545`); we sanitize a clone so the caller's `seg` is not
+/// mutated. Post-sanitize boundaries lie exactly on the 1e-4 grid, so the
+/// 4-decimal `stime`/`etime` display is exact.
 pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> String {
+    let mut seg = seg.clone();
+    seg.sanitize();
+    let seg = &seg;
     let speech_dur = speech_duration(seg);
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
@@ -54,7 +62,7 @@ pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> Strin
     for i in 0..segs.len().saturating_sub(1) {
         if segs[i].ty == SegClass::Speech {
             out.push_str(&format!(
-                "<SpeechSegment ch=\"1\" sconf=\"1.00\" stime=\"{:.3}\" etime=\"{:.3}\" spkid=\"1\"/>\n",
+                "<SpeechSegment ch=\"1\" sconf=\"1.00\" stime=\"{:.4}\" etime=\"{:.4}\" spkid=\"1\"/>\n",
                 segs[i].begin,
                 segs[i + 1].begin
             ));
