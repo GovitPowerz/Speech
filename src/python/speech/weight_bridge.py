@@ -8,6 +8,7 @@ High-risk: the column-major flat layout + adim_coeff scaling are the seam to the
 Rust engine - round-trip property tests are mandatory when implemented (Phase 3).
 """
 
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -24,11 +25,31 @@ def unpack_weights(flat: NDArray[np.float64], arch: dict[str, object]) -> dict[s
     ...
 
 
-def write_bin(matrix: NDArray[np.float64], path: Path) -> None:
-    """Write i64 LE rows, i64 LE cols, then f64 LE column-major (Phase 0)."""
-    ...
+def read_bin(path: Path) -> tuple[int, int, NDArray[np.float64]]:
+    """Read the custom .bin matrix; returns (rows, cols, column-major f64 vector)."""
+    raw = Path(path).read_bytes()
+    rows, cols = struct.unpack("<qq", raw[:16])
+    if rows * cols <= 0:
+        raise ValueError(f"empty/invalid .bin: rows={rows} cols={cols}")
+    data = np.frombuffer(raw[16 : 16 + 8 * rows * cols], dtype="<f8")
+    if data.shape[0] != rows * cols:
+        raise ValueError("truncated .bin payload")
+    return rows, cols, np.array(data, dtype=np.float64)
 
 
-def read_bin(path: Path) -> NDArray[np.float64]:
-    """Inverse of `write_bin` (Phase 0)."""
-    ...
+def write_bin(rows: int, cols: int, data: NDArray[np.float64], path: Path) -> None:
+    """Write rows/cols as i64 LE then column-major f64 LE (data is already column-major)."""
+    flat = np.ascontiguousarray(data, dtype="<f8").reshape(-1)
+    if flat.shape[0] != rows * cols:
+        raise ValueError("data length does not match rows*cols")
+    with Path(path).open("wb") as fh:
+        fh.write(struct.pack("<qq", rows, cols))
+        fh.write(flat.tobytes())
+
+
+def read_weight_vector(path: Path) -> NDArray[np.float64]:
+    """Read an N x 1 weight .bin as a flat vector (asserts cols == 1)."""
+    rows, cols, data = read_bin(path)
+    if cols != 1:
+        raise ValueError(f"expected a column vector, got cols={cols}")
+    return data
