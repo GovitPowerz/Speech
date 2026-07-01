@@ -92,6 +92,10 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   3.2/3.3, also load-bearing). *Fix candidate:* if `update_segmentation` is ever fed a 2-D buffer once
   features/NN land, use the column count, not the element count.
 
+## Toolchain deviations
+
+- **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
+
 ### Forward-noted (add the entry when the phase reproduces it)
 
 - **[3/4] `CostFunctionCalib` nnet_out-before-assignment** (Python optimizer) -- a real

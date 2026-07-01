@@ -39,3 +39,12 @@ def test_manifest_records_strict_fp_flags() -> None:
     flags = json.loads((REF / "manifest.json").read_text())["flags"]
     for flag in ("-fno-fast-math", "-ffp-contract=off", "-DEIGEN_DONT_VECTORIZE"):
         assert flag in flags, flag
+
+
+def test_anchor_hex_sig_norm() -> None:
+    manifest = json.loads((REF / "manifest.json").read_text())
+    anchor_hex = manifest["anchor"]["value_hex"]
+    rows, cols, data = read_bin(REF / "sig_norm.bin")
+    sig_norm = data.reshape((rows, cols))
+    actual_hex = sig_norm[0, 0].hex()
+    assert actual_hex == anchor_hex
