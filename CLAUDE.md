@@ -115,6 +115,21 @@ This repo started as all-stubs with two warning/typecheck suppressions in place.
 - Rust: the crate-root `#![allow(dead_code, unused_variables)]` in `src/rust/src/lib.rs` was removed in Phase 0a -- the crate now builds clean under `-D warnings` with `io/binary.rs`, `legacy_config.rs`, and `config.rs` implemented. If a future stub needs suppression, add a narrow `#[allow(...)]` on that item, not a crate-wide blanket.
 - Python: `allow_empty_bodies = true` in the mypy config (`pyproject.toml`).
 
+## Legacy Quirks & Deferred Fixes
+
+Legacy bugs and oddities we reproduce BIT-EXACTLY now (so the port matches the reference), to revisit and clean up ONCE end-to-end parity is validated. Do NOT "fix" any of these mid-port -- they are load-bearing for the goldens. **Maintainer note: every phase that reproduces a legacy quirk/bug adds an entry here (what / where / why deferred / fix candidate).**
+
+- **[0a] adim bias restore vs MATLAB FP path** (`config.rs` `apply_adim`, `weight_bridge.py`): we restore the bias to its ORIGINAL value; legacy `config2network.m` computes `(x/adim)*adim`, which differs by up to 1 ULP on ~34 biases. We chose original-restore so Rust == Python. *Fix candidate:* once the Phase-4 inference golden lands, decide whether strict legacy parity requires replicating `(x/adim)*adim` on the bias.
+- **[0b-i] CostLaw double-read** (`cost.rs` from `CostLaw.cpp:68-69`): `CostLawThresh{Speech,NoSpeech}` is read TWICE -- clamped (`1e-6..1-1e-6`) for the law coefficients, then re-read RAW/unclamped (defaults `10.0`/`-1.0`) for the runtime branch predicate. Almost certainly an unintended double-read; load-bearing for the sweep goldens. *Fix candidate:* unify to a single, clamped threshold after parity.
+- **[0b-i] LogLaw cost/deriv Adim asymmetry** (`cost.rs` from `CostLaw.h:119-149`): `cost()` divides `y` by `Adim` before clamp+log; `deriv()` clamps the RAW `y` (not divided) then returns `A/y`. The derivative is inconsistent with the cost -- a genuine legacy bug. *Fix candidate:* make `deriv` the true derivative of `cost` after parity (will shift training gradients slightly).
+- **[0b-i] AboveThreshCubic name-dependent coefficients** (`cost.rs` from `CostLaw.h:84-117`): the above-threshold cubic law switches its `A`/`B` coefficient formulas on the law-name STRING (`square`/`cubic` vs `linear`/`log`). Fragile and surprising. *Fix candidate:* refactor to explicit per-law types after parity.
+
+### Forward-noted (add the entry when the phase reproduces it)
+
+- **[0b-ii] `updateSegmentation` tail uses `results.size()` (rows*cols), not `length`** -- correct only for a pure row-vector; note when 0b-ii lands.
+- **[0b-ii] `suppressShortSegments` no-advance-after-erase** -- re-tests the merged segment; confirm intended vs bug at 0b-ii.
+- **[3/4] `CostFunctionCalib` nnet_out-before-assignment** (Python optimizer) -- a real use-before-assign bug flagged in the setup analysis; fix when the Python training loop is ported.
+
 ## Conventions
 
 - **Rust**: Edition 2024, `nalgebra`/`ndarray` for linear algebra, release profile with LTO. Engine deps include `rustfft`/`realfft`, `symphonia`, `rayon`, `byteorder`/`bytemuck`, `quick-xml`, `serde`/`toml`; `matfile` lands in Phase 1 when `io/matfile.rs` is implemented. `speech-py` uses `pyo3` + `numpy`.
