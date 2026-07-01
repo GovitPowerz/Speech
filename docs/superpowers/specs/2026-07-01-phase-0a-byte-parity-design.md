@@ -12,13 +12,21 @@ weight packer/unpacker. Deliver both the Rust implementation (crate `speech`) an
 reference port (package `speech`) so the packer is cross-checked from two independent directions
 against the same real artifact.
 
-**Acceptance (two bit-exact goldens):** (1) taking the structured config-domain weights from
-`BestConfigStruct`, applying `adim_coeff`, and packing the flat vector reproduces the paired
-nnet-domain `nnet_best[:33671]` byte-for-byte; (2) reading `NNweights_config1.bin` (269,384 bytes)
-and re-writing it reproduces the input bytes exactly. Both must hold in Rust and in Python. NOTE:
-the `.config` text file carries only hyperparameters + sizes + a `weightsFile` pointer, not the
-weights - so the packer/adim golden is sourced from the `save_net` `.mat`'s `BestConfigStruct` +
-`nnet_best` (see sections 4, 8-9), not from the `.config`.
+**Acceptance.** The `.bin` codec and the config parser are validated bit-for-bit / real-value
+against real artifacts: (1) reading `NNweights_config1.bin` (269,384 bytes) and re-writing it
+reproduces the input bytes exactly; (2) parsing `1_worker_1.config` yields the real `NnetSpec`.
+Both hold in Rust and Python.
+
+CORRECTION (discovered during implementation): the packer + `adim` seam CANNOT be validated against
+an independent legacy artifact - no `(structured-config, matching-.bin)` pair exists in the tree
+(`nnet_best` is the CMA-ES optimizer genome, not a weight-pack; `BestConfigStruct` matches none of
+685 candidate `.bin` files). The packer/adim is therefore validated by: line-by-line cross-check
+against `config2weights.m` / `config2network.m`; the exact element count (33,671); the mutual-inverse
+`flat <-> nnet` bijection; the `adim` invariants (bias exempt, body scaled by `1/adim`); the
+normalize `mean`/`std` tail matching a real `.bin`; and - across Tasks 3-4 - Rust-pack == Python-pack
+(two independent implementations agreeing on the same structured input). The definitive bit-exact
+packer/adim golden is DEFERRED to Phase 2, where inference on a real `.bin` matched against the legacy
+VRCTS segmentation output validates the whole load->infer path end-to-end.
 
 This is Phase 0a only. Phase 0b (cost laws, segmentation, scoring, VRCTS/STM I/O) is a separate
 later cycle with its own spec.
@@ -123,12 +131,15 @@ Authoritative source: MATLAB `config2weights.m` / `weights2nnet.m` / `nnet2MatFi
 **Global order:** all `forward.layer(j)` for every LSTM layer, then all `backward.layer(j)`, then
 `output.layer(j)`, then `mean`, then `std`.
 
-**Per LSTM layer** (each of `inputweights`/`forgetweights`/`outputweights`/`cellweights` is an
-`output_size x ncols` matrix, where `output_size = LSTMNeuronNb[i+1]`, `input_size = ncols -
-output_size - 5`, `ncols = input_size + output_size + 5`; columns: `1..output_size` = recurrent,
-`output_size+1..output_size+input_size` = fan-in, last 5 = `[3 input-gate-peephole cols][1
-recurrent-peephole col][1 bias]`). Each block is flattened ROW-MAJOR (`reshape(tmp',numel,1)` =
-C-order over the original matrix). Emission order:
+**Per LSTM layer** (`output_size = LSTMNeuronNb[i+1]`, `input_size = LSTMNeuronNb[i] *
+LSTMSubSampling[i]`). CORRECTION (verified against the real `.mat` + `config2weights.m`): the four
+gate matrices do NOT share a width. `inputweights`/`forgetweights`/`outputweights` are
+`output_size x (input_size + output_size + 5)` (columns: `1..output_size` recurrent,
+`+input_size` fan-in, then `[3 gate-peephole cols][1 recurrent-peephole col][1 bias]`), but
+`cellweights` is `output_size x (input_size + output_size + 1)` - it has NO peephole columns, so its
+bias is its OWN last column. Each gate's bias is therefore `m[:, -1]` (its own last column), NOT a
+shared `ncols-1` index. Each block is flattened ROW-MAJOR (`reshape(tmp',numel,1)` = numpy
+`X.reshape(-1)`, C-order). Emission order (`idx_in`/`idx_rec` identical across all four gates):
 
 ```
  1. inputweights(:, indices_in)     indices_in  = (output_size+1)..(output_size+input_size)
@@ -143,10 +154,10 @@ C-order over the original matrix). Emission order:
       [ inputweights(:,end-1)  forgetweights(:,end-1)  outputweights(:,end-1)          # 3 recurrent-peephole cols
         inputweights(:,end-4:end-2)  forgetweights(:,end-4:end-2)  outputweights(:,end-4:end-2) ]  # 3x3 gate-peephole cols
       flattened row-major. cellweights has NO peephole cols.
-10. inputweights(:,end)    BIAS input gate    (output_size elems)
-11. forgetweights(:,end)   BIAS forget gate
-12. outputweights(:,end)   BIAS output gate
-13. cellweights(:,end)     BIAS cell
+10. inputweights(:,-1)     BIAS input gate    (output_size elems; own last col)
+11. forgetweights(:,-1)    BIAS forget gate
+12. outputweights(:,-1)    BIAS output gate
+13. cellweights(:,-1)      BIAS cell           (cell's last col is input_size+output_size, not ncols-1)
 ```
 
 **Per output layer** (`weights` is `output_size x (input_size+1)`): emit `weights(:,1:input_size)`
@@ -230,7 +241,9 @@ For `LSTMNeuronNb=[23,24,24]`, `LSTMSubSampling=[4,1]`, `OutputNeuronNb=[48,12,1
 - `1_worker_1.config` (~3 KB) - real config-parse golden.
 - `best_config_domain.bin` + `best_config_manifest.json` - the structured config-domain weight rows
   from `BestConfigStruct` (emitted by the prep script).
-- `best_net_flat.bin` (269,384 bytes) - the paired nnet-domain flat vector `nnet_best[:33671]`.
+- `best_net_flat.bin` (269,384 bytes) - `nnet_to_flat(config_to_nnet(BestConfigStruct))`, i.e. the
+  SELF-DERIVED pack (there is no independent nnet-domain golden; see the section 1 correction). It
+  serves as the fixed-point that Rust and Python must both reproduce (cross-language agreement).
 
 Source (local, git-ignored): `.bin`/`.config` under
 `/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/`;
@@ -249,13 +262,17 @@ regenerates the derived fixtures from these.
 6. Packer bijection (no adim): `flat_to_nnet(read_weight_vector(NNweights_config1.bin), spec)` then
    `nnet_to_flat` == the input flat, bit-for-bit. Tail: `flat[-46:-23]` (mean), `flat[-23:]` (std,
    all `> 0`).
-7. THE acceptance (adim + pack): load `best_config_domain.bin` + manifest into `StructuredWeights`,
-   `config_to_nnet` (adim), `nnet_to_flat` == `read_weight_vector(best_net_flat.bin)` bit-for-bit
-   (`==` on `f64`, not approx).
-8. adim output-layer asymmetry: a targeted unit test on a small hand-built net asserting the output
-   layer uses `sqrt(out*sub)` with NO next-term (and that the bias column is exempt from scaling).
-9. Cross-language agreement: Rust and Python both reproduce the fixtures in tests 6 and 7 (both `==`
-   the committed goldens), so the two independent implementations agree by transitivity.
+7. Pipeline integrity + cross-language fixed-point: load `best_config_domain.bin` + manifest,
+   `config_to_nnet` (adim), `nnet_to_flat` == `read_weight_vector(best_net_flat.bin)` bit-for-bit.
+   This is NOT an independent golden (the fixture is self-derived); it pins pipeline determinism and,
+   because Rust and Python run the SAME assertion against the SAME committed fixture, forces the two
+   implementations to agree bit-for-bit.
+8. adim invariants: on the committed config-domain fixture, assert `nnet[:,-1] == config[:,-1]` (bias
+   exempt) and `nnet[:,:-1] * adim == config[:,:-1]` (body rescaled), for LSTM and output layers; and
+   a targeted check that the output-layer adim uses `sqrt(out*sub)` with NO next-term.
+9. Normalize-tail vs real `.bin`: `best_net_flat.bin[-46:]` (the `mean`/`std` tail) equals
+   `NNweights_config1.bin[-46:]` (both nets share the corpus normalization) - a small real-artifact
+   anchor on the tail placement; `std` (`[-23:]`) strictly positive.
 
 ## 10. Risks and pitfalls (must be pinned by tests)
 
