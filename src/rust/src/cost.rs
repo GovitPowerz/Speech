@@ -315,13 +315,117 @@ impl CostLaw {
         delta * output * (1.0 - output)
     }
 
-    /// Speech/no-speech law names (for later multiclass wiring; keeps parity with legacy).
+    /// Speech/no-speech law names (kept for legacy parity; unused by the softmax path).
     pub fn law_names(&self) -> (&str, &str) {
         (&self.speech_name, &self.no_speech_name)
     }
 
-    /// Class ponderations for the softmax path (empty when unset); wired in a later task.
+    /// Class ponderations for the softmax path (empty when unset).
     pub fn classes_ponderations(&self) -> &[f64] {
         &self.classes_ponderations
+    }
+
+    /// Multiclass softmax cross-entropy cost over a row-major `n_frames x n_classes` batch.
+    ///
+    /// Mirrors CostLaw.cpp:212-246 (the `targetSeq.cols() > 1` branch): sums
+    /// `-ln(clamp(output, 1e-24, inf))` over the on-class (`target > 0.5`) entries.
+    /// A frame whose target row is all `< 0` contributes nothing (no on-class).
+    /// Each term is scaled by `classes_ponderations[kk]` (when present) and by
+    /// `10 * (1 - target)` when `back_prop_wer` is set.
+    pub fn compute_cost(&self, outputs: &[f64], onehot_target: &[f64], n_classes: usize) -> f64 {
+        let use_pond = !self.classes_ponderations.is_empty();
+        if use_pond && self.classes_ponderations.len() < n_classes {
+            panic!("Not enough ponderations given for the number of classes!");
+        }
+        let mut cost = 0.0;
+        let n_frames = outputs.len() / n_classes;
+        for jj in 0..n_frames {
+            for kk in 0..n_classes {
+                let idx = jj * n_classes + kk;
+                let target = onehot_target[idx];
+                if target > 0.5 {
+                    let value = outputs[idx].max(1e-24);
+                    let pond = if use_pond {
+                        self.classes_ponderations[kk]
+                    } else {
+                        1.0
+                    };
+                    if self.back_prop_wer {
+                        cost += -value.ln() * pond * 10.0 * (1.0 - target);
+                    } else {
+                        cost += -value.ln() * pond;
+                    }
+                }
+            }
+        }
+        cost
+    }
+
+    /// Multiclass softmax cross-entropy deltas over a row-major `n_frames x n_classes` batch.
+    ///
+    /// Mirrors CostLaw.cpp:358-419 (the `targetSeq.cols() > 1` branch). Per element:
+    /// `target < 0` => 0 (ignore); the core contract is `delta = output - onehot`,
+    /// i.e. `output - 1` on the on-class (`target > 0.5`) and `output` elsewhere.
+    /// When `back_prop_wer` is set the legacy bakes in the WER factors
+    /// (`10*(1-target)` on-class, `10*target` off-class); class ponderations scale
+    /// each element (WER path) or the whole frame row by the on-class ponderation
+    /// (non-WER path).
+    pub fn compute_deltas(
+        &self,
+        outputs: &[f64],
+        onehot_target: &[f64],
+        n_classes: usize,
+        out: &mut [f64],
+    ) {
+        let use_pond = !self.classes_ponderations.is_empty();
+        if use_pond && self.classes_ponderations.len() < n_classes {
+            panic!("Not enough ponderations given for the number of classes!");
+        }
+        let n_frames = outputs.len() / n_classes;
+        if self.back_prop_wer {
+            for jj in 0..n_frames {
+                for kk in 0..n_classes {
+                    let idx = jj * n_classes + kk;
+                    let target = onehot_target[idx];
+                    let pond = if use_pond {
+                        self.classes_ponderations[kk]
+                    } else {
+                        1.0
+                    };
+                    out[idx] = if target < 0.0 {
+                        0.0
+                    } else if target > 0.5 {
+                        pond * 10.0 * (1.0 - target) * (outputs[idx] - 1.0)
+                    } else {
+                        pond * 10.0 * target * outputs[idx]
+                    };
+                }
+            }
+        } else {
+            for jj in 0..n_frames {
+                // Legacy captures the on-class ponderation for the frame, then scales
+                // the whole row by it (CostLaw.cpp:404-417).
+                let mut ponderation = 1.0;
+                for kk in 0..n_classes {
+                    let idx = jj * n_classes + kk;
+                    let target = onehot_target[idx];
+                    out[idx] = if target < 0.0 {
+                        0.0
+                    } else if target > 0.5 {
+                        if use_pond {
+                            ponderation = self.classes_ponderations[kk];
+                        }
+                        outputs[idx] - 1.0
+                    } else {
+                        outputs[idx]
+                    };
+                }
+                if use_pond {
+                    for kk in 0..n_classes {
+                        out[jj * n_classes + kk] *= ponderation;
+                    }
+                }
+            }
+        }
     }
 }
