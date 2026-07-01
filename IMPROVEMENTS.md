@@ -82,9 +82,17 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   sentinel makes them unreachable); the port relies on the same predicate rather than adding a redundant
   bounds check.
 
+- **[0b-ii] `update_segmentation` tail uses `results.size()`, not the row `length`** (`segmenter.rs`
+  `update_segmentation` tail, from `Segmenter.cpp:833-835`): the legacy TAIL sets `endSegment =
+  timeStep*results.size()`, where `results.size()` is `rows*cols` -- correct ONLY for a pure row vector
+  (the real SAD input), and wrong for any multi-row matrix. Our port takes a 1-D `results_row: &[f64]`,
+  so `results.len()` equals the intended column count and the quirk is structurally avoided for the
+  row-vector input; reproduced faithfully because SAD always feeds a single row (this ties to the
+  row-vector `update_segmentation` vs col-vector `lid_to_segmentation` orientation asymmetry -- see spec
+  3.2/3.3, also load-bearing). *Fix candidate:* if `update_segmentation` is ever fed a 2-D buffer once
+  features/NN land, use the column count, not the element count.
+
 ### Forward-noted (add the entry when the phase reproduces it)
 
-- **[0b-ii] `updateSegmentation` tail uses `results.size()` (rows*cols), not `length`** -- correct
-  only for a pure row-vector; note when 0b-ii lands.
 - **[3/4] `CostFunctionCalib` nnet_out-before-assignment** (Python optimizer) -- a real
   use-before-assign bug flagged in the setup analysis; fix when the Python training loop is ported.
