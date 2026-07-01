@@ -198,8 +198,10 @@ def flat_to_nnet(flat: np.ndarray, spec: dict) -> dict:
     for direction in ("forward", "backward"):
         for i in range(len(lstm) - 1):
             out, fin = lstm[i + 1], lstm[i] * lsub[i]
-            ncols = fin + out + 5
-            gates = {g: np.zeros((out, ncols)) for g in ("input", "forget", "output", "cell")}
+            ncols = fin + out + 5  # I/F/O gate frame; the cell matrix is narrower (fin+out+1, no peepholes).
+            cell_cols = fin + out + 1
+            gates = {g: np.zeros((out, ncols)) for g in ("input", "forget", "output")}
+            gates["cell"] = np.zeros((out, cell_cols))
             for g in ("input", "forget", "output", "cell"):
                 gates[g][:, out : out + fin] = take(out * fin).reshape(out, fin)
             for g in ("input", "forget", "output", "cell"):
@@ -210,8 +212,9 @@ def flat_to_nnet(flat: np.ndarray, spec: dict) -> dict:
                 gates["input"][r, ncols - 5 : ncols - 2] = peep[r, 3:6]
                 gates["forget"][r, ncols - 5 : ncols - 2] = peep[r, 6:9]
                 gates["output"][r, ncols - 5 : ncols - 2] = peep[r, 9:12]
-            for g in ("input", "forget", "output", "cell"):
+            for g in ("input", "forget", "output"):
                 gates[g][:, ncols - 1] = take(out)
+            gates["cell"][:, cell_cols - 1] = take(out)
             nnet[direction].append(gates)
     for i in range(len(outn) - 1):
         out, inp = outn[i + 1], outn[i]
