@@ -11,6 +11,7 @@ Speech Activity Detection (SAD) and spoken Language Identification (LID) engine.
 cd src/rust && cargo build --release && cd ../..
 
 # Run on a TOML config
+# Scaffold today: prints "engine not yet implemented"; real LID/SAD lands per-phase (see Roadmap)
 ./src/rust/target/release/speech -m configs/lid/lid_blstm.toml
 
 # Build the PyO3 bindings (module speech_rs)
@@ -67,7 +68,7 @@ Speech/
 
 ## What it does
 
-Two tasks, built on a shared feature front-end and neural-net zoo.
+Two tasks, built on a shared feature front-end and neural-net zoo (target behavior; see Roadmap - not what runs today).
 
 - **SAD (Speech Activity Detection).** A recurrent net emits a per-frame speech posterior; segmentation turns that posterior into speech/non-speech segments via a hysteresis-with-area double threshold plus a 7-step smoothing pass. Pure decision logic, golden-tested first.
 - **LID (spoken Language Identification).** A TwinBLSTM head consumes the SAD net's hidden states (the "twin" seam), accumulates per-segment evidence, and produces a per-file language posterior (argmax + confusion). LID is stacked on top of SAD, not run independently.
