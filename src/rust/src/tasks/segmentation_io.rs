@@ -500,7 +500,7 @@ pub fn load_ref_stm(
 /// Direct port of `Segmentation::load_ref_from_csv` (`Segmentation.cpp:745-806`).
 ///
 /// NOTE: the pinned interface omitted `pruning_thresh`; it is added here because
-/// the legacy `_PruningThresh` gate (`Segmentation.cpp:786`) is load-bearing --
+/// the legacy `_PruningThresh` gate (`Segmentation.cpp:783`) is load-bearing --
 /// it decides whether a parsed line is labeled at all. See task-6-report.md.
 ///
 /// Lines starting with `#` are skipped. Each remaining line has its commas
