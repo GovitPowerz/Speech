@@ -92,6 +92,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   3.2/3.3, also load-bearing). *Fix candidate:* if `update_segmentation` is ever fed a 2-D buffer once
   features/NN land, use the column count, not the element count.
 
+- **[phase1] GFFT twiddles: Taylor-seed constants + Numerical-Recipes running recurrence**
+  (`features/fft.rs` `sin_series`/`danielson_lanczos`, from `fft.hpp` -- V. Myrnyy, DDJ 2007): the
+  butterfly twiddle factors are NOT `libm sin`/`cos`. Each stage seeds `wpr = -2*Sin(N,1)^2`,
+  `wpi = -Sin(N,2)` where `Sin(B,A)` is a 16-term truncated Taylor series (`SinCosSeries<2,34>`,
+  `S(M) = 1 - ((x*x)/M)/(M+1)*S(M+2)`, base `S(34)=1`), then advances `wr`/`wi` by the NR running
+  recurrence `wr += wr*wpr - wi*wpi; wi += wi*wpr + wtemp*wpi;` which ACCUMULATES rounding error across
+  the loop. In the legacy these are compile-time template constants; the port computes them at runtime
+  with identical f64 operation order (which reproduces gcc strict-mode folding bit-for-bit). A modern
+  port would use precise `sin`/`cos` and a non-accumulating twiddle table -- more accurate, but the
+  goldens are pinned to this exact (lossy) scheme. *Fix candidate:* after end-to-end parity, swap to a
+  precomputed twiddle table using `f64::sin`/`cos`; expect small per-bin numeric drift vs the legacy
+  spectrum. Note the DL<4> base case is a hand-fused `-i` butterfly whose STATEMENT ORDER is
+  load-bearing (ported verbatim), and the scramble is the 1-based NR bit-reversal.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

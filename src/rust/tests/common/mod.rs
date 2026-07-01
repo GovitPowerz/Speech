@@ -1,4 +1,9 @@
 //! Shared test infrastructure for golden-fixture tests (Phase 1+).
+//!
+//! `mod common` is compiled into every integration-test binary, but not every
+//! binary uses every helper (e.g. the FFT golden uses only `load_bin`), so allow
+//! dead code here rather than forcing each test to touch all helpers.
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 

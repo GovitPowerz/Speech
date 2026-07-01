@@ -50,6 +50,19 @@ EXPECTED_SHAPES = {
     "win_hhcw_257.bin": (1, 257),
     "win_conv_norm_7.bin": (1, 7),
     "synth_20x50.bin": (20, 50),
+    "fft_in_4.bin": (1, 8),
+    "fft_out_4.bin": (1, 8),
+    "fft_in_8.bin": (1, 16),
+    "fft_out_8.bin": (1, 16),
+    "fft_in_256.bin": (1, 512),
+    "fft_out_256.bin": (1, 512),
+}
+
+# Verified against legacy/src/BLSTMSpectralSegmenter.cpp:199-203 (clamp is Max-1)
+# with Max=20 from the factory at :598-599. Value 19 (NOT 14); later tasks consume it.
+SPECTRUM_ORDER_CLAMP = {
+    "value": 19,
+    "source": "legacy/src/BLSTMSpectralSegmenter.cpp:199-203 (Max=20 at :598-599)",
 }
 
 
@@ -106,6 +119,7 @@ def main() -> None:
         },
         "dumps": inventory,
         "anchor": anchor,
+        "spectrum_order_clamp": SPECTRUM_ORDER_CLAMP,
     }
 
     manifest_path = FIXTURE_DIR / "manifest.json"

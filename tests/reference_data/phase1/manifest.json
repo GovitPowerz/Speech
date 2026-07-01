@@ -58,6 +58,30 @@
     "synth_20x50.bin": {
       "rows": 20,
       "cols": 50
+    },
+    "fft_in_4.bin": {
+      "rows": 1,
+      "cols": 8
+    },
+    "fft_out_4.bin": {
+      "rows": 1,
+      "cols": 8
+    },
+    "fft_in_8.bin": {
+      "rows": 1,
+      "cols": 16
+    },
+    "fft_out_8.bin": {
+      "rows": 1,
+      "cols": 16
+    },
+    "fft_in_256.bin": {
+      "rows": 1,
+      "cols": 512
+    },
+    "fft_out_256.bin": {
+      "rows": 1,
+      "cols": 512
     }
   },
   "anchor": {
@@ -67,5 +91,9 @@
       0
     ],
     "value_hex": "0x1.809dbda6cf509p-10"
+  },
+  "spectrum_order_clamp": {
+    "value": 19,
+    "source": "legacy/src/BLSTMSpectralSegmenter.cpp:199-203 (Max=20 at :598-599)"
   }
 }
