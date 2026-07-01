@@ -16,8 +16,22 @@
 //! - The deltas-no-DCT output layout is `[delta | delta | delta-delta]`: the
 //!   static log-mel block is OVERWRITTEN by the delta block (`:192-193`).
 //!
-//! DCT state (`nb_dct`, `ignore_first`, `deltas_nb`, `delta_deltas_nb`,
-//! `coeffs_dct`) is stored here but the `apply_dct` consumer lands in Task 7.
+//! Task 7 (`apply_dct`, `MelFilterBank.cpp:218-360`): DCT-II MFCCs + deltas + SDC.
+//! Parity hazards (all load-bearing, golden-tested):
+//! - The DCT product `melPeriodogram * _CoeffsDCT` is the feature path's ONE real
+//!   Eigen GEMM. The mandatory harness pre-check found Eigen's blocked kernel does
+//!   NOT accumulate in ascending order; per the Task 7 brief the product is done as
+//!   an explicit ascending triple loop (`dct_product`), and the goldens are dumped
+//!   with that order. Do NOT swap in a BLAS/`ndarray` `.dot()` -- the order matters.
+//! - SDC (Branch A): the delta uses the n=3 regression kernel REGARDLESS of the
+//!   `deltas_nb < 0` trigger; blocks stack at vertical offset `3*kk` in a
+//!   `(T+21) x 7*nb_dct` scratch, extracted at row `(k*P-1)/2 = 10` -> per-block
+//!   time offsets `{+10,+7,+4,+1,-2,-5,-8}`, zero-padded out of range.
+//! - `ignoreFirst` in SDC clobbers the LAST static column: statics are written
+//!   first, then `rightCols(7*nb_dct)` starting at col `nb_dct-1` overwrites c_{N-1}
+//!   (c0 kept, the last static lost). Port the write order exactly.
+//! - Branch B (`ignoreFirst && deltas_nb >= 0`) computes into a `T x (width+1)`
+//!   temp then drops the FIRST column (static c0 only; delta-of-c0 kept).
 
 use ndarray::Array2;
 
@@ -35,17 +49,14 @@ pub struct MelFilterBank {
     is_log: bool,
     is_mel: bool,
     is_dct_activated: bool,
-    #[allow(dead_code)] // stored for Task 7 apply_dct.
     ignore_first_dct: bool,
     nb_filters: usize,
-    #[allow(dead_code)] // stored for Task 7 apply_dct.
     nb_dct: i32,
     compute_deltas_nb: i32,
     compute_delta_deltas_nb: i32,
     beg_freq: usize,
     index_begin: Vec<usize>,
     coeffs: Vec<Vec<f64>>,
-    #[allow(dead_code)] // stored for Task 7 apply_dct.
     coeffs_dct: Array2<f64>,
 }
 
@@ -203,6 +214,117 @@ impl MelFilterBank {
 
     pub fn is_dct_activated(&self) -> bool {
         self.is_dct_activated
+    }
+
+    /// Output column count of `apply_dct` (getNbDCT, `MelFilterBank.h:45-89`).
+    /// deltas>0: `(dd>0 ? 3 : 2)*nb_dct`, minus 1 if ignoreFirst. deltas<0 (SDC):
+    /// `(ignoreFirst ? nb_dct-1 : nb_dct) + 7*nb_dct`. else: `nb_dct` minus 1 if
+    /// ignoreFirst.
+    pub fn nb_dct(&self) -> usize {
+        let nb = self.nb_dct as usize;
+        if self.compute_deltas_nb > 0 {
+            let mult = if self.compute_delta_deltas_nb > 0 {
+                3
+            } else {
+                2
+            };
+            mult * nb - usize::from(self.ignore_first_dct)
+        } else if self.compute_deltas_nb < 0 {
+            (nb - usize::from(self.ignore_first_dct)) + 7 * nb
+        } else {
+            nb - usize::from(self.ignore_first_dct)
+        }
+    }
+
+    /// Explicit ascending triple-loop `melPeriodogram * _CoeffsDCT`
+    /// (`MelFilterBank.cpp:223` under `EIGEN_DONT_VECTORIZE`, order verified). The
+    /// legacy uses an Eigen GEMM; the harness pre-check proved that GEMM diverges
+    /// from ascending accumulation, so the goldens (and this port) use this order.
+    fn dct_product(&self, mel: &Array2<f64>) -> Array2<f64> {
+        let t = mel.nrows();
+        let n = self.coeffs_dct.nrows();
+        let k = self.coeffs_dct.ncols();
+        let mut out = Array2::<f64>::zeros((t, k));
+        for tt in 0..t {
+            for kk in 0..k {
+                let mut acc = 0.0;
+                for nn in 0..n {
+                    acc += mel[[tt, nn]] * self.coeffs_dct[[nn, kk]];
+                }
+                out[[tt, kk]] = acc;
+            }
+        }
+        out
+    }
+
+    /// Apply the DCT (`applyDCT`, `MelFilterBank.cpp:218-360`). `mel` is the
+    /// `T x nb_filters` log-mel; returns the `T x nb_dct()` MFCC. Three branches:
+    /// Branch A (deltas < 0) = SDC; Branch B (ignoreFirst, deltas >= 0) = drop c0;
+    /// Branch C (!ignoreFirst, deltas >= 0) = statics + `[c|dc|(ddc)]`.
+    pub fn apply_dct(&self, mel: &Array2<f64>) -> Array2<f64> {
+        let t = mel.nrows();
+        let nb = self.nb_dct as usize;
+        let width = self.nb_dct();
+        let mut mfcc = Array2::<f64>::zeros((t, width));
+        let product = self.dct_product(mel); // T x nb
+
+        if self.compute_deltas_nb < 0 {
+            // Branch A - SDC. d=3, P=3, k=7; delta = n=3 kernel REGARDLESS of sign.
+            let (d, p, k) = (3i32, 3usize, 7usize);
+            // Statics written first (leftCols(nb) = product).
+            mfcc.slice_mut(ndarray::s![.., 0..nb]).assign(&product);
+            let mfcc_tmp = regression_deltas(&product, d);
+            // SDC scratch (T + k*P) x (k*nb); block kk at vertical offset kk*P.
+            let mut sdc = Array2::<f64>::zeros((t + k * p, k * nb));
+            for kk in 0..k {
+                for r in 0..t {
+                    for c in 0..nb {
+                        sdc[[kk * p + r, kk * nb + c]] = mfcc_tmp[[r, c]];
+                    }
+                }
+            }
+            // Extract at row (k*P-1)/2 = 10, width k*nb, into rightCols(k*nb). With
+            // ignoreFirst this starts at col nb-1 and clobbers the last static.
+            let start = (k * p - 1) / 2;
+            let col0 = width - k * nb;
+            for r in 0..t {
+                for c in 0..k * nb {
+                    mfcc[[r, col0 + c]] = sdc[[start + r, c]];
+                }
+            }
+        } else if self.ignore_first_dct {
+            // Branch B - ignoreFirst && deltas >= 0. Build a T x (width+1) temp
+            // then drop the FIRST column.
+            let mut tmp = Array2::<f64>::zeros((t, width + 1));
+            if self.compute_deltas_nb > 0 {
+                tmp.slice_mut(ndarray::s![.., 0..nb]).assign(&product);
+                let delta = regression_deltas(&product, self.compute_deltas_nb);
+                tmp.slice_mut(ndarray::s![.., nb..2 * nb]).assign(&delta);
+                if self.compute_delta_deltas_nb > 0 {
+                    let dd = regression_deltas(&delta, self.compute_delta_deltas_nb);
+                    tmp.slice_mut(ndarray::s![.., 2 * nb..3 * nb]).assign(&dd);
+                }
+            } else {
+                // deltas == 0: temp is just the product (T x nb == T x (width+1)).
+                tmp.assign(&product);
+            }
+            // rightCols(width): drop column 0.
+            mfcc.assign(&tmp.slice(ndarray::s![.., 1..width + 1]));
+        } else {
+            // Branch C - !ignoreFirst, deltas >= 0. Statics kept, [c|dc|(ddc)].
+            if self.compute_deltas_nb > 0 {
+                mfcc.slice_mut(ndarray::s![.., 0..nb]).assign(&product);
+                let delta = regression_deltas(&product, self.compute_deltas_nb);
+                mfcc.slice_mut(ndarray::s![.., nb..2 * nb]).assign(&delta);
+                if self.compute_delta_deltas_nb > 0 {
+                    let dd = regression_deltas(&delta, self.compute_delta_deltas_nb);
+                    mfcc.slice_mut(ndarray::s![.., 2 * nb..3 * nb]).assign(&dd);
+                }
+            } else {
+                mfcc.assign(&product);
+            }
+        }
+        mfcc
     }
 
     /// Apply the filterbank. Allocates a zero-initialized `T x nb_filters()`

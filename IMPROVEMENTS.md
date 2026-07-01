@@ -138,6 +138,27 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `empty_filter_collapses_whole_bank_to_passthrough` test). *Fix candidate:* after parity, either clamp
   `nb_bins` to what the resolution supports or drop only the empty filters instead of the whole bank.
 
+- **[phase1] SDC `ignoreFirst` clobbers the LAST static column, not c0** (`features/mel.rs` `apply_dct`
+  Branch A, from `MelFilterBank.cpp:262`): unlike the deltas>=0 `ignoreFirst` path (Branch B) which drops
+  the FIRST static (c0), the SDC path writes the `nb_dct` statics first, then assigns the `7*nb_dct`-wide
+  SDC band into `MFCC.rightCols(7*nb_dct)`. When `ignoreFirst` the output width is `nb_dct-1 + 7*nb_dct`,
+  so `rightCols` starts at column `nb_dct-1` and OVERWRITES the last static (`c_{nb_dct-1}`); c0..c_{nb_dct-2}
+  survive. So the discarded static is the highest-order cepstral coeff, not the energy term -- almost
+  certainly an authoring slip (the width bookkeeping subtracts 1 for "ignore first" but the write order
+  clobbers the last). Pinned by `mfcc_sdc_if_chan1.bin` (c12 == SDC block-0 col-0). *Fix candidate:* after
+  parity, either genuinely drop c0 (shift the SDC write right by one) or keep all statics; retrain-affecting.
+
+- **[phase1] DCT `melPeriodogram*_CoeffsDCT` Eigen GEMM replaced by an explicit ascending triple loop**
+  (`features/mel.rs` `apply_dct`/`dct_product`, from `MelFilterBank.cpp:223` etc.): the legacy computes the
+  DCT projection as an Eigen matrix-matrix product on the full `T x nb_filters` log-mel. The mandatory
+  Task-7 harness pre-check (Eigen GEMM vs `for t / for k / accumulate over n ascending`) DIVERGED: Eigen's
+  blocked `gebp` kernel does not accumulate in ascending order even under `-DEIGEN_DONT_VECTORIZE`
+  `-ffp-contract=off` (e.g. `E(0,0)` bits `...e6ea` vs ascending `...e6ec`; ~1500/2613 elements differ on
+  the 201x29 * 29x13 product). Per the brief the product is done as the explicit ascending triple loop, and
+  the goldens are dumped with THAT order (harness `dctProduct`), because Eigen's GEMM order is not portable
+  across BLAS/arch/Eigen versions. Recorded in `manifest.json:dct_gemm_substitution`. *Fix candidate:* none
+  -- the ascending loop is the deliberate portable parity target; do NOT swap in a BLAS `.dot()`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

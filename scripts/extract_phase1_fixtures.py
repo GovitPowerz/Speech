@@ -73,6 +73,32 @@ EXPECTED_SHAPES = {
     "logmel_deltas_chan1.bin": (201, 87),
     "mel_26_chan1.bin": (201, 29),
     "logmel_synth.bin": (20, 29),
+    # DCT / MFCC / deltas / SDC dumps (Task 7). All from the chan-1 log-mel (T=201,
+    # F=29) with nb_dct=13. Widths follow getNbDCT (MelFilterBank.h:45-89): plain
+    # 13; +deltas(3)+dd(3) 39; +ignoreFirst 38 (drops c0); SDC 13+7*13=104; SDC
+    # +ignoreFirst 12+7*13=103 (the SDC col 0 clobbers the last static c12).
+    "mfcc_chan1.bin": (201, 13),
+    "mfcc_deltas_chan1.bin": (201, 39),
+    "mfcc_deltas_if_chan1.bin": (201, 38),
+    "mfcc_sdc_chan1.bin": (201, 104),
+    "mfcc_sdc_if_chan1.bin": (201, 103),
+}
+
+# The DCT matrix product melPeriodogram*_CoeffsDCT is the feature path's one real
+# Eigen GEMM. The mandatory in-harness pre-check (Eigen GEMM vs explicit ascending
+# triple loop) DIVERGED - Eigen's blocked gebp kernel does not accumulate in plain
+# ascending order (E(0,0) bits ...e6ea vs loop ...e6ec; ~1500/2613 elements differ
+# on the 201x29 * 29x13 product). Per the Task 7 brief the Eigen product is replaced
+# by the explicit ascending triple loop (the portable/deterministic parity target
+# the Rust apply_dct reproduces), so the DCT dumps are produced by the harness's
+# applyDCTLoop, NOT the legacy mel.applyDCT.
+DCT_GEMM_SUBSTITUTION = {
+    "product": "melPeriodogram * _CoeffsDCT",
+    "legacy_source": "legacy/src/MelFilterBank.cpp:223,267,309,314,356",
+    "precheck": "Eigen GEMM vs explicit ascending triple loop",
+    "outcome": "DIVERGE",
+    "example": {"index": [0, 0], "eigen_bits": "c07a4614c6dfe6ea", "loop_bits": "c07a4614c6dfe6ec"},
+    "resolution": "replaced Eigen product with ascending triple loop (dctProduct in main.cpp)",
 }
 
 # Periodogram framing params + odd-variant end (kept in sync with main.cpp). The
@@ -152,6 +178,7 @@ def main() -> None:
         "anchor": anchor,
         "spectrum_order_clamp": SPECTRUM_ORDER_CLAMP,
         "periodogram": PERIODOGRAM,
+        "dct_gemm_substitution": DCT_GEMM_SUBSTITUTION,
     }
 
     manifest_path = FIXTURE_DIR / "manifest.json"

@@ -24,6 +24,25 @@ fn bank(spectrum: usize, is_log: bool, deltas: i32, dd: i32) -> MelFilterBank {
     )
 }
 
+/// DCT-active bank mirroring the harness Task 7 config (nb_dct=13), parameterized
+/// on the ignoreFirst / deltas / delta-delta toggles that vary across the DCT dumps.
+fn dct_bank(ignore_first: bool, deltas: i32, dd: i32) -> MelFilterBank {
+    MelFilterBank::new(
+        64.0,
+        3800.0,
+        26,
+        64.0,
+        3800.0,
+        8000.0,
+        128,
+        true,
+        13,
+        ignore_first,
+        deltas,
+        dd,
+    )
+}
+
 #[test]
 fn logmel_26_chan1_bitexact() {
     let perio = common::load_bin("perio_p8_s80_chan1.bin");
@@ -218,4 +237,208 @@ fn regression_deltas_oracle_cross_check_bit_exact() {
             );
         }
     }
+}
+
+// --- Task 7: apply_dct golden tests ---------------------------------------
+//
+// All five DCT dumps feed the SAME chan-1 log-mel (a DCT-active bank still emits
+// plain log-mel from apply_filter_bank, so logmel_26_chan1.bin is that input).
+// The harness product is the explicit ascending triple loop (Eigen GEMM diverged
+// in the mandatory pre-check); apply_dct reproduces that order bit-for-bit.
+
+fn logmel_input() -> Array2<f64> {
+    // Identical to logmel_26_chan1 (bank with nb_dct=13 emits plain log-mel).
+    let perio = common::load_bin("perio_p8_s80_chan1.bin");
+    dct_bank(false, 0, 0).apply_filter_bank(&perio)
+}
+
+#[test]
+fn mfcc_chan1_bitexact() {
+    let got = dct_bank(false, 0, 0).apply_dct(&logmel_input());
+    let want = common::load_bin("mfcc_chan1.bin");
+    common::assert_bits_eq(&got, &want, "mfcc_chan1");
+}
+
+#[test]
+fn mfcc_deltas_chan1_bitexact() {
+    let got = dct_bank(false, 3, 3).apply_dct(&logmel_input());
+    let want = common::load_bin("mfcc_deltas_chan1.bin");
+    common::assert_bits_eq(&got, &want, "mfcc_deltas_chan1");
+}
+
+#[test]
+fn mfcc_deltas_if_chan1_bitexact() {
+    let got = dct_bank(true, 3, 3).apply_dct(&logmel_input());
+    let want = common::load_bin("mfcc_deltas_if_chan1.bin");
+    common::assert_bits_eq(&got, &want, "mfcc_deltas_if_chan1");
+}
+
+#[test]
+fn mfcc_sdc_chan1_bitexact() {
+    let got = dct_bank(false, -1, 0).apply_dct(&logmel_input());
+    let want = common::load_bin("mfcc_sdc_chan1.bin");
+    common::assert_bits_eq(&got, &want, "mfcc_sdc_chan1");
+}
+
+#[test]
+fn mfcc_sdc_if_chan1_bitexact() {
+    // Pins the ignoreFirst clobber: SDC col 0 overwrites the LAST static (c12).
+    let got = dct_bank(true, -1, 0).apply_dct(&logmel_input());
+    let want = common::load_bin("mfcc_sdc_if_chan1.bin");
+    common::assert_bits_eq(&got, &want, "mfcc_sdc_if_chan1");
+}
+
+// --- Task 7: unit tests ---------------------------------------------------
+
+#[test]
+fn dct_matrix_entry_formula_sample() {
+    // The DCT table is built as cos(PI/nb_filters*(col+0.5)*row). With nb_dct=13 <
+    // nb_filters=29 the table is 29 x 13. apply_dct on a one-hot log-mel row (frame
+    // 0, filter n) with deltas=0/dd=0/!ignoreFirst yields out[0][k] == coeff(n,k),
+    // so we can read table entries straight out of the plain-MFCC path.
+    let fb = dct_bank(false, 0, 0);
+    let nb_filters = 29usize;
+    let pi = std::f64::consts::PI;
+    for &(n, k) in &[(0usize, 0usize), (0, 5), (7, 3), (28, 12), (13, 7), (28, 0)] {
+        let mut logmel = Array2::<f64>::zeros((1, nb_filters));
+        logmel[[0, n]] = 1.0;
+        let mfcc = fb.apply_dct(&logmel);
+        let expect = (pi / nb_filters as f64 * (n as f64 + 0.5) * k as f64).cos();
+        assert_eq!(
+            mfcc[[0, k]].to_bits(),
+            expect.to_bits(),
+            "coeff({n},{k}): got 0x{:016x} want 0x{:016x}",
+            mfcc[[0, k]].to_bits(),
+            expect.to_bits()
+        );
+    }
+}
+
+#[test]
+fn nb_dct_width_table() {
+    // getNbDCT (MelFilterBank.h:45-89) across all deltas/dd/ignoreFirst combos, with
+    // nb_dct=13. (ignore_first, deltas, dd) -> expected width.
+    let cases: &[(bool, i32, i32, usize)] = &[
+        // deltas == 0: nb_dct, minus 1 if ignoreFirst.
+        (false, 0, 0, 13),
+        (true, 0, 0, 12),
+        // deltas > 0, dd == 0: 2*nb_dct, minus 1 if ignoreFirst.
+        (false, 3, 0, 26),
+        (true, 3, 0, 25),
+        // deltas > 0, dd > 0: 3*nb_dct, minus 1 if ignoreFirst.
+        (false, 3, 3, 39),
+        (true, 3, 3, 38),
+        // deltas < 0 (SDC): (nb_dct or nb_dct-1) + 7*nb_dct.
+        (false, -1, 0, 13 + 7 * 13),
+        (true, -1, 0, 12 + 7 * 13),
+    ];
+    for &(ig, d, dd, expect) in cases {
+        assert_eq!(
+            dct_bank(ig, d, dd).nb_dct(),
+            expect,
+            "nb_dct(ignore_first={ig}, deltas={d}, dd={dd})"
+        );
+    }
+}
+
+#[test]
+fn sdc_offset_structure_on_ramp() {
+    // Synthetic log-mel ramp (T x 29). Run the SDC path, then assert each 13-wide
+    // block kk (kk in 0..7) equals the n=3 delta D shifted by +10-3*kk, ZERO-padded
+    // out of range. D is computed via the shared regression_deltas on the statics.
+    let t = 25usize;
+    let nb_filters = 29usize;
+    let nb_dct = 13usize;
+    let k = 7usize;
+    let mut logmel = Array2::<f64>::zeros((t, nb_filters));
+    for i in 0..t {
+        for j in 0..nb_filters {
+            logmel[[i, j]] = ((i * 7 + j * 13) % 100) as f64 / 100.0;
+        }
+    }
+    let fb = dct_bank(false, -1, 0);
+    let sdc = fb.apply_dct(&logmel); // (t, 13 + 7*13)
+    // statics = first nb_dct cols; D = n=3 delta of statics.
+    let statics = sdc.slice(ndarray::s![.., 0..nb_dct]).to_owned();
+    let d = regression_deltas(&statics, 3);
+    for kk in 0..k {
+        for tt in 0..t {
+            let src = tt as isize + 10 - 3 * kk as isize;
+            for c in 0..nb_dct {
+                let got = sdc[[tt, nb_dct + kk * nb_dct + c]];
+                let want = if src >= 0 && (src as usize) < t {
+                    d[[src as usize, c]]
+                } else {
+                    0.0
+                };
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "SDC block {kk} t={tt} col{c}: src={src} got 0x{:016x} want 0x{:016x}",
+                    got.to_bits(),
+                    want.to_bits()
+                );
+            }
+        }
+    }
+}
+
+// --- Task 7: sdc_oracle Rust == Python cross-check ------------------------
+
+#[derive(Deserialize)]
+struct SdcCase {
+    mfcc: Vec<Vec<f64>>,
+    nb_dct: usize,
+    expected: Vec<Vec<f64>>,
+}
+
+#[test]
+fn sdc_oracle_cross_check_bit_exact() {
+    // The Python sdc_oracle stacks the n=3-kernel deltas with zero-padded shifts.
+    // Our SDC is the tail of apply_dct: we reproduce just the SDC stacking here by
+    // feeding an MFCC directly as "statics" through the SDC math via regression_
+    // deltas + the +10-3*kk offset, and cross-check against the oracle JSON.
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase1/sdc_cases.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let cases: Vec<SdcCase> = serde_json::from_str(&text).unwrap();
+    assert!(cases.len() >= 4, "expected >= 4 cases, got {}", cases.len());
+
+    for (idx, case) in cases.iter().enumerate() {
+        let mfcc = to_array(&case.mfcc);
+        let expected = to_array(&case.expected);
+        let got = sdc_from_mfcc(&mfcc, case.nb_dct);
+        assert_eq!(got.shape(), expected.shape(), "sdc case {idx}: shape");
+        for ((i, gv), ev) in got.indexed_iter().zip(expected.iter()) {
+            assert_eq!(
+                gv.to_bits(),
+                ev.to_bits(),
+                "sdc case {idx} at {i:?}: rust=0x{:016x} ({gv}) py=0x{:016x} ({ev})",
+                gv.to_bits(),
+                ev.to_bits()
+            );
+        }
+    }
+}
+
+/// The SDC stacking in isolation (matches the Python `sdc_oracle`): from an MFCC
+/// (statics), form the n=3 delta then place block kk at time offset +10-3*kk,
+/// zero-padded. Output is `T x 7*nb_dct`. This is the SDC-block portion of the
+/// legacy applyDCT Branch A (without the leading statics or the ignoreFirst clobber).
+fn sdc_from_mfcc(mfcc: &Array2<f64>, nb_dct: usize) -> Array2<f64> {
+    let t = mfcc.nrows();
+    let k = 7usize;
+    let d = regression_deltas(mfcc, 3);
+    let mut out = Array2::<f64>::zeros((t, k * nb_dct));
+    for kk in 0..k {
+        for tt in 0..t {
+            let src = tt as isize + 10 - 3 * kk as isize;
+            if src >= 0 && (src as usize) < t {
+                for c in 0..nb_dct {
+                    out[[tt, kk * nb_dct + c]] = d[[src as usize, c]];
+                }
+            }
+        }
+    }
+    out
 }

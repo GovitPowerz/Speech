@@ -126,6 +126,26 @@
     "logmel_synth.bin": {
       "rows": 20,
       "cols": 29
+    },
+    "mfcc_chan1.bin": {
+      "rows": 201,
+      "cols": 13
+    },
+    "mfcc_deltas_chan1.bin": {
+      "rows": 201,
+      "cols": 39
+    },
+    "mfcc_deltas_if_chan1.bin": {
+      "rows": 201,
+      "cols": 38
+    },
+    "mfcc_sdc_chan1.bin": {
+      "rows": 201,
+      "cols": 104
+    },
+    "mfcc_sdc_if_chan1.bin": {
+      "rows": 201,
+      "cols": 103
     }
   },
   "anchor": {
@@ -150,5 +170,20 @@
     "end_full": 16000,
     "perio_odd_end": 399,
     "perio_odd_frame_nb": 5
+  },
+  "dct_gemm_substitution": {
+    "product": "melPeriodogram * _CoeffsDCT",
+    "legacy_source": "legacy/src/MelFilterBank.cpp:223,267,309,314,356",
+    "precheck": "Eigen GEMM vs explicit ascending triple loop",
+    "outcome": "DIVERGE",
+    "example": {
+      "index": [
+        0,
+        0
+      ],
+      "eigen_bits": "c07a4614c6dfe6ea",
+      "loop_bits": "c07a4614c6dfe6ec"
+    },
+    "resolution": "replaced Eigen product with ascending triple loop (dctProduct in main.cpp)"
   }
 }

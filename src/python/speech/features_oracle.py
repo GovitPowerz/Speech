@@ -32,3 +32,27 @@ def regression_deltas_oracle(base: NDArray[np.float64], n: int) -> NDArray[np.fl
         acc += j * (plus - minus)
         denom += j * j
     return acc / (2.0 * denom)
+
+
+def sdc_oracle(mfcc: NDArray[np.float64], nb_dct: int) -> NDArray[np.float64]:
+    """Shifted-Delta-Cepstra block portion (legacy applyDCT Branch A stacking).
+
+    Independent coding of the SDC scratch-and-extract in MelFilterBank.cpp:224-262:
+    the delta of the statics (n=3 regression kernel, adim 28) is stacked k=7 times
+    into a (T + k*P) x (k*nb_dct) scratch at vertical offset kk*P (P=3), then the
+    block starting at row (k*P-1)/2 = 10 is extracted. This yields the SDC band ONLY
+    (T x 7*nb_dct); the leading statics and the ignoreFirst clobber are the caller's
+    concern. Out of the extraction window the scratch is zero, so those cells are 0.
+
+    The Rust cross-check (phase1_mel_golden.rs) reproduces this via the closed-form
+    per-block time offset out[t, block kk] = D[t + 10 - 3*kk] (zero-padded); this
+    scratch-based coding is the independent arbiter.
+    """
+    t = mfcc.shape[0]
+    d, p, k = 3, 3, 7
+    delta = regression_deltas_oracle(mfcc[:, :nb_dct], d)  # T x nb_dct
+    scratch = np.zeros((t + k * p, k * nb_dct))
+    for kk in range(k):
+        scratch[kk * p : kk * p + t, kk * nb_dct : (kk + 1) * nb_dct] = delta
+    start = (k * p - 1) // 2  # 10
+    return scratch[start : start + t, :].copy()

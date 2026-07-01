@@ -9,6 +9,8 @@
 // Usage: ./oracle_harness <output_dir>
 // Later phase-1 tasks append stages to this single file.
 
+#include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -30,6 +32,125 @@ static const long PERIO_SHIFT = 80;      // window_shift
 // Odd-frame-count variant: end chosen so frameNb = ceil((end-begin+1)/shift) is odd.
 // begin=0, end=399 -> (399-0+1)/80 = 5 exactly -> frameNb=5 (odd). Asserted below.
 static const long long PERIO_ODD_END = 399;
+
+// Explicit ascending triple-loop replacement for melPeriodogram*_CoeffsDCT.
+// legacy semantics: MelFilterBank.cpp:223 under EIGEN_DONT_VECTORIZE, order verified
+// (the Eigen GEMM diverges from ascending accumulation; the pre-check aborted, so
+// this deterministic order is the parity target the Rust port reproduces).
+static Eigen::MatrixXd dctProduct(const Eigen::MatrixXd& mel, const Eigen::MatrixXd& coeffs) {
+    const int T = static_cast<int>(mel.rows());
+    const int N = static_cast<int>(coeffs.rows());
+    const int K = static_cast<int>(coeffs.cols());
+    Eigen::MatrixXd out = Eigen::MatrixXd::Zero(T, K);
+    for (int t = 0; t < T; ++t) {
+        for (int kk = 0; kk < K; ++kk) {
+            double acc = 0.0;
+            for (int n = 0; n < N; ++n) {
+                acc += mel(t, n) * coeffs(n, kk);
+            }
+            out(t, kk) = acc;
+        }
+    }
+    return out;
+}
+
+// Shared regression-deltas kernel over a T x nbDCT block (MelFilterBank.cpp:227-244
+// / 269-286 / 316-333). Faithful block-op port; used by applyDCTLoop for both the
+// SDC delta and the delta/delta-delta bands.
+static Eigen::MatrixXd regressionDeltas(const Eigen::MatrixXd& base, int n) {
+    const int T = static_cast<int>(base.rows());
+    const int F = static_cast<int>(base.cols());
+    Eigen::MatrixXd acc = Eigen::MatrixXd::Zero(T, F);
+    double adim = 0.0;
+    for (int jj = 1; jj <= n; ++jj) {
+        Eigen::MatrixXd deltas = Eigen::MatrixXd::Zero(T, F);
+        int length = jj;
+        if (length > T) {
+            length = T;
+        } else {
+            for (int r = 0; r < T - length; ++r)
+                for (int c = 0; c < F; ++c) deltas(r, c) = base(r + length, c);
+            for (int r = length; r < T; ++r)
+                for (int c = 0; c < F; ++c) deltas(r, c) -= base(r - length, c);
+        }
+        for (int kk = 0; kk < length; ++kk) {
+            for (int c = 0; c < F; ++c) {
+                deltas(kk, c) -= base(0, c);
+                deltas(T - 1 - kk, c) += base(T - 1, c);
+            }
+        }
+        adim += static_cast<double>(jj * jj);
+        acc.noalias() += static_cast<double>(jj) * deltas;
+    }
+    adim *= 2.0;
+    acc /= adim;
+    return acc;
+}
+
+// Faithful branch-for-branch port of MelFilterBank::applyDCT (MelFilterBank.cpp:
+// 218-360) with the one Eigen product replaced by dctProduct (ascending triple
+// loop). Returns the T x getNbDCT() MFCC matrix (caller-sized + zero-initialized
+// in the legacy; here allocated to the same width and zeroed).
+static Eigen::MatrixXd applyDCTLoop(const Eigen::MatrixXd& mel, const Eigen::MatrixXd& coeffs,
+                                    int nbDCT, bool ignoreFirst, int deltasNb, int ddNb) {
+    const int T = static_cast<int>(mel.rows());
+    // Output width = getNbDCT() (MelFilterBank.h:45-89).
+    int width;
+    if (deltasNb > 0) {
+        int mult = (ddNb > 0) ? 3 : 2;
+        width = mult * nbDCT - (ignoreFirst ? 1 : 0);
+    } else if (deltasNb < 0) {
+        width = (ignoreFirst ? nbDCT - 1 : nbDCT) + 7 * nbDCT;
+    } else {
+        width = ignoreFirst ? nbDCT - 1 : nbDCT;
+    }
+    Eigen::MatrixXd MFCC = Eigen::MatrixXd::Zero(T, width);
+    Eigen::MatrixXd product = dctProduct(mel, coeffs);  // T x nbDCT
+
+    if (deltasNb < 0) {
+        // Branch A - SDC. d=3, P=3, k=7; delta kernel n=3 (adim 28) REGARDLESS.
+        const int d = 3, P = 3, k = 7;
+        MFCC.leftCols(nbDCT) = product;  // statics written first
+        Eigen::MatrixXd MFCCtmp = regressionDeltas(MFCC.leftCols(nbDCT), d);
+        Eigen::MatrixXd SDC = Eigen::MatrixXd::Zero(T + k * P, k * nbDCT);
+        for (int kk = 0; kk < k; ++kk) {
+            SDC.block(kk * P, kk * nbDCT, MFCCtmp.rows(), MFCCtmp.cols()) = MFCCtmp;
+        }
+        // extract at row (k*P-1)/2 = 10; rightCols(SDC.cols()) overwrites col
+        // nbDCT-1 (the LAST static) when ignoreFirst (width = 12 + 7*13).
+        MFCC.rightCols(SDC.cols()) = SDC.block((k * P - 1) / 2, 0, MFCCtmp.rows(), SDC.cols());
+    } else if (ignoreFirst) {
+        // Branch B - ignoreFirst && deltasNb >= 0. Compute into T x (width+1) temp,
+        // then drop the FIRST column.
+        Eigen::MatrixXd MFCCtmp = Eigen::MatrixXd::Zero(T, width + 1);
+        if (deltasNb > 0) {
+            MFCCtmp.leftCols(nbDCT) = product;
+            MFCCtmp.leftCols(2 * nbDCT).rightCols(nbDCT) =
+                regressionDeltas(MFCCtmp.leftCols(nbDCT), deltasNb);
+            if (ddNb > 0) {
+                MFCCtmp.rightCols(nbDCT) =
+                    regressionDeltas(MFCCtmp.rightCols(2 * nbDCT).leftCols(nbDCT), ddNb);
+            }
+        } else {
+            MFCCtmp = product;  // plain assignment resizes to T x nbDCT
+        }
+        MFCC = MFCCtmp.rightCols(width);
+    } else {
+        // Branch C - !ignoreFirst, deltasNb >= 0. Statics kept, [c|dc|(ddc)].
+        if (deltasNb > 0) {
+            MFCC.leftCols(nbDCT) = product;
+            MFCC.leftCols(2 * nbDCT).rightCols(nbDCT) =
+                regressionDeltas(MFCC.leftCols(nbDCT), deltasNb);
+            if (ddNb > 0) {
+                MFCC.rightCols(nbDCT) =
+                    regressionDeltas(MFCC.rightCols(2 * nbDCT).leftCols(nbDCT), ddNb);
+            }
+        } else {
+            MFCC = product;
+        }
+    }
+    return MFCC;
+}
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -268,6 +389,77 @@ int main(int argc, char** argv) {
             Eigen::MatrixXd outm = Eigen::MatrixXd::Zero(synth.rows(), mel.getNbFilters());
             mel.applyFilterBank(synth, outm);
             Matrix2BinaryFile(out + "logmel_synth.bin", outm);
+            ++dumps;
+        }
+
+        // --- DCT / MFCC / deltas / SDC (Task 7) ------------------------------
+        // legacy: MelFilterBank.cpp:218-360 (applyDCT, three branches) + the DCT
+        // table at :108-127. All five dumps run applyFilterBank on the SAME chan-1
+        // periodogram with a DCT-active bank (nb_dct=13 < 29 filters, no clamp) ->
+        // plain log-mel T x 29 (the DCT params do NOT touch applyFilterBank), then
+        // the DCT into T x getNbDCT().
+        //
+        // GEMM PRE-CHECK OUTCOME (mandatory step, MelFilterBank.cpp:223): the
+        // legacy applyDCT computes melPeriodogram*_CoeffsDCT as an Eigen GEMM
+        // (201x29 * 29x13). Comparing that Eigen GEMM against the explicit ascending
+        // triple loop ABORTED - they diverge (Eigen's blocked gebp kernel does not
+        // accumulate in plain ascending order; e.g. E(0,0) bits ...e6ea vs loop
+        // ...e6ec, and ~1500/2613 elements differ). Per the brief, the Eigen product
+        // is therefore REPLACED by the explicit ascending triple loop, which is the
+        // portable/deterministic parity target the Rust apply_dct reproduces. The
+        // substitution is recorded in the manifest (dct_gemm_substitution). The dumps
+        // below are produced by applyDCTLoop (a faithful branch-for-branch port of
+        // MelFilterBank.cpp:218-360 with that one product swapped), NOT by the legacy
+        // mel.applyDCT, because the legacy would bake in the non-portable Eigen order.
+        {
+            MelFilterBank melLog(64.0, 3800.0, 26, 64.0, 3800.0, 8000.0, 128, true, 13, false, 0, 0);
+            Eigen::MatrixXd logmel = Eigen::MatrixXd::Zero(perio.rows(), melLog.getNbFilters());
+            melLog.applyFilterBank(perio, logmel);
+
+            // Reconstruct _CoeffsDCT with the exact ctor formula (cannot reach the
+            // private member without editing legacy/): 29 x 13, PI = _PI literal.
+            const int NB_FILTERS = 29;
+            const int NB_DCT = 13;
+            const double PI = 3.14159265358979323846264338327;  // legacy _PI (Constants.h:15)
+            Eigen::MatrixXd coeffs = Eigen::MatrixXd::Zero(NB_FILTERS, NB_DCT);
+            for (int col = 0; col < NB_FILTERS; ++col) {
+                for (int row = 0; row < NB_DCT; ++row) {
+                    coeffs(col, row) = std::cos(PI / NB_FILTERS * (col + 0.5) * row);
+                }
+            }
+
+            // Emit the demonstrated GEMM divergence to stdout for the record.
+            {
+                Eigen::MatrixXd eig = logmel * coeffs;
+                double loop00 = 0.0;
+                for (int n = 0; n < NB_FILTERS; ++n) loop00 += logmel(0, n) * coeffs(n, 0);
+                std::cout << "GEMM check: Eigen(0,0)=" << eig(0, 0)
+                          << " triple-loop(0,0)=" << loop00
+                          << (eig(0, 0) == loop00 ? " MATCH" : " DIVERGE -> using triple loop")
+                          << "\n";
+            }
+
+            // (a) plain MFCC: deltas 0, dd 0, ignoreFirst false -> T x 13.
+            Matrix2BinaryFile(out + "mfcc_chan1.bin",
+                              applyDCTLoop(logmel, coeffs, NB_DCT, false, 0, 0));
+            ++dumps;
+            // (b) MFCC + deltas(3) + dd(3), ignoreFirst false -> T x 39 ([c|dc|ddc]).
+            Matrix2BinaryFile(out + "mfcc_deltas_chan1.bin",
+                              applyDCTLoop(logmel, coeffs, NB_DCT, false, 3, 3));
+            ++dumps;
+            // (c) MFCC + deltas(3) + dd(3), ignoreFirst TRUE -> T x 38 (drops c0).
+            Matrix2BinaryFile(out + "mfcc_deltas_if_chan1.bin",
+                              applyDCTLoop(logmel, coeffs, NB_DCT, true, 3, 3));
+            ++dumps;
+            // (d) SDC: deltas -1, dd 0, ignoreFirst false -> T x (13 + 7*13) = 104.
+            Matrix2BinaryFile(out + "mfcc_sdc_chan1.bin",
+                              applyDCTLoop(logmel, coeffs, NB_DCT, false, -1, 0));
+            ++dumps;
+            // (e) SDC + ignoreFirst -> T x (12 + 7*13) = 103. Pins the c_{N-1}
+            // clobber: statics written first, then SDC col 0 overwrites the LAST
+            // static column via rightCols(7*nb_dct) starting at col nb_dct-1.
+            Matrix2BinaryFile(out + "mfcc_sdc_if_chan1.bin",
+                              applyDCTLoop(logmel, coeffs, NB_DCT, true, -1, 0));
             ++dumps;
         }
     }
