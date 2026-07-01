@@ -106,6 +106,38 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   spectrum. Note the DL<4> base case is a hand-fused `-i` butterfly whose STATEMENT ORDER is
   load-bearing (ported verbatim), and the scramble is the 1-based NR bit-reversal.
 
+- **[phase1] Mel deltas-no-DCT output is `[delta | delta | delta-delta]`, static log-mel OVERWRITTEN**
+  (`features/mel.rs` `apply_deltas_overwrite`, from `MelFilterBank.cpp:192-193`): when `!DCT &&
+  deltasNb > 0`, after computing the delta block (cols `[F,2F)`) and delta-delta block (cols `[2F,3F)`),
+  the final two statements do `melPeriodogram = MFCC;` then `melPeriodogram.leftCols(F) =
+  MFCC.leftCols(2F).rightCols(F)` -- i.e. the static log-mel block (cols `[0,F)`) is CLOBBERED by a copy
+  of the delta block, so the emitted layout is `[delta | delta | delta-delta]`, not
+  `[static | delta | delta-delta]`. Almost certainly an off-by-one authoring slip (the static features
+  are silently discarded), but it is the golden contract (pinned by `logmel_deltas_chan1.bin`). *Fix
+  candidate:* after end-to-end parity, keep the static block (`[static | delta | delta-delta]`); expect
+  the NN input dimensionality to be unchanged but the first `F` columns to carry different (real static)
+  values -- a retrain-affecting change.
+
+- **[phase1] Mel `adim` denominator includes the clamped `j` when `T <= j`** (`features/mel.rs`
+  `regression_deltas`, from `MelFilterBank.cpp:153-170`): the regression-deltas normalizer `adim += j*j`
+  runs for every `j` in `1..=n` EVEN when `j > T` (rows) and the shifted-difference copy is skipped
+  (`length = min(j, T)`). So on short segments the denominator `2*sum j^2` counts terms whose shifted
+  contribution is fully edge-clamped rather than a true `t+/-j` difference. Reproduced exactly (the
+  clamped closed form `D[t] = sum_j j*(B[min(t+j,T-1)] - B[max(t-j,0)]) / (2 sum j^2)` matches the
+  block-op sequence bit-for-bit, verified against the numpy oracle across `T<=n` shapes). *Fix
+  candidate:* none needed numerically; the behavior is self-consistent. Flagged only because it is a
+  non-obvious edge that a naive re-derivation (denominator over unclamped active `j` only) would get
+  wrong.
+
+- **[phase1] Mel whole-bank fallback: ANY empty filter collapses the ENTIRE bank to raw-band
+  pass-through** (`features/mel.rs` `new`, from `MelFilterBank.cpp:92-103`): if a single triangle
+  collects zero periodogram bins (`nb_bins` too large for the spectrum resolution), the ctor sets
+  `_IsMel = false` and `_NbFilters = _EndFreq - _BegFreq + 1` -- the mel projection is abandoned for the
+  whole bank and `applyFilterBank` falls to a raw-band copy/log. The partially built `_IndexBegin` /
+  `_Coeffs` are retained but never used. Reproduced faithfully (pinned by the
+  `empty_filter_collapses_whole_bank_to_passthrough` test). *Fix candidate:* after parity, either clamp
+  `nb_bins` to what the resolution supports or drop only the empty filters instead of the whole bank.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

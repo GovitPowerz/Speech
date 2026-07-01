@@ -201,6 +201,77 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- Mel filterbank + log-mel + regression deltas ------------------------
+    // legacy: MelFilterBank.cpp:17-216 (ctor grid walks + triangle coeffs +
+    // whole-bank fallback; applyFilterBank log/mel branches + the deltas-no-DCT
+    // [delta|delta|dd] overwrite quirk at :192-193). Ctor args mirror a real SAD
+    // spectral config: (minMel 64, maxMel 3800, nb_bins 26, minFreq 64, maxFreq
+    // 3800, rate 8000, spectrum_size 128, ...). spectrum_size 128 -> 129 bins;
+    // the caller snaps _BegFreq/_EndFreq via floor/ceil and the triangles yield
+    // 29 mel filters (NOT 26). applyFilterBank writes into a caller-sized,
+    // zero-initialized output (Eigen setZero + apply semantics).
+    {
+        // Recompute the full chan-1 periodogram (the odd variant above left a
+        // 5-row buffer in audio._Periodogram); snapshot it into a local matrix.
+        const unsigned Min = 1;
+        const unsigned Max = 20;
+        Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+        FactoryInit<GFFTList<GFFT, Min, Max>::Result>::apply(gfft_factory);
+        MelFilterBank emptyMel;
+        Eigen::MatrixXd win = getWindowingCoefficients("hamming", false, 257, 0.83333);
+        Eigen::MatrixXd noConv;
+        const long long endFull = audio.getFrameCount() - 1;
+        audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 0, true, win,
+                                                 emptyMel, gfft_factory, noConv, 0, endFull);
+        Eigen::MatrixXd perio = audio._Periodogram;  // 201 x 129
+
+        // log + mel, no DCT, no deltas -> 201 x 29.
+        {
+            MelFilterBank mel(64.0, 3800.0, 26, 64.0, 3800.0, 8000.0, 128, true, 0, false, 0, 0);
+            Eigen::MatrixXd outm = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+            mel.applyFilterBank(perio, outm);
+            Matrix2BinaryFile(out + "logmel_26_chan1.bin", outm);
+            ++dumps;
+        }
+
+        // log + mel + deltas(3) + delta-deltas(3), no DCT -> 201 x 87. Pins the
+        // [delta|delta|delta-delta] overwrite quirk (the static log-mel block is
+        // clobbered by the delta block) from MelFilterBank.cpp:192-193.
+        {
+            MelFilterBank mel(64.0, 3800.0, 26, 64.0, 3800.0, 8000.0, 128, true, 0, false, 3, 3);
+            Eigen::MatrixXd outm = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+            mel.applyFilterBank(perio, outm);
+            Matrix2BinaryFile(out + "logmel_deltas_chan1.bin", outm);
+            ++dumps;
+        }
+
+        // non-log + mel, no DCT, no deltas -> 201 x 29 (plain triangle dots).
+        {
+            MelFilterBank mel(64.0, 3800.0, 26, 64.0, 3800.0, 8000.0, 128, false, 0, false, 0, 0);
+            Eigen::MatrixXd outm = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+            mel.applyFilterBank(perio, outm);
+            Matrix2BinaryFile(out + "mel_26_chan1.bin", outm);
+            ++dumps;
+        }
+
+        // The synthetic 20x50 matrix reinterpreted as a 20-frame periodogram with
+        // rate 8000, spectrum_size 49 (-> freqStep 81.632...). log + mel, no DCT,
+        // no deltas -> 20 x 29. Pins the grid walk on a second (rational) freqStep.
+        {
+            Eigen::MatrixXd synth(20, 50);
+            for (int i = 0; i < 20; ++i) {
+                for (int j = 0; j < 50; ++j) {
+                    synth(i, j) = ((i * 7 + j * 13) % 100) / 100.0;
+                }
+            }
+            MelFilterBank mel(64.0, 3800.0, 26, 64.0, 3800.0, 8000.0, 49, true, 0, false, 0, 0);
+            Eigen::MatrixXd outm = Eigen::MatrixXd::Zero(synth.rows(), mel.getNbFilters());
+            mel.applyFilterBank(synth, outm);
+            Matrix2BinaryFile(out + "logmel_synth.bin", outm);
+            ++dumps;
+        }
+    }
+
     std::cout << "OK: " << dumps << " dumps\n";
     return 0;
 }

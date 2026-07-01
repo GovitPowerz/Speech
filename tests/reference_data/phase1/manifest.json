@@ -110,6 +110,22 @@
     "perio_odd_chan1.bin": {
       "rows": 5,
       "cols": 129
+    },
+    "logmel_26_chan1.bin": {
+      "rows": 201,
+      "cols": 29
+    },
+    "logmel_deltas_chan1.bin": {
+      "rows": 201,
+      "cols": 87
+    },
+    "mel_26_chan1.bin": {
+      "rows": 201,
+      "cols": 29
+    },
+    "logmel_synth.bin": {
+      "rows": 20,
+      "cols": 29
     }
   },
   "anchor": {

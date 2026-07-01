@@ -65,6 +65,14 @@ EXPECTED_SHAPES = {
     "perio_conv_p8_s80_chan2.bin": (201, 129),
     # Odd-frame-count variant (end=399 -> frameNb=5).
     "perio_odd_chan1.bin": (5, 129),
+    # Mel filterbank dumps. spectrum_size 128 -> 129 bins -> 29 mel filters (NOT
+    # 26: the triangle walk yields end-beg overlapping filters). log-mel: 201x29;
+    # +deltas(3)+dd(3): 201x87 ([static|delta|dd] with static overwritten by
+    # delta); non-log mel: 201x29; synth (spectrum_size 49): 20x29.
+    "logmel_26_chan1.bin": (201, 29),
+    "logmel_deltas_chan1.bin": (201, 87),
+    "mel_26_chan1.bin": (201, 29),
+    "logmel_synth.bin": (20, 29),
 }
 
 # Periodogram framing params + odd-variant end (kept in sync with main.cpp). The
