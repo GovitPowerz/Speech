@@ -90,15 +90,18 @@ impl Segmentation {
     /// Direct index-based port of `Segmentation::label_segment`
     /// (`Segmentation.cpp:147-174`).
     ///
-    /// Legacy returns the iterator to the final position; that return value is
-    /// only consumed by `addPadding` (Task 5), so it is dropped here.
-    pub fn label_segment(&mut self, begin: f64, end: f64, class: SegClass) {
+    /// Returns the index the legacy iterator ends on: the position of the
+    /// re-close boundary when one is inserted, else the resting index of the
+    /// erase/advance walk. `add_padding` consumes this to continue its walk
+    /// after each padded segment; the early-return paths return index 0 to
+    /// mirror the legacy `it = begin()`.
+    pub fn label_segment(&mut self, begin: f64, end: f64, class: SegClass) -> usize {
         let mut begin = begin;
         let mut previous_type = SegClass::Other;
 
         // if (endTime > it->_BeginTime)   with it = begin()
         if end <= self.segs[0].begin {
-            return;
+            return 0;
         }
         // clamp begin up to the list start
         if begin < self.segs[0].begin {
@@ -107,7 +110,7 @@ impl Segmentation {
         // if (beginTime < (segmentList.end()-1)->_BeginTime)  -- sentinel begin
         let last = self.segs.len() - 1;
         if begin >= self.segs[last].begin {
-            return;
+            return 0;
         }
 
         // Advance to the insertion point.
@@ -144,6 +147,7 @@ impl Segmentation {
                 },
             );
         }
+        i
     }
 
     /// Snap each non-terminal boundary to the 1e-4 grid and merge adjacent
@@ -167,5 +171,122 @@ impl Segmentation {
                 i += 1;
             }
         }
+    }
+
+    /// Remove `class` segments no longer than `threshold`, merging or splitting
+    /// their neighbours. Direct index port of `suppressShortSegments`
+    /// (`Segmentation.cpp:245-282`).
+    ///
+    /// `threshold <= 0.0` is a no-op (not even `sanitize`). Otherwise walk the
+    /// list; when a `class` segment has duration `<= threshold` pick one of four
+    /// branches and, crucially, DO NOT advance after any erase: the erased slot
+    /// shifts the next segment into `i`, which must be re-tested (a naive `i +=
+    /// 1` silently drops a merged-in short segment). `previous_type` is updated
+    /// only on the kept (else) branch, mirroring the legacy.
+    pub fn suppress_short(&mut self, threshold: f64, class: SegClass) {
+        if threshold <= 0.0 {
+            return;
+        }
+        let mut previous_type = SegClass::Other;
+        let mut i = 0usize;
+        // while (it+1 != end)
+        while i + 1 < self.segs.len() {
+            let dur = self.segs[i + 1].begin - self.segs[i].begin;
+            if self.segs[i].ty == class && dur <= threshold {
+                if i == 0 {
+                    // head: pull the next boundary back to this begin, erase this.
+                    self.segs[i + 1].begin = self.segs[i].begin;
+                    self.segs.remove(i);
+                } else if i + 2 == self.segs.len() {
+                    // it+2 == end: the short segment sits just before the sentinel.
+                    self.segs.remove(i);
+                } else if previous_type == self.segs[i + 1].ty {
+                    // neighbour match: erase the short segment, then erase again to
+                    // merge the two surrounding same-type segments into one.
+                    self.segs.remove(i);
+                    self.segs.remove(i);
+                } else {
+                    // neighbour differ: split at the midpoint, erase the short one.
+                    self.segs[i + 1].begin -= dur / 2.0;
+                    self.segs.remove(i);
+                }
+                // NO advance: re-test the segment now shifted into index i.
+            } else {
+                previous_type = self.segs[i].ty;
+                i += 1;
+            }
+        }
+        self.sanitize();
+    }
+
+    /// Grow each `class` segment by `before` on the left and `after` on the
+    /// right. Direct index port of `addPadding` (`Segmentation.cpp:216-243`).
+    ///
+    /// A side with value `0.0` is skipped (no `label_segment`, no `sanitize`).
+    /// The left pass walks forward, repositioning after each `label_segment`
+    /// return (padding can shift boundaries); the right pass walks backward over
+    /// indices so extending a segment rightward never disturbs an unvisited
+    /// index.
+    pub fn add_padding(&mut self, before: f64, after: f64, class: SegClass) {
+        if before > 0.0 {
+            // it = begin()+1
+            let mut i = 1usize;
+            // while ((it != end) && (it+1 != end))
+            while i < self.segs.len() && i + 1 < self.segs.len() {
+                if self.segs[i].ty == class {
+                    let b = self.segs[i].begin;
+                    i = self.label_segment(b - before, b + 1e-6, class) + 1;
+                } else {
+                    i += 1;
+                }
+            }
+            self.sanitize();
+        }
+        if after > 0.0 {
+            if self.segs.len() > 2 {
+                // ii walks from size-3 down through 0 (the legacy peels the ii==0
+                // iteration out of the `while (ii > 0)` loop to avoid unsigned
+                // underflow); here a signed counter expresses the same range.
+                let mut ii = self.segs.len() as isize - 3;
+                while ii >= 0 {
+                    let idx = ii as usize;
+                    if self.segs[idx].ty == class {
+                        let next_begin = self.segs[idx + 1].begin;
+                        self.label_segment(next_begin - 1e-6, next_begin + after, class);
+                    }
+                    ii -= 1;
+                }
+            }
+            self.sanitize();
+        }
+    }
+
+    /// Retype every non-sentinel segment from `before` to `after`, then
+    /// `sanitize`. Direct port of `modifySegmentsType` (`Segmentation.cpp:196`).
+    pub fn modify_type(&mut self, before: SegClass, after: SegClass) {
+        // while (it+1 != end)
+        let mut i = 0usize;
+        while i + 1 < self.segs.len() {
+            if self.segs[i].ty == before {
+                self.segs[i].ty = after;
+            }
+            i += 1;
+        }
+        self.sanitize();
+    }
+
+    /// `sanitize`, then accumulate each segment's duration into a per-class
+    /// table indexed by `ty as usize`. Direct port of `update_count`
+    /// (`Segmentation.cpp:206`). The sentinel is never counted (the loop stops
+    /// at `it+1 == end`), so `count[End]` stays `0.0`.
+    pub fn update_count(&mut self) -> [f64; 23] {
+        self.sanitize();
+        let mut count = [0.0f64; 23];
+        let mut i = 0usize;
+        while i + 1 < self.segs.len() {
+            count[self.segs[i].ty as usize] += self.segs[i + 1].begin - self.segs[i].begin;
+            i += 1;
+        }
+        count
     }
 }
