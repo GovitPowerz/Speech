@@ -16,6 +16,7 @@ from speech.features_oracle import (
     ltsv_oracle,
     regression_deltas_oracle,
     sdc_oracle,
+    stats_merge_oracle,
     tdc_oracle,
 )
 from speech.weight_bridge import read_bin
@@ -157,3 +158,50 @@ def test_tdc_oracle_min_lag_zero_r0_is_one() -> None:
     w = [((i * 7) % 5) - 2.0 for i in range(9)]
     s = tdc_oracle(w, 0, 4, 0.7)
     assert math.isfinite(s)
+
+
+# === Task 10: InputStatistics merge oracle =================================
+
+
+def test_stats_merge_oracle_single_batch_anchor() -> None:
+    # [[1],[2],[3]] as one chunk (batch, no merge): mean=2.0,
+    # std = sqrt(((1-2)^2+(2-2)^2+(3-2)^2)/3).
+    mean, std, n = stats_merge_oracle([[[1.0], [2.0], [3.0]]])
+    assert n == 3
+    assert mean == [2.0]
+    assert std == [math.sqrt(((1.0 - 2.0) ** 2 + (2.0 - 2.0) ** 2 + (3.0 - 2.0) ** 2) / 3.0)]
+
+
+def test_stats_merge_oracle_two_chunks_equals_pooled_formula() -> None:
+    # Merge of ([1],[2]) with ([3]): batch1 = {n=2, mean=1.5,
+    # std=sqrt(((1-1.5)^2+(2-1.5)^2)/2) = sqrt(0.25)=0.5}; batch2 = {n=1, mean=3,
+    # std=0}. Pooled: n=3, mean=(1.5*2+3*1)/3=2.0,
+    # std = sqrt(((0.5^2+(2-1.5)^2)*2 + (0^2+(2-3)^2)*1)/3).
+    mean, std, n = stats_merge_oracle([[[1.0], [2.0]], [[3.0]]])
+    assert n == 3
+    expected_mean = (1.5 * 2 + 3.0 * 1) / 3.0
+    expected_std = math.sqrt(((0.5**2 + (expected_mean - 1.5) ** 2) * 2 + (0.0**2 + (expected_mean - 3.0) ** 2) * 1) / 3.0)
+    assert mean == [expected_mean]
+    assert std == [expected_std]
+
+    # NOTE: this merge-of-chunks result is NOT asserted to bit-match a single
+    # from_matrix([[1],[2],[3]]) batch (floating-point pooling is not exactly
+    # associative) -- only the pooled-merge FORMULA above is the arbiter here.
+    # In THIS particular case the values happen to coincide (mean=2.0 either
+    # way; sqrt(0.5*2)... ), but that coincidence is not a general guarantee and
+    # is not asserted as a cross-equality contract.
+
+
+def test_stats_merge_oracle_empty_chunk_mid_chain_is_noop() -> None:
+    # A middle empty chunk (self.n != 0, other.n == 0) is a silent no-op.
+    mean_a, std_a, n_a = stats_merge_oracle([[[1.0], [2.0], [3.0]]])
+    mean_b, std_b, n_b = stats_merge_oracle([[[1.0], [2.0], [3.0]], []])
+    assert (mean_a, std_a, n_a) == (mean_b, std_b, n_b)
+
+
+def test_stats_merge_oracle_leading_empty_chunk_is_copy() -> None:
+    # A leading empty chunk (self.n == 0, other.n == 0) keeps n=0; the next
+    # nonempty chunk then plain-copies in (self.n == 0 branch).
+    mean, std, n = stats_merge_oracle([[], [[1.0], [2.0], [3.0]]])
+    mean_direct, std_direct, n_direct = stats_merge_oracle([[[1.0], [2.0], [3.0]]])
+    assert (mean, std, n) == (mean_direct, std_direct, n_direct)

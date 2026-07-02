@@ -208,6 +208,26 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the f64 balance blend -- two precision cliffs in the hot score path. Reproduced exactly. *Fix
   candidate:* subsumed by the `fmath::log -> f32::ln` swap above.
 
+- **[phase1] `InputStatistics::from_matrix` has no `n == 0` guard; empty batch yields NaN**
+  (`features/stats.rs` `InputStatistics::from_matrix`, from `InputStatistics.cpp:8-16`): both the mean
+  and std finalization divide by `_NbOfValues` unconditionally; a zero-row input therefore produces
+  `0.0/0 = NaN` mean/std rather than a guarded zero or an error. Reproduced as-is -- callers must not
+  batch zero rows if they want a finite result (the merge path's `update()` handles the actual "no data
+  yet" case via the `n == 0` copy branch, not via a from-empty-matrix batch). *Fix candidate:* after
+  parity, either guard `n == 0` in `from_matrix` or make it return `Option`/`Result`.
+
+- **[phase1] `InputStatistics::update` merge re-squares the STORED std (not variance) in a pinned
+  op order** (`features/stats.rs` `InputStatistics::update`, from `InputStatistics.cpp:39-46`): the
+  accumulator persists `std` (already sqrt'd), so every merge must square each side's std back to a
+  variance-like quantity, add the squared mean-shift term, scale by that side's sample count, sum both
+  sides, divide by the merged count, then `sqrt` once -- in exactly that per-element order (not
+  algebraically reassociated, e.g. not `sqrt(n1)*std1` distributed differently). Because floating-point
+  pooling is not exactly associative, merging in chunks generally produces DIFFERENT bits than a single
+  monolithic batch over the same rows (pinned by the oracle module docstring in `features_oracle.py`
+  and the Rust cross-check `stats_merge_oracle_cross_check_bit_exact`, which asserts the FORMULA, not
+  batch-vs-merge bit-equality). Reproduced exactly. *Fix candidate:* none -- this is inherent to
+  incremental variance/std pooling, not a bug to fix.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

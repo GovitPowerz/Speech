@@ -14,11 +14,19 @@ the hand anchors in `tests/test_features_oracle.py` are the arbiters.
 - `ltsv_oracle` (Task 8): LongTermSpectralVariation.cpp:82-128.
 - `fmath_log_oracle` / `tdc_oracle` (Task 9): fmath.hpp:186-226,713-727 and
   TimeDomainCorrel.cpp:36-91.
+- `stats_merge_oracle` (Task 10): InputStatistics.cpp:6-51 (batch ctor +
+  update/merge). PLAIN PYTHON LOOPS for every accumulation (column sums, squared
+  deviations, the merge pooling) -- NOT numpy vectorized reductions -- because
+  numpy's `.sum()` is a pairwise/blocked reduction that can drift by an ULP or two
+  from a strictly sequential accumulation; the cross-language JSON check demands
+  bit-exactness against the sequential Rust port (see the Task 8 oracle lesson,
+  restated here since Task 10 has its own accumulation-heavy kernel).
 """
 
 from __future__ import annotations
 
 import functools
+import math
 
 import numpy as np
 from numpy.typing import NDArray
@@ -237,3 +245,90 @@ def sdc_oracle(mfcc: NDArray[np.float64], nb_dct: int) -> NDArray[np.float64]:
         scratch[kk * p : kk * p + t, kk * nb_dct : (kk + 1) * nb_dct] = delta
     start = (k * p - 1) // 2  # 10
     return scratch[start : start + t, :].copy()
+
+
+def _batch_stats_oracle(rows: list[list[float]]) -> tuple[list[float], list[float], int]:
+    """Batch mean/std over `rows` (InputStatistics.cpp:8-16), plain Python loops.
+
+    Population std (divide by n, NOT n-1); no epsilon; n=0 divides by zero and
+    raises ZeroDivisionError in Python (the legacy equivalent is a silent NaN --
+    callers of `stats_merge_oracle` never emit a bare empty non-skip chunk through
+    this path; empty chunks are handled as a merge no-op/copy in the caller).
+    """
+    n = len(rows)
+    d = len(rows[0])
+    mean = [0.0] * d
+    for row in rows:
+        for j in range(d):
+            mean[j] += row[j]
+    for j in range(d):
+        mean[j] /= n
+
+    std = [0.0] * d
+    for row in rows:
+        for j in range(d):
+            diff = row[j] - mean[j]
+            std[j] += diff * diff
+    for j in range(d):
+        std[j] = math.sqrt(std[j] / n)
+
+    return mean, std, n
+
+
+def stats_merge_oracle(
+    chunks: list[list[list[float]]],
+) -> tuple[list[float], list[float], int]:
+    """Independent Python coding of chained `InputStatistics` batch+merge
+    (InputStatistics.cpp:6-51), one chunk at a time via the same update() rules
+    the Rust port implements: `self.n == 0` -> plain copy of the incoming batch
+    (empty-into-empty keeps n=0); else if the incoming batch has n > 0 -> pooled
+    merge with the per-element resqrt op order (square each side's std, add the
+    squared mean-shift, multiply by that side's n, sum, divide by the merged n,
+    sqrt); else (incoming batch empty, accumulator nonempty) -> silent no-op.
+
+    `chunks` is a list of row-lists (a chunk with zero rows is the empty batch).
+    Each accumulation (column sums, squared deviations, the merge pooling) uses
+    PLAIN PYTHON LOOPS, not numpy vectorized reductions -- see the module
+    docstring for why this matters for the bit-exact cross-language check.
+
+    NOTE: merging chunk-by-chunk generally produces DIFFERENT bits than batching
+    all rows in one `_batch_stats_oracle` call (floating-point pooling is not
+    exactly associative) -- this oracle intentionally does NOT assert equality
+    against the single-batch closed form; only the pooled-merge FORMULA is
+    asserted in the anchor test, not bit-equality with a monolithic batch.
+    """
+    acc_mean: list[float] = []
+    acc_std: list[float] = []
+    acc_n = 0
+
+    for rows in chunks:
+        if not rows:
+            if acc_n == 0:
+                continue  # empty-into-empty: stays n=0, empty vectors
+            continue  # nonempty-into-empty (other side): no-op
+
+        batch_mean, batch_std, batch_n = _batch_stats_oracle(rows)
+
+        if acc_n == 0:
+            acc_mean, acc_std, acc_n = batch_mean, batch_std, batch_n
+            continue
+
+        n1 = float(acc_n)
+        n2 = float(batch_n)
+        merged_n = acc_n + batch_n
+        nf = float(merged_n)
+
+        d = len(acc_mean)
+        merged_mean = [0.0] * d
+        for j in range(d):
+            merged_mean[j] = (acc_mean[j] * n1 + batch_mean[j] * n2) / nf
+
+        merged_std = [0.0] * d
+        for j in range(d):
+            self_term = (acc_std[j] * acc_std[j] + (merged_mean[j] - acc_mean[j]) ** 2) * n1
+            other_term = (batch_std[j] * batch_std[j] + (merged_mean[j] - batch_mean[j]) ** 2) * n2
+            merged_std[j] = math.sqrt((self_term + other_term) / nf)
+
+        acc_mean, acc_std, acc_n = merged_mean, merged_std, merged_n
+
+    return acc_mean, acc_std, acc_n

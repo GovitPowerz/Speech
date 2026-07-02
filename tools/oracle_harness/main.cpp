@@ -19,6 +19,7 @@
 #include "AudioStruct.h"
 #include "CorpusItem.h"
 #include "Helpers.hpp"
+#include "InputStatistics.h"
 #include "MelFilterBank.h"
 #include "fft.hpp"
 #include "fmath.hpp"
@@ -888,6 +889,50 @@ int main(int argc, char** argv) {
             Eigen::MatrixXd perio = audio._Periodogram;  // 201 x 129
             double coeff_homo = pitch / 300.0;
             Matrix2BinaryFile(out + "perio_homothety_chan1.bin", applyHomothety(perio, coeff_homo));
+            ++dumps;
+        }
+    }
+
+    // --- InputStatistics (Task 10) --------------------------------------------
+    // legacy: InputStatistics.cpp:6-51 (batch ctor + update/merge), REAL compiled
+    // translation unit (no transcription). Batch stats over the full synth_20x50
+    // matrix, then a merge of two batches built over the row splits [0,7) and
+    // [7,20) -- exercises the non-trivial n1,n2>0 merge branch (cpp:39-46) with the
+    // per-element resqrt op order. _MeanValue/_StandardDeviation are Eigen 1xD row
+    // vectors; dumped as 1x50 matrices, _NbOfValues (long) as a 1x1 matrix.
+    {
+        Eigen::MatrixXd synth(20, 50);
+        for (int i = 0; i < 20; ++i) {
+            for (int j = 0; j < 50; ++j) {
+                synth(i, j) = ((i * 7 + j * 13) % 100) / 100.0;
+            }
+        }
+
+        InputStatistics batch(synth);
+        Matrix2BinaryFile(out + "stats_batch_mean.bin", batch._MeanValue);
+        ++dumps;
+        Matrix2BinaryFile(out + "stats_batch_std.bin", batch._StandardDeviation);
+        ++dumps;
+        {
+            Eigen::MatrixXd n(1, 1);
+            n(0, 0) = (double) batch._NbOfValues;
+            Matrix2BinaryFile(out + "stats_batch_n.bin", n);
+            ++dumps;
+        }
+
+        Eigen::MatrixXd part1 = synth.block(0, 0, 7, 50);
+        Eigen::MatrixXd part2 = synth.block(7, 0, 13, 50);
+        InputStatistics merged(part1);
+        InputStatistics other(part2);
+        merged.update(other);
+        Matrix2BinaryFile(out + "stats_merged_mean.bin", merged._MeanValue);
+        ++dumps;
+        Matrix2BinaryFile(out + "stats_merged_std.bin", merged._StandardDeviation);
+        ++dumps;
+        {
+            Eigen::MatrixXd n(1, 1);
+            n(0, 0) = (double) merged._NbOfValues;
+            Matrix2BinaryFile(out + "stats_merged_n.bin", n);
             ++dumps;
         }
     }

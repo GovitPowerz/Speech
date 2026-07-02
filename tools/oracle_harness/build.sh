@@ -51,7 +51,7 @@ SRC=../../legacy/src
 # Legacy translation units required to compile+link the harness:
 #   AudioStruct     - the audio ctor + applyPreemph/applyNoise under test
 #   MelFilterBank   - AudioStruct references its methods (link)
-#   InputStatistics - listed for later stages; harmless now
+#   InputStatistics - batch/merge stats stage (Task 10)
 #   ConfigFile      - listed for later stages; harmless now
 #   CorpusItem      - AudioStruct ctor calls its getters (link)  [added]
 #   Timer           - AudioStruct uses Timer in periodogram paths (link)  [added]

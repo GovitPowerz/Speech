@@ -170,6 +170,30 @@
     "perio_homothety_chan1.bin": {
       "rows": 201,
       "cols": 129
+    },
+    "stats_batch_mean.bin": {
+      "rows": 1,
+      "cols": 50
+    },
+    "stats_batch_std.bin": {
+      "rows": 1,
+      "cols": 50
+    },
+    "stats_batch_n.bin": {
+      "rows": 1,
+      "cols": 1
+    },
+    "stats_merged_mean.bin": {
+      "rows": 1,
+      "cols": 50
+    },
+    "stats_merged_std.bin": {
+      "rows": 1,
+      "cols": 50
+    },
+    "stats_merged_n.bin": {
+      "rows": 1,
+      "cols": 1
     }
   },
   "anchor": {
