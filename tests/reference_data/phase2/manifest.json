@@ -1,0 +1,88 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "brew_versions": {
+    "gcc": "16.1.0",
+    "eigen@3": "3.4.1",
+    "boost": "1.90.0_1"
+  },
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "nn_source": {
+    "config": "tests/reference_data/phase0/1_worker_1.config",
+    "weights": "tests/reference_data/phase0/NNweights_config1.bin",
+    "weightsFile_cleared": true,
+    "layer_type": "LSTMLayer",
+    "lstm_neuron_nb": [
+      23,
+      24,
+      24
+    ],
+    "lstm_sub_sampling": [
+      4,
+      1
+    ],
+    "output_neuron_nb": [
+      48,
+      12,
+      1
+    ],
+    "output_sub_sampling": [
+      1,
+      1
+    ]
+  },
+  "nb_of_weights": 33671,
+  "nn_product_probes": {
+    "text": "Eigen blocked product vs the explicit ascending-loop accumulation (matSeq in main.cpp) at the NN product sites; measured fresh by the harness's NN_PROBE on every regeneration, not hardcoded. Extends the Phase 1 dct_gemm_substitution measurement to the LSTM/dense/softmax shapes the NN forward port will use.",
+    "sites": {
+      "lstm_input_gemm": {
+        "shape": "(T x 23) * (23 x 96): forward LSTM layer-0 input weights (top 23 rows) on a 200-row deterministic input.",
+        "diverged": true,
+        "mismatches": 8750,
+        "total": 19200,
+        "first_index": [
+          0,
+          0
+        ],
+        "eigen_bits": "3fcb36fbbf4f1a20",
+        "loop_bits": "3fcb36fbbf4f1a1c"
+      },
+      "lstm_recurrence_gemv": {
+        "shape": "(1 x 24) * (24 x 96) recurrent GEMV (LSTMLayer.cpp:351), accumulated over 150 timesteps of a bounded mock recurrence.",
+        "diverged": false,
+        "mismatches": 0,
+        "total": 14400,
+        "first_index": [
+          -1,
+          -1
+        ],
+        "eigen_bits": "0",
+        "loop_bits": "0"
+      },
+      "dense_gemm": {
+        "shape": "(200 x 48) * (48 x 12): output-MLP first NeuronLayer weights (NeuronLayer.cpp:130) on a deterministic input.",
+        "diverged": true,
+        "mismatches": 1890,
+        "total": 2400,
+        "first_index": [
+          0,
+          0
+        ],
+        "eigen_bits": "40003bf89a06e494",
+        "loop_bits": "40003bf89a06e495"
+      },
+      "softmax_rowsum": {
+        "shape": "row-sum of exp(dense output) (NeuronLayer.cpp:138-139): Eigen rowwise().sum() vs ascending matSeq against a ones vector.",
+        "diverged": false,
+        "mismatches": 0,
+        "total": 200,
+        "first_index": [
+          -1,
+          0
+        ],
+        "eigen_bits": "0",
+        "loop_bits": "0"
+      }
+    }
+  },
+  "dumps": {}
+}

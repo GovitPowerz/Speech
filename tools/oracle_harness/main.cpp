@@ -19,10 +19,12 @@
 #include <vector>
 
 #include "AudioStruct.h"
+#include "BLSTMNeuralNetwork.h"
 #include "ConfigFile.h"
 #include "CorpusItem.h"
 #include "Helpers.hpp"
 #include "InputStatistics.h"
+#include "LSTMLayer.h"
 #include "MelFilterBank.h"
 #include "fft.hpp"
 #include "fmath.hpp"
@@ -59,6 +61,69 @@ static Eigen::MatrixXd dctProduct(const Eigen::MatrixXd& mel, const Eigen::Matri
         }
     }
     return out;
+}
+
+// Phase 2 Task 1: general ascending-loop matrix product A(m x k) * B(k x n),
+// accumulating k in strictly ascending order (i / j outer, k inner). This is the
+// portable/deterministic accumulation order the Rust NN port will reproduce for
+// every NN product site; the NN_PROBE stage below compares it bit-for-bit against
+// Eigen's blocked product on the real NN shapes (extends the DCT GEMM_CHECK from
+// Phase 1 to the LSTM/dense/softmax sites). Measurement only -- nothing aborts on
+// divergence; the reimpl uses this order unconditionally.
+static Eigen::MatrixXd matSeq(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B) {
+    const int M = static_cast<int>(A.rows());
+    const int K = static_cast<int>(A.cols());
+    const int N = static_cast<int>(B.cols());
+    Eigen::MatrixXd out = Eigen::MatrixXd::Zero(M, N);
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            double acc = 0.0;
+            for (int k = 0; k < K; ++k) {
+                acc += A(i, k) * B(k, j);
+            }
+            out(i, j) = acc;
+        }
+    }
+    return out;
+}
+
+// Phase 2 Task 1: bit-for-bit divergence probe for one product site. Computes the
+// Eigen product AND matSeq on the SAME operands, compares every element by bit
+// pattern (memcpy to uint64_t, NOT operator== -- 1-ULP-only differences must be
+// caught), and prints a parseable NN_PROBE line the phase2 extractor parses into
+// manifest.json:nn_product_probes. Mirrors the Phase 1 GEMM_CHECK format exactly.
+static void nnProbe(const std::string& site, const Eigen::MatrixXd& A, const Eigen::MatrixXd& B) {
+    Eigen::MatrixXd eig = A * B;
+    Eigen::MatrixXd loop = matSeq(A, B);
+    const int total = static_cast<int>(eig.rows() * eig.cols());
+    int mismatches = 0;
+    int firstRow = -1, firstCol = -1;
+    uint64_t firstEigenBits = 0, firstLoopBits = 0;
+    for (int r = 0; r < eig.rows(); ++r) {
+        for (int c = 0; c < eig.cols(); ++c) {
+            uint64_t eBits, lBits;
+            double eVal = eig(r, c);
+            double lVal = loop(r, c);
+            std::memcpy(&eBits, &eVal, sizeof(double));
+            std::memcpy(&lBits, &lVal, sizeof(double));
+            if (eBits != lBits) {
+                if (mismatches == 0) {
+                    firstRow = r;
+                    firstCol = c;
+                    firstEigenBits = eBits;
+                    firstLoopBits = lBits;
+                }
+                ++mismatches;
+            }
+        }
+    }
+    const bool diverged = mismatches > 0;
+    std::cout << "NN_PROBE site=" << site
+              << " diverged=" << (diverged ? 1 : 0)
+              << " mismatches=" << mismatches << " total=" << total
+              << " first=(" << firstRow << "," << firstCol << ")"
+              << " eigen=0x" << std::hex << firstEigenBits
+              << " loop=0x" << firstLoopBits << std::dec << "\n";
 }
 
 // Shared regression-deltas kernel over a T x nbDCT block (MelFilterBank.cpp:227-244
@@ -510,6 +575,16 @@ int main(int argc, char** argv) {
     std::string out = argv[1];
     if (!out.empty() && out.back() != '/') out += '/';
     std::string wav = out + "excerpt_2ch_8k.wav";
+
+    // Phase 2 Task 1: real-net config + weights paths. Supplied as argv[2]/argv[3]
+    // (absolute, from the extractor) so they resolve regardless of the runtime cwd;
+    // the repo-relative fallbacks assume the harness is run from tools/oracle_harness.
+    std::string nnConfigPath = (argc > 2)
+        ? std::string(argv[2])
+        : std::string("../../tests/reference_data/phase0/1_worker_1.config");
+    std::string nnWeightsPath = (argc > 3)
+        ? std::string(argv[3])
+        : std::string("../../tests/reference_data/phase0/NNweights_config1.bin");
 
     int dumps = 0;
 
@@ -1253,6 +1328,188 @@ int main(int argc, char** argv) {
                                       std::to_string(chan + 1) + ".bin", inputSeq);
                 ++dumps;
             }
+        }
+    }
+
+    // --- Phase 2 Task 1: real BLSTMNeuralNetwork construction + product probes -
+    // legacy: BLSTMNeuralNetwork.cpp:26-153 (ctor) + :209-238 (setWeights /
+    // getNbOfWeights) + LSTMLayer.cpp:162-207 (per-layer flat setWeights layout) +
+    // NeuronLayer.cpp:69-86 (dense flat layout) + NeuralNetwork.hpp:69-85 (network
+    // setWeights order). Construct the REAL net from the vendored config + weights,
+    // then measure whether Eigen's blocked products diverge bitwise from ascending
+    // loops on the actual NN shapes.
+    //
+    // Construction pattern verified against BLSTMSpectralSegmenter.cpp:739-740:
+    //   ConfigFile conf(path, '_'); <clear BLSTM_weightsFile>;
+    //   BLSTMNeuralNetwork<LSTMLayer> nn(conf, "BLSTM", true); nn.setWeights(flat);
+    // Clearing BLSTM_weightsFile is MANDATORY: the config's value points to a dead
+    // .mat path (1_worker_1.config:59); a nonempty value drives the ctor into
+    // BinaryFile2Vector on that path -> exit(1). The ctor reads it via
+    // conf.get<string>(prep+"_weightsFile","") and skips loading when size()==0.
+    // NOTE: the brief's `set_val<string>(key,"")` cannot be used -- storing "" makes
+    // get<string> take the present-key branch -> read<string>("") asserts (empty
+    // stream extraction fails, String.hpp read()). ERASING the key instead makes
+    // get<string>(key,"") return the default "" via the absent-key branch, which is
+    // exactly the "no weights file" path the brief intends. weightsSetExternally=true
+    // skips the per-layer config weight keys (whose _ConfigFileString collapses under
+    // the iof shim -- irrelevant when that branch is never taken).
+    {
+        ConfigFile conf(nnConfigPath, '_');
+        conf._Params.erase("BLSTM_weightsFile");
+        BLSTMNeuralNetwork<LSTMLayer> nn(conf, "BLSTM", true);
+
+        Eigen::VectorXd flat = BinaryFile2Vector(nnWeightsPath);
+        const long nbWeights = nn.getNbOfWeights();
+        if (nbWeights != 33671) {
+            std::cerr << "FATAL: getNbOfWeights() = " << nbWeights << " != 33671\n";
+            abort();
+        }
+        nn.setWeights(flat);
+        std::cout << "NN_REAL ok weights=" << nbWeights << "\n";
+
+        // Reconstruct the real first-layer weight matrices straight from the flat
+        // vector at their known offsets (the layer members are protected). Layout
+        // matches LSTMLayer::setWeights / NeuronLayer::setWeights / the network
+        // ordering (Forward net first). Forward LSTM layer 0: _InputSize = 23*4 = 92
+        // (NNetInputSize 23, LSTMSubSampling[0] 4), _OutputSize = 24 -> 4*Out = 96.
+        //   _InputWeights   : 92 x 96, column-major, flat offset 0.
+        //   _FeedbackWeights: 24 x 96, column-major, flat offset 92*96 = 8832.
+        // Output MLP first NeuronLayer: _InputSize 48, _OutputSize 12 -> _Weights
+        // 48 x 12, column-major, flat offset fwd(16512)+bwd(16512) = 33024.
+        const int LSTM_IN = 92, LSTM_OUT = 24, LSTM_GATES = 96;
+        const int DENSE_IN = 48, DENSE_OUT = 12;
+        const long OFF_INPUTW = 0;
+        const long OFF_FEEDBACKW = (long)LSTM_IN * LSTM_GATES;        // 8832
+        const long OFF_DENSEW = 33024;
+
+        Eigen::MatrixXd inputWeights(LSTM_IN, LSTM_GATES);           // 92 x 96
+        for (int col = 0; col < LSTM_GATES; ++col)
+            for (int row = 0; row < LSTM_IN; ++row)
+                inputWeights(row, col) = flat(OFF_INPUTW + (long)col * LSTM_IN + row);
+
+        Eigen::MatrixXd feedbackWeights(LSTM_OUT, LSTM_GATES);       // 24 x 96
+        for (int col = 0; col < LSTM_GATES; ++col)
+            for (int row = 0; row < LSTM_OUT; ++row)
+                feedbackWeights(row, col) = flat(OFF_FEEDBACKW + (long)col * LSTM_OUT + row);
+
+        Eigen::MatrixXd denseWeights(DENSE_IN, DENSE_OUT);           // 48 x 12
+        for (int col = 0; col < DENSE_OUT; ++col)
+            for (int row = 0; row < DENSE_IN; ++row)
+                denseWeights(row, col) = flat(OFF_DENSEW + (long)col * DENSE_IN + row);
+
+        // Deterministic input trajectory for the lstm_input_gemm probe (200 rows).
+        // Same closed-form style as synth_20x50 above, recentered to [-0.5, 0.5) so
+        // the k-sum spans signed real-valued operands. Row t, col j.
+        const int T = 200;
+        Eigen::MatrixXd traj(T, 23);                                 // T x 23 (raw input band)
+        for (int t = 0; t < T; ++t)
+            for (int j = 0; j < 23; ++j)
+                traj(t, j) = (double)(((t * 31 + j * 17) % 100)) / 100.0 - 0.5;
+
+        // Probe 1: lstm_input_gemm -- (T x 23) * (23 x 96) on the real first-layer
+        // input weights (top 23 rows = the un-subsampled raw input band).
+        nnProbe("lstm_input_gemm", traj, inputWeights.topRows(23));
+
+        // Probe 2: lstm_recurrence_gemv -- the (1 x 24) * (24 x 96) recurrent GEMV
+        // (LSTMLayer.cpp:351 `outputSeq.row(row-1)*_FeedbackWeights`), accumulated
+        // over >= 100 timesteps. A single k=24 GEMV rarely trips Eigen's blocking;
+        // running a mock recurrence for T steps and comparing the FULL trajectory
+        // bit-for-bit is what surfaces (or rules out) per-step divergence. Each step:
+        // h_next = 0.1 * (h * W)[:, :24] folded back into a 24-vector (a bounded,
+        // deterministic feedback so the state neither blows up nor decays to zero),
+        // computed BOTH ways; any 1-ULP split propagates through the >=100 steps.
+        {
+            const int STEPS = 150;                                   // >= 100
+            Eigen::MatrixXd hEig(1, LSTM_OUT);
+            Eigen::MatrixXd hLoop(1, LSTM_OUT);
+            for (int j = 0; j < LSTM_OUT; ++j) {
+                double v = (double)((j * 13) % 100) / 100.0 - 0.5;
+                hEig(0, j) = v;
+                hLoop(0, j) = v;
+            }
+            int mismatches = 0, total = 0;
+            int firstStep = -1, firstCol = -1;
+            uint64_t firstEigenBits = 0, firstLoopBits = 0;
+            for (int step = 0; step < STEPS; ++step) {
+                Eigen::MatrixXd gEig = hEig * feedbackWeights;       // 1 x 96, Eigen
+                Eigen::MatrixXd gLoop = matSeq(hLoop, feedbackWeights);  // 1 x 96, ascending
+                for (int c = 0; c < LSTM_GATES; ++c) {
+                    uint64_t eBits, lBits;
+                    double eVal = gEig(0, c);
+                    double lVal = gLoop(0, c);
+                    std::memcpy(&eBits, &eVal, sizeof(double));
+                    std::memcpy(&lBits, &lVal, sizeof(double));
+                    ++total;
+                    if (eBits != lBits) {
+                        if (mismatches == 0) {
+                            firstStep = step;
+                            firstCol = c;
+                            firstEigenBits = eBits;
+                            firstLoopBits = lBits;
+                        }
+                        ++mismatches;
+                    }
+                }
+                // Bounded feedback: next state = 0.1 * first 24 gate activations.
+                for (int j = 0; j < LSTM_OUT; ++j) {
+                    hEig(0, j) = 0.1 * gEig(0, j);
+                    hLoop(0, j) = 0.1 * gLoop(0, j);
+                }
+            }
+            const bool diverged = mismatches > 0;
+            std::cout << "NN_PROBE site=lstm_recurrence_gemv"
+                      << " diverged=" << (diverged ? 1 : 0)
+                      << " mismatches=" << mismatches << " total=" << total
+                      << " first=(" << firstStep << "," << firstCol << ")"
+                      << " eigen=0x" << std::hex << firstEigenBits
+                      << " loop=0x" << firstLoopBits << std::dec << "\n";
+        }
+
+        // Probe 3: dense_gemm -- (200 x 48) * (48 x 12) on the real output-MLP
+        // first-layer weights (NeuronLayer.cpp:130 `InputSeq*_Weights`). Deterministic
+        // 200 x 48 input in the same closed-form style.
+        Eigen::MatrixXd denseIn(T, DENSE_IN);
+        for (int t = 0; t < T; ++t)
+            for (int j = 0; j < DENSE_IN; ++j)
+                denseIn(t, j) = (double)(((t * 19 + j * 23) % 100)) / 100.0 - 0.5;
+        nnProbe("dense_gemm", denseIn, denseWeights);
+
+        // Probe 4: softmax_rowsum -- the row-sum reduction over exp(dense output)
+        // (NeuronLayer.cpp:138-139 softmax normalizer). Measure whether the ascending
+        // row-sum of exp diverges from Eigen's rowwise().sum(). Build it as a matrix
+        // product against a 12 x 1 ones vector (that IS the row-sum) both ways: Eigen
+        // (exp .rowwise().sum()) vs the ascending accumulation matSeq(exp, ones).
+        {
+            Eigen::MatrixXd denseOut = matSeq(denseIn, denseWeights);   // 200 x 12
+            Eigen::MatrixXd expOut = denseOut.array().exp().matrix();   // 200 x 12
+            Eigen::MatrixXd ones = Eigen::MatrixXd::Ones(DENSE_OUT, 1);
+            Eigen::MatrixXd eig = expOut.rowwise().sum();               // 200 x 1, Eigen reduce
+            Eigen::MatrixXd loop = matSeq(expOut, ones);               // 200 x 1, ascending
+            const int total = static_cast<int>(eig.rows());
+            int mismatches = 0, firstRow = -1;
+            uint64_t firstEigenBits = 0, firstLoopBits = 0;
+            for (int r = 0; r < eig.rows(); ++r) {
+                uint64_t eBits, lBits;
+                double eVal = eig(r, 0);
+                double lVal = loop(r, 0);
+                std::memcpy(&eBits, &eVal, sizeof(double));
+                std::memcpy(&lBits, &lVal, sizeof(double));
+                if (eBits != lBits) {
+                    if (mismatches == 0) {
+                        firstRow = r;
+                        firstEigenBits = eBits;
+                        firstLoopBits = lBits;
+                    }
+                    ++mismatches;
+                }
+            }
+            const bool diverged = mismatches > 0;
+            std::cout << "NN_PROBE site=softmax_rowsum"
+                      << " diverged=" << (diverged ? 1 : 0)
+                      << " mismatches=" << mismatches << " total=" << total
+                      << " first=(" << firstRow << ",0)"
+                      << " eigen=0x" << std::hex << firstEigenBits
+                      << " loop=0x" << firstLoopBits << std::dec << "\n";
         }
     }
 
