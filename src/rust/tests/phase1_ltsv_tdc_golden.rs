@@ -253,19 +253,16 @@ fn excerpt_audio() -> speech::audio::Audio {
 
 #[test]
 fn fmath_log_sweep_bitexact() {
+    // fmath_log builds its table with f64 ln (libm), so the f32 results are libm-
+    // dependent -> canary-gated. f32-valued (the fmath table is f32): <=2 f32 ULP off
+    // the oracle libm.
     let want = common::load_bin("fmath_log_sweep.bin"); // 2 x N
     assert_eq!(want.nrows(), 2);
     for k in 0..want.ncols() {
         let x = want[[0, k]] as f32; // input was dumped as f32 widened to f64
-        let got = fmath_log(x) as f64;
-        let expect = want[[1, k]];
-        assert_eq!(
-            got.to_bits(),
-            expect.to_bits(),
-            "fmath_log col {k} x={x}: rust=0x{:016x} ({got}) want=0x{:016x} ({expect})",
-            got.to_bits(),
-            expect.to_bits()
-        );
+        let got = fmath_log(x);
+        let expect = want[[1, k]] as f32; // f32 result stored widened to f64
+        common::assert_oracle_eq_f32(got, expect, &format!("fmath_log col {k} x={x}"));
     }
 }
 
@@ -292,18 +289,14 @@ fn tdc_chan1_column_bitexact() {
         jj += tdc.shift;
     }
 
+    // The chain reaches cos (hamming window feeding get_sequence) AND fmath_log's
+    // libm-built table -> canary-gated (bit-exact on the oracle libm, <=4 ULP else).
     let want = common::load_bin("tdc_chan1.bin"); // 1 x frames
     assert_eq!(want.nrows(), 1);
     assert_eq!(got.len(), want.ncols());
     for (i, gv) in got.iter().enumerate() {
         let wv = want[[0, i]];
-        assert_eq!(
-            gv.to_bits(),
-            wv.to_bits(),
-            "tdc_chan1 frame {i}: rust=0x{:016x} ({gv}) want=0x{:016x} ({wv})",
-            gv.to_bits(),
-            wv.to_bits()
-        );
+        common::assert_oracle_eq_f64(*gv, wv, &format!("tdc_chan1 frame {i}"));
     }
 }
 
@@ -324,17 +317,13 @@ fn pitch_chan1_scalar_bitexact() {
     let audio = excerpt_audio();
     let tdc = tdc_params();
     let seg = pitch_segmentation(&audio);
+    // get_pitch windows with the hamming coeffs (cos) before autocorrelation ->
+    // canary-gated. (The pitch estimate is an integer quotient, so it is typically
+    // robust even under a differing libm; the gate only relaxes if it is not.)
     let got = get_pitch(&audio, &seg, 0, &tdc, 8000.0, false);
     let want = common::load_bin("pitch_chan1.bin"); // 1 x 1
     assert_eq!((want.nrows(), want.ncols()), (1, 1));
-    let wv = want[[0, 0]];
-    assert_eq!(
-        got.to_bits(),
-        wv.to_bits(),
-        "pitch: rust=0x{:016x} ({got}) want=0x{:016x} ({wv})",
-        got.to_bits(),
-        wv.to_bits()
-    );
+    common::assert_oracle_eq_f64(got, want[[0, 0]], "pitch");
 }
 
 // --- Golden: homothety warp of the chan-1 periodogram ------------------------
@@ -347,10 +336,12 @@ fn perio_homothety_chan1_bitexact() {
     let pitch = get_pitch(&audio, &seg, 0, &tdc, 8000.0, false);
     let coeff = pitch / 300.0;
 
+    // coeff = get_pitch(...)/300, and get_pitch windows with cos coeffs -> the warp
+    // depends on cos through the pitch estimate -> canary-gated.
     let perio = common::load_bin("perio_p8_s80_chan1.bin");
     let got = apply_homothety(&perio, coeff);
     let want = common::load_bin("perio_homothety_chan1.bin");
-    common::assert_bits_eq(&got, &want, "perio_homothety_chan1");
+    common::assert_oracle_eq(&got, &want, "perio_homothety_chan1");
 }
 
 // --- Unit tests (brief) ------------------------------------------------------
@@ -361,11 +352,12 @@ fn perio_homothety_chan1_bitexact() {
 #[allow(clippy::excessive_precision)]
 fn fmath_log_at_zero_is_finite() {
     // fmath.hpp:713-727 - no x<=0 guard; log(0f) = (0 - (127<<23)) as f32 * c_log2
-    // + app[0] + 0. Pinned literal verified against fmath_log_sweep.bin (0xc2b00f34).
+    // + app[0] + 0. The c_log2 table slope is f64-ln-built, so the exact bits are
+    // libm-dependent; pin the exact literal (0xc2b00f34) only on the oracle libm,
+    // else assert finiteness + <=2 f32 ULP.
     let v = fmath_log(0.0);
     assert!(v.is_finite());
-    assert_eq!(v, -88.029694);
-    assert_eq!(v.to_bits(), 0xc2b00f34);
+    common::assert_oracle_eq_f32(v, -88.029694, "fmath_log(0)");
 }
 
 #[test]
@@ -443,17 +435,16 @@ fn tdc_oracle_cross_check_bit_exact() {
     );
 
     for (idx, case) in cases.iter().enumerate() {
+        // tdc_classify_sequence embeds fmath_log (libm-built f32 table) -> the f64
+        // score is libm-dependent -> canary-gated (<=4 ULP off the oracle libm).
         let got = tdc_classify_sequence(&case.window, case.min_lag, case.max_lag, case.balance);
-        assert_eq!(
-            got.to_bits(),
-            case.expected.to_bits(),
-            "tdc case {idx} min_lag={} max_lag={} balance={}: rust=0x{:016x} ({got}) py=0x{:016x} ({})",
-            case.min_lag,
-            case.max_lag,
-            case.balance,
-            got.to_bits(),
-            case.expected.to_bits(),
-            case.expected
+        common::assert_oracle_eq_f64(
+            got,
+            case.expected,
+            &format!(
+                "tdc case {idx} min_lag={} max_lag={} balance={}",
+                case.min_lag, case.max_lag, case.balance
+            ),
         );
     }
 }

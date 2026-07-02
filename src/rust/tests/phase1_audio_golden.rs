@@ -1,5 +1,5 @@
 mod common;
-use common::{assert_bits_eq, fixture, load_bin};
+use common::{assert_bits_eq, assert_oracle_eq, fixture, load_bin};
 use ndarray::Array2;
 use speech::audio::{convolution_horiz, convolution_vert, read_audio, windowing_coefficients};
 
@@ -26,10 +26,12 @@ fn coeffs_row(v: Vec<f64>) -> Array2<f64> {
     Array2::from_shape_vec((1, n), v).unwrap()
 }
 
+// Windowing coeffs = 0.54 - 0.46*cos(...) (and hann/hHCw): the Rust side calls cos,
+// so these are canary-gated (bit-exact on the oracle libm, <=4 ULP elsewhere).
 #[test]
 fn windowing_hamming_matches_oracle() {
     let w = windowing_coefficients("hamming", false, 257, 0.83333).unwrap();
-    assert_bits_eq(
+    assert_oracle_eq(
         &coeffs_row(w),
         &load_bin("win_hamming_257.bin"),
         "win_hamming_257",
@@ -39,7 +41,7 @@ fn windowing_hamming_matches_oracle() {
 #[test]
 fn windowing_hann_matches_oracle() {
     let w = windowing_coefficients("hann", false, 257, 0.83333).unwrap();
-    assert_bits_eq(
+    assert_oracle_eq(
         &coeffs_row(w),
         &load_bin("win_hann_257.bin"),
         "win_hann_257",
@@ -49,7 +51,7 @@ fn windowing_hann_matches_oracle() {
 #[test]
 fn windowing_hhcw_matches_oracle() {
     let w = windowing_coefficients("hHCw", false, 257, 0.83333).unwrap();
-    assert_bits_eq(
+    assert_oracle_eq(
         &coeffs_row(w),
         &load_bin("win_hhcw_257.bin"),
         "win_hhcw_257",
@@ -59,7 +61,7 @@ fn windowing_hhcw_matches_oracle() {
 #[test]
 fn windowing_hann_normalized_matches_oracle() {
     let w = windowing_coefficients("hann", true, 7, 0.83333).unwrap();
-    assert_bits_eq(
+    assert_oracle_eq(
         &coeffs_row(w),
         &load_bin("win_conv_norm_7.bin"),
         "win_conv_norm_7",

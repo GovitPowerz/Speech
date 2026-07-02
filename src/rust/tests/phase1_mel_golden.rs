@@ -43,12 +43,14 @@ fn dct_bank(ignore_first: bool, deltas: i32, dd: i32) -> MelFilterBank {
     )
 }
 
+// Mel bank ctor calls hz_to_mel (ln) + mel_to_hz (exp); the log branch calls ln.
+// So every filter-bank golden's Rust chain reaches ln/exp -> canary-gated.
 #[test]
 fn logmel_26_chan1_bitexact() {
     let perio = common::load_bin("perio_p8_s80_chan1.bin");
     let got = bank(128, true, 0, 0).apply_filter_bank(&perio);
     let want = common::load_bin("logmel_26_chan1.bin");
-    common::assert_bits_eq(&got, &want, "logmel_26_chan1");
+    common::assert_oracle_eq(&got, &want, "logmel_26_chan1");
 }
 
 #[test]
@@ -56,7 +58,7 @@ fn logmel_deltas_chan1_bitexact() {
     let perio = common::load_bin("perio_p8_s80_chan1.bin");
     let got = bank(128, true, 3, 3).apply_filter_bank(&perio);
     let want = common::load_bin("logmel_deltas_chan1.bin");
-    common::assert_bits_eq(&got, &want, "logmel_deltas_chan1");
+    common::assert_oracle_eq(&got, &want, "logmel_deltas_chan1");
 }
 
 #[test]
@@ -64,7 +66,7 @@ fn mel_26_chan1_bitexact() {
     let perio = common::load_bin("perio_p8_s80_chan1.bin");
     let got = bank(128, false, 0, 0).apply_filter_bank(&perio);
     let want = common::load_bin("mel_26_chan1.bin");
-    common::assert_bits_eq(&got, &want, "mel_26_chan1");
+    common::assert_oracle_eq(&got, &want, "mel_26_chan1");
 }
 
 #[test]
@@ -73,7 +75,7 @@ fn logmel_synth_bitexact() {
     let synth = common::load_bin("synth_20x50.bin");
     let got = bank(49, true, 0, 0).apply_filter_bank(&synth);
     let want = common::load_bin("logmel_synth.bin");
-    common::assert_bits_eq(&got, &want, "logmel_synth");
+    common::assert_oracle_eq(&got, &want, "logmel_synth");
 }
 
 #[test]
@@ -260,32 +262,34 @@ fn logmel_input() -> Array2<f64> {
     dct_bank(false, 0, 0).apply_filter_bank(&perio)
 }
 
+// DCT goldens: logmel_input calls ln (log branch) + apply_dct's cos table -> the
+// Rust chain reaches ln and cos -> canary-gated (bit-exact on oracle libm, <=4 ULP).
 #[test]
 fn mfcc_chan1_bitexact() {
     let got = dct_bank(false, 0, 0).apply_dct(&logmel_input());
     let want = common::load_bin("mfcc_chan1.bin");
-    common::assert_bits_eq(&got, &want, "mfcc_chan1");
+    common::assert_oracle_eq(&got, &want, "mfcc_chan1");
 }
 
 #[test]
 fn mfcc_deltas_chan1_bitexact() {
     let got = dct_bank(false, 3, 3).apply_dct(&logmel_input());
     let want = common::load_bin("mfcc_deltas_chan1.bin");
-    common::assert_bits_eq(&got, &want, "mfcc_deltas_chan1");
+    common::assert_oracle_eq(&got, &want, "mfcc_deltas_chan1");
 }
 
 #[test]
 fn mfcc_deltas_if_chan1_bitexact() {
     let got = dct_bank(true, 3, 3).apply_dct(&logmel_input());
     let want = common::load_bin("mfcc_deltas_if_chan1.bin");
-    common::assert_bits_eq(&got, &want, "mfcc_deltas_if_chan1");
+    common::assert_oracle_eq(&got, &want, "mfcc_deltas_if_chan1");
 }
 
 #[test]
 fn mfcc_sdc_chan1_bitexact() {
     let got = dct_bank(false, -1, 0).apply_dct(&logmel_input());
     let want = common::load_bin("mfcc_sdc_chan1.bin");
-    common::assert_bits_eq(&got, &want, "mfcc_sdc_chan1");
+    common::assert_oracle_eq(&got, &want, "mfcc_sdc_chan1");
 }
 
 #[test]
@@ -293,7 +297,7 @@ fn mfcc_sdc_if_chan1_bitexact() {
     // Pins the ignoreFirst clobber: SDC col 0 overwrites the LAST static (c12).
     let got = dct_bank(true, -1, 0).apply_dct(&logmel_input());
     let want = common::load_bin("mfcc_sdc_if_chan1.bin");
-    common::assert_bits_eq(&got, &want, "mfcc_sdc_if_chan1");
+    common::assert_oracle_eq(&got, &want, "mfcc_sdc_if_chan1");
 }
 
 // --- Task 7: unit tests ---------------------------------------------------

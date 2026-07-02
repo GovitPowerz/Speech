@@ -41,6 +41,17 @@ def test_manifest_records_strict_fp_flags() -> None:
         assert flag in flags, flag
 
 
+def test_libm_canaries_present_and_manifested() -> None:
+    manifest = json.loads((REF / "manifest.json").read_text())
+    assert "libm_canaries.bin" in manifest["dumps"], "canary dump not in manifest inventory"
+    rows, cols, data = read_bin(REF / "libm_canaries.bin")
+    assert (rows, cols) == (2, 18)
+    assert data.shape[0] == rows * cols
+    note = manifest["libm_canaries"]
+    assert note["columns"] == 18
+    assert note["functions"] == ["cos"] * 10 + ["log"] * 5 + ["exp"] * 3
+
+
 def test_anchor_hex_sig_norm() -> None:
     manifest = json.loads((REF / "manifest.json").read_text())
     anchor_hex = manifest["anchor"]["value_hex"]

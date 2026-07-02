@@ -34,18 +34,20 @@ const END_FULL: usize = 16000;
 /// Odd-frame-count variant end (recorded in manifest.periodogram.perio_odd_end).
 const PERIO_ODD_END: usize = 399;
 
+// All periodogram goldens apply the hamming window (built via cos), so their Rust
+// chain reaches cos -> canary-gated (bit-exact on the oracle libm, <=4 ULP else).
 #[test]
 fn perio_p8_s80_chan1_bitexact() {
     let got = pipeline(0, None, END_FULL);
     let want = common::load_bin("perio_p8_s80_chan1.bin");
-    common::assert_bits_eq(&got, &want, "perio_p8_s80_chan1");
+    common::assert_oracle_eq(&got, &want, "perio_p8_s80_chan1");
 }
 
 #[test]
 fn perio_p8_s80_chan2_bitexact() {
     let got = pipeline(1, None, END_FULL);
     let want = common::load_bin("perio_p8_s80_chan2.bin");
-    common::assert_bits_eq(&got, &want, "perio_p8_s80_chan2");
+    common::assert_oracle_eq(&got, &want, "perio_p8_s80_chan2");
 }
 
 #[test]
@@ -53,7 +55,7 @@ fn perio_conv_p8_s80_chan1_bitexact() {
     let conv = windowing_coefficients("hann", true, 7, 0.0).unwrap();
     let got = pipeline(0, Some(&conv), END_FULL);
     let want = common::load_bin("perio_conv_p8_s80_chan1.bin");
-    common::assert_bits_eq(&got, &want, "perio_conv_p8_s80_chan1");
+    common::assert_oracle_eq(&got, &want, "perio_conv_p8_s80_chan1");
 }
 
 #[test]
@@ -61,7 +63,7 @@ fn perio_conv_p8_s80_chan2_bitexact() {
     let conv = windowing_coefficients("hann", true, 7, 0.0).unwrap();
     let got = pipeline(1, Some(&conv), END_FULL);
     let want = common::load_bin("perio_conv_p8_s80_chan2.bin");
-    common::assert_bits_eq(&got, &want, "perio_conv_p8_s80_chan2");
+    common::assert_oracle_eq(&got, &want, "perio_conv_p8_s80_chan2");
 }
 
 #[test]
@@ -71,7 +73,7 @@ fn perio_odd_chan1_bitexact() {
     let got = pipeline(0, None, PERIO_ODD_END);
     assert_eq!(got.nrows(), 5, "odd variant frameNb should be 5");
     let want = common::load_bin("perio_odd_chan1.bin");
-    common::assert_bits_eq(&got, &want, "perio_odd_chan1");
+    common::assert_oracle_eq(&got, &want, "perio_odd_chan1");
 }
 
 /// Hand-checked two-real unpack (n=4). Packs sig1/sig2 first 4 of 5 samples (the

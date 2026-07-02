@@ -8,6 +8,8 @@ double-pinning contract: harness dump == Rust port == numpy oracle).
 """
 
 import math
+import os
+from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,43 @@ from speech.features_oracle import (
 from speech.weight_bridge import read_bin
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "phase1"
+
+
+@cache
+def _oracle_strict() -> bool:
+    """True if THIS platform's libm matches the recorded oracle canaries bit-for-bit.
+
+    The fmath oracle uses ``math.log`` on the running platform; the committed sweep
+    dump was produced on the oracle libm (Apple). If the libms agree the oracle test
+    asserts exact equality; otherwise it relaxes to <=2 f32 ULP. Mirrors the Rust
+    ``oracle_mode()`` (same canary file, same 10 cos / 5 log / 3 exp column layout).
+    ``SPEECH_ORACLE_LIBM=strict|ulp`` forces a path.
+    """
+    forced = os.environ.get("SPEECH_ORACLE_LIBM")
+    if forced == "strict":
+        return True
+    if forced == "ulp":
+        return False
+    rows, _, flat = read_bin(FIXTURE_DIR / "libm_canaries.bin")  # 2 x N column-major
+    n = flat.size // rows
+    for k in range(n):
+        x = float(flat[k * rows + 0])
+        want = float(flat[k * rows + 1])
+        got = math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x)
+        if got.hex() != want.hex():
+            return False
+    return True
+
+
+def _assert_f32_close(got: np.float32, want: np.float32, label: str) -> None:
+    """Exact on the oracle libm, else <=2 f32 ULP (the fmath table is f32-valued)."""
+    if _oracle_strict():
+        assert got == want, f"{label}: {got!r} != {want!r}"
+        return
+    a = np.float32(got).view(np.int32)
+    b = np.float32(want).view(np.int32)
+    assert np.isfinite(got) and np.isfinite(want), f"{label}: non-finite {got!r} {want!r}"
+    assert abs(int(a) - int(b)) <= 2, f"{label}: f32 ULP {abs(int(a) - int(b))} > 2 ({got!r} vs {want!r})"
 
 
 def test_regression_deltas_anchor() -> None:
@@ -127,18 +166,20 @@ def test_fmath_log_oracle_matches_harness_dump_every_entry() -> None:
     # harness dump bit-for-bit for EVERY sweep entry (double-pinning the port).
     rows, cols, flat = read_bin(FIXTURE_DIR / "fmath_log_sweep.bin")
     assert rows == 2
+    # The oracle builds its table with math.log (libm); the dump was made on the
+    # oracle libm. Bit-exact where the libms agree (canary gate), else <=2 f32 ULP.
     # column-major: element (i, j) at index j*rows + i.
     for j in range(cols):
         x = np.float32(flat[j * rows + 0])  # input round-trips exactly through f64
-        want = flat[j * rows + 1]  # f32 result stored as f64
-        got = float(fmath_log_oracle(x))
-        assert got == want, f"col {j}: x={x} oracle={got!r} dump={want!r}"
+        want = np.float32(flat[j * rows + 1])  # f32 result stored as f64
+        got = fmath_log_oracle(x)
+        _assert_f32_close(got, want, f"col {j} x={x}")
 
 
 def test_fmath_log_oracle_at_zero_finite() -> None:
-    v = float(fmath_log_oracle(np.float32(0.0)))
-    assert math.isfinite(v)
-    assert v == float(np.float32(-88.029694))
+    v = fmath_log_oracle(np.float32(0.0))
+    assert math.isfinite(float(v))
+    _assert_f32_close(v, np.float32(-88.029694), "fmath_log(0)")
 
 
 def test_tdc_oracle_anchor_matches_rust_hand_case() -> None:

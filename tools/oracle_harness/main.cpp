@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "AudioStruct.h"
@@ -919,6 +920,54 @@ int main(int argc, char** argv) {
             sweep(1, k) = (double) fmath::log(xs[(size_t) k]);
         }
         Matrix2BinaryFile(out + "fmath_log_sweep.bin", sweep);
+        ++dumps;
+    }
+
+    // --- libm canaries (CI portability gate) ---------------------------------
+    // Record the exact transcendental results the parity paths depend on, evaluated
+    // EXACTLY as the code above does them (cos in the hamming window + DCT table, log
+    // in the mel band + fmath table build, exp in Mel2Hz). Dump 2 x N (row0 = input,
+    // row1 = output) with a FIXED column layout the Rust test hardcodes: 10 cos, then
+    // 5 log, then 3 exp (18 total). The Rust golden loader recomputes each with its
+    // own libm; if all bits match, goldens assert bit-for-bit (this oracle env); if
+    // not (e.g. glibc), the transcendental-dependent goldens assert <= 4 ULP instead.
+    {
+        const double PI = 3.14159265358979323846264338327;  // _PI (Constants.h:15)
+        std::vector<double> in;
+        std::vector<double> outv;
+        // cos: hamming-257 window arg 2*PI/256*k (getWindowingCoefficients, Helpers.hpp:230).
+        for (int k : {1, 27, 64, 128, 200, 255}) {
+            double x = 2.0 * PI / 256.0 * (double) k;
+            in.push_back(x);
+            outv.push_back(std::cos(x));
+        }
+        // cos: DCT table arg PI/29*(n+0.5)*m (MelFilterBank ctor, main.cpp:785).
+        for (auto nm : {std::pair<int, int>{0, 1}, {7, 3}, {28, 12}, {13, 7}}) {
+            double x = PI / 29.0 * ((double) nm.first + 0.5) * (double) nm.second;
+            in.push_back(x);
+            outv.push_back(std::cos(x));
+        }
+        // log (f64): mel-band 1+f/700 (Hz2Mel), raw-band floor 1e-24, table anchors.
+        for (double x : {1.0 + 64.0 / 700.0, 1.0 + 3800.0 / 700.0, 1e-24, 0.5,
+                         1.0 + 1023.0 / 2048.0}) {
+            in.push_back(x);
+            outv.push_back(std::log(x));
+        }
+        // exp (f64): Mel2Hz arg mel/1125 (MelFilterBank.cpp:367), mel from Hz2Mel.
+        const double minMel = 1125.0 * std::log(1.0 + 64.0 / 700.0);
+        const double maxMel = 1125.0 * std::log(1.0 + 3800.0 / 700.0);
+        for (double mel : {minMel, maxMel, (minMel + maxMel) / 2.0}) {
+            double x = mel / 1125.0;
+            in.push_back(x);
+            outv.push_back(std::exp(x));
+        }
+        const Eigen::Index n = (Eigen::Index) in.size();
+        Eigen::MatrixXd canaries(2, n);
+        for (Eigen::Index k = 0; k < n; ++k) {
+            canaries(0, k) = in[(size_t) k];
+            canaries(1, k) = outv[(size_t) k];
+        }
+        Matrix2BinaryFile(out + "libm_canaries.bin", canaries);
         ++dumps;
     }
 

@@ -242,6 +242,10 @@
     "inputseq_rawband_ltsv_chan2.bin": {
       "rows": 201,
       "cols": 99
+    },
+    "libm_canaries.bin": {
+      "rows": 2,
+      "cols": 18
     }
   },
   "anchor": {
@@ -282,6 +286,30 @@
     ],
     "pitch_segment_class": "SPEECH",
     "homothety_coeff": "pitch/300"
+  },
+  "libm_canaries": {
+    "columns": 18,
+    "functions": [
+      "cos",
+      "cos",
+      "cos",
+      "cos",
+      "cos",
+      "cos",
+      "cos",
+      "cos",
+      "cos",
+      "cos",
+      "log",
+      "log",
+      "log",
+      "log",
+      "log",
+      "exp",
+      "exp",
+      "exp"
+    ],
+    "note": "row0=input, row1=libm(input); cos args = hamming 2*PI/256*k and DCT PI/29*(n+0.5)*m; log args = mel 1+f/700, 1e-24, table anchors; exp args = Mel2Hz mel/1125. Goldens are bit-exact on the oracle libm (these match) and assert <=4 ULP where they differ (e.g. glibc)."
   },
   "dct_gemm_substitution": {
     "text": "product melPeriodogram * _CoeffsDCT (legacy/src/MelFilterBank.cpp:223,267,309,314,356) replaced with the explicit ascending triple loop (dctProduct in main.cpp) because Eigen's blocked gebp kernel does not accumulate in plain ascending order; the fields below are measured fresh by the harness's GEMM_CHECK on every fixture regeneration, not hardcoded.",

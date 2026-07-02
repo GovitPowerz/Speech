@@ -126,6 +126,23 @@ EXPECTED_SHAPES = {
     "params_rawband_ltsv.bin": (1, 8),
     "inputseq_rawband_ltsv_chan1.bin": (201, 99),
     "inputseq_rawband_ltsv_chan2.bin": (201, 99),
+    # libm canaries (CI portability gate): 2 x 18 (row0 input, row1 output),
+    # column layout 10 cos + 5 log + 3 exp. The Rust/Python golden loaders
+    # recompute these with their own libm to decide strict-vs-ULP golden mode.
+    "libm_canaries.bin": (2, 18),
+}
+
+# Per-column function tags for libm_canaries.bin (row1 = f(row0)), fixed layout the
+# Rust/Python golden loaders hardcode: 10 cos, then 5 log, then 3 exp.
+LIBM_CANARIES = {
+    "columns": 18,
+    "functions": ["cos"] * 10 + ["log"] * 5 + ["exp"] * 3,
+    "note": (
+        "row0=input, row1=libm(input); cos args = hamming 2*PI/256*k and DCT "
+        "PI/29*(n+0.5)*m; log args = mel 1+f/700, 1e-24, table anchors; exp args = "
+        "Mel2Hz mel/1125. Goldens are bit-exact on the oracle libm (these match) and "
+        "assert <=4 ULP where they differ (e.g. glibc)."
+    ),
 }
 
 # The DCT matrix product melPeriodogram*_CoeffsDCT is the feature path's one real
@@ -264,6 +281,7 @@ def main() -> None:
         "spectrum_order_clamp": SPECTRUM_ORDER_CLAMP,
         "periodogram": PERIODOGRAM,
         "tdc": TDC,
+        "libm_canaries": LIBM_CANARIES,
         "dct_gemm_substitution": dct_gemm_substitution,
     }
 
