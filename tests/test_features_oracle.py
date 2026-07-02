@@ -32,8 +32,9 @@ def _oracle_strict() -> bool:
 
     The fmath oracle uses ``math.log`` on the running platform; the committed sweep
     dump was produced on the oracle libm (Apple). If the libms agree the oracle test
-    asserts exact equality; otherwise it relaxes to <=2 f32 ULP. Mirrors the Rust
-    ``oracle_mode()`` (same canary file, same 10 cos / 5 log / 3 exp column layout).
+    asserts exact equality; otherwise it relaxes to the hybrid bound (<=2 f32 ULP
+    or a scaled absolute tolerance). Mirrors the Rust ``oracle_mode()`` (same canary
+    file, same 10 cos / 5 log / 3 exp column layout).
     ``SPEECH_ORACLE_LIBM=strict|ulp`` forces a path.
     """
     forced = os.environ.get("SPEECH_ORACLE_LIBM")
@@ -53,14 +54,27 @@ def _oracle_strict() -> bool:
 
 
 def _assert_f32_close(got: np.float32, want: np.float32, label: str) -> None:
-    """Exact on the oracle libm, else <=2 f32 ULP (the fmath table is f32-valued)."""
+    """Exact on the oracle libm, else hybrid: <=2 f32 ULP or an absolute tolerance
+    of ``512 * 2**-23 * max(|expected|, 1.0)`` (the fmath table is f32-valued).
+
+    Mirrors the Rust hybrid comparator (src/rust/tests/common/mod.rs): a 1-ULP libm
+    difference propagates as an ABSOLUTE error (~eps * |libm output|), so a tiny
+    output can legitimately be many ULP off; the absolute arm covers that while the
+    ULP arm stays the tight check for well-scaled values. NaN/inf always fail; a
+    finite sign flip across zero can pass only through the absolute arm.
+    """
     if _oracle_strict():
         assert got == want, f"{label}: {got!r} != {want!r}"
         return
-    a = np.float32(got).view(np.int32)
-    b = np.float32(want).view(np.int32)
     assert np.isfinite(got) and np.isfinite(want), f"{label}: non-finite {got!r} {want!r}"
-    assert abs(int(a) - int(b)) <= 2, f"{label}: f32 ULP {abs(int(a) - int(b))} > 2 ({got!r} vs {want!r})"
+    a = int(np.float32(got).view(np.int32))
+    b = int(np.float32(want).view(np.int32))
+    ulp = abs(a - b) if np.signbit(got) == np.signbit(want) else None
+    abs_diff = abs(float(got) - float(want))
+    abs_tol = 512.0 * 2.0**-23 * max(abs(float(want)), 1.0)
+    assert (ulp is not None and ulp <= 2) or abs_diff <= abs_tol, (
+        f"{label}: f32 ULP {'sign' if ulp is None else ulp} > 2 and |diff|={abs_diff!r} > abs_tol={abs_tol!r} ({got!r} vs {want!r})"
+    )
 
 
 def test_regression_deltas_anchor() -> None:
@@ -167,7 +181,8 @@ def test_fmath_log_oracle_matches_harness_dump_every_entry() -> None:
     rows, cols, flat = read_bin(FIXTURE_DIR / "fmath_log_sweep.bin")
     assert rows == 2
     # The oracle builds its table with math.log (libm); the dump was made on the
-    # oracle libm. Bit-exact where the libms agree (canary gate), else <=2 f32 ULP.
+    # oracle libm. Bit-exact where the libms agree (canary gate), else hybrid
+    # <=2 f32 ULP or scaled-absolute.
     # column-major: element (i, j) at index j*rows + i.
     for j in range(cols):
         x = np.float32(flat[j * rows + 0])  # input round-trips exactly through f64

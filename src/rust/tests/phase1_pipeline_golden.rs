@@ -427,7 +427,7 @@ fn run_pipeline(name: &str, chan: usize) -> Array2<f64> {
 
 fn assert_e2e(name: &str) {
     // The E2E chain reaches cos (windowing + DCT), ln + exp (mel bank ctor / log
-    // branch / raw-band ln) -> canary-gated (bit-exact on the oracle libm, <=4 ULP
+    // branch / raw-band ln) -> canary-gated (bit-exact on the oracle libm, hybrid <=4 ULP/abs
     // elsewhere). Only the derived-param goldens (round/floor, portable) stay bits.
     for chan in 0..2 {
         let got = run_pipeline(name, chan);

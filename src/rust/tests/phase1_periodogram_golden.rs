@@ -35,7 +35,7 @@ const END_FULL: usize = 16000;
 const PERIO_ODD_END: usize = 399;
 
 // All periodogram goldens apply the hamming window (built via cos), so their Rust
-// chain reaches cos -> canary-gated (bit-exact on the oracle libm, <=4 ULP else).
+// chain reaches cos -> canary-gated (bit-exact on the oracle libm, hybrid <=4 ULP/abs else).
 #[test]
 fn perio_p8_s80_chan1_bitexact() {
     let got = pipeline(0, None, END_FULL);

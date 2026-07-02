@@ -254,7 +254,7 @@ fn excerpt_audio() -> speech::audio::Audio {
 #[test]
 fn fmath_log_sweep_bitexact() {
     // fmath_log builds its table with f64 ln (libm), so the f32 results are libm-
-    // dependent -> canary-gated. f32-valued (the fmath table is f32): <=2 f32 ULP off
+    // dependent -> canary-gated. f32-valued (the fmath table is f32): hybrid <=2 f32 ULP/abs off
     // the oracle libm.
     let want = common::load_bin("fmath_log_sweep.bin"); // 2 x N
     assert_eq!(want.nrows(), 2);
@@ -290,7 +290,7 @@ fn tdc_chan1_column_bitexact() {
     }
 
     // The chain reaches cos (hamming window feeding get_sequence) AND fmath_log's
-    // libm-built table -> canary-gated (bit-exact on the oracle libm, <=4 ULP else).
+    // libm-built table -> canary-gated (bit-exact on the oracle libm, hybrid <=4 ULP/abs else).
     let want = common::load_bin("tdc_chan1.bin"); // 1 x frames
     assert_eq!(want.nrows(), 1);
     assert_eq!(got.len(), want.ncols());
@@ -354,7 +354,7 @@ fn fmath_log_at_zero_is_finite() {
     // fmath.hpp:713-727 - no x<=0 guard; log(0f) = (0 - (127<<23)) as f32 * c_log2
     // + app[0] + 0. The c_log2 table slope is f64-ln-built, so the exact bits are
     // libm-dependent; pin the exact literal (0xc2b00f34) only on the oracle libm,
-    // else assert finiteness + <=2 f32 ULP.
+    // else assert finiteness + hybrid <=2 f32 ULP/abs.
     let v = fmath_log(0.0);
     assert!(v.is_finite());
     common::assert_oracle_eq_f32(v, -88.029694, "fmath_log(0)");
@@ -436,7 +436,7 @@ fn tdc_oracle_cross_check_bit_exact() {
 
     for (idx, case) in cases.iter().enumerate() {
         // tdc_classify_sequence embeds fmath_log (libm-built f32 table) -> the f64
-        // score is libm-dependent -> canary-gated (<=4 ULP off the oracle libm).
+        // score is libm-dependent -> canary-gated (hybrid <=4 ULP/abs off the oracle libm).
         let got = tdc_classify_sequence(&case.window, case.min_lag, case.max_lag, case.balance);
         common::assert_oracle_eq_f64(
             got,

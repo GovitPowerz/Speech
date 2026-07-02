@@ -263,7 +263,7 @@ fn logmel_input() -> Array2<f64> {
 }
 
 // DCT goldens: logmel_input calls ln (log branch) + apply_dct's cos table -> the
-// Rust chain reaches ln and cos -> canary-gated (bit-exact on oracle libm, <=4 ULP).
+// Rust chain reaches ln and cos -> canary-gated (bit-exact on oracle libm, hybrid <=4 ULP/abs).
 #[test]
 fn mfcc_chan1_bitexact() {
     let got = dct_bank(false, 0, 0).apply_dct(&logmel_input());

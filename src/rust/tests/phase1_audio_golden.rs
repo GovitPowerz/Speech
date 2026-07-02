@@ -27,7 +27,7 @@ fn coeffs_row(v: Vec<f64>) -> Array2<f64> {
 }
 
 // Windowing coeffs = 0.54 - 0.46*cos(...) (and hann/hHCw): the Rust side calls cos,
-// so these are canary-gated (bit-exact on the oracle libm, <=4 ULP elsewhere).
+// so these are canary-gated (bit-exact on the oracle libm, hybrid <=4 ULP/abs elsewhere).
 #[test]
 fn windowing_hamming_matches_oracle() {
     let w = windowing_coefficients("hamming", false, 257, 0.83333).unwrap();
