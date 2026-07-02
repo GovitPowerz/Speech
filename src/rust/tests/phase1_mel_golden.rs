@@ -87,6 +87,10 @@ fn hz_mel_roundtrip_formulas() {
 
 #[test]
 fn grid_accumulates_sequentially() {
+    // Structural only: asserts the ctor lands on a valid (non-fallback) bank for
+    // this shape. The actual bit-exact PINNING of the sequential-accumulation grid
+    // walk is carried by the logmel_synth/logmel_26 goldens (`logmel_synth_bitexact`
+    // below), not this test.
     // rate 8000, spectrum_size 49 -> freqStep = 81.632653...; the mel walk yields
     // a valid (non-fallback) bank.
     let fb = bank(49, true, 0, 0);
@@ -106,6 +110,10 @@ fn empty_filter_collapses_whole_bank_to_passthrough() {
 
 #[test]
 fn triangle_first_coeff_matches_sequential_walk() {
+    // Structural only: re-derives filter 0's first rising-edge coefficient via an
+    // independent re-walk, it does not pin the ctor's own bit-exact accumulation
+    // order. That pinning is carried by the logmel_synth/logmel_26 goldens
+    // (`logmel_synth_bitexact` above), not this test.
     // Re-derive the first two mel edges with the SAME sequential walk the ctor
     // uses (spectrum_size 128, rate 8000 -> freqStep 31.25), then assert filter 0's
     // first coefficient equals the rising-edge expression from the first

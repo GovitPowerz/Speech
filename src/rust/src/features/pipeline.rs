@@ -5,6 +5,15 @@
 //!   `LongTermSpectralVariation::buildFromConf` (`LongTermSpectralVariation.cpp:
 //!   44-80`), `Segmenter::buildFromConf` (`Segmenter.cpp:94-102`), and
 //!   `BLSTMSpectralSegmenter::buildFromConf` (`BLSTMSpectralSegmenter.cpp:44-83`).
+//!   NOTE: `BLSTMSpectralSegmenter::buildFromConf` (`:45`) hardcodes the literal
+//!   `"BLSTM"` prefix for its `LongTermSpectralVariation::buildFromConf` call
+//!   regardless of the `specialization_preposition` parameter it was itself passed
+//!   -- every legacy call site (`BLSTMSpectralSegmenter`, `BLSTMSpectralLID`,
+//!   `TwinBLSTMSpectralLID`) happens to pass `"BLSTM"` too, so this never bites
+//!   today, but a future LID port that calls `from_legacy` with a different
+//!   `prefix` for the spectral subset would silently read the wrong keys (this
+//!   port's `from_legacy(map, prefix)` takes `prefix` at face value and applies it
+//!   uniformly -- it does NOT reproduce the hardcoding).
 //! - [`SpectralParams::derive`]: the param derivation from
 //!   `BLSTMSpectralSegmenter::initSpectralAnalysis` (`:194-314`) + `getLTSVParam`
 //!   (`:300-314`) + `getTDCParam` (`:341-370`).

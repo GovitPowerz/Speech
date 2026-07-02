@@ -309,7 +309,12 @@ pub fn compute_segment_periodogram_estimates(
     let mut buf2 = Array2::<f64>::zeros((1, full_signal_window_size));
 
     // Main loop: two frames per FFT. `end - shift` may underflow if end < shift;
-    // guard so the loop simply does not run (the odd tail then fills row 0).
+    // guard so the loop simply does not run (the odd tail then fills row 0). The
+    // legacy computes `end_frame - window_shift` in unsigned `size_type` arithmetic
+    // with no such guard, so on this same corner it would underflow-wrap to a huge
+    // bound rather than skip the loop -- unreachable in practice (`end < shift` never
+    // occurs with real frame counts/shifts), so this divergence is intentionally
+    // unreproduced rather than load-bearing.
     if end >= shift {
         let mut jj = begin;
         while jj <= end - shift {

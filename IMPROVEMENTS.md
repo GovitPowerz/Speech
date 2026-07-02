@@ -92,6 +92,76 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   3.2/3.3, also load-bearing). *Fix candidate:* if `update_segmentation` is ever fed a 2-D buffer once
   features/NN land, use the column count, not the element count.
 
+- **[phase1] `read_audio` clip length is `round(rate*max_duration+1)`, one frame past the naive
+  count** (`audio.rs` `read_audio`, from `AudioStruct.cpp:63`): `frame_count_max = (long long)
+  boost::math::round(_Framerate*_DurationMax+1)`, i.e. the `+1` is INSIDE the rounded expression, not
+  a post-hoc off-by-one guard -- a `max_duration` chosen to land exactly on a frame boundary still
+  gets one extra frame. Reproduced verbatim (`frame_count_max = (sample_rate as f64 *
+  max_duration_sec + 1.0).round() as i64`). *Fix candidate:* none needed; flagged because a naive
+  re-derivation (`round(rate*dur)` then `+1`) would usually agree but can differ by a rounding
+  boundary from the legacy's single combined round.
+- **[phase1] `applyPreemph`/`apply_preemph` gate is whole-function, not per-sample** (`audio.rs`
+  `Audio::apply_preemph`, from `AudioStruct.cpp:446-454`): the ENTIRE backward difference loop is
+  wrapped in one `if (preemphRatio > 0)` -- `ratio <= 0` (including the legacy's own negative-ratio
+  config convention seen in some configs) is a total no-op, not a per-sample branch or an
+  absolute-value application. Reproduced verbatim. *Fix candidate:* none; flagged only because the
+  gate is easy to miss when reading the loop body in isolation (it has no guard of its own).
+- **[phase1] `windowing_coefficients` "uniform" is only materialized when `normalized`; otherwise
+  it silently falls through to no-window (rectangular)** (`audio.rs` `windowing_coefficients`, from
+  `Helpers.hpp:222-272`): the legacy `else if ((normalized)&&(windowing_type.compare("uniform")==0))`
+  branch means `"uniform"` combined with `normalized == false` matches NEITHER that branch nor any
+  named-window branch, so it falls to the final `else { windowing_coeff = Eigen::MatrixXd(); }` --
+  an empty matrix, i.e. functionally identical to `"none"`. The port returns `None` for that same
+  combination. *Fix candidate:* after parity, either make unnormalized uniform genuinely fill 1.0s
+  (true rectangular window) or document the empty-matrix fallback as the intended behavior; a naive
+  re-implementation would likely "fix" this silently and change every windowed-feature golden that
+  uses `uniform` unnormalized.
+- **[phase1] Two-real periodogram: only the first `n` of the caller's `n+1`-wide window buffer is
+  packed; the DC bin divides by `n`, AC bins by `4n`** (`features/fft.rs`
+  `compute_two_real_periodogram`, from `AudioStruct.cpp:487-510`): `getSequence`/`get_sequence`
+  fills a `full_signal_window_size = window_size+1`-wide buffer, but
+  `computeTwoRealPeriodogram`/`compute_two_real_periodogram` only reads indices `0..full_window_size`
+  (`n = window_size`) when packing the two real signals into the complex FFT input -- the buffer's
+  LAST sample is silently dropped every call. Separately, the unpacked periodogram normalizes the DC
+  bin (`ii=0`) by `full_window_size` (`n`) while every other bin (`ii=2..=n`) normalizes by
+  `coeff_norm = 2*size_1 = 4*full_window_size` (`4n`) -- a 4x scale discontinuity between the DC bin
+  and the rest of the spectrum that is NOT a textbook periodogram normalization. Both reproduced
+  verbatim (pinned by the periodogram goldens). *Fix candidate:* after parity, either pack all
+  `n+1` samples (changing the FFT window content) or normalize DC consistently with the AC bins
+  (`/4n`); both are retrain-affecting.
+- **[phase1] Odd frame-count tail writes periodogram row twice, second write (P2 formula) silently
+  clobbers the first (P1 formula)** (`audio.rs` `compute_segment_periodogram_estimates`, from
+  `AudioStruct.cpp:551-559`): when `periodogram_frameNb` is odd, the tail packs the SAME frame as
+  both "signal 1" and "signal 2" into one FFT call with `periodogram_column_1 == periodogram_column_2
+  == currentFrame` -- so `computeTwoRealPeriodogram` writes that row via the P1 formula, then
+  immediately overwrites it via the P2 formula (the two formulas are algebraically different
+  quadratic combinations of the same FFT output, not equal in general). Only the final (P2) value
+  survives; the P1 computation is pure waste. Reproduced verbatim (the port's odd-tail path performs
+  the identical same-row double write). *Fix candidate:* after parity, skip the redundant P1 write
+  for the self-paired tail frame (pure perf cleanup, the surviving value is unchanged).
+- **[phase1] `get_sequence` left edge does not zero-pad; `index >= frames` is a silent no-op that
+  leaves the caller's buffer holding the PREVIOUS frame's contents** (`audio.rs` `get_sequence`, from
+  `AudioStruct.cpp:456-485`): (a) the outer guard `index < _FramesCount` wraps the entire body --
+  when false, the function returns having touched nothing, so the framing driver's single reused
+  buffer pair (`compute_segment_periodogram_estimates`) silently reprocesses stale data from an
+  earlier call; (b) on the LEFT edge (`index < half_window`) only the in-range block-copy region is
+  overwritten -- the left pad positions keep whatever was in the buffer before (never zeroed), unlike
+  the RIGHT edge which zeros the whole buffer first; (c) the DC-offset mean (when enabled) is taken
+  over the FULL `2*half_window+1` buffer INCLUDING any such stale/pad region, so a left-edge or
+  no-op frame's DC-offset subtraction is computed over garbage-adjacent data by design. All three
+  reproduced verbatim via the caller-owned reused-buffer contract (pinned by left-edge/right-edge
+  hand tests plus real-audio dumps whose first/last frames exercise both paths). *Fix candidate:*
+  after parity, zero the left pad explicitly and/or exclude pad positions from the DC-offset mean;
+  both are retrain-affecting for segments near file boundaries.
+- **[phase1] Convolution edge truncation drops taps without renormalizing** (`audio.rs`
+  `convolution_horiz`/`convolution_vert`/`conv_taps`, from `Helpers.hpp:164-220`): near either edge
+  of the row/column being convolved, the kernel is truncated to the taps that land in-bounds -- the
+  missing taps are simply omitted from the sum, not redistributed or renormalized against the
+  reduced tap weight. So edge outputs are systematically attenuated relative to interior outputs
+  whenever the kernel doesn't sum to a shape-invariant constant at the truncation point. Reproduced
+  verbatim (pinned by the windowing/temporal-convolution goldens). *Fix candidate:* after parity,
+  renormalize by the sum of the taps actually used (or mirror/replicate-pad instead of truncating);
+  retrain-affecting near segment edges.
 - **[phase1] GFFT twiddles: Taylor-seed constants + Numerical-Recipes running recurrence**
   (`features/fft.rs` `sin_series`/`danielson_lanczos`, from `fft.hpp` -- V. Myrnyy, DDJ 2007): the
   butterfly twiddle factors are NOT `libm sin`/`cos`. Each stage seeds `wpr = -2*Sin(N,1)^2`,
@@ -265,3 +335,13 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
 
 - **[3/4] `CostFunctionCalib` nnet_out-before-assignment** (Python optimizer) -- a real
   use-before-assign bug flagged in the setup analysis; fix when the Python training loop is ported.
+- **[3/4] OpenMP `InputStatistics` merge-order nondeterminism** (`CorpusProcessor.cpp:171-199`):
+  per-file corpus processing runs under `#pragma omp parallel for schedule(dynamic, 1)`, and each
+  file's `InputStatistics::update` merge into the shared accumulator happens inside `#pragma omp
+  critical` (`:192-196`) -- so the merge ORDER is whichever dynamically-scheduled thread finishes
+  and grabs the critical section first, not corpus/file order. Combined with the already-landed
+  `[phase1]` finding that `InputStatistics::update`'s pooled variance/std merge is not exactly
+  associative in floating point, a multi-threaded legacy run is not bit-reproducible across runs
+  (and a rayon `par_iter` port with a different reduction order will not match any single legacy
+  run bit-for-bit either). Add the concrete `[phase3]`/`[phase4]` entry (with the Rust reduction
+  strategy chosen) once `engine/corpus_processor.rs`'s parallel driver lands.

@@ -34,9 +34,12 @@ fn variant_cfg(name: &str) -> FeatureConfig {
     FeatureConfig::from_legacy(&map, "BLSTM").unwrap()
 }
 
-fn excerpt_audio() -> Audio {
+fn excerpt_audio(preemph_ratio: f64) -> Audio {
     let mut audio = read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0).expect("decode");
-    audio.apply_preemph(0.97);
+    // legacy gate: `if (preemphRatio > 0)` (audio.rs:40) -- apply only when positive.
+    if preemph_ratio > 0.0 {
+        audio.apply_preemph(preemph_ratio);
+    }
     // noise skipped: seed 0 in every variant config.
     audio
 }
@@ -166,8 +169,13 @@ fn sanitize_span_widened_both_endpoints() {
 
 #[test]
 fn sanitize_negative_then_swap_order() {
-    // minFreq=-5 -> 0, maxFreq=-10 -> 0; then both 0 -> span 0 < 2 -> widened to
-    // mean(0) +- 1 = [-1, 1]. Verifies negatives are zeroed BEFORE the widen.
+    // Ops commute here (both endpoints end up 0 either way), so this case can't by
+    // itself distinguish "negatives zeroed before swap" from "swap then zero" --
+    // the literal order (negative-zero, then swap-if-reversed, then span-widen) is
+    // preserved by the implementation (see `from_legacy`) and exercised for the
+    // no-swap case by `sanitize_negative_minfreq_zeroed_before_swap` above; this
+    // test only pins the DOWNSTREAM span-widen composing correctly with negative
+    // zeroing (both zeroed -> span 0 < 2 -> widened to mean(0) +- 1 = [-1, 1]).
     let mut m = base_map();
     m.insert("P_minFreq".into(), "-5".into());
     m.insert("P_maxFreq".into(), "-10".into());
@@ -306,7 +314,7 @@ fn assemble_hcat_ltsv_last_column() {
 
 fn run_pipeline(name: &str, chan: usize) -> Array2<f64> {
     let c = variant_cfg(name);
-    let audio = excerpt_audio();
+    let audio = excerpt_audio(c.preemph_ratio);
     let rate = audio.sample_rate as f64;
     let s = SpectralParams::derive(&c, rate);
 
