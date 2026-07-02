@@ -92,7 +92,267 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   3.2/3.3, also load-bearing). *Fix candidate:* if `update_segmentation` is ever fed a 2-D buffer once
   features/NN land, use the column count, not the element count.
 
+- **[phase1] `read_audio` clip length is `round(rate*max_duration+1)`, one frame past the naive
+  count** (`audio.rs` `read_audio`, from `AudioStruct.cpp:63`): `frame_count_max = (long long)
+  boost::math::round(_Framerate*_DurationMax+1)`, i.e. the `+1` is INSIDE the rounded expression, not
+  a post-hoc off-by-one guard -- a `max_duration` chosen to land exactly on a frame boundary still
+  gets one extra frame. Reproduced verbatim (`frame_count_max = (sample_rate as f64 *
+  max_duration_sec + 1.0).round() as i64`). *Fix candidate:* none needed; flagged because a naive
+  re-derivation (`round(rate*dur)` then `+1`) would usually agree but can differ by a rounding
+  boundary from the legacy's single combined round.
+- **[phase1] `applyPreemph`/`apply_preemph` gate is whole-function, not per-sample** (`audio.rs`
+  `Audio::apply_preemph`, from `AudioStruct.cpp:446-454`): the ENTIRE backward difference loop is
+  wrapped in one `if (preemphRatio > 0)` -- `ratio <= 0` (including the legacy's own negative-ratio
+  config convention seen in some configs) is a total no-op, not a per-sample branch or an
+  absolute-value application. Reproduced verbatim. *Fix candidate:* none; flagged only because the
+  gate is easy to miss when reading the loop body in isolation (it has no guard of its own).
+- **[phase1] `windowing_coefficients` "uniform" is only materialized when `normalized`; otherwise
+  it silently falls through to no-window (rectangular)** (`audio.rs` `windowing_coefficients`, from
+  `Helpers.hpp:222-272`): the legacy `else if ((normalized)&&(windowing_type.compare("uniform")==0))`
+  branch means `"uniform"` combined with `normalized == false` matches NEITHER that branch nor any
+  named-window branch, so it falls to the final `else { windowing_coeff = Eigen::MatrixXd(); }` --
+  an empty matrix, i.e. functionally identical to `"none"`. The port returns `None` for that same
+  combination. *Fix candidate:* after parity, either make unnormalized uniform genuinely fill 1.0s
+  (true rectangular window) or document the empty-matrix fallback as the intended behavior; a naive
+  re-implementation would likely "fix" this silently and change every windowed-feature golden that
+  uses `uniform` unnormalized.
+- **[phase1] Two-real periodogram: only the first `n` of the caller's `n+1`-wide window buffer is
+  packed; the DC bin divides by `n`, AC bins by `4n`** (`features/fft.rs`
+  `compute_two_real_periodogram`, from `AudioStruct.cpp:487-510`): `getSequence`/`get_sequence`
+  fills a `full_signal_window_size = window_size+1`-wide buffer, but
+  `computeTwoRealPeriodogram`/`compute_two_real_periodogram` only reads indices `0..full_window_size`
+  (`n = window_size`) when packing the two real signals into the complex FFT input -- the buffer's
+  LAST sample is silently dropped every call. Separately, the unpacked periodogram normalizes the DC
+  bin (`ii=0`) by `full_window_size` (`n`) while every other bin (`ii=2..=n`) normalizes by
+  `coeff_norm = 2*size_1 = 4*full_window_size` (`4n`) -- a 4x scale discontinuity between the DC bin
+  and the rest of the spectrum that is NOT a textbook periodogram normalization. Both reproduced
+  verbatim (pinned by the periodogram goldens). *Fix candidate:* after parity, either pack all
+  `n+1` samples (changing the FFT window content) or normalize DC consistently with the AC bins
+  (`/4n`); both are retrain-affecting.
+- **[phase1] Odd frame-count tail writes periodogram row twice, second write (P2 formula) silently
+  clobbers the first (P1 formula)** (`audio.rs` `compute_segment_periodogram_estimates`, from
+  `AudioStruct.cpp:551-559`): when `periodogram_frameNb` is odd, the tail packs the SAME frame as
+  both "signal 1" and "signal 2" into one FFT call with `periodogram_column_1 == periodogram_column_2
+  == currentFrame` -- so `computeTwoRealPeriodogram` writes that row via the P1 formula, then
+  immediately overwrites it via the P2 formula (the two formulas are algebraically different
+  quadratic combinations of the same FFT output, not equal in general). Only the final (P2) value
+  survives; the P1 computation is pure waste. Reproduced verbatim (the port's odd-tail path performs
+  the identical same-row double write). *Fix candidate:* after parity, skip the redundant P1 write
+  for the self-paired tail frame (pure perf cleanup, the surviving value is unchanged).
+- **[phase1] `get_sequence` left edge does not zero-pad; `index >= frames` is a silent no-op that
+  leaves the caller's buffer holding the PREVIOUS frame's contents** (`audio.rs` `get_sequence`, from
+  `AudioStruct.cpp:456-485`): (a) the outer guard `index < _FramesCount` wraps the entire body --
+  when false, the function returns having touched nothing, so the framing driver's single reused
+  buffer pair (`compute_segment_periodogram_estimates`) silently reprocesses stale data from an
+  earlier call; (b) on the LEFT edge (`index < half_window`) only the in-range block-copy region is
+  overwritten -- the left pad positions keep whatever was in the buffer before (never zeroed), unlike
+  the RIGHT edge which zeros the whole buffer first; (c) the DC-offset mean (when enabled) is taken
+  over the FULL `2*half_window+1` buffer INCLUDING any such stale/pad region, so a left-edge or
+  no-op frame's DC-offset subtraction is computed over garbage-adjacent data by design. All three
+  reproduced verbatim via the caller-owned reused-buffer contract (pinned by left-edge/right-edge
+  hand tests plus real-audio dumps whose first/last frames exercise both paths). *Fix candidate:*
+  after parity, zero the left pad explicitly and/or exclude pad positions from the DC-offset mean;
+  both are retrain-affecting for segments near file boundaries.
+- **[phase1] Convolution edge truncation drops taps without renormalizing** (`audio.rs`
+  `convolution_horiz`/`convolution_vert`/`conv_taps`, from `Helpers.hpp:164-220`): near either edge
+  of the row/column being convolved, the kernel is truncated to the taps that land in-bounds -- the
+  missing taps are simply omitted from the sum, not redistributed or renormalized against the
+  reduced tap weight. So edge outputs are systematically attenuated relative to interior outputs
+  whenever the kernel doesn't sum to a shape-invariant constant at the truncation point. Reproduced
+  verbatim (pinned by the windowing/temporal-convolution goldens). *Fix candidate:* after parity,
+  renormalize by the sum of the taps actually used (or mirror/replicate-pad instead of truncating);
+  retrain-affecting near segment edges.
+- **[phase1] GFFT twiddles: Taylor-seed constants + Numerical-Recipes running recurrence**
+  (`features/fft.rs` `sin_series`/`danielson_lanczos`, from `fft.hpp` -- V. Myrnyy, DDJ 2007): the
+  butterfly twiddle factors are NOT `libm sin`/`cos`. Each stage seeds `wpr = -2*Sin(N,1)^2`,
+  `wpi = -Sin(N,2)` where `Sin(B,A)` is a 16-term truncated Taylor series (`SinCosSeries<2,34>`,
+  `S(M) = 1 - ((x*x)/M)/(M+1)*S(M+2)`, base `S(34)=1`), then advances `wr`/`wi` by the NR running
+  recurrence `wr += wr*wpr - wi*wpi; wi += wi*wpr + wtemp*wpi;` which ACCUMULATES rounding error across
+  the loop. In the legacy these are compile-time template constants; the port computes them at runtime
+  with identical f64 operation order (which reproduces gcc strict-mode folding bit-for-bit). A modern
+  port would use precise `sin`/`cos` and a non-accumulating twiddle table -- more accurate, but the
+  goldens are pinned to this exact (lossy) scheme. *Fix candidate:* after end-to-end parity, swap to a
+  precomputed twiddle table using `f64::sin`/`cos`; expect small per-bin numeric drift vs the legacy
+  spectrum. Note the DL<4> base case is a hand-fused `-i` butterfly whose STATEMENT ORDER is
+  load-bearing (ported verbatim), and the scramble is the 1-based NR bit-reversal.
+
+- **[phase1] Mel deltas-no-DCT output is `[delta | delta | delta-delta]`, static log-mel OVERWRITTEN**
+  (`features/mel.rs` `apply_deltas_overwrite`, from `MelFilterBank.cpp:192-193`): when `!DCT &&
+  deltasNb > 0`, after computing the delta block (cols `[F,2F)`) and delta-delta block (cols `[2F,3F)`),
+  the final two statements do `melPeriodogram = MFCC;` then `melPeriodogram.leftCols(F) =
+  MFCC.leftCols(2F).rightCols(F)` -- i.e. the static log-mel block (cols `[0,F)`) is CLOBBERED by a copy
+  of the delta block, so the emitted layout is `[delta | delta | delta-delta]`, not
+  `[static | delta | delta-delta]`. Almost certainly an off-by-one authoring slip (the static features
+  are silently discarded), but it is the golden contract (pinned by `logmel_deltas_chan1.bin`). *Fix
+  candidate:* after end-to-end parity, keep the static block (`[static | delta | delta-delta]`); expect
+  the NN input dimensionality to be unchanged but the first `F` columns to carry different (real static)
+  values -- a retrain-affecting change.
+
+- **[phase1] Mel `adim` denominator includes the clamped `j` when `T <= j`** (`features/mel.rs`
+  `regression_deltas`, from `MelFilterBank.cpp:153-170`): the regression-deltas normalizer `adim += j*j`
+  runs for every `j` in `1..=n` EVEN when `j > T` (rows) and the shifted-difference copy is skipped
+  (`length = min(j, T)`). So on short segments the denominator `2*sum j^2` counts terms whose shifted
+  contribution is fully edge-clamped rather than a true `t+/-j` difference. Reproduced exactly (the
+  clamped closed form `D[t] = sum_j j*(B[min(t+j,T-1)] - B[max(t-j,0)]) / (2 sum j^2)` matches the
+  block-op sequence bit-for-bit, verified against the numpy oracle across `T<=n` shapes). *Fix
+  candidate:* none needed numerically; the behavior is self-consistent. Flagged only because it is a
+  non-obvious edge that a naive re-derivation (denominator over unclamped active `j` only) would get
+  wrong.
+
+- **[phase1] Mel whole-bank fallback: ANY empty filter collapses the ENTIRE bank to raw-band
+  pass-through** (`features/mel.rs` `new`, from `MelFilterBank.cpp:92-103`): if a single triangle
+  collects zero periodogram bins (`nb_bins` too large for the spectrum resolution), the ctor sets
+  `_IsMel = false` and `_NbFilters = _EndFreq - _BegFreq + 1` -- the mel projection is abandoned for the
+  whole bank and `applyFilterBank` falls to a raw-band copy/log. The partially built `_IndexBegin` /
+  `_Coeffs` are retained but never used. Reproduced faithfully (pinned by the
+  `empty_filter_collapses_whole_bank_to_passthrough` test). *Fix candidate:* after parity, either clamp
+  `nb_bins` to what the resolution supports or drop only the empty filters instead of the whole bank.
+
+- **[phase1] SDC `ignoreFirst` clobbers the LAST static column, not c0** (`features/mel.rs` `apply_dct`
+  Branch A, from `MelFilterBank.cpp:262`): unlike the deltas>=0 `ignoreFirst` path (Branch B) which drops
+  the FIRST static (c0), the SDC path writes the `nb_dct` statics first, then assigns the `7*nb_dct`-wide
+  SDC band into `MFCC.rightCols(7*nb_dct)`. When `ignoreFirst` the output width is `nb_dct-1 + 7*nb_dct`,
+  so `rightCols` starts at column `nb_dct-1` and OVERWRITES the last static (`c_{nb_dct-1}`); c0..c_{nb_dct-2}
+  survive. So the discarded static is the highest-order cepstral coeff, not the energy term -- almost
+  certainly an authoring slip (the width bookkeeping subtracts 1 for "ignore first" but the write order
+  clobbers the last). Pinned by `mfcc_sdc_if_chan1.bin` (c12 == SDC block-0 col-0). *Fix candidate:* after
+  parity, either genuinely drop c0 (shift the SDC write right by one) or keep all statics; retrain-affecting.
+
+- **[phase1] DCT `melPeriodogram*_CoeffsDCT` Eigen GEMM replaced by an explicit ascending triple loop**
+  (`features/mel.rs` `apply_dct`/`dct_product`, from `MelFilterBank.cpp:223` etc.): the legacy computes the
+  DCT projection as an Eigen matrix-matrix product on the full `T x nb_filters` log-mel. The mandatory
+  Task-7 harness pre-check (Eigen GEMM vs `for t / for k / accumulate over n ascending`) DIVERGED: Eigen's
+  blocked `gebp` kernel does not accumulate in ascending order even under `-DEIGEN_DONT_VECTORIZE`
+  `-ffp-contract=off` (e.g. `E(0,0)` bits `...e6ea` vs ascending `...e6ec`; ~1500/2613 elements differ on
+  the 201x29 * 29x13 product). Per the brief the product is done as the explicit ascending triple loop, and
+  the goldens are dumped with THAT order (harness `dctProduct`), because Eigen's GEMM order is not portable
+  across BLAS/arch/Eigen versions. Recorded in `manifest.json:dct_gemm_substitution`. *Fix candidate:* none
+  -- the ascending loop is the deliberate portable parity target; do NOT swap in a BLAS `.dot()`.
+
+- **[phase1] LTSV `classifySequence` returns variance, not "standard deviation"** (`features/ltsv_tdc.rs`
+  `ltsv_classify_sequence`, from `LongTermSpectralVariation.cpp:118-127`): the legacy names the
+  accumulator `std_dzeta`, comments the block "Compute standard deviation", and returns
+  `sum((dzeta-mean_dzeta)^2)/nbBins` -- there is no `sqrt`. So the LTSV "score" is a biased variance in
+  units squared, not a standard deviation; every downstream threshold tuned against this score is
+  implicitly tuned against variance, not std. Reproduced exactly (pinned by `ltsv_is_biased_variance_
+  no_sqrt` and the harness goldens `ltsv_chan1.bin`/`ltsv_synth.bin`). *Fix candidate:* after parity,
+  either take the sqrt (changing the score's scale/units and every tuned threshold) or rename to stop
+  calling it a standard deviation; retrain/re-tune-affecting either way.
+
+- **[phase1] LTSV `ltsv_classify_sequence` mean-only 1e-12 floor quirk** (`features/ltsv_tdc.rs`
+  `ltsv_classify_sequence`, from `LongTermSpectralVariation.cpp:101`): the 1e-12 epsilon floor is
+  applied ONLY to the per-bin window MEAN, never to the numerator `P(t,bin)` in the ratio `r = P/mean`.
+  The legacy guard `if (mean_value[row] < 1e-12) mean_value[row] = 1e-12;` prevents division by zero
+  (the across-bins `mean_dzeta` is never floored); a naive
+  re-derivation that floors the ratio `r` itself or the numerator `P` diverges from the goldens. Both
+  the unprotected numerator path and the protected-mean ratio are reproduced verbatim (pinned by
+  `ltsv_chan1.bin`/`ltsv_synth.bin`). *Fix candidate:* after parity, revisit whether a symmetric epsilon
+  floor on the ratio (or numerator) is preferable to the asymmetric mean-only floor.
+
+- **[phase1] `computePitch` returns a `long/long` INTEGER-divided pitch estimate** (`features/ltsv_tdc.rs`
+  `compute_pitch`, from `BLSTMSpectralSegmenter.cpp:172-192`): the legacy signature is `computePitch(long
+  min_lag, long max_lag, long frameRate, ...)` and it returns `frameRate/indiceMaxPeak` -- both `long`, so
+  the division TRUNCATES (8000/35 = 228, not 228.571...) and is widened to `double` only on return. The
+  accept bounds in `getPitch` (`:425`) are genuine double divisions, so the acceptance band is exact while
+  the accepted estimates are quantized to integers. Every `getPitch` average (and hence the homothety
+  `pitch/300` coefficient) is built from truncated estimates. Pinned by `pitch_chan1.bin` (229.9010989...
+  = 20921/91, an integer sum over 91 accepted frames). *Fix candidate:* after parity, divide in `f64`
+  (`rate / argmax_lag as f64`); expect the pitch estimate, homothety coefficient, and all downstream
+  warped-spectrum features to shift slightly.
+
+- **[phase1] `fmath::log` has no `x <= 0` guard; `log(0) = -88.0297f` finite** (`features/ltsv_tdc.rs`
+  `fmath_log`, from `fmath.hpp:713-727`): the bit-trick table log decodes the f32 bit pattern with no
+  domain check, so `fmath_log(0.0)` returns the finite `(0 - 127<<23)*c_log2 + app[0]` = -88.029694
+  instead of `-inf`; the sign bit is IGNORED by all three masks, so `fmath_log(-x) == fmath_log(x)`
+  (a finite wrong value, not NaN). The
+  TDC score relies on this: `-fmath_log(1-MaxPeak)` at `MaxPeak == 1` (min_lag=0, or a perfectly
+  periodic window) yields the finite +88.03-scaled score rather than +inf. Pinned by
+  `fmath_log_sweep.bin` (x=0 entry) and `tdc_r0_is_one_when_min_lag_zero_and_score_finite`. *Fix
+  candidate:* after parity, swap to `f32::ln` (or guard the domain); every tuned TDC threshold moves.
+
+- **[phase1] TDC cross-correlation `mm=0` term double-counts, hence `/2`; crossing polarity mixes
+  strict/non-strict** (`features/ltsv_tdc.rs` `tdc_classify_sequence`, from `TimeDomainCorrel.cpp:59-86`):
+  (a) the shifted cross-correlation `xcor(mm) = sum_nn R[p1+nn]*R[p2+nn+mm] + R[p1+mm+nn]*R[p2+nn]` counts
+  the same product twice at `mm=0`, which the `CrossCorr += tmp_xcorr/2` halving only exactly compensates
+  at `mm=0` (for `mm>0` the two orders are genuinely different shifts, so `/2` averages them); (b) the
+  zero-crossing predicate is keyed on `R[0]`'s sign (R at MIN lag, not lag 0) with asymmetric bounds --
+  `R[ll] > 0 && R[ll+1] <= 0` for the positive branch vs `R[ll] < 0 && R[ll+1] >= 0` for the negative --
+  so a sample landing exactly on 0.0 counts as a crossing in both branches but the entry condition
+  differs in strictness. Also `count` is a `double`. All reproduced verbatim (pinned by `tdc_chan1.bin`
+  and the `tdc_cases.json` cross-language check). *Fix candidate:* after parity, define the crossing
+  predicate symmetrically and normalize the `mm=0` self-term; re-tune-affecting.
+
+- **[phase1] `(1 - MaxPeak)` narrowed to f32 before `fmath::log`, widened back** (`features/ltsv_tdc.rs`
+  `tdc_classify_sequence` return, from `TimeDomainCorrel.cpp:90`): the TDC score's peak term computes
+  `1-MaxPeak` in f64, passes it through the f32-only `fmath::log`, and widens the f32 result back into
+  the f64 balance blend -- two precision cliffs in the hot score path. Reproduced exactly. *Fix
+  candidate:* subsumed by the `fmath::log -> f32::ln` swap above.
+
+- **[phase1] `InputStatistics::from_matrix` has no `n == 0` guard; empty batch yields NaN**
+  (`features/stats.rs` `InputStatistics::from_matrix`, from `InputStatistics.cpp:8-16`): both the mean
+  and std finalization divide by `_NbOfValues` unconditionally; a zero-row input therefore produces
+  `0.0/0 = NaN` mean/std rather than a guarded zero or an error. Reproduced as-is -- callers must not
+  batch zero rows if they want a finite result (the merge path's `update()` handles the actual "no data
+  yet" case via the `n == 0` copy branch, not via a from-empty-matrix batch). *Fix candidate:* after
+  parity, either guard `n == 0` in `from_matrix` or make it return `Option`/`Result`.
+
+- **[phase1] `InputStatistics::update` merge re-squares the STORED std (not variance) in a pinned
+  op order** (`features/stats.rs` `InputStatistics::update`, from `InputStatistics.cpp:39-46`): the
+  accumulator persists `std` (already sqrt'd), so every merge must square each side's std back to a
+  variance-like quantity, add the squared mean-shift term, scale by that side's sample count, sum both
+  sides, divide by the merged count, then `sqrt` once -- in exactly that per-element order (not
+  algebraically reassociated, e.g. not `sqrt(n1)*std1` distributed differently). Because floating-point
+  pooling is not exactly associative, merging in chunks generally produces DIFFERENT bits than a single
+  monolithic batch over the same rows (pinned by the oracle module docstring in `features_oracle.py`
+  and the Rust cross-check `stats_merge_oracle_cross_check_bit_exact`, which asserts the FORMULA, not
+  batch-vs-merge bit-equality). Reproduced exactly. *Fix candidate:* none -- this is inherent to
+  incremental variance/std pooling, not a bug to fix.
+
+- **[phase1] `_LTSVWindowShift != 0.0` guards the LTSVshift read on an UNINITIALIZED member (UB); guard
+  dropped** (`features/pipeline.rs` `FeatureConfig::from_legacy`, from `BLSTMSpectralSegmenter.cpp:50`):
+  the legacy reads `_LTSVWindowShift` from config only `if (_LTSVWindowShift != 0.0)`, but at that point
+  `_LTSVWindowShift` is a default-constructed `double` member with no in-class initializer and an empty
+  ctor body -- so the branch condition reads an INDETERMINATE value (undefined behavior). The port drops
+  the UB guard and reads `LTSVshift` unconditionally when the key is present (the oracle harness does the
+  same, so the golden stays valid; all four variant configs supply `LTSVshift` explicitly). *Fix
+  candidate:* after parity, either give `_LTSVWindowShift` a defined default or make the read
+  unconditional in the legacy (already the effective behavior here).
+
+- **[phase1] LTSV frequency band is RESET to `(0, output_dim-1)` for mel variants, diverging from the
+  spectral band** (E2E composition: `src/rust/tests/phase1_pipeline_golden.rs` + the harness twin
+  `tools/oracle_harness/main.cpp`, from `BLSTMSpectralSegmenter.cpp:270-271` inside the
+  `nb_bins > 0` block): `initSpectralAnalysis` reuses the `freq_beg`/`freq_end` out-params, resetting them
+  to `(0, periodogram_length-1)` where `periodogram_length` becomes `nbFilters` (or `nbDCT` when DCT is
+  active). `getLTSV` then runs over the RAW periodogram's first `output_dim` bins, NOT the spectral band
+  `[freq_beg, freq_end]` used by the raw-band assembly path. So for mel/DCT variants the LTSV score
+  covers periodogram bins `0..output_dim-1` (an arbitrary low-frequency prefix), while the raw-band
+  variant keeps the true spectral band. Reproduced exactly (pinned by `inputseq_{mfcc_deltas,mfcc_sdc,
+  logmel}_chan{1,2}.bin`, whose last column is the LTSV over the reset band). *Fix candidate:* after
+  parity, compute LTSV over the spectral band regardless of mel/DCT, or make the band an explicit
+  parameter rather than an aliased out-param.
+
+- **[phase1] `get_pitch` DC-offset flag was hardcoded `false`; now config-driven** (`features/ltsv_tdc.rs`
+  `get_pitch`, from `BLSTMSpectralSegmenter.cpp:423` `getSequence(..., _FlagDCOffset, ...)`): Task 9's
+  `get_pitch` passed a hardcoded `dc_offset = false` to its `get_sequence` call; the legacy value is the
+  config `_FlagDCOffset`. Task 11 added a `dc_offset: bool` parameter and wires the config flag through.
+  The Task 9 pitch golden was dumped with `dc_offset = false`, so the golden stays valid (both sides pass
+  `false` for that dump). Not a bug per se -- a wiring gap closed; noted for provenance.
+
+## Toolchain deviations
+
+- **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
+
 ### Forward-noted (add the entry when the phase reproduces it)
 
 - **[3/4] `CostFunctionCalib` nnet_out-before-assignment** (Python optimizer) -- a real
   use-before-assign bug flagged in the setup analysis; fix when the Python training loop is ported.
+- **[3/4] OpenMP `InputStatistics` merge-order nondeterminism** (`CorpusProcessor.cpp:171-199`):
+  per-file corpus processing runs under `#pragma omp parallel for schedule(dynamic, 1)`, and each
+  file's `InputStatistics::update` merge into the shared accumulator happens inside `#pragma omp
+  critical` (`:192-196`) -- so the merge ORDER is whichever dynamically-scheduled thread finishes
+  and grabs the critical section first, not corpus/file order. Combined with the already-landed
+  `[phase1]` finding that `InputStatistics::update`'s pooled variance/std merge is not exactly
+  associative in floating point, a multi-threaded legacy run is not bit-reproducible across runs
+  (and a rayon `par_iter` port with a different reduction order will not match any single legacy
+  run bit-for-bit either). Add the concrete `[phase3]`/`[phase4]` entry (with the Rust reduction
+  strategy chosen) once `engine/corpus_processor.rs`'s parallel driver lands.

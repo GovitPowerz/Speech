@@ -6,4 +6,5 @@
 pub mod fft;
 pub mod ltsv_tdc;
 pub mod mel;
+pub mod pipeline;
 pub mod stats;
