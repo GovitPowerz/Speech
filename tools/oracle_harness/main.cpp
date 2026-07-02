@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "ActivationFunctions.h"
 #include "AudioStruct.h"
 #include "BLSTMNeuralNetwork.h"
 #include "ConfigFile.h"
@@ -1511,6 +1512,43 @@ int main(int argc, char** argv) {
                       << " eigen=0x" << std::hex << firstEigenBits
                       << " loop=0x" << firstLoopBits << std::dec << "\n";
         }
+    }
+
+    // --- Phase 2 Task 2: activation sweep -------------------------------------
+    // legacy: ActivationFunctions.h:40-49 (Logistic, INCLUSIVE saturation),
+    // :229-238 (GatesFunction, 0.1 pre-scale, EXCLUSIVE saturation),
+    // :158-160 (Maxmin2 = asinh). expLimit computed via Log.hpp:193-195
+    // (std::log(std::numeric_limits<double>::max())), NOT hardcoded, so the
+    // boundary probes are the exact doubles the C++ saturation branches see.
+    // Dump 4 x N: row0 inputs, row1 GatesFunction::fn, row2 Logistic::fn,
+    // row3 Maxmin2::fn (asinh), via the REAL header structs.
+    {
+        const double expLimit = Log<double>::expLimit;
+        std::vector<double> xs = {
+            0.0, 1.0, -1.0, 10.0, -10.0, 100.0, -100.0,
+            expLimit / 0.1, -expLimit / 0.1,
+            std::nextafter(expLimit / 0.1, 0.0) , -std::nextafter(expLimit / 0.1, 0.0),
+            expLimit, -expLimit,
+            std::nextafter(expLimit, 0.0), -std::nextafter(expLimit, 0.0),
+            -1e4, 0.5, -0.5, 42.0,
+            // Exact boundary inputs GatesFunction::fn actually saturates on: the
+            // input x such that 0.1*x rounds to precisely +-expLimit (algebraic
+            // x = 10*expLimit need not round-trip through 0.1*(10*expLimit) back
+            // to expLimit; these two are the values the harness's own 0.1*x
+            // comparison sees at the boundary).
+            10.0 * expLimit, -10.0 * expLimit,
+        };
+        const int n = static_cast<int>(xs.size());
+        Eigen::MatrixXd sweep(4, n);
+        for (int k = 0; k < n; ++k) {
+            double x = xs[static_cast<size_t>(k)];
+            sweep(0, k) = x;
+            sweep(1, k) = GatesFunction::fn(x);
+            sweep(2, k) = Logistic::fn(x);
+            sweep(3, k) = Maxmin2::fn(x);
+        }
+        Matrix2BinaryFile(out + "act_sweep.bin", sweep);
+        ++dumps;
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

@@ -84,5 +84,10 @@
       }
     }
   },
-  "dumps": {}
+  "dumps": {
+    "act_sweep.bin": {
+      "rows": 4,
+      "cols": 21
+    }
+  }
 }

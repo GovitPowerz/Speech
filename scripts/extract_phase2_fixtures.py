@@ -13,9 +13,9 @@ NN forward port depends on (extends the Phase 1 ``dct_gemm_substitution`` probe)
 The harness reads five input fixtures from its output dir (``excerpt_2ch_8k.wav``
 plus four ``variant_*.config``); those live in ``tests/reference_data/phase1/``.
 To avoid mutating the committed Phase 1 dir, we run the harness in a throwaway temp
-dir seeded with copies of those inputs, keep only the parsed probe results, and
-write the manifest to the Phase 2 dir. Task 1 is measurement-only, so the Phase 2
-dir holds just the manifest (no ``.bin`` dumps yet).
+dir seeded with copies of those inputs, keep the parsed probe results AND the Task 2
+``act_sweep.bin`` dump (copied out into the Phase 2 dir), and write the manifest to
+the Phase 2 dir.
 
 Usage: uv run python scripts/extract_phase2_fixtures.py
 """
@@ -30,6 +30,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from speech.weight_bridge import read_bin
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS_DIR = REPO_ROOT / "tools" / "oracle_harness"
 PHASE1_DIR = REPO_ROOT / "tests" / "reference_data" / "phase1"
@@ -38,6 +40,13 @@ PHASE0_DIR = REPO_ROOT / "tests" / "reference_data" / "phase0"
 
 NN_CONFIG = PHASE0_DIR / "1_worker_1.config"
 NN_WEIGHTS = PHASE0_DIR / "NNweights_config1.bin"
+
+# Dumps the harness produces into its output dir, with their expected (rows, cols).
+# Task 2: act_sweep.bin (4 x N: row0 inputs, row1 GatesFunction, row2 Logistic,
+# row3 Maxmin2/asinh). N = len(xs) in main.cpp's Task 2 sweep block (21 probes).
+EXPECTED_SHAPES = {
+    "act_sweep.bin": (4, 21),
+}
 
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
 HARNESS_INPUTS = [
@@ -128,6 +137,7 @@ def main() -> None:
     # 2. Run it in a throwaway dir seeded with the Phase 1 harness inputs, so the
     #    Phase 1 fixture dir is not mutated. Pass the NN config + weights as absolute
     #    argv (main.cpp resolves argv[2]/argv[3] regardless of cwd).
+    PHASE2_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         for name in HARNESS_INPUTS:
@@ -140,9 +150,22 @@ def main() -> None:
                 str(NN_WEIGHTS),
             ]
         )
+        # Task 2: persist the activation sweep dump into the committed Phase 2 dir
+        # (everything else the harness writes into tmp_dir is feature-stage output
+        # already covered by Phase 1's own fixtures, so only this dump is copied out).
+        for name in EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2_DIR / name)
 
     nb_weights = _parse_nn_real(stdout)
     probes = _parse_nn_probes(stdout)
+
+    # 2b. Read each dump back, verify its shape, and build the inventory.
+    dump_inventory: dict[str, dict[str, int]] = {}
+    for name, (er, ec) in EXPECTED_SHAPES.items():
+        rows, cols, _ = read_bin(PHASE2_DIR / name)
+        if (rows, cols) != (er, ec):
+            raise SystemExit(f"{name}: shape ({rows},{cols}) != expected ({er},{ec})")
+        dump_inventory[name] = {"rows": rows, "cols": cols}
 
     # 3. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -170,10 +193,9 @@ def main() -> None:
             "text": PROBE_TEXT,
             "sites": probes,
         },
-        "dumps": {},
+        "dumps": dump_inventory,
     }
 
-    PHASE2_DIR.mkdir(parents=True, exist_ok=True)
     manifest_path = PHASE2_DIR / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
