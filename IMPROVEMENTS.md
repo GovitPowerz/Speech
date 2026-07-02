@@ -239,6 +239,15 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   either take the sqrt (changing the score's scale/units and every tuned threshold) or rename to stop
   calling it a standard deviation; retrain/re-tune-affecting either way.
 
+- **[phase1] LTSV `ltsv_classify_sequence` mean-only 1e-12 floor quirk** (`features/ltsv_tdc.rs`
+  `ltsv_classify_sequence`, from `LongTermSpectralVariation.cpp:101`): the 1e-12 epsilon floor is
+  applied ONLY to the per-bin window MEAN, never to the numerator `P(t,bin)` in the ratio `r = P/mean`.
+  The legacy guard `if (mean_dzeta < 1e-12) mean_dzeta = 1e-12` prevents division by zero; a naive
+  re-derivation that floors the ratio `r` itself or the numerator `P` diverges from the goldens. Both
+  the unprotected numerator path and the protected-mean ratio are reproduced verbatim (pinned by
+  `ltsv_chan1.bin`/`ltsv_synth.bin`). *Fix candidate:* after parity, revisit whether a symmetric epsilon
+  floor on the ratio (or numerator) is preferable to the asymmetric mean-only floor.
+
 - **[phase1] `computePitch` returns a `long/long` INTEGER-divided pitch estimate** (`features/ltsv_tdc.rs`
   `compute_pitch`, from `BLSTMSpectralSegmenter.cpp:172-192`): the legacy signature is `computePitch(long
   min_lag, long max_lag, long frameRate, ...)` and it returns `frameRate/indiceMaxPeak` -- both `long`, so
