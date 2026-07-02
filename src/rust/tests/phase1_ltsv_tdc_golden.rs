@@ -324,7 +324,7 @@ fn pitch_chan1_scalar_bitexact() {
     let audio = excerpt_audio();
     let tdc = tdc_params();
     let seg = pitch_segmentation(&audio);
-    let got = get_pitch(&audio, &seg, 0, &tdc, 8000.0);
+    let got = get_pitch(&audio, &seg, 0, &tdc, 8000.0, false);
     let want = common::load_bin("pitch_chan1.bin"); // 1 x 1
     assert_eq!((want.nrows(), want.ncols()), (1, 1));
     let wv = want[[0, 0]];
@@ -344,7 +344,7 @@ fn perio_homothety_chan1_bitexact() {
     let audio = excerpt_audio();
     let tdc = tdc_params();
     let seg = pitch_segmentation(&audio);
-    let pitch = get_pitch(&audio, &seg, 0, &tdc, 8000.0);
+    let pitch = get_pitch(&audio, &seg, 0, &tdc, 8000.0, false);
     let coeff = pitch / 300.0;
 
     let perio = common::load_bin("perio_p8_s80_chan1.bin");

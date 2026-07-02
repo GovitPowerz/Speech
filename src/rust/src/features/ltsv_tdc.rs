@@ -335,12 +335,17 @@ pub fn compute_pitch(window: &[f64], min_lag: usize, max_lag: usize, rate: f64) 
 /// end*rate - half_window]` (inclusive, both ends converted with the legacy
 /// truncating `size_type` casts), accumulating accepted pitch estimates. Divides
 /// by the accepted count, or by 1 when the count is 0 (returning the raw sum 0.0).
+///
+/// `dc_offset` is the config `_FlagDCOffset` (`:423` `getSequence(..., _FlagDCOffset,
+/// ...)`); the Task 9 pitch golden was dumped with `dc_offset = false`, so callers
+/// reproducing that golden pass `false`.
 pub fn get_pitch(
     audio: &Audio,
     seg: &Segmentation,
     chan: usize,
     tdc: &TdcParams,
     rate: f64,
+    dc_offset: bool,
 ) -> f64 {
     let mut number_of_frames = 0usize;
     let mut pitch = 0.0f64;
@@ -370,7 +375,7 @@ pub fn get_pitch(
                     chan,
                     jj,
                     tdc.half_window,
-                    false,
+                    dc_offset,
                     coeffs,
                     &mut buf,
                 );

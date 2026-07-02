@@ -106,6 +106,26 @@ EXPECTED_SHAPES = {
     "stats_merged_mean.bin": (1, 50),
     "stats_merged_std.bin": (1, 50),
     "stats_merged_n.bin": (1, 1),
+    # Task 11: end-to-end feature parity gate. Per variant: params (1x8 doubles:
+    # order, window_size, bins, shift_frames, freq_beg, freq_end, ltsv_half_window,
+    # ltsv_shift) + the assembled inputseq per channel. Widths: mfcc_deltas 39 DCT
+    # ([c|dc|ddc], nb_dct=13) + 1 LTSV = 40; mfcc_sdc 103 SDC (12+7*13, ignoreFirst)
+    # + 1 LTSV = 104; logmel 30 filters (snapped 62.5/3812.5 band -> 30, not the raw
+    # 64/3800 bank's 29) + 1 LTSV = 31; rawband 98 raw bins (band 9..106) + 1 LTSV =
+    # 99. The freq_beg/freq_end in params are the PRE-mel spectral band; the LTSV
+    # band for mel variants is (0, output_dim-1) per the :270-271 reset.
+    "params_mfcc_deltas.bin": (1, 8),
+    "inputseq_mfcc_deltas_chan1.bin": (201, 40),
+    "inputseq_mfcc_deltas_chan2.bin": (201, 40),
+    "params_mfcc_sdc.bin": (1, 8),
+    "inputseq_mfcc_sdc_chan1.bin": (201, 104),
+    "inputseq_mfcc_sdc_chan2.bin": (201, 104),
+    "params_logmel.bin": (1, 8),
+    "inputseq_logmel_chan1.bin": (201, 31),
+    "inputseq_logmel_chan2.bin": (201, 31),
+    "params_rawband_ltsv.bin": (1, 8),
+    "inputseq_rawband_ltsv_chan1.bin": (201, 99),
+    "inputseq_rawband_ltsv_chan2.bin": (201, 99),
 }
 
 # The DCT matrix product melPeriodogram*_CoeffsDCT is the feature path's one real

@@ -194,6 +194,54 @@
     "stats_merged_n.bin": {
       "rows": 1,
       "cols": 1
+    },
+    "params_mfcc_deltas.bin": {
+      "rows": 1,
+      "cols": 8
+    },
+    "inputseq_mfcc_deltas_chan1.bin": {
+      "rows": 201,
+      "cols": 40
+    },
+    "inputseq_mfcc_deltas_chan2.bin": {
+      "rows": 201,
+      "cols": 40
+    },
+    "params_mfcc_sdc.bin": {
+      "rows": 1,
+      "cols": 8
+    },
+    "inputseq_mfcc_sdc_chan1.bin": {
+      "rows": 201,
+      "cols": 104
+    },
+    "inputseq_mfcc_sdc_chan2.bin": {
+      "rows": 201,
+      "cols": 104
+    },
+    "params_logmel.bin": {
+      "rows": 1,
+      "cols": 8
+    },
+    "inputseq_logmel_chan1.bin": {
+      "rows": 201,
+      "cols": 31
+    },
+    "inputseq_logmel_chan2.bin": {
+      "rows": 201,
+      "cols": 31
+    },
+    "params_rawband_ltsv.bin": {
+      "rows": 1,
+      "cols": 8
+    },
+    "inputseq_rawband_ltsv_chan1.bin": {
+      "rows": 201,
+      "cols": 99
+    },
+    "inputseq_rawband_ltsv_chan2.bin": {
+      "rows": 201,
+      "cols": 99
     }
   },
   "anchor": {

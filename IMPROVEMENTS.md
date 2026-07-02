@@ -228,6 +228,35 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   batch-vs-merge bit-equality). Reproduced exactly. *Fix candidate:* none -- this is inherent to
   incremental variance/std pooling, not a bug to fix.
 
+- **[phase1] `_LTSVWindowShift != 0.0` guards the LTSVshift read on an UNINITIALIZED member (UB); guard
+  dropped** (`features/pipeline.rs` `FeatureConfig::from_legacy`, from `BLSTMSpectralSegmenter.cpp:50`):
+  the legacy reads `_LTSVWindowShift` from config only `if (_LTSVWindowShift != 0.0)`, but at that point
+  `_LTSVWindowShift` is a default-constructed `double` member with no in-class initializer and an empty
+  ctor body -- so the branch condition reads an INDETERMINATE value (undefined behavior). The port drops
+  the UB guard and reads `LTSVshift` unconditionally when the key is present (the oracle harness does the
+  same, so the golden stays valid; all four variant configs supply `LTSVshift` explicitly). *Fix
+  candidate:* after parity, either give `_LTSVWindowShift` a defined default or make the read
+  unconditional in the legacy (already the effective behavior here).
+
+- **[phase1] LTSV frequency band is RESET to `(0, output_dim-1)` for mel variants, diverging from the
+  spectral band** (`tasks/pipeline` E2E composition, from `BLSTMSpectralSegmenter.cpp:270-271` inside the
+  `nb_bins > 0` block): `initSpectralAnalysis` reuses the `freq_beg`/`freq_end` out-params, resetting them
+  to `(0, periodogram_length-1)` where `periodogram_length` becomes `nbFilters` (or `nbDCT` when DCT is
+  active). `getLTSV` then runs over the RAW periodogram's first `output_dim` bins, NOT the spectral band
+  `[freq_beg, freq_end]` used by the raw-band assembly path. So for mel/DCT variants the LTSV score
+  covers periodogram bins `0..output_dim-1` (an arbitrary low-frequency prefix), while the raw-band
+  variant keeps the true spectral band. Reproduced exactly (pinned by `inputseq_{mfcc_deltas,mfcc_sdc,
+  logmel}_chan{1,2}.bin`, whose last column is the LTSV over the reset band). *Fix candidate:* after
+  parity, compute LTSV over the spectral band regardless of mel/DCT, or make the band an explicit
+  parameter rather than an aliased out-param.
+
+- **[phase1] `get_pitch` DC-offset flag was hardcoded `false`; now config-driven** (`features/ltsv_tdc.rs`
+  `get_pitch`, from `BLSTMSpectralSegmenter.cpp:423` `getSequence(..., _FlagDCOffset, ...)`): Task 9's
+  `get_pitch` passed a hardcoded `dc_offset = false` to its `get_sequence` call; the legacy value is the
+  config `_FlagDCOffset`. Task 11 added a `dc_offset: bool` parameter and wires the config flag through.
+  The Task 9 pitch golden was dumped with `dc_offset = false`, so the golden stays valid (both sides pass
+  `false` for that dump). Not a bug per se -- a wiring gap closed; noted for provenance.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

@@ -15,8 +15,10 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "AudioStruct.h"
+#include "ConfigFile.h"
 #include "CorpusItem.h"
 #include "Helpers.hpp"
 #include "InputStatistics.h"
@@ -354,6 +356,149 @@ static Eigen::MatrixXd applyHomothety(const Eigen::MatrixXd& periodogramMem, dou
         }
     }
     return out;
+}
+
+// --- Task 11: FeatureConfig / SpectralParams derivation ---------------------
+// Faithful transcription of LongTermSpectralVariation::buildFromConf (key reads +
+// sanitization, LongTermSpectralVariation.cpp:44-80), BLSTMSpectralSegmenter::
+// buildFromConf (LTSV/TDC key reads, :44-83), and BLSTMSpectralSegmenter::
+// initSpectralAnalysis (order clamp + sizes + shift quantization + BLSTM-variant
+// freq band + LTSV params, :194-314). The LTSV/TDC classes cannot be compiled
+// standalone (they drag the whole Segmenter hierarchy), so the derivation is
+// transcribed here over the real ConfigFile (a compiled TU) rather than linked.
+//
+// DIVERGENCE NOTE (load-bearing, documented in the task report): the legacy guards
+// the LTSVshift read behind `if (_LTSVWindowShift != 0.0)` (BLSTMSpectralSegmenter
+// .cpp:50) -- but `_LTSVWindowShift` is an uninitialized double member at that
+// point (no in-class initializer, empty ctor body), so that branch reads an
+// INDETERMINATE value (UB). We drop the UB guard and read LTSVshift unconditionally
+// when the key is present; both the harness and the Rust port do the same, so the
+// golden stays valid. All four variant configs supply LTSVshift explicitly.
+struct FeatureCfg {
+    long order;
+    double shift_sec;
+    long conv_size;
+    std::string conv_type;
+    double min_mel;
+    double max_mel;
+    int nb_bins;
+    bool is_log;
+    int nb_dct;
+    bool ignore_first;
+    int deltas_nb;
+    int dd_nb;
+    double min_freq;
+    double max_freq;
+    std::string win_type;
+    double win_param;
+    bool flag_dc;
+    double preemph;
+    int noise_seed;
+    double noise_ratio;
+    double ltsv_window;
+    double ltsv_shift;
+    double tdc_window;
+};
+
+static FeatureCfg readFeatureCfg(ConfigFile& conf, const std::string& p) {
+    FeatureCfg c;
+    // LongTermSpectralVariation::buildFromConf key reads (:44-59, no defaults).
+    c.order = conf.get<long>(p + "_spectrum_order");
+    c.shift_sec = conf.get<double>(p + "_spectrum_shift");
+    c.conv_size = conf.get<long>(p + "_spectrum_temporal_convolution_size");
+    c.conv_type = conf.get<std::string>(p + "_spectrum_temporal_convolution_type");
+    c.min_mel = conf.get<double>(p + "_minMelFreq");
+    c.max_mel = conf.get<double>(p + "_maxMelFreq");
+    c.nb_bins = conf.get<int>(p + "_nb_bins");
+    c.is_log = conf.get<bool>(p + "_is_log_mel");
+    c.nb_dct = conf.get<int>(p + "_nb_DCT");
+    c.ignore_first = conf.get<bool>(p + "_IgnoreFirstDCT");
+    c.deltas_nb = conf.get<int>(p + "_ComputeDeltasNb");
+    c.dd_nb = conf.get<int>(p + "_ComputeDeltaDeltasNb");
+    // minFreq/maxFreq: clamp negatives to 0 BEFORE the swap (:56-59).
+    c.min_freq = conf.get<double>(p + "_minFreq");
+    if (c.min_freq < 0.0) c.min_freq = 0.0;
+    c.max_freq = conf.get<double>(p + "_maxFreq");
+    if (c.max_freq < 0.0) c.max_freq = 0.0;
+    // Mel pair swap + span-widen (:60-69).
+    if (c.max_mel < c.min_mel) { double t = c.min_mel; c.min_mel = c.max_mel; c.max_mel = t; }
+    if (std::abs(c.max_mel - c.min_mel) < 2.0) {
+        double mean = (c.min_mel + c.max_mel) / 2.0;
+        c.max_mel = mean + 1.0;
+        c.min_mel = mean - 1.0;
+    }
+    // Hz pair swap + span-widen (:70-79).
+    if (c.max_freq < c.min_freq) { double t = c.min_freq; c.min_freq = c.max_freq; c.max_freq = t; }
+    if (std::abs(c.max_freq - c.min_freq) < 2.0) {
+        double mean = (c.min_freq + c.max_freq) / 2.0;
+        c.max_freq = mean + 1.0;
+        c.min_freq = mean - 1.0;
+    }
+    // Segmenter::buildFromConf reads used by the derivation (Segmenter.cpp:94-98,
+    // 100-102) + BLSTMSpectralSegmenter LTSV/TDC reads (:48-81).
+    c.win_type = conf.get<std::string>(p + "_windowing_type");
+    c.win_param = conf.get<double>(p + "_windowing_param");
+    c.flag_dc = conf.get<bool>(p + "_flag_DCOffset");
+    c.preemph = conf.get<double>(p + "_preemph_ratio");
+    c.noise_seed = conf.get<int>(p + "_noise_seed");
+    c.noise_ratio = conf.get<double>(p + "_noise_ratio");
+    c.ltsv_window = conf.get<double>(p + "_LTSVwindow", 0.0);
+    if (c.ltsv_window < 0.0) c.ltsv_window = 0.0;
+    // LTSVshift read unconditionally (UB guard dropped, see note above).
+    c.ltsv_shift = conf.get<double>(p + "_LTSVshift");
+    if (c.ltsv_shift < 0.0) c.ltsv_shift = 0.0;
+    c.tdc_window = conf.get<double>(p + "_TDCwindow", 0.0);
+    if (c.tdc_window < 0.0) c.tdc_window = 0.0;
+    return c;
+}
+
+// Derived spectral params (the 8-double params dump order + the freq band the raw
+// path uses). BLSTMSpectralSegmenter::initSpectralAnalysis (:199-311), Max=20.
+struct SpectralP {
+    long order;
+    long window_size;
+    long bins;             // periodogram_length = 2^(order-1)+1
+    long shift_frames;
+    long freq_beg;         // BLSTM-variant band (:229-239), PRE-mel (raw-path band)
+    long freq_end;
+    long ltsv_half_window;
+    long ltsv_shift;
+    double min_freq_snapped;  // freq_beg*freqStep (mel ctor arg)
+    double max_freq_snapped;  // freq_end*freqStep
+};
+
+static SpectralP deriveSpectral(const FeatureCfg& c, double rate, unsigned Max) {
+    SpectralP s;
+    s.order = c.order;
+    if (s.order > (long)Max - 1) s.order = (long)Max - 1;   // clamp to 19 (:199-203)
+    s.window_size = 1 << s.order;
+    long periodogram_length = (1 << (s.order - 1)) + 1;
+    s.bins = periodogram_length;
+    s.shift_frames = (long)boost::math::round(c.shift_sec * rate);   // :208
+    // (audio.hasReadWavFile() is true for the excerpt, so the =80 override is skipped.)
+    // Freq band, BLSTM variant (:229-239). freqStep divides by (periodogram_length-1),
+    // NOT by periodogram_length; the LTSV.cpp variant differs -- this is the BLSTM one.
+    std::vector<double>::size_type freq_beg = 0;
+    std::vector<double>::size_type freq_end = periodogram_length - 1;
+    double freqStep = rate / 2 / freq_end;
+    std::vector<double>::size_type tmp = (std::vector<double>::size_type)std::floor(c.min_freq / freqStep);
+    if (freq_beg < tmp) freq_beg = tmp;
+    if (freq_beg > freq_end) freq_beg = freq_end;
+    tmp = (std::vector<double>::size_type)std::ceil(c.max_freq / freqStep);
+    if (freq_end > tmp) freq_end = tmp;
+    if (freq_end < freq_beg) freq_end = freq_beg;
+    s.freq_beg = (long)freq_beg;
+    s.freq_end = (long)freq_end;
+    s.min_freq_snapped = freq_beg * freqStep;   // :238
+    s.max_freq_snapped = freq_end * freqStep;   // :239
+    // LTSV params (:302-305). R and shift both keyed off shift_frames.
+    long R = (long)boost::math::round(c.ltsv_window * rate / 2.0 / s.shift_frames);
+    if (R < 1) R = 0;
+    long ls = (long)boost::math::round(c.ltsv_shift * rate / s.shift_frames);
+    if (ls < 1) ls = 1;
+    s.ltsv_half_window = R;
+    s.ltsv_shift = ls;
+    return s;
 }
 
 int main(int argc, char** argv) {
@@ -934,6 +1079,131 @@ int main(int argc, char** argv) {
             n(0, 0) = (double) merged._NbOfValues;
             Matrix2BinaryFile(out + "stats_merged_n.bin", n);
             ++dumps;
+        }
+    }
+
+    // --- Task 11: end-to-end feature parity gate -----------------------------
+    // legacy: BLSTMSpectralSegmenter::initSpectralAnalysis (:194-314) for the param
+    // derivation + getBLSTMInputSequence (:561-591) for the assembly. Per variant:
+    // parse the config with the real ConfigFile, derive params, decode a FRESH
+    // AudioStruct (offset 0.35, dur 2.0), applyPreemph per config (0.97), skip
+    // noise (seed 0), build the periodogram per channel, build the mel bank per
+    // config, assemble per getBLSTMInputSequence, and dump inputseq_<v>_chan{1,2}
+    // + params_<v> (1 x 8 doubles: order, window_size, bins, shift_frames, freq_beg,
+    // freq_end, ltsv_half_window, ltsv_shift).
+    //
+    // DCT NOTE: the legacy computeSegmentPeriodogramEstimates applies the filterbank
+    // + DCT internally via the Eigen GEMM. Per the Task 7 lock the DCT product is
+    // replaced by the ascending triple loop (applyDCTLoop above), so here the
+    // periodogram is computed with an EMPTY mel bank, then applyFilterBank + (when
+    // nb_dct>0) applyDCTLoop are applied explicitly -- matching the Rust port's
+    // periodogram -> apply_filter_bank -> apply_dct path.
+    {
+        const unsigned Min = 1;
+        const unsigned Max = 20;
+        Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+        FactoryInit<GFFTList<GFFT, Min, Max>::Result>::apply(gfft_factory);
+
+        const char* variants[] = {"mfcc_deltas", "mfcc_sdc", "logmel", "rawband_ltsv"};
+        for (const char* variant : variants) {
+            std::string cfgPath = out + "variant_" + variant + ".config";
+            ConfigFile conf(cfgPath);
+            FeatureCfg c = readFeatureCfg(conf, "BLSTM");
+
+            CorpusItem vitem(wav, "", "RUS", "RU", 0, 0, 1.0);
+            AudioStruct vaudio(OFFSET_SEC, MAX_DUR_SEC, 0, vitem);
+            const double RATE = (double)vaudio.getFrameRate();
+            SpectralP s = deriveSpectral(c, RATE, Max);
+
+            if (c.preemph > 0) vaudio.applyPreemph(c.preemph);
+            // noise skipped: noise_seed == 0 in every variant config (:222-227).
+
+            // params dump (1 x 8 doubles).
+            {
+                Eigen::MatrixXd params(1, 8);
+                params(0, 0) = (double)s.order;
+                params(0, 1) = (double)s.window_size;
+                params(0, 2) = (double)s.bins;
+                params(0, 3) = (double)s.shift_frames;
+                params(0, 4) = (double)s.freq_beg;
+                params(0, 5) = (double)s.freq_end;
+                params(0, 6) = (double)s.ltsv_half_window;
+                params(0, 7) = (double)s.ltsv_shift;
+                Matrix2BinaryFile(out + "params_" + variant + ".bin", params);
+                ++dumps;
+            }
+
+            // Mel bank per config, built with the SNAPPED freq band (:241 passes the
+            // reassigned _MinFreq/_MaxFreq) and spectrum_size = periodogram_length-1.
+            MelFilterBank mel;
+            if (c.nb_bins > 0) {
+                mel = MelFilterBank(c.min_mel, c.max_mel, c.nb_bins, s.min_freq_snapped,
+                                    s.max_freq_snapped, RATE, s.bins - 1, c.is_log, c.nb_dct,
+                                    c.ignore_first, c.deltas_nb, c.dd_nb);
+            }
+
+            // DCT coeffs (reconstructed by the ctor formula, as the Task 7 block does).
+            const double PI = 3.14159265358979323846264338327;
+            long nbFilters = mel.notEmpty() ? (long)mel.getNbFilters() : 0;
+            long nbDct = c.nb_dct;
+            if (nbDct > nbFilters) nbDct = nbFilters;   // ctor clamp (MelFilterBank.cpp)
+            Eigen::MatrixXd coeffs;
+            if (c.nb_bins > 0 && c.nb_dct > 0) {
+                coeffs = Eigen::MatrixXd::Zero(nbFilters, nbDct);
+                for (long col = 0; col < nbFilters; ++col)
+                    for (long row = 0; row < nbDct; ++row)
+                        coeffs(col, row) = std::cos(PI / nbFilters * (col + 0.5) * row);
+            }
+
+            Eigen::MatrixXd win = getWindowingCoefficients(c.win_type, false, s.window_size + 1, c.win_param);
+            Eigen::MatrixXd noConv;
+            MelFilterBank emptyMel;
+            const long long endFull = vaudio.getFrameCount() - 1;
+
+            for (int chan = 0; chan < 2; ++chan) {
+                // Periodogram with an EMPTY bank (see DCT NOTE); flag_DCOffset per config.
+                vaudio.computeSegmentPeriodogramEstimates(s.order, s.shift_frames, chan, c.flag_dc,
+                                                          win, emptyMel, gfft_factory, noConv, 0, endFull);
+                Eigen::MatrixXd perio = vaudio._Periodogram;
+
+                // getBLSTMInputSequence assembly (:568-576), spectral path priority
+                // DCT -> filterbank -> raw-band log.
+                Eigen::MatrixXd inputSeq;
+                if (mel.notEmpty()) {
+                    Eigen::MatrixXd fb = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+                    mel.applyFilterBank(perio, fb);
+                    if (c.nb_dct > 0) {
+                        inputSeq = applyDCTLoop(fb, coeffs, (int)nbDct, c.ignore_first, c.deltas_nb, c.dd_nb);
+                    } else {
+                        inputSeq = fb;
+                    }
+                } else {
+                    // raw-band path: ln(block(:, freq_beg..freq_end) + 1e-24) (:575).
+                    inputSeq = (((perio.block(0, s.freq_beg, perio.rows(),
+                                              s.freq_end - s.freq_beg + 1).array() + 1e-24).log()).matrix());
+                }
+
+                // LTSV column (getLTSV, :678), appended when R >= 1. LOAD-BEARING band
+                // asymmetry: initSpectralAnalysis RESETS freq_beg/freq_end to
+                // (0, output_dim-1) inside the nb_bins>0 block (:270-271, output_dim =
+                // nbDCT when nbDCT>0 else nbFilters), so for mel variants getLTSV runs
+                // over the RAW periodogram's FIRST output_dim bins, NOT the spectral
+                // band. For the raw-band variant (nb_bins==0) the band stays spectral
+                // (s.freq_beg/s.freq_end). output_dim == inputSeq.cols() here.
+                if (s.ltsv_half_window > 0) {
+                    long ltsv_beg = mel.notEmpty() ? 0 : s.freq_beg;
+                    long ltsv_end = mel.notEmpty() ? (long)inputSeq.cols() - 1 : s.freq_end;
+                    Eigen::MatrixXd ltsv = getLTSV(perio, s.ltsv_half_window, s.ltsv_shift,
+                                                   ltsv_beg, ltsv_end);
+                    Eigen::MatrixXd merged(inputSeq.rows(), inputSeq.cols() + 1);
+                    merged << inputSeq, ltsv;
+                    inputSeq = merged;
+                }
+
+                Matrix2BinaryFile(out + "inputseq_" + variant + "_chan" +
+                                      std::to_string(chan + 1) + ".bin", inputSeq);
+                ++dumps;
+            }
         }
     }
 
