@@ -12,7 +12,12 @@ mod common;
 
 use ndarray::Array2;
 use serde::Deserialize;
-use speech::features::ltsv_tdc::{get_ltsv, ltsv_classify_sequence};
+use speech::features::ltsv_tdc::{
+    apply_homothety, compute_pitch, fmath_log, get_ltsv, get_pitch, ltsv_classify_sequence,
+    tdc_classify_sequence,
+};
+use speech::features::pipeline::TdcParams;
+use speech::tasks::segmentation::{SegClass, Segmentation};
 
 fn synth_20x50() -> Array2<f64> {
     common::load_bin("synth_20x50.bin")
@@ -208,6 +213,244 @@ fn ltsv_oracle_cross_check_bit_exact() {
             case.half_window,
             case.freq_beg,
             case.freq_end,
+            got.to_bits(),
+            case.expected.to_bits(),
+            case.expected
+        );
+    }
+}
+
+// === Task 9: fmath::log + TDC + pitch + homothety ==========================
+
+/// TdcParams derived inline from the brief config (TDC_window=0.032, TDC_shift=0.01,
+/// lags=(0.002,0.016), balance=0.7 @ rate 8000): half_window=128, full_window=257,
+/// shift=80, min_lag=16, max_lag=128, hamming-257 window (param 0.8). Matches the
+/// harness derivation verbatim.
+fn tdc_params() -> TdcParams {
+    let coeffs = speech::audio::windowing_coefficients("hamming", false, 257, 0.8);
+    TdcParams {
+        half_window: 128,
+        full_window: 257,
+        shift: 80,
+        min_lag: 16,
+        max_lag: 128,
+        coeffs,
+        balance: 0.7,
+    }
+}
+
+/// Preemph+noise excerpt audio (chan 0), the same recipe every earlier phase-1
+/// audio golden uses (offset 0.35, dur 2.0, preemph 0.97, noise 0.001).
+fn excerpt_audio() -> speech::audio::Audio {
+    let mut audio = speech::audio::read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0)
+        .expect("decode excerpt");
+    audio.apply_preemph(0.97);
+    audio.apply_noise(0.001);
+    audio
+}
+
+// --- Golden: fmath_log sweep (2 x N: row0 input, row1 fmath::log(input)) -----
+
+#[test]
+fn fmath_log_sweep_bitexact() {
+    let want = common::load_bin("fmath_log_sweep.bin"); // 2 x N
+    assert_eq!(want.nrows(), 2);
+    for k in 0..want.ncols() {
+        let x = want[[0, k]] as f32; // input was dumped as f32 widened to f64
+        let got = fmath_log(x) as f64;
+        let expect = want[[1, k]];
+        assert_eq!(
+            got.to_bits(),
+            expect.to_bits(),
+            "fmath_log col {k} x={x}: rust=0x{:016x} ({got}) want=0x{:016x} ({expect})",
+            got.to_bits(),
+            expect.to_bits()
+        );
+    }
+}
+
+// --- Golden: TDC score column over the excerpt (chan 0) ----------------------
+
+#[test]
+fn tdc_chan1_column_bitexact() {
+    let audio = excerpt_audio();
+    let tdc = tdc_params();
+    let coeffs = tdc.coeffs.as_deref();
+    let frames = audio.data.ncols();
+    let vec_size = if (frames / tdc.shift) * tdc.shift == frames {
+        frames / tdc.shift
+    } else {
+        frames / tdc.shift + 1
+    };
+    let mut buf = Array2::<f64>::zeros((1, tdc.full_window));
+    let mut got = vec![0.0f64; vec_size];
+    let mut jj = 0usize;
+    while jj < frames {
+        speech::audio::get_sequence(&audio.data, 0, jj, tdc.half_window, false, coeffs, &mut buf);
+        let seq = buf.row(0).to_vec();
+        got[jj / tdc.shift] = tdc_classify_sequence(&seq, tdc.min_lag, tdc.max_lag, tdc.balance);
+        jj += tdc.shift;
+    }
+
+    let want = common::load_bin("tdc_chan1.bin"); // 1 x frames
+    assert_eq!(want.nrows(), 1);
+    assert_eq!(got.len(), want.ncols());
+    for (i, gv) in got.iter().enumerate() {
+        let wv = want[[0, i]];
+        assert_eq!(
+            gv.to_bits(),
+            wv.to_bits(),
+            "tdc_chan1 frame {i}: rust=0x{:016x} ({gv}) want=0x{:016x} ({wv})",
+            gv.to_bits(),
+            wv.to_bits()
+        );
+    }
+}
+
+// --- Golden: pitch scalar over a hand-built segmentation ---------------------
+
+/// Single SPEECH segment covering the middle 1.0s of the ~2s excerpt: [0.5s, 1.5s).
+/// Boundary list Other@0.0, Speech@0.5, Other@1.5, End@duration -- the exact segment
+/// the harness's `pitch_chan1.bin` used (documented in the manifest).
+fn pitch_segmentation(audio: &speech::audio::Audio) -> Segmentation {
+    let duration = audio.data.ncols() as f64 / 8000.0;
+    let mut seg = Segmentation::new(duration);
+    seg.label_segment(0.5, 1.5, SegClass::Speech);
+    seg
+}
+
+#[test]
+fn pitch_chan1_scalar_bitexact() {
+    let audio = excerpt_audio();
+    let tdc = tdc_params();
+    let seg = pitch_segmentation(&audio);
+    let got = get_pitch(&audio, &seg, 0, &tdc, 8000.0);
+    let want = common::load_bin("pitch_chan1.bin"); // 1 x 1
+    assert_eq!((want.nrows(), want.ncols()), (1, 1));
+    let wv = want[[0, 0]];
+    assert_eq!(
+        got.to_bits(),
+        wv.to_bits(),
+        "pitch: rust=0x{:016x} ({got}) want=0x{:016x} ({wv})",
+        got.to_bits(),
+        wv.to_bits()
+    );
+}
+
+// --- Golden: homothety warp of the chan-1 periodogram ------------------------
+
+#[test]
+fn perio_homothety_chan1_bitexact() {
+    let audio = excerpt_audio();
+    let tdc = tdc_params();
+    let seg = pitch_segmentation(&audio);
+    let pitch = get_pitch(&audio, &seg, 0, &tdc, 8000.0);
+    let coeff = pitch / 300.0;
+
+    let perio = common::load_bin("perio_p8_s80_chan1.bin");
+    let got = apply_homothety(&perio, coeff);
+    let want = common::load_bin("perio_homothety_chan1.bin");
+    common::assert_bits_eq(&got, &want, "perio_homothety_chan1");
+}
+
+// --- Unit tests (brief) ------------------------------------------------------
+
+#[test]
+// The brief's pinned literal -88.029694 is kept verbatim; clippy notes -88.02969
+// parses to the same f32 (0xc2b00f34) but the longer form matches the dump printout.
+#[allow(clippy::excessive_precision)]
+fn fmath_log_at_zero_is_finite() {
+    // fmath.hpp:713-727 - no x<=0 guard; log(0f) = (0 - (127<<23)) as f32 * c_log2
+    // + app[0] + 0. Pinned literal verified against fmath_log_sweep.bin (0xc2b00f34).
+    let v = fmath_log(0.0);
+    assert!(v.is_finite());
+    assert_eq!(v, -88.029694);
+    assert_eq!(v.to_bits(), 0xc2b00f34);
+}
+
+#[test]
+fn tdc_r0_is_one_when_min_lag_zero_and_score_finite() {
+    // min_lag=0 -> R[0] is the lag-0 autocorrelation == 1 -> MaxPeak >= 1 ->
+    // fmath_log(1 - MaxPeak) evaluated at <= 0 (finite, no guard).
+    let w: Vec<f64> = (0..9).map(|i| ((i * 7) % 5) as f64 - 2.0).collect();
+    let s = tdc_classify_sequence(&w, 0, 4, 0.7);
+    assert!(s.is_finite());
+}
+
+#[test]
+fn tdc_fewer_than_three_crossings_zero_crosscorr() {
+    // All-ones, min_lag=1, max_lag=3: R[k] = (5-k)/5 for k=1..3 -> R = [4/5,3/5,2/5],
+    // monotone decreasing and strictly positive -> NO zero crossing -> CrossCorr=0,
+    // so score = balance*(-fmath_log(1 - MaxPeak)) with MaxPeak = 4/5 (the brief's
+    // comment mis-stated r_max as 3/5; the actual peak is R[1]=4/5).
+    let w = vec![1.0, 1.0, 1.0, 1.0, 1.0];
+    let s = tdc_classify_sequence(&w, 1, 3, 0.5);
+    let r_max = (4.0f64 / 5.0).max((3.0f64 / 5.0).max(2.0f64 / 5.0));
+    assert_eq!(s, 0.5 * (-(fmath_log((1.0 - r_max) as f32) as f64)));
+}
+
+#[test]
+fn compute_pitch_accepts_inside_band() {
+    // A window whose dominant lag lands inside (rate/max_lag, rate/min_lag).
+    // Period-4 square wave at rate 8000, min_lag=2, max_lag=6: argmax lag = 4 ->
+    // est = 8000/4 = 2000, band = (8000/6, 8000/2) = (1333.3, 4000) -> accepted.
+    let w: Vec<f64> = (0..40)
+        .map(|i| if (i / 2) % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
+    let est = compute_pitch(&w, 2, 6, 8000.0);
+    assert_eq!(est, Some(2000.0));
+}
+
+#[test]
+fn homothety_interpolates_bins() {
+    // coeff=0.5: out[0][2] = pos=(int)(0.5*2)=1, alpha=0 -> exactly p[0][1] = 2.0.
+    let p = ndarray::arr2(&[[1.0, 2.0, 3.0, 4.0]]);
+    let out = apply_homothety(&p, 0.5);
+    assert_eq!(out[[0, 2]], 2.0);
+}
+
+#[test]
+fn homothety_alpha_zero_is_exact_copy() {
+    // coeff=1.0: pos=ii, alpha=0 for every column -> out == p (identity copy),
+    // except the last column ii=cols-1 whose pos+1 is out of bounds but alpha=0 so
+    // the (1-alpha)*p(t,pos) term is exact.
+    let p = ndarray::arr2(&[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+    let out = apply_homothety(&p, 1.0);
+    common::assert_bits_eq(&out, &p, "homothety identity");
+}
+
+// --- Rust == Python tdc_oracle cross-check ----------------------------------
+
+#[derive(Deserialize)]
+struct TdcCase {
+    window: Vec<f64>,
+    min_lag: usize,
+    max_lag: usize,
+    balance: f64,
+    expected: f64,
+}
+
+#[test]
+fn tdc_oracle_cross_check_bit_exact() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase1/tdc_cases.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let cases: Vec<TdcCase> = serde_json::from_str(&text).unwrap();
+    assert!(
+        cases.len() >= 4,
+        "expected >= 4 tdc cases, got {}",
+        cases.len()
+    );
+
+    for (idx, case) in cases.iter().enumerate() {
+        let got = tdc_classify_sequence(&case.window, case.min_lag, case.max_lag, case.balance);
+        assert_eq!(
+            got.to_bits(),
+            case.expected.to_bits(),
+            "tdc case {idx} min_lag={} max_lag={} balance={}: rust=0x{:016x} ({got}) py=0x{:016x} ({})",
+            case.min_lag,
+            case.max_lag,
+            case.balance,
             got.to_bits(),
             case.expected.to_bits(),
             case.expected

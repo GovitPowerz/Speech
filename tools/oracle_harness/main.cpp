@@ -21,6 +21,7 @@
 #include "Helpers.hpp"
 #include "MelFilterBank.h"
 #include "fft.hpp"
+#include "fmath.hpp"
 
 // Constants ALL later tasks reuse (kept in sync with the harness manifest).
 static const double OFFSET_SEC = 0.35;   // offset skip: round(rate*0.35) frames
@@ -237,6 +238,121 @@ static Eigen::MatrixXd getLTSV(const Eigen::MatrixXd& periodogram,
         }
     }
     return LTSV;
+}
+
+// legacy: TimeDomainCorrel.cpp:36-91 (classifySequence), transcribed VERBATIM
+// (member -> free function: `this->` state dropped, `_Balance` passed as the
+// `balance` param). `windowed_signal` is a 1 x N Eigen row vector; the body is
+// byte-for-byte the legacy except the class member `_Balance` -> `balance` and
+// `fmath::log` kept as-is (the scalar bit-trick log we double-pin against Rust).
+static double tdcClassifySequence(long min_lag, long max_lag, double balance,
+                                  const Eigen::MatrixXd& windowed_signal) {
+    // Max correlation peak
+    Eigen::DenseIndex length_signal = windowed_signal.cols();
+    Eigen::VectorXd R = Eigen::VectorXd::Zero(max_lag-min_lag+1);
+    double MaxPeak = -1e20;
+    double adim = windowed_signal.squaredNorm();
+    if (adim < 1e-12) adim = 1e-12;
+    Eigen::DenseIndex indice;
+    for (Eigen::DenseIndex kk = min_lag; kk <= max_lag; ++kk) {
+        indice = kk-min_lag;
+        Eigen::DenseIndex length = length_signal-kk;
+        R[indice] = (windowed_signal.block(0,0,1,length).array()*windowed_signal.block(0,kk,1,length).array()).sum()/adim;
+        if (R[indice] > MaxPeak) {
+            MaxPeak = R[indice];
+        }
+    }
+
+    // Cross-correlation
+    double CrossCorr = 0.0;
+    Eigen::DenseIndex period1_start = 0;
+    Eigen::DenseIndex period2_start = 0;
+    Eigen::DenseIndex period3_start = 0;
+    double count = 0;
+    for (Eigen::DenseIndex ll = 0 ; ll < max_lag-min_lag ; ++ll) {
+        if (((R[0] >= 0) && (R[ll] > 0) && (R[ll+1] <= 0)) || ((R[0] < 0) && (R[ll] < 0) && (R[ll+1] >= 0))) {
+            if (period1_start == 0) {
+                period1_start = ll+1;
+            } else {
+                if (period2_start == 0) {
+                    period2_start = ll+1;
+                } else {
+                    period3_start = ll+1;
+                    Eigen::DenseIndex min_size = period2_start-period1_start+1;
+                    Eigen::DenseIndex size2 = period3_start-period2_start+1;
+                    if (min_size > size2) min_size = size2;
+                    double tmp_xcorr = -1e12;
+                    for (Eigen::DenseIndex mm = 0 ; mm < min_size ; ++mm) {
+                        double xcor = 0;
+                        for (Eigen::DenseIndex nn = 0 ; nn < min_size-mm ; ++nn) {
+                            xcor += R[period1_start+nn]*R[period2_start+nn+mm]+R[period1_start+mm+nn]*R[period2_start+nn];
+                        }
+                        if (tmp_xcorr < xcor) tmp_xcorr = xcor;
+                    }
+                    CrossCorr = CrossCorr+tmp_xcorr/2;
+                    period1_start = period2_start;
+                    period2_start = period3_start;
+                    ++count;
+                }
+            }
+        }
+    }
+    if (count != 0) {
+        CrossCorr = (CrossCorr/count);
+    }
+    return balance*(-fmath::log(1-MaxPeak))+(1-balance)*CrossCorr;
+}
+
+// legacy: BLSTMSpectralSegmenter.cpp:172-192 (computePitch), transcribed VERBATIM
+// (member -> free function). Returns frameRate/indiceMaxPeak (a raw estimate; the
+// accept/reject bounds live in getPitch below).
+static double computePitch(long min_lag, long max_lag, long frameRate,
+                           const Eigen::Ref<const Eigen::MatrixXd> windowed_signal) {
+    // Max correlation peak
+    Eigen::DenseIndex length_signal = windowed_signal.cols();
+    Eigen::VectorXd R = Eigen::VectorXd::Zero(max_lag-min_lag+1);
+    double MaxPeak = -1e20;
+    double adim = windowed_signal.squaredNorm();
+    if (adim < 1e-12) adim = 1e-12;
+    Eigen::DenseIndex indice;
+    long indiceMaxPeak = min_lag;
+    for (Eigen::DenseIndex kk = min_lag; kk <= max_lag; ++kk) {
+        indice = kk-min_lag;
+        Eigen::DenseIndex length = length_signal-kk;
+        R[indice] = (windowed_signal.block(0,0,1,length).array()*windowed_signal.block(0,kk,1,length).array()).sum()/adim;
+        if (R[indice] > MaxPeak) {
+            MaxPeak = R[indice];
+            indiceMaxPeak = kk;
+        }
+    }
+
+    return frameRate/indiceMaxPeak;
+}
+
+// legacy: BLSTMSpectralSegmenter.cpp:762-775 (the homothety warp loop inside
+// getSegmentation), transcribed VERBATIM as a free function over `periodogramMem`
+// (the snapshot the legacy takes) writing a fresh output matrix (the legacy writes
+// back into audio._Periodogram). `coeff_homo` is the legacy pitch/300. `pos`/`pos+1`
+// index COLUMNS; the bounds checks are against periodogramMem.cols() exactly as
+// written -- Eigen's cols() returns a SIGNED Eigen::Index, so `pos < cols()` is a
+// signed comparison (the `pos >= 0` / `pos+1 >= 0` guards are load-bearing).
+static Eigen::MatrixXd applyHomothety(const Eigen::MatrixXd& periodogramMem, double coeff_homo) {
+    Eigen::MatrixXd out = Eigen::MatrixXd::Zero(periodogramMem.rows(), periodogramMem.cols());
+    for (std::vector<double>::size_type ii = 0 ; ii < (std::vector<double>::size_type) periodogramMem.cols() ; ++ii) {
+        for (std::vector<double>::size_type jj = 0 ; jj < (std::vector<double>::size_type) periodogramMem.rows() ; ++jj) {
+            int pos = (int) (coeff_homo*ii);
+            double alpha = coeff_homo*ii-pos;
+            double tmp = 0.0;
+            if ((pos >= 0)&&(pos < periodogramMem.cols())) {
+                tmp += (1-alpha)*periodogramMem(jj,pos);
+            }
+            if ((pos+1 >= 0)&&(pos+1 < periodogramMem.cols())) {
+                tmp += alpha*periodogramMem(jj,pos+1);
+            }
+            out(jj,ii) = tmp;
+        }
+    }
+    return out;
 }
 
 int main(int argc, char** argv) {
@@ -619,6 +735,161 @@ int main(int argc, char** argv) {
         Eigen::MatrixXd ltsvSynth = getLTSV(synth, 3, 1, 0, 49);
         Matrix2BinaryFile(out + "ltsv_synth.bin", ltsvSynth);
         ++dumps;
+    }
+
+    // --- fmath::log sweep (Task 9) -------------------------------------------
+    // legacy: fmath.hpp:186-226 (LogVar table build) + :713-727 (scalar log eval),
+    // the 2048-entry f32 table-log. Dump 2 x N: row0 = input (f32 widened to f64),
+    // row1 = fmath::log(input) (f32 result widened to f64). Sweep list = the brief's
+    // explicit values PLUS the four table-index anchors 1+i/2048 for i in {0,1,
+    // 1023,2047} and nextafterf neighbors of the mantissa table boundaries (the
+    // b1-mask edges at 1.0, 1.5=idx1024, and just under 2.0=idx2047) so the golden
+    // pins the idx-quantization edges, not just the interior.
+    {
+        std::vector<float> xs;
+        // Brief's explicit sweep.
+        xs.push_back(1e-24f);
+        xs.push_back(1e-12f);
+        xs.push_back(0.5f);
+        xs.push_back(1.0f - std::ldexp(1.0f, -24));  // 1.0 - 2^-24
+        xs.push_back(1.0f);
+        xs.push_back(1.5f);
+        xs.push_back(2.0f);
+        xs.push_back(88.0f);
+        xs.push_back(1e10f);
+        xs.push_back(0.0f);
+        // Table-index anchors 1 + i/2048 for i in {0,1,1023,2047}.
+        for (int i : {0, 1, 1023, 2047}) {
+            xs.push_back((float)(1.0 + (double)i / 2048.0));
+        }
+        // nextafterf neighbors of the table boundaries (idx quantization edges).
+        for (float boundary : {1.0f, 1.5f, 2.0f}) {
+            xs.push_back(std::nextafterf(boundary, 0.0f));  // toward smaller
+            xs.push_back(std::nextafterf(boundary, 3.0f));  // toward larger
+        }
+        Eigen::MatrixXd sweep(2, (Eigen::Index) xs.size());
+        for (Eigen::Index k = 0; k < (Eigen::Index) xs.size(); ++k) {
+            sweep(0, k) = (double) xs[(size_t) k];
+            sweep(1, k) = (double) fmath::log(xs[(size_t) k]);
+        }
+        Matrix2BinaryFile(out + "fmath_log_sweep.bin", sweep);
+        ++dumps;
+    }
+
+    // --- TDC scores + pitch + homothety (Task 9) -----------------------------
+    // legacy: TimeDomainCorrel.cpp:36-91 (classifySequence) + :100-236 (getSegmentation
+    // frame loop) for the TDC score column; BLSTMSpectralSegmenter.cpp:399-437 (getPitch)
+    // for the pitch scalar; :762-775 (homothety warp) for the periodogram warp. TdcParams
+    // derived inline from the brief config: TDC_window=0.032, TDC_shift=0.01,
+    // lags=(0.002,0.016), balance=0.7 at rate 8000 (TimeDomainCorrel.cpp:100-109):
+    //   half_window = round(0.032*8000/2) = 128, full_window = 2*128+1 = 257,
+    //   window_shift = round(0.01*8000) = 80,
+    //   min_lag = round(0.002*8000) = 16, max_lag = round(0.016*8000) = 128 (< 257),
+    //   hamming-257 window with param 0.8.
+    {
+        // Re-derive the same audio the earlier stages produced: the excerpt is
+        // decoded fresh, then preemph + noise applied (matching the audio-stage
+        // dumps at the top of main). `audio._Data` above already carries preemph +
+        // noise (applyPreemph + applyNoise were called on the single AudioStruct),
+        // so we reuse it directly here -- no second decode.
+        const double RATE = (double) audio.getFrameRate();
+        const long half_window = (long) boost::math::round(0.032 * RATE / 2.0);   // 128
+        const long full_window = 2 * half_window + 1;                             // 257
+        long window_shift = (long) boost::math::round(0.01 * RATE);               // 80
+        long min_lag = (long) boost::math::round(0.002 * RATE);                   // 16
+        long max_lag = (long) boost::math::round(0.016 * RATE);                   // 128
+        if (max_lag >= full_window) max_lag = full_window - 1;
+        const double balance = 0.7;
+        Eigen::MatrixXd tdcWin = getWindowingCoefficients("hamming", false, full_window, 0.8);
+
+        // (b) TDC score column over the excerpt (chan 0), single-threaded transcription
+        // of the getSegmentation frame loop (TimeDomainCorrel.cpp:178-204): vec_size is
+        // the inclusive-count ceil-divide of frameCount by window_shift; per jj = 0,
+        // shift, 2*shift, ... < frameCount, get the windowed sequence and classify. The
+        // OMP pragma is dropped (deterministic sequential order is the parity target).
+        {
+            const long frameCount = (long) audio.getFrameCount();
+            long vec_size;
+            if ((frameCount / window_shift) * window_shift == frameCount) {
+                vec_size = frameCount / window_shift;
+            } else {
+                vec_size = frameCount / window_shift + 1;
+            }
+            Eigen::MatrixXd result_vec = Eigen::MatrixXd::Zero(1, vec_size);
+            Eigen::MatrixXd windowed_signal = Eigen::MatrixXd::Zero(1, full_window);
+            for (long jj = 0; jj < frameCount; jj += window_shift) {
+                audio.getSequence(jj, half_window, 0, false, tdcWin, windowed_signal);
+                result_vec(0, jj / window_shift) = tdcClassifySequence(min_lag, max_lag, balance, windowed_signal);
+            }
+            Matrix2BinaryFile(out + "tdc_chan1.bin", result_vec);
+            ++dumps;
+        }
+
+        // (c) Pitch scalar over a hand-built segmentation: a SINGLE SPEECH segment
+        // covering the middle 1.0s of the 2.0s excerpt. frameCount = 16001 @ 8000 Hz
+        // -> 2.000125s duration; the segment spans [0.5s, 1.5s). Boundary list:
+        //   Other@0.0, Speech@0.5, Other@1.5, End@duration.
+        // getPitch iterates SPEECH segments; per segment frames step window_shift over
+        // [begin*rate + half_window, end*rate - half_window], accepting estimates
+        // strictly inside (rate/max_lag, rate/min_lag) (BLSTMSpectralSegmenter.cpp:399-437).
+        double pitch = 0.0;
+        {
+            const long frameCount = (long) audio.getFrameCount();
+            const double duration = ((double) frameCount) / RATE;
+            const double segBegin = 0.5;
+            const double segEnd = 1.5;
+            // getPitch frame-range arithmetic (transcribed verbatim), specialized to
+            // the one SPEECH segment [segBegin, segEnd):
+            Eigen::MatrixXd windowed_signal = Eigen::MatrixXd::Zero(1, full_window);
+            int numberOfFrames = 0;
+            std::vector<double>::size_type rowBegin =
+                ((std::vector<double>::size_type)(segBegin * RATE)) + (std::vector<double>::size_type) half_window;
+            std::vector<double>::size_type rowEnd =
+                ((std::vector<double>::size_type)(segEnd * RATE));
+            if (rowEnd > (std::vector<double>::size_type) half_window) {
+                rowEnd -= (std::vector<double>::size_type) half_window;
+            } else {
+                rowEnd = 0;
+            }
+            if (rowEnd >= rowBegin) {
+                for (std::vector<double>::size_type jj = rowBegin; jj <= rowEnd; jj += window_shift) {
+                    audio.getSequence(jj, half_window, 0, false, tdcWin, windowed_signal);
+                    double pitchEstimate = computePitch(min_lag, max_lag, (long) RATE, windowed_signal);
+                    if ((pitchEstimate > RATE / ((double) max_lag)) && (pitchEstimate < RATE / ((double) min_lag))) {
+                        pitch += pitchEstimate;
+                        ++numberOfFrames;
+                    }
+                }
+            }
+            if (numberOfFrames == 0) numberOfFrames = 1;
+            pitch = pitch / numberOfFrames;
+            (void) duration;
+            Eigen::MatrixXd pitchMat(1, 1);
+            pitchMat(0, 0) = pitch;
+            Matrix2BinaryFile(out + "pitch_chan1.bin", pitchMat);
+            ++dumps;
+        }
+
+        // (d) Homothety warp of the chan-1 periodogram with coeff = pitch/300.
+        // Recompute the chan-1 periodogram (perio_p8_s80_chan1 recipe: p=8, shift=80,
+        // dc_offset=TRUE, hamming-257, empty mel, no conv) on the SAME preemph+noise
+        // audio, then warp its columns (BLSTMSpectralSegmenter.cpp:762-775).
+        {
+            const unsigned Min = 1;
+            const unsigned Max = 20;
+            Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+            FactoryInit<GFFTList<GFFT, Min, Max>::Result>::apply(gfft_factory);
+            MelFilterBank emptyMel;
+            Eigen::MatrixXd win = getWindowingCoefficients("hamming", false, 257, 0.83333);
+            Eigen::MatrixXd noConv;
+            const long long endFull = audio.getFrameCount() - 1;
+            audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 0, true, win,
+                                                     emptyMel, gfft_factory, noConv, 0, endFull);
+            Eigen::MatrixXd perio = audio._Periodogram;  // 201 x 129
+            double coeff_homo = pitch / 300.0;
+            Matrix2BinaryFile(out + "perio_homothety_chan1.bin", applyHomothety(perio, coeff_homo));
+            ++dumps;
+        }
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

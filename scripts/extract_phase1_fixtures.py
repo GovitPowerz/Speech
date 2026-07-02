@@ -88,6 +88,15 @@ EXPECTED_SHAPES = {
     # 0..49, shift=1). Both single-column (T x 1).
     "ltsv_chan1.bin": (201, 1),
     "ltsv_synth.bin": (20, 1),
+    # Task 9 dumps. fmath::log sweep (2 x 20: row0 input, row1 fmath::log(input));
+    # TDC score column over the chan-1 excerpt (1 x 201, TdcParams half=128 shift=80
+    # min_lag=16 max_lag=128 balance=0.7); pitch scalar over the hand-built middle-1s
+    # SPEECH segmentation [0.5s,1.5s) (1 x 1); homothety warp of the chan-1
+    # periodogram with coeff = pitch/300 (201 x 129).
+    "fmath_log_sweep.bin": (2, 20),
+    "tdc_chan1.bin": (1, 201),
+    "pitch_chan1.bin": (1, 1),
+    "perio_homothety_chan1.bin": (201, 129),
 }
 
 # The DCT matrix product melPeriodogram*_CoeffsDCT is the feature path's one real
@@ -147,6 +156,27 @@ SPECTRUM_ORDER_CLAMP = {
     "source": "legacy/src/BLSTMSpectralSegmenter.cpp:199-203 (Max=20 at :598-599)",
 }
 
+# Task 9 TDC/pitch/homothety params (kept in sync with main.cpp). Derived inline from
+# the brief config (TDC_window=0.032, TDC_shift=0.01, lags=(0.002,0.016), balance=0.7
+# @ rate 8000) per TimeDomainCorrel.cpp:100-109. The pitch dump uses a hand-built
+# segmentation: a single SPEECH segment covering the middle 1.0s of the excerpt,
+# [0.5s, 1.5s) (boundary list Other@0.0, Speech@0.5, Other@1.5, End@duration). The
+# TDC score column + pitch both use DC-offset FALSE (a deterministic synthetic
+# choice; the harness and Rust port agree on it). homothety coeff = pitch/300.
+TDC = {
+    "half_window": 128,
+    "full_window": 257,
+    "shift": 80,
+    "min_lag": 16,
+    "max_lag": 128,
+    "balance": 0.7,
+    "window": "hamming_257_param_0.8",
+    "dc_offset": False,
+    "pitch_segment_sec": [0.5, 1.5],
+    "pitch_segment_class": "SPEECH",
+    "homothety_coeff": "pitch/300",
+}
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -204,6 +234,7 @@ def main() -> None:
         "anchor": anchor,
         "spectrum_order_clamp": SPECTRUM_ORDER_CLAMP,
         "periodogram": PERIODOGRAM,
+        "tdc": TDC,
         "dct_gemm_substitution": dct_gemm_substitution,
     }
 

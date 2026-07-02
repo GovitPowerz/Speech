@@ -169,6 +169,45 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   either take the sqrt (changing the score's scale/units and every tuned threshold) or rename to stop
   calling it a standard deviation; retrain/re-tune-affecting either way.
 
+- **[phase1] `computePitch` returns a `long/long` INTEGER-divided pitch estimate** (`features/ltsv_tdc.rs`
+  `compute_pitch`, from `BLSTMSpectralSegmenter.cpp:172-192`): the legacy signature is `computePitch(long
+  min_lag, long max_lag, long frameRate, ...)` and it returns `frameRate/indiceMaxPeak` -- both `long`, so
+  the division TRUNCATES (8000/35 = 228, not 228.571...) and is widened to `double` only on return. The
+  accept bounds in `getPitch` (`:425`) are genuine double divisions, so the acceptance band is exact while
+  the accepted estimates are quantized to integers. Every `getPitch` average (and hence the homothety
+  `pitch/300` coefficient) is built from truncated estimates. Pinned by `pitch_chan1.bin` (229.9010989...
+  = 20921/91, an integer sum over 91 accepted frames). *Fix candidate:* after parity, divide in `f64`
+  (`rate / argmax_lag as f64`); expect the pitch estimate, homothety coefficient, and all downstream
+  warped-spectrum features to shift slightly.
+
+- **[phase1] `fmath::log` has no `x <= 0` guard; `log(0) = -88.0297f` finite** (`features/ltsv_tdc.rs`
+  `fmath_log`, from `fmath.hpp:713-727`): the bit-trick table log decodes the f32 bit pattern with no
+  domain check, so `fmath_log(0.0)` returns the finite `(0 - 127<<23)*c_log2 + app[0]` = -88.029694
+  instead of `-inf`; the sign bit is IGNORED by all three masks, so `fmath_log(-x) == fmath_log(x)`
+  (a finite wrong value, not NaN). The
+  TDC score relies on this: `-fmath_log(1-MaxPeak)` at `MaxPeak == 1` (min_lag=0, or a perfectly
+  periodic window) yields the finite +88.03-scaled score rather than +inf. Pinned by
+  `fmath_log_sweep.bin` (x=0 entry) and `tdc_r0_is_one_when_min_lag_zero_and_score_finite`. *Fix
+  candidate:* after parity, swap to `f32::ln` (or guard the domain); every tuned TDC threshold moves.
+
+- **[phase1] TDC cross-correlation `mm=0` term double-counts, hence `/2`; crossing polarity mixes
+  strict/non-strict** (`features/ltsv_tdc.rs` `tdc_classify_sequence`, from `TimeDomainCorrel.cpp:59-86`):
+  (a) the shifted cross-correlation `xcor(mm) = sum_nn R[p1+nn]*R[p2+nn+mm] + R[p1+mm+nn]*R[p2+nn]` counts
+  the same product twice at `mm=0`, which the `CrossCorr += tmp_xcorr/2` halving only exactly compensates
+  at `mm=0` (for `mm>0` the two orders are genuinely different shifts, so `/2` averages them); (b) the
+  zero-crossing predicate is keyed on `R[0]`'s sign (R at MIN lag, not lag 0) with asymmetric bounds --
+  `R[ll] > 0 && R[ll+1] <= 0` for the positive branch vs `R[ll] < 0 && R[ll+1] >= 0` for the negative --
+  so a sample landing exactly on 0.0 counts as a crossing in both branches but the entry condition
+  differs in strictness. Also `count` is a `double`. All reproduced verbatim (pinned by `tdc_chan1.bin`
+  and the `tdc_cases.json` cross-language check). *Fix candidate:* after parity, define the crossing
+  predicate symmetrically and normalize the `mm=0` self-term; re-tune-affecting.
+
+- **[phase1] `(1 - MaxPeak)` narrowed to f32 before `fmath::log`, widened back** (`features/ltsv_tdc.rs`
+  `tdc_classify_sequence` return, from `TimeDomainCorrel.cpp:90`): the TDC score's peak term computes
+  `1-MaxPeak` in f64, passes it through the f32-only `fmath::log`, and widens the f32 result back into
+  the f64 balance blend -- two precision cliffs in the hot score path. Reproduced exactly. *Fix
+  candidate:* subsumed by the `fmath::log -> f32::ln` swap above.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

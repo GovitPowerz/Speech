@@ -154,6 +154,22 @@
     "ltsv_synth.bin": {
       "rows": 20,
       "cols": 1
+    },
+    "fmath_log_sweep.bin": {
+      "rows": 2,
+      "cols": 20
+    },
+    "tdc_chan1.bin": {
+      "rows": 1,
+      "cols": 201
+    },
+    "pitch_chan1.bin": {
+      "rows": 1,
+      "cols": 1
+    },
+    "perio_homothety_chan1.bin": {
+      "rows": 201,
+      "cols": 129
     }
   },
   "anchor": {
@@ -178,6 +194,22 @@
     "end_full": 16000,
     "perio_odd_end": 399,
     "perio_odd_frame_nb": 5
+  },
+  "tdc": {
+    "half_window": 128,
+    "full_window": 257,
+    "shift": 80,
+    "min_lag": 16,
+    "max_lag": 128,
+    "balance": 0.7,
+    "window": "hamming_257_param_0.8",
+    "dc_offset": false,
+    "pitch_segment_sec": [
+      0.5,
+      1.5
+    ],
+    "pitch_segment_class": "SPEECH",
+    "homothety_coeff": "pitch/300"
   },
   "dct_gemm_substitution": {
     "text": "product melPeriodogram * _CoeffsDCT (legacy/src/MelFilterBank.cpp:223,267,309,314,356) replaced with the explicit ascending triple loop (dctProduct in main.cpp) because Eigen's blocked gebp kernel does not accumulate in plain ascending order; the fields below are measured fresh by the harness's GEMM_CHECK on every fixture regeneration, not hardcoded.",

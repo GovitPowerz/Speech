@@ -1,25 +1,151 @@
-"""Numpy oracle for the shared regression-deltas kernel (Task 6).
+"""Numpy oracles for the Phase 1 feature kernels.
 
-Independent (vectorized) coding of the same clamped-formula kernel that the Rust
-`speech::features::mel::regression_deltas` implements sequentially. The two are
-cross-checked bit-for-bit via `tests/reference_data/phase1/deltas_cases.json`
-(emitted by `scripts/extract_phase1_oracle_cases.py`); the hand anchor in
-`tests/test_features_oracle.py` is the arbiter.
+Independent codings of the kernels the Rust `speech::features` modules implement
+sequentially, cross-checked bit-for-bit via the `*_cases.json` fixtures under
+`tests/reference_data/phase1/` (emitted by `scripts/extract_phase1_oracle_cases.py`);
+the hand anchors in `tests/test_features_oracle.py` are the arbiters.
 
-Legacy source: MelFilterBank.cpp:153-170 (the deltas block-op sequence). The
-kernel is
-
-    D[t] = sum_{j=1..n} j * (B[min(t+j, T-1)] - B[max(t-j, 0)]) / (2 * sum_{j} j^2)
-
-where the denominator sums j^2 over ALL j in 1..n (the legacy `adim` accumulates
-j*j even when T <= j and the shifted copy is skipped -- the clamp saturates but
-the term still contributes).
+- `regression_deltas_oracle` / `sdc_oracle` (Task 6/7): MelFilterBank.cpp:153-170,
+  224-262. The deltas kernel is
+      D[t] = sum_{j=1..n} j * (B[min(t+j, T-1)] - B[max(t-j, 0)]) / (2 * sum_{j} j^2)
+  where the denominator sums j^2 over ALL j in 1..n (the legacy `adim` accumulates
+  j*j even when T <= j and the shifted copy is skipped -- the clamp saturates but
+  the term still contributes).
+- `ltsv_oracle` (Task 8): LongTermSpectralVariation.cpp:82-128.
+- `fmath_log_oracle` / `tdc_oracle` (Task 9): fmath.hpp:186-226,713-727 and
+  TimeDomainCorrel.cpp:36-91.
 """
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 from numpy.typing import NDArray
+
+_LOG_LEN = 11
+_LOG_N = 1 << _LOG_LEN  # 2048
+
+
+@functools.lru_cache(maxsize=1)
+def _log_table() -> tuple[np.float32, NDArray[np.float32], NDArray[np.float32]]:
+    """Build the 2048-entry fmath log table (fmath.hpp:201-217) with numpy float32
+    SCALAR ops for the narrowings and f64 for the table build.
+
+    Per the Task 8 oracle lesson, np.float32 per-op arithmetic is exact IEEE f32 (the
+    hazard is only vectorized *reductions*, which this does not use). `c_log2 =
+    logf(2f)/2^23` in f32; per bin `x = 1 + i/n` in f64, `app = (f32) ln x`, `rev` is
+    the f64 slope `(ln(x+h-e)-ln(x)) / ((h-e)*2^23)` narrowed to f32 (last bin uses
+    the exact derivative `1/(x*2^23)`). `h = 2^-11`, `e = 2^-24`.
+    """
+    c_log2 = np.float32(np.float32(np.log(np.float32(2.0))) / np.float32(1 << 23))
+    e = 1.0 / float(1 << 24)
+    h = 1.0 / float(1 << _LOG_LEN)
+    n = _LOG_N
+    scale = float(1 << 23)
+    app = np.zeros(n, dtype=np.float32)
+    rev = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        x = 1.0 + float(i) / n
+        a = np.log(x)
+        app[i] = np.float32(a)
+        if i < n - 1:
+            b = np.log(x + h - e)
+            rev[i] = np.float32((b - a) / ((h - e) * scale))
+        else:
+            rev[i] = np.float32(1.0 / (x * scale))
+    return c_log2, app, rev
+
+
+def fmath_log_oracle(x: np.float32) -> np.float32:
+    """Independent numpy coding of `fmath::log(float)` (fmath.hpp:713-727), the
+    scalar f32 table log.
+
+    Replicates the bit-manipulation eval: mask the exponent bits `a`, the top-11
+    mantissa bits (table index `idx`), and the low-12 mantissa bits (`b2`); then
+    `(a - (127<<23)) * c_log2 + app[idx] + b2 * rev[idx]`, with the exponent
+    subtraction done as SIGNED int32 arithmetic before the f32 cast (matching the
+    legacy `int a` masked-bits value). No `x <= 0` guard, so `fmath_log_oracle(0.0)`
+    is finite. All arithmetic is np.float32 SCALAR (exact per-op IEEE f32).
+    """
+    c_log2, app, rev = _log_table()
+    bits = int(np.float32(x).view(np.uint32))
+    a = bits & (0xFF << 23)  # masked exponent bits (unsigned)
+    b1 = bits & (0x7FF << 12)
+    b2 = bits & 0xFFF
+    idx = b1 >> 12
+    a_signed = int(np.int32(np.uint32(a)) - np.int32(127 << 23))  # signed i32 subtraction
+    # f = float(a - 127<<23)*c_log2 + app[idx] + float(b2)*rev[idx], all f32, left-to-right.
+    t1 = np.float32(np.float32(a_signed) * c_log2)
+    t2 = np.float32(app[idx])
+    t3 = np.float32(np.float32(b2) * np.float32(rev[idx]))
+    return np.float32(np.float32(t1 + t2) + t3)
+
+
+def tdc_oracle(window: list[float], min_lag: int, max_lag: int, balance: float) -> float:
+    """Independent Python coding of `TimeDomainCorrel::classifySequence`
+    (TimeDomainCorrel.cpp:36-91).
+
+    Uses PLAIN Python loops for every accumulation (squared norm, autocorrelation,
+    cross-correlation) -- NOT numpy vectorized reductions -- so the cross-language
+    JSON check can demand bit-exactness against the sequential Rust port (numpy's
+    pairwise `.sum()` drifts by an ULP or two from a strictly sequential loop; see
+    the Task 8 oracle lesson). `R[0]` is the autocorrelation at MIN_LAG (index 0),
+    the zero-crossing polarity is keyed on its sign with the mixed strict/non-strict
+    comparisons copied verbatim, the `mm=0` cross term double-counts (hence `/2`),
+    `count` is a float, and `(1 - MaxPeak)` is narrowed to f32 before `fmath_log`
+    then widened back.
+    """
+    n = len(window)
+    adim = 0.0
+    for v in window:
+        adim += v * v
+    if adim < 1e-12:
+        adim = 1e-12
+
+    r = [0.0] * (max_lag - min_lag + 1)
+    max_peak = -1e20
+    for k in range(min_lag, max_lag + 1):
+        length = n - k
+        s = 0.0
+        for i in range(length):
+            s += window[i] * window[i + k]
+        r[k - min_lag] = s / adim
+        if r[k - min_lag] > max_peak:
+            max_peak = r[k - min_lag]
+
+    cross_corr = 0.0
+    period1_start = 0
+    period2_start = 0
+    count = 0.0
+    for ll in range(0, max_lag - min_lag):
+        crossing = (r[0] >= 0 and r[ll] > 0 and r[ll + 1] <= 0) or (r[0] < 0 and r[ll] < 0 and r[ll + 1] >= 0)
+        if crossing:
+            if period1_start == 0:
+                period1_start = ll + 1
+            elif period2_start == 0:
+                period2_start = ll + 1
+            else:
+                period3_start = ll + 1
+                min_size = period2_start - period1_start + 1
+                size2 = period3_start - period2_start + 1
+                if min_size > size2:
+                    min_size = size2
+                tmp_xcorr = -1e12
+                for mm in range(min_size):
+                    xcor = 0.0
+                    for nn in range(min_size - mm):
+                        xcor += r[period1_start + nn] * r[period2_start + nn + mm] + r[period1_start + mm + nn] * r[period2_start + nn]
+                    if tmp_xcorr < xcor:
+                        tmp_xcorr = xcor
+                cross_corr += tmp_xcorr / 2
+                period1_start = period2_start
+                period2_start = period3_start
+                count += 1
+    if count != 0:
+        cross_corr /= count
+    log_term = float(fmath_log_oracle(np.float32(1.0 - max_peak)))
+    return balance * (-log_term) + (1.0 - balance) * cross_corr
 
 
 def ltsv_oracle(p: NDArray[np.float64], col: int, freq_beg: int, freq_end: int, half_window: int) -> float:

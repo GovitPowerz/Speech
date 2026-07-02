@@ -28,15 +28,17 @@ Usage: uv run python scripts/extract_phase1_oracle_cases.py
 """
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 
-from speech.features_oracle import ltsv_oracle, regression_deltas_oracle, sdc_oracle
+from speech.features_oracle import ltsv_oracle, regression_deltas_oracle, sdc_oracle, tdc_oracle
 
 DELTAS_OUT = Path("tests/reference_data/phase1/deltas_cases.json")
 SDC_OUT = Path("tests/reference_data/phase1/sdc_cases.json")
 LTSV_OUT = Path("tests/reference_data/phase1/ltsv_cases.json")
+TDC_OUT = Path("tests/reference_data/phase1/tdc_cases.json")
 
 # (T, W) shapes: a spread of tall/wide/degenerate plus the T<=n edge shape.
 SHAPES = [(1, 2), (2, 3), (3, 1), (10, 4), (25, 3), (2, 2)]
@@ -55,6 +57,32 @@ LTSV_COLS = [0, 3, 19]
 
 def make_base(t: int, w: int) -> np.ndarray:
     return np.array([[((i * 7 + j * 13) % 100) / 100.0 for j in range(w)] for i in range(t)])
+
+
+# TDC windows: deterministic (no random). Chosen to exercise the branch matrix -
+# constant (no crossing, CrossCorr=0), alternating sign (R[0]>0 oscillating ->
+# multiple crossings, third-crossing cross-corr path), a sinusoid (>=3 crossings),
+# a closed-form window, a min_lag=0 window (R[0]=1 -> fmath_log(0) path), and a
+# window whose R[0] is negative (hits the R[0]<0 polarity branch).
+def _sinusoid(n: int, periods: float) -> list[float]:
+    return [math.sin(2.0 * math.pi * periods * i / n) for i in range(n)]
+
+
+def _closed_form(n: int) -> list[float]:
+    return [(((i * 7 + 3) % 11) - 5) / 5.0 for i in range(n)]
+
+
+# (window, min_lag, max_lag, balance)
+TDC_CASES = [
+    ([1.0] * 12, 1, 5, 0.7),  # constant: no crossing
+    ([1.0 if i % 2 == 0 else -1.0 for i in range(20)], 1, 10, 0.7),  # alternating
+    (_sinusoid(48, 3.0), 1, 24, 0.7),  # sinusoid, several periods -> >=3 crossings
+    (_sinusoid(64, 5.0), 2, 30, 0.5),  # more periods -> more crossings
+    (_closed_form(30), 1, 12, 0.7),  # closed-form deterministic
+    (_closed_form(25), 0, 10, 0.7),  # min_lag=0 -> R[0]=1
+    ([math.cos(math.pi * i) * (i + 1) for i in range(16)], 1, 8, 0.3),  # crafted
+    ([(-1.0) ** i * 0.5 for i in range(18)], 0, 9, 0.9),  # min_lag=0 alternating
+]
 
 
 def main() -> None:
@@ -91,13 +119,28 @@ def main() -> None:
                     }
                 )
 
+    tdc_cases = []
+    for window, min_lag, max_lag, balance in TDC_CASES:
+        expected = tdc_oracle(window, min_lag, max_lag, balance)
+        tdc_cases.append(
+            {
+                "window": list(window),
+                "min_lag": min_lag,
+                "max_lag": max_lag,
+                "balance": balance,
+                "expected": expected,
+            }
+        )
+
     DELTAS_OUT.parent.mkdir(parents=True, exist_ok=True)
     DELTAS_OUT.write_text(json.dumps(deltas_cases, indent=1) + "\n")
     SDC_OUT.write_text(json.dumps(sdc_cases, indent=1) + "\n")
     LTSV_OUT.write_text(json.dumps(ltsv_cases, indent=1) + "\n")
+    TDC_OUT.write_text(json.dumps(tdc_cases, indent=1) + "\n")
     print(f"OK: wrote {len(deltas_cases)} deltas cases to {DELTAS_OUT}")
     print(f"OK: wrote {len(sdc_cases)} sdc cases to {SDC_OUT}")
     print(f"OK: wrote {len(ltsv_cases)} ltsv cases to {LTSV_OUT}")
+    print(f"OK: wrote {len(tdc_cases)} tdc cases to {TDC_OUT}")
 
 
 if __name__ == "__main__":

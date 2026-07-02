@@ -1,12 +1,26 @@
-"""Anchor tests for the regression-deltas numpy oracle (Task 6).
+"""Anchor tests for the Phase 1 feature oracles (Tasks 6-9).
 
-The oracle is an independent numpy coding of the same clamped-formula kernel the
-Rust `regression_deltas` implements; the hand anchor here (and the cross-language
-JSON in `deltas_cases.json`) is the arbiter that both codings agree.
+Each oracle is an independent coding of the kernel its Rust counterpart implements
+sequentially; the hand anchors here (and the cross-language `*_cases.json` fixtures)
+are the arbiters that both codings agree. The Task 9 fmath_log test additionally
+pins the numpy oracle against the harness dump for EVERY sweep entry (the
+double-pinning contract: harness dump == Rust port == numpy oracle).
 """
 
+import math
+from pathlib import Path
+
 import numpy as np
-from speech.features_oracle import ltsv_oracle, regression_deltas_oracle, sdc_oracle
+from speech.features_oracle import (
+    fmath_log_oracle,
+    ltsv_oracle,
+    regression_deltas_oracle,
+    sdc_oracle,
+    tdc_oracle,
+)
+from speech.weight_bridge import read_bin
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "phase1"
 
 
 def test_regression_deltas_anchor() -> None:
@@ -101,3 +115,45 @@ def test_ltsv_oracle_edge_shrink_at_col_zero() -> None:
     m = (d0 + d1) / 2.0
     expected = ((d0 - m) ** 2 + (d1 - m) ** 2) / 2.0
     assert got == expected
+
+
+# === Task 9: fmath::log + TDC oracles ======================================
+
+
+def test_fmath_log_oracle_matches_harness_dump_every_entry() -> None:
+    # fmath_log_sweep.bin is 2 x N (column-major f64): row0 = input (f32 widened),
+    # row1 = fmath::log(input) (f32 result widened). The numpy oracle must match the
+    # harness dump bit-for-bit for EVERY sweep entry (double-pinning the port).
+    rows, cols, flat = read_bin(FIXTURE_DIR / "fmath_log_sweep.bin")
+    assert rows == 2
+    # column-major: element (i, j) at index j*rows + i.
+    for j in range(cols):
+        x = np.float32(flat[j * rows + 0])  # input round-trips exactly through f64
+        want = flat[j * rows + 1]  # f32 result stored as f64
+        got = float(fmath_log_oracle(x))
+        assert got == want, f"col {j}: x={x} oracle={got!r} dump={want!r}"
+
+
+def test_fmath_log_oracle_at_zero_finite() -> None:
+    v = float(fmath_log_oracle(np.float32(0.0)))
+    assert math.isfinite(v)
+    assert v == float(np.float32(-88.029694))
+
+
+def test_tdc_oracle_anchor_matches_rust_hand_case() -> None:
+    # Mirrors the Rust hand test tdc_fewer_than_three_crossings_zero_crosscorr:
+    # all-ones, min_lag=1, max_lag=3, balance=0.5 -> R=[4/5,3/5,2/5], no crossing,
+    # score = 0.5 * (-fmath_log(1 - 4/5)).
+    got = tdc_oracle([1.0, 1.0, 1.0, 1.0, 1.0], 1, 3, 0.5)
+    r_max = 4.0 / 5.0
+    log_term = float(fmath_log_oracle(np.float32(1.0 - r_max)))
+    expected = 0.5 * (-log_term)
+    assert got == expected
+
+
+def test_tdc_oracle_min_lag_zero_r0_is_one() -> None:
+    # min_lag=0 -> R[0] is the lag-0 autocorrelation == 1 -> MaxPeak >= 1 ->
+    # fmath_log evaluated at <= 0 (finite, no guard). Same window as the Rust test.
+    w = [((i * 7) % 5) - 2.0 for i in range(9)]
+    s = tdc_oracle(w, 0, 4, 0.7)
+    assert math.isfinite(s)
