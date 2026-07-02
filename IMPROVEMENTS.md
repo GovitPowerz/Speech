@@ -319,7 +319,8 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   unconditional in the legacy (already the effective behavior here).
 
 - **[phase1] LTSV frequency band is RESET to `(0, output_dim-1)` for mel variants, diverging from the
-  spectral band** (`tasks/pipeline` E2E composition, from `BLSTMSpectralSegmenter.cpp:270-271` inside the
+  spectral band** (E2E composition: `src/rust/tests/phase1_pipeline_golden.rs` + the harness twin
+  `tools/oracle_harness/main.cpp`, from `BLSTMSpectralSegmenter.cpp:270-271` inside the
   `nb_bins > 0` block): `initSpectralAnalysis` reuses the `freq_beg`/`freq_end` out-params, resetting them
   to `(0, periodogram_length-1)` where `periodogram_length` becomes `nbFilters` (or `nbDCT` when DCT is
   active). `getLTSV` then runs over the RAW periodogram's first `output_dim` bins, NOT the spectral band

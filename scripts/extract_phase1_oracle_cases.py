@@ -2,7 +2,7 @@
 
 Builds bases from a fixed closed-form (`((i*7 + j*13) % 100) / 100.0`) - NOT
 `random`/`np.random` - at a spread of shapes and delta orders, runs each through
-the numpy oracles, and writes three JSONs under `tests/reference_data/phase1/`:
+the numpy oracles, and writes five JSONs under `tests/reference_data/phase1/`:
 
   - `deltas_cases.json`: `[{"base": [[..]], "n": int, "expected": [[..]]}, ...]`
     for `regression_deltas_oracle` (MelFilterBank.cpp:153-170).
@@ -13,6 +13,9 @@ the numpy oracles, and writes three JSONs under `tests/reference_data/phase1/`:
     (`LongTermSpectralVariation::classifySequence`, :82-128), over the SAME
     closed-form 20x50 matrix as the harness's `synth_20x50.bin`, at the
     parameter grid R in {1,3,15} x band {(0,49),(5,20)} x cols {0,3,19}.
+  - `tdc_cases.json`: `[{"window": [[..]], "min_lag": int, "max_lag": int,
+    "balance": float, "expected": float}, ...]` for `tdc_oracle`
+    (`TimeDomainCorrel.cpp:100-109`), over the `TDC_CASES` window/lag/balance grid.
   - `stats_cases.json`: `[{"chunks": [{"rows": [[..]]}, ...], "expected_mean":
     [..], "expected_std": [..], "expected_n": int}, ...]` for
     `stats_merge_oracle` (`InputStatistics.cpp:6-51`), chains of 1-4 deterministic

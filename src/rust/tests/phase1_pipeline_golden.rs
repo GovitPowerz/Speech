@@ -264,6 +264,42 @@ fn derive_params_rawband_ltsv() {
     assert_params_match("rawband_ltsv");
 }
 
+#[test]
+fn derive_tdc_branch_params() {
+    // Task 9 harness constants (BLSTMSpectralSegmenter.cpp:341-370 + TimeDomainCorrel.cpp:100-109).
+    // None of the four variant configs exercise TDC (all set TDCwindow 0), so this
+    // is the only test pinning `SpectralParams::derive`'s TDC branch.
+    let mut m = base_map();
+    m.insert("P_TDCwindow".into(), "0.032".into());
+    m.insert("P_TDCshift".into(), "0.01".into());
+    m.insert("P_TDC_lags".into(), "0.002,0.016".into());
+    m.insert("P_TDC_balance".into(), "0.7".into());
+    m.insert("P_TDC_windowing_type".into(), "hamming".into());
+    m.insert("P_TDC_windowing_param".into(), "0.8".into());
+    let c = FeatureConfig::from_legacy(&m, "P").unwrap();
+
+    let s = SpectralParams::derive(&c, 8000.0);
+    let tdc = s.tdc.expect("TDCwindow != 0 must produce Some(TdcParams)");
+
+    // half_window = round(0.032*8000/2) = round(128.0) = 128.
+    assert_eq!(tdc.half_window, 128);
+    // full_window = 2*half_window+1 = 257.
+    assert_eq!(tdc.full_window, 257);
+    // shift: ws = max(0.01, 1/8000) = 0.01; window_shift = round(0.01*8000/80) = 1
+    // (shift_frames = round(P_spectrum_shift(0.01)*8000) = 80); >= 1, so stays 1;
+    // shift = 1*80 = 80.
+    assert_eq!(tdc.shift, 80);
+    // min_lag = round(0.002*8000) = round(16.0) = 16, >= 1 so unchanged.
+    assert_eq!(tdc.min_lag, 16);
+    // max_lag = round(0.016*8000) = round(128.0) = 128; < full_window-1 (256) and
+    // >= min_lag, so unchanged.
+    assert_eq!(tdc.max_lag, 128);
+    assert_eq!(tdc.balance, 0.7);
+
+    let want_coeffs = windowing_coefficients("hamming", false, 257, 0.8);
+    assert_eq!(tdc.coeffs, want_coeffs);
+}
+
 // --- assemble_input_sequence unit tests -------------------------------------
 
 #[test]
