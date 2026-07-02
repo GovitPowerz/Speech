@@ -159,6 +159,16 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   across BLAS/arch/Eigen versions. Recorded in `manifest.json:dct_gemm_substitution`. *Fix candidate:* none
   -- the ascending loop is the deliberate portable parity target; do NOT swap in a BLAS `.dot()`.
 
+- **[phase1] LTSV `classifySequence` returns variance, not "standard deviation"** (`features/ltsv_tdc.rs`
+  `ltsv_classify_sequence`, from `LongTermSpectralVariation.cpp:118-127`): the legacy names the
+  accumulator `std_dzeta`, comments the block "Compute standard deviation", and returns
+  `sum((dzeta-mean_dzeta)^2)/nbBins` -- there is no `sqrt`. So the LTSV "score" is a biased variance in
+  units squared, not a standard deviation; every downstream threshold tuned against this score is
+  implicitly tuned against variance, not std. Reproduced exactly (pinned by `ltsv_is_biased_variance_
+  no_sqrt` and the harness goldens `ltsv_chan1.bin`/`ltsv_synth.bin`). *Fix candidate:* after parity,
+  either take the sqrt (changing the score's scale/units and every tuned threshold) or rename to stop
+  calling it a standard deviation; retrain/re-tune-affecting either way.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

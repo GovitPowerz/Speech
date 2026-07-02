@@ -6,7 +6,7 @@ JSON in `deltas_cases.json`) is the arbiter that both codings agree.
 """
 
 import numpy as np
-from speech.features_oracle import regression_deltas_oracle, sdc_oracle
+from speech.features_oracle import ltsv_oracle, regression_deltas_oracle, sdc_oracle
 
 
 def test_regression_deltas_anchor() -> None:
@@ -57,3 +57,47 @@ def test_sdc_oracle_block_placement_4x2() -> None:
     expected[2, 8:10] = d[0]
     expected[3, 8:10] = d[1]
     assert np.array_equal(got, expected)
+
+
+def test_ltsv_oracle_anchor_matches_rust_hand_case() -> None:
+    # Mirrors the Rust hand test ltsv_is_biased_variance_no_sqrt:
+    # P = [[1,2],[3,4],[5,6]] (T=3, bins=2), col=1, R=1 -> window rows 0..=2, L=3
+    # bin0: mean=3; r={1/3,1,5/3}; sum r(r-1) = -2/9+0+10/9 = 8/9; dzeta0=-(8/9)/3
+    # bin1: mean=4; r={1/2,1,3/2}; sum = -1/4+0+3/4 = 1/2;        dzeta1=-(1/2)/3
+    # return biased variance of [dzeta0, dzeta1] -- no sqrt.
+    p = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    got = ltsv_oracle(p, col=1, freq_beg=0, freq_end=1, half_window=1)
+
+    def dz(vals: np.ndarray) -> float:
+        mean = max(vals.sum() / 3.0, 1e-12)
+        s = 0.0
+        for v in vals:
+            r = v / mean
+            s -= r * (r - 1.0)
+        return s / 3.0
+
+    d0 = dz(np.array([1.0, 3.0, 5.0]))
+    d1 = dz(np.array([2.0, 4.0, 6.0]))
+    m = (d0 + d1) / 2.0
+    expected = ((d0 - m) ** 2 + (d1 - m) ** 2) / 2.0
+    assert got == expected
+
+
+def test_ltsv_oracle_edge_shrink_at_col_zero() -> None:
+    # col=0, R=1 -> window clamps to [0,1] (length 2, no padding).
+    p = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    got = ltsv_oracle(p, col=0, freq_beg=0, freq_end=1, half_window=1)
+
+    def dz(vals: np.ndarray) -> float:
+        mean = max(vals.sum() / 2.0, 1e-12)
+        s = 0.0
+        for v in vals:
+            r = v / mean
+            s -= r * (r - 1.0)
+        return s / 2.0
+
+    d0 = dz(np.array([1.0, 3.0]))
+    d1 = dz(np.array([2.0, 4.0]))
+    m = (d0 + d1) / 2.0
+    expected = ((d0 - m) ** 2 + (d1 - m) ** 2) / 2.0
+    assert got == expected

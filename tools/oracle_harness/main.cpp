@@ -154,6 +154,91 @@ static Eigen::MatrixXd applyDCTLoop(const Eigen::MatrixXd& mel, const Eigen::Mat
     return MFCC;
 }
 
+// legacy: LongTermSpectralVariation.cpp:82-128 (classifySequence), transcribed
+// verbatim as a free function (member -> parameter renames only: `this->` state
+// dropped, all six args passed explicitly). `periodogram_cols` is the TIME axis
+// (rows of our Array2 convention: `column`/`ii` index it), `periodogram_rows` is
+// the FREQ axis (`row` indexes it) -- i.e. `periodogram(ii, row)` is (time, freq).
+static double classifySequence(std::vector<double>::size_type column,
+                               std::vector<double>::size_type freq_beg,
+                               std::vector<double>::size_type freq_end,
+                               std::vector<double>::size_type window_size,
+                               std::vector<double>::size_type periodogram_rows,
+                               std::vector<double>::size_type periodogram_cols,
+                               const Eigen::MatrixXd& periodogram) {
+    std::vector<double>::size_type beg_conv;
+    if (column < window_size) {
+        beg_conv = 0;
+    } else {
+        beg_conv = column-window_size;
+    }
+    std::vector<double>::size_type end_conv = column+window_size;
+    if (end_conv >= periodogram_cols) end_conv = periodogram_cols-1;
+    double length = (double) (end_conv-beg_conv+1);
+    double nbRows = (double) (freq_end-freq_beg+1);
+
+    std::vector<double> mean_value(periodogram_rows,0.0);
+    for(std::vector<double>::size_type row = freq_beg ; row <= freq_end; ++row) {
+        mean_value.at(row) = 0.0;
+        for(std::vector<double>::size_type ii = beg_conv ; ii <= end_conv ; ++ii) {
+            mean_value[row] += periodogram(ii,row);
+        }
+        mean_value[row] /= length;
+        if (mean_value[row] < 1e-12) mean_value[row] = 1e-12;
+    }
+
+    std::vector<double> dzeta(periodogram_rows,0.0);
+    double mean_dzeta = 0.0;
+    double tmp_log;
+    for(std::vector<double>::size_type row = freq_beg ; row <= freq_end; ++row) {
+        dzeta[row] = 0.0;
+        for(std::vector<double>::size_type ii = beg_conv ; ii <= end_conv ; ++ii) {
+            tmp_log = periodogram(ii,row)/mean_value[row];
+            dzeta[row] -= tmp_log*(tmp_log-1);
+        }
+        dzeta[row] /= length;
+        mean_dzeta += dzeta[row];
+    }
+    mean_dzeta /= nbRows;
+
+    // Compute standard deviation
+    double tmp;
+    double std_dzeta = 0.0;
+    for(std::vector<double>::size_type row = freq_beg ; row <= freq_end; ++row) {
+        tmp = dzeta[row]-mean_dzeta;
+        std_dzeta += tmp*tmp;
+    }
+    std_dzeta /= nbRows;
+
+    return std_dzeta;
+}
+
+// legacy: BLSTMSpectralSegmenter.cpp:316-339 (getLTSV), transcribed verbatim
+// (member -> parameter renames: `this->LongTermSpectralVariation::classifySequence`
+// -> the free function above; `audio._Periodogram` -> the `periodogram` param;
+// Timer/logStream removed as harness noise). `LTSV_window_size` is the `window_size`
+// (a.k.a. half_window/R) and `LTSV_window_shift` is the `shift`.
+static Eigen::MatrixXd getLTSV(const Eigen::MatrixXd& periodogram,
+                              std::vector<double>::size_type LTSV_window_size,
+                              long LTSV_window_shift,
+                              std::vector<double>::size_type freq_beg,
+                              std::vector<double>::size_type freq_end) {
+    std::vector<double>::size_type vec_size = periodogram.rows();
+    Eigen::MatrixXd LTSV = Eigen::MatrixXd::Zero(vec_size,1);
+    std::vector<double>::size_type periodogramSize = periodogram.cols();
+    for (std::vector<double>::size_type jj = 0 ; jj < vec_size ; jj += LTSV_window_shift) {
+        // Compute spectral variation
+        LTSV(jj,0) = classifySequence(jj, freq_beg, freq_end, LTSV_window_size, periodogramSize, vec_size, periodogram);
+        if (jj != 0) {
+            for (std::vector<double>::size_type mm = 1 ; mm < (std::vector<double>::size_type) LTSV_window_shift ; ++mm) {
+                double coeffInterp = ((double) mm)/LTSV_window_shift;
+                LTSV(jj-LTSV_window_shift+mm,0) = (1.0-coeffInterp)*LTSV(jj-LTSV_window_shift,0)+coeffInterp*LTSV(jj,0);
+            }
+        }
+    }
+    return LTSV;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0] << " <output_dir>\n";
@@ -499,6 +584,41 @@ int main(int argc, char** argv) {
                               applyDCTLoop(logmel, coeffs, NB_DCT, true, -1, 0));
             ++dumps;
         }
+    }
+
+    // --- LTSV (Task 8) --------------------------------------------------------
+    // legacy: LongTermSpectralVariation.cpp:82-128 (classifySequence) +
+    // BLSTMSpectralSegmenter.cpp:316-339 (getLTSV loop), transcribed above.
+    {
+        // Recompute the chan-1 full periodogram fresh (same recipe as the mel
+        // block above; that block's `perio` is out of scope here).
+        const unsigned Min = 1;
+        const unsigned Max = 20;
+        Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+        FactoryInit<GFFTList<GFFT, Min, Max>::Result>::apply(gfft_factory);
+        MelFilterBank emptyMel;
+        Eigen::MatrixXd win = getWindowingCoefficients("hamming", false, 257, 0.83333);
+        Eigen::MatrixXd noConv;
+        const long long endFull = audio.getFrameCount() - 1;
+        audio.computeSegmentPeriodogramEstimates(PERIO_P, PERIO_SHIFT, 0, true, win,
+                                                 emptyMel, gfft_factory, noConv, 0, endFull);
+        Eigen::MatrixXd perio = audio._Periodogram;  // 201 x 129
+
+        // LTSV column over perio_p8_s80_chan1: freq_beg=0, freq_end=128, R=15, shift=4.
+        Eigen::MatrixXd ltsvChan1 = getLTSV(perio, 15, 4, 0, 128);
+        Matrix2BinaryFile(out + "ltsv_chan1.bin", ltsvChan1);
+        ++dumps;
+
+        // Per-frame scores over synth_20x50: R=3, band 0..49, shift=1.
+        Eigen::MatrixXd synth(20, 50);
+        for (int i = 0; i < 20; ++i) {
+            for (int j = 0; j < 50; ++j) {
+                synth(i, j) = ((i * 7 + j * 13) % 100) / 100.0;
+            }
+        }
+        Eigen::MatrixXd ltsvSynth = getLTSV(synth, 3, 1, 0, 49);
+        Matrix2BinaryFile(out + "ltsv_synth.bin", ltsvSynth);
+        ++dumps;
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

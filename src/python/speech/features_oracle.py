@@ -22,6 +22,61 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def ltsv_oracle(p: NDArray[np.float64], col: int, freq_beg: int, freq_end: int, half_window: int) -> float:
+    """Independent numpy coding of `LongTermSpectralVariation::classifySequence`
+    (LongTermSpectralVariation.cpp:82-128).
+
+    `p` is (time x freq), matching the Rust `Array2<f64>` convention (rows=time,
+    cols=freq bins). Context window is `[max(0,col-R), min(T-1,col+R)]` INCLUSIVE
+    both ends (length shrinks at the edges, no padding). Per freq bin in
+    `[freq_beg, freq_end]` inclusive: mean over the window, floored at 1e-12 (the
+    mean only, never the numerator); dzeta[bin] = -(1/length) * sum_t r*(r-1) with
+    r = p[t,bin]/mean. Returns the BIASED VARIANCE of dzeta over the bins (divide
+    by nbBins, NO sqrt) -- the legacy comment says "standard deviation" and lies.
+
+    The per-bin/per-sample reductions use plain Python accumulation (not
+    `ndarray.sum`, whose pairwise/blocked reduction can reorder additions and
+    drift by an ULP or two from a strictly sequential accumulation) so the
+    cross-language JSON check can demand bit-exactness against the sequential
+    Rust port.
+    """
+    t = p.shape[0]
+    beg = max(0, col - half_window)
+    end = min(t - 1, col + half_window)
+    length = float(end - beg + 1)
+    nb_bins = freq_end - freq_beg + 1
+
+    mean_value = [0.0] * (freq_end + 1)
+    for row in range(freq_beg, freq_end + 1):
+        m = 0.0
+        for ii in range(beg, end + 1):
+            m += float(p[ii, row])
+        m /= length
+        if m < 1e-12:
+            m = 1e-12
+        mean_value[row] = m
+
+    dzeta = [0.0] * (freq_end + 1)
+    mean_dzeta = 0.0
+    for row in range(freq_beg, freq_end + 1):
+        d = 0.0
+        for ii in range(beg, end + 1):
+            tmp_log = float(p[ii, row]) / mean_value[row]
+            d -= tmp_log * (tmp_log - 1.0)
+        d /= length
+        dzeta[row] = d
+        mean_dzeta += d
+    mean_dzeta /= nb_bins
+
+    std_dzeta = 0.0
+    for row in range(freq_beg, freq_end + 1):
+        tmp = dzeta[row] - mean_dzeta
+        std_dzeta += tmp * tmp
+    std_dzeta /= nb_bins
+
+    return std_dzeta
+
+
 def regression_deltas_oracle(base: NDArray[np.float64], n: int) -> NDArray[np.float64]:
     t = base.shape[0]
     acc = np.zeros_like(base)

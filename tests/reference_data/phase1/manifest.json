@@ -146,6 +146,14 @@
     "mfcc_sdc_if_chan1.bin": {
       "rows": 201,
       "cols": 103
+    },
+    "ltsv_chan1.bin": {
+      "rows": 201,
+      "cols": 1
+    },
+    "ltsv_synth.bin": {
+      "rows": 20,
+      "cols": 1
     }
   },
   "anchor": {

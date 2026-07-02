@@ -83,6 +83,11 @@ EXPECTED_SHAPES = {
     "mfcc_deltas_if_chan1.bin": (201, 38),
     "mfcc_sdc_chan1.bin": (201, 104),
     "mfcc_sdc_if_chan1.bin": (201, 103),
+    # LTSV dumps (Task 8). Column over chan-1 periodogram (T=201, freq_beg=0,
+    # freq_end=128, R=15, shift=4); per-frame scores over synth_20x50 (R=3, band
+    # 0..49, shift=1). Both single-column (T x 1).
+    "ltsv_chan1.bin": (201, 1),
+    "ltsv_synth.bin": (20, 1),
 }
 
 # The DCT matrix product melPeriodogram*_CoeffsDCT is the feature path's one real
