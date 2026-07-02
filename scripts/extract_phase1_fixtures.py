@@ -13,6 +13,7 @@ Usage: uv run python scripts/extract_phase1_fixtures.py
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -85,21 +86,40 @@ EXPECTED_SHAPES = {
 }
 
 # The DCT matrix product melPeriodogram*_CoeffsDCT is the feature path's one real
-# Eigen GEMM. The mandatory in-harness pre-check (Eigen GEMM vs explicit ascending
-# triple loop) DIVERGED - Eigen's blocked gebp kernel does not accumulate in plain
-# ascending order (E(0,0) bits ...e6ea vs loop ...e6ec; ~1500/2613 elements differ
-# on the 201x29 * 29x13 product). Per the Task 7 brief the Eigen product is replaced
-# by the explicit ascending triple loop (the portable/deterministic parity target
-# the Rust apply_dct reproduces), so the DCT dumps are produced by the harness's
-# applyDCTLoop, NOT the legacy mel.applyDCT.
-DCT_GEMM_SUBSTITUTION = {
-    "product": "melPeriodogram * _CoeffsDCT",
-    "legacy_source": "legacy/src/MelFilterBank.cpp:223,267,309,314,356",
-    "precheck": "Eigen GEMM vs explicit ascending triple loop",
-    "outcome": "DIVERGE",
-    "example": {"index": [0, 0], "eigen_bits": "c07a4614c6dfe6ea", "loop_bits": "c07a4614c6dfe6ec"},
-    "resolution": "replaced Eigen product with ascending triple loop (dctProduct in main.cpp)",
-}
+# Eigen GEMM. Per the Task 7 brief the Eigen product is replaced by the explicit
+# ascending triple loop (the portable/deterministic parity target the Rust
+# apply_dct reproduces), so the DCT dumps are produced by the harness's
+# applyDCTLoop, NOT the legacy mel.applyDCT. This substitution is LOCKED. The
+# harness re-measures the divergence bit-for-bit on every regeneration (see the
+# GEMM_CHECK line parsed below) so the numbers here are never a stale, hardcoded
+# claim -- they are refreshed every time this script runs.
+DCT_GEMM_SUBSTITUTION_TEXT = (
+    "product melPeriodogram * _CoeffsDCT (legacy/src/MelFilterBank.cpp:223,267,309,314,356) "
+    "replaced with the explicit ascending triple loop (dctProduct in main.cpp) because Eigen's "
+    "blocked gebp kernel does not accumulate in plain ascending order; the fields below are "
+    "measured fresh by the harness's GEMM_CHECK on every fixture regeneration, not hardcoded."
+)
+
+GEMM_CHECK_RE = re.compile(
+    r"^GEMM_CHECK diverged=(?P<diverged>\d) mismatches=(?P<mismatches>\d+) total=(?P<total>\d+) "
+    r"first=\((?P<row>-?\d+),(?P<col>-?\d+)\) eigen=0x(?P<eigen>[0-9a-f]+) loop=0x(?P<loop>[0-9a-f]+)$",
+    re.MULTILINE,
+)
+
+
+def _parse_gemm_check(harness_stdout: str) -> dict[str, object]:
+    match = GEMM_CHECK_RE.search(harness_stdout)
+    if match is None:
+        raise SystemExit("GEMM_CHECK line missing from harness stdout")
+    return {
+        "text": DCT_GEMM_SUBSTITUTION_TEXT,
+        "diverged": bool(int(match["diverged"])),
+        "mismatches": int(match["mismatches"]),
+        "total": int(match["total"]),
+        "first_index": [int(match["row"]), int(match["col"])],
+        "eigen_bits": match["eigen"],
+        "loop_bits": match["loop"],
+    }
 
 # Periodogram framing params + odd-variant end (kept in sync with main.cpp). The
 # Rust golden reads perio_odd_end so both sides agree on the odd-frame end value.
@@ -144,7 +164,8 @@ def main() -> None:
 
     # 2. Run it into the fixture directory.
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    _run([str(HARNESS_DIR / "oracle_harness"), str(FIXTURE_DIR) + "/"])
+    harness_stdout = _run([str(HARNESS_DIR / "oracle_harness"), str(FIXTURE_DIR) + "/"])
+    dct_gemm_substitution = _parse_gemm_check(harness_stdout)
 
     # 3. Read each dump back, verify its shape, and build the inventory.
     inventory: dict[str, dict[str, int]] = {}
@@ -178,7 +199,7 @@ def main() -> None:
         "anchor": anchor,
         "spectrum_order_clamp": SPECTRUM_ORDER_CLAMP,
         "periodogram": PERIODOGRAM,
-        "dct_gemm_substitution": DCT_GEMM_SUBSTITUTION,
+        "dct_gemm_substitution": dct_gemm_substitution,
     }
 
     manifest_path = FIXTURE_DIR / "manifest.json"

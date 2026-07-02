@@ -10,7 +10,9 @@
 // Later phase-1 tasks append stages to this single file.
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 
@@ -402,15 +404,24 @@ int main(int argc, char** argv) {
         // GEMM PRE-CHECK OUTCOME (mandatory step, MelFilterBank.cpp:223): the
         // legacy applyDCT computes melPeriodogram*_CoeffsDCT as an Eigen GEMM
         // (201x29 * 29x13). Comparing that Eigen GEMM against the explicit ascending
-        // triple loop ABORTED - they diverge (Eigen's blocked gebp kernel does not
-        // accumulate in plain ascending order; e.g. E(0,0) bits ...e6ea vs loop
-        // ...e6ec, and ~1500/2613 elements differ). Per the brief, the Eigen product
-        // is therefore REPLACED by the explicit ascending triple loop, which is the
-        // portable/deterministic parity target the Rust apply_dct reproduces. The
-        // substitution is recorded in the manifest (dct_gemm_substitution). The dumps
-        // below are produced by applyDCTLoop (a faithful branch-for-branch port of
-        // MelFilterBank.cpp:218-360 with that one product swapped), NOT by the legacy
-        // mel.applyDCT, because the legacy would bake in the non-portable Eigen order.
+        // triple loop during development ABORTED - they diverge (Eigen's blocked
+        // gebp kernel does not accumulate in plain ascending order). Per the brief,
+        // the Eigen product is therefore REPLACED by the explicit ascending triple
+        // loop (dctProduct), which is the portable/deterministic parity target the
+        // Rust apply_dct reproduces; that substitution is LOCKED regardless of what
+        // the check below measures. The dumps below are produced by applyDCTLoop (a
+        // faithful branch-for-branch port of MelFilterBank.cpp:218-360 with that one
+        // product swapped), NOT by the legacy mel.applyDCT, because the legacy would
+        // bake in the non-portable Eigen order.
+        //
+        // The check below is NOT decorative: it recomputes the FULL 201x13 product
+        // both ways on the real chan-1 log-mel input on every fixture regeneration,
+        // compares every element bit-for-bit (not just (0,0), not by value), and
+        // prints a GEMM_CHECK line that extract_phase1_fixtures.py parses verbatim
+        // into manifest.json's dct_gemm_substitution object -- so the manifest never
+        // carries a stale/hardcoded divergence claim. It does not gate anything
+        // (no abort()): the ascending-loop fallback below is applied unconditionally
+        // either way, per the locked policy above.
         {
             MelFilterBank melLog(64.0, 3800.0, 26, 64.0, 3800.0, 8000.0, 128, true, 13, false, 0, 0);
             Eigen::MatrixXd logmel = Eigen::MatrixXd::Zero(perio.rows(), melLog.getNbFilters());
@@ -428,15 +439,41 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Emit the demonstrated GEMM divergence to stdout for the record.
+            // Self-enforcing full-product bit-for-bit divergence measurement: compute
+            // the SAME 201x13 product both ways and compare every element by bit
+            // pattern (memcpy'd to uint64_t; NOT operator==, which would compare by
+            // value and miss the 1-ULP-only differences this check exists to catch).
             {
                 Eigen::MatrixXd eig = logmel * coeffs;
-                double loop00 = 0.0;
-                for (int n = 0; n < NB_FILTERS; ++n) loop00 += logmel(0, n) * coeffs(n, 0);
-                std::cout << "GEMM check: Eigen(0,0)=" << eig(0, 0)
-                          << " triple-loop(0,0)=" << loop00
-                          << (eig(0, 0) == loop00 ? " MATCH" : " DIVERGE -> using triple loop")
-                          << "\n";
+                Eigen::MatrixXd loop = dctProduct(logmel, coeffs);
+                const int total = static_cast<int>(eig.rows() * eig.cols());
+                int mismatches = 0;
+                int firstRow = -1, firstCol = -1;
+                uint64_t firstEigenBits = 0, firstLoopBits = 0;
+                for (int r = 0; r < eig.rows(); ++r) {
+                    for (int c = 0; c < eig.cols(); ++c) {
+                        uint64_t eBits, lBits;
+                        double eVal = eig(r, c);
+                        double lVal = loop(r, c);
+                        std::memcpy(&eBits, &eVal, sizeof(double));
+                        std::memcpy(&lBits, &lVal, sizeof(double));
+                        if (eBits != lBits) {
+                            if (mismatches == 0) {
+                                firstRow = r;
+                                firstCol = c;
+                                firstEigenBits = eBits;
+                                firstLoopBits = lBits;
+                            }
+                            ++mismatches;
+                        }
+                    }
+                }
+                const bool diverged = mismatches > 0;
+                std::cout << "GEMM_CHECK diverged=" << (diverged ? 1 : 0)
+                          << " mismatches=" << mismatches << " total=" << total
+                          << " first=(" << firstRow << "," << firstCol << ")"
+                          << " eigen=0x" << std::hex << firstEigenBits
+                          << " loop=0x" << firstLoopBits << std::dec << "\n";
             }
 
             // (a) plain MFCC: deltas 0, dd 0, ignoreFirst false -> T x 13.
