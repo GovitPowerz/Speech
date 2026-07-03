@@ -1,13 +1,13 @@
 """Pure-Python BLSTM forward/backward oracle for gradient-check fixtures only.
 
 Ported from legacy MATLAB: BLSTM_Forward.m, BLSTM_Backward.m, Hz2Mel.m, Mel2Hz.m,
-and (Phase 2) the C++ engine LSTMLayer.cpp:312-421. NOT a production path -- used to
-validate the Rust engine (Phase 2-3).
+and (Phase 2) the C++ engine LSTMLayer.cpp:312-421 and NeuronLayer.cpp:127-149. NOT a
+production path -- used to validate the Rust engine (Phase 2-3).
 
-The LSTM oracle here is an INDEPENDENT reimplementation: per-timestep SCALAR Python
-loops with plain float accumulation, coded from the spec, NOT a transliteration of
-the Rust block structure. It exists to cross-check the Rust ``LstmLayer`` from a
-second, structurally-different codebase.
+The LSTM/dense oracles here are INDEPENDENT reimplementations: per-timestep SCALAR
+Python loops with plain float accumulation, coded from the spec, NOT a
+transliteration of the Rust block structure. They exist to cross-check the Rust
+``LstmLayer``/``NeuronLayer`` from a second, structurally-different codebase.
 
 IMPORTANT (bit-exactness caveat): the input projection and recurrence products are
 accumulated with an explicit ascending Python ``for``-loop and a running float
@@ -15,7 +15,7 @@ accumulated with an explicit ascending Python ``for``-loop and a running float
 that drifts by a few ULP from the engine's strictly-ascending order). Every
 elementwise op is a Python float op. On the same platform/libm this reproduces the
 engine's forward output; the JSON-fixture cross-check asserts bit-equality against
-the Rust ``LstmLayer`` (both are same-libm local computations).
+the Rust ``LstmLayer``/``NeuronLayer`` (both are same-libm local computations).
 """
 
 from __future__ import annotations
@@ -46,6 +46,16 @@ def _gates_fn(x: float) -> float:
 def _asinh(x: float) -> float:
     """Maxmin2::fn / Identity::fn (ActivationFunctions.h:158-160,206-208): std::asinh."""
     return math.asinh(x)
+
+
+def _logistic_fn(x: float) -> float:
+    """Logistic::fn (ActivationFunctions.h:41-48): plain sigmoid, INCLUSIVE
+    saturation at x == +-expLimit (no 0.1 pre-scale, unlike GatesFunction)."""
+    if x < _EXP_LIMIT:
+        if x > -_EXP_LIMIT:
+            return 1.0 / (1.0 + math.exp(-x))
+        return 0.0
+    return 1.0
 
 
 def _matmul_seq_row(vec: list[float], mat: NDArray[np.float64]) -> list[float]:
@@ -202,6 +212,83 @@ def lstm_forward_oracle(
         np.array(gates, dtype=np.float64).reshape(t_len, 4 * o),
         np.array(cells, dtype=np.float64).reshape(t_len, o),
     )
+
+
+def dense_forward_oracle(
+    weights: NDArray[np.float64],
+    biases: NDArray[np.float64],
+    x: NDArray[np.float64],
+    last_layer: bool,
+) -> NDArray[np.float64]:
+    """Independent scalar-loop oracle for NeuronLayer::feedForward (NeuronLayer.cpp:127-149).
+
+    Args:
+        weights: (I x O) projection matrix, no peepholes (unlike the LSTM gate blocks).
+        biases:  (O,) or (1 x O) bias row.
+        x:       (T x cols) input sequence. Width tolerance: cols>I uses the left I
+                 columns; cols<I uses the top cols weight rows (:129-135).
+        last_layer: True + O>1 -> UNSTABILIZED softmax (:138-142, no max-subtraction
+                    overflow guard, sequential per-row sum); True + O==1 -> Logistic
+                    (:144); False -> Maxmin2/asinh (:147).
+
+    Returns:
+        y: (T x O) outputs.
+    """
+    weights = np.ascontiguousarray(weights, dtype=np.float64)
+    bias = np.ravel(np.asarray(biases, dtype=np.float64)).tolist()
+
+    big_i = weights.shape[0]
+    o = weights.shape[1]
+    t_len = x.shape[0]
+    cols = x.shape[1]
+
+    # Width-tolerant projection (:129-135), ascending accumulation (matches the
+    # engine's matSeq contract, NOT numpy.dot).
+    if cols > big_i:
+        proj_w = weights
+        used = big_i
+    elif cols < big_i:
+        proj_w = weights[:cols, :]
+        used = cols
+    else:
+        proj_w = weights
+        used = big_i
+
+    pre_act = [[0.0] * o for _ in range(t_len)]
+    for t in range(t_len):
+        row = [float(x[t, j]) for j in range(used)]
+        proj = _matmul_seq_row(row, proj_w)
+        for j in range(o):
+            pre_act[t][j] = proj[j] + bias[j]  # .rowwise() + biases, BEFORE activation
+
+    y = [[0.0] * o for _ in range(t_len)]
+
+    if last_layer and o > 1:
+        # :138 exp(a+b), NO max-subtraction (unstabilized, load-bearing quirk).
+        exp_out = [[math.exp(pre_act[t][j]) for j in range(o)] for t in range(t_len)]
+        # :139 SEQUENTIAL per-row sum (ascending columns, not a reduction).
+        row_sum = [0.0] * t_len
+        for t in range(t_len):
+            acc = 0.0
+            for j in range(o):
+                acc += exp_out[t][j]
+            row_sum[t] = acc
+        # :140-142 per-COLUMN cwiseQuotient by the row sum.
+        for j in range(o):
+            for t in range(t_len):
+                y[t][j] = exp_out[t][j] / row_sum[t]
+    elif last_layer:
+        # O == 1: Logistic.
+        for t in range(t_len):
+            for j in range(o):
+                y[t][j] = _logistic_fn(pre_act[t][j])
+    else:
+        # Maxmin2 (asinh).
+        for t in range(t_len):
+            for j in range(o):
+                y[t][j] = _asinh(pre_act[t][j])
+
+    return np.array(y, dtype=np.float64).reshape(t_len, o)
 
 
 def blstm_forward(inputs: NDArray[np.float64], weights: dict[str, object]) -> NDArray[np.float64]:

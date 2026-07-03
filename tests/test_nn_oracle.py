@@ -1,17 +1,20 @@
-"""Anchor tests for the Phase 2 LSTM forward oracle (nn_reference.lstm_forward_oracle).
+"""Anchor tests for the Phase 2 LSTM/dense forward oracles
+(nn_reference.lstm_forward_oracle / dense_forward_oracle).
 
-The oracle is an independent scalar-loop coding of LSTMLayer::feedForward
-(LSTMLayer.cpp:312-413). The hand anchor here computes one small case longhand in the
-spec S4.3 op order and requires the oracle to reproduce it bit-for-bit; the
-cross-language `lstm_cases.json` fixture (consumed by the Rust golden test) is the
-arbiter that the oracle and the Rust `LstmLayer` agree exactly. Two extra tests pin
-the two load-bearing quirks: the t=0 no-forget-term and the input width tolerance.
+The oracles are independent scalar-loop codings of LSTMLayer::feedForward
+(LSTMLayer.cpp:312-413) and NeuronLayer::feedForward (NeuronLayer.cpp:127-149). The
+hand anchors here compute small cases longhand in the spec op order and require the
+oracle to reproduce them bit-for-bit; the cross-language `{lstm,dense}_cases.json`
+fixtures (consumed by the Rust golden tests) are the arbiter that the oracles and the
+Rust `LstmLayer`/`NeuronLayer` agree exactly. Extra tests pin the load-bearing quirks:
+LSTM's t=0 no-forget-term and input width tolerance; dense's UNSTABILIZED softmax and
+input width tolerance.
 """
 
 import math
 
 import numpy as np
-from speech.nn_reference import lstm_forward_oracle
+from speech.nn_reference import dense_forward_oracle, lstm_forward_oracle
 
 
 def _gate(z: float) -> float:
@@ -144,4 +147,77 @@ def test_lstm_input_width_tolerance() -> None:
     x_narrow = rng.standard_normal((5, big_i - 1))
     y_narrow, _, _ = lstm_forward_oracle(input_w, feedback_w, peep, bias, x_narrow, flags)
     y_toprows, _, _ = lstm_forward_oracle(input_w[: big_i - 1, :], feedback_w, peep, bias, x_narrow, flags)
+    assert np.array_equal(y_narrow, y_toprows), "narrow input uses top cols weight rows only"
+
+
+def test_dense_hand_case_softmax_o2_t1() -> None:
+    # I=2, O=2, T=1: hand-derived UNSTABILIZED softmax, same weights/inputs as the
+    # Rust hand anchor (phase2_layers_golden.rs::dense_hand_case_softmax_o2_t1).
+    # Layout col-major (I=2,O=2): weights [w00,w10, w01,w11]; bias [b0,b1].
+    w00, w10 = 1.0 / 4.0, -1.0 / 8.0  # input0/1 -> output0
+    w01, w11 = 3.0 / 8.0, -1.0 / 2.0  # input0/1 -> output1
+    b0, b1 = 1.0 / 16.0, -1.0 / 16.0
+
+    x0, x1 = 0.3, -0.2
+
+    # :129-135 projection (cols == I, plain product); :136-137 rowwise + bias.
+    a0 = x0 * w00 + x1 * w10 + b0
+    a1 = x0 * w01 + x1 * w11 + b1
+    # :138 exp(a+b) per column, NO max-subtraction (unstabilized, load-bearing quirk).
+    e0 = math.exp(a0)
+    e1 = math.exp(a1)
+    # :139 sequential row-sum (T=1, single row: e0 then e1, ascending column order).
+    total = e0 + e1
+    # :140-142 per-COLUMN cwiseQuotient by the row sum.
+    y0 = e0 / total
+    y1 = e1 / total
+
+    weights = np.array([[w00, w01], [w10, w11]], dtype=np.float64)  # I x O
+    bias = np.array([b0, b1], dtype=np.float64)
+    x = np.array([[x0, x1]], dtype=np.float64)
+
+    y = dense_forward_oracle(weights, bias, x, last_layer=True)
+
+    assert y[0, 0].tobytes() == np.float64(y0).tobytes(), "softmax y0"
+    assert y[0, 1].tobytes() == np.float64(y1).tobytes(), "softmax y1"
+
+
+def test_dense_logistic_and_hidden_paths() -> None:
+    # O == 1, last_layer -> Logistic; last_layer=False -> Maxmin2/asinh. Same weights,
+    # different activation dispatch.
+    weights = np.array([[0.3], [-0.2], [0.1]], dtype=np.float64)  # 3 x 1
+    bias = np.array([0.05], dtype=np.float64)
+    x = np.array([[0.1, -0.2, 0.3], [0.4, 0.5, -0.6]], dtype=np.float64)
+
+    pre_act = x @ weights + bias  # exact-width plain product, sanity reference only
+
+    y_logistic = dense_forward_oracle(weights, bias, x, last_layer=True)
+    y_hidden = dense_forward_oracle(weights, bias, x, last_layer=False)
+
+    for t in range(2):
+        expected_logistic = 1.0 / (1.0 + math.exp(-pre_act[t, 0]))
+        expected_hidden = math.asinh(pre_act[t, 0])
+        assert abs(y_logistic[t, 0] - expected_logistic) <= 1e-12
+        assert abs(y_hidden[t, 0] - expected_hidden) <= 1e-12
+
+
+def test_dense_input_width_tolerance() -> None:
+    # cols > I uses the left I input columns (:129-131); cols < I uses the top cols
+    # weight rows (:132-133). Verify both against an equivalent trimmed/exact run.
+    big_i, o = 3, 2
+    rng = np.random.default_rng(1)
+    weights = rng.standard_normal((big_i, o))
+    bias = rng.standard_normal(o)
+
+    # Wide input (cols = I+2): only the left I cols are used. last_layer=False so the
+    # width-mismatch path stays on the hidden (asinh) branch, per the harness dumps.
+    x_wide = rng.standard_normal((5, big_i + 2))
+    y_wide = dense_forward_oracle(weights, bias, x_wide, last_layer=False)
+    y_trim = dense_forward_oracle(weights, bias, x_wide[:, :big_i], last_layer=False)
+    assert np.array_equal(y_wide, y_trim), "wide input uses left I columns only"
+
+    # Narrow input (cols = I-1): only the top cols weight rows are used.
+    x_narrow = rng.standard_normal((5, big_i - 1))
+    y_narrow = dense_forward_oracle(weights, bias, x_narrow, last_layer=False)
+    y_toprows = dense_forward_oracle(weights[: big_i - 1, :], bias, x_narrow, last_layer=False)
     assert np.array_equal(y_narrow, y_toprows), "narrow input uses top cols weight rows only"

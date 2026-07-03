@@ -84,3 +84,26 @@ def test_lstm_forward_tol_bit_exact_vs_real_layer() -> None:
     assert tol["site"] == "lstm_forward"
     assert tol["max_ulp"] == 0, tol
     assert float(tol["max_abs"]) == 0.0, tol
+
+
+def test_dense_forward_tol_bit_exact_vs_real_layer() -> None:
+    # Task 5: the ascending-loop reimpl (denseForwardLoop) that produced the dense
+    # hidden/softmax/logistic/width-mismatch dumps must match the REAL compiled
+    # NeuronLayer::feedForward bit-for-bit over the whole grid -- max_ulp == 0, same
+    # rationale as the LSTM tolerance check above.
+    tol = _manifest()["dense_forward_tol"]
+    assert tol["site"] == "dense_forward"
+    assert tol["max_ulp"] == 0, tol
+    assert float(tol["max_abs"]) == 0.0, tol
+
+
+def test_dense_dumps_recorded_in_inventory() -> None:
+    dumps = _manifest()["dumps"]
+    for name in (
+        "dense_hidden.bin",
+        "dense_softmax.bin",
+        "dense_logistic.bin",
+        "dense_wide.bin",
+        "dense_narrow.bin",
+    ):
+        assert name in dumps, name

@@ -363,6 +363,19 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   Rust signature for parity with the `Layer` dispatch and the legacy call sites; bound to `let _ =`.
   Provenance note, not a bug.
 
+- **[phase2] `NeuronLayer` output softmax is UNSTABILIZED -- no max-subtraction overflow guard**
+  (`nn/layers.rs` `NeuronLayer::feed_forward`, from `NeuronLayer.cpp:138-142`): `lastLayer && O>1`
+  computes `exp(a+b)` directly on the raw pre-activation values with no `- max(row)` shift before the
+  exponential, unlike a numerically-stabilized softmax. Large pre-activations can overflow `exp` to
+  `inf` (and `inf/inf = NaN` in the row-sum quotient); the legacy has no guard against this and the port
+  reproduces it exactly, incl. the row-sum being a SEQUENTIAL per-row loop over ascending columns
+  (`:139`, not a reduction) followed by a per-COLUMN `cwiseQuotient` (`:140-142`). Confirmed neutral by
+  the harness NN_TOL probe: the ascending-loop reimpl matches the REAL compiled
+  `NeuronLayer::feedForward` with `max_ulp=0` over the whole dump grid. *Fix candidate:* after parity,
+  add a `- rowwise().maxCoeff()` shift before the `exp` for numerical safety on unseen inputs with large
+  activations; the training-time weight scale in practice keeps this from triggering on the observed
+  corpora, which is presumably why it was never noticed.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

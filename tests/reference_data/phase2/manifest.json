@@ -95,6 +95,12 @@
     "max_ulp": 0,
     "max_abs": "0.000e+00"
   },
+  "dense_forward_tol": {
+    "text": "Task 5: max ULP/abs gap between the REAL NeuronLayer::feedForward and the ascending-loop reimpl (denseForwardLoop) over the hidden/softmax/logistic/width-mismatch dump grid. max_ulp=0 means the reimpl reproduces Eigen's actual forward output bit-for-bit at these shapes -- the width-tolerant projection + UNSTABILIZED softmax (no max-subtraction overflow guard) + sequential row-sum contract (NeuronLayer.cpp:127-149).",
+    "site": "dense_forward",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00"
+  },
   "dumps": {
     "act_sweep.bin": {
       "rows": 4,
@@ -283,6 +289,26 @@
     "lstm_gates_3x2_T7_allon_narrowM1_fwd.bin": {
       "rows": 7,
       "cols": 8
+    },
+    "dense_hidden.bin": {
+      "rows": 6,
+      "cols": 3
+    },
+    "dense_softmax.bin": {
+      "rows": 6,
+      "cols": 3
+    },
+    "dense_logistic.bin": {
+      "rows": 6,
+      "cols": 1
+    },
+    "dense_wide.bin": {
+      "rows": 6,
+      "cols": 3
+    },
+    "dense_narrow.bin": {
+      "rows": 6,
+      "cols": 3
     }
   }
 }

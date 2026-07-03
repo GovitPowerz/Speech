@@ -69,6 +69,17 @@ for _name in ("3x2_T7_allon_wideP2_fwd", "3x2_T7_allon_narrowM1_fwd"):
     EXPECTED_SHAPES[f"lstm_fwd_{_name}.bin"] = (7, 2)
     EXPECTED_SHAPES[f"lstm_gates_{_name}.bin"] = (7, 8)
 
+# Task 5: NeuronLayer (dense) forward dumps. hidden/softmax/wide/narrow are I=4,O=3,
+# T=6 (softmax lastLayer=true O=3; hidden/wide/narrow lastLayer=false, asinh); wide
+# uses input cols I+2 (leftCols), narrow uses cols I-1 (topRows). logistic is
+# I=4,O=1,T=6 (lastLayer=true O=1). Kept in sync with the runCase grid in main.cpp's
+# Task 5 block.
+EXPECTED_SHAPES["dense_hidden.bin"] = (6, 3)
+EXPECTED_SHAPES["dense_softmax.bin"] = (6, 3)
+EXPECTED_SHAPES["dense_logistic.bin"] = (6, 1)
+EXPECTED_SHAPES["dense_wide.bin"] = (6, 3)
+EXPECTED_SHAPES["dense_narrow.bin"] = (6, 3)
+
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
 HARNESS_INPUTS = [
     "excerpt_2ch_8k.wav",
@@ -152,15 +163,15 @@ def _parse_lstm_nb(stdout: str) -> tuple[int, int]:
     return nb0, nb1
 
 
-def _parse_nn_tol(stdout: str) -> dict[str, object]:
-    match = NN_TOL_RE.search(stdout)
-    if match is None:
-        raise SystemExit("Task 4 NN_TOL line missing from harness stdout")
-    return {
-        "site": match["site"],
-        "max_ulp": int(match["max_ulp"]),
-        "max_abs": match["max_abs"],
-    }
+def _parse_nn_tol(stdout: str, site: str) -> dict[str, object]:
+    for match in NN_TOL_RE.finditer(stdout):
+        if match["site"] == site:
+            return {
+                "site": match["site"],
+                "max_ulp": int(match["max_ulp"]),
+                "max_abs": match["max_abs"],
+            }
+    raise SystemExit(f"NN_TOL line for site={site} missing from harness stdout")
 
 
 def _parse_nn_probes(stdout: str) -> dict[str, dict[str, object]]:
@@ -218,7 +229,8 @@ def main() -> None:
     nb_weights = _parse_nn_real(stdout)
     lstm_nb0, lstm_nb1 = _parse_lstm_nb(stdout)
     probes = _parse_nn_probes(stdout)
-    nn_tol = _parse_nn_tol(stdout)
+    lstm_nn_tol = _parse_nn_tol(stdout, "lstm_forward")
+    dense_nn_tol = _parse_nn_tol(stdout, "dense_forward")
 
     # 2b. Read each dump back, verify its shape, and build the inventory.
     dump_inventory: dict[str, dict[str, int]] = {}
@@ -271,7 +283,18 @@ def main() -> None:
                 "actual forward output bit-for-bit at these shapes -- the op-order + "
                 "combined/separate peephole grouping contract (LSTMLayer.cpp:312-421)."
             ),
-            **nn_tol,
+            **lstm_nn_tol,
+        },
+        "dense_forward_tol": {
+            "text": (
+                "Task 5: max ULP/abs gap between the REAL NeuronLayer::feedForward and "
+                "the ascending-loop reimpl (denseForwardLoop) over the hidden/softmax/"
+                "logistic/width-mismatch dump grid. max_ulp=0 means the reimpl "
+                "reproduces Eigen's actual forward output bit-for-bit at these shapes -- "
+                "the width-tolerant projection + UNSTABILIZED softmax (no max-subtraction "
+                "overflow guard) + sequential row-sum contract (NeuronLayer.cpp:127-149)."
+            ),
+            **dense_nn_tol,
         },
         "dumps": dump_inventory,
     }

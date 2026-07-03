@@ -5,7 +5,7 @@
 
 use ndarray::Array2;
 
-use super::activations::{gates_fn, identity_fn, maxmin2_fn};
+use super::activations::{gates_fn, identity_fn, logistic_fn, maxmin2_fn};
 
 /// Ascending-loop matrix product `a (m x k) * b (k x n)`, accumulating the `k`
 /// index in strictly ascending order (`i`/`j` outer, `k` inner). This is the
@@ -365,6 +365,149 @@ fn drain_col_major(m: &Array2<f64>, out: &mut Vec<f64>) {
     for jj in 0..cols {
         for ii in 0..rows {
             out.push(m[[ii, jj]]);
+        }
+    }
+}
+
+/// Dense output layer (legacy `NeuronLayer`). Ported: weight (de)serialization
+/// (`NeuronLayer.cpp:69-99`) + forward (`:127-149`).
+///
+/// - `weights`: `_InputSize x _OutputSize` (unlike the LSTM gate matrices, no
+///   peepholes -- one plain projection matrix).
+/// - `biases`: `1 x _OutputSize` (row vector; stored as `Array2<f64>` for a
+///   uniform (de)serialization loop with `weights`).
+pub struct NeuronLayer {
+    input_size: usize,
+    output_size: usize,
+
+    weights: Array2<f64>,
+    biases: Array2<f64>,
+}
+
+impl NeuronLayer {
+    /// New layer with zeroed weights (legacy ctor with `weightsSetExternally =
+    /// true` skips the config-key/random-table fill; callers set weights via
+    /// `set_weights`).
+    pub fn new(input_size: usize, output_size: usize) -> Self {
+        NeuronLayer {
+            input_size,
+            output_size,
+            weights: Array2::zeros((input_size, output_size)),
+            biases: Array2::zeros((1, output_size)),
+        }
+    }
+
+    /// `getNbOfWeights` (`NeuronLayer.cpp:84-86`): `_OutputSize*(_InputSize+1)`.
+    pub fn nb_of_weights(&self) -> usize {
+        self.output_size * (self.input_size + 1)
+    }
+
+    /// `setWeights` (`NeuronLayer.cpp:69-82`): consumes `flat[..nb_of_weights()]`
+    /// into the weights matrix (COLUMN-major element order,
+    /// `needed(jj*_InputSize+ii)`, `jj` outer/cols, `ii` inner/rows) then the bias
+    /// row, and returns the tail slice for the next layer to consume in a chain.
+    pub fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64] {
+        let nb = self.nb_of_weights();
+        let (needed, left) = flat.split_at(nb);
+
+        let mut pos = 0usize;
+        fill_col_major(&mut self.weights, needed, &mut pos);
+        fill_col_major(&mut self.biases, needed, &mut pos);
+
+        left
+    }
+
+    /// `getWeights` (`NeuronLayer.cpp:88-99`): the mirror of `set_weights`, same
+    /// column-major element order (weights then bias), appended into `out`.
+    pub fn get_weights(&self, out: &mut Vec<f64>) {
+        drain_col_major(&self.weights, out);
+        drain_col_major(&self.biases, out);
+    }
+
+    /// `feedForward` (`NeuronLayer.cpp:127-149`): whole-sequence dense forward
+    /// pass. Fills `output` (T x O).
+    ///
+    /// - Width-tolerant projection (`:129-135`): `cols > I` uses the left `I`
+    ///   input columns; `cols < I` uses the top `cols` weight rows; else the full
+    ///   product. Via `matmul_seq` (the measured ascending-loop contract).
+    /// - Bias added `.rowwise()` BEFORE activation (`:136-137`), shared by all
+    ///   three activation paths below.
+    /// - `last_layer && output_size > 1`: UNSTABILIZED softmax (`:138-142`) --
+    ///   `exp(a+b)` computed directly with NO max-subtraction overflow guard (a
+    ///   load-bearing legacy quirk, reproduced on purpose), per-row sum via a
+    ///   SEQUENTIAL ascending-column loop (not a reduction), then per-COLUMN
+    ///   quotient by that sum.
+    /// - `last_layer && output_size == 1`: `Logistic` (`:144`).
+    /// - `!last_layer`: `Maxmin2`/asinh (`:147`).
+    pub fn feed_forward(
+        &mut self,
+        input: &Array2<f64>,
+        output: &mut Array2<f64>,
+        last_layer: bool,
+    ) {
+        let i = self.input_size;
+        let o = self.output_size;
+        let cols = input.dim().1;
+
+        // :129-135 input projection with width tolerance.
+        let activations = if cols > i {
+            matmul_seq(&input.slice(ndarray::s![.., ..i]).to_owned(), &self.weights)
+        } else if cols < i {
+            matmul_seq(
+                input,
+                &self.weights.slice(ndarray::s![..cols, ..]).to_owned(),
+            )
+        } else {
+            matmul_seq(input, &self.weights)
+        };
+        let t_len = activations.dim().0;
+
+        // .rowwise() + _Biaises, BEFORE activation (:136-137).
+        let mut pre_act = activations;
+        for t in 0..t_len {
+            for j in 0..o {
+                pre_act[[t, j]] += self.biases[[0, j]];
+            }
+        }
+
+        output.fill(0.0);
+        if last_layer && o > 1 {
+            // :138 exp(a+b); :139 SEQUENTIAL per-row sum (ascending columns, not a
+            // reduction); :140-142 per-COLUMN cwiseQuotient. NO max-subtraction --
+            // the legacy softmax is unstabilized by construction.
+            let mut exp_out = Array2::<f64>::zeros((t_len, o));
+            for t in 0..t_len {
+                for j in 0..o {
+                    exp_out[[t, j]] = pre_act[[t, j]].exp();
+                }
+            }
+            let mut row_sum = vec![0.0f64; t_len];
+            for t in 0..t_len {
+                let mut acc = 0.0;
+                for j in 0..o {
+                    acc += exp_out[[t, j]];
+                }
+                row_sum[t] = acc;
+            }
+            for j in 0..o {
+                for t in 0..t_len {
+                    output[[t, j]] = exp_out[[t, j]] / row_sum[t];
+                }
+            }
+        } else if last_layer {
+            // O == 1: Logistic.
+            for t in 0..t_len {
+                for j in 0..o {
+                    output[[t, j]] = logistic_fn(pre_act[[t, j]]);
+                }
+            }
+        } else {
+            // Maxmin2 (asinh).
+            for t in 0..t_len {
+                for j in 0..o {
+                    output[[t, j]] = maxmin2_fn(pre_act[[t, j]]);
+                }
+            }
         }
     }
 }

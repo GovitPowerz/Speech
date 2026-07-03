@@ -29,6 +29,7 @@
 #include "InputStatistics.h"
 #include "LSTMLayer.h"
 #include "MelFilterBank.h"
+#include "NeuronLayer.h"
 #include "fft.hpp"
 #include "fmath.hpp"
 
@@ -1873,6 +1874,141 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "NN_TOL site=lstm_forward max_ulp=" << globalMaxUlp
+                  << " max_abs=" << std::scientific << std::setprecision(3)
+                  << globalMaxAbs << "\n";
+    }
+
+    // --- Phase 2 Task 5: NeuronLayer (dense) forward + NN_TOL probe ----------
+    // legacy: NeuronLayer.cpp:69-99 (setWeights/getWeights: flat order = weights
+    // COLUMN-major -- per-neuron fan-in blocks contiguous, m(ii,jj) =
+    // needed(jj*_InputSize+ii) -- THEN all biases; nb = O*(I+1)), :127-149
+    // (feedForward: width-tolerant projection -- cols>I uses leftCols(I), cols<I
+    // uses topRows(cols), else the plain product; bias .rowwise() BEFORE
+    // activation; lastLayer && O>1 -> UNSTABILIZED softmax [no max-subtraction
+    // overflow guard -- exp(a+b) computed directly, per-row sum via a SEQUENTIAL
+    // rowwise().sum(), then per-COLUMN cwiseQuotient by that sum]; lastLayer &&
+    // O==1 -> Logistic; else Maxmin2/asinh).
+    {
+        // Reimpl of NeuronLayer::feedForward (:127-149). Uses matSeq for the
+        // projection (measured ascending-loop contract, spec S8/Task 1). The
+        // softmax row-sum is accumulated in a SEQUENTIAL per-row loop (columns in
+        // ascending order), NOT Eigen's rowwise().sum() reduction -- mirrors the
+        // legacy's own explicit per-column cwiseQuotient loop (:140-142) that this
+        // reimpl also reproduces one column at a time.
+        auto denseForwardLoop = [](const Eigen::MatrixXd& inputSeq, const Eigen::MatrixXd& weights,
+                                    const Eigen::MatrixXd& bias, bool lastLayer) {
+            const int I = static_cast<int>(weights.rows());
+            const int O = static_cast<int>(weights.cols());
+            const int cols = static_cast<int>(inputSeq.cols());
+            // :129-135 width-tolerant projection.
+            Eigen::MatrixXd activations;
+            if (cols > I) {
+                activations = matSeq(inputSeq.leftCols(I), weights);
+            } else if (cols < I) {
+                activations = matSeq(inputSeq, weights.topRows(cols));
+            } else {
+                activations = matSeq(inputSeq, weights);
+            }
+            const int T = static_cast<int>(activations.rows());
+            // .rowwise() + _Biaises, BEFORE activation (shared by all three paths).
+            Eigen::MatrixXd preAct(T, O);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < O; ++j) preAct(t, j) = activations(t, j) + bias(0, j);
+
+            Eigen::MatrixXd output(T, O);
+            if (lastLayer && O > 1) {
+                // :138 exp(a+b), :139-142 sequential row-sum THEN per-column quotient.
+                Eigen::MatrixXd expOut(T, O);
+                for (int t = 0; t < T; ++t)
+                    for (int j = 0; j < O; ++j) expOut(t, j) = std::exp(preAct(t, j));
+                std::vector<double> rowSum(T, 0.0);
+                for (int t = 0; t < T; ++t) {
+                    double acc = 0.0;
+                    for (int j = 0; j < O; ++j) acc += expOut(t, j);
+                    rowSum[t] = acc;
+                }
+                for (int j = 0; j < O; ++j)
+                    for (int t = 0; t < T; ++t) output(t, j) = expOut(t, j) / rowSum[t];
+            } else if (lastLayer) {
+                // O == 1: Logistic.
+                for (int t = 0; t < T; ++t)
+                    for (int j = 0; j < O; ++j) output(t, j) = Logistic::fn(preAct(t, j));
+            } else {
+                // Maxmin2 (asinh).
+                for (int t = 0; t < T; ++t)
+                    for (int j = 0; j < O; ++j) output(t, j) = Maxmin2::fn(preAct(t, j));
+            }
+            return output;
+        };
+
+        ConfigFile conf(nnConfigPath, '_');
+        conf._Params.erase("BLSTM_weightsFile");
+
+        double globalMaxAbs = 0.0;
+        long globalMaxUlp = 0;
+        auto probeGap = [&](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl) {
+            for (int r = 0; r < real.rows(); ++r) {
+                for (int c = 0; c < real.cols(); ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    double absGap = std::fabs(a - b);
+                    if (absGap > globalMaxAbs) globalMaxAbs = absGap;
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > globalMaxUlp) globalMaxUlp = ulp;
+                }
+            }
+        };
+
+        // Deterministic closed-form input: signed values spanning [-0.5, 0.5)
+        // (same formula family as the Task 4 LSTM input).
+        auto makeInput = [](int T, int cols) {
+            Eigen::MatrixXd x(T, cols);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < cols; ++j)
+                    x(t, j) = (double)(((t * 37 + j * 53 + 7) % 101)) / 101.0 - 0.5;
+            return x;
+        };
+
+        // Run one case: real NeuronLayer + reimpl on the same synthetic weights and
+        // input; dump the reimpl's output; probe the real-vs-reimpl gap.
+        auto runCase = [&](const std::string& dumpName, int I, int O, int T,
+                           bool lastLayer, int inCols) {
+            NeuronLayer layer(conf, "SYNW", 0, (size_t)I, (size_t)O, true);
+            const long nb = layer.getNbOfWeights(); // O*(I+1)
+            Eigen::VectorXd flat(nb);
+            for (long k = 0; k < nb; ++k) flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            layer.setWeights(flat);
+
+            // Unpack the same flat vector into (weights I x O, bias 1 x O), matching
+            // NeuronLayer::setWeights (:69-82): weights COLUMN-major, then all biases.
+            Eigen::MatrixXd weights(I, O), bias(1, O);
+            for (int jj = 0; jj < O; ++jj)
+                for (int ii = 0; ii < I; ++ii) weights(ii, jj) = flat((long)jj * I + ii);
+            for (int jj = 0; jj < O; ++jj) bias(0, jj) = flat((long)O * I + jj);
+
+            Eigen::MatrixXd input = makeInput(T, inCols);
+            Eigen::MatrixXd realOut(T, O);
+            layer.feedForward(input, realOut, lastLayer);
+            Eigen::MatrixXd reimplOut = denseForwardLoop(input, weights, bias, lastLayer);
+
+            probeGap(realOut, reimplOut);
+            Matrix2BinaryFile(out + dumpName, reimplOut);
+            ++dumps;
+        };
+
+        // hidden: lastLayer=false, asinh, I=4 O=3 T=6.
+        runCase("dense_hidden.bin", 4, 3, 6, false, 4);
+        // softmax: lastLayer=true, O=3 (unstabilized softmax), I=4 T=6.
+        runCase("dense_softmax.bin", 4, 3, 6, true, 4);
+        // logistic: lastLayer=true, O=1, I=4 T=6.
+        runCase("dense_logistic.bin", 4, 1, 6, true, 4);
+        // width-mismatch, both directions, lastLayer=false: cols=I+2 and cols=I-1.
+        runCase("dense_wide.bin", 4, 3, 6, false, 4 + 2);
+        runCase("dense_narrow.bin", 4, 3, 6, false, 4 - 1);
+
+        std::cout << "NN_TOL site=dense_forward max_ulp=" << globalMaxUlp
                   << " max_abs=" << std::scientific << std::setprecision(3)
                   << globalMaxAbs << "\n";
     }

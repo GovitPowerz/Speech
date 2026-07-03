@@ -16,7 +16,7 @@
 mod common;
 
 use ndarray::Array2;
-use speech::nn::layers::LstmLayer;
+use speech::nn::layers::{LstmLayer, NeuronLayer};
 
 const NB0: usize = 72; // LstmLayer(I=3,O=2): 4*3*2 + 4*2*2 + 12*2 + 4*2 = 24+16+24+8
 const NB1: usize = 28; // LstmLayer(I=2,O=1): 4*2*1 + 4*1*1 + 12*1 + 4*1 = 8+4+12+4
@@ -441,5 +441,206 @@ fn lstm_python_oracle_cross_check() {
         common::assert_bits_eq(&output, &want_y, &format!("{name} y"));
         common::assert_bits_eq(layer.gates(), &want_gates, &format!("{name} gates"));
         common::assert_bits_eq(layer.cell_states(), &want_cells, &format!("{name} cells"));
+    }
+}
+
+// === Task 5: NeuronLayer (dense) forward goldens ============================
+//
+// The harness dumps, for each case, `dense_<case>.bin` (T x O outputs), computed by
+// the ascending-loop reimpl of `NeuronLayer::feedForward` -- which the harness's
+// NN_TOL probe verifies matches the REAL compiled `NeuronLayer::feedForward`
+// bit-for-bit (max_ulp=0) at these shapes. So each golden is a bit-exact target for
+// `NeuronLayer::feed_forward` on the oracle env; elsewhere the asinh/exp chains earn
+// `assert_oracle_eq`'s hybrid bound.
+
+/// The harness weight formula (same as LSTM Task 3/4): `w[k] = ((k*11+3) % 97)/97.0
+/// - 0.5`, length `nb_of_weights(I,O) = O*(I+1)`.
+fn synthetic_dense_weights(i: usize, o: usize) -> Vec<f64> {
+    let nb = NeuronLayer::new(i, o).nb_of_weights();
+    synthetic_flat(nb)
+}
+
+fn check_dense_case(
+    dump: &str,
+    i: usize,
+    o: usize,
+    t_len: usize,
+    last_layer: bool,
+    in_cols: usize,
+) {
+    let mut layer = NeuronLayer::new(i, o);
+    let flat = synthetic_dense_weights(i, o);
+    let tail = layer.set_weights(&flat);
+    assert_eq!(tail.len(), 0, "{dump}: flat vector fully consumed");
+
+    let input = synthetic_input(t_len, in_cols);
+    let mut output = Array2::<f64>::zeros((t_len, o));
+    layer.feed_forward(&input, &mut output, last_layer);
+
+    let want = common::load_bin_phase2(dump);
+    common::assert_oracle_eq(&output, &want, dump);
+}
+
+#[test]
+fn dense_hidden_matches_oracle() {
+    // lastLayer=false, asinh (Maxmin2), I=4 O=3 T=6.
+    check_dense_case("dense_hidden.bin", 4, 3, 6, false, 4);
+}
+
+#[test]
+fn dense_softmax_matches_oracle() {
+    // lastLayer=true, O=3 > 1 -> UNSTABILIZED softmax (no max-subtraction guard).
+    check_dense_case("dense_softmax.bin", 4, 3, 6, true, 4);
+}
+
+#[test]
+fn dense_logistic_matches_oracle() {
+    // lastLayer=true, O=1 -> Logistic.
+    check_dense_case("dense_logistic.bin", 4, 1, 6, true, 4);
+}
+
+#[test]
+fn dense_width_mismatch_matches_oracle() {
+    // lastLayer=false: cols=I+2 (leftCols(I)) and cols=I-1 (topRows(cols)).
+    check_dense_case("dense_wide.bin", 4, 3, 6, false, 4 + 2);
+    check_dense_case("dense_narrow.bin", 4, 3, 6, false, 4 - 1);
+}
+
+#[test]
+fn dense_nb_of_weights_matches_formula() {
+    // nb = O*(I+1), computed by hand:
+    // (4,3): 3*(4+1) = 15
+    // (4,1): 1*(4+1) = 5
+    // (2,2): 2*(2+1) = 6
+    let cases = [((4usize, 3usize), 15usize), ((4, 1), 5), ((2, 2), 6)];
+    for ((i, o), expected) in cases {
+        let layer = NeuronLayer::new(i, o);
+        assert_eq!(layer.nb_of_weights(), expected, "I={i} O={o}");
+    }
+}
+
+#[test]
+fn dense_weight_roundtrip_bits() {
+    // set_weights/get_weights must mirror bit-for-bit: pure copy logic, no libm.
+    let i = 4usize;
+    let o = 3usize;
+    let flat = synthetic_dense_weights(i, o);
+    let mut layer = NeuronLayer::new(i, o);
+    let tail = layer.set_weights(&flat);
+    assert_eq!(tail.len(), 0);
+
+    let mut got = Vec::new();
+    layer.get_weights(&mut got);
+    assert_eq!(got.len(), flat.len());
+    for (k, (a, b)) in flat.iter().zip(got.iter()).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "weight {k} roundtrip mismatch");
+    }
+}
+
+#[test]
+fn dense_weight_chaining_splits_flat_vector() {
+    // Two layers sharing one flat vector: layer0 consumes nb0, layer1 consumes the
+    // tail's first nb1, mirroring the LstmLayer chaining contract.
+    let i0 = 3usize;
+    let o0 = 2usize;
+    let i1 = 2usize;
+    let o1 = 1usize;
+    let nb0 = NeuronLayer::new(i0, o0).nb_of_weights(); // 2*(3+1) = 8
+    let nb1 = NeuronLayer::new(i1, o1).nb_of_weights(); // 1*(2+1) = 3
+    let flat = synthetic_flat(nb0 + nb1 + 4); // extra tail past both layers
+
+    let mut layer0 = NeuronLayer::new(i0, o0);
+    let mut layer1 = NeuronLayer::new(i1, o1);
+    let tail0 = layer0.set_weights(&flat);
+    assert_eq!(tail0.len(), flat.len() - nb0);
+    let tail1 = layer1.set_weights(tail0);
+    assert_eq!(tail1.len(), flat.len() - nb0 - nb1);
+    assert_eq!(tail1, &flat[nb0 + nb1..]);
+}
+
+#[test]
+fn dense_hand_case_softmax_o2_t1() {
+    // I=2, O=2, T=1: hand-derived UNSTABILIZED softmax, expression-coded (exp/sum/
+    // quotient in the exact legacy order: :138 exp(a+b); :139 sequential row-sum;
+    // :140-142 per-COLUMN cwiseQuotient). Layout (I=2,O=2) col-major:
+    //   weights [w00,w10, w01,w11] (per-neuron fan-in blocks contiguous); bias [b0,b1].
+    let w00 = 1.0 / 4.0; // input0 -> output0
+    let w10 = -1.0 / 8.0; // input1 -> output0
+    let w01 = 3.0 / 8.0; // input0 -> output1
+    let w11 = -1.0 / 2.0; // input1 -> output1
+    let b0 = 1.0 / 16.0;
+    let b1 = -1.0 / 16.0;
+
+    let x0 = 0.3_f64;
+    let x1 = -0.2_f64;
+
+    // :129-135 projection (cols == I, plain product); :136-137 rowwise + bias.
+    let a0 = x0 * w00 + x1 * w10 + b0;
+    let a1 = x0 * w01 + x1 * w11 + b1;
+    // :138 exp(a+b) per column, NO max-subtraction (unstabilized, load-bearing quirk).
+    let e0 = a0.exp();
+    let e1 = a1.exp();
+    // :139 sequential row-sum (T=1, single row: e0 then e1, in ascending column order).
+    let sum = e0 + e1;
+    // :140-142 per-COLUMN cwiseQuotient by the row sum.
+    let y0 = e0 / sum;
+    let y1 = e1 / sum;
+
+    let flat = vec![w00, w10, w01, w11, b0, b1];
+    let mut layer = NeuronLayer::new(2, 2);
+    let tail = layer.set_weights(&flat);
+    assert_eq!(tail.len(), 0);
+
+    let input = Array2::from_shape_vec((1, 2), vec![x0, x1]).unwrap();
+    let mut output = Array2::<f64>::zeros((1, 2));
+    layer.feed_forward(&input, &mut output, true);
+
+    // Same libm, same op order -> bit-identical.
+    assert_eq!(output[[0, 0]].to_bits(), y0.to_bits(), "softmax y0");
+    assert_eq!(output[[0, 1]].to_bits(), y1.to_bits(), "softmax y1");
+}
+
+// === Task 5: Python-oracle cross-check =======================================
+//
+// `dense_cases.json` (scripts/extract_phase2_oracle_cases.py) holds the Python
+// `dense_forward_oracle` forward outputs over a deterministic (I,O,T,last_layer)
+// grid, with every f64 stored as its raw u64 bits (hex). Both the Python oracle and
+// `NeuronLayer` are same-libm local computations, so the cross-check is BIT-EXACT
+// (`to_bits`), not the hybrid oracle bound.
+
+#[test]
+fn dense_python_oracle_cross_check() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase2/dense_cases.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let cases = doc["cases"].as_array().unwrap();
+    assert!(!cases.is_empty(), "dense_cases.json has no cases");
+
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let i = case["I"].as_u64().unwrap() as usize;
+        let o = case["O"].as_u64().unwrap() as usize;
+        let t_len = case["T"].as_u64().unwrap() as usize;
+        let in_cols = case["in_cols"].as_u64().unwrap() as usize;
+        let last_layer = case["last_layer"].as_bool().unwrap();
+
+        let flat: Vec<f64> = case["weights_bits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| bits_to_f64(s.as_str().unwrap()))
+            .collect();
+        let input = matrix_from_bits(&case["input_bits"]);
+        let want_y = matrix_from_bits(&case["y_bits"]);
+
+        let mut layer = NeuronLayer::new(i, o);
+        let tail = layer.set_weights(&flat);
+        assert_eq!(tail.len(), 0, "{name}: flat vector fully consumed");
+        let mut output = Array2::<f64>::zeros((t_len, o));
+        layer.feed_forward(&input, &mut output, last_layer);
+        assert_eq!(input.ncols(), in_cols, "{name}: input width sanity check");
+
+        common::assert_bits_eq(&output, &want_y, &format!("{name} y"));
     }
 }
