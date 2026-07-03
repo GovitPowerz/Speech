@@ -396,6 +396,44 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   distinguishable choice from a single product division -- ported as the legacy writes it (sequential),
   documented here rather than tested against a phantom counterexample.
 
+- **[phase2] `feedForwardBackwardTruncateSweep` SILENTLY DROPS a trailing chunk with `lengthShort == 0`**
+  (`nn/blstm.rs::feed_forward_backward_truncate_sweep`, from `BLSTMNeuralNetwork.cpp:534-542`): the
+  non-overlapping window loop advances `jj += window_size`; the partial LAST window recomputes its
+  post-subsampling length by SEQUENTIAL floors (LSTM ratios then Output ratios). When the trailing chunk
+  is shorter than the subsampling ratio (e.g. a 1-row tail with LSTM ratio 2 -> `1/2 = 0`), the
+  `if (lengthShort > 0)` guard skips it entirely -- the corresponding `outputSeq` rows keep the CALLER's
+  prior contents (never written). Pinned by the T=19 window-6 golden (`blstm_truncate_out.bin`, row 9
+  retains its pre-seed). Load-bearing: the caller must pre-zero (or otherwise initialize) `outputSeq` or
+  the dropped rows carry garbage. Reproduced, no guard. *Fix candidate:* after parity, either process the
+  short tail at reduced length or explicitly zero the dropped rows.
+
+- **[phase2] TwoSweeps makes `_OutputForward`/`_OutputBackward` DOUBLE-WIDTH** (`nn/blstm.rs::
+  feed_forward_backward_truncate`, from `BLSTMNeuralNetwork.cpp:583-586`): the two-sweeps branch runs a
+  front-padded sweep and a shift-offset sweep, then HCATs each sweep's hidden-state window into the member
+  matrices, so `_OutputForward` comes out `rows x 2*lstmOut` instead of `rows x lstmOut`. The
+  `(window_size/2)/ratio` integer division ORDER (`window_size/2` FIRST) is load-bearing for `shiftShort`;
+  sweep 1 drops the FRONT padding but KEEPS the back padding. Pinned by `blstm_twosweeps_fwd.bin` (10x4 for
+  a 2-wide LSTM). Provenance quirk (a downstream consumer that assumes single-width would misread it); not
+  a bug to fix pre-parity.
+
+- **[phase2] `feedForwardBackwardOverLap` divides `0/0 -> NaN` on rows no window covers**
+  (`nn/blstm.rs::feed_forward_backward_overlap`, from `BLSTMNeuralNetwork.cpp:674-679`): output + hidden
+  states are accumulated per row and then divided by per-row hit COUNTS; a `window_shift > 2*window_size+1`
+  leaves gap rows with count 0, so the final `cwiseQuotient` computes `0.0/0.0 = NaN` with no guard. Also
+  the count-quotient loop bound is `_OutputForward.cols()` for BOTH the forward and the backward quotient
+  (assumes equal widths). Window bounds are SNAPPED to the subsampling grid (begin down via
+  `(begin/ratio)*ratio`, end up via `((end+1)/ratio)*ratio-1`). Pinned by `blstm_overlap_nan_out.bin`
+  (rows 6-9 NaN). Reproduced exactly, no guard. *Fix candidate:* after parity, guard uncovered rows (leave
+  them zero or carry the caller's value) instead of emitting NaN.
+
+- **[phase2] `feedForwardBackwardMLPOverLap` IGNORES the passed `window_size`** (`nn/blstm.rs::
+  feed_forward_backward_mlp_overlap`, from `BLSTMNeuralNetwork.cpp:686`): the method's first act is
+  `window_size = getSubSamplingRatio()/2`, discarding whatever the caller passed; `length_short` is a hard
+  `1`. Only EXACT windows (`length_seq == 2*window_size+1`) are processed -- edge windows are skipped, so
+  those `outputSeq` rows keep the caller's contents -- and `_OutputForward`/`_OutputBackward` are EMPTIED
+  at the end. Pinned by `blstm_mlpoverlap_out.bin` (row 0 edge-skipped -> stays 0) and a test that calls
+  with a deliberately-wrong `window_size` and asserts the identical output. Provenance quirk; not a bug.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

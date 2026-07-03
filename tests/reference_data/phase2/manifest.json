@@ -176,6 +176,34 @@
       "max_abs": "2.220e-16"
     }
   },
+  "blstm_windowed_tol": {
+    "text": "Task 9: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> windowed feedForwardBackward (truncate / two-sweeps / overlap / MLP-overlap paths, no targets) and the reimpl (transcribed per-window plain FFB + integer window arithmetic + write-back index math). The probe covers the OUTPUT (the _OutputForward/_OutputBackward members are private on the real class; the fwd/bwd dumps ARE the reimpl, per the Task 8 precedent). blstm_truncate: T=19 window 6, trailing chunk lengthShort==0 SILENTLY DROPPED (row 9 untouched). blstm_twosweeps: T=20 window 8, hidden states DOUBLE-WIDTH. blstm_overlap: T=20 window_size 4 shift 3, grid snapping, full coverage. blstm_overlap_nan: window_size 3 shift 10, rows 6-9 uncovered -> 0/0 = NaN (reproduced, no guard; identical-NaN bits compared equal). blstm_mlpoverlap: MLP net, passed window_size IGNORED (overwritten with getSubSamplingRatio()/2). All max_ulp=0.",
+    "blstm_truncate": {
+      "site": "blstm_truncate",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_twosweeps": {
+      "site": "blstm_twosweeps",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_overlap": {
+      "site": "blstm_overlap",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_overlap_nan": {
+      "site": "blstm_overlap_nan",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_mlpoverlap": {
+      "site": "blstm_mlpoverlap",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    }
+  },
   "dumps": {
     "act_sweep.bin": {
       "rows": 4,
@@ -452,6 +480,62 @@
     "blstm_real_fullseq_bwd.bin": {
       "rows": 50,
       "cols": 24
+    },
+    "blstm_truncate_out.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "blstm_truncate_fwd.bin": {
+      "rows": 9,
+      "cols": 2
+    },
+    "blstm_truncate_bwd.bin": {
+      "rows": 9,
+      "cols": 2
+    },
+    "blstm_twosweeps_out.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "blstm_twosweeps_fwd.bin": {
+      "rows": 10,
+      "cols": 4
+    },
+    "blstm_twosweeps_bwd.bin": {
+      "rows": 10,
+      "cols": 4
+    },
+    "blstm_overlap_out.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "blstm_overlap_fwd.bin": {
+      "rows": 10,
+      "cols": 2
+    },
+    "blstm_overlap_bwd.bin": {
+      "rows": 10,
+      "cols": 2
+    },
+    "blstm_overlap_count.bin": {
+      "rows": 10,
+      "cols": 1
+    },
+    "blstm_overlap_nan_out.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "blstm_overlap_nan_fwd.bin": {
+      "rows": 10,
+      "cols": 2
+    },
+    "blstm_overlap_nan_bwd.bin": {
+      "rows": 10,
+      "cols": 2
+    },
+    "blstm_mlpoverlap_out.bin": {
+      "rows": 6,
+      "cols": 1
     }
   }
 }

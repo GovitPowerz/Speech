@@ -722,40 +722,498 @@ impl BlstmNetwork {
         }
     }
 
-    // --- Task 9 windowed drivers (stubs behind the dispatch) -----------------
+    // --- Task 9 windowed drivers ---------------------------------------------
 
-    /// `feedForwardBackwardTruncate` (`BLSTMNeuralNetwork.cpp:548-590`). Task 9.
+    /// `feedForwardBackwardTruncateSweep` (`BLSTMNeuralNetwork.cpp:488-546`):
+    /// non-overlapping windows `jj += window_size`; per-window SEQUENTIAL-floor
+    /// lengths (LSTM ratios then Output ratios); the partial LAST window is
+    /// recomputed; a trailing chunk whose `length_short == 0` (shorter than the
+    /// subsampling ratio) is SILENTLY DROPPED -- its `output` rows keep the caller's
+    /// prior contents. Write-backs land at `begin/subSamplingRatio` (output) and
+    /// `begin/lstmSubSamplingRatio` (fwd/bwd hidden states). FINALLY the caller-
+    /// visible `_OutputForward`/`_OutputBackward` are replaced by the stitched
+    /// full-length accumulators.
+    fn feed_forward_backward_truncate_sweep(
+        &mut self,
+        input: &Array2<f64>,
+        window_size: usize,
+        output: &mut Array2<f64>,
+        target: &Array2<f64>,
+    ) {
+        let lstm_sub_ratio = self.forward_lstm_sub_sampling_ratio(); // :489
+        let lstm_ratios = self.lstm_sub_sampling(); // :490 forward-net per-layer
+        let output_ratios = self.output_sub_sampling(); // :491
+        let is_sub_sampling_used = self.sub_sampling_ratio() > 1; // :492
+
+        // :493-496 outputForward/outputBackward length: input rows /= each LSTM ratio.
+        let mut length_output_lstm = input.nrows();
+        for &r in &lstm_ratios {
+            length_output_lstm /= r;
+        }
+        let fwd_out = self.forward_network.as_ref().unwrap().output_size();
+        let bwd_out = self.backward_network.as_ref().unwrap().output_size();
+        let mut output_forward = Array2::<f64>::zeros((length_output_lstm, fwd_out));
+        let mut output_backward = Array2::<f64>::zeros((length_output_lstm, bwd_out));
+
+        // :500-512 nominal lengths: window /= LSTM ratios (lstmLengthShort) then /=
+        // Output ratios (lengthShort). When subsampling is off, both stay = window.
+        let sub_sampling_ratio = self.sub_sampling_ratio(); // :501
+        let mut length = window_size; // :500
+        let mut nominal_lstm_len = length; // :502
+        if is_sub_sampling_used {
+            for &r in &lstm_ratios {
+                length /= r; // :504-506
+            }
+            nominal_lstm_len = length; // :507
+            for &r in &output_ratios {
+                length /= r; // :508-510
+            }
+        }
+        let nominal_len = length; // :512
+
+        let input_rows = input.nrows();
+        let mut jj = 0;
+        while jj < input_rows {
+            // :513-517 window bounds; the last window is clamped and shorter.
+            let begin = jj;
+            let mut end = jj + window_size - 1;
+            if end >= input_rows {
+                end = input_rows - 1;
+            }
+            let length_seq = end - begin + 1;
+
+            // :518-532 partial-window length recompute (SEQUENTIAL floors).
+            let (length_short, lstm_length_short) = if length_seq != window_size {
+                let mut ls = length_seq;
+                let mut lstm_ls = ls;
+                if is_sub_sampling_used {
+                    for &r in &lstm_ratios {
+                        ls /= r;
+                    }
+                    lstm_ls = ls;
+                    for &r in &output_ratios {
+                        ls /= r;
+                    }
+                }
+                (ls, lstm_ls)
+            } else {
+                (nominal_len, nominal_lstm_len)
+            };
+
+            // :534-542 length_short == 0 -> SILENTLY DROPPED (output rows untouched).
+            if length_short > 0 {
+                let block = input
+                    .slice(ndarray::s![begin..begin + length_seq, ..])
+                    .to_owned();
+                let mut output_short = Array2::<f64>::zeros((length_short, output.ncols()));
+                let target_short = if target.nrows() > 0 {
+                    // :537 target slice at begin/subSamplingRatio, length_short rows.
+                    target
+                        .slice(ndarray::s![
+                            begin / sub_sampling_ratio..begin / sub_sampling_ratio + length_short,
+                            ..
+                        ])
+                        .to_owned()
+                } else {
+                    Array2::<f64>::zeros((0, 0))
+                };
+                self.feed_forward_backward_plain(&block, &mut output_short, &target_short); // :538
+
+                // :539 write output at begin/subSamplingRatio.
+                let obeg = begin / sub_sampling_ratio;
+                for r in 0..length_short {
+                    for c in 0..output.ncols() {
+                        output[[obeg + r, c]] = output_short[[r, c]];
+                    }
+                }
+                // :540-541 write fwd/bwd hidden states at begin/lstmSubSamplingRatio.
+                let lbeg = begin / lstm_sub_ratio;
+                for r in 0..lstm_length_short {
+                    for c in 0..fwd_out {
+                        output_forward[[lbeg + r, c]] = self.output_forward[[r, c]];
+                    }
+                    for c in 0..bwd_out {
+                        output_backward[[lbeg + r, c]] = self.output_backward[[r, c]];
+                    }
+                }
+            }
+            jj += window_size;
+        }
+
+        // :544-545 replace with the stitched full-length accumulators.
+        self.output_forward = output_forward;
+        self.output_backward = output_backward;
+    }
+
+    /// `feedForwardBackwardTruncate` (`BLSTMNeuralNetwork.cpp:548-590`). When
+    /// `!two_sweeps` this is a single TruncateSweep. With two sweeps: run a
+    /// front-padded sweep and a shift-offset sweep, average their overlapping
+    /// outputs, and HCAT the two sweeps' hidden-state windows so
+    /// `_OutputForward`/`_OutputBackward` come out DOUBLE-WIDTH. Cost accumulates
+    /// over BOTH sweeps (on the padded sequences).
     fn feed_forward_backward_truncate(
         &mut self,
-        _input: &Array2<f64>,
-        _window_size: usize,
-        _output: &mut Array2<f64>,
-        _target: &Array2<f64>,
+        input: &Array2<f64>,
+        window_size: usize,
+        output: &mut Array2<f64>,
+        target: &Array2<f64>,
     ) {
-        todo!("Task 9: windowed truncate driver (BLSTMNeuralNetwork.cpp:488-590)");
+        if !self.cfg.two_sweeps {
+            self.feed_forward_backward_truncate_sweep(input, window_size, output, target); // :588
+            return;
+        }
+
+        let sub_sampling_ratio = self.sub_sampling_ratio();
+        let output_net_ratio = self.output_network.sub_sampling_ratio();
+        // :550-552 INTEGER-division ORDER: window_size/2 FIRST, then / ratio.
+        let shift_short = (window_size / 2) / sub_sampling_ratio;
+        let shift = shift_short * sub_sampling_ratio;
+        let window_size_short = window_size / sub_sampling_ratio;
+
+        // :553-554 input padding: first row replicated window_size times, input,
+        // last row replicated window_size times.
+        let input_padded = pad_replicate_ends(input, window_size, window_size);
+        // :555-556 output padding: window_size_short replicas at each end.
+        let out_rows = output.nrows();
+        let output_padded = pad_replicate_ends(output, window_size_short, window_size_short);
+
+        // :557-563 target padding + drop the FRONT window_size_short rows.
+        let target_padded = if target.nrows() > 0 {
+            pad_replicate_ends(target, window_size_short, window_size_short)
+        } else {
+            Array2::<f64>::zeros((0, 0))
+        };
+        let target_useful_sweep1 = if target.nrows() > 0 {
+            target_padded
+                .slice(ndarray::s![window_size_short.., ..])
+                .to_owned()
+        } else {
+            Array2::<f64>::zeros((0, 0))
+        };
+
+        // :565 sweep 1: input block drops the FRONT window_size padding, KEEPS the
+        // back padding; output written into outputSeqPadded.block(window_size_short..).
+        let sweep1_in = input_padded
+            .slice(ndarray::s![window_size.., ..])
+            .to_owned();
+        let mut sweep1_out = output_padded
+            .slice(ndarray::s![window_size_short.., ..])
+            .to_owned();
+        self.feed_forward_backward_truncate_sweep(
+            &sweep1_in,
+            window_size,
+            &mut sweep1_out,
+            &target_useful_sweep1,
+        );
+
+        // :568 outputSeq (sweep 1) = the first out_rows of sweep1_out.
+        let mut sweep1_final = sweep1_out.slice(ndarray::s![..out_rows, ..]).to_owned();
+        // :569-570 memDisplay hidden windows: the top out_rows*output_net_ratio rows.
+        let mem_rows = out_rows * output_net_ratio;
+        let mem_forward = self
+            .output_forward
+            .slice(ndarray::s![..mem_rows, ..])
+            .to_owned();
+        let mem_backward = self
+            .output_backward
+            .slice(ndarray::s![..mem_rows, ..])
+            .to_owned();
+
+        // :572 reset the padded output buffer to zero for sweep 2.
+        let mut output_padded2 = Array2::<f64>::zeros(output_padded.raw_dim());
+        // :573-575 sweep-2 target: drop the FRONT shift_short rows.
+        let target_useful_sweep2 = if target.nrows() > 0 {
+            target_padded
+                .slice(ndarray::s![shift_short.., ..])
+                .to_owned()
+        } else {
+            Array2::<f64>::zeros((0, 0))
+        };
+
+        // :576 sweep 2: input block from `shift`; output into block(shift_short..).
+        let sweep2_in = input_padded.slice(ndarray::s![shift.., ..]).to_owned();
+        let mut sweep2_out = output_padded2
+            .slice(ndarray::s![shift_short.., ..])
+            .to_owned();
+        self.feed_forward_backward_truncate_sweep(
+            &sweep2_in,
+            window_size,
+            &mut sweep2_out,
+            &target_useful_sweep2,
+        );
+        // Stitch sweep2_out back into output_padded2 so the window_size_short slice
+        // reads the shifted-write region (the legacy mutates the block in place).
+        for r in 0..sweep2_out.nrows() {
+            for c in 0..output_padded2.ncols() {
+                output_padded2[[shift_short + r, c]] = sweep2_out[[r, c]];
+            }
+        }
+
+        // :578-579 outputSeq += sweep2 window, then /= 2.
+        let sweep2_final = output_padded2
+            .slice(ndarray::s![
+                window_size_short..window_size_short + out_rows,
+                ..
+            ])
+            .to_owned();
+        for r in 0..out_rows {
+            for c in 0..output.ncols() {
+                sweep1_final[[r, c]] = (sweep1_final[[r, c]] + sweep2_final[[r, c]]) / 2.0;
+                output[[r, c]] = sweep1_final[[r, c]];
+            }
+        }
+
+        // :580-581 shifted hidden windows: offset by (window_size_short-shift_short)*ratio.
+        let mem_off = (window_size_short - shift_short) * output_net_ratio;
+        let mem_forward_shifted = self
+            .output_forward
+            .slice(ndarray::s![mem_off..mem_off + mem_rows, ..])
+            .to_owned();
+        let mem_backward_shifted = self
+            .output_backward
+            .slice(ndarray::s![mem_off..mem_off + mem_rows, ..])
+            .to_owned();
+
+        // :583-586 _OutputForward/_OutputBackward become the HCAT [mem, memShifted]
+        // -- DOUBLE WIDTH.
+        self.output_forward = hcat(&mem_forward, &mem_forward_shifted);
+        self.output_backward = hcat(&mem_backward, &mem_backward_shifted);
     }
 
-    /// `feedForwardBackwardOverLap` (`BLSTMNeuralNetwork.cpp:592-681`). Task 9.
+    /// `feedForwardBackwardOverLap` (`BLSTMNeuralNetwork.cpp:592-681`): overlapping
+    /// windows accumulated into per-row sums + counts, then averaged. Window bounds
+    /// are SNAPPED to the subsampling grid (begin down, end up). Rows never covered
+    /// by any window divide 0/0 -> NaN (REPRODUCED, no guard). The final count-
+    /// quotient loop runs `ii < _OutputForward.cols()` for BOTH the forward and the
+    /// backward quotient (assumes equal widths).
     fn feed_forward_backward_overlap(
         &mut self,
-        _input: &Array2<f64>,
-        _window_size: usize,
-        _window_shift: usize,
-        _output: &mut Array2<f64>,
-        _target: &Array2<f64>,
+        input: &Array2<f64>,
+        window_size: usize,
+        window_shift: usize,
+        output: &mut Array2<f64>,
+        target: &Array2<f64>,
     ) {
-        todo!("Task 9: overlap driver (BLSTMNeuralNetwork.cpp:592-681)");
+        let lstm_ratios = self.lstm_sub_sampling(); // :593
+        let output_ratios = self.output_sub_sampling(); // :594
+        let is_sub_sampling_used = self.sub_sampling_ratio() > 1; // :595
+        let sub_sampling_ratio = self.sub_sampling_ratio();
+        let output_net_ratio = self.output_network.sub_sampling_ratio();
+
+        // :596 lengthOutputLSTM = outputSeq.rows() * outputNetRatio.
+        let length_output_lstm = output.nrows() * output_net_ratio;
+        let fwd_out = self.forward_network.as_ref().unwrap().output_size();
+        let bwd_out = self.backward_network.as_ref().unwrap().output_size();
+        let mut output_forward = Array2::<f64>::zeros((length_output_lstm, fwd_out)); // :597
+        let mut output_backward = Array2::<f64>::zeros((length_output_lstm, bwd_out)); // :598
+        let mut output_count = vec![0.0_f64; output.nrows()]; // :599
+        let mut output_count_lstm = vec![0.0_f64; length_output_lstm]; // :600
+        // Accumulate into a plain buffer to mirror the noalias() += writes.
+        let mut output_sum = Array2::<f64>::zeros(output.raw_dim());
+
+        // :602-610 nominal length = (2*window_size+1) divided sequentially.
+        let mut length = 2 * window_size + 1;
+        if is_sub_sampling_used {
+            for &r in &lstm_ratios {
+                length /= r;
+            }
+            for &r in &output_ratios {
+                length /= r;
+            }
+        }
+        let nominal_len = length; // :611
+        let nominal_len_lstm = length; // :612
+
+        let input_rows = input.nrows();
+        let mut jj = 0;
+        while jj < input_rows {
+            // :614-620 begin (`jj < window_size ? 0 : jj-window_size`), snapped DOWN
+            // to the subsampling grid.
+            let mut begin = jj.saturating_sub(window_size);
+            begin = (begin / sub_sampling_ratio) * sub_sampling_ratio;
+            // :621-626 end = begin + 2*window_size, clamped, snapped UP.
+            let mut end = begin + 2 * window_size;
+            if end >= input_rows {
+                end = input_rows - 1;
+            }
+            end = ((end + 1) / sub_sampling_ratio) * sub_sampling_ratio - 1;
+            let length_seq = end - begin + 1; // :627
+
+            // :628-643 length_short / length_short_lstm recompute for partial windows.
+            let (length_short, length_short_lstm) = if length_seq != 2 * window_size + 1 {
+                let mut ls = length_seq;
+                let mut ls_lstm = length_seq;
+                if is_sub_sampling_used {
+                    for &r in &lstm_ratios {
+                        ls /= r;
+                        ls_lstm /= r;
+                    }
+                    for &r in &output_ratios {
+                        ls /= r;
+                    }
+                }
+                (ls, ls_lstm)
+            } else {
+                (nominal_len, nominal_len_lstm)
+            };
+
+            // :645-670 process the window; accumulate sums + counts.
+            if length_short > 0 {
+                let block = input
+                    .slice(ndarray::s![begin..begin + length_seq, ..])
+                    .to_owned();
+                let mut output_short = Array2::<f64>::zeros((length_short, self.output_size()));
+                let target_short = if target.nrows() > 0 {
+                    // :649 target slice at begin/subSamplingRatio, length_short rows.
+                    target
+                        .slice(ndarray::s![
+                            begin / sub_sampling_ratio..begin / sub_sampling_ratio + length_short,
+                            ..
+                        ])
+                        .to_owned()
+                } else {
+                    Array2::<f64>::zeros((0, 0))
+                };
+                self.feed_forward_backward_plain(&block, &mut output_short, &target_short); // :656
+
+                // :664-665 output sum + count at begin/subSamplingRatio.
+                let obeg = begin / sub_sampling_ratio;
+                for r in 0..length_short {
+                    for c in 0..output.ncols() {
+                        output_sum[[obeg + r, c]] += output_short[[r, c]];
+                    }
+                    output_count[obeg + r] += 1.0;
+                }
+                // :667-669 fwd/bwd sum + count at begin*outputNetRatio/subSamplingRatio.
+                let lbeg = begin * output_net_ratio / sub_sampling_ratio;
+                for r in 0..length_short_lstm {
+                    for c in 0..fwd_out {
+                        output_forward[[lbeg + r, c]] += self.output_forward[[r, c]];
+                    }
+                    for c in 0..bwd_out {
+                        output_backward[[lbeg + r, c]] += self.output_backward[[r, c]];
+                    }
+                    output_count_lstm[lbeg + r] += 1.0;
+                }
+            }
+            jj += window_shift;
+        }
+
+        // :672-673 install the accumulators, then quotient by the counts.
+        // :674-675 output /= outputCount (0/0 -> NaN on uncovered rows, no guard).
+        for r in 0..output.nrows() {
+            for c in 0..output.ncols() {
+                output[[r, c]] = output_sum[[r, c]] / output_count[r];
+            }
+        }
+        // :677-679 quotient loop bound = _OutputForward.cols() for BOTH fwd and bwd.
+        for r in 0..length_output_lstm {
+            for c in 0..fwd_out {
+                output_forward[[r, c]] /= output_count_lstm[r];
+                output_backward[[r, c]] /= output_count_lstm[r];
+            }
+        }
+        self.output_forward = output_forward;
+        self.output_backward = output_backward;
     }
 
-    /// `feedForwardBackwardMLPOverLap` (`BLSTMNeuralNetwork.cpp:683-709`). Task 9.
+    /// `feedForwardBackwardMLPOverLap` (`BLSTMNeuralNetwork.cpp:683-709`): IGNORES
+    /// the passed `window_size` (overwrites it with `getSubSamplingRatio()/2`);
+    /// `length = 2*window_size+1`, `length_short = 1`. Only EXACT windows
+    /// (`length_seq == 2*window_size+1`) are processed, each producing one scalar
+    /// written to `output[jj/window_shift, 0]`. Edge windows are skipped, so those
+    /// rows keep the caller's contents. `_OutputForward`/`_OutputBackward` are
+    /// EMPTIED at the end.
     fn feed_forward_backward_mlp_overlap(
         &mut self,
-        _input: &Array2<f64>,
+        input: &Array2<f64>,
         _window_size: usize,
-        _window_shift: usize,
-        _output: &mut Array2<f64>,
-        _target: &Array2<f64>,
+        window_shift: usize,
+        output: &mut Array2<f64>,
+        target: &Array2<f64>,
     ) {
-        todo!("Task 9: MLP overlap driver (BLSTMNeuralNetwork.cpp:683-709)");
+        // :686 the passed window_size is OVERWRITTEN.
+        let window_size = self.sub_sampling_ratio() / 2;
+        let length_short = 1usize; // :688
+
+        let input_rows = input.nrows();
+        let mut jj = 0;
+        while jj < input_rows {
+            // :690-698 window bounds (`jj < window_size ? 0 : jj-window_size`); only
+            // exact windows are processed.
+            let begin = jj.saturating_sub(window_size);
+            let mut end = jj + window_size;
+            if end >= input_rows {
+                end = input_rows - 1;
+            }
+            let length_seq = end - begin + 1;
+            if length_seq == 2 * window_size + 1 {
+                let block = input
+                    .slice(ndarray::s![begin..begin + length_seq, ..])
+                    .to_owned();
+                let mut output_short = Array2::<f64>::zeros((length_short, 1));
+                let target_short = if target.nrows() > 0 {
+                    // :702 Constant(length_short, 1, target(jj/window_shift, 0)).
+                    Array2::<f64>::from_elem((length_short, 1), target[[jj / window_shift, 0]])
+                } else {
+                    Array2::<f64>::zeros((0, 0))
+                };
+                self.feed_forward_backward_mlp(&block, &mut output_short, &target_short); // :703
+                output[[jj / window_shift, 0]] = output_short[[0, 0]]; // :704
+            }
+            jj += window_shift;
+        }
+
+        // :707-708 _OutputForward/_OutputBackward emptied.
+        self.output_forward = Array2::<f64>::zeros((0, 0));
+        self.output_backward = Array2::<f64>::zeros((0, 0));
     }
+
+    /// `_ForwardNetwork.getSubSamplingRatio()` (`BLSTMNeuralNetwork.cpp:489`): the
+    /// forward LSTM net's overall decimation ratio (distinct from the whole-BLSTM
+    /// `sub_sampling_ratio()`, which multiplies in the output net's ratio).
+    fn forward_lstm_sub_sampling_ratio(&self) -> usize {
+        self.forward_network.as_ref().unwrap().sub_sampling_ratio()
+    }
+}
+
+/// Replicate the FIRST row `front` times and the LAST row `back` times around
+/// `m`, stacking `[first x front; m; last x back]` (`BLSTMNeuralNetwork.cpp:554`
+/// `row(0).replicate(n,1)` idiom). `m` must have >= 1 row.
+fn pad_replicate_ends(m: &Array2<f64>, front: usize, back: usize) -> Array2<f64> {
+    let (r, c) = m.dim();
+    let mut out = Array2::<f64>::zeros((front + r + back, c));
+    for k in 0..front {
+        for j in 0..c {
+            out[[k, j]] = m[[0, j]];
+        }
+    }
+    for i in 0..r {
+        for j in 0..c {
+            out[[front + i, j]] = m[[i, j]];
+        }
+    }
+    for k in 0..back {
+        for j in 0..c {
+            out[[front + r + k, j]] = m[[r - 1, j]];
+        }
+    }
+    out
+}
+
+/// Horizontal concatenation `[a | b]` (`BLSTMNeuralNetwork.cpp:583-584` resize +
+/// `<<`). Requires equal row counts.
+fn hcat(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    let (r, ca) = a.dim();
+    let cb = b.ncols();
+    let mut out = Array2::<f64>::zeros((r, ca + cb));
+    for i in 0..r {
+        for j in 0..ca {
+            out[[i, j]] = a[[i, j]];
+        }
+        for j in 0..cb {
+            out[[i, ca + j]] = b[[i, j]];
+        }
+    }
+    out
 }

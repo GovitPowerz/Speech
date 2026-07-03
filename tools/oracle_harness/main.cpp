@@ -2754,6 +2754,510 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "blstm_real_fullseq_bwd.bin", outBackward);
             dumps += 3;
         }
+
+        // ================================================================
+        // Phase 2 Task 9: the four windowed forward drivers.
+        // legacy: BLSTMNeuralNetwork.cpp:488-546 (feedForwardBackwardTruncateSweep),
+        // :548-590 (feedForwardBackwardTruncate / TwoSweeps), :592-681
+        // (feedForwardBackwardOverLap), :683-709 (feedForwardBackwardMLPOverLap).
+        // The reimpls transcribe those methods' integer arithmetic + write-back index
+        // math verbatim, calling the plain-FFB reimpl (blstmFeedForward, no targets)
+        // per window and stitching. Probed vs the REAL class per mode. Dumps:
+        // blstm_<mode>_{out,fwd,bwd}.bin (+ counts where illuminating).
+        //
+        // NaN handling: the OverLap uncovered-rows case divides 0/0 -> NaN (the legacy
+        // reproduces this, no guard). probeGap subtracts (a-b) and would flag NaN-vs-NaN
+        // as a mismatch, so probeGapNaN treats IDENTICAL NaN bit patterns as equal
+        // (bitwise) before the arithmetic gap -- matching the golden's bitwise contract.
+        auto probeGapNaN = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                              long& maxUlp, double& maxAbs) {
+            for (int r = 0; r < real.rows(); ++r) {
+                for (int c = 0; c < real.cols(); ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    if (ab == bb) continue;  // identical bits (incl. same-pattern NaN) -> equal
+                    double absGap = std::fabs(a - b);
+                    if (absGap > maxAbs) maxAbs = absGap;
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > maxUlp) maxUlp = ulp;
+                }
+            }
+        };
+
+        // ---- Synthetic BLSTM net (same as Task 8): LSTM [3,4,2] sub [2,1], output
+        // [4,5,3] sub [1,1]. Reuse the Task 8 makeLstmSteps/makeDenseSteps/blstmFeedForward
+        // helpers (outer-scope lambdas). InputNormalizationType 0 (no mutation) keeps the
+        // windowed-arithmetic reasoning independent of normalization.
+        {
+            const std::vector<long> lstmNN = {3, 4, 2};
+            const std::vector<long> lstmSS = {2, 1};
+            const std::vector<long> outNN = {4, 5, 3};
+            const std::vector<long> outSS = {1, 1};
+            const std::vector<int> lstmIns = {6, 4}, lstmOuts = {4, 2};
+            const std::vector<int> outIns = {4, 5}, outOuts = {5, 3};
+            const int fwdInputSize = 3;
+            const long subRatio = 2;         // getSubSamplingRatio() = lstm(2)*out(1)
+            const long outNetRatio = 1;      // _OutputNetwork.getSubSamplingRatio()
+            const long lstmSubRatio = 2;     // _ForwardNetwork.getSubSamplingRatio()
+            const int fwdOut = 2;            // last LSTM layer output size
+
+            // Synthetic BLSTM config prefix (SYNB); topology fixed, only the per-mode
+            // knobs (InputNormalizationType, TwoSweeps) flip below.
+            ConfigFile confB(nnConfigPath, '_');
+            confB._Params.erase("BLSTM_weightsFile");
+            confB.set_val<std::string>("SYNB_LSTMNeuronNb", "3,4,2");
+            confB.set_val<std::string>("SYNB_LSTMSubSampling", "2,1");
+            confB.set_val<std::string>("SYNB_OutputNeuronNb", "4,5,3");
+            confB.set_val<std::string>("SYNB_OutputSubSampling", "1,1");
+            confB.set_val<bool>("SYNB_BackPropagationActivated", false);
+
+            auto lstmNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) {
+                    int I = ins[jj], O = outs[jj];
+                    s += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+                }
+                return s;
+            };
+            auto denseNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) s += (long)outs[jj] * (ins[jj] + 1);
+                return s;
+            };
+            const long fwdNb = lstmNetNb(lstmIns, lstmOuts);
+            const long bwdNb = fwdNb;
+            const long outNb = denseNetNb(outIns, outOuts);
+            const long tailNb = 2 * fwdInputSize;
+            const long nbTotal = fwdNb + bwdNb + outNb + tailNb;
+
+            Eigen::VectorXd flat(nbTotal);
+            for (long k = 0; k < nbTotal - tailNb; ++k)
+                flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            for (int j = 0; j < fwdInputSize; ++j) {
+                flat(nbTotal - tailNb + j) = 0.1 * (j + 1);
+                flat(nbTotal - tailNb + fwdInputSize + j) = 1.0 + 0.05 * j;
+            }
+
+            Eigen::VectorXd fwdSlice = flat.head(fwdNb);
+            Eigen::VectorXd bwdSlice = flat.segment(fwdNb, bwdNb);
+            Eigen::VectorXd outSlice = flat.segment(fwdNb + bwdNb, outNb);
+            std::vector<Eigen::MatrixXd> fiw, ffw, fpp, fbs, biw, bfw, bpp, bbs, ows, obs;
+            std::vector<NetLayerStep> fwdSteps, fwdStepsRev, bwdSteps, bwdStepsRev, outSteps;
+            makeLstmSteps(fwdSlice, lstmIns, lstmOuts, fiw, ffw, fpp, fbs, fwdSteps, fwdStepsRev);
+            makeLstmSteps(bwdSlice, lstmIns, lstmOuts, biw, bfw, bpp, bbs, bwdSteps, bwdStepsRev);
+            makeDenseSteps(outSlice, outIns, outOuts, ows, obs, outSteps);
+
+            // Per-window plain FFB reimpl (no normalization/targets): forward only,
+            // filling outF/outB (LSTM hidden states) + output. Wraps blstmFeedForward.
+            auto plainWindow = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outF,
+                                   Eigen::MatrixXd& outB, Eigen::MatrixXd& outp) {
+                blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                                 fwdInputSize, in, outF, outB, outp);
+            };
+
+            // Deterministic closed-form input (3 raw cols), T rows.
+            auto makeInput = [&](int T) {
+                Eigen::MatrixXd m(T, 3);
+                for (int t = 0; t < T; ++t)
+                    for (int j = 0; j < 3; ++j)
+                        m(t, j) = (double)(((t * 29 + j * 13 + 5) % 97)) / 97.0 - 0.5;
+                return m;
+            };
+
+            // Reimpl of feedForwardBackwardTruncateSweep (:488-546). outF/outB are the
+            // caller-visible _OutputForward/_OutputBackward AFTER the sweep (stitched).
+            auto truncateSweep = [&](const Eigen::MatrixXd& input, long window_size,
+                                     Eigen::MatrixXd& outputSeq, Eigen::MatrixXd& outF,
+                                     Eigen::MatrixXd& outB) {
+                long lengthOutputLSTM = input.rows();
+                for (long r : lstmSS) lengthOutputLSTM /= r;                 // :493-496
+                Eigen::MatrixXd outputForward = Eigen::MatrixXd::Zero(lengthOutputLSTM, fwdOut);
+                Eigen::MatrixXd outputBackward = Eigen::MatrixXd::Zero(lengthOutputLSTM, fwdOut);
+
+                long length = window_size, lstmLenShort = length;           // :500-512
+                for (long r : lstmSS) length /= r;
+                lstmLenShort = length;
+                for (long r : outSS) length /= r;
+                long nominalLen = length, nominalLstm = lstmLenShort;
+
+                for (long jj = 0; jj < input.rows(); jj += window_size) {    // :513
+                    long begin = jj;
+                    long end = jj + window_size - 1;
+                    if (end >= input.rows()) end = input.rows() - 1;
+                    long lengthSeq = end - begin + 1;
+                    long lengthShort, lstmLength;
+                    if (lengthSeq != window_size) {                         // :518-529
+                        lengthShort = lengthSeq;
+                        for (long r : lstmSS) lengthShort /= r;
+                        lstmLength = lengthShort;
+                        for (long r : outSS) lengthShort /= r;
+                    } else {
+                        lengthShort = nominalLen;
+                        lstmLength = nominalLstm;
+                    }
+                    if (lengthShort > 0) {                                  // :534
+                        Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+                        Eigen::MatrixXd outShort, oF, oB;
+                        plainWindow(block, oF, oB, outShort);
+                        outputSeq.block(begin / subRatio, 0, lengthShort, outputSeq.cols()) = outShort;  // :539
+                        outputForward.block(begin / lstmSubRatio, 0, lstmLength, fwdOut) = oF;           // :540
+                        outputBackward.block(begin / lstmSubRatio, 0, lstmLength, fwdOut) = oB;          // :541
+                    }
+                }
+                outF = outputForward;                                      // :544-545
+                outB = outputBackward;
+            };
+
+            // ---- Mode A: TruncateSweep, T=19 window 6 (trailing chunk lengthShort==0).
+            // T=19: chunks at jj=0,6,12 (full) then jj=18 (1 input row) -> lengthSeq=1,
+            // lengthShort = 1/2/1 = 0 -> SILENTLY DROPPED. The first three chunks write
+            // outputSeq rows [0,3),[3,6),[6,9); outputSeq is allocated with 10 rows and
+            // PRE-SEEDED to zero, so ROW 9 (the dropped chunk's begin/subRatio=18/2=9
+            // target) stays 0 in both the real class and the reimpl. Pre-seeding both
+            // buffers identically makes the untouched row compare bit-equal.
+            {
+                const int T = 19;
+                Eigen::MatrixXd input = makeInput(T);
+                confB.set_val<short>("SYNB_InputNormalizationType", (short)0);
+                confB.set_val<bool>("SYNB_TwoSweeps", false);
+                BLSTMNeuralNetwork<LSTMLayer> nn(confB, "SYNB", true);
+                nn.setWeights(flat);
+                nn.setProcessingType(true, false);  // truncate, no overlap -> Truncate path
+
+                // _OutputForward/_OutputBackward are private on the real class (no
+                // accessor; NEVER edit legacy/), so the probe covers the OUTPUT only,
+                // exactly as the Task 8 real-vs-reimpl precedent -- the fwd/bwd dumps
+                // ARE the reimpl (the Rust port compares against them).
+                Eigen::MatrixXd realInput = input;
+                Eigen::MatrixXd realOut = Eigen::MatrixXd::Zero(10, 3);  // 10 rows, row 9 untouched
+                Eigen::MatrixXd emptyTargets;
+                nn.feedForwardBackward(realInput, 6, 3, realOut, emptyTargets);
+
+                Eigen::MatrixXd reimplOut = Eigen::MatrixXd::Zero(10, 3);  // pre-seeded IDENTICALLY
+                Eigen::MatrixXd reimplF, reimplB;
+                truncateSweep(input, 6, reimplOut, reimplF, reimplB);
+
+                long u = 0; double a = 0.0;
+                probeGap(realOut, reimplOut, u, a);
+                std::cout << "NN_TOL site=blstm_truncate max_ulp=" << u
+                          << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                Matrix2BinaryFile(out + "blstm_truncate_out.bin", reimplOut);
+                Matrix2BinaryFile(out + "blstm_truncate_fwd.bin", reimplF);
+                Matrix2BinaryFile(out + "blstm_truncate_bwd.bin", reimplB);
+                dumps += 3;
+            }
+
+            // ---- Mode B: TwoSweeps, T=20 window 8. shiftShort=(8/2)/2=2, shift=4,
+            // window_sizeShort=8/2=4. Two front-padded sweeps averaged; _OutputForward/
+            // _OutputBackward come out DOUBLE-WIDTH (hcat of the two sweeps' hidden
+            // windows) -- asserted in-harness below.
+            {
+                const int T = 20;
+                Eigen::MatrixXd input = makeInput(T);
+                const long windowSize = 8;
+                confB.set_val<short>("SYNB_InputNormalizationType", (short)0);
+                confB.set_val<bool>("SYNB_TwoSweeps", true);
+                BLSTMNeuralNetwork<LSTMLayer> nn(confB, "SYNB", true);
+                nn.setWeights(flat);
+                nn.setProcessingType(true, false);  // truncate -> Truncate path; TwoSweeps on
+
+                Eigen::MatrixXd realInput = input;
+                Eigen::MatrixXd realOut = Eigen::MatrixXd::Zero(T / subRatio, 3);  // 10 x 3
+                Eigen::MatrixXd emptyTargets;
+                nn.feedForwardBackward(realInput, windowSize, 4, realOut, emptyTargets);
+
+                // Reimpl of feedForwardBackwardTruncate TwoSweeps branch (:549-586).
+                const long shiftShort = (windowSize / 2) / subRatio;   // :550 window/2 FIRST
+                const long shift = shiftShort * subRatio;              // :551
+                const long windowSizeShort = windowSize / subRatio;    // :552
+                const long outRows = realOut.rows();
+
+                auto replicateEnds = [](const Eigen::MatrixXd& m, long front, long back) {
+                    Eigen::MatrixXd out(front + m.rows() + back, m.cols());
+                    out << m.row(0).replicate(front, 1), m, m.row(m.rows() - 1).replicate(back, 1);
+                    return out;
+                };
+                Eigen::MatrixXd inputPadded = replicateEnds(input, windowSize, windowSize);   // :553-554
+                Eigen::MatrixXd outputSeq = Eigen::MatrixXd::Zero(outRows, 3);
+                Eigen::MatrixXd outputPadded =
+                    replicateEnds(outputSeq, windowSizeShort, windowSizeShort);              // :555-556
+
+                // Sweep 1: drop FRONT windowSize padding, KEEP back padding (:565).
+                Eigen::MatrixXd sweep1In =
+                    inputPadded.block(windowSize, 0, inputPadded.rows() - windowSize, inputPadded.cols());
+                Eigen::MatrixXd sweep1Out =
+                    outputPadded.block(windowSizeShort, 0, outputPadded.rows() - windowSizeShort, outputPadded.cols());
+                Eigen::MatrixXd sF, sB;
+                truncateSweep(sweep1In, windowSize, sweep1Out, sF, sB);
+
+                Eigen::MatrixXd combined = sweep1Out.block(0, 0, outRows, sweep1Out.cols());   // :568
+                long memRows = outRows * outNetRatio;
+                Eigen::MatrixXd memF = sF.block(0, 0, memRows, sF.cols());                     // :569
+                Eigen::MatrixXd memB = sB.block(0, 0, memRows, sB.cols());
+
+                // Sweep 2: from block(shift), into block(shiftShort) of a zeroed pad (:572-576).
+                Eigen::MatrixXd outputPadded2 = Eigen::MatrixXd::Zero(outputPadded.rows(), outputPadded.cols());
+                Eigen::MatrixXd sweep2In =
+                    inputPadded.block(shift, 0, inputPadded.rows() - shift, inputPadded.cols());
+                Eigen::MatrixXd sweep2Out =
+                    outputPadded2.block(shiftShort, 0, outputPadded2.rows() - shiftShort, outputPadded2.cols());
+                Eigen::MatrixXd sF2, sB2;
+                truncateSweep(sweep2In, windowSize, sweep2Out, sF2, sB2);
+                outputPadded2.block(shiftShort, 0, outputPadded2.rows() - shiftShort, outputPadded2.cols()) = sweep2Out;
+
+                combined += outputPadded2.block(windowSizeShort, 0, outRows, outputPadded2.cols());  // :578
+                combined /= 2.0;                                                                     // :579
+                long memOff = (windowSizeShort - shiftShort) * outNetRatio;                          // :580
+                Eigen::MatrixXd memFs = sF2.block(memOff, 0, memRows, sF2.cols());
+                Eigen::MatrixXd memBs = sB2.block(memOff, 0, memRows, sB2.cols());
+
+                Eigen::MatrixXd reimplF(memF.rows(), memF.cols() + memFs.cols());   // :583-584 HCAT
+                reimplF << memF, memFs;
+                Eigen::MatrixXd reimplB(memB.rows(), memB.cols() + memBs.cols());
+                reimplB << memB, memBs;
+
+                // In-harness double-width assertion: the reimpl _OutputForward/
+                // _OutputBackward are the HCAT of the two sweeps' hidden windows, so
+                // both come out 2*fwdOut wide (the real class does the same; its members
+                // are private, so the width contract is asserted on the reimpl + the
+                // Rust port).
+                if (reimplF.cols() != 2 * fwdOut || reimplB.cols() != 2 * fwdOut) {
+                    std::cerr << "TwoSweeps double-width FAIL: reimplF.cols=" << reimplF.cols()
+                              << " reimplB.cols=" << reimplB.cols() << " expected " << 2 * fwdOut << "\n";
+                    return 1;
+                }
+
+                long u = 0; double a = 0.0;
+                probeGap(realOut, combined, u, a);
+                std::cout << "NN_TOL site=blstm_twosweeps max_ulp=" << u
+                          << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                Matrix2BinaryFile(out + "blstm_twosweeps_out.bin", combined);
+                Matrix2BinaryFile(out + "blstm_twosweeps_fwd.bin", reimplF);
+                Matrix2BinaryFile(out + "blstm_twosweeps_bwd.bin", reimplB);
+                dumps += 3;
+            }
+
+            // Reimpl of feedForwardBackwardOverLap (:592-681). Accumulate windowed sums +
+            // per-row counts, then quotient (0/0 -> NaN on uncovered rows, no guard).
+            auto overlap = [&](const Eigen::MatrixXd& input, long windowSize, long windowShift,
+                               Eigen::MatrixXd& outputSeq, Eigen::MatrixXd& outF, Eigen::MatrixXd& outB,
+                               Eigen::MatrixXd& outCount, Eigen::MatrixXd& outCountLSTM) {
+                long lengthOutputLSTM = outputSeq.rows() * outNetRatio;                 // :596
+                Eigen::MatrixXd outputForward = Eigen::MatrixXd::Zero(lengthOutputLSTM, fwdOut);
+                Eigen::MatrixXd outputBackward = Eigen::MatrixXd::Zero(lengthOutputLSTM, fwdOut);
+                outCount = Eigen::MatrixXd::Zero(outputSeq.rows(), 1);                  // :599
+                outCountLSTM = Eigen::MatrixXd::Zero(lengthOutputLSTM, 1);              // :600
+                Eigen::MatrixXd sum = Eigen::MatrixXd::Zero(outputSeq.rows(), outputSeq.cols());
+
+                long length = 2 * windowSize + 1;                                       // :602-609
+                for (long r : lstmSS) length /= r;
+                for (long r : outSS) length /= r;
+                long nominalLen = length, nominalLstm = length;
+
+                for (long jj = 0; jj < input.rows(); jj += windowShift) {               // :613
+                    long begin = (jj < windowSize) ? 0 : jj - windowSize;               // :614-619
+                    begin = (begin / subRatio) * subRatio;                              // :620 snap down
+                    long end = begin + 2 * windowSize;                                  // :621
+                    if (end >= input.rows()) end = input.rows() - 1;                    // :623-625
+                    end = ((end + 1) / subRatio) * subRatio - 1;                        // :626 snap up
+                    long lengthSeq = end - begin + 1;                                   // :627
+                    long lengthShort, lengthShortLSTM;
+                    if (lengthSeq != 2 * windowSize + 1) {                              // :628-639
+                        lengthShort = lengthSeq;
+                        lengthShortLSTM = lengthSeq;
+                        for (long r : lstmSS) { lengthShort /= r; lengthShortLSTM /= r; }
+                        for (long r : outSS) lengthShort /= r;
+                    } else {
+                        lengthShort = nominalLen;
+                        lengthShortLSTM = nominalLstm;
+                    }
+                    if (lengthShort > 0) {                                              // :645
+                        Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+                        Eigen::MatrixXd outShort, oF, oB;
+                        plainWindow(block, oF, oB, outShort);
+                        sum.block(begin / subRatio, 0, lengthShort, sum.cols()) += outShort;              // :664
+                        outCount.block(begin / subRatio, 0, lengthShort, 1) += Eigen::MatrixXd::Ones(lengthShort, 1); // :665
+                        long lbeg = begin * outNetRatio / subRatio;                                       // :667-669
+                        outputForward.block(lbeg, 0, lengthShortLSTM, fwdOut) += oF;
+                        outputBackward.block(lbeg, 0, lengthShortLSTM, fwdOut) += oB;
+                        outCountLSTM.block(lbeg, 0, lengthShortLSTM, 1) += Eigen::MatrixXd::Ones(lengthShortLSTM, 1);
+                    }
+                }
+                for (long c = 0; c < outputSeq.cols(); ++c)                             // :674-675 (0/0->NaN)
+                    for (long r = 0; r < outputSeq.rows(); ++r)
+                        outputSeq(r, c) = sum(r, c) / outCount(r, 0);
+                for (long c = 0; c < fwdOut; ++c)                                       // :677-679 bound=cols
+                    for (long r = 0; r < lengthOutputLSTM; ++r) {
+                        outputForward(r, c) /= outCountLSTM(r, 0);
+                        outputBackward(r, c) /= outCountLSTM(r, 0);
+                    }
+                outF = outputForward;
+                outB = outputBackward;
+            };
+
+            // ---- Mode C1: OverLap, T=20 window_size 4 shift 3 (grid snapping exercised;
+            // FULL coverage, no NaN). begin snaps 5->4, 11->10; end snapped up per window.
+            {
+                const int T = 20;
+                Eigen::MatrixXd input = makeInput(T);
+                confB.set_val<short>("SYNB_InputNormalizationType", (short)0);
+                confB.set_val<bool>("SYNB_TwoSweeps", false);
+                BLSTMNeuralNetwork<LSTMLayer> nn(confB, "SYNB", true);
+                nn.setWeights(flat);
+                nn.setProcessingType(true, true);  // truncate + overlap -> OverLap path
+
+                Eigen::MatrixXd realInput = input;
+                Eigen::MatrixXd realOut = Eigen::MatrixXd::Zero(T / subRatio, 3);  // 10 x 3
+                Eigen::MatrixXd emptyTargets;
+                nn.feedForwardBackward(realInput, 4, 3, realOut, emptyTargets);
+
+                Eigen::MatrixXd reimplOut = Eigen::MatrixXd::Zero(T / subRatio, 3);
+                Eigen::MatrixXd reimplF, reimplB, cnt, cntL;
+                overlap(input, 4, 3, reimplOut, reimplF, reimplB, cnt, cntL);
+
+                long u = 0; double a = 0.0;
+                probeGap(realOut, reimplOut, u, a);
+                std::cout << "NN_TOL site=blstm_overlap max_ulp=" << u
+                          << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                Matrix2BinaryFile(out + "blstm_overlap_out.bin", reimplOut);
+                Matrix2BinaryFile(out + "blstm_overlap_fwd.bin", reimplF);
+                Matrix2BinaryFile(out + "blstm_overlap_bwd.bin", reimplB);
+                Matrix2BinaryFile(out + "blstm_overlap_count.bin", cnt);
+                dumps += 4;
+            }
+
+            // ---- Mode C2: OverLap uncovered-rows NaN case. window_size 3 shift 10 (>
+            // 2*3+1=7 so windows leave gaps). T=20: jj=0 covers outputSeq[0,3); jj=10
+            // covers [3,6); rows 6,7,8,9 are NEVER covered -> outCount 0 -> 0/0 = NaN.
+            // The fwd/bwd hidden states (lengthOutputLSTM=10) likewise NaN on rows 6-9.
+            // probeGapNaN treats identical-NaN bits as equal.
+            {
+                const int T = 20;
+                Eigen::MatrixXd input = makeInput(T);
+                confB.set_val<short>("SYNB_InputNormalizationType", (short)0);
+                confB.set_val<bool>("SYNB_TwoSweeps", false);
+                BLSTMNeuralNetwork<LSTMLayer> nn(confB, "SYNB", true);
+                nn.setWeights(flat);
+                nn.setProcessingType(true, true);
+
+                Eigen::MatrixXd realInput = input;
+                Eigen::MatrixXd realOut = Eigen::MatrixXd::Zero(T / subRatio, 3);  // 10 x 3
+                Eigen::MatrixXd emptyTargets;
+                nn.feedForwardBackward(realInput, 3, 10, realOut, emptyTargets);
+
+                Eigen::MatrixXd reimplOut = Eigen::MatrixXd::Zero(T / subRatio, 3);
+                Eigen::MatrixXd reimplF, reimplB, cnt, cntL;
+                overlap(input, 3, 10, reimplOut, reimplF, reimplB, cnt, cntL);
+
+                // probeGapNaN treats identical-NaN bits as equal; the uncovered rows
+                // (6-9) are NaN in both the real class output and the reimpl.
+                long u = 0; double a = 0.0;
+                probeGapNaN(realOut, reimplOut, u, a);
+                std::cout << "NN_TOL site=blstm_overlap_nan max_ulp=" << u
+                          << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                Matrix2BinaryFile(out + "blstm_overlap_nan_out.bin", reimplOut);
+                Matrix2BinaryFile(out + "blstm_overlap_nan_fwd.bin", reimplF);
+                Matrix2BinaryFile(out + "blstm_overlap_nan_bwd.bin", reimplB);
+                dumps += 3;
+            }
+        }
+
+        // ---- Mode D: MLPOverLap on an MLP-mode net: LSTM [0,...] (is_mlp), output
+        // [5,4,1] sub [2,1]. getSubSamplingRatio() (MLP) = out net ratio = 2*1 = 2, so
+        // the driver forces window_size = 2/2 = 1 (IGNORING the passed window_size),
+        // length = 3, length_short = 1. T=12 window_shift 2: only exact 3-row windows
+        // (jj=2,4,6,8,10) write output[jj/shift, 0]; jj=0 is an edge window (lengthSeq=2)
+        // -> skipped, so output ROW 0 keeps the caller's zeros. _OutputForward/
+        // _OutputBackward emptied.
+        {
+            const std::vector<long> outNN = {5, 4, 1};
+            const std::vector<long> outSS = {2, 1};
+            // Per-layer fan-in accounts for subsampling: L0 in = neuronNb[0]*sub[0] =
+            // 5*2 = 10; L1 in = neuronNb[1]*sub[1] = 4*1 = 4 (Task 6 dense convention).
+            const std::vector<int> outIns = {10, 4}, outOuts = {4, 1};
+
+            long outNb = 0;
+            for (size_t jj = 0; jj < outIns.size(); ++jj) outNb += (long)outOuts[jj] * (outIns[jj] + 1);
+            const long tailNb = 2 * 5;  // MLP input_size = OutputNeuronNb[0] = 5
+            const long nbTotal = outNb + tailNb;
+            Eigen::VectorXd flat(nbTotal);
+            for (long k = 0; k < nbTotal - tailNb; ++k)
+                flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            for (int j = 0; j < 5; ++j) {
+                flat(nbTotal - tailNb + j) = 0.1 * (j + 1);
+                flat(nbTotal - tailNb + 5 + j) = 1.0 + 0.05 * j;
+            }
+
+            std::vector<Eigen::MatrixXd> ows, obs;
+            std::vector<NetLayerStep> outSteps;
+            makeDenseSteps(flat.head(outNb), outIns, outOuts, ows, obs, outSteps);
+
+            // Plain MLP forward reimpl (feedForwardMLP :462-469): input width == net
+            // input (5) so the leftCols gate is false; forward the output net directly.
+            auto mlpForward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outp) {
+                netForwardLoop(outNN, outSS, outSteps, in, outp);
+            };
+
+            const int T = 12;
+            const long windowShift = 2;
+            const long subRatioMLP = 2;  // MLP getSubSamplingRatio() = out ratio
+            const long mlpWindow = subRatioMLP / 2;  // forced = 1 (:686)
+            Eigen::MatrixXd input(T, 5);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < 5; ++j)
+                    input(t, j) = (double)(((t * 29 + j * 13 + 5) % 97)) / 97.0 - 0.5;
+
+            ConfigFile confM(nnConfigPath, '_');
+            confM._Params.erase("BLSTM_weightsFile");
+            confM.set_val<std::string>("SYNM_LSTMNeuronNb", "0,3");
+            confM.set_val<std::string>("SYNM_LSTMSubSampling", "1");
+            confM.set_val<std::string>("SYNM_OutputNeuronNb", "5,4,1");
+            confM.set_val<std::string>("SYNM_OutputSubSampling", "2,1");
+            confM.set_val<short>("SYNM_InputNormalizationType", (short)0);
+            confM.set_val<bool>("SYNM_TwoSweeps", false);
+            BLSTMNeuralNetwork<LSTMLayer> nn(confM, "SYNM", true);
+            nn.setWeights(flat);
+            nn.setProcessingType(true, true);  // MLP + truncate + overlap -> MLPOverLap
+
+            // Output rows: plain MLP would give floor(T/outRatio)=12/2=6; loop indexes
+            // up to jj=10 -> jj/shift=5, so 6 rows. Row 0 (edge-skipped) keeps zeros.
+            // Pass a DELIBERATELY WRONG window_size (99) to prove it is ignored (:686):
+            // the driver overwrites it with getSubSamplingRatio()/2 regardless. The
+            // Rust test re-runs with the CORRECT window and asserts the same output.
+            Eigen::MatrixXd realInput = input;
+            Eigen::MatrixXd realOut = Eigen::MatrixXd::Zero(6, 1);
+            Eigen::MatrixXd emptyTargets;
+            nn.feedForwardBackward(realInput, 99, windowShift, realOut, emptyTargets);
+
+            // Reimpl of feedForwardBackwardMLPOverLap (:683-709).
+            Eigen::MatrixXd reimplOut = Eigen::MatrixXd::Zero(6, 1);  // row 0 stays zero
+            for (long jj = 0; jj < input.rows(); jj += windowShift) {
+                long begin = (jj < mlpWindow) ? 0 : jj - mlpWindow;    // :690-695
+                long end = jj + mlpWindow;                              // :696
+                if (end >= input.rows()) end = input.rows() - 1;       // :697
+                long lengthSeq = end - begin + 1;
+                if (lengthSeq == 2 * mlpWindow + 1) {                   // :699 exact windows only
+                    Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+                    Eigen::MatrixXd outShort;
+                    mlpForward(block, outShort);                        // :703
+                    reimplOut(jj / windowShift, 0) = outShort(0, 0);    // :704
+                }
+            }
+
+            long u = 0; double a = 0.0;
+            probeGap(realOut, reimplOut, u, a);
+            std::cout << "NN_TOL site=blstm_mlpoverlap max_ulp=" << u
+                      << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+            Matrix2BinaryFile(out + "blstm_mlpoverlap_out.bin", reimplOut);
+            dumps += 1;
+        }
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

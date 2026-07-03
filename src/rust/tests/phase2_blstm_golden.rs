@@ -588,3 +588,333 @@ fn no_targets_leaves_cost_and_classif_zero() {
     assert_eq!(net.cost.to_bits(), 0.0_f64.to_bits());
     assert_eq!(net.nb_of_classif, 0);
 }
+
+// ============================================================================
+// Task 9: the four windowed forward drivers
+// ============================================================================
+
+/// The synthetic-net closed-form input at an arbitrary row count T (the harness Task
+/// 9 `makeInput`: `x[t,j] = ((t*29 + j*13 + 5) % 97)/97 - 0.5`, 3 cols).
+fn synth_input_t(t_rows: usize) -> Array2<f64> {
+    Array2::from_shape_fn((t_rows, 3), |(t, j)| {
+        ((t * 29 + j * 13 + 5) % 97) as f64 / 97.0 - 0.5
+    })
+}
+
+/// Build the synthetic BLSTM net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1])
+/// with `truncates`/`overlaps` processing flags and an optional `two_sweeps`. Norm
+/// type 0 (no input mutation) matches the harness Task 9 dumps.
+fn make_synth_net_windowed(truncates: bool, overlaps: bool, two_sweeps: bool) -> BlstmNetwork {
+    let mut m = synth_map(0);
+    m.insert("SYNB_TwoSweeps".into(), two_sweeps.to_string());
+    let cfg = BlstmConfig::from_legacy(&m, "SYNB").unwrap();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+    net.set_weights(&synth_flat()).unwrap();
+    net.set_processing_type(truncates, overlaps);
+    net
+}
+
+/// The MLP-mode net from the harness Task 9 Mode D: LSTM [0,3] (is_mlp), output
+/// [5,4,1] sub [2,1]. Flat body `((k*11+3) % 97)/97 - 0.5`; tail (input_size = 5)
+/// mean[j]=0.1*(j+1), std[j]=1.0+0.05*j. Weights: L0 in = 5*2 = 10 out 4, L1 in = 4
+/// out 1 -> dense 4*(10+1) + 1*(4+1) = 49; tail 2*5 = 10; total 59.
+fn make_mlp_overlap_net() -> BlstmNetwork {
+    let mut m: IndexMap<String, String> = IndexMap::new();
+    m.insert("SYNM_LSTMNeuronNb".into(), "0,3".into());
+    m.insert("SYNM_LSTMSubSampling".into(), "1".into());
+    m.insert("SYNM_OutputNeuronNb".into(), "5,4,1".into());
+    m.insert("SYNM_OutputSubSampling".into(), "2,1".into());
+    m.insert("SYNM_InputNormalizationType".into(), "0".into());
+    m.insert("SYNM_TwoSweeps".into(), "false".into());
+    let cfg = BlstmConfig::from_legacy(&m, "SYNM").unwrap();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+
+    let out_nb = 4 * (10 + 1) + (4 + 1); // L0 4*(10+1)=44, L1 1*(4+1)=5 -> 49
+    let tail = 2 * 5;
+    let nb_total = out_nb + tail;
+    let mut flat = vec![0.0_f64; nb_total];
+    for (k, v) in flat.iter_mut().enumerate().take(nb_total - tail) {
+        *v = ((k * 11 + 3) % 97) as f64 / 97.0 - 0.5;
+    }
+    for j in 0..5 {
+        flat[nb_total - tail + j] = 0.1 * (j as f64 + 1.0);
+        flat[nb_total - tail + 5 + j] = 1.0 + 0.05 * j as f64;
+    }
+    net.set_weights(&flat).unwrap();
+    net.set_processing_type(true, true); // truncate + overlap -> MLPOverLap
+    net
+}
+
+/// The MLP-mode net's 5-col closed-form input, T rows (harness Mode D input formula).
+fn mlp_input(t_rows: usize) -> Array2<f64> {
+    Array2::from_shape_fn((t_rows, 5), |(t, j)| {
+        ((t * 29 + j * 13 + 5) % 97) as f64 / 97.0 - 0.5
+    })
+}
+
+#[test]
+fn truncate_out_matches_oracle() {
+    // Truncate (no two-sweeps): T=19 window 6. outputSeq pre-seeded to 10 rows so the
+    // trailing chunk (jj=18, 1 input row -> lengthShort==0) is SILENTLY DROPPED and
+    // ROW 9 stays at its pre-seed (0). Matches blstm_truncate_{out,fwd,bwd}.bin.
+    let mut net = make_synth_net_windowed(true, false, false);
+    let mut input = synth_input_t(19);
+    let mut output = Array2::<f64>::zeros((10, 3)); // pre-seeded IDENTICALLY to the harness
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 6, 3, &mut output, &empty);
+
+    common::assert_oracle_eq(
+        &output,
+        &common::load_bin_phase2("blstm_truncate_out.bin"),
+        "blstm_truncate_out",
+    );
+    common::assert_oracle_eq(
+        &net.output_forward,
+        &common::load_bin_phase2("blstm_truncate_fwd.bin"),
+        "blstm_truncate_fwd",
+    );
+    common::assert_oracle_eq(
+        &net.output_backward,
+        &common::load_bin_phase2("blstm_truncate_bwd.bin"),
+        "blstm_truncate_bwd",
+    );
+}
+
+#[test]
+fn truncate_dropped_chunk_leaves_output_row_untouched() {
+    // Pre-seed the output with a SENTINEL (not zero) and assert the dropped-chunk row
+    // 9 retains it (proving the driver does not write there), while rows 0..9 ARE
+    // overwritten. This is stronger than the zero-seeded golden.
+    let mut net = make_synth_net_windowed(true, false, false);
+    let mut input = synth_input_t(19);
+    let sentinel = f64::from_bits(0x4059_0000_0000_0000); // 100.0
+    let mut output = Array2::<f64>::from_elem((10, 3), sentinel);
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 6, 3, &mut output, &empty);
+
+    // Row 9 (dropped chunk's begin/subRatio = 18/2 = 9 target) keeps the sentinel.
+    for c in 0..3 {
+        assert_eq!(
+            output[[9, c]].to_bits(),
+            sentinel.to_bits(),
+            "row 9 col {c} must retain the sentinel (dropped chunk)"
+        );
+    }
+    // Rows 0..9 were all written by the three full windows -> no sentinel survives.
+    let mut any_sentinel = false;
+    for r in 0..9 {
+        for c in 0..3 {
+            if output[[r, c]].to_bits() == sentinel.to_bits() {
+                any_sentinel = true;
+            }
+        }
+    }
+    assert!(!any_sentinel, "rows 0..9 must all be overwritten");
+}
+
+#[test]
+fn two_sweeps_out_matches_oracle_and_doubles_hidden_width() {
+    // TwoSweeps: T=20 window 8. Output averaged over two sweeps; _OutputForward/
+    // _OutputBackward are the HCAT of the two sweeps' hidden windows -> DOUBLE-WIDTH
+    // (2*fwdOut = 2*2 = 4). Matches blstm_twosweeps_{out,fwd,bwd}.bin.
+    let mut net = make_synth_net_windowed(true, false, true);
+    let mut input = synth_input_t(20);
+    let mut output = Array2::<f64>::zeros((10, 3));
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 8, 4, &mut output, &empty);
+
+    common::assert_oracle_eq(
+        &output,
+        &common::load_bin_phase2("blstm_twosweeps_out.bin"),
+        "blstm_twosweeps_out",
+    );
+    // Double-width contract: the forward LSTM output size is 2, so the stitched
+    // hidden states are 2*2 = 4 columns wide.
+    assert_eq!(
+        net.output_forward.ncols(),
+        4,
+        "TwoSweeps output_forward must be DOUBLE-WIDTH (2 * lstm out = 4)"
+    );
+    assert_eq!(net.output_backward.ncols(), 4);
+    common::assert_oracle_eq(
+        &net.output_forward,
+        &common::load_bin_phase2("blstm_twosweeps_fwd.bin"),
+        "blstm_twosweeps_fwd",
+    );
+    common::assert_oracle_eq(
+        &net.output_backward,
+        &common::load_bin_phase2("blstm_twosweeps_bwd.bin"),
+        "blstm_twosweeps_bwd",
+    );
+}
+
+#[test]
+fn overlap_out_matches_oracle_full_coverage() {
+    // OverLap: T=20 window_size 4 shift 3, grid snapping exercised, FULL coverage (no
+    // NaN). Matches blstm_overlap_{out,fwd,bwd}.bin.
+    let mut net = make_synth_net_windowed(true, true, false);
+    let mut input = synth_input_t(20);
+    let mut output = Array2::<f64>::zeros((10, 3));
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 4, 3, &mut output, &empty);
+
+    common::assert_oracle_eq(
+        &output,
+        &common::load_bin_phase2("blstm_overlap_out.bin"),
+        "blstm_overlap_out",
+    );
+    common::assert_oracle_eq(
+        &net.output_forward,
+        &common::load_bin_phase2("blstm_overlap_fwd.bin"),
+        "blstm_overlap_fwd",
+    );
+    common::assert_oracle_eq(
+        &net.output_backward,
+        &common::load_bin_phase2("blstm_overlap_bwd.bin"),
+        "blstm_overlap_bwd",
+    );
+}
+
+#[test]
+fn overlap_uncovered_rows_are_nan() {
+    // OverLap NaN case: window_size 3 shift 10 (> 2*3+1=7) leaves rows 6-9 uncovered
+    // -> outputCount 0 -> 0/0 = NaN (REPRODUCED, no guard). Rows 0-5 are finite and
+    // match the fixture; rows 6-9 are NaN in BOTH the Rust output and the golden.
+    let mut net = make_synth_net_windowed(true, true, false);
+    let mut input = synth_input_t(20);
+    let mut output = Array2::<f64>::zeros((10, 3));
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 3, 10, &mut output, &empty);
+
+    let golden = common::load_bin_phase2("blstm_overlap_nan_out.bin");
+    let golden_fwd = common::load_bin_phase2("blstm_overlap_nan_fwd.bin");
+
+    // Uncovered rows 6-9 are NaN in both output AND the fwd hidden states.
+    for r in 6..10 {
+        for c in 0..3 {
+            assert!(output[[r, c]].is_nan(), "output ({r},{c}) must be NaN");
+            assert!(golden[[r, c]].is_nan(), "golden ({r},{c}) must be NaN");
+        }
+        for c in 0..2 {
+            assert!(
+                net.output_forward[[r, c]].is_nan(),
+                "output_forward ({r},{c}) must be NaN"
+            );
+            assert!(
+                golden_fwd[[r, c]].is_nan(),
+                "golden_fwd ({r},{c}) must be NaN"
+            );
+        }
+    }
+    // Covered rows 0-5 are finite and compare (assert_oracle_eq treats NaN via bits in
+    // Strict mode; restrict to the finite rows so the comparison is meaningful).
+    let out_finite = output.slice(ndarray::s![..6, ..]).to_owned();
+    let golden_finite = golden.slice(ndarray::s![..6, ..]).to_owned();
+    common::assert_oracle_eq(&out_finite, &golden_finite, "blstm_overlap_nan_out_finite");
+    let fwd_finite = net.output_forward.slice(ndarray::s![..6, ..]).to_owned();
+    let golden_fwd_finite = golden_fwd.slice(ndarray::s![..6, ..]).to_owned();
+    common::assert_oracle_eq(
+        &fwd_finite,
+        &golden_fwd_finite,
+        "blstm_overlap_nan_fwd_finite",
+    );
+}
+
+#[test]
+fn mlp_overlap_out_matches_oracle_and_ignores_window_size() {
+    // MLPOverLap: T=12 shift 2. The passed window_size is IGNORED (overwritten with
+    // getSubSamplingRatio()/2 = 1). Call with a DELIBERATELY WRONG window_size (99, as
+    // the harness does) -> must still match blstm_mlpoverlap_out.bin. Row 0 is
+    // edge-skipped (keeps caller zeros). _OutputForward/_OutputBackward EMPTIED.
+    let mut net = make_mlp_overlap_net();
+    let mut input = mlp_input(12);
+    let mut output = Array2::<f64>::zeros((6, 1)); // row 0 stays 0
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 99, 2, &mut output, &empty);
+
+    common::assert_oracle_eq(
+        &output,
+        &common::load_bin_phase2("blstm_mlpoverlap_out.bin"),
+        "blstm_mlpoverlap_out",
+    );
+    // _OutputForward/_OutputBackward emptied (0 elements).
+    assert_eq!(
+        net.output_forward.len(),
+        0,
+        "MLPOverLap empties output_forward"
+    );
+    assert_eq!(
+        net.output_backward.len(),
+        0,
+        "MLPOverLap empties output_backward"
+    );
+    // Row 0 (edge-skipped) keeps the caller's zero.
+    assert_eq!(output[[0, 0]].to_bits(), 0.0_f64.to_bits());
+}
+
+#[test]
+fn mlp_overlap_window_size_is_ignored() {
+    // Call twice with DIFFERENT (both wrong) passed window_sizes; the driver forces
+    // window_size = getSubSamplingRatio()/2 regardless, so the outputs must be bitwise
+    // identical.
+    let run = |ws: usize| {
+        let mut net = make_mlp_overlap_net();
+        let mut input = mlp_input(12);
+        let mut output = Array2::<f64>::zeros((6, 1));
+        let empty = Array2::<f64>::zeros((0, 0));
+        net.feed_forward_backward(&mut input, ws, 2, &mut output, &empty);
+        output
+    };
+    let a = run(99);
+    let b = run(3);
+    common::assert_bits_eq(&a, &b, "MLPOverLap ignores the passed window_size");
+}
+
+#[test]
+fn dispatch_routes_each_processing_type() {
+    // set_processing_type routes the BLSTM dispatch: (false,false) -> plain (fwd/bwd
+    // hidden states are the LSTM out width 2); (true,false) -> Truncate; (true,false)
+    // + two_sweeps -> TwoSweeps (DOUBLE-WIDTH); (true,true) -> OverLap. Each path is
+    // distinguishable by the resulting _OutputForward width / row coverage.
+    let empty = Array2::<f64>::zeros((0, 0));
+
+    // Plain: fwd width 2 (single sweep), full coverage.
+    let mut plain = make_synth_net_windowed(false, false, false);
+    let mut input = synth_input_t(20);
+    let mut out = Array2::<f64>::zeros((10, 3));
+    plain.feed_forward_backward(&mut input, 8, 4, &mut out, &empty);
+    assert_eq!(
+        plain.output_forward.ncols(),
+        2,
+        "plain path: single-width hidden"
+    );
+
+    // TwoSweeps: DOUBLE-WIDTH hidden (4).
+    let mut two = make_synth_net_windowed(true, false, true);
+    let mut input = synth_input_t(20);
+    let mut out = Array2::<f64>::zeros((10, 3));
+    two.feed_forward_backward(&mut input, 8, 4, &mut out, &empty);
+    assert_eq!(
+        two.output_forward.ncols(),
+        4,
+        "two-sweeps path: double-width hidden"
+    );
+
+    // OverLap with an uncovered-rows config -> NaN rows (only this path produces NaN).
+    let mut ov = make_synth_net_windowed(true, true, false);
+    let mut input = synth_input_t(20);
+    let mut out = Array2::<f64>::zeros((10, 3));
+    ov.feed_forward_backward(&mut input, 3, 10, &mut out, &empty);
+    assert!(out[[9, 0]].is_nan(), "overlap path: uncovered row 9 is NaN");
+
+    // MLPOverLap: empties the hidden states.
+    let mut mlp = make_mlp_overlap_net();
+    let mut input = mlp_input(12);
+    let mut out = Array2::<f64>::zeros((6, 1));
+    mlp.feed_forward_backward(&mut input, 4, 2, &mut out, &empty);
+    assert_eq!(
+        mlp.output_forward.len(),
+        0,
+        "mlp-overlap path: empties hidden states"
+    );
+}

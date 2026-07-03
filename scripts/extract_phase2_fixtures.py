@@ -108,6 +108,31 @@ EXPECTED_SHAPES["blstm_real_fullseq_out.bin"] = (50, 1)
 EXPECTED_SHAPES["blstm_real_fullseq_fwd.bin"] = (50, 24)
 EXPECTED_SHAPES["blstm_real_fullseq_bwd.bin"] = (50, 24)
 
+# Task 9: the four windowed forward drivers on the synthetic net (LSTM [3,4,2] sub
+# [2,1], output [4,5,3] sub [1,1]) + an MLP-mode net (output [5,4,1] sub [2,1]).
+# Truncate: T=19 window 6, outputSeq pre-seeded to 10 rows so the dropped trailing
+# chunk (lengthShort==0) leaves ROW 9 untouched (zeros); fwd/bwd are 9x2
+# (lengthOutputLSTM=19/2). TwoSweeps: T=20 window 8, out 10x3, fwd/bwd DOUBLE-WIDTH
+# 10x4 (hcat of two sweeps' 2-wide hidden windows). OverLap: T=20 window_size 4 shift
+# 3, full coverage, out 10x3, fwd/bwd 10x2 (lengthOutputLSTM=10), count 10x1. OverLap
+# NaN: window_size 3 shift 10 leaves rows 6-9 uncovered -> 0/0 = NaN (out 10x3, fwd/
+# bwd 10x2). MLPOverLap: T=12 shift 2, out 6x1 (row 0 edge-skipped -> 0). Kept in sync
+# with main.cpp's Task 9 block.
+EXPECTED_SHAPES["blstm_truncate_out.bin"] = (10, 3)
+EXPECTED_SHAPES["blstm_truncate_fwd.bin"] = (9, 2)
+EXPECTED_SHAPES["blstm_truncate_bwd.bin"] = (9, 2)
+EXPECTED_SHAPES["blstm_twosweeps_out.bin"] = (10, 3)
+EXPECTED_SHAPES["blstm_twosweeps_fwd.bin"] = (10, 4)
+EXPECTED_SHAPES["blstm_twosweeps_bwd.bin"] = (10, 4)
+EXPECTED_SHAPES["blstm_overlap_out.bin"] = (10, 3)
+EXPECTED_SHAPES["blstm_overlap_fwd.bin"] = (10, 2)
+EXPECTED_SHAPES["blstm_overlap_bwd.bin"] = (10, 2)
+EXPECTED_SHAPES["blstm_overlap_count.bin"] = (10, 1)
+EXPECTED_SHAPES["blstm_overlap_nan_out.bin"] = (10, 3)
+EXPECTED_SHAPES["blstm_overlap_nan_fwd.bin"] = (10, 2)
+EXPECTED_SHAPES["blstm_overlap_nan_bwd.bin"] = (10, 2)
+EXPECTED_SHAPES["blstm_mlpoverlap_out.bin"] = (6, 1)
+
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
 HARNESS_INPUTS = [
     "excerpt_2ch_8k.wav",
@@ -276,6 +301,20 @@ def main() -> None:
         for tag in ("1", "m1", "m2", "0")
     }
     blstm_real_fullseq_tol = _parse_nn_tol(stdout, "blstm_real_fullseq")
+    # Task 9: the four windowed forward drivers. All bit-exact vs the REAL class
+    # (max_ulp=0) -- the reimpls transcribe the integer window arithmetic + write-back
+    # index math verbatim, and blstm_overlap_nan's uncovered rows are NaN in both (the
+    # probe treats identical-NaN bits as equal).
+    blstm_windowed_tols = {
+        site: _parse_nn_tol(stdout, site)
+        for site in (
+            "blstm_truncate",
+            "blstm_twosweeps",
+            "blstm_overlap",
+            "blstm_overlap_nan",
+            "blstm_mlpoverlap",
+        )
+    }
 
     # 2b. Read each dump back, verify its shape, and build the inventory.
     dump_inventory: dict[str, dict[str, int]] = {}
@@ -370,6 +409,24 @@ def main() -> None:
             "synthetic_out": blstm_norm_tols,
             "synthetic_input_mutation": blstm_norm_input_tols,
             "real_fullseq": blstm_real_fullseq_tol,
+        },
+        "blstm_windowed_tol": {
+            "text": (
+                "Task 9: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> "
+                "windowed feedForwardBackward (truncate / two-sweeps / overlap / MLP-"
+                "overlap paths, no targets) and the reimpl (transcribed per-window plain "
+                "FFB + integer window arithmetic + write-back index math). The probe "
+                "covers the OUTPUT (the _OutputForward/_OutputBackward members are private "
+                "on the real class; the fwd/bwd dumps ARE the reimpl, per the Task 8 "
+                "precedent). blstm_truncate: T=19 window 6, trailing chunk lengthShort==0 "
+                "SILENTLY DROPPED (row 9 untouched). blstm_twosweeps: T=20 window 8, hidden "
+                "states DOUBLE-WIDTH. blstm_overlap: T=20 window_size 4 shift 3, grid "
+                "snapping, full coverage. blstm_overlap_nan: window_size 3 shift 10, rows "
+                "6-9 uncovered -> 0/0 = NaN (reproduced, no guard; identical-NaN bits "
+                "compared equal). blstm_mlpoverlap: MLP net, passed window_size IGNORED "
+                "(overwritten with getSubSamplingRatio()/2). All max_ulp=0."
+            ),
+            **blstm_windowed_tols,
         },
         "dumps": dump_inventory,
     }
