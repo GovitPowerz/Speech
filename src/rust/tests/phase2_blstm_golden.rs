@@ -1038,7 +1038,12 @@ fn scoring_out_matches_oracle_all_cases() {
 fn scoring_cost_and_nb_of_classif_match_manifest() {
     // The scoring feed_forward accumulates _Cost/_NbOfClassif via the windowed FFB it
     // calls; the manifest records the REAL class's getCost()/getNbOfClassif() per
-    // case (bit-exact hex). Assert the Rust net's cost/nb_of_classif match those bits.
+    // case (bit-exact hex, dumped on the oracle env / Apple libm). The Rust cost
+    // recomputation runs CostLaw::compute_cost, which traverses `.ln()` (cost.rs) --
+    // a libm chain -- so this is the cross-libm class: gated via
+    // `assert_oracle_eq_f64` (bit-exact on the oracle env, hybrid ULP/abs bound
+    // elsewhere). nb_of_classif is an integer count with no libm involved, stays
+    // exact everywhere.
     // Manifest values (tests/reference_data/phase2/manifest.json:blstm_scoring_tol):
     let expected: [(&str, u64, i64); 4] = [
         ("step0_mod1_plain", 0x4003fe046d21b5a8, 6),
@@ -1053,11 +1058,10 @@ fn scoring_cost_and_nb_of_classif_match_manifest() {
         let mut net = make_syns_net(*step, *cost_modified);
         let mut input = synth_input();
         let _ = net.feed_forward_scoring(&mut input, 4, 2, 1, *modifier);
-        assert_eq!(
-            net.cost.to_bits(),
-            *ecost_bits,
-            "scoring {tag}: cost bits mismatch (rust=0x{:016x}, manifest=0x{ecost_bits:016x})",
-            net.cost.to_bits()
+        common::assert_oracle_eq_f64(
+            net.cost,
+            f64::from_bits(*ecost_bits),
+            &format!("scoring {tag}: cost"),
         );
         assert_eq!(
             net.nb_of_classif, *enb,

@@ -198,9 +198,12 @@ fn lstm_width_mismatch_matches_oracle() {
 #[test]
 fn lstm_reverse_equals_flip_forward_flip() {
     // feedForwardReverse(x) == flip(feedForward(flip(x))) by construction
-    // (LSTMLayer.cpp:415-421). Verify against a golden forward case: build the
-    // reversed-input forward output, flip its rows, and require it to equal the
-    // reverse-case golden dump bit-for-bit (pure row permutation, so assert_bits_eq).
+    // (LSTMLayer.cpp:415-421). The property itself is a same-platform, same-libm
+    // comparison (both sides recomputed locally in this process), so it stays
+    // BIT-EXACT everywhere via assert_bits_eq -- it is NOT a fixture comparison and
+    // does not touch the oracle canary gate. A separate assert below checks the
+    // refolded output against the committed golden dump (Apple libm at generation
+    // time; this DOES traverse asinh/exp), gated via assert_oracle_eq.
     let mut fwd = LstmLayer::new(3, 2, true, true, true);
     fwd.set_weights(&synthetic_weights(3, 2));
     let input = synthetic_input(7, 3);
@@ -210,8 +213,22 @@ fn lstm_reverse_equals_flip_forward_flip() {
     fwd.feed_forward(&flipped, &mut fwd_out, false);
     let refolded = fwd_out.slice(ndarray::s![..;-1, ..]).to_owned();
 
+    let mut rev = LstmLayer::new(3, 2, true, true, true);
+    rev.set_weights(&synthetic_weights(3, 2));
+    let mut rev_out = Array2::<f64>::zeros((7, 2));
+    rev.feed_forward_reverse(&input, &mut rev_out, false);
+    common::assert_bits_eq(
+        &refolded,
+        &rev_out,
+        "flip(fwd(flip(x))) == feed_forward_reverse(x), same-platform property",
+    );
+
     let want_rev = common::load_bin_phase2("lstm_fwd_3x2_T7_allon_rev.bin");
-    common::assert_bits_eq(&refolded, &want_rev, "flip(fwd(flip(x))) == reverse golden");
+    common::assert_oracle_eq(
+        &refolded,
+        &want_rev,
+        "flip(fwd(flip(x))) vs reverse golden dump",
+    );
 }
 
 #[test]
@@ -372,10 +389,12 @@ fn lstm_hand_case_o1_t2() {
 //
 // `lstm_cases.json` (scripts/extract_phase2_oracle_cases.py) holds the Python
 // `lstm_forward_oracle` forward outputs over a deterministic (I,O,T,flags) grid, with
-// every f64 stored as its raw u64 bits (hex). Both the Python oracle and `LstmLayer`
-// are same-libm local computations, so the cross-check is BIT-EXACT (`to_bits`), not
-// the hybrid oracle bound: it proves two structurally-different implementations agree
-// exactly, a stronger statement than either alone.
+// every f64 stored as its raw u64 bits (hex). The JSON is a COMMITTED FIXTURE (frozen
+// at generation time on the oracle env, Apple libm), not recomputed by both sides at
+// test time -- despite both being "local" implementations, the chain traverses
+// asinh/exp, so on a different libm (CI glibc) this is exactly the cross-libm class:
+// gated via `assert_oracle_eq` (bit-exact on the oracle env, hybrid ULP/abs bound
+// elsewhere), not a raw `to_bits` cross-check.
 
 fn bits_to_f64(s: &str) -> f64 {
     let hex = s.strip_prefix("0x").unwrap_or(s);
@@ -438,9 +457,9 @@ fn lstm_python_oracle_cross_check() {
         let mut output = Array2::<f64>::zeros((t_len, o));
         layer.feed_forward(&input, &mut output, false);
 
-        common::assert_bits_eq(&output, &want_y, &format!("{name} y"));
-        common::assert_bits_eq(layer.gates(), &want_gates, &format!("{name} gates"));
-        common::assert_bits_eq(layer.cell_states(), &want_cells, &format!("{name} cells"));
+        common::assert_oracle_eq(&output, &want_y, &format!("{name} y"));
+        common::assert_oracle_eq(layer.gates(), &want_gates, &format!("{name} gates"));
+        common::assert_oracle_eq(layer.cell_states(), &want_cells, &format!("{name} cells"));
     }
 }
 
@@ -604,9 +623,10 @@ fn dense_hand_case_softmax_o2_t1() {
 //
 // `dense_cases.json` (scripts/extract_phase2_oracle_cases.py) holds the Python
 // `dense_forward_oracle` forward outputs over a deterministic (I,O,T,last_layer)
-// grid, with every f64 stored as its raw u64 bits (hex). Both the Python oracle and
-// `NeuronLayer` are same-libm local computations, so the cross-check is BIT-EXACT
-// (`to_bits`), not the hybrid oracle bound.
+// grid, with every f64 stored as its raw u64 bits (hex). The JSON is a COMMITTED
+// FIXTURE (frozen at generation time on the oracle env, Apple libm) -- the softmax/
+// logistic/asinh chain traverses exp, so this is the cross-libm class: gated via
+// `assert_oracle_eq`, not a raw `to_bits` cross-check.
 
 #[test]
 fn dense_python_oracle_cross_check() {
@@ -641,6 +661,6 @@ fn dense_python_oracle_cross_check() {
         layer.feed_forward(&input, &mut output, last_layer);
         assert_eq!(input.ncols(), in_cols, "{name}: input width sanity check");
 
-        common::assert_bits_eq(&output, &want_y, &format!("{name} y"));
+        common::assert_oracle_eq(&output, &want_y, &format!("{name} y"));
     }
 }

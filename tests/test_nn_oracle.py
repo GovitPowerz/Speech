@@ -22,6 +22,8 @@ from speech.nn_reference import (
 )
 from speech.weight_bridge import read_bin
 
+from tests._libm_gate import assert_f64_matrix_close as _assert_f64_matrix_close
+
 PHASE2_DIR = Path(__file__).resolve().parent / "reference_data" / "phase2"
 
 
@@ -304,8 +306,13 @@ def _synth_input_blstm() -> np.ndarray:
 
 
 def test_blstm_oracle_matches_harness_norm_dumps() -> None:
-    # blstm_forward_oracle reproduces the harness synthetic-net norm dumps bit-for-bit
-    # (same libm, ascending accumulation). One dump per normalization type {1,-1,-2,0}.
+    # blstm_forward_oracle reproduces the harness synthetic-net norm dumps: the chain
+    # traverses exp/asinh (LSTM gates + cell activations), and the dump was produced
+    # on the oracle env (Apple libm) while this oracle runs on the RUNNING platform's
+    # libm -- the cross-libm class. Bit-exact on the oracle env (canaries match),
+    # hybrid <=4 ULP or 512*eps*scale absolute elsewhere (scale = max|expected| over
+    # the whole matrix), gated the same way as the Rust `assert_oracle_eq`. One dump
+    # per normalization type {1,-1,-2,0}.
     fwd_layers, bwd_layers, out_layers, mean, std = _synth_net_layers()
     x = _synth_input_blstm()
     for norm_type, tag in ((1, "1"), (-1, "m1"), (-2, "m2"), (0, "0")):
@@ -313,4 +320,4 @@ def test_blstm_oracle_matches_harness_norm_dumps() -> None:
         rows, cols, flat = read_bin(PHASE2_DIR / f"blstm_norm{tag}_out.bin")
         want = flat.reshape(cols, rows).T  # column-major -> (rows, cols)
         assert y.shape == (rows, cols), f"norm {tag}: shape {y.shape} != ({rows},{cols})"
-        assert y.tobytes() == np.ascontiguousarray(want, dtype=np.float64).tobytes(), f"blstm oracle norm {tag} must match the harness dump bit-for-bit"
+        _assert_f64_matrix_close(y, np.ascontiguousarray(want, dtype=np.float64), f"blstm oracle norm {tag}")
