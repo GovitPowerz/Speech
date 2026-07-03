@@ -34,7 +34,7 @@ pub(crate) fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
 /// flat (de)serialization; forward/backward (Task 4+) are not yet implemented.
 ///
 /// Member sizes are the CTOR RESIZES (`LSTMLayer.cpp:19-22`), NOT the stale size
-/// comments in `LSTMLayer.h:33-36` (which claim `_PeepWeight` is `3*_OutputSize`
+/// comments in `LSTMLayer.h:35-36` (which claim `_PeepWeight` is `3*_OutputSize`
 /// and predate a peephole-bundle rework -- the real ctor resizes it to
 /// `12 x _OutputSize`):
 /// - `input_weights`: `_InputSize x 4*_OutputSize` (gate column blocks `[i|f|o|g]`).

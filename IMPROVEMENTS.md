@@ -503,6 +503,14 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   tests). *Fix candidate:* none -- document-only; an unguarded or clamp-to-epsilon rewrite diverges
   at the negative boundary.
 
+- **[phase2] Spec erratum: S6.6 "(row 0 always)" holds only for `step == 0`** (`nn/blstm.rs`
+  `feed_forward_scoring`, from `BLSTMNeuralNetwork.cpp:868-918`): the target-enforcement counter
+  starts at 0 and enforces a row when `counter >= target_enforcement_step`; for `step == 0` that
+  makes row 0 (and every row) enforced, but for `step >= 1` rows `0..step-1` are `-0.5` and row
+  `step` is the first enforced row. The port's doc-comment previously overclaimed "row 0 ALWAYS
+  enforced" as a general fact; corrected to state the `step`-dependent behavior. Code was already
+  correct -- comment-only fix.
+
 - **[phase2] LSTM `feedForward` t=0 cell update omits the forget term BY EXPRESSION SHAPE (no zero
   initial state)** (`nn/layers.rs` `feed_forward` t=0 branch, from `LSTMLayer.cpp:325-348` vs
   :351-411): the t=0 row is a structurally separate block -- `c_0 = i_0 .* g_0` (:337) with NO
@@ -608,7 +616,7 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   parity target (same rationale as the DCT entry); do NOT swap in BLAS/library GEMMs before
   end-to-end parity re-baselines.
 
-- **[phase2] `LSTMLayer.h:33-36` member-size comments are STALE for BOTH `_PeepWeight` and
+- **[phase2] `LSTMLayer.h:35-36` member-size comments are STALE for BOTH `_PeepWeight` and
   `_Biaises`** (`LSTMLayer.h:35-36` vs the ctor resizes at `LSTMLayer.cpp:21-22`): the header
   declares `_PeepWeight; // size 3*_OutputSize` and `_Biaises; // size _OutputSize`, but the ctor
   resizes `_PeepWeight` to `12 x _OutputSize` (and `LSTMLayer.cpp:21` repeats the stale

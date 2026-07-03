@@ -400,8 +400,3 @@ def blstm_forward_oracle(
     out_backward = _lstm_net_forward(bwd_layers, lstm_sub_sampling, bwd_in, reverse=True)
     hcat = np.concatenate([out_forward, out_backward], axis=1)  # forward LEFT
     return _dense_net_forward(out_layers, out_sub_sampling, hcat)
-
-
-def blstm_forward(inputs: NDArray[np.float64], weights: dict[str, object]) -> NDArray[np.float64]:
-    """Reference bidirectional-LSTM forward pass (Phase 2)."""
-    ...

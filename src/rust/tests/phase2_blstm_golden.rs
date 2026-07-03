@@ -776,6 +776,39 @@ fn overlap_out_matches_oracle_full_coverage() {
 }
 
 #[test]
+fn overlap_seeded_output_accumulates_in_place() {
+    // IN-PLACE ACCUMULATION (`BLSTMNeuralNetwork.cpp:664` `outputSeq.block(...)
+    // .noalias() += outputSeqShort`): the legacy sums window contributions
+    // DIRECTLY into the caller's `outputSeq` buffer, so caller-provided initial
+    // contents seed the sum: a covered row ends up `(initial + sum) / count`, not
+    // `sum / count`. Pre-seed with a sentinel and assert every row equals
+    // `golden_value + sentinel/count`, where `count` is this window's per-row
+    // coverage count (2,3,4,4,3,3,2,3,2,1 for rows 0-9 on this T=20 window_size=4
+    // shift=3 synthetic-net case -- derived from the zero-seeded golden and cross-
+    // checked against the driver's grid-snapped window bounds).
+    let mut net = make_synth_net_windowed(true, true, false);
+    let mut input = synth_input_t(20);
+    let sentinel = 100.0;
+    let mut output = Array2::<f64>::from_elem((10, 3), sentinel);
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 4, 3, &mut output, &empty);
+
+    let golden = common::load_bin_phase2("blstm_overlap_out.bin");
+    let counts = [2.0, 3.0, 4.0, 4.0, 3.0, 3.0, 2.0, 3.0, 2.0, 1.0];
+    for r in 0..10 {
+        let count = counts[r];
+        for c in 0..3 {
+            let expected = golden[[r, c]] + sentinel / count;
+            let got = output[[r, c]];
+            assert!(
+                (got - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+                "row {r} col {c}: got {got}, expected golden+sentinel/count = {expected} (count={count})"
+            );
+        }
+    }
+}
+
+#[test]
 fn overlap_uncovered_rows_are_nan() {
     // OverLap NaN case: window_size 3 shift 10 (> 2*3+1=7) leaves rows 6-9 uncovered
     // -> outputCount 0 -> 0/0 = NaN (REPRODUCED, no guard). Rows 0-5 are finite and

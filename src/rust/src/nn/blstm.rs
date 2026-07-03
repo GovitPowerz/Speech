@@ -655,8 +655,10 @@ impl BlstmNetwork {
     ///   counter, starting at 0, enforces a row when `counter >= target_enforcement_step`
     ///   (then resets to 0): the enforced row is `Constant(target)` with column
     ///   `target_index` set to `1-target`; a non-enforced row is `Constant(-0.5)` and
-    ///   `++counter`. Row 0 is ALWAYS enforced (`0 >= 0` for any `step >= 0`; for a
-    ///   negative `step` every row enforces). Binary (`output_size == 1`): enforced
+    ///   `++counter`. The counter starts at 0, so row 0 is enforced ONLY when
+    ///   `step == 0` (`0 >= 0`); for `step >= 1` rows `0..step-1` are `-0.5` and row
+    ///   `step` is the first enforced row (then every `step`-th row thereafter); for
+    ///   a negative `step` every row enforces. Binary (`output_size == 1`): enforced
     ///   rows get `(target_index == 1) ? 1-target : target`; non-enforced `-0.5`.
     /// - Binary expansion (`:922-926`): when `target_index >= 0 && output_size == 1`,
     ///   resize to `(length, 2)`, col1 = col0, col0 = `1 - col0` -> returns `[1-p, p]`.
@@ -789,6 +791,12 @@ impl BlstmNetwork {
                 if n_lines > 0 {
                     // Interior rows [1, rows-1) of the targets AND the caller-visible
                     // output overwritten with -0.5 (:820-821), BEFORE computeCost.
+                    // :820 bounds the target block by `targetSeq.rows()-2`, :821 bounds
+                    // the output block by `outputSeq.rows()-2` -- two separate
+                    // expressions in the legacy. This loop shares one `end` bound for
+                    // both writes, which is only equivalent when `output.nrows() ==
+                    // target.nrows()` -- true on every live call site (scoring always
+                    // sizes `output`/`target` identically), but not a general identity.
                     let end = target.nrows() - 1;
                     for row in 1..end {
                         for col in 0..new_target.ncols() {
@@ -1113,6 +1121,15 @@ impl BlstmNetwork {
     /// by any window divide 0/0 -> NaN (REPRODUCED, no guard). The final count-
     /// quotient loop runs `ii < _OutputForward.cols()` for BOTH the forward and the
     /// backward quotient (assumes equal widths).
+    ///
+    /// IN-PLACE ACCUMULATION (`:664` `outputSeq.block(...).noalias() += outputSeqShort`):
+    /// the legacy accumulates window sums DIRECTLY into the caller's `outputSeq`
+    /// buffer, so any caller-provided initial contents seed the sums -- a covered
+    /// row ends up `(initial + sum)/count`, not `sum/count`. `outputForward`/
+    /// `outputBackward` (`:597-598`) are, by contrast, FRESH `Zero` locals -- only
+    /// the output path is caller-seeded. The port mirrors this asymmetry: `output`
+    /// is accumulated in place (no fresh sum buffer), while `output_forward`/
+    /// `output_backward` stay fresh zero accumulators.
     fn feed_forward_backward_overlap(
         &mut self,
         input: &Array2<f64>,
@@ -1135,8 +1152,9 @@ impl BlstmNetwork {
         let mut output_backward = Array2::<f64>::zeros((length_output_lstm, bwd_out)); // :598
         let mut output_count = vec![0.0_f64; output.nrows()]; // :599
         let mut output_count_lstm = vec![0.0_f64; length_output_lstm]; // :600
-        // Accumulate into a plain buffer to mirror the noalias() += writes.
-        let mut output_sum = Array2::<f64>::zeros(output.raw_dim());
+        // :664 accumulates INTO the caller's `output` buffer in place (no fresh sum
+        // local) -- caller-seeded contents feed the sum, matching Eigen's
+        // `outputSeq.block(...).noalias() += outputSeqShort`.
 
         // :602-610 nominal length = (2*window_size+1) divided sequentially.
         let mut length = 2 * window_size + 1;
@@ -1203,11 +1221,12 @@ impl BlstmNetwork {
                 };
                 self.feed_forward_backward_plain(&block, &mut output_short, &target_short); // :656
 
-                // :664-665 output sum + count at begin/subSamplingRatio.
+                // :664-665 output sum + count at begin/subSamplingRatio. Accumulates
+                // IN PLACE into the caller's `output` buffer (:664 noalias() +=).
                 let obeg = begin / sub_sampling_ratio;
                 for r in 0..length_short {
                     for c in 0..output.ncols() {
-                        output_sum[[obeg + r, c]] += output_short[[r, c]];
+                        output[[obeg + r, c]] += output_short[[r, c]];
                     }
                     output_count[obeg + r] += 1.0;
                 }
@@ -1228,9 +1247,10 @@ impl BlstmNetwork {
 
         // :672-673 install the accumulators, then quotient by the counts.
         // :674-675 output /= outputCount (0/0 -> NaN on uncovered rows, no guard).
+        // `output` already holds (initial + sum) from the in-place accumulation above.
         for r in 0..output.nrows() {
             for c in 0..output.ncols() {
-                output[[r, c]] = output_sum[[r, c]] / output_count[r];
+                output[[r, c]] /= output_count[r];
             }
         }
         // :677-679 quotient loop bound = _OutputForward.cols() for BOTH fwd and bwd.
@@ -1343,4 +1363,83 @@ fn hcat(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod analyse_input_seq_tests {
+    use super::*;
+
+    /// Minimal MLP-mode net (LSTM `[0,3]` -> `_IsMLP`, output `[5,4,1]` sub
+    /// `[2,1]`): `input_size()` = 5 (the output net's input size in MLP mode),
+    /// so `analyse_input_seq` crops any wider sequence to the first 5 columns.
+    fn mlp_net(input_norm_type: i16) -> BlstmNetwork {
+        let mut m: IndexMap<String, String> = IndexMap::new();
+        m.insert("SYNT_LSTMNeuronNb".into(), "0,3".into());
+        m.insert("SYNT_LSTMSubSampling".into(), "1".into());
+        m.insert("SYNT_OutputNeuronNb".into(), "5,4,1".into());
+        m.insert("SYNT_OutputSubSampling".into(), "2,1".into());
+        m.insert(
+            "SYNT_InputNormalizationType".into(),
+            input_norm_type.to_string(),
+        );
+        m.insert("SYNT_TwoSweeps".into(), "false".into());
+        let cfg = BlstmConfig::from_legacy(&m, "SYNT").unwrap();
+        BlstmNetwork::from_config(cfg).unwrap()
+    }
+
+    #[test]
+    fn crops_when_strictly_wider_than_net_input() {
+        // net input_size() == 5; feed a 7-col sequence -> stats must be computed
+        // only over the LEFT 5 columns (`InputStatistics::from_matrix` on the
+        // cropped slice), the extra 2 columns must not perturb mean/std.
+        let mut net = mlp_net(1);
+        let wide = Array2::from_shape_fn((4, 7), |(r, c)| (r * 7 + c) as f64);
+        net.analyse_input_seq(&wide);
+
+        let cropped = wide.slice(ndarray::s![.., ..5]).to_owned();
+        let expected = InputStatistics::from_matrix(&cropped);
+        assert_eq!(net.input_statistics.mean, expected.mean);
+        assert_eq!(net.input_statistics.std, expected.std);
+        assert_eq!(net.input_statistics.n, expected.n);
+    }
+
+    #[test]
+    fn first_call_constructs_second_call_updates() {
+        // First call on a fresh net (n == 0): the batch REPLACES the accumulator
+        // wholesale (no merge). Second call: n != 0, so it MERGES via `update`
+        // (n accumulates: 3 + 3 == 6), not a plain overwrite.
+        let mut net = mlp_net(1);
+        assert_eq!(net.input_statistics.n, 0);
+
+        let batch1 = Array2::from_shape_fn((3, 5), |(r, c)| (r + c) as f64);
+        net.analyse_input_seq(&batch1);
+        let expected1 = InputStatistics::from_matrix(&batch1);
+        assert_eq!(net.input_statistics, expected1);
+        assert_eq!(net.input_statistics.n, 3);
+
+        let batch2 = Array2::from_shape_fn((3, 5), |(r, c)| (2 * r + c + 1) as f64);
+        net.analyse_input_seq(&batch2);
+        assert_eq!(net.input_statistics.n, 6);
+
+        // The merged result must match calling `update` directly, not a fresh
+        // `from_matrix` over either batch alone (proves the n != 0 branch merges
+        // rather than overwriting).
+        let mut expected_merged = InputStatistics::from_matrix(&batch1);
+        expected_merged.update(&InputStatistics::from_matrix(&batch2));
+        assert_eq!(net.input_statistics, expected_merged);
+    }
+
+    #[test]
+    fn zero_rows_is_a_noop() {
+        // `rows > 0` guard (:385): an empty sequence must not touch the
+        // accumulator at all (not even a zero-sample merge).
+        let mut net = mlp_net(1);
+        let batch = Array2::from_shape_fn((3, 5), |(r, c)| (r + c) as f64);
+        net.analyse_input_seq(&batch);
+        let before = net.input_statistics.clone();
+
+        let empty = Array2::<f64>::zeros((0, 5));
+        net.analyse_input_seq(&empty);
+        assert_eq!(net.input_statistics, before);
+    }
 }
