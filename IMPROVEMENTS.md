@@ -435,7 +435,7 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   with a deliberately-wrong `window_size` and asserts the identical output. Provenance quirk; not a bug.
 
 - **[phase2] Real-config feature width (11) does not match the trained net's input (23)** (E2E gate,
-  `BLSTMNeuralNetwork.cpp:426-428` feedForward width tolerance): the REAL `1_worker_1.config` DSP keys
+  `BLSTMNeuralNetwork.cpp:428-434` feedForward width tolerance): the REAL `1_worker_1.config` DSP keys
   (`nb_DCT 4`, `IgnoreFirstDCT true`, `ComputeDeltasNb 5`, `ComputeDeltaDeltasNb 3`) produce a `201 x 11`
   input sequence (`3*nb_DCT - 1 = 11`; `LTSVwindow 0` -> no LTSV column), but the net's `LSTMNeuronNb[0]`
   is 23. The legacy feeds the mismatched-width input anyway: the `leftCols(inputSize)` crop only fires when

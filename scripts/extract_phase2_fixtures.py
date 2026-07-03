@@ -364,9 +364,9 @@ def main() -> None:
     # needed), so fwd/bwd hidden states are probed against the real class alongside
     # the output. The synthetic-net per-type sites (out + input mutation + fwd + bwd)
     # are bit-exact (small shapes, k<=6); the real full-sequence site (out + fwd + bwd)
-    # is EXPECTED NONZERO (the k=23 input GEMM diverges from ascending accumulation
-    # per the Task 1 lstm_input_gemm probe -- the goldens ARE the reimpl, and the
-    # manifest records the measured gap).
+    # is EXPECTED NONZERO (topRows(11) input slice + k=24 recurrence and layer-1 GEMMs +
+    # output-net (k=48/k=12) GEMM divergence per the Task 1 lstm_input_gemm probe -- the
+    # goldens ARE the reimpl, and the manifest records the measured gap).
     blstm_norm_tols = {f"blstm_norm{tag}": _parse_nn_tol(stdout, f"blstm_norm{tag}") for tag in ("1", "m1", "m2", "0")}
     blstm_norm_input_tols = {f"blstm_norm{tag}_input": _parse_nn_tol(stdout, f"blstm_norm{tag}_input") for tag in ("1", "m1", "m2", "0")}
     blstm_norm_fwd_tols = {f"blstm_norm{tag}_fwd": _parse_nn_tol(stdout, f"blstm_norm{tag}_fwd") for tag in ("1", "m1", "m2", "0")}
@@ -405,9 +405,10 @@ def main() -> None:
 
     # Task 10: scoring feedForward + END-TO-END real-net gate. The scoring reimpl is
     # bit-exact vs the REAL class (max_ulp=0, small synthetic net); the E2E forwards are
-    # EXPECTED NONZERO (the real net's k=23 input GEMM diverges from ascending
-    # accumulation, same root cause as blstm_real_fullseq -- the goldens ARE the
-    # reimpl). _Cost/_NbOfClassif per scoring case are read from the real class.
+    # EXPECTED NONZERO (topRows(11) input slice + k=24 recurrence and layer-1 GEMMs +
+    # output-net (k=48/k=12) GEMM divergence, same root cause as blstm_real_fullseq --
+    # the goldens ARE the reimpl). _Cost/_NbOfClassif per scoring case are read from the
+    # real class.
     blstm_scoring_tols = {f"blstm_scoring_{case}": _parse_nn_tol(stdout, f"blstm_scoring_{case}") for case in _SCORING_CASES}
     blstm_scoring_costs = _parse_blstm_scoring(stdout)
     e2e_tols = {
@@ -511,10 +512,11 @@ def main() -> None:
                 "the output. The synthetic-net sites (out + fwd + bwd) are bit-exact (small "
                 "shapes); the *_input sites pin the in-place normalization mutation matching "
                 "the real class. The blstm_real_fullseq site (out + fwd + bwd) is EXPECTED "
-                "NONZERO: on the real net (k=23 input GEMM) Eigen's blocked product diverges "
-                "from ascending accumulation (Task 1 lstm_input_gemm probe), so the goldens "
-                "ARE the ascending-loop reimpl and this records the measured real-vs-reimpl "
-                "gap, including on the hidden states."
+                "NONZERO: on the real net (topRows(11) input slice + k=24 recurrence and "
+                "layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence) Eigen's blocked "
+                "product diverges from ascending accumulation (Task 1 lstm_input_gemm probe), "
+                "so the goldens ARE the ascending-loop reimpl and this records the measured "
+                "real-vs-reimpl gap, including on the hidden states."
             ),
             "synthetic_out": blstm_norm_tols,
             "synthetic_input_mutation": blstm_norm_input_tols,
@@ -575,7 +577,8 @@ def main() -> None:
                 "(the net input) exercises the feedForward WIDTH TOLERANCE: D=11 < 23 -> "
                 "the per-layer topRows tolerance (LSTMLayer/NeuronLayer forward), NOT the "
                 "leftCols crop (which only fires when D > 23). The forwards are EXPECTED "
-                "NONZERO vs the real class (k=23 input GEMM divergence, same root cause as "
+                "NONZERO vs the real class (topRows(11) input slice + k=24 recurrence and "
+                "layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence, same root cause as "
                 "blstm_real_fullseq); the goldens ARE the ascending-loop reimpl."
             ),
             "input_shape": {"rows": e2e_rows, "cols": e2e_cols},

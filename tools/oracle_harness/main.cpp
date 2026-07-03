@@ -2372,7 +2372,7 @@ int main(int argc, char** argv) {
     // (possibly-mutated) input blstm_norm<type>_input_after.bin. Plus the REAL net
     // (from the vendored config + weights) on a deterministic synthetic 200 x 23
     // input, plain FFB no targets -> blstm_real_fullseq_{out,fwd,bwd}.bin + its
-    // NN_TOL (EXPECTED NONZERO: the k=23 input GEMM diverges per Task 1 probes).
+    // NN_TOL (EXPECTED NONZERO: topRows(11) input slice + k=24 recurrence and layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence).
     {
         // Reimpl of the whole-sequence self-normalization (type -1, in place;
         // BLSTMNeuralNetwork.cpp:737-744). mean = colSum/rows; center row-by-row;
@@ -2788,7 +2788,7 @@ int main(int argc, char** argv) {
 
             // _OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:
             // 23-24, no accessor needed). EXPECTED NONZERO here too, same root cause as
-            // the output site: the k=23 input GEMM diverges from ascending accumulation
+            // the output site: topRows(11) input slice + k=24 recurrence and layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence
             // (Task 1 lstm_input_gemm probe).
             long fUlp = 0; double fAbs = 0.0;
             probeGapNaN(nn._OutputForward, outForward, fUlp, fAbs);
@@ -3525,7 +3525,7 @@ int main(int argc, char** argv) {
     //       is Phase 2b) -> e2e_out_overlap + e2e_fwd_overlap + e2e_bwd_overlap.
     // Also dumps e2e_input.bin (the assembled inputSeq -- revalidates Phase 1 under the
     // REAL config for the Rust gate). NN_TOL probes vs the REAL class on both forwards
-    // (EXPECTED NONZERO per the established k=23 input-GEMM pattern; measured recorded).
+    // (EXPECTED NONZERO per the established topRows(11) input slice + k=24 recurrence and layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence pattern; measured recorded).
     //
     // Real config keys: preemph_ratio -0.97 (< 0 -> preemph SKIPPED, matching
     // BLSTMSpectralSegmenter.cpp:216 `_PreemphRatio > 0`); spectrum_order 10; nb_bins 20,
