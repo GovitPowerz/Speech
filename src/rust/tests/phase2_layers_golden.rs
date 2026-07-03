@@ -94,3 +94,352 @@ fn chaining_splits_flat_vector_by_nb_of_weights() {
     assert_eq!(tail1.len(), flat.len() - NB0 - NB1);
     assert_eq!(tail1, &flat[NB0 + NB1..]);
 }
+
+// === Task 4: LSTM forward/reverse goldens ===================================
+//
+// The harness dumps, for each (I,O,T,flags,direction) case, `lstm_fwd_<case>.bin`
+// (T x O outputs) and `lstm_gates_<case>.bin` (T x 4O post-activation gates cache),
+// computed by the ascending-loop reimpl of `LSTMLayer::feedForward` -- which the
+// harness's NN_TOL probe verifies matches the REAL compiled `LSTMLayer::feedForward`
+// bit-for-bit (max_ulp=0) at these shapes. So each golden is a bit-exact target for
+// `LstmLayer::feed_forward`/`feed_forward_reverse` on the oracle env; elsewhere the
+// asinh/exp chains earn `assert_oracle_eq`'s hybrid bound.
+
+/// The harness weight formula: `w[k] = ((k*11+3) % 97)/97.0 - 0.5`, length nb(I,O).
+fn synthetic_weights(i: usize, o: usize) -> Vec<f64> {
+    let nb = LstmLayer::new(i, o, true, true, true).nb_of_weights();
+    synthetic_flat(nb)
+}
+
+/// The harness deterministic input: `x[t,j] = ((t*37 + j*53 + 7) % 101)/101.0 - 0.5`.
+fn synthetic_input(t_len: usize, cols: usize) -> Array2<f64> {
+    Array2::from_shape_fn((t_len, cols), |(t, j)| {
+        ((t * 37 + j * 53 + 7) % 101) as f64 / 101.0 - 0.5
+    })
+}
+
+/// `(cells, gates, gates_rec)` peephole flags for each case-label in the grid.
+fn flags_of(label: &str) -> (bool, bool, bool) {
+    match label {
+        "allon" => (true, true, true),
+        "cells" => (true, false, false),
+        "gates" => (false, true, false),
+        "gatesrec" => (false, false, true),
+        "alloff" => (false, false, false),
+        other => panic!("unknown flag label {other:?}"),
+    }
+}
+
+/// Replay one grid case through `LstmLayer` and check `output` + gates cache against
+/// the harness dumps. `in_cols` overrides the input width (width-mismatch cases).
+fn check_case(i: usize, o: usize, t_len: usize, label: &str, reverse: bool, in_cols: usize) {
+    let (c, g, r) = flags_of(label);
+    let mut layer = LstmLayer::new(i, o, c, g, r);
+    let flat = synthetic_weights(i, o);
+    let tail = layer.set_weights(&flat);
+    assert_eq!(
+        tail.len(),
+        0,
+        "case {i}x{o}_{label}: flat vector fully consumed"
+    );
+
+    let input = synthetic_input(t_len, in_cols);
+    let mut output = Array2::<f64>::zeros((t_len, o));
+    if reverse {
+        layer.feed_forward_reverse(&input, &mut output, false);
+    } else {
+        layer.feed_forward(&input, &mut output, false);
+    }
+
+    let dir = if reverse { "rev" } else { "fwd" };
+    let case = format!("{i}x{o}_T{t_len}_{label}_{dir}");
+    let want_out = common::load_bin_phase2(&format!("lstm_fwd_{case}.bin"));
+    let want_gates = common::load_bin_phase2(&format!("lstm_gates_{case}.bin"));
+    common::assert_oracle_eq(&output, &want_out, &format!("lstm_fwd_{case}"));
+    common::assert_oracle_eq(layer.gates(), &want_gates, &format!("lstm_gates_{case}"));
+}
+
+#[test]
+fn lstm_forward_reverse_grid_matches_oracle() {
+    let shapes = [(3usize, 2usize, 7usize), (5, 4, 12)];
+    let labels = ["allon", "cells", "gates", "gatesrec", "alloff"];
+    for (i, o, t_len) in shapes {
+        for label in labels {
+            check_case(i, o, t_len, label, false, i);
+            check_case(i, o, t_len, label, true, i);
+        }
+    }
+}
+
+#[test]
+fn lstm_width_mismatch_matches_oracle() {
+    // Forward, all-on, I=3,O=2,T=7: input cols I+2 (leftCols(I)) and I-1 (topRows).
+    // These reuse the base case labels with the harness's width suffixes.
+    for (in_cols, suffix) in [(5usize, "wideP2"), (2usize, "narrowM1")] {
+        let mut layer = LstmLayer::new(3, 2, true, true, true);
+        layer.set_weights(&synthetic_weights(3, 2));
+        let input = synthetic_input(7, in_cols);
+        let mut output = Array2::<f64>::zeros((7, 2));
+        layer.feed_forward(&input, &mut output, false);
+        let case = format!("3x2_T7_allon_{suffix}_fwd");
+        common::assert_oracle_eq(
+            &output,
+            &common::load_bin_phase2(&format!("lstm_fwd_{case}.bin")),
+            &format!("lstm_fwd_{case}"),
+        );
+        common::assert_oracle_eq(
+            layer.gates(),
+            &common::load_bin_phase2(&format!("lstm_gates_{case}.bin")),
+            &format!("lstm_gates_{case}"),
+        );
+    }
+}
+
+#[test]
+fn lstm_reverse_equals_flip_forward_flip() {
+    // feedForwardReverse(x) == flip(feedForward(flip(x))) by construction
+    // (LSTMLayer.cpp:415-421). Verify against a golden forward case: build the
+    // reversed-input forward output, flip its rows, and require it to equal the
+    // reverse-case golden dump bit-for-bit (pure row permutation, so assert_bits_eq).
+    let mut fwd = LstmLayer::new(3, 2, true, true, true);
+    fwd.set_weights(&synthetic_weights(3, 2));
+    let input = synthetic_input(7, 3);
+    // flip(x) rows.
+    let flipped = input.slice(ndarray::s![..;-1, ..]).to_owned();
+    let mut fwd_out = Array2::<f64>::zeros((7, 2));
+    fwd.feed_forward(&flipped, &mut fwd_out, false);
+    let refolded = fwd_out.slice(ndarray::s![..;-1, ..]).to_owned();
+
+    let want_rev = common::load_bin_phase2("lstm_fwd_3x2_T7_allon_rev.bin");
+    common::assert_bits_eq(&refolded, &want_rev, "flip(fwd(flip(x))) == reverse golden");
+}
+
+#[test]
+fn lstm_t0_has_no_forget_contribution() {
+    // At t=0 the cell state is i_0 .* g_0 with NO forget term (LSTMLayer.cpp:336):
+    // a nonzero forget bias/weight must NOT shift c_0. Flags = cells-only (gates-peep
+    // OFF so f_0 does NOT leak into o_0 via P[10], isolating the cell path). Two
+    // layers identical EXCEPT the forget-gate input weight + bias (block index 1 of
+    // 4): the t=0 output must be bit-identical, while a t>=1 output (which reads
+    // c_{t-1} through the forget gate at :387) must differ -- the forget path is dead
+    // only at t=0. With gates-peep on, f_0 leaks into o_0 (:341) and t=0 WOULD shift,
+    // so the isolation matters.
+    let i = 1usize;
+    let o = 1usize;
+    let base = synthetic_weights(i, o); // nb = 24
+    // Layout (I=1,O=1) col-major: input_w flat[0..4]=[Wi,Wf,Wo,Wg];
+    // feedback flat[4..8]; peep flat[8..20]; biases flat[20..24]=[bi,bf,bo,bg].
+    // Perturb the forget input weight (idx 1) and forget bias (idx 21).
+    let mut perturbed = base.clone();
+    perturbed[1] += 3.0; // Wf
+    perturbed[21] += 5.0; // bf
+
+    let input = synthetic_input(4, i);
+
+    let run = |w: &[f64]| {
+        let mut layer = LstmLayer::new(i, o, true, false, false);
+        layer.set_weights(w);
+        let mut out = Array2::<f64>::zeros((4, o));
+        layer.feed_forward(&input, &mut out, false);
+        out
+    };
+    let out_base = run(&base);
+    let out_pert = run(&perturbed);
+
+    assert_eq!(
+        out_base[[0, 0]].to_bits(),
+        out_pert[[0, 0]].to_bits(),
+        "t=0 output must be independent of the forget weights (no forget term at t=0)"
+    );
+    assert_ne!(
+        out_base[[1, 0]].to_bits(),
+        out_pert[[1, 0]].to_bits(),
+        "t=1 output must depend on the forget gate (c_0 flows through f_1)"
+    );
+}
+
+#[test]
+fn lstm_hand_case_o1_t2() {
+    // I=1, O=1, T=2, all peephole flags ON. Distinct small rational weights, coded
+    // as the longhand f64 op sequence in spec S4.3 order; the golden grid arbitrates
+    // FP order globally, this pins the scalar structure. Layout (I=1,O=1) col-major:
+    //   input_w  [Wi,Wf,Wo,Wg]; feedback [Ui,Uf,Uo,Ug]; peep P[0..12]; bias [bi,bf,bo,bg].
+    let wi = 1.0 / 8.0;
+    let wf = -1.0 / 4.0;
+    let wo = 3.0 / 8.0;
+    let wg = -1.0 / 2.0;
+    let ui = 1.0 / 16.0;
+    let uf = -3.0 / 16.0;
+    let uo = 5.0 / 16.0;
+    let ug = -7.0 / 16.0;
+    let p: [f64; 12] = [
+        1.0 / 32.0,   // P0  c_{t-1} -> i
+        -2.0 / 32.0,  // P1  c_{t-1} -> f
+        3.0 / 32.0,   // P2  c_t     -> o
+        -4.0 / 32.0,  // P3  i_{t-1} -> i (gates-rec)
+        5.0 / 32.0,   // P4  f_{t-1} -> i
+        -6.0 / 32.0,  // P5  o_{t-1} -> i
+        7.0 / 32.0,   // P6  i_{t-1} -> f
+        -8.0 / 32.0,  // P7  f_{t-1} -> f (gates-rec)
+        9.0 / 32.0,   // P8  o_{t-1} -> f
+        -10.0 / 32.0, // P9  i_t     -> o
+        11.0 / 32.0,  // P10 f_t     -> o
+        -12.0 / 32.0, // P11 o_{t-1} -> o (gates-rec)
+    ];
+    let bi = 1.0 / 3.0;
+    let bf = -1.0 / 6.0;
+    let bo = 1.0 / 5.0;
+    let bg = -1.0 / 7.0;
+
+    let flat: Vec<f64> = {
+        let mut v = Vec::with_capacity(24);
+        v.extend_from_slice(&[wi, wf, wo, wg]); // input_w 1x4 col-major
+        v.extend_from_slice(&[ui, uf, uo, ug]); // feedback 1x4 col-major
+        v.extend_from_slice(&p); // peep 12x1 col-major
+        v.extend_from_slice(&[bi, bf, bo, bg]); // bias 1x4
+        v
+    };
+
+    let x0 = 0.3_f64;
+    let x1 = -0.2_f64;
+    let input = Array2::from_shape_vec((2, 1), vec![x0, x1]).unwrap();
+
+    let gate = |z: f64| 1.0 / (1.0 + (-0.1 * z).exp()); // GatesFunction (0.1 pre-scale)
+    let asinh = |z: f64| z.asinh(); // Maxmin2 / Identity
+
+    // t=0 (LSTMLayer.cpp:325-348), all flags on.
+    let i0 = gate(wi * x0 + bi);
+    let f0 = gate(wf * x0 + bf);
+    let g0 = asinh(wg * x0 + bg);
+    let c0 = i0 * g0; // :336, no forget term
+    // o extras IN ORDER: c_0.*P2; i_0.*P9; f_0.*P10 (three separate adds).
+    let mut o0_pre = wo * x0 + bo;
+    o0_pre += c0 * p[2];
+    o0_pre += i0 * p[9];
+    o0_pre += f0 * p[10];
+    let o0 = gate(o0_pre);
+    let cin0 = asinh(c0);
+    let y0 = o0 * cin0;
+
+    // t=1 (LSTMLayer.cpp:350-412), all flags on. Post-activation reads of t=0 gates.
+    // :351 feedback into all four blocks; the four pre-activation gate accumulators:
+    let mut i1 = wi * x1 + bi + y0 * ui;
+    let mut f1 = wf * x1 + bf + y0 * uf;
+    let mut o1 = wo * x1 + bo + y0 * uo;
+    let g1_pre = wg * x1 + bg + y0 * ug;
+    // :353-356 cells peep: i += c_0*P0; f += c_0*P1.
+    i1 += c0 * p[0];
+    f1 += c0 * p[1];
+    // :357-360 gates-rec: i += i_0*P3; f += f_0*P7.
+    i1 += i0 * p[3];
+    f1 += f0 * p[7];
+    // :362-363 gates peep, each ONE combined expression.
+    i1 += f0 * p[4] + o0 * p[5];
+    f1 += i0 * p[6] + o0 * p[8];
+    // :370 activate i,f; :385 activate g.
+    let i1 = gate(i1);
+    let f1 = gate(f1);
+    let g1 = asinh(g1_pre);
+    // :387 c_1 = i_1*g_1 + c_0*f_1 (single combined expression).
+    let c1 = i1 * g1 + c0 * f1;
+    // :389-394 o extras IN ORDER: c_1*P2; i_1*P9; f_1*P10; o_0*P11.
+    o1 += c1 * p[2];
+    o1 += i1 * p[9];
+    o1 += f1 * p[10];
+    o1 += o0 * p[11];
+    let o1 = gate(o1);
+    let cin1 = asinh(c1);
+    let y1 = o1 * cin1;
+
+    let mut layer = LstmLayer::new(1, 1, true, true, true);
+    let tail = layer.set_weights(&flat);
+    assert_eq!(tail.len(), 0);
+    let mut output = Array2::<f64>::zeros((2, 1));
+    layer.feed_forward(&input, &mut output, false);
+
+    // Same libm, same op order -> bit-identical.
+    assert_eq!(output[[0, 0]].to_bits(), y0.to_bits(), "t=0 output");
+    assert_eq!(output[[1, 0]].to_bits(), y1.to_bits(), "t=1 output");
+    // Gates cache spot-check: post-activation [i1,f1,o1,g1] at row 1.
+    let gates = layer.gates();
+    assert_eq!(gates[[1, 0]].to_bits(), i1.to_bits(), "gates i_1");
+    assert_eq!(gates[[1, 1]].to_bits(), f1.to_bits(), "gates f_1");
+    assert_eq!(gates[[1, 2]].to_bits(), o1.to_bits(), "gates o_1");
+    assert_eq!(gates[[1, 3]].to_bits(), g1.to_bits(), "gates g_1");
+}
+
+// === Task 4: Python-oracle cross-check ======================================
+//
+// `lstm_cases.json` (scripts/extract_phase2_oracle_cases.py) holds the Python
+// `lstm_forward_oracle` forward outputs over a deterministic (I,O,T,flags) grid, with
+// every f64 stored as its raw u64 bits (hex). Both the Python oracle and `LstmLayer`
+// are same-libm local computations, so the cross-check is BIT-EXACT (`to_bits`), not
+// the hybrid oracle bound: it proves two structurally-different implementations agree
+// exactly, a stronger statement than either alone.
+
+fn bits_to_f64(s: &str) -> f64 {
+    let hex = s.strip_prefix("0x").unwrap_or(s);
+    f64::from_bits(u64::from_str_radix(hex, 16).unwrap())
+}
+
+fn matrix_from_bits(v: &serde_json::Value) -> Array2<f64> {
+    let rows: Vec<Vec<f64>> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r.as_array()
+                .unwrap()
+                .iter()
+                .map(|c| bits_to_f64(c.as_str().unwrap()))
+                .collect()
+        })
+        .collect();
+    let t_len = rows.len();
+    let cols = if t_len == 0 { 0 } else { rows[0].len() };
+    Array2::from_shape_fn((t_len, cols), |(t, j)| rows[t][j])
+}
+
+#[test]
+fn lstm_python_oracle_cross_check() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase2/lstm_cases.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let cases = doc["cases"].as_array().unwrap();
+    assert!(!cases.is_empty(), "lstm_cases.json has no cases");
+
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let i = case["I"].as_u64().unwrap() as usize;
+        let o = case["O"].as_u64().unwrap() as usize;
+        let t_len = case["T"].as_u64().unwrap() as usize;
+        let fl: Vec<bool> = case["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b.as_bool().unwrap())
+            .collect();
+
+        let flat: Vec<f64> = case["weights_bits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| bits_to_f64(s.as_str().unwrap()))
+            .collect();
+        let input = matrix_from_bits(&case["input_bits"]);
+        let want_y = matrix_from_bits(&case["y_bits"]);
+        let want_gates = matrix_from_bits(&case["gates_bits"]);
+        let want_cells = matrix_from_bits(&case["cells_bits"]);
+
+        let mut layer = LstmLayer::new(i, o, fl[0], fl[1], fl[2]);
+        let tail = layer.set_weights(&flat);
+        assert_eq!(tail.len(), 0, "{name}: flat vector fully consumed");
+        let mut output = Array2::<f64>::zeros((t_len, o));
+        layer.feed_forward(&input, &mut output, false);
+
+        common::assert_bits_eq(&output, &want_y, &format!("{name} y"));
+        common::assert_bits_eq(layer.gates(), &want_gates, &format!("{name} gates"));
+        common::assert_bits_eq(layer.cell_states(), &want_cells, &format!("{name} cells"));
+    }
+}

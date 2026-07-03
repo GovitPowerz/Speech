@@ -72,3 +72,15 @@ def test_recurrence_gemv_measured_over_many_timesteps() -> None:
     # be far larger than a single 96-wide row (>= 100 steps * 96).
     probe = _manifest()["nn_product_probes"]["sites"]["lstm_recurrence_gemv"]
     assert probe["total"] >= 100 * 96
+
+
+def test_lstm_forward_tol_bit_exact_vs_real_layer() -> None:
+    # Task 4: the ascending-loop reimpl (lstmForwardLoop) that produced the LSTM
+    # forward/reverse dumps must match the REAL compiled LSTMLayer::feedForward
+    # bit-for-bit over the whole grid -- max_ulp == 0 (Eigen does not diverge from the
+    # ascending order at these small shapes), otherwise the dumps would encode Eigen's
+    # order, not the portable one the Rust port reproduces.
+    tol = _manifest()["lstm_forward_tol"]
+    assert tol["site"] == "lstm_forward"
+    assert tol["max_ulp"] == 0, tol
+    assert float(tol["max_abs"]) == 0.0, tol

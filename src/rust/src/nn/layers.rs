@@ -5,6 +5,31 @@
 
 use ndarray::Array2;
 
+use super::activations::{gates_fn, identity_fn, maxmin2_fn};
+
+/// Ascending-loop matrix product `a (m x k) * b (k x n)`, accumulating the `k`
+/// index in strictly ascending order (`i`/`j` outer, `k` inner). This is the
+/// measured product-order contract for every NN product site (Task 1 probes: Eigen
+/// DIVERGES from ascending loops on the LSTM input-projection shape, and is bit-
+/// exact on the recurrence row-product; the harness reimpl uses `matSeq` for both,
+/// so the Rust port mirrors it uniformly). Matches `main.cpp`'s `matSeq`.
+pub(crate) fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    let (m, k) = a.dim();
+    let (kb, n) = b.dim();
+    debug_assert_eq!(k, kb, "matmul_seq inner dim mismatch");
+    let mut out = Array2::zeros((m, n));
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0;
+            for kk in 0..k {
+                acc += a[[i, kk]] * b[[kk, j]];
+            }
+            out[[i, j]] = acc;
+        }
+    }
+    out
+}
+
 /// Peephole LSTM layer (legacy `LSTMLayer`). Task 3 ports the weight layout +
 /// flat (de)serialization; forward/backward (Task 4+) are not yet implemented.
 ///
@@ -20,12 +45,8 @@ use ndarray::Array2;
 pub struct LstmLayer {
     input_size: usize,
     output_size: usize,
-    // Stored for Task 4's forward pass; unused until then.
-    #[allow(dead_code)]
     cells_peep: bool,
-    #[allow(dead_code)]
     gates_peep: bool,
-    #[allow(dead_code)]
     gates_rec_peep: bool,
 
     input_weights: Array2<f64>,
@@ -33,12 +54,11 @@ pub struct LstmLayer {
     peep_weight: Array2<f64>,
     biases: Array2<f64>,
 
-    // Forward-pass caches (Task 4). Left empty until then.
-    #[allow(dead_code)]
+    // Forward-pass caches (`_Gates`/`_CellsIn`/`_CellStates`), filled by
+    // `feed_forward`; the backward pass (Task 5+) reads them. `_Gates` holds the
+    // POST-activation gate values (T x 4O).
     gates: Array2<f64>,
-    #[allow(dead_code)]
     cells_in: Array2<f64>,
-    #[allow(dead_code)]
     cell_states: Array2<f64>,
 }
 
@@ -107,6 +127,222 @@ impl LstmLayer {
         drain_col_major(&self.feedback_weights, out);
         drain_col_major(&self.peep_weight, out);
         drain_col_major(&self.biases, out);
+    }
+
+    /// `feedForward` (`LSTMLayer.cpp:312-413`): whole-sequence peephole-LSTM forward
+    /// pass. Fills `output` (T x O) and the `self.gates`/`self.cell_states`/
+    /// `self.cells_in` caches (T x 4O / T x O / T x O). `last_layer` is UNUSED in the
+    /// LSTM forward (kept for signature parity with the legacy). Op order + FP
+    /// grouping follow spec S4.3 verbatim -- do NOT reorder or split the combined
+    /// gates-peep expressions (`:362-363`), which are single fused elementwise
+    /// passes, not two adds.
+    ///
+    /// - Input projection with width tolerance (`:313-319`): `cols > I` uses the
+    ///   left `I` input columns; `cols < I` uses the top `cols` weight rows; else the
+    ///   full product. All via `matmul_seq` (the measured ascending-loop contract).
+    /// - Peephole families gated by the flags: rows 0,1,2 (`cells_peep`),
+    ///   4,5,6,8,9,10 (`gates_peep`), 3,7,11 (`gates_rec_peep`).
+    /// - `t=0` has NO forget contribution and NO row-11 term.
+    /// - All `t-1` gate reads are POST-activation (the gates cache is activated in
+    ///   place before the next step reads it).
+    pub fn feed_forward(
+        &mut self,
+        input: &Array2<f64>,
+        output: &mut Array2<f64>,
+        last_layer: bool,
+    ) {
+        let _ = last_layer;
+        let o = self.output_size;
+        let i = self.input_size;
+        let cols = input.dim().1;
+
+        // :313-319 input projection with width tolerance.
+        let proj = if cols > i {
+            matmul_seq(
+                &input.slice(ndarray::s![.., ..i]).to_owned(),
+                &self.input_weights,
+            )
+        } else if cols < i {
+            matmul_seq(
+                input,
+                &self.input_weights.slice(ndarray::s![..cols, ..]).to_owned(),
+            )
+        } else {
+            matmul_seq(input, &self.input_weights)
+        };
+        let t_len = proj.dim().0;
+
+        // .rowwise() + _Biaises into the gates cache.
+        let mut gates = proj;
+        for t in 0..t_len {
+            for j in 0..4 * o {
+                gates[[t, j]] += self.biases[[0, j]];
+            }
+        }
+        let mut cell_states = Array2::<f64>::zeros((t_len, o));
+        let mut cells_in = Array2::<f64>::zeros((t_len, o));
+        output.fill(0.0);
+
+        let p = &self.peep_weight;
+
+        // --- t = 0 (:325-348) ------------------------------------------------
+        if t_len > 0 {
+            // :333 activate i,f (GatesFunction); :334 activate g (Maxmin2).
+            for j in 0..2 * o {
+                gates[[0, j]] = gates_fn(gates[[0, j]]);
+            }
+            for j in 0..o {
+                gates[[0, 3 * o + j]] = maxmin2_fn(gates[[0, 3 * o + j]]);
+            }
+            // :336 c_0 = i_0 .* g_0 (NO forget term).
+            for j in 0..o {
+                cell_states[[0, j]] = gates[[0, j]] * gates[[0, 3 * o + j]];
+            }
+            // :338-342 o extras IN ORDER: c_0.*P[2]; i_0.*P[9]; f_0.*P[10].
+            if self.cells_peep {
+                for j in 0..o {
+                    gates[[0, 2 * o + j]] += cell_states[[0, j]] * p[[2, j]];
+                }
+            }
+            if self.gates_peep {
+                for j in 0..o {
+                    gates[[0, 2 * o + j]] += gates[[0, j]] * p[[9, j]];
+                }
+                for j in 0..o {
+                    gates[[0, 2 * o + j]] += gates[[0, o + j]] * p[[10, j]];
+                }
+            }
+            // :346 activate o; :347 cells_in = asinh(c_0); :348 y_0 = o_0 .* cells_in_0.
+            for j in 0..o {
+                gates[[0, 2 * o + j]] = gates_fn(gates[[0, 2 * o + j]]);
+            }
+            for j in 0..o {
+                cells_in[[0, j]] = identity_fn(cell_states[[0, j]]);
+            }
+            for j in 0..o {
+                output[[0, j]] = gates[[0, 2 * o + j]] * cells_in[[0, j]];
+            }
+        }
+
+        // --- t >= 1 (:350-412) -----------------------------------------------
+        for t in 1..t_len {
+            // :351 gates.row(t) += y_{t-1} * FeedbackWeights (all four blocks).
+            let prev_out = output.slice(ndarray::s![t - 1..t, ..]).to_owned();
+            let rec = matmul_seq(&prev_out, &self.feedback_weights); // 1 x 4O
+            for j in 0..4 * o {
+                gates[[t, j]] += rec[[0, j]];
+            }
+            // :353-356 cells peep into i,f: i += c_{t-1}.*P[0]; f += c_{t-1}.*P[1].
+            if self.cells_peep {
+                for j in 0..o {
+                    gates[[t, j]] += cell_states[[t - 1, j]] * p[[0, j]];
+                }
+                for j in 0..o {
+                    gates[[t, o + j]] += cell_states[[t - 1, j]] * p[[1, j]];
+                }
+            }
+            // :357-360 gates-rec into i,f: i += i_{t-1}.*P[3]; f += f_{t-1}.*P[7].
+            if self.gates_rec_peep {
+                for j in 0..o {
+                    gates[[t, j]] += gates[[t - 1, j]] * p[[3, j]];
+                }
+                for j in 0..o {
+                    gates[[t, o + j]] += gates[[t - 1, o + j]] * p[[7, j]];
+                }
+            }
+            // :362-363 gates peep, each ONE COMBINED expression (single fused pass):
+            //   i += (f_{t-1}.*P[4] + o_{t-1}.*P[5]); f += (i_{t-1}.*P[6] + o_{t-1}.*P[8]).
+            if self.gates_peep {
+                for j in 0..o {
+                    gates[[t, j]] +=
+                        gates[[t - 1, o + j]] * p[[4, j]] + gates[[t - 1, 2 * o + j]] * p[[5, j]];
+                }
+                for j in 0..o {
+                    gates[[t, o + j]] +=
+                        gates[[t - 1, j]] * p[[6, j]] + gates[[t - 1, 2 * o + j]] * p[[8, j]];
+                }
+            }
+            // :370 activate i,f; :385 activate g.
+            for j in 0..2 * o {
+                gates[[t, j]] = gates_fn(gates[[t, j]]);
+            }
+            for j in 0..o {
+                gates[[t, 3 * o + j]] = maxmin2_fn(gates[[t, 3 * o + j]]);
+            }
+            // :387 c_t = i_t.*g_t + c_{t-1}.*f_t (single combined expression).
+            for j in 0..o {
+                cell_states[[t, j]] = gates[[t, j]] * gates[[t, 3 * o + j]]
+                    + cell_states[[t - 1, j]] * gates[[t, o + j]];
+            }
+            // :389-394 o extras IN ORDER: c_t.*P[2]; i_t.*P[9]; f_t.*P[10]; o_{t-1}.*P[11].
+            if self.cells_peep {
+                for j in 0..o {
+                    gates[[t, 2 * o + j]] += cell_states[[t, j]] * p[[2, j]];
+                }
+            }
+            if self.gates_peep {
+                for j in 0..o {
+                    gates[[t, 2 * o + j]] += gates[[t, j]] * p[[9, j]];
+                }
+                for j in 0..o {
+                    gates[[t, 2 * o + j]] += gates[[t, o + j]] * p[[10, j]];
+                }
+            }
+            if self.gates_rec_peep {
+                for j in 0..o {
+                    gates[[t, 2 * o + j]] += gates[[t - 1, 2 * o + j]] * p[[11, j]];
+                }
+            }
+            // :398 activate o; :399 cells_in = asinh(c_t); :400 y_t = o_t .* cells_in_t.
+            for j in 0..o {
+                gates[[t, 2 * o + j]] = gates_fn(gates[[t, 2 * o + j]]);
+            }
+            for j in 0..o {
+                cells_in[[t, j]] = identity_fn(cell_states[[t, j]]);
+            }
+            for j in 0..o {
+                output[[t, j]] = gates[[t, 2 * o + j]] * cells_in[[t, j]];
+            }
+        }
+
+        self.gates = gates;
+        self.cell_states = cell_states;
+        self.cells_in = cells_in;
+    }
+
+    /// Post-activation gates cache (`_Gates`, T x 4O) from the last forward pass.
+    /// Exposed for golden tests (the harness dumps this) and the Task 5+ backward
+    /// pass. Column blocks are `[i|f|o|g]`; after a reverse pass the rows are in
+    /// reversed-input order (see `feed_forward_reverse`).
+    pub fn gates(&self) -> &Array2<f64> {
+        &self.gates
+    }
+
+    /// Cell states cache (`_CellStates`, T x O) from the last forward pass.
+    pub fn cell_states(&self) -> &Array2<f64> {
+        &self.cell_states
+    }
+
+    /// Cell-input (`asinh`) cache (`_CellsIn`, T x O) from the last forward pass.
+    pub fn cells_in(&self) -> &Array2<f64> {
+        &self.cells_in
+    }
+
+    /// `feedForwardReverse` (`LSTMLayer.cpp:415-421`): reverse input rows, run
+    /// `feed_forward`, reverse output rows. The `self.gates`/`self.cell_states`/
+    /// `self.cells_in` caches are left in REVERSED-input order (exactly as the legacy
+    /// leaves `_Gates` after `feedForwardReverse` -- it never un-reverses them);
+    /// only `output` is un-reversed to match `outputSeq`.
+    pub fn feed_forward_reverse(
+        &mut self,
+        input: &Array2<f64>,
+        output: &mut Array2<f64>,
+        last_layer: bool,
+    ) {
+        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
+        let mut output_rev = Array2::<f64>::zeros(output.dim());
+        self.feed_forward(&input_rev, &mut output_rev, last_layer);
+        output.assign(&output_rev.slice(ndarray::s![..;-1, ..]));
     }
 }
 

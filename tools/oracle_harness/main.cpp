@@ -13,7 +13,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -125,6 +127,148 @@ static void nnProbe(const std::string& site, const Eigen::MatrixXd& A, const Eig
               << " first=(" << firstRow << "," << firstCol << ")"
               << " eigen=0x" << std::hex << firstEigenBits
               << " loop=0x" << firstLoopBits << std::dec << "\n";
+}
+
+// Phase 2 Task 4: unpack a flat weight vector (column-major, block order
+// InputWeights -> FeedbackWeights -> PeepWeight -> Biaises) into the four LSTM
+// matrices, EXACTLY as LSTMLayer::setWeights (LSTMLayer.cpp:162-203) does, so the
+// reimpl and the real layer share one flat vector bit-for-bit. Shapes: InputW
+// (I x 4O), FeedbackW (O x 4O), Peep (12 x O), Bias (1 x 4O).
+static void unpackLstmWeights(const Eigen::VectorXd& flat, int I, int O,
+                              Eigen::MatrixXd& inputW, Eigen::MatrixXd& feedbackW,
+                              Eigen::MatrixXd& peep, Eigen::MatrixXd& bias) {
+    inputW.resize(I, 4 * O);
+    feedbackW.resize(O, 4 * O);
+    peep.resize(12, O);
+    bias.resize(1, 4 * O);
+    long pos = 0;
+    for (int jj = 0; jj < 4 * O; ++jj)
+        for (int ii = 0; ii < I; ++ii) inputW(ii, jj) = flat(pos + (long)jj * I + ii);
+    pos += (long)I * 4 * O;
+    for (int jj = 0; jj < 4 * O; ++jj)
+        for (int ii = 0; ii < O; ++ii) feedbackW(ii, jj) = flat(pos + (long)jj * O + ii);
+    pos += (long)O * 4 * O;
+    for (int jj = 0; jj < O; ++jj)
+        for (int ii = 0; ii < 12; ++ii) peep(ii, jj) = flat(pos + (long)jj * 12 + ii);
+    pos += 12L * O;
+    for (int jj = 0; jj < 4 * O; ++jj) bias(0, jj) = flat(pos + jj);
+}
+
+// Phase 2 Task 4: faithful reimpl of LSTMLayer::feedForward (LSTMLayer.cpp:312-413),
+// the crux the Rust port reproduces. Uses matSeq for the input projection AND the
+// recurrence row-product (measured product-order contract, spec S4.3). Combined
+// Eigen array expressions (e.g. a.*P[4] + b.*P[5] at :362-363) are ONE evaluation
+// pass -- the two elementwise products are computed and summed, THEN added -- so
+// each is replicated as a single fused elementwise loop here (NOT two += adds).
+// Separate += adds elsewhere (:340-341, :391-392) stay separate. Peephole families:
+// rows 0,1,2 = cells_peep; 4,5,6,8,9,10 = gates_peep; 3,7,11 = gates_rec_peep.
+// Writes the post-activation _Gates cache (T x 4O) and outputs (T x O). lastLayer
+// is unused in the LSTM forward (kept for signature parity). Width tolerance on the
+// input projection matches :313-319 (cols>I -> leftCols(I); cols<I -> topRows(cols)).
+static void lstmForwardLoop(const Eigen::MatrixXd& inputSeq, const Eigen::MatrixXd& inputW,
+                            const Eigen::MatrixXd& feedbackW, const Eigen::MatrixXd& peep,
+                            const Eigen::MatrixXd& bias, int O,
+                            bool cellsPeep, bool gatesPeep, bool gatesRecPeep,
+                            Eigen::MatrixXd& gates, Eigen::MatrixXd& output) {
+    const int I = static_cast<int>(inputW.rows());
+    const int cols = static_cast<int>(inputSeq.cols());
+    // legacy: LSTMLayer.cpp:313-319 -- input projection with width tolerance.
+    Eigen::MatrixXd proj;
+    if (cols > I) {
+        proj = matSeq(inputSeq.leftCols(I), inputW);
+    } else if (cols < I) {
+        proj = matSeq(inputSeq, inputW.topRows(cols));
+    } else {
+        proj = matSeq(inputSeq, inputW);
+    }
+    const int T = static_cast<int>(proj.rows());
+    gates.resize(T, 4 * O);
+    for (int t = 0; t < T; ++t)                                        // .rowwise() + _Biaises
+        for (int j = 0; j < 4 * O; ++j) gates(t, j) = proj(t, j) + bias(0, j);
+    Eigen::MatrixXd cellStates = Eigen::MatrixXd::Zero(T, O);
+    Eigen::MatrixXd cellsIn = Eigen::MatrixXd::Zero(T, O);
+    output.resize(T, O);
+
+    // --- t = 0 (LSTMLayer.cpp:325-348) --------------------------------------
+    {
+        const int t = 0;
+        // :333 activate i,f (GatesFunction); :334 activate g (Maxmin2)
+        for (int j = 0; j < 2 * O; ++j) gates(t, j) = GatesFunction::fn(gates(t, j));
+        for (int j = 0; j < O; ++j) gates(t, 3 * O + j) = Maxmin2::fn(gates(t, 3 * O + j));
+        // :336 c_0 = i_0 .* g_0 (NO forget term)
+        for (int j = 0; j < O; ++j) cellStates(t, j) = gates(t, j) * gates(t, 3 * O + j);
+        // :338-342 o extras IN ORDER: c_0.*P[2]; i_0.*P[9]; f_0.*P[10] (separate adds)
+        if (cellsPeep)
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += cellStates(t, j) * peep(2, j);
+        if (gatesPeep) {
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, j) * peep(9, j);
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, O + j) * peep(10, j);
+        }
+        // :346 activate o; :347 cells_in = asinh(c_0); :348 y_0 = o_0 .* cells_in_0
+        for (int j = 0; j < O; ++j) gates(t, 2 * O + j) = GatesFunction::fn(gates(t, 2 * O + j));
+        for (int j = 0; j < O; ++j) cellsIn(t, j) = Identity::fn(cellStates(t, j));
+        for (int j = 0; j < O; ++j) output(t, j) = gates(t, 2 * O + j) * cellsIn(t, j);
+    }
+
+    // --- t >= 1 (LSTMLayer.cpp:350-412) -------------------------------------
+    for (int t = 1; t < T; ++t) {
+        // :351 gates.row(t) += y_{t-1} * FeedbackWeights (all four blocks)
+        Eigen::MatrixXd rec = matSeq(output.row(t - 1), feedbackW);    // 1 x 4O, ascending
+        for (int j = 0; j < 4 * O; ++j) gates(t, j) += rec(0, j);
+        // :353-356 cells peep into i,f: i += c_{t-1}.*P[0]; f += c_{t-1}.*P[1]
+        if (cellsPeep) {
+            for (int j = 0; j < O; ++j) gates(t, j) += cellStates(t - 1, j) * peep(0, j);
+            for (int j = 0; j < O; ++j) gates(t, O + j) += cellStates(t - 1, j) * peep(1, j);
+        }
+        // :357-360 gates-rec into i,f: i += i_{t-1}.*P[3]; f += f_{t-1}.*P[7]
+        if (gatesRecPeep) {
+            for (int j = 0; j < O; ++j) gates(t, j) += gates(t - 1, j) * peep(3, j);
+            for (int j = 0; j < O; ++j) gates(t, O + j) += gates(t - 1, O + j) * peep(7, j);
+        }
+        // :362-363 gates peep, each ONE COMBINED expression (single fused pass):
+        //   i += (f_{t-1}.*P[4] + o_{t-1}.*P[5]); f += (i_{t-1}.*P[6] + o_{t-1}.*P[8])
+        if (gatesPeep) {
+            for (int j = 0; j < O; ++j)
+                gates(t, j) += gates(t - 1, O + j) * peep(4, j) + gates(t - 1, 2 * O + j) * peep(5, j);
+            for (int j = 0; j < O; ++j)
+                gates(t, O + j) += gates(t - 1, j) * peep(6, j) + gates(t - 1, 2 * O + j) * peep(8, j);
+        }
+        // :370 activate i,f; :385 activate g
+        for (int j = 0; j < 2 * O; ++j) gates(t, j) = GatesFunction::fn(gates(t, j));
+        for (int j = 0; j < O; ++j) gates(t, 3 * O + j) = Maxmin2::fn(gates(t, 3 * O + j));
+        // :387 c_t = i_t.*g_t + c_{t-1}.*f_t (single combined expression)
+        for (int j = 0; j < O; ++j)
+            cellStates(t, j) = gates(t, j) * gates(t, 3 * O + j) + cellStates(t - 1, j) * gates(t, O + j);
+        // :389-394 o extras IN ORDER: c_t.*P[2]; i_t.*P[9]; f_t.*P[10]; o_{t-1}.*P[11]
+        if (cellsPeep)
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += cellStates(t, j) * peep(2, j);
+        if (gatesPeep) {
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, j) * peep(9, j);
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, O + j) * peep(10, j);
+        }
+        if (gatesRecPeep)
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t - 1, 2 * O + j) * peep(11, j);
+        // :398 activate o; :399 cells_in = asinh(c_t); :400 y_t = o_t .* cells_in_t
+        for (int j = 0; j < O; ++j) gates(t, 2 * O + j) = GatesFunction::fn(gates(t, 2 * O + j));
+        for (int j = 0; j < O; ++j) cellsIn(t, j) = Identity::fn(cellStates(t, j));
+        for (int j = 0; j < O; ++j) output(t, j) = gates(t, 2 * O + j) * cellsIn(t, j);
+    }
+}
+
+// Phase 2 Task 4: reimpl of LSTMLayer::feedForwardReverse (LSTMLayer.cpp:415-421):
+// reverse input rows, run forward, reverse output rows. The returned `gates` cache
+// is left in REVERSED-input order (exactly _Gates after feedForwardReverse -- the
+// real layer never un-reverses it); `output` IS un-reversed to match outputSeq.
+static void lstmForwardReverseLoop(const Eigen::MatrixXd& inputSeq, const Eigen::MatrixXd& inputW,
+                                   const Eigen::MatrixXd& feedbackW, const Eigen::MatrixXd& peep,
+                                   const Eigen::MatrixXd& bias, int O,
+                                   bool cellsPeep, bool gatesPeep, bool gatesRecPeep,
+                                   Eigen::MatrixXd& gates, Eigen::MatrixXd& output) {
+    Eigen::MatrixXd inputRev = inputSeq.colwise().reverse();
+    Eigen::MatrixXd outputRev;
+    lstmForwardLoop(inputRev, inputW, feedbackW, peep, bias, O,
+                    cellsPeep, gatesPeep, gatesRecPeep, gates, outputRev);
+    output = outputRev.colwise().reverse();
 }
 
 // Shared regression-deltas kernel over a T x nbDCT block (MelFilterBank.cpp:227-244
@@ -1618,6 +1762,119 @@ int main(int argc, char** argv) {
         ++dumps;
 
         std::cout << "NN_REAL ok lstm_nb0=" << nb0 << " lstm_nb1=" << nb1 << "\n";
+    }
+
+    // --- Phase 2 Task 4: LSTM forward/reverse dumps + NN_TOL probe -----------
+    // legacy: LSTMLayer.cpp:312-421 (feedForward / feedForwardReverse). For each
+    // (shape, flags, direction) case: build synthetic weights via the Task 3 formula
+    // (w[k] = ((k*11+3) % 97)/97.0 - 0.5) sized to nb_of_weights(I,O), feed them
+    // through BOTH the REAL LSTMLayer::setWeights AND the reimpl's unpacked arrays
+    // (unpackLstmWeights, same column-major layout), run the REAL feedForward beside
+    // lstmForwardLoop on a deterministic input, dump the reimpl's outputs (T x O) +
+    // post-activation gates cache (T x 4O), and accumulate the max ULP/abs gap
+    // between the real layer's output and the reimpl's output across ALL cases into
+    // one NN_TOL line. Flags gate peephole families: cells (rows 0,1,2), gates
+    // (4,5,6,8,9,10), gates-rec (3,7,11). Width-mismatch cases (forward, all-on):
+    // input cols I+2 (leftCols(I), :313-314) and I-1 (topRows(cols), :315-316).
+    {
+        ConfigFile conf(nnConfigPath, '_');
+        conf._Params.erase("BLSTM_weightsFile");
+
+        struct Shape { int I, O, T; };
+        const Shape shapes[] = {{3, 2, 7}, {5, 4, 12}};
+        struct Flags { const char* label; bool c, g, r; };
+        const Flags flagSet[] = {
+            {"allon", true, true, true},
+            {"cells", true, false, false},
+            {"gates", false, true, false},
+            {"gatesrec", false, false, true},
+            {"alloff", false, false, false},
+        };
+
+        double globalMaxAbs = 0.0;
+        long globalMaxUlp = 0;
+
+        auto probeGap = [&](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl) {
+            for (int r = 0; r < real.rows(); ++r) {
+                for (int c = 0; c < real.cols(); ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    double absGap = std::fabs(a - b);
+                    if (absGap > globalMaxAbs) globalMaxAbs = absGap;
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > globalMaxUlp) globalMaxUlp = ulp;
+                }
+            }
+        };
+
+        // Deterministic closed-form input: signed values spanning [-0.5, 0.5).
+        auto makeInput = [](int T, int cols) {
+            Eigen::MatrixXd x(T, cols);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < cols; ++j)
+                    x(t, j) = (double)(((t * 37 + j * 53 + 7) % 101)) / 101.0 - 0.5;
+            return x;
+        };
+
+        // Run one case: real layer + reimpl on the same weights/input; dump reimpl
+        // outputs + gates; probe the real-vs-reimpl output gap. `reverse` picks the
+        // direction; `inCols` overrides the input width (default I).
+        auto runCase = [&](const std::string& name, int I, int O, int T,
+                           const Flags& fl, bool reverse, int inCols) {
+            conf.set_val<bool>("SYNW_IsCellsPeepholesActive", fl.c);
+            conf.set_val<bool>("SYNW_IsGatesPeepholesActive", fl.g);
+            conf.set_val<bool>("SYNW_IsGatesRecurrentPeepholesActive", fl.r);
+            LSTMLayer layer(conf, "SYNW", 0, (size_t)I, (size_t)O, true);
+            const long nb = layer.getNbOfWeights();
+            Eigen::VectorXd flat(nb);
+            for (long k = 0; k < nb; ++k) flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            layer.setWeights(flat);
+
+            Eigen::MatrixXd inputW, feedbackW, peep, bias;
+            unpackLstmWeights(flat, I, O, inputW, feedbackW, peep, bias);
+
+            Eigen::MatrixXd input = makeInput(T, inCols);
+            Eigen::MatrixXd realOut(T, O), gates, reimplOut;
+            if (reverse) {
+                layer.feedForwardReverse(input, realOut, false);
+                lstmForwardReverseLoop(input, inputW, feedbackW, peep, bias, O,
+                                       fl.c, fl.g, fl.r, gates, reimplOut);
+            } else {
+                layer.feedForward(input, realOut, false);
+                lstmForwardLoop(input, inputW, feedbackW, peep, bias, O,
+                                fl.c, fl.g, fl.r, gates, reimplOut);
+            }
+            probeGap(realOut, reimplOut);
+
+            Matrix2BinaryFile(out + "lstm_fwd_" + name + ".bin", reimplOut);
+            Matrix2BinaryFile(out + "lstm_gates_" + name + ".bin", gates);
+            dumps += 2;
+        };
+
+        for (const Shape& s : shapes) {
+            for (const Flags& fl : flagSet) {
+                std::ostringstream base;
+                base << s.I << "x" << s.O << "_T" << s.T << "_" << fl.label;
+                runCase(base.str() + "_fwd", s.I, s.O, s.T, fl, false, s.I);
+                runCase(base.str() + "_rev", s.I, s.O, s.T, fl, true, s.I);
+            }
+        }
+        // Width-mismatch (forward, all-on): input cols I+2 (leftCols) and I-1 (topRows).
+        {
+            const Shape s = shapes[0];  // I=3,O=2,T=7
+            const Flags allon = flagSet[0];
+            std::ostringstream b1, b2;
+            b1 << s.I << "x" << s.O << "_T" << s.T << "_allon_wideP2_fwd";
+            b2 << s.I << "x" << s.O << "_T" << s.T << "_allon_narrowM1_fwd";
+            runCase(b1.str(), s.I, s.O, s.T, allon, false, s.I + 2);
+            runCase(b2.str(), s.I, s.O, s.T, allon, false, s.I - 1);
+        }
+
+        std::cout << "NN_TOL site=lstm_forward max_ulp=" << globalMaxUlp
+                  << " max_abs=" << std::scientific << std::setprecision(3)
+                  << globalMaxAbs << "\n";
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

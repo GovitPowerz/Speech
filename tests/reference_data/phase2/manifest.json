@@ -89,6 +89,12 @@
       }
     }
   },
+  "lstm_forward_tol": {
+    "text": "Task 4: max ULP/abs gap between the REAL LSTMLayer::feedForward and the ascending-loop reimpl (lstmForwardLoop) over the whole forward/reverse dump grid. max_ulp=0 means the reimpl reproduces Eigen's actual forward output bit-for-bit at these shapes -- the op-order + combined/separate peephole grouping contract (LSTMLayer.cpp:312-421).",
+    "site": "lstm_forward",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00"
+  },
   "dumps": {
     "act_sweep.bin": {
       "rows": 4,
@@ -101,6 +107,182 @@
     "lstm_w_roundtrip_out.bin": {
       "rows": 100,
       "cols": 1
+    },
+    "lstm_fwd_3x2_T7_allon_fwd.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_allon_fwd.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_allon_rev.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_allon_rev.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_cells_fwd.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_cells_fwd.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_cells_rev.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_cells_rev.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_gates_fwd.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_gates_fwd.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_gates_rev.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_gates_rev.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_gatesrec_fwd.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_gatesrec_fwd.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_gatesrec_rev.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_gatesrec_rev.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_alloff_fwd.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_alloff_fwd.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_alloff_rev.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_alloff_rev.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_5x4_T12_allon_fwd.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_allon_fwd.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_allon_rev.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_allon_rev.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_cells_fwd.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_cells_fwd.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_cells_rev.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_cells_rev.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_gates_fwd.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_gates_fwd.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_gates_rev.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_gates_rev.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_gatesrec_fwd.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_gatesrec_fwd.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_gatesrec_rev.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_gatesrec_rev.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_alloff_fwd.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_alloff_fwd.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_5x4_T12_alloff_rev.bin": {
+      "rows": 12,
+      "cols": 4
+    },
+    "lstm_gates_5x4_T12_alloff_rev.bin": {
+      "rows": 12,
+      "cols": 16
+    },
+    "lstm_fwd_3x2_T7_allon_wideP2_fwd.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_allon_wideP2_fwd.bin": {
+      "rows": 7,
+      "cols": 8
+    },
+    "lstm_fwd_3x2_T7_allon_narrowM1_fwd.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "lstm_gates_3x2_T7_allon_narrowM1_fwd.bin": {
+      "rows": 7,
+      "cols": 8
     }
   }
 }

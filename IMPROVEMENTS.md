@@ -338,6 +338,31 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   The Task 9 pitch golden was dumped with `dc_offset = false`, so the golden stays valid (both sides pass
   `false` for that dump). Not a bug per se -- a wiring gap closed; noted for provenance.
 
+- **[phase2] LSTM `feedForwardReverse` leaves the `_Gates`/`_CellStates`/`_CellsIn` caches in
+  REVERSED-input order** (`nn/layers.rs` `feed_forward_reverse`, from `LSTMLayer.cpp:415-421`): the
+  reverse pass is implemented as reverse-input -> `feedForward` -> reverse-output; only `outputSeq` is
+  un-reversed, so after a reverse pass the caches (which the backward pass reads) correspond to the
+  reversed sequence, NOT the natural time order. Reproduced exactly: the Rust caches match, and the
+  reverse gate goldens (`lstm_gates_*_rev.bin`) are dumped in reversed-input order to match. *Fix
+  candidate:* none needed -- the Task 5+ backward pass must consume the caches in the same reversed
+  order the legacy does; documented so the reverse-order cache state is not "fixed" into forward order.
+
+- **[phase2] DEAD hand-unrolled `feedForwardReverse` variant with DIFFERENT peephole grouping (not
+  ported)** (`LSTMLayer.cpp:423-516`, commented out): a second `feedForwardReverse` body exists fully
+  commented out; it splits the two-term gates-peep expressions (`:362-363` in the live forward) into
+  SEPARATE `+=` adds (e.g. `:464-465` add `P[4]` then `P[5]` in two statements) rather than the live
+  code's single combined expression. Porting from it would change the FP accumulation order and break
+  bit-exactness. The port follows the LIVE `feedForward` (`:312-413`) exclusively. Confirmed neutral by
+  the harness NN_TOL probe: the ascending-loop reimpl matches the REAL compiled `LSTMLayer::feedForward`
+  with `max_ulp=0` over the whole forward/reverse grid. *Fix candidate:* delete the dead block in a
+  post-parity legacy cleanup.
+
+- **[phase2] LSTM `feedForward` `lastLayer` parameter is UNUSED** (`nn/layers.rs` `feed_forward` /
+  `feed_forward_reverse`, from `LSTMLayer.cpp:312,415`): the legacy signature carries `bool lastLayer`
+  but the LSTM forward never reads it (it matters only for the output MLP `NeuronLayer`). Kept in the
+  Rust signature for parity with the `Layer` dispatch and the legacy call sites; bound to `let _ =`.
+  Provenance note, not a bug.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

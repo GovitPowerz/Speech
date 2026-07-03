@@ -53,6 +53,22 @@ EXPECTED_SHAPES = {
     "lstm_w_roundtrip_out.bin": (100, 1),
 }
 
+# Task 4: LSTM forward/reverse dumps. Grid = {I=3,O=2,T=7; I=5,O=4,T=12} x
+# {allon, cells, gates, gatesrec, alloff} x {fwd, rev} + two width-mismatch cases
+# (3x2_T7_allon, cols I+2 / I-1). lstm_fwd_<case>.bin is (T x O), lstm_gates_<case>.bin
+# is (T x 4O). Kept in sync with the runCase grid in main.cpp's Task 4 block.
+_LSTM_SHAPES = [(3, 2, 7), (5, 4, 12)]
+_LSTM_FLAGS = ["allon", "cells", "gates", "gatesrec", "alloff"]
+for _i, _o, _t in _LSTM_SHAPES:
+    for _fl in _LSTM_FLAGS:
+        for _dir in ("fwd", "rev"):
+            _name = f"{_i}x{_o}_T{_t}_{_fl}_{_dir}"
+            EXPECTED_SHAPES[f"lstm_fwd_{_name}.bin"] = (_t, _o)
+            EXPECTED_SHAPES[f"lstm_gates_{_name}.bin"] = (_t, 4 * _o)
+for _name in ("3x2_T7_allon_wideP2_fwd", "3x2_T7_allon_narrowM1_fwd"):
+    EXPECTED_SHAPES[f"lstm_fwd_{_name}.bin"] = (7, 2)
+    EXPECTED_SHAPES[f"lstm_gates_{_name}.bin"] = (7, 8)
+
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
 HARNESS_INPUTS = [
     "excerpt_2ch_8k.wav",
@@ -98,6 +114,14 @@ NN_PROBE_RE = re.compile(
     re.MULTILINE,
 )
 
+# Task 4: real LSTMLayer::feedForward vs the ascending-loop reimpl (lstmForwardLoop),
+# max ULP/abs gap over the whole dump grid. max_ulp=0 => the reimpl reproduces Eigen's
+# actual forward output bit-for-bit at these shapes (the op-order/grouping contract).
+NN_TOL_RE = re.compile(
+    r"^NN_TOL site=(?P<site>\w+) max_ulp=(?P<max_ulp>\d+) max_abs=(?P<max_abs>\S+)$",
+    re.MULTILINE,
+)
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -126,6 +150,17 @@ def _parse_lstm_nb(stdout: str) -> tuple[int, int]:
     if (nb0, nb1) != (EXPECTED_LSTM_NB0, EXPECTED_LSTM_NB1):
         raise SystemExit(f"lstm nb ({nb0},{nb1}) != expected ({EXPECTED_LSTM_NB0},{EXPECTED_LSTM_NB1})")
     return nb0, nb1
+
+
+def _parse_nn_tol(stdout: str) -> dict[str, object]:
+    match = NN_TOL_RE.search(stdout)
+    if match is None:
+        raise SystemExit("Task 4 NN_TOL line missing from harness stdout")
+    return {
+        "site": match["site"],
+        "max_ulp": int(match["max_ulp"]),
+        "max_abs": match["max_abs"],
+    }
 
 
 def _parse_nn_probes(stdout: str) -> dict[str, dict[str, object]]:
@@ -183,6 +218,7 @@ def main() -> None:
     nb_weights = _parse_nn_real(stdout)
     lstm_nb0, lstm_nb1 = _parse_lstm_nb(stdout)
     probes = _parse_nn_probes(stdout)
+    nn_tol = _parse_nn_tol(stdout)
 
     # 2b. Read each dump back, verify its shape, and build the inventory.
     dump_inventory: dict[str, dict[str, int]] = {}
@@ -226,6 +262,16 @@ def main() -> None:
         "nn_product_probes": {
             "text": PROBE_TEXT,
             "sites": probes,
+        },
+        "lstm_forward_tol": {
+            "text": (
+                "Task 4: max ULP/abs gap between the REAL LSTMLayer::feedForward and "
+                "the ascending-loop reimpl (lstmForwardLoop) over the whole forward/"
+                "reverse dump grid. max_ulp=0 means the reimpl reproduces Eigen's "
+                "actual forward output bit-for-bit at these shapes -- the op-order + "
+                "combined/separate peephole grouping contract (LSTMLayer.cpp:312-421)."
+            ),
+            **nn_tol,
         },
         "dumps": dump_inventory,
     }
