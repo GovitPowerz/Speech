@@ -17,6 +17,7 @@
 //! - `_IsMLP = (LSTMNeuronNb[0] == 0)` (`:54`).
 //! - `InputNormalizationType` (`short`, no default), `TwoSweeps` (`bool`, no
 //!   default), `BackPropagationActivated` (`bool`, default `false`),
+//!   `BackPropOutputNetworkOnly` (`bool`, default `false`),
 //!   `TargetEnforcementStep` (`int`, default `0`).
 //! - Peephole flags are read PER-DIRECTION, not per-layer: `NeuralNetwork`'s ctor
 //!   (`NeuralNetwork.hpp:27`) passes the SAME `specialization_preposition` (e.g.
@@ -124,6 +125,8 @@ pub struct BlstmConfig {
     pub input_normalization_type: i16,
     pub two_sweeps: bool,
     pub back_propagation_activated: bool,
+    /// legacy: BLSTMNeuralNetwork.cpp:103 (gradient-only flag; consumed in Phase 3)
+    pub back_prop_output_network_only: bool,
     pub target_enforcement_step: i32,
 }
 
@@ -175,6 +178,8 @@ impl BlstmConfig {
         let two_sweeps = get_bool(map, &k("_TwoSweeps"))?;
         let back_propagation_activated =
             get_bool_default(map, &k("_BackPropagationActivated"), false);
+        let back_prop_output_network_only =
+            get_bool_default(map, &k("_BackPropOutputNetworkOnly"), false);
         let target_enforcement_step = get_i32_default(map, &k("_TargetEnforcementStep"), 0);
 
         Ok(BlstmConfig {
@@ -188,6 +193,7 @@ impl BlstmConfig {
             input_normalization_type,
             two_sweeps,
             back_propagation_activated,
+            back_prop_output_network_only,
             target_enforcement_step,
         })
     }

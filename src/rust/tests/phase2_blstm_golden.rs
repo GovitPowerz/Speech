@@ -39,6 +39,10 @@ fn from_legacy_real_config_topology() {
     assert_eq!(cfg.input_normalization_type, -1);
     assert!(!cfg.two_sweeps, "BLSTM_TwoSweeps false in the fixture");
     assert!(!cfg.back_propagation_activated);
+    assert!(
+        !cfg.back_prop_output_network_only,
+        "BLSTM_BackPropOutputNetworkOnly absent -> default false"
+    );
     assert_eq!(cfg.target_enforcement_step, 0, "key absent -> default 0");
 
     // Peephole flags: all six keys are `true` in the real fixture.
