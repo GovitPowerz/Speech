@@ -94,6 +94,20 @@ EXPECTED_SHAPES["net_double.bin"] = (11, 2)
 EXPECTED_SHAPES["net_w_in.bin"] = (_NET_LSTM_NBTOTAL, 1)
 EXPECTED_SHAPES["net_w_out.bin"] = (_NET_LSTM_NBTOTAL, 1)
 
+# Task 8: BLSTM input normalization + core forward. Synthetic net LSTM [3,4,2] sub
+# [2,1] / output [4,5,3] sub [1,1], T=12: fwd LSTM sub 2*1 -> outputLength 12/2=6,
+# output O=3 -> out is (6 x 3); the (possibly-mutated) input is (12 x 3). One pair
+# per normalization type {1, -1 (tag m1), -2 (tag m2), 0}. Real net full-sequence
+# (1_worker_1.config), T=200: fwd LSTM sub 4*1 -> 200/4=50 rows; output O=1 -> out
+# is (50 x 1); the forward/backward LSTM hidden states are (50 x 24). Kept in sync
+# with main.cpp's Task 8 block.
+for _tag in ("1", "m1", "m2", "0"):
+    EXPECTED_SHAPES[f"blstm_norm{_tag}_out.bin"] = (6, 3)
+    EXPECTED_SHAPES[f"blstm_norm{_tag}_input_after.bin"] = (12, 3)
+EXPECTED_SHAPES["blstm_real_fullseq_out.bin"] = (50, 1)
+EXPECTED_SHAPES["blstm_real_fullseq_fwd.bin"] = (50, 24)
+EXPECTED_SHAPES["blstm_real_fullseq_bwd.bin"] = (50, 24)
+
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
 HARNESS_INPUTS = [
     "excerpt_2ch_8k.wav",
@@ -248,6 +262,20 @@ def main() -> None:
     net_lstm_rev_tol = _parse_nn_tol(stdout, "net_lstm_forward_rev")
     net_dense_tol = _parse_nn_tol(stdout, "net_dense_forward")
     net_double_tol = _parse_nn_tol(stdout, "net_double")
+    # Task 8: BLSTM normalization + core-forward NN_TOL sites. The synthetic-net
+    # per-type sites (out + input mutation) are bit-exact (small shapes, k<=6); the
+    # real full-sequence site is EXPECTED NONZERO (the k=23 input GEMM diverges from
+    # ascending accumulation per the Task 1 lstm_input_gemm probe -- the goldens ARE
+    # the reimpl, and the manifest records the measured gap).
+    blstm_norm_tols = {
+        f"blstm_norm{tag}": _parse_nn_tol(stdout, f"blstm_norm{tag}")
+        for tag in ("1", "m1", "m2", "0")
+    }
+    blstm_norm_input_tols = {
+        f"blstm_norm{tag}_input": _parse_nn_tol(stdout, f"blstm_norm{tag}_input")
+        for tag in ("1", "m1", "m2", "0")
+    }
+    blstm_real_fullseq_tol = _parse_nn_tol(stdout, "blstm_real_fullseq")
 
     # 2b. Read each dump back, verify its shape, and build the inventory.
     dump_inventory: dict[str, dict[str, int]] = {}
@@ -324,6 +352,24 @@ def main() -> None:
             "net_lstm_forward_rev": net_lstm_rev_tol,
             "net_dense_forward": net_dense_tol,
             "net_double": net_double_tol,
+        },
+        "blstm_forward_tol": {
+            "text": (
+                "Task 8: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> "
+                "(windowed feedForwardBackward, plain non-truncate path, no targets) and "
+                "the reimpl (normalization types 1/-1/-2/0 + blstmFeedForward wired to "
+                "netForwardLoop/netForwardReverseLoop/netForwardDoubleLoop) on a synthetic "
+                "net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12). The "
+                "synthetic-net sites are bit-exact (small shapes); the *_input sites pin "
+                "the in-place normalization mutation matching the real class. The "
+                "blstm_real_fullseq site is EXPECTED NONZERO: on the real net (k=23 input "
+                "GEMM) Eigen's blocked product diverges from ascending accumulation (Task 1 "
+                "lstm_input_gemm probe), so the goldens ARE the ascending-loop reimpl and "
+                "this records the measured real-vs-reimpl gap."
+            ),
+            "synthetic_out": blstm_norm_tols,
+            "synthetic_input_mutation": blstm_norm_input_tols,
+            "real_fullseq": blstm_real_fullseq_tol,
         },
         "dumps": dump_inventory,
     }

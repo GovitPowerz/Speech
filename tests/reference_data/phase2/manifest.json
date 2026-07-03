@@ -124,6 +124,58 @@
       "max_abs": "1.110e-16"
     }
   },
+  "blstm_forward_tol": {
+    "text": "Task 8: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> (windowed feedForwardBackward, plain non-truncate path, no targets) and the reimpl (normalization types 1/-1/-2/0 + blstmFeedForward wired to netForwardLoop/netForwardReverseLoop/netForwardDoubleLoop) on a synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12). The synthetic-net sites are bit-exact (small shapes); the *_input sites pin the in-place normalization mutation matching the real class. The blstm_real_fullseq site is EXPECTED NONZERO: on the real net (k=23 input GEMM) Eigen's blocked product diverges from ascending accumulation (Task 1 lstm_input_gemm probe), so the goldens ARE the ascending-loop reimpl and this records the measured real-vs-reimpl gap.",
+    "synthetic_out": {
+      "blstm_norm1": {
+        "site": "blstm_norm1",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm1": {
+        "site": "blstm_normm1",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm2": {
+        "site": "blstm_normm2",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_norm0": {
+        "site": "blstm_norm0",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    },
+    "synthetic_input_mutation": {
+      "blstm_norm1_input": {
+        "site": "blstm_norm1_input",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm1_input": {
+        "site": "blstm_normm1_input",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm2_input": {
+        "site": "blstm_normm2_input",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_norm0_input": {
+        "site": "blstm_norm0_input",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    },
+    "real_fullseq": {
+      "site": "blstm_real_fullseq",
+      "max_ulp": 7,
+      "max_abs": "2.220e-16"
+    }
+  },
   "dumps": {
     "act_sweep.bin": {
       "rows": 4,
@@ -356,6 +408,50 @@
     "net_w_out.bin": {
       "rows": 304,
       "cols": 1
+    },
+    "blstm_norm1_out.bin": {
+      "rows": 6,
+      "cols": 3
+    },
+    "blstm_norm1_input_after.bin": {
+      "rows": 12,
+      "cols": 3
+    },
+    "blstm_normm1_out.bin": {
+      "rows": 6,
+      "cols": 3
+    },
+    "blstm_normm1_input_after.bin": {
+      "rows": 12,
+      "cols": 3
+    },
+    "blstm_normm2_out.bin": {
+      "rows": 6,
+      "cols": 3
+    },
+    "blstm_normm2_input_after.bin": {
+      "rows": 12,
+      "cols": 3
+    },
+    "blstm_norm0_out.bin": {
+      "rows": 6,
+      "cols": 3
+    },
+    "blstm_norm0_input_after.bin": {
+      "rows": 12,
+      "cols": 3
+    },
+    "blstm_real_fullseq_out.bin": {
+      "rows": 50,
+      "cols": 1
+    },
+    "blstm_real_fullseq_fwd.bin": {
+      "rows": 50,
+      "cols": 24
+    },
+    "blstm_real_fullseq_bwd.bin": {
+      "rows": 50,
+      "cols": 24
     }
   }
 }

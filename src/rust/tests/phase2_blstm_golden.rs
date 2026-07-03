@@ -1,12 +1,23 @@
-//! Phase 2 Task 7: `BlstmConfig` + `BlstmNetwork` construction + flat weight seam.
+//! Phase 2 Task 7/8: `BlstmConfig` + `BlstmNetwork` construction + flat weight seam
+//! (Task 7); input normalization + core bidirectional forward + plain
+//! `feed_forward_backward` (Task 8).
 //!
-//! Golden tests against the real `1_worker_1.config` (BLSTM prefix) and the real
-//! `NNweights_config1.bin` (33,671 x 1). Pure construction/plumbing tests -- no
-//! oracle harness dump needed (this is the config/weight seam, not numerics).
+//! Task 7 goldens run against the real `1_worker_1.config` (BLSTM prefix) and the
+//! real `NNweights_config1.bin` (33,671 x 1) -- pure construction/plumbing.
+//!
+//! Task 8 goldens run against the harness Task 8 dumps: a synthetic net (LSTM
+//! [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12) forwarded through each
+//! normalization type {1, -1, -2, 0} (`blstm_norm<tag>_{out,input_after}.bin`) and
+//! the REAL net on a synthetic 200x23 input (`blstm_real_fullseq_{out,fwd,bwd}.bin`).
+//! The activation chains (asinh/exp/log) earn `assert_oracle_eq`'s hybrid bound off
+//! the oracle env; the cost quirk + in-place semantics are expression-coded units.
+
+mod common;
 
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
+use ndarray::Array2;
 use speech::config::NnetSpec;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 
@@ -265,4 +276,315 @@ fn reset_weights_derivatives_resets_input_statistics() {
     net.reset_weights_derivatives();
     assert_eq!(net.input_statistics.n, 0);
     assert!(net.input_statistics.mean.is_empty());
+}
+
+// ============================================================================
+// Task 8: input normalization + core forward + plain feed_forward_backward
+// ============================================================================
+
+/// Synthetic-net config map matching the harness Task 8 "SYNB" prefix: LSTM [3,4,2]
+/// sub [2,1], output [4,5,3] sub [1,1]. `norm_type` is the only per-dump knob.
+fn synth_map(norm_type: i16) -> IndexMap<String, String> {
+    let mut m: IndexMap<String, String> = IndexMap::new();
+    m.insert("SYNB_LSTMNeuronNb".into(), "3,4,2".into());
+    m.insert("SYNB_LSTMSubSampling".into(), "2,1".into());
+    m.insert("SYNB_OutputNeuronNb".into(), "4,5,3".into());
+    m.insert("SYNB_OutputSubSampling".into(), "1,1".into());
+    m.insert("SYNB_InputNormalizationType".into(), norm_type.to_string());
+    m.insert("SYNB_TwoSweeps".into(), "false".into());
+    m.insert("SYNB_BackPropagationActivated".into(), "false".into());
+    m
+}
+
+/// The synthetic net's flat weight vector, EXACTLY as the harness builds it: body =
+/// `((k*11+3) % 97)/97 - 0.5`; the last `2*3` entries are a NONZERO mean/std tail
+/// (mean[j] = 0.1*(j+1), std[j] = 1.0 + 0.05*j), so type 1 actually shifts/scales.
+fn synth_flat() -> Vec<f64> {
+    // nb: fwd LSTM net + bwd LSTM net + output dense net + 2*3 tail.
+    let lstm_nb = |i: usize, o: usize| 4 * i * o + 4 * o * o + 12 * o + 4 * o;
+    let fwd_nb = lstm_nb(6, 4) + lstm_nb(4, 2); // L0 in=3*2=6 out=4; L1 in=4*1=4 out=2
+    let out_nb = 5 * (4 + 1) + 3 * (5 + 1); // L0 in=4 out=5; L1 in=5 out=3
+    let tail = 2 * 3;
+    let nb_total = fwd_nb + fwd_nb + out_nb + tail;
+    let mut flat = vec![0.0_f64; nb_total];
+    for (k, v) in flat.iter_mut().enumerate().take(nb_total - tail) {
+        *v = ((k * 11 + 3) % 97) as f64 / 97.0 - 0.5;
+    }
+    for j in 0..3 {
+        flat[nb_total - tail + j] = 0.1 * (j as f64 + 1.0);
+        flat[nb_total - tail + 3 + j] = 1.0 + 0.05 * j as f64;
+    }
+    flat
+}
+
+/// The harness Task 8 synthetic input: `x[t,j] = ((t*29 + j*13 + 5) % 97)/97 - 0.5`,
+/// T=12, 3 cols.
+fn synth_input() -> Array2<f64> {
+    Array2::from_shape_fn((12, 3), |(t, j)| {
+        ((t * 29 + j * 13 + 5) % 97) as f64 / 97.0 - 0.5
+    })
+}
+
+/// Build + weight-load the synthetic net for a given normalization type, plain path.
+fn make_synth_net(norm_type: i16) -> BlstmNetwork {
+    let cfg = BlstmConfig::from_legacy(&synth_map(norm_type), "SYNB").unwrap();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+    net.set_weights(&synth_flat()).unwrap();
+    net.set_processing_type(false, false);
+    net
+}
+
+/// Tag used in the harness dump filenames: negative types get an `m` prefix.
+fn norm_tag(norm_type: i16) -> String {
+    if norm_type < 0 {
+        format!("m{}", -norm_type)
+    } else {
+        norm_type.to_string()
+    }
+}
+
+#[test]
+fn synth_norm_out_matches_oracle_all_types() {
+    for norm_type in [1_i16, -1, -2, 0] {
+        let mut net = make_synth_net(norm_type);
+        let mut input = synth_input();
+        let mut output = Array2::<f64>::zeros((6, 3)); // 12/2/1 = 6 rows, O=3
+        let empty = Array2::<f64>::zeros((0, 0));
+        net.feed_forward_backward(&mut input, 4, 2, &mut output, &empty);
+
+        let tag = norm_tag(norm_type);
+        common::assert_oracle_eq(
+            &output,
+            &common::load_bin_phase2(&format!("blstm_norm{tag}_out.bin")),
+            &format!("blstm_norm{tag}_out"),
+        );
+    }
+}
+
+#[test]
+fn synth_norm_input_after_matches_oracle_all_types() {
+    // The (possibly-mutated) input is dumped as blstm_norm<tag>_input_after.bin.
+    // Types 1 and -1 mutate the caller's matrix IN PLACE; types -2 and 0 leave it
+    // untouched. Comparing the post-call input pins the in-place semantics.
+    for norm_type in [1_i16, -1, -2, 0] {
+        let mut net = make_synth_net(norm_type);
+        let mut input = synth_input();
+        let mut output = Array2::<f64>::zeros((6, 3));
+        let empty = Array2::<f64>::zeros((0, 0));
+        net.feed_forward_backward(&mut input, 4, 2, &mut output, &empty);
+
+        let tag = norm_tag(norm_type);
+        common::assert_oracle_eq(
+            &input,
+            &common::load_bin_phase2(&format!("blstm_norm{tag}_input_after.bin")),
+            &format!("blstm_norm{tag}_input_after"),
+        );
+    }
+}
+
+#[test]
+fn type_minus2_and_zero_leave_input_untouched() {
+    // Type -2 normalizes into a COPY (input untouched); type 0 does nothing. Assert
+    // the post-call input is bit-identical to the pristine input (stronger than the
+    // golden -- proves no mutation at all).
+    for norm_type in [-2_i16, 0] {
+        let mut net = make_synth_net(norm_type);
+        let pristine = synth_input();
+        let mut input = pristine.clone();
+        let mut output = Array2::<f64>::zeros((6, 3));
+        let empty = Array2::<f64>::zeros((0, 0));
+        net.feed_forward_backward(&mut input, 4, 2, &mut output, &empty);
+        common::assert_bits_eq(
+            &input,
+            &pristine,
+            &format!("type {norm_type} input untouched"),
+        );
+    }
+}
+
+#[test]
+fn type1_columns_beyond_mean_tail_untouched() {
+    // External normalization touches only columns jj < min(cols, mean.size()). Build
+    // a net whose input tail (mean/std) is SHORTER than the input width, and assert
+    // the extra columns pass through unchanged. Net input size = LSTMNeuronNb[0] = 3,
+    // so the mean/std tail has 3 entries; feed a 5-column input -> columns 3,4 must be
+    // untouched, columns 0,1,2 normalized.
+    let cfg = BlstmConfig::from_legacy(&synth_map(1), "SYNB").unwrap();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+    net.set_weights(&synth_flat()).unwrap();
+    net.set_processing_type(false, false);
+
+    // 12x5 input: first 3 cols per the synth formula, cols 3,4 are sentinels.
+    let sentinel3 = f64::from_bits(0x4010_0000_0000_0000); // 4.0
+    let sentinel4 = f64::from_bits(0x4014_0000_0000_0000); // 5.0
+    let mut input = Array2::from_shape_fn((12, 5), |(t, j)| match j {
+        0..=2 => ((t * 29 + j * 13 + 5) % 97) as f64 / 97.0 - 0.5,
+        3 => sentinel3,
+        _ => sentinel4,
+    });
+    let before_cols_34 = input.slice(ndarray::s![.., 3..5]).to_owned();
+
+    // The forward net input size is 3, so leftCols(3) is used inside feed_forward;
+    // the normalization must not have touched cols 3,4 in the caller's matrix.
+    let mut output = Array2::<f64>::zeros((6, 3));
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 4, 2, &mut output, &empty);
+
+    let after_cols_34 = input.slice(ndarray::s![.., 3..5]).to_owned();
+    common::assert_bits_eq(
+        &after_cols_34,
+        &before_cols_34,
+        "type-1 columns beyond mean tail untouched",
+    );
+    // And columns 0..3 DID change (sanity: normalization actually ran).
+    let mut any_changed = false;
+    for t in 0..12 {
+        for j in 0..3 {
+            let orig = ((t * 29 + j * 13 + 5) % 97) as f64 / 97.0 - 0.5;
+            if input[[t, j]].to_bits() != orig.to_bits() {
+                any_changed = true;
+            }
+        }
+    }
+    assert!(any_changed, "type-1 must have normalized columns 0..3");
+}
+
+#[test]
+fn real_fullseq_matches_oracle() {
+    // The REAL net (1_worker_1.config, InputNormalizationType == -1) on a synthetic
+    // 200x23 input, plain FFB, no targets. Output (50x1) + forward/backward LSTM
+    // hidden states (50x24). EXPECTED tiny divergence vs Eigen's blocked k=23 GEMM
+    // (Task 1 lstm_input_gemm probe) -- assert_oracle_eq's hybrid bound covers it.
+    let m = real_map();
+    let cfg = BlstmConfig::from_legacy(&m, "BLSTM").unwrap();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+    let flat = speech::io::binary::read_weight_vector(&weights_bin_path()).unwrap();
+    net.set_weights(&flat).unwrap();
+    net.set_processing_type(false, false);
+
+    let mut input = Array2::from_shape_fn((200, 23), |(t, j)| {
+        ((t * 31 + j * 17) % 100) as f64 / 100.0 - 0.5
+    });
+    let mut output = Array2::<f64>::zeros((50, 1)); // 200/4/1 = 50 rows, O=1
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 4, 2, &mut output, &empty);
+
+    common::assert_oracle_eq(
+        &output,
+        &common::load_bin_phase2("blstm_real_fullseq_out.bin"),
+        "blstm_real_fullseq_out",
+    );
+    common::assert_oracle_eq(
+        &net.output_forward,
+        &common::load_bin_phase2("blstm_real_fullseq_fwd.bin"),
+        "blstm_real_fullseq_fwd",
+    );
+    common::assert_oracle_eq(
+        &net.output_backward,
+        &common::load_bin_phase2("blstm_real_fullseq_bwd.bin"),
+        "blstm_real_fullseq_bwd",
+    );
+}
+
+// === Cost quirk + nb_of_classif accounting ==================================
+
+#[test]
+fn cost_quirk_enforcement_neg_overwrites_output_interior_with_minus_half() {
+    // BLSTMNeuralNetwork.cpp:815-824: with targets present and target_enforcement_step
+    // < 0, the interior rows [1, rows-1) of the caller-visible output are overwritten
+    // with -0.5 BEFORE the cost is computed, and the cost is accumulated against the
+    // -0.5 targets (interior) rather than the caller's targets. Use a MULTI-CLASS
+    // output (O=3) so the softmax cross-entropy path runs; verify (a) output interior
+    // == -0.5 exactly after the call, and (b) cost equals the expression-coded cost
+    // against the -0.5-interior targets, computed independently via speech::cost.
+    let mut m = synth_map(0); // norm type 0: no input mutation, keep the math simple
+    m.insert("SYNB_TargetEnforcementStep".into(), "-1".into());
+    let cfg = BlstmConfig::from_legacy(&m, "SYNB").unwrap();
+    let cost_law = cfg.cost_law.clone();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+    net.set_weights(&synth_flat()).unwrap();
+    net.set_processing_type(false, false);
+
+    let mut input = synth_input();
+    let mut output = Array2::<f64>::zeros((6, 3));
+    // One-hot-ish targets (6 rows, 3 classes): on-class rotates by row.
+    let target = Array2::from_shape_fn((6, 3), |(r, c)| if c == r % 3 { 1.0 } else { 0.0 });
+    net.feed_forward_backward(&mut input, 4, 2, &mut output, &target);
+
+    // (a) Output interior rows [1,5) overwritten with -0.5 exactly.
+    for r in 1..5 {
+        for c in 0..3 {
+            assert_eq!(
+                output[[r, c]].to_bits(),
+                (-0.5_f64).to_bits(),
+                "output interior ({r},{c}) must be exactly -0.5"
+            );
+        }
+    }
+    // Rows 0 and 5 (the boundary rows) are NOT overwritten -- they keep the softmax
+    // output (each row sums to ~1, so not -0.5).
+    assert_ne!(output[[0, 0]].to_bits(), (-0.5_f64).to_bits());
+    assert_ne!(output[[5, 0]].to_bits(), (-0.5_f64).to_bits());
+
+    // (b) Expression-coded cost: build the -0.5-interior targets, take the -0.5-interior
+    // output (already mutated in `output`), and compute the softmax cost independently.
+    let mut new_target = target.clone();
+    for r in 1..5 {
+        for c in 0..3 {
+            new_target[[r, c]] = -0.5;
+        }
+    }
+    let out_flat: Vec<f64> = output.iter().copied().collect();
+    let tgt_flat: Vec<f64> = new_target.iter().copied().collect();
+    let expected_cost = cost_law.compute_cost(&out_flat, &tgt_flat, 3);
+    assert_eq!(
+        net.cost.to_bits(),
+        expected_cost.to_bits(),
+        "cost must be accumulated against the -0.5-interior targets and output"
+    );
+    assert_eq!(net.nb_of_classif, 6, "nb_of_classif += output.rows() == 6");
+}
+
+#[test]
+fn no_enforcement_uses_given_targets_and_leaves_output() {
+    // target_enforcement_step >= 0 (default 0): no interior overwrite; cost is against
+    // the given targets, output rows keep the softmax values. nb_of_classif == rows.
+    let cfg = BlstmConfig::from_legacy(&synth_map(0), "SYNB").unwrap();
+    let cost_law = cfg.cost_law.clone();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+    net.set_weights(&synth_flat()).unwrap();
+    net.set_processing_type(false, false);
+
+    let mut input = synth_input();
+    let mut output = Array2::<f64>::zeros((6, 3));
+    let target = Array2::from_shape_fn((6, 3), |(r, c)| if c == r % 3 { 1.0 } else { 0.0 });
+    net.feed_forward_backward(&mut input, 4, 2, &mut output, &target);
+
+    // No -0.5 overwrite anywhere.
+    for r in 0..6 {
+        for c in 0..3 {
+            assert_ne!(
+                output[[r, c]].to_bits(),
+                (-0.5_f64).to_bits(),
+                "no enforcement: output ({r},{c}) must keep its softmax value"
+            );
+        }
+    }
+    let out_flat: Vec<f64> = output.iter().copied().collect();
+    let tgt_flat: Vec<f64> = target.iter().copied().collect();
+    let expected_cost = cost_law.compute_cost(&out_flat, &tgt_flat, 3);
+    assert_eq!(net.cost.to_bits(), expected_cost.to_bits());
+    assert_eq!(net.nb_of_classif, 6);
+}
+
+#[test]
+fn no_targets_leaves_cost_and_classif_zero() {
+    // Empty target (0 rows) -> no cost accumulation, nb_of_classif stays 0.
+    let mut net = make_synth_net(-1);
+    let mut input = synth_input();
+    let mut output = Array2::<f64>::zeros((6, 3));
+    let empty = Array2::<f64>::zeros((0, 0));
+    net.feed_forward_backward(&mut input, 4, 2, &mut output, &empty);
+    assert_eq!(net.cost.to_bits(), 0.0_f64.to_bits());
+    assert_eq!(net.nb_of_classif, 0);
 }

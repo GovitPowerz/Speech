@@ -43,7 +43,9 @@
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
+use ndarray::Array2;
 
+use crate::cost::CostLaw;
 use crate::features::stats::InputStatistics;
 
 use super::layers::NeuronLayer;
@@ -128,6 +130,10 @@ pub struct BlstmConfig {
     /// legacy: BLSTMNeuralNetwork.cpp:103 (gradient-only flag; consumed in Phase 3)
     pub back_prop_output_network_only: bool,
     pub target_enforcement_step: i32,
+    /// `_CostFunction` (`BLSTMNeuralNetwork.cpp:104`): `CostLaw(conf, prefix)`. The
+    /// plain `feed_forward_backward` cost accumulation consumes it (Task 8); Phase 3
+    /// backward will reuse it for deltas.
+    pub cost_law: CostLaw,
 }
 
 impl BlstmConfig {
@@ -181,6 +187,9 @@ impl BlstmConfig {
         let back_prop_output_network_only =
             get_bool_default(map, &k("_BackPropOutputNetworkOnly"), false);
         let target_enforcement_step = get_i32_default(map, &k("_TargetEnforcementStep"), 0);
+        // `_CostFunction = CostLaw(conf, prefix)` (:104). Built from the same prefix;
+        // all cost-law keys have defaults, so a config lacking them is valid.
+        let cost_law = CostLaw::from_config(map, prefix);
 
         Ok(BlstmConfig {
             lstm_neuron_nb,
@@ -195,6 +204,7 @@ impl BlstmConfig {
             back_propagation_activated,
             back_prop_output_network_only,
             target_enforcement_step,
+            cost_law,
         })
     }
 }
@@ -435,5 +445,317 @@ impl BlstmNetwork {
 
     pub fn normalize_input_std(&self) -> &[f64] {
         &self.normalize_input_std
+    }
+
+    /// `analyseInputSeq` (`BLSTMNeuralNetwork.cpp:385-417`): fold the input's per-dim
+    /// statistics into `_InputStatistics`. `rows > 0` guard; crops `leftCols(input
+    /// size)` when the sequence is STRICTLY wider than the net input; first call
+    /// constructs from the batch, later calls `update`. Called only from the type-1
+    /// normalization branch.
+    fn analyse_input_seq(&mut self, input: &Array2<f64>) {
+        if input.nrows() == 0 {
+            return;
+        }
+        let net_in = self.input_size();
+        let batch = if net_in < input.ncols() {
+            InputStatistics::from_matrix(&input.slice(ndarray::s![.., ..net_in]).to_owned())
+        } else {
+            InputStatistics::from_matrix(input)
+        };
+        if self.input_statistics.n == 0 {
+            self.input_statistics = batch;
+        } else {
+            self.input_statistics.update(&batch);
+        }
+    }
+
+    /// Type -1 / -2 self-normalization body (`BLSTMNeuralNetwork.cpp:737-744` /
+    /// `:778-781`): mean = colSum/rows; center; std = `sqrt((colSum(centered^2) +
+    /// 1e-32)/rows)` (the 1e-32 is added to the SUM); then per element `asinh(x/std)`.
+    /// Whole-matrix form (matches the replicate/-2 shape); for type -1 the caller
+    /// passes its own matrix (mutated in place), for type -2 a copy.
+    fn self_normalize(m: &mut Array2<f64>) {
+        let (r, c) = m.dim();
+        if r == 0 {
+            return;
+        }
+        let rf = r as f64;
+        let mut mean = vec![0.0_f64; c];
+        for col in 0..c {
+            let mut acc = 0.0;
+            for row in 0..r {
+                acc += m[[row, col]];
+            }
+            mean[col] = acc / rf;
+        }
+        for row in 0..r {
+            for col in 0..c {
+                m[[row, col]] -= mean[col];
+            }
+        }
+        let mut stdv = vec![0.0_f64; c];
+        for col in 0..c {
+            let mut acc = 0.0;
+            for row in 0..r {
+                acc += m[[row, col]] * m[[row, col]];
+            }
+            stdv[col] = ((acc + 1e-32) / rf).sqrt();
+        }
+        for row in 0..r {
+            for col in 0..c {
+                m[[row, col]] = (m[[row, col]] / stdv[col]).asinh();
+            }
+        }
+    }
+
+    /// `feedForward` core (`BLSTMNeuralNetwork.cpp:419-437`): output length = input
+    /// rows divided SEQUENTIALLY by each forward-net LSTM sub-sampling ratio; forward
+    /// net `feed_forward` + backward net `feed_forward_reverse` into
+    /// `(outputLength x lstmOut)`; the `LSTMRatios[0] > 1 && net input < input cols`
+    /// gate crops `leftCols(input size)`; the output net's `feed_forward_double`
+    /// (forward LEFT) writes `output`. Fills `output_forward`/`output_backward`.
+    /// Panics in MLP mode (the legacy dispatches MLP through `feed_forward_mlp`).
+    pub fn feed_forward(&mut self, input: &Array2<f64>, output: &mut Array2<f64>) {
+        let (forward, backward) = match (
+            self.forward_network.as_mut(),
+            self.backward_network.as_mut(),
+        ) {
+            (Some(f), Some(b)) => (f, b),
+            _ => panic!("feed_forward is BLSTM-only; MLP mode uses feed_forward_mlp"),
+        };
+        let ratios = forward.sub_samplings().to_vec();
+        let mut output_length = input.nrows();
+        for &r in &ratios {
+            output_length /= r;
+        }
+        let fwd_in = forward.input_size();
+        let mut out_forward = Array2::zeros((output_length, forward.output_size()));
+        let mut out_backward = Array2::zeros((output_length, backward.output_size()));
+
+        if ratios[0] > 1 && fwd_in < input.ncols() {
+            let cropped = input.slice(ndarray::s![.., ..fwd_in]).to_owned();
+            forward.feed_forward(&cropped, &mut out_forward);
+            backward.feed_forward_reverse(&cropped, &mut out_backward);
+        } else {
+            forward.feed_forward(input, &mut out_forward);
+            backward.feed_forward_reverse(input, &mut out_backward);
+        }
+
+        self.output_network
+            .feed_forward_double(&out_forward, &out_backward, output);
+        self.output_forward = out_forward;
+        self.output_backward = out_backward;
+    }
+
+    /// `feedForwardMLP` (`BLSTMNeuralNetwork.cpp:462-469`): the `MLPRatios[0] > 1 &&
+    /// net input < input cols` gate crops `leftCols(input size)`, then the output net
+    /// forwards directly (no bidirectional halves).
+    pub fn feed_forward_mlp(&mut self, input: &Array2<f64>, output: &mut Array2<f64>) {
+        let ratios = self.output_network.sub_samplings().to_vec();
+        let mlp_in = self.output_network.input_size();
+        if ratios[0] > 1 && mlp_in < input.ncols() {
+            let cropped = input.slice(ndarray::s![.., ..mlp_in]).to_owned();
+            self.output_network.feed_forward(&cropped, output);
+        } else {
+            self.output_network.feed_forward(input, output);
+        }
+    }
+
+    /// Windowed `feedForwardBackward` entry (`BLSTMNeuralNetwork.cpp:711-773`): zero
+    /// the cost accumulators, apply the in-place normalization for types 1 / -1
+    /// (`:715-751`), then dispatch. THIS TASK ports the dispatch skeleton + the PLAIN
+    /// paths; the windowed drivers (Truncate / TwoSweeps / OverLap / MLPOverLap) are
+    /// Task 9 stubs behind the dispatch.
+    ///
+    /// `target` empty (0 rows) means "no targets". `input` is mutated in place for
+    /// normalization types 1 and -1 (matching the legacy `Eigen::Ref` mutation).
+    pub fn feed_forward_backward(
+        &mut self,
+        input: &mut Array2<f64>,
+        window_size: usize,
+        window_shift: usize,
+        output: &mut Array2<f64>,
+        target: &Array2<f64>,
+    ) {
+        self.cost = 0.0;
+        self.nb_of_classif = 0;
+
+        match self.cfg.input_normalization_type {
+            1 => {
+                // External normalization (:720-723): per column jj < min(cols,
+                // mean.size()), (x - mean_jj)/max(1e-12, std_jj). Cols beyond the
+                // mean/std tail are UNTOUCHED. Then analyseInputSeq (:728).
+                let (r, cols) = input.dim();
+                let max_col = cols.min(self.normalize_input_mean.len());
+                for jj in 0..max_col {
+                    let denom = 1e-12_f64.max(self.normalize_input_std[jj]);
+                    let mean = self.normalize_input_mean[jj];
+                    for row in 0..r {
+                        input[[row, jj]] = (input[[row, jj]] - mean) / denom;
+                    }
+                }
+                let snapshot = input.clone();
+                self.analyse_input_seq(&snapshot);
+            }
+            -1 => {
+                // Whole-sequence self-normalization in place (:737-744).
+                Self::self_normalize(input);
+            }
+            _ => {} // -2 handled in the plain FFB; 0/other -> nothing here.
+        }
+
+        if self.cfg.is_mlp {
+            if self.truncates_sequence && self.overlaps {
+                self.feed_forward_backward_mlp_overlap(
+                    input,
+                    window_size,
+                    window_shift,
+                    output,
+                    target,
+                );
+            } else {
+                self.feed_forward_backward_mlp(input, output, target);
+            }
+        } else if self.truncates_sequence {
+            if self.overlaps {
+                self.feed_forward_backward_overlap(
+                    input,
+                    window_size,
+                    window_shift,
+                    output,
+                    target,
+                );
+            } else {
+                self.feed_forward_backward_truncate(input, window_size, output, target);
+            }
+        } else {
+            self.feed_forward_backward_plain(input, output, target);
+        }
+    }
+
+    /// Plain (non-windowed) `feedForwardBackward` (`BLSTMNeuralNetwork.cpp:776-830`):
+    /// type -2 normalizes into a COPY (input untouched) then forwards the copy;
+    /// otherwise forwards the input directly. Backward is Phase 3 (skipped; the gate
+    /// exists). Cost accumulation (:815-829): when targets are present and
+    /// `_TargetEnforcementStep < 0`, the interior rows `[1, rows-1)` of BOTH a target
+    /// copy AND the caller-visible `output` are overwritten with `-0.5` BEFORE the
+    /// cost is computed against the -0.5 targets; else the cost is computed against
+    /// the given targets. `_NbOfClassif += output.rows()`.
+    fn feed_forward_backward_plain(
+        &mut self,
+        input: &Array2<f64>,
+        output: &mut Array2<f64>,
+        target: &Array2<f64>,
+    ) {
+        if self.cfg.input_normalization_type == -2 {
+            let mut norm = input.clone();
+            Self::self_normalize(&mut norm);
+            self.feed_forward(&norm, output);
+            // Backward (feedBackward on the normalized copy) is Phase 3.
+        } else {
+            self.feed_forward(input, output);
+            // Backward is Phase 3.
+        }
+
+        if target.nrows() > 0 {
+            if self.cfg.target_enforcement_step < 0 {
+                let mut new_target = target.clone();
+                let n_lines = target.nrows() as isize - 2;
+                if n_lines > 0 {
+                    // Interior rows [1, rows-1) of the targets AND the caller-visible
+                    // output overwritten with -0.5 (:820-821), BEFORE computeCost.
+                    let end = target.nrows() - 1;
+                    for row in 1..end {
+                        for col in 0..new_target.ncols() {
+                            new_target[[row, col]] = -0.5;
+                        }
+                        for col in 0..output.ncols() {
+                            output[[row, col]] = -0.5;
+                        }
+                    }
+                }
+                self.cost += self.compute_cost(output, &new_target);
+                self.nb_of_classif += output.nrows() as i64;
+            } else {
+                self.cost += self.compute_cost(output, target);
+                self.nb_of_classif += output.nrows() as i64;
+            }
+        }
+    }
+
+    /// Plain `feedForwardBackwardMLP` (`BLSTMNeuralNetwork.cpp:832-841`): forward +
+    /// cost, no `_TargetEnforcementStep` interior overwrite branch.
+    fn feed_forward_backward_mlp(
+        &mut self,
+        input: &Array2<f64>,
+        output: &mut Array2<f64>,
+        target: &Array2<f64>,
+    ) {
+        self.feed_forward_mlp(input, output);
+        // Backward is Phase 3.
+        if target.nrows() > 0 {
+            self.cost += self.compute_cost(output, target);
+            self.nb_of_classif += output.nrows() as i64;
+        }
+    }
+
+    /// `_CostFunction.computeCost` dispatch (`CostLaw.cpp:191-249`): a single-column
+    /// output uses the scalar VAD `compute_unitary_cost` summed over rows; a
+    /// multi-column output uses the softmax cross-entropy path. Row-major matrices.
+    fn compute_cost(&self, output: &Array2<f64>, target: &Array2<f64>) -> f64 {
+        let n_classes = output.ncols();
+        if n_classes == 1 {
+            let mut cost = 0.0;
+            for row in 0..output.nrows() {
+                cost += self
+                    .cfg
+                    .cost_law
+                    .compute_unitary_cost(output[[row, 0]], target[[row, 0]]);
+            }
+            cost
+        } else {
+            let out_flat: Vec<f64> = output.iter().copied().collect();
+            let tgt_flat: Vec<f64> = target.iter().copied().collect();
+            self.cfg
+                .cost_law
+                .compute_cost(&out_flat, &tgt_flat, n_classes)
+        }
+    }
+
+    // --- Task 9 windowed drivers (stubs behind the dispatch) -----------------
+
+    /// `feedForwardBackwardTruncate` (`BLSTMNeuralNetwork.cpp:548-590`). Task 9.
+    fn feed_forward_backward_truncate(
+        &mut self,
+        _input: &Array2<f64>,
+        _window_size: usize,
+        _output: &mut Array2<f64>,
+        _target: &Array2<f64>,
+    ) {
+        todo!("Task 9: windowed truncate driver (BLSTMNeuralNetwork.cpp:488-590)");
+    }
+
+    /// `feedForwardBackwardOverLap` (`BLSTMNeuralNetwork.cpp:592-681`). Task 9.
+    fn feed_forward_backward_overlap(
+        &mut self,
+        _input: &Array2<f64>,
+        _window_size: usize,
+        _window_shift: usize,
+        _output: &mut Array2<f64>,
+        _target: &Array2<f64>,
+    ) {
+        todo!("Task 9: overlap driver (BLSTMNeuralNetwork.cpp:592-681)");
+    }
+
+    /// `feedForwardBackwardMLPOverLap` (`BLSTMNeuralNetwork.cpp:683-709`). Task 9.
+    fn feed_forward_backward_mlp_overlap(
+        &mut self,
+        _input: &Array2<f64>,
+        _window_size: usize,
+        _window_shift: usize,
+        _output: &mut Array2<f64>,
+        _target: &Array2<f64>,
+    ) {
+        todo!("Task 9: MLP overlap driver (BLSTMNeuralNetwork.cpp:683-709)");
     }
 }

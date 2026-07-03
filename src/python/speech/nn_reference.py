@@ -291,6 +291,117 @@ def dense_forward_oracle(
     return np.array(y, dtype=np.float64).reshape(t_len, o)
 
 
+def _sub_sample(ratio: int, m: NDArray[np.float64]) -> NDArray[np.float64]:
+    """NeuralNetwork<L>::SubSample (NeuralNetwork.hpp:125-134): T x C -> floor(T/R) x
+    C*R, frame-contiguous temporal stacking, trailing T mod R rows dropped."""
+    t_len, c = m.shape
+    sub_len = t_len // ratio
+    out = np.zeros((sub_len, c * ratio), dtype=np.float64)
+    for jj in range(sub_len):
+        for kk in range(ratio):
+            out[jj, kk * c : (kk + 1) * c] = m[jj * ratio + kk, :]
+    return out
+
+
+def _lstm_net_forward(layers: list[dict[str, object]], sub_sampling: list[int], x: NDArray[np.float64], reverse: bool) -> NDArray[np.float64]:
+    """NeuralNetwork<LSTMLayer>::feedForward / feedForwardReverse over a stack of LSTM
+    layers with per-layer sub-sampling (NeuralNetwork.hpp:158-240). Each layer's input
+    is sub-sampled first when its ratio > 1; the reversal lives inside the layer."""
+    cur = x
+    for jj, layer in enumerate(layers):
+        if sub_sampling[jj] > 1:
+            cur = _sub_sample(sub_sampling[jj], cur)
+        iw = layer["input_w"]
+        fw = layer["feedback_w"]
+        pp = layer["peep"]
+        bs = layer["bias"]
+        flags = layer["flags"]
+        if reverse:
+            cur_rev = cur[::-1, :].copy()
+            y, _, _ = lstm_forward_oracle(iw, fw, pp, bs, cur_rev, flags)  # type: ignore[arg-type]
+            cur = y[::-1, :].copy()
+        else:
+            y, _, _ = lstm_forward_oracle(iw, fw, pp, bs, cur, flags)  # type: ignore[arg-type]
+            cur = y
+    return cur
+
+
+def _dense_net_forward(layers: list[dict[str, object]], sub_sampling: list[int], x: NDArray[np.float64]) -> NDArray[np.float64]:
+    """NeuralNetwork<NeuronLayer>::feedForward over a stack of dense layers with
+    per-layer sub-sampling; only the FINAL layer runs with last_layer=True."""
+    cur = x
+    n = len(layers)
+    for jj, layer in enumerate(layers):
+        if sub_sampling[jj] > 1:
+            cur = _sub_sample(sub_sampling[jj], cur)
+        cur = dense_forward_oracle(
+            layer["weights"],  # type: ignore[arg-type]
+            layer["bias"],  # type: ignore[arg-type]
+            cur,
+            last_layer=(jj == n - 1),
+        )
+    return cur
+
+
+def blstm_forward_oracle(
+    x: NDArray[np.float64],
+    norm_type: int,
+    mean: NDArray[np.float64],
+    std: NDArray[np.float64],
+    fwd_layers: list[dict[str, object]],
+    bwd_layers: list[dict[str, object]],
+    lstm_sub_sampling: list[int],
+    out_layers: list[dict[str, object]],
+    out_sub_sampling: list[int],
+    fwd_input_size: int,
+) -> NDArray[np.float64]:
+    """Independent scalar-loop oracle for the BLSTM wrapper forward path
+    (BLSTMNeuralNetwork.cpp:419-437 core + :715-751/:777-786 normalization), plain
+    (non-windowed) no-targets. Composes the LSTM/dense net oracles above.
+
+    norm_type: 1 (external: (x-mean)/max(1e-12,std) per col < min(cols,mean.size)),
+    -1 / -2 (whole-sequence self-norm: center, sqrt((sum sq + 1e-32)/rows), asinh(x/std)),
+    else no normalization. Returns the output net's output (forward LSTM half LEFT).
+    """
+    xin = np.array(x, dtype=np.float64, copy=True)
+    if norm_type == 1:
+        max_col = min(xin.shape[1], len(mean))
+        for jj in range(max_col):
+            denom = max(1e-12, float(std[jj]))
+            for r in range(xin.shape[0]):
+                xin[r, jj] = (xin[r, jj] - float(mean[jj])) / denom
+    elif norm_type in (-1, -2):
+        # Whole-sequence self-norm with ASCENDING per-column sums (matches the engine's
+        # accumulation order; numpy.sum would drift a few ULP). center; std =
+        # sqrt((sum sq + 1e-32)/rows) with 1e-32 into the SUM; then asinh(x/std).
+        rows, cols = xin.shape
+        for c in range(cols):
+            acc = 0.0
+            for r in range(rows):
+                acc += xin[r, c]
+            m = acc / rows
+            for r in range(rows):
+                xin[r, c] -= m
+        for c in range(cols):
+            acc = 0.0
+            for r in range(rows):
+                acc += xin[r, c] * xin[r, c]
+            sd = math.sqrt((acc + 1e-32) / rows)
+            for r in range(rows):
+                xin[r, c] = _asinh(xin[r, c] / sd)
+
+    # Core forward (:419-437): leftCols gate then forward + reverse + double.
+    fwd_in = xin
+    bwd_in = xin
+    if lstm_sub_sampling[0] > 1 and fwd_input_size < xin.shape[1]:
+        fwd_in = xin[:, :fwd_input_size]
+        bwd_in = xin[:, :fwd_input_size]
+    out_forward = _lstm_net_forward(fwd_layers, lstm_sub_sampling, fwd_in, reverse=False)
+    out_backward = _lstm_net_forward(bwd_layers, lstm_sub_sampling, bwd_in, reverse=True)
+    hcat = np.concatenate([out_forward, out_backward], axis=1)  # forward LEFT
+    return _dense_net_forward(out_layers, out_sub_sampling, hcat)
+
+
 def blstm_forward(inputs: NDArray[np.float64], weights: dict[str, object]) -> NDArray[np.float64]:
     """Reference bidirectional-LSTM forward pass (Phase 2)."""
     ...

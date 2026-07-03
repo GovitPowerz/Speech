@@ -12,9 +12,17 @@ input width tolerance.
 """
 
 import math
+from pathlib import Path
 
 import numpy as np
-from speech.nn_reference import dense_forward_oracle, lstm_forward_oracle
+from speech.nn_reference import (
+    blstm_forward_oracle,
+    dense_forward_oracle,
+    lstm_forward_oracle,
+)
+from speech.weight_bridge import read_bin
+
+PHASE2_DIR = Path(__file__).resolve().parent / "reference_data" / "phase2"
 
 
 def _gate(z: float) -> float:
@@ -221,3 +229,88 @@ def test_dense_input_width_tolerance() -> None:
     y_narrow = dense_forward_oracle(weights, bias, x_narrow, last_layer=False)
     y_toprows = dense_forward_oracle(weights[: big_i - 1, :], bias, x_narrow, last_layer=False)
     assert np.array_equal(y_narrow, y_toprows), "narrow input uses top cols weight rows only"
+
+
+# === BLSTM wrapper oracle (Task 8) ==========================================
+
+
+def _synth_flat_blstm() -> np.ndarray:
+    """The harness Task 8 synthetic flat vector: body = ((k*11+3)%97)/97 - 0.5, with a
+    NONZERO mean/std tail (mean[j]=0.1*(j+1), std[j]=1.0+0.05*j)."""
+
+    def lstm_nb(i: int, o: int) -> int:
+        return 4 * i * o + 4 * o * o + 12 * o + 4 * o
+
+    fwd_nb = lstm_nb(6, 4) + lstm_nb(4, 2)
+    out_nb = 5 * (4 + 1) + 3 * (5 + 1)
+    tail = 2 * 3
+    nb_total = fwd_nb + fwd_nb + out_nb + tail
+    flat = np.array([((k * 11 + 3) % 97) / 97.0 - 0.5 for k in range(nb_total)], dtype=np.float64)
+    for j in range(3):
+        flat[nb_total - tail + j] = 0.1 * (j + 1)
+        flat[nb_total - tail + 3 + j] = 1.0 + 0.05 * j
+    return flat
+
+
+def _unpack_lstm(flat: np.ndarray, pos: int, i: int, o: int) -> tuple[dict, int]:
+    """Column-major unpack of one LSTM layer (LSTMLayer::setWeights layout)."""
+    input_w = flat[pos : pos + i * 4 * o].reshape(4 * o, i).T.copy()
+    pos += i * 4 * o
+    feedback_w = flat[pos : pos + o * 4 * o].reshape(4 * o, o).T.copy()
+    pos += o * 4 * o
+    peep = flat[pos : pos + 12 * o].reshape(o, 12).T.copy()
+    pos += 12 * o
+    bias = flat[pos : pos + 4 * o].reshape(1, 4 * o).copy()
+    pos += 4 * o
+    layer = {"input_w": input_w, "feedback_w": feedback_w, "peep": peep, "bias": bias, "flags": (True, True, True)}
+    return layer, pos
+
+
+def _unpack_dense(flat: np.ndarray, pos: int, i: int, o: int) -> tuple[dict, int]:
+    weights = flat[pos : pos + i * o].reshape(o, i).T.copy()
+    pos += i * o
+    bias = flat[pos : pos + o].reshape(1, o).copy()
+    pos += o
+    return {"weights": weights, "bias": bias}, pos
+
+
+def _synth_net_layers() -> tuple[list, list, list, np.ndarray, np.ndarray]:
+    """Unpack the synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1]) into
+    fwd/bwd LSTM layers, output dense layers, and the mean/std tail."""
+    flat = _synth_flat_blstm()
+    pos = 0
+    fwd_layers = []
+    for i, o in ((6, 4), (4, 2)):
+        layer, pos = _unpack_lstm(flat, pos, i, o)
+        fwd_layers.append(layer)
+    bwd_layers = []
+    for i, o in ((6, 4), (4, 2)):
+        layer, pos = _unpack_lstm(flat, pos, i, o)
+        bwd_layers.append(layer)
+    out_layers = []
+    for i, o in ((4, 5), (5, 3)):
+        layer, pos = _unpack_dense(flat, pos, i, o)
+        out_layers.append(layer)
+    mean = flat[pos : pos + 3].copy()
+    std = flat[pos + 3 : pos + 6].copy()
+    return fwd_layers, bwd_layers, out_layers, mean, std
+
+
+def _synth_input_blstm() -> np.ndarray:
+    return np.array(
+        [[((t * 29 + j * 13 + 5) % 97) / 97.0 - 0.5 for j in range(3)] for t in range(12)],
+        dtype=np.float64,
+    )
+
+
+def test_blstm_oracle_matches_harness_norm_dumps() -> None:
+    # blstm_forward_oracle reproduces the harness synthetic-net norm dumps bit-for-bit
+    # (same libm, ascending accumulation). One dump per normalization type {1,-1,-2,0}.
+    fwd_layers, bwd_layers, out_layers, mean, std = _synth_net_layers()
+    x = _synth_input_blstm()
+    for norm_type, tag in ((1, "1"), (-1, "m1"), (-2, "m2"), (0, "0")):
+        y = blstm_forward_oracle(x, norm_type, mean, std, fwd_layers, bwd_layers, [2, 1], out_layers, [1, 1], 3)
+        rows, cols, flat = read_bin(PHASE2_DIR / f"blstm_norm{tag}_out.bin")
+        want = flat.reshape(cols, rows).T  # column-major -> (rows, cols)
+        assert y.shape == (rows, cols), f"norm {tag}: shape {y.shape} != ({rows},{cols})"
+        assert y.tobytes() == np.ascontiguousarray(want, dtype=np.float64).tobytes(), f"blstm oracle norm {tag} must match the harness dump bit-for-bit"

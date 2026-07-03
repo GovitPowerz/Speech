@@ -2357,6 +2357,405 @@ int main(int argc, char** argv) {
         }
     }
 
+    // --- Phase 2 Task 8: BLSTM input normalization + core bidirectional forward
+    // + plain feedForwardBackward -------------------------------------------
+    // legacy: BLSTMNeuralNetwork.cpp:419-437 (feedForward core), :711-751 (windowed
+    // FFB entry -- normalization types 1/-1 mutate inputSeq IN PLACE, then dispatch),
+    // :776-830 (plain feedForwardBackward -- type -2 into a COPY, then feedForward +
+    // cost). This block reimpls the normalization + core-forward path with ascending
+    // products (reusing lstmForwardLoop / netForwardLoop / netForwardDoubleLoop) and
+    // probes it against the REAL BLSTMNeuralNetwork<LSTMLayer> on each dump.
+    //
+    // Dumps: a synthetic net LSTM [3,4,2] sub [2,1] / output [4,5,3] sub [1,1]
+    // (output[0]==4==2*lstm.back()==2*2), T=12 closed-form input, one dump per
+    // normalization type {1, -1, -2, 0} -> blstm_norm<type>_out.bin + the
+    // (possibly-mutated) input blstm_norm<type>_input_after.bin. Plus the REAL net
+    // (from the vendored config + weights) on a deterministic synthetic 200 x 23
+    // input, plain FFB no targets -> blstm_real_fullseq_{out,fwd,bwd}.bin + its
+    // NN_TOL (EXPECTED NONZERO: the k=23 input GEMM diverges per Task 1 probes).
+    {
+        // Reimpl of the whole-sequence self-normalization (type -1, in place;
+        // BLSTMNeuralNetwork.cpp:737-744). mean = colSum/rows; center row-by-row;
+        // std = sqrt((colSum(centered^2) + 1e-32)/rows) with 1e-32 added to the SUM;
+        // then per row asinh(x/std). Keeps the row-loop op order.
+        auto normalizeType_1 = [](Eigen::MatrixXd& in) {
+            const int R = static_cast<int>(in.rows());
+            const int C = static_cast<int>(in.cols());
+            if (R == 0) return;
+            std::vector<double> mean(C, 0.0);
+            for (int c = 0; c < C; ++c) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += in(r, c);
+                mean[c] = acc / (double)R;
+            }
+            for (int r = 0; r < R; ++r)
+                for (int c = 0; c < C; ++c) in(r, c) -= mean[c];   // :738-740 row-by-row
+            std::vector<double> stdv(C, 0.0);
+            for (int c = 0; c < C; ++c) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += in(r, c) * in(r, c);
+                stdv[c] = std::sqrt((acc + 1e-32) / (double)R);     // 1e-32 into the SUM
+            }
+            for (int r = 0; r < R; ++r)
+                for (int c = 0; c < C; ++c) in(r, c) = Maxmin2::fn(in(r, c) / stdv[c]);
+        };
+
+        // Reimpl of external normalization (type 1, in place;
+        // BLSTMNeuralNetwork.cpp:720-723). Per column jj < min(cols, mean.size()):
+        // (col - mean_jj)/max(1e-12, std_jj); cols beyond mean.size() UNTOUCHED.
+        auto normalizeType1 = [](Eigen::MatrixXd& in, const std::vector<double>& mean,
+                                 const std::vector<double>& stdv) {
+            const int R = static_cast<int>(in.rows());
+            const long maxCol = std::min<long>(in.cols(), (long)mean.size());
+            for (long jj = 0; jj < maxCol; ++jj) {
+                double denom = std::max(1e-12, stdv[(size_t)jj]);
+                for (int r = 0; r < R; ++r) in(r, jj) = (in(r, jj) - mean[(size_t)jj]) / denom;
+            }
+        };
+
+        // Reimpl of per-window self-normalization (type -2, into a COPY;
+        // BLSTMNeuralNetwork.cpp:778-781): replicate/whole-matrix form. Same formula
+        // as type -1 but does NOT mutate the input; returns the normalized copy.
+        auto normalizeType_2 = [](const Eigen::MatrixXd& in) {
+            const int R = static_cast<int>(in.rows());
+            const int C = static_cast<int>(in.cols());
+            Eigen::MatrixXd meanRep(R, C), norm(R, C);
+            for (int c = 0; c < C; ++c) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += in(r, c);
+                double m = acc / (double)R;
+                for (int r = 0; r < R; ++r) meanRep(r, c) = m;
+            }
+            for (int r = 0; r < R; ++r)
+                for (int c = 0; c < C; ++c) norm(r, c) = in(r, c) - meanRep(r, c);
+            std::vector<double> stdv(C, 0.0);
+            for (int c = 0; c < C; ++c) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += norm(r, c) * norm(r, c);
+                stdv[c] = std::sqrt((acc + 1e-32) / (double)R);
+            }
+            for (int r = 0; r < R; ++r)
+                for (int c = 0; c < C; ++c) norm(r, c) = Maxmin2::fn(norm(r, c) / stdv[c]);
+            return norm;
+        };
+
+        // Core feedForward reimpl (BLSTMNeuralNetwork.cpp:419-437): outputLength =
+        // rows divided SEQUENTIALLY by each forward-net LSTM ratio; forward net
+        // feedForward + backward net feedForwardReverse into (outputLength x lstmOut);
+        // leftCols(fwdInputSize) gate when LSTMRatios[0] > 1 && input wider; output
+        // net feedForwardDouble (forward LEFT). Fills outForward/outBackward + output.
+        auto blstmFeedForward =
+            [&](const std::vector<long>& lstmNeuronNb, const std::vector<long>& lstmSub,
+                const std::vector<NetLayerStep>& fwdSteps, const std::vector<NetLayerStep>& bwdSteps,
+                const std::vector<long>& outNeuronNb, const std::vector<long>& outSub,
+                const std::vector<NetLayerStep>& outSteps, int fwdInputSize,
+                const Eigen::MatrixXd& input, Eigen::MatrixXd& outForward,
+                Eigen::MatrixXd& outBackward, Eigen::MatrixXd& output) {
+                long outputLength = input.rows();
+                for (size_t jj = 0; jj < lstmSub.size(); ++jj) outputLength /= lstmSub[jj];
+                (void)outputLength;  // sizing is implicit in the reimpl steps
+                Eigen::MatrixXd fwdIn = input, bwdIn = input;
+                if (lstmSub[0] > 1 && fwdInputSize < input.cols()) {
+                    fwdIn = input.leftCols(fwdInputSize);
+                    bwdIn = input.leftCols(fwdInputSize);
+                }
+                netForwardLoop(lstmNeuronNb, lstmSub, fwdSteps, fwdIn, outForward);
+                netForwardReverseLoop(lstmNeuronNb, lstmSub, bwdSteps, bwdIn, outBackward);
+                netForwardDoubleLoop(outNeuronNb, outSub, outSteps, outForward, outBackward, output);
+            };
+
+        // Build the per-layer forward/reverse steps for an LSTM sub-network from its
+        // flat weight slice (all peepholes on). Returns via out-params so the closures
+        // capture stable references (the unpacked matrices live in the provided vecs).
+        auto makeLstmSteps = [](const Eigen::VectorXd& flat,
+                                const std::vector<int>& ins, const std::vector<int>& outs,
+                                std::vector<Eigen::MatrixXd>& iw, std::vector<Eigen::MatrixXd>& fw,
+                                std::vector<Eigen::MatrixXd>& pp, std::vector<Eigen::MatrixXd>& bs,
+                                std::vector<NetLayerStep>& fwdSteps,
+                                std::vector<NetLayerStep>& bwdSteps) {
+                const size_t L = ins.size();
+                iw.resize(L); fw.resize(L); pp.resize(L); bs.resize(L);
+                fwdSteps.resize(L); bwdSteps.resize(L);
+                long pos = 0;
+                for (size_t jj = 0; jj < L; ++jj) {
+                    int I = ins[jj], O = outs[jj];
+                    long nb = 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+                    Eigen::VectorXd slice = flat.segment(pos, nb);
+                    pos += nb;
+                    unpackLstmWeights(slice, I, O, iw[jj], fw[jj], pp[jj], bs[jj]);
+                }
+                for (size_t jj = 0; jj < L; ++jj) {
+                    int O = outs[jj];
+                    fwdSteps[jj].forward = [&iw, &fw, &pp, &bs, jj, O](const Eigen::MatrixXd& in,
+                                                                      Eigen::MatrixXd& outm, bool) {
+                        Eigen::MatrixXd g;
+                        lstmForwardLoop(in, iw[jj], fw[jj], pp[jj], bs[jj], O, true, true, true, g, outm);
+                    };
+                    bwdSteps[jj].forward = [&iw, &fw, &pp, &bs, jj, O](const Eigen::MatrixXd& in,
+                                                                      Eigen::MatrixXd& outm, bool) {
+                        Eigen::MatrixXd g;
+                        lstmForwardReverseLoop(in, iw[jj], fw[jj], pp[jj], bs[jj], O, true, true, true, g, outm);
+                    };
+                }
+                return pos;
+            };
+
+        // Build the per-layer steps for a dense (NeuronLayer) sub-network from its
+        // flat weight slice. lastLayer flag is threaded by the driver.
+        auto makeDenseSteps = [](const Eigen::VectorXd& flat,
+                                 const std::vector<int>& ins, const std::vector<int>& outs,
+                                 std::vector<Eigen::MatrixXd>& ws, std::vector<Eigen::MatrixXd>& bs,
+                                 std::vector<NetLayerStep>& steps) {
+                const size_t L = ins.size();
+                ws.resize(L); bs.resize(L); steps.resize(L);
+                long pos = 0;
+                for (size_t jj = 0; jj < L; ++jj) {
+                    int I = ins[jj], O = outs[jj];
+                    long nb = (long)O * (I + 1);
+                    Eigen::VectorXd slice = flat.segment(pos, nb);
+                    pos += nb;
+                    ws[jj].resize(I, O); bs[jj].resize(1, O);
+                    for (int c = 0; c < O; ++c)
+                        for (int r = 0; r < I; ++r) ws[jj](r, c) = slice((long)c * I + r);
+                    for (int c = 0; c < O; ++c) bs[jj](0, c) = slice((long)O * I + c);
+                }
+                for (size_t jj = 0; jj < L; ++jj) {
+                    steps[jj].forward = [&ws, &bs, jj](const Eigen::MatrixXd& in,
+                                                       Eigen::MatrixXd& outm, bool last) {
+                        outm = denseForwardLoop(in, ws[jj], bs[jj], last);
+                    };
+                }
+                return pos;
+            };
+
+        // Max ULP/abs gap between the real BLSTM output and the reimpl output.
+        auto probeGap = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                           long& maxUlp, double& maxAbs) {
+            for (int r = 0; r < real.rows(); ++r) {
+                for (int c = 0; c < real.cols(); ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    double absGap = std::fabs(a - b);
+                    if (absGap > maxAbs) maxAbs = absGap;
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > maxUlp) maxUlp = ulp;
+                }
+            }
+        };
+
+        // ---- Synthetic net: LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1] ----
+        // A synthetic prefix "SYNB" is defined in the config with all the keys the
+        // BLSTMNeuralNetwork ctor reads; only _InputNormalizationType varies per dump.
+        {
+            const std::vector<long> lstmNN = {3, 4, 2};
+            const std::vector<long> lstmSS = {2, 1};
+            const std::vector<long> outNN = {4, 5, 3};
+            const std::vector<long> outSS = {1, 1};
+            // Forward/backward LSTM per-layer (in, out): L0 in=3*2=6 out=4; L1 in=4*1=4 out=2.
+            const std::vector<int> lstmIns = {6, 4}, lstmOuts = {4, 2};
+            // Output dense per-layer: L0 in=4 out=5 (asinh); L1 in=5 out=3 (softmax).
+            const std::vector<int> outIns = {4, 5}, outOuts = {5, 3};
+            const int fwdInputSize = 3;  // neuronNb[0]
+            const int T = 12;
+
+            // Deterministic closed-form input (3 raw cols), same family as Task 4/5
+            // but offset so the values are non-degenerate for normalization.
+            Eigen::MatrixXd baseInput(T, 3);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < 3; ++j)
+                    baseInput(t, j) = (double)(((t * 29 + j * 13 + 5) % 97)) / 97.0 - 0.5;
+
+            // Synthetic BLSTM config prefix. Build once; flip InputNormalizationType
+            // per dump. weightsSetExternally=true skips per-layer config weight reads.
+            ConfigFile confB(nnConfigPath, '_');
+            confB._Params.erase("BLSTM_weightsFile");
+            confB.set_val<std::string>("SYNB_LSTMNeuronNb", "3,4,2");
+            confB.set_val<std::string>("SYNB_LSTMSubSampling", "2,1");
+            confB.set_val<std::string>("SYNB_OutputNeuronNb", "4,5,3");
+            confB.set_val<std::string>("SYNB_OutputSubSampling", "1,1");
+            confB.set_val<bool>("SYNB_TwoSweeps", false);
+            confB.set_val<bool>("SYNB_BackPropagationActivated", false);
+            // Peephole flags per direction all default true (unset keys).
+
+            // nb of weights: forward + backward LSTM nets + output dense net + 2*3 tail.
+            auto lstmNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) {
+                    int I = ins[jj], O = outs[jj];
+                    s += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+                }
+                return s;
+            };
+            auto denseNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) s += (long)outs[jj] * (ins[jj] + 1);
+                return s;
+            };
+            const long fwdNb = lstmNetNb(lstmIns, lstmOuts);
+            const long bwdNb = fwdNb;
+            const long outNb = denseNetNb(outIns, outOuts);
+            const long tailNb = 2 * fwdInputSize;
+            const long nbTotal = fwdNb + bwdNb + outNb + tailNb;
+
+            // Synthetic flat vector with a NONZERO mean/std tail (so type 1 actually
+            // shifts/scales). Base formula for the body; the mean tail = 0.1*(idx+1),
+            // the std tail = 1.0 + 0.05*idx (all > 0 so max(1e-12,std)=std).
+            Eigen::VectorXd flat(nbTotal);
+            for (long k = 0; k < nbTotal - tailNb; ++k)
+                flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            std::vector<double> meanTail(fwdInputSize), stdTail(fwdInputSize);
+            for (int j = 0; j < fwdInputSize; ++j) {
+                meanTail[(size_t)j] = 0.1 * (j + 1);
+                stdTail[(size_t)j] = 1.0 + 0.05 * j;
+                flat(nbTotal - tailNb + j) = meanTail[(size_t)j];
+                flat(nbTotal - tailNb + fwdInputSize + j) = stdTail[(size_t)j];
+            }
+
+            // Unpack the reimpl weight steps ONCE (shared across all norm dumps -- the
+            // weights do not change, only the normalization type + input do).
+            Eigen::VectorXd fwdSlice = flat.head(fwdNb);
+            Eigen::VectorXd bwdSlice = flat.segment(fwdNb, bwdNb);
+            Eigen::VectorXd outSlice = flat.segment(fwdNb + bwdNb, outNb);
+            std::vector<Eigen::MatrixXd> fiw, ffw, fpp, fbs, biw, bfw, bpp, bbs, ows, obs;
+            std::vector<NetLayerStep> fwdSteps, fwdStepsRev, bwdSteps, bwdStepsRev, outSteps;
+            makeLstmSteps(fwdSlice, lstmIns, lstmOuts, fiw, ffw, fpp, fbs, fwdSteps, fwdStepsRev);
+            makeLstmSteps(bwdSlice, lstmIns, lstmOuts, biw, bfw, bpp, bbs, bwdSteps, bwdStepsRev);
+            makeDenseSteps(outSlice, outIns, outOuts, ows, obs, outSteps);
+
+            for (int normType : {1, -1, -2, 0}) {
+                confB.set_val<short>("SYNB_InputNormalizationType", (short)normType);
+                BLSTMNeuralNetwork<LSTMLayer> nn(confB, "SYNB", true);
+                nn.setWeights(flat);
+                nn.setProcessingType(false, false);  // plain path (no truncate/overlap)
+
+                // Real class: windowed FFB entry with no targets. window_size/shift
+                // are unused on the plain (non-truncate) path.
+                Eigen::MatrixXd realInput = baseInput;   // MUTATED for type 1/-1
+                Eigen::MatrixXd realOut(6, 3);           // outputLength = 12/2/1 = 6, out 3
+                Eigen::MatrixXd emptyTargets;
+                nn.feedForwardBackward(realInput, 4, 2, realOut, emptyTargets);
+
+                // Reimpl: mirror the windowed entry's normalization + dispatch to the
+                // plain FFB. Type 1/-1 mutate the reimpl input in place; type -2
+                // normalizes into a copy inside the plain FFB; type 0 does nothing.
+                Eigen::MatrixXd reimplInput = baseInput;
+                Eigen::MatrixXd reimplOut, outForward, outBackward;
+                if (normType == 1) {
+                    normalizeType1(reimplInput, meanTail, stdTail);
+                    // analyseInputSeq updates _InputStatistics (no effect on output).
+                    blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                                     fwdInputSize, reimplInput, outForward, outBackward, reimplOut);
+                } else if (normType == -1) {
+                    normalizeType_1(reimplInput);
+                    blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                                     fwdInputSize, reimplInput, outForward, outBackward, reimplOut);
+                } else if (normType == -2) {
+                    Eigen::MatrixXd norm = normalizeType_2(reimplInput);  // input untouched
+                    blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                                     fwdInputSize, norm, outForward, outBackward, reimplOut);
+                } else {
+                    blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                                     fwdInputSize, reimplInput, outForward, outBackward, reimplOut);
+                }
+
+                // Site tag: negative types use an 'm' prefix so the NN_TOL site name
+                // stays \w-safe (the extractor regex is `site=(\w+)`).
+                std::string tag = (normType < 0) ? ("m" + std::to_string(-normType))
+                                                 : std::to_string(normType);
+
+                long maxUlp = 0; double maxAbs = 0.0;
+                probeGap(realOut, reimplOut, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=blstm_norm" << tag
+                          << " max_ulp=" << maxUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << maxAbs << "\n";
+
+                // Verify the reimpl's in-place mutation matches the real class's
+                // mutation (types 1/-1 mutate; -2/0 leave the input identical).
+                long inUlp = 0; double inAbs = 0.0;
+                probeGap(realInput, reimplInput, inUlp, inAbs);
+                std::cout << "NN_TOL site=blstm_norm" << tag << "_input"
+                          << " max_ulp=" << inUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << inAbs << "\n";
+
+                Matrix2BinaryFile(out + "blstm_norm" + tag + "_out.bin", reimplOut);
+                Matrix2BinaryFile(out + "blstm_norm" + tag + "_input_after.bin", reimplInput);
+                dumps += 2;
+            }
+        }
+
+        // ---- Real net full-sequence: plain FFB, no targets, synthetic 200 x 23 ----
+        // The real BLSTMNeuralNetwork<LSTMLayer> (1_worker_1.config + NNweights, 33671)
+        // has _InputNormalizationType == -1 -> whole-sequence self-norm in place. Run
+        // the real windowed FFB (plain path) and reproduce it with the reimpl, dumping
+        // the output + the forward/backward LSTM hidden states.
+        {
+            ConfigFile conf(nnConfigPath, '_');
+            conf._Params.erase("BLSTM_weightsFile");
+            BLSTMNeuralNetwork<LSTMLayer> nn(conf, "BLSTM", true);
+            Eigen::VectorXd flat = BinaryFile2Vector(nnWeightsPath);
+            nn.setWeights(flat);
+            nn.setProcessingType(false, false);
+
+            const int T = 200;
+            Eigen::MatrixXd baseInput(T, 23);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < 23; ++j)
+                    baseInput(t, j) = (double)(((t * 31 + j * 17) % 100)) / 100.0 - 0.5;
+
+            // Real class (input MUTATED by the type -1 self-norm).
+            Eigen::MatrixXd realInput = baseInput;
+            const long outRows = T / 4;  // fwd LSTM sub 4*1 = 4 -> 200/4 = 50
+            Eigen::MatrixXd realOut(outRows, 1);
+            Eigen::MatrixXd emptyTargets;
+            nn.feedForwardBackward(realInput, 4, 2, realOut, emptyTargets);
+
+            // Reimpl. Real net: LSTM [23,24,24] sub [4,1]; output [48,12,1] sub [1,1].
+            const std::vector<long> lstmNN = {23, 24, 24};
+            const std::vector<long> lstmSS = {4, 1};
+            const std::vector<long> outNN = {48, 12, 1};
+            const std::vector<long> outSS = {1, 1};
+            const std::vector<int> lstmIns = {92, 24}, lstmOuts = {24, 24};  // 23*4=92, 24*1=24
+            const std::vector<int> outIns = {48, 12}, outOuts = {12, 1};
+            const int fwdInputSize = 23;
+
+            long fwdNb = 0;
+            for (size_t jj = 0; jj < lstmIns.size(); ++jj) {
+                int I = lstmIns[jj], O = lstmOuts[jj];
+                fwdNb += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+            }
+            long outNbW = 0;
+            for (size_t jj = 0; jj < outIns.size(); ++jj) outNbW += (long)outOuts[jj] * (outIns[jj] + 1);
+
+            Eigen::VectorXd fwdSlice = flat.head(fwdNb);
+            Eigen::VectorXd bwdSlice = flat.segment(fwdNb, fwdNb);
+            Eigen::VectorXd outSlice = flat.segment(2 * fwdNb, outNbW);
+            std::vector<Eigen::MatrixXd> fiw, ffw, fpp, fbs, biw, bfw, bpp, bbs, ows, obs;
+            std::vector<NetLayerStep> fwdSteps, fwdStepsRev, bwdSteps, bwdStepsRev, outSteps;
+            makeLstmSteps(fwdSlice, lstmIns, lstmOuts, fiw, ffw, fpp, fbs, fwdSteps, fwdStepsRev);
+            makeLstmSteps(bwdSlice, lstmIns, lstmOuts, biw, bfw, bpp, bbs, bwdSteps, bwdStepsRev);
+            makeDenseSteps(outSlice, outIns, outOuts, ows, obs, outSteps);
+
+            // Type -1 self-norm in place, then core forward.
+            Eigen::MatrixXd reimplInput = baseInput;
+            normalizeType_1(reimplInput);
+            Eigen::MatrixXd reimplOut, outForward, outBackward;
+            blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                             fwdInputSize, reimplInput, outForward, outBackward, reimplOut);
+
+            long maxUlp = 0; double maxAbs = 0.0;
+            probeGap(realOut, reimplOut, maxUlp, maxAbs);
+            std::cout << "NN_TOL site=blstm_real_fullseq max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+
+            Matrix2BinaryFile(out + "blstm_real_fullseq_out.bin", reimplOut);
+            Matrix2BinaryFile(out + "blstm_real_fullseq_fwd.bin", outForward);
+            Matrix2BinaryFile(out + "blstm_real_fullseq_bwd.bin", outBackward);
+            dumps += 3;
+        }
+    }
+
     std::cout << "OK: " << dumps << " dumps\n";
     return 0;
 }
