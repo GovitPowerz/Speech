@@ -44,8 +44,13 @@ NN_WEIGHTS = PHASE0_DIR / "NNweights_config1.bin"
 # Dumps the harness produces into its output dir, with their expected (rows, cols).
 # Task 2: act_sweep.bin (4 x N: row0 inputs, row1 GatesFunction, row2 Logistic,
 # row3 Maxmin2/asinh). N = len(xs) in main.cpp's Task 2 sweep block (21 probes).
+# Task 3: lstm_w_roundtrip_{in,out}.bin, one column vector each, length
+# nb0 + nb1 where nb0 = LstmLayer(I=3,O=2).nb_of_weights() = 72 and
+# nb1 = LstmLayer(I=2,O=1).nb_of_weights() = 28 -> 100 rows, 1 col.
 EXPECTED_SHAPES = {
     "act_sweep.bin": (4, 21),
+    "lstm_w_roundtrip_in.bin": (100, 1),
+    "lstm_w_roundtrip_out.bin": (100, 1),
 }
 
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
@@ -78,6 +83,14 @@ PROBE_TEXT = (
 
 NN_REAL_RE = re.compile(r"^NN_REAL ok weights=(?P<weights>\d+)$", re.MULTILINE)
 
+# Task 3: LstmLayer nb_of_weights() for the two chained synthetic layers
+# (I=3,O=2 -> 72; I=2,O=1 -> 28), printed by the harness's own getNbOfWeights().
+LSTM_NB_RE = re.compile(
+    r"^NN_REAL ok lstm_nb0=(?P<nb0>\d+) lstm_nb1=(?P<nb1>\d+)$", re.MULTILINE
+)
+EXPECTED_LSTM_NB0 = 72
+EXPECTED_LSTM_NB1 = 28
+
 NN_PROBE_RE = re.compile(
     r"^NN_PROBE site=(?P<site>\w+) diverged=(?P<diverged>\d) mismatches=(?P<mismatches>\d+) "
     r"total=(?P<total>\d+) first=\((?P<row>-?\d+),(?P<col>-?\d+)\) "
@@ -103,6 +116,16 @@ def _parse_nn_real(stdout: str) -> int:
     if weights != EXPECTED_NB_WEIGHTS:
         raise SystemExit(f"NN_REAL weights {weights} != {EXPECTED_NB_WEIGHTS}")
     return weights
+
+
+def _parse_lstm_nb(stdout: str) -> tuple[int, int]:
+    match = LSTM_NB_RE.search(stdout)
+    if match is None:
+        raise SystemExit("Task 3 lstm_nb0/lstm_nb1 line missing from harness stdout")
+    nb0, nb1 = int(match["nb0"]), int(match["nb1"])
+    if (nb0, nb1) != (EXPECTED_LSTM_NB0, EXPECTED_LSTM_NB1):
+        raise SystemExit(f"lstm nb ({nb0},{nb1}) != expected ({EXPECTED_LSTM_NB0},{EXPECTED_LSTM_NB1})")
+    return nb0, nb1
 
 
 def _parse_nn_probes(stdout: str) -> dict[str, dict[str, object]]:
@@ -150,13 +173,15 @@ def main() -> None:
                 str(NN_WEIGHTS),
             ]
         )
-        # Task 2: persist the activation sweep dump into the committed Phase 2 dir
-        # (everything else the harness writes into tmp_dir is feature-stage output
-        # already covered by Phase 1's own fixtures, so only this dump is copied out).
+        # Task 2 (act_sweep.bin) + Task 3 (lstm_w_roundtrip_{in,out}.bin): persist
+        # these dumps into the committed Phase 2 dir (everything else the harness
+        # writes into tmp_dir is feature-stage output already covered by Phase 1's
+        # own fixtures, so only the EXPECTED_SHAPES entries are copied out).
         for name in EXPECTED_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE2_DIR / name)
 
     nb_weights = _parse_nn_real(stdout)
+    lstm_nb0, lstm_nb1 = _parse_lstm_nb(stdout)
     probes = _parse_nn_probes(stdout)
 
     # 2b. Read each dump back, verify its shape, and build the inventory.
@@ -189,6 +214,15 @@ def main() -> None:
             "output_sub_sampling": [1, 1],
         },
         "nb_of_weights": nb_weights,
+        "lstm_layer_chain": {
+            "text": (
+                "Task 3: LstmLayer(conf,'SYNW',0,3,2,true) chained into "
+                "LstmLayer(conf,'SYNW',1,2,1,true) over one synthetic flat vector "
+                "(w[k] = ((k*11+3) % 97)/97.0 - 0.5). nb0/nb1 from getNbOfWeights()."
+            ),
+            "nb0": lstm_nb0,
+            "nb1": lstm_nb1,
+        },
         "nn_product_probes": {
             "text": PROBE_TEXT,
             "sites": probes,

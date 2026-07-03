@@ -31,6 +31,11 @@
     ]
   },
   "nb_of_weights": 33671,
+  "lstm_layer_chain": {
+    "text": "Task 3: LstmLayer(conf,'SYNW',0,3,2,true) chained into LstmLayer(conf,'SYNW',1,2,1,true) over one synthetic flat vector (w[k] = ((k*11+3) % 97)/97.0 - 0.5). nb0/nb1 from getNbOfWeights().",
+    "nb0": 72,
+    "nb1": 28
+  },
   "nn_product_probes": {
     "text": "Eigen blocked product vs the explicit ascending-loop accumulation (matSeq in main.cpp) at the NN product sites; measured fresh by the harness's NN_PROBE on every regeneration, not hardcoded. Extends the Phase 1 dct_gemm_substitution measurement to the LSTM/dense/softmax shapes the NN forward port will use.",
     "sites": {
@@ -88,6 +93,14 @@
     "act_sweep.bin": {
       "rows": 4,
       "cols": 21
+    },
+    "lstm_w_roundtrip_in.bin": {
+      "rows": 100,
+      "cols": 1
+    },
+    "lstm_w_roundtrip_out.bin": {
+      "rows": 100,
+      "cols": 1
     }
   }
 }

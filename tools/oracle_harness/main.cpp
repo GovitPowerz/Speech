@@ -1551,6 +1551,75 @@ int main(int argc, char** argv) {
         ++dumps;
     }
 
+    // --- Phase 2 Task 3: LstmLayer weight (de)serialization + chaining -------
+    // legacy: LSTMLayer.cpp:6-27 (ctor resizes: _InputWeights I x 4O,
+    // _FeedbackWeights O x 4O, _PeepWeight 12 x O, _Biaises 1 x 4O -- NOTE the
+    // header's size comments at LSTMLayer.h:33-36 are stale/wrong; the ctor resizes
+    // are authoritative), :162-207 (setWeights/getWeights: per-block COLUMN-major
+    // element order, block order InputWeights -> FeedbackWeights -> PeepWeight ->
+    // Biaises; setWeights consumes weights.head(getNbOfWeights()) and returns the
+    // tail via weights.tail(...)). Construct a REAL LSTMLayer(conf, "SYNW", 0, 3, 2,
+    // true) (weightsSetExternally=true skips the per-block config-key read path;
+    // the SYNW-prefixed scalar keys -- MaxSaturation/IsCellsPeepholesActive/etc --
+    // all have defaults, so the real ConfigFile from the Task 1 block above is
+    // reusable here without adding any new keys). Feed a synthetic flat vector
+    // (deterministic formula w[k] = ((k*11+3) % 97)/97.0 - 0.5) sized for BOTH
+    // layers back-to-back (first layer's nb + second layer's nb), setWeights on
+    // layer 0, dump the INPUT vector and layer 0's getWeights() output (must be
+    // bit-identical -- pins the mirror), then setWeights the LEFTOVER TAIL into a
+    // second chained layer (I=2, O=1) and dump ITS getWeights() output too (pins
+    // head/tail chaining semantics across two layers sharing one flat vector).
+    {
+        ConfigFile conf(nnConfigPath, '_');
+        conf._Params.erase("BLSTM_weightsFile");
+
+        LSTMLayer layer0(conf, "SYNW", 0, 3, 2, true);
+        LSTMLayer layer1(conf, "SYNW", 1, 2, 1, true);
+
+        const long nb0 = layer0.getNbOfWeights(); // 4*3*2+4*2*2+12*2+4*2 = 24+16+24+8 = 72
+        const long nb1 = layer1.getNbOfWeights(); // 4*2*1+4*1*1+12*1+4*1 = 8+4+12+4 = 28
+        const long nbTotal = nb0 + nb1;
+
+        Eigen::VectorXd flat(nbTotal);
+        for (long k = 0; k < nbTotal; ++k) {
+            flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+        }
+        Eigen::MatrixXd flatDump(nbTotal, 1);
+        flatDump.col(0) = flat;
+        Matrix2BinaryFile(out + "lstm_w_roundtrip_in.bin", flatDump);
+        ++dumps;
+
+        Eigen::VectorXd tail0 = layer0.setWeights(flat);
+        Eigen::VectorXd got0 = layer0.getWeights();
+        if (got0.size() != nb0) {
+            std::cerr << "FATAL: layer0 getWeights() size " << got0.size() << " != " << nb0 << "\n";
+            abort();
+        }
+
+        Eigen::VectorXd tail1 = layer1.setWeights(tail0);
+        Eigen::VectorXd got1 = layer1.getWeights();
+        if (got1.size() != nb1) {
+            std::cerr << "FATAL: layer1 getWeights() size " << got1.size() << " != " << nb1 << "\n";
+            abort();
+        }
+        if (tail1.size() != 0) {
+            std::cerr << "FATAL: tail after both layers is " << tail1.size() << " != 0\n";
+            abort();
+        }
+
+        // Dump layer0's getWeights() concatenated with layer1's getWeights() as one
+        // column vector: rows 0..nb0 pin layer0's mirror, rows nb0..nb0+nb1 pin
+        // layer1's mirror over the leftover tail. Both halves must equal the
+        // corresponding slices of lstm_w_roundtrip_in.bin bit-for-bit.
+        Eigen::MatrixXd outDump(nbTotal, 1);
+        outDump.block(0, 0, nb0, 1) = got0;
+        outDump.block(nb0, 0, nb1, 1) = got1;
+        Matrix2BinaryFile(out + "lstm_w_roundtrip_out.bin", outDump);
+        ++dumps;
+
+        std::cout << "NN_REAL ok lstm_nb0=" << nb0 << " lstm_nb1=" << nb1 << "\n";
+    }
+
     std::cout << "OK: " << dumps << " dumps\n";
     return 0;
 }
