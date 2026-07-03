@@ -80,6 +80,20 @@ EXPECTED_SHAPES["dense_logistic.bin"] = (6, 1)
 EXPECTED_SHAPES["dense_wide.bin"] = (6, 3)
 EXPECTED_SHAPES["dense_narrow.bin"] = (6, 3)
 
+# Task 6: NeuralNetwork container dumps. LSTM net [3,4,2] sub [2,1] on T=11: after
+# SubSample(2) the input drops to floor(11/2)=5 rows; final layer output is 5 x 2
+# (forward AND reverse). Dense net [4,3,2] sub [1,2] on T=11: SubSample(2) between
+# layers -> 5 x 2 (softmax O=2). feedForwardDouble net [10,4,2] sub [1,1] from two
+# 5-col halves on T=11 -> 11 x 2. Chained set_weights round-trip: nbTotal x 1 (LSTM
+# net getNbOfWeights() = 224 + 80 = 304). Kept in sync with main.cpp's Task 6 block.
+_NET_LSTM_NBTOTAL = 304
+EXPECTED_SHAPES["net_lstm_fwd.bin"] = (5, 2)
+EXPECTED_SHAPES["net_lstm_rev.bin"] = (5, 2)
+EXPECTED_SHAPES["net_dense.bin"] = (5, 2)
+EXPECTED_SHAPES["net_double.bin"] = (11, 2)
+EXPECTED_SHAPES["net_w_in.bin"] = (_NET_LSTM_NBTOTAL, 1)
+EXPECTED_SHAPES["net_w_out.bin"] = (_NET_LSTM_NBTOTAL, 1)
+
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
 HARNESS_INPUTS = [
     "excerpt_2ch_8k.wav",
@@ -112,9 +126,7 @@ NN_REAL_RE = re.compile(r"^NN_REAL ok weights=(?P<weights>\d+)$", re.MULTILINE)
 
 # Task 3: LstmLayer nb_of_weights() for the two chained synthetic layers
 # (I=3,O=2 -> 72; I=2,O=1 -> 28), printed by the harness's own getNbOfWeights().
-LSTM_NB_RE = re.compile(
-    r"^NN_REAL ok lstm_nb0=(?P<nb0>\d+) lstm_nb1=(?P<nb1>\d+)$", re.MULTILINE
-)
+LSTM_NB_RE = re.compile(r"^NN_REAL ok lstm_nb0=(?P<nb0>\d+) lstm_nb1=(?P<nb1>\d+)$", re.MULTILINE)
 EXPECTED_LSTM_NB0 = 72
 EXPECTED_LSTM_NB1 = 28
 
@@ -231,6 +243,11 @@ def main() -> None:
     probes = _parse_nn_probes(stdout)
     lstm_nn_tol = _parse_nn_tol(stdout, "lstm_forward")
     dense_nn_tol = _parse_nn_tol(stdout, "dense_forward")
+    # Task 6: container NN_TOL sites (real NeuralNetwork<L> vs the netForwardLoop reimpl).
+    net_lstm_fwd_tol = _parse_nn_tol(stdout, "net_lstm_forward_fwd")
+    net_lstm_rev_tol = _parse_nn_tol(stdout, "net_lstm_forward_rev")
+    net_dense_tol = _parse_nn_tol(stdout, "net_dense_forward")
+    net_double_tol = _parse_nn_tol(stdout, "net_double")
 
     # 2b. Read each dump back, verify its shape, and build the inventory.
     dump_inventory: dict[str, dict[str, int]] = {}
@@ -247,10 +264,7 @@ def main() -> None:
     manifest = {
         "compiler": compiler,
         "brew_versions": {dep: _brew_version(dep) for dep in ["gcc", "eigen@3", "boost"]},
-        "flags": (
-            "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off "
-            "-DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp"
-        ),
+        "flags": ("-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp"),
         "nn_source": {
             "config": "tests/reference_data/phase0/1_worker_1.config",
             "weights": "tests/reference_data/phase0/NNweights_config1.bin",
@@ -296,6 +310,21 @@ def main() -> None:
             ),
             **dense_nn_tol,
         },
+        "network_container_tol": {
+            "text": (
+                "Task 6: max ULP/abs gap between the REAL NeuralNetwork<L>::feedForward / "
+                "feedForwardReverse / feedForwardDouble and the container reimpl "
+                "(netForwardLoop, wired to lstmForwardLoop/denseForwardLoop) over the "
+                "stacked-net cases. max_ulp=0 means the reimpl reproduces the real "
+                "container output bit-for-bit -- the SubSample dropped-tail floor + "
+                "chained set_weights head/tail split + per-layer lastLayer flag + "
+                "double-input hcat (NeuralNetwork.hpp:125-249)."
+            ),
+            "net_lstm_forward_fwd": net_lstm_fwd_tol,
+            "net_lstm_forward_rev": net_lstm_rev_tol,
+            "net_dense_forward": net_dense_tol,
+            "net_double": net_double_tol,
+        },
         "dumps": dump_inventory,
     }
 
@@ -303,10 +332,7 @@ def main() -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     diverged = sum(1 for p in probes.values() if p["diverged"])
-    print(
-        f"OK: weights={nb_weights}, {len(probes)} probes ({diverged} diverged), "
-        f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
-    )
+    print(f"OK: weights={nb_weights}, {len(probes)} probes ({diverged} diverged), manifest -> {manifest_path.relative_to(REPO_ROOT)}")
 
 
 if __name__ == "__main__":

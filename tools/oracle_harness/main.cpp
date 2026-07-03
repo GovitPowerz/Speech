@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -270,6 +271,162 @@ static void lstmForwardReverseLoop(const Eigen::MatrixXd& inputSeq, const Eigen:
     lstmForwardLoop(inputRev, inputW, feedbackW, peep, bias, O,
                     cellsPeep, gatesPeep, gatesRecPeep, gates, outputRev);
     output = outputRev.colwise().reverse();
+}
+
+// Phase 2 Task 5/6: faithful reimpl of NeuronLayer::feedForward (NeuronLayer.cpp:
+// 127-149). Width-tolerant projection via matSeq (cols>I -> leftCols(I); cols<I ->
+// topRows(cols); else plain product), bias .rowwise() BEFORE activation, then one of
+// three activation paths: lastLayer && O>1 -> UNSTABILIZED softmax (exp(a+b) with NO
+// max-subtraction guard, SEQUENTIAL per-row sum in ascending column order, then
+// per-COLUMN cwiseQuotient); lastLayer && O==1 -> Logistic; else Maxmin2/asinh.
+// File-scope so BOTH the Task 5 dense probe AND the Task 6 container driver share
+// one reimpl (Task 6's dense net layers forward through this).
+static Eigen::MatrixXd denseForwardLoop(const Eigen::MatrixXd& inputSeq,
+                                        const Eigen::MatrixXd& weights,
+                                        const Eigen::MatrixXd& bias, bool lastLayer) {
+    const int I = static_cast<int>(weights.rows());
+    const int O = static_cast<int>(weights.cols());
+    const int cols = static_cast<int>(inputSeq.cols());
+    // :129-135 width-tolerant projection.
+    Eigen::MatrixXd activations;
+    if (cols > I) {
+        activations = matSeq(inputSeq.leftCols(I), weights);
+    } else if (cols < I) {
+        activations = matSeq(inputSeq, weights.topRows(cols));
+    } else {
+        activations = matSeq(inputSeq, weights);
+    }
+    const int T = static_cast<int>(activations.rows());
+    // .rowwise() + _Biaises, BEFORE activation (shared by all three paths).
+    Eigen::MatrixXd preAct(T, O);
+    for (int t = 0; t < T; ++t)
+        for (int j = 0; j < O; ++j) preAct(t, j) = activations(t, j) + bias(0, j);
+
+    Eigen::MatrixXd output(T, O);
+    if (lastLayer && O > 1) {
+        // :138 exp(a+b), :139-142 sequential row-sum THEN per-column quotient.
+        Eigen::MatrixXd expOut(T, O);
+        for (int t = 0; t < T; ++t)
+            for (int j = 0; j < O; ++j) expOut(t, j) = std::exp(preAct(t, j));
+        std::vector<double> rowSum(T, 0.0);
+        for (int t = 0; t < T; ++t) {
+            double acc = 0.0;
+            for (int j = 0; j < O; ++j) acc += expOut(t, j);
+            rowSum[t] = acc;
+        }
+        for (int j = 0; j < O; ++j)
+            for (int t = 0; t < T; ++t) output(t, j) = expOut(t, j) / rowSum[t];
+    } else if (lastLayer) {
+        // O == 1: Logistic.
+        for (int t = 0; t < T; ++t)
+            for (int j = 0; j < O; ++j) output(t, j) = Logistic::fn(preAct(t, j));
+    } else {
+        // Maxmin2 (asinh).
+        for (int t = 0; t < T; ++t)
+            for (int j = 0; j < O; ++j) output(t, j) = Maxmin2::fn(preAct(t, j));
+    }
+    return output;
+}
+
+// Phase 2 Task 6: transcription of NeuralNetwork<L>::SubSample (NeuralNetwork.hpp:
+// 125-134). T x C -> floor(T/R) x C*R: the trailing T mod R rows are DROPPED; source
+// row jj*R+kk lands in the block [kk*C, (kk+1)*C) of output row jj (frame-contiguous
+// temporal stacking). R==1 is a plain copy.
+static Eigen::MatrixXd subSampleLoop(long R, const Eigen::MatrixXd& Input) {
+    const long subLen = Input.rows() / R;  // floor: trailing T mod R rows dropped
+    const long C = Input.cols();
+    Eigen::MatrixXd SubInput(subLen, C * R);
+    for (long jj = 0; jj < subLen; ++jj)
+        for (long kk = 0; kk < R; ++kk)
+            SubInput.block(jj, kk * C, 1, C) = Input.row(jj * R + kk);
+    return SubInput;
+}
+
+// Phase 2 Task 6: a per-layer forward step (LSTM or dense), bundling the layer's
+// unpacked weights + its forward direction so the container driver stays layer-type
+// agnostic. `forward(in, out)` runs the reimpl (lstmForwardLoop / denseForwardLoop)
+// and writes `out` (the LSTM step discards its gates cache -- the container never
+// reads it). `lastLayer` is threaded to match the legacy driver's per-layer flag.
+struct NetLayerStep {
+    std::function<void(const Eigen::MatrixXd&, Eigen::MatrixXd&, bool)> forward;
+};
+
+// Phase 2 Task 6: transcription of NeuralNetwork<L>::feedForward (NeuralNetwork.hpp:
+// 158-198). EMPTY input (0 rows) -> silent no-op (outputSeq untouched). Single-layer
+// net (neuronNb.size()==2): optional subsample of the input then layer forward with
+// lastLayer=true. Multi-layer ascending: layer 0 (optionally subsampled input) ->
+// layersOutput[0] (lastLayer=false); middle layers same over layersOutput[jj-1];
+// FINAL layer writes the CALLER-ALLOCATED outputSeq (lastLayer=true). subSampling[jj]
+// gt 1 subsamples that layer's input first. layersOutput is sized per :172/:175/:188/
+// :191 (rows_after_subsample x neuronNb[jj+1]) but our reimpl steps resize `out`
+// themselves, so we just hold the intermediate matrices.
+static void netForwardLoop(const std::vector<long>& neuronNb,
+                           const std::vector<long>& subSampling,
+                           const std::vector<NetLayerStep>& steps,
+                           const Eigen::MatrixXd& Input, Eigen::MatrixXd& outputSeq) {
+    if (Input.rows() == 0) return;  // :159 -- empty input is a no-op
+    const size_t L = neuronNb.size();
+    if (L == 2) {
+        if (subSampling[0] > 1) {
+            Eigen::MatrixXd sub = subSampleLoop(subSampling[0], Input);
+            steps[0].forward(sub, outputSeq, true);
+        } else {
+            steps[0].forward(Input, outputSeq, true);
+        }
+        return;
+    }
+    std::vector<Eigen::MatrixXd> layersOutput(L - 1);
+    for (size_t jj = 0; jj < L - 1; ++jj) {
+        if (jj == 0) {
+            if (subSampling[0] > 1) {
+                Eigen::MatrixXd sub = subSampleLoop(subSampling[0], Input);
+                steps[jj].forward(sub, layersOutput[0], false);
+            } else {
+                steps[jj].forward(Input, layersOutput[0], false);
+            }
+        } else if (jj == L - 2) {
+            if (subSampling[jj] > 1) {
+                Eigen::MatrixXd sub = subSampleLoop(subSampling[jj], layersOutput[jj - 1]);
+                steps[jj].forward(sub, outputSeq, true);
+            } else {
+                steps[jj].forward(layersOutput[jj - 1], outputSeq, true);
+            }
+        } else {
+            if (subSampling[jj] > 1) {
+                Eigen::MatrixXd sub = subSampleLoop(subSampling[jj], layersOutput[jj - 1]);
+                steps[jj].forward(sub, layersOutput[jj], false);
+            } else {
+                steps[jj].forward(layersOutput[jj - 1], layersOutput[jj], false);
+            }
+        }
+    }
+}
+
+// Phase 2 Task 6: transcription of NeuralNetwork<L>::feedForwardReverse (:200-240).
+// IDENTICAL driver to netForwardLoop; the per-step `forward` closures dispatch the
+// REVERSE layer kernel (reversal lives inside the layer). Kept as a separate driver
+// (not a flag on netForwardLoop) to mirror the legacy's two copy-pasted methods.
+static void netForwardReverseLoop(const std::vector<long>& neuronNb,
+                                  const std::vector<long>& subSampling,
+                                  const std::vector<NetLayerStep>& steps,
+                                  const Eigen::MatrixXd& Input, Eigen::MatrixXd& outputSeq) {
+    // The driver is byte-identical to netForwardLoop -- only the step closures differ
+    // (they call the reverse kernel). Delegate to keep the two in lockstep.
+    netForwardLoop(neuronNb, subSampling, steps, Input, outputSeq);
+}
+
+// Phase 2 Task 6: transcription of NeuralNetwork<L>::feedForwardDouble (:242-249).
+// hcat firstInputSeq | secondInputSeq into an (rows x neuronNb[0]) matrix (forward
+// half on the LEFT), then normal forward. Empty first input -> no-op.
+static void netForwardDoubleLoop(const std::vector<long>& neuronNb,
+                                 const std::vector<long>& subSampling,
+                                 const std::vector<NetLayerStep>& steps,
+                                 const Eigen::MatrixXd& first, const Eigen::MatrixXd& second,
+                                 Eigen::MatrixXd& outputSeq) {
+    if (first.rows() == 0) return;  // :243
+    Eigen::MatrixXd Input(first.rows(), neuronNb[0]);
+    Input << first, second;  // :245 forward half LEFT, second half RIGHT
+    netForwardLoop(neuronNb, subSampling, steps, Input, outputSeq);
 }
 
 // Shared regression-deltas kernel over a T x nbDCT block (MelFilterBank.cpp:227-244
@@ -1889,58 +2046,8 @@ int main(int argc, char** argv) {
     // rowwise().sum(), then per-COLUMN cwiseQuotient by that sum]; lastLayer &&
     // O==1 -> Logistic; else Maxmin2/asinh).
     {
-        // Reimpl of NeuronLayer::feedForward (:127-149). Uses matSeq for the
-        // projection (measured ascending-loop contract, spec S8/Task 1). The
-        // softmax row-sum is accumulated in a SEQUENTIAL per-row loop (columns in
-        // ascending order), NOT Eigen's rowwise().sum() reduction -- mirrors the
-        // legacy's own explicit per-column cwiseQuotient loop (:140-142) that this
-        // reimpl also reproduces one column at a time.
-        auto denseForwardLoop = [](const Eigen::MatrixXd& inputSeq, const Eigen::MatrixXd& weights,
-                                    const Eigen::MatrixXd& bias, bool lastLayer) {
-            const int I = static_cast<int>(weights.rows());
-            const int O = static_cast<int>(weights.cols());
-            const int cols = static_cast<int>(inputSeq.cols());
-            // :129-135 width-tolerant projection.
-            Eigen::MatrixXd activations;
-            if (cols > I) {
-                activations = matSeq(inputSeq.leftCols(I), weights);
-            } else if (cols < I) {
-                activations = matSeq(inputSeq, weights.topRows(cols));
-            } else {
-                activations = matSeq(inputSeq, weights);
-            }
-            const int T = static_cast<int>(activations.rows());
-            // .rowwise() + _Biaises, BEFORE activation (shared by all three paths).
-            Eigen::MatrixXd preAct(T, O);
-            for (int t = 0; t < T; ++t)
-                for (int j = 0; j < O; ++j) preAct(t, j) = activations(t, j) + bias(0, j);
-
-            Eigen::MatrixXd output(T, O);
-            if (lastLayer && O > 1) {
-                // :138 exp(a+b), :139-142 sequential row-sum THEN per-column quotient.
-                Eigen::MatrixXd expOut(T, O);
-                for (int t = 0; t < T; ++t)
-                    for (int j = 0; j < O; ++j) expOut(t, j) = std::exp(preAct(t, j));
-                std::vector<double> rowSum(T, 0.0);
-                for (int t = 0; t < T; ++t) {
-                    double acc = 0.0;
-                    for (int j = 0; j < O; ++j) acc += expOut(t, j);
-                    rowSum[t] = acc;
-                }
-                for (int j = 0; j < O; ++j)
-                    for (int t = 0; t < T; ++t) output(t, j) = expOut(t, j) / rowSum[t];
-            } else if (lastLayer) {
-                // O == 1: Logistic.
-                for (int t = 0; t < T; ++t)
-                    for (int j = 0; j < O; ++j) output(t, j) = Logistic::fn(preAct(t, j));
-            } else {
-                // Maxmin2 (asinh).
-                for (int t = 0; t < T; ++t)
-                    for (int j = 0; j < O; ++j) output(t, j) = Maxmin2::fn(preAct(t, j));
-            }
-            return output;
-        };
-
+        // denseForwardLoop is now a file-scope static (hoisted for Task 6 reuse);
+        // the reimpl semantics (:127-149) are unchanged.
         ConfigFile conf(nnConfigPath, '_');
         conf._Params.erase("BLSTM_weightsFile");
 
@@ -2011,6 +2118,243 @@ int main(int argc, char** argv) {
         std::cout << "NN_TOL site=dense_forward max_ulp=" << globalMaxUlp
                   << " max_abs=" << std::scientific << std::setprecision(3)
                   << globalMaxAbs << "\n";
+    }
+
+    // --- Phase 2 Task 6: NeuralNetwork container (sub-sample stacking, chained
+    // weights, double-input MLP) ---------------------------------------------
+    // legacy: NeuralNetwork.hpp:25-249. Build the REAL NeuralNetwork<LSTMLayer> /
+    // NeuralNetwork<NeuronLayer> from the reusable config, set one synthetic flat
+    // vector (Task 3 formula) via NeuralNetwork::setWeights (which chains head/tail
+    // through the layers), and compare its feedForward/feedForwardReverse/
+    // feedForwardDouble against the container reimpl (netForwardLoop etc, wired to
+    // lstmForwardLoop/denseForwardLoop) on the same inputs -> NN_TOL. Dump the reimpl
+    // outputs as the goldens the Rust Network port reproduces. The container reimpl's
+    // per-layer steps re-chain the SAME flat vector into per-layer weight slices,
+    // matching setWeights's head/tail split (each layer consumes nb_of_weights()).
+    {
+        ConfigFile conf(nnConfigPath, '_');
+        conf._Params.erase("BLSTM_weightsFile");
+        // All-peephole-on for every LSTM layer (SYNW-prefixed flags apply uniformly).
+        conf.set_val<bool>("SYNW_IsCellsPeepholesActive", true);
+        conf.set_val<bool>("SYNW_IsGatesPeepholesActive", true);
+        conf.set_val<bool>("SYNW_IsGatesRecurrentPeepholesActive", true);
+
+        // The Task 3/4/5 synthetic flat-vector formula, length n.
+        auto synthFlat = [](long n) {
+            Eigen::VectorXd flat(n);
+            for (long k = 0; k < n; ++k) flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            return flat;
+        };
+        // The Task 4/5 deterministic closed-form input.
+        auto makeInput = [](int T, int cols) {
+            Eigen::MatrixXd x(T, cols);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < cols; ++j)
+                    x(t, j) = (double)(((t * 37 + j * 53 + 7) % 101)) / 101.0 - 0.5;
+            return x;
+        };
+        // Max ULP/abs gap between the real network output and the reimpl output.
+        auto probeGap = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                           long& maxUlp, double& maxAbs) {
+            for (int r = 0; r < real.rows(); ++r) {
+                for (int c = 0; c < real.cols(); ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    double absGap = std::fabs(a - b);
+                    if (absGap > maxAbs) maxAbs = absGap;
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > maxUlp) maxUlp = ulp;
+                }
+            }
+        };
+
+        // ---- 2-layer LSTM net [3,4,2] sub [2,1] on T=11 (odd -> dropped-tail floor).
+        // Layer sizes: L0 = LSTMLayer(in=neuronNb[0]*sub[0]=6, out=neuronNb[1]=4);
+        // L1 = LSTMLayer(in=neuronNb[1]*sub[1]=4, out=neuronNb[2]=2). SubSample(2) on
+        // the 11-row input drops row 10 -> 5 rows.
+        {
+            const std::vector<std::vector<double>::size_type> neuronNb = {3, 4, 2};
+            const std::vector<std::vector<double>::size_type> subSampling = {2, 1};
+            const std::vector<long> nnL = {3, 4, 2};
+            const std::vector<long> ssL = {2, 1};
+            const int L0in = 6, L0out = 4, L1in = 4, L1out = 2;
+
+            NeuralNetwork<LSTMLayer> net(conf, "SYNW", neuronNb, subSampling, true);
+            const long nbTotal = net.getNbOfWeights();
+            Eigen::VectorXd flat = synthFlat(nbTotal);
+            net.setWeights(flat);
+
+            // Re-chain the SAME flat vector into per-layer slices (head/tail split).
+            LSTMLayer probe0(conf, "SYNW", 0, (size_t)L0in, (size_t)L0out, true);
+            LSTMLayer probe1(conf, "SYNW", 1, (size_t)L1in, (size_t)L1out, true);
+            const long nb0 = probe0.getNbOfWeights();
+            const long nb1 = probe1.getNbOfWeights();
+            Eigen::VectorXd flat0 = flat.head(nb0);
+            Eigen::VectorXd flat1 = flat.segment(nb0, nb1);
+            Eigen::MatrixXd iw0, fw0, pp0, bs0, iw1, fw1, pp1, bs1;
+            unpackLstmWeights(flat0, L0in, L0out, iw0, fw0, pp0, bs0);
+            unpackLstmWeights(flat1, L1in, L1out, iw1, fw1, pp1, bs1);
+
+            Eigen::MatrixXd input = makeInput(11, 3);
+
+            for (bool reverse : {false, true}) {
+                std::vector<NetLayerStep> steps(2);
+                if (!reverse) {
+                    steps[0].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool) {
+                        Eigen::MatrixXd g;
+                        lstmForwardLoop(in, iw0, fw0, pp0, bs0, L0out, true, true, true, g, outm);
+                    };
+                    steps[1].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool) {
+                        Eigen::MatrixXd g;
+                        lstmForwardLoop(in, iw1, fw1, pp1, bs1, L1out, true, true, true, g, outm);
+                    };
+                } else {
+                    steps[0].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool) {
+                        Eigen::MatrixXd g;
+                        lstmForwardReverseLoop(in, iw0, fw0, pp0, bs0, L0out, true, true, true, g, outm);
+                    };
+                    steps[1].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool) {
+                        Eigen::MatrixXd g;
+                        lstmForwardReverseLoop(in, iw1, fw1, pp1, bs1, L1out, true, true, true, g, outm);
+                    };
+                }
+                const long outRows = 11 / 2;  // floor after SubSample(2)
+                Eigen::MatrixXd reimplOut, realOut(outRows, L1out);
+                netForwardLoop(nnL, ssL, steps, input, reimplOut);
+                if (reverse) net.feedForwardReverse(input, realOut);
+                else net.feedForward(input, realOut);
+
+                long maxUlp = 0; double maxAbs = 0.0;
+                probeGap(realOut, reimplOut, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=net_lstm_forward" << (reverse ? "_rev" : "_fwd")
+                          << " max_ulp=" << maxUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << maxAbs << "\n";
+                Matrix2BinaryFile(out + (reverse ? "net_lstm_rev.bin" : "net_lstm_fwd.bin"), reimplOut);
+                ++dumps;
+            }
+
+            // Chained set_weights round-trip: dump the input flat vector and the
+            // network's getWeights() output (must be bit-identical -- pure copy).
+            Eigen::MatrixXd inDump(nbTotal, 1);
+            inDump.col(0) = flat;
+            Matrix2BinaryFile(out + "net_w_in.bin", inDump);
+            Eigen::VectorXd got = net.getWeights();
+            if (got.size() != nbTotal) {
+                std::cerr << "FATAL: net getWeights() size " << got.size() << " != " << nbTotal << "\n";
+                abort();
+            }
+            Eigen::MatrixXd outDump(nbTotal, 1);
+            outDump.col(0) = got;
+            Matrix2BinaryFile(out + "net_w_out.bin", outDump);
+            dumps += 2;
+        }
+
+        // ---- Dense net [4,3,2] sub [1,2] on T=11. L0 = NeuronLayer(in=4, out=3)
+        // lastLayer=false (asinh); SubSample(2) between layers drops row 10 -> 5 rows;
+        // L1 = NeuronLayer(in=neuronNb[1]*sub[1]=6, out=2) lastLayer=true (softmax O=2).
+        {
+            const std::vector<std::vector<double>::size_type> neuronNb = {4, 3, 2};
+            const std::vector<std::vector<double>::size_type> subSampling = {1, 2};
+            const std::vector<long> nnD = {4, 3, 2};
+            const std::vector<long> ssD = {1, 2};
+            const int L0in = 4, L0out = 3, L1in = 6, L1out = 2;
+
+            NeuralNetwork<NeuronLayer> net(conf, "SYNW", neuronNb, subSampling, true);
+            const long nbTotal = net.getNbOfWeights();
+            Eigen::VectorXd flat = synthFlat(nbTotal);
+            net.setWeights(flat);
+
+            const long nb0 = (long)L0out * (L0in + 1);
+            Eigen::VectorXd flat0 = flat.head(nb0);
+            Eigen::VectorXd flat1 = flat.segment(nb0, (long)L1out * (L1in + 1));
+            Eigen::MatrixXd w0(L0in, L0out), b0(1, L0out), w1(L1in, L1out), b1(1, L1out);
+            for (int jj = 0; jj < L0out; ++jj)
+                for (int ii = 0; ii < L0in; ++ii) w0(ii, jj) = flat0((long)jj * L0in + ii);
+            for (int jj = 0; jj < L0out; ++jj) b0(0, jj) = flat0((long)L0out * L0in + jj);
+            for (int jj = 0; jj < L1out; ++jj)
+                for (int ii = 0; ii < L1in; ++ii) w1(ii, jj) = flat1((long)jj * L1in + ii);
+            for (int jj = 0; jj < L1out; ++jj) b1(0, jj) = flat1((long)L1out * L1in + jj);
+
+            std::vector<NetLayerStep> steps(2);
+            steps[0].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool last) {
+                outm = denseForwardLoop(in, w0, b0, last);
+            };
+            steps[1].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool last) {
+                outm = denseForwardLoop(in, w1, b1, last);
+            };
+
+            Eigen::MatrixXd input = makeInput(11, 4);
+            const long outRows = 11 / 2;  // floor after SubSample(2) at layer 1
+            Eigen::MatrixXd reimplOut, realOut(outRows, L1out);
+            netForwardLoop(nnD, ssD, steps, input, reimplOut);
+            net.feedForward(input, realOut);
+
+            long maxUlp = 0; double maxAbs = 0.0;
+            probeGap(realOut, reimplOut, maxUlp, maxAbs);
+            std::cout << "NN_TOL site=net_dense_forward max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            Matrix2BinaryFile(out + "net_dense.bin", reimplOut);
+            ++dumps;
+        }
+
+        // ---- feedForwardDouble on a dense net [10,4,2] sub [1,1] from two 5-col
+        // halves (forward half LEFT). L0 = NeuronLayer(in=10, out=4) lastLayer=false;
+        // L1 = NeuronLayer(in=4, out=2) lastLayer=true (softmax). Asymmetric halves so
+        // an accidental first/second swap changes the hcat and the output.
+        {
+            const std::vector<std::vector<double>::size_type> neuronNb = {10, 4, 2};
+            const std::vector<std::vector<double>::size_type> subSampling = {1, 1};
+            const std::vector<long> nnD = {10, 4, 2};
+            const std::vector<long> ssD = {1, 1};
+            const int L0in = 10, L0out = 4, L1in = 4, L1out = 2;
+
+            NeuralNetwork<NeuronLayer> net(conf, "SYNW", neuronNb, subSampling, true);
+            const long nbTotal = net.getNbOfWeights();
+            Eigen::VectorXd flat = synthFlat(nbTotal);
+            net.setWeights(flat);
+
+            const long nb0 = (long)L0out * (L0in + 1);
+            Eigen::VectorXd flat0 = flat.head(nb0);
+            Eigen::VectorXd flat1 = flat.segment(nb0, (long)L1out * (L1in + 1));
+            Eigen::MatrixXd w0(L0in, L0out), b0(1, L0out), w1(L1in, L1out), b1(1, L1out);
+            for (int jj = 0; jj < L0out; ++jj)
+                for (int ii = 0; ii < L0in; ++ii) w0(ii, jj) = flat0((long)jj * L0in + ii);
+            for (int jj = 0; jj < L0out; ++jj) b0(0, jj) = flat0((long)L0out * L0in + jj);
+            for (int jj = 0; jj < L1out; ++jj)
+                for (int ii = 0; ii < L1in; ++ii) w1(ii, jj) = flat1((long)jj * L1in + ii);
+            for (int jj = 0; jj < L1out; ++jj) b1(0, jj) = flat1((long)L1out * L1in + jj);
+
+            std::vector<NetLayerStep> steps(2);
+            steps[0].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool last) {
+                outm = denseForwardLoop(in, w0, b0, last);
+            };
+            steps[1].forward = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool last) {
+                outm = denseForwardLoop(in, w1, b1, last);
+            };
+
+            // Asymmetric halves: first = makeInput(T,5); second = makeInput shifted so
+            // swapping first/second yields a different hcat (a swap must fail the test).
+            const int T = 11;
+            Eigen::MatrixXd first(T, 5), second(T, 5);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < 5; ++j) {
+                    first(t, j) = (double)(((t * 37 + j * 53 + 7) % 101)) / 101.0 - 0.5;
+                    second(t, j) = (double)(((t * 41 + j * 59 + 13) % 103)) / 103.0 - 0.5;
+                }
+
+            Eigen::MatrixXd reimplOut, realOut(T, L1out);
+            netForwardDoubleLoop(nnD, ssD, steps, first, second, reimplOut);
+            net.feedForwardDouble(first, second, realOut);
+
+            long maxUlp = 0; double maxAbs = 0.0;
+            probeGap(realOut, reimplOut, maxUlp, maxAbs);
+            std::cout << "NN_TOL site=net_double max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            Matrix2BinaryFile(out + "net_double.bin", reimplOut);
+            ++dumps;
+        }
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

@@ -101,6 +101,29 @@
     "max_ulp": 0,
     "max_abs": "0.000e+00"
   },
+  "network_container_tol": {
+    "text": "Task 6: max ULP/abs gap between the REAL NeuralNetwork<L>::feedForward / feedForwardReverse / feedForwardDouble and the container reimpl (netForwardLoop, wired to lstmForwardLoop/denseForwardLoop) over the stacked-net cases. max_ulp=0 means the reimpl reproduces the real container output bit-for-bit -- the SubSample dropped-tail floor + chained set_weights head/tail split + per-layer lastLayer flag + double-input hcat (NeuralNetwork.hpp:125-249).",
+    "net_lstm_forward_fwd": {
+      "site": "net_lstm_forward_fwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "net_lstm_forward_rev": {
+      "site": "net_lstm_forward_rev",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "net_dense_forward": {
+      "site": "net_dense_forward",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "net_double": {
+      "site": "net_double",
+      "max_ulp": 2,
+      "max_abs": "1.110e-16"
+    }
+  },
   "dumps": {
     "act_sweep.bin": {
       "rows": 4,
@@ -309,6 +332,30 @@
     "dense_narrow.bin": {
       "rows": 6,
       "cols": 3
+    },
+    "net_lstm_fwd.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "net_lstm_rev.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "net_dense.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "net_double.bin": {
+      "rows": 11,
+      "cols": 2
+    },
+    "net_w_in.bin": {
+      "rows": 304,
+      "cols": 1
+    },
+    "net_w_out.bin": {
+      "rows": 304,
+      "cols": 1
     }
   }
 }

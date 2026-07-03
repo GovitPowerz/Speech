@@ -376,6 +376,26 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   activations; the training-time weight scale in practice keeps this from triggering on the observed
   corpora, which is presumably why it was never noticed.
 
+- **[phase2] `NeuralNetwork` copy constructor is ILL-FORMED C++ (never ported)** (`NeuralNetwork.hpp:39-51`):
+  the copy ctor body writes `_NeuronNb(neuralNetwork._NeuronNb);` etc as *statements* -- calling
+  `operator()` (element access) on already-constructed member vectors and discarding the result, NOT the
+  member-initializer-list copies it was meant to be. It compiles only because the template is never
+  copy-instantiated (dead code). The Rust port deliberately omits any `Clone`/copy path for `Network<L>`;
+  callers rebuild via `new` + `set_weights`. Provenance note, not a bug to reproduce. *Fix candidate:* if a
+  copy is ever needed, derive `Clone` correctly (the legacy intent was a deep copy that clears the
+  `_LayersOutput`/`_LayersOutputErrors` caches).
+
+- **[phase2] `NeuralNetwork::SubSample` DROPS the trailing `T mod R` frames (integer floor)**
+  (`nn/network.rs::sub_sample`, from `NeuralNetwork.hpp:125-134`): the sub-sampled length is
+  `Input.rows()/subSamplingRatio` (integer floor), so on a T not divisible by R the last `T mod R` input
+  rows are silently discarded -- e.g. T=11, R=2 -> 5 output rows, frame 10 dropped. Load-bearing for the
+  container output row count (`floor(T/ratio)`) and pinned by the T=11 goldens (odd length). Reproduced
+  exactly; NOT a bug to fix (the recurrent nets tolerate the boundary loss). Note the nested-floor
+  identity: applying `SubSample(a)` then `SubSample(b)` equals `SubSample(a*b)` in row count
+  (`floor(floor(T/a)/b) == floor(T/(a*b))`), so the legacy's SEQUENTIAL per-layer division is not a
+  distinguishable choice from a single product division -- ported as the legacy writes it (sequential),
+  documented here rather than tested against a phantom counterexample.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
