@@ -338,6 +338,294 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   The Task 9 pitch golden was dumped with `dc_offset = false`, so the golden stays valid (both sides pass
   `false` for that dump). Not a bug per se -- a wiring gap closed; noted for provenance.
 
+- **[phase2] LSTM `feedForwardReverse` leaves the `_Gates`/`_CellStates`/`_CellsIn` caches in
+  REVERSED-input order** (`nn/layers.rs` `feed_forward_reverse`, from `LSTMLayer.cpp:415-421`): the
+  reverse pass is implemented as reverse-input -> `feedForward` -> reverse-output; only `outputSeq` is
+  un-reversed, so after a reverse pass the caches (which the backward pass reads) correspond to the
+  reversed sequence, NOT the natural time order. Reproduced exactly: the Rust caches match, and the
+  reverse gate goldens (`lstm_gates_*_rev.bin`) are dumped in reversed-input order to match. *Fix
+  candidate:* none needed -- the Task 5+ backward pass must consume the caches in the same reversed
+  order the legacy does; documented so the reverse-order cache state is not "fixed" into forward order.
+
+- **[phase2] DEAD hand-unrolled `feedForwardReverse` variant with DIFFERENT peephole grouping (not
+  ported)** (`LSTMLayer.cpp:423-516`, commented out): a second `feedForwardReverse` body exists fully
+  commented out; it splits the two-term gates-peep expressions (`:362-363` in the live forward) into
+  SEPARATE `+=` adds (e.g. `:464-465` add `P[4]` then `P[5]` in two statements) rather than the live
+  code's single combined expression. Porting from it would change the FP accumulation order and break
+  bit-exactness. The port follows the LIVE `feedForward` (`:312-413`) exclusively. Confirmed neutral by
+  the harness NN_TOL probe: the ascending-loop reimpl matches the REAL compiled `LSTMLayer::feedForward`
+  with `max_ulp=0` over the whole forward/reverse grid. *Fix candidate:* delete the dead block in a
+  post-parity legacy cleanup.
+
+- **[phase2] LSTM `feedForward` `lastLayer` parameter is UNUSED** (`nn/layers.rs` `feed_forward` /
+  `feed_forward_reverse`, from `LSTMLayer.cpp:312,415`): the legacy signature carries `bool lastLayer`
+  but the LSTM forward never reads it (it matters only for the output MLP `NeuronLayer`). Kept in the
+  Rust signature for parity with the `Layer` dispatch and the legacy call sites; bound to `let _ =`.
+  Provenance note, not a bug.
+
+- **[phase2] `NeuronLayer` output softmax is UNSTABILIZED -- no max-subtraction overflow guard**
+  (`nn/layers.rs` `NeuronLayer::feed_forward`, from `NeuronLayer.cpp:138-142`): `lastLayer && O>1`
+  computes `exp(a+b)` directly on the raw pre-activation values with no `- max(row)` shift before the
+  exponential, unlike a numerically-stabilized softmax. Large pre-activations can overflow `exp` to
+  `inf` (and `inf/inf = NaN` in the row-sum quotient); the legacy has no guard against this and the port
+  reproduces it exactly, incl. the row-sum being a SEQUENTIAL per-row loop over ascending columns
+  (`:139`, not a reduction) followed by a per-COLUMN `cwiseQuotient` (`:140-142`). Confirmed neutral by
+  the harness NN_TOL probe: the ascending-loop reimpl matches the REAL compiled
+  `NeuronLayer::feedForward` with `max_ulp=0` over the whole dump grid. *Fix candidate:* after parity,
+  add a `- rowwise().maxCoeff()` shift before the `exp` for numerical safety on unseen inputs with large
+  activations; no overflow triggers on the committed fixtures or the real-net E2E run.
+
+- **[phase2] `NeuralNetwork` copy constructor is ILL-FORMED C++ (never ported)** (`NeuralNetwork.hpp:39-51`):
+  the copy ctor body writes `_NeuronNb(neuralNetwork._NeuronNb);` etc as *statements* -- calling
+  `operator()` (element access) on already-constructed member vectors and discarding the result, NOT the
+  member-initializer-list copies it was meant to be. It compiles only because the template is never
+  copy-instantiated (dead code). The Rust port deliberately omits any `Clone`/copy path for `Network<L>`;
+  callers rebuild via `new` + `set_weights`. Provenance note, not a bug to reproduce. *Fix candidate:* if a
+  copy is ever needed, derive `Clone` correctly (the legacy intent was a deep copy that clears the
+  `_LayersOutput`/`_LayersOutputErrors` caches).
+
+- **[phase2] `NeuralNetwork::SubSample` DROPS the trailing `T mod R` frames (integer floor)**
+  (`nn/network.rs::sub_sample`, from `NeuralNetwork.hpp:125-134`): the sub-sampled length is
+  `Input.rows()/subSamplingRatio` (integer floor), so on a T not divisible by R the last `T mod R` input
+  rows are silently discarded -- e.g. T=11, R=2 -> 5 output rows, frame 10 dropped. Load-bearing for the
+  container output row count (`floor(T/ratio)`) and pinned by the T=11 goldens (odd length). Reproduced
+  exactly; NOT a bug to fix (the recurrent nets tolerate the boundary loss). Note the nested-floor
+  identity: applying `SubSample(a)` then `SubSample(b)` equals `SubSample(a*b)` in row count
+  (`floor(floor(T/a)/b) == floor(T/(a*b))`), so the legacy's SEQUENTIAL per-layer division is not a
+  distinguishable choice from a single product division -- ported as the legacy writes it (sequential),
+  documented here rather than tested against a phantom counterexample.
+
+- **[phase2] `feedForwardBackwardTruncateSweep` SILENTLY DROPS a trailing chunk with `lengthShort == 0`**
+  (`nn/blstm.rs::feed_forward_backward_truncate_sweep`, from `BLSTMNeuralNetwork.cpp:534-542`): the
+  non-overlapping window loop advances `jj += window_size`; the partial LAST window recomputes its
+  post-subsampling length by SEQUENTIAL floors (LSTM ratios then Output ratios). When the trailing chunk
+  is shorter than the subsampling ratio (e.g. a 1-row tail with LSTM ratio 2 -> `1/2 = 0`), the
+  `if (lengthShort > 0)` guard skips it entirely -- the corresponding `outputSeq` rows keep the CALLER's
+  prior contents (never written). Pinned by the T=19 window-6 golden (`blstm_truncate_out.bin`, row 9
+  retains its pre-seed). Load-bearing: the caller must pre-zero (or otherwise initialize) `outputSeq` or
+  the dropped rows carry garbage. Reproduced, no guard. *Fix candidate:* after parity, either process the
+  short tail at reduced length or explicitly zero the dropped rows.
+
+- **[phase2] TwoSweeps makes `_OutputForward`/`_OutputBackward` DOUBLE-WIDTH** (`nn/blstm.rs::
+  feed_forward_backward_truncate`, from `BLSTMNeuralNetwork.cpp:583-586`): the two-sweeps branch runs a
+  front-padded sweep and a shift-offset sweep, then HCATs each sweep's hidden-state window into the member
+  matrices, so `_OutputForward` comes out `rows x 2*lstmOut` instead of `rows x lstmOut`. The
+  `(window_size/2)/ratio` integer division ORDER (`window_size/2` FIRST) is load-bearing for `shiftShort`;
+  sweep 1 drops the FRONT padding but KEEPS the back padding. Pinned by `blstm_twosweeps_fwd.bin` (10x4 for
+  a 2-wide LSTM). Provenance quirk (a downstream consumer that assumes single-width would misread it); not
+  a bug to fix pre-parity.
+
+- **[phase2] `feedForwardBackwardOverLap` divides `0/0 -> NaN` on rows no window covers**
+  (`nn/blstm.rs::feed_forward_backward_overlap`, from `BLSTMNeuralNetwork.cpp:674-679`): output + hidden
+  states are accumulated per row and then divided by per-row hit COUNTS; a `window_shift > 2*window_size+1`
+  leaves gap rows with count 0, so the final `cwiseQuotient` computes `0.0/0.0 = NaN` with no guard. Also
+  the count-quotient loop bound is `_OutputForward.cols()` for BOTH the forward and the backward quotient
+  (assumes equal widths). Window bounds are SNAPPED to the subsampling grid (begin down via
+  `(begin/ratio)*ratio`, end up via `((end+1)/ratio)*ratio-1`). Pinned by `blstm_overlap_nan_out.bin`
+  (rows 6-9 NaN). Reproduced exactly, no guard. *Fix candidate:* after parity, guard uncovered rows (leave
+  them zero or carry the caller's value) instead of emitting NaN.
+
+- **[phase2] `feedForwardBackwardMLPOverLap` IGNORES the passed `window_size`** (`nn/blstm.rs::
+  feed_forward_backward_mlp_overlap`, from `BLSTMNeuralNetwork.cpp:686`): the method's first act is
+  `window_size = getSubSamplingRatio()/2`, discarding whatever the caller passed; `length_short` is a hard
+  `1`. Only EXACT windows (`length_seq == 2*window_size+1`) are processed -- edge windows are skipped, so
+  those `outputSeq` rows keep the caller's contents -- and `_OutputForward`/`_OutputBackward` are EMPTIED
+  at the end. Pinned by `blstm_mlpoverlap_out.bin` (row 0 edge-skipped -> stays 0) and a test that calls
+  with a deliberately-wrong `window_size` and asserts the identical output. Provenance quirk; not a bug.
+
+- **[phase2] Real-config feature width (11) does not match the trained net's input (23)** (E2E gate,
+  `BLSTMNeuralNetwork.cpp:428-434` feedForward width tolerance): the REAL `1_worker_1.config` DSP keys
+  (`nb_DCT 4`, `IgnoreFirstDCT true`, `ComputeDeltasNb 5`, `ComputeDeltaDeltasNb 3`) produce a `201 x 11`
+  input sequence (`3*nb_DCT - 1 = 11`; `LTSVwindow 0` -> no LTSV column), but the net's `LSTMNeuronNb[0]`
+  is 23. The legacy feeds the mismatched-width input anyway: the `leftCols(inputSize)` crop only fires when
+  `LSTMRatios[0] > 1 && netInput < inputCols` (`11 < 23` is false, so no crop), and the per-layer input GEMM
+  then silently uses `topRows(cols)` of the 23-row weight block -- i.e. the trained net consumes only the
+  first 11 of its 23 input weights, leaving 12 rows of layer-0 input weights DEAD. This is almost certainly a
+  stale-config artifact (the `.mat` net was trained for a 23-dim front-end that this `.config` no longer
+  produces), but it is load-bearing for the golden: `e2e_out_full.bin` / `e2e_out_overlap.bin` are the real
+  class's actual output under this mismatch. Pinned bit-exact by `phase2_e2e_gate.rs`. Reproduced exactly;
+  *fix candidate:* once the training loop is ported, validate `feature_dim == net_input_size` at config load
+  and error (or re-derive) instead of silently truncating.
+
+- **[phase2] LSTM config-text weight branch writes only peephole rows 0-2; rows 3-11 UNINITIALIZED
+  (UB); the port zero-initializes** (`LSTMLayer.cpp:21,53-124`): the ctor resizes `_PeepWeight` to
+  `12 x _OutputSize` (:21) -- an Eigen resize, no zeroing -- but the per-block config-text branch
+  (:53-124, taken when explicit weight keys are present rather than the 1e24 random sentinel) assigns
+  ONLY rows 0/1/2 (:72, :89, :106, the cells-peephole rows). Rows 3-11 -- the gates/recurrent peephole
+  rows the forward reads at :357-368 and :394 whenever `_isGatesPeepholesActive` /
+  `_isGatesReccurentPeepholesActive` (both default true) -- stay INDETERMINATE, and
+  `_PeepWeight /= adimCoeff` (:129) then divides the garbage. Only the random-table branch (:44-48)
+  fills all 12 rows. The port deliberately deviates: `LstmLayer::new` zero-initializes every block and
+  weights only ever arrive via the flat `set_weights` seam (the legacy `weightsSetExternally == true`
+  path); the config-text weight-reading branch is NOT ported. Parity-neutral for the goldens (all
+  fixtures set weights externally). *Fix candidate:* if the config-text branch is ever ported, zero
+  rows 3-11 explicitly (the port's `new` already does).
+
+- **[phase2] Config KEY spells "Recurrent" correctly; the C++ member is misspelled "Reccurent"**
+  (`LSTMLayer.cpp:13`, `LSTMLayer.h:31`): `conf.get<bool>(prefix+"_IsGatesRecurrentPeepholesActive")`
+  is stored in `_isGatesReccurentPeepholesActive`. Internally consistent (the misspelling never leaks
+  into the config format), but a grep keyed on the member spelling misses every config-key site and
+  vice versa -- an easy way to port the wrong default or miss a flag consumer. The port uses the
+  correctly-spelled key (`config.rs`, `nn/blstm.rs`) and a conventional member name
+  (`gates_rec_peep`). Provenance note, not a bug.
+
+- **[phase2] `_MaxSaturation` config key is read and stored but ALL uses are commented out (dead)**
+  (`LSTMLayer.cpp:10` read; every consumer commented out at :371-380, :401-408, :693, :888; same
+  read in `SRNLayer.cpp:10` and `CWRNNLayer.cpp:10`): the ctor reads `prefix_MaxSaturation`
+  (default -1) into `_MaxSaturation` and the copy ctor copies it (:142), but the forward saturation
+  reset and the backward saturation counter that consume it are all commented out -- the key is
+  config-surface dead weight. The port drops the key and the member entirely. *Fix candidate:*
+  delete the key from the legacy config schema in a post-parity cleanup (or deliberately resurrect
+  the saturation logic).
+
+- **[phase2] `_NbOfSeqFedBackward` is never initialized by the MAIN ctor; the COPY ctor accidentally
+  launders it** (`LSTMLayer.cpp:6-136` has no init vs the copy ctor's `= 0` at :155; same pattern in
+  `SRNLayer.cpp:67`, `CWRNNLayer.cpp:84`, `NeuronLayer.cpp:66` -- only `ConvolutionalLayer.cpp:40`
+  initializes it in the main ctor): the layer ctor leaves the backward-pass sequence counter
+  indeterminate; it becomes 0 only because `NeuralNetwork.hpp:27` builds layers via
+  `push_back(LayerType(...))` and the user-declared copy ctor (which suppresses the implicit move
+  ctor) runs on insertion. A directly-constructed layer that fed backward would read/increment
+  indeterminate memory (`getWeightsDerivatives` :260-290, `feedBackward` :720). The port initializes
+  all state explicitly at construction (the counter itself lands with the Phase 3 derivative
+  accumulators). *Fix candidate:* initialize the member in the legacy main ctor.
+
+- **[phase2] `GatesFunction`/`Logistic` saturation guards: strict pass-through, boundary saturates;
+  the gates guard tests the SCALED value** (`nn/activations.rs` `gates_fn`/`logistic_fn`, from
+  `ActivationFunctions.h:229-238, 40-49`): both functions share the same guard shape --
+  `arg < expLimit` outer, `arg > -expLimit` inner, else hard 1.0/0.0 -- so equality at the boundary
+  saturates in BOTH (the spec's GatesFunction-EXCLUSIVE vs Logistic-INCLUSIVE labels, kept in the
+  port docs for continuity, denote this same at-boundary saturation). The substantive quirks: (a)
+  `GatesFunction` guards the pre-scaled `0.1*x`, so in x-space its saturation starts at
+  `|x| >= 10*expLimit` (~7097.8), not `expLimit` (~709.78); (b) the hard 0.0 return at the negative
+  boundary is OBSERVABLE, not just an overflow shield -- an unguarded sigmoid at `x == -expLimit`
+  computes `1/(1+exp(+709.78))` with `exp` still finite (~1.8e308), yielding a subnormal ~5.6e-309
+  instead of 0. Guard order ported exactly (pinned by the `phase2_activations_golden.rs` boundary
+  tests). *Fix candidate:* none -- document-only; an unguarded or clamp-to-epsilon rewrite diverges
+  at the negative boundary.
+
+- **[phase2] Spec erratum: S6.6 "(row 0 always)" holds only for `step == 0`** (`nn/blstm.rs`
+  `feed_forward_scoring`, from `BLSTMNeuralNetwork.cpp:868-918`): the target-enforcement counter
+  starts at 0 and enforces a row when `counter >= target_enforcement_step`; for `step == 0` that
+  makes row 0 (and every row) enforced, but for `step >= 1` rows `0..step-1` are `-0.5` and row
+  `step` is the first enforced row. The port's doc-comment previously overclaimed "row 0 ALWAYS
+  enforced" as a general fact; corrected to state the `step`-dependent behavior. Code was already
+  correct -- comment-only fix.
+
+- **[phase2] LSTM `feedForward` t=0 cell update omits the forget term BY EXPRESSION SHAPE (no zero
+  initial state)** (`nn/layers.rs` `feed_forward` t=0 branch, from `LSTMLayer.cpp:325-348` vs
+  :351-411): the t=0 row is a structurally separate block -- `c_0 = i_0 .* g_0` (:337) with NO
+  `+ c_prev .* f` term, no feedback GEMV, and no recurrent/gates peephole adds; the forget gate IS
+  computed and activated at t=0 (:333) but its value is discarded. This is by-omission zero state,
+  not a zeroed-previous-state multiply: materializing `c_-1 = 0` and running the general expression
+  would compute `i*g + 0*f` -- a different FP expression (sign-of-zero and NaN propagation differ,
+  e.g. `-0.0 + 0.0 = +0.0`). The port mirrors the two-branch structure exactly (pinned by the T=1
+  and gate-cache goldens). *Fix candidate:* none -- provenance; the Phase 3 backward pass must
+  mirror the same t=0 asymmetry.
+
+- **[phase2] Layer input-width tolerance is BIDIRECTIONAL silent truncation, in the LSTM AND dense
+  forwards** (`nn/layers.rs` `LstmLayer::feed_forward`/`NeuronLayer::feed_forward`, from
+  `LSTMLayer.cpp:313-319` and `NeuronLayer.cpp:129-134`): a three-way branch tolerates ANY
+  input-width mismatch silently. Input WIDER than the layer (`cols > I`): the extra input columns
+  are DROPPED (`leftCols(I)`). Input NARROWER (`cols < I`): the weight matrix's bottom `I - cols`
+  rows are silently DEAD (`_Weights.topRows(cols)`). No warning or error either way, in either
+  layer type. The E2E entry above (real-config width 11 vs net input 23) is the narrow direction
+  biting a real trained net; this entry records the general mechanism in both directions.
+  Reproduced exactly (pinned by the width-tolerance unit tests). *Fix candidate:* covered by the
+  E2E entry -- validate `feature_dim == net_input_size` at load after parity.
+
+- **[phase2] OverLap accumulates `_Cost`/`_NbOfClassif` PER WINDOW: overlapped rows are counted
+  once per covering window** (`nn/blstm.rs::feed_forward_backward_overlap` inner
+  `feed_forward_backward_plain` calls, from `BLSTMNeuralNetwork.cpp:657` + :815-828): the windowed
+  dispatch resets `_Cost = 0`/`_NbOfClassif = 0` once (:712-713), then the OverLap driver calls the
+  plain `feedForwardBackward` per window and each inner call adds `computeCost` over the window's
+  rows plus `_NbOfClassif += rows`. With `window_shift < 2*window_size+1` every overlapped output
+  row contributes to the cost and the classification count once PER COVERING WINDOW, so the
+  downstream per-classification normalization (cost/nbOfClassif) is over rows-times-coverage, not
+  rows. Note the asymmetry with the OUTPUT itself, which IS divided by per-row hit counts (see the
+  0/0 -> NaN entry above); the cost never is. Reproduced exactly -- the per-window accumulation is
+  the ported control flow. *Fix candidate:* after parity, decide whether the cost should be
+  coverage-normalized like the averaged output.
+
+- **[phase2] `_TargetEnforcementStep < 0` DESTROYS the caller-visible output interior with -0.5
+  before costing** (`nn/blstm.rs::feed_forward_backward` tail, from `BLSTMNeuralNetwork.cpp:
+  815-828`): with targets present and `_TargetEnforcementStep < 0`, the final cost block copies the
+  targets, overwrites BOTH the target copy's AND the caller-visible `outputSeq`'s interior rows
+  `[1, rows-1)` with the constant -0.5, then computes the cost on the mutated pair -- the returned
+  posteriors carry -0.5 in every interior row (only the two boundary rows survive the call) and the
+  accumulated cost is measured against constants, not the net's output. Pinned by
+  `cost_quirk_enforcement_neg_overwrites_output_interior_with_minus_half` (exact -0.5 bits + an
+  expression-coded independent cost). Reproduced exactly. *Fix candidate:* after parity, operate on
+  a local copy of the output (the in-place clobber looks like a debugging aid that shipped).
+
+- **[phase2] `config.rs` flat packer implements ONLY the non-MLP layout (`LSTMNeuronNb[0] == 0`
+  mode missing)** (`config.rs` `element_count`/`nnet_to_flat`/`flat_to_nnet`, vs
+  `BLSTMNeuralNetwork.cpp:209-253`): the legacy `_IsMLP` mode (`LSTMNeuronNb[0] == 0`, :54-55)
+  packs the `_OutputNetwork` weights only, with a mean/std tail of
+  `2*_OutputNetwork.getInputSize()` (= `2*OutputNeuronNb[0]`); the Phase 0a MATLAB-seam packer in
+  `config.rs` unconditionally lays out forward+backward LSTM blocks and sizes the tail
+  `2*LSTMNeuronNb[0]` (`element_count`) -- an MLP config would pack a zero-length tail and phantom
+  LSTM blocks. The RUNTIME seam (`nn/blstm.rs::{nb_of_weights,set_weights,get_weights}`) handles
+  both modes correctly; only the config-domain packer has the gap, and no MLP golden config exists
+  (the real configs are all BLSTM-mode). *Fix candidate:* add the `_IsMLP` branch to `config.rs`
+  when the Python optimizer needs to drive an MLP config; until then the gap is latent.
+
+- **[phase2] CNN is broken-as-committed: empty `_Layers` indexed on every real-config LID run (UB),
+  weights orphaned, backward has no return** (`ConvolutionalNeuralNetwork.cpp`,
+  `ConvolutionalLayer.cpp`, `TwinBLSTMSpectralLID.cpp` -- NOT ported, per the locked spec decision):
+  (a) the ctor builds `_Layers` only when `_NeuronNb[0] > 0` (`ConvolutionalNeuralNetwork.cpp:13`),
+  and `_NeuronNb` defaults to a single 0 (:8); but `feedForward`'s guard tests
+  `_NeuronNb.size() > 0` (:265) -- true even when the CNN is disabled -- so `_Layers[0]` (:266) and
+  `getOutputMatrix`'s `_Layers[_NeuronNb.size()-1]` (:228) index an EMPTY vector, and
+  `TwinBLSTMSpectralLID.cpp:924-928` calls both UNCONDITIONALLY (`if (true)`) on every file: any
+  real `lid.config` run without CNN keys executes undefined behavior (and would clobber `inputSeq`
+  with the CNN output if it were live). (b) the CNN weights are ORPHANED: constructed with
+  `weightsSetExternally == false` (`TwinBLSTMSpectralLID.cpp:23`, random-table init) and the LID
+  weight seam (`setWeightsLID`/`getWeightsLID`/`getWeightsDerivativesLID`, :63-72) never includes
+  them -- unserializable, untrainable. (c) `ConvolutionalLayer::feedBackward` (:232-287) is
+  entirely commented out: a value-returning function with NO return statement (UB if ever called).
+  (d) the dimension guards in `ConvolutionalLayer::feedForward` (:155-172) print to cerr WITHOUT
+  exiting on two of the three failure paths, then continue into negative `outputDimensions` and
+  out-of-bounds `block()` indexing. *Fix candidate:* if CNN-LID is ever wanted, fix the
+  `_NeuronNb[0]` guard, wire the weights into the flat seam, and write the backward -- effectively
+  a rewrite.
+
+- **[phase2] BLSTM copy ctor DROPS `_Trainer`/`_InputStatistics`/`_OutputForward`/`_OutputBackward`**
+  (`BLSTMNeuralNetwork.cpp:155-173`): the copy ctor copies 17 members (the three sub-networks, cost
+  law, mode flags, normalization vectors, cost/classif counters) but omits four -- the Rprop trainer
+  (the copy reverts to a default-constructed `Rprop()`, losing the configured `initDelta` and any
+  accumulated step sizes), the streaming `_InputStatistics`, and both hidden-state members (empty
+  matrices in the copy). The port deliberately implements no `Clone` for `BlstmNetwork` (mirroring
+  the ill-formed `NeuralNetwork` copy-ctor entry above); callers rebuild from config +
+  `set_weights`. Provenance note. *Fix candidate:* if a copy path is ever needed, copy or explicitly
+  reset ALL members.
+
+- **[phase2] NN product-order substitution: Eigen GEMM replaced by ascending-loop products at ALL NN
+  sites; the diverging layer-0 GEMMs seed the recurrence, so the substitution propagates NON-LOCALLY**
+  (`nn/layers.rs::matmul_seq` + the harness `matSeq`; extends the `[phase1]` DCT GEMM entry;
+  measured in `manifest.json:nn_product_probes`, re-probed on every fixture regeneration): the
+  harness probes Eigen's blocked product against explicit ascending-k accumulation at the four NN
+  product shapes -- `lstm_input_gemm` (T x 23)*(23 x 96) DIVERGED on 8750/19200 elements (~1 ULP)
+  and `dense_gemm` (200 x 48)*(48 x 12) DIVERGED on 1890/2400, while `lstm_recurrence_gemv`
+  (1 x 24)*(24 x 96) over 150 recurrence steps and `softmax_rowsum` are bit-exact (0/14400, 0/200).
+  Unlike Phase 1's DCT (a terminal projection), the diverging layer-0 input GEMM feeds the
+  recurrence, so every downstream timestep/gate/cell inherits the difference. The goldens therefore
+  come from a harness-local ascending-loop REIMPLEMENTATION, and the REAL compiled legacy classes
+  are probed against it with recorded NN_TOL deltas (all synthetic sites 0 ULP; the real-net sites
+  e.g. fullseq out 7 ULP, hidden states 735/2076 ULP at ~2e-15 abs, e2e 15/5 ULP) kept in the
+  manifest as Phase 4 calibration data. *Fix candidate:* none -- the ascending loop is the portable
+  parity target (same rationale as the DCT entry); do NOT swap in BLAS/library GEMMs before
+  end-to-end parity re-baselines.
+
+- **[phase2] `LSTMLayer.h:35-36` member-size comments are STALE for BOTH `_PeepWeight` and
+  `_Biaises`** (`LSTMLayer.h:35-36` vs the ctor resizes at `LSTMLayer.cpp:21-22`): the header
+  declares `_PeepWeight; // size 3*_OutputSize` and `_Biaises; // size _OutputSize`, but the ctor
+  resizes `_PeepWeight` to `12 x _OutputSize` (and `LSTMLayer.cpp:21` repeats the stale
+  `// size 3*_OutputSize` on the resize line itself) and `_Biaises` to `4*_OutputSize`. The
+  comments predate the 12-row peephole-bundle / 4-gate-bias rework; sizing a port or the flat
+  layout from them corrupts every weight offset after the first gate block. The port sizes from
+  the RESIZES (documented in `nn/layers.rs`'s struct doc) and the flat-seam tests pin the true
+  12-row/4-bias layout. *Fix candidate:* fix the two comments in a post-parity legacy cleanup.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

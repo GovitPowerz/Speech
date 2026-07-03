@@ -1,0 +1,1731 @@
+{
+  "text": "Python dense_forward_oracle (nn_reference.py) forward outputs over a deterministic (I,O,T,last_layer,in_cols) grid, covering the hidden (asinh), softmax (O>1), logistic (O==1), and width-mismatch (wide/narrow) paths. f64 stored as raw u64 bits (hex) for exact JSON round-trip. Rust replays the same weights/input through NeuronLayer and asserts to_bits equality (same-libm same-machine check).",
+  "weight_formula": "((k*11+3) % 97)/97 - 0.5",
+  "input_formula": "((t*37 + j*53 + 7) % 101)/101 - 0.5",
+  "cases": [
+    {
+      "name": "4x3_T1_exact_hidden",
+      "I": 4,
+      "O": 3,
+      "T": 1,
+      "in_cols": 4,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc11f84c99188ad",
+          "0xbf8a717ab6ed5fb8",
+          "0xbf90d3c6bc8acf92"
+        ]
+      ]
+    },
+    {
+      "name": "4x3_T1_exact_last",
+      "I": 4,
+      "O": 3,
+      "T": 1,
+      "in_cols": 4,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fd77fff6c4b78a2",
+          "0x3fd44920f9cc1806",
+          "0x3fd436df99e86f57"
+        ]
+      ]
+    },
+    {
+      "name": "4x3_T1_wide_hidden",
+      "I": 4,
+      "O": 3,
+      "T": 1,
+      "in_cols": 6,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c",
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc11f84c99188ad",
+          "0xbf8a717ab6ed5fb8",
+          "0xbf90d3c6bc8acf92"
+        ]
+      ]
+    },
+    {
+      "name": "4x3_T1_narrow_hidden",
+      "I": 4,
+      "O": 3,
+      "T": 1,
+      "in_cols": 3,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc37798bc17fbfd",
+          "0xbfae7693ae34ffee",
+          "0x3f8f831779d36063"
+        ]
+      ]
+    },
+    {
+      "name": "4x3_T6_exact_hidden",
+      "I": 4,
+      "O": 3,
+      "T": 6,
+      "in_cols": 4,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc11f84c99188ad",
+          "0xbf8a717ab6ed5fb8",
+          "0xbf90d3c6bc8acf92"
+        ],
+        [
+          "0xbfc64b41aa3a7dc5",
+          "0xbfbc5f2f08113b74",
+          "0xbf647c7ae084f89e"
+        ],
+        [
+          "0xbfd04d3a24f1d7e4",
+          "0x3f920771a2dec659",
+          "0x3fce3680cfd66eb0"
+        ],
+        [
+          "0x3f9025dfe59d3c08",
+          "0x3fa8bc64a375d094",
+          "0xbfb28ffe96d20ea1"
+        ],
+        [
+          "0x3fafd51f01839aaa",
+          "0xbfc2d8016bd422b0",
+          "0x3fd85b1ad0e210a8"
+        ],
+        [
+          "0xbfd785eb698a533c",
+          "0x3fb42a37af95aebb",
+          "0x3fc72e7239f59664"
+        ]
+      ]
+    },
+    {
+      "name": "4x3_T6_exact_last",
+      "I": 4,
+      "O": 3,
+      "T": 6,
+      "in_cols": 4,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fd77fff6c4b78a2",
+          "0x3fd44920f9cc1806",
+          "0x3fd436df99e86f57"
+        ],
+        [
+          "0x3fd3aa5fe2110f63",
+          "0x3fd4f71aa30c808d",
+          "0x3fd75e857ae27011"
+        ],
+        [
+          "0x3fd02b23eef28105",
+          "0x3fd549c3a000300f",
+          "0x3fda8b18710d4eed"
+        ],
+        [
+          "0x3fd5b4a45a0e91d0",
+          "0x3fd66c8cb356bd0f",
+          "0x3fd3decef29ab122"
+        ],
+        [
+          "0x3fd402cd9377a95c",
+          "0x3fd0389ec95e2f81",
+          "0x3fdbc493a32a2722"
+        ],
+        [
+          "0x3fcd9c1fff5ac272",
+          "0x3fd754306ac966c1",
+          "0x3fd9ddbf95893806"
+        ]
+      ]
+    },
+    {
+      "name": "4x3_T6_wide_hidden",
+      "I": 4,
+      "O": 3,
+      "T": 6,
+      "in_cols": 6,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c",
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930",
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498",
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8",
+          "0xbfcdc83cd4e93028",
+          "0x3fd2b16cfd7720f4"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512",
+          "0x3fc11be1958b67ec",
+          "0xbfd5dc83cd4e9302"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080",
+          "0xbfe0000000000000",
+          "0x3f9958b67ebb9080"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc11f84c99188ad",
+          "0xbf8a717ab6ed5fb8",
+          "0xbf90d3c6bc8acf92"
+        ],
+        [
+          "0xbfc64b41aa3a7dc5",
+          "0xbfbc5f2f08113b74",
+          "0xbf647c7ae084f89e"
+        ],
+        [
+          "0xbfd04d3a24f1d7e4",
+          "0x3f920771a2dec659",
+          "0x3fce3680cfd66eb0"
+        ],
+        [
+          "0x3f9025dfe59d3c08",
+          "0x3fa8bc64a375d094",
+          "0xbfb28ffe96d20ea1"
+        ],
+        [
+          "0x3fafd51f01839aaa",
+          "0xbfc2d8016bd422b0",
+          "0x3fd85b1ad0e210a8"
+        ],
+        [
+          "0xbfd785eb698a533c",
+          "0x3fb42a37af95aebb",
+          "0x3fc72e7239f59664"
+        ]
+      ]
+    },
+    {
+      "name": "4x3_T6_narrow_hidden",
+      "I": 4,
+      "O": 3,
+      "T": 6,
+      "in_cols": 3,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698",
+        "0x3fcb0d3224f2cddc",
+        "0x3fd4c893cb376c34",
+        "0x3fdc0a8e83f5717c",
+        "0xbfdcb376c34c893d",
+        "0xbfd5717c0a8e83f6",
+        "0xbfcc5f02a3a0fd5c",
+        "0xbfbbb61a6449e59c",
+        "0x3f751d07eae2f800",
+        "0x3fbe59bb61a644a0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc37798bc17fbfd",
+          "0xbfae7693ae34ffee",
+          "0x3f8f831779d36063"
+        ],
+        [
+          "0xbfce35b09410130b",
+          "0x3fa89e5365dfa2bf",
+          "0xbfbc642b8ad8bd1a"
+        ],
+        [
+          "0xbfd149c86c6a9941",
+          "0x3fad9387222fced0",
+          "0x3fcac978e43d5845"
+        ],
+        [
+          "0x3fa81201d3a396b6",
+          "0xbf9f2b3739c11747",
+          "0xbf9341cb175cec52"
+        ],
+        [
+          "0x3f88323c4330e266",
+          "0xbf953e167da0b715",
+          "0x3fd31d61bcd0a240"
+        ],
+        [
+          "0xbfd7b6d0251aef78",
+          "0x3fb63734d723be92",
+          "0x3fc67d7e12e8be80"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T1_exact_hidden",
+      "I": 4,
+      "O": 1,
+      "T": 1,
+      "in_cols": 4,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fccce866a2b87a8"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T1_exact_last",
+      "I": 4,
+      "O": 1,
+      "T": 1,
+      "in_cols": 4,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fe1ced2ce4e48d6"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T1_wide_hidden",
+      "I": 4,
+      "O": 1,
+      "T": 1,
+      "in_cols": 6,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c",
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fccce866a2b87a8"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T1_narrow_hidden",
+      "I": 4,
+      "O": 1,
+      "T": 1,
+      "in_cols": 3,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fcf1c8258aa481f"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T6_exact_hidden",
+      "I": 4,
+      "O": 1,
+      "T": 6,
+      "in_cols": 4,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fccce866a2b87a8"
+        ],
+        [
+          "0xbfb50996a65a739e"
+        ],
+        [
+          "0xbfc4fc90d8fbdda4"
+        ],
+        [
+          "0x3fbbbc45d2bfce11"
+        ],
+        [
+          "0x3fc3c2cdc406f57d"
+        ],
+        [
+          "0xbfd1e2700c88899e"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T6_exact_last",
+      "I": 4,
+      "O": 1,
+      "T": 6,
+      "in_cols": 4,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fe1ced2ce4e48d6"
+        ],
+        [
+          "0x3fdeaf36309558d6"
+        ],
+        [
+          "0x3fdd5eefdf83de38"
+        ],
+        [
+          "0x3fe0de198c2de846"
+        ],
+        [
+          "0x3fe13ccc78330100"
+        ],
+        [
+          "0x3fdb801e35320fea"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T6_wide_hidden",
+      "I": 4,
+      "O": 1,
+      "T": 6,
+      "in_cols": 6,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c",
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930",
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498",
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8",
+          "0xbfcdc83cd4e93028",
+          "0x3fd2b16cfd7720f4"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512",
+          "0x3fc11be1958b67ec",
+          "0xbfd5dc83cd4e9302"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080",
+          "0xbfe0000000000000",
+          "0x3f9958b67ebb9080"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fccce866a2b87a8"
+        ],
+        [
+          "0xbfb50996a65a739e"
+        ],
+        [
+          "0xbfc4fc90d8fbdda4"
+        ],
+        [
+          "0x3fbbbc45d2bfce11"
+        ],
+        [
+          "0x3fc3c2cdc406f57d"
+        ],
+        [
+          "0xbfd1e2700c88899e"
+        ]
+      ]
+    },
+    {
+      "name": "4x1_T6_narrow_hidden",
+      "I": 4,
+      "O": 1,
+      "T": 6,
+      "in_cols": 3,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fcf1c8258aa481f"
+        ],
+        [
+          "0xbfc28cb7e2175ddc"
+        ],
+        [
+          "0xbfc6ff8ca2754a68"
+        ],
+        [
+          "0x3fc1d69a5e0bade1"
+        ],
+        [
+          "0x3fbaba84c1332765"
+        ],
+        [
+          "0xbfd214b38a92e42b"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T1_exact_hidden",
+      "I": 2,
+      "O": 2,
+      "T": 1,
+      "in_cols": 2,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc385a5f6e2e806",
+          "0x3fc832371ce0a983"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T1_exact_last",
+      "I": 2,
+      "O": 2,
+      "T": 1,
+      "in_cols": 2,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fdf68407094c8ec",
+          "0x3fe04bdfc7b59b8a"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T1_wide_hidden",
+      "I": 2,
+      "O": 2,
+      "T": 1,
+      "in_cols": 4,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc385a5f6e2e806",
+          "0x3fc832371ce0a983"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T1_narrow_hidden",
+      "I": 2,
+      "O": 2,
+      "T": 1,
+      "in_cols": 1,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc7be5a2d1240d9",
+          "0x3fc9b7f6b620d2b5"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T6_exact_hidden",
+      "I": 2,
+      "O": 2,
+      "T": 6,
+      "in_cols": 2,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc385a5f6e2e806",
+          "0x3fc832371ce0a983"
+        ],
+        [
+          "0xbfc3015c87751dcc",
+          "0x3fabbca9dba7fe0a"
+        ],
+        [
+          "0xbfb8687522994444",
+          "0x3fa81c07b6b077d7"
+        ],
+        [
+          "0x3fb24699e86b54c1",
+          "0x3fc38f910b7954c3"
+        ],
+        [
+          "0x3fbfe9fc4e3428bd",
+          "0x3fc2a9ad8ac45a93"
+        ],
+        [
+          "0xbfc68ec8a2cbb393",
+          "0x3f8537b0fbabdf31"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T6_exact_last",
+      "I": 2,
+      "O": 2,
+      "T": 6,
+      "in_cols": 2,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fdf68407094c8ec",
+          "0x3fe04bdfc7b59b8a"
+        ],
+        [
+          "0x3fdcc2710bd3d66a",
+          "0x3fe19ec77a1614cb"
+        ],
+        [
+          "0x3fddb8eb7d6071d3",
+          "0x3fe1238a414fc716"
+        ],
+        [
+          "0x3fdeb076bd73155e",
+          "0x3fe0a7c4a1467551"
+        ],
+        [
+          "0x3fdfa89f832c8a01",
+          "0x3fe02bb03e69baff"
+        ],
+        [
+          "0x3fdd023759ea9f80",
+          "0x3fe17ee4530ab040"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T6_wide_hidden",
+      "I": 2,
+      "O": 2,
+      "T": 6,
+      "in_cols": 4,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc385a5f6e2e806",
+          "0x3fc832371ce0a983"
+        ],
+        [
+          "0xbfc3015c87751dcc",
+          "0x3fabbca9dba7fe0a"
+        ],
+        [
+          "0xbfb8687522994444",
+          "0x3fa81c07b6b077d7"
+        ],
+        [
+          "0x3fb24699e86b54c1",
+          "0x3fc38f910b7954c3"
+        ],
+        [
+          "0x3fbfe9fc4e3428bd",
+          "0x3fc2a9ad8ac45a93"
+        ],
+        [
+          "0xbfc68ec8a2cbb393",
+          "0x3f8537b0fbabdf31"
+        ]
+      ]
+    },
+    {
+      "name": "2x2_T6_narrow_hidden",
+      "I": 2,
+      "O": 2,
+      "T": 6,
+      "in_cols": 1,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0",
+        "0xbf8fab8be0547420",
+        "0x3fb9127966ed8698"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051"
+        ],
+        [
+          "0xbfb079a9d260511c"
+        ],
+        [
+          "0x3fd353a4c0a237c4"
+        ],
+        [
+          "0xbfd53a4c0a237c32"
+        ],
+        [
+          "0x3fa1be1958b67ec0"
+        ],
+        [
+          "0x3fd9a9d260511be2"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc7be5a2d1240d9",
+          "0x3fc9b7f6b620d2b5"
+        ],
+        [
+          "0x3f8e2748588a8e76",
+          "0x3fbd0063697d967b"
+        ],
+        [
+          "0xbfc40760533fd3a6",
+          "0x3f995ebce107362a"
+        ],
+        [
+          "0x3fc1e08a4c19d397",
+          "0x3fc6b3d4c0b3529a"
+        ],
+        [
+          "0xbfa03cc3127ee02b",
+          "0x3fb6e47532a4b2f0"
+        ],
+        [
+          "0xbfc9e0eff78096d8",
+          "0x3f49ebe0fd284032"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T1_exact_hidden",
+      "I": 3,
+      "O": 1,
+      "T": 1,
+      "in_cols": 3,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc0dab91bb97884"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T1_exact_last",
+      "I": 3,
+      "O": 1,
+      "T": 1,
+      "in_cols": 3,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fe10e0ecbc3e09d"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T1_wide_hidden",
+      "I": 3,
+      "O": 1,
+      "T": 1,
+      "in_cols": 5,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c",
+          "0xbfd53a4c0a237c32"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc0dab91bb97884"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T1_narrow_hidden",
+      "I": 3,
+      "O": 1,
+      "T": 1,
+      "in_cols": 2,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fa452fb889a5525"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T6_exact_hidden",
+      "I": 3,
+      "O": 1,
+      "T": 6,
+      "in_cols": 3,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc0dab91bb97884"
+        ],
+        [
+          "0xbfd062aeaecdfd0a"
+        ],
+        [
+          "0xbfd28ec3cb23f215"
+        ],
+        [
+          "0x3f9b0ab8077faa9f"
+        ],
+        [
+          "0xbf82079f6b42f44c"
+        ],
+        [
+          "0xbfd8f19a428a4b7d"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T6_exact_last",
+      "I": 3,
+      "O": 1,
+      "T": 6,
+      "in_cols": 3,
+      "last_layer": true,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fe10e0ecbc3e09d"
+        ],
+        [
+          "0x3fdbe1b6f4c52f86"
+        ],
+        [
+          "0x3fdb5432ed674438"
+        ],
+        [
+          "0x3fe036163e008836"
+        ],
+        [
+          "0x3fdfdbf0b1e63da4"
+        ],
+        [
+          "0x3fd9b053aff3c8c9"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T6_wide_hidden",
+      "I": 3,
+      "O": 1,
+      "T": 6,
+      "in_cols": 5,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8",
+          "0xbfd86562d9faee42",
+          "0x3fc260511be1958c",
+          "0xbfd53a4c0a237c32"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0",
+          "0xbf8e6a7498144700",
+          "0xbfdf5dc83cd4e930",
+          "0x3fa1be1958b67ec0"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a",
+          "0x3fd67ebb9079a9d2",
+          "0xbfbfaee41e6a7498",
+          "0x3fd9a9d260511be2"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8",
+          "0xbfd20f353a4c0a24",
+          "0x3fcf0cac5b3f5dc8",
+          "0xbfcdc83cd4e93028"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721",
+          "0x3fb58b67ebb90798",
+          "0xbfd9079a9d260512",
+          "0x3fc11be1958b67ec"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c",
+          "0x3fdcd4e930288df0",
+          "0xbf9958b67ebb9080",
+          "0xbfe0000000000000"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fc0dab91bb97884"
+        ],
+        [
+          "0xbfd062aeaecdfd0a"
+        ],
+        [
+          "0xbfd28ec3cb23f215"
+        ],
+        [
+          "0x3f9b0ab8077faa9f"
+        ],
+        [
+          "0xbf82079f6b42f44c"
+        ],
+        [
+          "0xbfd8f19a428a4b7d"
+        ]
+      ]
+    },
+    {
+      "name": "3x1_T6_narrow_hidden",
+      "I": 3,
+      "O": 1,
+      "T": 6,
+      "in_cols": 2,
+      "last_layer": false,
+      "weights_bits": [
+        "0xbfde054741fab8be",
+        "0xbfd6c34c893cb377",
+        "0xbfcf02a3a0fd5c60",
+        "0xbfc07eae2f8151d0"
+      ],
+      "input_bits": [
+        [
+          "0xbfdb9079a9d26051",
+          "0x3fb81446f86562d8"
+        ],
+        [
+          "0xbfb079a9d260511c",
+          "0x3fdd7720f353a4c0"
+        ],
+        [
+          "0x3fd353a4c0a237c4",
+          "0xbfc62d9faee41e6a"
+        ],
+        [
+          "0xbfd53a4c0a237c32",
+          "0x3fc8b67ebb9079a8"
+        ],
+        [
+          "0x3fa1be1958b67ec0",
+          "0xbfdc32b16cfd7721"
+        ],
+        [
+          "0x3fd9a9d260511be2",
+          "0xbfb30288df0cac5c"
+        ]
+      ],
+      "y_bits": [
+        [
+          "0x3fa452fb889a5525"
+        ],
+        [
+          "0xbfd09bba1d743cc7"
+        ],
+        [
+          "0xbfca8c189297ed57"
+        ],
+        [
+          "0xbfa57912228b0e07"
+        ],
+        [
+          "0x3f87b9d5a42b11f7"
+        ],
+        [
+          "0xbfd257c98e1d3dab"
+        ]
+      ]
+    }
+  ]
+}

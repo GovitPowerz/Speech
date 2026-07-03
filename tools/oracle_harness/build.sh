@@ -56,6 +56,17 @@ SRC=../../legacy/src
 #   CorpusItem      - AudioStruct ctor calls its getters (link)  [added]
 #   Timer           - AudioStruct uses Timer in periodogram paths (link)  [added]
 #   tinythread      - AudioStruct pulls tthread symbols (link)  [added]
+#   -- Phase 2 NN stack (Task 1): construct a real BLSTMNeuralNetwork<LSTMLayer> --
+#   BLSTMNeuralNetwork - the templated NN under port; its ctor/getNbOfWeights/
+#                        setWeights are exercised. Explicit template instantiations
+#                        at BLSTMNeuralNetwork.cpp:960-962 force <SRNLayer>/<CWRNNLayer>
+#                        symbols too, so SRNLayer.cpp + CWRNNLayer.cpp are LINK-required
+#                        even though this harness only builds the <LSTMLayer> variant.
+#   LSTMLayer          - the forward/backward LSTM layer (link + the probe shapes)
+#   NeuronLayer        - the output-MLP dense layer (link + dense_gemm probe shape)
+#   SRNLayer/CWRNNLayer- link-only, per the explicit instantiations above
+#   CostLaw            - BLSTMNeuralNetwork ctor builds a CostLaw member (link)
+#   Rprop              - BLSTMNeuralNetwork ctor builds an Rprop _Trainer member (link)
 #
 # -include boost/math/special_functions/round.hpp: modern Boost's tr1.hpp (pulled
 # by Helpers.hpp) no longer re-exports boost::math::round, which getWindowingCoeff
@@ -68,6 +79,8 @@ SRC=../../legacy/src
   main.cpp \
   "$SRC/AudioStruct.cpp" "$SRC/MelFilterBank.cpp" "$SRC/InputStatistics.cpp" \
   "$SRC/ConfigFile.cpp" "$SRC/CorpusItem.cpp" "$SRC/Timer.cpp" "$SRC/tinythread.cpp" \
+  "$SRC/BLSTMNeuralNetwork.cpp" "$SRC/LSTMLayer.cpp" "$SRC/NeuronLayer.cpp" \
+  "$SRC/SRNLayer.cpp" "$SRC/CWRNNLayer.cpp" "$SRC/CostLaw.cpp" "$SRC/Rprop.cpp" \
   -L "$BREW/lib" -lsndfile -lmatio -o oracle_harness
 
 echo "OK: built oracle_harness with $GXX"

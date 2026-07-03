@@ -8,8 +8,6 @@ double-pinning contract: harness dump == Rust port == numpy oracle).
 """
 
 import math
-import os
-from functools import cache
 from pathlib import Path
 
 import numpy as np
@@ -23,58 +21,9 @@ from speech.features_oracle import (
 )
 from speech.weight_bridge import read_bin
 
+from tests._libm_gate import assert_f32_close as _assert_f32_close
+
 FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "phase1"
-
-
-@cache
-def _oracle_strict() -> bool:
-    """True if THIS platform's libm matches the recorded oracle canaries bit-for-bit.
-
-    The fmath oracle uses ``math.log`` on the running platform; the committed sweep
-    dump was produced on the oracle libm (Apple). If the libms agree the oracle test
-    asserts exact equality; otherwise it relaxes to the hybrid bound (<=2 f32 ULP
-    or a scaled absolute tolerance). Mirrors the Rust ``oracle_mode()`` (same canary
-    file, same 10 cos / 5 log / 3 exp column layout).
-    ``SPEECH_ORACLE_LIBM=strict|ulp`` forces a path.
-    """
-    forced = os.environ.get("SPEECH_ORACLE_LIBM")
-    if forced == "strict":
-        return True
-    if forced == "ulp":
-        return False
-    rows, _, flat = read_bin(FIXTURE_DIR / "libm_canaries.bin")  # 2 x N column-major
-    n = flat.size // rows
-    for k in range(n):
-        x = float(flat[k * rows + 0])
-        want = float(flat[k * rows + 1])
-        got = math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x)
-        if got.hex() != want.hex():
-            return False
-    return True
-
-
-def _assert_f32_close(got: np.float32, want: np.float32, label: str) -> None:
-    """Exact on the oracle libm, else hybrid: <=2 f32 ULP or an absolute tolerance
-    of ``512 * 2**-23 * max(|expected|, 1.0)`` (the fmath table is f32-valued).
-
-    Mirrors the Rust hybrid comparator (src/rust/tests/common/mod.rs): a 1-ULP libm
-    difference propagates as an ABSOLUTE error (~eps * |libm output|), so a tiny
-    output can legitimately be many ULP off; the absolute arm covers that while the
-    ULP arm stays the tight check for well-scaled values. NaN/inf always fail; a
-    finite sign flip across zero can pass only through the absolute arm.
-    """
-    if _oracle_strict():
-        assert got == want, f"{label}: {got!r} != {want!r}"
-        return
-    assert np.isfinite(got) and np.isfinite(want), f"{label}: non-finite {got!r} {want!r}"
-    a = int(np.float32(got).view(np.int32))
-    b = int(np.float32(want).view(np.int32))
-    ulp = abs(a - b) if np.signbit(got) == np.signbit(want) else None
-    abs_diff = abs(float(got) - float(want))
-    abs_tol = 512.0 * 2.0**-23 * max(abs(float(want)), 1.0)
-    assert (ulp is not None and ulp <= 2) or abs_diff <= abs_tol, (
-        f"{label}: f32 ULP {'sign' if ulp is None else ulp} > 2 and |diff|={abs_diff!r} > abs_tol={abs_tol!r} ({got!r} vs {want!r})"
-    )
 
 
 def test_regression_deltas_anchor() -> None:
