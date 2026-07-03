@@ -825,11 +825,13 @@ impl BlstmNetwork {
     }
 
     /// `_CostFunction.computeCost` dispatch (`CostLaw.cpp:191-249`): a single-column
-    /// output uses the scalar VAD `compute_unitary_cost` summed over rows; a
-    /// multi-column output uses the softmax cross-entropy path. Row-major matrices.
+    /// TARGET uses the scalar VAD `compute_unitary_cost` summed over rows; otherwise
+    /// the softmax cross-entropy path (which iterates the OUTPUT's columns).
+    /// Row-major matrices.
     fn compute_cost(&self, output: &Array2<f64>, target: &Array2<f64>) -> f64 {
+        // Branch operand is the TARGET's column count (`targetSeq.cols() == 1`, CostLaw.cpp:193).
         let n_classes = output.ncols();
-        if n_classes == 1 {
+        if target.ncols() == 1 {
             let mut cost = 0.0;
             for row in 0..output.nrows() {
                 cost += self

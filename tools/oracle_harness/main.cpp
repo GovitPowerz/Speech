@@ -2551,6 +2551,12 @@ int main(int argc, char** argv) {
         // is used everywhere in Tasks 8/9 for uniformity, even where no NaN can occur.
         auto probeGapNaN = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
                               long& maxUlp, double& maxAbs) {
+            if (real.rows() != reimpl.rows() || real.cols() != reimpl.cols()) {
+                std::cerr << "probeGapNaN dims mismatch: real " << real.rows() << "x"
+                          << real.cols() << " vs reimpl " << reimpl.rows() << "x"
+                          << reimpl.cols() << "\n";
+                std::abort();
+            }
             for (int r = 0; r < real.rows(); ++r) {
                 for (int c = 0; c < real.cols(); ++c) {
                     double a = real(r, c), b = reimpl(r, c);
@@ -3069,9 +3075,8 @@ int main(int argc, char** argv) {
 
                 // In-harness double-width assertion: the reimpl _OutputForward/
                 // _OutputBackward are the HCAT of the two sweeps' hidden windows, so
-                // both come out 2*fwdOut wide (the real class does the same; its members
-                // are private, so the width contract is asserted on the reimpl + the
-                // Rust port).
+                // both come out 2*fwdOut wide (the real class does the same; its PUBLIC
+                // members are probed directly against the reimpl just below).
                 if (reimplF.cols() != 2 * fwdOut || reimplB.cols() != 2 * fwdOut) {
                     std::cerr << "TwoSweeps double-width FAIL: reimplF.cols=" << reimplF.cols()
                               << " reimplB.cols=" << reimplB.cols() << " expected " << 2 * fwdOut << "\n";
@@ -3598,6 +3603,12 @@ int main(int argc, char** argv) {
         };
         auto probeGapNaN = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
                               long& maxUlp, double& maxAbs) {
+            if (real.rows() != reimpl.rows() || real.cols() != reimpl.cols()) {
+                std::cerr << "probeGapNaN dims mismatch: real " << real.rows() << "x"
+                          << real.cols() << " vs reimpl " << reimpl.rows() << "x"
+                          << reimpl.cols() << "\n";
+                std::abort();
+            }
             for (int r = 0; r < real.rows(); ++r) {
                 for (int cc = 0; cc < real.cols(); ++cc) {
                     double av = real(r, cc), bv = reimpl(r, cc);
