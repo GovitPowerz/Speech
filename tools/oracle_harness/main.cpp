@@ -2372,7 +2372,7 @@ int main(int argc, char** argv) {
     // (possibly-mutated) input blstm_norm<type>_input_after.bin. Plus the REAL net
     // (from the vendored config + weights) on a deterministic synthetic 200 x 23
     // input, plain FFB no targets -> blstm_real_fullseq_{out,fwd,bwd}.bin + its
-    // NN_TOL (EXPECTED NONZERO: topRows(11) input slice + k=24 recurrence and layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence).
+    // NN_TOL (EXPECTED NONZERO: k=23 input GEMM + k=24 recurrence and layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence).
     {
         // Reimpl of the whole-sequence self-normalization (type -1, in place;
         // BLSTMNeuralNetwork.cpp:737-744). mean = colSum/rows; center row-by-row;
@@ -2788,7 +2788,7 @@ int main(int argc, char** argv) {
 
             // _OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:
             // 23-24, no accessor needed). EXPECTED NONZERO here too, same root cause as
-            // the output site: topRows(11) input slice + k=24 recurrence and layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence
+            // the output site: k=23 input GEMM + k=24 recurrence and layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence
             // (Task 1 lstm_input_gemm probe).
             long fUlp = 0; double fAbs = 0.0;
             probeGapNaN(nn._OutputForward, outForward, fUlp, fAbs);

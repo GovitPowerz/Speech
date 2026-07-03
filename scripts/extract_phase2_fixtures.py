@@ -364,7 +364,7 @@ def main() -> None:
     # needed), so fwd/bwd hidden states are probed against the real class alongside
     # the output. The synthetic-net per-type sites (out + input mutation + fwd + bwd)
     # are bit-exact (small shapes, k<=6); the real full-sequence site (out + fwd + bwd)
-    # is EXPECTED NONZERO (topRows(11) input slice + k=24 recurrence and layer-1 GEMMs +
+    # is EXPECTED NONZERO (k=23 input GEMM + k=24 recurrence and layer-1 GEMMs +
     # output-net (k=48/k=12) GEMM divergence per the Task 1 lstm_input_gemm probe -- the
     # goldens ARE the reimpl, and the manifest records the measured gap).
     blstm_norm_tols = {f"blstm_norm{tag}": _parse_nn_tol(stdout, f"blstm_norm{tag}") for tag in ("1", "m1", "m2", "0")}
@@ -512,7 +512,7 @@ def main() -> None:
                 "the output. The synthetic-net sites (out + fwd + bwd) are bit-exact (small "
                 "shapes); the *_input sites pin the in-place normalization mutation matching "
                 "the real class. The blstm_real_fullseq site (out + fwd + bwd) is EXPECTED "
-                "NONZERO: on the real net (topRows(11) input slice + k=24 recurrence and "
+                "NONZERO: on the real net (k=23 input GEMM + k=24 recurrence and "
                 "layer-1 GEMMs + output-net (k=48/k=12) GEMM divergence) Eigen's blocked "
                 "product diverges from ascending accumulation (Task 1 lstm_input_gemm probe), "
                 "so the goldens ARE the ascending-loop reimpl and this records the measured "
