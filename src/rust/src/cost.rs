@@ -320,6 +320,13 @@ impl CostLaw {
         (&self.speech_name, &self.no_speech_name)
     }
 
+    /// `isCostModified` (`CostLaw.cpp:110-112`): returns `_BackPropWER`. The scoring
+    /// `feedForward` reads this to decide the soft target (`0.1*modifier` when set,
+    /// else `0.0`) at `BLSTMNeuralNetwork.cpp:871`.
+    pub fn is_cost_modified(&self) -> bool {
+        self.back_prop_wer
+    }
+
     /// Class ponderations for the softmax path (empty when unset).
     pub fn classes_ponderations(&self) -> &[f64] {
         &self.classes_ponderations

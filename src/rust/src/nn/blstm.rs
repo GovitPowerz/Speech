@@ -633,6 +633,131 @@ impl BlstmNetwork {
         }
     }
 
+    /// `isCostModified` (`BLSTMNeuralNetwork.cpp:381-383` -> `CostLaw::isCostModified`
+    /// `CostLaw.cpp:110-112`, i.e. `_BackPropWER`). Consumed by the scoring
+    /// `feedForward` soft-target derivation (`:871`).
+    pub fn is_cost_modified(&self) -> bool {
+        self.cfg.cost_law.is_cost_modified()
+    }
+
+    /// Scoring `feedForward` (`BLSTMNeuralNetwork.cpp:843-929`): builds a per-frame
+    /// target sequence from `(target_index, target_modifier)`, runs the windowed
+    /// `feed_forward_backward` (input mutated in place by normalization types 1/-1),
+    /// and for a BINARY net with targets expands the single posterior column into
+    /// `[1-p, p]`. Returns the `outputSeqShort` matrix.
+    ///
+    /// - `rows < sub_sampling_ratio()` -> `Zero(1, output_size())` (`:845-846`).
+    /// - output `length` = rows divided SEQUENTIALLY by each LSTM sub-sampling ratio
+    ///   then each output-net ratio, ONLY when `sub_sampling_ratio() > 1` (`:854-863`).
+    /// - Target construction when `target_index >= 0` (`:868-918`):
+    ///   `target = is_cost_modified() ? 0.1*target_modifier : 0.0`. Multiclass
+    ///   (`output_size > 1`): `target_index >= output_size -> 0` (unknown class); a
+    ///   counter, starting at 0, enforces a row when `counter >= target_enforcement_step`
+    ///   (then resets to 0): the enforced row is `Constant(target)` with column
+    ///   `target_index` set to `1-target`; a non-enforced row is `Constant(-0.5)` and
+    ///   `++counter`. Row 0 is ALWAYS enforced (`0 >= 0` for any `step >= 0`; for a
+    ///   negative `step` every row enforces). Binary (`output_size == 1`): enforced
+    ///   rows get `(target_index == 1) ? 1-target : target`; non-enforced `-0.5`.
+    /// - Binary expansion (`:922-926`): when `target_index >= 0 && output_size == 1`,
+    ///   resize to `(length, 2)`, col1 = col0, col0 = `1 - col0` -> returns `[1-p, p]`.
+    ///   Without targets the raw single column returns.
+    pub fn feed_forward_scoring(
+        &mut self,
+        input: &mut Array2<f64>,
+        window_size: usize,
+        window_shift: usize,
+        target_index: i64,
+        target_modifier: f64,
+    ) -> Array2<f64> {
+        let output_size = self.output_size();
+        let rows = input.nrows();
+        if rows < self.sub_sampling_ratio() {
+            return Array2::<f64>::zeros((1, output_size)); // :845-846
+        }
+
+        // :854-863 output length. Only re-divided when the whole-BLSTM ratio > 1.
+        let mut length = rows;
+        if self.sub_sampling_ratio() > 1 {
+            for &r in &self.lstm_sub_sampling() {
+                length /= r;
+            }
+            for &r in &self.output_sub_sampling() {
+                length /= r;
+            }
+        }
+
+        let mut output = Array2::<f64>::zeros((length, output_size));
+        let mut target = Array2::<f64>::zeros((0, 0));
+
+        if target_index >= 0 {
+            let mut counter: i32 = 0;
+            let step = self.cfg.target_enforcement_step;
+            let target_val = if self.is_cost_modified() {
+                0.1 * target_modifier
+            } else {
+                0.0
+            };
+            if output_size > 1 {
+                // :872-886 multiclass. Unknown-class fold happens on a LOCAL copy of
+                // target_index (the legacy mutates its int arg; we must not touch the
+                // caller's binary-expansion decision below, but for output_size > 1
+                // that branch never runs, so a local is faithful either way).
+                let ti = if target_index >= output_size as i64 {
+                    0
+                } else {
+                    target_index as usize
+                };
+                target = Array2::<f64>::zeros((length, output_size));
+                for ii in 0..length {
+                    if counter >= step {
+                        counter = 0;
+                        for c in 0..output_size {
+                            target[[ii, c]] = target_val;
+                        }
+                        target[[ii, ti]] = 1.0 - target_val;
+                    } else {
+                        counter += 1;
+                        for c in 0..output_size {
+                            target[[ii, c]] = -0.5;
+                        }
+                    }
+                }
+            } else {
+                // :887-903 binary.
+                target = Array2::<f64>::zeros((length, 1));
+                for ii in 0..length {
+                    if counter >= step {
+                        counter = 0;
+                        target[[ii, 0]] = if target_index == 1 {
+                            1.0 - target_val
+                        } else {
+                            target_val
+                        };
+                    } else {
+                        counter += 1;
+                        target[[ii, 0]] = -0.5;
+                    }
+                }
+            }
+        }
+
+        // :920 windowed FFB (input MUTABLE: normalization mutates the caller's matrix).
+        self.feed_forward_backward(input, window_size, window_shift, &mut output, &target);
+
+        // :922-926 binary expansion into [1-p, p].
+        if target_index >= 0 && output_size == 1 {
+            let mut expanded = Array2::<f64>::zeros((length, 2));
+            for ii in 0..length {
+                let p = output[[ii, 0]];
+                expanded[[ii, 0]] = 1.0 - p;
+                expanded[[ii, 1]] = p;
+            }
+            expanded
+        } else {
+            output
+        }
+    }
+
     /// Plain (non-windowed) `feedForwardBackward` (`BLSTMNeuralNetwork.cpp:776-830`):
     /// type -2 normalizes into a COPY (input untouched) then forwards the copy;
     /// otherwise forwards the input directly. Backward is Phase 3 (skipped; the gate

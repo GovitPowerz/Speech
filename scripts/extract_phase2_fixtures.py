@@ -145,6 +145,34 @@ EXPECTED_SHAPES["blstm_overlap_nan_fwd.bin"] = (10, 2)
 EXPECTED_SHAPES["blstm_overlap_nan_bwd.bin"] = (10, 2)
 EXPECTED_SHAPES["blstm_mlpoverlap_out.bin"] = (6, 1)
 
+# Task 10: scoring feedForward (BLSTMNeuralNetwork.cpp:843-929) on a synthetic BINARY
+# net (LSTM [3,4,2] sub [2,1], output [4,5,1] sub [1,1], T=12 -> length 6). The binary
+# expansion (:922-926) makes every scoring output (6 x 2) = [1-p, p]. Cases sweep
+# {enforcement step 0, 2} x {targetModifier 1.0, 2.0} x {cost-modified false, true}.
+# _Cost/_NbOfClassif are recorded in the manifest from the REAL class accessors. Kept
+# in sync with main.cpp's Task 10 scoring block.
+_SCORING_CASES = ["step0_mod1_plain", "step2_mod1_plain", "step0_mod2_mod", "step2_mod2_mod"]
+for _case in _SCORING_CASES:
+    EXPECTED_SHAPES[f"blstm_scoring_{_case}_out.bin"] = (6, 2)
+
+# Task 10: END-TO-END real-net gate leg. The Phase 1 feature front-end under the REAL
+# 1_worker_1.config BLSTM_* keys on the excerpt (chan 1, offset 0.35 dur 2.0) produces
+# a (201 x D) inputSeq with D == 11 (nb_DCT 4, IgnoreFirstDCT true, deltas 5, dd 3 ->
+# 3*4-1 = 11; LTSVwindow 0 -> no LTSV column). D != 23 (the net input) exercises the
+# feedForward width tolerance (D=11 < 23 -> per-layer topRows in the LSTM/dense forward,
+# NOT the leftCols crop, which only fires when D > 23). The real net (LSTM [23,24,24]
+# sub [4,1], output [48,12,1] sub [1,1], InputNormalizationType -1) forwards TWICE:
+# (a) full-sequence plain FFB -> out (201/4 = 50 x 1), fwd/bwd hidden (50 x 24);
+# (b) OverLap window_size 25 shift 12 -> out (50 x 1), fwd/bwd hidden (50 x 24). Kept
+# in sync with main.cpp's Task 10 E2E block.
+EXPECTED_SHAPES["e2e_input.bin"] = (201, 11)
+EXPECTED_SHAPES["e2e_out_full.bin"] = (50, 1)
+EXPECTED_SHAPES["e2e_fwd_full.bin"] = (50, 24)
+EXPECTED_SHAPES["e2e_bwd_full.bin"] = (50, 24)
+EXPECTED_SHAPES["e2e_out_overlap.bin"] = (50, 1)
+EXPECTED_SHAPES["e2e_fwd_overlap.bin"] = (50, 24)
+EXPECTED_SHAPES["e2e_bwd_overlap.bin"] = (50, 24)
+
 # Input fixtures the harness reads from its output dir (see main.cpp:577,1233).
 HARNESS_INPUTS = [
     "excerpt_2ch_8k.wav",
@@ -196,6 +224,17 @@ NN_TOL_RE = re.compile(
     re.MULTILINE,
 )
 
+# Task 10: scoring feedForward per-case _Cost/_NbOfClassif, read from the REAL class
+# accessors (getCost/getNbOfClassif). cost is dumped as hex bits (bit-exact) + decimal.
+BLSTM_SCORING_RE = re.compile(
+    r"^BLSTM_SCORING case=(?P<case>\w+) cost=0x(?P<cost>[0-9a-f]+) "
+    r"cost_dec=(?P<cost_dec>\S+) nb_of_classif=(?P<nb>-?\d+)$",
+    re.MULTILINE,
+)
+
+# Task 10: E2E assembled-input shape (records the measured real-config feature width D).
+E2E_INPUT_RE = re.compile(r"^E2E_INPUT rows=(?P<rows>\d+) cols=(?P<cols>\d+)$", re.MULTILINE)
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -235,6 +274,27 @@ def _parse_nn_tol(stdout: str, site: str) -> dict[str, object]:
                 "max_abs": match["max_abs"],
             }
     raise SystemExit(f"NN_TOL line for site={site} missing from harness stdout")
+
+
+def _parse_blstm_scoring(stdout: str) -> dict[str, dict[str, object]]:
+    cases: dict[str, dict[str, object]] = {}
+    for match in BLSTM_SCORING_RE.finditer(stdout):
+        cases[match["case"]] = {
+            "cost_bits": match["cost"],
+            "cost": match["cost_dec"],
+            "nb_of_classif": int(match["nb"]),
+        }
+    missing = set(_SCORING_CASES) - set(cases)
+    if missing:
+        raise SystemExit(f"BLSTM_SCORING lines missing from harness stdout: {sorted(missing)}")
+    return cases
+
+
+def _parse_e2e_input(stdout: str) -> tuple[int, int]:
+    match = E2E_INPUT_RE.search(stdout)
+    if match is None:
+        raise SystemExit("E2E_INPUT line missing from harness stdout")
+    return int(match["rows"]), int(match["cols"])
 
 
 def _parse_nn_probes(stdout: str) -> dict[str, dict[str, object]]:
@@ -307,22 +367,10 @@ def main() -> None:
     # is EXPECTED NONZERO (the k=23 input GEMM diverges from ascending accumulation
     # per the Task 1 lstm_input_gemm probe -- the goldens ARE the reimpl, and the
     # manifest records the measured gap).
-    blstm_norm_tols = {
-        f"blstm_norm{tag}": _parse_nn_tol(stdout, f"blstm_norm{tag}")
-        for tag in ("1", "m1", "m2", "0")
-    }
-    blstm_norm_input_tols = {
-        f"blstm_norm{tag}_input": _parse_nn_tol(stdout, f"blstm_norm{tag}_input")
-        for tag in ("1", "m1", "m2", "0")
-    }
-    blstm_norm_fwd_tols = {
-        f"blstm_norm{tag}_fwd": _parse_nn_tol(stdout, f"blstm_norm{tag}_fwd")
-        for tag in ("1", "m1", "m2", "0")
-    }
-    blstm_norm_bwd_tols = {
-        f"blstm_norm{tag}_bwd": _parse_nn_tol(stdout, f"blstm_norm{tag}_bwd")
-        for tag in ("1", "m1", "m2", "0")
-    }
+    blstm_norm_tols = {f"blstm_norm{tag}": _parse_nn_tol(stdout, f"blstm_norm{tag}") for tag in ("1", "m1", "m2", "0")}
+    blstm_norm_input_tols = {f"blstm_norm{tag}_input": _parse_nn_tol(stdout, f"blstm_norm{tag}_input") for tag in ("1", "m1", "m2", "0")}
+    blstm_norm_fwd_tols = {f"blstm_norm{tag}_fwd": _parse_nn_tol(stdout, f"blstm_norm{tag}_fwd") for tag in ("1", "m1", "m2", "0")}
+    blstm_norm_bwd_tols = {f"blstm_norm{tag}_bwd": _parse_nn_tol(stdout, f"blstm_norm{tag}_bwd") for tag in ("1", "m1", "m2", "0")}
     blstm_real_fullseq_tol = _parse_nn_tol(stdout, "blstm_real_fullseq")
     blstm_real_fullseq_fwd_tol = _parse_nn_tol(stdout, "blstm_real_fullseq_fwd")
     blstm_real_fullseq_bwd_tol = _parse_nn_tol(stdout, "blstm_real_fullseq_bwd")
@@ -354,6 +402,26 @@ def main() -> None:
             "blstm_mlpoverlap_bwd",
         )
     }
+
+    # Task 10: scoring feedForward + END-TO-END real-net gate. The scoring reimpl is
+    # bit-exact vs the REAL class (max_ulp=0, small synthetic net); the E2E forwards are
+    # EXPECTED NONZERO (the real net's k=23 input GEMM diverges from ascending
+    # accumulation, same root cause as blstm_real_fullseq -- the goldens ARE the
+    # reimpl). _Cost/_NbOfClassif per scoring case are read from the real class.
+    blstm_scoring_tols = {f"blstm_scoring_{case}": _parse_nn_tol(stdout, f"blstm_scoring_{case}") for case in _SCORING_CASES}
+    blstm_scoring_costs = _parse_blstm_scoring(stdout)
+    e2e_tols = {
+        site: _parse_nn_tol(stdout, site)
+        for site in (
+            "e2e_full",
+            "e2e_full_fwd",
+            "e2e_full_bwd",
+            "e2e_overlap",
+            "e2e_overlap_fwd",
+            "e2e_overlap_bwd",
+        )
+    }
+    e2e_rows, e2e_cols = _parse_e2e_input(stdout)
 
     # 2b. Read each dump back, verify its shape, and build the inventory.
     dump_inventory: dict[str, dict[str, int]] = {}
@@ -477,6 +545,45 @@ def main() -> None:
                 "degenerate 0x0-vs-0x0 comparison. All max_ulp=0."
             ),
             **blstm_windowed_tols,
+        },
+        "blstm_scoring_tol": {
+            "text": (
+                "Task 10: scoring feedForward (BLSTMNeuralNetwork.cpp:843-929) on a "
+                "synthetic BINARY net (LSTM [3,4,2] sub [2,1], output [4,5,1] sub [1,1], "
+                "T=12 -> length 6). Target construction (soft target isCostModified ? "
+                "0.1*modifier : 0.0, enforcement counter, -0.5 markers) + binary [1-p, p] "
+                "expansion, reimpl-vs-real bit-exact (max_ulp=0). Cases sweep {enforcement "
+                "step 0, 2} x {targetModifier 1.0, 2.0} x {cost-modified false, true}, "
+                "targetIndex 1. isCostModified maps to CostLaw::_BackPropWER (>= 0 -> "
+                "modified). The per-case _Cost/_NbOfClassif are read from the REAL class "
+                "(getCost/getNbOfClassif); cost is bit-exact hex + decimal."
+            ),
+            "reimpl_vs_real": blstm_scoring_tols,
+            "cost_nb_of_classif": blstm_scoring_costs,
+        },
+        "e2e_gate": {
+            "text": (
+                "Task 10: the END-TO-END real-net gate. The Phase 1 feature front-end "
+                "(param derivation + getBLSTMInputSequence assembly) under the REAL "
+                "1_worker_1.config BLSTM_* DSP keys on the excerpt (chan 1, offset 0.35 "
+                "dur 2.0) produces the assembled inputSeq; the real net (from the config "
+                "+ NNweights_config1.bin) then forwards it plain (full-sequence) and via "
+                "OverLap (window_size 25 shift 12, EXPLICIT constants -- getBLSTMParam "
+                "derivation is Phase 2b). preemph_ratio -0.97 < 0 -> preemph SKIPPED; "
+                "LTSVwindow 0 -> no LTSV column; nb_DCT 4 + IgnoreFirstDCT + deltas 5 + "
+                "dd 3 -> D = 3*4-1 = 11 feature columns. The measured input width D != 23 "
+                "(the net input) exercises the feedForward WIDTH TOLERANCE: D=11 < 23 -> "
+                "the per-layer topRows tolerance (LSTMLayer/NeuronLayer forward), NOT the "
+                "leftCols crop (which only fires when D > 23). The forwards are EXPECTED "
+                "NONZERO vs the real class (k=23 input GEMM divergence, same root cause as "
+                "blstm_real_fullseq); the goldens ARE the ascending-loop reimpl."
+            ),
+            "input_shape": {"rows": e2e_rows, "cols": e2e_cols},
+            "measured_D": e2e_cols,
+            "net_input_size": 23,
+            "overlap_window_size": 25,
+            "overlap_window_shift": 12,
+            **e2e_tols,
         },
         "dumps": dump_inventory,
     }

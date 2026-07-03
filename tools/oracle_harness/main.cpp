@@ -3356,6 +3356,539 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "blstm_mlpoverlap_out.bin", reimplOut);
             dumps += 1;
         }
+
+        // ================================================================
+        // Phase 2 Task 10: scoring feedForward (BLSTMNeuralNetwork.cpp:843-929).
+        // The scoring feedForward builds a per-frame target sequence from
+        // (targetIndex, targetModifier), runs the windowed feedForwardBackward, and
+        // for a BINARY net (outputSize == 1) with targets expands the single posterior
+        // column into [1-p, p]. Reimpl transcribes the target-construction counter
+        // scheme + soft-target (isCostModified ? 0.1*modifier : 0.0) + binary
+        // expansion, calling blstmFeedForward (plain path, InputNormalizationType 0)
+        // per frame; probed vs the REAL class's scoring feedForward
+        // (BLSTMNeuralNetwork.h:195). isCostModified maps to CostLaw::_BackPropWER
+        // (CostLaw.cpp:110-112), driven by the synthetic config's SYNS_BackPropWER key
+        // (>= 0 -> modified). _Cost/_NbOfClassif are read from the REAL class via the
+        // public getCost()/getNbOfClassif() accessors (BLSTMNeuralNetwork.h:157-158)
+        // and printed as parseable BLSTM_SCORING lines for the manifest.
+        //
+        // Synthetic BINARY net: LSTM [3,4,2] sub [2,1], output [4,5,1] sub [1,1]
+        // (output ENDS AT 1). T=12 -> length = 12/2/1 = 6. Cases sweep {enforcement
+        // step 0, 2} x {targetModifier 1.0, 2.0} x {cost-modified false, true}, all at
+        // targetIndex 1 (the SPEECH class in the binary VAD convention).
+        {
+            const std::vector<long> lstmNN = {3, 4, 2};
+            const std::vector<long> lstmSS = {2, 1};
+            const std::vector<long> outNN = {4, 5, 1};
+            const std::vector<long> outSS = {1, 1};
+            const std::vector<int> lstmIns = {6, 4}, lstmOuts = {4, 2};
+            const std::vector<int> outIns = {4, 5}, outOuts = {5, 1};
+            const int fwdInputSize = 3;
+            const long subRatio = 2;   // lstm(2)*out(1)
+            const int T = 12;
+            const long length = 6;     // 12/2/1
+
+            auto lstmNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) {
+                    int I = ins[jj], O = outs[jj];
+                    s += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+                }
+                return s;
+            };
+            auto denseNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) s += (long)outs[jj] * (ins[jj] + 1);
+                return s;
+            };
+            const long fwdNb = lstmNetNb(lstmIns, lstmOuts);
+            const long bwdNb = fwdNb;
+            const long outNb = denseNetNb(outIns, outOuts);
+            const long tailNb = 2 * fwdInputSize;
+            const long nbTotal = fwdNb + bwdNb + outNb + tailNb;
+
+            Eigen::VectorXd flat(nbTotal);
+            for (long k = 0; k < nbTotal - tailNb; ++k)
+                flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            for (int j = 0; j < fwdInputSize; ++j) {
+                flat(nbTotal - tailNb + j) = 0.1 * (j + 1);
+                flat(nbTotal - tailNb + fwdInputSize + j) = 1.0 + 0.05 * j;
+            }
+
+            Eigen::VectorXd fwdSlice = flat.head(fwdNb);
+            Eigen::VectorXd bwdSlice = flat.segment(fwdNb, bwdNb);
+            Eigen::VectorXd outSlice = flat.segment(fwdNb + bwdNb, outNb);
+            std::vector<Eigen::MatrixXd> fiw, ffw, fpp, fbs, biw, bfw, bpp, bbs, ows, obs;
+            std::vector<NetLayerStep> fwdSteps, fwdStepsRev, bwdSteps, bwdStepsRev, outSteps;
+            makeLstmSteps(fwdSlice, lstmIns, lstmOuts, fiw, ffw, fpp, fbs, fwdSteps, fwdStepsRev);
+            makeLstmSteps(bwdSlice, lstmIns, lstmOuts, biw, bfw, bpp, bbs, bwdSteps, bwdStepsRev);
+            makeDenseSteps(outSlice, outIns, outOuts, ows, obs, outSteps);
+
+            Eigen::MatrixXd baseInput(T, 3);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < 3; ++j)
+                    baseInput(t, j) = (double)(((t * 29 + j * 13 + 5) % 97)) / 97.0 - 0.5;
+
+            // Reimpl of the scoring target construction + binary expansion (:868-926).
+            // outputSize == 1 (binary), so only the binary branch (:887-903) runs.
+            auto scoringReimpl = [&](int step, double modifier, bool costModified,
+                                     Eigen::MatrixXd& outputSeq) {
+                const int targetIndex = 1;
+                double target = costModified ? 0.1 * modifier : 0.0;   // :870-871
+                Eigen::MatrixXd targetSeq(length, 1);                   // :888
+                int counter = 0;
+                for (long ii = 0; ii < length; ++ii) {
+                    if (counter >= step) {                              // :890
+                        counter = 0;
+                        targetSeq(ii, 0) = (targetIndex == 1) ? (1.0 - target) : target;  // :893-897
+                    } else {
+                        ++counter;
+                        targetSeq(ii, 0) = -0.5;                        // :901
+                    }
+                }
+                // :920 windowed FFB -> plain path (InputNormalizationType 0, no norm).
+                Eigen::MatrixXd oF, oB;
+                Eigen::MatrixXd raw(length, 1);
+                blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                                 fwdInputSize, baseInput, oF, oB, raw);
+                // :922-926 binary expansion into [1-p, p].
+                outputSeq = Eigen::MatrixXd(length, 2);
+                for (long ii = 0; ii < length; ++ii) {
+                    outputSeq(ii, 0) = 1.0 - raw(ii, 0);
+                    outputSeq(ii, 1) = raw(ii, 0);
+                }
+            };
+
+            struct ScoreCase { int step; double modifier; bool costModified; const char* tag; };
+            const ScoreCase cases[] = {
+                {0, 1.0, false, "step0_mod1_plain"},
+                {2, 1.0, false, "step2_mod1_plain"},
+                {0, 2.0, true,  "step0_mod2_mod"},
+                {2, 2.0, true,  "step2_mod2_mod"},
+            };
+
+            for (const ScoreCase& sc : cases) {
+                // Synthetic BINARY config prefix (SYNS). InputNormalizationType 0.
+                ConfigFile confS(nnConfigPath, '_');
+                confS._Params.erase("BLSTM_weightsFile");
+                confS.set_val<std::string>("SYNS_LSTMNeuronNb", "3,4,2");
+                confS.set_val<std::string>("SYNS_LSTMSubSampling", "2,1");
+                confS.set_val<std::string>("SYNS_OutputNeuronNb", "4,5,1");
+                confS.set_val<std::string>("SYNS_OutputSubSampling", "1,1");
+                confS.set_val<short>("SYNS_InputNormalizationType", (short)0);
+                confS.set_val<bool>("SYNS_TwoSweeps", false);
+                confS.set_val<bool>("SYNS_BackPropagationActivated", false);
+                confS.set_val<int>("SYNS_TargetEnforcementStep", sc.step);
+                // isCostModified() == CostLaw::_BackPropWER (>= 0 -> modified).
+                confS.set_val<double>("SYNS_BackPropWER", sc.costModified ? 0.0 : -1.0);
+                BLSTMNeuralNetwork<LSTMLayer> nn(confS, "SYNS", true);
+                nn.setWeights(flat);
+                nn.setProcessingType(false, false);  // plain path
+
+                // Real class scoring feedForward (BLSTMNeuralNetwork.h:195): input is
+                // Eigen::Ref (mutated for norm 1/-1; norm 0 here leaves it alone).
+                Eigen::MatrixXd realInput = baseInput;
+                Eigen::MatrixXd realOut = nn.feedForward(realInput, 4, 2, 1, sc.modifier);
+
+                Eigen::MatrixXd reimplOut;
+                scoringReimpl(sc.step, sc.modifier, sc.costModified, reimplOut);
+
+                long u = 0; double a = 0.0;
+                probeGapNaN(realOut, reimplOut, u, a);
+                std::cout << "NN_TOL site=blstm_scoring_" << sc.tag << " max_ulp=" << u
+                          << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                // _Cost/_NbOfClassif from the REAL class (public accessors). Print as
+                // hex bits (parseable, bit-exact) alongside the decimal for the manifest.
+                double cost = nn.getCost();
+                double nbClassif = nn.getNbOfClassif();
+                uint64_t costBits;
+                std::memcpy(&costBits, &cost, sizeof(double));
+                std::cout << "BLSTM_SCORING case=" << sc.tag
+                          << " cost=0x" << std::hex << costBits << std::dec
+                          << " cost_dec=" << std::scientific << std::setprecision(17) << cost
+                          << " nb_of_classif=" << (long long)nbClassif << "\n";
+
+                Matrix2BinaryFile(out + "blstm_scoring_" + sc.tag + "_out.bin", reimplOut);
+                dumps += 1;
+            }
+        }
+    }
+
+    // --- Phase 2 Task 10: END-TO-END real-net gate leg -----------------------
+    // legacy: the Phase 1 feature front-end (BLSTMSpectralSegmenter::initSpectralAnalysis
+    // param derivation + getBLSTMInputSequence assembly, transcribed above in the Task 11
+    // feature block) driven by the REAL config's BLSTM_* DSP keys on the excerpt wav
+    // (chan 1, offset 0.35 dur 2.0), then the real-net blstm reimpl forward TWICE:
+    //   (a) full-sequence (plain FFB, no targets) -> e2e_out_full + e2e_fwd_full + e2e_bwd_full,
+    //   (b) OverLap window_size 25 shift 12 (EXPLICIT constants; getBLSTMParam derivation
+    //       is Phase 2b) -> e2e_out_overlap + e2e_fwd_overlap + e2e_bwd_overlap.
+    // Also dumps e2e_input.bin (the assembled inputSeq -- revalidates Phase 1 under the
+    // REAL config for the Rust gate). NN_TOL probes vs the REAL class on both forwards
+    // (EXPECTED NONZERO per the established k=23 input-GEMM pattern; measured recorded).
+    //
+    // Real config keys: preemph_ratio -0.97 (< 0 -> preemph SKIPPED, matching
+    // BLSTMSpectralSegmenter.cpp:216 `_PreemphRatio > 0`); spectrum_order 10; nb_bins 20,
+    // nb_DCT 4, is_log_mel true, IgnoreFirstDCT true, ComputeDeltasNb 5,
+    // ComputeDeltaDeltasNb 3 -> mel + DCT path; LTSVwindow 0 -> R == 0 -> NO LTSV. The
+    // assembled input width D is whatever the DCT branch produces; the net input is 23,
+    // and D != 23 exercises the feedForward width tolerance (leftCols when D > 23 &&
+    // LSTMRatios[0] > 1, else the per-layer topRows in the LSTM/dense forward). D is
+    // dumped in the manifest via e2e_input.bin's column count.
+    {
+        // Local copies of the Task 8/9 block-scoped helpers (makeLstmSteps /
+        // makeDenseSteps / probeGapNaN), needed here because this leg lives OUTSIDE
+        // the Task 8/9 block that defines them. Identical logic; kept in sync.
+        auto makeLstmSteps = [](const Eigen::VectorXd& flat,
+                                const std::vector<int>& ins, const std::vector<int>& outs,
+                                std::vector<Eigen::MatrixXd>& iw, std::vector<Eigen::MatrixXd>& fw,
+                                std::vector<Eigen::MatrixXd>& pp, std::vector<Eigen::MatrixXd>& bs,
+                                std::vector<NetLayerStep>& fwdSteps,
+                                std::vector<NetLayerStep>& bwdSteps) {
+            const size_t L = ins.size();
+            iw.resize(L); fw.resize(L); pp.resize(L); bs.resize(L);
+            fwdSteps.resize(L); bwdSteps.resize(L);
+            long pos = 0;
+            for (size_t jj = 0; jj < L; ++jj) {
+                int I = ins[jj], O = outs[jj];
+                long nb = 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+                Eigen::VectorXd slice = flat.segment(pos, nb);
+                pos += nb;
+                unpackLstmWeights(slice, I, O, iw[jj], fw[jj], pp[jj], bs[jj]);
+            }
+            for (size_t jj = 0; jj < L; ++jj) {
+                int O = outs[jj];
+                fwdSteps[jj].forward = [&iw, &fw, &pp, &bs, jj, O](const Eigen::MatrixXd& in,
+                                                                  Eigen::MatrixXd& outm, bool) {
+                    Eigen::MatrixXd g;
+                    lstmForwardLoop(in, iw[jj], fw[jj], pp[jj], bs[jj], O, true, true, true, g, outm);
+                };
+                bwdSteps[jj].forward = [&iw, &fw, &pp, &bs, jj, O](const Eigen::MatrixXd& in,
+                                                                  Eigen::MatrixXd& outm, bool) {
+                    Eigen::MatrixXd g;
+                    lstmForwardReverseLoop(in, iw[jj], fw[jj], pp[jj], bs[jj], O, true, true, true, g, outm);
+                };
+            }
+            return pos;
+        };
+        auto makeDenseSteps = [](const Eigen::VectorXd& flat,
+                                 const std::vector<int>& ins, const std::vector<int>& outs,
+                                 std::vector<Eigen::MatrixXd>& ws, std::vector<Eigen::MatrixXd>& bs,
+                                 std::vector<NetLayerStep>& steps) {
+            const size_t L = ins.size();
+            ws.resize(L); bs.resize(L); steps.resize(L);
+            long pos = 0;
+            for (size_t jj = 0; jj < L; ++jj) {
+                int I = ins[jj], O = outs[jj];
+                long nb = (long)O * (I + 1);
+                Eigen::VectorXd slice = flat.segment(pos, nb);
+                pos += nb;
+                ws[jj].resize(I, O); bs[jj].resize(1, O);
+                for (int cc = 0; cc < O; ++cc)
+                    for (int r = 0; r < I; ++r) ws[jj](r, cc) = slice((long)cc * I + r);
+                for (int cc = 0; cc < O; ++cc) bs[jj](0, cc) = slice((long)O * I + cc);
+            }
+            for (size_t jj = 0; jj < L; ++jj) {
+                steps[jj].forward = [&ws, &bs, jj](const Eigen::MatrixXd& in,
+                                                   Eigen::MatrixXd& outm, bool last) {
+                    outm = denseForwardLoop(in, ws[jj], bs[jj], last);
+                };
+            }
+            return pos;
+        };
+        auto probeGapNaN = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                              long& maxUlp, double& maxAbs) {
+            for (int r = 0; r < real.rows(); ++r) {
+                for (int cc = 0; cc < real.cols(); ++cc) {
+                    double av = real(r, cc), bv = reimpl(r, cc);
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &av, sizeof(double));
+                    std::memcpy(&bb, &bv, sizeof(double));
+                    if (ab == bb) continue;
+                    double absGap = std::fabs(av - bv);
+                    if (absGap > maxAbs) maxAbs = absGap;
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > maxUlp) maxUlp = ulp;
+                }
+            }
+        };
+
+        const unsigned Min = 1;
+        const unsigned Max = 20;
+        Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+        FactoryInit<GFFTList<GFFT, Min, Max>::Result>::apply(gfft_factory);
+
+        // Parse the REAL config with the same ConfigFile the feature block uses.
+        ConfigFile conf(nnConfigPath);
+        FeatureCfg c = readFeatureCfg(conf, "BLSTM");
+
+        CorpusItem eitem(wav, "", "RUS", "RU", 0, 0, 1.0);
+        AudioStruct eaudio(OFFSET_SEC, MAX_DUR_SEC, 0, eitem);
+        const double RATE = (double)eaudio.getFrameRate();
+        SpectralP s = deriveSpectral(c, RATE, Max);
+
+        if (c.preemph > 0) eaudio.applyPreemph(c.preemph);   // -0.97 -> SKIPPED
+        // noise skipped: real config noise_seed -3 (< 0 -> BLSTMSpectralSegmenter.cpp:222
+        // `_NoiseSeed > 0` false), and the feature transcription follows suit.
+
+        MelFilterBank mel;
+        if (c.nb_bins > 0) {
+            mel = MelFilterBank(c.min_mel, c.max_mel, c.nb_bins, s.min_freq_snapped,
+                                s.max_freq_snapped, RATE, s.bins - 1, c.is_log, c.nb_dct,
+                                c.ignore_first, c.deltas_nb, c.dd_nb);
+        }
+
+        const double PI = 3.14159265358979323846264338327;
+        long nbFilters = mel.notEmpty() ? (long)mel.getNbFilters() : 0;
+        long nbDct = c.nb_dct;
+        if (nbDct > nbFilters) nbDct = nbFilters;
+        Eigen::MatrixXd coeffs;
+        if (c.nb_bins > 0 && c.nb_dct > 0) {
+            coeffs = Eigen::MatrixXd::Zero(nbFilters, nbDct);
+            for (long col = 0; col < nbFilters; ++col)
+                for (long row = 0; row < nbDct; ++row)
+                    coeffs(col, row) = std::cos(PI / nbFilters * (col + 0.5) * row);
+        }
+
+        Eigen::MatrixXd win = getWindowingCoefficients(c.win_type, false, s.window_size + 1, c.win_param);
+        Eigen::MatrixXd noConv;
+        MelFilterBank emptyMel;
+        const long long endFull = eaudio.getFrameCount() - 1;
+
+        // chan 1 (0-indexed 0), per the brief.
+        const int chan = 0;
+        eaudio.computeSegmentPeriodogramEstimates(s.order, s.shift_frames, chan, c.flag_dc,
+                                                  win, emptyMel, gfft_factory, noConv, 0, endFull);
+        Eigen::MatrixXd perio = eaudio._Periodogram;
+
+        Eigen::MatrixXd inputSeq;
+        if (mel.notEmpty()) {
+            Eigen::MatrixXd fb = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+            mel.applyFilterBank(perio, fb);
+            if (c.nb_dct > 0) {
+                inputSeq = applyDCTLoop(fb, coeffs, (int)nbDct, c.ignore_first, c.deltas_nb, c.dd_nb);
+            } else {
+                inputSeq = fb;
+            }
+        } else {
+            inputSeq = (((perio.block(0, s.freq_beg, perio.rows(),
+                                      s.freq_end - s.freq_beg + 1).array() + 1e-24).log()).matrix());
+        }
+        if (s.ltsv_half_window > 0) {
+            long ltsv_beg = mel.notEmpty() ? 0 : s.freq_beg;
+            long ltsv_end = mel.notEmpty() ? (long)inputSeq.cols() - 1 : s.freq_end;
+            Eigen::MatrixXd ltsv = getLTSV(perio, s.ltsv_half_window, s.ltsv_shift, ltsv_beg, ltsv_end);
+            Eigen::MatrixXd merged(inputSeq.rows(), inputSeq.cols() + 1);
+            merged << inputSeq, ltsv;
+            inputSeq = merged;
+        }
+
+        Matrix2BinaryFile(out + "e2e_input.bin", inputSeq);
+        dumps += 1;
+        std::cout << "E2E_INPUT rows=" << inputSeq.rows() << " cols=" << inputSeq.cols() << "\n";
+
+        // --- Real-net blstm reimpl forward (mirrors the Task 8 real-fullseq block). --
+        // Rebuild the makeLstmSteps/makeDenseSteps/blstmFeedForward plumbing here (those
+        // Task 8/9 lambdas are scoped to the block above). Real net: LSTM [23,24,24] sub
+        // [4,1]; output [48,12,1] sub [1,1]; InputNormalizationType -1 (self-norm).
+        const std::vector<long> lstmNN = {23, 24, 24};
+        const std::vector<long> lstmSS = {4, 1};
+        const std::vector<long> outNN = {48, 12, 1};
+        const std::vector<long> outSS = {1, 1};
+        const std::vector<int> lstmIns = {92, 24}, lstmOuts = {24, 24};   // 23*4, 24*1
+        const std::vector<int> outIns = {48, 12}, outOuts = {12, 1};
+        const int fwdInputSize = 23;
+        const long subRatio = 4;   // lstm(4)*out(1)
+
+        ConfigFile nconf(nnConfigPath, '_');
+        nconf._Params.erase("BLSTM_weightsFile");
+        BLSTMNeuralNetwork<LSTMLayer> nn(nconf, "BLSTM", true);
+        Eigen::VectorXd flat = BinaryFile2Vector(nnWeightsPath);
+        nn.setWeights(flat);
+
+        long fwdNb = 0;
+        for (size_t jj = 0; jj < lstmIns.size(); ++jj) {
+            int I = lstmIns[jj], O = lstmOuts[jj];
+            fwdNb += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+        }
+        long outNbW = 0;
+        for (size_t jj = 0; jj < outIns.size(); ++jj) outNbW += (long)outOuts[jj] * (outIns[jj] + 1);
+        Eigen::VectorXd fwdSlice = flat.head(fwdNb);
+        Eigen::VectorXd bwdSlice = flat.segment(fwdNb, fwdNb);
+        Eigen::VectorXd outSlice = flat.segment(2 * fwdNb, outNbW);
+        std::vector<Eigen::MatrixXd> fiw, ffw, fpp, fbs, biw, bfw, bpp, bbs, ows, obs;
+        std::vector<NetLayerStep> fwdSteps, fwdStepsRev, bwdSteps, bwdStepsRev, outSteps;
+        makeLstmSteps(fwdSlice, lstmIns, lstmOuts, fiw, ffw, fpp, fbs, fwdSteps, fwdStepsRev);
+        makeLstmSteps(bwdSlice, lstmIns, lstmOuts, biw, bfw, bpp, bbs, bwdSteps, bwdStepsRev);
+        makeDenseSteps(outSlice, outIns, outOuts, ows, obs, outSteps);
+
+        // Reimpl type -1 self-norm in place, then core forward (leftCols gate:
+        // LSTMRatios[0]==4 > 1 && fwdInputSize(23) < D crops leftCols(23) when D > 23;
+        // when D < 23 the full input flows and the per-layer topRows tolerance applies).
+        auto normalizeType_1 = [](Eigen::MatrixXd& in) {
+            const int R = (int)in.rows(), C = (int)in.cols();
+            if (R == 0) return;
+            std::vector<double> mean(C, 0.0);
+            for (int cc = 0; cc < C; ++cc) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += in(r, cc);
+                mean[cc] = acc / (double)R;
+            }
+            for (int r = 0; r < R; ++r)
+                for (int cc = 0; cc < C; ++cc) in(r, cc) -= mean[cc];
+            std::vector<double> stdv(C, 0.0);
+            for (int cc = 0; cc < C; ++cc) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += in(r, cc) * in(r, cc);
+                stdv[cc] = std::sqrt((acc + 1e-32) / (double)R);
+            }
+            for (int r = 0; r < R; ++r)
+                for (int cc = 0; cc < C; ++cc) in(r, cc) = Maxmin2::fn(in(r, cc) / stdv[cc]);
+        };
+
+        // (a) full-sequence: plain FFB path, no targets. window_size/shift unused there.
+        {
+            long outRows = inputSeq.rows();
+            for (long r : lstmSS) outRows /= r;   // fwd LSTM ratio 4*1 -> rows/4
+            Eigen::MatrixXd realInput = inputSeq;  // MUTATED by the type -1 self-norm
+            Eigen::MatrixXd realOut(outRows, 1);
+            Eigen::MatrixXd emptyTargets;
+            nn.setProcessingType(false, false);
+            nn.feedForwardBackward(realInput, 4, 2, realOut, emptyTargets);
+
+            Eigen::MatrixXd reimplInput = inputSeq;
+            normalizeType_1(reimplInput);
+            Eigen::MatrixXd reimplOut, outForward, outBackward;
+            // Core forward (leftCols(23) gate lives inside blstmFeedForward).
+            {
+                Eigen::MatrixXd fwdIn = reimplInput, bwdIn = reimplInput;
+                if (lstmSS[0] > 1 && fwdInputSize < reimplInput.cols()) {
+                    fwdIn = reimplInput.leftCols(fwdInputSize);
+                    bwdIn = reimplInput.leftCols(fwdInputSize);
+                }
+                netForwardLoop(lstmNN, lstmSS, fwdSteps, fwdIn, outForward);
+                netForwardReverseLoop(lstmNN, lstmSS, bwdStepsRev, bwdIn, outBackward);
+                netForwardDoubleLoop(outNN, outSS, outSteps, outForward, outBackward, reimplOut);
+            }
+
+            long u = 0; double a = 0.0;
+            probeGapNaN(realOut, reimplOut, u, a);
+            std::cout << "NN_TOL site=e2e_full max_ulp=" << u
+                      << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+            long uF = 0; double aF = 0.0;
+            probeGapNaN(nn._OutputForward, outForward, uF, aF);
+            std::cout << "NN_TOL site=e2e_full_fwd max_ulp=" << uF
+                      << " max_abs=" << std::scientific << std::setprecision(3) << aF << "\n";
+            long uB = 0; double aB = 0.0;
+            probeGapNaN(nn._OutputBackward, outBackward, uB, aB);
+            std::cout << "NN_TOL site=e2e_full_bwd max_ulp=" << uB
+                      << " max_abs=" << std::scientific << std::setprecision(3) << aB << "\n";
+
+            Matrix2BinaryFile(out + "e2e_out_full.bin", reimplOut);
+            Matrix2BinaryFile(out + "e2e_fwd_full.bin", outForward);
+            Matrix2BinaryFile(out + "e2e_bwd_full.bin", outBackward);
+            dumps += 3;
+        }
+
+        // (b) OverLap window_size 25 shift 12 (EXPLICIT constants). Real net _Overlaps.
+        {
+            const long WINDOW_SIZE = 25;
+            const long WINDOW_SHIFT = 12;
+            const long outNetRatio = 1;   // _OutputNetwork.getSubSamplingRatio()
+            const int fwdOut = 24;        // last LSTM layer output size
+
+            long outRows = inputSeq.rows() / subRatio;   // whole-BLSTM ratio 4
+            Eigen::MatrixXd realInput = inputSeq;
+            Eigen::MatrixXd realOut = Eigen::MatrixXd::Zero(outRows, 1);
+            Eigen::MatrixXd emptyTargets;
+            nn.setProcessingType(true, true);  // truncate + overlap -> OverLap path
+            nn.feedForwardBackward(realInput, WINDOW_SIZE, WINDOW_SHIFT, realOut, emptyTargets);
+
+            // Reimpl OverLap (BLSTMNeuralNetwork.cpp:592-681), self-norm in place first.
+            Eigen::MatrixXd reimplInput = inputSeq;
+            normalizeType_1(reimplInput);
+
+            auto plainWindow = [&](const Eigen::MatrixXd& in, Eigen::MatrixXd& outF,
+                                   Eigen::MatrixXd& outB, Eigen::MatrixXd& outp) {
+                Eigen::MatrixXd fwdIn = in, bwdIn = in;
+                if (lstmSS[0] > 1 && fwdInputSize < in.cols()) {
+                    fwdIn = in.leftCols(fwdInputSize);
+                    bwdIn = in.leftCols(fwdInputSize);
+                }
+                netForwardLoop(lstmNN, lstmSS, fwdSteps, fwdIn, outF);
+                netForwardReverseLoop(lstmNN, lstmSS, bwdStepsRev, bwdIn, outB);
+                netForwardDoubleLoop(outNN, outSS, outSteps, outF, outB, outp);
+            };
+
+            Eigen::MatrixXd reimplOut = Eigen::MatrixXd::Zero(outRows, 1);
+            long lengthOutputLSTM = reimplOut.rows() * outNetRatio;                  // :596
+            Eigen::MatrixXd outputForward = Eigen::MatrixXd::Zero(lengthOutputLSTM, fwdOut);
+            Eigen::MatrixXd outputBackward = Eigen::MatrixXd::Zero(lengthOutputLSTM, fwdOut);
+            Eigen::MatrixXd outCount = Eigen::MatrixXd::Zero(reimplOut.rows(), 1);   // :599
+            Eigen::MatrixXd outCountLSTM = Eigen::MatrixXd::Zero(lengthOutputLSTM, 1); // :600
+            Eigen::MatrixXd sum = Eigen::MatrixXd::Zero(reimplOut.rows(), reimplOut.cols());
+
+            long length = 2 * WINDOW_SIZE + 1;                                       // :602-609
+            for (long r : lstmSS) length /= r;
+            for (long r : outSS) length /= r;
+            long nominalLen = length, nominalLstm = length;
+
+            for (long jj = 0; jj < reimplInput.rows(); jj += WINDOW_SHIFT) {         // :613
+                long begin = (jj < WINDOW_SIZE) ? 0 : jj - WINDOW_SIZE;              // :614-619
+                begin = (begin / subRatio) * subRatio;                              // :620
+                long end = begin + 2 * WINDOW_SIZE;                                  // :621
+                if (end >= reimplInput.rows()) end = reimplInput.rows() - 1;         // :623-625
+                end = ((end + 1) / subRatio) * subRatio - 1;                         // :626
+                long lengthSeq = end - begin + 1;                                    // :627
+                long lengthShort, lengthShortLSTM;
+                if (lengthSeq != 2 * WINDOW_SIZE + 1) {                              // :628-639
+                    lengthShort = lengthSeq;
+                    lengthShortLSTM = lengthSeq;
+                    for (long r : lstmSS) { lengthShort /= r; lengthShortLSTM /= r; }
+                    for (long r : outSS) lengthShort /= r;
+                } else {
+                    lengthShort = nominalLen;
+                    lengthShortLSTM = nominalLstm;
+                }
+                if (lengthShort > 0) {                                              // :645
+                    Eigen::MatrixXd block = reimplInput.block(begin, 0, lengthSeq, reimplInput.cols());
+                    Eigen::MatrixXd outShort, oF, oB;
+                    plainWindow(block, oF, oB, outShort);
+                    sum.block(begin / subRatio, 0, lengthShort, sum.cols()) += outShort;   // :664
+                    outCount.block(begin / subRatio, 0, lengthShort, 1) += Eigen::MatrixXd::Ones(lengthShort, 1); // :665
+                    long lbeg = begin * outNetRatio / subRatio;                     // :667-669
+                    outputForward.block(lbeg, 0, lengthShortLSTM, fwdOut) += oF;
+                    outputBackward.block(lbeg, 0, lengthShortLSTM, fwdOut) += oB;
+                    outCountLSTM.block(lbeg, 0, lengthShortLSTM, 1) += Eigen::MatrixXd::Ones(lengthShortLSTM, 1);
+                }
+            }
+            for (long cc = 0; cc < reimplOut.cols(); ++cc)                          // :674-675
+                for (long r = 0; r < reimplOut.rows(); ++r)
+                    reimplOut(r, cc) = sum(r, cc) / outCount(r, 0);
+            for (long cc = 0; cc < fwdOut; ++cc)                                    // :677-679
+                for (long r = 0; r < lengthOutputLSTM; ++r) {
+                    outputForward(r, cc) /= outCountLSTM(r, 0);
+                    outputBackward(r, cc) /= outCountLSTM(r, 0);
+                }
+
+            long u = 0; double a = 0.0;
+            probeGapNaN(realOut, reimplOut, u, a);
+            std::cout << "NN_TOL site=e2e_overlap max_ulp=" << u
+                      << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+            long uF = 0; double aF = 0.0;
+            probeGapNaN(nn._OutputForward, outputForward, uF, aF);
+            std::cout << "NN_TOL site=e2e_overlap_fwd max_ulp=" << uF
+                      << " max_abs=" << std::scientific << std::setprecision(3) << aF << "\n";
+            long uB = 0; double aB = 0.0;
+            probeGapNaN(nn._OutputBackward, outputBackward, uB, aB);
+            std::cout << "NN_TOL site=e2e_overlap_bwd max_ulp=" << uB
+                      << " max_abs=" << std::scientific << std::setprecision(3) << aB << "\n";
+
+            Matrix2BinaryFile(out + "e2e_out_overlap.bin", reimplOut);
+            Matrix2BinaryFile(out + "e2e_fwd_overlap.bin", outputForward);
+            Matrix2BinaryFile(out + "e2e_bwd_overlap.bin", outputBackward);
+            dumps += 3;
+        }
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

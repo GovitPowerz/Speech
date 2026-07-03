@@ -918,3 +918,149 @@ fn dispatch_routes_each_processing_type() {
         "mlp-overlap path: empties hidden states"
     );
 }
+
+// ============================================================================
+// Task 10: scoring feed_forward (BLSTMNeuralNetwork.cpp:843-929)
+// ============================================================================
+
+/// The synthetic BINARY net matching the harness Task 10 "SYNS" prefix: LSTM [3,4,2]
+/// sub [2,1], output [4,5,1] sub [1,1] (output ENDS AT 1). `step`/`cost_modified`
+/// vary per case; InputNormalizationType 0 (plain path, no input mutation).
+fn syns_map(step: i32, cost_modified: bool) -> IndexMap<String, String> {
+    let mut m: IndexMap<String, String> = IndexMap::new();
+    m.insert("SYNS_LSTMNeuronNb".into(), "3,4,2".into());
+    m.insert("SYNS_LSTMSubSampling".into(), "2,1".into());
+    m.insert("SYNS_OutputNeuronNb".into(), "4,5,1".into());
+    m.insert("SYNS_OutputSubSampling".into(), "1,1".into());
+    m.insert("SYNS_InputNormalizationType".into(), "0".into());
+    m.insert("SYNS_TwoSweeps".into(), "false".into());
+    m.insert("SYNS_BackPropagationActivated".into(), "false".into());
+    m.insert("SYNS_TargetEnforcementStep".into(), step.to_string());
+    // isCostModified() == CostLaw::_BackPropWER (>= 0 -> modified).
+    m.insert(
+        "SYNS_BackPropWER".into(),
+        if cost_modified { "0.0" } else { "-1.0" }.into(),
+    );
+    m
+}
+
+/// The SYNS net's flat weight vector, EXACTLY as the harness builds it: body =
+/// `((k*11+3) % 97)/97 - 0.5`; the last `2*3` entries are the mean/std tail (mean[j]
+/// = 0.1*(j+1), std[j] = 1.0 + 0.05*j).
+fn syns_flat() -> Vec<f64> {
+    let lstm_nb = |i: usize, o: usize| 4 * i * o + 4 * o * o + 12 * o + 4 * o;
+    let fwd_nb = lstm_nb(6, 4) + lstm_nb(4, 2); // L0 in=3*2=6 out=4; L1 in=4*1=4 out=2
+    let out_nb = 5 * (4 + 1) + (5 + 1); // L0 in=4 out=5; L1 in=5 out=1
+    let tail = 2 * 3;
+    let nb_total = fwd_nb + fwd_nb + out_nb + tail;
+    let mut flat = vec![0.0_f64; nb_total];
+    for (k, v) in flat.iter_mut().enumerate().take(nb_total - tail) {
+        *v = ((k * 11 + 3) % 97) as f64 / 97.0 - 0.5;
+    }
+    for j in 0..3 {
+        flat[nb_total - tail + j] = 0.1 * (j as f64 + 1.0);
+        flat[nb_total - tail + 3 + j] = 1.0 + 0.05 * j as f64;
+    }
+    flat
+}
+
+/// Build + weight-load the SYNS binary net for a scoring case (plain path).
+fn make_syns_net(step: i32, cost_modified: bool) -> BlstmNetwork {
+    let cfg = BlstmConfig::from_legacy(&syns_map(step, cost_modified), "SYNS").unwrap();
+    let mut net = BlstmNetwork::from_config(cfg).unwrap();
+    net.set_weights(&syns_flat()).unwrap();
+    net.set_processing_type(false, false);
+    net
+}
+
+/// The four harness scoring cases: (tag, step, target_modifier, cost_modified). All
+/// at target_index 1 (the SPEECH class in the binary VAD convention).
+const SCORING_CASES: [(&str, i32, f64, bool); 4] = [
+    ("step0_mod1_plain", 0, 1.0, false),
+    ("step2_mod1_plain", 2, 1.0, false),
+    ("step0_mod2_mod", 0, 2.0, true),
+    ("step2_mod2_mod", 2, 2.0, true),
+];
+
+#[test]
+fn scoring_out_matches_oracle_all_cases() {
+    // The scoring feed_forward on the SYNS binary net: builds targets from
+    // (target_index=1, target_modifier), runs the windowed FFB (plain path), and
+    // binary-expands the single posterior column into [1-p, p] (6 x 2). The reimpl
+    // is bit-exact vs the real class (small synthetic net) -> assert_oracle_eq.
+    for (tag, step, modifier, cost_modified) in SCORING_CASES {
+        let mut net = make_syns_net(step, cost_modified);
+        let mut input = synth_input(); // T=12, 3 cols (same closed-form as SYNB)
+        let out = net.feed_forward_scoring(&mut input, 4, 2, 1, modifier);
+        assert_eq!(out.dim(), (6, 2), "binary expansion -> (length, 2)");
+        common::assert_oracle_eq(
+            &out,
+            &common::load_bin_phase2(&format!("blstm_scoring_{tag}_out.bin")),
+            &format!("blstm_scoring_{tag}_out"),
+        );
+    }
+}
+
+#[test]
+fn scoring_cost_and_nb_of_classif_match_manifest() {
+    // The scoring feed_forward accumulates _Cost/_NbOfClassif via the windowed FFB it
+    // calls; the manifest records the REAL class's getCost()/getNbOfClassif() per
+    // case (bit-exact hex). Assert the Rust net's cost/nb_of_classif match those bits.
+    // Manifest values (tests/reference_data/phase2/manifest.json:blstm_scoring_tol):
+    let expected: [(&str, u64, i64); 4] = [
+        ("step0_mod1_plain", 0x4003fe046d21b5a8, 6),
+        ("step2_mod1_plain", 0x3feac9835d1a8d14, 6),
+        ("step0_mod2_mod", 0x4013fe046d21b5a7, 6),
+        ("step2_mod2_mod", 0x3ffac9835d1a8d12, 6),
+    ];
+    for ((tag, step, modifier, cost_modified), (etag, ecost_bits, enb)) in
+        SCORING_CASES.iter().zip(expected.iter())
+    {
+        assert_eq!(tag, etag, "case order mismatch");
+        let mut net = make_syns_net(*step, *cost_modified);
+        let mut input = synth_input();
+        let _ = net.feed_forward_scoring(&mut input, 4, 2, 1, *modifier);
+        assert_eq!(
+            net.cost.to_bits(),
+            *ecost_bits,
+            "scoring {tag}: cost bits mismatch (rust=0x{:016x}, manifest=0x{ecost_bits:016x})",
+            net.cost.to_bits()
+        );
+        assert_eq!(
+            net.nb_of_classif, *enb,
+            "scoring {tag}: nb_of_classif mismatch"
+        );
+    }
+}
+
+#[test]
+fn scoring_rows_below_ratio_returns_zero_row() {
+    // BLSTMNeuralNetwork.cpp:845-846: input rows < sub_sampling_ratio() -> Zero(1,
+    // output_size()). The SYNS net's ratio is lstm(2)*out(1) = 2; feed 1 row.
+    let mut net = make_syns_net(0, false);
+    let mut input = Array2::<f64>::from_shape_fn((1, 3), |(t, j)| {
+        ((t * 29 + j * 13 + 5) % 97) as f64 / 97.0 - 0.5
+    });
+    let out = net.feed_forward_scoring(&mut input, 4, 2, 1, 1.0);
+    // output_size() is 1 (binary net); the short-circuit returns Zero(1, 1) WITHOUT
+    // the binary expansion (the expansion is post-FFB, unreachable here).
+    assert_eq!(out.dim(), (1, 1));
+    assert_eq!(out[[0, 0]].to_bits(), 0.0_f64.to_bits());
+}
+
+#[test]
+fn scoring_no_target_returns_raw_single_column() {
+    // target_index < 0 -> no target sequence, no binary expansion: the raw single
+    // posterior column returns (length x output_size). With the SYNS binary net that
+    // is (6 x 1), and cost/nb_of_classif stay 0 (empty targets in the FFB).
+    let mut net = make_syns_net(0, false);
+    let mut input = synth_input();
+    let out = net.feed_forward_scoring(&mut input, 4, 2, -1, 1.0);
+    assert_eq!(
+        out.dim(),
+        (6, 1),
+        "no targets -> raw single column, no expansion"
+    );
+    assert_eq!(net.cost.to_bits(), 0.0_f64.to_bits());
+    assert_eq!(net.nb_of_classif, 0);
+}

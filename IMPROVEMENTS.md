@@ -434,6 +434,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   at the end. Pinned by `blstm_mlpoverlap_out.bin` (row 0 edge-skipped -> stays 0) and a test that calls
   with a deliberately-wrong `window_size` and asserts the identical output. Provenance quirk; not a bug.
 
+- **[phase2] Real-config feature width (11) does not match the trained net's input (23)** (E2E gate,
+  `BLSTMNeuralNetwork.cpp:426-428` feedForward width tolerance): the REAL `1_worker_1.config` DSP keys
+  (`nb_DCT 4`, `IgnoreFirstDCT true`, `ComputeDeltasNb 5`, `ComputeDeltaDeltasNb 3`) produce a `201 x 11`
+  input sequence (`3*nb_DCT - 1 = 11`; `LTSVwindow 0` -> no LTSV column), but the net's `LSTMNeuronNb[0]`
+  is 23. The legacy feeds the mismatched-width input anyway: the `leftCols(inputSize)` crop only fires when
+  `LSTMRatios[0] > 1 && netInput < inputCols` (`11 < 23` is false, so no crop), and the per-layer input GEMM
+  then silently uses `topRows(cols)` of the 23-row weight block -- i.e. the trained net consumes only the
+  first 11 of its 23 input weights, leaving 12 rows of layer-0 input weights DEAD. This is almost certainly a
+  stale-config artifact (the `.mat` net was trained for a 23-dim front-end that this `.config` no longer
+  produces), but it is load-bearing for the golden: `e2e_out_full.bin` / `e2e_out_overlap.bin` are the real
+  class's actual output under this mismatch. Pinned bit-exact by `phase2_e2e_gate.rs`. Reproduced exactly;
+  *fix candidate:* once the training loop is ported, validate `feature_dim == net_input_size` at config load
+  and error (or re-derive) instead of silently truncating.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

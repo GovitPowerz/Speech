@@ -308,6 +308,94 @@
       "max_abs": "0.000e+00"
     }
   },
+  "blstm_scoring_tol": {
+    "text": "Task 10: scoring feedForward (BLSTMNeuralNetwork.cpp:843-929) on a synthetic BINARY net (LSTM [3,4,2] sub [2,1], output [4,5,1] sub [1,1], T=12 -> length 6). Target construction (soft target isCostModified ? 0.1*modifier : 0.0, enforcement counter, -0.5 markers) + binary [1-p, p] expansion, reimpl-vs-real bit-exact (max_ulp=0). Cases sweep {enforcement step 0, 2} x {targetModifier 1.0, 2.0} x {cost-modified false, true}, targetIndex 1. isCostModified maps to CostLaw::_BackPropWER (>= 0 -> modified). The per-case _Cost/_NbOfClassif are read from the REAL class (getCost/getNbOfClassif); cost is bit-exact hex + decimal.",
+    "reimpl_vs_real": {
+      "blstm_scoring_step0_mod1_plain": {
+        "site": "blstm_scoring_step0_mod1_plain",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_scoring_step2_mod1_plain": {
+        "site": "blstm_scoring_step2_mod1_plain",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_scoring_step0_mod2_mod": {
+        "site": "blstm_scoring_step0_mod2_mod",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_scoring_step2_mod2_mod": {
+        "site": "blstm_scoring_step2_mod2_mod",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    },
+    "cost_nb_of_classif": {
+      "step0_mod1_plain": {
+        "cost_bits": "4003fe046d21b5a8",
+        "cost": "2.49903187998889464e+00",
+        "nb_of_classif": 6
+      },
+      "step2_mod1_plain": {
+        "cost_bits": "3feac9835d1a8d14",
+        "cost": "8.37098771899408067e-01",
+        "nb_of_classif": 6
+      },
+      "step0_mod2_mod": {
+        "cost_bits": "4013fe046d21b5a7",
+        "cost": "4.99806375997778840e+00",
+        "nb_of_classif": 6
+      },
+      "step2_mod2_mod": {
+        "cost_bits": "3ffac9835d1a8d12",
+        "cost": "1.67419754379881569e+00",
+        "nb_of_classif": 6
+      }
+    }
+  },
+  "e2e_gate": {
+    "text": "Task 10: the END-TO-END real-net gate. The Phase 1 feature front-end (param derivation + getBLSTMInputSequence assembly) under the REAL 1_worker_1.config BLSTM_* DSP keys on the excerpt (chan 1, offset 0.35 dur 2.0) produces the assembled inputSeq; the real net (from the config + NNweights_config1.bin) then forwards it plain (full-sequence) and via OverLap (window_size 25 shift 12, EXPLICIT constants -- getBLSTMParam derivation is Phase 2b). preemph_ratio -0.97 < 0 -> preemph SKIPPED; LTSVwindow 0 -> no LTSV column; nb_DCT 4 + IgnoreFirstDCT + deltas 5 + dd 3 -> D = 3*4-1 = 11 feature columns. The measured input width D != 23 (the net input) exercises the feedForward WIDTH TOLERANCE: D=11 < 23 -> the per-layer topRows tolerance (LSTMLayer/NeuronLayer forward), NOT the leftCols crop (which only fires when D > 23). The forwards are EXPECTED NONZERO vs the real class (k=23 input GEMM divergence, same root cause as blstm_real_fullseq); the goldens ARE the ascending-loop reimpl.",
+    "input_shape": {
+      "rows": 201,
+      "cols": 11
+    },
+    "measured_D": 11,
+    "net_input_size": 23,
+    "overlap_window_size": 25,
+    "overlap_window_shift": 12,
+    "e2e_full": {
+      "site": "e2e_full",
+      "max_ulp": 15,
+      "max_abs": "3.331e-16"
+    },
+    "e2e_full_fwd": {
+      "site": "e2e_full_fwd",
+      "max_ulp": 487,
+      "max_abs": "1.110e-15"
+    },
+    "e2e_full_bwd": {
+      "site": "e2e_full_bwd",
+      "max_ulp": 32792,
+      "max_abs": "2.554e-15"
+    },
+    "e2e_overlap": {
+      "site": "e2e_overlap",
+      "max_ulp": 5,
+      "max_abs": "2.220e-16"
+    },
+    "e2e_overlap_fwd": {
+      "site": "e2e_overlap_fwd",
+      "max_ulp": 256,
+      "max_abs": "7.147e-16"
+    },
+    "e2e_overlap_bwd": {
+      "site": "e2e_overlap_bwd",
+      "max_ulp": 1792,
+      "max_abs": "6.661e-16"
+    }
+  },
   "dumps": {
     "act_sweep.bin": {
       "rows": 4,
@@ -672,6 +760,50 @@
     "blstm_mlpoverlap_out.bin": {
       "rows": 6,
       "cols": 1
+    },
+    "blstm_scoring_step0_mod1_plain_out.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "blstm_scoring_step2_mod1_plain_out.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "blstm_scoring_step0_mod2_mod_out.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "blstm_scoring_step2_mod2_mod_out.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "e2e_input.bin": {
+      "rows": 201,
+      "cols": 11
+    },
+    "e2e_out_full.bin": {
+      "rows": 50,
+      "cols": 1
+    },
+    "e2e_fwd_full.bin": {
+      "rows": 50,
+      "cols": 24
+    },
+    "e2e_bwd_full.bin": {
+      "rows": 50,
+      "cols": 24
+    },
+    "e2e_out_overlap.bin": {
+      "rows": 50,
+      "cols": 1
+    },
+    "e2e_fwd_overlap.bin": {
+      "rows": 50,
+      "cols": 24
+    },
+    "e2e_bwd_overlap.bin": {
+      "rows": 50,
+      "cols": 24
     }
   }
 }
