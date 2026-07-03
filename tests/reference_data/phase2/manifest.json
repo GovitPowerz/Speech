@@ -125,7 +125,7 @@
     }
   },
   "blstm_forward_tol": {
-    "text": "Task 8: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> (windowed feedForwardBackward, plain non-truncate path, no targets) and the reimpl (normalization types 1/-1/-2/0 + blstmFeedForward wired to netForwardLoop/netForwardReverseLoop/netForwardDoubleLoop) on a synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12). The synthetic-net sites are bit-exact (small shapes); the *_input sites pin the in-place normalization mutation matching the real class. The blstm_real_fullseq site is EXPECTED NONZERO: on the real net (k=23 input GEMM) Eigen's blocked product diverges from ascending accumulation (Task 1 lstm_input_gemm probe), so the goldens ARE the ascending-loop reimpl and this records the measured real-vs-reimpl gap.",
+    "text": "Task 8: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> (windowed feedForwardBackward, plain non-truncate path, no targets) and the reimpl (normalization types 1/-1/-2/0 + blstmFeedForward wired to netForwardLoop/netForwardReverseLoop/netForwardDoubleLoop) on a synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12). _OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:23-24, no accessor needed) -- probed against the real class here, not just the output. The synthetic-net sites (out + fwd + bwd) are bit-exact (small shapes); the *_input sites pin the in-place normalization mutation matching the real class. The blstm_real_fullseq site (out + fwd + bwd) is EXPECTED NONZERO: on the real net (k=23 input GEMM) Eigen's blocked product diverges from ascending accumulation (Task 1 lstm_input_gemm probe), so the goldens ARE the ascending-loop reimpl and this records the measured real-vs-reimpl gap, including on the hidden states.",
     "synthetic_out": {
       "blstm_norm1": {
         "site": "blstm_norm1",
@@ -170,16 +170,80 @@
         "max_abs": "0.000e+00"
       }
     },
+    "synthetic_fwd": {
+      "blstm_norm1_fwd": {
+        "site": "blstm_norm1_fwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm1_fwd": {
+        "site": "blstm_normm1_fwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm2_fwd": {
+        "site": "blstm_normm2_fwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_norm0_fwd": {
+        "site": "blstm_norm0_fwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    },
+    "synthetic_bwd": {
+      "blstm_norm1_bwd": {
+        "site": "blstm_norm1_bwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm1_bwd": {
+        "site": "blstm_normm1_bwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_normm2_bwd": {
+        "site": "blstm_normm2_bwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "blstm_norm0_bwd": {
+        "site": "blstm_norm0_bwd",
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    },
     "real_fullseq": {
       "site": "blstm_real_fullseq",
       "max_ulp": 7,
       "max_abs": "2.220e-16"
+    },
+    "real_fullseq_fwd": {
+      "site": "blstm_real_fullseq_fwd",
+      "max_ulp": 735,
+      "max_abs": "2.054e-15"
+    },
+    "real_fullseq_bwd": {
+      "site": "blstm_real_fullseq_bwd",
+      "max_ulp": 2076,
+      "max_abs": "1.221e-15"
     }
   },
   "blstm_windowed_tol": {
-    "text": "Task 9: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> windowed feedForwardBackward (truncate / two-sweeps / overlap / MLP-overlap paths, no targets) and the reimpl (transcribed per-window plain FFB + integer window arithmetic + write-back index math). The probe covers the OUTPUT (the _OutputForward/_OutputBackward members are private on the real class; the fwd/bwd dumps ARE the reimpl, per the Task 8 precedent). blstm_truncate: T=19 window 6, trailing chunk lengthShort==0 SILENTLY DROPPED (row 9 untouched). blstm_twosweeps: T=20 window 8, hidden states DOUBLE-WIDTH. blstm_overlap: T=20 window_size 4 shift 3, grid snapping, full coverage. blstm_overlap_nan: window_size 3 shift 10, rows 6-9 uncovered -> 0/0 = NaN (reproduced, no guard; identical-NaN bits compared equal). blstm_mlpoverlap: MLP net, passed window_size IGNORED (overwritten with getSubSamplingRatio()/2). All max_ulp=0.",
+    "text": "Task 9: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> windowed feedForwardBackward (truncate / two-sweeps / overlap / MLP-overlap paths, no targets) and the reimpl (transcribed per-window plain FFB + integer window arithmetic + write-back index math). _OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:23-24, no accessor needed) -- the probe covers OUTPUT AND HIDDEN STATES for every mode (corrected from an earlier, FALSE 'private, no accessor' claim). blstm_truncate: T=19 window 6, trailing chunk lengthShort==0 SILENTLY DROPPED (row 9 untouched). blstm_twosweeps: T=20 window 8, hidden states DOUBLE-WIDTH. blstm_overlap: T=20 window_size 4 shift 3, grid snapping, full coverage. blstm_overlap_nan: window_size 3 shift 10, rows 6-9 uncovered -> 0/0 = NaN (reproduced, no guard; identical-NaN bits compared equal). blstm_mlpoverlap: MLP net, passed window_size IGNORED (overwritten with getSubSamplingRatio()/2); the MLP path has no LSTM, so feedForwardBackwardMLPOverLap EMPTIES _OutputForward/_OutputBackward (0x0 on the real class, asserted in-harness) -- its fwd/bwd sites are a degenerate 0x0-vs-0x0 comparison. All max_ulp=0.",
     "blstm_truncate": {
       "site": "blstm_truncate",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_truncate_fwd": {
+      "site": "blstm_truncate_fwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_truncate_bwd": {
+      "site": "blstm_truncate_bwd",
       "max_ulp": 0,
       "max_abs": "0.000e+00"
     },
@@ -188,8 +252,28 @@
       "max_ulp": 0,
       "max_abs": "0.000e+00"
     },
+    "blstm_twosweeps_fwd": {
+      "site": "blstm_twosweeps_fwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_twosweeps_bwd": {
+      "site": "blstm_twosweeps_bwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
     "blstm_overlap": {
       "site": "blstm_overlap",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_overlap_fwd": {
+      "site": "blstm_overlap_fwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_overlap_bwd": {
+      "site": "blstm_overlap_bwd",
       "max_ulp": 0,
       "max_abs": "0.000e+00"
     },
@@ -198,8 +282,28 @@
       "max_ulp": 0,
       "max_abs": "0.000e+00"
     },
+    "blstm_overlap_nan_fwd": {
+      "site": "blstm_overlap_nan_fwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_overlap_nan_bwd": {
+      "site": "blstm_overlap_nan_bwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
     "blstm_mlpoverlap": {
       "site": "blstm_mlpoverlap",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_mlpoverlap_fwd": {
+      "site": "blstm_mlpoverlap_fwd",
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "blstm_mlpoverlap_bwd": {
+      "site": "blstm_mlpoverlap_bwd",
       "max_ulp": 0,
       "max_abs": "0.000e+00"
     }
@@ -445,6 +549,14 @@
       "rows": 12,
       "cols": 3
     },
+    "blstm_norm1_fwd.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "blstm_norm1_bwd.bin": {
+      "rows": 6,
+      "cols": 2
+    },
     "blstm_normm1_out.bin": {
       "rows": 6,
       "cols": 3
@@ -452,6 +564,14 @@
     "blstm_normm1_input_after.bin": {
       "rows": 12,
       "cols": 3
+    },
+    "blstm_normm1_fwd.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "blstm_normm1_bwd.bin": {
+      "rows": 6,
+      "cols": 2
     },
     "blstm_normm2_out.bin": {
       "rows": 6,
@@ -461,6 +581,14 @@
       "rows": 12,
       "cols": 3
     },
+    "blstm_normm2_fwd.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "blstm_normm2_bwd.bin": {
+      "rows": 6,
+      "cols": 2
+    },
     "blstm_norm0_out.bin": {
       "rows": 6,
       "cols": 3
@@ -468,6 +596,14 @@
     "blstm_norm0_input_after.bin": {
       "rows": 12,
       "cols": 3
+    },
+    "blstm_norm0_fwd.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "blstm_norm0_bwd.bin": {
+      "rows": 6,
+      "cols": 2
     },
     "blstm_real_fullseq_out.bin": {
       "rows": 50,

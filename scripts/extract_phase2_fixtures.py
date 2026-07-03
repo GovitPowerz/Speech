@@ -96,28 +96,40 @@ EXPECTED_SHAPES["net_w_out.bin"] = (_NET_LSTM_NBTOTAL, 1)
 
 # Task 8: BLSTM input normalization + core forward. Synthetic net LSTM [3,4,2] sub
 # [2,1] / output [4,5,3] sub [1,1], T=12: fwd LSTM sub 2*1 -> outputLength 12/2=6,
-# output O=3 -> out is (6 x 3); the (possibly-mutated) input is (12 x 3). One pair
-# per normalization type {1, -1 (tag m1), -2 (tag m2), 0}. Real net full-sequence
-# (1_worker_1.config), T=200: fwd LSTM sub 4*1 -> 200/4=50 rows; output O=1 -> out
-# is (50 x 1); the forward/backward LSTM hidden states are (50 x 24). Kept in sync
-# with main.cpp's Task 8 block.
+# output O=3 -> out is (6 x 3); the (possibly-mutated) input is (12 x 3); the
+# forward/backward LSTM hidden states are (6 x 2) (last LSTM layer output size).
+# One quadruple (out, input_after, fwd, bwd) per normalization type
+# {1, -1 (tag m1), -2 (tag m2), 0}. Real net full-sequence (1_worker_1.config),
+# T=200: fwd LSTM sub 4*1 -> 200/4=50 rows; output O=1 -> out is (50 x 1); the
+# forward/backward LSTM hidden states are (50 x 24). Kept in sync with main.cpp's
+# Task 8 block. _OutputForward/_OutputBackward are PUBLIC members
+# (BLSTMNeuralNetwork.h:23-24, no accessor needed) -- probed against the real class
+# for every site here, not just the output.
 for _tag in ("1", "m1", "m2", "0"):
     EXPECTED_SHAPES[f"blstm_norm{_tag}_out.bin"] = (6, 3)
     EXPECTED_SHAPES[f"blstm_norm{_tag}_input_after.bin"] = (12, 3)
+    EXPECTED_SHAPES[f"blstm_norm{_tag}_fwd.bin"] = (6, 2)
+    EXPECTED_SHAPES[f"blstm_norm{_tag}_bwd.bin"] = (6, 2)
 EXPECTED_SHAPES["blstm_real_fullseq_out.bin"] = (50, 1)
 EXPECTED_SHAPES["blstm_real_fullseq_fwd.bin"] = (50, 24)
 EXPECTED_SHAPES["blstm_real_fullseq_bwd.bin"] = (50, 24)
 
 # Task 9: the four windowed forward drivers on the synthetic net (LSTM [3,4,2] sub
 # [2,1], output [4,5,3] sub [1,1]) + an MLP-mode net (output [5,4,1] sub [2,1]).
-# Truncate: T=19 window 6, outputSeq pre-seeded to 10 rows so the dropped trailing
-# chunk (lengthShort==0) leaves ROW 9 untouched (zeros); fwd/bwd are 9x2
-# (lengthOutputLSTM=19/2). TwoSweeps: T=20 window 8, out 10x3, fwd/bwd DOUBLE-WIDTH
-# 10x4 (hcat of two sweeps' 2-wide hidden windows). OverLap: T=20 window_size 4 shift
-# 3, full coverage, out 10x3, fwd/bwd 10x2 (lengthOutputLSTM=10), count 10x1. OverLap
-# NaN: window_size 3 shift 10 leaves rows 6-9 uncovered -> 0/0 = NaN (out 10x3, fwd/
-# bwd 10x2). MLPOverLap: T=12 shift 2, out 6x1 (row 0 edge-skipped -> 0). Kept in sync
-# with main.cpp's Task 9 block.
+# _OutputForward/_OutputBackward are PUBLIC members (BLSTMNeuralNetwork.h:23-24, no
+# accessor needed) -- every site's fwd/bwd hidden states are probed against the real
+# class, not just the output. Truncate: T=19 window 6, outputSeq pre-seeded to 10
+# rows so the dropped trailing chunk (lengthShort==0) leaves ROW 9 untouched (zeros);
+# fwd/bwd are 9x2 (lengthOutputLSTM=19/2). TwoSweeps: T=20 window 8, out 10x3, fwd/bwd
+# DOUBLE-WIDTH 10x4 (hcat of two sweeps' 2-wide hidden windows). OverLap: T=20
+# window_size 4 shift 3, full coverage, out 10x3, fwd/bwd 10x2 (lengthOutputLSTM=10),
+# count 10x1. OverLap NaN: window_size 3 shift 10 leaves rows 6-9 uncovered -> 0/0 =
+# NaN (out 10x3, fwd/bwd 10x2; identical-NaN bits probed as equal). MLPOverLap: T=12
+# shift 2, out 6x1 (row 0 edge-skipped -> 0); the MLP path has no LSTM, so
+# feedForwardBackwardMLPOverLap EMPTIES _OutputForward/_OutputBackward (0x0) -- the
+# harness asserts this on the real class and prints a zero-mismatch NN_TOL fwd/bwd
+# line, but there is no .bin to dump for a 0x0 matrix. Kept in sync with main.cpp's
+# Task 9 block.
 EXPECTED_SHAPES["blstm_truncate_out.bin"] = (10, 3)
 EXPECTED_SHAPES["blstm_truncate_fwd.bin"] = (9, 2)
 EXPECTED_SHAPES["blstm_truncate_bwd.bin"] = (9, 2)
@@ -287,11 +299,14 @@ def main() -> None:
     net_lstm_rev_tol = _parse_nn_tol(stdout, "net_lstm_forward_rev")
     net_dense_tol = _parse_nn_tol(stdout, "net_dense_forward")
     net_double_tol = _parse_nn_tol(stdout, "net_double")
-    # Task 8: BLSTM normalization + core-forward NN_TOL sites. The synthetic-net
-    # per-type sites (out + input mutation) are bit-exact (small shapes, k<=6); the
-    # real full-sequence site is EXPECTED NONZERO (the k=23 input GEMM diverges from
-    # ascending accumulation per the Task 1 lstm_input_gemm probe -- the goldens ARE
-    # the reimpl, and the manifest records the measured gap).
+    # Task 8: BLSTM normalization + core-forward NN_TOL sites. _OutputForward/
+    # _OutputBackward are PUBLIC members (BLSTMNeuralNetwork.h:23-24, no accessor
+    # needed), so fwd/bwd hidden states are probed against the real class alongside
+    # the output. The synthetic-net per-type sites (out + input mutation + fwd + bwd)
+    # are bit-exact (small shapes, k<=6); the real full-sequence site (out + fwd + bwd)
+    # is EXPECTED NONZERO (the k=23 input GEMM diverges from ascending accumulation
+    # per the Task 1 lstm_input_gemm probe -- the goldens ARE the reimpl, and the
+    # manifest records the measured gap).
     blstm_norm_tols = {
         f"blstm_norm{tag}": _parse_nn_tol(stdout, f"blstm_norm{tag}")
         for tag in ("1", "m1", "m2", "0")
@@ -300,19 +315,43 @@ def main() -> None:
         f"blstm_norm{tag}_input": _parse_nn_tol(stdout, f"blstm_norm{tag}_input")
         for tag in ("1", "m1", "m2", "0")
     }
+    blstm_norm_fwd_tols = {
+        f"blstm_norm{tag}_fwd": _parse_nn_tol(stdout, f"blstm_norm{tag}_fwd")
+        for tag in ("1", "m1", "m2", "0")
+    }
+    blstm_norm_bwd_tols = {
+        f"blstm_norm{tag}_bwd": _parse_nn_tol(stdout, f"blstm_norm{tag}_bwd")
+        for tag in ("1", "m1", "m2", "0")
+    }
     blstm_real_fullseq_tol = _parse_nn_tol(stdout, "blstm_real_fullseq")
+    blstm_real_fullseq_fwd_tol = _parse_nn_tol(stdout, "blstm_real_fullseq_fwd")
+    blstm_real_fullseq_bwd_tol = _parse_nn_tol(stdout, "blstm_real_fullseq_bwd")
     # Task 9: the four windowed forward drivers. All bit-exact vs the REAL class
-    # (max_ulp=0) -- the reimpls transcribe the integer window arithmetic + write-back
-    # index math verbatim, and blstm_overlap_nan's uncovered rows are NaN in both (the
-    # probe treats identical-NaN bits as equal).
+    # (max_ulp=0), OUTPUT and hidden states alike -- the reimpls transcribe the
+    # integer window arithmetic + write-back index math verbatim, and
+    # blstm_overlap_nan's uncovered rows are NaN in both (the probe treats
+    # identical-NaN bits as equal). blstm_mlpoverlap_fwd/_bwd are a degenerate 0x0
+    # vs 0x0 comparison (feedForwardBackwardMLPOverLap empties both members; no LSTM
+    # hidden states exist on the MLP path), asserted in-harness before the probe line
+    # is even printed.
     blstm_windowed_tols = {
         site: _parse_nn_tol(stdout, site)
         for site in (
             "blstm_truncate",
+            "blstm_truncate_fwd",
+            "blstm_truncate_bwd",
             "blstm_twosweeps",
+            "blstm_twosweeps_fwd",
+            "blstm_twosweeps_bwd",
             "blstm_overlap",
+            "blstm_overlap_fwd",
+            "blstm_overlap_bwd",
             "blstm_overlap_nan",
+            "blstm_overlap_nan_fwd",
+            "blstm_overlap_nan_bwd",
             "blstm_mlpoverlap",
+            "blstm_mlpoverlap_fwd",
+            "blstm_mlpoverlap_bwd",
         )
     }
 
@@ -398,33 +437,44 @@ def main() -> None:
                 "(windowed feedForwardBackward, plain non-truncate path, no targets) and "
                 "the reimpl (normalization types 1/-1/-2/0 + blstmFeedForward wired to "
                 "netForwardLoop/netForwardReverseLoop/netForwardDoubleLoop) on a synthetic "
-                "net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12). The "
-                "synthetic-net sites are bit-exact (small shapes); the *_input sites pin "
-                "the in-place normalization mutation matching the real class. The "
-                "blstm_real_fullseq site is EXPECTED NONZERO: on the real net (k=23 input "
-                "GEMM) Eigen's blocked product diverges from ascending accumulation (Task 1 "
-                "lstm_input_gemm probe), so the goldens ARE the ascending-loop reimpl and "
-                "this records the measured real-vs-reimpl gap."
+                "net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12). "
+                "_OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:"
+                "23-24, no accessor needed) -- probed against the real class here, not just "
+                "the output. The synthetic-net sites (out + fwd + bwd) are bit-exact (small "
+                "shapes); the *_input sites pin the in-place normalization mutation matching "
+                "the real class. The blstm_real_fullseq site (out + fwd + bwd) is EXPECTED "
+                "NONZERO: on the real net (k=23 input GEMM) Eigen's blocked product diverges "
+                "from ascending accumulation (Task 1 lstm_input_gemm probe), so the goldens "
+                "ARE the ascending-loop reimpl and this records the measured real-vs-reimpl "
+                "gap, including on the hidden states."
             ),
             "synthetic_out": blstm_norm_tols,
             "synthetic_input_mutation": blstm_norm_input_tols,
+            "synthetic_fwd": blstm_norm_fwd_tols,
+            "synthetic_bwd": blstm_norm_bwd_tols,
             "real_fullseq": blstm_real_fullseq_tol,
+            "real_fullseq_fwd": blstm_real_fullseq_fwd_tol,
+            "real_fullseq_bwd": blstm_real_fullseq_bwd_tol,
         },
         "blstm_windowed_tol": {
             "text": (
                 "Task 9: max ULP/abs gap between the REAL BLSTMNeuralNetwork<LSTMLayer> "
                 "windowed feedForwardBackward (truncate / two-sweeps / overlap / MLP-"
                 "overlap paths, no targets) and the reimpl (transcribed per-window plain "
-                "FFB + integer window arithmetic + write-back index math). The probe "
-                "covers the OUTPUT (the _OutputForward/_OutputBackward members are private "
-                "on the real class; the fwd/bwd dumps ARE the reimpl, per the Task 8 "
-                "precedent). blstm_truncate: T=19 window 6, trailing chunk lengthShort==0 "
-                "SILENTLY DROPPED (row 9 untouched). blstm_twosweeps: T=20 window 8, hidden "
-                "states DOUBLE-WIDTH. blstm_overlap: T=20 window_size 4 shift 3, grid "
-                "snapping, full coverage. blstm_overlap_nan: window_size 3 shift 10, rows "
-                "6-9 uncovered -> 0/0 = NaN (reproduced, no guard; identical-NaN bits "
-                "compared equal). blstm_mlpoverlap: MLP net, passed window_size IGNORED "
-                "(overwritten with getSubSamplingRatio()/2). All max_ulp=0."
+                "FFB + integer window arithmetic + write-back index math). "
+                "_OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:"
+                "23-24, no accessor needed) -- the probe covers OUTPUT AND HIDDEN STATES for "
+                "every mode (corrected from an earlier, FALSE 'private, no accessor' claim). "
+                "blstm_truncate: T=19 window 6, trailing chunk lengthShort==0 SILENTLY "
+                "DROPPED (row 9 untouched). blstm_twosweeps: T=20 window 8, hidden states "
+                "DOUBLE-WIDTH. blstm_overlap: T=20 window_size 4 shift 3, grid snapping, "
+                "full coverage. blstm_overlap_nan: window_size 3 shift 10, rows 6-9 "
+                "uncovered -> 0/0 = NaN (reproduced, no guard; identical-NaN bits compared "
+                "equal). blstm_mlpoverlap: MLP net, passed window_size IGNORED (overwritten "
+                "with getSubSamplingRatio()/2); the MLP path has no LSTM, so "
+                "feedForwardBackwardMLPOverLap EMPTIES _OutputForward/_OutputBackward (0x0 "
+                "on the real class, asserted in-harness) -- its fwd/bwd sites are a "
+                "degenerate 0x0-vs-0x0 comparison. All max_ulp=0."
             ),
             **blstm_windowed_tols,
         },

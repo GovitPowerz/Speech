@@ -107,3 +107,55 @@ def test_dense_dumps_recorded_in_inventory() -> None:
         "dense_narrow.bin",
     ):
         assert name in dumps, name
+
+
+def _assert_tol_field(tol: dict[str, Any], site: str) -> None:
+    assert tol["site"] == site, tol
+    assert isinstance(tol["max_ulp"], int), tol
+    assert tol["max_ulp"] >= 0, tol
+    float(tol["max_abs"])  # must parse as a float
+
+
+# Task 8: BLSTM input-normalization + core-forward hidden-state probes.
+# _OutputForward/_OutputBackward are PUBLIC members (BLSTMNeuralNetwork.h:23-24, no
+# accessor needed) -- probed against the real class alongside the output. The
+# synthetic-net sites (small shapes, k<=6) are bit-exact; the real full-sequence site
+# is EXPECTED NONZERO (k=23 input GEMM diverges from ascending accumulation, per the
+# Task 1 lstm_input_gemm probe), same as its already-covered output site.
+def test_blstm_norm_synthetic_hidden_states_bit_exact() -> None:
+    blstm = _manifest()["blstm_forward_tol"]
+    for tag in ("1", "m1", "m2", "0"):
+        fwd = blstm["synthetic_fwd"][f"blstm_norm{tag}_fwd"]
+        bwd = blstm["synthetic_bwd"][f"blstm_norm{tag}_bwd"]
+        _assert_tol_field(fwd, f"blstm_norm{tag}_fwd")
+        _assert_tol_field(bwd, f"blstm_norm{tag}_bwd")
+        assert fwd["max_ulp"] == 0, fwd
+        assert bwd["max_ulp"] == 0, bwd
+
+
+def test_blstm_real_fullseq_hidden_states_recorded() -> None:
+    blstm = _manifest()["blstm_forward_tol"]
+    fwd = blstm["real_fullseq_fwd"]
+    bwd = blstm["real_fullseq_bwd"]
+    _assert_tol_field(fwd, "blstm_real_fullseq_fwd")
+    _assert_tol_field(bwd, "blstm_real_fullseq_bwd")
+
+
+# Task 9: the four windowed forward drivers' hidden-state probes. All five sites are
+# bit-exact vs the REAL class (max_ulp=0) on OUTPUT AND HIDDEN STATES -- the reimpls
+# transcribe the integer window arithmetic + write-back index math verbatim.
+# blstm_mlpoverlap_fwd/_bwd are a degenerate 0x0-vs-0x0 comparison (the MLP path has
+# no LSTM; feedForwardBackwardMLPOverLap empties both members, asserted in-harness).
+def test_blstm_windowed_hidden_states_bit_exact() -> None:
+    windowed = _manifest()["blstm_windowed_tol"]
+    for site in (
+        "blstm_truncate",
+        "blstm_twosweeps",
+        "blstm_overlap",
+        "blstm_overlap_nan",
+        "blstm_mlpoverlap",
+    ):
+        for suffix in ("_fwd", "_bwd"):
+            tol = windowed[site + suffix]
+            _assert_tol_field(tol, site + suffix)
+            assert tol["max_ulp"] == 0, tol

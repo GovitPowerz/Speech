@@ -2545,6 +2545,27 @@ int main(int argc, char** argv) {
             }
         };
 
+        // Same as probeGap, but identical-bit-pattern NaNs (incl. same-pattern NaN)
+        // compare equal instead of registering as a mismatch -- matches the golden's
+        // bitwise contract for the OverLap uncovered-rows 0/0->NaN case (Task 9) and
+        // is used everywhere in Tasks 8/9 for uniformity, even where no NaN can occur.
+        auto probeGapNaN = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                              long& maxUlp, double& maxAbs) {
+            for (int r = 0; r < real.rows(); ++r) {
+                for (int c = 0; c < real.cols(); ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    if (ab == bb) continue;  // identical bits (incl. same-pattern NaN) -> equal
+                    double absGap = std::fabs(a - b);
+                    if (absGap > maxAbs) maxAbs = absGap;
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > maxUlp) maxUlp = ulp;
+                }
+            }
+        };
+
         // ---- Synthetic net: LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1] ----
         // A synthetic prefix "SYNB" is defined in the config with all the keys the
         // BLSTMNeuralNetwork ctor reads; only _InputNormalizationType varies per dump.
@@ -2666,7 +2687,7 @@ int main(int argc, char** argv) {
                                                  : std::to_string(normType);
 
                 long maxUlp = 0; double maxAbs = 0.0;
-                probeGap(realOut, reimplOut, maxUlp, maxAbs);
+                probeGapNaN(realOut, reimplOut, maxUlp, maxAbs);
                 std::cout << "NN_TOL site=blstm_norm" << tag
                           << " max_ulp=" << maxUlp << " max_abs=" << std::scientific
                           << std::setprecision(3) << maxAbs << "\n";
@@ -2674,14 +2695,30 @@ int main(int argc, char** argv) {
                 // Verify the reimpl's in-place mutation matches the real class's
                 // mutation (types 1/-1 mutate; -2/0 leave the input identical).
                 long inUlp = 0; double inAbs = 0.0;
-                probeGap(realInput, reimplInput, inUlp, inAbs);
+                probeGapNaN(realInput, reimplInput, inUlp, inAbs);
                 std::cout << "NN_TOL site=blstm_norm" << tag << "_input"
                           << " max_ulp=" << inUlp << " max_abs=" << std::scientific
                           << std::setprecision(3) << inAbs << "\n";
 
+                // _OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:
+                // 23-24, no accessor needed) -- probe the hidden states vs the reimpl's
+                // local outForward/outBackward too, per normalization type.
+                long fUlp = 0; double fAbs = 0.0;
+                probeGapNaN(nn._OutputForward, outForward, fUlp, fAbs);
+                std::cout << "NN_TOL site=blstm_norm" << tag << "_fwd"
+                          << " max_ulp=" << fUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << fAbs << "\n";
+                long bUlp = 0; double bAbs = 0.0;
+                probeGapNaN(nn._OutputBackward, outBackward, bUlp, bAbs);
+                std::cout << "NN_TOL site=blstm_norm" << tag << "_bwd"
+                          << " max_ulp=" << bUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << bAbs << "\n";
+
                 Matrix2BinaryFile(out + "blstm_norm" + tag + "_out.bin", reimplOut);
                 Matrix2BinaryFile(out + "blstm_norm" + tag + "_input_after.bin", reimplInput);
-                dumps += 2;
+                Matrix2BinaryFile(out + "blstm_norm" + tag + "_fwd.bin", outForward);
+                Matrix2BinaryFile(out + "blstm_norm" + tag + "_bwd.bin", outBackward);
+                dumps += 4;
             }
         }
 
@@ -2745,9 +2782,22 @@ int main(int argc, char** argv) {
                              fwdInputSize, reimplInput, outForward, outBackward, reimplOut);
 
             long maxUlp = 0; double maxAbs = 0.0;
-            probeGap(realOut, reimplOut, maxUlp, maxAbs);
+            probeGapNaN(realOut, reimplOut, maxUlp, maxAbs);
             std::cout << "NN_TOL site=blstm_real_fullseq max_ulp=" << maxUlp
                       << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+
+            // _OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:
+            // 23-24, no accessor needed). EXPECTED NONZERO here too, same root cause as
+            // the output site: the k=23 input GEMM diverges from ascending accumulation
+            // (Task 1 lstm_input_gemm probe).
+            long fUlp = 0; double fAbs = 0.0;
+            probeGapNaN(nn._OutputForward, outForward, fUlp, fAbs);
+            std::cout << "NN_TOL site=blstm_real_fullseq_fwd max_ulp=" << fUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << fAbs << "\n";
+            long bUlp = 0; double bAbs = 0.0;
+            probeGapNaN(nn._OutputBackward, outBackward, bUlp, bAbs);
+            std::cout << "NN_TOL site=blstm_real_fullseq_bwd max_ulp=" << bUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << bAbs << "\n";
 
             Matrix2BinaryFile(out + "blstm_real_fullseq_out.bin", reimplOut);
             Matrix2BinaryFile(out + "blstm_real_fullseq_fwd.bin", outForward);
@@ -2762,29 +2812,19 @@ int main(int argc, char** argv) {
         // (feedForwardBackwardOverLap), :683-709 (feedForwardBackwardMLPOverLap).
         // The reimpls transcribe those methods' integer arithmetic + write-back index
         // math verbatim, calling the plain-FFB reimpl (blstmFeedForward, no targets)
-        // per window and stitching. Probed vs the REAL class per mode. Dumps:
+        // per window and stitching. Probed vs the REAL class per mode -- OUTPUT and
+        // hidden states alike: _OutputForward/_OutputBackward ARE PUBLIC members
+        // (BLSTMNeuralNetwork.h:23-24, no accessor needed), populated by
+        // feedForwardBackward, so `nn._OutputForward`/`nn._OutputBackward` are read
+        // directly and compared to the reimpl's fwd/bwd dumps (blstm_<mode>_fwd/_bwd
+        // NN_TOL sites). MLPOverLap explicitly EMPTIES both members (no LSTM in the MLP
+        // path); that site's fwd/bwd probes assert 0x0 on both sides instead. Dumps:
         // blstm_<mode>_{out,fwd,bwd}.bin (+ counts where illuminating).
         //
         // NaN handling: the OverLap uncovered-rows case divides 0/0 -> NaN (the legacy
-        // reproduces this, no guard). probeGap subtracts (a-b) and would flag NaN-vs-NaN
-        // as a mismatch, so probeGapNaN treats IDENTICAL NaN bit patterns as equal
-        // (bitwise) before the arithmetic gap -- matching the golden's bitwise contract.
-        auto probeGapNaN = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
-                              long& maxUlp, double& maxAbs) {
-            for (int r = 0; r < real.rows(); ++r) {
-                for (int c = 0; c < real.cols(); ++c) {
-                    double a = real(r, c), b = reimpl(r, c);
-                    uint64_t ab, bb;
-                    std::memcpy(&ab, &a, sizeof(double));
-                    std::memcpy(&bb, &b, sizeof(double));
-                    if (ab == bb) continue;  // identical bits (incl. same-pattern NaN) -> equal
-                    double absGap = std::fabs(a - b);
-                    if (absGap > maxAbs) maxAbs = absGap;
-                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
-                    if (ulp > maxUlp) maxUlp = ulp;
-                }
-            }
-        };
+        // reproduces this, no guard). probeGapNaN (defined above, shared with Task 8)
+        // treats IDENTICAL NaN bit patterns as equal (bitwise) before the arithmetic
+        // gap -- matching the golden's bitwise contract.
 
         // ---- Synthetic BLSTM net (same as Task 8): LSTM [3,4,2] sub [2,1], output
         // [4,5,3] sub [1,1]. Reuse the Task 8 makeLstmSteps/makeDenseSteps/blstmFeedForward
@@ -2926,10 +2966,9 @@ int main(int argc, char** argv) {
                 nn.setWeights(flat);
                 nn.setProcessingType(true, false);  // truncate, no overlap -> Truncate path
 
-                // _OutputForward/_OutputBackward are private on the real class (no
-                // accessor; NEVER edit legacy/), so the probe covers the OUTPUT only,
-                // exactly as the Task 8 real-vs-reimpl precedent -- the fwd/bwd dumps
-                // ARE the reimpl (the Rust port compares against them).
+                // _OutputForward/_OutputBackward ARE PUBLIC members (BLSTMNeuralNetwork.h:
+                // 23-24, no accessor needed) -- populated by feedForwardBackward, so both
+                // the OUTPUT and the hidden states are probed against the real class here.
                 Eigen::MatrixXd realInput = input;
                 Eigen::MatrixXd realOut = Eigen::MatrixXd::Zero(10, 3);  // 10 rows, row 9 untouched
                 Eigen::MatrixXd emptyTargets;
@@ -2940,9 +2979,18 @@ int main(int argc, char** argv) {
                 truncateSweep(input, 6, reimplOut, reimplF, reimplB);
 
                 long u = 0; double a = 0.0;
-                probeGap(realOut, reimplOut, u, a);
+                probeGapNaN(realOut, reimplOut, u, a);
                 std::cout << "NN_TOL site=blstm_truncate max_ulp=" << u
                           << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                long uF = 0; double aF = 0.0;
+                probeGapNaN(nn._OutputForward, reimplF, uF, aF);
+                std::cout << "NN_TOL site=blstm_truncate_fwd max_ulp=" << uF
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aF << "\n";
+                long uB = 0; double aB = 0.0;
+                probeGapNaN(nn._OutputBackward, reimplB, uB, aB);
+                std::cout << "NN_TOL site=blstm_truncate_bwd max_ulp=" << uB
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aB << "\n";
 
                 Matrix2BinaryFile(out + "blstm_truncate_out.bin", reimplOut);
                 Matrix2BinaryFile(out + "blstm_truncate_fwd.bin", reimplF);
@@ -3031,9 +3079,20 @@ int main(int argc, char** argv) {
                 }
 
                 long u = 0; double a = 0.0;
-                probeGap(realOut, combined, u, a);
+                probeGapNaN(realOut, combined, u, a);
                 std::cout << "NN_TOL site=blstm_twosweeps max_ulp=" << u
                           << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                // _OutputForward/_OutputBackward are PUBLIC (BLSTMNeuralNetwork.h:23-24);
+                // probe the double-width hidden states against the real class too.
+                long uF = 0; double aF = 0.0;
+                probeGapNaN(nn._OutputForward, reimplF, uF, aF);
+                std::cout << "NN_TOL site=blstm_twosweeps_fwd max_ulp=" << uF
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aF << "\n";
+                long uB = 0; double aB = 0.0;
+                probeGapNaN(nn._OutputBackward, reimplB, uB, aB);
+                std::cout << "NN_TOL site=blstm_twosweeps_bwd max_ulp=" << uB
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aB << "\n";
 
                 Matrix2BinaryFile(out + "blstm_twosweeps_out.bin", combined);
                 Matrix2BinaryFile(out + "blstm_twosweeps_fwd.bin", reimplF);
@@ -3120,9 +3179,19 @@ int main(int argc, char** argv) {
                 overlap(input, 4, 3, reimplOut, reimplF, reimplB, cnt, cntL);
 
                 long u = 0; double a = 0.0;
-                probeGap(realOut, reimplOut, u, a);
+                probeGapNaN(realOut, reimplOut, u, a);
                 std::cout << "NN_TOL site=blstm_overlap max_ulp=" << u
                           << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                // _OutputForward/_OutputBackward are PUBLIC (BLSTMNeuralNetwork.h:23-24).
+                long uF = 0; double aF = 0.0;
+                probeGapNaN(nn._OutputForward, reimplF, uF, aF);
+                std::cout << "NN_TOL site=blstm_overlap_fwd max_ulp=" << uF
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aF << "\n";
+                long uB = 0; double aB = 0.0;
+                probeGapNaN(nn._OutputBackward, reimplB, uB, aB);
+                std::cout << "NN_TOL site=blstm_overlap_bwd max_ulp=" << uB
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aB << "\n";
 
                 Matrix2BinaryFile(out + "blstm_overlap_out.bin", reimplOut);
                 Matrix2BinaryFile(out + "blstm_overlap_fwd.bin", reimplF);
@@ -3160,6 +3229,17 @@ int main(int argc, char** argv) {
                 probeGapNaN(realOut, reimplOut, u, a);
                 std::cout << "NN_TOL site=blstm_overlap_nan max_ulp=" << u
                           << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                // _OutputForward/_OutputBackward are PUBLIC (BLSTMNeuralNetwork.h:23-24);
+                // uncovered rows are NaN in both the real class and the reimpl.
+                long uF = 0; double aF = 0.0;
+                probeGapNaN(nn._OutputForward, reimplF, uF, aF);
+                std::cout << "NN_TOL site=blstm_overlap_nan_fwd max_ulp=" << uF
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aF << "\n";
+                long uB = 0; double aB = 0.0;
+                probeGapNaN(nn._OutputBackward, reimplB, uB, aB);
+                std::cout << "NN_TOL site=blstm_overlap_nan_bwd max_ulp=" << uB
+                          << " max_abs=" << std::scientific << std::setprecision(3) << aB << "\n";
 
                 Matrix2BinaryFile(out + "blstm_overlap_nan_out.bin", reimplOut);
                 Matrix2BinaryFile(out + "blstm_overlap_nan_fwd.bin", reimplF);
@@ -3251,9 +3331,27 @@ int main(int argc, char** argv) {
             }
 
             long u = 0; double a = 0.0;
-            probeGap(realOut, reimplOut, u, a);
+            probeGapNaN(realOut, reimplOut, u, a);
             std::cout << "NN_TOL site=blstm_mlpoverlap max_ulp=" << u
                       << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+            // _OutputForward/_OutputBackward are PUBLIC (BLSTMNeuralNetwork.h:23-24), but
+            // feedForwardBackwardMLPOverLap explicitly EMPTIES them (BLSTMNeuralNetwork.cpp:
+            // 707-708: assignment to a default-constructed Eigen::MatrixXd, i.e. 0x0) since
+            // the MLP path has no LSTM hidden states. Assert both are 0x0 on the real class
+            // and print a zero-mismatch probe line for uniformity with the other four sites.
+            if (nn._OutputForward.rows() != 0 || nn._OutputForward.cols() != 0 ||
+                nn._OutputBackward.rows() != 0 || nn._OutputBackward.cols() != 0) {
+                std::cerr << "MLPOverLap emptied-members FAIL: _OutputForward="
+                          << nn._OutputForward.rows() << "x" << nn._OutputForward.cols()
+                          << " _OutputBackward=" << nn._OutputBackward.rows() << "x"
+                          << nn._OutputBackward.cols() << " expected 0x0\n";
+                return 1;
+            }
+            std::cout << "NN_TOL site=blstm_mlpoverlap_fwd max_ulp=0 max_abs="
+                      << std::scientific << std::setprecision(3) << 0.0 << "\n";
+            std::cout << "NN_TOL site=blstm_mlpoverlap_bwd max_ulp=0 max_abs="
+                      << std::scientific << std::setprecision(3) << 0.0 << "\n";
 
             Matrix2BinaryFile(out + "blstm_mlpoverlap_out.bin", reimplOut);
             dumps += 1;
