@@ -23,6 +23,7 @@
 
 #include "ActivationFunctions.h"
 #include "AudioStruct.h"
+#include "iof/io.hpp"
 #include "BLSTMNeuralNetwork.h"
 #include "ConfigFile.h"
 #include "CorpusItem.h"
@@ -3899,6 +3900,53 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "e2e_fwd_overlap.bin", outputForward);
             Matrix2BinaryFile(out + "e2e_bwd_overlap.bin", outputBackward);
             dumps += 3;
+        }
+    }
+
+    // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------
+    // The Phase 2b segmenter linkage makes the REAL Segmentation::toFile_VRCTS a
+    // byte golden, which routes through iof::fmtr (%f.Ns -> std::fixed +
+    // setprecision(N); %s -> default insertion; tail-flush + raw passthrough).
+    // Each case below runs the shim AND an independent std::ostringstream ground
+    // truth built with fixed/setprecision directly, and prints a parseable
+    // FMTR_CHECK line the extractor asserts (ok=0 -> SystemExit).
+    {
+        // Case fmtr_vrcts: the exact %s + %f.4s shape from toFile_VRCTS.
+        {
+            std::ostringstream got;
+            got << iof::fmtr("<x a=\"%s\" b=\"%f.4s\"/>") << 3 << 1.25;
+            std::ostringstream want;
+            want << "<x a=\"" << 3 << "\" b=\""
+                 << std::fixed << std::setprecision(4) << 1.25 << "\"/>";
+            std::cout << "FMTR_CHECK case=fmtr_vrcts ok="
+                      << (got.str() == want.str() ? 1 : 0) << "\n";
+        }
+        // Case fmtr_f2: a bare %f.2s (the sigdur/spdur/dur precision).
+        {
+            std::ostringstream got;
+            got << iof::fmtr("%f.2s") << 120.0;
+            std::ostringstream want;
+            want << std::fixed << std::setprecision(2) << 120.0;
+            std::cout << "FMTR_CHECK case=fmtr_f2 ok="
+                      << (got.str() == want.str() ? 1 : 0) << "\n";
+        }
+        // Case fmtr_tail: tail-flush + raw passthrough (Segmenter.cpp:66-67 shape).
+        {
+            std::ostringstream got;
+            got << iof::fmtr("warn %s") << "t" << "u";
+            std::ostringstream want;
+            want << "warn " << "t" << "u";
+            std::cout << "FMTR_CHECK case=fmtr_tail ok="
+                      << (got.str() == want.str() ? 1 : 0) << "\n";
+        }
+        // Case fmtr_f3: a %f.3s directive (preemph_ratio / cost precisions).
+        {
+            std::ostringstream got;
+            got << iof::fmtr("v=%f.3s;") << 0.97;
+            std::ostringstream want;
+            want << "v=" << std::fixed << std::setprecision(3) << 0.97 << ";";
+            std::cout << "FMTR_CHECK case=fmtr_f3 ok="
+                      << (got.str() == want.str() ? 1 : 0) << "\n";
         }
     }
 

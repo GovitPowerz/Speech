@@ -1,0 +1,45 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "segmenter_linkage": {
+    "text": "Phase 2b Task 1: the six vendored legacy segmenter TUs linked into the oracle harness so the REAL compiled Segmentation::toFile_VRCTS becomes a byte golden source. The include-graph analysis predicted no residual link errors beyond -lpng (Segmenter.cpp's plotting members odr-use png++ symbols even though runtime-dead); confirmed at build time -- no additional TUs were required.",
+    "translation_units": [
+      "Segmenter.cpp",
+      "Segmentation.cpp",
+      "BLSTMSpectralSegmenter.cpp",
+      "BLSTMSignalSegmenter.cpp",
+      "LongTermSpectralVariation.cpp",
+      "TimeDomainCorrel.cpp"
+    ],
+    "extra_link_libs": [
+      "png"
+    ],
+    "additional_tus_required": []
+  },
+  "fmtr_shim": {
+    "text": "Phase 2b Task 1: the iof::fmtr shim upgraded from inert (dropped format strings) to FAITHFUL. %f.Ns -> std::fixed + setprecision(N) (N observed in {0,2,3,4} on golden paths), %s -> default stream insertion, %% -> literal '%', tail-flush + raw passthrough for chained inserts after the last directive. Unknown/width directives (% 6ds, %f3.2s, % f6.2s, %s.s, ...) appear only on log paths the harness never dumps as a golden and are treated as %s after emitting their literal prefix. Each FMTR_CHECK case runs the shim against an independent std::ostringstream ground truth (fixed/setprecision directly); ok=1 means bit-identical strings.",
+    "checks": {
+      "fmtr_f2": 1,
+      "fmtr_f3": 1,
+      "fmtr_tail": 1,
+      "fmtr_vrcts": 1
+    }
+  },
+  "callsite_checks": {
+    "text": "Phase 2b spec decision 7: UNCOMMENTED call-site counts of the two deferred-port functions across the four LIVE driver TUs (TimeDomainCorrel, LongTermSpectralVariation, BLSTMSpectralSegmenter, BLSTMSignalSegmenter). A line is 'commented out' when its first non-space chars are '//'. 0 live callers each keeps both ports deferred (computeCost: no dead-code even; computeSpectralPitch: one commented-out call at BLSTMSpectralSegmenter.cpp:810). A nonzero count would be a scope change and aborts the extractor.",
+    "driver_tus": [
+      "TimeDomainCorrel.cpp",
+      "LongTermSpectralVariation.cpp",
+      "BLSTMSpectralSegmenter.cpp",
+      "BLSTMSignalSegmenter.cpp"
+    ],
+    "counts": {
+      "computeCost": 0,
+      "computeSpectralPitch": 0
+    },
+    "matched_lines": {
+      "computeCost": [],
+      "computeSpectralPitch": []
+    }
+  }
+}

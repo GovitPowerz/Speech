@@ -33,8 +33,11 @@ fi
 #   boost    - boost/math/round + range/lexical_cast (Helpers.hpp)
 #   png++    - png++/png.hpp (image dump helpers in Helpers.hpp, never called)
 #   sse2neon - shims/x86intrin.h -> <sse2neon.h> so legacy fmath.hpp parses on arm64
+#   libpng   - Segmenter.cpp's plotting members odr-use png++ symbols (runtime-dead
+#              image dumps); linking the segmenter TUs needs -lpng. libpng is a
+#              png++ dependency, so it is almost certainly already installed.
 missing=""
-for dep in gcc eigen@3 libsndfile libmatio boost png++ sse2neon; do
+for dep in gcc eigen@3 libsndfile libmatio boost png++ sse2neon libpng; do
   brew list --versions "$dep" >/dev/null 2>&1 || missing="$missing $dep"
 done
 if [ -n "$missing" ]; then
@@ -67,6 +70,16 @@ SRC=../../legacy/src
 #   SRNLayer/CWRNNLayer- link-only, per the explicit instantiations above
 #   CostLaw            - BLSTMNeuralNetwork ctor builds a CostLaw member (link)
 #   Rprop              - BLSTMNeuralNetwork ctor builds an Rprop _Trainer member (link)
+#   -- Phase 2b segmenter TUs (Task 1): link the real segmenter hierarchy so the
+#      compiled Segmentation::toFile_VRCTS becomes a byte golden source --
+#   Segmenter                  - segmenter base (buildFromConf, plotting members
+#                                that odr-use png++ -> -lpng below)
+#   Segmentation               - the VRCTS/STM/CSV writer + compute_errors under
+#                                port; DEFINES the global exclude_nontrans (:13)
+#   BLSTMSpectralSegmenter     - spectral segmenter (LTSV/TDC param derivation)
+#   BLSTMSignalSegmenter       - signal-domain segmenter
+#   LongTermSpectralVariation  - BLSTMSpectralSegmenter's base (link-required)
+#   TimeDomainCorrel           - TDC segmenter
 #
 # -include boost/math/special_functions/round.hpp: modern Boost's tr1.hpp (pulled
 # by Helpers.hpp) no longer re-exports boost::math::round, which getWindowingCoeff
@@ -81,6 +94,9 @@ SRC=../../legacy/src
   "$SRC/ConfigFile.cpp" "$SRC/CorpusItem.cpp" "$SRC/Timer.cpp" "$SRC/tinythread.cpp" \
   "$SRC/BLSTMNeuralNetwork.cpp" "$SRC/LSTMLayer.cpp" "$SRC/NeuronLayer.cpp" \
   "$SRC/SRNLayer.cpp" "$SRC/CWRNNLayer.cpp" "$SRC/CostLaw.cpp" "$SRC/Rprop.cpp" \
-  -L "$BREW/lib" -lsndfile -lmatio -o oracle_harness
+  "$SRC/Segmenter.cpp" "$SRC/Segmentation.cpp" "$SRC/BLSTMSpectralSegmenter.cpp" \
+  "$SRC/BLSTMSignalSegmenter.cpp" "$SRC/LongTermSpectralVariation.cpp" \
+  "$SRC/TimeDomainCorrel.cpp" \
+  -L "$BREW/lib" -lsndfile -lmatio -lpng -o oracle_harness
 
 echo "OK: built oracle_harness with $GXX"
