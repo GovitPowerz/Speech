@@ -47,6 +47,7 @@ PHASE2B_DIR = REPO_ROOT / "tests" / "reference_data" / "phase2b"
 
 NN_CONFIG = PHASE0_DIR / "1_worker_1.config"
 NN_WEIGHTS = PHASE0_DIR / "NNweights_config1.bin"
+TDC_CONFIG = PHASE2B_DIR / "tdc.config"
 
 # Input fixtures the harness reads from its output dir (same as Phase 1/2).
 HARNESS_INPUTS = [
@@ -89,6 +90,21 @@ EXPECTED_SHAPES = {
     "r2s_boundaries.bin": (2, 2),
     "r2s_boundaries_noconv.bin": (2, 2),
 }
+
+# Task 4: TdcSegmenter (Algo 1) dumps -- the REAL TimeDomainCorrel::getSegmentation
+# run on the excerpt under tdc.config (both channels), plus the two-files-in-
+# sequence boundary golden and the compute_errors-vs-reference scores.
+TDC_EXPECTED_SHAPES = {
+    "tdc_result_chan1.bin": (1, 201),
+    "tdc_result_chan2.bin": (1, 201),
+    "tdc_convolved_chan1.bin": (1, 201),
+    "tdc_convolved_chan2.bin": (1, 201),
+    "tdc_boundaries_chan1.bin": (3, 2),
+    "tdc_boundaries_chan2.bin": (2, 2),
+    "tdc_boundaries_file2_chan1.bin": (3, 2),
+    "tdc_scores.bin": (2, 3),
+}
+TDC_EXTRA_FILES = ["tdc_vrcts_chan1.xml"]
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
@@ -173,12 +189,19 @@ def main() -> None:
                 str(tmp_dir) + "/",
                 str(NN_CONFIG),
                 str(NN_WEIGHTS),
+                str(TDC_CONFIG),
             ]
         )
         # Task 2 (SegProbe results2segmentation dumps): persist these into the
         # committed Phase 2b dir -- everything else the harness writes into tmp_dir
         # is prior-phase output already covered by Phase 1/2's own fixtures.
         for name in EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        # Task 4 (TdcSegmenter dumps): result/convolved/boundaries/scores + the
+        # zero-offset VRCTS xml (0b-ii byte-equivalence closure golden).
+        for name in TDC_EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        for name in TDC_EXTRA_FILES:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
 
     # 4. Regression guard: the committed fixture dirs must be byte-identical after
@@ -216,6 +239,15 @@ def main() -> None:
             shape_mismatches.append({"file": name, "expected": expected, "got": got})
     if shape_mismatches:
         raise SystemExit(f"r2s_*.bin shape mismatch: {shape_mismatches}")
+
+    # 7b. Task 4 shape sync: the persisted tdc_*.bin dumps must match TDC_EXPECTED_SHAPES.
+    tdc_shape_mismatches = []
+    for name, expected in TDC_EXPECTED_SHAPES.items():
+        got = _read_bin_shape(PHASE2B_DIR / name)
+        if got != expected:
+            tdc_shape_mismatches.append({"file": name, "expected": expected, "got": got})
+    if tdc_shape_mismatches:
+        raise SystemExit(f"tdc_*.bin shape mismatch: {tdc_shape_mismatches}")
 
     # 8. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -299,6 +331,65 @@ def main() -> None:
             ),
             "expected_shapes": {k: list(v) for k, v in EXPECTED_SHAPES.items()},
         },
+        "tdc_segmenter": {
+            "text": (
+                "Phase 2b Task 4: TdcSegmenter (Algo 1). CHECK-FIRST outcome: "
+                "TimeDomainCorrel::getSegmentation (TimeDomainCorrel.cpp:93-259) calls "
+                "no NN (autocorrelation is cwise+sum; the only libm is fmath::log/cos "
+                "via classifySequence + the hamming window coefficients), so the REAL "
+                "compiled getSegmentation is used AS-IS as the golden source -- no "
+                "transcription at all, the strongest oracle of the phase. TdcProbe "
+                "(harness-local, derives TimeDomainCorrel) exposes the protected "
+                "Segmenter fields needed to independently replicate the pre-convolution "
+                "result_vec (a getSegmentation-local variable, not otherwise "
+                "observable): _MinMaxLag/_Balance are PRIVATE even to a derived class, "
+                "so the harness re-reads TDC_lags from the same ConfigFile and "
+                "reproduces the ctor's >=0.0 clamp (TDC_balance is unclamped and unused "
+                "by the replication, since classifySequence takes it as an implicit "
+                "member read inside the real, unmodified method). tdc.config: window "
+                "0.032s/shift 0.01s -> window_size=128, full_window=257 (odd), "
+                "min_lag=16, max_lag=128, window_shift=80 frames (0.01s, already >= "
+                "1/rate so the floor is a no-op); vec_size=201 "
+                "(16001 frames / 80, ceil since not exact). Dumps run on the shared "
+                "2-channel excerpt AudioStruct (offset 0.35, dur 2.0, rate 8000): "
+                "tdc_result_chan{1,2}.bin (pre-conv, 1x201), tdc_convolved_chan{1,2}.bin "
+                "(post results2segmentation, 1x201), tdc_boundaries_chan{1,2}.bin "
+                "(Nx2 begin/type hypothesis walk). tdc_vrcts_chan1.xml is the REAL "
+                "toFile_VRCTS output on a SEPARATE zero-offset AudioStruct (same wav, "
+                "audio_offset=0.0): the Rust Segmentation container has no "
+                "_AudioOffset field (folds to 0.0 in to_vrcts_string), so byte "
+                "equivalence on 'identical Segmentations' (spec S10) requires the "
+                "harness side to also be offset-free, sidestepping the +0.35 that "
+                "would otherwise bake into sigdur/stime/etime with no Rust-side "
+                "equivalent. tdc_scores.bin (2x3 Pfa/Pmiss/ErrorRate for SPEECH) is "
+                "compute_errors() against a PROGRAMMATIC reference built via direct "
+                "label_segment calls on a fresh Segmentation._Reference (public "
+                "member): two SPEECH spans [0.4,0.9) and [1.2,1.6) per channel, "
+                "_WordErrorRate left at its default NbWords=-1 (no WER pass, "
+                "matching the Rust nb_words<0 -> wer=None contract). "
+                "tdc_boundaries_file2_chan1.bin is the TWO-FILES golden: the SAME "
+                "TdcProbe instance runs getSegmentation a second time on the excerpt "
+                "into a fresh Segmentation, pinning the _WindowShift quantization "
+                "lifecycle (idempotent once quantized: round(x*rate)/rate on an "
+                "already-quantized value is a fixed point, so file 2's boundaries "
+                "differ from file 1's only through the hysteresis decision's own "
+                "state, not a shift drift -- both are dumped so the Rust test can "
+                "assert this explicitly rather than assume it)."
+            ),
+            "constants": {
+                "rate": 8000,
+                "window_size_frames": 128,
+                "full_window_frames": 257,
+                "min_lag_frames": 16,
+                "max_lag_frames": 128,
+                "window_shift_frames": 80,
+                "window_shift_sec": 0.01,
+                "vec_size": 201,
+                "reference_spans_sec": [[0.4, 0.9], [1.2, 1.6]],
+            },
+            "expected_shapes": {k: list(v) for k, v in TDC_EXPECTED_SHAPES.items()},
+            "extra_files": TDC_EXTRA_FILES,
+        },
     }
 
     manifest_path = PHASE2B_DIR / "manifest.json"
@@ -307,7 +398,8 @@ def main() -> None:
     counts = manifest["callsite_checks"]["counts"]
     print(
         f"OK: {len(fmtr_cases)} FMTR_CHECK all ok, "
-        f"callsites {counts}, r2s shapes ok, manifest -> {manifest_path.relative_to(REPO_ROOT)}"
+        f"callsites {counts}, r2s shapes ok, tdc shapes ok, "
+        f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 
 

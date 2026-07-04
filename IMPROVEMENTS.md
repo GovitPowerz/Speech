@@ -640,6 +640,30 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   *Fix candidate:* have the caller actually overwrite the stored type with `"none"` on an invalid
   value, after parity.
 
+- **[phase2b] `TdcSegmenter` windowing coefficients are UNNORMALIZED, unlike the convolution kernel**
+  (`tasks/sad.rs::TdcSegmenter::get_segmentation`, from `TimeDomainCorrel.cpp:146`
+  `getWindowingCoefficients(_WindowingType, false, full_window_size, _WindowingParam)`): the framing
+  window applied inside `getSequence` before `classifySequence` passes `normalized=false`, while
+  `DriverConfig::from_config`'s `{prefix}_convolution_window_size` kernel (Segmenter.cpp:113) is
+  ALWAYS built with `normalized=true`. Easy to accidentally normalize both the same way when porting
+  a second driver from this one; the TDC golden (`tdc_result_chan{1,2}.bin`) pins the unnormalized
+  windowed-signal magnitude directly. *Fix candidate:* none needed -- this is intentional legacy
+  design (the window shapes the autocorrelation without rescaling the signal energy), not a bug.
+
+- **[phase2b] `TdcSegmenter::window_shift_sec` is a STATEFUL member re-quantized on every call using
+  its OWN CURRENT VALUE, not the original config value** (`tasks/sad.rs::TdcSegmenter::
+  get_segmentation`, from `TimeDomainCorrel.cpp:103-105`): `_WindowShift` is floored at `1/rate` then
+  snapped to `round(x*rate)/rate` EVERY time `getSegmentation` runs, mutating the member in place; a
+  second call on the same segmenter instance reads back the FIRST call's quantized value as its
+  starting point, not the original `TDC_shift` config string. For a shift that already lands exactly
+  on a `1/rate` grid point (as in `tdc.config`: `0.01s` at `rate=8000` -> exactly `80` frames) this is
+  a no-op fixed point and invisible; for a shift that does NOT land on the grid, re-running the SAME
+  instance across files would silently drift from the configured value after the first call. Pinned
+  by `two_files_in_sequence_boundaries_match_dump` (`phase2b_tdc_golden.rs`) using a config already on
+  the grid; a future golden with an off-grid shift would make the (non-)drift directly observable.
+  *Fix candidate:* none -- this is the documented legacy per-file mutable-state contract (spec S3.4),
+  reproduced deliberately, not a bug to fix.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

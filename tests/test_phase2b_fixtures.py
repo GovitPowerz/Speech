@@ -78,3 +78,38 @@ def test_results_to_segmentation_dumps_present_with_expected_shapes() -> None:
             got_rows = int.from_bytes(f.read(8), "little", signed=True)
             got_cols = int.from_bytes(f.read(8), "little", signed=True)
         assert (got_rows, got_cols) == (rows, cols), name
+
+
+def test_tdc_segmenter_dumps_present_with_expected_shapes() -> None:
+    """Task 4: TdcSegmenter (Algo 1) -- result/convolved/boundaries/scores dumps."""
+    tdc = _manifest()["tdc_segmenter"]
+    expected_shapes = tdc["expected_shapes"]
+    assert expected_shapes == {
+        "tdc_result_chan1.bin": [1, 201],
+        "tdc_result_chan2.bin": [1, 201],
+        "tdc_convolved_chan1.bin": [1, 201],
+        "tdc_convolved_chan2.bin": [1, 201],
+        "tdc_boundaries_chan1.bin": [3, 2],
+        "tdc_boundaries_chan2.bin": [2, 2],
+        "tdc_boundaries_file2_chan1.bin": [3, 2],
+        "tdc_scores.bin": [2, 3],
+    }
+    for name, (rows, cols) in expected_shapes.items():
+        path = REF / name
+        assert path.is_file(), name
+        with path.open("rb") as f:
+            got_rows = int.from_bytes(f.read(8), "little", signed=True)
+            got_cols = int.from_bytes(f.read(8), "little", signed=True)
+        assert (got_rows, got_cols) == (rows, cols), name
+
+    for name in tdc["extra_files"]:
+        assert (REF / name).is_file(), name
+
+    constants = tdc["constants"]
+    assert constants["rate"] == 8000
+    assert constants["window_size_frames"] == 128
+    assert constants["full_window_frames"] == 257
+    assert constants["min_lag_frames"] == 16
+    assert constants["max_lag_frames"] == 128
+    assert constants["window_shift_frames"] == 80
+    assert constants["vec_size"] == 201

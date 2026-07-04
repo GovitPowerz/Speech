@@ -33,6 +33,7 @@
 #include "MelFilterBank.h"
 #include "NeuronLayer.h"
 #include "Segmenter.h"
+#include "TimeDomainCorrel.h"
 #include "fft.hpp"
 #include "fmath.hpp"
 
@@ -45,6 +46,26 @@ struct SegProbe : Segmenter {
     using Segmenter::results2segmentation;
     using Segmenter::updateSegmentation;
     using Segmenter::_ConvolutionCoeff;
+};
+
+// Phase 2b Task 4: TdcSegmenter (Algo 1) oracle. `TimeDomainCorrel::getSegmentation`
+// (TimeDomainCorrel.cpp:93-259) calls no NN (its only libm is fmath::log/cos via
+// classifySequence + the hamming/hann window coefficients), so the REAL compiled
+// method is used AS-IS -- no transcription. TdcProbe exposes the protected
+// Segmenter fields the harness needs to independently replicate the pre-conv
+// result_vec (`_MinMaxLag`/`_Balance` are private in TimeDomainCorrel itself and
+// inaccessible even to a derived class; the harness instead re-reads `TDC_lags`
+// from the same ConfigFile and reproduces the ctor's >= 0.0 clamp, TDC_balance
+// unclamped, which is all `getSegmentation` does with them before calling the
+// public `classifySequence`).
+struct TdcProbe : TimeDomainCorrel {
+    TdcProbe(ConfigFile &conf) : TimeDomainCorrel(conf, false, false) {}
+    using Segmenter::_WindowShift;
+    using Segmenter::_WindowSize;
+    using Segmenter::_FlagDCOffset;
+    using Segmenter::_WindowingType;
+    using Segmenter::_WindowingParam;
+    using Segmenter::results2segmentation;
 };
 
 // Constants ALL later tasks reuse (kept in sync with the harness manifest).
@@ -901,6 +922,13 @@ int main(int argc, char** argv) {
     std::string nnWeightsPath = (argc > 3)
         ? std::string(argv[3])
         : std::string("../../tests/reference_data/phase0/NNweights_config1.bin");
+
+    // Phase 2b Task 4: TDC-prefixed config, same argv-override convention as
+    // nnConfigPath/nnWeightsPath above (absolute from the extractor; repo-relative
+    // fallback assumes cwd == tools/oracle_harness).
+    std::string tdcConfigPath = (argc > 4)
+        ? std::string(argv[4])
+        : std::string("../../tests/reference_data/phase2b/tdc.config");
 
     int dumps = 0;
 
@@ -3992,6 +4020,193 @@ int main(int argc, char** argv) {
                 boundariesNoConv((long) ii, 1) = (double) segsNoConv[ii]._Type;
             }
             Matrix2BinaryFile(out + "r2s_boundaries_noconv.bin", boundariesNoConv);
+            ++dumps;
+        }
+    }
+
+    // --- Phase 2b Task 4: TdcSegmenter (Algo 1) ------------------------------
+    // legacy: TimeDomainCorrel::getSegmentation (TimeDomainCorrel.cpp:93-259). No
+    // NN in the chain (autocorrelation is cwise+sum, only libm is fmath::log/cos
+    // via classifySequence + the hamming window coeffs), so the REAL compiled
+    // getSegmentation is called AS-IS -- no transcription. A second, independent
+    // replication of the framing loop (using the real public classifySequence +
+    // AudioStruct::getSequence) recovers the PRE-convolution result_vec for the
+    // tdc_result_chan{N}.bin dump (that value is a local inside getSegmentation,
+    // not otherwise observable). Uses its OWN DEDICATED AudioStruct (audioTdc,
+    // same offset/duration recipe as the shared `audio`, built fresh here) rather
+    // than the harness's shared `audio`: the shared object already had
+    // applyPreemph(0.97) called on it at the top of main() for earlier phase-1/2
+    // stages and is never reset, so reusing it here would double-apply preemph
+    // (a harness-local artifact of shared mutable state across stages, not a
+    // legacy quirk to reproduce).
+    {
+        ConfigFile confTdc(tdcConfigPath, '_');
+        AudioStruct audioTdc(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+
+        // --- File 1: real getSegmentation on a fresh TdcProbe ------------------
+        TdcProbe probe(confTdc);
+        Segmentation seg(audioTdc, 0.5);
+        probe.getSegmentation(audioTdc, seg);
+        seg.compute_errors();
+
+        const long rate = audioTdc.getFrameRate();
+        const long long frameCount = audioTdc.getFrameCount();
+
+        // Independent re-derivation of window_size/window_shift/min_lag/max_lag,
+        // matching TimeDomainCorrel.cpp:100-111 exactly (TDC_lags re-read here
+        // since _MinMaxLag is private even to a derived class -- see TdcProbe).
+        std::vector<double>::size_type window_size =
+            (std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / 2.0);
+        std::vector<double>::size_type full_window_size = 2 * window_size + 1;
+        std::vector<double> minMaxLag = confTdc.get_list<double>("TDC_lags");
+        for (auto &v : minMaxLag) {
+            if (v < 0.0) v = 0.0;
+        }
+        long min_lag = (long) boost::math::round(minMaxLag[0] * rate);
+        long max_lag = (long) boost::math::round(minMaxLag[1] * rate);
+        if (max_lag >= (long) full_window_size) max_lag = full_window_size - 1;
+
+        // getSegmentation already quantized probe._WindowShift as a side effect
+        // (the stateful member); window_shift in FRAMES is recovered from it.
+        long window_shift = (long) boost::math::round(probe._WindowShift * rate);
+
+        Eigen::MatrixXd windowing_coeff =
+            getWindowingCoefficients(probe._WindowingType, false, full_window_size, probe._WindowingParam);
+
+        std::vector<double>::size_type vec_size = (std::vector<double>::size_type) frameCount;
+        if ((std::vector<double>::size_type) (vec_size / window_shift) * window_shift == vec_size) {
+            vec_size = (std::vector<double>::size_type) (vec_size / window_shift);
+        } else {
+            vec_size = (std::vector<double>::size_type) (vec_size / window_shift + 1);
+        }
+
+        for (int chan = 0; chan < audioTdc.getChannelCount(); ++chan) {
+            Eigen::MatrixXd windowed_signal = Eigen::MatrixXd::Zero(1, full_window_size);
+            Eigen::MatrixXd result_vec = Eigen::MatrixXd::Zero(1, vec_size);
+            for (std::vector<double>::size_type jj = 0; jj < (std::vector<double>::size_type) frameCount; jj += window_shift) {
+                audioTdc.getSequence(jj, window_size, chan, probe._FlagDCOffset, windowing_coeff, windowed_signal);
+                result_vec(0, jj / window_shift) = probe.classifySequence(min_lag, max_lag, windowed_signal);
+            }
+            std::ostringstream bufResult;
+            bufResult << "tdc_result_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufResult.str(), result_vec);
+            ++dumps;
+        }
+
+        // Convolved rows + boundaries: read back off the REAL post-getSegmentation
+        // Segmentation. The convolved result_vec itself is also a getSegmentation
+        // local, so it is independently rebuilt here via results2segmentation on a
+        // COPY of the pre-conv rows just dumped (same probe -- exercises the
+        // identical Segmenter::results2segmentation the real getSegmentation calls).
+        for (int chan = 0; chan < audioTdc.getChannelCount(); ++chan) {
+            std::ostringstream bufResult;
+            bufResult << "tdc_result_chan" << chan + 1 << ".bin";
+            Eigen::MatrixXd resultVec;
+            {
+                long long r, c;
+                std::ifstream f(out + bufResult.str(), std::ios::binary);
+                f.read((char*) &r, sizeof(long long));
+                f.read((char*) &c, sizeof(long long));
+                resultVec.resize(r, c);
+                f.read((char*) resultVec.data(), sizeof(double) * r * c);
+            }
+            Eigen::MatrixXd targetSeq = Eigen::MatrixXd::Zero(resultVec.cols(), 1);
+            Segmentation segConv(audioTdc, 0.5);
+            probe.results2segmentation(segConv, probe._WindowShift, 0.0, resultVec, targetSeq, chan, SPEECH);
+            std::ostringstream bufConv;
+            bufConv << "tdc_convolved_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufConv.str(), resultVec);
+            ++dumps;
+
+            std::ostringstream bufBound;
+            bufBound << "tdc_boundaries_chan" << chan + 1 << ".bin";
+            const auto& segs = segConv._Classification.at(chan);
+            Eigen::MatrixXd boundaries((long) segs.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs.size(); ++ii) {
+                boundaries((long) ii, 0) = segs[ii]._BeginTime;
+                boundaries((long) ii, 1) = (double) segs[ii]._Type;
+            }
+            Matrix2BinaryFile(out + bufBound.str(), boundaries);
+            ++dumps;
+        }
+
+        // VRCTS bytes: REAL toFile_VRCTS, 0b-ii byte-equivalence closure golden vs
+        // the Rust `to_vrcts_string` writer. The Rust `Segmentation` container has
+        // NO `_AudioOffset` field (a documented structural simplification -- offset
+        // folds to 0.0), so "identical Segmentations" (spec S10) requires an
+        // AudioStruct built with audio_offset=0.0 here too -- audioTdc above uses
+        // OFFSET_SEC=0.35, which would bake a `+0.35` into every stime/etime/sigdur
+        // that the Rust side cannot reproduce. A dedicated zero-offset AudioStruct
+        // on the SAME wav sidesteps the gap entirely (2-channel -> filenames get a
+        // _chan_N suffix; only chan 1 is dumped per the brief).
+        {
+            AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, item);
+            ConfigFile confTdcV(tdcConfigPath, '_');
+            TdcProbe probeV(confTdcV);
+            Segmentation segV(audioZeroOff, 0.5);
+            probeV.getSegmentation(audioZeroOff, segV);
+            segV.compute_errors();
+
+            std::string base = out + "tdc_vrcts";
+            segV.toFile_VRCTS(base);
+            std::ifstream vf(base + "_chan_1.xml", std::ios::binary);
+            std::ostringstream vs;
+            vs << vf.rdbuf();
+            std::ofstream outv(out + "tdc_vrcts_chan1.xml", std::ios::binary);
+            outv << vs.str();
+        }
+        ++dumps;
+
+        // compute_errors vs a programmatic reference: build a FRESH Segmentation
+        // (own dedicated AudioStruct-derived duration), populate _Reference
+        // directly (public member) with two SPEECH spans via label_segment, run
+        // the REAL getSegmentation to get a hypothesis, then compute_errors() with
+        // the reference branch active. Constants recorded in the manifest.
+        {
+            AudioStruct audioScore(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            ConfigFile confTdc2(tdcConfigPath, '_');
+            TdcProbe probeScore(confTdc2);
+            Segmentation segScore(audioScore, 0.5);
+            // _Reference starts empty (no .stm/.csv/.xml _RefSegFilename): seed it
+            // directly (public member) with the seeded pair (Other@0, End@dur) then
+            // two SPEECH spans via the real label_segment, per channel.
+            double audioDuration = ((double) audioScore.getFrameCount() - 1) / audioScore.getFrameRate();
+            for (int chan = 0; chan < audioScore.getChannelCount(); ++chan) {
+                segScore._Reference.push_back(std::deque<Segment> {Segment(), Segment(audioDuration, END)});
+                segScore.label_segment(segScore._Reference.at(chan), 0.4, 0.9, SPEECH);
+                segScore.label_segment(segScore._Reference.at(chan), 1.2, 1.6, SPEECH);
+            }
+            probeScore.getSegmentation(audioScore, segScore);
+            segScore.compute_errors();
+
+            Eigen::MatrixXd scores(audioScore.getChannelCount(), 3);
+            for (int chan = 0; chan < audioScore.getChannelCount(); ++chan) {
+                scores(chan, 0) = segScore._ClassificationErrors.at(chan)[SPEECH]._Pfa;
+                scores(chan, 1) = segScore._ClassificationErrors.at(chan)[SPEECH]._Pmiss;
+                scores(chan, 2) = segScore._ClassificationErrors.at(chan)[SPEECH]._ErrorRate;
+            }
+            Matrix2BinaryFile(out + "tdc_scores.bin", scores);
+            ++dumps;
+        }
+
+        // --- TWO-FILES golden: run the SAME probe object again on a FRESH
+        // dedicated AudioStruct -- pins the _WindowShift quantization lifecycle
+        // (idempotent: already quantized to a grid point of 1/rate, so a second
+        // run is a no-op on the member, but the boundary LIST regenerates fresh
+        // on a NEW Segmentation/AudioStruct pair, matching a second per-file call
+        // in the real corpus driver).
+        {
+            AudioStruct audioTdc2(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            Segmentation seg2(audioTdc2, 0.5);
+            probe.getSegmentation(audioTdc2, seg2);
+            seg2.compute_errors();
+            const auto& segs2 = seg2._Classification.at(0);
+            Eigen::MatrixXd boundaries2((long) segs2.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs2.size(); ++ii) {
+                boundaries2((long) ii, 0) = segs2[ii]._BeginTime;
+                boundaries2((long) ii, 1) = (double) segs2[ii]._Type;
+            }
+            Matrix2BinaryFile(out + "tdc_boundaries_file2_chan1.bin", boundaries2);
             ++dumps;
         }
     }
