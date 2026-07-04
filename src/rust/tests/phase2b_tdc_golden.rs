@@ -299,7 +299,24 @@ fn vrcts_bytes_match_dump() {
 }
 
 // === TWO-FILES golden: same TdcSegmenter instance, run twice =================
-
+//
+// NOTE (scope): this pins REPEAT-CALL DETERMINISM only, not the stateful
+// re-quantization lifecycle of `window_shift_sec`. The legacy quantization
+// `q(x) = round(x*rate)/rate` (`TimeDomainCorrel.cpp:103-105`) is PROVABLY
+// IDEMPOTENT for every representable f64 input at any practical sample rate
+// (see IMPROVEMENTS.md "[phase2b] TdcSegmenter::window_shift_sec ..." for the
+// proof): the compounded double-rounding error of the division-then-
+// multiplication round trip is bounded by ~1 ULP of the frame count, which is
+// astronomically below the 0.5 margin `round()` needs to flip its decision,
+// for any frame count an actual audio file can produce. Consequently there is
+// no TDC_shift config value (on- or off-grid) whose second-call quantization
+// differs from its first-call quantization, so no off-grid config variant can
+// make this golden non-vacuous: a driver that reset `window_shift_sec` from
+// the config string before every call would pass this test identically to the
+// real stateful driver. The driver code itself (verified by design/code
+// review) does carry the state through per `TimeDomainCorrel.cpp:103-105`;
+// this test just cannot distinguish that from a per-call reset, because the
+// quantization has no fixed input that drifts under re-quantization.
 #[test]
 fn two_files_in_sequence_boundaries_match_dump() {
     let m = tdc_map();
@@ -311,7 +328,9 @@ fn two_files_in_sequence_boundaries_match_dump() {
 
     // Second run on the SAME TdcSegmenter instance (inherits the quantized
     // window_shift_sec from file 1) against a FRESH audio/seg pair, per the
-    // harness's file-2 replay.
+    // harness's file-2 replay. See the module-level NOTE above: this proves
+    // determinism, not statefulness (the quantization is idempotent, so no
+    // config value can exercise observable drift).
     let mut audio2 = excerpt_audio();
     let mut segs2 = fresh_segs(&audio2);
     tdc.get_segmentation(&mut audio2, &mut segs2).unwrap();

@@ -655,14 +655,23 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   get_segmentation`, from `TimeDomainCorrel.cpp:103-105`): `_WindowShift` is floored at `1/rate` then
   snapped to `round(x*rate)/rate` EVERY time `getSegmentation` runs, mutating the member in place; a
   second call on the same segmenter instance reads back the FIRST call's quantized value as its
-  starting point, not the original `TDC_shift` config string. For a shift that already lands exactly
-  on a `1/rate` grid point (as in `tdc.config`: `0.01s` at `rate=8000` -> exactly `80` frames) this is
-  a no-op fixed point and invisible; for a shift that does NOT land on the grid, re-running the SAME
-  instance across files would silently drift from the configured value after the first call. Pinned
-  by `two_files_in_sequence_boundaries_match_dump` (`phase2b_tdc_golden.rs`) using a config already on
-  the grid; a future golden with an off-grid shift would make the (non-)drift directly observable.
+  starting point, not the original `TDC_shift` config string. This quantization is PROVABLY IDEMPOTENT
+  for every representable `f64` shift, at any practically realizable sample rate: writing
+  `q(x) = round(x*rate)/rate`, `q(q(x)) == q(x)` always, because `q(x)` is exactly `w/rate` for some
+  nonneg integer `w`, and the compounded double-rounding error of one division (`w/rate`) followed by
+  one multiplication (`(w/rate)*rate`) is bounded by ~1 ULP of `w` -- for `round()` to flip its decision
+  on the re-quantization the drift would need to reach 0.5, which requires `w` on the order of `2^52`
+  (checked numerically over `w` up to `5*10^7` and randomized/ULP-adjacent probes around the `round()`
+  half-integer boundary at rate=8000: zero mismatches). No audio file drives `w` (a frame count) anywhere
+  near that magnitude. So a SECOND call on the same instance always reproduces the SAME `window_shift`
+  frame count as the first call, for every config value, on- or off-grid -- there is no `TDC_shift` that
+  can make the two runs' boundaries differ via this mechanism alone. Pinned by
+  `two_files_in_sequence_boundaries_match_dump` (`phase2b_tdc_golden.rs`), which therefore pins
+  REPEAT-CALL DETERMINISM only, not statefulness: a buggy driver that reset `window_shift_sec` from the
+  config string before every call would compute the identical quantized value and pass this golden too.
   *Fix candidate:* none -- this is the documented legacy per-file mutable-state contract (spec S3.4),
-  reproduced deliberately, not a bug to fix.
+  reproduced deliberately, not a bug to fix; the idempotency is a property of the quantization scheme,
+  not something to "fix" either.
 
 ## Toolchain deviations
 
