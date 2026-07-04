@@ -32,8 +32,20 @@
 #include "LSTMLayer.h"
 #include "MelFilterBank.h"
 #include "NeuronLayer.h"
+#include "Segmenter.h"
 #include "fft.hpp"
 #include "fmath.hpp"
+
+// Phase 2b Task 2: exposes the protected Segmenter surface (buildFromConf,
+// results2segmentation, updateSegmentation) for the harness, and satisfies the
+// pure-virtual getSegmentation with a trivial override (never invoked here).
+struct SegProbe : Segmenter {
+    void getSegmentation(AudioStruct&, Segmentation&) override {}
+    using Segmenter::buildFromConf;
+    using Segmenter::results2segmentation;
+    using Segmenter::updateSegmentation;
+    using Segmenter::_ConvolutionCoeff;
+};
 
 // Constants ALL later tasks reuse (kept in sync with the harness manifest).
 static const double OFFSET_SEC = 0.35;   // offset skip: round(rate*0.35) frames
@@ -3900,6 +3912,87 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "e2e_fwd_overlap.bin", outputForward);
             Matrix2BinaryFile(out + "e2e_bwd_overlap.bin", outputBackward);
             dumps += 3;
+        }
+    }
+
+    // --- Phase 2b Task 2: results2segmentation (conv + updateSegmentation) ----
+    // legacy: Segmenter::buildFromConf (:73-148, real _ConvolutionCoeff via the
+    // BLSTM_convolution_window_size=9 -> 19-tap hHCw kernel), Segmenter::
+    // results2segmentation (:1113-1126: conv gate `_ConvolutionCoeff.cols()>1`,
+    // in-place Convolution on results, then updateSegmentation). Constructs a
+    // REAL Segmentation from the harness's own AudioStruct (the only real ctor;
+    // it needs a live AudioStruct, so `Segmentation seg(6.0)` from the plan is
+    // shorthand -- there is no such scalar ctor, see Segmentation.h:106).
+    {
+        ConfigFile conf(nnConfigPath, '_');
+        SegProbe probe;
+        probe.buildFromConf(conf, "BLSTM", false, false);
+
+        // conv coeff golden: BLSTM_convolution_window_size=9 -> 2*9+1=19 taps.
+        Matrix2BinaryFile(out + "r2s_conv_coeff.bin", probe._ConvolutionCoeff);
+
+        // Deterministic synthetic result row spanning the real thresholds
+        // (rising ~0.752, falling ~0.374): r[k] = 0.2 + 0.7*((k*13)%17)/16.
+        const int N = 60;
+        Eigen::MatrixXd results(1, N);
+        for (int k = 0; k < N; ++k) {
+            results(0, k) = 0.2 + 0.7 * ((k * 13) % 17) / 16.0;
+        }
+        Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(1, N);
+
+        // Real Segmentation, seeded from the harness's own AudioStruct (2ch,
+        // real duration from OFFSET_SEC/MAX_DUR_SEC truncation); pruning thresh
+        // is unused by results2segmentation/updateSegmentation.
+        Segmentation seg(audio, 0.5);
+
+        probe.results2segmentation(seg, 0.04, 0.0, results, targets, 0, SPEECH);
+        Matrix2BinaryFile(out + "r2s_convolved.bin", results);
+
+        // Walk the channel-0 hypothesis boundary list into an Nx2 begin/type dump.
+        {
+            const auto& segs = seg._Classification.at(0);
+            Eigen::MatrixXd boundaries((long) segs.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs.size(); ++ii) {
+                boundaries((long) ii, 0) = segs[ii]._BeginTime;
+                boundaries((long) ii, 1) = (double) segs[ii]._Type;
+            }
+            Matrix2BinaryFile(out + "r2s_boundaries.bin", boundaries);
+        }
+        dumps += 3;
+
+        // conv=none variant: BLSTM_convolution_window_size -> "0" via the
+        // established _Params erase+set pattern, then rebuild _ConvolutionCoeff
+        // via a fresh buildFromConf. Assert in-harness that results are UNCHANGED
+        // (the `_ConvolutionCoeff.cols() > 1` gate is false -> no Convolution call).
+        {
+            ConfigFile confNoConv(nnConfigPath, '_');
+            confNoConv._Params["BLSTM_convolution_window_size"] = "0";
+            SegProbe probeNoConv;
+            probeNoConv.buildFromConf(confNoConv, "BLSTM", false, false);
+
+            Eigen::MatrixXd resultsNoConv(1, N);
+            for (int k = 0; k < N; ++k) {
+                resultsNoConv(0, k) = 0.2 + 0.7 * ((k * 13) % 17) / 16.0;
+            }
+            Eigen::MatrixXd resultsNoConvCopy = resultsNoConv;
+            Eigen::MatrixXd targetsNoConv = Eigen::MatrixXd::Zero(1, N);
+
+            Segmentation segNoConv(audio, 0.5);
+            probeNoConv.results2segmentation(segNoConv, 0.04, 0.0, resultsNoConv, targetsNoConv, 0, SPEECH);
+
+            if (resultsNoConv != resultsNoConvCopy) {
+                std::cerr << "ERROR: noconv variant mutated results (expected untouched)\n";
+                return 1;
+            }
+
+            const auto& segsNoConv = segNoConv._Classification.at(0);
+            Eigen::MatrixXd boundariesNoConv((long) segsNoConv.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segsNoConv.size(); ++ii) {
+                boundariesNoConv((long) ii, 0) = segsNoConv[ii]._BeginTime;
+                boundariesNoConv((long) ii, 1) = (double) segsNoConv[ii]._Type;
+            }
+            Matrix2BinaryFile(out + "r2s_boundaries_noconv.bin", boundariesNoConv);
+            ++dumps;
         }
     }
 

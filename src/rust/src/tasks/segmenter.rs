@@ -1,16 +1,45 @@
 //! `Segmenter` decision logic (hysteresis-with-area) + the fixed smoothing pipeline.
 //!
-//! Ported from legacy C++ `Segmenter.cpp`: `buildFromConf` (:85-138),
-//! `updateSegmentation` (:725-845), `smoothSegmentation` (:709-723). Pure logic,
-//! validated by hand-computed unit tests.
+//! Ported from legacy C++ `Segmenter.cpp`: `buildFromConf` (:73-148),
+//! `updateSegmentation` (:725-845), `smoothSegmentation` (:709-723),
+//! `results2segmentation` (:1113-1126). Pure logic, validated by hand-computed unit
+//! tests plus the harness `SegProbe` goldens (`phase2b_wiring_golden.rs`).
 
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
+use ndarray::Array2;
+
+use crate::audio::{Audio, convolution_horiz_slice, windowing_coefficients};
 
 use super::segmentation::{SegClass, Segmentation};
 
 /// Produces a [`Segmentation`](super::segmentation_io) from features/audio.
-pub trait Segmenter {}
+///
+/// `get_segmentation` mirrors the legacy pure-virtual `Segmenter::getSegmentation`
+/// (`Segmenter.h:25`): `seg_per_chan` is pre-sized by the caller, one entry per
+/// audio channel. The weight-facing methods default to the legacy base-class
+/// no-op bodies (`Segmenter::setWeights`/`getWeights`/`getWeightsDerivatives`,
+/// `Segmenter.cpp:107-115`): a plain (non-BLSTM) segmenter has no trainable
+/// weights, so the defaults are the correct behaviour, not a stub.
+pub trait Segmenter {
+    fn get_segmentation(
+        &mut self,
+        audio: &mut Audio,
+        seg_per_chan: &mut [Segmentation],
+    ) -> Result<()>;
+
+    fn set_weights(&mut self, _flat: &[f64]) -> Result<()> {
+        Ok(())
+    }
+
+    fn get_weights(&self) -> Vec<f64> {
+        Vec::new()
+    }
+
+    fn get_weights_derivatives(&self) -> Array2<f64> {
+        Array2::zeros((0, 0))
+    }
+}
 
 /// Segmenter decision parameters, parsed from the legacy config (`buildFromConf`).
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +122,146 @@ impl SegmenterConfig {
             min_silence: [clamp0(min_silence_raw[0]), clamp0(min_silence_raw[1])],
         })
     }
+}
+
+/// Read a scalar `usize` from a config value (legacy `conf.get<vector<double>::
+/// size_type>(name)`, no default).
+fn parse_usize(m: &IndexMap<String, String>, key: &str) -> Result<usize> {
+    m.get(key)
+        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .trim()
+        .parse::<usize>()
+        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
+}
+
+/// Read a string from a config value, with a default for a missing key (legacy
+/// `conf.get<string>(name, default)`).
+fn parse_string_default(m: &IndexMap<String, String>, key: &str, default: &str) -> String {
+    m.get(key).cloned().unwrap_or_else(|| default.to_string())
+}
+
+/// The legacy warning text for an unsupported windowing type
+/// (`Segmenter::verifyWindowingType`, `Segmenter.cpp:61-70`).
+fn windowing_type_warning(parameter_name: &str) -> String {
+    format!(
+        "\n!!! WARNING !!!\nThe parameter given for {parameter_name} is not supported. The acceptable choices are \"uniform\", \"hamming\", \"hann\", \"hHCw\" or \"none\".\n{parameter_name}The parameter is set to none.\n"
+    )
+}
+
+const VALID_WINDOWING_TYPES: [&str; 5] = ["hamming", "hann", "hHCw", "uniform", "none"];
+
+/// Port of `Segmenter::verifyWindowingType` (`Segmenter.cpp:61-70`).
+///
+/// Legacy quirk reproduced FAITHFULLY: the legacy parameter is passed BY VALUE, so
+/// the `windowing_type = "none"` reassignment inside the function is a local-only
+/// mutation that is never written back to the caller's stored `_WindowingType`/
+/// `_ConvolutionType` field -- an invalid type is logged but the invalid string is
+/// still stored and used downstream. This port has nothing to mutate (it takes a
+/// borrowed `&str`), which is the same "no fix" behaviour by construction: it
+/// returns `Some(warning)` for the caller to log, and the caller's own stored type
+/// string is left untouched either way.
+pub fn verify_windowing_type(windowing_type: &str) -> Option<String> {
+    if VALID_WINDOWING_TYPES.contains(&windowing_type) {
+        None
+    } else {
+        Some(windowing_type_warning(windowing_type))
+    }
+}
+
+/// The residual `Segmenter::buildFromConf` keys NOT already covered by
+/// [`SegmenterConfig`] (decision/padding/min lists) or `FeatureConfig`
+/// (windowing/preemph/noise): the dump directory, window/shift, the convolution
+/// kernel, and the WER back-prop toggle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DriverConfig {
+    pub dump_dir: String,
+    pub window_size_sec: f64,
+    pub window_shift_sec: f64,
+    pub conv_coeff: Option<Vec<f64>>,
+    pub back_prop_wer: f64,
+}
+
+impl DriverConfig {
+    /// Port of the residual `Segmenter::buildFromConf` reads (`Segmenter.cpp:73-148`):
+    /// `Dump_Directory` (GLOBAL key, default `""`); `{prefix}_window`/`{prefix}_shift`
+    /// (required, no default -- `Err` on missing key, negative -> 0 clamp, :90-93);
+    /// `{prefix}_convolution_window_size` (required `usize`; `> 0` -> read
+    /// `{prefix}_convolution_window_type` + verify, else `"none"`, :100-108); the
+    /// convolution coefficients (`windowing_coefficients(ty, true, 2*size+1,
+    /// 0.83333)`, the legacy `getWindowingCoefficients` default extra param,
+    /// `Helpers.hpp:222`); `{prefix}_BackPropWER` (default `-1.0`).
+    pub fn from_config(m: &IndexMap<String, String>, prefix: &str) -> Result<DriverConfig> {
+        let dump_dir = parse_string_default(m, "Dump_Directory", "");
+
+        let mut window_size_sec = parse_scalar(m, &format!("{prefix}_window"))?;
+        if window_size_sec < 0.0 {
+            window_size_sec = 0.0;
+        }
+        let mut window_shift_sec = parse_scalar(m, &format!("{prefix}_shift"))?;
+        if window_shift_sec < 0.0 {
+            window_shift_sec = 0.0;
+        }
+
+        let conv_window_size = parse_usize(m, &format!("{prefix}_convolution_window_size"))?;
+        let conv_type = if conv_window_size > 0 {
+            let ty = m
+                .get(&format!("{prefix}_convolution_window_type"))
+                .ok_or_else(|| anyhow!("missing config key `{prefix}_convolution_window_type`"))?
+                .clone();
+            // verifyWindowingType is called for its logging side effect only (the
+            // by-value no-fix quirk): the stored type is used as-is either way.
+            let _ = verify_windowing_type(&ty);
+            ty
+        } else {
+            "none".to_string()
+        };
+        let conv_coeff =
+            windowing_coefficients(&conv_type, true, 2 * conv_window_size + 1, 0.83333);
+
+        let back_prop_wer = match m.get(&format!("{prefix}_BackPropWER")) {
+            None => -1.0,
+            Some(s) => s
+                .trim()
+                .parse::<f64>()
+                .map_err(|e| anyhow!("`{prefix}_BackPropWER`: cannot parse: {e}"))?,
+        };
+
+        Ok(DriverConfig {
+            dump_dir,
+            window_size_sec,
+            window_shift_sec,
+            conv_coeff,
+            back_prop_wer,
+        })
+    }
+}
+
+/// Port of `Segmenter::results2segmentation` (`Segmenter.cpp:1113-1126`).
+///
+/// `conv` is `Some(&coeffs)` with `len() > 1` -> convolves `results` IN PLACE via
+/// [`convolution_horiz_slice`] (the legacy `_ConvolutionCoeff.cols() > 1` gate;
+/// a `None`/single-tap kernel is a no-op, matching the legacy empty-matrix
+/// `cols() == 0` case and any degenerate 1-tap kernel), THEN calls
+/// [`update_segmentation`] (`updateSegmentation`, which itself runs
+/// [`smooth_segmentation`]). `targets` is unused by the live `updateSegmentation`
+/// body (every write site is commented out, `Segmenter.cpp:893-994`) and is
+/// therefore dropped from this signature, with this doc note standing in for the
+/// dead parameter.
+pub fn results_to_segmentation(
+    seg: &mut Segmentation,
+    time_step: f64,
+    time_offset: f64,
+    results: &mut [f64],
+    class: SegClass,
+    conv: Option<&[f64]>,
+    cfg: &SegmenterConfig,
+) {
+    if let Some(coeffs) = conv
+        && coeffs.len() > 1
+    {
+        convolution_horiz_slice(results, coeffs);
+    }
+    update_segmentation(seg, results, class, time_offset, time_step, cfg);
 }
 
 /// The RAW hysteresis-with-area decision over the ROW vector `results`, WITHOUT

@@ -626,6 +626,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the RESIZES (documented in `nn/layers.rs`'s struct doc) and the flat-seam tests pin the true
   12-row/4-bias layout. *Fix candidate:* fix the two comments in a post-parity legacy cleanup.
 
+- **[phase2b] `verifyWindowingType` by-value no-fix** (`Segmenter.cpp:61-70`, ported as
+  `tasks/segmenter.rs::verify_windowing_type`): the legacy function takes `windowing_type` BY VALUE
+  and reassigns its local copy to `"none"` when the string is unrecognized, logging a warning -- but
+  since the parameter is a value copy, the reassignment is NEVER written back to the caller's stored
+  `_WindowingType`/`_ConvolutionType` field. An invalid windowing/convolution type is warned about
+  but still used downstream as-is (fed straight into `getWindowingCoefficients`, whose `else` arm for
+  an unrecognized type returns an empty/`None` coefficient vector anyway, so the practical effect is
+  usually equivalent to "none" -- but only by coincidence of that downstream fallback, not because
+  the type was actually corrected). The port's `verify_windowing_type(&str) -> Option<String>` takes
+  a borrowed string, so there is nothing to mutate; it returns the warning for the caller to log and
+  leaves the caller's own stored type untouched either way, reproducing the same "no fix" behaviour.
+  *Fix candidate:* have the caller actually overwrite the stored type with `"none"` on an invalid
+  value, after parity.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

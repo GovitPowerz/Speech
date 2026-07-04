@@ -80,6 +80,16 @@ DEFERRED_FNS = ["computeCost", "computeSpectralPitch"]
 FMTR_CHECK_RE = re.compile(r"^FMTR_CHECK case=(?P<case>\w+) ok=(?P<ok>[01])$", re.MULTILINE)
 EXPECTED_FMTR_CASES = {"fmtr_vrcts", "fmtr_f2", "fmtr_tail", "fmtr_f3"}
 
+# Task 2: SegProbe results2segmentation dumps (conv coeff, convolved results, the
+# channel-0 hypothesis boundary walk, and the conv=none variant). Persisted into
+# the committed Phase 2b dir like Phase 2's EXPECTED_SHAPES.
+EXPECTED_SHAPES = {
+    "r2s_conv_coeff.bin": (1, 19),
+    "r2s_convolved.bin": (1, 60),
+    "r2s_boundaries.bin": (2, 2),
+    "r2s_boundaries_noconv.bin": (2, 2),
+}
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -113,6 +123,14 @@ def _parse_fmtr_checks(stdout: str) -> dict[str, int]:
     if failed:
         raise SystemExit(f"FMTR_CHECK failed (ok=0) for: {failed}")
     return cases
+
+
+def _read_bin_shape(path: Path) -> tuple[int, int]:
+    """Read just the (rows, cols) header of a legacy `.bin` (i64 LE, i64 LE, ...)."""
+    with path.open("rb") as f:
+        rows = int.from_bytes(f.read(8), "little", signed=True)
+        cols = int.from_bytes(f.read(8), "little", signed=True)
+    return rows, cols
 
 
 def _scan_callsites(fn: str) -> list[dict[str, object]]:
@@ -157,6 +175,11 @@ def main() -> None:
                 str(NN_WEIGHTS),
             ]
         )
+        # Task 2 (SegProbe results2segmentation dumps): persist these into the
+        # committed Phase 2b dir -- everything else the harness writes into tmp_dir
+        # is prior-phase output already covered by Phase 1/2's own fixtures.
+        for name in EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
 
     # 4. Regression guard: the committed fixture dirs must be byte-identical after
     #    the run (the fmtr upgrade must not perturb any prior harness dump).
@@ -185,7 +208,16 @@ def main() -> None:
             f"change for the controller):\n{detail}"
         )
 
-    # 7. Compiler version (same g++ selection as build.sh).
+    # 7. Task 2 shape sync: the persisted r2s_*.bin dumps must match EXPECTED_SHAPES.
+    shape_mismatches = []
+    for name, expected in EXPECTED_SHAPES.items():
+        got = _read_bin_shape(PHASE2B_DIR / name)
+        if got != expected:
+            shape_mismatches.append({"file": name, "expected": expected, "got": got})
+    if shape_mismatches:
+        raise SystemExit(f"r2s_*.bin shape mismatch: {shape_mismatches}")
+
+    # 8. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
     compiler = _run([gxx, "--version"]).splitlines()[0].strip()
 
@@ -238,6 +270,35 @@ def main() -> None:
             "counts": {fn: len(hits) for fn, hits in callsites.items()},
             "matched_lines": callsites,
         },
+        "results_to_segmentation": {
+            "text": (
+                "Phase 2b Task 2: SegProbe (a Segmenter subclass exposing the "
+                "protected buildFromConf/results2segmentation/updateSegmentation via "
+                "`using`) built from the REAL 1_worker_1.config (BLSTM prefix): "
+                "BLSTM_convolution_window_size=9 -> the real _ConvolutionCoeff is a "
+                "19-tap hHCw kernel (r2s_conv_coeff.bin, 1x19, sums to 1.0). A "
+                "deterministic synthetic 1x60 result row (r[k] = 0.2 + "
+                "0.7*((k*13) mod 17)/16) spanning the real decision thresholds "
+                "(rising~0.752, falling~0.374) is run through the REAL "
+                "results2segmentation(seg, 0.04, 0.0, results, targets, chan=0, "
+                "SPEECH) against a REAL Segmentation built from the harness's own "
+                "AudioStruct (Segmentation has no scalar-duration ctor -- only "
+                "Segmentation(AudioStruct&, double), so 'Segmentation seg(6.0)' in "
+                "the task brief is shorthand, not a literal signature). "
+                "r2s_convolved.bin (1x60) is the POST-convolution results (in-place "
+                "mutation observed through the same Eigen::Ref); r2s_boundaries.bin "
+                "(Nx2 begin/type) walks the resulting seg._Classification[0] "
+                "hypothesis list. The conv=none variant re-reads the config with "
+                "BLSTM_convolution_window_size forced to \"0\" via the established "
+                "_Params erase/set pattern (here: assignment, since the key is "
+                "present) -- _ConvolutionCoeff collapses to 0 cols, the "
+                "`.cols() > 1` gate in results2segmentation is false, and the "
+                "harness asserts in-process that the noconv results are BIT-IDENTICAL "
+                "to the pre-call copy (SystemExit if not) before dumping "
+                "r2s_boundaries_noconv.bin."
+            ),
+            "expected_shapes": {k: list(v) for k, v in EXPECTED_SHAPES.items()},
+        },
     }
 
     manifest_path = PHASE2B_DIR / "manifest.json"
@@ -246,7 +307,7 @@ def main() -> None:
     counts = manifest["callsite_checks"]["counts"]
     print(
         f"OK: {len(fmtr_cases)} FMTR_CHECK all ok, "
-        f"callsites {counts}, manifest -> {manifest_path.relative_to(REPO_ROOT)}"
+        f"callsites {counts}, r2s shapes ok, manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 
 

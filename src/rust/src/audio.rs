@@ -12,7 +12,7 @@ use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use ndarray::Array2;
+use ndarray::{Array1, Array2};
 use symphonia::core::audio::{AudioBufferRef, Signal};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::formats::FormatOptions;
@@ -158,21 +158,32 @@ fn conv_taps(ii: usize, len: usize, half_window: isize) -> (isize, usize, usize)
     (begin1, begin2 as usize, end as usize)
 }
 
-/// `Convolution` (`Helpers.hpp:164-191`): in-place 1xN horizontal convolution.
-/// Edge positions truncate the kernel without renormalizing (missing taps are
-/// simply dropped, not redistributed) -- a load-bearing legacy quirk.
-pub fn convolution_horiz(row: &mut Array2<f64>, coeffs: &[f64]) {
+/// `Convolution` (`Helpers.hpp:164-191`): in-place 1xN horizontal convolution over
+/// a plain slice. Edge positions truncate the kernel without renormalizing (missing
+/// taps are simply dropped, not redistributed) -- a load-bearing legacy quirk. The
+/// natural fit for `results_to_segmentation`/spectral/LTSV/TDC, which hold `Vec`
+/// results rather than an `Array2` row.
+pub fn convolution_horiz_slice(row: &mut [f64], coeffs: &[f64]) {
     let half_window = ((coeffs.len() - 1) / 2) as isize;
-    let cols = row.ncols();
-    let copy: Vec<f64> = row.row(0).to_vec();
-    for ii in 0..cols {
+    let cols = row.len();
+    let copy: Vec<f64> = row.to_vec();
+    for (ii, out) in row.iter_mut().enumerate() {
         let (begin1, begin2, end) = conv_taps(ii, cols, half_window);
         let mut acc = 0.0;
         for jj in begin2..=end {
             acc += copy[(begin1 + jj as isize) as usize] * coeffs[jj];
         }
-        row[[0, ii]] = acc;
+        *out = acc;
     }
+}
+
+/// `Convolution` (`Helpers.hpp:164-191`): in-place 1xN horizontal convolution over
+/// an `Array2` row. Delegates to [`convolution_horiz_slice`] (the single
+/// implementation) via a contiguous scratch copy.
+pub fn convolution_horiz(row: &mut Array2<f64>, coeffs: &[f64]) {
+    let mut buf: Vec<f64> = row.row(0).to_vec();
+    convolution_horiz_slice(&mut buf, coeffs);
+    row.row_mut(0).assign(&Array1::from(buf));
 }
 
 /// `ConvolutionVert` (`Helpers.hpp:193-220`): in-place T x B vertical convolution

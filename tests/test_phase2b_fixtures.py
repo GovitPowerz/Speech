@@ -61,3 +61,20 @@ def test_deferred_ports_have_zero_live_callers() -> None:
     assert set(counts) == DEFERRED_FNS
     for fn, n in counts.items():
         assert n == 0, (fn, callsites["matched_lines"][fn])
+
+
+def test_results_to_segmentation_dumps_present_with_expected_shapes() -> None:
+    expected_shapes = _manifest()["results_to_segmentation"]["expected_shapes"]
+    assert expected_shapes == {
+        "r2s_conv_coeff.bin": [1, 19],
+        "r2s_convolved.bin": [1, 60],
+        "r2s_boundaries.bin": [2, 2],
+        "r2s_boundaries_noconv.bin": [2, 2],
+    }
+    for name, (rows, cols) in expected_shapes.items():
+        path = REF / name
+        assert path.is_file(), name
+        with path.open("rb") as f:
+            got_rows = int.from_bytes(f.read(8), "little", signed=True)
+            got_cols = int.from_bytes(f.read(8), "little", signed=True)
+        assert (got_rows, got_cols) == (rows, cols), name

@@ -41,5 +41,26 @@
       "computeCost": [],
       "computeSpectralPitch": []
     }
+  },
+  "results_to_segmentation": {
+    "text": "Phase 2b Task 2: SegProbe (a Segmenter subclass exposing the protected buildFromConf/results2segmentation/updateSegmentation via `using`) built from the REAL 1_worker_1.config (BLSTM prefix): BLSTM_convolution_window_size=9 -> the real _ConvolutionCoeff is a 19-tap hHCw kernel (r2s_conv_coeff.bin, 1x19, sums to 1.0). A deterministic synthetic 1x60 result row (r[k] = 0.2 + 0.7*((k*13) mod 17)/16) spanning the real decision thresholds (rising~0.752, falling~0.374) is run through the REAL results2segmentation(seg, 0.04, 0.0, results, targets, chan=0, SPEECH) against a REAL Segmentation built from the harness's own AudioStruct (Segmentation has no scalar-duration ctor -- only Segmentation(AudioStruct&, double), so 'Segmentation seg(6.0)' in the task brief is shorthand, not a literal signature). r2s_convolved.bin (1x60) is the POST-convolution results (in-place mutation observed through the same Eigen::Ref); r2s_boundaries.bin (Nx2 begin/type) walks the resulting seg._Classification[0] hypothesis list. The conv=none variant re-reads the config with BLSTM_convolution_window_size forced to \"0\" via the established _Params erase/set pattern (here: assignment, since the key is present) -- _ConvolutionCoeff collapses to 0 cols, the `.cols() > 1` gate in results2segmentation is false, and the harness asserts in-process that the noconv results are BIT-IDENTICAL to the pre-call copy (SystemExit if not) before dumping r2s_boundaries_noconv.bin.",
+    "expected_shapes": {
+      "r2s_conv_coeff.bin": [
+        1,
+        19
+      ],
+      "r2s_convolved.bin": [
+        1,
+        60
+      ],
+      "r2s_boundaries.bin": [
+        2,
+        2
+      ],
+      "r2s_boundaries_noconv.bin": [
+        2,
+        2
+      ]
+    }
   }
 }
