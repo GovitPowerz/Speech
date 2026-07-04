@@ -46,6 +46,10 @@ use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
+use crate::audio::{Audio, compute_segment_periodogram_estimates, windowing_coefficients};
+use crate::features::ltsv_tdc::get_ltsv;
+use crate::features::mel::MelFilterBank;
+
 /// Time-domain-correlation window/lag/balance parameters.
 ///
 /// `half_window` is the legacy `TDC_window_size` (round(window_sec*rate/2)), the
@@ -481,4 +485,91 @@ pub fn assemble_input_sequence(
             merged
         }
     }
+}
+
+/// Build the full BLSTM input sequence for one channel: windowing -> periodogram
+/// -> mel/DCT (per config) -> LTSV (band asymmetry, `R >= 1` gate) -> assemble.
+///
+/// Lifted verbatim from the Phase 1/2 gate test bodies (`run_pipeline` /
+/// `assemble_real_input`) -- the two call sites differ only in config source; the
+/// real config's LTSV is disabled via `R == 0`, already handled by the
+/// `ltsv_half_window >= 1` gate below. Preemph/noise are NOT applied here -- callers
+/// own audio mutation before passing `audio` in.
+pub fn build_input_sequence(
+    audio: &Audio,
+    cfg: &FeatureConfig,
+    s: &SpectralParams,
+    chan: usize,
+    temporal_conv: Option<&[f64]>,
+) -> Array2<f64> {
+    let rate = audio.sample_rate as f64;
+    let win = windowing_coefficients(&cfg.win_type, false, s.buffer_size, cfg.win_param);
+    let end = audio.data.ncols() - 1;
+    let perio = compute_segment_periodogram_estimates(
+        audio,
+        s.order,
+        s.shift_frames,
+        chan,
+        cfg.flag_dc_offset,
+        win.as_deref(),
+        temporal_conv,
+        0,
+        end,
+    );
+
+    // Mel bank per config, SNAPPED freq band, spectrum_size = bins - 1.
+    let (mel_out, dct_out) = if cfg.nb_bins > 0 {
+        let bank = MelFilterBank::new(
+            cfg.min_mel,
+            cfg.max_mel,
+            cfg.nb_bins,
+            s.min_freq,
+            s.max_freq,
+            rate,
+            s.bins - 1,
+            cfg.is_log,
+            cfg.nb_dct,
+            cfg.ignore_first,
+            cfg.deltas_nb,
+            cfg.dd_nb,
+        );
+        let fb = bank.apply_filter_bank(&perio);
+        if cfg.nb_dct > 0 {
+            let dct = bank.apply_dct(&fb);
+            (Some(fb), Some(dct))
+        } else {
+            (Some(fb), None)
+        }
+    } else {
+        (None, None)
+    };
+
+    // Spectral output columns (before LTSV) drive the mel-variant LTSV band.
+    let spectral_cols = match (&dct_out, &mel_out) {
+        (Some(d), _) => d.ncols(),
+        (None, Some(m)) => m.ncols(),
+        (None, None) => s.freq_end - s.freq_beg + 1,
+    };
+
+    // LTSV column (band asymmetry): mel active -> (0, spectral_cols-1); else the
+    // spectral band. Appended when R >= 1.
+    let ltsv = if s.ltsv_half_window >= 1 {
+        let (lb, le) = if cfg.nb_bins > 0 {
+            (0, spectral_cols - 1)
+        } else {
+            (s.freq_beg, s.freq_end)
+        };
+        Some(get_ltsv(&perio, lb, le, s.ltsv_half_window, s.ltsv_shift))
+    } else {
+        None
+    };
+
+    assemble_input_sequence(
+        &perio,
+        mel_out.as_ref(),
+        dct_out.as_ref(),
+        ltsv.as_deref(),
+        s.freq_beg,
+        s.freq_end,
+    )
 }
