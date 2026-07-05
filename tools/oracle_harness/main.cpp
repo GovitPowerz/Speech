@@ -23,7 +23,6 @@
 
 #include "ActivationFunctions.h"
 #include "AudioStruct.h"
-#include "iof/io.hpp"
 #include "BLSTMNeuralNetwork.h"
 #include "BLSTMSignalSegmenter.h"
 #include "BLSTMSpectralSegmenter.h"
@@ -31,6 +30,7 @@
 #include "CorpusItem.h"
 #include "Helpers.hpp"
 #include "InputStatistics.h"
+#include "iof/io.hpp"
 #include "LSTMLayer.h"
 #include "LongTermSpectralVariation.h"
 #include "MelFilterBank.h"
@@ -4998,9 +4998,11 @@ int main(int argc, char** argv) {
     // min_speech/min_silence (0.05/0.1/0.1 vs 0.1/0.2/0.2) -- config keys only, no
     // code changes. Under this config the REAL compiled getSegmentation produces
     // genuine threshold crossings on channel 1: two SPEECH spans separated by an
-    // OTHER gap survive smoothing (padding shrinks the ~0.56s gap to ~0.16s, which
-    // is <= min_silence but NOT merged away because the tuned min_silence no longer
-    // exceeds it) -- SPEECH, OTHER, SPEECH, END. Channel 2 stays a single
+    // OTHER gap survive smoothing -- the gap is SPEECH[0,0.9892)/OTHER[0.9892,
+    // 1.3472)/SPEECH[1.3472,2.0), i.e. 1.3472-0.9892 = 0.358s, which is GREATER
+    // than min_silence (0.1s), so suppress_short's "erase short OTHER" rule does
+    // NOT fire and the gap survives as its own segment -- SPEECH, OTHER, SPEECH,
+    // END. Channel 2 stays a single
     // always-SPEECH span (its own periodogram content never drops below
     // _DecisionThreshFalling long enough to accrue an ending area) -- both channels
     // are dumped so the Rust golden can assert channel 1's non-vacuous structure

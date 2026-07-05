@@ -167,6 +167,67 @@ def test_ltsv_segmenter_dumps_present_with_expected_shapes() -> None:
     assert constants["ltsv_tiny_window_half_frames"] == 1
 
 
+def test_signal_segmenter_dumps_present_with_expected_shapes() -> None:
+    """Task 6: BlstmSignalSegmenter (Algo 4, the FIRST driver with the NN in the
+    chain) -- three variants (window0/overlap/noOverlap) + the signalRaw-vs-signal
+    timing dumps + the two-files noOverlap lifecycle."""
+    signal = _manifest()["signal_segmenter"]
+    expected_shapes = signal["expected_shapes"]
+    assert expected_shapes == {
+        "signal_window0_signalraw_chan1.bin": [1, 16001],
+        "signal_window0_signal_chan1.bin": [1, 16001],
+        "signal_window0_result_chan1.bin": [1, 4000],
+        "signal_window0_convolved_chan1.bin": [1, 4000],
+        "signal_window0_boundaries_chan1.bin": [2, 2],
+        "signal_window0_scores.bin": [2, 3],
+        "signal_overlap_signalraw_chan1.bin": [1, 16001],
+        "signal_overlap_signal_chan1.bin": [1, 16001],
+        "signal_overlap_result_chan1.bin": [1, 4001],
+        "signal_overlap_convolved_chan1.bin": [1, 4001],
+        "signal_overlap_boundaries_chan1.bin": [2, 2],
+        "signal_overlap_scores.bin": [2, 3],
+        "signal_noOverlap_signalraw_chan1.bin": [1, 16001],
+        "signal_noOverlap_signal_chan1.bin": [1, 16001],
+        "signal_noOverlap_result_chan1.bin": [1, 4000],
+        "signal_noOverlap_convolved_chan1.bin": [1, 4000],
+        "signal_noOverlap_boundaries_chan1.bin": [2, 2],
+        "signal_noOverlap_scores.bin": [2, 3],
+        "signal_noOverlap_boundaries_file1_chan1.bin": [2, 2],
+        "signal_noOverlap_boundaries_file2_chan1.bin": [2, 2],
+    }
+    for name, (rows, cols) in expected_shapes.items():
+        path = REF / name
+        assert path.is_file(), name
+        with path.open("rb") as f:
+            got_rows = int.from_bytes(f.read(8), "little", signed=True)
+            got_cols = int.from_bytes(f.read(8), "little", signed=True)
+        assert (got_rows, got_cols) == (rows, cols), name
+
+    for name in signal["extra_files"]:
+        assert (REF / name).is_file(), name
+    for name in signal["config_files"]:
+        assert (REF / name).is_file(), name
+
+    # SECONDARY real-forward structural probe (spec decision 3): all three signal
+    # sites must be present with ok=1 (a structural mismatch would have aborted
+    # generation) and the recorded max_dt.
+    seg_struct = signal["seg_struct"]
+    assert set(seg_struct) == {"signal_window0", "signal_overlap", "signal_noOverlap"}
+    for site, rec in seg_struct.items():
+        assert rec["ok"] == 1, site
+
+    constants = signal["constants"]
+    assert constants["rate"] == 8000
+    assert constants["frame_count"] == 16001
+    assert constants["sub_sampling_ratio"] == 4
+    assert constants["window0_real_vec_size"] == 4000
+    assert constants["overlap_window_size_samples"] == 40
+    assert constants["overlap_window_shift_samples"] == 4
+    assert constants["nooverlap_window_size_samples"] == 4000
+    assert constants["nooverlap_window_shift_samples"] == 1
+    assert constants["nooverlap_real_vec_size"] == 4000
+
+
 def test_spectral_segmenter_dumps_present_with_expected_shapes() -> None:
     """Task 7: BlstmSpectralSegmenter (Algo 3, no pitch pass) -- the REAL
     1_worker_1.config's algorithm. Three variants (real/overlap/noOverlap) + the
@@ -230,3 +291,42 @@ def test_spectral_segmenter_dumps_present_with_expected_shapes() -> None:
         "spectrum_shift_in_frames": 80,
         "real_vec_size": 50,
     }
+
+
+def test_spectral_pitch_pass_dumps_present_with_expected_shapes() -> None:
+    """Task 8: the pitch-homothety SECOND pass (Algo 3 complete) -- pass-1 dump-quirk
+    goldens + pass-2 goldens + the measured pitch scalar + the pass-2 VRCTS bytes."""
+    pitch = _manifest()["spectral_pitch_pass"]
+    expected_shapes = pitch["expected_shapes"]
+    assert expected_shapes == {
+        "spectral_pitch_pitch_chan1.bin": [1, 1],
+        "spectral_pitch_result_chan1.bin": [1, 50],
+        "spectral_pitch_convolved_chan1.bin": [1, 50],
+        "spectral_pitch_inputseq_chan1.bin": [201, 11],
+        "spectral_pitch_result_pass2_chan1.bin": [1, 50],
+        "spectral_pitch_convolved_pass2_chan1.bin": [1, 50],
+        "spectral_pitch_inputseq_pass2_chan1.bin": [201, 11],
+        "spectral_pitch_boundaries_chan1.bin": [3, 2],
+    }
+    for name, (rows, cols) in expected_shapes.items():
+        path = REF / name
+        assert path.is_file(), name
+        with path.open("rb") as f:
+            got_rows = int.from_bytes(f.read(8), "little", signed=True)
+            got_cols = int.from_bytes(f.read(8), "little", signed=True)
+        assert (got_rows, got_cols) == (rows, cols), name
+
+    # The pass-2 VRCTS bytes (the REAL toFile_VRCTS on the pass-2-driven Segmentation).
+    for name in pitch["extra_files"]:
+        assert (REF / name).is_file(), name
+    assert "spectral_pitch_vrcts_chan1.xml" in pitch["extra_files"]
+
+    # NON-VACUITY: the measured pitch is a real (positive) estimate, and the pass-2
+    # boundary crossing genuinely moved away from pass-1.
+    assert pitch["measured_pitch_chan1"] > 0.0
+    assert pitch["pass1_boundary_crossing_sec"] != pitch["pass2_boundary_crossing_sec"]
+
+    # SECONDARY real-forward structural probe (spec decision 3), pass-2 structure.
+    seg_struct = pitch["seg_struct"]
+    assert set(seg_struct) == {"spectral_pitch"}
+    assert seg_struct["spectral_pitch"]["ok"] == 1

@@ -44,7 +44,8 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   re-test-after-merge control flow (e.g. an explicit worklist) instead of the implicit no-advance
   loop.
 
-- **[0b-ii] VRCTS writer byte-golden deferred; fixtures are external `vrcts_part` reference input**
+- **[0b-ii] VRCTS writer byte-golden -- CLOSED in Phase 2b; fixtures are external `vrcts_part`
+  reference input**
   (`segmentation_io.rs` `to_vrcts_string`/`write_vrcts`, from `Segmentation.cpp:543-588`): the engine's
   `toFile_VRCTS` formats `stime`/`etime` with `iof::fmtr("%f.4s")` and `sigdur`/`spdur`/`dur` with
   `%f.2s`. `iof::fmtr`'s `%f.Ns` was resolved (by disassembling the vendored `Debug/bin/fsp` -- the `iof`
@@ -57,11 +58,22 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   sum of post-`sanitize` (4-decimal round-half-away, same-type-merged) SPEECH durations over the engine's
   full-precision internal boundaries -- unreproducible from the fixtures' rounded strings. *Validation:*
   `load_vrcts` is golden-tested for load correctness against the 3 fixtures; `to_vrcts_string` is
-  unit-tested on a constructed `Segmentation` with hand-computed 4-decimal bytes. *Deferred:* the
-  writer-vs-real-engine byte golden waits on the end-to-end inference-output parity milestone (README
-  Roadmap Phase 4), when a real engine-produced `.xml` exists to match. *Minor:* our writer sanitizes a
-  clone (non-mutating) whereas `toFile_VRCTS` mutates its `_Classification` in place; revisit if any
-  caller relies on the write-time sanitize side effect.
+  unit-tested on a constructed `Segmentation` with hand-computed 4-decimal bytes. **CLOSED (Phase 2b):**
+  the writer-vs-real-engine byte equivalence originally deferred here to Phase 4 is now ESTABLISHED.
+  The Phase 2b oracle harness upgraded the inert `iof` shim to a FAITHFUL mini-fmtr (`%f.Ns` ==
+  `std::fixed` + `setprecision(N)`, exactly the semantics pinned above; self-tested per generation via
+  the manifest's `fmtr_shim.checks`, guarded by `tests/test_phase2b_fixtures.py::
+  test_all_fmtr_checks_passed`), making the REAL compiled `Segmentation::toFile_VRCTS` a byte-golden
+  source. Nine real-engine-produced `.xml` fixtures now exist (`tdc_vrcts_chan1.xml`,
+  `ltsv_vrcts_chan1.xml`, `signal_{window0,overlap,noOverlap}_vrcts_chan1.xml`,
+  `spectral_{real,overlap,noOverlap,pitch}_vrcts_chan1.xml`) and `to_vrcts_string` byte-matches every
+  one: `vrcts_bytes_match_dump` (`phase2b_tdc_golden.rs`, `phase2b_ltsv_golden.rs`,
+  `phase2b_spectral_golden.rs`), `pitch_vrcts_bytes_match_dump` (`phase2b_spectral_golden.rs`),
+  `overlap_vrcts_matches_dump` + `vrcts_bytes_match_dump_cheap_variants` (`phase2b_signal_golden.rs`).
+  Byte-exactness is asserted on the oracle environment (the boundary times upstream traverse libm; the
+  standard canary-gating posture applies off-env). *Minor (still open):* our writer sanitizes a clone
+  (non-mutating) whereas `toFile_VRCTS` mutates its `_Classification` in place; revisit if any caller
+  relies on the write-time sanitize side effect.
 
 - **[0b-ii] `compute_errors` Pass 1b reads one past the ref End sentinel (UB)** --
   `Segmentation::compute_errors` (`Segmentation.cpp:370-382`) sets
@@ -626,19 +638,50 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the RESIZES (documented in `nn/layers.rs`'s struct doc) and the flat-seam tests pin the true
   12-row/4-bias layout. *Fix candidate:* fix the two comments in a post-parity legacy cleanup.
 
-- **[phase2b] `verifyWindowingType` by-value no-fix** (`Segmenter.cpp:61-70`, ported as
-  `tasks/segmenter.rs::verify_windowing_type`): the legacy function takes `windowing_type` BY VALUE
-  and reassigns its local copy to `"none"` when the string is unrecognized, logging a warning -- but
-  since the parameter is a value copy, the reassignment is NEVER written back to the caller's stored
-  `_WindowingType`/`_ConvolutionType` field. An invalid windowing/convolution type is warned about
-  but still used downstream as-is (fed straight into `getWindowingCoefficients`, whose `else` arm for
-  an unrecognized type returns an empty/`None` coefficient vector anyway, so the practical effect is
-  usually equivalent to "none" -- but only by coincidence of that downstream fallback, not because
-  the type was actually corrected). The port's `verify_windowing_type(&str) -> Option<String>` takes
-  a borrowed string, so there is nothing to mutate; it returns the warning for the caller to log and
-  leaves the caller's own stored type untouched either way, reproducing the same "no fix" behaviour.
-  *Fix candidate:* have the caller actually overwrite the stored type with `"none"` on an invalid
-  value, after parity.
+- **[phase2b] `Segmenter::buildFromConf` reads three WRITE-ONLY cost members, plus a same-key
+  DIFFERENT-DEFAULT collision with the live `CostLaw`** (`Segmenter.cpp:139-145`, NOT ported --
+  `tasks/segmenter.rs::DriverConfig` omits them entirely): `_CostPonderation` (default `0.5`,
+  `{prefix}_CostPonderation`), `_CostLaw` (default `"log"`, `{prefix}_CostLawSpeech`), and
+  `_CostLawParam` (default `0.5`, `{prefix}_CostLawParamSpeech`) are parsed and stored on every
+  `Segmenter`-derived object but never read back anywhere in the class hierarchy -- `grep` over the
+  vendored source shows no live use of `_CostPonderation`/`_CostLaw`/`_CostLawParam` outside the
+  copy-ctor and this assignment; the base `computeCost` that would have consumed them
+  (`Segmenter.cpp:640-657`) has no live Algo 1-4 caller either (Algo 3/4 cost via the NN's own
+  `getCost`; Algo 1/2 accumulate no cost at all -- confirmed by the Task 1 call-site check, S2
+  decision 7), so these three members are dead weight on every driver. SEPARATE collision, same key
+  family: `Segmenter.cpp:143` reads `{prefix}_CostLawParamSpeech` with default `0.5` into the
+  write-only `_CostLawParam`, while `CostLaw.cpp:14` reads the IDENTICAL key
+  `{prefix}_CostLawParamSpeech` with default `0.0` into `costLawParamSpeech`, which IS live (feeds
+  the softmax cross-entropy cost law actually used by the NN path, ported in `cost.rs`). Two
+  different classes read the same config key with two different defaults; only the `CostLaw.cpp`
+  reader's value has any observable effect, so the `Segmenter`-side default is moot in practice, but
+  a config that relies on the default (omits the key) would silently get `0.0` cost-law behavior
+  while a naive read of `Segmenter.cpp` alone would suggest `0.5`. Not ported: `DriverConfig` has no
+  field for any of the three keys. *Fix candidate:* post-parity, either delete the dead
+  `Segmenter`-side reads (they do nothing) or, if `Segmenter::computeCost` is ever revived for a
+  future Algo 5/6 (LID) driver, resolve the default collision explicitly rather than inheriting
+  whichever class happens to read the key first.
+
+- **[phase2b] `verifyWindowingType` double quirk: by-value no-fix AND unconditional `_LogStream`
+  clobber** (`Segmenter.cpp:61-70`, ported as `tasks/segmenter.rs::verify_windowing_type`): the
+  legacy function takes `windowing_type` BY VALUE and reassigns its local copy to `"none"` when the
+  string is unrecognized, logging a warning -- but since the parameter is a value copy, the
+  reassignment is NEVER written back to the caller's stored `_WindowingType`/`_ConvolutionType`
+  field. An invalid windowing/convolution type is warned about but still used downstream as-is (fed
+  straight into `getWindowingCoefficients`, whose `else` arm for an unrecognized type returns an
+  empty/`None` coefficient vector anyway, so the practical effect is usually equivalent to "none" --
+  but only by coincidence of that downstream fallback, not because the type was actually corrected).
+  SECOND quirk, same function: `_LogStream = logStream.str()` (`:70`) runs UNCONDITIONALLY after the
+  `if`, even on the valid-type path where `logStream` was never written to -- so every call, valid or
+  not, overwrites `_LogStream` wholesale (not appends), clobbering whatever a prior invalid-type call
+  had logged; only the LAST call's result (warning or empty string) survives on the member. The
+  port's `verify_windowing_type(&str) -> Option<String>` takes a borrowed string, so there is nothing
+  to mutate; it returns the warning (or `None`) for the caller to log, reproducing both the "no fix"
+  behaviour and the "last call wins" semantics (the caller is expected to store/overwrite, not
+  accumulate, the returned value; `DriverConfig::from_config` currently discards it via `let _ =`,
+  which is a stricter -- not weaker -- reproduction since a discarded log can't diverge from "last
+  call wins" either). *Fix candidate:* have the caller actually overwrite the stored type with
+  `"none"` on an invalid value, and append rather than clobber the log, after parity.
 
 - **[phase2b] `TdcSegmenter` windowing coefficients are UNNORMALIZED, unlike the convolution kernel**
   (`tasks/sad.rs::TdcSegmenter::get_segmentation`, from `TimeDomainCorrel.cpp:146`
@@ -660,10 +703,11 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `q(x) = round(x*rate)/rate`, `q(q(x)) == q(x)` always, because `q(x)` is exactly `w/rate` for some
   nonneg integer `w`, and the compounded double-rounding error of one division (`w/rate`) followed by
   one multiplication (`(w/rate)*rate`) is bounded by ~1 ULP of `w` -- for `round()` to flip its decision
-  on the re-quantization the drift would need to reach 0.5, which requires `w` on the order of `2^52`
-  (checked numerically over `w` up to `5*10^7` and randomized/ULP-adjacent probes around the `round()`
-  half-integer boundary at rate=8000: zero mismatches). No audio file drives `w` (a frame count) anywhere
-  near that magnitude. So a SECOND call on the same instance always reproduces the SAME `window_shift`
+  on the re-quantization the drift would need to reach 0.5, so ANALYTICALLY the idempotency holds for
+  all `w` up to ~`2^52` (where 1 ULP of `w` first reaches the 0.5 tie margin), i.e. any practically
+  realizable rate/duration; checked numerically over `w` up to `5*10^7` and randomized/ULP-adjacent
+  probes around the `round()` half-integer boundary at rate=8000: zero mismatches. No audio file drives
+  `w` (a frame count) anywhere near that magnitude. So a SECOND call on the same instance always reproduces the SAME `window_shift`
   frame count as the first call, for every config value, on- or off-grid -- there is no `TDC_shift` that
   can make the two runs' boundaries differ via this mechanism alone. Pinned by
   `two_files_in_sequence_boundaries_match_dump` (`phase2b_tdc_golden.rs`), which therefore pins
@@ -916,16 +960,25 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   forced the harness input-assembly choice for the spectral driver golden.
 
 - **[phase2b] Pitch second pass rebuilds the input with the OLD (pass-1) LTSV column, NOT recomputed
-  on the warped periodogram** (`BLSTMSpectralSegmenter.cpp:757-805`, Task 8): the pitch pass warps
-  `audio._Periodogram` by `pitch/300` (`:760-775`), re-runs the mel filterbank + DCT on the warped
-  periodogram (`:777-787`), then calls `getBLSTMInputSequence(audio, melFilters, freq_beg, freq_end,
-  LTSV, TDC)` (`:792`) with the SAME `LTSV` matrix computed in pass 1 over the UNWARPED periodogram.
-  The LTSV column is therefore stale relative to the warped spectral features -- the input's last
-  column reflects the un-warped spectrum while the mel/DCT columns reflect the warped one. Reproduced
-  by having the Rust driver capture the pass-1 LTSV (`build_input_sequence_parts`) and hand it back to
-  `assemble_from_periodogram` for the pass-2 build (the periodogram is warped, the LTSV is reused).
-  Pinned by `spectral_pitch_inputseq_pass2_chan1.bin`. Post-parity: recompute LTSV on the warped
-  periodogram (or document that the warp is only meant to affect the mel/DCT band).
+  on the warped periodogram -- CODE PATH IS WIRED BUT UNEXERCISED BY ANY CURRENT FIXTURE** (
+  `BLSTMSpectralSegmenter.cpp:757-805`, Task 8): the pitch pass warps `audio._Periodogram` by
+  `pitch/300` (`:760-775`), re-runs the mel filterbank + DCT on the warped periodogram (`:777-787`),
+  then calls `getBLSTMInputSequence(audio, melFilters, freq_beg, freq_end, LTSV, TDC)` (`:792`) with
+  the SAME `LTSV` matrix computed in pass 1 over the UNWARPED periodogram -- IF an LTSV column were
+  present, it would be stale relative to the warped spectral features. However, the real
+  `1_worker_1.config` (and the Task 8 `pitch_map()` variant, which only overrides the `TDCwindow`/
+  `TDCshift`/`TDC_lags`/`TDC_balance`/`TDC_windowing_*` keys to activate the pitch gate) both carry
+  `BLSTM_LTSVwindow 0`, so `SpectralParams::derive` resolves `ltsv_half_window = 0` and NO LTSV column
+  is appended in EITHER pass (`assemble_input_sequence`'s LTSV hcat is skipped entirely). The Rust
+  driver still captures the pass-1 LTSV output (`build_input_sequence_parts`) and threads it through
+  `assemble_from_periodogram` for the pass-2 build -- reproducing the WIRING -- but with
+  `ltsv_half_window == 0` that plumbing is a no-op: `spectral_pitch_inputseq_pass2_chan1.bin` pins only
+  the warp -> mel -> DCT columns, not any LTSV reuse. The stale-LTSV quirk this entry describes would
+  only be exercised by a config with BOTH `TDCwindow > 0` (pitch pass active) AND `LTSVwindow > 0` (an
+  LTSV column actually present) -- no such fixture exists yet. Post-parity: recompute LTSV on the
+  warped periodogram (or document that the warp is only meant to affect the mel/DCT band); a fixture
+  covering the LTSVwindow>0 x pitch-pass-active combination would be needed to golden-test the quirk
+  itself, not just the wiring.
 
 - **[phase2b] The externalized pitch-pass result dump preserves PASS-1, even though the final
   boundaries are PASS-2** (`BLSTMSpectralSegmenter.cpp:744,:848-850`, Task 8): `result_vec2` is set to

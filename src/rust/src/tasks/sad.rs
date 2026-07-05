@@ -1,7 +1,9 @@
-//! SAD segmenters: BLSTM over signal/spectral/LTSV features -> speech posterior.
+//! SAD segmenters (Algo 1-4, all implemented in Phase 2b): TDC autocorrelation,
+//! LTSV spectral variation, and BLSTM over spectral/signal input -> speech posterior.
 //!
-//! Ported from legacy C++: BLSTMSignalSegmenter.*, BLSTMSpectralSegmenter.*,
-//! BLSTMSpectralLID.*. Phase 2-4.
+//! Ported from legacy C++: TimeDomainCorrel.*, LongTermSpectralVariation.*,
+//! BLSTMSpectralSegmenter.* (incl. the pitch-homothety second pass),
+//! BLSTMSignalSegmenter.*.
 //!
 //! [`TdcSegmenter`] (Algo 1) is ported from `TimeDomainCorrel.{h,cpp}` (Phase 2b
 //! Task 4): the ctor (`:16-27`) and `getSegmentation` (`:93-259`). No NN in the

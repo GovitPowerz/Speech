@@ -688,9 +688,12 @@ fn dc_offset_flag_is_log_only() {
 /// boundary equality (both would show the always-Other seed under the overlap
 /// branch too, since posteriors stay sub-threshold there as well), but it would
 /// produce a differently-shaped (16001, not 4000) result row on file 2. Likewise
-/// `window_shift_sec()` is asserted to have round-tripped through `0.0` back to
-/// `1/rate = 1.25e-4` on both files (the reset firing, then re-deriving), not merely
-/// left at a fixed value.
+/// `window_shift_sec()` is asserted to be `0.0` post-call on both files: the member
+/// starts each call at the config value `0.0`, is floored up to `1/rate = 1.25e-4`
+/// DURING the call (`:107-108`, the noOverlap clamp), and is then reset back to
+/// `0.0` by the `:376` poisoning AFTER the call returns -- so the round trip is
+/// `0.0 -> 1.25e-4 -> 0.0` within a single call, not a value left sitting at a
+/// fixed nonzero point.
 #[test]
 fn two_files_in_sequence_no_overlap_lifecycle() {
     let w = real_weights();
