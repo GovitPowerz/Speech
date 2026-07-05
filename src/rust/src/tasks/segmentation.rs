@@ -82,6 +82,25 @@ impl Segmentation {
         &self.segs
     }
 
+    /// Reset the hypothesis boundary list to the seeded `[Other@0.0,
+    /// End@audio_duration]` state. Direct port of `Segmentation::clearClassification`
+    /// (`Segmentation.cpp:284-286`): `_Classification.at(chan) = deque<Segment>
+    /// {Segment(), Segment(_AudioDuration, END)}`. The legacy per-channel reference
+    /// list (`_Reference`) lives outside this container and is untouched by the
+    /// legacy method and by this port.
+    pub fn clear_hypothesis(&mut self) {
+        self.segs = vec![
+            Segment {
+                begin: 0.0,
+                ty: SegClass::Other,
+            },
+            Segment {
+                begin: self.audio_duration,
+                ty: SegClass::End,
+            },
+        ];
+    }
+
     pub fn audio_duration(&self) -> f64 {
         self.audio_duration
     }

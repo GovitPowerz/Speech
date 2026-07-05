@@ -1,0 +1,603 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "segmenter_linkage": {
+    "text": "Phase 2b Task 1: the six vendored legacy segmenter TUs linked into the oracle harness so the REAL compiled Segmentation::toFile_VRCTS becomes a byte golden source. The include-graph analysis predicted no residual link errors beyond -lpng (Segmenter.cpp's plotting members odr-use png++ symbols even though runtime-dead); confirmed at build time -- no additional TUs were required.",
+    "translation_units": [
+      "Segmenter.cpp",
+      "Segmentation.cpp",
+      "BLSTMSpectralSegmenter.cpp",
+      "BLSTMSignalSegmenter.cpp",
+      "LongTermSpectralVariation.cpp",
+      "TimeDomainCorrel.cpp"
+    ],
+    "extra_link_libs": [
+      "png"
+    ],
+    "additional_tus_required": []
+  },
+  "fmtr_shim": {
+    "text": "Phase 2b Task 1: the iof::fmtr shim upgraded from inert (dropped format strings) to FAITHFUL. %f.Ns -> std::fixed + setprecision(N) (N observed in {0,2,3,4} on golden paths), %s -> default stream insertion, %% -> literal '%', tail-flush + raw passthrough for chained inserts after the last directive. Unknown/width directives (% 6ds, %f3.2s, % f6.2s, %s.s, ...) appear only on log paths the harness never dumps as a golden and are treated as %s after emitting their literal prefix. Each FMTR_CHECK case runs the shim against an independent std::ostringstream ground truth (fixed/setprecision directly); ok=1 means bit-identical strings.",
+    "checks": {
+      "fmtr_f2": 1,
+      "fmtr_f3": 1,
+      "fmtr_tail": 1,
+      "fmtr_vrcts": 1
+    }
+  },
+  "callsite_checks": {
+    "text": "Phase 2b spec decision 7: UNCOMMENTED call-site counts of the two deferred-port functions across the four LIVE driver TUs (TimeDomainCorrel, LongTermSpectralVariation, BLSTMSpectralSegmenter, BLSTMSignalSegmenter). A line is 'commented out' when its first non-space chars are '//'. 0 live callers each keeps both ports deferred (computeCost: no dead-code even; computeSpectralPitch: one commented-out call at BLSTMSpectralSegmenter.cpp:810). A nonzero count would be a scope change and aborts the extractor.",
+    "driver_tus": [
+      "TimeDomainCorrel.cpp",
+      "LongTermSpectralVariation.cpp",
+      "BLSTMSpectralSegmenter.cpp",
+      "BLSTMSignalSegmenter.cpp"
+    ],
+    "counts": {
+      "computeCost": 0,
+      "computeSpectralPitch": 0
+    },
+    "matched_lines": {
+      "computeCost": [],
+      "computeSpectralPitch": []
+    }
+  },
+  "results_to_segmentation": {
+    "text": "Phase 2b Task 2: SegProbe (a Segmenter subclass exposing the protected buildFromConf/results2segmentation/updateSegmentation via `using`) built from the REAL 1_worker_1.config (BLSTM prefix): BLSTM_convolution_window_size=9 -> the real _ConvolutionCoeff is a 19-tap hHCw kernel (r2s_conv_coeff.bin, 1x19, sums to 1.0). A deterministic synthetic 1x60 result row (r[k] = 0.2 + 0.7*((k*13) mod 17)/16) spanning the real decision thresholds (rising~0.752, falling~0.374) is run through the REAL results2segmentation(seg, 0.04, 0.0, results, targets, chan=0, SPEECH) against a REAL Segmentation built from the harness's own AudioStruct (Segmentation has no scalar-duration ctor -- only Segmentation(AudioStruct&, double), so 'Segmentation seg(6.0)' in the task brief is shorthand, not a literal signature). r2s_convolved.bin (1x60) is the POST-convolution results (in-place mutation observed through the same Eigen::Ref); r2s_boundaries.bin (Nx2 begin/type) walks the resulting seg._Classification[0] hypothesis list. The conv=none variant re-reads the config with BLSTM_convolution_window_size forced to \"0\" via the established _Params erase/set pattern (here: assignment, since the key is present) -- _ConvolutionCoeff collapses to 0 cols, the `.cols() > 1` gate in results2segmentation is false, and the harness asserts in-process that the noconv results are BIT-IDENTICAL to the pre-call copy (SystemExit if not) before dumping r2s_boundaries_noconv.bin.",
+    "expected_shapes": {
+      "r2s_conv_coeff.bin": [
+        1,
+        19
+      ],
+      "r2s_convolved.bin": [
+        1,
+        60
+      ],
+      "r2s_boundaries.bin": [
+        2,
+        2
+      ],
+      "r2s_boundaries_noconv.bin": [
+        2,
+        2
+      ]
+    }
+  },
+  "tdc_segmenter": {
+    "text": "Phase 2b Task 4: TdcSegmenter (Algo 1). CHECK-FIRST outcome: TimeDomainCorrel::getSegmentation (TimeDomainCorrel.cpp:93-259) calls no NN (autocorrelation is cwise+sum; the only libm is fmath::log/cos via classifySequence + the hamming window coefficients), so the REAL compiled getSegmentation is used AS-IS as the golden source -- no transcription at all, the strongest oracle of the phase. TdcProbe (harness-local, derives TimeDomainCorrel) exposes the protected Segmenter fields needed to independently replicate the pre-convolution result_vec (a getSegmentation-local variable, not otherwise observable): _MinMaxLag/_Balance are PRIVATE even to a derived class, so the harness re-reads TDC_lags from the same ConfigFile and reproduces the ctor's >=0.0 clamp (TDC_balance is unclamped and unused by the replication, since classifySequence takes it as an implicit member read inside the real, unmodified method). tdc.config: window 0.032s/shift 0.01s -> window_size=128, full_window=257 (odd), min_lag=16, max_lag=128, window_shift=80 frames (0.01s, already >= 1/rate so the floor is a no-op); vec_size=201 (16001 frames / 80, ceil since not exact). Dumps run on the shared 2-channel excerpt AudioStruct (offset 0.35, dur 2.0, rate 8000): tdc_result_chan{1,2}.bin (pre-conv, 1x201), tdc_convolved_chan{1,2}.bin (post results2segmentation, 1x201), tdc_boundaries_chan{1,2}.bin (Nx2 begin/type hypothesis walk). tdc_vrcts_chan1.xml is the REAL toFile_VRCTS output on a SEPARATE zero-offset AudioStruct (same wav, audio_offset=0.0): the Rust Segmentation container has no _AudioOffset field (folds to 0.0 in to_vrcts_string), so byte equivalence on 'identical Segmentations' (spec S10) requires the harness side to also be offset-free, sidestepping the +0.35 that would otherwise bake into sigdur/stime/etime with no Rust-side equivalent. tdc_scores.bin (2x3 Pfa/Pmiss/ErrorRate for SPEECH) is compute_errors() against a PROGRAMMATIC reference built via direct label_segment calls on a fresh Segmentation._Reference (public member): two SPEECH spans [0.4,0.9) and [1.2,1.6) per channel, _WordErrorRate left at its default NbWords=-1 (no WER pass, matching the Rust nb_words<0 -> wer=None contract). tdc_boundaries_file2_chan1.bin is the TWO-FILES golden: the SAME TdcProbe instance runs getSegmentation a second time on the excerpt into a fresh Segmentation, pinning the _WindowShift quantization lifecycle (idempotent once quantized: round(x*rate)/rate on an already-quantized value is a fixed point, so file 2's boundaries differ from file 1's only through the hysteresis decision's own state, not a shift drift -- both are dumped so the Rust test can assert this explicitly rather than assume it).",
+    "constants": {
+      "rate": 8000,
+      "window_size_frames": 128,
+      "full_window_frames": 257,
+      "min_lag_frames": 16,
+      "max_lag_frames": 128,
+      "window_shift_frames": 80,
+      "window_shift_sec": 0.01,
+      "vec_size": 201,
+      "reference_spans_sec": [
+        [
+          0.4,
+          0.9
+        ],
+        [
+          1.2,
+          1.6
+        ]
+      ]
+    },
+    "expected_shapes": {
+      "tdc_result_chan1.bin": [
+        1,
+        201
+      ],
+      "tdc_result_chan2.bin": [
+        1,
+        201
+      ],
+      "tdc_convolved_chan1.bin": [
+        1,
+        201
+      ],
+      "tdc_convolved_chan2.bin": [
+        1,
+        201
+      ],
+      "tdc_boundaries_chan1.bin": [
+        3,
+        2
+      ],
+      "tdc_boundaries_chan2.bin": [
+        2,
+        2
+      ],
+      "tdc_boundaries_file2_chan1.bin": [
+        3,
+        2
+      ],
+      "tdc_scores.bin": [
+        2,
+        3
+      ]
+    },
+    "extra_files": [
+      "tdc_vrcts_chan1.xml"
+    ]
+  },
+  "ltsv_segmenter": {
+    "text": "Phase 2b Task 5: LtsvSegmenter (Algo 2). PRIMARY config (ltsv.config, nb_DCT=0): LongTermSpectralVariation::getSegmentation (LongTermSpectralVariation.cpp:130-407) calls applyFilterBank only (no DCT -> no Eigen GEMM), so the REAL compiled getSegmentation is the bit-golden AS-IS, same strength oracle as TdcSegmenter. LtsvProbe (harness-local, derives LongTermSpectralVariation) exposes the protected fields needed to independently replicate the pre-convolution decimated result_vec (a getSegmentation-local, not otherwise observable) via the REAL public classifySequence -- same pattern as TdcProbe. ltsv.config: spectrum_order=8 (window_size=256, periodogram_length=129), spectrum_shift=0.01s (80 frames), nb_bins=26 mel filters (is_log_mel=true), nb_DCT=0, LTSVwindow=0.3s -> half-window 15 periodogram frames, LTSVshift=0.04s -> shift 4 periodogram frames. The driver's own periodogram span uses begin_frame=0/end_frame= audio.getFrameCount() (LongTermSpectralVariation.cpp:293-294) -- ONE MORE than build_input_sequence's end=ncols()-1 call, the frameCount+1 vec_size quirk (spec S4.2): periodogram vec_size = ceil((frameCount+1)/spectrum_shift) = 201 rows, then real_vec_size = ceil(201/4) = 51 result columns. SECONDARY config (ltsv_dct.config, nb_DCT=4): applyDCT's Eigen GEMM diverges from the ascending-loop port at this shape (same family the Phase 1 GEMM_CHECK pre-check flagged), so this variant runs getSegmentation's body as an in-process reimplementation with ONLY the applyDCT call swapped for applyDCTLoop (T7's ascending- loop port, already defined for the Phase 1 DCT golden) -- periodogram, mel filterbank, LTSV classifySequence, and results2segmentation all stay the REAL compiled machinery, called through the same LtsvProbe surface. ltsv_tiny.config (LTSVwindow=0.001s): round(0.001*8000/2/80) == 0, floored to 1 (LongTermSpectralVariation.cpp:257-258) -- the LTSV-standalone floor-to-1 quirk, which DIFFERS from the BLSTM spectral segmenter's floor-to-0-disables (BLSTMSpectralSegmenter.cpp), ported as written. ltsv_vrcts_chan1.xml is the REAL toFile_VRCTS output on a SEPARATE zero-offset AudioStruct (same rationale as tdc_vrcts_chan1.xml). ltsv_scores.bin is compute_errors() against the same programmatic two-span reference recipe as TdcSegmenter. ltsv_boundaries_file2_chan1.bin is the TWO-FILES golden: the SAME LtsvProbe instance runs getSegmentation a second time on the excerpt, pinning the _WindowShift/_SpectrumShift quantization lifecycle (both are round(x*rate/N)*N/rate re-quantizations of an already-quantized value -- idempotent, same determinism-not-statefulness scope as the TDC two-files golden). POWER-SCALE variant (ltsv_powermel.config, Task 5 review Finding 1): the PRIMARY/SECONDARY/TINY configs above all share is_log_mel=true, which drives ltsv_classify_sequence's score to ~1e51 (see the IMPROVEMENTS.md log-mel-blowup entry) -- every column sits far above _DecisionThreshRising (0.6), so update_segmentation/smooth_segmentation never see a real threshold crossing and all three goldens collapse to one always-SPEECH span: VACUOUS for the decision layer (hysteresis, area gates, suppression, padding are never exercised). ltsv_powermel.config is byte-identical to ltsv.config except is_log_mel=false (restores the power-scale periodogram the LTSV formula's 1e-12 mean floor assumes) and smaller-but-still-nonzero speech_padding/min_speech/min_silence (0.05/0.1/0.1 vs 0.1/0.2/0.2 -- config keys only, tuned so a genuine ~0.56s silence gap between two real threshold crossings survives smoothing instead of being padded shut). Under this config the REAL compiled getSegmentation produces, on channel 1, the non-vacuous structure SPEECH[0,0.9892)/OTHER[0.9892,1.3472)/SPEECH[1.3472,2.0) -- two genuine rising/falling hysteresis crossings with the smoothing pipeline (sanitize, suppress_short x3 per side, add_padding x2) actively shaping the final boundaries, not a no-op. Channel 2 stays a single always-SPEECH span under the SAME config (its own periodogram content never drops far enough below _DecisionThreshFalling to accrue a qualifying ending area) -- dumped honestly alongside channel 1 rather than omitted.",
+    "constants": {
+      "rate": 8000,
+      "spectrum_order": 8,
+      "periodogram_length": 129,
+      "spectrum_shift_frames": 80,
+      "spectrum_shift_sec": 0.01,
+      "periodogram_vec_size": 201,
+      "ltsv_half_window_frames": 15,
+      "ltsv_shift_frames": 4,
+      "real_vec_size": 51,
+      "ltsv_tiny_window_half_frames": 1,
+      "reference_spans_sec": [
+        [
+          0.4,
+          0.9
+        ],
+        [
+          1.2,
+          1.6
+        ]
+      ],
+      "powermel_chan1_boundaries_sec": [
+        [
+          0.0,
+          "SPEECH"
+        ],
+        [
+          0.9892,
+          "OTHER"
+        ],
+        [
+          1.3472,
+          "SPEECH"
+        ],
+        [
+          2.0,
+          "END"
+        ]
+      ],
+      "powermel_chan2_boundaries_sec": [
+        [
+          0.0,
+          "SPEECH"
+        ],
+        [
+          2.0,
+          "END"
+        ]
+      ]
+    },
+    "expected_shapes": {
+      "ltsv_result_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_result_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_convolved_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_convolved_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_boundaries_chan1.bin": [
+        2,
+        2
+      ],
+      "ltsv_boundaries_chan2.bin": [
+        2,
+        2
+      ],
+      "ltsv_boundaries_file2_chan1.bin": [
+        2,
+        2
+      ],
+      "ltsv_scores.bin": [
+        2,
+        3
+      ],
+      "ltsv_dct_result_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_dct_result_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_dct_convolved_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_dct_convolved_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_dct_boundaries_chan1.bin": [
+        2,
+        2
+      ],
+      "ltsv_tiny_boundaries_chan1.bin": [
+        2,
+        2
+      ],
+      "ltsv_powermel_result_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_result_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_convolved_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_convolved_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_boundaries_chan1.bin": [
+        4,
+        2
+      ],
+      "ltsv_powermel_boundaries_chan2.bin": [
+        2,
+        2
+      ]
+    },
+    "extra_files": [
+      "ltsv_vrcts_chan1.xml"
+    ],
+    "config_files": [
+      "ltsv.config",
+      "ltsv_dct.config",
+      "ltsv_tiny.config",
+      "ltsv_powermel.config"
+    ]
+  },
+  "signal_segmenter": {
+    "text": "Phase 2b Task 6: BlstmSignalSegmenter (Algo 4), the FIRST driver with the NN in the chain. BLSTMSignalSegmenter::getSegmentation (BLSTMSignalSegmenter.cpp:93-398) produces its result_vec via _BLSTMNeuralNetwork.feedForwardBackward (:260), whose real Eigen GEMMs diverge from the ascending-loop port at the real net's k>=23 shapes (Phase 2 NN_PROBE) and the layer-0 GEMM seeds the recurrence, so the divergence propagates non-locally. SignalProbe (harness-local, derives BLSTMSignalSegmenter) therefore transcribes getSegmentation LIVE code (the param math :96-108/:221-254, results2segmentation, compute_errors) faithfully but swaps ONLY the FFB call for signalReimplFFB -- the ascending-loop reimpl family (t6MakeLstmSteps/t6MakeDenseSteps + blstmFeedForwardT6 + the plain/truncate/overlap windowed drivers) built on the file-scope kernel statics reused from Phase 2. SECONDARY probe (spec decision 3): the REAL compiled getSegmentation runs beside the transcription on the same inputs; the reimpl-driven and real Segmentation must match in segment count + types EXACTLY (a mismatch aborts the harness), and the boundary max-delta is recorded as SEG_STRUCT site=signal_<variant> ok=1 max_dt=<measured> (all three measured 0.0 here -- the real net's posteriors on this excerpt are ~0.002-0.03, far BELOW _DecisionThreshRising (0.6), so NO speech is ever detected and all variants collapse to the untouched always-Other SEED hypothesis ([Other@0, End@dur]; VRCTS SegmentList empty, spdur=0.00) insensitive to the posterior jitter; the result_vec goldens, pinned bit-exact via BlstmSignalSegmenter::last_result_rows (a port-side observation point, no legacy counterpart), NOT the boundary structure, are what pin the NN chain bit-exactly). The real net (1_worker_1.config topology, 33671 weights) expects 23 inputs; signal mode feeds a 1-column input (audio._Data.row(chan).transpose()), which the LSTM input projection accepts via inputW.topRows(cols) width tolerance -- the legacy's own behavior, kept. THREE variants (real net + real config keys, overridden window/shift): window0 (BLSTM_window 0 -> full-sequence plain FFB; real_vec_size = frameCount/ssr = 16001/4 = 4000), overlap (BLSTM_window 0.01, shift 0.0005 -> overlap FFB; window_size 40, window_shift 4; real_vec_size = ceil(16001/4) = 4001), noOverlap (BLSTM_window 0.5, shift 0 -> truncate FFB via the noOverlap poisoning; window_size floored to (round(0.5*8000)/4)*4 = 4000, window_shift clamped to 1, real_vec_size = ceil(16001/1)/4/1/1/1 = 4000). The brief's ORIGINAL overlap params (window 0.5, shift 0.1) are a broken-as-committed legacy path: the overlap result-vec sizing ceil(frameCount/shift) is far too small for the OverLap FFB driver's write index (begin/ssr + lengthShort ~ frameCount/ssr), so the REAL getSegmentation aborts on it under Eigen assertions (verified) and heap-corrupts under release -DNDEBUG; the OverLap path only survives when window_shift <= ssr (== 4 samples, i.e. shift <= 0.0005s), the degenerate regime used above. See the IMPROVEMENTS.md signal-overlap-oob entry. Dumps per variant, chan 1: signalraw (PRE-preemph, the timing-divergence golden), signal (POST -- differs since BLSTM_preemph_ratio 0.97 > 0), result (pre-conv row), convolved (post results2segmentation row), boundaries (Nx2 begin/type), vrcts (REAL toFile_VRCTS on the reimpl-driven Segmentation, zero-offset audio, 0b-ii byte-equivalence closure), scores (2x3 Pfa/Pmiss/ErrorRate vs the same two-span programmatic reference as TDC/LTSV). The noOverlap variant gets the TWO-FILES golden: unlike TDC/LTSV (idempotent shift re-quantization), signal noOverlap assigns _WindowShift = 0.0 mid-run (:376) -- so file 2 (SAME probe) re-enters getSegmentation with _WindowShift == 0.0, :99 rounds 0.0*rate -> 0 -> shift<1 -> noOverlap re-triggers, :107-108 re-clamp to 1/rate. This is the REAL lifecycle re-entry (a genuine round trip through mutated state), pinned by signal_noOverlap_boundaries_file{1,2}_chan1.bin -- both are dumped so the Rust test COMPARES rather than assumes; here they are equal (the output is the same untouched always-Other SEED hypothesis on both files), which the test asserts and its doc-comment explains honestly; it additionally asserts the discriminating result-vec length/window_shift_sec observable (4000/0.0 on both files, not the 16001 no-reset overlap-branch counterfactual) so the round trip through the mutated state is pinned, not merely the coincidental boundary equality.",
+    "constants": {
+      "rate": 8000,
+      "frame_count": 16001,
+      "sub_sampling_ratio": 4,
+      "window0_real_vec_size": 4000,
+      "overlap_window_size_samples": 40,
+      "overlap_window_shift_samples": 4,
+      "overlap_real_vec_size": 4001,
+      "nooverlap_window_size_samples": 4000,
+      "nooverlap_window_shift_samples": 1,
+      "nooverlap_real_vec_size": 4000,
+      "reference_spans_sec": [
+        [
+          0.4,
+          0.9
+        ],
+        [
+          1.2,
+          1.6
+        ]
+      ],
+      "broken_overlap_params_sec": {
+        "window": 0.5,
+        "shift": 0.1
+      }
+    },
+    "seg_struct": {
+      "signal_noOverlap": {
+        "ok": 1,
+        "max_dt": 0.0
+      },
+      "signal_overlap": {
+        "ok": 1,
+        "max_dt": 0.0
+      },
+      "signal_window0": {
+        "ok": 1,
+        "max_dt": 0.0
+      }
+    },
+    "expected_shapes": {
+      "signal_window0_signalraw_chan1.bin": [
+        1,
+        16001
+      ],
+      "signal_window0_signal_chan1.bin": [
+        1,
+        16001
+      ],
+      "signal_window0_result_chan1.bin": [
+        1,
+        4000
+      ],
+      "signal_window0_convolved_chan1.bin": [
+        1,
+        4000
+      ],
+      "signal_window0_boundaries_chan1.bin": [
+        2,
+        2
+      ],
+      "signal_window0_scores.bin": [
+        2,
+        3
+      ],
+      "signal_overlap_signalraw_chan1.bin": [
+        1,
+        16001
+      ],
+      "signal_overlap_signal_chan1.bin": [
+        1,
+        16001
+      ],
+      "signal_overlap_result_chan1.bin": [
+        1,
+        4001
+      ],
+      "signal_overlap_convolved_chan1.bin": [
+        1,
+        4001
+      ],
+      "signal_overlap_boundaries_chan1.bin": [
+        2,
+        2
+      ],
+      "signal_overlap_scores.bin": [
+        2,
+        3
+      ],
+      "signal_noOverlap_signalraw_chan1.bin": [
+        1,
+        16001
+      ],
+      "signal_noOverlap_signal_chan1.bin": [
+        1,
+        16001
+      ],
+      "signal_noOverlap_result_chan1.bin": [
+        1,
+        4000
+      ],
+      "signal_noOverlap_convolved_chan1.bin": [
+        1,
+        4000
+      ],
+      "signal_noOverlap_boundaries_chan1.bin": [
+        2,
+        2
+      ],
+      "signal_noOverlap_scores.bin": [
+        2,
+        3
+      ],
+      "signal_noOverlap_boundaries_file1_chan1.bin": [
+        2,
+        2
+      ],
+      "signal_noOverlap_boundaries_file2_chan1.bin": [
+        2,
+        2
+      ]
+    },
+    "extra_files": [
+      "signal_window0_vrcts_chan1.xml",
+      "signal_overlap_vrcts_chan1.xml",
+      "signal_noOverlap_vrcts_chan1.xml"
+    ],
+    "config_files": [
+      "signal.config"
+    ]
+  },
+  "spectral_segmenter": {
+    "text": "Phase 2b Task 7: BlstmSpectralSegmenter (Algo 3, no pitch pass), the REAL 1_worker_1.config's algorithm. BLSTMSpectralSegmenter::getSegmentation (BLSTMSpectralSegmenter.cpp:593-887) produces its result_vec via _BLSTMNeuralNetwork.feedForwardBackward (:740), whose real Eigen GEMMs diverge from the ascending-loop port. SpectralProbe (harness-local, derives BLSTMSpectralSegmenter) transcribes the getSegmentation body MINUS the pitch second pass (:757-805, which the Task-7 configs short-circuit -- TDCwindow 0 -> TDC_window_size 0 -> the `if (TDC_window_size > 0)` gate at :757 is false) with ONLY the FFB call swapped for signalReimplFFB (the Task 6 reimpl family, reused: the plain/truncate/overlap windowed drivers are input-column-agnostic and the leftCols crop stays FALSE at D=11<23); the spectral param derivation (initSpectralAnalysis/getWindowingCoeff/getTemporalConvolution/getLTSVParam/getTDCParam/getBLSTMParam/getLTSV/getBLSTMInputSequence) calls the REAL compiled protected helpers. SECONDARY probe (spec decision 3): the REAL compiled getSegmentation runs beside the transcription; segment count + types must match EXACTLY (abort on mismatch), boundary max-delta recorded as SEG_STRUCT site=spectral_<variant> ok=1 max_dt=<measured> (all three measured 0.0 -- the reimpl and real Eigen paths agree structurally). UNLIKE the signal driver, the real trained net on the REAL spectral features DOES cross the rising threshold (0.752): chan-1 detects speech [0, ~1.18s] ([SPEECH@0, OTHER@~1.183, END@2.0]), so the decision layer (rising crossing + linear interpolation + hysteresis area) is genuinely exercised by these goldens, not collapsed to the seed. CROSS-CHANNEL REUSE QUIRK (the load-bearing layout fact): result_vec is allocated ONCE by getBLSTMParam (:631) and REUSED across channels (:740); under the overlap FFB (accumulate-in-place :664 += then /= count) channel 2 SEEDS from channel 1's post-division contents -- reproduced by holding one result_vec across the channel loop; the overlap variant dumps BOTH channels (chan-1 result[:5] ~0.997 vs chan-2 ~0.973, chan-2 result contaminated by chan-1's carry-over) so the Rust cross-channel golden pins it (a fresh-buffer chan-2 run must DIFFER). THREE variants (real net, BLSTM_shift overridden): real (1_worker_1.config AS-IS, BLSTM_shift 0.8 -> overlap window_shift 80, 3 windows), overlap (BLSTM_shift 0.01 -> window_shift 1, heavier overlap, the cross-channel golden -- verified NO OOB: max overlap write index 50 == result_vec rows), noOverlap (BLSTM_shift 0 -> truncate FFB via the noOverlap poisoning; window_size floored to (round(3.25*8000/80)/4)*4 = 324, window_shift clamped to 1). All three: T=201 periodogram rows, real_vec_size = 201/4/1/1/1 = 50 (getBLSTMParam does the ssr-division UNCONDITIONALLY -- the `if noOverlap` guard at :487 is commented out, unlike the signal driver's gated version at BLSTMSignalSegmenter.cpp:239). Dumps per variant, chan 1 (+ chan 2 for overlap): inputseq (201x11, re-validates build_input_sequence under driver conditions), result (pre-conv row 1x50), convolved (post results2segmentation), boundaries (Nx2 begin/type), vrcts (REAL toFile_VRCTS on the reimpl-driven Segmentation, zero-offset audio, 0b-ii byte-equivalence), scores (2x3 Pfa/Pmiss/ErrorRate vs the same two-span programmatic reference as TDC/LTSV/signal). The noOverlap variant gets the TWO-FILES golden: spectral noOverlap assigns _WindowShift = 0.0 at :885 (post-dump). So file 2 (SAME probe) re-enters getBLSTMParam with _WindowShift == 0.0: :445 rounds 0.0 -> 0, :446 -> noOverlap re-triggers, :452 clamps shift to 1, :453 rewrites _WindowShift = 1*80/rate. Pinned by spectral_noOverlap_boundaries_file{1,2}_chan1.bin (both dumped, the test COMPARES rather than assumes) + the discriminating file2 params row spectral_noOverlap_params_file2.bin (1x4: window_shift=1, window_size=324, spectrum_shift_in_frames=80, real_vec_size=50) so the quantization-lifecycle round trip is pinned, not merely coincidental boundary equality.",
+    "constants": {
+      "rate": 8000,
+      "frame_count": 16001,
+      "sub_sampling_ratio": 4,
+      "spectrum_shift_in_frames": 80,
+      "periodogram_rows": 201,
+      "input_width_d": 11,
+      "real_vec_size": 50,
+      "real_window_size_periodogram_frames": 163,
+      "real_window_shift_periodogram_frames": 80,
+      "overlap_window_shift_periodogram_frames": 1,
+      "nooverlap_window_size_periodogram_frames": 324,
+      "nooverlap_window_shift_periodogram_frames": 1,
+      "file2_params_row": {
+        "window_shift": 1,
+        "window_size": 324,
+        "spectrum_shift_in_frames": 80,
+        "real_vec_size": 50
+      },
+      "reference_spans_sec": [
+        [
+          0.4,
+          0.9
+        ],
+        [
+          1.2,
+          1.6
+        ]
+      ]
+    },
+    "seg_struct": {
+      "spectral_noOverlap": {
+        "ok": 1,
+        "max_dt": 0.0
+      },
+      "spectral_overlap": {
+        "ok": 1,
+        "max_dt": 0.0
+      },
+      "spectral_real": {
+        "ok": 1,
+        "max_dt": 0.0
+      }
+    },
+    "expected_shapes": {
+      "spectral_real_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_real_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_real_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_real_boundaries_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_real_scores.bin": [
+        2,
+        3
+      ],
+      "spectral_overlap_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_overlap_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_result_chan2.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_convolved_chan2.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_boundaries_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_overlap_boundaries_chan2.bin": [
+        2,
+        2
+      ],
+      "spectral_overlap_scores.bin": [
+        2,
+        3
+      ],
+      "spectral_noOverlap_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_noOverlap_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_noOverlap_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_noOverlap_boundaries_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_noOverlap_scores.bin": [
+        2,
+        3
+      ],
+      "spectral_noOverlap_boundaries_file1_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_noOverlap_boundaries_file2_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_noOverlap_params_file2.bin": [
+        1,
+        4
+      ]
+    },
+    "extra_files": [
+      "spectral_real_vrcts_chan1.xml",
+      "spectral_overlap_vrcts_chan1.xml",
+      "spectral_noOverlap_vrcts_chan1.xml"
+    ],
+    "config_files": []
+  },
+  "spectral_pitch_pass": {
+    "text": "Phase 2b Task 8: the pitch-homothety SECOND pass completes Algo 3 (BLSTMSpectralSegmenter.cpp:757-805). SpectralProbe transcribes the pitch block gated on TDC_window_size > 0: getTDCParam REAL derives the TDC params (TDCwindow 0.032 -> TDC_window_size 128, full 257, shift 80, min_lag 16, max_lag 128, hamming-257 param 0.8); getPitch REAL (NN-free: getSequence + computePitch, an autocorrelation argmax) walks the PASS-1 SPEECH segment ([0, ~1.18s]) and returns the measured chan-1 pitch; the periodogram is warped by coeff = pitch/300 via applyHomothety (a pure linear-interpolation column warp, bit-exact off-libm); the mel filterbank + DCT are re-run on the WARPED periodogram (applyDCTLoop, same ascending recipe as pass 1); the input sequence is rebuilt WITH THE OLD (pass-1) LTSV column (:792 -- NOT recomputed on the warp, a load-bearing quirk); the reimpl FFB re-forwards; clearClassification (:800) + results2segmentation (:801) OVERWRITE the pass-1 boundaries; the error/classif slots are OVERWRITTEN (:802-803). The re-seg is guarded on pitch > 0 (:791). NON-VACUITY (the brief's mandate): measured pitch ~250 Hz > 0, the warped periodogram differs, the pass-2 result differs from pass-1 at ALL 50 positions, and the boundary crossing MOVES from pass-1 1.1831 to pass-2 1.2597 -- the pitch pass does real work on this excerpt. DUMP QUIRK reproduced (:848-850): the externalized result golden preserves PASS-1 (spectral_pitch_result_chan1.bin is byte-identical to the T7 spectral_real_result_chan1.bin) even though the final boundaries (spectral_pitch_boundaries_chan1.bin) are PASS-2; the pass-2 result/inputseq/convolved are dumped separately (spectral_pitch_*_pass2_chan1). SECONDARY probe: the REAL Eigen getSegmentation runs its OWN pitch pass beside the transcription; SEG_STRUCT site=spectral_pitch pins pass-2 structural equality (count + types) with the measured boundary max-dt. The VRCTS golden (spectral_pitch_vrcts_chan1.xml) is the REAL toFile_VRCTS on the pass-2-driven Segmentation.",
+    "measured_pitch_chan1": 250.04464285714286,
+    "pass1_boundary_crossing_sec": 1.1831,
+    "pass2_boundary_crossing_sec": 1.2597,
+    "constants": {
+      "tdc_window_size": 128,
+      "tdc_full_window_size": 257,
+      "tdc_window_shift": 80,
+      "min_lag": 16,
+      "max_lag": 128,
+      "balance": 0.7,
+      "tdc_windowing_type": "hamming",
+      "tdc_windowing_param": 0.8,
+      "homothety_coeff": 0.8334821428571428
+    },
+    "seg_struct": {
+      "spectral_pitch": {
+        "ok": 1,
+        "max_dt": 0.0
+      }
+    },
+    "expected_shapes": {
+      "spectral_pitch_pitch_chan1.bin": [
+        1,
+        1
+      ],
+      "spectral_pitch_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_pitch_result_pass2_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_convolved_pass2_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_inputseq_pass2_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_pitch_boundaries_chan1.bin": [
+        3,
+        2
+      ]
+    },
+    "extra_files": [
+      "spectral_pitch_vrcts_chan1.xml"
+    ],
+    "config_files": []
+  }
+}

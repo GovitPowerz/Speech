@@ -44,7 +44,8 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   re-test-after-merge control flow (e.g. an explicit worklist) instead of the implicit no-advance
   loop.
 
-- **[0b-ii] VRCTS writer byte-golden deferred; fixtures are external `vrcts_part` reference input**
+- **[0b-ii] VRCTS writer byte-golden -- CLOSED in Phase 2b; fixtures are external `vrcts_part`
+  reference input**
   (`segmentation_io.rs` `to_vrcts_string`/`write_vrcts`, from `Segmentation.cpp:543-588`): the engine's
   `toFile_VRCTS` formats `stime`/`etime` with `iof::fmtr("%f.4s")` and `sigdur`/`spdur`/`dur` with
   `%f.2s`. `iof::fmtr`'s `%f.Ns` was resolved (by disassembling the vendored `Debug/bin/fsp` -- the `iof`
@@ -57,11 +58,22 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   sum of post-`sanitize` (4-decimal round-half-away, same-type-merged) SPEECH durations over the engine's
   full-precision internal boundaries -- unreproducible from the fixtures' rounded strings. *Validation:*
   `load_vrcts` is golden-tested for load correctness against the 3 fixtures; `to_vrcts_string` is
-  unit-tested on a constructed `Segmentation` with hand-computed 4-decimal bytes. *Deferred:* the
-  writer-vs-real-engine byte golden waits on the end-to-end inference-output parity milestone (README
-  Roadmap Phase 4), when a real engine-produced `.xml` exists to match. *Minor:* our writer sanitizes a
-  clone (non-mutating) whereas `toFile_VRCTS` mutates its `_Classification` in place; revisit if any
-  caller relies on the write-time sanitize side effect.
+  unit-tested on a constructed `Segmentation` with hand-computed 4-decimal bytes. **CLOSED (Phase 2b):**
+  the writer-vs-real-engine byte equivalence originally deferred here to Phase 4 is now ESTABLISHED.
+  The Phase 2b oracle harness upgraded the inert `iof` shim to a FAITHFUL mini-fmtr (`%f.Ns` ==
+  `std::fixed` + `setprecision(N)`, exactly the semantics pinned above; self-tested per generation via
+  the manifest's `fmtr_shim.checks`, guarded by `tests/test_phase2b_fixtures.py::
+  test_all_fmtr_checks_passed`), making the REAL compiled `Segmentation::toFile_VRCTS` a byte-golden
+  source. Nine real-engine-produced `.xml` fixtures now exist (`tdc_vrcts_chan1.xml`,
+  `ltsv_vrcts_chan1.xml`, `signal_{window0,overlap,noOverlap}_vrcts_chan1.xml`,
+  `spectral_{real,overlap,noOverlap,pitch}_vrcts_chan1.xml`) and `to_vrcts_string` byte-matches every
+  one: `vrcts_bytes_match_dump` (`phase2b_tdc_golden.rs`, `phase2b_ltsv_golden.rs`,
+  `phase2b_spectral_golden.rs`), `pitch_vrcts_bytes_match_dump` (`phase2b_spectral_golden.rs`),
+  `overlap_vrcts_matches_dump` + `vrcts_bytes_match_dump_cheap_variants` (`phase2b_signal_golden.rs`).
+  Byte-exactness is asserted on the oracle environment (the boundary times upstream traverse libm; the
+  standard canary-gating posture applies off-env). *Minor (still open):* our writer sanitizes a clone
+  (non-mutating) whereas `toFile_VRCTS` mutates its `_Classification` in place; revisit if any caller
+  relies on the write-time sanitize side effect.
 
 - **[0b-ii] `compute_errors` Pass 1b reads one past the ref End sentinel (UB)** --
   `Segmentation::compute_errors` (`Segmentation.cpp:370-382`) sets
@@ -625,6 +637,372 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   layout from them corrupts every weight offset after the first gate block. The port sizes from
   the RESIZES (documented in `nn/layers.rs`'s struct doc) and the flat-seam tests pin the true
   12-row/4-bias layout. *Fix candidate:* fix the two comments in a post-parity legacy cleanup.
+
+- **[phase2b] `Segmenter::buildFromConf` reads three WRITE-ONLY cost members, plus a same-key
+  DIFFERENT-DEFAULT collision with the live `CostLaw`** (`Segmenter.cpp:139-145`, NOT ported --
+  `tasks/segmenter.rs::DriverConfig` omits them entirely): `_CostPonderation` (default `0.5`,
+  `{prefix}_CostPonderation`), `_CostLaw` (default `"log"`, `{prefix}_CostLawSpeech`), and
+  `_CostLawParam` (default `0.5`, `{prefix}_CostLawParamSpeech`) are parsed and stored on every
+  `Segmenter`-derived object but never read back anywhere in the class hierarchy -- `grep` over the
+  vendored source shows no live use of `_CostPonderation`/`_CostLaw`/`_CostLawParam` outside the
+  copy-ctor and this assignment; the base `computeCost` that would have consumed them
+  (`Segmenter.cpp:640-657`) has no live Algo 1-4 caller either (Algo 3/4 cost via the NN's own
+  `getCost`; Algo 1/2 accumulate no cost at all -- confirmed by the Task 1 call-site check, S2
+  decision 7), so these three members are dead weight on every driver. SEPARATE collision, same key
+  family: `Segmenter.cpp:143` reads `{prefix}_CostLawParamSpeech` with default `0.5` into the
+  write-only `_CostLawParam`, while `CostLaw.cpp:14` reads the IDENTICAL key
+  `{prefix}_CostLawParamSpeech` with default `0.0` into `costLawParamSpeech`, which IS live (feeds
+  the softmax cross-entropy cost law actually used by the NN path, ported in `cost.rs`). Two
+  different classes read the same config key with two different defaults; only the `CostLaw.cpp`
+  reader's value has any observable effect, so the `Segmenter`-side default is moot in practice, but
+  a config that relies on the default (omits the key) would silently get `0.0` cost-law behavior
+  while a naive read of `Segmenter.cpp` alone would suggest `0.5`. Not ported: `DriverConfig` has no
+  field for any of the three keys. *Fix candidate:* post-parity, either delete the dead
+  `Segmenter`-side reads (they do nothing) or, if `Segmenter::computeCost` is ever revived for a
+  future Algo 5/6 (LID) driver, resolve the default collision explicitly rather than inheriting
+  whichever class happens to read the key first.
+
+- **[phase2b] `verifyWindowingType` double quirk: by-value no-fix AND unconditional `_LogStream`
+  clobber** (`Segmenter.cpp:61-70`, ported as `tasks/segmenter.rs::verify_windowing_type`): the
+  legacy function takes `windowing_type` BY VALUE and reassigns its local copy to `"none"` when the
+  string is unrecognized, logging a warning -- but since the parameter is a value copy, the
+  reassignment is NEVER written back to the caller's stored `_WindowingType`/`_ConvolutionType`
+  field. An invalid windowing/convolution type is warned about but still used downstream as-is (fed
+  straight into `getWindowingCoefficients`, whose `else` arm for an unrecognized type returns an
+  empty/`None` coefficient vector anyway, so the practical effect is usually equivalent to "none" --
+  but only by coincidence of that downstream fallback, not because the type was actually corrected).
+  SECOND quirk, same function: `_LogStream = logStream.str()` (`:70`) runs UNCONDITIONALLY after the
+  `if`, even on the valid-type path where `logStream` was never written to -- so every call, valid or
+  not, overwrites `_LogStream` wholesale (not appends), clobbering whatever a prior invalid-type call
+  had logged; only the LAST call's result (warning or empty string) survives on the member. The
+  port's `verify_windowing_type(&str) -> Option<String>` takes a borrowed string, so there is nothing
+  to mutate; it returns the warning (or `None`) for the caller to log, reproducing both the "no fix"
+  behaviour and the "last call wins" semantics (the caller is expected to store/overwrite, not
+  accumulate, the returned value; `DriverConfig::from_config` currently discards it via `let _ =`,
+  which is a stricter -- not weaker -- reproduction since a discarded log can't diverge from "last
+  call wins" either). *Fix candidate:* have the caller actually overwrite the stored type with
+  `"none"` on an invalid value, and append rather than clobber the log, after parity.
+
+- **[phase2b] `TdcSegmenter` windowing coefficients are UNNORMALIZED, unlike the convolution kernel**
+  (`tasks/sad.rs::TdcSegmenter::get_segmentation`, from `TimeDomainCorrel.cpp:146`
+  `getWindowingCoefficients(_WindowingType, false, full_window_size, _WindowingParam)`): the framing
+  window applied inside `getSequence` before `classifySequence` passes `normalized=false`, while
+  `DriverConfig::from_config`'s `{prefix}_convolution_window_size` kernel (Segmenter.cpp:113) is
+  ALWAYS built with `normalized=true`. Easy to accidentally normalize both the same way when porting
+  a second driver from this one; the TDC golden (`tdc_result_chan{1,2}.bin`) pins the unnormalized
+  windowed-signal magnitude directly. *Fix candidate:* none needed -- this is intentional legacy
+  design (the window shapes the autocorrelation without rescaling the signal energy), not a bug.
+
+- **[phase2b] `TdcSegmenter::window_shift_sec` is a STATEFUL member re-quantized on every call using
+  its OWN CURRENT VALUE, not the original config value** (`tasks/sad.rs::TdcSegmenter::
+  get_segmentation`, from `TimeDomainCorrel.cpp:103-105`): `_WindowShift` is floored at `1/rate` then
+  snapped to `round(x*rate)/rate` EVERY time `getSegmentation` runs, mutating the member in place; a
+  second call on the same segmenter instance reads back the FIRST call's quantized value as its
+  starting point, not the original `TDC_shift` config string. This quantization is PROVABLY IDEMPOTENT
+  for every representable `f64` shift, at any practically realizable sample rate: writing
+  `q(x) = round(x*rate)/rate`, `q(q(x)) == q(x)` always, because `q(x)` is exactly `w/rate` for some
+  nonneg integer `w`, and the compounded double-rounding error of one division (`w/rate`) followed by
+  one multiplication (`(w/rate)*rate`) is bounded by ~1 ULP of `w` -- for `round()` to flip its decision
+  on the re-quantization the drift would need to reach 0.5, so ANALYTICALLY the idempotency holds for
+  all `w` up to ~`2^52` (where 1 ULP of `w` first reaches the 0.5 tie margin), i.e. any practically
+  realizable rate/duration; checked numerically over `w` up to `5*10^7` and randomized/ULP-adjacent
+  probes around the `round()` half-integer boundary at rate=8000: zero mismatches. No audio file drives
+  `w` (a frame count) anywhere near that magnitude. So a SECOND call on the same instance always reproduces the SAME `window_shift`
+  frame count as the first call, for every config value, on- or off-grid -- there is no `TDC_shift` that
+  can make the two runs' boundaries differ via this mechanism alone. Pinned by
+  `two_files_in_sequence_boundaries_match_dump` (`phase2b_tdc_golden.rs`), which therefore pins
+  REPEAT-CALL DETERMINISM only, not statefulness: a buggy driver that reset `window_shift_sec` from the
+  config string before every call would compute the identical quantized value and pass this golden too.
+  *Fix candidate:* none -- this is the documented legacy per-file mutable-state contract (spec S3.4),
+  reproduced deliberately, not a bug to fix; the idempotency is a property of the quantization scheme,
+  not something to "fix" either.
+
+- **[phase2b] `LongTermSpectralVariation` freq-band clamp order DIFFERS from the BLSTM
+  spectral segmenter's variant** (`features/pipeline.rs::derive_freq_band_ltsv_variant`
+  vs `SpectralParams::derive`, from `LongTermSpectralVariation.cpp:200-209` vs
+  `BLSTMSpectralSegmenter.cpp:229-239`): the BLSTM variant reclamps TWICE -- once
+  immediately after `freq_beg` is raised (`if freq_beg > freq_end: freq_beg = freq_end`,
+  using freq_end's value BEFORE the max-freq computation), and again after `freq_end` is
+  computed (`if freq_end < freq_beg: freq_end = freq_beg`). The LTSV-standalone variant has
+  only ONE guard, evaluated AFTER both `freq_beg` and `freq_end` are computed -- there is no
+  second reclamp pulling `freq_end` back up. For a min/max pair where the intermediate
+  (pre-max-freq) `freq_beg` already exceeds the periodogram's original `freq_end` (e.g.
+  `minFreq` beyond Nyquist), the two variants land on DIFFERENT final band values: the
+  BLSTM variant snaps to the ORIGINAL `freq_end`, the LTSV variant snaps to the
+  POST-max-freq-clamped `freq_end`. Pinned by
+  `ltsv_freq_band_variant_differs_from_blstm_variant` (`phase2b_ltsv_golden.rs`), a crafted
+  case (`min_freq=5000.0, max_freq=100.0, rate=8000, bins=129`) where BLSTM clamps both to
+  128 (4000.0 Hz, Nyquist) and LTSV clamps both to 4 (125.0 Hz). *Fix candidate:* none --
+  both are faithful ports of genuinely different legacy code paths, not a bug in either.
+
+- **[phase2b] `LongTermSpectralVariation::getSegmentation`'s periodogram `vec_size` uses
+  `frameCount+1`, not `frameCount`** (`tasks/sad.rs::LtsvSegmenter::get_segmentation`, from
+  `LongTermSpectralVariation.cpp:293-300`): `begin_frame=0`, `end_frame=audio.getFrameCount()`
+  (i.e. the frame count itself, ONE PAST the last valid sample index) is passed into
+  `computeSegmentPeriodogramEstimates`/`compute_segment_periodogram_estimates`, giving
+  `vec_size = ceil((frameCount+1)/spectrum_shift)`. This is a DIFFERENT call convention from
+  `features::pipeline::build_input_sequence`'s `end = audio.data.ncols() - 1` (the BLSTM
+  spectral driver's own periodogram span), which does NOT carry the `+1`. Easy to
+  copy-paste the wrong `end` value between the two drivers. Pinned structurally by the
+  `ltsv_result_chan{1,2}.bin`/`ltsv_dct_result_chan{1,2}.bin` goldens (dumped from a real/
+  reimplemented `getSegmentation` using the `+1` convention) and directly by
+  `vec_size_uses_frame_count_plus_one` (`phase2b_ltsv_golden.rs`). *Fix candidate:* none --
+  this is the real legacy driver's own call convention, reproduced as written.
+
+- **[phase2b] LTSV-standalone window floor is `< 1 -> 1`, DIFFERING from the BLSTM spectral
+  segmenter's `< 1 -> 0` (disables LTSV)** (`tasks/sad.rs::LtsvSegmenter::get_segmentation`,
+  from `LongTermSpectralVariation.cpp:257-258` vs `BLSTMSpectralSegmenter.cpp`'s own LTSV
+  param derivation, ported in `SpectralParams::derive` as `ltsv_half_window = 0` when
+  `r < 1.0`): in the BLSTM spectral segmenter, an `LTSVwindow` small enough to round to 0
+  half-windows means "LTSV is off" (the caller gates on `ltsv_half_window >= 1`); in the
+  LTSV-standalone driver, the SAME arithmetic instead floors up to a half-window of 1 --
+  LTSV always runs, never disabled by a tiny window. Pinned by `ltsv_tiny.config`
+  (`LTSVwindow 0.001` -> `round(0.001*8000/2/80) == 0` -> floored to 1) and
+  `ltsv_window_floors_to_one_not_zero` (`phase2b_ltsv_golden.rs`). *Fix candidate:* none --
+  both are faithful ports of genuinely different legacy classes' own derivations.
+
+- **[phase2b] `LtsvSegmenter` carries TWO stateful re-quantized members, both re-quantized
+  on EVERY call using their CURRENT value** (`tasks/sad.rs::LtsvSegmenter`, from
+  `LongTermSpectralVariation.cpp:154-155` and `:261-263`): `spectrum_shift_sec`
+  (`_SpectrumShift`, `round(x*rate)/rate` -- the same `1/rate`-grid quantization as TDC's
+  `window_shift_sec`) AND `window_shift_sec` (`_WindowShift`, `round(x*rate/spectrum_shift)
+  *spectrum_shift/rate` -- quantized onto a `spectrum_shift/rate`-grid, coarser than TDC's).
+  Both quantizations are `round()`-onto-a-fixed-grid operations, and both are therefore
+  PROVABLY IDEMPOTENT by the same argument as the TDC `window_shift_sec` proof above (see
+  the `[phase2b] TdcSegmenter::window_shift_sec ...` entry): re-quantizing an
+  already-quantized value is a fixed point for any realistic frame count / shift
+  combination. `two_files_in_sequence_boundaries_match_dump` (`phase2b_ltsv_golden.rs`)
+  therefore pins REPEAT-CALL DETERMINISM only, not statefulness, for the SAME reason the TDC
+  two-files golden does -- a driver that reset both members from the config string before
+  every call would pass this golden identically to the real stateful driver. *Fix
+  candidate:* none -- documented legacy per-file mutable-state contract (spec S3.4),
+  reproduced deliberately.
+
+- **[phase2b] `ltsv_classify_sequence` over log-mel-scaled input can produce astronomically
+  large scores, driving the decision to "always speech" on short excerpts** (observed while
+  regenerating the `ltsv.config` golden, `LTSV_is_log_mel true`): the per-bin mean floor
+  (`< 1e-12 -> 1e-12`, `LongTermSpectralVariation.cpp:101`) assumes a nonnegative (power-
+  scale) periodogram; fed a LOG-scale mel periodogram (whose per-bin mean can be zero or
+  negative), the floor instead clamps a near-zero-or-negative mean up to `1e-12`, and the
+  ratio `r = p[bin]/mean` (`:110`) then blows up to `~1e12` magnitude for any nonzero
+  log-mel value, which the `-r*(r-1)` accumulation squares again (`~1e24`) before the final
+  variance-of-`dzeta` squares it ONE MORE time (`~1e48-1e51`, matching the measured
+  `ltsv_result_chan1.bin` magnitudes ~2e51-9e51). This is a property of applying the LTSV
+  formula (designed for power-scale periodograms) to `is_log_mel=true` input, not a porting
+  bug -- the REAL compiled `getSegmentation` produces the identical behavior (confirmed via
+  the harness's real-classifySequence-driven `ltsv_boundaries_chan{1,2}.bin` dumps, which
+  show near-full-file SPEECH coverage under `ltsv.config`'s thresholds). *Fix candidate:*
+  if `is_log_mel=true` is ever paired with LTSV in a production config, consider whether the
+  legacy mean-floor should be `abs(mean) < 1e-12` or similarly signed-aware -- out of scope
+  for this port (bit-exact reproduction, not correction).
+  **Test-coverage consequence (Task 5 review Finding 1):** this blowup makes the STANDARD
+  `ltsv.config` golden (and its `ltsv_dct.config`/`ltsv_tiny.config` siblings, which inherit
+  `is_log_mel=true`) an always-SPEECH single-span result on every channel -- every score sits
+  far above `_DecisionThreshRising` for the whole excerpt, so `update_segmentation`/
+  `smooth_segmentation` (hysteresis, area gates, `suppress_short`, `add_padding`) never see a
+  real threshold crossing. A green `phase2b_ltsv_golden` suite against those three configs
+  alone is BLIND to the entire segmentation decision layer -- "tests green" must not be
+  mistaken for "hysteresis/smoothing verified" on this driver. `tests/reference_data/phase2b/
+  ltsv_powermel.config` (`is_log_mel=false`, restoring the power-scale periodogram the LTSV
+  formula's mean floor assumes, plus smaller-but-nonzero `speech_padding`/`min_speech`/
+  `min_silence`) exists SPECIFICALLY to cover that gap: under it the REAL compiled
+  `getSegmentation` produces a genuine rising+falling crossing pair on channel 1
+  (`SPEECH[0,0.9892)/OTHER[0.9892,1.3472)/SPEECH[1.3472,2.0)`), exercised by
+  `powermel_chan1_boundaries_are_non_vacuous` in `src/rust/tests/phase2b_ltsv_golden.rs`.
+
+- **[phase2b] `BLSTMSignalSegmenter` overlap mode is BROKEN AS COMMITTED for any
+  non-degenerate window/shift (out-of-bounds `outputSeq` writes)** (`BLSTMSignalSegmenter.cpp:221-240`
+  sizing vs `BLSTMNeuralNetwork.cpp:664-669` OverLap write index; IMPROVEMENTS tag
+  `signal-overlap-oob`): in overlapping-window mode (`window > 0`, `shift >= 1`), signal sizes
+  `result_vec` to `real_vec_size = ceil(frameCount/window_shift)` and does NOT ssr-divide it (the
+  ssr-division is gated on `window==0||noOverlap`, `:228`). But `setProcessingType((window>0),
+  !noOverlap)` selects the OverLap FFB driver (`feedForwardBackwardOverLap`), which writes
+  `outputSeq.block(begin/ssr, 0, lengthShort, cols)` with `begin` up to `~frameCount-window_size`
+  and `lengthShort ~ (2*window+1)/ssr` -- so the required row count is `~frameCount/ssr +
+  lengthShort`, FAR larger than `ceil(frameCount/window_shift)` for any `window_shift > ssr`. With
+  the real net (ssr=4) and the brief's overlap params (`BLSTM_window 0.5, shift 0.1` -> window_size
+  2000, window_shift 800), `result_vec` is 21 rows but the driver writes at rows up to ~4500 --
+  out-of-bounds. VERIFIED: the REAL compiled `getSegmentation` aborts on it with an Eigen
+  `Block.h:146` bounds assertion under `-DEIGEN` assertions (a standalone probe on the real config
+  + weights), i.e. heap-corrupts silently under the legacy release `-DNDEBUG` build. The OverLap
+  path only survives when `window_shift <= ssr` (so `ceil(frameCount/window_shift) >= frameCount/
+  ssr`): the Task-6 overlap golden uses `BLSTM_window 0.01, shift 0.0005` (window_size 40,
+  window_shift 4 == ssr) -- the ONLY non-broken regime, degenerate (a 4-sample = 0.5ms shift, ~4000
+  windows). The brief's `0.5/0.1` overlap variant is documented, not shipped. *Fix candidate:* the
+  overlap sizing should ssr-divide like `window==0`/`noOverlap`, or the OverLap driver should be
+  MLPOverLap (one scalar per window). Out of scope for this port (bit-exact reproduction of the
+  working regime; the broken regime is unrunnable, like the vendored CNN path). Pinned by the
+  Task-6 overlap golden + the doc-comment in `src/rust/tests/phase2b_signal_golden.rs`.
+
+- **[phase2b] `BlstmSignalSegmenter` window/shift sizing quirks: SIGNAL-sample units, the ssr-
+  division GATE, and the full=1-when-window-0 windowing no-op** (`BLSTMSignalSegmenter.cpp:96-108,
+  :221-240`, ported in `tasks/sad.rs::BlstmSignalSegmenter::get_segmentation`): all reproduced from
+  the signal-mode reverse-engineering report's 12-divergence list vs the spectral segmenter. (1)
+  window/shift are in raw SIGNAL samples with NO `/spectrum_shift` division anywhere (spectral
+  divides at `:441/:445/:448/:453`). (2) When `window_size == 0`, `full_window_size` STAYS 1 --
+  signal lacks spectral's `if (window_size == 0) full_window_size = 0` line (`:444`), so `:149`
+  builds a windowing coefficient over a length-1 window; Rust's `windowing_coefficients` returns
+  `None` for `size <= 1`, and the driver must (and does) STILL proceed -- the coeff is dump-only
+  dead weight, never applied to the input (which is raw `audio.data`), matching the legacy
+  empty-coeff no-op. (3) The result-vec ssr-division is GATED on `(window_size == 0 || noOverlap)`
+  (`:228`); spectral's is UNCONDITIONAL (its gate is commented out, `:487`). This asymmetry is
+  load-bearing, not sloppiness (overlapping signal mode emits one output per window position, ssr
+  already consumed inside each window). Pinned by `result_vec_sizing_all_variants` +
+  `window_zero_full_stays_one_and_driver_proceeds` in `phase2b_signal_golden.rs`.
+
+- **[phase2b] `BlstmSignalSegmenter._WindowShift` is a GENUINELY stateful member: the noOverlap
+  `= 0.0` reset makes the next file re-enter through mutated state** (`BLSTMSignalSegmenter.cpp:108`
+  write-back + `:376` reset; `tasks/sad.rs::BlstmSignalSegmenter`): unlike TDC/LTSV (whose per-call
+  shift re-quantization is IDEMPOTENT, so their two-files goldens only pin repeat-call determinism),
+  signal's noOverlap path assigns `_WindowShift = 0.0` mid-run (`:376`, BEFORE `compute_errors`) to
+  re-arm the noOverlap trigger for the NEXT file. So file 2 (same segmenter object) genuinely
+  re-enters `getSegmentation` with `_WindowShift == 0.0`: `:99` rounds `0.0*rate -> 0` -> `shift < 1`
+  -> noOverlap re-triggers, `:107-108` re-clamp the shift to 1 and rewrite `_WindowShift = 1/rate`.
+  This is a REAL round trip through mutated state (not a fixed point). The observable OUTPUT
+  boundaries nonetheless coincide across the two files (same audio -> same posteriors -> the SAME
+  untouched always-Other SEED hypothesis, `[Other@0, End@dur]`: the real net's posteriors on this
+  excerpt are ~0.002-0.03, far BELOW the 0.6 rising threshold, so NO speech is ever detected on
+  either file), which the two-files golden asserts rather than assumes; the state DOES round-trip,
+  the output does not change. Also reproduced: the reset-order divergence vs spectral (signal
+  resets BEFORE `compute_errors` at `:376`; spectral AFTER the mat dump at `:885` -- functionally
+  equivalent, ported as written).
+  Boundary/type coincidence alone cannot distinguish "the reset fired and re-derived the same
+  value" from "the reset never happened": WITHOUT it, file 2 would inherit `window_shift_sec =
+  1/rate` (not `0.0`), re-deriving through the OVERLAP branch (not noOverlap) with an UNCONDITIONAL
+  `ceil(frame_count/window_shift) = ceil(16001/1) = 16001`-row result vector -- vs the real
+  (reset-present) `4000`. So the two-files golden additionally asserts
+  `BlstmSignalSegmenter::last_result_rows()[0].len() == 4000` (not the 16001 no-reset
+  counterfactual) and `window_shift_sec() == 0.0` post-call on BOTH files, making the sizing/state
+  observable the actual discriminator rather than relying on the boundary coincidence. Pinned by
+  `two_files_in_sequence_no_overlap_lifecycle` in `phase2b_signal_golden.rs`.
+
+- **[phase2b] `BlstmSignalSegmenter` divergences that are dead/log-only in the signal chain**
+  (`BLSTMSignalSegmenter.cpp`): `_FlagDCOffset` is LOG-ONLY (`:116`) -- never applied, since the NN
+  consumes raw `audio.data` directly (`:188`, no `getSequence`/DC-removal call), unlike spectral
+  which threads it into the periodogram; pinned by `dc_offset_flag_is_log_only` (flag true vs false
+  -> byte-identical output). `BLSTM_TwoSweeps` is REQUIRED-but-DEAD (`:20/:28`): the only consumers
+  are commented out (`:282/:297`), so it is parsed (a missing key aborts the legacy
+  `conf.get<bool>`, so the parse is load-bearing) and stored, never read; pinned by
+  `from_legacy_missing_two_sweeps_is_err` (missing key -> `Err`) + `from_legacy_reads_real_values`.
+  The `signalRaw` (PRE-preemph, `:133-134`) vs `signal` (POST-preemph, `:174-175`) dumps GENUINELY
+  DIFFER when `preemph_ratio > 0` (divergence 8 vs spectral, whose two dumps are byte-identical
+  because spectral creates the .mat after preemph) -- pinned by
+  `signalraw_differs_from_signal_and_both_match_dump`.
+
+- **[phase2b] The Rust `Segmentation` container is SINGLE-CHANNEL; per-channel cost/classif live on
+  the DRIVER** (spec S6; `tasks/sad.rs::BlstmSignalSegmenter` `cumulative_error`/`nb_of_classif`
+  vs the legacy `Segmentation::_CumulativeError[chan]`/`_NbOfClassif[chan]`, `BLSTMSignalSegmenter.
+  cpp:346-347`): the legacy `Segmentation` is channel-indexed (`_Classification.at(chan)`,
+  `_CumulativeError[chan]`); the Rust container holds ONE channel's hypothesis, and the driver holds
+  a `Vec<Segmentation>` (one per channel) plus the per-channel `cumulative_error`/`nb_of_classif`
+  scalars. Behavior-preserving (all goldens are per-channel), a documented structural deviation.
+  The NN cost path DOES fire in signal mode (unlike the cost-free TDC/LTSV): `cumulative_error[chan]
+  = net.cost`, `nb_of_classif[chan] = net.nb_of_classif` after each `feed_forward_backward`.
+
+- **[phase2b] `BlstmSpectralSegmenter` (Algo 3) result-vec sizing is UNCONDITIONALLY ssr-divided**
+  (`BLSTMSpectralSegmenter.cpp:475-499`, ported in `tasks/sad.rs::get_blstm_param`): the sizing
+  computes `vec_size = ceil(frameCount/_SpectrumShiftInFrames)`, then divides sequentially by every
+  LSTM + output sub-sampling ratio -- guarded ONLY by `if (getSubSamplingRatio() > 1)` (`:488`). The
+  `if ((BLSTM_window_size == 0)||(noOverlap))` gate that would restrict the division (`:487`) is
+  COMMENTED OUT in the live source, so spectral ALWAYS decimates. This is the load-bearing CONTRAST
+  with the signal driver (`BLSTMSignalSegmenter.cpp:236-240`), whose identical division IS gated on
+  `(window==0 || noOverlap)`. Reproduced verbatim; pinned by
+  `get_blstm_param_unconditional_ssr_division_contrast` (`phase2b_spectral_golden.rs`), which
+  hand-derives both the spectral (50) and the hypothetical signal-gated (201) result at the overlap
+  regime (window>0, !noOverlap). The `10*ssr` noOverlap window minimum (`:449`) and the
+  window-half-to-ssr floor (`:442`) are ported too (`get_blstm_param_10ssr_floor_fires`,
+  `get_blstm_param_no_overlap_floor_and_10ssr`).
+
+- **[phase2b] `BlstmSpectralSegmenter` CROSS-CHANNEL `result_vec` REUSE** (spec-named, load-bearing;
+  `BLSTMSpectralSegmenter.cpp:631/:740`): the legacy allocates `result_vec` ONCE (returned by
+  `getBLSTMParam`, `:631`, BEFORE the channel loop) and REUSES the SAME buffer across channels
+  (`:740` passes it to `feedForwardBackward` each iteration). The OverLap FFB accumulates INTO the
+  caller's buffer in place (`:664` `noalias() +=`, then `/= count`), so channel 2 SEEDS from channel
+  1's post-division contents -- channel 2's result is CONTAMINATED by channel 1's carry-over. The
+  Rust driver reproduces this by holding ONE `result_buf` across the channel loop, NOT zeroed
+  between channels. Pinned by `overlap_variant_and_cross_channel_reuse` (both channels' results
+  byte-match the dumps) + the NON-VACUITY contrast `cross_channel_reuse_is_load_bearing` (a
+  fresh-buffer chan-2 run differs from the seeded dump by up to 0.6% relative -- proving the reuse is
+  pinned, not coincidental). This is the OPPOSITE convention from the signal driver, whose
+  `result_vec` is FRESH per channel (`BLSTMSignalSegmenter.cpp` allocation-scope divergence).
+
+- **[phase2b] `BlstmSpectralSegmenter` timeStep OVERLAP-branch override + noOverlap reset ORDER**
+  (`BLSTMSpectralSegmenter.cpp:724-734/:885`): the overlap branch OVERRIDES `timeStep`/`timeOffset`
+  with `_SpectrumShift*ssr` & `timeStep/2 - _SpectrumShift/2` (`:731-732`), NOT `_WindowShift` -- the
+  asymmetry vs the signal driver, which uses `_WindowShift` in its overlap branch. Reproduced;
+  pinned by `timestep_timeoffset_overlap_branch_override`. Separately, the noOverlap `_WindowShift =
+  0.0` poisoning fires AFTER the dumps/`compute_errors` (`:885`), unlike signal's BEFORE-`compute_
+  errors` reset (`BLSTMSignalSegmenter.cpp:376`); this reset-ORDER divergence is cosmetic (the reset
+  only affects the NEXT file) but ported as written. The two-files lifecycle
+  (`two_files_in_sequence_no_overlap_lifecycle`) pins the round trip: file 2 re-enters
+  `get_blstm_param` with `window_shift_sec == 0.0` -> noOverlap re-triggers -> window floored to 324,
+  shift clamped to 1 -- discriminated by the dumped `spectral_noOverlap_params_file2.bin` (1x4), not
+  merely the coincident boundaries.
+
+- **[phase2b] `BlstmSpectralSegmenter` non-wav `_SpectrumShiftInFrames = 80` PERSISTENCE**
+  (`BLSTMSpectralSegmenter.cpp:209-210`): when `!audio.hasReadWavFile()`, `initSpectralAnalysis` sets
+  `_SpectrumShiftInFrames = 80` and `_SpectrumShift = 80/rate`, and these PERSIST into the member for
+  subsequent files. The Rust driver always reads a wav (there is no non-wav fixture), so the
+  persistence is pinned unit-test-only via a direct state mutation
+  (`BlstmSpectralSegmenter::force_non_wav_spectrum_shift` +
+  `non_wav_spectrum_shift_80_fallback_persists`), exposed as a `pub` method solely for that test (no
+  production caller).
+
+- **[phase2b] The REAL `getBLSTMInputSequence` uses an Eigen `applyDCT` GEMM that diverges from the
+  Rust `build_input_sequence`** (`BLSTMSpectralSegmenter.cpp:561-591` reads
+  `audio._CepstreCoefficients`, filled by `MelFilterBank::applyDCT`'s Eigen `melPeriodogram*_CoeffsDCT`
+  product): at the real net's DCT shapes this diverges from the ascending-loop DCT the Phase 1
+  goldens + the Rust port reproduce (measured up to ~19k ULP on the assembled input). So the Task-7
+  oracle harness builds the spectral input via the ASCENDING-LOOP pipeline (empty-mel periodogram +
+  `applyFilterBank` + `applyDCTLoop` + `getLTSV`), matching the E2E leg, NOT the real
+  `getBLSTMInputSequence` -- confirmed byte-identical to `e2e_input.bin`. This is the same
+  Eigen-GEMM-vs-ascending divergence already logged for the DCT/NN sites; noted here because it
+  forced the harness input-assembly choice for the spectral driver golden.
+
+- **[phase2b] Pitch second pass rebuilds the input with the OLD (pass-1) LTSV column, NOT recomputed
+  on the warped periodogram -- CODE PATH IS WIRED BUT UNEXERCISED BY ANY CURRENT FIXTURE** (
+  `BLSTMSpectralSegmenter.cpp:757-805`, Task 8): the pitch pass warps `audio._Periodogram` by
+  `pitch/300` (`:760-775`), re-runs the mel filterbank + DCT on the warped periodogram (`:777-787`),
+  then calls `getBLSTMInputSequence(audio, melFilters, freq_beg, freq_end, LTSV, TDC)` (`:792`) with
+  the SAME `LTSV` matrix computed in pass 1 over the UNWARPED periodogram -- IF an LTSV column were
+  present, it would be stale relative to the warped spectral features. However, the real
+  `1_worker_1.config` (and the Task 8 `pitch_map()` variant, which only overrides the `TDCwindow`/
+  `TDCshift`/`TDC_lags`/`TDC_balance`/`TDC_windowing_*` keys to activate the pitch gate) both carry
+  `BLSTM_LTSVwindow 0`, so `SpectralParams::derive` resolves `ltsv_half_window = 0` and NO LTSV column
+  is appended in EITHER pass (`assemble_input_sequence`'s LTSV hcat is skipped entirely). The Rust
+  driver still captures the pass-1 LTSV output (`build_input_sequence_parts`) and threads it through
+  `assemble_from_periodogram` for the pass-2 build -- reproducing the WIRING -- but with
+  `ltsv_half_window == 0` that plumbing is a no-op: `spectral_pitch_inputseq_pass2_chan1.bin` pins only
+  the warp -> mel -> DCT columns, not any LTSV reuse. The stale-LTSV quirk this entry describes would
+  only be exercised by a config with BOTH `TDCwindow > 0` (pitch pass active) AND `LTSVwindow > 0` (an
+  LTSV column actually present) -- no such fixture exists yet. Post-parity: recompute LTSV on the
+  warped periodogram (or document that the warp is only meant to affect the mel/DCT band); a fixture
+  covering the LTSVwindow>0 x pitch-pass-active combination would be needed to golden-test the quirk
+  itself, not just the wiring.
+
+- **[phase2b] The externalized pitch-pass result dump preserves PASS-1, even though the final
+  boundaries are PASS-2** (`BLSTMSpectralSegmenter.cpp:744,:848-850`, Task 8): `result_vec2` is set to
+  `result_vec.transpose()` right after the pass-1 FFB (`:744`) and dumped by the `_IsUnitTest` `.mat`
+  branch at `:848-850` -- which runs AFTER the pitch second pass has already overwritten `result_vec`
+  (`:793`) and re-segmented (`:801`). But `result_vec2` is a COPY taken before the pitch pass, so the
+  dumped `result_vec_chan_*` is the PASS-1 result while `seg`'s boundaries are PASS-2. The Rust
+  `last_result_rows` observation point reproduces this exactly (it captures the pass-1 row and is NOT
+  overwritten by the pitch pass; the pass-2 row is exposed separately as `last_result_rows_pass2` for
+  test capture only). Pinned by `pitch_dump_quirk_pass1_result_preserved` (the pass-1 result is
+  byte-identical to the T7 `spectral_real` result, while the boundaries differ: crossing 1.1831 ->
+  1.2597). Post-parity: dump the pass-2 result if the externalized value is meant to reflect the final
+  segmentation.
+
+- **[phase2b] Pitch pass OVERWRITES the error/classif slots (not accumulated) and is guarded on
+  `pitch > 0`** (`BLSTMSpectralSegmenter.cpp:791-803`, Task 8): after the pass-2 FFB, `seg.
+  _CumulativeError[chan]` and `seg._NbOfClassif[chan]` are ASSIGNED (`:802-803`) from the pass-2 NN,
+  discarding the pass-1 values (`:752-753`) -- an overwrite, not a `+=`. The entire re-forward +
+  re-segmentation is gated on `if (pitch > 0)` (`:791`): a zero pitch (no accepted TDC estimate over
+  any pass-1 SPEECH segment, or no SPEECH segment at all) leaves the pass-1 boundaries + error slots
+  in place (the homothety with `coeff = 0` still runs at `:760-787` but its output is never forwarded).
+  Reproduced in the Rust driver (the `pitch > 0.0` guard wraps the re-forward/clear/re-seg/overwrite).
+  On the excerpt the reimpl-path cost is 0 (no targets), so the overwrite lands 0 over 0 -- the
+  observable is the boundary/result change, not the cost.
 
 ## Toolchain deviations
 

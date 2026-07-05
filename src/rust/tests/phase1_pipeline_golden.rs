@@ -15,12 +15,10 @@ mod common;
 
 use indexmap::IndexMap;
 use ndarray::Array2;
-use speech::audio::{
-    Audio, compute_segment_periodogram_estimates, read_audio, windowing_coefficients,
+use speech::audio::{Audio, read_audio, windowing_coefficients};
+use speech::features::pipeline::{
+    FeatureConfig, SpectralParams, assemble_input_sequence, build_input_sequence,
 };
-use speech::features::ltsv_tdc::get_ltsv;
-use speech::features::mel::MelFilterBank;
-use speech::features::pipeline::{FeatureConfig, SpectralParams, assemble_input_sequence};
 use speech::legacy_config::parse_legacy_config;
 
 // --- Helpers ----------------------------------------------------------------
@@ -353,76 +351,7 @@ fn run_pipeline(name: &str, chan: usize) -> Array2<f64> {
     let audio = excerpt_audio(c.preemph_ratio);
     let rate = audio.sample_rate as f64;
     let s = SpectralParams::derive(&c, rate);
-
-    let win = windowing_coefficients(&c.win_type, false, s.buffer_size, c.win_param);
-    let end = audio.data.ncols() - 1;
-    let perio = compute_segment_periodogram_estimates(
-        &audio,
-        s.order,
-        s.shift_frames,
-        chan,
-        c.flag_dc_offset,
-        win.as_deref(),
-        None,
-        0,
-        end,
-    );
-
-    // Mel bank per config, SNAPPED freq band, spectrum_size = bins - 1.
-    let (mel_out, dct_out) = if c.nb_bins > 0 {
-        let bank = MelFilterBank::new(
-            c.min_mel,
-            c.max_mel,
-            c.nb_bins,
-            s.min_freq,
-            s.max_freq,
-            rate,
-            s.bins - 1,
-            c.is_log,
-            c.nb_dct,
-            c.ignore_first,
-            c.deltas_nb,
-            c.dd_nb,
-        );
-        let fb = bank.apply_filter_bank(&perio);
-        if c.nb_dct > 0 {
-            let dct = bank.apply_dct(&fb);
-            (Some(fb), Some(dct))
-        } else {
-            (Some(fb), None)
-        }
-    } else {
-        (None, None)
-    };
-
-    // Spectral output columns (before LTSV) drive the mel-variant LTSV band.
-    let spectral_cols = match (&dct_out, &mel_out) {
-        (Some(d), _) => d.ncols(),
-        (None, Some(m)) => m.ncols(),
-        (None, None) => s.freq_end - s.freq_beg + 1,
-    };
-
-    // LTSV column (band asymmetry): mel active -> (0, spectral_cols-1); else the
-    // spectral band. Appended when R >= 1.
-    let ltsv = if s.ltsv_half_window >= 1 {
-        let (lb, le) = if c.nb_bins > 0 {
-            (0, spectral_cols - 1)
-        } else {
-            (s.freq_beg, s.freq_end)
-        };
-        Some(get_ltsv(&perio, lb, le, s.ltsv_half_window, s.ltsv_shift))
-    } else {
-        None
-    };
-
-    assemble_input_sequence(
-        &perio,
-        mel_out.as_ref(),
-        dct_out.as_ref(),
-        ltsv.as_deref(),
-        s.freq_beg,
-        s.freq_end,
-    )
+    build_input_sequence(&audio, &c, &s, chan, None)
 }
 
 fn assert_e2e(name: &str) {

@@ -36,6 +36,19 @@ pub fn load_bin_phase2(name: &str) -> Array2<f64> {
     Array2::from_shape_vec((rows, cols).f(), data).unwrap()
 }
 
+/// Absolute path to a file under `tests/reference_data/phase2b/`.
+pub fn fixture_phase2b(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase2b")
+        .join(name)
+}
+
+/// Load a phase2b `.bin` fixture (column-major f64) into an `Array2<f64>` (rows x cols).
+pub fn load_bin_phase2b(name: &str) -> Array2<f64> {
+    let (rows, cols, data) = speech::io::binary::read_matrix(&fixture_phase2b(name)).unwrap();
+    Array2::from_shape_vec((rows, cols).f(), data).unwrap()
+}
+
 /// Elementwise bit-exact comparison; reports the first mismatch index + hex bits.
 /// Used for PORTABLE goldens (pure arithmetic): they stay bit-exact on every libm.
 pub fn assert_bits_eq(a: &Array2<f64>, b: &Array2<f64>, label: &str) {
@@ -258,6 +271,110 @@ pub fn assert_oracle_eq_f32(a: f32, b: f32, label: &str) {
     }
 }
 
+// === VRCTS structural + value-level comparison (S9.3) ========================
+//
+// Extract `key="value"` verbatim from a single XML-ish line (no quote-escaping,
+// mirroring the legacy `iof::fmtr` scanf-style parser and `segmentation_io`'s
+// private `extract_attr`).
+fn vrcts_extract_attr(line: &str, key: &str) -> Option<String> {
+    let needle = format!("{key}=\"");
+    let start = line.find(&needle)? + needle.len();
+    let rest = &line[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Attribute names whose VALUE is a `%.2f`/`%.4f`-formatted float derived from the
+/// libm-traversing chain (posteriors -> interpolated boundary times -> formatting):
+/// these are compared via a display-quantum-aware bound instead of byte-for-byte.
+const VRCTS_FLOAT_ATTRS: &[&str] = &["sigdur", "spdur", "dur", "stime", "etime"];
+
+/// A `%.Nf`-formatted value can print differently even when the underlying f64s
+/// are within the hybrid ULP/absolute bound: an infinitesimal (libm-noise-scale)
+/// difference straddling a rounding boundary (e.g. `x.xxxx5`) flips the LAST
+/// PRINTED DIGIT, a full `10^-N` step in the parsed-back value -- nine-plus
+/// orders of magnitude bigger than the raw hybrid bound (`assert_oracle_eq_f64`'s
+/// `512*eps*scale`). So a pair of parsed VRCTS float attrs passes when EITHER the
+/// raw hybrid bound holds (the common case, no boundary straddle) OR the two
+/// values are within one display quantum of each other (`stime`/`etime` -> 4
+/// decimals -> `1e-4`; `sigdur`/`spdur`/`dur` -> 2 decimals -> `1e-2`) -- the
+/// boundary-straddle case, which is bounded (not unbounded) precisely BECAUSE the
+/// two runs both round the SAME underlying (hybrid-bound-close) value at the SAME
+/// precision. The quantum is inferred from the printed string's decimal-digit
+/// count so this stays correct if a future attr uses a different precision.
+fn vrcts_float_value_ok(got: &str, want: &str) -> bool {
+    let gf: f64 = match got.parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let wf: f64 = match want.parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let decimals = want.rsplit_once('.').map_or(0, |(_, frac)| frac.len());
+    let quantum = 10f64.powi(-(decimals as i32));
+    let abs_tol = HYBRID_ABS_FACTOR * f64::EPSILON * wf.abs().max(1.0);
+    hybrid_ok_f64(gf, wf, 4, abs_tol) || (gf - wf).abs() <= quantum
+}
+
+/// Compare a VRCTS XML document (`to_vrcts_string` output) against a committed
+/// fixture dump per spec S9.3: byte-exact on the oracle env (where the pin is
+/// load-bearing), value-level re-parse elsewhere, because `%.4f`/`%.2f` rounding
+/// of a libm-derived float can flip a final digit under a different libm even
+/// when the underlying value is correct to the hybrid ULP/absolute bound. The
+/// Ulp arm still fails on any STRUCTURAL drift -- segment count, class/tag
+/// names, attribute names or ordering -- by walking both documents line by
+/// line and requiring every non-float-attribute line to match byte-for-byte;
+/// only the known float attributes (`sigdur`, `spdur`, `dur`, `stime`, `etime`)
+/// go through [`vrcts_float_value_ok`].
+pub fn assert_vrcts_eq(got: &str, expected: &str, label: &str) {
+    match oracle_mode() {
+        OracleMode::Strict => assert_eq!(got, expected, "{label}: byte mismatch"),
+        OracleMode::Ulp(_) => {
+            let got_lines: Vec<&str> = got.lines().collect();
+            let want_lines: Vec<&str> = expected.lines().collect();
+            assert_eq!(
+                got_lines.len(),
+                want_lines.len(),
+                "{label}: line count mismatch (structural drift)"
+            );
+            for (i, (gl, wl)) in got_lines.iter().zip(want_lines.iter()).enumerate() {
+                if *gl == *wl {
+                    continue;
+                }
+                // Lines differ: must be explained ENTIRELY by float-attribute value
+                // drift, not by structure. Strip each known float attr's value out
+                // of both lines (replacing with a placeholder) and require the
+                // residue to match; then compare the stripped values numerically.
+                let mut g_residue = gl.to_string();
+                let mut w_residue = wl.to_string();
+                let mut any_float_attr = false;
+                for attr in VRCTS_FLOAT_ATTRS {
+                    if let (Some(gv), Some(wv)) =
+                        (vrcts_extract_attr(gl, attr), vrcts_extract_attr(wl, attr))
+                    {
+                        any_float_attr = true;
+                        assert!(
+                            vrcts_float_value_ok(&gv, &wv),
+                            "{label}: line {i} attr {attr}: got={gv} want={wv} outside hybrid bound and outside one display quantum"
+                        );
+                        g_residue = g_residue.replacen(&format!("{attr}=\"{gv}\""), "", 1);
+                        w_residue = w_residue.replacen(&format!("{attr}=\"{wv}\""), "", 1);
+                    }
+                }
+                assert!(
+                    any_float_attr,
+                    "{label}: line {i} differs with no recognized float attribute (structural drift):\n  got: {gl}\n  want: {wl}"
+                );
+                assert_eq!(
+                    g_residue, w_residue,
+                    "{label}: line {i} residue (non-float content) mismatch:\n  got: {gl}\n  want: {wl}"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod hybrid_comparator_tests {
     use super::*;
@@ -287,5 +404,120 @@ mod hybrid_comparator_tests {
         // f32 arm: same bug-scale rejection.
         let abs_tol32 = (HYBRID_ABS_FACTOR as f32) * f32::EPSILON * 1.0;
         assert!(!hybrid_ok_f32(0.0429_f32, 0.0430_f32, 2, abs_tol32));
+    }
+
+    const VRCTS_SAMPLE: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<AudioDoc name=\"x\" path=\"/tmp/x.wav\">\n<ProcList>\n<Proc name=\"vrcts_part\" version=\"1.3\"/>\n</ProcList>\n<ChannelList>\n<Channel num=\"1\" sigdur=\"2.00\" spdur=\"1.68\"/>\n</ChannelList>\n<SpeakerList>\n<Speaker ch=\"1\" dur=\"1.68\" gender=\"1\" spkid=\"1\"/>\n</SpeakerList>\n<SegmentList>\n<SpeechSegment ch=\"1\" sconf=\"1.00\" stime=\"0.0000\" etime=\"1.6773\" spkid=\"1\"/>\n</SegmentList>\n</AudioDoc>\n";
+
+    /// Runs the SAME line-walk logic as `assert_vrcts_eq`'s `Ulp` arm (mirrored here
+    /// so tests are independent of this process's actual `oracle_mode()`, an
+    /// env-gated `OnceLock` fixed for the whole binary -- normally `Strict` on the
+    /// oracle env these tests run on), returning `Err` instead of panicking.
+    fn vrcts_ulp_arm_ok(got: &str, expected: &str) -> Result<(), String> {
+        let got_lines: Vec<&str> = got.lines().collect();
+        let want_lines: Vec<&str> = expected.lines().collect();
+        if got_lines.len() != want_lines.len() {
+            return Err("line count mismatch (structural drift)".to_string());
+        }
+        for (i, (gl, wl)) in got_lines.iter().zip(want_lines.iter()).enumerate() {
+            if *gl == *wl {
+                continue;
+            }
+            let mut g_residue = gl.to_string();
+            let mut w_residue = wl.to_string();
+            let mut any_float_attr = false;
+            for attr in VRCTS_FLOAT_ATTRS {
+                if let (Some(gv), Some(wv)) =
+                    (vrcts_extract_attr(gl, attr), vrcts_extract_attr(wl, attr))
+                {
+                    any_float_attr = true;
+                    if !vrcts_float_value_ok(&gv, &wv) {
+                        return Err(format!("line {i} attr {attr}: {gv} vs {wv} out of bound"));
+                    }
+                    g_residue = g_residue.replacen(&format!("{attr}=\"{gv}\""), "", 1);
+                    w_residue = w_residue.replacen(&format!("{attr}=\"{wv}\""), "", 1);
+                }
+            }
+            if !any_float_attr {
+                return Err(format!(
+                    "line {i} structural drift (no recognized float attribute)"
+                ));
+            }
+            if g_residue != w_residue {
+                return Err(format!(
+                    "line {i} residue mismatch (structural drift): {g_residue:?} vs {w_residue:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn vrcts_eq_passes_identical() {
+        assert_vrcts_eq(VRCTS_SAMPLE, VRCTS_SAMPLE, "identical");
+        assert!(vrcts_ulp_arm_ok(VRCTS_SAMPLE, VRCTS_SAMPLE).is_ok());
+    }
+
+    #[test]
+    fn vrcts_eq_ulp_arm_tolerates_hybrid_bound_scale_drift() {
+        // A tiny (raw-ULP-scale) drift on a float attribute -- a 1-ULP libm
+        // difference in the upstream posterior propagating to a few-ULP difference
+        // in the pre-formatting time value, with NO rounding-boundary straddle --
+        // must pass via the hybrid-bound arm of vrcts_float_value_ok.
+        let drifted = VRCTS_SAMPLE.replace("etime=\"1.6773\"", "etime=\"1.67730000000001\"");
+        assert!(
+            vrcts_ulp_arm_ok(&drifted, VRCTS_SAMPLE).is_ok(),
+            "a hybrid-bound-scale drift must pass"
+        );
+    }
+
+    #[test]
+    fn vrcts_eq_ulp_arm_tolerates_display_quantum_boundary_straddle() {
+        // The S9.3 scenario this fix targets: two runs' underlying f64s differ only
+        // by libm noise but straddle a %.4f rounding boundary, so the PRINTED digit
+        // flips by a full 1e-4 step (e.g. 1.6773 vs 1.6774). This must pass via the
+        // display-quantum arm of vrcts_float_value_ok, not the raw hybrid bound.
+        let drifted = VRCTS_SAMPLE.replace("etime=\"1.6773\"", "etime=\"1.6774\"");
+        assert!(
+            vrcts_ulp_arm_ok(&drifted, VRCTS_SAMPLE).is_ok(),
+            "a one-display-quantum drift (rounding boundary straddle) must pass"
+        );
+    }
+
+    #[test]
+    fn vrcts_eq_ulp_arm_rejects_bug_scale_drift() {
+        // A drift several quanta wide (bug-scale, not a single rounding-boundary
+        // flip) must still fail -- the display-quantum arm only forgives ONE step.
+        let drifted = VRCTS_SAMPLE.replace("etime=\"1.6773\"", "etime=\"1.6790\"");
+        assert!(
+            vrcts_ulp_arm_ok(&drifted, VRCTS_SAMPLE).is_err(),
+            "a multi-quantum drift must NOT be masked"
+        );
+    }
+
+    #[test]
+    fn vrcts_eq_ulp_arm_rejects_structural_drift() {
+        // A mutated segment/tag name is NOT explainable by float-attribute value
+        // drift, so the Ulp arm must still fail on it (the S9.3 requirement: fail
+        // on genuine structural drift, not just on times).
+        let mutated = VRCTS_SAMPLE.replace("SpeechSegment", "NoiseSegment");
+        assert!(
+            vrcts_ulp_arm_ok(&mutated, VRCTS_SAMPLE).is_err(),
+            "a mutated tag name must NOT be masked by the float-attribute re-parse"
+        );
+    }
+
+    #[test]
+    fn vrcts_eq_ulp_arm_rejects_extra_segment() {
+        // A mutated string with an inserted extra segment line changes the line
+        // count -- must fail on the line-count check, not silently pass.
+        let mutated = VRCTS_SAMPLE.replacen(
+            "<SegmentList>\n",
+            "<SegmentList>\n<SpeechSegment ch=\"1\" sconf=\"1.00\" stime=\"1.7000\" etime=\"1.9000\" spkid=\"1\"/>\n",
+            1,
+        );
+        assert!(
+            vrcts_ulp_arm_ok(&mutated, VRCTS_SAMPLE).is_err(),
+            "an inserted extra segment line must fail on line-count structural drift"
+        );
     }
 }
