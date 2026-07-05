@@ -15,9 +15,14 @@
 
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
+use ndarray::Array2;
 
-use crate::audio::{Audio, get_sequence, windowing_coefficients};
-use crate::features::ltsv_tdc::tdc_classify_sequence;
+use crate::audio::{
+    Audio, compute_segment_periodogram_estimates, get_sequence, windowing_coefficients,
+};
+use crate::features::ltsv_tdc::{ltsv_classify_sequence, tdc_classify_sequence};
+use crate::features::mel::MelFilterBank;
+use crate::features::pipeline::{FeatureConfig, derive_freq_band_ltsv_variant};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
@@ -262,6 +267,255 @@ impl Segmenter for TdcSegmenter {
         // side effect on each hypothesis -- discard the (unused, no-reference)
         // ScoreReport here. Callers wanting scored output call `TdcSegmenter::score`
         // explicitly afterward.
+        for seg in seg_per_chan.iter_mut() {
+            compute_errors(seg, None, -1);
+        }
+
+        Ok(())
+    }
+}
+
+/// Long-Term Spectral Variation SAD segmenter (Algo 2;
+/// `LongTermSpectralVariation.{h,cpp}`).
+///
+/// Two stateful legacy members are carried across calls, each re-quantized on
+/// EVERY `get_segmentation` call using ITS CURRENT VALUE:
+/// - `spectrum_shift_sec` (`_SpectrumShift`, `:154-155`): `round(x*rate)/rate`.
+/// - `window_shift_sec` (`_WindowShift`, `:261-263`): `round(x*rate/spectrum_shift)
+///   *spectrum_shift/rate` -- quantized in PERIODOGRAM-FRAME units (a spectrum_shift
+///   multiple), unlike TDC's plain `1/rate` grid.
+///
+/// The LTSV-standalone window floor is `< 1 -> 1` (`:257-258`), which DIFFERS from
+/// the BLSTM spectral segmenter's `< 1 -> 0` (disables LTSV) -- ported as written,
+/// see IMPROVEMENTS.md.
+pub struct LtsvSegmenter {
+    driver_cfg: DriverConfig,
+    seg_cfg: SegmenterConfig,
+    feature_cfg: FeatureConfig,
+    spectrum_shift_sec: f64,
+    window_shift_sec: f64,
+    channels: usize,
+}
+
+impl LtsvSegmenter {
+    /// Port of the `LongTermSpectralVariation(ConfigFile&, bool, bool)` ctor
+    /// (`LongTermSpectralVariation.cpp:18-20` -> `buildFromConf`, itself
+    /// `Segmenter::buildFromConf` + the LTSV-specific reads): the `Segmenter`
+    /// residue (via [`SegmenterConfig::from_config`] + [`DriverConfig::from_config`])
+    /// plus the spectral/mel/freq-band config (via [`FeatureConfig::from_legacy`],
+    /// whose reads + sanitization order match `LongTermSpectralVariation::
+    /// buildFromConf` `:44-80` exactly under this generic `prefix`).
+    pub fn from_legacy(map: &IndexMap<String, String>) -> Result<LtsvSegmenter> {
+        let seg_cfg = SegmenterConfig::from_config(map, "LTSV")?;
+        let driver_cfg = DriverConfig::from_config(map, "LTSV")?;
+        let feature_cfg = FeatureConfig::from_legacy(map, "LTSV")?;
+
+        let spectrum_shift_sec = feature_cfg.shift_sec;
+        let window_shift_sec = driver_cfg.window_shift_sec;
+
+        Ok(LtsvSegmenter {
+            driver_cfg,
+            seg_cfg,
+            feature_cfg,
+            spectrum_shift_sec,
+            window_shift_sec,
+            channels: 0,
+        })
+    }
+
+    /// Zero cost accumulators: LTSV has no NN/cost path (same rationale as
+    /// [`TdcSegmenter::cumulative_error`]).
+    pub fn cumulative_error(&self) -> Vec<f64> {
+        vec![0.0; self.channels]
+    }
+
+    pub fn nb_of_classif(&self) -> Vec<i64> {
+        vec![0; self.channels]
+    }
+
+    /// `Segmentation::compute_errors`, one call per channel (see
+    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
+    pub fn score(
+        hyp: &mut [Segmentation],
+        reference: Option<&[Segmentation]>,
+        nb_words: i64,
+    ) -> Vec<ScoreReport> {
+        hyp.iter_mut()
+            .enumerate()
+            .map(|(chan, seg)| {
+                let refc = reference.map(|r| &r[chan]);
+                compute_errors(seg, refc, nb_words)
+            })
+            .collect()
+    }
+}
+
+impl Segmenter for LtsvSegmenter {
+    /// Port of `LongTermSpectralVariation::getSegmentation`
+    /// (`LongTermSpectralVariation.cpp:130-407`), the non-unit-test/non-plotting
+    /// path (dump/`.mat`/PNG/log branches dropped, display/diagnostic-only).
+    ///
+    /// Per channel: `compute_segment_periodogram_estimates` over `[0, frame_count]`
+    /// (the `+1` `vec_size` quirk -- `end_frame = audio.getFrameCount()`, ONE MORE
+    /// than the raw last-valid-index, `:293-294`), then the DECIMATED result row
+    /// `result_vec(0, jj/shift) = ltsv_classify_sequence(...)` (no interpolation
+    /// backfill -- that is [`crate::features::ltsv_tdc::get_ltsv`], the spectral
+    /// segmenter's, not this driver's); `results_to_segmentation(seg,
+    /// window_shift_sec /*post-quantization*/, 0.0, ...)`; `compute_errors` after
+    /// the full channel loop (`:386`).
+    fn get_segmentation(
+        &mut self,
+        audio: &mut Audio,
+        seg_per_chan: &mut [Segmentation],
+    ) -> Result<()> {
+        let rate = audio.sample_rate as f64;
+
+        // Spectrum-order clamp to Max-1 == 19 (`:145-149`).
+        let mut order = self.feature_cfg.order;
+        if order > 19 {
+            order = 19;
+        }
+        let window_size = 1usize << order;
+        let full_signal_window_size = window_size + 1;
+        let mut periodogram_length = (1usize << (order as u32 - 1)) + 1;
+
+        // spectrum_shift re-quantization using ITS CURRENT VALUE (`:154-155`).
+        let spectrum_shift = (self.spectrum_shift_sec * rate).round() as usize;
+        self.spectrum_shift_sec = spectrum_shift as f64 / rate;
+
+        // preemph -> noise (`:180-191`).
+        audio.apply_preemph(self.feature_cfg.preemph_ratio);
+        if self.feature_cfg.noise_seed > 0 {
+            audio.apply_noise(self.feature_cfg.noise_ratio);
+        }
+        let windowing_coeff = windowing_coefficients(
+            &self.feature_cfg.win_type,
+            false,
+            full_signal_window_size,
+            self.feature_cfg.win_param,
+        );
+
+        // Freq band: the LTSV.cpp:200-209 clamp-order VARIANT (differs from the
+        // BLSTM variant in `SpectralParams::derive`).
+        let (mut freq_beg, mut freq_end, min_freq, max_freq) =
+            derive_freq_band_ltsv_variant(&self.feature_cfg, rate, periodogram_length);
+
+        // Mel/DCT branch (`:210-246`): the `_NbDCT` clamp-to-nb_filters + the band
+        // reset to the mel/DCT output size.
+        let mel_bank = if self.feature_cfg.nb_bins > 0 {
+            let bank = MelFilterBank::new(
+                self.feature_cfg.min_mel,
+                self.feature_cfg.max_mel,
+                self.feature_cfg.nb_bins,
+                min_freq,
+                max_freq,
+                rate,
+                periodogram_length - 1,
+                self.feature_cfg.is_log,
+                self.feature_cfg.nb_dct,
+                self.feature_cfg.ignore_first,
+                self.feature_cfg.deltas_nb,
+                self.feature_cfg.dd_nb,
+            );
+            periodogram_length = bank.nb_filters();
+            if self.feature_cfg.nb_dct > 0 {
+                periodogram_length = bank.nb_dct();
+            }
+            freq_beg = 0;
+            freq_end = periodogram_length - 1;
+            Some(bank)
+        } else {
+            None
+        };
+
+        // Temporal convolution of the periodogram (`:248-249`; `verifyWindowingType`
+        // is a logging-only side effect, dropped here per its established contract).
+        let temporal_conv = windowing_coefficients(
+            &self.feature_cfg.conv_type,
+            true,
+            2 * self.feature_cfg.conv_size as usize + 1,
+            0.83333,
+        );
+
+        // LTSV window/shift in PERIODOGRAM-FRAME units (`:257-263`). The
+        // LTSV-standalone floor is `< 1 -> 1` (NOT the spectral segmenter's
+        // `< 1 -> 0` disable).
+        let mut ltsv_half_window =
+            (self.driver_cfg.window_size_sec * rate / 2.0 / spectrum_shift as f64).round() as i64;
+        if ltsv_half_window < 1 {
+            ltsv_half_window = 1;
+        }
+        let ltsv_half_window = ltsv_half_window as usize;
+        let mut ltsv_window_shift =
+            (self.window_shift_sec * rate / spectrum_shift as f64).round() as i64;
+        if ltsv_window_shift < 1 {
+            ltsv_window_shift = 1;
+        }
+        self.window_shift_sec = (ltsv_window_shift * spectrum_shift as i64) as f64 / rate;
+        let ltsv_window_shift = ltsv_window_shift as usize;
+
+        // vec_size: begin_frame=0, end_frame=audio.getFrameCount() (the +1 quirk
+        // vs `build_input_sequence`'s end=ncols()-1), `:293-300`.
+        let frame_count = audio.data.ncols();
+        let vec_size_raw = frame_count + 1;
+        let vec_size = if vec_size_raw.is_multiple_of(spectrum_shift) {
+            vec_size_raw / spectrum_shift
+        } else {
+            vec_size_raw / spectrum_shift + 1
+        };
+        let real_vec_size = if vec_size.is_multiple_of(ltsv_window_shift) {
+            vec_size / ltsv_window_shift
+        } else {
+            vec_size / ltsv_window_shift + 1
+        };
+
+        let channels = audio.data.nrows();
+        self.channels = channels;
+        for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
+            let perio: Array2<f64> = compute_segment_periodogram_estimates(
+                audio,
+                order as u32,
+                spectrum_shift,
+                chan,
+                self.feature_cfg.flag_dc_offset,
+                windowing_coeff.as_deref(),
+                temporal_conv.as_deref(),
+                0,
+                frame_count,
+            );
+
+            let source: Array2<f64> = match &mel_bank {
+                Some(bank) => {
+                    let fb = bank.apply_filter_bank(&perio);
+                    if self.feature_cfg.nb_dct > 0 {
+                        bank.apply_dct(&fb)
+                    } else {
+                        fb
+                    }
+                }
+                None => perio,
+            };
+
+            let mut results = vec![0.0f64; real_vec_size];
+            let mut jj = 0usize;
+            while jj < vec_size {
+                results[jj / ltsv_window_shift] =
+                    ltsv_classify_sequence(&source, jj, freq_beg, freq_end, ltsv_half_window);
+                jj += ltsv_window_shift;
+            }
+
+            results_to_segmentation(
+                seg,
+                self.window_shift_sec,
+                0.0,
+                &mut results,
+                SegClass::Speech,
+                self.driver_cfg.conv_coeff.as_deref(),
+                &self.seg_cfg,
+            );
+        }
+
+        // `seg.compute_errors()` after the FULL channel loop (`:386`).
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1);
         }

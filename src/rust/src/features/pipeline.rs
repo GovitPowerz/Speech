@@ -439,6 +439,55 @@ impl SpectralParams {
     }
 }
 
+/// The STANDALONE `LongTermSpectralVariation::getSegmentation` freq-band clamp
+/// order (`LongTermSpectralVariation.cpp:200-209`), a DIFFERENT variant from
+/// [`SpectralParams::derive`]'s BLSTM freq band (`BLSTMSpectralSegmenter.cpp:
+/// 229-239`).
+///
+/// Divergence (load-bearing, see the Task 5 crafted-case unit test): the BLSTM
+/// variant re-clamps TWICE -- once immediately after `freq_beg` is raised
+/// (`if freq_beg > freq_end: freq_beg = freq_end`, using freq_end's value
+/// BEFORE the max-freq computation) and again after `freq_end` is computed
+/// (`if freq_end < freq_beg: freq_end = freq_beg`). The LTSV variant here has
+/// only ONE guard, evaluated AFTER both `freq_beg` and `freq_end` are computed:
+/// `if freq_beg > freq_end: freq_beg = freq_end` -- there is no second reclamp
+/// pulling `freq_end` back up. For a min/max pair where the intermediate
+/// (pre-max-freq) `freq_beg` already exceeds the periodogram's original
+/// `freq_end`, the two variants land on different final band values (the BLSTM
+/// variant snaps to the ORIGINAL `freq_end` = `periodogram_length-1`; the LTSV
+/// variant snaps to the POST-max-freq-clamped `freq_end`).
+///
+/// Returns `(freq_beg, freq_end, min_freq_snapped, max_freq_snapped)`, where the
+/// snapped Hz values are `idx*freq_step` (`:208-209`), matching the legacy's
+/// mutation of `_MinFreq`/`_MaxFreq`. `rate` is the sample rate; `bins` is the
+/// `periodogram_length` (`freq_step = rate/2/(bins-1)`, matching `:202`'s
+/// `freq_end` divisor at that point, i.e. `bins-1`).
+pub fn derive_freq_band_ltsv_variant(
+    cfg: &FeatureConfig,
+    rate: f64,
+    bins: usize,
+) -> (usize, usize, f64, f64) {
+    let mut freq_beg: usize = 0;
+    let mut freq_end: usize = bins - 1;
+    let freq_step = rate / 2.0 / freq_end as f64;
+
+    let tmp = (cfg.min_freq / freq_step).floor() as usize;
+    if freq_beg < tmp {
+        freq_beg = tmp;
+    }
+    let tmp = (cfg.max_freq / freq_step).ceil() as usize;
+    if freq_end > tmp {
+        freq_end = tmp;
+    }
+    if freq_beg > freq_end {
+        freq_beg = freq_end;
+    }
+
+    let min_freq = freq_beg as f64 * freq_step;
+    let max_freq = freq_end as f64 * freq_step;
+    (freq_beg, freq_end, min_freq, max_freq)
+}
+
 /// Assemble the BLSTM input sequence (`getBLSTMInputSequence`, `:561-591`).
 ///
 /// Spectral-path priority (`:568-576`): if `dct` is `Some` use it verbatim (all

@@ -673,6 +673,85 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   reproduced deliberately, not a bug to fix; the idempotency is a property of the quantization scheme,
   not something to "fix" either.
 
+- **[phase2b] `LongTermSpectralVariation` freq-band clamp order DIFFERS from the BLSTM
+  spectral segmenter's variant** (`features/pipeline.rs::derive_freq_band_ltsv_variant`
+  vs `SpectralParams::derive`, from `LongTermSpectralVariation.cpp:200-209` vs
+  `BLSTMSpectralSegmenter.cpp:229-239`): the BLSTM variant reclamps TWICE -- once
+  immediately after `freq_beg` is raised (`if freq_beg > freq_end: freq_beg = freq_end`,
+  using freq_end's value BEFORE the max-freq computation), and again after `freq_end` is
+  computed (`if freq_end < freq_beg: freq_end = freq_beg`). The LTSV-standalone variant has
+  only ONE guard, evaluated AFTER both `freq_beg` and `freq_end` are computed -- there is no
+  second reclamp pulling `freq_end` back up. For a min/max pair where the intermediate
+  (pre-max-freq) `freq_beg` already exceeds the periodogram's original `freq_end` (e.g.
+  `minFreq` beyond Nyquist), the two variants land on DIFFERENT final band values: the
+  BLSTM variant snaps to the ORIGINAL `freq_end`, the LTSV variant snaps to the
+  POST-max-freq-clamped `freq_end`. Pinned by
+  `ltsv_freq_band_variant_differs_from_blstm_variant` (`phase2b_ltsv_golden.rs`), a crafted
+  case (`min_freq=5000.0, max_freq=100.0, rate=8000, bins=129`) where BLSTM clamps both to
+  128 (4000.0 Hz, Nyquist) and LTSV clamps both to 4 (125.0 Hz). *Fix candidate:* none --
+  both are faithful ports of genuinely different legacy code paths, not a bug in either.
+
+- **[phase2b] `LongTermSpectralVariation::getSegmentation`'s periodogram `vec_size` uses
+  `frameCount+1`, not `frameCount`** (`tasks/sad.rs::LtsvSegmenter::get_segmentation`, from
+  `LongTermSpectralVariation.cpp:293-300`): `begin_frame=0`, `end_frame=audio.getFrameCount()`
+  (i.e. the frame count itself, ONE PAST the last valid sample index) is passed into
+  `computeSegmentPeriodogramEstimates`/`compute_segment_periodogram_estimates`, giving
+  `vec_size = ceil((frameCount+1)/spectrum_shift)`. This is a DIFFERENT call convention from
+  `features::pipeline::build_input_sequence`'s `end = audio.data.ncols() - 1` (the BLSTM
+  spectral driver's own periodogram span), which does NOT carry the `+1`. Easy to
+  copy-paste the wrong `end` value between the two drivers. Pinned structurally by the
+  `ltsv_result_chan{1,2}.bin`/`ltsv_dct_result_chan{1,2}.bin` goldens (dumped from a real/
+  reimplemented `getSegmentation` using the `+1` convention) and directly by
+  `vec_size_uses_frame_count_plus_one` (`phase2b_ltsv_golden.rs`). *Fix candidate:* none --
+  this is the real legacy driver's own call convention, reproduced as written.
+
+- **[phase2b] LTSV-standalone window floor is `< 1 -> 1`, DIFFERING from the BLSTM spectral
+  segmenter's `< 1 -> 0` (disables LTSV)** (`tasks/sad.rs::LtsvSegmenter::get_segmentation`,
+  from `LongTermSpectralVariation.cpp:257-258` vs `BLSTMSpectralSegmenter.cpp`'s own LTSV
+  param derivation, ported in `SpectralParams::derive` as `ltsv_half_window = 0` when
+  `r < 1.0`): in the BLSTM spectral segmenter, an `LTSVwindow` small enough to round to 0
+  half-windows means "LTSV is off" (the caller gates on `ltsv_half_window >= 1`); in the
+  LTSV-standalone driver, the SAME arithmetic instead floors up to a half-window of 1 --
+  LTSV always runs, never disabled by a tiny window. Pinned by `ltsv_tiny.config`
+  (`LTSVwindow 0.001` -> `round(0.001*8000/2/80) == 0` -> floored to 1) and
+  `ltsv_window_floors_to_one_not_zero` (`phase2b_ltsv_golden.rs`). *Fix candidate:* none --
+  both are faithful ports of genuinely different legacy classes' own derivations.
+
+- **[phase2b] `LtsvSegmenter` carries TWO stateful re-quantized members, both re-quantized
+  on EVERY call using their CURRENT value** (`tasks/sad.rs::LtsvSegmenter`, from
+  `LongTermSpectralVariation.cpp:154-155` and `:261-263`): `spectrum_shift_sec`
+  (`_SpectrumShift`, `round(x*rate)/rate` -- the same `1/rate`-grid quantization as TDC's
+  `window_shift_sec`) AND `window_shift_sec` (`_WindowShift`, `round(x*rate/spectrum_shift)
+  *spectrum_shift/rate` -- quantized onto a `spectrum_shift/rate`-grid, coarser than TDC's).
+  Both quantizations are `round()`-onto-a-fixed-grid operations, and both are therefore
+  PROVABLY IDEMPOTENT by the same argument as the TDC `window_shift_sec` proof above (see
+  the `[phase2b] TdcSegmenter::window_shift_sec ...` entry): re-quantizing an
+  already-quantized value is a fixed point for any realistic frame count / shift
+  combination. `two_files_in_sequence_boundaries_match_dump` (`phase2b_ltsv_golden.rs`)
+  therefore pins REPEAT-CALL DETERMINISM only, not statefulness, for the SAME reason the TDC
+  two-files golden does -- a driver that reset both members from the config string before
+  every call would pass this golden identically to the real stateful driver. *Fix
+  candidate:* none -- documented legacy per-file mutable-state contract (spec S3.4),
+  reproduced deliberately.
+
+- **[phase2b] `ltsv_classify_sequence` over log-mel-scaled input can produce astronomically
+  large scores, driving the decision to "always speech" on short excerpts** (observed while
+  regenerating the `ltsv.config` golden, `LTSV_is_log_mel true`): the per-bin mean floor
+  (`< 1e-12 -> 1e-12`, `LongTermSpectralVariation.cpp:101`) assumes a nonnegative (power-
+  scale) periodogram; fed a LOG-scale mel periodogram (whose per-bin mean can be zero or
+  negative), the floor instead clamps a near-zero-or-negative mean up to `1e-12`, and the
+  ratio `r = p[bin]/mean` (`:110`) then blows up to `~1e12` magnitude for any nonzero
+  log-mel value, which the `-r*(r-1)` accumulation squares again (`~1e24`) before the final
+  variance-of-`dzeta` squares it ONE MORE time (`~1e48-1e51`, matching the measured
+  `ltsv_result_chan1.bin` magnitudes ~2e51-9e51). This is a property of applying the LTSV
+  formula (designed for power-scale periodograms) to `is_log_mel=true` input, not a porting
+  bug -- the REAL compiled `getSegmentation` produces the identical behavior (confirmed via
+  the harness's real-classifySequence-driven `ltsv_boundaries_chan{1,2}.bin` dumps, which
+  show near-full-file SPEECH coverage under `ltsv.config`'s thresholds). *Fix candidate:*
+  if `is_log_mel=true` is ever paired with LTSV in a production config, consider whether the
+  legacy mean-floor should be `abs(mean) < 1e-12` or similarly signed-aware -- out of scope
+  for this port (bit-exact reproduction, not correction).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

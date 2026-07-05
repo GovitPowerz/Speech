@@ -113,3 +113,48 @@ def test_tdc_segmenter_dumps_present_with_expected_shapes() -> None:
     assert constants["max_lag_frames"] == 128
     assert constants["window_shift_frames"] == 80
     assert constants["vec_size"] == 201
+
+
+def test_ltsv_segmenter_dumps_present_with_expected_shapes() -> None:
+    """Task 5: LtsvSegmenter (Algo 2) -- primary + DCT-secondary + tiny-window."""
+    ltsv = _manifest()["ltsv_segmenter"]
+    expected_shapes = ltsv["expected_shapes"]
+    assert expected_shapes == {
+        "ltsv_result_chan1.bin": [1, 51],
+        "ltsv_result_chan2.bin": [1, 51],
+        "ltsv_convolved_chan1.bin": [1, 51],
+        "ltsv_convolved_chan2.bin": [1, 51],
+        "ltsv_boundaries_chan1.bin": [2, 2],
+        "ltsv_boundaries_chan2.bin": [2, 2],
+        "ltsv_boundaries_file2_chan1.bin": [2, 2],
+        "ltsv_scores.bin": [2, 3],
+        "ltsv_dct_result_chan1.bin": [1, 51],
+        "ltsv_dct_result_chan2.bin": [1, 51],
+        "ltsv_dct_convolved_chan1.bin": [1, 51],
+        "ltsv_dct_convolved_chan2.bin": [1, 51],
+        "ltsv_dct_boundaries_chan1.bin": [2, 2],
+        "ltsv_tiny_boundaries_chan1.bin": [2, 2],
+    }
+    for name, (rows, cols) in expected_shapes.items():
+        path = REF / name
+        assert path.is_file(), name
+        with path.open("rb") as f:
+            got_rows = int.from_bytes(f.read(8), "little", signed=True)
+            got_cols = int.from_bytes(f.read(8), "little", signed=True)
+        assert (got_rows, got_cols) == (rows, cols), name
+
+    for name in ltsv["extra_files"]:
+        assert (REF / name).is_file(), name
+    for name in ltsv["config_files"]:
+        assert (REF / name).is_file(), name
+
+    constants = ltsv["constants"]
+    assert constants["rate"] == 8000
+    assert constants["spectrum_order"] == 8
+    assert constants["periodogram_length"] == 129
+    assert constants["spectrum_shift_frames"] == 80
+    assert constants["periodogram_vec_size"] == 201
+    assert constants["ltsv_half_window_frames"] == 15
+    assert constants["ltsv_shift_frames"] == 4
+    assert constants["real_vec_size"] == 51
+    assert constants["ltsv_tiny_window_half_frames"] == 1

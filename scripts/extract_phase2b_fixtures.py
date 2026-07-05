@@ -48,6 +48,9 @@ PHASE2B_DIR = REPO_ROOT / "tests" / "reference_data" / "phase2b"
 NN_CONFIG = PHASE0_DIR / "1_worker_1.config"
 NN_WEIGHTS = PHASE0_DIR / "NNweights_config1.bin"
 TDC_CONFIG = PHASE2B_DIR / "tdc.config"
+LTSV_CONFIG = PHASE2B_DIR / "ltsv.config"
+LTSV_DCT_CONFIG = PHASE2B_DIR / "ltsv_dct.config"
+LTSV_TINY_CONFIG = PHASE2B_DIR / "ltsv_tiny.config"
 
 # Input fixtures the harness reads from its output dir (same as Phase 1/2).
 HARNESS_INPUTS = [
@@ -105,6 +108,30 @@ TDC_EXPECTED_SHAPES = {
     "tdc_scores.bin": (2, 3),
 }
 TDC_EXTRA_FILES = ["tdc_vrcts_chan1.xml"]
+
+# Task 5: LtsvSegmenter (Algo 2) dumps -- the REAL LongTermSpectralVariation::
+# getSegmentation run on the excerpt under ltsv.config (primary, nb_DCT=0, GEMM-free
+# so the real getSegmentation is the bit-golden), ltsv_dct.config (secondary,
+# nb_DCT=4, applyDCT swapped for the ascending-loop applyDCTLoop), and
+# ltsv_tiny.config (LTSVwindow 0.001, exercises the floor-to-1 quirk).
+LTSV_EXPECTED_SHAPES = {
+    "ltsv_result_chan1.bin": (1, 51),
+    "ltsv_result_chan2.bin": (1, 51),
+    "ltsv_convolved_chan1.bin": (1, 51),
+    "ltsv_convolved_chan2.bin": (1, 51),
+    "ltsv_boundaries_chan1.bin": (2, 2),
+    "ltsv_boundaries_chan2.bin": (2, 2),
+    "ltsv_boundaries_file2_chan1.bin": (2, 2),
+    "ltsv_scores.bin": (2, 3),
+    "ltsv_dct_result_chan1.bin": (1, 51),
+    "ltsv_dct_result_chan2.bin": (1, 51),
+    "ltsv_dct_convolved_chan1.bin": (1, 51),
+    "ltsv_dct_convolved_chan2.bin": (1, 51),
+    "ltsv_dct_boundaries_chan1.bin": (2, 2),
+    "ltsv_tiny_boundaries_chan1.bin": (2, 2),
+}
+LTSV_EXTRA_FILES = ["ltsv_vrcts_chan1.xml"]
+LTSV_CONFIG_FILES = ["ltsv.config", "ltsv_dct.config", "ltsv_tiny.config"]
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
@@ -190,6 +217,9 @@ def main() -> None:
                 str(NN_CONFIG),
                 str(NN_WEIGHTS),
                 str(TDC_CONFIG),
+                str(LTSV_CONFIG),
+                str(LTSV_DCT_CONFIG),
+                str(LTSV_TINY_CONFIG),
             ]
         )
         # Task 2 (SegProbe results2segmentation dumps): persist these into the
@@ -203,19 +233,21 @@ def main() -> None:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
         for name in TDC_EXTRA_FILES:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        # Task 5 (LtsvSegmenter dumps): result/convolved/boundaries/scores (primary +
+        # DCT secondary + tiny-window variants) + the zero-offset VRCTS xml.
+        for name in LTSV_EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        for name in LTSV_EXTRA_FILES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
 
     # 4. Regression guard: the committed fixture dirs must be byte-identical after
     #    the run (the fmtr upgrade must not perturb any prior harness dump).
     after = {"phase1": _hash_tree(PHASE1_DIR), "phase2": _hash_tree(PHASE2_DIR)}
     for phase in ("phase1", "phase2"):
         b, a = before[phase], after[phase]
-        drifted = sorted(
-            name for name in set(b) | set(a) if b.get(name) != a.get(name)
-        )
+        drifted = sorted(name for name in set(b) | set(a) if b.get(name) != a.get(name))
         if drifted:
-            raise SystemExit(
-                f"REGRESSION: {phase} fixtures changed after harness run: {drifted}"
-            )
+            raise SystemExit(f"REGRESSION: {phase} fixtures changed after harness run: {drifted}")
 
     # 5. Parse the fmtr self-test (all ok=1 or SystemExit).
     fmtr_cases = _parse_fmtr_checks(stdout)
@@ -226,10 +258,7 @@ def main() -> None:
     nonzero = {fn: hits for fn, hits in callsites.items() if hits}
     if nonzero:
         detail = json.dumps(nonzero, indent=2)
-        raise SystemExit(
-            "BLOCKED: found UNCOMMENTED call sites of a deferred function (scope "
-            f"change for the controller):\n{detail}"
-        )
+        raise SystemExit(f"BLOCKED: found UNCOMMENTED call sites of a deferred function (scope change for the controller):\n{detail}")
 
     # 7. Task 2 shape sync: the persisted r2s_*.bin dumps must match EXPECTED_SHAPES.
     shape_mismatches = []
@@ -249,16 +278,22 @@ def main() -> None:
     if tdc_shape_mismatches:
         raise SystemExit(f"tdc_*.bin shape mismatch: {tdc_shape_mismatches}")
 
+    # 7c. Task 5 shape sync: the persisted ltsv_*.bin dumps must match LTSV_EXPECTED_SHAPES.
+    ltsv_shape_mismatches = []
+    for name, expected in LTSV_EXPECTED_SHAPES.items():
+        got = _read_bin_shape(PHASE2B_DIR / name)
+        if got != expected:
+            ltsv_shape_mismatches.append({"file": name, "expected": expected, "got": got})
+    if ltsv_shape_mismatches:
+        raise SystemExit(f"ltsv_*.bin shape mismatch: {ltsv_shape_mismatches}")
+
     # 8. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
     compiler = _run([gxx, "--version"]).splitlines()[0].strip()
 
     manifest = {
         "compiler": compiler,
-        "flags": (
-            "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off "
-            "-DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp"
-        ),
+        "flags": ("-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp"),
         "segmenter_linkage": {
             "text": (
                 "Phase 2b Task 1: the six vendored legacy segmenter TUs linked into "
@@ -321,7 +356,7 @@ def main() -> None:
                 "mutation observed through the same Eigen::Ref); r2s_boundaries.bin "
                 "(Nx2 begin/type) walks the resulting seg._Classification[0] "
                 "hypothesis list. The conv=none variant re-reads the config with "
-                "BLSTM_convolution_window_size forced to \"0\" via the established "
+                'BLSTM_convolution_window_size forced to "0" via the established '
                 "_Params erase/set pattern (here: assignment, since the key is "
                 "present) -- _ConvolutionCoeff collapses to 0 cols, the "
                 "`.cols() > 1` gate in results2segmentation is false, and the "
@@ -390,6 +425,66 @@ def main() -> None:
             "expected_shapes": {k: list(v) for k, v in TDC_EXPECTED_SHAPES.items()},
             "extra_files": TDC_EXTRA_FILES,
         },
+        "ltsv_segmenter": {
+            "text": (
+                "Phase 2b Task 5: LtsvSegmenter (Algo 2). PRIMARY config (ltsv.config, "
+                "nb_DCT=0): LongTermSpectralVariation::getSegmentation "
+                "(LongTermSpectralVariation.cpp:130-407) calls applyFilterBank only (no "
+                "DCT -> no Eigen GEMM), so the REAL compiled getSegmentation is the "
+                "bit-golden AS-IS, same strength oracle as TdcSegmenter. LtsvProbe "
+                "(harness-local, derives LongTermSpectralVariation) exposes the "
+                "protected fields needed to independently replicate the pre-convolution "
+                "decimated result_vec (a getSegmentation-local, not otherwise "
+                "observable) via the REAL public classifySequence -- same pattern as "
+                "TdcProbe. ltsv.config: spectrum_order=8 (window_size=256, "
+                "periodogram_length=129), spectrum_shift=0.01s (80 frames), nb_bins=26 "
+                "mel filters (is_log_mel=true), nb_DCT=0, LTSVwindow=0.3s -> half-window "
+                "15 periodogram frames, LTSVshift=0.04s -> shift 4 periodogram frames. "
+                "The driver's own periodogram span uses begin_frame=0/end_frame= "
+                "audio.getFrameCount() (LongTermSpectralVariation.cpp:293-294) -- ONE "
+                "MORE than build_input_sequence's end=ncols()-1 call, the frameCount+1 "
+                "vec_size quirk (spec S4.2): periodogram vec_size = ceil((frameCount+1)/"
+                "spectrum_shift) = 201 rows, then real_vec_size = ceil(201/4) = 51 "
+                "result columns. SECONDARY config (ltsv_dct.config, nb_DCT=4): "
+                "applyDCT's Eigen GEMM diverges from the ascending-loop port at this "
+                "shape (same family the Phase 1 GEMM_CHECK pre-check flagged), so this "
+                "variant runs getSegmentation's body as an in-process reimplementation "
+                "with ONLY the applyDCT call swapped for applyDCTLoop (T7's ascending- "
+                "loop port, already defined for the Phase 1 DCT golden) -- periodogram, "
+                "mel filterbank, LTSV classifySequence, and results2segmentation all "
+                "stay the REAL compiled machinery, called through the same LtsvProbe "
+                "surface. ltsv_tiny.config (LTSVwindow=0.001s): round(0.001*8000/2/80) "
+                "== 0, floored to 1 (LongTermSpectralVariation.cpp:257-258) -- the "
+                "LTSV-standalone floor-to-1 quirk, which DIFFERS from the BLSTM "
+                "spectral segmenter's floor-to-0-disables (BLSTMSpectralSegmenter.cpp), "
+                "ported as written. ltsv_vrcts_chan1.xml is the REAL toFile_VRCTS "
+                "output on a SEPARATE zero-offset AudioStruct (same rationale as "
+                "tdc_vrcts_chan1.xml). ltsv_scores.bin is compute_errors() against the "
+                "same programmatic two-span reference recipe as TdcSegmenter. "
+                "ltsv_boundaries_file2_chan1.bin is the TWO-FILES golden: the SAME "
+                "LtsvProbe instance runs getSegmentation a second time on the excerpt, "
+                "pinning the _WindowShift/_SpectrumShift quantization lifecycle (both "
+                "are round(x*rate/N)*N/rate re-quantizations of an already-quantized "
+                "value -- idempotent, same determinism-not-statefulness scope as the "
+                "TDC two-files golden)."
+            ),
+            "constants": {
+                "rate": 8000,
+                "spectrum_order": 8,
+                "periodogram_length": 129,
+                "spectrum_shift_frames": 80,
+                "spectrum_shift_sec": 0.01,
+                "periodogram_vec_size": 201,
+                "ltsv_half_window_frames": 15,
+                "ltsv_shift_frames": 4,
+                "real_vec_size": 51,
+                "ltsv_tiny_window_half_frames": 1,
+                "reference_spans_sec": [[0.4, 0.9], [1.2, 1.6]],
+            },
+            "expected_shapes": {k: list(v) for k, v in LTSV_EXPECTED_SHAPES.items()},
+            "extra_files": LTSV_EXTRA_FILES,
+            "config_files": LTSV_CONFIG_FILES,
+        },
     }
 
     manifest_path = PHASE2B_DIR / "manifest.json"
@@ -398,7 +493,7 @@ def main() -> None:
     counts = manifest["callsite_checks"]["counts"]
     print(
         f"OK: {len(fmtr_cases)} FMTR_CHECK all ok, "
-        f"callsites {counts}, r2s shapes ok, tdc shapes ok, "
+        f"callsites {counts}, r2s shapes ok, tdc shapes ok, ltsv shapes ok, "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

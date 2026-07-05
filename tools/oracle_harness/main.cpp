@@ -30,6 +30,7 @@
 #include "Helpers.hpp"
 #include "InputStatistics.h"
 #include "LSTMLayer.h"
+#include "LongTermSpectralVariation.h"
 #include "MelFilterBank.h"
 #include "NeuronLayer.h"
 #include "Segmenter.h"
@@ -66,6 +67,43 @@ struct TdcProbe : TimeDomainCorrel {
     using Segmenter::_WindowingType;
     using Segmenter::_WindowingParam;
     using Segmenter::results2segmentation;
+};
+
+// Phase 2b Task 5: LtsvSegmenter (Algo 2) oracle. `LongTermSpectralVariation::
+// getSegmentation` (LongTermSpectralVariation.cpp:130-407) calls no NN (the mel/DCT
+// branch's only libm is fmath::log/cos via the windowing coefficients + the DCT
+// cosine table; classifySequence itself is cwise+sum), so under the primary
+// (nb_DCT=0) config the REAL compiled getSegmentation is used AS-IS -- no
+// transcription. LtsvProbe exposes the protected fields the harness needs to
+// independently replicate the pre-convolution decimated result_vec (a
+// getSegmentation-local, not otherwise observable) via the REAL public
+// classifySequence, matching the TdcProbe pattern.
+struct LtsvProbe : LongTermSpectralVariation {
+    LtsvProbe(ConfigFile &conf) : LongTermSpectralVariation(conf, false, false) {}
+    using Segmenter::_WindowShift;
+    using Segmenter::_WindowSize;
+    using Segmenter::_FlagDCOffset;
+    using Segmenter::_WindowingType;
+    using Segmenter::_WindowingParam;
+    using Segmenter::_PreemphRatio;
+    using Segmenter::_NoiseSeed;
+    using Segmenter::_NoiseRatio;
+    using Segmenter::results2segmentation;
+    using LongTermSpectralVariation::_SpectrumOrder;
+    using LongTermSpectralVariation::_SpectrumShift;
+    using LongTermSpectralVariation::_TemporalConvolutionSize;
+    using LongTermSpectralVariation::_TemporalConvolutionType;
+    using LongTermSpectralVariation::_MinMelFreq;
+    using LongTermSpectralVariation::_MaxMelFreq;
+    using LongTermSpectralVariation::_NbBins;
+    using LongTermSpectralVariation::_IsLog;
+    using LongTermSpectralVariation::_NbDCT;
+    using LongTermSpectralVariation::_IgnoreFirstDCT;
+    using LongTermSpectralVariation::_ComputeDeltasNb;
+    using LongTermSpectralVariation::_ComputeDeltaDeltasNb;
+    using LongTermSpectralVariation::_MinFreq;
+    using LongTermSpectralVariation::_MaxFreq;
+    using LongTermSpectralVariation::classifySequence;
 };
 
 // Constants ALL later tasks reuse (kept in sync with the harness manifest).
@@ -929,6 +967,17 @@ int main(int argc, char** argv) {
     std::string tdcConfigPath = (argc > 4)
         ? std::string(argv[4])
         : std::string("../../tests/reference_data/phase2b/tdc.config");
+
+    // Phase 2b Task 5: LTSV-prefixed configs, same argv-override convention.
+    std::string ltsvConfigPath = (argc > 5)
+        ? std::string(argv[5])
+        : std::string("../../tests/reference_data/phase2b/ltsv.config");
+    std::string ltsvDctConfigPath = (argc > 6)
+        ? std::string(argv[6])
+        : std::string("../../tests/reference_data/phase2b/ltsv_dct.config");
+    std::string ltsvTinyConfigPath = (argc > 7)
+        ? std::string(argv[7])
+        : std::string("../../tests/reference_data/phase2b/ltsv_tiny.config");
 
     int dumps = 0;
 
@@ -4209,6 +4258,370 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "tdc_boundaries_file2_chan1.bin", boundaries2);
             ++dumps;
         }
+    }
+
+    // --- Phase 2b Task 5: LtsvSegmenter (Algo 2) -----------------------------
+    // legacy: LongTermSpectralVariation::getSegmentation (LongTermSpectralVariation.
+    // cpp:130-407). PRIMARY config (ltsv.config, nb_DCT=0): the mel/DCT branch calls
+    // applyFilterBank only (no DCT -> no Eigen GEMM), so the REAL compiled
+    // getSegmentation is the bit-golden AS-IS, same strength oracle as TdcProbe.
+    // SECONDARY config (ltsv_dct.config, nb_DCT=4): applyDCT's Eigen GEMM would
+    // diverge from the Rust ascending-loop port at this shape, so a dedicated
+    // in-process reimplementation of getSegmentation's body is run instead, with
+    // ONLY the applyDCT call swapped for applyDCTLoop (already defined above for
+    // Phase 1/2's own DCT golden) -- everything else (periodogram, mel filterbank,
+    // LTSV classifySequence, results2segmentation) is the REAL compiled machinery.
+    {
+        ConfigFile confLtsv(ltsvConfigPath, '_');
+        AudioStruct audioLtsv(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+
+        // --- File 1: real getSegmentation on a fresh LtsvProbe (nb_DCT=0) ------
+        LtsvProbe probe(confLtsv);
+        Segmentation seg(audioLtsv, 0.5);
+        probe.getSegmentation(audioLtsv, seg);
+        seg.compute_errors();
+
+        const long rate = audioLtsv.getFrameRate();
+        const long long frameCount = audioLtsv.getFrameCount();
+
+        // Independent re-derivation matching LongTermSpectralVariation.cpp:145-307
+        // exactly, to recover the pre-convolution decimated result_vec (a
+        // getSegmentation-local, not otherwise observable) via the REAL public
+        // classifySequence.
+        long spectrumOrder = probe._SpectrumOrder;
+        if (spectrumOrder > 19) spectrumOrder = 19;
+        std::vector<double>::size_type windowSize = 1 << spectrumOrder;
+        std::vector<double>::size_type fullSignalWindowSize = windowSize + 1;
+        std::vector<double>::size_type periodogramLength = (1 << (spectrumOrder - 1)) + 1;
+        // getSegmentation already quantized probe._SpectrumShift as a side effect.
+        long spectrumShift = (long) boost::math::round(probe._SpectrumShift * rate);
+
+        Eigen::MatrixXd windowingCoeff =
+            getWindowingCoefficients(probe._WindowingType, false, fullSignalWindowSize, probe._WindowingParam);
+
+        // Freq band: the LTSV.cpp:200-209 clamp-order VARIANT.
+        std::vector<double>::size_type freqBeg = 0;
+        std::vector<double>::size_type freqEnd = periodogramLength - 1;
+        double freqStep = ((double) rate) / 2 / freqEnd;
+        std::vector<double>::size_type tmp = (std::vector<double>::size_type) floor(probe._MinFreq / freqStep);
+        if (freqBeg < tmp) freqBeg = tmp;
+        tmp = (std::vector<double>::size_type) ceil(probe._MaxFreq / freqStep);
+        if (freqEnd > tmp) freqEnd = tmp;
+        if (freqBeg > freqEnd) freqBeg = freqEnd;
+
+        MelFilterBank melFilters;
+        if (probe._NbBins > 0) {
+            melFilters = MelFilterBank(probe._MinMelFreq, probe._MaxMelFreq, probe._NbBins,
+                                        freqBeg * freqStep, freqEnd * freqStep, rate,
+                                        periodogramLength - 1, probe._IsLog, probe._NbDCT,
+                                        probe._IgnoreFirstDCT, probe._ComputeDeltasNb,
+                                        probe._ComputeDeltaDeltasNb);
+            periodogramLength = melFilters.getNbFilters();
+            freqBeg = 0;
+            freqEnd = periodogramLength - 1;
+        }
+
+        Eigen::MatrixXd temporalConvCoeff =
+            getWindowingCoefficients(probe._TemporalConvolutionType, true, 2 * probe._TemporalConvolutionSize + 1);
+
+        std::vector<double>::size_type ltsvWindowSize =
+            (std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / 2.0 / spectrumShift);
+        if (ltsvWindowSize < 1) ltsvWindowSize = 1;
+        // getSegmentation already quantized probe._WindowShift as a side effect;
+        // ltsvWindowShift in PERIODOGRAM FRAMES is recovered from it.
+        long ltsvWindowShift = (long) boost::math::round(probe._WindowShift * rate / spectrumShift);
+
+        long long beginFrame = 0;
+        long long endFrame = frameCount;
+        std::vector<double>::size_type vecSize = (std::vector<double>::size_type) (endFrame - beginFrame + 1);
+        if ((std::vector<double>::size_type) (vecSize / spectrumShift) * spectrumShift == vecSize) {
+            vecSize = (std::vector<double>::size_type) (vecSize / spectrumShift);
+        } else {
+            vecSize = (std::vector<double>::size_type) (vecSize / spectrumShift + 1);
+        }
+        std::vector<double>::size_type realVecSize = vecSize;
+        if ((std::vector<double>::size_type) (realVecSize / ltsvWindowShift) * ltsvWindowShift == realVecSize) {
+            realVecSize = (std::vector<double>::size_type) (realVecSize / ltsvWindowShift);
+        } else {
+            realVecSize = (std::vector<double>::size_type) (realVecSize / ltsvWindowShift + 1);
+        }
+
+        Loki::Factory<AbstractFFT<double>,unsigned int> gfftFactoryLtsv;
+        FactoryInit<GFFTList<GFFT,1,20>::Result>::apply(gfftFactoryLtsv);
+
+        for (int chan = 0; chan < audioLtsv.getChannelCount(); ++chan) {
+            audioLtsv.computeSegmentPeriodogramEstimates(spectrumOrder, spectrumShift, chan, probe._FlagDCOffset,
+                                                          windowingCoeff, melFilters, gfftFactoryLtsv,
+                                                          temporalConvCoeff, beginFrame, endFrame);
+            const Eigen::MatrixXd& periodogramSrc =
+                melFilters.notEmpty() ? audioLtsv._FilterBankedPeriodogram : audioLtsv._Periodogram;
+
+            Eigen::MatrixXd resultVec = Eigen::MatrixXd::Zero(1, realVecSize);
+            for (std::vector<double>::size_type jj = 0; jj < vecSize; jj += ltsvWindowShift) {
+                resultVec(0, jj / ltsvWindowShift) =
+                    probe.classifySequence(jj, freqBeg, freqEnd, ltsvWindowSize, periodogramLength, vecSize, periodogramSrc);
+            }
+            std::ostringstream bufResult;
+            bufResult << "ltsv_result_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufResult.str(), resultVec);
+            ++dumps;
+        }
+
+        // Convolved rows + boundaries: read back off the REAL post-getSegmentation
+        // Segmentation, and independently rebuild via results2segmentation on a COPY
+        // of the pre-conv rows just dumped (same probe -- exercises the identical
+        // Segmenter::results2segmentation the real getSegmentation calls).
+        for (int chan = 0; chan < audioLtsv.getChannelCount(); ++chan) {
+            std::ostringstream bufResult;
+            bufResult << "ltsv_result_chan" << chan + 1 << ".bin";
+            Eigen::MatrixXd resultVec;
+            {
+                long long r, c;
+                std::ifstream f(out + bufResult.str(), std::ios::binary);
+                f.read((char*) &r, sizeof(long long));
+                f.read((char*) &c, sizeof(long long));
+                resultVec.resize(r, c);
+                f.read((char*) resultVec.data(), sizeof(double) * r * c);
+            }
+            Eigen::MatrixXd targetSeq = Eigen::MatrixXd::Zero(resultVec.cols(), 1);
+            Segmentation segConv(audioLtsv, 0.5);
+            probe.results2segmentation(segConv, probe._WindowShift, 0.0, resultVec, targetSeq, chan, SPEECH);
+            std::ostringstream bufConv;
+            bufConv << "ltsv_convolved_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufConv.str(), resultVec);
+            ++dumps;
+
+            std::ostringstream bufBound;
+            bufBound << "ltsv_boundaries_chan" << chan + 1 << ".bin";
+            const auto& segs = segConv._Classification.at(chan);
+            Eigen::MatrixXd boundaries((long) segs.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs.size(); ++ii) {
+                boundaries((long) ii, 0) = segs[ii]._BeginTime;
+                boundaries((long) ii, 1) = (double) segs[ii]._Type;
+            }
+            Matrix2BinaryFile(out + bufBound.str(), boundaries);
+            ++dumps;
+        }
+
+        // VRCTS bytes: REAL toFile_VRCTS, on a zero-offset AudioStruct (same
+        // rationale as tdc_vrcts_chan1.xml -- the Rust Segmentation container has no
+        // _AudioOffset field).
+        {
+            AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, item);
+            ConfigFile confLtsvV(ltsvConfigPath, '_');
+            LtsvProbe probeV(confLtsvV);
+            Segmentation segV(audioZeroOff, 0.5);
+            probeV.getSegmentation(audioZeroOff, segV);
+            segV.compute_errors();
+
+            std::string base = out + "ltsv_vrcts";
+            segV.toFile_VRCTS(base);
+            std::ifstream vf(base + "_chan_1.xml", std::ios::binary);
+            std::ostringstream vs;
+            vs << vf.rdbuf();
+            std::ofstream outv(out + "ltsv_vrcts_chan1.xml", std::ios::binary);
+            outv << vs.str();
+        }
+        ++dumps;
+
+        // compute_errors vs a programmatic reference: same recipe as TdcSegmenter.
+        {
+            AudioStruct audioScore(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            ConfigFile confLtsv2(ltsvConfigPath, '_');
+            LtsvProbe probeScore(confLtsv2);
+            Segmentation segScore(audioScore, 0.5);
+            double audioDuration = ((double) audioScore.getFrameCount() - 1) / audioScore.getFrameRate();
+            for (int chan = 0; chan < audioScore.getChannelCount(); ++chan) {
+                segScore._Reference.push_back(std::deque<Segment> {Segment(), Segment(audioDuration, END)});
+                segScore.label_segment(segScore._Reference.at(chan), 0.4, 0.9, SPEECH);
+                segScore.label_segment(segScore._Reference.at(chan), 1.2, 1.6, SPEECH);
+            }
+            probeScore.getSegmentation(audioScore, segScore);
+            segScore.compute_errors();
+
+            Eigen::MatrixXd scores(audioScore.getChannelCount(), 3);
+            for (int chan = 0; chan < audioScore.getChannelCount(); ++chan) {
+                scores(chan, 0) = segScore._ClassificationErrors.at(chan)[SPEECH]._Pfa;
+                scores(chan, 1) = segScore._ClassificationErrors.at(chan)[SPEECH]._Pmiss;
+                scores(chan, 2) = segScore._ClassificationErrors.at(chan)[SPEECH]._ErrorRate;
+            }
+            Matrix2BinaryFile(out + "ltsv_scores.bin", scores);
+            ++dumps;
+        }
+
+        // --- TWO-FILES golden: run the SAME probe object again on a FRESH
+        // dedicated AudioStruct -- pins the _WindowShift/_SpectrumShift quantization
+        // lifecycle (see the Rust two-files test's scoped-down determinism note).
+        {
+            AudioStruct audioLtsv2(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            Segmentation seg2(audioLtsv2, 0.5);
+            probe.getSegmentation(audioLtsv2, seg2);
+            seg2.compute_errors();
+            const auto& segs2 = seg2._Classification.at(0);
+            Eigen::MatrixXd boundaries2((long) segs2.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs2.size(); ++ii) {
+                boundaries2((long) ii, 0) = segs2[ii]._BeginTime;
+                boundaries2((long) ii, 1) = (double) segs2[ii]._Type;
+            }
+            Matrix2BinaryFile(out + "ltsv_boundaries_file2_chan1.bin", boundaries2);
+            ++dumps;
+        }
+    }
+
+    // --- Phase 2b Task 5: LtsvSegmenter SECONDARY variant (nb_DCT=4) ---------
+    // applyDCT's Eigen GEMM diverges from the ascending-loop port at this shape (the
+    // Phase 1 GEMM_CHECK pre-check established this for the same nb_bins/nb_DCT
+    // family), so this variant runs an IN-PROCESS reimplementation of
+    // getSegmentation's body with ONLY the applyDCT call swapped for applyDCTLoop
+    // (defined above, T7). Everything else -- periodogram, mel filterbank, LTSV
+    // classifySequence, results2segmentation -- is the REAL compiled machinery,
+    // called through the SAME LtsvProbe/protected-member surface as the primary
+    // variant.
+    {
+        ConfigFile confLtsvDct(ltsvDctConfigPath, '_');
+        AudioStruct audioLtsvDct(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+        LtsvProbe probe(confLtsvDct);
+
+        const long rate = audioLtsvDct.getFrameRate();
+        const long long frameCount = audioLtsvDct.getFrameCount();
+
+        long spectrumOrder = probe._SpectrumOrder;
+        if (spectrumOrder > 19) spectrumOrder = 19;
+        std::vector<double>::size_type periodogramLength = (1 << (spectrumOrder - 1)) + 1;
+        long spectrumShift = (long) boost::math::round(probe._SpectrumShift * rate);
+        probe._SpectrumShift = ((double) spectrumShift) / rate;
+        std::vector<double>::size_type fullSignalWindowSize = (1u << spectrumOrder) + 1;
+
+        Eigen::MatrixXd windowingCoeff =
+            getWindowingCoefficients(probe._WindowingType, false, fullSignalWindowSize, probe._WindowingParam);
+
+        if (probe._PreemphRatio > 0) audioLtsvDct.applyPreemph(probe._PreemphRatio);
+        if (probe._NoiseSeed > 0) audioLtsvDct.applyNoise(probe._NoiseRatio);
+
+        std::vector<double>::size_type freqBeg = 0;
+        std::vector<double>::size_type freqEnd = periodogramLength - 1;
+        double freqStep = ((double) rate) / 2 / freqEnd;
+        std::vector<double>::size_type tmp = (std::vector<double>::size_type) floor(probe._MinFreq / freqStep);
+        if (freqBeg < tmp) freqBeg = tmp;
+        tmp = (std::vector<double>::size_type) ceil(probe._MaxFreq / freqStep);
+        if (freqEnd > tmp) freqEnd = tmp;
+        if (freqBeg > freqEnd) freqBeg = freqEnd;
+
+        MelFilterBank melFilters(probe._MinMelFreq, probe._MaxMelFreq, probe._NbBins,
+                                  freqBeg * freqStep, freqEnd * freqStep, rate,
+                                  periodogramLength - 1, probe._IsLog, probe._NbDCT,
+                                  probe._IgnoreFirstDCT, probe._ComputeDeltasNb,
+                                  probe._ComputeDeltaDeltasNb);
+        int nbFiltersForDct = (int) melFilters.getNbFilters();
+        int nbDctClamped = probe._NbDCT;
+        if (nbDctClamped > nbFiltersForDct) nbDctClamped = nbFiltersForDct;
+        periodogramLength = melFilters.getNbDCT();
+        freqBeg = 0;
+        freqEnd = periodogramLength - 1;
+
+        // _CoeffsDCT is private (no getter); reconstruct with the exact ctor
+        // formula (MelFilterBank.cpp:108-127), same recipe as the Phase 1 DCT
+        // GEMM_CHECK block above: NB_FILTERS x NB_DCT, PI = the legacy _PI literal.
+        const double PI_LTSV = 3.14159265358979323846264338327;
+        Eigen::MatrixXd dctCoeffs = Eigen::MatrixXd::Zero(nbFiltersForDct, nbDctClamped);
+        for (int col = 0; col < nbFiltersForDct; ++col) {
+            for (int row = 0; row < nbDctClamped; ++row) {
+                dctCoeffs(col, row) = std::cos(PI_LTSV / nbFiltersForDct * (col + 0.5) * row);
+            }
+        }
+
+        Eigen::MatrixXd temporalConvCoeff =
+            getWindowingCoefficients(probe._TemporalConvolutionType, true, 2 * probe._TemporalConvolutionSize + 1);
+
+        std::vector<double>::size_type ltsvWindowSize =
+            (std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / 2.0 / spectrumShift);
+        if (ltsvWindowSize < 1) ltsvWindowSize = 1;
+        long ltsvWindowShift =
+            (long) boost::math::round(probe._WindowShift * rate / spectrumShift);
+        if (ltsvWindowShift < 1) ltsvWindowShift = 1;
+        probe._WindowShift = ((double) ltsvWindowShift * spectrumShift) / rate;
+
+        long long beginFrame = 0;
+        long long endFrame = frameCount;
+        std::vector<double>::size_type vecSize = (std::vector<double>::size_type) (endFrame - beginFrame + 1);
+        if ((std::vector<double>::size_type) (vecSize / spectrumShift) * spectrumShift == vecSize) {
+            vecSize = (std::vector<double>::size_type) (vecSize / spectrumShift);
+        } else {
+            vecSize = (std::vector<double>::size_type) (vecSize / spectrumShift + 1);
+        }
+        std::vector<double>::size_type realVecSize = vecSize;
+        if ((std::vector<double>::size_type) (realVecSize / ltsvWindowShift) * ltsvWindowShift == realVecSize) {
+            realVecSize = (std::vector<double>::size_type) (realVecSize / ltsvWindowShift);
+        } else {
+            realVecSize = (std::vector<double>::size_type) (realVecSize / ltsvWindowShift + 1);
+        }
+
+        Loki::Factory<AbstractFFT<double>,unsigned int> gfftFactoryDct;
+        FactoryInit<GFFTList<GFFT,1,20>::Result>::apply(gfftFactoryDct);
+
+        Segmentation seg(audioLtsvDct, 0.5);
+        for (int chan = 0; chan < audioLtsvDct.getChannelCount(); ++chan) {
+            audioLtsvDct.computeSegmentPeriodogramEstimates(spectrumOrder, spectrumShift, chan, probe._FlagDCOffset,
+                                                             windowingCoeff, melFilters, gfftFactoryDct,
+                                                             temporalConvCoeff, beginFrame, endFrame);
+            // applyDCT substitution: the REAL MelFilterBank::applyFilterBank output
+            // (audioLtsvDct._FilterBankedPeriodogram) feeds applyDCTLoop (T7's
+            // ascending-loop port of applyDCT) instead of the real (GEMM-based)
+            // MelFilterBank::applyDCT.
+            Eigen::MatrixXd dctOut = applyDCTLoop(audioLtsvDct._FilterBankedPeriodogram, dctCoeffs,
+                                                  nbDctClamped, probe._IgnoreFirstDCT, probe._ComputeDeltasNb,
+                                                  probe._ComputeDeltaDeltasNb);
+
+            Eigen::MatrixXd resultVec = Eigen::MatrixXd::Zero(1, realVecSize);
+            for (std::vector<double>::size_type jj = 0; jj < vecSize; jj += ltsvWindowShift) {
+                resultVec(0, jj / ltsvWindowShift) =
+                    probe.classifySequence(jj, freqBeg, freqEnd, ltsvWindowSize, periodogramLength, vecSize, dctOut);
+            }
+            std::ostringstream bufResult;
+            bufResult << "ltsv_dct_result_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufResult.str(), resultVec);
+            ++dumps;
+
+            Eigen::MatrixXd targetSeq = Eigen::MatrixXd::Zero(resultVec.cols(), 1);
+            probe.results2segmentation(seg, probe._WindowShift, 0.0, resultVec, targetSeq, chan, SPEECH);
+            std::ostringstream bufConv;
+            bufConv << "ltsv_dct_convolved_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufConv.str(), resultVec);
+            ++dumps;
+        }
+        seg.compute_errors();
+        {
+            const auto& segs = seg._Classification.at(0);
+            Eigen::MatrixXd boundaries((long) segs.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs.size(); ++ii) {
+                boundaries((long) ii, 0) = segs[ii]._BeginTime;
+                boundaries((long) ii, 1) = (double) segs[ii]._Type;
+            }
+            Matrix2BinaryFile(out + "ltsv_dct_boundaries_chan1.bin", boundaries);
+            ++dumps;
+        }
+    }
+
+    // --- Phase 2b Task 5: LtsvSegmenter tiny-window floor-to-1 quirk ---------
+    // ltsv_tiny.config: LTSVwindow 0.001 -> round(0.001*8000/2/80) == 0, floored to
+    // 1 (LongTermSpectralVariation.cpp:257-258). Real getSegmentation call only --
+    // no independent result-row replication needed, this just proves the driver
+    // does not panic/divide-by-zero and produces a Segmentation.
+    {
+        ConfigFile confLtsvTiny(ltsvTinyConfigPath, '_');
+        AudioStruct audioLtsvTiny(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+        LtsvProbe probeTiny(confLtsvTiny);
+        Segmentation segTiny(audioLtsvTiny, 0.5);
+        probeTiny.getSegmentation(audioLtsvTiny, segTiny);
+        segTiny.compute_errors();
+        const auto& segsTiny = segTiny._Classification.at(0);
+        Eigen::MatrixXd boundariesTiny((long) segsTiny.size(), 2);
+        for (std::vector<double>::size_type ii = 0; ii < segsTiny.size(); ++ii) {
+            boundariesTiny((long) ii, 0) = segsTiny[ii]._BeginTime;
+            boundariesTiny((long) ii, 1) = (double) segsTiny[ii]._Type;
+        }
+        Matrix2BinaryFile(out + "ltsv_tiny_boundaries_chan1.bin", boundariesTiny);
+        ++dumps;
     }
 
     // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------
