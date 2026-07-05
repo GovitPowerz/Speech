@@ -187,6 +187,53 @@ SIGNAL_EXTRA_FILES = [
 ]
 SIGNAL_CONFIG_FILES = ["signal.config"]
 
+# Task 7: BlstmSpectralSegmenter (Algo 3, no pitch pass) dumps -- the REAL
+# 1_worker_1.config's algorithm. Like the signal driver, the spectral result_vec
+# comes from feedForwardBackward (BLSTMSpectralSegmenter.cpp:740); the PRIMARY golden
+# dumps come from a TRANSCRIPTION of getSegmentation (:593-887 MINUS the pitch second
+# pass :757-805, which the Task-7 configs short-circuit via TDCwindow 0) with ONLY
+# that FFB call swapped for signalReimplFFB (the Task 6 reimpl family, reused). A
+# SECONDARY probe runs the REAL getSegmentation beside it (structural equality or
+# abort, SEG_STRUCT max-dt recorded). Real net (33671 weights), input width D=11
+# (< 23 -> the LSTM input topRows tolerance). Three variants (BLSTM_shift overridden):
+#   real      -- 1_worker_1.config AS-IS (BLSTM_shift 0.8 -> overlap window_shift 80)
+#   overlap   -- BLSTM_shift 0.01 (heavier overlap, window_shift 1; the cross-channel
+#                reuse golden -- chan-2 result seeded by chan-1 via the reused buffer)
+#   noOverlap -- BLSTM_shift 0 (truncate FFB; window_size 324, window_shift 1)
+# frame_count 16001, ssr 4, spectrum_shift_in_frames 80, periodogram rows T=201,
+# real_vec_size = 201/4/1/1/1 = 50 for all three variants.
+SPECTRAL_EXPECTED_SHAPES = {
+    "spectral_real_inputseq_chan1.bin": (201, 11),
+    "spectral_real_result_chan1.bin": (1, 50),
+    "spectral_real_convolved_chan1.bin": (1, 50),
+    "spectral_real_boundaries_chan1.bin": (3, 2),
+    "spectral_real_scores.bin": (2, 3),
+    "spectral_overlap_inputseq_chan1.bin": (201, 11),
+    "spectral_overlap_result_chan1.bin": (1, 50),
+    "spectral_overlap_result_chan2.bin": (1, 50),
+    "spectral_overlap_convolved_chan1.bin": (1, 50),
+    "spectral_overlap_convolved_chan2.bin": (1, 50),
+    "spectral_overlap_boundaries_chan1.bin": (3, 2),
+    "spectral_overlap_boundaries_chan2.bin": (2, 2),
+    "spectral_overlap_scores.bin": (2, 3),
+    "spectral_noOverlap_inputseq_chan1.bin": (201, 11),
+    "spectral_noOverlap_result_chan1.bin": (1, 50),
+    "spectral_noOverlap_convolved_chan1.bin": (1, 50),
+    "spectral_noOverlap_boundaries_chan1.bin": (3, 2),
+    "spectral_noOverlap_scores.bin": (2, 3),
+    "spectral_noOverlap_boundaries_file1_chan1.bin": (3, 2),
+    "spectral_noOverlap_boundaries_file2_chan1.bin": (3, 2),
+    "spectral_noOverlap_params_file2.bin": (1, 4),
+}
+SPECTRAL_EXTRA_FILES = [
+    "spectral_real_vrcts_chan1.xml",
+    "spectral_overlap_vrcts_chan1.xml",
+    "spectral_noOverlap_vrcts_chan1.xml",
+]
+# Task 7 reuses 1_worker_1.config (nn_config, already committed under phase0); no new
+# config file is added under phase2b.
+SPECTRAL_CONFIG_FILES: list[str] = []
+
 # SEG_STRUCT self-test lines from the SECONDARY real-forward probe (spec decision 3):
 # reimpl-driven segment structure (count + types) must equal the real Eigen path's,
 # with the boundary max-delta recorded. ok=0 (or a missing line) -> SystemExit.
@@ -194,7 +241,14 @@ SEG_STRUCT_RE = re.compile(
     r"^SEG_STRUCT site=(?P<site>\w+) ok=(?P<ok>[01]) max_dt=(?P<max_dt>[-0-9.eE+]+)$",
     re.MULTILINE,
 )
-EXPECTED_SEG_STRUCT_SITES = {"signal_window0", "signal_overlap", "signal_noOverlap"}
+EXPECTED_SEG_STRUCT_SITES = {
+    "signal_window0",
+    "signal_overlap",
+    "signal_noOverlap",
+    "spectral_real",
+    "spectral_overlap",
+    "spectral_noOverlap",
+}
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
@@ -325,6 +379,13 @@ def main() -> None:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
         for name in SIGNAL_EXTRA_FILES:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        # Task 7 (BlstmSpectralSegmenter dumps): inputseq/result/convolved/boundaries/
+        # scores per variant (chan 2 for the overlap cross-channel reuse golden) + the
+        # zero-offset VRCTS xml + the two-files noOverlap lifecycle boundaries + params.
+        for name in SPECTRAL_EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        for name in SPECTRAL_EXTRA_FILES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
 
     # 4. Regression guard: the committed fixture dirs must be byte-identical after
     #    the run (the fmtr upgrade must not perturb any prior harness dump).
@@ -385,6 +446,15 @@ def main() -> None:
             signal_shape_mismatches.append({"file": name, "expected": expected, "got": got})
     if signal_shape_mismatches:
         raise SystemExit(f"signal_*.bin shape mismatch: {signal_shape_mismatches}")
+
+    # 7e. Task 7 shape sync: the persisted spectral_*.bin dumps must match SPECTRAL_EXPECTED_SHAPES.
+    spectral_shape_mismatches = []
+    for name, expected in SPECTRAL_EXPECTED_SHAPES.items():
+        got = _read_bin_shape(PHASE2B_DIR / name)
+        if got != expected:
+            spectral_shape_mismatches.append({"file": name, "expected": expected, "got": got})
+    if spectral_shape_mismatches:
+        raise SystemExit(f"spectral_*.bin shape mismatch: {spectral_shape_mismatches}")
 
     # 8. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -692,10 +762,98 @@ def main() -> None:
                 "reference_spans_sec": [[0.4, 0.9], [1.2, 1.6]],
                 "broken_overlap_params_sec": {"window": 0.5, "shift": 0.1},
             },
-            "seg_struct": dict(sorted(seg_struct.items())),
+            "seg_struct": {k: v for k, v in sorted(seg_struct.items()) if k.startswith("signal_")},
             "expected_shapes": {k: list(v) for k, v in SIGNAL_EXPECTED_SHAPES.items()},
             "extra_files": SIGNAL_EXTRA_FILES,
             "config_files": SIGNAL_CONFIG_FILES,
+        },
+        "spectral_segmenter": {
+            "text": (
+                "Phase 2b Task 7: BlstmSpectralSegmenter (Algo 3, no pitch pass), the "
+                "REAL 1_worker_1.config's algorithm. BLSTMSpectralSegmenter::"
+                "getSegmentation (BLSTMSpectralSegmenter.cpp:593-887) produces its "
+                "result_vec via _BLSTMNeuralNetwork.feedForwardBackward (:740), whose "
+                "real Eigen GEMMs diverge from the ascending-loop port. SpectralProbe "
+                "(harness-local, derives BLSTMSpectralSegmenter) transcribes the "
+                "getSegmentation body MINUS the pitch second pass (:757-805, which the "
+                "Task-7 configs short-circuit -- TDCwindow 0 -> TDC_window_size 0 -> the "
+                "`if (TDC_window_size > 0)` gate at :757 is false) with ONLY the FFB call "
+                "swapped for signalReimplFFB (the Task 6 reimpl family, reused: the "
+                "plain/truncate/overlap windowed drivers are input-column-agnostic and "
+                "the leftCols crop stays FALSE at D=11<23); the spectral param "
+                "derivation (initSpectralAnalysis/getWindowingCoeff/getTemporalConvolution"
+                "/getLTSVParam/getTDCParam/getBLSTMParam/getLTSV/getBLSTMInputSequence) "
+                "calls the REAL compiled protected helpers. SECONDARY probe (spec "
+                "decision 3): the REAL compiled getSegmentation runs beside the "
+                "transcription; segment count + types must match EXACTLY (abort on "
+                "mismatch), boundary max-delta recorded as SEG_STRUCT site="
+                "spectral_<variant> ok=1 max_dt=<measured> (all three measured 0.0 -- the "
+                "reimpl and real Eigen paths agree structurally). UNLIKE the signal "
+                "driver, the real trained net on the REAL spectral features DOES cross "
+                "the rising threshold (0.752): chan-1 detects speech [0, ~1.18s] "
+                "([SPEECH@0, OTHER@~1.183, END@2.0]), so the decision layer (rising "
+                "crossing + linear interpolation + hysteresis area) is genuinely "
+                "exercised by these goldens, not collapsed to the seed. CROSS-CHANNEL "
+                "REUSE QUIRK (the load-bearing layout fact): result_vec is allocated ONCE "
+                "by getBLSTMParam (:631) and REUSED across channels (:740); under the "
+                "overlap FFB (accumulate-in-place :664 += then /= count) channel 2 SEEDS "
+                "from channel 1's post-division contents -- reproduced by holding one "
+                "result_vec across the channel loop; the overlap variant dumps BOTH "
+                "channels (chan-1 result[:5] ~0.997 vs chan-2 ~0.973, chan-2 result "
+                "contaminated by chan-1's carry-over) so the Rust cross-channel golden "
+                "pins it (a fresh-buffer chan-2 run must DIFFER). THREE variants (real "
+                "net, BLSTM_shift overridden): real (1_worker_1.config AS-IS, BLSTM_shift "
+                "0.8 -> overlap window_shift 80, 3 windows), overlap (BLSTM_shift 0.01 -> "
+                "window_shift 1, heavier overlap, the cross-channel golden -- verified NO "
+                "OOB: max overlap write index 50 == result_vec rows), noOverlap "
+                "(BLSTM_shift 0 -> truncate FFB via the noOverlap poisoning; window_size "
+                "floored to (round(3.25*8000/80)/4)*4 = 324, window_shift clamped to 1). "
+                "All three: T=201 periodogram rows, real_vec_size = 201/4/1/1/1 = 50 "
+                "(getBLSTMParam does the ssr-division UNCONDITIONALLY -- the `if noOverlap"
+                "` guard at :487 is commented out, unlike the signal driver's gated "
+                "version at BLSTMSignalSegmenter.cpp:239). Dumps per variant, chan 1 (+ "
+                "chan 2 for overlap): inputseq (201x11, re-validates build_input_sequence "
+                "under driver conditions), result (pre-conv row 1x50), convolved (post "
+                "results2segmentation), boundaries (Nx2 begin/type), vrcts (REAL "
+                "toFile_VRCTS on the reimpl-driven Segmentation, zero-offset audio, 0b-ii "
+                "byte-equivalence), scores (2x3 Pfa/Pmiss/ErrorRate vs the same two-span "
+                "programmatic reference as TDC/LTSV/signal). The noOverlap variant gets "
+                "the TWO-FILES golden: spectral noOverlap assigns _WindowShift = 0.0 at "
+                ":885 (post-dump). So file 2 (SAME probe) re-enters getBLSTMParam with "
+                "_WindowShift == 0.0: :445 rounds 0.0 -> 0, :446 -> noOverlap re-triggers, "
+                ":452 clamps shift to 1, :453 rewrites _WindowShift = 1*80/rate. Pinned "
+                "by spectral_noOverlap_boundaries_file{1,2}_chan1.bin (both dumped, the "
+                "test COMPARES rather than assumes) + the discriminating file2 params row "
+                "spectral_noOverlap_params_file2.bin (1x4: window_shift=1, window_size="
+                "324, spectrum_shift_in_frames=80, real_vec_size=50) so the "
+                "quantization-lifecycle round trip is pinned, not merely coincidental "
+                "boundary equality."
+            ),
+            "constants": {
+                "rate": 8000,
+                "frame_count": 16001,
+                "sub_sampling_ratio": 4,
+                "spectrum_shift_in_frames": 80,
+                "periodogram_rows": 201,
+                "input_width_d": 11,
+                "real_vec_size": 50,
+                "real_window_size_periodogram_frames": 163,
+                "real_window_shift_periodogram_frames": 80,
+                "overlap_window_shift_periodogram_frames": 1,
+                "nooverlap_window_size_periodogram_frames": 324,
+                "nooverlap_window_shift_periodogram_frames": 1,
+                "file2_params_row": {
+                    "window_shift": 1,
+                    "window_size": 324,
+                    "spectrum_shift_in_frames": 80,
+                    "real_vec_size": 50,
+                },
+                "reference_spans_sec": [[0.4, 0.9], [1.2, 1.6]],
+            },
+            "seg_struct": {k: v for k, v in sorted(seg_struct.items()) if k.startswith("spectral_")},
+            "expected_shapes": {k: list(v) for k, v in SPECTRAL_EXPECTED_SHAPES.items()},
+            "extra_files": SPECTRAL_EXTRA_FILES,
+            "config_files": SPECTRAL_CONFIG_FILES,
         },
     }
 
@@ -706,7 +864,7 @@ def main() -> None:
     print(
         f"OK: {len(fmtr_cases)} FMTR_CHECK all ok, {len(seg_struct)} SEG_STRUCT all ok, "
         f"callsites {counts}, r2s shapes ok, tdc shapes ok, ltsv shapes ok, "
-        f"signal shapes ok, manifest -> {manifest_path.relative_to(REPO_ROOT)}"
+        f"signal shapes ok, spectral shapes ok, manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 
 

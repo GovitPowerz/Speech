@@ -855,6 +855,66 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   The NN cost path DOES fire in signal mode (unlike the cost-free TDC/LTSV): `cumulative_error[chan]
   = net.cost`, `nb_of_classif[chan] = net.nb_of_classif` after each `feed_forward_backward`.
 
+- **[phase2b] `BlstmSpectralSegmenter` (Algo 3) result-vec sizing is UNCONDITIONALLY ssr-divided**
+  (`BLSTMSpectralSegmenter.cpp:475-499`, ported in `tasks/sad.rs::get_blstm_param`): the sizing
+  computes `vec_size = ceil(frameCount/_SpectrumShiftInFrames)`, then divides sequentially by every
+  LSTM + output sub-sampling ratio -- guarded ONLY by `if (getSubSamplingRatio() > 1)` (`:488`). The
+  `if ((BLSTM_window_size == 0)||(noOverlap))` gate that would restrict the division (`:487`) is
+  COMMENTED OUT in the live source, so spectral ALWAYS decimates. This is the load-bearing CONTRAST
+  with the signal driver (`BLSTMSignalSegmenter.cpp:236-240`), whose identical division IS gated on
+  `(window==0 || noOverlap)`. Reproduced verbatim; pinned by
+  `get_blstm_param_unconditional_ssr_division_contrast` (`phase2b_spectral_golden.rs`), which
+  hand-derives both the spectral (50) and the hypothetical signal-gated (201) result at the overlap
+  regime (window>0, !noOverlap). The `10*ssr` noOverlap window minimum (`:449`) and the
+  window-half-to-ssr floor (`:442`) are ported too (`get_blstm_param_10ssr_floor_fires`,
+  `get_blstm_param_no_overlap_floor_and_10ssr`).
+
+- **[phase2b] `BlstmSpectralSegmenter` CROSS-CHANNEL `result_vec` REUSE** (spec-named, load-bearing;
+  `BLSTMSpectralSegmenter.cpp:631/:740`): the legacy allocates `result_vec` ONCE (returned by
+  `getBLSTMParam`, `:631`, BEFORE the channel loop) and REUSES the SAME buffer across channels
+  (`:740` passes it to `feedForwardBackward` each iteration). The OverLap FFB accumulates INTO the
+  caller's buffer in place (`:664` `noalias() +=`, then `/= count`), so channel 2 SEEDS from channel
+  1's post-division contents -- channel 2's result is CONTAMINATED by channel 1's carry-over. The
+  Rust driver reproduces this by holding ONE `result_buf` across the channel loop, NOT zeroed
+  between channels. Pinned by `overlap_variant_and_cross_channel_reuse` (both channels' results
+  byte-match the dumps) + the NON-VACUITY contrast `cross_channel_reuse_is_load_bearing` (a
+  fresh-buffer chan-2 run differs from the seeded dump by up to 0.6% relative -- proving the reuse is
+  pinned, not coincidental). This is the OPPOSITE convention from the signal driver, whose
+  `result_vec` is FRESH per channel (`BLSTMSignalSegmenter.cpp` allocation-scope divergence).
+
+- **[phase2b] `BlstmSpectralSegmenter` timeStep OVERLAP-branch override + noOverlap reset ORDER**
+  (`BLSTMSpectralSegmenter.cpp:724-734/:885`): the overlap branch OVERRIDES `timeStep`/`timeOffset`
+  with `_SpectrumShift*ssr` & `timeStep/2 - _SpectrumShift/2` (`:731-732`), NOT `_WindowShift` -- the
+  asymmetry vs the signal driver, which uses `_WindowShift` in its overlap branch. Reproduced;
+  pinned by `timestep_timeoffset_overlap_branch_override`. Separately, the noOverlap `_WindowShift =
+  0.0` poisoning fires AFTER the dumps/`compute_errors` (`:885`), unlike signal's BEFORE-`compute_
+  errors` reset (`BLSTMSignalSegmenter.cpp:376`); this reset-ORDER divergence is cosmetic (the reset
+  only affects the NEXT file) but ported as written. The two-files lifecycle
+  (`two_files_in_sequence_no_overlap_lifecycle`) pins the round trip: file 2 re-enters
+  `get_blstm_param` with `window_shift_sec == 0.0` -> noOverlap re-triggers -> window floored to 324,
+  shift clamped to 1 -- discriminated by the dumped `spectral_noOverlap_params_file2.bin` (1x4), not
+  merely the coincident boundaries.
+
+- **[phase2b] `BlstmSpectralSegmenter` non-wav `_SpectrumShiftInFrames = 80` PERSISTENCE**
+  (`BLSTMSpectralSegmenter.cpp:209-210`): when `!audio.hasReadWavFile()`, `initSpectralAnalysis` sets
+  `_SpectrumShiftInFrames = 80` and `_SpectrumShift = 80/rate`, and these PERSIST into the member for
+  subsequent files. The Rust driver always reads a wav (there is no non-wav fixture), so the
+  persistence is pinned unit-test-only via a direct state mutation
+  (`BlstmSpectralSegmenter::force_non_wav_spectrum_shift` +
+  `non_wav_spectrum_shift_80_fallback_persists`), exposed as a `pub` method solely for that test (no
+  production caller).
+
+- **[phase2b] The REAL `getBLSTMInputSequence` uses an Eigen `applyDCT` GEMM that diverges from the
+  Rust `build_input_sequence`** (`BLSTMSpectralSegmenter.cpp:561-591` reads
+  `audio._CepstreCoefficients`, filled by `MelFilterBank::applyDCT`'s Eigen `melPeriodogram*_CoeffsDCT`
+  product): at the real net's DCT shapes this diverges from the ascending-loop DCT the Phase 1
+  goldens + the Rust port reproduce (measured up to ~19k ULP on the assembled input). So the Task-7
+  oracle harness builds the spectral input via the ASCENDING-LOOP pipeline (empty-mel periodogram +
+  `applyFilterBank` + `applyDCTLoop` + `getLTSV`), matching the E2E leg, NOT the real
+  `getBLSTMInputSequence` -- confirmed byte-identical to `e2e_input.bin`. This is the same
+  Eigen-GEMM-vs-ascending divergence already logged for the DCT/NN sites; noted here because it
+  forced the harness input-assembly choice for the spectral driver golden.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

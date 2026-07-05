@@ -22,7 +22,9 @@ use crate::audio::{
 };
 use crate::features::ltsv_tdc::{ltsv_classify_sequence, tdc_classify_sequence};
 use crate::features::mel::MelFilterBank;
-use crate::features::pipeline::{FeatureConfig, derive_freq_band_ltsv_variant};
+use crate::features::pipeline::{
+    FeatureConfig, SpectralParams, build_input_sequence, derive_freq_band_ltsv_variant,
+};
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
@@ -870,6 +872,456 @@ impl Segmenter for BlstmSignalSegmenter {
     }
 
     /// `getWeights` delegates to the NN (`:42-44`).
+    fn get_weights(&self) -> Vec<f64> {
+        self.net.get_weights()
+    }
+}
+
+/// The `getBLSTMParam` output (`BLSTMSpectralSegmenter.cpp:439-500`): the per-file
+/// window/shift derivation (in PERIODOGRAM-frame units) + result-vec sizing. Mutates
+/// the caller's `window_shift_sec` (the stateful `_WindowShift`, `:453`) via the
+/// `&mut f64` argument, exactly like the legacy member write.
+///
+/// The key divergences vs the signal driver's sizing (all cited in-line):
+/// - window/shift are in PERIODOGRAM frames (`/ spectrum_shift_in_frames`), NOT signal
+///   samples (`BLSTMSignalSegmenter.cpp` has no `/ ssif` anywhere).
+/// - result-vec sizing does the ssr-division UNCONDITIONALLY (`:488`, guarded only by
+///   `ssr > 1`) -- the `if ((BLSTM_window_size == 0)||(noOverlap))` gate at `:487` is
+///   COMMENTED OUT in the live source, so spectral ALWAYS decimates. This is the
+///   contrast with `BLSTMSignalSegmenter.cpp:239`, whose ssr-division IS gated on
+///   `(window == 0 || noOverlap)` -- reproduced in [`BlstmSignalSegmenter`]'s driver.
+///
+/// Returns `(window_size, window_shift, no_overlap, real_vec_size)`. `full_window_size`
+/// is a log-only intermediate (never consumed by the reimpl FFB, which takes
+/// `window_size`/`window_shift`), so it is not returned.
+///
+/// `pub` (not `pub(crate)`) so the integration-test suite `phase2b_spectral_golden.rs`
+/// can hand-test the clamps + the unconditional-ssr-division sizing contrast directly.
+#[allow(clippy::too_many_arguments)]
+pub fn get_blstm_param(
+    window_size_sec: f64,
+    window_shift_sec: &mut f64,
+    rate: f64,
+    spectrum_shift_in_frames: usize,
+    ssr: usize,
+    lstm_sub_sampling: &[usize],
+    output_sub_sampling: &[usize],
+    frame_count: usize,
+) -> (usize, usize, bool, usize) {
+    let ssif = spectrum_shift_in_frames as f64;
+
+    // :441 window half-size in periodogram frames.
+    let mut window_size = f64::round(window_size_sec * rate / 2.0 / ssif) as usize;
+    // :442 floor at ssr when nonzero.
+    if window_size != 0 && window_size < ssr {
+        window_size = ssr;
+    }
+    // :443-444 full_window_size (log-only) -- computed for parity but not returned.
+    let _full_window_size = if window_size == 0 {
+        0
+    } else {
+        2 * window_size + 1
+    };
+
+    // :445 shift in periodogram frames.
+    let mut window_shift = f64::round(*window_shift_sec * rate / ssif) as i64;
+    let mut no_overlap = false;
+    // :446-451 noOverlap branch: window floored to an ssr multiple, min 10*ssr.
+    if window_size != 0 && window_shift < 1 {
+        no_overlap = true;
+        let raw = f64::round(window_size_sec * rate / ssif) as usize;
+        window_size = (raw / ssr) * ssr;
+        if window_size < 10 * ssr {
+            window_size = 10 * ssr;
+        }
+    }
+    // :452 shift floored at 1.
+    if window_size == 0 || window_shift < 1 {
+        window_shift = 1;
+    }
+    // :453 MEMBER MUTATION: _WindowShift = shift*ssif/rate.
+    *window_shift_sec = (window_shift * spectrum_shift_in_frames as i64) as f64 / rate;
+
+    // :475-480 vec_size = ceil(frameCount / ssif).
+    let vec_size =
+        if (frame_count / spectrum_shift_in_frames) * spectrum_shift_in_frames == frame_count {
+            frame_count / spectrum_shift_in_frames
+        } else {
+            frame_count / spectrum_shift_in_frames + 1
+        };
+    // :481-497 real_vec_size: UNCONDITIONAL sequential ssr-division (the `if noOverlap`
+    // gate at :487 is commented out), guarded only by `ssr > 1`.
+    let mut real_vec_size = vec_size;
+    if ssr > 1 {
+        for &r in lstm_sub_sampling {
+            real_vec_size /= r;
+        }
+        for &r in output_sub_sampling {
+            real_vec_size /= r;
+        }
+    }
+
+    (
+        window_size,
+        window_shift as usize,
+        no_overlap,
+        real_vec_size,
+    )
+}
+
+/// BLSTM spectral-domain SAD segmenter (Algo 3; `BLSTMSpectralSegmenter.{h,cpp}`) --
+/// the REAL `1_worker_1.config`'s algorithm.
+///
+/// The spectral driver is the crux of Phase 2b: unlike the signal driver (raw
+/// `audio.data.row(chan)` fed to the NN), the per-channel input is the full feature
+/// pipeline (`build_input_sequence`: periodogram -> mel/DCT -> optional LTSV), and the
+/// per-file window/shift are in PERIODOGRAM-frame units. The result vector comes from
+/// the ported [`BlstmNetwork::feed_forward_backward`].
+///
+/// THE CROSS-CHANNEL REUSE QUIRK (spec-named, load-bearing): the legacy allocates
+/// `result_vec` ONCE (returned by `getBLSTMParam`, `:631`) and REUSES it across
+/// channels (`:740`). Under the overlap FFB (which ACCUMULATES into the caller's buffer
+/// in place, `:664` `+=` then `/= count`) channel 2 SEEDS from channel 1's post-
+/// division contents. This driver reproduces it by holding ONE `result_vec` buffer
+/// across the channel loop (`self.result_buf`), matching the real class. The overlap
+/// cross-channel golden pins it (`phase2b_spectral_golden.rs`: a fresh-buffer chan-2
+/// run DIFFERS from the dump).
+///
+/// STATEFUL MEMBERS (S3.4), re-quantized per `get_segmentation` call:
+/// - `spectrum_shift_sec` (`_SpectrumShift`) + `spectrum_shift_in_frames`
+///   (`_SpectrumShiftInFrames`): `round(x*rate)` then `x = ssif/rate`
+///   (`initSpectralAnalysis` `:208-210`); the non-wav fallback `ssif = 80` PERSISTS
+///   into the member (`:209`) -- exercised by a unit test via direct state mutation (no
+///   non-wav fixture).
+/// - `window_shift_sec` (`_WindowShift`): re-quantized in [`get_blstm_param`] (`:445-453`
+///   in periodogram-frame units), then RESET to `0.0` when noOverlap fired, AFTER the
+///   dumps (`:885`; the reset-order divergence vs signal's BEFORE-`compute_errors` reset
+///   is cosmetic, ported as written).
+/// - `ltsv_shift_sec` (`_LTSVWindowShift`): re-quantized per call (`getLTSVParam`
+///   `:302-306`); DEAD for the Task-7 configs (LTSVwindow 0 -> no LTSV), tracked for
+///   S3.4 faithfulness.
+///
+/// PITCH SECOND PASS (`:757-805`) is EXCLUDED this task: the `tdc.half_window > 0` gate
+/// short-circuits false for the Task-7 configs (TDCwindow 0). Task 8 adds it.
+pub struct BlstmSpectralSegmenter {
+    driver_cfg: DriverConfig,
+    seg_cfg: SegmenterConfig,
+    feature_cfg: FeatureConfig,
+    net: BlstmNetwork,
+    /// Stateful `_SpectrumShift` (`:210`), self-quantizing per call.
+    spectrum_shift_sec: f64,
+    /// Stateful `_SpectrumShiftInFrames` (`:208-209`); the non-wav 80 fallback persists.
+    spectrum_shift_in_frames: usize,
+    /// Stateful `_WindowShift` (`:453/:885`).
+    window_shift_sec: f64,
+    /// Stateful `_LTSVWindowShift` (`:306`); dead for Task-7 configs.
+    ltsv_shift_sec: f64,
+    channels: usize,
+    cumulative_error: Vec<f64>,
+    nb_of_classif: Vec<i64>,
+    /// The ONE `result_vec` buffer reused across the channel loop (the cross-channel
+    /// reuse quirk). Holds `(real_vec_size, 1)`; re-sized per file by
+    /// [`get_blstm_param`], NOT zeroed between channels (the overlap accumulation seeds
+    /// channel 2 from channel 1). `None` until the first `get_segmentation` call.
+    result_buf: Option<Array2<f64>>,
+    /// Port-side observation point, NO legacy counterpart (same rationale as
+    /// [`BlstmSignalSegmenter::last_result_rows`]): the PRE-convolution `result_vec2`
+    /// row per channel captured on the last `get_segmentation` call, before
+    /// `results_to_segmentation` mutates it in place. Pins the NN chain bit-exactly.
+    last_result_rows: Vec<Vec<f64>>,
+}
+
+impl BlstmSpectralSegmenter {
+    /// Port of the `BLSTMSpectralSegmenter(ConfigFile&, ...)` ctor
+    /// (`BLSTMSpectralSegmenter.cpp:17-21`): `buildFromConf(conf, "BLSTM", ...)` (the
+    /// `Segmenter` residue via [`SegmenterConfig::from_config`] +
+    /// [`DriverConfig::from_config`]), the spectral/mel/LTSV/TDC config surface via
+    /// [`FeatureConfig::from_legacy`] (whose reads match `buildFromConf` `:44-83` incl.
+    /// the LTSVshift-gate deviation, already IMPROVEMENTS'd), and
+    /// `BLSTMNeuralNetwork(conf, "BLSTM", false)` via [`BlstmConfig::from_legacy`] +
+    /// [`BlstmNetwork::from_config`]. `weights` mirrors the two ctor overloads:
+    /// `Some(flat)` -> `setWeights` (`:23-27`, commented but the harness/E2E path);
+    /// `None` -> the no-weights ctor.
+    pub fn from_legacy(
+        map: &IndexMap<String, String>,
+        weights: Option<&[f64]>,
+    ) -> Result<BlstmSpectralSegmenter> {
+        let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
+        let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
+        let feature_cfg = FeatureConfig::from_legacy(map, "BLSTM")?;
+
+        let blstm_cfg = BlstmConfig::from_legacy(map, "BLSTM")?;
+        let mut net = BlstmNetwork::from_config(blstm_cfg)?;
+        if let Some(flat) = weights {
+            net.set_weights(flat)?;
+        }
+
+        let spectrum_shift_sec = feature_cfg.shift_sec;
+        let window_shift_sec = driver_cfg.window_shift_sec;
+        let ltsv_shift_sec = feature_cfg.ltsv_shift;
+
+        Ok(BlstmSpectralSegmenter {
+            driver_cfg,
+            seg_cfg,
+            feature_cfg,
+            net,
+            spectrum_shift_sec,
+            spectrum_shift_in_frames: 0,
+            window_shift_sec,
+            ltsv_shift_sec,
+            channels: 0,
+            cumulative_error: Vec::new(),
+            nb_of_classif: Vec::new(),
+            result_buf: None,
+            last_result_rows: Vec::new(),
+        })
+    }
+
+    /// The stateful legacy `_WindowShift` member (`:453/:885`), POST the last
+    /// `get_segmentation` call's mutation. Exposed so golden tests can pin the cross-
+    /// file lifecycle observably.
+    pub fn window_shift_sec(&self) -> f64 {
+        self.window_shift_sec
+    }
+
+    /// The stateful legacy `_SpectrumShiftInFrames` member (`:208-210`), POST the last
+    /// call. Exposed for the two-files params golden + the non-wav-80 unit test.
+    pub fn spectrum_shift_in_frames(&self) -> usize {
+        self.spectrum_shift_in_frames
+    }
+
+    /// The stateful legacy `_SpectrumShift` member (`:210`), POST the last call.
+    pub fn spectrum_shift_sec(&self) -> f64 {
+        self.spectrum_shift_sec
+    }
+
+    /// The number of rows in the reused `result_vec` buffer (`real_vec_size`) POST the
+    /// last call. Exposed for the two-files params golden.
+    pub fn last_result_rows_len(&self) -> usize {
+        self.result_buf.as_ref().map(|b| b.nrows()).unwrap_or(0)
+    }
+
+    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
+    /// `get_segmentation` call -- the whole NN chain's raw output, before
+    /// `results_to_segmentation` convolves it in place. Port-side observation point
+    /// with NO legacy counterpart (see the field doc + [`BlstmSignalSegmenter::
+    /// last_result_rows`]).
+    pub fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:752`).
+    pub fn cumulative_error(&self) -> &[f64] {
+        &self.cumulative_error
+    }
+
+    /// Per-channel `seg._NbOfClassif[chan] = nbOfClassif` (`:753`).
+    pub fn nb_of_classif(&self) -> &[i64] {
+        &self.nb_of_classif
+    }
+
+    /// Directly set the non-wav `_SpectrumShiftInFrames = 80` fallback state (`:209`).
+    /// Exposed (not `#[cfg(test)]`, which would not reach the integration-test crate)
+    /// SOLELY so `phase2b_spectral_golden.rs` can pin the persistence quirk WITHOUT a
+    /// non-wav fixture (the driver always reads a wav; there is no production caller).
+    pub fn force_non_wav_spectrum_shift(&mut self) {
+        self.spectrum_shift_in_frames = 80;
+        // The legacy also rewrites _SpectrumShift = 80/rate (:210); the rate is only
+        // known at get_segmentation time, so the test asserts on the frames member.
+    }
+
+    /// `Segmentation::compute_errors`, one call per channel (see
+    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
+    pub fn score(
+        hyp: &mut [Segmentation],
+        reference: Option<&[Segmentation]>,
+        nb_words: i64,
+    ) -> Vec<ScoreReport> {
+        hyp.iter_mut()
+            .enumerate()
+            .map(|(chan, seg)| {
+                let refc = reference.map(|r| &r[chan]);
+                compute_errors(seg, refc, nb_words)
+            })
+            .collect()
+    }
+}
+
+impl Segmenter for BlstmSpectralSegmenter {
+    /// Port of `BLSTMSpectralSegmenter::getSegmentation`
+    /// (`BLSTMSpectralSegmenter.cpp:593-887`), the non-unit-test/non-plotting path (the
+    /// `.mat`/PNG/log branches dropped: display/diagnostic-only), and WITHOUT the pitch
+    /// second pass (`:757-805`) -- the `tdc.half_window > 0` gate short-circuits false
+    /// for the Task-7 configs (TDCwindow 0). Task 8 adds the pitch pass.
+    fn get_segmentation(
+        &mut self,
+        audio: &mut Audio,
+        seg_per_chan: &mut [Segmentation],
+    ) -> Result<()> {
+        let rate = audio.sample_rate as f64;
+
+        // initSpectralAnalysis (:194-276) via SpectralParams::derive: order clamp,
+        // spectrum-shift quantization, freq band (BLSTM variant), mel-bank sizing, LTSV
+        // params. `derive` reads cfg.shift_sec (0.01) and re-quantizes to
+        // spectrum_shift_in_frames = round(0.01*rate); on a real wav at fixed rate this
+        // equals the stateful member's self-quantization, so building `s` per call is
+        // consistent (the non-wav 80 fallback is handled below + in the unit test).
+        let s = SpectralParams::derive(&self.feature_cfg, rate);
+
+        // Stateful spectrum-shift quantization (:208-210). The non-wav fallback (80)
+        // PERSISTS: if a prior call set it to 80, honor that (no wav-read info here --
+        // the driver always reads a wav; the 80 path is the unit-test-only mutation).
+        self.spectrum_shift_in_frames = if self.spectrum_shift_in_frames == 80 {
+            80
+        } else {
+            f64::round(self.spectrum_shift_sec * rate) as usize
+        };
+        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
+        let spectrum_shift_in_frames = self.spectrum_shift_in_frames;
+
+        // preemph -> noise (:216-227). Gated on ratio > 0 / seed > 0.
+        if self.feature_cfg.preemph_ratio > 0.0 {
+            audio.apply_preemph(self.feature_cfg.preemph_ratio);
+        }
+        if self.feature_cfg.noise_seed > 0 {
+            audio.apply_noise(self.feature_cfg.noise_ratio);
+        }
+
+        // getLTSVParam (:302-306): re-quantize the stateful _LTSVWindowShift (dead for
+        // Task-7 configs, LTSVwindow 0 -> ltsv_half_window 0 -> no LTSV column).
+        let ltsv_ws =
+            f64::round(self.feature_cfg.ltsv_shift * rate / spectrum_shift_in_frames as f64) as i64;
+        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
+        self.ltsv_shift_sec = (ltsv_ws * spectrum_shift_in_frames as i64) as f64 / rate;
+
+        // getBLSTMParam (:439-500): window/shift derivation + result-vec sizing.
+        // Mutates self.window_shift_sec (the stateful _WindowShift).
+        let ssr = self.net.sub_sampling_ratio();
+        let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
+            self.driver_cfg.window_size_sec,
+            &mut self.window_shift_sec,
+            rate,
+            spectrum_shift_in_frames,
+            ssr,
+            &self.net.lstm_sub_sampling(),
+            &self.net.output_sub_sampling(),
+            audio.data.ncols(),
+        );
+
+        // resetWeightsDerivatives ONCE per file (:473).
+        self.net.reset_weights_derivatives();
+
+        // result_vec allocated ONCE, reused across channels (:631 -- THE cross-channel
+        // reuse quirk). Re-sized per file; NOT zeroed between channels (the overlap
+        // accumulation seeds channel 2 from channel 1's post-division contents).
+        self.result_buf = Some(Array2::<f64>::zeros((real_vec_size, 1)));
+
+        let channels = audio.data.nrows();
+        self.channels = channels;
+        self.cumulative_error = vec![0.0; channels];
+        self.nb_of_classif = vec![0; channels];
+        self.last_result_rows = Vec::with_capacity(channels);
+
+        // setProcessingType((window > 0), !noOverlap) ONCE (:739): flags are per-file
+        // constants (do not change across channels).
+        self.net.set_processing_type(window_size > 0, !no_overlap);
+
+        // timeStep/timeOffset (:724-734): the OVERLAP branch OVERRIDES with
+        // _SpectrumShift (the asymmetry vs signal, which uses _WindowShift there).
+        // window_shift_sec here is the POST-getBLSTMParam mutated value.
+        let mut time_step = self.window_shift_sec * ssr as f64;
+        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+        if window_size > 0 {
+            if no_overlap {
+                time_step = self.window_shift_sec * ssr as f64;
+                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+            } else {
+                time_step = self.spectrum_shift_sec * ssr as f64;
+                time_offset = time_step / 2.0 - self.spectrum_shift_sec / 2.0;
+            }
+        }
+
+        // getTemporalConvolution (:615): the periodogram temporal-convolution kernel,
+        // config-derived (constant across channels). conv_size 0 -> size 1 ->
+        // windowing_coefficients None (no temporal convolution) for the real config.
+        let temporal_conv = windowing_coefficients(
+            &self.feature_cfg.conv_type,
+            true,
+            2 * self.feature_cfg.conv_size as usize + 1,
+            0.83333,
+        );
+
+        for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
+            // build_input_sequence (the Task 3 lift): periodogram -> mel/DCT -> LTSV.
+            // Preemph/noise already applied to `audio` above (the lift does NOT mutate
+            // audio).
+            let mut input_seq =
+                build_input_sequence(audio, &self.feature_cfg, &s, chan, temporal_conv.as_deref());
+
+            // getTargets when a reference exists (:735-738). Fresh hypotheses carry no
+            // reference, so the no-target forward path runs; reference-driven scoring
+            // is exercised via `score`.
+            let target = Array2::<f64>::zeros((0, 0));
+
+            // NN forward+backward (:740): input mutated in place by the internal type
+            // -1 self-normalization. result_vec is the SHARED buffer (reused across
+            // channels -- the cross-channel quirk).
+            let result_vec = self.result_buf.as_mut().unwrap();
+            self.net.feed_forward_backward(
+                &mut input_seq,
+                window_size,
+                window_shift,
+                result_vec,
+                &target,
+            );
+            self.cumulative_error[chan] = self.net.cost;
+            self.nb_of_classif[chan] = self.net.nb_of_classif;
+
+            // result_vec2 = result_vec.transpose() -> ROW vector (:744).
+            let mut result_vec2: Vec<f64> = result_vec.column(0).to_vec();
+
+            // Capture the PRE-convolution row (port-side observation point). Cloned
+            // before results_to_segmentation convolves it in place.
+            self.last_result_rows.push(result_vec2.clone());
+
+            // results2segmentation (:750-751): the targetSeqTmp copy quirk is a dead
+            // param in results_to_segmentation.
+            results_to_segmentation(
+                seg,
+                time_step,
+                time_offset,
+                &mut result_vec2,
+                SegClass::Speech,
+                self.driver_cfg.conv_coeff.as_deref(),
+                &self.seg_cfg,
+            );
+
+            // pitch second pass (:757-805) SKIPPED: tdc.half_window == 0 for Task-7
+            // configs (TDCwindow 0). Task 8 wires it in.
+        }
+
+        // `seg.compute_errors()` after the FULL channel loop (:864).
+        for seg in seg_per_chan.iter_mut() {
+            compute_errors(seg, None, -1);
+        }
+
+        // noOverlap `_WindowShift = 0.0` reset (:885), AFTER the dumps/compute_errors
+        // (the reset-order divergence vs signal's BEFORE-compute_errors reset is
+        // cosmetic -- ported as written). Re-arms the noOverlap trigger for the next
+        // file (the genuine cross-file state).
+        if no_overlap {
+            self.window_shift_sec = 0.0;
+        }
+
+        Ok(())
+    }
+
+    /// `setWeights` delegates to the NN (`BLSTMSpectralSegmenter.cpp:87-89`).
+    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
+        self.net.set_weights(flat)
+    }
+
+    /// `getWeights` delegates to the NN (`:91-93`).
     fn get_weights(&self) -> Vec<f64> {
         self.net.get_weights()
     }

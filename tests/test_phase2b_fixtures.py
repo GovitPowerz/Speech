@@ -165,3 +165,68 @@ def test_ltsv_segmenter_dumps_present_with_expected_shapes() -> None:
     assert constants["ltsv_shift_frames"] == 4
     assert constants["real_vec_size"] == 51
     assert constants["ltsv_tiny_window_half_frames"] == 1
+
+
+def test_spectral_segmenter_dumps_present_with_expected_shapes() -> None:
+    """Task 7: BlstmSpectralSegmenter (Algo 3, no pitch pass) -- the REAL
+    1_worker_1.config's algorithm. Three variants (real/overlap/noOverlap) + the
+    overlap cross-channel reuse dumps + the two-files noOverlap lifecycle + params."""
+    spectral = _manifest()["spectral_segmenter"]
+    expected_shapes = spectral["expected_shapes"]
+    assert expected_shapes == {
+        "spectral_real_inputseq_chan1.bin": [201, 11],
+        "spectral_real_result_chan1.bin": [1, 50],
+        "spectral_real_convolved_chan1.bin": [1, 50],
+        "spectral_real_boundaries_chan1.bin": [3, 2],
+        "spectral_real_scores.bin": [2, 3],
+        "spectral_overlap_inputseq_chan1.bin": [201, 11],
+        "spectral_overlap_result_chan1.bin": [1, 50],
+        "spectral_overlap_result_chan2.bin": [1, 50],
+        "spectral_overlap_convolved_chan1.bin": [1, 50],
+        "spectral_overlap_convolved_chan2.bin": [1, 50],
+        "spectral_overlap_boundaries_chan1.bin": [3, 2],
+        "spectral_overlap_boundaries_chan2.bin": [2, 2],
+        "spectral_overlap_scores.bin": [2, 3],
+        "spectral_noOverlap_inputseq_chan1.bin": [201, 11],
+        "spectral_noOverlap_result_chan1.bin": [1, 50],
+        "spectral_noOverlap_convolved_chan1.bin": [1, 50],
+        "spectral_noOverlap_boundaries_chan1.bin": [3, 2],
+        "spectral_noOverlap_scores.bin": [2, 3],
+        "spectral_noOverlap_boundaries_file1_chan1.bin": [3, 2],
+        "spectral_noOverlap_boundaries_file2_chan1.bin": [3, 2],
+        "spectral_noOverlap_params_file2.bin": [1, 4],
+    }
+    for name, (rows, cols) in expected_shapes.items():
+        path = REF / name
+        assert path.is_file(), name
+        with path.open("rb") as f:
+            got_rows = int.from_bytes(f.read(8), "little", signed=True)
+            got_cols = int.from_bytes(f.read(8), "little", signed=True)
+        assert (got_rows, got_cols) == (rows, cols), name
+
+    for name in spectral["extra_files"]:
+        assert (REF / name).is_file(), name
+
+    # SECONDARY real-forward structural probe (spec decision 3): all three spectral
+    # sites must be present with ok=1 (a structural mismatch would have aborted
+    # generation) and the recorded max_dt.
+    seg_struct = spectral["seg_struct"]
+    assert set(seg_struct) == {"spectral_real", "spectral_overlap", "spectral_noOverlap"}
+    for site, rec in seg_struct.items():
+        assert rec["ok"] == 1, site
+
+    constants = spectral["constants"]
+    assert constants["rate"] == 8000
+    assert constants["frame_count"] == 16001
+    assert constants["sub_sampling_ratio"] == 4
+    assert constants["spectrum_shift_in_frames"] == 80
+    assert constants["periodogram_rows"] == 201
+    assert constants["input_width_d"] == 11
+    assert constants["real_vec_size"] == 50
+    assert constants["nooverlap_window_size_periodogram_frames"] == 324
+    assert constants["file2_params_row"] == {
+        "window_shift": 1,
+        "window_size": 324,
+        "spectrum_shift_in_frames": 80,
+        "real_vec_size": 50,
+    }

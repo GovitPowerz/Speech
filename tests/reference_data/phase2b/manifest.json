@@ -399,5 +399,144 @@
     "config_files": [
       "signal.config"
     ]
+  },
+  "spectral_segmenter": {
+    "text": "Phase 2b Task 7: BlstmSpectralSegmenter (Algo 3, no pitch pass), the REAL 1_worker_1.config's algorithm. BLSTMSpectralSegmenter::getSegmentation (BLSTMSpectralSegmenter.cpp:593-887) produces its result_vec via _BLSTMNeuralNetwork.feedForwardBackward (:740), whose real Eigen GEMMs diverge from the ascending-loop port. SpectralProbe (harness-local, derives BLSTMSpectralSegmenter) transcribes the getSegmentation body MINUS the pitch second pass (:757-805, which the Task-7 configs short-circuit -- TDCwindow 0 -> TDC_window_size 0 -> the `if (TDC_window_size > 0)` gate at :757 is false) with ONLY the FFB call swapped for signalReimplFFB (the Task 6 reimpl family, reused: the plain/truncate/overlap windowed drivers are input-column-agnostic and the leftCols crop stays FALSE at D=11<23); the spectral param derivation (initSpectralAnalysis/getWindowingCoeff/getTemporalConvolution/getLTSVParam/getTDCParam/getBLSTMParam/getLTSV/getBLSTMInputSequence) calls the REAL compiled protected helpers. SECONDARY probe (spec decision 3): the REAL compiled getSegmentation runs beside the transcription; segment count + types must match EXACTLY (abort on mismatch), boundary max-delta recorded as SEG_STRUCT site=spectral_<variant> ok=1 max_dt=<measured> (all three measured 0.0 -- the reimpl and real Eigen paths agree structurally). UNLIKE the signal driver, the real trained net on the REAL spectral features DOES cross the rising threshold (0.752): chan-1 detects speech [0, ~1.18s] ([SPEECH@0, OTHER@~1.183, END@2.0]), so the decision layer (rising crossing + linear interpolation + hysteresis area) is genuinely exercised by these goldens, not collapsed to the seed. CROSS-CHANNEL REUSE QUIRK (the load-bearing layout fact): result_vec is allocated ONCE by getBLSTMParam (:631) and REUSED across channels (:740); under the overlap FFB (accumulate-in-place :664 += then /= count) channel 2 SEEDS from channel 1's post-division contents -- reproduced by holding one result_vec across the channel loop; the overlap variant dumps BOTH channels (chan-1 result[:5] ~0.997 vs chan-2 ~0.973, chan-2 result contaminated by chan-1's carry-over) so the Rust cross-channel golden pins it (a fresh-buffer chan-2 run must DIFFER). THREE variants (real net, BLSTM_shift overridden): real (1_worker_1.config AS-IS, BLSTM_shift 0.8 -> overlap window_shift 80, 3 windows), overlap (BLSTM_shift 0.01 -> window_shift 1, heavier overlap, the cross-channel golden -- verified NO OOB: max overlap write index 50 == result_vec rows), noOverlap (BLSTM_shift 0 -> truncate FFB via the noOverlap poisoning; window_size floored to (round(3.25*8000/80)/4)*4 = 324, window_shift clamped to 1). All three: T=201 periodogram rows, real_vec_size = 201/4/1/1/1 = 50 (getBLSTMParam does the ssr-division UNCONDITIONALLY -- the `if noOverlap` guard at :487 is commented out, unlike the signal driver's gated version at BLSTMSignalSegmenter.cpp:239). Dumps per variant, chan 1 (+ chan 2 for overlap): inputseq (201x11, re-validates build_input_sequence under driver conditions), result (pre-conv row 1x50), convolved (post results2segmentation), boundaries (Nx2 begin/type), vrcts (REAL toFile_VRCTS on the reimpl-driven Segmentation, zero-offset audio, 0b-ii byte-equivalence), scores (2x3 Pfa/Pmiss/ErrorRate vs the same two-span programmatic reference as TDC/LTSV/signal). The noOverlap variant gets the TWO-FILES golden: spectral noOverlap assigns _WindowShift = 0.0 at :885 (post-dump). So file 2 (SAME probe) re-enters getBLSTMParam with _WindowShift == 0.0: :445 rounds 0.0 -> 0, :446 -> noOverlap re-triggers, :452 clamps shift to 1, :453 rewrites _WindowShift = 1*80/rate. Pinned by spectral_noOverlap_boundaries_file{1,2}_chan1.bin (both dumped, the test COMPARES rather than assumes) + the discriminating file2 params row spectral_noOverlap_params_file2.bin (1x4: window_shift=1, window_size=324, spectrum_shift_in_frames=80, real_vec_size=50) so the quantization-lifecycle round trip is pinned, not merely coincidental boundary equality.",
+    "constants": {
+      "rate": 8000,
+      "frame_count": 16001,
+      "sub_sampling_ratio": 4,
+      "spectrum_shift_in_frames": 80,
+      "periodogram_rows": 201,
+      "input_width_d": 11,
+      "real_vec_size": 50,
+      "real_window_size_periodogram_frames": 163,
+      "real_window_shift_periodogram_frames": 80,
+      "overlap_window_shift_periodogram_frames": 1,
+      "nooverlap_window_size_periodogram_frames": 324,
+      "nooverlap_window_shift_periodogram_frames": 1,
+      "file2_params_row": {
+        "window_shift": 1,
+        "window_size": 324,
+        "spectrum_shift_in_frames": 80,
+        "real_vec_size": 50
+      },
+      "reference_spans_sec": [
+        [
+          0.4,
+          0.9
+        ],
+        [
+          1.2,
+          1.6
+        ]
+      ]
+    },
+    "seg_struct": {
+      "spectral_noOverlap": {
+        "ok": 1,
+        "max_dt": 0.0
+      },
+      "spectral_overlap": {
+        "ok": 1,
+        "max_dt": 0.0
+      },
+      "spectral_real": {
+        "ok": 1,
+        "max_dt": 0.0
+      }
+    },
+    "expected_shapes": {
+      "spectral_real_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_real_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_real_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_real_boundaries_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_real_scores.bin": [
+        2,
+        3
+      ],
+      "spectral_overlap_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_overlap_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_result_chan2.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_convolved_chan2.bin": [
+        1,
+        50
+      ],
+      "spectral_overlap_boundaries_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_overlap_boundaries_chan2.bin": [
+        2,
+        2
+      ],
+      "spectral_overlap_scores.bin": [
+        2,
+        3
+      ],
+      "spectral_noOverlap_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_noOverlap_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_noOverlap_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_noOverlap_boundaries_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_noOverlap_scores.bin": [
+        2,
+        3
+      ],
+      "spectral_noOverlap_boundaries_file1_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_noOverlap_boundaries_file2_chan1.bin": [
+        3,
+        2
+      ],
+      "spectral_noOverlap_params_file2.bin": [
+        1,
+        4
+      ]
+    },
+    "extra_files": [
+      "spectral_real_vrcts_chan1.xml",
+      "spectral_overlap_vrcts_chan1.xml",
+      "spectral_noOverlap_vrcts_chan1.xml"
+    ],
+    "config_files": []
   }
 }

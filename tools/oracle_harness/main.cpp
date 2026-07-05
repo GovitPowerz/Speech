@@ -26,6 +26,7 @@
 #include "iof/io.hpp"
 #include "BLSTMNeuralNetwork.h"
 #include "BLSTMSignalSegmenter.h"
+#include "BLSTMSpectralSegmenter.h"
 #include "ConfigFile.h"
 #include "CorpusItem.h"
 #include "Helpers.hpp"
@@ -130,6 +131,44 @@ struct SignalProbe : BLSTMSignalSegmenter {
     using Segmenter::getTargets;
     using BLSTMSignalSegmenter::_BLSTMNeuralNetwork;
     using BLSTMSignalSegmenter::_BLSTMTwoSweeps;
+};
+
+// Phase 2b Task 7: BlstmSpectralSegmenter (Algo 3) oracle -- the REAL 1_worker_1.
+// config's algorithm. Like the signal driver, the spectral result_vec is produced by
+// _BLSTMNeuralNetwork.feedForwardBackward (BLSTMSpectralSegmenter.cpp:740), whose real
+// Eigen GEMMs diverge from the ascending-loop port at the real net's k>=23 shapes. So
+// SpectralProbe exposes the protected machinery so the harness can (a) transcribe the
+// getSegmentation body (:593-887, MINUS the pitch second pass :757-805 which the
+// Task-7 configs short-circuit via TDCwindow 0) with ONLY that FFB call swapped for
+// the reimpl family (signalReimplFFB, shared with Task 6 -- the plain/truncate/overlap
+// windowed drivers are input-column-agnostic and the leftCols crop stays FALSE at
+// D=11<23), and (b) run the REAL getSegmentation beside it as a SECONDARY structural
+// probe (segment count + types must match EXACTLY or abort). The spectral param
+// derivation (initSpectralAnalysis, getWindowingCoeff, getTemporalConvolution,
+// getLTSVParam, getTDCParam, getBLSTMParam, getLTSV, getBLSTMInputSequence) uses the
+// REAL compiled protected helpers -- exposed here so the main-side transcription can
+// call them (they mutate _SpectrumShiftInFrames/_SpectrumShift/_WindowShift as real
+// side effects, exactly as the driver's getBLSTMParam does).
+struct SpectralProbe : BLSTMSpectralSegmenter {
+    SpectralProbe(ConfigFile &conf) : BLSTMSpectralSegmenter(conf, false, false) {}
+    using Segmenter::_WindowShift;
+    using Segmenter::_WindowSize;
+    using Segmenter::_FlagDCOffset;
+    using Segmenter::_ConvolutionCoeff;
+    using Segmenter::results2segmentation;
+    using Segmenter::getTargets;
+    using LongTermSpectralVariation::_SpectrumOrder;
+    using LongTermSpectralVariation::_SpectrumShift;
+    using BLSTMSpectralSegmenter::_SpectrumShiftInFrames;
+    using BLSTMSpectralSegmenter::_BLSTMNeuralNetwork;
+    using BLSTMSpectralSegmenter::initSpectralAnalysis;
+    using BLSTMSpectralSegmenter::getWindowingCoeff;
+    using BLSTMSpectralSegmenter::getTemporalConvolution;
+    using BLSTMSpectralSegmenter::getLTSVParam;
+    using BLSTMSpectralSegmenter::getTDCParam;
+    using BLSTMSpectralSegmenter::getBLSTMParam;
+    using BLSTMSpectralSegmenter::getLTSV;
+    using BLSTMSpectralSegmenter::getBLSTMInputSequence;
 };
 
 // Constants ALL later tasks reuse (kept in sync with the harness manifest).
@@ -5426,6 +5465,429 @@ int main(int argc, char** argv) {
             probe2.getSegmentation(audioF2, segF2);
             segF2.compute_errors();
             dumpBoundaries(segF2, "signal_noOverlap_boundaries_file2_chan1.bin");
+            ++dumps;
+        }
+    }
+
+    // --- Phase 2b Task 7: BlstmSpectralSegmenter (Algo 3, no pitch pass) ------
+    // legacy: BLSTMSpectralSegmenter::getSegmentation (BLSTMSpectralSegmenter.cpp:
+    // 593-887, MINUS the pitch second pass :757-805 which the Task-7 configs
+    // short-circuit -- TDCwindow 0 -> TDC_window_size 0 -> the `if (TDC_window_size
+    // > 0)` gate at :757 is false). This is the REAL 1_worker_1.config's algorithm.
+    // The spectral result_vec comes from _BLSTMNeuralNetwork.feedForwardBackward
+    // (:740), whose real Eigen GEMMs diverge from the ascending-loop port; the PRIMARY
+    // golden dumps are produced by a TRANSCRIPTION of getSegmentation with ONLY that
+    // FFB call swapped for signalReimplFFB (the Task 6 reimpl family, shared -- the
+    // plain/truncate/overlap windowed drivers are input-column-agnostic and the
+    // leftCols crop stays FALSE at D=11<23). Everything else -- the spectral param
+    // derivation (initSpectralAnalysis/getWindowingCoeff/getTemporalConvolution/
+    // getLTSVParam/getTDCParam/getBLSTMParam/getLTSV/getBLSTMInputSequence), the
+    // results2segmentation call, the compute_errors -- calls the REAL compiled
+    // protected helpers via the SpectralProbe `using` exposures.
+    //
+    // CROSS-CHANNEL REUSE QUIRK (the load-bearing layout fact): result_vec is
+    // allocated ONCE by getBLSTMParam (:631) and REUSED across channels (:740). Under
+    // the overlap FFB (accumulate-in-place, :664 += then /= count) channel 2 SEEDS
+    // from channel 1's post-division contents. Reproduced by holding one result_vec
+    // across the channel loop (matching the real class); the overlap variant dumps
+    // BOTH channels so the Rust cross-channel golden can pin it.
+    //
+    // SECONDARY probe (spec decision 3): the REAL compiled getSegmentation runs beside
+    // the transcription; segment count + types must match EXACTLY (abort on mismatch),
+    // boundary max-delta recorded as SEG_STRUCT site=spectral_<variant> ok=1
+    // max_dt=<measured>.
+    //
+    // The real net (33671 weights) expects 23 inputs; the spectral input width is
+    // D == 11 (3*nb_DCT-1 with IgnoreFirstDCT), 11 < 23 -> the LSTM input projection's
+    // inputW.topRows(cols) width tolerance applies (the E2E gate's D=11 leg), the
+    // leftCols crop never fires.
+    //
+    // Three variants (real net + real config keys, BLSTM_shift overridden):
+    //   real      -- 1_worker_1.config AS-IS (BLSTM_window 3.25, shift 0.8 -> overlap
+    //                FFB; BLSTM_window_size 163, window_shift 80, real_vec_size 50)
+    //   overlap   -- BLSTM_shift 0.01 (heavier overlap; window_shift 1, real_vec_size
+    //                50 -- verified no OOB: max write index 50 == buffer rows)
+    //   noOverlap -- BLSTM_shift 0 (truncate FFB via the noOverlap poisoning;
+    //                window_size floored to (round(3.25*8000/80)/4)*4 = 324,
+    //                window_shift clamped to 1, real_vec_size 50)
+    {
+        Eigen::VectorXd flatSpectral = BinaryFile2Vector(nnWeightsPath);
+        T6Blstm reimplNetSpec(flatSpectral);
+
+        auto dumpBoundariesSpec = [&](const Segmentation& seg, int chan, const std::string& name) {
+            const auto& segs = seg._Classification.at(chan);
+            Eigen::MatrixXd b((long) segs.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs.size(); ++ii) {
+                b((long) ii, 0) = segs[ii]._BeginTime;
+                b((long) ii, 1) = (double) segs[ii]._Type;
+            }
+            Matrix2BinaryFile(out + name, b);
+        };
+
+        // TRANSCRIPTION of getSegmentation (:593-887 minus the pitch block). The FFB
+        // call is swapped for signalReimplFFB (the ascending-loop NN), AND the input
+        // sequence is built with the ASCENDING-LOOP feature pipeline (deriveSpectral +
+        // computeSegmentPeriodogramEstimates with an EMPTY mel bank + applyFilterBank +
+        // applyDCTLoop + getLTSV), NOT the real compiled getBLSTMInputSequence -- because
+        // the real applyDCT is an Eigen GEMM that diverges from the ascending-loop DCT
+        // the Phase 1 goldens + the Rust port reproduce (same rationale as the E2E leg,
+        // and confirmed here: the real getBLSTMInputSequence diverges from the Rust
+        // build_input_sequence by up to ~19k ULP). The stateful param derivation
+        // (getBLSTMParam :439-500, _SpectrumShift/_WindowShift/_SpectrumShiftInFrames) is
+        // transcribed inline (pure integer/round math, no Eigen) mutating the probe's
+        // members faithfully; the Segmenter machinery (getTargets/results2segmentation)
+        // is called REAL via the probe. `setReference` sets a two-span programmatic
+        // reference (getTargets fires). result_vec is allocated ONCE and reused across
+        // channels (the cross-channel reuse quirk). The caller owns probe/audio/seg so
+        // the two-files test can reuse a probe.
+        auto transcribeSpectral =
+            [&](SpectralProbe& probe, AudioStruct& audio, Segmentation& seg, bool setReference,
+                const std::string& tag, bool dumpChan1, bool dumpBothChannels) {
+                const unsigned Max = 20;
+                Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+                FactoryInit<GFFTList<GFFT, 1, Max>::Result>::apply(gfft_factory);
+
+                if (setReference) {
+                    double audioDuration = ((double) audio.getFrameCount() - 1) / audio.getFrameRate();
+                    for (int ch = 0; ch < audio.getChannelCount(); ++ch) {
+                        seg._Reference.push_back(std::deque<Segment>{Segment(), Segment(audioDuration, END)});
+                        seg.label_segment(seg._Reference.at(ch), 0.4, 0.9, SPEECH);
+                        seg.label_segment(seg._Reference.at(ch), 1.2, 1.6, SPEECH);
+                    }
+                }
+
+                const double rate = (double) audio.getFrameRate();
+                const long ssr = probe._BLSTMNeuralNetwork.getSubSamplingRatio();
+
+                // --- Feature-pipeline params via the ascending-loop reimpl (matches the
+                // E2E leg + the Rust SpectralParams::derive). No Eigen DCT here. The
+                // feature params (spectrum_order/shift, mel, freq band, LTSV) are
+                // INDEPENDENT of the BLSTM_shift override (which only drives _WindowShift,
+                // read from the probe below), so a fresh readFeatureCfg on the real
+                // config is exact regardless of the variant. ---
+                ConfigFile featConf(nnConfigPath, '_');
+                featConf._Params.erase("BLSTM_weightsFile");
+                FeatureCfg c = readFeatureCfg(featConf, "BLSTM");
+                SpectralP s = deriveSpectral(c, rate, Max);
+
+                // Stateful _SpectrumShiftInFrames/_SpectrumShift (:208-210), set on the
+                // probe so getTargets/results2segmentation + the timeStep math see them.
+                probe._SpectrumShiftInFrames = s.shift_frames;
+                probe._SpectrumShift = (double) s.shift_frames / rate;
+
+                // preemph -> noise (:216-227). Applied ONCE, directly on the audio.
+                if (c.preemph > 0) audio.applyPreemph(c.preemph);
+                if (c.noise_seed > 0) audio.applyNoise(c.noise_ratio);
+
+                // getLTSVParam re-quantization of _LTSVWindowShift (:302-306); dead for
+                // TDCwindow-0/LTSVwindow-0 configs but tracked for the stateful map.
+                {
+                    long ltsv_ws = (long) boost::math::round(c.ltsv_shift * rate / (double) s.shift_frames);
+                    if (ltsv_ws < 1) ltsv_ws = 1;
+                    (void) ltsv_ws;
+                }
+
+                // Mel bank + DCT coeffs for the ascending pipeline (the E2E-leg recipe).
+                MelFilterBank mel;
+                if (c.nb_bins > 0) {
+                    mel = MelFilterBank(c.min_mel, c.max_mel, c.nb_bins, s.min_freq_snapped,
+                                        s.max_freq_snapped, rate, s.bins - 1, c.is_log, c.nb_dct,
+                                        c.ignore_first, c.deltas_nb, c.dd_nb);
+                }
+                const double PI = 3.14159265358979323846264338327;
+                long nbFilters = mel.notEmpty() ? (long) mel.getNbFilters() : 0;
+                long nbDct = c.nb_dct;
+                if (nbDct > nbFilters) nbDct = nbFilters;
+                Eigen::MatrixXd coeffs;
+                if (c.nb_bins > 0 && c.nb_dct > 0) {
+                    coeffs = Eigen::MatrixXd::Zero(nbFilters, nbDct);
+                    for (long col = 0; col < nbFilters; ++col)
+                        for (long row = 0; row < nbDct; ++row)
+                            coeffs(col, row) = std::cos(PI / nbFilters * (col + 0.5) * row);
+                }
+                Eigen::MatrixXd win = getWindowingCoefficients(c.win_type, false, s.window_size + 1, c.win_param);
+                Eigen::MatrixXd noConv;
+                MelFilterBank emptyMel;
+
+                // --- getBLSTMParam (:439-500) transcribed inline (integer/round math,
+                // no Eigen). Mutates probe._WindowShift (the stateful _WindowShift). ---
+                const long ssif = s.shift_frames;
+                std::vector<double>::size_type BLSTM_window_size =
+                    (std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / 2.0 / ssif);
+                if ((BLSTM_window_size != 0) && (BLSTM_window_size < (std::vector<double>::size_type) ssr))
+                    BLSTM_window_size = ssr;
+                long BLSTM_window_shift = (long) boost::math::round(probe._WindowShift * rate / ssif);
+                bool noOverlap = false;
+                if ((BLSTM_window_size != 0) && (BLSTM_window_shift < 1)) {
+                    noOverlap = true;
+                    BLSTM_window_size = (((std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / ssif)) / ssr) * ssr;
+                    if (BLSTM_window_size < 10 * (std::vector<double>::size_type) ssr)
+                        BLSTM_window_size = 10 * ssr;
+                }
+                if ((BLSTM_window_size == 0) || (BLSTM_window_shift < 1)) BLSTM_window_shift = 1;
+                probe._WindowShift = ((double) BLSTM_window_shift * ssif) / rate;  // :453 MEMBER MUTATION
+                // result_vec sizing (:475-499): ceil(frameCount/ssif), then UNCONDITIONAL
+                // sequential ssr-division (the `if noOverlap` gate at :487 is commented).
+                std::vector<double>::size_type vec_size = (std::vector<double>::size_type) audio.getFrameCount();
+                if ((vec_size / ssif) * ssif == vec_size) vec_size = vec_size / ssif;
+                else vec_size = vec_size / ssif + 1;
+                std::vector<double>::size_type real_vec_size = vec_size;
+                if (ssr > 1) {
+                    for (auto r : probe._BLSTMNeuralNetwork.getLSTMSubSampling()) real_vec_size /= r;
+                    for (auto r : probe._BLSTMNeuralNetwork.getOutputSubSampling()) real_vec_size /= r;
+                }
+                // result_vec allocated ONCE (:631), reused across channels -- the
+                // load-bearing cross-channel reuse quirk.
+                Eigen::MatrixXd result_vec = Eigen::MatrixXd::Zero(real_vec_size, 1);
+                Eigen::MatrixXd targetSeq = Eigen::MatrixXd();
+
+                probe._BLSTMNeuralNetwork.resetWeightsDerivatives();  // :473
+
+                // timeStep/timeOffset (:724-734). Overlap OVERRIDE with _SpectrumShift.
+                double timeStep = probe._WindowShift * ssr;
+                double timeOffset = timeStep / 2 - probe._WindowShift / 2;
+                if (BLSTM_window_size > 0) {
+                    if (noOverlap) {
+                        timeStep = probe._WindowShift * ssr;
+                        timeOffset = timeStep / 2 - probe._WindowShift / 2;
+                    } else {
+                        timeStep = probe._SpectrumShift * ssr;
+                        timeOffset = timeStep / 2 - probe._SpectrumShift / 2;
+                    }
+                }
+
+                const int channelCount = audio.getChannelCount();
+                const long long endFull = audio.getFrameCount() - 1;
+                for (int chan = 0; chan < channelCount; ++chan) {
+                    // Periodogram with an EMPTY mel bank -> _Periodogram is raw (NOT run
+                    // through the real Eigen applyDCT), matching the E2E leg + Rust port.
+                    audio.computeSegmentPeriodogramEstimates(s.order, s.shift_frames, chan, c.flag_dc,
+                                                             win, emptyMel, gfft_factory, noConv, 0, endFull);
+                    Eigen::MatrixXd perio = audio._Periodogram;
+
+                    Eigen::MatrixXd inputSeq;
+                    if (mel.notEmpty()) {
+                        Eigen::MatrixXd fb = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+                        mel.applyFilterBank(perio, fb);
+                        if (c.nb_dct > 0) {
+                            inputSeq = applyDCTLoop(fb, coeffs, (int) nbDct, c.ignore_first, c.deltas_nb, c.dd_nb);
+                        } else {
+                            inputSeq = fb;
+                        }
+                    } else {
+                        inputSeq = (((perio.block(0, s.freq_beg, perio.rows(),
+                                                  s.freq_end - s.freq_beg + 1).array() + 1e-24).log()).matrix());
+                    }
+                    if (s.ltsv_half_window > 0) {
+                        long ltsv_beg = mel.notEmpty() ? 0 : s.freq_beg;
+                        long ltsv_end = mel.notEmpty() ? (long) inputSeq.cols() - 1 : s.freq_end;
+                        Eigen::MatrixXd ltsv = getLTSV(perio, s.ltsv_half_window, s.ltsv_shift, ltsv_beg, ltsv_end);
+                        Eigen::MatrixXd merged(inputSeq.rows(), inputSeq.cols() + 1);
+                        merged << inputSeq, ltsv;
+                        inputSeq = merged;
+                    }
+                    if (chan == 0 && dumpChan1) {
+                        Matrix2BinaryFile(out + "spectral_" + tag + "_inputseq_chan1.bin", inputSeq);
+                        ++dumps;
+                    }
+
+                    if (seg._Reference.size() > 0) {
+                        targetSeq = result_vec;
+                        probe.getTargets(seg, timeStep, timeOffset, targetSeq, chan, SPEECH);
+                    }
+                    probe._BLSTMNeuralNetwork.setProcessingType((BLSTM_window_size > 0), !noOverlap);
+
+                    // NN invocation SWAPPED for the reimpl (:740). Input mutated in
+                    // place by the type -1 self-normalization inside signalReimplFFB.
+                    // result_vec is the SHARED buffer (reused across channels).
+                    Eigen::MatrixXd reimplInput = inputSeq;
+                    signalReimplFFB(reimplNetSpec, reimplInput, (long) BLSTM_window_size, BLSTM_window_shift, noOverlap, result_vec);
+
+                    Eigen::MatrixXd result_vec2 = result_vec.transpose();  // :744 ROW vector
+                    if (chan == 0 && dumpChan1) {
+                        Matrix2BinaryFile(out + "spectral_" + tag + "_result_chan1.bin", result_vec2);
+                        ++dumps;
+                    } else if (dumpBothChannels && chan == 1) {
+                        Matrix2BinaryFile(out + "spectral_" + tag + "_result_chan2.bin", result_vec2);
+                        ++dumps;
+                    }
+
+                    // results2segmentation (:750-751): targetSeqTmp = result_vec copy
+                    // quirk (dead param in the live results2segmentation).
+                    Eigen::MatrixXd targetSeqTmp = result_vec;
+                    probe.results2segmentation(seg, timeStep, timeOffset, result_vec2, targetSeqTmp, chan, SPEECH);
+                    seg._CumulativeError[chan] = 0.0;   // no NN cost accumulated (no targets on the reimpl path)
+                    seg._NbOfClassif[chan] = 0;
+
+                    if (chan == 0 && dumpChan1) {
+                        Matrix2BinaryFile(out + "spectral_" + tag + "_convolved_chan1.bin", result_vec2);
+                        ++dumps;
+                    } else if (dumpBothChannels && chan == 1) {
+                        Matrix2BinaryFile(out + "spectral_" + tag + "_convolved_chan2.bin", result_vec2);
+                        ++dumps;
+                    }
+                    // pitch second pass (:757-805) SKIPPED (TDC_window_size == 0).
+                }
+                seg.compute_errors();
+                if (dumpChan1) {
+                    dumpBoundariesSpec(seg, 0, "spectral_" + tag + "_boundaries_chan1.bin");
+                    ++dumps;
+                }
+                if (dumpBothChannels) {
+                    dumpBoundariesSpec(seg, 1, "spectral_" + tag + "_boundaries_chan2.bin");
+                    ++dumps;
+                }
+                if (noOverlap) probe._WindowShift = 0.0;  // :885 (post-dump order, cosmetic)
+                return std::pair<double, long>(seg._CumulativeError[0], seg._NbOfClassif[0]);
+            };
+
+        // Run ONE variant end to end: transcribe (reimpl FFB) for the golden dumps,
+        // then the REAL getSegmentation as a structural SECONDARY probe, then VRCTS +
+        // scores.
+        auto runSpectralVariant = [&](const std::string& tag, const std::string& shiftOverride,
+                                      bool dumpBothChannels) {
+            // --- Transcription (reimpl FFB) on a FRESH probe + FRESH audio ------
+            ConfigFile confT(nnConfigPath, '_');
+            confT._Params.erase("BLSTM_weightsFile");
+            confT.set_val<std::string>("BLSTM_shift", shiftOverride);
+            AudioStruct audioT(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            SpectralProbe probe(confT);
+            probe.setWeights(flatSpectral);
+            Segmentation seg(audioT, 0.5);
+            transcribeSpectral(probe, audioT, seg, /*setReference=*/false, tag, /*dumpChan1=*/true, dumpBothChannels);
+
+            // --- SECONDARY structural probe: REAL getSegmentation on FRESH audio ---
+            ConfigFile confR(nnConfigPath, '_');
+            confR._Params.erase("BLSTM_weightsFile");
+            confR.set_val<std::string>("BLSTM_shift", shiftOverride);
+            AudioStruct audioR(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            SpectralProbe probeR(confR);
+            probeR.setWeights(flatSpectral);
+            Segmentation segR(audioR, 0.5);
+            probeR.getSegmentation(audioR, segR);  // REAL Eigen FFB
+            segR.compute_errors();
+
+            const int chanCmp = 0;
+            const auto& segsReimpl = seg._Classification.at(chanCmp);
+            const auto& segsReal = segR._Classification.at(chanCmp);
+            if (segsReimpl.size() != segsReal.size()) {
+                std::cerr << "SEG_STRUCT site=spectral_" << tag << " ABORT: count "
+                          << segsReimpl.size() << " (reimpl) != " << segsReal.size()
+                          << " (real)\n";
+                std::abort();
+            }
+            double maxDt = 0.0;
+            for (std::vector<double>::size_type ii = 0; ii < segsReimpl.size(); ++ii) {
+                if (segsReimpl[ii]._Type != segsReal[ii]._Type) {
+                    std::cerr << "SEG_STRUCT site=spectral_" << tag << " ABORT: type mismatch at "
+                              << ii << " (" << (int) segsReimpl[ii]._Type << " vs "
+                              << (int) segsReal[ii]._Type << ")\n";
+                    std::abort();
+                }
+                double dt = std::fabs(segsReimpl[ii]._BeginTime - segsReal[ii]._BeginTime);
+                if (dt > maxDt) maxDt = dt;
+            }
+            std::cout << "SEG_STRUCT site=spectral_" << tag << " ok=1 max_dt="
+                      << std::scientific << std::setprecision(3) << maxDt << "\n";
+
+            // VRCTS bytes: REAL toFile_VRCTS on the reimpl-driven Segmentation, on a
+            // zero-offset AudioStruct (same rationale as signal_*_vrcts_chan1.xml).
+            {
+                ConfigFile confV(nnConfigPath, '_');
+                confV._Params.erase("BLSTM_weightsFile");
+                confV.set_val<std::string>("BLSTM_shift", shiftOverride);
+                AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, itemVrcts);
+                SpectralProbe probeV(confV);
+                probeV.setWeights(flatSpectral);
+                Segmentation segV(audioZeroOff, 0.5);
+                transcribeSpectral(probeV, audioZeroOff, segV, /*setReference=*/false, tag, /*dumpChan1=*/false, /*dumpBothChannels=*/false);
+                std::string base = out + "spectral_" + tag + "_vrcts";
+                segV.toFile_VRCTS(base);
+                std::ifstream vf(base + "_chan_1.xml", std::ios::binary);
+                std::ostringstream vs;
+                vs << vf.rdbuf();
+                std::ofstream outv(out + "spectral_" + tag + "_vrcts_chan1.xml", std::ios::binary);
+                outv << vs.str();
+            }
+            ++dumps;
+
+            // compute_errors vs a programmatic two-span reference (getTargets fires):
+            // the transcription with a reference set (chan-0 scores dumped as Nx3).
+            {
+                ConfigFile confS(nnConfigPath, '_');
+                confS._Params.erase("BLSTM_weightsFile");
+                confS.set_val<std::string>("BLSTM_shift", shiftOverride);
+                AudioStruct audioS(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+                SpectralProbe probeS(confS);
+                probeS.setWeights(flatSpectral);
+                Segmentation segS(audioS, 0.5);
+                transcribeSpectral(probeS, audioS, segS, /*setReference=*/true, tag, /*dumpChan1=*/false, /*dumpBothChannels=*/false);
+                Eigen::MatrixXd scores(audioS.getChannelCount(), 3);
+                for (int ch = 0; ch < audioS.getChannelCount(); ++ch) {
+                    scores(ch, 0) = segS._ClassificationErrors.at(ch)[SPEECH]._Pfa;
+                    scores(ch, 1) = segS._ClassificationErrors.at(ch)[SPEECH]._Pmiss;
+                    scores(ch, 2) = segS._ClassificationErrors.at(ch)[SPEECH]._ErrorRate;
+                }
+                Matrix2BinaryFile(out + "spectral_" + tag + "_scores.bin", scores);
+                ++dumps;
+            }
+        };
+
+        // real (1_worker_1.config AS-IS: BLSTM_shift 0.8 -> overlap window_shift 80),
+        // overlap (shift 0.01 -> window_shift 1, heavier overlap, cross-channel golden),
+        // noOverlap (shift 0 -> truncate).
+        runSpectralVariant("real", "8.000000000000000e-01", /*dumpBothChannels=*/false);
+        runSpectralVariant("overlap", "0.01", /*dumpBothChannels=*/true);
+        runSpectralVariant("noOverlap", "0", /*dumpBothChannels=*/false);
+
+        // --- TWO-FILES golden (noOverlap only): the stateful lifecycle. The spectral
+        // noOverlap assigns _WindowShift = 0.0 at :885 (post-dump). So on file 2 the
+        // SAME probe re-enters getBLSTMParam with _WindowShift == 0.0: :445 rounds
+        // 0.0 -> 0, :446 -> noOverlap re-triggers, :452 clamps shift to 1, :453
+        // rewrites _WindowShift = 1*80/rate. Dump both files' boundaries + file2's
+        // params row so the Rust two-files test pins the round trip.
+        {
+            ConfigFile conf2(nnConfigPath, '_');
+            conf2._Params.erase("BLSTM_weightsFile");
+            conf2.set_val<std::string>("BLSTM_shift", "0");
+            SpectralProbe probe2(conf2);
+            probe2.setWeights(flatSpectral);
+
+            AudioStruct audioF1(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            Segmentation segF1(audioF1, 0.5);
+            transcribeSpectral(probe2, audioF1, segF1, /*setReference=*/false, "noOverlap_file1", /*dumpChan1=*/false, /*dumpBothChannels=*/false);
+            dumpBoundariesSpec(segF1, 0, "spectral_noOverlap_boundaries_file1_chan1.bin");
+            ++dumps;
+
+            // File 2: SAME probe2 (now carrying _WindowShift == 0.0 from :885), fresh
+            // audio -> re-enters the noOverlap path deterministically. Dump file2's
+            // params row (window_shift, window_size, spectrum_shift_in_frames,
+            // real_vec_size) so the two-files test can pin the quantization lifecycle.
+            AudioStruct audioF2(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            Segmentation segF2(audioF2, 0.5);
+            transcribeSpectral(probe2, audioF2, segF2, /*setReference=*/false, "noOverlap_file2", /*dumpChan1=*/false, /*dumpBothChannels=*/false);
+            dumpBoundariesSpec(segF2, 0, "spectral_noOverlap_boundaries_file2_chan1.bin");
+            ++dumps;
+
+            // File2 params row: re-derive via getBLSTMParam on a THIRD fresh audio with
+            // probe2's post-file2 state (already at _WindowShift == 0.0 again -> the
+            // same noOverlap re-derivation). Dumped as a 1x4 row for the Rust golden.
+            AudioStruct audioF3(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            std::stringstream ls3;
+            const unsigned Max3 = 20;
+            MelFilterBank mf3;
+            std::vector<double>::size_type fw3 = 0, fb3 = 0, fe3 = 0;
+            probe2.initSpectralAnalysis(audioF3, ls3, Max3, fw3, fb3, fe3, mf3);
+            std::vector<double>::size_type bws3 = 0;
+            long bwsh3 = 0;
+            bool noOv3 = false;
+            Eigen::MatrixXd rv3 = probe2.getBLSTMParam(audioF3, ls3, bws3, bwsh3, noOv3);
+            Eigen::MatrixXd paramsRow(1, 4);
+            paramsRow(0, 0) = (double) bwsh3;
+            paramsRow(0, 1) = (double) bws3;
+            paramsRow(0, 2) = (double) probe2._SpectrumShiftInFrames;
+            paramsRow(0, 3) = (double) rv3.rows();
+            Matrix2BinaryFile(out + "spectral_noOverlap_params_file2.bin", paramsRow);
             ++dumps;
         }
     }
