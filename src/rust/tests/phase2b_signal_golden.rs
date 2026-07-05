@@ -113,10 +113,14 @@ fn build(tag: &str) -> BlstmSignalSegmenter {
 
 /// NaN-aware convolved-row comparator: bit-IDENTICAL elements (including the OverLap
 /// `0/0 -> NaN` uncovered-row quirk that the overlap variant carries) pass in ANY
-/// mode; the rest go through `assert_oracle_eq` (bit-exact on the oracle env, hybrid
-/// ULP off-env). This mirrors the harness's `probeGapNaN` contract (identical NaN
-/// bits -> equal) so the shared `assert_oracle_eq` -- whose ULP arm cannot compare a
-/// NaN -- is only fed the finite elements. `got`/`want` are single-row vectors.
+/// mode; NaN-vs-NaN with DIFFERENT bits passes only off the oracle env (Ulp mode),
+/// because the default quiet NaN's sign bit is architecture-defined (x86-64 SSE
+/// `0/0` -> 0xfff8..., AArch64 -> 0x7ff8...) while the oracle env reproduces the
+/// fixture's bits exactly; the finite rest goes through `assert_oracle_eq`
+/// (bit-exact on the oracle env, hybrid ULP off-env). This mirrors the harness's
+/// `probeGapNaN` contract so the shared `assert_oracle_eq` -- whose ULP arm cannot
+/// compare a NaN -- is only fed the finite elements. `got`/`want` are single-row
+/// vectors.
 fn assert_convolved_eq(got: &ndarray::Array2<f64>, want: &ndarray::Array2<f64>, label: &str) {
     assert_eq!(got.shape(), want.shape(), "{label}: shape mismatch");
     let g = got.row(0);
@@ -127,9 +131,23 @@ fn assert_convolved_eq(got: &ndarray::Array2<f64>, want: &ndarray::Array2<f64>, 
         if gv.to_bits() == wv.to_bits() {
             continue; // bit-identical (incl. same-pattern NaN) -> equal in any mode.
         }
+        if gv.is_nan() && wv.is_nan() {
+            // The 0/0 default quiet NaN's SIGN BIT is architecture-defined
+            // (x86-64 SSE -> 0xfff8..., AArch64 -> 0x7ff8...), so off the
+            // oracle env only NaN-ness is comparable; on it, bits reproduce.
+            match common::oracle_mode() {
+                common::OracleMode::Strict => panic!(
+                    "{label}: at {i} a non-identical NaN in strict mode \
+                     (got=0x{:016x}, want=0x{:016x})",
+                    gv.to_bits(),
+                    wv.to_bits()
+                ),
+                common::OracleMode::Ulp(_) => continue,
+            }
+        }
         assert!(
             !gv.is_nan() && !wv.is_nan(),
-            "{label}: at {i} a non-identical NaN (got=0x{:016x}, want=0x{:016x})",
+            "{label}: at {i} NaN vs finite (got=0x{:016x}, want=0x{:016x})",
             gv.to_bits(),
             wv.to_bits()
         );

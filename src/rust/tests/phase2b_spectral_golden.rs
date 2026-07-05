@@ -124,8 +124,10 @@ fn build(tag: &str) -> BlstmSpectralSegmenter {
 
 /// NaN-aware convolved-row comparator (same contract as the signal golden's): bit-
 /// IDENTICAL elements (including any OverLap `0/0 -> NaN` uncovered-row quirk) pass in
-/// ANY mode; the rest go through `assert_oracle_eq` (bit-exact on the oracle env,
-/// hybrid ULP off-env). `got`/`want` are single-row vectors.
+/// ANY mode; NaN-vs-NaN with different bits passes only off the oracle env (the
+/// default quiet NaN's sign bit is architecture-defined: x86-64 SSE -> 0xfff8...,
+/// AArch64 -> 0x7ff8...); the finite rest goes through `assert_oracle_eq` (bit-exact
+/// on the oracle env, hybrid ULP off-env). `got`/`want` are single-row vectors.
 fn assert_convolved_eq(got: &ndarray::Array2<f64>, want: &ndarray::Array2<f64>, label: &str) {
     assert_eq!(got.shape(), want.shape(), "{label}: shape mismatch");
     let g = got.row(0);
@@ -136,9 +138,23 @@ fn assert_convolved_eq(got: &ndarray::Array2<f64>, want: &ndarray::Array2<f64>, 
         if gv.to_bits() == wv.to_bits() {
             continue; // bit-identical (incl. same-pattern NaN) -> equal in any mode.
         }
+        if gv.is_nan() && wv.is_nan() {
+            // The 0/0 default quiet NaN's SIGN BIT is architecture-defined
+            // (x86-64 SSE -> 0xfff8..., AArch64 -> 0x7ff8...), so off the
+            // oracle env only NaN-ness is comparable; on it, bits reproduce.
+            match common::oracle_mode() {
+                common::OracleMode::Strict => panic!(
+                    "{label}: at {i} a non-identical NaN in strict mode \
+                     (got=0x{:016x}, want=0x{:016x})",
+                    gv.to_bits(),
+                    wv.to_bits()
+                ),
+                common::OracleMode::Ulp(_) => continue,
+            }
+        }
         assert!(
             !gv.is_nan() && !wv.is_nan(),
-            "{label}: at {i} a non-identical NaN (got=0x{:016x}, want=0x{:016x})",
+            "{label}: at {i} NaN vs finite (got=0x{:016x}, want=0x{:016x})",
             gv.to_bits(),
             wv.to_bits()
         );
