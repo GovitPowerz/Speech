@@ -574,6 +574,17 @@ pub struct BlstmSignalSegmenter {
     channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
+    /// Port-side observation point, NO legacy counterpart: the PRE-convolution
+    /// `result_vec2` row (`:315`) captured per channel on the last
+    /// `get_segmentation` call, before `results_to_segmentation` mutates it in
+    /// place. The legacy only ever externalizes this value through the
+    /// `_IsUnitTest`-gated `.mat` dump (`Matrix2MatFile("result_vec_chan_%s",
+    /// result_vec2, _MatFilePtr)`, `:316-322`), which requires a live
+    /// `_MatFilePtr` (`io/matfile.rs` is an unported Phase 4 stub) -- so there is
+    /// no dump-directory route to reproduce that mechanism here. This accessor
+    /// exists purely so golden tests can pin the whole NN chain's output
+    /// bit-exactly without adding a `.mat` writer just for test capture.
+    last_result_rows: Vec<Vec<f64>>,
 }
 
 impl BlstmSignalSegmenter {
@@ -624,6 +635,7 @@ impl BlstmSignalSegmenter {
             channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
+            last_result_rows: Vec::new(),
         })
     }
 
@@ -631,6 +643,24 @@ impl BlstmSignalSegmenter {
     /// field parsed without being consumed by the live path).
     pub fn two_sweeps(&self) -> bool {
         self.two_sweeps
+    }
+
+    /// The stateful legacy `_WindowShift` member (`:108/:376`), POST the last
+    /// `get_segmentation` call's mutation (re-quantized, and reset to `0.0` if
+    /// that call's noOverlap branch fired). Exposed so golden tests can pin the
+    /// cross-file lifecycle observably instead of only via boundary structure.
+    pub fn window_shift_sec(&self) -> f64 {
+        self.window_shift_sec
+    }
+
+    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
+    /// `get_segmentation` call -- the whole NN chain's raw output, before
+    /// `results_to_segmentation` convolves it in place. Port-side observation
+    /// point with NO legacy counterpart; see the field doc for why (the legacy's
+    /// only externalization is the `_IsUnitTest`-gated `.mat` dump, which this
+    /// port does not carry).
+    pub fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
     }
 
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:346`): the NN cost from
@@ -731,6 +761,7 @@ impl Segmenter for BlstmSignalSegmenter {
         self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
+        self.last_result_rows = Vec::with_capacity(channels);
 
         // setProcessingType((window > 0), !noOverlap) ONCE (`:259`): the flags do not
         // change across channels (window_size/no_overlap are per-file constants).
@@ -798,6 +829,12 @@ impl Segmenter for BlstmSignalSegmenter {
 
             // result_vec2 = result_vec.transpose() -> ROW vector (`:315`).
             let mut result_vec2: Vec<f64> = result_vec.column(0).to_vec();
+
+            // Capture the PRE-convolution row for `last_result_rows` (port-side
+            // observation point, no legacy counterpart -- see the field doc).
+            // `results_to_segmentation` below mutates `result_vec2` in place via the
+            // convolution kernel, so the clone must happen before that call.
+            self.last_result_rows.push(result_vec2.clone());
 
             // results2segmentation (`:344-345`): the `targetSeqTmp = result_vec` copy
             // quirk is a dead param in the live `results_to_segmentation` (see its doc).

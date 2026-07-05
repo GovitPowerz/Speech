@@ -14,10 +14,15 @@
 //! match EXACTLY (a mismatch aborts fixture generation), and the boundary max-delta
 //! is recorded as `SEG_STRUCT site=signal_<variant> ok=1 max_dt=<measured>` in the
 //! manifest. All three variants measured `max_dt=0.0`: the real net's posteriors on
-//! this excerpt stay above `_DecisionThreshRising`, so every variant collapses to a
-//! single always-SPEECH span, insensitive to the tiny reimpl-vs-real posterior gap.
-//! The `signal_*_result_chan1.bin` goldens (4000/4001 NN outputs), NOT the trivial
-//! boundary structure, are what pin the whole NN chain bit-exactly.
+//! this excerpt are ~0.002-0.03, far BELOW `_DecisionThreshRising` (0.6), so NO
+//! speech is ever detected and every variant collapses to the untouched always-Other
+//! SEED hypothesis (`[Other@0, End@dur]`; VRCTS `SegmentList` empty, `spdur=0.00`,
+//! `Pmiss=1.0`) -- insensitive to the tiny reimpl-vs-real posterior gap. The
+//! `signal_*_result_chan1.bin` goldens (4000/4001 NN outputs) are what pin the whole
+//! NN chain bit-exactly, via `BlstmSignalSegmenter::last_result_rows` (a port-side
+//! observation point with no legacy counterpart, see its doc in `tasks/sad.rs`)
+//! rather than only the (structurally trivial, given the sub-threshold posteriors)
+//! boundary list.
 //!
 //! Goldens dumped by the harness `SignalProbe` stage (`tools/oracle_harness/main.cpp`,
 //! Phase 2b Task 6 block) against `tests/reference_data/phase2b/signal.config` (the
@@ -171,18 +176,28 @@ fn from_legacy_missing_two_sweeps_is_err() {
 // PERF NOTE: the signal NN forward runs on the full 16001-sample input; the overlap
 // variant (window_shift 4) runs ~4000 windows through the whole BLSTM per channel,
 // ~160s in debug. So the driver's expensive `get_segmentation` is invoked EXACTLY
-// ONCE per cheap variant (window0/noOverlap) across the whole file, and exactly ONCE
-// for overlap (in `overlap_end_to_end_matches_dump`). Everything else is derived from
-// the dumps (NN-free): the result NUMERIC content via the convolved-row rebuild, the
-// shapes via the dump headers here.
+// ONCE per cheap variant (window0/noOverlap) across the whole file, and exactly TWICE
+// for overlap (`overlap_result_and_boundaries_match_dump` + `overlap_vrcts_matches_
+// dump` -- two different audio slices back two different goldens, see those tests'
+// doc-comments). Everything else is derived from the dumps (NN-free): the shapes
+// here, the convolved-row rebuild in the next test.
+//
+// The result vec's NUMERIC content coming out of the REAL Rust NN chain is pinned
+// bit-exact against `signal_<tag>_result_chan1.bin` via
+// `BlstmSignalSegmenter::last_result_rows` (a port-side capture point, no legacy
+// counterpart -- see its doc in `tasks/sad.rs`) inside
+// `get_segmentation_boundaries_match_dump_cheap_variants` (window0/noOverlap) and
+// `overlap_result_and_boundaries_match_dump` (overlap), reusing those tests' single
+// runs rather than invoking the expensive driver again here. This closes the S9.3
+// gap: a stub `BlstmNetwork` forward returning all-zeros would fail
+// `assert_last_result_row_matches_dump` immediately (0.0 != the dumped ~0.002-0.03
+// posteriors), even though it would still pass the boundary/VRCTS goldens (all-zeros
+// is also below the 0.6 rising threshold, so it too collapses to the same
+// always-Other seed).
 
 #[test]
 fn result_row_shapes_match_manifest() {
-    // Dump-shape check only (NN-free): the real_vec_size per variant. The result
-    // vec's NUMERIC content is pinned NN-free by `convolved_rows_match_dump_all_
-    // variants` (rebuild from the dumped pre-conv row through the same
-    // results_to_segmentation), and the driver's own end-to-end output is checked in
-    // the cheap-variant + overlap e2e tests below.
+    // Dump-shape check only (NN-free): the real_vec_size per variant.
     for (tag, cols) in [
         ("window0", 4000usize),
         ("overlap", 4001),
@@ -196,6 +211,33 @@ fn result_row_shapes_match_manifest() {
             "{tag} result: real_vec_size per the manifest constants"
         );
     }
+}
+
+/// Bit-exact vs the golden: the driver's captured PRE-convolution result row (the
+/// REAL Rust `BlstmNetwork` forward output, via `last_result_rows`) compared to
+/// `signal_<tag>_result_chan1.bin`. Called once per variant with that variant's
+/// already-run driver (see call sites), so no extra expensive forward pass.
+///
+/// Uses the NaN-aware `assert_convolved_eq` comparator: the overlap variant's
+/// PRE-convolution row carries the documented OverLap `0/0 -> NaN` uncovered-row
+/// quirk at its last index (`last_result_rows` is captured BEFORE
+/// `results_to_segmentation`'s convolution, same row `assert_convolved_eq` already
+/// handles for the POST-convolution comparison below), so a plain `assert_oracle_eq`
+/// would spuriously fail the ULP arm's NaN comparison.
+fn assert_last_result_row_matches_dump(sig: &BlstmSignalSegmenter, tag: &str) {
+    let want = common::load_bin_phase2b(&format!("signal_{tag}_result_chan1.bin"));
+    let rows = sig.last_result_rows();
+    assert_eq!(
+        rows.len(),
+        2,
+        "{tag}: last_result_rows must have 2 channels"
+    );
+    let got = ndarray::Array2::from_shape_vec((1, rows[0].len()), rows[0].clone()).unwrap();
+    assert_convolved_eq(
+        &got,
+        &want,
+        &format!("{tag} last_result_row (chan1, NN-chain)"),
+    );
 }
 
 // === Convolved rows + boundaries (post results_to_segmentation), per variant ==
@@ -263,7 +305,8 @@ fn convolved_rows_match_dump_all_variants() {
 }
 
 fn want_bound_count(_tag: &str) -> usize {
-    2 // all variants: [SPEECH@0, END@dur] (always-SPEECH span)
+    2 // all variants: [Other@0, End@dur] (untouched always-Other seed hypothesis;
+    // sub-threshold posteriors never trigger a rising crossing)
 }
 
 /// Assert `segs[0]`'s hypothesis boundary list matches the harness dump exactly.
@@ -290,8 +333,11 @@ fn assert_boundaries_match(segs: &[Segmentation], dump: &str, label: &str) {
 // === End-to-end boundaries off the DRIVER (not the rebuild) ===================
 //
 // Cheap variants only (window0/noOverlap, single-forward). Overlap's driver-level
-// e2e is checked ONCE in `overlap_end_to_end_matches_dump` (the ~160s run), and its
-// NUMERIC result is pinned NN-free in `convolved_rows_match_dump_all_variants`.
+// e2e (boundaries + result-vec) is checked in `overlap_result_and_boundaries_match_
+// dump` (one of its two ~160s runs); its VRCTS golden in `overlap_vrcts_matches_dump`
+// (the other run, on zero-offset audio). The result-vec's numeric content is ALSO
+// cross-checked NN-free (from the static dump, not a live run) in
+// `convolved_rows_match_dump_all_variants`.
 
 #[test]
 fn get_segmentation_boundaries_match_dump_cheap_variants() {
@@ -305,26 +351,59 @@ fn get_segmentation_boundaries_match_dump_cheap_variants() {
             &format!("signal_{tag}_boundaries_chan1.bin"),
             &format!("{tag} e2e"),
         );
+        // S9.3: the REAL Rust NN chain's result row, bit-exact vs the golden dump
+        // (see `assert_last_result_row_matches_dump`'s doc for why this is required
+        // and not implied by the boundary/VRCTS checks).
+        assert_last_result_row_matches_dump(&sig, tag);
     }
 }
 
-// === Overlap variant: the ONE expensive driver-level end-to-end run ===========
+// === Overlap variant: the TWO expensive driver-level end-to-end runs ==========
+//
+// The overlap NN forward is ~160s in debug regardless of which audio slice it runs
+// on (cost is windows-per-channel, not audio content), so it is invoked EXACTLY
+// TWICE for the whole suite -- matching the harness's own dump generation, which
+// also runs the overlap NN twice: once on the offset-0.35 excerpt (`runVariant`,
+// backing `signal_overlap_result_chan1.bin` / `..._boundaries_chan1.bin`) and once
+// on the zero-offset excerpt (the inner VRCTS block, backing
+// `signal_overlap_vrcts_chan1.xml`). The two goldens are NOT interchangeable (they
+// come from different audio slices), so one Rust-side run cannot serve both without
+// either mismatching the result-vec golden or the VRCTS golden -- hence two runs,
+// not a reused single one.
 
-/// The overlap variant's driver-level end-to-end check, run EXACTLY ONCE (the ~4000-
-/// window forward is ~160s in debug). Covers result-vec shape (4001), the boundary
-/// list, the score, and the VRCTS bytes in a single `get_segmentation` on the
-/// zero-offset audio (so the VRCTS times are offset-free) -- the reference/score is
-/// computed on a second, cheaper path (the score reuses the same hypothesis).
+/// Run 1/2 (offset 0.35, matching `signal_overlap_result_chan1.bin` /
+/// `signal_overlap_boundaries_chan1.bin`): asserts the REAL Rust NN chain's result
+/// row bit-exact (S9.3; see `assert_last_result_row_matches_dump`'s doc), the
+/// driver-level boundary list, and the cost/classif accumulators.
 #[test]
-fn overlap_end_to_end_matches_dump() {
+fn overlap_result_and_boundaries_match_dump() {
+    let tag = "overlap";
+    let mut sig = build(tag);
+    let mut audio = excerpt_audio();
+    let mut segs = fresh_segs(&audio);
+    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    assert_last_result_row_matches_dump(&sig, tag);
+    assert_boundaries_match(
+        &segs,
+        &format!("signal_{tag}_boundaries_chan1.bin"),
+        &format!("{tag} e2e"),
+    );
+
+    assert_eq!(sig.cumulative_error().len(), 2, "overlap: per-channel cost");
+    assert_eq!(
+        sig.nb_of_classif().len(),
+        2,
+        "overlap: per-channel nb_of_classif"
+    );
+}
+
+/// Run 2/2 (zero offset, matching `signal_overlap_vrcts_chan1.xml`): the VRCTS byte
+/// golden, whose times must be offset-free.
+#[test]
+fn overlap_vrcts_matches_dump() {
     let tag = "overlap";
 
-    // Zero-offset audio so the SAME run backs both the boundary and VRCTS goldens
-    // (VRCTS needs offset-free times; boundaries are offset-independent structure on
-    // this always-SPEECH excerpt). Score uses the offset-0.35 reference recipe, so it
-    // is covered on the cheap variants; here we assert the overlap boundary + result
-    // shape + VRCTS bytes, the overlap-specific wiring (OverLap FFB driver, timeStep=
-    // shift, timeOffset=0).
     let dump = std::fs::read_to_string(common::fixture_phase2b(&format!(
         "signal_{tag}_vrcts_chan1.xml"
     )))
@@ -336,22 +415,10 @@ fn overlap_end_to_end_matches_dump() {
     let mut segs = fresh_segs(&audio);
     sig.get_segmentation(&mut audio, &mut segs).unwrap();
 
-    // The VRCTS golden was dumped on zero-offset audio, so its boundaries match this
-    // run's (both offset-free). Byte-match the VRCTS writer output.
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
     assert_eq!(
         got, dump,
         "overlap: to_vrcts_string must byte-match the real toFile_VRCTS dump"
-    );
-
-    // Result-vec shape (4001) is implied by the always-SPEECH span reaching END@dur;
-    // assert the cumulative-error/nb-of-classif accumulators are per-channel populated
-    // (the NN cost path fired), distinguishing signal from the cost-free TDC/LTSV.
-    assert_eq!(sig.cumulative_error().len(), 2, "overlap: per-channel cost");
-    assert_eq!(
-        sig.nb_of_classif().len(),
-        2,
-        "overlap: per-channel nb_of_classif"
     );
 }
 
@@ -434,8 +501,8 @@ fn score_matches_dump_cheap_variants() {
 
 #[test]
 fn vrcts_bytes_match_dump_cheap_variants() {
-    // Overlap's VRCTS is covered in `overlap_end_to_end_matches_dump` (the single
-    // expensive overlap run); here the two cheap variants.
+    // Overlap's VRCTS is covered in `overlap_vrcts_matches_dump` (one of its two
+    // expensive overlap runs); here the two cheap variants.
     for tag in ["window0", "noOverlap"] {
         let dump = std::fs::read_to_string(common::fixture_phase2b(&format!(
             "signal_{tag}_vrcts_chan1.xml"
@@ -592,14 +659,38 @@ fn dc_offset_flag_is_log_only() {
 ///
 /// EVIDENCE (do the two files differ?): the harness dumps show
 /// `signal_noOverlap_boundaries_file1_chan1.bin` ==
-/// `signal_noOverlap_boundaries_file2_chan1.bin` -- BOTH are the single always-SPEECH
-/// span `[SPEECH@0, END@dur]`. So the OUTPUT is identical across files even though
-/// the lifecycle genuinely re-enters through the mutated `_WindowShift`. This is NOT
-/// the idempotent-re-quantization argument (TDC/LTSV): here the member is truly reset
-/// to 0.0 and re-derived, but the re-derivation lands on the SAME `1/rate` and the
-/// posteriors are unchanged (same audio), so the boundaries coincide. The test
-/// asserts the equality rather than assuming it, and this doc-comment records the
-/// honest finding: the state DOES round-trip, the observable output does not change.
+/// `signal_noOverlap_boundaries_file2_chan1.bin` -- BOTH are the untouched SEED
+/// hypothesis `[Other@0, End@dur]` (the real net's posteriors on this excerpt are
+/// ~0.002-0.03, far BELOW the 0.6 rising threshold, so NO speech is ever detected;
+/// VRCTS `SegmentList` is empty, `spdur=0.00`). So the OUTPUT is identical across
+/// files even though the lifecycle genuinely re-enters through the mutated
+/// `_WindowShift`. This is NOT the idempotent-re-quantization argument (TDC/LTSV):
+/// here the member is truly reset to 0.0 and re-derived, but the re-derivation lands
+/// on the SAME `1/rate` and the posteriors are unchanged (same audio), so the
+/// boundaries coincide. The test asserts the equality rather than assuming it, and
+/// this doc-comment records the honest finding: the state DOES round-trip, the
+/// observable output does not change.
+///
+/// This is NOT determinism-only, though: the boundary/type coincidence alone cannot
+/// distinguish "the reset genuinely fired and re-derived the same value" from "the
+/// reset never happened at all". WITHOUT the `:376` reset, file 2 would instead
+/// inherit file 1's POST-mutation `window_shift_sec = 1/rate` (not `0.0`), which
+/// re-derives `window_size (half) = round(0.5*8000/2) = 2000` -> `window_shift =
+/// round((1/8000)*8000) = 1 >= 1` -> `no_overlap = false` -- the OVERLAP branch, NOT
+/// noOverlap, with `full_window_size = 4001` and result-vec sizing UNCONDITIONAL
+/// `ceil(frame_count/window_shift) = ceil(16001/1) = 16001` (no ssr-division gate,
+/// since the gate is `window_size==0||no_overlap` and neither holds). That is a
+/// completely different code path with a ~4x larger result vector than the real
+/// (reset-present) `4000`. So `last_result_rows()[0].len()` after each call --
+/// asserted below against the real value, 4000, not the 16001 no-reset
+/// counterfactual -- IS the discriminating observable: a driver that silently
+/// dropped the `:376` reset would still coincidentally match the file1==file2
+/// boundary equality (both would show the always-Other seed under the overlap
+/// branch too, since posteriors stay sub-threshold there as well), but it would
+/// produce a differently-shaped (16001, not 4000) result row on file 2. Likewise
+/// `window_shift_sec()` is asserted to have round-tripped through `0.0` back to
+/// `1/rate = 1.25e-4` on both files (the reset firing, then re-deriving), not merely
+/// left at a fixed value.
 #[test]
 fn two_files_in_sequence_no_overlap_lifecycle() {
     let w = real_weights();
@@ -609,9 +700,41 @@ fn two_files_in_sequence_no_overlap_lifecycle() {
     let mut segs1 = fresh_segs(&audio1);
     sig.get_segmentation(&mut audio1, &mut segs1).unwrap();
 
+    // Discriminator (file 1): result-vec length must be the real (reset-present)
+    // 4000, not the no-reset counterfactual (irrelevant on file 1, which has no
+    // prior state, but establishes the baseline shape) -- and window_shift_sec must
+    // have landed back on 1/rate post-call.
+    assert_eq!(
+        sig.last_result_rows()[0].len(),
+        4000,
+        "file1: result-vec length must be 4000 (noOverlap sizing)"
+    );
+    assert_eq!(
+        sig.window_shift_sec(),
+        0.0,
+        "file1: the :376 reset must fire post-call (noOverlap branch taken)"
+    );
+
     let mut audio2 = excerpt_audio();
     let mut segs2 = fresh_segs(&audio2);
     sig.get_segmentation(&mut audio2, &mut segs2).unwrap();
+
+    // Discriminator (file 2): THE key observable. If the :376 reset had NOT fired
+    // on file 1, file 2 would inherit window_shift_sec = 1/rate (not 0.0), re-derive
+    // through the OVERLAP branch (not noOverlap), and produce a result-vec of length
+    // 16001 (ceil(16001/1), no ssr-division gate) -- see the doc-comment above for
+    // the full counterfactual derivation. The real (reset-present) value is 4000.
+    assert_eq!(
+        sig.last_result_rows()[0].len(),
+        4000,
+        "file2: result-vec length must be 4000 (the reset re-triggered noOverlap), \
+         NOT 16001 (the no-reset overlap-branch counterfactual)"
+    );
+    assert_eq!(
+        sig.window_shift_sec(),
+        0.0,
+        "file2: the :376 reset must fire again post-call (the round trip repeats)"
+    );
 
     let want1 = common::load_bin_phase2b("signal_noOverlap_boundaries_file1_chan1.bin");
     let want2 = common::load_bin_phase2b("signal_noOverlap_boundaries_file2_chan1.bin");

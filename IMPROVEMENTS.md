@@ -815,11 +815,21 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   re-enters `getSegmentation` with `_WindowShift == 0.0`: `:99` rounds `0.0*rate -> 0` -> `shift < 1`
   -> noOverlap re-triggers, `:107-108` re-clamp the shift to 1 and rewrite `_WindowShift = 1/rate`.
   This is a REAL round trip through mutated state (not a fixed point). The observable OUTPUT
-  boundaries nonetheless coincide across the two files (same audio -> same posteriors -> same
-  always-SPEECH span), which the two-files golden asserts rather than assumes; the state DOES
-  round-trip, the output does not change. Also reproduced: the reset-order divergence vs spectral
-  (signal resets BEFORE `compute_errors` at `:376`; spectral AFTER the mat dump at `:885` --
-  functionally equivalent, ported as written). Pinned by
+  boundaries nonetheless coincide across the two files (same audio -> same posteriors -> the SAME
+  untouched always-Other SEED hypothesis, `[Other@0, End@dur]`: the real net's posteriors on this
+  excerpt are ~0.002-0.03, far BELOW the 0.6 rising threshold, so NO speech is ever detected on
+  either file), which the two-files golden asserts rather than assumes; the state DOES round-trip,
+  the output does not change. Also reproduced: the reset-order divergence vs spectral (signal
+  resets BEFORE `compute_errors` at `:376`; spectral AFTER the mat dump at `:885` -- functionally
+  equivalent, ported as written).
+  Boundary/type coincidence alone cannot distinguish "the reset fired and re-derived the same
+  value" from "the reset never happened": WITHOUT it, file 2 would inherit `window_shift_sec =
+  1/rate` (not `0.0`), re-deriving through the OVERLAP branch (not noOverlap) with an UNCONDITIONAL
+  `ceil(frame_count/window_shift) = ceil(16001/1) = 16001`-row result vector -- vs the real
+  (reset-present) `4000`. So the two-files golden additionally asserts
+  `BlstmSignalSegmenter::last_result_rows()[0].len() == 4000` (not the 16001 no-reset
+  counterfactual) and `window_shift_sec() == 0.0` post-call on BOTH files, making the sizing/state
+  observable the actual discriminator rather than relying on the boundary coincidence. Pinned by
   `two_files_in_sequence_no_overlap_lifecycle` in `phase2b_signal_golden.rs`.
 
 - **[phase2b] `BlstmSignalSegmenter` divergences that are dead/log-only in the signal chain**

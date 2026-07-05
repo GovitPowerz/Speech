@@ -5113,7 +5113,10 @@ int main(int argc, char** argv) {
     //
     // Three variants (real net + real config keys, overridden window/shift):
     //   window0   -- BLSTM_window 0        (full-sequence, plain FFB path)
-    //   overlap   -- BLSTM_window 0.5, shift 0.1  (overlap FFB path)
+    //   overlap   -- BLSTM_window 0.01, shift 0.0005  (overlap FFB path; window_shift
+    //                4 == ssr, the ONLY non-broken overlap regime -- the brief's
+    //                original 0.5/0.1 params are broken-as-committed, see the
+    //                signal-overlap-oob note below the runVariant calls)
     //   noOverlap -- BLSTM_window 0.5, shift 0    (truncate FFB path; the `=0.0`
     //                _WindowShift poisoning + the ssr-division sizing gate)
     {
