@@ -25,6 +25,7 @@
 #include "AudioStruct.h"
 #include "iof/io.hpp"
 #include "BLSTMNeuralNetwork.h"
+#include "BLSTMSignalSegmenter.h"
 #include "ConfigFile.h"
 #include "CorpusItem.h"
 #include "Helpers.hpp"
@@ -104,6 +105,31 @@ struct LtsvProbe : LongTermSpectralVariation {
     using LongTermSpectralVariation::_MinFreq;
     using LongTermSpectralVariation::_MaxFreq;
     using LongTermSpectralVariation::classifySequence;
+};
+
+// Phase 2b Task 6: BlstmSignalSegmenter (Algo 4) oracle. Unlike TDC/LTSV, the signal
+// driver runs the REAL BLSTMNeuralNetwork.feedForwardBackward (BLSTMSignalSegmenter.
+// cpp:260), whose Eigen GEMMs diverge from the ascending-loop port. SignalProbe
+// exposes the protected Segmenter/segmenter fields + the NN member so the harness can
+// (a) transcribe getSegmentation with ONLY that FFB call swapped for the reimpl
+// family above (signalReimplFFB), and (b) run the REAL getSegmentation beside it as a
+// SECONDARY structural probe (segment count + types must match EXACTLY or abort).
+struct SignalProbe : BLSTMSignalSegmenter {
+    SignalProbe(ConfigFile &conf, const Eigen::Ref<const Eigen::VectorXd> weights)
+        : BLSTMSignalSegmenter(conf, weights, false, false) {}
+    using Segmenter::_WindowShift;
+    using Segmenter::_WindowSize;
+    using Segmenter::_FlagDCOffset;
+    using Segmenter::_WindowingType;
+    using Segmenter::_WindowingParam;
+    using Segmenter::_PreemphRatio;
+    using Segmenter::_NoiseSeed;
+    using Segmenter::_NoiseRatio;
+    using Segmenter::_ConvolutionCoeff;
+    using Segmenter::results2segmentation;
+    using Segmenter::getTargets;
+    using BLSTMSignalSegmenter::_BLSTMNeuralNetwork;
+    using BLSTMSignalSegmenter::_BLSTMTwoSweeps;
 };
 
 // Constants ALL later tasks reuse (kept in sync with the harness manifest).
@@ -942,6 +968,267 @@ static SpectralP deriveSpectral(const FeatureCfg& c, double rate, unsigned Max) 
     return s;
 }
 
+// ===========================================================================
+// Phase 2b Task 6: BLSTMSignalSegmenter (Algo 4) reimpl-swap family.
+//
+// The signal driver is the FIRST driver with the NN in the chain: its result_vec
+// is produced by _BLSTMNeuralNetwork.feedForwardBackward (BLSTMSignalSegmenter.cpp:
+// 260). Eigen's blocked GEMM diverges from ascending accumulation at the real net's
+// k>=23 shapes (Phase 2 NN_PROBE), and the layer-0 GEMM seeds the recurrence, so the
+// divergence propagates non-locally. The SignalProbe therefore transcribes
+// getSegmentation (:93-398, LIVE code only) faithfully but swaps ONLY that one FFB
+// call for the ascending-loop reimpl family below (makeLstmSteps/makeDenseSteps +
+// blstmFeedForwardT6 + the three windowed drivers), reusing the file-scope kernel
+// statics (lstmForwardLoop/netForwardLoop/denseForwardLoop/...). These are
+// standalone statics (not the Task 8/9 scope lambdas) so no prior golden path is
+// perturbed; they are byte-identical in logic to the Task 8/9 reimpls.
+//
+// State bundle for one BLSTM sub-network's per-layer weight matrices + steps. The
+// unpacked matrices must outlive the steps (the step closures capture references
+// into these vectors), so the caller owns a T6Net and passes it around.
+struct T6Net {
+    std::vector<Eigen::MatrixXd> iw, fw, pp, bs;   // LSTM per-layer (fwd or bwd)
+    std::vector<Eigen::MatrixXd> dw, db;           // dense per-layer
+    std::vector<NetLayerStep> lstmFwd, lstmRev, dense;
+};
+
+// Build fwd/rev LSTM steps from a flat weight slice (all peepholes on). Mirrors the
+// Task 8 makeLstmSteps lambda; returns the consumed weight count.
+static long t6MakeLstmSteps(const Eigen::VectorXd& flat, const std::vector<int>& ins,
+                            const std::vector<int>& outs, T6Net& n) {
+    const size_t L = ins.size();
+    n.iw.resize(L); n.fw.resize(L); n.pp.resize(L); n.bs.resize(L);
+    n.lstmFwd.resize(L); n.lstmRev.resize(L);
+    long pos = 0;
+    for (size_t jj = 0; jj < L; ++jj) {
+        int I = ins[jj], O = outs[jj];
+        long nb = 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+        Eigen::VectorXd slice = flat.segment(pos, nb);
+        pos += nb;
+        unpackLstmWeights(slice, I, O, n.iw[jj], n.fw[jj], n.pp[jj], n.bs[jj]);
+    }
+    for (size_t jj = 0; jj < L; ++jj) {
+        int O = outs[jj];
+        n.lstmFwd[jj].forward = [&n, jj, O](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool) {
+            Eigen::MatrixXd g;
+            lstmForwardLoop(in, n.iw[jj], n.fw[jj], n.pp[jj], n.bs[jj], O, true, true, true, g, outm);
+        };
+        n.lstmRev[jj].forward = [&n, jj, O](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool) {
+            Eigen::MatrixXd g;
+            lstmForwardReverseLoop(in, n.iw[jj], n.fw[jj], n.pp[jj], n.bs[jj], O, true, true, true, g, outm);
+        };
+    }
+    return pos;
+}
+
+// Build dense (NeuronLayer) steps from a flat weight slice. Mirrors makeDenseSteps.
+static long t6MakeDenseSteps(const Eigen::VectorXd& flat, const std::vector<int>& ins,
+                             const std::vector<int>& outs, T6Net& n) {
+    const size_t L = ins.size();
+    n.dw.resize(L); n.db.resize(L); n.dense.resize(L);
+    long pos = 0;
+    for (size_t jj = 0; jj < L; ++jj) {
+        int I = ins[jj], O = outs[jj];
+        long nb = (long)O * (I + 1);
+        Eigen::VectorXd slice = flat.segment(pos, nb);
+        pos += nb;
+        n.dw[jj].resize(I, O); n.db[jj].resize(1, O);
+        for (int c = 0; c < O; ++c)
+            for (int r = 0; r < I; ++r) n.dw[jj](r, c) = slice((long)c * I + r);
+        for (int c = 0; c < O; ++c) n.db[jj](0, c) = slice((long)O * I + c);
+    }
+    for (size_t jj = 0; jj < L; ++jj) {
+        n.dense[jj].forward = [&n, jj](const Eigen::MatrixXd& in, Eigen::MatrixXd& outm, bool last) {
+            outm = denseForwardLoop(in, n.dw[jj], n.db[jj], last);
+        };
+    }
+    return pos;
+}
+
+// The whole real-net BLSTM reimpl state, built once from the flat weight vector.
+// Real net: LSTM [23,24,24] sub [4,1]; output [48,12,1] sub [1,1]; ssr = 4.
+struct T6Blstm {
+    std::vector<long> lstmNN{23, 24, 24}, lstmSS{4, 1}, outNN{48, 12, 1}, outSS{1, 1};
+    std::vector<int> lstmIns{92, 24}, lstmOuts{24, 24};   // 23*4=92, 24*1=24
+    std::vector<int> outIns{48, 12}, outOuts{12, 1};
+    int fwdInputSize = 23;
+    long subRatio = 4, outNetRatio = 1, lstmSubRatio = 4;
+    int fwdOut = 24;    // last LSTM layer output size
+    T6Net fwd, bwd, out;
+
+    explicit T6Blstm(const Eigen::VectorXd& flat) {
+        long fwdNb = 0;
+        for (size_t jj = 0; jj < lstmIns.size(); ++jj) {
+            int I = lstmIns[jj], O = lstmOuts[jj];
+            fwdNb += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+        }
+        long outNbW = 0;
+        for (size_t jj = 0; jj < outIns.size(); ++jj) outNbW += (long)outOuts[jj] * (outIns[jj] + 1);
+        Eigen::VectorXd fwdSlice = flat.head(fwdNb);
+        Eigen::VectorXd bwdSlice = flat.segment(fwdNb, fwdNb);
+        Eigen::VectorXd outSlice = flat.segment(2 * fwdNb, outNbW);
+        t6MakeLstmSteps(fwdSlice, lstmIns, lstmOuts, fwd);
+        t6MakeLstmSteps(bwdSlice, lstmIns, lstmOuts, bwd);
+        t6MakeDenseSteps(outSlice, outIns, outOuts, out);
+    }
+};
+
+// Core plain feedForward reimpl for the real net (BLSTMNeuralNetwork.cpp:419-437):
+// forward net feedForward + backward net feedForwardReverse into (outputLength x
+// lstmOut), then output net feedForwardDouble (forward half LEFT). The leftCols
+// crop gate (LSTMRatios[0] > 1 && fwdInputSize < input.cols()) is FALSE for signal
+// mode's 1-col input (23 < 1 is false), so the whole 1-col input flows into the
+// LSTM layer, which itself handles cols<inputSize via inputW.topRows(cols).
+static void blstmFeedForwardT6(T6Blstm& b, const Eigen::MatrixXd& input,
+                               Eigen::MatrixXd& outForward, Eigen::MatrixXd& outBackward,
+                               Eigen::MatrixXd& output) {
+    Eigen::MatrixXd fwdIn = input, bwdIn = input;
+    if (b.lstmSS[0] > 1 && b.fwdInputSize < input.cols()) {
+        fwdIn = input.leftCols(b.fwdInputSize);
+        bwdIn = input.leftCols(b.fwdInputSize);
+    }
+    netForwardLoop(b.lstmNN, b.lstmSS, b.fwd.lstmFwd, fwdIn, outForward);
+    netForwardReverseLoop(b.lstmNN, b.lstmSS, b.bwd.lstmRev, bwdIn, outBackward);
+    netForwardDoubleLoop(b.outNN, b.outSS, b.out.dense, outForward, outBackward, output);
+}
+
+// Reimpl of feedForwardBackwardTruncateSweep (BLSTMNeuralNetwork.cpp:488-546), the
+// !two_sweeps Truncate path (signal noOverlap always has _BLSTMTwoSweeps parsed but
+// the config sets it false, and the TwoSweeps branch is dead in signal anyway).
+static void truncateSweepT6(T6Blstm& b, const Eigen::MatrixXd& input, long window_size,
+                            Eigen::MatrixXd& outputSeq) {
+    long lengthOutputLSTM = input.rows();
+    for (long r : b.lstmSS) lengthOutputLSTM /= r;
+    Eigen::MatrixXd outputForward = Eigen::MatrixXd::Zero(lengthOutputLSTM, b.fwdOut);
+    Eigen::MatrixXd outputBackward = Eigen::MatrixXd::Zero(lengthOutputLSTM, b.fwdOut);
+
+    long length = window_size, lstmLenShort;
+    for (long r : b.lstmSS) length /= r;
+    lstmLenShort = length;
+    for (long r : b.outSS) length /= r;
+    long nominalLen = length, nominalLstm = lstmLenShort;
+
+    for (long jj = 0; jj < input.rows(); jj += window_size) {
+        long begin = jj;
+        long end = jj + window_size - 1;
+        if (end >= input.rows()) end = input.rows() - 1;
+        long lengthSeq = end - begin + 1;
+        long lengthShort, lstmLength;
+        if (lengthSeq != window_size) {
+            lengthShort = lengthSeq;
+            for (long r : b.lstmSS) lengthShort /= r;
+            lstmLength = lengthShort;
+            for (long r : b.outSS) lengthShort /= r;
+        } else {
+            lengthShort = nominalLen;
+            lstmLength = nominalLstm;
+        }
+        if (lengthShort > 0) {
+            Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+            Eigen::MatrixXd outShort, oF, oB;
+            blstmFeedForwardT6(b, block, oF, oB, outShort);
+            outputSeq.block(begin / b.subRatio, 0, lengthShort, outputSeq.cols()) = outShort;
+            outputForward.block(begin / b.lstmSubRatio, 0, lstmLength, b.fwdOut) = oF;
+            outputBackward.block(begin / b.lstmSubRatio, 0, lstmLength, b.fwdOut) = oB;
+        }
+    }
+}
+
+// Reimpl of feedForwardBackwardOverLap (BLSTMNeuralNetwork.cpp:592-681): overlapping
+// windows accumulated INTO the caller's outputSeq (in place, :664 noalias() +=) +
+// per-row counts, then quotient (0/0 -> NaN on uncovered rows, no guard). Window
+// bounds snapped to the subsampling grid (begin down, end up).
+static void overlapT6(T6Blstm& b, const Eigen::MatrixXd& input, long windowSize,
+                      long windowShift, Eigen::MatrixXd& outputSeq) {
+    long lengthOutputLSTM = outputSeq.rows() * b.outNetRatio;
+    Eigen::MatrixXd outputForward = Eigen::MatrixXd::Zero(lengthOutputLSTM, b.fwdOut);
+    Eigen::MatrixXd outputBackward = Eigen::MatrixXd::Zero(lengthOutputLSTM, b.fwdOut);
+    Eigen::MatrixXd outCount = Eigen::MatrixXd::Zero(outputSeq.rows(), 1);
+    Eigen::MatrixXd outCountLSTM = Eigen::MatrixXd::Zero(lengthOutputLSTM, 1);
+
+    long length = 2 * windowSize + 1;
+    for (long r : b.lstmSS) length /= r;
+    for (long r : b.outSS) length /= r;
+    long nominalLen = length, nominalLstm = length;
+
+    for (long jj = 0; jj < input.rows(); jj += windowShift) {
+        long begin = (jj < windowSize) ? 0 : jj - windowSize;
+        begin = (begin / b.subRatio) * b.subRatio;
+        long end = begin + 2 * windowSize;
+        if (end >= input.rows()) end = input.rows() - 1;
+        end = ((end + 1) / b.subRatio) * b.subRatio - 1;
+        long lengthSeq = end - begin + 1;
+        long lengthShort, lengthShortLSTM;
+        if (lengthSeq != 2 * windowSize + 1) {
+            lengthShort = lengthSeq;
+            lengthShortLSTM = lengthSeq;
+            for (long r : b.lstmSS) { lengthShort /= r; lengthShortLSTM /= r; }
+            for (long r : b.outSS) lengthShort /= r;
+        } else {
+            lengthShort = nominalLen;
+            lengthShortLSTM = nominalLstm;
+        }
+        if (lengthShort > 0) {
+            Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+            Eigen::MatrixXd outShort, oF, oB;
+            blstmFeedForwardT6(b, block, oF, oB, outShort);
+            // :664 accumulate INTO the caller's outputSeq buffer (in place).
+            outputSeq.block(begin / b.subRatio, 0, lengthShort, outputSeq.cols()) += outShort;
+            outCount.block(begin / b.subRatio, 0, lengthShort, 1) += Eigen::MatrixXd::Ones(lengthShort, 1);
+            long lbeg = begin * b.outNetRatio / b.subRatio;
+            outputForward.block(lbeg, 0, lengthShortLSTM, b.fwdOut) += oF;
+            outputBackward.block(lbeg, 0, lengthShortLSTM, b.fwdOut) += oB;
+            outCountLSTM.block(lbeg, 0, lengthShortLSTM, 1) += Eigen::MatrixXd::Ones(lengthShortLSTM, 1);
+        }
+    }
+    for (long c = 0; c < outputSeq.cols(); ++c)
+        for (long r = 0; r < outputSeq.rows(); ++r)
+            outputSeq(r, c) /= outCount(r, 0);
+    (void)outputForward; (void)outputBackward; (void)outCountLSTM;
+}
+
+// Top-level feedForwardBackward reimpl for signal mode, dispatching exactly as
+// BLSTMNeuralNetwork::feedForwardBackward (:711-773) does after setProcessingType
+// ((window>0), !noOverlap): type -1 whole-sequence self-normalization in place
+// (the real net's _InputNormalizationType == -1), then the driver:
+//   window==0  -> plain (truncates_sequence=false)
+//   noOverlap  -> truncate (truncates_sequence=true, overlaps=false)
+//   overlap    -> overlap (truncates_sequence=true, overlaps=true)
+static void signalReimplFFB(T6Blstm& b, Eigen::MatrixXd& input, long window_size,
+                            long window_shift, bool noOverlap, Eigen::MatrixXd& output) {
+    // Type -1 self-normalization in place (BLSTMNeuralNetwork.cpp:737-744).
+    {
+        const int R = static_cast<int>(input.rows());
+        const int C = static_cast<int>(input.cols());
+        if (R > 0) {
+            std::vector<double> mean(C, 0.0);
+            for (int c = 0; c < C; ++c) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += input(r, c);
+                mean[c] = acc / (double)R;
+            }
+            for (int r = 0; r < R; ++r)
+                for (int c = 0; c < C; ++c) input(r, c) -= mean[c];
+            std::vector<double> stdv(C, 0.0);
+            for (int c = 0; c < C; ++c) {
+                double acc = 0.0;
+                for (int r = 0; r < R; ++r) acc += input(r, c) * input(r, c);
+                stdv[c] = std::sqrt((acc + 1e-32) / (double)R);
+            }
+            for (int r = 0; r < R; ++r)
+                for (int c = 0; c < C; ++c) input(r, c) = Maxmin2::fn(input(r, c) / stdv[c]);
+        }
+    }
+    if (window_size == 0) {
+        Eigen::MatrixXd oF, oB;
+        blstmFeedForwardT6(b, input, oF, oB, output);   // plain path
+    } else if (noOverlap) {
+        truncateSweepT6(b, input, window_size, output);  // truncate path
+    } else {
+        overlapT6(b, input, window_size, window_shift, output);  // overlap path
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0] << " <output_dir>\n";
@@ -1001,6 +1288,11 @@ int main(int argc, char** argv) {
     std::string ltsvPowermelConfigPath = (argc > 8)
         ? std::string(argv[8])
         : std::string("../../tests/reference_data/phase2b/ltsv_powermel.config");
+
+    // Phase 2b Task 6: BLSTM-prefixed signal config, same argv-override convention.
+    std::string signalConfigPath = (argc > 9)
+        ? std::string(argv[9])
+        : std::string("../../tests/reference_data/phase2b/signal.config");
 
     int dumps = 0;
 
@@ -4797,6 +5089,340 @@ int main(int argc, char** argv) {
                 boundariesPm((long) ii, 1) = (double) segsPm[ii]._Type;
             }
             Matrix2BinaryFile(out + bufBoundPm.str(), boundariesPm);
+            ++dumps;
+        }
+    }
+
+    // --- Phase 2b Task 6: BlstmSignalSegmenter (Algo 4) ----------------------
+    // legacy: BLSTMSignalSegmenter::getSegmentation (BLSTMSignalSegmenter.cpp:93-398,
+    // LIVE code only). The FIRST driver with the NN in the chain: result_vec comes
+    // from _BLSTMNeuralNetwork.feedForwardBackward (:260), whose real Eigen GEMMs
+    // diverge from the ascending-loop port. Each variant's PRIMARY golden dumps are
+    // produced by a TRANSCRIPTION of getSegmentation with ONLY that FFB call swapped
+    // for signalReimplFFB (the reimpl family above); everything else -- the param
+    // math (:96-108, :221-254), the results2segmentation call, the compute_errors --
+    // is faithful. The SECONDARY probe runs the REAL BLSTMSignalSegmenter::
+    // getSegmentation beside it: segment count + types must match EXACTLY (abort on
+    // mismatch, spec decision 3), boundary max-delta recorded as
+    //   SEG_STRUCT site=signal_<variant> ok=1 max_dt=<measured>.
+    //
+    // The real net (1_worker_1.config topology, 33671 weights) expects 23 inputs;
+    // signal mode feeds a 1-column input (audio._Data.row(chan).transpose()), which
+    // the LSTM input projection accepts via inputW.topRows(cols) width tolerance --
+    // the legacy's own behavior, kept.
+    //
+    // Three variants (real net + real config keys, overridden window/shift):
+    //   window0   -- BLSTM_window 0        (full-sequence, plain FFB path)
+    //   overlap   -- BLSTM_window 0.5, shift 0.1  (overlap FFB path)
+    //   noOverlap -- BLSTM_window 0.5, shift 0    (truncate FFB path; the `=0.0`
+    //                _WindowShift poisoning + the ssr-division sizing gate)
+    {
+        Eigen::VectorXd flatSignal = BinaryFile2Vector(nnWeightsPath);
+        T6Blstm reimplNet(flatSignal);
+
+        // Boundary-dump helper: (begin, type) rows off a Segmentation's channel-0
+        // hypothesis list.
+        auto dumpBoundaries = [&](const Segmentation& seg, const std::string& name) {
+            const auto& segs = seg._Classification.at(0);
+            Eigen::MatrixXd b((long) segs.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segs.size(); ++ii) {
+                b((long) ii, 0) = segs[ii]._BeginTime;
+                b((long) ii, 1) = (double) segs[ii]._Type;
+            }
+            Matrix2BinaryFile(out + name, b);
+        };
+
+        // Run ONE variant end to end: transcribe getSegmentation (reimpl FFB) for the
+        // golden dumps, then the REAL getSegmentation as a structural SECONDARY probe.
+        // `windowOverride`/`shiftOverride` are the raw BLSTM_window / BLSTM_shift
+        // config values for the variant. `chan` is fixed to 0 (chan 1) for the dumps.
+        auto runVariant = [&](const std::string& tag, const std::string& windowOverride,
+                              const std::string& shiftOverride) {
+            // --- Transcription (reimpl FFB) on a FRESH probe + FRESH audio -------
+            ConfigFile confT(signalConfigPath, '_');
+            confT._Params.erase("BLSTM_weightsFile");
+            confT.set_val<std::string>("BLSTM_window", windowOverride);
+            confT.set_val<std::string>("BLSTM_shift", shiftOverride);
+            AudioStruct audioT(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            SignalProbe probe(confT, flatSignal);
+
+            const long rate = audioT.getFrameRate();
+            const long long frameCount = audioT.getFrameCount();
+            const long ssr = probe._BLSTMNeuralNetwork.getSubSamplingRatio();
+
+            // signalraw: audio._Data BEFORE preemph/noise (:133-134). The signal
+            // timing divergence golden vs signal (post).
+            Matrix2BinaryFile(out + "signal_" + tag + "_signalraw_chan1.bin",
+                              audioT._Data.row(0));
+
+            // Window/shift derivation in SIGNAL samples (:96-108).
+            std::vector<double>::size_type BLSTM_window_size =
+                (std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / 2.0);
+            if ((BLSTM_window_size != 0) && (BLSTM_window_size < (std::vector<double>::size_type) ssr))
+                BLSTM_window_size = ssr;
+            std::vector<double>::size_type BLSTM_full_window_size = 2 * BLSTM_window_size + 1;
+            long BLSTM_window_shift = (long) boost::math::round(probe._WindowShift * rate);
+            bool noOverlap = false;
+            if ((BLSTM_window_size != 0) && (BLSTM_window_shift < 1)) {
+                noOverlap = true;
+                BLSTM_window_size =
+                    (((std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate)) / ssr) * ssr;
+                if (BLSTM_window_size < 10 * (std::vector<double>::size_type) ssr)
+                    BLSTM_window_size = 10 * ssr;
+                BLSTM_full_window_size = BLSTM_window_size;
+            }
+            if ((BLSTM_window_size == 0) || (BLSTM_window_shift < 1)) BLSTM_window_shift = 1;
+            probe._WindowShift = ((double) BLSTM_window_shift) / rate;   // MEMBER MUTATION (:108)
+
+            // preemph -> noise (:137-148). windowing_coeff computed (:149) but never
+            // applied (dump-only dead weight); getWindowingCoefficients returns 0 cols
+            // for full==1 (window==0), matching the Rust windowing_coefficients(size<=1)
+            // -> None no-op.
+            if (probe._PreemphRatio > 0) audioT.applyPreemph(probe._PreemphRatio);
+            if (probe._NoiseSeed > 0) audioT.applyNoise(probe._NoiseRatio);
+            Eigen::MatrixXd windowing_coeff =
+                getWindowingCoefficients(probe._WindowingType, false, BLSTM_full_window_size, probe._WindowingParam);
+
+            // signal: audio._Data AFTER preemph/noise (:174-175).
+            Matrix2BinaryFile(out + "signal_" + tag + "_signal_chan1.bin", audioT._Data.row(0));
+
+            probe._BLSTMNeuralNetwork.resetWeightsDerivatives();  // :170
+
+            const int chan = 0;
+            Eigen::MatrixXd inputSeq = audioT._Data.row(chan).transpose();  // :188 Nx1
+
+            // Result-vec sizing (:221-240): unconditional ceil-division by
+            // BLSTM_window_shift, then ssr-division GATED on (window==0 || noOverlap).
+            std::vector<double>::size_type vec_size = (std::vector<double>::size_type) frameCount;
+            std::vector<double>::size_type real_vec_size = vec_size;
+            if ((std::vector<double>::size_type) (real_vec_size / BLSTM_window_shift) * BLSTM_window_shift == real_vec_size) {
+                real_vec_size = (std::vector<double>::size_type) (real_vec_size / BLSTM_window_shift);
+            } else {
+                real_vec_size = (std::vector<double>::size_type) (real_vec_size / BLSTM_window_shift + 1);
+            }
+            if ((BLSTM_window_size == 0) || (noOverlap)) {
+                if (ssr > 1) {
+                    std::vector<std::vector<double>::size_type> LSTMRatios =
+                        probe._BLSTMNeuralNetwork.getLSTMSubSampling();
+                    for (std::vector<double>::size_type jj = 0; jj < LSTMRatios.size(); ++jj)
+                        real_vec_size /= LSTMRatios[jj];
+                    std::vector<std::vector<double>::size_type> OutputRatios =
+                        probe._BLSTMNeuralNetwork.getOutputSubSampling();
+                    for (std::vector<double>::size_type jj = 0; jj < OutputRatios.size(); ++jj)
+                        real_vec_size /= OutputRatios[jj];
+                }
+            }
+            Eigen::MatrixXd result_vec = Eigen::MatrixXd::Zero(real_vec_size, 1);
+
+            // timeStep/timeOffset (:244-254). _WindowShift here is the POST-:108 value.
+            double timeStep = probe._WindowShift * ssr;
+            double timeOffset = timeStep / 2 - probe._WindowShift / 2;
+            if (BLSTM_window_size > 0) {
+                if (noOverlap) {
+                    timeStep = probe._WindowShift * ssr;
+                    timeOffset = timeStep / 2 - probe._WindowShift / 2;
+                } else {
+                    timeStep = probe._WindowShift;
+                    timeOffset = 0.0;
+                }
+            }
+
+            // NN invocation SWAPPED for the reimpl (:259-260). No targets (no
+            // reference set on this Segmentation). Input mutated in place by the type
+            // -1 self-normalization inside signalReimplFFB, matching the real class.
+            Eigen::MatrixXd reimplInput = inputSeq;
+            signalReimplFFB(reimplNet, reimplInput, (long) BLSTM_window_size, BLSTM_window_shift,
+                            noOverlap, result_vec);
+
+            Eigen::MatrixXd result_vec2 = result_vec.transpose();  // :315 ROW vector
+            Matrix2BinaryFile(out + "signal_" + tag + "_result_chan1.bin", result_vec2);
+
+            // results2segmentation (:344-345): targetSeqTmp = result_vec copy quirk.
+            Eigen::MatrixXd targetSeqTmp = result_vec;
+            Segmentation seg(audioT, 0.5);
+            probe.results2segmentation(seg, timeStep, timeOffset, result_vec2, targetSeqTmp, chan, SPEECH);
+            seg.compute_errors();
+            Matrix2BinaryFile(out + "signal_" + tag + "_convolved_chan1.bin", result_vec2);
+            dumpBoundaries(seg, "signal_" + tag + "_boundaries_chan1.bin");
+            dumps += 5;   // signalraw, signal, result, convolved, boundaries
+
+            // --- SECONDARY structural probe: REAL getSegmentation on FRESH audio ---
+            ConfigFile confR(signalConfigPath, '_');
+            confR._Params.erase("BLSTM_weightsFile");
+            confR.set_val<std::string>("BLSTM_window", windowOverride);
+            confR.set_val<std::string>("BLSTM_shift", shiftOverride);
+            AudioStruct audioR(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            SignalProbe probeR(confR, flatSignal);
+            Segmentation segR(audioR, 0.5);
+            probeR.getSegmentation(audioR, segR);   // REAL Eigen FFB
+            segR.compute_errors();
+
+            const auto& segsReimpl = seg._Classification.at(chan);
+            const auto& segsReal = segR._Classification.at(chan);
+            if (segsReimpl.size() != segsReal.size()) {
+                std::cerr << "SEG_STRUCT site=signal_" << tag << " ABORT: count "
+                          << segsReimpl.size() << " (reimpl) != " << segsReal.size()
+                          << " (real)\n";
+                std::abort();
+            }
+            double maxDt = 0.0;
+            for (std::vector<double>::size_type ii = 0; ii < segsReimpl.size(); ++ii) {
+                if (segsReimpl[ii]._Type != segsReal[ii]._Type) {
+                    std::cerr << "SEG_STRUCT site=signal_" << tag << " ABORT: type mismatch at "
+                              << ii << " (" << (int) segsReimpl[ii]._Type << " vs "
+                              << (int) segsReal[ii]._Type << ")\n";
+                    std::abort();
+                }
+                double dt = std::fabs(segsReimpl[ii]._BeginTime - segsReal[ii]._BeginTime);
+                if (dt > maxDt) maxDt = dt;
+            }
+            std::cout << "SEG_STRUCT site=signal_" << tag << " ok=1 max_dt="
+                      << std::scientific << std::setprecision(3) << maxDt << "\n";
+
+            // VRCTS bytes: REAL toFile_VRCTS on the reimpl-driven Segmentation, on a
+            // zero-offset AudioStruct (same rationale as tdc/ltsv_vrcts_chan1.xml).
+            {
+                ConfigFile confV(signalConfigPath, '_');
+                confV._Params.erase("BLSTM_weightsFile");
+                confV.set_val<std::string>("BLSTM_window", windowOverride);
+                confV.set_val<std::string>("BLSTM_shift", shiftOverride);
+                AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, itemVrcts);
+                SignalProbe probeV(confV, flatSignal);
+                const long rateV = audioZeroOff.getFrameRate();
+                const long long frameCountV = audioZeroOff.getFrameCount();
+                const long ssrV = probeV._BLSTMNeuralNetwork.getSubSamplingRatio();
+
+                std::vector<double>::size_type wsz =
+                    (std::vector<double>::size_type) boost::math::round(probeV._WindowSize * rateV / 2.0);
+                if ((wsz != 0) && (wsz < (std::vector<double>::size_type) ssrV)) wsz = ssrV;
+                long wsh = (long) boost::math::round(probeV._WindowShift * rateV);
+                bool noOv = false;
+                if ((wsz != 0) && (wsh < 1)) {
+                    noOv = true;
+                    wsz = (((std::vector<double>::size_type) boost::math::round(probeV._WindowSize * rateV)) / ssrV) * ssrV;
+                    if (wsz < 10 * (std::vector<double>::size_type) ssrV) wsz = 10 * ssrV;
+                }
+                if ((wsz == 0) || (wsh < 1)) wsh = 1;
+                probeV._WindowShift = ((double) wsh) / rateV;
+                if (probeV._PreemphRatio > 0) audioZeroOff.applyPreemph(probeV._PreemphRatio);
+                if (probeV._NoiseSeed > 0) audioZeroOff.applyNoise(probeV._NoiseRatio);
+                probeV._BLSTMNeuralNetwork.resetWeightsDerivatives();
+
+                std::vector<double>::size_type vszV = (std::vector<double>::size_type) frameCountV;
+                std::vector<double>::size_type rvszV = vszV;
+                if ((std::vector<double>::size_type) (rvszV / wsh) * wsh == rvszV) rvszV = rvszV / wsh;
+                else rvszV = rvszV / wsh + 1;
+                if ((wsz == 0) || (noOv)) {
+                    if (ssrV > 1) {
+                        auto LR = probeV._BLSTMNeuralNetwork.getLSTMSubSampling();
+                        for (auto r : LR) rvszV /= r;
+                        auto OR = probeV._BLSTMNeuralNetwork.getOutputSubSampling();
+                        for (auto r : OR) rvszV /= r;
+                    }
+                }
+                Eigen::MatrixXd rvV = Eigen::MatrixXd::Zero(rvszV, 1);
+                double tsV = probeV._WindowShift * ssrV;
+                double toV = tsV / 2 - probeV._WindowShift / 2;
+                if (wsz > 0) {
+                    if (noOv) { tsV = probeV._WindowShift * ssrV; toV = tsV / 2 - probeV._WindowShift / 2; }
+                    else { tsV = probeV._WindowShift; toV = 0.0; }
+                }
+                Eigen::MatrixXd inV = audioZeroOff._Data.row(0).transpose();
+                signalReimplFFB(reimplNet, inV, (long) wsz, wsh, noOv, rvV);
+                Eigen::MatrixXd rvV2 = rvV.transpose();
+                Eigen::MatrixXd ttV = rvV;
+                Segmentation segV(audioZeroOff, 0.5);
+                probeV.results2segmentation(segV, tsV, toV, rvV2, ttV, 0, SPEECH);
+                segV.compute_errors();
+
+                std::string base = out + "signal_" + tag + "_vrcts";
+                segV.toFile_VRCTS(base);
+                std::ifstream vf(base + "_chan_1.xml", std::ios::binary);
+                std::ostringstream vs;
+                vs << vf.rdbuf();
+                std::ofstream outv(out + "signal_" + tag + "_vrcts_chan1.xml", std::ios::binary);
+                outv << vs.str();
+            }
+            ++dumps;
+
+            // compute_errors vs a programmatic two-span reference (same recipe as
+            // TDC/LTSV): the transcription with a reference set, so getTargets fires.
+            {
+                ConfigFile confS(signalConfigPath, '_');
+                confS._Params.erase("BLSTM_weightsFile");
+                confS.set_val<std::string>("BLSTM_window", windowOverride);
+                confS.set_val<std::string>("BLSTM_shift", shiftOverride);
+                AudioStruct audioS(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+                SignalProbe probeS(confS, flatSignal);
+                Segmentation segS(audioS, 0.5);
+                double audioDuration = ((double) audioS.getFrameCount() - 1) / audioS.getFrameRate();
+                for (int ch = 0; ch < audioS.getChannelCount(); ++ch) {
+                    segS._Reference.push_back(std::deque<Segment> {Segment(), Segment(audioDuration, END)});
+                    segS.label_segment(segS._Reference.at(ch), 0.4, 0.9, SPEECH);
+                    segS.label_segment(segS._Reference.at(ch), 1.2, 1.6, SPEECH);
+                }
+                // Real getSegmentation (with reference -> getTargets active); the score
+                // is a structural/decision-layer golden, downstream of the same decision
+                // machinery, so the real Eigen FFB is fine here (the boundaries come from
+                // update_segmentation, pinned structurally by SEG_STRUCT above).
+                probeS.getSegmentation(audioS, segS);
+                segS.compute_errors();
+                Eigen::MatrixXd scores(audioS.getChannelCount(), 3);
+                for (int ch = 0; ch < audioS.getChannelCount(); ++ch) {
+                    scores(ch, 0) = segS._ClassificationErrors.at(ch)[SPEECH]._Pfa;
+                    scores(ch, 1) = segS._ClassificationErrors.at(ch)[SPEECH]._Pmiss;
+                    scores(ch, 2) = segS._ClassificationErrors.at(ch)[SPEECH]._ErrorRate;
+                }
+                Matrix2BinaryFile(out + "signal_" + tag + "_scores.bin", scores);
+                ++dumps;
+            }
+        };
+
+        runVariant("window0", "0", "0.1");
+        // NOTE (legacy bug, IMPROVEMENTS.md signal-overlap-oob): the brief's overlap
+        // params (window 0.5, shift 0.1) crash the REAL getSegmentation with an Eigen
+        // block-bounds assertion -- the overlap result-vec sizing (ceil(frameCount/
+        // shift)) is far too small for the OverLap FFB driver's write index
+        // (begin/ssr + lengthShort ~ frameCount/ssr). It only survives when
+        // window_shift <= ssr (== 4 samples here), i.e. shift <= 0.0005s. We use the
+        // working degenerate regime (window 0.01 -> window_size 40, shift 0.0005 ->
+        // window_shift 4 == ssr) so the OverLap path IS exercised end-to-end; the
+        // brief's 0.5/0.1 is a broken-as-committed legacy path (verified: real
+        // getSegmentation aborts on it under -DEIGEN assertions, heap-corrupts under
+        // release -DNDEBUG), documented not shipped.
+        runVariant("overlap", "0.01", "0.0005");
+        runVariant("noOverlap", "0.5", "0");
+
+        // --- TWO-FILES golden (noOverlap only): the REAL lifecycle. Unlike TDC/LTSV
+        // where the shift re-quantization is idempotent, signal noOverlap assigns
+        // _WindowShift = 0.0 mid-run (:376, the noOverlap poisoning). So on file 2 the
+        // SAME SignalProbe instance re-enters getSegmentation with _WindowShift == 0.0:
+        // :99 rounds 0.0*rate -> 0 -> shift<1 -> noOverlap re-triggers, :107 clamps
+        // shift back to 1, :108 rewrites _WindowShift = 1/rate. The dump lets the Rust
+        // two-files test pin this genuine round trip (both files' boundaries dumped so
+        // the test can compare, not assume, file1 == file2).
+        {
+            ConfigFile conf2(signalConfigPath, '_');
+            conf2._Params.erase("BLSTM_weightsFile");
+            conf2.set_val<std::string>("BLSTM_window", "0.5");
+            conf2.set_val<std::string>("BLSTM_shift", "0");
+            SignalProbe probe2(conf2, flatSignal);
+
+            // File 1: real getSegmentation, dump boundaries (file1 reference).
+            AudioStruct audioF1(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            Segmentation segF1(audioF1, 0.5);
+            probe2.getSegmentation(audioF1, segF1);
+            segF1.compute_errors();
+            dumpBoundaries(segF1, "signal_noOverlap_boundaries_file1_chan1.bin");
+            ++dumps;
+
+            // File 2: SAME probe2 (now carrying _WindowShift == 0.0 from :376), fresh
+            // audio -> re-enters the noOverlap path deterministically.
+            AudioStruct audioF2(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+            Segmentation segF2(audioF2, 0.5);
+            probe2.getSegmentation(audioF2, segF2);
+            segF2.compute_errors();
+            dumpBoundaries(segF2, "signal_noOverlap_boundaries_file2_chan1.bin");
             ++dumps;
         }
     }

@@ -52,6 +52,7 @@ LTSV_CONFIG = PHASE2B_DIR / "ltsv.config"
 LTSV_DCT_CONFIG = PHASE2B_DIR / "ltsv_dct.config"
 LTSV_TINY_CONFIG = PHASE2B_DIR / "ltsv_tiny.config"
 LTSV_POWERMEL_CONFIG = PHASE2B_DIR / "ltsv_powermel.config"
+SIGNAL_CONFIG = PHASE2B_DIR / "signal.config"
 
 # Input fixtures the harness reads from its output dir (same as Phase 1/2).
 HARNESS_INPUTS = [
@@ -144,6 +145,57 @@ LTSV_EXPECTED_SHAPES = {
 LTSV_EXTRA_FILES = ["ltsv_vrcts_chan1.xml"]
 LTSV_CONFIG_FILES = ["ltsv.config", "ltsv_dct.config", "ltsv_tiny.config", "ltsv_powermel.config"]
 
+# Task 6: BlstmSignalSegmenter (Algo 4) dumps -- the FIRST driver with the NN in the
+# chain. Each variant's PRIMARY golden dumps come from a TRANSCRIPTION of
+# getSegmentation (BLSTMSignalSegmenter.cpp:93-398) with ONLY the feedForwardBackward
+# call swapped for the ascending-loop reimpl family (signalReimplFFB); a SECONDARY
+# probe runs the REAL getSegmentation beside it (segment count + types match exactly
+# or abort, boundary max-dt recorded in SEG_STRUCT). Real net (1_worker_1.config
+# topology, 33671 weights) on the shared 2-channel excerpt. Three variants:
+#   window0   -- BLSTM_window 0        (full-sequence, plain FFB; real=frameCount/ssr)
+#   overlap   -- BLSTM_window 0.01, shift 0.0005 (overlap FFB; window_shift 4 == ssr
+#                is the ONLY non-broken regime -- see the signal-overlap-oob note)
+#   noOverlap -- BLSTM_window 0.5, shift 0 (truncate FFB; the =0.0 poisoning + the
+#                ssr-division sizing gate)
+# frame_count=16001, ssr=4. window0/noOverlap real_vec_size=4000; overlap=4001.
+SIGNAL_EXPECTED_SHAPES = {
+    "signal_window0_signalraw_chan1.bin": (1, 16001),
+    "signal_window0_signal_chan1.bin": (1, 16001),
+    "signal_window0_result_chan1.bin": (1, 4000),
+    "signal_window0_convolved_chan1.bin": (1, 4000),
+    "signal_window0_boundaries_chan1.bin": (2, 2),
+    "signal_window0_scores.bin": (2, 3),
+    "signal_overlap_signalraw_chan1.bin": (1, 16001),
+    "signal_overlap_signal_chan1.bin": (1, 16001),
+    "signal_overlap_result_chan1.bin": (1, 4001),
+    "signal_overlap_convolved_chan1.bin": (1, 4001),
+    "signal_overlap_boundaries_chan1.bin": (2, 2),
+    "signal_overlap_scores.bin": (2, 3),
+    "signal_noOverlap_signalraw_chan1.bin": (1, 16001),
+    "signal_noOverlap_signal_chan1.bin": (1, 16001),
+    "signal_noOverlap_result_chan1.bin": (1, 4000),
+    "signal_noOverlap_convolved_chan1.bin": (1, 4000),
+    "signal_noOverlap_boundaries_chan1.bin": (2, 2),
+    "signal_noOverlap_scores.bin": (2, 3),
+    "signal_noOverlap_boundaries_file1_chan1.bin": (2, 2),
+    "signal_noOverlap_boundaries_file2_chan1.bin": (2, 2),
+}
+SIGNAL_EXTRA_FILES = [
+    "signal_window0_vrcts_chan1.xml",
+    "signal_overlap_vrcts_chan1.xml",
+    "signal_noOverlap_vrcts_chan1.xml",
+]
+SIGNAL_CONFIG_FILES = ["signal.config"]
+
+# SEG_STRUCT self-test lines from the SECONDARY real-forward probe (spec decision 3):
+# reimpl-driven segment structure (count + types) must equal the real Eigen path's,
+# with the boundary max-delta recorded. ok=0 (or a missing line) -> SystemExit.
+SEG_STRUCT_RE = re.compile(
+    r"^SEG_STRUCT site=(?P<site>\w+) ok=(?P<ok>[01]) max_dt=(?P<max_dt>[-0-9.eE+]+)$",
+    re.MULTILINE,
+)
+EXPECTED_SEG_STRUCT_SITES = {"signal_window0", "signal_overlap", "signal_noOverlap"}
+
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -177,6 +229,20 @@ def _parse_fmtr_checks(stdout: str) -> dict[str, int]:
     if failed:
         raise SystemExit(f"FMTR_CHECK failed (ok=0) for: {failed}")
     return cases
+
+
+def _parse_seg_struct(stdout: str) -> dict[str, dict[str, object]]:
+    """Parse the SEG_STRUCT secondary-probe lines; ok=0 or missing site -> SystemExit."""
+    sites: dict[str, dict[str, object]] = {}
+    for match in SEG_STRUCT_RE.finditer(stdout):
+        sites[match["site"]] = {"ok": int(match["ok"]), "max_dt": float(match["max_dt"])}
+    missing = EXPECTED_SEG_STRUCT_SITES - set(sites)
+    if missing:
+        raise SystemExit(f"SEG_STRUCT lines missing from harness stdout: {sorted(missing)}")
+    failed = sorted(name for name, rec in sites.items() if rec["ok"] != 1)
+    if failed:
+        raise SystemExit(f"SEG_STRUCT failed (ok=0, structural mismatch) for: {failed}")
+    return sites
 
 
 def _read_bin_shape(path: Path) -> tuple[int, int]:
@@ -232,6 +298,7 @@ def main() -> None:
                 str(LTSV_DCT_CONFIG),
                 str(LTSV_TINY_CONFIG),
                 str(LTSV_POWERMEL_CONFIG),
+                str(SIGNAL_CONFIG),
             ]
         )
         # Task 2 (SegProbe results2segmentation dumps): persist these into the
@@ -251,6 +318,13 @@ def main() -> None:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
         for name in LTSV_EXTRA_FILES:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        # Task 6 (BlstmSignalSegmenter dumps): signalraw/signal/result/convolved/
+        # boundaries/scores per variant + the zero-offset VRCTS xml + the two-files
+        # noOverlap lifecycle boundaries.
+        for name in SIGNAL_EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        for name in SIGNAL_EXTRA_FILES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
 
     # 4. Regression guard: the committed fixture dirs must be byte-identical after
     #    the run (the fmtr upgrade must not perturb any prior harness dump).
@@ -263,6 +337,10 @@ def main() -> None:
 
     # 5. Parse the fmtr self-test (all ok=1 or SystemExit).
     fmtr_cases = _parse_fmtr_checks(stdout)
+
+    # 5b. Parse the Task 6 SEG_STRUCT secondary-probe lines (all ok=1 or SystemExit;
+    #     a structural mismatch would have already aborted the harness itself).
+    seg_struct = _parse_seg_struct(stdout)
 
     # 6. Call-site scan (spec decision 7). Expected 0 uncommented callers each; a
     #    nonzero count is a scope change -> STOP.
@@ -298,6 +376,15 @@ def main() -> None:
             ltsv_shape_mismatches.append({"file": name, "expected": expected, "got": got})
     if ltsv_shape_mismatches:
         raise SystemExit(f"ltsv_*.bin shape mismatch: {ltsv_shape_mismatches}")
+
+    # 7d. Task 6 shape sync: the persisted signal_*.bin dumps must match SIGNAL_EXPECTED_SHAPES.
+    signal_shape_mismatches = []
+    for name, expected in SIGNAL_EXPECTED_SHAPES.items():
+        got = _read_bin_shape(PHASE2B_DIR / name)
+        if got != expected:
+            signal_shape_mismatches.append({"file": name, "expected": expected, "got": got})
+    if signal_shape_mismatches:
+        raise SystemExit(f"signal_*.bin shape mismatch: {signal_shape_mismatches}")
 
     # 8. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -522,6 +609,86 @@ def main() -> None:
             "extra_files": LTSV_EXTRA_FILES,
             "config_files": LTSV_CONFIG_FILES,
         },
+        "signal_segmenter": {
+            "text": (
+                "Phase 2b Task 6: BlstmSignalSegmenter (Algo 4), the FIRST driver with "
+                "the NN in the chain. BLSTMSignalSegmenter::getSegmentation "
+                "(BLSTMSignalSegmenter.cpp:93-398) produces its result_vec via "
+                "_BLSTMNeuralNetwork.feedForwardBackward (:260), whose real Eigen GEMMs "
+                "diverge from the ascending-loop port at the real net's k>=23 shapes "
+                "(Phase 2 NN_PROBE) and the layer-0 GEMM seeds the recurrence, so the "
+                "divergence propagates non-locally. SignalProbe (harness-local, derives "
+                "BLSTMSignalSegmenter) therefore transcribes getSegmentation LIVE code "
+                "(the param math :96-108/:221-254, results2segmentation, compute_errors) "
+                "faithfully but swaps ONLY the FFB call for signalReimplFFB -- the "
+                "ascending-loop reimpl family (t6MakeLstmSteps/t6MakeDenseSteps + "
+                "blstmFeedForwardT6 + the plain/truncate/overlap windowed drivers) built "
+                "on the file-scope kernel statics reused from Phase 2. SECONDARY probe "
+                "(spec decision 3): the REAL compiled getSegmentation runs beside the "
+                "transcription on the same inputs; the reimpl-driven and real Segmentation "
+                "must match in segment count + types EXACTLY (a mismatch aborts the "
+                "harness), and the boundary max-delta is recorded as "
+                "SEG_STRUCT site=signal_<variant> ok=1 max_dt=<measured> (all three "
+                "measured 0.0 here -- the real net's posteriors on this excerpt stay "
+                "above _DecisionThreshRising, so all variants collapse to a single "
+                "always-SPEECH span insensitive to the posterior jitter; the result_vec "
+                "goldens, NOT the boundary structure, are what pin the NN chain "
+                "bit-exactly). The real net (1_worker_1.config topology, 33671 weights) "
+                "expects 23 inputs; signal mode feeds a 1-column input "
+                "(audio._Data.row(chan).transpose()), which the LSTM input projection "
+                "accepts via inputW.topRows(cols) width tolerance -- the legacy's own "
+                "behavior, kept. THREE variants (real net + real config keys, overridden "
+                "window/shift): window0 (BLSTM_window 0 -> full-sequence plain FFB; "
+                "real_vec_size = frameCount/ssr = 16001/4 = 4000), overlap (BLSTM_window "
+                "0.01, shift 0.0005 -> overlap FFB; window_size 40, window_shift 4; "
+                "real_vec_size = ceil(16001/4) = 4001), noOverlap (BLSTM_window 0.5, "
+                "shift 0 -> truncate FFB via the noOverlap poisoning; window_size floored "
+                "to (round(0.5*8000)/4)*4 = 4000, window_shift clamped to 1, "
+                "real_vec_size = ceil(16001/1)/4/1/1/1 = 4000). The brief's ORIGINAL "
+                "overlap params (window 0.5, shift 0.1) are a broken-as-committed legacy "
+                "path: the overlap result-vec sizing ceil(frameCount/shift) is far too "
+                "small for the OverLap FFB driver's write index (begin/ssr + lengthShort "
+                "~ frameCount/ssr), so the REAL getSegmentation aborts on it under Eigen "
+                "assertions (verified) and heap-corrupts under release -DNDEBUG; the "
+                "OverLap path only survives when window_shift <= ssr (== 4 samples, i.e. "
+                "shift <= 0.0005s), the degenerate regime used above. See the "
+                "IMPROVEMENTS.md signal-overlap-oob entry. Dumps per variant, chan 1: "
+                "signalraw (PRE-preemph, the timing-divergence golden), signal (POST -- "
+                "differs since BLSTM_preemph_ratio 0.97 > 0), result (pre-conv row), "
+                "convolved (post results2segmentation row), boundaries (Nx2 begin/type), "
+                "vrcts (REAL toFile_VRCTS on the reimpl-driven Segmentation, zero-offset "
+                "audio, 0b-ii byte-equivalence closure), scores (2x3 Pfa/Pmiss/ErrorRate "
+                "vs the same two-span programmatic reference as TDC/LTSV). The noOverlap "
+                "variant gets the TWO-FILES golden: unlike TDC/LTSV (idempotent shift "
+                "re-quantization), signal noOverlap assigns _WindowShift = 0.0 mid-run "
+                "(:376) -- so file 2 (SAME probe) re-enters getSegmentation with "
+                "_WindowShift == 0.0, :99 rounds 0.0*rate -> 0 -> shift<1 -> noOverlap "
+                "re-triggers, :107-108 re-clamp to 1/rate. This is the REAL lifecycle "
+                "re-entry (a genuine round trip through mutated state), pinned by "
+                "signal_noOverlap_boundaries_file{1,2}_chan1.bin -- both are dumped so "
+                "the Rust test COMPARES rather than assumes; here they are equal (the "
+                "output is the same always-SPEECH span), which the test asserts and its "
+                "doc-comment explains honestly."
+            ),
+            "constants": {
+                "rate": 8000,
+                "frame_count": 16001,
+                "sub_sampling_ratio": 4,
+                "window0_real_vec_size": 4000,
+                "overlap_window_size_samples": 40,
+                "overlap_window_shift_samples": 4,
+                "overlap_real_vec_size": 4001,
+                "nooverlap_window_size_samples": 4000,
+                "nooverlap_window_shift_samples": 1,
+                "nooverlap_real_vec_size": 4000,
+                "reference_spans_sec": [[0.4, 0.9], [1.2, 1.6]],
+                "broken_overlap_params_sec": {"window": 0.5, "shift": 0.1},
+            },
+            "seg_struct": dict(sorted(seg_struct.items())),
+            "expected_shapes": {k: list(v) for k, v in SIGNAL_EXPECTED_SHAPES.items()},
+            "extra_files": SIGNAL_EXTRA_FILES,
+            "config_files": SIGNAL_CONFIG_FILES,
+        },
     }
 
     manifest_path = PHASE2B_DIR / "manifest.json"
@@ -529,9 +696,9 @@ def main() -> None:
 
     counts = manifest["callsite_checks"]["counts"]
     print(
-        f"OK: {len(fmtr_cases)} FMTR_CHECK all ok, "
+        f"OK: {len(fmtr_cases)} FMTR_CHECK all ok, {len(seg_struct)} SEG_STRUCT all ok, "
         f"callsites {counts}, r2s shapes ok, tdc shapes ok, ltsv shapes ok, "
-        f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
+        f"signal shapes ok, manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 
 

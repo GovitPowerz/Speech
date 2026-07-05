@@ -766,6 +766,85 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`SPEECH[0,0.9892)/OTHER[0.9892,1.3472)/SPEECH[1.3472,2.0)`), exercised by
   `powermel_chan1_boundaries_are_non_vacuous` in `src/rust/tests/phase2b_ltsv_golden.rs`.
 
+- **[phase2b] `BLSTMSignalSegmenter` overlap mode is BROKEN AS COMMITTED for any
+  non-degenerate window/shift (out-of-bounds `outputSeq` writes)** (`BLSTMSignalSegmenter.cpp:221-240`
+  sizing vs `BLSTMNeuralNetwork.cpp:664-669` OverLap write index; IMPROVEMENTS tag
+  `signal-overlap-oob`): in overlapping-window mode (`window > 0`, `shift >= 1`), signal sizes
+  `result_vec` to `real_vec_size = ceil(frameCount/window_shift)` and does NOT ssr-divide it (the
+  ssr-division is gated on `window==0||noOverlap`, `:228`). But `setProcessingType((window>0),
+  !noOverlap)` selects the OverLap FFB driver (`feedForwardBackwardOverLap`), which writes
+  `outputSeq.block(begin/ssr, 0, lengthShort, cols)` with `begin` up to `~frameCount-window_size`
+  and `lengthShort ~ (2*window+1)/ssr` -- so the required row count is `~frameCount/ssr +
+  lengthShort`, FAR larger than `ceil(frameCount/window_shift)` for any `window_shift > ssr`. With
+  the real net (ssr=4) and the brief's overlap params (`BLSTM_window 0.5, shift 0.1` -> window_size
+  2000, window_shift 800), `result_vec` is 21 rows but the driver writes at rows up to ~4500 --
+  out-of-bounds. VERIFIED: the REAL compiled `getSegmentation` aborts on it with an Eigen
+  `Block.h:146` bounds assertion under `-DEIGEN` assertions (a standalone probe on the real config
+  + weights), i.e. heap-corrupts silently under the legacy release `-DNDEBUG` build. The OverLap
+  path only survives when `window_shift <= ssr` (so `ceil(frameCount/window_shift) >= frameCount/
+  ssr`): the Task-6 overlap golden uses `BLSTM_window 0.01, shift 0.0005` (window_size 40,
+  window_shift 4 == ssr) -- the ONLY non-broken regime, degenerate (a 4-sample = 0.5ms shift, ~4000
+  windows). The brief's `0.5/0.1` overlap variant is documented, not shipped. *Fix candidate:* the
+  overlap sizing should ssr-divide like `window==0`/`noOverlap`, or the OverLap driver should be
+  MLPOverLap (one scalar per window). Out of scope for this port (bit-exact reproduction of the
+  working regime; the broken regime is unrunnable, like the vendored CNN path). Pinned by the
+  Task-6 overlap golden + the doc-comment in `src/rust/tests/phase2b_signal_golden.rs`.
+
+- **[phase2b] `BlstmSignalSegmenter` window/shift sizing quirks: SIGNAL-sample units, the ssr-
+  division GATE, and the full=1-when-window-0 windowing no-op** (`BLSTMSignalSegmenter.cpp:96-108,
+  :221-240`, ported in `tasks/sad.rs::BlstmSignalSegmenter::get_segmentation`): all reproduced from
+  the signal-mode reverse-engineering report's 12-divergence list vs the spectral segmenter. (1)
+  window/shift are in raw SIGNAL samples with NO `/spectrum_shift` division anywhere (spectral
+  divides at `:441/:445/:448/:453`). (2) When `window_size == 0`, `full_window_size` STAYS 1 --
+  signal lacks spectral's `if (window_size == 0) full_window_size = 0` line (`:444`), so `:149`
+  builds a windowing coefficient over a length-1 window; Rust's `windowing_coefficients` returns
+  `None` for `size <= 1`, and the driver must (and does) STILL proceed -- the coeff is dump-only
+  dead weight, never applied to the input (which is raw `audio.data`), matching the legacy
+  empty-coeff no-op. (3) The result-vec ssr-division is GATED on `(window_size == 0 || noOverlap)`
+  (`:228`); spectral's is UNCONDITIONAL (its gate is commented out, `:487`). This asymmetry is
+  load-bearing, not sloppiness (overlapping signal mode emits one output per window position, ssr
+  already consumed inside each window). Pinned by `result_vec_sizing_all_variants` +
+  `window_zero_full_stays_one_and_driver_proceeds` in `phase2b_signal_golden.rs`.
+
+- **[phase2b] `BlstmSignalSegmenter._WindowShift` is a GENUINELY stateful member: the noOverlap
+  `= 0.0` reset makes the next file re-enter through mutated state** (`BLSTMSignalSegmenter.cpp:108`
+  write-back + `:376` reset; `tasks/sad.rs::BlstmSignalSegmenter`): unlike TDC/LTSV (whose per-call
+  shift re-quantization is IDEMPOTENT, so their two-files goldens only pin repeat-call determinism),
+  signal's noOverlap path assigns `_WindowShift = 0.0` mid-run (`:376`, BEFORE `compute_errors`) to
+  re-arm the noOverlap trigger for the NEXT file. So file 2 (same segmenter object) genuinely
+  re-enters `getSegmentation` with `_WindowShift == 0.0`: `:99` rounds `0.0*rate -> 0` -> `shift < 1`
+  -> noOverlap re-triggers, `:107-108` re-clamp the shift to 1 and rewrite `_WindowShift = 1/rate`.
+  This is a REAL round trip through mutated state (not a fixed point). The observable OUTPUT
+  boundaries nonetheless coincide across the two files (same audio -> same posteriors -> same
+  always-SPEECH span), which the two-files golden asserts rather than assumes; the state DOES
+  round-trip, the output does not change. Also reproduced: the reset-order divergence vs spectral
+  (signal resets BEFORE `compute_errors` at `:376`; spectral AFTER the mat dump at `:885` --
+  functionally equivalent, ported as written). Pinned by
+  `two_files_in_sequence_no_overlap_lifecycle` in `phase2b_signal_golden.rs`.
+
+- **[phase2b] `BlstmSignalSegmenter` divergences that are dead/log-only in the signal chain**
+  (`BLSTMSignalSegmenter.cpp`): `_FlagDCOffset` is LOG-ONLY (`:116`) -- never applied, since the NN
+  consumes raw `audio.data` directly (`:188`, no `getSequence`/DC-removal call), unlike spectral
+  which threads it into the periodogram; pinned by `dc_offset_flag_is_log_only` (flag true vs false
+  -> byte-identical output). `BLSTM_TwoSweeps` is REQUIRED-but-DEAD (`:20/:28`): the only consumers
+  are commented out (`:282/:297`), so it is parsed (a missing key aborts the legacy
+  `conf.get<bool>`, so the parse is load-bearing) and stored, never read; pinned by
+  `from_legacy_missing_two_sweeps_is_err` (missing key -> `Err`) + `from_legacy_reads_real_values`.
+  The `signalRaw` (PRE-preemph, `:133-134`) vs `signal` (POST-preemph, `:174-175`) dumps GENUINELY
+  DIFFER when `preemph_ratio > 0` (divergence 8 vs spectral, whose two dumps are byte-identical
+  because spectral creates the .mat after preemph) -- pinned by
+  `signalraw_differs_from_signal_and_both_match_dump`.
+
+- **[phase2b] The Rust `Segmentation` container is SINGLE-CHANNEL; per-channel cost/classif live on
+  the DRIVER** (spec S6; `tasks/sad.rs::BlstmSignalSegmenter` `cumulative_error`/`nb_of_classif`
+  vs the legacy `Segmentation::_CumulativeError[chan]`/`_NbOfClassif[chan]`, `BLSTMSignalSegmenter.
+  cpp:346-347`): the legacy `Segmentation` is channel-indexed (`_Classification.at(chan)`,
+  `_CumulativeError[chan]`); the Rust container holds ONE channel's hypothesis, and the driver holds
+  a `Vec<Segmentation>` (one per channel) plus the per-channel `cumulative_error`/`nb_of_classif`
+  scalars. Behavior-preserving (all goldens are per-channel), a documented structural deviation.
+  The NN cost path DOES fire in signal mode (unlike the cost-free TDC/LTSV): `cumulative_error[chan]
+  = net.cost`, `nb_of_classif[chan] = net.nb_of_classif` after each `feed_forward_backward`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

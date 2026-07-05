@@ -23,6 +23,7 @@ use crate::audio::{
 use crate::features::ltsv_tdc::{ltsv_classify_sequence, tdc_classify_sequence};
 use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{FeatureConfig, derive_freq_band_ltsv_variant};
+use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
@@ -521,5 +522,318 @@ impl Segmenter for LtsvSegmenter {
         }
 
         Ok(())
+    }
+}
+
+/// BLSTM signal-domain SAD segmenter (Algo 4; `BLSTMSignalSegmenter.{h,cpp}`).
+///
+/// The FIRST driver with the NN in the chain: unlike TDC/LTSV, the per-channel
+/// result vector is produced by the ported [`BlstmNetwork::feed_forward_backward`],
+/// NOT a feature-extraction + classify loop. The "pipeline" is literally
+/// `audio.data.row(chan)` transposed to an Nx1 column (`:188`) -- no periodogram, no
+/// mel, no LTSV/TDC. Input normalization (type -1 self-normalization for the real
+/// net) lives inside the NN.
+///
+/// `window_shift_sec` is the stateful legacy `_WindowShift`: re-quantized on EVERY
+/// `get_segmentation` call (`round(x*rate)/rate`, `:99-108`), then RESET to `0.0`
+/// when the noOverlap branch fired (`:376`, BEFORE `compute_errors`). Unlike TDC/
+/// LTSV, this reset makes the noOverlap lifecycle genuinely re-entrant: file 2 sees
+/// `_WindowShift == 0.0`, so `:99` rounds `0.0*rate -> 0`, re-triggers noOverlap,
+/// and `:107-108` re-clamps to `1/rate`. The two-files golden pins the real round
+/// trip (see `phase2b_signal_golden.rs`).
+///
+/// `two_sweeps` is the required-but-DEAD `BLSTM_TwoSweeps` flag (`:20,:28`): the only
+/// consumers are commented out (`:282,:297`), so it is parsed (a missing key aborts
+/// the legacy `conf.get<bool>`, so the parse itself is load-bearing) and stored, but
+/// never read by the live path.
+///
+/// Divergences vs the spectral segmenter (`p2b_signal.md` 12-divergence list),
+/// reproduced here: window/shift in SIGNAL samples (no `/spectrum_shift`); NO
+/// `full_window = 0` when `window == 0` (stays 1, feeds a length-1 windowing coeff
+/// that Rust's [`windowing_coefficients`] returns `None` for -- a no-op, matching the
+/// legacy empty-coeff dump-only dead weight); `_FlagDCOffset` log-only (never applied
+/// -- the input is raw `audio.data`); result-vec sizing GATES the ssr-division on
+/// `(window == 0 || noOverlap)` (spectral's is unconditional); the overlap-branch
+/// `timeStep = window_shift_sec, timeOffset = 0.0` asymmetry; fresh `result_vec` per
+/// channel.
+pub struct BlstmSignalSegmenter {
+    driver_cfg: DriverConfig,
+    seg_cfg: SegmenterConfig,
+    net: BlstmNetwork,
+    /// `_BLSTMTwoSweeps` (`:20,:28`): required-but-dead. Parsed so a missing key is an
+    /// error (parity with `conf.get<bool>`); never consumed by the live path.
+    two_sweeps: bool,
+    windowing_type: String,
+    windowing_param: f64,
+    flag_dc_offset: bool,
+    preemph_ratio: f64,
+    noise_seed: i32,
+    noise_ratio: f64,
+    /// The stateful legacy `_WindowShift` member (`:108/:376`).
+    window_shift_sec: f64,
+    channels: usize,
+    cumulative_error: Vec<f64>,
+    nb_of_classif: Vec<i64>,
+}
+
+impl BlstmSignalSegmenter {
+    /// Port of the `BLSTMSignalSegmenter(ConfigFile&, ...)` ctors
+    /// (`BLSTMSignalSegmenter.cpp:16-29`): `buildFromConf(conf, "BLSTM", ...)` (the
+    /// `Segmenter` residue, via [`SegmenterConfig::from_config`] +
+    /// [`DriverConfig::from_config`]), `BLSTMNeuralNetwork(conf, "BLSTM", ...)`
+    /// (via [`BlstmConfig::from_legacy`] + [`BlstmNetwork::from_config`]), then
+    /// `BLSTM_TwoSweeps` (required bool). `weights` mirrors the two ctor overloads:
+    /// `Some(flat)` -> `setWeights(weights)` (the weights-ctor, `:23-27`); `None` ->
+    /// the no-weights ctor (`:16-21`, weights loaded later or left zero).
+    pub fn from_legacy(
+        map: &IndexMap<String, String>,
+        weights: Option<&[f64]>,
+    ) -> Result<BlstmSignalSegmenter> {
+        let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
+        let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
+
+        let blstm_cfg = BlstmConfig::from_legacy(map, "BLSTM")?;
+        let mut net = BlstmNetwork::from_config(blstm_cfg)?;
+        if let Some(flat) = weights {
+            net.set_weights(flat)?;
+        }
+
+        let two_sweeps = parse_bool(map, "BLSTM_TwoSweeps")?;
+
+        let flag_dc_offset = parse_bool(map, "BLSTM_flag_DCOffset")?;
+        let preemph_ratio = parse_scalar(map, "BLSTM_preemph_ratio")?;
+        let noise_seed = parse_i32(map, "BLSTM_noise_seed")?;
+        let noise_ratio = parse_scalar(map, "BLSTM_noise_ratio")?;
+        let windowing_type = parse_string(map, "BLSTM_windowing_type")?;
+        let windowing_param = parse_scalar(map, "BLSTM_windowing_param")?;
+
+        let window_shift_sec = driver_cfg.window_shift_sec;
+
+        Ok(BlstmSignalSegmenter {
+            driver_cfg,
+            seg_cfg,
+            net,
+            two_sweeps,
+            windowing_type,
+            windowing_param,
+            flag_dc_offset,
+            preemph_ratio,
+            noise_seed,
+            noise_ratio,
+            window_shift_sec,
+            channels: 0,
+            cumulative_error: Vec::new(),
+            nb_of_classif: Vec::new(),
+        })
+    }
+
+    /// `_BLSTMTwoSweeps` accessor (dead flag; exposed so a doc test can assert the
+    /// field parsed without being consumed by the live path).
+    pub fn two_sweeps(&self) -> bool {
+        self.two_sweeps
+    }
+
+    /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:346`): the NN cost from
+    /// the last `get_segmentation`, one entry per channel.
+    pub fn cumulative_error(&self) -> &[f64] {
+        &self.cumulative_error
+    }
+
+    /// Per-channel `seg._NbOfClassif[chan] = nbOfClassif` (`:347`).
+    pub fn nb_of_classif(&self) -> &[i64] {
+        &self.nb_of_classif
+    }
+
+    /// `Segmentation::compute_errors`, one call per channel (see
+    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
+    pub fn score(
+        hyp: &mut [Segmentation],
+        reference: Option<&[Segmentation]>,
+        nb_words: i64,
+    ) -> Vec<ScoreReport> {
+        hyp.iter_mut()
+            .enumerate()
+            .map(|(chan, seg)| {
+                let refc = reference.map(|r| &r[chan]);
+                compute_errors(seg, refc, nb_words)
+            })
+            .collect()
+    }
+}
+
+impl Segmenter for BlstmSignalSegmenter {
+    /// Port of `BLSTMSignalSegmenter::getSegmentation`
+    /// (`BLSTMSignalSegmenter.cpp:93-398`), the non-unit-test/non-plotting path (the
+    /// `.mat`/PNG/log branches dropped: display/diagnostic-only). The `_BLSTMTwoSweeps`
+    /// block (`:282-305`) is DEAD (commented out in legacy) -- unported.
+    fn get_segmentation(
+        &mut self,
+        audio: &mut Audio,
+        seg_per_chan: &mut [Segmentation],
+    ) -> Result<()> {
+        let rate = audio.sample_rate as f64;
+        let ssr = self.net.sub_sampling_ratio();
+
+        // Window/shift in SIGNAL samples (`:96-108`). half = round(w*rate/2); the
+        // `!= 0 && < ssr -> ssr` floor; full = 2*window+1 (ODD). NO `full = 0` when
+        // window == 0 (stays 1, `p2b_signal.md` divergence 2).
+        let mut window_size = f64::round(self.driver_cfg.window_size_sec * rate / 2.0) as usize;
+        if window_size != 0 && window_size < ssr {
+            window_size = ssr;
+        }
+        let mut full_window_size = 2 * window_size + 1;
+
+        let mut window_shift = f64::round(self.window_shift_sec * rate) as i64;
+        let mut no_overlap = false;
+        if window_size != 0 && window_shift < 1 {
+            no_overlap = true;
+            // Integer floor-div then re-multiply (`:103`): (round(w*rate)/ssr)*ssr.
+            window_size = (f64::round(self.driver_cfg.window_size_sec * rate) as usize / ssr) * ssr;
+            if window_size < 10 * ssr {
+                window_size = 10 * ssr;
+            }
+            full_window_size = window_size; // EVEN, not 2k+1 (`:105`).
+        }
+        if window_size == 0 || window_shift < 1 {
+            window_shift = 1;
+        }
+        // MEMBER MUTATION (`:108`): _WindowShift = shift/rate.
+        self.window_shift_sec = window_shift as f64 / rate;
+
+        // `_FlagDCOffset` is LOG-ONLY in signal mode (`:116`, divergence 4): never
+        // applied. Threaded nowhere below; kept as a field only for parity/logging.
+        let _ = self.flag_dc_offset;
+
+        // preemph -> noise (`:137-148`). windowing_coeff computed (`:149`) but never
+        // applied (dump-only dead weight, divergence 3); Rust's `windowing_coefficients`
+        // returns `None` for size <= 1 (the full == 1 window == 0 case) -- a no-op,
+        // matching the legacy empty-coeff behavior. Computed here only for parity of
+        // the (dropped) unit-test dump; discarded.
+        if self.preemph_ratio > 0.0 {
+            audio.apply_preemph(self.preemph_ratio);
+        }
+        if self.noise_seed > 0 {
+            audio.apply_noise(self.noise_ratio);
+        }
+        let _windowing_coeff = windowing_coefficients(
+            &self.windowing_type,
+            false,
+            full_window_size,
+            self.windowing_param,
+        );
+
+        // resetWeightsDerivatives ONCE per file, before the channel loop (`:170`).
+        self.net.reset_weights_derivatives();
+
+        let window_shift_usize = window_shift as usize;
+        let channels = audio.data.nrows();
+        let frame_count = audio.data.ncols();
+        self.channels = channels;
+        self.cumulative_error = vec![0.0; channels];
+        self.nb_of_classif = vec![0; channels];
+
+        // setProcessingType((window > 0), !noOverlap) ONCE (`:259`): the flags do not
+        // change across channels (window_size/no_overlap are per-file constants).
+        self.net.set_processing_type(window_size > 0, !no_overlap);
+
+        for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
+            // inputSeq = audio.data.row(chan).transpose() -> Nx1 column (`:188`).
+            let row = audio.data.row(chan);
+            let mut input_seq = Array2::<f64>::zeros((frame_count, 1));
+            for (i, &v) in row.iter().enumerate() {
+                input_seq[[i, 0]] = v;
+            }
+
+            // Result-vec sizing (`:221-240`), FRESH per channel (divergence 6):
+            // unconditional ceil-division by window_shift, then ssr-division GATED on
+            // (window == 0 || noOverlap) (divergence 5).
+            let mut real_vec_size = if frame_count.is_multiple_of(window_shift_usize) {
+                frame_count / window_shift_usize
+            } else {
+                frame_count / window_shift_usize + 1
+            };
+            if (window_size == 0 || no_overlap) && ssr > 1 {
+                for r in self.net.lstm_sub_sampling() {
+                    real_vec_size /= r;
+                }
+                for r in self.net.output_sub_sampling() {
+                    real_vec_size /= r;
+                }
+            }
+            let mut result_vec = Array2::<f64>::zeros((real_vec_size, 1));
+
+            // timeStep/timeOffset (`:244-254`): `window_shift_sec` here is the POST-:108
+            // mutated value. Default/noOverlap: `shift*ssr` & `step/2 - shift/2`;
+            // overlap: `shift` & 0.0 (divergence 7).
+            let mut time_step = self.window_shift_sec * ssr as f64;
+            let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+            if window_size > 0 {
+                if no_overlap {
+                    time_step = self.window_shift_sec * ssr as f64;
+                    time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+                } else {
+                    time_step = self.window_shift_sec;
+                    time_offset = 0.0;
+                }
+            }
+
+            // getTargets when a reference exists (`:255-258`). No reference is set on a
+            // fresh hypothesis Segmentation, so the target sequence stays empty; the
+            // driver runs the no-target forward path. (Reference-driven scoring is
+            // exercised via `score`, not this method, matching the goldens.)
+            let target = Array2::<f64>::zeros((0, 0));
+
+            // NN forward+backward (`:260`): input mutated in place by the internal
+            // normalization (type -1 for the real net). window_size/window_shift are
+            // the SIGNAL-sample values.
+            self.net.feed_forward_backward(
+                &mut input_seq,
+                window_size,
+                window_shift_usize,
+                &mut result_vec,
+                &target,
+            );
+            self.cumulative_error[chan] = self.net.cost;
+            self.nb_of_classif[chan] = self.net.nb_of_classif;
+
+            // result_vec2 = result_vec.transpose() -> ROW vector (`:315`).
+            let mut result_vec2: Vec<f64> = result_vec.column(0).to_vec();
+
+            // results2segmentation (`:344-345`): the `targetSeqTmp = result_vec` copy
+            // quirk is a dead param in the live `results_to_segmentation` (see its doc).
+            results_to_segmentation(
+                seg,
+                time_step,
+                time_offset,
+                &mut result_vec2,
+                SegClass::Speech,
+                self.driver_cfg.conv_coeff.as_deref(),
+                &self.seg_cfg,
+            );
+        }
+
+        // noOverlap `_WindowShift = 0.0` reset BEFORE compute_errors (`:376`,
+        // divergence 11): re-arms the noOverlap trigger for the NEXT file. This is the
+        // genuine cross-file state (unlike TDC/LTSV's idempotent re-quantization).
+        if no_overlap {
+            self.window_shift_sec = 0.0;
+        }
+
+        // `seg.compute_errors()` after the FULL channel loop (`:378`).
+        for seg in seg_per_chan.iter_mut() {
+            compute_errors(seg, None, -1);
+        }
+
+        Ok(())
+    }
+
+    /// `setWeights` delegates to the NN (`BLSTMSignalSegmenter.cpp:38-40`).
+    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
+        self.net.set_weights(flat)
+    }
+
+    /// `getWeights` delegates to the NN (`:42-44`).
+    fn get_weights(&self) -> Vec<f64> {
+        self.net.get_weights()
     }
 }
