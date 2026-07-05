@@ -267,10 +267,7 @@ fn vrcts_bytes_match_dump() {
     ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
 
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
-    assert_eq!(
-        got, dump,
-        "to_vrcts_string output must byte-match the real toFile_VRCTS dump"
-    );
+    common::assert_vrcts_eq(&got, &dump, "ltsv vrcts");
 }
 
 // === SECONDARY config (nb_DCT=4): applyDCTLoop-substituted golden ============

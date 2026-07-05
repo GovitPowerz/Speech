@@ -991,10 +991,15 @@ pub fn get_blstm_param(
 ///
 /// STATEFUL MEMBERS (S3.4), re-quantized per `get_segmentation` call:
 /// - `spectrum_shift_sec` (`_SpectrumShift`) + `spectrum_shift_in_frames`
-///   (`_SpectrumShiftInFrames`): `round(x*rate)` then `x = ssif/rate`
-///   (`initSpectralAnalysis` `:208-210`); the non-wav fallback `ssif = 80` PERSISTS
-///   into the member (`:209`) -- exercised by a unit test via direct state mutation (no
-///   non-wav fixture).
+///   (`_SpectrumShiftInFrames`): ALWAYS recomputed as `ssif = round(spectrum_shift_sec *
+///   rate)` (`initSpectralAnalysis` `:208`), then the non-wav fallback OVERRIDES `ssif =
+///   80` when `!hasReadWavFile()` (`:209`), then `spectrum_shift_sec = ssif/rate`
+///   PERSISTS the (possibly-overridden) value back into the member (`:210`). The driver
+///   always reads a wav, so the override never fires in production; it is exercised by a
+///   unit test via [`BlstmSpectralSegmenter::force_non_wav_spectrum_shift`] (no non-wav
+///   fixture exists). There is no "sticky 80" special case: a later call at a DIFFERENT
+///   rate always re-derives from `spectrum_shift_sec`, e.g. force at 8000 Hz then
+///   re-derive at 16000 Hz gives `round(0.01*16000) = 160`, not 80.
 /// - `window_shift_sec` (`_WindowShift`): re-quantized in [`get_blstm_param`] (`:445-453`
 ///   in periodogram-frame units), then RESET to `0.0` when noOverlap fired, AFTER the
 ///   dumps (`:885`; the reset-order divergence vs signal's BEFORE-`compute_errors` reset
@@ -1019,7 +1024,8 @@ pub struct BlstmSpectralSegmenter {
     net: BlstmNetwork,
     /// Stateful `_SpectrumShift` (`:210`), self-quantizing per call.
     spectrum_shift_sec: f64,
-    /// Stateful `_SpectrumShiftInFrames` (`:208-209`); the non-wav 80 fallback persists.
+    /// Stateful `_SpectrumShiftInFrames` (`:208-210`); ALWAYS recomputed from
+    /// `spectrum_shift_sec` each call, non-wav override aside (see the struct doc).
     spectrum_shift_in_frames: usize,
     /// Stateful `_WindowShift` (`:453/:885`).
     window_shift_sec: f64,
@@ -1146,14 +1152,20 @@ impl BlstmSpectralSegmenter {
         &self.nb_of_classif
     }
 
-    /// Directly set the non-wav `_SpectrumShiftInFrames = 80` fallback state (`:209`).
-    /// Exposed (not `#[cfg(test)]`, which would not reach the integration-test crate)
-    /// SOLELY so `phase2b_spectral_golden.rs` can pin the persistence quirk WITHOUT a
-    /// non-wav fixture (the driver always reads a wav; there is no production caller).
-    pub fn force_non_wav_spectrum_shift(&mut self) {
+    /// Directly set the non-wav `_SpectrumShiftInFrames = 80` fallback state (`:209`),
+    /// mirroring the legacy's non-wav override AND its persistence: `_SpectrumShiftInFrames
+    /// = 80` then `_SpectrumShift = 80/rate` (`:210`), so BOTH members land in the same
+    /// state the legacy would have after a non-wav read at `rate`. Exposed (not
+    /// `#[cfg(test)]`, which would not reach the integration-test crate) SOLELY so
+    /// `phase2b_spectral_golden.rs` can pin the fallback WITHOUT a non-wav fixture (the
+    /// driver always reads a wav; there is no production caller). There is no "sticky
+    /// 80": a subsequent `get_segmentation` call ALWAYS recomputes `ssif =
+    /// round(spectrum_shift_sec * new_rate)` from the persisted `spectrum_shift_sec`, so
+    /// a rate change after this call changes the observed value (e.g. force at 8000 then
+    /// re-derive at 16000 gives `round((80/8000)*16000) = round(160.0) = 160`, not 80).
+    pub fn force_non_wav_spectrum_shift(&mut self, rate: f64) {
         self.spectrum_shift_in_frames = 80;
-        // The legacy also rewrites _SpectrumShift = 80/rate (:210); the rate is only
-        // known at get_segmentation time, so the test asserts on the frames member.
+        self.spectrum_shift_sec = 80.0 / rate;
     }
 
     /// `Segmentation::compute_errors`, one call per channel (see
@@ -1194,14 +1206,12 @@ impl Segmenter for BlstmSpectralSegmenter {
         // consistent (the non-wav 80 fallback is handled below + in the unit test).
         let s = SpectralParams::derive(&self.feature_cfg, rate);
 
-        // Stateful spectrum-shift quantization (:208-210). The non-wav fallback (80)
-        // PERSISTS: if a prior call set it to 80, honor that (no wav-read info here --
-        // the driver always reads a wav; the 80 path is the unit-test-only mutation).
-        self.spectrum_shift_in_frames = if self.spectrum_shift_in_frames == 80 {
-            80
-        } else {
-            f64::round(self.spectrum_shift_sec * rate) as usize
-        };
+        // Stateful spectrum-shift quantization (:208-210). ALWAYS recompute from the
+        // CURRENT spectrum_shift_sec (there is no "sticky 80" -- the driver always reads
+        // a wav, so the non-wav override at :209 never fires here; it is exercised only
+        // via force_non_wav_spectrum_shift for the unit test). Persistence flows through
+        // spectrum_shift_sec exactly like the legacy's _SpectrumShift = ssif/rate (:210).
+        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
         self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
         let spectrum_shift_in_frames = self.spectrum_shift_in_frames;
 

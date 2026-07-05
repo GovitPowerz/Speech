@@ -416,10 +416,7 @@ fn overlap_vrcts_matches_dump() {
     sig.get_segmentation(&mut audio, &mut segs).unwrap();
 
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
-    assert_eq!(
-        got, dump,
-        "overlap: to_vrcts_string must byte-match the real toFile_VRCTS dump"
-    );
+    common::assert_vrcts_eq(&got, &dump, "overlap vrcts");
 }
 
 // === signalraw (PRE-preemph) vs signal (POST) -- the timing divergence golden ==
@@ -516,10 +513,7 @@ fn vrcts_bytes_match_dump_cheap_variants() {
         sig.get_segmentation(&mut audio, &mut segs).unwrap();
 
         let got = to_vrcts_string(&segs[0], &name, &path_attr);
-        assert_eq!(
-            got, dump,
-            "{tag}: to_vrcts_string output must byte-match the real toFile_VRCTS dump"
-        );
+        common::assert_vrcts_eq(&got, &dump, &format!("{tag} vrcts"));
     }
 }
 

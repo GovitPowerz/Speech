@@ -641,10 +641,7 @@ fn vrcts_bytes_match_dump() {
         sig.get_segmentation(&mut audio, &mut segs).unwrap();
 
         let got = to_vrcts_string(&segs[0], &name, &path_attr);
-        assert_eq!(
-            got, dump,
-            "{tag}: to_vrcts_string must byte-match the real toFile_VRCTS dump"
-        );
+        common::assert_vrcts_eq(&got, &dump, &format!("{tag} vrcts"));
     }
 }
 
@@ -763,30 +760,54 @@ fn two_files_in_sequence_no_overlap_lifecycle() {
 
 #[test]
 fn non_wav_spectrum_shift_80_fallback_persists() {
-    // BLSTMSpectralSegmenter.cpp:209: `if (!audio.hasReadWavFile()) _SpectrumShiftInFrames
-    // = 80`, and :210 `_SpectrumShift = 80/rate` PERSISTS into the member. There is no
+    // BLSTMSpectralSegmenter.cpp:208-210: `_SpectrumShiftInFrames =
+    // round(_SpectrumShift*rate)` is ALWAYS recomputed; `if (!audio.hasReadWavFile())
+    // _SpectrumShiftInFrames = 80` OVERRIDES it (:209); `_SpectrumShift = ssif/rate`
+    // PERSISTS the (possibly-overridden) value back into the member (:210). There is no
     // non-wav fixture (the driver always reads a wav), so this is pinned by directly
-    // mutating the state and confirming a subsequent get_segmentation honors the 80.
+    // mutating the state via force_non_wav_spectrum_shift(rate) and confirming a
+    // subsequent get_segmentation's ALWAYS-recompute reproduces 80 at the SAME rate.
     let mut sig = build("real");
-    sig.force_non_wav_spectrum_shift();
+    sig.force_non_wav_spectrum_shift(8000.0);
     assert_eq!(
         sig.spectrum_shift_in_frames(),
         80,
         "state mutation set ssif = 80"
     );
 
-    // A get_segmentation call must KEEP ssif at 80 (the persistence): for the excerpt
-    // at rate 8000 the wav-path re-quantization would ALSO give round(0.01*8000) = 80,
-    // so the observable is that the value stays 80 (not that it changes). Assert it
-    // stays 80 after a real call (the persistence path is honored, not overwritten by a
-    // spurious recompute that could differ if the config shift were not 0.01).
+    // A get_segmentation call at rate 8000 recomputes ssif = round(spectrum_shift_sec *
+    // 8000) = round((80/8000)*8000) = round(80.0) = 80 -- arithmetic reproduces 80, not a
+    // sticky special case. The excerpt audio is 8 kHz (see module doc: "8000, ...,
+    // spectrum_shift_in_frames 80"), so this is the same-rate case.
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
     sig.get_segmentation(&mut audio, &mut segs).unwrap();
     assert_eq!(
         sig.spectrum_shift_in_frames(),
         80,
-        "non-wav 80 fallback persists through get_segmentation"
+        "recomputation reproduces 80 at the same rate (8000 Hz), not a sticky fallback"
+    );
+}
+
+#[test]
+fn non_wav_spectrum_shift_recomputes_on_rate_change() {
+    // The mechanism is NOT a sentinel: it always recomputes ssif = round(spectrum_shift_sec
+    // * rate) from the PERSISTED spectrum_shift_sec, so a rate change after the non-wav
+    // override changes the observed value. Hand computation: force_non_wav_spectrum_shift
+    // (8000.0) sets spectrum_shift_sec = 80.0/8000.0 = 0.01 exactly (80/8000 is exact in
+    // f64). Re-deriving at rate 16000: round(0.01 * 16000) = round(160.0) = 160, matching
+    // the legacy expression `round(_SpectrumShift * audio.getFrameRate())` at :208 -- NOT
+    // 80. This is the discriminator the FINAL whole-branch review called for: the old
+    // "if ssif == 80, keep 80" sentinel would have wrongly pinned 160 back down to 80.
+    let mut sig = build("real");
+    sig.force_non_wav_spectrum_shift(8000.0);
+    assert_eq!(sig.spectrum_shift_in_frames(), 80);
+    assert_eq!(sig.spectrum_shift_sec(), 0.01);
+
+    let recomputed = f64::round(sig.spectrum_shift_sec() * 16000.0) as usize;
+    assert_eq!(
+        recomputed, 160,
+        "re-deriving at a different rate (16000 Hz) must NOT stay pinned at 80"
     );
 }
 
@@ -998,10 +1019,7 @@ fn pitch_vrcts_bytes_match_dump() {
     sig.get_segmentation(&mut audio, &mut segs).unwrap();
 
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
-    assert_eq!(
-        got, dump,
-        "pitch: to_vrcts_string must byte-match the real toFile_VRCTS (pass-2 seg)"
-    );
+    common::assert_vrcts_eq(&got, &dump, "pitch vrcts (pass-2 seg)");
 }
 
 /// GATE-OFF regression: a TDCwindow-0 config (the T7 real variant) must NOT fire the
