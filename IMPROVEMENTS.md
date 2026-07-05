@@ -915,6 +915,42 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   Eigen-GEMM-vs-ascending divergence already logged for the DCT/NN sites; noted here because it
   forced the harness input-assembly choice for the spectral driver golden.
 
+- **[phase2b] Pitch second pass rebuilds the input with the OLD (pass-1) LTSV column, NOT recomputed
+  on the warped periodogram** (`BLSTMSpectralSegmenter.cpp:757-805`, Task 8): the pitch pass warps
+  `audio._Periodogram` by `pitch/300` (`:760-775`), re-runs the mel filterbank + DCT on the warped
+  periodogram (`:777-787`), then calls `getBLSTMInputSequence(audio, melFilters, freq_beg, freq_end,
+  LTSV, TDC)` (`:792`) with the SAME `LTSV` matrix computed in pass 1 over the UNWARPED periodogram.
+  The LTSV column is therefore stale relative to the warped spectral features -- the input's last
+  column reflects the un-warped spectrum while the mel/DCT columns reflect the warped one. Reproduced
+  by having the Rust driver capture the pass-1 LTSV (`build_input_sequence_parts`) and hand it back to
+  `assemble_from_periodogram` for the pass-2 build (the periodogram is warped, the LTSV is reused).
+  Pinned by `spectral_pitch_inputseq_pass2_chan1.bin`. Post-parity: recompute LTSV on the warped
+  periodogram (or document that the warp is only meant to affect the mel/DCT band).
+
+- **[phase2b] The externalized pitch-pass result dump preserves PASS-1, even though the final
+  boundaries are PASS-2** (`BLSTMSpectralSegmenter.cpp:744,:848-850`, Task 8): `result_vec2` is set to
+  `result_vec.transpose()` right after the pass-1 FFB (`:744`) and dumped by the `_IsUnitTest` `.mat`
+  branch at `:848-850` -- which runs AFTER the pitch second pass has already overwritten `result_vec`
+  (`:793`) and re-segmented (`:801`). But `result_vec2` is a COPY taken before the pitch pass, so the
+  dumped `result_vec_chan_*` is the PASS-1 result while `seg`'s boundaries are PASS-2. The Rust
+  `last_result_rows` observation point reproduces this exactly (it captures the pass-1 row and is NOT
+  overwritten by the pitch pass; the pass-2 row is exposed separately as `last_result_rows_pass2` for
+  test capture only). Pinned by `pitch_dump_quirk_pass1_result_preserved` (the pass-1 result is
+  byte-identical to the T7 `spectral_real` result, while the boundaries differ: crossing 1.1831 ->
+  1.2597). Post-parity: dump the pass-2 result if the externalized value is meant to reflect the final
+  segmentation.
+
+- **[phase2b] Pitch pass OVERWRITES the error/classif slots (not accumulated) and is guarded on
+  `pitch > 0`** (`BLSTMSpectralSegmenter.cpp:791-803`, Task 8): after the pass-2 FFB, `seg.
+  _CumulativeError[chan]` and `seg._NbOfClassif[chan]` are ASSIGNED (`:802-803`) from the pass-2 NN,
+  discarding the pass-1 values (`:752-753`) -- an overwrite, not a `+=`. The entire re-forward +
+  re-segmentation is gated on `if (pitch > 0)` (`:791`): a zero pitch (no accepted TDC estimate over
+  any pass-1 SPEECH segment, or no SPEECH segment at all) leaves the pass-1 boundaries + error slots
+  in place (the homothety with `coeff = 0` still runs at `:760-787` but its output is never forwarded).
+  Reproduced in the Rust driver (the `pitch > 0.0` guard wraps the re-forward/clear/re-seg/overwrite).
+  On the excerpt the reimpl-path cost is 0 (no targets), so the overwrite lands 0 over 0 -- the
+  observable is the boundary/result change, not the cost.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

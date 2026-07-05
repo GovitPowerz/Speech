@@ -234,6 +234,36 @@ SPECTRAL_EXTRA_FILES = [
 # config file is added under phase2b.
 SPECTRAL_CONFIG_FILES: list[str] = []
 
+# Task 8: BlstmSpectralSegmenter pitch-homothety SECOND pass (Algo 3 complete). The
+# "pitch" variant = the real spectral base (BLSTM_shift 0.8 -> overlap) + TDC keys that
+# activate the pitch pass (BLSTMSpectralSegmenter.cpp:757-805): TDCwindow 0.032 ->
+# TDC_window_size 128 > 0 (gate on), TDCshift 0.01, lags (0.002,0.016), balance 0.7,
+# hamming-257 window param 0.8. getPitch walks the pass-1 SPEECH segment ([0, ~1.18s]),
+# returns pitch ~250 Hz (nonzero -> the warp does real work); the warp -> refilterbank/DCT
+# -> re-forward shifts the boundary from pass-1 1.1831 to pass-2 1.2597. DUMP QUIRK
+# (:848-850): the pass-1 result/convolved dumps are preserved (result_chan1 == the T7 real
+# result, byte-for-byte) while the pass-2 result/inputseq/boundaries are dumped separately;
+# the final boundaries dump reflects pass-2. The pass-1 result_chan1/inputseq_chan1 are the
+# same recipe as T7 real (proves pass-1 is untouched); the pass-2 dumps pin the second
+# pass. SEG_STRUCT site=spectral_pitch (reimpl pass-2 structure == real Eigen pass-2 or
+# abort). The measured chan-1 pitch is printed as SPECTRAL_PITCH measured_pitch_chan1=<v>
+# and recorded in the manifest.
+SPECTRAL_PITCH_EXPECTED_SHAPES = {
+    "spectral_pitch_pitch_chan1.bin": (1, 1),
+    "spectral_pitch_result_chan1.bin": (1, 50),
+    "spectral_pitch_convolved_chan1.bin": (1, 50),
+    "spectral_pitch_inputseq_chan1.bin": (201, 11),
+    "spectral_pitch_result_pass2_chan1.bin": (1, 50),
+    "spectral_pitch_convolved_pass2_chan1.bin": (1, 50),
+    "spectral_pitch_inputseq_pass2_chan1.bin": (201, 11),
+    "spectral_pitch_boundaries_chan1.bin": (3, 2),
+}
+SPECTRAL_PITCH_EXTRA_FILES = ["spectral_pitch_vrcts_chan1.xml"]
+# Reuses 1_worker_1.config with in-harness set_val TDC overrides; no new config file.
+SPECTRAL_PITCH_CONFIG_FILES: list[str] = []
+
+SPECTRAL_PITCH_RE = re.compile(r"^SPECTRAL_PITCH measured_pitch_chan1=(?P<pitch>[-0-9.eE+]+)$", re.MULTILINE)
+
 # SEG_STRUCT self-test lines from the SECONDARY real-forward probe (spec decision 3):
 # reimpl-driven segment structure (count + types) must equal the real Eigen path's,
 # with the boundary max-delta recorded. ok=0 (or a missing line) -> SystemExit.
@@ -248,6 +278,7 @@ EXPECTED_SEG_STRUCT_SITES = {
     "spectral_real",
     "spectral_overlap",
     "spectral_noOverlap",
+    "spectral_pitch",
 }
 
 
@@ -386,6 +417,13 @@ def main() -> None:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
         for name in SPECTRAL_EXTRA_FILES:
             shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        # Task 8 (BlstmSpectralSegmenter pitch second pass): pass-1 (preserved) +
+        # pass-2 result/inputseq/convolved/boundaries + the pitch scalar + the
+        # pass-2-driven VRCTS.
+        for name in SPECTRAL_PITCH_EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
+        for name in SPECTRAL_PITCH_EXTRA_FILES:
+            shutil.copy2(tmp_dir / name, PHASE2B_DIR / name)
 
     # 4. Regression guard: the committed fixture dirs must be byte-identical after
     #    the run (the fmtr upgrade must not perturb any prior harness dump).
@@ -402,6 +440,13 @@ def main() -> None:
     # 5b. Parse the Task 6 SEG_STRUCT secondary-probe lines (all ok=1 or SystemExit;
     #     a structural mismatch would have already aborted the harness itself).
     seg_struct = _parse_seg_struct(stdout)
+
+    # 5c. Parse the Task 8 measured pitch (SPECTRAL_PITCH line; recorded in the manifest
+    #     and pinned by the oracle-gated pitch scalar test).
+    pitch_match = SPECTRAL_PITCH_RE.search(stdout)
+    if not pitch_match:
+        raise SystemExit("SPECTRAL_PITCH line missing from harness stdout")
+    measured_pitch = float(pitch_match["pitch"])
 
     # 6. Call-site scan (spec decision 7). Expected 0 uncommented callers each; a
     #    nonzero count is a scope change -> STOP.
@@ -455,6 +500,23 @@ def main() -> None:
             spectral_shape_mismatches.append({"file": name, "expected": expected, "got": got})
     if spectral_shape_mismatches:
         raise SystemExit(f"spectral_*.bin shape mismatch: {spectral_shape_mismatches}")
+
+    # 7f. Task 8 shape sync: the pitch second-pass dumps must match their shapes, and
+    #     the preserved pass-1 result/inputseq must be BYTE-IDENTICAL to the T7 real
+    #     variant (the dump quirk: the externalized pass-1 result survives the pitch pass).
+    spectral_pitch_shape_mismatches = []
+    for name, expected in SPECTRAL_PITCH_EXPECTED_SHAPES.items():
+        got = _read_bin_shape(PHASE2B_DIR / name)
+        if got != expected:
+            spectral_pitch_shape_mismatches.append({"file": name, "expected": expected, "got": got})
+    if spectral_pitch_shape_mismatches:
+        raise SystemExit(f"spectral_pitch_*.bin shape mismatch: {spectral_pitch_shape_mismatches}")
+    for pass1, real in (
+        ("spectral_pitch_result_chan1.bin", "spectral_real_result_chan1.bin"),
+        ("spectral_pitch_inputseq_chan1.bin", "spectral_real_inputseq_chan1.bin"),
+    ):
+        if (PHASE2B_DIR / pass1).read_bytes() != (PHASE2B_DIR / real).read_bytes():
+            raise SystemExit(f"pitch pass-1 dump {pass1} must be byte-identical to the T7 {real} (the dump quirk: pass 1 is preserved, pass 2 differs)")
 
     # 8. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -850,10 +912,61 @@ def main() -> None:
                 },
                 "reference_spans_sec": [[0.4, 0.9], [1.2, 1.6]],
             },
-            "seg_struct": {k: v for k, v in sorted(seg_struct.items()) if k.startswith("spectral_")},
+            "seg_struct": {k: v for k, v in sorted(seg_struct.items()) if k.startswith("spectral_") and k != "spectral_pitch"},
             "expected_shapes": {k: list(v) for k, v in SPECTRAL_EXPECTED_SHAPES.items()},
             "extra_files": SPECTRAL_EXTRA_FILES,
             "config_files": SPECTRAL_CONFIG_FILES,
+        },
+        "spectral_pitch_pass": {
+            "text": (
+                "Phase 2b Task 8: the pitch-homothety SECOND pass completes Algo 3 "
+                "(BLSTMSpectralSegmenter.cpp:757-805). SpectralProbe transcribes the pitch "
+                "block gated on TDC_window_size > 0: getTDCParam REAL derives the TDC "
+                "params (TDCwindow 0.032 -> TDC_window_size 128, full 257, shift 80, "
+                "min_lag 16, max_lag 128, hamming-257 param 0.8); getPitch REAL (NN-free: "
+                "getSequence + computePitch, an autocorrelation argmax) walks the PASS-1 "
+                "SPEECH segment ([0, ~1.18s]) and returns the measured chan-1 pitch; the "
+                "periodogram is warped by coeff = pitch/300 via applyHomothety (a pure "
+                "linear-interpolation column warp, bit-exact off-libm); the mel filterbank "
+                "+ DCT are re-run on the WARPED periodogram (applyDCTLoop, same ascending "
+                "recipe as pass 1); the input sequence is rebuilt WITH THE OLD (pass-1) "
+                "LTSV column (:792 -- NOT recomputed on the warp, a load-bearing quirk); "
+                "the reimpl FFB re-forwards; clearClassification (:800) + "
+                "results2segmentation (:801) OVERWRITE the pass-1 boundaries; the error/"
+                "classif slots are OVERWRITTEN (:802-803). The re-seg is guarded on "
+                "pitch > 0 (:791). NON-VACUITY (the brief's mandate): measured pitch ~250 "
+                "Hz > 0, the warped periodogram differs, the pass-2 result differs from "
+                "pass-1 at ALL 50 positions, and the boundary crossing MOVES from pass-1 "
+                "1.1831 to pass-2 1.2597 -- the pitch pass does real work on this excerpt. "
+                "DUMP QUIRK reproduced (:848-850): the externalized result golden preserves "
+                "PASS-1 (spectral_pitch_result_chan1.bin is byte-identical to the T7 "
+                "spectral_real_result_chan1.bin) even though the final boundaries "
+                "(spectral_pitch_boundaries_chan1.bin) are PASS-2; the pass-2 result/"
+                "inputseq/convolved are dumped separately (spectral_pitch_*_pass2_chan1). "
+                "SECONDARY probe: the REAL Eigen getSegmentation runs its OWN pitch pass "
+                "beside the transcription; SEG_STRUCT site=spectral_pitch pins pass-2 "
+                "structural equality (count + types) with the measured boundary max-dt. "
+                "The VRCTS golden (spectral_pitch_vrcts_chan1.xml) is the REAL toFile_VRCTS "
+                "on the pass-2-driven Segmentation."
+            ),
+            "measured_pitch_chan1": measured_pitch,
+            "pass1_boundary_crossing_sec": 1.1831,
+            "pass2_boundary_crossing_sec": 1.2597,
+            "constants": {
+                "tdc_window_size": 128,
+                "tdc_full_window_size": 257,
+                "tdc_window_shift": 80,
+                "min_lag": 16,
+                "max_lag": 128,
+                "balance": 0.7,
+                "tdc_windowing_type": "hamming",
+                "tdc_windowing_param": 0.8,
+                "homothety_coeff": measured_pitch / 300.0,
+            },
+            "seg_struct": {k: v for k, v in sorted(seg_struct.items()) if k == "spectral_pitch"},
+            "expected_shapes": {k: list(v) for k, v in SPECTRAL_PITCH_EXPECTED_SHAPES.items()},
+            "extra_files": SPECTRAL_PITCH_EXTRA_FILES,
+            "config_files": SPECTRAL_PITCH_CONFIG_FILES,
         },
     }
 
@@ -864,7 +977,8 @@ def main() -> None:
     print(
         f"OK: {len(fmtr_cases)} FMTR_CHECK all ok, {len(seg_struct)} SEG_STRUCT all ok, "
         f"callsites {counts}, r2s shapes ok, tdc shapes ok, ltsv shapes ok, "
-        f"signal shapes ok, spectral shapes ok, manifest -> {manifest_path.relative_to(REPO_ROOT)}"
+        f"signal shapes ok, spectral shapes ok, pitch shapes ok "
+        f"(pitch_chan1={measured_pitch:.6g}), manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 
 

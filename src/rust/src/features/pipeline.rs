@@ -536,37 +536,25 @@ pub fn assemble_input_sequence(
     }
 }
 
-/// Build the full BLSTM input sequence for one channel: windowing -> periodogram
-/// -> mel/DCT (per config) -> LTSV (band asymmetry, `R >= 1` gate) -> assemble.
+/// Mel/DCT + LTSV-hcat assembly from an ALREADY-COMPUTED periodogram
+/// (`getBLSTMInputSequence` :561-591, feature side): run the mel filterbank + DCT per
+/// config on `perio`, then hcat `ltsv` as the last column when `Some`. Split out of
+/// [`build_input_sequence`] so the pitch second pass can rebuild the input from the
+/// WARPED periodogram while reusing the OLD (pass-1) LTSV column
+/// (`BLSTMSpectralSegmenter.cpp:777-792` -- the LTSV is NOT recomputed on the warped
+/// periodogram, a load-bearing quirk).
 ///
-/// Lifted verbatim from the Phase 1/2 gate test bodies (`run_pipeline` /
-/// `assemble_real_input`) -- the two call sites differ only in config source; the
-/// real config's LTSV is disabled via `R == 0`, already handled by the
-/// `ltsv_half_window >= 1` gate below. Preemph/noise are NOT applied here -- callers
-/// own audio mutation before passing `audio` in.
-pub fn build_input_sequence(
-    audio: &Audio,
+/// `ltsv` is the caller-owned column (pass 1 computes it via [`get_ltsv`]; the pitch
+/// pass hands the SAME slice back in). The mel bank is re-derived here from `cfg`/`s`
+/// (config-time constant), matching the legacy re-`applyFilterBank`/`applyDCT`.
+/// `rate` is the sample rate (the mel bank ctor arg).
+pub fn assemble_from_periodogram(
+    perio: &Array2<f64>,
     cfg: &FeatureConfig,
     s: &SpectralParams,
-    chan: usize,
-    temporal_conv: Option<&[f64]>,
+    rate: f64,
+    ltsv: Option<&[f64]>,
 ) -> Array2<f64> {
-    let rate = audio.sample_rate as f64;
-    let win = windowing_coefficients(&cfg.win_type, false, s.buffer_size, cfg.win_param);
-    let end = audio.data.ncols() - 1;
-    let perio = compute_segment_periodogram_estimates(
-        audio,
-        s.order,
-        s.shift_frames,
-        chan,
-        cfg.flag_dc_offset,
-        win.as_deref(),
-        temporal_conv,
-        0,
-        end,
-    );
-
-    // Mel bank per config, SNAPPED freq band, spectrum_size = bins - 1.
     let (mel_out, dct_out) = if cfg.nb_bins > 0 {
         let bank = MelFilterBank::new(
             cfg.min_mel,
@@ -582,7 +570,7 @@ pub fn build_input_sequence(
             cfg.deltas_nb,
             cfg.dd_nb,
         );
-        let fb = bank.apply_filter_bank(&perio);
+        let fb = bank.apply_filter_bank(perio);
         if cfg.nb_dct > 0 {
             let dct = bank.apply_dct(&fb);
             (Some(fb), Some(dct))
@@ -593,11 +581,84 @@ pub fn build_input_sequence(
         (None, None)
     };
 
-    // Spectral output columns (before LTSV) drive the mel-variant LTSV band.
-    let spectral_cols = match (&dct_out, &mel_out) {
-        (Some(d), _) => d.ncols(),
-        (None, Some(m)) => m.ncols(),
-        (None, None) => s.freq_end - s.freq_beg + 1,
+    assemble_input_sequence(
+        perio,
+        mel_out.as_ref(),
+        dct_out.as_ref(),
+        ltsv,
+        s.freq_beg,
+        s.freq_end,
+    )
+}
+
+/// Build the full BLSTM input sequence for one channel: windowing -> periodogram
+/// -> mel/DCT (per config) -> LTSV (band asymmetry, `R >= 1` gate) -> assemble.
+///
+/// Lifted verbatim from the Phase 1/2 gate test bodies (`run_pipeline` /
+/// `assemble_real_input`) -- the two call sites differ only in config source; the
+/// real config's LTSV is disabled via `R == 0`, already handled by the
+/// `ltsv_half_window >= 1` gate below. Preemph/noise are NOT applied here -- callers
+/// own audio mutation before passing `audio` in.
+pub fn build_input_sequence(
+    audio: &Audio,
+    cfg: &FeatureConfig,
+    s: &SpectralParams,
+    chan: usize,
+    temporal_conv: Option<&[f64]>,
+) -> Array2<f64> {
+    build_input_sequence_parts(audio, cfg, s, chan, temporal_conv).0
+}
+
+/// [`build_input_sequence`] that ALSO returns the raw periodogram and the pass-1
+/// LTSV column, so the pitch second pass can warp the periodogram + reuse the OLD
+/// LTSV (`BLSTMSpectralSegmenter.cpp:757-805`). Returns `(input_seq, perio, ltsv)`.
+pub fn build_input_sequence_parts(
+    audio: &Audio,
+    cfg: &FeatureConfig,
+    s: &SpectralParams,
+    chan: usize,
+    temporal_conv: Option<&[f64]>,
+) -> (Array2<f64>, Array2<f64>, Option<Vec<f64>>) {
+    let win = windowing_coefficients(&cfg.win_type, false, s.buffer_size, cfg.win_param);
+    let end = audio.data.ncols() - 1;
+    let perio = compute_segment_periodogram_estimates(
+        audio,
+        s.order,
+        s.shift_frames,
+        chan,
+        cfg.flag_dc_offset,
+        win.as_deref(),
+        temporal_conv,
+        0,
+        end,
+    );
+
+    // Spectral output columns (before LTSV) drive the mel-variant LTSV band. Match
+    // the legacy: mel/DCT output width when mel is active, else the raw spectral band.
+    let spectral_cols = if cfg.nb_bins > 0 {
+        // Re-derive the mel/DCT width without re-running the bank (cheap: getNbFilters/
+        // getNbDCT). Building the bank once and querying is simplest.
+        let bank = MelFilterBank::new(
+            cfg.min_mel,
+            cfg.max_mel,
+            cfg.nb_bins,
+            s.min_freq,
+            s.max_freq,
+            audio.sample_rate as f64,
+            s.bins - 1,
+            cfg.is_log,
+            cfg.nb_dct,
+            cfg.ignore_first,
+            cfg.deltas_nb,
+            cfg.dd_nb,
+        );
+        if cfg.nb_dct > 0 {
+            bank.nb_dct()
+        } else {
+            bank.nb_filters()
+        }
+    } else {
+        s.freq_end - s.freq_beg + 1
     };
 
     // LTSV column (band asymmetry): mel active -> (0, spectral_cols-1); else the
@@ -613,12 +674,7 @@ pub fn build_input_sequence(
         None
     };
 
-    assemble_input_sequence(
-        &perio,
-        mel_out.as_ref(),
-        dct_out.as_ref(),
-        ltsv.as_deref(),
-        s.freq_beg,
-        s.freq_end,
-    )
+    let input_seq =
+        assemble_from_periodogram(&perio, cfg, s, audio.sample_rate as f64, ltsv.as_deref());
+    (input_seq, perio, ltsv)
 }

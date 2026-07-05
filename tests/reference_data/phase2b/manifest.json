@@ -538,5 +538,66 @@
       "spectral_noOverlap_vrcts_chan1.xml"
     ],
     "config_files": []
+  },
+  "spectral_pitch_pass": {
+    "text": "Phase 2b Task 8: the pitch-homothety SECOND pass completes Algo 3 (BLSTMSpectralSegmenter.cpp:757-805). SpectralProbe transcribes the pitch block gated on TDC_window_size > 0: getTDCParam REAL derives the TDC params (TDCwindow 0.032 -> TDC_window_size 128, full 257, shift 80, min_lag 16, max_lag 128, hamming-257 param 0.8); getPitch REAL (NN-free: getSequence + computePitch, an autocorrelation argmax) walks the PASS-1 SPEECH segment ([0, ~1.18s]) and returns the measured chan-1 pitch; the periodogram is warped by coeff = pitch/300 via applyHomothety (a pure linear-interpolation column warp, bit-exact off-libm); the mel filterbank + DCT are re-run on the WARPED periodogram (applyDCTLoop, same ascending recipe as pass 1); the input sequence is rebuilt WITH THE OLD (pass-1) LTSV column (:792 -- NOT recomputed on the warp, a load-bearing quirk); the reimpl FFB re-forwards; clearClassification (:800) + results2segmentation (:801) OVERWRITE the pass-1 boundaries; the error/classif slots are OVERWRITTEN (:802-803). The re-seg is guarded on pitch > 0 (:791). NON-VACUITY (the brief's mandate): measured pitch ~250 Hz > 0, the warped periodogram differs, the pass-2 result differs from pass-1 at ALL 50 positions, and the boundary crossing MOVES from pass-1 1.1831 to pass-2 1.2597 -- the pitch pass does real work on this excerpt. DUMP QUIRK reproduced (:848-850): the externalized result golden preserves PASS-1 (spectral_pitch_result_chan1.bin is byte-identical to the T7 spectral_real_result_chan1.bin) even though the final boundaries (spectral_pitch_boundaries_chan1.bin) are PASS-2; the pass-2 result/inputseq/convolved are dumped separately (spectral_pitch_*_pass2_chan1). SECONDARY probe: the REAL Eigen getSegmentation runs its OWN pitch pass beside the transcription; SEG_STRUCT site=spectral_pitch pins pass-2 structural equality (count + types) with the measured boundary max-dt. The VRCTS golden (spectral_pitch_vrcts_chan1.xml) is the REAL toFile_VRCTS on the pass-2-driven Segmentation.",
+    "measured_pitch_chan1": 250.04464285714286,
+    "pass1_boundary_crossing_sec": 1.1831,
+    "pass2_boundary_crossing_sec": 1.2597,
+    "constants": {
+      "tdc_window_size": 128,
+      "tdc_full_window_size": 257,
+      "tdc_window_shift": 80,
+      "min_lag": 16,
+      "max_lag": 128,
+      "balance": 0.7,
+      "tdc_windowing_type": "hamming",
+      "tdc_windowing_param": 0.8,
+      "homothety_coeff": 0.8334821428571428
+    },
+    "seg_struct": {
+      "spectral_pitch": {
+        "ok": 1,
+        "max_dt": 0.0
+      }
+    },
+    "expected_shapes": {
+      "spectral_pitch_pitch_chan1.bin": [
+        1,
+        1
+      ],
+      "spectral_pitch_result_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_convolved_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_inputseq_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_pitch_result_pass2_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_convolved_pass2_chan1.bin": [
+        1,
+        50
+      ],
+      "spectral_pitch_inputseq_pass2_chan1.bin": [
+        201,
+        11
+      ],
+      "spectral_pitch_boundaries_chan1.bin": [
+        3,
+        2
+      ]
+    },
+    "extra_files": [
+      "spectral_pitch_vrcts_chan1.xml"
+    ],
+    "config_files": []
   }
 }

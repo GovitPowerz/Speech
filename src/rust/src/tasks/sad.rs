@@ -23,7 +23,7 @@ use crate::audio::{
 use crate::features::ltsv_tdc::{ltsv_classify_sequence, tdc_classify_sequence};
 use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{
-    FeatureConfig, SpectralParams, build_input_sequence, derive_freq_band_ltsv_variant,
+    FeatureConfig, SpectralParams, build_input_sequence_parts, derive_freq_band_ltsv_variant,
 };
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
@@ -1001,8 +1001,15 @@ pub fn get_blstm_param(
 ///   `:302-306`); DEAD for the Task-7 configs (LTSVwindow 0 -> no LTSV), tracked for
 ///   S3.4 faithfulness.
 ///
-/// PITCH SECOND PASS (`:757-805`) is EXCLUDED this task: the `tdc.half_window > 0` gate
-/// short-circuits false for the Task-7 configs (TDCwindow 0). Task 8 adds it.
+/// PITCH SECOND PASS (`:757-805`, Task 8): gated on `s.tdc.half_window > 0` (TDCwindow
+/// != 0). For the Task-7 configs (TDCwindow 0) `s.tdc` is None -> skipped (byte-identical
+/// to T7). When active: `get_pitch` over the PASS-1 `seg`, `coeff = pitch/300`,
+/// `apply_homothety` on the periodogram, re-filterbank/DCT, rebuild inputSeq WITH THE OLD
+/// (pass-1) LTSV column (`:792` quirk), re-forward, `clear_hypothesis` (`:800`), re-
+/// `results_to_segmentation` (`:801`), and OVERWRITE the error/classif slots (`:802-803`).
+/// The re-seg is guarded on `pitch > 0` (`:791`). `last_result_rows` is NOT overwritten by
+/// the pitch pass -- it holds the PASS-1 result, matching the legacy dump quirk (`:848-850`
+/// dumps result_vec2 before the pitch pass rewrites result_vec).
 pub struct BlstmSpectralSegmenter {
     driver_cfg: DriverConfig,
     seg_cfg: SegmenterConfig,
@@ -1027,8 +1034,16 @@ pub struct BlstmSpectralSegmenter {
     /// Port-side observation point, NO legacy counterpart (same rationale as
     /// [`BlstmSignalSegmenter::last_result_rows`]): the PRE-convolution `result_vec2`
     /// row per channel captured on the last `get_segmentation` call, before
-    /// `results_to_segmentation` mutates it in place. Pins the NN chain bit-exactly.
+    /// `results_to_segmentation` mutates it in place. Holds the PASS-1 result (the pitch
+    /// pass does NOT overwrite it -- matching the legacy dump quirk). Pins the NN chain
+    /// bit-exactly.
     last_result_rows: Vec<Vec<f64>>,
+    /// Port-side observation point for the PITCH pass (Task 8): the PRE-convolution
+    /// pass-2 `result_vec2` row per channel, captured only when the pitch pass fired
+    /// with `pitch > 0` (else no entry is pushed for that channel). Pins the second
+    /// forward bit-exactly (the legacy never externalizes this row -- see the dump
+    /// quirk -- so this is a pure test-capture accessor, like `last_result_rows`).
+    last_result_rows_pass2: Vec<Vec<f64>>,
 }
 
 impl BlstmSpectralSegmenter {
@@ -1074,6 +1089,7 @@ impl BlstmSpectralSegmenter {
             nb_of_classif: Vec::new(),
             result_buf: None,
             last_result_rows: Vec::new(),
+            last_result_rows_pass2: Vec::new(),
         })
     }
 
@@ -1108,6 +1124,14 @@ impl BlstmSpectralSegmenter {
     /// last_result_rows`]).
     pub fn last_result_rows(&self) -> &[Vec<f64>] {
         &self.last_result_rows
+    }
+
+    /// PRE-convolution PASS-2 result rows (Task 8), one per channel where the pitch
+    /// pass fired with `pitch > 0`. Empty when the pitch gate is off (TDCwindow 0) or
+    /// every channel measured `pitch == 0`. Test-only observation point (no legacy
+    /// counterpart -- the legacy dump quirk keeps the externalized result at pass 1).
+    pub fn last_result_rows_pass2(&self) -> &[Vec<f64>] {
+        &self.last_result_rows_pass2
     }
 
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:752`).
@@ -1150,9 +1174,9 @@ impl BlstmSpectralSegmenter {
 impl Segmenter for BlstmSpectralSegmenter {
     /// Port of `BLSTMSpectralSegmenter::getSegmentation`
     /// (`BLSTMSpectralSegmenter.cpp:593-887`), the non-unit-test/non-plotting path (the
-    /// `.mat`/PNG/log branches dropped: display/diagnostic-only), and WITHOUT the pitch
-    /// second pass (`:757-805`) -- the `tdc.half_window > 0` gate short-circuits false
-    /// for the Task-7 configs (TDCwindow 0). Task 8 adds the pitch pass.
+    /// `.mat`/PNG/log branches dropped: display/diagnostic-only), INCLUDING the pitch
+    /// second pass (`:757-805`, Task 8) gated on `s.tdc.half_window > 0` (skipped for the
+    /// Task-7 configs where TDCwindow 0 -> `s.tdc` is None -> byte-identical to T7).
     fn get_segmentation(
         &mut self,
         audio: &mut Audio,
@@ -1221,6 +1245,7 @@ impl Segmenter for BlstmSpectralSegmenter {
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
+        self.last_result_rows_pass2 = Vec::new();
 
         // setProcessingType((window > 0), !noOverlap) ONCE (:739): flags are per-file
         // constants (do not change across channels).
@@ -1254,9 +1279,16 @@ impl Segmenter for BlstmSpectralSegmenter {
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             // build_input_sequence (the Task 3 lift): periodogram -> mel/DCT -> LTSV.
             // Preemph/noise already applied to `audio` above (the lift does NOT mutate
-            // audio).
-            let mut input_seq =
-                build_input_sequence(audio, &self.feature_cfg, &s, chan, temporal_conv.as_deref());
+            // audio). `_parts` also returns the raw periodogram + the pass-1 LTSV column,
+            // which the pitch second pass reuses (the warp warps the periodogram; the
+            // LTSV column is NOT recomputed, :792 quirk).
+            let (mut input_seq, perio, ltsv_pass1) = build_input_sequence_parts(
+                audio,
+                &self.feature_cfg,
+                &s,
+                chan,
+                temporal_conv.as_deref(),
+            );
 
             // getTargets when a reference exists (:735-738). Fresh hypotheses carry no
             // reference, so the no-target forward path runs; reference-driven scoring
@@ -1281,11 +1313,15 @@ impl Segmenter for BlstmSpectralSegmenter {
             let mut result_vec2: Vec<f64> = result_vec.column(0).to_vec();
 
             // Capture the PRE-convolution row (port-side observation point). Cloned
-            // before results_to_segmentation convolves it in place.
+            // before results_to_segmentation convolves it in place. This is the PASS-1
+            // result; the pitch pass does NOT overwrite last_result_rows -- matching the
+            // legacy dump quirk (:848-850 dumps result_vec2 BEFORE the pitch pass, so the
+            // externalized result is always pass 1 even when the final boundaries are
+            // pass 2).
             self.last_result_rows.push(result_vec2.clone());
 
             // results2segmentation (:750-751): the targetSeqTmp copy quirk is a dead
-            // param in results_to_segmentation.
+            // param in results_to_segmentation. Writes the PASS-1 boundaries into `seg`.
             results_to_segmentation(
                 seg,
                 time_step,
@@ -1296,8 +1332,69 @@ impl Segmenter for BlstmSpectralSegmenter {
                 &self.seg_cfg,
             );
 
-            // pitch second pass (:757-805) SKIPPED: tdc.half_window == 0 for Task-7
-            // configs (TDCwindow 0). Task 8 wires it in.
+            // --- PITCH SECOND PASS (:757-805) --------------------------------------
+            // Gated on `TDC_window_size > 0` (the derived `s.tdc.half_window`). For the
+            // Task-7 configs (TDCwindow 0) `s.tdc` is None -> skipped, matching T7.
+            if let Some(tdc) = s.tdc.as_ref()
+                && tdc.half_window > 0
+            {
+                // getPitch REAL (:758) over the PASS-1 `seg` (just written above). NN-free
+                // (get_sequence + compute_pitch). dc_offset threaded from the config.
+                let pitch = crate::features::ltsv_tdc::get_pitch(
+                    audio,
+                    seg,
+                    chan,
+                    tdc,
+                    rate,
+                    self.feature_cfg.flag_dc_offset,
+                );
+
+                // Homothety warp of the periodogram (:760-775), coeff = pitch/300.
+                let coeff_homo = pitch / 300.0;
+                let warped = crate::features::ltsv_tdc::apply_homothety(&perio, coeff_homo);
+
+                // Rebuild inputSeq from the WARPED periodogram (re-filterbank/DCT, :777-787)
+                // WITH THE OLD (pass-1) LTSV column (:792 -- NOT recomputed on the warp).
+                let mut input_seq_p = crate::features::pipeline::assemble_from_periodogram(
+                    &warped,
+                    &self.feature_cfg,
+                    &s,
+                    rate,
+                    ltsv_pass1.as_deref(),
+                );
+
+                // Re-forward (:793) ONLY when pitch > 0 (:791). Reuses the SAME result_vec
+                // buffer (:793). clear_hypothesis (:800) then re-results2segmentation (:801)
+                // OVERWRITE the pass-1 boundaries; the error/classif slots are OVERWRITTEN
+                // (:802-803, not accumulated).
+                if pitch > 0.0 {
+                    let result_vec = self.result_buf.as_mut().unwrap();
+                    self.net.feed_forward_backward(
+                        &mut input_seq_p,
+                        window_size,
+                        window_shift,
+                        result_vec,
+                        &target,
+                    );
+                    self.cumulative_error[chan] = self.net.cost;
+                    self.nb_of_classif[chan] = self.net.nb_of_classif;
+
+                    let mut result_vec2_p: Vec<f64> = result_vec.column(0).to_vec();
+                    // Capture the PASS-2 pre-conv row (test observation point) before the
+                    // in-place convolution in results_to_segmentation.
+                    self.last_result_rows_pass2.push(result_vec2_p.clone());
+                    seg.clear_hypothesis();
+                    results_to_segmentation(
+                        seg,
+                        time_step,
+                        time_offset,
+                        &mut result_vec2_p,
+                        SegClass::Speech,
+                        self.driver_cfg.conv_coeff.as_deref(),
+                        &self.seg_cfg,
+                    );
+                }
+            }
         }
 
         // `seg.compute_errors()` after the FULL channel loop (:864).

@@ -85,6 +85,20 @@ fn variant_map(tag: &str) -> IndexMap<String, String> {
     }
 }
 
+/// The Task 8 pitch variant: the real spectral base (BLSTM_shift 0.8 -> overlap) + the
+/// TDC overrides that activate the pitch pass (brief-mandated; the harness sets the same
+/// keys via set_val). TDCwindow 0.032 -> TDC_window_size 128 > 0 -> the pitch gate fires.
+fn pitch_map() -> IndexMap<String, String> {
+    let mut m = spectral_map("8.000000000000000e-01");
+    m.insert("BLSTM_TDCwindow".into(), "0.032".into());
+    m.insert("BLSTM_TDCshift".into(), "0.01".into());
+    m.insert("BLSTM_TDC_lags".into(), "0.002,0.016".into());
+    m.insert("BLSTM_TDC_balance".into(), "0.7".into());
+    m.insert("BLSTM_TDC_windowing_type".into(), "hamming".into());
+    m.insert("BLSTM_TDC_windowing_param".into(), "0.8".into());
+    m
+}
+
 /// Fresh excerpt audio (offset 0.35, dur 2.0), UNMUTATED: `get_segmentation` applies
 /// preemph itself (config `BLSTM_preemph_ratio -0.97 < 0` -> SKIPPED, `noise_seed -3`
 /// -> no noise). So the excerpt reaches the periodogram raw, matching the E2E gate.
@@ -773,5 +787,244 @@ fn non_wav_spectrum_shift_80_fallback_persists() {
         sig.spectrum_shift_in_frames(),
         80,
         "non-wav 80 fallback persists through get_segmentation"
+    );
+}
+
+// === Task 8: pitch-homothety second pass (Algo 3 complete) ====================
+//
+// The pitch variant = the real spectral base (BLSTM_shift 0.8) + TDC keys activating
+// the pitch pass (TDCwindow 0.032 -> TDC_window_size 128 > 0). getPitch walks the
+// PASS-1 SPEECH segment ([0, ~1.18s]) -> pitch ~250 Hz > 0; the warp -> refilterbank
+// -> re-forward shifts the boundary from pass-1 1.1831 to pass-2 1.2597. The DUMP QUIRK
+// (:848-850): the externalized result golden preserves PASS-1 (result_chan1 ==
+// spectral_real_result_chan1) even though the final boundaries are PASS-2.
+
+fn build_pitch() -> BlstmSpectralSegmenter {
+    BlstmSpectralSegmenter::from_legacy(&pitch_map(), Some(&real_weights())).unwrap()
+}
+
+/// The measured chan-1 pitch scalar bit-exact (oracle-gated) vs the harness dump. This
+/// is the whole TDC-autocorrelation-argmax chain (getPitch over the pass-1 SPEECH
+/// segment) pinned to a single f64. A wrong segment walk, wrong lag bounds, or a wrong
+/// getSequence framing would land a different pitch here.
+#[test]
+fn pitch_scalar_matches_dump() {
+    let want = common::load_bin_phase2b("spectral_pitch_pitch_chan1.bin");
+    assert_eq!(want.shape(), &[1, 1], "pitch dump is 1x1");
+    let want_pitch = want[[0, 0]];
+    // Sanity: the manifest records ~250.045; a zero pitch would make the pass vacuous.
+    assert!(
+        want_pitch > 0.0,
+        "measured pitch must be > 0 (non-vacuous warp)"
+    );
+
+    // Re-derive the pitch the way the driver does: the pitch pass runs get_pitch over the
+    // PASS-1 seg. We reproduce that by running the driver's pass 1 (via a TDCwindow-0
+    // twin whose pass-1 seg is identical to the pitch variant's pass 1 -- proven by the
+    // result_chan1 == spectral_real byte-equality), then calling get_pitch directly with
+    // the derived TdcParams. This isolates the scalar without depending on the pass-2
+    // forward.
+    use speech::features::ltsv_tdc::get_pitch;
+    use speech::features::pipeline::{FeatureConfig, SpectralParams};
+
+    let m = pitch_map();
+    let c = FeatureConfig::from_legacy(&m, "BLSTM").unwrap();
+    let mut audio = excerpt_audio();
+    // preemph SKIPPED (ratio < 0), noise SKIPPED (seed < 0) -- same as the driver.
+    let rate = audio.sample_rate as f64;
+    let s = SpectralParams::derive(&c, rate);
+    let tdc = s.tdc.as_ref().expect("pitch config -> Some(TdcParams)");
+    assert_eq!(tdc.half_window, 128, "TDC_window_size 128");
+    assert_eq!(tdc.full_window, 257, "TDC_full_window_size 257");
+    assert_eq!(tdc.min_lag, 16, "min_lag 16");
+    assert_eq!(tdc.max_lag, 128, "max_lag 128");
+
+    // Run the driver to get the PASS-1 seg (chan 0), which get_pitch walks. The driver
+    // applies preemph to `audio` in place; get_pitch below reads the SAME mutated audio,
+    // matching the legacy (getPitch runs on the preemph'd audio inside getSegmentation).
+    let mut sig = build_pitch();
+    let mut segs = fresh_segs(&audio);
+    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    // But segs[0] now holds the PASS-2 boundaries (the pitch pass overwrote them). To
+    // walk the PASS-1 seg we rebuild it: pass-1 boundaries == the T7 real dump.
+    let bound = common::load_bin_phase2b("spectral_real_boundaries_chan1.bin");
+    let audio_duration = bound[[bound.nrows() - 1, 0]];
+    let mut pass1_seg = Segmentation::new(audio_duration);
+    // Reconstruct pass-1 as [SPEECH@0, OTHER@1.1831, END@2.0] by labeling the speech span.
+    pass1_seg.label_segment(bound[[0, 0]], bound[[1, 0]], SegClass::Speech);
+
+    let got = get_pitch(&audio, &pass1_seg, 0, tdc, rate, c.flag_dc_offset);
+    common::assert_oracle_eq_f64(got, want_pitch, "pitch scalar (chan1)");
+}
+
+/// Both-pass goldens: the driver's PASS-1 result row (`last_result_rows`, preserved by
+/// the dump quirk) matches the pass-1 dump AND is byte-identical to the T7 real result;
+/// the PASS-2 result row (`last_result_rows_pass2`) matches the pass-2 dump; the final
+/// boundaries match the pass-2 boundaries dump.
+#[test]
+fn pitch_both_pass_goldens() {
+    let mut sig = build_pitch();
+    let mut audio = excerpt_audio();
+    let mut segs = fresh_segs(&audio);
+    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    // PASS-1 result (preserved): last_result_rows[0] == the pass-1 dump.
+    let rows1 = sig.last_result_rows();
+    assert_eq!(rows1.len(), 2, "last_result_rows must have 2 channels");
+    let want_p1 = common::load_bin_phase2b("spectral_pitch_result_chan1.bin");
+    let got_p1 = ndarray::Array2::from_shape_vec((1, rows1[0].len()), rows1[0].clone()).unwrap();
+    assert_convolved_eq(&got_p1, &want_p1, "pitch pass-1 result (chan1)");
+
+    // PASS-2 result: last_result_rows_pass2[0] == the pass-2 dump.
+    let rows2 = sig.last_result_rows_pass2();
+    assert_eq!(
+        rows2.len(),
+        2,
+        "pitch fired on both channels (both crossed the pass-1 threshold, pitch > 0)"
+    );
+    let want_p2 = common::load_bin_phase2b("spectral_pitch_result_pass2_chan1.bin");
+    let got_p2 = ndarray::Array2::from_shape_vec((1, rows2[0].len()), rows2[0].clone()).unwrap();
+    assert_convolved_eq(&got_p2, &want_p2, "pitch pass-2 result (chan1)");
+
+    // Pass-2 result MUST differ from pass-1 (non-vacuity: the warp does real work).
+    assert_ne!(
+        rows1[0], rows2[0],
+        "pass-2 result must DIFFER from pass-1 (the warp is non-vacuous)"
+    );
+
+    // Final boundaries reflect PASS-2.
+    assert_boundaries_match(
+        &segs,
+        0,
+        "spectral_pitch_boundaries_chan1.bin",
+        "pitch e2e chan1 (pass-2 boundaries)",
+    );
+}
+
+/// The DUMP QUIRK, pinned explicitly (the brief's Step 2 mandate): the externalized
+/// result (`last_result_rows`, pass 1) is byte-identical to the T7 real result even
+/// though the final boundaries are pass 2 -- AND the pass-2 boundaries differ from the
+/// pass-1 boundaries (so the two passes are genuinely distinct).
+#[test]
+fn pitch_dump_quirk_pass1_result_preserved() {
+    let mut sig = build_pitch();
+    let mut audio = excerpt_audio();
+    let mut segs = fresh_segs(&audio);
+    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    // last_result_rows (pass 1) == the T7 real result, byte-for-byte (the preserved dump).
+    let rows1 = sig.last_result_rows();
+    let real_result = common::load_bin_phase2b("spectral_real_result_chan1.bin");
+    let got = ndarray::Array2::from_shape_vec((1, rows1[0].len()), rows1[0].clone()).unwrap();
+    assert_convolved_eq(&got, &real_result, "pitch pass-1 result == T7 real result");
+
+    // The pass-2 boundaries (final) DIFFER from the pass-1 boundaries (T7 real): the
+    // crossing moves 1.1831 -> 1.2597. This proves the two passes produce different
+    // segmentations (the quirk is load-bearing, not coincidental).
+    let pass1_bound = common::load_bin_phase2b("spectral_real_boundaries_chan1.bin");
+    let pass2_bound = common::load_bin_phase2b("spectral_pitch_boundaries_chan1.bin");
+    assert_ne!(
+        pass1_bound, pass2_bound,
+        "pass-2 boundaries must DIFFER from pass-1 (the pitch pass re-segments)"
+    );
+    // And the final seg matches pass 2, NOT pass 1.
+    assert_boundaries_match(
+        &segs,
+        0,
+        "spectral_pitch_boundaries_chan1.bin",
+        "final == pass2",
+    );
+}
+
+/// The pass-2 inputseq (warp -> refilterbank -> DCT -> OLD LTSV) matches the harness
+/// dump, and DIFFERS from the pass-1 inputseq (the warp changed the features). This
+/// pins the homothety + refilterbank/DCT + old-LTSV-reuse chain end to end.
+#[test]
+fn pitch_pass2_inputseq_matches_dump() {
+    // The driver does not expose the pass-2 inputseq directly; reproduce it via the
+    // public pipeline helpers exactly as the driver does, then compare to the dump.
+    use speech::features::ltsv_tdc::{apply_homothety, get_pitch};
+    use speech::features::pipeline::{
+        FeatureConfig, SpectralParams, assemble_from_periodogram, build_input_sequence_parts,
+    };
+
+    let m = pitch_map();
+    let c = FeatureConfig::from_legacy(&m, "BLSTM").unwrap();
+    let mut audio = excerpt_audio();
+    let rate = audio.sample_rate as f64;
+    // preemph SKIPPED (ratio < 0), noise SKIPPED -- but the driver would apply them if
+    // enabled; the pitch config keeps them off, so `audio` is raw (matches the harness).
+    let s = SpectralParams::derive(&c, rate);
+    let tdc = s.tdc.as_ref().unwrap();
+
+    // Pass 1 pieces (chan 0): the input seq, the raw periodogram, the pass-1 LTSV.
+    let (input1, perio, ltsv1) = build_input_sequence_parts(&audio, &c, &s, 0, None);
+    let want_in1 = common::load_bin_phase2b("spectral_pitch_inputseq_chan1.bin");
+    common::assert_oracle_eq(&input1, &want_in1, "pitch pass-1 inputseq");
+
+    // Pass-1 seg for get_pitch (== T7 real boundaries).
+    let bound = common::load_bin_phase2b("spectral_real_boundaries_chan1.bin");
+    let audio_duration = bound[[bound.nrows() - 1, 0]];
+    let mut pass1_seg = Segmentation::new(audio_duration);
+    pass1_seg.label_segment(bound[[0, 0]], bound[[1, 0]], SegClass::Speech);
+    let pitch = get_pitch(&audio, &pass1_seg, 0, tdc, rate, c.flag_dc_offset);
+
+    // Warp + rebuild with the OLD LTSV.
+    let warped = apply_homothety(&perio, pitch / 300.0);
+    let input2 = assemble_from_periodogram(&warped, &c, &s, rate, ltsv1.as_deref());
+    let want_in2 = common::load_bin_phase2b("spectral_pitch_inputseq_pass2_chan1.bin");
+    common::assert_oracle_eq(&input2, &want_in2, "pitch pass-2 inputseq (warped)");
+
+    // Non-vacuity: the warp changed the inputseq.
+    assert_ne!(
+        input1, input2,
+        "the warped pass-2 inputseq must DIFFER from pass-1 (the warp is non-vacuous)"
+    );
+    let _ = &mut audio;
+}
+
+/// Pass-2 VRCTS bytes: `to_vrcts_string` on the pass-2-driven Segmentation must byte-
+/// match the real `toFile_VRCTS` dump (the 0b-ii equivalence, now on the pass-2 path).
+#[test]
+fn pitch_vrcts_bytes_match_dump() {
+    let dump =
+        std::fs::read_to_string(common::fixture_phase2b("spectral_pitch_vrcts_chan1.xml")).unwrap();
+    let (name, path_attr) = parse_audiodoc_attrs(&dump);
+
+    let mut sig = build_pitch();
+    let mut audio = excerpt_audio_zero_offset();
+    let mut segs = fresh_segs(&audio);
+    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    let got = to_vrcts_string(&segs[0], &name, &path_attr);
+    assert_eq!(
+        got, dump,
+        "pitch: to_vrcts_string must byte-match the real toFile_VRCTS (pass-2 seg)"
+    );
+}
+
+/// GATE-OFF regression: a TDCwindow-0 config (the T7 real variant) must NOT fire the
+/// pitch pass -- `last_result_rows_pass2` stays empty and the boundaries stay pass-1
+/// (== the T7 real dump). This confirms the gate short-circuits and the pitch pass adds
+/// zero behavior when TDCwindow is 0 (the full T7 golden suite is the broader regression;
+/// this test pins the gate observably).
+#[test]
+fn pitch_gate_off_when_tdcwindow_zero() {
+    let mut sig = build("real"); // TDCwindow 0 -> s.tdc is None -> gate off.
+    let mut audio = excerpt_audio();
+    let mut segs = fresh_segs(&audio);
+    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    assert!(
+        sig.last_result_rows_pass2().is_empty(),
+        "TDCwindow 0 -> the pitch pass must NOT fire (no pass-2 rows)"
+    );
+    // Boundaries stay pass-1 (== the T7 real golden, byte-unchanged).
+    assert_boundaries_match(
+        &segs,
+        0,
+        "spectral_real_boundaries_chan1.bin",
+        "gate-off boundaries == T7 real (pass-1)",
     );
 }
