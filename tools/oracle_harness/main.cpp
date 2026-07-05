@@ -951,6 +951,24 @@ int main(int argc, char** argv) {
     if (!out.empty() && out.back() != '/') out += '/';
     std::string wav = out + "excerpt_2ch_8k.wav";
 
+    // Fixture-hygiene fix (Phase 2b Task 5 review, Finding 3): committed VRCTS xml
+    // goldens embed `wav`'s directory (`out`, the extractor's throwaway
+    // tempfile.TemporaryDirectory()) in the `path=` attribute, which churns on every
+    // regeneration since `out` is a fresh random path each run. `path=`/`name=` are
+    // OPAQUE CALLER INPUTS to the real `Segmentation::toFile_VRCTS` (T4 review), so
+    // swapping in a FIXED literal path weakens nothing. `sf_open` (AudioStruct's
+    // ctor) still needs a real, readable file at that path, so the excerpt wav is
+    // copied there once per harness run (idempotent, deterministic bytes) and a
+    // dedicated CorpusItem/AudioStruct pair reads from the stable path instead of
+    // `wav`/`item` for VRCTS-dumping blocks only -- every other dump keeps using the
+    // real `wav`/`item` untouched.
+    std::string vrctsWav = "/tmp/speech_oracle_harness_vrcts_fixture_audio.wav";
+    {
+        std::ifstream src(wav, std::ios::binary);
+        std::ofstream dst(vrctsWav, std::ios::binary | std::ios::trunc);
+        dst << src.rdbuf();
+    }
+
     // Phase 2 Task 1: real-net config + weights paths. Supplied as argv[2]/argv[3]
     // (absolute, from the extractor) so they resolve regardless of the runtime cwd;
     // the repo-relative fallbacks assume the harness is run from tools/oracle_harness.
@@ -978,6 +996,11 @@ int main(int argc, char** argv) {
     std::string ltsvTinyConfigPath = (argc > 7)
         ? std::string(argv[7])
         : std::string("../../tests/reference_data/phase2b/ltsv_tiny.config");
+    // Phase 2b Task 5 review, Finding 1: power-scale (is_log_mel=false) LTSV variant
+    // -- see the LtsvProbe powermel block below for why this is needed.
+    std::string ltsvPowermelConfigPath = (argc > 8)
+        ? std::string(argv[8])
+        : std::string("../../tests/reference_data/phase2b/ltsv_powermel.config");
 
     int dumps = 0;
 
@@ -987,6 +1010,9 @@ int main(int argc, char** argv) {
     // (2*RMS + max)/2 normalization).
     CorpusItem item(wav, "", "RUS", "RU", 0, 0, 1.0);
     AudioStruct audio(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+    // Stable-path CorpusItem for VRCTS dumps only (Finding 3) -- same wav bytes, a
+    // FIXED path so the `path=` attribute in committed VRCTS xml no longer churns.
+    CorpusItem itemVrcts(vrctsWav, "", "RUS", "RU", 0, 0, 1.0);
     Matrix2BinaryFile(out + "sig_norm.bin", audio._DataRaw);
     ++dumps;
 
@@ -4187,9 +4213,11 @@ int main(int argc, char** argv) {
         // OFFSET_SEC=0.35, which would bake a `+0.35` into every stime/etime/sigdur
         // that the Rust side cannot reproduce. A dedicated zero-offset AudioStruct
         // on the SAME wav sidesteps the gap entirely (2-channel -> filenames get a
-        // _chan_N suffix; only chan 1 is dumped per the brief).
+        // _chan_N suffix; only chan 1 is dumped per the brief). Uses `itemVrcts`
+        // (stable-path CorpusItem, Finding 3) so the dumped `path=` attribute no
+        // longer churns across regenerations.
         {
-            AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, item);
+            AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, itemVrcts);
             ConfigFile confTdcV(tdcConfigPath, '_');
             TdcProbe probeV(confTdcV);
             Segmentation segV(audioZeroOff, 0.5);
@@ -4405,9 +4433,10 @@ int main(int argc, char** argv) {
 
         // VRCTS bytes: REAL toFile_VRCTS, on a zero-offset AudioStruct (same
         // rationale as tdc_vrcts_chan1.xml -- the Rust Segmentation container has no
-        // _AudioOffset field).
+        // _AudioOffset field). Uses `itemVrcts` (stable-path CorpusItem, Finding 3)
+        // so the dumped `path=` attribute no longer churns across regenerations.
         {
-            AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, item);
+            AudioStruct audioZeroOff(0.0, MAX_DUR_SEC, 0, itemVrcts);
             ConfigFile confLtsvV(ltsvConfigPath, '_');
             LtsvProbe probeV(confLtsvV);
             Segmentation segV(audioZeroOff, 0.5);
@@ -4622,6 +4651,154 @@ int main(int argc, char** argv) {
         }
         Matrix2BinaryFile(out + "ltsv_tiny_boundaries_chan1.bin", boundariesTiny);
         ++dumps;
+    }
+
+    // --- Phase 2b Task 5 review, Finding 1: power-scale (is_log_mel=false) variant,
+    // NON-VACUOUS decision-layer coverage --------------------------------------
+    // ltsv.config (is_log_mel=true) drives ltsv_classify_sequence's score to
+    // ~1e51 (see the IMPROVEMENTS.md log-mel-blowup entry): every column sits far
+    // above _DecisionThreshRising (0.6), so update_segmentation/smooth_segmentation
+    // never see a threshold crossing and the golden collapses to one
+    // always-SPEECH span -- vacuous for the hysteresis/smoothing/suppression/
+    // padding logic. ltsv_powermel.config is identical to ltsv.config except
+    // is_log_mel=false (the power-scale periodogram the LTSV formula's 1e-12 mean
+    // floor actually assumes) and smaller (but still nonzero) speech_padding/
+    // min_speech/min_silence (0.05/0.1/0.1 vs 0.1/0.2/0.2) -- config keys only, no
+    // code changes. Under this config the REAL compiled getSegmentation produces
+    // genuine threshold crossings on channel 1: two SPEECH spans separated by an
+    // OTHER gap survive smoothing (padding shrinks the ~0.56s gap to ~0.16s, which
+    // is <= min_silence but NOT merged away because the tuned min_silence no longer
+    // exceeds it) -- SPEECH, OTHER, SPEECH, END. Channel 2 stays a single
+    // always-SPEECH span (its own periodogram content never drops below
+    // _DecisionThreshFalling long enough to accrue an ending area) -- both channels
+    // are dumped so the Rust golden can assert channel 1's non-vacuous structure
+    // directly and channel 2's differing (still-trivial) outcome honestly, rather
+    // than cherry-picking only the channel that crosses.
+    // Same GEMM-free strength oracle as the primary block (nb_DCT=0): the REAL
+    // compiled getSegmentation is the bit-golden AS-IS. Dumps the same standard set
+    // as the primary block (result/convolved/boundaries rows, both channels),
+    // reusing the IDENTICAL independent-replication recipe (periodogram/mel/
+    // classifySequence chain via the REAL public classifySequence) verbatim.
+    {
+        ConfigFile confLtsvPowermel(ltsvPowermelConfigPath, '_');
+        AudioStruct audioLtsvPowermel(OFFSET_SEC, MAX_DUR_SEC, 0, item);
+
+        LtsvProbe probePowermel(confLtsvPowermel);
+        Segmentation segPowermel(audioLtsvPowermel, 0.5);
+        probePowermel.getSegmentation(audioLtsvPowermel, segPowermel);
+        segPowermel.compute_errors();
+
+        const long ratePowermel = audioLtsvPowermel.getFrameRate();
+        const long long frameCountPowermel = audioLtsvPowermel.getFrameCount();
+
+        long spectrumOrderPm = probePowermel._SpectrumOrder;
+        if (spectrumOrderPm > 19) spectrumOrderPm = 19;
+        std::vector<double>::size_type windowSizePm = 1 << spectrumOrderPm;
+        std::vector<double>::size_type fullSignalWindowSizePm = windowSizePm + 1;
+        std::vector<double>::size_type periodogramLengthPm = (1 << (spectrumOrderPm - 1)) + 1;
+        long spectrumShiftPm = (long) boost::math::round(probePowermel._SpectrumShift * ratePowermel);
+
+        Eigen::MatrixXd windowingCoeffPm = getWindowingCoefficients(
+            probePowermel._WindowingType, false, fullSignalWindowSizePm, probePowermel._WindowingParam);
+
+        std::vector<double>::size_type freqBegPm = 0;
+        std::vector<double>::size_type freqEndPm = periodogramLengthPm - 1;
+        double freqStepPm = ((double) ratePowermel) / 2 / freqEndPm;
+        std::vector<double>::size_type tmpPm = (std::vector<double>::size_type) floor(probePowermel._MinFreq / freqStepPm);
+        if (freqBegPm < tmpPm) freqBegPm = tmpPm;
+        tmpPm = (std::vector<double>::size_type) ceil(probePowermel._MaxFreq / freqStepPm);
+        if (freqEndPm > tmpPm) freqEndPm = tmpPm;
+        if (freqBegPm > freqEndPm) freqBegPm = freqEndPm;
+
+        MelFilterBank melFiltersPm;
+        if (probePowermel._NbBins > 0) {
+            melFiltersPm = MelFilterBank(probePowermel._MinMelFreq, probePowermel._MaxMelFreq, probePowermel._NbBins,
+                                          freqBegPm * freqStepPm, freqEndPm * freqStepPm, ratePowermel,
+                                          periodogramLengthPm - 1, probePowermel._IsLog, probePowermel._NbDCT,
+                                          probePowermel._IgnoreFirstDCT, probePowermel._ComputeDeltasNb,
+                                          probePowermel._ComputeDeltaDeltasNb);
+            periodogramLengthPm = melFiltersPm.getNbFilters();
+            freqBegPm = 0;
+            freqEndPm = periodogramLengthPm - 1;
+        }
+
+        Eigen::MatrixXd temporalConvCoeffPm = getWindowingCoefficients(
+            probePowermel._TemporalConvolutionType, true, 2 * probePowermel._TemporalConvolutionSize + 1);
+
+        std::vector<double>::size_type ltsvWindowSizePm = (std::vector<double>::size_type) boost::math::round(
+            probePowermel._WindowSize * ratePowermel / 2.0 / spectrumShiftPm);
+        if (ltsvWindowSizePm < 1) ltsvWindowSizePm = 1;
+        long ltsvWindowShiftPm =
+            (long) boost::math::round(probePowermel._WindowShift * ratePowermel / spectrumShiftPm);
+
+        long long beginFramePm = 0;
+        long long endFramePm = frameCountPowermel;
+        std::vector<double>::size_type vecSizePm = (std::vector<double>::size_type) (endFramePm - beginFramePm + 1);
+        if ((std::vector<double>::size_type) (vecSizePm / spectrumShiftPm) * spectrumShiftPm == vecSizePm) {
+            vecSizePm = (std::vector<double>::size_type) (vecSizePm / spectrumShiftPm);
+        } else {
+            vecSizePm = (std::vector<double>::size_type) (vecSizePm / spectrumShiftPm + 1);
+        }
+        std::vector<double>::size_type realVecSizePm = vecSizePm;
+        if ((std::vector<double>::size_type) (realVecSizePm / ltsvWindowShiftPm) * ltsvWindowShiftPm == realVecSizePm) {
+            realVecSizePm = (std::vector<double>::size_type) (realVecSizePm / ltsvWindowShiftPm);
+        } else {
+            realVecSizePm = (std::vector<double>::size_type) (realVecSizePm / ltsvWindowShiftPm + 1);
+        }
+
+        Loki::Factory<AbstractFFT<double>,unsigned int> gfftFactoryPm;
+        FactoryInit<GFFTList<GFFT,1,20>::Result>::apply(gfftFactoryPm);
+
+        for (int chan = 0; chan < audioLtsvPowermel.getChannelCount(); ++chan) {
+            audioLtsvPowermel.computeSegmentPeriodogramEstimates(
+                spectrumOrderPm, spectrumShiftPm, chan, probePowermel._FlagDCOffset, windowingCoeffPm, melFiltersPm,
+                gfftFactoryPm, temporalConvCoeffPm, beginFramePm, endFramePm);
+            const Eigen::MatrixXd& periodogramSrcPm =
+                melFiltersPm.notEmpty() ? audioLtsvPowermel._FilterBankedPeriodogram : audioLtsvPowermel._Periodogram;
+
+            Eigen::MatrixXd resultVecPm = Eigen::MatrixXd::Zero(1, realVecSizePm);
+            for (std::vector<double>::size_type jj = 0; jj < vecSizePm; jj += ltsvWindowShiftPm) {
+                resultVecPm(0, jj / ltsvWindowShiftPm) = probePowermel.classifySequence(
+                    jj, freqBegPm, freqEndPm, ltsvWindowSizePm, periodogramLengthPm, vecSizePm, periodogramSrcPm);
+            }
+            std::ostringstream bufResultPm;
+            bufResultPm << "ltsv_powermel_result_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufResultPm.str(), resultVecPm);
+            ++dumps;
+        }
+
+        for (int chan = 0; chan < audioLtsvPowermel.getChannelCount(); ++chan) {
+            std::ostringstream bufResultPm;
+            bufResultPm << "ltsv_powermel_result_chan" << chan + 1 << ".bin";
+            Eigen::MatrixXd resultVecPm;
+            {
+                long long r, c;
+                std::ifstream f(out + bufResultPm.str(), std::ios::binary);
+                f.read((char*) &r, sizeof(long long));
+                f.read((char*) &c, sizeof(long long));
+                resultVecPm.resize(r, c);
+                f.read((char*) resultVecPm.data(), sizeof(double) * r * c);
+            }
+            Eigen::MatrixXd targetSeqPm = Eigen::MatrixXd::Zero(resultVecPm.cols(), 1);
+            Segmentation segConvPm(audioLtsvPowermel, 0.5);
+            probePowermel.results2segmentation(segConvPm, probePowermel._WindowShift, 0.0, resultVecPm, targetSeqPm,
+                                                chan, SPEECH);
+            std::ostringstream bufConvPm;
+            bufConvPm << "ltsv_powermel_convolved_chan" << chan + 1 << ".bin";
+            Matrix2BinaryFile(out + bufConvPm.str(), resultVecPm);
+            ++dumps;
+
+            std::ostringstream bufBoundPm;
+            bufBoundPm << "ltsv_powermel_boundaries_chan" << chan + 1 << ".bin";
+            const auto& segsPm = segConvPm._Classification.at(chan);
+            Eigen::MatrixXd boundariesPm((long) segsPm.size(), 2);
+            for (std::vector<double>::size_type ii = 0; ii < segsPm.size(); ++ii) {
+                boundariesPm((long) ii, 0) = segsPm[ii]._BeginTime;
+                boundariesPm((long) ii, 1) = (double) segsPm[ii]._Type;
+            }
+            Matrix2BinaryFile(out + bufBoundPm.str(), boundariesPm);
+            ++dumps;
+        }
     }
 
     // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------

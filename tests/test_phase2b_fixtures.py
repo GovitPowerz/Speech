@@ -116,7 +116,8 @@ def test_tdc_segmenter_dumps_present_with_expected_shapes() -> None:
 
 
 def test_ltsv_segmenter_dumps_present_with_expected_shapes() -> None:
-    """Task 5: LtsvSegmenter (Algo 2) -- primary + DCT-secondary + tiny-window."""
+    """Task 5: LtsvSegmenter (Algo 2) -- primary + DCT-secondary + tiny-window +
+    power-scale (Task 5 review Finding 1: non-vacuous decision-layer golden)."""
     ltsv = _manifest()["ltsv_segmenter"]
     expected_shapes = ltsv["expected_shapes"]
     assert expected_shapes == {
@@ -134,6 +135,12 @@ def test_ltsv_segmenter_dumps_present_with_expected_shapes() -> None:
         "ltsv_dct_convolved_chan2.bin": [1, 51],
         "ltsv_dct_boundaries_chan1.bin": [2, 2],
         "ltsv_tiny_boundaries_chan1.bin": [2, 2],
+        "ltsv_powermel_result_chan1.bin": [1, 51],
+        "ltsv_powermel_result_chan2.bin": [1, 51],
+        "ltsv_powermel_convolved_chan1.bin": [1, 51],
+        "ltsv_powermel_convolved_chan2.bin": [1, 51],
+        "ltsv_powermel_boundaries_chan1.bin": [4, 2],
+        "ltsv_powermel_boundaries_chan2.bin": [2, 2],
     }
     for name, (rows, cols) in expected_shapes.items():
         path = REF / name

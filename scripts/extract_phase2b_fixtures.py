@@ -51,6 +51,7 @@ TDC_CONFIG = PHASE2B_DIR / "tdc.config"
 LTSV_CONFIG = PHASE2B_DIR / "ltsv.config"
 LTSV_DCT_CONFIG = PHASE2B_DIR / "ltsv_dct.config"
 LTSV_TINY_CONFIG = PHASE2B_DIR / "ltsv_tiny.config"
+LTSV_POWERMEL_CONFIG = PHASE2B_DIR / "ltsv_powermel.config"
 
 # Input fixtures the harness reads from its output dir (same as Phase 1/2).
 HARNESS_INPUTS = [
@@ -112,8 +113,12 @@ TDC_EXTRA_FILES = ["tdc_vrcts_chan1.xml"]
 # Task 5: LtsvSegmenter (Algo 2) dumps -- the REAL LongTermSpectralVariation::
 # getSegmentation run on the excerpt under ltsv.config (primary, nb_DCT=0, GEMM-free
 # so the real getSegmentation is the bit-golden), ltsv_dct.config (secondary,
-# nb_DCT=4, applyDCT swapped for the ascending-loop applyDCTLoop), and
-# ltsv_tiny.config (LTSVwindow 0.001, exercises the floor-to-1 quirk).
+# nb_DCT=4, applyDCT swapped for the ascending-loop applyDCTLoop), ltsv_tiny.config
+# (LTSVwindow 0.001, exercises the floor-to-1 quirk), and ltsv_powermel.config
+# (Task 5 review Finding 1: is_log_mel=false + tuned padding/min_speech/min_silence,
+# the NON-VACUOUS decision-layer golden -- see the harness's own comment block and
+# the IMPROVEMENTS.md log-mel-blowup entry for why the other three configs never
+# exercise a real hysteresis/smoothing crossing).
 LTSV_EXPECTED_SHAPES = {
     "ltsv_result_chan1.bin": (1, 51),
     "ltsv_result_chan2.bin": (1, 51),
@@ -129,9 +134,15 @@ LTSV_EXPECTED_SHAPES = {
     "ltsv_dct_convolved_chan2.bin": (1, 51),
     "ltsv_dct_boundaries_chan1.bin": (2, 2),
     "ltsv_tiny_boundaries_chan1.bin": (2, 2),
+    "ltsv_powermel_result_chan1.bin": (1, 51),
+    "ltsv_powermel_result_chan2.bin": (1, 51),
+    "ltsv_powermel_convolved_chan1.bin": (1, 51),
+    "ltsv_powermel_convolved_chan2.bin": (1, 51),
+    "ltsv_powermel_boundaries_chan1.bin": (4, 2),
+    "ltsv_powermel_boundaries_chan2.bin": (2, 2),
 }
 LTSV_EXTRA_FILES = ["ltsv_vrcts_chan1.xml"]
-LTSV_CONFIG_FILES = ["ltsv.config", "ltsv_dct.config", "ltsv_tiny.config"]
+LTSV_CONFIG_FILES = ["ltsv.config", "ltsv_dct.config", "ltsv_tiny.config", "ltsv_powermel.config"]
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
@@ -220,6 +231,7 @@ def main() -> None:
                 str(LTSV_CONFIG),
                 str(LTSV_DCT_CONFIG),
                 str(LTSV_TINY_CONFIG),
+                str(LTSV_POWERMEL_CONFIG),
             ]
         )
         # Task 2 (SegProbe results2segmentation dumps): persist these into the
@@ -466,7 +478,30 @@ def main() -> None:
                 "pinning the _WindowShift/_SpectrumShift quantization lifecycle (both "
                 "are round(x*rate/N)*N/rate re-quantizations of an already-quantized "
                 "value -- idempotent, same determinism-not-statefulness scope as the "
-                "TDC two-files golden)."
+                "TDC two-files golden). "
+                "POWER-SCALE variant (ltsv_powermel.config, Task 5 review Finding 1): "
+                "the PRIMARY/SECONDARY/TINY configs above all share is_log_mel=true, "
+                "which drives ltsv_classify_sequence's score to ~1e51 (see the "
+                "IMPROVEMENTS.md log-mel-blowup entry) -- every column sits far above "
+                "_DecisionThreshRising (0.6), so update_segmentation/smooth_segmentation "
+                "never see a real threshold crossing and all three goldens collapse to "
+                "one always-SPEECH span: VACUOUS for the decision layer (hysteresis, "
+                "area gates, suppression, padding are never exercised). "
+                "ltsv_powermel.config is byte-identical to ltsv.config except "
+                "is_log_mel=false (restores the power-scale periodogram the LTSV "
+                "formula's 1e-12 mean floor assumes) and smaller-but-still-nonzero "
+                "speech_padding/min_speech/min_silence (0.05/0.1/0.1 vs 0.1/0.2/0.2 -- "
+                "config keys only, tuned so a genuine ~0.56s silence gap between two "
+                "real threshold crossings survives smoothing instead of being padded "
+                "shut). Under this config the REAL compiled getSegmentation produces, "
+                "on channel 1, the non-vacuous structure SPEECH[0,0.9892)/OTHER["
+                "0.9892,1.3472)/SPEECH[1.3472,2.0) -- two genuine rising/falling "
+                "hysteresis crossings with the smoothing pipeline (sanitize, "
+                "suppress_short x3 per side, add_padding x2) actively shaping the "
+                "final boundaries, not a no-op. Channel 2 stays a single always-SPEECH "
+                "span under the SAME config (its own periodogram content never drops "
+                "far enough below _DecisionThreshFalling to accrue a qualifying ending "
+                "area) -- dumped honestly alongside channel 1 rather than omitted."
             ),
             "constants": {
                 "rate": 8000,
@@ -480,6 +515,8 @@ def main() -> None:
                 "real_vec_size": 51,
                 "ltsv_tiny_window_half_frames": 1,
                 "reference_spans_sec": [[0.4, 0.9], [1.2, 1.6]],
+                "powermel_chan1_boundaries_sec": [[0.0, "SPEECH"], [0.9892, "OTHER"], [1.3472, "SPEECH"], [2.0, "END"]],
+                "powermel_chan2_boundaries_sec": [[0.0, "SPEECH"], [2.0, "END"]],
             },
             "expected_shapes": {k: list(v) for k, v in LTSV_EXPECTED_SHAPES.items()},
             "extra_files": LTSV_EXTRA_FILES,

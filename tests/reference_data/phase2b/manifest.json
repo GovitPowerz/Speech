@@ -124,7 +124,7 @@
     ]
   },
   "ltsv_segmenter": {
-    "text": "Phase 2b Task 5: LtsvSegmenter (Algo 2). PRIMARY config (ltsv.config, nb_DCT=0): LongTermSpectralVariation::getSegmentation (LongTermSpectralVariation.cpp:130-407) calls applyFilterBank only (no DCT -> no Eigen GEMM), so the REAL compiled getSegmentation is the bit-golden AS-IS, same strength oracle as TdcSegmenter. LtsvProbe (harness-local, derives LongTermSpectralVariation) exposes the protected fields needed to independently replicate the pre-convolution decimated result_vec (a getSegmentation-local, not otherwise observable) via the REAL public classifySequence -- same pattern as TdcProbe. ltsv.config: spectrum_order=8 (window_size=256, periodogram_length=129), spectrum_shift=0.01s (80 frames), nb_bins=26 mel filters (is_log_mel=true), nb_DCT=0, LTSVwindow=0.3s -> half-window 15 periodogram frames, LTSVshift=0.04s -> shift 4 periodogram frames. The driver's own periodogram span uses begin_frame=0/end_frame= audio.getFrameCount() (LongTermSpectralVariation.cpp:293-294) -- ONE MORE than build_input_sequence's end=ncols()-1 call, the frameCount+1 vec_size quirk (spec S4.2): periodogram vec_size = ceil((frameCount+1)/spectrum_shift) = 201 rows, then real_vec_size = ceil(201/4) = 51 result columns. SECONDARY config (ltsv_dct.config, nb_DCT=4): applyDCT's Eigen GEMM diverges from the ascending-loop port at this shape (same family the Phase 1 GEMM_CHECK pre-check flagged), so this variant runs getSegmentation's body as an in-process reimplementation with ONLY the applyDCT call swapped for applyDCTLoop (T7's ascending- loop port, already defined for the Phase 1 DCT golden) -- periodogram, mel filterbank, LTSV classifySequence, and results2segmentation all stay the REAL compiled machinery, called through the same LtsvProbe surface. ltsv_tiny.config (LTSVwindow=0.001s): round(0.001*8000/2/80) == 0, floored to 1 (LongTermSpectralVariation.cpp:257-258) -- the LTSV-standalone floor-to-1 quirk, which DIFFERS from the BLSTM spectral segmenter's floor-to-0-disables (BLSTMSpectralSegmenter.cpp), ported as written. ltsv_vrcts_chan1.xml is the REAL toFile_VRCTS output on a SEPARATE zero-offset AudioStruct (same rationale as tdc_vrcts_chan1.xml). ltsv_scores.bin is compute_errors() against the same programmatic two-span reference recipe as TdcSegmenter. ltsv_boundaries_file2_chan1.bin is the TWO-FILES golden: the SAME LtsvProbe instance runs getSegmentation a second time on the excerpt, pinning the _WindowShift/_SpectrumShift quantization lifecycle (both are round(x*rate/N)*N/rate re-quantizations of an already-quantized value -- idempotent, same determinism-not-statefulness scope as the TDC two-files golden).",
+    "text": "Phase 2b Task 5: LtsvSegmenter (Algo 2). PRIMARY config (ltsv.config, nb_DCT=0): LongTermSpectralVariation::getSegmentation (LongTermSpectralVariation.cpp:130-407) calls applyFilterBank only (no DCT -> no Eigen GEMM), so the REAL compiled getSegmentation is the bit-golden AS-IS, same strength oracle as TdcSegmenter. LtsvProbe (harness-local, derives LongTermSpectralVariation) exposes the protected fields needed to independently replicate the pre-convolution decimated result_vec (a getSegmentation-local, not otherwise observable) via the REAL public classifySequence -- same pattern as TdcProbe. ltsv.config: spectrum_order=8 (window_size=256, periodogram_length=129), spectrum_shift=0.01s (80 frames), nb_bins=26 mel filters (is_log_mel=true), nb_DCT=0, LTSVwindow=0.3s -> half-window 15 periodogram frames, LTSVshift=0.04s -> shift 4 periodogram frames. The driver's own periodogram span uses begin_frame=0/end_frame= audio.getFrameCount() (LongTermSpectralVariation.cpp:293-294) -- ONE MORE than build_input_sequence's end=ncols()-1 call, the frameCount+1 vec_size quirk (spec S4.2): periodogram vec_size = ceil((frameCount+1)/spectrum_shift) = 201 rows, then real_vec_size = ceil(201/4) = 51 result columns. SECONDARY config (ltsv_dct.config, nb_DCT=4): applyDCT's Eigen GEMM diverges from the ascending-loop port at this shape (same family the Phase 1 GEMM_CHECK pre-check flagged), so this variant runs getSegmentation's body as an in-process reimplementation with ONLY the applyDCT call swapped for applyDCTLoop (T7's ascending- loop port, already defined for the Phase 1 DCT golden) -- periodogram, mel filterbank, LTSV classifySequence, and results2segmentation all stay the REAL compiled machinery, called through the same LtsvProbe surface. ltsv_tiny.config (LTSVwindow=0.001s): round(0.001*8000/2/80) == 0, floored to 1 (LongTermSpectralVariation.cpp:257-258) -- the LTSV-standalone floor-to-1 quirk, which DIFFERS from the BLSTM spectral segmenter's floor-to-0-disables (BLSTMSpectralSegmenter.cpp), ported as written. ltsv_vrcts_chan1.xml is the REAL toFile_VRCTS output on a SEPARATE zero-offset AudioStruct (same rationale as tdc_vrcts_chan1.xml). ltsv_scores.bin is compute_errors() against the same programmatic two-span reference recipe as TdcSegmenter. ltsv_boundaries_file2_chan1.bin is the TWO-FILES golden: the SAME LtsvProbe instance runs getSegmentation a second time on the excerpt, pinning the _WindowShift/_SpectrumShift quantization lifecycle (both are round(x*rate/N)*N/rate re-quantizations of an already-quantized value -- idempotent, same determinism-not-statefulness scope as the TDC two-files golden). POWER-SCALE variant (ltsv_powermel.config, Task 5 review Finding 1): the PRIMARY/SECONDARY/TINY configs above all share is_log_mel=true, which drives ltsv_classify_sequence's score to ~1e51 (see the IMPROVEMENTS.md log-mel-blowup entry) -- every column sits far above _DecisionThreshRising (0.6), so update_segmentation/smooth_segmentation never see a real threshold crossing and all three goldens collapse to one always-SPEECH span: VACUOUS for the decision layer (hysteresis, area gates, suppression, padding are never exercised). ltsv_powermel.config is byte-identical to ltsv.config except is_log_mel=false (restores the power-scale periodogram the LTSV formula's 1e-12 mean floor assumes) and smaller-but-still-nonzero speech_padding/min_speech/min_silence (0.05/0.1/0.1 vs 0.1/0.2/0.2 -- config keys only, tuned so a genuine ~0.56s silence gap between two real threshold crossings survives smoothing instead of being padded shut). Under this config the REAL compiled getSegmentation produces, on channel 1, the non-vacuous structure SPEECH[0,0.9892)/OTHER[0.9892,1.3472)/SPEECH[1.3472,2.0) -- two genuine rising/falling hysteresis crossings with the smoothing pipeline (sanitize, suppress_short x3 per side, add_padding x2) actively shaping the final boundaries, not a no-op. Channel 2 stays a single always-SPEECH span under the SAME config (its own periodogram content never drops far enough below _DecisionThreshFalling to accrue a qualifying ending area) -- dumped honestly alongside channel 1 rather than omitted.",
     "constants": {
       "rate": 8000,
       "spectrum_order": 8,
@@ -144,6 +144,34 @@
         [
           1.2,
           1.6
+        ]
+      ],
+      "powermel_chan1_boundaries_sec": [
+        [
+          0.0,
+          "SPEECH"
+        ],
+        [
+          0.9892,
+          "OTHER"
+        ],
+        [
+          1.3472,
+          "SPEECH"
+        ],
+        [
+          2.0,
+          "END"
+        ]
+      ],
+      "powermel_chan2_boundaries_sec": [
+        [
+          0.0,
+          "SPEECH"
+        ],
+        [
+          2.0,
+          "END"
         ]
       ]
     },
@@ -203,6 +231,30 @@
       "ltsv_tiny_boundaries_chan1.bin": [
         2,
         2
+      ],
+      "ltsv_powermel_result_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_result_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_convolved_chan1.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_convolved_chan2.bin": [
+        1,
+        51
+      ],
+      "ltsv_powermel_boundaries_chan1.bin": [
+        4,
+        2
+      ],
+      "ltsv_powermel_boundaries_chan2.bin": [
+        2,
+        2
       ]
     },
     "extra_files": [
@@ -211,7 +263,8 @@
     "config_files": [
       "ltsv.config",
       "ltsv_dct.config",
-      "ltsv_tiny.config"
+      "ltsv_tiny.config",
+      "ltsv_powermel.config"
     ]
   }
 }

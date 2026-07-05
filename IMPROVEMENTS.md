@@ -751,6 +751,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   if `is_log_mel=true` is ever paired with LTSV in a production config, consider whether the
   legacy mean-floor should be `abs(mean) < 1e-12` or similarly signed-aware -- out of scope
   for this port (bit-exact reproduction, not correction).
+  **Test-coverage consequence (Task 5 review Finding 1):** this blowup makes the STANDARD
+  `ltsv.config` golden (and its `ltsv_dct.config`/`ltsv_tiny.config` siblings, which inherit
+  `is_log_mel=true`) an always-SPEECH single-span result on every channel -- every score sits
+  far above `_DecisionThreshRising` for the whole excerpt, so `update_segmentation`/
+  `smooth_segmentation` (hysteresis, area gates, `suppress_short`, `add_padding`) never see a
+  real threshold crossing. A green `phase2b_ltsv_golden` suite against those three configs
+  alone is BLIND to the entire segmentation decision layer -- "tests green" must not be
+  mistaken for "hysteresis/smoothing verified" on this driver. `tests/reference_data/phase2b/
+  ltsv_powermel.config` (`is_log_mel=false`, restoring the power-scale periodogram the LTSV
+  formula's mean floor assumes, plus smaller-but-nonzero `speech_padding`/`min_speech`/
+  `min_silence`) exists SPECIFICALLY to cover that gap: under it the REAL compiled
+  `getSegmentation` produces a genuine rising+falling crossing pair on channel 1
+  (`SPEECH[0,0.9892)/OTHER[0.9892,1.3472)/SPEECH[1.3472,2.0)`), exercised by
+  `powermel_chan1_boundaries_are_non_vacuous` in `src/rust/tests/phase2b_ltsv_golden.rs`.
 
 ## Toolchain deviations
 

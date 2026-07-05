@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<AudioDoc name="excerpt_2ch_8k" path="/var/folders/gv/4ctwylcn2bbdbkpp23xnnn7h0000gn/T/tmp2jp6f0hh/excerpt_2ch_8k.wav">
+<AudioDoc name="speech_oracle_harness_vrcts_fixture_audio" path="/tmp/speech_oracle_harness_vrcts_fixture_audio.wav">
 <ProcList>
 <Proc name="vrcts_part" version="1.3"/>
 </ProcList>

@@ -23,9 +23,22 @@
 //! substitution exactly.
 //!
 //! Goldens dumped by the harness `LtsvProbe` stage (`tools/oracle_harness/main.cpp`,
-//! Phase 2b Task 5 block) against `tests/reference_data/phase2b/ltsv{,_dct,_tiny}
-//! .config` on the shared 2-channel excerpt (`excerpt_2ch_8k.wav`, offset 0.35, dur
-//! 2.0, rate 8000).
+//! Phase 2b Task 5 block) against `tests/reference_data/phase2b/ltsv{,_dct,_tiny,
+//! _powermel}.config` on the shared 2-channel excerpt (`excerpt_2ch_8k.wav`, offset
+//! 0.35, dur 2.0, rate 8000).
+//!
+//! Task 5 REVIEW Finding 1 (non-vacuous decision-layer coverage): the PRIMARY/
+//! SECONDARY/TINY configs above all share `is_log_mel=true`, which drives
+//! `ltsv_classify_sequence`'s score to ~1e51 (see the IMPROVEMENTS.md log-mel-blowup
+//! entry) -- every column sits far above `_DecisionThreshRising` (0.6), so
+//! `update_segmentation`/`smooth_segmentation` never see a real threshold crossing
+//! and all three goldens above collapse to one always-SPEECH span: VACUOUS for the
+//! decision layer. `ltsv_powermel.config` (`is_log_mel=false` + smaller-but-nonzero
+//! `speech_padding`/`min_speech`/`min_silence`, config keys only) restores a
+//! power-scale periodogram and produces genuine hysteresis crossings + smoothing
+//! merges on channel 1: `SPEECH[0,0.9892)/OTHER[0.9892,1.3472)/SPEECH[1.3472,2.0)`.
+//! Channel 2 stays a single always-SPEECH span under the SAME config (dumped
+//! honestly, not omitted).
 
 mod common;
 
@@ -56,6 +69,10 @@ fn ltsv_dct_map() -> IndexMap<String, String> {
 
 fn ltsv_tiny_map() -> IndexMap<String, String> {
     speech::legacy_config::parse_legacy_config(&config_text("ltsv_tiny.config"))
+}
+
+fn ltsv_powermel_map() -> IndexMap<String, String> {
+    speech::legacy_config::parse_legacy_config(&config_text("ltsv_powermel.config"))
 }
 
 /// Fresh excerpt audio (offset 0.35, dur 2.0), UNMUTATED: `LtsvSegmenter::
@@ -476,6 +493,141 @@ fn ltsv_freq_band_variant_differs_from_blstm_variant() {
     // different final band.
     assert_ne!(blstm.freq_beg, ltsv_beg);
     assert_ne!(blstm.min_freq, ltsv_min);
+}
+
+// === POWER-SCALE variant (is_log_mel=false): NON-VACUOUS decision golden =====
+//
+// Task 5 review Finding 1. The three configs above all leave the decision layer
+// (hysteresis, area gates, suppress_short, add_padding) completely unexercised --
+// every one of their goldens is the trivial [(0.0, SPEECH), (2.0, END)] structure.
+// `ltsv_powermel.config` is `ltsv.config` with `is_log_mel=false` (restores a
+// power-scale periodogram) and smaller-but-nonzero `speech_padding`/`min_speech`/
+// `min_silence` (config keys only, no code changes): the REAL compiled
+// `getSegmentation` then produces genuine threshold crossings on channel 1.
+
+/// Non-vacuity gate: channel 1 must have >= 2 segments with BOTH a SPEECH and a
+/// non-SPEECH (OTHER) label present -- i.e. a real rising+falling hysteresis
+/// crossing survived `smooth_segmentation`, not just the trivial single-span
+/// structure the other three LTSV configs produce.
+#[test]
+fn powermel_chan1_boundaries_are_non_vacuous() {
+    let m = ltsv_powermel_map();
+    let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
+    let mut audio = excerpt_audio();
+    let mut segs = fresh_segs(&audio);
+    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    let got_segs = segs[0].segments();
+    assert!(
+        got_segs.len() >= 2,
+        "powermel chan1 must have >= 2 boundary entries (non-vacuous), got {}",
+        got_segs.len()
+    );
+    let has_speech = got_segs.iter().any(|s| s.ty == SegClass::Speech);
+    let has_non_speech = got_segs.iter().any(|s| s.ty != SegClass::Speech);
+    assert!(has_speech, "powermel chan1 must contain a SPEECH segment");
+    assert!(
+        has_non_speech,
+        "powermel chan1 must contain a non-SPEECH segment (the whole point of \
+         Finding 1: a real falling-threshold crossing, not always-speech)"
+    );
+
+    // Exact structural pin: SPEECH[0,0.9892)/OTHER[0.9892,1.3472)/SPEECH[1.3472,2.0).
+    let want = common::load_bin_phase2b("ltsv_powermel_boundaries_chan1.bin");
+    assert_eq!(
+        got_segs.len(),
+        want.nrows(),
+        "ltsv_powermel_boundaries_chan1.bin: boundary count mismatch"
+    );
+    for (i, s) in got_segs.iter().enumerate() {
+        let got = ndarray::Array2::from_shape_vec((1, 1), vec![s.begin]).unwrap();
+        let wantv = ndarray::Array2::from_shape_vec((1, 1), vec![want[[i, 0]]]).unwrap();
+        common::assert_oracle_eq(&got, &wantv, &format!("powermel chan1 boundary[{i}].begin"));
+        assert_eq!(
+            s.ty as i32,
+            want[[i, 1]] as i32,
+            "powermel chan1 boundary[{i}].type mismatch"
+        );
+    }
+}
+
+/// Channel 2 stays a single always-SPEECH span under the SAME `is_log_mel=false`
+/// config (its periodogram content never drops far enough below
+/// `_DecisionThreshFalling` to accrue a qualifying ending area) -- dumped and
+/// asserted honestly rather than cherry-picking only the channel that crosses.
+#[test]
+fn powermel_chan2_boundaries_match_dump() {
+    let m = ltsv_powermel_map();
+    let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
+    let mut audio = excerpt_audio();
+    let mut segs = fresh_segs(&audio);
+    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+
+    let want = common::load_bin_phase2b("ltsv_powermel_boundaries_chan2.bin");
+    let got_segs = segs[1].segments();
+    assert_eq!(got_segs.len(), want.nrows());
+    for (i, s) in got_segs.iter().enumerate() {
+        let got = ndarray::Array2::from_shape_vec((1, 1), vec![s.begin]).unwrap();
+        let wantv = ndarray::Array2::from_shape_vec((1, 1), vec![want[[i, 0]]]).unwrap();
+        common::assert_oracle_eq(&got, &wantv, &format!("powermel chan2 boundary[{i}].begin"));
+        assert_eq!(
+            s.ty as i32,
+            want[[i, 1]] as i32,
+            "powermel chan2 boundary[{i}].type mismatch"
+        );
+    }
+}
+
+/// Numeric cross-check of the powermel result/convolved rows against the harness's
+/// independent replication, same recipe as `convolved_rows_match_dump_primary`.
+#[test]
+fn powermel_convolved_rows_match_dump() {
+    use speech::tasks::segmenter::{DriverConfig, SegmenterConfig, results_to_segmentation};
+
+    let m = ltsv_powermel_map();
+    let driver_cfg = DriverConfig::from_config(&m, "LTSV").unwrap();
+    let seg_cfg = SegmenterConfig::from_config(&m, "LTSV").unwrap();
+
+    for (chan_idx, (pre_name, conv_name, bound_name)) in [
+        (
+            "ltsv_powermel_result_chan1.bin",
+            "ltsv_powermel_convolved_chan1.bin",
+            "ltsv_powermel_boundaries_chan1.bin",
+        ),
+        (
+            "ltsv_powermel_result_chan2.bin",
+            "ltsv_powermel_convolved_chan2.bin",
+            "ltsv_powermel_boundaries_chan2.bin",
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let pre = common::load_bin_phase2b(pre_name);
+        let mut results: Vec<f64> = pre.row(0).to_vec();
+
+        let bound_dump = common::load_bin_phase2b(bound_name);
+        let audio_duration = bound_dump[[bound_dump.nrows() - 1, 0]];
+        let mut seg = Segmentation::new(audio_duration);
+
+        results_to_segmentation(
+            &mut seg,
+            0.04,
+            0.0,
+            &mut results,
+            SegClass::Speech,
+            driver_cfg.conv_coeff.as_deref(),
+            &seg_cfg,
+        );
+
+        let want = common::load_bin_phase2b(conv_name);
+        let got = ndarray::Array2::from_shape_vec((1, results.len()), results).unwrap();
+        common::assert_oracle_eq(
+            &got,
+            &want,
+            &format!("powermel convolved chan{}", chan_idx + 1),
+        );
+    }
 }
 
 /// Minimal `FeatureConfig` for the crafted-case unit test above (order=8 ->
