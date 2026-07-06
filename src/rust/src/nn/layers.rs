@@ -44,6 +44,7 @@ pub(crate) fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
 /// - `peep_weight`: `12 x _OutputSize`.
 /// - `biases`: `1 x 4*_OutputSize` (row vector; stored as `Array2<f64>` for a
 ///   uniform (de)serialization loop with the other three blocks).
+#[derive(Clone)]
 pub struct LstmLayer {
     input_size: usize,
     output_size: usize,
@@ -813,6 +814,7 @@ fn drain_col_major(m: &Array2<f64>, out: &mut Vec<f64>) {
 ///   peepholes -- one plain projection matrix).
 /// - `biases`: `1 x _OutputSize` (row vector; stored as `Array2<f64>` for a
 ///   uniform (de)serialization loop with `weights`).
+#[derive(Clone)]
 pub struct NeuronLayer {
     input_size: usize,
     output_size: usize,

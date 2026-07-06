@@ -27,6 +27,7 @@ use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{
     FeatureConfig, SpectralParams, build_input_sequence_parts, derive_freq_band_ltsv_variant,
 };
+use crate::features::stats::InputStatistics;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
@@ -84,6 +85,7 @@ fn parse_string(m: &IndexMap<String, String>, key: &str) -> Result<String> {
 /// sequence run therefore sees the SECOND call read back the FIRST call's
 /// quantized value (idempotent once on a `1/rate` grid point, but not assumed:
 /// the two-files golden pins this explicitly).
+#[derive(Clone)]
 pub struct TdcSegmenter {
     driver_cfg: DriverConfig,
     seg_cfg: SegmenterConfig,
@@ -293,6 +295,7 @@ impl Segmenter for TdcSegmenter {
 /// The LTSV-standalone window floor is `< 1 -> 1` (`:257-258`), which DIFFERS from
 /// the BLSTM spectral segmenter's `< 1 -> 0` (disables LTSV) -- ported as written,
 /// see IMPROVEMENTS.md.
+#[derive(Clone)]
 pub struct LtsvSegmenter {
     driver_cfg: DriverConfig,
     seg_cfg: SegmenterConfig,
@@ -560,6 +563,7 @@ impl Segmenter for LtsvSegmenter {
 /// `(window == 0 || noOverlap)` (spectral's is unconditional); the overlap-branch
 /// `timeStep = window_shift_sec, timeOffset = 0.0` asymmetry; fresh `result_vec` per
 /// channel.
+#[derive(Clone)]
 pub struct BlstmSignalSegmenter {
     driver_cfg: DriverConfig,
     seg_cfg: SegmenterConfig,
@@ -676,6 +680,40 @@ impl BlstmSignalSegmenter {
     /// Per-channel `seg._NbOfClassif[chan] = nbOfClassif` (`:347`).
     pub fn nb_of_classif(&self) -> &[i64] {
         &self.nb_of_classif
+    }
+
+    /// `isBackPropActivated` (`BLSTMSignalSegmenter.cpp` delegate, mirroring
+    /// `BLSTMSpectralSegmenter.cpp:103-105`): forwards to the net's
+    /// `isBackPropagationActivated`.
+    pub fn is_back_prop_activated(&self) -> bool {
+        self.net.config().back_propagation_activated
+    }
+
+    /// `updateWeights` delegate (`:107-109`): hand the Nx2 gradient object + cost to
+    /// the net's long-lived iRPROP- trainer.
+    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
+        self.net.update_weights(derivs, cost);
+    }
+
+    /// `saveWeights` delegate (`:111-113`): the net writes the three artifacts.
+    pub fn save_weights(
+        &self,
+        filename: &str,
+        derivs: &Array2<f64>,
+        stats: &InputStatistics,
+    ) -> Result<()> {
+        self.net.save_weights(filename, derivs, stats)
+    }
+
+    /// `getInputStatistics` delegate (`:99-101`): the net's accumulated per-dim stats.
+    pub fn input_statistics(&self) -> &InputStatistics {
+        self.net.input_statistics()
+    }
+
+    /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators
+    /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
+    pub fn reset_weights_derivatives(&mut self) {
+        self.net.reset_weights_derivatives();
     }
 
     /// `Segmentation::compute_errors`, one call per channel (see
@@ -1017,6 +1055,7 @@ pub fn get_blstm_param(
 /// The re-seg is guarded on `pitch > 0` (`:791`). `last_result_rows` is NOT overwritten by
 /// the pitch pass -- it holds the PASS-1 result, matching the legacy dump quirk (`:848-850`
 /// dumps result_vec2 before the pitch pass rewrites result_vec).
+#[derive(Clone)]
 pub struct BlstmSpectralSegmenter {
     driver_cfg: DriverConfig,
     seg_cfg: SegmenterConfig,
@@ -1166,6 +1205,39 @@ impl BlstmSpectralSegmenter {
     pub fn force_non_wav_spectrum_shift(&mut self, rate: f64) {
         self.spectrum_shift_in_frames = 80;
         self.spectrum_shift_sec = 80.0 / rate;
+    }
+
+    /// `isBackPropActivated` (`BLSTMSpectralSegmenter.cpp:103-105`): forwards to the
+    /// net's `isBackPropagationActivated`.
+    pub fn is_back_prop_activated(&self) -> bool {
+        self.net.config().back_propagation_activated
+    }
+
+    /// `updateWeights` (`:107-109`): hand the Nx2 gradient object + cost to the net's
+    /// long-lived iRPROP- trainer.
+    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
+        self.net.update_weights(derivs, cost);
+    }
+
+    /// `saveWeights` (`:111-113`): the net writes the three artifacts.
+    pub fn save_weights(
+        &self,
+        filename: &str,
+        derivs: &Array2<f64>,
+        stats: &InputStatistics,
+    ) -> Result<()> {
+        self.net.save_weights(filename, derivs, stats)
+    }
+
+    /// `getInputStatistics` (`:99-101`): the net's accumulated per-dim stats.
+    pub fn input_statistics(&self) -> &InputStatistics {
+        self.net.input_statistics()
+    }
+
+    /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators
+    /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
+    pub fn reset_weights_derivatives(&mut self) {
+        self.net.reset_weights_derivatives();
     }
 
     /// `Segmentation::compute_errors`, one call per channel (see

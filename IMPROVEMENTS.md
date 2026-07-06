@@ -1330,6 +1330,33 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the load-bearing part. *Pinned by:* `iss_extract_matches_istringstream_oracle` (31-case table
   captured from compiled `istringstream >>` probes on the oracle env).
 
+- **[phase4a] `saveWeights` glues the `weights_`/`weightsDerivatives_` prefix to the WHOLE filename
+  string, not the basename** (`nn/blstm.rs::save_weights`, from `BLSTMNeuralNetwork.cpp:319-323`):
+  `buf << "weights_%s" << filename` (and `buf2 << "weightsDerivatives_%s"`) string-concatenates the
+  prefix before the ENTIRE path, so a `<filename>` of `/out/epoch995.mat` yields the sibling `.bin`
+  path `weights_/out/epoch995.mat` -- the prefix does NOT respect path separators. In production
+  `<filename>` is a bare basename (the engine runs in the output dir), so the siblings land next to
+  it; a full path would target a nonexistent `weights_<dir>/` parent. Reproduced verbatim (the port
+  concatenates identically). The `<filename>` itself typically ends in `.mat` even though the two
+  siblings are the custom `.bin` codec (i64 rows/cols + column-major f64), NOT MAT-files -- the
+  commented-out real `.mat` weight writes (`:324-325`) are dead. *Why deferred:* provenance; the
+  string-glue is load-bearing for any tooling that reads these siblings by the same rule. *Fix
+  candidate:* once the driver bag is ported, prepend the prefix to the basename only (or write to a
+  dedicated artifacts dir). *Pinned by:* `save_weights_writes_three_artifacts`
+  (`tests/phase4a_lifecycle.rs`): the sibling paths are computed by the same whole-string glue.
+
+- **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
+  the console warning** (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):
+  a `.bin` with FEWER elements than `getNbOfWeights()` is a hard `exit(1)` (ported as `Err`); with
+  MORE, the legacy prints `Warning: The number of gains given in %s is more than what's needed.` and
+  STILL calls `setWeights`, which consumes only the head and ignores the tail. The port reproduces
+  the truncation exactly (`set_weights` already tolerates an over-long slice) but does NOT emit the
+  console warning -- there is no logging seam here yet. *Why deferred:* the numeric behavior (load
+  the head, ignore the tail) is load-bearing and reproduced; the warning is a diagnostic side-effect
+  with no golden. *Fix candidate:* thread a log sink through the engine drivers and restore the
+  warning (or make the mismatch a hard error once configs are trusted). *Pinned by:*
+  `weights_file_too_many_truncates` + `weights_file_too_few_errors` (`tests/phase4a_lifecycle.rs`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
