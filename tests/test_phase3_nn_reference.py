@@ -308,17 +308,19 @@ def test_blstm_backward_matches_harness() -> None:
 
 def test_json_replay_closes_t1_seam() -> None:
     """Transitive-triangulation cross-check (this phase's contract, NOT a live
-    Rust cross-call): the Python oracle's Nx2 derivs on the SAME synthetic Task 1
-    case must equal the committed `expected_derivs_bits`, which are themselves the
-    harness-reimpl values the Rust `LstmLayer`/`NeuronLayer` unit/golden tests
-    assert against independently (src/rust/tests -- `bwd_lstm_derivs.bin`/
-    `bwd_dense_*_derivs.bin` consumed there via `cargo test`). Both legs replay the
-    SAME `backward_cases.json` fixture against the SAME harness goldens, so a match
-    here plus a green `cargo test` closes the seam transitively (harness-reimpl ==
-    Rust-layer, harness-reimpl == Python-oracle) -- equivalent in force to a
-    three-way agreement, but there is no in-process call from Python into the Rust
-    layers. A mismatch here, per the binding arbiter rule, is a phase-critical
-    finding, NOT a Python bug to silently patch around."""
+    Rust cross-call): the Python oracle's Nx2 derivs on the Task 1 JSON cases must
+    equal the committed `expected_derivs_bits`, which are byte-identical to the
+    harness-reimpl `.bin` dumps for those cases (verified at extraction). The Rust
+    leg does NOT read `backward_cases.json`; it independently reproduces the same
+    harness reimpl on the SHARED-operand fixtures it does consume via `cargo test`
+    (the Task 4 `lstm_bwd_*` variant family, `lstm_bwd_signal_derivs.bin`,
+    `bwd_dense_hidden_derivs.bin`, and the `bwd_dense_*_deltasout.bin` goldens).
+    So the closure is family-level: harness-reimpl == Python-oracle on the JSON
+    cases here, harness-reimpl == Rust-layer on the shared fixtures in cargo --
+    transitive through the single reimpl golden source, with no in-process call
+    from Python into the Rust layers. A mismatch here, per the binding arbiter
+    rule, is a phase-critical finding, NOT a Python bug to silently patch
+    around."""
     d = _load_backward_cases()
 
     for c in d["lstm_cases"]:
