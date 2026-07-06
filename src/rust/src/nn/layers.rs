@@ -5,7 +5,7 @@
 
 use ndarray::Array2;
 
-use super::activations::{gates_fn, identity_fn, logistic_fn, maxmin2_fn};
+use super::activations::{gates_fn, identity_fn, logistic_fn, maxmin2_deriv, maxmin2_fn};
 
 /// Ascending-loop matrix product `a (m x k) * b (k x n)`, accumulating the `k`
 /// index in strictly ascending order (`i`/`j` outer, `k` inner). This is the
@@ -382,6 +382,14 @@ pub struct NeuronLayer {
 
     weights: Array2<f64>,
     biases: Array2<f64>,
+
+    // Backward-pass deriv accumulators (`_WeightsDerivatives`/`_BiaisesDerivatives`,
+    // NeuronLayer.cpp:53-54) + frame count (`_NbOfSeqFedBackward`). Reset via
+    // `reset_weights_derivatives`, accumulated across `feed_backward` calls,
+    // harvested via `get_weights_derivatives`.
+    weights_derivatives: Array2<f64>,
+    biases_derivatives: Array2<f64>,
+    nb_of_seq_fed_backward: i64,
 }
 
 impl NeuronLayer {
@@ -394,6 +402,9 @@ impl NeuronLayer {
             output_size,
             weights: Array2::zeros((input_size, output_size)),
             biases: Array2::zeros((1, output_size)),
+            weights_derivatives: Array2::zeros((input_size, output_size)),
+            biases_derivatives: Array2::zeros((1, output_size)),
+            nb_of_seq_fed_backward: 0,
         }
     }
 
@@ -509,5 +520,123 @@ impl NeuronLayer {
                 }
             }
         }
+    }
+
+    /// `feedBackward` (`NeuronLayer.cpp:151-207`). Returns `deltas_out` (T x I).
+    ///
+    /// - Width-tolerant input reconstruction (`:157-166`, mirrors the forward's
+    ///   `:129-135`): `cols > I` -> take the left `I` input columns; `cols < I`
+    ///   -> zero-pad up to `I` columns; else the input as-is. (The legacy stores
+    ///   this transposed, `I x T`; the Rust port keeps `input` T x I throughout
+    ///   and reads columns/rows accordingly -- an equivalent, not identical,
+    ///   layout, since ndarray column ops are just as cheap either way here.)
+    /// - `weightsDerivatives += input.col(jj)*deltas.row(jj)` accumulated PER
+    ///   ROW (`:178-182`, ascending-loop outer product per `jj`, NOT a single
+    ///   GEMM); bias derivs `+= deltas.colwise().sum()` (`:183`).
+    /// - `invSubSamplingRatio > 1` scales BOTH deriv blocks (`:192-195`).
+    /// - `_NbOfSeqFedBackward += InputSeq.rows()` (`:199` -- the ORIGINAL input's
+    ///   row count, NOT `deltas.rows()`; they coincide here since this layer
+    ///   never decimates internally, but the count source is InputSeq by the
+    ///   legacy's own choice).
+    /// - `lastLayer`: `deltas_out = deltas * weights^T`, NO activation
+    ///   derivative -- the softmax+CE fusion (and the scalar Logistic fold) is
+    ///   pre-seeded into `deltas` by `CostLaw::computeDeltas` upstream; adding a
+    ///   Jacobian here would double-count it (spec S5, risk R3).
+    /// - hidden: `deltas_out = (deltas * weights^T) .* Maxmin2'(InputSeq)`,
+    ///   the asinh-deriv taken on the LAYER INPUT (`:204`), not the output.
+    /// - No retained cache: `input`/`deltas` are passed in fresh each call.
+    pub fn feed_backward(
+        &mut self,
+        input: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64> {
+        let i = self.input_size;
+        let o = self.output_size;
+        let cols = input.dim().1;
+        let t = input.dim().0;
+
+        // :157-166 width-tolerant input reconstruction (T x I, zero-padded /
+        // truncated on the COLUMN axis to match _InputSize).
+        let recon_input: Array2<f64> = if cols > i {
+            input.slice(ndarray::s![.., ..i]).to_owned()
+        } else if cols < i {
+            let mut padded = Array2::<f64>::zeros((t, i));
+            padded.slice_mut(ndarray::s![.., ..cols]).assign(input);
+            padded
+        } else {
+            input.to_owned()
+        };
+
+        // :178-182 weightsDerivatives += input.col(jj)*deltas.row(jj) per row.
+        let mut weights_derivatives = Array2::<f64>::zeros((i, o));
+        for jj in 0..deltas.dim().0 {
+            let in_row = recon_input
+                .slice(ndarray::s![jj..jj + 1, ..])
+                .t()
+                .to_owned(); // I x 1
+            let delta_row = deltas.slice(ndarray::s![jj..jj + 1, ..]).to_owned(); // 1 x O
+            let outer = matmul_seq(&in_row, &delta_row); // I x O
+            weights_derivatives += &outer;
+        }
+        // :183 biaisesDerivatives += deltas.colwise().sum().
+        let mut biases_derivatives = Array2::<f64>::zeros((1, o));
+        for jj in 0..deltas.dim().0 {
+            for j in 0..o {
+                biases_derivatives[[0, j]] += deltas[[jj, j]];
+            }
+        }
+
+        if inv_sub_sampling_ratio > 1 {
+            let ratio = inv_sub_sampling_ratio as f64;
+            weights_derivatives.mapv_inplace(|v| v * ratio);
+            biases_derivatives.mapv_inplace(|v| v * ratio);
+        }
+
+        self.weights_derivatives += &weights_derivatives;
+        self.biases_derivatives += &biases_derivatives;
+        self.nb_of_seq_fed_backward += input.dim().0 as i64; // :199 InputSeq.rows(), NOT deltas.rows()
+
+        // deltas (T x O) * weights^T (O x I) -> T x I, via matmul_seq (the
+        // measured ascending-loop contract; Eigen diverges at NN-wide k here).
+        let w_t = self.weights.t().to_owned();
+        let mut deltas_out = matmul_seq(deltas, &w_t);
+        if !last_layer {
+            // :204 hidden -> .* Maxmin2'(InputSeq), the asinh-deriv on the RAW
+            // (width-tolerant-reconstructed) layer input.
+            for r in 0..deltas_out.dim().0 {
+                for c in 0..deltas_out.dim().1 {
+                    deltas_out[[r, c]] *= maxmin2_deriv(recon_input[[r, c]]);
+                }
+            }
+        }
+        deltas_out
+    }
+
+    /// `getWeightsDerivatives` (`NeuronLayer.cpp:101-114`): Nx2 harvest, col0 =
+    /// the summed derivative (weights column-major, i.e. weight-block ordering
+    /// matching the flat packer, then bias), col1 = `_NbOfSeqFedBackward`
+    /// REPLICATED per element. Appended into `out` (threaded through
+    /// `Network`/`BlstmNetwork` in later tasks; final `Array2` assembly is
+    /// Task 6).
+    pub fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
+        let count = self.nb_of_seq_fed_backward as f64;
+        for jj in 0..self.output_size {
+            for ii in 0..self.input_size {
+                out.push([self.weights_derivatives[[ii, jj]], count]);
+            }
+        }
+        for jj in 0..self.output_size {
+            out.push([self.biases_derivatives[[0, jj]], count]);
+        }
+    }
+
+    /// `resetWeightsDerivatives` (`NeuronLayer.cpp:116-120`): zero both deriv
+    /// matrices and the frame count.
+    pub fn reset_weights_derivatives(&mut self) {
+        self.nb_of_seq_fed_backward = 0;
+        self.weights_derivatives = Array2::zeros((self.input_size, self.output_size));
+        self.biases_derivatives = Array2::zeros((1, self.output_size));
     }
 }

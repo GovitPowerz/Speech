@@ -10,9 +10,13 @@
     "max_abs": "0.000e+00"
   },
   "dense_backward_tol": {
-    "text": "Standalone NeuronLayer::feedBackward (NeuronLayer.cpp:151-207) vs denseBackwardLoop over {I=4,O=3 hidden; I=4,O=3 last; I=4,O=1 last/logistic}. max_ulp=0. The hidden and last sites share col0 derivs (the weight-deriv input.col*deltas.row is lastLayer-agnostic; lastLayer only changes deltas_out, where the softmax+CE fusion means the output layer applies NO activation Jacobian -- the fusion lives in CostLaw). The blstm_feedbackward site is the end-to-end proof of the no-double-count property.",
+    "text": "Standalone NeuronLayer::feedBackward (NeuronLayer.cpp:151-207) vs denseBackwardLoop over {I=4,O=3 hidden; I=4,O=3 last; I=4,O=1 last/logistic}. max_ulp=0. The hidden and last sites share col0 derivs (the weight-deriv input.col*deltas.row is lastLayer-agnostic; lastLayer only changes deltas_out, where the softmax+CE fusion means the output layer applies NO activation Jacobian -- the fusion lives in CostLaw). The blstm_feedbackward site is the end-to-end proof of the no-double-count property. Task 3 adds the deltas_out (T x I) golden per variant (dense_backward_deltasout, also max_ulp=0): the last-layer variants prove deltas_out == deltas*W^T with NO activation Jacobian (double-count trap, spec S11.3); the hidden variant proves the asinh-deriv (Maxmin2::deriv) fold on the LAYER INPUT.",
     "max_ulp": 0,
-    "max_abs": "0.000e+00"
+    "max_abs": "0.000e+00",
+    "deltasout": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    }
   },
   "net_backward_tol": {
     "text": "NeuralNetwork<LSTMLayer>/<NeuronLayer>::feedBackward (NeuralNetwork.hpp:251-351) vs netBackwardLoop over the LSTM net [3,4,2] sub [2,1] (fwd + reverse) and the dense net [4,3,2] sub [1,2], T=11 (the SubSample interaction: decimated forward rows vs the InvSubSample delta inflation + running invSubSamplingRatio). max_ulp=0 all four. The reverse site pins the time-reversed cache consumption (feedBackwardReverse reverses input/output/deltas, runs the forward-order backward, reverses the returned deltas).",
@@ -94,6 +98,18 @@
     "bwd_blstm_real_derivs.bin": {
       "rows": 33671,
       "cols": 2
+    },
+    "bwd_dense_hidden_deltasout.bin": {
+      "rows": 6,
+      "cols": 4
+    },
+    "bwd_dense_last_deltasout.bin": {
+      "rows": 6,
+      "cols": 4
+    },
+    "bwd_dense_logistic_deltasout.bin": {
+      "rows": 6,
+      "cols": 4
     }
   },
   "costlaw_backward": {

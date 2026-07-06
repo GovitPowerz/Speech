@@ -1004,6 +1004,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   On the excerpt the reimpl-path cost is 0 (no targets), so the overwrite lands 0 over 0 -- the
   observable is the boundary/result change, not the cost.
 
+- **[phase3] `NeuronLayer::feedBackward` counts `InputSeq.rows()`, not `deltas.rows()`** (
+  `NeuronLayer.cpp:199`): `_NbOfSeqFedBackward += InputSeq.rows()` uses the ORIGINAL input's row
+  count as the frame-count denominator for the Nx2 harvest (`getWeightsDerivatives`, `:101-114`),
+  not the incoming `deltas`' row count. For this layer the two coincide in every current caller
+  (the dense output layer never internally decimates between its input and its deltas), so the
+  distinction is currently unobservable end-to-end -- but it is the legacy's explicit choice
+  (mirrored by `LSTMLayer.cpp:719`'s `linesNb` from the layer's own input, same pattern) and the
+  port (`nn/layers.rs::NeuronLayer::feed_backward`) reproduces it literally rather than reusing
+  `deltas.nrows()` out of convenience. Pinned by `count_is_input_rows`
+  (`tests/phase3_neuron_backward_golden.rs`) and a dedicated mutation check (swapping the count
+  source to `deltas.rows()` was confirmed to fail that test during Task 3 review). No fix
+  candidate -- this is the correct, intentional legacy behavior, just non-obvious from the call
+  site alone.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

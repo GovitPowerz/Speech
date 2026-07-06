@@ -6988,9 +6988,13 @@ int main(int argc, char** argv) {
         // ---- Site dense_backward: standalone NeuronLayer::feedBackward --------
         // Grid: {I=4,O=3 hidden; I=4,O=3 last; I=4,O=1 last(logistic)}. The last-layer
         // case proves NO activation deriv on the output (fusion in CostLaw); the hidden
-        // case exercises the asinh deriv on the layer input.
+        // case exercises the asinh deriv on the layer input. Task 3 also dumps
+        // deltas_out (T x I) per variant -- the double-count trap fixture (spec S11.3):
+        // deltas_out for the last-layer sites is EXACTLY deltas*W^T with no activation
+        // Jacobian folded in, which the Rust golden test asserts by hand.
         {
             long maxUlp = 0; double maxAbs = 0.0;
+            long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
             struct S { int I, O, T; bool last; const char* tag; } grid[] = {
                 {4, 3, 6, false, "hidden"}, {4, 3, 6, true, "last"}, {4, 1, 6, true, "logistic"}};
             for (const S& s : grid) {
@@ -7002,7 +7006,7 @@ int main(int argc, char** argv) {
                 Eigen::MatrixXd realOut(s.T, s.O);
                 layer.feedForward(input, realOut, s.last);
                 Eigen::MatrixXd deltas = makeDeltas(s.T, s.O);
-                layer.feedBackward(input, realOut, deltas, 1, s.last);
+                Eigen::MatrixXd realDeltasOut = layer.feedBackward(input, realOut, deltas, 1, s.last);
                 Eigen::MatrixXd realDerivs = layer.getWeightsDerivatives();
 
                 Eigen::MatrixXd w(s.I, s.O), b(1, s.O);
@@ -7010,15 +7014,36 @@ int main(int argc, char** argv) {
                     for (int r = 0; r < s.I; ++r) w(r, c) = flat((long)c * s.I + r);
                 for (int c = 0; c < s.O; ++c) b(0, c) = flat((long)s.O * s.I + c);
                 DenseDerivs d; d.init(s.I, s.O);
-                denseBackwardLoop(input, deltas, w, s.I, s.O, 1, s.last, d);
+                Eigen::MatrixXd reimplDeltasOut = denseBackwardLoop(input, deltas, w, s.I, s.O, 1, s.last, d);
                 DenseSubNet single; single.derivs = {d};
                 Eigen::MatrixXd reimplDerivs = single.flatDerivs();
                 derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+
+                // ULP/abs gap over the FULL deltas_out matrix (not just col 0).
+                long rows = std::min(realDeltasOut.rows(), reimplDeltasOut.rows());
+                long cols = std::min(realDeltasOut.cols(), reimplDeltasOut.cols());
+                for (long r = 0; r < rows; ++r) {
+                    for (long c = 0; c < cols; ++c) {
+                        double a = realDeltasOut(r, c), b2 = reimplDeltasOut(r, c);
+                        double absGap = std::fabs(a - b2);
+                        if (absGap > maxAbsDeltasOut) maxAbsDeltasOut = absGap;
+                        uint64_t ab, bb;
+                        std::memcpy(&ab, &a, sizeof(double));
+                        std::memcpy(&bb, &b2, sizeof(double));
+                        long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                        if (ulp > maxUlpDeltasOut) maxUlpDeltasOut = ulp;
+                    }
+                }
+
                 Matrix2BinaryFile(out + "bwd_dense_" + s.tag + "_derivs.bin", reimplDerivs);
+                Matrix2BinaryFile(out + "bwd_dense_" + s.tag + "_deltasout.bin", reimplDeltasOut);
+                ++dumps;
                 ++dumps;
             }
             std::cout << "NN_TOL site=dense_backward max_ulp=" << maxUlp
                       << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            std::cout << "NN_TOL site=dense_backward_deltasout max_ulp=" << maxUlpDeltasOut
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
         }
 
         // ---- Sites net_lstm_backward_{fwd,rev}: NeuralNetwork<LSTMLayer> ------

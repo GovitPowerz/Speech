@@ -18,6 +18,7 @@ REF = Path("tests/reference_data/phase3")
 SYNTHETIC_TOL_SITES = {
     "lstm_backward",
     "dense_backward",
+    "dense_backward_deltasout",
     "net_lstm_backward_fwd",
     "net_lstm_backward_rev",
     "net_dense_backward",
@@ -33,6 +34,12 @@ EXPECTED_SHAPES = {
     "bwd_net_dense_derivs.bin": (29, 2),
     "bwd_blstm_derivs.bin": (651, 2),
     "bwd_blstm_real_derivs.bin": (33671, 2),
+}
+# Task 3: dense backward deltas_out (T x I) per NeuronLayer grid variant.
+EXPECTED_DELTASOUT_SHAPES = {
+    "bwd_dense_hidden_deltasout.bin": (6, 4),
+    "bwd_dense_last_deltasout.bin": (6, 4),
+    "bwd_dense_logistic_deltasout.bin": (6, 4),
 }
 EXPECTED_NB_DERIVS = 33671
 
@@ -95,6 +102,7 @@ def test_synthetic_backward_sites_are_bit_exact() -> None:
     got = {
         "lstm_backward": m["lstm_backward_tol"]["max_ulp"],
         "dense_backward": m["dense_backward_tol"]["max_ulp"],
+        "dense_backward_deltasout": m["dense_backward_tol"]["deltasout"]["max_ulp"],
         "net_lstm_backward_fwd": m["net_backward_tol"]["net_lstm_backward_fwd"]["max_ulp"],
         "net_lstm_backward_rev": m["net_backward_tol"]["net_lstm_backward_rev"]["max_ulp"],
         "net_dense_backward": m["net_backward_tol"]["net_dense_backward"]["max_ulp"],
@@ -124,6 +132,13 @@ def test_backward_product_probes_do_not_diverge() -> None:
 
 def test_deriv_goldens_present_with_expected_shapes() -> None:
     for name, (rows, cols) in EXPECTED_SHAPES.items():
+        path = REF / name
+        assert path.is_file(), name
+        assert _read_bin_shape(path) == (rows, cols), name
+
+
+def test_deltasout_goldens_present_with_expected_shapes() -> None:
+    for name, (rows, cols) in EXPECTED_DELTASOUT_SHAPES.items():
         path = REF / name
         assert path.is_file(), name
         assert _read_bin_shape(path) == (rows, cols), name

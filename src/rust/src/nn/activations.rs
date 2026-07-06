@@ -68,3 +68,12 @@ pub fn identity_fn(x: f64) -> f64 {
 pub fn asinh_fn(x: f64) -> f64 {
     x.asinh()
 }
+
+/// `Maxmin2::deriv` / `Asinh::deriv` (ActivationFunctions.h:162-165, 173-176):
+/// `1/sqrt(1+sinh(y)^2)`, taken on `y` -- the pre-image at which `fn` was
+/// evaluated (i.e. the raw layer input in `NeuronLayer::feedBackward:204`, NOT
+/// the post-`asinh` output). Both structs share the identical body.
+pub fn maxmin2_deriv(y: f64) -> f64 {
+    let input = y.sinh();
+    1.0 / (1.0 + input * input).sqrt()
+}

@@ -87,6 +87,14 @@ EXPECTED_SHAPES = {
     "bwd_blstm_real_derivs.bin": (33671, 2),
 }
 
+# Task 3: dense backward deltas_out (T x I) per NeuronLayer grid variant, dumped
+# alongside the existing Nx2 deriv goldens above (same harness stage).
+EXPECTED_DELTASOUT_SHAPES = {
+    "bwd_dense_hidden_deltasout.bin": (6, 4),
+    "bwd_dense_last_deltasout.bin": (6, 4),
+    "bwd_dense_logistic_deltasout.bin": (6, 4),
+}
+
 # Task 2: CostLaw backward REAL-probe goldens (dumped from the REAL compiled
 # computeUnitaryDeltas/computeDeltas, NOT a reimpl -- CostLaw is tier-2 oracle
 # per spec S2, probed directly). Nx2 [output | delta] for the scalar sweeps
@@ -125,6 +133,7 @@ ALIAS_COPIES = {
 SYNTHETIC_TOL_SITES = [
     "lstm_backward",
     "dense_backward",
+    "dense_backward_deltasout",
     "net_lstm_backward_fwd",
     "net_lstm_backward_rev",
     "net_dense_backward",
@@ -245,6 +254,9 @@ def main() -> None:
         # Copy the reimpl-produced Nx2 deriv goldens into the committed Phase 3 dir.
         for name in EXPECTED_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Task 3: dense backward deltas_out goldens (same harness stage).
+        for name in EXPECTED_DELTASOUT_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
         # Copy the Task 2 CostLaw REAL-probe goldens (dumped from the real class).
         for name in COST_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
@@ -280,6 +292,13 @@ def main() -> None:
             mismatches.append({"file": name, "expected": expected, "got": got})
     if mismatches:
         raise SystemExit(f"bwd_*.bin shape mismatch: {mismatches}")
+    deltasout_mismatches = []
+    for name, expected in EXPECTED_DELTASOUT_SHAPES.items():
+        got = _read_bin_shape(PHASE3_DIR / name)
+        if got != expected:
+            deltasout_mismatches.append({"file": name, "expected": expected, "got": got})
+    if deltasout_mismatches:
+        raise SystemExit(f"bwd_dense_*_deltasout.bin shape mismatch: {deltasout_mismatches}")
     cost_mismatches = []
     for name, expected in COST_SHAPES.items():
         got = _read_bin_shape(PHASE3_DIR / name)
@@ -347,9 +366,14 @@ def main() -> None:
                 "input.col*deltas.row is lastLayer-agnostic; lastLayer only changes deltas_out, "
                 "where the softmax+CE fusion means the output layer applies NO activation "
                 "Jacobian -- the fusion lives in CostLaw). The blstm_feedbackward site is the "
-                "end-to-end proof of the no-double-count property."
+                "end-to-end proof of the no-double-count property. Task 3 adds the deltas_out "
+                "(T x I) golden per variant (dense_backward_deltasout, also max_ulp=0): the "
+                "last-layer variants prove deltas_out == deltas*W^T with NO activation Jacobian "
+                "(double-count trap, spec S11.3); the hidden variant proves the asinh-deriv "
+                "(Maxmin2::deriv) fold on the LAYER INPUT."
             ),
             **tols["dense_backward"],
+            "deltasout": tols["dense_backward_deltasout"],
         },
         "net_backward_tol": {
             "text": (
@@ -394,7 +418,10 @@ def main() -> None:
             ),
             "sites": probes,
         },
-        "dumps": {name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_SHAPES.items()},
+        "dumps": {
+            **{name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_DELTASOUT_SHAPES.items()},
+        },
         "costlaw_backward": {
             "text": (
                 "Task 2: CostLaw backward seam VALIDATION (cost.rs was already ported in "
@@ -445,7 +472,8 @@ def main() -> None:
     real_ulp = tols[REAL_TOL_SITE]["max_ulp"]
     print(
         f"OK: {len(SYNTHETIC_TOL_SITES)} synthetic backward sites max_ulp=0, "
-        f"real-net calibration max_ulp={real_ulp}, {len(EXPECTED_SHAPES) + len(COST_SHAPES)} goldens -> "
+        f"real-net calibration max_ulp={real_ulp}, "
+        f"{len(EXPECTED_SHAPES) + len(EXPECTED_DELTASOUT_SHAPES) + len(COST_SHAPES)} goldens -> "
         f"{manifest_path.relative_to(REPO_ROOT)}"
     )
 
