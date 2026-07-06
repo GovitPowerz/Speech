@@ -50,6 +50,7 @@ use crate::features::stats::InputStatistics;
 
 use super::layers::NeuronLayer;
 use super::network::Network;
+use super::train::Rprop;
 
 fn get_list(map: &IndexMap<String, String>, key: &str) -> Result<Vec<usize>> {
     let s = map
@@ -87,6 +88,12 @@ fn get_i16(map: &IndexMap<String, String>, key: &str) -> Result<i16> {
 fn get_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> i32 {
     map.get(key)
         .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(default)
+}
+
+fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> f64 {
+    map.get(key)
+        .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(default)
 }
 
@@ -134,6 +141,10 @@ pub struct BlstmConfig {
     /// plain `feed_forward_backward` cost accumulation consumes it (Task 8); Phase 3
     /// backward will reuse it for deltas.
     pub cost_law: CostLaw,
+    /// `_BackPropagationRpropInit` (`BLSTMNeuralNetwork.cpp:151`): the iRPROP- initial
+    /// step size, default `1e-2`. The real `1_worker_1.config` has NO such key, so the
+    /// default path is the live one.
+    pub rprop_init: f64,
 }
 
 impl BlstmConfig {
@@ -190,6 +201,9 @@ impl BlstmConfig {
         // `_CostFunction = CostLaw(conf, prefix)` (:104). Built from the same prefix;
         // all cost-law keys have defaults, so a config lacking them is valid.
         let cost_law = CostLaw::from_config(map, prefix);
+        // `_BackPropagationRpropInit` (:151), default 1e-2 (the live path -- the real
+        // config has no such key).
+        let rprop_init = get_f64_default(map, &k("_BackPropagationRpropInit"), 1e-2);
 
         Ok(BlstmConfig {
             lstm_neuron_nb,
@@ -205,6 +219,7 @@ impl BlstmConfig {
             back_prop_output_network_only,
             target_enforcement_step,
             cost_law,
+            rprop_init,
         })
     }
 }
@@ -233,6 +248,11 @@ pub struct BlstmNetwork {
     overlaps: bool,
 
     pub input_statistics: InputStatistics,
+
+    /// `_Trainer` (`BLSTMNeuralNetwork.cpp:152`): the iRPROP- optimizer, a LONG-LIVED
+    /// per-network member (state persists across `update_weights` calls for the
+    /// network's lifetime), constructed from `_BackPropagationRpropInit` (default 1e-2).
+    trainer: Rprop,
 }
 
 impl BlstmNetwork {
@@ -287,6 +307,8 @@ impl BlstmNetwork {
             forward_network.as_ref().unwrap().input_size()
         };
 
+        let trainer = Rprop::new(cfg.rprop_init);
+
         Ok(BlstmNetwork {
             cfg,
             forward_network,
@@ -301,6 +323,7 @@ impl BlstmNetwork {
             truncates_sequence: false,
             overlaps: false,
             input_statistics: InputStatistics::new(),
+            trainer,
         })
     }
 
@@ -416,12 +439,100 @@ impl BlstmNetwork {
         out
     }
 
-    /// `resetWeightsDerivatives` (`:278-287`): resets ONLY the `InputStatistics`
-    /// field here (the per-sub-network gradient-accumulator reset is a Phase 3
-    /// stub; `_Cost`/`_NbOfClassif`/`_OutputForward`/`_OutputBackward` are
-    /// deliberately untouched, matching the legacy).
+    /// `resetWeightsDerivatives` (`:278-287`): reset the sub-networks' per-layer
+    /// gradient accumulators (fwd/bwd LSTM nets skipped in MLP mode) + the
+    /// `InputStatistics` field. `_Cost`/`_NbOfClassif`/`_OutputForward`/
+    /// `_OutputBackward` are deliberately untouched, matching the legacy.
     pub fn reset_weights_derivatives(&mut self) {
+        if self.cfg.is_mlp {
+            self.output_network.reset_weights_derivatives();
+        } else {
+            self.forward_network
+                .as_mut()
+                .unwrap()
+                .reset_weights_derivatives();
+            self.backward_network
+                .as_mut()
+                .unwrap()
+                .reset_weights_derivatives();
+            self.output_network.reset_weights_derivatives();
+        }
         self.input_statistics = InputStatistics::new();
+    }
+
+    /// `getWeightsDerivatives` (`BLSTMNeuralNetwork.cpp:255-276`): the Nx2 flat gradient
+    /// object -- col0 the SUMMED derivative, col1 the `_NbOfSeqFedBackward` frame count
+    /// replicated per element (spec S3). Empty when `_BackPropagationActivated` is off
+    /// (`:273-274`). Layout: MLP mode -> `output | [Zero|Ones|Zero|Ones]` stats tail;
+    /// non-MLP -> `fwd | bwd | output | [Zero|Ones|Zero|Ones]`, with the fwd/bwd LSTM
+    /// col0 multiplied by `_OutputNetwork.getSubSamplingRatio()` when that ratio > 1
+    /// (`:266-269`). The 4-block tail is `2*inputSize` rows each `[0.0, 1.0]` (mean rows
+    /// then std rows; stats never move, count 1). The col0 ordering matches the P0a flat
+    /// weight packer element-for-element.
+    pub fn get_weights_derivatives(&self) -> Array2<f64> {
+        if !self.cfg.back_propagation_activated {
+            return Array2::<f64>::zeros((0, 0)); // :273-274
+        }
+        let input_size = self.input_size();
+        let out_ratio = self.output_network.sub_sampling_ratio();
+
+        let mut rows: Vec<[f64; 2]> = Vec::with_capacity(self.nb_of_weights());
+        if !self.cfg.is_mlp {
+            // fwd | bwd, col0 scaled by the output-net ratio when > 1 (:266-269).
+            let start_fwd = rows.len();
+            self.forward_network
+                .as_ref()
+                .unwrap()
+                .get_weights_derivatives(&mut rows);
+            self.backward_network
+                .as_ref()
+                .unwrap()
+                .get_weights_derivatives(&mut rows);
+            if out_ratio > 1 {
+                for r in rows[start_fwd..].iter_mut() {
+                    r[0] *= out_ratio as f64;
+                }
+            }
+        }
+        self.output_network.get_weights_derivatives(&mut rows);
+
+        // Stats tail: 2*inputSize rows, each [deriv 0 | count 1] (mean then std;
+        // `Zero(mean) | Ones | Zero(std) | Ones` in the legacy `all <<`).
+        for _ in 0..2 * input_size {
+            rows.push([0.0, 1.0]);
+        }
+
+        let n = rows.len();
+        let mut all = Array2::<f64>::zeros((n, 2));
+        for (k, r) in rows.iter().enumerate() {
+            all[[k, 0]] = r[0];
+            all[[k, 1]] = r[1];
+        }
+        all
+    }
+
+    /// `updateWeights` (`BLSTMNeuralNetwork.cpp:303-310`): normalize the Nx2 gradient
+    /// object ELEMENT-WISE (`col0 cwiseQuotient col1`, never a scalar `/nframes` --
+    /// risk R1), hand it to the long-lived iRPROP- trainer, and write the updated flat
+    /// vector back via `set_weights`. Empty gradient (`size() == 0`, backprop off) is a
+    /// no-op (`:304`). The element-wise quotient of a count-0 region yields `0/0 = NaN`
+    /// per IEEE (the legacy `cwiseQuotient` does the same); the stats tail's count-1
+    /// slots never divide-by-zero, and the trained regions carry their accumulated
+    /// frame counts, so under a real training call every count is > 0.
+    pub fn update_weights(&mut self, weights_derivatives: &Array2<f64>, cost: f64) {
+        if weights_derivatives.is_empty() {
+            return; // :304 (size() > 0 guard)
+        }
+        let mut weights = self.get_weights();
+        let n = weights_derivatives.nrows();
+        let mut norm = vec![0.0_f64; n];
+        for j in 0..n {
+            norm[j] = weights_derivatives[[j, 0]] / weights_derivatives[[j, 1]]; // :306
+        }
+        self.trainer.update_weights(&norm, &mut weights, cost); // :307
+        // `set_weights` returns Err only when the vector is too short; `get_weights`
+        // produced exactly `nb_of_weights()` elements, so this cannot fail.
+        self.set_weights(&weights).unwrap(); // :308
     }
 
     /// Trivial setter for the processing-type flags (`_TruncatesSequence`/
@@ -558,6 +669,139 @@ impl BlstmNetwork {
             self.output_network.feed_forward(&cropped, output);
         } else {
             self.output_network.feed_forward(input, output);
+        }
+    }
+
+    /// `feedBackward` (`BLSTMNeuralNetwork.cpp:439-460`): the BPTT fan-out. Seed
+    /// `deltas = Zero(target.rows, target.cols)`, fill via `_CostFunction.computeDeltas`
+    /// (scalar VAD path when `target.ncols() == 1` -- `compute_unitary_delta` per row,
+    /// mirroring the `compute_cost` dispatch; else the multiclass softmax+CE fusion),
+    /// then `output_network.feed_backward_double(output_forward, output_backward,
+    /// output, deltas)` returns the split-ready `(rows x 2*lstm_out)` deltas. Unless
+    /// `back_prop_output_network_only` (`:450`), split left/right halves and drive the
+    /// forward LSTM net `feed_backward` + the backward LSTM net `feed_backward_reverse`,
+    /// with the SAME `LSTMRatios[0] > 1 && input_size < input.cols()` crop gate the
+    /// forward uses (`:452-454`). MLP-mode nets never reach here (their backward is
+    /// `feed_backward_mlp`), so `forward_network`/`backward_network` are present.
+    ///
+    /// The commented `targetSeq.cols() > 1 -> deltas = output - target` branch (`:441`)
+    /// is DEAD in the legacy: the live path always allocates `Zero(target.rows,
+    /// target.cols)` and lets `computeDeltas` overwrite it.
+    fn feed_backward(&mut self, input: &Array2<f64>, output: &Array2<f64>, target: &Array2<f64>) {
+        // Seed deltas via the cost law. Scalar VAD path when the TARGET is one column
+        // (CostLaw.cpp:348), else the multiclass fusion (mirrors compute_cost dispatch).
+        let mut deltas = Array2::<f64>::zeros((target.nrows(), target.ncols()));
+        if target.ncols() == 1 {
+            for row in 0..target.nrows() {
+                deltas[[row, 0]] = self
+                    .cfg
+                    .cost_law
+                    .compute_unitary_delta(output[[row, 0]], target[[row, 0]]);
+            }
+        } else {
+            let out_flat: Vec<f64> = output.iter().copied().collect();
+            let tgt_flat: Vec<f64> = target.iter().copied().collect();
+            let n_classes = output.ncols();
+            let mut d_flat = vec![0.0_f64; out_flat.len()];
+            self.cfg
+                .cost_law
+                .compute_deltas(&out_flat, &tgt_flat, n_classes, &mut d_flat);
+            for (k, v) in d_flat.into_iter().enumerate() {
+                deltas[[k / n_classes, k % n_classes]] = v;
+            }
+        }
+
+        // Output-net backward over the hcat(fwd|bwd); returns (rows x 2*lstm_out).
+        let output_forward = std::mem::replace(&mut self.output_forward, Array2::zeros((0, 0)));
+        let output_backward = std::mem::replace(&mut self.output_backward, Array2::zeros((0, 0)));
+        let split = self.output_network.feed_backward_double(
+            &output_forward,
+            &output_backward,
+            output,
+            &deltas,
+        );
+        self.output_forward = output_forward;
+        self.output_backward = output_backward;
+
+        if self.cfg.back_prop_output_network_only {
+            return; // :450 short-circuit -- LSTM stacks untouched
+        }
+
+        // :451-458 split left/right halves and drive the LSTM stacks. The crop gate
+        // mirrors the forward's leftCols(inputSize) (:452-454).
+        let half = split.ncols() / 2;
+        let left = split.slice(ndarray::s![.., ..half]).to_owned();
+        let right = split.slice(ndarray::s![.., half..]).to_owned();
+
+        let forward = self.forward_network.as_ref().unwrap();
+        let fwd_in = forward.input_size();
+        let ratios0 = forward.sub_samplings()[0];
+        let output_forward = std::mem::replace(&mut self.output_forward, Array2::zeros((0, 0)));
+        let output_backward = std::mem::replace(&mut self.output_backward, Array2::zeros((0, 0)));
+        if ratios0 > 1 && fwd_in < input.ncols() {
+            let cropped = input.slice(ndarray::s![.., ..fwd_in]).to_owned();
+            self.forward_network
+                .as_mut()
+                .unwrap()
+                .feed_backward(&cropped, &output_forward, &left);
+            self.backward_network
+                .as_mut()
+                .unwrap()
+                .feed_backward_reverse(&cropped, &output_backward, &right);
+        } else {
+            self.forward_network
+                .as_mut()
+                .unwrap()
+                .feed_backward(input, &output_forward, &left);
+            self.backward_network
+                .as_mut()
+                .unwrap()
+                .feed_backward_reverse(input, &output_backward, &right);
+        }
+        self.output_forward = output_forward;
+        self.output_backward = output_backward;
+    }
+
+    /// `feedBackwardMLP` (`BLSTMNeuralNetwork.cpp:471-486`): the MLP-mode backward. Seed
+    /// deltas via `computeDeltas` (the commented `cols > 1 -> output - target` at `:474`
+    /// is dead -- the Zero-seed path always runs), then `output_network.feed_backward`
+    /// directly (no bidirectional split), with the `MLPRatios[0] > 1 && input_size <
+    /// input.cols()` crop gate (`:480-484`). `output` is the layer's stored forward
+    /// output; the dense backward reads the raw input from `layers_output` internally.
+    fn feed_backward_mlp(
+        &mut self,
+        input: &Array2<f64>,
+        output: &Array2<f64>,
+        target: &Array2<f64>,
+    ) {
+        let mut deltas = Array2::<f64>::zeros((target.nrows(), target.ncols()));
+        if target.ncols() == 1 {
+            for row in 0..target.nrows() {
+                deltas[[row, 0]] = self
+                    .cfg
+                    .cost_law
+                    .compute_unitary_delta(output[[row, 0]], target[[row, 0]]);
+            }
+        } else {
+            let out_flat: Vec<f64> = output.iter().copied().collect();
+            let tgt_flat: Vec<f64> = target.iter().copied().collect();
+            let n_classes = output.ncols();
+            let mut d_flat = vec![0.0_f64; out_flat.len()];
+            self.cfg
+                .cost_law
+                .compute_deltas(&out_flat, &tgt_flat, n_classes, &mut d_flat);
+            for (k, v) in d_flat.into_iter().enumerate() {
+                deltas[[k / n_classes, k % n_classes]] = v;
+            }
+        }
+
+        let mlp_in = self.output_network.input_size();
+        let ratios0 = self.output_network.sub_samplings()[0];
+        if ratios0 > 1 && mlp_in < input.ncols() {
+            let cropped = input.slice(ndarray::s![.., ..mlp_in]).to_owned();
+            self.output_network.feed_backward(&cropped, output, &deltas);
+        } else {
+            self.output_network.feed_backward(input, output, &deltas);
         }
     }
 
@@ -762,28 +1006,60 @@ impl BlstmNetwork {
 
     /// Plain (non-windowed) `feedForwardBackward` (`BLSTMNeuralNetwork.cpp:776-830`):
     /// type -2 normalizes into a COPY (input untouched) then forwards the copy;
-    /// otherwise forwards the input directly. Backward is Phase 3 (skipped; the gate
-    /// exists). Cost accumulation (:815-829): when targets are present and
-    /// `_TargetEnforcementStep < 0`, the interior rows `[1, rows-1)` of BOTH a target
-    /// copy AND the caller-visible `output` are overwritten with `-0.5` BEFORE the
-    /// cost is computed against the -0.5 targets; else the cost is computed against
-    /// the given targets. `_NbOfClassif += output.rows()`.
+    /// otherwise forwards the input directly. When `back_propagation_activated` and
+    /// targets are present, the BACKWARD runs (:788-799 / :802-813): a `_Target
+    /// EnforcementStep < 0` interior-row rewrite of a NEW target copy to -0.5 (the
+    /// OUTPUT is NOT touched here) BEFORE `feed_backward`. THEN, separately, the cost
+    /// block (:815-828, risk R7): when `_TargetEnforcementStep < 0`, the interior rows
+    /// `[1, rows-1)` of BOTH a fresh target copy AND the caller-visible `output` are
+    /// overwritten with `-0.5` before `computeCost`; else cost against the given
+    /// targets. The two enforcement rewrites are SEPARATE: the backward one seeds
+    /// deltas from the raw `output`, the cost one mutates `output`. `_NbOfClassif +=
+    /// output.rows()`.
     fn feed_forward_backward_plain(
         &mut self,
         input: &Array2<f64>,
         output: &mut Array2<f64>,
         target: &Array2<f64>,
     ) {
-        if self.cfg.input_normalization_type == -2 {
+        // The input the backward reads: for type -2, the normalized copy (:787,795);
+        // otherwise the raw input (:801,809). Type -2 always needs an owned copy to
+        // forward (the normalization mutates it), so it's materialized regardless of
+        // backprop; the plain-input case only clones when the backward will actually
+        // run, sparing every pure-forward scoring call a T x D copy.
+        let normed = if self.cfg.input_normalization_type == -2 {
             let mut norm = input.clone();
             Self::self_normalize(&mut norm);
             self.feed_forward(&norm, output);
-            // Backward (feedBackward on the normalized copy) is Phase 3.
+            Some(norm)
         } else {
             self.feed_forward(input, output);
-            // Backward is Phase 3.
+            None
+        };
+
+        // BACKWARD (:788-799 / :802-813). Runs BEFORE the cost block, so it seeds deltas
+        // from the UNMUTATED output. Its enforcement rewrite touches only the TARGET.
+        if self.cfg.back_propagation_activated && target.nrows() > 0 {
+            let bwd_input = normed.as_ref().unwrap_or(input);
+            if self.cfg.target_enforcement_step < 0 {
+                let mut new_target = target.clone();
+                let n_lines = target.nrows() as isize - 2;
+                if n_lines > 0 {
+                    for row in 1..target.nrows() - 1 {
+                        for col in 0..new_target.ncols() {
+                            new_target[[row, col]] = -0.5;
+                        }
+                    }
+                }
+                let out_snapshot = output.clone();
+                self.feed_backward(bwd_input, &out_snapshot, &new_target);
+            } else {
+                let out_snapshot = output.clone();
+                self.feed_backward(bwd_input, &out_snapshot, target);
+            }
         }
 
+        // COST (:815-828). SEPARATE enforcement rewrite of target AND output.
         if target.nrows() > 0 {
             if self.cfg.target_enforcement_step < 0 {
                 let mut new_target = target.clone();
@@ -816,8 +1092,9 @@ impl BlstmNetwork {
         }
     }
 
-    /// Plain `feedForwardBackwardMLP` (`BLSTMNeuralNetwork.cpp:832-841`): forward +
-    /// cost, no `_TargetEnforcementStep` interior overwrite branch.
+    /// Plain `feedForwardBackwardMLP` (`BLSTMNeuralNetwork.cpp:832-841`): forward, the
+    /// backward (`feed_backward_mlp`) when backprop is active + targets present, then
+    /// cost -- no `_TargetEnforcementStep` interior overwrite branch.
     fn feed_forward_backward_mlp(
         &mut self,
         input: &Array2<f64>,
@@ -825,7 +1102,10 @@ impl BlstmNetwork {
         target: &Array2<f64>,
     ) {
         self.feed_forward_mlp(input, output);
-        // Backward is Phase 3.
+        if self.cfg.back_propagation_activated && target.nrows() > 0 {
+            let out_snapshot = output.clone();
+            self.feed_backward_mlp(input, &out_snapshot, target);
+        }
         if target.nrows() > 0 {
             self.cost += self.compute_cost(output, target);
             self.nb_of_classif += output.nrows() as i64;

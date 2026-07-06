@@ -1004,6 +1004,300 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   On the excerpt the reimpl-path cost is 0 (no targets), so the overwrite lands 0 over 0 -- the
   observable is the boundary/result change, not the cost.
 
+- **[phase3] `CostLaw::computeUnitaryDeltas` folds the LOGISTIC output-activation
+  derivative `output*(1-output)` directly into the scalar VAD delta** (`cost.rs::
+  compute_unitary_delta`, from `CostLaw.cpp:343`): after selecting the per-regime law
+  derivative and applying the optional `BackPropWER` scale, the final line multiplies by
+  `output*(1-output)` -- the derivative of the scalar output head's `Logistic` activation
+  (`NeuronLayer.cpp:144`), NOT a second law-derivative term. This is the scalar-path
+  counterpart to the multiclass softmax+CE fusion (S5/S11.3): the scalar head is a plain
+  logistic, not a softmax, so its chain rule is the textbook `y(1-y)` rather than the
+  softmax+CE simplification, but it is likewise folded into the cost seam rather than
+  applied as a separate layer-side Jacobian. The real config's own `CostLawThreshSpeech
+  1`/`CostLawThreshNoSpeech 0` (`1_worker_1.config:64-65`) puts the above-thresh branch
+  exactly at `output` in `{0.0, 1.0}`, where this fold is ZERO and would mask a broken
+  above-thresh law derivative -- `mid_thresh_law` (both thresholds moved to 0.5) is the
+  dedicated non-vacuity builder for that branch. *Why deferred:* provenance; the fold is
+  the correct chain rule for the scalar head's activation, not an ad hoc addition.
+  *Pinned by:* `scalar_delta_polynomial_bit_exact`/`scalar_delta_log_sqrt_canary` (the
+  fold is present in every scalar delta, poly bit-exact, log/sqrt canary-gated) and
+  `scalar_delta_midthresh_cubic_above_branch`/`scalar_delta_midthresh_sqrt_above_branch`
+  (non-vacuous away from the fold's `output in {0,1}` zero).
+
+- **[phase3] `BackPropWER` scales the scalar delta AND the multiclass fusion by an
+  ASYMMETRIC `10x` factor keyed on target class, `10*(1-target)` (speech-on) vs
+  `10*target` (other-on)** (`cost.rs::compute_unitary_delta` + `compute_deltas`, from
+  `CostLaw.cpp:335-341` scalar / `:371-406` multiclass): when `_BackPropWER >= 0`
+  (`isCostModified`), the delta (scalar path) or the whole fused row (multiclass path) is
+  multiplied by a constant `10.0` weighted by the OPPOSITE regime's target value -- for a
+  speech-on frame (`target > 0.5`) the factor is `10*(1-target)`, for an other-on frame
+  it is `10*target`. At exact one-hot targets (`target` in `{0.0, 1.0}`) this reduces to
+  a plain `10.0` or `0.0`, but the multiclass fixtures use SOFT targets specifically so
+  the scaling is observable as a genuine non-constant factor rather than degenerating to
+  0/10 (see the harness comment cited in `multiclass_deltas_wer_and_pond`). The same `10x`
+  constant also gates the cost itself (`compute_unitary_cost`, `cost.rs:276-282`, from
+  `CostLaw.cpp:180-186`) -- WER scaling enters BOTH the forward cost and the backward
+  delta identically, per risk R4's ponderations-in-cost-AND-gradient concern. *Why
+  deferred:* provenance; this is the legacy's Word-Error-Rate-oriented cost reweighting,
+  reproduced verbatim. *Pinned by:* `multiclass_deltas_wer_and_pond` (`cost_deltas_wer.
+  bin`/`cost_deltas_wer_pond.bin`, WER combined with and without classes_ponderations)
+  and `ignore_mask_zeroes_row`'s WER-path branch (a fully-masked row stays exactly 0
+  under WER too).
+
+- **[phase3] `NeuronLayer::feedBackward` counts `InputSeq.rows()`, not `deltas.rows()`** (
+  `NeuronLayer.cpp:199`): `_NbOfSeqFedBackward += InputSeq.rows()` uses the ORIGINAL input's row
+  count as the frame-count denominator for the Nx2 harvest (`getWeightsDerivatives`, `:101-114`),
+  not the incoming `deltas`' row count. For this layer the two coincide in every current caller
+  (the dense output layer never internally decimates between its input and its deltas), so the
+  distinction is currently unobservable end-to-end -- but it is the legacy's explicit choice
+  (mirrored by `LSTMLayer.cpp:719`'s `linesNb` from the layer's own input, same pattern) and the
+  port (`nn/layers.rs::NeuronLayer::feed_backward`) reproduces it literally rather than reusing
+  `deltas.nrows()` out of convenience. Pinned by `count_is_input_rows`
+  (`tests/phase3_neuron_backward_golden.rs`) and a dedicated mutation check (swapping the count
+  source to `deltas.rows()` was confirmed to fail that test during Task 3 review). No fix
+  candidate -- this is the correct, intentional legacy behavior, just non-obvious from the call
+  site alone.
+
+- **[phase3] `NeuronLayer::feedBackward`'s hidden-path Maxmin2 deriv fold reads the RAW `InputSeq`
+  parameter, not the width-reconstructed `input` local** (`NeuronLayer.cpp:204`, `deltas_out =
+  (deltas*W^T).array()*(InputSeq.unaryExpr(Maxmin2::deriv).array())`): the accumulation half
+  (`:157-183`) genuinely reads the width-tolerant-reconstructed tensor (`cols > I` truncates,
+  `cols < I` zero-pads, per `:157-166`), but the deriv-fold half at `:204` indexes the ORIGINAL,
+  un-reconstructed `InputSeq` argument directly -- two different tensors read by the same function.
+  A prior port draft (Task 3, pre-review) folded on the reconstructed tensor for both halves; caught
+  in review because it is only observable at `cols != I`, which never arises from the sole legacy
+  caller (`BLSTMNeuralNetwork.h:29`, `.cpp:90` always chains `NeuronLayer`s output-to-input at
+  `cols == I`). At that reachable width, reconstruction is a byte-exact no-op, so the deviation was
+  fully dormant against every fixture. The two out-of-range directions are NOT symmetric: a wide
+  (`cols > I`) input reaching the raw fold is still IN-BOUNDS (the fold only ever indexes columns
+  `0..I`, and reconstruction's wide-case truncation is exactly `leftCols(I)` -- the same first-`I`
+  columns the raw tensor already has), so raw-vs-reconstructed is silently identical there and a
+  wide fixture could never discriminate the two tensors even if one were built. Further, because
+  `cols < I` zero-padding can only turn an out-of-bounds read into an in-bounds `0.0` (never a
+  differing finite value), the ONLY way the fix is observable at all is that a genuinely narrow
+  (`cols < I`) input reaching the hidden fold now panics (index out of bounds) instead of silently
+  zero-filling -- which mirrors the legacy's own Eigen coefficient-wise-product shape mismatch (UB)
+  at that same unreachable shape. Fixed to read
+  `input[[r, c]]` (the raw parameter) directly in `nn/layers.rs::NeuronLayer::feed_backward`. Pinned
+  by `hidden_fold_reads_raw_input_not_reconstructed` (arithmetic sanity at `cols == I`) and
+  `hidden_fold_panics_on_narrow_raw_input` (the actual regression discriminator: reverting to the
+  reconstructed tensor makes the expected panic NOT occur) in `tests/phase3_neuron_backward_golden.rs`.
+  No fix candidate needed beyond the literal-fidelity correction already applied -- this entry
+  documents a legacy-unreachable branch whose Rust semantics are now pinned to the literal source
+  rather than silently generalized.
+
+- **[phase3] LSTM backward mixes PRIOR-step and CURRENT-step gate deltas in the peephole
+  cross-terms, via the `deltasForgetGatetmp` save** (`LSTMLayer.cpp:518-682`, port
+  `nn/layers.rs::LstmLayer::feed_backward`): the reverse-time loop reuses the SAME
+  `deltasInputGate`/`deltasForgetGate`/`deltasOutputGate` 1xO buffers across iterations, so when a
+  block reads them for a peephole cross-term the value is whatever the PRIOR (later-time) iteration
+  left there -- EXCEPT the current row's output-gate delta, which is computed first (`:585`) and is
+  therefore already CURRENT by the time the state/forget/input blocks read it. The input-gate block
+  (`:659-682`) additionally needs the PRIOR forget-gate delta (peep row 6, `:660`), but by then the
+  forget block (`:624-657`) has already overwritten `deltasForgetGate` with the current row's value;
+  the legacy saves the prior one into `deltasForgetGatetmp` at `:624` (BEFORE the overwrite) and reads
+  the save at `:660`. So a single expression can legitimately mix a current-step delta (output gate)
+  with prior-step deltas (input/forget) -- not a bug, but easy to "clean up" into all-current or
+  all-prior and get wrong. The port reproduces the exact buffer lifetimes: `deltas_output_gate` is
+  overwritten before the state/forget/input blocks read it (current), `deltas_input_gate`/
+  `deltas_forget_gate` are read at their prior value inside those blocks and only then overwritten,
+  and `deltas_forget_gate_tmp = deltas_forget_gate.clone()` captures the prior forget delta before the
+  forget block. Pinned by the peep-row and gate-block mutation battery in
+  `tests/phase3_lstm_backward_golden.rs` (the mandated peep-row-4<->5 and gate-block-i<->f swaps, plus
+  the `forgettmp_use_live` mutation swapping the saved prior for the live current value, all confirmed
+  to fail a golden). No fix candidate -- correct, intentional, non-obvious.
+
+- **[phase3] LSTM backward `row==0` forget-gate branch drops the cellstate term but KEEPS the
+  peephole cross-terms** (`LSTMLayer.cpp:648-657`, port `nn/layers.rs::LstmLayer::feed_backward` else
+  branch): at the first time step there is no `c_{-1}`, so the `row>0` branch's
+  `_CellStates.row(row-1) .* epsilonState` term is absent -- but the branch still folds the gates-peep
+  (rows 4/10) and gates-rec (row 7) cross-terms and the bias derivative, and still activates through
+  `GatesFunction::deriv`. It also skips the input-weight-only accumulation's feedback/peep-row-1/6/8
+  half (there is no `output.col(-1)` and no `_CellStates.row(-1)`). This is standard BPTT boundary
+  handling, but the asymmetry (drop ONE term, keep the rest) is a classic transcription trap -- a naive
+  port either drops the whole forget block at row 0 or reads `_CellStates.row(row-1)` out of bounds.
+  Pinned by `row_zero_forget_branch` (T=1, must not panic, layer-native derivs) and the
+  `row0_spurious_cellstate` mutation (adding a `cs[row]` term at row 0 fails a golden). No fix
+  candidate -- correct, intentional.
+
+- **[phase3] Container backward `InvSubSample` does NOT restore the SubSample-dropped tail frames --
+  the returned `deltas_out` has `floor(T/R)*R` rows, not `T`** (`NeuralNetwork.hpp:125-145`, port
+  `nn/network.rs::inv_sub_sample` + `Network::feed_backward`): the forward `SubSample(R, T-rows)` FLOORS
+  to `floor(T/R)` rows, silently dropping the trailing `T mod R` frames (already tracked as the forward
+  decimation quirk). The backward `InvSubSample(R, .)` inflates a `K`-row sub-sampled delta block back to
+  `K*R` rows by un-stacking the R column-blocks -- so a round-trip yields `floor(T/R)*R` rows, and the
+  dropped tail is GONE. For the real net (`1_worker_1.config`: `LSTMNeuronNb 23,24,24` / subsample
+  `4,1`; T frames, layer-0 R=4) the layer-0 `deltas_out` returned to the BLSTM wrapper is
+  `floor(T/4)*4` rows wide, up to 3 frames short of the original input; the wrapper never uses these
+  tail rows (it splits the output-net deltas, not the LSTM `deltas_out`), so the truncation is invisible
+  downstream -- but a port that "helpfully" pads InvSubSample back to `T` rows, or that asserts
+  `deltas_out.nrows() == input.nrows()`, diverges from the legacy. The Task 5 goldens are a T=11, R=2
+  multi-layer net: `sub_sample` floors 11->5, `inv_sub_sample` restores 5->10 (NOT 11); fix-wave 1
+  (review finding 1) added a T=7, R=2 SINGLE-layer net (`neuron_nb.len()==2`, `:255-263` -- the real
+  `configs/legacy/LID_BLSTM.config` single-layer subsample shape, `LSTMNeuronNb 11,12` / subsample `4`,
+  in miniature) exercising the SAME floor/expand quirk on the structurally distinct single-layer branch:
+  `floor(7/2)=3` decimated rows, InvSubSample restores 3*2=6 (NOT 7).
+  Pinned by `inv_sub_sample_inverts_sub_sample_on_floored_input` (round-trip == the first 10 rows of the
+  11-row input, bit-exact) + the `(10, 3)`/`(10, 4)`/`(6, 2)` structural row-count assertions in
+  `lstm_net_subsample_inversion_{fwd,rev}` / `dense_net_last_layer_subsample` / `single_layer_subsample_inversion`,
+  and the injected mutation battery (skip-inflation, wrong-column-block, and -- fix-wave 1 -- the
+  single-layer arm reading the running `deltas_out` instead of the seed `deltas`, both the subsample and
+  plain arms, confirmed to fail `single_layer_subsample_inversion`/`single_layer_plain_no_subsample`/
+  `single_layer_reads_seed_deltas_not_running_deltas_out`). No fix candidate -- correct, intentional; the
+  floor/expand asymmetry is a direct consequence of the forward decimation and is load-bearing for the
+  deltas_out shape.
+
+- **[phase3] Container backward `NeuronLayer` layer-0 frame count is `input.rows()`, not the (smaller)
+  delta rows it back-projects over** (`NeuronLayer.cpp:199`, exercised by `Network::feed_backward` over
+  the dense `[4,3,2]` sub `[1,2]` net): under a downstream SubSample the incoming `deltas` have FEWER rows
+  than the layer's stored input (that net's layer 0 receives 10 delta rows over an 11-row input).
+  `NeuronLayer::feedBackward` accumulates its weight derivatives over `deltas.rows()` (10) but bumps
+  `_NbOfSeqFedBackward` by `InputSeq.rows()` (11) -- so the Nx2 col1 (the normalizer denominator) for that
+  layer is 11, while the LSTM layers count `deltas.rows()`. The mismatch is intentional (each region's
+  count is whatever that layer's `:199`/`:720` line says) and load-bearing for the at-update-time
+  `col0 cwiseQuotient col1` normalization. Pinned by
+  `dense_net_count_reflects_input_rows_not_delta_rows` (layer-0 count == 11, layer-1 count == 5) and the
+  `get_derivatives_layout_layer0_first` layout check. No fix candidate -- documented for the
+  normalization audit.
+
+- **[phase3] Container backward `net_*_deltasout` calibration: the returned `deltas_out` is a `deltas*W^T`
+  GEMM (k=O) so the REAL Eigen path diverges from the ascending reimpl in the last ULP** (Task 5 harness
+  `net_lstm_backward_{fwd,rev}_deltasout` / `net_dense_backward_deltasout`): the Nx2 DERIVS at these
+  synthetic net shapes are k=1 outer products and match the real class bit-for-bit (`max_ulp=0`), but the
+  layer-1 `deltas*W^T` back-projection (k=O=4 for the LSTM net) is a blocked-vs-ascending GEMM that
+  diverges (fwd 8 ULP, rev 16 ULP, max_abs ~8.7e-19; the dense net's k=O=3 happened to be 0 ULP). The
+  reimpl dump IS the golden (same ascending `matmul_seq` the Rust uses), so the Rust matches the dump; the
+  divergence is recorded as calibration in `manifest.json:net_backward_tol.deltasout_calibration`, NOT
+  gated to 0 like the derivs. Same non-local blocked-GEMM story as the Phase 2 forward; documented here so
+  the nonzero calibration line is not mistaken for a port bug.
+
+- **[phase3] INVERTED iRPROP- SIGN CONVENTION: `deriv>0 -> dw = -delta`, `deriv<0 -> dw = +delta`** (
+  `nn/train.rs::Rprop::update_weights`, from `Rprop.cpp:14-23/:26-56`): the legacy update
+  computes `dw = -delta` when `deriv > 0.0` (positive, would ascend naively) and `dw = +delta`
+  when `deriv < 0.0` (negative, would descend naively), then applies `weights += dw` -- an
+  inverted/descend-by-negation sign convention baked into the update rule, not a transcription
+  quirk. A naive "corrected" sign (positive deriv -> positive delta -> descent via `weights -=`
+  on the applied delta) would diverge from every golden immediately on step 1 (the post-first-call
+  weights would flip sign, destroying all downstream deltas/step sizes). Reproduced verbatim.
+  *Why deferred:* nothing to fix -- this IS the iRPROP- algorithm as the legacy implements it, and
+  every trajectory golden is pinned bit-exact against it. *Pinned by:* `trajectory_a_bit_exact` +
+  `trajectory_b_bit_exact` (`phase3_rprop_golden.rs`, all weights/deltas/delta_weights/prev_derivs
+  bit-exact at EVERY step across two independent real-compiled golden trajectories) and
+  `inverted_sign` (structural sign-direction assertion). *Mutation evidence (brief req. 2):*
+  swapping the sign convention (first-call branch: `deriv>0 -> +delta`, `deriv<0 -> -delta`)
+  was confirmed to fail BOTH trajectory tests at step 1, and reverting it restored the golden
+  match.
+
+- **[phase3] `Rprop::_PrevCost` is UNINITIALIZED by the legacy ctor, but this is benign:
+  it is never READ before the first WRITE** (`Rprop.h:16` declares `_PrevCost` a plain
+  `double` with no in-class initializer; `Rprop.cpp:6` (`Rprop(double initDelta)`) does not
+  mention it in the member-init list either): the only read (`Rprop.cpp:42`, the
+  cost-gated backtrack condition `_PrevCost < cost`) lives entirely inside
+  `updateWeights`'s `else` branch (the "subsequent call" path, `:23-57`); the first call
+  takes the `_Deltas.size() == 0` branch (`:10-22`) unconditionally and returns without
+  ever touching `_PrevCost`, and that SAME first call is the only one that writes it
+  (`:58`, unconditional at the end of every call). So by the time the backtrack condition
+  can execute (call >= 2), `_PrevCost` always holds a real value from call 1's tail write
+  -- the indeterminate ctor value is dead on every reachable path. The port
+  (`nn/train.rs::Rprop`) initializes the field to `0.0` for Rust's no-uninitialized-memory
+  discipline, which is a strictly SAFER default than the legacy's indeterminate value but
+  provably unobservable (both are dead until the same write). *Why deferred:* nothing to
+  fix in the legacy behavior itself -- documenting the reachability argument so a future
+  reader does not mistake the field for a live footgun. *Pinned by:* the `deltas.
+  is_empty()` first-call gate (`nn/train.rs`) structurally mirroring `_Deltas.size() == 0`,
+  and `trajectory_a_bit_exact`/`trajectory_b_bit_exact` exercising calls 2+ (where
+  `prev_cost` is read) bit-exact against the real class from a real call-1 write, never
+  from the ctor default.
+
+- **[phase3] COST-GATED BACKTRACK + `prev_derivs` ZEROING** (`nn/train.rs::
+  Rprop::update_weights` shrink branch, from `Rprop.cpp:38-45`): on a derivative sign flip
+  (`derivTimesPrev < 0`), the weight step is undone (`weights[j] -= delta_weights[j]`) ONLY if
+  the cost went UP since the prior call (`prev_cost < cost`); the shrink is applied regardless
+  (delta clamped to min), but the last delta_weights value is discarded/stale if the cost did
+  NOT rise. Separately and critically, `prev_derivs[j]` is ZEROED (:45) unconditionally after the
+  shrink, forcing the NEXT call's `deriv_times_prev` for that element to be exactly 0 regardless
+  of the next step's derivative sign, routing it into the `== 0` branch (recompute + apply at
+  the current, decayed delta). Do not "fix" this into an unconditional backtrack, and do not drop
+  the zeroing -- the backtrack gate and the zeroing are the load-bearing iRPROP- machinery for
+  handling weight reversals. Reproduced verbatim. *Why deferred:* nothing to fix -- this is the
+  iRPROP- rule as specialized by Igel & Husken, 2000 (the cost-gated backtrack + prev_derivs
+  zeroing on a sign flip; the original Riedmiller & Braun 1993 RPROP backtracks unconditionally
+  on every sign flip, with no cost comparison -- "iRPROP-" is this project's inherited name for
+  the gated variant, kept for continuity with the spec/CLAUDE.md). *Pinned by:*
+  `trajectory_a_bit_exact` (step 3 backtracks on cost rise 9->12, step 4 does NOT on cost fall
+  12->8, both elements' prev_derivs bit-match the zero-forced values at subsequent steps) +
+  `trajectory_b_bit_exact` (alternating cost oscillations over 48 steps; element 1 hits the
+  shrink branch every other step and its backtrack gate FIRES every one of those times -- cost
+  rises on every even step by construction, so trajectory B never exercises a shrink WITHOUT a
+  backtrack; the no-fire case (step 4's cost fall) is pinned solely by trajectory A. Element 1's
+  step-boundary prev_derivs match the forced-zero value; alternating-sign delta shrinks are
+  clamped correctly).
+  *Mutation evidence (brief req. 3):* (a) inverting the backtrack gate (`prev_cost < cost` ->
+  `prev_cost > cost`) failed both trajectory tests, the element that should backtrack at step 3
+  did not. (b) Dropping the zeroing (`self.prev_derivs[j] = 0.0` removed) failed both trajectory
+  tests via a `prev_derivs` mismatch at the step immediately after the shrink -- the zero-forced
+  value was not present to route the next call into the `== 0` branch, so the state machine
+  diverged. Both mutations reverted to verified-good state after each.
+
+- **[phase3] BLSTM enforcement-step (`_TargetEnforcementStep < 0`) mutates the caller-visible
+  `outputSeq` interior to -0.5, and does so SEPARATELY from the backward's own target rewrite**
+  (`nn/blstm.rs::feed_forward_backward_plain`, from `BLSTMNeuralNetwork.cpp:788-828`, risk R7):
+  the plain per-window worker, when backprop is active and `_TargetEnforcementStep < 0`, first
+  builds a NEW target copy with interior rows `[1, rows-1)` set to -0.5 and feeds THAT to
+  `feed_backward` (the output is NOT touched at this point, so the backward seeds its deltas from
+  the raw forward output), THEN the cost block builds ANOTHER fresh target copy AND overwrites the
+  caller's `output` interior with -0.5 before `computeCost`. Two independent -0.5 rewrites, and the
+  ordering (backward first, on unmutated output; cost second, mutating output) is load-bearing --
+  a port that shared one rewrite or reordered them would seed the backward from the -0.5-poisoned
+  output. *Why deferred:* provenance; the -0.5 interior is the legacy's soft-target enforcement
+  convention and the goldens are pinned against it. *Pinned by:* `enforcement_active_backward`
+  (`tests/phase3_blstm_backward_golden.rs`) vs `blstm_bwd_enforce_derivs.bin`. *Mutation evidence:*
+  feeding the ORIGINAL (un-rewritten) target to the backward instead of `new_target` failed the
+  golden; reverted after.
+
+- **[phase3] `updateWeights` normalizes `col0 cwiseQuotient col1` ELEMENT-WISE, so a count-0
+  region divides `0/0 = NaN` (or `x/0 = +-inf`) per IEEE -- NO guard** (`nn/blstm.rs::update_weights`,
+  from `BLSTMNeuralNetwork.cpp:306`, risk R1): the per-element quotient is the ONLY correct
+  normalization -- a scalar `/nframes` is wrong because different deriv-object regions carry
+  different frame counts (the mean/std tail count 1; the LSTM blocks accumulate frames x sweeps x
+  per-window coverings). Since the downstream trainer (iRPROP-) is SIGN-based, the magnitude of the
+  quotient is invisible through Rprop on a well-formed count vector -- the element-wise-vs-scalar
+  distinction is observable ONLY at a count-0 element, where `0/0 = NaN` routes to Rprop's else
+  (ascend) branch while a scalar `0/n = 0` takes no step. Under a real training call every count is
+  > 0, so the NaN path is not hit; it is reproduced (no guard) for parity. *Why deferred:* provenance
+  + the count-0 case cannot occur in real training. *Pinned by:* `update_weights_element_wise_not_scalar`
+  (a count-0 zero-deriv row takes the `+init_delta` NaN-routed step). *Mutation evidence:* replacing
+  `col0 / col1` with `col0 / n` (scalar) failed that test (the count-0 row took no step); reverted.
+
+- **[phase3] BLSTM windowed backward: TwoSweeps derivs DOUBLE (both sweeps back-propagate, derivs
+  NOT halved) and OverLap derivs accumulate per covering window -- the `col1` count carries the
+  forward-average compensation, never the derivs** (`nn/blstm.rs` windowed drivers +
+  `get_weights_derivatives`, from `BLSTMNeuralNetwork.cpp:548-590`/`:592-681`, spec S6): the
+  windowed drivers call the per-window worker (forward + backward + cost) inside EVERY window, so
+  the sub-network deriv accumulators (which `+=` per `feed_backward` and are reset only by
+  `reset_weights_derivatives`) naturally sum across windows/sweeps. TwoSweeps runs the worker over
+  two offset padded sweeps and averages the FORWARD output `/2`, but the derivs are the full
+  two-sweep sum (col1 count == 34 vs the single-sweep truncate's 12); OverLap divides the forward
+  output by the per-row coverage but accumulates the derivs once per covering window (col1 == 27 vs
+  the single-pass 12). A "fix" that halved the derivs to match the forward /2 would corrupt the
+  gradient. *Why deferred:* provenance; the count column is the legacy's compensation mechanism.
+  *Pinned by:* `twosweeps_count_vector`/`overlap_count_vector` (col1 == the manifest-recorded 34/27,
+  strictly > the single-pass counts) + the col0 goldens (`blstm_bwd_{twosweeps,overlap}_derivs.bin`,
+  non-vacuously differing from the truncate col0 by up to 22x). *Mutation evidence:* pre-normalizing
+  col0 by col1 in `get_weights_derivatives` (i.e. halving/dividing the accumulated derivs) failed
+  `twosweeps_count_vector`; reverted.
+
+- **[phase3] BLSTM `getWeightsDerivatives` mean/std tail is 4 constant blocks `[Zero | Ones | Zero
+  | Ones]` -- deriv 0, count 1, stats never trained** (`nn/blstm.rs::get_weights_derivatives`, from
+  `BLSTMNeuralNetwork.cpp:259,270`): the `2*inputSize` normalization-tail rows (mean then std) are
+  appended to the Nx2 gradient object as `[0.0, 1.0]` each -- a zero derivative (the mean/std are
+  not gradient-trained; they are folded from `InputStatistics` separately) and a count of exactly 1
+  (so the `col0/col1` update-time quotient leaves them as `0/1 = 0`, i.e. no step). *Why deferred:*
+  provenance. *Pinned by:* `meanstd_tail_structure` (last `2*inputSize` rows bit-exact `[0.0, 1.0]`)
+  + `update_weights_changes_weights_via_rprop` (the tail weights -- mean 0 / std 1 -- are unchanged
+  after a step). *Mutation evidence:* changing the tail push to `[0.0, 0.0]` failed
+  `meanstd_tail_structure`; reverted.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

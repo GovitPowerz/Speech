@@ -35,10 +35,23 @@
 #include "LongTermSpectralVariation.h"
 #include "MelFilterBank.h"
 #include "NeuronLayer.h"
+#include "Rprop.h"
 #include "Segmenter.h"
 #include "TimeDomainCorrel.h"
 #include "fft.hpp"
 #include "fmath.hpp"
+
+// Phase 3 Task 7: exposes Rprop's protected state (_Deltas/_PrevDerivs/
+// _DeltasWeights/_PrevCost) so the harness can dump the per-step trainer state
+// alongside the caller-visible weights vector. Rprop::updateWeights itself is
+// called UNMODIFIED (public, no override needed) -- only the accessors are new.
+struct RpropProbe : Rprop {
+    RpropProbe(double initDelta) : Rprop(initDelta) {}
+    using Rprop::_Deltas;
+    using Rprop::_PrevDerivs;
+    using Rprop::_DeltasWeights;
+    using Rprop::_PrevCost;
+};
 
 // Phase 2b Task 2: exposes the protected Segmenter surface (buildFromConf,
 // results2segmentation, updateSegmentation) for the harness, and satisfies the
@@ -478,6 +491,44 @@ static Eigen::MatrixXd subSampleLoop(long R, const Eigen::MatrixXd& Input) {
         for (long kk = 0; kk < R; ++kk)
             SubInput.block(jj, kk * C, 1, C) = Input.row(jj * R + kk);
     return SubInput;
+}
+
+// Phase 3 Task 1: transcription of NeuralNetwork<L>::InvSubSample (NeuralNetwork.hpp:
+// 136-145). T x (C*R) -> (T*R) x C: the inverse of SubSample, un-stacking each block
+// [kk*C, (kk+1)*C) of source row jj into output row jj*R+kk. Used by the backward
+// container loop to inflate a sub-sampled layer's returned deltas back to the full
+// (pre-decimation) row count before feeding the layer below it.
+static Eigen::MatrixXd invSubSampleLoop(long R, const Eigen::MatrixXd& Input) {
+    const long sampledLen = Input.rows() * R;
+    const long C = Input.cols() / R;
+    Eigen::MatrixXd out(sampledLen, C);
+    for (long jj = 0; jj < Input.rows(); ++jj)
+        for (long kk = 0; kk < R; ++kk)
+            out.row(jj * R + kk) = Input.block(jj, kk * C, 1, C);
+    return out;
+}
+
+// Read a legacy `.bin` (i64 LE rows, i64 LE cols, column-major f64) into a matrix --
+// the inverse of Helpers.hpp's Matrix2BinaryFile. Used by the Phase 3 real-net
+// backward probe to re-read the committed e2e_input.bin (201 x 11) without needing
+// its shape at the call site.
+static Eigen::MatrixXd readBinMatrix(const std::string& fileName) {
+    std::ifstream in(fileName, std::ios::binary);
+    if (!in) {
+        std::cerr << "readBinMatrix: cannot open " << fileName << "\n";
+        exit(1);
+    }
+    long long rows = 0, cols = 0;
+    in.read(reinterpret_cast<char*>(&rows), 8);
+    in.read(reinterpret_cast<char*>(&cols), 8);
+    Eigen::MatrixXd m(rows, cols);
+    for (long long c = 0; c < cols; ++c)
+        for (long long r = 0; r < rows; ++r) {
+            double v;
+            in.read(reinterpret_cast<char*>(&v), 8);
+            m(r, c) = v;
+        }
+    return m;
 }
 
 // Phase 2 Task 6: a per-layer forward step (LSTM or dense), bundling the layer's
@@ -1268,6 +1319,771 @@ static void signalReimplFFB(T6Blstm& b, Eigen::MatrixXd& input, long window_size
         overlapT6(b, input, window_size, window_shift, output);  // overlap path
     }
 }
+
+// =========================================================================
+// Phase 3 Task 1: ascending-loop BACKWARD reimpl family. Mirrors the Phase 2
+// forward reimpl family above (lstmForwardLoop/denseForwardLoop/netForward*),
+// built on matSeq + the same file-scope kernels. The backward contains Eigen
+// GEMMs at NN-wide k (_FeedbackWeights*test LSTMLayer.cpp:703, _InputWeights*
+// testM :707, NeuronLayer deltas*_Weights.transpose() :202), so the goldens are
+// dumped from THESE reimpls and the NN_TOL probes record the real-class deltas
+// (synthetic small shapes expected 0 ULP; real-net k>=23 recorded as Phase 4
+// calibration). Derivatives are recomputed FROM the post-activation caches
+// (_Gates/_CellStates/_CellsIn) via the activation deriv structs -- no forward
+// change; the forward-with-caches helper below just also RETURNS cellStates/
+// cellsIn (the forward stores gates + output only) so the backward can read all
+// three caches the real layer keeps as members.
+
+// Forward-with-caches: identical math to lstmForwardLoop but ALSO returns the
+// cellStates (T x O) and cellsIn (T x O = asinh(cellStates)) caches the backward
+// consumes (_CellStates / _CellsIn members). Byte-identical to lstmForwardLoop by
+// construction (same op order); kept separate so no forward golden path shifts.
+static void lstmForwardLoopCache(const Eigen::MatrixXd& inputSeq, const Eigen::MatrixXd& inputW,
+                                 const Eigen::MatrixXd& feedbackW, const Eigen::MatrixXd& peep,
+                                 const Eigen::MatrixXd& bias, int O,
+                                 bool cellsPeep, bool gatesPeep, bool gatesRecPeep,
+                                 Eigen::MatrixXd& gates, Eigen::MatrixXd& output,
+                                 Eigen::MatrixXd& cellStates, Eigen::MatrixXd& cellsIn) {
+    const int I = static_cast<int>(inputW.rows());
+    const int cols = static_cast<int>(inputSeq.cols());
+    Eigen::MatrixXd proj;
+    if (cols > I) {
+        proj = matSeq(inputSeq.leftCols(I), inputW);
+    } else if (cols < I) {
+        proj = matSeq(inputSeq, inputW.topRows(cols));
+    } else {
+        proj = matSeq(inputSeq, inputW);
+    }
+    const int T = static_cast<int>(proj.rows());
+    gates.resize(T, 4 * O);
+    for (int t = 0; t < T; ++t)
+        for (int j = 0; j < 4 * O; ++j) gates(t, j) = proj(t, j) + bias(0, j);
+    cellStates = Eigen::MatrixXd::Zero(T, O);
+    cellsIn = Eigen::MatrixXd::Zero(T, O);
+    output.resize(T, O);
+    {
+        const int t = 0;
+        for (int j = 0; j < 2 * O; ++j) gates(t, j) = GatesFunction::fn(gates(t, j));
+        for (int j = 0; j < O; ++j) gates(t, 3 * O + j) = Maxmin2::fn(gates(t, 3 * O + j));
+        for (int j = 0; j < O; ++j) cellStates(t, j) = gates(t, j) * gates(t, 3 * O + j);
+        if (cellsPeep)
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += cellStates(t, j) * peep(2, j);
+        if (gatesPeep) {
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, j) * peep(9, j);
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, O + j) * peep(10, j);
+        }
+        for (int j = 0; j < O; ++j) gates(t, 2 * O + j) = GatesFunction::fn(gates(t, 2 * O + j));
+        for (int j = 0; j < O; ++j) cellsIn(t, j) = Identity::fn(cellStates(t, j));
+        for (int j = 0; j < O; ++j) output(t, j) = gates(t, 2 * O + j) * cellsIn(t, j);
+    }
+    for (int t = 1; t < T; ++t) {
+        Eigen::MatrixXd rec = matSeq(output.row(t - 1), feedbackW);
+        for (int j = 0; j < 4 * O; ++j) gates(t, j) += rec(0, j);
+        if (cellsPeep) {
+            for (int j = 0; j < O; ++j) gates(t, j) += cellStates(t - 1, j) * peep(0, j);
+            for (int j = 0; j < O; ++j) gates(t, O + j) += cellStates(t - 1, j) * peep(1, j);
+        }
+        if (gatesRecPeep) {
+            for (int j = 0; j < O; ++j) gates(t, j) += gates(t - 1, j) * peep(3, j);
+            for (int j = 0; j < O; ++j) gates(t, O + j) += gates(t - 1, O + j) * peep(7, j);
+        }
+        if (gatesPeep) {
+            for (int j = 0; j < O; ++j)
+                gates(t, j) += gates(t - 1, O + j) * peep(4, j) + gates(t - 1, 2 * O + j) * peep(5, j);
+            for (int j = 0; j < O; ++j)
+                gates(t, O + j) += gates(t - 1, j) * peep(6, j) + gates(t - 1, 2 * O + j) * peep(8, j);
+        }
+        for (int j = 0; j < 2 * O; ++j) gates(t, j) = GatesFunction::fn(gates(t, j));
+        for (int j = 0; j < O; ++j) gates(t, 3 * O + j) = Maxmin2::fn(gates(t, 3 * O + j));
+        for (int j = 0; j < O; ++j)
+            cellStates(t, j) = gates(t, j) * gates(t, 3 * O + j) + cellStates(t - 1, j) * gates(t, O + j);
+        if (cellsPeep)
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += cellStates(t, j) * peep(2, j);
+        if (gatesPeep) {
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, j) * peep(9, j);
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t, O + j) * peep(10, j);
+        }
+        if (gatesRecPeep)
+            for (int j = 0; j < O; ++j) gates(t, 2 * O + j) += gates(t - 1, 2 * O + j) * peep(11, j);
+        for (int j = 0; j < O; ++j) gates(t, 2 * O + j) = GatesFunction::fn(gates(t, 2 * O + j));
+        for (int j = 0; j < O; ++j) cellsIn(t, j) = Identity::fn(cellStates(t, j));
+        for (int j = 0; j < O; ++j) output(t, j) = gates(t, 2 * O + j) * cellsIn(t, j);
+    }
+}
+
+// The four LSTM derivative blocks + the frame count, in the same shapes the real
+// layer's protected members carry (input I x 4O, feedback O x 4O, peep 12 x O,
+// bias 1 x 4O). ACCUMULATED across calls, exactly like the real layer's members.
+struct LstmDerivs {
+    Eigen::MatrixXd inputW, feedbackW, peep, bias;   // *Derivatives blocks
+    long nbFedBackward = 0;
+    void init(int I, int O) {
+        inputW = Eigen::MatrixXd::Zero(I, 4 * O);
+        feedbackW = Eigen::MatrixXd::Zero(O, 4 * O);
+        peep = Eigen::MatrixXd::Zero(12, O);
+        bias = Eigen::MatrixXd::Zero(1, 4 * O);
+        nbFedBackward = 0;
+    }
+};
+
+// legacy: LSTMLayer.cpp:518-723 (feedBackward), transcribed VERBATIM. Reverse-time
+// loop; gate-derivative order O -> state -> C -> F -> I; the 12-row peephole index
+// map identical to the forward (rows 0,1,2 cells; 3,7,11 gates-rec; 4,5,6,8,9,10
+// gates); the row==0 no-cellstate forget branch (:648-657); the deltasForgetGatetmp
+// save (:624 read at :660 for the input gate); the width tolerance (:534-543:
+// cols>I -> leftCols transpose; cols<I -> ZERO-PAD to I rows); the 4O-stacked
+// testM; deltasPreviousLayer = (_InputWeights*testM).transpose() and deltasFeedback
+// = (_FeedbackWeights*test).transpose() via matSeq (:703,:707); the invSubSampling
+// block scaling (:710-715); ACCUMULATE into the four deriv members; += linesNb.
+// I is the LAYER'S input size (inputW.rows()); cols is InputSeq.cols(). Derivatives
+// recomputed FROM the post-activation caches (gates/cellStates/cellsIn) via the
+// activation deriv structs -- GatesFunction/Maxmin2/Identity::deriv take the
+// ACTIVATED value. DEAD (not ported): the _MaxSaturation truncation (:693-705
+// commented), the commented alternate bodies (:519-533,:564-574,:684-704).
+static Eigen::MatrixXd lstmBackwardLoop(const Eigen::MatrixXd& InputSeq,
+                                        const Eigen::MatrixXd& outputSeq,
+                                        const Eigen::MatrixXd& deltas,
+                                        const Eigen::MatrixXd& inputW,
+                                        const Eigen::MatrixXd& feedbackW,
+                                        const Eigen::MatrixXd& peep, int I, int O,
+                                        bool cellsPeep, bool gatesPeep, bool gatesRecPeep,
+                                        const Eigen::MatrixXd& gatesCache,
+                                        const Eigen::MatrixXd& cellStates,
+                                        const Eigen::MatrixXd& cellsIn,
+                                        long invSubSamplingRatio, LstmDerivs& d) {
+    // :534-543 width tolerance -> `input` is (I x InputSeq.rows()) (transposed).
+    Eigen::MatrixXd input;
+    if (InputSeq.cols() > I) {
+        input = InputSeq.leftCols(I).transpose();
+    } else if (InputSeq.cols() < I) {
+        Eigen::MatrixXd filler = Eigen::MatrixXd::Zero(I - InputSeq.cols(), InputSeq.rows());
+        input.resize(I, InputSeq.rows());
+        input << InputSeq.transpose(), filler;
+    } else {
+        input = InputSeq.transpose();
+    }
+    Eigen::MatrixXd output = outputSeq.transpose();   // O x T
+
+    Eigen::MatrixXd deltasPreviousLayer = Eigen::MatrixXd::Zero(input.cols(), I);
+    Eigen::MatrixXd deltasFeedback = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd deltasInputGate = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd tmpDeltasInputGate = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd deltasForgetGate = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd tmpDeltasForgetGate = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd deltasCells;
+    Eigen::MatrixXd deltasOutputGate = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd tmpDeltasOutputGate = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd epsilonCells;
+    Eigen::MatrixXd epsilonState;
+    Eigen::MatrixXd tmpEpsilonState = Eigen::MatrixXd::Zero(1, O);
+    Eigen::MatrixXd epsilonForget;
+    Eigen::MatrixXd inputWeightsDerivatives = Eigen::MatrixXd::Zero(I, 4 * O);
+    Eigen::MatrixXd feedbackWeightsDerivatives = Eigen::MatrixXd::Zero(O, 4 * O);
+    Eigen::MatrixXd peepWeightDerivatives = Eigen::MatrixXd::Zero(12, O);
+    Eigen::MatrixXd biaisesDerivatives = Eigen::MatrixXd::Zero(1, 4 * O);
+
+    // Cache block accessors (post-activation): _Gates.block(row, k*O, 1, O).
+    auto gRow = [&](long row, int block) { return gatesCache.block(row, (long)block * O, 1, O); };
+
+    Eigen::MatrixXd testM(4 * O, input.cols());
+    long long linesNb = deltas.rows();
+    for (long long row = linesNb - 1; row >= 0; --row) {
+        epsilonCells = deltas.row(row) + deltasFeedback;   // :580
+
+        // :582-585 deltasOutputGate.
+        tmpDeltasOutputGate = cellsIn.row(row).cwiseProduct(epsilonCells);
+        if (gatesPeep)
+            tmpDeltasOutputGate.noalias() +=
+                (deltasInputGate.array() * peep.row(5).array() + deltasForgetGate.array() * peep.row(8).array()).matrix();
+        if (gatesRecPeep)
+            tmpDeltasOutputGate.noalias() += (deltasOutputGate.array() * peep.row(11).array()).matrix();
+        deltasOutputGate = (gRow(row, 2).unaryExpr(CwiseActFunctionDeriv<GatesFunction>()).array() * tmpDeltasOutputGate.array()).matrix();
+
+        // :595-605 output-gate deriv accumulation.
+        inputWeightsDerivatives.block(0, 2 * O, I, O).noalias() += input.col(row) * deltasOutputGate;
+        if (row > 0) {
+            feedbackWeightsDerivatives.block(0, 2 * O, O, O).noalias() += output.col(row - 1) * deltasOutputGate;
+            if (gatesRecPeep)
+                peepWeightDerivatives.row(11).noalias() += (deltasOutputGate.array() * gRow(row - 1, 2).array()).matrix();
+        }
+        if (cellsPeep) peepWeightDerivatives.row(2).noalias() += deltasOutputGate.cwiseProduct(cellStates.row(row));
+        if (gatesPeep) {
+            peepWeightDerivatives.row(9).noalias() += deltasOutputGate.cwiseProduct(gRow(row, 0));
+            peepWeightDerivatives.row(10).noalias() += deltasOutputGate.cwiseProduct(gRow(row, 1));
+        }
+        biaisesDerivatives.block(0, 2 * O, 1, O) += deltasOutputGate;
+
+        // :607-611 epsilonForget from NEXT-step forget gate.
+        if (row != linesNb - 1) {
+            epsilonForget = gRow(row + 1, 1).array() * epsilonState.array();
+        } else {
+            epsilonForget = Eigen::MatrixXd::Zero(1, O);
+        }
+
+        // :613-614 epsilonState.
+        if (cellsPeep)
+            tmpEpsilonState.noalias() =
+                (deltasInputGate.array() * peep.row(0).array() + deltasForgetGate.array() * peep.row(1).array() + deltasOutputGate.array() * peep.row(2).array()).matrix();
+        epsilonState.noalias() = (gRow(row, 2).array() * cellsIn.row(row).unaryExpr(CwiseActFunctionDeriv<Identity>()).array() * epsilonCells.array()).matrix() + epsilonForget + tmpEpsilonState;
+
+        // :616 deltasCells.
+        deltasCells.noalias() = (gRow(row, 0).array() * gRow(row, 3).unaryExpr(CwiseActFunctionDeriv<Maxmin2>()).array() * epsilonState.array()).matrix();
+        inputWeightsDerivatives.block(0, 3 * O, I, O).noalias() += input.col(row) * deltasCells;
+        if (row > 0) feedbackWeightsDerivatives.block(0, 3 * O, O, O).noalias() += output.col(row - 1) * deltasCells;
+        biaisesDerivatives.block(0, 3 * O, 1, O) += deltasCells;
+
+        // :624-657 deltasForgetGate (row>0 with cellstate; row==0 no cellstate).
+        Eigen::MatrixXd deltasForgetGatetmp = deltasForgetGate;   // :624 save (read at :660)
+        if (row > 0) {
+            tmpDeltasForgetGate.noalias() = cellStates.row(row - 1).cwiseProduct(epsilonState);
+            if (gatesPeep)
+                tmpDeltasForgetGate.noalias() += (deltasInputGate.array() * peep.row(4).array() + deltasOutputGate.array() * peep.row(10).array()).matrix();
+            if (gatesRecPeep)
+                tmpDeltasForgetGate.noalias() += (deltasForgetGate.array() * peep.row(7).array()).matrix();
+            deltasForgetGate = (gRow(row, 1).unaryExpr(CwiseActFunctionDeriv<GatesFunction>()).array() * tmpDeltasForgetGate.array()).matrix();
+            inputWeightsDerivatives.block(0, 1 * O, I, O).noalias() += input.col(row) * deltasForgetGate;
+            feedbackWeightsDerivatives.block(0, 1 * O, O, O).noalias() += output.col(row - 1) * deltasForgetGate;
+            if (cellsPeep) peepWeightDerivatives.row(1).noalias() += deltasForgetGate.cwiseProduct(cellStates.row(row - 1));
+            if (gatesPeep) {
+                peepWeightDerivatives.row(6).noalias() += deltasForgetGate.cwiseProduct(gRow(row - 1, 0));
+                peepWeightDerivatives.row(8).noalias() += deltasForgetGate.cwiseProduct(gRow(row - 1, 2));
+            }
+            if (gatesRecPeep) peepWeightDerivatives.row(7).noalias() += deltasForgetGate.cwiseProduct(gRow(row - 1, 1));
+            biaisesDerivatives.block(0, 1 * O, 1, O) += deltasForgetGate;
+        } else {
+            tmpDeltasForgetGate = Eigen::MatrixXd::Zero(1, O);
+            if (gatesPeep)
+                tmpDeltasForgetGate.noalias() += (deltasInputGate.array() * peep.row(4).array() + deltasOutputGate.array() * peep.row(10).array()).matrix();
+            if (gatesRecPeep)
+                tmpDeltasForgetGate.noalias() += (deltasForgetGate.array() * peep.row(7).array()).matrix();
+            deltasForgetGate = gRow(row, 1).unaryExpr(CwiseActFunctionDeriv<GatesFunction>()).cwiseProduct(tmpDeltasForgetGate);
+            inputWeightsDerivatives.block(0, 1 * O, I, O).noalias() += input.col(row) * deltasForgetGate;
+            biaisesDerivatives.block(0, 1 * O, 1, O) += deltasForgetGate;
+        }
+
+        // :659-682 deltasInputGate (reads deltasForgetGatetmp at :660).
+        tmpDeltasInputGate.noalias() = gRow(row, 3).cwiseProduct(epsilonState);
+        if (gatesPeep)
+            tmpDeltasInputGate.noalias() += (deltasForgetGatetmp.array() * peep.row(6).array() + deltasOutputGate.array() * peep.row(9).array()).matrix();
+        if (gatesRecPeep)
+            tmpDeltasInputGate.noalias() += (deltasInputGate.array() * peep.row(3).array()).matrix();
+        deltasInputGate = gRow(row, 0).unaryExpr(CwiseActFunctionDeriv<GatesFunction>()).cwiseProduct(tmpDeltasInputGate);
+        inputWeightsDerivatives.block(0, 0, I, O).noalias() += input.col(row) * deltasInputGate;
+        if (row > 0) {
+            feedbackWeightsDerivatives.block(0, 0, O, O).noalias() += output.col(row - 1) * deltasInputGate;
+            if (cellsPeep) peepWeightDerivatives.row(0).noalias() += deltasInputGate.cwiseProduct(cellStates.row(row - 1));
+            if (gatesPeep) {
+                peepWeightDerivatives.row(4).noalias() += deltasInputGate.cwiseProduct(gRow(row - 1, 1));
+                peepWeightDerivatives.row(5).noalias() += deltasInputGate.cwiseProduct(gRow(row - 1, 2));
+            }
+            if (gatesRecPeep) peepWeightDerivatives.row(3).noalias() += deltasInputGate.cwiseProduct(gRow(row - 1, 0));
+        }
+        biaisesDerivatives.block(0, 0, 1, O) += deltasInputGate;
+
+        // :688-704 stacked testM column + deltasFeedback via matSeq.
+        Eigen::MatrixXd test(4 * O, 1);
+        test << deltasInputGate.transpose(), deltasForgetGate.transpose(), deltasOutputGate.transpose(), deltasCells.transpose();
+        testM.col(row) = test;
+        deltasFeedback = matSeq(feedbackW, test).transpose();   // :703 (_FeedbackWeights*test)^T
+    }
+    deltasPreviousLayer = matSeq(inputW, testM).transpose();    // :707 (_InputWeights*testM)^T
+
+    if (invSubSamplingRatio > 1) {
+        inputWeightsDerivatives *= (double)invSubSamplingRatio;
+        feedbackWeightsDerivatives *= (double)invSubSamplingRatio;
+        peepWeightDerivatives *= (double)invSubSamplingRatio;
+        biaisesDerivatives *= (double)invSubSamplingRatio;
+    }
+    d.inputW += inputWeightsDerivatives;
+    d.feedbackW += feedbackWeightsDerivatives;
+    d.peep += peepWeightDerivatives;
+    d.bias += biaisesDerivatives;
+    d.nbFedBackward += (long)linesNb;
+    return deltasPreviousLayer;
+}
+
+// legacy: LSTMLayer.cpp:725-732 (feedBackwardReverse): reverse input/output/deltas,
+// call the FORWARD-order feedBackward, reverse the returned deltas. The caches are
+// stored time-reversed after feedForwardReverse and consumed AS-IS (do not
+// un-reverse) -- so the caller passes the reversed-storage caches here unchanged.
+static Eigen::MatrixXd lstmBackwardReverseLoop(const Eigen::MatrixXd& InputSeq,
+                                               const Eigen::MatrixXd& outputSeq,
+                                               const Eigen::MatrixXd& deltas,
+                                               const Eigen::MatrixXd& inputW,
+                                               const Eigen::MatrixXd& feedbackW,
+                                               const Eigen::MatrixXd& peep, int I, int O,
+                                               bool cellsPeep, bool gatesPeep, bool gatesRecPeep,
+                                               const Eigen::MatrixXd& gatesCache,
+                                               const Eigen::MatrixXd& cellStates,
+                                               const Eigen::MatrixXd& cellsIn,
+                                               long invSubSamplingRatio, LstmDerivs& d) {
+    Eigen::MatrixXd InputSeqRev = InputSeq.colwise().reverse();
+    Eigen::MatrixXd outputSeqRev = outputSeq.colwise().reverse();
+    Eigen::MatrixXd deltasRev = deltas.colwise().reverse();
+    Eigen::MatrixXd dpl = lstmBackwardLoop(InputSeqRev, outputSeqRev, deltasRev, inputW, feedbackW,
+                                           peep, I, O, cellsPeep, gatesPeep, gatesRecPeep,
+                                           gatesCache, cellStates, cellsIn, invSubSamplingRatio, d);
+    return dpl.colwise().reverse();
+}
+
+// The dense (NeuronLayer) derivative blocks + count. Weights I x O, bias 1 x O.
+struct DenseDerivs {
+    Eigen::MatrixXd weights, bias;
+    long nbFedBackward = 0;
+    void init(int I, int O) {
+        weights = Eigen::MatrixXd::Zero(I, O);
+        bias = Eigen::MatrixXd::Zero(1, O);
+        nbFedBackward = 0;
+    }
+};
+
+// legacy: NeuronLayer.cpp:151-207 (feedBackward), transcribed VERBATIM. Width
+// tolerance (:158-166: cols>I -> leftCols transpose; cols<I -> ZERO-PAD to I rows).
+// weightsDerivatives += input.col(jj)*deltas.row(jj) per row (:178-183); bias +=
+// deltas.colwise().sum(); invSubSampling scaling (:192-195); += InputSeq.rows()
+// (:199 -- NOTE InputSeq.rows(), not deltas.rows()). lastLayer -> deltas_out =
+// deltas*_Weights.transpose() with NO activation deriv (the softmax+CE fusion lives
+// in CostLaw); hidden -> *= Maxmin2'(InputSeq) on the LAYER INPUT (:204). deltas_out
+// via matSeq (deltas * W^T -- k=O, the divergent GEMM at NN width).
+static Eigen::MatrixXd denseBackwardLoop(const Eigen::MatrixXd& InputSeq,
+                                         const Eigen::MatrixXd& deltas,
+                                         const Eigen::MatrixXd& weights, int I, int O,
+                                         long invSubSamplingRatio, bool lastLayer, DenseDerivs& d) {
+    Eigen::MatrixXd input;
+    if (InputSeq.cols() > I) {
+        input = InputSeq.leftCols(I).transpose();
+    } else if (InputSeq.cols() < I) {
+        Eigen::MatrixXd filler = Eigen::MatrixXd::Zero(I - InputSeq.cols(), InputSeq.rows());
+        input.resize(I, InputSeq.rows());
+        input << InputSeq.transpose(), filler;
+    } else {
+        input = InputSeq.transpose();
+    }
+    Eigen::MatrixXd weightsDerivatives = Eigen::MatrixXd::Zero(I, O);
+    Eigen::MatrixXd biaisesDerivatives = Eigen::MatrixXd::Zero(1, O);
+    for (long jj = 0; jj < deltas.rows(); ++jj)
+        weightsDerivatives.noalias() += input.col(jj) * deltas.row(jj);
+    biaisesDerivatives.noalias() += deltas.colwise().sum();
+    if (invSubSamplingRatio > 1) {
+        weightsDerivatives *= (double)invSubSamplingRatio;
+        biaisesDerivatives *= (double)invSubSamplingRatio;
+    }
+    d.weights += weightsDerivatives;
+    d.bias += biaisesDerivatives;
+    d.nbFedBackward += (long)InputSeq.rows();
+
+    // W^T is (O x I); deltas (T x O) * W^T (O x I) -> (T x I). matSeq needs W^T.
+    Eigen::MatrixXd wT = weights.transpose();
+    Eigen::MatrixXd deltas_out = matSeq(deltas, wT);
+    if (!lastLayer) {
+        for (long r = 0; r < deltas_out.rows(); ++r)
+            for (long c = 0; c < deltas_out.cols(); ++c)
+                deltas_out(r, c) *= Maxmin2::deriv(InputSeq(r, c));   // :204 asinh' on the INPUT
+    }
+    return deltas_out;
+}
+
+// One backward layer step (LSTM or dense), mirroring NetLayerStep for the forward.
+// `backward(input, output, deltasIn, invSub, lastLayer)` returns deltas_out and
+// accumulates the layer's derivs into its bound Derivs struct.
+struct NetBackStep {
+    std::function<Eigen::MatrixXd(const Eigen::MatrixXd&, const Eigen::MatrixXd&,
+                                  const Eigen::MatrixXd&, long, bool)>
+        backward;
+};
+
+// legacy: NeuralNetwork.hpp:251-300 (feedBackward). Reverse-order layer loop with the
+// running invSubSamplingRatio + the SubSample/InvSubSample inversion. Each layer gets
+// its retained forward input (Input for layer 0, layersOutput[jj-1] for jj>0) and its
+// forward OUTPUT (layersOutput[jj] for hidden, outputSeq for the final layer);
+// SubSampling[jj] > 1 subsamples the layer's input + output.topRows(deltaRows), the
+// layer runs, its deltas_out is InvSubSampled, and invSubSamplingRatio *= ratio (fed
+// into the NEXT layer up). `deltaRows` tracks the current delta row count (deltas for
+// the seed layer, deltas_out.rows() thereafter). The steps close over the retained
+// forward tensors; the driver only threads deltas + the ratio.
+static Eigen::MatrixXd netBackwardLoop(const std::vector<long>& neuronNb,
+                                       const std::vector<long>& subSampling,
+                                       const std::vector<NetBackStep>& steps,
+                                       const Eigen::MatrixXd& Input,
+                                       const Eigen::MatrixXd& outputSeq,
+                                       const std::vector<Eigen::MatrixXd>& layersOutput,
+                                       const Eigen::MatrixXd& seedDeltas) {
+    Eigen::MatrixXd deltas_out;
+    long invSubSamplingRatio = 1;
+    if (Input.rows() == 0) return deltas_out;
+    const size_t L = neuronNb.size();
+    if (L == 2) {
+        if (subSampling[0] > 1) {
+            Eigen::MatrixXd sub = subSampleLoop(subSampling[0], Input);
+            deltas_out = steps[0].backward(sub.topRows(seedDeltas.rows()), outputSeq.topRows(seedDeltas.rows()),
+                                           seedDeltas, invSubSamplingRatio, true);
+            deltas_out = invSubSampleLoop(subSampling[0], deltas_out);
+            invSubSamplingRatio *= subSampling[0];
+        } else {
+            deltas_out = steps[0].backward(Input, outputSeq, seedDeltas, invSubSamplingRatio, true);
+        }
+        return deltas_out;
+    }
+    for (size_t kk = 0; kk < L - 1; ++kk) {
+        size_t jj = L - 2 - kk;
+        const Eigen::MatrixXd& curDeltas = (kk == 0) ? seedDeltas : deltas_out;
+        if (jj == 0) {
+            if (subSampling[0] > 1) {
+                Eigen::MatrixXd sub = subSampleLoop(subSampling[0], Input);
+                deltas_out = steps[jj].backward(sub.topRows(curDeltas.rows()), layersOutput[jj].topRows(curDeltas.rows()),
+                                                curDeltas, invSubSamplingRatio, true);
+                deltas_out = invSubSampleLoop(subSampling[0], deltas_out);
+                invSubSamplingRatio *= subSampling[0];
+            } else {
+                deltas_out = steps[jj].backward(Input, layersOutput[jj], curDeltas, invSubSamplingRatio, true);
+            }
+        } else if (jj == L - 2) {
+            if (subSampling[jj] > 1) {
+                Eigen::MatrixXd sub = subSampleLoop(subSampling[jj], layersOutput[jj - 1]);
+                deltas_out = steps[jj].backward(sub.topRows(seedDeltas.rows()), outputSeq.topRows(seedDeltas.rows()),
+                                                seedDeltas, invSubSamplingRatio, false);
+                deltas_out = invSubSampleLoop(subSampling[jj], deltas_out);
+                invSubSamplingRatio *= subSampling[jj];
+            } else {
+                deltas_out = steps[jj].backward(layersOutput[jj - 1], outputSeq, seedDeltas, invSubSamplingRatio, false);
+            }
+        } else {
+            if (subSampling[jj] > 1) {
+                Eigen::MatrixXd sub = subSampleLoop(subSampling[jj], layersOutput[jj - 1]);
+                deltas_out = steps[jj].backward(sub.topRows(curDeltas.rows()), layersOutput[jj].topRows(curDeltas.rows()),
+                                                curDeltas, invSubSamplingRatio, false);
+                deltas_out = invSubSampleLoop(subSampling[jj], deltas_out);
+                invSubSamplingRatio *= subSampling[jj];
+            } else {
+                deltas_out = steps[jj].backward(layersOutput[jj - 1], layersOutput[jj], curDeltas, invSubSamplingRatio, false);
+            }
+        }
+    }
+    return deltas_out;
+}
+
+// legacy: NeuralNetwork.hpp:302-351 (feedBackwardReverse). Byte-identical driver to
+// netBackwardLoop -- only the per-layer step closures dispatch the REVERSE layer
+// kernel (reversal lives inside the layer step). Kept separate to mirror the legacy's
+// two copy-pasted methods.
+static Eigen::MatrixXd netBackwardReverseLoop(const std::vector<long>& neuronNb,
+                                              const std::vector<long>& subSampling,
+                                              const std::vector<NetBackStep>& steps,
+                                              const Eigen::MatrixXd& Input,
+                                              const Eigen::MatrixXd& outputSeq,
+                                              const std::vector<Eigen::MatrixXd>& layersOutput,
+                                              const Eigen::MatrixXd& seedDeltas) {
+    return netBackwardLoop(neuronNb, subSampling, steps, Input, outputSeq, layersOutput, seedDeltas);
+}
+
+// One LSTM sub-network's per-layer weights + forward caches + deriv accumulators,
+// enough to run netBackwardLoop over it. Forward caches (gates/cellStates/cellsIn per
+// layer, layersOutput per non-final layer) are captured during a forward pass that
+// mirrors NeuralNetwork::feedForward's SubSample + layersOutput bookkeeping, so the
+// backward can feed each layer its exact forward input/output (the retained
+// _LayersOutput the real container holds). `reverse` picks fwd vs reverse LSTM
+// kernels. All peepholes on (the real net's config).
+struct LstmSubNet {
+    std::vector<long> neuronNb, subSampling;
+    std::vector<int> ins, outs;
+    std::vector<Eigen::MatrixXd> iw, fw, pp, bs;   // per-layer unpacked weights
+    std::vector<Eigen::MatrixXd> gcache, ccache, cicache;   // per-layer forward caches
+    std::vector<Eigen::MatrixXd> layersOutput;     // non-final layer outputs (retained)
+    std::vector<LstmDerivs> derivs;
+    bool reverse = false;
+
+    void build(const Eigen::VectorXd& flat, const std::vector<long>& nn,
+               const std::vector<long>& ss, bool rev) {
+        neuronNb = nn; subSampling = ss; reverse = rev;
+        const size_t L = nn.size() - 1;
+        ins.resize(L); outs.resize(L);
+        for (size_t jj = 0; jj < L; ++jj) {
+            ins[jj] = (int)(nn[jj] * (jj == 0 ? ss[0] : ss[jj]));
+            outs[jj] = (int)nn[jj + 1];
+        }
+        // ins[0] already folds subSampling[0] (SubSample widens the layer-0 input);
+        // ins[jj>0] folds subSampling[jj] the same way.
+        iw.resize(L); fw.resize(L); pp.resize(L); bs.resize(L);
+        derivs.resize(L);
+        long pos = 0;
+        for (size_t jj = 0; jj < L; ++jj) {
+            int I = ins[jj], O = outs[jj];
+            long nb = 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+            Eigen::VectorXd slice = flat.segment(pos, nb);
+            pos += nb;
+            unpackLstmWeights(slice, I, O, iw[jj], fw[jj], pp[jj], bs[jj]);
+            derivs[jj].init(I, O);
+        }
+    }
+
+    // Forward with cache capture (mirrors NeuralNetwork::feedForward + feedForwardReverse
+    // layersOutput bookkeeping). Fills gcache/ccache/cicache per layer + layersOutput,
+    // returns the final output (== _OutputForward or _OutputBackward).
+    Eigen::MatrixXd forwardCapture(const Eigen::MatrixXd& Input) {
+        const size_t L = neuronNb.size() - 1;
+        gcache.assign(L, Eigen::MatrixXd());
+        ccache.assign(L, Eigen::MatrixXd());
+        cicache.assign(L, Eigen::MatrixXd());
+        layersOutput.assign(L > 0 ? L - 1 : 0, Eigen::MatrixXd());
+        Eigen::MatrixXd finalOut;
+        auto runLayer = [&](size_t jj, const Eigen::MatrixXd& in, Eigen::MatrixXd& out) {
+            int O = outs[jj];
+            if (reverse) {
+                Eigen::MatrixXd inRev = in.colwise().reverse(), outRev;
+                lstmForwardLoopCache(inRev, iw[jj], fw[jj], pp[jj], bs[jj], O, true, true, true,
+                                     gcache[jj], outRev, ccache[jj], cicache[jj]);
+                out = outRev.colwise().reverse();  // caches STAY reversed (consumed as-is)
+            } else {
+                lstmForwardLoopCache(in, iw[jj], fw[jj], pp[jj], bs[jj], O, true, true, true,
+                                     gcache[jj], out, ccache[jj], cicache[jj]);
+            }
+        };
+        if (L == 1) {
+            Eigen::MatrixXd in = (subSampling[0] > 1) ? subSampleLoop(subSampling[0], Input) : Input;
+            runLayer(0, in, finalOut);
+            return finalOut;
+        }
+        for (size_t jj = 0; jj < L; ++jj) {
+            Eigen::MatrixXd in;
+            if (jj == 0) in = (subSampling[0] > 1) ? subSampleLoop(subSampling[0], Input) : Input;
+            else in = (subSampling[jj] > 1) ? subSampleLoop(subSampling[jj], layersOutput[jj - 1]) : layersOutput[jj - 1];
+            if (jj == L - 1) runLayer(jj, in, finalOut);
+            else runLayer(jj, in, layersOutput[jj]);
+        }
+        return finalOut;
+    }
+
+    // Backward via netBackwardLoop, threading each layer's captured caches through a
+    // NetBackStep closure. `Input` is the ORIGINAL sub-net input (pre-SubSample);
+    // outputSeq is the sub-net final output; seedDeltas is the delta half from the
+    // output-net backward. Accumulates into `derivs`; returns deltasPreviousLayer.
+    Eigen::MatrixXd backward(const Eigen::MatrixXd& Input, const Eigen::MatrixXd& outputSeq,
+                             const Eigen::MatrixXd& seedDeltas) {
+        const size_t L = neuronNb.size() - 1;
+        std::vector<NetBackStep> steps(L);
+        for (size_t jj = 0; jj < L; ++jj) {
+            steps[jj].backward = [this, jj](const Eigen::MatrixXd& lin, const Eigen::MatrixXd& lout,
+                                            const Eigen::MatrixXd& din, long invSub, bool last) {
+                int I = ins[jj], O = outs[jj];
+                if (reverse) {
+                    return lstmBackwardReverseLoop(lin, lout, din, iw[jj], fw[jj], pp[jj], I, O,
+                                                   true, true, true, gcache[jj], ccache[jj], cicache[jj],
+                                                   invSub, derivs[jj]);
+                }
+                return lstmBackwardLoop(lin, lout, din, iw[jj], fw[jj], pp[jj], I, O,
+                                        true, true, true, gcache[jj], ccache[jj], cicache[jj],
+                                        invSub, derivs[jj]);
+            };
+        }
+        if (reverse)
+            return netBackwardReverseLoop(neuronNb, subSampling, steps, Input, outputSeq, layersOutput, seedDeltas);
+        return netBackwardLoop(neuronNb, subSampling, steps, Input, outputSeq, layersOutput, seedDeltas);
+    }
+
+    // Nx2 flat deriv assembly matching NeuralNetwork::getWeightsDerivatives (vertical
+    // hcat of per-layer LSTMLayer::getWeightsDerivatives, LSTMLayer.cpp:251-295): flat
+    // block order InputWeights (col-major) -> FeedbackWeights -> PeepWeight -> Biaises,
+    // col0 = deriv, col1 = nbFedBackward replicated.
+    Eigen::MatrixXd flatDerivs() const {
+        std::vector<double> col0, col1;
+        for (size_t jj = 0; jj < derivs.size(); ++jj) {
+            const LstmDerivs& d = derivs[jj];
+            long cnt = d.nbFedBackward;
+            const Eigen::MatrixXd& iwd = d.inputW;   // I x 4O col-major
+            for (long c = 0; c < iwd.cols(); ++c)
+                for (long r = 0; r < iwd.rows(); ++r) { col0.push_back(iwd(r, c)); col1.push_back((double)cnt); }
+            const Eigen::MatrixXd& fwd = d.feedbackW;
+            for (long c = 0; c < fwd.cols(); ++c)
+                for (long r = 0; r < fwd.rows(); ++r) { col0.push_back(fwd(r, c)); col1.push_back((double)cnt); }
+            const Eigen::MatrixXd& ppd = d.peep;     // 12 x O col-major
+            for (long c = 0; c < ppd.cols(); ++c)
+                for (long r = 0; r < ppd.rows(); ++r) { col0.push_back(ppd(r, c)); col1.push_back((double)cnt); }
+            const Eigen::MatrixXd& bsd = d.bias;     // 1 x 4O
+            for (long c = 0; c < bsd.cols(); ++c) { col0.push_back(bsd(0, c)); col1.push_back((double)cnt); }
+        }
+        Eigen::MatrixXd out((long)col0.size(), 2);
+        for (long k = 0; k < (long)col0.size(); ++k) { out(k, 0) = col0[k]; out(k, 1) = col1[k]; }
+        return out;
+    }
+};
+
+// One dense (output-MLP) sub-network. Same shape as LstmSubNet but with dense layers;
+// the output net is fed HCAT(_OutputForward|_OutputBackward) as input (feedBackward-
+// Double, NeuralNetwork.hpp:353-362). Captures layersOutput for the hidden asinh deriv.
+struct DenseSubNet {
+    std::vector<long> neuronNb, subSampling;
+    std::vector<int> ins, outs;
+    std::vector<Eigen::MatrixXd> dw, db;
+    std::vector<Eigen::MatrixXd> layersOutput;
+    std::vector<DenseDerivs> derivs;
+
+    void build(const Eigen::VectorXd& flat, const std::vector<long>& nn, const std::vector<long>& ss) {
+        neuronNb = nn; subSampling = ss;
+        const size_t L = nn.size() - 1;
+        ins.resize(L); outs.resize(L); dw.resize(L); db.resize(L); derivs.resize(L);
+        long pos = 0;
+        for (size_t jj = 0; jj < L; ++jj) {
+            int I = (int)(nn[jj] * (jj == 0 ? ss[0] : ss[jj])), O = (int)nn[jj + 1];
+            ins[jj] = I; outs[jj] = O;
+            long nb = (long)O * (I + 1);
+            Eigen::VectorXd slice = flat.segment(pos, nb);
+            pos += nb;
+            dw[jj].resize(I, O); db[jj].resize(1, O);
+            for (int c = 0; c < O; ++c)
+                for (int r = 0; r < I; ++r) dw[jj](r, c) = slice((long)c * I + r);
+            for (int c = 0; c < O; ++c) db[jj](0, c) = slice((long)O * I + c);
+            derivs[jj].init(I, O);
+        }
+    }
+
+    // Forward over an already-hcat'd input (first|second), capturing layersOutput.
+    Eigen::MatrixXd forwardCapture(const Eigen::MatrixXd& Input) {
+        const size_t L = neuronNb.size() - 1;
+        layersOutput.assign(L > 0 ? L - 1 : 0, Eigen::MatrixXd());
+        Eigen::MatrixXd finalOut;
+        if (L == 1) {
+            Eigen::MatrixXd in = (subSampling[0] > 1) ? subSampleLoop(subSampling[0], Input) : Input;
+            finalOut = denseForwardLoop(in, dw[0], db[0], true);
+            return finalOut;
+        }
+        for (size_t jj = 0; jj < L; ++jj) {
+            Eigen::MatrixXd in;
+            if (jj == 0) in = (subSampling[0] > 1) ? subSampleLoop(subSampling[0], Input) : Input;
+            else in = (subSampling[jj] > 1) ? subSampleLoop(subSampling[jj], layersOutput[jj - 1]) : layersOutput[jj - 1];
+            bool last = (jj == L - 1);
+            Eigen::MatrixXd o = denseForwardLoop(in, dw[jj], db[jj], last);
+            if (last) finalOut = o; else layersOutput[jj] = o;
+        }
+        return finalOut;
+    }
+
+    // feedBackwardDouble backward (NeuralNetwork.hpp:353-362 -> feedBackward :251-300):
+    // the input is the hcat(first|second); returns the split-ready deltas_out (rows x
+    // neuronNb[0]) whose left half feeds the fwd LSTM stack, right half the bwd stack.
+    Eigen::MatrixXd backward(const Eigen::MatrixXd& hcatInput, const Eigen::MatrixXd& outputSeq,
+                             const Eigen::MatrixXd& seedDeltas) {
+        const size_t L = neuronNb.size() - 1;
+        std::vector<NetBackStep> steps(L);
+        for (size_t jj = 0; jj < L; ++jj) {
+            steps[jj].backward = [this, jj](const Eigen::MatrixXd& lin, const Eigen::MatrixXd&,
+                                            const Eigen::MatrixXd& din, long invSub, bool last) {
+                return denseBackwardLoop(lin, din, dw[jj], ins[jj], outs[jj], invSub, last, derivs[jj]);
+            };
+        }
+        return netBackwardLoop(neuronNb, subSampling, steps, hcatInput, outputSeq, layersOutput, seedDeltas);
+    }
+
+    Eigen::MatrixXd flatDerivs() const {
+        std::vector<double> col0, col1;
+        for (size_t jj = 0; jj < derivs.size(); ++jj) {
+            const DenseDerivs& d = derivs[jj];
+            long cnt = d.nbFedBackward;
+            const Eigen::MatrixXd& wd = d.weights;   // I x O col-major (NeuronLayer.cpp:105)
+            for (long c = 0; c < wd.cols(); ++c)
+                for (long r = 0; r < wd.rows(); ++r) { col0.push_back(wd(r, c)); col1.push_back((double)cnt); }
+            const Eigen::MatrixXd& bd = d.bias;      // 1 x O
+            for (long c = 0; c < bd.cols(); ++c) { col0.push_back(bd(0, c)); col1.push_back((double)cnt); }
+        }
+        Eigen::MatrixXd out((long)col0.size(), 2);
+        for (long k = 0; k < (long)col0.size(); ++k) { out(k, 0) = col0[k]; out(k, 1) = col1[k]; }
+        return out;
+    }
+};
+
+// legacy: BLSTMNeuralNetwork.cpp:439-460 (feedBackward) + getWeightsDerivatives
+// (:255-276). The whole-net plain (non-windowed) backward reimpl: run the forward net
+// (fwd LSTM + bwd LSTM reverse) into _OutputForward/_OutputBackward, output net over
+// hcat(fwd|bwd); seed deltas via the REAL CostLaw::computeDeltas (passed in, since
+// CostLaw is bit-portable for polynomial laws); feedBackwardDouble; then (unless
+// _BackPropOutputNetworkOnly) fwd feedBackward on deltas.leftCols(half) + bwd
+// feedBackwardReverse on deltas.rightCols(half), with the leftCols(inputSize) crop
+// gate (:452-454). Assembles the Nx2 flat derivs (fwd|bwd|output|stats-tail:
+// [0|1|0|1] so the mean/std slots never move).
+struct BlstmBack {
+    LstmSubNet fwd, bwd;
+    DenseSubNet out;
+    long statsRows = 0;   // _NormalizeInputMean.rows() (== lstm input size)
+    int fwdInputSize = 0;
+    long outNetRatio = 1;
+    bool outputNetworkOnly = false;
+
+    // Build from the flat weight vector (fwd | bwd | output blocks, as the real net
+    // packs). lstmNN/lstmSS the LSTM sub-net dims; outNN/outSS the output net dims.
+    void build(const Eigen::VectorXd& flat, const std::vector<long>& lstmNN,
+               const std::vector<long>& lstmSS, const std::vector<long>& outNN,
+               const std::vector<long>& outSS) {
+        long fwdNb = 0;
+        for (size_t jj = 0; jj + 1 < lstmNN.size(); ++jj) {
+            long I = lstmNN[jj] * (jj == 0 ? lstmSS[0] : lstmSS[jj]), O = lstmNN[jj + 1];
+            fwdNb += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+        }
+        long outNbW = 0;
+        for (size_t jj = 0; jj + 1 < outNN.size(); ++jj) {
+            long I = outNN[jj] * (jj == 0 ? outSS[0] : outSS[jj]), O = outNN[jj + 1];
+            outNbW += O * (I + 1);
+        }
+        fwd.build(flat.head(fwdNb), lstmNN, lstmSS, false);
+        bwd.build(flat.segment(fwdNb, fwdNb), lstmNN, lstmSS, true);
+        out.build(flat.segment(2 * fwdNb, outNbW), outNN, outSS);
+        statsRows = lstmNN[0];
+        fwdInputSize = (int)lstmNN[0];
+        outNetRatio = 1;
+        for (size_t jj = 0; jj + 1 < outSS.size() + 0 && jj < outSS.size(); ++jj) outNetRatio *= outSS[jj];
+    }
+
+    // Forward (plain) into outForward/outBackward/output, capturing all caches.
+    void forward(const Eigen::MatrixXd& input, Eigen::MatrixXd& outForward,
+                 Eigen::MatrixXd& outBackward, Eigen::MatrixXd& output, Eigen::MatrixXd& hcat) {
+        Eigen::MatrixXd fwdIn = input, bwdIn = input;
+        if (fwd.subSampling[0] > 1 && fwdInputSize < input.cols()) {
+            fwdIn = input.leftCols(fwdInputSize);
+            bwdIn = input.leftCols(fwdInputSize);
+        }
+        outForward = fwd.forwardCapture(fwdIn);
+        outBackward = bwd.forwardCapture(bwdIn);
+        hcat.resize(outForward.rows(), out.neuronNb[0]);
+        hcat << outForward, outBackward;
+        output = out.forwardCapture(hcat);
+    }
+
+    // Backward given the forward caches + the seed deltas (from CostLaw). `input` is
+    // the ORIGINAL BLSTM input; outForward/outBackward/hcat/output from forward().
+    void backward(const Eigen::MatrixXd& input, const Eigen::MatrixXd& outForward,
+                  const Eigen::MatrixXd& outBackward, const Eigen::MatrixXd& hcat,
+                  const Eigen::MatrixXd& output, Eigen::MatrixXd& seedDeltas) {
+        Eigen::MatrixXd deltas = out.backward(hcat, output, seedDeltas);   // rows x neuronNb[0]
+        if (outputNetworkOnly) return;
+        long half = deltas.cols() / 2;
+        Eigen::MatrixXd leftD = deltas.leftCols(half), rightD = deltas.rightCols(half);
+        Eigen::MatrixXd fwdIn = input, bwdIn = input;
+        if (fwd.subSampling[0] > 1 && fwdInputSize < input.cols()) {
+            fwdIn = input.leftCols(fwdInputSize);
+            bwdIn = input.leftCols(fwdInputSize);
+        }
+        fwd.backward(fwdIn, outForward, leftD);
+        bwd.backward(bwdIn, outBackward, rightD);
+    }
+
+    // Nx2 flat derivs matching BLSTMNeuralNetwork::getWeightsDerivatives (:255-276):
+    // fwd|bwd|output|[Zero|Ones|Zero|Ones] stats tail. If outNetRatio > 1 the fwd/bwd
+    // LSTM col0 is scaled by it (:266-269).
+    Eigen::MatrixXd flatDerivs() const {
+        Eigen::MatrixXd f = fwd.flatDerivs(), b = bwd.flatDerivs(), o = out.flatDerivs();
+        if (outNetRatio > 1) {
+            f.col(0) *= (double)outNetRatio;
+            b.col(0) *= (double)outNetRatio;
+        }
+        long total = f.rows() + b.rows() + o.rows() + 2 * statsRows;
+        Eigen::MatrixXd all(total, 2);
+        long pos = 0;
+        all.block(pos, 0, f.rows(), 2) = f; pos += f.rows();
+        all.block(pos, 0, b.rows(), 2) = b; pos += b.rows();
+        all.block(pos, 0, o.rows(), 2) = o; pos += o.rows();
+        for (long k = 0; k < statsRows; ++k) { all(pos, 0) = 0.0; all(pos, 1) = 1.0; ++pos; }  // mean
+        for (long k = 0; k < statsRows; ++k) { all(pos, 0) = 0.0; all(pos, 1) = 1.0; ++pos; }  // std
+        return all;
+    }
+};
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -6094,6 +6910,1221 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "spectral_noOverlap_params_file2.bin", paramsRow);
             ++dumps;
         }
+    }
+
+    // =====================================================================
+    // --- Phase 3 Task 1: BACKWARD reimpl NN_TOL/NN_PROBE probes -----------
+    // For each site, construct the REAL compiled layer/net, run its forward THEN
+    // backward on the same operands, harvest getWeightsDerivatives().col(0) (the
+    // summed deriv), and compare it element-by-element (ULP) against the ascending-
+    // loop reimpl's col(0). Synthetic small shapes MUST be max_ulp=0 (the extractor
+    // asserts it); the real-net site (blstm_real_backward, k>=23) records nonzero as
+    // Phase 4 calibration. The reimpl-produced Nx2 derivs ARE the goldens (Tasks 3-6
+    // consume them), dumped here -- NOT the real-Eigen derivs.
+    {
+        ConfigFile conf(nnConfigPath, '_');
+        conf._Params.erase("BLSTM_weightsFile");
+        conf.set_val<bool>("SYNW_IsCellsPeepholesActive", true);
+        conf.set_val<bool>("SYNW_IsGatesPeepholesActive", true);
+        conf.set_val<bool>("SYNW_IsGatesRecurrentPeepholesActive", true);
+
+        auto synthFlat = [](long n) {
+            Eigen::VectorXd flat(n);
+            for (long k = 0; k < n; ++k) flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            return flat;
+        };
+        auto makeInput = [](int T, int cols) {
+            Eigen::MatrixXd x(T, cols);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < cols; ++j)
+                    x(t, j) = (double)(((t * 37 + j * 53 + 7) % 101)) / 101.0 - 0.5;
+            return x;
+        };
+        // Deterministic delta seed (the incoming gradient a layer/net receives).
+        auto makeDeltas = [](int T, int O) {
+            Eigen::MatrixXd dd(T, O);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < O; ++j)
+                    dd(t, j) = (double)(((t * 29 + j * 41 + 5) % 83)) / 83.0 - 0.5;
+            return dd;
+        };
+        // ULP gap over col(0) of two Nx2 deriv matrices (the summed derivative).
+        auto derivGap = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                           long& maxUlp, double& maxAbs) {
+            long rows = std::min(real.rows(), reimpl.rows());
+            for (long r = 0; r < rows; ++r) {
+                double a = real(r, 0), b = reimpl(r, 0);
+                double absGap = std::fabs(a - b);
+                if (absGap > maxAbs) maxAbs = absGap;
+                uint64_t ab, bb;
+                std::memcpy(&ab, &a, sizeof(double));
+                std::memcpy(&bb, &b, sizeof(double));
+                long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                if (ulp > maxUlp) maxUlp = ulp;
+            }
+        };
+
+        // Full-matrix ULP/abs gap over an arbitrary (T x C) tensor (deltas_out), not
+        // just col 0 -- used by the Phase 3 Task 5 net-backward deltas_out comparison.
+        auto deltasGap = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                            long& maxUlp, double& maxAbs) {
+            long rows = std::min(real.rows(), reimpl.rows());
+            long cols = std::min(real.cols(), reimpl.cols());
+            for (long r = 0; r < rows; ++r) {
+                for (long c = 0; c < cols; ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    double absGap = std::fabs(a - b);
+                    if (absGap > maxAbs) maxAbs = absGap;
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > maxUlp) maxUlp = ulp;
+                }
+            }
+        };
+
+        // ---- Site lstm_backward: standalone LSTMLayer::feedBackward -----------
+        // Grid {I=3,O=2,T=7; I=5,O=4,T=6}. Build the real layer, run feedForward to
+        // populate _Gates/_CellStates/_CellsIn, then feedBackward(deltas). Mirror with
+        // lstmForwardLoopCache + lstmBackwardLoop on the same weights/input/deltas.
+        {
+            long maxUlp = 0; double maxAbs = 0.0;
+            struct S { int I, O, T; } grid[] = {{3, 2, 7}, {5, 4, 6}};
+            for (const S& s : grid) {
+                LSTMLayer layer(conf, "SYNW", 0, (size_t)s.I, (size_t)s.O, true);
+                Eigen::VectorXd flat = synthFlat(layer.getNbOfWeights());
+                layer.setWeights(flat);
+                layer.resetWeightsDerivatives();
+                Eigen::MatrixXd input = makeInput(s.T, s.I);
+                Eigen::MatrixXd realOut(s.T, s.O);
+                layer.feedForward(input, realOut, false);
+                Eigen::MatrixXd deltas = makeDeltas(s.T, s.O);
+                layer.feedBackward(input, realOut, deltas, 1, false);
+                Eigen::MatrixXd realDerivs = layer.getWeightsDerivatives();
+
+                Eigen::MatrixXd iw, fw, pp, bs, g, o, cs, ci;
+                unpackLstmWeights(flat, s.I, s.O, iw, fw, pp, bs);
+                lstmForwardLoopCache(input, iw, fw, pp, bs, s.O, true, true, true, g, o, cs, ci);
+                LstmDerivs d; d.init(s.I, s.O);
+                lstmBackwardLoop(input, o, deltas, iw, fw, pp, s.I, s.O, true, true, true, g, cs, ci, 1, d);
+                LstmSubNet single;   // reuse flatDerivs assembly for one layer
+                single.derivs = {d};
+                Eigen::MatrixXd reimplDerivs = single.flatDerivs();
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                if (s.I == 3) { Matrix2BinaryFile(out + "bwd_lstm_derivs.bin", reimplDerivs); ++dumps; }
+            }
+            std::cout << "NN_TOL site=lstm_backward max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+        }
+
+        // ---- Site lstm_backward_variants: Task 4 per-variant goldens ----------
+        // Synthetic I=2,O=2,T=5 (odd length). Dumps lstm_bwd_deltasprev_<v>.bin
+        // (T x I) + lstm_bwd_derivs_<v>.bin (Nx2) for peep_all / peep_none / reverse
+        // / subsample, plus lstm_bwd_signal_derivs.bin (the 1-col signal_width case,
+        // dead weight rows accumulate exactly 0 -- spec S11.5). The reimpl (dumped)
+        // is checked bit-for-bit (max_ulp=0) against the REAL LSTMLayer::feedBackward
+        // / feedBackwardReverse (LSTMLayer.cpp:518-732).
+        {
+            long maxUlp = 0; double maxAbs = 0.0;
+            const int I = 2, O = 2, T = 5;
+
+            // deltasPreviousLayer ULP gap over the full T x I matrix.
+            auto dplGap = [&](const Eigen::MatrixXd& a, const Eigen::MatrixXd& b) {
+                long rows = std::min(a.rows(), b.rows()), cols = std::min(a.cols(), b.cols());
+                for (long r = 0; r < rows; ++r)
+                    for (long c = 0; c < cols; ++c) {
+                        double x = a(r, c), y = b(r, c);
+                        double g = std::fabs(x - y);
+                        if (g > maxAbs) maxAbs = g;
+                        uint64_t xb, yb; std::memcpy(&xb, &x, 8); std::memcpy(&yb, &y, 8);
+                        long u = (xb > yb) ? (long)(xb - yb) : (long)(yb - xb);
+                        if (u > maxUlp) maxUlp = u;
+                    }
+            };
+
+            struct V { const char* tag; bool cp, gp, grp; bool reverse; long ratio; int inCols; };
+            V variants[] = {
+                {"peep_all",  true,  true,  true,  false, 1, I},
+                {"peep_none", false, false, false, false, 1, I},
+                {"reverse",   true,  true,  true,  true,  1, I},
+                {"subsample", true,  true,  true,  false, 2, I},
+                {"signal",    true,  true,  true,  false, 1, 1},   // width tolerance, 1-col input
+            };
+            for (const V& v : variants) {
+                conf.set_val<bool>("SYNW_IsCellsPeepholesActive", v.cp);
+                conf.set_val<bool>("SYNW_IsGatesPeepholesActive", v.gp);
+                conf.set_val<bool>("SYNW_IsGatesRecurrentPeepholesActive", v.grp);
+                LSTMLayer layer(conf, "SYNW", 0, (size_t)I, (size_t)O, true);
+                Eigen::VectorXd flat = synthFlat(layer.getNbOfWeights());
+                layer.setWeights(flat);
+                layer.resetWeightsDerivatives();
+                Eigen::MatrixXd input = makeInput(T, v.inCols);
+                Eigen::MatrixXd realOut(T, O);
+                Eigen::MatrixXd realDpl;
+                if (v.reverse) {
+                    layer.feedForwardReverse(input, realOut, false);
+                    Eigen::MatrixXd deltas = makeDeltas(T, O);
+                    realDpl = layer.feedBackwardReverse(input, realOut, deltas, (size_t)v.ratio, false);
+                } else {
+                    layer.feedForward(input, realOut, false);
+                    Eigen::MatrixXd deltas = makeDeltas(T, O);
+                    realDpl = layer.feedBackward(input, realOut, deltas, (size_t)v.ratio, false);
+                }
+                Eigen::MatrixXd realDerivs = layer.getWeightsDerivatives();
+
+                Eigen::MatrixXd iw, fw, pp, bs, g, o, cs, ci;
+                unpackLstmWeights(flat, I, O, iw, fw, pp, bs);
+                Eigen::MatrixXd deltas = makeDeltas(T, O);
+                LstmDerivs d; d.init(I, O);
+                Eigen::MatrixXd reimplDpl;
+                if (v.reverse) {
+                    // feedForwardReverse: forward on the reversed input, caches stay reversed.
+                    Eigen::MatrixXd inRev = input.colwise().reverse(), oRev;
+                    lstmForwardLoopCache(inRev, iw, fw, pp, bs, O, v.cp, v.gp, v.grp, g, oRev, cs, ci);
+                    reimplDpl = lstmBackwardReverseLoop(input, oRev.colwise().reverse(), deltas,
+                                                        iw, fw, pp, I, O, v.cp, v.gp, v.grp,
+                                                        g, cs, ci, v.ratio, d);
+                } else {
+                    lstmForwardLoopCache(input, iw, fw, pp, bs, O, v.cp, v.gp, v.grp, g, o, cs, ci);
+                    reimplDpl = lstmBackwardLoop(input, o, deltas, iw, fw, pp, I, O,
+                                                 v.cp, v.gp, v.grp, g, cs, ci, v.ratio, d);
+                }
+                LstmSubNet single; single.derivs = {d};
+                Eigen::MatrixXd reimplDerivs = single.flatDerivs();
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                dplGap(realDpl, reimplDpl);
+
+                std::string t = v.tag;
+                if (std::string(v.tag) == "signal") {
+                    Matrix2BinaryFile(out + "lstm_bwd_signal_derivs.bin", reimplDerivs); ++dumps;
+                } else {
+                    Matrix2BinaryFile(out + "lstm_bwd_deltasprev_" + t + ".bin", reimplDpl); ++dumps;
+                    Matrix2BinaryFile(out + "lstm_bwd_derivs_" + t + ".bin", reimplDerivs); ++dumps;
+                }
+            }
+            // Restore the all-on flags for any later stages reusing conf.
+            conf.set_val<bool>("SYNW_IsCellsPeepholesActive", true);
+            conf.set_val<bool>("SYNW_IsGatesPeepholesActive", true);
+            conf.set_val<bool>("SYNW_IsGatesRecurrentPeepholesActive", true);
+            std::cout << "NN_TOL site=lstm_backward_variants max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+        }
+
+        // ---- Site dense_backward: standalone NeuronLayer::feedBackward --------
+        // Grid: {I=4,O=3 hidden; I=4,O=3 last; I=4,O=1 last(logistic)}. The last-layer
+        // case proves NO activation deriv on the output (fusion in CostLaw); the hidden
+        // case exercises the asinh deriv on the layer input. Task 3 also dumps
+        // deltas_out (T x I) per variant -- the double-count trap fixture (spec S11.3):
+        // deltas_out for the last-layer sites is EXACTLY deltas*W^T with no activation
+        // Jacobian folded in, which the Rust golden test asserts by hand.
+        {
+            long maxUlp = 0; double maxAbs = 0.0;
+            long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
+            struct S { int I, O, T; bool last; const char* tag; } grid[] = {
+                {4, 3, 6, false, "hidden"}, {4, 3, 6, true, "last"}, {4, 1, 6, true, "logistic"}};
+            for (const S& s : grid) {
+                NeuronLayer layer(conf, "SYNW", 0, (size_t)s.I, (size_t)s.O, true);
+                Eigen::VectorXd flat = synthFlat(layer.getNbOfWeights());
+                layer.setWeights(flat);
+                layer.resetWeightsDerivatives();
+                Eigen::MatrixXd input = makeInput(s.T, s.I);
+                Eigen::MatrixXd realOut(s.T, s.O);
+                layer.feedForward(input, realOut, s.last);
+                Eigen::MatrixXd deltas = makeDeltas(s.T, s.O);
+                Eigen::MatrixXd realDeltasOut = layer.feedBackward(input, realOut, deltas, 1, s.last);
+                Eigen::MatrixXd realDerivs = layer.getWeightsDerivatives();
+
+                Eigen::MatrixXd w(s.I, s.O), b(1, s.O);
+                for (int c = 0; c < s.O; ++c)
+                    for (int r = 0; r < s.I; ++r) w(r, c) = flat((long)c * s.I + r);
+                for (int c = 0; c < s.O; ++c) b(0, c) = flat((long)s.O * s.I + c);
+                DenseDerivs d; d.init(s.I, s.O);
+                Eigen::MatrixXd reimplDeltasOut = denseBackwardLoop(input, deltas, w, s.I, s.O, 1, s.last, d);
+                DenseSubNet single; single.derivs = {d};
+                Eigen::MatrixXd reimplDerivs = single.flatDerivs();
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+
+                // ULP/abs gap over the FULL deltas_out matrix (not just col 0).
+                long rows = std::min(realDeltasOut.rows(), reimplDeltasOut.rows());
+                long cols = std::min(realDeltasOut.cols(), reimplDeltasOut.cols());
+                for (long r = 0; r < rows; ++r) {
+                    for (long c = 0; c < cols; ++c) {
+                        double a = realDeltasOut(r, c), b2 = reimplDeltasOut(r, c);
+                        double absGap = std::fabs(a - b2);
+                        if (absGap > maxAbsDeltasOut) maxAbsDeltasOut = absGap;
+                        uint64_t ab, bb;
+                        std::memcpy(&ab, &a, sizeof(double));
+                        std::memcpy(&bb, &b2, sizeof(double));
+                        long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                        if (ulp > maxUlpDeltasOut) maxUlpDeltasOut = ulp;
+                    }
+                }
+
+                Matrix2BinaryFile(out + "bwd_dense_" + s.tag + "_derivs.bin", reimplDerivs);
+                Matrix2BinaryFile(out + "bwd_dense_" + s.tag + "_deltasout.bin", reimplDeltasOut);
+                ++dumps;
+                ++dumps;
+            }
+            std::cout << "NN_TOL site=dense_backward max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            std::cout << "NN_TOL site=dense_backward_deltasout max_ulp=" << maxUlpDeltasOut
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
+        }
+
+        // ---- Sites net_lstm_backward_{fwd,rev}: NeuralNetwork<LSTMLayer> ------
+        // 2-layer LSTM net [3,4,2] sub [2,1] on T=11 (SubSample interaction). Real net
+        // feedForward(+Reverse) THEN feedBackward(+Reverse) on seed deltas sized to the
+        // decimated output rows (11/2 = 5). Mirror with LstmSubNet forwardCapture +
+        // backward. The reverse site pins the time-reversed cache consumption.
+        {
+            const std::vector<std::vector<double>::size_type> neuronNb = {3, 4, 2};
+            const std::vector<std::vector<double>::size_type> subSampling = {2, 1};
+            const std::vector<long> nnL = {3, 4, 2}, ssL = {2, 1};
+            Eigen::MatrixXd input = makeInput(11, 3);
+            const long outRows = 11 / 2;
+            Eigen::MatrixXd seedDeltas = makeDeltas((int)outRows, 2);
+            for (bool reverse : {false, true}) {
+                NeuralNetwork<LSTMLayer> net(conf, "SYNW", neuronNb, subSampling, true);
+                Eigen::VectorXd flat = synthFlat(net.getNbOfWeights());
+                net.setWeights(flat);
+                net.resetWeightsDerivatives();
+                Eigen::MatrixXd realOut(outRows, 2);
+                Eigen::MatrixXd realDeltasOut;
+                if (reverse) { net.feedForwardReverse(input, realOut); realDeltasOut = net.feedBackwardReverse(input, realOut, seedDeltas); }
+                else { net.feedForward(input, realOut); realDeltasOut = net.feedBackward(input, realOut, seedDeltas); }
+                Eigen::MatrixXd realDerivs = net.getWeightsDerivatives();
+
+                LstmSubNet sub;
+                sub.build(flat, nnL, ssL, reverse);
+                Eigen::MatrixXd fout = sub.forwardCapture(input);
+                Eigen::MatrixXd reimplDeltasOut = sub.backward(input, fout, seedDeltas);
+                Eigen::MatrixXd reimplDerivs = sub.flatDerivs();
+                long maxUlp = 0; double maxAbs = 0.0;
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=net_lstm_backward" << (reverse ? "_rev" : "_fwd")
+                          << " max_ulp=" << maxUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << maxAbs << "\n";
+                // Phase 3 Task 5: also compare + dump the returned deltas_out (the layer-0
+                // InvSubSample'd deltasPreviousLayer, NeuralNetwork.hpp:271-272/299). Row
+                // count is floor(T/R)*R (11/2*2 = 10), NOT T -- the trailing SubSample row
+                // is dropped by the forward floor and never restored by InvSubSample. The
+                // reimpl IS the golden; deltas_out is `_InputWeights*testM` (LSTMLayer.cpp
+                // :707), a GEMM with k=4*O (16 for this [3,4,2] layer-0, O=4) -- NOT k=O as
+                // a prior comment here mis-stated (fix-wave 1, review finding 3) -- so the
+                // REAL Eigen path diverges in the last ULP (recorded as a SEPARATE
+                // calibration site, NOT gated to 0 -- unlike the k=1 outer-product derivs
+                // above).
+                long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
+                deltasGap(realDeltasOut, reimplDeltasOut, maxUlpDeltasOut, maxAbsDeltasOut);
+                std::cout << "NN_TOL site=net_lstm_backward" << (reverse ? "_rev" : "_fwd")
+                          << "_deltasout max_ulp=" << maxUlpDeltasOut << " max_abs="
+                          << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
+                Matrix2BinaryFile(out + (reverse ? "bwd_net_lstm_rev_derivs.bin" : "bwd_net_lstm_fwd_derivs.bin"), reimplDerivs);
+                Matrix2BinaryFile(out + (reverse ? "bwd_net_lstm_rev_deltasout.bin" : "bwd_net_lstm_fwd_deltasout.bin"), reimplDeltasOut);
+                ++dumps;
+                ++dumps;
+            }
+        }
+
+        // ---- Site net_dense_backward: NeuralNetwork<NeuronLayer> -------------
+        // 2-layer dense net [4,3,2] sub [1,2] on T=11 (SubSample(2) between layers ->
+        // 5 rows). Real net feedForward THEN feedBackward on seed deltas (5 x 2);
+        // mirror with DenseSubNet.
+        {
+            const std::vector<std::vector<double>::size_type> neuronNb = {4, 3, 2};
+            const std::vector<std::vector<double>::size_type> subSampling = {1, 2};
+            const std::vector<long> nnD = {4, 3, 2}, ssD = {1, 2};
+            Eigen::MatrixXd input = makeInput(11, 4);
+            const long outRows = 11 / 2;   // decimated by the layer-1 SubSample(2)
+            Eigen::MatrixXd seedDeltas = makeDeltas((int)outRows, 2);
+            NeuralNetwork<NeuronLayer> net(conf, "SYNW", neuronNb, subSampling, true);
+            Eigen::VectorXd flat = synthFlat(net.getNbOfWeights());
+            net.setWeights(flat);
+            net.resetWeightsDerivatives();
+            Eigen::MatrixXd realOut(outRows, 2);
+            net.feedForward(input, realOut);
+            Eigen::MatrixXd realDeltasOut = net.feedBackward(input, realOut, seedDeltas);
+            Eigen::MatrixXd realDerivs = net.getWeightsDerivatives();
+
+            DenseSubNet sub;
+            sub.build(flat, nnD, ssD);
+            Eigen::MatrixXd fout = sub.forwardCapture(input);
+            Eigen::MatrixXd reimplDeltasOut = sub.backward(input, fout, seedDeltas);
+            Eigen::MatrixXd reimplDerivs = sub.flatDerivs();
+            long maxUlp = 0; double maxAbs = 0.0;
+            derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+            std::cout << "NN_TOL site=net_dense_backward max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            // Phase 3 Task 5: also compare + dump the returned deltas_out. Layer-1
+            // SubSample(2) decimates to 5 rows, InvSubSample restores to 10; layer 0
+            // (no subsample) back-projects at deltas.rows()=10 while its count is
+            // input.rows()=11 (NeuronLayer.cpp:199) -- deltas_out is 10 x 4. The
+            // deltas*W^T GEMM (k=O) may diverge from the real Eigen path in the last
+            // ULP -- a SEPARATE calibration site (the reimpl dump is the golden).
+            long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
+            deltasGap(realDeltasOut, reimplDeltasOut, maxUlpDeltasOut, maxAbsDeltasOut);
+            std::cout << "NN_TOL site=net_dense_backward_deltasout max_ulp=" << maxUlpDeltasOut
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
+            Matrix2BinaryFile(out + "bwd_net_dense_derivs.bin", reimplDerivs);
+            Matrix2BinaryFile(out + "bwd_net_dense_deltasout.bin", reimplDeltasOut);
+            ++dumps;
+            ++dumps;
+        }
+
+        // ---- Sites net_single_layer_backward_{subsample,plain}: NeuralNetwork
+        //      <LSTMLayer> with neuronNb.size()==2 (a SINGLE layer, NeuralNetwork.hpp
+        //      :255-263) ------------------------------------------------------------
+        // Fix-wave 1 (review finding 1): the two net_lstm_backward_{fwd,rev} +
+        // net_dense_backward sites above are BOTH neuronNb.size()==3 (2 hidden layers),
+        // so they only ever exercise the multi-layer loop (:264-296) -- never the
+        // single-layer branch (:255-263), which is structurally distinct: it reads
+        // `deltas`/`deltas.rows()` (the SEED) directly, not the running `deltasOut`
+        // that feeds the multi-layer jj==0 arm on every iteration but the last. LSTM
+        // [2,2] sub [2] (subsample arm, the brief's dropped fixture) and LSTM [2,2]
+        // sub [1] (plain arm, legacy :262, "if cheaply constructible" per the finding)
+        // at T=7 (odd length, also exercising the SubSample floor quirk on this arm:
+        // floor(7/2)=3 decimated rows). Real net feedForward THEN feedBackward on seed
+        // deltas sized to the (decimated, for the subsample variant) output rows;
+        // mirror with LstmSubNet (L==1 already routes through netBackwardLoop's L==2
+        // branch, same code path exercised end-to-end since Task 1).
+        {
+            const std::vector<std::vector<double>::size_type> neuronNb = {2, 2};
+            const std::vector<long> nnL = {2, 2};
+            struct V { std::vector<std::vector<double>::size_type> ss; std::vector<long> ssL; long outRows; const char* tag; } variants[] = {
+                {{2}, {2}, 7 / 2, "subsample"},
+                {{1}, {1}, 7, "plain"},
+            };
+            for (const V& v : variants) {
+                Eigen::MatrixXd input = makeInput(7, 2);
+                Eigen::MatrixXd seedDeltas = makeDeltas((int)v.outRows, 2);
+                NeuralNetwork<LSTMLayer> net(conf, "SYNW", neuronNb, v.ss, true);
+                Eigen::VectorXd flat = synthFlat(net.getNbOfWeights());
+                net.setWeights(flat);
+                net.resetWeightsDerivatives();
+                Eigen::MatrixXd realOut(v.outRows, 2);
+                net.feedForward(input, realOut);
+                Eigen::MatrixXd realDeltasOut = net.feedBackward(input, realOut, seedDeltas);
+                Eigen::MatrixXd realDerivs = net.getWeightsDerivatives();
+
+                LstmSubNet sub;
+                sub.build(flat, nnL, v.ssL, false);
+                Eigen::MatrixXd fout = sub.forwardCapture(input);
+                Eigen::MatrixXd reimplDeltasOut = sub.backward(input, fout, seedDeltas);
+                Eigen::MatrixXd reimplDerivs = sub.flatDerivs();
+
+                long maxUlp = 0; double maxAbs = 0.0;
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=net_single_layer_backward_" << v.tag
+                          << " max_ulp=" << maxUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << maxAbs << "\n";
+
+                long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
+                deltasGap(realDeltasOut, reimplDeltasOut, maxUlpDeltasOut, maxAbsDeltasOut);
+                std::cout << "NN_TOL site=net_single_layer_backward_" << v.tag
+                          << "_deltasout max_ulp=" << maxUlpDeltasOut << " max_abs="
+                          << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
+
+                Matrix2BinaryFile(out + "bwd_net_single_" + v.tag + "_derivs.bin", reimplDerivs);
+                Matrix2BinaryFile(out + "bwd_net_single_" + v.tag + "_deltasout.bin", reimplDeltasOut);
+                ++dumps;
+                ++dumps;
+            }
+        }
+
+        // ---- Site blstm_feedbackward: synthetic BLSTMNeuralNetwork ------------
+        // Small BINARY-multiclass net (LSTM [3,4,2] sub [2,1], output [4,5,2] sub
+        // [1,1], T=12 -> length 6), backprop active, a multiclass (softmax+CE) target.
+        // The seed deltas come from the REAL CostLaw::computeDeltas (bit-portable for
+        // the polynomial law the golden config uses). feedForwardBackward with targets
+        // drives the WHOLE real backward; harvest getWeightsDerivatives. Mirror with
+        // BlstmBack (forward capture -> CostLaw seed -> backward). This is the double-
+        // count-safe fusion site: NeuronLayer applies no output Jacobian.
+        {
+            const std::vector<long> lstmNN = {3, 4, 2}, lstmSS = {2, 1};
+            const std::vector<long> outNN = {4, 5, 2}, outSS = {1, 1};
+            ConfigFile bconf(nnConfigPath, '_');
+            bconf._Params.erase("BLSTM_weightsFile");
+            bconf.set_val<std::string>("SYNB_LSTMNeuronNb", "3,4,2");
+            bconf.set_val<std::string>("SYNB_LSTMSubSampling", "2,1");
+            bconf.set_val<std::string>("SYNB_OutputNeuronNb", "4,5,2");
+            bconf.set_val<std::string>("SYNB_OutputSubSampling", "1,1");
+            bconf.set_val<short>("SYNB_InputNormalizationType", (short)0);
+            bconf.set_val<bool>("SYNB_TwoSweeps", false);
+            bconf.set_val<bool>("SYNB_BackPropagationActivated", true);
+            bconf.set_val<bool>("SYNB_BackPropOutputNetworkOnly", false);
+            bconf.set_val<int>("SYNB_TargetEnforcementStep", 0);
+            BLSTMNeuralNetwork<LSTMLayer> nn(bconf, "SYNB", true);
+            Eigen::VectorXd flat = synthFlat(nn.getNbOfWeights());
+            nn.setWeights(flat);
+            nn.resetWeightsDerivatives();
+
+            Eigen::MatrixXd input = makeInput(12, 3);
+            const long outLen = 12 / 2;   // fwd LSTM ratio 2*1
+            Eigen::MatrixXd realOut(outLen, 2);
+            // Multiclass one-hot-ish targets: class 0 or 1 per row (>0.5 target).
+            Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(outLen, 2);
+            for (long r = 0; r < outLen; ++r) targets(r, (r % 2)) = 1.0;
+            nn.setProcessingType(false, false);
+            nn.feedForwardBackward(input, 0, 0, realOut, targets);
+            Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+
+            // Reimpl: forward capture, then seed deltas via the REAL CostLaw on the
+            // reimpl output (bit-portable polynomial/softmax-CE), then backward.
+            BlstmBack bb;
+            bb.build(flat, lstmNN, lstmSS, outNN, outSS);
+            Eigen::MatrixXd oF, oB, hcat, reimplOut;
+            bb.forward(input, oF, oB, reimplOut, hcat);
+            CostLaw cost(bconf, "SYNB");
+            Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(targets.rows(), targets.cols());
+            cost.computeDeltas(reimplOut, targets, seed);
+            bb.backward(input, oF, oB, hcat, reimplOut, seed);
+            Eigen::MatrixXd reimplDerivs = bb.flatDerivs();
+            long maxUlp = 0; double maxAbs = 0.0;
+            derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+            std::cout << "NN_TOL site=blstm_feedbackward max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            Matrix2BinaryFile(out + "bwd_blstm_derivs.bin", reimplDerivs);
+            ++dumps;
+        }
+
+        // ---- Site blstm_outratio: output sub-sampling ratio > 1 --------------
+        // Same net as blstm_feedbackward BUT output [4,5,2] sub [2,1] (out ratio 2), so
+        // the fwd/bwd LSTM col0 is MULTIPLIED by 2 in getWeightsDerivatives (:266-269).
+        // A port that dropped that multiplier would diverge on the fwd/bwd blocks. T=24
+        // -> LSTM decimates to 12 (sub [2,1]), output decimates to 6 (sub [2,1]).
+        {
+            const std::vector<long> lstmNN = {3, 4, 2}, lstmSS = {2, 1};
+            const std::vector<long> outNN = {4, 5, 2}, outSS = {2, 1};
+            ConfigFile bconf(nnConfigPath, '_');
+            bconf._Params.erase("BLSTM_weightsFile");
+            bconf.set_val<std::string>("SYNB_LSTMNeuronNb", "3,4,2");
+            bconf.set_val<std::string>("SYNB_LSTMSubSampling", "2,1");
+            bconf.set_val<std::string>("SYNB_OutputNeuronNb", "4,5,2");
+            bconf.set_val<std::string>("SYNB_OutputSubSampling", "2,1");
+            bconf.set_val<short>("SYNB_InputNormalizationType", (short)0);
+            bconf.set_val<bool>("SYNB_TwoSweeps", false);
+            bconf.set_val<bool>("SYNB_BackPropagationActivated", true);
+            bconf.set_val<bool>("SYNB_BackPropOutputNetworkOnly", false);
+            bconf.set_val<int>("SYNB_TargetEnforcementStep", 0);
+            BLSTMNeuralNetwork<LSTMLayer> nn(bconf, "SYNB", true);
+            Eigen::VectorXd flat = synthFlat(nn.getNbOfWeights());
+            nn.setWeights(flat);
+            nn.resetWeightsDerivatives();
+
+            Eigen::MatrixXd input = makeInput(24, 3);
+            const long outLen = 24 / 4;   // fwd LSTM ratio 2 * output ratio 2
+            Eigen::MatrixXd realOut(outLen, 2);
+            Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(outLen, 2);
+            for (long r = 0; r < outLen; ++r) targets(r, (r % 2)) = 1.0;
+            nn.setProcessingType(false, false);
+            nn.feedForwardBackward(input, 0, 0, realOut, targets);
+            Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+
+            BlstmBack bb;
+            bb.build(flat, lstmNN, lstmSS, outNN, outSS);
+            Eigen::MatrixXd oF, oB, hcat, reimplOut;
+            bb.forward(input, oF, oB, reimplOut, hcat);
+            CostLaw cost(bconf, "SYNB");
+            Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(targets.rows(), targets.cols());
+            cost.computeDeltas(reimplOut, targets, seed);
+            bb.backward(input, oF, oB, hcat, reimplOut, seed);
+            Eigen::MatrixXd reimplDerivs = bb.flatDerivs();
+            long maxUlp = 0; double maxAbs = 0.0;
+            derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+            // Output sub-sampling [2,1] introduces a SubSample/InvSubSample GEMM in the
+            // output-net backward (netBackwardLoop) whose k diverges Eigen from the
+            // ascending reimpl -- like the real-net site, the REIMPL derivs are the
+            // golden (the Rust port uses ascending matmul_seq) and the real-vs-reimpl
+            // gap is RECORDED as calibration, not gated to 0. The col0 ratio-multiplier
+            // (x2 on fwd/bwd) is a structural op both apply identically -- it is pinned
+            // by the Rust test comparing the harvested fwd/bwd blocks against this dump.
+            std::cout << "NN_TOL site=blstm_outratio max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            Matrix2BinaryFile(out + "bwd_blstm_outratio_derivs.bin", reimplDerivs);
+            ++dumps;
+        }
+
+        // ---- Site blstm_real_backward: the REAL 33,671-weight net ------------
+        // Reuse e2e_input.bin (the assembled real-config inputSeq, 201 x 11) + the real
+        // net (1_worker_1.config + NNweights_config1.bin, InputNormalizationType -1).
+        // Backprop must be turned ON (the real config has it false + no RpropInit key) via
+        // set_val. Multiclass output is O=1 (binary VAD via the scalar Logistic head), so
+        // the SCALAR CostLaw path (computeUnitaryDeltas with the folded logistic deriv)
+        // seeds the deltas. EXPECTED NONZERO (k=23/24/48 GEMM divergence) -> the reimpl
+        // derivs ARE the golden; the delta is recorded as Phase 4 calibration.
+        {
+            const std::vector<long> lstmNN = {23, 24, 24}, lstmSS = {4, 1};
+            const std::vector<long> outNN = {48, 12, 1}, outSS = {1, 1};
+            Eigen::MatrixXd inputSeq = readBinMatrix(out + "e2e_input.bin");
+            ConfigFile nconf(nnConfigPath, '_');
+            nconf._Params.erase("BLSTM_weightsFile");
+            nconf.set_val<bool>("BLSTM_BackPropagationActivated", true);
+            nconf.set_val<bool>("BLSTM_BackPropOutputNetworkOnly", false);
+            BLSTMNeuralNetwork<LSTMLayer> nn(nconf, "BLSTM", true);
+            Eigen::VectorXd flat = BinaryFile2Vector(nnWeightsPath);
+            nn.setWeights(flat);
+            nn.resetWeightsDerivatives();
+
+            const long outLen = inputSeq.rows() / 4;   // ssr 4
+            Eigen::MatrixXd realOut(outLen, 1);
+            // Scalar VAD targets: deterministic 0/1 per decimated row.
+            Eigen::MatrixXd targets(outLen, 1);
+            for (long r = 0; r < outLen; ++r) targets(r, 0) = ((r % 3) == 0) ? 1.0 : 0.0;
+            Eigen::MatrixXd realInput = inputSeq;   // MUTATED by type -1 self-norm
+            nn.setProcessingType(false, false);
+            nn.feedForwardBackward(realInput, 0, 0, realOut, targets);
+            Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+
+            // Reimpl: type -1 self-norm in place, forward capture, CostLaw seed, backward.
+            Eigen::MatrixXd reimplInput = inputSeq;
+            {
+                const int R = (int)reimplInput.rows(), C = (int)reimplInput.cols();
+                std::vector<double> mean(C, 0.0);
+                for (int c = 0; c < C; ++c) { double a = 0.0; for (int r = 0; r < R; ++r) a += reimplInput(r, c); mean[c] = a / (double)R; }
+                for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) reimplInput(r, c) -= mean[c];
+                std::vector<double> stdv(C, 0.0);
+                for (int c = 0; c < C; ++c) { double a = 0.0; for (int r = 0; r < R; ++r) a += reimplInput(r, c) * reimplInput(r, c); stdv[c] = std::sqrt((a + 1e-32) / (double)R); }
+                for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) reimplInput(r, c) = Maxmin2::fn(reimplInput(r, c) / stdv[c]);
+            }
+            BlstmBack bb;
+            bb.build(flat, lstmNN, lstmSS, outNN, outSS);
+            Eigen::MatrixXd oF, oB, hcat, reimplOut;
+            bb.forward(reimplInput, oF, oB, reimplOut, hcat);
+            CostLaw cost(nconf, "BLSTM");
+            Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(targets.rows(), targets.cols());
+            cost.computeDeltas(reimplOut, targets, seed);
+            bb.backward(reimplInput, oF, oB, hcat, reimplOut, seed);
+            Eigen::MatrixXd reimplDerivs = bb.flatDerivs();
+            long maxUlp = 0; double maxAbs = 0.0;
+            derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+            std::cout << "NN_TOL site=blstm_real_backward max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            std::cout << "NN_REAL ok backward_nb_derivs=" << reimplDerivs.rows() << "\n";
+            Matrix2BinaryFile(out + "bwd_blstm_real_derivs.bin", reimplDerivs);
+            ++dumps;
+
+            // ---- Task 8 E2E iRPROP- step dumps (the phase capstone) ----------
+            // Feed the REAL-net normalized gradient (col0 cwiseQuotient col1,
+            // element-wise -- BLSTMNeuralNetwork.cpp:306, the same op the Rust
+            // update_weights does) into the REAL compiled Rprop::updateWeights
+            // (Rprop.cpp:9-59), starting from the real flat weight vector, and
+            // dump the weights after ONE step and after a SECOND step whose
+            // gradient sign-flips (negated) under a RISEN cost so the cost-gated
+            // backtrack FIRES on every nonzero-gradient element (:42-44).
+            //   step 1: grad = norm,  cost = 1.0 (unused -- first call skips the
+            //           state branch; prev_cost is set to 1.0 for step 2's gate).
+            //   step 2: grad = -norm, cost = 2.0 > 1.0 -> derivTimesPrev < 0 on
+            //           every nonzero element AND prev_cost(1.0) < cost(2.0) ->
+            //           BACKTRACK: weights[j] -= delta_weights[j] (undoes step 1).
+            // Costs are FIXED control inputs (not derived from the net's cost),
+            // so the whole trajectory is bit-portable and matches the Rust E2E
+            // test element-for-element. The trainer step on a FIXED gradient is
+            // pure scalar (no libm/GEMM) -> STRICT BITS; only the gradient VALUE
+            // it consumes is the canary-gated reimpl (Rust gates that assert).
+            {
+                Eigen::VectorXd norm(reimplDerivs.rows());
+                for (long j = 0; j < reimplDerivs.rows(); ++j)
+                    norm(j) = reimplDerivs(j, 0) / reimplDerivs(j, 1); // :306
+                RpropProbe rp(1e-2);
+                Eigen::VectorXd w = flat;
+                rp.updateWeights(norm, w, 1.0);
+                Matrix2BinaryFile(out + "e2e_weights_after_step.bin", w);
+                ++dumps;
+                Eigen::VectorXd negNorm = -norm;
+                rp.updateWeights(negNorm, w, 2.0);
+                Matrix2BinaryFile(out + "e2e_weights_after_backtrack.bin", w);
+                // The step-1 dw per element (recorded before step 2 mutated the
+                // caller weights) equals rp._DeltasWeights after step 1; step 2's
+                // backtrack branch leaves _DeltasWeights untouched, so dumping it
+                // now yields the step-1 dw the Rust test uses to assert the
+                // structural "weights moved back" fact.
+                Matrix2BinaryFile(out + "e2e_step1_dw.bin", rp._DeltasWeights);
+                ++dumps;
+            }
+        }
+
+        // ---- NN_PROBE backward: pure-arithmetic outer-product (0 ULP at synthetic k)
+        // The weight-deriv outer product input.col(row)*deltas.row(row) (small k) and
+        // the deltas*W^T back-projection (k=O) are ascending-loop products; at synthetic
+        // shapes Eigen and matSeq agree bit-for-bit. Probe both against nnProbe.
+        {
+            Eigen::MatrixXd inCol = makeInput(1, 4);        // 1 x 4 (input.col row)
+            Eigen::MatrixXd dRow = makeDeltas(1, 3);        // 1 x 3 (deltas.row)
+            nnProbe("bwd_outer_product", inCol.transpose(), dRow);   // (4x1)*(1x3)
+            Eigen::MatrixXd deltas = makeDeltas(6, 3);      // 6 x 3
+            Eigen::MatrixXd wT = makeInput(3, 4);           // 3 x 4 (W^T, O x I)
+            nnProbe("bwd_backproj", deltas, wT);            // (6x3)*(3x4)
+        }
+
+        // ---- Phase 3 Task 6: WINDOWED BLSTM backward dumps -------------------
+        // The plain site above proves the feed_backward FAN-OUT. This stage proves the
+        // WINDOWED accumulation (Truncate / TwoSweeps / OverLap) + the enforcement-step
+        // sequencing + the back_prop_output_network_only short-circuit. The synthetic
+        // net is LSTM [2,2] sub [1] + output [4,2] sub [1] (sub_sampling_ratio == 1: no
+        // grid snapping, no decimation -> the col1 count vector is hand-computable).
+        //
+        // Golden = the REAL compiled feedForwardBackward's getWeightsDerivatives (the
+        // per-window worker's backward is at synthetic k < 23, so Eigen == ascending;
+        // the plain site measured max_ulp=0, and the windowed drivers are pure
+        // structural loops over that worker). Each variant additionally builds a
+        // BlstmBack-per-window reimpl and records NN_TOL site=blstm_bwd_<variant> vs
+        // the real derivs -- must be 0 for these synthetic shapes.
+        {
+            const std::vector<long> wLstmNN = {2, 2}, wLstmSS = {1};
+            const std::vector<long> wOutNN = {4, 2}, wOutSS = {1};
+
+            // Build the windowed synthetic net once per variant (via a helper that
+            // sets the SYNW_ keys + the two_sweeps/enforcement/output-only knobs).
+            auto buildWindowedNet = [&](bool twoSweeps, bool outputOnly,
+                                        int enforcement) {
+                ConfigFile wconf(nnConfigPath, '_');
+                wconf._Params.erase("BLSTM_weightsFile");
+                wconf.set_val<std::string>("SYNW_LSTMNeuronNb", "2,2");
+                wconf.set_val<std::string>("SYNW_LSTMSubSampling", "1");
+                wconf.set_val<std::string>("SYNW_OutputNeuronNb", "4,2");
+                wconf.set_val<std::string>("SYNW_OutputSubSampling", "1");
+                wconf.set_val<short>("SYNW_InputNormalizationType", (short)0);
+                wconf.set_val<bool>("SYNW_TwoSweeps", twoSweeps);
+                wconf.set_val<bool>("SYNW_BackPropagationActivated", true);
+                wconf.set_val<bool>("SYNW_BackPropOutputNetworkOnly", outputOnly);
+                wconf.set_val<int>("SYNW_TargetEnforcementStep", enforcement);
+                return wconf;
+            };
+
+            // Deterministic multiclass targets over `rows` decimated frames.
+            auto windowedTargets = [](long rows) {
+                Eigen::MatrixXd t = Eigen::MatrixXd::Zero(rows, 2);
+                for (long r = 0; r < rows; ++r) t(r, (r % 2)) = 1.0;
+                return t;
+            };
+
+            // Reimpl of the whole windowed feedForwardBackward BACKWARD, mirroring
+            // BLSTMNeuralNetwork.cpp:711-830 for sub_sampling_ratio == 1 (the synthetic
+            // net). `mode`: 0 plain, 1 truncate (single sweep), 2 two-sweeps, 3 overlap.
+            // Accumulates into a single BlstmBack (Derivs use += and reset only in
+            // build()), mirroring the real layer's member accumulation across windows.
+            // enforcement < 0 rewrites the per-window target interior to -0.5 BEFORE the
+            // per-window feed_backward (:803-808); the cost block is not modeled (derivs
+            // only). Returns the assembled Nx2 flat derivs.
+            auto windowedReimplDerivs = [&](ConfigFile& wconf, int mode,
+                                            long window_size, long window_shift,
+                                            const Eigen::MatrixXd& input, long enforcement,
+                                            bool outputOnly, bool twoSweeps) {
+                BLSTMNeuralNetwork<LSTMLayer> szn(wconf, "SYNW", true);
+                Eigen::VectorXd flat = synthFlat(szn.getNbOfWeights());
+                CostLaw cost(wconf, "SYNW");
+                BlstmBack bb;
+                bb.build(flat, wLstmNN, wLstmSS, wOutNN, wOutSS);
+                bb.outputNetworkOnly = outputOnly;
+
+                // One per-window worker: forward capture -> CostLaw seed (with the
+                // enforcement rewrite) -> backward accumulate. `block` is the input
+                // window; `tgt` the decimated targets for it (rows == block rows here,
+                // ssr == 1).
+                auto worker = [&](const Eigen::MatrixXd& block, const Eigen::MatrixXd& tgt) {
+                    Eigen::MatrixXd oF, oB, hcat, outShort;
+                    bb.forward(block, oF, oB, outShort, hcat);
+                    if (tgt.rows() > 0) {
+                        Eigen::MatrixXd tEnf = tgt;
+                        if (enforcement < 0) {
+                            long nbLines = tgt.rows() - 2;
+                            if (nbLines > 0)
+                                tEnf.block(1, 0, nbLines, tgt.cols()) =
+                                    Eigen::MatrixXd::Constant(nbLines, tgt.cols(), -0.5);
+                        }
+                        Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(tEnf.rows(), tEnf.cols());
+                        cost.computeDeltas(outShort, tEnf, seed);
+                        bb.backward(block, oF, oB, hcat, outShort, seed);
+                    }
+                    return outShort;
+                };
+
+                Eigen::MatrixXd targets = windowedTargets(input.rows());
+                if (mode == 0) {
+                    // Plain: one full-sequence window.
+                    worker(input, targets);
+                } else if (mode == 1 || (mode == 2 && !twoSweeps)) {
+                    // TruncateSweep (BLSTMNeuralNetwork.cpp:488-546), ssr == 1: windows
+                    // jj += window_size, last window clamped.
+                    for (long jj = 0; jj < input.rows(); jj += window_size) {
+                        long begin = jj;
+                        long end = jj + window_size - 1;
+                        if (end >= input.rows()) end = input.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0) {
+                            Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+                            Eigen::MatrixXd tgt = targets.block(begin, 0, lengthSeq, targets.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                } else if (mode == 2) {
+                    // TwoSweeps (BLSTMNeuralNetwork.cpp:548-590), ssr == 1: front/back
+                    // replicate-pad by window_size, run TWO offset TruncateSweeps. Both
+                    // sweeps back-propagate -> derivs + counts DOUBLE (derivs NOT halved;
+                    // col1 count carries the compensation). shift == window_size/2.
+                    auto replicateEnds = [](const Eigen::MatrixXd& m, long front, long back) {
+                        Eigen::MatrixXd o(front + m.rows() + back, m.cols());
+                        o << m.row(0).replicate(front, 1), m, m.row(m.rows() - 1).replicate(back, 1);
+                        return o;
+                    };
+                    long shift = window_size / 2;   // ssr == 1
+                    long ws = window_size;           // window_size_short == window_size (ssr 1)
+                    Eigen::MatrixXd inPad = replicateEnds(input, window_size, window_size);
+                    Eigen::MatrixXd tgtPad = replicateEnds(targets, ws, ws);
+                    // Sweep 1: drop the FRONT window_size input padding, KEEP the back;
+                    // target drops the FRONT ws rows.
+                    Eigen::MatrixXd sweep1In = inPad.block(window_size, 0,
+                                                           inPad.rows() - window_size, inPad.cols());
+                    Eigen::MatrixXd sweep1Tgt = tgtPad.block(ws, 0, tgtPad.rows() - ws, tgtPad.cols());
+                    for (long jj = 0; jj < sweep1In.rows(); jj += window_size) {
+                        long begin = jj, end = jj + window_size - 1;
+                        if (end >= sweep1In.rows()) end = sweep1In.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0 && begin < sweep1Tgt.rows()) {
+                            long tRows = std::min(lengthSeq, sweep1Tgt.rows() - begin);
+                            Eigen::MatrixXd block = sweep1In.block(begin, 0, lengthSeq, sweep1In.cols());
+                            Eigen::MatrixXd tgt = sweep1Tgt.block(begin, 0, tRows, sweep1Tgt.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                    // Sweep 2: input from `shift`; target drops the FRONT shift rows.
+                    Eigen::MatrixXd sweep2In = inPad.block(shift, 0, inPad.rows() - shift, inPad.cols());
+                    Eigen::MatrixXd sweep2Tgt = tgtPad.block(shift, 0, tgtPad.rows() - shift, tgtPad.cols());
+                    for (long jj = 0; jj < sweep2In.rows(); jj += window_size) {
+                        long begin = jj, end = jj + window_size - 1;
+                        if (end >= sweep2In.rows()) end = sweep2In.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0 && begin < sweep2Tgt.rows()) {
+                            long tRows = std::min(lengthSeq, sweep2Tgt.rows() - begin);
+                            Eigen::MatrixXd block = sweep2In.block(begin, 0, lengthSeq, sweep2In.cols());
+                            Eigen::MatrixXd tgt = sweep2Tgt.block(begin, 0, tRows, sweep2Tgt.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                } else {
+                    // OverLap (BLSTMNeuralNetwork.cpp:592-681), ssr == 1: windows jj +=
+                    // window_shift, begin = jj<ws?0:jj-ws, end = begin+2ws clamped. Each
+                    // covering window back-propagates -> per-frame counts multiply.
+                    for (long jj = 0; jj < input.rows(); jj += window_shift) {
+                        long begin = (jj < window_size) ? 0 : jj - window_size;
+                        long end = begin + 2 * window_size;
+                        if (end >= input.rows()) end = input.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0) {
+                            Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+                            Eigen::MatrixXd tgt = targets.block(begin, 0, lengthSeq, targets.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                }
+                return bb.flatDerivs();
+            };
+
+            // Drive the REAL windowed net and harvest getWeightsDerivatives (the golden),
+            // compare vs the reimpl (NN_TOL), dump the REAL derivs.
+            auto runWindowed = [&](const char* variant, int mode, long window_size,
+                                   long window_shift, long tLen, bool twoSweeps,
+                                   bool outputOnly, int enforcement) {
+                ConfigFile wconf = buildWindowedNet(twoSweeps, outputOnly, enforcement);
+                BLSTMNeuralNetwork<LSTMLayer> nn(wconf, "SYNW", true);
+                Eigen::VectorXd flat = synthFlat(nn.getNbOfWeights());
+                nn.setWeights(flat);
+                nn.resetWeightsDerivatives();
+
+                Eigen::MatrixXd input = makeInput((int)tLen, 2);
+                Eigen::MatrixXd realOut(tLen, 2);
+                Eigen::MatrixXd targets = windowedTargets(tLen);
+                // Processing type: plain (false,false); truncate/twosweeps (true,false);
+                // overlap (true,true).
+                bool truncates = (mode != 0);
+                bool overlaps = (mode == 3);
+                nn.setProcessingType(truncates, overlaps);
+                nn.feedForwardBackward(input, window_size, window_shift, realOut, targets);
+                Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+
+                Eigen::MatrixXd reimplDerivs = windowedReimplDerivs(
+                    wconf, mode, window_size, window_shift, input, enforcement, outputOnly, twoSweeps);
+                long maxUlp = 0; double maxAbs = 0.0;
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=blstm_bwd_" << variant << " max_ulp=" << maxUlp
+                          << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+                Matrix2BinaryFile(out + "blstm_bwd_" + variant + "_derivs.bin", realDerivs);
+                ++dumps;
+                return realDerivs;
+            };
+
+            // Variants. window_size/shift/tLen chosen so the count vectors are
+            // non-trivial and hand-computable (recorded in the extractor manifest).
+            runWindowed("plain", 0, 0, 0, 8, false, false, 0);
+            runWindowed("truncate", 1, 4, 0, 12, false, false, 0);
+            runWindowed("twosweeps", 2, 4, 0, 12, true, false, 0);
+            runWindowed("overlap", 3, 3, 3, 12, false, false, 0);
+            runWindowed("enforce", 0, 0, 0, 8, false, false, -1);
+
+            // back_prop_output_network_only: the LSTM deriv blocks stay 0 (not dumped as
+            // a golden; the Rust test builds this variant directly and asserts the LSTM
+            // blocks are zero). Confirm the reimpl short-circuit matches the real net.
+            {
+                ConfigFile wconf = buildWindowedNet(false, true, 0);
+                BLSTMNeuralNetwork<LSTMLayer> nn(wconf, "SYNW", true);
+                Eigen::VectorXd flat = synthFlat(nn.getNbOfWeights());
+                nn.setWeights(flat);
+                nn.resetWeightsDerivatives();
+                Eigen::MatrixXd input = makeInput(8, 2);
+                Eigen::MatrixXd realOut(8, 2);
+                Eigen::MatrixXd targets = windowedTargets(8);
+                nn.setProcessingType(false, false);
+                nn.feedForwardBackward(input, 0, 0, realOut, targets);
+                Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+                Eigen::MatrixXd reimplDerivs = windowedReimplDerivs(
+                    wconf, 0, 0, 0, input, 0, true, false);
+                long maxUlp = 0; double maxAbs = 0.0;
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=blstm_bwd_outputonly max_ulp=" << maxUlp
+                          << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+                // LSTM blocks (first 2*64 rows) must be exactly zero on the REAL net.
+                long lstmBlock = 64 + 64;   // fwd LSTM(2,2)=64 + bwd LSTM(2,2)=64
+                long lstmNonzero = 0;
+                for (long r = 0; r < lstmBlock; ++r)
+                    if (realDerivs(r, 0) != 0.0) ++lstmNonzero;
+                std::cout << "NN_OUTPUTONLY lstm_nonzero=" << lstmNonzero << "\n";
+            }
+        }
+    }
+
+    // =====================================================================
+    // --- Phase 3 Task 2: CostLaw backward REAL-probe goldens --------------
+    // Task 2 VALIDATES the already-ported cost.rs backward chain (deriv() per
+    // law, computeUnitaryDeltas, computeDeltas) against the REAL compiled
+    // CostLaw (CostLaw.cpp:278-445, CostLaw.h:6-213) -- not a transcription: the
+    // REAL class is called directly as the golden (S2 tier 2). Three CostLaw
+    // instances built from the real 1_worker_1.config (BLSTM_ prefix) via the
+    // same ConfigFile + set_val override pattern as the Task 1 stage above:
+    //   - polyConf:  CostLawSpeech/NoSpeech = "square" (pure arithmetic; the
+    //     below/above-thresh switch + the output*(1-output) logistic fold are
+    //     exercised bit-exactly on every platform).
+    //   - logConf:   the config's OWN default ("log"/"log") -- libm-dependent
+    //     (ln), canary-gated on the Rust side.
+    //   - sqrtConf:  CostLawSpeech/NoSpeech = "sqrt" -- libm-dependent (sqrt),
+    //     canary-gated on the Rust side.
+    // `conf.set_val<T>(key, "")` would ABORT (empty-string parse), so no key is
+    // ever erased to "unset" it; only real values are written, matching the
+    // brief's constraint note.
+    {
+        auto buildCostConf = [&](const char* speechLaw, const char* noSpeechLaw) {
+            ConfigFile conf(nnConfigPath, '_');
+            conf._Params.erase("BLSTM_weightsFile");
+            conf.set_val<std::string>("BLSTM_CostLawSpeech", std::string(speechLaw));
+            conf.set_val<std::string>("BLSTM_CostLawNoSpeech", std::string(noSpeechLaw));
+            return conf;
+        };
+
+        // ---- Scalar VAD sweep: cost_deriv_scalar_{speech,other}.bin ----------
+        // Deterministic grid output = k/64, k in [0,64] (65 points), for
+        // target=1.0 (speech) and target=0.0 (other). Dumped as Nx2 [output|delta]
+        // via the REAL computeUnitaryDeltas, for the square (strict-bits) law.
+        // The polynomial dump also exercises the BackPropWER scaling branch by
+        // being re-dumped under a WER-enabled config variant (see below).
+        auto dumpScalarSweep = [&](CostLaw& law, const std::string& fname) {
+            const int N = 65;
+            Eigen::MatrixXd mat(N, 2);
+            for (int k = 0; k <= 64; ++k) {
+                double output = (double)k / 64.0;
+                mat(k, 0) = output;
+                mat(k, 1) = law.computeUnitaryDeltas(output, 1.0);
+            }
+            Matrix2BinaryFile(out + fname + "_speech.bin", mat);
+            for (int k = 0; k <= 64; ++k) {
+                double output = (double)k / 64.0;
+                mat(k, 0) = output;
+                mat(k, 1) = law.computeUnitaryDeltas(output, 0.0);
+            }
+            Matrix2BinaryFile(out + fname + "_other.bin", mat);
+            ++dumps;
+            ++dumps;
+        };
+
+        {
+            ConfigFile polyConf = buildCostConf("square", "square");
+            CostLaw polyLaw(polyConf, "BLSTM");
+            dumpScalarSweep(polyLaw, "cost_deriv_scalar_poly");
+        }
+        {
+            // Config's own default (log/log) -- CANARY-GATED on the Rust side.
+            ConfigFile logConf(nnConfigPath, '_');
+            logConf._Params.erase("BLSTM_weightsFile");
+            CostLaw logLaw(logConf, "BLSTM");
+            dumpScalarSweep(logLaw, "cost_deriv_scalar_log");
+        }
+        {
+            ConfigFile sqrtConf = buildCostConf("sqrt", "sqrt");
+            CostLaw sqrtLaw(sqrtConf, "BLSTM");
+            dumpScalarSweep(sqrtLaw, "cost_deriv_scalar_sqrt");
+        }
+        // The brief's literal alias names (cost_deriv_scalar_{speech,other}.bin) are
+        // now produced as a byte copy of the poly dump by the Python extractor
+        // (scripts/extract_phase3_fixtures.py), NOT re-dumped here -- a second
+        // independent C++ dump block ~20 lines from the first is a manual
+        // lock-step trap (fix-wave 1 review finding 2): the two blocks could
+        // silently diverge if only one were edited later.
+
+        // ---- Mid-thresh above-branch coverage: cubic/sqrt deriv, non-degenerate
+        // logistic fold (fix-wave 1 review finding 1) ------------------------
+        // The real config's CostLawThreshSpeech=1 / CostLawThreshNoSpeech=0
+        // (tests/reference_data/phase0/1_worker_1.config:64-65) means the
+        // above-thresh branch (CostLaw.cpp:297,324 speech; :307,326 no-speech)
+        // fires ONLY at output=1.0 (speech) / output=0.0 (no-speech) in every
+        // sweep above -- exactly where the logistic chain-rule fold
+        // `delta*output*(1-output)` (CostLaw.cpp:344) is IDENTICALLY ZERO,
+        // which multiplies away any bug in AboveCubic/AboveSqrt::deriv. This
+        // block overrides BOTH thresholds to 0.5 so the above-thresh branch
+        // fires at output values AWAY from 0/1 (nonzero logistic fold), for
+        // the cubic law (CostLaw.h:84-117 AboveThreshCubicLaw, routed via the
+        // "cubic" name at CostLaw.cpp:300,328) and the sqrt law (CostLaw.h:
+        // 182-213 AboveThreshSqrtLaw, routed via CostLaw.cpp:298,326).
+        //
+        // Above-branch condition (CostLaw.cpp:282,297 speech; :308,324
+        // no-speech): speech is "above" when output >= SwitchingThreshSpeech;
+        // no-speech is "above" when output <= SwitchingThreshNoSpeech (the
+        // ELSE arm of `output > _SwitchingThreshNoSpeech`, after which the
+        // law is evaluated on the flipped `1-output`). With both thresholds
+        // at 0.5: speech points 0.6/0.75/0.9 and no-speech points
+        // 0.4/0.25/0.1 all land in the above-thresh regime.
+        //
+        // ALSO override CostLawParamSpeech/NoSpeech (the real config's own
+        // value is 0, CostLaw.cpp:14-19 "q") away from 0: AboveThreshCubicLaw's
+        // A/B (CostLaw.h:88-93, the "cubic" name routes to the square/cubic
+        // formula) and AboveThreshSqrtLaw's A/B (CostLaw.h:186-188, A=-q, B=q)
+        // are BOTH directly proportional to q -- at q=0 the above-thresh deriv
+        // is identically 0.0 regardless of the logistic fold, a second,
+        // independent way to land a vacuous golden (caught by inspecting the
+        // dumped bytes below before wiring the Rust side, same as the WER
+        // vacuity note above).
+        auto dumpMidThreshPoints = [&](CostLaw& law, const std::string& fname) {
+            const double speechPts[3] = {0.6, 0.75, 0.9};
+            const double noSpeechPts[3] = {0.4, 0.25, 0.1};
+            Eigen::MatrixXd matSpeech(3, 2);
+            for (int k = 0; k < 3; ++k) {
+                matSpeech(k, 0) = speechPts[k];
+                matSpeech(k, 1) = law.computeUnitaryDeltas(speechPts[k], 1.0);
+            }
+            Matrix2BinaryFile(out + fname + "_speech.bin", matSpeech);
+            Eigen::MatrixXd matNoSpeech(3, 2);
+            for (int k = 0; k < 3; ++k) {
+                matNoSpeech(k, 0) = noSpeechPts[k];
+                matNoSpeech(k, 1) = law.computeUnitaryDeltas(noSpeechPts[k], 0.0);
+            }
+            Matrix2BinaryFile(out + fname + "_other.bin", matNoSpeech);
+            ++dumps;
+            ++dumps;
+        };
+        auto buildMidThreshConf = [&](const char* speechLaw, const char* noSpeechLaw) {
+            ConfigFile conf = buildCostConf(speechLaw, noSpeechLaw);
+            conf.set_val<double>("BLSTM_CostLawThreshSpeech", 0.5);
+            conf.set_val<double>("BLSTM_CostLawThreshNoSpeech", 0.5);
+            conf.set_val<double>("BLSTM_CostLawParamSpeech", 0.3);
+            conf.set_val<double>("BLSTM_CostLawParamNoSpeech", 0.3);
+            return conf;
+        };
+        {
+            ConfigFile cubicMidConf = buildMidThreshConf("cubic", "cubic");
+            CostLaw cubicMidLaw(cubicMidConf, "BLSTM");
+            dumpMidThreshPoints(cubicMidLaw, "cost_deriv_scalar_midthresh_cubic");
+        }
+        {
+            ConfigFile sqrtMidConf = buildMidThreshConf("sqrt", "sqrt");
+            CostLaw sqrtMidLaw(sqrtMidConf, "BLSTM");
+            dumpMidThreshPoints(sqrtMidLaw, "cost_deriv_scalar_midthresh_sqrt");
+        }
+
+        // ---- Multiclass softmax+CE fusion: cost_deltas_multiclass.bin --------
+        // n_frames=4 x n_classes=3, deterministic outputs (softmax-shaped, but the
+        // fusion math doesn't require a true softmax row -- any [0,1] values probe
+        // the branch), one-hot-ish targets exercising:
+        //   row0: normal on-class (target col1 > 0.5) -> output-1 on-class, output off-class.
+        //   row1: an ignore-masked row (ALL targets < 0) -> deltas(row1,*) == 0.0 exactly.
+        //   row2: on-class at col0.
+        //   row3: on-class at col2.
+        // The CostLaw for this dump has NO BackPropWER, NO ponderations (the
+        // "vanilla" fusion path -- CostLaw.cpp:403-418 else-branch, no-pond arm).
+        {
+            const int NF = 4, NC = 3;
+            Eigen::MatrixXd outputs(NF, NC);
+            double ov[4][3] = {
+                {0.7, 0.2, 0.1},
+                {0.5, 0.3, 0.2},
+                {0.6, 0.1, 0.3},
+                {0.25, 0.35, 0.4},
+            };
+            for (int j = 0; j < NF; ++j)
+                for (int k = 0; k < NC; ++k) outputs(j, k) = ov[j][k];
+            Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(NF, NC);
+            targets(0, 1) = 1.0;              // row0: on-class col1
+            targets(1, 0) = -1.0; targets(1, 1) = -1.0; targets(1, 2) = -1.0; // row1: fully masked
+            targets(2, 0) = 1.0;               // row2: on-class col0
+            targets(3, 2) = 1.0;               // row3: on-class col2
+
+            ConfigFile mcConf(nnConfigPath, '_');
+            mcConf._Params.erase("BLSTM_weightsFile");
+            CostLaw mcLaw(mcConf, "BLSTM");
+            Eigen::MatrixXd deltas = Eigen::MatrixXd::Zero(NF, NC);
+            mcLaw.computeDeltas(outputs, targets, deltas);
+            Matrix2BinaryFile(out + "cost_deltas_multiclass.bin", deltas);
+            ++dumps;
+
+            // Ponderation variant: same outputs/targets, classes_ponderations set
+            // (non-uniform, exercises CostLaw.cpp:410-417 whole-row scaling by the
+            // ON-CLASS ponderation). Dumped alongside the unponderated deltas above
+            // so the Rust test can assert the exact scale factor between them.
+            ConfigFile pondConf(nnConfigPath, '_');
+            pondConf._Params.erase("BLSTM_weightsFile");
+            pondConf.set_val<std::string>("BLSTM_classes_ponderations", std::string("2.0,3.0,4.0"));
+            CostLaw pondLaw(pondConf, "BLSTM");
+            Eigen::MatrixXd pondDeltas = Eigen::MatrixXd::Zero(NF, NC);
+            pondLaw.computeDeltas(outputs, targets, pondDeltas);
+            Matrix2BinaryFile(out + "cost_deltas_multiclass_pond.bin", pondDeltas);
+            ++dumps;
+        }
+
+        // ---- BackPropWER multiclass path: cost_deltas_wer.bin -----------------
+        // SOFT targets (not exact 0/1): the WER scaling factors are
+        // `10*(1-target)` on-class / `10*target` off-class (CostLaw.cpp:379-397),
+        // which VANISH at target==1.0/0.0 exactly -- the engine's real soft-target
+        // convention (BLSTMNeuralNetwork.cpp:871, `0.1*modifier`) is what makes the
+        // scaling non-degenerate, so a golden built on pure one-hot targets would
+        // be vacuous here (S11.9 non-vacuity). Row0/1 carry soft on-class targets
+        // (0.9, 0.8) with soft off-class floors (0.05/0.1/0.15..); row2 is fully
+        // masked (target<0 everywhere) to prove the ignore path composes with WER.
+        // WITHOUT ponderations, then WITH (CostLaw.cpp:372-401, per-element
+        // pond*10*... arm).
+        {
+            const int NF = 3, NC = 3;
+            Eigen::MatrixXd outputs(NF, NC);
+            double ov[3][3] = {
+                {0.7, 0.2, 0.1},
+                {0.5, 0.3, 0.2},
+                {0.25, 0.35, 0.4},
+            };
+            for (int j = 0; j < NF; ++j)
+                for (int k = 0; k < NC; ++k) outputs(j, k) = ov[j][k];
+            Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(NF, NC);
+            targets(0, 0) = 0.05; targets(0, 1) = 0.9;  targets(0, 2) = 0.05;
+            targets(1, 0) = 0.8;  targets(1, 1) = 0.1;  targets(1, 2) = 0.1;
+            targets(2, 0) = -1.0; targets(2, 1) = -1.0; targets(2, 2) = -1.0;
+
+            ConfigFile werConf(nnConfigPath, '_');
+            werConf._Params.erase("BLSTM_weightsFile");
+            werConf.set_val<double>("BLSTM_BackPropWER", 0.0);
+            CostLaw werLaw(werConf, "BLSTM");
+            Eigen::MatrixXd werDeltas = Eigen::MatrixXd::Zero(NF, NC);
+            werLaw.computeDeltas(outputs, targets, werDeltas);
+            Matrix2BinaryFile(out + "cost_deltas_wer.bin", werDeltas);
+            ++dumps;
+
+            ConfigFile werPondConf(nnConfigPath, '_');
+            werPondConf._Params.erase("BLSTM_weightsFile");
+            werPondConf.set_val<double>("BLSTM_BackPropWER", 0.0);
+            werPondConf.set_val<std::string>("BLSTM_classes_ponderations", std::string("2.0,3.0,4.0"));
+            CostLaw werPondLaw(werPondConf, "BLSTM");
+            Eigen::MatrixXd werPondDeltas = Eigen::MatrixXd::Zero(NF, NC);
+            werPondLaw.computeDeltas(outputs, targets, werPondDeltas);
+            Matrix2BinaryFile(out + "cost_deltas_wer_pond.bin", werPondDeltas);
+            ++dumps;
+        }
+    }
+
+    // =====================================================================
+    // --- Phase 3 Task 7: Rprop iRPROP- trainer trajectory dumps -----------
+    // The REAL compiled Rprop::updateWeights (Rprop.cpp:9-59; :60-76 is the
+    // dead .mat dump, not exercised) IS the golden directly (S2 tier 1): pure
+    // scalar, no libm/GEMM, bit-portable on every platform. Two trajectories,
+    // one Rprop(1e-2) instance each, state persisting call-to-call:
+    //
+    // Trajectory A (5 elements, 5 steps) hits every branch EXCEPT the delta
+    // clamps: first-call init (deriv>0/deriv<0/deriv==0), eta+ growth, eta-
+    // shrink with the cost-gated backtrack BOTH firing (cost rises) and NOT
+    // firing (cost falls), the post-backtrack prev_derivs==0 path (both with a
+    // nonzero AND a literal-zero current deriv), and a literal subsequent-call
+    // deriv==0. Per-element stories (see scratchpad derivation, hand-verified
+    // against a Python transcription of the exact algorithm):
+    //   e0: deriv always +1 (init_pos, then grow every step, never flips).
+    //   e1: deriv always -1 (init_neg, then grow every step on the negative
+    //       side, never flips) -- mirrors e0 to prove the sign symmetry.
+    //   e2: +1,+1,-1(cost RISES 9->12 => backtrack FIRES),-1(post-backtrack
+    //       zero branch, deriv nonzero),-1 (grows again from the zeroed prev).
+    //   e3: 0(init_zero),+1(dtp=1*0=0 => zero branch, deriv nonzero),+1(grows),
+    //       -1(cost FALLS 12->8 => backtrack does NOT fire),-1(post-backtrack
+    //       zero branch, deriv nonzero).
+    //   e4: +1(init_pos),0,0,0,0 (every subsequent call is a literal deriv==0
+    //       zero branch: dtp=0*prev=0 regardless of prev).
+    // Costs: step1=10 (unused; first call skips the state-having branch
+    // entirely), step2=9, step3=12 (RISE vs 9), step4=8 (FALL vs 12), step5=7.
+    //
+    // Trajectory B (2 elements, 48 steps) hits BOTH delta clamps in isolation
+    // (a dedicated trajectory per the brief's "or use a second trajectory with
+    // init_delta near a clamp" alternative -- growing/shrinking 5 elements to
+    // both extremes in one trajectory would tangle the branch bookkeeping):
+    //   e0: deriv always +1 -> delta = 1e-2 * 1.2^k, hits max_delta=0.2 at
+    //       step 18 (1.2^17 ~= 20.3) and STAYS clamped every step after.
+    //   e1: deriv alternates sign +1/-1 every step starting at step 2 -> every
+    //       OTHER call is a real shrink (the intervening calls are forced-zero
+    //       calls per the post-backtrack prev_derivs==0 rule, so the delta
+    //       only *=0.5 on odd-indexed shrinks) -> 24 actual halvings needed
+    //       (0.5^24 ~= 5.96e-8... precisely: 1e-2*0.5^24 ~= 5.96e-10 < 1e-9),
+    //       reached at step 48. Cost oscillates every step (falls/rises
+    //       alternately) so the backtrack gate fires repeatedly along the way
+    //       too (bonus non-vacuity beyond Trajectory A's single instance of
+    //       each).
+    {
+        auto dumpStep = [&](const std::string& prefix, int step, const RpropProbe& rp,
+                             const Eigen::VectorXd& weights) {
+            std::ostringstream ss;
+            ss << prefix << "_step" << step << "_";
+            Matrix2BinaryFile(out + ss.str() + "weights.bin", weights);
+            Matrix2BinaryFile(out + ss.str() + "deltas.bin", rp._Deltas);
+            Matrix2BinaryFile(out + ss.str() + "deltaweights.bin", rp._DeltasWeights);
+            Matrix2BinaryFile(out + ss.str() + "prevderivs.bin", rp._PrevDerivs);
+            ++dumps;
+        };
+
+        // ---- Trajectory A: 5 elements, 5 steps, all branches but the clamps --
+        {
+            RpropProbe rp(1e-2);
+            Eigen::VectorXd weights = Eigen::VectorXd::Constant(5, 1.0);
+            double derivsArr[5][5] = {
+                {1.0, -1.0, 1.0, 0.0, 1.0},
+                {1.0, -1.0, 1.0, 1.0, 0.0},
+                {1.0, -1.0, -1.0, 1.0, 0.0},
+                {1.0, -1.0, -1.0, -1.0, 0.0},
+                {1.0, -1.0, -1.0, -1.0, 0.0},
+            };
+            double costs[5] = {10.0, 9.0, 12.0, 8.0, 7.0};
+            for (int step = 1; step <= 5; ++step) {
+                Eigen::VectorXd derivs(5);
+                for (int j = 0; j < 5; ++j) derivs(j) = derivsArr[step - 1][j];
+                rp.updateWeights(derivs, weights, costs[step - 1]);
+                dumpStep("rprop_trajA", step, rp, weights);
+            }
+        }
+
+        // ---- Trajectory B: 2 elements, 48 steps, both delta clamps -----------
+        {
+            RpropProbe rp(1e-2);
+            Eigen::VectorXd weights = Eigen::VectorXd::Constant(2, 1.0);
+            double prevCost = 5.0;
+            for (int step = 1; step <= 48; ++step) {
+                Eigen::VectorXd derivs(2);
+                derivs(0) = 1.0;
+                derivs(1) = (step == 1) ? 1.0 : ((step % 2 == 1) ? 1.0 : -1.0);
+                double cost = prevCost + ((step % 2 == 0) ? 1.0 : -1.0);
+                rp.updateWeights(derivs, weights, cost);
+                prevCost = cost;
+                dumpStep("rprop_trajB", step, rp, weights);
+            }
+        }
+
+        std::cout << "OK: rprop trajectories dumped (trajA 5 steps, trajB 48 steps)\n";
     }
 
     // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------

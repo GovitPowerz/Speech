@@ -1,0 +1,974 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "backward_reimpl": {
+    "text": "Phase 3 Task 1: the harness-local ascending-loop BACKWARD reimpl family (lstmForwardLoopCache/lstmBackwardLoop/lstmBackwardReverseLoop, denseBackwardLoop, netBackwardLoop/netBackwardReverseLoop, and the LstmSubNet/DenseSubNet/BlstmBack container reimpls) mirrors the Phase 2 forward reimpl family and is built on matSeq + the same file-scope kernels. For each site the harness constructs the REAL compiled layer/net, runs its forward THEN backward on the same operands, harvests getWeightsDerivatives().col(0) (the summed derivative), and compares it element-by-element (ULP) against the reimpl's col(0). The reimpl-produced Nx2 derivs (col0 = summed deriv, col1 = _NbOfSeqFedBackward frame count replicated) ARE the goldens Tasks 3-6 consume -- NOT the real-Eigen derivs, because the backward contains Eigen GEMMs at NN-wide k (_FeedbackWeights*test LSTMLayer.cpp:703, _InputWeights*testM :707, NeuronLayer deltas*_Weights.transpose() :202) that diverge from ascending accumulation at the real net's k>=23 shapes, doubly non-local because the forward already seeds the caches. Derivatives are recomputed FROM the post-activation caches (_Gates/_CellStates/_CellsIn) via the activation deriv structs (GatesFunction/Maxmin2/Identity::deriv) -- NO forward change. The seed deltas for the BLSTM sites come from the REAL compiled CostLaw::computeDeltas (bit-portable: the synthetic site's MULTICLASS softmax+CE path is pure arithmetic; the real net's scalar log-law seed is the same-libm calibration path)."
+  },
+  "lstm_backward_tol": {
+    "text": "Standalone LSTMLayer::feedBackward (LSTMLayer.cpp:518-723) vs lstmBackwardLoop over {I=3,O=2,T=7; I=5,O=4,T=6}, all peepholes on, deterministic synthetic weights/input/deltas. max_ulp=0 means the reimpl reproduces the real layer's getWeightsDerivatives bit-for-bit at these shapes (the reverse-time loop, the O->state->C->F->I gate-derivative order, the 12-row peephole index map, the row==0 no-cellstate forget branch, the deltasForgetGatetmp save/read).",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00"
+  },
+  "dense_backward_tol": {
+    "text": "Standalone NeuronLayer::feedBackward (NeuronLayer.cpp:151-207) vs denseBackwardLoop over {I=4,O=3 hidden; I=4,O=3 last; I=4,O=1 last/logistic}. max_ulp=0. The hidden and last sites share col0 derivs (the weight-deriv input.col*deltas.row is lastLayer-agnostic; lastLayer only changes deltas_out, where the softmax+CE fusion means the output layer applies NO activation Jacobian -- the fusion lives in CostLaw). The blstm_feedbackward site is the end-to-end proof of the no-double-count property. Task 3 adds the deltas_out (T x I) golden per variant (dense_backward_deltasout, also max_ulp=0): the last-layer variants prove deltas_out == deltas*W^T with NO activation Jacobian (double-count trap, spec S11.3); the hidden variant proves the asinh-deriv (Maxmin2::deriv) fold on the LAYER INPUT.",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00",
+    "deltasout": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    }
+  },
+  "net_backward_tol": {
+    "text": "NeuralNetwork<LSTMLayer>/<NeuronLayer>::feedBackward (NeuralNetwork.hpp:251-351) vs netBackwardLoop over the LSTM net [3,4,2] sub [2,1] (fwd + reverse) and the dense net [4,3,2] sub [1,2], T=11 (the SubSample interaction: decimated forward rows vs the InvSubSample delta inflation + running invSubSamplingRatio). max_ulp=0 all four (now covering BOTH the Nx2 derivs AND the returned deltas_out per site -- Task 5). The reverse site pins the time-reversed cache consumption (feedBackwardReverse reverses input/output/deltas, runs the forward-order backward, reverses the returned deltas). deltas_out row count is floor(T/R)*R (10, not 11): SubSample floors the trailing row, InvSubSample never restores it.",
+    "net_lstm_backward_fwd": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "net_lstm_backward_rev": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "net_dense_backward": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "deltasout_calibration": {
+      "net_lstm_backward_fwd_deltasout": {
+        "max_ulp": 8,
+        "max_abs": "8.674e-19"
+      },
+      "net_lstm_backward_rev_deltasout": {
+        "max_ulp": 16,
+        "max_abs": "8.674e-19"
+      },
+      "net_dense_backward_deltasout": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "net_single_layer_backward_subsample_deltasout": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "net_single_layer_backward_plain_deltasout": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    }
+  },
+  "net_single_layer_backward_tol": {
+    "text": "Fix-wave 1 (review finding 1): NeuralNetwork<LSTMLayer>::feedBackward on a SINGLE-layer net (neuronNb.size()==2, NeuralNetwork.hpp:255-263) vs netBackwardLoop's L==2 branch, LSTM [2,2] at T=7 (odd length). This branch is REACHABLE in a real config (configs/legacy/LID_BLSTM.config: BLSTM_LSTMNeuronNb 11,12 with BLSTM_LSTMSubSampling 4) and is structurally distinct from the multi-layer jj==0 arm (:268-276): the single-layer branch reads `deltas`/`deltas.rows()` (the SEED) directly every call, never the running `deltasOut` the multi-layer arm reads on all but the last iteration. subsample (sub [2]) exercises the SubSample/InvSubSample inversion (floor(7/2)=3 decimated rows, InvSubSample restores 3*2=6, NOT 7); plain (sub [1], legacy :262) exercises the no-subsample else-branch. Both max_ulp=0 over BOTH the Nx2 derivs and the returned deltas_out; deltasout is a separate calibration site (see net_backward_tol) for the k=O deltas*W^T back-projection GEMM, here k=O=2 (LSTM [2,2]) -- measured 0 at this shape. This does NOT mean k=O GEMMs are categorically safe below some fixed width: the sibling net_lstm_backward_rev_deltasout site (LSTM [3,4,2], layer-0 k=O=4) measures a nonzero 8-16 ULP at the SAME k=4, so the Eigen-vs-ascending divergence onset for this GEMM shape is between k=2 and k=4, not a large NN-width threshold like the Phase 2 forward's k=23 (that figure does not transfer to this backward GEMM shape) -- it is a per-site measured property, not a predictable cutoff.",
+    "subsample": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "plain": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "deltasout_calibration": {
+      "subsample": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "plain": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    }
+  },
+  "blstm_backward_tol": {
+    "text": "BLSTMNeuralNetwork<LSTMLayer>::feedBackward (BLSTMNeuralNetwork.cpp:439-460) + getWeightsDerivatives (:255-276) vs BlstmBack. The synthetic site (blstm_feedbackward: LSTM [3,4,2] sub [2,1] fwd+bwd, output [4,5,2] sub [1,1], T=12, multiclass targets, backprop active) is max_ulp=0 -- the reimpl reproduces the whole fan-out (CostLaw seed -> feedBackwardDouble hcat -> fwd feedBackward + bwd feedBackwardReverse) bit-for-bit, proving the Nx2 flat deriv layout (fwd|bwd|output|[0|1|0|1] stats tail) matches getWeightsDerivatives element-for-element. The real-net site (blstm_real_backward: the 33,671-weight net on e2e_input.bin, InputNormalizationType -1, scalar-VAD targets, log-law CostLaw seed) is EXPECTED NONZERO -- k=23/24/48 GEMM divergence, RECORDED here as Phase 4 calibration (the reimpl derivs ARE the golden, bwd_blstm_real_derivs.bin).",
+    "synthetic": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "real_calibration": {
+      "max_ulp": 434176,
+      "max_abs": "1.155e-14"
+    },
+    "real_nb_derivs": 33671,
+    "outratio_calibration": {
+      "text": "Output sub-sampling [2,1] (out ratio 2): getWeightsDerivatives multiplies the fwd/bwd LSTM col0 by 2 (:266-269). The output-net SubSample/InvSubSample GEMM in the backward diverges Eigen from the ascending reimpl (like the real-net site), so the REIMPL derivs are the golden (bwd_blstm_outratio_derivs.bin) and the real-vs-reimpl gap is recorded here. The Rust test pins the x2 multiplier by comparing the fwd/bwd blocks vs this dump AND vs the unscaled single-ratio site.",
+      "max_ulp": 80,
+      "max_abs": "1.041e-17"
+    }
+  },
+  "blstm_windowed_backward": {
+    "text": "Task 6: the WINDOWED BLSTMNeuralNetwork::feedForwardBackward backward (BLSTMNeuralNetwork.cpp:711-830) per processing type, on the windowed synthetic net LSTM [2,2] sub [1] + output [4,2] sub [1] (sub_sampling_ratio == 1: no grid snapping/decimation -> the col1 count vector is hand-computable). The golden is the REAL compiled getWeightsDerivatives (the per-window worker's backward is at synthetic k < 23 where Eigen == the ascending reimpl -- the plain site is max_ulp=0; the windowed drivers are pure structural loops over that worker). Each variant's NN_TOL (site=blstm_bwd_<variant>) records the reimpl vs the real net -- all max_ulp=0. The count vector (col1) proves spec S6/S11.4: TwoSweeps back-propagates BOTH sweeps so the trained-weight count is 34 (> the single-sweep truncate 12) with the derivs NOT halved (the count carries the /2 forward-average compensation); OverLap back-propagates each covering window so the count is 27 (> the single-pass 12); the mean/std stats tail is always count 1. The enforce variant (TargetEnforcementStep -1) rewrites the per-window target interior to -0.5 BEFORE feed_backward (risk R7); its count stays 8 (the enforcement moves the deltas, not the frame count). blstm_bwd_outputonly (BackPropOutputNetworkOnly true) is not dumped as a golden -- the harness asserts NN_OUTPUTONLY lstm_nonzero=0 (the LSTM deriv blocks stay 0) and the Rust test builds it directly.",
+    "variants": {
+      "plain": {
+        "t_len": 8,
+        "window_size": 0,
+        "window_shift": 0,
+        "trained_count": 8,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "truncate": {
+        "t_len": 12,
+        "window_size": 4,
+        "window_shift": 0,
+        "trained_count": 12,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "twosweeps": {
+        "t_len": 12,
+        "window_size": 4,
+        "window_shift": 0,
+        "trained_count": 34,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "overlap": {
+        "t_len": 12,
+        "window_size": 3,
+        "window_shift": 3,
+        "trained_count": 27,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "enforce": {
+        "t_len": 8,
+        "window_size": 0,
+        "window_shift": 0,
+        "trained_count": 8,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      }
+    },
+    "stats_tail_count": 1,
+    "output_only_nn_tol": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    }
+  },
+  "nn_backward_product_probes": {
+    "text": "Pure-arithmetic backward products at synthetic k: the weight-deriv outer product input.col(row)*deltas.row(row) (small k) and the deltas*W^T back-projection (k=O). Eigen's product vs the ascending matSeq must agree bit-for-bit (diverged=0) at these shapes -- the same NN_PROBE format as the Phase 2 forward product probes.",
+    "sites": {
+      "bwd_outer_product": {
+        "shape": "(4x1)*(1x3) weight-deriv outer product input.col(row)*deltas.row(row).",
+        "diverged": false,
+        "mismatches": 0,
+        "total": 12
+      },
+      "bwd_backproj": {
+        "shape": "(6x3)*(3x4) deltas*W^T back-projection (k=O), the divergent GEMM at NN width.",
+        "diverged": false,
+        "mismatches": 0,
+        "total": 24
+      }
+    }
+  },
+  "lstm_backward_variants_tol": {
+    "text": "Task 4: LSTMLayer::feedBackward / feedBackwardReverse (LSTMLayer.cpp:518-732) per-variant goldens at synthetic I=2,O=2,T=5 (odd length). Variants: peep_all (all three peephole flags on), peep_none (all off -- the peephole cross-terms drop entirely), reverse (feedForwardReverse then feedBackwardReverse: reverse input/output/deltas, run the forward-order backward, reverse returned deltas; the caches are stored time-reversed and consumed as-is), subsample (invSubSamplingRatio=2, asserting the *2 block scaling on all four deriv blocks, :710-715). Each dumps deltasPreviousLayer (T x I) + the Nx2 derivs (col0 summed deriv, col1 frame count). The signal variant feeds a 1-col input into the I=2 layer (width tolerance :534-543, zero-pad to I rows): dead weight rows accumulate exactly 0 (spec S11.5), gradient stays layer-native (lstm_bwd_signal_derivs.bin). max_ulp=0 vs the real compiled layer over BOTH derivs and deltasPreviousLayer.",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00"
+  },
+  "dumps": {
+    "bwd_lstm_derivs.bin": {
+      "rows": 72,
+      "cols": 2
+    },
+    "bwd_dense_hidden_derivs.bin": {
+      "rows": 15,
+      "cols": 2
+    },
+    "bwd_dense_last_derivs.bin": {
+      "rows": 15,
+      "cols": 2
+    },
+    "bwd_dense_logistic_derivs.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "bwd_net_lstm_fwd_derivs.bin": {
+      "rows": 304,
+      "cols": 2
+    },
+    "bwd_net_lstm_rev_derivs.bin": {
+      "rows": 304,
+      "cols": 2
+    },
+    "bwd_net_dense_derivs.bin": {
+      "rows": 29,
+      "cols": 2
+    },
+    "bwd_blstm_derivs.bin": {
+      "rows": 651,
+      "cols": 2
+    },
+    "bwd_blstm_outratio_derivs.bin": {
+      "rows": 671,
+      "cols": 2
+    },
+    "bwd_blstm_real_derivs.bin": {
+      "rows": 33671,
+      "cols": 2
+    },
+    "bwd_dense_hidden_deltasout.bin": {
+      "rows": 6,
+      "cols": 4
+    },
+    "bwd_dense_last_deltasout.bin": {
+      "rows": 6,
+      "cols": 4
+    },
+    "bwd_dense_logistic_deltasout.bin": {
+      "rows": 6,
+      "cols": 4
+    },
+    "bwd_net_lstm_fwd_deltasout.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "bwd_net_lstm_rev_deltasout.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "bwd_net_dense_deltasout.bin": {
+      "rows": 10,
+      "cols": 4
+    },
+    "lstm_bwd_deltasprev_peep_all.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_deltasprev_peep_none.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_deltasprev_reverse.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_deltasprev_subsample.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_peep_all.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_peep_none.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_reverse.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_subsample.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_signal_derivs.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "bwd_net_single_subsample_derivs.bin": {
+      "rows": 80,
+      "cols": 2
+    },
+    "bwd_net_single_plain_derivs.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "bwd_net_single_subsample_deltasout.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "bwd_net_single_plain_deltasout.bin": {
+      "rows": 7,
+      "cols": 2
+    },
+    "blstm_bwd_plain_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_truncate_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_twosweeps_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_overlap_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_enforce_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "e2e_weights_after_step.bin": {
+      "rows": 33671,
+      "cols": 1
+    },
+    "e2e_weights_after_backtrack.bin": {
+      "rows": 33671,
+      "cols": 1
+    },
+    "e2e_step1_dw.bin": {
+      "rows": 33671,
+      "cols": 1
+    }
+  },
+  "e2e_gate": {
+    "text": "Task 8: the phase E2E training gate. The REAL 33,671-weight net (1_worker_1.config + NNweights_config1.bin, BackPropagationActivated overridden true, InputNormalizationType -1) on e2e_input.bin (201 x 11, width < 23 -> the LSTM topRows tolerance) with deterministic scalar-VAD targets (row%3==0 -> 1.0) runs feedForwardBackward; its Nx2 gradient IS bwd_blstm_real_derivs.bin (the reimpl golden -- canary-gated, k>=23 GEMM divergence). update_weights normalizes col0 cwiseQuotient col1 element-wise (:306) and hands it to the REAL compiled Rprop::updateWeights. Step 1 (cost 1.0, unused first call) -> e2e_weights_after_step.bin. Step 2 feeds the NEGATED gradient under a RISEN cost (2.0 > 1.0): every nonzero element sign-flips (derivTimesPrev < 0) and the cost gate opens, so the backtrack FIRES (weights[j] -= delta_weights[j], undoing step 1) -> e2e_weights_after_backtrack.bin. e2e_step1_dw.bin is the step-1 dw per element (the backtrack branch leaves _DeltasWeights untouched, so it still holds step-1's value after step 2) -- the Rust test asserts weights moved back by exactly -dw on the fired elements. The Rprop step is pure scalar (no libm/GEMM) -> STRICT BITS; only the gradient VALUE it consumes is the canary-gated reimpl. Backtrack fired on `fired_count` elements (MEASURED).",
+    "step1_cost": 1.0,
+    "step2_cost": 2.0,
+    "fired_count": 24409,
+    "grad_dump": "bwd_blstm_real_derivs.bin",
+    "dumps": {
+      "e2e_weights_after_step.bin": {
+        "rows": 33671,
+        "cols": 1
+      },
+      "e2e_weights_after_backtrack.bin": {
+        "rows": 33671,
+        "cols": 1
+      },
+      "e2e_step1_dw.bin": {
+        "rows": 33671,
+        "cols": 1
+      }
+    }
+  },
+  "gradcheck": {
+    "text": "Task 8: the network-level central-difference grad check (spec S8; the legacy shape is CorpusProcessor::gradCheck:237-340). For a spot-checked subset of the flat weights, perturb +eps/-eps with full state restore, cost from one feed_forward_backward each side (cost = net.cost / net.nb_of_classif, matching the legacy `cost /= counter`), numerical grad = (costPlus - costMinus)/(2*eps), compared vs analytic col0/col1 with relative error floored at 1e-24. Bound-based (NOT a byte golden -- no fixture): the Rust test asserts the mean relative error over the subset is below the documented bound, and DOUBLE-DUTIES as the analytic chain's non-vacuity layer (a sign-flip mutation in the LSTM deriv accumulation blows through the bound). eps and bound are the documented contract, replayed by the test.",
+    "epsilon": 1e-05,
+    "relative_error_bound": 0.0005,
+    "ref_floor": 1e-24
+  },
+  "costlaw_backward": {
+    "text": "Task 2: CostLaw backward seam VALIDATION (cost.rs was already ported in Phase 0b-i). The REAL compiled CostLaw::computeUnitaryDeltas/computeDeltas (CostLaw.cpp:278-445, CostLaw.h:6-213) is probed DIRECTLY as the golden (S2 tier 2) -- no transcription. Scalar VAD sweeps: output=k/64 for k in [0,64] (65 points), target=1.0 (speech) / target=0.0 (other), for the square (polynomial, strict-bits), log (libm, canary-gated), and sqrt (libm, canary-gated) laws -- exercises the below/above-thresh switch, the no-speech 1-output flip + derivative negation, and the output*(1-output) logistic chain-rule fold (:344). cost_deriv_scalar_{speech,other}.bin are a byte copy (shutil.copy2, this extractor) of the square-law dump under the brief's literal names -- fix-wave 1 (review finding 2) removed the second, independent C++ dump block that produced them. FIX-WAVE 1 (review finding 1): the real config's CostLawThreshSpeech=1/CostLawThreshNoSpeech=0 (1_worker_1.config:64-65) means the k/64 sweep above only ever exercises the above-thresh branch at output=1.0/0.0, where the logistic fold is exactly zero -- cost_deriv_scalar_midthresh_{cubic,sqrt}_{speech,other}.bin override BOTH thresholds to 0.5 and dump 3 explicit points landing in the above-thresh regime away from 0/1 (speech 0.6/0.75/0.9, no-speech 0.4/0.25/0.1 -- CostLaw.cpp:282,297,308,324), for the cubic law (AboveThreshCubicLaw, CostLaw.h:84-117, strict bits) and the sqrt law (AboveThreshSqrtLaw, CostLaw.h:182-213, canary-gated). Multiclass fusion (cost_deltas_multiclass.bin, n_frames=4 x n_classes=3): row1 is FULLY ignore-masked (target<0 -> delta==0.0 exactly), rows 0/2/3 place the on-class at different columns; the _pond variant sets classes_ponderations=2,3,4 and scales the WHOLE on-class row by the on-class ponderation (:410-417). BackPropWER (cost_deltas_wer.bin, n_frames=3 x n_classes=3): SOFT targets (0.9/0.8 on-class, not exact 1.0) because the WER scaling `10*(1-target)` / `10*target` (:379-397) VANISHES at target==1.0/0.0 exactly -- soft targets are the engine's real BackPropWER convention (BLSTMNeuralNetwork.cpp:871, 0.1*modifier); a one-hot-only golden would be vacuous. Row2 is fully masked (ignore composes with WER). The _pond variant adds classes_ponderations to the per-element WER arm. All multiclass/WER dumps are pure arithmetic (no libm) -> strict bits.",
+    "dumps": {
+      "cost_deriv_scalar_poly_speech.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_poly_other.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_log_speech.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_log_other.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_sqrt_speech.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_sqrt_other.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deltas_multiclass.bin": {
+        "rows": 4,
+        "cols": 3
+      },
+      "cost_deltas_multiclass_pond.bin": {
+        "rows": 4,
+        "cols": 3
+      },
+      "cost_deltas_wer.bin": {
+        "rows": 3,
+        "cols": 3
+      },
+      "cost_deltas_wer_pond.bin": {
+        "rows": 3,
+        "cols": 3
+      },
+      "cost_deriv_scalar_midthresh_cubic_speech.bin": {
+        "rows": 3,
+        "cols": 2
+      },
+      "cost_deriv_scalar_midthresh_cubic_other.bin": {
+        "rows": 3,
+        "cols": 2
+      },
+      "cost_deriv_scalar_midthresh_sqrt_speech.bin": {
+        "rows": 3,
+        "cols": 2
+      },
+      "cost_deriv_scalar_midthresh_sqrt_other.bin": {
+        "rows": 3,
+        "cols": 2
+      }
+    },
+    "alias_dumps": {
+      "cost_deriv_scalar_speech.bin": {
+        "copy_of": "cost_deriv_scalar_poly_speech.bin",
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_other.bin": {
+        "copy_of": "cost_deriv_scalar_poly_other.bin",
+        "rows": 65,
+        "cols": 2
+      }
+    }
+  },
+  "rprop_trajectories": {
+    "text": "Task 7: the REAL compiled Rprop::updateWeights (Rprop.cpp:9-59, the :60-76 .mat dump + _Count are dead and not exercised) is the golden DIRECTLY -- pure scalar, no libm/GEMM, bit-portable on every platform (STRICT BITS everywhere, no canary gate). Trajectory A (5 elements, 5 steps) exercises every branch except the delta clamps: first-call init (deriv>0/deriv<0/deriv==0), eta+ growth, eta- shrink with the cost-gated backtrack BOTH firing (step3, cost rises 9->12) and NOT firing (step4, cost falls 12->8), the post-backtrack prev_derivs==0 path (both with a nonzero and a literal-zero current deriv), and a literal subsequent-call deriv==0. Trajectory B (2 elements, 48 steps) is a DEDICATED clamp trajectory (the brief's 'second trajectory with init_delta near a clamp' alternative): element 0's deriv never flips, growing 1e-2*1.2^k to the max_delta=0.2 clamp (hit at step 18); element 1 alternates sign every step, so only every OTHER call is a genuine shrink (the intervening calls are the forced-zero post-backtrack path), reaching the min_delta=1e-9 clamp at step 48. The branch record below is an INDEPENDENT re-derivation (this extractor script, not read back from the dumps) of the deriv-sign x prev-deriv-sign x cost-comparison state machine over the exact same trajectory inputs fed to the harness -- the Rust golden test asserts it covers all 7 required branch kinds (S11.1) and cross-checks a few spot elements/steps against the dumped numbers.",
+    "eta_min": 0.5,
+    "eta_plus": 1.2,
+    "min_delta": 1e-09,
+    "max_delta": 0.2,
+    "init_delta": 0.01,
+    "trajectory_a": {
+      "n_elements": 5,
+      "n_steps": 5,
+      "derivs": [
+        [
+          1.0,
+          -1.0,
+          1.0,
+          0.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0,
+          1.0,
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          -1.0,
+          -1.0,
+          1.0,
+          0.0
+        ],
+        [
+          1.0,
+          -1.0,
+          -1.0,
+          -1.0,
+          0.0
+        ],
+        [
+          1.0,
+          -1.0,
+          -1.0,
+          -1.0,
+          0.0
+        ]
+      ],
+      "costs": [
+        10.0,
+        9.0,
+        12.0,
+        8.0,
+        7.0
+      ],
+      "branches": [
+        [
+          "init_pos",
+          "init_neg",
+          "init_pos",
+          "init_zero",
+          "init_pos"
+        ],
+        [
+          "grow",
+          "grow",
+          "grow",
+          "zero_pos",
+          "zero"
+        ],
+        [
+          "grow",
+          "grow",
+          "shrink+backtrack",
+          "grow",
+          "zero"
+        ],
+        [
+          "grow",
+          "grow",
+          "zero_neg",
+          "shrink+nobacktrack",
+          "zero"
+        ],
+        [
+          "grow",
+          "grow",
+          "grow",
+          "zero_neg",
+          "zero"
+        ]
+      ]
+    },
+    "trajectory_b": {
+      "n_elements": 2,
+      "n_steps": 48,
+      "derivs": [
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ],
+        [
+          1.0,
+          1.0
+        ],
+        [
+          1.0,
+          -1.0
+        ]
+      ],
+      "costs": [
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0,
+        4.0,
+        5.0
+      ],
+      "branches": [
+        [
+          "init_pos",
+          "init_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow",
+          "shrink+backtrack"
+        ],
+        [
+          "grow",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink+backtrack"
+        ],
+        [
+          "grow_clamped",
+          "zero_pos"
+        ],
+        [
+          "grow_clamped",
+          "shrink_clamped+backtrack"
+        ]
+      ],
+      "max_delta_clamp_first_step": 18,
+      "min_delta_clamp_first_step": 48
+    },
+    "required_branch_kinds_covered": [
+      "grow",
+      "grow_clamped",
+      "init",
+      "shrink_backtrack",
+      "shrink_clamped",
+      "shrink_nobacktrack",
+      "zero_post"
+    ]
+  }
+}
