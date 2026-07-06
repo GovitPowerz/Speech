@@ -1,9 +1,11 @@
 """Build and run the oracle harness for Phase 3, then write the backward NN-probe manifest.
 
-Phase 3 lands network-level training (BPTT + iRPROP-). This extractor covers Task 1:
-the harness-local ascending-loop BACKWARD reimpl family (mirroring the Phase 2 forward
-reimpl) + the NN_TOL/NN_PROBE backward probe stages already wired into
-``tools/oracle_harness/main.cpp``. It:
+Phase 3 lands network-level training (BPTT + iRPROP-). This extractor covers Task 1
+(the harness-local ascending-loop BACKWARD reimpl family mirroring the Phase 2 forward
+reimpl, + the NN_TOL/NN_PROBE backward probe stages) and Task 2 (CostLaw backward seam
+VALIDATION: the REAL compiled `CostLaw::computeUnitaryDeltas`/`computeDeltas` probed
+directly as the golden -- cost.rs was already ported in Phase 0b-i, so this is not a
+transcription target), both already wired into ``tools/oracle_harness/main.cpp``. It:
 
   1. Rebuilds the harness (the backward reimpl statics + probe stage are already in it;
      the linked TUs are unchanged from Phase 2b -- BLSTMNeuralNetwork/LSTMLayer/
@@ -85,6 +87,25 @@ EXPECTED_SHAPES = {
     "bwd_blstm_real_derivs.bin": (33671, 2),
 }
 
+# Task 2: CostLaw backward REAL-probe goldens (dumped from the REAL compiled
+# computeUnitaryDeltas/computeDeltas, NOT a reimpl -- CostLaw is tier-2 oracle
+# per spec S2, probed directly). Nx2 [output | delta] for the scalar sweeps
+# (65-point k/64 grid), n_frames x n_classes for the multiclass fusion dumps.
+COST_SHAPES = {
+    "cost_deriv_scalar_speech.bin": (65, 2),
+    "cost_deriv_scalar_other.bin": (65, 2),
+    "cost_deriv_scalar_poly_speech.bin": (65, 2),
+    "cost_deriv_scalar_poly_other.bin": (65, 2),
+    "cost_deriv_scalar_log_speech.bin": (65, 2),
+    "cost_deriv_scalar_log_other.bin": (65, 2),
+    "cost_deriv_scalar_sqrt_speech.bin": (65, 2),
+    "cost_deriv_scalar_sqrt_other.bin": (65, 2),
+    "cost_deltas_multiclass.bin": (4, 3),
+    "cost_deltas_multiclass_pond.bin": (4, 3),
+    "cost_deltas_wer.bin": (3, 3),
+    "cost_deltas_wer_pond.bin": (3, 3),
+}
+
 # NN_TOL backward sites. Synthetic sites MUST be max_ulp=0; the real-net site is
 # recorded nonzero (Phase 4 calibration).
 SYNTHETIC_TOL_SITES = [
@@ -156,10 +177,7 @@ def _parse_nn_tol(stdout: str) -> dict[str, dict[str, object]]:
     # Synthetic backward sites MUST be bit-exact vs the real compiled class.
     nonzero = [s for s in SYNTHETIC_TOL_SITES if tols[s]["max_ulp"] != 0]
     if nonzero:
-        raise SystemExit(
-            f"synthetic backward NN_TOL sites must be max_ulp=0 (the reimpl is wrong): "
-            f"{[(s, tols[s]['max_ulp']) for s in nonzero]}"
-        )
+        raise SystemExit(f"synthetic backward NN_TOL sites must be max_ulp=0 (the reimpl is wrong): {[(s, tols[s]['max_ulp']) for s in nonzero]}")
     return tols
 
 
@@ -213,6 +231,9 @@ def main() -> None:
         # Copy the reimpl-produced Nx2 deriv goldens into the committed Phase 3 dir.
         for name in EXPECTED_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Copy the Task 2 CostLaw REAL-probe goldens (dumped from the real class).
+        for name in COST_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
 
     # 4. Regression guard: the prior-phase dirs must be byte-identical after the run.
     after = {p: _hash_tree(d) for p, d in (("phase1", PHASE1_DIR), ("phase2", PHASE2_DIR), ("phase2b", PHASE2B_DIR))}
@@ -240,6 +261,13 @@ def main() -> None:
             mismatches.append({"file": name, "expected": expected, "got": got})
     if mismatches:
         raise SystemExit(f"bwd_*.bin shape mismatch: {mismatches}")
+    cost_mismatches = []
+    for name, expected in COST_SHAPES.items():
+        got = _read_bin_shape(PHASE3_DIR / name)
+        if got != expected:
+            cost_mismatches.append({"file": name, "expected": expected, "got": got})
+    if cost_mismatches:
+        raise SystemExit(f"cost_*.bin shape mismatch: {cost_mismatches}")
 
     # 7. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -340,6 +368,33 @@ def main() -> None:
             "sites": probes,
         },
         "dumps": {name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_SHAPES.items()},
+        "costlaw_backward": {
+            "text": (
+                "Task 2: CostLaw backward seam VALIDATION (cost.rs was already ported in "
+                "Phase 0b-i). The REAL compiled CostLaw::computeUnitaryDeltas/computeDeltas "
+                "(CostLaw.cpp:278-445, CostLaw.h:6-213) is probed DIRECTLY as the golden (S2 "
+                "tier 2) -- no transcription. Scalar VAD sweeps: output=k/64 for k in [0,64] "
+                "(65 points), target=1.0 (speech) / target=0.0 (other), for the square "
+                "(polynomial, strict-bits), log (libm, canary-gated), and sqrt (libm, "
+                "canary-gated) laws -- exercises the below/above-thresh switch, the no-speech "
+                "1-output flip + derivative negation, and the output*(1-output) logistic "
+                "chain-rule fold (:344). cost_deriv_scalar_{speech,other}.bin alias the square "
+                "law dump under the brief's literal names. Multiclass fusion "
+                "(cost_deltas_multiclass.bin, n_frames=4 x n_classes=3): row1 is FULLY "
+                "ignore-masked (target<0 -> delta==0.0 exactly), rows 0/2/3 place the on-class "
+                "at different columns; the _pond variant sets classes_ponderations=2,3,4 and "
+                "scales the WHOLE on-class row by the on-class ponderation (:410-417). "
+                "BackPropWER (cost_deltas_wer.bin, n_frames=3 x n_classes=3): SOFT targets "
+                "(0.9/0.8 on-class, not exact 1.0) because the WER scaling `10*(1-target)` / "
+                "`10*target` (:379-397) VANISHES at target==1.0/0.0 exactly -- soft targets are "
+                "the engine's real BackPropWER convention (BLSTMNeuralNetwork.cpp:871, "
+                "0.1*modifier); a one-hot-only golden would be vacuous. Row2 is fully masked "
+                "(ignore composes with WER). The _pond variant adds classes_ponderations to the "
+                "per-element WER arm. All multiclass/WER dumps are pure arithmetic (no libm) -> "
+                "strict bits."
+            ),
+            "dumps": {name: {"rows": r, "cols": c} for name, (r, c) in COST_SHAPES.items()},
+        },
     }
 
     manifest_path = PHASE3_DIR / "manifest.json"
@@ -348,7 +403,7 @@ def main() -> None:
     real_ulp = tols[REAL_TOL_SITE]["max_ulp"]
     print(
         f"OK: {len(SYNTHETIC_TOL_SITES)} synthetic backward sites max_ulp=0, "
-        f"real-net calibration max_ulp={real_ulp}, {len(EXPECTED_SHAPES)} goldens -> "
+        f"real-net calibration max_ulp={real_ulp}, {len(EXPECTED_SHAPES) + len(COST_SHAPES)} goldens -> "
         f"{manifest_path.relative_to(REPO_ROOT)}"
     )
 

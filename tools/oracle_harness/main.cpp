@@ -7221,6 +7221,180 @@ int main(int argc, char** argv) {
         }
     }
 
+    // =====================================================================
+    // --- Phase 3 Task 2: CostLaw backward REAL-probe goldens --------------
+    // Task 2 VALIDATES the already-ported cost.rs backward chain (deriv() per
+    // law, computeUnitaryDeltas, computeDeltas) against the REAL compiled
+    // CostLaw (CostLaw.cpp:278-445, CostLaw.h:6-213) -- not a transcription: the
+    // REAL class is called directly as the golden (S2 tier 2). Three CostLaw
+    // instances built from the real 1_worker_1.config (BLSTM_ prefix) via the
+    // same ConfigFile + set_val override pattern as the Task 1 stage above:
+    //   - polyConf:  CostLawSpeech/NoSpeech = "square" (pure arithmetic; the
+    //     below/above-thresh switch + the output*(1-output) logistic fold are
+    //     exercised bit-exactly on every platform).
+    //   - logConf:   the config's OWN default ("log"/"log") -- libm-dependent
+    //     (ln), canary-gated on the Rust side.
+    //   - sqrtConf:  CostLawSpeech/NoSpeech = "sqrt" -- libm-dependent (sqrt),
+    //     canary-gated on the Rust side.
+    // `conf.set_val<T>(key, "")` would ABORT (empty-string parse), so no key is
+    // ever erased to "unset" it; only real values are written, matching the
+    // brief's constraint note.
+    {
+        auto buildCostConf = [&](const char* speechLaw, const char* noSpeechLaw) {
+            ConfigFile conf(nnConfigPath, '_');
+            conf._Params.erase("BLSTM_weightsFile");
+            conf.set_val<std::string>("BLSTM_CostLawSpeech", std::string(speechLaw));
+            conf.set_val<std::string>("BLSTM_CostLawNoSpeech", std::string(noSpeechLaw));
+            return conf;
+        };
+
+        // ---- Scalar VAD sweep: cost_deriv_scalar_{speech,other}.bin ----------
+        // Deterministic grid output = k/64, k in [0,64] (65 points), for
+        // target=1.0 (speech) and target=0.0 (other). Dumped as Nx2 [output|delta]
+        // via the REAL computeUnitaryDeltas, for the square (strict-bits) law.
+        // The polynomial dump also exercises the BackPropWER scaling branch by
+        // being re-dumped under a WER-enabled config variant (see below).
+        auto dumpScalarSweep = [&](CostLaw& law, const std::string& fname) {
+            const int N = 65;
+            Eigen::MatrixXd mat(N, 2);
+            for (int k = 0; k <= 64; ++k) {
+                double output = (double)k / 64.0;
+                mat(k, 0) = output;
+                mat(k, 1) = law.computeUnitaryDeltas(output, 1.0);
+            }
+            Matrix2BinaryFile(out + fname + "_speech.bin", mat);
+            for (int k = 0; k <= 64; ++k) {
+                double output = (double)k / 64.0;
+                mat(k, 0) = output;
+                mat(k, 1) = law.computeUnitaryDeltas(output, 0.0);
+            }
+            Matrix2BinaryFile(out + fname + "_other.bin", mat);
+            ++dumps;
+            ++dumps;
+        };
+
+        {
+            ConfigFile polyConf = buildCostConf("square", "square");
+            CostLaw polyLaw(polyConf, "BLSTM");
+            dumpScalarSweep(polyLaw, "cost_deriv_scalar_poly");
+        }
+        {
+            // Config's own default (log/log) -- CANARY-GATED on the Rust side.
+            ConfigFile logConf(nnConfigPath, '_');
+            logConf._Params.erase("BLSTM_weightsFile");
+            CostLaw logLaw(logConf, "BLSTM");
+            dumpScalarSweep(logLaw, "cost_deriv_scalar_log");
+        }
+        {
+            ConfigFile sqrtConf = buildCostConf("sqrt", "sqrt");
+            CostLaw sqrtLaw(sqrtConf, "BLSTM");
+            dumpScalarSweep(sqrtLaw, "cost_deriv_scalar_sqrt");
+        }
+        // Kept for the brief's named dumps (== the poly speech/other pair; the
+        // poly law is strict-bits so an alias dump costs nothing and lets the
+        // Rust test names match the brief's dump names exactly).
+        {
+            ConfigFile polyConf = buildCostConf("square", "square");
+            CostLaw polyLaw(polyConf, "BLSTM");
+            dumpScalarSweep(polyLaw, "cost_deriv_scalar");
+        }
+
+        // ---- Multiclass softmax+CE fusion: cost_deltas_multiclass.bin --------
+        // n_frames=4 x n_classes=3, deterministic outputs (softmax-shaped, but the
+        // fusion math doesn't require a true softmax row -- any [0,1] values probe
+        // the branch), one-hot-ish targets exercising:
+        //   row0: normal on-class (target col1 > 0.5) -> output-1 on-class, output off-class.
+        //   row1: an ignore-masked row (ALL targets < 0) -> deltas(row1,*) == 0.0 exactly.
+        //   row2: on-class at col0.
+        //   row3: on-class at col2.
+        // The CostLaw for this dump has NO BackPropWER, NO ponderations (the
+        // "vanilla" fusion path -- CostLaw.cpp:403-418 else-branch, no-pond arm).
+        {
+            const int NF = 4, NC = 3;
+            Eigen::MatrixXd outputs(NF, NC);
+            double ov[4][3] = {
+                {0.7, 0.2, 0.1},
+                {0.5, 0.3, 0.2},
+                {0.6, 0.1, 0.3},
+                {0.25, 0.35, 0.4},
+            };
+            for (int j = 0; j < NF; ++j)
+                for (int k = 0; k < NC; ++k) outputs(j, k) = ov[j][k];
+            Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(NF, NC);
+            targets(0, 1) = 1.0;              // row0: on-class col1
+            targets(1, 0) = -1.0; targets(1, 1) = -1.0; targets(1, 2) = -1.0; // row1: fully masked
+            targets(2, 0) = 1.0;               // row2: on-class col0
+            targets(3, 2) = 1.0;               // row3: on-class col2
+
+            ConfigFile mcConf(nnConfigPath, '_');
+            mcConf._Params.erase("BLSTM_weightsFile");
+            CostLaw mcLaw(mcConf, "BLSTM");
+            Eigen::MatrixXd deltas = Eigen::MatrixXd::Zero(NF, NC);
+            mcLaw.computeDeltas(outputs, targets, deltas);
+            Matrix2BinaryFile(out + "cost_deltas_multiclass.bin", deltas);
+            ++dumps;
+
+            // Ponderation variant: same outputs/targets, classes_ponderations set
+            // (non-uniform, exercises CostLaw.cpp:410-417 whole-row scaling by the
+            // ON-CLASS ponderation). Dumped alongside the unponderated deltas above
+            // so the Rust test can assert the exact scale factor between them.
+            ConfigFile pondConf(nnConfigPath, '_');
+            pondConf._Params.erase("BLSTM_weightsFile");
+            pondConf.set_val<std::string>("BLSTM_classes_ponderations", std::string("2.0,3.0,4.0"));
+            CostLaw pondLaw(pondConf, "BLSTM");
+            Eigen::MatrixXd pondDeltas = Eigen::MatrixXd::Zero(NF, NC);
+            pondLaw.computeDeltas(outputs, targets, pondDeltas);
+            Matrix2BinaryFile(out + "cost_deltas_multiclass_pond.bin", pondDeltas);
+            ++dumps;
+        }
+
+        // ---- BackPropWER multiclass path: cost_deltas_wer.bin -----------------
+        // SOFT targets (not exact 0/1): the WER scaling factors are
+        // `10*(1-target)` on-class / `10*target` off-class (CostLaw.cpp:379-397),
+        // which VANISH at target==1.0/0.0 exactly -- the engine's real soft-target
+        // convention (BLSTMNeuralNetwork.cpp:871, `0.1*modifier`) is what makes the
+        // scaling non-degenerate, so a golden built on pure one-hot targets would
+        // be vacuous here (S11.9 non-vacuity). Row0/1 carry soft on-class targets
+        // (0.9, 0.8) with soft off-class floors (0.05/0.1/0.15..); row2 is fully
+        // masked (target<0 everywhere) to prove the ignore path composes with WER.
+        // WITHOUT ponderations, then WITH (CostLaw.cpp:372-401, per-element
+        // pond*10*... arm).
+        {
+            const int NF = 3, NC = 3;
+            Eigen::MatrixXd outputs(NF, NC);
+            double ov[3][3] = {
+                {0.7, 0.2, 0.1},
+                {0.5, 0.3, 0.2},
+                {0.25, 0.35, 0.4},
+            };
+            for (int j = 0; j < NF; ++j)
+                for (int k = 0; k < NC; ++k) outputs(j, k) = ov[j][k];
+            Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(NF, NC);
+            targets(0, 0) = 0.05; targets(0, 1) = 0.9;  targets(0, 2) = 0.05;
+            targets(1, 0) = 0.8;  targets(1, 1) = 0.1;  targets(1, 2) = 0.1;
+            targets(2, 0) = -1.0; targets(2, 1) = -1.0; targets(2, 2) = -1.0;
+
+            ConfigFile werConf(nnConfigPath, '_');
+            werConf._Params.erase("BLSTM_weightsFile");
+            werConf.set_val<double>("BLSTM_BackPropWER", 0.0);
+            CostLaw werLaw(werConf, "BLSTM");
+            Eigen::MatrixXd werDeltas = Eigen::MatrixXd::Zero(NF, NC);
+            werLaw.computeDeltas(outputs, targets, werDeltas);
+            Matrix2BinaryFile(out + "cost_deltas_wer.bin", werDeltas);
+            ++dumps;
+
+            ConfigFile werPondConf(nnConfigPath, '_');
+            werPondConf._Params.erase("BLSTM_weightsFile");
+            werPondConf.set_val<double>("BLSTM_BackPropWER", 0.0);
+            werPondConf.set_val<std::string>("BLSTM_classes_ponderations", std::string("2.0,3.0,4.0"));
+            CostLaw werPondLaw(werPondConf, "BLSTM");
+            Eigen::MatrixXd werPondDeltas = Eigen::MatrixXd::Zero(NF, NC);
+            werPondLaw.computeDeltas(outputs, targets, werPondDeltas);
+            Matrix2BinaryFile(out + "cost_deltas_wer_pond.bin", werPondDeltas);
+            ++dumps;
+        }
+    }
+
     // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------
     // The Phase 2b segmenter linkage makes the REAL Segmentation::toFile_VRCTS a
     // byte golden, which routes through iof::fmtr (%f.Ns -> std::fixed +

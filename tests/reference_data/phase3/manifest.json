@@ -95,5 +95,58 @@
       "rows": 33671,
       "cols": 2
     }
+  },
+  "costlaw_backward": {
+    "text": "Task 2: CostLaw backward seam VALIDATION (cost.rs was already ported in Phase 0b-i). The REAL compiled CostLaw::computeUnitaryDeltas/computeDeltas (CostLaw.cpp:278-445, CostLaw.h:6-213) is probed DIRECTLY as the golden (S2 tier 2) -- no transcription. Scalar VAD sweeps: output=k/64 for k in [0,64] (65 points), target=1.0 (speech) / target=0.0 (other), for the square (polynomial, strict-bits), log (libm, canary-gated), and sqrt (libm, canary-gated) laws -- exercises the below/above-thresh switch, the no-speech 1-output flip + derivative negation, and the output*(1-output) logistic chain-rule fold (:344). cost_deriv_scalar_{speech,other}.bin alias the square law dump under the brief's literal names. Multiclass fusion (cost_deltas_multiclass.bin, n_frames=4 x n_classes=3): row1 is FULLY ignore-masked (target<0 -> delta==0.0 exactly), rows 0/2/3 place the on-class at different columns; the _pond variant sets classes_ponderations=2,3,4 and scales the WHOLE on-class row by the on-class ponderation (:410-417). BackPropWER (cost_deltas_wer.bin, n_frames=3 x n_classes=3): SOFT targets (0.9/0.8 on-class, not exact 1.0) because the WER scaling `10*(1-target)` / `10*target` (:379-397) VANISHES at target==1.0/0.0 exactly -- soft targets are the engine's real BackPropWER convention (BLSTMNeuralNetwork.cpp:871, 0.1*modifier); a one-hot-only golden would be vacuous. Row2 is fully masked (ignore composes with WER). The _pond variant adds classes_ponderations to the per-element WER arm. All multiclass/WER dumps are pure arithmetic (no libm) -> strict bits.",
+    "dumps": {
+      "cost_deriv_scalar_speech.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_other.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_poly_speech.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_poly_other.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_log_speech.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_log_other.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_sqrt_speech.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deriv_scalar_sqrt_other.bin": {
+        "rows": 65,
+        "cols": 2
+      },
+      "cost_deltas_multiclass.bin": {
+        "rows": 4,
+        "cols": 3
+      },
+      "cost_deltas_multiclass_pond.bin": {
+        "rows": 4,
+        "cols": 3
+      },
+      "cost_deltas_wer.bin": {
+        "rows": 3,
+        "cols": 3
+      },
+      "cost_deltas_wer_pond.bin": {
+        "rows": 3,
+        "cols": 3
+      }
+    }
   }
 }
