@@ -1298,6 +1298,38 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   after a step). *Mutation evidence:* changing the tail push to `[0.0, 0.0]` failed
   `meanstd_tail_structure`; reverted.
 
+- **[phase4a] Corpus no-listing fallback: the loop's `lang = "unk"` / `dial = "unk"` defaults are
+  DEAD when the key is absent -- lang/dial come out `""`** (`engine/corpus.rs::from_config`, from
+  `Corpus.cpp:44-56` + `ConfigFile.h:70-77`): `get_list<string>("reflangfiles", "", filesNames.size(), ',')`
+  pads an ABSENT key to exactly `filesNames.size()` copies of the overload's OWN default `""` -- so
+  `ii < refLangFiles.size()` is always true and the loop's local `"unk"` initializer is never
+  reached; every item gets language/dialect `""`. `"unk"` only fires when the key is PRESENT but
+  its comma-split is SHORTER than `files` (a non-empty list is never padded: `vector::resize` runs
+  only in the `.empty()` branch). *Why deferred:* the `""`-vs-`"unk"` language feeds the
+  class-mapping lookup and the count keys; changing it changes class indices. *Pinned by:*
+  `no_listing_fallback` (absent keys -> `""`) + `no_listing_fallback_unk_when_reflangfiles_short`
+  (present-but-short -> `"unk"` for the uncovered index only).
+
+- **[phase4a] Corpus ctor "normalizing coefficients" print derefs `++begin()` -- UB when the corpus
+  has fewer than 2 classes** (dropped, display-only; from `Corpus.cpp:123-130`): the legacy tail
+  print walks `_ClassCount.begin(); ++it; it->second` unconditionally, dereferencing `end()` (UB)
+  whenever `_ClassCount` has a single entry (e.g. every file unknown-class). The whole block is
+  log-only state-free output and is dropped in the port (doc-comment on `from_config`); no
+  class-balance state is computed there. *Why deferred:* nothing to port -- recorded so nobody
+  "restores" the print verbatim later.
+
+- **[phase4a] Listing weight/fileId `istringstream` extraction: hexfloat atom accumulation makes
+  `"0.5abc"` FAIL but `"0.5z"` extract 0.5** (`engine/corpus.rs::iss_extract_double`/
+  `iss_extract_int`, from `Corpus.cpp:80-91`): num_get stage 2 accumulates every char from the
+  float atom set (digits, `a-f`/`A-F`, `x/X`, `p/P`, sign only first-or-after-exponent, at most
+  one `.` -- a second dot STOPS accumulation, so `"1.2.3"` extracts 1.2), then stage 3 must consume
+  the WHOLE accumulated string or the extraction fails and the 1.0/1 defaults are kept. Int atoms
+  exclude `x`/`.` (`"7x"` -> 7, `"0x10"` -> 0); overflow sets failbit (C++11) -> default kept. NOT
+  reproduced (cannot occur in real listings): stage-3 hexfloat (`"0x1p3"`) and the
+  subnormal-underflow ERANGE corner. *Why deferred:* provenance -- the accept-on-success guard is
+  the load-bearing part. *Pinned by:* `iss_extract_matches_istringstream_oracle` (31-case table
+  captured from compiled `istringstream >>` probes on the oracle env).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
