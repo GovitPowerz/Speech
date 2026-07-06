@@ -1167,6 +1167,65 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   value was not present to route the next call into the `== 0` branch, so the state machine
   diverged. Both mutations reverted to verified-good state after each.
 
+- **[phase3] BLSTM enforcement-step (`_TargetEnforcementStep < 0`) mutates the caller-visible
+  `outputSeq` interior to -0.5, and does so SEPARATELY from the backward's own target rewrite**
+  (`nn/blstm.rs::feed_forward_backward_plain`, from `BLSTMNeuralNetwork.cpp:788-828`, risk R7):
+  the plain per-window worker, when backprop is active and `_TargetEnforcementStep < 0`, first
+  builds a NEW target copy with interior rows `[1, rows-1)` set to -0.5 and feeds THAT to
+  `feed_backward` (the output is NOT touched at this point, so the backward seeds its deltas from
+  the raw forward output), THEN the cost block builds ANOTHER fresh target copy AND overwrites the
+  caller's `output` interior with -0.5 before `computeCost`. Two independent -0.5 rewrites, and the
+  ordering (backward first, on unmutated output; cost second, mutating output) is load-bearing --
+  a port that shared one rewrite or reordered them would seed the backward from the -0.5-poisoned
+  output. *Why deferred:* provenance; the -0.5 interior is the legacy's soft-target enforcement
+  convention and the goldens are pinned against it. *Pinned by:* `enforcement_active_backward`
+  (`tests/phase3_blstm_backward_golden.rs`) vs `blstm_bwd_enforce_derivs.bin`. *Mutation evidence:*
+  feeding the ORIGINAL (un-rewritten) target to the backward instead of `new_target` failed the
+  golden; reverted after.
+
+- **[phase3] `updateWeights` normalizes `col0 cwiseQuotient col1` ELEMENT-WISE, so a count-0
+  region divides `0/0 = NaN` (or `x/0 = +-inf`) per IEEE -- NO guard** (`nn/blstm.rs::update_weights`,
+  from `BLSTMNeuralNetwork.cpp:306`, risk R1): the per-element quotient is the ONLY correct
+  normalization -- a scalar `/nframes` is wrong because different deriv-object regions carry
+  different frame counts (the mean/std tail count 1; the LSTM blocks accumulate frames x sweeps x
+  per-window coverings). Since the downstream trainer (iRPROP-) is SIGN-based, the magnitude of the
+  quotient is invisible through Rprop on a well-formed count vector -- the element-wise-vs-scalar
+  distinction is observable ONLY at a count-0 element, where `0/0 = NaN` routes to Rprop's else
+  (ascend) branch while a scalar `0/n = 0` takes no step. Under a real training call every count is
+  > 0, so the NaN path is not hit; it is reproduced (no guard) for parity. *Why deferred:* provenance
+  + the count-0 case cannot occur in real training. *Pinned by:* `update_weights_element_wise_not_scalar`
+  (a count-0 zero-deriv row takes the `+init_delta` NaN-routed step). *Mutation evidence:* replacing
+  `col0 / col1` with `col0 / n` (scalar) failed that test (the count-0 row took no step); reverted.
+
+- **[phase3] BLSTM windowed backward: TwoSweeps derivs DOUBLE (both sweeps back-propagate, derivs
+  NOT halved) and OverLap derivs accumulate per covering window -- the `col1` count carries the
+  forward-average compensation, never the derivs** (`nn/blstm.rs` windowed drivers +
+  `get_weights_derivatives`, from `BLSTMNeuralNetwork.cpp:548-590`/`:592-681`, spec S6): the
+  windowed drivers call the per-window worker (forward + backward + cost) inside EVERY window, so
+  the sub-network deriv accumulators (which `+=` per `feed_backward` and are reset only by
+  `reset_weights_derivatives`) naturally sum across windows/sweeps. TwoSweeps runs the worker over
+  two offset padded sweeps and averages the FORWARD output `/2`, but the derivs are the full
+  two-sweep sum (col1 count == 34 vs the single-sweep truncate's 12); OverLap divides the forward
+  output by the per-row coverage but accumulates the derivs once per covering window (col1 == 27 vs
+  the single-pass 12). A "fix" that halved the derivs to match the forward /2 would corrupt the
+  gradient. *Why deferred:* provenance; the count column is the legacy's compensation mechanism.
+  *Pinned by:* `twosweeps_count_vector`/`overlap_count_vector` (col1 == the manifest-recorded 34/27,
+  strictly > the single-pass counts) + the col0 goldens (`blstm_bwd_{twosweeps,overlap}_derivs.bin`,
+  non-vacuously differing from the truncate col0 by up to 22x). *Mutation evidence:* pre-normalizing
+  col0 by col1 in `get_weights_derivatives` (i.e. halving/dividing the accumulated derivs) failed
+  `twosweeps_count_vector`; reverted.
+
+- **[phase3] BLSTM `getWeightsDerivatives` mean/std tail is 4 constant blocks `[Zero | Ones | Zero
+  | Ones]` -- deriv 0, count 1, stats never trained** (`nn/blstm.rs::get_weights_derivatives`, from
+  `BLSTMNeuralNetwork.cpp:259,270`): the `2*inputSize` normalization-tail rows (mean then std) are
+  appended to the Nx2 gradient object as `[0.0, 1.0]` each -- a zero derivative (the mean/std are
+  not gradient-trained; they are folded from `InputStatistics` separately) and a count of exactly 1
+  (so the `col0/col1` update-time quotient leaves them as `0/1 = 0`, i.e. no step). *Why deferred:*
+  provenance. *Pinned by:* `meanstd_tail_structure` (last `2*inputSize` rows bit-exact `[0.0, 1.0]`)
+  + `update_weights_changes_weights_via_rprop` (the tail weights -- mean 0 / std 1 -- are unchanged
+  after a step). *Mutation evidence:* changing the tail push to `[0.0, 0.0]` failed
+  `meanstd_tail_structure`; reverted.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

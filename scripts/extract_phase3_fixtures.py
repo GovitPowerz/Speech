@@ -91,7 +91,43 @@ EXPECTED_SHAPES = {
     "bwd_net_lstm_rev_derivs.bin": (304, 2),
     "bwd_net_dense_derivs.bin": (29, 2),
     "bwd_blstm_derivs.bin": (651, 2),
+    # Output sub-sampling ratio 2: LSTM [3,4,2] sub [2,1] fwd(304)+bwd(304) + output
+    # [4,5,2] sub [2,1] (L0 dense(8,5)=45 + L1 dense(5,2)=12 = 57) + 2*3 tail = 671. The
+    # fwd/bwd col0 is scaled by 2 (:266-269) -- pins the ratio-multiplier mutation.
+    "bwd_blstm_outratio_derivs.bin": (671, 2),
     "bwd_blstm_real_derivs.bin": (33671, 2),
+}
+
+# Task 6: windowed BLSTM backward goldens (the REAL feedForwardBackward's
+# getWeightsDerivatives per processing type), on the windowed synthetic net LSTM
+# [2,2] sub [1] + output [4,2] sub [1] (sub_sampling_ratio == 1). N = fwd LSTM(2,2)=64
+# + bwd LSTM(2,2)=64 + output(4,2)=10 + 2*inputSize(2) stats tail = 142.
+#   plain:     T=8,  window 0            -> one pass, count 8
+#   truncate:  T=12, window 4           -> 3 non-overlapping windows, count 12
+#   twosweeps: T=12, window 4, 2 sweeps -> both sweeps back-propagate, count 34
+#   overlap:   T=12, window 3, shift 3  -> multi-covering, count 27
+#   enforce:   T=8,  TargetEnforcementStep -1 -> one pass, count 8 (enforcement moves
+#              the deltas, not the count)
+WINDOWED_BWD_SHAPES = {
+    "blstm_bwd_plain_derivs.bin": (142, 2),
+    "blstm_bwd_truncate_derivs.bin": (142, 2),
+    "blstm_bwd_twosweeps_derivs.bin": (142, 2),
+    "blstm_bwd_overlap_derivs.bin": (142, 2),
+    "blstm_bwd_enforce_derivs.bin": (142, 2),
+}
+
+# Per-variant windowed count expectations (spec S11.4): the hand-computable col1
+# trained-weight count + the driver params the Rust test replays. `trained_count` is
+# the total frame count fed backward across all windows/sweeps for every trained
+# weight (uniform since ssr == 1); the stats tail is always count 1. MEASURED from the
+# harness dumps (not hardcoded blindly): the extractor reads col1 and asserts the
+# recorded value matches, so a drift surfaces here.
+WINDOWED_BWD_COUNTS = {
+    "plain": {"t_len": 8, "window_size": 0, "window_shift": 0, "trained_count": 8},
+    "truncate": {"t_len": 12, "window_size": 4, "window_shift": 0, "trained_count": 12},
+    "twosweeps": {"t_len": 12, "window_size": 4, "window_shift": 0, "trained_count": 34},
+    "overlap": {"t_len": 12, "window_size": 3, "window_shift": 3, "trained_count": 27},
+    "enforce": {"t_len": 8, "window_size": 0, "window_shift": 0, "trained_count": 8},
 }
 
 # Task 3: dense backward deltas_out (T x I) per NeuronLayer grid variant, dumped
@@ -198,6 +234,14 @@ SYNTHETIC_TOL_SITES = [
     "net_single_layer_backward_subsample",
     "net_single_layer_backward_plain",
     "blstm_feedbackward",
+    # Task 6 windowed backward sites (the reimpl reproduces the real net bit-for-bit
+    # at the synthetic ssr==1 shapes -- all must be max_ulp=0).
+    "blstm_bwd_plain",
+    "blstm_bwd_truncate",
+    "blstm_bwd_twosweeps",
+    "blstm_bwd_overlap",
+    "blstm_bwd_enforce",
+    "blstm_bwd_outputonly",
 ]
 REAL_TOL_SITE = "blstm_real_backward"
 
@@ -346,6 +390,7 @@ NN_PROBE_RE = re.compile(
     re.MULTILINE,
 )
 NN_REAL_DERIVS_RE = re.compile(r"^NN_REAL ok backward_nb_derivs=(?P<n>\d+)$", re.MULTILINE)
+NN_OUTPUTONLY_RE = re.compile(r"^NN_OUTPUTONLY lstm_nonzero=(?P<n>\d+)$", re.MULTILINE)
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
@@ -373,6 +418,17 @@ def _read_bin_shape(path: Path) -> tuple[int, int]:
         rows = int.from_bytes(f.read(8), "little", signed=True)
         cols = int.from_bytes(f.read(8), "little", signed=True)
     return rows, cols
+
+
+def _read_bin_col1(path: Path) -> list[float]:
+    """Read column 1 (the replicated frame count) of an Nx2 .bin (column-major f64)."""
+    import struct
+
+    with path.open("rb") as f:
+        rows = int.from_bytes(f.read(8), "little", signed=True)
+        cols = int.from_bytes(f.read(8), "little", signed=True)
+        data = struct.unpack(f"<{rows * cols}d", f.read(8 * rows * cols))
+    return list(data[rows : 2 * rows])  # column-major: col1 is the second rows-block
 
 
 def _parse_nn_tol(stdout: str) -> dict[str, dict[str, object]]:
@@ -439,6 +495,9 @@ def main() -> None:
         # Copy the reimpl-produced Nx2 deriv goldens into the committed Phase 3 dir.
         for name in EXPECTED_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Task 6: windowed BLSTM backward goldens (the REAL feedForwardBackward derivs).
+        for name in WINDOWED_BWD_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
         # Task 3: dense backward deltas_out goldens (same harness stage).
         for name in EXPECTED_DELTASOUT_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
@@ -484,6 +543,13 @@ def main() -> None:
     nb_derivs = int(real_match["n"])
     if nb_derivs != EXPECTED_NB_DERIVS:
         raise SystemExit(f"real-net backward deriv count {nb_derivs} != {EXPECTED_NB_DERIVS}")
+    # Task 6: back_prop_output_network_only short-circuit -- the LSTM deriv blocks must
+    # stay exactly 0 (only the output net trains).
+    outputonly_match = NN_OUTPUTONLY_RE.search(stdout)
+    if outputonly_match is None:
+        raise SystemExit("NN_OUTPUTONLY lstm_nonzero line missing from harness stdout")
+    if int(outputonly_match["n"]) != 0:
+        raise SystemExit(f"back_prop_output_network_only leaked {outputonly_match['n']} nonzero LSTM derivs")
 
     # 6. Shape sync: every persisted golden must match EXPECTED_SHAPES.
     mismatches = []
@@ -514,6 +580,36 @@ def main() -> None:
             net_single_mismatches.append({"file": name, "expected": expected, "got": got})
     if net_single_mismatches:
         raise SystemExit(f"bwd_net_single_*.bin shape mismatch: {net_single_mismatches}")
+    windowed_mismatches = []
+    for name, expected in WINDOWED_BWD_SHAPES.items():
+        got = _read_bin_shape(PHASE3_DIR / name)
+        if got != expected:
+            windowed_mismatches.append({"file": name, "expected": expected, "got": got})
+    if windowed_mismatches:
+        raise SystemExit(f"blstm_bwd_*.bin shape mismatch: {windowed_mismatches}")
+    # Task 6 count-vector VERIFICATION (spec S11.4): the col1 trained-weight count in
+    # each windowed dump must match the recorded `trained_count`, and the stats tail
+    # (last 2*inputSize=4 rows) must be count 1. Reading col1 back from the dump makes
+    # the manifest counts MEASURED, not hardcoded-and-hoped.
+    count_mismatches = []
+    for variant, meta in WINDOWED_BWD_COUNTS.items():
+        col1 = _read_bin_col1(PHASE3_DIR / f"blstm_bwd_{variant}_derivs.bin")
+        head = len(col1) - 4  # trained head vs the 2*inputSize stats tail
+        head_counts = {int(c) for c in col1[:head]}
+        tail_counts = {int(c) for c in col1[head:]}
+        if head_counts != {meta["trained_count"]}:
+            count_mismatches.append({"variant": variant, "expected_trained": meta["trained_count"], "got": sorted(head_counts)})
+        if tail_counts != {1}:
+            count_mismatches.append({"variant": variant, "expected_tail": 1, "got_tail": sorted(tail_counts)})
+    if count_mismatches:
+        raise SystemExit(f"windowed backward count-vector mismatch: {count_mismatches}")
+    # Non-vacuity of the double-count/overlap semantics: twosweeps + overlap counts must
+    # STRICTLY exceed their single-pass baselines (a halved-deriv or single-sweep port
+    # would collapse these).
+    if WINDOWED_BWD_COUNTS["twosweeps"]["trained_count"] <= WINDOWED_BWD_COUNTS["truncate"]["trained_count"]:
+        raise SystemExit("twosweeps count must exceed the single-sweep truncate count")
+    if WINDOWED_BWD_COUNTS["overlap"]["trained_count"] <= WINDOWED_BWD_COUNTS["overlap"]["t_len"]:
+        raise SystemExit("overlap count must exceed the single-pass frame count")
     cost_mismatches = []
     for name, expected in COST_SHAPES.items():
         got = _read_bin_shape(PHASE3_DIR / name)
@@ -670,6 +766,53 @@ def main() -> None:
             "synthetic": tols["blstm_feedbackward"],
             "real_calibration": tols[REAL_TOL_SITE],
             "real_nb_derivs": nb_derivs,
+            "outratio_calibration": {
+                "text": (
+                    "Output sub-sampling [2,1] (out ratio 2): getWeightsDerivatives "
+                    "multiplies the fwd/bwd LSTM col0 by 2 (:266-269). The output-net "
+                    "SubSample/InvSubSample GEMM in the backward diverges Eigen from the "
+                    "ascending reimpl (like the real-net site), so the REIMPL derivs are "
+                    "the golden (bwd_blstm_outratio_derivs.bin) and the real-vs-reimpl "
+                    "gap is recorded here. The Rust test pins the x2 multiplier by "
+                    "comparing the fwd/bwd blocks vs this dump AND vs the unscaled "
+                    "single-ratio site."
+                ),
+                **tols["blstm_outratio"],
+            },
+        },
+        "blstm_windowed_backward": {
+            "text": (
+                "Task 6: the WINDOWED BLSTMNeuralNetwork::feedForwardBackward backward "
+                "(BLSTMNeuralNetwork.cpp:711-830) per processing type, on the windowed "
+                "synthetic net LSTM [2,2] sub [1] + output [4,2] sub [1] "
+                "(sub_sampling_ratio == 1: no grid snapping/decimation -> the col1 count "
+                "vector is hand-computable). The golden is the REAL compiled "
+                "getWeightsDerivatives (the per-window worker's backward is at synthetic "
+                "k < 23 where Eigen == the ascending reimpl -- the plain site is "
+                "max_ulp=0; the windowed drivers are pure structural loops over that "
+                "worker). Each variant's NN_TOL (site=blstm_bwd_<variant>) records the "
+                "reimpl vs the real net -- all max_ulp=0. The count vector (col1) proves "
+                "spec S6/S11.4: TwoSweeps back-propagates BOTH sweeps so the trained-"
+                "weight count is 34 (> the single-sweep truncate 12) with the derivs NOT "
+                "halved (the count carries the /2 forward-average compensation); OverLap "
+                "back-propagates each covering window so the count is 27 (> the "
+                "single-pass 12); the mean/std stats tail is always count 1. The enforce "
+                "variant (TargetEnforcementStep -1) rewrites the per-window target "
+                "interior to -0.5 BEFORE feed_backward (risk R7); its count stays 8 (the "
+                "enforcement moves the deltas, not the frame count). blstm_bwd_outputonly "
+                "(BackPropOutputNetworkOnly true) is not dumped as a golden -- the harness "
+                "asserts NN_OUTPUTONLY lstm_nonzero=0 (the LSTM deriv blocks stay 0) and "
+                "the Rust test builds it directly."
+            ),
+            "variants": {
+                variant: {
+                    **meta,
+                    "nn_tol": tols[f"blstm_bwd_{variant}"],
+                }
+                for variant, meta in WINDOWED_BWD_COUNTS.items()
+            },
+            "stats_tail_count": 1,
+            "output_only_nn_tol": tols["blstm_bwd_outputonly"],
         },
         "nn_backward_product_probes": {
             "text": (
@@ -707,6 +850,7 @@ def main() -> None:
             **{name: {"rows": r, "cols": c} for name, (r, c) in LSTM_BWD_DERIVS_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in NET_SINGLE_LAYER_DERIVS_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in NET_SINGLE_LAYER_DELTASOUT_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in WINDOWED_BWD_SHAPES.items()},
         },
         "costlaw_backward": {
             "text": (

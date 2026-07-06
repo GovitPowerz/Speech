@@ -7388,6 +7388,63 @@ int main(int argc, char** argv) {
             ++dumps;
         }
 
+        // ---- Site blstm_outratio: output sub-sampling ratio > 1 --------------
+        // Same net as blstm_feedbackward BUT output [4,5,2] sub [2,1] (out ratio 2), so
+        // the fwd/bwd LSTM col0 is MULTIPLIED by 2 in getWeightsDerivatives (:266-269).
+        // A port that dropped that multiplier would diverge on the fwd/bwd blocks. T=24
+        // -> LSTM decimates to 12 (sub [2,1]), output decimates to 6 (sub [2,1]).
+        {
+            const std::vector<long> lstmNN = {3, 4, 2}, lstmSS = {2, 1};
+            const std::vector<long> outNN = {4, 5, 2}, outSS = {2, 1};
+            ConfigFile bconf(nnConfigPath, '_');
+            bconf._Params.erase("BLSTM_weightsFile");
+            bconf.set_val<std::string>("SYNB_LSTMNeuronNb", "3,4,2");
+            bconf.set_val<std::string>("SYNB_LSTMSubSampling", "2,1");
+            bconf.set_val<std::string>("SYNB_OutputNeuronNb", "4,5,2");
+            bconf.set_val<std::string>("SYNB_OutputSubSampling", "2,1");
+            bconf.set_val<short>("SYNB_InputNormalizationType", (short)0);
+            bconf.set_val<bool>("SYNB_TwoSweeps", false);
+            bconf.set_val<bool>("SYNB_BackPropagationActivated", true);
+            bconf.set_val<bool>("SYNB_BackPropOutputNetworkOnly", false);
+            bconf.set_val<int>("SYNB_TargetEnforcementStep", 0);
+            BLSTMNeuralNetwork<LSTMLayer> nn(bconf, "SYNB", true);
+            Eigen::VectorXd flat = synthFlat(nn.getNbOfWeights());
+            nn.setWeights(flat);
+            nn.resetWeightsDerivatives();
+
+            Eigen::MatrixXd input = makeInput(24, 3);
+            const long outLen = 24 / 4;   // fwd LSTM ratio 2 * output ratio 2
+            Eigen::MatrixXd realOut(outLen, 2);
+            Eigen::MatrixXd targets = Eigen::MatrixXd::Zero(outLen, 2);
+            for (long r = 0; r < outLen; ++r) targets(r, (r % 2)) = 1.0;
+            nn.setProcessingType(false, false);
+            nn.feedForwardBackward(input, 0, 0, realOut, targets);
+            Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+
+            BlstmBack bb;
+            bb.build(flat, lstmNN, lstmSS, outNN, outSS);
+            Eigen::MatrixXd oF, oB, hcat, reimplOut;
+            bb.forward(input, oF, oB, reimplOut, hcat);
+            CostLaw cost(bconf, "SYNB");
+            Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(targets.rows(), targets.cols());
+            cost.computeDeltas(reimplOut, targets, seed);
+            bb.backward(input, oF, oB, hcat, reimplOut, seed);
+            Eigen::MatrixXd reimplDerivs = bb.flatDerivs();
+            long maxUlp = 0; double maxAbs = 0.0;
+            derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+            // Output sub-sampling [2,1] introduces a SubSample/InvSubSample GEMM in the
+            // output-net backward (netBackwardLoop) whose k diverges Eigen from the
+            // ascending reimpl -- like the real-net site, the REIMPL derivs are the
+            // golden (the Rust port uses ascending matmul_seq) and the real-vs-reimpl
+            // gap is RECORDED as calibration, not gated to 0. The col0 ratio-multiplier
+            // (x2 on fwd/bwd) is a structural op both apply identically -- it is pinned
+            // by the Rust test comparing the harvested fwd/bwd blocks against this dump.
+            std::cout << "NN_TOL site=blstm_outratio max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            Matrix2BinaryFile(out + "bwd_blstm_outratio_derivs.bin", reimplDerivs);
+            ++dumps;
+        }
+
         // ---- Site blstm_real_backward: the REAL 33,671-weight net ------------
         // Reuse e2e_input.bin (the assembled real-config inputSeq, 201 x 11) + the real
         // net (1_worker_1.config + NNweights_config1.bin, InputNormalizationType -1).
@@ -7459,6 +7516,241 @@ int main(int argc, char** argv) {
             Eigen::MatrixXd deltas = makeDeltas(6, 3);      // 6 x 3
             Eigen::MatrixXd wT = makeInput(3, 4);           // 3 x 4 (W^T, O x I)
             nnProbe("bwd_backproj", deltas, wT);            // (6x3)*(3x4)
+        }
+
+        // ---- Phase 3 Task 6: WINDOWED BLSTM backward dumps -------------------
+        // The plain site above proves the feed_backward FAN-OUT. This stage proves the
+        // WINDOWED accumulation (Truncate / TwoSweeps / OverLap) + the enforcement-step
+        // sequencing + the back_prop_output_network_only short-circuit. The synthetic
+        // net is LSTM [2,2] sub [1] + output [4,2] sub [1] (sub_sampling_ratio == 1: no
+        // grid snapping, no decimation -> the col1 count vector is hand-computable).
+        //
+        // Golden = the REAL compiled feedForwardBackward's getWeightsDerivatives (the
+        // per-window worker's backward is at synthetic k < 23, so Eigen == ascending;
+        // the plain site measured max_ulp=0, and the windowed drivers are pure
+        // structural loops over that worker). Each variant additionally builds a
+        // BlstmBack-per-window reimpl and records NN_TOL site=blstm_bwd_<variant> vs
+        // the real derivs -- must be 0 for these synthetic shapes.
+        {
+            const std::vector<long> wLstmNN = {2, 2}, wLstmSS = {1};
+            const std::vector<long> wOutNN = {4, 2}, wOutSS = {1};
+
+            // Build the windowed synthetic net once per variant (via a helper that
+            // sets the SYNW_ keys + the two_sweeps/enforcement/output-only knobs).
+            auto buildWindowedNet = [&](bool twoSweeps, bool outputOnly,
+                                        int enforcement) {
+                ConfigFile wconf(nnConfigPath, '_');
+                wconf._Params.erase("BLSTM_weightsFile");
+                wconf.set_val<std::string>("SYNW_LSTMNeuronNb", "2,2");
+                wconf.set_val<std::string>("SYNW_LSTMSubSampling", "1");
+                wconf.set_val<std::string>("SYNW_OutputNeuronNb", "4,2");
+                wconf.set_val<std::string>("SYNW_OutputSubSampling", "1");
+                wconf.set_val<short>("SYNW_InputNormalizationType", (short)0);
+                wconf.set_val<bool>("SYNW_TwoSweeps", twoSweeps);
+                wconf.set_val<bool>("SYNW_BackPropagationActivated", true);
+                wconf.set_val<bool>("SYNW_BackPropOutputNetworkOnly", outputOnly);
+                wconf.set_val<int>("SYNW_TargetEnforcementStep", enforcement);
+                return wconf;
+            };
+
+            // Deterministic multiclass targets over `rows` decimated frames.
+            auto windowedTargets = [](long rows) {
+                Eigen::MatrixXd t = Eigen::MatrixXd::Zero(rows, 2);
+                for (long r = 0; r < rows; ++r) t(r, (r % 2)) = 1.0;
+                return t;
+            };
+
+            // Reimpl of the whole windowed feedForwardBackward BACKWARD, mirroring
+            // BLSTMNeuralNetwork.cpp:711-830 for sub_sampling_ratio == 1 (the synthetic
+            // net). `mode`: 0 plain, 1 truncate (single sweep), 2 two-sweeps, 3 overlap.
+            // Accumulates into a single BlstmBack (Derivs use += and reset only in
+            // build()), mirroring the real layer's member accumulation across windows.
+            // enforcement < 0 rewrites the per-window target interior to -0.5 BEFORE the
+            // per-window feed_backward (:803-808); the cost block is not modeled (derivs
+            // only). Returns the assembled Nx2 flat derivs.
+            auto windowedReimplDerivs = [&](ConfigFile& wconf, int mode,
+                                            long window_size, long window_shift,
+                                            const Eigen::MatrixXd& input, long enforcement,
+                                            bool outputOnly, bool twoSweeps) {
+                BLSTMNeuralNetwork<LSTMLayer> szn(wconf, "SYNW", true);
+                Eigen::VectorXd flat = synthFlat(szn.getNbOfWeights());
+                CostLaw cost(wconf, "SYNW");
+                BlstmBack bb;
+                bb.build(flat, wLstmNN, wLstmSS, wOutNN, wOutSS);
+                bb.outputNetworkOnly = outputOnly;
+
+                // One per-window worker: forward capture -> CostLaw seed (with the
+                // enforcement rewrite) -> backward accumulate. `block` is the input
+                // window; `tgt` the decimated targets for it (rows == block rows here,
+                // ssr == 1).
+                auto worker = [&](const Eigen::MatrixXd& block, const Eigen::MatrixXd& tgt) {
+                    Eigen::MatrixXd oF, oB, hcat, outShort;
+                    bb.forward(block, oF, oB, outShort, hcat);
+                    if (tgt.rows() > 0) {
+                        Eigen::MatrixXd tEnf = tgt;
+                        if (enforcement < 0) {
+                            long nbLines = tgt.rows() - 2;
+                            if (nbLines > 0)
+                                tEnf.block(1, 0, nbLines, tgt.cols()) =
+                                    Eigen::MatrixXd::Constant(nbLines, tgt.cols(), -0.5);
+                        }
+                        Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(tEnf.rows(), tEnf.cols());
+                        cost.computeDeltas(outShort, tEnf, seed);
+                        bb.backward(block, oF, oB, hcat, outShort, seed);
+                    }
+                    return outShort;
+                };
+
+                Eigen::MatrixXd targets = windowedTargets(input.rows());
+                if (mode == 0) {
+                    // Plain: one full-sequence window.
+                    worker(input, targets);
+                } else if (mode == 1 || (mode == 2 && !twoSweeps)) {
+                    // TruncateSweep (BLSTMNeuralNetwork.cpp:488-546), ssr == 1: windows
+                    // jj += window_size, last window clamped.
+                    for (long jj = 0; jj < input.rows(); jj += window_size) {
+                        long begin = jj;
+                        long end = jj + window_size - 1;
+                        if (end >= input.rows()) end = input.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0) {
+                            Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+                            Eigen::MatrixXd tgt = targets.block(begin, 0, lengthSeq, targets.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                } else if (mode == 2) {
+                    // TwoSweeps (BLSTMNeuralNetwork.cpp:548-590), ssr == 1: front/back
+                    // replicate-pad by window_size, run TWO offset TruncateSweeps. Both
+                    // sweeps back-propagate -> derivs + counts DOUBLE (derivs NOT halved;
+                    // col1 count carries the compensation). shift == window_size/2.
+                    auto replicateEnds = [](const Eigen::MatrixXd& m, long front, long back) {
+                        Eigen::MatrixXd o(front + m.rows() + back, m.cols());
+                        o << m.row(0).replicate(front, 1), m, m.row(m.rows() - 1).replicate(back, 1);
+                        return o;
+                    };
+                    long shift = window_size / 2;   // ssr == 1
+                    long ws = window_size;           // window_size_short == window_size (ssr 1)
+                    Eigen::MatrixXd inPad = replicateEnds(input, window_size, window_size);
+                    Eigen::MatrixXd tgtPad = replicateEnds(targets, ws, ws);
+                    // Sweep 1: drop the FRONT window_size input padding, KEEP the back;
+                    // target drops the FRONT ws rows.
+                    Eigen::MatrixXd sweep1In = inPad.block(window_size, 0,
+                                                           inPad.rows() - window_size, inPad.cols());
+                    Eigen::MatrixXd sweep1Tgt = tgtPad.block(ws, 0, tgtPad.rows() - ws, tgtPad.cols());
+                    for (long jj = 0; jj < sweep1In.rows(); jj += window_size) {
+                        long begin = jj, end = jj + window_size - 1;
+                        if (end >= sweep1In.rows()) end = sweep1In.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0 && begin < sweep1Tgt.rows()) {
+                            long tRows = std::min(lengthSeq, sweep1Tgt.rows() - begin);
+                            Eigen::MatrixXd block = sweep1In.block(begin, 0, lengthSeq, sweep1In.cols());
+                            Eigen::MatrixXd tgt = sweep1Tgt.block(begin, 0, tRows, sweep1Tgt.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                    // Sweep 2: input from `shift`; target drops the FRONT shift rows.
+                    Eigen::MatrixXd sweep2In = inPad.block(shift, 0, inPad.rows() - shift, inPad.cols());
+                    Eigen::MatrixXd sweep2Tgt = tgtPad.block(shift, 0, tgtPad.rows() - shift, tgtPad.cols());
+                    for (long jj = 0; jj < sweep2In.rows(); jj += window_size) {
+                        long begin = jj, end = jj + window_size - 1;
+                        if (end >= sweep2In.rows()) end = sweep2In.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0 && begin < sweep2Tgt.rows()) {
+                            long tRows = std::min(lengthSeq, sweep2Tgt.rows() - begin);
+                            Eigen::MatrixXd block = sweep2In.block(begin, 0, lengthSeq, sweep2In.cols());
+                            Eigen::MatrixXd tgt = sweep2Tgt.block(begin, 0, tRows, sweep2Tgt.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                } else {
+                    // OverLap (BLSTMNeuralNetwork.cpp:592-681), ssr == 1: windows jj +=
+                    // window_shift, begin = jj<ws?0:jj-ws, end = begin+2ws clamped. Each
+                    // covering window back-propagates -> per-frame counts multiply.
+                    for (long jj = 0; jj < input.rows(); jj += window_shift) {
+                        long begin = (jj < window_size) ? 0 : jj - window_size;
+                        long end = begin + 2 * window_size;
+                        if (end >= input.rows()) end = input.rows() - 1;
+                        long lengthSeq = end - begin + 1;
+                        if (lengthSeq > 0) {
+                            Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+                            Eigen::MatrixXd tgt = targets.block(begin, 0, lengthSeq, targets.cols());
+                            worker(block, tgt);
+                        }
+                    }
+                }
+                return bb.flatDerivs();
+            };
+
+            // Drive the REAL windowed net and harvest getWeightsDerivatives (the golden),
+            // compare vs the reimpl (NN_TOL), dump the REAL derivs.
+            auto runWindowed = [&](const char* variant, int mode, long window_size,
+                                   long window_shift, long tLen, bool twoSweeps,
+                                   bool outputOnly, int enforcement) {
+                ConfigFile wconf = buildWindowedNet(twoSweeps, outputOnly, enforcement);
+                BLSTMNeuralNetwork<LSTMLayer> nn(wconf, "SYNW", true);
+                Eigen::VectorXd flat = synthFlat(nn.getNbOfWeights());
+                nn.setWeights(flat);
+                nn.resetWeightsDerivatives();
+
+                Eigen::MatrixXd input = makeInput((int)tLen, 2);
+                Eigen::MatrixXd realOut(tLen, 2);
+                Eigen::MatrixXd targets = windowedTargets(tLen);
+                // Processing type: plain (false,false); truncate/twosweeps (true,false);
+                // overlap (true,true).
+                bool truncates = (mode != 0);
+                bool overlaps = (mode == 3);
+                nn.setProcessingType(truncates, overlaps);
+                nn.feedForwardBackward(input, window_size, window_shift, realOut, targets);
+                Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+
+                Eigen::MatrixXd reimplDerivs = windowedReimplDerivs(
+                    wconf, mode, window_size, window_shift, input, enforcement, outputOnly, twoSweeps);
+                long maxUlp = 0; double maxAbs = 0.0;
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=blstm_bwd_" << variant << " max_ulp=" << maxUlp
+                          << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+                Matrix2BinaryFile(out + "blstm_bwd_" + variant + "_derivs.bin", realDerivs);
+                ++dumps;
+                return realDerivs;
+            };
+
+            // Variants. window_size/shift/tLen chosen so the count vectors are
+            // non-trivial and hand-computable (recorded in the extractor manifest).
+            runWindowed("plain", 0, 0, 0, 8, false, false, 0);
+            runWindowed("truncate", 1, 4, 0, 12, false, false, 0);
+            runWindowed("twosweeps", 2, 4, 0, 12, true, false, 0);
+            runWindowed("overlap", 3, 3, 3, 12, false, false, 0);
+            runWindowed("enforce", 0, 0, 0, 8, false, false, -1);
+
+            // back_prop_output_network_only: the LSTM deriv blocks stay 0 (not dumped as
+            // a golden; the Rust test builds this variant directly and asserts the LSTM
+            // blocks are zero). Confirm the reimpl short-circuit matches the real net.
+            {
+                ConfigFile wconf = buildWindowedNet(false, true, 0);
+                BLSTMNeuralNetwork<LSTMLayer> nn(wconf, "SYNW", true);
+                Eigen::VectorXd flat = synthFlat(nn.getNbOfWeights());
+                nn.setWeights(flat);
+                nn.resetWeightsDerivatives();
+                Eigen::MatrixXd input = makeInput(8, 2);
+                Eigen::MatrixXd realOut(8, 2);
+                Eigen::MatrixXd targets = windowedTargets(8);
+                nn.setProcessingType(false, false);
+                nn.feedForwardBackward(input, 0, 0, realOut, targets);
+                Eigen::MatrixXd realDerivs = nn.getWeightsDerivatives();
+                Eigen::MatrixXd reimplDerivs = windowedReimplDerivs(
+                    wconf, 0, 0, 0, input, 0, true, false);
+                long maxUlp = 0; double maxAbs = 0.0;
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=blstm_bwd_outputonly max_ulp=" << maxUlp
+                          << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+                // LSTM blocks (first 2*64 rows) must be exactly zero on the REAL net.
+                long lstmBlock = 64 + 64;   // fwd LSTM(2,2)=64 + bwd LSTM(2,2)=64
+                long lstmNonzero = 0;
+                for (long r = 0; r < lstmBlock; ++r)
+                    if (realDerivs(r, 0) != 0.0) ++lstmNonzero;
+                std::cout << "NN_OUTPUTONLY lstm_nonzero=" << lstmNonzero << "\n";
+            }
         }
     }
 

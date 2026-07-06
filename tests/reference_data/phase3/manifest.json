@@ -86,7 +86,72 @@
       "max_ulp": 434176,
       "max_abs": "1.155e-14"
     },
-    "real_nb_derivs": 33671
+    "real_nb_derivs": 33671,
+    "outratio_calibration": {
+      "text": "Output sub-sampling [2,1] (out ratio 2): getWeightsDerivatives multiplies the fwd/bwd LSTM col0 by 2 (:266-269). The output-net SubSample/InvSubSample GEMM in the backward diverges Eigen from the ascending reimpl (like the real-net site), so the REIMPL derivs are the golden (bwd_blstm_outratio_derivs.bin) and the real-vs-reimpl gap is recorded here. The Rust test pins the x2 multiplier by comparing the fwd/bwd blocks vs this dump AND vs the unscaled single-ratio site.",
+      "max_ulp": 80,
+      "max_abs": "1.041e-17"
+    }
+  },
+  "blstm_windowed_backward": {
+    "text": "Task 6: the WINDOWED BLSTMNeuralNetwork::feedForwardBackward backward (BLSTMNeuralNetwork.cpp:711-830) per processing type, on the windowed synthetic net LSTM [2,2] sub [1] + output [4,2] sub [1] (sub_sampling_ratio == 1: no grid snapping/decimation -> the col1 count vector is hand-computable). The golden is the REAL compiled getWeightsDerivatives (the per-window worker's backward is at synthetic k < 23 where Eigen == the ascending reimpl -- the plain site is max_ulp=0; the windowed drivers are pure structural loops over that worker). Each variant's NN_TOL (site=blstm_bwd_<variant>) records the reimpl vs the real net -- all max_ulp=0. The count vector (col1) proves spec S6/S11.4: TwoSweeps back-propagates BOTH sweeps so the trained-weight count is 34 (> the single-sweep truncate 12) with the derivs NOT halved (the count carries the /2 forward-average compensation); OverLap back-propagates each covering window so the count is 27 (> the single-pass 12); the mean/std stats tail is always count 1. The enforce variant (TargetEnforcementStep -1) rewrites the per-window target interior to -0.5 BEFORE feed_backward (risk R7); its count stays 8 (the enforcement moves the deltas, not the frame count). blstm_bwd_outputonly (BackPropOutputNetworkOnly true) is not dumped as a golden -- the harness asserts NN_OUTPUTONLY lstm_nonzero=0 (the LSTM deriv blocks stay 0) and the Rust test builds it directly.",
+    "variants": {
+      "plain": {
+        "t_len": 8,
+        "window_size": 0,
+        "window_shift": 0,
+        "trained_count": 8,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "truncate": {
+        "t_len": 12,
+        "window_size": 4,
+        "window_shift": 0,
+        "trained_count": 12,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "twosweeps": {
+        "t_len": 12,
+        "window_size": 4,
+        "window_shift": 0,
+        "trained_count": 34,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "overlap": {
+        "t_len": 12,
+        "window_size": 3,
+        "window_shift": 3,
+        "trained_count": 27,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      },
+      "enforce": {
+        "t_len": 8,
+        "window_size": 0,
+        "window_shift": 0,
+        "trained_count": 8,
+        "nn_tol": {
+          "max_ulp": 0,
+          "max_abs": "0.000e+00"
+        }
+      }
+    },
+    "stats_tail_count": 1,
+    "output_only_nn_tol": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    }
   },
   "nn_backward_product_probes": {
     "text": "Pure-arithmetic backward products at synthetic k: the weight-deriv outer product input.col(row)*deltas.row(row) (small k) and the deltas*W^T back-projection (k=O). Eigen's product vs the ascending matSeq must agree bit-for-bit (diverged=0) at these shapes -- the same NN_PROBE format as the Phase 2 forward product probes.",
@@ -141,6 +206,10 @@
     },
     "bwd_blstm_derivs.bin": {
       "rows": 651,
+      "cols": 2
+    },
+    "bwd_blstm_outratio_derivs.bin": {
+      "rows": 671,
       "cols": 2
     },
     "bwd_blstm_real_derivs.bin": {
@@ -221,6 +290,26 @@
     },
     "bwd_net_single_plain_deltasout.bin": {
       "rows": 7,
+      "cols": 2
+    },
+    "blstm_bwd_plain_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_truncate_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_twosweeps_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_overlap_derivs.bin": {
+      "rows": 142,
+      "cols": 2
+    },
+    "blstm_bwd_enforce_derivs.bin": {
+      "rows": 142,
       "cols": 2
     }
   },
