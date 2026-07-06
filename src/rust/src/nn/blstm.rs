@@ -1023,20 +1023,24 @@ impl BlstmNetwork {
         target: &Array2<f64>,
     ) {
         // The input the backward reads: for type -2, the normalized copy (:787,795);
-        // otherwise the raw input (:801,809).
-        let bwd_input = if self.cfg.input_normalization_type == -2 {
+        // otherwise the raw input (:801,809). Type -2 always needs an owned copy to
+        // forward (the normalization mutates it), so it's materialized regardless of
+        // backprop; the plain-input case only clones when the backward will actually
+        // run, sparing every pure-forward scoring call a T x D copy.
+        let normed = if self.cfg.input_normalization_type == -2 {
             let mut norm = input.clone();
             Self::self_normalize(&mut norm);
             self.feed_forward(&norm, output);
-            norm
+            Some(norm)
         } else {
             self.feed_forward(input, output);
-            input.clone()
+            None
         };
 
         // BACKWARD (:788-799 / :802-813). Runs BEFORE the cost block, so it seeds deltas
         // from the UNMUTATED output. Its enforcement rewrite touches only the TARGET.
         if self.cfg.back_propagation_activated && target.nrows() > 0 {
+            let bwd_input = normed.as_ref().unwrap_or(input);
             if self.cfg.target_enforcement_step < 0 {
                 let mut new_target = target.clone();
                 let n_lines = target.nrows() as isize - 2;
@@ -1048,10 +1052,10 @@ impl BlstmNetwork {
                     }
                 }
                 let out_snapshot = output.clone();
-                self.feed_backward(&bwd_input, &out_snapshot, &new_target);
+                self.feed_backward(bwd_input, &out_snapshot, &new_target);
             } else {
                 let out_snapshot = output.clone();
-                self.feed_backward(&bwd_input, &out_snapshot, target);
+                self.feed_backward(bwd_input, &out_snapshot, target);
             }
         }
 

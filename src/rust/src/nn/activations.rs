@@ -79,9 +79,11 @@ pub fn asinh_fn(x: f64) -> f64 {
 }
 
 /// `Maxmin2::deriv` / `Asinh::deriv` (ActivationFunctions.h:162-165, 173-176):
-/// `1/sqrt(1+sinh(y)^2)`, taken on `y` -- the pre-image at which `fn` was
-/// evaluated (i.e. the raw layer input in `NeuronLayer::feedBackward:204`, NOT
-/// the post-`asinh` output). Both structs share the identical body.
+/// `1/sqrt(1+sinh(y)^2)`. `y` is the value whose sinh recovers the
+/// pre-activation: the cached post-activation at the LSTM sites (`layers.rs`
+/// `feed_backward`, doc-commented `LSTMLayer.cpp:366-371`), or the raw layer
+/// input (== the previous layer's post-activation output) at the
+/// `NeuronLayer.cpp:204` site. Both structs share the identical body.
 pub fn maxmin2_deriv(y: f64) -> f64 {
     let input = y.sinh();
     1.0 / (1.0 + input * input).sqrt()
