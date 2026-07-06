@@ -35,10 +35,23 @@
 #include "LongTermSpectralVariation.h"
 #include "MelFilterBank.h"
 #include "NeuronLayer.h"
+#include "Rprop.h"
 #include "Segmenter.h"
 #include "TimeDomainCorrel.h"
 #include "fft.hpp"
 #include "fmath.hpp"
+
+// Phase 3 Task 7: exposes Rprop's protected state (_Deltas/_PrevDerivs/
+// _DeltasWeights/_PrevCost) so the harness can dump the per-step trainer state
+// alongside the caller-visible weights vector. Rprop::updateWeights itself is
+// called UNMODIFIED (public, no override needed) -- only the accessors are new.
+struct RpropProbe : Rprop {
+    RpropProbe(double initDelta) : Rprop(initDelta) {}
+    using Rprop::_Deltas;
+    using Rprop::_PrevDerivs;
+    using Rprop::_DeltasWeights;
+    using Rprop::_PrevCost;
+};
 
 // Phase 2b Task 2: exposes the protected Segmenter surface (buildFromConf,
 // results2segmentation, updateSegmentation) for the harness, and satisfies the
@@ -7688,6 +7701,99 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "cost_deltas_wer_pond.bin", werPondDeltas);
             ++dumps;
         }
+    }
+
+    // =====================================================================
+    // --- Phase 3 Task 7: Rprop iRPROP- trainer trajectory dumps -----------
+    // The REAL compiled Rprop::updateWeights (Rprop.cpp:9-59; :60-76 is the
+    // dead .mat dump, not exercised) IS the golden directly (S2 tier 1): pure
+    // scalar, no libm/GEMM, bit-portable on every platform. Two trajectories,
+    // one Rprop(1e-2) instance each, state persisting call-to-call:
+    //
+    // Trajectory A (5 elements, 5 steps) hits every branch EXCEPT the delta
+    // clamps: first-call init (deriv>0/deriv<0/deriv==0), eta+ growth, eta-
+    // shrink with the cost-gated backtrack BOTH firing (cost rises) and NOT
+    // firing (cost falls), the post-backtrack prev_derivs==0 path (both with a
+    // nonzero AND a literal-zero current deriv), and a literal subsequent-call
+    // deriv==0. Per-element stories (see scratchpad derivation, hand-verified
+    // against a Python transcription of the exact algorithm):
+    //   e0: deriv always +1 (init_pos, then grow every step, never flips).
+    //   e1: deriv always -1 (init_neg, then grow every step on the negative
+    //       side, never flips) -- mirrors e0 to prove the sign symmetry.
+    //   e2: +1,+1,-1(cost RISES 9->12 => backtrack FIRES),-1(post-backtrack
+    //       zero branch, deriv nonzero),-1 (grows again from the zeroed prev).
+    //   e3: 0(init_zero),+1(dtp=1*0=0 => zero branch, deriv nonzero),+1(grows),
+    //       -1(cost FALLS 12->8 => backtrack does NOT fire),-1(post-backtrack
+    //       zero branch, deriv nonzero).
+    //   e4: +1(init_pos),0,0,0,0 (every subsequent call is a literal deriv==0
+    //       zero branch: dtp=0*prev=0 regardless of prev).
+    // Costs: step1=10 (unused; first call skips the state-having branch
+    // entirely), step2=9, step3=12 (RISE vs 9), step4=8 (FALL vs 12), step5=7.
+    //
+    // Trajectory B (2 elements, 48 steps) hits BOTH delta clamps in isolation
+    // (a dedicated trajectory per the brief's "or use a second trajectory with
+    // init_delta near a clamp" alternative -- growing/shrinking 5 elements to
+    // both extremes in one trajectory would tangle the branch bookkeeping):
+    //   e0: deriv always +1 -> delta = 1e-2 * 1.2^k, hits max_delta=0.2 at
+    //       step 18 (1.2^17 ~= 20.3) and STAYS clamped every step after.
+    //   e1: deriv alternates sign +1/-1 every step starting at step 2 -> every
+    //       OTHER call is a real shrink (the intervening calls are forced-zero
+    //       calls per the post-backtrack prev_derivs==0 rule, so the delta
+    //       only *=0.5 on odd-indexed shrinks) -> 24 actual halvings needed
+    //       (0.5^24 ~= 5.96e-8... precisely: 1e-2*0.5^24 ~= 5.96e-10 < 1e-9),
+    //       reached at step 48. Cost oscillates every step (falls/rises
+    //       alternately) so the backtrack gate fires repeatedly along the way
+    //       too (bonus non-vacuity beyond Trajectory A's single instance of
+    //       each).
+    {
+        auto dumpStep = [&](const std::string& prefix, int step, const RpropProbe& rp,
+                             const Eigen::VectorXd& weights) {
+            std::ostringstream ss;
+            ss << prefix << "_step" << step << "_";
+            Matrix2BinaryFile(out + ss.str() + "weights.bin", weights);
+            Matrix2BinaryFile(out + ss.str() + "deltas.bin", rp._Deltas);
+            Matrix2BinaryFile(out + ss.str() + "deltaweights.bin", rp._DeltasWeights);
+            Matrix2BinaryFile(out + ss.str() + "prevderivs.bin", rp._PrevDerivs);
+            ++dumps;
+        };
+
+        // ---- Trajectory A: 5 elements, 5 steps, all branches but the clamps --
+        {
+            RpropProbe rp(1e-2);
+            Eigen::VectorXd weights = Eigen::VectorXd::Constant(5, 1.0);
+            double derivsArr[5][5] = {
+                {1.0, -1.0, 1.0, 0.0, 1.0},
+                {1.0, -1.0, 1.0, 1.0, 0.0},
+                {1.0, -1.0, -1.0, 1.0, 0.0},
+                {1.0, -1.0, -1.0, -1.0, 0.0},
+                {1.0, -1.0, -1.0, -1.0, 0.0},
+            };
+            double costs[5] = {10.0, 9.0, 12.0, 8.0, 7.0};
+            for (int step = 1; step <= 5; ++step) {
+                Eigen::VectorXd derivs(5);
+                for (int j = 0; j < 5; ++j) derivs(j) = derivsArr[step - 1][j];
+                rp.updateWeights(derivs, weights, costs[step - 1]);
+                dumpStep("rprop_trajA", step, rp, weights);
+            }
+        }
+
+        // ---- Trajectory B: 2 elements, 48 steps, both delta clamps -----------
+        {
+            RpropProbe rp(1e-2);
+            Eigen::VectorXd weights = Eigen::VectorXd::Constant(2, 1.0);
+            double prevCost = 5.0;
+            for (int step = 1; step <= 48; ++step) {
+                Eigen::VectorXd derivs(2);
+                derivs(0) = 1.0;
+                derivs(1) = (step == 1) ? 1.0 : ((step % 2 == 1) ? 1.0 : -1.0);
+                double cost = prevCost + ((step % 2 == 0) ? 1.0 : -1.0);
+                rp.updateWeights(derivs, weights, cost);
+                prevCost = cost;
+                dumpStep("rprop_trajB", step, rp, weights);
+            }
+        }
+
+        std::cout << "OK: rprop trajectories dumped (trajA 5 steps, trajB 48 steps)\n";
     }
 
     // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------

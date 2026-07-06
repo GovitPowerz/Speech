@@ -24,6 +24,12 @@ transcription target), both already wired into ``tools/oracle_harness/main.cpp``
   5. REGRESSION GUARD (copy the phase2b pattern): hashes every file under
      tests/reference_data/{phase1,phase2,phase2b} BEFORE and AFTER the harness run and
      SystemExit's on any drift (the Phase 3 stage must not perturb a prior-phase dump).
+  6. Copies the Task 7 Rprop trajectory dumps (rprop_traj{A,B}_step<k>_*.bin, the REAL
+     compiled Rprop::updateWeights -- pure scalar, no libm/GEMM, bit-portable) and
+     computes a per-step/per-element BRANCH RECORD from the trajectory's own
+     derivs/costs (independent re-derivation of the deriv-sign x prev-deriv-sign x
+     cost-comparison state machine, NOT read back from the dumps) into manifest.json,
+     asserting all 7 required branch kinds (S11.1) are covered.
 
 Run TWICE; the manifest + goldens must be byte-identical.
 
@@ -213,6 +219,120 @@ PROBE_SITES = {
     "bwd_backproj": "(6x3)*(3x4) deltas*W^T back-projection (k=O), the divergent GEMM at NN width.",
 }
 
+# Task 7: Rprop iRPROP- trainer trajectories (REAL compiled Rprop::updateWeights,
+# tools/oracle_harness/main.cpp Phase 3 Task 7 stage). Defined here (not just read
+# back from the dumps) so the branch record is an INDEPENDENT re-derivation of the
+# deriv-sign x prev-deriv-sign x cost-comparison state machine -- the same inputs
+# fed to the harness, mirrored byte-for-byte, so a copy/paste error in the harness's
+# hardcoded arrays would surface as a manifest/dump mismatch, not be silently trusted.
+RPROP_ETA_MIN = 0.5
+RPROP_ETA_PLUS = 1.2
+RPROP_MIN_DELTA = 1e-9
+RPROP_MAX_DELTA = 0.2
+RPROP_INIT_DELTA = 1e-2
+
+TRAJ_A_DERIVS = [
+    [1.0, -1.0, 1.0, 0.0, 1.0],
+    [1.0, -1.0, 1.0, 1.0, 0.0],
+    [1.0, -1.0, -1.0, 1.0, 0.0],
+    [1.0, -1.0, -1.0, -1.0, 0.0],
+    [1.0, -1.0, -1.0, -1.0, 0.0],
+]
+TRAJ_A_COSTS = [10.0, 9.0, 12.0, 8.0, 7.0]
+TRAJ_A_N = 5
+TRAJ_A_STEPS = 5
+
+TRAJ_B_N = 2
+TRAJ_B_STEPS = 48
+
+
+def _traj_b_derivs_costs() -> tuple[list[list[float]], list[float]]:
+    derivs = []
+    costs = []
+    prev_cost = 5.0
+    for step in range(1, TRAJ_B_STEPS + 1):
+        d1 = 1.0 if step == 1 else (1.0 if step % 2 == 1 else -1.0)
+        derivs.append([1.0, d1])
+        cost = prev_cost + (1.0 if step % 2 == 0 else -1.0)
+        costs.append(cost)
+        prev_cost = cost
+    return derivs, costs
+
+
+TRAJ_B_DERIVS, TRAJ_B_COSTS = _traj_b_derivs_costs()
+
+
+def _rprop_branch_record(all_derivs: list[list[float]], all_costs: list[float], n: int) -> list[list[str]]:
+    """Re-derive, per step and per element, which Rprop.cpp:9-59 branch fires --
+    an independent state machine over the SAME trajectory inputs the harness
+    consumes (not a read-back of the harness's own state). Branch tags:
+      init_pos / init_neg / init_zero        (first call, per element sign)
+      grow                                    (derivTimesPrev > 0, unclamped)
+      grow_clamped                            (derivTimesPrev > 0, hit max_delta)
+      shrink+backtrack / shrink+nobacktrack   (derivTimesPrev < 0, cost gate)
+      shrink_clamped+backtrack/+nobacktrack   (derivTimesPrev < 0, hit min_delta)
+      zero / zero_pos / zero_neg              (derivTimesPrev == 0: literal-zero
+                                                current deriv, or the
+                                                post-backtrack forced-zero path)
+    """
+    deltas = [None] * n
+    prev_derivs = [None] * n
+    prev_cost = None
+    record: list[list[str]] = []
+    for step in range(len(all_derivs)):
+        derivs = all_derivs[step]
+        cost = all_costs[step]
+        branch = [""] * n
+        if deltas[0] is None:
+            deltas = [RPROP_INIT_DELTA] * n
+            prev_derivs = list(derivs)
+            for j in range(n):
+                d = derivs[j]
+                branch[j] = "init_zero" if d == 0.0 else ("init_pos" if d > 0.0 else "init_neg")
+        else:
+            dtp = [derivs[j] * prev_derivs[j] for j in range(n)]
+            prev_derivs = list(derivs)
+            for j in range(n):
+                if dtp[j] > 0.0:
+                    deltas[j] *= RPROP_ETA_PLUS
+                    if deltas[j] > RPROP_MAX_DELTA:
+                        deltas[j] = RPROP_MAX_DELTA
+                        branch[j] = "grow_clamped"
+                    else:
+                        branch[j] = "grow"
+                elif dtp[j] < 0.0:
+                    deltas[j] *= RPROP_ETA_MIN
+                    clamped = deltas[j] < RPROP_MIN_DELTA
+                    if clamped:
+                        deltas[j] = RPROP_MIN_DELTA
+                    fired = prev_cost < cost
+                    tag = "shrink_clamped" if clamped else "shrink"
+                    branch[j] = f"{tag}+{'backtrack' if fired else 'nobacktrack'}"
+                    prev_derivs[j] = 0.0
+                else:
+                    d = derivs[j]
+                    branch[j] = "zero" if d == 0.0 else ("zero_pos" if d > 0.0 else "zero_neg")
+        prev_cost = cost
+        record.append(branch)
+    return record
+
+
+TRAJ_A_BRANCHES = _rprop_branch_record(TRAJ_A_DERIVS, TRAJ_A_COSTS, TRAJ_A_N)
+TRAJ_B_BRANCHES = _rprop_branch_record(TRAJ_B_DERIVS, TRAJ_B_COSTS, TRAJ_B_N)
+
+# S11.1 non-vacuity: the seven required branch KINDS (ignoring the +back/nobacktrack
+# and _pos/_neg/_clamped element-sign suffixes) that must appear somewhere across the
+# two trajectories' branch records.
+REQUIRED_BRANCH_KINDS = {
+    "init": lambda b: b.startswith("init_"),
+    "grow": lambda b: b == "grow",
+    "grow_clamped": lambda b: b == "grow_clamped",
+    "shrink_backtrack": lambda b: b.startswith("shrink") and b.endswith("+backtrack"),
+    "shrink_nobacktrack": lambda b: b.startswith("shrink") and b.endswith("+nobacktrack"),
+    "shrink_clamped": lambda b: b.startswith("shrink_clamped"),
+    "zero_post": lambda b: b.startswith("zero"),
+}
+
 EXPECTED_NB_DERIVS = 33671
 
 NN_TOL_RE = re.compile(
@@ -339,6 +459,13 @@ def main() -> None:
         # dump block, single source of truth.
         for alias_name, source_name in ALIAS_COPIES.items():
             shutil.copy2(PHASE3_DIR / source_name, PHASE3_DIR / alias_name)
+        # Task 7: Rprop trajectory dumps (rprop_traj{A,B}_step<k>_{weights,deltas,
+        # deltaweights,prevderivs}.bin).
+        for traj, n_steps in (("trajA", TRAJ_A_STEPS), ("trajB", TRAJ_B_STEPS)):
+            for step in range(1, n_steps + 1):
+                for kind in ("weights", "deltas", "deltaweights", "prevderivs"):
+                    name = f"rprop_{traj}_step{step}_{kind}.bin"
+                    shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
 
     # 4. Regression guard: the prior-phase dirs must be byte-identical after the run.
     after = {p: _hash_tree(d) for p, d in (("phase1", PHASE1_DIR), ("phase2", PHASE2_DIR), ("phase2b", PHASE2B_DIR))}
@@ -402,6 +529,25 @@ def main() -> None:
             alias_mismatches.append({"file": alias_name, "expected": expected, "got": got})
     if alias_mismatches:
         raise SystemExit(f"cost_*.bin alias shape mismatch: {alias_mismatches}")
+    rprop_mismatches = []
+    for traj, n_steps, n in (("trajA", TRAJ_A_STEPS, TRAJ_A_N), ("trajB", TRAJ_B_STEPS, TRAJ_B_N)):
+        for step in range(1, n_steps + 1):
+            for kind in ("weights", "deltas", "deltaweights", "prevderivs"):
+                name = f"rprop_{traj}_step{step}_{kind}.bin"
+                got = _read_bin_shape(PHASE3_DIR / name)
+                if got != (n, 1):
+                    rprop_mismatches.append({"file": name, "expected": (n, 1), "got": got})
+    if rprop_mismatches:
+        raise SystemExit(f"rprop_traj*.bin shape mismatch: {rprop_mismatches}")
+
+    # S11.1 non-vacuity: every required branch KIND must appear at least once across
+    # the two trajectories' branch records.
+    all_branches = [b for step in (*TRAJ_A_BRANCHES, *TRAJ_B_BRANCHES) for b in step]
+    missing_kinds = [
+        kind for kind, pred in REQUIRED_BRANCH_KINDS.items() if not any(pred(b) for b in all_branches)
+    ]
+    if missing_kinds:
+        raise SystemExit(f"Rprop trajectory does not exercise required branch kinds: {missing_kinds}")
 
     # 7. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -603,6 +749,58 @@ def main() -> None:
                 alias_name: {"copy_of": source_name, **{"rows": COST_SHAPES[source_name][0], "cols": COST_SHAPES[source_name][1]}}
                 for alias_name, source_name in ALIAS_COPIES.items()
             },
+        },
+        "rprop_trajectories": {
+            "text": (
+                "Task 7: the REAL compiled Rprop::updateWeights (Rprop.cpp:9-59, the "
+                ":60-76 .mat dump + _Count are dead and not exercised) is the golden "
+                "DIRECTLY -- pure scalar, no libm/GEMM, bit-portable on every platform "
+                "(STRICT BITS everywhere, no canary gate). Trajectory A (5 elements, 5 "
+                "steps) exercises every branch except the delta clamps: first-call init "
+                "(deriv>0/deriv<0/deriv==0), eta+ growth, eta- shrink with the "
+                "cost-gated backtrack BOTH firing (step3, cost rises 9->12) and NOT "
+                "firing (step4, cost falls 12->8), the post-backtrack prev_derivs==0 "
+                "path (both with a nonzero and a literal-zero current deriv), and a "
+                "literal subsequent-call deriv==0. Trajectory B (2 elements, 48 steps) "
+                "is a DEDICATED clamp trajectory (the brief's 'second trajectory with "
+                "init_delta near a clamp' alternative): element 0's deriv never flips, "
+                "growing 1e-2*1.2^k to the max_delta=0.2 clamp (hit at step 18); "
+                "element 1 alternates sign every step, so only every OTHER call is a "
+                "genuine shrink (the intervening calls are the forced-zero "
+                "post-backtrack path), reaching the min_delta=1e-9 clamp at step 48. "
+                "The branch record below is an INDEPENDENT re-derivation (this "
+                "extractor script, not read back from the dumps) of the deriv-sign x "
+                "prev-deriv-sign x cost-comparison state machine over the exact same "
+                "trajectory inputs fed to the harness -- the Rust golden test asserts "
+                "it covers all 7 required branch kinds (S11.1) and cross-checks a few "
+                "spot elements/steps against the dumped numbers."
+            ),
+            "eta_min": RPROP_ETA_MIN,
+            "eta_plus": RPROP_ETA_PLUS,
+            "min_delta": RPROP_MIN_DELTA,
+            "max_delta": RPROP_MAX_DELTA,
+            "init_delta": RPROP_INIT_DELTA,
+            "trajectory_a": {
+                "n_elements": TRAJ_A_N,
+                "n_steps": TRAJ_A_STEPS,
+                "derivs": TRAJ_A_DERIVS,
+                "costs": TRAJ_A_COSTS,
+                "branches": TRAJ_A_BRANCHES,
+            },
+            "trajectory_b": {
+                "n_elements": TRAJ_B_N,
+                "n_steps": TRAJ_B_STEPS,
+                "derivs": TRAJ_B_DERIVS,
+                "costs": TRAJ_B_COSTS,
+                "branches": TRAJ_B_BRANCHES,
+                "max_delta_clamp_first_step": next(
+                    step for step, b in enumerate(TRAJ_B_BRANCHES, start=1) if "grow_clamped" in b
+                ),
+                "min_delta_clamp_first_step": next(
+                    step for step, b in enumerate(TRAJ_B_BRANCHES, start=1) if any("shrink_clamped" in x for x in b)
+                ),
+            },
+            "required_branch_kinds_covered": sorted(REQUIRED_BRANCH_KINDS),
         },
     }
 

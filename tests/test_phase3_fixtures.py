@@ -10,6 +10,7 @@ the reimpl-produced Nx2 deriv goldens exist with the expected shapes.
 
 import json
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -310,6 +311,87 @@ def test_cost_scalar_goldens_are_non_vacuous() -> None:
             f.read(8 * rows)  # skip col0 (output)
             col1 = [struct.unpack("<d", f.read(8))[0] for _ in range(rows)]
         assert any(v != 0.0 for v in col1), name
+
+
+# --- Task 7: Rprop iRPROP- trainer trajectory dumps -------------------------
+# The REAL compiled Rprop::updateWeights is the golden directly (pure scalar,
+# no libm/GEMM) -- Trajectory A (5 elements, 5 steps) exercises every branch
+# except the delta clamps; Trajectory B (2 elements, 48 steps) is a dedicated
+# clamp trajectory. See scripts/extract_phase3_fixtures.py's
+# TRAJ_A_*/TRAJ_B_*/_rprop_branch_record for the independent re-derivation.
+
+RPROP_TRAJ_A_STEPS = 5
+RPROP_TRAJ_A_N = 5
+RPROP_TRAJ_B_STEPS = 48
+RPROP_TRAJ_B_N = 2
+
+
+def test_rprop_trajectory_dumps_present_with_expected_shapes() -> None:
+    for traj, n_steps, n in (
+        ("trajA", RPROP_TRAJ_A_STEPS, RPROP_TRAJ_A_N),
+        ("trajB", RPROP_TRAJ_B_STEPS, RPROP_TRAJ_B_N),
+    ):
+        for step in range(1, n_steps + 1):
+            for kind in ("weights", "deltas", "deltaweights", "prevderivs"):
+                name = f"rprop_{traj}_step{step}_{kind}.bin"
+                path = REF / name
+                assert path.is_file(), name
+                assert _read_bin_shape(path) == (n, 1), name
+
+
+def test_rprop_manifest_records_trajectories() -> None:
+    section = _manifest()["rprop_trajectories"]
+    assert isinstance(section["text"], str) and section["text"]
+    assert section["eta_min"] == 0.5
+    assert section["eta_plus"] == 1.2
+    assert section["min_delta"] == 1e-9
+    assert section["max_delta"] == 0.2
+    assert section["init_delta"] == 1e-2
+    a = section["trajectory_a"]
+    assert a["n_elements"] == RPROP_TRAJ_A_N
+    assert a["n_steps"] == RPROP_TRAJ_A_STEPS
+    b = section["trajectory_b"]
+    assert b["n_elements"] == RPROP_TRAJ_B_N
+    assert b["n_steps"] == RPROP_TRAJ_B_STEPS
+    assert b["max_delta_clamp_first_step"] == 18
+    assert b["min_delta_clamp_first_step"] == 48
+
+
+def test_rprop_branch_record_covers_all_required_kinds() -> None:
+    """S11.1 non-vacuity: the branch record (independent re-derivation, not a
+    read-back of the harness/Rust state) must cover all 7 required branch
+    kinds across the two trajectories -- structurally, not by hoping."""
+    section = _manifest()["rprop_trajectories"]
+    all_branches = [b for traj in (section["trajectory_a"], section["trajectory_b"]) for step in traj["branches"] for b in step]
+
+    def any_matching(pred: Callable[[str], bool]) -> bool:
+        return any(pred(b) for b in all_branches)
+
+    assert any_matching(lambda b: b.startswith("init_")), "missing first-call init"
+    assert any_matching(lambda b: b == "grow"), "missing eta+ growth"
+    assert any_matching(lambda b: b == "grow_clamped"), "missing max_delta clamp"
+    assert any_matching(lambda b: b.endswith("+backtrack")), "missing backtrack firing"
+    assert any_matching(lambda b: b.endswith("+nobacktrack")), "missing backtrack not firing"
+    assert any_matching(lambda b: b.startswith("shrink_clamped")), "missing min_delta clamp"
+    assert any_matching(lambda b: b.startswith("zero")), "missing zero/post-backtrack-zero path"
+
+
+def test_rprop_trajectory_b_deltas_hit_both_clamps_exactly() -> None:
+    """Structural: at step 18 element 0's delta is bit-exactly max_delta=0.2;
+    at step 48 element 1's delta is bit-exactly min_delta=1e-9."""
+    path18 = REF / "rprop_trajB_step18_deltas.bin"
+    with path18.open("rb") as f:
+        rows = int.from_bytes(f.read(8), "little", signed=True)
+        int.from_bytes(f.read(8), "little", signed=True)
+        vals = struct.unpack(f"<{rows}d", f.read(8 * rows))
+    assert vals[0] == 0.2
+
+    path48 = REF / "rprop_trajB_step48_deltas.bin"
+    with path48.open("rb") as f:
+        rows = int.from_bytes(f.read(8), "little", signed=True)
+        int.from_bytes(f.read(8), "little", signed=True)
+        vals = struct.unpack(f"<{rows}d", f.read(8 * rows))
+    assert vals[1] == 1e-9
 
 
 def test_costlaw_ignore_mask_row_is_exactly_zero() -> None:
