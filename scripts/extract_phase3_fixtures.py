@@ -797,10 +797,15 @@ def main() -> None:
                 "subsample (sub [2]) exercises the SubSample/InvSubSample inversion "
                 "(floor(7/2)=3 decimated rows, InvSubSample restores 3*2=6, NOT 7); plain "
                 "(sub [1], legacy :262) exercises the no-subsample else-branch. Both max_ulp=0 "
-                "(synthetic, k<23 -- below the Eigen-blocked-GEMM divergence threshold) over "
-                "BOTH the Nx2 derivs and the returned deltas_out; deltasout is a separate "
-                "calibration site per the k=4*O GEMM-order convention (see net_backward_tol), "
-                "measured 0 at this shape."
+                "over BOTH the Nx2 derivs and the returned deltas_out; deltasout is a separate "
+                "calibration site (see net_backward_tol) for the k=O deltas*W^T back-projection "
+                "GEMM, here k=O=2 (LSTM [2,2]) -- measured 0 at this shape. This does NOT mean "
+                "k=O GEMMs are categorically safe below some fixed width: the sibling "
+                "net_lstm_backward_rev_deltasout site (LSTM [3,4,2], layer-0 k=O=4) measures a "
+                "nonzero 8-16 ULP at the SAME k=4, so the Eigen-vs-ascending divergence onset "
+                "for this GEMM shape is between k=2 and k=4, not a large NN-width threshold like "
+                "the Phase 2 forward's k=23 (that figure does not transfer to this backward GEMM "
+                "shape) -- it is a per-site measured property, not a predictable cutoff."
             ),
             "subsample": tols["net_single_layer_backward_subsample"],
             "plain": tols["net_single_layer_backward_plain"],

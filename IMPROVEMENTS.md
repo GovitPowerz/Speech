@@ -1004,6 +1004,46 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   On the excerpt the reimpl-path cost is 0 (no targets), so the overwrite lands 0 over 0 -- the
   observable is the boundary/result change, not the cost.
 
+- **[phase3] `CostLaw::computeUnitaryDeltas` folds the LOGISTIC output-activation
+  derivative `output*(1-output)` directly into the scalar VAD delta** (`cost.rs::
+  compute_unitary_delta`, from `CostLaw.cpp:343`): after selecting the per-regime law
+  derivative and applying the optional `BackPropWER` scale, the final line multiplies by
+  `output*(1-output)` -- the derivative of the scalar output head's `Logistic` activation
+  (`NeuronLayer.cpp:144`), NOT a second law-derivative term. This is the scalar-path
+  counterpart to the multiclass softmax+CE fusion (S5/S11.3): the scalar head is a plain
+  logistic, not a softmax, so its chain rule is the textbook `y(1-y)` rather than the
+  softmax+CE simplification, but it is likewise folded into the cost seam rather than
+  applied as a separate layer-side Jacobian. The real config's own `CostLawThreshSpeech
+  1`/`CostLawThreshNoSpeech 0` (`1_worker_1.config:64-65`) puts the above-thresh branch
+  exactly at `output` in `{0.0, 1.0}`, where this fold is ZERO and would mask a broken
+  above-thresh law derivative -- `mid_thresh_law` (both thresholds moved to 0.5) is the
+  dedicated non-vacuity builder for that branch. *Why deferred:* provenance; the fold is
+  the correct chain rule for the scalar head's activation, not an ad hoc addition.
+  *Pinned by:* `scalar_delta_polynomial_bit_exact`/`scalar_delta_log_sqrt_canary` (the
+  fold is present in every scalar delta, poly bit-exact, log/sqrt canary-gated) and
+  `scalar_delta_midthresh_cubic_above_branch`/`scalar_delta_midthresh_sqrt_above_branch`
+  (non-vacuous away from the fold's `output in {0,1}` zero).
+
+- **[phase3] `BackPropWER` scales the scalar delta AND the multiclass fusion by an
+  ASYMMETRIC `10x` factor keyed on target class, `10*(1-target)` (speech-on) vs
+  `10*target` (other-on)** (`cost.rs::compute_unitary_delta` + `compute_deltas`, from
+  `CostLaw.cpp:335-341` scalar / `:371-406` multiclass): when `_BackPropWER >= 0`
+  (`isCostModified`), the delta (scalar path) or the whole fused row (multiclass path) is
+  multiplied by a constant `10.0` weighted by the OPPOSITE regime's target value -- for a
+  speech-on frame (`target > 0.5`) the factor is `10*(1-target)`, for an other-on frame
+  it is `10*target`. At exact one-hot targets (`target` in `{0.0, 1.0}`) this reduces to
+  a plain `10.0` or `0.0`, but the multiclass fixtures use SOFT targets specifically so
+  the scaling is observable as a genuine non-constant factor rather than degenerating to
+  0/10 (see the harness comment cited in `multiclass_deltas_wer_and_pond`). The same `10x`
+  constant also gates the cost itself (`compute_unitary_cost`, `cost.rs:276-282`, from
+  `CostLaw.cpp:180-186`) -- WER scaling enters BOTH the forward cost and the backward
+  delta identically, per risk R4's ponderations-in-cost-AND-gradient concern. *Why
+  deferred:* provenance; this is the legacy's Word-Error-Rate-oriented cost reweighting,
+  reproduced verbatim. *Pinned by:* `multiclass_deltas_wer_and_pond` (`cost_deltas_wer.
+  bin`/`cost_deltas_wer_pond.bin`, WER combined with and without classes_ponderations)
+  and `ignore_mask_zeroes_row`'s WER-path branch (a fully-masked row stays exactly 0
+  under WER too).
+
 - **[phase3] `NeuronLayer::feedBackward` counts `InputSeq.rows()`, not `deltas.rows()`** (
   `NeuronLayer.cpp:199`): `_NbOfSeqFedBackward += InputSeq.rows()` uses the ORIGINAL input's row
   count as the frame-count denominator for the Nx2 harvest (`getWeightsDerivatives`, `:101-114`),
@@ -1028,11 +1068,16 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   in review because it is only observable at `cols != I`, which never arises from the sole legacy
   caller (`BLSTMNeuralNetwork.h:29`, `.cpp:90` always chains `NeuronLayer`s output-to-input at
   `cols == I`). At that reachable width, reconstruction is a byte-exact no-op, so the deviation was
-  fully dormant against every fixture. Further, because `cols < I` zero-padding can only turn an
-  out-of-bounds read into an in-bounds `0.0` (never a differing finite value), the ONLY way the fix
-  is observable at all is that a genuinely narrow (`cols < I`) input reaching the hidden fold now
-  panics (index out of bounds) instead of silently zero-filling -- which mirrors the legacy's own
-  Eigen coefficient-wise-product shape mismatch (UB) at that same unreachable shape. Fixed to read
+  fully dormant against every fixture. The two out-of-range directions are NOT symmetric: a wide
+  (`cols > I`) input reaching the raw fold is still IN-BOUNDS (the fold only ever indexes columns
+  `0..I`, and reconstruction's wide-case truncation is exactly `leftCols(I)` -- the same first-`I`
+  columns the raw tensor already has), so raw-vs-reconstructed is silently identical there and a
+  wide fixture could never discriminate the two tensors even if one were built. Further, because
+  `cols < I` zero-padding can only turn an out-of-bounds read into an in-bounds `0.0` (never a
+  differing finite value), the ONLY way the fix is observable at all is that a genuinely narrow
+  (`cols < I`) input reaching the hidden fold now panics (index out of bounds) instead of silently
+  zero-filling -- which mirrors the legacy's own Eigen coefficient-wise-product shape mismatch (UB)
+  at that same unreachable shape. Fixed to read
   `input[[r, c]]` (the raw parameter) directly in `nn/layers.rs::NeuronLayer::feed_backward`. Pinned
   by `hidden_fold_reads_raw_input_not_reconstructed` (arithmetic sanity at `cols == I`) and
   `hidden_fold_panics_on_narrow_raw_input` (the actual regression discriminator: reverting to the
@@ -1143,6 +1188,27 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   was confirmed to fail BOTH trajectory tests at step 1, and reverting it restored the golden
   match.
 
+- **[phase3] `Rprop::_PrevCost` is UNINITIALIZED by the legacy ctor, but this is benign:
+  it is never READ before the first WRITE** (`Rprop.h:16` declares `_PrevCost` a plain
+  `double` with no in-class initializer; `Rprop.cpp:6` (`Rprop(double initDelta)`) does not
+  mention it in the member-init list either): the only read (`Rprop.cpp:42`, the
+  cost-gated backtrack condition `_PrevCost < cost`) lives entirely inside
+  `updateWeights`'s `else` branch (the "subsequent call" path, `:23-57`); the first call
+  takes the `_Deltas.size() == 0` branch (`:10-22`) unconditionally and returns without
+  ever touching `_PrevCost`, and that SAME first call is the only one that writes it
+  (`:58`, unconditional at the end of every call). So by the time the backtrack condition
+  can execute (call >= 2), `_PrevCost` always holds a real value from call 1's tail write
+  -- the indeterminate ctor value is dead on every reachable path. The port
+  (`nn/train.rs::Rprop`) initializes the field to `0.0` for Rust's no-uninitialized-memory
+  discipline, which is a strictly SAFER default than the legacy's indeterminate value but
+  provably unobservable (both are dead until the same write). *Why deferred:* nothing to
+  fix in the legacy behavior itself -- documenting the reachability argument so a future
+  reader does not mistake the field for a live footgun. *Pinned by:* the `deltas.
+  is_empty()` first-call gate (`nn/train.rs`) structurally mirroring `_Deltas.size() == 0`,
+  and `trajectory_a_bit_exact`/`trajectory_b_bit_exact` exercising calls 2+ (where
+  `prev_cost` is read) bit-exact against the real class from a real call-1 write, never
+  from the ctor default.
+
 - **[phase3] COST-GATED BACKTRACK + `prev_derivs` ZEROING** (`nn/train.rs::
   Rprop::update_weights` shrink branch, from `Rprop.cpp:38-45`): on a derivative sign flip
   (`derivTimesPrev < 0`), the weight step is undone (`weights[j] -= delta_weights[j]`) ONLY if
@@ -1154,12 +1220,18 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the current, decayed delta). Do not "fix" this into an unconditional backtrack, and do not drop
   the zeroing -- the backtrack gate and the zeroing are the load-bearing iRPROP- machinery for
   handling weight reversals. Reproduced verbatim. *Why deferred:* nothing to fix -- this is the
-  iRPROP- definition (Riedmiller & Braun, 1993; backtrack only on cost rise, force zero for a
-  step to clear the sign flip). *Pinned by:* `trajectory_a_bit_exact` (step 3 backtracks on
-  cost rise 9->12, step 4 does NOT on cost fall 12->8, both elements' prev_derivs bit-match the
-  zero-forced values at subsequent steps) + `trajectory_b_bit_exact` (alternating cost
-  oscillations, half the steps trigger backtrack, half do not; element 1's step-boundary
-  prev_derivs match the forced-zero value; alternating-sign delta shrinks are clamped correctly).
+  iRPROP- rule as specialized by Igel & Husken, 2000 (the cost-gated backtrack + prev_derivs
+  zeroing on a sign flip; the original Riedmiller & Braun 1993 RPROP backtracks unconditionally
+  on every sign flip, with no cost comparison -- "iRPROP-" is this project's inherited name for
+  the gated variant, kept for continuity with the spec/CLAUDE.md). *Pinned by:*
+  `trajectory_a_bit_exact` (step 3 backtracks on cost rise 9->12, step 4 does NOT on cost fall
+  12->8, both elements' prev_derivs bit-match the zero-forced values at subsequent steps) +
+  `trajectory_b_bit_exact` (alternating cost oscillations over 48 steps; element 1 hits the
+  shrink branch every other step and its backtrack gate FIRES every one of those times -- cost
+  rises on every even step by construction, so trajectory B never exercises a shrink WITHOUT a
+  backtrack; the no-fire case (step 4's cost fall) is pinned solely by trajectory A. Element 1's
+  step-boundary prev_derivs match the forced-zero value; alternating-sign delta shrinks are
+  clamped correctly).
   *Mutation evidence (brief req. 3):* (a) inverting the backtrack gate (`prev_cost < cost` ->
   `prev_cost > cost`) failed both trajectory tests, the element that should backtrack at step 3
   did not. (b) Dropping the zeroing (`self.prev_derivs[j] = 0.0` removed) failed both trajectory

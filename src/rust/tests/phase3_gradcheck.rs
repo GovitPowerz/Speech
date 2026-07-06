@@ -35,7 +35,12 @@ const EPS: f64 = 1e-5;
 /// the spot-checked subset (manifest `gradcheck.relative_error_bound`). 1e-5 eps on
 /// a smooth cost gives ~O(eps^2)=1e-10 truncation + f64 round-off; 5e-4 is a
 /// comfortable ceiling a correct gradient clears by orders of magnitude, while the
-/// sign-flip mutation blows straight through it.
+/// sign-flip mutation blows straight through it. [P3T8] The bound is applied to the
+/// MEAN relative error across the spot-checked subset, not a per-element MAX -- a
+/// weaker aggregate that could in principle let one bad element hide inside several
+/// good ones; accepted here because the spot-checked set already spans every
+/// sub-network region (one element per block) and the sign-flip mutation test
+/// demonstrates the mean bound still catches a genuinely wrong gradient.
 const REL_BOUND: f64 = 5e-4;
 
 /// Relative-error floor (`CorpusProcessor.cpp:334`: `if (ref < 1e-24) ref = 1e-24`).

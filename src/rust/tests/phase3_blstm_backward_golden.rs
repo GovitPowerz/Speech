@@ -257,7 +257,8 @@ fn layout_matches_packer() {
     // get_weights' tail is the mean/std values. So compare only the trained head length
     // (nb - 2*inputSize): the ordering of the trained blocks must be identical, which we
     // verify by confirming the deriv harvest length == get_weights length == nb (same
-    // walk) and that a per-block boundary lands at the same index in both.
+    // walk) and that a per-block boundary lands at the SAME index in both -- not just
+    // that the total lengths agree.
     let mut trained = plain_synthetic_net().0;
     trained.reset_weights_derivatives();
     let mut input = make_input(12, 3);
@@ -273,7 +274,53 @@ fn layout_matches_packer() {
         "deriv Nx2 and flat weight vector have the SAME length (same block walk)"
     );
     assert_eq!(derivs.nrows(), nb);
-    let _ = net;
+
+    // Per-block boundary indices for the LSTM `[3,4,2]` sub `[2,1]` fwd/bwd stacks +
+    // output `[4,5,2]` sub `[1,1]` net (Network::new: layer jj's input is
+    // `neuron_nb[jj]*sub_sampling[jj]`, LSTMLayer::nb_of_weights =
+    // `4*I*O+4*O*O+12*O+4*O`, NeuronLayer::nb_of_weights = `O*(I+1)`):
+    //   fwd: LSTM(I=3*2=6,O=4)=224 + LSTM(I=4*1=4,O=2)=80 -> 304
+    //   bwd: same shape -> 304 (fwd|bwd boundary at 304, bwd|output at 608)
+    //   output: dense(I=4*1=4,O=5)=25 + dense(I=5*1=5,O=2)=12 -> 37 (output|tail at 645)
+    //   tail: 2*input_size() = 2*3 = 6 (645..651 == nb)
+    let fwd_bwd_boundary = 304;
+    let bwd_output_boundary = 608;
+    let output_tail_boundary = 645;
+    assert_eq!(
+        output_tail_boundary + 2 * net.input_size(),
+        nb,
+        "hand-derived block sizes must sum to nb_of_weights()"
+    );
+
+    // The tail's constant [deriv 0 | count 1] structure (pinned generally by
+    // `meanstd_tail_structure`) must begin EXACTLY at output_tail_boundary -- proving
+    // the deriv col0 walk's LSTM/output region ends at the same index the packer's
+    // block-size arithmetic predicts, not merely that the overall lengths match.
+    for r in 0..output_tail_boundary {
+        assert_ne!(
+            derivs[[r, 1]].to_bits(),
+            1.0_f64.to_bits(),
+            "row {r} (still inside fwd/bwd/output) must NOT carry the tail's count-1 marker"
+        );
+    }
+    for r in output_tail_boundary..nb {
+        assert_eq!(derivs[[r, 0]].to_bits(), 0.0_f64.to_bits());
+        assert_eq!(derivs[[r, 1]].to_bits(), 1.0_f64.to_bits());
+    }
+    // Non-vacuity for the off-by-one direction: one row EARLIER than the boundary must
+    // still be inside a trained region (this is the row the loop above's assert_ne!
+    // already covers at r == output_tail_boundary-1, restated here as an explicit
+    // positive check that the boundary is exact, not merely an upper bound).
+    assert_ne!(
+        derivs[[output_tail_boundary - 1, 1]].to_bits(),
+        1.0_f64.to_bits(),
+        "row immediately before the tail boundary must still be a trained-region count"
+    );
+    // fwd|bwd boundary (304) and bwd|output boundary (608) are cited from the hand-derived
+    // block sizes above (not independently re-observable from the Nx2 object itself, since
+    // fwd/bwd/output col1 counts can coincide in value) -- the output_tail_boundary check
+    // above is the discriminating, independently-observable boundary assertion.
+    let _ = (fwd_bwd_boundary, bwd_output_boundary, net);
 }
 
 // === gradient_non_trivial (S11.2): non-zero, non-saturated, finite ===========
