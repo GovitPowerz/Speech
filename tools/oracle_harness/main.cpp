@@ -7503,6 +7503,45 @@ int main(int argc, char** argv) {
             std::cout << "NN_REAL ok backward_nb_derivs=" << reimplDerivs.rows() << "\n";
             Matrix2BinaryFile(out + "bwd_blstm_real_derivs.bin", reimplDerivs);
             ++dumps;
+
+            // ---- Task 8 E2E iRPROP- step dumps (the phase capstone) ----------
+            // Feed the REAL-net normalized gradient (col0 cwiseQuotient col1,
+            // element-wise -- BLSTMNeuralNetwork.cpp:306, the same op the Rust
+            // update_weights does) into the REAL compiled Rprop::updateWeights
+            // (Rprop.cpp:9-59), starting from the real flat weight vector, and
+            // dump the weights after ONE step and after a SECOND step whose
+            // gradient sign-flips (negated) under a RISEN cost so the cost-gated
+            // backtrack FIRES on every nonzero-gradient element (:42-44).
+            //   step 1: grad = norm,  cost = 1.0 (unused -- first call skips the
+            //           state branch; prev_cost is set to 1.0 for step 2's gate).
+            //   step 2: grad = -norm, cost = 2.0 > 1.0 -> derivTimesPrev < 0 on
+            //           every nonzero element AND prev_cost(1.0) < cost(2.0) ->
+            //           BACKTRACK: weights[j] -= delta_weights[j] (undoes step 1).
+            // Costs are FIXED control inputs (not derived from the net's cost),
+            // so the whole trajectory is bit-portable and matches the Rust E2E
+            // test element-for-element. The trainer step on a FIXED gradient is
+            // pure scalar (no libm/GEMM) -> STRICT BITS; only the gradient VALUE
+            // it consumes is the canary-gated reimpl (Rust gates that assert).
+            {
+                Eigen::VectorXd norm(reimplDerivs.rows());
+                for (long j = 0; j < reimplDerivs.rows(); ++j)
+                    norm(j) = reimplDerivs(j, 0) / reimplDerivs(j, 1); // :306
+                RpropProbe rp(1e-2);
+                Eigen::VectorXd w = flat;
+                rp.updateWeights(norm, w, 1.0);
+                Matrix2BinaryFile(out + "e2e_weights_after_step.bin", w);
+                ++dumps;
+                Eigen::VectorXd negNorm = -norm;
+                rp.updateWeights(negNorm, w, 2.0);
+                Matrix2BinaryFile(out + "e2e_weights_after_backtrack.bin", w);
+                // The step-1 dw per element (recorded before step 2 mutated the
+                // caller weights) equals rp._DeltasWeights after step 1; step 2's
+                // backtrack branch leaves _DeltasWeights untouched, so dumping it
+                // now yields the step-1 dw the Rust test uses to assert the
+                // structural "weights moved back" fact.
+                Matrix2BinaryFile(out + "e2e_step1_dw.bin", rp._DeltasWeights);
+                ++dumps;
+            }
         }
 
         // ---- NN_PROBE backward: pure-arithmetic outer-product (0 ULP at synthetic k)

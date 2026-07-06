@@ -411,3 +411,66 @@ def test_costlaw_ignore_mask_row_is_exactly_zero() -> None:
         for kk in range(n_classes):
             v = data[kk * rows + masked_row]
             assert v == 0.0, (name, masked_row, kk, v)
+
+
+# --- Task 8: E2E real-net iRPROP- step gate + network grad check ------------
+# The phase capstone. The real-net gradient (bwd_blstm_real_derivs.bin, dumped by
+# Task 1) is normalized and stepped through the REAL Rprop; a second step fires the
+# cost-gated backtrack. The grad check is bound-based (no fixture); its eps + bound
+# live in the manifest as the documented contract the Rust test replays.
+
+E2E_STEP_SHAPES = {
+    "e2e_weights_after_step.bin": (33671, 1),
+    "e2e_weights_after_backtrack.bin": (33671, 1),
+    "e2e_step1_dw.bin": (33671, 1),
+}
+
+
+def test_e2e_step_dumps_present_with_expected_shapes() -> None:
+    for name, (rows, cols) in E2E_STEP_SHAPES.items():
+        path = REF / name
+        assert path.is_file(), name
+        assert _read_bin_shape(path) == (rows, cols), name
+
+
+def test_e2e_manifest_well_formed() -> None:
+    section = _manifest()["e2e_gate"]
+    assert isinstance(section["text"], str) and section["text"]
+    assert section["step1_cost"] == 1.0
+    assert section["step2_cost"] == 2.0
+    assert section["grad_dump"] == "bwd_blstm_real_derivs.bin"
+    assert set(section["dumps"]) == set(E2E_STEP_SHAPES)
+
+
+def test_e2e_backtrack_fired_non_vacuous() -> None:
+    """S11.1 non-vacuity: the backtrack must fire on at least one element -- and
+    on the fired elements the weight moves back by exactly the step-1 dw (the
+    <0 branch does `weights[j] -= delta_weights[j]` and leaves dw untouched)."""
+    section = _manifest()["e2e_gate"]
+    fired = section["fired_count"]
+    assert fired > 0, "backtrack fired on 0 elements (vacuous)"
+
+    def _flat(name: str) -> list[float]:
+        with (REF / name).open("rb") as f:
+            rows = int.from_bytes(f.read(8), "little", signed=True)
+            cols = int.from_bytes(f.read(8), "little", signed=True)
+            return list(struct.unpack(f"<{rows * cols}d", f.read(8 * rows * cols)))
+
+    w_step = _flat("e2e_weights_after_step.bin")
+    w_back = _flat("e2e_weights_after_backtrack.bin")
+    dw1 = _flat("e2e_step1_dw.bin")
+    measured_fired = 0
+    for a, b, d in zip(w_step, w_back, dw1, strict=True):
+        if d != 0.0 and a != b:
+            # backtrack: w_back == w_step - dw1 (bit-exact, pure scalar).
+            assert b == a - d
+            measured_fired += 1
+    assert measured_fired == fired
+
+
+def test_gradcheck_manifest_records_contract() -> None:
+    section = _manifest()["gradcheck"]
+    assert isinstance(section["text"], str) and section["text"]
+    assert section["epsilon"] == 1e-5
+    assert section["relative_error_bound"] == 5e-4
+    assert section["ref_floor"] == 1e-24

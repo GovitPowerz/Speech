@@ -98,6 +98,15 @@ EXPECTED_SHAPES = {
     "bwd_blstm_real_derivs.bin": (33671, 2),
 }
 
+# Task 8 E2E gate: the real-net weights after ONE iRPROP- step on the normalized
+# real-net gradient, and after a SECOND (backtrack-firing) step; plus the step-1 dw
+# per element (used by the Rust backtrack-fired structural assertion). All 33671 x 1.
+E2E_STEP_SHAPES = {
+    "e2e_weights_after_step.bin": (33671, 1),
+    "e2e_weights_after_backtrack.bin": (33671, 1),
+    "e2e_step1_dw.bin": (33671, 1),
+}
+
 # Task 6: windowed BLSTM backward goldens (the REAL feedForwardBackward's
 # getWeightsDerivatives per processing type), on the windowed synthetic net LSTM
 # [2,2] sub [1] + output [4,2] sub [1] (sub_sampling_ratio == 1). N = fwd LSTM(2,2)=64
@@ -275,6 +284,26 @@ RPROP_MIN_DELTA = 1e-9
 RPROP_MAX_DELTA = 0.2
 RPROP_INIT_DELTA = 1e-2
 
+# Task 8 E2E iRPROP- step costs (fixed control inputs, harness == Rust): step 1's
+# cost is unused (first call), step 2's must exceed step 1's so the sign-flipped
+# gradient's cost-gated backtrack fires.
+E2E_STEP1_COST = 1.0
+E2E_STEP2_COST = 2.0
+
+# Task 8 network-level grad-check parameters (spec S8 / CorpusProcessor:237-340).
+# The central-difference epsilon is the legacy default `Neural_Networks_Gradient_
+# Check_Epsilon` (configs/legacy/LID_BLSTM.config:88; CheckGrad.m:12 hardcodes the
+# same 1e-5). The grad check is bound-based (NOT a byte golden -- spec S8/S10 dump
+# nothing for it), so these live in the manifest as the DOCUMENTED contract the Rust
+# test replays. The relative-error bound is the mean-relative-error threshold the
+# spot-checked weight subset must satisfy: |analytic - numerical| / max(|numerical|,
+# 1e-24), averaged over the subset, must be below GRADCHECK_REL_BOUND. 1e-5 eps on a
+# smooth cost gives ~O(eps^2)=1e-10 truncation plus f64 round-off; 5e-4 is a
+# comfortable ceiling that a correct analytic gradient clears by orders of magnitude
+# while a sign-flip mutation (the built-in non-vacuity test) blows straight through.
+GRADCHECK_EPSILON = 1e-5
+GRADCHECK_REL_BOUND = 5e-4
+
 TRAJ_A_DERIVS = [
     [1.0, -1.0, 1.0, 0.0, 1.0],
     [1.0, -1.0, 1.0, 1.0, 0.0],
@@ -431,6 +460,17 @@ def _read_bin_col1(path: Path) -> list[float]:
     return list(data[rows : 2 * rows])  # column-major: col1 is the second rows-block
 
 
+def _read_bin_flat(path: Path) -> list[float]:
+    """Read a column vector .bin (rows x 1, column-major f64) as a flat list."""
+    import struct
+
+    with path.open("rb") as f:
+        rows = int.from_bytes(f.read(8), "little", signed=True)
+        cols = int.from_bytes(f.read(8), "little", signed=True)
+        data = struct.unpack(f"<{rows * cols}d", f.read(8 * rows * cols))
+    return list(data)
+
+
 def _parse_nn_tol(stdout: str) -> dict[str, dict[str, object]]:
     tols: dict[str, dict[str, object]] = {}
     for m in NN_TOL_RE.finditer(stdout):
@@ -494,6 +534,9 @@ def main() -> None:
         )
         # Copy the reimpl-produced Nx2 deriv goldens into the committed Phase 3 dir.
         for name in EXPECTED_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Task 8: E2E real-net iRPROP- step + backtrack weight dumps.
+        for name in E2E_STEP_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
         # Task 6: windowed BLSTM backward goldens (the REAL feedForwardBackward derivs).
         for name in WINDOWED_BWD_SHAPES:
@@ -559,6 +602,24 @@ def main() -> None:
             mismatches.append({"file": name, "expected": expected, "got": got})
     if mismatches:
         raise SystemExit(f"bwd_*.bin shape mismatch: {mismatches}")
+    e2e_mismatches = []
+    for name, expected in E2E_STEP_SHAPES.items():
+        got = _read_bin_shape(PHASE3_DIR / name)
+        if got != expected:
+            e2e_mismatches.append({"file": name, "expected": expected, "got": got})
+    if e2e_mismatches:
+        raise SystemExit(f"e2e_*.bin shape mismatch: {e2e_mismatches}")
+    # Task 8 non-vacuity: the backtrack MUST fire on at least one element -- assert
+    # structurally from the dumps that weights_after_backtrack != weights_after_step
+    # on the elements where step 1 applied a nonzero dw (the sign-flip + risen-cost
+    # backtrack undoes step 1's move). A vacuous port (backtrack never firing) would
+    # make the two weight vectors identical on those elements.
+    w_step = _read_bin_flat(PHASE3_DIR / "e2e_weights_after_step.bin")
+    w_back = _read_bin_flat(PHASE3_DIR / "e2e_weights_after_backtrack.bin")
+    dw1 = _read_bin_flat(PHASE3_DIR / "e2e_step1_dw.bin")
+    fired = sum(1 for a, b, d in zip(w_step, w_back, dw1) if d != 0.0 and a != b)
+    if fired == 0:
+        raise SystemExit("Task 8 backtrack fired on 0 elements (vacuous)")
     deltasout_mismatches = []
     for name, expected in EXPECTED_DELTASOUT_SHAPES.items():
         got = _read_bin_shape(PHASE3_DIR / name)
@@ -851,6 +912,52 @@ def main() -> None:
             **{name: {"rows": r, "cols": c} for name, (r, c) in NET_SINGLE_LAYER_DERIVS_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in NET_SINGLE_LAYER_DELTASOUT_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in WINDOWED_BWD_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in E2E_STEP_SHAPES.items()},
+        },
+        "e2e_gate": {
+            "text": (
+                "Task 8: the phase E2E training gate. The REAL 33,671-weight net "
+                "(1_worker_1.config + NNweights_config1.bin, BackPropagationActivated "
+                "overridden true, InputNormalizationType -1) on e2e_input.bin (201 x 11, "
+                "width < 23 -> the LSTM topRows tolerance) with deterministic scalar-VAD "
+                "targets (row%3==0 -> 1.0) runs feedForwardBackward; its Nx2 gradient IS "
+                "bwd_blstm_real_derivs.bin (the reimpl golden -- canary-gated, k>=23 GEMM "
+                "divergence). update_weights normalizes col0 cwiseQuotient col1 element-wise "
+                "(:306) and hands it to the REAL compiled Rprop::updateWeights. Step 1 "
+                "(cost 1.0, unused first call) -> e2e_weights_after_step.bin. Step 2 feeds "
+                "the NEGATED gradient under a RISEN cost (2.0 > 1.0): every nonzero element "
+                "sign-flips (derivTimesPrev < 0) and the cost gate opens, so the backtrack "
+                "FIRES (weights[j] -= delta_weights[j], undoing step 1) -> "
+                "e2e_weights_after_backtrack.bin. e2e_step1_dw.bin is the step-1 dw per "
+                "element (the backtrack branch leaves _DeltasWeights untouched, so it still "
+                "holds step-1's value after step 2) -- the Rust test asserts weights moved "
+                "back by exactly -dw on the fired elements. The Rprop step is pure scalar "
+                "(no libm/GEMM) -> STRICT BITS; only the gradient VALUE it consumes is the "
+                "canary-gated reimpl. Backtrack fired on `fired_count` elements (MEASURED)."
+            ),
+            "step1_cost": E2E_STEP1_COST,
+            "step2_cost": E2E_STEP2_COST,
+            "fired_count": fired,
+            "grad_dump": "bwd_blstm_real_derivs.bin",
+            "dumps": {name: {"rows": r, "cols": c} for name, (r, c) in E2E_STEP_SHAPES.items()},
+        },
+        "gradcheck": {
+            "text": (
+                "Task 8: the network-level central-difference grad check (spec S8; the "
+                "legacy shape is CorpusProcessor::gradCheck:237-340). For a spot-checked "
+                "subset of the flat weights, perturb +eps/-eps with full state restore, "
+                "cost from one feed_forward_backward each side (cost = net.cost / "
+                "net.nb_of_classif, matching the legacy `cost /= counter`), numerical grad = "
+                "(costPlus - costMinus)/(2*eps), compared vs analytic col0/col1 with relative "
+                "error floored at 1e-24. Bound-based (NOT a byte golden -- no fixture): the "
+                "Rust test asserts the mean relative error over the subset is below the "
+                "documented bound, and DOUBLE-DUTIES as the analytic chain's non-vacuity "
+                "layer (a sign-flip mutation in the LSTM deriv accumulation blows through "
+                "the bound). eps and bound are the documented contract, replayed by the test."
+            ),
+            "epsilon": GRADCHECK_EPSILON,
+            "relative_error_bound": GRADCHECK_REL_BOUND,
+            "ref_floor": 1e-24,
         },
         "costlaw_backward": {
             "text": (

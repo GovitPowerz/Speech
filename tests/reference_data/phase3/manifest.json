@@ -311,7 +311,46 @@
     "blstm_bwd_enforce_derivs.bin": {
       "rows": 142,
       "cols": 2
+    },
+    "e2e_weights_after_step.bin": {
+      "rows": 33671,
+      "cols": 1
+    },
+    "e2e_weights_after_backtrack.bin": {
+      "rows": 33671,
+      "cols": 1
+    },
+    "e2e_step1_dw.bin": {
+      "rows": 33671,
+      "cols": 1
     }
+  },
+  "e2e_gate": {
+    "text": "Task 8: the phase E2E training gate. The REAL 33,671-weight net (1_worker_1.config + NNweights_config1.bin, BackPropagationActivated overridden true, InputNormalizationType -1) on e2e_input.bin (201 x 11, width < 23 -> the LSTM topRows tolerance) with deterministic scalar-VAD targets (row%3==0 -> 1.0) runs feedForwardBackward; its Nx2 gradient IS bwd_blstm_real_derivs.bin (the reimpl golden -- canary-gated, k>=23 GEMM divergence). update_weights normalizes col0 cwiseQuotient col1 element-wise (:306) and hands it to the REAL compiled Rprop::updateWeights. Step 1 (cost 1.0, unused first call) -> e2e_weights_after_step.bin. Step 2 feeds the NEGATED gradient under a RISEN cost (2.0 > 1.0): every nonzero element sign-flips (derivTimesPrev < 0) and the cost gate opens, so the backtrack FIRES (weights[j] -= delta_weights[j], undoing step 1) -> e2e_weights_after_backtrack.bin. e2e_step1_dw.bin is the step-1 dw per element (the backtrack branch leaves _DeltasWeights untouched, so it still holds step-1's value after step 2) -- the Rust test asserts weights moved back by exactly -dw on the fired elements. The Rprop step is pure scalar (no libm/GEMM) -> STRICT BITS; only the gradient VALUE it consumes is the canary-gated reimpl. Backtrack fired on `fired_count` elements (MEASURED).",
+    "step1_cost": 1.0,
+    "step2_cost": 2.0,
+    "fired_count": 24409,
+    "grad_dump": "bwd_blstm_real_derivs.bin",
+    "dumps": {
+      "e2e_weights_after_step.bin": {
+        "rows": 33671,
+        "cols": 1
+      },
+      "e2e_weights_after_backtrack.bin": {
+        "rows": 33671,
+        "cols": 1
+      },
+      "e2e_step1_dw.bin": {
+        "rows": 33671,
+        "cols": 1
+      }
+    }
+  },
+  "gradcheck": {
+    "text": "Task 8: the network-level central-difference grad check (spec S8; the legacy shape is CorpusProcessor::gradCheck:237-340). For a spot-checked subset of the flat weights, perturb +eps/-eps with full state restore, cost from one feed_forward_backward each side (cost = net.cost / net.nb_of_classif, matching the legacy `cost /= counter`), numerical grad = (costPlus - costMinus)/(2*eps), compared vs analytic col0/col1 with relative error floored at 1e-24. Bound-based (NOT a byte golden -- no fixture): the Rust test asserts the mean relative error over the subset is below the documented bound, and DOUBLE-DUTIES as the analytic chain's non-vacuity layer (a sign-flip mutation in the LSTM deriv accumulation blows through the bound). eps and bound are the documented contract, replayed by the test.",
+    "epsilon": 1e-05,
+    "relative_error_bound": 0.0005,
+    "ref_floor": 1e-24
   },
   "costlaw_backward": {
     "text": "Task 2: CostLaw backward seam VALIDATION (cost.rs was already ported in Phase 0b-i). The REAL compiled CostLaw::computeUnitaryDeltas/computeDeltas (CostLaw.cpp:278-445, CostLaw.h:6-213) is probed DIRECTLY as the golden (S2 tier 2) -- no transcription. Scalar VAD sweeps: output=k/64 for k in [0,64] (65 points), target=1.0 (speech) / target=0.0 (other), for the square (polynomial, strict-bits), log (libm, canary-gated), and sqrt (libm, canary-gated) laws -- exercises the below/above-thresh switch, the no-speech 1-output flip + derivative negation, and the output*(1-output) logistic chain-rule fold (:344). cost_deriv_scalar_{speech,other}.bin are a byte copy (shutil.copy2, this extractor) of the square-law dump under the brief's literal names -- fix-wave 1 (review finding 2) removed the second, independent C++ dump block that produced them. FIX-WAVE 1 (review finding 1): the real config's CostLawThreshSpeech=1/CostLawThreshNoSpeech=0 (1_worker_1.config:64-65) means the k/64 sweep above only ever exercises the above-thresh branch at output=1.0/0.0, where the logistic fold is exactly zero -- cost_deriv_scalar_midthresh_{cubic,sqrt}_{speech,other}.bin override BOTH thresholds to 0.5 and dump 3 explicit points landing in the above-thresh regime away from 0/1 (speech 0.6/0.75/0.9, no-speech 0.4/0.25/0.1 -- CostLaw.cpp:282,297,308,324), for the cubic law (AboveThreshCubicLaw, CostLaw.h:84-117, strict bits) and the sqrt law (AboveThreshSqrtLaw, CostLaw.h:182-213, canary-gated). Multiclass fusion (cost_deltas_multiclass.bin, n_frames=4 x n_classes=3): row1 is FULLY ignore-masked (target<0 -> delta==0.0 exactly), rows 0/2/3 place the on-class at different columns; the _pond variant sets classes_ponderations=2,3,4 and scales the WHOLE on-class row by the on-class ponderation (:410-417). BackPropWER (cost_deltas_wer.bin, n_frames=3 x n_classes=3): SOFT targets (0.9/0.8 on-class, not exact 1.0) because the WER scaling `10*(1-target)` / `10*target` (:379-397) VANISHES at target==1.0/0.0 exactly -- soft targets are the engine's real BackPropWER convention (BLSTMNeuralNetwork.cpp:871, 0.1*modifier); a one-hot-only golden would be vacuous. Row2 is fully masked (ignore composes with WER). The _pond variant adds classes_ponderations to the per-element WER arm. All multiclass/WER dumps are pure arithmetic (no libm) -> strict bits.",
