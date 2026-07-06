@@ -7,14 +7,17 @@ transcriptions of the ENGINE backward (`LSTMLayer.cpp:518-723`, `NeuronLayer.cpp
 pairs with the divergent MATLAB forward -- sigmoid(x) gates, no softmax, internal /ncols
 normalization -- and must NOT be ported).
 
-Triangulation (this phase's cross-check contract): the Task 1 JSON cases
-(`backward_cases.json`) carry expected Nx2 derivs SOURCED FROM THE HARNESS REIMPL
-GOLDENS; replaying them through this INDEPENDENT Python oracle and matching bit-for-bit
-closes that seam (harness-reimpl == Python-oracle == Rust-layer all agree). The
-`triangulation_vs_rust` test additionally builds the Rust `LstmLayer`/`NeuronLayer`
-directly (via the PyO3 binding, when importable) on the SAME synthetic case as a THIRD
-independent check; if the binding is not built, the test still asserts the harness-JSON
-agreement (ANTI-VACUITY: skip only the Rust leg, never silently pass on zero assertions).
+Triangulation (this phase's cross-check contract) is TRANSITIVE, not a live cross-call:
+the Task 1 JSON cases (`backward_cases.json`) carry expected Nx2 derivs SOURCED FROM THE
+HARNESS REIMPL GOLDENS; the SAME goldens are independently reproduced by (a) the Rust
+suite (`cargo test`, `phase3_*_golden.rs`, consuming the harness `.bin` dumps directly)
+and (b) this Python oracle replaying `backward_cases.json`. Matching bit-for-bit in both
+places closes the seam (harness-reimpl == Rust-layer, harness-reimpl == Python-oracle),
+which is equivalent in force to a three-way agreement but there is NO live PyO3
+cross-call here: `speech-py` (`src/rust/speech-py/src/lib.rs`) is an 18-line stub
+exposing only `version()` -- the hot-loop binding is a Phase 4 deliverable. The
+`test_json_replay_closes_t1_seam` test below replays `backward_cases.json` a second
+time through the oracle; it does not build or call the Rust layers directly.
 """
 
 from __future__ import annotations
@@ -294,28 +297,28 @@ def test_blstm_backward_matches_harness() -> None:
 
     # col1 (frame count) is a pure-arithmetic replication of T=8 (trained blocks) / 1
     # (mean/std tail) -- strict-bits regardless of libm (spec S11.4/S11.9).
-    lstm_block = 4 * _lstm_nb(i, o)  # fwd + bwd, but col1 lives per-row not per-block; check directly
     assert np.all(derivs[: 2 * _lstm_nb(i, o), 1] == 8.0), "LSTM blocks: count == T == 8"
     assert np.all(derivs[2 * _lstm_nb(i, o) : 2 * _lstm_nb(i, o) + _dense_nb(out_i, out_o), 1] == 8.0), "output block: count == T == 8"
     assert np.all(derivs[2 * _lstm_nb(i, o) + _dense_nb(out_i, out_o) :, 1] == 1.0), "mean/std tail: count == 1"
     assert np.all(derivs[2 * _lstm_nb(i, o) + _dense_nb(out_i, out_o) :, 0] == 0.0), "mean/std tail: deriv == 0"
-    del lstm_block
 
 
-# === triangulation_vs_rust (independent arbiter) ============================
+# === test_json_replay_closes_t1_seam (transitive triangulation) =============
 
 
-def test_triangulation_vs_rust() -> None:
-    """Independent-arbiter cross-check (the phase's triangulation contract): the
-    Python oracle's Nx2 derivs on the SAME synthetic Task 1 case must equal the
-    committed `expected_derivs_bits`, which are themselves the harness-reimpl values
-    the Rust `LstmLayer`/`NeuronLayer` unit/golden tests assert against
-    (src/rust/tests -- `bwd_lstm_derivs.bin`/`bwd_dense_*_derivs.bin` consumed there).
-    This test is the THIRD independent leg (harness reimpl -> Rust port already
-    verified in `cargo test`; here: harness reimpl -> Python oracle) -- the same
-    triangulation pattern the Phase 2 forward oracle used. A mismatch here, per the
-    binding arbiter rule, is a phase-critical two-vs-one finding, NOT a Python bug to
-    silently patch around."""
+def test_json_replay_closes_t1_seam() -> None:
+    """Transitive-triangulation cross-check (this phase's contract, NOT a live
+    Rust cross-call): the Python oracle's Nx2 derivs on the SAME synthetic Task 1
+    case must equal the committed `expected_derivs_bits`, which are themselves the
+    harness-reimpl values the Rust `LstmLayer`/`NeuronLayer` unit/golden tests
+    assert against independently (src/rust/tests -- `bwd_lstm_derivs.bin`/
+    `bwd_dense_*_derivs.bin` consumed there via `cargo test`). Both legs replay the
+    SAME `backward_cases.json` fixture against the SAME harness goldens, so a match
+    here plus a green `cargo test` closes the seam transitively (harness-reimpl ==
+    Rust-layer, harness-reimpl == Python-oracle) -- equivalent in force to a
+    three-way agreement, but there is no in-process call from Python into the Rust
+    layers. A mismatch here, per the binding arbiter rule, is a phase-critical
+    finding, NOT a Python bug to silently patch around."""
     d = _load_backward_cases()
 
     for c in d["lstm_cases"]:
