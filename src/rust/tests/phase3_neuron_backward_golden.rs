@@ -218,13 +218,20 @@ fn inv_sub_sampling_ratio_scales_derivs_not_deltas_out() {
 }
 
 /// Width tolerance (`:157-166`): `cols < I` -> zero-pad the input up to `I`
-/// columns before the outer-product accumulation and the asinh-deriv fold.
-/// Feeding an `I=4`-configured layer a `cols=2` input must produce EXACTLY the
-/// same result as feeding it a hand-padded `cols=4` input with columns 2,3
-/// explicitly zero (the legacy's `Eigen::MatrixXd::Zero` filler, `:161-163`).
-/// A layer that instead used the narrow input as-is (skipping the pad) would
-/// diverge both in deltas_out shape expectations and in the dead weight rows'
-/// (cols 2,3) deriv contribution.
+/// columns before the outer-product accumulation (`weightsDerivatives`/
+/// `biaisesDerivatives`, `:178-183`). That half genuinely reads the
+/// width-reconstructed tensor, so the DERIVS from a narrow (`cols=2`) call
+/// must match a hand-padded (`cols=4`, explicit zero fill) call exactly --
+/// including the dead weight rows (input cols 2,3) accumulating EXACTLY
+/// zero, since their column is all-zero regardless of deltas.
+///
+/// `deltas_out` is only compared with `last_layer = true` (no Maxmin2 fold):
+/// `deltas * W^T` depends only on `deltas`/`weights`, so it is identical
+/// regardless of which (width-tolerant-reconstructed) tensor fed the
+/// accumulation half above, and narrow vs hand-padded must agree bit-exact.
+/// The hidden (`last_layer = false`) fold is NOT width-tolerant -- see
+/// `hidden_fold_reads_raw_input_not_reconstructed` below for why, and for the
+/// actual regression discriminator for the `:204` fix.
 #[test]
 fn width_tolerance_zero_pads_narrow_input() {
     let (i, o, t) = (4, 3, 6);
@@ -238,12 +245,12 @@ fn width_tolerance_zero_pads_narrow_input() {
         .slice_mut(ndarray::s![.., ..2])
         .assign(&narrow_input);
 
-    let deltas_out_narrow = layer_narrow.feed_backward(&narrow_input, &deltas, 1, false);
-    let deltas_out_padded = layer_padded.feed_backward(&hand_padded, &deltas, 1, false);
+    let deltas_out_narrow = layer_narrow.feed_backward(&narrow_input, &deltas, 1, true);
+    let deltas_out_padded = layer_padded.feed_backward(&hand_padded, &deltas, 1, true);
     common::assert_bits_eq(
         &deltas_out_narrow,
         &deltas_out_padded,
-        "width-tolerant deltas_out matches hand-zero-padded input",
+        "width-tolerant deltas_out (last_layer) matches hand-zero-padded input",
     );
 
     let mut derivs_narrow = Vec::new();
@@ -274,6 +281,83 @@ fn width_tolerance_zero_pads_narrow_input() {
             );
         }
     }
+}
+
+/// `:204`'s fold is `deltas_out(r,c) *= Maxmin2::deriv(InputSeq(r,c))`, indexed
+/// against `deltas_out`'s own shape (`T x I`, from `deltas * W^T`), on the RAW
+/// `InputSeq` -- NOT the width-reconstructed `input` local used by the
+/// accumulation half. Since zero-padding writes literal `0.0` into the padded
+/// columns, `recon_input` and `input` never hold DIFFERENT finite values at
+/// any index both can address -- padding can only turn an out-of-bounds read
+/// into an in-bounds 0.0, it cannot change a value. So the fix's observable
+/// effect is not "different numbers" but "no valid `cols < I` case exists at
+/// all": a narrow input reaching this fold is precisely the legacy's own
+/// Eigen coefficient-wise-product shape mismatch (`InputSeq` narrower than
+/// `deltas_out`), which is undefined behavior there too. Confirmed unreachable
+/// from the sole legacy caller (`BLSTMNeuralNetwork.h:29`, `.cpp:90`, always
+/// `cols == I`).
+///
+/// Two assertions pin this down:
+/// 1. At the reachable width (`cols == I`), the fold matches a hand-computed
+///    `(deltas * W^T) .* maxmin2_deriv(input)` built directly from `input`
+///    (canary-gated: this alone would ALSO pass under the old `recon_input`
+///    fold, since reconstruction is a no-op at `cols == I` -- it is a sanity
+///    check on the fold's arithmetic, not the regression discriminator).
+/// 2. THE regression discriminator: feeding a genuinely narrow (`cols=2`)
+///    input to a hidden-layer call must panic (index out of bounds), because
+///    the fold reads `input[[r, c]]` up to `c = I-1` directly off the raw,
+///    un-padded tensor. The reverted (`recon_input`) code silently absorbed
+///    this into a defined (but legacy-unfaithful) zero-fill instead of
+///    panicking -- exactly the masked-UB behavior the fix removes.
+#[test]
+fn hidden_fold_reads_raw_input_not_reconstructed() {
+    let (i, o, t) = (4, 3, 6);
+    let mut layer = build_layer(i, o);
+    let input = make_input(t, i); // cols == I, the only legacy-reachable shape
+    let deltas = make_deltas(t, o);
+
+    let deltas_out = layer.feed_backward(&input, &deltas, 1, false);
+
+    let flat = synth_flat(layer.nb_of_weights());
+    let mut w = Array2::<f64>::zeros((i, o));
+    for c in 0..o {
+        for r in 0..i {
+            w[[r, c]] = flat[c * i + r];
+        }
+    }
+    let mut hand = Array2::<f64>::zeros((t, i));
+    for tt in 0..t {
+        for ii in 0..i {
+            let mut acc = 0.0;
+            for c in 0..o {
+                acc += deltas[[tt, c]] * w[[ii, c]];
+            }
+            hand[[tt, ii]] = acc * speech::nn::activations::maxmin2_deriv(input[[tt, ii]]);
+        }
+    }
+    // Transcendental (Maxmin2::deriv folds sinh) -> canary-gated.
+    common::assert_oracle_eq(
+        &deltas_out,
+        &hand,
+        "hidden fold matches hand maxmin2_deriv(raw input)",
+    );
+}
+
+/// The actual regression discriminator (see doc comment above): a narrow
+/// (`cols=2 < I=4`) input reaching the HIDDEN fold must panic on out-of-bounds
+/// indexing into the raw `input`, since the fold reads columns up to `I-1`
+/// directly off it. Reverting to `recon_input` makes this NOT panic (it
+/// silently reads the zero-padded reconstruction instead) -- run this test
+/// with the fold swapped back to `recon_input` to confirm it fails
+/// (`#[should_panic]` would then see no panic and the test would fail).
+#[test]
+#[should_panic(expected = "index out of bounds")]
+fn hidden_fold_panics_on_narrow_raw_input() {
+    let (i, o, t) = (4, 3, 6);
+    let mut layer = build_layer(i, o);
+    let narrow_input = make_input(t, 2); // cols=2 < I=4
+    let deltas = make_deltas(t, o);
+    let _ = layer.feed_backward(&narrow_input, &deltas, 1, false);
 }
 
 #[test]

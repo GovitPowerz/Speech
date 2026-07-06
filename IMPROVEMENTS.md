@@ -1018,6 +1018,29 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   candidate -- this is the correct, intentional legacy behavior, just non-obvious from the call
   site alone.
 
+- **[phase3] `NeuronLayer::feedBackward`'s hidden-path Maxmin2 deriv fold reads the RAW `InputSeq`
+  parameter, not the width-reconstructed `input` local** (`NeuronLayer.cpp:204`, `deltas_out =
+  (deltas*W^T).array()*(InputSeq.unaryExpr(Maxmin2::deriv).array())`): the accumulation half
+  (`:157-183`) genuinely reads the width-tolerant-reconstructed tensor (`cols > I` truncates,
+  `cols < I` zero-pads, per `:157-166`), but the deriv-fold half at `:204` indexes the ORIGINAL,
+  un-reconstructed `InputSeq` argument directly -- two different tensors read by the same function.
+  A prior port draft (Task 3, pre-review) folded on the reconstructed tensor for both halves; caught
+  in review because it is only observable at `cols != I`, which never arises from the sole legacy
+  caller (`BLSTMNeuralNetwork.h:29`, `.cpp:90` always chains `NeuronLayer`s output-to-input at
+  `cols == I`). At that reachable width, reconstruction is a byte-exact no-op, so the deviation was
+  fully dormant against every fixture. Further, because `cols < I` zero-padding can only turn an
+  out-of-bounds read into an in-bounds `0.0` (never a differing finite value), the ONLY way the fix
+  is observable at all is that a genuinely narrow (`cols < I`) input reaching the hidden fold now
+  panics (index out of bounds) instead of silently zero-filling -- which mirrors the legacy's own
+  Eigen coefficient-wise-product shape mismatch (UB) at that same unreachable shape. Fixed to read
+  `input[[r, c]]` (the raw parameter) directly in `nn/layers.rs::NeuronLayer::feed_backward`. Pinned
+  by `hidden_fold_reads_raw_input_not_reconstructed` (arithmetic sanity at `cols == I`) and
+  `hidden_fold_panics_on_narrow_raw_input` (the actual regression discriminator: reverting to the
+  reconstructed tensor makes the expected panic NOT occur) in `tests/phase3_neuron_backward_golden.rs`.
+  No fix candidate needed beyond the literal-fidelity correction already applied -- this entry
+  documents a legacy-unreachable branch whose Rust semantics are now pinned to the literal source
+  rather than silently generalized.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

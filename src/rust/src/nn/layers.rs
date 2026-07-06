@@ -543,7 +543,10 @@ impl NeuronLayer {
     ///   pre-seeded into `deltas` by `CostLaw::computeDeltas` upstream; adding a
     ///   Jacobian here would double-count it (spec S5, risk R3).
     /// - hidden: `deltas_out = (deltas * weights^T) .* Maxmin2'(InputSeq)`,
-    ///   the asinh-deriv taken on the LAYER INPUT (`:204`), not the output.
+    ///   the asinh-deriv taken on the RAW `InputSeq` parameter (`:204`), not the
+    ///   output AND not the width-reconstructed `input` local used above for the
+    ///   deriv-accumulation half -- the two halves read different tensors in the
+    ///   legacy. See the fold site below for the divergence-reachability note.
     /// - No retained cache: `input`/`deltas` are passed in fresh each call.
     pub fn feed_backward(
         &mut self,
@@ -603,11 +606,17 @@ impl NeuronLayer {
         let w_t = self.weights.t().to_owned();
         let mut deltas_out = matmul_seq(deltas, &w_t);
         if !last_layer {
-            // :204 hidden -> .* Maxmin2'(InputSeq), the asinh-deriv on the RAW
-            // (width-tolerant-reconstructed) layer input.
+            // :204 hidden -> .* Maxmin2'(InputSeq), literally the UN-RECONSTRUCTED
+            // `InputSeq` parameter (not the width-reconstructed/transposed `input`
+            // local used for the :157-166 deriv-accumulation half above). The two
+            // halves read different tensors in the legacy: accumulation uses the
+            // reconstructed `input`, this fold uses the raw `input` arg as-is. The
+            // divergence between raw and reconstructed is only observable when
+            // `cols != I`, which this layer's sole legacy caller never produces
+            // (BLSTMNeuralNetwork.h:29, .cpp:90 always feeds cols == I).
             for r in 0..deltas_out.dim().0 {
                 for c in 0..deltas_out.dim().1 {
-                    deltas_out[[r, c]] *= maxmin2_deriv(recon_input[[r, c]]);
+                    deltas_out[[r, c]] *= maxmin2_deriv(input[[r, c]]);
                 }
             }
         }
