@@ -1357,6 +1357,29 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   warning (or make the mismatch a hard error once configs are trusted). *Pinned by:*
   `weights_file_too_many_truncates` + `weights_file_too_few_errors` (`tests/phase4a_lifecycle.rs`).
 
+- **[phase4a] `BagOfProcessors` ctor clears `files`/`refsegfiles`/`reflangfiles` to `""` in every
+  config map but deliberately NOT `refdialfiles`** (`engine/bag_of_processors.rs::from_configs`,
+  from `BagOfProcessors.cpp:21-23`): a memory-reuse quirk in the legacy ctor -- three of the four
+  per-file listing keys are blanked in-place before any driver is constructed (so a later corpus
+  load off the SAME map sees them empty), the fourth is left untouched with no apparent reason.
+  Reproduced verbatim (asymmetric clearing, not a full reset). *Why deferred:* provenance; changing
+  this would silently alter what `Corpus::from_config` (Task 5) sees on a shared map. *Fix
+  candidate:* none identified -- likely an oversight in the original, revisit only if a corpus-load
+  golden depends on `refdialfiles` being live post-bag-construction. *Pinned by:*
+  `key_clears_applied` (`src/engine/bag_of_processors.rs`).
+
+- **[phase4a] `isBackPropActivated`/`getWeights` non-NN-algo defaults are asymmetric (`vec![false]`
+  vs empty vec)** (`engine/bag_of_processors.rs::{is_back_prop_activated, get_weights}`, from
+  `BagOfProcessors.cpp:73-101`): for algo 1/2 (non-NN segmenters, no `else if` branch matches),
+  `isBackPropActivated` falls through to the ctor's own `return vector<bool>(1, false)` (`:85`) --
+  a ONE-element vec -- while `getWeights`/`getInputStatistics`/`getWeightsDerivatives` fall through
+  to `return vector<...>()` (`:100`,`:128-129`,`:143-144`) -- an EMPTY vec. Not obviously
+  intentional (the four dispatch methods otherwise mirror each other structurally), but reproduced
+  as written since it is directly observable (a caller iterating `is_back_prop_activated` for a
+  non-NN config sees one `false`, not zero elements). *Why deferred:* provenance; changing either
+  side would need a caller-side audit of every non-NN-algo consumer once Task 5's corpus-processor
+  driver lands. *Pinned by:* `dispatch_vec_shapes` (`src/engine/bag_of_processors.rs`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

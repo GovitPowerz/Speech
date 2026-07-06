@@ -716,6 +716,14 @@ impl BlstmSignalSegmenter {
         self.net.reset_weights_derivatives();
     }
 
+    /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
+    /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
+    /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
+    /// None)`, matching the legacy's in-ctor load without duplicating its semantics.
+    pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
+        self.net.load_weights_file(map, "BLSTM")
+    }
+
     /// `Segmentation::compute_errors`, one call per channel (see
     /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
     pub fn score(
@@ -1238,6 +1246,14 @@ impl BlstmSpectralSegmenter {
     /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
     pub fn reset_weights_derivatives(&mut self) {
         self.net.reset_weights_derivatives();
+    }
+
+    /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
+    /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
+    /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
+    /// None)`, matching the legacy's in-ctor load without duplicating its semantics.
+    pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
+        self.net.load_weights_file(map, "BLSTM")
     }
 
     /// `Segmentation::compute_errors`, one call per channel (see

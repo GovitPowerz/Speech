@@ -9,9 +9,10 @@ fn main() {
         Some(mode) => {
             // Phase 0+: build CorpusProcessor and dispatch on `mode`.
             eprintln!(
-                "speech {} - mode {:?} (engine not yet implemented)",
+                "speech {} - mode {:?} verbose={} (engine not yet implemented)",
                 speech::version(),
-                mode
+                mode.kind,
+                mode.verbose
             );
         }
         None => {
