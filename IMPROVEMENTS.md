@@ -1380,6 +1380,19 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   side would need a caller-side audit of every non-NN-algo consumer once Task 5's corpus-processor
   driver lands. *Pinned by:* `dispatch_vec_shapes` (`src/engine/bag_of_processors.rs`).
 
+- **[phase4a] `File_Type != 0` (non-wav ingestion) is unported; bag ctor bails**
+  (`engine/bag_of_processors.rs::from_configs`, from `BagOfProcessors.h:44`): the legacy
+  `_FileType` member documents the enum `0: wav; 1: phSeq; 2: cep`. `AudioStruct.cpp` reads
+  file_type == 0 (libsndfile `sf_open`), == 1 (`.phSeq` plain binary, framerate 8000), and == 2
+  (`.cep` Mel-frequency cepstral coefficient binary, framerate 8000). The Rust port reads `File_Type`
+  from the config and bails with `Err` if `file_type != 0`, since the `AudioStruct` non-wav readers
+  (`phSeq`/`cep` paths) are not ported. *Why deferred:* the Phase 4a parity corpora use only wav
+  files (file_type 0); non-wav ingestion paths were never exercised and remain unvalidated. *Fix
+  candidate:* once (if) a corpus ever requires non-wav files, port `AudioStruct`'s `.phSeq` and
+  `.cep` readers and plumb the file_type enum through the audio I/O. *Pinned by:*
+  `file_type_nonzero_errors` (`src/engine/bag_of_processors.rs` doc-comment
+  `from_configs_non_wav_bail_test`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
