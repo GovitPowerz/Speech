@@ -62,6 +62,11 @@
       }
     }
   },
+  "lstm_backward_variants_tol": {
+    "text": "Task 4: LSTMLayer::feedBackward / feedBackwardReverse (LSTMLayer.cpp:518-732) per-variant goldens at synthetic I=2,O=2,T=5 (odd length). Variants: peep_all (all three peephole flags on), peep_none (all off -- the peephole cross-terms drop entirely), reverse (feedForwardReverse then feedBackwardReverse: reverse input/output/deltas, run the forward-order backward, reverse returned deltas; the caches are stored time-reversed and consumed as-is), subsample (invSubSamplingRatio=2, asserting the *2 block scaling on all four deriv blocks, :710-715). Each dumps deltasPreviousLayer (T x I) + the Nx2 derivs (col0 summed deriv, col1 frame count). The signal variant feeds a 1-col input into the I=2 layer (width tolerance :534-543, zero-pad to I rows): dead weight rows accumulate exactly 0 (spec S11.5), gradient stays layer-native (lstm_bwd_signal_derivs.bin). max_ulp=0 vs the real compiled layer over BOTH derivs and deltasPreviousLayer.",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00"
+  },
   "dumps": {
     "bwd_lstm_derivs.bin": {
       "rows": 72,
@@ -110,6 +115,42 @@
     "bwd_dense_logistic_deltasout.bin": {
       "rows": 6,
       "cols": 4
+    },
+    "lstm_bwd_deltasprev_peep_all.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_deltasprev_peep_none.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_deltasprev_reverse.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_deltasprev_subsample.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_peep_all.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_peep_none.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_reverse.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_derivs_subsample.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "lstm_bwd_signal_derivs.bin": {
+      "rows": 64,
+      "cols": 2
     }
   },
   "costlaw_backward": {

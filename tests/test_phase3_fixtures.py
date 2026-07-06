@@ -41,6 +41,19 @@ EXPECTED_DELTASOUT_SHAPES = {
     "bwd_dense_last_deltasout.bin": (6, 4),
     "bwd_dense_logistic_deltasout.bin": (6, 4),
 }
+# Task 4: LSTMLayer::feedBackward per-variant goldens (synthetic I=2,O=2,T=5).
+# deltasPreviousLayer T x I = 5 x 2; derivs Nx2 with N = 4*I*O+4*O*O+12*O+4*O = 64.
+LSTM_BWD_SHAPES = {
+    "lstm_bwd_deltasprev_peep_all.bin": (5, 2),
+    "lstm_bwd_deltasprev_peep_none.bin": (5, 2),
+    "lstm_bwd_deltasprev_reverse.bin": (5, 2),
+    "lstm_bwd_deltasprev_subsample.bin": (5, 2),
+    "lstm_bwd_derivs_peep_all.bin": (64, 2),
+    "lstm_bwd_derivs_peep_none.bin": (64, 2),
+    "lstm_bwd_derivs_reverse.bin": (64, 2),
+    "lstm_bwd_derivs_subsample.bin": (64, 2),
+    "lstm_bwd_signal_derivs.bin": (64, 2),
+}
 EXPECTED_NB_DERIVS = 33671
 
 # Task 2: CostLaw backward REAL-probe goldens (dumped from the REAL compiled
@@ -142,6 +155,38 @@ def test_deltasout_goldens_present_with_expected_shapes() -> None:
         path = REF / name
         assert path.is_file(), name
         assert _read_bin_shape(path) == (rows, cols), name
+
+
+def test_lstm_backward_variant_goldens_present_with_expected_shapes() -> None:
+    for name, (rows, cols) in LSTM_BWD_SHAPES.items():
+        path = REF / name
+        assert path.is_file(), name
+        assert _read_bin_shape(path) == (rows, cols), name
+
+
+def test_lstm_backward_variants_manifest_max_ulp_zero() -> None:
+    # Task 4: the reimpl (dumped as the golden) reproduces the REAL compiled
+    # LSTMLayer::feedBackward / feedBackwardReverse bit-for-bit at these shapes.
+    tol = _manifest()["lstm_backward_variants_tol"]
+    assert tol["max_ulp"] == 0
+
+
+def test_lstm_signal_backward_dead_rows_zero() -> None:
+    # Width-tolerance (S11.5): the 1-col signal into an I=2 layer zero-pads the
+    # input's second row, so input_weights_derivatives row 1 (input col 1) is
+    # exactly 0 in every gate column. input_weights_derivatives is the first
+    # I*4O = 2*8 = 16 col0 entries (column-major, I x 4O); index (ii=1, jj) lands
+    # at jj*I + 1.
+    path = REF / "lstm_bwd_signal_derivs.bin"
+    with path.open("rb") as f:
+        rows = int.from_bytes(f.read(8), "little", signed=True)
+        int.from_bytes(f.read(8), "little", signed=True)  # cols == 2
+        col0 = [struct.unpack("<d", f.read(8))[0] for _ in range(rows)]  # first col (col-major)
+    in_size, out_size = 2, 2
+    for jj in range(4 * out_size):
+        assert col0[jj * in_size + 1] == 0.0, f"dead input row deriv nonzero at gate col {jj}"
+    # Non-vacuity: the live rows (input col 0) are NOT all zero.
+    assert any(col0[jj * in_size + 0] != 0.0 for jj in range(4 * out_size)), "signal derivs all-zero"
 
 
 def test_deriv_goldens_are_non_vacuous() -> None:

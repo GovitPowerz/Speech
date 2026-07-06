@@ -5,7 +5,9 @@
 
 use ndarray::Array2;
 
-use super::activations::{gates_fn, identity_fn, logistic_fn, maxmin2_deriv, maxmin2_fn};
+use super::activations::{
+    gates_deriv, gates_fn, identity_fn, logistic_fn, maxmin2_deriv, maxmin2_fn,
+};
 
 /// Ascending-loop matrix product `a (m x k) * b (k x n)`, accumulating the `k`
 /// index in strictly ascending order (`i`/`j` outer, `k` inner). This is the
@@ -55,11 +57,22 @@ pub struct LstmLayer {
     biases: Array2<f64>,
 
     // Forward-pass caches (`_Gates`/`_CellsIn`/`_CellStates`), filled by
-    // `feed_forward`; the backward pass (Task 5+) reads them. `_Gates` holds the
+    // `feed_forward`; the backward pass reads them. `_Gates` holds the
     // POST-activation gate values (T x 4O).
     gates: Array2<f64>,
     cells_in: Array2<f64>,
     cell_states: Array2<f64>,
+
+    // Backward-pass deriv accumulators (`_InputWeightsDerivatives` I x 4O,
+    // `_FeedbackWeightsDerivatives` O x 4O, `_PeepWeightDerivatives` 12 x O,
+    // `_BiaisesDerivatives` 1 x 4O; `LSTMLayer.cpp:518-522`) + frame count
+    // (`_NbOfSeqFedBackward`). Reset via `reset_weights_derivatives`, accumulated
+    // across `feed_backward` calls, harvested via `get_weights_derivatives`.
+    input_weights_derivatives: Array2<f64>,
+    feedback_weights_derivatives: Array2<f64>,
+    peep_weight_derivatives: Array2<f64>,
+    biases_derivatives: Array2<f64>,
+    nb_of_seq_fed_backward: i64,
 }
 
 impl LstmLayer {
@@ -89,6 +102,11 @@ impl LstmLayer {
             gates: Array2::zeros((0, 0)),
             cells_in: Array2::zeros((0, 0)),
             cell_states: Array2::zeros((0, 0)),
+            input_weights_derivatives: Array2::zeros((input_size, 4 * output_size)),
+            feedback_weights_derivatives: Array2::zeros((output_size, 4 * output_size)),
+            peep_weight_derivatives: Array2::zeros((12, output_size)),
+            biases_derivatives: Array2::zeros((1, 4 * output_size)),
+            nb_of_seq_fed_backward: 0,
         }
     }
 
@@ -343,6 +361,425 @@ impl LstmLayer {
         let mut output_rev = Array2::<f64>::zeros(output.dim());
         self.feed_forward(&input_rev, &mut output_rev, last_layer);
         output.assign(&output_rev.slice(ndarray::s![..;-1, ..]));
+    }
+
+    /// `feedBackward` (`LSTMLayer.cpp:518-723`): whole-sequence peephole-LSTM BPTT.
+    /// Reverse-time loop (`row = T-1 .. 0`); per row the gate-derivative order is
+    /// O -> state -> C -> F -> I (`:582/613/616/624/659`). Derivatives are recomputed
+    /// FROM the post-activation caches (`self.gates`/`cell_states`/`cells_in`) via the
+    /// activation derivatives (`gates_deriv`/`maxmin2_deriv`, each on the CACHED
+    /// activated value). Returns `deltas_previous_layer` (T x I). Accumulates into the
+    /// four deriv members and `nb_of_seq_fed_backward += deltas.nrows()` (`:720`).
+    ///
+    /// The 1xO gate-delta vectors (`deltas_{input,forget,output}_gate`) carry state
+    /// ACROSS reverse-time iterations: at each row they still hold the PRIOR (later
+    /// time) step's values when the peephole cross-terms read them, and are only then
+    /// overwritten with the current row's. The `deltas_forget_gate_tmp` save (`:624`)
+    /// captures the prior forget-gate delta BEFORE the forget block overwrites it, for
+    /// the input-gate block to read at `:660`.
+    ///
+    /// Products: the two NN-wide-k GEMMs (`(_FeedbackWeights*test)^T` `:703`,
+    /// `(_InputWeights*testM)^T` `:707`) go through `matmul_seq` (the measured
+    /// ascending-loop contract); the rank-1 outer-product deriv accumulations
+    /// (`input.col(row)*deltasX`, `output.col(row-1)*deltasX`) are k=1, done as
+    /// explicit scalar loops (bit-identical to the legacy Eigen product at k=1).
+    pub fn feed_backward(
+        &mut self,
+        input: &Array2<f64>,
+        output: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64> {
+        let _ = last_layer; // lastLayer is UNUSED in the LSTM backward (signature parity).
+        let o = self.output_size;
+        let i = self.input_size;
+        let cols = input.dim().1;
+        let lines_nb = deltas.dim().0; // :578 linesNb = deltas.rows().
+
+        // :534-543 width tolerance. Legacy transposes to I x T; the Rust port keeps
+        // the sequence T x I and reads `recon_input.row(row)` where the legacy reads
+        // `input.col(row)`. cols > I -> leftCols(I); cols < I -> zero-PAD columns up
+        // to I (the input matrix itself is padded, NOT truncated -- differs from the
+        // dense width-recon only in that both there and here the accumulation half
+        // reads the reconstructed tensor); else as-is.
+        let recon_input: Array2<f64> = if cols > i {
+            input.slice(ndarray::s![.., ..i]).to_owned()
+        } else if cols < i {
+            let mut padded = Array2::<f64>::zeros((lines_nb, i));
+            padded.slice_mut(ndarray::s![.., ..cols]).assign(input);
+            padded
+        } else {
+            input.to_owned()
+        };
+
+        let p = &self.peep_weight;
+        let g = &self.gates;
+        let cs = &self.cell_states;
+        let ci = &self.cells_in;
+
+        // Per-call accumulators (`:559-562`), added into the members at the end.
+        let mut iw_d = Array2::<f64>::zeros((i, 4 * o));
+        let mut fw_d = Array2::<f64>::zeros((o, 4 * o));
+        let mut pp_d = Array2::<f64>::zeros((12, o));
+        let mut bs_d = Array2::<f64>::zeros((1, 4 * o));
+
+        // 1xO state vectors persisting across the reverse-time loop (`:547-557`).
+        let mut deltas_feedback = vec![0.0f64; o];
+        let mut deltas_input_gate = vec![0.0f64; o];
+        let mut deltas_forget_gate = vec![0.0f64; o];
+        let mut deltas_output_gate = vec![0.0f64; o];
+        let mut deltas_cells = vec![0.0f64; o];
+        // epsilonState from the NEXT (later) step, read by epsilonForget at :608.
+        let mut epsilon_state = vec![0.0f64; o];
+
+        // testM (4O x T) stacks per-row [i|f|o|c] gate deltas for the :707 GEMM.
+        let mut test_m = Array2::<f64>::zeros((4 * o, lines_nb));
+
+        for row in (0..lines_nb).rev() {
+            let last_row = row == lines_nb - 1;
+
+            // :580 epsilonCells = deltas.row(row) + deltasFeedback.
+            let mut epsilon_cells = vec![0.0f64; o];
+            for j in 0..o {
+                epsilon_cells[j] = deltas[[row, j]] + deltas_feedback[j];
+            }
+
+            // :582-585 deltasOutputGate. tmp = _CellsIn.row(row) .* epsilonCells,
+            // += gatesPeep (rows 5/8 from PRIOR i/f deltas), += gatesRecPeep (row 11
+            // from PRIOR o delta), then * GatesFunction'(_Gates[o-block]).
+            let mut tmp = vec![0.0f64; o];
+            for j in 0..o {
+                tmp[j] = ci[[row, j]] * epsilon_cells[j];
+            }
+            if self.gates_peep {
+                for j in 0..o {
+                    tmp[j] += deltas_input_gate[j] * p[[5, j]] + deltas_forget_gate[j] * p[[8, j]];
+                }
+            }
+            if self.gates_rec_peep {
+                for j in 0..o {
+                    tmp[j] += deltas_output_gate[j] * p[[11, j]];
+                }
+            }
+            for j in 0..o {
+                deltas_output_gate[j] = gates_deriv(g[[row, 2 * o + j]]) * tmp[j];
+            }
+
+            // :595-605 output-gate deriv accumulation.
+            for ii in 0..i {
+                for j in 0..o {
+                    iw_d[[ii, 2 * o + j]] += recon_input[[row, ii]] * deltas_output_gate[j];
+                }
+            }
+            if row > 0 {
+                for ii in 0..o {
+                    for j in 0..o {
+                        fw_d[[ii, 2 * o + j]] += output[[row - 1, ii]] * deltas_output_gate[j];
+                    }
+                }
+                if self.gates_rec_peep {
+                    for j in 0..o {
+                        pp_d[[11, j]] += deltas_output_gate[j] * g[[row - 1, 2 * o + j]];
+                    }
+                }
+            }
+            if self.cells_peep {
+                for j in 0..o {
+                    pp_d[[2, j]] += deltas_output_gate[j] * cs[[row, j]];
+                }
+            }
+            if self.gates_peep {
+                for j in 0..o {
+                    pp_d[[9, j]] += deltas_output_gate[j] * g[[row, j]];
+                }
+                for j in 0..o {
+                    pp_d[[10, j]] += deltas_output_gate[j] * g[[row, o + j]];
+                }
+            }
+            for j in 0..o {
+                bs_d[[0, 2 * o + j]] += deltas_output_gate[j];
+            }
+
+            // :607-611 epsilonForget from the NEXT step's forget gate .* NEXT epsilonState.
+            let mut epsilon_forget = vec![0.0f64; o];
+            if !last_row {
+                for j in 0..o {
+                    epsilon_forget[j] = g[[row + 1, o + j]] * epsilon_state[j];
+                }
+            }
+
+            // :613-614 epsilonState = _Gates[o].*Identity'(_CellsIn).*epsilonCells
+            //   + epsilonForget + cellsPeep(rows 0/1/2 from PRIOR i/f/o deltas).
+            let mut tmp_epsilon_state = vec![0.0f64; o];
+            if self.cells_peep {
+                for j in 0..o {
+                    tmp_epsilon_state[j] = deltas_input_gate[j] * p[[0, j]]
+                        + deltas_forget_gate[j] * p[[1, j]]
+                        + deltas_output_gate[j] * p[[2, j]];
+                }
+            }
+            for j in 0..o {
+                epsilon_state[j] =
+                    g[[row, 2 * o + j]] * maxmin2_deriv(ci[[row, j]]) * epsilon_cells[j]
+                        + epsilon_forget[j]
+                        + tmp_epsilon_state[j];
+            }
+
+            // :616 deltasCells = _Gates[i] .* Maxmin2'(_Gates[g-block]) .* epsilonState.
+            for j in 0..o {
+                deltas_cells[j] =
+                    g[[row, j]] * maxmin2_deriv(g[[row, 3 * o + j]]) * epsilon_state[j];
+            }
+            for ii in 0..i {
+                for j in 0..o {
+                    iw_d[[ii, 3 * o + j]] += recon_input[[row, ii]] * deltas_cells[j];
+                }
+            }
+            if row > 0 {
+                for ii in 0..o {
+                    for j in 0..o {
+                        fw_d[[ii, 3 * o + j]] += output[[row - 1, ii]] * deltas_cells[j];
+                    }
+                }
+            }
+            for j in 0..o {
+                bs_d[[0, 3 * o + j]] += deltas_cells[j];
+            }
+
+            // :624 save the PRIOR forget-gate delta (read at :660 by the input gate).
+            let deltas_forget_gate_tmp = deltas_forget_gate.clone();
+
+            // :624-657 deltasForgetGate: row>0 has the _CellStates.row(row-1) term;
+            // row==0 (`:648-657`) DROPS it (no `_CellStates.row(-1)` read).
+            if row > 0 {
+                let mut tmp_f = vec![0.0f64; o];
+                for j in 0..o {
+                    tmp_f[j] = cs[[row - 1, j]] * epsilon_state[j];
+                }
+                if self.gates_peep {
+                    for j in 0..o {
+                        tmp_f[j] +=
+                            deltas_input_gate[j] * p[[4, j]] + deltas_output_gate[j] * p[[10, j]];
+                    }
+                }
+                if self.gates_rec_peep {
+                    for j in 0..o {
+                        tmp_f[j] += deltas_forget_gate[j] * p[[7, j]];
+                    }
+                }
+                for j in 0..o {
+                    deltas_forget_gate[j] = gates_deriv(g[[row, o + j]]) * tmp_f[j];
+                }
+                for ii in 0..i {
+                    for j in 0..o {
+                        iw_d[[ii, o + j]] += recon_input[[row, ii]] * deltas_forget_gate[j];
+                    }
+                }
+                for ii in 0..o {
+                    for j in 0..o {
+                        fw_d[[ii, o + j]] += output[[row - 1, ii]] * deltas_forget_gate[j];
+                    }
+                }
+                if self.cells_peep {
+                    for j in 0..o {
+                        pp_d[[1, j]] += deltas_forget_gate[j] * cs[[row - 1, j]];
+                    }
+                }
+                if self.gates_peep {
+                    for j in 0..o {
+                        pp_d[[6, j]] += deltas_forget_gate[j] * g[[row - 1, j]];
+                    }
+                    for j in 0..o {
+                        pp_d[[8, j]] += deltas_forget_gate[j] * g[[row - 1, 2 * o + j]];
+                    }
+                }
+                if self.gates_rec_peep {
+                    for j in 0..o {
+                        pp_d[[7, j]] += deltas_forget_gate[j] * g[[row - 1, o + j]];
+                    }
+                }
+                for j in 0..o {
+                    bs_d[[0, o + j]] += deltas_forget_gate[j];
+                }
+            } else {
+                // :648-657 row==0: no cellstate term; still folds the gates-peep
+                // (rows 4/10) + gates-rec (row 7) cross-terms and the bias.
+                let mut tmp_f = vec![0.0f64; o];
+                if self.gates_peep {
+                    for j in 0..o {
+                        tmp_f[j] +=
+                            deltas_input_gate[j] * p[[4, j]] + deltas_output_gate[j] * p[[10, j]];
+                    }
+                }
+                if self.gates_rec_peep {
+                    for j in 0..o {
+                        tmp_f[j] += deltas_forget_gate[j] * p[[7, j]];
+                    }
+                }
+                for j in 0..o {
+                    deltas_forget_gate[j] = gates_deriv(g[[row, o + j]]) * tmp_f[j];
+                }
+                for ii in 0..i {
+                    for j in 0..o {
+                        iw_d[[ii, o + j]] += recon_input[[row, ii]] * deltas_forget_gate[j];
+                    }
+                }
+                for j in 0..o {
+                    bs_d[[0, o + j]] += deltas_forget_gate[j];
+                }
+            }
+
+            // :659-682 deltasInputGate. tmp = _Gates[g-block].*epsilonState, +=
+            // gatesPeep (row 6 from the SAVED prior forget delta, row 9 from the
+            // current o delta), += gatesRecPeep (row 3 from the PRIOR i delta), then
+            // * GatesFunction'(_Gates[i-block]).
+            let mut tmp_i = vec![0.0f64; o];
+            for j in 0..o {
+                tmp_i[j] = g[[row, 3 * o + j]] * epsilon_state[j];
+            }
+            if self.gates_peep {
+                for j in 0..o {
+                    tmp_i[j] +=
+                        deltas_forget_gate_tmp[j] * p[[6, j]] + deltas_output_gate[j] * p[[9, j]];
+                }
+            }
+            if self.gates_rec_peep {
+                for j in 0..o {
+                    tmp_i[j] += deltas_input_gate[j] * p[[3, j]];
+                }
+            }
+            for j in 0..o {
+                deltas_input_gate[j] = gates_deriv(g[[row, j]]) * tmp_i[j];
+            }
+            for ii in 0..i {
+                for j in 0..o {
+                    iw_d[[ii, j]] += recon_input[[row, ii]] * deltas_input_gate[j];
+                }
+            }
+            if row > 0 {
+                for ii in 0..o {
+                    for j in 0..o {
+                        fw_d[[ii, j]] += output[[row - 1, ii]] * deltas_input_gate[j];
+                    }
+                }
+                if self.cells_peep {
+                    for j in 0..o {
+                        pp_d[[0, j]] += deltas_input_gate[j] * cs[[row - 1, j]];
+                    }
+                }
+                if self.gates_peep {
+                    for j in 0..o {
+                        pp_d[[4, j]] += deltas_input_gate[j] * g[[row - 1, o + j]];
+                    }
+                    for j in 0..o {
+                        pp_d[[5, j]] += deltas_input_gate[j] * g[[row - 1, 2 * o + j]];
+                    }
+                }
+                if self.gates_rec_peep {
+                    for j in 0..o {
+                        pp_d[[3, j]] += deltas_input_gate[j] * g[[row - 1, j]];
+                    }
+                }
+            }
+            for j in 0..o {
+                bs_d[[0, j]] += deltas_input_gate[j];
+            }
+
+            // :688-690 stack [i|f|o|c] into testM.col(row) (4O x 1).
+            for j in 0..o {
+                test_m[[j, row]] = deltas_input_gate[j];
+                test_m[[o + j, row]] = deltas_forget_gate[j];
+                test_m[[2 * o + j, row]] = deltas_output_gate[j];
+                test_m[[3 * o + j, row]] = deltas_cells[j];
+            }
+
+            // :703 deltasFeedback = (_FeedbackWeights * test)^T, for the next (earlier)
+            // iteration's :580. test is testM.col(row) (4O x 1).
+            let test_col = test_m.slice(ndarray::s![.., row..row + 1]).to_owned();
+            let fb = matmul_seq(&self.feedback_weights, &test_col); // O x 1
+            for j in 0..o {
+                deltas_feedback[j] = fb[[j, 0]];
+            }
+        }
+
+        // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I.
+        let dpl = matmul_seq(&self.input_weights, &test_m); // I x T
+        let deltas_previous_layer = dpl.t().to_owned();
+
+        // :710-715 invSubSamplingRatio > 1 scales all four deriv blocks.
+        if inv_sub_sampling_ratio > 1 {
+            let r = inv_sub_sampling_ratio as f64;
+            iw_d.mapv_inplace(|v| v * r);
+            fw_d.mapv_inplace(|v| v * r);
+            pp_d.mapv_inplace(|v| v * r);
+            bs_d.mapv_inplace(|v| v * r);
+        }
+
+        // :716-720 accumulate into the members; count += linesNb (deltas.rows()).
+        self.input_weights_derivatives += &iw_d;
+        self.feedback_weights_derivatives += &fw_d;
+        self.peep_weight_derivatives += &pp_d;
+        self.biases_derivatives += &bs_d;
+        self.nb_of_seq_fed_backward += lines_nb as i64;
+
+        deltas_previous_layer
+    }
+
+    /// `feedBackwardReverse` (`LSTMLayer.cpp:725-732`): reverse input/output/deltas
+    /// rows, run the forward-order `feed_backward`, reverse the returned deltas. The
+    /// caches are STORED time-reversed after `feed_forward_reverse` and consumed
+    /// AS-IS here (do NOT un-reverse them -- see `feed_forward_reverse`, risk R9).
+    pub fn feed_backward_reverse(
+        &mut self,
+        input: &Array2<f64>,
+        output: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64> {
+        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
+        let output_rev = output.slice(ndarray::s![..;-1, ..]).to_owned();
+        let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
+        let dpl = self.feed_backward(
+            &input_rev,
+            &output_rev,
+            &deltas_rev,
+            inv_sub_sampling_ratio,
+            last_layer,
+        );
+        dpl.slice(ndarray::s![..;-1, ..]).to_owned()
+    }
+
+    /// `getWeightsDerivatives` (`LSTMLayer.cpp:251-295`): Nx2 harvest, col0 = the
+    /// summed derivative in the flat weight-packer block order (InputWeights ->
+    /// FeedbackWeights -> PeepWeight -> Biaises, each COLUMN-major), col1 =
+    /// `_NbOfSeqFedBackward` REPLICATED per element. Appended into `out`.
+    pub fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
+        let count = self.nb_of_seq_fed_backward as f64;
+        for m in [
+            &self.input_weights_derivatives,
+            &self.feedback_weights_derivatives,
+            &self.peep_weight_derivatives,
+            &self.biases_derivatives,
+        ] {
+            let (rows, cols) = m.dim();
+            for jj in 0..cols {
+                for ii in 0..rows {
+                    out.push([m[[ii, jj]], count]);
+                }
+            }
+        }
+    }
+
+    /// `resetWeightsDerivatives` (`LSTMLayer.cpp:297-303`): zero all four deriv
+    /// blocks and the frame count.
+    pub fn reset_weights_derivatives(&mut self) {
+        self.nb_of_seq_fed_backward = 0;
+        self.input_weights_derivatives = Array2::zeros((self.input_size, 4 * self.output_size));
+        self.feedback_weights_derivatives = Array2::zeros((self.output_size, 4 * self.output_size));
+        self.peep_weight_derivatives = Array2::zeros((12, self.output_size));
+        self.biases_derivatives = Array2::zeros((1, 4 * self.output_size));
     }
 }
 

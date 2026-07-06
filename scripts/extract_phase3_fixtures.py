@@ -95,6 +95,25 @@ EXPECTED_DELTASOUT_SHAPES = {
     "bwd_dense_logistic_deltasout.bin": (6, 4),
 }
 
+# Task 4: LSTMLayer::feedBackward per-variant goldens (synthetic I=2,O=2,T=5, odd
+# length). deltasPreviousLayer is T x I = 5 x 2; derivs are Nx2 with
+# N = 4*I*O + 4*O*O + 12*O + 4*O = 16 + 16 + 24 + 8 = 64 (layer-native shape). The
+# signal_width variant feeds a 1-col input into the I=2 layer (width tolerance) --
+# its derivs stay at the layer-native N=64 with the dead weight rows exactly 0.
+LSTM_BWD_DELTASPREV_SHAPES = {
+    "lstm_bwd_deltasprev_peep_all.bin": (5, 2),
+    "lstm_bwd_deltasprev_peep_none.bin": (5, 2),
+    "lstm_bwd_deltasprev_reverse.bin": (5, 2),
+    "lstm_bwd_deltasprev_subsample.bin": (5, 2),
+}
+LSTM_BWD_DERIVS_SHAPES = {
+    "lstm_bwd_derivs_peep_all.bin": (64, 2),
+    "lstm_bwd_derivs_peep_none.bin": (64, 2),
+    "lstm_bwd_derivs_reverse.bin": (64, 2),
+    "lstm_bwd_derivs_subsample.bin": (64, 2),
+    "lstm_bwd_signal_derivs.bin": (64, 2),
+}
+
 # Task 2: CostLaw backward REAL-probe goldens (dumped from the REAL compiled
 # computeUnitaryDeltas/computeDeltas, NOT a reimpl -- CostLaw is tier-2 oracle
 # per spec S2, probed directly). Nx2 [output | delta] for the scalar sweeps
@@ -132,6 +151,7 @@ ALIAS_COPIES = {
 # recorded nonzero (Phase 4 calibration).
 SYNTHETIC_TOL_SITES = [
     "lstm_backward",
+    "lstm_backward_variants",
     "dense_backward",
     "dense_backward_deltasout",
     "net_lstm_backward_fwd",
@@ -257,6 +277,9 @@ def main() -> None:
         # Task 3: dense backward deltas_out goldens (same harness stage).
         for name in EXPECTED_DELTASOUT_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Task 4: LSTM backward per-variant goldens (deltasPreviousLayer + derivs).
+        for name in (*LSTM_BWD_DELTASPREV_SHAPES, *LSTM_BWD_DERIVS_SHAPES):
+            shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
         # Copy the Task 2 CostLaw REAL-probe goldens (dumped from the real class).
         for name in COST_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
@@ -299,6 +322,13 @@ def main() -> None:
             deltasout_mismatches.append({"file": name, "expected": expected, "got": got})
     if deltasout_mismatches:
         raise SystemExit(f"bwd_dense_*_deltasout.bin shape mismatch: {deltasout_mismatches}")
+    lstm_bwd_mismatches = []
+    for name, expected in (*LSTM_BWD_DELTASPREV_SHAPES.items(), *LSTM_BWD_DERIVS_SHAPES.items()):
+        got = _read_bin_shape(PHASE3_DIR / name)
+        if got != expected:
+            lstm_bwd_mismatches.append({"file": name, "expected": expected, "got": got})
+    if lstm_bwd_mismatches:
+        raise SystemExit(f"lstm_bwd_*.bin shape mismatch: {lstm_bwd_mismatches}")
     cost_mismatches = []
     for name, expected in COST_SHAPES.items():
         got = _read_bin_shape(PHASE3_DIR / name)
@@ -418,9 +448,29 @@ def main() -> None:
             ),
             "sites": probes,
         },
+        "lstm_backward_variants_tol": {
+            "text": (
+                "Task 4: LSTMLayer::feedBackward / feedBackwardReverse (LSTMLayer.cpp:"
+                "518-732) per-variant goldens at synthetic I=2,O=2,T=5 (odd length). "
+                "Variants: peep_all (all three peephole flags on), peep_none (all off -- "
+                "the peephole cross-terms drop entirely), reverse (feedForwardReverse then "
+                "feedBackwardReverse: reverse input/output/deltas, run the forward-order "
+                "backward, reverse returned deltas; the caches are stored time-reversed and "
+                "consumed as-is), subsample (invSubSamplingRatio=2, asserting the *2 block "
+                "scaling on all four deriv blocks, :710-715). Each dumps deltasPreviousLayer "
+                "(T x I) + the Nx2 derivs (col0 summed deriv, col1 frame count). The signal "
+                "variant feeds a 1-col input into the I=2 layer (width tolerance :534-543, "
+                "zero-pad to I rows): dead weight rows accumulate exactly 0 (spec S11.5), "
+                "gradient stays layer-native (lstm_bwd_signal_derivs.bin). max_ulp=0 vs the "
+                "real compiled layer over BOTH derivs and deltasPreviousLayer."
+            ),
+            **tols["lstm_backward_variants"],
+        },
         "dumps": {
             **{name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_DELTASOUT_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in LSTM_BWD_DELTASPREV_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in LSTM_BWD_DERIVS_SHAPES.items()},
         },
         "costlaw_backward": {
             "text": (

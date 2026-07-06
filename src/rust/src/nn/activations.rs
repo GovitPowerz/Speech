@@ -40,6 +40,15 @@ pub fn gates_fn(x: f64) -> f64 {
     }
 }
 
+/// `GatesFunction::deriv` (ActivationFunctions.h:240-242): `0.1*y*(1-y)`, taken on
+/// the POST-activation value `y` (the activated sigmoid output). This is a plain
+/// sigmoid-derivative-of-output times the 0.1 pre-scale (`d/dz sigmoid(0.1 z) =
+/// 0.1 sigmoid(0.1 z)(1-sigmoid(0.1 z))`), NOT `f'(f^{-1}(y))`; the LSTM backward
+/// (`LSTMLayer.cpp:585,629,653,662`) evaluates it on the cached gate values.
+pub fn gates_deriv(y: f64) -> f64 {
+    0.1 * y * (1.0 - y)
+}
+
 /// `Logistic::fn` (ActivationFunctions.h:41-48): plain sigmoid, INCLUSIVE
 /// saturation at `x == +-expLimit`.
 pub fn logistic_fn(x: f64) -> f64 {

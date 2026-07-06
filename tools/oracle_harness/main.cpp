@@ -6985,6 +6985,99 @@ int main(int argc, char** argv) {
                       << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
         }
 
+        // ---- Site lstm_backward_variants: Task 4 per-variant goldens ----------
+        // Synthetic I=2,O=2,T=5 (odd length). Dumps lstm_bwd_deltasprev_<v>.bin
+        // (T x I) + lstm_bwd_derivs_<v>.bin (Nx2) for peep_all / peep_none / reverse
+        // / subsample, plus lstm_bwd_signal_derivs.bin (the 1-col signal_width case,
+        // dead weight rows accumulate exactly 0 -- spec S11.5). The reimpl (dumped)
+        // is checked bit-for-bit (max_ulp=0) against the REAL LSTMLayer::feedBackward
+        // / feedBackwardReverse (LSTMLayer.cpp:518-732).
+        {
+            long maxUlp = 0; double maxAbs = 0.0;
+            const int I = 2, O = 2, T = 5;
+
+            // deltasPreviousLayer ULP gap over the full T x I matrix.
+            auto dplGap = [&](const Eigen::MatrixXd& a, const Eigen::MatrixXd& b) {
+                long rows = std::min(a.rows(), b.rows()), cols = std::min(a.cols(), b.cols());
+                for (long r = 0; r < rows; ++r)
+                    for (long c = 0; c < cols; ++c) {
+                        double x = a(r, c), y = b(r, c);
+                        double g = std::fabs(x - y);
+                        if (g > maxAbs) maxAbs = g;
+                        uint64_t xb, yb; std::memcpy(&xb, &x, 8); std::memcpy(&yb, &y, 8);
+                        long u = (xb > yb) ? (long)(xb - yb) : (long)(yb - xb);
+                        if (u > maxUlp) maxUlp = u;
+                    }
+            };
+
+            struct V { const char* tag; bool cp, gp, grp; bool reverse; long ratio; int inCols; };
+            V variants[] = {
+                {"peep_all",  true,  true,  true,  false, 1, I},
+                {"peep_none", false, false, false, false, 1, I},
+                {"reverse",   true,  true,  true,  true,  1, I},
+                {"subsample", true,  true,  true,  false, 2, I},
+                {"signal",    true,  true,  true,  false, 1, 1},   // width tolerance, 1-col input
+            };
+            for (const V& v : variants) {
+                conf.set_val<bool>("SYNW_IsCellsPeepholesActive", v.cp);
+                conf.set_val<bool>("SYNW_IsGatesPeepholesActive", v.gp);
+                conf.set_val<bool>("SYNW_IsGatesRecurrentPeepholesActive", v.grp);
+                LSTMLayer layer(conf, "SYNW", 0, (size_t)I, (size_t)O, true);
+                Eigen::VectorXd flat = synthFlat(layer.getNbOfWeights());
+                layer.setWeights(flat);
+                layer.resetWeightsDerivatives();
+                Eigen::MatrixXd input = makeInput(T, v.inCols);
+                Eigen::MatrixXd realOut(T, O);
+                Eigen::MatrixXd realDpl;
+                if (v.reverse) {
+                    layer.feedForwardReverse(input, realOut, false);
+                    Eigen::MatrixXd deltas = makeDeltas(T, O);
+                    realDpl = layer.feedBackwardReverse(input, realOut, deltas, (size_t)v.ratio, false);
+                } else {
+                    layer.feedForward(input, realOut, false);
+                    Eigen::MatrixXd deltas = makeDeltas(T, O);
+                    realDpl = layer.feedBackward(input, realOut, deltas, (size_t)v.ratio, false);
+                }
+                Eigen::MatrixXd realDerivs = layer.getWeightsDerivatives();
+
+                Eigen::MatrixXd iw, fw, pp, bs, g, o, cs, ci;
+                unpackLstmWeights(flat, I, O, iw, fw, pp, bs);
+                Eigen::MatrixXd deltas = makeDeltas(T, O);
+                LstmDerivs d; d.init(I, O);
+                Eigen::MatrixXd reimplDpl;
+                if (v.reverse) {
+                    // feedForwardReverse: forward on the reversed input, caches stay reversed.
+                    Eigen::MatrixXd inRev = input.colwise().reverse(), oRev;
+                    lstmForwardLoopCache(inRev, iw, fw, pp, bs, O, v.cp, v.gp, v.grp, g, oRev, cs, ci);
+                    reimplDpl = lstmBackwardReverseLoop(input, oRev.colwise().reverse(), deltas,
+                                                        iw, fw, pp, I, O, v.cp, v.gp, v.grp,
+                                                        g, cs, ci, v.ratio, d);
+                } else {
+                    lstmForwardLoopCache(input, iw, fw, pp, bs, O, v.cp, v.gp, v.grp, g, o, cs, ci);
+                    reimplDpl = lstmBackwardLoop(input, o, deltas, iw, fw, pp, I, O,
+                                                 v.cp, v.gp, v.grp, g, cs, ci, v.ratio, d);
+                }
+                LstmSubNet single; single.derivs = {d};
+                Eigen::MatrixXd reimplDerivs = single.flatDerivs();
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                dplGap(realDpl, reimplDpl);
+
+                std::string t = v.tag;
+                if (std::string(v.tag) == "signal") {
+                    Matrix2BinaryFile(out + "lstm_bwd_signal_derivs.bin", reimplDerivs); ++dumps;
+                } else {
+                    Matrix2BinaryFile(out + "lstm_bwd_deltasprev_" + t + ".bin", reimplDpl); ++dumps;
+                    Matrix2BinaryFile(out + "lstm_bwd_derivs_" + t + ".bin", reimplDerivs); ++dumps;
+                }
+            }
+            // Restore the all-on flags for any later stages reusing conf.
+            conf.set_val<bool>("SYNW_IsCellsPeepholesActive", true);
+            conf.set_val<bool>("SYNW_IsGatesPeepholesActive", true);
+            conf.set_val<bool>("SYNW_IsGatesRecurrentPeepholesActive", true);
+            std::cout << "NN_TOL site=lstm_backward_variants max_ulp=" << maxUlp
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+        }
+
         // ---- Site dense_backward: standalone NeuronLayer::feedBackward --------
         // Grid: {I=4,O=3 hidden; I=4,O=3 last; I=4,O=1 last(logistic)}. The last-layer
         // case proves NO activation deriv on the output (fusion in CostLaw); the hidden

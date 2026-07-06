@@ -1041,6 +1041,40 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   documents a legacy-unreachable branch whose Rust semantics are now pinned to the literal source
   rather than silently generalized.
 
+- **[phase3] LSTM backward mixes PRIOR-step and CURRENT-step gate deltas in the peephole
+  cross-terms, via the `deltasForgetGatetmp` save** (`LSTMLayer.cpp:518-682`, port
+  `nn/layers.rs::LstmLayer::feed_backward`): the reverse-time loop reuses the SAME
+  `deltasInputGate`/`deltasForgetGate`/`deltasOutputGate` 1xO buffers across iterations, so when a
+  block reads them for a peephole cross-term the value is whatever the PRIOR (later-time) iteration
+  left there -- EXCEPT the current row's output-gate delta, which is computed first (`:585`) and is
+  therefore already CURRENT by the time the state/forget/input blocks read it. The input-gate block
+  (`:659-682`) additionally needs the PRIOR forget-gate delta (peep row 6, `:660`), but by then the
+  forget block (`:624-657`) has already overwritten `deltasForgetGate` with the current row's value;
+  the legacy saves the prior one into `deltasForgetGatetmp` at `:624` (BEFORE the overwrite) and reads
+  the save at `:660`. So a single expression can legitimately mix a current-step delta (output gate)
+  with prior-step deltas (input/forget) -- not a bug, but easy to "clean up" into all-current or
+  all-prior and get wrong. The port reproduces the exact buffer lifetimes: `deltas_output_gate` is
+  overwritten before the state/forget/input blocks read it (current), `deltas_input_gate`/
+  `deltas_forget_gate` are read at their prior value inside those blocks and only then overwritten,
+  and `deltas_forget_gate_tmp = deltas_forget_gate.clone()` captures the prior forget delta before the
+  forget block. Pinned by the peep-row and gate-block mutation battery in
+  `tests/phase3_lstm_backward_golden.rs` (the mandated peep-row-4<->5 and gate-block-i<->f swaps, plus
+  the `forgettmp_use_live` mutation swapping the saved prior for the live current value, all confirmed
+  to fail a golden). No fix candidate -- correct, intentional, non-obvious.
+
+- **[phase3] LSTM backward `row==0` forget-gate branch drops the cellstate term but KEEPS the
+  peephole cross-terms** (`LSTMLayer.cpp:648-657`, port `nn/layers.rs::LstmLayer::feed_backward` else
+  branch): at the first time step there is no `c_{-1}`, so the `row>0` branch's
+  `_CellStates.row(row-1) .* epsilonState` term is absent -- but the branch still folds the gates-peep
+  (rows 4/10) and gates-rec (row 7) cross-terms and the bias derivative, and still activates through
+  `GatesFunction::deriv`. It also skips the input-weight-only accumulation's feedback/peep-row-1/6/8
+  half (there is no `output.col(-1)` and no `_CellStates.row(-1)`). This is standard BPTT boundary
+  handling, but the asymmetry (drop ONE term, keep the rest) is a classic transcription trap -- a naive
+  port either drops the whole forget block at row 0 or reads `_CellStates.row(row-1)` out of bounds.
+  Pinned by `row_zero_forget_branch` (T=1, must not panic, layer-native derivs) and the
+  `row0_spurious_cellstate` mutation (adding a `cs[row]` term at row 0 fails a golden). No fix
+  candidate -- correct, intentional.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
