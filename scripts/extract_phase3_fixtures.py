@@ -13,7 +13,8 @@ transcription target), both already wired into ``tools/oracle_harness/main.cpp``
   2. Runs it in a throwaway dir seeded with the Phase 1 harness inputs (so no committed
      fixture dir is mutated), passing the same argv the Phase 2b extractor does.
   3. Parses the backward NN_TOL lines (site=lstm_backward|dense_backward|
-     net_lstm_backward_{fwd,rev}|net_dense_backward|blstm_feedbackward|blstm_real_backward)
+     net_lstm_backward_{fwd,rev}|net_dense_backward|
+     net_single_layer_backward_{subsample,plain}|blstm_feedbackward|blstm_real_backward)
      and the NN_PROBE backward lines (bwd_outer_product, bwd_backproj) into manifest.json.
      ASSERTS every SYNTHETIC site is max_ulp=0 (the reimpl reproduces the real class
      bit-for-bit); RECORDS the real-net site (blstm_real_backward) nonzero delta as
@@ -108,6 +109,24 @@ NET_BWD_DELTASOUT_SHAPES = {
     "bwd_net_dense_deltasout.bin": (10, 4),
 }
 
+# Fix-wave 1 (review finding 1): the single-layer container backward branch
+# (neuronNb.size()==2, NeuralNetwork.hpp:255-263) had ZERO golden coverage -- both
+# nets above are neuronNb.size()==3 (multi-layer). LSTM [2,2] at T=7 (odd length):
+# subsample variant (sub [2], the brief's dropped fixture) exercises the InvSubSample
+# arm; plain variant (sub [1], legacy :262) exercises the no-subsample arm. Both are
+# structurally distinct from the multi-layer jj==0 arm: the single-layer branch reads
+# `deltas`/`deltas.rows()` (the SEED) directly, never the running `deltasOut`.
+#   subsample: I=2*2=4 -> weights 4*4*2+4*2*2+12*2+4*2=80; deltas_out floor(7/2)*2=6 x 2.
+#   plain:     I=2*1=2 -> weights 4*2*2+4*2*2+12*2+4*2=64; deltas_out T=7 x 2 (no floor).
+NET_SINGLE_LAYER_DERIVS_SHAPES = {
+    "bwd_net_single_subsample_derivs.bin": (80, 2),
+    "bwd_net_single_plain_derivs.bin": (64, 2),
+}
+NET_SINGLE_LAYER_DELTASOUT_SHAPES = {
+    "bwd_net_single_subsample_deltasout.bin": (6, 2),
+    "bwd_net_single_plain_deltasout.bin": (7, 2),
+}
+
 # Task 4: LSTMLayer::feedBackward per-variant goldens (synthetic I=2,O=2,T=5, odd
 # length). deltasPreviousLayer is T x I = 5 x 2; derivs are Nx2 with
 # N = 4*I*O + 4*O*O + 12*O + 4*O = 16 + 16 + 24 + 8 = 64 (layer-native shape). The
@@ -170,6 +189,8 @@ SYNTHETIC_TOL_SITES = [
     "net_lstm_backward_fwd",
     "net_lstm_backward_rev",
     "net_dense_backward",
+    "net_single_layer_backward_subsample",
+    "net_single_layer_backward_plain",
     "blstm_feedbackward",
 ]
 REAL_TOL_SITE = "blstm_real_backward"
@@ -181,6 +202,8 @@ DELTASOUT_CALIB_SITES = [
     "net_lstm_backward_fwd_deltasout",
     "net_lstm_backward_rev_deltasout",
     "net_dense_backward_deltasout",
+    "net_single_layer_backward_subsample_deltasout",
+    "net_single_layer_backward_plain_deltasout",
 ]
 
 # NN_PROBE backward sites (pure-arithmetic outer product + back-projection at synthetic
@@ -302,6 +325,9 @@ def main() -> None:
         # Task 5: net-container backward deltas_out goldens (same harness stage).
         for name in NET_BWD_DELTASOUT_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Fix-wave 1 (review finding 1): single-layer container backward goldens.
+        for name in (*NET_SINGLE_LAYER_DERIVS_SHAPES, *NET_SINGLE_LAYER_DELTASOUT_SHAPES):
+            shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
         # Task 4: LSTM backward per-variant goldens (deltasPreviousLayer + derivs).
         for name in (*LSTM_BWD_DELTASPREV_SHAPES, *LSTM_BWD_DERIVS_SHAPES):
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
@@ -354,6 +380,13 @@ def main() -> None:
             lstm_bwd_mismatches.append({"file": name, "expected": expected, "got": got})
     if lstm_bwd_mismatches:
         raise SystemExit(f"lstm_bwd_*.bin shape mismatch: {lstm_bwd_mismatches}")
+    net_single_mismatches = []
+    for name, expected in (*NET_SINGLE_LAYER_DERIVS_SHAPES.items(), *NET_SINGLE_LAYER_DELTASOUT_SHAPES.items()):
+        got = _read_bin_shape(PHASE3_DIR / name)
+        if got != expected:
+            net_single_mismatches.append({"file": name, "expected": expected, "got": got})
+    if net_single_mismatches:
+        raise SystemExit(f"bwd_net_single_*.bin shape mismatch: {net_single_mismatches}")
     cost_mismatches = []
     for name, expected in COST_SHAPES.items():
         got = _read_bin_shape(PHASE3_DIR / name)
@@ -448,6 +481,31 @@ def main() -> None:
             "net_dense_backward": tols["net_dense_backward"],
             "deltasout_calibration": {site: tols[site] for site in DELTASOUT_CALIB_SITES},
         },
+        "net_single_layer_backward_tol": {
+            "text": (
+                "Fix-wave 1 (review finding 1): NeuralNetwork<LSTMLayer>::feedBackward on a "
+                "SINGLE-layer net (neuronNb.size()==2, NeuralNetwork.hpp:255-263) vs "
+                "netBackwardLoop's L==2 branch, LSTM [2,2] at T=7 (odd length). This branch is "
+                "REACHABLE in a real config (configs/legacy/LID_BLSTM.config: "
+                "BLSTM_LSTMNeuronNb 11,12 with BLSTM_LSTMSubSampling 4) and is structurally "
+                "distinct from the multi-layer jj==0 arm (:268-276): the single-layer branch "
+                "reads `deltas`/`deltas.rows()` (the SEED) directly every call, never the "
+                "running `deltasOut` the multi-layer arm reads on all but the last iteration. "
+                "subsample (sub [2]) exercises the SubSample/InvSubSample inversion "
+                "(floor(7/2)=3 decimated rows, InvSubSample restores 3*2=6, NOT 7); plain "
+                "(sub [1], legacy :262) exercises the no-subsample else-branch. Both max_ulp=0 "
+                "(synthetic, k<23 -- below the Eigen-blocked-GEMM divergence threshold) over "
+                "BOTH the Nx2 derivs and the returned deltas_out; deltasout is a separate "
+                "calibration site per the k=4*O GEMM-order convention (see net_backward_tol), "
+                "measured 0 at this shape."
+            ),
+            "subsample": tols["net_single_layer_backward_subsample"],
+            "plain": tols["net_single_layer_backward_plain"],
+            "deltasout_calibration": {
+                "subsample": tols["net_single_layer_backward_subsample_deltasout"],
+                "plain": tols["net_single_layer_backward_plain_deltasout"],
+            },
+        },
         "blstm_backward_tol": {
             "text": (
                 "BLSTMNeuralNetwork<LSTMLayer>::feedBackward (BLSTMNeuralNetwork.cpp:439-460) + "
@@ -501,6 +559,8 @@ def main() -> None:
             **{name: {"rows": r, "cols": c} for name, (r, c) in NET_BWD_DELTASOUT_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in LSTM_BWD_DELTASPREV_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in LSTM_BWD_DERIVS_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in NET_SINGLE_LAYER_DERIVS_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in NET_SINGLE_LAYER_DELTASOUT_SHAPES.items()},
         },
         "costlaw_backward": {
             "text": (

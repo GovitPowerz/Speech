@@ -44,6 +44,35 @@
       "net_dense_backward_deltasout": {
         "max_ulp": 0,
         "max_abs": "0.000e+00"
+      },
+      "net_single_layer_backward_subsample_deltasout": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "net_single_layer_backward_plain_deltasout": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
+    }
+  },
+  "net_single_layer_backward_tol": {
+    "text": "Fix-wave 1 (review finding 1): NeuralNetwork<LSTMLayer>::feedBackward on a SINGLE-layer net (neuronNb.size()==2, NeuralNetwork.hpp:255-263) vs netBackwardLoop's L==2 branch, LSTM [2,2] at T=7 (odd length). This branch is REACHABLE in a real config (configs/legacy/LID_BLSTM.config: BLSTM_LSTMNeuronNb 11,12 with BLSTM_LSTMSubSampling 4) and is structurally distinct from the multi-layer jj==0 arm (:268-276): the single-layer branch reads `deltas`/`deltas.rows()` (the SEED) directly every call, never the running `deltasOut` the multi-layer arm reads on all but the last iteration. subsample (sub [2]) exercises the SubSample/InvSubSample inversion (floor(7/2)=3 decimated rows, InvSubSample restores 3*2=6, NOT 7); plain (sub [1], legacy :262) exercises the no-subsample else-branch. Both max_ulp=0 (synthetic, k<23 -- below the Eigen-blocked-GEMM divergence threshold) over BOTH the Nx2 derivs and the returned deltas_out; deltasout is a separate calibration site per the k=4*O GEMM-order convention (see net_backward_tol), measured 0 at this shape.",
+    "subsample": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "plain": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "deltasout_calibration": {
+      "subsample": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      },
+      "plain": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
       }
     }
   },
@@ -176,6 +205,22 @@
     },
     "lstm_bwd_signal_derivs.bin": {
       "rows": 64,
+      "cols": 2
+    },
+    "bwd_net_single_subsample_derivs.bin": {
+      "rows": 80,
+      "cols": 2
+    },
+    "bwd_net_single_plain_derivs.bin": {
+      "rows": 64,
+      "cols": 2
+    },
+    "bwd_net_single_subsample_deltasout.bin": {
+      "rows": 6,
+      "cols": 2
+    },
+    "bwd_net_single_plain_deltasout.bin": {
+      "rows": 7,
       "cols": 2
     }
   },

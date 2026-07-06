@@ -7196,9 +7196,12 @@ int main(int argc, char** argv) {
                 // InvSubSample'd deltasPreviousLayer, NeuralNetwork.hpp:271-272/299). Row
                 // count is floor(T/R)*R (11/2*2 = 10), NOT T -- the trailing SubSample row
                 // is dropped by the forward floor and never restored by InvSubSample. The
-                // reimpl IS the golden; deltas_out is a deltas*W^T GEMM (k=O) so the REAL
-                // Eigen path diverges in the last ULP (recorded as a SEPARATE calibration
-                // site, NOT gated to 0 -- unlike the k=1 outer-product derivs above).
+                // reimpl IS the golden; deltas_out is `_InputWeights*testM` (LSTMLayer.cpp
+                // :707), a GEMM with k=4*O (16 for this [3,4,2] layer-0, O=4) -- NOT k=O as
+                // a prior comment here mis-stated (fix-wave 1, review finding 3) -- so the
+                // REAL Eigen path diverges in the last ULP (recorded as a SEPARATE
+                // calibration site, NOT gated to 0 -- unlike the k=1 outer-product derivs
+                // above).
                 long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
                 deltasGap(realDeltasOut, reimplDeltasOut, maxUlpDeltasOut, maxAbsDeltasOut);
                 std::cout << "NN_TOL site=net_lstm_backward" << (reverse ? "_rev" : "_fwd")
@@ -7254,6 +7257,66 @@ int main(int argc, char** argv) {
             Matrix2BinaryFile(out + "bwd_net_dense_deltasout.bin", reimplDeltasOut);
             ++dumps;
             ++dumps;
+        }
+
+        // ---- Sites net_single_layer_backward_{subsample,plain}: NeuralNetwork
+        //      <LSTMLayer> with neuronNb.size()==2 (a SINGLE layer, NeuralNetwork.hpp
+        //      :255-263) ------------------------------------------------------------
+        // Fix-wave 1 (review finding 1): the two net_lstm_backward_{fwd,rev} +
+        // net_dense_backward sites above are BOTH neuronNb.size()==3 (2 hidden layers),
+        // so they only ever exercise the multi-layer loop (:264-296) -- never the
+        // single-layer branch (:255-263), which is structurally distinct: it reads
+        // `deltas`/`deltas.rows()` (the SEED) directly, not the running `deltasOut`
+        // that feeds the multi-layer jj==0 arm on every iteration but the last. LSTM
+        // [2,2] sub [2] (subsample arm, the brief's dropped fixture) and LSTM [2,2]
+        // sub [1] (plain arm, legacy :262, "if cheaply constructible" per the finding)
+        // at T=7 (odd length, also exercising the SubSample floor quirk on this arm:
+        // floor(7/2)=3 decimated rows). Real net feedForward THEN feedBackward on seed
+        // deltas sized to the (decimated, for the subsample variant) output rows;
+        // mirror with LstmSubNet (L==1 already routes through netBackwardLoop's L==2
+        // branch, same code path exercised end-to-end since Task 1).
+        {
+            const std::vector<std::vector<double>::size_type> neuronNb = {2, 2};
+            const std::vector<long> nnL = {2, 2};
+            struct V { std::vector<std::vector<double>::size_type> ss; std::vector<long> ssL; long outRows; const char* tag; } variants[] = {
+                {{2}, {2}, 7 / 2, "subsample"},
+                {{1}, {1}, 7, "plain"},
+            };
+            for (const V& v : variants) {
+                Eigen::MatrixXd input = makeInput(7, 2);
+                Eigen::MatrixXd seedDeltas = makeDeltas((int)v.outRows, 2);
+                NeuralNetwork<LSTMLayer> net(conf, "SYNW", neuronNb, v.ss, true);
+                Eigen::VectorXd flat = synthFlat(net.getNbOfWeights());
+                net.setWeights(flat);
+                net.resetWeightsDerivatives();
+                Eigen::MatrixXd realOut(v.outRows, 2);
+                net.feedForward(input, realOut);
+                Eigen::MatrixXd realDeltasOut = net.feedBackward(input, realOut, seedDeltas);
+                Eigen::MatrixXd realDerivs = net.getWeightsDerivatives();
+
+                LstmSubNet sub;
+                sub.build(flat, nnL, v.ssL, false);
+                Eigen::MatrixXd fout = sub.forwardCapture(input);
+                Eigen::MatrixXd reimplDeltasOut = sub.backward(input, fout, seedDeltas);
+                Eigen::MatrixXd reimplDerivs = sub.flatDerivs();
+
+                long maxUlp = 0; double maxAbs = 0.0;
+                derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
+                std::cout << "NN_TOL site=net_single_layer_backward_" << v.tag
+                          << " max_ulp=" << maxUlp << " max_abs=" << std::scientific
+                          << std::setprecision(3) << maxAbs << "\n";
+
+                long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
+                deltasGap(realDeltasOut, reimplDeltasOut, maxUlpDeltasOut, maxAbsDeltasOut);
+                std::cout << "NN_TOL site=net_single_layer_backward_" << v.tag
+                          << "_deltasout max_ulp=" << maxUlpDeltasOut << " max_abs="
+                          << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
+
+                Matrix2BinaryFile(out + "bwd_net_single_" + v.tag + "_derivs.bin", reimplDerivs);
+                Matrix2BinaryFile(out + "bwd_net_single_" + v.tag + "_deltasout.bin", reimplDeltasOut);
+                ++dumps;
+                ++dumps;
+            }
         }
 
         // ---- Site blstm_feedbackward: synthetic BLSTMNeuralNetwork ------------

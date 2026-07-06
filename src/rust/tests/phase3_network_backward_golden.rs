@@ -20,6 +20,11 @@
 //!   [4,1] real net's layer-0 arm in miniature). fwd + reverse drivers.
 //! - Dense `[4,3,2]` sub `[1,2]`, T=11: layer-1 (interior/last) `_SubSampling[1]=2`
 //!   -- the SubSample on the LAST layer + the multi-layer interior loop.
+//! - Fix-wave 1 (review finding 1): LSTM `[2,2]` sub `[2]`/`[1]`, T=7 -- the
+//!   SINGLE-layer branch (`neuron_nb.len() == 2`, `NeuralNetwork.hpp:255-263`), a
+//!   real-config-reachable path (`configs/legacy/LID_BLSTM.config`:
+//!   `BLSTM_LSTMNeuronNb 11,12` / `BLSTM_LSTMSubSampling 4`) that had zero coverage
+//!   from the two multi-layer nets above.
 //!
 //! Comparator discipline: deltas_out + deriv col0 traverse the layer activation
 //! derivatives (asinh/sigmoid via the LSTM caches) -> canary-gated
@@ -366,6 +371,158 @@ fn get_derivatives_layout_layer0_first() {
     }
     // The very next row (index 15) is the layer-1 block start (count 5, decimated input).
     assert_eq!(full[nb0][1], 5.0, "row nb0 is the layer-1 block (count 5)");
+}
+
+// === Single-layer container backward branch (fix-wave 1, review finding 1) ===
+//
+// NeuralNetwork.hpp:255-263 -- the `neuron_nb.len() == 2` branch (a SINGLE layer).
+// Both nets above are `neuron_nb.len() == 3` (multi-layer), so this branch had ZERO
+// golden coverage prior to this fix wave. It is REACHABLE in a real config
+// (configs/legacy/LID_BLSTM.config: `BLSTM_LSTMNeuronNb 11,12` with
+// `BLSTM_LSTMSubSampling 4` -- a single-layer LSTM, subsample arm) and is
+// structurally distinct from the multi-layer `jj==0` arm: the single-layer branch
+// reads `deltas`/`deltas.rows()` (the SEED) directly on every call, whereas the
+// multi-layer `jj==0` arm reads the running `deltas_out` on every iteration except
+// when `n_layers == 1` degenerates it to the seed (which cannot happen for
+// `neuron_nb.len() == 3`, `n_layers == 2`). LSTM `[2,2]` at T=7 (odd length, so the
+// SubSample floor quirk (`floor(7/2)=3`) is exercised on THIS arm too): `subsample`
+// (sub `[2]`) exercises the InvSubSample inversion; `plain` (sub `[1]`, legacy
+// `:262`) exercises the no-subsample else-branch.
+
+fn make_single_layer_net(sub: usize) -> Network<LstmLayer> {
+    let mut net = Network::<LstmLayer>::new(vec![2, 2], vec![sub], |_id, i, o| {
+        LstmLayer::new(i, o, true, true, true)
+    });
+    net.set_weights(&synth_flat(net.nb_of_weights()));
+    net
+}
+
+#[test]
+fn single_layer_subsample_inversion() {
+    // T=7, sub [2]: forward decimates floor(7/2)=3 rows; feed_backward's
+    // `neuron_nb.len() == 2` branch re-SubSamples the input, backs the layer at 3
+    // rows, then InvSubSamples the returned deltas back to 3*2=6 rows (NOT 7 -- the
+    // trailing SubSample row is dropped and never restored, same crux as the
+    // multi-layer nets above).
+    let mut net = make_single_layer_net(2);
+    let input = make_input(7, 2);
+    let out_rows = 7 / 2; // 3
+    let seed = make_deltas(out_rows, 2);
+
+    let mut output = Array2::zeros((out_rows, 2));
+    net.reset_weights_derivatives();
+    net.feed_forward(&input, &mut output);
+    let deltas_out = net.feed_backward(&input, &output, &seed);
+
+    assert_eq!(
+        deltas_out.dim(),
+        (6, 2),
+        "single-layer subsample deltas_out InvSubSampled to floor(7/2)*2=6 rows x 2 cols"
+    );
+    let golden_deltasout = common::load_bin_phase3("bwd_net_single_subsample_deltasout.bin");
+    common::assert_oracle_eq(
+        &deltas_out,
+        &golden_deltasout,
+        "single-layer subsample deltas_out",
+    );
+
+    let mut harvested = Vec::new();
+    net.get_weights_derivatives(&mut harvested);
+    let (col0, col1) = derivs_to_cols(&harvested);
+    let golden = common::load_bin_phase3("bwd_net_single_subsample_derivs.bin");
+    assert_eq!(
+        golden.dim(),
+        (80, 2),
+        "LSTM(4,2) single layer has 80 weights"
+    );
+    common::assert_oracle_eq(
+        &col0,
+        &golden_col(&golden, 0),
+        "single-layer subsample derivs col0",
+    );
+    common::assert_bits_eq(
+        &col1,
+        &golden_col(&golden, 1),
+        "single-layer subsample derivs col1",
+    );
+}
+
+#[test]
+fn single_layer_plain_no_subsample() {
+    // T=7, sub [1] (legacy :262, the non-subsample single-layer arm): no decimation,
+    // deltas_out stays the full T=7 rows -- contrast with the subsample variant's
+    // floor(7/2)*2=6.
+    let mut net = make_single_layer_net(1);
+    let input = make_input(7, 2);
+    let seed = make_deltas(7, 2);
+
+    let mut output = Array2::zeros((7, 2));
+    net.reset_weights_derivatives();
+    net.feed_forward(&input, &mut output);
+    let deltas_out = net.feed_backward(&input, &output, &seed);
+
+    assert_eq!(
+        deltas_out.dim(),
+        (7, 2),
+        "single-layer plain deltas_out keeps all 7 rows"
+    );
+    let golden_deltasout = common::load_bin_phase3("bwd_net_single_plain_deltasout.bin");
+    common::assert_oracle_eq(
+        &deltas_out,
+        &golden_deltasout,
+        "single-layer plain deltas_out",
+    );
+
+    let mut harvested = Vec::new();
+    net.get_weights_derivatives(&mut harvested);
+    let (col0, col1) = derivs_to_cols(&harvested);
+    let golden = common::load_bin_phase3("bwd_net_single_plain_derivs.bin");
+    assert_eq!(
+        golden.dim(),
+        (64, 2),
+        "LSTM(2,2) single layer has 64 weights"
+    );
+    common::assert_oracle_eq(
+        &col0,
+        &golden_col(&golden, 0),
+        "single-layer plain derivs col0",
+    );
+    common::assert_bits_eq(
+        &col1,
+        &golden_col(&golden, 1),
+        "single-layer plain derivs col1",
+    );
+}
+
+#[test]
+fn single_layer_reads_seed_deltas_not_running_deltas_out() {
+    // Structural, non-vacuity for the mutation this fix wave verifies against: the
+    // single-layer branch (:255-263) takes `deltas` (the SEED) as its backward input
+    // on every call -- there is no "running deltas_out" for it to read (that concept
+    // only exists in the multi-layer loop's accumulation across layers). Confirm two
+    // DIFFERENT seeds produce DIFFERENT derivs (the seed is genuinely read), which a
+    // mutation feeding a stale/zeroed deltas_out in its place would fail to reproduce.
+    let seed_a = make_deltas(7, 2);
+    let seed_b = Array2::from_shape_fn((7, 2), |(t, j)| {
+        ((t * 13 + j * 17 + 3) % 61) as f64 / 61.0 - 0.5
+    });
+    let mut net_a = make_single_layer_net(1);
+    let mut net_b = make_single_layer_net(1);
+    let input = make_input(7, 2);
+    let mut out_a = Array2::zeros((7, 2));
+    let mut out_b = Array2::zeros((7, 2));
+    net_a.reset_weights_derivatives();
+    net_a.feed_forward(&input, &mut out_a);
+    let da = net_a.feed_backward(&input, &out_a, &seed_a);
+    net_b.reset_weights_derivatives();
+    net_b.feed_forward(&input, &mut out_b);
+    let db = net_b.feed_backward(&input, &out_b, &seed_b);
+    assert!(
+        da.iter()
+            .zip(db.iter())
+            .any(|(x, y)| x.to_bits() != y.to_bits()),
+        "different seed deltas must produce different deltas_out (proves the seed is read)"
+    );
 }
 
 // === inv_sub_sample unit (the InvSubSample column un-stacking) ================

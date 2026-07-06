@@ -1081,17 +1081,26 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   to `floor(T/R)` rows, silently dropping the trailing `T mod R` frames (already tracked as the forward
   decimation quirk). The backward `InvSubSample(R, .)` inflates a `K`-row sub-sampled delta block back to
   `K*R` rows by un-stacking the R column-blocks -- so a round-trip yields `floor(T/R)*R` rows, and the
-  dropped tail is GONE. For the real `[4,1]` LID net (T frames, layer-0 R=4) the layer-0 `deltas_out`
-  returned to the BLSTM wrapper is `floor(T/4)*4` rows wide, up to 3 frames short of the original input;
-  the wrapper never uses these tail rows (it splits the output-net deltas, not the LSTM `deltas_out`), so
-  the truncation is invisible downstream -- but a port that "helpfully" pads InvSubSample back to `T`
-  rows, or that asserts `deltas_out.nrows() == input.nrows()`, diverges from the legacy. The Task 5
-  goldens are a T=11, R=2 net: `sub_sample` floors 11->5, `inv_sub_sample` restores 5->10 (NOT 11).
+  dropped tail is GONE. For the real net (`1_worker_1.config`: `LSTMNeuronNb 23,24,24` / subsample
+  `4,1`; T frames, layer-0 R=4) the layer-0 `deltas_out` returned to the BLSTM wrapper is
+  `floor(T/4)*4` rows wide, up to 3 frames short of the original input; the wrapper never uses these
+  tail rows (it splits the output-net deltas, not the LSTM `deltas_out`), so the truncation is invisible
+  downstream -- but a port that "helpfully" pads InvSubSample back to `T` rows, or that asserts
+  `deltas_out.nrows() == input.nrows()`, diverges from the legacy. The Task 5 goldens are a T=11, R=2
+  multi-layer net: `sub_sample` floors 11->5, `inv_sub_sample` restores 5->10 (NOT 11); fix-wave 1
+  (review finding 1) added a T=7, R=2 SINGLE-layer net (`neuron_nb.len()==2`, `:255-263` -- the real
+  `configs/legacy/LID_BLSTM.config` single-layer subsample shape, `LSTMNeuronNb 11,12` / subsample `4`,
+  in miniature) exercising the SAME floor/expand quirk on the structurally distinct single-layer branch:
+  `floor(7/2)=3` decimated rows, InvSubSample restores 3*2=6 (NOT 7).
   Pinned by `inv_sub_sample_inverts_sub_sample_on_floored_input` (round-trip == the first 10 rows of the
-  11-row input, bit-exact) + the `(10, 3)`/`(10, 4)` structural row-count assertions in
-  `lstm_net_subsample_inversion_{fwd,rev}` / `dense_net_last_layer_subsample`, and the injected mutation
-  battery (skip-inflation, wrong-column-block). No fix candidate -- correct, intentional; the floor/expand
-  asymmetry is a direct consequence of the forward decimation and is load-bearing for the deltas_out shape.
+  11-row input, bit-exact) + the `(10, 3)`/`(10, 4)`/`(6, 2)` structural row-count assertions in
+  `lstm_net_subsample_inversion_{fwd,rev}` / `dense_net_last_layer_subsample` / `single_layer_subsample_inversion`,
+  and the injected mutation battery (skip-inflation, wrong-column-block, and -- fix-wave 1 -- the
+  single-layer arm reading the running `deltas_out` instead of the seed `deltas`, both the subsample and
+  plain arms, confirmed to fail `single_layer_subsample_inversion`/`single_layer_plain_no_subsample`/
+  `single_layer_reads_seed_deltas_not_running_deltas_out`). No fix candidate -- correct, intentional; the
+  floor/expand asymmetry is a direct consequence of the forward decimation and is load-bearing for the
+  deltas_out shape.
 
 - **[phase3] Container backward `NeuronLayer` layer-0 frame count is `input.rows()`, not the (smaller)
   delta rows it back-projects over** (`NeuronLayer.cpp:199`, exercised by `Network::feed_backward` over

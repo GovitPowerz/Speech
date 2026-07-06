@@ -22,6 +22,8 @@ SYNTHETIC_TOL_SITES = {
     "net_lstm_backward_fwd",
     "net_lstm_backward_rev",
     "net_dense_backward",
+    "net_single_layer_backward_subsample",
+    "net_single_layer_backward_plain",
     "blstm_feedbackward",
 }
 EXPECTED_SHAPES = {
@@ -54,6 +56,15 @@ LSTM_BWD_SHAPES = {
     "lstm_bwd_derivs_subsample.bin": (64, 2),
     "lstm_bwd_signal_derivs.bin": (64, 2),
 }
+# Fix-wave 1 (review finding 1): the single-layer container backward branch
+# (neuronNb.size()==2, NeuralNetwork.hpp:255-263) -- LSTM [2,2] at T=7.
+NET_SINGLE_LAYER_SHAPES = {
+    "bwd_net_single_subsample_derivs.bin": (80, 2),
+    "bwd_net_single_plain_derivs.bin": (64, 2),
+    "bwd_net_single_subsample_deltasout.bin": (6, 2),
+    "bwd_net_single_plain_deltasout.bin": (7, 2),
+}
+
 EXPECTED_NB_DERIVS = 33671
 
 # Task 2: CostLaw backward REAL-probe goldens (dumped from the REAL compiled
@@ -119,11 +130,40 @@ def test_synthetic_backward_sites_are_bit_exact() -> None:
         "net_lstm_backward_fwd": m["net_backward_tol"]["net_lstm_backward_fwd"]["max_ulp"],
         "net_lstm_backward_rev": m["net_backward_tol"]["net_lstm_backward_rev"]["max_ulp"],
         "net_dense_backward": m["net_backward_tol"]["net_dense_backward"]["max_ulp"],
+        "net_single_layer_backward_subsample": m["net_single_layer_backward_tol"]["subsample"]["max_ulp"],
+        "net_single_layer_backward_plain": m["net_single_layer_backward_tol"]["plain"]["max_ulp"],
         "blstm_feedbackward": m["blstm_backward_tol"]["synthetic"]["max_ulp"],
     }
     assert set(got) == SYNTHETIC_TOL_SITES
     for site, ulp in got.items():
         assert ulp == 0, (site, ulp)
+
+
+def test_single_layer_backward_goldens_present_with_expected_shapes() -> None:
+    """Fix-wave 1 (review finding 1): presence + shape guard for the single-layer
+    container backward branch goldens (previously zero coverage)."""
+    for name, (rows, cols) in NET_SINGLE_LAYER_SHAPES.items():
+        path = REF / name
+        assert path.is_file(), name
+        assert _read_bin_shape(path) == (rows, cols), name
+
+
+def test_single_layer_backward_deltasout_calibration_recorded() -> None:
+    cal = _manifest()["net_single_layer_backward_tol"]["deltasout_calibration"]
+    assert set(cal) == {"subsample", "plain"}
+    for site, rec in cal.items():
+        assert "max_ulp" in rec and "max_abs" in rec, site
+        assert int(rec["max_ulp"]) == 0, (site, rec)  # measured 0 at this synthetic shape
+
+
+def test_single_layer_backward_derivs_are_non_vacuous() -> None:
+    for name in ("bwd_net_single_subsample_derivs.bin", "bwd_net_single_plain_derivs.bin"):
+        path = REF / name
+        with path.open("rb") as f:
+            rows = int.from_bytes(f.read(8), "little", signed=True)
+            int.from_bytes(f.read(8), "little", signed=True)  # cols == 2
+            col0 = [struct.unpack("<d", f.read(8))[0] for _ in range(rows)]
+        assert any(v != 0.0 for v in col0), name
 
 
 def test_real_net_calibration_recorded() -> None:
