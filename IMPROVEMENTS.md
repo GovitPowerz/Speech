@@ -1126,6 +1126,47 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   gated to 0 like the derivs. Same non-local blocked-GEMM story as the Phase 2 forward; documented here so
   the nonzero calibration line is not mistaken for a port bug.
 
+- **[phase3] INVERTED iRPROP- SIGN CONVENTION: `deriv>0 -> dw = -delta`, `deriv<0 -> dw = +delta`** (
+  `nn/train.rs::Rprop::update_weights`, from `Rprop.cpp:14-23/:26-56`): the legacy update
+  computes `dw = -delta` when `deriv > 0.0` (positive, would ascend naively) and `dw = +delta`
+  when `deriv < 0.0` (negative, would descend naively), then applies `weights += dw` -- an
+  inverted/descend-by-negation sign convention baked into the update rule, not a transcription
+  quirk. A naive "corrected" sign (positive deriv -> positive delta -> descent via `weights -=`
+  on the applied delta) would diverge from every golden immediately on step 1 (the post-first-call
+  weights would flip sign, destroying all downstream deltas/step sizes). Reproduced verbatim.
+  *Why deferred:* nothing to fix -- this IS the iRPROP- algorithm as the legacy implements it, and
+  every trajectory golden is pinned bit-exact against it. *Pinned by:* `trajectory_a_bit_exact` +
+  `trajectory_b_bit_exact` (`phase3_rprop_golden.rs`, all weights/deltas/delta_weights/prev_derivs
+  bit-exact at EVERY step across two independent real-compiled golden trajectories) and
+  `inverted_sign` (structural sign-direction assertion). *Mutation evidence (brief req. 2):*
+  swapping the sign convention (first-call branch: `deriv>0 -> +delta`, `deriv<0 -> -delta`)
+  was confirmed to fail BOTH trajectory tests at step 1, and reverting it restored the golden
+  match.
+
+- **[phase3] COST-GATED BACKTRACK + `prev_derivs` ZEROING** (`nn/train.rs::
+  Rprop::update_weights` shrink branch, from `Rprop.cpp:38-45`): on a derivative sign flip
+  (`derivTimesPrev < 0`), the weight step is undone (`weights[j] -= delta_weights[j]`) ONLY if
+  the cost went UP since the prior call (`prev_cost < cost`); the shrink is applied regardless
+  (delta clamped to min), but the last delta_weights value is discarded/stale if the cost did
+  NOT rise. Separately and critically, `prev_derivs[j]` is ZEROED (:45) unconditionally after the
+  shrink, forcing the NEXT call's `deriv_times_prev` for that element to be exactly 0 regardless
+  of the next step's derivative sign, routing it into the `== 0` branch (recompute + apply at
+  the current, decayed delta). Do not "fix" this into an unconditional backtrack, and do not drop
+  the zeroing -- the backtrack gate and the zeroing are the load-bearing iRPROP- machinery for
+  handling weight reversals. Reproduced verbatim. *Why deferred:* nothing to fix -- this is the
+  iRPROP- definition (Riedmiller & Braun, 1993; backtrack only on cost rise, force zero for a
+  step to clear the sign flip). *Pinned by:* `trajectory_a_bit_exact` (step 3 backtracks on
+  cost rise 9->12, step 4 does NOT on cost fall 12->8, both elements' prev_derivs bit-match the
+  zero-forced values at subsequent steps) + `trajectory_b_bit_exact` (alternating cost
+  oscillations, half the steps trigger backtrack, half do not; element 1's step-boundary
+  prev_derivs match the forced-zero value; alternating-sign delta shrinks are clamped correctly).
+  *Mutation evidence (brief req. 3):* (a) inverting the backtrack gate (`prev_cost < cost` ->
+  `prev_cost > cost`) failed both trajectory tests, the element that should backtrack at step 3
+  did not. (b) Dropping the zeroing (`self.prev_derivs[j] = 0.0` removed) failed both trajectory
+  tests via a `prev_derivs` mismatch at the step immediately after the shrink -- the zero-forced
+  value was not present to route the next call into the `== 0` branch, so the state machine
+  diverged. Both mutations reverted to verified-good state after each.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
