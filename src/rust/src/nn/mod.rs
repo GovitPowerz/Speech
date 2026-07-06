@@ -1,8 +1,8 @@
-//! Neural network: layers, BLSTM, generic container, activations (Phase 2,
-//! forward only; LSTM + dense scope) and training (Phase 3 stub).
+//! Neural network: layers, BLSTM, generic container, activations (Phase 2
+//! forward + Phase 3 backward/BPTT and iRPROP- training; LSTM + dense scope).
 //!
 //! Ported from legacy C++: NeuralNetwork.hpp, BLSTMNeuralNetwork.*, LSTMLayer.*,
-//! NeuronLayer.*, ActivationFunctions.h; Rprop.*/Trainer.h pending (Phase 3).
+//! NeuronLayer.*, ActivationFunctions.h, Rprop.*/Trainer.h (train.rs).
 //! SRN/CWRNN are dead code in the legacy (never ported); the conv layer is
 //! broken-as-committed there (see IMPROVEMENTS.md).
 

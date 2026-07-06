@@ -119,9 +119,9 @@ Parity is verified as a layered ladder, each rung golden-tested against the lega
 
 1. **Golden features** - feature extraction bit-for-bit against legacy `.mat` dumps.
 2. **Weight roundtrip** - flat weight-vector `.bin` codec (ordering + `adim_coeff` scaling) survives a Rust encode/decode without drift; property-tested.
-3. **Forward parity** - NN forward matches the `BLSTM_Forward` oracle.
-4. **Gradient parity** - analytic BPTT matches `BLSTM_Backward` and finite differences.
-5. **Optimizer-step parity** - a single iRPROP-/optimizer update matches the legacy step.
+3. **Forward parity** - NN forward matches the strict-IEEE harness oracle (real compiled legacy TUs probed against an ascending-loop reimpl; MATLAB's `BLSTM_Forward.m` has divergent semantics and was never the oracle).
+4. **Gradient parity** - analytic BPTT matches the same harness oracle bit-exactly plus central finite differences (MATLAB's `BLSTM_Backward.m` shares the divergent semantics; the Python `nn_reference.py` oracle implements ENGINE semantics instead).
+5. **Optimizer-step parity** - a single iRPROP- update matches the REAL compiled legacy `Rprop::updateWeights` bit-for-bit, including a fired cost-gated backtrack.
 6. **Decision/scoring parity** - segmentation, smoothing, WER/error/LID scoring, EER-cutoff confusion.
 7. **End-to-end LID/SAD** - full-pipeline score parity on a held-out corpus.
 
