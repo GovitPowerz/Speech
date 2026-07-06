@@ -92,8 +92,6 @@ EXPECTED_SHAPES = {
 # per spec S2, probed directly). Nx2 [output | delta] for the scalar sweeps
 # (65-point k/64 grid), n_frames x n_classes for the multiclass fusion dumps.
 COST_SHAPES = {
-    "cost_deriv_scalar_speech.bin": (65, 2),
-    "cost_deriv_scalar_other.bin": (65, 2),
     "cost_deriv_scalar_poly_speech.bin": (65, 2),
     "cost_deriv_scalar_poly_other.bin": (65, 2),
     "cost_deriv_scalar_log_speech.bin": (65, 2),
@@ -104,6 +102,22 @@ COST_SHAPES = {
     "cost_deltas_multiclass_pond.bin": (4, 3),
     "cost_deltas_wer.bin": (3, 3),
     "cost_deltas_wer_pond.bin": (3, 3),
+    # Fix-wave 1 (review finding 1): mid-thresh (0.5/0.5) above-branch coverage
+    # for the cubic and sqrt laws, at points away from 0/1 (nonzero logistic fold).
+    "cost_deriv_scalar_midthresh_cubic_speech.bin": (3, 2),
+    "cost_deriv_scalar_midthresh_cubic_other.bin": (3, 2),
+    "cost_deriv_scalar_midthresh_sqrt_speech.bin": (3, 2),
+    "cost_deriv_scalar_midthresh_sqrt_other.bin": (3, 2),
+}
+
+# The brief's literal alias names (cost_deriv_scalar_{speech,other}.bin) are a byte
+# copy of the poly-named dump -- fix-wave 1 (review finding 2) removed the second,
+# independent C++ dump block that produced them (a manual lock-step trap) in favor
+# of a single copy here. Both filenames stay on disk; the Rust golden test
+# references the literal alias names.
+ALIAS_COPIES = {
+    "cost_deriv_scalar_speech.bin": "cost_deriv_scalar_poly_speech.bin",
+    "cost_deriv_scalar_other.bin": "cost_deriv_scalar_poly_other.bin",
 }
 
 # NN_TOL backward sites. Synthetic sites MUST be max_ulp=0; the real-net site is
@@ -234,6 +248,11 @@ def main() -> None:
         # Copy the Task 2 CostLaw REAL-probe goldens (dumped from the real class).
         for name in COST_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Produce the brief's literal alias filenames as a byte copy of the
+        # poly-named dump (fix-wave 1, review finding 2) -- no second harness
+        # dump block, single source of truth.
+        for alias_name, source_name in ALIAS_COPIES.items():
+            shutil.copy2(PHASE3_DIR / source_name, PHASE3_DIR / alias_name)
 
     # 4. Regression guard: the prior-phase dirs must be byte-identical after the run.
     after = {p: _hash_tree(d) for p, d in (("phase1", PHASE1_DIR), ("phase2", PHASE2_DIR), ("phase2b", PHASE2B_DIR))}
@@ -268,6 +287,14 @@ def main() -> None:
             cost_mismatches.append({"file": name, "expected": expected, "got": got})
     if cost_mismatches:
         raise SystemExit(f"cost_*.bin shape mismatch: {cost_mismatches}")
+    alias_mismatches = []
+    for alias_name, source_name in ALIAS_COPIES.items():
+        expected = COST_SHAPES[source_name]
+        got = _read_bin_shape(PHASE3_DIR / alias_name)
+        if got != expected:
+            alias_mismatches.append({"file": alias_name, "expected": expected, "got": got})
+    if alias_mismatches:
+        raise SystemExit(f"cost_*.bin alias shape mismatch: {alias_mismatches}")
 
     # 7. Compiler version (same g++ selection as build.sh).
     gxx = _run(["bash", "-c", 'ls "$(brew --prefix)"/bin/g++-* | sort -V | tail -1']).strip()
@@ -378,8 +405,19 @@ def main() -> None:
                 "(polynomial, strict-bits), log (libm, canary-gated), and sqrt (libm, "
                 "canary-gated) laws -- exercises the below/above-thresh switch, the no-speech "
                 "1-output flip + derivative negation, and the output*(1-output) logistic "
-                "chain-rule fold (:344). cost_deriv_scalar_{speech,other}.bin alias the square "
-                "law dump under the brief's literal names. Multiclass fusion "
+                "chain-rule fold (:344). cost_deriv_scalar_{speech,other}.bin are a byte copy "
+                "(shutil.copy2, this extractor) of the square-law dump under the brief's "
+                "literal names -- fix-wave 1 (review finding 2) removed the second, "
+                "independent C++ dump block that produced them. FIX-WAVE 1 (review finding "
+                "1): the real config's CostLawThreshSpeech=1/CostLawThreshNoSpeech=0 "
+                "(1_worker_1.config:64-65) means the k/64 sweep above only ever exercises "
+                "the above-thresh branch at output=1.0/0.0, where the logistic fold is "
+                "exactly zero -- cost_deriv_scalar_midthresh_{cubic,sqrt}_{speech,other}.bin "
+                "override BOTH thresholds to 0.5 and dump 3 explicit points landing in the "
+                "above-thresh regime away from 0/1 (speech 0.6/0.75/0.9, no-speech "
+                "0.4/0.25/0.1 -- CostLaw.cpp:282,297,308,324), for the cubic law "
+                "(AboveThreshCubicLaw, CostLaw.h:84-117, strict bits) and the sqrt law "
+                "(AboveThreshSqrtLaw, CostLaw.h:182-213, canary-gated). Multiclass fusion "
                 "(cost_deltas_multiclass.bin, n_frames=4 x n_classes=3): row1 is FULLY "
                 "ignore-masked (target<0 -> delta==0.0 exactly), rows 0/2/3 place the on-class "
                 "at different columns; the _pond variant sets classes_ponderations=2,3,4 and "
@@ -394,6 +432,10 @@ def main() -> None:
                 "strict bits."
             ),
             "dumps": {name: {"rows": r, "cols": c} for name, (r, c) in COST_SHAPES.items()},
+            "alias_dumps": {
+                alias_name: {"copy_of": source_name, **{"rows": COST_SHAPES[source_name][0], "cols": COST_SHAPES[source_name][1]}}
+                for alias_name, source_name in ALIAS_COPIES.items()
+            },
         },
     }
 

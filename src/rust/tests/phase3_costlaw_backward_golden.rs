@@ -53,6 +53,39 @@ fn sqrt_law() -> CostLaw {
     CostLaw::from_config(&m, "BLSTM")
 }
 
+/// Fix-wave 1 (review finding 1): the real config's CostLawThreshSpeech=1 /
+/// CostLawThreshNoSpeech=0 (1_worker_1.config:64-65) means the above-thresh
+/// branch (CostLaw.cpp:297,324 speech; :307,326 no-speech) only ever fires at
+/// output=1.0/0.0, exactly where the logistic fold `output*(1-output)`
+/// (CostLaw.cpp:344) is zero -- masking any bug in AboveCubic/AboveSqrt::deriv.
+/// This builder overrides BOTH thresholds to 0.5 AND CostLawParamSpeech/
+/// NoSpeech to 0.3 (the real config's own param is 0, which would zero out
+/// AboveThreshCubicLaw's/AboveThreshSqrtLaw's A/B coefficients regardless of
+/// the logistic fold -- CostLaw.h:88-93,186-188, both directly proportional
+/// to q) so the above-branch deriv is genuinely non-vacuous.
+fn mid_thresh_law(name: &str) -> CostLaw {
+    let mut m = base_map();
+    m.insert("BLSTM_CostLawSpeech".into(), name.into());
+    m.insert("BLSTM_CostLawNoSpeech".into(), name.into());
+    m.insert("BLSTM_CostLawThreshSpeech".into(), "0.5".into());
+    m.insert("BLSTM_CostLawThreshNoSpeech".into(), "0.5".into());
+    m.insert("BLSTM_CostLawParamSpeech".into(), "0.3".into());
+    m.insert("BLSTM_CostLawParamNoSpeech".into(), "0.3".into());
+    CostLaw::from_config(&m, "BLSTM")
+}
+
+/// Replay 3 explicit above-thresh points through `compute_unitary_delta`,
+/// matching the harness's `dumpMidThreshPoints` (must land in the above-thresh
+/// regime, away from 0/1, per the fixed threshold=0.5 in `mid_thresh_law`).
+fn mid_thresh_points(law: &CostLaw, points: &[f64; 3], target: f64) -> ndarray::Array2<f64> {
+    let mut out = ndarray::Array2::<f64>::zeros((3, 2));
+    for (k, &output) in points.iter().enumerate() {
+        out[[k, 0]] = output;
+        out[[k, 1]] = law.compute_unitary_delta(output, target);
+    }
+    out
+}
+
 /// Replay the harness's deterministic k/64 sweep (k in [0,64], 65 points)
 /// through `compute_unitary_delta` for a fixed target, returning an Nx2
 /// `[output | delta]` matrix laid out the same way `common::load_bin_phase3`
@@ -122,6 +155,58 @@ fn scalar_delta_log_sqrt_canary() {
         &want_sqrt_other,
         "sqrt scalar delta (other)",
     );
+}
+
+/// Fix-wave 1 (review finding 1, Critical): the above-thresh cubic derivative
+/// branch (Law::AboveCubic::deriv), constrained at points AWAY from output=0/1
+/// so the logistic fold `output*(1-output)` (CostLaw.cpp:344) is nonzero.
+/// Points: speech (target=1.0) 0.6/0.75/0.9 are >= the 0.5 speech threshold
+/// (CostLaw.cpp:282,297 "above" test); no-speech (target=0.0) 0.4/0.25/0.1 are
+/// <= the 0.5 no-speech threshold (CostLaw.cpp:308,324 "above" test, after the
+/// 1-output flip). Pure polynomial (no libm) -> strict bits.
+#[test]
+fn scalar_delta_midthresh_cubic_above_branch() {
+    let law = mid_thresh_law("cubic");
+    let got_speech = mid_thresh_points(&law, &[0.6, 0.75, 0.9], 1.0);
+    let got_other = mid_thresh_points(&law, &[0.4, 0.25, 0.1], 0.0);
+    let want_speech = common::load_bin_phase3("cost_deriv_scalar_midthresh_cubic_speech.bin");
+    let want_other = common::load_bin_phase3("cost_deriv_scalar_midthresh_cubic_other.bin");
+    common::assert_bits_eq(&got_speech, &want_speech, "midthresh cubic delta (speech)");
+    common::assert_bits_eq(&got_other, &want_other, "midthresh cubic delta (other)");
+
+    // Non-vacuity (S11.9): every point must be genuinely in the above-thresh
+    // regime AND away from the logistic-fold zero -- assert every delta is
+    // nonzero (a vacuous fixture, e.g. thresh/param misconfigured back to the
+    // real config's degenerate values, would silently read back all zeros).
+    for v in got_speech
+        .column(1)
+        .iter()
+        .chain(got_other.column(1).iter())
+    {
+        assert_ne!(*v, 0.0, "midthresh cubic delta must be nonzero: {v}");
+    }
+}
+
+/// Fix-wave 1 (review finding 1, Critical): the above-thresh sqrt derivative
+/// branch (Law::AboveSqrt::deriv), same mid-thresh non-degenerate points as
+/// the cubic case above. sqrt calls libm (`sqrt`) -> canary-gated.
+#[test]
+fn scalar_delta_midthresh_sqrt_above_branch() {
+    let law = mid_thresh_law("sqrt");
+    let got_speech = mid_thresh_points(&law, &[0.6, 0.75, 0.9], 1.0);
+    let got_other = mid_thresh_points(&law, &[0.4, 0.25, 0.1], 0.0);
+    let want_speech = common::load_bin_phase3("cost_deriv_scalar_midthresh_sqrt_speech.bin");
+    let want_other = common::load_bin_phase3("cost_deriv_scalar_midthresh_sqrt_other.bin");
+    common::assert_oracle_eq(&got_speech, &want_speech, "midthresh sqrt delta (speech)");
+    common::assert_oracle_eq(&got_other, &want_other, "midthresh sqrt delta (other)");
+
+    for v in got_speech
+        .column(1)
+        .iter()
+        .chain(got_other.column(1).iter())
+    {
+        assert_ne!(*v, 0.0, "midthresh sqrt delta must be nonzero: {v}");
+    }
 }
 
 /// The multiclass fusion case fixture: 4 frames x 3 classes, row1 fully

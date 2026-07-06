@@ -36,6 +36,37 @@ EXPECTED_SHAPES = {
 }
 EXPECTED_NB_DERIVS = 33671
 
+# Task 2: CostLaw backward REAL-probe goldens (dumped from the REAL compiled
+# computeUnitaryDeltas/computeDeltas). Nx2 [output|delta] scalar sweeps (65-point
+# k/64 grid, or the fix-wave-1 3-point mid-thresh above-branch coverage) and
+# n_frames x n_classes multiclass fusion dumps.
+COST_SHAPES = {
+    "cost_deriv_scalar_poly_speech.bin": (65, 2),
+    "cost_deriv_scalar_poly_other.bin": (65, 2),
+    "cost_deriv_scalar_log_speech.bin": (65, 2),
+    "cost_deriv_scalar_log_other.bin": (65, 2),
+    "cost_deriv_scalar_sqrt_speech.bin": (65, 2),
+    "cost_deriv_scalar_sqrt_other.bin": (65, 2),
+    "cost_deltas_multiclass.bin": (4, 3),
+    "cost_deltas_multiclass_pond.bin": (4, 3),
+    "cost_deltas_wer.bin": (3, 3),
+    "cost_deltas_wer_pond.bin": (3, 3),
+    # Fix-wave 1 (review finding 1): mid-thresh (0.5/0.5) above-branch coverage
+    # for the cubic and sqrt laws, at points away from 0/1.
+    "cost_deriv_scalar_midthresh_cubic_speech.bin": (3, 2),
+    "cost_deriv_scalar_midthresh_cubic_other.bin": (3, 2),
+    "cost_deriv_scalar_midthresh_sqrt_speech.bin": (3, 2),
+    "cost_deriv_scalar_midthresh_sqrt_other.bin": (3, 2),
+}
+
+# Fix-wave 1 (review finding 2): the brief's literal alias names are a byte copy
+# (shutil.copy2, the extractor) of the poly-named dump -- both must exist and be
+# byte-identical, since no second C++ dump block produces them anymore.
+ALIAS_COPIES = {
+    "cost_deriv_scalar_speech.bin": "cost_deriv_scalar_poly_speech.bin",
+    "cost_deriv_scalar_other.bin": "cost_deriv_scalar_poly_other.bin",
+}
+
 
 def _manifest() -> dict[str, Any]:
     manifest: dict[str, Any] = json.loads((REF / "manifest.json").read_text())
@@ -121,3 +152,80 @@ def test_backward_oracle_cases_present() -> None:
     for case in payload["lstm_cases"] + payload["dense_cases"]:
         for key in ("weights_bits", "input_bits", "deltas_bits", "expected_derivs_bits"):
             assert case[key], (case["name"], key)
+
+
+# --- Task 2: CostLaw backward REAL-probe goldens (fix-wave 1, review finding 3) ----
+# Mirrors the Task 1 pattern above (EXPECTED_SHAPES + presence test + manifest
+# well-formedness): the cost_*.bin fixtures and the costlaw_backward manifest
+# section had no presence/shape guard before this fix wave.
+
+
+def test_cost_goldens_present_with_expected_shapes() -> None:
+    for name, (rows, cols) in COST_SHAPES.items():
+        path = REF / name
+        assert path.is_file(), name
+        assert _read_bin_shape(path) == (rows, cols), name
+    # The alias filenames are on disk too (byte copies -- see ALIAS_COPIES),
+    # same expected shape as their source.
+    for alias_name, source_name in ALIAS_COPIES.items():
+        path = REF / alias_name
+        assert path.is_file(), alias_name
+        assert _read_bin_shape(path) == COST_SHAPES[source_name], alias_name
+
+
+def test_costlaw_backward_manifest_well_formed() -> None:
+    section = _manifest()["costlaw_backward"]
+    assert isinstance(section["text"], str) and section["text"]
+    dumps = section["dumps"]
+    assert set(dumps) == set(COST_SHAPES)
+    for name, (rows, cols) in COST_SHAPES.items():
+        assert dumps[name] == {"rows": rows, "cols": cols}, name
+    alias_dumps = section["alias_dumps"]
+    assert set(alias_dumps) == set(ALIAS_COPIES)
+    for alias_name, source_name in ALIAS_COPIES.items():
+        assert alias_dumps[alias_name]["copy_of"] == source_name, alias_name
+
+
+def test_cost_alias_dumps_are_byte_identical_copies() -> None:
+    # Review finding 2: the alias pair is a byte copy of the poly-named dump
+    # (no second, independently-maintained C++ dump block).
+    for alias_name, source_name in ALIAS_COPIES.items():
+        alias_bytes = (REF / alias_name).read_bytes()
+        source_bytes = (REF / source_name).read_bytes()
+        assert alias_bytes == source_bytes, (alias_name, source_name)
+
+
+def test_cost_scalar_goldens_are_non_vacuous() -> None:
+    """A scalar delta golden that is all-zero (e.g. the above-thresh branch
+    landing exactly at the logistic-fold zero, or a law param that zeroes the
+    above-thresh coefficients) would silently pass any assertion -- assert the
+    delta column (col1) has at least one nonzero entry (S11.9 non-vacuity),
+    for every scalar sweep/mid-thresh dump."""
+    scalar_names = [name for name in COST_SHAPES if name.startswith("cost_deriv_scalar")]
+    for name in scalar_names:
+        path = REF / name
+        with path.open("rb") as f:
+            rows = int.from_bytes(f.read(8), "little", signed=True)
+            int.from_bytes(f.read(8), "little", signed=True)  # cols == 2
+            f.read(8 * rows)  # skip col0 (output)
+            col1 = [struct.unpack("<d", f.read(8))[0] for _ in range(rows)]
+        assert any(v != 0.0 for v in col1), name
+
+
+def test_costlaw_ignore_mask_row_is_exactly_zero() -> None:
+    """Structural (risk R8): the fully ignore-masked row (target < 0 everywhere)
+    in the multiclass fusion goldens must be EXACTLY 0.0 bit, independent of the
+    WER/ponderation path."""
+    for name, masked_row, n_classes in (
+        ("cost_deltas_multiclass.bin", 1, 3),
+        ("cost_deltas_wer.bin", 2, 3),
+    ):
+        path = REF / name
+        with path.open("rb") as f:
+            rows = int.from_bytes(f.read(8), "little", signed=True)
+            cols = int.from_bytes(f.read(8), "little", signed=True)
+            data = struct.unpack(f"<{rows * cols}d", f.read(8 * rows * cols))
+        # column-major: element (row, col) is at data[col * rows + row].
+        for kk in range(n_classes):
+            v = data[kk * rows + masked_row]
+            assert v == 0.0, (name, masked_row, kk, v)

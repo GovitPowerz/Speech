@@ -7290,13 +7290,80 @@ int main(int argc, char** argv) {
             CostLaw sqrtLaw(sqrtConf, "BLSTM");
             dumpScalarSweep(sqrtLaw, "cost_deriv_scalar_sqrt");
         }
-        // Kept for the brief's named dumps (== the poly speech/other pair; the
-        // poly law is strict-bits so an alias dump costs nothing and lets the
-        // Rust test names match the brief's dump names exactly).
+        // The brief's literal alias names (cost_deriv_scalar_{speech,other}.bin) are
+        // now produced as a byte copy of the poly dump by the Python extractor
+        // (scripts/extract_phase3_fixtures.py), NOT re-dumped here -- a second
+        // independent C++ dump block ~20 lines from the first is a manual
+        // lock-step trap (fix-wave 1 review finding 2): the two blocks could
+        // silently diverge if only one were edited later.
+
+        // ---- Mid-thresh above-branch coverage: cubic/sqrt deriv, non-degenerate
+        // logistic fold (fix-wave 1 review finding 1) ------------------------
+        // The real config's CostLawThreshSpeech=1 / CostLawThreshNoSpeech=0
+        // (tests/reference_data/phase0/1_worker_1.config:64-65) means the
+        // above-thresh branch (CostLaw.cpp:297,324 speech; :307,326 no-speech)
+        // fires ONLY at output=1.0 (speech) / output=0.0 (no-speech) in every
+        // sweep above -- exactly where the logistic chain-rule fold
+        // `delta*output*(1-output)` (CostLaw.cpp:344) is IDENTICALLY ZERO,
+        // which multiplies away any bug in AboveCubic/AboveSqrt::deriv. This
+        // block overrides BOTH thresholds to 0.5 so the above-thresh branch
+        // fires at output values AWAY from 0/1 (nonzero logistic fold), for
+        // the cubic law (CostLaw.h:84-117 AboveThreshCubicLaw, routed via the
+        // "cubic" name at CostLaw.cpp:300,328) and the sqrt law (CostLaw.h:
+        // 182-213 AboveThreshSqrtLaw, routed via CostLaw.cpp:298,326).
+        //
+        // Above-branch condition (CostLaw.cpp:282,297 speech; :308,324
+        // no-speech): speech is "above" when output >= SwitchingThreshSpeech;
+        // no-speech is "above" when output <= SwitchingThreshNoSpeech (the
+        // ELSE arm of `output > _SwitchingThreshNoSpeech`, after which the
+        // law is evaluated on the flipped `1-output`). With both thresholds
+        // at 0.5: speech points 0.6/0.75/0.9 and no-speech points
+        // 0.4/0.25/0.1 all land in the above-thresh regime.
+        //
+        // ALSO override CostLawParamSpeech/NoSpeech (the real config's own
+        // value is 0, CostLaw.cpp:14-19 "q") away from 0: AboveThreshCubicLaw's
+        // A/B (CostLaw.h:88-93, the "cubic" name routes to the square/cubic
+        // formula) and AboveThreshSqrtLaw's A/B (CostLaw.h:186-188, A=-q, B=q)
+        // are BOTH directly proportional to q -- at q=0 the above-thresh deriv
+        // is identically 0.0 regardless of the logistic fold, a second,
+        // independent way to land a vacuous golden (caught by inspecting the
+        // dumped bytes below before wiring the Rust side, same as the WER
+        // vacuity note above).
+        auto dumpMidThreshPoints = [&](CostLaw& law, const std::string& fname) {
+            const double speechPts[3] = {0.6, 0.75, 0.9};
+            const double noSpeechPts[3] = {0.4, 0.25, 0.1};
+            Eigen::MatrixXd matSpeech(3, 2);
+            for (int k = 0; k < 3; ++k) {
+                matSpeech(k, 0) = speechPts[k];
+                matSpeech(k, 1) = law.computeUnitaryDeltas(speechPts[k], 1.0);
+            }
+            Matrix2BinaryFile(out + fname + "_speech.bin", matSpeech);
+            Eigen::MatrixXd matNoSpeech(3, 2);
+            for (int k = 0; k < 3; ++k) {
+                matNoSpeech(k, 0) = noSpeechPts[k];
+                matNoSpeech(k, 1) = law.computeUnitaryDeltas(noSpeechPts[k], 0.0);
+            }
+            Matrix2BinaryFile(out + fname + "_other.bin", matNoSpeech);
+            ++dumps;
+            ++dumps;
+        };
+        auto buildMidThreshConf = [&](const char* speechLaw, const char* noSpeechLaw) {
+            ConfigFile conf = buildCostConf(speechLaw, noSpeechLaw);
+            conf.set_val<double>("BLSTM_CostLawThreshSpeech", 0.5);
+            conf.set_val<double>("BLSTM_CostLawThreshNoSpeech", 0.5);
+            conf.set_val<double>("BLSTM_CostLawParamSpeech", 0.3);
+            conf.set_val<double>("BLSTM_CostLawParamNoSpeech", 0.3);
+            return conf;
+        };
         {
-            ConfigFile polyConf = buildCostConf("square", "square");
-            CostLaw polyLaw(polyConf, "BLSTM");
-            dumpScalarSweep(polyLaw, "cost_deriv_scalar");
+            ConfigFile cubicMidConf = buildMidThreshConf("cubic", "cubic");
+            CostLaw cubicMidLaw(cubicMidConf, "BLSTM");
+            dumpMidThreshPoints(cubicMidLaw, "cost_deriv_scalar_midthresh_cubic");
+        }
+        {
+            ConfigFile sqrtMidConf = buildMidThreshConf("sqrt", "sqrt");
+            CostLaw sqrtMidLaw(sqrtMidConf, "BLSTM");
+            dumpMidThreshPoints(sqrtMidLaw, "cost_deriv_scalar_midthresh_sqrt");
         }
 
         // ---- Multiclass softmax+CE fusion: cost_deltas_multiclass.bin --------
