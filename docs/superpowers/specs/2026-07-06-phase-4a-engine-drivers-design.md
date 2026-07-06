@@ -58,10 +58,18 @@ IN (all Rust; Python only as a test cross-check):
   config 0 and threaded as a parameter to the STM reference loader (NOT a
   global), `CorpusProcessor` construction + `run()`, nonzero exit on error.
   Usage text corrected to `.config` (TOML deferred to 4c).
-- Driver-level `save_weights` on the NN drivers (Algo 3/4): compose
-  `bestNNWeight_<n>_<outfile>` and write the weight `.bin` incl. the mean/std
-  tail from `InputStatistics` - the Phase 0a packer seam finally exercised by
-  a full engine run (the deferred Phase 0a milestone).
+- Driver-level `save_weights` on the NN drivers (Algo 3/4), per
+  `BLSTMNeuralNetwork::saveWeights` (`BLSTMNeuralNetwork.cpp:312-331`): the
+  flat weight vector (incl. its own normalize tail - the Phase 0a packer seam
+  finally exercised by a full engine run) goes to a `.bin` named
+  `weights_bestNNWeight_<n>_<outfile>` (a `.bin` payload with a
+  `.mat`-suffixed name, quirk), the derivatives to
+  `weightsDerivatives_bestNNWeight_<n>_<outfile>`, while the `.mat` file
+  itself holds ONLY the corpus-accumulated `InputStatistics` (`nbOfInputs`
+  scalar + `meanInputs`/`stdInputs` matrices) - so `io/matfile.rs` needs a
+  scalar writer too. The `InputStatistics` accumulation itself lives in
+  `BLSTMNeuralNetwork` (`:286-300`, `:380-415`) and is not yet ported - 4a
+  adds it to `BlstmNetwork` with the same gating.
 
 Dispatch coverage: Algo 1-4 run for real. Algo 0/5/6 arms exist as typed
 "not yet ported (Phase 4b)" errors; `PrintConfusionMatrix` (only reachable
@@ -207,9 +215,15 @@ real-Eigen structural probe records SEG_STRUCT-style agreement per the 2b
 convention (abort fixture generation on structural mismatch).
 
 **.mat parity contract is value-level, never byte-level** (matio header
-carries a timestamp): parse both sides, compare f64 payloads bit-exact,
-EXCEPT the timing column (col 3 of the result vector = col 6 of
-`MultiConfigResults` after the 3 id columns), which is masked everywhere.
+carries a timestamp, and the legacy writes `MAT_COMPRESSION_ZLIB` variables -
+`Helpers.hpp:450,469`): the extractor converts every matio-written `.mat`
+fixture into per-variable `.bin` dumps via `scipy.io.loadmat`, so the Rust
+side compares plain `.bin` values and needs NO `.mat` reader at all (the
+`matfile` crate stays out; CLAUDE.md's "matfile lands in Phase 4" note is
+amended in the docs task). The Rust WRITER emits uncompressed v5 (readable
+by scipy/MATLAB; validated by a scipy round-trip pytest). The timing column
+(col 3 of the result vector = col 6 of `MultiConfigResults` after the 3 id
+columns) is masked in every comparison.
 
 ## S7. Testing requirements (non-vacuity PROVEN, per the Phase 3 standard)
 
@@ -264,7 +278,8 @@ implementation surfaces.
 - R4: stateful-driver cross-file chaining vs lane cloning - pinned by the
   two-files-style fixtures; any mismatch is a bug in the lane model, not the
   drivers.
-- R5: `.mat` reader crate fidelity - guarded by the scipy cross-read.
+- R5: matio zlib-compressed fixtures - resolved by converting to `.bin` at
+  extraction time via scipy (S6); no Rust `.mat` reader exists or is needed.
 
 ## S10. Process
 
