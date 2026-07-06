@@ -350,8 +350,11 @@ fn hidden_fold_reads_raw_input_not_reconstructed() {
 /// silently reads the zero-padded reconstruction instead) -- run this test
 /// with the fold swapped back to `recon_input` to confirm it fails
 /// (`#[should_panic]` would then see no panic and the test would fail).
+/// No `expected` substring: ndarray's OOB panic message differs between
+/// debug and release builds, and the discriminator is panic-vs-no-panic,
+/// not the message text (a release-only substring broke debug `cargo test`).
 #[test]
-#[should_panic(expected = "index out of bounds")]
+#[should_panic]
 fn hidden_fold_panics_on_narrow_raw_input() {
     let (i, o, t) = (4, 3, 6);
     let mut layer = build_layer(i, o);
