@@ -4,9 +4,11 @@
 //! stacks `Layer` impls, threads a chained flat weight vector through them
 //! (layer-0-first head/tail split), sub-samples between layers (frame-contiguous
 //! temporal stacking, dropped tail), and drives forward / reverse / double-input
-//! passes. `_LayersOutput` intermediate caches are retained as fields (Phase 3's
-//! backward pass reads them). `InvSubSample`/`feedBackward*` are Phase 3 -- not
-//! ported here.
+//! passes. `_LayersOutput` intermediate caches are retained as fields; the Phase 3
+//! backward pass (`feed_backward`/`feed_backward_reverse`/`feed_backward_double`,
+//! `NeuralNetwork.hpp:251-362`) reads them and threads the `inv_sub_sample`
+//! (`:136-145`) delta inflation + running `invSubSamplingRatio` through the
+//! reverse-order layer loop.
 
 use ndarray::Array2;
 
@@ -28,6 +30,34 @@ pub trait Layer {
         output: &mut Array2<f64>,
         last_layer: bool,
     );
+    /// `LayerType::feedBackward(input, output, deltas, invSubSamplingRatio, lastLayer)`:
+    /// accumulate this layer's weight derivatives from the reverse pass and return the
+    /// deltas propagated to the previous layer (T x input_size). The layer scales its
+    /// deriv blocks by `inv_sub_sampling_ratio` when > 1 (Tasks 3/4 already implement
+    /// the layer-side scaling).
+    fn feed_backward(
+        &mut self,
+        input: &Array2<f64>,
+        output: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64>;
+    /// `LayerType::feedBackwardReverse` (reverse-time variant). `NeuronLayer` never runs
+    /// reversed and panics, mirroring `feed_forward_reverse`.
+    fn feed_backward_reverse(
+        &mut self,
+        input: &Array2<f64>,
+        output: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64>;
+    /// `LayerType::getWeightsDerivatives`: append this layer's Nx2 `[deriv | count]`
+    /// rows (flat weight-packer block order, col1 = frame count replicated) to `out`.
+    fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>);
+    /// `LayerType::resetWeightsDerivatives`: zero the deriv accumulators + frame count.
+    fn reset_weights_derivatives(&mut self);
     fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64];
     fn get_weights(&self, out: &mut Vec<f64>);
     fn nb_of_weights(&self) -> usize;
@@ -44,6 +74,46 @@ impl Layer for LstmLayer {
         last_layer: bool,
     ) {
         LstmLayer::feed_forward_reverse(self, input, output, last_layer);
+    }
+    fn feed_backward(
+        &mut self,
+        input: &Array2<f64>,
+        output: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64> {
+        LstmLayer::feed_backward(
+            self,
+            input,
+            output,
+            deltas,
+            inv_sub_sampling_ratio,
+            last_layer,
+        )
+    }
+    fn feed_backward_reverse(
+        &mut self,
+        input: &Array2<f64>,
+        output: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64> {
+        LstmLayer::feed_backward_reverse(
+            self,
+            input,
+            output,
+            deltas,
+            inv_sub_sampling_ratio,
+            last_layer,
+        )
+    }
+    fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
+        LstmLayer::get_weights_derivatives(self, out);
+    }
+    fn reset_weights_derivatives(&mut self) {
+        LstmLayer::reset_weights_derivatives(self);
     }
     fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64] {
         LstmLayer::set_weights(self, flat)
@@ -69,6 +139,38 @@ impl Layer for NeuronLayer {
         _last_layer: bool,
     ) {
         panic!("NeuronLayer is never run reversed (legacy never instantiates it)");
+    }
+    /// `NeuronLayer::feedBackward` takes NO `output` argument (the dense backward reads
+    /// the RAW `input` for the hidden asinh-deriv fold, `NeuronLayer.cpp:204`); the
+    /// container passes the layer's forward output uniformly, so the trait method drops
+    /// it here.
+    fn feed_backward(
+        &mut self,
+        input: &Array2<f64>,
+        _output: &Array2<f64>,
+        deltas: &Array2<f64>,
+        inv_sub_sampling_ratio: usize,
+        last_layer: bool,
+    ) -> Array2<f64> {
+        NeuronLayer::feed_backward(self, input, deltas, inv_sub_sampling_ratio, last_layer)
+    }
+    /// `NeuronLayer` has no reverse variant -- the dense output MLP is never driven
+    /// reversed. Panics, mirroring `feed_forward_reverse`.
+    fn feed_backward_reverse(
+        &mut self,
+        _input: &Array2<f64>,
+        _output: &Array2<f64>,
+        _deltas: &Array2<f64>,
+        _inv_sub_sampling_ratio: usize,
+        _last_layer: bool,
+    ) -> Array2<f64> {
+        panic!("NeuronLayer is never run reversed (legacy never instantiates it)");
+    }
+    fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
+        NeuronLayer::get_weights_derivatives(self, out);
+    }
+    fn reset_weights_derivatives(&mut self) {
+        NeuronLayer::reset_weights_derivatives(self);
     }
     fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64] {
         NeuronLayer::set_weights(self, flat)
@@ -310,6 +412,259 @@ impl<L: Layer> Network<L> {
         }
         self.feed_forward(&hcat, output);
     }
+
+    /// `feedBackward` (`NeuralNetwork.hpp:251-300`): the reverse-order layer loop, each
+    /// layer fed its RETAINED forward input (`input` for layer 0, `layers_output[jj-1]`
+    /// otherwise) + output (`layers_output[jj]` hidden, `output_seq` final) and the
+    /// running `inv_sub_sampling_ratio` (starts at 1). A sub-sampled layer (`sub_sampling
+    /// [jj] > 1`) re-`sub_sample`s its stored input + output, truncated to the incoming
+    /// delta row count via `.topRows(...)`, then `inv_sub_sample`s the returned deltas
+    /// back to the pre-decimation resolution and multiplies the running ratio by
+    /// `sub_sampling[jj]` (fed to the NEXT-earlier layer). Layer 0's `deltas_out` (already
+    /// `inv_sub_sample`d) is returned. Empty input -> empty. Transcribed from the legacy;
+    /// the harness `netBackwardLoop` dumps are the arbiter.
+    pub fn feed_backward(
+        &mut self,
+        input: &Array2<f64>,
+        output_seq: &Array2<f64>,
+        deltas: &Array2<f64>,
+    ) -> Array2<f64> {
+        self.drive_backward(input, output_seq, deltas, false)
+    }
+
+    /// `feedBackwardReverse` (`NeuralNetwork.hpp:302-351`): byte-identical driver to
+    /// `feed_backward`, only each per-layer step dispatches the REVERSE layer backward
+    /// (the reversal lives inside the layer). Same ascending SubSample bookkeeping.
+    pub fn feed_backward_reverse(
+        &mut self,
+        input: &Array2<f64>,
+        output_seq: &Array2<f64>,
+        deltas: &Array2<f64>,
+    ) -> Array2<f64> {
+        self.drive_backward(input, output_seq, deltas, true)
+    }
+
+    /// Shared driver for `feed_backward`/`feed_backward_reverse` (the legacy copy-pastes
+    /// the two methods verbatim except the per-layer backward call). `reverse` picks the
+    /// per-layer kernel.
+    fn drive_backward(
+        &mut self,
+        input: &Array2<f64>,
+        output_seq: &Array2<f64>,
+        deltas: &Array2<f64>,
+        reverse: bool,
+    ) -> Array2<f64> {
+        // :252-253 deltas_out empty, invSubSamplingRatio = 1.
+        let mut deltas_out: Array2<f64> = Array2::zeros((0, 0));
+        let mut inv_sub_sampling_ratio = 1usize;
+        if input.nrows() == 0 {
+            return deltas_out; // :254 -- empty input, empty result
+        }
+        let n_layers = self.neuron_nb.len() - 1;
+        let step = |layer: &mut L,
+                    inp: &Array2<f64>,
+                    outp: &Array2<f64>,
+                    din: &Array2<f64>,
+                    ratio: usize,
+                    last: bool| {
+            if reverse {
+                layer.feed_backward_reverse(inp, outp, din, ratio, last)
+            } else {
+                layer.feed_backward(inp, outp, din, ratio, last)
+            }
+        };
+
+        if self.neuron_nb.len() == 2 {
+            // Single-layer net (:255-263).
+            if self.sub_sampling[0] > 1 {
+                let sub = sub_sample(self.sub_sampling[0], input);
+                let dr = deltas.nrows();
+                let sub_top = sub.slice(ndarray::s![..dr, ..]).to_owned();
+                let out_top = output_seq.slice(ndarray::s![..dr, ..]).to_owned();
+                let dpl = step(
+                    &mut self.layers[0],
+                    &sub_top,
+                    &out_top,
+                    deltas,
+                    inv_sub_sampling_ratio,
+                    true,
+                );
+                deltas_out = inv_sub_sample(self.sub_sampling[0], &dpl);
+                inv_sub_sampling_ratio *= self.sub_sampling[0];
+            } else {
+                deltas_out = step(
+                    &mut self.layers[0],
+                    input,
+                    output_seq,
+                    deltas,
+                    inv_sub_sampling_ratio,
+                    true,
+                );
+            }
+            let _ = inv_sub_sampling_ratio; // consumed above; kept for source parity
+            return deltas_out;
+        }
+
+        // Multi-layer reverse order (:264-296). `kk` counts up; `jj = L-2-kk` counts down.
+        // The current deltas are the SEED (`deltas`) on the first iteration (last layer,
+        // kk==0) and the previous `deltas_out` thereafter -- see :271/:280/:289 which all
+        // read `deltas_out` for jj != L-2, `deltas` at jj == L-2.
+        for kk in 0..n_layers {
+            let jj = n_layers - 1 - kk; // n_layers == _NeuronNb.size()-1, so jj = L-2-kk
+            if jj == 0 {
+                // :268-276 first layer: input is Input/SubInput, output is layers_output[0].
+                let cur = std::mem::replace(&mut deltas_out, Array2::zeros((0, 0)));
+                if self.sub_sampling[0] > 1 {
+                    let sub = sub_sample(self.sub_sampling[0], input);
+                    let dr = cur.nrows();
+                    let sub_top = sub.slice(ndarray::s![..dr, ..]).to_owned();
+                    let lo = std::mem::replace(&mut self.layers_output[jj], Array2::zeros((0, 0)));
+                    let lo_top = lo.slice(ndarray::s![..dr, ..]).to_owned();
+                    let dpl = step(
+                        &mut self.layers[jj],
+                        &sub_top,
+                        &lo_top,
+                        &cur,
+                        inv_sub_sampling_ratio,
+                        true,
+                    );
+                    self.layers_output[jj] = lo;
+                    deltas_out = inv_sub_sample(self.sub_sampling[0], &dpl);
+                    inv_sub_sampling_ratio *= self.sub_sampling[0];
+                } else {
+                    let lo = std::mem::replace(&mut self.layers_output[jj], Array2::zeros((0, 0)));
+                    deltas_out = step(
+                        &mut self.layers[jj],
+                        input,
+                        &lo,
+                        &cur,
+                        inv_sub_sampling_ratio,
+                        true,
+                    );
+                    self.layers_output[jj] = lo;
+                }
+            } else if jj == n_layers - 1 {
+                // :277-285 last layer: input is layers_output[jj-1], output is output_seq,
+                // deltas is the SEED (`deltas`), lastLayer = false.
+                let prev =
+                    std::mem::replace(&mut self.layers_output[jj - 1], Array2::zeros((0, 0)));
+                if self.sub_sampling[jj] > 1 {
+                    let sub = sub_sample(self.sub_sampling[jj], &prev);
+                    let dr = deltas.nrows();
+                    let sub_top = sub.slice(ndarray::s![..dr, ..]).to_owned();
+                    let out_top = output_seq.slice(ndarray::s![..dr, ..]).to_owned();
+                    let dpl = step(
+                        &mut self.layers[jj],
+                        &sub_top,
+                        &out_top,
+                        deltas,
+                        inv_sub_sampling_ratio,
+                        false,
+                    );
+                    deltas_out = inv_sub_sample(self.sub_sampling[jj], &dpl);
+                    inv_sub_sampling_ratio *= self.sub_sampling[jj];
+                } else {
+                    deltas_out = step(
+                        &mut self.layers[jj],
+                        &prev,
+                        output_seq,
+                        deltas,
+                        inv_sub_sampling_ratio,
+                        false,
+                    );
+                }
+                self.layers_output[jj - 1] = prev;
+            } else {
+                // :286-295 interior layer: input is layers_output[jj-1], output is
+                // layers_output[jj], deltas is the running `deltas_out`, lastLayer = false.
+                let cur = std::mem::replace(&mut deltas_out, Array2::zeros((0, 0)));
+                let prev =
+                    std::mem::replace(&mut self.layers_output[jj - 1], Array2::zeros((0, 0)));
+                if self.sub_sampling[jj] > 1 {
+                    let sub = sub_sample(self.sub_sampling[jj], &prev);
+                    let dr = cur.nrows();
+                    let sub_top = sub.slice(ndarray::s![..dr, ..]).to_owned();
+                    let lo = std::mem::replace(&mut self.layers_output[jj], Array2::zeros((0, 0)));
+                    let lo_top = lo.slice(ndarray::s![..dr, ..]).to_owned();
+                    let dpl = step(
+                        &mut self.layers[jj],
+                        &sub_top,
+                        &lo_top,
+                        &cur,
+                        inv_sub_sampling_ratio,
+                        false,
+                    );
+                    self.layers_output[jj] = lo;
+                    deltas_out = inv_sub_sample(self.sub_sampling[jj], &dpl);
+                    inv_sub_sampling_ratio *= self.sub_sampling[jj];
+                } else {
+                    let lo = std::mem::replace(&mut self.layers_output[jj], Array2::zeros((0, 0)));
+                    deltas_out = step(
+                        &mut self.layers[jj],
+                        &prev,
+                        &lo,
+                        &cur,
+                        inv_sub_sampling_ratio,
+                        false,
+                    );
+                    self.layers_output[jj] = lo;
+                }
+                self.layers_output[jj - 1] = prev;
+            }
+        }
+        deltas_out
+    }
+
+    /// `feedBackwardDouble` (`NeuralNetwork.hpp:353-362`): hcat `first | second` (forward
+    /// half on the LEFT) into an `(rows x neuron_nb[0])` matrix, run `feed_backward`, and
+    /// return the split-ready `deltas_out`. Empty `first` (0 rows) -> empty result.
+    pub fn feed_backward_double(
+        &mut self,
+        first: &Array2<f64>,
+        second: &Array2<f64>,
+        output_seq: &Array2<f64>,
+        deltas: &Array2<f64>,
+    ) -> Array2<f64> {
+        if first.nrows() == 0 {
+            return Array2::zeros((0, 0)); // :355
+        }
+        assert_eq!(first.nrows(), second.nrows(), "double: row-count mismatch");
+        assert_eq!(
+            first.ncols() + second.ncols(),
+            self.neuron_nb[0],
+            "double: first|second cols must sum to neuron_nb[0]"
+        );
+        let rows = first.nrows();
+        let mut hcat = Array2::zeros((rows, self.neuron_nb[0]));
+        let fc = first.ncols();
+        for t in 0..rows {
+            for j in 0..fc {
+                hcat[[t, j]] = first[[t, j]];
+            }
+            for j in 0..second.ncols() {
+                hcat[[t, fc + j]] = second[[t, j]];
+            }
+        }
+        self.feed_backward(&hcat, output_seq, deltas)
+    }
+
+    /// `getWeightsDerivatives` (`NeuralNetwork.hpp:98-111`): concatenate each layer's Nx2
+    /// `[deriv | count]` rows into `out`, layer-0-first (the `jj == 0` seed then vertical
+    /// hcat). Same block order `set_weights`/`get_weights` walk, so col0 matches the
+    /// Phase 0a flat weight packer element-for-element.
+    pub fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
+        for layer in &self.layers {
+            layer.get_weights_derivatives(out);
+        }
+    }
+
+    /// `resetWeightsDerivatives` (`NeuralNetwork.hpp:113-117`): zero every layer's deriv
+    /// accumulators + frame count.
+    pub fn reset_weights_derivatives(&mut self) {
+        for layer in &mut self.layers {
+            layer.reset_weights_derivatives();
+        }
+    }
 }
 
 /// `NeuralNetwork<L>::SubSample` (`NeuralNetwork.hpp:125-134`). `T x C -> floor(T/R) x
@@ -325,6 +680,31 @@ pub fn sub_sample(ratio: usize, input: &Array2<f64>) -> Array2<f64> {
             let src = jj * ratio + kk;
             for j in 0..c {
                 out[[jj, kk * c + j]] = input[[src, j]];
+            }
+        }
+    }
+    out
+}
+
+/// `NeuralNetwork<L>::InvSubSample` (`NeuralNetwork.hpp:136-145`), the inverse of
+/// `sub_sample`'s column-block stacking: `T x (C*R) -> (T*R) x C`. Source row `jj`'s
+/// block `[kk*C, (kk+1)*C)` un-stacks into output row `jj*R+kk`. The backward container
+/// loop uses it to inflate a sub-sampled layer's returned deltas back to the
+/// pre-decimation row count before feeding the layer below.
+///
+/// Quirk (Task 5): `sub_sample` FLOORS the input to `floor(T/R)` rows (dropping the
+/// trailing `T mod R`), so a round-trip `inv_sub_sample(R, sub_sample(R, x))` yields
+/// `floor(T/R)*R` rows, NOT `T` -- the dropped tail frames are never restored (this is
+/// how the container's returned `deltas_out` ends up shorter than the original input
+/// for odd `T`). See IMPROVEMENTS.md.
+pub fn inv_sub_sample(ratio: usize, input: &Array2<f64>) -> Array2<f64> {
+    let (t, c_wide) = input.dim();
+    let c = c_wide / ratio;
+    let mut out = Array2::zeros((t * ratio, c));
+    for jj in 0..t {
+        for kk in 0..ratio {
+            for j in 0..c {
+                out[[jj * ratio + kk, j]] = input[[jj, kk * c + j]];
             }
         }
     }

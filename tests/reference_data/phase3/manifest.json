@@ -19,7 +19,7 @@
     }
   },
   "net_backward_tol": {
-    "text": "NeuralNetwork<LSTMLayer>/<NeuronLayer>::feedBackward (NeuralNetwork.hpp:251-351) vs netBackwardLoop over the LSTM net [3,4,2] sub [2,1] (fwd + reverse) and the dense net [4,3,2] sub [1,2], T=11 (the SubSample interaction: decimated forward rows vs the InvSubSample delta inflation + running invSubSamplingRatio). max_ulp=0 all four. The reverse site pins the time-reversed cache consumption (feedBackwardReverse reverses input/output/deltas, runs the forward-order backward, reverses the returned deltas).",
+    "text": "NeuralNetwork<LSTMLayer>/<NeuronLayer>::feedBackward (NeuralNetwork.hpp:251-351) vs netBackwardLoop over the LSTM net [3,4,2] sub [2,1] (fwd + reverse) and the dense net [4,3,2] sub [1,2], T=11 (the SubSample interaction: decimated forward rows vs the InvSubSample delta inflation + running invSubSamplingRatio). max_ulp=0 all four (now covering BOTH the Nx2 derivs AND the returned deltas_out per site -- Task 5). The reverse site pins the time-reversed cache consumption (feedBackwardReverse reverses input/output/deltas, runs the forward-order backward, reverses the returned deltas). deltas_out row count is floor(T/R)*R (10, not 11): SubSample floors the trailing row, InvSubSample never restores it.",
     "net_lstm_backward_fwd": {
       "max_ulp": 0,
       "max_abs": "0.000e+00"
@@ -31,6 +31,20 @@
     "net_dense_backward": {
       "max_ulp": 0,
       "max_abs": "0.000e+00"
+    },
+    "deltasout_calibration": {
+      "net_lstm_backward_fwd_deltasout": {
+        "max_ulp": 8,
+        "max_abs": "8.674e-19"
+      },
+      "net_lstm_backward_rev_deltasout": {
+        "max_ulp": 16,
+        "max_abs": "8.674e-19"
+      },
+      "net_dense_backward_deltasout": {
+        "max_ulp": 0,
+        "max_abs": "0.000e+00"
+      }
     }
   },
   "blstm_backward_tol": {
@@ -114,6 +128,18 @@
     },
     "bwd_dense_logistic_deltasout.bin": {
       "rows": 6,
+      "cols": 4
+    },
+    "bwd_net_lstm_fwd_deltasout.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "bwd_net_lstm_rev_deltasout.bin": {
+      "rows": 10,
+      "cols": 3
+    },
+    "bwd_net_dense_deltasout.bin": {
+      "rows": 10,
       "cols": 4
     },
     "lstm_bwd_deltasprev_peep_all.bin": {

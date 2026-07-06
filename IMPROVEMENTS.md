@@ -1075,6 +1075,48 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `row0_spurious_cellstate` mutation (adding a `cs[row]` term at row 0 fails a golden). No fix
   candidate -- correct, intentional.
 
+- **[phase3] Container backward `InvSubSample` does NOT restore the SubSample-dropped tail frames --
+  the returned `deltas_out` has `floor(T/R)*R` rows, not `T`** (`NeuralNetwork.hpp:125-145`, port
+  `nn/network.rs::inv_sub_sample` + `Network::feed_backward`): the forward `SubSample(R, T-rows)` FLOORS
+  to `floor(T/R)` rows, silently dropping the trailing `T mod R` frames (already tracked as the forward
+  decimation quirk). The backward `InvSubSample(R, .)` inflates a `K`-row sub-sampled delta block back to
+  `K*R` rows by un-stacking the R column-blocks -- so a round-trip yields `floor(T/R)*R` rows, and the
+  dropped tail is GONE. For the real `[4,1]` LID net (T frames, layer-0 R=4) the layer-0 `deltas_out`
+  returned to the BLSTM wrapper is `floor(T/4)*4` rows wide, up to 3 frames short of the original input;
+  the wrapper never uses these tail rows (it splits the output-net deltas, not the LSTM `deltas_out`), so
+  the truncation is invisible downstream -- but a port that "helpfully" pads InvSubSample back to `T`
+  rows, or that asserts `deltas_out.nrows() == input.nrows()`, diverges from the legacy. The Task 5
+  goldens are a T=11, R=2 net: `sub_sample` floors 11->5, `inv_sub_sample` restores 5->10 (NOT 11).
+  Pinned by `inv_sub_sample_inverts_sub_sample_on_floored_input` (round-trip == the first 10 rows of the
+  11-row input, bit-exact) + the `(10, 3)`/`(10, 4)` structural row-count assertions in
+  `lstm_net_subsample_inversion_{fwd,rev}` / `dense_net_last_layer_subsample`, and the injected mutation
+  battery (skip-inflation, wrong-column-block). No fix candidate -- correct, intentional; the floor/expand
+  asymmetry is a direct consequence of the forward decimation and is load-bearing for the deltas_out shape.
+
+- **[phase3] Container backward `NeuronLayer` layer-0 frame count is `input.rows()`, not the (smaller)
+  delta rows it back-projects over** (`NeuronLayer.cpp:199`, exercised by `Network::feed_backward` over
+  the dense `[4,3,2]` sub `[1,2]` net): under a downstream SubSample the incoming `deltas` have FEWER rows
+  than the layer's stored input (that net's layer 0 receives 10 delta rows over an 11-row input).
+  `NeuronLayer::feedBackward` accumulates its weight derivatives over `deltas.rows()` (10) but bumps
+  `_NbOfSeqFedBackward` by `InputSeq.rows()` (11) -- so the Nx2 col1 (the normalizer denominator) for that
+  layer is 11, while the LSTM layers count `deltas.rows()`. The mismatch is intentional (each region's
+  count is whatever that layer's `:199`/`:720` line says) and load-bearing for the at-update-time
+  `col0 cwiseQuotient col1` normalization. Pinned by
+  `dense_net_count_reflects_input_rows_not_delta_rows` (layer-0 count == 11, layer-1 count == 5) and the
+  `get_derivatives_layout_layer0_first` layout check. No fix candidate -- documented for the
+  normalization audit.
+
+- **[phase3] Container backward `net_*_deltasout` calibration: the returned `deltas_out` is a `deltas*W^T`
+  GEMM (k=O) so the REAL Eigen path diverges from the ascending reimpl in the last ULP** (Task 5 harness
+  `net_lstm_backward_{fwd,rev}_deltasout` / `net_dense_backward_deltasout`): the Nx2 DERIVS at these
+  synthetic net shapes are k=1 outer products and match the real class bit-for-bit (`max_ulp=0`), but the
+  layer-1 `deltas*W^T` back-projection (k=O=4 for the LSTM net) is a blocked-vs-ascending GEMM that
+  diverges (fwd 8 ULP, rev 16 ULP, max_abs ~8.7e-19; the dense net's k=O=3 happened to be 0 ULP). The
+  reimpl dump IS the golden (same ascending `matmul_seq` the Rust uses), so the Rust matches the dump; the
+  divergence is recorded as calibration in `manifest.json:net_backward_tol.deltasout_calibration`, NOT
+  gated to 0 like the derivs. Same non-local blocked-GEMM story as the Phase 2 forward; documented here so
+  the nonzero calibration line is not mistaken for a port bug.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

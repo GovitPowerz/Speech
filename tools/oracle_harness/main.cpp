@@ -6951,6 +6951,26 @@ int main(int argc, char** argv) {
             }
         };
 
+        // Full-matrix ULP/abs gap over an arbitrary (T x C) tensor (deltas_out), not
+        // just col 0 -- used by the Phase 3 Task 5 net-backward deltas_out comparison.
+        auto deltasGap = [](const Eigen::MatrixXd& real, const Eigen::MatrixXd& reimpl,
+                            long& maxUlp, double& maxAbs) {
+            long rows = std::min(real.rows(), reimpl.rows());
+            long cols = std::min(real.cols(), reimpl.cols());
+            for (long r = 0; r < rows; ++r) {
+                for (long c = 0; c < cols; ++c) {
+                    double a = real(r, c), b = reimpl(r, c);
+                    double absGap = std::fabs(a - b);
+                    if (absGap > maxAbs) maxAbs = absGap;
+                    uint64_t ab, bb;
+                    std::memcpy(&ab, &a, sizeof(double));
+                    std::memcpy(&bb, &b, sizeof(double));
+                    long ulp = (ab > bb) ? (long)(ab - bb) : (long)(bb - ab);
+                    if (ulp > maxUlp) maxUlp = ulp;
+                }
+            }
+        };
+
         // ---- Site lstm_backward: standalone LSTMLayer::feedBackward -----------
         // Grid {I=3,O=2,T=7; I=5,O=4,T=6}. Build the real layer, run feedForward to
         // populate _Gates/_CellStates/_CellsIn, then feedBackward(deltas). Mirror with
@@ -7157,21 +7177,36 @@ int main(int argc, char** argv) {
                 net.setWeights(flat);
                 net.resetWeightsDerivatives();
                 Eigen::MatrixXd realOut(outRows, 2);
-                if (reverse) { net.feedForwardReverse(input, realOut); net.feedBackwardReverse(input, realOut, seedDeltas); }
-                else { net.feedForward(input, realOut); net.feedBackward(input, realOut, seedDeltas); }
+                Eigen::MatrixXd realDeltasOut;
+                if (reverse) { net.feedForwardReverse(input, realOut); realDeltasOut = net.feedBackwardReverse(input, realOut, seedDeltas); }
+                else { net.feedForward(input, realOut); realDeltasOut = net.feedBackward(input, realOut, seedDeltas); }
                 Eigen::MatrixXd realDerivs = net.getWeightsDerivatives();
 
                 LstmSubNet sub;
                 sub.build(flat, nnL, ssL, reverse);
                 Eigen::MatrixXd fout = sub.forwardCapture(input);
-                sub.backward(input, fout, seedDeltas);
+                Eigen::MatrixXd reimplDeltasOut = sub.backward(input, fout, seedDeltas);
                 Eigen::MatrixXd reimplDerivs = sub.flatDerivs();
                 long maxUlp = 0; double maxAbs = 0.0;
                 derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
                 std::cout << "NN_TOL site=net_lstm_backward" << (reverse ? "_rev" : "_fwd")
                           << " max_ulp=" << maxUlp << " max_abs=" << std::scientific
                           << std::setprecision(3) << maxAbs << "\n";
+                // Phase 3 Task 5: also compare + dump the returned deltas_out (the layer-0
+                // InvSubSample'd deltasPreviousLayer, NeuralNetwork.hpp:271-272/299). Row
+                // count is floor(T/R)*R (11/2*2 = 10), NOT T -- the trailing SubSample row
+                // is dropped by the forward floor and never restored by InvSubSample. The
+                // reimpl IS the golden; deltas_out is a deltas*W^T GEMM (k=O) so the REAL
+                // Eigen path diverges in the last ULP (recorded as a SEPARATE calibration
+                // site, NOT gated to 0 -- unlike the k=1 outer-product derivs above).
+                long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
+                deltasGap(realDeltasOut, reimplDeltasOut, maxUlpDeltasOut, maxAbsDeltasOut);
+                std::cout << "NN_TOL site=net_lstm_backward" << (reverse ? "_rev" : "_fwd")
+                          << "_deltasout max_ulp=" << maxUlpDeltasOut << " max_abs="
+                          << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
                 Matrix2BinaryFile(out + (reverse ? "bwd_net_lstm_rev_derivs.bin" : "bwd_net_lstm_fwd_derivs.bin"), reimplDerivs);
+                Matrix2BinaryFile(out + (reverse ? "bwd_net_lstm_rev_deltasout.bin" : "bwd_net_lstm_fwd_deltasout.bin"), reimplDeltasOut);
+                ++dumps;
                 ++dumps;
             }
         }
@@ -7193,19 +7228,31 @@ int main(int argc, char** argv) {
             net.resetWeightsDerivatives();
             Eigen::MatrixXd realOut(outRows, 2);
             net.feedForward(input, realOut);
-            net.feedBackward(input, realOut, seedDeltas);
+            Eigen::MatrixXd realDeltasOut = net.feedBackward(input, realOut, seedDeltas);
             Eigen::MatrixXd realDerivs = net.getWeightsDerivatives();
 
             DenseSubNet sub;
             sub.build(flat, nnD, ssD);
             Eigen::MatrixXd fout = sub.forwardCapture(input);
-            sub.backward(input, fout, seedDeltas);
+            Eigen::MatrixXd reimplDeltasOut = sub.backward(input, fout, seedDeltas);
             Eigen::MatrixXd reimplDerivs = sub.flatDerivs();
             long maxUlp = 0; double maxAbs = 0.0;
             derivGap(realDerivs, reimplDerivs, maxUlp, maxAbs);
             std::cout << "NN_TOL site=net_dense_backward max_ulp=" << maxUlp
                       << " max_abs=" << std::scientific << std::setprecision(3) << maxAbs << "\n";
+            // Phase 3 Task 5: also compare + dump the returned deltas_out. Layer-1
+            // SubSample(2) decimates to 5 rows, InvSubSample restores to 10; layer 0
+            // (no subsample) back-projects at deltas.rows()=10 while its count is
+            // input.rows()=11 (NeuronLayer.cpp:199) -- deltas_out is 10 x 4. The
+            // deltas*W^T GEMM (k=O) may diverge from the real Eigen path in the last
+            // ULP -- a SEPARATE calibration site (the reimpl dump is the golden).
+            long maxUlpDeltasOut = 0; double maxAbsDeltasOut = 0.0;
+            deltasGap(realDeltasOut, reimplDeltasOut, maxUlpDeltasOut, maxAbsDeltasOut);
+            std::cout << "NN_TOL site=net_dense_backward_deltasout max_ulp=" << maxUlpDeltasOut
+                      << " max_abs=" << std::scientific << std::setprecision(3) << maxAbsDeltasOut << "\n";
             Matrix2BinaryFile(out + "bwd_net_dense_derivs.bin", reimplDerivs);
+            Matrix2BinaryFile(out + "bwd_net_dense_deltasout.bin", reimplDeltasOut);
+            ++dumps;
             ++dumps;
         }
 

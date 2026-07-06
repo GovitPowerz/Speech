@@ -95,6 +95,19 @@ EXPECTED_DELTASOUT_SHAPES = {
     "bwd_dense_logistic_deltasout.bin": (6, 4),
 }
 
+# Task 5: the Network<L>::feedBackward returned deltas_out (deltasPreviousLayer) at
+# the two net sites, dumped alongside the existing Nx2 net-deriv goldens. The row
+# count is floor(T/R)*R, NOT T: SubSample floors 11 -> 5 rows, InvSubSample restores
+# 5 -> 10, and the dropped trailing row is never recovered (documented quirk).
+#   net_lstm  [3,4,2] sub [2,1]: layer-0 InvSubSample(2) of a 5-row deltasPrev -> 10 x 3.
+#   net_dense [4,3,2] sub [1,2]: layer-1 InvSubSample(2) -> 10 rows; layer 0 back-projects
+#                                at deltas.rows()=10 -> 10 x 4 (fan-in of net input).
+NET_BWD_DELTASOUT_SHAPES = {
+    "bwd_net_lstm_fwd_deltasout.bin": (10, 3),
+    "bwd_net_lstm_rev_deltasout.bin": (10, 3),
+    "bwd_net_dense_deltasout.bin": (10, 4),
+}
+
 # Task 4: LSTMLayer::feedBackward per-variant goldens (synthetic I=2,O=2,T=5, odd
 # length). deltasPreviousLayer is T x I = 5 x 2; derivs are Nx2 with
 # N = 4*I*O + 4*O*O + 12*O + 4*O = 16 + 16 + 24 + 8 = 64 (layer-native shape). The
@@ -161,6 +174,15 @@ SYNTHETIC_TOL_SITES = [
 ]
 REAL_TOL_SITE = "blstm_real_backward"
 
+# Task 5: the net-container deltas_out is a deltas*W^T GEMM (k=O), so the REAL Eigen
+# path diverges from the ascending reimpl in the last ULP -- recorded as calibration
+# (the reimpl dump is the golden), NOT gated to 0 like the k=1 outer-product derivs.
+DELTASOUT_CALIB_SITES = [
+    "net_lstm_backward_fwd_deltasout",
+    "net_lstm_backward_rev_deltasout",
+    "net_dense_backward_deltasout",
+]
+
 # NN_PROBE backward sites (pure-arithmetic outer product + back-projection at synthetic
 # k -- Eigen vs matSeq must agree bit-for-bit, diverged=0).
 PROBE_SITES = {
@@ -214,7 +236,7 @@ def _parse_nn_tol(stdout: str) -> dict[str, dict[str, object]]:
     tols: dict[str, dict[str, object]] = {}
     for m in NN_TOL_RE.finditer(stdout):
         tols[m["site"]] = {"max_ulp": int(m["max_ulp"]), "max_abs": m["max_abs"]}
-    for site in [*SYNTHETIC_TOL_SITES, REAL_TOL_SITE]:
+    for site in [*SYNTHETIC_TOL_SITES, REAL_TOL_SITE, *DELTASOUT_CALIB_SITES]:
         if site not in tols:
             raise SystemExit(f"NN_TOL line for site={site} missing from harness stdout")
     # Synthetic backward sites MUST be bit-exact vs the real compiled class.
@@ -276,6 +298,9 @@ def main() -> None:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
         # Task 3: dense backward deltas_out goldens (same harness stage).
         for name in EXPECTED_DELTASOUT_SHAPES:
+            shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
+        # Task 5: net-container backward deltas_out goldens (same harness stage).
+        for name in NET_BWD_DELTASOUT_SHAPES:
             shutil.copy2(tmp_dir / name, PHASE3_DIR / name)
         # Task 4: LSTM backward per-variant goldens (deltasPreviousLayer + derivs).
         for name in (*LSTM_BWD_DELTASPREV_SHAPES, *LSTM_BWD_DERIVS_SHAPES):
@@ -411,13 +436,17 @@ def main() -> None:
                 "vs netBackwardLoop over the LSTM net [3,4,2] sub [2,1] (fwd + reverse) and the "
                 "dense net [4,3,2] sub [1,2], T=11 (the SubSample interaction: decimated forward "
                 "rows vs the InvSubSample delta inflation + running invSubSamplingRatio). "
-                "max_ulp=0 all four. The reverse site pins the time-reversed cache consumption "
-                "(feedBackwardReverse reverses input/output/deltas, runs the forward-order "
-                "backward, reverses the returned deltas)."
+                "max_ulp=0 all four (now covering BOTH the Nx2 derivs AND the returned "
+                "deltas_out per site -- Task 5). The reverse site pins the time-reversed cache "
+                "consumption (feedBackwardReverse reverses input/output/deltas, runs the "
+                "forward-order backward, reverses the returned deltas). deltas_out row count is "
+                "floor(T/R)*R (10, not 11): SubSample floors the trailing row, InvSubSample "
+                "never restores it."
             ),
             "net_lstm_backward_fwd": tols["net_lstm_backward_fwd"],
             "net_lstm_backward_rev": tols["net_lstm_backward_rev"],
             "net_dense_backward": tols["net_dense_backward"],
+            "deltasout_calibration": {site: tols[site] for site in DELTASOUT_CALIB_SITES},
         },
         "blstm_backward_tol": {
             "text": (
@@ -469,6 +498,7 @@ def main() -> None:
         "dumps": {
             **{name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in EXPECTED_DELTASOUT_SHAPES.items()},
+            **{name: {"rows": r, "cols": c} for name, (r, c) in NET_BWD_DELTASOUT_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in LSTM_BWD_DELTASPREV_SHAPES.items()},
             **{name: {"rows": r, "cols": c} for name, (r, c) in LSTM_BWD_DERIVS_SHAPES.items()},
         },
