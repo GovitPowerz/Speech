@@ -49,6 +49,19 @@ pub fn load_bin_phase2b(name: &str) -> Array2<f64> {
     Array2::from_shape_vec((rows, cols).f(), data).unwrap()
 }
 
+/// Absolute path to a file under `tests/reference_data/phase3/`.
+pub fn fixture_phase3(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase3")
+        .join(name)
+}
+
+/// Load a phase3 `.bin` fixture (column-major f64) into an `Array2<f64>` (rows x cols).
+pub fn load_bin_phase3(name: &str) -> Array2<f64> {
+    let (rows, cols, data) = speech::io::binary::read_matrix(&fixture_phase3(name)).unwrap();
+    Array2::from_shape_vec((rows, cols).f(), data).unwrap()
+}
+
 /// Elementwise bit-exact comparison; reports the first mismatch index + hex bits.
 /// Used for PORTABLE goldens (pure arithmetic): they stay bit-exact on every libm.
 pub fn assert_bits_eq(a: &Array2<f64>, b: &Array2<f64>, label: &str) {

@@ -1,0 +1,99 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "backward_reimpl": {
+    "text": "Phase 3 Task 1: the harness-local ascending-loop BACKWARD reimpl family (lstmForwardLoopCache/lstmBackwardLoop/lstmBackwardReverseLoop, denseBackwardLoop, netBackwardLoop/netBackwardReverseLoop, and the LstmSubNet/DenseSubNet/BlstmBack container reimpls) mirrors the Phase 2 forward reimpl family and is built on matSeq + the same file-scope kernels. For each site the harness constructs the REAL compiled layer/net, runs its forward THEN backward on the same operands, harvests getWeightsDerivatives().col(0) (the summed derivative), and compares it element-by-element (ULP) against the reimpl's col(0). The reimpl-produced Nx2 derivs (col0 = summed deriv, col1 = _NbOfSeqFedBackward frame count replicated) ARE the goldens Tasks 3-6 consume -- NOT the real-Eigen derivs, because the backward contains Eigen GEMMs at NN-wide k (_FeedbackWeights*test LSTMLayer.cpp:703, _InputWeights*testM :707, NeuronLayer deltas*_Weights.transpose() :202) that diverge from ascending accumulation at the real net's k>=23 shapes, doubly non-local because the forward already seeds the caches. Derivatives are recomputed FROM the post-activation caches (_Gates/_CellStates/_CellsIn) via the activation deriv structs (GatesFunction/Maxmin2/Identity::deriv) -- NO forward change. The seed deltas for the BLSTM sites come from the REAL compiled CostLaw::computeDeltas (bit-portable: the synthetic site's MULTICLASS softmax+CE path is pure arithmetic; the real net's scalar log-law seed is the same-libm calibration path)."
+  },
+  "lstm_backward_tol": {
+    "text": "Standalone LSTMLayer::feedBackward (LSTMLayer.cpp:518-723) vs lstmBackwardLoop over {I=3,O=2,T=7; I=5,O=4,T=6}, all peepholes on, deterministic synthetic weights/input/deltas. max_ulp=0 means the reimpl reproduces the real layer's getWeightsDerivatives bit-for-bit at these shapes (the reverse-time loop, the O->state->C->F->I gate-derivative order, the 12-row peephole index map, the row==0 no-cellstate forget branch, the deltasForgetGatetmp save/read).",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00"
+  },
+  "dense_backward_tol": {
+    "text": "Standalone NeuronLayer::feedBackward (NeuronLayer.cpp:151-207) vs denseBackwardLoop over {I=4,O=3 hidden; I=4,O=3 last; I=4,O=1 last/logistic}. max_ulp=0. The hidden and last sites share col0 derivs (the weight-deriv input.col*deltas.row is lastLayer-agnostic; lastLayer only changes deltas_out, where the softmax+CE fusion means the output layer applies NO activation Jacobian -- the fusion lives in CostLaw). The blstm_feedbackward site is the end-to-end proof of the no-double-count property.",
+    "max_ulp": 0,
+    "max_abs": "0.000e+00"
+  },
+  "net_backward_tol": {
+    "text": "NeuralNetwork<LSTMLayer>/<NeuronLayer>::feedBackward (NeuralNetwork.hpp:251-351) vs netBackwardLoop over the LSTM net [3,4,2] sub [2,1] (fwd + reverse) and the dense net [4,3,2] sub [1,2], T=11 (the SubSample interaction: decimated forward rows vs the InvSubSample delta inflation + running invSubSamplingRatio). max_ulp=0 all four. The reverse site pins the time-reversed cache consumption (feedBackwardReverse reverses input/output/deltas, runs the forward-order backward, reverses the returned deltas).",
+    "net_lstm_backward_fwd": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "net_lstm_backward_rev": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "net_dense_backward": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    }
+  },
+  "blstm_backward_tol": {
+    "text": "BLSTMNeuralNetwork<LSTMLayer>::feedBackward (BLSTMNeuralNetwork.cpp:439-460) + getWeightsDerivatives (:255-276) vs BlstmBack. The synthetic site (blstm_feedbackward: LSTM [3,4,2] sub [2,1] fwd+bwd, output [4,5,2] sub [1,1], T=12, multiclass targets, backprop active) is max_ulp=0 -- the reimpl reproduces the whole fan-out (CostLaw seed -> feedBackwardDouble hcat -> fwd feedBackward + bwd feedBackwardReverse) bit-for-bit, proving the Nx2 flat deriv layout (fwd|bwd|output|[0|1|0|1] stats tail) matches getWeightsDerivatives element-for-element. The real-net site (blstm_real_backward: the 33,671-weight net on e2e_input.bin, InputNormalizationType -1, scalar-VAD targets, log-law CostLaw seed) is EXPECTED NONZERO -- k=23/24/48 GEMM divergence, RECORDED here as Phase 4 calibration (the reimpl derivs ARE the golden, bwd_blstm_real_derivs.bin).",
+    "synthetic": {
+      "max_ulp": 0,
+      "max_abs": "0.000e+00"
+    },
+    "real_calibration": {
+      "max_ulp": 434176,
+      "max_abs": "1.155e-14"
+    },
+    "real_nb_derivs": 33671
+  },
+  "nn_backward_product_probes": {
+    "text": "Pure-arithmetic backward products at synthetic k: the weight-deriv outer product input.col(row)*deltas.row(row) (small k) and the deltas*W^T back-projection (k=O). Eigen's product vs the ascending matSeq must agree bit-for-bit (diverged=0) at these shapes -- the same NN_PROBE format as the Phase 2 forward product probes.",
+    "sites": {
+      "bwd_outer_product": {
+        "shape": "(4x1)*(1x3) weight-deriv outer product input.col(row)*deltas.row(row).",
+        "diverged": false,
+        "mismatches": 0,
+        "total": 12
+      },
+      "bwd_backproj": {
+        "shape": "(6x3)*(3x4) deltas*W^T back-projection (k=O), the divergent GEMM at NN width.",
+        "diverged": false,
+        "mismatches": 0,
+        "total": 24
+      }
+    }
+  },
+  "dumps": {
+    "bwd_lstm_derivs.bin": {
+      "rows": 72,
+      "cols": 2
+    },
+    "bwd_dense_hidden_derivs.bin": {
+      "rows": 15,
+      "cols": 2
+    },
+    "bwd_dense_last_derivs.bin": {
+      "rows": 15,
+      "cols": 2
+    },
+    "bwd_dense_logistic_derivs.bin": {
+      "rows": 5,
+      "cols": 2
+    },
+    "bwd_net_lstm_fwd_derivs.bin": {
+      "rows": 304,
+      "cols": 2
+    },
+    "bwd_net_lstm_rev_derivs.bin": {
+      "rows": 304,
+      "cols": 2
+    },
+    "bwd_net_dense_derivs.bin": {
+      "rows": 29,
+      "cols": 2
+    },
+    "bwd_blstm_derivs.bin": {
+      "rows": 651,
+      "cols": 2
+    },
+    "bwd_blstm_real_derivs.bin": {
+      "rows": 33671,
+      "cols": 2
+    }
+  }
+}
