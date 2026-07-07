@@ -320,16 +320,17 @@ fn speech_duration(seg: &Segmentation) -> f64 {
     total
 }
 
-/// Serialize `seg` as a VRCTS XML document. Direct port of
-/// `Segmentation::toFile_VRCTS` (`Segmentation.cpp:543-587`), single-channel
-/// (`chan = 1`), offset folded to `0.0` (this container has no `_AudioOffset`
-/// field).
+/// Serialize `seg` as a VRCTS XML document for display channel `chan` (1-based).
+/// Direct port of one iteration of `Segmentation::toFile_VRCTS`'s per-channel loop
+/// (`Segmentation.cpp:543-588`), offset folded to `0.0` (this container has no
+/// `_AudioOffset` field). The legacy uses `chan+1` (1-based) for `num`/`ch`; the
+/// `spkid`/`gender` are always `1`.
 ///
 /// `toFile_VRCTS` calls `sanitize()` on the channel before summing/printing
 /// (`Segmentation.cpp:545`); we sanitize a clone so the caller's `seg` is not
 /// mutated. Post-sanitize boundaries lie exactly on the 1e-4 grid, so the
 /// 4-decimal `stime`/`etime` display is exact.
-pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> String {
+fn to_vrcts_string_chan(seg: &Segmentation, name: &str, path_attr: &str, chan: usize) -> String {
     let mut seg = seg.clone();
     seg.sanitize();
     let seg = &seg;
@@ -344,14 +345,14 @@ pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> Strin
     out.push_str("</ProcList>\n");
     out.push_str("<ChannelList>\n");
     out.push_str(&format!(
-        "<Channel num=\"1\" sigdur=\"{:.2}\" spdur=\"{:.2}\"/>\n",
+        "<Channel num=\"{chan}\" sigdur=\"{:.2}\" spdur=\"{:.2}\"/>\n",
         seg.audio_duration(),
         speech_dur
     ));
     out.push_str("</ChannelList>\n");
     out.push_str("<SpeakerList>\n");
     out.push_str(&format!(
-        "<Speaker ch=\"1\" dur=\"{speech_dur:.2}\" gender=\"1\" spkid=\"1\"/>\n"
+        "<Speaker ch=\"{chan}\" dur=\"{speech_dur:.2}\" gender=\"1\" spkid=\"1\"/>\n"
     ));
     out.push_str("</SpeakerList>\n");
     out.push_str("<SegmentList>\n");
@@ -359,7 +360,7 @@ pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> Strin
     for i in 0..segs.len().saturating_sub(1) {
         if segs[i].ty == SegClass::Speech {
             out.push_str(&format!(
-                "<SpeechSegment ch=\"1\" sconf=\"1.00\" stime=\"{:.4}\" etime=\"{:.4}\" spkid=\"1\"/>\n",
+                "<SpeechSegment ch=\"{chan}\" sconf=\"1.00\" stime=\"{:.4}\" etime=\"{:.4}\" spkid=\"1\"/>\n",
                 segs[i].begin,
                 segs[i + 1].begin
             ));
@@ -370,9 +371,49 @@ pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> Strin
     out
 }
 
-/// Write `seg` as VRCTS XML to `out`. Wraps [`to_vrcts_string`].
+/// Serialize `seg` as a single-channel VRCTS XML document (`ch = 1`). Kept for the
+/// single-channel byte goldens (Phase 0b-ii/2b) which pin `chan="1"` documents.
+/// Shape-generic: identical to channel 1 of the multi-channel writer.
+pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> String {
+    to_vrcts_string_chan(seg, name, path_attr, 1)
+}
+
+/// Write `seg` as single-channel VRCTS XML to `out`. Wraps [`to_vrcts_string`].
 pub fn write_vrcts(seg: &Segmentation, name: &str, path_attr: &str, out: &Path) -> Result<()> {
     std::fs::write(out, to_vrcts_string(seg, name, path_attr))?;
+    Ok(())
+}
+
+/// Write the per-channel VRCTS XML fan-out for a multi-channel hypothesis, matching
+/// `Segmentation::toFile_VRCTS` (`Segmentation.cpp:543-590`): for `_ChannelNb > 1`
+/// one `<basefilename>_chan_<n>.xml` per channel (`n = chan+1`); for `_ChannelNb == 1`
+/// a single `<basefilename>.xml`. `name`/`path_attr` are the shared `AudioDoc` attrs
+/// (legacy `filenameShort` / `_AudioFilename`), constant across channels. `basefilename`
+/// is the directory + basename WITHOUT extension (the legacy `basefilename` local).
+pub fn write_vrcts_multichannel(
+    segs: &[Segmentation],
+    name: &str,
+    path_attr: &str,
+    basefilename: &Path,
+) -> Result<()> {
+    let multi = segs.len() > 1;
+    for (chan0, seg) in segs.iter().enumerate() {
+        // legacy: chan+1 (1-based) for both the filename suffix and the display fields.
+        let chan1 = chan0 + 1;
+        let content = to_vrcts_string_chan(seg, name, path_attr, chan1);
+        let path = if multi {
+            // legacy: "%s_chan_%s.xml" with basefilename + chan+1.
+            let mut p = basefilename.as_os_str().to_owned();
+            p.push(format!("_chan_{chan1}.xml"));
+            std::path::PathBuf::from(p)
+        } else {
+            // legacy: "%s.xml" with basefilename.
+            let mut p = basefilename.as_os_str().to_owned();
+            p.push(".xml");
+            std::path::PathBuf::from(p)
+        };
+        std::fs::write(&path, content)?;
+    }
     Ok(())
 }
 

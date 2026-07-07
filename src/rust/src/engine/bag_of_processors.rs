@@ -20,7 +20,7 @@ use crate::tasks::sad::{
 };
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{
-    ScoreReport, compute_errors, load_ref_csv, load_ref_stm, write_vrcts,
+    ScoreReport, compute_errors, load_ref_csv, load_ref_stm, write_vrcts_multichannel,
 };
 
 /// `conf.get<int>(name)` (required, no default): missing key is an error.
@@ -789,21 +789,29 @@ impl BagOfProcessors {
             // legacy: VRCTS write. Scored branch (`:352-356`) writes ONLY when
             // dumpDir is set; unscored branch (`:394-401`) ALWAYS writes (next to
             // the audio when dumpDir is empty). Both use the basename quirk (strip
-            // the last 4 chars = extension).
+            // the last 4 chars = extension) to build `basefilename`, then call
+            // `seg.toFile_VRCTS(basefilename)` which fans out one document per
+            // channel (`<basefilename>_chan_<n>.xml` for `_ChannelNb > 1`, else
+            // `<basefilename>.xml`; `Segmentation.cpp:543-590`).
             //
-            // KNOWN GAP: single-channel write (`seg_per_chan[0]` only). The legacy
-            // `Segmentation::toFile_VRCTS` (`Segmentation.cpp:543-590`) loops over
-            // ALL `_ChannelNb` channels, writing one `<basename>_chan_<n>.xml` per
-            // channel (or a single `<basename>.xml` when `_ChannelNb == 1`); this
-            // port always emits channel 0 only, so channel 2+ segments are dropped
-            // from VRCTS output on stereo audio. Closed in Task 8 against the real
-            // compiled `toFile_VRCTS` byte golden. See IMPROVEMENTS.md
-            // ("single-channel VRCTS write on the corpus path").
+            // `name`/`path` inside `toFile_VRCTS` are derived from
+            // `_AudioFilename` NOT from `basefilename`: `name` (filenameShort) is
+            // the last path component of the audio file minus its 4-char
+            // extension (`:553-561`), `path` is the full audio filename (`:570`).
+            // Multi-channel fan-out closed in Task 8 against the real compiled
+            // `toFile_VRCTS` byte golden (see IMPROVEMENTS.md).
             let base_last = base_from_last_slash(file_name);
+            let vrcts_name = base_from_last_slash(file_name);
+            let vrcts_path = file_name;
             if scored {
                 if !dump_dir.is_empty() {
                     let out = format!("{dump_dir}/{base_last}");
-                    write_vrcts(&seg_per_chan[0], "", "", Path::new(&out))?;
+                    write_vrcts_multichannel(
+                        &seg_per_chan,
+                        &vrcts_name,
+                        vrcts_path,
+                        Path::new(&out),
+                    )?;
                 }
             } else {
                 let out = if !dump_dir.is_empty() {
@@ -812,7 +820,7 @@ impl BagOfProcessors {
                     // No dumpDir: strip the extension from the FULL path (`:399`).
                     strip_last_4(file_name)
                 };
-                write_vrcts(&seg_per_chan[0], "", "", Path::new(&out))?;
+                write_vrcts_multichannel(&seg_per_chan, &vrcts_name, vrcts_path, Path::new(&out))?;
             }
 
             // legacy: :403 audio.reset() before the next config.

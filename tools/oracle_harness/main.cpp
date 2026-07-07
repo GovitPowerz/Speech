@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -28,6 +30,7 @@
 #include "BLSTMSpectralSegmenter.h"
 #include "ConfigFile.h"
 #include "CorpusItem.h"
+#include "CorpusProcessor.h"
 #include "Helpers.hpp"
 #include "InputStatistics.h"
 #include "iof/io.hpp"
@@ -2149,6 +2152,15 @@ int main(int argc, char** argv) {
     std::string signalConfigPath = (argc > 9)
         ? std::string(argv[9])
         : std::string("../../tests/reference_data/phase2b/signal.config");
+
+    // Phase 4a Task 8: tier-1 corpus workdir (a FIXED absolute path seeded with the
+    // committed corpora + configs by the extractor). The phase4a_tier1 stage chdir's
+    // into it and runs the REAL CorpusProcessor there so .mat + VRCTS outputs land at
+    // a byte-reproducible path (spec 2b convention). Empty -> the stage is skipped
+    // (so the extractor can run the earlier stages without the corpus seed present).
+    std::string corpusWorkdir = (argc > 10) ? std::string(argv[10]) : std::string("");
+    std::string tier1TdcConfig = (argc > 11) ? std::string(argv[11]) : std::string("tier1_tdc.config");
+    std::string tier1LtsvConfig = (argc > 12) ? std::string(argv[12]) : std::string("tier1_ltsv_powermel.config");
 
     int dumps = 0;
 
@@ -8125,6 +8137,113 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "OK: rprop trajectories dumped (trajA 5 steps, trajB 48 steps)\n";
+    }
+
+    // =====================================================================
+    // --- Phase 4a Task 8: tier-1 REAL CorpusProcessor stack ---------------
+    // Runs the REAL compiled CorpusProcessor(configs, mode).run() on the
+    // committed 3-file 2-channel corpus at a FIXED path, dumping the raw .mat
+    // outputs (converted to .bin by the extractor via scipy) and the
+    // multi-channel VRCTS xml (the carried-over multi-channel byte oracle).
+    // Three runs: solo (-s, TDC, epochs->0), train (-m, LTSV, epochs 2),
+    // multiconfig (-m, both configs). The stage chdir's into the corpus workdir
+    // so the CorpusProcessor's relative output filenames land there.
+    //
+    // legacy: CorpusProcessor.cpp:48-404. The mode is a char* the legacy MUTATES
+    // (mode[1]='m' etc.), so writable 2-char buffers are passed. The Mat_Open
+    // check after each run fails fast on matio issues (spec Step 1).
+    if (!corpusWorkdir.empty()) {
+        char origCwd[4096];
+        if (!getcwd(origCwd, sizeof(origCwd))) {
+            std::cerr << "phase4a_tier1: getcwd failed\n";
+            return 1;
+        }
+        if (chdir(corpusWorkdir.c_str()) != 0) {
+            std::cerr << "phase4a_tier1: chdir to " << corpusWorkdir << " failed\n";
+            return 1;
+        }
+
+        // Assert a just-written .mat opens (fail fast on matio issues, spec Step 1).
+        auto assertMatOpens = [](const std::string& path) {
+            mat_t* m = Mat_Open(path.c_str(), MAT_ACC_RDONLY);
+            if (!m) {
+                std::cerr << "phase4a_tier1: Mat_Open failed for " << path << "\n";
+                exit(1);
+            }
+            Mat_Close(m);
+        };
+
+        // The legacy VRCTS write is an ofstream to `dumpDir/basefilename...`; the dir
+        // must PRE-EXIST (ofstream never creates it) or the write silently no-ops.
+        // Pre-create every Dump_Directory the runs below reference (idempotent).
+        for (const char* d : {"vrcts_solo", "vrcts_train", "vrcts_multi_tdc", "vrcts_multi_ltsv"}) {
+            mkdir(d, 0755);
+        }
+
+        // --- Run 1: solo (-s), TDC (Algo 1), epochs overridden to 0. -----------
+        // -s is UNSCORED (scored branch is m/M/t/T only): VRCTS is ALWAYS written
+        // (the unscored branch), so the 2-channel excerpt yields _chan_1/_chan_2
+        // documents -- the multi-channel VRCTS byte oracle.
+        {
+            ConfigFile conf(tier1TdcConfig, '_');
+            conf.set_val<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            conf.set_val<std::string>("multiConfigResultsOutputFile", std::string("solo_tdc.mat"));
+            conf.set_val<std::string>("Dump_Directory", std::string("vrcts_solo"));
+            std::vector<ConfigFile> configs{conf};
+            char mode[3] = {'-', 's', '\0'};
+            CorpusProcessor cp(configs, mode);
+            cp.run();
+            assertMatOpens("solo_tdc.mat");
+        }
+
+        // --- Run 2: train (-m), LTSV powermel (Algo 2), epochs 2. --------------
+        // -m is SCORED (VRCTS written since Dump_Directory is set). CostMem is
+        // (epochs+2) x nbConf = 4 x 1 (the final saveResults writes topRows(4)).
+        {
+            ConfigFile conf(tier1LtsvConfig, '_');
+            conf.set_val<std::string>("multiConfigResultsOutputFile", std::string("train_ltsv.mat"));
+            conf.set_val<std::string>("Dump_Directory", std::string("vrcts_train"));
+            std::vector<ConfigFile> configs{conf};
+            char mode[3] = {'-', 'm', '\0'};
+            CorpusProcessor cp(configs, mode);
+            cp.run();
+            assertMatOpens("train_ltsv.mat");
+        }
+
+        // --- Run 3: multiconfig (-m), BOTH configs. ----------------------------
+        // ResultsE interleaves (file, conf, chan) -- config 0 (TDC) then config 1
+        // (LTSV) rows per file. The output filename comes from configs[0]
+        // (CorpusProcessor.cpp:52), so it is set on the TDC config. Epochs come
+        // from configs[0] too; overridden to 0 to keep the multiconfig run a
+        // single-epoch solo-style pass (CostMem 1 x 2), so the row-interleaving
+        // golden isolates transformResults from the training loop.
+        {
+            ConfigFile confTdc(tier1TdcConfig, '_');
+            confTdc.set_val<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            confTdc.set_val<std::string>("multiConfigResultsOutputFile", std::string("multiconfig.mat"));
+            confTdc.set_val<std::string>("Dump_Directory", std::string("vrcts_multi_tdc"));
+            ConfigFile confLtsv(tier1LtsvConfig, '_');
+            confLtsv.set_val<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            confLtsv.set_val<std::string>("Dump_Directory", std::string("vrcts_multi_ltsv"));
+            std::vector<ConfigFile> configs{confTdc, confLtsv};
+            char mode[3] = {'-', 'm', '\0'};
+            CorpusProcessor cp(configs, mode);
+            cp.run();
+            assertMatOpens("multiconfig.mat");
+        }
+
+        // Report the measured corpus shape (extractor records it in the manifest).
+        {
+            ConfigFile conf(tier1TdcConfig, '_');
+            Corpus corpus(conf);
+            std::cout << "PHASE4A_TIER1 nb_files=" << corpus.getNbOfFiles() << "\n";
+        }
+
+        if (chdir(origCwd) != 0) {
+            std::cerr << "phase4a_tier1: chdir back to " << origCwd << " failed\n";
+            return 1;
+        }
+        std::cout << "OK: phase4a_tier1 (solo_tdc.mat, train_ltsv.mat, multiconfig.mat + VRCTS)\n";
     }
 
     // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------
