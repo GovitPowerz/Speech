@@ -1254,13 +1254,11 @@ impl Segmenter for TwinBlstmSpectralLid {
         // sizing; mutates self.lid_window_shift_sec + resets the LID net derivs.
         let lid_ssr = self.lid_net.sub_sampling_ratio();
         let ssif = spectrum_shift_in_frames as f64;
-        let mut lid_window_size =
-            f64::round(self.lid_window_size_sec * rate / 2.0 / ssif) as usize;
+        let mut lid_window_size = f64::round(self.lid_window_size_sec * rate / 2.0 / ssif) as usize;
         if lid_window_size != 0 && lid_window_size < lid_ssr {
             lid_window_size = lid_ssr;
         }
-        let mut lid_window_shift =
-            f64::round(self.lid_window_shift_sec * rate / ssif) as i64;
+        let mut lid_window_shift = f64::round(self.lid_window_shift_sec * rate / ssif) as i64;
         let mut lid_no_overlap = false;
         if lid_window_size != 0 && lid_window_shift < 1 {
             lid_no_overlap = true;
@@ -1273,7 +1271,8 @@ impl Segmenter for TwinBlstmSpectralLid {
         if lid_window_size == 0 || lid_window_shift < 1 {
             lid_window_shift = 1;
         }
-        self.lid_window_shift_sec = (lid_window_shift * spectrum_shift_in_frames as i64) as f64 / rate;
+        self.lid_window_shift_sec =
+            (lid_window_shift * spectrum_shift_in_frames as i64) as f64 / rate;
         self.lid_net.reset_weights_derivatives(); // :110
         let frame_count = audio.data.ncols();
         let vec_size = if frame_count.is_multiple_of(spectrum_shift_in_frames) {
@@ -1467,7 +1466,10 @@ impl Segmenter for TwinBlstmSpectralLid {
 
             // segmentationLID (`:1242`): midpoint seed.
             let mut segmentation_lid =
-                vec![(self.lid_decision_thresh_rising + self.lid_decision_thresh_falling) / 2.0; lid_real_vec_size];
+                vec![
+                    (self.lid_decision_thresh_rising + self.lid_decision_thresh_falling) / 2.0;
+                    lid_real_vec_size
+                ];
 
             let mut langid = vec![0.0f64; class_nb];
             let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
@@ -1653,5 +1655,49 @@ impl Segmenter for TwinBlstmSpectralLid {
     /// `getWeights` delegates to the SAD NN.
     fn get_weights(&self) -> Vec<f64> {
         self.sad_net.get_weights()
+    }
+}
+
+#[cfg(test)]
+mod twin_tests {
+    use super::*;
+    use crate::tasks::segmentation::Segmentation;
+
+    /// `getTargetsLID` (`:170-219`) enforcement pattern with `TargetEnforcementStep 2`:
+    /// SPEECH rows are `-0.5` until `counter == step` (EQUALITY), then the enforced row
+    /// sets every column to `target` (0.0, cost NOT modified) with `target_index -> 1-target`.
+    /// Pins the `==`-not-`>=` asymmetry vs the scoring path (IMPROVEMENTS'd).
+    #[test]
+    fn get_targets_lid_enforcement() {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/reference_data/phase4b/twin_mode0.config");
+        let mut map =
+            crate::legacy_config::parse_legacy_config(&std::fs::read_to_string(p).unwrap());
+        map.insert(
+            "BLSTM_LID_TargetEnforcementStep".to_string(),
+            "2".to_string(),
+        );
+        let drv = TwinBlstmSpectralLid::from_legacy(&map, None, None).unwrap();
+
+        // A single SPEECH span [0, 0.9) so all 6 rows (t = 0.0..0.5 at step 0.1) are SPEECH.
+        let mut seg = Segmentation::new(1.0);
+        seg.label_segment(0.0, 0.9, SegClass::Speech);
+        let targets = drv.get_targets_lid(&seg, 0.1, 0.0, 1, 6);
+
+        // step 2: rows 0,1 = -0.5; row 2 = enforced; rows 3,4 = -0.5; row 5 = enforced.
+        for r in [0usize, 1, 3, 4] {
+            for c in 0..3 {
+                assert_eq!(targets[[r, c]], -0.5, "row {r} col {c} should be -0.5");
+            }
+        }
+        for r in [2usize, 5] {
+            assert_eq!(targets[[r, 0]], 0.0, "enforced row {r} col0");
+            assert_eq!(
+                targets[[r, 1]],
+                1.0,
+                "enforced row {r} target col (1-target)"
+            );
+            assert_eq!(targets[[r, 2]], 0.0, "enforced row {r} col2");
+        }
     }
 }

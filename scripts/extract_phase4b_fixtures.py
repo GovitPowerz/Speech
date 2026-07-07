@@ -1,6 +1,15 @@
 """Build and run the oracle harness's phase4b stages, then write the LID
 confusion-core (Task 1) + multiclass scoring-overload (Task 3) + BlstmSpectralLID
-Algo-5 driver (Task 4) + phSeq reader (Task 5) fixtures.
+Algo-5 driver (Task 4) + phSeq reader (Task 5) + TwinBlstmSpectralLid Algo-6 driver
+(Task 6) fixtures.
+
+Task 6 runs the harness TwinProbe stage over the T2 corpus with twin_mode*.config
+(4 variants: mode0, mode0_concat, mode2, mode3) + the real 33k SAD net + a synthetic
+3-class LID net: the reimpl transcription of the wav-mode 0/2/3 getSegmentation paths
+dumps the SAD result_vec + LID members + the concat-augmented per-segment scoring
+(twin_<v>_<f>_{result,liderr,confusion,members,boundaries}_chan{1,2}.bin), and a
+SECONDARY real-Eigen probe cross-checks SEG_STRUCT + LID_STRUCT (confusion +
+_IsLIDCorrect equality + the concat branch counter). See manifest.json:twin.
 
 Task 5 runs the harness over the committed synthetic corpus_phseq/{f1,f2,f3}.phSeq
 fixtures (the format contract -- no real .phSeq file exists anywhere to validate
@@ -169,6 +178,33 @@ def _phseq_expected(path: Path) -> dict[str, object]:
     }
 
 
+# Task 6: TwinBlstmSpectralLid (Algo 6). twin_mode*.config (in PHASE4B_DIR) + the T2
+# corpus + the real 33k SAD net + a synthetic 3-class LID net (weights dumped by the
+# harness). Variant -> (mode, expected concat branch, reference-driven).
+TWIN_VARIANTS = {
+    "mode0": {"mode": 0, "concat": 0, "ref": False},
+    "mode0_concat": {"mode": 0, "concat": 1, "ref": False},
+    "mode2": {"mode": 2, "concat": 2, "ref": True},
+    "mode3": {"mode": 3, "concat": 0, "ref": True},
+}
+TWIN_FILES = ["f1", "f2", "f3"]
+TWIN_KINDS = ["result", "liderr", "confusion", "members", "boundaries"]
+TWIN_BINS = [f"twin_{v}_lidweights.bin" for v in TWIN_VARIANTS] + [
+    f"twin_{v}_{f}_{kind}_chan{ch}.bin"
+    for v in TWIN_VARIANTS
+    for f in TWIN_FILES
+    for kind in TWIN_KINDS
+    for ch in (1, 2)
+]
+TWIN_SEG_STRUCT_RE = re.compile(
+    r"^SEG_STRUCT site=twin_(?P<name>\w+) ok=1 max_dt=(?P<dt>[0-9.eE+-]+)$", re.MULTILINE
+)
+TWIN_STRUCT_RE = re.compile(
+    r"^LID_STRUCT site=twin_(?P<name>\w+) ok=1 confusion_eq=1 iscorrect_eq=1 "
+    r"concat=(?P<concat>\d+) langid_max_abs=(?P<langid>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
+
 LID_SEG_STRUCT_RE = re.compile(
     r"^SEG_STRUCT site=lid5_(?P<name>\w+) ok=1 max_dt=(?P<dt>[0-9.eE+-]+)$", re.MULTILINE
 )
@@ -300,10 +336,11 @@ def main() -> None:
                 str(LID5_CONFIG),  # argv[15]: Task 4 LID config.
                 str(LID_CORPUS_DIR),  # argv[16]: Task 4 corpus dir (f1/f2/f3.wav).
                 str(PHSEQ_DIR),  # argv[17]: Task 5 phSeq corpus dir (f1/f2/f3.phSeq).
+                str(PHASE4B_DIR),  # argv[18]: Task 6 Twin config dir (twin_mode*.config).
             ]
         )
 
-        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN, *LID5_BINS, *phseq_bins]:
+        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN, *LID5_BINS, *TWIN_BINS, *phseq_bins]:
             src = tmp_dir / name
             if not src.is_file():
                 raise SystemExit(f"harness did not produce {name}")
@@ -408,6 +445,61 @@ def main() -> None:
                 "has_sentinel_gt150": sentinel,
             }
         lid_measured[name] = {"class_index": LID5_FILES.index(name), "channels": chans}
+
+    # 4c'. Task 6: parse + validate the Twin SEG_STRUCT / LID_STRUCT structural lines.
+    # Each variant x file must produce ok=1 SEG_STRUCT (segment count/type equality
+    # reimpl-vs-real -- the C++ std::abort()s otherwise) + ok=1 LID_STRUCT (confusion +
+    # _IsLIDCorrect equality). The `concat=` field must match the variant's expected
+    # branch (0 not-called / 1 concat / 2 empty-fallback) -- the concat non-vacuity.
+    twin_seg = {m["name"]: m for m in TWIN_SEG_STRUCT_RE.finditer(stdout)}
+    twin_struct = {m["name"]: m for m in TWIN_STRUCT_RE.finditer(stdout)}
+    twin_measured: dict[str, dict[str, object]] = {}
+    for v, meta in TWIN_VARIANTS.items():
+        files_m: dict[str, object] = {}
+        for f in TWIN_FILES:
+            key = f"{v}_{f}"
+            if key not in twin_seg:
+                raise SystemExit(f"missing SEG_STRUCT line for twin_{key} (structural abort or mismatch)")
+            if key not in twin_struct:
+                raise SystemExit(f"missing LID_STRUCT line for twin_{key} (confusion/isCorrect mismatch)")
+            concat = int(twin_struct[key]["concat"])
+            if concat != meta["concat"]:
+                raise SystemExit(
+                    f"twin_{key}: concat branch {concat} != expected {meta['concat']} -- the "
+                    "getBLSTMLIDInputSequence non-vacuity contract is broken."
+                )
+            chans: dict[str, object] = {}
+            for ch in (1, 2):
+                _rr, rc, _res = _read_bin(PHASE4B_DIR / f"twin_{v}_{f}_result_chan{ch}.bin")
+                _er, _ec, liderr = _read_bin(PHASE4B_DIR / f"twin_{v}_{f}_liderr_chan{ch}.bin")
+                cr, cc, _conf = _read_bin(PHASE4B_DIR / f"twin_{v}_{f}_confusion_chan{ch}.bin")
+                _mr, _mc, mem = _read_bin(PHASE4B_DIR / f"twin_{v}_{f}_members_chan{ch}.bin")
+                br, bc, _b = _read_bin(PHASE4B_DIR / f"twin_{v}_{f}_boundaries_chan{ch}.bin")
+                if max(liderr) <= 150.0:
+                    raise SystemExit(f"twin_{key}_chan{ch}: no >150 sentinel in lid_classification_errors")
+                chans[f"chan{ch}"] = {
+                    "result_len": rc,
+                    "liderr": liderr,
+                    "confusion_shape": [cr, cc],
+                    "lid_cumulative_error": mem[0],
+                    "lid_nb_of_classif": int(mem[1]),
+                    "is_lid_correct": int(mem[2]),
+                    "cumulative_error": mem[3],
+                    "nb_of_classif": int(mem[4]),
+                    "boundaries_shape": [br, bc],
+                }
+            files_m[f] = {
+                "class_index": TWIN_FILES.index(f),
+                "seg_max_dt": float(twin_seg[key]["dt"]),
+                "langid_max_abs": float(twin_struct[key]["langid"]),
+                "channels": chans,
+            }
+        twin_measured[v] = {
+            "mode": meta["mode"],
+            "concat_branch": meta["concat"],
+            "reference_driven": meta["ref"],
+            "files": files_m,
+        }
 
     # 4d. Task 5: parse + validate the PHASE4B_PHSEQ stdout lines against the
     # INDEPENDENT Python reimplementation (phseq_expected), and cross-check the
@@ -597,6 +689,39 @@ def main() -> None:
             "calibration": lid_cal,
             "measured": lid_measured,
         },
+        "twin": {
+            "text": (
+                "Task 6: TwinBlstmSpectralLid (Algo 6), the wav-mode 0/2/3 paths + the "
+                "hidden-state concat. TwinBLSTMSpectralLID::getSegmentation (:263-1421) runs "
+                "the SAD BLSTM (_BLSTMNeuralNetwork) for the VAD result_vec (modes 0/3) then a "
+                "SECOND net (_LIDBLSTMNeuralNetwork) per speech segment for language scoring "
+                "(:1243-1291 via the returning feedForward :1250). The harness TwinProbe "
+                "transcribes the mode 0/2/3 paths swapping ONLY the SAD FFB (:715, "
+                "blstmFeedForwardT6) + the LID scoring feedForward (:1250, a generic "
+                "small-topology reimpl), keeping getTargets/results2segmentation/LID2Segmentation/"
+                "compute_errors REAL; the reimpl dumps (twin_<v>_<f>_{result,liderr,confusion,"
+                "members,boundaries}_chan{1,2}.bin) are the goldens the Rust port matches "
+                "bit-exact (canary-gated: liderr/lid_cumulative_error are softmax/CE chains, "
+                "the SAD cumulative_error a LogLaw chain in mode 3). members = [lid_cumulative_"
+                "error (*= audio._Weight), lid_nb_of_classif, is_lid_correct, cumulative_error "
+                "(SAD, *= LIDCostPonderation), nb_of_classif]. A SECONDARY real-Eigen probe runs "
+                "the compiled Twin beside the reimpl: SEG_STRUCT (segment count/type equality, "
+                "all max_dt == 0) + LID_STRUCT (confusion + _IsLIDCorrect EQUALITY + the concat "
+                "branch counter; a mismatch std::abort()s generation). NON-VACUITY: the >150 "
+                "in-band sentinel (targetLID(target) = -2.0) is present at every variant x file "
+                "x channel; the confusion has both diagonal (f1 target 0 == argmax) and "
+                "off-diagonal (f2/f3 miss) mass; and the concat branch is proven per variant -- "
+                "mode0 not-called (0), mode0_concat concat (1, LID input 59 > feature width 11 "
+                "with the SAD hidden states populated), mode2 empty-fallback (2, LID input 59 > "
+                "11 but the SAD outputs cleared at :762-763), mode3 not-called (0). Modes "
+                "2/3 iterate the REFERENCE (a programmatic 2-span segmentation) instead of the "
+                "SAD classification, and (mode != 0) overwrite the hypothesis via "
+                "LID2Segmentation -> reference-driven boundaries differ from mode0. The langid "
+                "deltas (~1e-16) are the ascending forward vs the real Eigen forward, recorded "
+                "per variant/file."
+            ),
+            "measured": twin_measured,
+        },
         "phseq": {
             "text": (
                 "Task 5: the phSeq reader (File_Type 1, AudioStruct.cpp:138-182). Pure "
@@ -642,6 +767,8 @@ def main() -> None:
         f"matrix={mat_rows}x{mat_cols}, error1=error2={error1!r}; "
         f"scoring_multi={sc_rows}x{sc_cols}, all sites max_ulp=0; "
         f"lid5 {len(LID5_FILES)} files, all SEG_STRUCT/LID_STRUCT ok=1; "
+        f"twin {len(TWIN_VARIANTS)} variants x {len(TWIN_FILES)} files, all "
+        f"SEG_STRUCT/LID_STRUCT ok=1, concat branches pinned; "
         f"phseq {len(PHSEQ_FILES)} files, {len(phseq_bins)} bins), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )

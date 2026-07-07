@@ -1899,6 +1899,71 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   *Fix candidate:* N/A. *Pinned by:* `out_of_domain_char_bails`, `missing_file_bails`
   (`tests/phase4b_phseq.rs`).
 
+- **[phase4b] The Twin driver ports ONLY wav-modes 0/1/2/3 + the concat; the pitch second pass,
+  modes 4/5/6/7, and the CNN member are deferred/excluded** (`tasks/lid.rs::TwinBlstmSpectralLid`,
+  from `TwinBLSTMSpectralLID.cpp:263-1421`): `getSegmentation` is a 1,159-line switch over 8 modes.
+  This port covers the mode 0/1/2/3 scoring branch (`:1194-1310`) + the SAD FFB (`:713-764`); it
+  BAILS typed on modes 4/5/6/7 (the LID-first block `:640-692`, the `abs(_Mode)==7` CNN/noise block
+  `:903-1193`) and on the pitch second pass (`:349-614`, `TDC_window_size > 0`). The Twin's pitch
+  pass is REFERENCE-based (`seg._Classification = seg._Reference` then `getPitch`, `:366-369`) and
+  warps the periodogram BEFORE the SAD forward -- a load-bearing DIVERGENCE from the base spectral
+  driver's post-forward pitch pass (`BLSTMSpectralSegmenter.cpp:757-805`) -- so it cannot reuse that
+  machinery and is deferred with its own golden. All four ported configs use `TDCwindow 0` so the
+  gate is off (byte-identical to a no-pitch run). The `_LIDConvNeuralNetwork` (`:23`) is constructed
+  in the legacy ctor but is dead under the port scope (only mode 7 uses it) -- NOT ported, matching
+  the Phase 2 Conv exclusion (`ConvolutionalLayer` is broken-as-committed). Mode 1's synthesis
+  (`result_vec.setConstant(10.0)`, `:726`) IS included (it shares the `:1194` branch) though no
+  fixture exercises it. `interestSegs` (`:1240`) + the `_LIDTrainingPruningThreshold` gate (`:1286`,
+  `itInterest->_Type = OTHER`) are NOT reproduced: both feed ONLY the skipped VRCTS dump + the
+  mode!=0 `interestSegs` replacement (`:1297`, dump-only), so they are observably dead (and
+  config-gated on `> 0`, default -1.0, besides). *Why deferred:* the deferred modes are the next
+  task's scope; the pitch divergence needs its own reference-based transcription. *Fix candidate:*
+  land modes 4/5/6/7 + the pitch pass in the next task. *Pinned by:* `boundaries_match_dump`,
+  `members_match_dump` (`tests/phase4b_twin_golden.rs`, all four modes bit-exact vs the harness
+  `TwinProbe` reimpl, itself SEG_STRUCT/LID_STRUCT-verified against the REAL compiled Twin). Mutation:
+  removing the `mode` guard makes a mode-4 config reach the mode-0 SAD-FFB path and diverge.
+
+- **[phase4b] The SAD FFB normalizes `inputSeq` IN PLACE (non-const `Eigen::Ref`), so the concat +
+  LID scoring consume the NORMALIZED SAD input; `getBLSTMLIDInputSequence` resamples the SAD hidden
+  states by nearest index when the LSTM row count differs** (`tasks/lid.rs::get_segmentation`/
+  `get_blstm_lid_input_sequence`, from `TwinBLSTMSpectralLID.cpp:715,1221,139-168`): the windowed
+  `feedForwardBackward(Eigen::Ref<Eigen::MatrixXd> inputSeq, ...)` (`BLSTMNeuralNetwork.cpp:711`, the
+  NON-const overload, unlike the plain `:776` `const Ref`) mutates the caller's `inputSeq` via the
+  type -1 self-normalization (`:737-743`) -- so for modes 0/3 the `:1221` concat guard + the
+  `:1249` per-segment slice see the normalized values, NOT the raw feature. The port passes
+  `&mut input_seq` to `feed_forward_backward` (which self-normalizes in place, matching), then reads
+  the mutated buffer for the concat/scoring. `getBLSTMLIDInputSequence` (`:139-168`) z-normalizes
+  `[_OutputForward | _OutputBackward]` per column (the `+1e-32` std floor) and, when the LSTM output
+  row count `n != inputSeq.rows()` (always here: `n = T/lstm_ss`, `rows = T`), hcat's them by NEAREST
+  index `round((n-1)*frame/(rows-1))` (the `+0.5` truncation, `:158`) -- an upsample, reproduced with
+  a `(rows-1).max(1)` denominator (the legacy `length-1` div-by-zero at `rows==1` is unreachable).
+  An EMPTY `_OutputForward` (modes 1/2, cleared at `:762-763`) returns `inputSeq` unchanged (the
+  fallback). *Why deferred:* provenance -- the in-place mutation is a load-bearing Eigen-signature
+  fact, and the resample is exact. *Fix candidate:* N/A. *Pinned by:* `concat_branch_matches_expected`
+  (branch 0/1/2 per variant), `sad_result_row_matches_dump`, `lid_confusion_matches_dump`
+  (`tests/phase4b_twin_golden.rs`). Mutation: cloning `input_seq` before the SAD FFB (leaving it raw)
+  makes the concat variant's confusion/liderr diverge; forcing the direct-hcat branch (`n == rows`)
+  panics on the shape mismatch.
+
+- **[phase4b] `LID2Segmentation`'s `threshMin` argument is DEAD, `getTargetsLID` uses `counter ==
+  step` (EQUALITY, not the scoring path's `>=`), and the mode 0/1/2/3 branch's `LIDTimeStep`/
+  `LIDTimeOffset` locals are DEAD** (`tasks/lid.rs`, from `TwinBLSTMSpectralLID.cpp:1296,182,
+  1195-1204` + `Segmenter.cpp:999-1055`): `LID2Segmentation(seg, ..., threshMax, threshMin)` (`:1296`,
+  passed `_LIDDecisionThreshRising`/`_LIDDecisionThreshFalling`) reads ONLY `threshMax` -- the whole
+  falling-edge block is commented out (`Segmenter.cpp:1057-1075`), so `threshMin` is inert -- ported
+  via the single-threshold [`lid_to_segmentation`]. `getTargetsLID` (`:170-219`, a private fn for the
+  next task's modes 4/5/6, unreached by 0/1/2/3) enforces on `counter == getTargetEnforcementStep()`
+  (`:182`, strict equality), NOT the scoring `feedForward`'s `counter >= step` (`:1073`) -- a
+  load-bearing asymmetry ported verbatim + unit-tested directly. The `:1195-1204` `LIDTimeStep`/
+  `LIDTimeOffset` re-derivation inside the `:1194` branch is never read there (the scoring loop uses
+  `_SpectrumShift` for row indices `:1245` + the SAD `timeStep` for the modifier `:1250` + `timeStep`/
+  `timeOffset` for `LID2Segmentation` `:1296`) -- dead, skipped. *Why deferred:* provenance; the
+  equality enforcement + the dead threshMin are the legacy's exact behavior. *Fix candidate:* N/A.
+  *Pinned by:* `boundaries_match_dump` (modes 2/3 via `LID2Segmentation`,
+  `tests/phase4b_twin_golden.rs`) + the inline `get_targets_lid_enforcement` unit test
+  (`tasks/lid.rs`). Mutation: switching `get_targets_lid`'s `==` to `>=` flips its enforced-row
+  placement for `step >= 1` (the `get_targets_lid_enforcement` test uses `step = 2`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
