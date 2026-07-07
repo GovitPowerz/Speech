@@ -1,0 +1,29 @@
+{
+  "text": "Phase 4b Task 1: the LID confusion core (BagOfProcessors::PrintConfusionMatrix sentinel-decode + argmax accumulation, Confusion2String's row-normalized error aggregate). Both are pure integer-threshold/division arithmetic -- no libm -- so every fixture here is asserted STRICT BITS on every platform.",
+  "confusion_input": {
+    "text": "4 crafted 3-class rows: row A's target (col1, value 280=100*0.8+200) beats its best competitor (50) -> WIN. Row B's target (col0, value 220=100*0.2+200, score 20) loses to its best competitor (90) -> MISS. Row C has NO target sentinel at all (every value <= 150) -- STICKY QUIRK: posTarget/posBestNotTarget are declared OUTSIDE the row loop in the legacy and reset to 0 only ONCE, before row 0 (BagOfProcessors.cpp:509-510), NOT at every row boundary (:533-534 resets only scoreTarget/maxScoreNotTarget) -- so row C's miss is credited to posTarget=1, inherited from row B's sentinel, not to the index-header slot 0. Row D's target (col2, value 250=100*0.5+200, score 50) TIES its best competitor (50) exactly -> the strict `>` comparison sends a tie to the miss branch too.",
+    "shape": [
+      4,
+      3
+    ]
+  },
+  "confusion_matrix": {
+    "text": "The harness's OWN transcription of BagOfProcessors.cpp:501-535 (the real matrix is a function-local inside the protected PrintConfusionMatrix and is never returned, even via a probe subclass), cross-validated two independent ways against the REAL compiled code on the SAME input (see confusion_error below) -- not merely asserted to be right by inspection.",
+    "shape": [
+      5,
+      5
+    ]
+  },
+  "confusion_error": {
+    "text": "1x2 = [error1, error2]. error1: the transcribed confusion_matrix fed to the REAL free Confusion2String (Helpers.hpp:365-438, static -- directly callable). error2: the REAL (protected, via a BagProbe subclass) PrintConfusionMatrix itself, called end-to-end on confusion_input directly (BagOfProcessors.cpp:474-598). error1 == error2 bit-exact (harness-asserted via the ok= stdout flag, SystemExit on failure) is the non-vacuous cross-check that the transcribed matrix matches what the real method built internally -- the only way to validate it, since PrintConfusionMatrix never returns its matrix.",
+    "shape": [
+      1,
+      2
+    ],
+    "error1": 66.66666666666667,
+    "error2": 66.66666666666667
+  },
+  "dead_code_not_ported": {
+    "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
+  }
+}

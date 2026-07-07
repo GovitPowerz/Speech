@@ -1683,6 +1683,89 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   reference-loaded, `TDCwindow > 0` pitch-pass golden pinning the pass-1-target-reuse quirk under
   live targets (current pitch-pass coverage is NN-chain-only, no reference-driven target path).
 
+- **[phase4b] `PrintConfusionMatrix`'s `posTarget`/`posBestNotTarget` are STICKY across rows, NOT
+  reset per row** (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:
+  509-510,533-534`): both position variables are declared OUTSIDE the row loop and initialized to
+  `0` exactly ONCE, before row 0; the end-of-row reset (`:533-534`) touches only
+  `scoreTarget`/`maxScoreNotTarget`. So a row with no target sentinel at all (every column `<=
+  150`) does NOT attribute its miss to `posTarget = 0` (the index-header slot) in general -- it
+  inherits `posTarget` (and, unless overwritten by a competitor score that row, `posBestNotTarget`)
+  from the LAST row that set them. Only a no-target row that is ALSO the very first row ever
+  processed lands at index `0`. Almost certainly an oversight (the natural reading of the code is
+  "reset per row"), but load-bearing for the confusion-matrix goldens as committed. Caught by a
+  genuine TDD RED: the first hand-derived `sentinel_decode_and_argmax` expectation assumed a
+  per-row reset and failed against both the Rust implementation (written directly from source) and
+  the independently cross-validated harness dump, forcing a re-read of `:509-510` vs `:533-534`.
+  *Why deferred:* provenance; the confusion matrix's row/col attribution for degenerate (no-target)
+  rows is directly observable and load-bearing for any LID confusion-matrix consumer built on this
+  in Phase 4b's later tasks. *Fix candidate:* reset `posTarget`/`posBestNotTarget` to `0` at every
+  row boundary alongside `scoreTarget`/`maxScoreNotTarget`, once end-to-end LID parity holds. *Pinned
+  by:* `sentinel_decode_and_argmax`, `no_target_as_first_row_uses_header_zero_slot`
+  (`src/engine/confusion.rs`), `confusion_matrix_matches_harness_transcription`
+  (`tests/phase4b_confusion_golden.rs`) -- the latter cross-validated against the REAL compiled
+  `PrintConfusionMatrix`/`Confusion2String` via the oracle harness's `phase4b_confusion` stage
+  (`error1 == error2` non-vacuity gate).
+
+- **[phase4b] An exact score tie sends the target to the MISS branch (strict `>` only)**
+  (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:524`): the win
+  condition is `scoreTarget > maxScoreNotTarget`, so `scoreTarget == maxScoreNotTarget` (the
+  decoded target score exactly equals the best competitor's raw score) falls to the
+  best-competitor/miss branch, not a coin-flip or a separate tie bucket. *Why deferred:*
+  provenance; a `>=` flip is a plausible "intended" reading but changes which class gets credited
+  on every exact tie. *Fix candidate:* none identified without knowing the original intent. *Pinned
+  by:* the row-D case (an exact 50.0/50.0 tie) in `sentinel_decode_and_argmax`
+  (`src/engine/confusion.rs`); a `>` -> `>=` mutation was run and confirmed to break this test (see
+  the Task 1 report).
+
+- **[phase4b] `Confusion2String`'s zero-row-total normalization guard leaves that row's diagonal
+  cell as a RAW COUNT, not a percentage** (`engine/confusion.rs::confusion_error`, from
+  `Helpers.hpp:375`): the per-row scaling only fires `if (confusion(kk+1, classNb+1) > 0)`; a class
+  with zero samples in this crafted batch keeps its raw (unscaled) diagonal count feeding directly
+  into the `100 - normalized(ii,ii)` deficit sum, which is only a sensible percentage-deficit for
+  rows that DID get scaled. *Why deferred:* provenance; matches the legacy exactly and only matters
+  for genuinely empty classes. *Fix candidate:* none identified -- an empty class arguably
+  shouldn't contribute to the error average at all; revisit once a real (non-crafted) confusion
+  matrix with an empty class is observed. *Pinned by:* `zero_total_row_left_unnormalized`
+  (`src/engine/confusion.rs`).
+
+- **[phase4b] `Confusion2String`'s ill-conditioned-matrix gate (`exit(1)` in the legacy) ported as
+  a Rust panic** (`engine/confusion.rs::confusion_error`, from `Helpers.hpp:369-371`): `classNb =
+  confusion.rows()-2 < 2`, or `rows-2 != cols-2`, is fatal in the legacy (`exit(1)`, no exception,
+  no recovery). Rust has no direct equivalent that stays testable via `#[should_panic]`, so this
+  port uses `panic!`. *Why deferred:* this branch is reachable only from a deliberately malformed
+  matrix (never from `confusion_from_results`'s own construction, which always builds a valid
+  square matrix or returns the `classNb <= 1` empty case without calling `confusion_error` at all);
+  revisit if a future caller needs graceful-`Result` handling instead. *Fix candidate:* none
+  identified. *Pinned by:* `ill_conditioned_matrix_panics` (`src/engine/confusion.rs`).
+
+- **[phase4b] `BagOfProcessors::PrintConfusionMatrix`'s classNb==2 binary ROC-curve variant and a
+  duplicate normalization/print block are commented-out DEAD CODE, not ported**
+  (`engine/confusion.rs`, from `BagOfProcessors.cpp:477-499,541-593`): `:477-499` is an entire
+  `if (classNb == 2) { ... }` arm computing a 10001-step threshold-sweep negative/positive
+  histogram -- entirely commented out, so `classNb == 2` falls straight into the SAME general
+  `else if (classNb > 1)` accumulation as every other `classNb >= 2`, with no ROC/histogram
+  behavior at all. `:541-593` duplicates (via `cout`, not `error +=`) exactly what the LIVE
+  `Confusion2String` call at `:540` already computes and is never executed. *Why deferred: N/A --
+  this is a straightforward "do not port dead code" decision, not a deferred fix. *Pinned by:*
+  `dead_binary_variant_not_ported` (`src/engine/confusion.rs`).
+
+- **[phase4b] CORRECTED a Phase 4a stub doc-comment: `PrintConfusionMatrix`'s returned `error` IS
+  the row-normalized `error/classNb` aggregate, not a raw off-diagonal count**
+  (`engine/bag_of_processors.rs::print_confusion_matrix`): the Phase 4a stub's doc comment (written
+  ahead of the real implementation, "verified against source in 4a" per that phase's task
+  instructions) claimed the returned error was "the summed off-diagonal confusion (raw count, not
+  yet normalized -- the normalization block is legacy dead code, commented out at `:534-596`)".
+  Re-reading `BagOfProcessors.cpp:536-598` for Task 1 shows this conflated two different things:
+  the LIVE `error = Confusion2String(confusion, output, "      ");` call at `:540` (NOT inside the
+  commented range) IS what computes and returns the row-normalized aggregate (`Helpers.hpp:438`'s
+  own `return error/classNb;`); only the DUPLICATE block at `:541-593` (a `cout`-based re-derivation
+  of the same math, never executed) and the commented `return error/classNb;` at `:596` (which
+  would have double-divided had it been live) are dead. *Why deferred:* N/A -- documentation
+  correction, not a behavioral question. *Fix candidate:* N/A. *Pinned by:*
+  `error_matches_real_confusion2string_and_printconfusionmatrix`
+  (`tests/phase4b_confusion_golden.rs`), which asserts the Rust `confusion_error` return equals
+  the REAL compiled `Confusion2String`'s (normalized) return.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

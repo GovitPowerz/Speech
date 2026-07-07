@@ -9104,6 +9104,102 @@ int main(int argc, char** argv) {
         }
     }
 
+    // =====================================================================
+    // --- Phase 4b Task 1: LID confusion core real-compiled goldens --------
+    // `BagOfProcessors::PrintConfusionMatrix` (BagOfProcessors.cpp:474-598,
+    // protected) builds a (classNb+2)x(classNb+2) confusion matrix as a
+    // function-LOCAL Eigen::MatrixXd and returns only the scalar `error`
+    // (already row-normalized via the LIVE `Confusion2String` call at :540)
+    // plus a display `string&` -- the matrix itself is never handed back to
+    // the caller, even via a probe subclass (it is a local, not a member).
+    // So the matrix dumped below is a TRANSCRIPTION of the accumulation loop
+    // (:501-535, pure integer-threshold arithmetic, no libm), cross-validated
+    // two independent ways against the REAL compiled code on the SAME input:
+    //   (a) the transcribed matrix fed to the REAL free `Confusion2String`
+    //       (Helpers.hpp:365-438, static -- directly callable, already
+    //       included via Helpers.hpp) -> error1.
+    //   (b) the REAL PrintConfusionMatrix itself (via BagProbe, exposing the
+    //       protected method) run end-to-end on the SAME input -> error2.
+    // error1 == error2 bit-exact is only possible if the transcribed matrix
+    // matches what the real method built internally (transitively: :540
+    // calls the SAME Confusion2String on the real method's OWN matrix), so
+    // this is a non-vacuous cross-check, not just "we hope the transcription
+    // is right".
+    {
+        struct BagProbe : BagOfProcessors {
+            using BagOfProcessors::PrintConfusionMatrix;
+        };
+
+        // Crafted 3-class rows (see engine/confusion.rs's `crafted_rows` test
+        // doc for the row-by-row derivation): A = target col1 wins; B =
+        // target col0 loses; C = no target sentinel at all (STICKY posTarget
+        // carried over from B -- posTarget/posBestNotTarget are declared
+        // OUTSIDE the row loop and reset to 0 only ONCE, before row 0, not at
+        // every row boundary like scoreTarget/maxScoreNotTarget are); D = an
+        // ambiguous exact tie (falls to the best-competitor/miss branch,
+        // strict `>` only).
+        Eigen::MatrixXd input(4, 3);
+        input << 30.0, 280.0, 50.0,
+                  220.0, 90.0, 10.0,
+                  10.0, 90.0, 40.0,
+                  50.0, 20.0, 250.0;
+        Matrix2BinaryFile(out + "confusion_input.bin", input);
+        ++dumps;
+
+        long classNb = input.cols();
+        Eigen::MatrixXd confusion = Eigen::MatrixXd::Zero(classNb + 2, classNb + 2);
+        for (long kk = 0; kk < classNb + 1; ++kk) {
+            confusion(0, kk) = kk;
+            confusion(kk, 0) = kk;
+        }
+        double maxScoreNotTarget = -1.0;
+        long posBestNotTarget = 0;
+        long posTarget = 0;
+        double scoreTarget = -1.0;
+        for (long jj = 0; jj < input.rows(); ++jj) {
+            for (long kk = 0; kk < classNb; ++kk) {
+                if (input(jj, kk) > 150) {
+                    scoreTarget = input(jj, kk) - 200;
+                    posTarget = kk + 1;
+                } else if (input(jj, kk) > maxScoreNotTarget) {
+                    maxScoreNotTarget = input(jj, kk);
+                    posBestNotTarget = kk + 1;
+                }
+            }
+            if (scoreTarget > maxScoreNotTarget) {
+                confusion(posTarget, posTarget) += 1.0;
+                confusion(posTarget, classNb + 1) += 1.0;
+                confusion(classNb + 1, posTarget) += 1.0;
+            } else {
+                confusion(posTarget, posBestNotTarget) += 1.0;
+                confusion(posTarget, classNb + 1) += 1.0;
+                confusion(classNb + 1, posBestNotTarget) += 1.0;
+            }
+            // legacy :533-534 -- only these two are reset per row (STICKY quirk).
+            maxScoreNotTarget = -1.0;
+            scoreTarget = -1.0;
+        }
+        Matrix2BinaryFile(out + "confusion_matrix.bin", confusion);
+        ++dumps;
+
+        std::string displayStr1;
+        double error1 = Confusion2String(confusion, displayStr1, "      ");
+
+        BagProbe probe;
+        std::string displayStr2;
+        double error2 = probe.PrintConfusionMatrix(input, 1, displayStr2);
+
+        Eigen::MatrixXd errorDump(1, 2);
+        errorDump(0, 0) = error1;
+        errorDump(0, 1) = error2;
+        Matrix2BinaryFile(out + "confusion_error.bin", errorDump);
+        ++dumps;
+
+        std::cout << "PHASE4B_CONFUSION ok=" << (error1 == error2 ? 1 : 0)
+                   << " error1=" << std::setprecision(17) << error1
+                   << " error2=" << error2 << "\n";
+    }
+
     std::cout << "OK: " << dumps << " dumps\n";
     return 0;
 }

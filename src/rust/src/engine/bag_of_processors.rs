@@ -13,6 +13,7 @@ use ndarray::Array2;
 
 use crate::audio::{Audio, read_audio};
 use crate::cli::{Mode, ModeKind};
+use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
 use crate::features::stats::InputStatistics;
 use crate::tasks::sad::{
@@ -473,22 +474,31 @@ impl BagOfProcessors {
     /// Port of `BagOfProcessors::PrintConfusionMatrix` (`:473-598`): LID confusion
     /// matrix + normalized error percentage, reachable only for algo 5/6 (the
     /// `saveAndUpdate` call site is gated on `_AlgoTypes[ii] == 5 || == 6`,
-    /// `:438-441`). Unreachable in 4a since algo 5/6 bail at construction.
+    /// `:438-441`). Still dead code here in Task 1: `save_and_update`'s guard at
+    /// `unreachable!("Algo 5/6 - Phase 4b")` below stays until Task 9 wires this
+    /// method into that call site.
     ///
-    /// Doc summary for Phase 4b: the confusion matrix is built from an in-band
-    /// numeric encoding of the per-frame LID scores -- any score `> 150` marks
-    /// the TARGET (correct) class and decodes to the real score via `score -
-    /// 200`; every other score is a competing non-target class's raw score. Per
-    /// row, the best non-target score is tracked; if the target's decoded score
-    /// beats it, the confusion matrix's diagonal + row/col totals for the target
-    /// class are incremented, else the row/col totals credit the best-scoring
-    /// non-target class instead (a miss). `Confusion2String` formats the matrix;
-    /// the returned `error` is the summed off-diagonal confusion (raw count, not
-    /// yet normalized -- the normalization block is legacy dead code, commented
-    /// out at `:534-596`).
+    /// Delegates to [`confusion::confusion_from_results`] for the sentinel
+    /// decode + argmax accumulation (`:501-535`) and the row-normalized error
+    /// (the LIVE `Confusion2String` call at `:540`, ported as
+    /// [`confusion::confusion_error`]).
+    ///
+    /// CORRECTION (Task 1 source re-read) to this doc comment's prior claim:
+    /// the returned `error` IS the row-normalized `error/classNb` aggregate,
+    /// NOT a raw off-diagonal count. `Confusion2String`'s call at `:540` is
+    /// LIVE code (not part of the dead duplicate block at `:541-593`, which
+    /// re-derives the same normalization via `cout` instead of `error +=` and
+    /// is never executed); its `return error/classNb` (`Helpers.hpp:438`) is
+    /// what `:597`'s `return error;` hands back unchanged (the commented-out
+    /// `return error/classNb;` at `:596` would have double-divided).
     #[allow(dead_code)]
-    fn print_confusion_matrix(&self, _results_mat: &Array2<f64>, _config_nb: usize) -> f64 {
-        unreachable!("Algo 5/6 - Phase 4b")
+    fn print_confusion_matrix(
+        &self,
+        results_mat: &Array2<f64>,
+        _config_nb: usize,
+    ) -> (f64, Array2<f64>) {
+        let (matrix, error) = confusion::confusion_from_results(results_mat);
+        (error, matrix)
     }
 
     /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
