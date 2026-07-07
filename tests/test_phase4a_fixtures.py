@@ -114,3 +114,108 @@ def test_train_costmem_rows_identical_across_epochs() -> None:
         assert bad[e, 0] == bad[0, 0], f"BadClassifMem epoch {e} must equal epoch 0"
     # Genuinely nonzero -> the identity is a real pin, not a vacuous 0 == 0.
     assert bad[0, 0] != 0.0, "train BadClassifMem must be nonzero (scored LTSV)"
+
+
+# ==== Task 9 tier-2 fixture guards ==========================================
+
+
+def test_tier2_manifest_trajectory_and_seg_struct() -> None:
+    """The manifest records the MEASURED tier-2 trajectory (non-vacuity: gate fired
+    AND skipped, every epoch pair differing) and the SEG_STRUCT secondary probe
+    (count/type equality is the abort gate inside the harness; the recorded max_dt
+    is asserted at its measured value, 0.0 here)."""
+    manifest = _load_manifest()
+    tier2 = cast(dict[str, object], manifest["tier2"])
+    train = cast(dict[str, object], tier2["train"])
+    nv = cast(dict[str, object], train["non_vacuity"])
+    epochs = cast(int, train["epochs"])
+    assert epochs == 5, "3 training epochs -> 5 saveAndUpdate rows (solo + 3 + final)"
+    assert nv["epochs_differing"] == epochs - 1, "every consecutive epoch pair differs"
+    assert cast(int, nv["gate_fired"]) >= 1, "best-cost gate fired at least once"
+    assert cast(int, nv["gate_skipped"]) >= 1, "best-cost gate skipped at least once"
+    trajectory = cast(list[float], nv["best_cost_trajectory"])
+    assert len(trajectory) == epochs
+    seg = cast(dict[str, object], train["seg_struct"])
+    assert seg["ok"] == 1
+    assert seg["max_dt"] == 0.0, "measured SEG_STRUCT boundary max_dt (reimpl vs real Eigen)"
+    gc = cast(dict[str, object], tier2["gradcheck"])
+    assert gc["gradcheck_max_weights"] == 10, "the capped sweep (deviation, recorded)"
+    assert cast(float, gc["mean_relative_error"]) < 5e-4
+
+
+def test_tier2_epoch_weight_fixtures_inventory() -> None:
+    """Every per-epoch weight dump exists, parses, and is the full 33,671-weight
+    vector; consecutive dumps DIFFER (the non-vacuity, re-checked from the committed
+    bytes, not just the manifest)."""
+    manifest = _load_manifest()
+    train = cast(dict[str, object], cast(dict[str, object], manifest["tier2"])["train"])
+    names = cast(list[str], train["epoch_weight_files"])
+    assert names == [f"tier2_weights_epoch{e}.bin" for e in range(5)]
+    prev: np.ndarray | None = None
+    for name in names:
+        path = PHASE4A / name
+        assert path.is_file(), f"{name} must be committed"
+        arr = _read_bin(path)
+        assert arr.shape == (33671, 1), f"{name}: full real-net weight vector"
+        if prev is not None:
+            assert not np.array_equal(arr.view(np.uint64), prev.view(np.uint64)), f"{name} must differ from the previous epoch"
+        prev = arr
+
+
+def test_tier2_gradcheck_fixture_shape_and_seed() -> None:
+    """tier2_gradcheck.bin: 10 per-weight triples + the means row; the means row
+    reproduces the manifest values; the seed dump is the phase3 synth_flat pattern."""
+    gc = _read_bin(PHASE4A / "tier2_gradcheck.bin")
+    assert gc.shape == (11, 3)
+    manifest = _load_manifest()
+    meta = cast(dict[str, object], cast(dict[str, object], manifest["tier2"])["gradcheck"])
+    assert gc[10, 0] == cast(float, meta["mean_error"])
+    assert gc[10, 1] == cast(float, meta["mean_relative_error"])
+    assert gc[10, 2] == 0.0
+    seed = _read_bin(PHASE4A / "tier2_gradcheck_seed.bin")
+    assert seed.shape == (137, 1), "the synthetic [2,2]+[4,1] net has 137 weights"
+    expect = np.array([((k * 11 + 3) % 97) / 97.0 - 0.5 for k in range(137)]).reshape(-1, 1)
+    assert np.array_equal(seed.view(np.uint64), expect.view(np.uint64))
+
+
+def test_tier2_mat_conversion_and_artifacts() -> None:
+    """The tier-2 result .mat reproduces its converted .bin fixtures (same col-6 mask
+    guard as tier-1); the bestNNWeight artifact split is present and coherent (the
+    weights/derivs are io::binary despite the legacy .mat suffix; the stats .mat
+    carries an EMPTY InputStatistics -- type -1 never accumulates)."""
+    mat = scipy.io.loadmat(PHASE4A / "tier2_spectral.mat")
+    for var in MAT_VARS:
+        raw = cast(np.ndarray, mat[var]).astype("<f8").copy()
+        if var == "MultiConfigResults":
+            raw[:, 6] = 0.0
+        converted = _read_bin(PHASE4A / f"tier2_spectral_{var}.bin")
+        assert raw.shape == converted.shape, f"tier2/{var}: shape mismatch"
+        assert np.array_equal(raw.view(np.uint64), converted.view(np.uint64)), f"tier2/{var}: raw .mat (masked) != converted .bin"
+    w = _read_bin(PHASE4A / "weights_bestNNWeight_1_tier2_spectral.mat")
+    assert w.shape == (33671, 1)
+    # saveWeights fires BEFORE updateWeights (BagOfProcessors.cpp:464 vs :466), so
+    # the saved best == the PRE-update weights of the last firing epoch (the final
+    # eval) == the post-epoch-3 vector.
+    epoch3 = _read_bin(PHASE4A / "tier2_weights_epoch3.bin")
+    assert np.array_equal(w.view(np.uint64), epoch3.view(np.uint64)), "best weights == post-epoch-3 (save-before-update order)"
+    d = _read_bin(PHASE4A / "weightsDerivatives_bestNNWeight_1_tier2_spectral.mat")
+    assert d.shape == (33671, 2)
+    assert np.any(d[:, 0] != 0.0), "derivs col0 must be nonzero (live backward)"
+    assert np.all(d[:, 1][d[:, 1] != 0.0] > 0.0), "derivs col1 counts are positive"
+    stats = scipy.io.loadmat(PHASE4A / "bestNNWeight_1_tier2_spectral.mat")
+    assert cast(np.ndarray, stats["nbOfInputs"])[0, 0] == 0.0
+    assert cast(np.ndarray, stats["meanInputs"]).size == 0
+    assert cast(np.ndarray, stats["stdInputs"]).size == 0
+
+
+def test_tier2_vrcts_dumps_present() -> None:
+    manifest = _load_manifest()
+    train = cast(dict[str, object], cast(dict[str, object], manifest["tier2"])["train"])
+    names = cast(list[str], train["vrcts"])
+    assert names == [f"tier2_f{f}_chan_{c}.xml" for f in (1, 2) for c in (1, 2)]
+    for name in names:
+        path = PHASE4A / name
+        assert path.is_file(), f"tier-2 VRCTS {name} must be committed"
+        text = path.read_text()
+        assert text.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+        assert "<AudioDoc" in text

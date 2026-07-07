@@ -177,6 +177,13 @@ def _hash_tree(root: Path) -> dict[str, str]:
     return digests
 
 
+def _read_bin(path: Path) -> np.ndarray:
+    """Read an io::binary .bin (i64 LE rows, i64 LE cols, f64 LE column-major)."""
+    raw = path.read_bytes()
+    rows, cols = struct.unpack("<qq", raw[:16])
+    return np.frombuffer(raw[16:], dtype="<f8").reshape((rows, cols), order="F")
+
+
 def _write_bin(path: Path, matrix: np.ndarray) -> None:
     """Write `matrix` as an io::binary .bin: i64 LE rows, i64 LE cols, f64 LE
     column-major -- the exact format the Rust `load_bin_phase4a` reads."""
@@ -401,7 +408,17 @@ def main() -> None:
         raise SystemExit("PHASE4A_TIER2_GRADCHECK line missing from harness stdout")
     if int(m_gc["sweep"]) != TIER2_GRADCHECK_MAX_WEIGHTS:
         raise SystemExit(f"tier-2 gradcheck sweep {m_gc['sweep']} != {TIER2_GRADCHECK_MAX_WEIGHTS}")
-    gc_mean_err, gc_mean_rel_err = float(m_gc["err"]), float(m_gc["rel"])
+    # The stdout echo carries only 6 significant digits; the manifest records the
+    # EXACT doubles from the .bin's means row (row sweep = [mean_err, mean_rel, 0]),
+    # cross-checked against the echo.
+    gc_bin = _read_bin(PHASE4A_DIR / "tier2_gradcheck.bin")
+    if gc_bin.shape != (TIER2_GRADCHECK_MAX_WEIGHTS + 1, 3):
+        raise SystemExit(f"tier2_gradcheck.bin shape {gc_bin.shape} unexpected")
+    gc_mean_err = float(gc_bin[TIER2_GRADCHECK_MAX_WEIGHTS, 0])
+    gc_mean_rel_err = float(gc_bin[TIER2_GRADCHECK_MAX_WEIGHTS, 1])
+    for exact, echoed in [(gc_mean_err, float(m_gc["err"])), (gc_mean_rel_err, float(m_gc["rel"]))]:
+        if abs(exact - echoed) > 1e-5 * abs(echoed):
+            raise SystemExit(f"tier-2 gradcheck .bin mean {exact} != stdout echo {echoed}")
     if not gc_mean_rel_err < 5e-4:
         raise SystemExit(f"tier-2 gradcheck mean_rel_err {gc_mean_rel_err} >= 5e-4")
 

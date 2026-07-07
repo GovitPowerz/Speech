@@ -241,8 +241,8 @@
       "config": "tier2_gradcheck.config",
       "gradcheck_max_weights": 10,
       "epsilon": 1e-05,
-      "mean_error": 1.77385e-11,
-      "mean_relative_error": 0.0001200096
+      "mean_error": 1.7738502991583638e-11,
+      "mean_relative_error": 0.00012000957351711342
     }
   }
 }

@@ -133,7 +133,9 @@ fn tier2_gradcheck_golden() {
     }
     cp.set_config0_weights_for_test(&flat).unwrap();
 
-    let report = cp.grad_check_for_test(epsilon, max_weights as usize).unwrap();
+    let report = cp
+        .grad_check_for_test(epsilon, max_weights as usize)
+        .unwrap();
 
     // Golden: rows 0..9 = [analytic_col0, analytic_col1, numerical]; row 10 =
     // [mean_error, mean_relative_error, 0].

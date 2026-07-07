@@ -159,7 +159,9 @@ fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<Array2<f64>> {
                 data.push(f64_le(bytes, p + 8 + k * 8));
             }
             // column-major -> row-major Array2.
-            return Some(Array2::from_shape_fn((rows, cols), |(i, j)| data[j * rows + i]));
+            return Some(Array2::from_shape_fn((rows, cols), |(i, j)| {
+                data[j * rows + i]
+            }));
         }
         off += 8 + size;
     }
@@ -224,7 +226,11 @@ fn tier2_train_epoch_weights_golden() {
 
     // --- Per-epoch weight vectors vs the harness dumps (canary-gated). ---------
     let trace = cp.epoch_weight_trace_for_test();
-    assert_eq!(trace.len(), 5, "epochs 0..4 captured (3 inner + solo + final)");
+    assert_eq!(
+        trace.len(),
+        5,
+        "epochs 0..4 captured (3 inner + solo + final)"
+    );
     for (e, weights) in trace.iter().enumerate() {
         let golden = load_bin_phase4a(&format!("tier2_weights_epoch{e}.bin"));
         assert_eq!(golden.dim(), (weights.len(), 1), "epoch {e} weight count");
@@ -260,9 +266,15 @@ fn tier2_train_epoch_weights_golden() {
     // Epoch 0 always fires (1e20 seed); the trace starts at the post-epoch-0 value,
     // so only epochs 1..4 are classified here (4 transitions).
     let (m_differ, m_fired, m_skipped) = manifest_non_vacuity();
-    assert_eq!(m_differ, 4, "manifest records all 4 consecutive pairs differing");
+    assert_eq!(
+        m_differ, 4,
+        "manifest records all 4 consecutive pairs differing"
+    );
     assert_eq!(fired, m_fired, "gate-fired count vs manifest trajectory");
-    assert_eq!(skipped, m_skipped, "gate-skipped count vs manifest trajectory");
+    assert_eq!(
+        skipped, m_skipped,
+        "gate-skipped count vs manifest trajectory"
+    );
     assert!(fired >= 1 && skipped >= 1, "gate must fire AND skip");
 
     // --- The 5 .mat variables vs the converted fixtures. -----------------------
@@ -272,12 +284,7 @@ fn tier2_train_epoch_weights_golden() {
     let got = mat_var_matrix(&bytes, "MultiConfigResults").unwrap();
     let want = load_bin_phase4a("tier2_spectral_MultiConfigResults.bin");
     assert_matrix(&got, &want, &[0, 1, 2], &[6], "MultiConfigResults");
-    for name in [
-        "CostMem",
-        "BadClassifMem",
-        "CostLIDMem",
-        "BadClassifLIDMem",
-    ] {
+    for name in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
         let got = mat_var_matrix(&bytes, name).unwrap();
         let want = load_bin_phase4a(&format!("tier2_spectral_{name}.bin"));
         assert_matrix(&got, &want, &[], &[], name);
