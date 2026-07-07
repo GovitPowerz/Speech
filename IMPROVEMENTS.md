@@ -1636,6 +1636,46 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   since the real binary cannot reach this path without crashing). *Pinned by:*
   `phase4a_cli.rs::override_empty_removes_key`.
 
+- **[phase4a] Mutation battery (Task 11): load-bearing goldens confirmed, two coverage gaps found.**
+  Six targeted production mutations, each applied/run/reverted/re-run in isolation (named suite
+  only, full `cargo test` once at the end): (1) fold-order reversed (`corpus_processor.rs::run_epoch`,
+  `per_file.sort_by_key` ascending -> `Reverse`) against `phase4a_train_golden` -- did NOT fail (the
+  tier-2 corpus has exactly 2 files and `numOuterThreads 1` clamps to one lane, so the fold is a
+  2-element commutative `+=`/`InputStatistics::update` merge -- order-insensitive per the spec S7
+  caveat; a 3+-file crafted-divergence golden is future work, not faked here). (2) best-cost gate
+  `>` -> `>=` (`bag_of_processors.rs::save_weights`, Spectral arm) against `phase4a_train_golden`
+  AND `phase4a_save_update::best_cost_gate_fires_and_skips` -- did NOT fail either: both suites only
+  exercise strict improve/strict-worse costs, never an exact tie, so `>=` is behaviorally identical
+  to `>` on every existing case -- a genuine golden coverage gap (no crafted-tie test exists) reported
+  honestly, not faked. (3) cost column `sums[4]` -> `sums[5]` (`bag_of_processors.rs::save_and_update`)
+  against `phase4a_tier1_e2e::train_ltsv_two_epochs_matches` -- FAILED as expected
+  (`train CostMem[0,0]: a=12 (want) b=0 (got)`); reverted, PASS. (4) counter-normalization guard
+  dropped to unconditional divide (both the cost and costLID guards) against
+  `phase4a_save_update` -- FAILED as expected (`aggregation_counter_zero_guard_skips_division`:
+  `left: inf, right: 7.0`, div-by-zero; 2 more tests failed downstream from the same cause);
+  reverted, PASS. (5) gradCheck epsilon sign flipped (asymmetric: `+=epsilon` -> `-=epsilon` on the
+  first perturbation only, since negating `epsilon` uniformly at the call site is a no-op by central-
+  difference symmetry) against `phase4a_gradcheck_golden` -- FAILED as expected (`weight 0 numerical`
+  bit mismatch from the broken +/- symmetry); reverted, PASS. (6) `costLID = -1.0` gate removed
+  (`bag_of_processors.rs::save_and_update`, the `:465` override) against
+  `phase4a_save_update::update_called_with_neg_costlid` -- FAILED as expected (`left: Some(3.0)`
+  real costLID leaking through `right: Some(-1.0)` expected gate); reverted, PASS. This mutation was
+  originally slated "defer to 4b" in the plan, but Task 6's `update_called_with_neg_costlid` hook
+  makes it directly observable in 4a, so the stronger result (FAILS, not vacuously unreachable) is
+  recorded here instead of deferred. *Lane N=1 vs N=2 measurement* (throwaway test, not committed):
+  a 3-file corpus (`excerpt_2ch_8k.wav` x3) driving `signal.config` (Algo 4) with the noOverlap
+  `BLSTM_window 0.5` / `BLSTM_shift 0` override at `numOuterThreads` 1 vs 2 -- outputs DIVERGED as
+  expected (`MultiConfigResults` columns 6-7, the timing/cost-adjacent columns, differ across all 3
+  file-rows; `CostMem`/`BadClassifMem`/etc. stayed identical since Solo mode never calls
+  `saveAndUpdate`). Confirms genuine cross-file lane state chaining: N=1 chains all 3 files in one
+  lane (f0->f1->f2), N=2 partitions lane0={f0,f2}/lane1={f1}, so f2 inherits poisoned
+  `_WindowShift` state directly from f0 under N=2 but from f1 under N=1 -- a real, expected
+  N-dependence per the `[phase4a] Static-lane deterministic reduction` entry above, not a bug.
+  *Net verdict:* 4 of 6 mutations break their named golden as designed; 2 (fold-order, best-cost
+  tie) expose real gaps in tie/multi-contribution coverage on the current 2-file tier-2 fixture,
+  recorded honestly rather than papered over. Full detail (diffs, commands, output) in
+  `.superpowers/sdd/task-11-phase4a-report.md`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
