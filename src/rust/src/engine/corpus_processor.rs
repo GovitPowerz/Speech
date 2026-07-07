@@ -77,6 +77,15 @@ pub struct CorpusProcessor {
     cost_lid_mem: Array2<f64>,
     bad_classif_lid_mem: Array2<f64>,
     best_cost: BTreeMap<usize, f64>,
+    /// Test-observation hook (Task 9): after each `save_and_update_epoch` in a
+    /// training run, snapshot config-0's flat weight vector AND whether the
+    /// best-cost gate fired that epoch. No legacy counterpart; the tier-2 train
+    /// golden replays this to pin the epoch-chained weight trajectory + the
+    /// gate fire/skip non-vacuity. Only allocated under `test-support`.
+    #[cfg(feature = "test-support")]
+    epoch_weight_trace: Vec<Vec<f64>>,
+    #[cfg(feature = "test-support")]
+    epoch_best_cost_trace: Vec<f64>,
 }
 
 impl CorpusProcessor {
@@ -148,6 +157,10 @@ impl CorpusProcessor {
             cost_lid_mem: Array2::zeros((1, nb_of_conf)),
             bad_classif_lid_mem: Array2::zeros((1, nb_of_conf)),
             best_cost,
+            #[cfg(feature = "test-support")]
+            epoch_weight_trace: Vec::new(),
+            #[cfg(feature = "test-support")]
+            epoch_best_cost_trace: Vec::new(),
         })
     }
 
@@ -413,6 +426,16 @@ impl CorpusProcessor {
                 // legacy: :217-224 training branch -- saveAndUpdate + saveResults
                 // ALWAYS (every epoch, including the final epoch > _TrainingEpochs).
                 self.save_and_update_epoch(epoch, derivs, &input_statistics)?;
+                #[cfg(feature = "test-support")]
+                {
+                    // Post-update snapshot: config-0's flat weights + the best-cost
+                    // for conf 0 (its evolution reveals gate fire/skip -- the gate
+                    // fires iff best_cost DROPPED this epoch).
+                    self.epoch_weight_trace
+                        .push(self.get_config0_weights_for_test());
+                    self.epoch_best_cost_trace
+                        .push(*self.best_cost.get(&0).unwrap_or(&f64::INFINITY));
+                }
                 self.save_results(epoch)?;
             } else {
                 // legacy: :226-230 non-training branch -- only when epoch <=
@@ -746,6 +769,27 @@ impl CorpusProcessor {
         max_weights: usize,
     ) -> Result<GradCheckReport> {
         self.grad_check_capped(epsilon, max_weights)
+    }
+
+    /// The per-epoch config-0 weight snapshots captured during a training run
+    /// (test hook for `phase4a_train_golden`). `epoch_weight_trace_for_test()[e]`
+    /// is config-0's flat weights AFTER the epoch-`e` `saveAndUpdate` (epoch 0 =
+    /// post-solo, then one entry per inner epoch, then the final eval). Empty for
+    /// a non-training run.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn epoch_weight_trace_for_test(&self) -> &[Vec<f64>] {
+        &self.epoch_weight_trace
+    }
+
+    /// The per-epoch best-cost (conf 0) snapshots captured during a training run
+    /// (test hook for the gate fire/skip non-vacuity assert). A STRICT drop from
+    /// entry `e-1` to `e` means the save gate FIRED at epoch `e`; an unchanged
+    /// value means it SKIPPED.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn epoch_best_cost_trace_for_test(&self) -> &[f64] {
+        &self.epoch_best_cost_trace
     }
 
     /// Config-0's flat weight vector (test hook for the grad-check restore assert).
