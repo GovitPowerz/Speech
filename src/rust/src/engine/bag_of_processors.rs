@@ -554,6 +554,15 @@ impl BagOfProcessors {
             // dumpDir is set; unscored branch (`:394-401`) ALWAYS writes (next to
             // the audio when dumpDir is empty). Both use the basename quirk (strip
             // the last 4 chars = extension).
+            //
+            // KNOWN GAP: single-channel write (`seg_per_chan[0]` only). The legacy
+            // `Segmentation::toFile_VRCTS` (`Segmentation.cpp:543-590`) loops over
+            // ALL `_ChannelNb` channels, writing one `<basename>_chan_<n>.xml` per
+            // channel (or a single `<basename>.xml` when `_ChannelNb == 1`); this
+            // port always emits channel 0 only, so channel 2+ segments are dropped
+            // from VRCTS output on stereo audio. Closed in Task 8 against the real
+            // compiled `toFile_VRCTS` byte golden. See IMPROVEMENTS.md
+            // ("single-channel VRCTS write on the corpus path").
             let base_last = base_from_last_slash(file_name);
             if scored {
                 if !dump_dir.is_empty() {

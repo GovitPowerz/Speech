@@ -1447,6 +1447,26 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   *Fix candidate:* port `load_ref_from_trs` (and wire `load_vrcts` into the reference dispatch) when a
   corpus needs them. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
 
+- **[phase4a] Single-channel VRCTS write on the corpus path** (`engine/bag_of_processors.rs::segmentation_function`
+  VRCTS write sites + `tasks/segmentation_io.rs::to_vrcts_string` (`:332`), from
+  `Segmentation.cpp:543-590` `Segmentation::toFile_VRCTS`): the legacy writer loops
+  `for (int chan = 0 ; chan < _ChannelNb ; ++chan)`, sanitizing and emitting one
+  full VRCTS document per channel -- `<basename>_chan_<n>.xml` when `_ChannelNb > 1`,
+  or a single `<basename>.xml` when `_ChannelNb == 1` -- each with its own
+  `Channel`/`Speaker`/`SegmentList` block for that channel's `_Classification`.
+  `to_vrcts_string` (pre-existing from Phase 0b-ii, byte-golden-pinned single-channel)
+  only ever serializes ONE channel (hardcoded `chan="1"`, no multi-file fan-out), and
+  the new `segmentation_function` write sites call it with `seg_per_chan[0]` only in
+  both the scored and unscored branches -- so on stereo audio every channel beyond 0
+  is silently dropped from VRCTS output. *Why deferred:* the fix must match the real
+  multi-channel byte oracle; Task 8 dumps the actual compiled `toFile_VRCTS` bytes on
+  2-channel corpora, and the multi-channel assembly should be written against that
+  authoritative golden rather than guessed at now. *Fix candidate:* multi-channel
+  assembly in `to_vrcts_string` (loop over channels, emit the `_chan_<n>` filename
+  suffix when `channel_count > 1`) or a wrapper around it that fans out one file per
+  channel, validated byte-for-byte in the Phase 4a tier-1 goldens. *Pinned by:* none
+  yet -- closed by the Task 8 tier-1 VRCTS byte golden.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
