@@ -95,3 +95,56 @@ def test_error_is_non_vacuous() -> None:
     _, _, data = _read_bin(PHASE4B / "confusion_error.bin")
     assert data[0] > 0.0
     assert data[0] == 200.0 / 3.0, "hand-derivable exact value (see manifest + Rust golden doc)"
+
+
+# --- Task 7 FLAGSHIP: Mode-7 (phSeq) real-compiled member fixtures + DumpLIDInternals ---
+
+MODE7_VARIANTS = ["twin_mode7", "twin_mode7_ppm1", "twin_mode7_ppm2"]
+MODE7_FILES = ["s1", "s2", "s3"]
+
+
+def test_mode7_member_fixtures_shapes_and_nonvacuity() -> None:
+    """The REAL compiled TwinBLSTMSpectralLID::getSegmentation LID members per
+    (variant, phSeq file): confusion is (classNb+2)x(classNb+2) = 4x4 (binary
+    net -> classNb 2), liderr is 1x2, members is 1x3. Non-vacuity across files:
+    at least one aggregate HIT (isCorrect 100) AND one MISS (0), and the >150
+    targetLID sentinel present in every liderr row."""
+    saw_hit = saw_miss = False
+    for v in MODE7_VARIANTS:
+        for f in MODE7_FILES:
+            cr, cc, _ = _read_bin(PHASE4B / f"mode7_{v}_{f}_confusion.bin")
+            assert (cr, cc) == (4, 4), f"mode7 {v} {f} confusion shape {cr}x{cc}"
+            lr, lc, liderr = _read_bin(PHASE4B / f"mode7_{v}_{f}_liderr.bin")
+            assert (lr, lc) == (1, 2), f"mode7 {v} {f} liderr shape {lr}x{lc}"
+            assert any(x > 150.0 for x in liderr), f"mode7 {v} {f}: no >150 sentinel"
+            mr, mc, members = _read_bin(PHASE4B / f"mode7_{v}_{f}_members.bin")
+            assert (mr, mc) == (1, 3), f"mode7 {v} {f} members shape {mr}x{mc}"
+            is_correct = members[2]
+            assert is_correct in (0.0, 100.0), f"mode7 {v} {f} isCorrect {is_correct}"
+            saw_hit = saw_hit or is_correct == 100.0
+            saw_miss = saw_miss or is_correct == 0.0
+            assert members[1] > 0.0, f"mode7 {v} {f} nb_of_classif not > 0"
+    assert saw_hit and saw_miss, "need both an aggregate hit and a miss across the mode-7 corpus"
+
+
+def test_mode7_dump_lid_internals_scipy_valued() -> None:
+    """DumpLIDInternals (:1136-1158): the harness real-Eigen `.mat` carries
+    `features_<n>` = [_OutputForward | _OutputBackward] per kept phSeq block +
+    a `matNb` scalar. Read via scipy (the 4a conversion pattern) and value-check:
+    matNb == number of features_n vars (2 for s1's 7-/5-row blocks), each is a
+    finite (rows x 96) matrix (TwoSweeps doubles the 24-wide fwd/bwd -> 48 each,
+    hcat -> 96), and not all-zero."""
+    import numpy as np
+    import scipy.io
+
+    mat = scipy.io.loadmat(PHASE4B / "mode7_dump_s1.mat")
+    varnames = [k for k in mat if not k.startswith("__")]
+    feats = sorted(v for v in varnames if v.startswith("features_"))
+    assert feats == ["features_0", "features_1"], f"unexpected feature vars {feats}"
+    assert "matNb" in varnames, "matNb missing"
+    assert int(np.asarray(mat["matNb"]).ravel()[0]) == len(feats), "matNb != feature count"
+    for name in feats:
+        m = np.asarray(mat[name])
+        assert m.shape[1] == 96, f"{name}: cols {m.shape[1]} != 96 (2*2*24 TwoSweeps [oF|oB])"
+        assert m.shape[0] > 0 and np.all(np.isfinite(m)), f"{name}: empty or non-finite"
+        assert np.any(m != 0.0), f"{name}: all-zero"

@@ -230,6 +230,27 @@ PRIOR_PHASES = ["phase0", "phase0b", "phase0bii", "phase1", "phase2", "phase2b",
 
 CONFUSION_BINS = ["confusion_input.bin", "confusion_matrix.bin", "confusion_error.bin"]
 
+# Task 7 FLAGSHIP: Mode 7 (phSeq) real-compiled getSegmentation LID members over
+# twin_mode7{,_ppm1,_ppm2}.config x s{1,2,3}.phSeq + the strict noise-indexing probe.
+MODE7_VARIANTS = ["twin_mode7", "twin_mode7_ppm1", "twin_mode7_ppm2"]
+MODE7_FILES = ["s1", "s2", "s3"]
+MODE7_KINDS = ["confusion", "liderr", "members"]
+MODE7_BINS = (
+    [
+        f"mode7_{v}_{f}_{kind}.bin"
+        for v in MODE7_VARIANTS
+        for f in MODE7_FILES
+        for kind in MODE7_KINDS
+    ]
+    + ["mode7_noise_in.bin", "mode7_noise_out.bin"]
+    + ["mode7_dump_s1.mat"]  # DumpLIDInternals real-Eigen .mat (scipy value-check)
+)
+MODE7_RE = re.compile(
+    r"^PHASE4B_MODE7 (?P<tag>\S+) nbclassif=(?P<nbc>\d+) isCorrect=(?P<iscorrect>-?\d+) "
+    r"lidCumErr=(?P<cost>[0-9.eE+-]+) confSum=(?P<confsum>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
+
 # Task 3: the multiclass scoring feedForward overload golden (BLSTMNeuralNetwork.h:195,
 # the LID path). One reimpl output covers every case (the forward is target-independent).
 SCORING_MULTI_BIN = "scoring_multi_out.bin"
@@ -340,7 +361,14 @@ def main() -> None:
             ]
         )
 
-        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN, *LID5_BINS, *TWIN_BINS, *phseq_bins]:
+        for name in [
+            *CONFUSION_BINS,
+            SCORING_MULTI_BIN,
+            *LID5_BINS,
+            *TWIN_BINS,
+            *phseq_bins,
+            *MODE7_BINS,
+        ]:
             src = tmp_dir / name
             if not src.is_file():
                 raise SystemExit(f"harness did not produce {name}")

@@ -20,6 +20,8 @@
 //! - the `_MinNbOfFrames` guard (ppm2's `MinNbOfFrames 4` skips the 2-/3-row blocks);
 //! - `_DumpLIDInternals` writes the `features_<n>` + `matNb` `.mat` (value round-trip).
 
+mod common;
+
 use std::path::PathBuf;
 
 use speech::audio::{Audio, read_audio};
@@ -27,6 +29,12 @@ use speech::io::binary::read_weight_vector;
 use speech::tasks::lid::TwinBlstmSpectralLid;
 use speech::tasks::segmentation::Segmentation;
 use speech::tasks::segmenter::Segmenter;
+
+const VARIANTS: [&str; 3] = ["twin_mode7", "twin_mode7_ppm1", "twin_mode7_ppm2"];
+
+fn row(v: &[f64]) -> ndarray::Array2<f64> {
+    ndarray::Array2::from_shape_vec((1, v.len()), v.to_vec()).unwrap()
+}
 
 fn phase4b(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -59,8 +67,9 @@ fn phseq_audio(f: &str, lang: i32, weight: f64) -> Audio {
     a
 }
 
-/// (file, lang) -- s1/s3 -> class 0 (eng), s2 -> class 1 (vie).
-const FILES: [(&str, i32); 3] = [("s1", 0), ("s2", 1), ("s3", 0)];
+/// (file, lang). s1 -> class 0 (net predicts 0 -> HIT); s2 -> class 1 (net predicts 1 ->
+/// HIT); s3 -> class 1 (net predicts 0 -> aggregate MISS -> isCorrect 0 non-vacuity).
+const FILES: [(&str, i32); 3] = [("s1", 0), ("s2", 1), ("s3", 1)];
 
 fn run(variant: &str, f: &str, lang: i32) -> (TwinBlstmSpectralLid, Vec<Segmentation>) {
     let lidw = lid_weights();
@@ -164,14 +173,19 @@ fn post_process_mode_all_three_covered() {
         d2.lid_classification_errors()[0],
         "ppm2 (vote) must differ from ppm0 (sum-log)"
     );
-    // ppm1 (entropy) COINCIDES with ppm0 in the normalized observables (documented: the
-    // per-row entropy offset is column-constant -> cancels in the softmax normalization).
+    // ppm1 (entropy) NEAR-COINCIDES with ppm0 in the normalized observables: the per-row
+    // entropy offset is column-constant so it cancels in the softmax normalization EXACTLY
+    // in exact arithmetic, and to ~1 ULP in floating point (exp/normalize rounding).
     let (d1, _) = run("twin_mode7_ppm1", "s1", 0);
-    assert_eq!(
-        d0.lid_classification_errors()[0],
-        d1.lid_classification_errors()[0],
-        "ppm1 should coincide with ppm0 in normalized langID (offset-cancellation)"
-    );
+    for (a, b) in d0.lid_classification_errors()[0]
+        .iter()
+        .zip(d1.lid_classification_errors()[0].iter())
+    {
+        assert!(
+            (a - b).abs() <= 1e-10 * a.abs().max(1.0),
+            "ppm1 should near-coincide with ppm0 (offset-cancellation): {a} vs {b}"
+        );
+    }
 }
 
 #[test]
@@ -201,4 +215,82 @@ fn dump_lid_internals_written_and_valued() {
     assert!(text.contains("features_1"), "missing features_1 variable");
     assert!(text.contains("matNb"), "missing matNb variable");
     std::fs::remove_dir_all(&tmp).ok();
+}
+
+// === bit-exact goldens vs the REAL compiled getSegmentation ======================
+// The harness runs the REAL compiled TwinBLSTMSpectralLID::getSegmentation over the
+// phSeq corpus (mode 7, noise off -> deterministic) and dumps the LID members
+// (`mode7_<variant>_<file>_{confusion,liderr,members}.bin`). The port matches ALL members
+// bit-exact on the oracle env: the LID net's one-hot phSeq input makes the layer-0
+// projection summation-free (blocked == ascending GEMM), and the rest of the small
+// 36/48-wide net happens to match Eigen bit-for-bit here (measured Rust-vs-REAL delta =
+// 0 on every continuous member). confusion/is_lid_correct/nb_of_classif are argmax/count-
+// derived (portable, bit-exact everywhere); lid_cumulative_error/lid_classification_errors
+// carry LogLaw/exp -> canary-gated (<=4 ULP off the oracle libm). members = [lidCumErr,
+// lidNbOfClassif, isLIDCorrect].
+
+#[test]
+fn mode7_integer_members_match_real_bitexact() {
+    for v in VARIANTS {
+        for (f, lang) in FILES {
+            let (drv, _) = run(v, f, lang);
+            let conf_want = common::load_bin_phase4b(&format!("mode7_{v}_{f}_confusion.bin"));
+            common::assert_bits_eq(
+                &drv.lid_segments_confusion()[0],
+                &conf_want,
+                &format!("mode7 {v} {f} confusion"),
+            );
+            let m = common::load_bin_phase4b(&format!("mode7_{v}_{f}_members.bin"));
+            assert_eq!(
+                drv.lid_nb_of_classif()[0],
+                m[[0, 1]] as i64,
+                "mode7 {v} {f} nb_of_classif"
+            );
+            assert_eq!(
+                drv.is_lid_correct()[0],
+                m[[0, 2]] as i32,
+                "mode7 {v} {f} is_lid_correct"
+            );
+        }
+    }
+}
+
+#[test]
+fn mode7_continuous_members_match_real() {
+    // lid_cumulative_error (LogLaw cost) + lid_classification_errors (langID via exp) --
+    // libm-dependent -> canary-gated (bit-exact on the oracle env, <=4 ULP off it).
+    for v in VARIANTS {
+        for (f, lang) in FILES {
+            let (drv, _) = run(v, f, lang);
+            let m = common::load_bin_phase4b(&format!("mode7_{v}_{f}_members.bin"));
+            common::assert_oracle_eq_f64(
+                drv.lid_cumulative_error()[0],
+                m[[0, 0]],
+                &format!("mode7 {v} {f} lid_cumulative_error"),
+            );
+            let liderr = common::load_bin_phase4b(&format!("mode7_{v}_{f}_liderr.bin"));
+            let got = row(&drv.lid_classification_errors()[0]);
+            common::assert_oracle_eq(&got, &liderr, &format!("mode7 {v} {f} liderr"));
+        }
+    }
+}
+
+#[test]
+fn mode7_noise_table_indexing_strict() {
+    // The noise path (:1022-1032) is a PURE table lookup; random_init is wall-clock in the
+    // legacy (:311, non-reproducible) so the port fixes randinit = 0. The harness dumps the
+    // fixed-table result (m = _RandomGaussVector[(kk*cols+ll)%_MaxRandSize]-0.5, feat +
+    // magnitude*m); the port reproduces it via constants::random_gauss -> STRICT bits.
+    let feat = common::load_bin_phase4b("mode7_noise_in.bin");
+    let want = common::load_bin_phase4b("mode7_noise_out.bin");
+    let magnitude = 0.3;
+    let (nr, nc) = feat.dim();
+    let mut got = feat.clone();
+    for kk in 0..nr {
+        for ll in 0..nc {
+            let m = speech::constants::random_gauss(kk * nc + ll) - 0.5;
+            got[[kk, ll]] += magnitude * m;
+        }
+    }
+    common::assert_bits_eq(&got, &want, "mode7 noise indexing");
 }

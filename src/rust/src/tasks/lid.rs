@@ -1216,8 +1216,15 @@ impl TwinBlstmSpectralLid {
             ));
         }
 
-        // Stateful spectrum-shift quantization (`:208-210`).
+        // Stateful spectrum-shift quantization (`initSpectralAnalysis` `:208-210`). The
+        // `!hasReadWavFile()` override (`:209`) forces `_SpectrumShiftInFrames = 80` for
+        // phSeq (File_Type 1) -- LOAD-BEARING: it drives every downstream window/shift
+        // derivation (getLIDBLSTMParam window 25, not the 10 the raw `round(0.025*8000)=
+        // 200` would give). `audio.periodogram.is_some()` is the port's `!hasReadWavFile()`.
         self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
+        if audio.periodogram.is_some() {
+            self.spectrum_shift_in_frames = 80;
+        }
         self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
         let ssif = self.spectrum_shift_in_frames;
         let spectrum_shift_sec = self.spectrum_shift_sec;

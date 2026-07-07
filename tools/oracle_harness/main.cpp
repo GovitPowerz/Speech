@@ -10397,6 +10397,133 @@ int main(int argc, char** argv) {
     }
 
     // =====================================================================
+    // --- Phase 4b Task 7 FLAGSHIP: TwinBLSTMSpectralLID Mode 7 (phSeq) -----
+    // The abs(_Mode)==7 branch (:903-1193) over the committed LID config
+    // (twin_mode7*.config = LID_BLSTM.config re-pointed) on the REAL 95k LID net
+    // (LID_bestNNWeight_1.bin, 12409 weights) + the phSeq corpus (s{1,2,3}.phSeq).
+    // Unlike the wav-mode Twin stage above, the LID net input (36) is DENSE-recurrent
+    // and 36/48-wide -> Eigen's blocked GEMM DIVERGES from the ascending-loop Rust port
+    // at k>=23, so an ascending-loop transcription for the CONTINUOUS observables would
+    // be the only bit-exact source. Here we pin against the REAL compiled getSegmentation
+    // directly (the strongest oracle): the port matches the ARGMAX/COUNT-derived members
+    // (_LIDSegmentsConfusion, _IsLIDCorrect, _LIDNbOfClassif) BIT-EXACT (integer, GEMM-
+    // robust) and the CONTINUOUS members (_LIDClassificationErrors, _LIDCumulativeError)
+    // to a GEMM+libm tolerance (LID7_STRUCT records the delta). Noise is off in the
+    // flagship (_NoiseMagnitude 0), so the real path is deterministic. The noise TABLE
+    // INDEXING is pinned separately + STRICT via noiseGauss below.
+    if (!twinConfigDir.empty() && !phseqCorpusDir.empty()) {
+        Eigen::VectorXd realLidW = BinaryFile2Vector(twinConfigDir + "/LID_bestNNWeight_1.bin");
+        std::cout << "PHASE4B_MODE7 lidWeights=" << realLidW.size() << "\n";
+
+        auto runMode7 = [&](const std::string& variant, const std::string& fname, int lang) {
+            ConfigFile conf(twinConfigDir + "/" + variant + ".config", '_');
+            // Erase the weightsFile keys (loaded explicitly) + silence DumpInternals for the
+            // real run (its .mat side-effect is validated Rust-side; oF/oB are GEMM-divergent).
+            conf._Params.erase("BLSTM_weightsFile");
+            conf._Params.erase("BLSTM_LID_weightsFile");
+            conf._Params["BLSTM_LID_DumpInternals"] = "false";
+            CorpusItem item(phseqCorpusDir + "/" + fname + ".phSeq", "", "eng", "us", lang, 0, 1.0);
+            AudioStruct audio(0.0, MAX_DUR_SEC, 1, item);
+            TwinProbe probe(conf);
+            probe.setWeightsLID(realLidW);
+            Segmentation seg(audio, 0.5);
+            probe.getSegmentation(audio, seg);
+
+            const std::string tag = variant + "_" + fname;
+            Eigen::MatrixXd conf_m = seg._LIDSegmentsConfusion[0];
+            Eigen::MatrixXd liderr = seg._LIDClassificationErrors[0];
+            Matrix2BinaryFile(out + "mode7_" + tag + "_confusion.bin", conf_m);
+            Matrix2BinaryFile(out + "mode7_" + tag + "_liderr.bin", liderr);
+            Eigen::MatrixXd members(1, 3);
+            members(0, 0) = seg._LIDCumulativeError[0];
+            members(0, 1) = (double) seg._LIDNbOfClassif[0];
+            members(0, 2) = (double) seg._IsLIDCorrect[0];
+            Matrix2BinaryFile(out + "mode7_" + tag + "_members.bin", members);
+            dumps += 3;
+            std::cout << "PHASE4B_MODE7 " << tag << " nbclassif=" << seg._LIDNbOfClassif[0]
+                      << " isCorrect=" << seg._IsLIDCorrect[0]
+                      << " lidCumErr=" << std::setprecision(17) << seg._LIDCumulativeError[0]
+                      << " confSum=" << conf_m.sum() << "\n";
+        };
+        for (const std::string& v : {std::string("twin_mode7"), std::string("twin_mode7_ppm1"),
+                                     std::string("twin_mode7_ppm2")}) {
+            runMode7(v, "s1", 0);
+            runMode7(v, "s2", 1);
+            runMode7(v, "s3", 1);  // net predicts class 0 -> aggregate MISS (isCorrect 0 non-vacuity)
+        }
+
+        // Noise-table indexing STRICT probe (:1022-1032). random_init is wall-clock
+        // (:311, non-deterministic) so the DRIVER path can never bit-match the real
+        // getSegmentation with _NoiseMagnitude>0; the port fixes randinit=0. Here we pin
+        // the PURE table lookup m(kk,ll) = _RandomGaussVector[(kk*cols+ll+0)%_MaxRandSize]
+        // - 0.5 and feat_noised = feat + magnitude*m against the fixed table (bit-exact
+        // everywhere -- pure indexing, no libm). The Rust test reproduces via constants::
+        // random_gauss with the same randinit=0.
+        {
+            const long NR = 5, NC = 7;
+            const double magnitude = 0.3;
+            Eigen::MatrixXd feat(NR, NC), noised(NR, NC);
+            for (long kk = 0; kk < NR; ++kk)
+                for (long ll = 0; ll < NC; ++ll)
+                    feat(kk, ll) = 0.01 * (kk * NC + ll);
+            for (long kk = 0; kk < NR; ++kk)
+                for (long ll = 0; ll < NC; ++ll) {
+                    double m = _RandomGaussVector[(kk * NC + ll) % _MaxRandSize] - 0.5;
+                    noised(kk, ll) = feat(kk, ll) + magnitude * m;
+                }
+            Matrix2BinaryFile(out + "mode7_noise_in.bin", feat);
+            Matrix2BinaryFile(out + "mode7_noise_out.bin", noised);
+            dumps += 2;
+            std::cout << "PHASE4B_MODE7 noise_probe NR=" << NR << " NC=" << NC
+                      << " magnitude=" << magnitude << " out00=" << std::setprecision(17)
+                      << noised(0, 0) << "\n";
+        }
+
+        // DumpLIDInternals .mat emitter (:1136-1144) for the scipy value-check: replicate
+        // the per-block `features_<n> = [_OutputForward | _OutputBackward]` + `matNb` dump
+        // over s1 (ppm2 config: _MinNbOfFrames 4 keeps both 7-/5-row blocks). Real Eigen
+        // forward with the phSeq ssif=80 window (25, noOverlap).
+        {
+            ConfigFile conf(twinConfigDir + "/twin_mode7_ppm2.config", '_');
+            conf._Params.erase("BLSTM_weightsFile");
+            conf._Params.erase("BLSTM_LID_weightsFile");
+            CorpusItem item(phseqCorpusDir + "/s1.phSeq", "", "eng", "us", 0, 0, 1.0);
+            AudioStruct audio(0.0, MAX_DUR_SEC, 1, item);
+            TwinProbe probe(conf);
+            probe.setWeightsLID(realLidW);
+            const long ssif = 80;  // BLSTMSpectralSegmenter.cpp:209 non-wav override.
+            const double rate = (double) audio.getFrameRate();
+            const double lidWinSec = conf.get<double>("BLSTM_LID_window");
+            long lidWs = (long) boost::math::round(lidWinSec * rate / 2.0 / ssif);
+            bool lidNoOv = false;
+            if (lidWs != 0) {  // BLSTM_LID_shift 0 -> shift 0 < 1
+                lidNoOv = true;
+                lidWs = (long) boost::math::round(lidWinSec * rate / ssif);
+                if (lidWs < 10) lidWs = 10;
+            }
+            probe._LIDBLSTMNeuralNetwork.setProcessingType(lidWs > 0, !lidNoOv);
+            mat_t* mp = Mat_Create((out + "mode7_dump_s1.mat").c_str(), NULL);
+            int cnt = 0;
+            for (Eigen::MatrixXd feat : audio._ExternalFeatures) {
+                if ((long) feat.rows() < 1 || (long) feat.rows() < 4) continue;  // MinNbOfFrames 4
+                probe._LIDBLSTMNeuralNetwork.feedForward(feat, lidWs, 1, 0, 1.0 / feat.rows());
+                Eigen::MatrixXd tmp(probe._LIDBLSTMNeuralNetwork._OutputForward.rows(),
+                                    2 * probe._LIDBLSTMNeuralNetwork._OutputForward.cols());
+                tmp << probe._LIDBLSTMNeuralNetwork._OutputForward,
+                    probe._LIDBLSTMNeuralNetwork._OutputBackward;
+                std::ostringstream buf;
+                buf << "features_" << cnt;
+                ++cnt;
+                Matrix2MatFile(buf.str(), tmp, mp);
+            }
+            Value2MatFile("matNb", (double) cnt, mp);
+            Mat_Close(mp);
+            dumps += 1;
+            std::cout << "PHASE4B_MODE7 dump matNb=" << cnt << " lidWs=" << lidWs << "\n";
+        }
+    }
+
+    // =====================================================================
     // --- Phase 4b Task 1: LID confusion core real-compiled goldens --------
     // `BagOfProcessors::PrintConfusionMatrix` (BagOfProcessors.cpp:474-598,
     // protected) builds a (classNb+2)x(classNb+2) confusion matrix as a

@@ -1964,6 +1964,76 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`tasks/lid.rs`). Mutation: switching `get_targets_lid`'s `==` to `>=` flips its enforced-row
   placement for `step >= 1` (the `get_targets_lid_enforcement` test uses `step = 2`).
 
+- **[phase4b] The phSeq (`!hasReadWavFile()`) `_SpectrumShiftInFrames = 80` override drives
+  EVERY window/shift derivation** (`tasks/lid.rs` `get_segmentation_mode7`, from
+  `BLSTMSpectralSegmenter.cpp:208-210`): `initSpectralAnalysis` computes
+  `_SpectrumShiftInFrames = round(_SpectrumShift*frameRate)` (= `round(0.025*8000) = 200`)
+  then UNCONDITIONALLY overrides it to `80` for a non-wav (phSeq) source (`:209`), and
+  re-derives `_SpectrumShift = 80/frameRate = 0.01`. Load-bearing: with 200 the Mode-7 LID
+  window is 10 (getLIDBLSTMParam `round(0.25*8000/2/200)=5 -> noOverlap -> 10`); with the
+  correct 80 it is 25 (`round(0.25*8000/2/80)=13 -> noOverlap -> 25`), which changes the
+  TwoSweeps truncate row counts (nb_of_classif 39 vs 77 for a 7-row block) and every
+  posterior. The port keys the override off `audio.periodogram.is_some()` (the phSeq ctor
+  populates it; the wav path leaves it `None`). *Why deferred:* faithful port; the 80 is a
+  hardcoded legacy magic constant. *Fix candidate:* N/A. *Pinned by:*
+  `mode7_integer_members_match_real_bitexact` + `mode7_continuous_members_match_real`
+  (`tests/phase4b_twin_mode7.rs`, bit-exact vs the REAL compiled `getSegmentation`: nbclassif
+  150/213/142). Mutation: dropping the `= 80` override (keeping 200) yields nb_of_classif 74
+  and flips `s2`/`s3` classifications, failing every mode-7 golden.
+
+- **[phase4b] The Mode-7 noise `random_init` is wall-clock -> the port fixes `randinit = 0`**
+  (`tasks/lid.rs` `get_segmentation_mode7`, from `TwinBLSTMSpectralLID.cpp:311,1025-1032`):
+  the noise offset is `randinit = remainder((long)(1e6*preparationElapsedSec), 100)` (`:311`
+  seeds `random_init` from `Timer` wall-clock; `:1025` reduces it mod 100), so the legacy
+  noise is NON-DETERMINISTIC and NON-REPRODUCIBLE across runs/machines. The table itself is
+  fixed (`_RandomGaussVector[(kk*cols+ll+randinit)%_MaxRandSize]`), so only the offset is
+  irreproducible. The port fixes `randinit = 0`, making the noise deterministic; the pure
+  table INDEXING (magnitude * (`random_gauss(kk*cols+ll) - 0.5`)) is then bit-exact. The
+  flagship configs run `_NoiseMagnitude 0` (noise off, so the real path is deterministic and
+  the goldens above hold regardless). *Why deferred:* wall-clock seeding cannot be ported
+  faithfully. *Fix candidate:* thread a real RNG seed through the config if noise is ever
+  needed for training. *Pinned by:* `mode7_noise_table_indexing_strict`
+  (`tests/phase4b_twin_mode7.rs`, STRICT bits vs the harness `_RandomGaussVector` dump with
+  `randinit = 0`). Mutation: shifting the port's index by +1 (`kk*cols+ll+1`) breaks the
+  strict golden.
+
+- **[phase4b] `abs(_Mode) == 7`: the wav arm (CNN) is unported, the `_Mode < 0` sub-branches
+  are dead, and the SAD net never runs** (`tasks/lid.rs`, from `TwinBLSTMSpectralLID.cpp:
+  903-1193`): the `if (audio.hasReadWavFile())` block (`:922-963`) feeds `inputSeq` through
+  `_LIDConvNeuralNetwork` (`:927`, the CNN -- NOT ported, dead-under-scope per the Phase 2
+  Conv exclusion) then rebuilds `_ExternalFeatures`; for phSeq (`!hasReadWavFile()`) it is
+  SKIPPED, so the loop iterates the ctor-loaded `_ExternalFeatures` directly. The port bails
+  typed on wav Mode 7 (CNN). The `_Mode < 0 && outputSeq.cols() == 2` sub-branch (`:1040-
+  1071`, an extra SAD `feedForward` when `targetIndex == 1`) is dead under `_Mode = +7` and
+  skipped. The SAD `_BLSTMNeuralNetwork` is never run in Mode 7 (`result_vec` is synthesized
+  constant `10.0` at `:726`, outputs cleared at `:762-763`), so the committed config's absent
+  `BLSTM_weightsFile` (default-init SAD net) is parity-neutral. *Why deferred:* the CNN is
+  broken-as-committed (Phase 2); the negative modes are dead. *Fix candidate:* port the CNN
+  if a mode-7 wav corpus is ever needed. *Pinned by:* the mode-7 goldens above (phSeq arm) +
+  the driver's typed wav bail (unit-covered by `get_segmentation_mode7`'s `periodogram.is_none()`
+  guard). Mutation: N/A (dead code); the SAD-irrelevance is proven by the goldens passing with
+  no SAD weights loaded.
+
+- **[phase4b] Mode-7 `classNb = max(2, outputSize)`, the DumpLIDInternals path is simplified,
+  and `_PostProcessMode 1` cancels in normalization** (`tasks/lid.rs`, from
+  `TwinBLSTMSpectralLID.cpp:624-625,906-921,1073-1179`): the committed LID net is BINARY
+  (`OutputNeuronNb 48,1` -> `getOutputSize() = 1`), and `classNb` is forced to `max(2, 1) =
+  2` (`:624-625`), so the brief's "3-class mapping" is superseded -- the fixtures use a
+  2-class mapping. `_DumpLIDInternals` derives the `.mat` filename from
+  `audio.getAudioFileName()` (`:906-913`); the port's `Audio` carries no source path, so the
+  dump lands at `<_DumpDir>/chan<c>_lid_dump.mat` (cosmetic path deviation) -- the VARIABLE
+  names (`features_<n>` = `[_OutputForward | _OutputBackward]`, `matNb`) and values are the
+  faithful part. `_PostProcessMode 1` (entropy-weighted, `:1073-1089`) adds a per-row scalar
+  `-sum log(entropy)` EQUALLY across every `segLID` column, which is a column-constant offset
+  -> it cancels in the softmax normalization (`:1169-1172`), so ppm1's normalized `langID`
+  NEAR-coincides with ppm0's (exactly in real arithmetic, ~1 ULP in floating point). *Why
+  deferred:* faithful port + missing `Audio` source path. *Fix candidate:* add
+  `Audio.source_name` if the exact legacy dump filename is ever needed. *Pinned by:*
+  `dump_lid_internals_written_and_valued`, `post_process_mode_all_three_covered`
+  (`tests/phase4b_twin_mode7.rs`; ppm2 vote DISTINCT, ppm1 near-coincident, all three code
+  paths counter-asserted). Mutation: forcing `classNb = outputSize` (dropping the `max(2,.)`)
+  makes the confusion 3x3 and mismatches the REAL 4x4 dump.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
