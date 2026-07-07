@@ -727,6 +727,15 @@ impl BlstmSignalSegmenter {
         self.net.input_statistics()
     }
 
+    /// `getWeightsDerivatives` delegate (`BLSTMSignalSegmenter.cpp:46-48`): the net's
+    /// Nx2 flat derivative matrix (col0 summed deriv, col1 frame count). The
+    /// `Segmenter` trait's default returns an empty matrix; this inherent method (and
+    /// the `Segmenter` override below) surface the real net derivs so the corpus
+    /// gradient harvest reads them.
+    pub fn get_weights_derivatives(&self) -> Array2<f64> {
+        self.net.get_weights_derivatives()
+    }
+
     /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators
     /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
     pub fn reset_weights_derivatives(&mut self) {
@@ -1289,6 +1298,14 @@ impl BlstmSpectralSegmenter {
     /// `getInputStatistics` (`:99-101`): the net's accumulated per-dim stats.
     pub fn input_statistics(&self) -> &InputStatistics {
         self.net.input_statistics()
+    }
+
+    /// `getWeightsDerivatives` delegate (`BLSTMSpectralSegmenter.cpp:95-97`): the
+    /// net's Nx2 flat derivative matrix. See the [`BlstmSignalSegmenter`] twin's doc:
+    /// the `Segmenter` trait default returns empty; this inherent method surfaces the
+    /// real net derivs for the corpus gradient harvest.
+    pub fn get_weights_derivatives(&self) -> Array2<f64> {
+        self.net.get_weights_derivatives()
     }
 
     /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators

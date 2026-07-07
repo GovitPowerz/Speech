@@ -377,7 +377,6 @@ impl BagOfProcessors {
     /// everything else falls through to the legacy's EMPTY default
     /// (`:143-144`).
     pub fn get_weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
-        use crate::tasks::segmenter::Segmenter;
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.get_weights_derivatives()],
             Processor::Signal(seg) => vec![seg.get_weights_derivatives()],

@@ -1497,6 +1497,76 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`tests/phase4a_save_update.rs`), which mixes single-row algo-1/algo-3 configs so
   `means == sums` and the per-config independence of the row-count basis is exercised directly.
 
+- **[phase4a] Static-lane deterministic reduction replaces the legacy OpenMP dynamic parallel-for**
+  (`engine/corpus_processor.rs::run_epoch`, from `CorpusProcessor.cpp:172-203`): the legacy runs
+  `#pragma omp parallel for ... schedule(dynamic, 1)` over files and folds each file's contribution
+  inside an `omp critical` block, so the FOLD ORDER is whichever thread grabs the critical section
+  first -- nondeterministic even at a fixed thread count. Since the derivative `+=` and
+  `InputStatistics::update` merge (`:184-199`) are float-order-sensitive, the reduced values are
+  not bit-reproducible run to run. This port (spec S3, the R6 determinism fix -- the ONE deliberate
+  deviation from legacy parallelism) assigns file `j` to lane `j % N` (`N = nb_of_threads` clamped
+  to `[1, nb_files]`), clones the epoch-start bag once per lane (`firstprivate`, `:172`), walks each
+  lane's files in ascending `j` (so genuine cross-file driver state chains within a lane), and folds
+  in ASCENDING FILE INDEX after the parallel section. At `N == 1` this is byte-identical to a plain
+  sequential loop (the golden-pinned parity mode); for `N > 1` the results are deterministic (fixed
+  for a fixed N) but differ from the legacy's nondeterministic run AND, because state chains per
+  lane, from `N == 1`. *Why deferred:* this is a deliberate FIX (determinism), not a bug to revisit;
+  the entry documents the N-dependence so a reader does not expect `N > 1` to match `N == 1` or the
+  legacy. This CLOSES the forward-noted `[3/4] OpenMP InputStatistics merge-order nondeterminism`
+  item below. *Pinned by:* `lanes_n1_equals_sequential` (`tests/phase4a_corpus_processor.rs`),
+  which asserts `run_epoch` at N=1 is bit-exact (col 6 = the wall-clock timing column masked) vs a
+  hand-sequential oracle over a 3-file corpus.
+
+- **[phase4a] NN driver `get_weights_derivatives` was shadowed by the `Segmenter` trait default
+  (returned an empty matrix); added an inherent net delegate** (`tasks/sad.rs`, both
+  `BlstmSignalSegmenter` and `BlstmSpectralSegmenter`): Task 3/4 added inherent net-delegating
+  methods for `save_weights`/`update_weights`/`input_statistics`/`is_back_prop_activated` but NOT
+  for `get_weights_derivatives`, so `BagOfProcessors::get_weights_derivatives` (which calls
+  `seg.get_weights_derivatives()` with `Segmenter` in scope) resolved to the trait DEFAULT
+  (`segmenter.rs:39-41`, `Array2::zeros((0,0))`) instead of the net's real Nx2 derivative matrix.
+  The corpus gradient harvest (`run_epoch`) and gradCheck therefore saw an all-empty derivative
+  everywhere. Task 7 adds the missing inherent `get_weights_derivatives` delegate to both NN drivers
+  (mirroring the `input_statistics` delegate); Rust's inherent-over-trait method resolution makes
+  the bag pick it up. *Why noted:* a cross-task gap (Task 3/4 omission) surfaced only when a caller
+  actually read the harvested derivs; the fix is a pure additive delegate, no behavior change to
+  existing callers (which never read a non-empty derivs before). *Pinned by:* the harvest path in
+  `grad_check_synthetic` reaching a `(137, 2)` analytic derivative shape rather than `(0, 0)`
+  (`tests/phase4a_corpus_processor.rs`).
+
+- **[phase4a] Corpus-level gradCheck is DEGENERATE under the current Phase 2b drivers (cost/counter
+  both 0)** (`engine/corpus_processor.rs::grad_check`, from `CorpusProcessor.cpp:237-340`): the
+  gradCheck central difference reads result col 4 (`cumulative_error`) / col 17 (`nb_of_classif`)
+  from the per-file results. But the Phase 2b NN drivers (`tasks/sad.rs`,
+  `BlstmSignalSegmenter`/`BlstmSpectralSegmenter` `get_segmentation`) do NOT wire the
+  reference-driven target path (`sad.rs:882`/`:1462` pass an EMPTY target to
+  `feed_forward_backward`), and `feed_forward_backward` gates BOTH the backward derivative
+  accumulation AND the cost/counter accumulation on `target.nrows() > 0` (`blstm.rs:1150,1171`). So
+  with no target: `cumulative_error == 0`, `nb_of_classif == 0`, and the analytic derivs are 0 with
+  count 0. The gradcheck cost is `0/0 == NaN` on both the +eps and -eps sides, the analytic
+  normalized deriv is `0/0 == NaN`, and both means are NaN -- the check is VACUOUS. The legacy
+  produces a live cost because its `getSegmentation` calls `getTargets` when `seg._Reference.size()
+  > 0` (`BLSTMSignalSegmenter.cpp:255-260`) and passes the real target to `feedForwardBackward`.
+  *Why deferred:* the reference-driven target wiring in `get_segmentation` is a Phase 2b driver
+  internal (out of Task 7 scope); Task 7 transcribes the gradCheck ORCHESTRATION faithfully (bag
+  snapshot, per-weight perturb/restore, central difference, the Nx2 col0/col1 normalize-at-read),
+  and Task 9's harness golden supplies the LIVE cost against a `SpectralProbe` whose real
+  `getSegmentation` DOES pass targets. *Fix candidate:* wire `get_targets` (already ported,
+  `segmenter.rs:524`) into both NN drivers' `get_segmentation` under `seg._Reference` (requires the
+  driver to first set the per-channel reference on the hypothesis Segmentation). *Pinned by:*
+  `grad_check_synthetic` (`tests/phase4a_corpus_processor.rs`), which asserts the orchestration
+  mechanics (10 per-weight triples, bit-exact weight restore after the sweep) AND the NaN degeneracy
+  explicitly, so a future driver fix that makes the cost live will flip this assertion visibly.
+
+- **[phase4a] gradCheck `max_weights` cap is a port-only DEVIATION from the legacy full sweep**
+  (`engine/corpus_processor.rs::grad_check_capped`): the legacy `gradCheck` (`:263`) checks EVERY
+  weight (`kk < weightsNb`), each requiring two full corpus runs -- O(N) forwards for an N-weight
+  net (33,671 for the real config). The port adds a `max_weights` cap (the public `run()` path uses
+  `usize::MAX` == the full legacy sweep; the test/Task-9 path caps at 10) so the golden replay does
+  not pay 33,671 * 2 corpus runs. Recorded in the Task 9 manifest as `gradcheck_max_weights`. *Why
+  deferred:* a deliberate test-cost deviation, not a bug; the capped subset still spans the flat
+  layout (Task 9 chooses the indices). *Pinned by:* `grad_check_synthetic` (10-weight cap) and Task
+  9's `phase4a_gradcheck_golden`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
