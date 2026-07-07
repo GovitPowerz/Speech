@@ -147,6 +147,13 @@ impl TdcSegmenter {
         })
     }
 
+    /// The configured dump directory (`Segmenter::_DumpDir`, read via
+    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
+    /// VRCTS write (`BagOfProcessors.cpp:268,273,278,...`).
+    pub fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
     /// Zero cost accumulators: TDC has no NN/cost path (`cumulative_error`/
     /// `nb_of_classif` stay at their legacy `Segmentation` ctor-seeded 0.0/0
     /// defaults for every channel -- `getSegmentation` never writes them). Sized
@@ -329,6 +336,11 @@ impl LtsvSegmenter {
             window_shift_sec,
             channels: 0,
         })
+    }
+
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    pub fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
     }
 
     /// Zero cost accumulators: LTSV has no NN/cost path (same rationale as
@@ -669,6 +681,11 @@ impl BlstmSignalSegmenter {
     /// port does not carry).
     pub fn last_result_rows(&self) -> &[Vec<f64>] {
         &self.last_result_rows
+    }
+
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    pub fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
     }
 
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:346`): the NN cost from
@@ -1187,6 +1204,11 @@ impl BlstmSpectralSegmenter {
     /// counterpart -- the legacy dump quirk keeps the externalized result at pass 1).
     pub fn last_result_rows_pass2(&self) -> &[Vec<f64>] {
         &self.last_result_rows_pass2
+    }
+
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    pub fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
     }
 
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:752`).

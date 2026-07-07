@@ -3,14 +3,24 @@
 //!
 //! Ported from legacy C++: BagOfProcessors.*.
 
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
-use crate::cli::Mode;
+use crate::audio::{Audio, read_audio};
+use crate::cli::{Mode, ModeKind};
+use crate::engine::corpus::CorpusItem;
 use crate::features::stats::InputStatistics;
 use crate::tasks::sad::{
     BlstmSignalSegmenter, BlstmSpectralSegmenter, LtsvSegmenter, TdcSegmenter,
+};
+use crate::tasks::segmentation::{SegClass, Segmentation};
+use crate::tasks::segmentation_io::{
+    ScoreReport, compute_errors, load_ref_csv, load_ref_stm, write_vrcts,
 };
 
 /// `conf.get<int>(name)` (required, no default): missing key is an error.
@@ -77,6 +87,57 @@ pub enum Processor {
     Ltsv(LtsvSegmenter),
     Spectral(BlstmSpectralSegmenter),
     Signal(BlstmSignalSegmenter),
+}
+
+impl Processor {
+    /// Dispatch `Segmenter::getSegmentation` (`BagOfProcessors.cpp:267,272,...`):
+    /// the enum tag replaces the legacy `_AlgoTypes[ii]` if/else ladder.
+    fn get_segmentation(
+        &mut self,
+        audio: &mut crate::audio::Audio,
+        seg_per_chan: &mut [crate::tasks::segmentation::Segmentation],
+    ) -> Result<()> {
+        use crate::tasks::segmenter::Segmenter;
+        match self {
+            Processor::Tdc(s) => s.get_segmentation(audio, seg_per_chan),
+            Processor::Ltsv(s) => s.get_segmentation(audio, seg_per_chan),
+            Processor::Spectral(s) => s.get_segmentation(audio, seg_per_chan),
+            Processor::Signal(s) => s.get_segmentation(audio, seg_per_chan),
+        }
+    }
+
+    /// The driver's `_DumpDir` (`BagOfProcessors.cpp:268,273,...`): gates the
+    /// scored-branch VRCTS write.
+    fn dump_dir(&self) -> &str {
+        match self {
+            Processor::Tdc(s) => s.dump_dir(),
+            Processor::Ltsv(s) => s.dump_dir(),
+            Processor::Spectral(s) => s.dump_dir(),
+            Processor::Signal(s) => s.dump_dir(),
+        }
+    }
+
+    /// Per-channel `seg._CumulativeError` (result col 4). TDC/LTSV are NN-free
+    /// and return owned zero vecs; the NN drivers return the cost captured on the
+    /// last `get_segmentation` call.
+    fn cumulative_error(&self) -> Vec<f64> {
+        match self {
+            Processor::Tdc(s) => s.cumulative_error(),
+            Processor::Ltsv(s) => s.cumulative_error(),
+            Processor::Spectral(s) => s.cumulative_error().to_vec(),
+            Processor::Signal(s) => s.cumulative_error().to_vec(),
+        }
+    }
+
+    /// Per-channel `seg._NbOfClassif` (result col 17).
+    fn nb_of_classif(&self) -> Vec<i64> {
+        match self {
+            Processor::Tdc(s) => s.nb_of_classif(),
+            Processor::Ltsv(s) => s.nb_of_classif(),
+            Processor::Spectral(s) => s.nb_of_classif().to_vec(),
+            Processor::Signal(s) => s.nb_of_classif().to_vec(),
+        }
+    }
 }
 
 /// Port of `BagOfProcessors` (`BagOfProcessors.h`/`.cpp`): per-config driver
@@ -323,6 +384,330 @@ impl BagOfProcessors {
             Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
         }
     }
+
+    /// Dispatch config-`pos`'s `Segmenter::getSegmentation` onto a pre-seeded
+    /// per-channel `Segmentation` slice. Exposed so the corpus-processor driver
+    /// (and Task 5's own scoring oracle) can drive one config without going
+    /// through the whole [`Self::segmentation_function`] flow.
+    pub fn run_get_segmentation(
+        &mut self,
+        pos: usize,
+        audio: &mut Audio,
+        seg_per_chan: &mut [Segmentation],
+    ) -> Result<()> {
+        self.processors[pos].get_segmentation(audio, seg_per_chan)
+    }
+
+    /// Port of `BagOfProcessors::SegmentationFunction` (`:207-407`): read the
+    /// file once, then for each config seed a per-channel [`Segmentation`], run
+    /// the segmenter, score against the reference, and assemble the per-channel
+    /// 18-column result vector (`config -> channel -> row`).
+    ///
+    /// The lock-file block (`:214-250`) is STUBBED: with no `LockFilesDir` the
+    /// legacy always sets `treatFile = true`, so this port unconditionally treats
+    /// the file. The `jj` param (legacy lane index, only ever fed the lock
+    /// filename) is therefore dropped from the signature. IMPROVEMENTS: `[phase4a]
+    /// SegmentationFunction lock-file block stubbed`.
+    ///
+    /// Reference load dispatches on `item.ref_seg`'s extension (mirroring the
+    /// legacy `Segmentation` ctor `:72-110`): `.stm` -> [`load_ref_stm`] per
+    /// channel, `.csv` -> [`load_ref_csv`] (also yields `nb_words` for WER),
+    /// `.trs` -> `bail!` (unported), anything else / empty -> no reference.
+    /// The mandatory-reference check (`:302-305`): a scored mode with no loadable
+    /// reference is an error (legacy `exit(1)`).
+    pub fn segmentation_function(
+        &mut self,
+        item: &CorpusItem,
+        mode: Mode,
+    ) -> Result<BTreeMap<usize, BTreeMap<usize, Vec<f64>>>> {
+        let mut results: BTreeMap<usize, BTreeMap<usize, Vec<f64>>> = BTreeMap::new();
+
+        // legacy: :254 AudioStruct audio(_OffsetBegin, _DurationMax, _FileType, corpusItem);
+        let file_name = &item.file_name;
+        let mut audio = read_audio(Path::new(file_name), self.offset_begin, self.duration_max)?;
+        let channel_count = audio.data.nrows();
+        let frame_count = audio.data.ncols();
+        // legacy: Segmentation.cpp:47 _AudioDuration = (frameCount-1)/frameRate.
+        let audio_duration = (frame_count as f64 - 1.0) / audio.sample_rate as f64;
+
+        // Reference text is read once (the legacy `Segmentation` ctor opens the
+        // file per channel for STM, but the content is the same file).
+        let ref_ext = extension_of(&item.ref_seg);
+        let ref_text = match ref_ext {
+            RefExt::Trs => {
+                // legacy: Segmentation.cpp:103,108 load_ref_from_trs -- unported.
+                bail!(
+                    "TRS reference `{}` not ported (Phase 4b): IMPROVEMENTS [phase4a] .trs reference loader unported",
+                    item.ref_seg
+                );
+            }
+            RefExt::None => None,
+            _ => Some(std::fs::read_to_string(&item.ref_seg).ok()),
+        };
+
+        // Scored iff mode is m/M/t/T, OR i/I with a non-empty reference (`:311`).
+        // The mandatory-reference check (`:302-305`) fires for m/M/t/T only.
+        let is_scored_kind = matches!(mode.kind, ModeKind::Multi | ModeKind::UnitTest);
+        let is_image_kind = matches!(mode.kind, ModeKind::Image);
+
+        for ii in 0..self.nb_of_conf {
+            // legacy: :260 Segmentation seg(audio, _PruningThresholds[ii]);
+            let mut seg_per_chan: Vec<Segmentation> = (0..channel_count)
+                .map(|_| Segmentation::new(audio_duration))
+                .collect();
+
+            // Build the per-channel reference (None when no reference is loadable)
+            // and its `nb_words` WER gate. CSV yields nb_words; STM/none leave it
+            // at the legacy default -1 (`Segmentation.h:70`), which suppresses WER
+            // Pass 1. `_Reference` is filled identically per channel from the same
+            // file, so the single CSV parse's `nb_words` is shared across channels.
+            let (reference, nb_words): (Option<Vec<Segmentation>>, i64) = match (ref_ext, &ref_text)
+            {
+                (RefExt::Stm, Some(Some(text))) => {
+                    let refs = (0..channel_count)
+                        .map(|chan| {
+                            load_ref_stm(
+                                text,
+                                chan,
+                                self.offset_begin,
+                                audio_duration,
+                                self.exclude_nontrans,
+                            )
+                        })
+                        .collect();
+                    (Some(refs), -1)
+                }
+                // CSV: the legacy `load_ref_from_csv` (`Segmentation.cpp:745-806`)
+                // only builds `buf` (the filename to open) for `_ChannelNb == 1`;
+                // for `_ChannelNb == 2` it leaves `buf` EMPTY (`:750-752`, a
+                // log-only branch -- the `buf << filename` write is missing), so
+                // `ifstream("")` fails and NO `_Reference` is pushed for ANY
+                // channel. Reproduced: a CSV reference loads only for single-channel
+                // audio; 2+ channels get no reference at all (load-bearing legacy
+                // bug, IMPROVEMENTS).
+                (RefExt::Csv, Some(Some(text))) if channel_count == 1 => {
+                    let (seg, nb) = load_ref_csv(
+                        text,
+                        self.offset_begin,
+                        audio_duration,
+                        self.pruning_thresholds[ii],
+                    );
+                    (Some(vec![seg]), nb)
+                }
+                _ => (None, -1),
+            };
+
+            let t = Instant::now();
+            // legacy: :265-300 dispatch on _AlgoTypes[ii].getSegmentation(audio, seg).
+            self.processors[ii].get_segmentation(&mut audio, &mut seg_per_chan)?;
+            let dump_dir = self.processors[ii].dump_dir().to_string();
+
+            // Mandatory-reference check (`:302-305`): _ClassificationErrors is
+            // populated only when a reference exists, so "scored mode AND no
+            // reference" is the legacy's empty-_ClassificationErrors bail.
+            if is_scored_kind && reference.is_none() {
+                bail!(
+                    "Error: no valid reference segmentation was given for the file {}.\nA valid reference is mandatory when using the modes \"-m\", \"-M\", \"-t\" or \"-T\".",
+                    file_name
+                );
+            }
+
+            // legacy: :308-309 timing (masked in goldens; still measured).
+            let time_elapsed_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let time_per_hour =
+                time_elapsed_ms / 1000.0 / channel_count as f64 / frame_count as f64
+                    * (audio.sample_rate as f64 * 3600.0);
+
+            // The scored branch fires for m/M/t/T, or i/I with a non-empty ref.
+            let scored = is_scored_kind || (is_image_kind && reference.is_some());
+
+            // Score every channel (compute_errors sanitizes hyp in place -- the
+            // legacy's getSegmentation always calls compute_errors, so the
+            // speech-duration walk always reads the SANITIZED hypothesis, scored
+            // or not).
+            let cumulative_error = self.processors[ii].cumulative_error();
+            let nb_of_classif = self.processors[ii].nb_of_classif();
+
+            let mut chan_map: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            for chan in 0..channel_count {
+                let refc = reference.as_ref().map(|r| &r[chan]);
+                let report = compute_errors(&mut seg_per_chan[chan], refc, nb_words);
+                let speech_duration = speech_duration_of(&seg_per_chan[chan]);
+
+                let row = if scored {
+                    assemble_scored_row(
+                        &report,
+                        time_per_hour,
+                        cumulative_error[chan],
+                        audio_duration,
+                        speech_duration,
+                        nb_of_classif[chan],
+                    )
+                } else {
+                    assemble_unscored_row(time_per_hour, audio_duration, speech_duration)
+                };
+                chan_map.insert(chan, row);
+            }
+            results.insert(ii, chan_map);
+
+            // legacy: VRCTS write. Scored branch (`:352-356`) writes ONLY when
+            // dumpDir is set; unscored branch (`:394-401`) ALWAYS writes (next to
+            // the audio when dumpDir is empty). Both use the basename quirk (strip
+            // the last 4 chars = extension).
+            let base_last = base_from_last_slash(file_name);
+            if scored {
+                if !dump_dir.is_empty() {
+                    let out = format!("{dump_dir}/{base_last}");
+                    write_vrcts(&seg_per_chan[0], "", "", Path::new(&out))?;
+                }
+            } else {
+                let out = if !dump_dir.is_empty() {
+                    format!("{dump_dir}/{base_last}")
+                } else {
+                    // No dumpDir: strip the extension from the FULL path (`:399`).
+                    strip_last_4(file_name)
+                };
+                write_vrcts(&seg_per_chan[0], "", "", Path::new(&out))?;
+            }
+
+            // legacy: :403 audio.reset() before the next config.
+            audio.reset();
+        }
+
+        Ok(results)
+    }
+}
+
+/// The extension dispatch of the legacy `Segmentation` ctor (`:72-110`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RefExt {
+    Stm,
+    Csv,
+    Trs,
+    None,
+}
+
+/// Classify `ref_seg` by its trailing 4 chars (`:73`), matching the legacy
+/// `.substr(size-4)` compare: an empty/short name is no reference; `.stm`/`.csv`
+/// dispatch to their loaders; `.xml` (VRCTS) is not wired here (no corpus in 4a
+/// uses it -- deferred with the TRS path); everything else (incl. `.trs`) is TRS.
+fn extension_of(ref_seg: &str) -> RefExt {
+    if ref_seg.len() <= 4 {
+        // legacy: :106 size > 0 -> TRS; size 0 -> no reference.
+        return if ref_seg.is_empty() {
+            RefExt::None
+        } else {
+            RefExt::Trs
+        };
+    }
+    match &ref_seg[ref_seg.len() - 4..] {
+        ".stm" => RefExt::Stm,
+        ".csv" => RefExt::Csv,
+        _ => RefExt::Trs,
+    }
+}
+
+/// Speech-duration walk over the hyp segments (`:324-330`): sum
+/// `next.begin - cur.begin` over SPEECH intervals (all but the `End` sentinel).
+fn speech_duration_of(seg: &Segmentation) -> f64 {
+    let segs = seg.segments();
+    let mut total = 0.0;
+    for i in 0..segs.len().saturating_sub(1) {
+        if segs[i].ty == SegClass::Speech {
+            total += segs[i + 1].begin - segs[i].begin;
+        }
+    }
+    total
+}
+
+/// Basename after the last `/`, minus the last 4 chars (`:353`, `:396`): the
+/// legacy `substr(last_slash+1, size-last_slash-1-4)` = component without its
+/// 4-char extension.
+fn base_from_last_slash(path: &str) -> String {
+    let after = match path.rfind('/') {
+        Some(i) => &path[i + 1..],
+        None => path,
+    };
+    strip_last_4(after)
+}
+
+/// Drop the last 4 chars (the `.ext`), as the legacy `substr(0, size-4)` (`:399`).
+fn strip_last_4(s: &str) -> String {
+    if s.len() >= 4 {
+        s[..s.len() - 4].to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// The scored 18-column row (`:313-350`): errors + timing + cost + duration +
+/// speech walk + WER (cols 7-13) + the two 0.0 LID slots + lid_nb_of_classif (0
+/// in 4a) + nb_of_classif.
+fn assemble_scored_row(
+    report: &ScoreReport,
+    time_per_hour: f64,
+    cumulative_error: f64,
+    audio_duration: f64,
+    speech_duration: f64,
+    nb_of_classif: i64,
+) -> Vec<f64> {
+    let speech = report.per_class[SegClass::Speech as usize];
+    let mut global_error_rate = 0.0;
+    // legacy: :317-319 j from OTHER up to (exclusive) EXCLUDED.
+    for j in (SegClass::Other as usize)..(SegClass::Excluded as usize) {
+        global_error_rate += report.per_class[j].error_rate;
+    }
+    let wer = report.wer.unwrap_or_default();
+
+    vec![
+        100.0 * speech.pfa,        // 0
+        100.0 * speech.pmiss,      // 1
+        100.0 * global_error_rate, // 2
+        time_per_hour,             // 3
+        cumulative_error,          // 4
+        audio_duration,            // 5
+        speech_duration,           // 6
+        wer.nb_words as f64,       // 7
+        wer.corrects as f64,       // 8
+        wer.subs as f64,           // 9
+        wer.ins as f64,            // 10
+        wer.dels as f64,           // 11
+        wer.coverage_penalty,      // 12
+        wer.delay_penalty,         // 13
+        0.0,                       // 14 (no LID in 4a)
+        0.0,                       // 15
+        0.0,                       // 16 lid_nb_of_classif
+        nb_of_classif as f64,      // 17
+    ]
+}
+
+/// The unscored 18-column row (`:358-392`): zeros for the error cols and the two
+/// counters, timing/duration/speech walk still real, WER default (all zero).
+fn assemble_unscored_row(
+    time_per_hour: f64,
+    audio_duration: f64,
+    speech_duration: f64,
+) -> Vec<f64> {
+    vec![
+        0.0,             // 0
+        0.0,             // 1
+        0.0,             // 2
+        time_per_hour,   // 3
+        0.0,             // 4
+        audio_duration,  // 5
+        speech_duration, // 6
+        0.0,             // 7 nb_words (WER default)
+        0.0,             // 8 corrects
+        0.0,             // 9 subs
+        0.0,             // 10 ins
+        0.0,             // 11 dels
+        0.0,             // 12 coverage
+        0.0,             // 13 delay
+        0.0,             // 14 LID slot
+        0.0,             // 15 LID slot
+        0.0,             // 16 lid_nb_of_classif (0)
+        0.0,             // 17 nb_of_classif (0)
+    ]
 }
 
 #[cfg(test)]

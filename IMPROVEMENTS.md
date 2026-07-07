@@ -1392,6 +1392,61 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `.cep` readers and plumb the file_type enum through the audio I/O. *Pinned by:*
   `file_type_nonzero_bails` (inline, `engine/bag_of_processors.rs`).
 
+- **[phase4a] `SegmentationFunction` lock-file block stubbed (no `LockFilesDir` -> always treat
+  the file)** (`engine/bag_of_processors.rs::segmentation_function`, from `BagOfProcessors.cpp:214-250`):
+  the legacy gates per-file processing on an `O_CREAT|O_EXCL` lock file under `_LockFilesDir` (a
+  crude multi-worker file-claim scheme -- `<dir>/<prefix>_<jj>_<basename>.lck`, with the odd
+  double-`open()` retry ladder at `:225-249`). The port drops the whole block: with `_LockFilesDir`
+  empty the legacy itself always sets `treatFile = true` (`:214-215`), which is the only regime the
+  Phase 4a in-process rayon-static-lane driver runs in (no cross-process lock coordination). The
+  legacy `jj` argument (lane index) fed ONLY the lock filename, so it is dropped from the Rust
+  signature. *Why deferred:* the lock scheme is a distributed-cluster artifact; the in-process port
+  coordinates lanes via static-lane assignment (spec S), not filesystem locks. *Fix candidate:* if a
+  multi-process cluster drop-in is ever needed, reintroduce the lock-file claim behind a
+  `LockFilesDir`-set branch. *Pinned by:* `segmentation_function`'s always-treat behaviour across the
+  scored/unscored tests (`tests/phase4a_segfn.rs`).
+
+- **[phase4a] Unscored branch ALWAYS writes VRCTS (even with no dump dir, next to the audio)**
+  (`engine/bag_of_processors.rs::segmentation_function`, from `BagOfProcessors.cpp:394-401`): the
+  SCORED result branch (`:352-356`) writes the VRCTS dump ONLY when `dumpDir` is non-empty, but the
+  UNSCORED branch (`:394-401`) writes it UNCONDITIONALLY -- to `dumpDir/<basename>` when a dump dir is
+  set, else to `<full-audio-path-minus-4-char-extension>` right next to the source audio. So a plain
+  `-s`/`-S` solo run silently drops a `<audiofile-without-ext>` VRCTS file beside every input. Both
+  branches share the load-bearing basename quirk: `substr(last_slash+1, size-last_slash-1-4)` (strip
+  the last path component's 4-char extension) for the dump-dir case, `substr(0, size-4)` (strip the
+  extension from the FULL path) for the next-to-audio case. Reproduced verbatim. *Why deferred:*
+  observable side effect on disk; changing it would diverge from the legacy's file output. *Fix
+  candidate:* after end-to-end parity, gate the unscored write on an explicit opt-in flag. *Pinned by:*
+  `unscored_mode_zero_columns_and_vrcts` + `dump_dir_vrcts` (`tests/phase4a_segfn.rs`).
+
+- **[phase4a] CSV reference loads ONLY for single-channel audio (2-channel `buf` left empty ->
+  no reference)** (`engine/bag_of_processors.rs::segmentation_function`, from
+  `Segmentation.cpp:745-806`): `load_ref_from_csv` loops over `_ChannelNb` and builds the file-to-open
+  string `buf` ONLY in the `_ChannelNb == 1` branch (`:748-749` `buf << filename`); the
+  `_ChannelNb == 2` branch (`:750-752`) emits a "wrong path" LOG line and NEVER writes `buf`, so
+  `ifstream(buf.str())` opens the empty string, fails, and the `else` body that pushes `_Reference` +
+  parses lines is skipped for EVERY channel. Net effect: a `.csv` reference is honored only for
+  mono audio; for stereo (or any `_ChannelNb != 1`) the reference is silently empty, so a scored
+  stereo run with a CSV reference would hit the mandatory-reference bail (`:302-305`). The port
+  reproduces this: CSV builds a reference only when `channel_count == 1`; otherwise `None`. *Why
+  deferred:* load-bearing legacy bug directly affecting whether scoring runs; "fixing" it (loading
+  the CSV for both channels) would diverge from the oracle. *Fix candidate:* after end-to-end parity,
+  decide whether stereo CSV references should load channel 0 (or per-channel columns). *Pinned by:*
+  the `channel_count == 1` guard in `segmentation_function` (the Phase 4a tests exercise the STM path
+  on the 2-channel excerpt; a mono-CSV golden lands with the corpus-processor fixtures).
+
+- **[phase4a] `.trs` reference loader unported; `segmentation_function` bails on a TRS reference**
+  (`engine/bag_of_processors.rs::segmentation_function` + `extension_of`, from `Segmentation.cpp:101-109`
+  `load_ref_from_trs`): the legacy `Segmentation` ctor dispatches any non-`.stm`/`.csv`/`.xml`
+  reference extension (and any name too short for an extension) to `load_ref_from_trs` (a Transcriber
+  `.trs` XML parser). That loader is not ported (`segmentation_io.rs` carries STM/CSV/VRCTS only), so
+  the reference dispatch here `bail!`s on a TRS reference rather than silently producing an empty
+  reference. `.xml` (VRCTS) reference loading is also not wired into this dispatch -- no Phase 4a
+  corpus uses it -- and currently falls into the TRS bail branch. *Why deferred:* the Phase 4a parity
+  corpora use STM (SAD) and CSV (WER) references only; TRS/VRCTS reference inputs were never exercised.
+  *Fix candidate:* port `load_ref_from_trs` (and wire `load_vrcts` into the reference dispatch) when a
+  corpus needs them. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
