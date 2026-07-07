@@ -1447,25 +1447,42 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   *Fix candidate:* port `load_ref_from_trs` (and wire `load_vrcts` into the reference dispatch) when a
   corpus needs them. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
 
-- **[phase4a] Single-channel VRCTS write on the corpus path** (`engine/bag_of_processors.rs::segmentation_function`
-  VRCTS write sites + `tasks/segmentation_io.rs::to_vrcts_string` (`:332`), from
+- **[phase4a] CLOSED (Task 8): multi-channel VRCTS write on the corpus path**
+  (`engine/bag_of_processors.rs::segmentation_function` VRCTS write sites +
+  `tasks/segmentation_io.rs::to_vrcts_string`/`write_vrcts_multichannel`, from
   `Segmentation.cpp:543-590` `Segmentation::toFile_VRCTS`): the legacy writer loops
   `for (int chan = 0 ; chan < _ChannelNb ; ++chan)`, sanitizing and emitting one
   full VRCTS document per channel -- `<basename>_chan_<n>.xml` when `_ChannelNb > 1`,
   or a single `<basename>.xml` when `_ChannelNb == 1` -- each with its own
-  `Channel`/`Speaker`/`SegmentList` block for that channel's `_Classification`.
-  `to_vrcts_string` (pre-existing from Phase 0b-ii, byte-golden-pinned single-channel)
-  only ever serializes ONE channel (hardcoded `chan="1"`, no multi-file fan-out), and
-  the new `segmentation_function` write sites call it with `seg_per_chan[0]` only in
-  both the scored and unscored branches -- so on stereo audio every channel beyond 0
-  is silently dropped from VRCTS output. *Why deferred:* the fix must match the real
-  multi-channel byte oracle; Task 8 dumps the actual compiled `toFile_VRCTS` bytes on
-  2-channel corpora, and the multi-channel assembly should be written against that
-  authoritative golden rather than guessed at now. *Fix candidate:* multi-channel
-  assembly in `to_vrcts_string` (loop over channels, emit the `_chan_<n>` filename
-  suffix when `channel_count > 1`) or a wrapper around it that fans out one file per
-  channel, validated byte-for-byte in the Phase 4a tier-1 goldens. *Pinned by:* none
-  yet -- closed by the Task 8 tier-1 VRCTS byte golden.
+  `Channel`/`Speaker`/`SegmentList` block (and `num`/`ch` = `chan+1`) for that
+  channel's `_Classification`. Before Task 8 the port emitted channel 0 only
+  (hardcoded `chan="1"`), silently dropping channel 2+ on stereo audio. *Fix (Task
+  8):* `to_vrcts_string` now delegates to a per-channel `to_vrcts_string_chan`
+  (channel number threaded into `num`/`ch`), and a new `write_vrcts_multichannel`
+  fans out one `<base>_chan_<n>.xml` per channel (or `<base>.xml` for mono); the bag
+  write sites call it with the full `seg_per_chan` slice and the legacy-derived
+  `name=`/`path=` attrs (audio basename minus extension / full audio path). The
+  single-channel byte goldens (0b-ii/2b) stay green (shape-generic; `chan="1"`
+  unchanged for mono). *Pinned by:* `phase4a_tier1_e2e.rs::vrcts_byte_equal` (Rust
+  `write_vrcts_multichannel` output byte-matches the REAL compiled `toFile_VRCTS`
+  dumps for both channels of all three corpus files) + `phase4a_segfn.rs::
+  {unscored_mode_zero_columns_and_vrcts,dump_dir_vrcts}` (per-channel filename
+  fan-out).
+
+- **[phase4a] CLOSED (Task 8): result-row `nb_words` column defaults to -1, not 0**
+  (`engine/bag_of_processors.rs::{assemble_scored_row,assemble_unscored_row}` +
+  `tasks/segmentation_io.rs::WerStats::legacy_default`, from `BagOfProcessors.cpp:
+  322,373` `tmp.push_back(seg._WordErrorRate[chan]._NbWords)`): the legacy result
+  row pushes the `WordErrorRate` struct's `_NbWords`, whose CONSTRUCTOR default is
+  `-1` (`Segmentation.h:70`), left untouched whenever WER Pass 1 does not run (STM
+  references, or no reference -- Pass 1 is CSV-only). The port emitted `0` there:
+  the scored row read `report.wer.unwrap_or_default().nb_words` (Rust `WerStats`
+  i64-Default `0`) and the unscored row hardcoded `0.0`. Both now use
+  `WerStats::legacy_default()` (`nb_words = -1`, rest 0), matching the legacy. *Found
+  by* the Task 8 tier-1 `MultiConfigResults` golden (col 10 = data col 7 = -1 in the
+  real dump, 0 in the port). *Pinned by:* `phase4a_tier1_e2e.rs::{solo_tdc_matches,
+  train_ltsv_two_epochs_matches,multiconfig_matches}` (MultiConfigResults col-10
+  byte compare vs the real dump).
 
 - **[phase4a] `costLID = -1.0` gate applied AFTER `saveWeights`, BEFORE `updateWeights` --
   order is load-bearing** (`engine/bag_of_processors.rs::save_and_update`, from

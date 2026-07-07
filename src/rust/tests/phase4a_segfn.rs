@@ -187,13 +187,17 @@ fn unscored_mode_zero_columns_and_vrcts() {
         assert_eq!(row.len(), 18, "18 columns chan {chan}");
     }
 
-    // VRCTS written next to the audio: strip ".wav" (last 4 chars), no extension added.
-    let expected = dir.path().join("excerpt_2ch_8k");
-    assert!(
-        expected.exists(),
-        "unscored VRCTS should be written next to audio at {}",
-        expected.display()
-    );
+    // VRCTS written next to the audio: strip ".wav" (last 4 chars) to the
+    // basefilename, then the multi-channel fan-out writes one <base>_chan_<n>.xml per
+    // channel (the 2-channel excerpt -> _chan_1 + _chan_2; Task 8 multi-channel fix).
+    for chan in [1, 2] {
+        let expected = dir.path().join(format!("excerpt_2ch_8k_chan_{chan}.xml"));
+        assert!(
+            expected.exists(),
+            "unscored VRCTS chan {chan} should be written next to audio at {}",
+            expected.display()
+        );
+    }
 }
 
 // === dump_dir_vrcts =========================================================
@@ -217,13 +221,16 @@ fn dump_dir_vrcts() {
     let it = item(wav.to_str().unwrap(), stm.to_str().unwrap());
     bag.segmentation_function(&it, multi_mode()).unwrap();
 
-    // basename = last path component minus the 4-char extension, under dumpDir.
-    let expected = dump.join("excerpt_2ch_8k");
-    assert!(
-        expected.exists(),
-        "scored VRCTS should be written under dumpDir at {}",
-        expected.display()
-    );
+    // basename = last path component minus the 4-char extension, under dumpDir; the
+    // multi-channel fan-out writes <base>_chan_<n>.xml per channel (Task 8 fix).
+    for chan in [1, 2] {
+        let expected = dump.join(format!("excerpt_2ch_8k_chan_{chan}.xml"));
+        assert!(
+            expected.exists(),
+            "scored VRCTS chan {chan} should be written under dumpDir at {}",
+            expected.display()
+        );
+    }
 }
 
 // === speech_duration_walk ===================================================

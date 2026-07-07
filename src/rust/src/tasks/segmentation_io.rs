@@ -35,6 +35,21 @@ pub struct WerStats {
     pub delay_penalty: f64,
 }
 
+impl WerStats {
+    /// The legacy `WordErrorRate` CONSTRUCTOR default (`Segmentation.h:68-78`):
+    /// `_NbWords = -1`, everything else 0. This is the state pushed into a result
+    /// row when WER Pass 1 never ran (STM references, or no reference), which is
+    /// NOT the same as `WerStats::default()` (i64 `nb_words = 0`). The result-row
+    /// `nb_words` column is -1 in that case, not 0 (pinned by the Phase 4a tier-1
+    /// `MultiConfigResults` golden).
+    pub fn legacy_default() -> WerStats {
+        WerStats {
+            nb_words: -1,
+            ..WerStats::default()
+        }
+    }
+}
+
 /// Result of [`compute_errors`]: per-class errors, the reference label counts,
 /// and optional WER stats.
 ///

@@ -20,7 +20,7 @@ use crate::tasks::sad::{
 };
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{
-    ScoreReport, compute_errors, load_ref_csv, load_ref_stm, write_vrcts_multichannel,
+    ScoreReport, WerStats, compute_errors, load_ref_csv, load_ref_stm, write_vrcts_multichannel,
 };
 
 /// `conf.get<int>(name)` (required, no default): missing key is an error.
@@ -910,7 +910,10 @@ fn assemble_scored_row(
     for j in (SegClass::Other as usize)..(SegClass::Excluded as usize) {
         global_error_rate += report.per_class[j].error_rate;
     }
-    let wer = report.wer.unwrap_or_default();
+    // No WER Pass 1 (STM/no reference) -> the legacy WordErrorRate CONSTRUCTOR
+    // default (`_NbWords = -1`, rest 0), NOT `WerStats::default()` (nb_words 0).
+    // The nb_words result column is -1 in that case (Phase 4a tier-1 golden).
+    let wer = report.wer.unwrap_or(WerStats::legacy_default());
 
     vec![
         100.0 * speech.pfa,        // 0
@@ -935,31 +938,35 @@ fn assemble_scored_row(
 }
 
 /// The unscored 18-column row (`:358-392`): zeros for the error cols and the two
-/// counters, timing/duration/speech walk still real, WER default (all zero).
+/// counters, timing/duration/speech walk still real. The WER columns (7-13) push
+/// `seg._WordErrorRate[chan]` UNCHANGED (Pass 1 never ran), which is the legacy
+/// WordErrorRate constructor default: `_NbWords = -1`, everything else 0. So col 7
+/// (nb_words) is -1, NOT 0 (Phase 4a tier-1 golden).
 fn assemble_unscored_row(
     time_per_hour: f64,
     audio_duration: f64,
     speech_duration: f64,
 ) -> Vec<f64> {
+    let wer = WerStats::legacy_default();
     vec![
-        0.0,             // 0
-        0.0,             // 1
-        0.0,             // 2
-        time_per_hour,   // 3
-        0.0,             // 4
-        audio_duration,  // 5
-        speech_duration, // 6
-        0.0,             // 7 nb_words (WER default)
-        0.0,             // 8 corrects
-        0.0,             // 9 subs
-        0.0,             // 10 ins
-        0.0,             // 11 dels
-        0.0,             // 12 coverage
-        0.0,             // 13 delay
-        0.0,             // 14 LID slot
-        0.0,             // 15 LID slot
-        0.0,             // 16 lid_nb_of_classif (0)
-        0.0,             // 17 nb_of_classif (0)
+        0.0,                  // 0
+        0.0,                  // 1
+        0.0,                  // 2
+        time_per_hour,        // 3
+        0.0,                  // 4
+        audio_duration,       // 5
+        speech_duration,      // 6
+        wer.nb_words as f64,  // 7 nb_words (legacy default -1)
+        wer.corrects as f64,  // 8 corrects
+        wer.subs as f64,      // 9 subs
+        wer.ins as f64,       // 10 ins
+        wer.dels as f64,      // 11 dels
+        wer.coverage_penalty, // 12 coverage
+        wer.delay_penalty,    // 13 delay
+        0.0,                  // 14 LID slot
+        0.0,                  // 15 LID slot
+        0.0,                  // 16 lid_nb_of_classif (0)
+        0.0,                  // 17 nb_of_classif (0)
     ]
 }
 
