@@ -1,5 +1,14 @@
 """Build and run the oracle harness's phase4b stages, then write the LID
-confusion-core (Task 1) + multiclass scoring-overload (Task 3) fixtures.
+confusion-core (Task 1) + multiclass scoring-overload (Task 3) + BlstmSpectralLID
+Algo-5 driver (Task 4) fixtures.
+
+Task 4 runs the harness LidProbe stage over the T2 corpus (f1/f2/f3.wav, class 0/1/2)
+with lid5.config + the real 33,671-weight SAD net: the reimpl transcription of
+BLSTMSpectralLID::getSegmentation dumps the LTSV-SAD row + LID members
+(lid5_<f>_{ltsv,liderr,confusion,members,boundaries}_chan{1,2}.bin), and a SECONDARY
+real-Eigen probe cross-checks SEG_STRUCT (segment count/type) + LID_STRUCT (confusion +
+_IsLIDCorrect equality) with the langid/cost deltas recorded as GEMM-divergence
+calibration. See tests/reference_data/phase4b/manifest.json:lid5.
 
 Phase 4b Task 1 ports `BagOfProcessors::PrintConfusionMatrix`'s sentinel-decode
 + best-non-target argmax accumulation (`BagOfProcessors.cpp:501-535`) and
@@ -82,6 +91,28 @@ LTSV_DCT_CONFIG = PHASE2B_DIR / "ltsv_dct.config"
 LTSV_TINY_CONFIG = PHASE2B_DIR / "ltsv_tiny.config"
 LTSV_POWERMEL_CONFIG = PHASE2B_DIR / "ltsv_powermel.config"
 SIGNAL_CONFIG = PHASE2B_DIR / "signal.config"
+
+# Task 4: BlstmSpectralLID (Algo 5). lid5.config + the T2 corpus (f1/f2/f3.wav, class
+# 0/1/2 via the crafted CorpusItems) + the real 33,671-weight SAD net (NNweights_config1.bin).
+LID5_CONFIG = PHASE4B_DIR / "lid5.config"
+LID_CORPUS_DIR = PHASE4B_DIR / "corpus_lid"
+LID5_FILES = ["f1", "f2", "f3"]
+LID5_KINDS = ["ltsv", "liderr", "confusion", "members", "boundaries"]
+LID5_BINS = [
+    f"lid5_{name}_{kind}_chan{ch}.bin"
+    for name in LID5_FILES
+    for kind in LID5_KINDS
+    for ch in (1, 2)
+]
+
+LID_SEG_STRUCT_RE = re.compile(
+    r"^SEG_STRUCT site=lid5_(?P<name>\w+) ok=1 max_dt=(?P<dt>[0-9.eE+-]+)$", re.MULTILINE
+)
+LID_STRUCT_RE = re.compile(
+    r"^LID_STRUCT site=lid5_(?P<name>\w+) ok=1 confusion_eq=1 iscorrect_eq=1 "
+    r"langid_max_abs=(?P<langid>[0-9.eE+-]+) cost_max_abs=(?P<cost>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
 
 # Input fixtures the harness reads from its argv[1] output dir (earlier phase
 # 1/2/2b stages still run every invocation and expect these seeded).
@@ -186,10 +217,17 @@ def main() -> None:
                 str(LTSV_TINY_CONFIG),
                 str(LTSV_POWERMEL_CONFIG),
                 str(SIGNAL_CONFIG),
+                "",  # argv[10] corpusWorkdir empty -> the phase4a tier block is skipped.
+                "t1",  # argv[11..14] tier configs (unused when corpusWorkdir is empty).
+                "t2",
+                "t3",
+                "t4",
+                str(LID5_CONFIG),  # argv[15]: Task 4 LID config.
+                str(LID_CORPUS_DIR),  # argv[16]: Task 4 corpus dir (f1/f2/f3.wav).
             ]
         )
 
-        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN]:
+        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN, *LID5_BINS]:
             src = tmp_dir / name
             if not src.is_file():
                 raise SystemExit(f"harness did not produce {name}")
@@ -247,6 +285,53 @@ def main() -> None:
     sc_rows, sc_cols, _ = _read_bin(PHASE4B_DIR / SCORING_MULTI_BIN)
     if (sc_rows, sc_cols) != (6, 3):
         raise SystemExit(f"{SCORING_MULTI_BIN} shape {(sc_rows, sc_cols)} != (6, 3)")
+
+    # 4c. Task 4: parse + validate the LID SEG_STRUCT / LID_STRUCT structural lines. Each
+    # file must produce an ok=1 SEG_STRUCT (segment count/type equality reimpl-vs-real; the
+    # C++ std::abort()s otherwise, so its absence == a passing generation) and an ok=1
+    # LID_STRUCT (confusion + _IsLIDCorrect equality). The langid/cost deltas are recorded
+    # as GEMM-divergence calibration (the ascending reimpl vs the real Eigen forward).
+    lid_seg = {m["name"]: m for m in LID_SEG_STRUCT_RE.finditer(stdout)}
+    lid_struct = {m["name"]: m for m in LID_STRUCT_RE.finditer(stdout)}
+    lid_cal: dict[str, dict[str, float]] = {}
+    for name in LID5_FILES:
+        if name not in lid_seg:
+            raise SystemExit(f"missing SEG_STRUCT line for lid5_{name} (structural abort or mismatch)")
+        if name not in lid_struct:
+            raise SystemExit(f"missing LID_STRUCT line for lid5_{name} (confusion/isCorrect mismatch)")
+        lid_cal[name] = {
+            "seg_max_dt": float(lid_seg[name]["dt"]),
+            "langid_max_abs": float(lid_struct[name]["langid"]),
+            "cost_max_abs": float(lid_struct[name]["cost"]),
+        }
+    for name in LID5_BINS:
+        src = PHASE4B_DIR / name
+        if not src.is_file():
+            raise SystemExit(f"harness did not produce {name}")
+    # MEASURED per-file/per-channel LID members for the manifest.
+    lid_measured: dict[str, dict[str, object]] = {}
+    for name in LID5_FILES:
+        chans: dict[str, object] = {}
+        for ch in (1, 2):
+            lr, lc, ltsv = _read_bin(PHASE4B_DIR / f"lid5_{name}_ltsv_chan{ch}.bin")
+            er, ec, liderr = _read_bin(PHASE4B_DIR / f"lid5_{name}_liderr_chan{ch}.bin")
+            cr, cc, _conf = _read_bin(PHASE4B_DIR / f"lid5_{name}_confusion_chan{ch}.bin")
+            _mr, _mc, mem = _read_bin(PHASE4B_DIR / f"lid5_{name}_members_chan{ch}.bin")
+            br, bc, _b = _read_bin(PHASE4B_DIR / f"lid5_{name}_boundaries_chan{ch}.bin")
+            sentinel = max(liderr) > 150.0
+            if not sentinel:
+                raise SystemExit(f"lid5_{name}_chan{ch}: no >150 sentinel in lid_classification_errors")
+            chans[f"chan{ch}"] = {
+                "ltsv_len": lc,
+                "liderr": liderr,
+                "confusion_shape": [cr, cc],
+                "cumulative_error": mem[0],
+                "nb_of_classif": int(mem[1]),
+                "is_lid_correct": int(mem[2]),
+                "boundaries_shape": [br, bc],
+                "has_sentinel_gt150": sentinel,
+            }
+        lid_measured[name] = {"class_index": LID5_FILES.index(name), "channels": chans}
 
     # 5. Regression guard: the prior-phase fixture dirs must be byte-identical after.
     after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
@@ -342,6 +427,36 @@ def main() -> None:
                 for tag in SCORING_MULTI_CASES
             },
         },
+        "lid5": {
+            "text": (
+                "Task 4: BlstmSpectralLID (Algo 5), the FIRST LID driver. "
+                "BLSTMSpectralLID::getSegmentation (:27-460) does SAD via LTSV "
+                "(classifySequence over the RAW periodogram, :271-274 -- the mel branch is "
+                "COMMENTED OUT) then runs the BLSTM PER SPEECH SEGMENT for language scoring "
+                "(:346-401 via the returning feedForward overload :363). The harness LidProbe "
+                "transcribes :27-460 swapping ONLY that :363 feedForward for the reimpl scoring "
+                "(target build :868-903 + signalReimplFFB plain path + REAL CostLaw::computeCost "
+                ":815-828), keeping LTSV/results2segmentation/compute_errors REAL; the reimpl "
+                "dumps (lid5_<f>_{ltsv,liderr,confusion,members,boundaries}_chan{1,2}.bin) are "
+                "the goldens the Rust port matches bit-exact (canary-gated: langID is a "
+                "softmax/log chain, cumulative_error a LogLaw chain). lid5.config forces the "
+                "plain scoring path (BLSTM_window 0) + a degenerate SAD (decision thresholds "
+                "<< 0 -> one big SPEECH segment/file), so the scoring loop always runs "
+                "(non-vacuity: the >150 in-band sentinel is present at every file's target "
+                "index via targetLID(target) = -2.0, and the confusion has off-diagonal mass "
+                "on f1/f3 -- target argmax != language target -- vs a diagonal hit on f2). The "
+                "real 33,671-weight SAD net is binary (outputSize 1 -> the [1-p,p] binary-"
+                "expansion path); targetIndex = getRefLangIndex() (f1/f2/f3 -> class 0/1/2, "
+                "class 2 clamps to 0 under classNb 2). A SECONDARY real-Eigen probe runs the "
+                "compiled getSegmentation beside the reimpl: SEG_STRUCT (segment count/type "
+                "equality, all max_dt == 0 -- the LTSV SAD is NN-free so it is bit-identical) "
+                "and LID_STRUCT (confusion + _IsLIDCorrect EQUALITY -- argmax agrees despite "
+                "the GEMM divergence; a mismatch std::abort()s generation). The langid deltas "
+                "are ~1e-16 (the ascending forward vs the real Eigen forward), recorded below."
+            ),
+            "calibration": lid_cal,
+            "measured": lid_measured,
+        },
         "dead_code_not_ported": {
             "text": (
                 "Two legacy blocks are commented out and NOT ported: the classNb==2 binary "
@@ -361,7 +476,8 @@ def main() -> None:
     print(
         f"OK: phase4b fixtures (confusion input={in_rows}x{in_cols}, "
         f"matrix={mat_rows}x{mat_cols}, error1=error2={error1!r}; "
-        f"scoring_multi={sc_rows}x{sc_cols}, all sites max_ulp=0), "
+        f"scoring_multi={sc_rows}x{sc_cols}, all sites max_ulp=0; "
+        f"lid5 {len(LID5_FILES)} files, all SEG_STRUCT/LID_STRUCT ok=1), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

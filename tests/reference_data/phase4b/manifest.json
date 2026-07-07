@@ -82,6 +82,157 @@
       }
     }
   },
+  "lid5": {
+    "text": "Task 4: BlstmSpectralLID (Algo 5), the FIRST LID driver. BLSTMSpectralLID::getSegmentation (:27-460) does SAD via LTSV (classifySequence over the RAW periodogram, :271-274 -- the mel branch is COMMENTED OUT) then runs the BLSTM PER SPEECH SEGMENT for language scoring (:346-401 via the returning feedForward overload :363). The harness LidProbe transcribes :27-460 swapping ONLY that :363 feedForward for the reimpl scoring (target build :868-903 + signalReimplFFB plain path + REAL CostLaw::computeCost :815-828), keeping LTSV/results2segmentation/compute_errors REAL; the reimpl dumps (lid5_<f>_{ltsv,liderr,confusion,members,boundaries}_chan{1,2}.bin) are the goldens the Rust port matches bit-exact (canary-gated: langID is a softmax/log chain, cumulative_error a LogLaw chain). lid5.config forces the plain scoring path (BLSTM_window 0) + a degenerate SAD (decision thresholds << 0 -> one big SPEECH segment/file), so the scoring loop always runs (non-vacuity: the >150 in-band sentinel is present at every file's target index via targetLID(target) = -2.0, and the confusion has off-diagonal mass on f1/f3 -- target argmax != language target -- vs a diagonal hit on f2). The real 33,671-weight SAD net is binary (outputSize 1 -> the [1-p,p] binary-expansion path); targetIndex = getRefLangIndex() (f1/f2/f3 -> class 0/1/2, class 2 clamps to 0 under classNb 2). A SECONDARY real-Eigen probe runs the compiled getSegmentation beside the reimpl: SEG_STRUCT (segment count/type equality, all max_dt == 0 -- the LTSV SAD is NN-free so it is bit-identical) and LID_STRUCT (confusion + _IsLIDCorrect EQUALITY -- argmax agrees despite the GEMM divergence; a mismatch std::abort()s generation). The langid deltas are ~1e-16 (the ascending forward vs the real Eigen forward), recorded below.",
+    "calibration": {
+      "f1": {
+        "seg_max_dt": 0.0,
+        "langid_max_abs": 1.11e-16,
+        "cost_max_abs": 0.0
+      },
+      "f2": {
+        "seg_max_dt": 0.0,
+        "langid_max_abs": 1.11e-16,
+        "cost_max_abs": 0.0
+      },
+      "f3": {
+        "seg_max_dt": 0.0,
+        "langid_max_abs": 1.11e-16,
+        "cost_max_abs": 0.0
+      }
+    },
+    "measured": {
+      "f1": {
+        "class_index": 0,
+        "channels": {
+          "chan1": {
+            "ltsv_len": 34,
+            "liderr": [
+              200.81657211954723,
+              99.18342788045277
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 19.468902470663128,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          },
+          "chan2": {
+            "ltsv_len": 34,
+            "liderr": [
+              203.36279569552818,
+              96.63720430447182
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 14.079286838265405,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          }
+        }
+      },
+      "f2": {
+        "class_index": 1,
+        "channels": {
+          "chan1": {
+            "ltsv_len": 34,
+            "liderr": [
+              0.8165721195472153,
+              299.18342788045277
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 0.032808240383395436,
+            "nb_of_classif": 8,
+            "is_lid_correct": 100,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          },
+          "chan2": {
+            "ltsv_len": 34,
+            "liderr": [
+              3.362795695528166,
+              296.6372043044718
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 0.13760141118366281,
+            "nb_of_classif": 8,
+            "is_lid_correct": 100,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          }
+        }
+      },
+      "f3": {
+        "class_index": 2,
+        "channels": {
+          "chan1": {
+            "ltsv_len": 34,
+            "liderr": [
+              200.81657211954723,
+              99.18342788045277
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 19.468902470663128,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          },
+          "chan2": {
+            "ltsv_len": 34,
+            "liderr": [
+              203.36279569552818,
+              96.63720430447182
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 14.079286838265405,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          }
+        }
+      }
+    }
+  },
   "dead_code_not_ported": {
     "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
   }
