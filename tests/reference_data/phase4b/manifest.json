@@ -544,6 +544,160 @@
           }
         }
       },
+      "mode1": {
+        "mode": 1,
+        "concat_branch": 0,
+        "reference_driven": false,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  243.05840393725174,
+                  30.47684584251834,
+                  26.46475022022993
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 83.91638970192491,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  243.0801120876707,
+                  30.54986135275577,
+                  26.37002655957355
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 83.84459709944191,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.05840393725173,
+                  230.47684584251834,
+                  26.46475022022993
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 177.4916309343597,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.0801120876707,
+                  230.54986135275578,
+                  26.37002655957355
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 177.10674033678748,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.665e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.05840393725173,
+                  30.47684584251834,
+                  226.46475022022994
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 264.74517920082263,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.0801120876707,
+                  30.54986135275577,
+                  226.37002655957357
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 265.472360461887,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
       "mode2": {
         "mode": 2,
         "concat_branch": 2,

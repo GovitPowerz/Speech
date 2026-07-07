@@ -1899,28 +1899,37 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   *Fix candidate:* N/A. *Pinned by:* `out_of_domain_char_bails`, `missing_file_bails`
   (`tests/phase4b_phseq.rs`).
 
-- **[phase4b] The Twin driver ports ONLY wav-modes 0/1/2/3 + the concat; the pitch second pass,
-  modes 4/5/6/7, and the CNN member are deferred/excluded** (`tasks/lid.rs::TwinBlstmSpectralLid`,
-  from `TwinBLSTMSpectralLID.cpp:263-1421`): `getSegmentation` is a 1,159-line switch over 8 modes.
-  This port covers the mode 0/1/2/3 scoring branch (`:1194-1310`) + the SAD FFB (`:713-764`); it
-  BAILS typed on modes 4/5/6/7 (the LID-first block `:640-692`, the `abs(_Mode)==7` CNN/noise block
-  `:903-1193`) and on the pitch second pass (`:349-614`, `TDC_window_size > 0`). The Twin's pitch
+- **[phase4b] The Twin driver ports wav-modes 0/1/2/3 + Mode 7 (phSeq); modes 4/5/6 + the pitch
+  pass + the CNN remain deferred/excluded** (`tasks/lid.rs::TwinBlstmSpectralLid`, from
+  `TwinBLSTMSpectralLID.cpp:263-1421`): `getSegmentation` is a 1,159-line switch over 8 modes.
+  This port covers the mode 0/1/2/3 scoring branch (`:1194-1310`) + the SAD FFB (`:713-764`) + the
+  `abs(_Mode)==7` phSeq LID loop (`:903-1193`, `get_segmentation_mode7`); it BAILS typed on modes
+  4/5/6 (the LID-first train block `:640-692` + the `:798-902` scoring branch: `getTargetsLID` ->
+  LID `feedForwardBackward` train, mode-6 `LID2Segmentation`, the `_PostProcessMode` slice of the
+  pre-computed `LID_result_vec`), on the Mode-7 WAV arm (`:922-963`, the CNN), and on the pitch
+  second pass (`:349-614`, `TDC_window_size > 0`). **Modes-1/4 decision:** mode 1 was UNEXERCISED in
+  T6 -- it is now a full GOLDEN (`twin_mode1`, the same T2 corpus + synthetic LID net, SEG_STRUCT/
+  LID_STRUCT-verified vs the real compiled Twin); mode 4 is deferred WITH modes 4/5/6 (its train
+  branch + reference-copy/smooth share their machinery), documented rather than probe-pinned since
+  its fixture is not craftable in isolation. The Twin's pitch
   pass is REFERENCE-based (`seg._Classification = seg._Reference` then `getPitch`, `:366-369`) and
   warps the periodogram BEFORE the SAD forward -- a load-bearing DIVERGENCE from the base spectral
   driver's post-forward pitch pass (`BLSTMSpectralSegmenter.cpp:757-805`) -- so it cannot reuse that
   machinery and is deferred with its own golden. All four ported configs use `TDCwindow 0` so the
   gate is off (byte-identical to a no-pitch run). The `_LIDConvNeuralNetwork` (`:23`) is constructed
   in the legacy ctor but is dead under the port scope (only mode 7 uses it) -- NOT ported, matching
-  the Phase 2 Conv exclusion (`ConvolutionalLayer` is broken-as-committed). Mode 1's synthesis
-  (`result_vec.setConstant(10.0)`, `:726`) IS included (it shares the `:1194` branch) though no
-  fixture exercises it. `interestSegs` (`:1240`) + the `_LIDTrainingPruningThreshold` gate (`:1286`,
+  the Phase 2 Conv exclusion (`ConvolutionalLayer` is broken-as-committed; the phSeq Mode-7 arm
+  reaches the CNN only for WAV, so its typed bail is the port's whole treatment of it). Mode 1's
+  synthesis (`result_vec.setConstant(10.0)`, `:726`) shares the `:1194` branch and is now golden
+  (`twin_mode1`). `interestSegs` (`:1240`) + the `_LIDTrainingPruningThreshold` gate (`:1286`,
   `itInterest->_Type = OTHER`) are NOT reproduced: both feed ONLY the skipped VRCTS dump + the
   mode!=0 `interestSegs` replacement (`:1297`, dump-only), so they are observably dead (and
   config-gated on `> 0`, default -1.0, besides). *Why deferred:* the deferred modes are the next
   task's scope; the pitch divergence needs its own reference-based transcription. *Fix candidate:*
-  land modes 4/5/6/7 + the pitch pass in the next task. *Pinned by:* `boundaries_match_dump`,
-  `members_match_dump` (`tests/phase4b_twin_golden.rs`, all four modes bit-exact vs the harness
-  `TwinProbe` reimpl, itself SEG_STRUCT/LID_STRUCT-verified against the REAL compiled Twin). Mutation:
+  land modes 4/5/6 + the pitch pass in a follow-up task. *Pinned by:* `boundaries_match_dump`,
+  `members_match_dump` (`tests/phase4b_twin_golden.rs`, all FIVE wav modes 0/0_concat/1/2/3
+  bit-exact vs the harness `TwinProbe` reimpl, itself SEG_STRUCT/LID_STRUCT-verified against the
+  REAL compiled Twin) + the Mode-7 flagship goldens (`tests/phase4b_twin_mode7.rs`). Mutation:
   removing the `mode` guard makes a mode-4 config reach the mode-0 SAD-FFB path and diverge.
 
 - **[phase4b] The SAD FFB normalizes `inputSeq` IN PLACE (non-const `Eigen::Ref`), so the concat +

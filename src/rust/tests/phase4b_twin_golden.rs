@@ -48,7 +48,7 @@ struct Variant {
     set_ref: bool,
 }
 
-const VARIANTS: [Variant; 4] = [
+const VARIANTS: [Variant; 5] = [
     Variant {
         name: "mode0",
         concat: 0,
@@ -68,6 +68,17 @@ const VARIANTS: [Variant; 4] = [
         name: "mode3",
         concat: 0,
         set_ref: true,
+    },
+    // Modes-1/4 decision: mode 1 (result_vec synthesized constant 10 -> all-speech, LID
+    // scores the classification, LID2Segmentation overwrites) is reachable via the shared
+    // 0/1/2/3 branch but was UNEXERCISED by a T6 golden -- pinned here as a full golden
+    // (the harness `transcribeTwin` already handled it), NOT a probe, since the fixture is
+    // cheap (the same T2 wav corpus + synthetic LID net). Appended so the `mode2`/`mode3`
+    // differ-test indices below stay valid. (Mode 4 is deferred with modes 4/5/6.)
+    Variant {
+        name: "mode1",
+        concat: 0,
+        set_ref: false,
     },
 ];
 

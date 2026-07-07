@@ -10392,6 +10392,7 @@ int main(int argc, char** argv) {
 
         runTwinVariant("mode0", 0, 0, 1.0, false);
         runTwinVariant("mode0_concat", 0, 0, 1.0, false);
+        runTwinVariant("mode1", 1, 0, 1.0, false);
         runTwinVariant("mode2", 2, 0, 1.0, true);
         runTwinVariant("mode3", 3, 0, 1.0, true);
     }

@@ -184,6 +184,7 @@ def _phseq_expected(path: Path) -> dict[str, object]:
 TWIN_VARIANTS = {
     "mode0": {"mode": 0, "concat": 0, "ref": False},
     "mode0_concat": {"mode": 0, "concat": 1, "ref": False},
+    "mode1": {"mode": 1, "concat": 0, "ref": False},
     "mode2": {"mode": 2, "concat": 2, "ref": True},
     "mode3": {"mode": 3, "concat": 0, "ref": True},
 }
