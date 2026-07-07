@@ -1475,7 +1475,7 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
 - **[phase4a] CLOSED (Task 8): result-row `nb_words` column defaults to -1, not 0**
   (`engine/bag_of_processors.rs::{assemble_scored_row,assemble_unscored_row}` +
   `tasks/segmentation_io.rs::WerStats::legacy_default`, from `BagOfProcessors.cpp:
-  322,373` `tmp.push_back(seg._WordErrorRate[chan]._NbWords)`): the legacy result
+  331,373` `tmp.push_back(seg._WordErrorRate[chan]._NbWords)`): the legacy result
   row pushes the `WordErrorRate` struct's `_NbWords`, whose CONSTRUCTOR default is
   `-1` (`Segmentation.h:70`), left untouched whenever WER Pass 1 does not run (STM
   references, or no reference -- Pass 1 is CSV-only). The port emitted `0` there:
