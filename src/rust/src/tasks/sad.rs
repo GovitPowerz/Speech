@@ -1116,6 +1116,16 @@ pub struct BlstmSpectralSegmenter {
     /// forward bit-exactly (the legacy never externalizes this row -- see the dump
     /// quirk -- so this is a pure test-capture accessor, like `last_result_rows`).
     last_result_rows_pass2: Vec<Vec<f64>>,
+    /// Test-only observation hook (`test-support` feature, no legacy counterpart,
+    /// no production cost -- absent from plain `cargo build`/release): records the
+    /// `costLID` value `BagOfProcessors::update_weights` last passed in
+    /// (`BagOfProcessors.cpp:194`, algo 3 -- ignored by the actual criterion, which
+    /// is `cost` alone, but the `:465` `costLID = -1.0` gate order is only
+    /// observable this way in Phase 4a since algo 3/4 never consume `costLID` for
+    /// real; Phase 4b's algo 5/6 make it live). See
+    /// [`Self::last_update_cost_lid_for_test`].
+    #[cfg(feature = "test-support")]
+    last_update_cost_lid: Option<f64>,
 }
 
 impl BlstmSpectralSegmenter {
@@ -1162,7 +1172,24 @@ impl BlstmSpectralSegmenter {
             result_buf: None,
             last_result_rows: Vec::new(),
             last_result_rows_pass2: Vec::new(),
+            #[cfg(feature = "test-support")]
+            last_update_cost_lid: None,
         })
+    }
+
+    /// Test-only hook: record the `costLID` value the bag's `update_weights`
+    /// received for this config (see the field doc). Not part of the legacy
+    /// `updateWeights` signature -- called separately by
+    /// `BagOfProcessors::update_weights`.
+    #[cfg(feature = "test-support")]
+    pub fn record_update_cost_lid_for_test(&mut self, cost_lid: f64) {
+        self.last_update_cost_lid = Some(cost_lid);
+    }
+
+    /// Test-only accessor for [`Self::record_update_cost_lid_for_test`].
+    #[cfg(feature = "test-support")]
+    pub fn last_update_cost_lid_for_test(&self) -> Option<f64> {
+        self.last_update_cost_lid
     }
 
     /// The stateful legacy `_WindowShift` member (`:453/:885`), POST the last

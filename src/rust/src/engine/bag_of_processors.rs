@@ -385,6 +385,232 @@ impl BagOfProcessors {
         }
     }
 
+    /// Port of `BagOfProcessors::saveWeights` (`:148-181`): per-algo save
+    /// criterion, gated on beating the running `bestCost[pos]`. Algo 1/2 have no
+    /// matching legacy `if` branch -- no-op here too. Algo 5/6 are unreachable in
+    /// 4a (bag construction bails on those algos in [`Self::from_configs`]).
+    /// Arity mirrors the legacy signature (`:148`) verbatim.
+    #[allow(clippy::too_many_arguments)]
+    fn save_weights(
+        &mut self,
+        filename: &str,
+        pos: usize,
+        best_cost: &mut BTreeMap<usize, f64>,
+        cost: f64,
+        _bad_classif: f64,
+        cost_lid: f64,
+        bad_classif_lid: f64,
+        derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
+        stats: &BTreeMap<usize, Vec<InputStatistics>>,
+    ) -> Result<()> {
+        match &mut self.processors[pos] {
+            Processor::Spectral(seg) => {
+                // legacy: :149-155 saveCriterion = cost (badClassif+cost is commented out).
+                let save_criterion = cost;
+                if best_cost[&pos] > save_criterion {
+                    seg.save_weights(filename, &derivs[&pos][0], &stats[&pos][0])?;
+                    best_cost.insert(pos, save_criterion);
+                }
+            }
+            Processor::Signal(seg) => {
+                // legacy: :156-162, identical criterion to algo 3.
+                let save_criterion = cost;
+                if best_cost[&pos] > save_criterion {
+                    seg.save_weights(filename, &derivs[&pos][0], &stats[&pos][0])?;
+                    best_cost.insert(pos, save_criterion);
+                }
+            }
+            Processor::Tdc(_) | Processor::Ltsv(_) => {
+                // legacy: no `if` branch for algo 1/2 -- no-op.
+            }
+        }
+        // Algo 5/6 criteria (`:163-180`, badClassifLID+costLID / cost+costLID) are
+        // unreachable in 4a: `from_configs` bails on Algo_choice 5/6.
+        let _ = (cost_lid, bad_classif_lid);
+        Ok(())
+    }
+
+    /// Port of `BagOfProcessors::updateWeights` (`:183-205`): per-algo update
+    /// criterion, unconditional (unlike `saveWeights`, no best-cost gate). Algo
+    /// 1/2 no-op (no legacy branch). Algo 5/6 unreachable in 4a.
+    fn update_weights(
+        &mut self,
+        pos: usize,
+        cost: f64,
+        _bad_classif: f64,
+        cost_lid: f64,
+        _bad_classif_lid: f64,
+        derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
+    ) {
+        match &mut self.processors[pos] {
+            Processor::Spectral(seg) => {
+                // legacy: :184-188 saveCriterion = cost.
+                let save_criterion = cost;
+                seg.update_weights(&derivs[&pos][0], save_criterion);
+                #[cfg(feature = "test-support")]
+                seg.record_update_cost_lid_for_test(cost_lid);
+            }
+            Processor::Signal(seg) => {
+                // legacy: :189-193, identical criterion to algo 3.
+                let save_criterion = cost;
+                seg.update_weights(&derivs[&pos][0], save_criterion);
+            }
+            Processor::Tdc(_) | Processor::Ltsv(_) => {
+                // legacy: no `if` branch for algo 1/2 -- no-op.
+            }
+        }
+        let _ = cost_lid;
+    }
+
+    /// Port of `BagOfProcessors::PrintConfusionMatrix` (`:473-598`): LID confusion
+    /// matrix + normalized error percentage, reachable only for algo 5/6 (the
+    /// `saveAndUpdate` call site is gated on `_AlgoTypes[ii] == 5 || == 6`,
+    /// `:438-441`). Unreachable in 4a since algo 5/6 bail at construction.
+    ///
+    /// Doc summary for Phase 4b: the confusion matrix is built from an in-band
+    /// numeric encoding of the per-frame LID scores -- any score `> 150` marks
+    /// the TARGET (correct) class and decodes to the real score via `score -
+    /// 200`; every other score is a competing non-target class's raw score. Per
+    /// row, the best non-target score is tracked; if the target's decoded score
+    /// beats it, the confusion matrix's diagonal + row/col totals for the target
+    /// class are incremented, else the row/col totals credit the best-scoring
+    /// non-target class instead (a miss). `Confusion2String` formats the matrix;
+    /// the returned `error` is the summed off-diagonal confusion (raw count, not
+    /// yet normalized -- the normalization block is legacy dead code, commented
+    /// out at `:534-596`).
+    #[allow(dead_code)]
+    fn print_confusion_matrix(&self, _results_mat: &Array2<f64>, _config_nb: usize) -> f64 {
+        unreachable!("Algo 5/6 - Phase 4b")
+    }
+
+    /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
+    /// column-sum/mean aggregation over the file x channel result rows, cost/
+    /// badClassif/costLID/badLIDClassif derivation, WER percent scaling, the
+    /// `costMem`/`badClassifMem`/`costLIDMem`/`badClassifLIDMem` row writes, the
+    /// `bestNNWeight_<pos+1>_<filename>` save, and the `costLID = -1.0` gate
+    /// (`:465`) applied AFTER `save_weights` and BEFORE `update_weights` -- order
+    /// is load-bearing (the save criterion sees the real costLID; the update
+    /// criterion sees the gated one).
+    ///
+    /// Column sums/means use explicit ascending row loops (the repo's
+    /// ascending-loop product contract), NOT `ndarray::sum_axis`/`mean_axis`.
+    ///
+    /// `totalSignalDuration`/`totalSpeechDuration` (`:445-446`) are computed
+    /// (needed for the `:465` gate) but the h/min/s display prints (`:447-456`)
+    /// are display-only and dropped, per the brief.
+    ///
+    /// "N files" (`resultsperConf[ii].rows()`, `:449`) is a MISNOMER in the
+    /// legacy print: the row count is file x channel rows (one row per channel
+    /// per file), not per-file -- display-only anyway, but the underlying MEANS
+    /// (`:410-411`) are genuinely averages over file x channel rows, which is
+    /// what makes `badClassif`/`badLIDClassif` correct per-frame-class averages
+    /// rather than per-file averages.
+    ///
+    /// Arity matches the brief's exact signature; the legacy `saveAndUpdate`
+    /// (`:409`) similarly takes 9 parameters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_and_update(
+        &mut self,
+        filename: &str,
+        results_per_conf: &[Array2<f64>],
+        best_cost: &mut BTreeMap<usize, f64>,
+        derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
+        stats: &BTreeMap<usize, Vec<InputStatistics>>,
+        cost_mem_row: &mut [f64],
+        bad_classif_row: &mut [f64],
+        cost_lid_row: &mut [f64],
+        bad_classif_lid_row: &mut [f64],
+    ) -> Result<()> {
+        for ii in 0..self.nb_of_conf {
+            let m = &results_per_conf[ii];
+            let (rows, cols) = m.dim();
+
+            // legacy: :411-412 colwise sum/mean, ascending row loop (product contract).
+            let mut sums = vec![0.0_f64; cols];
+            for r in 0..rows {
+                for c in 0..cols {
+                    sums[c] += m[[r, c]];
+                }
+            }
+            let mut means = vec![0.0_f64; cols];
+            for c in 0..cols {
+                means[c] = sums[c] / rows as f64;
+            }
+
+            // legacy: :413-414 cost = sums(4), guarded /= sums(last).
+            let mut cost = sums[4];
+            if sums[cols - 1] > 0.0 {
+                cost /= sums[cols - 1];
+            }
+            // legacy: :415 badClassif = means(2).
+            let bad_classif = means[2];
+            // legacy: :416-417 costLID = sums(14), guarded /= sums(cols-2).
+            let mut cost_lid = sums[14];
+            if sums[cols - 2] > 0.0 {
+                cost_lid /= sums[cols - 2];
+            }
+            // legacy: :418 badLIDClassif = 100-means(15).
+            let bad_lid_classif = 100.0 - means[15];
+
+            // legacy: :419-433 WER percent scaling, guarded by nbOfWords > 0.
+            let nb_of_words = sums[7];
+            let mut wer_correct = 100.0 * sums[8];
+            let mut wer_subs = 100.0 * sums[9];
+            let mut wer_ins = 100.0 * sums[10];
+            let mut wer_dels = 100.0 * sums[11];
+            let mut wer_coverage_penalty = 100.0 * sums[12];
+            let mut wer_delay_penalty = 100.0 * sums[13];
+            if nb_of_words > 0.0 {
+                wer_correct /= nb_of_words;
+                wer_subs /= nb_of_words;
+                wer_ins /= nb_of_words;
+                wer_dels /= nb_of_words;
+                wer_coverage_penalty /= nb_of_words;
+                wer_delay_penalty /= nb_of_words;
+            }
+            let _wer = wer_subs + wer_ins + wer_dels;
+            let _ = (wer_correct, wer_coverage_penalty, wer_delay_penalty);
+
+            // legacy: :435-441 confusion matrix, algo 5/6 only -- unreachable in 4a.
+            if self.algo_types[ii] == 5 || self.algo_types[ii] == 6 {
+                unreachable!("Algo 5/6 - Phase 4b");
+            }
+
+            // legacy: :445-446 total durations, needed for the :465 gate.
+            let total_speech_duration = means[6] * rows as f64;
+
+            // legacy: :457-460 row writes.
+            cost_mem_row[ii] = cost;
+            bad_classif_row[ii] = bad_classif;
+            cost_lid_row[ii] = cost_lid;
+            bad_classif_lid_row[ii] = bad_lid_classif;
+
+            // legacy: :462-464 bestNNWeight_<pos+1>_<filename> compose.
+            let save_filename = format!("bestNNWeight_{}_{filename}", ii + 1);
+            // legacy: :464 saveWeights call -- BEFORE the :465 costLID override.
+            self.save_weights(
+                &save_filename,
+                ii,
+                best_cost,
+                cost,
+                bad_classif,
+                cost_lid,
+                bad_lid_classif,
+                derivs,
+                stats,
+            )?;
+
+            // legacy: :465 costLID = -1.0 when totalSpeechDuration < 1e-3. ORDER:
+            // after save_weights, before update_weights.
+            if total_speech_duration < 1e-3 {
+                cost_lid = -1.0;
+            }
+            // legacy: :466 updateWeights call -- AFTER the override.
+            self.update_weights(ii, cost, bad_classif, cost_lid, bad_lid_classif, derivs);
+        }
+        Ok(())
+    }
+
     /// Dispatch config-`pos`'s `Segmenter::getSegmentation` onto a pre-seeded
     /// per-channel `Segmentation` slice. Exposed so the corpus-processor driver
     /// (and Task 5's own scoring oracle) can drive one config without going

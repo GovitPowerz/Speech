@@ -1467,6 +1467,36 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   channel, validated byte-for-byte in the Phase 4a tier-1 goldens. *Pinned by:* none
   yet -- closed by the Task 8 tier-1 VRCTS byte golden.
 
+- **[phase4a] `costLID = -1.0` gate applied AFTER `saveWeights`, BEFORE `updateWeights` --
+  order is load-bearing** (`engine/bag_of_processors.rs::save_and_update`, from
+  `BagOfProcessors.cpp:409-471`, specifically `:464-466`): per config, `saveAndUpdate` calls
+  `saveWeights` with the REAL (pre-gate) `costLID`, THEN overwrites `costLID = -1.0` when
+  `totalSpeechDuration < 1e-3` (no speech segments detected in the accumulated file x channel
+  rows), THEN calls `updateWeights` with the gated value. The row-slice writes
+  (`costMem`/`badClassifMem`/`costLIDMem`/`badClassifLIDMem`, `:457-460`) also happen BEFORE the
+  gate, so they always carry the real `costLID`, never `-1.0`. Swapping the order (gating before
+  `saveWeights`, or before the row writes) would silently change algo 5/6's save criterion
+  (`badClassifLID+costLID` / `cost+costLID`) in Phase 4b even though it is inert for algo 3/4 in
+  4a (their save/update criteria are `cost` alone, ignoring `costLID` entirely). *Why deferred:*
+  Phase 4a has no algo 5/6 bag to observe the gate on the SAVE side; only the update-side effect
+  is observable, via a test-only hook. *Fix candidate:* none -- this is the correct legacy order,
+  to be reproduced as-is when Phase 4b lands algo 5/6. *Pinned by:* `update_called_with_neg_costlid`
+  (`tests/phase4a_save_update.rs`), which asserts the update-side value is `-1.0` while the same
+  call's row-slice write (`cost_lid_row`) still carries the pre-gate value.
+
+- **[phase4a] `saveAndUpdate`'s column means are per file x channel ROW, not per file** (from
+  `BagOfProcessors.cpp:409-471`): `resultsperConf[ii].rows()` is one row per (file, channel) pair
+  accumulated by `SegmentationFunction` (Task 5), not one row per file -- the legacy's own "%s
+  files have been processed" print (`:449`) is therefore a misnomer (display-only, dropped in this
+  port per the brief) since it prints the row count as a file count. This is not merely a cosmetic
+  quibble: it is what makes `badClassif = means(2)` and `badLIDClassif = 100-means(15)` genuinely
+  per-frame-class averages over every scored channel, rather than per-file averages that would
+  need a further per-file channel-count weighting. *Why deferred:* not a bug, just an easy
+  misreading of the legacy print; noted so a future reader does not "fix" the row semantics to
+  match the dropped print's wording. *Pinned by:* `cost_mem_rows_written`
+  (`tests/phase4a_save_update.rs`), which mixes single-row algo-1/algo-3 configs so
+  `means == sums` and the per-config independence of the row-count basis is exercised directly.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

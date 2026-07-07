@@ -904,6 +904,7 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
+ "speech",
  "symphonia",
  "tempfile",
  "thiserror",
