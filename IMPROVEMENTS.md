@@ -1792,6 +1792,59 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`tests/phase4b_nn_lid.rs`, STRICT bits: col0 == col0*factor, col1 unchanged); mutation check --
   scaling col1 instead of col0, or scaling both, flips the strict-bit assertion.
 
+- **[phase4b] `BLSTMSpectralLID::getSegmentation` inlines a spectral-setup COPY that DIVERGES
+  from the base `BLSTMSpectralSegmenter::getSegmentation` in five load-bearing ways -- the Algo-5
+  lines govern** (`tasks/lid.rs::get_segmentation`, from `BLSTMSpectralLID.cpp:27-460` diffed against
+  `BLSTMSpectralSegmenter.cpp:593-887` + `getLTSVParam` `:300-314` + `getBLSTMParam` `:439-500`): (1)
+  the SAD result_vec is the LTSV score (`classifySequence` over the RAW periodogram, `:271-274` -- the
+  mel branch `:252-269` is COMMENTED OUT), NOT the BLSTM posterior; the BLSTM runs only per speech
+  segment for LID scoring. (2) the LTSV half-window floors `< 1 -> 1` (`:157-158`), UNLIKE the base
+  `getLTSVParam`'s `< 1 -> 0` (`:303`, which DISABLES LTSV) -- so LTSV SAD is always active even with
+  `LTSVwindow 0` (`round(0) = 0 -> 1`); this is the STANDALONE `LtsvSegmenter`'s floor, not the
+  spectral SAD's. (3) result_vec is sized `ceil(vec_size / LTSV_window_shift)` (`:227-232`), the LTSV
+  decimation, NOT `getBLSTMParam`'s ssr-division (`:481-497`), and the LTSV loop writes DECIMATED
+  indices `result_vec[jj/LTSV_window_shift]` with NO interpolation backfill. (4) the SAD
+  `results2segmentation` timeStep is `_WindowShift` with offset 0.0 (`:302`) -- the BLSTM-derived
+  window shift used as the LTSV-SAD time step, a compression quirk (the result_vec is LTSV-decimated
+  but stepped by `_WindowShift`, not `_WindowShift * LTSV_window_shift`), so the SAD boundaries live on
+  a compressed timeline. (5) the scoring timeStep uses the SIGNAL pattern (`:333-343`: overlap keeps
+  `timeStep = _WindowShift`), NOT the base spectral `_SpectrumShift * ssr` (`:731`). *Why deferred:*
+  the LID driver is a faithful port target; the divergences are load-bearing for the goldens. *Fix
+  candidate:* after end-to-end LID parity, reconcile the LID SAD path with the base spectral/LTSV
+  drivers (the timeline compression at (4) is the most surprising and worth a second look). *Pinned
+  by:* `ltsv_sad_row_matches_dump`, `sad_boundaries_match_dump`, `lid_classification_errors_match_dump`
+  (`tests/phase4b_lid5_golden.rs`), all bit-exact vs the harness `LidProbe` reimpl.
+
+- **[phase4b] The LID driver computes TDC params + `LTSV_freq_beg`/`LTSV_freq_end` + `costLID` that
+  are all DEAD, and has a `_CepstreCoefficients` writeback that never re-reads** (`tasks/lid.rs`, from
+  `BLSTMSpectralLID.cpp`): TDC (`:162-173`, incl. a min_lag/max_lag derivation SIMPLER than
+  `getTDCParam` -- no `min_lag < 1 -> 1`, no `max_lag < min_lag` guard, no `_MinMaxLag` writeback) is
+  computed but never used (no pitch pass in the LID driver), so it is SKIPPED here. `LTSV_freq_beg`/
+  `LTSV_freq_end` (`:109-110`) are captured before the mel branch but never read (the LTSV loop uses
+  the post-mel `freq_beg/end`), so SKIPPED. `costLID` (`:320,376,405,410`) is accumulated but NEVER
+  stored on `seg` or returned (a dead local), so NOT reproduced. The `_CepstreCoefficients` block
+  writeback of the (type-1-normalized) input after each scoring call (`:364-368`) is DEAD: SAD
+  segments after smoothing are separated by an OTHER span, so `rowEnd_i < rowBegin_{i+2}` always (the
+  written rows are never re-read), and under `lid5.config`'s single-segment SAD it writes once and
+  never re-reads -- SKIPPED. *Why deferred:* dead-code omission, not a behavioral deviation. *Fix
+  candidate:* N/A. *Pinned by:* `lid_members_match_dump`/`lid_confusion_matches_dump`
+  (`tests/phase4b_lid5_golden.rs`), bit-exact despite the skips.
+
+- **[phase4b] The LID `_IsLIDCorrect = -1` branch is DEAD (targetIndex is clamped `>= 0`), and the
+  per-segment scoring-block guard adds a `rowEnd >= rowBegin` underflow check with no legacy
+  counterpart** (`tasks/lid.rs::get_segmentation`, from `BLSTMSpectralLID.cpp:321-323,352,424-425`):
+  `targetIndex` is clamped to `[0, classNb)` at `:321-323`, so every `if (targetIndex >= 0)` (`:375,
+  :410,:413,:417`) is always true and the `else { _IsLIDCorrect = -1 }` at `:424-425` never fires --
+  reproduced structurally (the accessor CAN return -1) but never reached. The `rowEnd - rowBegin + 1
+  >= ssr` guard (`:352`) is unsigned in the legacy: when `rowEnd < rowBegin` (a segment shorter than
+  one periodogram frame) it wraps to a huge value, passes the guard, and the subsequent `.block(...)`
+  slice reads OOB (UB). The port adds an explicit `row_end >= row_begin` guard so it SKIPS such a
+  segment instead of UB-slicing; this is unreachable with real min-length SPEECH segments (the harness
+  would `std::abort` on the resulting structural mismatch, so no committed fixture exercises it) and is
+  byte-identical on every fixture. *Why deferred:* the -1 branch is dead reproduction; the guard is a
+  port-only safety over legacy UB. *Fix candidate:* N/A (the UB is unreachable). *Pinned by:*
+  `lid_members_match_dump`, `sentinel_gt150_present_every_file` (`tests/phase4b_lid5_golden.rs`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
