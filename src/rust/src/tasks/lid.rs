@@ -53,6 +53,7 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::audio::{Audio, compute_segment_periodogram_estimates, windowing_coefficients};
+use crate::constants::random_gauss;
 use crate::features::ltsv_tdc::ltsv_classify_sequence;
 use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{FeatureConfig, SpectralParams, build_input_sequence_parts};
@@ -1180,6 +1181,397 @@ impl TwinBlstmSpectralLid {
         }
         targets
     }
+
+    /// Override the DumpLIDInternals output directory (`_DumpDir`). The legacy derives
+    /// the `.mat` filename from `audio.getAudioFileName()` (`:906-913`); the port's
+    /// `Audio` carries no source path, so the dump filename is `<dir>/chan<c>_lid_dump.mat`
+    /// -- a cosmetic path deviation (IMPROVEMENTS'd); the VARIABLE names (`features_<n>`,
+    /// `matNb`) and values are the faithful part.
+    pub fn set_dump_dir(&mut self, dir: String) {
+        self.driver_cfg.dump_dir = dir;
+    }
+
+    /// Port of the `abs(_Mode) == 7` branch (`:903-1193`), phSeq (File_Type 1) arm only.
+    /// The SAD net is NEVER run (`result_vec` is synthesized constant 10.0 at `:726`);
+    /// the LID net scores each `audio._ExternalFeatures[i]` block directly (`:980-1155`).
+    /// The wav arm (`:922-963`) runs the CNN (`_LIDConvNeuralNetwork`, not ported) -> bail.
+    fn get_segmentation_mode7(
+        &mut self,
+        audio: &mut Audio,
+        seg_per_chan: &mut [Segmentation],
+        _refs: Option<&[Segmentation]>,
+    ) -> Result<()> {
+        if audio.periodogram.is_none() {
+            return Err(anyhow!(
+                "TwinBlstmSpectralLid mode 7: wav arm runs the CNN (not ported); only File_Type 1 (phSeq) supported (legacy :922-963)"
+            ));
+        }
+        let rate = audio.sample_rate as f64;
+        let s = SpectralParams::derive(&self.feature_cfg, rate);
+        if let Some(tdc) = s.tdc.as_ref()
+            && tdc.half_window > 0
+        {
+            return Err(anyhow!(
+                "TwinBlstmSpectralLid mode 7: pitch pass (TDCwindow > 0) not ported"
+            ));
+        }
+
+        // Stateful spectrum-shift quantization (`:208-210`).
+        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
+        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
+        let ssif = self.spectrum_shift_in_frames;
+        let spectrum_shift_sec = self.spectrum_shift_sec;
+
+        // initSpectralAnalysis preemph/noise (harmless on the zeroed phSeq waveform).
+        if self.feature_cfg.preemph_ratio > 0.0 {
+            audio.apply_preemph(self.feature_cfg.preemph_ratio);
+        }
+        if self.feature_cfg.noise_seed > 0 {
+            audio.apply_noise(self.feature_cfg.noise_ratio);
+        }
+
+        // getLTSVParam re-quantize (dead for LTSVwindow 0).
+        let ltsv_ws = f64::round(self.feature_cfg.ltsv_shift * rate / ssif as f64) as i64;
+        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
+        self.ltsv_shift_sec = (ltsv_ws * ssif as i64) as f64 / rate;
+
+        // getBLSTMParam (SAD result_vec sizing) + getLIDBLSTMParam.
+        let sad_ssr = self.sad_net.sub_sampling_ratio();
+        let (window_size, _sad_window_shift, no_overlap, real_vec_size) = get_blstm_param(
+            self.driver_cfg.window_size_sec,
+            &mut self.window_shift_sec,
+            rate,
+            ssif,
+            sad_ssr,
+            &self.sad_net.lstm_sub_sampling(),
+            &self.sad_net.output_sub_sampling(),
+            audio.data.ncols(),
+        );
+
+        let lid_ssr = self.lid_net.sub_sampling_ratio();
+        let ssifd = ssif as f64;
+        let mut lid_window_size =
+            f64::round(self.lid_window_size_sec * rate / 2.0 / ssifd) as usize;
+        if lid_window_size != 0 && lid_window_size < lid_ssr {
+            lid_window_size = lid_ssr;
+        }
+        let mut lid_window_shift = f64::round(self.lid_window_shift_sec * rate / ssifd) as i64;
+        let mut lid_no_overlap = false;
+        if lid_window_size != 0 && lid_window_shift < 1 {
+            lid_no_overlap = true;
+            let raw = f64::round(self.lid_window_size_sec * rate / ssifd) as usize;
+            lid_window_size = (raw / lid_ssr) * lid_ssr;
+            if lid_window_size < 10 * lid_ssr {
+                lid_window_size = 10 * lid_ssr;
+            }
+        }
+        if lid_window_size == 0 || lid_window_shift < 1 {
+            lid_window_shift = 1;
+        }
+        self.lid_window_shift_sec = (lid_window_shift * ssif as i64) as f64 / rate;
+        self.lid_net.reset_weights_derivatives();
+        self.sad_net.reset_weights_derivatives();
+        let lid_window_shift = lid_window_shift as usize;
+
+        // SAD timeStep/offset (`:696-706`).
+        let mut time_step = self.window_shift_sec * sad_ssr as f64;
+        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+        if window_size > 0 {
+            if no_overlap {
+                time_step = self.window_shift_sec * sad_ssr as f64;
+                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+            } else {
+                time_step = spectrum_shift_sec * sad_ssr as f64;
+                time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
+            }
+        }
+
+        let class_nb = self.lid_net.output_size().max(2);
+        let cost_modified = self.lid_net.is_cost_modified();
+
+        let channels = audio.data.nrows();
+        self.channels = channels;
+        self.cumulative_error = vec![0.0; channels];
+        self.nb_of_classif = vec![0; channels];
+        self.last_result_rows = Vec::with_capacity(channels);
+        self.lid_cumulative_error = vec![0.0; channels];
+        self.lid_nb_of_classif = vec![0; channels];
+        self.lid_classification_errors = vec![Vec::new(); channels];
+        self.lid_segments_confusion = vec![Array2::<f64>::zeros((0, 0)); channels];
+        self.is_lid_correct = vec![0; channels];
+        self.concat_branch = vec![0; channels];
+
+        let audio_weight = audio.weight;
+        let post_process_mode = self.post_process_mode;
+        let min_nb_of_frames = self.min_nb_of_frames;
+        let noise_magnitude = self.noise_magnitude;
+        let dump_lid_internals = self.dump_lid_internals;
+        let dump_dir = self.driver_cfg.dump_dir.clone();
+        let conv_coeff = self.driver_cfg.conv_coeff.clone();
+        let mut lid_cost_ponderation = 1.0f64;
+        // External features are shared across channels (phSeq has _ChannelsCount = 1).
+        let external_features = audio.external_features.clone();
+
+        for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
+            // targetIndex = clamp(lang_index, [0, classNb)) (`:626-628`).
+            let mut target_index = audio.lang_index;
+            if target_index >= class_nb as i32 {
+                target_index = 0;
+            }
+            if target_index < 0 {
+                target_index = 0;
+            }
+            let ti = target_index as usize;
+
+            // SAD else branch (`:725`): result_vec.setConstant(10.0); clear SAD outputs.
+            let mut result_vec2 = vec![10.0f64; real_vec_size];
+            self.sad_net.output_forward = Array2::<f64>::zeros((0, 0));
+            self.sad_net.output_backward = Array2::<f64>::zeros((0, 0));
+            self.last_result_rows.push(result_vec2.clone());
+            // results2segmentation (`:773`, mode 7 runs it: _Mode != 4 && != 6).
+            results_to_segmentation(
+                seg,
+                time_step,
+                time_offset,
+                &mut result_vec2,
+                SegClass::Speech,
+                conv_coeff.as_deref(),
+                &self.seg_cfg,
+            );
+            self.cumulative_error[chan] = 0.0; // NNCost (SAD never run) (`:885`)
+            self.nb_of_classif[chan] = 0;
+
+            // --- abs(_Mode)==7 external-features loop (`:965-1179`) ------------
+            self.lid_net
+                .set_processing_type(lid_window_size > 0, !lid_no_overlap); // :971
+
+            let mut dump = if dump_lid_internals && !dump_dir.is_empty() {
+                let p = std::path::Path::new(&dump_dir).join(format!("chan{chan}_lid_dump.mat"));
+                Some(crate::io::matfile::MatWriter::create(&p)?)
+            } else {
+                None
+            };
+            let mut count_dump = 0i64;
+
+            let mut langid = vec![0.0f64; class_nb];
+            let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
+            for kk in 0..class_nb + 1 {
+                confusion[[0, kk]] = kk as f64;
+                confusion[[kk, 0]] = kk as f64;
+            }
+            let mut segments_count = 0i32;
+            let mut number_of_frames = 0i32;
+            let mut lid_nn_cost = 0.0f64;
+            let mut lid_nb_classif = 0i64;
+
+            for feat in &external_features {
+                // _MinNbOfFrames + ssr guard (`:981`).
+                if feat.nrows() < lid_ssr || (feat.nrows() as i32) < min_nb_of_frames {
+                    continue;
+                }
+                // Gaussian noise (`:1022-1032`). PORT: random_init is wall-clock
+                // (`:311`, non-deterministic/non-portable) -> the port fixes randinit = 0
+                // (IMPROVEMENTS'd); table lookups are pure so the indexing is exact.
+                let mut feat_noised = feat.clone();
+                if noise_magnitude > 0.0 {
+                    let cols = feat.ncols();
+                    let randinit = 0usize;
+                    for kk in 0..feat.nrows() {
+                        for ll in 0..cols {
+                            let m = random_gauss(kk * cols + ll + randinit) - 0.5;
+                            feat_noised[[kk, ll]] += noise_magnitude * m;
+                        }
+                    }
+                }
+
+                // feedForward (`:1034`): modifier = 1/feat.rows().
+                let modifier = 1.0 / feat.nrows() as f64;
+                let output_seq = self.lid_net.feed_forward_scoring(
+                    &mut feat_noised,
+                    lid_window_size,
+                    lid_window_shift,
+                    target_index as i64,
+                    modifier,
+                );
+                lid_nn_cost += self.lid_net.cost; // :1035
+                lid_nb_classif += self.lid_net.nb_of_classif; // :1036
+
+                // segLID accumulation per _PostProcessMode (`:1073-1108`). The legacy gate
+                // `short_result_vec(kk,0) > 0.5` uses `Ones(rows, sadOutputSize)` (`:1039`)
+                // -> ALWAYS true, so only `outputSeq(kk,1) >= 0` gates. The `_Mode < 0`
+                // sub-branch (`:1040-1071`) is dead for _Mode = +7.
+                let out_cols = output_seq.ncols();
+                let mut seg_lid = vec![0.0f64; out_cols];
+                match post_process_mode {
+                    1 => {
+                        for kk in 0..output_seq.nrows() {
+                            if output_seq[[kk, 1]] >= 0.0 {
+                                let mut entropy = 0.0;
+                                let mut log_out = vec![0.0f64; out_cols];
+                                for ll in 0..out_cols {
+                                    log_out[ll] = f64::max(1e-24, output_seq[[kk, ll]]).ln();
+                                    entropy -= output_seq[[kk, ll]] * log_out[ll];
+                                }
+                                entropy /= 2.0f64.ln();
+                                if entropy < 1e-24 {
+                                    entropy = 1e-24;
+                                }
+                                for ll in 0..out_cols {
+                                    seg_lid[ll] +=
+                                        f64::max(1e-24, output_seq[[kk, ll]] / entropy).ln();
+                                }
+                                number_of_frames += 1;
+                            }
+                        }
+                    }
+                    2 => {
+                        for kk in 0..output_seq.nrows() {
+                            if output_seq[[kk, 1]] >= 0.0 {
+                                let mut j = 0usize;
+                                let mut best = output_seq[[kk, 0]];
+                                for c in 1..out_cols {
+                                    if output_seq[[kk, c]] > best {
+                                        best = output_seq[[kk, c]];
+                                        j = c;
+                                    }
+                                }
+                                seg_lid[j] += 1.0;
+                                number_of_frames += 1;
+                            }
+                        }
+                    }
+                    _ => {
+                        for kk in 0..output_seq.nrows() {
+                            if output_seq[[kk, 1]] >= 0.0 {
+                                for ll in 0..out_cols {
+                                    seg_lid[ll] += f64::max(1e-24, output_seq[[kk, ll]]).ln();
+                                }
+                                number_of_frames += 1;
+                            }
+                        }
+                    }
+                }
+
+                // argmax j (`:1113-1114`), confusion (`:1121-1130`).
+                let mut j = 0usize;
+                let mut best = seg_lid[0];
+                for (c, &v) in seg_lid.iter().enumerate().skip(1) {
+                    if v > best {
+                        best = v;
+                        j = c;
+                    }
+                }
+                let pos_target = ti + 1;
+                if j == ti {
+                    confusion[[pos_target, pos_target]] += 1.0;
+                    confusion[[pos_target, class_nb + 1]] += 1.0;
+                    confusion[[class_nb + 1, pos_target]] += 1.0;
+                } else {
+                    let pos_best = j + 1;
+                    confusion[[pos_target, pos_best]] += 1.0;
+                    confusion[[pos_target, class_nb + 1]] += 1.0;
+                    confusion[[class_nb + 1, pos_best]] += 1.0;
+                }
+
+                // langID (`:1131-1135`).
+                let rows = output_seq.nrows() as f64;
+                if cost_modified {
+                    for (c, &v) in seg_lid.iter().enumerate() {
+                        langid[c] += v / rows;
+                    }
+                } else {
+                    for (c, &v) in seg_lid.iter().enumerate() {
+                        langid[c] += v;
+                    }
+                }
+
+                // DumpLIDInternals features_<n> = [oF | oB] (`:1136-1144`).
+                if let Some(w) = dump.as_mut() {
+                    let of = &self.lid_net.output_forward;
+                    let ob = &self.lid_net.output_backward;
+                    let n = of.nrows();
+                    let (fc, bc) = (of.ncols(), ob.ncols());
+                    let mut colmaj = Vec::with_capacity(n * (fc + bc));
+                    for c in 0..fc {
+                        for r in 0..n {
+                            colmaj.push(of[[r, c]]);
+                        }
+                    }
+                    for c in 0..bc {
+                        for r in 0..n {
+                            colmaj.push(ob[[r, c]]);
+                        }
+                    }
+                    w.write_matrix(&format!("features_{count_dump}"), n, fc + bc, &colmaj)?;
+                    count_dump += 1;
+                }
+
+                segments_count += 1;
+            }
+
+            if let Some(mut w) = dump.take() {
+                w.write_scalar("matNb", count_dump as f64)?; // :1157-1158
+                w.finish()?;
+            }
+
+            // langID normalization (`:1163-1179`).
+            if segments_count > 0 && langid.iter().sum::<f64>() != 0.0 {
+                if cost_modified {
+                    for v in langid.iter_mut() {
+                        *v /= segments_count as f64;
+                    }
+                } else {
+                    for v in langid.iter_mut() {
+                        *v /= number_of_frames as f64;
+                    }
+                }
+                if post_process_mode != 2 {
+                    for v in langid.iter_mut() {
+                        *v = v.exp();
+                    }
+                }
+                let adim: f64 = langid.iter().sum();
+                for v in langid.iter_mut() {
+                    *v /= adim;
+                }
+            } else {
+                langid[0] = 1.0;
+            }
+
+            // Member writes (`:1318-1337`).
+            let mut target_lid = vec![0.0f64; class_nb];
+            target_lid[ti] = -2.0;
+            self.lid_cumulative_error[chan] = lid_nn_cost;
+            self.lid_nb_of_classif[chan] = lid_nb_classif;
+            let mut lid_errors = vec![0.0f64; class_nb];
+            for c in 0..class_nb {
+                lid_errors[c] = 100.0 * (langid[c] - target_lid[c]);
+            }
+            self.lid_classification_errors[chan] = lid_errors;
+            self.lid_segments_confusion[chan] = confusion;
+            let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            self.is_lid_correct[chan] = if langid[ti] == max_langid { 100 } else { 0 };
+
+            lid_cost_ponderation = self.lid_net.get_cost_ponderation(target_index as i64); // :1334
+            self.lid_net.ponderate_weights_derivatives(audio_weight); // :1335
+            self.lid_cumulative_error[chan] *= audio_weight; // :1336
+            self.cumulative_error[chan] *= lid_cost_ponderation; // :1337
+        }
+
+        // Epilogue (`:1393-1420`).
+        self.sad_net
+            .ponderate_weights_derivatives(lid_cost_ponderation);
+        for seg in seg_per_chan.iter_mut() {
+            compute_errors(seg, None, -1);
+        }
+        if no_overlap {
+            self.window_shift_sec = 0.0;
+        }
+        if lid_no_overlap {
+            self.lid_window_shift_sec = 0.0;
+        }
+        Ok(())
+    }
 }
 
 impl Segmenter for TwinBlstmSpectralLid {
@@ -1194,9 +1586,15 @@ impl Segmenter for TwinBlstmSpectralLid {
         seg_per_chan: &mut [Segmentation],
         refs: Option<&[Segmentation]>,
     ) -> Result<()> {
+        // Mode 7 (the `abs(_Mode) == 7` branch, `:903-1193`): the phSeq external-features
+        // LID loop. Only the File_Type-1 (phSeq) arm is ported -- the wav arm (`:922-963`)
+        // runs the CNN (`:927`, NOT ported) so it bails. Handled in its own method.
+        if self.mode == 7 {
+            return self.get_segmentation_mode7(audio, seg_per_chan, refs);
+        }
         if !(self.mode == 0 || self.mode == 1 || self.mode == 2 || self.mode == 3) {
             return Err(anyhow!(
-                "TwinBlstmSpectralLid: mode {} not ported (modes 4/5/6/7 deferred; legacy :640-1193)",
+                "TwinBlstmSpectralLid: mode {} not ported (modes 4/5/6 deferred; legacy :640-902)",
                 self.mode
             ));
         }
