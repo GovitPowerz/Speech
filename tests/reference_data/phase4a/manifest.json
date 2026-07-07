@@ -169,5 +169,80 @@
       "f3_chan_1.xml",
       "f3_chan_2.xml"
     ]
+  },
+  "tier2": {
+    "train": {
+      "text": "Task 9 tier-2 CorpusProbe train (Algo 3 reimpl-swap): the harness transcribes CorpusProcessor::train/run(epoch) + BagOfProcessors::SegmentationFunction/saveAndUpdate around the spectral reimpl-swap (ascending-loop forward+backward via BlstmBack + REAL CostLaw), feeding the reimpl derivs into the REAL compiled updateWeights/saveWeights (real Rprop) through their external-derivs arguments. Config: tier2_spectral.config = the phase0 1_worker_1.config re-pointed at the 2-file corpus (f1/f2), BackPropagationActivated true, epochs 3, RpropInit 0.05 (chosen so the measured best-cost gate trajectory both FIRES and SKIPS -- 1e-2 default fires every epoch), numOuterThreads 1 (== the Rust static-lane N=1 parity mode). Dumps the post-saveAndUpdate weight vector per epoch (0 = post-solo .. 4 = post-final). The transcription's time_per_hour result column is hard-zeroed (the Task 8 mask value), so the .mat conversion mask is a no-op kept for pipeline symmetry.",
+      "config": "tier2_spectral.config",
+      "epochs": 5,
+      "epoch_weight_files": [
+        "tier2_weights_epoch0.bin",
+        "tier2_weights_epoch1.bin",
+        "tier2_weights_epoch2.bin",
+        "tier2_weights_epoch3.bin",
+        "tier2_weights_epoch4.bin"
+      ],
+      "rprop_init": 0.05,
+      "non_vacuity": {
+        "text": "MEASURED (harness stdout): every consecutive epoch weight pair differs; the bestNNWeight save gate FIRED and SKIPPED at least once each. The Rust golden re-asserts the same pattern from its own trace.",
+        "epochs_differing": 4,
+        "gate_fired": 2,
+        "gate_skipped": 2,
+        "best_cost_trajectory": [
+          1.1179364603428454,
+          0.24198616733537365,
+          0.24198616733537365,
+          0.24198616733537365,
+          0.1727108023717789
+        ]
+      },
+      "seg_struct": {
+        "text": "SECONDARY structural probe (2b convention): the REAL Eigen getSegmentation ran beside the reimpl per file at the initial weights; segment count/types matched exactly (mismatch aborts fixture generation), max boundary dt recorded.",
+        "site": "tier2_train",
+        "ok": 1,
+        "max_dt": 0.0
+      },
+      "shapes": {
+        "MultiConfigResults": [
+          4,
+          21
+        ],
+        "CostMem": [
+          5,
+          1
+        ],
+        "BadClassifMem": [
+          5,
+          1
+        ],
+        "CostLIDMem": [
+          5,
+          1
+        ],
+        "BadClassifLIDMem": [
+          5,
+          1
+        ]
+      },
+      "best_artifacts": [
+        "weights_bestNNWeight_1_tier2_spectral.mat",
+        "weightsDerivatives_bestNNWeight_1_tier2_spectral.mat",
+        "bestNNWeight_1_tier2_spectral.mat"
+      ],
+      "vrcts": [
+        "tier2_f1_chan_1.xml",
+        "tier2_f1_chan_2.xml",
+        "tier2_f2_chan_1.xml",
+        "tier2_f2_chan_2.xml"
+      ]
+    },
+    "gradcheck": {
+      "text": "Task 9 tier-2 corpus-level gradCheck (CorpusProcessor.cpp:237-340) on the synthetic signal net ([2,2] LSTM + [4,1] output, 137 weights, algo 4) over the 1-file corpus (f1), seeded with the phase3 synth_flat pattern (dumped as tier2_gradcheck_seed.bin -- the single source of truth the Rust golden loads). tier2_gradcheck.bin rows 0..sweep-1 = [analytic_col0, analytic_col1, numerical] per weight; final row = [mean_error, mean_relative_error, 0].",
+      "config": "tier2_gradcheck.config",
+      "gradcheck_max_weights": 10,
+      "epsilon": 1e-05,
+      "mean_error": 1.77385e-11,
+      "mean_relative_error": 0.0001200096
+    }
   }
 }

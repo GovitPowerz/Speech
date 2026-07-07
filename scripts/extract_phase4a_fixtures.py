@@ -73,6 +73,25 @@ CORPUS_DIR = PHASE4A_DIR / "corpus"
 FILESLISTING = PHASE4A_DIR / "fileslisting.csv"
 MAPPING = PHASE4A_DIR / "language2classmapping.csv"
 
+# Task 9 tier-2 configs + listings (CorpusProbe train + gradCheck).
+TIER2_SPECTRAL_CONFIG = PHASE4A_DIR / "tier2_spectral.config"
+TIER2_GRADCHECK_CONFIG = PHASE4A_DIR / "tier2_gradcheck.config"
+TIER2_FILESLISTING = PHASE4A_DIR / "tier2_fileslisting.csv"
+TIER2_GC_FILESLISTING = PHASE4A_DIR / "tier2_gc_fileslisting.csv"
+
+# Task 9 tier-2 artifacts. Epoch count = Neural_Networks_BackPropagation_Epochs(3)+2.
+TIER2_EPOCHS = 5
+# The gradCheck sweep cap (DEVIATION from the legacy full sweep; manifest key).
+TIER2_GRADCHECK_MAX_WEIGHTS = 10
+# bestNNWeight artifact basename (bestNNWeight_<pos+1>_<multiConfigResultsOutputFile>).
+TIER2_BEST_BASE = "bestNNWeight_1_tier2_spectral.mat"
+# The saveWeights .mat variables (BLSTMNeuralNetwork::saveWeights; the weights/derivs
+# go to SEPARATE io::binary files, the .mat carries only the input statistics).
+TIER2_BEST_MAT_VARS = ["nbOfInputs", "meanInputs", "stdInputs"]
+# VRCTS from the tier-2 train (final epoch's bytes; committed with a tier2_ prefix so
+# the names do not collide with the tier-1 vrcts_solo dumps).
+TIER2_VRCTS = ["f1_chan_1.xml", "f1_chan_2.xml", "f2_chan_1.xml", "f2_chan_2.xml"]
+
 # The FIXED corpus workdir the harness chdir's into (spec 2b path-stability convention:
 # VRCTS AudioDoc path=/name= attrs are byte-reproducible only at a fixed path).
 FIXED_CORPUS = Path("/tmp/speech_phase4a_corpus")
@@ -120,6 +139,21 @@ VRCTS_DUMPS = [
 ]
 
 NB_FILES_RE = re.compile(r"^PHASE4A_TIER1 nb_files=(?P<n>\d+)$", re.MULTILINE)
+# \f? -- the legacy iof::fmtr prints end in "\n\f", so a form feed can precede the
+# next line's text; tolerate it before each tier-2 marker.
+TIER2_TRAIN_RE = re.compile(
+    r"^\f?PHASE4A_TIER2_TRAIN epochs=(?P<epochs>\d+) differ=(?P<differ>\d+) "
+    r"fired=(?P<fired>\d+) skipped=(?P<skipped>\d+) best_cost=\[(?P<costs>[^\]]+)\]$",
+    re.MULTILINE,
+)
+TIER2_SEG_STRUCT_RE = re.compile(
+    r"^\f?SEG_STRUCT site=tier2_train ok=1 max_dt=(?P<dt>[0-9.eE+-]+)$", re.MULTILINE
+)
+TIER2_GRADCHECK_RE = re.compile(
+    r"^\f?PHASE4A_TIER2_GRADCHECK sweep=(?P<sweep>\d+) mean_err=(?P<err>[0-9.eE+-]+) "
+    r"mean_rel_err=(?P<rel>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> str:
@@ -183,6 +217,22 @@ def _mat_conversion_differs(new_mat: Path, committed_mat: Path) -> bool:
     return False
 
 
+def _best_mat_differs(new_mat: Path, committed_mat: Path) -> bool:
+    """Churn guard for the bestNNWeight stats .mat (nbOfInputs/meanInputs/stdInputs):
+    True iff any variable's values differ. Same rationale as _mat_conversion_differs
+    (matio zlib bytes churn run-to-run; the decoded values are the invariant)."""
+    a = scipy.io.loadmat(new_mat)
+    b = scipy.io.loadmat(committed_mat)
+    for var in TIER2_BEST_MAT_VARS:
+        if var not in a or var not in b:
+            return True
+        av = cast(np.ndarray, a[var]).astype("<f8")
+        bv = cast(np.ndarray, b[var]).astype("<f8")
+        if av.shape != bv.shape or not np.array_equal(av.view(np.uint64), bv.view(np.uint64)):
+            return True
+    return False
+
+
 def _convert_mat(mat_path: Path, out_prefix: str) -> dict[str, list[int]]:
     """Load a harness .mat, write each variable to `<out_prefix>_<var>.bin` (timing
     masked), and return the per-variable (rows, cols) shapes."""
@@ -217,6 +267,13 @@ def main() -> None:
     shutil.copy2(MAPPING, FIXED_CORPUS / "language2classmapping.csv")
     shutil.copy2(TIER1_TDC_CONFIG, FIXED_CORPUS / "tier1_tdc.config")
     shutil.copy2(TIER1_LTSV_CONFIG, FIXED_CORPUS / "tier1_ltsv_powermel.config")
+    # Task 9 tier-2 seeds: configs + listings + the phase0 weight pack the
+    # tier2_spectral.config's relative BLSTM_weightsFile resolves to.
+    shutil.copy2(TIER2_SPECTRAL_CONFIG, FIXED_CORPUS / "tier2_spectral.config")
+    shutil.copy2(TIER2_GRADCHECK_CONFIG, FIXED_CORPUS / "tier2_gradcheck.config")
+    shutil.copy2(TIER2_FILESLISTING, FIXED_CORPUS / "tier2_fileslisting.csv")
+    shutil.copy2(TIER2_GC_FILESLISTING, FIXED_CORPUS / "tier2_gc_fileslisting.csv")
+    shutil.copy2(NN_WEIGHTS, FIXED_CORPUS / "NNweights_config1.bin")
 
     # 4. Run the harness: earlier stages into a throwaway dir, the tier-1 stage into
     #    the fixed corpus path (argv[10..12]).
@@ -239,8 +296,21 @@ def main() -> None:
                 str(FIXED_CORPUS),
                 str(FIXED_CORPUS / "tier1_tdc.config"),
                 str(FIXED_CORPUS / "tier1_ltsv_powermel.config"),
+                str(FIXED_CORPUS / "tier2_spectral.config"),
+                str(FIXED_CORPUS / "tier2_gradcheck.config"),
             ]
         )
+
+        # Task 9 tier-2 .bin dumps land in the harness OUTPUT dir (argv[1], this
+        # throwaway tempdir) -- collect them before it closes. Byte-deterministic
+        # (io::binary from the ascending-loop reimpl + real Rprop), committed as-is.
+        tier2_bins = [f"tier2_weights_epoch{e}.bin" for e in range(TIER2_EPOCHS)]
+        tier2_bins += ["tier2_gradcheck.bin", "tier2_gradcheck_seed.bin"]
+        for name in tier2_bins:
+            src = tmp_dir / name
+            if not src.is_file():
+                raise SystemExit(f"harness did not produce tier-2 dump {name}")
+            shutil.copy2(src, PHASE4A_DIR / name)
 
     nb_match = NB_FILES_RE.search(stdout)
     if not nb_match:
@@ -271,6 +341,69 @@ def main() -> None:
         if not src.is_file():
             raise SystemExit(f"harness did not produce VRCTS {src}")
         shutil.copy2(src, PHASE4A_DIR / fname)
+
+    # 6b. Task 9 tier-2 artifacts (train stage, CWD = the fixed corpus workdir).
+    # Result .mat -> per-variable .bin (timing col already 0.0 in the transcription;
+    # the mask is a no-op kept for pipeline symmetry) + the churn-guarded raw .mat.
+    tier2_mat = FIXED_CORPUS / "tier2_spectral.mat"
+    if not tier2_mat.is_file():
+        raise SystemExit("harness did not produce tier2_spectral.mat")
+    tier2_shapes = _convert_mat(tier2_mat, "tier2_spectral")
+    committed = PHASE4A_DIR / "tier2_spectral.mat"
+    if not committed.is_file() or _mat_conversion_differs(tier2_mat, committed):
+        shutil.copy2(tier2_mat, committed)
+    # bestNNWeight artifact split (BLSTMNeuralNetwork::saveWeights): the weights +
+    # derivs are io::binary files (misleading .mat suffix -- the legacy composes
+    # "weights_"+filename where filename ends in .mat); byte-deterministic, copied
+    # as-is. The stats .mat (nbOfInputs/meanInputs/stdInputs; EMPTY under the real
+    # config's InputNormalizationType -1, which never accumulates stats) is matio
+    # zlib -> churn-guarded via its scipy conversion.
+    for name in [f"weights_{TIER2_BEST_BASE}", f"weightsDerivatives_{TIER2_BEST_BASE}"]:
+        src = FIXED_CORPUS / name
+        if not src.is_file():
+            raise SystemExit(f"harness did not produce bestNNWeight artifact {name}")
+        shutil.copy2(src, PHASE4A_DIR / name)
+    best_mat_src = FIXED_CORPUS / TIER2_BEST_BASE
+    if not best_mat_src.is_file():
+        raise SystemExit(f"harness did not produce {TIER2_BEST_BASE}")
+    best_committed = PHASE4A_DIR / TIER2_BEST_BASE
+    if not best_committed.is_file() or _best_mat_differs(best_mat_src, best_committed):
+        shutil.copy2(best_mat_src, best_committed)
+    # tier-2 VRCTS (final epoch's bytes), committed with a tier2_ prefix.
+    for fname in TIER2_VRCTS:
+        src = FIXED_CORPUS / "vrcts_tier2" / fname
+        if not src.is_file():
+            raise SystemExit(f"harness did not produce tier-2 VRCTS {src}")
+        shutil.copy2(src, PHASE4A_DIR / f"tier2_{fname}")
+
+    # 6c. Task 9 stdout probes: the trajectory (non-vacuity), the SEG_STRUCT
+    # secondary probe (ABORT on absence -- a structural mismatch already aborted the
+    # harness itself), and the gradCheck means.
+    m_train = TIER2_TRAIN_RE.search(stdout)
+    if not m_train:
+        raise SystemExit("PHASE4A_TIER2_TRAIN line missing from harness stdout")
+    if int(m_train["epochs"]) != TIER2_EPOCHS:
+        raise SystemExit(f"tier-2 train epochs {m_train['epochs']} != {TIER2_EPOCHS}")
+    differ, fired, skipped = int(m_train["differ"]), int(m_train["fired"]), int(m_train["skipped"])
+    # NON-VACUITY (measured, not assumed): every consecutive epoch pair differs, and
+    # the best-cost gate FIRED at least once AND SKIPPED at least once.
+    if differ != TIER2_EPOCHS - 1:
+        raise SystemExit(f"tier-2 non-vacuity: only {differ}/{TIER2_EPOCHS - 1} epoch pairs differ")
+    if fired < 1 or skipped < 1:
+        raise SystemExit(f"tier-2 non-vacuity: gate fired={fired} skipped={skipped} (need both >= 1)")
+    best_cost_trajectory = [float(x) for x in m_train["costs"].split(",")]
+    m_seg = TIER2_SEG_STRUCT_RE.search(stdout)
+    if not m_seg:
+        raise SystemExit("SEG_STRUCT site=tier2_train line missing from harness stdout")
+    tier2_seg_max_dt = float(m_seg["dt"])
+    m_gc = TIER2_GRADCHECK_RE.search(stdout)
+    if not m_gc:
+        raise SystemExit("PHASE4A_TIER2_GRADCHECK line missing from harness stdout")
+    if int(m_gc["sweep"]) != TIER2_GRADCHECK_MAX_WEIGHTS:
+        raise SystemExit(f"tier-2 gradcheck sweep {m_gc['sweep']} != {TIER2_GRADCHECK_MAX_WEIGHTS}")
+    gc_mean_err, gc_mean_rel_err = float(m_gc["err"]), float(m_gc["rel"])
+    if not gc_mean_rel_err < 5e-4:
+        raise SystemExit(f"tier-2 gradcheck mean_rel_err {gc_mean_rel_err} >= 5e-4")
 
     # 7. Regression guard: the prior-phase fixture dirs must be byte-identical after.
     after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
@@ -409,15 +542,89 @@ def main() -> None:
             "dumps": [f"{sub}/{f}" for sub, f in VRCTS_DUMPS],
             "committed_names": [f for _, f in VRCTS_DUMPS],
         },
+        "tier2": {
+            "train": {
+                "text": (
+                    "Task 9 tier-2 CorpusProbe train (Algo 3 reimpl-swap): the harness "
+                    "transcribes CorpusProcessor::train/run(epoch) + BagOfProcessors::"
+                    "SegmentationFunction/saveAndUpdate around the spectral reimpl-swap "
+                    "(ascending-loop forward+backward via BlstmBack + REAL CostLaw), "
+                    "feeding the reimpl derivs into the REAL compiled updateWeights/"
+                    "saveWeights (real Rprop) through their external-derivs arguments. "
+                    "Config: tier2_spectral.config = the phase0 1_worker_1.config "
+                    "re-pointed at the 2-file corpus (f1/f2), BackPropagationActivated "
+                    "true, epochs 3, RpropInit 0.05 (chosen so the measured best-cost "
+                    "gate trajectory both FIRES and SKIPS -- 1e-2 default fires every "
+                    "epoch), numOuterThreads 1 (== the Rust static-lane N=1 parity "
+                    "mode). Dumps the post-saveAndUpdate weight vector per epoch (0 = "
+                    "post-solo .. 4 = post-final). The transcription's time_per_hour "
+                    "result column is hard-zeroed (the Task 8 mask value), so the .mat "
+                    "conversion mask is a no-op kept for pipeline symmetry."
+                ),
+                "config": "tier2_spectral.config",
+                "epochs": TIER2_EPOCHS,
+                "epoch_weight_files": [f"tier2_weights_epoch{e}.bin" for e in range(TIER2_EPOCHS)],
+                "rprop_init": 0.05,
+                "non_vacuity": {
+                    "text": (
+                        "MEASURED (harness stdout): every consecutive epoch weight pair "
+                        "differs; the bestNNWeight save gate FIRED and SKIPPED at least "
+                        "once each. The Rust golden re-asserts the same pattern from its "
+                        "own trace."
+                    ),
+                    "epochs_differing": differ,
+                    "gate_fired": fired,
+                    "gate_skipped": skipped,
+                    "best_cost_trajectory": best_cost_trajectory,
+                },
+                "seg_struct": {
+                    "text": (
+                        "SECONDARY structural probe (2b convention): the REAL Eigen "
+                        "getSegmentation ran beside the reimpl per file at the initial "
+                        "weights; segment count/types matched exactly (mismatch aborts "
+                        "fixture generation), max boundary dt recorded."
+                    ),
+                    "site": "tier2_train",
+                    "ok": 1,
+                    "max_dt": tier2_seg_max_dt,
+                },
+                "shapes": tier2_shapes,
+                "best_artifacts": [
+                    f"weights_{TIER2_BEST_BASE}",
+                    f"weightsDerivatives_{TIER2_BEST_BASE}",
+                    TIER2_BEST_BASE,
+                ],
+                "vrcts": [f"tier2_{f}" for f in TIER2_VRCTS],
+            },
+            "gradcheck": {
+                "text": (
+                    "Task 9 tier-2 corpus-level gradCheck (CorpusProcessor.cpp:237-340) "
+                    "on the synthetic signal net ([2,2] LSTM + [4,1] output, 137 "
+                    "weights, algo 4) over the 1-file corpus (f1), seeded with the "
+                    "phase3 synth_flat pattern (dumped as tier2_gradcheck_seed.bin -- "
+                    "the single source of truth the Rust golden loads). "
+                    "tier2_gradcheck.bin rows 0..sweep-1 = [analytic_col0, "
+                    "analytic_col1, numerical] per weight; final row = [mean_error, "
+                    "mean_relative_error, 0]."
+                ),
+                "config": "tier2_gradcheck.config",
+                "gradcheck_max_weights": TIER2_GRADCHECK_MAX_WEIGHTS,
+                "epsilon": 1e-5,
+                "mean_error": gc_mean_err,
+                "mean_relative_error": gc_mean_rel_err,
+            },
+        },
     }
 
     manifest_path = PHASE4A_DIR / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     print(
-        f"OK: phase4a tier-1 fixtures (nb_files={nb_files}, "
+        f"OK: phase4a tier-1+2 fixtures (nb_files={nb_files}, "
         f"runs={RUNS}, masked_cols={MASKED_COLS}, "
-        f"vrcts={len(VRCTS_DUMPS)} xml), manifest -> {manifest_path.relative_to(REPO_ROOT)}"
+        f"vrcts={len(VRCTS_DUMPS)} xml; tier2 fired={fired} skipped={skipped} "
+        f"differ={differ} seg_dt={tier2_seg_max_dt} gc_rel={gc_mean_rel_err}), "
+        f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 
 
