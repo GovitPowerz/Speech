@@ -1390,8 +1390,7 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   files (file_type 0); non-wav ingestion paths were never exercised and remain unvalidated. *Fix
   candidate:* once (if) a corpus ever requires non-wav files, port `AudioStruct`'s `.phSeq` and
   `.cep` readers and plumb the file_type enum through the audio I/O. *Pinned by:*
-  `file_type_nonzero_errors` (`src/engine/bag_of_processors.rs` doc-comment
-  `from_configs_non_wav_bail_test`).
+  `file_type_nonzero_bails` (inline, `engine/bag_of_processors.rs`).
 
 ## Toolchain deviations
 

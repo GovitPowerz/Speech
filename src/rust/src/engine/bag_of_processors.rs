@@ -387,6 +387,16 @@ mod tests {
     }
 
     #[test]
+    fn file_type_nonzero_bails() {
+        let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
+        cfg.insert("File_Type".to_string(), "2".to_string());
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()) {
+            Err(e) => assert!(e.to_string().contains("File_Type")),
+            Ok(_) => panic!("expected non-wav File_Type to bail"),
+        }
+    }
+
+    #[test]
     fn key_clears_applied() {
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("files".to_string(), "some_file.wav".to_string());
