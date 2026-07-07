@@ -147,7 +147,16 @@ TIER2_TRAIN_RE = re.compile(
     re.MULTILINE,
 )
 TIER2_SEG_STRUCT_RE = re.compile(
-    r"^\f?SEG_STRUCT site=tier2_train ok=1 max_dt=(?P<dt>[0-9.eE+-]+)$", re.MULTILINE
+    r"^\f?SEG_STRUCT site=tier2_train_epoch(?P<epoch>\d+) ok=1 max_dt=(?P<dt>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
+TIER2_CALIB_RE = re.compile(
+    r"^\f?TIER2_CALIB epoch=(?P<epoch>\d+) cost_reimpl=(?P<reimpl>[0-9.eE+-]+) "
+    r"cost_real=(?P<real>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
+TIER2_CALIB_GATE_RE = re.compile(
+    r"^\f?TIER2_CALIB real_gate fired=(?P<fired>\d+) skipped=(?P<skipped>\d+)$", re.MULTILINE
 )
 TIER2_GRADCHECK_RE = re.compile(
     r"^\f?PHASE4A_TIER2_GRADCHECK sweep=(?P<sweep>\d+) mean_err=(?P<err>[0-9.eE+-]+) "
@@ -399,10 +408,19 @@ def main() -> None:
     if fired < 1 or skipped < 1:
         raise SystemExit(f"tier-2 non-vacuity: gate fired={fired} skipped={skipped} (need both >= 1)")
     best_cost_trajectory = [float(x) for x in m_train["costs"].split(",")]
-    m_seg = TIER2_SEG_STRUCT_RE.search(stdout)
-    if not m_seg:
-        raise SystemExit("SEG_STRUCT site=tier2_train line missing from harness stdout")
-    tier2_seg_max_dt = float(m_seg["dt"])
+    seg_epochs = {int(m["epoch"]): float(m["dt"]) for m in TIER2_SEG_STRUCT_RE.finditer(stdout)}
+    if sorted(seg_epochs) != list(range(TIER2_EPOCHS)):
+        raise SystemExit(f"SEG_STRUCT tier2_train_epoch lines incomplete: {sorted(seg_epochs)}")
+    tier2_seg_max_dt = max(seg_epochs.values())
+    calib = {
+        int(m["epoch"]): {"cost_reimpl": float(m["reimpl"]), "cost_real": float(m["real"])}
+        for m in TIER2_CALIB_RE.finditer(stdout)
+    }
+    if sorted(calib) != list(range(TIER2_EPOCHS)):
+        raise SystemExit(f"TIER2_CALIB epoch lines incomplete: {sorted(calib)}")
+    m_gate = TIER2_CALIB_GATE_RE.search(stdout)
+    if not m_gate:
+        raise SystemExit("TIER2_CALIB real_gate line missing from harness stdout")
     m_gc = TIER2_GRADCHECK_RE.search(stdout)
     if not m_gc:
         raise SystemExit("PHASE4A_TIER2_GRADCHECK line missing from harness stdout")
@@ -596,14 +614,25 @@ def main() -> None:
                 },
                 "seg_struct": {
                     "text": (
-                        "SECONDARY structural probe (2b convention): the REAL Eigen "
-                        "getSegmentation ran beside the reimpl per file at the initial "
-                        "weights; segment count/types matched exactly (mismatch aborts "
-                        "fixture generation), max boundary dt recorded."
+                        "SECONDARY structural probe (2b convention), PER EPOCH: the "
+                        "SAME train ran once more with the REAL Eigen forward (real "
+                        "getSegmentation, real derivs, real updateWeights); per epoch "
+                        "per file/channel the segment count/types matched the reimpl "
+                        "train exactly (mismatch aborts fixture generation), max "
+                        "boundary dt recorded per epoch. The real-vs-reimpl per-epoch "
+                        "cost deltas (ULP-level, the blocked-GEMM story) are recorded "
+                        "as CALIBRATION, not gated; the real trajectory's gate pattern "
+                        "matched (fired/skipped)."
                     ),
-                    "site": "tier2_train",
+                    "site": "tier2_train_epoch{N}",
                     "ok": 1,
                     "max_dt": tier2_seg_max_dt,
+                    "per_epoch_max_dt": [seg_epochs[e] for e in range(TIER2_EPOCHS)],
+                    "calibration": {
+                        "per_epoch_costs": [calib[e] for e in range(TIER2_EPOCHS)],
+                        "real_gate_fired": int(m_gate["fired"]),
+                        "real_gate_skipped": int(m_gate["skipped"]),
+                    },
                 },
                 "shapes": tier2_shapes,
                 "best_artifacts": [

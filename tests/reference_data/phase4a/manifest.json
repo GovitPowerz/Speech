@@ -197,10 +197,43 @@
         ]
       },
       "seg_struct": {
-        "text": "SECONDARY structural probe (2b convention): the REAL Eigen getSegmentation ran beside the reimpl per file at the initial weights; segment count/types matched exactly (mismatch aborts fixture generation), max boundary dt recorded.",
-        "site": "tier2_train",
+        "text": "SECONDARY structural probe (2b convention), PER EPOCH: the SAME train ran once more with the REAL Eigen forward (real getSegmentation, real derivs, real updateWeights); per epoch per file/channel the segment count/types matched the reimpl train exactly (mismatch aborts fixture generation), max boundary dt recorded per epoch. The real-vs-reimpl per-epoch cost deltas (ULP-level, the blocked-GEMM story) are recorded as CALIBRATION, not gated; the real trajectory's gate pattern matched (fired/skipped).",
+        "site": "tier2_train_epoch{N}",
         "ok": 1,
-        "max_dt": 0.0
+        "max_dt": 0.0,
+        "per_epoch_max_dt": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "calibration": {
+          "per_epoch_costs": [
+            {
+              "cost_reimpl": 1.1179364603428454,
+              "cost_real": 1.1179364603428452
+            },
+            {
+              "cost_reimpl": 0.24198616733537365,
+              "cost_real": 0.24198616733537365
+            },
+            {
+              "cost_reimpl": 0.2733286605909985,
+              "cost_real": 0.27332866059099853
+            },
+            {
+              "cost_reimpl": 0.2566450396599771,
+              "cost_real": 0.25664503965997704
+            },
+            {
+              "cost_reimpl": 0.1727108023717789,
+              "cost_real": 0.1727108023717789
+            }
+          ],
+          "real_gate_fired": 2,
+          "real_gate_skipped": 2
+        }
       },
       "shapes": {
         "MultiConfigResults": [

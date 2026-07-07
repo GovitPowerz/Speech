@@ -138,6 +138,19 @@ def test_tier2_manifest_trajectory_and_seg_struct() -> None:
     seg = cast(dict[str, object], train["seg_struct"])
     assert seg["ok"] == 1
     assert seg["max_dt"] == 0.0, "measured SEG_STRUCT boundary max_dt (reimpl vs real Eigen)"
+    per_epoch = cast(list[float], seg["per_epoch_max_dt"])
+    assert len(per_epoch) == epochs, "one SEG_STRUCT record per epoch"
+    for e, dt in enumerate(per_epoch):
+        assert dt == 0.0, f"epoch {e}: measured max_dt must be the recorded 0.0"
+    calib = cast(dict[str, object], seg["calibration"])
+    costs = cast(list[dict[str, float]], calib["per_epoch_costs"])
+    assert len(costs) == epochs
+    for e, c in enumerate(costs):
+        # Calibration, not a gate: real-Eigen vs reimpl cost deltas are ULP-level.
+        assert abs(c["cost_real"] - c["cost_reimpl"]) <= 1e-12 * abs(c["cost_reimpl"]), f"epoch {e}: real-vs-reimpl cost delta beyond ULP-level calibration"
+    # The real-Eigen trajectory exercises the same gate pattern (fired AND skipped).
+    assert cast(int, calib["real_gate_fired"]) >= 1
+    assert cast(int, calib["real_gate_skipped"]) >= 1
     gc = cast(dict[str, object], tier2["gradcheck"])
     assert gc["gradcheck_max_weights"] == 10, "the capped sweep (deviation, recorded)"
     assert cast(float, gc["mean_relative_error"]) < 5e-4

@@ -8546,12 +8546,18 @@ int main(int argc, char** argv) {
                 Mat_Close(mp);
             };
 
+            // Per-epoch reimpl boundary capture for the per-epoch SEG_STRUCT probe:
+            // reimplBounds[epoch][file][chan] = [(beginTime, type), ...].
+            typedef std::vector<std::pair<double, int>> BoundVec;
+            std::vector<std::vector<std::vector<BoundVec>>> reimplBounds;
+
             // One epoch: run every file's segmentation (reimpl FFB + backward + cost),
             // fold the per-file derivs (ascending file order, N=1), then saveAndUpdate.
             // Returns the post-update config-0 weight vector + the best-cost after this
             // epoch (the non-vacuity observables). `isTrainingEpoch`: the saveAndUpdate
             // gating (train branch always saves+updates; epoch-0/final included).
             auto runEpoch = [&](long epoch) {
+                reimplBounds.emplace_back();
                 // Per-conf accumulated derivs (algo 3: one Nx2 matrix) + the ResPerConf
                 // rows (one row per file x channel, 18 cols like assemble_scored_row).
                 Eigen::MatrixXd accDerivs;
@@ -8644,6 +8650,19 @@ int main(int argc, char** argv) {
                         seg._NbOfClassif[chan] = nbc;
                     }
                     seg.compute_errors();
+
+                    // Capture the (sanitized, post-compute_errors) per-channel boundary
+                    // lists for the per-epoch SEG_STRUCT probe below.
+                    {
+                        std::vector<BoundVec> fileBounds;
+                        for (int chan = 0; chan < channelCount; ++chan) {
+                            BoundVec bv;
+                            for (const Segment& sgm : seg._Classification.at(chan))
+                                bv.push_back(std::make_pair(sgm._BeginTime, (int)sgm._Type));
+                            fileBounds.push_back(bv);
+                        }
+                        reimplBounds.back().push_back(fileBounds);
+                    }
 
                     // Assemble the per-channel scored result row (SegmentationFunction
                     // :312-351, scored branch). 18 cols: [Pfa*100, Pmiss*100, globalERR*100,
@@ -8788,89 +8807,80 @@ int main(int argc, char** argv) {
                 std::cout << (e ? "," : "") << std::setprecision(17) << trace[e].second;
             std::cout << "]\n";
 
-            // --- SECONDARY SEG_STRUCT probe (2b convention): run ONE epoch's
-            // segmentation with the REAL Eigen forward beside the reimpl and assert the
-            // per-file per-channel segment count + types match; record max boundary dt.
-            // (getSegmentation on a fresh SpectralProbe at the INITIAL weights, so the
-            // decision layer is exercised identically to the reimpl's epoch-0 pass.) ---
+            // --- SECONDARY SEG_STRUCT probe (2b convention), PER EPOCH: run the SAME
+            // train once more with the REAL Eigen forward (the real compiled
+            // getSegmentation does the whole chain internally: features via the real
+            // Eigen applyDCT, forward+backward, reference-driven getTargets since the
+            // Segmentation ctor auto-loads the .stm) + the REAL updateWeights fed the
+            // REAL net's own derivs. Per epoch, per file/channel, the segment count +
+            // types must match the reimpl train's captured boundaries EXACTLY (abort on
+            // mismatch); the max boundary dt is recorded per epoch. The real-Eigen
+            // weight/cost trajectory diverges from the reimpl's at the ULP level (the
+            // blocked-GEMM story) -- the per-epoch cost deltas are printed as
+            // TIER2_CALIB calibration lines, NOT gated. saveWeights is SKIPPED here
+            // (bookkeeping only) so the reimpl train's committed artifacts are not
+            // clobbered; the gate bookkeeping still runs for the calibration print. ---
             {
-                double maxDt = 0.0;
-                for (long jj = 0; jj < nbFiles; ++jj) {
-                    CorpusItem cit = corpus.getItem(jj);
-                    // Reimpl segmentation at the INITIAL weights (fresh probe).
-                    ConfigFile cRe(tier2SpectralConfig, '_');
-                    SpectralProbe probeRe(cRe);
-                    probeRe.setWeights(BinaryFile2Vector(nnWeightsPath));
-                    AudioStruct audioRe(offsetBegin, durationMax, fileType, cit);
-                    const double rate = (double)audioRe.getFrameRate();
-                    const long ssr = probeRe._BLSTMNeuralNetwork.getSubSamplingRatio();
-                    SpectralP s = deriveSpectral(fc, rate, Max);
-                    if (fc.preemph > 0) audioRe.applyPreemph(fc.preemph);
-                    if (fc.noise_seed > 0) audioRe.applyNoise(fc.noise_ratio);
-                    MelFilterBank mel;
-                    if (fc.nb_bins > 0)
-                        mel = MelFilterBank(fc.min_mel, fc.max_mel, fc.nb_bins, s.min_freq_snapped,
-                                            s.max_freq_snapped, rate, s.bins - 1, fc.is_log, fc.nb_dct,
-                                            fc.ignore_first, fc.deltas_nb, fc.dd_nb);
-                    long nbFilters = mel.notEmpty() ? (long)mel.getNbFilters() : 0;
-                    long nbDct = fc.nb_dct; if (nbDct > nbFilters) nbDct = nbFilters;
-                    Eigen::MatrixXd coeffs;
-                    if (fc.nb_bins > 0 && fc.nb_dct > 0) {
-                        coeffs = Eigen::MatrixXd::Zero(nbFilters, nbDct);
-                        for (long col = 0; col < nbFilters; ++col)
-                            for (long row = 0; row < nbDct; ++row)
-                                coeffs(col, row) = std::cos(PI / nbFilters * (col + 0.5) * row);
-                    }
-                    Eigen::MatrixXd win = getWindowingCoefficients(fc.win_type, false, s.window_size + 1, fc.win_param);
-                    T9BlstmParam bp = t9DeriveBlstmParam(probeRe, s, rate, ssr, audioRe.getFrameCount());
-                    BlstmBack bb; bb.build(BinaryFile2Vector(nnWeightsPath), RN_lstmNN, RN_lstmSS, RN_outNN, RN_outSS);
-                    T6Blstm fwdOnly(BinaryFile2Vector(nnWeightsPath));
-                    probeRe._BLSTMNeuralNetwork.setProcessingType((bp.window_size > 0), !bp.noOverlap);
-                    Eigen::MatrixXd resultVec = Eigen::MatrixXd::Zero(bp.real_vec_size, 1);
-                    Loki::Factory<AbstractFFT<double>, unsigned int> gf;
-                    FactoryInit<GFFTList<GFFT, 1, Max>::Result>::apply(gf);
-                    Segmentation segRe(audioRe, cRe.get<double>("Pruning_Threshold", 0.0));
-                    for (int chan = 0; chan < audioRe.getChannelCount(); ++chan) {
-                        Eigen::MatrixXd inputSeq = t9BuildSpectralInput(probeRe, audioRe, fc, s, chan, mel, coeffs, nbDct, win, gf);
-                        Eigen::MatrixXd target;
-                        if (segRe._Reference.size() > 0) { target = resultVec; probeRe.getTargets(segRe, bp.timeStep, bp.timeOffset, target, chan, SPEECH); }
-                        double cst = 0.0; long nbc = 0;
-                        t9SpectralOverlapWorker(bb, fwdOnly, costLaw, inputSeq, bp.window_size, bp.window_shift, target, backProp, targetEnforcement, resultVec, cst, nbc);
-                        Eigen::MatrixXd rv2 = resultVec.transpose(), tmp = resultVec;
-                        probeRe.results2segmentation(segRe, bp.timeStep, bp.timeOffset, rv2, tmp, chan, SPEECH);
-                    }
-                    segRe.compute_errors();
+                ConfigFile cRl(tier2SpectralConfig, '_');
+                SpectralProbe segmenterR(cRl);
+                segmenterR.setWeights(BinaryFile2Vector(nnWeightsPath));
+                double bestCostR = 1e20;
+                int nFiredR = 0, nSkippedR = 0;
+                for (long epoch = 0; epoch <= trainingEpochs + 1; ++epoch) {
+                    Eigen::MatrixXd accDerivsR;
+                    bool accInitR = false;
+                    double sum4 = 0.0, sum17 = 0.0;
+                    double maxDt = 0.0;
+                    for (long jj = 0; jj < nbFiles; ++jj) {
+                        CorpusItem cit = corpus.getItem(jj);
+                        AudioStruct audioRl(offsetBegin, durationMax, fileType, cit);
+                        Segmentation segRl(audioRl, cRl.get<double>("Pruning_Threshold", 0.0));
+                        segmenterR.getSegmentation(audioRl, segRl);   // REAL Eigen chain
+                        segRl.compute_errors();
 
-                    // REAL Eigen getSegmentation on a fresh probe/audio.
-                    ConfigFile cRl(tier2SpectralConfig, '_');
-                    SpectralProbe probeRl(cRl);
-                    probeRl.setWeights(BinaryFile2Vector(nnWeightsPath));
-                    AudioStruct audioRl(offsetBegin, durationMax, fileType, cit);
-                    Segmentation segRl(audioRl, cRl.get<double>("Pruning_Threshold", 0.0));
-                    probeRl.getSegmentation(audioRl, segRl);
-                    segRl.compute_errors();
+                        // Per-file real derivs fold (the real class resets per file).
+                        Eigen::MatrixXd d = segmenterR.getWeightsDerivatives();
+                        if (!accInitR) { accDerivsR = d; accInitR = true; }
+                        else accDerivsR += d;
 
-                    for (int chan = 0; chan < audioRe.getChannelCount(); ++chan) {
-                        const auto& a = segRe._Classification.at(chan);
-                        const auto& b = segRl._Classification.at(chan);
-                        if (a.size() != b.size()) {
-                            std::cerr << "SEG_STRUCT site=tier2_train_f" << jj << "_c" << chan
-                                      << " ABORT: count " << a.size() << " (reimpl) != " << b.size() << " (real)\n";
-                            std::abort();
-                        }
-                        for (std::deque<Segment>::size_type ii = 0; ii < a.size(); ++ii) {
-                            if (a[ii]._Type != b[ii]._Type) {
-                                std::cerr << "SEG_STRUCT site=tier2_train_f" << jj << "_c" << chan
-                                          << " ABORT: type mismatch at " << ii << "\n";
+                        for (int chan = 0; chan < audioRl.getChannelCount(); ++chan) {
+                            sum4 += segRl._CumulativeError[chan];
+                            sum17 += (double)segRl._NbOfClassif[chan];
+                            // Structural compare vs the reimpl epoch's captured bounds.
+                            const auto& a = reimplBounds[epoch][jj][chan];
+                            const auto& b = segRl._Classification.at(chan);
+                            if (a.size() != b.size()) {
+                                std::cerr << "SEG_STRUCT site=tier2_train_epoch" << epoch
+                                          << "_f" << jj << "_c" << chan << " ABORT: count "
+                                          << a.size() << " (reimpl) != " << b.size() << " (real)\n";
                                 std::abort();
                             }
-                            double dt = std::fabs(a[ii]._BeginTime - b[ii]._BeginTime);
-                            if (dt > maxDt) maxDt = dt;
+                            for (std::deque<Segment>::size_type ii = 0; ii < b.size(); ++ii) {
+                                if (a[ii].second != (int)b[ii]._Type) {
+                                    std::cerr << "SEG_STRUCT site=tier2_train_epoch" << epoch
+                                              << "_f" << jj << "_c" << chan
+                                              << " ABORT: type mismatch at " << ii << "\n";
+                                    std::abort();
+                                }
+                                double dt = std::fabs(a[ii].first - b[ii]._BeginTime);
+                                if (dt > maxDt) maxDt = dt;
+                            }
                         }
+                        audioRl.reset();
                     }
+                    double costR = sum4;
+                    if (sum17 > 0) costR /= sum17;
+                    if (bestCostR > costR) { bestCostR = costR; if (epoch > 0) ++nFiredR; }
+                    else if (epoch > 0) ++nSkippedR;
+                    segmenterR.updateWeights(accDerivsR, costR);   // REAL Rprop, real derivs
+                    std::cout << "SEG_STRUCT site=tier2_train_epoch" << epoch << " ok=1 max_dt="
+                              << std::scientific << std::setprecision(3) << maxDt << "\n";
+                    std::cout << "TIER2_CALIB epoch=" << epoch << " cost_reimpl="
+                              << std::setprecision(17) << costMem(epoch, 0)
+                              << " cost_real=" << costR << "\n";
                 }
-                std::cout << "SEG_STRUCT site=tier2_train ok=1 max_dt="
-                          << std::scientific << std::setprecision(3) << maxDt << "\n";
+                std::cout << "TIER2_CALIB real_gate fired=" << nFiredR
+                          << " skipped=" << nSkippedR << "\n";
             }
         }
 
