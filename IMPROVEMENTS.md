@@ -1988,7 +1988,11 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `mode7_integer_members_match_real_bitexact` + `mode7_continuous_members_match_real`
   (`tests/phase4b_twin_mode7.rs`, bit-exact vs the REAL compiled `getSegmentation`: nbclassif
   150/213/142). Mutation: dropping the `= 80` override (keeping 200) yields nb_of_classif 74
-  and flips `s2`/`s3` classifications, failing every mode-7 golden.
+  and flips `s2`/`s3` classifications, failing every mode-7 golden. This closes the latent gap
+  flagged in the Task-4 (phase2b) review entry above: the `_SpectrumShiftInFrames = 80`
+  override was pinned unit-test-only via `force_non_wav_spectrum_shift` (no production caller,
+  since the corpus was wav-only at the time) -- the phSeq corpus landed in Task 5/7 gives it a
+  real, exercised production caller (`get_segmentation_mode7`).
 
 - **[phase4b] The Mode-7 noise `random_init` is wall-clock -> the port fixes `randinit = 0`**
   (`tasks/lid.rs` `get_segmentation_mode7`, from `TwinBLSTMSpectralLID.cpp:311,1025-1032`):

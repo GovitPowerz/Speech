@@ -127,6 +127,44 @@ def test_mode7_member_fixtures_shapes_and_nonvacuity() -> None:
     assert saw_hit and saw_miss, "need both an aggregate hit and a miss across the mode-7 corpus"
 
 
+def test_manifest_mode7_section_present_and_matches_bins() -> None:
+    """The extractor's Task 7 wiring (previously-dead MODE7_RE) parses + validates the
+    harness's PHASE4B_MODE7 stdout lines and records them under manifest["mode7"];
+    cross-check the recorded values against the committed .bin dumps independently of
+    the extractor's own parsing."""
+    manifest = _load_manifest()
+    assert "mode7" in manifest
+    mode7 = cast(dict[str, object], manifest["mode7"])
+    assert mode7["lid_weights"] == 12409
+    measured = cast(dict[str, object], mode7["measured"])
+    assert set(measured) == set(MODE7_VARIANTS)
+    for v in MODE7_VARIANTS:
+        files_m = cast(dict[str, object], measured[v])
+        assert set(files_m) == set(MODE7_FILES)
+        for f in MODE7_FILES:
+            entry = cast(dict[str, object], files_m[f])
+            _mr, _mc, members = _read_bin(PHASE4B / f"mode7_{v}_{f}_members.bin")
+            assert entry["lid_cumulative_error"] == members[0]
+            assert entry["nb_of_classif"] == int(members[1])
+            assert entry["is_correct"] == int(members[2])
+            _cr, _cc, conf = _read_bin(PHASE4B / f"mode7_{v}_{f}_confusion.bin")
+            assert entry["confusion_sum"] == sum(conf)
+
+
+def test_manifest_lid_weight_provenance() -> None:
+    """The committed LID_bestNNWeight_1.bin's provenance is now self-checked (Task 7
+    IMPORTANT-2): the element count is asserted against the .bin's own header
+    (independent of any legacy tree), and manifest["mode7"]["lid_weight_provenance"]
+    records whether a fresh scipy re-conversion of the legacy source was reverified."""
+    manifest = _load_manifest()
+    provenance = cast(dict[str, object], cast(dict[str, object], manifest["mode7"])["lid_weight_provenance"])
+    assert provenance["element_count"] == 12409
+    assert provenance["source_variable"] == "weights"
+    rows, cols, _ = _read_bin(PHASE4B / "LID_bestNNWeight_1.bin")
+    assert rows * cols == 12409
+    assert tuple(cast(list[int], provenance["shape"])) == (rows, cols)
+
+
 def test_mode7_dump_lid_internals_scipy_valued() -> None:
     """DumpLIDInternals (:1136-1158): the harness real-Eigen `.mat` carries
     `features_<n>` = [_OutputForward | _OutputBackward] per kept phSeq block +

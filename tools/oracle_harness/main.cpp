@@ -10409,8 +10409,12 @@ int main(int argc, char** argv) {
     // directly (the strongest oracle): the port matches the ARGMAX/COUNT-derived members
     // (_LIDSegmentsConfusion, _IsLIDCorrect, _LIDNbOfClassif) BIT-EXACT (integer, GEMM-
     // robust) and the CONTINUOUS members (_LIDClassificationErrors, _LIDCumulativeError)
-    // to a GEMM+libm tolerance (LID7_STRUCT records the delta). Noise is off in the
-    // flagship (_NoiseMagnitude 0), so the real path is deterministic. The noise TABLE
+    // to a GEMM+libm tolerance, echoed via the PHASE4B_MODE7 lidCumErr=/confSum= stdout
+    // fields and the dumped mode7_*_{confusion,liderr,members}.bin below -- unlike the
+    // wav-mode Twin stage above, there is no separate SEG_STRUCT/LID_STRUCT-style
+    // secondary probe for Mode 7; this real-compiled comparison IS the oracle, not a
+    // cross-check against one. Noise is off in the flagship (_NoiseMagnitude 0), so the
+    // real path is deterministic. The noise TABLE
     // INDEXING is pinned separately + STRICT via noiseGauss below.
     if (!twinConfigDir.empty() && !phseqCorpusDir.empty()) {
         Eigen::VectorXd realLidW = BinaryFile2Vector(twinConfigDir + "/LID_bestNNWeight_1.bin");

@@ -96,6 +96,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+import numpy as np
+import scipy.io
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HARNESS_DIR = REPO_ROOT / "tools" / "oracle_harness"
 REF_DIR = REPO_ROOT / "tests" / "reference_data"
@@ -251,6 +254,21 @@ MODE7_RE = re.compile(
     r"lidCumErr=(?P<cost>[0-9.eE+-]+) confSum=(?P<confsum>[0-9.eE+-]+)$",
     re.MULTILINE,
 )
+MODE7_WEIGHTS_RE = re.compile(r"^PHASE4B_MODE7 lidWeights=(?P<n>\d+)$", re.MULTILINE)
+
+# Task 7: LID_bestNNWeight_1.bin provenance. The committed weight vector was a
+# MANUAL scipy conversion of the legacy libmatio MultiConfigResults .mat's
+# `weights` variable (12409x1) -- reproduce that conversion here so it stops being
+# an undocumented one-off. The legacy binary artifact lives OUTSIDE this repo's
+# git-ignored `legacy/` (source-only, per CLAUDE.md) in a sibling checkout, so the
+# byte-identity re-check is LOCAL-ONLY: it runs (and can SystemExit on drift) only
+# when that sibling checkout is present; the element-count assertion is NOT gated
+# on it and always runs, so the check still has teeth on a machine without the
+# legacy tree (e.g. CI, though CI never invokes this extractor -- see CLAUDE.md).
+LEGACY_LID_MAT = Path(
+    "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Release/bin/LID_bestNNWeight_1_MultiConfigResults.mat"
+)
+LID_WEIGHT_BIN = PHASE4B_DIR / "LID_bestNNWeight_1.bin"
 
 # Task 3: the multiclass scoring feedForward overload golden (BLSTMNeuralNetwork.h:195,
 # the LID path). One reimpl output covers every case (the forward is target-independent).
@@ -310,6 +328,44 @@ def _read_bin(path: Path) -> tuple[int, int, list[float]]:
     n = rows * cols
     data = list(struct.unpack(f"<{n}d", raw[16 : 16 + 8 * n]))
     return rows, cols, data
+
+
+def _verify_lid_weight_provenance() -> dict[str, object]:
+    """Task 7 IMPORTANT-2: make the `LID_bestNNWeight_1.bin` conversion reproducible +
+    self-checking instead of a manual, undocumented one-off. Always asserts the
+    committed .bin's OWN header element count == 12409 (independent of the legacy
+    tree). If the legacy source .mat is present locally, redoes the scipy conversion
+    (the `weights` variable) into a throwaway buffer and SystemExits on any byte
+    drift from the committed .bin."""
+    committed = LID_WEIGHT_BIN.read_bytes()
+    rows, cols = struct.unpack("<qq", committed[:16])
+    if rows * cols != 12409:
+        raise SystemExit(
+            f"{LID_WEIGHT_BIN}: header element count {rows}x{cols}={rows * cols} != 12409 "
+            "(the built [36,24]/[48,1] LID net's weight count)"
+        )
+
+    provenance: dict[str, object] = {
+        "committed_bin": str(LID_WEIGHT_BIN.relative_to(REPO_ROOT)),
+        "shape": [rows, cols],
+        "element_count": rows * cols,
+        "source_mat": str(LEGACY_LID_MAT),
+        "source_variable": "weights",
+        "legacy_source_available": LEGACY_LID_MAT.is_file(),
+        "reverified_byte_identical": False,
+    }
+    if LEGACY_LID_MAT.is_file():
+        mat = scipy.io.loadmat(LEGACY_LID_MAT)
+        weights = np.asarray(mat["weights"], dtype="<f8")
+        w_rows, w_cols = weights.shape
+        redone = struct.pack("<qq", w_rows, w_cols) + weights.flatten(order="F").tobytes()
+        if redone != committed:
+            raise SystemExit(
+                f"{LID_WEIGHT_BIN} drifted from a fresh scipy conversion of "
+                f"{LEGACY_LID_MAT}'s 'weights' variable -- re-run the conversion and re-commit."
+            )
+        provenance["reverified_byte_identical"] = True
+    return provenance
 
 
 def main() -> None:
@@ -594,6 +650,43 @@ def main() -> None:
     if not any(0 in exp["lens"] for exp in phseq_expected.values()):
         raise SystemExit("no phSeq fixture exercises a length-0 line (0-row one-hot block)")
 
+    # 4e. Task 7 IMPORTANT-1: parse + validate the PHASE4B_MODE7 stdout lines (was
+    # dead: MODE7_RE was defined but never wired up). One `lidWeights=` line (the
+    # real LID net's weight count, must be exactly 12409) plus one `<variant>_<file>
+    # nbclassif=.../isCorrect=.../lidCumErr=.../confSum=...` line per (variant, file)
+    # -- a missing line, or a lidWeights count != 12409, aborts generation.
+    wm = MODE7_WEIGHTS_RE.search(stdout)
+    if not wm:
+        raise SystemExit("PHASE4B_MODE7 lidWeights= line missing from harness stdout")
+    mode7_lid_weights = int(wm["n"])
+    if mode7_lid_weights != 12409:
+        raise SystemExit(
+            f"PHASE4B_MODE7 lidWeights={mode7_lid_weights} != 12409 -- the real LID net's "
+            "weight count drifted (LID_bestNNWeight_1.bin element count, or the built "
+            "[36,24]/[48,1] LID net topology, changed)."
+        )
+
+    mode7_matches = {m["tag"]: m for m in MODE7_RE.finditer(stdout)}
+    mode7_measured: dict[str, dict[str, object]] = {}
+    for v in MODE7_VARIANTS:
+        mode7_files_m: dict[str, object] = {}
+        for f in MODE7_FILES:
+            tag = f"{v}_{f}"
+            if tag not in mode7_matches:
+                raise SystemExit(f"missing PHASE4B_MODE7 line for {tag} (nbclassif/isCorrect absent)")
+            mm = mode7_matches[tag]
+            mode7_files_m[f] = {
+                "nb_of_classif": int(mm["nbc"]),
+                "is_correct": int(mm["iscorrect"]),
+                "lid_cumulative_error": float(mm["cost"]),
+                "confusion_sum": float(mm["confsum"]),
+            }
+        mode7_measured[v] = mode7_files_m
+
+    # 4f. Task 7 IMPORTANT-2: verify (and, where the sibling legacy checkout is
+    # present, re-derive) the committed LID_bestNNWeight_1.bin's provenance.
+    lid_weight_provenance = _verify_lid_weight_provenance()
+
     # 5. Regression guard: the prior-phase fixture dirs must be byte-identical after.
     after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
     for ph in PRIOR_PHASES:
@@ -775,6 +868,25 @@ def main() -> None:
             ),
             "measured": phseq_measured,
         },
+        "mode7": {
+            "text": (
+                "Task 7 FLAGSHIP: TwinBlstmSpectralLid Mode 7 (phSeq) over twin_mode7{,_ppm1,"
+                "_ppm2} x s{1,2,3}.phSeq, pinned DIRECTLY against the REAL compiled "
+                "getSegmentation (no reimpl/transcription swap for this stage, unlike lid5/"
+                "twin above -- the real-compiled run IS the oracle; there is no SEG_STRUCT/"
+                "LID_STRUCT-style secondary probe here). The PHASE4B_MODE7 stdout lines are "
+                "now parsed + validated (previously dead code: MODE7_RE was defined but never "
+                "used): one `lidWeights=<n>` line (the real LID_bestNNWeight_1.bin net, "
+                "asserted == 12409) plus one `<variant>_<file> nbclassif=/isCorrect=/"
+                "lidCumErr=/confSum=` line per case (a missing line aborts generation, per "
+                "repo standard). lidCumErr/confSum are cross-checked below against the "
+                "committed mode7_<variant>_<file>_{members,confusion}.bin dumps by "
+                "tests/test_phase4b_fixtures.py."
+            ),
+            "lid_weights": mode7_lid_weights,
+            "lid_weight_provenance": lid_weight_provenance,
+            "measured": mode7_measured,
+        },
         "dead_code_not_ported": {
             "text": (
                 "Two legacy blocks are commented out and NOT ported: the classNb==2 binary "
@@ -798,7 +910,10 @@ def main() -> None:
         f"lid5 {len(LID5_FILES)} files, all SEG_STRUCT/LID_STRUCT ok=1; "
         f"twin {len(TWIN_VARIANTS)} variants x {len(TWIN_FILES)} files, all "
         f"SEG_STRUCT/LID_STRUCT ok=1, concat branches pinned; "
-        f"phseq {len(PHSEQ_FILES)} files, {len(phseq_bins)} bins), "
+        f"phseq {len(PHSEQ_FILES)} files, {len(phseq_bins)} bins; "
+        f"mode7 lidWeights={mode7_lid_weights}, {len(MODE7_VARIANTS)} variants x "
+        f"{len(MODE7_FILES)} files parsed, weight provenance reverified="
+        f"{lid_weight_provenance['reverified_byte_identical']}), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

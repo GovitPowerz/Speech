@@ -8,9 +8,11 @@
 //! (10 periodogram frames); the windowed TwoSweeps forward is exercised but each block
 //! spans a single window.
 //!
-//! Bit-exact goldens vs the harness `TwinProbe` mode-7 transcription land alongside; THIS
-//! file pins the non-vacuity + structural contract (which the harness `LID7_STRUCT`
-//! secondary cross-checks against the REAL compiled Twin):
+//! Bit-exact goldens vs the harness `TwinProbe` mode-7 run land alongside -- unlike the
+//! wav-mode Twin stage, the harness calls the REAL compiled `getSegmentation` directly for
+//! Mode 7 (no reimpl/transcription swap, and no SEG_STRUCT/LID_STRUCT-style secondary probe);
+//! the goldens ARE the real-compiled comparison, not a cross-check against one. THIS file
+//! pins the non-vacuity + structural contract:
 //! - confusion off- AND on-diagonal mass across files (s1/s3 lang 0 hit, s2 lang 1 miss);
 //! - the `>150` targetLID sentinel present every file;
 //! - `_PostProcessMode` 0/1/2 all covered (ppm2 differs from ppm0; ppm1 coincides with

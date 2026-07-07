@@ -1070,6 +1070,84 @@
       }
     }
   },
+  "mode7": {
+    "text": "Task 7 FLAGSHIP: TwinBlstmSpectralLid Mode 7 (phSeq) over twin_mode7{,_ppm1,_ppm2} x s{1,2,3}.phSeq, pinned DIRECTLY against the REAL compiled getSegmentation (no reimpl/transcription swap for this stage, unlike lid5/twin above -- the real-compiled run IS the oracle; there is no SEG_STRUCT/LID_STRUCT-style secondary probe here). The PHASE4B_MODE7 stdout lines are now parsed + validated (previously dead code: MODE7_RE was defined but never used): one `lidWeights=<n>` line (the real LID_bestNNWeight_1.bin net, asserted == 12409) plus one `<variant>_<file> nbclassif=/isCorrect=/lidCumErr=/confSum=` line per case (a missing line aborts generation, per repo standard). lidCumErr/confSum are cross-checked below against the committed mode7_<variant>_<file>_{members,confusion}.bin dumps by tests/test_phase4b_fixtures.py.",
+    "lid_weights": 12409,
+    "lid_weight_provenance": {
+      "committed_bin": "tests/reference_data/phase4b/LID_bestNNWeight_1.bin",
+      "shape": [
+        12409,
+        1
+      ],
+      "element_count": 12409,
+      "source_mat": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Release/bin/LID_bestNNWeight_1_MultiConfigResults.mat",
+      "source_variable": "weights",
+      "legacy_source_available": true,
+      "reverified_byte_identical": true
+    },
+    "measured": {
+      "twin_mode7": {
+        "s1": {
+          "nb_of_classif": 150,
+          "is_correct": 100,
+          "lid_cumulative_error": 7.785306975316978,
+          "confusion_sum": 12.0
+        },
+        "s2": {
+          "nb_of_classif": 213,
+          "is_correct": 100,
+          "lid_cumulative_error": 117.4617590254188,
+          "confusion_sum": 15.0
+        },
+        "s3": {
+          "nb_of_classif": 142,
+          "is_correct": 0,
+          "lid_cumulative_error": 81.0807799495393,
+          "confusion_sum": 12.0
+        }
+      },
+      "twin_mode7_ppm1": {
+        "s1": {
+          "nb_of_classif": 150,
+          "is_correct": 100,
+          "lid_cumulative_error": 7.785306975316978,
+          "confusion_sum": 12.0
+        },
+        "s2": {
+          "nb_of_classif": 213,
+          "is_correct": 100,
+          "lid_cumulative_error": 117.4617590254188,
+          "confusion_sum": 15.0
+        },
+        "s3": {
+          "nb_of_classif": 142,
+          "is_correct": 0,
+          "lid_cumulative_error": 81.0807799495393,
+          "confusion_sum": 12.0
+        }
+      },
+      "twin_mode7_ppm2": {
+        "s1": {
+          "nb_of_classif": 150,
+          "is_correct": 100,
+          "lid_cumulative_error": 7.785306975316978,
+          "confusion_sum": 12.0
+        },
+        "s2": {
+          "nb_of_classif": 146,
+          "is_correct": 100,
+          "lid_cumulative_error": 69.96891137726902,
+          "confusion_sum": 12.0
+        },
+        "s3": {
+          "nb_of_classif": 73,
+          "is_correct": 0,
+          "lid_cumulative_error": 46.30944507863297,
+          "confusion_sum": 9.0
+        }
+      }
+    }
+  },
   "dead_code_not_ported": {
     "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
   }
