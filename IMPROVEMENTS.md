@@ -1676,6 +1676,13 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   recorded honestly rather than papered over. Full detail (diffs, commands, output) in
   `.superpowers/sdd/task-11-phase4a-report.md`.
 
+- **[phase4a] Phase 4b test backlog (from the 4a final review):** (1) a crafted best-cost TIE
+  golden (cost delta >= the mutation's detection gap, closing the `>` vs `>=` gate coverage hole);
+  (2) a 3+-file fold-order-divergence golden exercising a genuinely non-commutative reduction (the
+  current tier-2 fixture's 2-file merge is commutative, masking the fold-order mutation); (3) a
+  reference-loaded, `TDCwindow > 0` pitch-pass golden pinning the pass-1-target-reuse quirk under
+  live targets (current pitch-pass coverage is NN-chain-only, no reference-driven target path).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

@@ -33,7 +33,11 @@ fn get_i32(map: &IndexMap<String, String>, key: &str) -> Result<i32> {
 }
 
 /// `conf.get<double>(name, default)`: missing key -> default.
-fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
+pub(crate) fn get_f64_default(
+    map: &IndexMap<String, String>,
+    key: &str,
+    default: f64,
+) -> Result<f64> {
     match map.get(key) {
         None => Ok(default),
         Some(s) => s
@@ -44,7 +48,11 @@ fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> R
 }
 
 /// `conf.get<int>(name, default)`: missing key -> default.
-fn get_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
+pub(crate) fn get_i32_default(
+    map: &IndexMap<String, String>,
+    key: &str,
+    default: i32,
+) -> Result<i32> {
     match map.get(key) {
         None => Ok(default),
         Some(s) => s
@@ -800,27 +808,29 @@ impl BagOfProcessors {
             // extension (`:553-561`), `path` is the full audio filename (`:570`).
             // Multi-channel fan-out closed in Task 8 against the real compiled
             // `toFile_VRCTS` byte golden (see IMPROVEMENTS.md).
-            let base_last = base_from_last_slash(file_name);
-            let vrcts_name = base_from_last_slash(file_name);
+            // Both `basefilename` (:352-401, the dumpDir-relative write target) and
+            // `name` passed to `toFile_VRCTS` derive from the SAME legacy expression
+            // (`_AudioFilename` basename minus its extension) -- one binding for both.
+            let vrcts_base = base_from_last_slash(file_name);
             let vrcts_path = file_name;
             if scored {
                 if !dump_dir.is_empty() {
-                    let out = format!("{dump_dir}/{base_last}");
+                    let out = format!("{dump_dir}/{vrcts_base}");
                     write_vrcts_multichannel(
                         &seg_per_chan,
-                        &vrcts_name,
+                        &vrcts_base,
                         vrcts_path,
                         Path::new(&out),
                     )?;
                 }
             } else {
                 let out = if !dump_dir.is_empty() {
-                    format!("{dump_dir}/{base_last}")
+                    format!("{dump_dir}/{vrcts_base}")
                 } else {
                     // No dumpDir: strip the extension from the FULL path (`:399`).
                     strip_last_4(file_name)
                 };
-                write_vrcts_multichannel(&seg_per_chan, &vrcts_name, vrcts_path, Path::new(&out))?;
+                write_vrcts_multichannel(&seg_per_chan, &vrcts_base, vrcts_path, Path::new(&out))?;
             }
 
             // legacy: :403 audio.reset() before the next config.

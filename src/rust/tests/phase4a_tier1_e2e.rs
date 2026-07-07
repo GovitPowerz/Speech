@@ -20,9 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use indexmap::IndexMap;
-use ndarray::Array2;
 
-use common::{assert_oracle_eq_f64, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a};
+use common::{assert_matrix, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a, read_mat_var};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus::Corpus;
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -95,43 +94,8 @@ fn mode(kind: ModeKind) -> Mode {
     }
 }
 
-/// Read a variable's matrix back out of a MAT v5 file the engine wrote (the writer
-/// has no reader). Row-major `Array2`.
-fn read_mat_var(bytes: &[u8], name: &str) -> Array2<f64> {
-    mat_var_matrix(bytes, name).unwrap_or_else(|| panic!("variable {name} not in .mat"))
-}
-
-/// Compare two matrices structurally: dims strict, then each element via
-/// `assert_oracle_eq_f64` EXCEPT columns listed in `strict_cols` (id/count columns,
-/// bit-exact) and `masked_cols` (skipped entirely).
-fn assert_matrix(
-    got: &Array2<f64>,
-    want: &Array2<f64>,
-    strict_cols: &[usize],
-    masked_cols: &[usize],
-    label: &str,
-) {
-    assert_eq!(got.dim(), want.dim(), "{label}: shape mismatch");
-    let (rows, cols) = got.dim();
-    for r in 0..rows {
-        for c in 0..cols {
-            if masked_cols.contains(&c) {
-                continue;
-            }
-            let g = got[[r, c]];
-            let w = want[[r, c]];
-            if strict_cols.contains(&c) {
-                assert_eq!(
-                    g.to_bits(),
-                    w.to_bits(),
-                    "{label}[{r},{c}] strict: got {g} want {w}"
-                );
-            } else {
-                assert_oracle_eq_f64(g, w, &format!("{label}[{r},{c}]"));
-            }
-        }
-    }
-}
+// `read_mat_var`/`assert_matrix` are shared via `common` (hoisted from four
+// copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === solo_tdc_matches ========================================================
 // CorpusProcessor::new(tier1_tdc.config with epochs->0, Mode::Solo).run(); read back
@@ -426,66 +390,4 @@ fn listing_parse_vs_fixture() {
     assert_eq!(*corpus.class_count().get(&1).unwrap(), 2, "class 1 count");
     assert_eq!(*corpus.language_count().get("eng").unwrap(), 1, "eng count");
     assert_eq!(*corpus.language_count().get("unk").unwrap(), 2, "unk count");
-}
-
-// ============================================================================
-// Minimal MAT v5 reader (the writer has no reader; spec S6). Uncompressed v5 only:
-// 128-byte header then a sequence of miMATRIX elements. Enough to pull a variable's
-// matrix by name for the assertions above. (Mirrors phase4a_corpus_processor.rs.)
-// ============================================================================
-
-fn u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn i32_le(b: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn f64_le(b: &[u8], off: usize) -> f64 {
-    f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
-}
-
-fn pad8(n: usize) -> usize {
-    n.div_ceil(8) * 8
-}
-
-fn mat_vars(bytes: &[u8]) -> Vec<(String, usize, usize, Vec<f64>)> {
-    let mut out = Vec::new();
-    let mut off = 128;
-    while off + 8 <= bytes.len() {
-        let tag = u32_le(bytes, off);
-        let size = u32_le(bytes, off + 4) as usize;
-        if tag != 14 {
-            break;
-        }
-        let mut p = off + 8;
-        p += 8 + 8; // array flags sub-element
-        let dims_size = u32_le(bytes, p + 4) as usize;
-        let rows = i32_le(bytes, p + 8) as usize;
-        let cols = i32_le(bytes, p + 12) as usize;
-        p += 8 + pad8(dims_size);
-        let name_size = u32_le(bytes, p + 4) as usize;
-        let name = String::from_utf8(bytes[p + 8..p + 8 + name_size].to_vec()).unwrap();
-        p += 8 + pad8(name_size);
-        let data_size = u32_le(bytes, p + 4) as usize;
-        let n = data_size / 8;
-        let mut data = Vec::with_capacity(n);
-        for k in 0..n {
-            data.push(f64_le(bytes, p + 8 + k * 8));
-        }
-        out.push((name, rows, cols, data));
-        off += 8 + size;
-    }
-    out
-}
-
-fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<Array2<f64>> {
-    mat_vars(bytes)
-        .into_iter()
-        .find(|(n, _, _, _)| n == name)
-        .map(|(_, r, c, data)| {
-            // The writer stored column-major; rebuild row-major Array2.
-            Array2::from_shape_fn((r, c), |(i, j)| data[j * r + i])
-        })
 }

@@ -9,12 +9,15 @@
 //! parallel section. N=1 must be byte-identical to a plain sequential loop -- that
 //! is the golden-pinned parity mode (`lanes_n1_equals_sequential`).
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use indexmap::IndexMap;
 
+use common::{mat_var_dims, mat_var_matrix, mat_var_order};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
 
@@ -235,12 +238,12 @@ fn lanes_n1_equals_sequential() {
     let engine_bytes = std::fs::read("MultiConfigResults.mat").unwrap();
     let engine_results = mat_var_matrix(&engine_bytes, "MultiConfigResults").unwrap();
 
-    // The hand-sequential oracle: for each file j in ascending order, run
-    // segmentation_function directly on a fresh bag (n=1 chains state within the one
-    // lane; here each file is independent for TDC, so a fresh bag per file is
-    // equivalent -- TDC has no cross-file NN state). Assemble the same ResultsE row
-    // layout [file+1, conf+1, chan+1, res...] and compare (col 3 = ResultsE col 6
-    // masked).
+    // The hand-sequential oracle (`run_epoch_sequential_oracle`): build ONE bag and
+    // walk every file j in ascending order through segmentation_function on that
+    // SAME bag -- mirroring the engine's n=1 single lane, which likewise clones the
+    // epoch-start bag once and chains state across its files. Assemble the same
+    // ResultsE row layout [file+1, conf+1, chan+1, res...] and compare (col 3 =
+    // ResultsE col 6 masked).
     let seq_results =
         CorpusProcessor::run_epoch_sequential_oracle(vec![cfg], mode(ModeKind::Solo)).unwrap();
 
@@ -445,81 +448,5 @@ fn synthetic_signal_corpus_config(dir: &Path) -> IndexMap<String, String> {
     m
 }
 
-// ============================================================================
-// Minimal MAT v5 reader helpers (the writer has no reader; spec S6). Uncompressed
-// v5 only: 128-byte header then a sequence of miMATRIX elements. Enough to pull a
-// variable's dims / data / name-order for the assertions above.
-// ============================================================================
-
-fn u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn i32_le(b: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn f64_le(b: &[u8], off: usize) -> f64 {
-    f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
-}
-
-fn pad8(n: usize) -> usize {
-    n.div_ceil(8) * 8
-}
-
-/// Walk the miMATRIX elements, returning `(name, rows, cols, col_major_data)` per
-/// variable in file order.
-fn mat_vars(bytes: &[u8]) -> Vec<(String, usize, usize, Vec<f64>)> {
-    let mut out = Vec::new();
-    let mut off = 128;
-    while off + 8 <= bytes.len() {
-        let tag = u32_le(bytes, off);
-        let size = u32_le(bytes, off + 4) as usize;
-        if tag != 14 {
-            break;
-        }
-        let mut p = off + 8;
-        // array flags sub-element (miUINT32, 8 payload): skip tag+size+8.
-        p += 8 + 8;
-        // dims sub-element (miINT32): tag+size then two i32.
-        let dims_size = u32_le(bytes, p + 4) as usize;
-        let rows = i32_le(bytes, p + 8) as usize;
-        let cols = i32_le(bytes, p + 12) as usize;
-        p += 8 + pad8(dims_size);
-        // name sub-element (miINT8, long form): tag+size then the padded body.
-        let name_size = u32_le(bytes, p + 4) as usize;
-        let name = String::from_utf8(bytes[p + 8..p + 8 + name_size].to_vec()).unwrap();
-        p += 8 + pad8(name_size);
-        // data sub-element (miDOUBLE): tag+size then the doubles.
-        let data_size = u32_le(bytes, p + 4) as usize;
-        let n = data_size / 8;
-        let mut data = Vec::with_capacity(n);
-        for k in 0..n {
-            data.push(f64_le(bytes, p + 8 + k * 8));
-        }
-        out.push((name, rows, cols, data));
-        off += 8 + size;
-    }
-    out
-}
-
-fn mat_var_order(bytes: &[u8]) -> Vec<String> {
-    mat_vars(bytes).into_iter().map(|(n, _, _, _)| n).collect()
-}
-
-fn mat_var_dims(bytes: &[u8], name: &str) -> Option<(usize, usize)> {
-    mat_vars(bytes)
-        .into_iter()
-        .find(|(n, _, _, _)| n == name)
-        .map(|(_, r, c, _)| (r, c))
-}
-
-fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<ndarray::Array2<f64>> {
-    mat_vars(bytes)
-        .into_iter()
-        .find(|(n, _, _, _)| n == name)
-        .map(|(_, r, c, data)| {
-            // The writer stored column-major; rebuild row-major Array2.
-            ndarray::Array2::from_shape_fn((r, c), |(i, j)| data[j * r + i])
-        })
-}
+// `mat_var_order`/`mat_var_dims`/`mat_var_matrix` are shared via `common`
+// (hoisted from four copy-pasted phase4a test files; see `tests/common/mod.rs`).

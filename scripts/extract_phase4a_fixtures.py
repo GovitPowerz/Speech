@@ -291,8 +291,8 @@ def main() -> None:
     shutil.copy2(TIER2_GC_FILESLISTING, FIXED_CORPUS / "tier2_gc_fileslisting.csv")
     shutil.copy2(NN_WEIGHTS, FIXED_CORPUS / "NNweights_config1.bin")
 
-    # 4. Run the harness: earlier stages into a throwaway dir, the tier-1 stage into
-    #    the fixed corpus path (argv[10..12]).
+    # 4. Run the harness: earlier stages into a throwaway dir, the tier-1/tier-2
+    #    stages into the fixed corpus path (argv[10..14]).
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         for name in HARNESS_INPUTS:

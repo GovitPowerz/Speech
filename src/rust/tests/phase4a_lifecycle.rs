@@ -7,6 +7,7 @@
 //! truncate) transcribed from `BLSTMNeuralNetwork.cpp:122-150,312-331,385-417`.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use indexmap::IndexMap;
 use ndarray::Array2;
@@ -14,6 +15,33 @@ use ndarray::Array2;
 use speech::features::stats::InputStatistics;
 use speech::io::binary::{read_matrix, write_matrix};
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
+
+/// `save_weights`'s `weights_`/`weightsDerivatives_` prefix glues onto the WHOLE
+/// filename string (`:319-321`), so its production shape is a BARE relative
+/// filename with cwd == the run/output dir -- the `.bin` siblings land next to it
+/// with no path-separator awareness. Exercising that verbatim needs a real chdir
+/// (an absolute tempdir path would materialize `weights_/<abs...>` trees under
+/// whatever the glued prefix resolves to, polluting the cargo CWD). `set_current_dir`
+/// is process-global; serialize against `cargo test`'s parallel threads.
+static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+struct CwdGuard {
+    original: PathBuf,
+}
+
+impl CwdGuard {
+    fn enter(dir: &std::path::Path) -> CwdGuard {
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir).unwrap();
+        CwdGuard { original }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data/phase0")
@@ -113,32 +141,21 @@ fn save_weights_writes_three_artifacts() {
 
     // The legacy glues the `weights_`/`weightsDerivatives_` PREFIX to the WHOLE
     // filename string (`:319-321`), NOT the basename. Its production shape is a bare
-    // basename (the engine runs in the output dir), so the `.bin` siblings land next
-    // to `<filename>`. To exercise that verbatim without a global-CWD race, pass an
-    // absolute path whose LAST path component carries the prefix -- i.e. compute the
-    // sibling paths by prefixing the SAME string `save_weights` receives, so the
-    // test's expectation IS the quirk's output.
-    let dir = std::env::temp_dir().join("speech_saveweights_task3");
-    std::fs::create_dir_all(&dir).unwrap();
-    let filename = dir.join("epoch1.mat");
-    let filename_str = filename.to_str().unwrap().to_string();
-    // Prefix glued to the whole string (matching save_weights), then re-rooted so the
-    // parent is `dir` (which exists) -- the prefix lands on the basename.
-    let weights_str = format!("weights_{filename_str}");
-    let derivs_str = format!("weightsDerivatives_{filename_str}");
-    // Because the prefix is glued before the leading '/', the sibling parent would be
-    // `weights_<abs...>`; create it so the write lands, then read it back. This is the
-    // faithful behavior -- the prefix does NOT respect path separators.
-    let weights_path = PathBuf::from(&weights_str);
-    let derivs_path = PathBuf::from(&derivs_str);
-    std::fs::create_dir_all(weights_path.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(derivs_path.parent().unwrap()).unwrap();
-    let _ = std::fs::remove_file(&filename);
-    let _ = std::fs::remove_file(&weights_path);
-    let _ = std::fs::remove_file(&derivs_path);
+    // relative filename with cwd == the run/output dir, so the `.bin` siblings land
+    // next to `<filename>` in that same dir. Reproduce that shape exactly: chdir into
+    // a tempdir and pass a bare filename, instead of routing an absolute tempdir path
+    // through the quirk (which glues the prefix ahead of the leading '/' and
+    // materializes a `weights_<abs...>` tree under the cargo CWD).
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let _cwd = CwdGuard::enter(dir.path());
 
-    let mat_path = filename.clone();
-    net.save_weights(&filename_str, &derivs, &stats).unwrap();
+    let filename = "epoch1.mat";
+    let weights_path = PathBuf::from(format!("weights_{filename}"));
+    let derivs_path = PathBuf::from(format!("weightsDerivatives_{filename}"));
+    let mat_path = PathBuf::from(filename);
+
+    net.save_weights(filename, &derivs, &stats).unwrap();
 
     // 1) weights_<f>.mat is the flat weight vector as an N x 1 .bin (custom codec).
     let (wr, wc, wdata) = read_matrix(&weights_path).unwrap();
@@ -246,9 +263,8 @@ fn weights_file_too_many_truncates() {
         speech::io::binary::read_weight_vector(&ref_dir().join("NNweights_config1.bin")).unwrap();
     let mut too_many = base.clone();
     too_many.extend_from_slice(&[7.0, 8.0, 9.0]); // 3 extra
-    let dir = std::env::temp_dir().join("speech_wf_task3");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("too_many.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("too_many.bin");
     write_matrix(&path, too_many.len(), 1, &too_many).unwrap();
 
     let (m, mut net) = real_net_with_weights_file(path.to_str().unwrap());
@@ -263,9 +279,8 @@ fn weights_file_too_few_errors() {
     let base =
         speech::io::binary::read_weight_vector(&ref_dir().join("NNweights_config1.bin")).unwrap();
     let too_few = base[..base.len() - 1].to_vec();
-    let dir = std::env::temp_dir().join("speech_wf_task3");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("too_few.bin");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("too_few.bin");
     write_matrix(&path, too_few.len(), 1, &too_few).unwrap();
 
     let (m, mut net) = real_net_with_weights_file(path.to_str().unwrap());

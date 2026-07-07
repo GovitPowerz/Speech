@@ -35,7 +35,7 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
-use crate::engine::bag_of_processors::BagOfProcessors;
+use crate::engine::bag_of_processors::{BagOfProcessors, get_f64_default, get_i32_default};
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
 use crate::io::matfile::MatWriter;
@@ -114,17 +114,13 @@ impl CorpusProcessor {
             std::fs::write(&output_file_name, " ")?;
         }
 
-        // legacy: :60-62 epochs clamp (< 0 -> 0).
-        let training_epochs = configs[0]
-            .get("Neural_Networks_BackPropagation_Epochs")
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(0)
-            .max(0) as usize;
-        // legacy: :63 epsilon default 0.0.
-        let epsilon = configs[0]
-            .get("Neural_Networks_Gradient_Check_Epsilon")
-            .and_then(|s| s.trim().parse::<f64>().ok())
-            .unwrap_or(0.0);
+        // legacy: :60-62 epochs clamp (< 0 -> 0). get<T>(name, default) exits(1) on
+        // a present-but-unparseable value -- ported as Err, not a silent fallback.
+        let training_epochs =
+            get_i32_default(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?.max(0)
+                as usize;
+        // legacy: :63 epsilon default 0.0, same present-but-malformed -> Err semantics.
+        let epsilon = get_f64_default(&configs[0], "Neural_Networks_Gradient_Check_Epsilon", 0.0)?;
 
         // legacy: :64-66 _BestCost[ii] = 1e20 seeds.
         let mut best_cost = BTreeMap::new();
@@ -270,9 +266,12 @@ impl CorpusProcessor {
     /// `mode` param -- `:177` reads `_Mode`, NOT the passed `mode`; reproduced: the
     /// per-file `segmentation_function` sees `self.mode`, and the passed `mode` only
     /// distinguishes the isLog/save-gating epoch role). The `backPropWeightsDerivatives`
-    /// map: a conf `ii` present in the map (even with an empty Vec) requests the
-    /// per-file derivative harvest for that conf (`:184`); an ABSENT conf is never
-    /// harvested. `run_solo`/`train`'s epoch-0 pass an empty map -> no harvest.
+    /// map: legacy `:183-199` harvests EVERY conf on EVERY processed file
+    /// unconditionally (`ii < getNbOfConf()`, no gate on the map's initial
+    /// contents) -- a conf absent from the caller's map is CREATED by the harvest,
+    /// not skipped. `run_solo`/`train`'s epoch-0 fresh empty map still ends up
+    /// populated for all confs; see the static-lane section below for the full
+    /// create-vs-`+=` fold detail.
     fn run_epoch(
         &mut self,
         epoch: usize,
@@ -388,8 +387,10 @@ impl CorpusProcessor {
             self.results.insert(j, tmp);
             // legacy: :183-199 per-conf derivative + input-stats accumulation.
             for ii in 0..nb_of_conf {
-                // Only confs the caller requested were collected AND are folded
-                // (:184 count(ii) != 0 -- an absent conf is never touched here).
+                // `derivs_j`/`stats_j` carry ALL confs for this file (the lane
+                // harvest above is unconditional per :183-199), so this `if let`
+                // matches every `ii` when the file produced results -- it is not
+                // gating on caller-requested confs.
                 if let Some(tmp_derivs) = derivs_j.get(&ii) {
                     // legacy: :184-191 first file CREATES by move, later files += .
                     match derivs.get_mut(&ii) {
@@ -528,7 +529,13 @@ impl CorpusProcessor {
                 // legacy: CorpusProcessor.cpp:357 - mmap[0][0] operator[] default-constructs
                 // an empty vector if conf 0 / chan 0 is absent, rather than reading whatever
                 // conf/chan IS present. Match that exactly, including the degenerate width-0
-                // case, instead of taking the first present entry.
+                // case, instead of taking the first present entry. Note: the real legacy
+                // `operator[]` would also INSERT a phantom (0,0) entry into `mmap` as a side
+                // effect, which a subsequent BOOST_FOREACH would then iterate as a spurious
+                // `[file+1, 1, 1]` row -- but that only matters when conf 0/chan 0 is absent
+                // AND `mmap` is iterated again afterward, which is unreachable here (`mmap`
+                // is read-only past this point); the port's `.get()` does not reproduce that
+                // phantom insert.
                 res_width = mmap
                     .get(&0)
                     .and_then(|chan_map| chan_map.get(&0))
@@ -867,4 +874,52 @@ fn write_row_major(w: &mut MatWriter, name: &str, m: &Array2<f64>) -> Result<()>
     }
     w.write_matrix(name, rows, cols, &col_major)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal algo-1 (TDC) config with a single-file listing, so
+    /// `Corpus::from_config` + `BagOfProcessors::from_configs` both succeed and the
+    /// constructor reaches the epochs/epsilon parse. The `Neural_Networks_*` keys
+    /// are overridden per test.
+    fn minimal_config(dir: &std::path::Path) -> IndexMap<String, String> {
+        let mapping = dir.join("mapping.csv");
+        std::fs::write(&mapping, "unk;unk;0\n").unwrap();
+        let listing = dir.join("listing.csv");
+        std::fs::write(&listing, "dummy.wav;;unk;unk;1.0;1\n").unwrap();
+
+        let mut m = IndexMap::new();
+        m.insert("Algo_choice".to_string(), "1".to_string());
+        m.insert("numOuterThreads".to_string(), "1".to_string());
+        m.insert(
+            "language2classmapping".to_string(),
+            mapping.to_str().unwrap().to_string(),
+        );
+        m.insert(
+            "fileslisting".to_string(),
+            listing.to_str().unwrap().to_string(),
+        );
+        m
+    }
+
+    /// legacy `get<T>(name, default)` exits(1) on a PRESENT but unparseable value
+    /// (not a silent fallback to the default): a malformed
+    /// `Neural_Networks_BackPropagation_Epochs` must surface as `Err`, matching
+    /// `bag_of_processors::get_i32_default`'s erroring semantics.
+    #[test]
+    fn malformed_epochs_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = minimal_config(dir.path());
+        cfg.insert(
+            "Neural_Networks_BackPropagation_Epochs".to_string(),
+            "not_a_number".to_string(),
+        );
+        let mode = Mode {
+            kind: ModeKind::Solo,
+            verbose: false,
+        };
+        assert!(CorpusProcessor::new(vec![cfg], mode).is_err());
+    }
 }

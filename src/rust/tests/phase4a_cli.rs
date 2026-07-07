@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-use ndarray::Array2;
-
-use common::{assert_oracle_eq_f64, load_bin_phase4a};
+use common::{assert_matrix, load_bin_phase4a, mat_var_matrix};
 use speech::cli::{ModeKind, parse_cli};
 
 /// `set_current_dir` is process-global; serialize against other tests in this
@@ -178,84 +176,8 @@ fn seed_corpus(dir: &Path) {
     std::fs::create_dir_all(dir.join("vrcts_solo")).unwrap();
 }
 
-fn u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn i32_le(b: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn f64_le(b: &[u8], off: usize) -> f64 {
-    f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
-}
-
-fn pad8(n: usize) -> usize {
-    n.div_ceil(8) * 8
-}
-
-/// Minimal MAT v5 reader (mirrors `phase4a_tier1_e2e.rs`; the writer has no reader).
-fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<Array2<f64>> {
-    let mut off = 128;
-    while off + 8 <= bytes.len() {
-        let tag = u32_le(bytes, off);
-        let size = u32_le(bytes, off + 4) as usize;
-        if tag != 14 {
-            break;
-        }
-        let mut p = off + 8;
-        p += 8 + 8;
-        let dims_size = u32_le(bytes, p + 4) as usize;
-        let rows = i32_le(bytes, p + 8) as usize;
-        let cols = i32_le(bytes, p + 12) as usize;
-        p += 8 + pad8(dims_size);
-        let name_size = u32_le(bytes, p + 4) as usize;
-        let this_name = String::from_utf8(bytes[p + 8..p + 8 + name_size].to_vec()).unwrap();
-        p += 8 + pad8(name_size);
-        let data_size = u32_le(bytes, p + 4) as usize;
-        let n = data_size / 8;
-        if this_name == name {
-            let mut data = Vec::with_capacity(n);
-            for k in 0..n {
-                data.push(f64_le(bytes, p + 8 + k * 8));
-            }
-            return Some(Array2::from_shape_fn((rows, cols), |(i, j)| {
-                data[j * rows + i]
-            }));
-        }
-        off += 8 + size;
-    }
-    None
-}
-
-fn assert_matrix(
-    got: &Array2<f64>,
-    want: &Array2<f64>,
-    strict_cols: &[usize],
-    masked_cols: &[usize],
-    label: &str,
-) {
-    assert_eq!(got.dim(), want.dim(), "{label}: shape mismatch");
-    let (rows, cols) = got.dim();
-    for r in 0..rows {
-        for c in 0..cols {
-            if masked_cols.contains(&c) {
-                continue;
-            }
-            let g = got[[r, c]];
-            let w = want[[r, c]];
-            if strict_cols.contains(&c) {
-                assert_eq!(
-                    g.to_bits(),
-                    w.to_bits(),
-                    "{label}[{r},{c}] strict: got {g} want {w}"
-                );
-            } else {
-                assert_oracle_eq_f64(g, w, &format!("{label}[{r},{c}]"));
-            }
-        }
-    }
-}
+// `mat_var_matrix`/`assert_matrix` are shared via `common` (hoisted from four
+// copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 #[test]
 fn binary_end_to_end() {

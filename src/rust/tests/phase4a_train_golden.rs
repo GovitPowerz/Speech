@@ -34,7 +34,10 @@ use std::sync::Mutex;
 use indexmap::IndexMap;
 use ndarray::Array2;
 
-use common::{assert_oracle_eq_f64, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a};
+use common::{
+    assert_matrix, assert_oracle_eq_f64, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a,
+    mat_var_matrix,
+};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
 
@@ -116,88 +119,8 @@ fn manifest_non_vacuity() -> (i64, i64, i64) {
     )
 }
 
-// ==== minimal MAT v5 reader (uncompressed, the engine's own writer output) =====
-
-fn u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn i32_le(b: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn f64_le(b: &[u8], off: usize) -> f64 {
-    f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
-}
-
-fn pad8(n: usize) -> usize {
-    n.div_ceil(8) * 8
-}
-
-fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<Array2<f64>> {
-    let mut off = 128;
-    while off + 8 <= bytes.len() {
-        let tag = u32_le(bytes, off);
-        let size = u32_le(bytes, off + 4) as usize;
-        if tag != 14 {
-            break;
-        }
-        let mut p = off + 8;
-        p += 8 + 8; // array flags
-        let dims_size = u32_le(bytes, p + 4) as usize;
-        let rows = i32_le(bytes, p + 8) as usize;
-        let cols = i32_le(bytes, p + 12) as usize;
-        p += 8 + pad8(dims_size);
-        let name_size = u32_le(bytes, p + 4) as usize;
-        let var_name = String::from_utf8(bytes[p + 8..p + 8 + name_size].to_vec()).unwrap();
-        p += 8 + pad8(name_size);
-        if var_name == name {
-            let data_size = u32_le(bytes, p + 4) as usize;
-            let n = data_size / 8;
-            let mut data = Vec::with_capacity(n);
-            for k in 0..n {
-                data.push(f64_le(bytes, p + 8 + k * 8));
-            }
-            // column-major -> row-major Array2.
-            return Some(Array2::from_shape_fn((rows, cols), |(i, j)| {
-                data[j * rows + i]
-            }));
-        }
-        off += 8 + size;
-    }
-    None
-}
-
-/// Element compare: `strict_cols` bit-exact (id/count columns), `masked_cols`
-/// skipped (timing), the rest canary-gated.
-fn assert_matrix(
-    got: &Array2<f64>,
-    want: &Array2<f64>,
-    strict_cols: &[usize],
-    masked_cols: &[usize],
-    label: &str,
-) {
-    assert_eq!(got.dim(), want.dim(), "{label}: shape mismatch");
-    let (rows, cols) = got.dim();
-    for r in 0..rows {
-        for c in 0..cols {
-            if masked_cols.contains(&c) {
-                continue;
-            }
-            let g = got[[r, c]];
-            let w = want[[r, c]];
-            if strict_cols.contains(&c) {
-                assert_eq!(
-                    g.to_bits(),
-                    w.to_bits(),
-                    "{label}[{r},{c}] strict: got {g} want {w}"
-                );
-            } else {
-                assert_oracle_eq_f64(g, w, &format!("{label}[{r},{c}]"));
-            }
-        }
-    }
-}
+// `mat_var_matrix`/`assert_matrix` are shared via `common` (hoisted from four
+// copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === tier2_train_epoch_weights_golden ========================================
 // The whole tier-2 train replay: run, then compare every observable against the
