@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AudioDoc name="f2" path="corpus/f2.wav">
+<ProcList>
+<Proc name="vrcts_part" version="1.3"/>
+</ProcList>
+<ChannelList>
+<Channel num="2" sigdur="2.00" spdur="2.00"/>
+</ChannelList>
+<SpeakerList>
+<Speaker ch="2" dur="2.00" gender="1" spkid="1"/>
+</SpeakerList>
+<SegmentList>
+<SpeechSegment ch="2" sconf="1.00" stime="0.0000" etime="2.0000" spkid="1"/>
+</SegmentList>
+</AudioDoc>

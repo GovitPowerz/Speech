@@ -1,0 +1,173 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "libmatio_version": "libmatio 1.5.30_1",
+  "corpus_driver_linkage": {
+    "text": "Phase 4a Task 8: the REAL CorpusProcessor stack linked into the oracle harness (CorpusProcessor.cpp, BagOfProcessors.cpp, Corpus.cpp; CorpusItem.cpp already linked for AudioStruct). BagOfProcessors's member vectors force VRCTSpart.cpp / BLSTMSpectralLID.cpp / TwinBLSTMSpectralLID.cpp (constructed/destructed even for algo 1/2). TwinBLSTMSpectralLID drags ConvolutionalNeuralNetwork.cpp / ConvolutionalLayer.cpp (broken-as-committed at runtime, but they link and are never constructed here). CorpusProcessor.cpp's free CalcThread() (the commented-out threading path) odr-uses FileDispatcher.cpp. The omp.h no-op shim keeps the #pragma omp parallel-for sequential (NO -fopenmp) == the N=1 golden parity mode. -lmatio was already linked (Phase 2b Helpers.hpp/AudioStruct).",
+    "translation_units": [
+      "CorpusProcessor.cpp",
+      "BagOfProcessors.cpp",
+      "Corpus.cpp",
+      "VRCTSpart.cpp",
+      "BLSTMSpectralLID.cpp",
+      "TwinBLSTMSpectralLID.cpp",
+      "FileDispatcher.cpp",
+      "ConvolutionalNeuralNetwork.cpp",
+      "ConvolutionalLayer.cpp"
+    ]
+  },
+  "corpus": {
+    "text": "Committed 3-file 2-channel corpus (3 copies of the phase1 excerpt_2ch_8k.wav) with crafted 2-channel STMs (one SPEECH span per channel inside 2.0s). fileslisting.csv exercises the weight column and the defaults: row 1 full (eng;us;0.5;2), row 2 present-weight with empty lang/dial siblings (;;0.75), row 3 defaults-only (wav;stm). Every row is referenced (STM) so the -m scored runs never hit the mandatory-reference bail. language2classmapping.csv maps 2 languages (eng;us->0, unk;unk->1) to 2 classes.",
+    "nb_files": 3,
+    "class_index": {
+      "f1": 0,
+      "f2": 1,
+      "f3": 1
+    },
+    "weights": {
+      "f1": 0.5,
+      "f2": 0.75,
+      "f3": 1.0
+    },
+    "file_ids": {
+      "f1": 2,
+      "f2": 1,
+      "f3": 1
+    },
+    "language_count": {
+      "eng": 1,
+      "unk": 2
+    },
+    "class_count": {
+      "0": 1,
+      "1": 2
+    }
+  },
+  "runs": {
+    "solo_tdc": {
+      "mode": "-s",
+      "algo": 1,
+      "config": "tier1_tdc.config",
+      "epochs": 0,
+      "text": "solo (-s) is UNSCORED (scored branch is m/M/t/T only): runSolo -> CostMem 1 x nbConf. The MultiConfigResults rows are unscored (error cols 0/1/2 = 0), 3 files x 2 channels = 6 rows. VRCTS is always written (unscored branch) -> the multi-channel byte oracle.",
+      "shapes": {
+        "MultiConfigResults": [
+          6,
+          21
+        ],
+        "CostMem": [
+          1,
+          1
+        ],
+        "BadClassifMem": [
+          1,
+          1
+        ],
+        "CostLIDMem": [
+          1,
+          1
+        ],
+        "BadClassifLIDMem": [
+          1,
+          1
+        ]
+      }
+    },
+    "train_ltsv": {
+      "mode": "-m",
+      "algo": 2,
+      "config": "tier1_ltsv_powermel.config",
+      "epochs": 2,
+      "text": "train (-m) with epochs 2: train() runs epoch 0 (solo) then 2 inner epochs then a final eval at epoch 3, each saveResults writing topRows(epoch+1); the last writes topRows(4) so CostMem is 4 x 1. LTSV/TDC have NO weight updates, so CostMem rows are EXPECTED IDENTICAL across epochs (tier-1 pins the loop/aggregation plumbing; weight evolution is tier-2).",
+      "shapes": {
+        "MultiConfigResults": [
+          6,
+          21
+        ],
+        "CostMem": [
+          4,
+          1
+        ],
+        "BadClassifMem": [
+          4,
+          1
+        ],
+        "CostLIDMem": [
+          4,
+          1
+        ],
+        "BadClassifLIDMem": [
+          4,
+          1
+        ]
+      }
+    },
+    "multiconfig": {
+      "mode": "-m",
+      "algo": [
+        1,
+        2
+      ],
+      "config": [
+        "tier1_tdc.config",
+        "tier1_ltsv_powermel.config"
+      ],
+      "epochs": 0,
+      "text": "multiconfig (-m) with both configs, epochs 0 (overridden on configs[0]): a single scored pass. MultiConfigResults interleaves (file, conf, chan): 3 files x 2 confs x 2 channels = 12 rows, ordered file-ascending then conf-ascending then chan-ascending (transformResults BTreeMap iteration). CostMem is 1 x 2.",
+      "shapes": {
+        "MultiConfigResults": [
+          12,
+          21
+        ],
+        "CostMem": [
+          1,
+          2
+        ],
+        "BadClassifMem": [
+          1,
+          2
+        ],
+        "CostLIDMem": [
+          1,
+          2
+        ],
+        "BadClassifLIDMem": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  "mat_conversion": {
+    "text": "Each harness .mat (saveResults writes 5 vars: MultiConfigResults, CostMem, BadClassifMem, CostLIDMem, BadClassifLIDMem via Matrix2MatFile, MAT_COMPRESSION_ZLIB) is converted to per-variable .bin (io::binary: i64 LE rows, i64 LE cols, f64 LE column-major) via scipy.io.loadmat. The wall-clock timing column of MultiConfigResults (col 6 = the 4th data column after [file, conf, chan] = time_per_hour) is ZEROED so the dump is byte-reproducible; the Rust golden masks the same column. The RAW .mat outputs are committed too so the pytest guard re-reads them with scipy and checks the conversion (with the same col-6 mask).",
+    "vars": [
+      "MultiConfigResults",
+      "CostMem",
+      "BadClassifMem",
+      "CostLIDMem",
+      "BadClassifLIDMem"
+    ],
+    "masked_cols": [
+      6
+    ]
+  },
+  "vrcts": {
+    "text": "The carried-over multi-channel VRCTS byte oracle (IMPROVEMENTS 'Single-channel VRCTS write on the corpus path'). The REAL compiled Segmentation::toFile_VRCTS fans out one <basefilename>_chan_<n>.xml per channel for the 2-channel excerpt; name= is the audio basename minus extension, path= is the relative audio path (corpus/fN.wav), both from a FIXED corpus workdir so the attrs are byte-reproducible. The Rust write_vrcts_multichannel output must byte-match these.",
+    "dumps": [
+      "vrcts_solo/f1_chan_1.xml",
+      "vrcts_solo/f1_chan_2.xml",
+      "vrcts_solo/f2_chan_1.xml",
+      "vrcts_solo/f2_chan_2.xml",
+      "vrcts_solo/f3_chan_1.xml",
+      "vrcts_solo/f3_chan_2.xml"
+    ],
+    "committed_names": [
+      "f1_chan_1.xml",
+      "f1_chan_2.xml",
+      "f2_chan_1.xml",
+      "f2_chan_2.xml",
+      "f3_chan_1.xml",
+      "f3_chan_2.xml"
+    ]
+  }
+}
