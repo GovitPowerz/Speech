@@ -103,11 +103,11 @@ fn pitch_map() -> IndexMap<String, String> {
 /// preemph itself (config `BLSTM_preemph_ratio -0.97 < 0` -> SKIPPED, `noise_seed -3`
 /// -> no noise). So the excerpt reaches the periodogram raw, matching the E2E gate.
 fn excerpt_audio() -> Audio {
-    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0).expect("decode excerpt")
+    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0).expect("decode excerpt")
 }
 
 fn excerpt_audio_zero_offset() -> Audio {
-    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.0, 2.0).expect("decode excerpt")
+    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.0, 2.0, 0).expect("decode excerpt")
 }
 
 fn fresh_segs(audio: &Audio) -> Vec<Segmentation> {

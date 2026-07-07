@@ -61,7 +61,7 @@ fn corpus_audio(name: &str, lang_index: i32) -> Audio {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/reference_data/phase4b/corpus_lid")
         .join(format!("{name}.wav"));
-    let mut a = read_audio(&p, 0.35, 2.0).expect("decode corpus wav");
+    let mut a = read_audio(&p, 0.35, 2.0, 0).expect("decode corpus wav");
     a.lang_index = lang_index;
     a
 }

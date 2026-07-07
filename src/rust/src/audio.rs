@@ -45,6 +45,21 @@ pub struct Audio {
     /// placement deviation as `lang_index`. Defaults to 1.0, matching the
     /// legacy default ctor's `_Weight(1.0)` (AudioStruct.cpp:33).
     pub weight: f64,
+    /// `AudioStruct::_ExternalFeatures` (AudioStruct.h:27): one one-hot
+    /// `(sentence_len x 38)` matrix per phSeq line (`file_type == 1`,
+    /// AudioStruct.cpp:163-172). Empty for the wav path (`file_type == 0`
+    /// never touches this member; `_ExternalFeatures.clear()` is the only
+    /// write in that branch's absence, so it stays default-constructed empty).
+    pub external_features: Vec<Array2<f64>>,
+    /// `AudioStruct::_Periodogram` (AudioStruct.h:24) as pre-filled by the
+    /// phSeq ctor (`AudioStruct.cpp:177-182`) -- NOT the per-segmenter
+    /// computed periodogram (`compute_segment_periodogram_estimates`, which
+    /// returns its own `Array2` rather than writing back to `Audio`). `None`
+    /// for the wav path. How a future LID/Twin driver (Phase 4b Task 6/7)
+    /// should consume this pre-filled periodogram for `file_type == 1` corpora
+    /// is UNRESOLVED here by design (see Task 5 report) -- this field only
+    /// exposes the ctor-populated data.
+    pub periodogram: Option<Array2<f64>>,
 }
 
 impl Audio {
@@ -437,9 +452,171 @@ pub fn normalize_channels(data: &mut Array2<f64>) {
     }
 }
 
-/// Decode a wav file, apply the legacy offset/duration truncation, then normalize.
-/// `AudioStruct.cpp:36-128` (file_type == 0 branch).
-pub fn read_audio(path: &Path, offset_sec: f64, max_duration_sec: f64) -> anyhow::Result<Audio> {
+/// legacy: `static std::map<char,int> letterMapping` (AudioStruct.h:18), a 38-entry
+/// char -> column bijection used by the phSeq readers (`file_type` 1 and 3, only 1
+/// ported here). A `std::map` is queried only via `.at()` in the legacy (never
+/// iterated), so insertion/traversal order carries no semantics here -- this is a
+/// plain lookup, not an ordered table. Out-of-domain characters: the legacy `.at()`
+/// throws `std::out_of_range`, UNCAUGHT -> `std::terminate` (an abort, not a clean
+/// `exit(1)`); this port turns that crash into a recoverable `bail!` instead of
+/// reproducing an abort (a deliberate deviation, not a reproduced quirk -- see
+/// IMPROVEMENTS.md).
+fn letter_index(c: char) -> Option<usize> {
+    Some(match c {
+        ' ' => 0,
+        '&' => 1,
+        'A' => 2,
+        '@' => 3,
+        'E' => 4,
+        'I' => 5,
+        'H' => 6,
+        'O' => 7,
+        'N' => 8,
+        'S' => 9,
+        'Z' => 10,
+        'a' => 11,
+        'c' => 12,
+        'b' => 13,
+        'e' => 14,
+        'd' => 15,
+        'g' => 16,
+        'f' => 17,
+        'i' => 18,
+        'h' => 19,
+        'k' => 20,
+        'j' => 21,
+        'm' => 22,
+        'l' => 23,
+        'o' => 24,
+        'n' => 25,
+        'p' => 26,
+        's' => 27,
+        'r' => 28,
+        'u' => 29,
+        't' => 30,
+        'w' => 31,
+        'v' => 32,
+        'y' => 33,
+        'x' => 34,
+        'z' => 35,
+        '.' => 36,
+        '-' => 37,
+        _ => return None,
+    })
+}
+
+/// `letterMapping.size()` (AudioStruct.h:18): the one-hot width / `_Periodogram`
+/// column count for the phSeq readers.
+const LETTER_MAPPING_SIZE: usize = 38;
+
+/// legacy: `AudioStruct.cpp:173` `_FramesCount = numberOfPhonemes*0.01*_Framerate;`.
+/// Isolated into its own function so the LEFT-ASSOCIATIVE evaluation order
+/// (`(numberOfPhonemes*0.01)*framerate`, matching C++'s left-to-right `*`
+/// grouping) is directly unit-testable: it diverges from the naive
+/// `numberOfPhonemes*(0.01*framerate)` regrouping by 1 truncated frame at
+/// `number_of_phonemes = 803` (`framerate = 8000`) -- see `frames_count_arithmetic`
+/// (IMPROVEMENTS.md). The intermediate promotions (`int -> double`, `long ->
+/// double`) and the final double -> `long long` truncation-toward-zero on
+/// assignment are both reproduced (`as f64` / `as i64`).
+fn phseq_frames_count(number_of_phonemes: i64, framerate: i64) -> i64 {
+    ((number_of_phonemes as f64 * 0.01) * framerate as f64) as i64
+}
+
+/// `AudioStruct` ctor, `file_type == 1` branch (`AudioStruct.cpp:138-182`): phoneme
+/// sequence text reader. `_ChannelsCount = 1`, `_Framerate = 8000` (hardcoded, NOT
+/// config-derived -- `:143-144`); `audio_offset`/`audio_max_duration` are stored on
+/// the legacy `AudioStruct` (`_OffsetBegin`/`_DurationMax`) but never READ again in
+/// this branch (no truncation of the zero-filled data), so this port's `Audio` has
+/// no fields for them either -- both `read_audio` params are simply unused on this
+/// path.
+///
+/// Each line of the file is a "sentence": a one-hot `(len x 38)` matrix keyed by
+/// [`letter_index`]. `number_of_phonemes` accumulates `len+10` per sentence (10
+/// initial, `:164`); `_FramesCount` per [`phseq_frames_count`] (`:173`).
+/// `_Periodogram` is `(number_of_phonemes x 38)` zeroed (`:177`) then block-filled
+/// per sentence starting at `row_begin = 5` (`:178`), stepping `len+10` rows after
+/// each write (`:180-181`) -- a fixed 5-row lead margin plus a 10-row gap between
+/// sentences. By construction `number_of_phonemes = 10 + sum(len_i+10)` while the
+/// FINAL `row_begin` (after the loop) is `5 + sum(len_i+10)`, so
+/// `number_of_phonemes - final_row_begin == 5` identically: a fixed 5-row trailing
+/// margin survives regardless of sentence count/lengths, so the block-fill NEVER
+/// overflows the allocation (see IMPROVEMENTS.md). `_DataRaw`/`_Data` are
+/// `(1 x _FramesCount)` zeroed (`:174-175`, no real audio -- phSeq carries no
+/// waveform).
+fn read_phseq(path: &Path) -> anyhow::Result<Audio> {
+    // legacy: :149-152 `ifstream` bool-conversion failure -> exit(1).
+    let text = std::fs::read_to_string(path).with_context(|| {
+        format!(
+            "No .phSeq file given or wrong path for the file \"{}\".",
+            path.display()
+        )
+    })?;
+    // legacy: :157-161 getline loop, kept verbatim (no trimming beyond the newline
+    // itself). Rust's `str::lines` also strips a trailing '\r' (C++ `getline` does
+    // not) -- irrelevant to this port's Unix-line-ending-only fixtures.
+    let lines: Vec<&str> = text.lines().collect();
+
+    let mut external_features: Vec<Array2<f64>> = Vec::with_capacity(lines.len());
+    let mut number_of_phonemes: i64 = 10; // legacy :164.
+    for (line_idx, sentence) in lines.iter().enumerate() {
+        let len = sentence.chars().count();
+        let mut feat = Array2::<f64>::zeros((len, LETTER_MAPPING_SIZE));
+        for (pos, ch) in sentence.chars().enumerate() {
+            let col = letter_index(ch).with_context(|| {
+                format!("phSeq char {ch:?} at line {line_idx} pos {pos} not in letterMapping")
+            })?;
+            feat[[pos, col]] = 1.0; // legacy :168.
+        }
+        number_of_phonemes += len as i64 + 10; // legacy :170.
+        external_features.push(feat);
+    }
+
+    // number_of_phonemes >= 10 always (never negative), so the truncated
+    // frame count is always non-negative.
+    let frames_count = phseq_frames_count(number_of_phonemes, 8000) as usize;
+    let data_raw = Array2::<f64>::zeros((1, frames_count));
+    let data = Array2::<f64>::zeros((1, frames_count));
+
+    let mut periodogram = Array2::<f64>::zeros((number_of_phonemes as usize, LETTER_MAPPING_SIZE));
+    let mut row_begin: usize = 5; // legacy :178.
+    for feat in &external_features {
+        let rows = feat.nrows();
+        periodogram
+            .slice_mut(ndarray::s![row_begin..row_begin + rows, ..])
+            .assign(feat);
+        row_begin += rows + 10; // legacy :181.
+    }
+
+    Ok(Audio {
+        sample_rate: 8000,
+        data,
+        data_raw,
+        lang_index: -1,
+        weight: 1.0,
+        external_features,
+        periodogram: Some(periodogram),
+    })
+}
+
+/// `AudioStruct` ctor dispatch (`AudioStruct.cpp:36-412`). `file_type == 0`: decode a
+/// wav file, apply the legacy offset/duration truncation, then normalize
+/// (`:36-128`). `file_type == 1`: phSeq text reader (`:138-182`, see
+/// [`read_phseq`]). Any other value is unported (`file_type` 2/3/4 -- cep/phSeq-N/
+/// mat readers, AudioStruct.cpp:183-412).
+pub fn read_audio(
+    path: &Path,
+    offset_sec: f64,
+    max_duration_sec: f64,
+    file_type: i32,
+) -> anyhow::Result<Audio> {
+    if file_type == 1 {
+        return read_phseq(path);
+    }
+    if file_type != 0 {
+        bail!(
+            "read_audio: file_type {file_type} not supported (Phase 4b: 0=wav, 1=phSeq ported; 2/3/4 unported)"
+        );
+    }
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
@@ -529,6 +706,8 @@ pub fn read_audio(path: &Path, offset_sec: f64, max_duration_sec: f64) -> anyhow
         data_raw,
         lang_index: -1,
         weight: 1.0,
+        external_features: Vec::new(),
+        periodogram: None,
     })
 }
 
@@ -577,6 +756,8 @@ fn test_audio(samples: Vec<f64>) -> Audio {
         data_raw: data,
         lang_index: -1,
         weight: 1.0,
+        external_features: Vec::new(),
+        periodogram: None,
     }
 }
 
@@ -591,6 +772,8 @@ fn test_audio_2ch(samples: Vec<f64>) -> Audio {
         data_raw: data,
         lang_index: -1,
         weight: 1.0,
+        external_features: Vec::new(),
+        periodogram: None,
     }
 }
 

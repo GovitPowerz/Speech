@@ -107,7 +107,7 @@ fn scored_mode_result_columns() {
 
     // Independent oracle: re-run the driver + compute_errors on channel 0.
     let stm_text = std::fs::read_to_string(&stm).unwrap();
-    let mut audio = read_audio(&wav, 0.0, 2.0).unwrap();
+    let mut audio = read_audio(&wav, 0.0, 2.0, 0).unwrap();
     let audio_duration = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let n_chan = audio.data.nrows();
     let mut hyp: Vec<Segmentation> = (0..n_chan)
@@ -249,7 +249,7 @@ fn speech_duration_walk() {
     let results = bag.segmentation_function(&it, multi_mode()).unwrap();
 
     // Re-run the driver to get the same hyp segments and walk them by hand.
-    let mut audio = read_audio(&wav, 0.0, 2.0).unwrap();
+    let mut audio = read_audio(&wav, 0.0, 2.0, 0).unwrap();
     let audio_duration = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let n_chan = audio.data.nrows();
     let mut hyp: Vec<Segmentation> = (0..n_chan)

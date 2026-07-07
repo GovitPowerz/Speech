@@ -1845,6 +1845,60 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   port-only safety over legacy UB. *Fix candidate:* N/A (the UB is unreachable). *Pinned by:*
   `lid_members_match_dump`, `sentinel_gt150_present_every_file` (`tests/phase4b_lid5_golden.rs`).
 
+- **[phase4b] The phSeq reader's phoneme count carries a fixed `10 + sum(len+10)` padding
+  arithmetic -- 10 phantom head phonemes plus 10 phantom gap phonemes appended after EVERY
+  sentence (including the last)** (`audio.rs::read_phseq`, from `AudioStruct.cpp:164,170`):
+  `numberOfPhonemes` starts at 10 (`:164`, before any line is read) and each sentence adds
+  `length+10` (`:170`), so a file's "phoneme count" is inflated by `10*(nb_lines+1)` silence-gap
+  slots that never correspond to any input character. Combined with the `rowBegin = 5` block-fill
+  start (`:178`, see the next entry) this yields a 5-row lead margin, 10-row inter-sentence gaps,
+  and -- by the identity `numberOfPhonemes - final_rowBegin == 5` (final `rowBegin` is
+  `5 + sum(len+10)`) -- an exactly 5-row trailing margin, so the fill never overflows the
+  `numberOfPhonemes x 38` allocation for ANY sentence lengths. The asymmetric split (5 lead vs 10
+  between) is presumably a context-padding choice for the downstream BLSTM, but nothing documents
+  it. *Why deferred:* provenance; the goldens encode these exact offsets. *Fix candidate:* none --
+  document once a real phSeq training run validates the intent. *Pinned by:* `phseq_onehot_golden`
+  (`tests/phase4b_phseq.rs`, bit-exact vs the REAL compiled `AudioStruct` `file_type==1` ctor's
+  `_Periodogram`/`_ExternalFeatures` dumps) and `phseq_metadata_matches_manifest` (the
+  `numberOfPhonemes`/frames-count scalars). Mutation: changing the initial 10, the per-sentence
+  `+10`, or the `rowBegin = 5` seed each shifts every block placement and/or the periodogram row
+  count -> `phseq_onehot_golden` fails on shape or first-row mismatch (`f1`: 52 rows, blocks at
+  5/21/31). The `len==0` edge (a blank line contributes its bare `+10` with a 0-row one-hot block)
+  is separately pinned by `phseq_zero_length_line_is_a_zero_row_block`.
+
+- **[phase4b] `_FramesCount = numberOfPhonemes*0.01*_Framerate` fabricates a synthetic duration
+  (10 ms per phoneme slot) with LEFT-ASSOCIATIVE float grouping, and the 0.01 is an undocumented
+  magic constant** (`audio.rs::phseq_frames_count`, from `AudioStruct.cpp:173`): the zero-filled
+  `_Data` gets `(numberOfPhonemes*0.01)*_Framerate` frames -- C++ `*` associates left-to-right, and
+  the port isolates that exact grouping in `phseq_frames_count` because the naive regrouping
+  `numberOfPhonemes*(0.01*_Framerate)` differs by 1 truncated frame where `n*0.01` rounds down
+  (first divergence at `numberOfPhonemes = 803`, framerate 8000: 64239.999... -> 64239 vs 64240.0
+  -> 64240; the committed fixtures' 52/46/45 all land exact, so only the synthetic in-test file
+  exercises the divergence). The double -> `long long` assignment truncates toward zero (`as i64`).
+  *Why deferred:* provenance; 0.01 (= 10 ms/slot at any framerate) is load-bearing for every
+  downstream frame-indexed computation. *Fix candidate:* name the constant once end-to-end phSeq
+  parity holds. *Pinned by:* `frames_count_arithmetic` (`tests/phase4b_phseq.rs`, a 783-char
+  synthetic line -> `numberOfPhonemes` 803 -> asserts 64239 AND explicitly `!= 64240`) plus
+  `phseq_metadata_matches_manifest` (fixture-file counts 4160/3680/3600). Mutation: regrouping the
+  product right-associatively flips `frames_count_arithmetic`'s 64239 assert; changing 0.01 flips
+  every frames-count assert in both tests.
+
+- **[phase4b] The phSeq out-of-domain-character crash (`letterMapping.at()` ->
+  uncaught `std::out_of_range` -> `std::terminate`) is ported as a recoverable `Err`, and the
+  missing-file `exit(1)` as `Err` too** (`audio.rs::letter_index`/`read_phseq`, from
+  `AudioStruct.cpp:168,149-152`): the legacy one-hot loop indexes `letterMapping.at(sentence[pos])`
+  with no domain guard -- any character outside the 38-entry map (`AudioStruct.h:18`; note 'q' is
+  absent, as are all digits and uppercase beyond the 11 phone-class letters) throws out of `.at()`
+  and, uncaught anywhere in the call chain, aborts the process. This port returns a contextual
+  error naming the char/line/pos instead of reproducing a crash; same `Err` treatment for the
+  missing-file `exit(1)` (the established Phase 0a+ convention). Also note `sentence[pos]` is
+  byte-indexed `std::string`: non-ASCII input would be consumed byte-by-byte in the legacy, while
+  the port iterates `chars()`; parity-neutral because every mapped character is single-byte ASCII
+  and out-of-domain input errors on both sides (differently). *Why deferred:* N/A -- an
+  error-surface improvement over legacy UB/abort, behavior-identical on all valid inputs.
+  *Fix candidate:* N/A. *Pinned by:* `out_of_domain_char_bails`, `missing_file_bails`
+  (`tests/phase4b_phseq.rs`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

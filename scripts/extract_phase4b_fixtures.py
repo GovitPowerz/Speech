@@ -1,6 +1,18 @@
 """Build and run the oracle harness's phase4b stages, then write the LID
 confusion-core (Task 1) + multiclass scoring-overload (Task 3) + BlstmSpectralLID
-Algo-5 driver (Task 4) fixtures.
+Algo-5 driver (Task 4) + phSeq reader (Task 5) fixtures.
+
+Task 5 runs the harness over the committed synthetic corpus_phseq/{f1,f2,f3}.phSeq
+fixtures (the format contract -- no real .phSeq file exists anywhere to validate
+against) through the REAL AudioStruct file_type==1 ctor (AudioStruct.cpp:138-182):
+pure indexing + one-hot construction, no libm, so every phseq_*.bin dump is STRICT
+BITS on every platform. Dumps per file: `phseq_<f>_feat<i>.bin` (one per phSeq line,
+the one-hot `_ExternalFeatures[i]`) and `phseq_<f>_periodogram.bin` (`_Periodogram`,
+pre-filled at rows `numberOfPhonemes x 38`). A `PHASE4B_PHSEQ file=<f> lines=<n>
+frames_count=<v> channels=<c> framerate=<r> periodogram_rows=<pr>
+periodogram_cols=<pc>` stdout line is parsed and cross-checked against an
+INDEPENDENT Python reimplementation of the ctor's arithmetic (`_phseq_expected`)
+run directly over the same fixture files -- not merely trusting the harness output.
 
 Task 4 runs the harness LidProbe stage over the T2 corpus (f1/f2/f3.wav, class 0/1/2)
 with lid5.config + the real 33,671-weight SAD net: the reimpl transcription of
@@ -105,6 +117,58 @@ LID5_BINS = [
     for ch in (1, 2)
 ]
 
+# Task 5: phSeq reader (File_Type 1). letterMapping (AudioStruct.h:18), a 38-entry
+# char -> column bijection -- the fixture files below draw characters ONLY from this
+# domain (checked by _phseq_expected below, which mirrors the Rust letter_index table).
+PHSEQ_LETTER_MAPPING = {
+    c: i
+    for i, c in enumerate(
+        " &A@EIHONSZacbedgfihkjmlonpsrutwvyxz.-"
+    )
+}
+PHSEQ_DIR = PHASE4B_DIR / "corpus_phseq"
+PHSEQ_FILES = ["f1", "f2", "f3"]
+
+PHSEQ_RE = re.compile(
+    r"^PHASE4B_PHSEQ file=(?P<name>\w+) lines=(?P<lines>\d+) frames_count=(?P<frames>\d+) "
+    r"channels=(?P<channels>\d+) framerate=(?P<framerate>\d+) "
+    r"periodogram_rows=(?P<prows>\d+) periodogram_cols=(?P<pcols>\d+)$",
+    re.MULTILINE,
+)
+
+
+def _phseq_expected(path: Path) -> dict[str, object]:
+    """Independent Python reimplementation of AudioStruct.cpp:138-182's arithmetic
+    (NOT reading any harness output), so the harness's own numbers are cross-checked
+    against a second source, not merely trusted."""
+    lines = path.read_text().split("\n")
+    # str.read_text().split("\n") on a trailing-newline file yields one spurious
+    # trailing "" entry (unlike C++ getline / Python's own splitlines()) -- drop it,
+    # matching getline's "no line for a bare trailing newline" behavior.
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    for line in lines:
+        for ch in line:
+            if ch not in PHSEQ_LETTER_MAPPING:
+                raise SystemExit(f"{path}: char {ch!r} not in letterMapping domain")
+    number_of_phonemes = 10
+    row_begin = 5
+    blocks = []
+    for line in lines:
+        blocks.append((row_begin, len(line)))
+        number_of_phonemes += len(line) + 10
+        row_begin += len(line) + 10
+    # legacy AudioStruct.cpp:173, LEFT-ASSOCIATIVE: (numberOfPhonemes*0.01)*framerate.
+    frames_count = int((number_of_phonemes * 0.01) * 8000.0)
+    return {
+        "lines": len(lines),
+        "lens": [len(line) for line in lines],
+        "number_of_phonemes": number_of_phonemes,
+        "frames_count": frames_count,
+        "blocks": blocks,
+    }
+
+
 LID_SEG_STRUCT_RE = re.compile(
     r"^SEG_STRUCT site=lid5_(?P<name>\w+) ok=1 max_dt=(?P<dt>[0-9.eE+-]+)$", re.MULTILINE
 )
@@ -199,6 +263,17 @@ def main() -> None:
 
     PHASE4B_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Task 5: independently recompute the expected phSeq ctor arithmetic straight
+    # from the committed fixture files (not from any harness output), and derive
+    # the exact set of per-file .bin names the harness must produce (one feat<i>.bin
+    # per line + one periodogram.bin).
+    phseq_expected = {name: _phseq_expected(PHSEQ_DIR / f"{name}.phSeq") for name in PHSEQ_FILES}
+    phseq_bins: list[str] = []
+    for name in PHSEQ_FILES:
+        for i in range(int(phseq_expected[name]["lines"])):
+            phseq_bins.append(f"phseq_{name}_feat{i}.bin")
+        phseq_bins.append(f"phseq_{name}_periodogram.bin")
+
     # 3. Run the harness in a throwaway dir (no corpus workdir arg -> the
     #    phase4a tier1/tier2 block is skipped; phase4b_confusion is unconditional).
     with tempfile.TemporaryDirectory() as tmp:
@@ -224,10 +299,11 @@ def main() -> None:
                 "t4",
                 str(LID5_CONFIG),  # argv[15]: Task 4 LID config.
                 str(LID_CORPUS_DIR),  # argv[16]: Task 4 corpus dir (f1/f2/f3.wav).
+                str(PHSEQ_DIR),  # argv[17]: Task 5 phSeq corpus dir (f1/f2/f3.phSeq).
             ]
         )
 
-        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN, *LID5_BINS]:
+        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN, *LID5_BINS, *phseq_bins]:
             src = tmp_dir / name
             if not src.is_file():
                 raise SystemExit(f"harness did not produce {name}")
@@ -332,6 +408,70 @@ def main() -> None:
                 "has_sentinel_gt150": sentinel,
             }
         lid_measured[name] = {"class_index": LID5_FILES.index(name), "channels": chans}
+
+    # 4d. Task 5: parse + validate the PHASE4B_PHSEQ stdout lines against the
+    # INDEPENDENT Python reimplementation (phseq_expected), and cross-check the
+    # dumped .bin shapes/content match too -- not merely trusting either source
+    # alone.
+    phseq_stdout = {m["name"]: m for m in PHSEQ_RE.finditer(stdout)}
+    phseq_measured: dict[str, dict[str, object]] = {}
+    for name in PHSEQ_FILES:
+        if name not in phseq_stdout:
+            raise SystemExit(f"missing PHASE4B_PHSEQ line for {name}")
+        m = phseq_stdout[name]
+        exp = phseq_expected[name]
+        if int(m["lines"]) != exp["lines"]:
+            raise SystemExit(f"phseq {name}: harness lines={m['lines']} != expected {exp['lines']}")
+        if int(m["frames"]) != exp["frames_count"]:
+            raise SystemExit(
+                f"phseq {name}: harness frames_count={m['frames']} != expected {exp['frames_count']}"
+            )
+        if int(m["prows"]) != exp["number_of_phonemes"]:
+            raise SystemExit(
+                f"phseq {name}: harness periodogram_rows={m['prows']} != expected numberOfPhonemes "
+                f"{exp['number_of_phonemes']}"
+            )
+        if (int(m["channels"]), int(m["framerate"]), int(m["pcols"])) != (1, 8000, 38):
+            raise SystemExit(
+                f"phseq {name}: (channels,framerate,periodogram_cols)="
+                f"{(m['channels'], m['framerate'], m['pcols'])} != (1, 8000, 38)"
+            )
+        # Cross-check the dumped periodogram.bin shape + the block-fill placement
+        # against the independently-computed (row_begin, len) blocks.
+        pr, pc, pdata = _read_bin(PHASE4B_DIR / f"phseq_{name}_periodogram.bin")
+        if (pr, pc) != (exp["number_of_phonemes"], 38):
+            raise SystemExit(f"phseq_{name}_periodogram.bin shape {(pr, pc)} != {(exp['number_of_phonemes'], 38)}")
+        feat_shapes = []
+        for i, (row_begin, length) in enumerate(exp["blocks"]):
+            fr, fc, fdata = _read_bin(PHASE4B_DIR / f"phseq_{name}_feat{i}.bin")
+            if (fr, fc) != (length, 38):
+                raise SystemExit(f"phseq_{name}_feat{i}.bin shape {(fr, fc)} != {(length, 38)}")
+            feat_shapes.append([row_begin, length])
+            # Non-vacuity + placement check: every nonzero cell of feat[i] (column-major)
+            # must reappear at periodogram[row_begin + local_row, col] (also column-major).
+            for idx, v in enumerate(fdata):
+                if v == 0.0:
+                    continue
+                local_row, col = idx % length, idx // length
+                global_row = row_begin + local_row
+                pidx = col * pr + global_row
+                if pdata[pidx] != v:
+                    raise SystemExit(
+                        f"phseq_{name}: feat{i}[{local_row},{col}]={v} not placed at "
+                        f"periodogram[{global_row},{col}] (row_begin={row_begin})"
+                    )
+        phseq_measured[name] = {
+            "lines": exp["lines"],
+            "line_lengths": exp["lens"],
+            "number_of_phonemes": exp["number_of_phonemes"],
+            "frames_count": exp["frames_count"],
+            "blocks_row_begin_len": feat_shapes,
+        }
+    # Non-vacuity: at least one fixture line must be length-0 (the "sentence" with
+    # NO phonemes -- a 0-row one-hot block, exercising the len==0 edge of the
+    # `+10` gap arithmetic). f1's middle blank line is that case.
+    if not any(0 in exp["lens"] for exp in phseq_expected.values()):
+        raise SystemExit("no phSeq fixture exercises a length-0 line (0-row one-hot block)")
 
     # 5. Regression guard: the prior-phase fixture dirs must be byte-identical after.
     after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
@@ -457,6 +597,30 @@ def main() -> None:
             "calibration": lid_cal,
             "measured": lid_measured,
         },
+        "phseq": {
+            "text": (
+                "Task 5: the phSeq reader (File_Type 1, AudioStruct.cpp:138-182). Pure "
+                "indexing + one-hot construction (letterMapping, AudioStruct.h:18 -- a "
+                "38-entry char -> column bijection), no libm involved anywhere in this "
+                "branch, so every phseq_*.bin dump here is STRICT BITS on every platform "
+                "(unlike the transcendental-dependent lid5/scoring_multi fixtures above). "
+                "corpus_phseq/{f1,f2,f3}.phSeq are SYNTHETIC fixtures (the format contract "
+                "-- no real .phSeq file exists anywhere in this repo or its legacy vendor "
+                "tree to validate against), characters drawn only from letterMapping's "
+                "domain. f1 has a middle BLANK line (0-length sentence -> a 0-row one-hot "
+                "block), exercising the len==0 edge of the `+10` gap arithmetic; f2/f3 "
+                "cover a space-containing multi-word sentence, the `.`/`-` special chars, "
+                "and a full 25-letter single-sentence line (every lowercase letter except "
+                "'q', which is absent from letterMapping). Every PHASE4B_PHSEQ stdout "
+                "line (lines/frames_count/periodogram_rows/periodogram_cols) is "
+                "cross-checked against an INDEPENDENT Python reimplementation of the "
+                "ctor's arithmetic run directly over the fixture files (not merely "
+                "trusting the harness), and every dumped feat<i>.bin nonzero cell is "
+                "verified to reappear at the expected periodogram.bin offset "
+                "(row_begin + local_row, col) -- a placement, not just a shape, check."
+            ),
+            "measured": phseq_measured,
+        },
         "dead_code_not_ported": {
             "text": (
                 "Two legacy blocks are commented out and NOT ported: the classNb==2 binary "
@@ -477,7 +641,8 @@ def main() -> None:
         f"OK: phase4b fixtures (confusion input={in_rows}x{in_cols}, "
         f"matrix={mat_rows}x{mat_cols}, error1=error2={error1!r}; "
         f"scoring_multi={sc_rows}x{sc_cols}, all sites max_ulp=0; "
-        f"lid5 {len(LID5_FILES)} files, all SEG_STRUCT/LID_STRUCT ok=1), "
+        f"lid5 {len(LID5_FILES)} files, all SEG_STRUCT/LID_STRUCT ok=1; "
+        f"phseq {len(PHSEQ_FILES)} files, {len(phseq_bins)} bins), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

@@ -3,7 +3,7 @@
 //! Phase 1 features -> real trained network -> posteriors. The full Rust chain runs
 //! under the REAL `1_worker_1.config` (BLSTM prefix) and the real
 //! `NNweights_config1.bin`:
-//!   read_audio(excerpt, 0.35, 2.0) -> preemph per config (SKIPPED: ratio -0.97 < 0)
+//!   read_audio(excerpt, 0.35, 2.0, 0) -> preemph per config (SKIPPED: ratio -0.97 < 0)
 //!   -> SpectralParams::derive(BLSTM keys) -> windowing -> periodogram
 //!   -> mel + DCT per config (nb_bins 20, nb_DCT 4, IgnoreFirstDCT, deltas 5, dd 3)
 //!   -> LTSV (SKIPPED: LTSVwindow 0 -> R == 0) -> assemble_input_sequence
@@ -47,7 +47,8 @@ fn real_weights() -> Vec<f64> {
 }
 
 fn excerpt_audio(preemph_ratio: f64) -> Audio {
-    let mut audio = read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0).expect("decode");
+    let mut audio =
+        read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0).expect("decode");
     // legacy gate: `if (preemphRatio > 0)` (BLSTMSpectralSegmenter.cpp:216). The real
     // config's preemph_ratio is -0.97 < 0, so this is SKIPPED.
     if preemph_ratio > 0.0 {

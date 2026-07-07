@@ -233,6 +233,68 @@
       }
     }
   },
+  "phseq": {
+    "text": "Task 5: the phSeq reader (File_Type 1, AudioStruct.cpp:138-182). Pure indexing + one-hot construction (letterMapping, AudioStruct.h:18 -- a 38-entry char -> column bijection), no libm involved anywhere in this branch, so every phseq_*.bin dump here is STRICT BITS on every platform (unlike the transcendental-dependent lid5/scoring_multi fixtures above). corpus_phseq/{f1,f2,f3}.phSeq are SYNTHETIC fixtures (the format contract -- no real .phSeq file exists anywhere in this repo or its legacy vendor tree to validate against), characters drawn only from letterMapping's domain. f1 has a middle BLANK line (0-length sentence -> a 0-row one-hot block), exercising the len==0 edge of the `+10` gap arithmetic; f2/f3 cover a space-containing multi-word sentence, the `.`/`-` special chars, and a full 25-letter single-sentence line (every lowercase letter except 'q', which is absent from letterMapping). Every PHASE4B_PHSEQ stdout line (lines/frames_count/periodogram_rows/periodogram_cols) is cross-checked against an INDEPENDENT Python reimplementation of the ctor's arithmetic run directly over the fixture files (not merely trusting the harness), and every dumped feat<i>.bin nonzero cell is verified to reappear at the expected periodogram.bin offset (row_begin + local_row, col) -- a placement, not just a shape, check.",
+    "measured": {
+      "f1": {
+        "lines": 3,
+        "line_lengths": [
+          6,
+          0,
+          6
+        ],
+        "number_of_phonemes": 52,
+        "frames_count": 4160,
+        "blocks_row_begin_len": [
+          [
+            5,
+            6
+          ],
+          [
+            21,
+            0
+          ],
+          [
+            31,
+            6
+          ]
+        ]
+      },
+      "f2": {
+        "lines": 2,
+        "line_lengths": [
+          12,
+          4
+        ],
+        "number_of_phonemes": 46,
+        "frames_count": 3680,
+        "blocks_row_begin_len": [
+          [
+            5,
+            12
+          ],
+          [
+            27,
+            4
+          ]
+        ]
+      },
+      "f3": {
+        "lines": 1,
+        "line_lengths": [
+          25
+        ],
+        "number_of_phonemes": 45,
+        "frames_count": 3600,
+        "blocks_row_begin_len": [
+          [
+            5,
+            25
+          ]
+        ]
+      }
+    }
+  },
   "dead_code_not_ported": {
     "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
   }

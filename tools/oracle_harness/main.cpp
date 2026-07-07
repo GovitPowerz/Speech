@@ -2422,6 +2422,10 @@ int main(int argc, char** argv) {
     std::string lid5Config = (argc > 15) ? std::string(argv[15]) : std::string("");
     std::string lidCorpusDir = (argc > 16) ? std::string(argv[16]) : std::string("");
 
+    // Phase 4b Task 5: phSeq corpus dir (f1/f2/f3.phSeq, committed synthetic
+    // fixtures). Empty -> the phSeq stage is skipped.
+    std::string phseqCorpusDir = (argc > 17) ? std::string(argv[17]) : std::string("");
+
     int dumps = 0;
 
     // --- Audio stages ---------------------------------------------------------
@@ -9799,6 +9803,47 @@ int main(int argc, char** argv) {
         std::cout << "PHASE4B_CONFUSION ok=" << (error1 == error2 ? 1 : 0)
                    << " error1=" << std::setprecision(17) << error1
                    << " error2=" << error2 << "\n";
+    }
+
+    // =====================================================================
+    // --- Phase 4b Task 5: phSeq reader (File_Type 1) real-compiled goldens ---
+    // legacy: AudioStruct.cpp:138-182 (the file_type==1 ctor branch). Pure
+    // indexing + one-hot construction, no libm involved anywhere in this branch
+    // -- every fixture dumped here is STRICT BITS on every platform, unlike the
+    // transcendental-dependent stages above. `phseqCorpusDir` holds the
+    // committed synthetic .phSeq fixtures (the format contract -- no real
+    // .phSeq file exists anywhere in this repo or its legacy vendor tree to
+    // validate against; see tests/reference_data/phase4b/manifest.json:phseq).
+    // `_ExternalFeatures`/`_Periodogram` are dumped directly (public members,
+    // no probe subclass needed); `numberOfPhonemes` is not itself a member,
+    // but IS observable as `_Periodogram.rows()` (the ctor sizes the
+    // periodogram with exactly that value at `:177`).
+    if (!phseqCorpusDir.empty()) {
+        auto dumpPhSeq = [&](const std::string& name) {
+            CorpusItem item(phseqCorpusDir + "/" + name + ".phSeq", "", "lang", "dial", 0, 0, 1.0);
+            AudioStruct audio(0.0, MAX_DUR_SEC, 1, item);
+
+            for (size_t i = 0; i < audio._ExternalFeatures.size(); ++i) {
+                Matrix2BinaryFile(out + "phseq_" + name + "_feat" + std::to_string(i) + ".bin",
+                                  audio._ExternalFeatures[i]);
+                ++dumps;
+            }
+            Matrix2BinaryFile(out + "phseq_" + name + "_periodogram.bin", audio._Periodogram);
+            ++dumps;
+
+            std::cout << "PHASE4B_PHSEQ file=" << name
+                       << " lines=" << audio._ExternalFeatures.size()
+                       << " frames_count=" << audio.getFrameCount()
+                       << " channels=" << audio.getChannelCount()
+                       << " framerate=" << audio.getFrameRate()
+                       << " periodogram_rows=" << audio._Periodogram.rows()
+                       << " periodogram_cols=" << audio._Periodogram.cols()
+                       << "\n";
+        };
+
+        dumpPhSeq("f1");
+        dumpPhSeq("f2");
+        dumpPhSeq("f3");
     }
 
     std::cout << "OK: " << dumps << " dumps\n";

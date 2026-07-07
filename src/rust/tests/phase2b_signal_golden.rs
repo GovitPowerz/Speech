@@ -92,11 +92,11 @@ fn variant_map(tag: &str) -> IndexMap<String, String> {
 /// Fresh excerpt audio (offset 0.35, dur 2.0), UNMUTATED: `get_segmentation` applies
 /// preemph itself (config `BLSTM_preemph_ratio 0.97`, `BLSTM_noise_seed 0` -> no noise).
 fn excerpt_audio() -> Audio {
-    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0).expect("decode excerpt")
+    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0).expect("decode excerpt")
 }
 
 fn excerpt_audio_zero_offset() -> Audio {
-    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.0, 2.0).expect("decode excerpt")
+    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.0, 2.0, 0).expect("decode excerpt")
 }
 
 fn fresh_segs(audio: &Audio) -> Vec<Segmentation> {

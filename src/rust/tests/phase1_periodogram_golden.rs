@@ -22,7 +22,7 @@ use speech::features::fft::{Gfft, compute_two_real_periodogram};
 /// dc_offset=true begin=0 end=frames-1.
 fn pipeline(chan: usize, conv: Option<&[f64]>, end: usize) -> Array2<f64> {
     let wav = common::fixture("excerpt_2ch_8k.wav");
-    let mut audio = read_audio(&wav, 0.35, 2.0).unwrap();
+    let mut audio = read_audio(&wav, 0.35, 2.0, 0).unwrap();
     audio.apply_preemph(0.97);
     audio.apply_noise(0.001);
     let win = windowing_coefficients("hamming", false, 257, 0.83333).unwrap();

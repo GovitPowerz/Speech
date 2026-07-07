@@ -197,8 +197,11 @@ impl BagOfProcessors {
     /// branches) but only currently consulted for algo dispatch validity.
     ///
     /// Algo 0/5/6 (`VRCTSPart`/`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`) are
-    /// unported -- `bail!`, deferred to Phase 4b. `File_Type != 0` (non-wav
-    /// input) is also unported -- `bail!`, IMPROVEMENTS entry.
+    /// unported here (`bail!`) -- `BLSTMSpectralLID` (Algo 5) has a standalone
+    /// driver since Phase 4b Task 4 (`tasks::lid::BlstmSpectralLid`), but is not
+    /// yet wired into this dispatch. `File_Type` 2/3/4 (cep/phSeq-N/mat input)
+    /// are also unported -- `bail!`, IMPROVEMENTS entry; `File_Type` 0 (wav) and
+    /// 1 (phSeq, Task 5) are both supported.
     pub fn from_configs(
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
@@ -217,10 +220,11 @@ impl BagOfProcessors {
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
 
-        if file_type != 0 {
-            // legacy: AudioStruct non-wav read path -- unported (Phase 4b).
+        if file_type != 0 && file_type != 1 {
+            // legacy: AudioStruct non-wav/non-phSeq read paths (cep/phSeq-N/mat,
+            // file_type 2/3/4) -- unported (Phase 4b).
             bail!(
-                "File_Type {file_type} not ported (Phase 4b): only wav (File_Type 0) is supported"
+                "File_Type {file_type} not ported (Phase 4b): only wav (0) and phSeq (1) are supported"
             );
         }
 
@@ -670,7 +674,12 @@ impl BagOfProcessors {
 
         // legacy: :254 AudioStruct audio(_OffsetBegin, _DurationMax, _FileType, corpusItem);
         let file_name = &item.file_name;
-        let mut audio = read_audio(Path::new(file_name), self.offset_begin, self.duration_max)?;
+        let mut audio = read_audio(
+            Path::new(file_name),
+            self.offset_begin,
+            self.duration_max,
+            self.file_type,
+        )?;
         // legacy: AudioStruct ctor sets _LangIndex/_Weight from the CorpusItem
         // (AudioStruct.cpp:53,60) -- see apply_corpus_item's doc for the
         // placement deviation.
@@ -1050,7 +1059,7 @@ mod tests {
     #[test]
     fn apply_corpus_item_sets_lang_index_and_weight() {
         let mut audio =
-            crate::audio::read_audio(&ref_dir().join("phase1/excerpt_2ch_8k.wav"), 0.0, 0.1)
+            crate::audio::read_audio(&ref_dir().join("phase1/excerpt_2ch_8k.wav"), 0.0, 0.1, 0)
                 .unwrap();
         assert_eq!(audio.lang_index, -1, "read_audio default");
         assert_eq!(audio.weight, 1.0, "read_audio default");
@@ -1100,13 +1109,25 @@ mod tests {
     }
 
     #[test]
-    fn file_type_nonzero_bails() {
+    fn file_type_2_bails() {
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "2".to_string());
         match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()) {
             Err(e) => assert!(e.to_string().contains("File_Type")),
-            Ok(_) => panic!("expected non-wav File_Type to bail"),
+            Ok(_) => panic!("expected File_Type 2 (cep, unported) to bail"),
         }
+    }
+
+    #[test]
+    fn file_type_1_allowed() {
+        // Task 5: File_Type 1 (phSeq) is now a supported gate value -- construction
+        // itself doesn't touch read_audio, so a plain TDC driver config with the gate
+        // flipped must succeed (the gate check runs before the per-config driver loop).
+        let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
+        cfg.insert("File_Type".to_string(), "1".to_string());
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode())
+            .expect("File_Type 1 (phSeq) must be accepted by the gate");
+        assert_eq!(bag.file_type(), 1);
     }
 
     #[test]
