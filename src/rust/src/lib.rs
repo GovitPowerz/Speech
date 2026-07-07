@@ -22,6 +22,9 @@ pub mod legacy_config;
 pub mod nn;
 pub mod tasks;
 
+/// Convenience re-export: the top-level engine driver, used directly by `main.rs`.
+pub use engine::corpus_processor::CorpusProcessor;
+
 /// Crate version, sourced from Cargo metadata.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

@@ -187,6 +187,10 @@ impl Layer for NeuronLayer {
 /// - 1` layers with per-layer sub-sampling, a chained flat weight vector, and forward
 /// / reverse / double-input drivers. `neuron_nb[jj]`/`neuron_nb[jj+1]` are the fan-in
 /// (times `sub_sampling[jj]`) / fan-out of layer `jj`.
+///
+/// `Clone` requires `L: Clone` (the derive bound); both `LstmLayer` and `NeuronLayer`
+/// derive it. Enables the whole-net clone the Task 4/7 driver bags depend on.
+#[derive(Clone)]
 pub struct Network<L: Layer> {
     neuron_nb: Vec<usize>,
     sub_sampling: Vec<usize>,

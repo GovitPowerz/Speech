@@ -112,7 +112,7 @@ fn result_rows_match_dump_primary() {
     let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+    ltsv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     for name in ["ltsv_result_chan1.bin", "ltsv_result_chan2.bin"] {
         let want = common::load_bin_phase2b(name);
@@ -133,7 +133,7 @@ fn get_segmentation_boundaries_match_dump_primary() {
     let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+    ltsv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     for (chan, name) in ["ltsv_boundaries_chan1.bin", "ltsv_boundaries_chan2.bin"]
         .iter()
@@ -233,7 +233,7 @@ fn score_matches_dump() {
     let mut audio2 = excerpt_audio();
     let mut ltsv2 = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut hyp = fresh_segs(&audio2);
-    ltsv2.get_segmentation(&mut audio2, &mut hyp).unwrap();
+    ltsv2.get_segmentation(&mut audio2, &mut hyp, None).unwrap();
 
     let want = common::load_bin_phase2b("ltsv_scores.bin");
     let reports = LtsvSegmenter::score(&mut hyp, Some(&reference), -1);
@@ -264,7 +264,7 @@ fn vrcts_bytes_match_dump() {
     let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio_zero_offset();
     let mut segs = fresh_segs(&audio);
-    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+    ltsv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
     common::assert_vrcts_eq(&got, &dump, "ltsv vrcts");
@@ -278,7 +278,7 @@ fn result_rows_match_dump_dct_variant() {
     let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+    ltsv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     for (chan, name) in ["ltsv_dct_boundaries_chan1.bin"].iter().enumerate() {
         let want = common::load_bin_phase2b(name);
@@ -363,11 +363,13 @@ fn two_files_in_sequence_boundaries_match_dump() {
 
     let mut audio1 = excerpt_audio();
     let mut segs1 = fresh_segs(&audio1);
-    ltsv.get_segmentation(&mut audio1, &mut segs1).unwrap();
+    ltsv.get_segmentation(&mut audio1, &mut segs1, None)
+        .unwrap();
 
     let mut audio2 = excerpt_audio();
     let mut segs2 = fresh_segs(&audio2);
-    ltsv.get_segmentation(&mut audio2, &mut segs2).unwrap();
+    ltsv.get_segmentation(&mut audio2, &mut segs2, None)
+        .unwrap();
 
     let want = common::load_bin_phase2b("ltsv_boundaries_file2_chan1.bin");
     let got_segs = segs2[0].segments();
@@ -398,7 +400,7 @@ fn ltsv_window_floors_to_one_not_zero() {
     let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+    ltsv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     let want = common::load_bin_phase2b("ltsv_tiny_boundaries_chan1.bin");
     let got_segs = segs[0].segments();
@@ -512,7 +514,7 @@ fn powermel_chan1_boundaries_are_non_vacuous() {
     let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+    ltsv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     let got_segs = segs[0].segments();
     assert!(
@@ -558,7 +560,7 @@ fn powermel_chan2_boundaries_match_dump() {
     let mut ltsv = LtsvSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    ltsv.get_segmentation(&mut audio, &mut segs).unwrap();
+    ltsv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     let want = common::load_bin_phase2b("ltsv_powermel_boundaries_chan2.bin");
     let got_segs = segs[1].segments();

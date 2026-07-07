@@ -21,11 +21,20 @@ use super::segmentation::{SegClass, Segmentation};
 /// no-op bodies (`Segmenter::setWeights`/`getWeights`/`getWeightsDerivatives`,
 /// `Segmenter.cpp:107-115`): a plain (non-BLSTM) segmenter has no trainable
 /// weights, so the defaults are the correct behaviour, not a stub.
+///
+/// `refs` is the per-channel REFERENCE segmentation (the legacy `seg._Reference`,
+/// which the Rust [`Segmentation`] does NOT carry internally): `Some(&[Segmentation])`
+/// with one entry per channel when a reference was loaded, `None` otherwise. The two
+/// NN drivers (spectral/signal) build per-frame training targets from it
+/// (`Segmenter::getTargets`, gated on `seg._Reference.size() > 0`); the non-NN
+/// drivers (TDC/LTSV) ignore it. With `refs = None` the drivers run the no-target
+/// forward path, byte-identical to the pre-target behaviour.
 pub trait Segmenter {
     fn get_segmentation(
         &mut self,
         audio: &mut Audio,
         seg_per_chan: &mut [Segmentation],
+        refs: Option<&[Segmentation]>,
     ) -> Result<()>;
 
     fn set_weights(&mut self, _flat: &[f64]) -> Result<()> {

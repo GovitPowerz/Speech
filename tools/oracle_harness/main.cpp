@@ -14,6 +14,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -28,6 +30,7 @@
 #include "BLSTMSpectralSegmenter.h"
 #include "ConfigFile.h"
 #include "CorpusItem.h"
+#include "CorpusProcessor.h"
 #include "Helpers.hpp"
 #include "InputStatistics.h"
 #include "iof/io.hpp"
@@ -61,6 +64,7 @@ struct SegProbe : Segmenter {
     using Segmenter::buildFromConf;
     using Segmenter::results2segmentation;
     using Segmenter::updateSegmentation;
+    using Segmenter::getTargets;
     using Segmenter::_ConvolutionCoeff;
 };
 
@@ -2085,6 +2089,236 @@ struct BlstmBack {
     }
 };
 
+// ===========================================================================
+// Phase 4a Task 9: tier-2 CorpusProbe (Algo 3 reimpl-swap) TRAIN + gradCheck
+// stage. Transcribes CorpusProcessor::train/run(epoch)/gradCheck (CorpusProcessor.
+// cpp:83-340) + BagOfProcessors::SegmentationFunction/saveAndUpdate (BagOfProcessors.
+// cpp:207-471) around the SAME spectral reimpl-swap machinery the Phase 2b spectral
+// stage uses (transcribeSpectral :593-887, FFB swapped for the ascending-loop reimpl).
+// The difference vs Phase 2b: BackPropagationActivated is TRUE, so the per-window
+// worker now runs the BACKWARD (BlstmBack + real CostLaw) and accumulates a cost +
+// derivs, and the corpus loop feeds those reimpl-derivs into the REAL compiled
+// updateWeights/saveWeights (real Rprop!) via the external-derivs argument the real
+// BLSTMSpectralSegmenter::updateWeights/saveWeights accept. The Corpus/CorpusItem/
+// Segmentation/compute_errors and getTargets/results2segmentation are REAL compiled;
+// only the NN forward+backward is swapped. See tests/reference_data/phase4a/manifest.json.
+//
+// One channel's windowed OVERLAP forward+backward+cost, mirroring the Rust
+// BlstmNetwork::feed_forward_backward_overlap (blstm.rs) + feed_forward_backward_plain
+// per-window worker for the REAL net (LSTM [23,24,24] sub [4,1], output [48,12,1] sub
+// [1,1], ssr 4; the "real" spectral config yields the overlap driver: window_size 163
+// > 0, window_shift 80 >= 1). `bb` is the file-lifetime BlstmBack (derivs accumulate
+// across windows AND channels via the LstmDerivs += + nbFedBackward++ contract, exactly
+// like the real net's member accumulation between resetWeightsDerivatives calls, which
+// happens ONCE per file :473). `cost`/`nbOfClassif` accumulate the per-window scalar-VAD
+// CostLaw cost (target.cols()==1 -> computeUnitaryCost per row) + output row count.
+// Returns the accumulated result_vec (:664 in-place += then /= count). `costLaw` is the
+// REAL compiled CostLaw (bit-portable for the polynomial law the config uses).
+static void t9SpectralOverlapWorker(BlstmBack& bb, T6Blstm& fwdOnly, CostLaw& costLaw,
+                                    const Eigen::MatrixXd& inputSeqRaw, long window_size,
+                                    long window_shift, const Eigen::MatrixXd& target,
+                                    bool backPropActivated, int targetEnforcementStep,
+                                    Eigen::MatrixXd& output, double& cost, long& nbOfClassif) {
+    // Type -1 whole-sequence self-normalization in place (BLSTMNeuralNetwork.cpp:737-744),
+    // matching Rust feed_forward_backward's `-1` branch + signalReimplFFB's normalize.
+    Eigen::MatrixXd input = inputSeqRaw;
+    {
+        const int R = (int)input.rows(), C = (int)input.cols();
+        if (R > 0) {
+            std::vector<double> mean(C, 0.0);
+            for (int c = 0; c < C; ++c) { double a = 0.0; for (int r = 0; r < R; ++r) a += input(r, c); mean[c] = a / (double)R; }
+            for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) input(r, c) -= mean[c];
+            std::vector<double> stdv(C, 0.0);
+            for (int c = 0; c < C; ++c) { double a = 0.0; for (int r = 0; r < R; ++r) a += input(r, c) * input(r, c); stdv[c] = std::sqrt((a + 1e-32) / (double)R); }
+            for (int r = 0; r < R; ++r) for (int c = 0; c < C; ++c) input(r, c) = Maxmin2::fn(input(r, c) / stdv[c]);
+        }
+    }
+    (void)fwdOnly;
+
+    const long ssr = bb.fwd.subSampling[0];   // 4 (fwd LSTM ratio 4*1)
+    const long outNetRatio = bb.outNetRatio;  // 1
+    const long fwdOut = (long)bb.out.neuronNb[0] / 2;   // 24 (hcat half)
+
+    // OverLap driver (BLSTMNeuralNetwork.cpp:592-681), ssr>1 grid snapping (matches
+    // overlapT6 + the Rust overlap driver). `output` is pre-seeded to zero by the
+    // caller and accumulated IN PLACE (:664 noalias() +=), then quotiented by the count.
+    const long outRows = output.rows();
+    std::vector<double> outCount(outRows, 0.0);
+    long length = 2 * window_size + 1;
+    length /= ssr;                 // sequential LSTM ratios (4) then output ratios (1)
+    long nominalLen = length;
+
+    for (long jj = 0; jj < input.rows(); jj += window_shift) {
+        long begin = (jj < window_size) ? 0 : jj - window_size;
+        begin = (begin / ssr) * ssr;
+        long end = begin + 2 * window_size;
+        if (end >= input.rows()) end = input.rows() - 1;
+        end = ((end + 1) / ssr) * ssr - 1;
+        long lengthSeq = end - begin + 1;
+        long lengthShort = (lengthSeq != 2 * window_size + 1) ? (lengthSeq / ssr) : nominalLen;
+        if (lengthShort > 0) {
+            Eigen::MatrixXd block = input.block(begin, 0, lengthSeq, input.cols());
+            // Per-window plain forward+backward+cost (feed_forward_backward_plain).
+            Eigen::MatrixXd oF, oB, hcat, outShort;
+            bb.forward(block, oF, oB, outShort, hcat);   // decimated rows == lengthShort
+            // Scalar-VAD target slice at begin/ssr, lengthShort rows (:649).
+            Eigen::MatrixXd tgt;
+            if (target.rows() > 0) {
+                long tbeg = begin / ssr;
+                tgt = target.block(tbeg, 0, lengthShort, target.cols());
+            }
+            // BACKWARD (feed_forward_backward_plain :788-799): seed via CostLaw::
+            // computeDeltas from the UNMUTATED outShort, then bb.backward. The
+            // _TargetEnforcementStep<0 interior rewrite touches only the target copy
+            // (mirrored below; the real config's step is >= 0 so this is dormant).
+            if (backPropActivated && tgt.rows() > 0) {
+                Eigen::MatrixXd tEnf = tgt;
+                if (targetEnforcementStep < 0) {
+                    long nbLines = tgt.rows() - 2;
+                    if (nbLines > 0) tEnf.block(1, 0, nbLines, tgt.cols()) = Eigen::MatrixXd::Constant(nbLines, tgt.cols(), -0.5);
+                }
+                Eigen::MatrixXd seed = Eigen::MatrixXd::Zero(tEnf.rows(), tEnf.cols());
+                costLaw.computeDeltas(outShort, tEnf, seed);
+                bb.backward(block, oF, oB, hcat, outShort, seed);
+            }
+            // COST (feed_forward_backward_plain :815-828): scalar-VAD computeUnitaryCost
+            // per row (target.cols()==1). The <0 enforcement rewrite of BOTH target and
+            // output is dormant for the real config (step >= 0). NOTE the SUBTOTAL: the
+            // legacy `_Cost += _CostFunction.computeCost(...)` sums the window's rows
+            // into computeCost's LOCAL accumulator and adds the per-window subtotal --
+            // NOT each row directly into the running total (FP non-associativity: a
+            // direct per-row += diverges by 1-2 ULP; measured against the Rust engine).
+            if (tgt.rows() > 0) {
+                Eigen::MatrixXd outCost = outShort, tgtCost = tgt;
+                if (targetEnforcementStep < 0) {
+                    long endRow = tgt.rows() - 1;
+                    for (long r = 1; r < endRow; ++r) {
+                        for (long c = 0; c < tgtCost.cols(); ++c) tgtCost(r, c) = -0.5;
+                        for (long c = 0; c < outCost.cols(); ++c) outCost(r, c) = -0.5;
+                    }
+                }
+                double windowCost = 0.0;
+                for (long r = 0; r < outCost.rows(); ++r)
+                    windowCost += costLaw.computeUnitaryCost(outCost(r, 0), tgtCost(r, 0));
+                cost += windowCost;
+                nbOfClassif += outCost.rows();
+            }
+            // :664 accumulate output IN PLACE at begin/ssr.
+            long obeg = begin / ssr;
+            for (long r = 0; r < lengthShort; ++r) {
+                for (long c = 0; c < output.cols(); ++c) output(obeg + r, c) += outShort(r, c);
+                outCount[obeg + r] += 1.0;
+            }
+            (void)outNetRatio; (void)fwdOut;
+        }
+    }
+    // :674-675 output /= outputCount (0/0 -> NaN on uncovered rows, no guard).
+    for (long r = 0; r < output.rows(); ++r)
+        for (long c = 0; c < output.cols(); ++c) output(r, c) /= outCount[r];
+}
+
+// Per-file spectral param + window derivation for the tier-2 train (BLSTMSpectralSegmenter::
+// getBLSTMParam :439-500, transcribed inline -- integer/round math, no Eigen). Mutates
+// probe._WindowShift/_SpectrumShift/_SpectrumShiftInFrames as real side effects (matching
+// the Rust get_blstm_param + the stateful members), and returns window_size/window_shift/
+// noOverlap/real_vec_size + timeStep/timeOffset. Reads the probe's _WindowShift (from the
+// config's BLSTM_shift, quantized by the ctor) and _WindowSize. `s` is the derived spectral
+// params (deriveSpectral). Shared by every channel of the file.
+struct T9BlstmParam {
+    long window_size, window_shift, real_vec_size;
+    bool noOverlap;
+    double timeStep, timeOffset;
+};
+static T9BlstmParam t9DeriveBlstmParam(SpectralProbe& probe, const SpectralP& s, double rate,
+                                       long ssr, long frameCount) {
+    const long ssif = s.shift_frames;
+    probe._SpectrumShiftInFrames = ssif;
+    probe._SpectrumShift = (double)ssif / rate;
+
+    std::vector<double>::size_type window_size =
+        (std::vector<double>::size_type)boost::math::round(probe._WindowSize * rate / 2.0 / ssif);
+    if ((window_size != 0) && (window_size < (std::vector<double>::size_type)ssr)) window_size = ssr;
+    long window_shift = (long)boost::math::round(probe._WindowShift * rate / ssif);
+    bool noOverlap = false;
+    if ((window_size != 0) && (window_shift < 1)) {
+        noOverlap = true;
+        window_size = (((std::vector<double>::size_type)boost::math::round(probe._WindowSize * rate / ssif)) / ssr) * ssr;
+        if (window_size < 10 * (std::vector<double>::size_type)ssr) window_size = 10 * ssr;
+    }
+    if ((window_size == 0) || (window_shift < 1)) window_shift = 1;
+    probe._WindowShift = ((double)window_shift * ssif) / rate;   // :453 MEMBER MUTATION
+
+    std::vector<double>::size_type vec_size = (std::vector<double>::size_type)frameCount;
+    if ((vec_size / ssif) * ssif == vec_size) vec_size = vec_size / ssif;
+    else vec_size = vec_size / ssif + 1;
+    std::vector<double>::size_type real_vec_size = vec_size;
+    if (ssr > 1) {
+        for (auto r : probe._BLSTMNeuralNetwork.getLSTMSubSampling()) real_vec_size /= r;
+        for (auto r : probe._BLSTMNeuralNetwork.getOutputSubSampling()) real_vec_size /= r;
+    }
+
+    double timeStep = probe._WindowShift * ssr;
+    double timeOffset = timeStep / 2 - probe._WindowShift / 2;
+    if (window_size > 0) {
+        if (noOverlap) {
+            timeStep = probe._WindowShift * ssr;
+            timeOffset = timeStep / 2 - probe._WindowShift / 2;
+        } else {
+            timeStep = probe._SpectrumShift * ssr;
+            timeOffset = timeStep / 2 - probe._SpectrumShift / 2;
+        }
+    }
+    T9BlstmParam p;
+    p.window_size = (long)window_size;
+    p.window_shift = window_shift;
+    p.real_vec_size = (long)real_vec_size;
+    p.noOverlap = noOverlap;
+    p.timeStep = timeStep;
+    p.timeOffset = timeOffset;
+    return p;
+}
+
+// Build one channel's spectral input sequence via the ascending-loop feature pipeline
+// (deriveSpectral + computeSegmentPeriodogramEstimates with an EMPTY mel bank + real
+// applyFilterBank + applyDCTLoop + getLTSV), matching transcribeSpectral / the Rust
+// build_input_sequence. `perioOut` receives the raw periodogram (unused by the train
+// leg, kept for symmetry). Preemph/noise are applied to `audio` ONCE by the caller
+// before the channel loop (as the driver does :216-227), so NOT reapplied here.
+static Eigen::MatrixXd t9BuildSpectralInput(SpectralProbe& probe, AudioStruct& audio,
+                                            const FeatureCfg& c, const SpectralP& s, int chan,
+                                            MelFilterBank& mel, const Eigen::MatrixXd& coeffs,
+                                            long nbDct, Eigen::MatrixXd& win,
+                                            Loki::Factory<AbstractFFT<double>, unsigned int>& gfft_factory) {
+    (void)probe;   // param derivation happens in t9DeriveBlstmParam; kept for call-site symmetry
+    const long long endFull = audio.getFrameCount() - 1;
+    Eigen::MatrixXd noConv;
+    MelFilterBank emptyMel;
+    audio.computeSegmentPeriodogramEstimates(s.order, s.shift_frames, chan, c.flag_dc,
+                                             win, emptyMel, gfft_factory, noConv, 0, endFull);
+    Eigen::MatrixXd perio = audio._Periodogram;
+
+    Eigen::MatrixXd inputSeq;
+    if (mel.notEmpty()) {
+        Eigen::MatrixXd fb = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+        mel.applyFilterBank(perio, fb);
+        if (c.nb_dct > 0) inputSeq = applyDCTLoop(fb, coeffs, (int)nbDct, c.ignore_first, c.deltas_nb, c.dd_nb);
+        else inputSeq = fb;
+    } else {
+        inputSeq = (((perio.block(0, s.freq_beg, perio.rows(), s.freq_end - s.freq_beg + 1).array() + 1e-24).log()).matrix());
+    }
+    if (s.ltsv_half_window > 0) {
+        // The FREE harness getLTSV reimpl (ascending-loop, the same one
+        // transcribeSpectral uses -- NOT the SpectralProbe member).
+        long ltsv_beg = mel.notEmpty() ? 0 : s.freq_beg;
+        long ltsv_end = mel.notEmpty() ? (long)inputSeq.cols() - 1 : s.freq_end;
+        Eigen::MatrixXd ltsv = getLTSV(perio, s.ltsv_half_window, s.ltsv_shift, ltsv_beg, ltsv_end);
+        Eigen::MatrixXd merged(inputSeq.rows(), inputSeq.cols() + 1);
+        merged << inputSeq, ltsv;
+        inputSeq = merged;
+    }
+    return inputSeq;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0] << " <output_dir>\n";
@@ -2149,6 +2383,19 @@ int main(int argc, char** argv) {
     std::string signalConfigPath = (argc > 9)
         ? std::string(argv[9])
         : std::string("../../tests/reference_data/phase2b/signal.config");
+
+    // Phase 4a Task 8: tier-1 corpus workdir (a FIXED absolute path seeded with the
+    // committed corpora + configs by the extractor). The phase4a_tier1 stage chdir's
+    // into it and runs the REAL CorpusProcessor there so .mat + VRCTS outputs land at
+    // a byte-reproducible path (spec 2b convention). Empty -> the stage is skipped
+    // (so the extractor can run the earlier stages without the corpus seed present).
+    std::string corpusWorkdir = (argc > 10) ? std::string(argv[10]) : std::string("");
+    std::string tier1TdcConfig = (argc > 11) ? std::string(argv[11]) : std::string("tier1_tdc.config");
+    std::string tier1LtsvConfig = (argc > 12) ? std::string(argv[12]) : std::string("tier1_ltsv_powermel.config");
+    // Phase 4a Task 9: tier-2 CorpusProbe configs (spectral train + synthetic gradCheck),
+    // seeded into the corpus workdir by the extractor.
+    std::string tier2SpectralConfig = (argc > 13) ? std::string(argv[13]) : std::string("tier2_spectral.config");
+    std::string tier2GradCheckConfig = (argc > 14) ? std::string(argv[14]) : std::string("tier2_gradcheck.config");
 
     int dumps = 0;
 
@@ -8125,6 +8372,689 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "OK: rprop trajectories dumped (trajA 5 steps, trajB 48 steps)\n";
+    }
+
+    // =====================================================================
+    // --- Phase 4a Task 8: tier-1 REAL CorpusProcessor stack ---------------
+    // Runs the REAL compiled CorpusProcessor(configs, mode).run() on the
+    // committed 3-file 2-channel corpus at a FIXED path, dumping the raw .mat
+    // outputs (converted to .bin by the extractor via scipy) and the
+    // multi-channel VRCTS xml (the carried-over multi-channel byte oracle).
+    // Three runs: solo (-s, TDC, epochs->0), train (-m, LTSV, epochs 2),
+    // multiconfig (-m, both configs). The stage chdir's into the corpus workdir
+    // so the CorpusProcessor's relative output filenames land there.
+    //
+    // legacy: CorpusProcessor.cpp:48-404. The mode is a char* the legacy MUTATES
+    // (mode[1]='m' etc.), so writable 2-char buffers are passed. The Mat_Open
+    // check after each run fails fast on matio issues (spec Step 1).
+    if (!corpusWorkdir.empty()) {
+        char origCwd[4096];
+        if (!getcwd(origCwd, sizeof(origCwd))) {
+            std::cerr << "phase4a_tier1: getcwd failed\n";
+            return 1;
+        }
+        if (chdir(corpusWorkdir.c_str()) != 0) {
+            std::cerr << "phase4a_tier1: chdir to " << corpusWorkdir << " failed\n";
+            return 1;
+        }
+
+        // Assert a just-written .mat opens (fail fast on matio issues, spec Step 1).
+        auto assertMatOpens = [](const std::string& path) {
+            mat_t* m = Mat_Open(path.c_str(), MAT_ACC_RDONLY);
+            if (!m) {
+                std::cerr << "phase4a_tier1: Mat_Open failed for " << path << "\n";
+                exit(1);
+            }
+            Mat_Close(m);
+        };
+
+        // The legacy VRCTS write is an ofstream to `dumpDir/basefilename...`; the dir
+        // must PRE-EXIST (ofstream never creates it) or the write silently no-ops.
+        // Pre-create every Dump_Directory the runs below reference (idempotent).
+        for (const char* d : {"vrcts_solo", "vrcts_train", "vrcts_multi_tdc", "vrcts_multi_ltsv"}) {
+            mkdir(d, 0755);
+        }
+
+        // --- Run 1: solo (-s), TDC (Algo 1), epochs overridden to 0. -----------
+        // -s is UNSCORED (scored branch is m/M/t/T only): VRCTS is ALWAYS written
+        // (the unscored branch), so the 2-channel excerpt yields _chan_1/_chan_2
+        // documents -- the multi-channel VRCTS byte oracle.
+        {
+            ConfigFile conf(tier1TdcConfig, '_');
+            conf.set_val<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            conf.set_val<std::string>("multiConfigResultsOutputFile", std::string("solo_tdc.mat"));
+            conf.set_val<std::string>("Dump_Directory", std::string("vrcts_solo"));
+            std::vector<ConfigFile> configs{conf};
+            char mode[3] = {'-', 's', '\0'};
+            CorpusProcessor cp(configs, mode);
+            cp.run();
+            assertMatOpens("solo_tdc.mat");
+        }
+
+        // --- Run 2: train (-m), LTSV powermel (Algo 2), epochs 2. --------------
+        // -m is SCORED (VRCTS written since Dump_Directory is set). CostMem is
+        // (epochs+2) x nbConf = 4 x 1 (the final saveResults writes topRows(4)).
+        {
+            ConfigFile conf(tier1LtsvConfig, '_');
+            conf.set_val<std::string>("multiConfigResultsOutputFile", std::string("train_ltsv.mat"));
+            conf.set_val<std::string>("Dump_Directory", std::string("vrcts_train"));
+            std::vector<ConfigFile> configs{conf};
+            char mode[3] = {'-', 'm', '\0'};
+            CorpusProcessor cp(configs, mode);
+            cp.run();
+            assertMatOpens("train_ltsv.mat");
+        }
+
+        // --- Run 3: multiconfig (-m), BOTH configs. ----------------------------
+        // ResultsE interleaves (file, conf, chan) -- config 0 (TDC) then config 1
+        // (LTSV) rows per file. The output filename comes from configs[0]
+        // (CorpusProcessor.cpp:52), so it is set on the TDC config. Epochs come
+        // from configs[0] too; overridden to 0 to keep the multiconfig run a
+        // single-epoch solo-style pass (CostMem 1 x 2), so the row-interleaving
+        // golden isolates transformResults from the training loop.
+        {
+            ConfigFile confTdc(tier1TdcConfig, '_');
+            confTdc.set_val<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            confTdc.set_val<std::string>("multiConfigResultsOutputFile", std::string("multiconfig.mat"));
+            confTdc.set_val<std::string>("Dump_Directory", std::string("vrcts_multi_tdc"));
+            ConfigFile confLtsv(tier1LtsvConfig, '_');
+            confLtsv.set_val<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            confLtsv.set_val<std::string>("Dump_Directory", std::string("vrcts_multi_ltsv"));
+            std::vector<ConfigFile> configs{confTdc, confLtsv};
+            char mode[3] = {'-', 'm', '\0'};
+            CorpusProcessor cp(configs, mode);
+            cp.run();
+            assertMatOpens("multiconfig.mat");
+        }
+
+        // Report the measured corpus shape (extractor records it in the manifest).
+        {
+            ConfigFile conf(tier1TdcConfig, '_');
+            Corpus corpus(conf);
+            std::cout << "PHASE4A_TIER1 nb_files=" << corpus.getNbOfFiles() << "\n";
+        }
+
+        // =================================================================
+        // --- Phase 4a Task 9: tier-2 CorpusProbe TRAIN (Algo 3 reimpl) ---
+        // Transcribes CorpusProcessor::train (:83-111) + run(epoch) (:140-235) +
+        // BagOfProcessors::SegmentationFunction (:207-407) + saveAndUpdate (:409-471)
+        // around the spectral reimpl-swap (t9SpectralOverlapWorker + BlstmBack + real
+        // CostLaw). The weight chaining uses a REAL BLSTMSpectralSegmenter (via a fresh
+        // SpectralProbe held across epochs): getWeights/setWeights/updateWeights/
+        // saveWeights are REAL (real Rprop internally), fed the reimpl-derivs via the
+        // external-derivs argument. numOuterThreads 1 == the Rust static-lane N=1 golden
+        // parity mode. Epochs 3 (config), RpropInit 0.05 (config) -> a MIXED best-cost
+        // trajectory (gate FIRES @1, SKIPS @2/3, FIRES @final) measured on the Rust side.
+        {
+            const unsigned Max = 20;
+            const double PI = 3.14159265358979323846264338327;
+
+            // Corpus (REAL): the 2-file tier-2 listing (f1/f2). CorpusItem carries the
+            // .stm ref path -> the Segmentation ctor auto-loads _Reference -> getTargets
+            // fires (matching SegmentationFunction / the Rust reference-driven target).
+            ConfigFile corpusConf(tier2SpectralConfig, '_');
+            Corpus corpus(corpusConf);
+            const long nbFiles = (long)corpus.getNbOfFiles();
+            double offsetBegin = corpusConf.get<double>("Audio_offset", 0.0);
+            double durationMax = corpusConf.get<double>("Audio_max_duration", 3.6e6);
+            int fileType = corpusConf.get<int>("File_Type", 0);
+            std::string outputFileName = corpusConf.get<std::string>("multiConfigResultsOutputFile", "MultiConfigResults.mat");
+            int trainingEpochs = corpusConf.get<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            if (trainingEpochs < 0) trainingEpochs = 0;
+
+            // The REAL segmenter that OWNS the weights across epochs (weight chaining).
+            // BackPropagationActivated is TRUE in the config. mode '-m' -> (t/T)=false,
+            // (i/I)=false, so the ctor's log flags are both false (matches -m).
+            SpectralProbe segmenter(corpusConf);
+            segmenter.setWeights(BinaryFile2Vector(nnWeightsPath));   // BLSTM_weightsFile re-pointed
+            CostLaw costLaw(corpusConf, "BLSTM");
+            bool backProp = segmenter.isBackPropActivated();
+            int targetEnforcement = corpusConf.get<int>("BLSTM_TargetEnforcementStep", 0);
+            // Real-net dims (no getter for the neuron counts; hardcoded like the rest of
+            // the harness -- LSTM [23,24,24] sub [4,1], output [48,12,1] sub [1,1], ssr 4).
+            const std::vector<long> RN_lstmNN = {23, 24, 24}, RN_lstmSS = {4, 1};
+            const std::vector<long> RN_outNN = {48, 12, 1}, RN_outSS = {1, 1};
+
+            // Feature params (config-derived, constant across files/epochs).
+            ConfigFile featConf(tier2SpectralConfig, '_');
+            featConf._Params.erase("BLSTM_weightsFile");
+            FeatureCfg fc = readFeatureCfg(featConf, "BLSTM");
+
+            // Pre-size the four mem matrices (train :84-87): (epochs+2) x 1.
+            const long memRows = trainingEpochs + 2;
+            Eigen::MatrixXd costMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd badClassifMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd costLIDMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd badClassifLIDMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd resultsE;   // transformResults output (final epoch's kept)
+            std::string dumpDir = corpusConf.get<std::string>("Dump_Directory", "");
+            if (!dumpDir.empty()) mkdir(dumpDir.c_str(), 0755);
+            std::map<std::vector<ConfigFile>::size_type, double> bestCost;
+            bestCost[0] = 1e20;
+
+            // saveResults (:391-404): the 5 named vars, mems topRows(epoch+1). Written
+            // per epoch like the legacy (Mat_Create truncates); the committed artifact
+            // is the FINAL epoch's write.
+            auto saveResults = [&](long epoch) {
+                mat_t* mp = Mat_Create(outputFileName.c_str(), NULL);
+                if (!mp) { std::cerr << "tier2: Mat_Create failed for " << outputFileName << "\n"; exit(1); }
+                Matrix2MatFile("MultiConfigResults", resultsE, mp);
+                Matrix2MatFile("CostMem", costMem.topRows(epoch + 1), mp);
+                Matrix2MatFile("BadClassifMem", badClassifMem.topRows(epoch + 1), mp);
+                Matrix2MatFile("CostLIDMem", costLIDMem.topRows(epoch + 1), mp);
+                Matrix2MatFile("BadClassifLIDMem", badClassifLIDMem.topRows(epoch + 1), mp);
+                Mat_Close(mp);
+            };
+
+            // Per-epoch reimpl boundary capture for the per-epoch SEG_STRUCT probe:
+            // reimplBounds[epoch][file][chan] = [(beginTime, type), ...].
+            typedef std::vector<std::pair<double, int>> BoundVec;
+            std::vector<std::vector<std::vector<BoundVec>>> reimplBounds;
+
+            // One epoch: run every file's segmentation (reimpl FFB + backward + cost),
+            // fold the per-file derivs (ascending file order, N=1), then saveAndUpdate.
+            // Returns the post-update config-0 weight vector + the best-cost after this
+            // epoch (the non-vacuity observables). `isTrainingEpoch`: the saveAndUpdate
+            // gating (train branch always saves+updates; epoch-0/final included).
+            auto runEpoch = [&](long epoch) {
+                reimplBounds.emplace_back();
+                // Per-conf accumulated derivs (algo 3: one Nx2 matrix) + the ResPerConf
+                // rows (one row per file x channel, 18 cols like assemble_scored_row).
+                Eigen::MatrixXd accDerivs;
+                bool accInit = false;
+                std::vector<std::vector<double>> resRows;   // per file x channel
+
+                for (long jj = 0; jj < nbFiles; ++jj) {
+                    CorpusItem cit = corpus.getItem(jj);
+                    AudioStruct audio(offsetBegin, durationMax, fileType, cit);
+                    const double rate = (double)audio.getFrameRate();
+                    const long ssr = segmenter._BLSTMNeuralNetwork.getSubSamplingRatio();
+
+                    SpectralP s = deriveSpectral(fc, rate, Max);
+                    // preemph -> noise ONCE per file, before the channel loop (:216-227).
+                    if (fc.preemph > 0) audio.applyPreemph(fc.preemph);
+                    if (fc.noise_seed > 0) audio.applyNoise(fc.noise_ratio);
+
+                    // Mel bank + DCT coeffs (E2E-leg recipe) + windowing coeffs.
+                    MelFilterBank mel;
+                    if (fc.nb_bins > 0)
+                        mel = MelFilterBank(fc.min_mel, fc.max_mel, fc.nb_bins, s.min_freq_snapped,
+                                            s.max_freq_snapped, rate, s.bins - 1, fc.is_log, fc.nb_dct,
+                                            fc.ignore_first, fc.deltas_nb, fc.dd_nb);
+                    long nbFilters = mel.notEmpty() ? (long)mel.getNbFilters() : 0;
+                    long nbDct = fc.nb_dct; if (nbDct > nbFilters) nbDct = nbFilters;
+                    Eigen::MatrixXd coeffs;
+                    if (fc.nb_bins > 0 && fc.nb_dct > 0) {
+                        coeffs = Eigen::MatrixXd::Zero(nbFilters, nbDct);
+                        for (long col = 0; col < nbFilters; ++col)
+                            for (long row = 0; row < nbDct; ++row)
+                                coeffs(col, row) = std::cos(PI / nbFilters * (col + 0.5) * row);
+                    }
+                    Eigen::MatrixXd win = getWindowingCoefficients(fc.win_type, false, s.window_size + 1, fc.win_param);
+
+                    // getBLSTMParam (window/shift + real_vec_size + timeStep/offset),
+                    // mutating the segmenter's stateful members (chained across files).
+                    T9BlstmParam bp = t9DeriveBlstmParam(segmenter, s, rate, ssr, audio.getFrameCount());
+                    // Tier-2 supports ONLY the overlap FFB (the real config's path:
+                    // window 3.25 / shift 0.8 -> window_size 163, window_shift 80). A
+                    // config that lands elsewhere would silently use the wrong driver.
+                    if (bp.window_size <= 0 || bp.noOverlap) {
+                        std::cerr << "tier2 train: non-overlap window params (ws=" << bp.window_size
+                                  << " noOverlap=" << bp.noOverlap << ") -- only the overlap FFB is transcribed\n";
+                        std::abort();
+                    }
+
+                    // resetWeightsDerivatives ONCE per file (:473) -> a fresh BlstmBack
+                    // (build() zeroes derivs) accumulating across BOTH channels + windows.
+                    // Built from the CURRENT (chained) weights so the backward reads the
+                    // live weight state, not the initial file's.
+                    BlstmBack bb;
+                    bb.build(segmenter.getWeights(), RN_lstmNN, RN_lstmSS, RN_outNN, RN_outSS);
+                    bb.outputNetworkOnly = false;
+                    T6Blstm fwdOnly(segmenter.getWeights());   // unused (backward path), kept for the worker sig
+
+                    segmenter._BLSTMNeuralNetwork.setProcessingType((bp.window_size > 0), !bp.noOverlap);
+
+                    // result_vec allocated ONCE, reused across channels (:631 cross-channel
+                    // reuse quirk): the overlap accumulation seeds channel 2 from channel 1.
+                    Eigen::MatrixXd resultVec = Eigen::MatrixXd::Zero(bp.real_vec_size, 1);
+
+                    Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+                    FactoryInit<GFFTList<GFFT, 1, Max>::Result>::apply(gfft_factory);
+
+                    const int channelCount = audio.getChannelCount();
+                    // Segmentation (REAL): auto-loads the .stm _Reference from the item.
+                    Segmentation seg(audio, corpusConf.get<double>("Pruning_Threshold", 0.0));
+
+                    for (int chan = 0; chan < channelCount; ++chan) {
+                        Eigen::MatrixXd inputSeq = t9BuildSpectralInput(segmenter, audio, fc, s, chan,
+                                                                        mel, coeffs, nbDct, win, gfft_factory);
+                        // getTargets when a reference exists (:735-738): targetSeq = a
+                        // real_vec_size x 1 zeros buffer, filled by REAL getTargets.
+                        Eigen::MatrixXd target;
+                        if (seg._Reference.size() > 0) {
+                            target = resultVec;   // real_vec_size x 1 shape
+                            segmenter.getTargets(seg, bp.timeStep, bp.timeOffset, target, chan, SPEECH);
+                        }
+                        // Windowed overlap forward+backward+cost (reimpl); resultVec is
+                        // the SHARED buffer (accumulate-in-place across channels).
+                        double cost = 0.0; long nbc = 0;
+                        t9SpectralOverlapWorker(bb, fwdOnly, costLaw, inputSeq, bp.window_size,
+                                                bp.window_shift, target, backProp, targetEnforcement,
+                                                resultVec, cost, nbc);
+
+                        Eigen::MatrixXd resultVec2 = resultVec.transpose();
+                        Eigen::MatrixXd targetSeqTmp = resultVec;
+                        segmenter.results2segmentation(seg, bp.timeStep, bp.timeOffset, resultVec2, targetSeqTmp, chan, SPEECH);
+                        seg._CumulativeError[chan] = cost;
+                        seg._NbOfClassif[chan] = nbc;
+                    }
+                    seg.compute_errors();
+
+                    // Capture the (sanitized, post-compute_errors) per-channel boundary
+                    // lists for the per-epoch SEG_STRUCT probe below.
+                    {
+                        std::vector<BoundVec> fileBounds;
+                        for (int chan = 0; chan < channelCount; ++chan) {
+                            BoundVec bv;
+                            for (const Segment& sgm : seg._Classification.at(chan))
+                                bv.push_back(std::make_pair(sgm._BeginTime, (int)sgm._Type));
+                            fileBounds.push_back(bv);
+                        }
+                        reimplBounds.back().push_back(fileBounds);
+                    }
+
+                    // Assemble the per-channel scored result row (SegmentationFunction
+                    // :312-351, scored branch). 18 cols: [Pfa*100, Pmiss*100, globalERR*100,
+                    // time_per_hour(masked), cumErr, sigDur, spDur, nbWords, corr, subs, ins,
+                    // dels, cov, delay, LIDcumErr(0), LIDcorrect(0), LIDnbClassif(0), nbClassif].
+                    for (int chan = 0; chan < channelCount; ++chan) {
+                        double globalErr = 0.0;
+                        for (int k = (int)OTHER; k < (int)EXCLUDED; ++k)
+                            globalErr += seg._ClassificationErrors.at(chan)[(segment_class)k]._ErrorRate;
+                        double spdur = 0.0;
+                        for (std::deque<Segment>::iterator it = seg._Classification.at(chan).begin(); it + 1 != seg._Classification.at(chan).end(); ++it)
+                            if (it->_Type == SPEECH) spdur += (it + 1)->_BeginTime - it->_BeginTime;
+                        std::vector<double> row;
+                        row.push_back(100 * seg._ClassificationErrors.at(chan)[SPEECH]._Pfa);
+                        row.push_back(100 * seg._ClassificationErrors.at(chan)[SPEECH]._Pmiss);
+                        row.push_back(100 * globalErr);
+                        row.push_back(0.0);   // time_per_hour (masked)
+                        row.push_back(seg._CumulativeError[chan]);
+                        row.push_back(((double)audio.getFrameCount() - 1.0) / audio.getFrameRate());
+                        row.push_back(spdur);
+                        row.push_back(seg._WordErrorRate[chan]._NbWords);
+                        row.push_back(seg._WordErrorRate[chan]._Corrects);
+                        row.push_back(seg._WordErrorRate[chan]._Substitutions);
+                        row.push_back(seg._WordErrorRate[chan]._Insertions);
+                        row.push_back(seg._WordErrorRate[chan]._Deletions);
+                        row.push_back(seg._WordErrorRate[chan]._CoveragePenalty);
+                        row.push_back(seg._WordErrorRate[chan]._DelayPenalty);
+                        row.push_back(0.0);   // LID cumErr
+                        row.push_back(0.0);   // LID correct
+                        row.push_back(seg._LIDNbOfClassif[chan]);
+                        row.push_back(seg._NbOfClassif[chan]);
+                        resRows.push_back(row);
+                    }
+
+                    // VRCTS (scored branch :352-356): dumpDir set -> REAL toFile_VRCTS on
+                    // the reimpl-driven Segmentation. Written per epoch (overwritten);
+                    // the committed artifact is the FINAL epoch's bytes.
+                    if (!dumpDir.empty()) {
+                        std::string fn = audio.getAudioFileName();
+                        std::string basefilename = fn.substr(fn.find_last_of('/') + 1,
+                                                             fn.size() - fn.find_last_of('/') - 1 - 4);
+                        seg.toFile_VRCTS(dumpDir + "/" + basefilename);
+                    }
+
+                    // Per-file deriv fold (:183-191), ascending file order (N=1). The
+                    // reimpl file derivs are bb.flatDerivs() (accumulated across channels).
+                    Eigen::MatrixXd fileDerivs = bb.flatDerivs();
+                    if (!accInit) { accDerivs = fileDerivs; accInit = true; }
+                    else accDerivs += fileDerivs;
+                    audio.reset();
+                }
+
+                // transformResults (:342-389) -> ResPerConf[0] (rows x 18) + ResultsE
+                // ([file+1, conf+1, chan+1, res...]; single conf, 2 channels per file,
+                // ascending file then channel -- exactly the resRows push order).
+                const long nRows = (long)resRows.size();
+                const long nCols = nRows > 0 ? (long)resRows[0].size() : 18;
+                Eigen::MatrixXd resPerConf(nRows, nCols);
+                resultsE = Eigen::MatrixXd::Zero(nRows, 3 + nCols);
+                const long chansPerFile = nRows / nbFiles;
+                for (long r = 0; r < nRows; ++r) {
+                    for (long c = 0; c < nCols; ++c) resPerConf(r, c) = resRows[r][c];
+                    resultsE(r, 0) = (double)(r / chansPerFile + 1);   // file+1
+                    resultsE(r, 1) = 1.0;                             // conf+1
+                    resultsE(r, 2) = (double)(r % chansPerFile + 1);  // chan+1
+                    for (long c = 0; c < nCols; ++c) resultsE(r, 3 + c) = resRows[r][c];
+                }
+
+                // saveAndUpdate (:409-471) for conf 0 (algo 3). Column sums/means.
+                std::vector<double> sums(nCols, 0.0), means(nCols, 0.0);
+                for (long r = 0; r < nRows; ++r) for (long c = 0; c < nCols; ++c) sums[c] += resPerConf(r, c);
+                for (long c = 0; c < nCols; ++c) means[c] = sums[c] / (double)nRows;
+                double cost = sums[4];
+                if (sums[nCols - 1] > 0) cost /= sums[nCols - 1];
+                double badClassif = means[2];
+                double costLIDMemVal = sums[14];
+                if (sums[nCols - 2] > 0) costLIDMemVal /= sums[nCols - 2];
+                double badLIDClassif = 100.0 - means[15];
+                double totalSpeechDuration = means[6] * nRows;
+                costMem(epoch, 0) = cost;
+                badClassifMem(epoch, 0) = badClassif;
+                costLIDMem(epoch, 0) = costLIDMemVal;
+                badClassifLIDMem(epoch, 0) = badLIDClassif;
+
+                // bestNNWeight_<pos+1>_<filename> compose + REAL saveWeights (gated on
+                // bestCost > cost) -> real Rprop-free artifact split (:462-464).
+                std::ostringstream bn;
+                bn << iof::fmtr("bestNNWeight_%s_" + outputFileName) << 1;
+                bool gateFired = false;
+                if (bestCost[0] > cost) {
+                    // saveWeights takes the derivs + inputStatistics externally; the reimpl
+                    // path never accumulated input stats, so pass a default InputStatistics
+                    // (matches the Rust save_weights stats tail: mean/std unused on this path).
+                    InputStatistics emptyStats;
+                    segmenter.saveWeights(bn.str(), accDerivs, emptyStats);
+                    bestCost[0] = cost;
+                    gateFired = true;
+                }
+                // costLID = -1.0 gate (:465) then REAL updateWeights (:466) -> real Rprop.
+                // (For algo 3 the update criterion is `cost` -- the costLID gate value is
+                // computed for parity but unused by the algo-3 arm, BagOfProcessors:184-188.)
+                double costLID = costLIDMemVal;
+                if (totalSpeechDuration < 1e-3) costLID = -1.0;
+                (void)costLID;
+                segmenter.updateWeights(accDerivs, cost);   // real Rprop, chains getWeights
+
+                // saveResults (:224) -- AFTER saveAndUpdate, every training epoch.
+                saveResults(epoch);
+                (void)gateFired;
+                return std::pair<Eigen::VectorXd, double>(segmenter.getWeights(), bestCost[0]);
+            };
+
+            // train() structure (:92-108): epoch 0 (solo, _Mode) -> inner epochs 1..N
+            // (lowercase m) -> final epoch N+1 (_Mode). saveAndUpdate on every epoch.
+            std::vector<std::pair<Eigen::VectorXd, double>> trace;
+            for (long epoch = 0; epoch <= trainingEpochs + 1; ++epoch) {
+                auto r = runEpoch(epoch);
+                trace.push_back(r);
+                // Dump the post-update weight vector (epochs 0..N+1).
+                Eigen::MatrixXd wcol = r.first;   // Nx1
+                Matrix2BinaryFile(out + "tier2_weights_epoch" + std::to_string(epoch) + ".bin", wcol);
+                ++dumps;
+            }
+
+            // Non-vacuity report (extractor records the trajectory in the manifest):
+            // consecutive epoch vectors DIFFER + the best-cost gate fired AND skipped.
+            int nDiffer = 0, nFired = 0, nSkipped = 0;
+            for (size_t e = 1; e < trace.size(); ++e) {
+                bool differ = false;
+                for (long k = 0; k < trace[e].first.size(); ++k) {
+                    uint64_t a, b; double av = trace[e].first(k), bv = trace[e - 1].first(k);
+                    std::memcpy(&a, &av, 8); std::memcpy(&b, &bv, 8);
+                    if (a != b) { differ = true; break; }
+                }
+                if (differ) ++nDiffer;
+                if (trace[e].second < trace[e - 1].second) ++nFired; else ++nSkipped;
+            }
+            std::cout << "PHASE4A_TIER2_TRAIN epochs=" << (trainingEpochs + 2)
+                      << " differ=" << nDiffer << " fired=" << nFired << " skipped=" << nSkipped
+                      << " best_cost=[";
+            for (size_t e = 0; e < trace.size(); ++e)
+                std::cout << (e ? "," : "") << std::setprecision(17) << trace[e].second;
+            std::cout << "]\n";
+
+            // --- SECONDARY SEG_STRUCT probe (2b convention), PER EPOCH: run the SAME
+            // train once more with the REAL Eigen forward (the real compiled
+            // getSegmentation does the whole chain internally: features via the real
+            // Eigen applyDCT, forward+backward, reference-driven getTargets since the
+            // Segmentation ctor auto-loads the .stm) + the REAL updateWeights fed the
+            // REAL net's own derivs. Per epoch, per file/channel, the segment count +
+            // types must match the reimpl train's captured boundaries EXACTLY (abort on
+            // mismatch); the max boundary dt is recorded per epoch. The real-Eigen
+            // weight/cost trajectory diverges from the reimpl's at the ULP level (the
+            // blocked-GEMM story) -- the per-epoch cost deltas are printed as
+            // TIER2_CALIB calibration lines, NOT gated. saveWeights is SKIPPED here
+            // (bookkeeping only) so the reimpl train's committed artifacts are not
+            // clobbered; the gate bookkeeping still runs for the calibration print. ---
+            {
+                ConfigFile cRl(tier2SpectralConfig, '_');
+                SpectralProbe segmenterR(cRl);
+                segmenterR.setWeights(BinaryFile2Vector(nnWeightsPath));
+                double bestCostR = 1e20;
+                int nFiredR = 0, nSkippedR = 0;
+                for (long epoch = 0; epoch <= trainingEpochs + 1; ++epoch) {
+                    Eigen::MatrixXd accDerivsR;
+                    bool accInitR = false;
+                    double sum4 = 0.0, sum17 = 0.0;
+                    double maxDt = 0.0;
+                    for (long jj = 0; jj < nbFiles; ++jj) {
+                        CorpusItem cit = corpus.getItem(jj);
+                        AudioStruct audioRl(offsetBegin, durationMax, fileType, cit);
+                        Segmentation segRl(audioRl, cRl.get<double>("Pruning_Threshold", 0.0));
+                        segmenterR.getSegmentation(audioRl, segRl);   // REAL Eigen chain
+                        segRl.compute_errors();
+
+                        // Per-file real derivs fold (the real class resets per file).
+                        Eigen::MatrixXd d = segmenterR.getWeightsDerivatives();
+                        if (!accInitR) { accDerivsR = d; accInitR = true; }
+                        else accDerivsR += d;
+
+                        for (int chan = 0; chan < audioRl.getChannelCount(); ++chan) {
+                            sum4 += segRl._CumulativeError[chan];
+                            sum17 += (double)segRl._NbOfClassif[chan];
+                            // Structural compare vs the reimpl epoch's captured bounds.
+                            const auto& a = reimplBounds[epoch][jj][chan];
+                            const auto& b = segRl._Classification.at(chan);
+                            if (a.size() != b.size()) {
+                                std::cerr << "SEG_STRUCT site=tier2_train_epoch" << epoch
+                                          << "_f" << jj << "_c" << chan << " ABORT: count "
+                                          << a.size() << " (reimpl) != " << b.size() << " (real)\n";
+                                std::abort();
+                            }
+                            for (std::deque<Segment>::size_type ii = 0; ii < b.size(); ++ii) {
+                                if (a[ii].second != (int)b[ii]._Type) {
+                                    std::cerr << "SEG_STRUCT site=tier2_train_epoch" << epoch
+                                              << "_f" << jj << "_c" << chan
+                                              << " ABORT: type mismatch at " << ii << "\n";
+                                    std::abort();
+                                }
+                                double dt = std::fabs(a[ii].first - b[ii]._BeginTime);
+                                if (dt > maxDt) maxDt = dt;
+                            }
+                        }
+                        audioRl.reset();
+                    }
+                    double costR = sum4;
+                    if (sum17 > 0) costR /= sum17;
+                    if (bestCostR > costR) { bestCostR = costR; if (epoch > 0) ++nFiredR; }
+                    else if (epoch > 0) ++nSkippedR;
+                    segmenterR.updateWeights(accDerivsR, costR);   // REAL Rprop, real derivs
+                    std::cout << "SEG_STRUCT site=tier2_train_epoch" << epoch << " ok=1 max_dt="
+                              << std::scientific << std::setprecision(3) << maxDt << "\n";
+                    std::cout << "TIER2_CALIB epoch=" << epoch << " cost_reimpl="
+                              << std::setprecision(17) << costMem(epoch, 0)
+                              << " cost_real=" << costR << "\n";
+                }
+                std::cout << "TIER2_CALIB real_gate fired=" << nFiredR
+                          << " skipped=" << nSkippedR << "\n";
+            }
+        }
+
+        // --- Phase 4a Task 9: tier-2 CorpusProbe gradCheck (synthetic signal) ----
+        // Transcribes CorpusProcessor::gradCheck (:237-340) on the SAME synthetic
+        // config/corpus/seeded-weights the Rust grad_check_synthetic test builds ([2,2]
+        // LSTM + [4,1] output, 137 weights, algo 4 signal driver -- the signal result
+        // buffer is Nx1). Capped at maxWeights=10 (gradcheck_max_weights in the manifest).
+        // For a signal-algo synthetic net the FFB is the plain (window 0) driver; the
+        // reimpl uses BlstmBack (whole-sequence forward+backward+cost) on the raw 1-col
+        // signal. Dumps per-weight [analytic_col0, analytic_col1, numerical] + the two
+        // mean errors -> tier2_gradcheck.bin. The seeded weights are dumped as a .bin the
+        // Rust test loads (single source of truth for the seeding).
+        {
+            const int maxWeights = 10;
+            ConfigFile gcConf(tier2GradCheckConfig, '_');
+            Corpus gcCorpus(gcConf);
+            const long nbFiles = (long)gcCorpus.getNbOfFiles();
+            double offsetBegin = gcConf.get<double>("Audio_offset", 0.0);
+            double durationMax = gcConf.get<double>("Audio_max_duration", 3.6e6);
+            int fileType = gcConf.get<int>("File_Type", 0);
+            double epsilon = gcConf.get<double>("Neural_Networks_Gradient_Check_Epsilon", 1e-5);
+
+            // Synthetic signal net dims from the config (BLSTM prefix, like every driver): [2,2] LSTM
+            // sub [1] + [4,1] output sub [1] (matches the Rust grad_check_synthetic net).
+            // getNbOfWeights via a throwaway net; the neuron dims read from the config
+            // (no neuron-nb getter -- the harness reads dims from config/hardcodes them).
+            BLSTMNeuralNetwork<LSTMLayer> netProbe(gcConf, "BLSTM", true);
+            const long nbW = netProbe.getNbOfWeights();
+            std::vector<long> lstmNN = gcConf.get_list<long>("BLSTM_LSTMNeuronNb");
+            std::vector<long> lstmSS = gcConf.get_list<long>("BLSTM_LSTMSubSampling");
+            std::vector<long> outNN = gcConf.get_list<long>("BLSTM_OutputNeuronNb");
+            std::vector<long> outSS = gcConf.get_list<long>("BLSTM_OutputSubSampling");
+            const long ssr = (long)netProbe.getSubSamplingRatio();
+            CostLaw gcCost(gcConf, "BLSTM");
+
+            // Seeded weights (phase3 synth_flat: ((k*11+3)%97)/97 - 0.5) -- the same
+            // deterministic nonzero pattern the Rust test uses. Dumped as the single
+            // source of truth for the Rust replay.
+            Eigen::VectorXd seed(nbW);
+            for (long k = 0; k < nbW; ++k) seed(k) = ((double)((k * 11 + 3) % 97)) / 97.0 - 0.5;
+            {
+                Eigen::MatrixXd sc = seed;   // Nx1
+                Matrix2BinaryFile(out + "tier2_gradcheck_seed.bin", sc);
+                ++dumps;
+            }
+
+            // The signal driver feeds the raw 1-col signal per channel (:188). Build the
+            // per-file per-channel signal input + the getTargets time params once (weight-
+            // independent). The Segmentation is held per file (owns the .stm _Reference).
+            struct GcChan { Eigen::MatrixXd input; Eigen::MatrixXd target; int chan; };
+            std::vector<GcChan> chans;
+            std::vector<Segmentation*> fileSegs;   // Segmentation is non-copyable (stringstream member)
+            std::vector<AudioStruct*> audios;      // kept alive across the sweep
+            for (long jj = 0; jj < nbFiles; ++jj) {
+                CorpusItem cit = gcCorpus.getItem(jj);
+                AudioStruct* audio = new AudioStruct(offsetBegin, durationMax, fileType, cit);
+                audios.push_back(audio);
+                const double rate = (double)audio->getFrameRate();
+                // preemph -> noise (BLSTMSignalSegmenter.cpp:137-148): applied ONCE to
+                // the audio BEFORE the channel extraction, exactly as the Rust signal
+                // driver does (signal.config: preemph 0.97, noise_seed 0).
+                double preemph = gcConf.get<double>("BLSTM_preemph_ratio", 0.0);
+                int noiseSeed = gcConf.get<int>("BLSTM_noise_seed", 0);
+                if (preemph > 0) audio->applyPreemph(preemph);
+                if (noiseSeed > 0) audio->applyNoise(gcConf.get<double>("BLSTM_noise_ratio", 0.0));
+                // Signal window params (BLSTMSignalSegmenter.cpp:96-108). window 0 -> plain
+                // FFB; shift 0.1 -> window_shift (used only for the getTargets time grid).
+                double windowSec = gcConf.get<double>("BLSTM_window", 0.0);
+                double shiftSec = gcConf.get<double>("BLSTM_shift", 0.1);
+                long windowSize = (long)boost::math::round(windowSec * rate / 2.0);
+                if (windowSize != 0 && windowSize < ssr) windowSize = ssr;
+                long windowShift = (long)boost::math::round(shiftSec * rate);
+                if (windowSize == 0 || windowShift < 1) windowShift = 1;
+                long frameCount = audio->getFrameCount();
+                long realVecSize = (frameCount % windowShift == 0) ? frameCount / windowShift : frameCount / windowShift + 1;
+                if (ssr > 1) { for (auto r : lstmSS) realVecSize /= r; for (auto r : outSS) realVecSize /= r; }
+                double timeStep = ((double)windowShift / rate) * ssr;
+                double timeOffset = timeStep / 2 - ((double)windowShift / rate) / 2;
+                fileSegs.push_back(new Segmentation(*audio, gcConf.get<double>("Pruning_Threshold", 0.0)));
+                for (int chan = 0; chan < audio->getChannelCount(); ++chan) {
+                    Eigen::MatrixXd in(frameCount, 1);
+                    for (long i = 0; i < frameCount; ++i) in(i, 0) = audio->_Data(chan, i);
+                    // getTargets REAL over the file's .stm reference (window 0 -> the
+                    // whole-sequence output has realVecSize rows).
+                    Eigen::MatrixXd tgt = Eigen::MatrixXd::Zero(realVecSize, 1);
+                    if (fileSegs[jj]->_Reference.size() > 0) {
+                        SegProbe sp;
+                        sp.getTargets(*fileSegs[jj], timeStep, timeOffset, tgt, chan, SPEECH);
+                    }
+                    chans.push_back(GcChan{in, tgt, chan});
+                }
+            }
+
+            // One analytic+cost pass at a given flat weight vector: returns cost, fills
+            // derivsOut. Plain whole-sequence FFB (signal window 0): BlstmBack forward +
+            // CostLaw seed + backward + scalar-VAD cost, summed over files/channels.
+            auto costAndDerivs = [&](const Eigen::VectorXd& flat, Eigen::MatrixXd& derivsOut) {
+                BlstmBack bb; bb.build(flat, lstmNN, lstmSS, outNN, outSS); bb.outputNetworkOnly = false;
+                double totalCost = 0.0; long totalNbc = 0;
+                for (const auto& gc : chans) {
+                    // Type -1 self-normalization in place (the synthetic net uses type 0;
+                    // gate on it below by reading the config once -- but the Rust synthetic
+                    // config sets InputNormalizationType 0, so NO normalization). To match
+                    // the Rust net exactly, do NOT normalize (type 0).
+                    Eigen::MatrixXd input = gc.input;
+                    Eigen::MatrixXd oF, oB, hcat, outShort;
+                    bb.forward(input, oF, oB, outShort, hcat);
+                    if (gc.target.rows() > 0) {
+                        // The target was sized realVecSize; the plain FFB output is realVecSize
+                        // rows too (window 0, whole sequence). Seed + backward + cost.
+                        Eigen::MatrixXd seed2 = Eigen::MatrixXd::Zero(outShort.rows(), outShort.cols());
+                        gcCost.computeDeltas(outShort, gc.target, seed2);
+                        bb.backward(input, oF, oB, hcat, outShort, seed2);
+                        // PER-CHANNEL SUBTOTAL (gradCheck :271-292 sums the per-channel
+                        // row[4] values -- each a computeCost-local subtotal -- NOT every
+                        // row into one accumulator; FP non-associativity, same fix as the
+                        // train worker).
+                        double chanCost = 0.0;
+                        for (long r = 0; r < outShort.rows(); ++r)
+                            chanCost += gcCost.computeUnitaryCost(outShort(r, 0), gc.target(r, 0));
+                        totalCost += chanCost;
+                        totalNbc += outShort.rows();
+                    }
+                }
+                derivsOut = bb.flatDerivs();
+                return (totalNbc > 0) ? totalCost / (double)totalNbc : totalCost;
+            };
+
+            // Analytic derivs at the seed (gradCheck :251-252 run(1,...)).
+            Eigen::MatrixXd analytic;
+            costAndDerivs(seed, analytic);
+
+            // Central-difference sweep over the first maxWeights (:263-331).
+            const long sweep = std::min<long>(maxWeights, nbW);
+            Eigen::MatrixXd perWeight(sweep, 3);   // [analytic_col0, analytic_col1, numerical]
+            double gradErr = 0.0, gradRelErr = 0.0;
+            for (long kk = 0; kk < sweep; ++kk) {
+                Eigen::VectorXd wp = seed; wp(kk) += epsilon;
+                Eigen::MatrixXd dP; double costPlus = costAndDerivs(wp, dP);
+                Eigen::VectorXd wm = seed; wm(kk) -= epsilon;
+                Eigen::MatrixXd dM; double costMinus = costAndDerivs(wm, dM);
+                double numerical = (costPlus - costMinus) / (2 * epsilon);
+                double back = analytic(kk, 0) / analytic(kk, 1);
+                perWeight(kk, 0) = analytic(kk, 0);
+                perWeight(kk, 1) = analytic(kk, 1);
+                perWeight(kk, 2) = numerical;
+                gradErr += std::fabs(back - numerical);
+                double ref = std::fabs(numerical); if (ref < 1e-24) ref = 1e-24;
+                gradRelErr += std::fabs(back - numerical) / ref;
+            }
+            gradErr /= (double)sweep;
+            gradRelErr /= (double)sweep;
+
+            // tier2_gradcheck.bin: (sweep+1) x 3. Rows 0..sweep-1 the per-weight triples;
+            // final row [mean_error, mean_relative_error, 0].
+            Eigen::MatrixXd gcDump(sweep + 1, 3);
+            gcDump.topRows(sweep) = perWeight;
+            gcDump(sweep, 0) = gradErr; gcDump(sweep, 1) = gradRelErr; gcDump(sweep, 2) = 0.0;
+            Matrix2BinaryFile(out + "tier2_gradcheck.bin", gcDump);
+            ++dumps;
+            std::cout << "PHASE4A_TIER2_GRADCHECK sweep=" << sweep << " mean_err="
+                      << std::scientific << std::setprecision(6) << gradErr
+                      << " mean_rel_err=" << gradRelErr << "\n";
+            for (auto* s2 : fileSegs) delete s2;
+            for (auto* a : audios) delete a;
+            (void)nbFiles;
+        }
+
+        if (chdir(origCwd) != 0) {
+            std::cerr << "phase4a_tier1: chdir back to " << origCwd << " failed\n";
+            return 1;
+        }
+        std::cout << "OK: phase4a_tier1 (solo_tdc.mat, train_ltsv.mat, multiconfig.mat + VRCTS)\n";
     }
 
     // --- Phase 2b Task 1: faithful iof::fmtr self-test ------------------------

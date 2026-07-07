@@ -28,11 +28,18 @@ realfft = "3"
 symphonia = { version = "0.5", features = ["wav", "flac", "ogg", "vorbis"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
 
+[features]
+# Test-only observation hooks (e.g. BlstmSpectralSegmenter's update-costLID
+# capture for phase4a_save_update.rs), enabled for `cargo test` via the
+# dev-dependency self-reference below so `cargo build`/release carry nothing.
+test-support = []
+
 [dev-dependencies]
 approx = "0.5"
 rstest = "0.26"
 proptest = "1"
 tempfile = "3"
+speech = { path = ".", features = ["test-support"] }
 
 [profile.release]
 opt-level = 3

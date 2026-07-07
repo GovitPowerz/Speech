@@ -1,6 +1,6 @@
 //! Skeleton smoke tests: the crate boots and the real plumbing works.
 
-use speech::cli::Mode;
+use speech::cli::{Mode, ModeKind};
 use speech::constants::{MAX_RAND_SIZE, random_uniform};
 
 #[test]
@@ -10,8 +10,20 @@ fn version_is_set() {
 
 #[test]
 fn mode_parses_flags() {
-    assert_eq!(Mode::from_flag("-m"), Some(Mode::Multi));
-    assert_eq!(Mode::from_flag("-s"), Some(Mode::Solo));
+    assert_eq!(
+        Mode::from_flag("-m"),
+        Some(Mode {
+            kind: ModeKind::Multi,
+            verbose: false
+        })
+    );
+    assert_eq!(
+        Mode::from_flag("-s"),
+        Some(Mode {
+            kind: ModeKind::Solo,
+            verbose: false
+        })
+    );
     assert_eq!(Mode::from_flag("--nope"), None);
 }
 

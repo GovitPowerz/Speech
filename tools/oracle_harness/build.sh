@@ -80,6 +80,31 @@ SRC=../../legacy/src
 #   BLSTMSignalSegmenter       - signal-domain segmenter
 #   LongTermSpectralVariation  - BLSTMSpectralSegmenter's base (link-required)
 #   TimeDomainCorrel           - TDC segmenter
+#   -- Phase 4a Task 8 corpus-driver TUs: the REAL CorpusProcessor stack so the
+#      phase4a_tier1 stage runs CorpusProcessor(configs, mode).run() end to end --
+#   CorpusProcessor            - the top-level driver (mode dispatch, epoch loop,
+#                                transformResults, saveResults). Includes omp.h ->
+#                                resolved by the shims/omp.h no-op (NO -fopenmp, so
+#                                the #pragma omp parallel-for runs sequentially ==
+#                                the N=1 golden parity mode).
+#   BagOfProcessors            - SegmentationFunction dispatch + saveAndUpdate; its
+#                                members include vector<VRCTSPart>/<BLSTMSpectralLID>/
+#                                <TwinBLSTMSpectralLID>, so those three TUs are
+#                                LINK-required (constructed/destructed even for algo
+#                                1/2, which never populate them).
+#   Corpus / CorpusItem        - listing/mapping parse (CorpusItem already linked
+#                                above for AudioStruct); Corpus.cpp is new.
+#   VRCTSpart / BLSTMSpectralLID / TwinBLSTMSpectralLID - link-only (bag member
+#                                vectors odr-use their ctors/dtors/vtables).
+#   FileDispatcher             - CorpusProcessor.cpp's free CalcThread() (the
+#                                commented-out threading path) is still emitted and
+#                                odr-uses FileDispatcher::NextSeq/updateResults ->
+#                                LINK-required (CalcThread is never CALLED; the live
+#                                run() uses the omp-shimmed sequential parallel-for).
+#   ConvolutionalNeuralNetwork / ConvolutionalLayer - TwinBLSTMSpectralLID's ctor +
+#                                getSegmentation odr-use the conv stack (broken-as-
+#                                committed at RUNTIME, but links; never constructed
+#                                for algo 1/2 in this stage).
 #
 # -include boost/math/special_functions/round.hpp: modern Boost's tr1.hpp (pulled
 # by Helpers.hpp) no longer re-exports boost::math::round, which getWindowingCoeff
@@ -97,6 +122,9 @@ SRC=../../legacy/src
   "$SRC/Segmenter.cpp" "$SRC/Segmentation.cpp" "$SRC/BLSTMSpectralSegmenter.cpp" \
   "$SRC/BLSTMSignalSegmenter.cpp" "$SRC/LongTermSpectralVariation.cpp" \
   "$SRC/TimeDomainCorrel.cpp" \
+  "$SRC/CorpusProcessor.cpp" "$SRC/BagOfProcessors.cpp" "$SRC/Corpus.cpp" \
+  "$SRC/VRCTSpart.cpp" "$SRC/BLSTMSpectralLID.cpp" "$SRC/TwinBLSTMSpectralLID.cpp" \
+  "$SRC/FileDispatcher.cpp" "$SRC/ConvolutionalNeuralNetwork.cpp" "$SRC/ConvolutionalLayer.cpp" \
   -L "$BREW/lib" -lsndfile -lmatio -lpng -o oracle_harness
 
 echo "OK: built oracle_harness with $GXX"

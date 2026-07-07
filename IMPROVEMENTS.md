@@ -1298,6 +1298,391 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   after a step). *Mutation evidence:* changing the tail push to `[0.0, 0.0]` failed
   `meanstd_tail_structure`; reverted.
 
+- **[phase4a] Corpus no-listing fallback: the loop's `lang = "unk"` / `dial = "unk"` defaults are
+  DEAD when the key is absent -- lang/dial come out `""`** (`engine/corpus.rs::from_config`, from
+  `Corpus.cpp:44-56` + `ConfigFile.h:70-77`): `get_list<string>("reflangfiles", "", filesNames.size(), ',')`
+  pads an ABSENT key to exactly `filesNames.size()` copies of the overload's OWN default `""` -- so
+  `ii < refLangFiles.size()` is always true and the loop's local `"unk"` initializer is never
+  reached; every item gets language/dialect `""`. `"unk"` only fires when the key is PRESENT but
+  its comma-split is SHORTER than `files` (a non-empty list is never padded: `vector::resize` runs
+  only in the `.empty()` branch). *Why deferred:* the `""`-vs-`"unk"` language feeds the
+  class-mapping lookup and the count keys; changing it changes class indices. *Pinned by:*
+  `no_listing_fallback` (absent keys -> `""`) + `no_listing_fallback_unk_when_reflangfiles_short`
+  (present-but-short -> `"unk"` for the uncovered index only).
+
+- **[phase4a] Corpus ctor "normalizing coefficients" print derefs `++begin()` -- UB when the corpus
+  has fewer than 2 classes** (dropped, display-only; from `Corpus.cpp:123-130`): the legacy tail
+  print walks `_ClassCount.begin(); ++it; it->second` unconditionally, dereferencing `end()` (UB)
+  whenever `_ClassCount` has a single entry (e.g. every file unknown-class). The whole block is
+  log-only state-free output and is dropped in the port (doc-comment on `from_config`); no
+  class-balance state is computed there. *Why deferred:* nothing to port -- recorded so nobody
+  "restores" the print verbatim later.
+
+- **[phase4a] Listing weight/fileId `istringstream` extraction: hexfloat atom accumulation makes
+  `"0.5abc"` FAIL but `"0.5z"` extract 0.5** (`engine/corpus.rs::iss_extract_double`/
+  `iss_extract_int`, from `Corpus.cpp:80-91`): num_get stage 2 accumulates every char from the
+  float atom set (digits, `a-f`/`A-F`, `x/X`, `p/P`, sign only first-or-after-exponent, at most
+  one `.` -- a second dot STOPS accumulation, so `"1.2.3"` extracts 1.2), then stage 3 must consume
+  the WHOLE accumulated string or the extraction fails and the 1.0/1 defaults are kept. Int atoms
+  exclude `x`/`.` (`"7x"` -> 7, `"0x10"` -> 0); overflow sets failbit (C++11) -> default kept. NOT
+  reproduced (cannot occur in real listings): stage-3 hexfloat (`"0x1p3"`) and the
+  subnormal-underflow ERANGE corner. *Why deferred:* provenance -- the accept-on-success guard is
+  the load-bearing part. *Pinned by:* `iss_extract_matches_istringstream_oracle` (31-case table
+  captured from compiled `istringstream >>` probes on the oracle env).
+
+- **[phase4a] `saveWeights` glues the `weights_`/`weightsDerivatives_` prefix to the WHOLE filename
+  string, not the basename** (`nn/blstm.rs::save_weights`, from `BLSTMNeuralNetwork.cpp:319-323`):
+  `buf << "weights_%s" << filename` (and `buf2 << "weightsDerivatives_%s"`) string-concatenates the
+  prefix before the ENTIRE path, so a `<filename>` of `/out/epoch995.mat` yields the sibling `.bin`
+  path `weights_/out/epoch995.mat` -- the prefix does NOT respect path separators. In production
+  `<filename>` is a bare basename (the engine runs in the output dir), so the siblings land next to
+  it; a full path would target a nonexistent `weights_<dir>/` parent. Reproduced verbatim (the port
+  concatenates identically). The `<filename>` itself typically ends in `.mat` even though the two
+  siblings are the custom `.bin` codec (i64 rows/cols + column-major f64), NOT MAT-files -- the
+  commented-out real `.mat` weight writes (`:324-325`) are dead. *Why deferred:* provenance; the
+  string-glue is load-bearing for any tooling that reads these siblings by the same rule. *Fix
+  candidate:* once the driver bag is ported, prepend the prefix to the basename only (or write to a
+  dedicated artifacts dir). *Pinned by:* `save_weights_writes_three_artifacts`
+  (`tests/phase4a_lifecycle.rs`): the sibling paths are computed by the same whole-string glue;
+  `tier2_train_epoch_weights_golden` (`tests/phase4a_train_golden.rs`): the glued-name siblings
+  (`weights_bestNNWeight_1_tier2_spectral.mat`, io::binary despite the `.mat` suffix) are compared
+  value-for-value against the REAL legacy `saveWeights` output from the harness train stage.
+
+- **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
+  the console warning** (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):
+  a `.bin` with FEWER elements than `getNbOfWeights()` is a hard `exit(1)` (ported as `Err`); with
+  MORE, the legacy prints `Warning: The number of gains given in %s is more than what's needed.` and
+  STILL calls `setWeights`, which consumes only the head and ignores the tail. The port reproduces
+  the truncation exactly (`set_weights` already tolerates an over-long slice) but does NOT emit the
+  console warning -- there is no logging seam here yet. *Why deferred:* the numeric behavior (load
+  the head, ignore the tail) is load-bearing and reproduced; the warning is a diagnostic side-effect
+  with no golden. *Fix candidate:* thread a log sink through the engine drivers and restore the
+  warning (or make the mismatch a hard error once configs are trusted). *Pinned by:*
+  `weights_file_too_many_truncates` + `weights_file_too_few_errors` (`tests/phase4a_lifecycle.rs`).
+
+- **[phase4a] `BagOfProcessors` ctor clears `files`/`refsegfiles`/`reflangfiles` to `""` in every
+  config map but deliberately NOT `refdialfiles`** (`engine/bag_of_processors.rs::from_configs`,
+  from `BagOfProcessors.cpp:21-23`): a memory-reuse quirk in the legacy ctor -- three of the four
+  per-file listing keys are blanked in-place before any driver is constructed (so a later corpus
+  load off the SAME map sees them empty), the fourth is left untouched with no apparent reason.
+  Reproduced verbatim (asymmetric clearing, not a full reset). *Why deferred:* provenance; changing
+  this would silently alter what `Corpus::from_config` (Task 5) sees on a shared map. *Fix
+  candidate:* none identified -- likely an oversight in the original, revisit only if a corpus-load
+  golden depends on `refdialfiles` being live post-bag-construction. *Pinned by:*
+  `key_clears_applied` (`src/engine/bag_of_processors.rs`).
+
+- **[phase4a] `isBackPropActivated`/`getWeights` non-NN-algo defaults are asymmetric (`vec![false]`
+  vs empty vec)** (`engine/bag_of_processors.rs::{is_back_prop_activated, get_weights}`, from
+  `BagOfProcessors.cpp:73-101`): for algo 1/2 (non-NN segmenters, no `else if` branch matches),
+  `isBackPropActivated` falls through to the ctor's own `return vector<bool>(1, false)` (`:85`) --
+  a ONE-element vec -- while `getWeights`/`getInputStatistics`/`getWeightsDerivatives` fall through
+  to `return vector<...>()` (`:100`,`:128-129`,`:143-144`) -- an EMPTY vec. Not obviously
+  intentional (the four dispatch methods otherwise mirror each other structurally), but reproduced
+  as written since it is directly observable (a caller iterating `is_back_prop_activated` for a
+  non-NN config sees one `false`, not zero elements). *Why deferred:* provenance; changing either
+  side would need a caller-side audit of every non-NN-algo consumer once Task 5's corpus-processor
+  driver lands. *Pinned by:* `dispatch_vec_shapes` (`src/engine/bag_of_processors.rs`).
+
+- **[phase4a] `File_Type != 0` (non-wav ingestion) is unported; bag ctor bails**
+  (`engine/bag_of_processors.rs::from_configs`, from `BagOfProcessors.h:44`): the legacy
+  `_FileType` member documents the enum `0: wav; 1: phSeq; 2: cep`. `AudioStruct.cpp` reads
+  file_type == 0 (libsndfile `sf_open`), == 1 (`.phSeq` plain binary, framerate 8000), and == 2
+  (`.cep` Mel-frequency cepstral coefficient binary, framerate 8000). The Rust port reads `File_Type`
+  from the config and bails with `Err` if `file_type != 0`, since the `AudioStruct` non-wav readers
+  (`phSeq`/`cep` paths) are not ported. *Why deferred:* the Phase 4a parity corpora use only wav
+  files (file_type 0); non-wav ingestion paths were never exercised and remain unvalidated. *Fix
+  candidate:* once (if) a corpus ever requires non-wav files, port `AudioStruct`'s `.phSeq` and
+  `.cep` readers and plumb the file_type enum through the audio I/O. *Pinned by:*
+  `file_type_nonzero_bails` (inline, `engine/bag_of_processors.rs`).
+
+- **[phase4a] `SegmentationFunction` lock-file block stubbed (no `LockFilesDir` -> always treat
+  the file)** (`engine/bag_of_processors.rs::segmentation_function`, from `BagOfProcessors.cpp:214-250`):
+  the legacy gates per-file processing on an `O_CREAT|O_EXCL` lock file under `_LockFilesDir` (a
+  crude multi-worker file-claim scheme -- `<dir>/<prefix>_<jj>_<basename>.lck`, with the odd
+  double-`open()` retry ladder at `:225-249`). The port drops the whole block: with `_LockFilesDir`
+  empty the legacy itself always sets `treatFile = true` (`:214-215`), which is the only regime the
+  Phase 4a in-process rayon-static-lane driver runs in (no cross-process lock coordination). The
+  legacy `jj` argument (lane index) fed ONLY the lock filename, so it is dropped from the Rust
+  signature. *Why deferred:* the lock scheme is a distributed-cluster artifact; the in-process port
+  coordinates lanes via static-lane assignment (spec S), not filesystem locks. *Fix candidate:* if a
+  multi-process cluster drop-in is ever needed, reintroduce the lock-file claim behind a
+  `LockFilesDir`-set branch. *Pinned by:* `segmentation_function`'s always-treat behaviour across the
+  scored/unscored tests (`tests/phase4a_segfn.rs`).
+
+- **[phase4a] Unscored branch ALWAYS writes VRCTS (even with no dump dir, next to the audio)**
+  (`engine/bag_of_processors.rs::segmentation_function`, from `BagOfProcessors.cpp:394-401`): the
+  SCORED result branch (`:352-356`) writes the VRCTS dump ONLY when `dumpDir` is non-empty, but the
+  UNSCORED branch (`:394-401`) writes it UNCONDITIONALLY -- to `dumpDir/<basename>` when a dump dir is
+  set, else to `<full-audio-path-minus-4-char-extension>` right next to the source audio. So a plain
+  `-s`/`-S` solo run silently drops a `<audiofile-without-ext>` VRCTS file beside every input. Both
+  branches share the load-bearing basename quirk: `substr(last_slash+1, size-last_slash-1-4)` (strip
+  the last path component's 4-char extension) for the dump-dir case, `substr(0, size-4)` (strip the
+  extension from the FULL path) for the next-to-audio case. Reproduced verbatim. *Why deferred:*
+  observable side effect on disk; changing it would diverge from the legacy's file output. *Fix
+  candidate:* after end-to-end parity, gate the unscored write on an explicit opt-in flag. *Pinned by:*
+  `unscored_mode_zero_columns_and_vrcts` + `dump_dir_vrcts` (`tests/phase4a_segfn.rs`).
+
+- **[phase4a] CSV reference loads ONLY for single-channel audio (2-channel `buf` left empty ->
+  no reference)** (`engine/bag_of_processors.rs::segmentation_function`, from
+  `Segmentation.cpp:745-806`): `load_ref_from_csv` loops over `_ChannelNb` and builds the file-to-open
+  string `buf` ONLY in the `_ChannelNb == 1` branch (`:748-749` `buf << filename`); the
+  `_ChannelNb == 2` branch (`:750-752`) emits a "wrong path" LOG line and NEVER writes `buf`, so
+  `ifstream(buf.str())` opens the empty string, fails, and the `else` body that pushes `_Reference` +
+  parses lines is skipped for EVERY channel. Net effect: a `.csv` reference is honored only for
+  mono audio; for stereo (or any `_ChannelNb != 1`) the reference is silently empty, so a scored
+  stereo run with a CSV reference would hit the mandatory-reference bail (`:302-305`). The port
+  reproduces this: CSV builds a reference only when `channel_count == 1`; otherwise `None`. *Why
+  deferred:* load-bearing legacy bug directly affecting whether scoring runs; "fixing" it (loading
+  the CSV for both channels) would diverge from the oracle. *Fix candidate:* after end-to-end parity,
+  decide whether stereo CSV references should load channel 0 (or per-channel columns). *Pinned by:*
+  the `channel_count == 1` guard in `segmentation_function` (the Phase 4a tests exercise the STM path
+  on the 2-channel excerpt; a mono-CSV golden lands with the corpus-processor fixtures).
+
+- **[phase4a] `.trs` reference loader unported; `segmentation_function` bails on a TRS reference**
+  (`engine/bag_of_processors.rs::segmentation_function` + `extension_of`, from `Segmentation.cpp:101-109`
+  `load_ref_from_trs`): the legacy `Segmentation` ctor dispatches any non-`.stm`/`.csv`/`.xml`
+  reference extension (and any name too short for an extension) to `load_ref_from_trs` (a Transcriber
+  `.trs` XML parser). That loader is not ported (`segmentation_io.rs` carries STM/CSV/VRCTS only), so
+  the reference dispatch here `bail!`s on a TRS reference rather than silently producing an empty
+  reference. `.xml` (VRCTS) reference loading is also not wired into this dispatch -- no Phase 4a
+  corpus uses it -- and currently falls into the TRS bail branch. *Why deferred:* the Phase 4a parity
+  corpora use STM (SAD) and CSV (WER) references only; TRS/VRCTS reference inputs were never exercised.
+  *Fix candidate:* port `load_ref_from_trs` (and wire `load_vrcts` into the reference dispatch) when a
+  corpus needs them. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
+
+- **[phase4a] CLOSED (Task 8): multi-channel VRCTS write on the corpus path**
+  (`engine/bag_of_processors.rs::segmentation_function` VRCTS write sites +
+  `tasks/segmentation_io.rs::to_vrcts_string`/`write_vrcts_multichannel`, from
+  `Segmentation.cpp:543-590` `Segmentation::toFile_VRCTS`): the legacy writer loops
+  `for (int chan = 0 ; chan < _ChannelNb ; ++chan)`, sanitizing and emitting one
+  full VRCTS document per channel -- `<basename>_chan_<n>.xml` when `_ChannelNb > 1`,
+  or a single `<basename>.xml` when `_ChannelNb == 1` -- each with its own
+  `Channel`/`Speaker`/`SegmentList` block (and `num`/`ch` = `chan+1`) for that
+  channel's `_Classification`. Before Task 8 the port emitted channel 0 only
+  (hardcoded `chan="1"`), silently dropping channel 2+ on stereo audio. *Fix (Task
+  8):* `to_vrcts_string` now delegates to a per-channel `to_vrcts_string_chan`
+  (channel number threaded into `num`/`ch`), and a new `write_vrcts_multichannel`
+  fans out one `<base>_chan_<n>.xml` per channel (or `<base>.xml` for mono); the bag
+  write sites call it with the full `seg_per_chan` slice and the legacy-derived
+  `name=`/`path=` attrs (audio basename minus extension / full audio path). The
+  single-channel byte goldens (0b-ii/2b) stay green (shape-generic; `chan="1"`
+  unchanged for mono). *Pinned by:* `phase4a_tier1_e2e.rs::vrcts_byte_equal` (Rust
+  `write_vrcts_multichannel` output byte-matches the REAL compiled `toFile_VRCTS`
+  dumps for both channels of all three corpus files) + `phase4a_segfn.rs::
+  {unscored_mode_zero_columns_and_vrcts,dump_dir_vrcts}` (per-channel filename
+  fan-out).
+
+- **[phase4a] CLOSED (Task 8): result-row `nb_words` column defaults to -1, not 0**
+  (`engine/bag_of_processors.rs::{assemble_scored_row,assemble_unscored_row}` +
+  `tasks/segmentation_io.rs::WerStats::legacy_default`, from `BagOfProcessors.cpp:
+  331,373` `tmp.push_back(seg._WordErrorRate[chan]._NbWords)`): the legacy result
+  row pushes the `WordErrorRate` struct's `_NbWords`, whose CONSTRUCTOR default is
+  `-1` (`Segmentation.h:70`), left untouched whenever WER Pass 1 does not run (STM
+  references, or no reference -- Pass 1 is CSV-only). The port emitted `0` there:
+  the scored row read `report.wer.unwrap_or_default().nb_words` (Rust `WerStats`
+  i64-Default `0`) and the unscored row hardcoded `0.0`. Both now use
+  `WerStats::legacy_default()` (`nb_words = -1`, rest 0), matching the legacy. *Found
+  by* the Task 8 tier-1 `MultiConfigResults` golden (col 10 = data col 7 = -1 in the
+  real dump, 0 in the port). *Pinned by:* `phase4a_tier1_e2e.rs::{solo_tdc_matches,
+  train_ltsv_two_epochs_matches,multiconfig_matches}` (MultiConfigResults col-10
+  byte compare vs the real dump).
+
+- **[phase4a] `costLID = -1.0` gate applied AFTER `saveWeights`, BEFORE `updateWeights` --
+  order is load-bearing** (`engine/bag_of_processors.rs::save_and_update`, from
+  `BagOfProcessors.cpp:409-471`, specifically `:464-466`): per config, `saveAndUpdate` calls
+  `saveWeights` with the REAL (pre-gate) `costLID`, THEN overwrites `costLID = -1.0` when
+  `totalSpeechDuration < 1e-3` (no speech segments detected in the accumulated file x channel
+  rows), THEN calls `updateWeights` with the gated value. The row-slice writes
+  (`costMem`/`badClassifMem`/`costLIDMem`/`badClassifLIDMem`, `:457-460`) also happen BEFORE the
+  gate, so they always carry the real `costLID`, never `-1.0`. Swapping the order (gating before
+  `saveWeights`, or before the row writes) would silently change algo 5/6's save criterion
+  (`badClassifLID+costLID` / `cost+costLID`) in Phase 4b even though it is inert for algo 3/4 in
+  4a (their save/update criteria are `cost` alone, ignoring `costLID` entirely). *Why deferred:*
+  Phase 4a has no algo 5/6 bag to observe the gate on the SAVE side; only the update-side effect
+  is observable, via a test-only hook. *Fix candidate:* none -- this is the correct legacy order,
+  to be reproduced as-is when Phase 4b lands algo 5/6. *Pinned by:* `update_called_with_neg_costlid`
+  (`tests/phase4a_save_update.rs`), which asserts the update-side value is `-1.0` while the same
+  call's row-slice write (`cost_lid_row`) still carries the pre-gate value.
+
+- **[phase4a] `saveAndUpdate`'s column means are per file x channel ROW, not per file** (from
+  `BagOfProcessors.cpp:409-471`): `resultsperConf[ii].rows()` is one row per (file, channel) pair
+  accumulated by `SegmentationFunction` (Task 5), not one row per file -- the legacy's own "%s
+  files have been processed" print (`:449`) is therefore a misnomer (display-only, dropped in this
+  port per the brief) since it prints the row count as a file count. This is not merely a cosmetic
+  quibble: it is what makes `badClassif = means(2)` and `badLIDClassif = 100-means(15)` genuinely
+  per-frame-class averages over every scored channel, rather than per-file averages that would
+  need a further per-file channel-count weighting. *Why deferred:* not a bug, just an easy
+  misreading of the legacy print; noted so a future reader does not "fix" the row semantics to
+  match the dropped print's wording. *Pinned by:* `cost_mem_rows_written`
+  (`tests/phase4a_save_update.rs`), which mixes single-row algo-1/algo-3 configs so
+  `means == sums` and the per-config independence of the row-count basis is exercised directly.
+
+- **[phase4a] Static-lane deterministic reduction replaces the legacy OpenMP dynamic parallel-for**
+  (`engine/corpus_processor.rs::run_epoch`, from `CorpusProcessor.cpp:172-203`): the legacy runs
+  `#pragma omp parallel for ... schedule(dynamic, 1)` over files and folds each file's contribution
+  inside an `omp critical` block, so the FOLD ORDER is whichever thread grabs the critical section
+  first -- nondeterministic even at a fixed thread count. Since the derivative `+=` and
+  `InputStatistics::update` merge (`:184-199`) are float-order-sensitive, the reduced values are
+  not bit-reproducible run to run. This port (spec S3, the R6 determinism fix -- the ONE deliberate
+  deviation from legacy parallelism) assigns file `j` to lane `j % N` (`N = nb_of_threads` clamped
+  to `[1, nb_files]`), clones the epoch-start bag once per lane (`firstprivate`, `:172`), walks each
+  lane's files in ascending `j` (so genuine cross-file driver state chains within a lane), and folds
+  in ASCENDING FILE INDEX after the parallel section. At `N == 1` this is byte-identical to a plain
+  sequential loop (the golden-pinned parity mode); for `N > 1` the results are deterministic (fixed
+  for a fixed N) but differ from the legacy's nondeterministic run AND, because state chains per
+  lane, from `N == 1`. *Why deferred:* this is a deliberate FIX (determinism), not a bug to revisit;
+  the entry documents the N-dependence so a reader does not expect `N > 1` to match `N == 1` or the
+  legacy. This CLOSES the forward-noted `[3/4] OpenMP InputStatistics merge-order nondeterminism`
+  item below. *Pinned by:* `lanes_n1_equals_sequential` (`tests/phase4a_corpus_processor.rs`),
+  which asserts `run_epoch` at N=1 is bit-exact (col 6 = the wall-clock timing column masked) vs a
+  hand-sequential oracle over a 3-file corpus.
+
+- **[phase4a] NN driver `get_weights_derivatives` was shadowed by the `Segmenter` trait default
+  (returned an empty matrix); added an inherent net delegate** (`tasks/sad.rs`, both
+  `BlstmSignalSegmenter` and `BlstmSpectralSegmenter`): Task 3/4 added inherent net-delegating
+  methods for `save_weights`/`update_weights`/`input_statistics`/`is_back_prop_activated` but NOT
+  for `get_weights_derivatives`, so `BagOfProcessors::get_weights_derivatives` (which calls
+  `seg.get_weights_derivatives()` with `Segmenter` in scope) resolved to the trait DEFAULT
+  (`segmenter.rs:39-41`, `Array2::zeros((0,0))`) instead of the net's real Nx2 derivative matrix.
+  The corpus gradient harvest (`run_epoch`) and gradCheck therefore saw an all-empty derivative
+  everywhere. Task 7 adds the missing inherent `get_weights_derivatives` delegate to both NN drivers
+  (mirroring the `input_statistics` delegate); Rust's inherent-over-trait method resolution makes
+  the bag pick it up. *Why noted:* a cross-task gap (Task 3/4 omission) surfaced only when a caller
+  actually read the harvested derivs; the fix is a pure additive delegate, no behavior change to
+  existing callers (which never read a non-empty derivs before). *Pinned by:* the harvest path in
+  `grad_check_synthetic` reaching a `(137, 2)` analytic derivative shape rather than `(0, 0)`
+  (`tests/phase4a_corpus_processor.rs`).
+
+- **[phase4a] CLOSED (Task 7b): corpus-level gradCheck was DEGENERATE (cost/counter both 0) under
+  the Phase 2b drivers** (`engine/corpus_processor.rs::grad_check`, from `CorpusProcessor.cpp:237-340`):
+  the gradCheck central difference reads result col 4 (`cumulative_error`) / col 17 (`nb_of_classif`)
+  from the per-file results. The Phase 2b NN drivers (`tasks/sad.rs`,
+  `BlstmSignalSegmenter`/`BlstmSpectralSegmenter` `get_segmentation`) hard-coded an EMPTY target to
+  `feed_forward_backward`, which gates BOTH the backward derivative accumulation AND the cost/counter
+  accumulation on `target.nrows() > 0` (`blstm.rs:1150,1171`). So with no target: `cumulative_error
+  == 0`, `nb_of_classif == 0`, analytic derivs 0 with count 0, gradcheck cost `0/0 == NaN` on both
+  sides -- the check was VACUOUS. **Task 7b closed this** by threading the per-channel REFERENCE
+  through the `Segmenter::get_segmentation` trait (new `refs: Option<&[Segmentation]>` param) and
+  calling the already-ported `get_targets` (`segmenter.rs`) inside the two NN drivers under the legacy
+  gate `seg._Reference.size() > 0` (`BLSTMSignalSegmenter.cpp:255-258`,
+  `BLSTMSpectralSegmenter.cpp:735-738`). The corpus bag (`bag_of_processors.rs::segmentation_function`)
+  now passes its loaded references to the driver. *Pinned by:* `grad_check_synthetic`
+  (`tests/phase4a_corpus_processor.rs`) now asserts mean-relative-error < 5e-4 (analytic vs numeric
+  agree) plus a non-vacuity guard (>= 1 nonzero numerical deriv) and the bit-exact weight restore;
+  `spectral_scored_cost_is_live` / `spectral_no_reference_zero_cost` (`tests/phase4a_segfn.rs`) pin
+  the live-cost path and the no-reference gate on the REAL algo-3 config. *Mutation evidence:* the
+  `refs=None` contrast test (`spectral_no_reference_zero_cost`) fails if the driver ever builds a
+  target without a reference (col 4 / col 17 would go nonzero); and reverting the trait wiring so the
+  bag passes `None` returns `grad_check_synthetic` to the NaN-degeneracy it had before Task 7b.
+
+- **[phase4a] `getTargets` with `_BackPropWER < 0` uses the SPEECH `classType` arg; the drivers pass
+  `SPEECH` unconditionally** (`tasks/sad.rs` NN drivers, from `BLSTMSignalSegmenter.cpp:257` /
+  `BLSTMSpectralSegmenter.cpp:737`): both NN drivers call `getTargets(..., SPEECH)`. In `getTargets`
+  (`Segmenter.cpp:696-704`, the `_BackPropWER < 0` branch), the reference SPEECH span -> target 1.0,
+  SUBSTITUTION -> 1.0 (via `classType == SPEECH && ty == SUBSTITUTION`), EXCLUDED -> -0.5, everything
+  else -> 0.0. The real `1_worker_1.config` has no `BLSTM_BackPropWER` key, so `DriverConfig`
+  defaults it to -1.0 (`< 0`) -> this simple-class branch, NOT the WER-soft-target branch. The
+  synthetic signal gradcheck config also sets `BLSTM_BackPropWER -1.0` explicitly. Reproduced
+  verbatim; no port deviation.
+
+- **[phase4a] The spectral PITCH second pass REUSES the pass-1 target buffer (not rebuilt on the
+  warp)** (`tasks/sad.rs::BlstmSpectralSegmenter::get_segmentation` pitch block, from
+  `BLSTMSpectralSegmenter.cpp:793`): the pitch pass re-forwards the WARPED input through
+  `feed_forward_backward` but passes the SAME `targetSeq` built once at `:736-738` for pass 1 -- the
+  legacy does NOT re-call `getTargets` for the pitch re-forward. The Rust port carries the pass-1
+  `target` in scope across the pitch block and passes `&target` unchanged, matching `:793`
+  element-for-element. Reproduced verbatim. (Under the real algo-3 config the pitch pass is gated on
+  `TDCwindow > 0`, which the base config does not set, so this is exercised only by the pitch-variant
+  spectral goldens; the target reuse is nonetheless wired for that path.)
+
+- **[phase4a] Task 7b target flow does NOT interact with the `_TargetEnforcementStep < 0` interior
+  rewrite for the ported configs** (`nn/blstm.rs::feed_forward_backward_plain`, risk R7 cross-ref):
+  the R7 rewrite (interior target/output rows -> -0.5) fires only when `target_enforcement_step < 0`.
+  The real `1_worker_1.config` and the synthetic gradcheck config both set/derive
+  `TargetEnforcementStep = 0` (`>= 0`), so the reference-driven target flows through to `feed_backward`
+  and `compute_cost` UNCHANGED (no interior overwrite). The existing `blstm.rs` R7 behaviour is thus
+  unaffected by the Task 7b wiring for the ported configs; the R7 mutation of the caller-visible
+  `outputSeq` remains reachable only under a `step < 0` config (none in the current test corpus).
+  Verified by inspection; the existing phase3 backward goldens (which DO exercise `step < 0`) stay
+  green under `cargo test`.
+
+- **[phase4a] gradCheck `max_weights` cap is a port-only DEVIATION from the legacy full sweep**
+  (`engine/corpus_processor.rs::grad_check_capped`): the legacy `gradCheck` (`:263`) checks EVERY
+  weight (`kk < weightsNb`), each requiring two full corpus runs -- O(N) forwards for an N-weight
+  net (33,671 for the real config). The port adds a `max_weights` cap (the public `run()` path uses
+  `usize::MAX` == the full legacy sweep; the test/Task-9 path caps at 10) so the golden replay does
+  not pay 33,671 * 2 corpus runs. Recorded in the Task 9 manifest as `gradcheck_max_weights`. *Why
+  deferred:* a deliberate test-cost deviation, not a bug; the capped subset still spans the flat
+  layout (Task 9 chooses the indices). *Pinned by:* `grad_check_synthetic` (10-weight cap) and Task
+  9's `phase4a_gradcheck_golden`.
+
+- **[phase4a] CLI `--key=` empty-value override REMOVES the key -- a port-only DEVIATION from the
+  literal (unreachable) legacy behavior** (`cli.rs::apply_override`): the legacy usage text
+  (`FastSpeechProcessing.cpp:85`, `setting <variable_value> = "" removes the variable from the
+  config`) documents this, but `ConfigFile::set_val` (`ConfigFile.h:34-42`) never erases -- it
+  unconditionally does `_Params[name] = ss.str()` for any value including `""`. The only erase in
+  `ConfigFile` is `warn_unused`'s `_Params.erase` (`ConfigFile.cpp:43`), gated on a `_Used` set whose
+  single insertion site is commented out everywhere (`ConfigFile.h:39,47,56,65,75`) -- so even that
+  path is dead by construction -- and `warn_unused` is never called from `main()` (`:31-75`) at all.
+  Separately, `--key=` with a GENUINELY empty value can't even reach `set_val`: `split<string>(argv,
+  '=', 2)` (`String.hpp:86-98`) uses `getline(ss, s, '=')`, which on `"--key="` yields a 1-element
+  vector (no trailing empty field emitted at EOF) -- `argument[1]` is an out-of-bounds
+  `std::vector::operator[]` read, undefined behavior, verified against a standalone repro of the exact
+  `split` template. The usage string is therefore vestigial/aspirational documentation for a feature
+  that is not wired to anything reachable from the legacy binary's `main()`. This port implements the
+  DOCUMENTED (not the literal) behavior -- `IndexMap::shift_remove(key)` on an empty override value --
+  because the task spec calls for defined, usage-text-honoring semantics rather than reproducing C++
+  UB. *Why deferred:* a deliberate port-only choice (no legacy golden can pin either interpretation,
+  since the real binary cannot reach this path without crashing). *Pinned by:*
+  `phase4a_cli.rs::override_empty_removes_key`.
+
+- **[phase4a] Mutation battery (Task 11): load-bearing goldens confirmed, two coverage gaps found.**
+  Six targeted production mutations, each applied/run/reverted/re-run in isolation (named suite
+  only, full `cargo test` once at the end): (1) fold-order reversed (`corpus_processor.rs::run_epoch`,
+  `per_file.sort_by_key` ascending -> `Reverse`) against `phase4a_train_golden` -- did NOT fail (the
+  tier-2 corpus has exactly 2 files and `numOuterThreads 1` clamps to one lane, so the fold is a
+  2-element commutative `+=`/`InputStatistics::update` merge -- order-insensitive per the spec S7
+  caveat; a 3+-file crafted-divergence golden is future work, not faked here). (2) best-cost gate
+  `>` -> `>=` (`bag_of_processors.rs::save_weights`, Spectral arm) against `phase4a_train_golden`
+  AND `phase4a_save_update::best_cost_gate_fires_and_skips` -- did NOT fail either: both suites only
+  exercise strict improve/strict-worse costs, never an exact tie, so `>=` is behaviorally identical
+  to `>` on every existing case -- a genuine golden coverage gap (no crafted-tie test exists) reported
+  honestly, not faked. (3) cost column `sums[4]` -> `sums[5]` (`bag_of_processors.rs::save_and_update`)
+  against `phase4a_tier1_e2e::train_ltsv_two_epochs_matches` -- FAILED as expected
+  (`train CostMem[0,0]: a=12 (want) b=0 (got)`); reverted, PASS. (4) counter-normalization guard
+  dropped to unconditional divide (both the cost and costLID guards) against
+  `phase4a_save_update` -- FAILED as expected (`aggregation_counter_zero_guard_skips_division`:
+  `left: inf, right: 7.0`, div-by-zero; 2 more tests failed downstream from the same cause);
+  reverted, PASS. (5) gradCheck epsilon sign flipped (asymmetric: `+=epsilon` -> `-=epsilon` on the
+  first perturbation only, since negating `epsilon` uniformly at the call site is a no-op by central-
+  difference symmetry) against `phase4a_gradcheck_golden` -- FAILED as expected (`weight 0 numerical`
+  bit mismatch from the broken +/- symmetry); reverted, PASS. (6) `costLID = -1.0` gate removed
+  (`bag_of_processors.rs::save_and_update`, the `:465` override) against
+  `phase4a_save_update::update_called_with_neg_costlid` -- FAILED as expected (`left: Some(3.0)`
+  real costLID leaking through `right: Some(-1.0)` expected gate); reverted, PASS. This mutation was
+  originally slated "defer to 4b" in the plan, but Task 6's `update_called_with_neg_costlid` hook
+  makes it directly observable in 4a, so the stronger result (FAILS, not vacuously unreachable) is
+  recorded here instead of deferred. *Lane N=1 vs N=2 measurement* (throwaway test, not committed):
+  a 3-file corpus (`excerpt_2ch_8k.wav` x3) driving `signal.config` (Algo 4) with the noOverlap
+  `BLSTM_window 0.5` / `BLSTM_shift 0` override at `numOuterThreads` 1 vs 2 -- outputs DIVERGED as
+  expected (`MultiConfigResults` columns 6-7, the timing/cost-adjacent columns, differ across all 3
+  file-rows; `CostMem`/`BadClassifMem`/etc. stayed identical since Solo mode never calls
+  `saveAndUpdate`). Confirms genuine cross-file lane state chaining: N=1 chains all 3 files in one
+  lane (f0->f1->f2), N=2 partitions lane0={f0,f2}/lane1={f1}, so f2 inherits poisoned
+  `_WindowShift` state directly from f0 under N=2 but from f1 under N=1 -- a real, expected
+  N-dependence per the `[phase4a] Static-lane deterministic reduction` entry above, not a bug.
+  *Net verdict:* 4 of 6 mutations break their named golden as designed; 2 (fold-order, best-cost
+  tie) expose real gaps in tie/multi-contribution coverage on the current 2-file tier-2 fixture,
+  recorded honestly rather than papered over. Full detail (diffs, commands, output) in
+  `.superpowers/sdd/task-11-phase4a-report.md`.
+
+- **[phase4a] Phase 4b test backlog (from the 4a final review):** (1) a crafted best-cost TIE
+  golden (cost delta >= the mutation's detection gap, closing the `>` vs `>=` gate coverage hole);
+  (2) a 3+-file fold-order-divergence golden exercising a genuinely non-commutative reduction (the
+  current tier-2 fixture's 2-file merge is commutative, masking the fold-order mutation); (3) a
+  reference-loaded, `TDCwindow > 0` pitch-pass golden pinning the pass-1-target-reuse quirk under
+  live targets (current pitch-pass coverage is NN-chain-only, no reference-driven target path).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

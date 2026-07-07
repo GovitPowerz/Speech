@@ -1,0 +1,281 @@
+{
+  "compiler": "g++-16 (Homebrew GCC 16.1.0) 16.1.0",
+  "flags": "-O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE -include boost/math/special_functions/round.hpp",
+  "libmatio_version": "libmatio 1.5.30_1",
+  "corpus_driver_linkage": {
+    "text": "Phase 4a Task 8: the REAL CorpusProcessor stack linked into the oracle harness (CorpusProcessor.cpp, BagOfProcessors.cpp, Corpus.cpp; CorpusItem.cpp already linked for AudioStruct). BagOfProcessors's member vectors force VRCTSpart.cpp / BLSTMSpectralLID.cpp / TwinBLSTMSpectralLID.cpp (constructed/destructed even for algo 1/2). TwinBLSTMSpectralLID drags ConvolutionalNeuralNetwork.cpp / ConvolutionalLayer.cpp (broken-as-committed at runtime, but they link and are never constructed here). CorpusProcessor.cpp's free CalcThread() (the commented-out threading path) odr-uses FileDispatcher.cpp. The omp.h no-op shim keeps the #pragma omp parallel-for sequential (NO -fopenmp) == the N=1 golden parity mode. -lmatio was already linked (Phase 2b Helpers.hpp/AudioStruct).",
+    "translation_units": [
+      "CorpusProcessor.cpp",
+      "BagOfProcessors.cpp",
+      "Corpus.cpp",
+      "VRCTSpart.cpp",
+      "BLSTMSpectralLID.cpp",
+      "TwinBLSTMSpectralLID.cpp",
+      "FileDispatcher.cpp",
+      "ConvolutionalNeuralNetwork.cpp",
+      "ConvolutionalLayer.cpp"
+    ]
+  },
+  "corpus": {
+    "text": "Committed 3-file 2-channel corpus (3 copies of the phase1 excerpt_2ch_8k.wav) with crafted 2-channel STMs (one SPEECH span per channel inside 2.0s). fileslisting.csv exercises the weight column and the defaults: row 1 full (eng;us;0.5;2), row 2 present-weight with empty lang/dial siblings (;;0.75), row 3 defaults-only (wav;stm). Every row is referenced (STM) so the -m scored runs never hit the mandatory-reference bail. language2classmapping.csv maps 2 languages (eng;us->0, unk;unk->1) to 2 classes.",
+    "nb_files": 3,
+    "class_index": {
+      "f1": 0,
+      "f2": 1,
+      "f3": 1
+    },
+    "weights": {
+      "f1": 0.5,
+      "f2": 0.75,
+      "f3": 1.0
+    },
+    "file_ids": {
+      "f1": 2,
+      "f2": 1,
+      "f3": 1
+    },
+    "language_count": {
+      "eng": 1,
+      "unk": 2
+    },
+    "class_count": {
+      "0": 1,
+      "1": 2
+    }
+  },
+  "runs": {
+    "solo_tdc": {
+      "mode": "-s",
+      "algo": 1,
+      "config": "tier1_tdc.config",
+      "epochs": 0,
+      "text": "solo (-s) is UNSCORED (scored branch is m/M/t/T only): runSolo -> CostMem 1 x nbConf. The MultiConfigResults rows are unscored (error cols 0/1/2 = 0), 3 files x 2 channels = 6 rows. VRCTS is always written (unscored branch) -> the multi-channel byte oracle.",
+      "shapes": {
+        "MultiConfigResults": [
+          6,
+          21
+        ],
+        "CostMem": [
+          1,
+          1
+        ],
+        "BadClassifMem": [
+          1,
+          1
+        ],
+        "CostLIDMem": [
+          1,
+          1
+        ],
+        "BadClassifLIDMem": [
+          1,
+          1
+        ]
+      }
+    },
+    "train_ltsv": {
+      "mode": "-m",
+      "algo": 2,
+      "config": "tier1_ltsv_powermel.config",
+      "epochs": 2,
+      "text": "train (-m) with epochs 2: train() runs epoch 0 (solo) then 2 inner epochs then a final eval at epoch 3, each saveResults writing topRows(epoch+1); the last writes topRows(4) so CostMem is 4 x 1. LTSV/TDC have NO weight updates, so CostMem rows are EXPECTED IDENTICAL across epochs (tier-1 pins the loop/aggregation plumbing; weight evolution is tier-2).",
+      "shapes": {
+        "MultiConfigResults": [
+          6,
+          21
+        ],
+        "CostMem": [
+          4,
+          1
+        ],
+        "BadClassifMem": [
+          4,
+          1
+        ],
+        "CostLIDMem": [
+          4,
+          1
+        ],
+        "BadClassifLIDMem": [
+          4,
+          1
+        ]
+      }
+    },
+    "multiconfig": {
+      "mode": "-m",
+      "algo": [
+        1,
+        2
+      ],
+      "config": [
+        "tier1_tdc.config",
+        "tier1_ltsv_powermel.config"
+      ],
+      "epochs": 0,
+      "text": "multiconfig (-m) with both configs, epochs 0 (overridden on configs[0]): a single scored pass. MultiConfigResults interleaves (file, conf, chan): 3 files x 2 confs x 2 channels = 12 rows, ordered file-ascending then conf-ascending then chan-ascending (transformResults BTreeMap iteration). CostMem is 1 x 2.",
+      "shapes": {
+        "MultiConfigResults": [
+          12,
+          21
+        ],
+        "CostMem": [
+          1,
+          2
+        ],
+        "BadClassifMem": [
+          1,
+          2
+        ],
+        "CostLIDMem": [
+          1,
+          2
+        ],
+        "BadClassifLIDMem": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  "mat_conversion": {
+    "text": "Each harness .mat (saveResults writes 5 vars: MultiConfigResults, CostMem, BadClassifMem, CostLIDMem, BadClassifLIDMem via Matrix2MatFile, MAT_COMPRESSION_ZLIB) is converted to per-variable .bin (io::binary: i64 LE rows, i64 LE cols, f64 LE column-major) via scipy.io.loadmat. The wall-clock timing column of MultiConfigResults (col 6 = the 4th data column after [file, conf, chan] = time_per_hour) is ZEROED so the dump is byte-reproducible; the Rust golden masks the same column. The RAW .mat outputs are committed too so the pytest guard re-reads them with scipy and checks the conversion (with the same col-6 mask).",
+    "vars": [
+      "MultiConfigResults",
+      "CostMem",
+      "BadClassifMem",
+      "CostLIDMem",
+      "BadClassifLIDMem"
+    ],
+    "masked_cols": [
+      6
+    ]
+  },
+  "vrcts": {
+    "text": "The carried-over multi-channel VRCTS byte oracle (IMPROVEMENTS 'Single-channel VRCTS write on the corpus path'). The REAL compiled Segmentation::toFile_VRCTS fans out one <basefilename>_chan_<n>.xml per channel for the 2-channel excerpt; name= is the audio basename minus extension, path= is the relative audio path (corpus/fN.wav), both from a FIXED corpus workdir so the attrs are byte-reproducible. The Rust write_vrcts_multichannel output must byte-match these.",
+    "dumps": [
+      "vrcts_solo/f1_chan_1.xml",
+      "vrcts_solo/f1_chan_2.xml",
+      "vrcts_solo/f2_chan_1.xml",
+      "vrcts_solo/f2_chan_2.xml",
+      "vrcts_solo/f3_chan_1.xml",
+      "vrcts_solo/f3_chan_2.xml"
+    ],
+    "committed_names": [
+      "f1_chan_1.xml",
+      "f1_chan_2.xml",
+      "f2_chan_1.xml",
+      "f2_chan_2.xml",
+      "f3_chan_1.xml",
+      "f3_chan_2.xml"
+    ]
+  },
+  "tier2": {
+    "train": {
+      "text": "Task 9 tier-2 CorpusProbe train (Algo 3 reimpl-swap): the harness transcribes CorpusProcessor::train/run(epoch) + BagOfProcessors::SegmentationFunction/saveAndUpdate around the spectral reimpl-swap (ascending-loop forward+backward via BlstmBack + REAL CostLaw), feeding the reimpl derivs into the REAL compiled updateWeights/saveWeights (real Rprop) through their external-derivs arguments. Config: tier2_spectral.config = the phase0 1_worker_1.config re-pointed at the 2-file corpus (f1/f2), BackPropagationActivated true, epochs 3, RpropInit 0.05 (chosen so the measured best-cost gate trajectory both FIRES and SKIPS -- 1e-2 default fires every epoch), numOuterThreads 1 (== the Rust static-lane N=1 parity mode). Dumps the post-saveAndUpdate weight vector per epoch (0 = post-solo .. 4 = post-final). The transcription's time_per_hour result column is hard-zeroed (the Task 8 mask value), so the .mat conversion mask is a no-op kept for pipeline symmetry.",
+      "config": "tier2_spectral.config",
+      "epochs": 5,
+      "epoch_weight_files": [
+        "tier2_weights_epoch0.bin",
+        "tier2_weights_epoch1.bin",
+        "tier2_weights_epoch2.bin",
+        "tier2_weights_epoch3.bin",
+        "tier2_weights_epoch4.bin"
+      ],
+      "rprop_init": 0.05,
+      "non_vacuity": {
+        "text": "MEASURED (harness stdout): every consecutive epoch weight pair differs; the bestNNWeight save gate FIRED and SKIPPED at least once each. The Rust golden re-asserts the same pattern from its own trace.",
+        "epochs_differing": 4,
+        "gate_fired": 2,
+        "gate_skipped": 2,
+        "best_cost_trajectory": [
+          1.1179364603428454,
+          0.24198616733537365,
+          0.24198616733537365,
+          0.24198616733537365,
+          0.1727108023717789
+        ]
+      },
+      "seg_struct": {
+        "text": "SECONDARY structural probe (2b convention), PER EPOCH: the SAME train ran once more with the REAL Eigen forward (real getSegmentation, real derivs, real updateWeights); per epoch per file/channel the segment count/types matched the reimpl train exactly (mismatch aborts fixture generation), max boundary dt recorded per epoch. The real-vs-reimpl per-epoch cost deltas (ULP-level, the blocked-GEMM story) are recorded as CALIBRATION, not gated; the real trajectory's gate pattern matched (fired/skipped).",
+        "site": "tier2_train_epoch{N}",
+        "ok": 1,
+        "max_dt": 0.0,
+        "per_epoch_max_dt": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "calibration": {
+          "per_epoch_costs": [
+            {
+              "cost_reimpl": 1.1179364603428454,
+              "cost_real": 1.1179364603428452
+            },
+            {
+              "cost_reimpl": 0.24198616733537365,
+              "cost_real": 0.24198616733537365
+            },
+            {
+              "cost_reimpl": 0.2733286605909985,
+              "cost_real": 0.27332866059099853
+            },
+            {
+              "cost_reimpl": 0.2566450396599771,
+              "cost_real": 0.25664503965997704
+            },
+            {
+              "cost_reimpl": 0.1727108023717789,
+              "cost_real": 0.1727108023717789
+            }
+          ],
+          "real_gate_fired": 2,
+          "real_gate_skipped": 2
+        }
+      },
+      "shapes": {
+        "MultiConfigResults": [
+          4,
+          21
+        ],
+        "CostMem": [
+          5,
+          1
+        ],
+        "BadClassifMem": [
+          5,
+          1
+        ],
+        "CostLIDMem": [
+          5,
+          1
+        ],
+        "BadClassifLIDMem": [
+          5,
+          1
+        ]
+      },
+      "best_artifacts": [
+        "weights_bestNNWeight_1_tier2_spectral.mat",
+        "weightsDerivatives_bestNNWeight_1_tier2_spectral.mat",
+        "bestNNWeight_1_tier2_spectral.mat"
+      ],
+      "vrcts": [
+        "tier2_f1_chan_1.xml",
+        "tier2_f1_chan_2.xml",
+        "tier2_f2_chan_1.xml",
+        "tier2_f2_chan_2.xml"
+      ]
+    },
+    "gradcheck": {
+      "text": "Task 9 tier-2 corpus-level gradCheck (CorpusProcessor.cpp:237-340) on the synthetic signal net ([2,2] LSTM + [4,1] output, 137 weights, algo 4) over the 1-file corpus (f1), seeded with the phase3 synth_flat pattern (dumped as tier2_gradcheck_seed.bin -- the single source of truth the Rust golden loads). tier2_gradcheck.bin rows 0..sweep-1 = [analytic_col0, analytic_col1, numerical] per weight; final row = [mean_error, mean_relative_error, 0].",
+      "config": "tier2_gradcheck.config",
+      "gradcheck_max_weights": 10,
+      "epsilon": 1e-05,
+      "mean_error": 1.7738502991583638e-11,
+      "mean_relative_error": 0.00012000957351711342
+    }
+  }
+}

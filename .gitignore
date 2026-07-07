@@ -23,6 +23,7 @@ build/
 
 # === MATLAB / binary data ===
 *.mat
+!/tests/reference_data/**/*.mat
 
 # === Legacy reference (local oracle, never committed) ===
 /legacy/
