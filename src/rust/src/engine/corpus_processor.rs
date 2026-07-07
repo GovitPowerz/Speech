@@ -502,13 +502,15 @@ impl CorpusProcessor {
                 continue;
             }
             if !initialized {
-                // legacy: :357-362 width from the FIRST result (mmap[0][0]).
-                let first_row = mmap
-                    .values()
-                    .next()
-                    .and_then(|chan_map| chan_map.values().next())
-                    .expect("non-empty result map has at least one row");
-                res_width = first_row.len();
+                // legacy: CorpusProcessor.cpp:357 - mmap[0][0] operator[] default-constructs
+                // an empty vector if conf 0 / chan 0 is absent, rather than reading whatever
+                // conf/chan IS present. Match that exactly, including the degenerate width-0
+                // case, instead of taking the first present entry.
+                res_width = mmap
+                    .get(&0)
+                    .and_then(|chan_map| chan_map.get(&0))
+                    .map(|v| v.len())
+                    .unwrap_or(0);
                 results_e = Array2::zeros((nb_elements, 3 + res_width));
                 res_per_conf = (0..nb_of_conf)
                     .map(|_| Array2::zeros((nb_elements_per_conf, res_width)))
@@ -689,7 +691,9 @@ impl CorpusProcessor {
             last_report = Some(report);
         }
 
-        // Restore the bag to the snapshot (the sweep left it perturbed).
+        // Restore the bag to the snapshot (the sweep left it perturbed). Port addition,
+        // no legacy counterpart (legacy leaves _Processors perturbed) -- unobservable
+        // since gradCheck is terminal in run().
         self.processors = proc_mem;
 
         last_report
@@ -782,7 +786,11 @@ impl CorpusProcessor {
 }
 
 /// Truncate an `Array2` to its first `n` rows (`conservativeResize(n, cols)`), a
-/// plain row-slice copy (all live call sites shrink or keep, never grow).
+/// plain row-slice copy. Live call sites shrink or keep, except the pathological
+/// gradcheck empty-results path, where `top_rows` can be asked for more rows than
+/// `m` has (e.g. a 1-row `cost_mem` with `epoch+1 == 2`) -- that indexes out of
+/// bounds here, mirroring legacy `topRows(2)`-on-1-row UB. Faithful to legacy UB,
+/// unreachable under non-empty corpora, panics by design if hit.
 fn truncate_rows(m: &Array2<f64>, n: usize) -> Array2<f64> {
     let cols = m.dim().1;
     Array2::from_shape_fn((n, cols), |(i, j)| m[[i, j]])
