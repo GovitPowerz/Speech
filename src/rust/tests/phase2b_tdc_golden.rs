@@ -87,7 +87,7 @@ fn from_legacy_clamps_negative_lags() {
     let mut tdc = TdcSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    tdc.get_segmentation(&mut audio, &mut segs).unwrap();
+    tdc.get_segmentation(&mut audio, &mut segs, None).unwrap();
 }
 
 // === result rows (pre-convolution) ===========================================
@@ -98,7 +98,7 @@ fn result_rows_match_dump() {
     let mut tdc = TdcSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    tdc.get_segmentation(&mut audio, &mut segs).unwrap();
+    tdc.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // The driver convolves `results` in place inside `get_segmentation`, so the
     // pre-convolution row is not directly observable from the trait surface.
@@ -153,7 +153,7 @@ fn get_segmentation_boundaries_match_dump() {
     let mut tdc = TdcSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    tdc.get_segmentation(&mut audio, &mut segs).unwrap();
+    tdc.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     for (chan, name) in ["tdc_boundaries_chan1.bin", "tdc_boundaries_chan2.bin"]
         .iter()
@@ -238,7 +238,7 @@ fn score_matches_dump() {
     let mut tdc = TdcSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    tdc.get_segmentation(&mut audio, &mut segs).unwrap();
+    tdc.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // Programmatic reference: two SPEECH spans per channel, matching the harness
     // manifest constants (`tdc_segmenter.constants.reference_spans_sec`).
@@ -258,7 +258,7 @@ fn score_matches_dump() {
     let mut audio2 = excerpt_audio();
     let mut tdc2 = TdcSegmenter::from_legacy(&m).unwrap();
     let mut hyp = fresh_segs(&audio2);
-    tdc2.get_segmentation(&mut audio2, &mut hyp).unwrap();
+    tdc2.get_segmentation(&mut audio2, &mut hyp, None).unwrap();
 
     let want = common::load_bin_phase2b("tdc_scores.bin");
     let reports = TdcSegmenter::score(&mut hyp, Some(&reference), -1);
@@ -289,7 +289,7 @@ fn vrcts_bytes_match_dump() {
     let mut tdc = TdcSegmenter::from_legacy(&m).unwrap();
     let mut audio = excerpt_audio_zero_offset();
     let mut segs = fresh_segs(&audio);
-    tdc.get_segmentation(&mut audio, &mut segs).unwrap();
+    tdc.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
     common::assert_vrcts_eq(&got, &dump, "tdc vrcts");
@@ -321,7 +321,7 @@ fn two_files_in_sequence_boundaries_match_dump() {
 
     let mut audio1 = excerpt_audio();
     let mut segs1 = fresh_segs(&audio1);
-    tdc.get_segmentation(&mut audio1, &mut segs1).unwrap();
+    tdc.get_segmentation(&mut audio1, &mut segs1, None).unwrap();
 
     // Second run on the SAME TdcSegmenter instance (inherits the quantized
     // window_shift_sec from file 1) against a FRESH audio/seg pair, per the
@@ -330,7 +330,7 @@ fn two_files_in_sequence_boundaries_match_dump() {
     // config value can exercise observable drift).
     let mut audio2 = excerpt_audio();
     let mut segs2 = fresh_segs(&audio2);
-    tdc.get_segmentation(&mut audio2, &mut segs2).unwrap();
+    tdc.get_segmentation(&mut audio2, &mut segs2, None).unwrap();
 
     let want = common::load_bin_phase2b("tdc_boundaries_file2_chan1.bin");
     let got_segs = segs2[0].segments();
@@ -359,7 +359,7 @@ fn window_shift_floors_at_one_over_rate() {
     let mut segs = fresh_segs(&audio);
     // Must not panic (a zero/undersized window_shift would divide-by-zero or
     // index out of bounds); the floor keeps window_shift >= 1 frame.
-    tdc.get_segmentation(&mut audio, &mut segs).unwrap();
+    tdc.get_segmentation(&mut audio, &mut segs, None).unwrap();
 }
 
 #[test]

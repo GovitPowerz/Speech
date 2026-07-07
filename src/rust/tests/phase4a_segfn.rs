@@ -278,3 +278,94 @@ fn speech_duration_walk() {
         );
     }
 }
+
+/// The REAL algo-3 config (`1_worker_1.config`) + real net weights
+/// (`NNweights_config1.bin`, 33,671 f64) with the top-level bag keys and a 2s
+/// window. `BackPropWER` defaults to -1 (no key) -> the simple-class target branch
+/// in `getTargets` (SPEECH/SUBSTITUTION -> 1.0). Backprop is OFF in the base config,
+/// but the FFB COST block is gated only on a non-empty target (NOT on backprop), so
+/// the reference-driven target still makes the cost live.
+fn spectral_bag_config() -> IndexMap<String, String> {
+    let mut m = load_config("phase0/1_worker_1.config");
+    m.insert("numOuterThreads".to_string(), "1".to_string());
+    m.insert("Algo_choice".to_string(), "3".to_string());
+    m.insert("Audio_offset".to_string(), "0.0".to_string());
+    m.insert("Audio_max_duration".to_string(), "2.0".to_string());
+    m.insert(
+        "BLSTM_weightsFile".to_string(),
+        ref_dir()
+            .join("phase0/NNweights_config1.bin")
+            .to_str()
+            .unwrap()
+            .to_string(),
+    );
+    m
+}
+
+// === spectral_scored_cost_is_live ===========================================
+// Task 7b: a scored 2-channel run on the REAL algo-3 config with an STM reference
+// now yields NONZERO nb_of_classif (col 17) and a finite NONZERO cumulative_error
+// (col 4) on BOTH channels -- the corpus cost path is live (targets flow into
+// `feed_forward_backward`, whose cost block accumulates on the non-empty target).
+#[test]
+fn spectral_scored_cost_is_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = wav_in(dir.path());
+    let stm = write_stm(dir.path());
+
+    let mut cfg = spectral_bag_config();
+    let mut bag =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+
+    let it = item(wav.to_str().unwrap(), stm.to_str().unwrap());
+    let results = bag.segmentation_function(&it, multi_mode()).unwrap();
+
+    let cfg0 = &results[&0];
+    assert_eq!(cfg0.len(), 2, "two channels");
+    for (chan, row) in cfg0 {
+        assert!(
+            row[17] > 0.0,
+            "col17 nb_of_classif must be > 0 (live target) chan {chan}, got {}",
+            row[17]
+        );
+        assert!(
+            row[4].is_finite() && row[4] != 0.0,
+            "col4 cumulative_error must be finite nonzero (live cost) chan {chan}, got {}",
+            row[4]
+        );
+    }
+}
+
+// === spectral_no_reference_zero_cost ========================================
+// The gating contrast (Task 7b): the SAME real algo-3 config, run WITHOUT a
+// reference (unscored solo mode, empty ref_seg), keeps col 4 == 0.0 and col 17 == 0
+// -- the drivers run the no-target forward path (empty target -> no cost/counter
+// accumulation), byte-identical to the pre-target behaviour. This pins the
+// reference gate: no reference => no live cost.
+#[test]
+fn spectral_no_reference_zero_cost() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = wav_in(dir.path());
+
+    let mut cfg = spectral_bag_config();
+    let mut bag =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()).unwrap();
+
+    // Empty ref_seg -> no reference loaded -> the no-target path (unscored solo mode
+    // does not require a reference, unlike -m/-t).
+    let it = item(wav.to_str().unwrap(), "");
+    let results = bag.segmentation_function(&it, solo_mode()).unwrap();
+
+    let cfg0 = &results[&0];
+    assert_eq!(cfg0.len(), 2, "two channels");
+    for (chan, row) in cfg0 {
+        assert_eq!(
+            row[4], 0.0,
+            "col4 cumulative_error must be 0 with no reference chan {chan}"
+        );
+        assert_eq!(
+            row[17], 0.0,
+            "col17 nb_of_classif must be 0 with no reference chan {chan}"
+        );
+    }
+}

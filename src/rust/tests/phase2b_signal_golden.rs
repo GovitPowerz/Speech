@@ -363,7 +363,7 @@ fn get_segmentation_boundaries_match_dump_cheap_variants() {
         let mut sig = build(tag);
         let mut audio = excerpt_audio();
         let mut segs = fresh_segs(&audio);
-        sig.get_segmentation(&mut audio, &mut segs).unwrap();
+        sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
         assert_boundaries_match(
             &segs,
             &format!("signal_{tag}_boundaries_chan1.bin"),
@@ -399,7 +399,7 @@ fn overlap_result_and_boundaries_match_dump() {
     let mut sig = build(tag);
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     assert_last_result_row_matches_dump(&sig, tag);
     assert_boundaries_match(
@@ -431,7 +431,7 @@ fn overlap_vrcts_matches_dump() {
     let mut sig = build(tag);
     let mut audio = excerpt_audio_zero_offset();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
     common::assert_vrcts_eq(&got, &dump, "overlap vrcts");
@@ -491,7 +491,7 @@ fn score_matches_dump_cheap_variants() {
         let mut audio = excerpt_audio();
         let mut sig = build(tag);
         let mut hyp = fresh_segs(&audio);
-        sig.get_segmentation(&mut audio, &mut hyp).unwrap();
+        sig.get_segmentation(&mut audio, &mut hyp, None).unwrap();
 
         let want = common::load_bin_phase2b(&format!("signal_{tag}_scores.bin"));
         let reports = BlstmSignalSegmenter::score(&mut hyp, Some(&reference), -1);
@@ -528,7 +528,7 @@ fn vrcts_bytes_match_dump_cheap_variants() {
         let mut sig = build(tag);
         let mut audio = excerpt_audio_zero_offset();
         let mut segs = fresh_segs(&audio);
-        sig.get_segmentation(&mut audio, &mut segs).unwrap();
+        sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
         let got = to_vrcts_string(&segs[0], &name, &path_attr);
         common::assert_vrcts_eq(&got, &dump, &format!("{tag} vrcts"));
@@ -593,7 +593,7 @@ fn window_zero_full_stays_one_and_driver_proceeds() {
     let mut sig = build("window0");
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
     assert!(!segs[0].segments().is_empty());
 
     // Sanity: windowing_coefficients over a length-1 window is None (the no-op the
@@ -645,7 +645,7 @@ fn dc_offset_flag_is_log_only() {
         let mut sig = BlstmSignalSegmenter::from_legacy(&m, Some(&w)).unwrap();
         let mut audio = excerpt_audio();
         let mut segs = fresh_segs(&audio);
-        sig.get_segmentation(&mut audio, &mut segs).unwrap();
+        sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
         segs[0]
             .segments()
             .iter()
@@ -713,7 +713,7 @@ fn two_files_in_sequence_no_overlap_lifecycle() {
 
     let mut audio1 = excerpt_audio();
     let mut segs1 = fresh_segs(&audio1);
-    sig.get_segmentation(&mut audio1, &mut segs1).unwrap();
+    sig.get_segmentation(&mut audio1, &mut segs1, None).unwrap();
 
     // Discriminator (file 1): result-vec length must be the real (reset-present)
     // 4000, not the no-reset counterfactual (irrelevant on file 1, which has no
@@ -732,7 +732,7 @@ fn two_files_in_sequence_no_overlap_lifecycle() {
 
     let mut audio2 = excerpt_audio();
     let mut segs2 = fresh_segs(&audio2);
-    sig.get_segmentation(&mut audio2, &mut segs2).unwrap();
+    sig.get_segmentation(&mut audio2, &mut segs2, None).unwrap();
 
     // Discriminator (file 2): THE key observable. If the :376 reset had NOT fired
     // on file 1, file 2 would inherit window_shift_sec = 1/rate (not 0.0), re-derive

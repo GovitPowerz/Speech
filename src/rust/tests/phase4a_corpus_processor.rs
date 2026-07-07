@@ -306,21 +306,13 @@ fn save_results_variables() {
 }
 
 // === grad_check_synthetic ====================================================
-// The corpus-level gradCheck ORCHESTRATION (`CorpusProcessor.cpp:237-340`): a
-// synthetic signal (Algo 4) net on a 1-file corpus, backprop active. Validates the
-// bag-snapshot / per-weight perturb / restore / central-difference machinery and
-// the returned `GradCheckReport` shape.
-//
-// PORT LIMITATION (documented in the report + IMPROVEMENTS): the Phase 2b drivers
-// do NOT wire the reference-driven target path into `get_segmentation` (they pass
-// an EMPTY target, `sad.rs:882`), so `feed_forward_backward` accumulates NO
-// cost/counter (`blstm.rs:1171` gates cost on `target.nrows() > 0`). The gradcheck
-// cost is therefore `sum(col 4) / sum(col 17) = 0 / 0 = NaN`, and the analytic
-// normalized deriv is `0 / count`. The central difference cannot be non-vacuous
-// under the current drivers -- Task 9's harness golden supplies the LIVE cost once
-// the target wiring lands. This test asserts what IS meaningful in Phase 4a: the
-// orchestration mechanics (report shape, weight restore after the sweep), and it
-// documents the degenerate cost explicitly.
+// The corpus-level gradCheck (`CorpusProcessor.cpp:237-340`): a synthetic signal
+// (Algo 4) net on a 1-file corpus WITH an STM reference, backprop active. Task 7b
+// wired the reference-driven target into the NN drivers, so `feed_forward_backward`
+// now accumulates a LIVE cost/counter and the backward derivs are non-degenerate --
+// the analytic gradient and the numerical central difference agree to the Task 7
+// bound (mean relative error < 5e-4). Also validates the bag-snapshot / per-weight
+// perturb / restore machinery and the `GradCheckReport` shape.
 #[test]
 fn grad_check_synthetic() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -329,6 +321,16 @@ fn grad_check_synthetic() {
     let _cwd = CwdGuard::enter(dir.path());
 
     let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::UnitTest)).unwrap();
+
+    // Seed deterministic NONZERO weights: the default-initialized net sits at a
+    // degenerate operating point (near-zero gradients everywhere), so the gradcheck
+    // would pass trivially on an all-zero gradient. The phase3 `synth_flat` pattern
+    // (`((k*11+3)%97)/97 - 0.5`) gives a smoothly-varying cost.
+    let nb = cp.get_config0_weights_for_test().len();
+    let synth: Vec<f64> = (0..nb)
+        .map(|k| ((k * 11 + 3) % 97) as f64 / 97.0 - 0.5)
+        .collect();
+    cp.set_config0_weights_for_test(&synth).unwrap();
 
     // Snapshot the pre-check weights (the sweep must leave them restored).
     let weights_before = cp.get_config0_weights_for_test();
@@ -339,16 +341,26 @@ fn grad_check_synthetic() {
 
     // Orchestration mechanics: exactly 10 per-weight triples produced by the sweep.
     assert_eq!(report.per_weight.len(), 10, "10 weights checked");
-    // The numeric values are DEGENERATE by construction: with no target the driver
-    // accumulates neither cost, count, nor backward derivs, so both the analytic
-    // normalized deriv (`0/0`) and the numerical central difference (`0/0`) are NaN,
-    // and so are the two means. Assert this degeneracy EXPLICITLY (it is the honest
-    // Phase 4a state; Task 9 supplies the live cost). If a future driver wiring makes
-    // the cost real, this assertion flips and the bound assert below takes over.
+    // The cost path is now LIVE (Task 7b targets): the analytic normalized deriv and
+    // the numerical central difference are finite and agree. Assert the Task 7 bound.
     assert!(
-        report.mean_relative_error.is_nan(),
-        "grad check cost is degenerate (0/0) under the current drivers -- mean rel error should be NaN, got {}",
+        report.mean_relative_error.is_finite(),
+        "grad check mean rel error must be finite (live cost path), got {}",
         report.mean_relative_error
+    );
+    assert!(
+        report.mean_relative_error < 5e-4,
+        "analytic vs numeric gradient must agree to < 5e-4, got {}",
+        report.mean_relative_error
+    );
+    // Non-vacuity: at least one checked weight has a genuinely nonzero numerical
+    // derivative (the check is not passing trivially on an all-zero gradient).
+    assert!(
+        report
+            .per_weight
+            .iter()
+            .any(|(_, numerical, _)| numerical.abs() > 1e-9),
+        "grad check must exercise at least one nonzero numerical derivative"
     );
     // Weight restore: after the sweep the bag is restored to its snapshot, so the
     // config-0 weights are bit-identical to before the check.

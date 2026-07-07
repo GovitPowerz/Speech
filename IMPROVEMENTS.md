@@ -1533,29 +1533,58 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `grad_check_synthetic` reaching a `(137, 2)` analytic derivative shape rather than `(0, 0)`
   (`tests/phase4a_corpus_processor.rs`).
 
-- **[phase4a] Corpus-level gradCheck is DEGENERATE under the current Phase 2b drivers (cost/counter
-  both 0)** (`engine/corpus_processor.rs::grad_check`, from `CorpusProcessor.cpp:237-340`): the
-  gradCheck central difference reads result col 4 (`cumulative_error`) / col 17 (`nb_of_classif`)
-  from the per-file results. But the Phase 2b NN drivers (`tasks/sad.rs`,
-  `BlstmSignalSegmenter`/`BlstmSpectralSegmenter` `get_segmentation`) do NOT wire the
-  reference-driven target path (`sad.rs:882`/`:1462` pass an EMPTY target to
-  `feed_forward_backward`), and `feed_forward_backward` gates BOTH the backward derivative
-  accumulation AND the cost/counter accumulation on `target.nrows() > 0` (`blstm.rs:1150,1171`). So
-  with no target: `cumulative_error == 0`, `nb_of_classif == 0`, and the analytic derivs are 0 with
-  count 0. The gradcheck cost is `0/0 == NaN` on both the +eps and -eps sides, the analytic
-  normalized deriv is `0/0 == NaN`, and both means are NaN -- the check is VACUOUS. The legacy
-  produces a live cost because its `getSegmentation` calls `getTargets` when `seg._Reference.size()
-  > 0` (`BLSTMSignalSegmenter.cpp:255-260`) and passes the real target to `feedForwardBackward`.
-  *Why deferred:* the reference-driven target wiring in `get_segmentation` is a Phase 2b driver
-  internal (out of Task 7 scope); Task 7 transcribes the gradCheck ORCHESTRATION faithfully (bag
-  snapshot, per-weight perturb/restore, central difference, the Nx2 col0/col1 normalize-at-read),
-  and Task 9's harness golden supplies the LIVE cost against a `SpectralProbe` whose real
-  `getSegmentation` DOES pass targets. *Fix candidate:* wire `get_targets` (already ported,
-  `segmenter.rs:524`) into both NN drivers' `get_segmentation` under `seg._Reference` (requires the
-  driver to first set the per-channel reference on the hypothesis Segmentation). *Pinned by:*
-  `grad_check_synthetic` (`tests/phase4a_corpus_processor.rs`), which asserts the orchestration
-  mechanics (10 per-weight triples, bit-exact weight restore after the sweep) AND the NaN degeneracy
-  explicitly, so a future driver fix that makes the cost live will flip this assertion visibly.
+- **[phase4a] CLOSED (Task 7b): corpus-level gradCheck was DEGENERATE (cost/counter both 0) under
+  the Phase 2b drivers** (`engine/corpus_processor.rs::grad_check`, from `CorpusProcessor.cpp:237-340`):
+  the gradCheck central difference reads result col 4 (`cumulative_error`) / col 17 (`nb_of_classif`)
+  from the per-file results. The Phase 2b NN drivers (`tasks/sad.rs`,
+  `BlstmSignalSegmenter`/`BlstmSpectralSegmenter` `get_segmentation`) hard-coded an EMPTY target to
+  `feed_forward_backward`, which gates BOTH the backward derivative accumulation AND the cost/counter
+  accumulation on `target.nrows() > 0` (`blstm.rs:1150,1171`). So with no target: `cumulative_error
+  == 0`, `nb_of_classif == 0`, analytic derivs 0 with count 0, gradcheck cost `0/0 == NaN` on both
+  sides -- the check was VACUOUS. **Task 7b closed this** by threading the per-channel REFERENCE
+  through the `Segmenter::get_segmentation` trait (new `refs: Option<&[Segmentation]>` param) and
+  calling the already-ported `get_targets` (`segmenter.rs`) inside the two NN drivers under the legacy
+  gate `seg._Reference.size() > 0` (`BLSTMSignalSegmenter.cpp:255-258`,
+  `BLSTMSpectralSegmenter.cpp:735-738`). The corpus bag (`bag_of_processors.rs::segmentation_function`)
+  now passes its loaded references to the driver. *Pinned by:* `grad_check_synthetic`
+  (`tests/phase4a_corpus_processor.rs`) now asserts mean-relative-error < 5e-4 (analytic vs numeric
+  agree) plus a non-vacuity guard (>= 1 nonzero numerical deriv) and the bit-exact weight restore;
+  `spectral_scored_cost_is_live` / `spectral_no_reference_zero_cost` (`tests/phase4a_segfn.rs`) pin
+  the live-cost path and the no-reference gate on the REAL algo-3 config. *Mutation evidence:* the
+  `refs=None` contrast test (`spectral_no_reference_zero_cost`) fails if the driver ever builds a
+  target without a reference (col 4 / col 17 would go nonzero); and reverting the trait wiring so the
+  bag passes `None` returns `grad_check_synthetic` to the NaN-degeneracy it had before Task 7b.
+
+- **[phase4a] `getTargets` with `_BackPropWER < 0` uses the SPEECH `classType` arg; the drivers pass
+  `SPEECH` unconditionally** (`tasks/sad.rs` NN drivers, from `BLSTMSignalSegmenter.cpp:257` /
+  `BLSTMSpectralSegmenter.cpp:737`): both NN drivers call `getTargets(..., SPEECH)`. In `getTargets`
+  (`Segmenter.cpp:696-704`, the `_BackPropWER < 0` branch), the reference SPEECH span -> target 1.0,
+  SUBSTITUTION -> 1.0 (via `classType == SPEECH && ty == SUBSTITUTION`), EXCLUDED -> -0.5, everything
+  else -> 0.0. The real `1_worker_1.config` has no `BLSTM_BackPropWER` key, so `DriverConfig`
+  defaults it to -1.0 (`< 0`) -> this simple-class branch, NOT the WER-soft-target branch. The
+  synthetic signal gradcheck config also sets `BLSTM_BackPropWER -1.0` explicitly. Reproduced
+  verbatim; no port deviation.
+
+- **[phase4a] The spectral PITCH second pass REUSES the pass-1 target buffer (not rebuilt on the
+  warp)** (`tasks/sad.rs::BlstmSpectralSegmenter::get_segmentation` pitch block, from
+  `BLSTMSpectralSegmenter.cpp:793`): the pitch pass re-forwards the WARPED input through
+  `feed_forward_backward` but passes the SAME `targetSeq` built once at `:736-738` for pass 1 -- the
+  legacy does NOT re-call `getTargets` for the pitch re-forward. The Rust port carries the pass-1
+  `target` in scope across the pitch block and passes `&target` unchanged, matching `:793`
+  element-for-element. Reproduced verbatim. (Under the real algo-3 config the pitch pass is gated on
+  `TDCwindow > 0`, which the base config does not set, so this is exercised only by the pitch-variant
+  spectral goldens; the target reuse is nonetheless wired for that path.)
+
+- **[phase4a] Task 7b target flow does NOT interact with the `_TargetEnforcementStep < 0` interior
+  rewrite for the ported configs** (`nn/blstm.rs::feed_forward_backward_plain`, risk R7 cross-ref):
+  the R7 rewrite (interior target/output rows -> -0.5) fires only when `target_enforcement_step < 0`.
+  The real `1_worker_1.config` and the synthetic gradcheck config both set/derive
+  `TargetEnforcementStep = 0` (`>= 0`), so the reference-driven target flows through to `feed_backward`
+  and `compute_cost` UNCHANGED (no interior overwrite). The existing `blstm.rs` R7 behaviour is thus
+  unaffected by the Task 7b wiring for the ported configs; the R7 mutation of the caller-visible
+  `outputSeq` remains reachable only under a `step < 0` config (none in the current test corpus).
+  Verified by inspection; the existing phase3 backward goldens (which DO exercise `step < 0`) stay
+  green under `cargo test`.
 
 - **[phase4a] gradCheck `max_weights` cap is a port-only DEVIATION from the legacy full sweep**
   (`engine/corpus_processor.rs::grad_check_capped`): the legacy `gradCheck` (`:263`) checks EVERY

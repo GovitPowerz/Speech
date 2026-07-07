@@ -96,13 +96,14 @@ impl Processor {
         &mut self,
         audio: &mut crate::audio::Audio,
         seg_per_chan: &mut [crate::tasks::segmentation::Segmentation],
+        refs: Option<&[crate::tasks::segmentation::Segmentation]>,
     ) -> Result<()> {
         use crate::tasks::segmenter::Segmenter;
         match self {
-            Processor::Tdc(s) => s.get_segmentation(audio, seg_per_chan),
-            Processor::Ltsv(s) => s.get_segmentation(audio, seg_per_chan),
-            Processor::Spectral(s) => s.get_segmentation(audio, seg_per_chan),
-            Processor::Signal(s) => s.get_segmentation(audio, seg_per_chan),
+            Processor::Tdc(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::Ltsv(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::Spectral(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::Signal(s) => s.get_segmentation(audio, seg_per_chan, refs),
         }
     }
 
@@ -620,7 +621,9 @@ impl BagOfProcessors {
         audio: &mut Audio,
         seg_per_chan: &mut [Segmentation],
     ) -> Result<()> {
-        self.processors[pos].get_segmentation(audio, seg_per_chan)
+        // No reference is threaded here (the test-oracle path drives one config's
+        // hypothesis only); the NN drivers run the no-target forward path.
+        self.processors[pos].get_segmentation(audio, seg_per_chan, None)
     }
 
     /// Port of `BagOfProcessors::SegmentationFunction` (`:207-407`): read the
@@ -724,7 +727,15 @@ impl BagOfProcessors {
 
             let t = Instant::now();
             // legacy: :265-300 dispatch on _AlgoTypes[ii].getSegmentation(audio, seg).
-            self.processors[ii].get_segmentation(&mut audio, &mut seg_per_chan)?;
+            // Thread the per-channel reference (the legacy `seg._Reference`) so the NN
+            // drivers can build training targets (`getTargets`, gated on a non-empty
+            // reference). Non-NN drivers (TDC/LTSV) ignore it. `None` when no reference
+            // was loadable -- the drivers then run the no-target forward path.
+            self.processors[ii].get_segmentation(
+                &mut audio,
+                &mut seg_per_chan,
+                reference.as_deref(),
+            )?;
             let dump_dir = self.processors[ii].dump_dir().to_string();
 
             // Mandatory-reference check (`:302-305`): _ClassificationErrors is

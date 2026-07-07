@@ -31,7 +31,9 @@ use crate::features::stats::InputStatistics;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
-use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
+use crate::tasks::segmenter::{
+    DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
+};
 
 fn parse_scalar(m: &IndexMap<String, String>, key: &str) -> Result<f64> {
     m.get(key)
@@ -197,7 +199,10 @@ impl Segmenter for TdcSegmenter {
         &mut self,
         audio: &mut Audio,
         seg_per_chan: &mut [Segmentation],
+        _refs: Option<&[Segmentation]>,
     ) -> Result<()> {
+        // TDC is NN-free (no BLSTM in the chain): the legacy `getTargets` call site
+        // lives only in the two BLSTM drivers, so the reference is ignored here.
         let rate = audio.sample_rate as f64;
 
         // window_size (`:100-101`): half = round(w*rate/2), full = 2*half+1 (ODD).
@@ -387,7 +392,9 @@ impl Segmenter for LtsvSegmenter {
         &mut self,
         audio: &mut Audio,
         seg_per_chan: &mut [Segmentation],
+        _refs: Option<&[Segmentation]>,
     ) -> Result<()> {
+        // LTSV is NN-free (no BLSTM in the chain): the reference is ignored here.
         let rate = audio.sample_rate as f64;
 
         // Spectrum-order clamp to Max-1 == 19 (`:145-149`).
@@ -776,6 +783,7 @@ impl Segmenter for BlstmSignalSegmenter {
         &mut self,
         audio: &mut Audio,
         seg_per_chan: &mut [Segmentation],
+        refs: Option<&[Segmentation]>,
     ) -> Result<()> {
         let rate = audio.sample_rate as f64;
         let ssr = self.net.sub_sampling_ratio();
@@ -884,11 +892,31 @@ impl Segmenter for BlstmSignalSegmenter {
                 }
             }
 
-            // getTargets when a reference exists (`:255-258`). No reference is set on a
-            // fresh hypothesis Segmentation, so the target sequence stays empty; the
-            // driver runs the no-target forward path. (Reference-driven scoring is
-            // exercised via `score`, not this method, matching the goldens.)
-            let target = Array2::<f64>::zeros((0, 0));
+            // getTargets when a reference exists (`:255-258`): `seg._Reference.size()
+            // > 0` -> `targetSeq = result_vec` (a `real_vec_size x 1` zeros buffer),
+            // then `getTargets(seg, timeStep, timeOffset, targetSeq, chan, SPEECH)`
+            // fills col 0. `refs` carries the per-channel reference the Rust
+            // Segmentation does not hold internally; a `None`/empty reference leaves
+            // `target` empty (`0x0`), so `feed_forward_backward` runs the no-target
+            // forward path (cost/nb_of_classif un-accumulated -- the pre-target 2b
+            // behaviour is byte-identical). `SPEECH` is the legacy `classType`
+            // argument (`:257`): the reference SPEECH/SUBSTITUTION spans map to target
+            // 1.0 (back_prop_wer < 0) or the WER-soft target (back_prop_wer >= 0).
+            let target = match refs {
+                Some(rs) if !rs[chan].segments().is_empty() => {
+                    let col = get_targets(
+                        seg,
+                        &rs[chan],
+                        time_step,
+                        time_offset,
+                        self.driver_cfg.back_prop_wer,
+                        SegClass::Speech,
+                        real_vec_size,
+                    );
+                    Array2::from_shape_vec((real_vec_size, 1), col).unwrap()
+                }
+                _ => Array2::<f64>::zeros((0, 0)),
+            };
 
             // NN forward+backward (`:260`): input mutated in place by the internal
             // normalization (type -1 for the real net). window_size/window_shift are
@@ -1349,6 +1377,7 @@ impl Segmenter for BlstmSpectralSegmenter {
         &mut self,
         audio: &mut Audio,
         seg_per_chan: &mut [Segmentation],
+        refs: Option<&[Segmentation]>,
     ) -> Result<()> {
         let rate = audio.sample_rate as f64;
 
@@ -1456,10 +1485,28 @@ impl Segmenter for BlstmSpectralSegmenter {
                 temporal_conv.as_deref(),
             );
 
-            // getTargets when a reference exists (:735-738). Fresh hypotheses carry no
-            // reference, so the no-target forward path runs; reference-driven scoring
-            // is exercised via `score`.
-            let target = Array2::<f64>::zeros((0, 0));
+            // getTargets when a reference exists (:735-738): `seg._Reference.size() > 0`
+            // -> `targetSeq = result_vec` (a `real_vec_size x 1` zeros buffer), then
+            // `getTargets(seg, timeStep, timeOffset, targetSeq, chan, SPEECH)` fills
+            // col 0. `refs` carries the per-channel reference; `None`/empty leaves
+            // `target` empty (`0x0`) -> the no-target forward path (byte-identical to
+            // the pre-target 2b behaviour). Built ONCE here and REUSED by the pitch
+            // second pass (:793 passes the SAME `targetSeq`, NOT rebuilt).
+            let target = match refs {
+                Some(rs) if !rs[chan].segments().is_empty() => {
+                    let col = get_targets(
+                        seg,
+                        &rs[chan],
+                        time_step,
+                        time_offset,
+                        self.driver_cfg.back_prop_wer,
+                        SegClass::Speech,
+                        real_vec_size,
+                    );
+                    Array2::from_shape_vec((real_vec_size, 1), col).unwrap()
+                }
+                _ => Array2::<f64>::zeros((0, 0)),
+            };
 
             // NN forward+backward (:740): input mutated in place by the internal type
             // -1 self-normalization. result_vec is the SHARED buffer (reused across
@@ -1530,9 +1577,11 @@ impl Segmenter for BlstmSpectralSegmenter {
                 );
 
                 // Re-forward (:793) ONLY when pitch > 0 (:791). Reuses the SAME result_vec
-                // buffer (:793). clear_hypothesis (:800) then re-results2segmentation (:801)
-                // OVERWRITE the pass-1 boundaries; the error/classif slots are OVERWRITTEN
-                // (:802-803, not accumulated).
+                // buffer (:793) AND the SAME `target` built for pass 1 (:793 passes the
+                // unchanged `targetSeq`, NOT rebuilt on the warp). clear_hypothesis
+                // (:800) then re-results2segmentation (:801) OVERWRITE the pass-1
+                // boundaries; the error/classif slots are OVERWRITTEN (:802-803, not
+                // accumulated).
                 if pitch > 0.0 {
                     let result_vec = self.result_buf.as_mut().unwrap();
                     self.net.feed_forward_backward(

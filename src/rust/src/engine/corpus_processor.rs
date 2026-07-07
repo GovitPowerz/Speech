@@ -759,6 +759,16 @@ impl CorpusProcessor {
             .unwrap_or_default()
     }
 
+    /// Seed config-0's NN with a synthetic nonzero weight vector (test hook for
+    /// `grad_check_synthetic`): the default-initialized net sits at a degenerate
+    /// operating point (near-zero gradients), so the gradcheck needs deterministic
+    /// nonzero weights -- exactly the phase3 `synth_flat` pattern -- to exercise a
+    /// smoothly-varying cost. No-op for a non-NN config 0.
+    #[doc(hidden)]
+    pub fn set_config0_weights_for_test(&mut self, flat: &[f64]) -> Result<()> {
+        self.processors.set_weights(0, &[flat.to_vec()])
+    }
+
     /// A hand-sequential oracle for `lanes_n1_equals_sequential`: build a fresh bag,
     /// walk the corpus files in ascending order through `segmentation_function`, and
     /// assemble the same `[file+1, conf+1, chan+1, res...]` ResultsE the engine's

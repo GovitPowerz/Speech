@@ -384,7 +384,7 @@ fn run_and_assert_chan1(tag: &str) {
     let mut sig = build(tag);
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // S9.3: the REAL Rust NN chain's chan-1 result row, bit-exact vs the golden.
     assert_last_result_row_matches_dump(&sig, tag, 0);
@@ -478,7 +478,7 @@ fn overlap_variant_and_cross_channel_reuse() {
     let mut sig = build("overlap");
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // Both channels' result rows bit-exact vs the dumps (the cross-channel contents ARE
     // the golden: chan-2 is contaminated by chan-1's carry-over).
@@ -514,7 +514,7 @@ fn cross_channel_reuse_is_load_bearing() {
     let mut sig = build("overlap");
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
     let contaminated = sig.last_result_rows()[1].clone();
 
     // The dump == the contaminated (reused-buffer) chan-2 result.
@@ -619,7 +619,7 @@ fn score_matches_dump_real_variant() {
         let mut audio = excerpt_audio();
         let mut sig = build(tag);
         let mut hyp = fresh_segs(&audio);
-        sig.get_segmentation(&mut audio, &mut hyp).unwrap();
+        sig.get_segmentation(&mut audio, &mut hyp, None).unwrap();
 
         let want = common::load_bin_phase2b(&format!("spectral_{tag}_scores.bin"));
         let reports = BlstmSpectralSegmenter::score(&mut hyp, Some(&reference), -1);
@@ -654,7 +654,7 @@ fn vrcts_bytes_match_dump() {
         let mut sig = build(tag);
         let mut audio = excerpt_audio_zero_offset();
         let mut segs = fresh_segs(&audio);
-        sig.get_segmentation(&mut audio, &mut segs).unwrap();
+        sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
         let got = to_vrcts_string(&segs[0], &name, &path_attr);
         common::assert_vrcts_eq(&got, &dump, &format!("{tag} vrcts"));
@@ -687,7 +687,7 @@ fn two_files_in_sequence_no_overlap_lifecycle() {
 
     let mut audio1 = excerpt_audio();
     let mut segs1 = fresh_segs(&audio1);
-    sig.get_segmentation(&mut audio1, &mut segs1).unwrap();
+    sig.get_segmentation(&mut audio1, &mut segs1, None).unwrap();
 
     // Post-file1: the :885 reset fired -> window_shift_sec back to 0.0.
     assert_eq!(
@@ -708,7 +708,7 @@ fn two_files_in_sequence_no_overlap_lifecycle() {
 
     let mut audio2 = excerpt_audio();
     let mut segs2 = fresh_segs(&audio2);
-    sig.get_segmentation(&mut audio2, &mut segs2).unwrap();
+    sig.get_segmentation(&mut audio2, &mut segs2, None).unwrap();
 
     // Post-file2: the reset re-fired (the round trip repeats).
     assert_eq!(
@@ -797,7 +797,7 @@ fn non_wav_spectrum_shift_80_fallback_persists() {
     // spectrum_shift_in_frames 80"), so this is the same-rate case.
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
     assert_eq!(
         sig.spectrum_shift_in_frames(),
         80,
@@ -881,7 +881,7 @@ fn pitch_scalar_matches_dump() {
     // matching the legacy (getPitch runs on the preemph'd audio inside getSegmentation).
     let mut sig = build_pitch();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // But segs[0] now holds the PASS-2 boundaries (the pitch pass overwrote them). To
     // walk the PASS-1 seg we rebuild it: pass-1 boundaries == the T7 real dump.
@@ -904,7 +904,7 @@ fn pitch_both_pass_goldens() {
     let mut sig = build_pitch();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // PASS-1 result (preserved): last_result_rows[0] == the pass-1 dump.
     let rows1 = sig.last_result_rows();
@@ -948,7 +948,7 @@ fn pitch_dump_quirk_pass1_result_preserved() {
     let mut sig = build_pitch();
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // last_result_rows (pass 1) == the T7 real result, byte-for-byte (the preserved dump).
     let rows1 = sig.last_result_rows();
@@ -1032,7 +1032,7 @@ fn pitch_vrcts_bytes_match_dump() {
     let mut sig = build_pitch();
     let mut audio = excerpt_audio_zero_offset();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     let got = to_vrcts_string(&segs[0], &name, &path_attr);
     common::assert_vrcts_eq(&got, &dump, "pitch vrcts (pass-2 seg)");
@@ -1048,7 +1048,7 @@ fn pitch_gate_off_when_tdcwindow_zero() {
     let mut sig = build("real"); // TDCwindow 0 -> s.tdc is None -> gate off.
     let mut audio = excerpt_audio();
     let mut segs = fresh_segs(&audio);
-    sig.get_segmentation(&mut audio, &mut segs).unwrap();
+    sig.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     assert!(
         sig.last_result_rows_pass2().is_empty(),
