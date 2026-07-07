@@ -671,6 +671,10 @@ impl BagOfProcessors {
         // legacy: :254 AudioStruct audio(_OffsetBegin, _DurationMax, _FileType, corpusItem);
         let file_name = &item.file_name;
         let mut audio = read_audio(Path::new(file_name), self.offset_begin, self.duration_max)?;
+        // legacy: AudioStruct ctor sets _LangIndex/_Weight from the CorpusItem
+        // (AudioStruct.cpp:53,60) -- see apply_corpus_item's doc for the
+        // placement deviation.
+        apply_corpus_item(&mut audio, item);
         let channel_count = audio.data.nrows();
         let frame_count = audio.data.ncols();
         // legacy: Segmentation.cpp:47 _AudioDuration = (frameCount-1)/frameRate.
@@ -851,6 +855,23 @@ impl BagOfProcessors {
     }
 }
 
+/// legacy: `AudioStruct::AudioStruct(double, double, int, CorpusItem&)`
+/// (AudioStruct.cpp:53,60 -- and the four sibling per-`file_type` copy sites at
+/// `:141/147`, `:186/192`, `:260/266`, `:328/333`): `_LangIndex =
+/// corpusItem.getClassOfFile()`, `_Weight = corpusItem.getWeightOfFile()`. In
+/// the legacy these assignments run INSIDE the `AudioStruct` ctor, which takes
+/// the owning `CorpusItem` directly. This port's `read_audio` (Phase 1)
+/// predates the corpus/bag wiring and has no `CorpusItem` in scope, so the bag
+/// driver sets the two fields here, immediately after `read_audio` returns --
+/// a documented placement deviation (same audio object, same point before any
+/// other use), not a behavior change. Extracted as its own function so the
+/// setter path is unit-testable without going through the full
+/// `segmentation_function` flow.
+fn apply_corpus_item(audio: &mut Audio, item: &CorpusItem) {
+    audio.lang_index = item.class_index;
+    audio.weight = item.weight;
+}
+
 /// The extension dispatch of the legacy `Segmentation` ctor (`:72-110`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RefExt {
@@ -1019,6 +1040,33 @@ mod tests {
         m.insert("numOuterThreads".to_string(), "1".to_string());
         m.insert("Algo_choice".to_string(), algo.to_string());
         m
+    }
+
+    // === apply_corpus_item_sets_lang_index_and_weight =======================
+    // Unit test for the extracted setter helper (Task 2): asserts the bag's
+    // AudioStruct-ctor-equivalent copy (class_index -> lang_index, weight ->
+    // weight) directly, without going through the full segmentation_function
+    // flow (which requires a real decodable wav).
+    #[test]
+    fn apply_corpus_item_sets_lang_index_and_weight() {
+        let mut audio =
+            crate::audio::read_audio(&ref_dir().join("phase1/excerpt_2ch_8k.wav"), 0.0, 0.1)
+                .unwrap();
+        assert_eq!(audio.lang_index, -1, "read_audio default");
+        assert_eq!(audio.weight, 1.0, "read_audio default");
+
+        let item = CorpusItem {
+            file_name: "irrelevant.wav".to_string(),
+            ref_seg: String::new(),
+            language: "chi".to_string(),
+            dialect: "man".to_string(),
+            class_index: 1,
+            file_id: 1,
+            weight: 0.75,
+        };
+        apply_corpus_item(&mut audio, &item);
+        assert_eq!(audio.lang_index, 1);
+        assert_eq!(audio.weight, 0.75);
     }
 
     #[test]

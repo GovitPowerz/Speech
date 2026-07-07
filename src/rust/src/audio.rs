@@ -31,6 +31,20 @@ pub struct Audio {
     pub sample_rate: u32,
     pub data: Array2<f64>,
     pub data_raw: Array2<f64>,
+    /// `AudioStruct::_LangIndex` (AudioStruct.h:64), set from the owning
+    /// `CorpusItem::getClassOfFile()` (AudioStruct.cpp:53 and its four other
+    /// per-`file_type` copy sites). `read_audio` (Phase 1) has no `CorpusItem`
+    /// in scope -- the bag driver sets this field right after `read_audio`
+    /// returns (Phase 4b, `engine::bag_of_processors::apply_corpus_item`), a
+    /// documented placement deviation, not a behavior change. Defaults to -1
+    /// (the legacy default ctor leaves `_LangIndex` uninitialized; -1 is this
+    /// port's explicit stand-in).
+    pub lang_index: i32,
+    /// `AudioStruct::_Weight` (AudioStruct.h:28), set from
+    /// `CorpusItem::getWeightOfFile()` (AudioStruct.cpp:60 + siblings). Same
+    /// placement deviation as `lang_index`. Defaults to 1.0, matching the
+    /// legacy default ctor's `_Weight(1.0)` (AudioStruct.cpp:33).
+    pub weight: f64,
 }
 
 impl Audio {
@@ -513,6 +527,8 @@ pub fn read_audio(path: &Path, offset_sec: f64, max_duration_sec: f64) -> anyhow
         sample_rate,
         data,
         data_raw,
+        lang_index: -1,
+        weight: 1.0,
     })
 }
 
@@ -559,6 +575,8 @@ fn test_audio(samples: Vec<f64>) -> Audio {
         sample_rate: 8000,
         data: data.clone(),
         data_raw: data,
+        lang_index: -1,
+        weight: 1.0,
     }
 }
 
@@ -571,6 +589,8 @@ fn test_audio_2ch(samples: Vec<f64>) -> Audio {
         sample_rate: 8000,
         data: data.clone(),
         data_raw: data,
+        lang_index: -1,
+        weight: 1.0,
     }
 }
 
