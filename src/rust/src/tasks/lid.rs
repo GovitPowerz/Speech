@@ -48,19 +48,24 @@
 //! normalized input (`:364-368`) is DEAD (segments read disjoint row blocks) -- skipped,
 //! see IMPROVEMENTS.md.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::audio::{Audio, compute_segment_periodogram_estimates, windowing_coefficients};
 use crate::features::ltsv_tdc::ltsv_classify_sequence;
 use crate::features::mel::MelFilterBank;
-use crate::features::pipeline::{FeatureConfig, SpectralParams};
+use crate::features::pipeline::{FeatureConfig, SpectralParams, build_input_sequence_parts};
+use crate::features::stats::InputStatistics;
+use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
-use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
+use crate::tasks::segmenter::{
+    DriverConfig, Segmenter, SegmenterConfig, get_targets, lid_to_segmentation,
+    results_to_segmentation,
+};
 
 /// BLSTM spectral LID driver (Algo 5; `BLSTMSpectralLID.{h,cpp}`).
 ///
@@ -628,5 +633,1025 @@ impl Segmenter for BlstmSpectralLid {
     /// `getWeights` delegates to the NN.
     fn get_weights(&self) -> Vec<f64> {
         self.net.get_weights()
+    }
+}
+
+// ===========================================================================
+// Twin/Siamese LID driver (Algo 6; `TwinBLSTMSpectralLID.{h,cpp}`).
+// ===========================================================================
+
+fn twin_scalar(m: &IndexMap<String, String>, key: &str) -> Result<f64> {
+    m.get(key)
+        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .trim()
+        .parse::<f64>()
+        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
+}
+
+fn twin_scalar_default(m: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
+    match m.get(key) {
+        None => Ok(default),
+        Some(s) => s
+            .trim()
+            .parse::<f64>()
+            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
+    }
+}
+
+fn twin_i32_default(m: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
+    match m.get(key) {
+        None => Ok(default),
+        Some(s) => s
+            .trim()
+            .parse::<i32>()
+            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
+    }
+}
+
+fn twin_bool_default(m: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
+    match m.get(key) {
+        None => Ok(default),
+        Some(s) => s
+            .trim()
+            .parse::<bool>()
+            .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}")),
+    }
+}
+
+/// Twin/Siamese spectral LID driver (Algo 6; `TwinBLSTMSpectralLID.{h,cpp}`).
+///
+/// UNLIKE Algo 5 (`BlstmSpectralLid`, whose SAD is LTSV-driven), Algo 6's SAD IS the
+/// BLSTM spectral segmenter: `getSegmentation` (`:263-1421`) inlines the BASE
+/// `BLSTMSpectralSegmenter` spectrum pipeline (`:349-619`, the same
+/// `getBLSTMInputSequence` the base driver uses), runs the SAD BLSTM
+/// (`_BLSTMNeuralNetwork`, `:715`) for the VAD result_vec, then a SECOND
+/// (`_LIDBLSTMNeuralNetwork`) per-speech-segment for language scoring
+/// (`:1243-1291`). The two nets read the `BLSTM` / `BLSTM_LID` config namespaces.
+///
+/// THIS DRIVER ports the wav-mode 0/2/3 paths + the hidden-state concat only. Modes
+/// 4/5/6/7 (the `if ((_Mode==4)||(_Mode==5)||(_Mode==6))` LID-first block `:640-692`,
+/// the `abs(_Mode)==7` CNN/noise block `:903-1193`) and the pitch second pass
+/// (`:349-614` `TDC_window_size > 0`, a REFERENCE-based pre-forward warp that DIVERGES
+/// from the base driver's post-forward pitch pass) BAIL typed, deferred to the next
+/// task. The CNN member (`_LIDConvNeuralNetwork`, `:23`) is NOT ported (dead under the
+/// port scope, only live in mode 7 -- see IMPROVEMENTS phase2 Conv exclusion).
+///
+/// MODE gating on the ported `:1194-1310` scoring branch (reached by modes 0/1/2/3):
+/// - Mode 0/3 run the SAD net `feedForwardBackward` (`:713-717`), populating
+///   `_OutputForward`/`_OutputBackward` (consumed by the concat).
+/// - Mode 2 synthesizes `result_vec = LID_result_vec` (all-zero, `:719-724`) and CLEARS
+///   the SAD net outputs (`:762-763`) -> the concat takes the empty fallback.
+/// - Mode 1 fills `result_vec` with the constant 10.0 (`:726`) + clears outputs.
+/// - The scoring loop iterates the REFERENCE for modes 2/3, the CLASSIFICATION for
+///   modes 0/1 (`:1223-1239`). For modes != 0 the final classification is OVERWRITTEN by
+///   `LID2Segmentation(segmentationLID)` (`:1294-1298`).
+///
+/// The `lid_*` accessors mirror [`BlstmSpectralLid`]'s; unlike Algo 5, the SAD-side
+/// `cumulative_error`/`nb_of_classif` ARE written (`= NNCost`, then `*= LIDCostPonderation`
+/// `:774,:1337`) since the SAD is a real NN here.
+#[derive(Clone)]
+pub struct TwinBlstmSpectralLid {
+    driver_cfg: DriverConfig,
+    seg_cfg: SegmenterConfig,
+    feature_cfg: FeatureConfig,
+    sad_net: BlstmNetwork,
+    lid_net: BlstmNetwork,
+    /// `_LIDWindowSize` (`:15-16`, clamped `< 0 -> 0`); constant.
+    lid_window_size_sec: f64,
+    /// `_LIDWindowShift` (`:17-18` seed, mutated by `getLIDBLSTMParam` `:102`, reset to
+    /// `0.0` on LIDnoOverlap `:1420`); stateful.
+    lid_window_shift_sec: f64,
+    /// `_LIDDetectionThreshold` (`:25`, default -1.0). Unused on the 0/2/3 path.
+    lid_detection_threshold: f64,
+    /// `_LIDTrainingPruningThreshold` (`:26`, default -1.0). Gates `:1286` pruning.
+    lid_training_pruning_threshold: f64,
+    /// `_LIDDecisionThreshRising` (`:28`). Used by `LID2Segmentation` (`:1296`) + the
+    /// `segmentationLID` midpoint seed (`:1242`).
+    lid_decision_thresh_rising: f64,
+    /// `_LIDDecisionThreshFalling` (`:29`). Midpoint seed only on the 0/2/3 path
+    /// (`LID2Segmentation` ignores its `threshMin` arg -- see [`lid_to_segmentation`]).
+    lid_decision_thresh_falling: f64,
+    /// `_Mode` (`:33`, default 0). 0/1/2/3 ported; 4/5/6/7 bail.
+    mode: i32,
+    /// `_PostProcessMode` (`:35`, default 0). The 0/2/3 scoring branch always sums log
+    /// posteriors via `segLID = colwise sum / rows` (the `_PostProcessMode` 1/2 variants
+    /// live only in the mode 4/5/6/7 blocks) -- stored for the next task.
+    post_process_mode: i32,
+    /// `_MinNbOfFrames` (`:36`, default 0). Mode 7-only; stored for the next task.
+    min_nb_of_frames: i32,
+    /// `_NoiseMagnitude` (`:37`, default 0.0). Mode 7-only; stored for the next task.
+    noise_magnitude: f64,
+    /// `_DumpLIDInternals` (`:38`, default false). Mode 7-only; stored for the next task.
+    dump_lid_internals: bool,
+    /// Stateful `_SpectrumShift` (`:210`), self-quantizing per call.
+    spectrum_shift_sec: f64,
+    /// Stateful `_SpectrumShiftInFrames` (`:208-210`).
+    spectrum_shift_in_frames: usize,
+    /// Stateful SAD `_WindowShift` (`:453/:1419`).
+    window_shift_sec: f64,
+    /// Stateful `_LTSVWindowShift` (`:306`); dead for the ported configs (LTSVwindow 0).
+    ltsv_shift_sec: f64,
+    channels: usize,
+    /// `seg._CumulativeError[chan]` (`:774`, then `*= LIDCostPonderation` `:1337`).
+    cumulative_error: Vec<f64>,
+    /// `seg._NbOfClassif[chan]` (`:775`).
+    nb_of_classif: Vec<i64>,
+    /// Port-side observation point (no legacy counterpart, same rationale as
+    /// [`BlstmSpectralSegmenter::last_result_rows`]): the SAD `result_vec2` row per
+    /// channel captured PRE-convolution (before `results_to_segmentation`).
+    last_result_rows: Vec<Vec<f64>>,
+    /// `seg._LIDCumulativeError[chan]` (`:1320`, then `*= audio._Weight` `:1336`).
+    lid_cumulative_error: Vec<f64>,
+    /// `seg._LIDNbOfClassif[chan]` (`:1321`).
+    lid_nb_of_classif: Vec<i64>,
+    /// `seg._LIDClassificationErrors[chan]` (`:1322`): `100 * (langID - targetLID)`.
+    lid_classification_errors: Vec<Vec<f64>>,
+    /// `seg._LIDSegmentsConfusion[chan]` (`:1324`).
+    lid_segments_confusion: Vec<Array2<f64>>,
+    /// `seg._IsLIDCorrect[chan]` (`:1325-1331`): 100/0 (`-1` dead, targetIndex clamped >= 0).
+    is_lid_correct: Vec<i32>,
+    /// Port-side observation point (no legacy counterpart): which branch of
+    /// `getBLSTMLIDInputSequence` (`:139-168`) the concat guard (`:1221`) took per
+    /// channel -- `0` not called (LID input <= feature width), `1` concat (SAD
+    /// `_OutputForward` populated), `2` empty fallback (outputs cleared/empty). Pins the
+    /// concat non-vacuity.
+    concat_branch: Vec<i32>,
+}
+
+impl TwinBlstmSpectralLid {
+    /// Port of the `TwinBLSTMSpectralLID(ConfigFile&, ...)` ctor (`:10-39`):
+    /// `BLSTMSpectralSegmenter::buildFromConf(conf, "BLSTM", ...)` (the `Segmenter` +
+    /// spectral residue) + `BLSTMNeuralNetwork(conf, "BLSTM", false)` (the SAD net) +
+    /// `BLSTMNeuralNetwork(conf, "BLSTM_LID", false)` (the LID net) + the `BLSTM_LID_*`
+    /// scalars. The `_LIDConvNeuralNetwork(conf, "CNN", false)` (`:23`) is NOT ported.
+    /// `weights`/`lid_weights` mirror the two ctor overloads: `Some(flat)` ->
+    /// `setWeights`/`setWeightsLID`, `None` -> the no-weights ctor.
+    pub fn from_legacy(
+        map: &IndexMap<String, String>,
+        weights: Option<&[f64]>,
+        lid_weights: Option<&[f64]>,
+    ) -> Result<TwinBlstmSpectralLid> {
+        let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
+        let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
+        let feature_cfg = FeatureConfig::from_legacy(map, "BLSTM")?;
+
+        let sad_cfg = BlstmConfig::from_legacy(map, "BLSTM")?;
+        let mut sad_net = BlstmNetwork::from_config(sad_cfg)?;
+        if let Some(flat) = weights {
+            sad_net.set_weights(flat)?;
+        }
+
+        let lid_cfg = BlstmConfig::from_legacy(map, "BLSTM_LID")?;
+        let mut lid_net = BlstmNetwork::from_config(lid_cfg)?;
+        if let Some(flat) = lid_weights {
+            lid_net.set_weights(flat)?;
+        }
+
+        let mut lid_window_size_sec = twin_scalar(map, "BLSTM_LID_window")?;
+        if lid_window_size_sec < 0.0 {
+            lid_window_size_sec = 0.0;
+        }
+        let mut lid_window_shift_sec = twin_scalar(map, "BLSTM_LID_shift")?;
+        if lid_window_shift_sec < 0.0 {
+            lid_window_shift_sec = 0.0;
+        }
+
+        let lid_detection_threshold =
+            twin_scalar_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
+        let lid_training_pruning_threshold =
+            twin_scalar_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
+        let lid_decision_thresh_rising = twin_scalar(map, "BLSTM_LID_decision_thresh_rising")?;
+        let lid_decision_thresh_falling = twin_scalar(map, "BLSTM_LID_decision_thresh_falling")?;
+        let mode = twin_i32_default(map, "BLSTM_LID_Mode", 0)?;
+        let post_process_mode = twin_i32_default(map, "BLSTM_LID_PostProcessMode", 0)?;
+        let min_nb_of_frames = twin_i32_default(map, "BLSTM_LID_MinNbOfFrames", 0)?;
+        let noise_magnitude = twin_scalar_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
+        let dump_lid_internals = twin_bool_default(map, "BLSTM_LID_DumpInternals", false)?;
+
+        let spectrum_shift_sec = feature_cfg.shift_sec;
+        let window_shift_sec = driver_cfg.window_shift_sec;
+        let ltsv_shift_sec = feature_cfg.ltsv_shift;
+
+        Ok(TwinBlstmSpectralLid {
+            driver_cfg,
+            seg_cfg,
+            feature_cfg,
+            sad_net,
+            lid_net,
+            lid_window_size_sec,
+            lid_window_shift_sec,
+            lid_detection_threshold,
+            lid_training_pruning_threshold,
+            lid_decision_thresh_rising,
+            lid_decision_thresh_falling,
+            mode,
+            post_process_mode,
+            min_nb_of_frames,
+            noise_magnitude,
+            dump_lid_internals,
+            spectrum_shift_sec,
+            spectrum_shift_in_frames: 0,
+            window_shift_sec,
+            ltsv_shift_sec,
+            channels: 0,
+            cumulative_error: Vec::new(),
+            nb_of_classif: Vec::new(),
+            last_result_rows: Vec::new(),
+            lid_cumulative_error: Vec::new(),
+            lid_nb_of_classif: Vec::new(),
+            lid_classification_errors: Vec::new(),
+            lid_segments_confusion: Vec::new(),
+            is_lid_correct: Vec::new(),
+            concat_branch: Vec::new(),
+        })
+    }
+
+    /// `<prefix>_weightsFile` load delegates for BOTH nets (`BLSTM` / `BLSTM_LID`),
+    /// matching the legacy in-ctor loads.
+    pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
+        self.sad_net.load_weights_file(map, "BLSTM")?;
+        self.lid_net.load_weights_file(map, "BLSTM_LID")
+    }
+
+    // -- scalar/config accessors --------------------------------------------
+    pub fn mode(&self) -> i32 {
+        self.mode
+    }
+    pub fn post_process_mode(&self) -> i32 {
+        self.post_process_mode
+    }
+    pub fn min_nb_of_frames(&self) -> i32 {
+        self.min_nb_of_frames
+    }
+    pub fn noise_magnitude(&self) -> f64 {
+        self.noise_magnitude
+    }
+    pub fn dump_lid_internals(&self) -> bool {
+        self.dump_lid_internals
+    }
+    pub fn lid_detection_threshold(&self) -> f64 {
+        self.lid_detection_threshold
+    }
+    pub fn lid_training_pruning_threshold(&self) -> f64 {
+        self.lid_training_pruning_threshold
+    }
+    pub fn lid_decision_thresh_rising(&self) -> f64 {
+        self.lid_decision_thresh_rising
+    }
+    pub fn lid_decision_thresh_falling(&self) -> f64 {
+        self.lid_decision_thresh_falling
+    }
+    pub fn window_shift_sec(&self) -> f64 {
+        self.window_shift_sec
+    }
+    pub fn spectrum_shift_sec(&self) -> f64 {
+        self.spectrum_shift_sec
+    }
+    pub fn lid_window_shift_sec(&self) -> f64 {
+        self.lid_window_shift_sec
+    }
+    pub fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    // -- SAD-side outputs ----------------------------------------------------
+    /// `seg._CumulativeError[chan] = NNCost` (`:774`) `*= LIDCostPonderation` (`:1337`).
+    pub fn cumulative_error(&self) -> &[f64] {
+        &self.cumulative_error
+    }
+    /// `seg._NbOfClassif[chan] = nbOfClassif` (`:775`).
+    pub fn nb_of_classif(&self) -> &[i64] {
+        &self.nb_of_classif
+    }
+    /// PRE-convolution SAD `result_vec2` rows (one per channel) from the last call.
+    pub fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    // -- LID-side outputs (mirror Algo 5) ------------------------------------
+    pub fn lid_cumulative_error(&self) -> &[f64] {
+        &self.lid_cumulative_error
+    }
+    pub fn lid_nb_of_classif(&self) -> &[i64] {
+        &self.lid_nb_of_classif
+    }
+    pub fn lid_classification_errors(&self) -> &[Vec<f64>] {
+        &self.lid_classification_errors
+    }
+    pub fn lid_segments_confusion(&self) -> &[Array2<f64>] {
+        &self.lid_segments_confusion
+    }
+    pub fn is_lid_correct(&self) -> &[i32] {
+        &self.is_lid_correct
+    }
+    /// Per-channel concat branch taken (`0`/`1`/`2`, see the field doc) -- concat
+    /// non-vacuity.
+    pub fn concat_branch(&self) -> &[i32] {
+        &self.concat_branch
+    }
+
+    // -- SAD net weight family (`BLSTMSpectralSegmenter` delegates) -----------
+    pub fn is_back_prop_activated(&self) -> bool {
+        self.sad_net.config().back_propagation_activated
+    }
+    pub fn get_weights_derivatives(&self) -> Array2<f64> {
+        self.sad_net.get_weights_derivatives()
+    }
+    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
+        self.sad_net.update_weights(derivs, cost);
+    }
+    pub fn save_weights(
+        &self,
+        filename: &str,
+        derivs: &Array2<f64>,
+        stats: &InputStatistics,
+    ) -> Result<()> {
+        self.sad_net.save_weights(filename, derivs, stats)
+    }
+    pub fn input_statistics(&self) -> &InputStatistics {
+        self.sad_net.input_statistics()
+    }
+
+    // -- LID net weight family (`:59-85` delegates) --------------------------
+    /// `isBackPropActivatedLID` (`:59-61`).
+    pub fn is_back_prop_activated_lid(&self) -> bool {
+        self.lid_net.config().back_propagation_activated
+    }
+    /// `setWeightsLID` (`:63-65`).
+    pub fn set_weights_lid(&mut self, flat: &[f64]) -> Result<()> {
+        self.lid_net.set_weights(flat)
+    }
+    /// `getWeightsLID` (`:67-69`).
+    pub fn get_weights_lid(&self) -> Vec<f64> {
+        self.lid_net.get_weights()
+    }
+    /// `getWeightsDerivativesLID` (`:71-73`).
+    pub fn get_weights_derivatives_lid(&self) -> Array2<f64> {
+        self.lid_net.get_weights_derivatives()
+    }
+    /// `getInputStatisticsLID` (`:75-77`).
+    pub fn get_input_statistics_lid(&self) -> &InputStatistics {
+        self.lid_net.input_statistics()
+    }
+    /// `updateWeightsLID` (`:79-81`).
+    pub fn update_weights_lid(&mut self, derivs: &Array2<f64>, cost: f64) {
+        self.lid_net.update_weights(derivs, cost);
+    }
+    /// `saveWeightsLID` (`:83-85`): the LID net writes with the caller's filename
+    /// PREFIXED by `LID_` (`_LIDBLSTMNeuralNetwork.saveWeights("LID_"+filename, ...)`).
+    pub fn save_weights_lid(
+        &self,
+        filename: &str,
+        derivs: &Array2<f64>,
+        stats: &InputStatistics,
+    ) -> Result<()> {
+        self.lid_net
+            .save_weights(&format!("LID_{filename}"), derivs, stats)
+    }
+
+    /// `Segmentation::compute_errors`, one call per channel (single-channel-container
+    /// rationale, see [`BlstmSpectralLid::score`]).
+    pub fn score(
+        hyp: &mut [Segmentation],
+        reference: Option<&[Segmentation]>,
+        nb_words: i64,
+    ) -> Vec<ScoreReport> {
+        hyp.iter_mut()
+            .enumerate()
+            .map(|(chan, seg)| {
+                let refc = reference.map(|r| &r[chan]);
+                compute_errors(seg, refc, nb_words)
+            })
+            .collect()
+    }
+
+    /// Port of `getBLSTMLIDInputSequence` (`:139-168`): when the SAD net's
+    /// `_OutputForward` is populated, hcat its z-normalized `[fwd | bwd]` hidden states
+    /// onto `input_seq`, resampling by nearest index when the LSTM output row count
+    /// differs from `input_seq`'s (`:150-163`); an EMPTY `_OutputForward` returns
+    /// `input_seq` unchanged (`:164-166`). Returns `(augmented, branch)` with `branch`
+    /// `1` = concat, `2` = empty fallback.
+    fn get_blstm_lid_input_sequence(&self, input_seq: &Array2<f64>) -> (Array2<f64>, i32) {
+        let fwd = &self.sad_net.output_forward;
+        let bwd = &self.sad_net.output_backward;
+        if fwd.nrows() == 0 {
+            return (input_seq.clone(), 2);
+        }
+        // addedColumns = [fwd | bwd], then per-column z-normalize (mean/std over rows,
+        // std with the +1e-32 floor), `:142-148`.
+        let n = fwd.nrows();
+        let fc = fwd.ncols();
+        let bc = bwd.ncols();
+        let added_cols = fc + bc;
+        let mut added = Array2::<f64>::zeros((n, added_cols));
+        for r in 0..n {
+            for c in 0..fc {
+                added[[r, c]] = fwd[[r, c]];
+            }
+            for c in 0..bc {
+                added[[r, fc + c]] = bwd[[r, c]];
+            }
+        }
+        for c in 0..added_cols {
+            let mut sum = 0.0;
+            for r in 0..n {
+                sum += added[[r, c]];
+            }
+            let mean = sum / n as f64;
+            let mut sq = 0.0;
+            for r in 0..n {
+                let d = added[[r, c]] - mean;
+                added[[r, c]] = d;
+                sq += d * d;
+            }
+            let std = ((sq + 1e-32) / n as f64).sqrt();
+            for r in 0..n {
+                added[[r, c]] /= std;
+            }
+        }
+
+        let rows = input_seq.nrows();
+        let cols = input_seq.ncols();
+        let mut out = Array2::<f64>::zeros((rows, cols + added_cols));
+        for r in 0..rows {
+            for c in 0..cols {
+                out[[r, c]] = input_seq[[r, c]];
+            }
+        }
+        if n == rows {
+            // Direct hcat (`:150-152`).
+            for r in 0..rows {
+                for c in 0..added_cols {
+                    out[[r, cols + c]] = added[[r, c]];
+                }
+            }
+        } else {
+            // Nearest-index resample (`:154-162`): indexSpectrum = round((n-1)*frame/
+            // (length-1)) via the `+0.5` truncation.
+            let denom = (rows as f64 - 1.0).max(1.0);
+            for frame in 0..rows {
+                let idx = ((n as f64 - 1.0) * frame as f64 / denom + 0.5) as usize;
+                for c in 0..added_cols {
+                    out[[frame, cols + c]] = added[[idx, c]];
+                }
+            }
+        }
+        (out, 1)
+    }
+
+    /// Port of `getTargetsLID` (`:170-219`): the per-frame LID target from the
+    /// (smoothed reference) classification `seg`. Multiclass (`output_size > 1`): a
+    /// SPEECH row enforces `[target..]` with `target_index -> 1-target`; an OTHER row
+    /// enforces `target_index -> target`, `col0 -> 1-target`; non-enforced rows are
+    /// `-0.5`. Binary (`output_size <= 1`): SPEECH enforces `(target_index==1) ?
+    /// 1-target : target`, OTHER is always `-0.5`. `target = isCostModified() ? 0.1/
+    /// dur_seg : 0.0`. Enforcement uses `counter == step` (EQUALITY, `:182` -- NOT the
+    /// scoring path's `>=`). NOT reached by modes 0/1/2/3 (only modes 4/5/6 call it,
+    /// `:662`); ported for the next task, exercised by a direct unit test.
+    #[allow(dead_code)]
+    fn get_targets_lid(
+        &self,
+        seg: &Segmentation,
+        time_step: f64,
+        time_offset: f64,
+        target_index: usize,
+        n_rows: usize,
+    ) -> Array2<f64> {
+        let out_size = self.lid_net.output_size();
+        let cols = out_size.max(1);
+        let mut targets = Array2::<f64>::zeros((n_rows, cols));
+        let segs = seg.segments();
+        if segs.is_empty() {
+            return targets;
+        }
+        let cost_modified = self.lid_net.is_cost_modified();
+        let step = self.lid_net.target_enforcement_step();
+        let mut counter = 0i32;
+        let mut idx = 0usize;
+        for ii in 0..n_rows {
+            let t = ii as f64 * time_step + time_offset;
+            while idx + 1 < segs.len() && segs[idx + 1].begin <= t {
+                idx += 1;
+            }
+            let target = if cost_modified && idx + 1 < segs.len() {
+                0.1 / (segs[idx + 1].begin - segs[idx].begin)
+            } else {
+                0.0
+            };
+            if out_size > 1 {
+                if segs[idx].ty == SegClass::Speech {
+                    if counter == step {
+                        for c in 0..cols {
+                            targets[[ii, c]] = target;
+                        }
+                        targets[[ii, target_index]] = 1.0 - target;
+                        counter = 0;
+                    } else {
+                        for c in 0..cols {
+                            targets[[ii, c]] = -0.5;
+                        }
+                        counter += 1;
+                    }
+                } else if counter == step {
+                    targets[[ii, target_index]] = target;
+                    targets[[ii, 0]] = 1.0 - target;
+                    counter = 0;
+                } else {
+                    for c in 0..cols {
+                        targets[[ii, c]] = -0.5;
+                    }
+                    counter += 1;
+                }
+            } else if segs[idx].ty == SegClass::Speech {
+                if counter == step {
+                    counter = 0;
+                    targets[[ii, 0]] = if target_index == 1 {
+                        1.0 - target
+                    } else {
+                        target
+                    };
+                } else {
+                    counter += 1;
+                    targets[[ii, 0]] = -0.5;
+                }
+            } else {
+                targets[[ii, 0]] = -0.5;
+            }
+        }
+        targets
+    }
+}
+
+impl Segmenter for TwinBlstmSpectralLid {
+    /// Port of `TwinBLSTMSpectralLID::getSegmentation` (`:263-1421`), the wav-mode
+    /// 0/1/2/3 non-unit-test/non-plotting paths (the `.mat`/PNG/log branches dropped).
+    /// Modes 4/5/6/7 and the pitch second pass BAIL typed (see the struct doc). `refs`
+    /// maps to `seg._Reference`: required for modes 2/3 (the scoring loop iterates it)
+    /// and, for any mode with a reference, builds the SAD net's `targetSeq` (`:707-711`).
+    fn get_segmentation(
+        &mut self,
+        audio: &mut Audio,
+        seg_per_chan: &mut [Segmentation],
+        refs: Option<&[Segmentation]>,
+    ) -> Result<()> {
+        if !(self.mode == 0 || self.mode == 1 || self.mode == 2 || self.mode == 3) {
+            return Err(anyhow!(
+                "TwinBlstmSpectralLid: mode {} not ported (modes 4/5/6/7 deferred; legacy :640-1193)",
+                self.mode
+            ));
+        }
+        let rate = audio.sample_rate as f64;
+
+        // initSpectralAnalysis param derivation (`:281`) via the base spectral machinery.
+        let s = SpectralParams::derive(&self.feature_cfg, rate);
+
+        // The pitch second pass (`:349-614`, TDC_window_size > 0) is a REFERENCE-based
+        // pre-forward warp that DIVERGES from the base driver's post-forward pitch pass --
+        // deferred (bail typed). All ported configs use TDCwindow 0.
+        if let Some(tdc) = s.tdc.as_ref()
+            && tdc.half_window > 0
+        {
+            return Err(anyhow!(
+                "TwinBlstmSpectralLid: pitch second pass (TDCwindow > 0) not ported (legacy :349-614)"
+            ));
+        }
+
+        // Stateful spectrum-shift quantization (`:208-210`).
+        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
+        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
+        let spectrum_shift_in_frames = self.spectrum_shift_in_frames;
+        let spectrum_shift_sec = self.spectrum_shift_sec;
+
+        // preemph -> noise (`initSpectralAnalysis` :216-227).
+        if self.feature_cfg.preemph_ratio > 0.0 {
+            audio.apply_preemph(self.feature_cfg.preemph_ratio);
+        }
+        if self.feature_cfg.noise_seed > 0 {
+            audio.apply_noise(self.feature_cfg.noise_ratio);
+        }
+
+        // getLTSVParam re-quantize `_LTSVWindowShift` (`:288/:302-306`; dead for LTSVwindow 0).
+        let ltsv_ws =
+            f64::round(self.feature_cfg.ltsv_shift * rate / spectrum_shift_in_frames as f64) as i64;
+        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
+        self.ltsv_shift_sec = (ltsv_ws * spectrum_shift_in_frames as i64) as f64 / rate;
+
+        // getBLSTMParam (`:300` -> `:439-500`): SAD window/shift + result-vec sizing;
+        // mutates self.window_shift_sec.
+        let sad_ssr = self.sad_net.sub_sampling_ratio();
+        let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
+            self.driver_cfg.window_size_sec,
+            &mut self.window_shift_sec,
+            rate,
+            spectrum_shift_in_frames,
+            sad_ssr,
+            &self.sad_net.lstm_sub_sampling(),
+            &self.sad_net.output_sub_sampling(),
+            audio.data.ncols(),
+        );
+
+        // getLIDBLSTMParam (`:306` -> `:87-137`): LID window/shift + LID_result_vec
+        // sizing; mutates self.lid_window_shift_sec + resets the LID net derivs.
+        let lid_ssr = self.lid_net.sub_sampling_ratio();
+        let ssif = spectrum_shift_in_frames as f64;
+        let mut lid_window_size =
+            f64::round(self.lid_window_size_sec * rate / 2.0 / ssif) as usize;
+        if lid_window_size != 0 && lid_window_size < lid_ssr {
+            lid_window_size = lid_ssr;
+        }
+        let mut lid_window_shift =
+            f64::round(self.lid_window_shift_sec * rate / ssif) as i64;
+        let mut lid_no_overlap = false;
+        if lid_window_size != 0 && lid_window_shift < 1 {
+            lid_no_overlap = true;
+            let raw = f64::round(self.lid_window_size_sec * rate / ssif) as usize;
+            lid_window_size = (raw / lid_ssr) * lid_ssr;
+            if lid_window_size < 10 * lid_ssr {
+                lid_window_size = 10 * lid_ssr;
+            }
+        }
+        if lid_window_size == 0 || lid_window_shift < 1 {
+            lid_window_shift = 1;
+        }
+        self.lid_window_shift_sec = (lid_window_shift * spectrum_shift_in_frames as i64) as f64 / rate;
+        self.lid_net.reset_weights_derivatives(); // :110
+        let frame_count = audio.data.ncols();
+        let vec_size = if frame_count.is_multiple_of(spectrum_shift_in_frames) {
+            frame_count / spectrum_shift_in_frames
+        } else {
+            frame_count / spectrum_shift_in_frames + 1
+        };
+        let mut lid_real_vec_size = vec_size;
+        if lid_ssr > 1 {
+            for r in self.lid_net.lstm_sub_sampling() {
+                lid_real_vec_size /= r;
+            }
+            for r in self.lid_net.output_sub_sampling() {
+                lid_real_vec_size /= r;
+            }
+        }
+        let lid_window_shift = lid_window_shift as usize;
+
+        // resetWeightsDerivatives on the SAD net (`:234` via getBLSTMParam already reset,
+        // but the base getBLSTMParam :473 resets -- our get_blstm_param does NOT, so reset
+        // here to match).
+        self.sad_net.reset_weights_derivatives();
+
+        // SAD timeStep/timeOffset (`:696-706`): overlap OVERRIDES with _SpectrumShift.
+        let mut time_step = self.window_shift_sec * sad_ssr as f64;
+        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+        if window_size > 0 {
+            if no_overlap {
+                time_step = self.window_shift_sec * sad_ssr as f64;
+                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+            } else {
+                time_step = spectrum_shift_sec * sad_ssr as f64;
+                time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
+            }
+        }
+
+        let class_nb = self.lid_net.output_size().max(2);
+
+        let temporal_conv = windowing_coefficients(
+            &self.feature_cfg.conv_type,
+            true,
+            2 * self.feature_cfg.conv_size as usize + 1,
+            0.83333,
+        );
+
+        let channels = audio.data.nrows();
+        self.channels = channels;
+        self.cumulative_error = vec![0.0; channels];
+        self.nb_of_classif = vec![0; channels];
+        self.last_result_rows = Vec::with_capacity(channels);
+        self.lid_cumulative_error = vec![0.0; channels];
+        self.lid_nb_of_classif = vec![0; channels];
+        self.lid_classification_errors = vec![Vec::new(); channels];
+        self.lid_segments_confusion = vec![Array2::<f64>::zeros((0, 0)); channels];
+        self.is_lid_correct = vec![0; channels];
+        self.concat_branch = vec![0; channels];
+
+        let audio_weight = audio.weight;
+        let mut lid_cost_ponderation = 1.0f64;
+
+        for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
+            // SAD input (`:359-619`): the BASE spectral pipeline (periodogram -> mel/DCT
+            // -> LTSV) -- identical to `BlstmSpectralSegmenter` when the pitch pass is off.
+            let (mut input_seq, _perio, _ltsv1) = build_input_sequence_parts(
+                audio,
+                &self.feature_cfg,
+                &s,
+                chan,
+                temporal_conv.as_deref(),
+            );
+
+            // targetIndex = clamp(audio.getRefLangIndex()) to [0, classNb) (`:626-628`).
+            let mut target_index = audio.lang_index;
+            if target_index >= class_nb as i32 {
+                target_index = 0;
+            }
+            if target_index < 0 {
+                target_index = 0;
+            }
+            let ti = target_index as usize;
+
+            // SAD targetSeq (`:707-711`): built when a reference exists; :710 zeroes it
+            // for a BINARY LID net when targetIndex != 1.
+            let has_ref = matches!(refs, Some(rs) if !rs[chan].segments().is_empty());
+            let target = if has_ref {
+                let rs = refs.unwrap();
+                let col = get_targets(
+                    seg,
+                    &rs[chan],
+                    time_step,
+                    time_offset,
+                    self.driver_cfg.back_prop_wer,
+                    SegClass::Speech,
+                    real_vec_size,
+                );
+                let mut t = Array2::from_shape_vec((real_vec_size, 1), col).unwrap();
+                if self.lid_net.output_size() == 1 && target_index != 1 {
+                    t.fill(0.0);
+                }
+                t
+            } else {
+                Array2::<f64>::zeros((0, 0))
+            };
+
+            // SAD result_vec: modes 0/3 run the SAD net; else (modes 1/2) synthesize.
+            let mut result_vec = Array2::<f64>::zeros((real_vec_size, 1));
+            let mut nn_cost = 0.0f64;
+            let mut nb_of_classif = 0i64;
+            if self.mode == 0 || self.mode == 3 {
+                // `:713-717` SAD net feedForwardBackward (populates _OutputForward/Backward).
+                self.sad_net
+                    .set_processing_type(window_size > 0, !no_overlap);
+                self.sad_net.feed_forward_backward(
+                    &mut input_seq,
+                    window_size,
+                    window_shift,
+                    &mut result_vec,
+                    &target,
+                );
+                nn_cost = self.sad_net.cost;
+                nb_of_classif = self.sad_net.nb_of_classif;
+            } else {
+                // `:718-764` else branch. Mode 2: result_vec = LID_result_vec (all-zero,
+                // `:719-724`). Mode 1: result_vec.setConstant(10.0) (`:726`). Both CLEAR
+                // the SAD net outputs (`:762-763`).
+                if self.mode == 2 {
+                    // LID_result_vec is Zero(lid_real_vec_size, lid_output_size); col
+                    // (targetIndex) or the whole matrix (cols==1) -> a zero column.
+                    result_vec = Array2::<f64>::zeros((lid_real_vec_size, 1));
+                } else {
+                    // mode 1
+                    result_vec.fill(10.0);
+                }
+                self.sad_net.output_forward = Array2::<f64>::zeros((0, 0));
+                self.sad_net.output_backward = Array2::<f64>::zeros((0, 0));
+            }
+
+            // result_vec2 = transpose -> ROW vector (`:766`).
+            let mut result_vec2: Vec<f64> = result_vec.column(0).to_vec();
+            self.last_result_rows.push(result_vec2.clone());
+
+            // results2segmentation (`:773`, for modes != 4,6 -> yes for 0/1/2/3).
+            results_to_segmentation(
+                seg,
+                time_step,
+                time_offset,
+                &mut result_vec2,
+                SegClass::Speech,
+                self.driver_cfg.conv_coeff.as_deref(),
+                &self.seg_cfg,
+            );
+            // :774-775.
+            self.cumulative_error[chan] = nn_cost;
+            self.nb_of_classif[chan] = nb_of_classif;
+
+            // ---- LID scoring branch (`:1194-1310`) --------------------------------
+            self.lid_net
+                .set_processing_type(lid_window_size > 0, !lid_no_overlap); // :1206
+
+            // Concat (`:1221`): LID input size > feature width -> augment.
+            self.concat_branch[chan] = if self.lid_net.input_size() > input_seq.ncols() {
+                let (aug, branch) = self.get_blstm_lid_input_sequence(&input_seq);
+                input_seq = aug;
+                branch
+            } else {
+                0
+            };
+
+            // Scoring iterator: REFERENCE for modes 2/3, CLASSIFICATION for 0/1 (`:1223-1239`).
+            let scoring_segs: Vec<crate::tasks::segmentation::Segment> =
+                if (self.mode == 2 || self.mode == 3) && has_ref {
+                    refs.unwrap()[chan].segments().to_vec()
+                } else {
+                    seg.segments().to_vec()
+                };
+
+            // totalSpeechDuration over the scoring iterator (`:1229-1234`).
+            let mut total_speech_duration = 0.0f64;
+            for i in 0..scoring_segs.len().saturating_sub(1) {
+                if scoring_segs[i].ty == SegClass::Speech {
+                    total_speech_duration += scoring_segs[i + 1].begin - scoring_segs[i].begin;
+                }
+            }
+
+            // interestSegs (`:1240`) + the TrainingPruning gate (`:1286`, mutating
+            // `itInterest->_Type`) are NOT reproduced: `interestSegs` is consumed ONLY by
+            // the VRCTS dump (skipped) + the mode!=0 replacement (`:1297`, itself
+            // dump-only), so both the copy and the pruning are observably dead in this
+            // port. The gate is config-gated on `_LIDTrainingPruningThreshold > 0`
+            // (default -1.0) besides -- see IMPROVEMENTS.md.
+
+            // segmentationLID (`:1242`): midpoint seed.
+            let mut segmentation_lid =
+                vec![(self.lid_decision_thresh_rising + self.lid_decision_thresh_falling) / 2.0; lid_real_vec_size];
+
+            let mut langid = vec![0.0f64; class_nb];
+            let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
+            for kk in 0..class_nb + 1 {
+                confusion[[0, kk]] = kk as f64;
+                confusion[[kk, 0]] = kk as f64;
+            }
+            let mut segments_count = 0i32;
+            let mut lid_nn_cost = 0.0f64;
+            let mut lid_nb_classif = 0i64;
+
+            for i in 0..scoring_segs.len().saturating_sub(1) {
+                if scoring_segs[i].ty != SegClass::Speech {
+                    continue;
+                }
+                // rowBegin = ceil(begin / _SpectrumShift), rowEnd = floor(next / _SpectrumShift)
+                // (`:1245-1247`). NO offset.
+                let ratio = scoring_segs[i].begin / spectrum_shift_sec;
+                let mut row_begin = ratio as usize;
+                if (row_begin as f64) != ratio {
+                    row_begin += 1;
+                }
+                let row_end = (scoring_segs[i + 1].begin / spectrum_shift_sec) as usize;
+                // `:1248` guard (unsigned; the row_end >= row_begin guard prevents underflow).
+                if row_end < row_begin || row_end - row_begin + 1 < lid_ssr {
+                    continue;
+                }
+                let n_rows = row_end - row_begin + 1;
+                if row_begin + n_rows > input_seq.nrows() {
+                    continue; // block would read past the input (legacy UB-slices; guarded).
+                }
+
+                // inputSeqLID = inputSeq.block(rowBegin, 0, n_rows, cols) (`:1249`).
+                let cols = input_seq.ncols();
+                let mut input_seq_lid = Array2::<f64>::zeros((n_rows, cols));
+                for r in 0..n_rows {
+                    for c in 0..cols {
+                        input_seq_lid[[r, c]] = input_seq[[row_begin + r, c]];
+                    }
+                }
+
+                // Scoring feedForward (`:1250`): modifier = timeStep / segment duration.
+                let modifier = time_step / (scoring_segs[i + 1].begin - scoring_segs[i].begin);
+                let output_seq = self.lid_net.feed_forward_scoring(
+                    &mut input_seq_lid,
+                    lid_window_size,
+                    lid_window_shift,
+                    target_index as i64,
+                    modifier,
+                );
+
+                // segmentationLID block = InvLogistic(outputSeq.col(1)) (`:1251`).
+                let start = row_begin / lid_ssr;
+                for r in 0..output_seq.nrows() {
+                    if start + r < segmentation_lid.len() && output_seq.ncols() > 1 {
+                        segmentation_lid[start + r] = inv_logistic_fn(output_seq[[r, 1]]);
+                    }
+                }
+
+                lid_nn_cost += self.lid_net.cost; // :1252
+                lid_nb_classif += self.lid_net.nb_of_classif; // :1253
+
+                // segLID = colwise sum / rows (`:1254`).
+                let out_rows = output_seq.nrows() as f64;
+                let mut seg_lid = vec![0.0f64; class_nb];
+                for (c, sv) in seg_lid.iter_mut().enumerate() {
+                    let mut acc = 0.0;
+                    for r in 0..output_seq.nrows() {
+                        acc += output_seq[[r, c]];
+                    }
+                    *sv = acc / out_rows;
+                }
+
+                // argmax j (`:1257-1258`), confusion (`:1265-1274`).
+                let mut j = 0usize;
+                let mut best = seg_lid[0];
+                for (c, &v) in seg_lid.iter().enumerate().skip(1) {
+                    if v > best {
+                        best = v;
+                        j = c;
+                    }
+                }
+                let pos_target = ti + 1;
+                if j == ti {
+                    confusion[[pos_target, pos_target]] += 1.0;
+                    confusion[[pos_target, class_nb + 1]] += 1.0;
+                    confusion[[class_nb + 1, pos_target]] += 1.0;
+                } else {
+                    let pos_best = j + 1;
+                    confusion[[pos_target, pos_best]] += 1.0;
+                    confusion[[pos_target, class_nb + 1]] += 1.0;
+                    confusion[[class_nb + 1, pos_best]] += 1.0;
+                }
+
+                // langID accumulation (`:1275-1279`): cost-modified += segLID; else
+                // += dur*segLID.
+                let dur = scoring_segs[i + 1].begin - scoring_segs[i].begin;
+                if self.lid_net.is_cost_modified() {
+                    for (c, &v) in seg_lid.iter().enumerate() {
+                        langid[c] += v;
+                    }
+                } else {
+                    for (c, &v) in seg_lid.iter().enumerate() {
+                        langid[c] += dur * v;
+                    }
+                }
+                segments_count += 1;
+            }
+
+            // segmentationLID /= 56 (`:1292`).
+            for v in segmentation_lid.iter_mut() {
+                *v /= 56.0;
+            }
+
+            if segments_count > 0 {
+                // mode != 0 -> clearClassification + LID2Segmentation (`:1294-1298`).
+                if self.mode != 0 {
+                    seg.clear_hypothesis();
+                    lid_to_segmentation(
+                        seg,
+                        &segmentation_lid,
+                        SegClass::Speech,
+                        time_offset,
+                        time_step,
+                        self.lid_decision_thresh_rising,
+                    );
+                }
+                // langID normalization (`:1299-1303`).
+                if self.lid_net.is_cost_modified() {
+                    for v in langid.iter_mut() {
+                        *v /= segments_count as f64;
+                    }
+                } else {
+                    for v in langid.iter_mut() {
+                        *v /= total_speech_duration;
+                    }
+                }
+            } else {
+                langid[0] = 1.0; // :1305
+            }
+
+            // Member writes (`:1318-1337`).
+            let mut target_lid = vec![0.0f64; class_nb];
+            target_lid[ti] = -2.0; // :1319 (targetIndex >= 0 always)
+            self.lid_cumulative_error[chan] = lid_nn_cost; // :1320
+            self.lid_nb_of_classif[chan] = lid_nb_classif; // :1321
+            let mut lid_errors = vec![0.0f64; class_nb];
+            for c in 0..class_nb {
+                lid_errors[c] = 100.0 * (langid[c] - target_lid[c]); // :1322
+            }
+            self.lid_classification_errors[chan] = lid_errors;
+            self.lid_segments_confusion[chan] = confusion; // :1324
+            let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            self.is_lid_correct[chan] = if langid[ti] == max_langid { 100 } else { 0 }; // :1325-1329
+
+            lid_cost_ponderation = self.lid_net.get_cost_ponderation(target_index as i64); // :1334
+            self.lid_net.ponderate_weights_derivatives(audio_weight); // :1335
+            self.lid_cumulative_error[chan] *= audio_weight; // :1336
+            self.cumulative_error[chan] *= lid_cost_ponderation; // :1337
+        }
+
+        // Epilogue (`:1393-1420`): SAD net ponderate by the LAST channel's LIDCostPonderation.
+        self.sad_net
+            .ponderate_weights_derivatives(lid_cost_ponderation); // :1393
+        for seg in seg_per_chan.iter_mut() {
+            compute_errors(seg, None, -1); // :1394
+        }
+        if no_overlap {
+            self.window_shift_sec = 0.0; // :1419
+        }
+        if lid_no_overlap {
+            self.lid_window_shift_sec = 0.0; // :1420
+        }
+
+        Ok(())
+    }
+
+    /// `setWeights` delegates to the SAD NN (base `BLSTMSpectralSegmenter::setWeights`).
+    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
+        self.sad_net.set_weights(flat)
+    }
+
+    /// `getWeights` delegates to the SAD NN.
+    fn get_weights(&self) -> Vec<f64> {
+        self.sad_net.get_weights()
     }
 }

@@ -63,6 +63,16 @@ pub fn logistic_fn(x: f64) -> f64 {
     }
 }
 
+/// `InvLogistic::fn` (ActivationFunctions.h:76-82): the sigmoid inverse (logit) with
+/// a `1e-24` domain floor -- `x < 1e-24 -> x = 1e-24`, then `-log(1/x - 1)`. NO upper
+/// clamp (an `x >= 1` argument yields `-inf`/`NaN` per the legacy, unreproduced-guard).
+/// Consumed by the Twin LID driver's `segmentationLID` fill
+/// (`TwinBLSTMSpectralLID.cpp:1251`).
+pub fn inv_logistic_fn(x: f64) -> f64 {
+    let x = if x < 1e-24 { 1e-24 } else { x };
+    -(1.0 / x - 1.0).ln()
+}
+
 /// `Maxmin2::fn` (ActivationFunctions.h:158-160): `std::asinh`.
 pub fn maxmin2_fn(x: f64) -> f64 {
     x.asinh()

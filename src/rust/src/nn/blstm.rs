@@ -349,6 +349,12 @@ impl BlstmNetwork {
         self.output_network.output_size()
     }
 
+    /// `getTargetEnforcementStep` (`BLSTMNeuralNetwork.cpp:379`): the `_TargetEnforcementStep`
+    /// member, consumed by the LID target builder (`TwinBLSTMSpectralLID::getTargetsLID`).
+    pub fn target_enforcement_step(&self) -> i32 {
+        self.cfg.target_enforcement_step
+    }
+
     /// `getCostPonderation` (`BLSTMNeuralNetwork.cpp:333-350`): per-class cost weight
     /// for the LID accumulation (`TwinBLSTMSpectralLID.cpp:1334`).
     ///
