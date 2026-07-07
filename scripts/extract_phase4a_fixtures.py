@@ -167,6 +167,22 @@ def _mask_timing(name: str, matrix: np.ndarray) -> np.ndarray:
     return masked
 
 
+def _mat_conversion_differs(new_mat: Path, committed_mat: Path) -> bool:
+    """True iff the two .mat files disagree on ANY variable AFTER masking the timing
+    column (the only wall-clock source). Used so a re-run does not churn the committed
+    .mat snapshot when only the (masked-away) timing column moved."""
+    a = scipy.io.loadmat(new_mat)
+    b = scipy.io.loadmat(committed_mat)
+    for var in MAT_VARS:
+        if var not in a or var not in b:
+            return True
+        av = _mask_timing(var, cast(np.ndarray, a[var]).astype("<f8"))
+        bv = _mask_timing(var, cast(np.ndarray, b[var]).astype("<f8"))
+        if av.shape != bv.shape or not np.array_equal(av.view(np.uint64), bv.view(np.uint64)):
+            return True
+    return False
+
+
 def _convert_mat(mat_path: Path, out_prefix: str) -> dict[str, list[int]]:
     """Load a harness .mat, write each variable to `<out_prefix>_<var>.bin` (timing
     masked), and return the per-variable (rows, cols) shapes."""
@@ -232,14 +248,22 @@ def main() -> None:
     nb_files = int(nb_match["n"])
 
     # 5. Convert each run's .mat -> per-variable .bin (timing masked) + copy the raw
-    #    .mat (committed for the pytest conversion guard).
+    #    .mat (committed for the pytest conversion guard). The .bin dumps are
+    #    deterministic (the timing column, the only wall-clock source, is masked to
+    #    0.0), but the raw .mat carries the live timing column + matio zlib state, so
+    #    it churns every run. Only (re)write the committed .mat when it is ABSENT or
+    #    its masked conversion actually DIFFERS from the committed one -- keeping the
+    #    committed .mat a stable snapshot across regenerations (git-noise-free) while
+    #    still catching a genuine conversion change.
     run_shapes: dict[str, dict[str, list[int]]] = {}
     for run in RUNS:
         mat_src = FIXED_CORPUS / f"{run}.mat"
         if not mat_src.is_file():
             raise SystemExit(f"harness did not produce {mat_src}")
         run_shapes[run] = _convert_mat(mat_src, run)
-        shutil.copy2(mat_src, PHASE4A_DIR / f"{run}.mat")
+        committed = PHASE4A_DIR / f"{run}.mat"
+        if not committed.is_file() or _mat_conversion_differs(mat_src, committed):
+            shutil.copy2(mat_src, committed)
 
     # 6. Copy the multi-channel VRCTS xml (the carried-over byte oracle).
     for subdir, fname in VRCTS_DUMPS:
