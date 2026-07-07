@@ -1343,7 +1343,10 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   string-glue is load-bearing for any tooling that reads these siblings by the same rule. *Fix
   candidate:* once the driver bag is ported, prepend the prefix to the basename only (or write to a
   dedicated artifacts dir). *Pinned by:* `save_weights_writes_three_artifacts`
-  (`tests/phase4a_lifecycle.rs`): the sibling paths are computed by the same whole-string glue.
+  (`tests/phase4a_lifecycle.rs`): the sibling paths are computed by the same whole-string glue;
+  `tier2_train_epoch_weights_golden` (`tests/phase4a_train_golden.rs`): the glued-name siblings
+  (`weights_bestNNWeight_1_tier2_spectral.mat`, io::binary despite the `.mat` suffix) are compared
+  value-for-value against the REAL legacy `saveWeights` output from the harness train stage.
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning** (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):
