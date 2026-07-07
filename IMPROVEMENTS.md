@@ -1766,6 +1766,32 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`tests/phase4b_confusion_golden.rs`), which asserts the Rust `confusion_error` return equals
   the REAL compiled `Confusion2String`'s (normalized) return.
 
+- **[phase4b] `getCostPonderation`'s `classIndex < 0` clamp is DEAD in the legacy (unsigned
+  `size_type` param), ported as a live `i64 < 0` clamp -- behavior-identical**
+  (`nn/blstm.rs::get_cost_ponderation`, from `BLSTMNeuralNetwork.cpp:333-350`): the legacy
+  parameter is `std::vector<double>::size_type` (UNSIGNED), so both branches' literal
+  `(classIndex < 0)` sub-tests can never fire. The sole caller passes a signed `int`
+  (`TwinBLSTMSpectralLID.cpp:1334`, `targetIndex`); a negative arg converts to a huge unsigned that
+  trips the OTHER sub-test (`>= getOutputSize()` multiclass / `> getOutputSize()` binary) and clamps
+  to 0 anyway. The port takes `class_index: i64` with an EXPLICIT `< 0` clamp, which yields the
+  identical result for every input (a negative always lands on 0 either way), while being readable
+  and not relying on unsigned wraparound. The multiclass guard uses `>=` and the binary guard uses
+  `>` -- that asymmetry is load-bearing and reproduced verbatim. *Why deferred:* N/A -- an
+  equivalence-preserving readability choice, not a behavioral deviation. *Fix candidate:* N/A.
+  *Pinned by:* `cost_ponderation_clamps` (`tests/phase4b_nn_lid.rs`), which tables the fold for
+  negative / equal-to-size / far-out-of-range indices in both branches.
+
+- **[phase4b] `ponderateWeightsDerivatives` scales the deriv col0 only; the `_NbOfSeqFedBackward`
+  count column and the mean/std tail are untouched** (`nn/blstm.rs`, `nn/network.rs`, `nn/layers.rs`,
+  from `BLSTMNeuralNetwork.cpp:289-297` -> `NeuralNetwork.hpp:119-123` -> `LSTMLayer.cpp:305-310` /
+  `NeuronLayer.cpp:122-125`): the legacy `_...Derivatives *= ponderation` touches ONLY the raw
+  derivative accumulators (the harvested Nx2 col0). `_NbOfSeqFedBackward` (col1) is a separate member,
+  never scaled, and the mean/std tail is assembled fresh as `[0, 1]` in `getWeightsDerivatives`, so it
+  never participates. Not a bug -- a semantics note for the count-vs-deriv normalization asymmetry
+  (spec S3). *Why deferred:* N/A. *Fix candidate:* N/A. *Pinned by:* `ponderation_scales_col0_not_col1`
+  (`tests/phase4b_nn_lid.rs`, STRICT bits: col0 == col0*factor, col1 unchanged); mutation check --
+  scaling col1 instead of col0, or scaling both, flips the strict-bit assertion.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

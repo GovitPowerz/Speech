@@ -5029,6 +5029,133 @@ int main(int argc, char** argv) {
                 dumps += 1;
             }
         }
+
+        // ================================================================
+        // Phase 4b Task 3: MULTICLASS scoring feedForward (BLSTMNeuralNetwork.cpp:
+        // 843-929), the LID path (outputSize > 1). Reuses the Task 8/9 makeLstmSteps/
+        // makeDenseSteps/blstmFeedForward + probeGapNaN. Exercises:
+        //   - the multiclass target construction (:872-886: unknown-class fold
+        //     targetIndex >= outputSize -> 0; the per-frame enforcement counter;
+        //     Constant(target) rows with column targetIndex set to 1-target),
+        //   - the NO-binary-expansion return (:922-926 gate is outputSize == 1, so a
+        //     multiclass net returns the RAW length x outputSize matrix).
+        // Synthetic MULTICLASS net (SYNC): LSTM [3,4,2] sub [2,1], output [4,5,3] sub
+        // [1,1], T=12 -> length 6, outputSize 3.
+        //
+        // The forward output is TARGET-INDEPENDENT (targets feed only cost/backward,
+        // both irrelevant here: BackPropagationActivated false, step >= 0 so the plain-
+        // FFB cost block never rewrites the output), so ONE reimpl output golden covers
+        // every case; the per-case _Cost DOES reflect the multiclass target construction
+        // (via the real CostLaw::computeCost) and is dumped for the manifest. targetIndex
+        // 5 (>= 3) exercises the unknown-class fold (-> 0), cross-checked to match
+        // targetIndex 0's cost (Rust scoring_multi_oob_index_folds_to_zero).
+        {
+            const std::vector<long> lstmNN = {3, 4, 2};
+            const std::vector<long> lstmSS = {2, 1};
+            const std::vector<long> outNN = {4, 5, 3};
+            const std::vector<long> outSS = {1, 1};
+            const std::vector<int> lstmIns = {6, 4}, lstmOuts = {4, 2};
+            const std::vector<int> outIns = {4, 5}, outOuts = {5, 3};
+            const int fwdInputSize = 3;
+            const int T = 12;
+            const long length = 6;      // 12/2/1
+            const long outputSize = 3;
+
+            auto lstmNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) {
+                    int I = ins[jj], O = outs[jj];
+                    s += 4L * I * O + 4L * O * O + 12L * O + 4L * O;
+                }
+                return s;
+            };
+            auto denseNetNb = [&](const std::vector<int>& ins, const std::vector<int>& outs) {
+                long s = 0;
+                for (size_t jj = 0; jj < ins.size(); ++jj) s += (long)outs[jj] * (ins[jj] + 1);
+                return s;
+            };
+            const long fwdNb = lstmNetNb(lstmIns, lstmOuts);
+            const long bwdNb = fwdNb;
+            const long outNb = denseNetNb(outIns, outOuts);
+            const long tailNb = 2 * fwdInputSize;
+            const long nbTotal = fwdNb + bwdNb + outNb + tailNb;
+
+            Eigen::VectorXd flat(nbTotal);
+            for (long k = 0; k < nbTotal - tailNb; ++k)
+                flat(k) = (double)((k * 11 + 3) % 97) / 97.0 - 0.5;
+            for (int j = 0; j < fwdInputSize; ++j) {
+                flat(nbTotal - tailNb + j) = 0.1 * (j + 1);
+                flat(nbTotal - tailNb + fwdInputSize + j) = 1.0 + 0.05 * j;
+            }
+
+            Eigen::VectorXd fwdSlice = flat.head(fwdNb);
+            Eigen::VectorXd bwdSlice = flat.segment(fwdNb, bwdNb);
+            Eigen::VectorXd outSlice = flat.segment(fwdNb + bwdNb, outNb);
+            std::vector<Eigen::MatrixXd> fiw, ffw, fpp, fbs, biw, bfw, bpp, bbs, ows, obs;
+            std::vector<NetLayerStep> fwdSteps, fwdStepsRev, bwdSteps, bwdStepsRev, outSteps;
+            makeLstmSteps(fwdSlice, lstmIns, lstmOuts, fiw, ffw, fpp, fbs, fwdSteps, fwdStepsRev);
+            makeLstmSteps(bwdSlice, lstmIns, lstmOuts, biw, bfw, bpp, bbs, bwdSteps, bwdStepsRev);
+            makeDenseSteps(outSlice, outIns, outOuts, ows, obs, outSteps);
+
+            Eigen::MatrixXd baseInput(T, 3);
+            for (int t = 0; t < T; ++t)
+                for (int j = 0; j < 3; ++j)
+                    baseInput(t, j) = (double)(((t * 29 + j * 13 + 5) % 97)) / 97.0 - 0.5;
+
+            // Reimpl forward (target-independent): the raw multiclass posterior matrix.
+            Eigen::MatrixXd oF, oB, reimplOut(length, outputSize);
+            blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
+                             fwdInputSize, baseInput, oF, oB, reimplOut);
+
+            struct MCase { int targetIndex; int step; const char* tag; };
+            const MCase cases[] = {
+                {0, 0, "ti0_step0"},
+                {2, 0, "ti2_step0"},
+                {2, 2, "ti2_step2"},
+                {5, 0, "tiOOB_step0"},   // 5 >= 3 -> unknown class -> folds to 0
+            };
+
+            for (const MCase& mc : cases) {
+                // Synthetic MULTICLASS config prefix (SYNC). InputNormalizationType 0.
+                ConfigFile confC(nnConfigPath, '_');
+                confC._Params.erase("BLSTM_weightsFile");
+                confC.set_val<std::string>("SYNC_LSTMNeuronNb", "3,4,2");
+                confC.set_val<std::string>("SYNC_LSTMSubSampling", "2,1");
+                confC.set_val<std::string>("SYNC_OutputNeuronNb", "4,5,3");
+                confC.set_val<std::string>("SYNC_OutputSubSampling", "1,1");
+                confC.set_val<short>("SYNC_InputNormalizationType", (short)0);
+                confC.set_val<bool>("SYNC_TwoSweeps", false);
+                confC.set_val<bool>("SYNC_BackPropagationActivated", false);
+                confC.set_val<int>("SYNC_TargetEnforcementStep", mc.step);
+                BLSTMNeuralNetwork<LSTMLayer> nn(confC, "SYNC", true);
+                nn.setWeights(flat);
+                nn.setProcessingType(false, false);  // plain path
+
+                // Real class scoring feedForward (BLSTMNeuralNetwork.h:195). Multiclass:
+                // NO binary expansion -> realOut is (length x outputSize).
+                Eigen::MatrixXd realInput = baseInput;
+                Eigen::MatrixXd realOut = nn.feedForward(realInput, 4, 2, mc.targetIndex, 1.0);
+
+                long u = 0; double a = 0.0;
+                probeGapNaN(realOut, reimplOut, u, a);
+                std::cout << "NN_TOL site=blstm_scoring_multi_" << mc.tag << " max_ulp=" << u
+                          << " max_abs=" << std::scientific << std::setprecision(3) << a << "\n";
+
+                // _Cost/_NbOfClassif from the REAL class (public accessors). The cost
+                // reflects the multiclass target construction feeding CostLaw::computeCost.
+                double cost = nn.getCost();
+                double nbClassif = nn.getNbOfClassif();
+                uint64_t costBits;
+                std::memcpy(&costBits, &cost, sizeof(double));
+                std::cout << "BLSTM_SCORING_MULTI case=" << mc.tag
+                          << " cost=0x" << std::hex << costBits << std::dec
+                          << " cost_dec=" << std::scientific << std::setprecision(17) << cost
+                          << " nb_of_classif=" << (long long)nbClassif << "\n";
+            }
+
+            Matrix2BinaryFile(out + "scoring_multi_out.bin", reimplOut);
+            dumps += 1;
+        }
     }
 
     // --- Phase 2 Task 10: END-TO-END real-net gate leg -----------------------

@@ -1,5 +1,5 @@
-"""Build and run the oracle harness's phase4b_confusion stage, then write the
-LID confusion-core fixtures.
+"""Build and run the oracle harness's phase4b stages, then write the LID
+confusion-core (Task 1) + multiclass scoring-overload (Task 3) fixtures.
 
 Phase 4b Task 1 ports `BagOfProcessors::PrintConfusionMatrix`'s sentinel-decode
 + best-non-target argmax accumulation (`BagOfProcessors.cpp:501-535`) and
@@ -36,9 +36,13 @@ This extractor:
   4. Parses the `PHASE4B_CONFUSION ok=<0|1> error1=<f> error2=<f>` stdout line,
      asserting ok=1 (SystemExit otherwise) and cross-checking the echoed
      doubles against the committed `confusion_error.bin`.
-  5. Copies the three `.bin` dumps into `tests/reference_data/phase4b/` and
-     writes `manifest.json` with MEASURED shapes/values.
-  6. REGRESSION GUARD: hashes every prior-phase fixture dir before/after; any
+  5. Parses the `NN_TOL site=blstm_scoring_multi_* max_ulp=0` + `BLSTM_SCORING_MULTI`
+     lines (Task 3), asserting every multiclass scoring site is 0-ULP and the
+     unknown-class fold (targetIndex 5 -> 0) bit-matches targetIndex 0's cost.
+  6. Copies the confusion `.bin` dumps + `scoring_multi_out.bin` into
+     `tests/reference_data/phase4b/` and writes `manifest.json` with MEASURED
+     shapes/values.
+  7. REGRESSION GUARD: hashes every prior-phase fixture dir before/after; any
      drift -> SystemExit.
 
 Run TWICE; the `.bin` dumps + manifest must be byte-identical (pure arithmetic,
@@ -92,8 +96,31 @@ PRIOR_PHASES = ["phase0", "phase0b", "phase0bii", "phase1", "phase2", "phase2b",
 
 CONFUSION_BINS = ["confusion_input.bin", "confusion_matrix.bin", "confusion_error.bin"]
 
+# Task 3: the multiclass scoring feedForward overload golden (BLSTMNeuralNetwork.h:195,
+# the LID path). One reimpl output covers every case (the forward is target-independent).
+SCORING_MULTI_BIN = "scoring_multi_out.bin"
+
+# The harness multiclass scoring cases: tag -> (target_index, enforcement step).
+SCORING_MULTI_CASES = {
+    "ti0_step0": (0, 0),
+    "ti2_step0": (2, 0),
+    "ti2_step2": (2, 2),
+    "tiOOB_step0": (5, 0),  # 5 >= 3 -> unknown-class fold -> 0
+}
+
 PHASE4B_RE = re.compile(
     r"^PHASE4B_CONFUSION ok=(?P<ok>\d) error1=(?P<e1>[0-9.eE+-]+) error2=(?P<e2>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
+
+SCORING_MULTI_TOL_RE = re.compile(
+    r"^NN_TOL site=blstm_scoring_multi_(?P<tag>\w+) max_ulp=(?P<ulp>\d+) "
+    r"max_abs=(?P<abs>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
+SCORING_MULTI_COST_RE = re.compile(
+    r"^BLSTM_SCORING_MULTI case=(?P<tag>\w+) cost=0x(?P<cost>[0-9a-f]+) "
+    r"cost_dec=(?P<cost_dec>[0-9.eE+-]+) nb_of_classif=(?P<nb>\d+)$",
     re.MULTILINE,
 )
 
@@ -158,7 +185,7 @@ def main() -> None:
             ]
         )
 
-        for name in CONFUSION_BINS:
+        for name in [*CONFUSION_BINS, SCORING_MULTI_BIN]:
             src = tmp_dir / name
             if not src.is_file():
                 raise SystemExit(f"harness did not produce {name}")
@@ -194,6 +221,28 @@ def main() -> None:
         raise SystemExit(f"confusion_input.bin shape {(in_rows, in_cols)} != (4, 3)")
     if (mat_rows, mat_cols) != (5, 5):
         raise SystemExit(f"confusion_matrix.bin shape {(mat_rows, mat_cols)} != (5, 5)")
+
+    # 4b. Task 3: parse + validate the multiclass scoring overload lines.
+    tol_matches = {m["tag"]: m for m in SCORING_MULTI_TOL_RE.finditer(stdout)}
+    cost_matches = {m["tag"]: m for m in SCORING_MULTI_COST_RE.finditer(stdout)}
+    for tag in SCORING_MULTI_CASES:
+        if tag not in tol_matches:
+            raise SystemExit(f"missing NN_TOL scoring_multi line for {tag}")
+        if int(tol_matches[tag]["ulp"]) != 0:
+            raise SystemExit(
+                f"scoring_multi {tag} max_ulp={tol_matches[tag]['ulp']} != 0 -- the REAL "
+                "compiled scoring feedForward overload diverged from the reimpl at the "
+                "synthetic shape (expected 0 ULP)."
+            )
+        if tag not in cost_matches:
+            raise SystemExit(f"missing BLSTM_SCORING_MULTI line for {tag}")
+    # Unknown-class fold cross-check: targetIndex 5 (>= outputSize 3) folds to 0, so its
+    # accumulated cost MUST bit-match targetIndex 0's (both step 0).
+    if cost_matches["tiOOB_step0"]["cost"] != cost_matches["ti0_step0"]["cost"]:
+        raise SystemExit("scoring_multi OOB (targetIndex 5) cost != targetIndex-0 cost: the unknown-class fold (BLSTMNeuralNetwork.cpp:873) is broken.")
+    sc_rows, sc_cols, _ = _read_bin(PHASE4B_DIR / SCORING_MULTI_BIN)
+    if (sc_rows, sc_cols) != (6, 3):
+        raise SystemExit(f"{SCORING_MULTI_BIN} shape {(sc_rows, sc_cols)} != (6, 3)")
 
     # 5. Regression guard: the prior-phase fixture dirs must be byte-identical after.
     after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
@@ -251,6 +300,37 @@ def main() -> None:
             "error1": error1,
             "error2": error2,
         },
+        "scoring_multi": {
+            "text": (
+                "Task 3: the MULTICLASS scoring feedForward overload (BLSTMNeuralNetwork.cpp:"
+                "843-929, BLSTMNeuralNetwork.h:195 -- the LID drivers' core call) on a "
+                "synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12 -> "
+                "length 6, outputSize 3). scoring_multi_out.bin is the reimpl's raw "
+                "length x outputSize posterior matrix, pinned max_ulp=0 vs the REAL compiled "
+                "overload (NN_TOL site=blstm_scoring_multi_*). The forward output is "
+                "TARGET-INDEPENDENT (targets feed only cost/backward, both off here + step>=0 "
+                "leaves the plain-FFB cost block from rewriting the output), so one golden "
+                "covers every case; the NO-binary-expansion return is exercised (the [1-p,p] "
+                "expansion gate at :922-926 is outputSize == 1, so a multiclass net returns "
+                "the raw matrix). The per-case _Cost (read from the REAL class via getCost()) "
+                "reflects the multiclass target construction (:872-886) feeding "
+                "CostLaw::computeCost -- softmax CE, a libm chain, so the hex is the oracle-env "
+                "(Apple libm) value. targetIndex 5 (>= outputSize 3) folds to the unknown class "
+                "0 (:873), harness-asserted to bit-match targetIndex 0's cost."
+            ),
+            "shape": [sc_rows, sc_cols],
+            "cases": {
+                tag: {
+                    "target_index": SCORING_MULTI_CASES[tag][0],
+                    "step": SCORING_MULTI_CASES[tag][1],
+                    "max_ulp": int(tol_matches[tag]["ulp"]),
+                    "cost_bits": "0x" + cost_matches[tag]["cost"],
+                    "cost_dec": float(cost_matches[tag]["cost_dec"]),
+                    "nb_of_classif": int(cost_matches[tag]["nb"]),
+                }
+                for tag in SCORING_MULTI_CASES
+            },
+        },
         "dead_code_not_ported": {
             "text": (
                 "Two legacy blocks are commented out and NOT ported: the classNb==2 binary "
@@ -268,8 +348,9 @@ def main() -> None:
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     print(
-        f"OK: phase4b confusion fixtures (input={in_rows}x{in_cols}, "
-        f"matrix={mat_rows}x{mat_cols}, error1=error2={error1!r}), "
+        f"OK: phase4b fixtures (confusion input={in_rows}x{in_cols}, "
+        f"matrix={mat_rows}x{mat_cols}, error1=error2={error1!r}; "
+        f"scoring_multi={sc_rows}x{sc_cols}, all sites max_ulp=0), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

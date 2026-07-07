@@ -58,6 +58,9 @@ pub trait Layer {
     fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>);
     /// `LayerType::resetWeightsDerivatives`: zero the deriv accumulators + frame count.
     fn reset_weights_derivatives(&mut self);
+    /// `LayerType::ponderateWeightsDerivatives`: scale the deriv accumulators (col0) by
+    /// `factor` in place; the frame-count column (col1) is untouched.
+    fn ponderate_weights_derivatives(&mut self, factor: f64);
     fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64];
     fn get_weights(&self, out: &mut Vec<f64>);
     fn nb_of_weights(&self) -> usize;
@@ -115,6 +118,9 @@ impl Layer for LstmLayer {
     fn reset_weights_derivatives(&mut self) {
         LstmLayer::reset_weights_derivatives(self);
     }
+    fn ponderate_weights_derivatives(&mut self, factor: f64) {
+        LstmLayer::ponderate_weights_derivatives(self, factor);
+    }
     fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64] {
         LstmLayer::set_weights(self, flat)
     }
@@ -171,6 +177,9 @@ impl Layer for NeuronLayer {
     }
     fn reset_weights_derivatives(&mut self) {
         NeuronLayer::reset_weights_derivatives(self);
+    }
+    fn ponderate_weights_derivatives(&mut self, factor: f64) {
+        NeuronLayer::ponderate_weights_derivatives(self, factor);
     }
     fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64] {
         NeuronLayer::set_weights(self, flat)
@@ -667,6 +676,14 @@ impl<L: Layer> Network<L> {
     pub fn reset_weights_derivatives(&mut self) {
         for layer in &mut self.layers {
             layer.reset_weights_derivatives();
+        }
+    }
+
+    /// `ponderateWeightsDerivatives` (`NeuralNetwork.hpp:119-123`): scale every layer's
+    /// deriv accumulators (col0) by `factor`; frame counts (col1) are untouched.
+    pub fn ponderate_weights_derivatives(&mut self, factor: f64) {
+        for layer in &mut self.layers {
+            layer.ponderate_weights_derivatives(factor);
         }
     }
 }

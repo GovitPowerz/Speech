@@ -782,6 +782,16 @@ impl LstmLayer {
         self.peep_weight_derivatives = Array2::zeros((12, self.output_size));
         self.biases_derivatives = Array2::zeros((1, 4 * self.output_size));
     }
+
+    /// `ponderateWeightsDerivatives` (`LSTMLayer.cpp:305-310`): scale the four deriv
+    /// accumulators (the harvested Nx2 col0) IN PLACE by `factor`. The frame count
+    /// `_NbOfSeqFedBackward` (col1) is deliberately NOT touched.
+    pub fn ponderate_weights_derivatives(&mut self, factor: f64) {
+        self.input_weights_derivatives *= factor;
+        self.feedback_weights_derivatives *= factor;
+        self.peep_weight_derivatives *= factor;
+        self.biases_derivatives *= factor;
+    }
 }
 
 /// Read `rows*cols` elements from `needed[*pos..]` in column-major order (`jj`
@@ -1086,5 +1096,13 @@ impl NeuronLayer {
         self.nb_of_seq_fed_backward = 0;
         self.weights_derivatives = Array2::zeros((self.input_size, self.output_size));
         self.biases_derivatives = Array2::zeros((1, self.output_size));
+    }
+
+    /// `ponderateWeightsDerivatives` (`NeuronLayer.cpp:122-125`): scale the weight +
+    /// bias deriv accumulators (the harvested Nx2 col0) IN PLACE by `factor`. The frame
+    /// count `_NbOfSeqFedBackward` (col1) is deliberately NOT touched.
+    pub fn ponderate_weights_derivatives(&mut self, factor: f64) {
+        self.weights_derivatives *= factor;
+        self.biases_derivatives *= factor;
     }
 }

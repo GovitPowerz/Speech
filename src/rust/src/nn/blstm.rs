@@ -349,6 +349,49 @@ impl BlstmNetwork {
         self.output_network.output_size()
     }
 
+    /// `getCostPonderation` (`BLSTMNeuralNetwork.cpp:333-350`): per-class cost weight
+    /// for the LID accumulation (`TwinBLSTMSpectralLID.cpp:1334`).
+    ///
+    /// Multiclass (`output_size > 1`, `:334-341`): out-of-range/negative `class_index`
+    /// -> 0 (`:335`), then return `classes_ponderations[class_index]` if in range, else
+    /// `1.0` (`:337-340`). Binary (`output_size <= 1`, `:342-348`): the guard uses `>`
+    /// (NOT `>=`, `:343`); `class_index == 1` -> `2*cost_ponderation`, else
+    /// `2*(1-cost_ponderation)` (`:344-347`).
+    ///
+    /// The legacy `classIndex` is `size_type` (UNSIGNED), so its literal `< 0` tests are
+    /// dead; a negative `int` caller arg wraps to a huge unsigned and trips the
+    /// `>= output_size` / `> output_size` branch, clamping to 0 all the same. Porting the
+    /// signed `i64` param with an explicit `< 0` clamp is behavior-identical for every
+    /// input (a negative always lands on 0 either way) -- see IMPROVEMENTS.
+    pub fn get_cost_ponderation(&self, class_index: i64) -> f64 {
+        let output_size = self.output_size() as i64;
+        if output_size > 1 {
+            let ci = if class_index >= output_size || class_index < 0 {
+                0
+            } else {
+                class_index
+            };
+            let cp = self.cfg.cost_law.classes_ponderations();
+            if (ci as usize) < cp.len() {
+                cp[ci as usize] // :338
+            } else {
+                1.0 // :340
+            }
+        } else {
+            // :343 guard uses `>` (not `>=`).
+            let ci = if class_index > output_size || class_index < 0 {
+                0
+            } else {
+                class_index
+            };
+            if ci == 1 {
+                2.0 * self.cfg.cost_law.cost_ponderation() // :345
+            } else {
+                2.0 * (1.0 - self.cfg.cost_law.cost_ponderation()) // :347
+            }
+        }
+    }
+
     /// `getSubSamplingRatio` (`:189-195`): output-only ratio in MLP mode, else
     /// forward-ratio * output-ratio.
     pub fn sub_sampling_ratio(&self) -> usize {
@@ -516,6 +559,30 @@ impl BlstmNetwork {
             all[[k, 1]] = r[1];
         }
         all
+    }
+
+    /// `ponderateWeightsDerivatives` (`BLSTMNeuralNetwork.cpp:289-297`): scale the
+    /// accumulated derivative col0 IN PLACE by `factor`. Delegates to each sub-network's
+    /// `ponderateWeightsDerivatives` (`NeuralNetwork.hpp:119-123` -> per-leaf `*=`,
+    /// `LSTMLayer.cpp:305-310` / `NeuronLayer.cpp:122-125`): MLP mode scales only the
+    /// output net; non-MLP scales fwd + bwd + output. The `_NbOfSeqFedBackward` count
+    /// column (col1) is NOT touched, and the mean/std tail (assembled fresh as `[0, 1]`
+    /// in `get_weights_derivatives`) never participates -- so `factor` scales the
+    /// harvested col0 alone, leaving col1 the raw frame count.
+    pub fn ponderate_weights_derivatives(&mut self, factor: f64) {
+        if self.cfg.is_mlp {
+            self.output_network.ponderate_weights_derivatives(factor);
+        } else {
+            self.forward_network
+                .as_mut()
+                .unwrap()
+                .ponderate_weights_derivatives(factor);
+            self.backward_network
+                .as_mut()
+                .unwrap()
+                .ponderate_weights_derivatives(factor);
+            self.output_network.ponderate_weights_derivatives(factor);
+        }
     }
 
     /// `updateWeights` (`BLSTMNeuralNetwork.cpp:303-310`): normalize the Nx2 gradient

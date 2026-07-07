@@ -23,6 +23,47 @@
     "error1": 66.66666666666667,
     "error2": 66.66666666666667
   },
+  "scoring_multi": {
+    "text": "Task 3: the MULTICLASS scoring feedForward overload (BLSTMNeuralNetwork.cpp:843-929, BLSTMNeuralNetwork.h:195 -- the LID drivers' core call) on a synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12 -> length 6, outputSize 3). scoring_multi_out.bin is the reimpl's raw length x outputSize posterior matrix, pinned max_ulp=0 vs the REAL compiled overload (NN_TOL site=blstm_scoring_multi_*). The forward output is TARGET-INDEPENDENT (targets feed only cost/backward, both off here + step>=0 leaves the plain-FFB cost block from rewriting the output), so one golden covers every case; the NO-binary-expansion return is exercised (the [1-p,p] expansion gate at :922-926 is outputSize == 1, so a multiclass net returns the raw matrix). The per-case _Cost (read from the REAL class via getCost()) reflects the multiclass target construction (:872-886) feeding CostLaw::computeCost -- softmax CE, a libm chain, so the hex is the oracle-env (Apple libm) value. targetIndex 5 (>= outputSize 3) folds to the unknown class 0 (:873), harness-asserted to bit-match targetIndex 0's cost.",
+    "shape": [
+      6,
+      3
+    ],
+    "cases": {
+      "ti0_step0": {
+        "target_index": 0,
+        "step": 0,
+        "max_ulp": 0,
+        "cost_bits": "0x401f5578982da593",
+        "cost_dec": 7.833467843805368,
+        "nb_of_classif": 6
+      },
+      "ti2_step0": {
+        "target_index": 2,
+        "step": 0,
+        "max_ulp": 0,
+        "cost_bits": "0x4018ee91c18d115c",
+        "cost_dec": 6.232977890238853,
+        "nb_of_classif": 6
+      },
+      "ti2_step2": {
+        "target_index": 2,
+        "step": 2,
+        "max_ulp": 0,
+        "cost_bits": "0x400094c4bc58e6e5",
+        "cost_dec": 2.07264086862857,
+        "nb_of_classif": 6
+      },
+      "tiOOB_step0": {
+        "target_index": 5,
+        "step": 0,
+        "max_ulp": 0,
+        "cost_bits": "0x401f5578982da593",
+        "cost_dec": 7.833467843805368,
+        "nb_of_classif": 6
+      }
+    }
+  },
   "dead_code_not_ported": {
     "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
   }
