@@ -5048,7 +5048,13 @@ int main(int argc, char** argv) {
         // every case; the per-case _Cost DOES reflect the multiclass target construction
         // (via the real CostLaw::computeCost) and is dumped for the manifest. targetIndex
         // 5 (>= 3) exercises the unknown-class fold (-> 0), cross-checked to match
-        // targetIndex 0's cost (Rust scoring_multi_oob_index_folds_to_zero).
+        // targetIndex 0's cost (Rust scoring_multi_oob_index_folds_to_zero). A fifth case
+        // (ti2_step0_mod2_costmod) sets SYNC_BackPropWER (isCostModified() -> true) with
+        // targetModifier 2.0, mirroring the binary-path {modifier 2.0} x {costModified
+        // true} case (~:4893) -- exercises the multiclass NONZERO soft-target placement
+        // (:871-886: target=0.1*modifier=0.2, enforced rows get non-target cols=0.2 and
+        // the target col=1-target=0.8, vs the always-0.0/1.0 hard target of the other
+        // four cases).
         {
             const std::vector<long> lstmNN = {3, 4, 2};
             const std::vector<long> lstmSS = {2, 1};
@@ -5107,12 +5113,13 @@ int main(int argc, char** argv) {
             blstmFeedForward(lstmNN, lstmSS, fwdSteps, bwdStepsRev, outNN, outSS, outSteps,
                              fwdInputSize, baseInput, oF, oB, reimplOut);
 
-            struct MCase { int targetIndex; int step; const char* tag; };
+            struct MCase { int targetIndex; int step; double modifier; bool costModified; const char* tag; };
             const MCase cases[] = {
-                {0, 0, "ti0_step0"},
-                {2, 0, "ti2_step0"},
-                {2, 2, "ti2_step2"},
-                {5, 0, "tiOOB_step0"},   // 5 >= 3 -> unknown class -> folds to 0
+                {0, 0, 1.0, false, "ti0_step0"},
+                {2, 0, 1.0, false, "ti2_step0"},
+                {2, 2, 1.0, false, "ti2_step2"},
+                {5, 0, 1.0, false, "tiOOB_step0"},              // 5 >= 3 -> unknown class -> folds to 0
+                {2, 0, 2.0, true,  "ti2_step0_mod2_costmod"},   // isCostModified -> nonzero soft target
             };
 
             for (const MCase& mc : cases) {
@@ -5127,6 +5134,8 @@ int main(int argc, char** argv) {
                 confC.set_val<bool>("SYNC_TwoSweeps", false);
                 confC.set_val<bool>("SYNC_BackPropagationActivated", false);
                 confC.set_val<int>("SYNC_TargetEnforcementStep", mc.step);
+                // isCostModified() == CostLaw::_BackPropWER (>= 0 -> modified).
+                confC.set_val<double>("SYNC_BackPropWER", mc.costModified ? 0.0 : -1.0);
                 BLSTMNeuralNetwork<LSTMLayer> nn(confC, "SYNC", true);
                 nn.setWeights(flat);
                 nn.setProcessingType(false, false);  // plain path
@@ -5134,7 +5143,7 @@ int main(int argc, char** argv) {
                 // Real class scoring feedForward (BLSTMNeuralNetwork.h:195). Multiclass:
                 // NO binary expansion -> realOut is (length x outputSize).
                 Eigen::MatrixXd realInput = baseInput;
-                Eigen::MatrixXd realOut = nn.feedForward(realInput, 4, 2, mc.targetIndex, 1.0);
+                Eigen::MatrixXd realOut = nn.feedForward(realInput, 4, 2, mc.targetIndex, mc.modifier);
 
                 long u = 0; double a = 0.0;
                 probeGapNaN(realOut, reimplOut, u, a);

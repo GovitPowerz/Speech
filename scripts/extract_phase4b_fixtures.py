@@ -38,7 +38,10 @@ This extractor:
      doubles against the committed `confusion_error.bin`.
   5. Parses the `NN_TOL site=blstm_scoring_multi_* max_ulp=0` + `BLSTM_SCORING_MULTI`
      lines (Task 3), asserting every multiclass scoring site is 0-ULP and the
-     unknown-class fold (targetIndex 5 -> 0) bit-matches targetIndex 0's cost.
+     unknown-class fold (targetIndex 5 -> 0) bit-matches targetIndex 0's cost. One
+     of the five cases (`ti2_step0_mod2_costmod`) sets SYNC_BackPropWER so
+     isCostModified() is true with target_modifier 2.0, exercising the nonzero
+     soft-target placement on the multiclass path.
   6. Copies the confusion `.bin` dumps + `scoring_multi_out.bin` into
      `tests/reference_data/phase4b/` and writes `manifest.json` with MEASURED
      shapes/values.
@@ -100,12 +103,13 @@ CONFUSION_BINS = ["confusion_input.bin", "confusion_matrix.bin", "confusion_erro
 # the LID path). One reimpl output covers every case (the forward is target-independent).
 SCORING_MULTI_BIN = "scoring_multi_out.bin"
 
-# The harness multiclass scoring cases: tag -> (target_index, enforcement step).
+# The harness multiclass scoring cases: tag -> (target_index, step, target_modifier, cost_modified).
 SCORING_MULTI_CASES = {
-    "ti0_step0": (0, 0),
-    "ti2_step0": (2, 0),
-    "ti2_step2": (2, 2),
-    "tiOOB_step0": (5, 0),  # 5 >= 3 -> unknown-class fold -> 0
+    "ti0_step0": (0, 0, 1.0, False),
+    "ti2_step0": (2, 0, 1.0, False),
+    "ti2_step2": (2, 2, 1.0, False),
+    "tiOOB_step0": (5, 0, 1.0, False),  # 5 >= 3 -> unknown-class fold -> 0
+    "ti2_step0_mod2_costmod": (2, 0, 2.0, True),  # isCostModified True, modifier 2.0 -> nonzero soft target
 }
 
 PHASE4B_RE = re.compile(
@@ -316,13 +320,20 @@ def main() -> None:
                 "reflects the multiclass target construction (:872-886) feeding "
                 "CostLaw::computeCost -- softmax CE, a libm chain, so the hex is the oracle-env "
                 "(Apple libm) value. targetIndex 5 (>= outputSize 3) folds to the unknown class "
-                "0 (:873), harness-asserted to bit-match targetIndex 0's cost."
+                "0 (:873), harness-asserted to bit-match targetIndex 0's cost. A fifth case "
+                "(ti2_step0_mod2_costmod) sets SYNC_BackPropWER (isCostModified() -> true) with "
+                "target_modifier 2.0, exercising the NONZERO soft-target placement (target = "
+                "0.1*modifier = 0.2; enforced rows set the non-target columns to 0.2 and the "
+                "target column to 1-target = 0.8), unlike the other four (hard-target 0.0/1.0) "
+                "cases."
             ),
             "shape": [sc_rows, sc_cols],
             "cases": {
                 tag: {
                     "target_index": SCORING_MULTI_CASES[tag][0],
                     "step": SCORING_MULTI_CASES[tag][1],
+                    "target_modifier": SCORING_MULTI_CASES[tag][2],
+                    "cost_modified": SCORING_MULTI_CASES[tag][3],
                     "max_ulp": int(tol_matches[tag]["ulp"]),
                     "cost_bits": "0x" + cost_matches[tag]["cost"],
                     "cost_dec": float(cost_matches[tag]["cost_dec"]),

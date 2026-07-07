@@ -6,12 +6,17 @@
 //! overload, `BLSTMNeuralNetwork.h:195`). The scoring overload's BINARY path is already
 //! pinned by Phase 2 Task 10 (`phase2_blstm_golden.rs`); this file adds the MULTICLASS
 //! (LID) path golden `scoring_multi_out.bin`, dumped from the harness reimpl and pinned
-//! `max_ulp=0` vs the real compiled overload (`NN_TOL site=blstm_scoring_multi_*`).
+//! `max_ulp=0` vs the real compiled overload (`NN_TOL site=blstm_scoring_multi_*`). Five
+//! harness cases are covered (`SCORING_MULTI_CASES`), the fifth (`ti2_step0_mod2_costmod`)
+//! setting `SYNC_BackPropWER` (`isCostModified()` true) with `target_modifier` 2.0 to
+//! exercise the multiclass NONZERO soft-target placement (`:871-886`); its cost is
+//! cross-checked against the manifest hex bits in `scoring_multi_cost_matches_manifest`.
 //!
 //! Comparator discipline: ponderation is a pure `*=` (no libm) -> STRICT bits; the
 //! cost-ponderation clamps are pure comparisons/arithmetic -> STRICT; the scoring
 //! output traverses the LSTM/output activation chain (asinh/softmax) -> canary-gated
-//! (`assert_oracle_eq`).
+//! (`assert_oracle_eq`); the manifest-recorded per-case cost traverses `CostLaw::
+//! compute_cost`'s `.ln()` -> canary-gated (`assert_oracle_eq_f64`).
 
 mod common;
 
@@ -267,9 +272,11 @@ fn cost_ponderation_clamps() {
 // ============================================================================
 
 /// Reconstruct the harness SYNC multiclass scoring net: LSTM [3,4,2] sub [2,1], output
-/// [4,5,3] sub [1,1], norm 0, backprop off, enforcement `step`. Weights = the harness
-/// synthetic flat (body + mean/std tail).
-fn scoring_multi_net(step: i32) -> BlstmNetwork {
+/// [4,5,3] sub [1,1], norm 0, backprop off, enforcement `step`. `cost_modified` sets
+/// `SYNC_BackPropWER` (`>= 0` -> `isCostModified()` true, `CostLaw.cpp:110-112`); the
+/// harness's four original cases all pass `false` (no key -> default `-1.0` -> false).
+/// Weights = the harness synthetic flat (body + mean/std tail).
+fn scoring_multi_net(step: i32, cost_modified: bool) -> BlstmNetwork {
     let mut m: IndexMap<String, String> = IndexMap::new();
     m.insert("SYNC_LSTMNeuronNb".into(), "3,4,2".into());
     m.insert("SYNC_LSTMSubSampling".into(), "2,1".into());
@@ -279,6 +286,10 @@ fn scoring_multi_net(step: i32) -> BlstmNetwork {
     m.insert("SYNC_TwoSweeps".into(), "false".into());
     m.insert("SYNC_BackPropagationActivated".into(), "false".into());
     m.insert("SYNC_TargetEnforcementStep".into(), step.to_string());
+    m.insert(
+        "SYNC_BackPropWER".into(),
+        (if cost_modified { 0.0 } else { -1.0 }).to_string(),
+    );
     let cfg = BlstmConfig::from_legacy(&m, "SYNC").unwrap();
     let mut net = BlstmNetwork::from_config(cfg).unwrap();
     let nb = net.nb_of_weights();
@@ -287,28 +298,32 @@ fn scoring_multi_net(step: i32) -> BlstmNetwork {
     net
 }
 
-// The harness multiclass scoring cases: (tag, target_index, step). The forward output is
-// TARGET-INDEPENDENT (targets feed only cost/backward, both off here + step>=0 leaves the
-// output un-rewritten), so ONE golden covers every case.
-const SCORING_MULTI_CASES: [(&str, i64, i32); 4] = [
-    ("ti0_step0", 0, 0),
-    ("ti2_step0", 2, 0),
-    ("ti2_step2", 2, 2),
-    ("tiOOB_step0", 5, 0), // 5 >= 3 -> unknown-class fold -> 0
+// The harness multiclass scoring cases: (tag, target_index, step, target_modifier,
+// cost_modified). The forward output is TARGET-INDEPENDENT (targets feed only
+// cost/backward, both off here + step>=0 leaves the output un-rewritten), so ONE golden
+// covers every case, including the fifth (cost-modified, modifier != 1.0) one.
+const SCORING_MULTI_CASES: [(&str, i64, i32, f64, bool); 5] = [
+    ("ti0_step0", 0, 0, 1.0, false),
+    ("ti2_step0", 2, 0, 1.0, false),
+    ("ti2_step2", 2, 2, 1.0, false),
+    ("tiOOB_step0", 5, 0, 1.0, false), // 5 >= 3 -> unknown-class fold -> 0
+    // isCostModified() true + modifier 2.0 -> nonzero soft-target placement (:871-886):
+    // target = 0.1*2.0 = 0.2, enforced rows get non-target cols = 0.2, target col = 0.8.
+    ("ti2_step0_mod2_costmod", 2, 0, 2.0, true),
 ];
 
 #[test]
 fn scoring_overload_matches_reimpl() {
     // The scoring feed_forward on the SYNC multiclass net: builds a per-frame target
-    // sequence from (target_index, modifier=1.0), runs the windowed FFB (plain path),
+    // sequence from (target_index, target_modifier), runs the windowed FFB (plain path),
     // and -- because output_size > 1 -- returns the RAW length x output_size matrix (NO
     // binary [1-p,p] expansion; that gate is output_size == 1). The output is
     // target-independent here, so every case matches the single golden
     // `scoring_multi_out.bin` (harness reimpl, pinned max_ulp=0 vs the real overload).
-    for (tag, target_index, step) in SCORING_MULTI_CASES {
-        let mut net = scoring_multi_net(step);
+    for (tag, target_index, step, modifier, cost_modified) in SCORING_MULTI_CASES {
+        let mut net = scoring_multi_net(step, cost_modified);
         let mut input = synth_input();
-        let out = net.feed_forward_scoring(&mut input, 4, 2, target_index, 1.0);
+        let out = net.feed_forward_scoring(&mut input, 4, 2, target_index, modifier);
         assert_eq!(
             out.dim(),
             (6, 3),
@@ -328,12 +343,12 @@ fn scoring_multi_oob_index_folds_to_zero() {
     // step 0 (every row enforced) the OOB case must accumulate the SAME cost as
     // target_index 0 -- validating the fold via the cost channel (the only observable
     // effect of the multiclass target construction), no fixture needed.
-    let mut net0 = scoring_multi_net(0);
+    let mut net0 = scoring_multi_net(0, false);
     let mut in0 = synth_input();
     let _ = net0.feed_forward_scoring(&mut in0, 4, 2, 0, 1.0);
     let cost0 = net0.cost;
 
-    let mut net_oob = scoring_multi_net(0);
+    let mut net_oob = scoring_multi_net(0, false);
     let mut in_oob = synth_input();
     let _ = net_oob.feed_forward_scoring(&mut in_oob, 4, 2, 5, 1.0);
     assert_eq!(
@@ -353,7 +368,7 @@ fn scoring_multi_target_index_and_step_change_cost() {
     // (target_index) OR a different enforcement cadence (step) yields a different CE cost.
     // Fixture-free structural validation of the counter + column placement.
     let cost = |ti: i64, step: i32| {
-        let mut net = scoring_multi_net(step);
+        let mut net = scoring_multi_net(step, false);
         let mut input = synth_input();
         let _ = net.feed_forward_scoring(&mut input, 4, 2, ti, 1.0);
         net.cost
@@ -374,7 +389,7 @@ fn scoring_multi_target_index_and_step_change_cost() {
 fn scoring_multi_rows_below_ratio_returns_zero_row() {
     // rows < sub_sampling_ratio() short-circuits to Zero(1, output_size()) (:845-846).
     // The SYNC net's ratio is lstm(2)*out(1) = 2; feed 1 row -> Zero(1, 3).
-    let mut net = scoring_multi_net(0);
+    let mut net = scoring_multi_net(0, false);
     let mut input = Array2::<f64>::from_shape_fn((1, 3), |(_, j)| j as f64);
     let out = net.feed_forward_scoring(&mut input, 4, 2, 0, 1.0);
     assert_eq!(
@@ -389,7 +404,7 @@ fn scoring_multi_rows_below_ratio_returns_zero_row() {
 fn scoring_multi_no_target_returns_raw_matrix() {
     // target_index < 0 -> no target sequence, and (output_size > 1) the raw multiclass
     // matrix returns unchanged (length x output_size).
-    let mut net = scoring_multi_net(0);
+    let mut net = scoring_multi_net(0, false);
     let mut input = synth_input();
     let out = net.feed_forward_scoring(&mut input, 4, 2, -1, 1.0);
     assert_eq!(
@@ -403,4 +418,39 @@ fn scoring_multi_no_target_returns_raw_matrix() {
         &common::load_bin_phase4b("scoring_multi_out.bin"),
         "scoring_multi no-target out",
     );
+}
+
+#[test]
+fn scoring_multi_cost_matches_manifest() {
+    // Cross-libm class (CostLaw::compute_cost traverses `.ln()`): the per-case _Cost the
+    // harness reads from the REAL compiled scoring feedForward overload, recorded bit-
+    // exact hex in the manifest (tests/reference_data/phase4b/manifest.json:
+    // scoring_multi.cases, Apple libm / oracle env), gated via assert_oracle_eq_f64
+    // (bit-exact on the oracle env, hybrid ULP/abs bound elsewhere) -- mirrors
+    // phase2_blstm_golden.rs::scoring_cost_and_nb_of_classif_match_manifest for the
+    // binary path. Covers the new cost-modified/modifier!=1.0 case plus one existing
+    // (hard-target) case as a contrast.
+    let expected: [(&str, u64, i64); 2] = [
+        ("ti2_step0", 0x4018ee91c18d115c, 6),
+        ("ti2_step0_mod2_costmod", 0x4028ee91c18d115a, 6),
+    ];
+    for (tag, ecost_bits, enb) in expected {
+        let (_, target_index, step, modifier, cost_modified) = SCORING_MULTI_CASES
+            .iter()
+            .copied()
+            .find(|c| c.0 == tag)
+            .unwrap_or_else(|| panic!("unknown case tag {tag}"));
+        let mut net = scoring_multi_net(step, cost_modified);
+        let mut input = synth_input();
+        let _ = net.feed_forward_scoring(&mut input, 4, 2, target_index, modifier);
+        common::assert_oracle_eq_f64(
+            net.cost,
+            f64::from_bits(ecost_bits),
+            &format!("scoring_multi {tag}: cost"),
+        );
+        assert_eq!(
+            net.nb_of_classif, enb,
+            "scoring_multi {tag}: nb_of_classif mismatch"
+        );
+    }
 }

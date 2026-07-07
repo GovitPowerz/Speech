@@ -24,7 +24,7 @@
     "error2": 66.66666666666667
   },
   "scoring_multi": {
-    "text": "Task 3: the MULTICLASS scoring feedForward overload (BLSTMNeuralNetwork.cpp:843-929, BLSTMNeuralNetwork.h:195 -- the LID drivers' core call) on a synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12 -> length 6, outputSize 3). scoring_multi_out.bin is the reimpl's raw length x outputSize posterior matrix, pinned max_ulp=0 vs the REAL compiled overload (NN_TOL site=blstm_scoring_multi_*). The forward output is TARGET-INDEPENDENT (targets feed only cost/backward, both off here + step>=0 leaves the plain-FFB cost block from rewriting the output), so one golden covers every case; the NO-binary-expansion return is exercised (the [1-p,p] expansion gate at :922-926 is outputSize == 1, so a multiclass net returns the raw matrix). The per-case _Cost (read from the REAL class via getCost()) reflects the multiclass target construction (:872-886) feeding CostLaw::computeCost -- softmax CE, a libm chain, so the hex is the oracle-env (Apple libm) value. targetIndex 5 (>= outputSize 3) folds to the unknown class 0 (:873), harness-asserted to bit-match targetIndex 0's cost.",
+    "text": "Task 3: the MULTICLASS scoring feedForward overload (BLSTMNeuralNetwork.cpp:843-929, BLSTMNeuralNetwork.h:195 -- the LID drivers' core call) on a synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12 -> length 6, outputSize 3). scoring_multi_out.bin is the reimpl's raw length x outputSize posterior matrix, pinned max_ulp=0 vs the REAL compiled overload (NN_TOL site=blstm_scoring_multi_*). The forward output is TARGET-INDEPENDENT (targets feed only cost/backward, both off here + step>=0 leaves the plain-FFB cost block from rewriting the output), so one golden covers every case; the NO-binary-expansion return is exercised (the [1-p,p] expansion gate at :922-926 is outputSize == 1, so a multiclass net returns the raw matrix). The per-case _Cost (read from the REAL class via getCost()) reflects the multiclass target construction (:872-886) feeding CostLaw::computeCost -- softmax CE, a libm chain, so the hex is the oracle-env (Apple libm) value. targetIndex 5 (>= outputSize 3) folds to the unknown class 0 (:873), harness-asserted to bit-match targetIndex 0's cost. A fifth case (ti2_step0_mod2_costmod) sets SYNC_BackPropWER (isCostModified() -> true) with target_modifier 2.0, exercising the NONZERO soft-target placement (target = 0.1*modifier = 0.2; enforced rows set the non-target columns to 0.2 and the target column to 1-target = 0.8), unlike the other four (hard-target 0.0/1.0) cases.",
     "shape": [
       6,
       3
@@ -33,6 +33,8 @@
       "ti0_step0": {
         "target_index": 0,
         "step": 0,
+        "target_modifier": 1.0,
+        "cost_modified": false,
         "max_ulp": 0,
         "cost_bits": "0x401f5578982da593",
         "cost_dec": 7.833467843805368,
@@ -41,6 +43,8 @@
       "ti2_step0": {
         "target_index": 2,
         "step": 0,
+        "target_modifier": 1.0,
+        "cost_modified": false,
         "max_ulp": 0,
         "cost_bits": "0x4018ee91c18d115c",
         "cost_dec": 6.232977890238853,
@@ -49,6 +53,8 @@
       "ti2_step2": {
         "target_index": 2,
         "step": 2,
+        "target_modifier": 1.0,
+        "cost_modified": false,
         "max_ulp": 0,
         "cost_bits": "0x400094c4bc58e6e5",
         "cost_dec": 2.07264086862857,
@@ -57,9 +63,21 @@
       "tiOOB_step0": {
         "target_index": 5,
         "step": 0,
+        "target_modifier": 1.0,
+        "cost_modified": false,
         "max_ulp": 0,
         "cost_bits": "0x401f5578982da593",
         "cost_dec": 7.833467843805368,
+        "nb_of_classif": 6
+      },
+      "ti2_step0_mod2_costmod": {
+        "target_index": 2,
+        "step": 0,
+        "target_modifier": 2.0,
+        "cost_modified": true,
+        "max_ulp": 0,
+        "cost_bits": "0x4028ee91c18d115a",
+        "cost_dec": 12.465955780477703,
         "nb_of_classif": 6
       }
     }
