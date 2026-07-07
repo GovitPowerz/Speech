@@ -1616,6 +1616,26 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   layout (Task 9 chooses the indices). *Pinned by:* `grad_check_synthetic` (10-weight cap) and Task
   9's `phase4a_gradcheck_golden`.
 
+- **[phase4a] CLI `--key=` empty-value override REMOVES the key -- a port-only DEVIATION from the
+  literal (unreachable) legacy behavior** (`cli.rs::apply_override`): the legacy usage text
+  (`FastSpeechProcessing.cpp:85`, `setting <variable_value> = "" removes the variable from the
+  config`) documents this, but `ConfigFile::set_val` (`ConfigFile.h:34-42`) never erases -- it
+  unconditionally does `_Params[name] = ss.str()` for any value including `""`. The only erase in
+  `ConfigFile` is `warn_unused`'s `_Params.erase` (`ConfigFile.cpp:43`), gated on a `_Used` set whose
+  single insertion site is commented out everywhere (`ConfigFile.h:39,47,56,65,75`) -- so even that
+  path is dead by construction -- and `warn_unused` is never called from `main()` (`:31-75`) at all.
+  Separately, `--key=` with a GENUINELY empty value can't even reach `set_val`: `split<string>(argv,
+  '=', 2)` (`String.hpp:86-98`) uses `getline(ss, s, '=')`, which on `"--key="` yields a 1-element
+  vector (no trailing empty field emitted at EOF) -- `argument[1]` is an out-of-bounds
+  `std::vector::operator[]` read, undefined behavior, verified against a standalone repro of the exact
+  `split` template. The usage string is therefore vestigial/aspirational documentation for a feature
+  that is not wired to anything reachable from the legacy binary's `main()`. This port implements the
+  DOCUMENTED (not the literal) behavior -- `IndexMap::shift_remove(key)` on an empty override value --
+  because the task spec calls for defined, usage-text-honoring semantics rather than reproducing C++
+  UB. *Why deferred:* a deliberate port-only choice (no legacy golden can pin either interpretation,
+  since the real binary cannot reach this path without crashing). *Pinned by:*
+  `phase4a_cli.rs::override_empty_removes_key`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

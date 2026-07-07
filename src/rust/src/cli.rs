@@ -2,6 +2,11 @@
 //!
 //! Ported from legacy C++: FastSpeechProcessing.cpp `main`.
 
+use anyhow::{Result, bail};
+use indexmap::IndexMap;
+
+use crate::legacy_config::parse_legacy_config;
+
 /// Run mode selected by the leading CLI flag, case dropped (the legacy `mode[1]`
 /// letter carries both the mode AND its case, e.g. `T`/`M`/`I` gate the verbose
 /// per-file log branches in `BagOfProcessors::SegmentationFunction`).
@@ -42,4 +47,83 @@ impl Mode {
         };
         Some(Mode { kind, verbose })
     }
+}
+
+/// A fully parsed CLI invocation: the mode plus one parsed config map per
+/// `-m`/`-M` config path (single-config modes always yield exactly one map).
+#[derive(Debug, Clone)]
+pub struct CliInvocation {
+    pub mode: Mode,
+    pub configs: Vec<IndexMap<String, String>>,
+}
+
+/// Port of `FastSpeechProcessing.cpp main` (`:31-64`)'s argument parsing (mode
+/// dispatch, config load, `--key=val` overrides / multi-config collection).
+/// `args` excludes `argv[0]` (the program name) -- `args[0]` is the mode flag.
+///
+/// Single-config modes (`s`/`S`/`t`/`T`/`i`/`I`, `:45-53`): the LAST arg is the
+/// config file; args between the flag and the config are `--key=val` overrides,
+/// applied left-to-right via set-or-remove (empty `val` REMOVES the key -- the
+/// legacy usage text `:85` documents this, though `ConfigFile::set_val` itself
+/// never erases; see IMPROVEMENTS.md `[phase4a] CLI empty-value override`).
+///
+/// Multi mode (`m`/`M`, `:54-58`): every arg after the flag is a config path,
+/// no overrides.
+///
+/// Unknown mode (`:59-63`) or `args.len() < 2` (legacy `argc < 3`, `:37-40`)
+/// is an error (usage + exit in the legacy; here, an `Err` for `main` to turn
+/// into a usage print + exit).
+pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
+    if args.len() < 2 {
+        bail!("too few arguments");
+    }
+
+    let flag = &args[0];
+    let mode = Mode::from_flag(flag).ok_or_else(|| anyhow::anyhow!("unknown mode ({flag})"))?;
+
+    let configs = match mode.kind {
+        ModeKind::Solo | ModeKind::UnitTest | ModeKind::Image => {
+            let config_path = &args[args.len() - 1];
+            let mut map = load_config(config_path)?;
+            for arg in &args[1..args.len() - 1] {
+                apply_override(&mut map, arg)?;
+            }
+            vec![map]
+        }
+        ModeKind::Multi => {
+            let mut maps = Vec::with_capacity(args.len() - 1);
+            for config_path in &args[1..] {
+                maps.push(load_config(config_path)?);
+            }
+            maps
+        }
+    };
+
+    Ok(CliInvocation { mode, configs })
+}
+
+fn load_config(path: &str) -> Result<IndexMap<String, String>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read config file '{path}': {e}"))?;
+    Ok(parse_legacy_config(&text))
+}
+
+/// Apply one `--key=val` override to `map` (legacy `:47-52`): `arg` must start
+/// with `--` (legacy `check(argument[0].substr(0,2) == "--", ...)`); an empty
+/// `val` removes `key` instead of setting it (`IndexMap::shift_remove` to keep
+/// iteration order stable for the remaining keys).
+fn apply_override(map: &mut IndexMap<String, String>, arg: &str) -> Result<()> {
+    if !arg.starts_with("--") {
+        bail!("invalid option name {arg}");
+    }
+    let rest = &arg[2..];
+    let (key, val) = rest
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("invalid option (missing '='): {arg}"))?;
+    if val.is_empty() {
+        map.shift_remove(key);
+    } else {
+        map.insert(key.to_string(), val.to_string());
+    }
+    Ok(())
 }
