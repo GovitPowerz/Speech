@@ -2418,6 +2418,54 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   over. Full transcript (diffs, commands, exact output) in
   `.superpowers/sdd/task-11-report.md`.
 
+- **[phase4c] SMORMS3.m header mislabeled "Sum of Functions Optimizer (SFO)"**
+  (`legacy/Optimizer_V6.2.2/functions/SMORMS3.m:1-47`; ported in `src/python/speech/optimizers.py`
+  `Smorms3`): the file's entire doc-comment header (title, arXiv 1311.2115 reference, the
+  `obj = sfo(f_df, theta, subfunction_references, ...)` synopsis, "Author: Jascha Sohl-Dickstein")
+  describes the SFO quasi-Newton optimizer, but the `classdef` at `:49` is `SMORMS3 < handle` and
+  the `optimization_step` at `:324-363` implements the SMORMS3 update (`r = 1/(delta+1)`, RMS EMA,
+  `min(lrate, stepRate^2/(MMS+eps))` per-param cap), NOT SFO. The SFO scaffolding (subspace
+  `P`/`b`, Hessian banks, active-set growth) survives only as commented-out properties (`:55-146`).
+  A copy-paste-from-sfo.m header the author never rewrote; harmless (comment only) but misleading.
+  *Fix candidate:* rewrite the header to describe SMORMS3 once the optimizer zoo is settled. The
+  port's docstring names the algorithm correctly and cites the real update lines.
+
+- **[phase4c] Rprop.m dead `rand` at `:5`** (`legacy/Optimizer_V6.2.2/functions/Rprop.m:5-6`;
+  ported in `src/python/speech/optimizers.py` `rprop_step`): line 5 computes
+  `delta0 = 0.001*(0.9*rand+0.1)` (a random step-size seed), then line 6 UNCONDITIONALLY overwrites
+  it with `delta0 = 0.01`. The `rand` draw at `:5` is discarded -- its only observable effect would
+  be advancing the global RNG stream, but Rprop is a standalone leaf function that draws nothing
+  else and is called fresh each step, so the discarded draw is value-neutral. The port hard-codes
+  `delta0 = 0.01` and calls no RNG, matching the LIVE `:6` value bit-for-bit. *Fix candidate:*
+  delete the dead `:5` line after parity. **Mutation:** restoring `:5` as the live delta0 (deleting
+  `:6`) makes the init-branch `deltaweight = -sign(deriv)*delta0` random -> `rprop_sequence_bit_exact`
+  fails on step 1.
+
+- **[phase4c] Octave-compat: SMORMS3 empty-varargin lvalue cs-list miscount**
+  (`tools/octave_harness/{smorms3_f_df,stage_smorms3}.m`; the .m source `SMORMS3.m:313` is
+  UNCHANGED -- this is a harness-executor accommodation, not a source edit): `f_df_wrapper`
+  assigns `[f, df_full, theta_local_out, obj.varargin_stored{:}] = obj.f_df(...)`. When SMORMS3 is
+  constructed with no trailing varargin (`SMORMS3(f_df, theta)`), `obj.varargin_stored` is `{}` and
+  the trailing `{:}` should expand to zero lvalues -- MATLAB requests 3 outputs, but Octave 11.3.0
+  miscounts and raises `f_df: function called with too many outputs`. The smallest accommodation
+  that keeps TIER 1 (the real classdef ctor + `optimization_step` + `f_df_wrapper` + update math all
+  run unchanged): pass exactly ONE dummy varargin (`struct()`), so the cs-list is a well-defined
+  single element, and have the injected `smorms3_f_df` echo it back as a 4th output. It is
+  VALUE-NEUTRAL: the scripted gradient depends only on `eval_count`, and the update math never reads
+  the varargin. The Python port (`Smorms3`) takes no such varargin -- its `f_df(theta, eval_count)`
+  is the clean contract; the dummy exists only to work around Octave's lvalue-expansion bug in the
+  oracle. Adjudicated per the CLAUDE.md rule "the .m source stays the contract; Octave the executor".
+
+- **[phase4c] Fixed-seed determinism deviation (forward-noted for the optimizer zoo)**
+  (`src/python/speech/optimizers.py`; QuantumPSO/CMA-ES land in a later 4c task): the legacy
+  optimizer path is nondeterministic BY DESIGN (`QuantumPSO.m:91` reseeds `rand` from the wall
+  clock; no fixed seed anywhere). The port will route every stochastic draw through one injected
+  numpy `Generator` with a fixed per-run seed, preserving each operator's draw structure/order but
+  NOT bit-matching any single legacy RUN (impossible in principle). SMORMS3/Rprop themselves draw
+  no randomness (Rprop's only `rand` is the dead `:5` above), so THIS task's goldens are fully
+  deterministic; the deviation is recorded here for the stochastic optimizers to come. *Fix
+  candidate:* none -- this is a deliberate, documented divergence, not a bug to fix.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

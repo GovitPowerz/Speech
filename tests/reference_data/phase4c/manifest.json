@@ -1,0 +1,118 @@
+{
+  "text": "Phase 4c Task 6: the Octave harness foundation + the SMORMS3/Rprop bit-pins. GNU Octave executes the VENDORED legacy .m sources (legacy/Optimizer_V6.2.2/functions/{SMORMS3,Rprop}.m) to dump per-step optimizer state trajectories -- the MATLAB-side analog of the C++ oracle harness. LOCAL-ONLY dep (brew install octave); CI consumes only these committed fixtures. TIER 1 (real classdef / real function) for BOTH stages; the sole Octave accommodation is one value-neutral dummy varargin passed to SMORMS3 (the empty-cell lvalue cs-list miscount at SMORMS3.m:313; the gradient depends only on eval_count and the update math is untouched).",
+  "octave_version": "11.3.0",
+  "smorms3": {
+    "text": "SMORMS3.m per-step state (:324-363). Main run: 2-cell theta0 (3x1 vector + 2x2 matrix, M=7), 12 steps, pass-through theta_out; scripted grad_script (per-dim-distinct, step-to-step sign flips). Per-field libm status (the CROSS-LIBM rule): mms/steprate/delta/lrate are PURE arithmetic (EMA + mul + add + min/max) -> STRICT bits on every platform; theta/dtheta traverse sqrt(MMS) (a libm call, :335) -> canary-gated off the oracle env (tests/_libm_gate.py). lrate_traj proves the x10 geometric warmup (1e-9 -> 1e-1 by step 8) capped at 1e-1 (:347). Round-trip run (rt_*): f_df returns theta_out = theta + rt_offset (nonzero), pinning `theta = theta_out + dtheta` (:355) -- the update adds dtheta to the RETURNED theta, not the input. theta_final_cell{0,1} pin the column-major flat->original reconstruction (:286-303).",
+    "num_steps": 12,
+    "M": 7,
+    "rt_num_steps": 4,
+    "rt_M": 3,
+    "lrate_traj": [
+      1e-08,
+      1e-07,
+      1e-06,
+      9.999999999999999e-06,
+      9.999999999999999e-05,
+      0.001,
+      0.01,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1
+    ],
+    "shapes": {
+      "smorms3_grad_script.bin": [
+        7,
+        12
+      ],
+      "smorms3_theta0_flat.bin": [
+        7,
+        1
+      ],
+      "smorms3_theta_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_mms_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_steprate_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_delta_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_lrate_traj.bin": [
+        1,
+        12
+      ],
+      "smorms3_cost_traj.bin": [
+        1,
+        12
+      ],
+      "smorms3_theta_final_cell0.bin": [
+        3,
+        1
+      ],
+      "smorms3_theta_final_cell1.bin": [
+        2,
+        2
+      ],
+      "smorms3_rt_grad_script.bin": [
+        3,
+        4
+      ],
+      "smorms3_rt_theta0_flat.bin": [
+        3,
+        1
+      ],
+      "smorms3_rt_offset.bin": [
+        3,
+        1
+      ],
+      "smorms3_rt_theta_traj.bin": [
+        3,
+        4
+      ]
+    }
+  },
+  "rprop": {
+    "text": "Rprop.m (iRPROP-, 38 LOC) per-step state over a crafted 5-weight x 6-step derivative/cost sequence. etap 1.2 / etam 0.5 / delta0 0.01 (the :5 rand is DEAD -- overwritten at :6, see IMPROVEMENTS) / deltamin 1e-9 / deltamax 1.0. All branches exercised: same-sign delta*=etap grow (delta_traj max 0.020736 = 0.01*1.2^4), sign-flip delta*=etam shrink (delta_traj min 0.0025 = 0.01*0.5^2) + the cost-gated backtrack (prev_cost<cost) + derivative-zeroing (derivout has 0 where deriv_script was nonzero), and the plain ==0 step. PURE arithmetic (sign, min/max, mul, add -- no libm) -> STRICT bits on every platform.",
+    "N": 5,
+    "K": 6,
+    "shapes": {
+      "rprop_deriv_script.bin": [
+        5,
+        6
+      ],
+      "rprop_cost_script.bin": [
+        1,
+        6
+      ],
+      "rprop_weights0.bin": [
+        5,
+        1
+      ],
+      "rprop_weights_traj.bin": [
+        5,
+        6
+      ],
+      "rprop_delta_traj.bin": [
+        5,
+        6
+      ],
+      "rprop_deltaweight_traj.bin": [
+        5,
+        6
+      ],
+      "rprop_derivout_traj.bin": [
+        5,
+        6
+      ]
+    }
+  }
+}
