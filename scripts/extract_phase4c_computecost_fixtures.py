@@ -17,9 +17,13 @@ with real MATLAB semantics (sortrows stable-ascending, median, hist center-binni
 ddof=1, cumsum, exp/log). The port must match.
 
 STRICT (pure arithmetic, bit-exact everywhere): agg (sortrows), avg (col0/max(1,col1)),
-l2, pooled mean/nb, and the crafted integer balance 0/3/4/5. CANARY-gated (libm-bearing,
-see tests/_libm_gate.py): pooled std (sqrt), the balance-10 LID calibration
-(hist/cumsum/std/exp/log), and the committed-fixture realistic cases.
+l2, pooled mean/nb, the crafted integer balance 0/3/4/5, and every cpu_mean (median) golden.
+CANARY-gated (libm-bearing, see tests/_libm_gate.py): pooled std (sqrt), the balance-10 LID
+calibration (hist/cumsum/std/exp/log) including the b10c zero-zero interior-cutoff variant
+(:571-572), the committed-fixture realistic cases, and the 4 fractional-mean cost scalars
+measured 0-ULP-exact on the oracle env. ALWAYS-TOLERANT `close` (not libm-gated -- see
+IMPROVEMENTS for why): the 3 fractional-mean cost scalars measured genuinely 1-ULP-off Octave
+(an extended-precision accumulation gap in Octave's mean/sum, not summation order or libm).
 
 GNU Octave is a LOCAL-ONLY dep (brew install octave); CI consumes only these committed
 fixtures. Running this extractor TWICE yields byte-identical committed output; a
@@ -80,11 +84,14 @@ VARS = [
     # crafted balance-10 3-class else branch (CANARY)
     "b10b_mcr",
     "b10b_error", "b10b_cost", "b10b_nnseg", "b10b_cpumean", "b10b_nnlid", "b10b_cutoff",
+    # crafted balance-10 2-class ZERO-ZERO interior-cutoff branch, :571-572 (CANARY)
+    "b10c_mcr",
+    "b10c_error", "b10c_cost", "b10c_nnseg", "b10c_cpumean", "b10c_nnlid", "b10c_cutoff",
 ]
 
 STAGE_LINE_RE = re.compile(
     r"^OCTAVE_STAGE computecost cb0=(?P<cb0>\S+) cb5=(?P<cb5>\S+) b10a=(?P<b10a>\S+) "
-    r"b10b=(?P<b10b>\S+) agg_rows=(?P<agg>\d+) pool_nb=(?P<pool>\d+)$",
+    r"b10b=(?P<b10b>\S+) b10c=(?P<b10c>\S+) agg_rows=(?P<agg>\d+) pool_nb=(?P<pool>\d+)$",
     re.MULTILINE,
 )
 
@@ -209,6 +216,12 @@ def main() -> None:
         _, _, cutb = _read_bin(tmp_dir / "computecost_b10b_cutoff.bin")
         if float(cutb[0, 0]) != -1.0:
             raise SystemExit(f"b10b cutoff sentinel {float(cutb[0, 0])} != -1 (else branch not taken)")
+        # balance-10 2-class ZERO-ZERO interior cutoff (:571-572): the crafted gap puts the
+        # midpoint-of-nearest-edges result around 45, far from the plain argmin position (~10,
+        # the first bin of the zero-zero plateau) a reverted/un-guarded branch would emit instead.
+        _, _, cutc = _read_bin(tmp_dir / "computecost_b10c_cutoff.bin")
+        if not (30.0 < float(cutc[0, 0]) < 60.0):
+            raise SystemExit(f"b10c cutoff {float(cutc[0, 0])} not in the expected interior-midpoint band -- the zero-zero branch is vacuous")
 
         # Regression guard.
         after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
@@ -225,15 +238,21 @@ def main() -> None:
                 "VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:285-652: sortrows "
                 "[1 2 3] aggregation, deriv averaging col0/max(1,col1), pooled input stats, L2, and the balance-law "
                 "0/3/4/5/10 error + cost) over the committed phase4a/4b MultiConfigResults fixtures + crafted "
-                "per-balance variants. ComputeCost.m's top half shells out to the engine (system RunFsp) and cannot "
-                "run in Octave, and its !-escape cleaning (:37) deletes pre-injected worker files, so no injection "
-                "point leaves the vendored .m unmodified; the transcription is line-for-line with `% legacy:` "
-                "provenance and Octave executes the real MATLAB semantics (sortrows stable-ascending, median, hist "
-                "center-binning, std ddof=1, cumsum, exp/log). Column schema (Error_vad = MCR(:,4:end), 1-based): "
-                "1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 15 LID-num, 16 flag, 17:end-2 per-class "
+                "per-balance variants, including a b10c variant crafted so the balance-10 zero-zero interior-cutoff "
+                "midpoint branch (:571-572) fires. ComputeCost.m's top half shells out to the engine (system RunFsp) "
+                "and cannot run in Octave, and its !-escape cleaning (:37) deletes pre-injected worker files, so no "
+                "injection point leaves the vendored .m unmodified; the transcription is line-for-line with "
+                "`% legacy:` provenance and Octave executes the real MATLAB semantics (sortrows stable-ascending, "
+                "median, hist center-binning, std ddof=1, cumsum, exp/log). Column schema (Error_vad = MCR(:,4:end), "
+                "1-based): 1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 15 LID-num, 16 flag, 17:end-2 per-class "
                 "(>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: agg/avg/l2/pooled-mean/crafted-integer "
-                "balance 0/3/4/5. CANARY (tests/_libm_gate.py): pooled std (sqrt), balance-10 (hist/std/exp/log), "
-                "committed-fixture realistic cases."
+                "balance 0/3/4/5, and every cpu_mean (median) golden -- measured bit-exact numpy-vs-Octave in all 9 "
+                "cases, `median` being a single sort + at-most-one `/2`, not a multi-term reduction. CANARY "
+                "(tests/_libm_gate.py): pooled std (sqrt), balance-10 (hist/std/exp/log), committed-fixture "
+                "realistic cases, plus the 4 `mean`/`mean(.^2)` cost scalars measured 0-ULP-exact on the oracle env "
+                "(tier2_b0/tier2_b5/b10b/b10c). CLOSE (always-tolerant, not libm-gated): the `mean`/`mean(.^2)` cost "
+                "scalars measured genuinely 1-ULP-off Octave even on the oracle env (cb3/cb4/b10a) -- Octave "
+                "accumulates mean/sum in extended precision, not a libm or summation-order split; see IMPROVEMENTS."
             ),
             "tier": "fallback (stage-local transcription of ComputeCost.m:285-652)",
             "octave_version": octave_version,
@@ -245,36 +264,49 @@ def main() -> None:
                 "cb5_cost": float(sm["cb5"]),
                 "b10a_cost": float(sm["b10a"]),
                 "b10b_cost": float(sm["b10b"]),
+                "b10c_cost": float(sm["b10c"]),
                 "b10a_cutoff": float(cut[0, 0]),
+                "b10c_cutoff": float(cutc[0, 0]),
             },
             # Three comparators (see the test):
             #   strict -- bit-exact on every platform (pure arithmetic; single-op /100; the
-            #             per-file ERROR vectors + integer-error `mean` costs cb0/cb5).
+            #             per-file ERROR vectors, the integer-error `mean` costs cb0/cb5, and
+            #             every cpu_mean median -- a single sort + at-most-one /2, no multi-term
+            #             reduction for numpy/Octave to disagree over).
             #   canary -- bit-exact on the oracle libm, hybrid ULP/abs elsewhere (a libm
             #             transcendental or sqrt in the chain: pooled std, balance-10 exp/log
-            #             error vectors, the realistic committed-fixture element-wise errors).
-            #   close  -- always a tight hybrid ULP/abs bound, EVEN on the oracle env: a `mean`/
-            #             `mean(.^2)` reduction over FRACTIONAL errors differs numpy-vs-Octave by
-            #             ~1 ULP by summation order (NOT libm), so exact-on-oracle is unattainable.
+            #             error vectors, the realistic committed-fixture element-wise errors, and
+            #             the 4 fractional-mean cost scalars measured 0-ULP-exact on the oracle
+            #             env: tier2_b0/tier2_b5/b10b/b10c).
+            #   close  -- always a tight hybrid ULP/abs bound, EVEN on the oracle env: cb3/cb4/b10a
+            #             measure a genuine 1 ULP gap between numpy's `mean`/`mean(.^2)` and
+            #             Octave's, that PERSISTS when the numpy reduction is replaced by a plain
+            #             sequential Python loop (ruling out summation order -- order is invariant
+            #             in f64 at these small n). The cause is Octave's mean/sum accumulating in
+            #             EXTENDED precision (x87/long-double internals), which no f64 loop order
+            #             can reproduce; see the IMPROVEMENTS entry for the measured evidence table.
             "strict": [
                 "computecost_agg_out.bin", "computecost_avg_out.bin", "computecost_l2_cost.bin",
                 "computecost_l2_grad.bin", "computecost_pool_out_nb.bin", "computecost_pool_out_mean.bin",
-                "computecost_cb0_error.bin", "computecost_cb0_cost.bin", "computecost_cb0_nnseg.bin",
-                "computecost_cb3_error.bin", "computecost_cb3_nnseg.bin",
-                "computecost_cb4_error.bin", "computecost_cb4_nnseg.bin",
-                "computecost_cb5_error.bin", "computecost_cb5_cost.bin", "computecost_cb5_nnseg.bin",
+                "computecost_cb0_error.bin", "computecost_cb0_cost.bin", "computecost_cb0_nnseg.bin", "computecost_cb0_cpumean.bin",
+                "computecost_cb3_error.bin", "computecost_cb3_nnseg.bin", "computecost_cb3_cpumean.bin",
+                "computecost_cb4_error.bin", "computecost_cb4_nnseg.bin", "computecost_cb4_cpumean.bin",
+                "computecost_cb5_error.bin", "computecost_cb5_cost.bin", "computecost_cb5_nnseg.bin", "computecost_cb5_cpumean.bin",
+                "computecost_tier2_b0_cpumean.bin", "computecost_tier2_b5_cpumean.bin",
+                "computecost_b10a_cpumean.bin", "computecost_b10b_cpumean.bin", "computecost_b10c_cpumean.bin",
             ],
             "canary": [
                 "computecost_pool_out_std.bin",
-                "computecost_tier2_b0_error.bin", "computecost_tier2_b5_error.bin",
+                "computecost_tier2_b0_error.bin", "computecost_tier2_b0_cost.bin",
+                "computecost_tier2_b5_error.bin", "computecost_tier2_b5_cost.bin",
                 "computecost_twin_nnseg.bin", "computecost_twin_nnlid.bin",
                 "computecost_b10a_error.bin", "computecost_b10a_cutoff.bin", "computecost_b10a_nnlid.bin",
-                "computecost_b10b_error.bin",
+                "computecost_b10b_error.bin", "computecost_b10b_cost.bin",
+                "computecost_b10c_error.bin", "computecost_b10c_cost.bin",
+                "computecost_b10c_cutoff.bin", "computecost_b10c_nnlid.bin",
             ],
             "close": [
-                "computecost_cb3_cost.bin", "computecost_cb4_cost.bin",
-                "computecost_tier2_b0_cost.bin", "computecost_tier2_b5_cost.bin",
-                "computecost_b10a_cost.bin", "computecost_b10b_cost.bin",
+                "computecost_cb3_cost.bin", "computecost_cb4_cost.bin", "computecost_b10a_cost.bin",
             ],
             "shapes": shapes,
         }

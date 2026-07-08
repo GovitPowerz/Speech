@@ -2573,16 +2573,74 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`test_balance_3_vs_4_over90_saturation` + the extractor's non-vacuity guard).
 
 - **[phase4c] The fractional-error `mean`/`mean(.^2)` cost scalars need an always-tolerant
-  comparator (`close`), NOT the oracle-exact libm canary** (`engine.py::compute_cost` `:626-651`
-  balance cost; `tests/test_phase4c_engine_cost.py::_assert_close_always`): the per-file ERROR
-  vectors are bit-exact numpy-vs-Octave (single-op `/100`), but averaging FRACTIONAL errors
-  (cb3/cb4/tier2/balance-10) diverges by ~1 ULP by SUMMATION ORDER -- a numpy-`mean`-vs-Octave-
-  `mean` reduction difference that persists EVEN on the oracle libm env (it is not a
-  transcendental split), so `assert_f64_close` (exact-on-oracle) cannot pin it. The `close` class
-  applies a tight hybrid `<=4 ULP or 512*2^-52*max(|want|,1)` bound on every platform. cb0/cb5
-  (INTEGER-error means, exact `/n`) stay STRICT. *Pinned by:* the `close`-classified goldens in
-  the manifest. *Mutation:* classifying cb3_cost as `canary` (as first drafted) fails on the
-  oracle env -- the reduction gap survives the libm gate.
+  comparator (`close`), NOT the oracle-exact libm canary -- and NOT because of summation order**
+  (`engine.py::compute_cost` `:626-651` balance cost; `tests/test_phase4c_engine_cost.py::
+  _assert_close_always`). Originally misdiagnosed as a numpy-pairwise-vs-Octave-sequential
+  summation-order difference; a review pass (empirical) found that diagnosis wrong: a plain
+  sequential Python loop (`s=0.0; for v in x: s+=v; s/len(x)`) reproduces `np.mean`'s bit pattern
+  EXACTLY on every case below, so the residual cannot be reduction order (order is invariant in
+  IEEE double at these `n`, and numpy's pairwise summation only diverges from sequential at much
+  larger `n` than these 3-4-element vectors anyway). The real cause is that Octave accumulates
+  `mean`/`sum` internally in EXTENDED precision (x87 80-bit / long-double on this toolchain), so
+  its result can land 1 ULP away from ANY double-precision loop-order variant -- a gap that is
+  LOOP-ORDER-INVARIANT in double and therefore genuinely unfixable by "port the summation order
+  more faithfully" (the repo's usual ascending-loop-vs-numpy-pairwise fix for this class of gap
+  does not apply here). A tolerant bound is the correct and only remedy.
+
+  Evidence (measured on the oracle env; `np.mean(x) == seq_mean(x)` bit-for-bit in every row,
+  yet both differ from Octave by 1 ULP on 3 of 8 cases):
+
+  | golden | np.mean | sequential-loop mean | == np.mean? | Octave | ULP(np vs Octave) |
+  |---|---|---|---|---|---|
+  | cb0_cost | 102.66666666666667 | 102.66666666666667 | yes | 102.66666666666667 | 0 |
+  | cb5_cost | 45.0 | 45.0 | yes | 45.0 | 0 |
+  | cb3_cost | 0.4833333333333334 | 0.4833333333333334 | yes | 0.48333333333333334 | 1 |
+  | cb4_cost | 0.5666666666666668 | 0.5666666666666668 | yes | 0.5666666666666667 | 1 |
+  | tier2_b0_cost | 84.0967032967033 | 84.0967032967033 | yes | 84.0967032967033 | 0 |
+  | tier2_b5_cost | 36.78 | 36.78 | yes | 36.78 | 0 |
+  | b10a_cost | 3.6027306048400947 | 3.6027306048400947 | yes | 3.602730604840095 | 1 |
+  | b10b_cost | 2.8405808008508533 | 2.8405808008508533 | yes | 2.8405808008508533 | 0 |
+
+  cb0/cb5 (INTEGER-error means, exact `/n`, no accumulated rounding to disagree about) and the
+  3 goldens measuring 0 ULP above (tier2_b0/tier2_b5/b10b) are promoted to the oracle-exact
+  `canary` comparator; only the genuinely 1-ULP-off cases (cb3/cb4/b10a) stay `close`
+  (always-tolerant `<=4 ULP or 512*2^-52*max(|want|,1)`, applied on every platform including the
+  oracle env, since the gap is not a libm split `canary` could gate on). *Pinned by:* the
+  `close`/`canary`-classified goldens in the manifest. *Mutation:* classifying cb3_cost as
+  `canary` (as first drafted) fails on the oracle env -- the extended-precision gap survives the
+  libm gate, because it was never a libm gate in the first place.
+
+- **[phase4c] The 8 `computecost_*_cpumean.bin` goldens were dumped but never asserted** (review
+  follow-up to Task 9): `ComputeCost.m:432-436`'s `cpu_mean = median(Error_vad(:,4))` term feeds
+  balances 0/3/4/5/10 (`engine.py::compute_cost`'s `cpu_term`/`error` formulas), and the extractor
+  already dumped a `cpumean` golden alongside every `error`/`cost`/`nnseg` group, but no test read
+  them back -- pure dead pinning. Now asserted in every balance-law test via `bd.cpu_mean` against
+  `computecost_<group>_cpumean.bin`. All 9 cases (cb0/3/4/5, tier2_b0/b5, b10a/b10b/b10c) measure
+  bit-exact numpy-vs-Octave (`np.median` vs Octave `median`) and are classified STRICT: `median` is
+  a single sort + at-most-one `/2` on already-materialized values, not a multi-term reduction, so
+  it never exhibits the extended-precision accumulation gap the `mean`/`mean(.^2)` cost scalars
+  above do. *Pinned by:* the `_cpumean` assertions added to `test_balance_crafted`,
+  `test_balance_tier2_committed`, `test_balance10_two_class_cutoff_search`,
+  `test_balance10_three_class_else_branch`, `test_balance10_two_class_zero_zero_interior_cutoff`.
+
+- **[phase4c] The balance-10 zero-zero interior-cutoff branch (`ComputeCost.m:571-572`) was
+  transcribed but unpinned** (review follow-up to Task 9): `_balance10_cutoff`'s
+  `if n[pos]==0 and n2[pos]==0: cutoff = (centers[first_n]+centers[last_n2])/2` branch fires only
+  when the two per-class score CDFs (`n` ascending, `n2` descending) leave an interior span of the
+  0-99.99 hist grid where BOTH are identically zero -- i.e. the class-1-fired and class-2-fired
+  score clusters are cleanly separated with a gap between them, so the plain `argmin(|n-n2|)`
+  position lands in a flat zero-zero plateau rather than on a genuine crossing, and the code
+  instead bridges the gap by taking the midpoint of the two clusters' nearest edges. Neither b10a
+  (crossing inside an overlapping plateau, both curves at 50) nor b10b (>2-class else branch, no
+  `n`/`n2` at all) exercises it. Added a crafted 2-class case (`b10c`: class-1-fired scores
+  ~290/295 -> `tmp2` max 10; class-2-fired scores ~280/285 -> `tmp` min 80, leaving the zero-zero
+  span `(10,80)`) that lands the branch's midpoint cutoff at 44.995 -- bit-exact Python vs Octave,
+  and far from the ~10.005 a reverted/un-guarded `cutoff = t(pos)` branch would emit instead (the
+  first bin of the zero-zero plateau, since `argmin`/Octave `min` both return the first minimum).
+  *Pinned by:* `test_balance10_two_class_zero_zero_interior_cutoff` (`tests/
+  test_phase4c_engine_cost.py`); the extractor's non-vacuity guard SystemExits if `b10c_cutoff`
+  falls outside `(30, 60)`. *Mutation:* deleting the `if` guard (always taking `cutoff = t(pos)`)
+  would move b10c's cutoff to ~10.005, failing both the golden compare and the `(30, 60)` band.
 
 ## Toolchain deviations
 

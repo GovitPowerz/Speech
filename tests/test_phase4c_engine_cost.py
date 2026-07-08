@@ -9,13 +9,21 @@ group pins the Python port (`speech.engine`) against Octave's real MATLAB semant
 (sortrows stable-ascending, median, hist center-binning, std ddof=1, cumsum, exp/log):
 
   * aggregate_workers (sortrows [1 2 3]), average_derivs (col0/max(1,count)), l2_penalty,
-    pooled mean/nb, and the crafted-integer balance 0/3/4/5 -> STRICT (bit-exact).
-  * pooled std (sqrt), the balance-10 LID calibration, the committed-fixture realistic
-    cases, and the fractional-error `mean` cost scalars (cb3/cb4) -> CANARY (the hybrid
-    ULP-or-scaled-abs comparator, `tests/_libm_gate.py`; the manifest's `canary` list).
+    pooled mean/nb, the crafted-integer balance 0/3/4/5, and every cpu_mean (median) golden
+    -> STRICT (bit-exact; median is a single sort + at-most-one /2, not a multi-term
+    reduction, so it never picks up the `close` group's accumulation gap below).
+  * pooled std (sqrt), the balance-10 LID calibration (incl. the b10c zero-zero
+    interior-cutoff variant, :571-572), the committed-fixture realistic cases, and the
+    fractional-`mean` cost scalars measured 0-ULP-exact on the oracle env
+    (tier2_b0/tier2_b5/b10b/b10c) -> CANARY (the hybrid ULP-or-scaled-abs comparator,
+    `tests/_libm_gate.py`; the manifest's `canary` list).
+  * the fractional-`mean` cost scalars measured genuinely 1-ULP-off Octave even on the
+    oracle env (cb3/cb4/b10a) -> CLOSE (`_assert_close_always` below; NOT libm-gated,
+    since the gap is not a libm split -- see that function's docstring and the
+    IMPROVEMENTS entry for the measured evidence).
 
-The manifest's `strict`/`canary` lists are the single source of truth for which comparator
-each `.bin` gets.
+The manifest's `strict`/`canary`/`close` lists are the single source of truth for which
+comparator each `.bin` gets.
 """
 
 from __future__ import annotations
@@ -54,9 +62,15 @@ CLOSE: set[str] = set(cast(list[str], MANIFEST["close"]))
 def _assert_close_always(got: float, want: float, label: str) -> None:
     """A tight hybrid ULP-or-scaled-abs bound applied on EVERY platform (unlike
     `assert_f64_close`, which is exact on the oracle libm). For a `mean`/`mean(.^2)`
-    reduction over fractional errors, numpy and Octave disagree by ~1 ULP by summation
-    order regardless of libm, so exact-on-oracle is unattainable -- but the gap is bounded
-    the same way a libm gap would be: <=4 f64 ULP or abs <= 512*2^-52*max(|want|,1)."""
+    reduction over fractional errors (cb3/cb4/b10a), numpy and Octave disagree by exactly
+    1 ULP regardless of libm -- and NOT because of summation order: a plain sequential
+    Python loop (`s=0.0; for v in x: s+=v; s/len(x)`) reproduces `np.mean`'s bit pattern
+    exactly for these small vectors (order is invariant in f64 at this n), yet still
+    differs from Octave by 1 ULP. The real cause is that Octave accumulates `mean`/`sum`
+    internally in EXTENDED precision (x87/long-double), a gap no f64 loop order can close,
+    so exact-on-oracle is unattainable -- but the gap is bounded the same way a libm gap
+    would be: <=4 f64 ULP or abs <= 512*2^-52*max(|want|,1). See the IMPROVEMENTS entry for
+    the measured evidence table (numpy == sequential-loop, both != Octave, on every case)."""
     assert math.isfinite(got) and math.isfinite(want), f"{label}: non-finite {got!r} {want!r}"
     a = int(np.float64(got).view(np.int64))
     b = int(np.float64(want).view(np.int64))
@@ -162,6 +176,7 @@ def test_balance_crafted(balance: int) -> None:
     _assert_against(bd.error, f"cb{balance}_error")
     _assert_against(cost, f"cb{balance}_cost")
     _assert_against(bd.nn_cost_seg, f"cb{balance}_nnseg")
+    _assert_against(bd.cpu_mean, f"cb{balance}_cpumean")
 
 
 def test_balance_3_vs_4_over90_saturation() -> None:
@@ -183,6 +198,7 @@ def test_balance_tier2_committed(balance: int) -> None:
     cost, bd = compute_cost(mcr, 1, balance, params)
     _assert_against(bd.error, f"tier2_b{balance}_error")
     _assert_against(cost, f"tier2_b{balance}_cost")
+    _assert_against(bd.cpu_mean, f"tier2_b{balance}_cpumean")
 
 
 # ==== balance 10 (LID calibration) ========================================================
@@ -195,6 +211,7 @@ def test_balance10_two_class_cutoff_search() -> None:
     _assert_against(bd.error, "b10a_error")
     _assert_against(cost, "b10a_cost")
     _assert_against(bd.nn_cost_lid, "b10a_nnlid")
+    _assert_against(bd.cpu_mean, "b10a_cpumean")
     # Mutation guard: the hist cutoff search landed a finite interior cutoff (not clamped).
     assert 0.1 < bd.cutoff < 99.9
 
@@ -205,6 +222,27 @@ def test_balance10_three_class_else_branch() -> None:
     assert bd.cutoff is None
     _assert_against(bd.error, "b10b_error")
     _assert_against(cost, "b10b_cost")
+    _assert_against(bd.cpu_mean, "b10b_cpumean")
+
+
+def test_balance10_two_class_zero_zero_interior_cutoff() -> None:
+    """The `(n(pos)==0)&&(n2(pos)==0)` midpoint branch (ComputeCost.m:571-572): b10c is
+    crafted so class-1-fired scores (~290/295) and class-2-fired scores (~280/285) leave a
+    wide interior span of the hist grid where BOTH cumulative curves are identically zero,
+    so argmin(|n-n2|) alone is not enough -- the branch instead takes the midpoint between
+    the nearest edges of the two distributions."""
+    cost, bd = compute_cost(_cc("b10c_mcr"), 1, 10, CostParams(mode=0, algo=6))
+    assert bd.cutoff is not None
+    _assert_against(bd.cutoff, "b10c_cutoff")
+    _assert_against(bd.error, "b10c_error")
+    _assert_against(cost, "b10c_cost")
+    _assert_against(bd.nn_cost_lid, "b10c_nnlid")
+    _assert_against(bd.cpu_mean, "b10c_cpumean")
+    # Mutation guard: the interior-midpoint branch lands near 45 (the midpoint between the
+    # two clusters' nearest edges, ~10 and ~80). Reverting to the plain `cutoff = t(pos)`
+    # argmin branch would instead land at the FIRST bin of the zero-zero plateau (~10.005) --
+    # far outside this band.
+    assert 30.0 < bd.cutoff < 60.0
 
 
 def test_twin_committed_nn_costs() -> None:

@@ -141,10 +141,35 @@ function stage_computecost(out_dir)
   R.b10b_mcr = b10b_mcr;
   [R.b10b_error, R.b10b_cost, R.b10b_nnseg, R.b10b_cpumean, R.b10b_nnlid, R.b10b_cutoff] = balance10_cost(b10b_mcr, 1, 0);
 
+  % ---- Crafted 2-class balance-10, ZERO-ZERO INTERIOR CUTOFF branch (:571-572; canary) --
+  % Unlike b10a (where argmin(|n-n2|) lands on a nonzero plateau where the two class-score
+  % CDFs overlap), here class-1-fired scores (~290/295) and class-2-fired scores (~280/285)
+  % are constructed so n's rising edge (min tmp = 80) sits STRICTLY ABOVE n2's falling edge
+  % (max tmp2 = 10): the histogram grid has a wide interior span (10,80) where BOTH n and n2
+  % are identically 0, so `(n(pos)==0)&&(n2(pos)==0)` fires and the midpoint-of-nearest-edges
+  % branch (`cutoff = (t(first nonzero n)+t(last nonzero n2))/2`) computes the cutoff instead
+  % of the plain `cutoff = t(pos)` argmin branch.
+  b10c_ev = zeros(4, 20);
+  b10c_ev(:, 1) = [10; 20; 30; 40];    % Pfa (unused by balance 10 error)
+  b10c_ev(:, 2) = [5; 6; 7; 8];        % Pmiss
+  b10c_ev(:, 3) = [90; 80; 70; 60];    % 100-success
+  b10c_ev(:, 4) = [5; 5; 5; 5];        % cpu
+  b10c_ev(:, 5) = [12; 8; 20; 4];      % seg-num
+  b10c_ev(:, 15) = [50; 40; 30; 20];   % LID-num
+  b10c_ev(:, 16) = [0; 0; 0; 0];       % flag (recomputed inside)
+  b10c_ev(:, 17) = [290; 295; 30; 35]; % class 1 (files 1,2 fired: tmp2 = 10, 5)
+  b10c_ev(:, 18) = [20; 25; 280; 285]; % class 2 (files 3,4 fired: tmp = 80, 85)
+  b10c_ev(:, 19) = [100; 100; 100; 100]; % LID-denom
+  b10c_ev(:, 20) = [150; 150; 150; 150]; % seg-denom
+  b10c_id = [(1:4)', ones(4, 1), ones(4, 1)];
+  b10c_mcr = [b10c_id, b10c_ev];
+  R.b10c_mcr = b10c_mcr;
+  [R.b10c_error, R.b10c_cost, R.b10c_nnseg, R.b10c_cpumean, R.b10c_nnlid, R.b10c_cutoff] = balance10_cost(b10c_mcr, 1, 0);
+
   save('-v7', fullfile(out_dir, 'computecost.mat'), '-struct', 'R');
 
-  printf('OCTAVE_STAGE computecost cb0=%g cb5=%g b10a=%g b10b=%g agg_rows=%d pool_nb=%d\n', ...
-         R.cb0_cost, R.cb5_cost, R.b10a_cost, R.b10b_cost, size(agg_out, 1), pnb);
+  printf('OCTAVE_STAGE computecost cb0=%g cb5=%g b10a=%g b10b=%g b10c=%g agg_rows=%d pool_nb=%d\n', ...
+         R.cb0_cost, R.cb5_cost, R.b10a_cost, R.b10b_cost, R.b10c_cost, size(agg_out, 1), pnb);
 end
 
 
