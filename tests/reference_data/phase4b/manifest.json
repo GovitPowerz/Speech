@@ -1610,6 +1610,175 @@
       }
     }
   },
+  "corpus_lid": {
+    "text": "Task 9: corpus-level LID goldens. UNLIKE the tier-2 CorpusProbe (reimpl-swapped FFB), every per-file getSegmentation here is the REAL COMPILED driver: the configs use TINY nets (every GEMM reduction dim < 23, the nn_product_probes boundary), so the real Eigen engine and the ascending-loop Rust port agree bit-for-bit on the oracle env (libm-bearing values canary-gated off it). Only the corpus loop + SegmentationFunction row assembly + saveAndUpdate are transcribed, with the REAL saveWeights/saveWeightsLID/updateWeights/updateWeightsLID (real Rprop, both nets) and the REAL PrintConfusionMatrix. twin_train: Mode-7 phSeq 2-file corpus, 3 epochs, BOTH nets' post-saveAndUpdate weights dumped per epoch; the algo-6 criterion (cost+costLID) trajectory measured (fired/skipped). The SAD net never forwards in Mode 7 -> its derivs stay a zero Nx2 -> updateWeights normalizes 0/0 = NaN per element -> Rprop's else-branch applies +delta per weight row per epoch (the stats-tail rows, count 1, stay put): the SAD epoch dumps pin exactly this NaN-drift semantics. twin_train_ns: rising threshold 11 > the constant-10 Mode-7 result_vec -> NO speech -> saveAndUpdate:465 forces costLID = -1.0 into EVERY updateWeightsLID (the LIVE gate); twin_train_nsx is the same run with the gate DISABLED (counterfactual) -- the two LID trajectories diverge at ns_gate_diverge_epoch (a port that dropped the gate would reproduce nsx, not ns). twin_e2e: the REAL CorpusProcessor(-m).run() at epochs 0 -> the twin_e2e_<var>.bin value fixtures for the spawned-binary e2e (timing col masked). twin_gradcheck: Mode-5 wav 1-file corpus, BOTH nets backprop-active -> the per-network cost-column switch (ii=0 SAD cols 4/len-1, ii=1 LID cols 14/len-2) golden per net; lid5_gradcheck: Algo 5, cols 14/len-2. SQUARE cost laws -> the gradcheck goldens are strict-bits everywhere. Each gradcheck .bin is (sweep+1) x 3: rows 0..sweep-1 = [analytic_col0, analytic_col1, numerical]; final row [mean_error, mean_relative_error, 0].",
+    "measured": {
+      "seeds": {
+        "sad_nb_weights": 537,
+        "lid_nb_weights": 1093
+      },
+      "train": {
+        "twin_train": {
+          "epochs": 8,
+          "gate_fired": 5,
+          "gate_skipped": 2,
+          "lid_epochs_differing": 7,
+          "best_cost": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10889047764217685,
+            0.10889047764217685
+          ],
+          "cost_lid": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.16117503289495358,
+            0.10889047764217685,
+            0.11586497565554843
+          ],
+          "total_speech_duration": [
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975
+          ],
+          "error_perc_lid": [
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0
+          ]
+        },
+        "twin_train_ns": {
+          "epochs": 8,
+          "gate_fired": 4,
+          "gate_skipped": 3,
+          "lid_epochs_differing": 7,
+          "best_cost": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10917422315437127
+          ],
+          "cost_lid": [
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "total_speech_duration": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "error_perc_lid": [
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0
+          ]
+        },
+        "twin_train_nsx": {
+          "epochs": 8,
+          "gate_fired": 5,
+          "gate_skipped": 2,
+          "lid_epochs_differing": 7,
+          "best_cost": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10889047764217685,
+            0.10889047764217685
+          ],
+          "cost_lid": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.16117503289495358,
+            0.10889047764217685,
+            0.11586497565554843
+          ],
+          "total_speech_duration": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "error_perc_lid": [
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0
+          ]
+        }
+      },
+      "ns_gate_diverge_epoch": 5,
+      "gradcheck": {
+        "twin_net0": {
+          "sweep": 10,
+          "mean_error": 2.425475e-12,
+          "mean_relative_error": 3.690437e-09
+        },
+        "twin_net1": {
+          "sweep": 10,
+          "mean_error": 7.756033e-13,
+          "mean_relative_error": 1.383881e-09
+        },
+        "lid5_net0": {
+          "sweep": 10,
+          "mean_error": 0.0008888687,
+          "mean_relative_error": 0.1911849
+        }
+      },
+      "gradcheck_max_weights": 10,
+      "epsilon": 1e-05
+    }
+  },
   "dead_code_not_ported": {
     "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
   }

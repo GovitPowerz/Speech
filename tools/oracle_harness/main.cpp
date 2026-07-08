@@ -2459,6 +2459,12 @@ int main(int argc, char** argv) {
     // + the corpus_lid wavs). Empty -> the Twin stage is skipped.
     std::string twinConfigDir = (argc > 18) ? std::string(argv[18]) : std::string("");
 
+    // Phase 4b Task 9: corpus-level LID workdir (a FIXED path seeded by the extractor
+    // with twin_train/twin_train_ns/twin_e2e/twin_gradcheck/lid5_gradcheck.config +
+    // the phSeq/wav corpora + listings + mapping). The stage chdir's into it (tier1
+    // convention). Empty -> skipped.
+    std::string lidT9Workdir = (argc > 19) ? std::string(argv[19]) : std::string("");
+
     int dumps = 0;
 
     // --- Audio stages ---------------------------------------------------------
@@ -10989,6 +10995,438 @@ int main(int argc, char** argv) {
             dumps += 1;
             std::cout << "PHASE4B_MODE7 dump matNb=" << cnt << " lidWs=" << lidWs << "\n";
         }
+    }
+
+    // =====================================================================
+    // --- Phase 4b Task 9: corpus-level LID stages ------------------------
+    // twin_train / twin_train_ns (+ its no-gate counterfactual) / twin_e2e /
+    // twin_gradcheck / lid5_gradcheck. UNLIKE the tier-2 CorpusProbe (which
+    // reimpl-swapped the 33k-net FFB), every per-file getSegmentation here is
+    // the REAL COMPILED driver: the configs use TINY nets (every GEMM
+    // reduction dim < 23, the manifest nn_product_probes boundary), so the
+    // real Eigen engine and the ascending-loop Rust port agree bit-for-bit on
+    // the oracle machine (libm-bearing values canary-gated off it). Only the
+    // corpus loop (CorpusProcessor.cpp:83-235 train / :237-340 gradCheck) and
+    // BagOfProcessors::SegmentationFunction's row assembly (:312-351) +
+    // saveAndUpdate (:409-471) are transcribed -- with the REAL
+    // saveWeights/saveWeightsLID/updateWeights/updateWeightsLID (real Rprop)
+    // and the REAL PrintConfusionMatrix doing the actual work.
+    if (!lidT9Workdir.empty()) {
+        char t9OrigCwd[4096];
+        if (!getcwd(t9OrigCwd, sizeof(t9OrigCwd))) { std::cerr << "phase4b_t9: getcwd failed\n"; return 1; }
+        if (chdir(lidT9Workdir.c_str()) != 0) { std::cerr << "phase4b_t9: chdir " << lidT9Workdir << " failed\n"; return 1; }
+
+        auto synthFlatT9 = [](long n) {
+            Eigen::VectorXd v(n);
+            for (long k = 0; k < n; ++k) v(k) = ((double)((k * 11 + 3) % 97)) / 97.0 - 0.5;
+            return v;
+        };
+
+        // --- Seed generation (BEFORE any probe ctor: the configs' weightsFile
+        // keys point at these workdir files). synthFlat = the phase3 pattern,
+        // deterministic -> re-runs byte-identical. Committed copies to `out`.
+        {
+            ConfigFile conf("twin_train.config", '_');
+            conf._Params.erase("BLSTM_weightsFile");
+            conf._Params.erase("BLSTM_LID_weightsFile");
+            BLSTMNeuralNetwork<LSTMLayer> sadNet(conf, "BLSTM", true);
+            BLSTMNeuralNetwork<LSTMLayer> lidNet(conf, "BLSTM_LID", true);
+            Eigen::MatrixXd sadSeed = synthFlatT9(sadNet.getNbOfWeights());
+            Eigen::MatrixXd lidSeed = synthFlatT9(lidNet.getNbOfWeights());
+            Matrix2BinaryFile("tiny_sad_seed.bin", sadSeed);
+            Matrix2BinaryFile("tiny_lid_seed.bin", lidSeed);
+            Matrix2BinaryFile(out + "tiny_sad_seed.bin", sadSeed);
+            Matrix2BinaryFile(out + "tiny_lid_seed.bin", lidSeed);
+            dumps += 2;
+            std::cout << "PHASE4B_T9 seeds sad=" << sadSeed.rows() << " lid=" << lidSeed.rows() << "\n";
+        }
+
+        // The scored result row for a LID algo (SegmentationFunction :312-351
+        // with the :338-343 LID block LIVE): 14 base cols + [LIDCumErr,
+        // IsLIDCorrect, classNb confusion cols] + [LIDNbOfClassif, NbOfClassif].
+        // Timing col 3 = 0.0 (masked in every comparison).
+        auto assembleLidRows = [](Segmentation& seg, AudioStruct& audio,
+                                  std::vector<std::vector<double>>& rows) {
+            for (int chan = 0; chan < audio.getChannelCount(); ++chan) {
+                double globalErr = 0.0;
+                for (int k = (int)OTHER; k < (int)EXCLUDED; ++k)
+                    globalErr += seg._ClassificationErrors.at(chan)[(segment_class)k]._ErrorRate;
+                double spdur = 0.0;
+                for (std::deque<Segment>::iterator it = seg._Classification.at(chan).begin(); it + 1 != seg._Classification.at(chan).end(); ++it)
+                    if (it->_Type == SPEECH) spdur += (it + 1)->_BeginTime - it->_BeginTime;
+                std::vector<double> row;
+                row.push_back(100 * seg._ClassificationErrors.at(chan)[SPEECH]._Pfa);
+                row.push_back(100 * seg._ClassificationErrors.at(chan)[SPEECH]._Pmiss);
+                row.push_back(100 * globalErr);
+                row.push_back(0.0);   // time_per_hour (masked)
+                row.push_back(seg._CumulativeError[chan]);
+                row.push_back(((double)audio.getFrameCount() - 1.0) / audio.getFrameRate());
+                row.push_back(spdur);
+                row.push_back(seg._WordErrorRate[chan]._NbWords);
+                row.push_back(seg._WordErrorRate[chan]._Corrects);
+                row.push_back(seg._WordErrorRate[chan]._Substitutions);
+                row.push_back(seg._WordErrorRate[chan]._Insertions);
+                row.push_back(seg._WordErrorRate[chan]._Deletions);
+                row.push_back(seg._WordErrorRate[chan]._CoveragePenalty);
+                row.push_back(seg._WordErrorRate[chan]._DelayPenalty);
+                // :338-343 -- the LID drivers always fill _IsLIDCorrect, so the
+                // LID block is LIVE (one confusion col per class -> row grows).
+                row.push_back(seg._LIDCumulativeError[chan]);
+                row.push_back((double)seg._IsLIDCorrect[chan]);
+                for (long jj = 0; jj < seg._LIDClassificationErrors[chan].cols(); ++jj)
+                    row.push_back(seg._LIDClassificationErrors[chan](0, jj));
+                row.push_back((double)seg._LIDNbOfClassif[chan]);
+                row.push_back((double)seg._NbOfClassif[chan]);
+                rows.push_back(row);
+            }
+        };
+
+        struct T9BagProbe : BagOfProcessors {
+            using BagOfProcessors::PrintConfusionMatrix;
+        };
+
+        // --- twin_train / twin_train_ns / twin_train_nsx (counterfactual) ---
+        // Transcribes train() (:83-111) + run(epoch) fold (:140-235) +
+        // saveAndUpdate (:409-471) around the REAL TwinProbe.getSegmentation.
+        // `gateEnabled=false` = the counterfactual that SKIPS the :465
+        // costLID=-1.0 override (proves the gate is observable in the LID
+        // weight trajectory). `dumpSad` gates the per-epoch SAD dumps (the ns
+        // variants' SAD trajectory duplicates the main run's).
+        // Returns the per-epoch LID weight vectors for the divergence check.
+        auto runTwinTrain = [&](const std::string& cfgName, const std::string& tag,
+                                bool gateEnabled, bool dumpSad) {
+            ConfigFile conf(cfgName, '_');
+            Corpus corpus(conf);
+            const long nbFiles = (long)corpus.getNbOfFiles();
+            double offsetBegin = conf.get<double>("Audio_offset", 0.0);
+            double durationMax = conf.get<double>("Audio_max_duration", 3.6e6);
+            int fileType = conf.get<int>("File_Type", 0);
+            double pruning = conf.get<double>("Pruning_Threshold", 0.0);
+            std::string outputFileName = conf.get<std::string>("multiConfigResultsOutputFile", "MultiConfigResults.mat");
+            int trainingEpochs = conf.get<int>("Neural_Networks_BackPropagation_Epochs", 0);
+            if (trainingEpochs < 0) trainingEpochs = 0;
+
+            TwinProbe probe(conf);   // ctor loads BOTH seed files from the config keys
+            std::map<int, double> bestCost; bestCost[0] = 1e20;
+            const long memRows = trainingEpochs + 2;
+            Eigen::MatrixXd costMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd badClassifMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd costLIDMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd badClassifLIDMem = Eigen::MatrixXd::Zero(memRows, 1);
+            Eigen::MatrixXd resultsE;
+            T9BagProbe bagProbe;
+
+            auto saveResultsT9 = [&](long epoch) {
+                mat_t* mp = Mat_Create(outputFileName.c_str(), NULL);
+                if (!mp) { std::cerr << "phase4b_t9: Mat_Create failed for " << outputFileName << "\n"; exit(1); }
+                Matrix2MatFile("MultiConfigResults", resultsE, mp);
+                Matrix2MatFile("CostMem", costMem.topRows(epoch + 1), mp);
+                Matrix2MatFile("BadClassifMem", badClassifMem.topRows(epoch + 1), mp);
+                Matrix2MatFile("CostLIDMem", costLIDMem.topRows(epoch + 1), mp);
+                Matrix2MatFile("BadClassifLIDMem", badClassifLIDMem.topRows(epoch + 1), mp);
+                Mat_Close(mp);
+            };
+
+            std::vector<Eigen::VectorXd> lidTrace;
+            std::vector<double> bestCostTrace, costLidTrace, speechTrace, errorPercLidTrace;
+
+            for (long epoch = 0; epoch <= trainingEpochs + 1; ++epoch) {
+                std::vector<std::vector<double>> resRows;
+                Eigen::MatrixXd accSad, accLid;
+                InputStatistics statsSad, statsLid;
+                bool accInit = false;
+                for (long jj = 0; jj < nbFiles; ++jj) {
+                    CorpusItem cit = corpus.getItem(jj);
+                    AudioStruct audio(offsetBegin, durationMax, fileType, cit);
+                    Segmentation seg(audio, pruning);   // auto-loads the .stm _Reference
+                    probe.getSegmentation(audio, seg);  // REAL compiled Mode-7 driver
+                    assembleLidRows(seg, audio, resRows);
+                    // Per-file harvest + ascending fold (:183-199). The driver reset
+                    // its derivs at getLIDBLSTMParam, so this is file jj's own
+                    // contribution (accumulated across the file's feature blocks).
+                    Eigen::MatrixXd dSad = probe.getWeightsDerivatives();
+                    Eigen::MatrixXd dLid = probe.getWeightsDerivativesLID();
+                    InputStatistics sSad = probe.getInputStatistics();
+                    InputStatistics sLid = probe.getInputStatisticsLID();
+                    if (!accInit) { accSad = dSad; accLid = dLid; statsSad = sSad; statsLid = sLid; accInit = true; }
+                    else { accSad += dSad; accLid += dLid; statsSad.update(sSad); statsLid.update(sLid); }
+                }
+
+                // transformResults-lite (single conf; phSeq = 1 channel per file).
+                const long nRows = (long)resRows.size();
+                const long nCols = (long)resRows[0].size();
+                Eigen::MatrixXd resPerConf(nRows, nCols);
+                resultsE = Eigen::MatrixXd::Zero(nRows, 3 + nCols);
+                const long chansPerFile = nRows / nbFiles;
+                for (long r = 0; r < nRows; ++r) {
+                    for (long c = 0; c < nCols; ++c) resPerConf(r, c) = resRows[r][c];
+                    resultsE(r, 0) = (double)(r / chansPerFile + 1);
+                    resultsE(r, 1) = 1.0;
+                    resultsE(r, 2) = (double)(r % chansPerFile + 1);
+                    for (long c = 0; c < nCols; ++c) resultsE(r, 3 + c) = resRows[r][c];
+                }
+
+                // saveAndUpdate (:409-471), algo-6 arm.
+                std::vector<double> sums(nCols, 0.0), means(nCols, 0.0);
+                for (long r = 0; r < nRows; ++r) for (long c = 0; c < nCols; ++c) sums[c] += resPerConf(r, c);
+                for (long c = 0; c < nCols; ++c) means[c] = sums[c] / (double)nRows;
+                double cost = sums[4];
+                if (sums[nCols - 1] > 0) cost /= sums[nCols - 1];
+                double badClassif = means[2];
+                double costLID = sums[14];
+                if (sums[nCols - 2] > 0) costLID /= sums[nCols - 2];
+                double badLIDClassif = 100.0 - means[15];
+                // :436-441 confusion block: REAL PrintConfusionMatrix on the sliced
+                // confusion columns (display-only return, dumped for the Rust pin).
+                Eigen::MatrixXd confBlock = resPerConf.block(0, 16, nRows, nCols - 2 - 16);
+                std::string confOut;
+                double errorPercLID = bagProbe.PrintConfusionMatrix(confBlock, 1, confOut);
+                double totalSpeechDuration = means[6] * nRows;
+                costMem(epoch, 0) = cost;
+                badClassifMem(epoch, 0) = badClassif;
+                costLIDMem(epoch, 0) = costLID;
+                badClassifLIDMem(epoch, 0) = badLIDClassif;
+
+                // :462-464 save gate (criterion cost+costLID, BOTH nets saved).
+                std::string bn = "bestNNWeight_1_" + outputFileName;
+                double saveCriterion = cost + costLID;
+                if (bestCost[0] > saveCriterion) {
+                    probe.saveWeights(bn, accSad, statsSad);
+                    probe.saveWeightsLID(bn, accLid, statsLid);
+                    bestCost[0] = saveCriterion;
+                }
+                // :465 the costLID = -1.0 no-speech gate (LIVE for algo 6) -- the
+                // counterfactual run skips it to prove observability.
+                if (gateEnabled && totalSpeechDuration < 1e-3) costLID = -1.0;
+                // :466 updateWeights(cost) THEN updateWeightsLID(costLID), real Rprop.
+                probe.updateWeights(accSad, cost);
+                probe.updateWeightsLID(accLid, costLID);
+
+                saveResultsT9(epoch);
+
+                Eigen::MatrixXd wSad = probe.getWeights();
+                Eigen::MatrixXd wLid = probe.getWeightsLID();
+                if (dumpSad) {
+                    Matrix2BinaryFile(out + tag + "_sad_epoch" + std::to_string(epoch) + ".bin", wSad);
+                    ++dumps;
+                }
+                Matrix2BinaryFile(out + tag + "_lid_epoch" + std::to_string(epoch) + ".bin", wLid);
+                ++dumps;
+                lidTrace.push_back(probe.getWeightsLID());
+                bestCostTrace.push_back(bestCost[0]);
+                costLidTrace.push_back(costLID);
+                speechTrace.push_back(totalSpeechDuration);
+                errorPercLidTrace.push_back(errorPercLID);
+            }
+
+            // Trajectory report (extractor -> manifest). Gate fired at epoch e>0 iff
+            // bestCost dropped; epoch 0 always fires (1e20 seed).
+            int nFired = 0, nSkipped = 0, nDifferLid = 0;
+            for (size_t e = 1; e < bestCostTrace.size(); ++e) {
+                if (bestCostTrace[e] < bestCostTrace[e - 1]) ++nFired; else ++nSkipped;
+                bool differ = false;
+                for (long k = 0; k < lidTrace[e].size(); ++k) {
+                    uint64_t a, b; double av = lidTrace[e](k), bv = lidTrace[e - 1](k);
+                    std::memcpy(&a, &av, 8); std::memcpy(&b, &bv, 8);
+                    if (a != b) { differ = true; break; }
+                }
+                if (differ) ++nDifferLid;
+            }
+            std::cout << "PHASE4B_T9_TRAIN tag=" << tag << " epochs=" << bestCostTrace.size()
+                      << " fired=" << nFired << " skipped=" << nSkipped
+                      << " differ_lid=" << nDifferLid << std::setprecision(17)
+                      << " best_cost=[";
+            for (size_t e = 0; e < bestCostTrace.size(); ++e) std::cout << (e ? "," : "") << bestCostTrace[e];
+            std::cout << "] cost_lid=[";
+            for (size_t e = 0; e < costLidTrace.size(); ++e) std::cout << (e ? "," : "") << costLidTrace[e];
+            std::cout << "] speech=[";
+            for (size_t e = 0; e < speechTrace.size(); ++e) std::cout << (e ? "," : "") << speechTrace[e];
+            std::cout << "] error_perc_lid=[";
+            for (size_t e = 0; e < errorPercLidTrace.size(); ++e) std::cout << (e ? "," : "") << errorPercLidTrace[e];
+            std::cout << "]\n";
+            return lidTrace;
+        };
+
+        runTwinTrain("twin_train.config", "twin_train", true, true);
+        std::vector<Eigen::VectorXd> nsTrace = runTwinTrain("twin_train_ns.config", "twin_train_ns", true, false);
+        std::vector<Eigen::VectorXd> nsxTrace = runTwinTrain("twin_train_ns.config", "twin_train_nsx", false, false);
+        {
+            // First epoch where the gated (ns) and counterfactual (nsx) LID weight
+            // vectors diverge -- the LIVE costLID=-1.0 gate observability proof. A
+            // port that dropped the :465 gate would reproduce nsx, not ns.
+            int divergeEpoch = -1;
+            for (size_t e = 0; e < nsTrace.size() && divergeEpoch < 0; ++e) {
+                for (long k = 0; k < nsTrace[e].size(); ++k) {
+                    uint64_t a, b; double av = nsTrace[e](k), bv = nsxTrace[e](k);
+                    std::memcpy(&a, &av, 8); std::memcpy(&b, &bv, 8);
+                    if (a != b) { divergeEpoch = (int)e; break; }
+                }
+            }
+            std::cout << "PHASE4B_T9_NS_DIVERGE epoch=" << divergeEpoch << "\n";
+        }
+
+        // --- twin_e2e: the REAL CorpusProcessor end to end (tier-1 pattern) ---
+        {
+            ConfigFile conf("twin_e2e.config", '_');
+            std::vector<ConfigFile> configs{conf};
+            char mode[3] = {'-', 'm', '\0'};
+            CorpusProcessor cp(configs, mode);
+            cp.run();
+            mat_t* m = Mat_Open("twin_e2e.mat", MAT_ACC_RDONLY);
+            if (!m) { std::cerr << "phase4b_t9: Mat_Open failed for twin_e2e.mat\n"; exit(1); }
+            Mat_Close(m);
+            std::cout << "PHASE4B_T9_E2E ok=1\n";
+        }
+
+        // --- Corpus gradChecks (:237-340) around REAL getSegmentation ---------
+        // One corpus pass at given weights -> the scored rows. A FRESH probe per
+        // pass == the legacy's `_Processors = procMem` restore (procMem is the
+        // pristine pre-run bag; the probe ctor state matches it, and the seeds
+        // are overridden by the perturbed vectors).
+        auto costFromRows = [](const std::vector<std::vector<double>>& rows, bool lidCols) {
+            double cost = 0.0, counter = 0.0;
+            for (const auto& row : rows) {
+                if (lidCols) { cost += row[14]; counter += row[row.size() - 2]; }
+                else { cost += row[4]; counter += row[row.size() - 1]; }
+            }
+            return cost / counter;
+        };
+
+        // maxWeights cap (port-only deviation, manifest: gradcheck_max_weights).
+        const long t9MaxWeights = 10;
+
+        // Twin (algo 6, Mode 5, wav): nets ii=0 (SAD, cols 4/len-1) and ii=1
+        // (LID, cols 14/len-2) -- THE column switch under pin.
+        {
+            ConfigFile conf("twin_gradcheck.config", '_');
+            double epsilon = conf.get<double>("Neural_Networks_Gradient_Check_Epsilon", 1e-5);
+            double offsetBegin = conf.get<double>("Audio_offset", 0.0);
+            double durationMax = conf.get<double>("Audio_max_duration", 3.6e6);
+            int fileType = conf.get<int>("File_Type", 0);
+            double pruning = conf.get<double>("Pruning_Threshold", 0.0);
+
+            Eigen::VectorXd seedSad = BinaryFile2Vector("tiny_sad_seed.bin");
+            Eigen::VectorXd seedLid = BinaryFile2Vector("tiny_lid_seed.bin");
+
+            auto runOnce = [&](const Eigen::VectorXd& wSad, const Eigen::VectorXd& wLid,
+                               Eigen::MatrixXd* dSad, Eigen::MatrixXd* dLid) {
+                ConfigFile c2(conf);
+                Corpus corpus(c2);
+                TwinProbe probe(c2);
+                probe.setWeights(wSad);
+                probe.setWeightsLID(wLid);
+                std::vector<std::vector<double>> rows;
+                for (long jj = 0; jj < (long)corpus.getNbOfFiles(); ++jj) {
+                    CorpusItem cit = corpus.getItem(jj);
+                    AudioStruct audio(offsetBegin, durationMax, fileType, cit);
+                    Segmentation seg(audio, pruning);
+                    probe.getSegmentation(audio, seg);   // REAL Mode-5 driver
+                    assembleLidRows(seg, audio, rows);
+                }
+                if (dSad) *dSad = probe.getWeightsDerivatives();
+                if (dLid) *dLid = probe.getWeightsDerivativesLID();
+                return rows;
+            };
+
+            // Analytic run (gradCheck :251-252) -- BOTH nets' derivs harvested.
+            Eigen::MatrixXd anSad, anLid;
+            runOnce(seedSad, seedLid, &anSad, &anLid);
+
+            for (int ii = 0; ii < 2; ++ii) {
+                const Eigen::VectorXd& base = (ii == 0) ? seedSad : seedLid;
+                const Eigen::MatrixXd& analytic = (ii == 0) ? anSad : anLid;
+                const long sweep = std::min<long>(t9MaxWeights, base.size());
+                Eigen::MatrixXd perWeight(sweep, 3);
+                double gradErr = 0.0, gradRelErr = 0.0;
+                for (long kk = 0; kk < sweep; ++kk) {
+                    Eigen::VectorXd wp = base; wp(kk) += epsilon;
+                    auto rowsP = (ii == 0) ? runOnce(wp, seedLid, NULL, NULL) : runOnce(seedSad, wp, NULL, NULL);
+                    double costPlus = costFromRows(rowsP, ii == 1);
+                    Eigen::VectorXd wm = base; wm(kk) -= epsilon;
+                    auto rowsM = (ii == 0) ? runOnce(wm, seedLid, NULL, NULL) : runOnce(seedSad, wm, NULL, NULL);
+                    double costMinus = costFromRows(rowsM, ii == 1);
+                    double numerical = (costPlus - costMinus) / (2 * epsilon);
+                    perWeight(kk, 0) = analytic(kk, 0);
+                    perWeight(kk, 1) = analytic(kk, 1);
+                    perWeight(kk, 2) = numerical;
+                    double back = analytic(kk, 0) / analytic(kk, 1);
+                    gradErr += std::fabs(back - numerical);
+                    double ref = std::fabs(numerical); if (ref < 1e-24) ref = 1e-24;
+                    gradRelErr += std::fabs(back - numerical) / ref;
+                }
+                gradErr /= (double)sweep;
+                gradRelErr /= (double)sweep;
+                Eigen::MatrixXd gcDump(sweep + 1, 3);
+                gcDump.topRows(sweep) = perWeight;
+                gcDump(sweep, 0) = gradErr; gcDump(sweep, 1) = gradRelErr; gcDump(sweep, 2) = 0.0;
+                Matrix2BinaryFile(out + "twin_gradcheck_net" + std::to_string(ii) + ".bin", gcDump);
+                ++dumps;
+                std::cout << "PHASE4B_T9_GRADCHECK tag=twin net=" << ii << " sweep=" << sweep
+                          << " mean_err=" << std::scientific << std::setprecision(6) << gradErr
+                          << " mean_rel_err=" << gradRelErr << "\n";
+            }
+        }
+
+        // LID5 (algo 5, wav): the single (base-class) net, LID cost cols 14/len-2.
+        {
+            ConfigFile conf("lid5_gradcheck.config", '_');
+            double epsilon = conf.get<double>("Neural_Networks_Gradient_Check_Epsilon", 1e-5);
+            double offsetBegin = conf.get<double>("Audio_offset", 0.0);
+            double durationMax = conf.get<double>("Audio_max_duration", 3.6e6);
+            int fileType = conf.get<int>("File_Type", 0);
+            double pruning = conf.get<double>("Pruning_Threshold", 0.0);
+            Eigen::VectorXd seed = BinaryFile2Vector("tiny_sad_seed.bin");
+
+            auto runOnce = [&](const Eigen::VectorXd& w, Eigen::MatrixXd* dOut) {
+                ConfigFile c2(conf);
+                Corpus corpus(c2);
+                BLSTMSpectralLID probe(c2, false, false);
+                probe.setWeights(w);
+                std::vector<std::vector<double>> rows;
+                for (long jj = 0; jj < (long)corpus.getNbOfFiles(); ++jj) {
+                    CorpusItem cit = corpus.getItem(jj);
+                    AudioStruct audio(offsetBegin, durationMax, fileType, cit);
+                    Segmentation seg(audio, pruning);
+                    probe.getSegmentation(audio, seg);   // REAL Algo-5 driver
+                    assembleLidRows(seg, audio, rows);
+                }
+                if (dOut) *dOut = probe.getWeightsDerivatives();
+                return rows;
+            };
+
+            Eigen::MatrixXd analytic;
+            runOnce(seed, &analytic);
+            const long sweep = std::min<long>(t9MaxWeights, seed.size());
+            Eigen::MatrixXd perWeight(sweep, 3);
+            double gradErr = 0.0, gradRelErr = 0.0;
+            for (long kk = 0; kk < sweep; ++kk) {
+                Eigen::VectorXd wp = seed; wp(kk) += epsilon;
+                double costPlus = costFromRows(runOnce(wp, NULL), true);
+                Eigen::VectorXd wm = seed; wm(kk) -= epsilon;
+                double costMinus = costFromRows(runOnce(wm, NULL), true);
+                double numerical = (costPlus - costMinus) / (2 * epsilon);
+                perWeight(kk, 0) = analytic(kk, 0);
+                perWeight(kk, 1) = analytic(kk, 1);
+                perWeight(kk, 2) = numerical;
+                double back = analytic(kk, 0) / analytic(kk, 1);
+                gradErr += std::fabs(back - numerical);
+                double ref = std::fabs(numerical); if (ref < 1e-24) ref = 1e-24;
+                gradRelErr += std::fabs(back - numerical) / ref;
+            }
+            gradErr /= (double)sweep;
+            gradRelErr /= (double)sweep;
+            Eigen::MatrixXd gcDump(sweep + 1, 3);
+            gcDump.topRows(sweep) = perWeight;
+            gcDump(sweep, 0) = gradErr; gcDump(sweep, 1) = gradRelErr; gcDump(sweep, 2) = 0.0;
+            Matrix2BinaryFile(out + "lid5_gradcheck.bin", gcDump);
+            ++dumps;
+            std::cout << "PHASE4B_T9_GRADCHECK tag=lid5 net=0 sweep=" << sweep
+                      << " mean_err=" << std::scientific << std::setprecision(6) << gradErr
+                      << " mean_rel_err=" << gradRelErr << "\n";
+        }
+
+        if (chdir(t9OrigCwd) != 0) { std::cerr << "phase4b_t9: chdir back failed\n"; return 1; }
+        std::cout << "OK: phase4b_t9 (twin_train + ns/nsx + e2e + gradchecks)\n";
     }
 
     // =====================================================================

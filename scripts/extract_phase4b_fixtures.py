@@ -296,6 +296,57 @@ PHASE4B_RE = re.compile(
     re.MULTILINE,
 )
 
+# Task 9: corpus-level LID stages. The harness chdir's into a seeded workdir
+# (argv[19]) and runs twin_train / twin_train_ns (+ the nsx no-gate
+# counterfactual) / twin_e2e (REAL CorpusProcessor) / twin_gradcheck /
+# lid5_gradcheck with the REAL compiled drivers (tiny nets -> every GEMM
+# reduction dim < 23, bit-exact vs the ascending-loop port on the oracle env).
+T9_WORKDIR_FILES = [
+    "twin_train.config",
+    "twin_train_ns.config",
+    "twin_e2e.config",
+    "twin_gradcheck.config",
+    "lid5_gradcheck.config",
+    "languagemapping_lid7.csv",
+    "listing_gc_wav.csv",
+]
+T9_PHSEQ_FILES = ["s1.phSeq", "s2.phSeq", "s1.stm", "s2.stm", "listing_train.csv"]
+T9_WAV_FILES = ["f1.wav", "f1.stm"]
+T9_EPOCHS = 8  # 6 training epochs + solo + final eval
+T9_DUMPS = (
+    ["tiny_sad_seed.bin", "tiny_lid_seed.bin"]
+    + [f"twin_train_sad_epoch{e}.bin" for e in range(T9_EPOCHS)]
+    + [f"twin_train_lid_epoch{e}.bin" for e in range(T9_EPOCHS)]
+    + [f"twin_train_ns_lid_epoch{e}.bin" for e in range(T9_EPOCHS)]
+    + [f"twin_train_nsx_lid_epoch{e}.bin" for e in range(T9_EPOCHS)]
+    + ["twin_gradcheck_net0.bin", "twin_gradcheck_net1.bin", "lid5_gradcheck.bin"]
+)
+# The 5 saveResults variables (CorpusProcessor.cpp:397-401), in write order.
+T9_MAT_VARS = ["MultiConfigResults", "CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"]
+# bestNNWeight artifacts (BOTH nets; the LID pair carries saveWeightsLID's LID_
+# prefix -- the Task-9 pin) copied raw from the workdir (io::binary payload
+# despite the legacy .mat suffix).
+T9_BEST_ARTIFACTS = [
+    "weights_bestNNWeight_1_twin_train.mat",
+    "weightsDerivatives_bestNNWeight_1_twin_train.mat",
+    "weights_LID_bestNNWeight_1_twin_train.mat",
+    "weightsDerivatives_LID_bestNNWeight_1_twin_train.mat",
+]
+T9_SEEDS_RE = re.compile(r"^\f?PHASE4B_T9 seeds sad=(?P<sad>\d+) lid=(?P<lid>\d+)$", re.MULTILINE)
+T9_TRAIN_RE = re.compile(
+    r"^\f?PHASE4B_T9_TRAIN tag=(?P<tag>\w+) epochs=(?P<epochs>\d+) fired=(?P<fired>\d+) "
+    r"skipped=(?P<skipped>\d+) differ_lid=(?P<differ>\d+) best_cost=\[(?P<bc>[^\]]*)\] "
+    r"cost_lid=\[(?P<cl>[^\]]*)\] speech=\[(?P<sp>[^\]]*)\] error_perc_lid=\[(?P<epl>[^\]]*)\]$",
+    re.MULTILINE,
+)
+T9_NS_DIVERGE_RE = re.compile(r"^\f?PHASE4B_T9_NS_DIVERGE epoch=(?P<e>-?\d+)$", re.MULTILINE)
+T9_GRADCHECK_RE = re.compile(
+    r"^\f?PHASE4B_T9_GRADCHECK tag=(?P<tag>\w+) net=(?P<net>\d) sweep=(?P<sweep>\d+) "
+    r"mean_err=(?P<err>[0-9.eE+-]+) mean_rel_err=(?P<rel>[0-9.eE+-]+)$",
+    re.MULTILINE,
+)
+T9_E2E_RE = re.compile(r"^\f?PHASE4B_T9_E2E ok=1$", re.MULTILINE)
+
 SCORING_MULTI_TOL_RE = re.compile(
     r"^NN_TOL site=blstm_scoring_multi_(?P<tag>\w+) max_ulp=(?P<ulp>\d+) "
     r"max_abs=(?P<abs>[0-9.eE+-]+)$",
@@ -315,6 +366,29 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
         sys.stderr.write(result.stderr)
         raise SystemExit(f"command failed ({result.returncode}): {' '.join(cmd)}")
     return result.stdout
+
+
+def _write_bin(path: Path, matrix: np.ndarray) -> None:
+    """Write `matrix` as an io::binary .bin: i64 LE rows, i64 LE cols, f64 LE
+    column-major -- the exact format the Rust golden loaders read."""
+    mat = np.ascontiguousarray(matrix, dtype="<f8")
+    rows, cols = mat.shape
+    with path.open("wb") as f:
+        f.write(struct.pack("<q", rows))
+        f.write(struct.pack("<q", cols))
+        f.write(mat.flatten(order="F").tobytes())
+
+
+def _t9_convert_mat(mat_path: Path, prefix: str) -> None:
+    """Convert a Task-9 .mat's 5 variables to `<prefix>_<var>.bin` fixtures,
+    zeroing MultiConfigResults' wall-clock timing column (col 6 = data col 3)."""
+    mat = scipy.io.loadmat(mat_path)
+    for var in T9_MAT_VARS:
+        m = np.atleast_2d(np.asarray(mat[var], dtype=np.float64))
+        if var == "MultiConfigResults" and m.shape[1] > 6:
+            m = m.copy()
+            m[:, 6] = 0.0
+        _write_bin(PHASE4B_DIR / f"{prefix}_{var}.bin", m)
 
 
 def _hash_tree(root: Path) -> dict[str, str]:
@@ -422,6 +496,19 @@ def main() -> None:
         tmp_dir = Path(tmp)
         for name in HARNESS_INPUTS:
             shutil.copy2(PHASE1_DIR / name, tmp_dir / name)
+
+        # Task 9: seed the corpus workdir (configs + corpora + listings, all the
+        # workdir-relative paths the configs reference).
+        t9_dir = tmp_dir / "t9_workdir"
+        (t9_dir / "corpus_phseq").mkdir(parents=True)
+        (t9_dir / "corpus_lid").mkdir(parents=True)
+        for name in T9_WORKDIR_FILES:
+            shutil.copy2(PHASE4B_DIR / name, t9_dir / name)
+        for name in T9_PHSEQ_FILES:
+            shutil.copy2(PHASE4B_DIR / "corpus_phseq" / name, t9_dir / "corpus_phseq" / name)
+        for name in T9_WAV_FILES:
+            shutil.copy2(PHASE4B_DIR / "corpus_lid" / name, t9_dir / "corpus_lid" / name)
+
         stdout = _run(
             [
                 str(HARNESS_DIR / "oracle_harness"),
@@ -443,8 +530,19 @@ def main() -> None:
                 str(LID_CORPUS_DIR),  # argv[16]: Task 4 corpus dir (f1/f2/f3.wav).
                 str(PHSEQ_DIR),  # argv[17]: Task 5 phSeq corpus dir (f1/f2/f3.phSeq).
                 str(PHASE4B_DIR),  # argv[18]: Task 6 Twin config dir (twin_mode*.config).
+                str(t9_dir),  # argv[19]: Task 9 corpus-level LID workdir.
             ]
         )
+
+        # Task 9: converted .mat value fixtures + the bestNNWeight artifact pins
+        # (raw io::binary payloads; copied BEFORE the tempdir is torn down).
+        _t9_convert_mat(t9_dir / "twin_train.mat", "twin_train")
+        _t9_convert_mat(t9_dir / "twin_e2e.mat", "twin_e2e")
+        for name in T9_BEST_ARTIFACTS:
+            src = t9_dir / name
+            if not src.is_file():
+                raise SystemExit(f"harness did not produce the bestNNWeight artifact {name}")
+            shutil.copy2(src, PHASE4B_DIR / name)
 
         for name in [
             *CONFUSION_BINS,
@@ -453,6 +551,7 @@ def main() -> None:
             *TWIN_BINS,
             *phseq_bins,
             *MODE7_BINS,
+            *T9_DUMPS,
         ]:
             src = tmp_dir / name
             if not src.is_file():
@@ -721,6 +820,92 @@ def main() -> None:
     # present, re-derive) the committed LID_bestNNWeight_1.bin's provenance.
     lid_weight_provenance = _verify_lid_weight_provenance()
 
+    # 4g. Task 9: parse + validate the corpus-level LID lines. Non-vacuity is
+    # ENFORCED here (SystemExit), not hoped for: the twin_train best-cost gate
+    # must FIRE and SKIP; every consecutive LID epoch pair must DIFFER; the main
+    # corpus must have speech every epoch while the ns variant has none (its
+    # costLID forced to -1.0 by the LIVE :465 gate); and the gated (ns) vs
+    # ungated (nsx) counterfactual LID trajectories must DIVERGE at a measured
+    # epoch -- the proof the gate is observable in the weights.
+    t9_seeds = T9_SEEDS_RE.search(stdout)
+    if not t9_seeds:
+        raise SystemExit("PHASE4B_T9 seeds line missing from harness stdout")
+    t9_train = {m["tag"]: m for m in T9_TRAIN_RE.finditer(stdout)}
+    for tag in ("twin_train", "twin_train_ns", "twin_train_nsx"):
+        if tag not in t9_train:
+            raise SystemExit(f"missing PHASE4B_T9_TRAIN line for {tag}")
+    def _floats(s: str) -> list[float]:
+        return [float(x) for x in s.split(",") if x]
+    tm = t9_train["twin_train"]
+    t9_fired, t9_skipped = int(tm["fired"]), int(tm["skipped"])
+    if t9_fired < 1 or t9_skipped < 1:
+        raise SystemExit(
+            f"twin_train best-cost gate fired={t9_fired} skipped={t9_skipped}: both must be "
+            ">= 1 -- retune BLSTM_LID_BackPropagationRpropInit/epochs in twin_train.config."
+        )
+    if int(tm["differ"]) != T9_EPOCHS - 1:
+        raise SystemExit(f"twin_train differ_lid={tm['differ']} != {T9_EPOCHS - 1}: LID epochs collapsed")
+    if any(sp <= 1e-3 for sp in _floats(tm["sp"])):
+        raise SystemExit("twin_train must detect speech EVERY epoch (else its costLID gets gated)")
+    ns = t9_train["twin_train_ns"]
+    if any(sp != 0.0 for sp in _floats(ns["sp"])):
+        raise SystemExit("twin_train_ns must detect NO speech (rising threshold 11 > constant 10)")
+    if any(cl != -1.0 for cl in _floats(ns["cl"])):
+        raise SystemExit("twin_train_ns costLID must be -1.0 every epoch (the LIVE :465 gate)")
+    nsx = t9_train["twin_train_nsx"]
+    if all(cl == -1.0 for cl in _floats(nsx["cl"])):
+        raise SystemExit("twin_train_nsx (counterfactual) costLID must carry the REAL values")
+    t9_div = T9_NS_DIVERGE_RE.search(stdout)
+    if not t9_div:
+        raise SystemExit("PHASE4B_T9_NS_DIVERGE line missing")
+    t9_diverge_epoch = int(t9_div["e"])
+    if t9_diverge_epoch < 0:
+        raise SystemExit(
+            "ns vs nsx LID trajectories never diverged: the costLID=-1.0 gate is not "
+            "observable with this config -- retune RpropInit/epochs."
+        )
+    t9_gc = {(m["tag"], int(m["net"])): m for m in T9_GRADCHECK_RE.finditer(stdout)}
+    for key in (("twin", 0), ("twin", 1), ("lid5", 0)):
+        if key not in t9_gc:
+            raise SystemExit(f"missing PHASE4B_T9_GRADCHECK line for {key}")
+    # Non-degeneracy: at least one numerical derivative per gradcheck golden.
+    for name in ("twin_gradcheck_net0.bin", "twin_gradcheck_net1.bin", "lid5_gradcheck.bin"):
+        gr, gcc, gdata = _read_bin(PHASE4B_DIR / name)
+        if gcc != 3:
+            raise SystemExit(f"{name}: cols {gcc} != 3")
+        numerical = [gdata[2 * gr + r] for r in range(gr - 1)]  # col 2, rows 0..sweep-1
+        if not any(abs(v) > 1e-12 for v in numerical):
+            raise SystemExit(f"{name}: every numerical derivative is ~0 -- degenerate gradcheck")
+    if not T9_E2E_RE.search(stdout):
+        raise SystemExit("PHASE4B_T9_E2E ok=1 line missing (real CorpusProcessor run failed)")
+    t9_measured = {
+        "seeds": {"sad_nb_weights": int(t9_seeds["sad"]), "lid_nb_weights": int(t9_seeds["lid"])},
+        "train": {
+            tag: {
+                "epochs": int(t9_train[tag]["epochs"]),
+                "gate_fired": int(t9_train[tag]["fired"]),
+                "gate_skipped": int(t9_train[tag]["skipped"]),
+                "lid_epochs_differing": int(t9_train[tag]["differ"]),
+                "best_cost": _floats(t9_train[tag]["bc"]),
+                "cost_lid": _floats(t9_train[tag]["cl"]),
+                "total_speech_duration": _floats(t9_train[tag]["sp"]),
+                "error_perc_lid": _floats(t9_train[tag]["epl"]),
+            }
+            for tag in ("twin_train", "twin_train_ns", "twin_train_nsx")
+        },
+        "ns_gate_diverge_epoch": t9_diverge_epoch,
+        "gradcheck": {
+            f"{tag}_net{net}": {
+                "sweep": int(m["sweep"]),
+                "mean_error": float(m["err"]),
+                "mean_relative_error": float(m["rel"]),
+            }
+            for (tag, net), m in t9_gc.items()
+        },
+        "gradcheck_max_weights": 10,
+        "epsilon": 1e-5,
+    }
+
     # 5. Regression guard: the prior-phase fixture dirs must be byte-identical after.
     after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
     for ph in PRIOR_PHASES:
@@ -939,6 +1124,39 @@ def main() -> None:
             "lid_weight_provenance": lid_weight_provenance,
             "measured": mode7_measured,
         },
+        "corpus_lid": {
+            "text": (
+                "Task 9: corpus-level LID goldens. UNLIKE the tier-2 CorpusProbe (reimpl-"
+                "swapped FFB), every per-file getSegmentation here is the REAL COMPILED "
+                "driver: the configs use TINY nets (every GEMM reduction dim < 23, the "
+                "nn_product_probes boundary), so the real Eigen engine and the ascending-"
+                "loop Rust port agree bit-for-bit on the oracle env (libm-bearing values "
+                "canary-gated off it). Only the corpus loop + SegmentationFunction row "
+                "assembly + saveAndUpdate are transcribed, with the REAL saveWeights/"
+                "saveWeightsLID/updateWeights/updateWeightsLID (real Rprop, both nets) and "
+                "the REAL PrintConfusionMatrix. twin_train: Mode-7 phSeq 2-file corpus, "
+                "3 epochs, BOTH nets' post-saveAndUpdate weights dumped per epoch; the "
+                "algo-6 criterion (cost+costLID) trajectory measured (fired/skipped). The "
+                "SAD net never forwards in Mode 7 -> its derivs stay a zero Nx2 -> "
+                "updateWeights normalizes 0/0 = NaN per element -> Rprop's else-branch "
+                "applies +delta per weight row per epoch (the stats-tail rows, count 1, "
+                "stay put): the SAD epoch dumps pin exactly this NaN-drift semantics. "
+                "twin_train_ns: rising threshold 11 > the constant-10 Mode-7 result_vec -> "
+                "NO speech -> saveAndUpdate:465 forces costLID = -1.0 into EVERY "
+                "updateWeightsLID (the LIVE gate); twin_train_nsx is the same run with the "
+                "gate DISABLED (counterfactual) -- the two LID trajectories diverge at "
+                "ns_gate_diverge_epoch (a port that dropped the gate would reproduce nsx, "
+                "not ns). twin_e2e: the REAL CorpusProcessor(-m).run() at epochs 0 -> the "
+                "twin_e2e_<var>.bin value fixtures for the spawned-binary e2e (timing col "
+                "masked). twin_gradcheck: Mode-5 wav 1-file corpus, BOTH nets backprop-"
+                "active -> the per-network cost-column switch (ii=0 SAD cols 4/len-1, ii=1 "
+                "LID cols 14/len-2) golden per net; lid5_gradcheck: Algo 5, cols 14/len-2. "
+                "SQUARE cost laws -> the gradcheck goldens are strict-bits everywhere. "
+                "Each gradcheck .bin is (sweep+1) x 3: rows 0..sweep-1 = [analytic_col0, "
+                "analytic_col1, numerical]; final row [mean_error, mean_relative_error, 0]."
+            ),
+            "measured": t9_measured,
+        },
         "dead_code_not_ported": {
             "text": (
                 "Two legacy blocks are commented out and NOT ported: the classNb==2 binary "
@@ -965,7 +1183,9 @@ def main() -> None:
         f"phseq {len(PHSEQ_FILES)} files, {len(phseq_bins)} bins; "
         f"mode7 lidWeights={mode7_lid_weights}, {len(MODE7_VARIANTS)} variants x "
         f"{len(MODE7_FILES)} files parsed, weight provenance reverified="
-        f"{lid_weight_provenance['reverified_byte_identical']}), "
+        f"{lid_weight_provenance['reverified_byte_identical']}; "
+        f"t9 twin_train fired={t9_fired} skipped={t9_skipped} "
+        f"ns_diverge_epoch={t9_diverge_epoch}, gradchecks twin+lid5 ok, e2e ok), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 
