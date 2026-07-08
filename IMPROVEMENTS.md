@@ -1830,7 +1830,7 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   histogram -- entirely commented out, so `classNb == 2` falls straight into the SAME general
   `else if (classNb > 1)` accumulation as every other `classNb >= 2`, with no ROC/histogram
   behavior at all. `:541-593` duplicates (via `cout`, not `error +=`) exactly what the LIVE
-  `Confusion2String` call at `:540` already computes and is never executed. *Why deferred: N/A --
+  `Confusion2String` call at `:540` already computes and is never executed. *Why deferred:* N/A --
   this is a straightforward "do not port dead code" decision, not a deferred fix. *Pinned by:*
   `dead_binary_variant_not_ported` (`src/engine/confusion.rs`).
 
@@ -1898,7 +1898,12 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   candidate:* after end-to-end LID parity, reconcile the LID SAD path with the base spectral/LTSV
   drivers (the timeline compression at (4) is the most surprising and worth a second look). *Pinned
   by:* `ltsv_sad_row_matches_dump`, `sad_boundaries_match_dump`, `lid_classification_errors_match_dump`
-  (`tests/phase4b_lid5_golden.rs`), all bit-exact vs the harness `LidProbe` reimpl.
+  (`tests/phase4b_lid5_golden.rs`), all bit-exact vs the harness `LidProbe` reimpl. Mutation: the
+  `LidProbe` reimpl encodes the Algo-5 lines (not the base spectral machinery), so reverting any of
+  the five divergences -- e.g. restoring the commented-out mel-branch SAD, or the base
+  `getLTSVParam` `< 1 -> 0` floor -- diverges the `*_match_dump` goldens; the Task-11 battery's
+  in-band `-2.0 -> -1.0` flip additionally breaks `phase4b_lid5_golden` (see the Task-11 entry
+  below, item 1).
 
 - **[phase4b] The LID driver computes TDC params + `LTSV_freq_beg`/`LTSV_freq_end` + `costLID` that
   are all DEAD, and has a `_CepstreCoefficients` writeback that never re-reads** (`tasks/lid.rs`, from
@@ -1913,7 +1918,9 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   written rows are never re-read), and under `lid5.config`'s single-segment SAD it writes once and
   never re-reads -- SKIPPED. *Why deferred:* dead-code omission, not a behavioral deviation. *Fix
   candidate:* N/A. *Pinned by:* `lid_members_match_dump`/`lid_confusion_matches_dump`
-  (`tests/phase4b_lid5_golden.rs`), bit-exact despite the skips.
+  (`tests/phase4b_lid5_golden.rs`), bit-exact despite the skips. Mutation: N/A -- these are
+  dead-code omissions (computing and storing the dead TDC / `costLID` / cepstre values changes
+  nothing the goldens observe), so there is no live branch to break.
 
 - **[phase4b] The LID `_IsLIDCorrect = -1` branch is DEAD (targetIndex is clamped `>= 0`), and the
   per-segment scoring-block guard adds a `rowEnd >= rowBegin` underflow check with no legacy
@@ -1929,6 +1936,10 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   byte-identical on every fixture. *Why deferred:* the -1 branch is dead reproduction; the guard is a
   port-only safety over legacy UB. *Fix candidate:* N/A (the UB is unreachable). *Pinned by:*
   `lid_members_match_dump`, `sentinel_gt150_present_every_file` (`tests/phase4b_lid5_golden.rs`).
+  Mutation: the Task-11 battery's in-band `-2.0 -> -1.0` flip breaks `sentinel_gt150_present_every_file`
+  / `lid_classification_errors_match_dump` (Task-11 entry below, item 1); the dead `-1` branch and
+  the port-only underflow guard are themselves N/A (both unreachable -- `targetIndex` is clamped
+  `>= 0`, and min-length SPEECH segments never underflow the slice).
 
 - **[phase4b] The phSeq reader's phoneme count carries a fixed `10 + sum(len+10)` padding
   arithmetic -- 10 phantom head phonemes plus 10 phantom gap phonemes appended after EVERY
@@ -2054,6 +2065,25 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the FFB order for mode 5 (SAD before LID) feeds the SAD net a differently-normalized input and
   diverges `sad_result_row`; (iii) running `results2segmentation` for mode 6 (dropping the
   `mode == 5` guard) overwrites the `LID2Segmentation` classification and breaks `boundaries_match_dump`.
+
+- **[phase4b] Task 7c latent: the modes-4/5/6 offset-subtracted row slice saturates a negative
+  index to 0 where the legacy UB-wraps to a huge unsigned** (`tasks/lid.rs::get_segmentation_mode456`,
+  from `TwinBLSTMSpectralLID.cpp:811-812`): the block start is `rowBegin =
+  ceil((begin - LIDTimeOffset)/LIDTimeStep)`. If a SPEECH segment's `begin` is EARLIER than
+  `LIDTimeOffset`, `(begin - offset)/step` is negative; Rust's `ratio as usize` saturates the
+  negative float to 0 (then the `!= ratio` bump lands `row_begin` at 1), while C++ `(size_t)` of a
+  negative double is UB that on the usual targets wraps to a huge value -- which then trips the
+  `rowEnd < rowBegin` skip guard (`:815`), dropping the segment entirely. So on a hypothetical
+  `begin < LIDTimeOffset` input the two would DIVERGE (Rust reads a top-of-buffer block; the legacy
+  skips). This is the offset-subtracted (`:811-813`) slice's contrast with the modes-0-3 `:1245`
+  bare `begin/_SpectrumShift` (always `>= 0`, so no negative there). UNREACHABLE in the committed
+  fixtures: every mode-4/5/6 variant derives `LIDTimeOffset = 0.0`, so `begin - 0 >= 0` for every
+  segment and `ratio` is never negative. *Why deferred:* a port-only safety over legacy UB on an
+  unreachable input, not a behavioral deviation on any fixture. *Fix candidate:* N/A (the negative
+  case cannot occur under any committed config). *Pinned by:* `sad_result_row_matches_dump`,
+  `members_match_dump` (`tests/phase4b_twin_golden.rs`, modes 4/5/6, all bit-exact -- `LIDTimeOffset`
+  is 0 so the saturating cast and a UB-wrap would agree here). Mutation: N/A -- the divergence needs
+  a `LIDTimeOffset > min speech begin` config, which no committed fixture provides.
 
 - **[phase4b] The SAD FFB normalizes `inputSeq` IN PLACE (non-const `Eigen::Ref`), so the concat +
   LID scoring consume the NORMALIZED SAD input; `getBLSTMLIDInputSequence` resamples the SAD hidden
