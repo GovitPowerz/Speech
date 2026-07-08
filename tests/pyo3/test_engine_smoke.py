@@ -11,7 +11,6 @@ into it -- mirroring `src/rust/tests/phase4a_tier1_e2e.rs::seed_corpus`.
 
 import os
 import shutil
-import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,7 +23,6 @@ speech_rs = pytest.importorskip("speech_rs")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PHASE4A = REPO_ROOT / "tests" / "reference_data" / "phase4a"
 PHASE0 = REPO_ROOT / "tests" / "reference_data" / "phase0"
-RUST_MANIFEST = REPO_ROOT / "src" / "rust" / "Cargo.toml"
 
 
 @contextmanager
@@ -123,53 +121,55 @@ def test_error_chain_surfaces(tmp_path: Path) -> None:
 
 
 # === Phase 4c Task 5: TOML canonical config ==================================
-# The Rust-side conversion table (`speech::toml_config`) lives only in Rust, so
-# these tests drive the actual `speech --convert-config` CLI tool (via `cargo
-# run`, which builds it if needed) to produce a real `.toml` fixture, then
-# exercise the `speech_rs` seam (`load_toml_config` + `Engine(["*.toml"], ...)`)
-# against it -- an end-to-end proof that the PyO3 seam's `.toml` acceptance
-# (not just the pure Rust `toml_config` module) is wired correctly.
+# The Rust-side conversion table (`speech::toml_config::map_to_toml`) lives only
+# in Rust and has its own dedicated coverage (`src/rust/tests/phase4c_toml.rs`,
+# `src/rust/tests/phase4a_cli.rs::convert_config_binary_end_to_end`). These
+# pyo3 tests exercise a DIFFERENT seam: `load_toml_config` / `Engine(["*.toml"])`
+# only ever READ TOML (`toml_config::toml_to_map`) -- there is no Python-side
+# converter and no `--convert-config` involved. So the `.toml` fixtures here are
+# HAND-WRITTEN, entirely under the `[legacy.raw]` escape hatch (every legacy key
+# is a valid mapping regardless of section, per `toml_to_map`'s raw branch --
+# see `raw_escape_hatch_roundtrips` in `phase4c_toml.rs`): this proves the PyO3
+# `.toml` acceptance is wired correctly without shelling out to `cargo run`
+# (which used to force an uncached debug build of the whole `speech` crate in
+# the `python-pyo3` CI job).
 
 
-def _convert_config_to_toml(config_path: Path, out_path: Path) -> None:
-    result = subprocess.run(
-        [
-            "cargo",
-            "run",
-            "--quiet",
-            "--manifest-path",
-            str(RUST_MANIFEST),
-            "--bin",
-            "speech",
-            "--",
-            "--convert-config",
-            str(config_path),
-            str(out_path),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"--convert-config failed: stdout={result.stdout}\nstderr={result.stderr}"
-    assert out_path.exists(), "--convert-config did not write the .toml output"
+def _raw_toml(pairs: dict[str, str]) -> str:
+    """Hand-render a `[legacy.raw]` TOML table -- every value a quoted string,
+    verbatim. Deliberately ignorant of `toml_config::KEY_TABLE`'s canonical
+    section names: the raw escape hatch flattens to the exact same
+    `dict[str, str]` shape as the canonical sections do (`toml_to_map` inserts
+    both under the plain legacy key), so this is a legitimate, minimal way to
+    author a `.toml` config by hand."""
+    lines = ["[legacy.raw]"]
+    for key, value in pairs.items():
+        k = key.replace("\\", "\\\\").replace('"', '\\"')
+        v = value.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'"{k}" = "{v}"')
+    return "\n".join(lines) + "\n"
 
 
 def test_load_toml_config_matches_legacy_parse(tmp_path: Path) -> None:
     config_path = PHASE4A / "tier1_tdc.config"
+    want = speech_rs.parse_legacy_config(config_path.read_text())
+
     toml_path = tmp_path / "tier1_tdc.toml"
-    _convert_config_to_toml(config_path, toml_path)
+    toml_path.write_text(_raw_toml(want))
 
     got = speech_rs.load_toml_config(str(toml_path))
-    want = speech_rs.parse_legacy_config(config_path.read_text())
     assert got == want
 
 
 def test_engine_runs_tier1_tdc_toml(tmp_path: Path) -> None:
-    # Mirrors test_engine_runs_tier1_tdc, but the config is converted to TOML
-    # first and Engine() is constructed from the .toml path -- exercising the
-    # `.toml` extension-dispatch branch inside `Engine::new` (speech-py/src/lib.rs).
+    # Mirrors test_engine_runs_tier1_tdc, but a second Engine is constructed
+    # from a hand-written `tier1_tdc.toml` (same key set as the seeded
+    # `tier1_tdc.config`, incl. its epochs=0 override) -- exercising the
+    # `.toml` extension-dispatch branch inside `Engine::new` (speech-py/src/lib.rs)
+    # without any conversion step.
     _seed_tier1(tmp_path)
-    toml_path = tmp_path / "tier1_tdc.toml"
-    _convert_config_to_toml(tmp_path / "tier1_tdc.config", toml_path)
+    config_map = speech_rs.parse_legacy_config((tmp_path / "tier1_tdc.config").read_text())
+    (tmp_path / "tier1_tdc.toml").write_text(_raw_toml(config_map))
 
     with chdir(tmp_path):
         eng_config = speech_rs.Engine(["tier1_tdc.config"], "-m")

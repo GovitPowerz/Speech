@@ -7,7 +7,10 @@
 //!   duplicate-key fixture (`configs/legacy/LID_BLSTM.config`) explicitly.
 //! - `engine_output_bit_identity`: the tier-1 TDC fixture run through
 //!   `CorpusProcessor` from its `.config` vs from its converted `.toml` produces a
-//!   bit-identical `results_matrix`.
+//!   bit-identical `results_matrix`, modulo column 6 (wall-clock timing). A THIRD
+//!   in-test control run (same `.config`-derived map, cloned) proves the col-6
+//!   mask is actually justified -- two runs of the IDENTICAL config diverge only
+//!   at column 6 too -- instead of relying on a one-off manual scratch check.
 //! - `lid_blstm_toml_full_coverage`: converting the full legacy `LID_BLSTM.config`
 //!   produces ZERO `[legacy.raw]` fallbacks -- `KEY_TABLE` covers every key it uses.
 //! - `raw_escape_hatch_roundtrips`: an unmapped key (incl. one needing a quoted
@@ -17,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use indexmap::IndexMap;
+use ndarray::Array2;
 
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -183,6 +187,18 @@ fn engine_output_bit_identity() {
     cfg_map.insert("Dump_Directory".to_string(), "vrcts_config".to_string());
     std::fs::create_dir_all("vrcts_config").unwrap();
 
+    // The CONTROL run: a second `CorpusProcessor` built from the SAME
+    // `.config`-derived map (cloned before the primary run consumes `cfg_map`;
+    // own `Dump_Directory` so its VRCTS writes cannot cross-talk with the
+    // primary run's). This is what upgrades the col-6-is-timing-only claim below
+    // from a one-off manual scratch check into something CI actually proves.
+    let control_map = {
+        let mut m = cfg_map.clone();
+        m.insert("Dump_Directory".to_string(), "vrcts_control".to_string());
+        m
+    };
+    std::fs::create_dir_all("vrcts_control").unwrap();
+
     let toml_map = {
         let mut m = cfg_map.clone();
         m.insert("Dump_Directory".to_string(), "vrcts_toml".to_string());
@@ -207,44 +223,56 @@ fn engine_output_bit_identity() {
     let mut cp_config = CorpusProcessor::new(vec![cfg_map], mode(ModeKind::Solo)).unwrap();
     cp_config.run().unwrap();
 
+    let mut cp_control = CorpusProcessor::new(vec![control_map], mode(ModeKind::Solo)).unwrap();
+    cp_control.run().unwrap();
+
     let mut cp_toml = CorpusProcessor::new(vec![reloaded_toml_map], mode(ModeKind::Solo)).unwrap();
     cp_toml.run().unwrap();
 
     let from_config = cp_config.results_matrix();
+    let from_control = cp_control.results_matrix();
     let from_toml = cp_toml.results_matrix();
-    assert_eq!(
-        from_config.dim(),
-        from_toml.dim(),
-        "results_matrix shape must match"
-    );
 
     // Column 6 is the wall-clock TIMING column (masked in every phase4a golden
     // comparison, e.g. `phase4a_tier1_e2e.rs::solo_tdc_matches`) -- it is expected
     // to differ between any two runs, even two runs of the IDENTICAL config in the
-    // SAME process (confirmed by a scratch check: re-running `CorpusProcessor` on
-    // an unmodified config twice sequentially already diverges at column 6 only).
-    // Every other column is a pure function of the (identical) config content, so
-    // it must be STRICT bit-identical here -- this is a same-port same-machine
+    // SAME process. The CONTROL pair proves exactly that claim in CI (rather than
+    // a one-off manual scratch check): two `CorpusProcessor` runs from the SAME
+    // `.config`-derived map must ALSO diverge only at column 6. Every other
+    // column is a pure function of the (identical) config content, so both pairs
+    // must be STRICT bit-identical elsewhere -- this is a same-port same-machine
     // comparison, not an oracle/libm one, so no canary-gated tolerance applies.
-    let (rows, cols) = from_config.dim();
+    assert_masked_col6_bit_identical(
+        from_config,
+        from_control,
+        "control (.config vs .config, identical map)",
+    );
+    assert_masked_col6_bit_identical(from_config, from_toml, ".config vs .toml");
+
+    // Non-vacuity: the matrix must actually contain data (3 files x 2 channels).
+    assert_eq!(from_config.dim(), (6, 21));
+}
+
+/// Shared masked-compare helper for `engine_output_bit_identity`: two
+/// `results_matrix()` outputs must be bit-identical on every column except 6
+/// (wall-clock timing).
+fn assert_masked_col6_bit_identical(a: &Array2<f64>, b: &Array2<f64>, label: &str) {
+    assert_eq!(a.dim(), b.dim(), "{label}: results_matrix shape must match");
+    let (rows, cols) = a.dim();
     for r in 0..rows {
         for c in 0..cols {
             if c == 6 {
                 continue;
             }
             assert_eq!(
-                from_config[[r, c]].to_bits(),
-                from_toml[[r, c]].to_bits(),
-                "results_matrix[{r},{c}] must be bit-identical between .config and .toml runs \
-                 (got {} vs {})",
-                from_config[[r, c]],
-                from_toml[[r, c]]
+                a[[r, c]].to_bits(),
+                b[[r, c]].to_bits(),
+                "{label}: results_matrix[{r},{c}] must be bit-identical (got {} vs {})",
+                a[[r, c]],
+                b[[r, c]]
             );
         }
     }
-
-    // Non-vacuity: the matrix must actually contain data (3 files x 2 channels).
-    assert_eq!(from_config.dim(), (6, 21));
 }
 
 // === lid_blstm_toml_full_coverage ============================================

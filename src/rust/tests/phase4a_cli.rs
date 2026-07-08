@@ -7,6 +7,9 @@
 //! (`CARGO_BIN_EXE_speech`) and replays the Task 8 tier-1 solo golden
 //! (`solo_tdc_matches` in `phase4a_tier1_e2e.rs`) through the CLI surface, to pin
 //! `main.rs`'s parse -> CorpusProcessor::new -> run wiring end to end.
+//! `convert_config_binary_end_to_end` / `convert_config_wrong_arity_exits_nonzero`
+//! (Phase 4c Task 5 follow-up) cover `main.rs`'s OWN `--convert-config` dispatch
+//! branch the same way, via the same `CARGO_BIN_EXE_speech` idiom.
 
 mod common;
 
@@ -16,6 +19,8 @@ use std::sync::Mutex;
 
 use common::{assert_matrix, load_bin_phase4a, mat_var_matrix};
 use speech::cli::{ModeKind, parse_cli};
+use speech::legacy_config::parse_legacy_config;
+use speech::toml_config::toml_to_map;
 
 /// `set_current_dir` is process-global; serialize against other tests in this
 /// binary (mirrors `phase4a_tier1_e2e.rs`'s `CWD_LOCK`, but this file's tests
@@ -249,5 +254,75 @@ fn binary_usage_on_parse_failure() {
             .to_lowercase()
             .contains("usage"),
         "stderr should print usage"
+    );
+}
+
+// === --convert-config (main.rs pre-parse_cli dispatch) ========================
+//
+// `speech --convert-config <in.config> <out.toml>` is main.rs's OWN dispatch
+// branch, handled before `parse_cli` runs at all (see main.rs's doc comment:
+// port-only tooling, not a legacy CLI surface) -- but it is still binary-level
+// wiring exercised via the same `CARGO_BIN_EXE_speech` idiom as
+// `binary_end_to_end`, so it lives here rather than in `phase4c_toml.rs` (which
+// charters the pure `toml_config` module logic, no process spawning). Closes the
+// Phase 4c Task 5 concern that this path was only exercised by the Python pyo3
+// suite's uncached `cargo run` shell-out.
+
+#[test]
+fn convert_config_binary_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let in_path = phase4a_src().join("tier1_tdc.config");
+    let out_path = dir.path().join("tier1_tdc.toml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_speech"))
+        .args([
+            "--convert-config",
+            in_path.to_str().unwrap(),
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to run speech binary");
+
+    assert!(
+        output.status.success(),
+        "speech --convert-config exited non-zero: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        out_path.exists(),
+        "--convert-config did not write the .toml output"
+    );
+
+    let want = parse_legacy_config(&std::fs::read_to_string(&in_path).unwrap());
+    let toml_text = std::fs::read_to_string(&out_path).unwrap();
+    let got = toml_to_map(&toml_text)
+        .unwrap_or_else(|e| panic!("converted .toml failed to parse back: {e:#}"));
+    assert_eq!(
+        got, want,
+        "converted .toml must round-trip (toml_to_map) to the exact source .config map"
+    );
+}
+
+#[test]
+fn convert_config_wrong_arity_exits_nonzero() {
+    // main.rs gates the `--convert-config` branch on `args.len() == 4` exactly;
+    // a short invocation falls through to `parse_cli`, which then rejects
+    // "--convert-config" as an unknown mode flag -- the same usage-failure exit
+    // contract as `binary_usage_on_parse_failure` above.
+    let output = Command::new(env!("CARGO_BIN_EXE_speech"))
+        .args(["--convert-config", "only_one_path.config"])
+        .output()
+        .expect("failed to run speech binary");
+
+    assert!(
+        !output.status.success(),
+        "speech --convert-config with wrong arity must exit non-zero"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "usage-failure exit code contract"
     );
 }
