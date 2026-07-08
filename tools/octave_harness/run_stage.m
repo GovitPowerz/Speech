@@ -26,6 +26,8 @@ function run_stage(stage, out_dir)
       stage_rprop(out_dir);
     case 'vec2struct'
       stage_vec2struct(out_dir);
+    case 'computecost'
+      stage_computecost(out_dir);
     otherwise
       error('run_stage: unknown stage %s', stage);
   end

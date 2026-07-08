@@ -27,6 +27,8 @@ here `addpath` the vendored sources and **call** them, never modify them.
 | `stage_smorms3.m` | Drives the REAL `SMORMS3.m` classdef over scripted gradient sequences; dumps per-step `theta/MMS/stepRate/delta/lrate` + the round-trip variant. |
 | `stage_rprop.m` | Drives the REAL `Rprop.m` function over a crafted derivative/cost sequence; dumps per-step `weights/delta/deltaweight/derivatives`. |
 | `smorms3_f_df.m` | The injected SMORMS3 objective (scripted gradient + `theta_out` round-trip offset). |
+| `stage_vec2struct.m` | Drives the REAL `vec2struct.m` (+ `printConfig.m`) over six algo/mask/PS cases; dumps the genome<->config bijection goldens. |
+| `stage_computecost.m` | **FALLBACK-TIER** transcription of the `ComputeCost.m` cost-assembly lines (`:285-652`); drives the balance-law 0/3/4/5/10 error + cost, sortrows aggregation, deriv averaging, pooled stats, and L2 over the committed 4a/4b MultiConfigResults fixtures + crafted variants. |
 
 Run a stage by hand:
 
@@ -35,17 +37,28 @@ octave-cli --no-gui --quiet --path tools/octave_harness \
   --eval "run_stage('smorms3', '/tmp/out')"
 ```
 
-The extractor `scripts/extract_phase4c_fixtures.py` runs the stages into a tempdir,
-converts the `.mat` dumps to `.bin` (dropping the MAT-v7 timestamp header, so re-runs are
-byte-identical), validates shapes/step-counts/non-vacuity, hash-guards the prior-phase
-fixtures, and commits the `.bin` + `manifest.json`.
+The extractors (`scripts/extract_phase4c_fixtures.py` for smorms3/rprop,
+`scripts/extract_phase4c_genome_fixtures.py` for vec2struct,
+`scripts/extract_phase4c_computecost_fixtures.py` for computecost) run the stages into a
+tempdir, convert the `.mat` dumps to `.bin` (dropping the MAT-v7 timestamp header, so
+re-runs are byte-identical), validate shapes/step-counts/non-vacuity, hash-guard the
+prior-phase (and prior-phase4c) fixtures, and commit the `.bin` + `manifest.json`.
 
 ## Fidelity tiers
 
-Both current stages are **TIER 1**: the real vendored classdef/function is exercised
-unchanged (real ctor, real `optimization_step`, real `f_df_wrapper`, real update math for
-SMORMS3; the real function for Rprop). The C++ harness's "reimpl-swap" fallback tier has
-no analog here yet.
+The smorms3/rprop/vec2struct stages are **TIER 1**: the real vendored classdef/function is
+exercised unchanged (real ctor, real `optimization_step`, real `f_df_wrapper`, real update
+math for SMORMS3; the real function for Rprop; the real `vec2struct`/`printConfig`).
+
+`stage_computecost.m` is the **FALLBACK TIER** (the MATLAB analog of the C++ harness's
+"reimpl-swap"): `ComputeCost.m`'s top half shells out to the engine
+(`system('python RunFsp.py ...')`, `:173-191`) after a config-write loop and then LOADS the
+worker `.mat`/`.bin` the shell-out wrote, and its `!`-escape cleaning (`:37`) deletes any
+pre-injected worker files before the shell-out -- so there is no injection point that leaves
+the vendored `.m` unmodified. The stage transcribes only the PURE assembly lines
+(`:285-652`) line-for-line with `% legacy:` provenance and lets Octave execute the real
+MATLAB builtins (sortrows/median/hist/std/cumsum/exp/log). See `IMPROVEMENTS.md` (phase4c
+ComputeCost fallback-tier entry).
 
 The **one** Octave-compat accommodation is `stage_smorms3.m` passing a single dummy
 `varargin` to `SMORMS3(...)`: Octave 11.3.0 miscounts the empty-cell lvalue cs-list at

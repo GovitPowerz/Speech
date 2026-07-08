@@ -31,6 +31,7 @@ Two DIFFERENT tolerance regimes are load-bearing here, not one:
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 from collections.abc import Iterator
@@ -43,6 +44,8 @@ import pytest
 import scipy.io
 from numpy.typing import NDArray
 from speech.config_bridge import parse_legacy_config as parse_legacy_config_py
+from speech.engine import forward_backward
+from speech.optimizers import Smorms3
 from speech.weight_bridge import read_bin
 
 from tests._libm_gate import assert_f64_close
@@ -364,6 +367,62 @@ def test_same_seed_determinism(tmp_path_factory: pytest.TempPathFactory) -> None
     assert np.array_equal(masked[0].view(np.uint64), masked[1].view(np.uint64)), "results_matrix must be bit-identical across runs (timing column masked)"
     assert np.array_equal(sad_weights[0].view(np.uint64), sad_weights[1].view(np.uint64)), "SAD final weights must be bit-identical across runs"
     assert np.array_equal(lid_weights[0].view(np.uint64), lid_weights[1].view(np.uint64)), "LID final weights must be bit-identical across runs"
+
+
+# ==== Task 9: engine.forward_backward over the seam ==========================
+
+
+def _seed_tier2_single_epoch(dst: Path) -> None:
+    """`_seed_tier2_spectral` + override the config's `Epochs 3` down to 1 (last-wins),
+    so `Engine.run()` is a SINGLE forward-backward + deriv dump -- the gradient eval
+    `forward_backward` needs, not the full 3-epoch train."""
+    _seed_tier2_spectral(dst)
+    with (dst / "tier2_spectral.config").open("a") as fh:
+        fh.write("\nNeural_Networks_BackPropagation_Epochs 1\n")
+
+
+def test_forward_backward_tier2_determinism(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """`engine.forward_backward` (ComputeGradient's contract) on the tier-2 spectral fixture:
+    two evals of the SAME seed weights on FRESH engines (the coarse-seam rebuild-per-eval
+    pattern) must return a bit-identical finite cost + a single-net gradient paired and
+    shaped to the input weights. The FULL epoch-0->1 equivalence lands in T12's exit gate."""
+    results: list[tuple[float, NDArray[np.float64]]] = []
+    seed: NDArray[np.float64] | None = None
+    for i in range(2):
+        dst = tmp_path_factory.mktemp(f"fb_tier2_{i}")
+        _seed_tier2_single_epoch(dst)
+        with chdir(dst):
+            eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
+            if seed is None:
+                seed = np.array(eng.weights(0)[0], dtype=np.float64, copy=True)
+            f, grads = forward_backward(eng, [seed], None)
+            assert len(grads) == 1, "algo 3 -> a single [sad] gradient"
+            assert grads[0].shape == seed.shape, "gradient must be paired + shaped to the input weights"
+            assert math.isfinite(f), "cost must be finite"
+            assert np.isfinite(grads[0]).all(), "gradient must be finite"
+            results.append((f, np.array(grads[0], dtype=np.float64, copy=True)))
+
+    assert results[0][0] == results[1][0], "forward_backward cost must be deterministic across fresh engines"
+    assert np.array_equal(results[0][1].view(np.uint64), results[1][1].view(np.uint64)), "forward_backward gradient must be bit-identical across fresh engines"
+
+
+def test_forward_backward_drives_smorms3(tmp_path: Path) -> None:
+    """One `Smorms3` step wrapping `forward_backward` (the inner training move) stays finite
+    and shape-stable -- the seam feeds the optimizer, not just the goldens."""
+    _seed_tier2_single_epoch(tmp_path)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
+        theta0 = [np.array(eng.weights(0)[0], dtype=np.float64, copy=True)]
+
+        def f_df(theta: list[NDArray[np.float64]], _ec: int) -> tuple[float, list[NDArray[np.float64]], list[NDArray[np.float64]]]:
+            cost, grads = forward_backward(eng, theta, None)
+            return cost, grads, theta  # theta_out is a pass-through (SMORMS3 adds dtheta to it)
+
+        opt = Smorms3(f_df, theta0)
+        opt.optimization_step()
+        assert opt.theta.shape == theta0[0].shape, "theta stays the flat net length"
+        assert np.isfinite(opt.theta).all(), "one SMORMS3 step must keep theta finite"
+        assert opt.hist_f_flat and math.isfinite(opt.hist_f_flat[-1]), "the recorded cost must be finite"
 
 
 # ==== Task 3 minors folded in =================================================

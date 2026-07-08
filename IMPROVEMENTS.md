@@ -2545,6 +2545,45 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   block (e.g. Cell `nbNeed` using `+2+3` instead of `+1`) shifts every downstream genome index
   -> both the count and out_param goldens fail (risk R3).
 
+- **[phase4c] L2 regularization is wired for the LID net ONLY, never the SAD/seg net**
+  (`ComputeCost.m:362` gradient `MultiDerivLID += L2_regul*(MultiWeightsLID.*(1-isBiasLID))` and
+  `:554` cost `NNCostLID += L2_regul*sum((MultiWeightsLID.*(1-isBiasLID)).^2)/2`, both inside the
+  `if (PS.VP.algo == 6)` LID block; the SAD deriv `MultiDeriv` is averaged at `:357` with NO L2
+  term and `NNCostSeg` at `:430` gets none either; ported in `engine.py::forward_backward`): the
+  seg/SAD network is left unregularized regardless of `L2_regul`. The port reproduces the
+  asymmetry -- `forward_backward` applies `l2_penalty` to net index 1 (LID) only, never net 0.
+  *Pinned by:* `test_l2_penalty` (the helper) + `test_forward_backward_tier2_determinism` (algo 3,
+  `l2` default 0 -> no L2 on the seg net). *Mutation:* applying `l2_penalty` to `gradients[0]`
+  (the SAD net) in `forward_backward` would double-count regularization the legacy never applies.
+
+- **[phase4c] ComputeCost stage is FALLBACK-TIER (stage-local transcription of the assembly
+  lines), not TIER 1** (`tools/octave_harness/stage_computecost.m`; adjudication): unlike the
+  SMORMS3/Rprop/vec2struct stages (which `addpath` + CALL the vendored `.m` unchanged),
+  `ComputeCost.m` cannot be driven wholesale in Octave -- its top half shells out to the engine
+  (`system('python RunFsp.py ...')`, `:173-191`) after a `vec2struct`+`nnet2MatFile` config-write
+  loop and then LOADS the worker `.mat`/`.bin` the shell-out wrote (`:216-282`), and the
+  `!`-escape cleaning (`:37`) deletes any pre-injected worker files before the shell-out, so there
+  is no injection point that leaves the vendored `.m` unmodified. The stage transcribes the PURE
+  assembly lines (`:285-652`: sortrows `[1 2 3]`, deriv averaging, pooled stats, L2, the balance
+  0/3/4/5/10 error + cost) line-for-line with `% legacy:` provenance and lets Octave execute the
+  real MATLAB builtins (sortrows/median/hist/std/cumsum/exp/log). The engine-shelling top half is
+  the seam -- covered separately by `tests/pyo3` against `speech_rs.Engine`, not by this stage.
+  *Pinned by:* `tests/test_phase4c_engine_cost.py` (all groups). *Mutation:* the balance-3-vs-4
+  over-90 saturation coefficient (`0*` vs `1*`, `:450`/`:458`) is checked to DIVERGE
+  (`test_balance_3_vs_4_over90_saturation` + the extractor's non-vacuity guard).
+
+- **[phase4c] The fractional-error `mean`/`mean(.^2)` cost scalars need an always-tolerant
+  comparator (`close`), NOT the oracle-exact libm canary** (`engine.py::compute_cost` `:626-651`
+  balance cost; `tests/test_phase4c_engine_cost.py::_assert_close_always`): the per-file ERROR
+  vectors are bit-exact numpy-vs-Octave (single-op `/100`), but averaging FRACTIONAL errors
+  (cb3/cb4/tier2/balance-10) diverges by ~1 ULP by SUMMATION ORDER -- a numpy-`mean`-vs-Octave-
+  `mean` reduction difference that persists EVEN on the oracle libm env (it is not a
+  transcendental split), so `assert_f64_close` (exact-on-oracle) cannot pin it. The `close` class
+  applies a tight hybrid `<=4 ULP or 512*2^-52*max(|want|,1)` bound on every platform. cb0/cb5
+  (INTEGER-error means, exact `/n`) stay STRICT. *Pinned by:* the `close`-classified goldens in
+  the manifest. *Mutation:* classifying cb3_cost as `canary` (as first drafted) fails on the
+  oracle env -- the reduction gap survives the libm gate.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
