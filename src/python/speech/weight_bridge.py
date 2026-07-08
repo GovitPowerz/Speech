@@ -12,19 +12,56 @@ import json
 import math
 import struct
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 
+def _spec_from_net(net: dict[str, object]) -> dict[str, object]:
+    """Derive the minimal LSTM-shape spec `nnet_to_flat` needs, straight off `net`'s own matrices.
+
+    `net["forward"]`/`net["backward"]` layers are self-describing 2D arrays (out x ncols), so
+    unlike `flat_to_nnet` (which slices a shapeless flat vector and MUST be told the spec),
+    `nnet_to_flat` only ever reads `spec["LSTMNeuronNb"][i+1]` (= layer i's row count "out") and
+    the product `spec["LSTMNeuronNb"][i] * spec["LSTMSubSampling"][i]` (= layer i's fan-in
+    "fin", from the Cell matrix's narrower `out+fin+1` column count - see `_pack_lstm_layer`).
+    `LSTMNeuronNb[i+1]` for i>0 is shared with layer i-1's fan-in product, so it is NOT a free
+    choice: it is pinned to layer i-1's own "out". `LSTMNeuronNb[0]` has no such constraint (no
+    layer -1), so it is set to layer 0's fan-in directly with `LSTMSubSampling[0] = 1`.
+    Output layers and mean/std need no spec at all (`nnet_to_flat` reads their shapes as-is).
+    """
+    forward = cast(list[dict[str, np.ndarray]], net["forward"])
+    outs = [int(np.asarray(layer["cell"], dtype=np.float64).shape[0]) for layer in forward]
+    fins = [int(np.asarray(layer["cell"], dtype=np.float64).shape[1]) - out - 1 for out, layer in zip(outs, forward, strict=True)]
+    lstm_neuron_nb = [fins[0], *outs]
+    lstm_subsampling = [1, *(fins[i] // lstm_neuron_nb[i] for i in range(1, len(outs)))]
+    return {"LSTMNeuronNb": lstm_neuron_nb, "LSTMSubSampling": lstm_subsampling}
+
+
 def pack_weights(net: dict[str, object]) -> NDArray[np.float64]:
-    """Flatten a network struct into the canonical column-major vector (Phase 3)."""
-    ...
+    """Flatten a network struct into the canonical row-major flat vector.
+
+    `net` is nnet-domain (`config_to_nnet`'s output shape: `{"forward"/"backward": [layer ->
+    {"input"/"forget"/"output"/"cell": 2D}], "output": [layer -> 2D], "mean"/"std": 1D}` - see
+    the module-level "Structured/Nnet" comment above `element_count`). This is a thin wrapper
+    over `nnet_to_flat` (the Rust twin: `config.rs::nnet_to_flat`): it needs no separate `arch`
+    because `net`'s matrices already carry their own shape, so `_spec_from_net` recovers the
+    handful of scalars `nnet_to_flat` actually reads.
+    """
+    return np.asarray(nnet_to_flat(net, _spec_from_net(net)), dtype=np.float64)
 
 
 def unpack_weights(flat: NDArray[np.float64], arch: dict[str, object]) -> dict[str, object]:
-    """Inverse of `pack_weights` (Phase 3)."""
-    ...
+    """Inverse of `pack_weights`.
+
+    `flat` is a shapeless vector, so - unlike `pack_weights` - the caller MUST supply `arch`: an
+    `NnetSpec`-shaped dict (as produced by `config_bridge.nnet_spec`: `LSTMNeuronNb`,
+    `LSTMSubSampling`, `OutputNeuronNb`, `OutputSubSampling`, `NNetInputSize`). Thin wrapper over
+    `flat_to_nnet` (the Rust twin: `config.rs::flat_to_nnet`), which is where the real slicing
+    logic lives.
+    """
+    return flat_to_nnet(flat, arch)
 
 
 def read_bin(path: Path) -> tuple[int, int, NDArray[np.float64]]:
