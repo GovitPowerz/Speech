@@ -2492,6 +2492,59 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   deterministic; the deviation is recorded here for the stochastic optimizers to come. *Fix
   candidate:* none -- this is a deliberate, documented divergence, not a bug to fix.
 
+- **[phase4c] printConfig.m emits the Forward_/Backward_/LID peephole-flag + MaxSaturation
+  fields -- the ACTIVE inline condition DIVERGES from the commented-out `isNotExcluded`**
+  (`legacy/Optimizer_V6.2.2/functions/printConfig.m:8-9` vs the dead `:45-77`; ported in
+  `src/python/speech/genome.py::_printconfig_written`): the clean refactored `isNotExcluded`
+  helper lists `AlgName_Forward_` / `AlgName_Backward_` / their `MaxSaturation` +
+  `Is*PeepholesActive` variants ALL as excluded prefixes, so it would drop every
+  `AlgName_Forward_*` field. But that helper is COMMENTED OUT at the call site (`:10`); the
+  live boolean (`:8-9`) whitelists `MaxSaturation` + the three peephole-flag families (and any
+  `_ActivationClocks`-suffixed field) with `~= 0` OR-arms, excluding ONLY the weight matrices
+  (`Layer_*Weights` / `LSTMBlock` / `Output_Layer` / `NormalizeInput`). The port mirrors the
+  LIVE condition, not the helper. *Verified against* the real `1_worker_1.config`
+  (`tests/reference_data/phase0/`): `BLSTM_Forward_IsCellsPeepholesActive true` etc. ARE
+  present, weight lines absent. *Pinned by:* `test_configstruct_fields_match`
+  (`tests/test_phase4c_genome.py`, spectral/twin cases -- both emit the six peephole flags).
+  *Mutation:* switching `_printconfig_written` to the `isNotExcluded` semantics (exclude every
+  `AlgName_Forward_`/`Backward_`) drops the six peephole-flag lines -> the config golden fails.
+
+- **[phase4c] vec2struct.m:964 LID `decision_thresh_falling` is unconditionally overwritten
+  with `-decision_thresh_rising`** (`legacy/Optimizer_V6.2.2/functions/vec2struct.m:954-965`;
+  ported in `src/python/speech/genome.py::_lid`): the LID falling threshold runs the full
+  param-decode + mask + `> rising` clamp branch (all of which write `out_param`), then the very
+  next line before `setfield` does `fieldValue = -configStruct.AlgName_LID_decision_thresh_rising`
+  -- discarding the just-computed value for the STORED config (out_param keeps the branch
+  result). The SAD `decision_thresh_falling` (`:50-60`) has no such negate -- a load-bearing
+  asymmetry. *Pinned by:* `test_twin_lid_falling_negate_quirk` (`falling == -rising`).
+  *Mutation:* dropping the `fieldValue = -rising` line makes the twin config's
+  `BLSTM_LID_decision_thresh_falling` carry the clamped decode instead of `-rising` -> fails.
+
+- **[phase4c] The calibration `CostLawParam*`/`CostLawThresh*` fields encode `out_param`
+  UNCONDITIONALLY (not just under a mask), and clamp to [0,1]; `ComputeDeltasNb` rounds WITHOUT
+  `abs`; `min_speech(3)` is floored at 0 only for algo < 5** (`vec2struct.m:1384-1421`, `:580`,
+  `:239-241`; ported in `genome.py::_clamped01`, `_algo_spectral`, `_front_matter`): the six
+  calibration clamps write `out_param(count) = fieldValue*adim` before the `isfield` mask check
+  (so a sorted/clamped genome round-trips even unmasked); the law strings decode via
+  `rem(round(5*|p|/adim),5) -> {log,linear,square,sqrt,cubic}`. `ComputeDeltasNb` uses
+  `round(param)` (signed) unlike its `abs`-guarded neighbours. `min_speech`'s third element is
+  `max(0,.)`-floored only below algo 5. *Pinned by:* `test_calib_law_decode_and_clamps`
+  (sqrt/cubic + clamp-high `1`/clamp-low `0`) + `test_out_param_inverse_matches` (bit-exact).
+  *Mutation:* gating the `_clamped01` out_param write behind the mask (as the string-law fields
+  are) leaves the calib `out_param` == input param at those positions -> the out_param golden fails.
+
+- **[phase4c] `count_param` (the genome length) is the 1-based cursor's FINAL value =
+  `len(genome) + 1`, and is a pure function of the PS spec (algo + net sizes + balance +
+  flags), independent of param values and the mask** (`vec2struct.m:30` init `count_param = 1`,
+  returned at `:1`; `genome_length` in `src/python/speech/genome.py`): `Train_BLSTM_Seg.m:682`
+  sets `PS.NS.ncoef = count_param` (the +1 form) then immediately overwrites it with `5e4`
+  (`:683`) -- a harmless over-allocation, so the off-by-one never bites operationally. The port
+  returns the identical `count_param`; `genome_length` runs the same walk over a zero genome
+  (mask-independent). *Pinned by:* `test_count_param_matches` (STRICT vs Octave per case, and
+  `count == len(param)+1`, and `genome_length == count`). *Mutation:* any single miscounted
+  block (e.g. Cell `nbNeed` using `+2+3` instead of `+1`) shifts every downstream genome index
+  -> both the count and out_param goldens fail (risk R3).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
