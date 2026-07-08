@@ -311,7 +311,7 @@ T9_WORKDIR_FILES = [
     "listing_gc_wav.csv",
 ]
 T9_PHSEQ_FILES = ["s1.phSeq", "s2.phSeq", "s1.stm", "s2.stm", "listing_train.csv"]
-T9_WAV_FILES = ["f1.wav", "f1.stm"]
+T9_WAV_FILES = ["f1.wav", "f1.stm", "f1_gc.stm"]
 T9_EPOCHS = 8  # 6 training epochs + solo + final eval
 T9_DUMPS = (
     ["tiny_sad_seed.bin", "tiny_lid_seed.bin"]
@@ -1151,7 +1151,7 @@ def main() -> None:
                 "masked). twin_gradcheck: Mode-5 wav 1-file corpus, BOTH nets backprop-"
                 "active -> the per-network cost-column switch (ii=0 SAD cols 4/len-1, ii=1 "
                 "LID cols 14/len-2) golden per net; lid5_gradcheck: Algo 5, cols 14/len-2. "
-                "SQUARE cost laws -> the gradcheck goldens are strict-bits everywhere. "
+                "SQUARE cost laws avoid the cost-law libm (the LSTM activation chain still carries libm, so the goldens stay canary-gated off the oracle env); Audio_max_duration 0.2 keeps every backward deriv reduction below the k>=23 Eigen-blocking boundary. "
                 "Each gradcheck .bin is (sweep+1) x 3: rows 0..sweep-1 = [analytic_col0, "
                 "analytic_col1, numerical]; final row [mean_error, mean_relative_error, 0]."
             ),

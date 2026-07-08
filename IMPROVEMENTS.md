@@ -328,7 +328,16 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the UB guard and reads `LTSVshift` unconditionally when the key is present (the oracle harness does the
   same, so the golden stays valid; all four variant configs supply `LTSVshift` explicitly). *Fix
   candidate:* after parity, either give `_LTSVWindowShift` a defined default or make the read
-  unconditional in the legacy (already the effective behavior here).
+  unconditional in the legacy (already the effective behavior here). *Phase 4b Task 9 addendum --
+  the UB observed LIVE:* the Task-9 harness stage drives the REAL compiled `BLSTMSpectralLID`
+  (whose ctor runs the real `buildFromConf`), and the process's FIRST construction landed on a
+  zeroed heap page -> the `!= 0.0` gate SKIPPED the read -> `_LTSVWindowShift` stayed `0.0` ->
+  the LTSV decimation floored to 1 -> a whole-file (201-row) Algo-5 SAD segmentation, while every
+  LATER construction (dirty heap) read the key and produced the deterministic 34-element/0.34s
+  segmentation. Run-order-dependent segmentation from uninitialized memory, empirically confirmed.
+  The harness probe now re-applies the Phase-1 adjudication (assigns the key value explicitly
+  after construction, `tools/oracle_harness/main.cpp` "UB KILL" comment), so every fixture pins
+  the deterministic branch the port implements.
 
 - **[phase1] LTSV frequency band is RESET to `(0, output_dim-1)` for mel variants, diverging from the
   spectral band** (E2E composition: `src/rust/tests/phase1_pipeline_golden.rs` + the harness twin
@@ -1502,7 +1511,18 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   is observable, via a test-only hook. *Fix candidate:* none -- this is the correct legacy order,
   to be reproduced as-is when Phase 4b lands algo 5/6. *Pinned by:* `update_called_with_neg_costlid`
   (`tests/phase4a_save_update.rs`), which asserts the update-side value is `-1.0` while the same
-  call's row-slice write (`cost_lid_row`) still carries the pre-gate value.
+  call's row-slice write (`cost_lid_row`) still carries the pre-gate value. *Phase 4b Task 9
+  addendum -- the gate is now LIVE and pinned end-to-end:* the `twin_train_ns` fixture (Mode-7
+  phSeq corpus whose rising threshold 11 exceeds the constant-10 result_vec -> zero speech every
+  epoch) forces `costLID = -1.0` into every real `updateWeightsLID`; the committed
+  `twin_train_nsx_lid_epoch*.bin` counterfactual (same harness run with the gate DISABLED)
+  diverges from the gated trajectory at the manifest-recorded epoch 5 (`corpus_lid.measured.
+  ns_gate_diverge_epoch` -- the first epoch where the ungated costLID RISES, so Rprop's
+  cost-gated backtrack fires only in the ungated world). *Pinned by:*
+  `twin_train_ns_costlid_gate_live` (`tests/phase4b_corpus_lid.rs`): the replay must equal the
+  ns goldens AND differ from nsx at epoch 5, and `CostLIDMem` must carry the PRE-gate values.
+  Mutation (verified): disabling the `save_and_update` gate (`if false && ...`) makes the test
+  fail at exactly `epoch 5 weight 167` -- the port then reproduces the counterfactual.
 
 - **[phase4a] `saveAndUpdate`'s column means are per file x channel ROW, not per file** (from
   `BagOfProcessors.cpp:409-471`): `resultsperConf[ii].rows()` is one row per (file, channel) pair
@@ -2142,6 +2162,47 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`tests/phase4b_vrcts.rs`): a config missing `VRCTS_min_silence` now errs naming the key.
   Mutation: reverting `from_legacy` to skip the two calls makes this test fail (the construction
   would instead succeed).
+
+- **[phase4b] `saveAndUpdate`'s `PrintConfusionMatrix` outputs are DISPLAY-ONLY -- no
+  parity-relevant storage exists** (`engine/bag_of_processors.rs::save_and_update`, from
+  `BagOfProcessors.cpp:436-443,468`): the algo-5/6 confusion block slices the confusion columns
+  (`block(0, 16, rows, cols-2-16)`) and calls `PrintConfusionMatrix`, but the returned
+  `errorPercLID` feeds ONLY the `:443` `cout` status line and the `outputConfusion` string only
+  the `:468` `cout` -- neither reaches a member, result row, mem matrix, or artifact. The port
+  invokes the call for flow parity and exposes the `(error, matrix)` pair solely as a
+  test-support observation (`last_confusion_for_test`); inventing storage would deviate from the
+  legacy. *Pinned by:* `twin_train_epoch_weights_golden` (`tests/phase4b_corpus_lid.rs`) --
+  the captured `errorPercLID` must equal the harness-measured per-epoch value (50.0 for the
+  2-file 2-class corpus: one hit, one miss), computed by the REAL compiled
+  `PrintConfusionMatrix` in the fixture generator. Mutation: mis-slicing the confusion block
+  (e.g. starting at col 15) changes the captured error and fails the assert.
+
+- **[phase4b] Mode-7's never-forwarded SAD net still gets `updateWeights` -> `0/0 = NaN`
+  normalized derivs -> a deterministic Rprop `+delta` drift** (from `BagOfProcessors.cpp:196` +
+  `BLSTMNeuralNetwork.cpp:304-308` + `Rprop.cpp:9-59`): algo 6's `updateWeights(cost)` runs
+  unconditionally on the SAD net, whose Mode-7 derivs are an all-zero `Nx2` (reset per file,
+  never accumulated -- the SAD net never forwards). The element-wise `col0 cwiseQuotient col1`
+  yields `0/0 = NaN` for every weight row (the stats-tail rows are `0/1 = 0`), and the legacy
+  Rprop's branch structure (`== 0` / `> 0` / `else`) routes NaN into the `else` arm -> `+delta`
+  applied per weight row per epoch, deltas never grown (the `derivTimesPrev` NaN product also
+  lands in the neither-positive-nor-negative arm). The Rust `Rprop` has the identical branch
+  structure, so the NaN semantics agree without special-casing. *Pinned by:*
+  `twin_train_epoch_weights_golden`'s SAD trace (`twin_train_sad_epoch{0..7}.bin` -- generated by
+  the REAL compiled `updateWeights`/`Rprop`): the SAD weight rows drift by exactly `+init_delta`
+  per epoch while the two stats-tail blocks stay put. Mutation: skipping the SAD update when the
+  deriv counts are all zero freezes the trace and fails every epoch >= 1.
+
+- **[phase4b] Mixed-width multi-config bags are broken-as-committed** (from
+  `CorpusProcessor.cpp:342-389` + `BagOfProcessors.cpp:338-349`): algo 5/6 result rows are
+  `18 + classNb` columns wide (the confusion columns), algo 0-4 rows 18 -- but
+  `transformResults` sizes EVERY per-conf matrix (and `ResultsE`) from conf 0's first row's
+  width (`:357`), and `_ResPerConf[cc].row(...) = res` with a wider `res` is an Eigen size
+  mismatch (assert/UB). A bag mixing a LID config with a non-LID config therefore aborts in the
+  legacy; the port's `transform_results_impl` panics on the same shape (out-of-bounds write).
+  No committed legacy config mixes them; same-width bags (all-LID or all-non-LID with equal
+  classNb) are fine. *Fix candidate:* per-conf row widths after parity. Not test-pinned
+  (reaching it requires a deliberately malformed multi-config setup); documented here per the
+  width-growth review in Task 9.
 
 ## Toolchain deviations
 

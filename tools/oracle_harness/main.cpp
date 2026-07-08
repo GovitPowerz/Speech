@@ -202,6 +202,7 @@ struct SpectralProbe : BLSTMSpectralSegmenter {
 // the same protected members are reachable as SpectralProbe's.
 struct LidProbe : BLSTMSpectralLID {
     LidProbe(ConfigFile &conf) : BLSTMSpectralLID(conf, false, false) {}
+    using BLSTMSpectralSegmenter::_LTSVWindowShift;
     using Segmenter::_WindowShift;
     using Segmenter::_WindowSize;
     using Segmenter::_ConvolutionCoeff;
@@ -11380,7 +11381,17 @@ int main(int argc, char** argv) {
             auto runOnce = [&](const Eigen::VectorXd& w, Eigen::MatrixXd* dOut) {
                 ConfigFile c2(conf);
                 Corpus corpus(c2);
-                BLSTMSpectralLID probe(c2, false, false);
+                LidProbe probe(c2);
+                // UB KILL (the FeatureCfg DIVERGENCE NOTE above): the REAL
+                // BLSTMSpectralSegmenter::buildFromConf:50 gates the LTSVshift read
+                // on the UNINITIALIZED _LTSVWindowShift member -- the process's
+                // FIRST construction lands on a zeroed heap page, skips the read,
+                // and floors the LTSV decimation to 1 (a run-order-dependent
+                // segmentation). Re-apply the Phase-1 adjudication (read the key
+                // unconditionally, as the harness transcriptions and the Rust port
+                // do) so EVERY run takes the deterministic branch.
+                probe._LTSVWindowShift = c2.get<double>("BLSTM_LTSVshift");
+                if (probe._LTSVWindowShift < 0.0) probe._LTSVWindowShift = 0.0;
                 probe.setWeights(w);
                 std::vector<std::vector<double>> rows;
                 for (long jj = 0; jj < (long)corpus.getNbOfFiles(); ++jj) {

@@ -899,6 +899,14 @@ impl CorpusProcessor {
         self.processors.get_weights(0)
     }
 
+    /// The bag's captured per-conf `(errorPercLID, confusion)` pairs from the
+    /// LAST `save_and_update` (Task 9; display-only in the legacy).
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn last_confusion_for_test_from_bag(&self) -> &[(f64, Array2<f64>)] {
+        self.processors.last_confusion_for_test()
+    }
+
     /// A hand-sequential oracle for `lanes_n1_equals_sequential`: build a fresh bag,
     /// walk the corpus files in ascending order through `segmentation_function`, and
     /// assemble the same `[file+1, conf+1, chan+1, res...]` ResultsE the engine's
