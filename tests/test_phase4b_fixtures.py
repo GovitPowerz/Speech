@@ -165,6 +165,28 @@ def test_manifest_lid_weight_provenance() -> None:
     assert tuple(cast(list[int], provenance["shape"])) == (rows, cols)
 
 
+# --- Task 4: lid5 (Algo 5) LID_STRUCT calibration -- cost_max_abs delta semantics ---
+
+LID5_FILES = ["f1", "f2", "f3"]
+
+
+def test_lid5_calibration_cost_max_abs_is_a_true_delta() -> None:
+    """`cost_max_abs` (`tools/oracle_harness/main.cpp`'s lid5 LID_STRUCT probe) is the max
+    per-channel |real - reimpl| `_LIDCumulativeError` delta, NOT the magnitude of the real
+    value alone (a harness bug closed in Phase 4c Task 2: the reimpl's per-channel NNCost
+    is now retained -- like `langidR` already was -- and diffed against
+    `segReal._LIDCumulativeError[chan]`, `BLSTMSpectralLID.cpp:414`). Pin the fix: every
+    calibration delta is TINY (same order as `langid_max_abs`'s ~1e-16 ascending-vs-Eigen
+    forward noise), not O(1) -- the pre-fix magnitude-only readings were 19.47/0.1376/19.47."""
+    manifest = _load_manifest()
+    calibration = cast(dict[str, object], cast(dict[str, object], manifest["lid5"])["calibration"])
+    assert set(calibration) == set(LID5_FILES)
+    for f in LID5_FILES:
+        entry = cast(dict[str, object], calibration[f])
+        cost_max_abs = cast(float, entry["cost_max_abs"])
+        assert cost_max_abs < 1e-6, f"lid5 {f}: cost_max_abs {cost_max_abs} not a small real-vs-reimpl delta"
+
+
 def test_mode7_dump_lid_internals_scipy_valued() -> None:
     """DumpLIDInternals (:1136-1158): the harness real-Eigen `.mat` carries
     `features_<n>` = [_OutputForward | _OutputBackward] per kept phSeq block +

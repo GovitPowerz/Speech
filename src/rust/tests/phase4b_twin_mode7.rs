@@ -58,15 +58,15 @@ fn map_of(variant: &str) -> indexmap::IndexMap<String, String> {
 }
 
 fn phseq_audio(f: &str, lang: i32, weight: f64) -> Audio {
-    let mut a = read_audio(
-        &phase4b("corpus_phseq").join(format!("{f}.phSeq")),
-        0.0,
-        120.0,
-        1,
-    )
-    .unwrap();
+    let path = phase4b("corpus_phseq").join(format!("{f}.phSeq"));
+    let mut a = read_audio(&path, 0.0, 120.0, 1).unwrap();
     a.lang_index = lang;
     a.weight = weight;
+    // Mirrors `engine::bag_of_processors::apply_corpus_item` (Phase 4b Task 8), which sets
+    // `Audio::audio_file_name` from the owning `CorpusItem` post-hoc, outside `read_audio`.
+    // Exercises the mode-7 dump filename's legacy-faithful basename derivation (`mode7_dump_
+    // basename`, `tasks/lid.rs`) against a realistic non-`.wav` extension.
+    a.audio_file_name = path.to_string_lossy().into_owned();
     a
 }
 
@@ -247,7 +247,11 @@ fn dump_lid_internals_written_and_valued() {
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // s1 = [bonjour(7), salut(5)]; MinNbOfFrames 4 keeps both -> matNb = 2, features_0/1.
-    let mat = tmp.path().join("chan0_lid_dump.mat");
+    // Legacy-faithful name (`TwinBLSTMSpectralLID.cpp:906-913`): `<audio basename minus 4
+    // trailing chars>_chan<c>_lid_dump.mat` -- audio_file_name's basename is "s1.phSeq"
+    // (8 chars), and the legacy strip is a LITERAL 4 trailing chars (not ".wav"-aware), so
+    // "s1.phSeq" -> "s1.p" (a load-bearing quirk, see IMPROVEMENTS.md).
+    let mat = tmp.path().join("s1.p_chan0_lid_dump.mat");
     assert!(mat.exists(), "dump .mat not written at {mat:?}");
     let bytes = std::fs::read(&mat).unwrap();
     // MAT v5 header text + the variable names appear literally in the (uncompressed) file.

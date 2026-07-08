@@ -88,17 +88,17 @@
       "f1": {
         "seg_max_dt": 0.0,
         "langid_max_abs": 1.11e-16,
-        "cost_max_abs": 19.47
+        "cost_max_abs": 3.553e-15
       },
       "f2": {
         "seg_max_dt": 0.0,
         "langid_max_abs": 1.11e-16,
-        "cost_max_abs": 0.1376
+        "cost_max_abs": 1.11e-16
       },
       "f3": {
         "seg_max_dt": 0.0,
         "langid_max_abs": 1.11e-16,
-        "cost_max_abs": 19.47
+        "cost_max_abs": 3.553e-15
       }
     },
     "measured": {

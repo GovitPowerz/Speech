@@ -1944,6 +1944,32 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the port-only underflow guard are themselves N/A (both unreachable -- `targetIndex` is clamped
   `>= 0`, and min-length SPEECH segments never underflow the slice).
 
+- **[phase4c] CLOSED: the lid5 (Algo 5) `LID_STRUCT` harness probe's `cost_max_abs`
+  calibration recorded the MAGNITUDE of the real value, not a real-vs-reimpl delta -- unlike
+  its sibling `langid_max_abs`** (`tools/oracle_harness/main.cpp`'s `runLidFile` lambda, the
+  `lid5` SECONDARY real-Eigen probe added in Phase 4b Task 4): `langid_max_abs` is a genuine
+  `std::fabs(langidR[chan](0,cc) - langidReal)` delta because the reimpl's per-channel `langID`
+  matrix is captured through an out-param (`langidR`, filled by `transcribeLid`). The sibling
+  `cost_max_abs` line instead read `std::fabs(segReal._LIDCumulativeError[chan])` -- the REAL
+  value's absolute magnitude alone, because `transcribeLid` never returned its per-channel
+  `NNCost` (`BLSTMSpectralLID.cpp:414`'s `seg._LIDCumulativeError[chan] = NNCost` counterpart)
+  for the caller to diff against. The committed manifest values (19.47/0.1376/19.47) were
+  therefore never a calibration signal at all -- they were just `|_LIDCumulativeError|`,
+  masking whatever the real reimpl-vs-real forward divergence actually was. Fixed:
+  `transcribeLid` gained a `cumErrOut` out-param (mirroring `langidOut`/`confusionOut`/
+  `isCorrectOut`), populated with the reimpl's raw per-channel `NNCost` (no `/segmentsCount`,
+  no weight scaling -- matching the real ctor's `seg._LIDCumulativeError[chan] = NNCost`
+  exactly); `runLidFile` now computes `std::fabs(segReal._LIDCumulativeError[chan] -
+  cumErrR[chan])`. Measured deltas after the fix: f1/f3 `3.553e-15`, f2 `1.11e-16` -- the same
+  order as `langid_max_abs`'s `1.11e-16` (the expected ascending-loop-vs-real-Eigen forward
+  noise floor), confirming the bug was purely a harness diagnostic defect, not a hidden
+  port-vs-legacy divergence. *Pinned by:* `tests/test_phase4b_fixtures.py::
+  test_lid5_calibration_cost_max_abs_is_a_true_delta` (asserts every `lid5.calibration.*.
+  cost_max_abs` is `< 1e-6`; RED against the stale manifest's `19.47`/`0.1376`/`19.47`, GREEN
+  after `scripts/extract_phase4b_fixtures.py` regenerated `manifest.json` with the fixed
+  harness -- byte-identical across two consecutive regenerations, and no other `phase4b/`
+  fixture drifted).
+
 - **[phase4b] The phSeq reader's phoneme count carries a fixed `10 + sum(len+10)` padding
   arithmetic -- 10 phantom head phonemes plus 10 phantom gap phonemes appended after EVERY
   sentence (including the last)** (`audio.rs::read_phseq`, from `AudioStruct.cpp:164,170`):
@@ -2183,18 +2209,12 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   guard). Mutation: N/A (dead code); the SAD-irrelevance is proven by the goldens passing with
   no SAD weights loaded.
 
-- **[phase4b] Mode-7 `classNb = max(2, outputSize)`, the DumpLIDInternals path is simplified,
-  and `_PostProcessMode 1` cancels in normalization** (`tasks/lid.rs`, from
-  `TwinBLSTMSpectralLID.cpp:624-625,906-921,1073-1179`): the committed LID net is BINARY
+- **[phase4b] Mode-7 `classNb = max(2, outputSize)`, and `_PostProcessMode 1` cancels in
+  normalization; the DumpLIDInternals filename is CLOSED (Phase 4c Task 2)** (`tasks/lid.rs`,
+  from `TwinBLSTMSpectralLID.cpp:624-625,906-921,1073-1179`): the committed LID net is BINARY
   (`OutputNeuronNb 48,1` -> `getOutputSize() = 1`), and `classNb` is forced to `max(2, 1) =
   2` (`:624-625`), so the brief's "3-class mapping" is superseded -- the fixtures use a
-  2-class mapping. `_DumpLIDInternals` derives the `.mat` filename from
-  `audio.getAudioFileName()` (`:906-913`); the port doesn't thread `Audio::audio_file_name`
-  (the field landed in Task 8, populated post-hoc by `bag_of_processors::apply_corpus_item`,
-  not by `read_audio`/`read_phseq`) into this dump path, so the dump lands at
-  `<_DumpDir>/chan<c>_lid_dump.mat` (cosmetic path deviation) -- the VARIABLE
-  names (`features_<n>` = `[_OutputForward | _OutputBackward]`, `matNb`) and values are the
-  faithful part. `_PostProcessMode 1` (entropy-weighted, `:1073-1089`) adds a per-row scalar
+  2-class mapping. `_PostProcessMode 1` (entropy-weighted, `:1073-1089`) adds a per-row scalar
   `-sum log(entropy)` EQUALLY across every `segLID` column, which is a column-constant offset
   -> it cancels in the softmax normalization (`:1169-1172`), so ppm1's normalized `langID`
   NEAR-coincides with ppm0's (exactly in real arithmetic, ~1 ULP in floating point). That pin
@@ -2202,14 +2222,38 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   match_real`'s ppm1 golden (`tests/phase4b_twin_mode7.rs`) sits only ~1 ULP from ppm0's, well
   inside the off-oracle hybrid bound (`common::assert_oracle_eq`, `<=4` ULP / `512*eps*scale`
   absolute), so a bug that collapsed ppm1's post-process path onto ppm0's could pass
-  undetected on CI glibc. *Why deferred:* the mode-7 driver predates `Audio::audio_file_name`
-  and hasn't been revisited for the dump path. *Fix candidate:* thread `audio_file_name` into
-  the dump path for the legacy-faithful filename, now that the field exists (4c-era). *Pinned
-  by:*
-  `dump_lid_internals_written_and_valued`, `post_process_mode_all_three_covered`
-  (`tests/phase4b_twin_mode7.rs`; ppm2 vote DISTINCT, ppm1 near-coincident, all three code
-  paths counter-asserted). Mutation: forcing `classNb = outputSize` (dropping the `max(2,.)`)
-  makes the confusion 3x3 and mismatches the REAL 4x4 dump.
+  undetected on CI glibc. *Why deferred (classNb/ppm1):* out of scope for this task, unrelated
+  to the filename fix. *Fix candidate:* none identified. *Pinned by:*
+  `post_process_mode_all_three_covered` (`tests/phase4b_twin_mode7.rs`; ppm2 vote DISTINCT,
+  ppm1 near-coincident, all three code paths counter-asserted). Mutation: forcing `classNb =
+  outputSize` (dropping the `max(2,.)`) makes the confusion 3x3 and mismatches the REAL 4x4
+  dump.
+  **CLOSED (Phase 4c Task 2), DumpLIDInternals filename:** `_DumpLIDInternals` derives the
+  `.mat` filename from `audio.getAudioFileName()` (`:906-913`, the `_DumpDir.size() > 0`
+  branch, the only one reachable here): strip the directory (the portion after the last `/`,
+  or the whole string if none), then ALWAYS drop exactly 4 trailing characters from that
+  basename -- NOT an extension-aware strip (a `.wav` name is cleanly de-extensioned; the
+  mode-7 phSeq arm's `.phSeq`, 6 chars, leaves a partial extension, e.g. `"s1.phSeq"` ->
+  `"s1.p"`); when the basename is shorter than 4 bytes, `std::string::substr`'s length-clamp
+  leaves it untouched instead of underflowing. The port previously didn't thread
+  `Audio::audio_file_name` (landed in 4b Task 8, populated post-hoc by
+  `bag_of_processors::apply_corpus_item`, not by `read_audio`/`read_phseq`) into this dump
+  path, so the dump landed at the cosmetic `<_DumpDir>/chan<c>_lid_dump.mat` instead of the
+  legacy-faithful `<_DumpDir>/<basename minus 4 chars>_chan<c>_lid_dump.mat`; the VARIABLE
+  names (`features_<n>` = `[_OutputForward | _OutputBackward]`, `matNb`) and values were
+  always the faithful part. Now fixed: `tasks/lid.rs::mode7_dump_basename` composes the
+  legacy-faithful name from `audio.audio_file_name`, threaded through
+  `get_segmentation_mode7`. Verified no oracle-harness or committed-fixture filename shared
+  this convention (`tools/oracle_harness/main.cpp`'s `mode7_dump_s1.mat` scipy-value probe
+  writes a harness-hardcoded literal name via a hand-rolled `Mat_Create` call, never going
+  through `getSegmentation`'s dump path, so no harness-side rename was needed; confirmed by a
+  no-op `git status` on `tests/reference_data/phase4b/` for every file except
+  `manifest.json`, whose diff is isolated to the unrelated `cost_max_abs` fix below). *Pinned
+  by:* `dump_lid_internals_written_and_valued` (`tests/phase4b_twin_mode7.rs`), TDD RED/GREEN
+  verified: the test's `phseq_audio` helper now sets `audio.audio_file_name` to the real
+  `.phSeq` path (previously left empty), and the assertion targets `s1.p_chan0_lid_dump.mat`
+  under the tempdir; reverting `tasks/lid.rs`'s driver change alone (test unchanged) fails the
+  test (file not found at the new path), confirming the rename is load-bearing.
 
 - **[phase4b] `VrctsPart` (Algo 0) hard-codes the legacy `vrcts_part` binary path, and its spawn
   failure semantics necessarily diverge from the legacy's discarded `system()` return** (`tasks/

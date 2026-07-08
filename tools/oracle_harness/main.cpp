@@ -9482,7 +9482,8 @@ int main(int argc, char** argv) {
                                  Segmentation& seg, const std::string& name, bool dump,
                                  std::vector<Eigen::MatrixXd>& langidOut,
                                  std::vector<Eigen::MatrixXd>& confusionOut,
-                                 std::vector<int>& isCorrectOut) {
+                                 std::vector<int>& isCorrectOut,
+                                 std::vector<double>& cumErrOut) {
             Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
             FactoryInit<GFFTList<GFFT, 1, Max>::Result>::apply(gfft_factory);
 
@@ -9588,6 +9589,7 @@ int main(int argc, char** argv) {
             langidOut.assign(channelCount, Eigen::MatrixXd());
             confusionOut.assign(channelCount, Eigen::MatrixXd());
             isCorrectOut.assign(channelCount, 0);
+            cumErrOut.assign(channelCount, 0.0);
 
             for (int chan = 0; chan < channelCount; ++chan) {
                 // Periodogram with an EMPTY mel bank -> raw _Periodogram (:244).
@@ -9694,6 +9696,9 @@ int main(int argc, char** argv) {
                 langidOut[chan] = langID;
                 confusionOut[chan] = confusion;
                 isCorrectOut[chan] = isCorrect;
+                // BLSTMSpectralLID.cpp:414 -- seg._LIDCumulativeError[chan] = NNCost (raw
+                // sum, no /segmentsCount and no weight scaling for algo 5).
+                cumErrOut[chan] = NNCost;
 
                 if (dump) {
                     std::string suf = "_chan" + std::to_string(chan + 1) + ".bin";
@@ -9734,7 +9739,8 @@ int main(int argc, char** argv) {
             Segmentation seg(audioT, 0.5);
             std::vector<Eigen::MatrixXd> langidR, confusionR;
             std::vector<int> isCorrectR;
-            transcribeLid(probe, costLaw, audioT, seg, name, /*dump=*/true, langidR, confusionR, isCorrectR);
+            std::vector<double> cumErrR;
+            transcribeLid(probe, costLaw, audioT, seg, name, /*dump=*/true, langidR, confusionR, isCorrectR, cumErrR);
 
             // --- SECONDARY: REAL getSegmentation (Eigen forward) ---
             ConfigFile confReal(lid5Config, '_');
@@ -9798,7 +9804,8 @@ int main(int argc, char** argv) {
                     double d = std::fabs(langidR[chan](0, cc) - langidReal);
                     if (d > langidMaxAbs) langidMaxAbs = d;
                 }
-                double dc = std::fabs(segReal._LIDCumulativeError[chan]);   // reimpl cumErr already dumped
+                // True real-vs-reimpl delta (was: magnitude of the real value only).
+                double dc = std::fabs(segReal._LIDCumulativeError[chan] - cumErrR[chan]);
                 if (dc > costMaxAbs) costMaxAbs = dc;
             }
             std::cout << "SEG_STRUCT site=lid5_" << name << " ok=1 max_dt="
