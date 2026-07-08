@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use crate::audio::Audio;
 use crate::tasks::segmentation::Segmentation;
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors, load_vrcts};
-use crate::tasks::segmenter::Segmenter;
+use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig};
 
 /// legacy: hard-coded absolute path (`VRCTSpart.cpp:44,46`), not read from config.
 /// IMPROVEMENTS [phase4b]: hard-coded VRCTS binary path.
@@ -36,41 +36,55 @@ fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
 /// windowing type, preemph/noise, convolution kernel -- `Segmenter.cpp:73-148`)
 /// -- but `VRCTSPart::getSegmentation` never calls `updateSegmentation`/
 /// `smoothSegmentation`/`results2segmentation`, so none of those fields affect
-/// any observable output. This port narrows `from_legacy` to the two keys that
-/// DO matter (`VRCTS_isFast`/`VRCTS_force`) plus the generic `Dump_Directory`
-/// (needed for the `Processor::dump_dir()` dispatch, matching `Segmenter::
-/// buildFromConf`'s first read, `Segmenter.cpp:75`): a real legacy config
-/// missing e.g. `VRCTS_window` would fail to construct `VRCTSPart` at all,
-/// while this port accepts it -- a deliberate scope-narrowing (not a bit-exact
-/// deviation pinned by any golden), noted in IMPROVEMENTS.md.
+/// any observable output. This port replicates the generic REQUIRED-KEY
+/// validation (same as every sibling driver in `tasks/sad.rs`: `TdcSegmenter`/
+/// `LtsvSegmenter`/`BlstmSignalSegmenter`/`BlstmSpectralSegmenter`) by calling
+/// [`SegmenterConfig::from_config`] + [`DriverConfig::from_config`] with prefix
+/// `"VRCTS"` -- a real legacy config missing e.g. `VRCTS_window` now fails to
+/// construct `VrctsPart`, matching `buildFromConf`'s `exit(1)`. The parsed
+/// values themselves stay unused beyond that validation (`seg_cfg`), or are
+/// used only for `dump_dir()` (`driver_cfg`), since nothing downstream reads
+/// them -- this is a deliberate PARTIAL replication of `buildFromConf` (the
+/// windowing/preemph/noise reads and the `CostLaw` construction are still
+/// skipped, same as every sibling driver, none of which read them either).
 #[derive(Clone)]
 pub struct VrctsPart {
+    /// Stored only to replicate `buildFromConf`'s required-key validation
+    /// (`Segmenter.cpp:83-138`); `getSegmentation` never reads its fields.
+    #[allow(dead_code)]
+    seg_cfg: SegmenterConfig,
+    driver_cfg: DriverConfig,
     is_fast: bool,
     force: bool,
-    dump_dir: String,
     channels: usize,
 }
 
 impl VrctsPart {
-    /// Port of the `VRCTSPart(ConfigFile&, bool, bool)` ctor (`VRCTSpart.cpp:8-12`),
-    /// narrowed per the struct doc above: `VRCTS_isFast`/`VRCTS_force` (both
-    /// REQUIRED, no default -- `conf.get<bool>` with no default arg).
+    /// Port of the `VRCTSPart(ConfigFile&, bool, bool)` ctor (`VRCTSpart.cpp:8-12`):
+    /// `buildFromConf(conf, "VRCTS", ...)` (`Segmenter.cpp:73-148`) via
+    /// [`SegmenterConfig::from_config`] + [`DriverConfig::from_config`], THEN
+    /// `VRCTS_isFast`/`VRCTS_force` (both REQUIRED, no default -- `conf.get<bool>`
+    /// with no default arg).
     pub fn from_legacy(map: &IndexMap<String, String>) -> Result<VrctsPart> {
+        let seg_cfg = SegmenterConfig::from_config(map, "VRCTS")?;
+        let driver_cfg = DriverConfig::from_config(map, "VRCTS")?;
+
         let is_fast = parse_bool(map, "VRCTS_isFast")?;
         let force = parse_bool(map, "VRCTS_force")?;
-        let dump_dir = map.get("Dump_Directory").cloned().unwrap_or_default();
         Ok(VrctsPart {
+            seg_cfg,
+            driver_cfg,
             is_fast,
             force,
-            dump_dir,
             channels: 0,
         })
     }
 
-    /// The configured dump directory (`Segmenter::_DumpDir`): `SegmentationFunction`
-    /// reads it per config to gate the VRCTS write (`BagOfProcessors.cpp:268,273,...`).
+    /// The configured dump directory (`Segmenter::_DumpDir`, read via
+    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
+    /// VRCTS write (`BagOfProcessors.cpp:268,273,...`).
     pub fn dump_dir(&self) -> &str {
-        &self.dump_dir
+        &self.driver_cfg.dump_dir
     }
 
     /// Zero cost accumulators: VRCTS has no NN/cost path (`cumulative_error`/

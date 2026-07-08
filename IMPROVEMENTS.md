@@ -2120,22 +2120,28 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `_chan_<n>` suffix in the path format breaks 3 of the 5 `phase4b_vrcts` tests (verified: the
   pre-seeded single-path fixtures are no longer found, forcing a spawn that then fails).
 
-- **[phase4b] `VrctsPart::from_legacy` skips `Segmenter::buildFromConf`'s generic required-key
-  validation** (`tasks/vrcts.rs`, from `VRCTSpart.cpp:9` + `Segmenter.cpp:73-148`): the legacy ctor
-  calls `this->buildFromConf(conf, "VRCTS", ...)` BEFORE reading `VRCTS_isFast`/`VRCTS_force`,
-  which requires (no default, `conf.get<T>` throws/exits on missing) a full set of `VRCTS_*` keys
-  -- decision thresholds, window/shift, windowing type, preemph/noise ratio, convolution kernel --
-  none of which `VRCTSPart::getSegmentation` ever reads (no `updateSegmentation`/
-  `smoothSegmentation`/`results2segmentation` call site anywhere in the function). This port
-  narrows `from_legacy` to the two keys that matter (`VRCTS_isFast`/`VRCTS_force`) plus the
-  generic `Dump_Directory` (needed for the `Processor::dump_dir()` dispatch): a real legacy
-  config missing e.g. `VRCTS_window` would fail to CONSTRUCT `VRCTSPart` at all, while this port
-  accepts it. *Why deferred:* deliberate scope-narrowing (no observable behavior depends on the
-  skipped fields; not a bit-exact deviation pinned by any golden -- `getSegmentation`'s output is
-  identical either way). *Fix candidate:* add the full `SegmenterConfig`/`DriverConfig` read (like
-  `TdcSegmenter`/`LtsvSegmenter`) if legacy config VALIDATION parity is ever required, not just
-  segmentation-output parity. *Pinned by:* N/A (no golden exercises the gap; `from_legacy_reads_*`
-  style coverage in `tests/phase4b_vrcts.rs` only exercises the two consumed keys).
+- **[phase4b] CLOSED: `VrctsPart::from_legacy` now replicates `Segmenter::buildFromConf`'s
+  generic required-key validation** (`tasks/vrcts.rs`, from `VRCTSpart.cpp:9` +
+  `Segmenter.cpp:73-148`): the legacy ctor calls `this->buildFromConf(conf, "VRCTS", ...)` BEFORE
+  reading `VRCTS_isFast`/`VRCTS_force`, which requires (no default, `conf.get<T>` throws/exits on
+  missing) a set of `VRCTS_*` keys -- decision thresholds, window/shift, convolution kernel,
+  padding/min-speech/min-silence lists -- none of which `VRCTSPart::getSegmentation` ever reads
+  (no `updateSegmentation`/`smoothSegmentation`/`results2segmentation` call site anywhere in the
+  function). `from_legacy` originally skipped this validation entirely (accepting a config that
+  would have failed to CONSTRUCT `VRCTSPart` in legacy); it now calls
+  `SegmenterConfig::from_config`/`DriverConfig::from_config` with prefix `"VRCTS"`, same as every
+  sibling driver (`TdcSegmenter`/`LtsvSegmenter`/`BlstmSignalSegmenter`/`BlstmSpectralSegmenter`
+  in `tasks/sad.rs`) -- a missing key now errors, matching `buildFromConf`'s `exit(1)`, and
+  `dump_dir()` now reads `DriverConfig::dump_dir` instead of a separately-parsed field. The parsed
+  `SegmenterConfig`/`DriverConfig` values are otherwise still unused by `getSegmentation`, same as
+  before. NOTE: this is still a PARTIAL replication of `buildFromConf` -- the windowing-type/
+  preemph/noise-ratio reads and the `CostLaw` construction (`Segmenter.cpp:139-146`) remain
+  unreplicated, but that gap is pre-existing and shared by every sibling driver too (none of them
+  read `{prefix}_CostPonderation`/`{prefix}_CostLawSpeech`/`{prefix}_CostLawParamSpeech` either),
+  so it is out of scope for this fix. *Pinned by:* `missing_required_key_rejected`
+  (`tests/phase4b_vrcts.rs`): a config missing `VRCTS_min_silence` now errs naming the key.
+  Mutation: reverting `from_legacy` to skip the two calls makes this test fail (the construction
+  would instead succeed).
 
 ## Toolchain deviations
 

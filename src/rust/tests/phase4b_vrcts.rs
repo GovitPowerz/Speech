@@ -23,8 +23,32 @@ use speech::tasks::segmentation_io::to_vrcts_string;
 use speech::tasks::segmenter::Segmenter;
 use speech::tasks::vrcts::VrctsPart;
 
+/// Minimal valid `VRCTS_*` config: the generic `SegmenterConfig`/`DriverConfig`
+/// required keys (replicating `Segmenter::buildFromConf`, `Segmenter.cpp:73-148`)
+/// plus the two keys `VrctsPart` actually reads. `VRCTS_convolution_window_size
+/// = 0` sidesteps also needing `VRCTS_convolution_window_type` (only read when
+/// the window size is `> 0`, `Segmenter.cpp:100-103`).
 fn vrcts_map(is_fast: bool, force: bool) -> IndexMap<String, String> {
     let mut m = IndexMap::new();
+    m.insert(
+        "VRCTS_decision_thresh_rising".to_string(),
+        "0.6".to_string(),
+    );
+    m.insert("VRCTS_decision_area_rising".to_string(), "0.05".to_string());
+    m.insert(
+        "VRCTS_decision_thresh_falling".to_string(),
+        "0.3".to_string(),
+    );
+    m.insert("VRCTS_decision_area_falling".to_string(), "0.1".to_string());
+    m.insert("VRCTS_window".to_string(), "0.032".to_string());
+    m.insert("VRCTS_shift".to_string(), "0.01".to_string());
+    m.insert("VRCTS_convolution_window_size".to_string(), "0".to_string());
+    m.insert(
+        "VRCTS_speech_padding".to_string(),
+        "0.1,0.1,0.1,0.1".to_string(),
+    );
+    m.insert("VRCTS_min_speech".to_string(), "0.2,0.2,0.2".to_string());
+    m.insert("VRCTS_min_silence".to_string(), "0.2,0.2".to_string());
     m.insert("VRCTS_isFast".to_string(), is_fast.to_string());
     m.insert("VRCTS_force".to_string(), force.to_string());
     m
@@ -214,4 +238,26 @@ fn same_xml_shared_across_channels() {
         assert_eq!(a.begin, b.begin);
     }
     assert_eq!(seg_per_chan[0].segments()[1].ty, SegClass::Speech);
+}
+
+// === required-key validation (Segmenter::buildFromConf, Segmenter.cpp:73-148) ==
+
+/// A config missing one of the generic `SegmenterConfig`/`DriverConfig`
+/// required keys (here `VRCTS_min_silence`) must fail to construct, matching
+/// `buildFromConf`'s `exit(1)` -- even though `VRCTS_min_silence` itself is
+/// never read by `getSegmentation`.
+#[test]
+fn missing_required_key_rejected() {
+    let mut m = vrcts_map(true, false);
+    m.shift_remove("VRCTS_min_silence");
+
+    // `.err().unwrap()` (not `.unwrap_err()`): `VrctsPart` doesn't derive `Debug`,
+    // and `.err()` -> `Option<E>` doesn't require the `Ok` type to (matches the
+    // `is_err()`-only convention used by the other `from_legacy` config tests).
+    let err = VrctsPart::from_legacy(&m).err().unwrap();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("VRCTS_min_silence"),
+        "error should name the missing key: {msg}"
+    );
 }
