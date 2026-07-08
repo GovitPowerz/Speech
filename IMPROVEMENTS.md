@@ -955,7 +955,8 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   persistence is pinned unit-test-only via a direct state mutation
   (`BlstmSpectralSegmenter::force_non_wav_spectrum_shift` +
   `non_wav_spectrum_shift_80_fallback_persists`), exposed as a `pub` method solely for that test (no
-  production caller).
+  production caller). [Superseded: see the [phase4b] closure entry - the phSeq corpus gives it a live
+  production caller since Task 5/7.]
 
 - **[phase2b] The REAL `getBLSTMInputSequence` uses an Eigen `applyDCT` GEMM that diverges from the
   Rust `build_input_sequence`** (`BLSTMSpectralSegmenter.cpp:561-591` reads
