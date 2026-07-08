@@ -34,6 +34,8 @@ function run_stage(stage, out_dir)
       stage_masking(out_dir);
     case 'batching'
       stage_batching(out_dir);
+    case 'qpso'
+      stage_qpso(out_dir);
     otherwise
       error('run_stage: unknown stage %s', stage);
   end

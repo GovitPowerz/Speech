@@ -141,6 +141,55 @@ def test_masking_manifest_present_and_pass_fail_split() -> None:
     assert (mk["pass_failed"], mk["fail_failed"]) == (0, 1)
 
 
+# --- Task 11: QuantumPSO shared-random-table fixtures ---
+
+
+def test_qpso_manifest_present_and_records_params() -> None:
+    m = _manifest()
+    assert "qpso" in m, "phase4c manifest.json missing the qpso section"
+    q = cast(dict[str, object], m["qpso"])
+    assert (q["D"], q["ps"], q["me"], q["K"]) == (3, 4, 3, 8)
+    assert q["table_seed"] == 20260709 and q["table_n"] == 5000
+
+
+def test_qpso_bins_exist_and_match_manifest_shapes() -> None:
+    m = _manifest()
+    shapes = cast(dict[str, list[int]], cast(dict[str, object], m["qpso"])["shapes"])
+    for name, shape in shapes.items():
+        rows, cols, _ = _read_bin(PHASE4C / name)
+        assert (rows, cols) == tuple(shape), f"{name}: shape ({rows},{cols}) != manifest {shape}"
+
+
+def test_qpso_random_table_present_and_sized() -> None:
+    m = _manifest()
+    q = cast(dict[str, object], m["qpso"])
+    rows, cols, _ = _read_bin(PHASE4C / "qpso_random_table.bin")
+    assert (rows, cols) == (q["table_n"], 1), f"random table shape ({rows},{cols}) != ({q['table_n']}, 1)"
+
+
+def test_qpso_cursor_and_dedraw_nonvacuity() -> None:
+    """cursor_end (the .bin, the manifest, and the base-draw floor all agree): DE/Levy fired
+    (cursor beyond the no-candidate base), and gbest genuinely evolved across epochs."""
+    m = _manifest()
+    q = cast(dict[str, object], m["qpso"])
+    _, _, cursor = _read_bin(PHASE4C / "qpso_cursor_end.bin")
+    assert int(cursor[0]) == q["cursor_end"]
+    ps, d, me = cast(int, q["ps"]), cast(int, q["D"]), cast(int, q["me"])
+    base_draws = 6 * ps * d + me * (12 * ps * d + ps)
+    assert int(cursor[0]) > base_draws, "cursor_end at/below base -- DE/Levy arms never fired"
+    gr, gc, gbest = _read_bin(PHASE4C / "qpso_gbest_traj.bin")  # me x D column-major
+    rows = {tuple(gbest[c * gr + i] for c in range(gc)) for i in range(gr)}
+    assert len(rows) >= 2, "gbest never changed across epochs (the pin would be trivial)"
+
+
+def test_qpso_levy_nonzero_and_input_is_table_prefix() -> None:
+    _, _, levy_out = _read_bin(PHASE4C / "qpso_levy_out.bin")
+    assert any(v != 0.0 for v in levy_out) and all(v == v for v in levy_out), "levy_out degenerate"
+    _, _, levy_in = _read_bin(PHASE4C / "qpso_levy_in.bin")
+    _, _, table = _read_bin(PHASE4C / "qpso_random_table.bin")
+    assert levy_in == table[:16], "levy_in must be exactly table[0:16] (V=table[0:8], W=table[8:16])"
+
+
 # --- Task 8: vec2struct genome-bijection fixtures ---
 GENOME_MANIFEST = PHASE4C / "genome_manifest.json"
 GENOME_CASES = ["algo0", "tdc", "calib", "spectral", "twin", "masked"]

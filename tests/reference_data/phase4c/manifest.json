@@ -361,5 +361,116 @@
         1
       ]
     }
+  },
+  "qpso": {
+    "text": "Task 11: QuantumPSO.m (845 LOC) bit-pinned against a MODIFIED-COPY (tools/octave_harness/qpso_modified/QuantumPSO.m) whose rand/randperm/stblrnd are substituted by reads of a shared committed random table (qpso_random_table.bin, 5000 uniforms from numpy default_rng(seed=20260709), column-major stream) and whose CostFunction is the quadratic surrogate sum_j (x_j-center_j)^2 (center=[3.5,4.5,6.5]); the wall-clock reseed (:91) is removed. The legacy path is nondeterministic BY DESIGN, so no single RUN is reproducible -- the table makes the OPERATOR STRUCTURE pinnable. Small run: D=3, ps=4, me=3, PSOseed=1 (seed overwrites the first ps rows), trelea=3 (Clerc, needed for the dead vel3 bank's chi), ergrd=1e-99 ergrdep=500 errgoal=NaN. Structure exercised: init + opposition-based learning (:257-327); the 4 DEAD velocity banks that DRAW 8*ps*D per epoch but are never applied (:375-411, gate :447 unreachable); the QDPSO ranking-operator roulette + the log(1/u) jump (:414-443); DE recombination (randperm neighbours) + a Chambers-Mallows-Stuck Levy kick (:465-479); pbest/gbest updates (:623-686); stall gate (:751); final re-generation (:799-843). Per-value comparator split: init_* is PURE arithmetic (normmat division + surrogate + min/sortrows) -> STRICT bits; every *_traj is transcendental from epoch 1 (log(1/u) + the Levy tan/atan/sin/cos/log/pow) -> canary-gated (bit-exact on the oracle libm, measured; the ranking is libm-robust because gbestval+pbestval gaps are O(0.1)-O(1) >> ULP). cursor_end pins the exact draw count (== Python TableRng.cursor). levy_in/levy_out pin the standalone CMS sampler over table[0:16].",
+    "table_seed": 20260709,
+    "table_n": 5000,
+    "D": 3,
+    "ps": 4,
+    "me": 3,
+    "K": 8,
+    "cursor_end": 561,
+    "te": 3,
+    "min_pbestval_gap": 0.25905997177496315,
+    "params": {
+      "ac1": 2.1,
+      "ac2": 2.1,
+      "iw1": 0.9,
+      "iw2": 0.6,
+      "iwe": 300,
+      "ergrd": 1e-99,
+      "ergrdep": 500,
+      "errgoal": "NaN",
+      "trelea": 3,
+      "pso_seed": 1,
+      "minmax": 0,
+      "adim": 10.0,
+      "center": [
+        3.5,
+        4.5,
+        6.5
+      ],
+      "seed_value": [
+        [
+          5,
+          4,
+          6
+        ],
+        [
+          3,
+          5,
+          7
+        ],
+        [
+          6,
+          2,
+          4
+        ],
+        [
+          4,
+          6,
+          5
+        ]
+      ]
+    },
+    "shapes": {
+      "qpso_levy_in.bin": [
+        16,
+        1
+      ],
+      "qpso_levy_out.bin": [
+        1,
+        8
+      ],
+      "qpso_init_pos.bin": [
+        4,
+        3
+      ],
+      "qpso_init_pbest.bin": [
+        4,
+        3
+      ],
+      "qpso_init_pbestval.bin": [
+        4,
+        1
+      ],
+      "qpso_init_gbest.bin": [
+        1,
+        3
+      ],
+      "qpso_init_gbestval.bin": [
+        1,
+        1
+      ],
+      "qpso_pos_traj.bin": [
+        4,
+        9
+      ],
+      "qpso_pbest_traj.bin": [
+        4,
+        9
+      ],
+      "qpso_pbestval_traj.bin": [
+        4,
+        3
+      ],
+      "qpso_gbest_traj.bin": [
+        3,
+        3
+      ],
+      "qpso_gbestval_traj.bin": [
+        1,
+        3
+      ],
+      "qpso_final_out.bin": [
+        4,
+        1
+      ],
+      "qpso_cursor_end.bin": [
+        1,
+        1
+      ]
+    }
   }
 }

@@ -29,6 +29,7 @@ here `addpath` the vendored sources and **call** them, never modify them.
 | `smorms3_f_df.m` | The injected SMORMS3 objective (scripted gradient + `theta_out` round-trip offset). |
 | `stage_vec2struct.m` | Drives the REAL `vec2struct.m` (+ `printConfig.m`) over six algo/mask/PS cases; dumps the genome<->config bijection goldens. |
 | `stage_computecost.m` | **FALLBACK-TIER** transcription of the `ComputeCost.m` cost-assembly lines (`:285-652`); drives the balance-law 0/3/4/5/10 error + cost, sortrows aggregation, deriv averaging, pooled stats, and L2 over the committed 4a/4b MultiConfigResults fixtures + crafted variants. |
+| `stage_qpso.m` + `qpso_modified/` | **SUBSTITUTION-COPY TIER** (Task 11): drives a MODIFIED-COPY of `QuantumPSO.m` (`qpso_modified/QuantumPSO.m`) whose rand/randperm/stblrnd are substituted by reads of a shared committed random table (`tbl_rand`/`tbl_randperm`/`tbl_stblrnd`, a stage-global cursor) and whose `CostFunction` is the quadratic `qpso_surrogate.m`; the wall-clock reseed (`:91`) is removed. Every substitution is a `% HARNESS-SUB` comment quoting the original line. Dumps the post-init state + per-epoch pos/pbest/gbest trajectory + a standalone Levy sample; the Python `speech.optimizers.quantum_pso` replays the SAME table (`tests/reference_data/phase4c/qpso_random_table.bin`). |
 
 Run a stage by hand:
 
@@ -59,6 +60,17 @@ the vendored `.m` unmodified. The stage transcribes only the PURE assembly lines
 (`:285-652`) line-for-line with `% legacy:` provenance and lets Octave execute the real
 MATLAB builtins (sortrows/median/hist/std/cumsum/exp/log). See `IMPROVEMENTS.md` (phase4c
 ComputeCost fallback-tier entry).
+
+`stage_qpso.m` is the **SUBSTITUTION-COPY TIER**: `QuantumPSO.m:91` reseeds `rand` from the
+wall clock, so no legacy RUN is reproducible and there is no injection point that leaves the
+`.m` unmodified while making it deterministic. `qpso_modified/QuantumPSO.m` is a near-verbatim
+copy of `QuantumPSO.m:252-843` with ONLY the RNG and cost calls substituted (every one a
+`% HARNESS-SUB` comment quoting the original), so the algorithm structure -- init + OBL, the
+dead-but-drawing velocity banks, the QDPSO ranking-operator roulette, DE + Levy, pbest/gbest,
+stall, final generation -- runs unchanged over the shared table. The parity target is the
+port's OPERATOR STRUCTURE, not a wall-clock run; the copy shadows the vendored `QuantumPSO.m`
+via `addpath(...,'-begin')`. See `IMPROVEMENTS.md` (the phase4c determinism/dead-banks/
+substitution-adjudication entries).
 
 The **one** Octave-compat accommodation is `stage_smorms3.m` passing a single dummy
 `varargin` to `SMORMS3(...)`: Octave 11.3.0 miscounts the empty-cell lvalue cs-list at

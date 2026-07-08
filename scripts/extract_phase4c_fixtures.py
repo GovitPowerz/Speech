@@ -44,6 +44,13 @@ one Octave-compat accommodation -- the SMORMS3 empty-varargin lvalue miscount):
   masking : MaskingValidation.m + vec2struct.m (TIER 1), a PASS case (a well-formed scalar
             mask) and a FAIL case (masking a `_padding_block`-family vector field with a
             negative component, exploiting that field's encode/decode asymmetry).
+  qpso    : QuantumPSO.m (845 LOC) via a MODIFIED-COPY (tools/octave_harness/qpso_modified/)
+            whose rand/randperm/stblrnd are substituted by reads of a shared committed random
+            table (generated here, fixed numpy seed) and whose CostFunction is a quadratic
+            surrogate; the wall-clock reseed is removed. Dumps the post-init state + per-epoch
+            pos/pbest/gbest trajectory + a standalone Levy (Chambers-Mallows-Stuck) sample. The
+            Python port (speech.optimizers.quantum_pso) replays the SAME table. init_* is STRICT
+            (pure arithmetic); the trajectory is canary-gated (transcendental via log(1/u)+Levy).
 
 Determinism: only `.bin` + `manifest.json` are committed (the `.mat` MAT-v7 header
 carries a churning timestamp; we never copy it). The `.bin` payloads and the manifest
@@ -167,6 +174,31 @@ MASKING_SHAPES = {
     "fail_count": (1, 1),
     "fail_vector": (265, 1),
 }
+# --- Task 11: QuantumPSO shared random table + trajectory ---
+# The table is generated ONCE with a FIXED numpy seed and committed. Regeneration must be
+# byte-identical: numpy's default_rng (PCG64) is version-stable for a given seed, and
+# `.random(N)` draws N uniforms in [0,1). BOTH the Octave modified-copy (qpso_modified/) and
+# the Python port (speech.optimizers.TableRng) read this same table sequentially, column-major.
+QPSO_TABLE_SEED = 20260709
+QPSO_TABLE_N = 5000
+# The stage's small-D/ps/me run and standalone Levy dump (stage_qpso.m). D=3, ps=4, me=3, K=8.
+QPSO_D, QPSO_PS, QPSO_ME, QPSO_K = 3, 4, 3, 8
+QPSO_SHAPES = {
+    "levy_in": (2 * QPSO_K, 1),  # the V(8)+W(8) input slice table[0:16]
+    "levy_out": (1, QPSO_K),
+    "init_pos": (QPSO_PS, QPSO_D),
+    "init_pbest": (QPSO_PS, QPSO_D),
+    "init_pbestval": (QPSO_PS, 1),
+    "init_gbest": (1, QPSO_D),
+    "init_gbestval": (1, 1),
+    "pos_traj": (QPSO_PS, QPSO_D * QPSO_ME),  # horzcat of per-epoch pos
+    "pbest_traj": (QPSO_PS, QPSO_D * QPSO_ME),
+    "pbestval_traj": (QPSO_PS, QPSO_ME),
+    "gbest_traj": (QPSO_ME, QPSO_D),  # vertcat of per-epoch gbest rows
+    "gbestval_traj": (1, QPSO_ME),
+    "final_out": (QPSO_D + 1, 1),  # OUT = [gbest'; gbestval]
+    "cursor_end": (1, 1),  # draws consumed (== Python TableRng.cursor)
+}
 
 STAGE_LINE_RE = re.compile(
     r"^OCTAVE_STAGE smorms3 M=(?P<M>\d+) num_steps=(?P<ns>\d+) rt_M=(?P<rtM>\d+) rt_num_steps=(?P<rtns>\d+) "
@@ -181,6 +213,11 @@ BATCHING_LINE_RE = re.compile(
 )
 CHECKGRAD_LINE_RE = re.compile(r"^OCTAVE_STAGE checkgrad n=(?P<n>\d+) Kw=(?P<Kw>\d+)$", re.MULTILINE)
 MASKING_LINE_RE = re.compile(r"^OCTAVE_STAGE masking pass_failed=(?P<pass_failed>\d+) fail_failed=(?P<fail_failed>\d+)$", re.MULTILINE)
+QPSO_LINE_RE = re.compile(
+    r"^OCTAVE_STAGE qpso D=(?P<D>\d+) ps=(?P<ps>\d+) me=(?P<me>\d+) K=(?P<K>\d+) "
+    r"cursor_end=(?P<cursor>\d+) te=(?P<te>\d+)$",
+    re.MULTILINE,
+)
 
 
 def _find_octave() -> str:
@@ -270,11 +307,16 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
+        # The QuantumPSO stage reads a shared random table from its out_dir; generate it FIRST
+        # (fixed seed -> byte-identical on every run) so the Octave stage can consume it.
+        qpso_table = np.random.default_rng(QPSO_TABLE_SEED).random(QPSO_TABLE_N)
+        _write_bin(tmp_dir / "qpso_random_table.bin", qpso_table.reshape(QPSO_TABLE_N, 1))
         smorms3_stdout = _run_stage(octave, "smorms3", tmp_dir)
         rprop_stdout = _run_stage(octave, "rprop", tmp_dir)
         batching_stdout = _run_stage(octave, "batching", tmp_dir)
         checkgrad_stdout = _run_stage(octave, "checkgrad", tmp_dir)
         masking_stdout = _run_stage(octave, "masking", tmp_dir)
+        qpso_stdout = _run_stage(octave, "qpso", tmp_dir)
 
         sm = STAGE_LINE_RE.search(smorms3_stdout)
         if not sm:
@@ -291,6 +333,11 @@ def main() -> None:
         mkm = MASKING_LINE_RE.search(masking_stdout)
         if not mkm:
             raise SystemExit("OCTAVE_STAGE masking line missing from stdout")
+        qm = QPSO_LINE_RE.search(qpso_stdout)
+        if not qm:
+            raise SystemExit("OCTAVE_STAGE qpso line missing from stdout")
+        if (int(qm["D"]), int(qm["ps"]), int(qm["me"]), int(qm["K"])) != (QPSO_D, QPSO_PS, QPSO_ME, QPSO_K):
+            raise SystemExit(f"qpso stage dims {(qm['D'], qm['ps'], qm['me'], qm['K'])} != {(QPSO_D, QPSO_PS, QPSO_ME, QPSO_K)}")
         sm_dims = (int(sm["M"]), int(sm["ns"]), int(sm["rtM"]), int(sm["rtns"]), int(sm["epsM"]), int(sm["epsns"]))
         if sm_dims != (7, 12, 3, 4, 1, 3):
             raise SystemExit(f"smorms3 stage dims {sm_dims} != (7,12,3,4,1,3)")
@@ -304,6 +351,7 @@ def main() -> None:
         _convert_stage(tmp_dir / "batching.mat", "batching", BATCHING_SHAPES, tmp_dir)
         _convert_stage(tmp_dir / "checkgrad.mat", "checkgrad", CHECKGRAD_SHAPES, tmp_dir)
         _convert_stage(tmp_dir / "masking.mat", "masking", MASKING_SHAPES, tmp_dir)
+        _convert_stage(tmp_dir / "qpso.mat", "qpso", QPSO_SHAPES, tmp_dir)
 
         # --- Non-vacuity: the goldens must actually exercise the pinned behaviors. ---
         # SMORMS3 lrate x10 warmup + 1e-1 cap: 1e-8..1e-1 then plateau.
@@ -382,6 +430,43 @@ def main() -> None:
         # outcome and the golden pins nothing).
         if (int(mkm["pass_failed"]), int(mkm["fail_failed"])) != (0, 1):
             raise SystemExit(f"masking non-vacuity: (pass_failed, fail_failed) = {(mkm['pass_failed'], mkm['fail_failed'])} != (0, 1)")
+
+        # QPSO: the trajectory must genuinely exercise the operators, not sit on a fixed point.
+        cursor_line = int(qm["cursor"])
+        _, _, cursor_bin = _read_bin(tmp_dir / "qpso_cursor_end.bin")
+        if int(cursor_bin[0]) != cursor_line:
+            raise SystemExit(f"qpso cursor_end .bin {cursor_bin[0]} != stdout {cursor_line}")
+        # Base draws with NO DE/Levy candidates: init (6*ps*D) + me*(8 dead banks + phi/u/dead-sign
+        # (3) + live-sign (1) = 12*ps*D, plus ps roulette wheels). DE recombination and the Levy
+        # kick MUST have fired at least once (extra draws beyond base), else those arms are vacuous.
+        base_draws = 6 * QPSO_PS * QPSO_D + QPSO_ME * (12 * QPSO_PS * QPSO_D + QPSO_PS)
+        if cursor_line <= base_draws:
+            raise SystemExit(f"qpso non-vacuity: cursor_end {cursor_line} <= base {base_draws} -- DE/Levy arms never fired")
+        # gbest must EVOLVE across epochs (else the seed sits on the surrogate optimum and the
+        # gbest pin is trivial), and every epoch's gbestval must be finite.
+        gr, gc, gbest_traj = _read_bin(tmp_dir / "qpso_gbest_traj.bin")  # me x D column-major
+        gbest_rows = [tuple(gbest_traj[c * gr + i] for c in range(gc)) for i in range(gr)]
+        if len(set(gbest_rows)) < 2:
+            raise SystemExit("qpso non-vacuity: gbest never changed across epochs (seed on the optimum?)")
+        _, _, gbestval_traj = _read_bin(tmp_dir / "qpso_gbestval_traj.bin")
+        if not all(np.isfinite(v) for v in gbestval_traj):
+            raise SystemExit(f"qpso gbestval_traj not all finite: {gbestval_traj}")
+        # Ranking robustness off the oracle libm: the per-epoch (gbestval + pbestval) values must
+        # be well-separated (min gap >> any plausible libm ULP perturbation), so no sortrows /
+        # min tie can flip discretely under a different libm. Measured gaps here are O(0.1)-O(1).
+        pr, pc, pbestval_traj = _read_bin(tmp_dir / "qpso_pbestval_traj.bin")  # ps x me
+        min_gap = float("inf")
+        for k in range(QPSO_ME):
+            vals = sorted([gbestval_traj[k]] + [pbestval_traj[k * pr + i] for i in range(pr)])
+            gaps = [b - a for a, b in zip(vals[:-1], vals[1:], strict=True) if b - a > 0]
+            if gaps:
+                min_gap = min(min_gap, min(gaps))
+        if min_gap < 1e-3:
+            raise SystemExit(f"qpso ranking-robustness: min (gbestval+pbestval) gap {min_gap} < 1e-3 -- a libm flip could reorder the swarm")
+        # Levy: the standalone CMS sample must be nonzero + finite (not a degenerate all-zero draw).
+        _, _, levy_out = _read_bin(tmp_dir / "qpso_levy_out.bin")
+        if not (all(np.isfinite(v) for v in levy_out) and any(v != 0.0 for v in levy_out)):
+            raise SystemExit(f"qpso levy_out degenerate (all-zero or non-finite): {levy_out}")
 
         # Regression guard.
         after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
@@ -519,6 +604,57 @@ def main() -> None:
                 "fail_failed": int(mkm["fail_failed"]),
                 "shapes": {f"masking_{v}.bin": list(s) for v, s in MASKING_SHAPES.items()},
             },
+            "qpso": {
+                "text": (
+                    "Task 11: QuantumPSO.m (845 LOC) bit-pinned against a MODIFIED-COPY "
+                    "(tools/octave_harness/qpso_modified/QuantumPSO.m) whose rand/randperm/stblrnd are "
+                    "substituted by reads of a shared committed random table (qpso_random_table.bin, "
+                    f"{QPSO_TABLE_N} uniforms from numpy default_rng(seed={QPSO_TABLE_SEED}), column-major "
+                    "stream) and whose CostFunction is the quadratic surrogate sum_j (x_j-center_j)^2 "
+                    "(center=[3.5,4.5,6.5]); the wall-clock reseed (:91) is removed. The legacy path is "
+                    "nondeterministic BY DESIGN, so no single RUN is reproducible -- the table makes the "
+                    "OPERATOR STRUCTURE pinnable. Small run: D=3, ps=4, me=3, PSOseed=1 (seed overwrites "
+                    "the first ps rows), trelea=3 (Clerc, needed for the dead vel3 bank's chi), ergrd=1e-99 "
+                    "ergrdep=500 errgoal=NaN. Structure exercised: init + opposition-based learning "
+                    "(:257-327); the 4 DEAD velocity banks that DRAW 8*ps*D per epoch but are never applied "
+                    "(:375-411, gate :447 unreachable); the QDPSO ranking-operator roulette + the log(1/u) "
+                    "jump (:414-443); DE recombination (randperm neighbours) + a Chambers-Mallows-Stuck "
+                    "Levy kick (:465-479); pbest/gbest updates (:623-686); stall gate (:751); final "
+                    "re-generation (:799-843). Per-value comparator split: init_* is PURE arithmetic "
+                    "(normmat division + surrogate + min/sortrows) -> STRICT bits; every *_traj is "
+                    "transcendental from epoch 1 (log(1/u) + the Levy tan/atan/sin/cos/log/pow) -> "
+                    "canary-gated (bit-exact on the oracle libm, measured; the ranking is libm-robust "
+                    "because gbestval+pbestval gaps are O(0.1)-O(1) >> ULP). cursor_end pins the exact "
+                    "draw count (== Python TableRng.cursor). levy_in/levy_out pin the standalone CMS "
+                    "sampler over table[0:16]."
+                ),
+                "table_seed": QPSO_TABLE_SEED,
+                "table_n": QPSO_TABLE_N,
+                "D": QPSO_D,
+                "ps": QPSO_PS,
+                "me": QPSO_ME,
+                "K": QPSO_K,
+                "cursor_end": cursor_line,
+                "te": int(qm["te"]),
+                "min_pbestval_gap": min_gap,
+                "params": {
+                    "ac1": 2.1,
+                    "ac2": 2.1,
+                    "iw1": 0.9,
+                    "iw2": 0.6,
+                    "iwe": 300,
+                    "ergrd": 1e-99,
+                    "ergrdep": 500,
+                    "errgoal": "NaN",
+                    "trelea": 3,
+                    "pso_seed": 1,
+                    "minmax": 0,
+                    "adim": 10.0,
+                    "center": [3.5, 4.5, 6.5],
+                    "seed_value": [[5, 4, 6], [3, 5, 7], [6, 2, 4], [4, 6, 5]],
+                },
+                "shapes": {f"qpso_{v}.bin": list(s) for v, s in QPSO_SHAPES.items()},
+            },
         }
 
         # Commit: every check passed -> copy the .bin fixtures into PHASE4C_DIR.
@@ -528,10 +664,13 @@ def main() -> None:
             ("batching", BATCHING_SHAPES),
             ("checkgrad", CHECKGRAD_SHAPES),
             ("masking", MASKING_SHAPES),
+            ("qpso", QPSO_SHAPES),
         ):
             for var in shapes:
                 name = f"{stage}_{var}.bin"
                 shutil.copy2(tmp_dir / name, PHASE4C_DIR / name)
+        # The shared QuantumPSO random table (the Python port + the Octave copy both read it).
+        shutil.copy2(tmp_dir / "qpso_random_table.bin", PHASE4C_DIR / "qpso_random_table.bin")
         manifest_path = PHASE4C_DIR / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -539,7 +678,8 @@ def main() -> None:
         f"OK: phase4c fixtures (octave {octave_version}; smorms3 M=7 steps=12 lrate cap@step8, "
         f"rt offset nonzero; rprop 5x6 delta span [{min(delta)}, {max(delta)}]; "
         f"batching single/multi_nb/sub/clobber/degenerate + getWorstAndBest; "
-        f"checkgrad Kw=53 (2 normalize-tail entries always 0); masking pass=0 fail=1), "
+        f"checkgrad Kw=53 (2 normalize-tail entries always 0); masking pass=0 fail=1; "
+        f"qpso D=3 ps=4 me=3 cursor_end={cursor_line} min_gap={min_gap:.3g}), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

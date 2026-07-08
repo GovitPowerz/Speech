@@ -2482,15 +2482,58 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   warmed up (later step) while gradients stay near-zero (mms doesn't grow); left as a
   narrower follow-up if that call site ever needs its own golden.
 
-- **[phase4c] Fixed-seed determinism deviation (forward-noted for the optimizer zoo)**
-  (`src/python/speech/optimizers.py`; QuantumPSO/CMA-ES land in a later 4c task): the legacy
-  optimizer path is nondeterministic BY DESIGN (`QuantumPSO.m:91` reseeds `rand` from the wall
-  clock; no fixed seed anywhere). The port will route every stochastic draw through one injected
-  numpy `Generator` with a fixed per-run seed, preserving each operator's draw structure/order but
-  NOT bit-matching any single legacy RUN (impossible in principle). SMORMS3/Rprop themselves draw
-  no randomness (Rprop's only `rand` is the dead `:5` above), so THIS task's goldens are fully
-  deterministic; the deviation is recorded here for the stochastic optimizers to come. *Fix
-  candidate:* none -- this is a deliberate, documented divergence, not a bug to fix.
+- **[phase4c] Fixed-seed / injected-source determinism deviation -- REALIZED for QuantumPSO**
+  (`src/python/speech/optimizers.py::quantum_pso`, `TableRng`; `QuantumPSO.m:91`): the legacy
+  optimizer path is nondeterministic BY DESIGN (`QuantumPSO.m:91` `rand('state',sum(100*clock))`
+  reseeds `rand` from the wall clock; no fixed seed anywhere), so no single legacy RUN is
+  reproducible in principle. The port routes EVERY stochastic draw (rand/randperm/stblrnd) through
+  an injected source -- a `TableRng` (sequential f64 reads of a committed table) for bit-pinning, or
+  a plain numpy `Generator` for production. This preserves each operator's draw STRUCTURE/ORDER and
+  makes the operator behaviour pinnable, but does not bit-match any wall-clock legacy run. The
+  oracle is a MODIFIED-COPY of `QuantumPSO.m` (`tools/octave_harness/qpso_modified/`, NOT an edit to
+  `legacy/`) with the clock reseed removed and rand/randperm/stblrnd substituted by the SAME table
+  reads; both sides consume the identical committed `qpso_random_table.bin` (fixed numpy seed
+  20260709). *Pinned by:* `test_qpso_trajectory_bit_exact_given_table` (bit-exact init +
+  canary-gated trajectory + exact `cursor_end` draw count). *Fix candidate:* none -- a deliberate,
+  documented divergence. SMORMS3/Rprop still draw no randomness, so their goldens remain fully
+  deterministic without a table.
+
+- **[phase4c] QuantumPSO's four velocity banks are DEAD but STREAM-CONSUMING**
+  (`legacy/Optimizer_V6.2.2/functions/QuantumPSO.m:375-411` vs the apply gate `:447`; ported in
+  `src/python/speech/optimizers.py::quantum_pso`): each epoch computes `vel1..vel4` (Trelea sets
+  1/2, Clerc type-1" with `chi`, common-PSO with linear `iwt`), drawing EIGHT `rand([ps,D])`
+  matrices (`:375,376,382,383,389,390,403,404`). The only place those velocities are APPLIED to
+  `pos` is inside `if (i > 20*me/2)` (`:447`) -- i.e. `i > 10*me`, which is unreachable for the
+  loop `i = 1:me`. So the banks never move a particle, yet their 8*ps*D draws per epoch DO advance
+  the shared RNG stream; dropping them shifts every downstream value (QDPSO update, DE/Levy gates,
+  cost order). The port keeps the draws (a documented consume-and-discard) but skips the dead vel
+  ARITHMETIC (parity-neutral: it feeds only the unreachable apply). The Octave modified-copy keeps
+  the arithmetic verbatim for faithfulness. Same class of quirk as `:420` (a `sign(rand(ps,D)-0.5)`
+  drawn then overwritten at `:442`) and the fully-dead-in-both-directions `MBest = mean(pbest)`
+  (`:418`, unused since `:421` is commented). *Fix candidate:* delete the dead banks (and fix the
+  `20*me/2` gate if velocity PSO was ever intended) after parity. *Pinned by:*
+  `test_dead_banks_consume_stream`. **Mutation:** the `_dead_banks=False` variant (skipping the 8
+  per-epoch vel draws) diverges the position trajectory from the pinned run at epoch 0 -- the
+  non-vacuity proof that the dead draws are load-bearing for stream alignment.
+
+- **[phase4c] QuantumPSO oracle substitution adjudications (Octave modified-copy)**
+  (`tools/octave_harness/qpso_modified/{QuantumPSO,tbl_rand,tbl_randperm,tbl_stblrnd}.m`): the four
+  RNG substitutions that make the wall-clock-reseeded `QuantumPSO.m` table-reproducible, each
+  mirrored bit-for-bit by the Python `TableRng`/`levy_stable_cms`. (1) **Column-major fill**:
+  MATLAB `rand([m,n])` lays its stream out column-major, so `tbl_rand`/`TableRng.rand` read `m*n`
+  values and reshape with `order='F'` (Octave `reshape` default); numpy's default row-major fill
+  would silently transpose every matrix draw. (2) **randperm**: MATLAB's builtin `randperm(n,k)` is
+  not table-reproducible, so BOTH sides substitute an identical Durstenfeld/Fisher-Yates over 1..n
+  consuming exactly `n-1` draws (`j=floor(rand*i)+1; swap p(i),p(j)`), then take the first k -- the
+  selected neighbour indices match. (3) **stblrnd**: `stblrnd(1.3,1,0.5,0,1,D)` hits only the
+  general `alpha!=1` Chambers-Mallows-Stuck branch (`stblrnd.m:75-82,96`), which draws V then W;
+  ported as `levy_stable_cms`, table-fed in the same order. (4) **the backprop gate** (`:481`
+  `(BackPropagationActivated>0) && (rand<0.5)`): with `BackPropagationActivated=0` the `&&`
+  short-circuits and NO `rand<0.5` is drawn -- the port matches (a HOOK; T12 wires the real
+  refinement). *Measurement:* on the oracle libm (Apple, this repo's oracle env) the ENTIRE
+  trajectory including the transcendental `log(1/u)` + Levy path is bit-exact between Octave 11.3.0
+  and numpy (measured 0-ULP); the `*_traj` comparators are canary-gated only for cross-libm CI. The
+  copy shadows the vendored `QuantumPSO.m` via `addpath(...,'-begin')` (no other stage calls it).
 
 - **[phase4c] printConfig.m emits the Forward_/Backward_/LID peephole-flag + MaxSaturation
   fields -- the ACTIVE inline condition DIVERGES from the commented-out `isNotExcluded`**
