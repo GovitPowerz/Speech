@@ -1,29 +1,143 @@
-# Canonical TOML config for a Twin-BLSTM LID run.
-# Mirrors a subset of the legacy ConfigFiles/LID_BLSTM.config (Algo_choice 6).
-# Full legacy-key coverage lands in Phase 0 alongside the legacy_config importer.
+# Canonical TOML config for a Twin-BLSTM LID run (Algo_choice 6, Mode 7).
+#
+# FULL key coverage of configs/legacy/LID_BLSTM.config (its last-wins effective
+# key set), generated via `speech --convert-config` and hand-checked (Phase 4c
+# Task 5). Section/key names follow the declarative conversion table in
+# src/rust/src/toml_config.rs (KEY_TABLE) -- the ONE config semantics: this file
+# flattens to the exact same KEY -> value map the legacy .config parses to
+# (pinned by `lid_blstm_toml_full_coverage` in src/rust/tests/phase4c_toml.rs).
+#
+# Value convention (see toml_config.rs's module doc): booleans/integers are
+# native TOML; everything else (floats, comma-lists, words, paths) is a quoted
+# string carrying the legacy decimal text VERBATIM -- exact fidelity for values
+# like "3.795068189162301e-01" beats native-float prettiness.
 
 [engine]
-algo = "twin_blstm_lid"          # legacy Algo_choice 6
+algo_choice = 6
 num_outer_threads = 1
 num_inner_threads = 1
 results_file = "MultiConfigResults.mat"
+file_type = 1
+backpropagation_epochs = 0
+
+[corpus]
+fileslisting = "/Users/Govit/Documents/QT/FastSpeechProcessing/ConfigFiles/listing_eval_minus_phSeqbis.csv"
+language2classmapping = "/Users/Govit/Documents/QT/FastSpeechProcessing/ConfigFiles/languagemapping_vie.csv"
+
+[display]
+height = 0
+milliseconds_per_pixel = 64
+output_directory = "/Users/Govit/Documents"
+wave_all_height = 50
+wave_all_width = 1000
 
 [audio]
-offset = 0.0                     # legacy Audio_offset
-max_duration = 120.0             # legacy Audio_max_duration
-
-[decision]
-thresh_rising = 0.6              # legacy BLSTM_decision_thresh_rising
-area_rising = 0.0
-thresh_falling = 0.3795068189162301
-area_falling = 0.0
+offset = 0
+max_duration = 120
 
 [spectrum]
-order = 9                        # legacy BLSTM_spectrum_order
-shift = 0.025                    # legacy BLSTM_spectrum_shift
+order = 9
+shift = "2.500000000000000e-02"
+temporal_convolution_size = 0
 temporal_convolution_type = "hamming"
+frame_window = "5.0"
+frame_shift = 0
+windowing_type = "none"
+windowing_param = "8.842614840690313e-01"
+min_freq = "1.156988075220142e+02"
+max_freq = 4400
+min_mel_freq = "1.861001763856132e+02"
+max_mel_freq = "2.502400490895474e+03"
+nb_bins = 20
+is_log_mel = true
+nb_dct = 8
+ignore_first_dct = true
+compute_deltas_nb = -3
+compute_delta_deltas_nb = 3
+flag_dc_offset = false
 
 [preprocess]
-preemph_ratio = -0.97            # legacy BLSTM_preemph_ratio
+preemph_ratio = "-9.700000000000000e-01"
 noise_seed = 3
-noise_ratio = 0.02921428128844371
+noise_ratio = "2.921428128844371e-02"
+
+[decision]
+thresh_rising = "0.6"
+area_rising = "0.0"
+thresh_falling = "3.795068189162301e-01"
+area_falling = "0.0"
+convolution_window_size = 0
+convolution_window_type = "hHCw"
+speech_padding = "0.1,0.1,0.0,0.0"
+min_speech = "0.0,0.0,0.0"
+min_silence = "0.5,0.0"
+
+[pitch]
+ltsv_window = 0
+ltsv_shift = "1.965217312933439e-01"
+tdc_window = 0
+tdc_shift = "7.992420714637314e-01"
+tdc_balance = "1.124303052287790e+00"
+tdc_lags = "0,0"
+tdc_windowing_type = "hann"
+tdc_windowing_param = "1.358255922816280e+00"
+
+[nn]
+lstm_neuron_nb = "11,12"
+lstm_sub_sampling = 4
+output_neuron_nb = "24,1"
+output_subsampling = 1
+pruning_thresh = 0
+two_sweeps = true
+input_normalization_type = -1
+use_cep_files = 0
+backprop_wer = "-0.02"
+backpropagation_activated = false
+backward_cells_peepholes_active = true
+backward_gates_peepholes_active = true
+backward_gates_recurrent_peepholes_active = true
+forward_cells_peepholes_active = true
+forward_gates_peepholes_active = true
+forward_gates_recurrent_peepholes_active = true
+
+[cost]
+law_speech = "log"
+law_no_speech = "log"
+law_param_speech = 0
+law_param_no_speech = 0
+law_thresh_speech = 1
+law_thresh_no_speech = 0
+ponderation = "0.2"
+
+[nn_lid]
+lstm_neuron_nb = "36,24"
+lstm_sub_sampling = 1
+output_neuron_nb = "48,1"
+output_subsampling = 1
+two_sweeps = true
+input_normalization_type = 0
+weights_file = "/Users/Govit/Documents/QT/FastSpeechProcessing/Release/bin/LID_bestNNWeight_1_MultiConfigResults.mat"
+backprop_wer = "-0.02"
+backpropagation_activated = false
+backward_cells_peepholes_active = true
+backward_gates_peepholes_active = true
+backward_gates_recurrent_peepholes_active = true
+forward_cells_peepholes_active = true
+forward_gates_peepholes_active = true
+forward_gates_recurrent_peepholes_active = true
+mode = 7
+decision_thresh_falling = "-0.5"
+decision_thresh_rising = "0.5"
+shift = "0.0"
+window = "0.25"
+detection_threshold = "0.6"
+
+[cost_lid]
+law_speech = "log"
+law_no_speech = "log"
+law_param_speech = 0
+law_param_no_speech = 0
+law_thresh_speech = 1
+law_thresh_no_speech = 0
+ponderation = "0.93311"
+

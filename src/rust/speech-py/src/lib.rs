@@ -19,6 +19,7 @@ use pyo3::types::PyDict;
 use speech::cli::Mode;
 use speech::engine::corpus_processor::CorpusProcessor;
 use speech::legacy_config::parse_legacy_config as parse_legacy_config_rs;
+use speech::toml_config::toml_to_map as toml_to_map_rs;
 
 /// Convert an engine error into a Python `RuntimeError`, formatting the FULL
 /// chain via the alternate `Display` (`{:#}`, which `anyhow::Error` renders as
@@ -47,6 +48,24 @@ fn parse_legacy_config<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, 
     Ok(dict)
 }
 
+/// Load a canonical TOML config FILE (Phase 4c Task 5) into a `dict[str, str]`,
+/// flattened through `toml_config::toml_to_map` -- the same shape
+/// `parse_legacy_config` produces, regardless of which format the config is
+/// authored in. Takes a PATH (not text): unlike `parse_legacy_config`, the TOML
+/// side has no meaningful "text with no file" use case in this API since the
+/// canonical workflow is always a config file on disk.
+#[pyfunction]
+fn load_toml_config<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| PyRuntimeError::new_err(format!("cannot read config file '{path}': {e}")))?;
+    let map = toml_to_map_rs(&text).map_err(to_pyerr)?;
+    let dict = PyDict::new(py);
+    for (k, v) in &map {
+        dict.set_item(k, v)?;
+    }
+    Ok(dict)
+}
+
 /// The coarse corpus-level engine: a `CorpusProcessor` behind the legacy
 /// corpus contract, driven in-process. Construct from config PATHS + a CLI mode
 /// flag, `run()`, then read the results.
@@ -58,11 +77,12 @@ struct Engine {
 #[pymethods]
 impl Engine {
     /// Build from config PATHS + a CLI mode flag (`"-m"`, `"-s"`, ...; parsed
-    /// via `cli::Mode::from_flag`). A `.config` path is read + `parse_legacy_config`'d;
-    /// a `.toml` path is rejected until Task 5 wires the TOML canonical config.
-    /// An empty `config_paths` is NOT checked here -- `CorpusProcessor::new`
-    /// already bails with its own "at least one config is required" message,
-    /// so a redundant pre-check here would just duplicate that error surface.
+    /// via `cli::Mode::from_flag`). Dispatches by extension like `cli::parse_cli`:
+    /// a `.toml` path is read + `toml_config::toml_to_map`'d, anything else is
+    /// read + `parse_legacy_config`'d. An empty `config_paths` is NOT checked here
+    /// -- `CorpusProcessor::new` already bails with its own "at least one config
+    /// is required" message, so a redundant pre-check here would just duplicate
+    /// that error surface.
     #[new]
     fn new(config_paths: Vec<String>, mode: String) -> PyResult<Self> {
         let mode = Mode::from_flag(&mode)
@@ -70,15 +90,17 @@ impl Engine {
 
         let mut configs = Vec::with_capacity(config_paths.len());
         for path in &config_paths {
-            if path.ends_with(".toml") {
-                return Err(PyRuntimeError::new_err(format!(
-                    "TOML config '{path}' is not supported yet (TOML lands in Task 5); use a legacy .config"
-                )));
-            }
             let text = std::fs::read_to_string(path).map_err(|e| {
                 PyRuntimeError::new_err(format!("cannot read config file '{path}': {e}"))
             })?;
-            configs.push(parse_legacy_config_rs(&text));
+            let map = if path.ends_with(".toml") {
+                toml_to_map_rs(&text).map_err(|e| {
+                    PyRuntimeError::new_err(format!("invalid TOML config '{path}': {e:#}"))
+                })?
+            } else {
+                parse_legacy_config_rs(&text)
+            };
+            configs.push(map);
         }
 
         let inner = CorpusProcessor::new(configs, mode).map_err(to_pyerr)?;
@@ -176,6 +198,7 @@ impl Engine {
 fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_legacy_config, m)?)?;
+    m.add_function(wrap_pyfunction!(load_toml_config, m)?)?;
     m.add_class::<Engine>()?;
     Ok(())
 }

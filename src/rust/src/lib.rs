@@ -21,6 +21,7 @@ pub mod io;
 pub mod legacy_config;
 pub mod nn;
 pub mod tasks;
+pub mod toml_config;
 
 /// Convenience re-export: the top-level engine driver, used directly by `main.rs`.
 pub use engine::corpus_processor::CorpusProcessor;

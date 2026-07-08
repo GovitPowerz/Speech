@@ -11,6 +11,7 @@ into it -- mirroring `src/rust/tests/phase4a_tier1_e2e.rs::seed_corpus`.
 
 import os
 import shutil
+import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,6 +24,7 @@ speech_rs = pytest.importorskip("speech_rs")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PHASE4A = REPO_ROOT / "tests" / "reference_data" / "phase4a"
 PHASE0 = REPO_ROOT / "tests" / "reference_data" / "phase0"
+RUST_MANIFEST = REPO_ROOT / "src" / "rust" / "Cargo.toml"
 
 
 @contextmanager
@@ -118,3 +120,70 @@ def test_error_chain_surfaces(tmp_path: Path) -> None:
     with chdir(tmp_path):  # noqa: SIM117
         with pytest.raises(RuntimeError, match="does_not_exist_listing.csv"):
             speech_rs.Engine(["broken.config"], "-m")
+
+
+# === Phase 4c Task 5: TOML canonical config ==================================
+# The Rust-side conversion table (`speech::toml_config`) lives only in Rust, so
+# these tests drive the actual `speech --convert-config` CLI tool (via `cargo
+# run`, which builds it if needed) to produce a real `.toml` fixture, then
+# exercise the `speech_rs` seam (`load_toml_config` + `Engine(["*.toml"], ...)`)
+# against it -- an end-to-end proof that the PyO3 seam's `.toml` acceptance
+# (not just the pure Rust `toml_config` module) is wired correctly.
+
+
+def _convert_config_to_toml(config_path: Path, out_path: Path) -> None:
+    result = subprocess.run(
+        [
+            "cargo",
+            "run",
+            "--quiet",
+            "--manifest-path",
+            str(RUST_MANIFEST),
+            "--bin",
+            "speech",
+            "--",
+            "--convert-config",
+            str(config_path),
+            str(out_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"--convert-config failed: stdout={result.stdout}\nstderr={result.stderr}"
+    assert out_path.exists(), "--convert-config did not write the .toml output"
+
+
+def test_load_toml_config_matches_legacy_parse(tmp_path: Path) -> None:
+    config_path = PHASE4A / "tier1_tdc.config"
+    toml_path = tmp_path / "tier1_tdc.toml"
+    _convert_config_to_toml(config_path, toml_path)
+
+    got = speech_rs.load_toml_config(str(toml_path))
+    want = speech_rs.parse_legacy_config(config_path.read_text())
+    assert got == want
+
+
+def test_engine_runs_tier1_tdc_toml(tmp_path: Path) -> None:
+    # Mirrors test_engine_runs_tier1_tdc, but the config is converted to TOML
+    # first and Engine() is constructed from the .toml path -- exercising the
+    # `.toml` extension-dispatch branch inside `Engine::new` (speech-py/src/lib.rs).
+    _seed_tier1(tmp_path)
+    toml_path = tmp_path / "tier1_tdc.toml"
+    _convert_config_to_toml(tmp_path / "tier1_tdc.config", toml_path)
+
+    with chdir(tmp_path):
+        eng_config = speech_rs.Engine(["tier1_tdc.config"], "-m")
+        eng_config.run()
+        res_config = eng_config.results_matrix()
+
+        eng_toml = speech_rs.Engine(["tier1_tdc.toml"], "-m")
+        eng_toml.run()
+        res_toml = eng_toml.results_matrix()
+
+    assert res_config.shape == res_toml.shape == (6, 21)
+    # Column 6 is the wall-clock timing column (masked in every Rust-side golden
+    # comparison too, e.g. phase4a_tier1_e2e.rs); every other column is a pure
+    # function of the (equivalent) config content and must match bit-for-bit.
+    mask = np.ones(res_config.shape[1], dtype=bool)
+    mask[6] = False
+    np.testing.assert_array_equal(res_config[:, mask], res_toml[:, mask])
