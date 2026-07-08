@@ -60,13 +60,11 @@ impl Engine {
     /// Build from config PATHS + a CLI mode flag (`"-m"`, `"-s"`, ...; parsed
     /// via `cli::Mode::from_flag`). A `.config` path is read + `parse_legacy_config`'d;
     /// a `.toml` path is rejected until Task 5 wires the TOML canonical config.
+    /// An empty `config_paths` is NOT checked here -- `CorpusProcessor::new`
+    /// already bails with its own "at least one config is required" message,
+    /// so a redundant pre-check here would just duplicate that error surface.
     #[new]
     fn new(config_paths: Vec<String>, mode: String) -> PyResult<Self> {
-        if config_paths.is_empty() {
-            return Err(PyRuntimeError::new_err(
-                "Engine: at least one config path is required",
-            ));
-        }
         let mode = Mode::from_flag(&mode)
             .ok_or_else(|| PyRuntimeError::new_err(format!("unknown mode flag '{mode}'")))?;
 
