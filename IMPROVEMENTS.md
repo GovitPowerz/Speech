@@ -2269,6 +2269,70 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (reaching it requires a deliberately malformed multi-config setup); documented here per the
   width-growth review in Task 9.
 
+- **[phase4b] Mutation battery (Task 11): 6 of 7 fresh mutations break their named golden as
+  designed; 1 genuine coverage gap found, recorded honestly.** Each applied/run(named suite
+  only)/reverted/re-run in isolation, full `cargo test` once at the end (all foreground, no
+  background test runs). (1) In-band encode `target_lid[ti] = -2.0` -> `-1.0` (`tasks/lid.rs`,
+  both the `BlstmSpectralLid::get_segmentation` site and the `TwinBlstmSpectralLid::get_segmentation`
+  modes-0-3 site) against `phase4b_lid5_golden`/`phase4b_twin_golden` -- FAILED as expected on
+  BOTH (`sentinel_gt150_present_every_file`: "no >150 sentinel in [100.8..]"/"[143.1..]";
+  `lid_classification_errors_match_dump`: target col now decodes to `100*x+100` instead of
+  `100*x+200`); reverted, PASS. (2) Sentinel decode `150.0` -> `250.0`
+  (`engine/confusion.rs::confusion_from_results`) against `phase4b_confusion_golden` -- FAILED
+  as expected (`confusion_matrix_matches_harness_transcription` cell mismatch,
+  `error_matches_real_confusion2string_and_printconfusionmatrix` bit mismatch); reverted, PASS.
+  (3) PostProcessMode accumulator body swap (`2 <-> _` match arms, `get_segmentation_mode7`'s
+  segLID loop) against `phase4b_twin_mode7` -- FAILED as expected (3 tests:
+  `post_process_mode_all_three_covered` "ppm1 should near-coincide with ppm0" now false since ppm2
+  swapped to the sum-log body pulls ppm1's near-coincidence check off; plus
+  `mode7_continuous_members_match_real` and `mode7_integer_members_match_real_bitexact` bit
+  mismatches); reverted, PASS. (4) `LID_` filename-prefix drop
+  (`TwinBlstmSpectralLid::save_weights_lid`) against `phase4b_corpus_lid::twin_train_epoch_weights_golden`
+  -- FAILED as expected, though via a different observable than the target `LID_*.exists()` assert:
+  dropping the prefix makes the LID net's save collide with the SAD net's identically-named
+  artifact, so the SAD weights dims check fails FIRST (`weights_bestNNWeight_1_twin_train.mat
+  dims: left: (1093, 1) right: (537, 1)`) -- the corruption is caught earlier in the same test,
+  confirming the mutation is load-bearing; reverted, PASS. (5) `[sad, lid]` dispatch order swap
+  in `BagOfProcessors::get_weights_derivatives`'s `TwinLid` arm (now `[lid, sad]`) against
+  `phase4b_corpus_lid::twin_gradcheck_golden`/`twin_train_epoch_weights_golden` -- FAILED as
+  expected on both (`twin_gradcheck_golden`: "twin net 0 weight 0 backprop: got ... want ... (>
+  16 ULP)"; `twin_train_epoch_weights_golden`: panics in `nn/train.rs` Rprop update, "index out
+  of bounds: the len is 537 but the index is 537" -- the swapped, differently-shaped derivative
+  matrix desyncs the per-weight iRPROP- state vectors); reverted, PASS. (6) `costLID = -1.0`
+  no-speech gate removed (`bag_of_processors.rs::save_and_update`, the `:465` override) against
+  `phase4b_corpus_lid::twin_train_ns_costlid_gate_live` -- FAILED as expected (epoch-5 weight
+  mismatch, real costLID leaking into `update_weights_lid` where the gated `-1.0` should have
+  fired); reverted, PASS. (7) `segmentationLID /= 56.0` -> `/= 55.0` (`tasks/lid.rs`,
+  `TwinBlstmSpectralLid::get_segmentation` modes-0-3 arm) against `phase4b_twin_golden` (all 8
+  variants incl. modes 1/2/3, the only ones that reach `lid_to_segmentation`) -- did NOT fail: a
+  GENUINE coverage gap, measured not assumed. Diagnostic instrumentation (temporary, not
+  committed) showed `segmentation_lid`'s max value on the T2 3-file corpus is `~0.0089`
+  (`0.5/56`, the untouched midpoint-seed entries dominate the max) against a
+  `BLSTM_LID_decision_thresh_rising` of `0.6` -- three orders of magnitude short, so neither
+  `/56.0` nor `/55.0` ever crosses the rising threshold and `lid_to_segmentation` never emits a
+  segment on this fixture; confirmed the gap is not merely 55-vs-56-insensitive but
+  divisor-insensitive up to `/1.0` (still no crossing -- the live NN posteriors are just far from
+  saturation on this synthetic corpus). Pushing further (`/0.001`, blasting every entry to `500`,
+  far above threshold) surfaced a SECOND, independent reason the call site is inert here: when
+  `results[0] >= thresh_max` (`tasks/segmenter.rs::lid_to_segmentation:470-472`), `begin` is
+  seeded to `0.0` but `has_begun` is NOT set -- and the loop's only `has_begun = true` site
+  requires `begin < 0.0` (`:478`), which is now false, so a segment that is already "open" at
+  frame 0 can never close (the `:483-497` block never runs) NOR does the post-loop `if has_begun`
+  finalizer (`:500-503`) fire (`has_begun` stayed false throughout) -- a same-family "already
+  above threshold at frame 0" edge case never triggers `label_segment` at all. Both findings are
+  measured facts about the current T2 fixture + `lid_to_segmentation`'s literal control flow, not
+  a claim that the `/56.0`/`/55.0` distinction can never matter on other data. No production code
+  changed to chase this gap; a future crafted fixture with LID posteriors saturated enough to
+  cross 0.6 mid-sequence (not at frame 0) would be needed to close it. **Cross-reference (Task
+  10, not re-run here):** the tie-gate (`>` -> `>=`) and fold-order-reversal mutations from the
+  original Task 11 (4a) plan item are already executed and recorded above under the `[phase4a]
+  Mutation battery` entry's `UPDATE (Task 10)` addendum and the `[phase4a] Phase 4b test backlog`
+  entry, closed by `phase4b_backlog.rs::best_cost_gate_skips_on_exact_tie` and
+  `fold_order_ascending_golden` respectively. *Net verdict for this task:* 6/7 fresh mutations
+  break their golden as designed; 1 genuine gap (item 7) reported honestly rather than papered
+  over. Full transcript (diffs, commands, exact output) in
+  `.superpowers/sdd/task-11-report.md`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
