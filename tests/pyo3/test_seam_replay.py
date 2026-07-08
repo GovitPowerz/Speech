@@ -24,7 +24,8 @@ Two DIFFERENT tolerance regimes are load-bearing here, not one:
   shapes (`phase4b_corpus_lid.rs::assert_gradcheck`'s doc comment) -- a GEMM
   block-order divergence, not a libm one, so the libm-canary comparator does
   not apply; mirrored here via `_assert_gradcheck_report` using the same
-  measured ULP/abs bounds as the Rust `assert_gradcheck` helper.
+  measured ULP/abs bounds as the Rust `assert_gradcheck` helper, including the
+  Task-9 1e-6 tightness bound on mean_relative_error for the twin leg.
 """
 
 from __future__ import annotations
@@ -179,10 +180,12 @@ def _ulp_diff(a: float, b: float) -> int:
     return abs(ai - bi)
 
 
-def _assert_gradcheck_report(report: dict[str, Any], golden: NDArray[np.float64], label: str) -> None:
+def _assert_gradcheck_report(report: dict[str, Any], golden: NDArray[np.float64], label: str, is_twin: bool = False) -> None:
     """Mirrors `phase4b_corpus_lid.rs::assert_gradcheck`'s MEASURED tolerances
     (NOT the libm-canary standard): backprop column <= 16 ULP, numerical column
-    <= 1e-8 absolute, means <= 1e-8 / 1e-5 absolute, mean_relative_error < 5e-4."""
+    <= 1e-8 absolute, means <= 1e-8 / 1e-5 absolute. For tier2 (is_twin=False),
+    mean_relative_error < 5e-4; for twin (is_twin=True), mean_relative_error < 1e-6
+    (the Task-9 measured bound: src/rust/tests/phase4b_corpus_lid.rs:460-464)."""
     per_weight = cast(NDArray[np.float64], report["per_weight"])
     sweep = golden.shape[0] - 1
     assert per_weight.shape == (sweep, 3), f"{label}: sweep length"
@@ -197,7 +200,12 @@ def _assert_gradcheck_report(report: dict[str, Any], golden: NDArray[np.float64]
     mean_rel = float(cast(float, report["mean_relative_error"]))
     assert abs(mean_error - float(golden[sweep, 0])) <= 1e-8, f"{label}: mean_error mismatch"
     assert abs(mean_rel - float(golden[sweep, 1])) <= 1e-5, f"{label}: mean_relative_error mismatch"
-    assert mean_rel < 5e-4, f"{label}: mean_relative_error {mean_rel} exceeds the 5e-4 analytic-vs-numeric bound"
+    if is_twin:
+        # Task-9 measured bound: analytic/numerical agreement is tight at ~1e-9 scale.
+        # See phase4b_corpus_lid.rs:460-464 for the Rust golden assertion.
+        assert mean_rel < 1e-6, f"{label}: mean_relative_error {mean_rel} not at the measured ~1e-9 scale"
+    else:
+        assert mean_rel < 5e-4, f"{label}: mean_relative_error {mean_rel} exceeds the 5e-4 analytic-vs-numeric bound"
     assert any(abs(float(t)) > 1e-12 for t in per_weight[:, 1]), f"{label}: all numerical derivatives ~0 (degenerate check)"
 
 
@@ -314,7 +322,7 @@ def test_grad_check_seam(tmp_path_factory: pytest.TempPathFactory) -> None:
         assert reports[1][0] == 1, "network index 1 (LID) second"
         for net_idx, report in reports:
             golden = _load_bin_matrix(PHASE4B / f"twin_gradcheck_net{net_idx}.bin")
-            _assert_gradcheck_report(report, golden, f"twin net {net_idx}")
+            _assert_gradcheck_report(report, golden, f"twin net {net_idx}", is_twin=True)
 
         n0 = [float(t) for t in cast(NDArray[np.float64], reports[0][1]["per_weight"])[:, 1]]
         n1 = [float(t) for t in cast(NDArray[np.float64], reports[1][1]["per_weight"])[:, 1]]
