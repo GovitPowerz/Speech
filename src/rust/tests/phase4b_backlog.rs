@@ -377,7 +377,13 @@ fn fold_order_measured_divergence_seed0() {
 
 /// GOLDEN: production `CorpusProcessor::run()` (ascending fold, the real
 /// `n == 1` static-lane path) over the SAME 3-file corpus/config, one
-/// training epoch, pinned bit-exact against a committed fixture.
+/// training epoch, against a committed fixture -- compared via the repo's
+/// canary-gated comparator (`common::assert_oracle_eq`, same family as the
+/// pitch-pass golden below), NOT a strict `to_bits()` assert: the raw
+/// derivatives flow through the net's ln/exp/asinh activation chain (real
+/// 33,671-weight net, 67,342-element fixture), so they are NOT a
+/// portable-arithmetic golden -- bit-exact on the oracle env (Apple libm),
+/// hybrid ULP/absolute off it (e.g. CI glibc).
 ///
 /// Pins `epoch_raw_derivs_trace_for_test()` (the RAW folded `[deriv, count]`
 /// matrix captured immediately after `run_epoch`'s per-file fold, BEFORE
@@ -392,7 +398,16 @@ fn fold_order_measured_divergence_seed0() {
 /// (tried first; reverted after confirming the false negative, see the task
 /// report). The raw-derivs pin below DOES fail under that same mutation --
 /// confirmed manually (apply/run/revert, matching the Task 11 mutation-
-/// battery methodology, not automated in CI).
+/// battery methodology). IMPORTANT CAVEAT: that mutation-sensitivity
+/// evidence (T10/T11) was gathered ON THE ORACLE ENV ONLY, where the
+/// comparator runs in `Strict` (bit-exact) mode. The fold-order divergence
+/// is bit-level (~1 ULP per affected element, not a magnitude difference),
+/// which sits INSIDE the hybrid ULP/absolute bound used off the oracle env
+/// -- so the "this golden catches the fold-order mutation" claim is
+/// oracle-env-only, not CI-verified; it was never repeated under
+/// `SPEECH_ORACLE_LIBM=ulp` or on a glibc host. Off-oracle this test still
+/// pins shape + hybrid-bound agreement against the fixture, just not the
+/// ULP-scale mutation sensitivity the manual apply/run/revert established.
 #[test]
 fn fold_order_ascending_golden() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -422,14 +437,7 @@ fn fold_order_ascending_golden() {
     );
 
     let want = common::load_bin_phase4b("fold_order_ascending_epoch0_raw_derivs.bin");
-    assert_eq!(epoch0.dim(), want.dim(), "golden raw-derivs matrix shape");
-    for ((r, c), &v) in epoch0.indexed_iter() {
-        assert_eq!(
-            v.to_bits(),
-            want[[r, c]].to_bits(),
-            "epoch-0 (ascending fold) raw deriv [{r},{c}] bit mismatch"
-        );
-    }
+    common::assert_oracle_eq(epoch0, &want, "fold_order_ascending epoch0 raw derivs");
 
     // NON-VACUITY: the post-Rprop trained weights also move (the fold's
     // derivatives genuinely drove a step), even though (per the doc comment

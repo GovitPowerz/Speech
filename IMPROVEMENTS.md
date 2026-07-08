@@ -1731,9 +1731,11 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   between ascending and descending fold order); *mutation evidence:*
   `run_epoch`'s `per_file.sort_by_key(|(j, _, _, _)| *j)` -> `Reverse(*j)` makes it FAIL
   (`epoch-0 (ascending fold) raw deriv [3,0] bit mismatch`); reverted, PASS. See the Task 10
-  backlog entry below for the full write-up (both items pin the RAW folded derivative matrix, not
-  the post-Rprop weights, since iRPROP- only reacts to derivative sign and this fold order's
-  divergence is too small to flip one).
+  backlog entry below for the full write-up. **Correction:** only the fold-order item pins the
+  RAW folded derivative matrix, not the post-Rprop weights, since iRPROP- only reacts to
+  derivative sign and this fold order's divergence is too small to flip one; the best-cost-tie
+  item pins a different observable entirely (the save-gate's weights-artifact existence, via
+  `!weights_artifact_b.exists()`), not the derivative matrix.
 
 - **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
   (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely
@@ -2187,15 +2189,23 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`OutputNeuronNb 48,1` -> `getOutputSize() = 1`), and `classNb` is forced to `max(2, 1) =
   2` (`:624-625`), so the brief's "3-class mapping" is superseded -- the fixtures use a
   2-class mapping. `_DumpLIDInternals` derives the `.mat` filename from
-  `audio.getAudioFileName()` (`:906-913`); the port's `Audio` carries no source path, so the
-  dump lands at `<_DumpDir>/chan<c>_lid_dump.mat` (cosmetic path deviation) -- the VARIABLE
+  `audio.getAudioFileName()` (`:906-913`); the port doesn't thread `Audio::audio_file_name`
+  (the field landed in Task 8, populated post-hoc by `bag_of_processors::apply_corpus_item`,
+  not by `read_audio`/`read_phseq`) into this dump path, so the dump lands at
+  `<_DumpDir>/chan<c>_lid_dump.mat` (cosmetic path deviation) -- the VARIABLE
   names (`features_<n>` = `[_OutputForward | _OutputBackward]`, `matNb`) and values are the
   faithful part. `_PostProcessMode 1` (entropy-weighted, `:1073-1089`) adds a per-row scalar
   `-sum log(entropy)` EQUALLY across every `segLID` column, which is a column-constant offset
   -> it cancels in the softmax normalization (`:1169-1172`), so ppm1's normalized `langID`
-  NEAR-coincides with ppm0's (exactly in real arithmetic, ~1 ULP in floating point). *Why
-  deferred:* faithful port + missing `Audio` source path. *Fix candidate:* add
-  `Audio.source_name` if the exact legacy dump filename is ever needed. *Pinned by:*
+  NEAR-coincides with ppm0's (exactly in real arithmetic, ~1 ULP in floating point). That pin
+  is therefore effectively ORACLE-ENV-ONLY as a mutation-catcher: `mode7_continuous_members_
+  match_real`'s ppm1 golden (`tests/phase4b_twin_mode7.rs`) sits only ~1 ULP from ppm0's, well
+  inside the off-oracle hybrid bound (`common::assert_oracle_eq`, `<=4` ULP / `512*eps*scale`
+  absolute), so a bug that collapsed ppm1's post-process path onto ppm0's could pass
+  undetected on CI glibc. *Why deferred:* the mode-7 driver predates `Audio::audio_file_name`
+  and hasn't been revisited for the dump path. *Fix candidate:* thread `audio_file_name` into
+  the dump path for the legacy-faithful filename, now that the field exists (4c-era). *Pinned
+  by:*
   `dump_lid_internals_written_and_valued`, `post_process_mode_all_three_covered`
   (`tests/phase4b_twin_mode7.rs`; ppm2 vote DISTINCT, ppm1 near-coincident, all three code
   paths counter-asserted). Mutation: forcing `classNb = outputSize` (dropping the `max(2,.)`)

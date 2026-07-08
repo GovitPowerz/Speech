@@ -9799,7 +9799,7 @@ int main(int argc, char** argv) {
                     if (d > langidMaxAbs) langidMaxAbs = d;
                 }
                 double dc = std::fabs(segReal._LIDCumulativeError[chan]);   // reimpl cumErr already dumped
-                (void) dc;
+                if (dc > costMaxAbs) costMaxAbs = dc;
             }
             std::cout << "SEG_STRUCT site=lid5_" << name << " ok=1 max_dt="
                       << std::scientific << std::setprecision(3) << segMaxDt << "\n";
@@ -9817,9 +9817,12 @@ int main(int argc, char** argv) {
     // TwinBLSTMSpectralLID::getSegmentation (:263-1421) runs the SAD BLSTM
     // (_BLSTMNeuralNetwork) for the VAD result_vec (modes 0/3) then a SECOND net
     // (_LIDBLSTMNeuralNetwork) per speech segment for language scoring (:1243-1291).
-    // We transcribe the wav-mode 0/2/3 paths swapping ONLY the SAD FFB (:715) +
-    // the LID scoring feedForward (:1250) for the reimpl family (blstmFeedForwardT6
-    // for the real 33k SAD net + a generic small-topology LID reimpl), keeping
+    // We transcribe the wav-mode 0/2/3 paths swapping FOUR real-class call sites for
+    // reimpl equivalents: the SAD FFB (:715, blstmFeedForwardT6 for the real 33k SAD
+    // net), the type -1 self-normalization shared by both nets (BLSTMNeuralNetwork.cpp
+    // :737-744, `selfNorm` below), getBLSTMLIDInputSequence's SAD-hidden-state concat
+    // (:139-168, `concatReimpl` below), and the LID scoring feedForward (:1250, a
+    // generic small-topology reimpl) -- keeping
     // getTargets/results2segmentation/LID2Segmentation/compute_errors REAL. A
     // SECONDARY real-Eigen probe runs the compiled getSegmentation beside it:
     // SEG_STRUCT (segment count/type) + LID_STRUCT (confusion + _IsLIDCorrect),

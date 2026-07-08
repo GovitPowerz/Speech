@@ -3,10 +3,13 @@
 //! `TwinBLSTMSpectralLID::getSegmentation` (`:263-1421`) runs the SAD BLSTM
 //! (`_BLSTMNeuralNetwork`) for the VAD result_vec (modes 0/3) then a SECOND net
 //! (`_LIDBLSTMNeuralNetwork`) per speech segment for language scoring (`:1243-1291`).
-//! The harness `TwinProbe` stage transcribes the wav-mode 0/2/3 paths swapping ONLY the
-//! SAD FFB (`:715`) + the LID scoring `feedForward` (`:1250`) for the reimpl family
-//! (`blstmFeedForwardT6` for the real 33k SAD net + a generic small-topology LID reimpl),
-//! keeping `getTargets`/`results2segmentation`/`LID2Segmentation`/`compute_errors` REAL;
+//! The harness `TwinProbe` stage transcribes the wav-mode 0/2/3 paths swapping FOUR
+//! real-class call sites for reimpl equivalents: the SAD FFB (`:715`,
+//! `blstmFeedForwardT6` for the real 33k SAD net), the type -1 self-normalization
+//! shared by both nets (`BLSTMNeuralNetwork.cpp:737-744`), `getBLSTMLIDInputSequence`'s
+//! SAD-hidden-state concat (`:139-168`), and the LID scoring `feedForward` (`:1250`, a
+//! generic small-topology reimpl) -- keeping
+//! `getTargets`/`results2segmentation`/`LID2Segmentation`/`compute_errors` REAL;
 //! the reimpl dumps are what this port matches. A harness SECONDARY real-Eigen probe
 //! cross-checks SEG_STRUCT (segment count/type equality, `max_dt == 0`) + LID_STRUCT
 //! (confusion + `_IsLIDCorrect` equality, `langid_max_abs ~ 1e-16`) against the REAL

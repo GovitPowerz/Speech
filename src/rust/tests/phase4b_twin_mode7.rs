@@ -13,7 +13,8 @@
 //! Mode 7 (no reimpl/transcription swap, and no SEG_STRUCT/LID_STRUCT-style secondary probe);
 //! the goldens ARE the real-compiled comparison, not a cross-check against one. THIS file
 //! pins the non-vacuity + structural contract:
-//! - confusion off- AND on-diagonal mass across files (s1/s3 lang 0 hit, s2 lang 1 miss);
+//! - confusion off- AND on-diagonal mass across files (s1 lang 0 hit, s2 lang 1 hit, s3
+//!   lang 1 miss -- net predicts class 0 on s3);
 //! - the `>150` targetLID sentinel present every file;
 //! - `_PostProcessMode` 0/1/2 all covered (ppm2 differs from ppm0; ppm1 coincides with
 //!   ppm0 in the normalized observables -- the per-row entropy offset is column-constant
@@ -123,7 +124,7 @@ fn sentinel_gt150_present_every_file() {
 
 #[test]
 fn is_lid_correct_hit_and_miss() {
-    // s1/s3 (lang 0) HIT -> 100; s2 (lang 1) MISS -> 0. Proves argmax(langID) is exercised.
+    // s1 (lang 0) / s2 (lang 1) HIT -> 100; s3 (lang 1) MISS -> 0. Proves argmax(langID) is exercised.
     let mut saw_hit = false;
     let mut saw_miss = false;
     for (f, lang) in FILES {
@@ -190,15 +191,54 @@ fn post_process_mode_all_three_covered() {
     }
 }
 
+/// Minimal MAT v5 reader for THIS test's own dump only, matching `io/matfile.rs`'s
+/// writer exactly (fixed 128-byte header, sequential uncompressed miMATRIX elements,
+/// no compression). NOT a general reader -- the crate deliberately ships none (S6,
+/// see `io/matfile.rs`'s module doc); this stays test-local, just enough to pull one
+/// named variable's payload back out for a real value check instead of a
+/// presence-only text scan.
+fn read_mat_matrix(bytes: &[u8], name: &str) -> (usize, usize, Vec<f64>) {
+    let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+    let mut off = 128usize; // fixed text/version/endian header (matfile.rs::create)
+    while off + 8 <= bytes.len() {
+        let ty = u32_at(off);
+        let payload_size = u32_at(off + 4) as usize;
+        assert_eq!(ty, 14, "expected miMATRIX tag at offset {off}");
+        let mut p = off + 8;
+        let flags_size = u32_at(p + 4) as usize;
+        p += 8 + flags_size.div_ceil(8) * 8;
+        let dims_size = u32_at(p + 4) as usize;
+        let rows = i32::from_le_bytes(bytes[p + 8..p + 12].try_into().unwrap()) as usize;
+        let cols = i32::from_le_bytes(bytes[p + 12..p + 16].try_into().unwrap()) as usize;
+        p += 8 + dims_size.div_ceil(8) * 8;
+        let name_size = u32_at(p + 4) as usize;
+        let this_name = String::from_utf8_lossy(&bytes[p + 8..p + 8 + name_size]).into_owned();
+        p += 8 + name_size.div_ceil(8) * 8;
+        let data_size = u32_at(p + 4) as usize;
+        let data_start = p + 8;
+        let n = data_size / 8;
+        if this_name == name {
+            let data: Vec<f64> = (0..n)
+                .map(|k| {
+                    let o = data_start + k * 8;
+                    f64::from_le_bytes(bytes[o..o + 8].try_into().unwrap())
+                })
+                .collect();
+            return (rows, cols, data);
+        }
+        off += 8 + payload_size;
+    }
+    panic!("variable {name:?} not found in MAT v5 buffer");
+}
+
 #[test]
 fn dump_lid_internals_written_and_valued() {
     // ppm2 has DumpInternals true. The driver writes features_<n> (= [oF|oB]) + matNb.
-    let tmp = std::env::temp_dir().join(format!("speech_mode7_dump_{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
     let lidw = lid_weights();
     let mut drv =
         TwinBlstmSpectralLid::from_legacy(&map_of("twin_mode7_ppm2"), None, Some(&lidw)).unwrap();
-    drv.set_dump_dir(tmp.to_string_lossy().into_owned());
+    drv.set_dump_dir(tmp.path().to_string_lossy().into_owned());
     let mut audio = phseq_audio("s1", 0, 1.0);
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
@@ -207,7 +247,7 @@ fn dump_lid_internals_written_and_valued() {
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
 
     // s1 = [bonjour(7), salut(5)]; MinNbOfFrames 4 keeps both -> matNb = 2, features_0/1.
-    let mat = tmp.join("chan0_lid_dump.mat");
+    let mat = tmp.path().join("chan0_lid_dump.mat");
     assert!(mat.exists(), "dump .mat not written at {mat:?}");
     let bytes = std::fs::read(&mat).unwrap();
     // MAT v5 header text + the variable names appear literally in the (uncompressed) file.
@@ -216,7 +256,34 @@ fn dump_lid_internals_written_and_valued() {
     assert!(text.contains("features_0"), "missing features_0 variable");
     assert!(text.contains("features_1"), "missing features_1 variable");
     assert!(text.contains("matNb"), "missing matNb variable");
-    std::fs::remove_dir_all(&tmp).ok();
+
+    // Real VALUE check, not just presence: parse features_0's payload back out (our
+    // own writer's format) and pin it against the harness's real-compiled dump of
+    // the SAME case (`mode7_dump_s1.mat`, `tools/oracle_harness/main.cpp`'s
+    // DumpLIDInternals emitter, twin_mode7_ppm2/s1) -- element [0,0] (first
+    // forward-net output) AND [3,48] (the fwd|bwd hcat boundary column, so a
+    // concatenation-order bug is caught too, not just a scalar typo). Values
+    // extracted once via `scipy.io.loadmat("mode7_dump_s1.mat")`. Canary-gated:
+    // these flow through the LID net's asinh/sigmoid/softmax chain.
+    let (rows, cols, data) = read_mat_matrix(&bytes, "features_0");
+    assert_eq!((rows, cols), (7, 96), "features_0 shape");
+    let at = |r: usize, c: usize| data[c * rows + r]; // column-major
+    common::assert_oracle_eq_f64(
+        at(0, 0),
+        0.307_905_288_145_866_2,
+        "features_0[0,0] (oF start)",
+    );
+    common::assert_oracle_eq_f64(
+        at(3, 48),
+        -0.016_480_922_319_417_602,
+        "features_0[3,48] (oB start, hcat boundary)",
+    );
+
+    // matNb: the scalar VALUE (2 = both "bonjour"/7-row and "salut"/5-row blocks kept
+    // by MinNbOfFrames 4), not just "the variable name string appears".
+    let (mrows, mcols, mdata) = read_mat_matrix(&bytes, "matNb");
+    assert_eq!((mrows, mcols), (1, 1), "matNb shape");
+    assert_eq!(mdata[0], 2.0, "matNb value");
 }
 
 // === bit-exact goldens vs the REAL compiled getSegmentation ======================

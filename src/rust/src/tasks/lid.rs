@@ -1222,10 +1222,13 @@ impl TwinBlstmSpectralLid {
     }
 
     /// Override the DumpLIDInternals output directory (`_DumpDir`). The legacy derives
-    /// the `.mat` filename from `audio.getAudioFileName()` (`:906-913`); the port's
-    /// `Audio` carries no source path, so the dump filename is `<dir>/chan<c>_lid_dump.mat`
-    /// -- a cosmetic path deviation (IMPROVEMENTS'd); the VARIABLE names (`features_<n>`,
-    /// `matNb`) and values are the faithful part.
+    /// the `.mat` filename from `audio.getAudioFileName()` (`:906-913`); this driver
+    /// does not thread `Audio::audio_file_name` (the field landed in Task 8, populated
+    /// post-hoc by `engine::bag_of_processors::apply_corpus_item`, not by
+    /// `read_audio`/`read_phseq`) into this dump path, so the dump filename stays
+    /// `<dir>/chan<c>_lid_dump.mat` -- a cosmetic path deviation (IMPROVEMENTS'd, now a
+    /// real 4c-era fix candidate since the field exists); the VARIABLE names
+    /// (`features_<n>`, `matNb`) and values are the faithful part.
     pub fn set_dump_dir(&mut self, dir: String) {
         self.driver_cfg.dump_dir = dir;
     }
