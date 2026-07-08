@@ -70,10 +70,43 @@ function stage_smorms3(out_dir)
     rt_theta_traj(:, s) = rt_obj.theta;
   end
 
+  % ---- Eps-guard variant: near-zero-gradient regime (M=1, few steps) ----
+  % Review finding: both eps=1e-16 guards (SMORMS3.m:335 sqrt(MMS)+eps in the dtheta
+  % denominator, and the MMS+eps min-cap denominator shared by the dtheta cap and the
+  % delta update) are INACTIVE on the two sequences above (MMS >> eps everywhere there,
+  % so an eps-placement mutation is a no-op). A single ~1e-8 gradient makes step-1
+  % MMS = 0.5*grad^2 ~ 5e-17 -- the SAME ORDER as eps=1e-16 (MMS+eps ~= 3*MMS, a
+  % measured effect, not rounding noise) -- genuinely exercising both guards.
+  eps_M = 1;
+  eps_num_steps = 3;
+  eps_theta0 = { 0.5 };
+  eps_grad_script = 1e-8 * ones(eps_M, eps_num_steps);
+  eps_offset = zeros(eps_M, 1);
+
+  eps_f_df = @(theta, passthru, ec) smorms3_f_df(theta, passthru, ec, eps_grad_script, eps_offset);
+  eps_obj = SMORMS3(eps_f_df, eps_theta0, struct());
+
+  eps_theta0_flat = eps_obj.theta;
+  eps_theta_traj = zeros(eps_M, eps_num_steps);
+  eps_mms_traj = zeros(eps_M, eps_num_steps);
+  eps_steprate_traj = zeros(eps_M, eps_num_steps);
+  eps_delta_traj = zeros(eps_M, eps_num_steps);
+  eps_lrate_traj = zeros(1, eps_num_steps);
+  for s = 1:eps_num_steps
+    eps_obj.optimization_step();
+    eps_theta_traj(:, s) = eps_obj.theta;
+    eps_mms_traj(:, s) = eps_obj.MMS;
+    eps_steprate_traj(:, s) = eps_obj.stepRate;
+    eps_delta_traj(:, s) = eps_obj.delta;
+    eps_lrate_traj(1, s) = eps_obj.lrate;
+  end
+
   save('-v7', fullfile(out_dir, 'smorms3.mat'), ...
        'grad_script', 'theta0_flat', 'theta_traj', 'mms_traj', 'steprate_traj', ...
        'delta_traj', 'lrate_traj', 'cost_traj', 'theta_final_cell0', 'theta_final_cell1', ...
-       'rt_grad_script', 'rt_theta0_flat', 'rt_offset', 'rt_theta_traj');
-  printf('OCTAVE_STAGE smorms3 M=%d num_steps=%d rt_M=%d rt_num_steps=%d\n', ...
-         M, num_steps, rt_M, rt_num_steps);
+       'rt_grad_script', 'rt_theta0_flat', 'rt_offset', 'rt_theta_traj', ...
+       'eps_grad_script', 'eps_theta0_flat', 'eps_theta_traj', 'eps_mms_traj', ...
+       'eps_steprate_traj', 'eps_delta_traj', 'eps_lrate_traj');
+  printf('OCTAVE_STAGE smorms3 M=%d num_steps=%d rt_M=%d rt_num_steps=%d eps_M=%d eps_num_steps=%d\n', ...
+         M, num_steps, rt_M, rt_num_steps, eps_M, eps_num_steps);
 end

@@ -18,6 +18,10 @@ one Octave-compat accommodation -- the SMORMS3 empty-varargin lvalue miscount):
             warmup (1e-9 -> 1e-1 by step 8) AND the 1e-1 cap (steps 9-12 plateau).
             Round-trip run: f_df returns a MODIFIED theta_out (nonzero offset), pinning
             SMORMS3.m:355's `theta = theta_out + dtheta`.
+            Eps-guard run: a near-zero gradient (M=1, 3 steps, grad=1e-8 constant) makes
+            step-1 MMS ~ eps=1e-16 (same order, not rounding noise), genuinely
+            exercising the two `+eps` guards (SMORMS3.m:335) that the main/round-trip
+            sequences leave inactive (MMS >> eps there).
   rprop   : Rprop.m (function) per-step state over a crafted derivative/cost sequence
             exercising every branch (grow / shrink+backtrack / plain) -- pure arithmetic,
             STRICT bits everywhere.
@@ -70,7 +74,18 @@ SMORMS3_SHAPES = {
     "rt_theta0_flat": (3, 1),
     "rt_offset": (3, 1),
     "rt_theta_traj": (3, 4),
+    "eps_grad_script": (1, 3),
+    "eps_theta0_flat": (1, 1),
+    "eps_theta_traj": (1, 3),
+    "eps_mms_traj": (1, 3),
+    "eps_steprate_traj": (1, 3),
+    "eps_delta_traj": (1, 3),
+    "eps_lrate_traj": (1, 3),
 }
+# The near-zero-gradient regime targets: SMORMS3.m:79/:335's guard value, and the
+# "genuinely active" band the non-vacuity check below requires step-1 MMS to fall in.
+SMORMS3_EPS = 1e-16
+EPS_GUARD_RATIO_BAND = (1e-2, 1e2)  # within 2 orders of magnitude of SMORMS3_EPS
 RPROP_SHAPES = {
     "deriv_script": (5, 6),
     "cost_script": (1, 6),
@@ -82,7 +97,8 @@ RPROP_SHAPES = {
 }
 
 STAGE_LINE_RE = re.compile(
-    r"^OCTAVE_STAGE smorms3 M=(?P<M>\d+) num_steps=(?P<ns>\d+) rt_M=(?P<rtM>\d+) rt_num_steps=(?P<rtns>\d+)$",
+    r"^OCTAVE_STAGE smorms3 M=(?P<M>\d+) num_steps=(?P<ns>\d+) rt_M=(?P<rtM>\d+) rt_num_steps=(?P<rtns>\d+) "
+    r"eps_M=(?P<epsM>\d+) eps_num_steps=(?P<epsns>\d+)$",
     re.MULTILINE,
 )
 RPROP_LINE_RE = re.compile(r"^OCTAVE_STAGE rprop N=(?P<N>\d+) K=(?P<K>\d+)$", re.MULTILINE)
@@ -184,8 +200,9 @@ def main() -> None:
         rm = RPROP_LINE_RE.search(rprop_stdout)
         if not rm:
             raise SystemExit("OCTAVE_STAGE rprop line missing from stdout")
-        if (int(sm["M"]), int(sm["ns"]), int(sm["rtM"]), int(sm["rtns"])) != (7, 12, 3, 4):
-            raise SystemExit(f"smorms3 stage dims {(sm['M'], sm['ns'], sm['rtM'], sm['rtns'])} != (7,12,3,4)")
+        sm_dims = (int(sm["M"]), int(sm["ns"]), int(sm["rtM"]), int(sm["rtns"]), int(sm["epsM"]), int(sm["epsns"]))
+        if sm_dims != (7, 12, 3, 4, 1, 3):
+            raise SystemExit(f"smorms3 stage dims {sm_dims} != (7,12,3,4,1,3)")
         if (int(rm["N"]), int(rm["K"])) != (5, 6):
             raise SystemExit(f"rprop stage dims {(rm['N'], rm['K'])} != (5,6)")
 
@@ -213,6 +230,16 @@ def main() -> None:
         step1_mms = [mms[c * mr + r] for r in range(mr) for c in [0]]
         if len(set(step1_mms)) < mr:
             raise SystemExit("smorms3 step-1 MMS not per-dim distinct -- gradient script too uniform")
+        # Eps-guard non-vacuity: step-1 MMS must be genuinely the same order as
+        # SMORMS3_EPS (not rounding noise) for the eps=1e-16 guards to actually engage.
+        _, _, eps_mms = _read_bin(tmp_dir / "smorms3_eps_mms_traj.bin")
+        eps_step1_mms = eps_mms[0]
+        eps_ratio = eps_step1_mms / SMORMS3_EPS
+        if not (EPS_GUARD_RATIO_BAND[0] <= eps_ratio <= EPS_GUARD_RATIO_BAND[1]):
+            raise SystemExit(
+                f"smorms3 eps-guard step-1 MMS={eps_step1_mms} not within 2 orders of magnitude of "
+                f"eps={SMORMS3_EPS} (ratio={eps_ratio}) -- eps-guard fixture would be vacuous"
+            )
 
         # RPROP: both the etap-grow (>0.01) and etam-shrink (<0.01) branches fired, and the
         # sign-flip derivative-zeroing produced a 0 where the input derivative was nonzero.
@@ -264,6 +291,24 @@ def main() -> None:
                 "rt_M": int(sm["rtM"]),
                 "lrate_traj": lrate,
                 "shapes": {f"smorms3_{v}.bin": list(s) for v, s in SMORMS3_SHAPES.items()},
+                "eps_guard": {
+                    "text": (
+                        "Near-zero-gradient run (M=1, 3 steps, grad=1e-8 constant), added per review "
+                        "finding: the main/round-trip sequences above leave both eps=1e-16 guards "
+                        "(SMORMS3.m:335 sqrt(MMS)+eps and the MMS+eps min-cap denominator, shared by "
+                        "the dtheta cap and the delta update) INACTIVE (MMS >> eps there, so an "
+                        "eps-placement mutation is a no-op). Here step-1 MMS = 0.5*grad^2 is the SAME "
+                        "ORDER as eps -- MMS+eps ~= 3*MMS, a measured effect, not rounding noise -- "
+                        "genuinely exercising both guards. delta_traj is PURE arithmetic (the MMS+eps "
+                        "term feeds it directly) -> STRICT bits; theta_traj is sqrt-bearing -> "
+                        "canary-gated."
+                    ),
+                    "eps": SMORMS3_EPS,
+                    "step1_mms": eps_step1_mms,
+                    "step1_mms_over_eps_ratio": eps_ratio,
+                    "M": int(sm["epsM"]),
+                    "num_steps": int(sm["epsns"]),
+                },
             },
             "rprop": {
                 "text": (

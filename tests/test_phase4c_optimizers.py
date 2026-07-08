@@ -106,6 +106,69 @@ def test_smorms3_trajectory_bit_exact() -> None:
             assert_f64_close(float(opt.theta[d]), float(theta_g[d, col]), f"theta[{d}] step {s}")
 
 
+def _eps_run_setup() -> tuple[
+    Callable[[list[NDArray[np.float64]], int], tuple[float, list[NDArray[np.float64]], list[NDArray[np.float64]]]],
+    list[NDArray[np.float64]],
+    list[tuple[int, int]],
+    int,
+]:
+    grad_script = _load("smorms3_eps_grad_script")  # (1, 3)
+    theta0_flat = _load("smorms3_eps_theta0_flat").reshape(-1)  # (1,)
+    shapes = [(1, 1)]
+    theta0 = _cells_from_flat(theta0_flat, shapes)
+    offset = np.zeros(1)  # pass-through
+    return _build_f_df(grad_script, offset, shapes), theta0, shapes, grad_script.shape[1]
+
+
+def test_smorms3_eps_guard_active() -> None:
+    """Near-zero-gradient regime (M=1, 3 steps, grad=1e-8 constant) that makes BOTH
+    eps=1e-16 guards (SMORMS3.m:335 `sqrt(MMS)+eps` in the dtheta denominator, and the
+    `MMS+eps` min-cap denominator shared by the dtheta cap and the delta update)
+    genuinely active. Step-1 MMS = 0.5*grad^2 ~= 5e-17 -- the SAME ORDER as eps
+    (MMS+eps ~= 3*MMS, a measured effect, not rounding noise). This is the counterpart
+    to `test_smorms3_trajectory_bit_exact`'s main run, where MMS >> eps everywhere and
+    an eps-placement mutation is a no-op (see IMPROVEMENTS.md phase4c eps-guard entry).
+
+    delta_traj is PURE arithmetic (the MMS+eps term feeds it directly) -> STRICT bits;
+    theta_traj is sqrt-bearing -> canary-gated.
+
+    Mutation (local, not committed -- verified by hand, see the report): dropping
+    `+eps` from `sqrt(MMS)+eps` (the dtheta denominator) changes `theta` at step 1 here
+    while leaving the main/round-trip goldens bit-identical (confirming that guard is a
+    no-op there, per IMPROVEMENTS). Dropping `+eps` from `MMS+eps` at its delta-update
+    site changes `delta` at step 1 by ~22% (1.5 vs 1.8333) -- a real effect, not ULP
+    noise. One nuance found and reported honestly: the OTHER `MMS+eps` occurrence (the
+    dtheta min-cap ratio inside `min(lrate, stepRate^2/(MMS+eps))`) stays a no-op even
+    on this fixture, because `lrate` is still 1e-9 (pre-warmup) at step 1 and saturates
+    the `min()` regardless of the ratio's value -- that occurrence remains untested by
+    any fixture in this suite.
+    """
+    f_df, theta0, _shapes, num_steps = _eps_run_setup()
+    mms_g = _load("smorms3_eps_mms_traj")
+    sr_g = _load("smorms3_eps_steprate_traj")
+    delta_g = _load("smorms3_eps_delta_traj")
+    lrate_g = _load("smorms3_eps_lrate_traj")
+    theta_g = _load("smorms3_eps_theta_traj")
+
+    # Non-vacuity: step-1 MMS is genuinely the same order of magnitude as eps (not
+    # rounding noise) -- else this fixture wouldn't actually exercise the guards.
+    eps = 1e-16
+    step1_mms = float(mms_g[0, 0])
+    ratio = step1_mms / eps
+    assert 1e-2 <= ratio <= 1e2, f"eps-guard fixture vacuous: step1 mms={step1_mms} eps={eps} ratio={ratio}"
+
+    opt = Smorms3(f_df, theta0)
+    for s in range(1, num_steps + 1):
+        opt.optimization_step()
+        col = s - 1
+        _assert_bits(opt.mms, mms_g[:, col], f"eps mms step {s}")
+        _assert_bits(opt.step_rate, sr_g[:, col], f"eps step_rate step {s}")
+        _assert_bits(opt.delta, delta_g[:, col], f"eps delta step {s}")
+        assert float(opt.lrate).hex() == float(lrate_g[0, col]).hex(), f"eps lrate step {s}"
+        for d in range(theta_g.shape[0]):
+            assert_f64_close(float(opt.theta[d]), float(theta_g[d, col]), f"eps theta[{d}] step {s}")
+
+
 def test_smorms3_lrate_warmup_x10_capped() -> None:
     """The lrate x10 geometric warmup (1e-9 -> 1e-1 by step 8) capped at 1e-1 (SMORMS3.m:347).
     STRICT bits: pure `min(lrate*10, lrate_max)`. Mutation guard: an x2 warmup, or moving/

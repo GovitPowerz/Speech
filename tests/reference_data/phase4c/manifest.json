@@ -77,7 +77,43 @@
       "smorms3_rt_theta_traj.bin": [
         3,
         4
+      ],
+      "smorms3_eps_grad_script.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_theta0_flat.bin": [
+        1,
+        1
+      ],
+      "smorms3_eps_theta_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_mms_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_steprate_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_delta_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_lrate_traj.bin": [
+        1,
+        3
       ]
+    },
+    "eps_guard": {
+      "text": "Near-zero-gradient run (M=1, 3 steps, grad=1e-8 constant), added per review finding: the main/round-trip sequences above leave both eps=1e-16 guards (SMORMS3.m:335 sqrt(MMS)+eps and the MMS+eps min-cap denominator, shared by the dtheta cap and the delta update) INACTIVE (MMS >> eps there, so an eps-placement mutation is a no-op). Here step-1 MMS = 0.5*grad^2 is the SAME ORDER as eps -- MMS+eps ~= 3*MMS, a measured effect, not rounding noise -- genuinely exercising both guards. delta_traj is PURE arithmetic (the MMS+eps term feeds it directly) -> STRICT bits; theta_traj is sqrt-bearing -> canary-gated.",
+      "eps": 1e-16,
+      "step1_mms": 5.0000000000000005e-17,
+      "step1_mms_over_eps_ratio": 0.5000000000000001,
+      "M": 1,
+      "num_steps": 3
     }
   },
   "rprop": {

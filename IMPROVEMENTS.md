@@ -2456,6 +2456,32 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   is the clean contract; the dummy exists only to work around Octave's lvalue-expansion bug in the
   oracle. Adjudicated per the CLAUDE.md rule "the .m source stays the contract; Octave the executor".
 
+- **[phase4c] SMORMS3.m:335-336 `eps=1e-16` guards -- now pinned by a near-zero-gradient
+  fixture** (`tools/octave_harness/stage_smorms3.m` eps-guard run; ported in
+  `src/python/speech/optimizers.py` `Smorms3.optimization_step`): the review finding
+  above (main-run coverage gap) noted `MMS >> eps` everywhere on the M=7/12-step main
+  run and the round-trip run, so an `eps`-placement mutation was a no-op there. Closed
+  by a third `stage_smorms3.m` sequence (M=1, 3 steps, constant `grad=1e-8`): step-1
+  `MMS = 0.5*grad^2 ~= 5e-17`, the same order as `eps=1e-16` (`MMS+eps ~= 3*MMS`,
+  extractor-asserted non-vacuous within 2 orders of magnitude, `scripts/
+  extract_phase4c_fixtures.py::EPS_GUARD_RATIO_BAND`). *Pinned by:*
+  `test_smorms3_eps_guard_active` (`tests/test_phase4c_optimizers.py`).
+  **Mutation results (local, hand-verified, not committed as code):** (1) dropping
+  `+eps` from `sqrt(MMS)+eps` (the dtheta denominator) changes `theta` at step 1 on
+  this fixture, while leaving the main/round-trip goldens bit-identical -- confirms
+  that guard is exercised HERE and only here. (2) dropping `+eps` from the `MMS+eps`
+  occurrence at the delta-update site (`self.delta = 1 + self.delta * (1 -
+  step_rate**2/(MMS+eps))`) changes `delta` at step 1 by ~22% (1.5 vs 1.8333) -- a
+  real, non-ULP effect. (3) **honest gap, still open:** the OTHER `MMS+eps` occurrence
+  -- the dtheta min-cap ratio inside `min(lrate, step_rate**2/(MMS+eps))` -- is a NO-OP
+  even on this near-zero-gradient fixture, because `lrate` is still `1e-9`
+  (pre-warmup) at step 1 and the `min()` saturates to `lrate` regardless of the ratio's
+  value; dropping `eps` there alone leaves `dtheta`/`delta`/`theta` bit-identical.
+  *Fix candidate:* none identified -- that occurrence would need a fixture where
+  `step_rate^2/(MMS+eps) < lrate` AND `MMS` is eps-scale simultaneously, i.e. `lrate`
+  warmed up (later step) while gradients stay near-zero (mms doesn't grow); left as a
+  narrower follow-up if that call site ever needs its own golden.
+
 - **[phase4c] Fixed-seed determinism deviation (forward-noted for the optimizer zoo)**
   (`src/python/speech/optimizers.py`; QuantumPSO/CMA-ES land in a later 4c task): the legacy
   optimizer path is nondeterministic BY DESIGN (`QuantumPSO.m:91` reseeds `rand` from the wall
