@@ -60,6 +60,25 @@ pub struct Audio {
     /// is UNRESOLVED here by design (see Task 5 report) -- this field only
     /// exposes the ctor-populated data.
     pub periodogram: Option<Array2<f64>>,
+    /// `AudioStruct::_AudioFilename`, set from `CorpusItem::getFileName()` at
+    /// every ctor site (AudioStruct.cpp:51,139,+3 unported branches). Same
+    /// placement deviation as [`Audio::lang_index`]: `read_audio`/`read_phseq`
+    /// default it empty, `engine::bag_of_processors::apply_corpus_item` fills it
+    /// in post-hoc. Consumed by [`crate::tasks::vrcts::VrctsPart`] (the `-f`
+    /// audio arg to the external `vrcts_part` binary).
+    pub audio_file_name: String,
+    /// `AudioStruct::_RefSegFilename`, same provenance/placement-deviation as
+    /// [`Audio::audio_file_name`] (AudioStruct.cpp:52,140). Consumed by
+    /// [`crate::tasks::vrcts::VrctsPart`] (the `<refseg>_VRCTS_{Fast,Long}.xml`
+    /// path stem).
+    pub ref_seg_file_name: String,
+    /// `AudioStruct::_OffsetBegin`, set DIRECTLY from `read_audio`'s own
+    /// `offset_sec` parameter (AudioStruct.cpp:57,145 -- both ported branches
+    /// set it from the ctor's own `audio_offset` arg, not from `CorpusItem`, so
+    /// no placement deviation is needed here). Consumed by
+    /// [`crate::tasks::segmentation_io::load_vrcts`]'s `off` bound via
+    /// [`crate::tasks::vrcts::VrctsPart`].
+    pub audio_offset: f64,
 }
 
 impl Audio {
@@ -595,6 +614,9 @@ fn read_phseq(path: &Path) -> anyhow::Result<Audio> {
         weight: 1.0,
         external_features,
         periodogram: Some(periodogram),
+        audio_file_name: String::new(),
+        ref_seg_file_name: String::new(),
+        audio_offset: 0.0,
     })
 }
 
@@ -610,7 +632,12 @@ pub fn read_audio(
     file_type: i32,
 ) -> anyhow::Result<Audio> {
     if file_type == 1 {
-        return read_phseq(path);
+        // legacy: AudioStruct.cpp:145 `_OffsetBegin = audio_offset;` -- set from
+        // this ctor's own param even though the phSeq branch never reads it
+        // again (read_phseq has no offset_sec param of its own).
+        let mut audio = read_phseq(path)?;
+        audio.audio_offset = offset_sec;
+        return Ok(audio);
     }
     if file_type != 0 {
         bail!(
@@ -708,6 +735,9 @@ pub fn read_audio(
         weight: 1.0,
         external_features: Vec::new(),
         periodogram: None,
+        audio_file_name: String::new(),
+        ref_seg_file_name: String::new(),
+        audio_offset: offset_sec,
     })
 }
 
@@ -758,6 +788,9 @@ fn test_audio(samples: Vec<f64>) -> Audio {
         weight: 1.0,
         external_features: Vec::new(),
         periodogram: None,
+        audio_file_name: String::new(),
+        ref_seg_file_name: String::new(),
+        audio_offset: 0.0,
     }
 }
 
@@ -774,6 +807,9 @@ fn test_audio_2ch(samples: Vec<f64>) -> Audio {
         weight: 1.0,
         external_features: Vec::new(),
         periodogram: None,
+        audio_file_name: String::new(),
+        ref_seg_file_name: String::new(),
+        audio_offset: 0.0,
     }
 }
 

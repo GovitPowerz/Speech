@@ -23,6 +23,7 @@ use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{
     ScoreReport, WerStats, compute_errors, load_ref_csv, load_ref_stm, write_vrcts_multichannel,
 };
+use crate::tasks::vrcts::VrctsPart;
 
 /// `conf.get<int>(name)` (required, no default): missing key is an error.
 fn get_i32(map: &IndexMap<String, String>, key: &str) -> Result<i32> {
@@ -83,8 +84,8 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// vectors: `processors[pos]` IS the config-`pos` driver directly (the enum tag
 /// substitutes for the legacy's separate `_AlgoTypes[pos]` dispatch on WHICH
 /// vector `_ConfigIndex[pos]` indexes into). Algo 0 (`VRCTSPart`, external-tool
-/// adapter), 5 (`BLSTMSpectralLID`), 6 (`TwinBLSTMSpectralLID`) are unported
-/// (Phase 4b): see [`BagOfProcessors::from_configs`].
+/// adapter) landed Phase 4b Task 8; 5 (`BLSTMSpectralLID`), 6
+/// (`TwinBLSTMSpectralLID`) remain unported: see [`BagOfProcessors::from_configs`].
 ///
 /// `large_enum_variant` allowed: the brief's signature is exact
 /// (`Spectral(BlstmSpectralSegmenter)`, no `Box`); boxing would change the public
@@ -92,6 +93,7 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Processor {
+    Vrcts(VrctsPart),
     Tdc(TdcSegmenter),
     Ltsv(LtsvSegmenter),
     Spectral(BlstmSpectralSegmenter),
@@ -109,6 +111,7 @@ impl Processor {
     ) -> Result<()> {
         use crate::tasks::segmenter::Segmenter;
         match self {
+            Processor::Vrcts(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::Tdc(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::Ltsv(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::Spectral(s) => s.get_segmentation(audio, seg_per_chan, refs),
@@ -120,6 +123,7 @@ impl Processor {
     /// scored-branch VRCTS write.
     fn dump_dir(&self) -> &str {
         match self {
+            Processor::Vrcts(s) => s.dump_dir(),
             Processor::Tdc(s) => s.dump_dir(),
             Processor::Ltsv(s) => s.dump_dir(),
             Processor::Spectral(s) => s.dump_dir(),
@@ -127,11 +131,12 @@ impl Processor {
         }
     }
 
-    /// Per-channel `seg._CumulativeError` (result col 4). TDC/LTSV are NN-free
-    /// and return owned zero vecs; the NN drivers return the cost captured on the
-    /// last `get_segmentation` call.
+    /// Per-channel `seg._CumulativeError` (result col 4). VRCTS/TDC/LTSV are
+    /// NN-free and return owned zero vecs; the NN drivers return the cost
+    /// captured on the last `get_segmentation` call.
     fn cumulative_error(&self) -> Vec<f64> {
         match self {
+            Processor::Vrcts(s) => s.cumulative_error(),
             Processor::Tdc(s) => s.cumulative_error(),
             Processor::Ltsv(s) => s.cumulative_error(),
             Processor::Spectral(s) => s.cumulative_error().to_vec(),
@@ -142,6 +147,7 @@ impl Processor {
     /// Per-channel `seg._NbOfClassif` (result col 17).
     fn nb_of_classif(&self) -> Vec<i64> {
         match self {
+            Processor::Vrcts(s) => s.nb_of_classif(),
             Processor::Tdc(s) => s.nb_of_classif(),
             Processor::Ltsv(s) => s.nb_of_classif(),
             Processor::Spectral(s) => s.nb_of_classif().to_vec(),
@@ -196,12 +202,13 @@ impl BagOfProcessors {
     /// legacy signature and needed for a future Task 5 wire-up of the log
     /// branches) but only currently consulted for algo dispatch validity.
     ///
-    /// Algo 0/5/6 (`VRCTSPart`/`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`) are
-    /// unported here (`bail!`) -- `BLSTMSpectralLID` (Algo 5) has a standalone
-    /// driver since Phase 4b Task 4 (`tasks::lid::BlstmSpectralLid`), but is not
-    /// yet wired into this dispatch. `File_Type` 2/3/4 (cep/phSeq-N/mat input)
-    /// are also unported -- `bail!`, IMPROVEMENTS entry; `File_Type` 0 (wav) and
-    /// 1 (phSeq, Task 5) are both supported.
+    /// Algo 0 (`VRCTSPart`) is wired here since Phase 4b Task 8
+    /// (`Processor::Vrcts`). Algo 5/6 (`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`)
+    /// remain unported here (`bail!`) -- `BLSTMSpectralLID` (Algo 5) has a
+    /// standalone driver since Phase 4b Task 4 (`tasks::lid::BlstmSpectralLid`),
+    /// but is not yet wired into this dispatch. `File_Type` 2/3/4 (cep/phSeq-N/
+    /// mat input) are also unported -- `bail!`, IMPROVEMENTS entry; `File_Type`
+    /// 0 (wav) and 1 (phSeq, Task 5) are both supported.
     pub fn from_configs(
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
@@ -246,7 +253,7 @@ impl BagOfProcessors {
             pruning_thresholds.push(pruning_thresh);
 
             let processor = match algo {
-                0 => bail!("Algo 0 not ported (Phase 4b)"),
+                0 => Processor::Vrcts(VrctsPart::from_legacy(map)?),
                 1 => Processor::Tdc(TdcSegmenter::from_legacy(map)?),
                 2 => Processor::Ltsv(LtsvSegmenter::from_legacy(map)?),
                 3 => {
@@ -345,7 +352,7 @@ impl BagOfProcessors {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.is_back_prop_activated()],
             Processor::Signal(seg) => vec![seg.is_back_prop_activated()],
-            Processor::Tdc(_) | Processor::Ltsv(_) => vec![false],
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => vec![false],
         }
     }
 
@@ -359,7 +366,7 @@ impl BagOfProcessors {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.get_weights()],
             Processor::Signal(seg) => vec![seg.get_weights()],
-            Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
         }
     }
 
@@ -371,7 +378,7 @@ impl BagOfProcessors {
         match &mut self.processors[pos] {
             Processor::Spectral(seg) => seg.set_weights(&new_weights[0]),
             Processor::Signal(seg) => seg.set_weights(&new_weights[0]),
-            Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
         }
     }
 
@@ -382,7 +389,7 @@ impl BagOfProcessors {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.input_statistics().clone()],
             Processor::Signal(seg) => vec![seg.input_statistics().clone()],
-            Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
         }
     }
 
@@ -394,7 +401,7 @@ impl BagOfProcessors {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.get_weights_derivatives()],
             Processor::Signal(seg) => vec![seg.get_weights_derivatives()],
-            Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
         }
     }
 
@@ -433,8 +440,8 @@ impl BagOfProcessors {
                     best_cost.insert(pos, save_criterion);
                 }
             }
-            Processor::Tdc(_) | Processor::Ltsv(_) => {
-                // legacy: no `if` branch for algo 1/2 -- no-op.
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
+                // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
         // Algo 5/6 criteria (`:163-180`, badClassifLID+costLID / cost+costLID) are
@@ -468,8 +475,8 @@ impl BagOfProcessors {
                 let save_criterion = cost;
                 seg.update_weights(&derivs[&pos][0], save_criterion);
             }
-            Processor::Tdc(_) | Processor::Ltsv(_) => {
-                // legacy: no `if` branch for algo 1/2 -- no-op.
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
+                // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
         let _ = cost_lid;
@@ -879,6 +886,11 @@ impl BagOfProcessors {
 fn apply_corpus_item(audio: &mut Audio, item: &CorpusItem) {
     audio.lang_index = item.class_index;
     audio.weight = item.weight;
+    // legacy: AudioStruct.cpp:51-52,139-140 `_AudioFilename`/`_RefSegFilename`
+    // set from the CorpusItem, same placement deviation as lang_index/weight
+    // above. Consumed by VrctsPart (Algo 0, Phase 4b Task 8).
+    audio.audio_file_name = item.file_name.clone();
+    audio.ref_seg_file_name = item.ref_seg.clone();
 }
 
 /// The extension dispatch of the legacy `Segmentation` ctor (`:72-110`).

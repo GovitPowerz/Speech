@@ -2085,6 +2085,58 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   paths counter-asserted). Mutation: forcing `classNb = outputSize` (dropping the `max(2,.)`)
   makes the confusion 3x3 and mismatches the REAL 4x4 dump.
 
+- **[phase4b] `VrctsPart` (Algo 0) hard-codes the legacy `vrcts_part` binary path, and its spawn
+  failure semantics necessarily diverge from the legacy's discarded `system()` return** (`tasks/
+  vrcts.rs`, from `VRCTSpart.cpp:44,46,53`): the command string embeds the absolute path
+  `/usr/local/vrcts/vrcts_1_5_9/bin/vrcts_part` (not config-driven), then calls bare
+  `system(command.str().c_str())` -- the shell exit status (including 127, "command not found",
+  if the binary is missing) is NEVER read, so `getSegmentation` always proceeds straight to
+  `load_from_vrcts` on whatever the xml file (still) contains. `std::process::Command` execs the
+  binary directly with no intervening shell, so a missing binary is a SPAWN-level `io::Error`
+  (`NotFound`) at the Rust API boundary, not an ignorable exit code -- there is no way to swallow
+  that and still call it "faithful" (the OS never even started a process to have an exit code from).
+  The port therefore surfaces ONLY the spawn-level failure as a typed error (propagated via `?`);
+  a successful spawn's exit status IS still discarded, matching legacy. *Why deferred:* the binary
+  does not exist on this or any CI machine, so this divergence is currently unobservable in any
+  golden; revisit once a real VRCTS install is available to test the ignored-exit-code path.
+  *Fix candidate:* make the binary path configurable; consider whether the exit-code-ignoring
+  behavior should be preserved or fixed if VRCTS is ever run for real corpora. *Pinned by:*
+  `spawn_attempted_when_missing`, `force_respawns` (`tests/phase4b_vrcts.rs`, error message
+  asserted to mention the hard-coded path). Mutation: N/A (there is no legacy golden to diverge
+  from -- the binary's absence IS the tested condition).
+
+- **[phase4b] `VrctsPart::getSegmentation` composes the SAME xml path for every channel (no
+  `_chan_<n>` suffix), so a multi-channel file loads an IDENTICAL segmentation into every
+  channel** (`tasks/vrcts.rs`, from `VRCTSpart.cpp:34-38`): the per-channel path variant
+  (`"%s_chan_%s_VRCTS_Fast.xml"`) is commented out in the legacy source; the LIVE line is
+  `"%s_VRCTS_Fast.xml"` keyed only on `_RefSegFilename`, with no `chan` in it at all (the audio
+  arg passed to `vrcts_part -f` is likewise the whole multi-channel file, not a per-channel
+  split). Reproduced verbatim: the Rust loop recomputes the SAME path every iteration and, for
+  `force=false`, the first channel's spawn (if any) makes the file exist for every subsequent
+  channel too. *Why deferred:* provenance -- a straight transcription of the live (non-commented)
+  line. *Fix candidate:* N/A (this is presumably intentional in the legacy: VRCTS analyzes the
+  whole recording once and applies the same speech/non-speech decision to all channels). *Pinned
+  by:* `same_xml_shared_across_channels` (`tests/phase4b_vrcts.rs`). Mutation: reinstating the
+  `_chan_<n>` suffix in the path format breaks 3 of the 5 `phase4b_vrcts` tests (verified: the
+  pre-seeded single-path fixtures are no longer found, forcing a spawn that then fails).
+
+- **[phase4b] `VrctsPart::from_legacy` skips `Segmenter::buildFromConf`'s generic required-key
+  validation** (`tasks/vrcts.rs`, from `VRCTSpart.cpp:9` + `Segmenter.cpp:73-148`): the legacy ctor
+  calls `this->buildFromConf(conf, "VRCTS", ...)` BEFORE reading `VRCTS_isFast`/`VRCTS_force`,
+  which requires (no default, `conf.get<T>` throws/exits on missing) a full set of `VRCTS_*` keys
+  -- decision thresholds, window/shift, windowing type, preemph/noise ratio, convolution kernel --
+  none of which `VRCTSPart::getSegmentation` ever reads (no `updateSegmentation`/
+  `smoothSegmentation`/`results2segmentation` call site anywhere in the function). This port
+  narrows `from_legacy` to the two keys that matter (`VRCTS_isFast`/`VRCTS_force`) plus the
+  generic `Dump_Directory` (needed for the `Processor::dump_dir()` dispatch): a real legacy
+  config missing e.g. `VRCTS_window` would fail to CONSTRUCT `VRCTSPart` at all, while this port
+  accepts it. *Why deferred:* deliberate scope-narrowing (no observable behavior depends on the
+  skipped fields; not a bit-exact deviation pinned by any golden -- `getSegmentation`'s output is
+  identical either way). *Fix candidate:* add the full `SegmenterConfig`/`DriverConfig` read (like
+  `TdcSegmenter`/`LtsvSegmenter`) if legacy config VALIDATION parity is ever required, not just
+  segmentation-output parity. *Pinned by:* N/A (no golden exercises the gap; `from_legacy_reads_*`
+  style coverage in `tests/phase4b_vrcts.rs` only exercises the two consumed keys).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
