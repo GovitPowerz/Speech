@@ -92,3 +92,39 @@ def test_rprop_derivative_zeroing_present() -> None:
     dr, dc, deriv_in = _read_bin(PHASE4C / "rprop_deriv_script.bin")
     _, _, deriv_out = _read_bin(PHASE4C / "rprop_derivout_traj.bin")
     assert any(o == 0.0 and i != 0.0 for i, o in zip(deriv_in, deriv_out, strict=True)), "no derivative was zeroed -- the <0 sign-flip branch never fired"
+
+
+# --- Task 8: vec2struct genome-bijection fixtures ---
+GENOME_MANIFEST = PHASE4C / "genome_manifest.json"
+GENOME_CASES = ["algo0", "tdc", "calib", "spectral", "twin", "masked"]
+
+
+def _genome_manifest() -> dict[str, object]:
+    return cast(dict[str, object], json.loads(GENOME_MANIFEST.read_text()))
+
+
+def test_genome_manifest_present_and_records_octave_version() -> None:
+    assert GENOME_MANIFEST.is_file(), "phase4c genome_manifest.json must be committed"
+    m = _genome_manifest()
+    version = cast(str, m["octave_version"])
+    assert version and version[0].isdigit(), f"octave_version {version!r} not recorded/parsed"
+    assert set(cast(dict[str, int], m["counts"])) == set(GENOME_CASES)
+
+
+def test_genome_bins_exist_and_match_manifest_shapes() -> None:
+    m = _genome_manifest()
+    shapes = cast(dict[str, list[int]], m["shapes"])
+    for name, shape in shapes.items():
+        rows, cols, _ = _read_bin(PHASE4C / name)
+        assert (rows, cols) == tuple(shape), f"{name}: shape ({rows},{cols}) != manifest {shape}"
+
+
+def test_genome_configs_and_count_consistency() -> None:
+    """Each case's .config is present and non-empty, and count_param == len(param)+1."""
+    m = _genome_manifest()
+    counts = cast(dict[str, int], m["counts"])
+    for case in GENOME_CASES:
+        conf = PHASE4C / f"genome_{case}.config"
+        assert conf.is_file() and conf.read_text().strip(), f"{conf.name} missing/empty"
+        rows, _, _ = _read_bin(PHASE4C / f"genome_{case}_param.bin")
+        assert counts[case] == rows + 1, f"{case}: count {counts[case]} != len(param)+1 ({rows + 1})"

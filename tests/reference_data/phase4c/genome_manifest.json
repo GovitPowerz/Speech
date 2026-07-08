@@ -1,0 +1,70 @@
+{
+  "text": "Phase 4c Task 8: the vec2struct genome<->config bijection bit-pins. GNU Octave runs the VENDORED legacy/Optimizer_V6.2.2/functions/vec2struct.m (+ printConfig.m at mode==1) over six algo/mask/PS cases, dumping the INPUT param, the returned out_param (the mask/sortrows/clamp re-encoding), count_param (the genome-length walk invariant), and the printConfig engine-facing key->value dict (weights excluded, emitted via the .bin codec). TIER 1 (real function). vec2struct is PURE arithmetic (rem/round/abs/min/max/sortrows -- no libm), so param is read byte-for-byte and the port reproduces out_param bit-exactly + the config string-exactly on every platform. Cases: algo0 VRCTS, tdc (algo1), calib (algo2 -- law decode + [0,1] clamps in isolation), spectral (algo3 -- full NN weight walk), twin (algo6 -- SAD + LID mirror incl. the LID falling=-rising negate quirk), masked (algo3 + Force_Symetry/Force_Identical_Rows block ties + a scalar-field mask write-back).",
+  "octave_version": "11.3.0",
+  "counts": {
+    "algo0": 29,
+    "tdc": 34,
+    "calib": 45,
+    "spectral": 266,
+    "twin": 505,
+    "masked": 266
+  },
+  "shapes": {
+    "genome_algo0_param.bin": [
+      28,
+      1
+    ],
+    "genome_algo0_out_param.bin": [
+      28,
+      1
+    ],
+    "genome_tdc_param.bin": [
+      33,
+      1
+    ],
+    "genome_tdc_out_param.bin": [
+      33,
+      1
+    ],
+    "genome_calib_param.bin": [
+      44,
+      1
+    ],
+    "genome_calib_out_param.bin": [
+      44,
+      1
+    ],
+    "genome_spectral_param.bin": [
+      265,
+      1
+    ],
+    "genome_spectral_out_param.bin": [
+      265,
+      1
+    ],
+    "genome_twin_param.bin": [
+      504,
+      1
+    ],
+    "genome_twin_out_param.bin": [
+      504,
+      1
+    ],
+    "genome_masked_param.bin": [
+      265,
+      1
+    ],
+    "genome_masked_out_param.bin": [
+      265,
+      1
+    ]
+  },
+  "configs": [
+    "genome_algo0.config",
+    "genome_tdc.config",
+    "genome_calib.config",
+    "genome_spectral.config",
+    "genome_twin.config",
+    "genome_masked.config"
+  ]
+}

@@ -24,6 +24,8 @@ function run_stage(stage, out_dir)
       stage_smorms3(out_dir);
     case 'rprop'
       stage_rprop(out_dir);
+    case 'vec2struct'
+      stage_vec2struct(out_dir);
     otherwise
       error('run_stage: unknown stage %s', stage);
   end
