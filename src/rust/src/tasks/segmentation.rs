@@ -105,6 +105,17 @@ impl Segmentation {
         self.audio_duration
     }
 
+    /// Copy another segmentation's boundary list into this one, keeping this
+    /// container's `audio_duration`. Direct port of the legacy deque assignment
+    /// `seg._Classification.at(chan) = seg._Reference.at(chan)`
+    /// (`TwinBLSTMSpectralLID.cpp:660,781`): only the boundary list is replaced;
+    /// the separate `_AudioDuration` member is untouched. The source list already
+    /// ends with its own `End` sentinel (at the same audio duration for a reference
+    /// loaded over the same audio), so the copy stays well-formed.
+    pub fn set_segments_from(&mut self, src: &Segmentation) {
+        self.segs = src.segs.clone();
+    }
+
     /// Overwrite `[begin, end)` with `class`, splitting/erasing existing
     /// boundaries and re-closing the tail with the last overwritten type.
     /// Direct index-based port of `Segmentation::label_segment`

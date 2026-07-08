@@ -1,0 +1,1793 @@
+{
+  "text": "Phase 4b Task 1: the LID confusion core (BagOfProcessors::PrintConfusionMatrix sentinel-decode + argmax accumulation, Confusion2String's row-normalized error aggregate). Both are pure integer-threshold/division arithmetic -- no libm -- so every fixture here is asserted STRICT BITS on every platform.",
+  "confusion_input": {
+    "text": "4 crafted 3-class rows: row A's target (col1, value 280=100*0.8+200) beats its best competitor (50) -> WIN. Row B's target (col0, value 220=100*0.2+200, score 20) loses to its best competitor (90) -> MISS. Row C has NO target sentinel at all (every value <= 150) -- STICKY QUIRK: posTarget/posBestNotTarget are declared OUTSIDE the row loop in the legacy and reset to 0 only ONCE, before row 0 (BagOfProcessors.cpp:509-510), NOT at every row boundary (:533-534 resets only scoreTarget/maxScoreNotTarget) -- so row C's miss is credited to posTarget=1, inherited from row B's sentinel, not to the index-header slot 0. Row D's target (col2, value 250=100*0.5+200, score 50) TIES its best competitor (50) exactly -> the strict `>` comparison sends a tie to the miss branch too.",
+    "shape": [
+      4,
+      3
+    ]
+  },
+  "confusion_matrix": {
+    "text": "The harness's OWN transcription of BagOfProcessors.cpp:501-535 (the real matrix is a function-local inside the protected PrintConfusionMatrix and is never returned, even via a probe subclass), cross-validated two independent ways against the REAL compiled code on the SAME input (see confusion_error below) -- not merely asserted to be right by inspection.",
+    "shape": [
+      5,
+      5
+    ]
+  },
+  "confusion_error": {
+    "text": "1x2 = [error1, error2]. error1: the transcribed confusion_matrix fed to the REAL free Confusion2String (Helpers.hpp:365-438, static -- directly callable). error2: the REAL (protected, via a BagProbe subclass) PrintConfusionMatrix itself, called end-to-end on confusion_input directly (BagOfProcessors.cpp:474-598). error1 == error2 bit-exact (harness-asserted via the ok= stdout flag, SystemExit on failure) is the non-vacuous cross-check that the transcribed matrix matches what the real method built internally -- the only way to validate it, since PrintConfusionMatrix never returns its matrix.",
+    "shape": [
+      1,
+      2
+    ],
+    "error1": 66.66666666666667,
+    "error2": 66.66666666666667
+  },
+  "scoring_multi": {
+    "text": "Task 3: the MULTICLASS scoring feedForward overload (BLSTMNeuralNetwork.cpp:843-929, BLSTMNeuralNetwork.h:195 -- the LID drivers' core call) on a synthetic net (LSTM [3,4,2] sub [2,1], output [4,5,3] sub [1,1], T=12 -> length 6, outputSize 3). scoring_multi_out.bin is the reimpl's raw length x outputSize posterior matrix, pinned max_ulp=0 vs the REAL compiled overload (NN_TOL site=blstm_scoring_multi_*). The forward output is TARGET-INDEPENDENT (targets feed only cost/backward, both off here + step>=0 leaves the plain-FFB cost block from rewriting the output), so one golden covers every case; the NO-binary-expansion return is exercised (the [1-p,p] expansion gate at :922-926 is outputSize == 1, so a multiclass net returns the raw matrix). The per-case _Cost (read from the REAL class via getCost()) reflects the multiclass target construction (:872-886) feeding CostLaw::computeCost -- softmax CE, a libm chain, so the hex is the oracle-env (Apple libm) value. targetIndex 5 (>= outputSize 3) folds to the unknown class 0 (:873), harness-asserted to bit-match targetIndex 0's cost. A fifth case (ti2_step0_mod2_costmod) sets SYNC_BackPropWER (isCostModified() -> true) with target_modifier 2.0, exercising the NONZERO soft-target placement (target = 0.1*modifier = 0.2; enforced rows set the non-target columns to 0.2 and the target column to 1-target = 0.8), unlike the other four (hard-target 0.0/1.0) cases.",
+    "shape": [
+      6,
+      3
+    ],
+    "cases": {
+      "ti0_step0": {
+        "target_index": 0,
+        "step": 0,
+        "target_modifier": 1.0,
+        "cost_modified": false,
+        "max_ulp": 0,
+        "cost_bits": "0x401f5578982da593",
+        "cost_dec": 7.833467843805368,
+        "nb_of_classif": 6
+      },
+      "ti2_step0": {
+        "target_index": 2,
+        "step": 0,
+        "target_modifier": 1.0,
+        "cost_modified": false,
+        "max_ulp": 0,
+        "cost_bits": "0x4018ee91c18d115c",
+        "cost_dec": 6.232977890238853,
+        "nb_of_classif": 6
+      },
+      "ti2_step2": {
+        "target_index": 2,
+        "step": 2,
+        "target_modifier": 1.0,
+        "cost_modified": false,
+        "max_ulp": 0,
+        "cost_bits": "0x400094c4bc58e6e5",
+        "cost_dec": 2.07264086862857,
+        "nb_of_classif": 6
+      },
+      "tiOOB_step0": {
+        "target_index": 5,
+        "step": 0,
+        "target_modifier": 1.0,
+        "cost_modified": false,
+        "max_ulp": 0,
+        "cost_bits": "0x401f5578982da593",
+        "cost_dec": 7.833467843805368,
+        "nb_of_classif": 6
+      },
+      "ti2_step0_mod2_costmod": {
+        "target_index": 2,
+        "step": 0,
+        "target_modifier": 2.0,
+        "cost_modified": true,
+        "max_ulp": 0,
+        "cost_bits": "0x4028ee91c18d115a",
+        "cost_dec": 12.465955780477703,
+        "nb_of_classif": 6
+      }
+    }
+  },
+  "lid5": {
+    "text": "Task 4: BlstmSpectralLID (Algo 5), the FIRST LID driver. BLSTMSpectralLID::getSegmentation (:27-460) does SAD via LTSV (classifySequence over the RAW periodogram, :271-274 -- the mel branch is COMMENTED OUT) then runs the BLSTM PER SPEECH SEGMENT for language scoring (:346-401 via the returning feedForward overload :363). The harness LidProbe transcribes :27-460 swapping ONLY that :363 feedForward for the reimpl scoring (target build :868-903 + signalReimplFFB plain path + REAL CostLaw::computeCost :815-828), keeping LTSV/results2segmentation/compute_errors REAL; the reimpl dumps (lid5_<f>_{ltsv,liderr,confusion,members,boundaries}_chan{1,2}.bin) are the goldens the Rust port matches bit-exact (canary-gated: langID is a softmax/log chain, cumulative_error a LogLaw chain). lid5.config forces the plain scoring path (BLSTM_window 0) + a degenerate SAD (decision thresholds << 0 -> one big SPEECH segment/file), so the scoring loop always runs (non-vacuity: the >150 in-band sentinel is present at every file's target index via targetLID(target) = -2.0, and the confusion has off-diagonal mass on f1/f3 -- target argmax != language target -- vs a diagonal hit on f2). The real 33,671-weight SAD net is binary (outputSize 1 -> the [1-p,p] binary-expansion path); targetIndex = getRefLangIndex() (f1/f2/f3 -> class 0/1/2, class 2 clamps to 0 under classNb 2). A SECONDARY real-Eigen probe runs the compiled getSegmentation beside the reimpl: SEG_STRUCT (segment count/type equality, all max_dt == 0 -- the LTSV SAD is NN-free so it is bit-identical) and LID_STRUCT (confusion + _IsLIDCorrect EQUALITY -- argmax agrees despite the GEMM divergence; a mismatch std::abort()s generation). The langid deltas are ~1e-16 (the ascending forward vs the real Eigen forward), recorded below.",
+    "calibration": {
+      "f1": {
+        "seg_max_dt": 0.0,
+        "langid_max_abs": 1.11e-16,
+        "cost_max_abs": 19.47
+      },
+      "f2": {
+        "seg_max_dt": 0.0,
+        "langid_max_abs": 1.11e-16,
+        "cost_max_abs": 0.1376
+      },
+      "f3": {
+        "seg_max_dt": 0.0,
+        "langid_max_abs": 1.11e-16,
+        "cost_max_abs": 19.47
+      }
+    },
+    "measured": {
+      "f1": {
+        "class_index": 0,
+        "channels": {
+          "chan1": {
+            "ltsv_len": 34,
+            "liderr": [
+              200.81657211954723,
+              99.18342788045277
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 19.468902470663128,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          },
+          "chan2": {
+            "ltsv_len": 34,
+            "liderr": [
+              203.36279569552818,
+              96.63720430447182
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 14.079286838265405,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          }
+        }
+      },
+      "f2": {
+        "class_index": 1,
+        "channels": {
+          "chan1": {
+            "ltsv_len": 34,
+            "liderr": [
+              0.8165721195472153,
+              299.18342788045277
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 0.032808240383395436,
+            "nb_of_classif": 8,
+            "is_lid_correct": 100,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          },
+          "chan2": {
+            "ltsv_len": 34,
+            "liderr": [
+              3.362795695528166,
+              296.6372043044718
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 0.13760141118366281,
+            "nb_of_classif": 8,
+            "is_lid_correct": 100,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          }
+        }
+      },
+      "f3": {
+        "class_index": 2,
+        "channels": {
+          "chan1": {
+            "ltsv_len": 34,
+            "liderr": [
+              200.81657211954723,
+              99.18342788045277
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 19.468902470663128,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          },
+          "chan2": {
+            "ltsv_len": 34,
+            "liderr": [
+              203.36279569552818,
+              96.63720430447182
+            ],
+            "confusion_shape": [
+              4,
+              4
+            ],
+            "cumulative_error": 14.079286838265405,
+            "nb_of_classif": 8,
+            "is_lid_correct": 0,
+            "boundaries_shape": [
+              3,
+              2
+            ],
+            "has_sentinel_gt150": true
+          }
+        }
+      }
+    }
+  },
+  "twin": {
+    "text": "Task 6: TwinBlstmSpectralLid (Algo 6), the wav-mode 0/2/3 paths + the hidden-state concat. TwinBLSTMSpectralLID::getSegmentation (:263-1421) runs the SAD BLSTM (_BLSTMNeuralNetwork) for the VAD result_vec (modes 0/3) then a SECOND net (_LIDBLSTMNeuralNetwork) per speech segment for language scoring (:1243-1291 via the returning feedForward :1250). The harness TwinProbe transcribes the mode 0/2/3 paths swapping FOUR real-class call sites for reimpl equivalents: the SAD FFB (:715, blstmFeedForwardT6), the type -1 self-normalization shared by both nets (BLSTMNeuralNetwork.cpp:737-744), getBLSTMLIDInputSequence's SAD-hidden-state concat (:139-168), and the LID scoring feedForward (:1250, a generic small-topology reimpl) -- keeping getTargets/results2segmentation/LID2Segmentation/compute_errors REAL; the reimpl dumps (twin_<v>_<f>_{result,liderr,confusion,members,boundaries}_chan{1,2}.bin) are the goldens the Rust port matches bit-exact (canary-gated: liderr/lid_cumulative_error are softmax/CE chains, the SAD cumulative_error a LogLaw chain in mode 3). members = [lid_cumulative_error (*= audio._Weight), lid_nb_of_classif, is_lid_correct, cumulative_error (SAD, *= LIDCostPonderation), nb_of_classif]. A SECONDARY real-Eigen probe runs the compiled Twin beside the reimpl: SEG_STRUCT (segment count/type equality, all max_dt == 0) + LID_STRUCT (confusion + _IsLIDCorrect EQUALITY + the concat branch counter; a mismatch std::abort()s generation). NON-VACUITY: the >150 in-band sentinel (targetLID(target) = -2.0) is present at every variant x file x channel; the confusion has both diagonal (f1 target 0 == argmax) and off-diagonal (f2/f3 miss) mass; and the concat branch is proven per variant -- mode0 not-called (0), mode0_concat concat (1, LID input 59 > feature width 11 with the SAD hidden states populated), mode2 empty-fallback (2, LID input 59 > 11 but the SAD outputs cleared at :762-763), mode3 not-called (0). Modes 2/3 iterate the REFERENCE (a programmatic 2-span segmentation) instead of the SAD classification, and (mode != 0) overwrite the hypothesis via LID2Segmentation -> reference-driven boundaries differ from mode0. The langid deltas (~1e-16) are the ascending forward vs the real Eigen forward, recorded per variant/file. Task 7c adds modes 4/5/6 (the :640-902 LID-train + scoring branch, transcribeTwin456): the LID net runs feedForwardBackward ONCE over the WHOLE inputSeq (:664) and the scoring slices LID_result_vec per speech span by LIDTimeStep/LIDTimeOffset (offset SUBTRACTED before the divide, :811-813 -- the load-bearing contrast vs the :1245 branch's bare begin/_SpectrumShift). The three modes differ only in the classification the scoring iterates: mode 4 = REFERENCE smoothed (:779-783; SAD net NOT run, cumulative_error 0); mode 5 = SAD BLSTM VAD (blstmFeedForwardT6 on the LID-normalized inputSeq -> results2segmentation; sadCumErr/nb populated); mode 6 = LID2Segmentation over 1-LID_result_vec.col(0) (:678-691; the SAD result_vec at :727-732 is dead). The :798-902 accumulator is the three _PostProcessMode forms shared with the mode-7 branch (langID += isCostModified ? segLID/rows : segLID; post-loop /= segmentsCount or numberOfFrames, PPM != 2 -> exp, row-normalize). All configs use PostProcessMode 0 (sum-log). NON-VACUITY: getTargetsLID is exercised (the LID target build); LID2Segmentation (mode 6) produces speech spans DIFFERING from the reference (~[1.73,1.81]/[1.89,1.94] vs the ref [0.4,0.9]/[1.2,1.6]) and from the 2-segment seed; the >150 sentinel is present at every file; the confusion has diagonal (f1) + off-diagonal (f2/f3) mass. concat is always 0 (modes 4/5/6 never reach the :1221 concat).",
+    "measured": {
+      "mode0": {
+        "mode": 0,
+        "concat_branch": 0,
+        "reference_driven": false,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  243.14533913464226,
+                  30.597021244107992,
+                  26.25763962124974
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 31.54677321397923,
+                "lid_nb_of_classif": 75,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  243.02191922052518,
+                  30.595482410682912,
+                  26.3825983687919
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 83.98075758420646,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.22e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.14533913464228,
+                  230.59702124410802,
+                  26.25763962124974
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 66.6552274173844,
+                "lid_nb_of_classif": 75,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.02191922052517,
+                  230.59548241068293,
+                  26.3825983687919
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 176.8842394052192,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.22e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.14533913464228,
+                  30.597021244107992,
+                  226.25763962124975
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 100.36150464701815,
+                "lid_nb_of_classif": 75,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.02191922052517,
+                  30.595482410682912,
+                  226.3825983687919
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 265.38539547968213,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "mode0_concat": {
+        "mode": 0,
+        "concat_branch": 1,
+        "reference_driven": false,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.22e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  239.64390136290197,
+                  25.961542149728604,
+                  34.39455648736942
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 35.743207868801505,
+                "lid_nb_of_classif": 75,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  239.32496041099841,
+                  26.244550977889592,
+                  34.43048861111197
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 94.79632604901987,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  39.643901362901985,
+                  225.96154214972861,
+                  34.39455648736942
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 76.0225223377785,
+                "lid_nb_of_classif": 75,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  39.32496041099844,
+                  226.24455097788962,
+                  34.43048861111197
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 200.4005206008975,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 5.551e-17,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  39.643901362901985,
+                  25.961542149728604,
+                  234.3945564873694
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 82.16028548618097,
+                "lid_nb_of_classif": 75,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  39.32496041099844,
+                  26.244550977889592,
+                  234.43048861111197
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 218.61111122210332,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "mode1": {
+        "mode": 1,
+        "concat_branch": 0,
+        "reference_driven": false,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  243.05840393725174,
+                  30.47684584251834,
+                  26.46475022022993
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 83.91638970192491,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  243.0801120876707,
+                  30.54986135275577,
+                  26.37002655957355
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 83.84459709944191,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.05840393725173,
+                  230.47684584251834,
+                  26.46475022022993
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 177.4916309343597,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.0801120876707,
+                  230.54986135275578,
+                  26.37002655957355
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 177.10674033678748,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.665e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.05840393725173,
+                  30.47684584251834,
+                  226.46475022022994
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 264.74517920082263,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.0801120876707,
+                  30.54986135275577,
+                  226.37002655957357
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 265.472360461887,
+                "lid_nb_of_classif": 199,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "mode2": {
+        "mode": 2,
+        "concat_branch": 2,
+        "reference_driven": true,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.665e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  239.0074376863718,
+                  25.37338143530113,
+                  35.619180878327086
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 43.529308838456316,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  238.80587636939393,
+                  25.219337320775193,
+                  35.974786309830876
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 43.76370306963803,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 5.551e-17,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  39.00743768637178,
+                  225.37338143530113,
+                  35.619180878327086
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 94.7146089429479,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  38.805876369393935,
+                  225.2193373207752,
+                  35.974786309830876
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 95.12013974618777,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  39.00743768637178,
+                  25.37338143530113,
+                  235.6191808783271
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 95.65949352021066,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  38.805876369393935,
+                  25.219337320775193,
+                  235.97478630983088
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 94.87078545506137,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "mode3": {
+        "mode": 3,
+        "concat_branch": 0,
+        "reference_driven": true,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.22e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  243.0165696204158,
+                  30.574454457313088,
+                  26.408975922271132
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 38.83707449576268,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 100,
+                "cumulative_error": 69.31704465026897,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  243.17423761324503,
+                  30.51179647253855,
+                  26.313965914216386
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 38.66178797085793,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 100,
+                "cumulative_error": 45.35499212217115,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.01656962041579,
+                  230.5744544573131,
+                  26.408975922271132
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 81.86511537878734,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 69.31704465026897,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.17423761324506,
+                  230.51179647253855,
+                  26.313965914216386
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 81.9578572385089,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 45.35499212217115,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.665e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  43.01656962041579,
+                  30.574454457313088,
+                  226.4089759222711
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 122.58797185350414,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 69.31704465026897,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.17423761324506,
+                  30.51179647253855,
+                  226.31396591421637
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 122.9356560858331,
+                "lid_nb_of_classif": 92,
+                "is_lid_correct": 0,
+                "cumulative_error": 45.35499212217115,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  2,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "mode4": {
+        "mode": 4,
+        "concat_branch": 0,
+        "reference_driven": true,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.776e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  243.60212562396265,
+                  30.42930709553896,
+                  25.968567280498366
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 84.73950214581397,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  242.7855620840428,
+                  30.633284702952263,
+                  26.581153213004928
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 84.67490379647876,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.665e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  43.60212562396268,
+                  230.42930709553895,
+                  25.968567280498366
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 151.43238004188868,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  42.785562084042816,
+                  230.63328470295227,
+                  26.581153213004928
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 149.48913437179846,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.22e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  43.60212562396268,
+                  30.42930709553896,
+                  225.96856728049835
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 216.20118730616704,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  42.785562084042816,
+                  30.633284702952263,
+                  226.5811532130049
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 212.25727361429966,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "mode5": {
+        "mode": 5,
+        "concat_branch": 0,
+        "reference_driven": true,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.776e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  242.8213437047764,
+                  31.25405106549542,
+                  25.924605229728186
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 84.73950214581397,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 100,
+                "cumulative_error": 69.01795757698254,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  243.07786979486846,
+                  30.55476233843261,
+                  26.36736786669894
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 84.67490379647876,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 100,
+                "cumulative_error": 44.48186278104509,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 5.551e-17,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  42.821343704776396,
+                  231.25405106549542,
+                  25.924605229728186
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 151.43238004188868,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 69.01795757698254,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.077869794868455,
+                  230.55476233843262,
+                  26.36736786669894
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 149.48913437179846,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 44.48186278104509,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.776e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 50,
+                "liderr": [
+                  42.821343704776396,
+                  31.25405106549542,
+                  225.92460522972817
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 216.20118730616704,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 69.01795757698254,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  5,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 50,
+                "liderr": [
+                  43.077869794868455,
+                  30.55476233843261,
+                  226.36736786669894
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 212.25727361429966,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 44.48186278104509,
+                "nb_of_classif": 50,
+                "boundaries_shape": [
+                  3,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      },
+      "mode6": {
+        "mode": 6,
+        "concat_branch": 0,
+        "reference_driven": true,
+        "files": {
+          "f1": {
+            "class_index": 0,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.776e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  238.48743549926343,
+                  33.3052938040372,
+                  28.207270696699393
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 84.73950214581397,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  239.63250881578787,
+                  32.18859148340866,
+                  28.178899700803477
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 84.67490379647876,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 100,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              }
+            }
+          },
+          "f2": {
+            "class_index": 1,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 1.11e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  38.48743549926342,
+                  233.3052938040372,
+                  28.207270696699393
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 151.43238004188868,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  39.632508815787865,
+                  232.18859148340866,
+                  28.178899700803477
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 149.48913437179846,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              }
+            }
+          },
+          "f3": {
+            "class_index": 2,
+            "seg_max_dt": 0.0,
+            "langid_max_abs": 2.22e-16,
+            "channels": {
+              "chan1": {
+                "result_len": 201,
+                "liderr": [
+                  38.48743549926342,
+                  33.3052938040372,
+                  228.20727069669937
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 216.20118730616704,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              },
+              "chan2": {
+                "result_len": 201,
+                "liderr": [
+                  39.632508815787865,
+                  32.18859148340866,
+                  228.1788997008035
+                ],
+                "confusion_shape": [
+                  5,
+                  5
+                ],
+                "lid_cumulative_error": 212.25727361429966,
+                "lid_nb_of_classif": 201,
+                "is_lid_correct": 0,
+                "cumulative_error": 0.0,
+                "nb_of_classif": 0,
+                "boundaries_shape": [
+                  6,
+                  2
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "phseq": {
+    "text": "Task 5: the phSeq reader (File_Type 1, AudioStruct.cpp:138-182). Pure indexing + one-hot construction (letterMapping, AudioStruct.h:18 -- a 38-entry char -> column bijection), no libm involved anywhere in this branch, so every phseq_*.bin dump here is STRICT BITS on every platform (unlike the transcendental-dependent lid5/scoring_multi fixtures above). corpus_phseq/{f1,f2,f3}.phSeq are SYNTHETIC fixtures (the format contract -- no real .phSeq file exists anywhere in this repo or its legacy vendor tree to validate against), characters drawn only from letterMapping's domain. f1 has a middle BLANK line (0-length sentence -> a 0-row one-hot block), exercising the len==0 edge of the `+10` gap arithmetic; f2/f3 cover a space-containing multi-word sentence, the `.`/`-` special chars, and a full 25-letter single-sentence line (every lowercase letter except 'q', which is absent from letterMapping). Every PHASE4B_PHSEQ stdout line (lines/frames_count/periodogram_rows/periodogram_cols) is cross-checked against an INDEPENDENT Python reimplementation of the ctor's arithmetic run directly over the fixture files (not merely trusting the harness), and every dumped feat<i>.bin nonzero cell is verified to reappear at the expected periodogram.bin offset (row_begin + local_row, col) -- a placement, not just a shape, check.",
+    "measured": {
+      "f1": {
+        "lines": 3,
+        "line_lengths": [
+          6,
+          0,
+          6
+        ],
+        "number_of_phonemes": 52,
+        "frames_count": 4160,
+        "blocks_row_begin_len": [
+          [
+            5,
+            6
+          ],
+          [
+            21,
+            0
+          ],
+          [
+            31,
+            6
+          ]
+        ]
+      },
+      "f2": {
+        "lines": 2,
+        "line_lengths": [
+          12,
+          4
+        ],
+        "number_of_phonemes": 46,
+        "frames_count": 3680,
+        "blocks_row_begin_len": [
+          [
+            5,
+            12
+          ],
+          [
+            27,
+            4
+          ]
+        ]
+      },
+      "f3": {
+        "lines": 1,
+        "line_lengths": [
+          25
+        ],
+        "number_of_phonemes": 45,
+        "frames_count": 3600,
+        "blocks_row_begin_len": [
+          [
+            5,
+            25
+          ]
+        ]
+      }
+    }
+  },
+  "mode7": {
+    "text": "Task 7 FLAGSHIP: TwinBlstmSpectralLid Mode 7 (phSeq) over twin_mode7{,_ppm1,_ppm2} x s{1,2,3}.phSeq, pinned DIRECTLY against the REAL compiled getSegmentation (no reimpl/transcription swap for this stage, unlike lid5/twin above -- the real-compiled run IS the oracle; there is no SEG_STRUCT/LID_STRUCT-style secondary probe here). The PHASE4B_MODE7 stdout lines are now parsed + validated (previously dead code: MODE7_RE was defined but never used): one `lidWeights=<n>` line (the real LID_bestNNWeight_1.bin net, asserted == 12409) plus one `<variant>_<file> nbclassif=/isCorrect=/lidCumErr=/confSum=` line per case (a missing line aborts generation, per repo standard). lidCumErr/confSum are cross-checked below against the committed mode7_<variant>_<file>_{members,confusion}.bin dumps by tests/test_phase4b_fixtures.py.",
+    "lid_weights": 12409,
+    "lid_weight_provenance": {
+      "committed_bin": "tests/reference_data/phase4b/LID_bestNNWeight_1.bin",
+      "shape": [
+        12409,
+        1
+      ],
+      "element_count": 12409,
+      "source_mat": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Release/bin/LID_bestNNWeight_1_MultiConfigResults.mat",
+      "source_variable": "weights",
+      "legacy_source_available": true,
+      "reverified_byte_identical": true
+    },
+    "measured": {
+      "twin_mode7": {
+        "s1": {
+          "nb_of_classif": 150,
+          "is_correct": 100,
+          "lid_cumulative_error": 7.785306975316978,
+          "confusion_sum": 12.0
+        },
+        "s2": {
+          "nb_of_classif": 213,
+          "is_correct": 100,
+          "lid_cumulative_error": 117.4617590254188,
+          "confusion_sum": 15.0
+        },
+        "s3": {
+          "nb_of_classif": 142,
+          "is_correct": 0,
+          "lid_cumulative_error": 81.0807799495393,
+          "confusion_sum": 12.0
+        }
+      },
+      "twin_mode7_ppm1": {
+        "s1": {
+          "nb_of_classif": 150,
+          "is_correct": 100,
+          "lid_cumulative_error": 7.785306975316978,
+          "confusion_sum": 12.0
+        },
+        "s2": {
+          "nb_of_classif": 213,
+          "is_correct": 100,
+          "lid_cumulative_error": 117.4617590254188,
+          "confusion_sum": 15.0
+        },
+        "s3": {
+          "nb_of_classif": 142,
+          "is_correct": 0,
+          "lid_cumulative_error": 81.0807799495393,
+          "confusion_sum": 12.0
+        }
+      },
+      "twin_mode7_ppm2": {
+        "s1": {
+          "nb_of_classif": 150,
+          "is_correct": 100,
+          "lid_cumulative_error": 7.785306975316978,
+          "confusion_sum": 12.0
+        },
+        "s2": {
+          "nb_of_classif": 146,
+          "is_correct": 100,
+          "lid_cumulative_error": 69.96891137726902,
+          "confusion_sum": 12.0
+        },
+        "s3": {
+          "nb_of_classif": 73,
+          "is_correct": 0,
+          "lid_cumulative_error": 46.30944507863297,
+          "confusion_sum": 9.0
+        }
+      }
+    }
+  },
+  "corpus_lid": {
+    "text": "Task 9: corpus-level LID goldens. UNLIKE the tier-2 CorpusProbe (reimpl-swapped FFB), every per-file getSegmentation here is the REAL COMPILED driver: the configs use TINY nets (every GEMM reduction dim < 23, the nn_product_probes boundary), so the real Eigen engine and the ascending-loop Rust port agree bit-for-bit on the oracle env (libm-bearing values canary-gated off it). Only the corpus loop + SegmentationFunction row assembly + saveAndUpdate are transcribed, with the REAL saveWeights/saveWeightsLID/updateWeights/updateWeightsLID (real Rprop, both nets) and the REAL PrintConfusionMatrix. twin_train: Mode-7 phSeq 2-file corpus, 3 epochs, BOTH nets' post-saveAndUpdate weights dumped per epoch; the algo-6 criterion (cost+costLID) trajectory measured (fired/skipped). The SAD net never forwards in Mode 7 -> its derivs stay a zero Nx2 -> updateWeights normalizes 0/0 = NaN per element -> Rprop's else-branch applies +delta per weight row per epoch (the stats-tail rows, count 1, stay put): the SAD epoch dumps pin exactly this NaN-drift semantics. twin_train_ns: rising threshold 11 > the constant-10 Mode-7 result_vec -> NO speech -> saveAndUpdate:465 forces costLID = -1.0 into EVERY updateWeightsLID (the LIVE gate); twin_train_nsx is the same run with the gate DISABLED (counterfactual) -- the two LID trajectories diverge at ns_gate_diverge_epoch (a port that dropped the gate would reproduce nsx, not ns). twin_e2e: the REAL CorpusProcessor(-m).run() at epochs 0 -> the twin_e2e_<var>.bin value fixtures for the spawned-binary e2e (timing col masked). twin_gradcheck: Mode-5 wav 1-file corpus, BOTH nets backprop-active -> the per-network cost-column switch (ii=0 SAD cols 4/len-1, ii=1 LID cols 14/len-2) golden per net; lid5_gradcheck: Algo 5, cols 14/len-2. SQUARE cost laws avoid the cost-law libm (the LSTM activation chain still carries libm, so the goldens stay canary-gated off the oracle env); Audio_max_duration 0.2 keeps every backward deriv reduction below the k>=23 Eigen-blocking boundary. Each gradcheck .bin is (sweep+1) x 3: rows 0..sweep-1 = [analytic_col0, analytic_col1, numerical]; final row [mean_error, mean_relative_error, 0].",
+    "measured": {
+      "seeds": {
+        "sad_nb_weights": 537,
+        "lid_nb_weights": 1093
+      },
+      "train": {
+        "twin_train": {
+          "epochs": 8,
+          "gate_fired": 5,
+          "gate_skipped": 2,
+          "lid_epochs_differing": 7,
+          "best_cost": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10889047764217685,
+            0.10889047764217685
+          ],
+          "cost_lid": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.16117503289495358,
+            0.10889047764217685,
+            0.11586497565554843
+          ],
+          "total_speech_duration": [
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975,
+            0.93975
+          ],
+          "error_perc_lid": [
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0
+          ]
+        },
+        "twin_train_ns": {
+          "epochs": 8,
+          "gate_fired": 4,
+          "gate_skipped": 3,
+          "lid_epochs_differing": 7,
+          "best_cost": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10917422315437127
+          ],
+          "cost_lid": [
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0,
+            -1.0
+          ],
+          "total_speech_duration": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "error_perc_lid": [
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0
+          ]
+        },
+        "twin_train_nsx": {
+          "epochs": 8,
+          "gate_fired": 5,
+          "gate_skipped": 2,
+          "lid_epochs_differing": 7,
+          "best_cost": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.10917422315437127,
+            0.10889047764217685,
+            0.10889047764217685
+          ],
+          "cost_lid": [
+            0.4418872285201163,
+            0.330994972853483,
+            0.2655730572874828,
+            0.17594677170591339,
+            0.10917422315437127,
+            0.16117503289495358,
+            0.10889047764217685,
+            0.11586497565554843
+          ],
+          "total_speech_duration": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "error_perc_lid": [
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0,
+            50.0
+          ]
+        }
+      },
+      "ns_gate_diverge_epoch": 5,
+      "gradcheck": {
+        "twin_net0": {
+          "sweep": 10,
+          "mean_error": 1.219205e-12,
+          "mean_relative_error": 3.723355e-09
+        },
+        "twin_net1": {
+          "sweep": 10,
+          "mean_error": 6.267445e-13,
+          "mean_relative_error": 1.093652e-09
+        },
+        "lid5_net0": {
+          "sweep": 10,
+          "mean_error": 1.314345e-12,
+          "mean_relative_error": 6.704713e-10
+        }
+      },
+      "gradcheck_max_weights": 10,
+      "epsilon": 1e-05
+    }
+  },
+  "pitch_scored": {
+    "text": "Task 10 (phase4a backlog item 3): the spectral PITCH second pass (BLSTMSpectralSegmenter.cpp:757-805) driven with a LIVE STM reference, closing the gap the phase2b pitch goldens left (NN-chain only, setReference=false). Reuses the SAME segmenter-level transcribeSpectral lambda as the 'pitch' variant (byte-identical TDC overrides), but the Segmentation is built from a REAL CorpusItem pointing at the phase4a 3-file corpus's f1.wav/f1.stm (Segmentation::Segmentation(AudioStruct&, double) auto-loads the .stm reference from getRefSegFileName() -- no lambda change needed, setReference stays false so the hardcoded synthetic span is not ALSO pushed). Pins a bit-exact pass-2 result-row golden (spectral_pitch_scored_result_pass2_chan1.bin) under a GENUINELY-BUILT getTargets() target (seg._Reference.size() > 0 fires for real, from a real committed .stm, not the synthetic hardcoded span every other setReference=true call site here uses) -- closing the phase4a backlog's 'no reference-driven target path' gap in COVERAGE. cumError_chan1/nbClassif_chan1 read 0 here (see the extractor's inline comment: the reimpl transcription never wires cost through, and result_vec is target-independent by construction given TargetEnforcementStep >= 0) -- the live-cost claim (a real reference genuinely drives a nonzero cost, i.e. the :793 target-reuse wiring is exercised on a NON-EMPTY target, not merely inert) is asserted on the RUST PRODUCTION driver instead, in phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference.",
+    "measured": {
+      "pitch_chan1": 237.45637583892616,
+      "cum_error_chan1": 0.0,
+      "nb_classif_chan1": 0
+    }
+  },
+  "dead_code_not_ported": {
+    "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
+  }
+}

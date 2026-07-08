@@ -79,13 +79,13 @@ fn ltsv_powermel_map() -> IndexMap<String, String> {
 /// get_segmentation` applies preemph/noise itself (config `LTSV_preemph_ratio
 /// 0.97`, `LTSV_noise_seed 0` -> no noise).
 fn excerpt_audio() -> Audio {
-    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0).expect("decode excerpt")
+    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0).expect("decode excerpt")
 }
 
 /// Fresh zero-offset excerpt audio (same wav, offset 0.0): the VRCTS byte-
 /// equivalence golden uses this so neither side has an `_AudioOffset` to bake in.
 fn excerpt_audio_zero_offset() -> Audio {
-    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.0, 2.0).expect("decode excerpt")
+    read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.0, 2.0, 0).expect("decode excerpt")
 }
 
 fn fresh_segs(audio: &Audio) -> Vec<Segmentation> {

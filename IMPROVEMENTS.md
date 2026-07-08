@@ -328,7 +328,16 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the UB guard and reads `LTSVshift` unconditionally when the key is present (the oracle harness does the
   same, so the golden stays valid; all four variant configs supply `LTSVshift` explicitly). *Fix
   candidate:* after parity, either give `_LTSVWindowShift` a defined default or make the read
-  unconditional in the legacy (already the effective behavior here).
+  unconditional in the legacy (already the effective behavior here). *Phase 4b Task 9 addendum --
+  the UB observed LIVE:* the Task-9 harness stage drives the REAL compiled `BLSTMSpectralLID`
+  (whose ctor runs the real `buildFromConf`), and the process's FIRST construction landed on a
+  zeroed heap page -> the `!= 0.0` gate SKIPPED the read -> `_LTSVWindowShift` stayed `0.0` ->
+  the LTSV decimation floored to 1 -> a whole-file (201-row) Algo-5 SAD segmentation, while every
+  LATER construction (dirty heap) read the key and produced the deterministic 34-element/0.34s
+  segmentation. Run-order-dependent segmentation from uninitialized memory, empirically confirmed.
+  The harness probe now re-applies the Phase-1 adjudication (assigns the key value explicitly
+  after construction, `tools/oracle_harness/main.cpp` "UB KILL" comment), so every fixture pins
+  the deterministic branch the port implements.
 
 - **[phase1] LTSV frequency band is RESET to `(0, output_dim-1)` for mel variants, diverging from the
   spectral band** (E2E composition: `src/rust/tests/phase1_pipeline_golden.rs` + the harness twin
@@ -946,7 +955,8 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   persistence is pinned unit-test-only via a direct state mutation
   (`BlstmSpectralSegmenter::force_non_wav_spectrum_shift` +
   `non_wav_spectrum_shift_80_fallback_persists`), exposed as a `pub` method solely for that test (no
-  production caller).
+  production caller). [Superseded: see the [phase4b] closure entry - the phSeq corpus gives it a live
+  production caller since Task 5/7.]
 
 - **[phase2b] The REAL `getBLSTMInputSequence` uses an Eigen `applyDCT` GEMM that diverges from the
   Rust `build_input_sequence`** (`BLSTMSpectralSegmenter.cpp:561-591` reads
@@ -1502,7 +1512,18 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   is observable, via a test-only hook. *Fix candidate:* none -- this is the correct legacy order,
   to be reproduced as-is when Phase 4b lands algo 5/6. *Pinned by:* `update_called_with_neg_costlid`
   (`tests/phase4a_save_update.rs`), which asserts the update-side value is `-1.0` while the same
-  call's row-slice write (`cost_lid_row`) still carries the pre-gate value.
+  call's row-slice write (`cost_lid_row`) still carries the pre-gate value. *Phase 4b Task 9
+  addendum -- the gate is now LIVE and pinned end-to-end:* the `twin_train_ns` fixture (Mode-7
+  phSeq corpus whose rising threshold 11 exceeds the constant-10 result_vec -> zero speech every
+  epoch) forces `costLID = -1.0` into every real `updateWeightsLID`; the committed
+  `twin_train_nsx_lid_epoch*.bin` counterfactual (same harness run with the gate DISABLED)
+  diverges from the gated trajectory at the manifest-recorded epoch 5 (`corpus_lid.measured.
+  ns_gate_diverge_epoch` -- the first epoch where the ungated costLID RISES, so Rprop's
+  cost-gated backtrack fires only in the ungated world). *Pinned by:*
+  `twin_train_ns_costlid_gate_live` (`tests/phase4b_corpus_lid.rs`): the replay must equal the
+  ns goldens AND differ from nsx at epoch 5, and `CostLIDMem` must carry the PRE-gate values.
+  Mutation (verified): disabling the `save_and_update` gate (`if false && ...`) makes the test
+  fail at exactly `epoch 5 weight 167` -- the port then reproduces the counterfactual.
 
 - **[phase4a] `saveAndUpdate`'s column means are per file x channel ROW, not per file** (from
   `BagOfProcessors.cpp:409-471`): `resultsperConf[ii].rows()` is one row per (file, channel) pair
@@ -1593,7 +1614,32 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `target` in scope across the pitch block and passes `&target` unchanged, matching `:793`
   element-for-element. Reproduced verbatim. (Under the real algo-3 config the pitch pass is gated on
   `TDCwindow > 0`, which the base config does not set, so this is exercised only by the pitch-variant
-  spectral goldens; the target reuse is nonetheless wired for that path.)
+  spectral goldens; the target reuse is nonetheless wired for that path.) **UPDATE (Task 10):** the
+  `phase2b_spectral_golden.rs` pitch goldens all pass `refs: None` (an empty target -- the reuse is
+  wired but numerically inert). `phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference`
+  closes that gap with a LIVE STM reference (`f1.wav`/`f1.stm`), confirming `target.nrows() > 0`
+  flows into BOTH passes' `feed_forward_backward` (live cost/counter accumulation on the real
+  production driver) and pinning the pass-2 result row against a new harness dump
+  (`spectral_pitch_scored_result_pass2_chan1.bin`). Note: reuse-vs-rebuild is NOT an observable
+  distinction on this config at all -- not via `result_vec`, and not via cost either.
+  `Segmenter::get_targets` (`segmenter.rs`, from `Segmenter.cpp`) is a pure function of
+  `(reference, timeStep, timeOffset, backPropWer, classType, nRows)`; `BLSTMSpectralSegmenter.cpp
+  :724-733` computes `timeStep`/`timeOffset` exactly ONCE, before the `:735-738` target build and
+  before the pitch block, and the pitch warp (`:760-775`) preserves the periodogram's row/column
+  shape (confirmed in the ported `apply_homothety`), so `nRows` and every other argument a
+  hypothetical rebuild at `:793` would pass to `getTargets` are IDENTICAL to pass 1's -- the
+  rebuilt target would be bit-identical to the reused one, hence so would the resulting cost. The
+  golden closes the "numerically inert target" gap (a live reference now drives real, live cost/
+  counter accumulation through both passes on the production driver); the `:793` reuse-vs-rebuild
+  question itself is structurally pinned by transcription (a verbatim port of the legacy line, not
+  a port-invented shortcut) and is observationally indistinguishable from a rebuild for this
+  driver/config -- see the Task 10 backlog entry above for the full analysis. **Correction:** the
+  `0f7ab42` commit message's "All three mutation-tested (apply/run/revert)" overclaims coverage for
+  this item -- item 3 (this entry) was closed by DIRECT ASSERTION (live nonzero cost/counter values
+  on the production driver + the bit-exact pass-2 golden), not by a mutation. Per the analysis just
+  above, an apply/run/revert mutation swapping the `:793` reuse for a rebuild would be numerically
+  inert on this config (bit-identical target in, bit-identical cost out), so it could not have
+  demonstrated anything; no such mutation was run, and none would be meaningful here.
 
 - **[phase4a] Task 7b target flow does NOT interact with the `_TargetEnforcementStep < 0` interior
   rewrite for the ported configs** (`nn/blstm.rs::feed_forward_backward_plain`, risk R7 cross-ref):
@@ -1674,14 +1720,659 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   *Net verdict:* 4 of 6 mutations break their named golden as designed; 2 (fold-order, best-cost
   tie) expose real gaps in tie/multi-contribution coverage on the current 2-file tier-2 fixture,
   recorded honestly rather than papered over. Full detail (diffs, commands, output) in
-  `.superpowers/sdd/task-11-phase4a-report.md`.
+  `.superpowers/sdd/task-11-phase4a-report.md`. **UPDATE (Task 10):** both flagged gaps are now
+  CLOSED. The best-cost tie gap is closed by `phase4b_backlog.rs::best_cost_gate_skips_on_exact_tie`
+  (a crafted byte-equal-cost epoch B against the same `Processor::Spectral` `save_weights` gate);
+  *mutation evidence:* `best_cost[&pos] > save_criterion` -> `>=` makes it FAIL
+  (`assertion failed: !weights_artifact_b.exists()`, the tie now re-saves); reverted, PASS. The
+  fold-order gap is closed by `phase4b_backlog.rs::fold_order_ascending_golden` (a 3-file corpus
+  whose per-file derivative fold is measurably order-sensitive, per
+  `fold_order_measured_divergence_seed0`: 5865 of 67342 raw-derivative elements differ in bits
+  between ascending and descending fold order); *mutation evidence:*
+  `run_epoch`'s `per_file.sort_by_key(|(j, _, _, _)| *j)` -> `Reverse(*j)` makes it FAIL
+  (`epoch-0 (ascending fold) raw deriv [3,0] bit mismatch`); reverted, PASS. See the Task 10
+  backlog entry below for the full write-up. **Correction:** only the fold-order item pins the
+  RAW folded derivative matrix, not the post-Rprop weights, since iRPROP- only reacts to
+  derivative sign and this fold order's divergence is too small to flip one; the best-cost-tie
+  item pins a different observable entirely (the save-gate's weights-artifact existence, via
+  `!weights_artifact_b.exists()`), not the derivative matrix.
 
-- **[phase4a] Phase 4b test backlog (from the 4a final review):** (1) a crafted best-cost TIE
-  golden (cost delta >= the mutation's detection gap, closing the `>` vs `>=` gate coverage hole);
-  (2) a 3+-file fold-order-divergence golden exercising a genuinely non-commutative reduction (the
-  current tier-2 fixture's 2-file merge is commutative, masking the fold-order mutation); (3) a
-  reference-loaded, `TDCwindow > 0` pitch-pass golden pinning the pass-1-target-reuse quirk under
-  live targets (current pitch-pass coverage is NN-chain-only, no reference-driven target path).
+- **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
+  (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely
+  worse) closing the `>` vs `>=` gate coverage hole. *Pinned by:*
+  `phase4b_backlog.rs::best_cost_gate_skips_on_exact_tie`. *Mutation evidence:* `save_weights`'s
+  `Processor::Spectral` arm `best_cost[&pos] > save_criterion` -> `>=` makes the test FAIL
+  (`assertion failed: !weights_artifact_b.exists()`, the tie now re-saves); reverted, PASS.
+  (2) CLOSED: a 3-file (`f1`/`f2`/`f3`) fold-order-divergence golden -- MEASURED, no seed search
+  needed (bound: 1 of a budgeted 20; the base `NNweights_config1.bin` seed diverges immediately,
+  5865 of 67342 raw-derivative elements differ in bits between the ascending and descending fold).
+  *Pinned by:* `phase4b_backlog.rs::fold_order_measured_divergence_seed0` (the measurement) and
+  `fold_order_ascending_golden` (the locked ascending-order golden). *Non-obvious finding:* the
+  golden must pin the RAW folded derivative matrix (a new test-support-only observation point,
+  `CorpusProcessor::epoch_raw_derivs_trace_for_test`, captured immediately after `run_epoch`'s
+  per-file fold, BEFORE `save_and_update_epoch`), NOT the post-Rprop trained weights
+  (`epoch_weight_trace_for_test`) -- iRPROP- (`nn/train.rs`) reacts only to the SIGN of the
+  count-normalized derivative, so this fold order's ULP-scale divergence never flips a sign and is
+  therefore INVISIBLE in the trained weights; pinning `epoch_weight_trace_for_test` instead was
+  tried first and did NOT fail under the mutation below (a false negative), which is why the
+  raw-derivs observation point was added. *Mutation evidence:* `run_epoch`'s
+  `per_file.sort_by_key(|(j, _, _, _)| *j)` -> `Reverse(*j)` makes `fold_order_ascending_golden`
+  FAIL (`epoch-0 (ascending fold) raw deriv [3,0] bit mismatch`, off by 1 ULP); reverted, PASS.
+  (3) CLOSED: a `TDCwindow 0.032` pitch-pass golden (`f1.wav`/`f1.stm`, the phase4a 3-file corpus)
+  driven with a LIVE STM reference (`refs: Some(&refs)`), pinning `last_result_rows_pass2` against
+  a new harness dump (`spectral_pitch_scored_result_pass2_chan1.bin`, `tools/oracle_harness/
+  main.cpp`'s segmenter-level `transcribeSpectral` reused unmodified with a real
+  `Segmentation::Segmentation(AudioStruct&, double)` STM auto-load, no lambda change). *Pinned by:*
+  `phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference`, which additionally asserts
+  live (nonzero) `cumulative_error`/`nb_of_classif` on the REAL Rust production driver -- the
+  harness's own `cumError_chan1`/`nbClassif_chan1` read 0 by construction (its reimpl transcription
+  never wires cost through the target, and `result_vec` is target-INDEPENDENT given
+  `TargetEnforcementStep >= 0`; see `scripts/extract_phase4b_fixtures.py`'s `pitch_scored` manifest
+  text), so the harness fixture pins the bit-exact NN forward-pass row only, while the live-cost
+  claim is asserted on production code.
+
+- **[phase4b] `PrintConfusionMatrix`'s `posTarget`/`posBestNotTarget` are STICKY across rows, NOT
+  reset per row** (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:
+  509-510,533-534`): both position variables are declared OUTSIDE the row loop and initialized to
+  `0` exactly ONCE, before row 0; the end-of-row reset (`:533-534`) touches only
+  `scoreTarget`/`maxScoreNotTarget`. So a row with no target sentinel at all (every column `<=
+  150`) does NOT attribute its miss to `posTarget = 0` (the index-header slot) in general -- it
+  inherits `posTarget` (and, unless overwritten by a competitor score that row, `posBestNotTarget`)
+  from the LAST row that set them. Only a no-target row that is ALSO the very first row ever
+  processed lands at index `0`. Almost certainly an oversight (the natural reading of the code is
+  "reset per row"), but load-bearing for the confusion-matrix goldens as committed. Caught by a
+  genuine TDD RED: the first hand-derived `sentinel_decode_and_argmax` expectation assumed a
+  per-row reset and failed against both the Rust implementation (written directly from source) and
+  the independently cross-validated harness dump, forcing a re-read of `:509-510` vs `:533-534`.
+  *Why deferred:* provenance; the confusion matrix's row/col attribution for degenerate (no-target)
+  rows is directly observable and load-bearing for any LID confusion-matrix consumer built on this
+  in Phase 4b's later tasks. *Fix candidate:* reset `posTarget`/`posBestNotTarget` to `0` at every
+  row boundary alongside `scoreTarget`/`maxScoreNotTarget`, once end-to-end LID parity holds. *Pinned
+  by:* `sentinel_decode_and_argmax`, `no_target_as_first_row_uses_header_zero_slot`
+  (`src/engine/confusion.rs`), `confusion_matrix_matches_harness_transcription`
+  (`tests/phase4b_confusion_golden.rs`) -- the latter cross-validated against the REAL compiled
+  `PrintConfusionMatrix`/`Confusion2String` via the oracle harness's `phase4b_confusion` stage
+  (`error1 == error2` non-vacuity gate).
+
+- **[phase4b] An exact score tie sends the target to the MISS branch (strict `>` only)**
+  (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:524`): the win
+  condition is `scoreTarget > maxScoreNotTarget`, so `scoreTarget == maxScoreNotTarget` (the
+  decoded target score exactly equals the best competitor's raw score) falls to the
+  best-competitor/miss branch, not a coin-flip or a separate tie bucket. *Why deferred:*
+  provenance; a `>=` flip is a plausible "intended" reading but changes which class gets credited
+  on every exact tie. *Fix candidate:* none identified without knowing the original intent. *Pinned
+  by:* the row-D case (an exact 50.0/50.0 tie) in `sentinel_decode_and_argmax`
+  (`src/engine/confusion.rs`); a `>` -> `>=` mutation was run and confirmed to break this test (see
+  the Task 1 report).
+
+- **[phase4b] `Confusion2String`'s zero-row-total normalization guard leaves that row's diagonal
+  cell as a RAW COUNT, not a percentage** (`engine/confusion.rs::confusion_error`, from
+  `Helpers.hpp:375`): the per-row scaling only fires `if (confusion(kk+1, classNb+1) > 0)`; a class
+  with zero samples in this crafted batch keeps its raw (unscaled) diagonal count feeding directly
+  into the `100 - normalized(ii,ii)` deficit sum, which is only a sensible percentage-deficit for
+  rows that DID get scaled. *Why deferred:* provenance; matches the legacy exactly and only matters
+  for genuinely empty classes. *Fix candidate:* none identified -- an empty class arguably
+  shouldn't contribute to the error average at all; revisit once a real (non-crafted) confusion
+  matrix with an empty class is observed. *Pinned by:* `zero_total_row_left_unnormalized`
+  (`src/engine/confusion.rs`).
+
+- **[phase4b] `Confusion2String`'s ill-conditioned-matrix gate (`exit(1)` in the legacy) ported as
+  a Rust panic** (`engine/confusion.rs::confusion_error`, from `Helpers.hpp:369-371`): `classNb =
+  confusion.rows()-2 < 2`, or `rows-2 != cols-2`, is fatal in the legacy (`exit(1)`, no exception,
+  no recovery). Rust has no direct equivalent that stays testable via `#[should_panic]`, so this
+  port uses `panic!`. *Why deferred:* this branch is reachable only from a deliberately malformed
+  matrix (never from `confusion_from_results`'s own construction, which always builds a valid
+  square matrix or returns the `classNb <= 1` empty case without calling `confusion_error` at all);
+  revisit if a future caller needs graceful-`Result` handling instead. *Fix candidate:* none
+  identified. *Pinned by:* `ill_conditioned_matrix_panics` (`src/engine/confusion.rs`).
+
+- **[phase4b] `BagOfProcessors::PrintConfusionMatrix`'s classNb==2 binary ROC-curve variant and a
+  duplicate normalization/print block are commented-out DEAD CODE, not ported**
+  (`engine/confusion.rs`, from `BagOfProcessors.cpp:477-499,541-593`): `:477-499` is an entire
+  `if (classNb == 2) { ... }` arm computing a 10001-step threshold-sweep negative/positive
+  histogram -- entirely commented out, so `classNb == 2` falls straight into the SAME general
+  `else if (classNb > 1)` accumulation as every other `classNb >= 2`, with no ROC/histogram
+  behavior at all. `:541-593` duplicates (via `cout`, not `error +=`) exactly what the LIVE
+  `Confusion2String` call at `:540` already computes and is never executed. *Why deferred:* N/A --
+  this is a straightforward "do not port dead code" decision, not a deferred fix. *Pinned by:*
+  `dead_binary_variant_not_ported` (`src/engine/confusion.rs`).
+
+- **[phase4b] CORRECTED a Phase 4a stub doc-comment: `PrintConfusionMatrix`'s returned `error` IS
+  the row-normalized `error/classNb` aggregate, not a raw off-diagonal count**
+  (`engine/bag_of_processors.rs::print_confusion_matrix`): the Phase 4a stub's doc comment (written
+  ahead of the real implementation, "verified against source in 4a" per that phase's task
+  instructions) claimed the returned error was "the summed off-diagonal confusion (raw count, not
+  yet normalized -- the normalization block is legacy dead code, commented out at `:534-596`)".
+  Re-reading `BagOfProcessors.cpp:536-598` for Task 1 shows this conflated two different things:
+  the LIVE `error = Confusion2String(confusion, output, "      ");` call at `:540` (NOT inside the
+  commented range) IS what computes and returns the row-normalized aggregate (`Helpers.hpp:438`'s
+  own `return error/classNb;`); only the DUPLICATE block at `:541-593` (a `cout`-based re-derivation
+  of the same math, never executed) and the commented `return error/classNb;` at `:596` (which
+  would have double-divided had it been live) are dead. *Why deferred:* N/A -- documentation
+  correction, not a behavioral question. *Fix candidate:* N/A. *Pinned by:*
+  `error_matches_real_confusion2string_and_printconfusionmatrix`
+  (`tests/phase4b_confusion_golden.rs`), which asserts the Rust `confusion_error` return equals
+  the REAL compiled `Confusion2String`'s (normalized) return.
+
+- **[phase4b] `getCostPonderation`'s `classIndex < 0` clamp is DEAD in the legacy (unsigned
+  `size_type` param), ported as a live `i64 < 0` clamp -- behavior-identical**
+  (`nn/blstm.rs::get_cost_ponderation`, from `BLSTMNeuralNetwork.cpp:333-350`): the legacy
+  parameter is `std::vector<double>::size_type` (UNSIGNED), so both branches' literal
+  `(classIndex < 0)` sub-tests can never fire. The sole caller passes a signed `int`
+  (`TwinBLSTMSpectralLID.cpp:1334`, `targetIndex`); a negative arg converts to a huge unsigned that
+  trips the OTHER sub-test (`>= getOutputSize()` multiclass / `> getOutputSize()` binary) and clamps
+  to 0 anyway. The port takes `class_index: i64` with an EXPLICIT `< 0` clamp, which yields the
+  identical result for every input (a negative always lands on 0 either way), while being readable
+  and not relying on unsigned wraparound. The multiclass guard uses `>=` and the binary guard uses
+  `>` -- that asymmetry is load-bearing and reproduced verbatim. *Why deferred:* N/A -- an
+  equivalence-preserving readability choice, not a behavioral deviation. *Fix candidate:* N/A.
+  *Pinned by:* `cost_ponderation_clamps` (`tests/phase4b_nn_lid.rs`), which tables the fold for
+  negative / equal-to-size / far-out-of-range indices in both branches.
+
+- **[phase4b] `ponderateWeightsDerivatives` scales the deriv col0 only; the `_NbOfSeqFedBackward`
+  count column and the mean/std tail are untouched** (`nn/blstm.rs`, `nn/network.rs`, `nn/layers.rs`,
+  from `BLSTMNeuralNetwork.cpp:289-297` -> `NeuralNetwork.hpp:119-123` -> `LSTMLayer.cpp:305-310` /
+  `NeuronLayer.cpp:122-125`): the legacy `_...Derivatives *= ponderation` touches ONLY the raw
+  derivative accumulators (the harvested Nx2 col0). `_NbOfSeqFedBackward` (col1) is a separate member,
+  never scaled, and the mean/std tail is assembled fresh as `[0, 1]` in `getWeightsDerivatives`, so it
+  never participates. Not a bug -- a semantics note for the count-vs-deriv normalization asymmetry
+  (spec S3). *Why deferred:* N/A. *Fix candidate:* N/A. *Pinned by:* `ponderation_scales_col0_not_col1`
+  (`tests/phase4b_nn_lid.rs`, STRICT bits: col0 == col0*factor, col1 unchanged); mutation check --
+  scaling col1 instead of col0, or scaling both, flips the strict-bit assertion.
+
+- **[phase4b] `BLSTMSpectralLID::getSegmentation` inlines a spectral-setup COPY that DIVERGES
+  from the base `BLSTMSpectralSegmenter::getSegmentation` in five load-bearing ways -- the Algo-5
+  lines govern** (`tasks/lid.rs::get_segmentation`, from `BLSTMSpectralLID.cpp:27-460` diffed against
+  `BLSTMSpectralSegmenter.cpp:593-887` + `getLTSVParam` `:300-314` + `getBLSTMParam` `:439-500`): (1)
+  the SAD result_vec is the LTSV score (`classifySequence` over the RAW periodogram, `:271-274` -- the
+  mel branch `:252-269` is COMMENTED OUT), NOT the BLSTM posterior; the BLSTM runs only per speech
+  segment for LID scoring. (2) the LTSV half-window floors `< 1 -> 1` (`:157-158`), UNLIKE the base
+  `getLTSVParam`'s `< 1 -> 0` (`:303`, which DISABLES LTSV) -- so LTSV SAD is always active even with
+  `LTSVwindow 0` (`round(0) = 0 -> 1`); this is the STANDALONE `LtsvSegmenter`'s floor, not the
+  spectral SAD's. (3) result_vec is sized `ceil(vec_size / LTSV_window_shift)` (`:227-232`), the LTSV
+  decimation, NOT `getBLSTMParam`'s ssr-division (`:481-497`), and the LTSV loop writes DECIMATED
+  indices `result_vec[jj/LTSV_window_shift]` with NO interpolation backfill. (4) the SAD
+  `results2segmentation` timeStep is `_WindowShift` with offset 0.0 (`:302`) -- the BLSTM-derived
+  window shift used as the LTSV-SAD time step, a compression quirk (the result_vec is LTSV-decimated
+  but stepped by `_WindowShift`, not `_WindowShift * LTSV_window_shift`), so the SAD boundaries live on
+  a compressed timeline. (5) the scoring timeStep uses the SIGNAL pattern (`:333-343`: overlap keeps
+  `timeStep = _WindowShift`), NOT the base spectral `_SpectrumShift * ssr` (`:731`). *Why deferred:*
+  the LID driver is a faithful port target; the divergences are load-bearing for the goldens. *Fix
+  candidate:* after end-to-end LID parity, reconcile the LID SAD path with the base spectral/LTSV
+  drivers (the timeline compression at (4) is the most surprising and worth a second look). *Pinned
+  by:* `ltsv_sad_row_matches_dump`, `sad_boundaries_match_dump`, `lid_classification_errors_match_dump`
+  (`tests/phase4b_lid5_golden.rs`), all bit-exact vs the harness `LidProbe` reimpl. Mutation: the
+  `LidProbe` reimpl encodes the Algo-5 lines (not the base spectral machinery), so reverting any of
+  the five divergences -- e.g. restoring the commented-out mel-branch SAD, or the base
+  `getLTSVParam` `< 1 -> 0` floor -- diverges the `*_match_dump` goldens; the Task-11 battery's
+  in-band `-2.0 -> -1.0` flip additionally breaks `phase4b_lid5_golden` (see the Task-11 entry
+  below, item 1).
+
+- **[phase4b] The LID driver computes TDC params + `LTSV_freq_beg`/`LTSV_freq_end` + `costLID` that
+  are all DEAD, and has a `_CepstreCoefficients` writeback that never re-reads** (`tasks/lid.rs`, from
+  `BLSTMSpectralLID.cpp`): TDC (`:162-173`, incl. a min_lag/max_lag derivation SIMPLER than
+  `getTDCParam` -- no `min_lag < 1 -> 1`, no `max_lag < min_lag` guard, no `_MinMaxLag` writeback) is
+  computed but never used (no pitch pass in the LID driver), so it is SKIPPED here. `LTSV_freq_beg`/
+  `LTSV_freq_end` (`:109-110`) are captured before the mel branch but never read (the LTSV loop uses
+  the post-mel `freq_beg/end`), so SKIPPED. `costLID` (`:320,376,405,410`) is accumulated but NEVER
+  stored on `seg` or returned (a dead local), so NOT reproduced. The `_CepstreCoefficients` block
+  writeback of the (type-1-normalized) input after each scoring call (`:364-368`) is DEAD: SAD
+  segments after smoothing are separated by an OTHER span, so `rowEnd_i < rowBegin_{i+2}` always (the
+  written rows are never re-read), and under `lid5.config`'s single-segment SAD it writes once and
+  never re-reads -- SKIPPED. *Why deferred:* dead-code omission, not a behavioral deviation. *Fix
+  candidate:* N/A. *Pinned by:* `lid_members_match_dump`/`lid_confusion_matches_dump`
+  (`tests/phase4b_lid5_golden.rs`), bit-exact despite the skips. Mutation: N/A -- these are
+  dead-code omissions (computing and storing the dead TDC / `costLID` / cepstre values changes
+  nothing the goldens observe), so there is no live branch to break.
+
+- **[phase4b] The LID `_IsLIDCorrect = -1` branch is DEAD (targetIndex is clamped `>= 0`), and the
+  per-segment scoring-block guard adds a `rowEnd >= rowBegin` underflow check with no legacy
+  counterpart** (`tasks/lid.rs::get_segmentation`, from `BLSTMSpectralLID.cpp:321-323,352,424-425`):
+  `targetIndex` is clamped to `[0, classNb)` at `:321-323`, so every `if (targetIndex >= 0)` (`:375,
+  :410,:413,:417`) is always true and the `else { _IsLIDCorrect = -1 }` at `:424-425` never fires --
+  reproduced structurally (the accessor CAN return -1) but never reached. The `rowEnd - rowBegin + 1
+  >= ssr` guard (`:352`) is unsigned in the legacy: when `rowEnd < rowBegin` (a segment shorter than
+  one periodogram frame) it wraps to a huge value, passes the guard, and the subsequent `.block(...)`
+  slice reads OOB (UB). The port adds an explicit `row_end >= row_begin` guard so it SKIPS such a
+  segment instead of UB-slicing; this is unreachable with real min-length SPEECH segments (the harness
+  would `std::abort` on the resulting structural mismatch, so no committed fixture exercises it) and is
+  byte-identical on every fixture. *Why deferred:* the -1 branch is dead reproduction; the guard is a
+  port-only safety over legacy UB. *Fix candidate:* N/A (the UB is unreachable). *Pinned by:*
+  `lid_members_match_dump`, `sentinel_gt150_present_every_file` (`tests/phase4b_lid5_golden.rs`).
+  Mutation: the Task-11 battery's in-band `-2.0 -> -1.0` flip breaks `sentinel_gt150_present_every_file`
+  / `lid_classification_errors_match_dump` (Task-11 entry below, item 1); the dead `-1` branch and
+  the port-only underflow guard are themselves N/A (both unreachable -- `targetIndex` is clamped
+  `>= 0`, and min-length SPEECH segments never underflow the slice).
+
+- **[phase4b] The phSeq reader's phoneme count carries a fixed `10 + sum(len+10)` padding
+  arithmetic -- 10 phantom head phonemes plus 10 phantom gap phonemes appended after EVERY
+  sentence (including the last)** (`audio.rs::read_phseq`, from `AudioStruct.cpp:164,170`):
+  `numberOfPhonemes` starts at 10 (`:164`, before any line is read) and each sentence adds
+  `length+10` (`:170`), so a file's "phoneme count" is inflated by `10*(nb_lines+1)` silence-gap
+  slots that never correspond to any input character. Combined with the `rowBegin = 5` block-fill
+  start (`:178`, see the next entry) this yields a 5-row lead margin, 10-row inter-sentence gaps,
+  and -- by the identity `numberOfPhonemes - final_rowBegin == 5` (final `rowBegin` is
+  `5 + sum(len+10)`) -- an exactly 5-row trailing margin, so the fill never overflows the
+  `numberOfPhonemes x 38` allocation for ANY sentence lengths. The asymmetric split (5 lead vs 10
+  between) is presumably a context-padding choice for the downstream BLSTM, but nothing documents
+  it. *Why deferred:* provenance; the goldens encode these exact offsets. *Fix candidate:* none --
+  document once a real phSeq training run validates the intent. *Pinned by:* `phseq_onehot_golden`
+  (`tests/phase4b_phseq.rs`, bit-exact vs the REAL compiled `AudioStruct` `file_type==1` ctor's
+  `_Periodogram`/`_ExternalFeatures` dumps) and `phseq_metadata_matches_manifest` (the
+  `numberOfPhonemes`/frames-count scalars). Mutation: changing the initial 10, the per-sentence
+  `+10`, or the `rowBegin = 5` seed each shifts every block placement and/or the periodogram row
+  count -> `phseq_onehot_golden` fails on shape or first-row mismatch (`f1`: 52 rows, blocks at
+  5/21/31). The `len==0` edge (a blank line contributes its bare `+10` with a 0-row one-hot block)
+  is separately pinned by `phseq_zero_length_line_is_a_zero_row_block`.
+
+- **[phase4b] `_FramesCount = numberOfPhonemes*0.01*_Framerate` fabricates a synthetic duration
+  (10 ms per phoneme slot) with LEFT-ASSOCIATIVE float grouping, and the 0.01 is an undocumented
+  magic constant** (`audio.rs::phseq_frames_count`, from `AudioStruct.cpp:173`): the zero-filled
+  `_Data` gets `(numberOfPhonemes*0.01)*_Framerate` frames -- C++ `*` associates left-to-right, and
+  the port isolates that exact grouping in `phseq_frames_count` because the naive regrouping
+  `numberOfPhonemes*(0.01*_Framerate)` differs by 1 truncated frame where `n*0.01` rounds down
+  (first divergence at `numberOfPhonemes = 803`, framerate 8000: 64239.999... -> 64239 vs 64240.0
+  -> 64240; the committed fixtures' 52/46/45 all land exact, so only the synthetic in-test file
+  exercises the divergence). The double -> `long long` assignment truncates toward zero (`as i64`).
+  *Why deferred:* provenance; 0.01 (= 10 ms/slot at any framerate) is load-bearing for every
+  downstream frame-indexed computation. *Fix candidate:* name the constant once end-to-end phSeq
+  parity holds. *Pinned by:* `frames_count_arithmetic` (`tests/phase4b_phseq.rs`, a 783-char
+  synthetic line -> `numberOfPhonemes` 803 -> asserts 64239 AND explicitly `!= 64240`) plus
+  `phseq_metadata_matches_manifest` (fixture-file counts 4160/3680/3600). Mutation: regrouping the
+  product right-associatively flips `frames_count_arithmetic`'s 64239 assert; changing 0.01 flips
+  every frames-count assert in both tests.
+
+- **[phase4b] The phSeq out-of-domain-character crash (`letterMapping.at()` ->
+  uncaught `std::out_of_range` -> `std::terminate`) is ported as a recoverable `Err`, and the
+  missing-file `exit(1)` as `Err` too** (`audio.rs::letter_index`/`read_phseq`, from
+  `AudioStruct.cpp:168,149-152`): the legacy one-hot loop indexes `letterMapping.at(sentence[pos])`
+  with no domain guard -- any character outside the 38-entry map (`AudioStruct.h:18`; note 'q' is
+  absent, as are all digits and uppercase beyond the 11 phone-class letters) throws out of `.at()`
+  and, uncaught anywhere in the call chain, aborts the process. This port returns a contextual
+  error naming the char/line/pos instead of reproducing a crash; same `Err` treatment for the
+  missing-file `exit(1)` (the established Phase 0a+ convention). Also note `sentence[pos]` is
+  byte-indexed `std::string`: non-ASCII input would be consumed byte-by-byte in the legacy, while
+  the port iterates `chars()`; parity-neutral because every mapped character is single-byte ASCII
+  and out-of-domain input errors on both sides (differently). *Why deferred:* N/A -- an
+  error-surface improvement over legacy UB/abort, behavior-identical on all valid inputs.
+  *Fix candidate:* N/A. *Pinned by:* `out_of_domain_char_bails`, `missing_file_bails`
+  (`tests/phase4b_phseq.rs`).
+
+- **[phase4b] The Twin driver ports wav-modes 0/1/2/3 + Mode 7 (phSeq); modes 4/5/6 + the pitch
+  pass + the CNN remain deferred/excluded** (`tasks/lid.rs::TwinBlstmSpectralLid`, from
+  `TwinBLSTMSpectralLID.cpp:263-1421`): `getSegmentation` is a 1,159-line switch over 8 modes.
+  This port covers the mode 0/1/2/3 scoring branch (`:1194-1310`) + the SAD FFB (`:713-764`) + the
+  `abs(_Mode)==7` phSeq LID loop (`:903-1193`, `get_segmentation_mode7`); it BAILS typed on modes
+  4/5/6 (the LID-first train block `:640-692` + the `:798-902` scoring branch: `getTargetsLID` ->
+  LID `feedForwardBackward` train, mode-6 `LID2Segmentation`, the `_PostProcessMode` slice of the
+  pre-computed `LID_result_vec`), on the Mode-7 WAV arm (`:922-963`, the CNN), and on the pitch
+  second pass (`:349-614`, `TDC_window_size > 0`). **Modes-1/4 decision:** mode 1 was UNEXERCISED in
+  T6 -- it is now a full GOLDEN (`twin_mode1`, the same T2 corpus + synthetic LID net, SEG_STRUCT/
+  LID_STRUCT-verified vs the real compiled Twin); mode 4 is deferred WITH modes 4/5/6 (its train
+  branch + reference-copy/smooth share their machinery), documented rather than probe-pinned since
+  its fixture is not craftable in isolation. The Twin's pitch
+  pass is REFERENCE-based (`seg._Classification = seg._Reference` then `getPitch`, `:366-369`) and
+  warps the periodogram BEFORE the SAD forward -- a load-bearing DIVERGENCE from the base spectral
+  driver's post-forward pitch pass (`BLSTMSpectralSegmenter.cpp:757-805`) -- so it cannot reuse that
+  machinery and is deferred with its own golden. All four ported configs use `TDCwindow 0` so the
+  gate is off (byte-identical to a no-pitch run). The `_LIDConvNeuralNetwork` (`:23`) is constructed
+  in the legacy ctor but is dead under the port scope (only mode 7 uses it) -- NOT ported, matching
+  the Phase 2 Conv exclusion (`ConvolutionalLayer` is broken-as-committed; the phSeq Mode-7 arm
+  reaches the CNN only for WAV, so its typed bail is the port's whole treatment of it). Mode 1's
+  synthesis (`result_vec.setConstant(10.0)`, `:726`) shares the `:1194` branch and is now golden
+  (`twin_mode1`). `interestSegs` (`:1240`) + the `_LIDTrainingPruningThreshold` gate (`:1286`,
+  `itInterest->_Type = OTHER`) are NOT reproduced: both feed ONLY the skipped VRCTS dump + the
+  mode!=0 `interestSegs` replacement (`:1297`, dump-only), so they are observably dead (and
+  config-gated on `> 0`, default -1.0, besides). *Why deferred:* the deferred modes are the next
+  task's scope; the pitch divergence needs its own reference-based transcription. *Fix candidate:*
+  land modes 4/5/6 + the pitch pass in a follow-up task. **UPDATE (Task 7c):** modes 4/5/6 are now
+  LANDED (`get_segmentation_mode456`, full goldens, see the entry below); only the pitch second pass
+  + the Mode-7 WAV/CNN arm remain deferred. *Pinned by:* `boundaries_match_dump`,
+  `members_match_dump` (`tests/phase4b_twin_golden.rs`, all EIGHT wav modes 0/0_concat/1/2/3/4/5/6
+  bit-exact vs the harness `TwinProbe` reimpl, itself SEG_STRUCT/LID_STRUCT-verified against the
+  REAL compiled Twin) + the Mode-7 flagship goldens (`tests/phase4b_twin_mode7.rs`). Mutation:
+  removing the `mode` guard makes a mode-4 config reach the mode-0 SAD-FFB path and diverge.
+
+- **[phase4b] Task 7c: modes 4/5/6 slice `LID_result_vec` by `LIDTimeStep`/`LIDTimeOffset` with the
+  offset SUBTRACTED before the divide (`:811-813`) -- NOT the `:1245` branch's bare
+  `begin/_SpectrumShift`; the LID net trains on the WHOLE inputSeq ONCE, and several per-mode
+  synthesis steps are DEAD** (`tasks/lid.rs::get_segmentation_mode456`, from
+  `TwinBLSTMSpectralLID.cpp:640-902`): unlike modes 0/1/2/3 (per-segment `feedForward`, row index
+  `begin/_SpectrumShift`), modes 4/5/6 run `_LIDBLSTMNeuralNetwork.feedForwardBackward` ONCE over the
+  whole inputSeq (`:664`) into `LID_result_vec`, then the `:798-902` scoring reads blocks
+  `rowBegin = ceil((begin - LIDTimeOffset)/LIDTimeStep)`, `rowEnd = floor((next - LIDTimeOffset)/
+  LIDTimeStep)` (offset subtracted first -- load-bearing, since `LID_result_vec` is decimated by the
+  LID net's own subsampling, not indexed in periodogram frames). The LID FFB self-normalizes inputSeq
+  IN PLACE (type -1), so for mode 5 the SAD net's OWN FFB re-normalizes the already-LID-normalized
+  buffer (double self-norm, reproduced by calling the two FFBs on the same `&mut input_seq` in the
+  legacy order: LID first, SAD second). DEAD steps reproduced as no-ops (documented, not executed):
+  (a) mode 6's `:727-732` result_vec = `1 - LID_result_vec.col(0)` + the `timeStep`/`_DecisionThresh`
+  overwrites feed ONLY `results2segmentation`, which is SKIPPED for mode 6 (`_Mode != 4 && != 6`,
+  `:773`) -- the port computes the result_vec ONLY for the dumped `last_result_rows` row, and drops
+  the threshold overwrites; (b) `totalSpeechDuration` (`:799-806`) is never read by the `:798-902`
+  post-loop (it normalizes by `segmentsCount`/`numberOfFrames`, `:888-892`) -- skipped; (c) the
+  `score = segLID(targetIndex)` locals (`:860-861,:900-901`) are dead. Per-mode classification:
+  mode 4 = REFERENCE smoothed (`seg._Classification = seg._Reference` then `smoothSegmentation`,
+  `:779-783`, via the new `Segmentation::set_segments_from`); mode 5 = SAD VAD; mode 6 =
+  `LID2Segmentation` over `1 - LID_result_vec.col(0)` (`:678-691`). The `:798-902` accumulator is the
+  three `_PostProcessMode` forms shared with the mode-7 branch (`langID += isCostModified ?
+  segLID/rows : segLID`; post-loop `/= segmentsCount` or `/= numberOfFrames`, `PPM != 2 -> exp`,
+  row-normalize). *Why deferred:* provenance -- the offset-subtracted slice + the double-norm order +
+  the dead branches are the legacy's exact behavior. *Fix candidate:* N/A. *Pinned by:*
+  `sad_result_row_matches_dump`, `lid_classification_errors_match_dump`, `lid_confusion_matches_dump`,
+  `members_match_dump`, `boundaries_match_dump` (all EIGHT variants bit-exact), plus the non-vacuity
+  `mode6_lid2segmentation_non_vacuous` (LID2Seg produces speech spans `~[1.73,1.81]/[1.89,1.94]`
+  DIFFERING from the reference `[0.4,0.9]/[1.2,1.6]`) and `mode5_runs_sad_net_modes_4_6_do_not`
+  (`tests/phase4b_twin_golden.rs`). Mutation: (i) NOT subtracting `LIDTimeOffset` in the row slice
+  (`begin/LIDTimeStep`) shifts the sliced blocks and diverges the confusion/langID; (ii) reversing
+  the FFB order for mode 5 (SAD before LID) feeds the SAD net a differently-normalized input and
+  diverges `sad_result_row`; (iii) running `results2segmentation` for mode 6 (dropping the
+  `mode == 5` guard) overwrites the `LID2Segmentation` classification and breaks `boundaries_match_dump`.
+
+- **[phase4b] Task 7c latent: the modes-4/5/6 offset-subtracted row slice saturates a negative
+  index to 0 where the legacy UB-wraps to a huge unsigned** (`tasks/lid.rs::get_segmentation_mode456`,
+  from `TwinBLSTMSpectralLID.cpp:811-812`): the block start is `rowBegin =
+  ceil((begin - LIDTimeOffset)/LIDTimeStep)`. If a SPEECH segment's `begin` is EARLIER than
+  `LIDTimeOffset`, `(begin - offset)/step` is negative; Rust's `ratio as usize` saturates the
+  negative float to 0 (then the `!= ratio` bump lands `row_begin` at 1), while C++ `(size_t)` of a
+  negative double is UB that on the usual targets wraps to a huge value -- which then trips the
+  `rowEnd < rowBegin` skip guard (`:815`), dropping the segment entirely. So on a hypothetical
+  `begin < LIDTimeOffset` input the two would DIVERGE (Rust reads a top-of-buffer block; the legacy
+  skips). This is the offset-subtracted (`:811-813`) slice's contrast with the modes-0-3 `:1245`
+  bare `begin/_SpectrumShift` (always `>= 0`, so no negative there). UNREACHABLE in the committed
+  fixtures: every mode-4/5/6 variant derives `LIDTimeOffset = 0.0`, so `begin - 0 >= 0` for every
+  segment and `ratio` is never negative. *Why deferred:* a port-only safety over legacy UB on an
+  unreachable input, not a behavioral deviation on any fixture. *Fix candidate:* N/A (the negative
+  case cannot occur under any committed config). *Pinned by:* `sad_result_row_matches_dump`,
+  `members_match_dump` (`tests/phase4b_twin_golden.rs`, modes 4/5/6, all bit-exact -- `LIDTimeOffset`
+  is 0 so the saturating cast and a UB-wrap would agree here). Mutation: N/A -- the divergence needs
+  a `LIDTimeOffset > min speech begin` config, which no committed fixture provides.
+
+- **[phase4b] The SAD FFB normalizes `inputSeq` IN PLACE (non-const `Eigen::Ref`), so the concat +
+  LID scoring consume the NORMALIZED SAD input; `getBLSTMLIDInputSequence` resamples the SAD hidden
+  states by nearest index when the LSTM row count differs** (`tasks/lid.rs::get_segmentation`/
+  `get_blstm_lid_input_sequence`, from `TwinBLSTMSpectralLID.cpp:715,1221,139-168`): the windowed
+  `feedForwardBackward(Eigen::Ref<Eigen::MatrixXd> inputSeq, ...)` (`BLSTMNeuralNetwork.cpp:711`, the
+  NON-const overload, unlike the plain `:776` `const Ref`) mutates the caller's `inputSeq` via the
+  type -1 self-normalization (`:737-743`) -- so for modes 0/3 the `:1221` concat guard + the
+  `:1249` per-segment slice see the normalized values, NOT the raw feature. The port passes
+  `&mut input_seq` to `feed_forward_backward` (which self-normalizes in place, matching), then reads
+  the mutated buffer for the concat/scoring. `getBLSTMLIDInputSequence` (`:139-168`) z-normalizes
+  `[_OutputForward | _OutputBackward]` per column (the `+1e-32` std floor) and, when the LSTM output
+  row count `n != inputSeq.rows()` (always here: `n = T/lstm_ss`, `rows = T`), hcat's them by NEAREST
+  index `round((n-1)*frame/(rows-1))` (the `+0.5` truncation, `:158`) -- an upsample, reproduced with
+  a `(rows-1).max(1)` denominator (the legacy `length-1` div-by-zero at `rows==1` is unreachable).
+  An EMPTY `_OutputForward` (modes 1/2, cleared at `:762-763`) returns `inputSeq` unchanged (the
+  fallback). *Why deferred:* provenance -- the in-place mutation is a load-bearing Eigen-signature
+  fact, and the resample is exact. *Fix candidate:* N/A. *Pinned by:* `concat_branch_matches_expected`
+  (branch 0/1/2 per variant), `sad_result_row_matches_dump`, `lid_confusion_matches_dump`
+  (`tests/phase4b_twin_golden.rs`). Mutation: cloning `input_seq` before the SAD FFB (leaving it raw)
+  makes the concat variant's confusion/liderr diverge; forcing the direct-hcat branch (`n == rows`)
+  panics on the shape mismatch.
+
+- **[phase4b] `LID2Segmentation`'s `threshMin` argument is DEAD, `getTargetsLID` uses `counter ==
+  step` (EQUALITY, not the scoring path's `>=`), and the mode 0/1/2/3 branch's `LIDTimeStep`/
+  `LIDTimeOffset` locals are DEAD** (`tasks/lid.rs`, from `TwinBLSTMSpectralLID.cpp:1296,182,
+  1195-1204` + `Segmenter.cpp:999-1055`): `LID2Segmentation(seg, ..., threshMax, threshMin)` (`:1296`,
+  passed `_LIDDecisionThreshRising`/`_LIDDecisionThreshFalling`) reads ONLY `threshMax` -- the whole
+  falling-edge block is commented out (`Segmenter.cpp:1057-1075`), so `threshMin` is inert -- ported
+  via the single-threshold [`lid_to_segmentation`]. `getTargetsLID` (`:170-219`, a private fn for the
+  next task's modes 4/5/6, unreached by 0/1/2/3) enforces on `counter == getTargetEnforcementStep()`
+  (`:182`, strict equality), NOT the scoring `feedForward`'s `counter >= step` (`:1073`) -- a
+  load-bearing asymmetry ported verbatim + unit-tested directly. The `:1195-1204` `LIDTimeStep`/
+  `LIDTimeOffset` re-derivation inside the `:1194` branch is never read there (the scoring loop uses
+  `_SpectrumShift` for row indices `:1245` + the SAD `timeStep` for the modifier `:1250` + `timeStep`/
+  `timeOffset` for `LID2Segmentation` `:1296`) -- dead, skipped. *Why deferred:* provenance; the
+  equality enforcement + the dead threshMin are the legacy's exact behavior. *Fix candidate:* N/A.
+  *Pinned by:* `boundaries_match_dump` (modes 2/3 via `LID2Segmentation`,
+  `tests/phase4b_twin_golden.rs`) + the inline `get_targets_lid_enforcement` unit test
+  (`tasks/lid.rs`). Mutation: switching `get_targets_lid`'s `==` to `>=` flips its enforced-row
+  placement for `step >= 1` (the `get_targets_lid_enforcement` test uses `step = 2`).
+
+- **[phase4b] The phSeq (`!hasReadWavFile()`) `_SpectrumShiftInFrames = 80` override drives
+  EVERY window/shift derivation** (`tasks/lid.rs` `get_segmentation_mode7`, from
+  `BLSTMSpectralSegmenter.cpp:208-210`): `initSpectralAnalysis` computes
+  `_SpectrumShiftInFrames = round(_SpectrumShift*frameRate)` (= `round(0.025*8000) = 200`)
+  then UNCONDITIONALLY overrides it to `80` for a non-wav (phSeq) source (`:209`), and
+  re-derives `_SpectrumShift = 80/frameRate = 0.01`. Load-bearing: with 200 the Mode-7 LID
+  window is 10 (getLIDBLSTMParam `round(0.25*8000/2/200)=5 -> noOverlap -> 10`); with the
+  correct 80 it is 25 (`round(0.25*8000/2/80)=13 -> noOverlap -> 25`), which changes the
+  TwoSweeps truncate row counts (nb_of_classif 39 vs 77 for a 7-row block) and every
+  posterior. The port keys the override off `audio.periodogram.is_some()` (the phSeq ctor
+  populates it; the wav path leaves it `None`). *Why deferred:* faithful port; the 80 is a
+  hardcoded legacy magic constant. *Fix candidate:* N/A. *Pinned by:*
+  `mode7_integer_members_match_real_bitexact` + `mode7_continuous_members_match_real`
+  (`tests/phase4b_twin_mode7.rs`, bit-exact vs the REAL compiled `getSegmentation`: nbclassif
+  150/213/142). Mutation: dropping the `= 80` override (keeping 200) yields nb_of_classif 74
+  and flips `s2`/`s3` classifications, failing every mode-7 golden. This closes the latent gap
+  flagged in the Task-4 (phase2b) review entry above: the `_SpectrumShiftInFrames = 80`
+  override was pinned unit-test-only via `force_non_wav_spectrum_shift` (no production caller,
+  since the corpus was wav-only at the time) -- the phSeq corpus landed in Task 5/7 gives it a
+  real, exercised production caller (`get_segmentation_mode7`).
+
+- **[phase4b] The Mode-7 noise `random_init` is wall-clock -> the port fixes `randinit = 0`**
+  (`tasks/lid.rs` `get_segmentation_mode7`, from `TwinBLSTMSpectralLID.cpp:311,1025-1032`):
+  the noise offset is `randinit = remainder((long)(1e6*preparationElapsedSec), 100)` (`:311`
+  seeds `random_init` from `Timer` wall-clock; `:1025` reduces it mod 100), so the legacy
+  noise is NON-DETERMINISTIC and NON-REPRODUCIBLE across runs/machines. The table itself is
+  fixed (`_RandomGaussVector[(kk*cols+ll+randinit)%_MaxRandSize]`), so only the offset is
+  irreproducible. The port fixes `randinit = 0`, making the noise deterministic; the pure
+  table INDEXING (magnitude * (`random_gauss(kk*cols+ll) - 0.5`)) is then bit-exact. The
+  flagship configs run `_NoiseMagnitude 0` (noise off, so the real path is deterministic and
+  the goldens above hold regardless). *Why deferred:* wall-clock seeding cannot be ported
+  faithfully. *Fix candidate:* thread a real RNG seed through the config if noise is ever
+  needed for training. *Pinned by:* `mode7_noise_table_indexing_strict`
+  (`tests/phase4b_twin_mode7.rs`, STRICT bits vs the harness `_RandomGaussVector` dump with
+  `randinit = 0`). Mutation: shifting the port's index by +1 (`kk*cols+ll+1`) breaks the
+  strict golden.
+
+- **[phase4b] `abs(_Mode) == 7`: the wav arm (CNN) is unported, the `_Mode < 0` sub-branches
+  are dead, and the SAD net never runs** (`tasks/lid.rs`, from `TwinBLSTMSpectralLID.cpp:
+  903-1193`): the `if (audio.hasReadWavFile())` block (`:922-963`) feeds `inputSeq` through
+  `_LIDConvNeuralNetwork` (`:927`, the CNN -- NOT ported, dead-under-scope per the Phase 2
+  Conv exclusion) then rebuilds `_ExternalFeatures`; for phSeq (`!hasReadWavFile()`) it is
+  SKIPPED, so the loop iterates the ctor-loaded `_ExternalFeatures` directly. The port bails
+  typed on wav Mode 7 (CNN). The `_Mode < 0 && outputSeq.cols() == 2` sub-branch (`:1040-
+  1071`, an extra SAD `feedForward` when `targetIndex == 1`) is dead under `_Mode = +7` and
+  skipped. The SAD `_BLSTMNeuralNetwork` is never run in Mode 7 (`result_vec` is synthesized
+  constant `10.0` at `:726`, outputs cleared at `:762-763`), so the committed config's absent
+  `BLSTM_weightsFile` (default-init SAD net) is parity-neutral. *Why deferred:* the CNN is
+  broken-as-committed (Phase 2); the negative modes are dead. *Fix candidate:* port the CNN
+  if a mode-7 wav corpus is ever needed. *Pinned by:* the mode-7 goldens above (phSeq arm) +
+  the driver's typed wav bail (unit-covered by `get_segmentation_mode7`'s `periodogram.is_none()`
+  guard). Mutation: N/A (dead code); the SAD-irrelevance is proven by the goldens passing with
+  no SAD weights loaded.
+
+- **[phase4b] Mode-7 `classNb = max(2, outputSize)`, the DumpLIDInternals path is simplified,
+  and `_PostProcessMode 1` cancels in normalization** (`tasks/lid.rs`, from
+  `TwinBLSTMSpectralLID.cpp:624-625,906-921,1073-1179`): the committed LID net is BINARY
+  (`OutputNeuronNb 48,1` -> `getOutputSize() = 1`), and `classNb` is forced to `max(2, 1) =
+  2` (`:624-625`), so the brief's "3-class mapping" is superseded -- the fixtures use a
+  2-class mapping. `_DumpLIDInternals` derives the `.mat` filename from
+  `audio.getAudioFileName()` (`:906-913`); the port doesn't thread `Audio::audio_file_name`
+  (the field landed in Task 8, populated post-hoc by `bag_of_processors::apply_corpus_item`,
+  not by `read_audio`/`read_phseq`) into this dump path, so the dump lands at
+  `<_DumpDir>/chan<c>_lid_dump.mat` (cosmetic path deviation) -- the VARIABLE
+  names (`features_<n>` = `[_OutputForward | _OutputBackward]`, `matNb`) and values are the
+  faithful part. `_PostProcessMode 1` (entropy-weighted, `:1073-1089`) adds a per-row scalar
+  `-sum log(entropy)` EQUALLY across every `segLID` column, which is a column-constant offset
+  -> it cancels in the softmax normalization (`:1169-1172`), so ppm1's normalized `langID`
+  NEAR-coincides with ppm0's (exactly in real arithmetic, ~1 ULP in floating point). That pin
+  is therefore effectively ORACLE-ENV-ONLY as a mutation-catcher: `mode7_continuous_members_
+  match_real`'s ppm1 golden (`tests/phase4b_twin_mode7.rs`) sits only ~1 ULP from ppm0's, well
+  inside the off-oracle hybrid bound (`common::assert_oracle_eq`, `<=4` ULP / `512*eps*scale`
+  absolute), so a bug that collapsed ppm1's post-process path onto ppm0's could pass
+  undetected on CI glibc. *Why deferred:* the mode-7 driver predates `Audio::audio_file_name`
+  and hasn't been revisited for the dump path. *Fix candidate:* thread `audio_file_name` into
+  the dump path for the legacy-faithful filename, now that the field exists (4c-era). *Pinned
+  by:*
+  `dump_lid_internals_written_and_valued`, `post_process_mode_all_three_covered`
+  (`tests/phase4b_twin_mode7.rs`; ppm2 vote DISTINCT, ppm1 near-coincident, all three code
+  paths counter-asserted). Mutation: forcing `classNb = outputSize` (dropping the `max(2,.)`)
+  makes the confusion 3x3 and mismatches the REAL 4x4 dump.
+
+- **[phase4b] `VrctsPart` (Algo 0) hard-codes the legacy `vrcts_part` binary path, and its spawn
+  failure semantics necessarily diverge from the legacy's discarded `system()` return** (`tasks/
+  vrcts.rs`, from `VRCTSpart.cpp:44,46,53`): the command string embeds the absolute path
+  `/usr/local/vrcts/vrcts_1_5_9/bin/vrcts_part` (not config-driven), then calls bare
+  `system(command.str().c_str())` -- the shell exit status (including 127, "command not found",
+  if the binary is missing) is NEVER read, so `getSegmentation` always proceeds straight to
+  `load_from_vrcts` on whatever the xml file (still) contains. `std::process::Command` execs the
+  binary directly with no intervening shell, so a missing binary is a SPAWN-level `io::Error`
+  (`NotFound`) at the Rust API boundary, not an ignorable exit code -- there is no way to swallow
+  that and still call it "faithful" (the OS never even started a process to have an exit code from).
+  The port therefore surfaces ONLY the spawn-level failure as a typed error (propagated via `?`);
+  a successful spawn's exit status IS still discarded, matching legacy. *Why deferred:* the binary
+  does not exist on this or any CI machine, so this divergence is currently unobservable in any
+  golden; revisit once a real VRCTS install is available to test the ignored-exit-code path.
+  *Fix candidate:* make the binary path configurable; consider whether the exit-code-ignoring
+  behavior should be preserved or fixed if VRCTS is ever run for real corpora. *Pinned by:*
+  `spawn_attempted_when_missing`, `force_respawns` (`tests/phase4b_vrcts.rs`, error message
+  asserted to mention the hard-coded path). Mutation: N/A (there is no legacy golden to diverge
+  from -- the binary's absence IS the tested condition).
+
+- **[phase4b] `VrctsPart::getSegmentation` composes the SAME xml path for every channel (no
+  `_chan_<n>` suffix), so a multi-channel file loads an IDENTICAL segmentation into every
+  channel** (`tasks/vrcts.rs`, from `VRCTSpart.cpp:34-38`): the per-channel path variant
+  (`"%s_chan_%s_VRCTS_Fast.xml"`) is commented out in the legacy source; the LIVE line is
+  `"%s_VRCTS_Fast.xml"` keyed only on `_RefSegFilename`, with no `chan` in it at all (the audio
+  arg passed to `vrcts_part -f` is likewise the whole multi-channel file, not a per-channel
+  split). Reproduced verbatim: the Rust loop recomputes the SAME path every iteration and, for
+  `force=false`, the first channel's spawn (if any) makes the file exist for every subsequent
+  channel too. *Why deferred:* provenance -- a straight transcription of the live (non-commented)
+  line. *Fix candidate:* N/A (this is presumably intentional in the legacy: VRCTS analyzes the
+  whole recording once and applies the same speech/non-speech decision to all channels). *Pinned
+  by:* `same_xml_shared_across_channels` (`tests/phase4b_vrcts.rs`). Mutation: reinstating the
+  `_chan_<n>` suffix in the path format breaks 3 of the 5 `phase4b_vrcts` tests (verified: the
+  pre-seeded single-path fixtures are no longer found, forcing a spawn that then fails).
+
+- **[phase4b] CLOSED: `VrctsPart::from_legacy` now replicates `Segmenter::buildFromConf`'s
+  generic required-key validation** (`tasks/vrcts.rs`, from `VRCTSpart.cpp:9` +
+  `Segmenter.cpp:73-148`): the legacy ctor calls `this->buildFromConf(conf, "VRCTS", ...)` BEFORE
+  reading `VRCTS_isFast`/`VRCTS_force`, which requires (no default, `conf.get<T>` throws/exits on
+  missing) a set of `VRCTS_*` keys -- decision thresholds, window/shift, convolution kernel,
+  padding/min-speech/min-silence lists -- none of which `VRCTSPart::getSegmentation` ever reads
+  (no `updateSegmentation`/`smoothSegmentation`/`results2segmentation` call site anywhere in the
+  function). `from_legacy` originally skipped this validation entirely (accepting a config that
+  would have failed to CONSTRUCT `VRCTSPart` in legacy); it now calls
+  `SegmenterConfig::from_config`/`DriverConfig::from_config` with prefix `"VRCTS"`, same as every
+  sibling driver (`TdcSegmenter`/`LtsvSegmenter`/`BlstmSignalSegmenter`/`BlstmSpectralSegmenter`
+  in `tasks/sad.rs`) -- a missing key now errors, matching `buildFromConf`'s `exit(1)`, and
+  `dump_dir()` now reads `DriverConfig::dump_dir` instead of a separately-parsed field. The parsed
+  `SegmenterConfig`/`DriverConfig` values are otherwise still unused by `getSegmentation`, same as
+  before. NOTE: this is still a PARTIAL replication of `buildFromConf` -- the windowing-type/
+  preemph/noise-ratio reads and the `CostLaw` construction (`Segmenter.cpp:139-146`) remain
+  unreplicated, but that gap is pre-existing and shared by every sibling driver too (none of them
+  read `{prefix}_CostPonderation`/`{prefix}_CostLawSpeech`/`{prefix}_CostLawParamSpeech` either),
+  so it is out of scope for this fix. *Pinned by:* `missing_required_key_rejected`
+  (`tests/phase4b_vrcts.rs`): a config missing `VRCTS_min_silence` now errs naming the key.
+  Mutation: reverting `from_legacy` to skip the two calls makes this test fail (the construction
+  would instead succeed).
+
+- **[phase4b] `saveAndUpdate`'s `PrintConfusionMatrix` outputs are DISPLAY-ONLY -- no
+  parity-relevant storage exists** (`engine/bag_of_processors.rs::save_and_update`, from
+  `BagOfProcessors.cpp:436-443,468`): the algo-5/6 confusion block slices the confusion columns
+  (`block(0, 16, rows, cols-2-16)`) and calls `PrintConfusionMatrix`, but the returned
+  `errorPercLID` feeds ONLY the `:443` `cout` status line and the `outputConfusion` string only
+  the `:468` `cout` -- neither reaches a member, result row, mem matrix, or artifact. The port
+  invokes the call for flow parity and exposes the `(error, matrix)` pair solely as a
+  test-support observation (`last_confusion_for_test`); inventing storage would deviate from the
+  legacy. *Pinned by:* `twin_train_epoch_weights_golden` (`tests/phase4b_corpus_lid.rs`) --
+  the captured `errorPercLID` must equal the harness-measured per-epoch value (50.0 for the
+  2-file 2-class corpus: one hit, one miss), computed by the REAL compiled
+  `PrintConfusionMatrix` in the fixture generator. Mutation: mis-slicing the confusion block
+  (e.g. starting at col 15) changes the captured error and fails the assert.
+
+- **[phase4b] Mode-7's never-forwarded SAD net still gets `updateWeights` -> `0/0 = NaN`
+  normalized derivs -> a deterministic Rprop `+delta` drift** (from `BagOfProcessors.cpp:196` +
+  `BLSTMNeuralNetwork.cpp:304-308` + `Rprop.cpp:9-59`): algo 6's `updateWeights(cost)` runs
+  unconditionally on the SAD net, whose Mode-7 derivs are an all-zero `Nx2` (reset per file,
+  never accumulated -- the SAD net never forwards). The element-wise `col0 cwiseQuotient col1`
+  yields `0/0 = NaN` for every weight row (the stats-tail rows are `0/1 = 0`), and the legacy
+  Rprop's branch structure (`== 0` / `> 0` / `else`) routes NaN into the `else` arm -> `+delta`
+  applied per weight row per epoch, deltas never grown (the `derivTimesPrev` NaN product also
+  lands in the neither-positive-nor-negative arm). The Rust `Rprop` has the identical branch
+  structure, so the NaN semantics agree without special-casing. *Pinned by:*
+  `twin_train_epoch_weights_golden`'s SAD trace (`twin_train_sad_epoch{0..7}.bin` -- generated by
+  the REAL compiled `updateWeights`/`Rprop`): the SAD weight rows drift by exactly `+init_delta`
+  per epoch while the two stats-tail blocks stay put. Mutation: skipping the SAD update when the
+  deriv counts are all zero freezes the trace and fails every epoch >= 1.
+
+- **[phase4b] Mixed-width multi-config bags are broken-as-committed** (from
+  `CorpusProcessor.cpp:342-389` + `BagOfProcessors.cpp:338-349`): algo 5/6 result rows are
+  `18 + classNb` columns wide (the confusion columns), algo 0-4 rows 18 -- but
+  `transformResults` sizes EVERY per-conf matrix (and `ResultsE`) from conf 0's first row's
+  width (`:357`), and `_ResPerConf[cc].row(...) = res` with a wider `res` is an Eigen size
+  mismatch (assert/UB). A bag mixing a LID config with a non-LID config therefore aborts in the
+  legacy; the port's `transform_results_impl` panics on the same shape (out-of-bounds write).
+  No committed legacy config mixes them; same-width bags (all-LID or all-non-LID with equal
+  classNb) are fine. *Fix candidate:* per-conf row widths after parity. Not test-pinned
+  (reaching it requires a deliberately malformed multi-config setup); documented here per the
+  width-growth review in Task 9.
+
+- **[phase4b] Mutation battery (Task 11): 6 of 7 fresh mutations break their named golden as
+  designed; 1 genuine coverage gap found, recorded honestly.** Each applied/run(named suite
+  only)/reverted/re-run in isolation, full `cargo test` once at the end (all foreground, no
+  background test runs). (1) In-band encode `target_lid[ti] = -2.0` -> `-1.0` (`tasks/lid.rs`,
+  both the `BlstmSpectralLid::get_segmentation` site and the `TwinBlstmSpectralLid::get_segmentation`
+  modes-0-3 site) against `phase4b_lid5_golden`/`phase4b_twin_golden` -- FAILED as expected on
+  BOTH (`sentinel_gt150_present_every_file`: "no >150 sentinel in [100.8..]"/"[143.1..]";
+  `lid_classification_errors_match_dump`: target col now decodes to `100*x+100` instead of
+  `100*x+200`); reverted, PASS. (2) Sentinel decode `150.0` -> `250.0`
+  (`engine/confusion.rs::confusion_from_results`) against `phase4b_confusion_golden` -- FAILED
+  as expected (`confusion_matrix_matches_harness_transcription` cell mismatch,
+  `error_matches_real_confusion2string_and_printconfusionmatrix` bit mismatch); reverted, PASS.
+  (3) PostProcessMode accumulator body swap (`2 <-> _` match arms, `get_segmentation_mode7`'s
+  segLID loop) against `phase4b_twin_mode7` -- FAILED as expected (3 tests:
+  `post_process_mode_all_three_covered` "ppm1 should near-coincide with ppm0" now false since ppm2
+  swapped to the sum-log body pulls ppm1's near-coincidence check off; plus
+  `mode7_continuous_members_match_real` and `mode7_integer_members_match_real_bitexact` bit
+  mismatches); reverted, PASS. (4) `LID_` filename-prefix drop
+  (`TwinBlstmSpectralLid::save_weights_lid`) against `phase4b_corpus_lid::twin_train_epoch_weights_golden`
+  -- FAILED as expected, though via a different observable than the target `LID_*.exists()` assert:
+  dropping the prefix makes the LID net's save collide with the SAD net's identically-named
+  artifact, so the SAD weights dims check fails FIRST (`weights_bestNNWeight_1_twin_train.mat
+  dims: left: (1093, 1) right: (537, 1)`) -- the corruption is caught earlier in the same test,
+  confirming the mutation is load-bearing; reverted, PASS. (5) `[sad, lid]` dispatch order swap
+  in `BagOfProcessors::get_weights_derivatives`'s `TwinLid` arm (now `[lid, sad]`) against
+  `phase4b_corpus_lid::twin_gradcheck_golden`/`twin_train_epoch_weights_golden` -- FAILED as
+  expected on both (`twin_gradcheck_golden`: "twin net 0 weight 0 backprop: got ... want ... (>
+  16 ULP)"; `twin_train_epoch_weights_golden`: panics in `nn/train.rs` Rprop update, "index out
+  of bounds: the len is 537 but the index is 537" -- the swapped, differently-shaped derivative
+  matrix desyncs the per-weight iRPROP- state vectors); reverted, PASS. (6) `costLID = -1.0`
+  no-speech gate removed (`bag_of_processors.rs::save_and_update`, the `:465` override) against
+  `phase4b_corpus_lid::twin_train_ns_costlid_gate_live` -- FAILED as expected (epoch-5 weight
+  mismatch, real costLID leaking into `update_weights_lid` where the gated `-1.0` should have
+  fired); reverted, PASS. (7) `segmentationLID /= 56.0` -> `/= 55.0` (`tasks/lid.rs`,
+  `TwinBlstmSpectralLid::get_segmentation` modes-0-3 arm) against `phase4b_twin_golden` (all 8
+  variants incl. modes 1/2/3, the only ones that reach `lid_to_segmentation`) -- did NOT fail: a
+  GENUINE coverage gap, measured not assumed. Diagnostic instrumentation (temporary, not
+  committed) showed `segmentation_lid`'s max value on the T2 3-file corpus is `~0.0089`
+  (`0.5/56`, the untouched midpoint-seed entries dominate the max) against a
+  `BLSTM_LID_decision_thresh_rising` of `0.6` -- three orders of magnitude short, so neither
+  `/56.0` nor `/55.0` ever crosses the rising threshold and `lid_to_segmentation` never emits a
+  segment on this fixture; confirmed the gap is not merely 55-vs-56-insensitive but
+  divisor-insensitive up to `/1.0` (still no crossing -- the live NN posteriors are just far from
+  saturation on this synthetic corpus). Pushing further (`/0.001`, blasting every entry to `500`,
+  far above threshold) surfaced a SECOND, independent reason the call site is inert here: when
+  `results[0] >= thresh_max` (`tasks/segmenter.rs::lid_to_segmentation:470-472`), `begin` is
+  seeded to `0.0` but `has_begun` is NOT set -- and the loop's only `has_begun = true` site
+  requires `begin < 0.0` (`:478`), which is now false, so a segment that is already "open" at
+  frame 0 can never close (the `:483-497` block never runs) NOR does the post-loop `if has_begun`
+  finalizer (`:500-503`) fire (`has_begun` stayed false throughout) -- a same-family "already
+  above threshold at frame 0" edge case never triggers `label_segment` at all. Both findings are
+  measured facts about the current T2 fixture + `lid_to_segmentation`'s literal control flow, not
+  a claim that the `/56.0`/`/55.0` distinction can never matter on other data. No production code
+  changed to chase this gap; a future crafted fixture with LID posteriors saturated enough to
+  cross 0.6 mid-sequence (not at frame 0) would be needed to close it. **Cross-reference (Task
+  10, not re-run here):** the tie-gate (`>` -> `>=`) and fold-order-reversal mutations from the
+  original Task 11 (4a) plan item are already executed and recorded above under the `[phase4a]
+  Mutation battery` entry's `UPDATE (Task 10)` addendum and the `[phase4a] Phase 4b test backlog`
+  entry, closed by `phase4b_backlog.rs::best_cost_gate_skips_on_exact_tie` and
+  `fold_order_ascending_golden` respectively. *Net verdict for this task:* 6/7 fresh mutations
+  break their golden as designed; 1 genuine gap (item 7) reported honestly rather than papered
+  over. Full transcript (diffs, commands, exact output) in
+  `.superpowers/sdd/task-11-report.md`.
 
 ## Toolchain deviations
 

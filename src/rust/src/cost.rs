@@ -188,6 +188,11 @@ pub struct CostLaw {
     switching_thresh_no_speech: f64,
     back_prop_wer: bool,
     classes_ponderations: Vec<f64>,
+    /// `_CostPonderation` (`CostLaw.cpp:114-116`): the clamped [0.01, 0.99] scalar
+    /// (config `<prefix>_CostPonderation`, default 0.5). Kept as a member solely to
+    /// back `getCostPonderation()`, consumed by the BINARY branch of
+    /// `BlstmNetwork::get_cost_ponderation`.
+    cost_ponderation: f64,
     speech_name: String,
     no_speech_name: String,
 }
@@ -246,6 +251,7 @@ impl CostLaw {
             switching_thresh_no_speech,
             back_prop_wer,
             classes_ponderations,
+            cost_ponderation: cp,
             speech_name,
             no_speech_name,
         }
@@ -330,6 +336,11 @@ impl CostLaw {
     /// Class ponderations for the softmax path (empty when unset).
     pub fn classes_ponderations(&self) -> &[f64] {
         &self.classes_ponderations
+    }
+
+    /// `getCostPonderation` (`CostLaw.cpp:114-116`): the clamped scalar cost ponderation.
+    pub fn cost_ponderation(&self) -> f64 {
+        self.cost_ponderation
     }
 
     /// Multiclass softmax cross-entropy cost over a row-major `n_frames x n_classes` batch.
