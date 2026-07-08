@@ -105,6 +105,7 @@ REF_DIR = REPO_ROOT / "tests" / "reference_data"
 PHASE0_DIR = REF_DIR / "phase0"
 PHASE1_DIR = REF_DIR / "phase1"
 PHASE2B_DIR = REF_DIR / "phase2b"
+PHASE4A_DIR = REF_DIR / "phase4a"
 PHASE4B_DIR = REF_DIR / "phase4b"
 
 NN_CONFIG = PHASE0_DIR / "1_worker_1.config"
@@ -347,6 +348,26 @@ T9_GRADCHECK_RE = re.compile(
 )
 T9_E2E_RE = re.compile(r"^\f?PHASE4B_T9_E2E ok=1$", re.MULTILINE)
 
+# Task 10: pitch-pass target-reuse pin under a LIVE STM reference (f1.wav/f1.stm,
+# the phase4a 3-file corpus). measured_pitch_chan1 must be > 0 (the warp fired);
+# cumError_chan1/nbClassif_chan1 must be nonzero (the live-target cost path fired).
+PITCH_SCORED_RE = re.compile(
+    r"^\f?SPECTRAL_PITCH_SCORED measured_pitch_chan1=(?P<pitch>[0-9.eE+-]+) "
+    r"cumError_chan1=(?P<err>[0-9.eE+-]+) nbClassif_chan1=(?P<nb>-?\d+)$",
+    re.MULTILINE,
+)
+PITCH_SCORED_KINDS = [
+    "inputseq_chan1",
+    "result_chan1",
+    "convolved_chan1",
+    "inputseq_pass2_chan1",
+    "result_pass2_chan1",
+    "convolved_pass2_chan1",
+    "boundaries_chan1",
+    "scores",
+]
+PITCH_SCORED_BINS = [f"spectral_pitch_scored_{kind}.bin" for kind in PITCH_SCORED_KINDS]
+
 SCORING_MULTI_TOL_RE = re.compile(
     r"^NN_TOL site=blstm_scoring_multi_(?P<tag>\w+) max_ulp=(?P<ulp>\d+) "
     r"max_abs=(?P<abs>[0-9.eE+-]+)$",
@@ -531,6 +552,7 @@ def main() -> None:
                 str(PHSEQ_DIR),  # argv[17]: Task 5 phSeq corpus dir (f1/f2/f3.phSeq).
                 str(PHASE4B_DIR),  # argv[18]: Task 6 Twin config dir (twin_mode*.config).
                 str(t9_dir),  # argv[19]: Task 9 corpus-level LID workdir.
+                str(PHASE4A_DIR / "corpus"),  # argv[20]: Task 10 f1.wav/f1.stm (read-only).
             ]
         )
 
@@ -552,6 +574,7 @@ def main() -> None:
             *phseq_bins,
             *MODE7_BINS,
             *T9_DUMPS,
+            *PITCH_SCORED_BINS,
         ]:
             src = tmp_dir / name
             if not src.is_file():
@@ -878,6 +901,43 @@ def main() -> None:
             raise SystemExit(f"{name}: every numerical derivative is ~0 -- degenerate gradcheck")
     if not T9_E2E_RE.search(stdout):
         raise SystemExit("PHASE4B_T9_E2E ok=1 line missing (real CorpusProcessor run failed)")
+
+    # Task 10: pitch-pass target-reuse pin (SPECTRAL_PITCH_SCORED line + the STM-
+    # referenced dumps). Non-vacuity: pitch > 0 (the warp fired, matching the
+    # NN-chain-only "pitch" variant's measured ~250 Hz).
+    #
+    # cumError_chan1/nbClassif_chan1 are expected to read 0 here EVEN THOUGH a
+    # live STM reference is loaded: the harness's `signalReimplFFB` (the
+    # ascending-loop NN swap every spectral variant uses, since the REAL
+    # Eigen FFB diverges from the port at this net's shapes) has never
+    # accumulated cost for ANY prior variant -- `transcribeSpectral` HARD-CODES
+    # `_CumulativeError[chan] = 0.0` after every `results2segmentation` call
+    # (main.cpp, "no NN cost accumulated (no targets on the reimpl path)"),
+    # because forward-pass posteriors (`result_vec`, what this golden pins) are
+    # mathematically INDEPENDENT of the target (`nn/blstm.rs::
+    # feed_forward_backward_plain`: `output` is fully determined by
+    # `self.feed_forward(input, output)` BEFORE the target-gated cost/backward
+    # blocks run, given `TargetEnforcementStep >= 0` as here) -- extending the
+    # reimpl to accumulate cost would be a much larger, shared-helper change for
+    # a value this golden does not need. The live-cost claim (does a REAL
+    # reference genuinely drive a nonzero cost) is instead asserted on the
+    # RUST PRODUCTION driver directly, in
+    # `phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference`.
+    ps = PITCH_SCORED_RE.search(stdout)
+    if not ps:
+        raise SystemExit("SPECTRAL_PITCH_SCORED line missing from harness stdout")
+    pitch_scored_pitch = float(ps["pitch"])
+    pitch_scored_cum_error = float(ps["err"])
+    pitch_scored_nb_classif = int(ps["nb"])
+    if pitch_scored_pitch <= 0.0:
+        raise SystemExit(
+            f"SPECTRAL_PITCH_SCORED measured_pitch_chan1={pitch_scored_pitch} <= 0 -- "
+            "the pitch pass did not fire on the STM-referenced run"
+        )
+    for name in PITCH_SCORED_BINS:
+        if not (PHASE4B_DIR / name).is_file():
+            raise SystemExit(f"harness did not produce {name}")
+
     t9_measured = {
         "seeds": {"sad_nb_weights": int(t9_seeds["sad"]), "lid_nb_weights": int(t9_seeds["lid"])},
         "train": {
@@ -1157,6 +1217,37 @@ def main() -> None:
             ),
             "measured": t9_measured,
         },
+        "pitch_scored": {
+            "text": (
+                "Task 10 (phase4a backlog item 3): the spectral PITCH second pass "
+                "(BLSTMSpectralSegmenter.cpp:757-805) driven with a LIVE STM reference, "
+                "closing the gap the phase2b pitch goldens left (NN-chain only, "
+                "setReference=false). Reuses the SAME segmenter-level transcribeSpectral "
+                "lambda as the 'pitch' variant (byte-identical TDC overrides), but the "
+                "Segmentation is built from a REAL CorpusItem pointing at the phase4a "
+                "3-file corpus's f1.wav/f1.stm (Segmentation::Segmentation(AudioStruct&, "
+                "double) auto-loads the .stm reference from getRefSegFileName() -- no "
+                "lambda change needed, setReference stays false so the hardcoded synthetic "
+                "span is not ALSO pushed). Pins a bit-exact pass-2 result-row golden "
+                "(spectral_pitch_scored_result_pass2_chan1.bin) under a GENUINELY-BUILT "
+                "getTargets() target (seg._Reference.size() > 0 fires for real, from a "
+                "real committed .stm, not the synthetic hardcoded span every other "
+                "setReference=true call site here uses) -- closing the phase4a backlog's "
+                "'no reference-driven target path' gap in COVERAGE. cumError_chan1/"
+                "nbClassif_chan1 read 0 here (see the extractor's inline comment: the "
+                "reimpl transcription never wires cost through, and result_vec is "
+                "target-independent by construction given TargetEnforcementStep >= 0) -- "
+                "the live-cost claim (a real reference genuinely drives a nonzero cost, "
+                "i.e. the :793 target-reuse wiring is exercised on a NON-EMPTY target, not "
+                "merely inert) is asserted on the RUST PRODUCTION driver instead, in "
+                "phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference."
+            ),
+            "measured": {
+                "pitch_chan1": pitch_scored_pitch,
+                "cum_error_chan1": pitch_scored_cum_error,
+                "nb_classif_chan1": pitch_scored_nb_classif,
+            },
+        },
         "dead_code_not_ported": {
             "text": (
                 "Two legacy blocks are commented out and NOT ported: the classNb==2 binary "
@@ -1185,7 +1276,10 @@ def main() -> None:
         f"{len(MODE7_FILES)} files parsed, weight provenance reverified="
         f"{lid_weight_provenance['reverified_byte_identical']}; "
         f"t9 twin_train fired={t9_fired} skipped={t9_skipped} "
-        f"ns_diverge_epoch={t9_diverge_epoch}, gradchecks twin+lid5 ok, e2e ok), "
+        f"ns_diverge_epoch={t9_diverge_epoch}, gradchecks twin+lid5 ok, e2e ok; "
+        f"pitch_scored pitch_chan1={pitch_scored_pitch!r} "
+        f"cumError_chan1={pitch_scored_cum_error!r} "
+        f"nbClassif_chan1={pitch_scored_nb_classif}), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

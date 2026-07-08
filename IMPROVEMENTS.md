@@ -1613,7 +1613,16 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `target` in scope across the pitch block and passes `&target` unchanged, matching `:793`
   element-for-element. Reproduced verbatim. (Under the real algo-3 config the pitch pass is gated on
   `TDCwindow > 0`, which the base config does not set, so this is exercised only by the pitch-variant
-  spectral goldens; the target reuse is nonetheless wired for that path.)
+  spectral goldens; the target reuse is nonetheless wired for that path.) **UPDATE (Task 10):** the
+  `phase2b_spectral_golden.rs` pitch goldens all pass `refs: None` (an empty target -- the reuse is
+  wired but numerically inert). `phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference`
+  closes that gap with a LIVE STM reference (`f1.wav`/`f1.stm`), confirming `target.nrows() > 0`
+  flows into BOTH passes' `feed_forward_backward` (live cost/counter accumulation on the real
+  production driver) and pinning the pass-2 result row against a new harness dump
+  (`spectral_pitch_scored_result_pass2_chan1.bin`). Note: the reused-vs-rebuilt distinction is NOT
+  numerically observable via `result_vec` itself (target-independent given `TargetEnforcementStep >=
+  0` -- see `nn/blstm.rs::feed_forward_backward_plain`), only via cost; see the Task 10 backlog entry
+  above for the full analysis.
 
 - **[phase4a] Task 7b target flow does NOT interact with the `_TargetEnforcementStep < 0` interior
   rewrite for the ported configs** (`nn/blstm.rs::feed_forward_backward_plain`, risk R7 cross-ref):
@@ -1696,12 +1705,39 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   recorded honestly rather than papered over. Full detail (diffs, commands, output) in
   `.superpowers/sdd/task-11-phase4a-report.md`.
 
-- **[phase4a] Phase 4b test backlog (from the 4a final review):** (1) a crafted best-cost TIE
-  golden (cost delta >= the mutation's detection gap, closing the `>` vs `>=` gate coverage hole);
-  (2) a 3+-file fold-order-divergence golden exercising a genuinely non-commutative reduction (the
-  current tier-2 fixture's 2-file merge is commutative, masking the fold-order mutation); (3) a
-  reference-loaded, `TDCwindow > 0` pitch-pass golden pinning the pass-1-target-reuse quirk under
-  live targets (current pitch-pass coverage is NN-chain-only, no reference-driven target path).
+- **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
+  (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely
+  worse) closing the `>` vs `>=` gate coverage hole. *Pinned by:*
+  `phase4b_backlog.rs::best_cost_gate_skips_on_exact_tie`. *Mutation evidence:* `save_weights`'s
+  `Processor::Spectral` arm `best_cost[&pos] > save_criterion` -> `>=` makes the test FAIL
+  (`assertion failed: !weights_artifact_b.exists()`, the tie now re-saves); reverted, PASS.
+  (2) CLOSED: a 3-file (`f1`/`f2`/`f3`) fold-order-divergence golden -- MEASURED, no seed search
+  needed (bound: 1 of a budgeted 20; the base `NNweights_config1.bin` seed diverges immediately,
+  5865 of 67342 raw-derivative elements differ in bits between the ascending and descending fold).
+  *Pinned by:* `phase4b_backlog.rs::fold_order_measured_divergence_seed0` (the measurement) and
+  `fold_order_ascending_golden` (the locked ascending-order golden). *Non-obvious finding:* the
+  golden must pin the RAW folded derivative matrix (a new test-support-only observation point,
+  `CorpusProcessor::epoch_raw_derivs_trace_for_test`, captured immediately after `run_epoch`'s
+  per-file fold, BEFORE `save_and_update_epoch`), NOT the post-Rprop trained weights
+  (`epoch_weight_trace_for_test`) -- iRPROP- (`nn/train.rs`) reacts only to the SIGN of the
+  count-normalized derivative, so this fold order's ULP-scale divergence never flips a sign and is
+  therefore INVISIBLE in the trained weights; pinning `epoch_weight_trace_for_test` instead was
+  tried first and did NOT fail under the mutation below (a false negative), which is why the
+  raw-derivs observation point was added. *Mutation evidence:* `run_epoch`'s
+  `per_file.sort_by_key(|(j, _, _, _)| *j)` -> `Reverse(*j)` makes `fold_order_ascending_golden`
+  FAIL (`epoch-0 (ascending fold) raw deriv [3,0] bit mismatch`, off by 1 ULP); reverted, PASS.
+  (3) CLOSED: a `TDCwindow 0.032` pitch-pass golden (`f1.wav`/`f1.stm`, the phase4a 3-file corpus)
+  driven with a LIVE STM reference (`refs: Some(&refs)`), pinning `last_result_rows_pass2` against
+  a new harness dump (`spectral_pitch_scored_result_pass2_chan1.bin`, `tools/oracle_harness/
+  main.cpp`'s segmenter-level `transcribeSpectral` reused unmodified with a real
+  `Segmentation::Segmentation(AudioStruct&, double)` STM auto-load, no lambda change). *Pinned by:*
+  `phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference`, which additionally asserts
+  live (nonzero) `cumulative_error`/`nb_of_classif` on the REAL Rust production driver -- the
+  harness's own `cumError_chan1`/`nbClassif_chan1` read 0 by construction (its reimpl transcription
+  never wires cost through the target, and `result_vec` is target-INDEPENDENT given
+  `TargetEnforcementStep >= 0`; see `scripts/extract_phase4b_fixtures.py`'s `pitch_scored` manifest
+  text), so the harness fixture pins the bit-exact NN forward-pass row only, while the live-cost
+  claim is asserted on production code.
 
 - **[phase4b] `PrintConfusionMatrix`'s `posTarget`/`posBestNotTarget` are STICKY across rows, NOT
   reset per row** (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:

@@ -2466,6 +2466,12 @@ int main(int argc, char** argv) {
     // convention). Empty -> skipped.
     std::string lidT9Workdir = (argc > 19) ? std::string(argv[19]) : std::string("");
 
+    // Phase 4b Task 10: the phase4a 3-file corpus dir (f1/f2/f3.wav + .stm, the SAME
+    // committed fixtures `phase4a_train_golden.rs`'s tier-2 golden reads), used
+    // READ-ONLY for the STM-referenced pitch-pass golden (`f1.wav`/`f1.stm`). Empty ->
+    // the pitch-scored-reference block below is skipped.
+    std::string pitchScoredCorpusDir = (argc > 20) ? std::string(argv[20]) : std::string("");
+
     int dumps = 0;
 
     // --- Audio stages ---------------------------------------------------------
@@ -7309,6 +7315,64 @@ int main(int argc, char** argv) {
                 std::ofstream outv(out + "spectral_" + tag + "_vrcts_chan1.xml", std::ios::binary);
                 outv << vs.str();
             }
+            ++dumps;
+        }
+
+        // --- PITCH VARIANT + LIVE STM REFERENCE (Task 10: pitch-pass target-reuse pin,
+        // IMPROVEMENTS.md "[phase4a] Phase 4b test backlog" item 3) -------------------
+        // SAME pitch config as the "pitch" variant above (TDCwindow 0.032 activates the
+        // second pass), but driven off `f1.wav`/`f1.stm` (the phase4a 3-file corpus,
+        // read-only) instead of a synthetic/no reference. `Segmentation::Segmentation
+        // (AudioStruct&, double)` (Segmentation.cpp:42-111) auto-loads the STM
+        // reference from `audio.getRefSegFileName()` when it ends ".stm" -- NO lambda
+        // change needed: `transcribeSpectral`'s target-building (`seg._Reference.size()
+        // > 0` -> getTargets, :6992-6995) already keys off `seg._Reference`, not the
+        // `setReference` bool (that bool only controls the SYNTHETIC hardcoded span
+        // pushed inside the lambda). So `setReference` stays false here -- it would
+        // otherwise double-push a second, synthetic reference on top of the STM-loaded
+        // one. This exercises the pass-1-target-reuse quirk (BLSTMSpectralSegmenter.cpp
+        // :793) with a NON-EMPTY target for the first time in this harness.
+        if (!pitchScoredCorpusDir.empty()) {
+            auto setPitchOverridesScored = [&](ConfigFile& conf) {
+                conf.set_val<std::string>("BLSTM_shift", "8.000000000000000e-01");
+                conf.set_val<std::string>("BLSTM_TDCwindow", "0.032");
+                conf.set_val<std::string>("BLSTM_TDCshift", "0.01");
+                conf.set_val<std::string>("BLSTM_TDC_lags", "0.002,0.016");
+                conf.set_val<std::string>("BLSTM_TDC_balance", "0.7");
+                conf.set_val<std::string>("BLSTM_TDC_windowing_type", "hamming");
+                conf.set_val<std::string>("BLSTM_TDC_windowing_param", "0.8");
+            };
+            const std::string tag3 = "pitch_scored";
+            std::string wavPath = pitchScoredCorpusDir + "/f1.wav";
+            std::string stmPath = pitchScoredCorpusDir + "/f1.stm";
+
+            ConfigFile confT3(nnConfigPath, '_');
+            confT3._Params.erase("BLSTM_weightsFile");
+            setPitchOverridesScored(confT3);
+            CorpusItem itemScored(wavPath, stmPath, "unk", "unk", 0, 0, 1.0);
+            AudioStruct audioT3(0.0, 2.0, 0, itemScored);
+            SpectralProbe probeT3(confT3);
+            probeT3.setWeights(flatSpectral);
+            Segmentation segT3(audioT3, 0.5);  // auto-loads f1.stm into _Reference.
+            if (segT3._Reference.empty() || segT3._Reference.at(0).empty()) {
+                std::cerr << "PHASE4B_PITCH_SCORED ABORT: STM reference failed to load from "
+                          << stmPath << "\n";
+                std::abort();
+            }
+            double measuredPitch3 = -1.0;
+            transcribeSpectral(probeT3, audioT3, segT3, /*setReference=*/false, tag3, /*dumpChan1=*/true, /*dumpBothChannels=*/false, /*pitchPass=*/true, &measuredPitch3);
+            segT3.compute_errors();
+
+            Eigen::MatrixXd scores3(audioT3.getChannelCount(), 3);
+            for (int ch = 0; ch < audioT3.getChannelCount(); ++ch) {
+                scores3(ch, 0) = segT3._ClassificationErrors.at(ch)[SPEECH]._Pfa;
+                scores3(ch, 1) = segT3._ClassificationErrors.at(ch)[SPEECH]._Pmiss;
+                scores3(ch, 2) = segT3._ClassificationErrors.at(ch)[SPEECH]._ErrorRate;
+            }
+            Matrix2BinaryFile(out + "spectral_" + tag3 + "_scores.bin", scores3);
+            std::cout << "SPECTRAL_PITCH_SCORED measured_pitch_chan1=" << std::setprecision(17)
+                      << measuredPitch3 << " cumError_chan1=" << segT3._CumulativeError[0]
+                      << " nbClassif_chan1=" << segT3._NbOfClassif[0] << "\n";
             ++dumps;
         }
 

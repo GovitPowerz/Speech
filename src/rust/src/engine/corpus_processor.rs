@@ -90,6 +90,19 @@ pub struct CorpusProcessor {
     epoch_weight_trace_lid: Vec<Vec<f64>>,
     #[cfg(feature = "test-support")]
     epoch_best_cost_trace: Vec<f64>,
+    /// Test-observation hook (Task 10, fold-order golden): config-0's RAW
+    /// accumulated derivative matrix (the first net's `[deriv, count]` pair
+    /// per weight) right after `run_epoch`'s per-file fold completes, one
+    /// snapshot per epoch -- BEFORE `save_and_update_epoch`'s Rprop update
+    /// consumes it. Unlike `epoch_weight_trace` (the POST-Rprop weights),
+    /// this is sensitive to the raw fold order: iRPROP- (`nn/train.rs`) only
+    /// ever reacts to the SIGN of the normalized derivative, so a fold-order
+    /// perturbation that does not flip a sign is invisible in the trained
+    /// weights but fully visible here. No legacy counterpart (a pure
+    /// port-side determinism-contract probe). Empty entries for a non-NN
+    /// config 0 or an epoch that produced no results.
+    #[cfg(feature = "test-support")]
+    epoch_raw_derivs_trace: Vec<Array2<f64>>,
 }
 
 impl CorpusProcessor {
@@ -163,6 +176,8 @@ impl CorpusProcessor {
             epoch_weight_trace_lid: Vec::new(),
             #[cfg(feature = "test-support")]
             epoch_best_cost_trace: Vec::new(),
+            #[cfg(feature = "test-support")]
+            epoch_raw_derivs_trace: Vec::new(),
         })
     }
 
@@ -425,6 +440,18 @@ impl CorpusProcessor {
                 }
             }
         }
+
+        // Test-observation hook (Task 10): config-0's RAW folded derivative
+        // matrix, captured HERE -- right after the per-file fold above, before
+        // `save_and_update_epoch` (Rprop) consumes `derivs` below. See
+        // `epoch_raw_derivs_trace`'s doc comment.
+        #[cfg(feature = "test-support")]
+        self.epoch_raw_derivs_trace.push(
+            derivs
+                .get(&0)
+                .and_then(|v| v.first().cloned())
+                .unwrap_or_else(|| Array2::zeros((0, 0))),
+        );
 
         // legacy: :215-234 transform + saveAndUpdate + saveResults gating.
         if !self.results.is_empty() {
@@ -864,6 +891,16 @@ impl CorpusProcessor {
         &self.epoch_best_cost_trace
     }
 
+    /// Config-0's per-epoch RAW folded derivative matrix (test hook for the
+    /// Task 10 fold-order golden). See [`Self::epoch_raw_derivs_trace`]'s doc
+    /// comment: unlike `epoch_weight_trace_for_test`, this is sensitive to
+    /// the per-file fold order even when no Rprop sign flips.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn epoch_raw_derivs_trace_for_test(&self) -> &[Array2<f64>] {
+        &self.epoch_raw_derivs_trace
+    }
+
     /// Config-0's flat weight vector (test hook for the grad-check restore assert).
     /// Empty when config 0 is a non-NN algo (no weights).
     #[doc(hidden)]
@@ -930,6 +967,54 @@ impl CorpusProcessor {
         let (results_e, _) =
             Self::transform_results_impl(&results, bag.nb_of_conf(), corpus.nb_of_files());
         Ok(results_e)
+    }
+
+    /// Fold-order MEASUREMENT probe (Task 10 backlog item 2, no legacy
+    /// counterpart -- the port's OWN determinism contract, not a legacy
+    /// parity target). Sibling of [`Self::run_epoch_sequential_oracle`]: same
+    /// fresh-bag sequential walk, but (a) parameterized by file order
+    /// (`reverse`) and (b) returns the FOLDED per-conf derivatives instead of
+    /// the transformed results matrix, using the IDENTICAL create-vs-`+=`
+    /// accumulation `run_epoch` performs (`:184-191`) -- so a measured
+    /// ascending-vs-descending divergence here is evidence about the SAME
+    /// arithmetic `run_epoch`'s static-lane fold performs at `n == 1`
+    /// (`lanes_n1_equals_sequential`), not a separate reimplementation.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn run_epoch_fold_probe_for_test(
+        mut configs: Vec<IndexMap<String, String>>,
+        mode: Mode,
+        reverse: bool,
+    ) -> Result<BTreeMap<usize, Vec<Array2<f64>>>> {
+        let corpus = Corpus::from_config(&configs[0])?;
+        let mut bag = BagOfProcessors::from_configs(&mut configs, mode)?;
+        let nb_of_conf = bag.nb_of_conf();
+        let mut order: Vec<usize> = (0..corpus.nb_of_files()).collect();
+        if reverse {
+            order.reverse();
+        }
+        let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
+        for j in order {
+            let item = corpus.item(j);
+            let tmp = bag.segmentation_function(item, mode)?;
+            if tmp.is_empty() {
+                continue;
+            }
+            for ii in 0..nb_of_conf {
+                let tmp_derivs = bag.get_weights_derivatives(ii);
+                match derivs.get_mut(&ii) {
+                    Some(existing) if !existing.is_empty() => {
+                        for (kk, mat) in tmp_derivs.iter().enumerate() {
+                            existing[kk] = &existing[kk] + mat;
+                        }
+                    }
+                    _ => {
+                        derivs.insert(ii, tmp_derivs);
+                    }
+                }
+            }
+        }
+        Ok(derivs)
     }
 }
 

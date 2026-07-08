@@ -1779,6 +1779,14 @@
       "epsilon": 1e-05
     }
   },
+  "pitch_scored": {
+    "text": "Task 10 (phase4a backlog item 3): the spectral PITCH second pass (BLSTMSpectralSegmenter.cpp:757-805) driven with a LIVE STM reference, closing the gap the phase2b pitch goldens left (NN-chain only, setReference=false). Reuses the SAME segmenter-level transcribeSpectral lambda as the 'pitch' variant (byte-identical TDC overrides), but the Segmentation is built from a REAL CorpusItem pointing at the phase4a 3-file corpus's f1.wav/f1.stm (Segmentation::Segmentation(AudioStruct&, double) auto-loads the .stm reference from getRefSegFileName() -- no lambda change needed, setReference stays false so the hardcoded synthetic span is not ALSO pushed). Pins a bit-exact pass-2 result-row golden (spectral_pitch_scored_result_pass2_chan1.bin) under a GENUINELY-BUILT getTargets() target (seg._Reference.size() > 0 fires for real, from a real committed .stm, not the synthetic hardcoded span every other setReference=true call site here uses) -- closing the phase4a backlog's 'no reference-driven target path' gap in COVERAGE. cumError_chan1/nbClassif_chan1 read 0 here (see the extractor's inline comment: the reimpl transcription never wires cost through, and result_vec is target-independent by construction given TargetEnforcementStep >= 0) -- the live-cost claim (a real reference genuinely drives a nonzero cost, i.e. the :793 target-reuse wiring is exercised on a NON-EMPTY target, not merely inert) is asserted on the RUST PRODUCTION driver instead, in phase4b_backlog.rs::pitch_pass_target_reuse_under_live_reference.",
+    "measured": {
+      "pitch_chan1": 237.45637583892616,
+      "cum_error_chan1": 0.0,
+      "nb_classif_chan1": 0
+    }
+  },
   "dead_code_not_ported": {
     "text": "Two legacy blocks are commented out and NOT ported: the classNb==2 binary ROC-curve variant (BagOfProcessors.cpp:477-499, a 10001-step threshold-sweep negative/positive histogram) -- classNb==2 falls straight into the SAME general accumulation as any other classNb>=2, pinned by the Rust dead_binary_variant_not_ported test; and a duplicate normalization+print block (:541-593) that re-derives (via cout, not error +=) exactly what the LIVE Confusion2String call at :540 already computes."
   }
