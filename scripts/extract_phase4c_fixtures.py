@@ -1,5 +1,5 @@
-"""Run the Phase 4c Octave harness stages and write the SMORMS3 + Rprop bit-pin
-fixtures.
+"""Run the Phase 4c Octave harness stages and write the SMORMS3 + Rprop + batching +
+CheckGrad + MaskingValidation bit-pin fixtures.
 
 This is the MATLAB-side analog of `scripts/extract_phase4b_fixtures.py` (which drives
 the C++ oracle harness): instead of compiling and running vendored C++, it locates a
@@ -25,6 +25,25 @@ one Octave-compat accommodation -- the SMORMS3 empty-varargin lvalue miscount):
   rprop   : Rprop.m (function) per-step state over a crafted derivative/cost sequence
             exercising every branch (grow / shrink+backtrack / plain) -- pure arithmetic,
             STRICT bits everywhere.
+  batching: CreateBatches.m + GetNewBatch.m (TIER 1) + the FALLBACK-TIER
+            getworstandbest_transcribed.m (verbatim transcription of getCases.m's private
+            getWorstAndBest subfunction -- unreachable standalone). randperm is SHADOWED
+            with a fixed reverse-order permutation (batching_shadow/randperm.m) so
+            CreateBatches's shuffle is reproducible AND trivially replicable in Python.
+            Five CreateBatches cases (single / multi_nb / clobber / sub / degenerate) plus
+            rotation traces and two getWorstAndBest cases -- PURE integer arithmetic
+            throughout (no libm), STRICT bits everywhere.
+  checkgrad: CheckGrad.m (TIER 1) driven with a harness-local quadratic-surrogate
+            CostFunction.m shadow (re-deriving the real flat NN weight vector from param
+            via the REAL vec2struct + nnet2MatFile on every call) plus no-op
+            figure/subplot/semilogy/hold/grid shadows (CheckGrad's diagnostic plot errors
+            under this Octave/graphics-toolkit combination). Surfaces a genuine legacy bug
+            (weights2nnet.m never writes back the normalize mean/std tail of the `weights`
+            vector nnet2MatFile.m appends -- CheckGrad's last 2 numeric derivatives are
+            always exactly 0 regardless of the analytic value).
+  masking : MaskingValidation.m + vec2struct.m (TIER 1), a PASS case (a well-formed scalar
+            mask) and a FAIL case (masking a `_padding_block`-family vector field with a
+            negative component, exploiting that field's encode/decode asymmetry).
 
 Determinism: only `.bin` + `manifest.json` are committed (the `.mat` MAT-v7 header
 carries a churning timestamp; we never copy it). The `.bin` payloads and the manifest
@@ -95,6 +114,59 @@ RPROP_SHAPES = {
     "deltaweight_traj": (5, 6),
     "derivout_traj": (5, 6),
 }
+BATCHING_SHAPES = {
+    "single_index": (6, 1),
+    "single_worst_index": (1, 1),
+    "single_batch_traj": (2, 8),
+    "single_validation_traj": (6, 8),
+    "single_countpass_traj": (1, 8),
+    "multi_nb_case1_index": (2, 1),
+    "multi_nb_case2_index": (2, 1),
+    "multi_nb_case3_index": (2, 1),
+    "multi_nb_worst1_index": (1, 1),
+    "multi_nb_worst2_index": (1, 1),
+    "multi_nb_worst3_index": (1, 1),
+    "multi_nb_batch_traj": (2, 8),
+    "multi_nb_validation_traj": (6, 8),
+    "multi_nb_countpass_traj": (1, 8),
+    "clobber_case3_index": (2, 1),
+    "sub_case1_index": (3, 1),
+    "sub_case2_index": (3, 1),
+    "sub_case3_sub1_index": (3, 1),
+    "sub_case3_sub2_index": (3, 1),
+    "sub_worst1_index": (1, 1),
+    "sub_worst2_index": (1, 1),
+    "sub_worst3_index": (1, 1),
+    "sub_batch_traj": (2, 10),
+    "sub_validation_traj": (12, 10),
+    "sub_countpass_traj": (1, 10),
+    "degenerate_cases": (3, 1),
+    "degenerate_batch": (3, 1),
+    "degenerate_validation": (3, 1),
+    "gwb_basic_indBest": (2, 1),
+    "gwb_basic_indMiddle": (1, 1),
+    "gwb_basic_indWorst": (3, 1),
+    "gwb_basic_scoreBest": (2, 1),
+    "gwb_basic_scoreMiddle": (1, 1),
+    "gwb_basic_scoreWorst": (3, 1),
+    "gwb_edge_indBest": (0, 0),
+    "gwb_edge_indMiddle": (0, 0),
+    "gwb_edge_indWorst": (0, 0),
+}
+CHECKGRAD_SHAPES = {
+    "nnet_in": (107, 1),
+    "MultiWeights": (53, 1),
+    "MultiDeriv_BackProp": (53, 1),
+    "MultiDeriv_Num": (53, 1),
+}
+MASKING_SHAPES = {
+    "pass_hasFailed": (1, 1),
+    "pass_count": (1, 1),
+    "pass_vector": (265, 1),
+    "fail_hasFailed": (1, 1),
+    "fail_count": (1, 1),
+    "fail_vector": (265, 1),
+}
 
 STAGE_LINE_RE = re.compile(
     r"^OCTAVE_STAGE smorms3 M=(?P<M>\d+) num_steps=(?P<ns>\d+) rt_M=(?P<rtM>\d+) rt_num_steps=(?P<rtns>\d+) "
@@ -102,6 +174,13 @@ STAGE_LINE_RE = re.compile(
     re.MULTILINE,
 )
 RPROP_LINE_RE = re.compile(r"^OCTAVE_STAGE rprop N=(?P<N>\d+) K=(?P<K>\d+)$", re.MULTILINE)
+BATCHING_LINE_RE = re.compile(
+    r"^OCTAVE_STAGE batching single_n=(?P<single_n>\d+) multi_nb_n=(?P<multi_nb_n>\d+) "
+    r"sub_n=(?P<sub_n>\d+) degenerate_batch_len=(?P<deg_len>\d+)$",
+    re.MULTILINE,
+)
+CHECKGRAD_LINE_RE = re.compile(r"^OCTAVE_STAGE checkgrad n=(?P<n>\d+) Kw=(?P<Kw>\d+)$", re.MULTILINE)
+MASKING_LINE_RE = re.compile(r"^OCTAVE_STAGE masking pass_failed=(?P<pass_failed>\d+) fail_failed=(?P<fail_failed>\d+)$", re.MULTILINE)
 
 
 def _find_octave() -> str:
@@ -193,6 +272,9 @@ def main() -> None:
         tmp_dir = Path(tmp)
         smorms3_stdout = _run_stage(octave, "smorms3", tmp_dir)
         rprop_stdout = _run_stage(octave, "rprop", tmp_dir)
+        batching_stdout = _run_stage(octave, "batching", tmp_dir)
+        checkgrad_stdout = _run_stage(octave, "checkgrad", tmp_dir)
+        masking_stdout = _run_stage(octave, "masking", tmp_dir)
 
         sm = STAGE_LINE_RE.search(smorms3_stdout)
         if not sm:
@@ -200,14 +282,28 @@ def main() -> None:
         rm = RPROP_LINE_RE.search(rprop_stdout)
         if not rm:
             raise SystemExit("OCTAVE_STAGE rprop line missing from stdout")
+        bm = BATCHING_LINE_RE.search(batching_stdout)
+        if not bm:
+            raise SystemExit("OCTAVE_STAGE batching line missing from stdout")
+        cgm = CHECKGRAD_LINE_RE.search(checkgrad_stdout)
+        if not cgm:
+            raise SystemExit("OCTAVE_STAGE checkgrad line missing from stdout")
+        mkm = MASKING_LINE_RE.search(masking_stdout)
+        if not mkm:
+            raise SystemExit("OCTAVE_STAGE masking line missing from stdout")
         sm_dims = (int(sm["M"]), int(sm["ns"]), int(sm["rtM"]), int(sm["rtns"]), int(sm["epsM"]), int(sm["epsns"]))
         if sm_dims != (7, 12, 3, 4, 1, 3):
             raise SystemExit(f"smorms3 stage dims {sm_dims} != (7,12,3,4,1,3)")
         if (int(rm["N"]), int(rm["K"])) != (5, 6):
             raise SystemExit(f"rprop stage dims {(rm['N'], rm['K'])} != (5,6)")
+        if (int(cgm["n"]), int(cgm["Kw"])) != (107, 53):
+            raise SystemExit(f"checkgrad stage dims {(cgm['n'], cgm['Kw'])} != (107,53)")
 
         _convert_stage(tmp_dir / "smorms3.mat", "smorms3", SMORMS3_SHAPES, tmp_dir)
         _convert_stage(tmp_dir / "rprop.mat", "rprop", RPROP_SHAPES, tmp_dir)
+        _convert_stage(tmp_dir / "batching.mat", "batching", BATCHING_SHAPES, tmp_dir)
+        _convert_stage(tmp_dir / "checkgrad.mat", "checkgrad", CHECKGRAD_SHAPES, tmp_dir)
+        _convert_stage(tmp_dir / "masking.mat", "masking", MASKING_SHAPES, tmp_dir)
 
         # --- Non-vacuity: the goldens must actually exercise the pinned behaviors. ---
         # SMORMS3 lrate x10 warmup + 1e-1 cap: 1e-8..1e-1 then plateau.
@@ -250,6 +346,42 @@ def main() -> None:
         _, _, deriv_out = _read_bin(tmp_dir / "rprop_derivout_traj.bin")
         if not any(o == 0.0 and i != 0.0 for i, o in zip(deriv_in, deriv_out, strict=True)):
             raise SystemExit("rprop derivout never zeroed a nonzero derivative -- the <0 sign-flip branch never fired")
+
+        # BATCHING: the clobber case really did lose class-0's aggregate (Cases(3) ends up
+        # holding class-2's data, [6,5] 1-based -- NOT class-0's [2,1]).
+        _, _, clobber = _read_bin(tmp_dir / "batching_clobber_case3_index.bin")
+        if sorted(clobber) != [5.0, 6.0]:
+            raise SystemExit(f"batching clobber non-vacuity: clobber_case3_index {clobber} != class-2's [5,6] -- the clobber quirk did not fire")
+        # Rotation traces must be non-trivial (the batch actually varies across steps, not
+        # stuck repeating the same pair every call).
+        for case, ncols in (("single", 8), ("multi_nb", 8), ("sub", 10)):
+            r, c, traj = _read_bin(tmp_dir / f"batching_{case}_batch_traj.bin")
+            cols = [tuple(traj[col * r : (col + 1) * r]) for col in range(ncols)]
+            if len(set(cols)) < 2:
+                raise SystemExit(f"batching {case} non-vacuity: batch_traj never changes across {ncols} steps")
+        # Degenerate: Batch must equal Cases verbatim (GetNewBatch.m:3-5), not a rotation.
+        _, _, deg_cases = _read_bin(tmp_dir / "batching_degenerate_cases.bin")
+        _, _, deg_batch = _read_bin(tmp_dir / "batching_degenerate_batch.bin")
+        if deg_cases != deg_batch:
+            raise SystemExit(f"batching degenerate non-vacuity: batch {deg_batch} != cases {deg_cases}")
+
+        # CHECKGRAD: the analytic/numeric agreement is non-vacuous (both nonzero, close)
+        # for the well-behaved prefix, AND the discovered weights2nnet.m normalize-tail bug
+        # (last 2 entries) genuinely shows numeric==0 with analytic!=0 -- else the pinned
+        # quirk would be silently absent from the fixture.
+        _, _, cg_analytic = _read_bin(tmp_dir / "checkgrad_MultiDeriv_BackProp.bin")
+        _, _, cg_numeric = _read_bin(tmp_dir / "checkgrad_MultiDeriv_Num.bin")
+        if not all(abs(a - n) < 1e-3 for a, n in zip(cg_analytic[:-2], cg_numeric[:-2], strict=True)):
+            raise SystemExit("checkgrad non-vacuity: the well-behaved prefix's analytic/numeric derivatives do not agree")
+        if cg_numeric[-1] != 0.0 or cg_numeric[-2] != 0.0:
+            raise SystemExit(f"checkgrad non-vacuity: expected the normalize-tail bug (numeric==0) at the last 2 entries, got {cg_numeric[-2:]}")
+        if cg_analytic[-1] == 0.0 or cg_analytic[-2] == 0.0:
+            raise SystemExit("checkgrad non-vacuity: analytic tail is zero -- the quirk contrast (nonzero analytic vs zero numeric) would be vacuous")
+
+        # MASKING: pass must not fail, fail must fail (else both cases collapse to the same
+        # outcome and the golden pins nothing).
+        if (int(mkm["pass_failed"]), int(mkm["fail_failed"])) != (0, 1):
+            raise SystemExit(f"masking non-vacuity: (pass_failed, fail_failed) = {(mkm['pass_failed'], mkm['fail_failed'])} != (0, 1)")
 
         # Regression guard.
         after = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
@@ -325,10 +457,78 @@ def main() -> None:
                 "K": int(rm["K"]),
                 "shapes": {f"rprop_{v}.bin": list(s) for v, s in RPROP_SHAPES.items()},
             },
+            "batching": {
+                "text": (
+                    "Task 10: CreateBatches.m (158 LOC) + GetNewBatch.m (94 LOC), TIER 1 real "
+                    "functions, plus the FALLBACK-TIER getworstandbest_transcribed.m (verbatim "
+                    "transcription of getCases.m:116-165's private getWorstAndBest subfunction -- "
+                    "unreachable standalone, see that file's header). randperm is SHADOWED "
+                    "(batching_shadow/randperm.m) with a fixed reverse-order permutation (p=n:-1:1), "
+                    "reproducible AND trivially replicable in Python (tests/test_phase4c_batching.py), "
+                    "so create_batches's own shuffle is pinned, not just GetNewBatch's rotation. Cases: "
+                    "single (nbOfTargetClasses<=1), multi_nb (nbOfTargetClasses>1, non-multilingual, "
+                    "classes {1,2,5} -> clean aggregate), clobber (classes {0,1,2} -- the natural "
+                    "contiguous labeling silently OVERWRITES the aggregate slot with the top target "
+                    "class's data, losing the aggregate entirely -- structural-only, no rotation), sub "
+                    "(nbOfTargetClasses>1, multilingual, classes {1,2,5,8} -> two SubCases groups), "
+                    "degenerate (nbOfTargetClasses*nbOfWorstCases+nbOfCasesPerBatch > file_nb -- "
+                    "GetNewBatch takes the ~isfield(Batches,'currentClass') branch, Batch=Cases "
+                    "verbatim). PURE integer-cursor arithmetic throughout (no libm) -> STRICT bits "
+                    "everywhere."
+                ),
+                "single_n": int(bm["single_n"]),
+                "multi_nb_n": int(bm["multi_nb_n"]),
+                "sub_n": int(bm["sub_n"]),
+                "degenerate_batch_len": int(bm["deg_len"]),
+                "shapes": {f"batching_{v}.bin": list(s) for v, s in BATCHING_SHAPES.items()},
+            },
+            "checkgrad": {
+                "text": (
+                    "Task 10: CheckGrad.m (163 LOC), TIER 1 real function, driven with a "
+                    "harness-local quadratic-surrogate CostFunction.m shadow (checkgrad_shadow/, "
+                    "f(w)=0.5*sum(c.*(w-target).^2) over the REAL flat NN weight vector, re-derived "
+                    "from param via the REAL vec2struct + nnet2MatFile on every call -- so a weight-kk "
+                    "epsilon nudge applied by CheckGrad's own network2config/weights2nnet/vec2struct "
+                    "round trip is visible here) plus no-op figure/subplot/semilogy/hold/grid shadows "
+                    "(CheckGrad's diagnostic plot uses the old-style `subplot 211` form, which errors "
+                    "under this Octave/graphics-toolkit combination independent of headlessness). "
+                    "epsilon=1e-5 (:12, unconditional); the surrogate is an EXACT quadratic form, so "
+                    "central diff carries no truncation error. Surfaces a genuine legacy bug (not a "
+                    "harness artifact): weights2nnet.m (:150-186) never writes back the normalize "
+                    "mean/std tail nnet2MatFile.m (:140-141) appends to `weights` -- CheckGrad's last "
+                    "2 (2*len(normalize.mean)) numeric derivatives are always exactly 0 regardless of "
+                    "the analytic value, an asymmetry vs the LID branch (:109), which explicitly trims "
+                    "that tail before its own loop. See IMPROVEMENTS.md."
+                ),
+                "n": int(cgm["n"]),
+                "Kw": int(cgm["Kw"]),
+                "shapes": {f"checkgrad_{v}.bin": list(s) for v, s in CHECKGRAD_SHAPES.items()},
+            },
+            "masking": {
+                "text": (
+                    "Task 10: MaskingValidation.m (54 LOC) + vec2struct.m, TIER 1 real functions, no "
+                    "shadow needed. PASS: a well-formed scalar mask (AlgName_decision_thresh_rising="
+                    "0.7, the same case Task 8 bit-pins). FAIL: masking AlgName_min_speech (a "
+                    "_padding_block-family vector field) with a negative last component -- the "
+                    "encode ((fv+0.1)*adim, using the raw masked fv) is NOT the algebraic inverse of "
+                    "the decode (-0.1+abs(p/adim)) for fv<0 (abs() destroys the sign asymmetrically), "
+                    "so the round trip genuinely diverges and MaskingValidation correctly flags it -- "
+                    "discovered by direct execution, not guessed. See IMPROVEMENTS.md."
+                ),
+                "pass_failed": int(mkm["pass_failed"]),
+                "fail_failed": int(mkm["fail_failed"]),
+                "shapes": {f"masking_{v}.bin": list(s) for v, s in MASKING_SHAPES.items()},
+            },
         }
 
         # Commit: every check passed -> copy the .bin fixtures into PHASE4C_DIR.
-        for stage, shapes in (("smorms3", SMORMS3_SHAPES), ("rprop", RPROP_SHAPES)):
+        for stage, shapes in (
+            ("smorms3", SMORMS3_SHAPES),
+            ("rprop", RPROP_SHAPES),
+            ("batching", BATCHING_SHAPES),
+            ("checkgrad", CHECKGRAD_SHAPES),
+            ("masking", MASKING_SHAPES),
+        ):
             for var in shapes:
                 name = f"{stage}_{var}.bin"
                 shutil.copy2(tmp_dir / name, PHASE4C_DIR / name)
@@ -337,7 +537,9 @@ def main() -> None:
 
     print(
         f"OK: phase4c fixtures (octave {octave_version}; smorms3 M=7 steps=12 lrate cap@step8, "
-        f"rt offset nonzero; rprop 5x6 delta span [{min(delta)}, {max(delta)}]), "
+        f"rt offset nonzero; rprop 5x6 delta span [{min(delta)}, {max(delta)}]; "
+        f"batching single/multi_nb/sub/clobber/degenerate + getWorstAndBest; "
+        f"checkgrad Kw=53 (2 normalize-tail entries always 0); masking pass=0 fail=1), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
 

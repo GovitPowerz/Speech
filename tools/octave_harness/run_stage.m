@@ -28,6 +28,12 @@ function run_stage(stage, out_dir)
       stage_vec2struct(out_dir);
     case 'computecost'
       stage_computecost(out_dir);
+    case 'checkgrad'
+      stage_checkgrad(out_dir);
+    case 'masking'
+      stage_masking(out_dir);
+    case 'batching'
+      stage_batching(out_dir);
     otherwise
       error('run_stage: unknown stage %s', stage);
   end

@@ -150,5 +150,216 @@
         6
       ]
     }
+  },
+  "batching": {
+    "text": "Task 10: CreateBatches.m (158 LOC) + GetNewBatch.m (94 LOC), TIER 1 real functions, plus the FALLBACK-TIER getworstandbest_transcribed.m (verbatim transcription of getCases.m:116-165's private getWorstAndBest subfunction -- unreachable standalone, see that file's header). randperm is SHADOWED (batching_shadow/randperm.m) with a fixed reverse-order permutation (p=n:-1:1), reproducible AND trivially replicable in Python (tests/test_phase4c_batching.py), so create_batches's own shuffle is pinned, not just GetNewBatch's rotation. Cases: single (nbOfTargetClasses<=1), multi_nb (nbOfTargetClasses>1, non-multilingual, classes {1,2,5} -> clean aggregate), clobber (classes {0,1,2} -- the natural contiguous labeling silently OVERWRITES the aggregate slot with the top target class's data, losing the aggregate entirely -- structural-only, no rotation), sub (nbOfTargetClasses>1, multilingual, classes {1,2,5,8} -> two SubCases groups), degenerate (nbOfTargetClasses*nbOfWorstCases+nbOfCasesPerBatch > file_nb -- GetNewBatch takes the ~isfield(Batches,'currentClass') branch, Batch=Cases verbatim). PURE integer-cursor arithmetic throughout (no libm) -> STRICT bits everywhere.",
+    "single_n": 6,
+    "multi_nb_n": 6,
+    "sub_n": 6,
+    "degenerate_batch_len": 3,
+    "shapes": {
+      "batching_single_index.bin": [
+        6,
+        1
+      ],
+      "batching_single_worst_index.bin": [
+        1,
+        1
+      ],
+      "batching_single_batch_traj.bin": [
+        2,
+        8
+      ],
+      "batching_single_validation_traj.bin": [
+        6,
+        8
+      ],
+      "batching_single_countpass_traj.bin": [
+        1,
+        8
+      ],
+      "batching_multi_nb_case1_index.bin": [
+        2,
+        1
+      ],
+      "batching_multi_nb_case2_index.bin": [
+        2,
+        1
+      ],
+      "batching_multi_nb_case3_index.bin": [
+        2,
+        1
+      ],
+      "batching_multi_nb_worst1_index.bin": [
+        1,
+        1
+      ],
+      "batching_multi_nb_worst2_index.bin": [
+        1,
+        1
+      ],
+      "batching_multi_nb_worst3_index.bin": [
+        1,
+        1
+      ],
+      "batching_multi_nb_batch_traj.bin": [
+        2,
+        8
+      ],
+      "batching_multi_nb_validation_traj.bin": [
+        6,
+        8
+      ],
+      "batching_multi_nb_countpass_traj.bin": [
+        1,
+        8
+      ],
+      "batching_clobber_case3_index.bin": [
+        2,
+        1
+      ],
+      "batching_sub_case1_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_case2_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_case3_sub1_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_case3_sub2_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_worst1_index.bin": [
+        1,
+        1
+      ],
+      "batching_sub_worst2_index.bin": [
+        1,
+        1
+      ],
+      "batching_sub_worst3_index.bin": [
+        1,
+        1
+      ],
+      "batching_sub_batch_traj.bin": [
+        2,
+        10
+      ],
+      "batching_sub_validation_traj.bin": [
+        12,
+        10
+      ],
+      "batching_sub_countpass_traj.bin": [
+        1,
+        10
+      ],
+      "batching_degenerate_cases.bin": [
+        3,
+        1
+      ],
+      "batching_degenerate_batch.bin": [
+        3,
+        1
+      ],
+      "batching_degenerate_validation.bin": [
+        3,
+        1
+      ],
+      "batching_gwb_basic_indBest.bin": [
+        2,
+        1
+      ],
+      "batching_gwb_basic_indMiddle.bin": [
+        1,
+        1
+      ],
+      "batching_gwb_basic_indWorst.bin": [
+        3,
+        1
+      ],
+      "batching_gwb_basic_scoreBest.bin": [
+        2,
+        1
+      ],
+      "batching_gwb_basic_scoreMiddle.bin": [
+        1,
+        1
+      ],
+      "batching_gwb_basic_scoreWorst.bin": [
+        3,
+        1
+      ],
+      "batching_gwb_edge_indBest.bin": [
+        0,
+        0
+      ],
+      "batching_gwb_edge_indMiddle.bin": [
+        0,
+        0
+      ],
+      "batching_gwb_edge_indWorst.bin": [
+        0,
+        0
+      ]
+    }
+  },
+  "checkgrad": {
+    "text": "Task 10: CheckGrad.m (163 LOC), TIER 1 real function, driven with a harness-local quadratic-surrogate CostFunction.m shadow (checkgrad_shadow/, f(w)=0.5*sum(c.*(w-target).^2) over the REAL flat NN weight vector, re-derived from param via the REAL vec2struct + nnet2MatFile on every call -- so a weight-kk epsilon nudge applied by CheckGrad's own network2config/weights2nnet/vec2struct round trip is visible here) plus no-op figure/subplot/semilogy/hold/grid shadows (CheckGrad's diagnostic plot uses the old-style `subplot 211` form, which errors under this Octave/graphics-toolkit combination independent of headlessness). epsilon=1e-5 (:12, unconditional); the surrogate is an EXACT quadratic form, so central diff carries no truncation error. Surfaces a genuine legacy bug (not a harness artifact): weights2nnet.m (:150-186) never writes back the normalize mean/std tail nnet2MatFile.m (:140-141) appends to `weights` -- CheckGrad's last 2 (2*len(normalize.mean)) numeric derivatives are always exactly 0 regardless of the analytic value, an asymmetry vs the LID branch (:109), which explicitly trims that tail before its own loop. See IMPROVEMENTS.md.",
+    "n": 107,
+    "Kw": 53,
+    "shapes": {
+      "checkgrad_nnet_in.bin": [
+        107,
+        1
+      ],
+      "checkgrad_MultiWeights.bin": [
+        53,
+        1
+      ],
+      "checkgrad_MultiDeriv_BackProp.bin": [
+        53,
+        1
+      ],
+      "checkgrad_MultiDeriv_Num.bin": [
+        53,
+        1
+      ]
+    }
+  },
+  "masking": {
+    "text": "Task 10: MaskingValidation.m (54 LOC) + vec2struct.m, TIER 1 real functions, no shadow needed. PASS: a well-formed scalar mask (AlgName_decision_thresh_rising=0.7, the same case Task 8 bit-pins). FAIL: masking AlgName_min_speech (a _padding_block-family vector field) with a negative last component -- the encode ((fv+0.1)*adim, using the raw masked fv) is NOT the algebraic inverse of the decode (-0.1+abs(p/adim)) for fv<0 (abs() destroys the sign asymmetrically), so the round trip genuinely diverges and MaskingValidation correctly flags it -- discovered by direct execution, not guessed. See IMPROVEMENTS.md.",
+    "pass_failed": 0,
+    "fail_failed": 1,
+    "shapes": {
+      "masking_pass_hasFailed.bin": [
+        1,
+        1
+      ],
+      "masking_pass_count.bin": [
+        1,
+        1
+      ],
+      "masking_pass_vector.bin": [
+        265,
+        1
+      ],
+      "masking_fail_hasFailed.bin": [
+        1,
+        1
+      ],
+      "masking_fail_count.bin": [
+        1,
+        1
+      ],
+      "masking_fail_vector.bin": [
+        265,
+        1
+      ]
+    }
   }
 }

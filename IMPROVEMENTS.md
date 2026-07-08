@@ -2642,6 +2642,112 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   falls outside `(30, 60)`. *Mutation:* deleting the `if` guard (always taking `cutoff = t(pos)`)
   would move b10c's cutoff to ~10.005, failing both the golden compare and the `(30, 60)` band.
 
+- **[phase4c] `CreateBatches.m`'s non-multilingual `nbOfTargetClasses>1` branch indexes
+  `Cases`/`WorstCases` by LOOP POSITION, not class VALUE -- silently clobbering the aggregate
+  slot for the natural contiguous class labeling** (`CreateBatches.m:43-60`; `src/python/speech/
+  batching.py::create_batches`). The loop is `for ii = 1:length(possibleValues)`, and for a
+  target class (`0 < possibleValues(ii) < nbOfTargetClasses`) it writes `Cases(ii)` -- the LOOP
+  COUNTER `ii`, not `possibleValues(ii)` (the class value itself). `possibleValues` is
+  `unique(...)`, sorted ascending. When class values are the natural contiguous labeling
+  `0, 1, ..., nbOfTargetClasses-1` (0 = non-target catch-all, 1..N-1 = targets -- the obvious
+  choice), the LAST loop position (`ii = nbOfTargetClasses`) lands on `possibleValues(ii) =
+  nbOfTargetClasses-1`, which is ITSELF a valid target (`0 < nbOfTargetClasses-1 <
+  nbOfTargetClasses`) -- so it overwrites `Cases(nbOfTargetClasses)`, the SAME slot pre-reserved
+  for the non-target aggregate, with the top target class's data. Class-0's files (assigned to
+  the aggregate at `ii=1`) are silently lost; `WorstCases(nbOfTargetClasses)` (derived from
+  `Cases(nbOfTargetClasses)` AFTER the loop) inherits the same clobber. Ported faithfully: the
+  Python `create_batches` writes `cases[ii]` (the Python loop position) for target classes,
+  exactly mirroring the bug. A SEPARATE non-multilingual quirk: the aggregate's own accumulation
+  branch (`Cases(nbOfTargetClasses).index = [Cases(...).index; find(...)]`, no `randperm` call)
+  is NEVER shuffled, unlike every target class's pool -- also ported verbatim (`create_batches`'s
+  `else` branch concatenates `find`-order indices with no `shuffled(...)` call).
+  *Pinned by:* `test_create_batches_clobber_quirk` (contiguous `{0,1,2}`/`nb_classes=3` ->
+  `Cases(3)` ends up as class-2's data) vs `test_create_batches_multi_nb_clean_aggregate_and_
+  rotation` (non-contiguous `{1,2,5}`/`nb_classes=3` -> no clobber, clean aggregate) in `tests/
+  test_phase4c_batching.py`; the extractor's non-vacuity guard SystemExits unless the clobber
+  case measures class-2's data. *Mutation:* indexing by `possibleValues(ii)` instead of `ii`
+  (the "obviously correct" fix) would change `test_create_batches_clobber_quirk`'s expected
+  `Cases(3)` content and fail against the real Octave dump.
+
+- **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
+  `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
+  shuffles every per-class index pool via the builtin `randperm`, which would make the
+  extractor's output non-reproducible run to run (breaking the "run twice, byte-identical"
+  determinism contract every other Phase 4c stage relies on). Shadowed (via `addpath` ordering,
+  the shadow dir added AFTER `functions_dir` so it wins -- Octave `addpath` prepends, so the
+  LATER call takes precedence; verified empirically, since this is easy to get backwards) with
+  `p = n:-1:1`, a closed-form function of `n` trivial to replicate in Python (a duck-typed
+  `rng.permutation` stand-in reversing its input, `tests/test_phase4c_batching.py::_ReverseRng`)
+  -- so `create_batches`'s OWN shuffle output is bit-pinned against the real `CreateBatches.m`,
+  not just `GetNewBatch.m`'s RNG-free rotation. `CreateBatches.m` itself is unmodified (TIER 1).
+
+- **[phase4c] Octave-compat: `CheckGrad.m`'s real `CostFunction.m` and diagnostic plot are both
+  unusable in the harness -- shadowed via `addpath` precedence, `CheckGrad.m` itself untouched**
+  (`tools/octave_harness/checkgrad_shadow/`). Two independent problems: (1) the real
+  `CostFunction.m` shells out to the engine (`system('python RunFsp.py ...')`) -- unusable in a
+  fast, hermetic Octave-only harness; shadowed with a pure quadratic surrogate
+  `f(w)=0.5*sum(c.*(w-target).^2)` over the REAL flat NN weight vector, re-derived from `param`
+  via the REAL `vec2struct`+`nnet2MatFile` on every call (so `CheckGrad`'s own per-weight
+  `network2config`/`weights2nnet`/`vec2struct` perturbation round trip is genuinely exercised and
+  visible to the surrogate). (2) `CheckGrad.m`'s per-genome diagnostic plot (`:91-96`/`:155-159`)
+  uses the old-style `subplot 211` call form, which errors ("invalid axes handle or RCN
+  argument") under this Octave/FLTK combination independent of headlessness -- shadowed with
+  no-op `figure`/`subplot`/`semilogy`/`hold`/`grid` stand-ins (verified empirically: the real
+  calls error even with `--no-gui`, and the no-ops let the unmodified function run to completion).
+  Both shadows live only in `checkgrad_shadow/`, added to the Octave path AFTER `functions_dir`.
+
+- **[phase4c] Genuine legacy bug surfaced by driving the real `CheckGrad.m`: `weights2nnet.m`
+  never writes back the normalize mean/std tail `nnet2MatFile.m` appends to `weights`, so
+  CheckGrad's last `2*length(normalize.mean)` numeric derivatives are always exactly 0**
+  (`nnet2MatFile.m:140-141` appends `nnet.normalize.mean;nnet.normalize.std` to the flat
+  `weights` vector CheckGrad iterates `kk = 1:length(weights)` over; `weights2nnet.m:150-186`
+  reconstructs `nnet.output.layer(*).weights` from `weights` and then RETURNS -- it never reads
+  or writes `nnet.normalize.*` at all). So perturbing weight index `kk` in the tail (`modWeights
+  (kk) = modWeights(kk)+epsilon`) has NO EFFECT on the reconstructed `nnet_mod`, hence no effect
+  on the config/param round trip, hence the central-diff numerator is always `PlusNNCost -
+  MinusNNCost = 0` for those 2 entries -- while the analytic backprop derivative at the same
+  index is whatever the (real or surrogate) `CostFunction` computed, generally nonzero. This is
+  an ASYMMETRY vs the LID branch (`CheckGrad.m:109`, `weightsLID = weightsLID(1:end-2*length
+  (normalizeLID.mean));`), which explicitly TRIMS that untestable tail before its own loop -- the
+  SAD branch (`:45-96`) has no equivalent trim. Measured on the Task 10 golden (algo-3, tiny net,
+  `Kw=53`, `2*length(normalize.mean)=2`): `MultiDeriv_Num(52:53) = [0, 0]` while `MultiDeriv_
+  BackProp(52:53)` are both nonzero (~13.5 and ~5.6). NOT reproduced by the Python port:
+  `speech.scoring.check_grad` is a GENERIC central-diff utility that perturbs its `weights`
+  argument DIRECTLY (no config round trip), so it has no way to inherit this bug and correctly
+  produces a proper nonzero numeric derivative at those indices -- a deliberate, documented,
+  and tested divergence, not an oversight. *Pinned by:* `test_checkgrad_normalize_tail_quirk_
+  recorded` (`tests/test_phase4c_fixtures.py`, guards the golden fixture itself) and
+  `test_check_grad_normalize_tail_quirk_documented_not_reproduced` (`tests/
+  test_phase4c_scoring.py`, asserts the Python port's numeric/analytic AGREE at those indices,
+  the opposite of the Octave golden). *Mutation:* the extractor's non-vacuity guard SystemExits
+  if the golden's last 2 numeric entries are ever nonzero (would mean the bug -- or the harness
+  setup exercising it -- silently stopped firing).
+
+- **[phase4c] `MaskingValidation.m`'s FAIL case exploits a genuine encode/decode asymmetry in
+  `vec2struct.m`'s `_padding_block`-family fields for negative mask values** (`vec2struct.m`
+  `_padding_block`/`genome.py::_Walk._padding_block`, feeding `AlgName_speech_padding`/
+  `AlgName_min_silence`/`AlgName_min_speech`). The ENCODE (mask branch) writes `out_param =
+  (fv+0.1)*adim` using the RAW masked value `fv`; the DECODE (both the plain param->field path
+  and the re-decode `MaskingValidation.m` performs on `out_param` with an EMPTY mask) computes
+  `fv' = -0.1 + abs(p/adim)`. For `fv >= 0` these are inverses (`abs` is a no-op on a
+  non-negative argument). For `fv < 0` they are NOT: encoding `fv=-5` (`adim=10`) gives
+  `out_param = (-5+0.1)*10 = -49`; decoding `-49` gives `fv' = -0.1+abs(-4.9) = 4.8`, nothing like
+  `-5` (mask-forced value, used by the FIRST `vec2struct` call's `configStruct`) OR `0` (the
+  algo<5 floor-at-0 clamp genome.py's `_front_matter` applies to `min_speech[2]` specifically,
+  also visible only in the first call's `cfg`, not in `out_param`). So `MaskingValidation.m`'s
+  double round trip (`configStruct` from `vec2struct(vector,mask,...)` vs `maskedConfigStruct`
+  from `vec2struct(out_param,[],...)`) genuinely diverges and correctly reports a mismatch --
+  this is the validator doing its job (catching a mask value outside the field's implicit
+  non-negative domain), not a false positive. Not "fixed" in the port (`speech.genome.vec2struct`
+  reproduces the same asymmetric encode/decode); discovered by directly running the vendored
+  `.m` with a crafted negative mask value, not by reading source alone.
+  *Pinned by:* `test_masking_validation_fail_case` + `test_masking_validation_pass_case`
+  (`tests/test_phase4c_scoring.py`) and `test_masking_manifest_present_and_pass_fail_split`
+  (`tests/test_phase4c_fixtures.py`); the extractor's non-vacuity guard SystemExits unless
+  `(pass_failed, fail_failed) == (0, 1)`. *Mutation:* clamping `fv` to `>= 0` before the mask
+  encode (the "obviously correct" fix) would make the FAIL case pass too, collapsing the pinned
+  contrast.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
