@@ -233,6 +233,46 @@ impl BlstmSpectralLid {
             })
             .collect()
     }
+
+    // -- NN weight family (BASE-CLASS delegates, Task 9) ----------------------
+    // `BLSTMSpectralLID` adds no overrides of its own: the bag's algo-5 arms
+    // (`BagOfProcessors.cpp:79,94,109,122,138,168,194`) resolve to the INHERITED
+    // `BLSTMSpectralSegmenter` methods, which delegate to `_BLSTMNeuralNetwork`
+    // -- and in `BLSTMSpectralLID` that base-class member IS the LID net (the
+    // ctor builds it from the same `BLSTM_*` namespace). So every delegate here
+    // targets `self.net`, mirroring `BlstmSpectralSegmenter`'s family.
+
+    /// `isBackPropActivated` (inherited, `BLSTMSpectralSegmenter.h`).
+    pub fn is_back_prop_activated(&self) -> bool {
+        self.net.config().back_propagation_activated
+    }
+
+    /// `getWeightsDerivatives` (inherited): the net's `Nx2` flat derivative matrix.
+    pub fn get_weights_derivatives(&self) -> Array2<f64> {
+        self.net.get_weights_derivatives()
+    }
+
+    /// `updateWeights` (inherited): iRPROP- on the flat vector. The algo-5 bag arm
+    /// passes `costLID` as the criterion (`BagOfProcessors.cpp:192-194`).
+    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
+        self.net.update_weights(derivs, cost);
+    }
+
+    /// `saveWeights` (inherited): the three-artifact split (weights/derivs `.bin` +
+    /// stats `.mat`).
+    pub fn save_weights(
+        &self,
+        filename: &str,
+        derivs: &Array2<f64>,
+        stats: &InputStatistics,
+    ) -> Result<()> {
+        self.net.save_weights(filename, derivs, stats)
+    }
+
+    /// `getInputStatistics` (inherited): the net's accumulated input statistics.
+    pub fn input_statistics(&self) -> &InputStatistics {
+        self.net.input_statistics()
+    }
 }
 
 impl Segmenter for BlstmSpectralLid {

@@ -84,6 +84,10 @@ pub struct CorpusProcessor {
     /// gate fire/skip non-vacuity. Only allocated under `test-support`.
     #[cfg(feature = "test-support")]
     epoch_weight_trace: Vec<Vec<f64>>,
+    /// Task 9: the SECOND net's (config-0 network index 1, the algo-6 LID net)
+    /// per-epoch flat weights. Empty vecs when config 0 has a single net.
+    #[cfg(feature = "test-support")]
+    epoch_weight_trace_lid: Vec<Vec<f64>>,
     #[cfg(feature = "test-support")]
     epoch_best_cost_trace: Vec<f64>,
 }
@@ -155,6 +159,8 @@ impl CorpusProcessor {
             best_cost,
             #[cfg(feature = "test-support")]
             epoch_weight_trace: Vec::new(),
+            #[cfg(feature = "test-support")]
+            epoch_weight_trace_lid: Vec::new(),
             #[cfg(feature = "test-support")]
             epoch_best_cost_trace: Vec::new(),
         })
@@ -431,9 +437,17 @@ impl CorpusProcessor {
                 {
                     // Post-update snapshot: config-0's flat weights + the best-cost
                     // for conf 0 (its evolution reveals gate fire/skip -- the gate
-                    // fires iff best_cost DROPPED this epoch).
+                    // fires iff best_cost DROPPED this epoch). Task 9: net index 1
+                    // (the algo-6 LID net) captured alongside, empty when absent.
                     self.epoch_weight_trace
                         .push(self.get_config0_weights_for_test());
+                    self.epoch_weight_trace_lid.push(
+                        self.processors
+                            .get_weights(0)
+                            .into_iter()
+                            .nth(1)
+                            .unwrap_or_default(),
+                    );
                     self.epoch_best_cost_trace
                         .push(*self.best_cost.get(&0).unwrap_or(&f64::INFINITY));
                 }
@@ -618,13 +632,22 @@ impl CorpusProcessor {
     ///
     /// `max_weights` caps the sweep (DEVIATION from the legacy full sweep, recorded
     /// in the manifest as `gradcheck_max_weights`; the legacy checks every weight).
-    /// Returns the last-processed network's [`GradCheckReport`] (config 0 has a
-    /// single NN for algo 3/4, so there is exactly one).
+    /// Returns the last-processed network's [`GradCheckReport`] (algo 3/4/5 have a
+    /// single NN; algo 6 iterates BOTH nets -- use
+    /// [`Self::grad_check_all_for_test`] to observe every per-network report).
     fn grad_check(&mut self, epsilon: f64) -> Result<GradCheckReport> {
         self.grad_check_capped(epsilon, usize::MAX)
+            .map(|mut v| v.pop().map(|(_, r)| r))?
+            .ok_or_else(|| anyhow::anyhow!("gradCheck: no backprop-activated network in config 0"))
     }
 
-    fn grad_check_capped(&mut self, epsilon: f64, max_weights: usize) -> Result<GradCheckReport> {
+    /// Per-network gradCheck: one `(network_index, report)` per backprop-active
+    /// network of config 0, in ascending network index (`:245-246`).
+    fn grad_check_capped(
+        &mut self,
+        epsilon: f64,
+        max_weights: usize,
+    ) -> Result<Vec<(usize, GradCheckReport)>> {
         // legacy: :238 snapshot the WHOLE bag.
         let proc_mem = self.processors.clone();
         let nb = self.processors.nb_of_conf();
@@ -636,7 +659,7 @@ impl CorpusProcessor {
         // legacy: :243 _TrainingEpochs = 0.
         self.training_epochs = 0;
 
-        let mut last_report: Option<GradCheckReport> = None;
+        let mut reports: Vec<(usize, GradCheckReport)> = Vec::new();
 
         // legacy: :245-246 for each network ii of config 0 with backprop active.
         let back_prop_activated = self.processors.is_back_prop_activated(0);
@@ -650,11 +673,6 @@ impl CorpusProcessor {
             let mut new_nn_weights = nn_weight.clone();
 
             let algo0 = self.processors.algo_type(0);
-            if !(algo0 == 3 || algo0 == 4) {
-                // The algo 5/6 arms of the cost-column selection are unreachable in
-                // 4a (bag construction bails on those algos).
-                unreachable!("gradCheck cost columns only defined for algo 3/4 in 4a");
-            }
 
             // legacy: :251-252 one analytic run(1, _Mode, derivs, true) with a FRESH
             // (empty) derivs map -- the harvest populates all confs via the create
@@ -682,7 +700,7 @@ impl CorpusProcessor {
                 self.processors.set_weights(0, &new_nn_weights)?;
                 let mut tmp_derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
                 self.run_epoch(1, inner_mode, &mut tmp_derivs, false)?;
-                let cost_plus = self.grad_check_cost(algo0);
+                let cost_plus = self.grad_check_cost(algo0, ii);
 
                 // legacy: :295-297 -eps: perturb -2*eps from the +eps point, restore.
                 new_nn_weights[ii][kk] -= 2.0 * epsilon;
@@ -690,7 +708,7 @@ impl CorpusProcessor {
                 self.processors.set_weights(0, &new_nn_weights)?;
                 let mut tmp_derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
                 self.run_epoch(1, inner_mode, &mut tmp_derivs, false)?;
-                let cost_minus = self.grad_check_cost(algo0);
+                let cost_minus = self.grad_check_cost(algo0, ii);
 
                 // legacy: :326 numerical = (c+ - c-)/(2 eps).
                 let numerical = (cost_plus - cost_minus) / (2.0 * epsilon);
@@ -718,7 +736,7 @@ impl CorpusProcessor {
                 mean_relative_error: grad_rel_error / denom,
                 per_weight,
             };
-            last_report = Some(report);
+            reports.push((ii, report));
         }
 
         // Restore the bag to the snapshot (the sweep left it perturbed). Port addition,
@@ -726,15 +744,20 @@ impl CorpusProcessor {
         // since gradCheck is terminal in run().
         self.processors = proc_mem;
 
-        last_report
-            .ok_or_else(|| anyhow::anyhow!("gradCheck: no backprop-activated network in config 0"))
+        Ok(reports)
     }
 
     /// The cost accumulation over `self.results` for the gradCheck central
-    /// difference (`:271-292`): for algo 3/4, `cost += results[jj][0][chan][4]`,
-    /// `counter += results[jj][0][chan][last]`, then `cost /= counter`. Algo 5/6
-    /// arms are unreachable in 4a.
-    fn grad_check_cost(&self, algo0: i32) -> f64 {
+    /// difference (`:271-292`), switching on config-0's algo AND (for algo 6)
+    /// the network index `ii`: algo 3/4 -> `cost += row[4]`, `counter +=
+    /// row[len-1]` (`:275-277`); algo 5 -> `row[14]`/`row[len-2]` (`:278-280`);
+    /// algo 6 net `ii == 0` -> the SAD columns `row[4]`/`row[len-1]`, net
+    /// `ii == 1` -> the LID columns `row[14]`/`row[len-2]` (`:281-288`).
+    ///
+    /// The legacy `counter` is a `long` accumulating doubles (per-element
+    /// truncation); every accumulated value is an exact integer count stored in
+    /// a double, so an f64 accumulator is value-identical.
+    fn grad_check_cost(&self, algo0: i32, ii: usize) -> f64 {
         let mut cost = 0.0;
         let mut counter = 0.0;
         for jj in 0..self.corpus.nb_of_files() {
@@ -742,11 +765,28 @@ impl CorpusProcessor {
                 continue;
             };
             for row in conf0.values() {
-                if algo0 == 3 || algo0 == 4 {
-                    cost += row[4];
-                    counter += row[row.len() - 1];
-                } else {
-                    unreachable!("gradCheck cost columns only defined for algo 3/4 in 4a");
+                match algo0 {
+                    3 | 4 => {
+                        cost += row[4];
+                        counter += row[row.len() - 1];
+                    }
+                    5 => {
+                        cost += row[14];
+                        counter += row[row.len() - 2];
+                    }
+                    6 => {
+                        if ii == 0 {
+                            cost += row[4];
+                            counter += row[row.len() - 1];
+                        } else {
+                            cost += row[14];
+                            counter += row[row.len() - 2];
+                        }
+                    }
+                    _ => {
+                        // legacy: no matching arm (:275-289) -- cost/counter stay
+                        // untouched; the :292 division then yields 0/0 = NaN.
+                    }
                 }
             }
         }
@@ -768,13 +808,29 @@ impl CorpusProcessor {
     }
 
     /// Corpus-level gradient check with a weight cap (test hook for
-    /// `grad_check_synthetic`; Task 9's harness golden replays it).
+    /// `grad_check_synthetic`; Task 9's harness golden replays it). Returns the
+    /// LAST backprop-active network's report (pre-Task-9 signature, kept for
+    /// the 4a single-net goldens).
     #[doc(hidden)]
     pub fn grad_check_for_test(
         &mut self,
         epsilon: f64,
         max_weights: usize,
     ) -> Result<GradCheckReport> {
+        self.grad_check_capped(epsilon, max_weights)
+            .map(|mut v| v.pop().map(|(_, r)| r))?
+            .ok_or_else(|| anyhow::anyhow!("gradCheck: no backprop-activated network in config 0"))
+    }
+
+    /// Per-network gradient check (Task 9): one `(network_index, report)` per
+    /// backprop-active network of config 0 -- for algo 6, index 0 is the SAD
+    /// net (cost cols 4/len-1) and index 1 the LID net (cols 14/len-2).
+    #[doc(hidden)]
+    pub fn grad_check_all_for_test(
+        &mut self,
+        epsilon: f64,
+        max_weights: usize,
+    ) -> Result<Vec<(usize, GradCheckReport)>> {
         self.grad_check_capped(epsilon, max_weights)
     }
 
@@ -787,6 +843,15 @@ impl CorpusProcessor {
     #[doc(hidden)]
     pub fn epoch_weight_trace_for_test(&self) -> &[Vec<f64>] {
         &self.epoch_weight_trace
+    }
+
+    /// The SECOND net's (config-0 network index 1 -- the algo-6 LID net)
+    /// per-epoch weight snapshots (Task 9). Entries are empty vecs for a
+    /// single-net config 0.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn epoch_weight_trace_lid_for_test(&self) -> &[Vec<f64>] {
+        &self.epoch_weight_trace_lid
     }
 
     /// The per-epoch best-cost (conf 0) snapshots captured during a training run
@@ -818,6 +883,20 @@ impl CorpusProcessor {
     #[doc(hidden)]
     pub fn set_config0_weights_for_test(&mut self, flat: &[f64]) -> Result<()> {
         self.processors.set_weights(0, &[flat.to_vec()])
+    }
+
+    /// Seed EVERY net of config 0 (Task 9): for algo 6 pass `[sad, lid]`; the
+    /// single-net variant of [`Self::set_config0_weights_for_test`].
+    #[doc(hidden)]
+    pub fn set_config0_all_weights_for_test(&mut self, nets: &[Vec<f64>]) -> Result<()> {
+        self.processors.set_weights(0, nets)
+    }
+
+    /// Config-0's full weight-vector set (test hook): one flat vec per network
+    /// (algo 6 -> `[sad, lid]`).
+    #[doc(hidden)]
+    pub fn get_config0_all_weights_for_test(&self) -> Vec<Vec<f64>> {
+        self.processors.get_weights(0)
     }
 
     /// A hand-sequential oracle for `lanes_n1_equals_sequential`: build a fresh bag,

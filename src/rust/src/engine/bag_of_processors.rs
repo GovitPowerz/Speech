@@ -16,6 +16,7 @@ use crate::cli::{Mode, ModeKind};
 use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
 use crate::features::stats::InputStatistics;
+use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
     BlstmSignalSegmenter, BlstmSpectralSegmenter, LtsvSegmenter, TdcSegmenter,
 };
@@ -80,12 +81,12 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
     }
 }
 
-/// One per-config driver, replacing the legacy `_ConfigIndex` + 6 parallel typed
+/// One per-config driver, replacing the legacy `_ConfigIndex` + 7 parallel typed
 /// vectors: `processors[pos]` IS the config-`pos` driver directly (the enum tag
 /// substitutes for the legacy's separate `_AlgoTypes[pos]` dispatch on WHICH
 /// vector `_ConfigIndex[pos]` indexes into). Algo 0 (`VRCTSPart`, external-tool
-/// adapter) landed Phase 4b Task 8; 5 (`BLSTMSpectralLID`), 6
-/// (`TwinBLSTMSpectralLID`) remain unported: see [`BagOfProcessors::from_configs`].
+/// adapter) landed Phase 4b Task 8; 5 (`BLSTMSpectralLID`) and 6
+/// (`TwinBLSTMSpectralLID`) landed Phase 4b Task 9.
 ///
 /// `large_enum_variant` allowed: the brief's signature is exact
 /// (`Spectral(BlstmSpectralSegmenter)`, no `Box`); boxing would change the public
@@ -98,6 +99,21 @@ pub enum Processor {
     Ltsv(LtsvSegmenter),
     Spectral(BlstmSpectralSegmenter),
     Signal(BlstmSignalSegmenter),
+    Lid(BlstmSpectralLid),
+    TwinLid(TwinBlstmSpectralLid),
+}
+
+/// Per-channel LID result-row data (`seg._LID*` members): the `:338-349` scored
+/// (and `:380-389` unscored) branch reads them when `seg._IsLIDCorrect` is
+/// non-empty -- which in the port means the config's driver is a LID algo (5/6),
+/// since only those drivers ever write the members. One instance per channel.
+pub(crate) struct LidRowData {
+    pub cumulative_error: f64,
+    pub is_correct: f64,
+    /// `_LIDClassificationErrors[chan]` -- one column per class; its LENGTH grows
+    /// the result row (the confusion columns inserted after col 15).
+    pub classification_errors: Vec<f64>,
+    pub nb_of_classif: i64,
 }
 
 impl Processor {
@@ -116,6 +132,8 @@ impl Processor {
             Processor::Ltsv(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::Spectral(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::Signal(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::Lid(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::TwinLid(s) => s.get_segmentation(audio, seg_per_chan, refs),
         }
     }
 
@@ -128,12 +146,15 @@ impl Processor {
             Processor::Ltsv(s) => s.dump_dir(),
             Processor::Spectral(s) => s.dump_dir(),
             Processor::Signal(s) => s.dump_dir(),
+            Processor::Lid(s) => s.dump_dir(),
+            Processor::TwinLid(s) => s.dump_dir(),
         }
     }
 
     /// Per-channel `seg._CumulativeError` (result col 4). VRCTS/TDC/LTSV are
     /// NN-free and return owned zero vecs; the NN drivers return the cost
-    /// captured on the last `get_segmentation` call.
+    /// captured on the last `get_segmentation` call. Algo 5's SAD is LTSV
+    /// (NN-free) so its vec is zeros too; Algo 6's SAD is a real NN.
     fn cumulative_error(&self) -> Vec<f64> {
         match self {
             Processor::Vrcts(s) => s.cumulative_error(),
@@ -141,10 +162,12 @@ impl Processor {
             Processor::Ltsv(s) => s.cumulative_error(),
             Processor::Spectral(s) => s.cumulative_error().to_vec(),
             Processor::Signal(s) => s.cumulative_error().to_vec(),
+            Processor::Lid(s) => s.cumulative_error(),
+            Processor::TwinLid(s) => s.cumulative_error().to_vec(),
         }
     }
 
-    /// Per-channel `seg._NbOfClassif` (result col 17).
+    /// Per-channel `seg._NbOfClassif` (result col `len-1`).
     fn nb_of_classif(&self) -> Vec<i64> {
         match self {
             Processor::Vrcts(s) => s.nb_of_classif(),
@@ -152,6 +175,31 @@ impl Processor {
             Processor::Ltsv(s) => s.nb_of_classif(),
             Processor::Spectral(s) => s.nb_of_classif().to_vec(),
             Processor::Signal(s) => s.nb_of_classif().to_vec(),
+            Processor::Lid(s) => s.nb_of_classif(),
+            Processor::TwinLid(s) => s.nb_of_classif().to_vec(),
+        }
+    }
+
+    /// Per-channel LID result-row data. The legacy gate is
+    /// `!seg._IsLIDCorrect.empty()` (`:338`/`:380`): only the LID drivers
+    /// (algo 5/6) ever fill `_IsLIDCorrect`, so the port keys the branch off the
+    /// PROCESSOR variant -- `None` for algo 0-4 (the two 0.0 slots, no confusion
+    /// columns), `Some` for 5/6 (the row WIDTH grows by the class count).
+    fn lid_row_data(&self, chan: usize) -> Option<LidRowData> {
+        match self {
+            Processor::Lid(s) => Some(LidRowData {
+                cumulative_error: s.lid_cumulative_error()[chan],
+                is_correct: s.is_lid_correct()[chan] as f64,
+                classification_errors: s.lid_classification_errors()[chan].clone(),
+                nb_of_classif: s.lid_nb_of_classif()[chan],
+            }),
+            Processor::TwinLid(s) => Some(LidRowData {
+                cumulative_error: s.lid_cumulative_error()[chan],
+                is_correct: s.is_lid_correct()[chan] as f64,
+                classification_errors: s.lid_classification_errors()[chan].clone(),
+                nb_of_classif: s.lid_nb_of_classif()[chan],
+            }),
+            _ => None,
         }
     }
 }
@@ -175,6 +223,11 @@ pub struct BagOfProcessors {
     pruning_thresholds: Vec<f64>,
     processors: Vec<Processor>,
     exclude_nontrans: bool,
+    /// Test-support capture of `save_and_update`'s per-conf algo-5/6
+    /// `(errorPercLID, confusion)` (display-only in the legacy; see
+    /// [`Self::print_confusion_matrix`]). Cleared at each `save_and_update`.
+    #[cfg(feature = "test-support")]
+    last_confusion: Vec<(f64, Array2<f64>)>,
 }
 
 impl BagOfProcessors {
@@ -203,12 +256,11 @@ impl BagOfProcessors {
     /// branches) but only currently consulted for algo dispatch validity.
     ///
     /// Algo 0 (`VRCTSPart`) is wired here since Phase 4b Task 8
-    /// (`Processor::Vrcts`). Algo 5/6 (`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`)
-    /// remain unported here (`bail!`) -- `BLSTMSpectralLID` (Algo 5) has a
-    /// standalone driver since Phase 4b Task 4 (`tasks::lid::BlstmSpectralLid`),
-    /// but is not yet wired into this dispatch. `File_Type` 2/3/4 (cep/phSeq-N/
-    /// mat input) are also unported -- `bail!`, IMPROVEMENTS entry; `File_Type`
-    /// 0 (wav) and 1 (phSeq, Task 5) are both supported.
+    /// (`Processor::Vrcts`); Algo 5/6 (`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`)
+    /// since Phase 4b Task 9 (`Processor::Lid`/`Processor::TwinLid`).
+    /// `File_Type` 2/3/4 (cep/phSeq-N/mat input) remain unported -- `bail!`,
+    /// IMPROVEMENTS entry; `File_Type` 0 (wav) and 1 (phSeq, Task 5) are both
+    /// supported.
     pub fn from_configs(
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
@@ -266,8 +318,21 @@ impl BagOfProcessors {
                     seg.load_weights_file(map)?;
                     Processor::Signal(seg)
                 }
-                5 => bail!("Algo 5 not ported (Phase 4b)"),
-                6 => bail!("Algo 6 not ported (Phase 4b)"),
+                5 => {
+                    // legacy: :43-45 BLSTMSpectralLID(conf, ...) -- the (single) net
+                    // reads the same `BLSTM_*` namespace incl. `BLSTM_weightsFile`.
+                    let mut seg = BlstmSpectralLid::from_legacy(map, None)?;
+                    seg.load_weights_file(map)?;
+                    Processor::Lid(seg)
+                }
+                6 => {
+                    // legacy: :46-48 TwinBLSTMSpectralLID(conf, ...) -- TWO nets
+                    // (`BLSTM_*` SAD + `BLSTM_LID_*` LID); `load_weights_file` applies
+                    // BOTH `<prefix>_weightsFile` keys, matching the in-ctor loads.
+                    let mut seg = TwinBlstmSpectralLid::from_legacy(map, None, None)?;
+                    seg.load_weights_file(map)?;
+                    Processor::TwinLid(seg)
+                }
                 other => bail!("Algo {other} not ported (Phase 4b)"),
             };
             processors.push(processor);
@@ -285,6 +350,8 @@ impl BagOfProcessors {
             pruning_thresholds,
             processors,
             exclude_nontrans,
+            #[cfg(feature = "test-support")]
+            last_confusion: Vec::new(),
         })
     }
 
@@ -343,72 +410,99 @@ impl BagOfProcessors {
         &mut self.processors[pos]
     }
 
-    /// Port of `BagOfProcessors::isBackPropActivated` (`:73-86`): algo 3/4 (the
-    /// only ported NN algos) return a single-element vec from the net's
-    /// `isBackPropagationActivated`; everything else (here: algo 1/2, the
-    /// non-NN segmenters) falls through to the legacy's own default
-    /// `vector<bool>(1, false)` (`:85`) -- NOT an empty vec.
+    /// Port of `BagOfProcessors::isBackPropActivated` (`:73-86`): algo 3/4/5
+    /// return a single-element vec from the net's `isBackPropagationActivated`;
+    /// algo 6 the 2-element `[sad, lid]` pair (`:80-84`); everything else (here:
+    /// algo 0/1/2, the non-NN segmenters) falls through to the legacy's own
+    /// default `vector<bool>(1, false)` (`:85`) -- NOT an empty vec.
     pub fn is_back_prop_activated(&self, pos: usize) -> Vec<bool> {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.is_back_prop_activated()],
             Processor::Signal(seg) => vec![seg.is_back_prop_activated()],
+            Processor::Lid(seg) => vec![seg.is_back_prop_activated()],
+            Processor::TwinLid(seg) => vec![
+                seg.is_back_prop_activated(),
+                seg.is_back_prop_activated_lid(),
+            ],
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => vec![false],
         }
     }
 
-    /// Port of `BagOfProcessors::getWeights` (`:88-101`): algo 3/4 return a
-    /// single-element vec of the net's flat weight vector; everything else
-    /// (algo 1/2 here) falls through to the legacy's EMPTY `vector<Eigen::
-    /// VectorXd>()` default (`:100`) -- an empty Vec, unlike
-    /// `isBackPropActivated`'s single-`false` default.
+    /// Port of `BagOfProcessors::getWeights` (`:88-101`): algo 3/4/5 return a
+    /// single-element vec of the net's flat weight vector; algo 6 the paired
+    /// `[regular, LID]` vec (`:95-98`); everything else (algo 0/1/2 here) falls
+    /// through to the legacy's EMPTY `vector<Eigen::VectorXd>()` default
+    /// (`:100`) -- an empty Vec, unlike `isBackPropActivated`'s single-`false`
+    /// default.
     pub fn get_weights(&self, pos: usize) -> Vec<Vec<f64>> {
         use crate::tasks::segmenter::Segmenter;
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.get_weights()],
             Processor::Signal(seg) => vec![seg.get_weights()],
+            Processor::Lid(seg) => vec![seg.get_weights()],
+            Processor::TwinLid(seg) => vec![seg.get_weights(), seg.get_weights_lid()],
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
         }
     }
 
-    /// Port of `BagOfProcessors::setWeights` (`:103-114`): algo 3/4 forward
-    /// `new_weights[0]` to the net's `setWeights`; algo 1/2 (no legacy `else`
-    /// branch at `:103-114`) are a no-op.
+    /// Port of `BagOfProcessors::setWeights` (`:103-114`): algo 3/4/5 forward
+    /// `new_weights[0]` to the net's `setWeights`; algo 6 forwards `at(0)` to
+    /// the SAD net and `at(1)` to the LID net (`:110-113`); algo 0/1/2 (no
+    /// legacy `else` branch) are a no-op.
     pub fn set_weights(&mut self, pos: usize, new_weights: &[Vec<f64>]) -> Result<()> {
         use crate::tasks::segmenter::Segmenter;
         match &mut self.processors[pos] {
             Processor::Spectral(seg) => seg.set_weights(&new_weights[0]),
             Processor::Signal(seg) => seg.set_weights(&new_weights[0]),
+            Processor::Lid(seg) => seg.set_weights(&new_weights[0]),
+            Processor::TwinLid(seg) => {
+                seg.set_weights(&new_weights[0])?;
+                seg.set_weights_lid(&new_weights[1])
+            }
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
         }
     }
 
-    /// Port of `BagOfProcessors::getInputStatistics` (`:116-130`): algo 3/4
-    /// return a single-element vec of the net's `InputStatistics`; everything
-    /// else falls through to the legacy's EMPTY default (`:128-129`).
+    /// Port of `BagOfProcessors::getInputStatistics` (`:116-130`): algo 3/4/5
+    /// return a single-element vec of the net's `InputStatistics`; algo 6 the
+    /// paired `[regular, LID]` vec (`:123-126`); everything else falls through
+    /// to the legacy's EMPTY default (`:128-129`).
     pub fn get_input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.input_statistics().clone()],
             Processor::Signal(seg) => vec![seg.input_statistics().clone()],
+            Processor::Lid(seg) => vec![seg.input_statistics().clone()],
+            Processor::TwinLid(seg) => vec![
+                seg.input_statistics().clone(),
+                seg.get_input_statistics_lid().clone(),
+            ],
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
         }
     }
 
-    /// Port of `BagOfProcessors::getWeightsDerivatives` (`:132-146`): algo 3/4
-    /// return a single-element vec of the net's `Nx2` derivative matrix;
-    /// everything else falls through to the legacy's EMPTY default
-    /// (`:143-144`).
+    /// Port of `BagOfProcessors::getWeightsDerivatives` (`:132-146`): algo
+    /// 3/4/5 return a single-element vec of the net's `Nx2` derivative matrix;
+    /// algo 6 the paired `[regular, LID]` vec (`:139-142`); everything else
+    /// falls through to the legacy's EMPTY default (`:143-144`).
     pub fn get_weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.get_weights_derivatives()],
             Processor::Signal(seg) => vec![seg.get_weights_derivatives()],
+            Processor::Lid(seg) => vec![seg.get_weights_derivatives()],
+            Processor::TwinLid(seg) => vec![
+                seg.get_weights_derivatives(),
+                seg.get_weights_derivatives_lid(),
+            ],
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
         }
     }
 
     /// Port of `BagOfProcessors::saveWeights` (`:148-181`): per-algo save
-    /// criterion, gated on beating the running `bestCost[pos]`. Algo 1/2 have no
-    /// matching legacy `if` branch -- no-op here too. Algo 5/6 are unreachable in
-    /// 4a (bag construction bails on those algos in [`Self::from_configs`]).
+    /// criterion, gated on beating the running `bestCost[pos]`. Algo 0/1/2 have
+    /// no matching legacy `if` branch -- no-op here too. Algo 5 criterion is
+    /// `badClassifLID + costLID` (`:166`); algo 6 is `cost + costLID` (`:173`)
+    /// and saves BOTH nets -- the LID save via `saveWeightsLID`, which prefixes
+    /// the filename with `LID_` internally (`:176`).
     /// Arity mirrors the legacy signature (`:148`) verbatim.
     #[allow(clippy::too_many_arguments)]
     fn save_weights(
@@ -440,19 +534,39 @@ impl BagOfProcessors {
                     best_cost.insert(pos, save_criterion);
                 }
             }
+            Processor::Lid(seg) => {
+                // legacy: :165-171 saveCriterion = badClassifLID + costLID.
+                let save_criterion = bad_classif_lid + cost_lid;
+                if best_cost[&pos] > save_criterion {
+                    seg.save_weights(filename, &derivs[&pos][0], &stats[&pos][0])?;
+                    best_cost.insert(pos, save_criterion);
+                }
+            }
+            Processor::TwinLid(seg) => {
+                // legacy: :172-179 saveCriterion = cost + costLID; BOTH nets saved
+                // under ONE gate (`saveWeightsLID` adds its own `LID_` prefix).
+                let save_criterion = cost + cost_lid;
+                if best_cost[&pos] > save_criterion {
+                    seg.save_weights(filename, &derivs[&pos][0], &stats[&pos][0])?;
+                    seg.save_weights_lid(filename, &derivs[&pos][1], &stats[&pos][1])?;
+                    best_cost.insert(pos, save_criterion);
+                }
+            }
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
-        // Algo 5/6 criteria (`:163-180`, badClassifLID+costLID / cost+costLID) are
-        // unreachable in 4a: `from_configs` bails on Algo_choice 5/6.
-        let _ = (cost_lid, bad_classif_lid);
         Ok(())
     }
 
     /// Port of `BagOfProcessors::updateWeights` (`:183-205`): per-algo update
     /// criterion, unconditional (unlike `saveWeights`, no best-cost gate). Algo
-    /// 1/2 no-op (no legacy branch). Algo 5/6 unreachable in 4a.
+    /// 0/1/2 no-op (no legacy branch). Algo 5's criterion is `costLID`
+    /// (`:193`); algo 6 updates the SAD net with `cost` THEN the LID net with
+    /// `costLID` (`:196-200`) -- the caller's `:465` `costLID = -1.0` no-speech
+    /// gate is LIVE for both LID arms (the commented-out `saveCriterion > 0`
+    /// skip at `:199-203` is dead: the update runs unconditionally, -1.0 cost
+    /// included).
     fn update_weights(
         &mut self,
         pos: usize,
@@ -475,19 +589,35 @@ impl BagOfProcessors {
                 let save_criterion = cost;
                 seg.update_weights(&derivs[&pos][0], save_criterion);
             }
+            Processor::Lid(seg) => {
+                // legacy: :192-194 saveCriterion = costLID.
+                seg.update_weights(&derivs[&pos][0], cost_lid);
+            }
+            Processor::TwinLid(seg) => {
+                // legacy: :195-200 updateWeights(cost) THEN updateWeightsLID(costLID).
+                seg.update_weights(&derivs[&pos][0], cost);
+                seg.update_weights_lid(&derivs[&pos][1], cost_lid);
+            }
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
-        let _ = cost_lid;
     }
 
     /// Port of `BagOfProcessors::PrintConfusionMatrix` (`:473-598`): LID confusion
     /// matrix + normalized error percentage, reachable only for algo 5/6 (the
     /// `saveAndUpdate` call site is gated on `_AlgoTypes[ii] == 5 || == 6`,
-    /// `:438-441`). Still dead code here in Task 1: `save_and_update`'s guard at
-    /// `unreachable!("Algo 5/6 - Phase 4b")` below stays until Task 9 wires this
-    /// method into that call site.
+    /// `:438-441`). Wired into `save_and_update` since Task 9.
+    ///
+    /// USAGE FINDING (Task 9 source re-read of `:436-443,468`): the returned
+    /// `errorPercLID` feeds ONLY the `:443` `cout` status line, and the
+    /// `outputConfusion` display string is printed at `:468` -- NEITHER is
+    /// stored on any member, result row, mem matrix, or artifact. The call has
+    /// NO side effects on parity-relevant state (the matrix is a function
+    /// local). The port therefore invokes it for flow parity and exposes the
+    /// `(error, matrix)` pair only as a test-support observation
+    /// ([`Self::last_confusion_for_test`]); nothing production-visible consumes
+    /// the values -- inventing storage would deviate from the legacy.
     ///
     /// Delegates to [`confusion::confusion_from_results`] for the sentinel
     /// decode + argmax accumulation (`:501-535`) and the row-normalized error
@@ -502,7 +632,6 @@ impl BagOfProcessors {
     /// is never executed); its `return error/classNb` (`Helpers.hpp:438`) is
     /// what `:597`'s `return error;` hands back unchanged (the commented-out
     /// `return error/classNb;` at `:596` would have double-divided).
-    #[allow(dead_code)]
     fn print_confusion_matrix(
         &self,
         results_mat: &Array2<f64>,
@@ -510,6 +639,15 @@ impl BagOfProcessors {
     ) -> (f64, Array2<f64>) {
         let (matrix, error) = confusion::confusion_from_results(results_mat);
         (error, matrix)
+    }
+
+    /// Test-observation hook (Task 9, no legacy counterpart): the last
+    /// `(errorPercLID, confusion)` pair per conf produced by `save_and_update`'s
+    /// algo-5/6 confusion block -- the legacy prints both and stores neither, so
+    /// this is the only way a golden can pin the aggregation.
+    #[cfg(feature = "test-support")]
+    pub fn last_confusion_for_test(&self) -> &[(f64, Array2<f64>)] {
+        &self.last_confusion
     }
 
     /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
@@ -550,6 +688,9 @@ impl BagOfProcessors {
         cost_lid_row: &mut [f64],
         bad_classif_lid_row: &mut [f64],
     ) -> Result<()> {
+        #[cfg(feature = "test-support")]
+        self.last_confusion.clear();
+
         for ii in 0..self.nb_of_conf {
             let m = &results_per_conf[ii];
             let (rows, cols) = m.dim();
@@ -600,9 +741,25 @@ impl BagOfProcessors {
             let _wer = wer_subs + wer_ins + wer_dels;
             let _ = (wer_correct, wer_coverage_penalty, wer_delay_penalty);
 
-            // legacy: :435-441 confusion matrix, algo 5/6 only -- unreachable in 4a.
+            // legacy: :435-441 confusion block, algo 5/6 only: slice the confusion
+            // columns `block(0, 16, rows, cols-2-16)` and feed PrintConfusionMatrix.
+            // errorPercLID + the confusion string are DISPLAY-ONLY in the legacy
+            // (`:443` cout / `:468` cout) -- nothing parity-relevant is stored (see
+            // print_confusion_matrix's usage finding), so outside test-support the
+            // pair is dropped after the call.
             if self.algo_types[ii] == 5 || self.algo_types[ii] == 6 {
-                unreachable!("Algo 5/6 - Phase 4b");
+                let conf_cols = cols - 2 - 16;
+                let mut block = Array2::<f64>::zeros((rows, conf_cols));
+                for r in 0..rows {
+                    for c in 0..conf_cols {
+                        block[[r, c]] = m[[r, 16 + c]];
+                    }
+                }
+                let confusion_pair = self.print_confusion_matrix(&block, ii + 1);
+                #[cfg(feature = "test-support")]
+                self.last_confusion.push(confusion_pair);
+                #[cfg(not(feature = "test-support"))]
+                let _ = confusion_pair;
             }
 
             // legacy: :445-446 total durations, needed for the :465 gate.
@@ -807,6 +964,9 @@ impl BagOfProcessors {
                 let refc = reference.as_ref().map(|r| &r[chan]);
                 let report = compute_errors(&mut seg_per_chan[chan], refc, nb_words);
                 let speech_duration = speech_duration_of(&seg_per_chan[chan]);
+                // legacy: :338/:380 `!seg._IsLIDCorrect.empty()` -- LID slots live for
+                // algo 5/6 (the row WIDTH grows by the class count), else two 0.0s.
+                let lid = self.processors[ii].lid_row_data(chan);
 
                 let row = if scored {
                     assemble_scored_row(
@@ -816,9 +976,15 @@ impl BagOfProcessors {
                         audio_duration,
                         speech_duration,
                         nb_of_classif[chan],
+                        lid.as_ref(),
                     )
                 } else {
-                    assemble_unscored_row(time_per_hour, audio_duration, speech_duration)
+                    assemble_unscored_row(
+                        time_per_hour,
+                        audio_duration,
+                        speech_duration,
+                        lid.as_ref(),
+                    )
                 };
                 chan_map.insert(chan, row);
             }
@@ -955,9 +1121,14 @@ fn strip_last_4(s: &str) -> String {
     }
 }
 
-/// The scored 18-column row (`:313-350`): errors + timing + cost + duration +
-/// speech walk + WER (cols 7-13) + the two 0.0 LID slots + lid_nb_of_classif (0
-/// in 4a) + nb_of_classif.
+/// The scored result row (`:313-350`): errors + timing + cost + duration +
+/// speech walk + WER (cols 7-13) + the LID block + lid_nb_of_classif +
+/// nb_of_classif. WIDTH: 18 columns for algo 0-4 (`lid == None`: the two 0.0
+/// LID slots, `:344-347`); `18 + classNb` for algo 5/6 (`lid == Some`:
+/// `[14]=_LIDCumulativeError`, `[15]=_IsLIDCorrect`, then one confusion column
+/// per class from `_LIDClassificationErrors`, `:338-343`). The final two
+/// columns are ALWAYS `[len-2]=_LIDNbOfClassif`, `[len-1]=_NbOfClassif`
+/// (`:348-349`, pushed OUTSIDE the LID gate).
 fn assemble_scored_row(
     report: &ScoreReport,
     time_per_hour: f64,
@@ -965,6 +1136,7 @@ fn assemble_scored_row(
     audio_duration: f64,
     speech_duration: f64,
     nb_of_classif: i64,
+    lid: Option<&LidRowData>,
 ) -> Vec<f64> {
     let speech = report.per_class[SegClass::Speech as usize];
     let mut global_error_rate = 0.0;
@@ -977,7 +1149,7 @@ fn assemble_scored_row(
     // The nb_words result column is -1 in that case (Phase 4a tier-1 golden).
     let wer = report.wer.unwrap_or(WerStats::legacy_default());
 
-    vec![
+    let mut row = vec![
         100.0 * speech.pfa,        // 0
         100.0 * speech.pmiss,      // 1
         100.0 * global_error_rate, // 2
@@ -992,25 +1164,30 @@ fn assemble_scored_row(
         wer.dels as f64,           // 11
         wer.coverage_penalty,      // 12
         wer.delay_penalty,         // 13
-        0.0,                       // 14 (no LID in 4a)
-        0.0,                       // 15
-        0.0,                       // 16 lid_nb_of_classif
-        nb_of_classif as f64,      // 17
-    ]
+    ];
+    push_lid_block(&mut row, lid);
+    // legacy: :348-349 -- the two counters, outside the LID gate.
+    row.push(lid.map_or(0.0, |l| l.nb_of_classif as f64)); // len-2 _LIDNbOfClassif
+    row.push(nb_of_classif as f64); // len-1 _NbOfClassif
+    row
 }
 
-/// The unscored 18-column row (`:358-392`): zeros for the error cols and the two
+/// The unscored result row (`:358-392`): zeros for the error cols and the two
 /// counters, timing/duration/speech walk still real. The WER columns (7-13) push
 /// `seg._WordErrorRate[chan]` UNCHANGED (Pass 1 never ran), which is the legacy
 /// WordErrorRate constructor default: `_NbWords = -1`, everything else 0. So col 7
-/// (nb_words) is -1, NOT 0 (Phase 4a tier-1 golden).
+/// (nb_words) is -1, NOT 0 (Phase 4a tier-1 golden). The LID block (`:380-389`)
+/// is IDENTICAL to the scored branch's (the members are real either way -- the
+/// `:383` `.size()` vs `:341` `.cols()` difference is vacuous for a row vector),
+/// but the two trailing counters are hard 0s (`:390-391`).
 fn assemble_unscored_row(
     time_per_hour: f64,
     audio_duration: f64,
     speech_duration: f64,
+    lid: Option<&LidRowData>,
 ) -> Vec<f64> {
     let wer = WerStats::legacy_default();
-    vec![
+    let mut row = vec![
         0.0,                  // 0
         0.0,                  // 1
         0.0,                  // 2
@@ -1025,11 +1202,28 @@ fn assemble_unscored_row(
         wer.dels as f64,      // 11 dels
         wer.coverage_penalty, // 12 coverage
         wer.delay_penalty,    // 13 delay
-        0.0,                  // 14 LID slot
-        0.0,                  // 15 LID slot
-        0.0,                  // 16 lid_nb_of_classif (0)
-        0.0,                  // 17 nb_of_classif (0)
-    ]
+    ];
+    push_lid_block(&mut row, lid);
+    row.push(0.0); // len-2 (:390 -- hard 0, unlike the scored branch)
+    row.push(0.0); // len-1 (:391)
+    row
+}
+
+/// The `:338-347` LID block shared by both branches: `Some` pushes
+/// `[_LIDCumulativeError, _IsLIDCorrect, confusion col per class]`; `None`
+/// pushes the two 0.0 slots (no confusion columns -- the width difference).
+fn push_lid_block(row: &mut Vec<f64>, lid: Option<&LidRowData>) {
+    match lid {
+        Some(l) => {
+            row.push(l.cumulative_error); // 14
+            row.push(l.is_correct); // 15
+            row.extend_from_slice(&l.classification_errors); // 16..16+classNb
+        }
+        None => {
+            row.push(0.0); // 14
+            row.push(0.0); // 15
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1111,13 +1305,91 @@ mod tests {
         }
     }
 
+    /// Task 9: algo 5/6 construct through the bag (weightsFile keys cleared --
+    /// the committed configs carry unreachable legacy paths; the nets default-
+    /// init, which is all construction needs). The dispatch Vec shapes are the
+    /// legacy `:73-146` arms: algo 5 single-element via the (base-class) net,
+    /// algo 6 the paired `[sad, lid]` 2-element vecs.
     #[test]
-    fn algo_5_bails() {
-        let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 5);
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()) {
-            Err(e) => assert!(e.to_string().contains("Algo 5 not ported")),
-            Ok(_) => panic!("expected algo 5 to bail"),
-        }
+    fn constructs_algo_5_and_6_and_dispatch_shapes() {
+        let mut lid5 = with_bag_keys(load_config("phase4b/lid5.config"), 5);
+        lid5.insert("BLSTM_weightsFile".to_string(), String::new());
+        let mut twin = with_bag_keys(load_config("phase4b/twin_mode0.config"), 6);
+        twin.insert("BLSTM_weightsFile".to_string(), String::new());
+        twin.insert("BLSTM_LID_weightsFile".to_string(), String::new());
+
+        let mut cfgs = vec![lid5, twin];
+        let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        assert_eq!(bag.nb_of_conf(), 2);
+        assert_eq!(bag.algo_type(0), 5);
+        assert_eq!(bag.algo_type(1), 6);
+
+        // Algo 5 (pos 0): single-element vecs; backprop mirrors the config.
+        assert_eq!(bag.get_weights(0).len(), 1);
+        assert_eq!(bag.is_back_prop_activated(0).len(), 1);
+        assert_eq!(bag.get_input_statistics(0).len(), 1);
+        assert_eq!(bag.get_weights_derivatives(0).len(), 1);
+
+        // Algo 6 (pos 1): 2-element [sad, lid] vecs.
+        let w = bag.get_weights(1);
+        assert_eq!(w.len(), 2);
+        assert_ne!(w[0].len(), w[1].len(), "SAD and LID nets are distinct");
+        assert_eq!(bag.is_back_prop_activated(1).len(), 2);
+        assert_eq!(bag.get_input_statistics(1).len(), 2);
+        // Paired [sad, lid] derivs (Nx2 buffers are sized lazily on the first
+        // reset/backward, so only the VEC shape is a construction-time contract).
+        assert_eq!(bag.get_weights_derivatives(1).len(), 2);
+
+        // setWeights round-trip: algo 6 sets BOTH nets from [at(0), at(1)].
+        let mut new_w = w.clone();
+        new_w[0][0] += 1.0;
+        new_w[1][0] += 2.0;
+        bag.set_weights(1, &new_w).unwrap();
+        let after = bag.get_weights(1);
+        assert_eq!(after[0][0].to_bits(), new_w[0][0].to_bits());
+        assert_eq!(after[1][0].to_bits(), new_w[1][0].to_bits());
+    }
+
+    /// The scored/unscored row WIDTH contract (`:338-349`/`:380-391`): algo 0-4
+    /// rows are 18 cols (two 0.0 LID slots); algo 5/6 rows grow to
+    /// `18 + classNb` (confusion columns inserted after col 15), with
+    /// `[len-2]=_LIDNbOfClassif`, `[len-1]=_NbOfClassif` in BOTH widths.
+    #[test]
+    fn lid_row_width_and_slots() {
+        let report = ScoreReport {
+            per_class: [Default::default(); 23],
+            label_counts: [0.0; 23],
+            wer: None,
+        };
+        let lid = LidRowData {
+            cumulative_error: 7.5,
+            is_correct: 100.0,
+            classification_errors: vec![210.0, 30.0, 60.0], // classNb = 3
+            nb_of_classif: 42,
+        };
+
+        let plain = assemble_scored_row(&report, 1.0, 2.0, 3.0, 4.0, 9, None);
+        assert_eq!(plain.len(), 18);
+        assert_eq!(plain[14], 0.0);
+        assert_eq!(plain[15], 0.0);
+        assert_eq!(plain[16], 0.0); // len-2 lid_nb_of_classif
+        assert_eq!(plain[17], 9.0); // len-1 nb_of_classif
+
+        let wide = assemble_scored_row(&report, 1.0, 2.0, 3.0, 4.0, 9, Some(&lid));
+        assert_eq!(wide.len(), 21, "18 + classNb(3)");
+        assert_eq!(wide[14], 7.5);
+        assert_eq!(wide[15], 100.0);
+        assert_eq!(&wide[16..19], &[210.0, 30.0, 60.0]);
+        assert_eq!(wide[19], 42.0); // len-2
+        assert_eq!(wide[20], 9.0); // len-1
+
+        // Unscored branch: same LID block, hard-0 trailing counters (:390-391).
+        let unscored = assemble_unscored_row(1.0, 3.0, 4.0, Some(&lid));
+        assert_eq!(unscored.len(), 21);
+        assert_eq!(unscored[14], 7.5);
+        assert_eq!(&unscored[16..19], &[210.0, 30.0, 60.0]);
+        assert_eq!(unscored[19], 0.0);
+        assert_eq!(unscored[20], 0.0);
     }
 
     #[test]
