@@ -24,6 +24,8 @@ pub mod tasks;
 
 /// Convenience re-export: the top-level engine driver, used directly by `main.rs`.
 pub use engine::corpus_processor::CorpusProcessor;
+/// Convenience re-export: the `grad_check` seam result type (Phase 4c PyO3 surface).
+pub use engine::corpus_processor::GradCheckReport;
 
 /// Crate version, sourced from Cargo metadata.
 pub fn version() -> &'static str {
