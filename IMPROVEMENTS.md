@@ -1619,10 +1619,26 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   closes that gap with a LIVE STM reference (`f1.wav`/`f1.stm`), confirming `target.nrows() > 0`
   flows into BOTH passes' `feed_forward_backward` (live cost/counter accumulation on the real
   production driver) and pinning the pass-2 result row against a new harness dump
-  (`spectral_pitch_scored_result_pass2_chan1.bin`). Note: the reused-vs-rebuilt distinction is NOT
-  numerically observable via `result_vec` itself (target-independent given `TargetEnforcementStep >=
-  0` -- see `nn/blstm.rs::feed_forward_backward_plain`), only via cost; see the Task 10 backlog entry
-  above for the full analysis.
+  (`spectral_pitch_scored_result_pass2_chan1.bin`). Note: reuse-vs-rebuild is NOT an observable
+  distinction on this config at all -- not via `result_vec`, and not via cost either.
+  `Segmenter::get_targets` (`segmenter.rs`, from `Segmenter.cpp`) is a pure function of
+  `(reference, timeStep, timeOffset, backPropWer, classType, nRows)`; `BLSTMSpectralSegmenter.cpp
+  :724-733` computes `timeStep`/`timeOffset` exactly ONCE, before the `:735-738` target build and
+  before the pitch block, and the pitch warp (`:760-775`) preserves the periodogram's row/column
+  shape (confirmed in the ported `apply_homothety`), so `nRows` and every other argument a
+  hypothetical rebuild at `:793` would pass to `getTargets` are IDENTICAL to pass 1's -- the
+  rebuilt target would be bit-identical to the reused one, hence so would the resulting cost. The
+  golden closes the "numerically inert target" gap (a live reference now drives real, live cost/
+  counter accumulation through both passes on the production driver); the `:793` reuse-vs-rebuild
+  question itself is structurally pinned by transcription (a verbatim port of the legacy line, not
+  a port-invented shortcut) and is observationally indistinguishable from a rebuild for this
+  driver/config -- see the Task 10 backlog entry above for the full analysis. **Correction:** the
+  `0f7ab42` commit message's "All three mutation-tested (apply/run/revert)" overclaims coverage for
+  this item -- item 3 (this entry) was closed by DIRECT ASSERTION (live nonzero cost/counter values
+  on the production driver + the bit-exact pass-2 golden), not by a mutation. Per the analysis just
+  above, an apply/run/revert mutation swapping the `:793` reuse for a rebuild would be numerically
+  inert on this config (bit-identical target in, bit-identical cost out), so it could not have
+  demonstrated anything; no such mutation was run, and none would be meaningful here.
 
 - **[phase4a] Task 7b target flow does NOT interact with the `_TargetEnforcementStep < 0` interior
   rewrite for the ported configs** (`nn/blstm.rs::feed_forward_backward_plain`, risk R7 cross-ref):
@@ -1703,7 +1719,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   *Net verdict:* 4 of 6 mutations break their named golden as designed; 2 (fold-order, best-cost
   tie) expose real gaps in tie/multi-contribution coverage on the current 2-file tier-2 fixture,
   recorded honestly rather than papered over. Full detail (diffs, commands, output) in
-  `.superpowers/sdd/task-11-phase4a-report.md`.
+  `.superpowers/sdd/task-11-phase4a-report.md`. **UPDATE (Task 10):** both flagged gaps are now
+  CLOSED. The best-cost tie gap is closed by `phase4b_backlog.rs::best_cost_gate_skips_on_exact_tie`
+  (a crafted byte-equal-cost epoch B against the same `Processor::Spectral` `save_weights` gate);
+  *mutation evidence:* `best_cost[&pos] > save_criterion` -> `>=` makes it FAIL
+  (`assertion failed: !weights_artifact_b.exists()`, the tie now re-saves); reverted, PASS. The
+  fold-order gap is closed by `phase4b_backlog.rs::fold_order_ascending_golden` (a 3-file corpus
+  whose per-file derivative fold is measurably order-sensitive, per
+  `fold_order_measured_divergence_seed0`: 5865 of 67342 raw-derivative elements differ in bits
+  between ascending and descending fold order); *mutation evidence:*
+  `run_epoch`'s `per_file.sort_by_key(|(j, _, _, _)| *j)` -> `Reverse(*j)` makes it FAIL
+  (`epoch-0 (ascending fold) raw deriv [3,0] bit mismatch`); reverted, PASS. See the Task 10
+  backlog entry below for the full write-up (both items pin the RAW folded derivative matrix, not
+  the post-Rprop weights, since iRPROP- only reacts to derivative sign and this fold order's
+  divergence is too small to flip one).
 
 - **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
   (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely

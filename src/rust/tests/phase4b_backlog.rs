@@ -129,8 +129,7 @@ fn best_cost_gate_skips_on_exact_tie() {
     let stats0 = bag.get_input_statistics(0);
 
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
-    let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> =
-        BTreeMap::from([(0, vec![derivs_mat.clone()])]);
+    let derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::from([(0, vec![derivs_mat])]);
     let stats: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::from([(0, stats0)]);
 
     let _cwd = CwdGuard::enter(tmp.path());
@@ -168,8 +167,6 @@ fn best_cost_gate_skips_on_exact_tie() {
         .modified()
         .unwrap();
     let weights_bytes_a = std::fs::read(&weights_artifact).unwrap();
-
-    derivs.insert(0, vec![derivs_mat]);
 
     let out_b = "run_b.mat";
     // BYTE-EQUAL cost to epoch A: same col4/col17 values -> cost == 5.0 exactly
@@ -532,23 +529,29 @@ fn fresh_segs(audio: &speech::audio::Audio) -> Vec<Segmentation> {
 /// :1495-1509`) is reused unchanged for pass 2's FFB call (`:1592`) -- the
 /// `:793` quirk, now exercised on a NON-EMPTY target for the first time
 /// (every existing pitch golden, `phase2b_spectral_golden.rs`, passes
-/// `refs: None`). NOTE: `result_vec` (the forward-pass posteriors this test
-/// also pins bit-exact against the harness) is mathematically
-/// TARGET-INDEPENDENT here (`nn/blstm.rs::feed_forward_backward_plain`:
-/// `output` is fully determined by `feed_forward` before the target-gated
-/// cost/backward blocks run, given `TargetEnforcementStep >= 0`) -- so this
-/// does NOT (and cannot) prove the reuse via a numeric difference in the
-/// result row. What IS observable, and asserted below, is that a live
-/// reference genuinely drives the cost/counter accumulation end to end
-/// through BOTH passes (Task 7b's target-gated `feed_forward_backward` cost
-/// block) -- the actual gap the backlog item named ("no reference-driven
-/// target path" tested). Confirmed two ways: (a) live nonzero cost/counter
-/// on THIS (production) driver, and (b) the pass-2 result row bit-exact
-/// against the harness's STM-driven dump (a genuinely new fixture: the
-/// harness's reimpl transcription never wires cost through the target
-/// either, by construction -- see `scripts/extract_phase4b_fixtures.py`'s
-/// `pitch_scored` comment -- so its role here is only the bit-exact NN
-/// forward-pass pin, not a cost cross-check).
+/// `refs: None`).
+///
+/// This golden closes the "numerically inert target" gap: a live reference
+/// now genuinely drives the cost/counter accumulation end to end through
+/// BOTH passes (Task 7b's target-gated `feed_forward_backward` cost block),
+/// asserted below two ways -- (a) live nonzero cost/counter on THIS
+/// (production) driver, and (b) the pass-2 result row bit-exact against a
+/// new harness dump.
+///
+/// It does NOT (and structurally cannot) distinguish the `:793` reuse from
+/// a hypothetical rebuild -- not via `result_vec`, and not via cost either.
+/// `get_targets` (`segmenter.rs`) is a pure function of `(reference,
+/// timeStep, timeOffset, backPropWer, classType, nRows)`; the legacy
+/// (`BLSTMSpectralSegmenter.cpp:724-733`) computes `timeStep`/`timeOffset`
+/// exactly ONCE, before the pitch block, and the pitch warp preserves the
+/// periodogram's shape, so every argument a rebuild at `:793` would pass is
+/// identical to pass 1's -- the rebuilt target would be bit-identical to the
+/// reused one. The `:793` reuse is therefore structurally pinned by
+/// transcription (a verbatim port of the legacy line), and is
+/// observationally indistinguishable from a rebuild for this driver/config,
+/// not merely "provable only via cost" (the version of this comment shipped
+/// in `0f7ab42` overclaimed that; see IMPROVEMENTS.md's pitch-reuse UPDATE
+/// addendum for the correction and the full analysis).
 #[test]
 fn pitch_pass_target_reuse_under_live_reference() {
     let mut sig = build_pitch_scored();
