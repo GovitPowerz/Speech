@@ -190,6 +190,14 @@ TWIN_VARIANTS = {
     "mode1": {"mode": 1, "concat": 0, "ref": False},
     "mode2": {"mode": 2, "concat": 2, "ref": True},
     "mode3": {"mode": 3, "concat": 0, "ref": True},
+    # Task 7c: modes 4/5/6 (the :640-902 LID-train + scoring branch). The LID net
+    # trains on the whole inputSeq (feedForwardBackward) and the scoring slices
+    # LID_result_vec per speech span by LIDTimeStep/LIDTimeOffset. No concat (concat=0);
+    # always reference-driven (getTargetsLID + the per-mode classification assembly).
+    # mode 4 = REF smoothed; mode 5 = SAD VAD; mode 6 = LID2Segmentation.
+    "mode4": {"mode": 4, "concat": 0, "ref": True},
+    "mode5": {"mode": 5, "concat": 0, "ref": True},
+    "mode6": {"mode": 6, "concat": 0, "ref": True},
 }
 TWIN_FILES = ["f1", "f2", "f3"]
 TWIN_KINDS = ["result", "liderr", "confusion", "members", "boundaries"]
@@ -330,6 +338,26 @@ def _read_bin(path: Path) -> tuple[int, int, list[float]]:
     return rows, cols, data
 
 
+def _mat_dump_differs(new_mat: Path, committed_mat: Path) -> bool:
+    """Churn guard for mode7_dump_s1.mat (the DumpLIDInternals real-Eigen .mat). The
+    harness writes it via libmatio, whose MAT v5 header embeds a wall-clock timestamp
+    that churns run-to-run even when the decoded matrices are byte-identical. Return
+    True iff any decoded variable's VALUES differ, so a value-stable re-run does not
+    rewrite the committed snapshot. Same rationale as the 4a `_mat_conversion_differs`
+    pattern (scripts/extract_phase4a_fixtures.py)."""
+    a = scipy.io.loadmat(new_mat)
+    b = scipy.io.loadmat(committed_mat)
+    keys = {k for k in set(a) | set(b) if not k.startswith("__")}
+    for var in keys:
+        if var not in a or var not in b:
+            return True
+        av = np.asarray(a[var]).astype("<f8")
+        bv = np.asarray(b[var]).astype("<f8")
+        if av.shape != bv.shape or not np.array_equal(av.view(np.uint64), bv.view(np.uint64)):
+            return True
+    return False
+
+
 def _verify_lid_weight_provenance() -> dict[str, object]:
     """Task 7 IMPORTANT-2: make the `LID_bestNNWeight_1.bin` conversion reproducible +
     self-checking instead of a manual, undocumented one-off. Always asserts the
@@ -429,7 +457,13 @@ def main() -> None:
             src = tmp_dir / name
             if not src.is_file():
                 raise SystemExit(f"harness did not produce {name}")
-            shutil.copy2(src, PHASE4B_DIR / name)
+            dst = PHASE4B_DIR / name
+            # Task 7c churn nit: mode7_dump_s1.mat is libmatio output whose MAT v5 header
+            # timestamp churns run-to-run; skip the rewrite when the VALUES are unchanged
+            # (the 4a value-guarded skip pattern), so a re-run stays byte-identical.
+            if name == "mode7_dump_s1.mat" and dst.is_file() and not _mat_dump_differs(src, dst):
+                continue
+            shutil.copy2(src, dst)
 
     # 4. Parse + validate the PHASE4B_CONFUSION stdout line.
     m = PHASE4B_RE.search(stdout)
@@ -840,7 +874,25 @@ def main() -> None:
                 "SAD classification, and (mode != 0) overwrite the hypothesis via "
                 "LID2Segmentation -> reference-driven boundaries differ from mode0. The langid "
                 "deltas (~1e-16) are the ascending forward vs the real Eigen forward, recorded "
-                "per variant/file."
+                "per variant/file. Task 7c adds modes 4/5/6 (the :640-902 LID-train + scoring "
+                "branch, transcribeTwin456): the LID net runs feedForwardBackward ONCE over the "
+                "WHOLE inputSeq (:664) and the scoring slices LID_result_vec per speech span by "
+                "LIDTimeStep/LIDTimeOffset (offset SUBTRACTED before the divide, :811-813 -- the "
+                "load-bearing contrast vs the :1245 branch's bare begin/_SpectrumShift). The "
+                "three modes differ only in the classification the scoring iterates: mode 4 = "
+                "REFERENCE smoothed (:779-783; SAD net NOT run, cumulative_error 0); mode 5 = SAD "
+                "BLSTM VAD (blstmFeedForwardT6 on the LID-normalized inputSeq -> "
+                "results2segmentation; sadCumErr/nb populated); mode 6 = LID2Segmentation over "
+                "1-LID_result_vec.col(0) (:678-691; the SAD result_vec at :727-732 is dead). The "
+                ":798-902 accumulator is the three _PostProcessMode forms shared with the mode-7 "
+                "branch (langID += isCostModified ? segLID/rows : segLID; post-loop /= "
+                "segmentsCount or numberOfFrames, PPM != 2 -> exp, row-normalize). All configs use "
+                "PostProcessMode 0 (sum-log). NON-VACUITY: getTargetsLID is exercised (the LID "
+                "target build); LID2Segmentation (mode 6) produces speech spans DIFFERING from the "
+                "reference (~[1.73,1.81]/[1.89,1.94] vs the ref [0.4,0.9]/[1.2,1.6]) and from the "
+                "2-segment seed; the >150 sentinel is present at every file; the confusion has "
+                "diagonal (f1) + off-diagonal (f2/f3) mass. concat is always 0 (modes 4/5/6 never "
+                "reach the :1221 concat)."
             ),
             "measured": twin_measured,
         },

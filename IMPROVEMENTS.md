@@ -1926,11 +1926,49 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   mode!=0 `interestSegs` replacement (`:1297`, dump-only), so they are observably dead (and
   config-gated on `> 0`, default -1.0, besides). *Why deferred:* the deferred modes are the next
   task's scope; the pitch divergence needs its own reference-based transcription. *Fix candidate:*
-  land modes 4/5/6 + the pitch pass in a follow-up task. *Pinned by:* `boundaries_match_dump`,
-  `members_match_dump` (`tests/phase4b_twin_golden.rs`, all FIVE wav modes 0/0_concat/1/2/3
+  land modes 4/5/6 + the pitch pass in a follow-up task. **UPDATE (Task 7c):** modes 4/5/6 are now
+  LANDED (`get_segmentation_mode456`, full goldens, see the entry below); only the pitch second pass
+  + the Mode-7 WAV/CNN arm remain deferred. *Pinned by:* `boundaries_match_dump`,
+  `members_match_dump` (`tests/phase4b_twin_golden.rs`, all EIGHT wav modes 0/0_concat/1/2/3/4/5/6
   bit-exact vs the harness `TwinProbe` reimpl, itself SEG_STRUCT/LID_STRUCT-verified against the
   REAL compiled Twin) + the Mode-7 flagship goldens (`tests/phase4b_twin_mode7.rs`). Mutation:
   removing the `mode` guard makes a mode-4 config reach the mode-0 SAD-FFB path and diverge.
+
+- **[phase4b] Task 7c: modes 4/5/6 slice `LID_result_vec` by `LIDTimeStep`/`LIDTimeOffset` with the
+  offset SUBTRACTED before the divide (`:811-813`) -- NOT the `:1245` branch's bare
+  `begin/_SpectrumShift`; the LID net trains on the WHOLE inputSeq ONCE, and several per-mode
+  synthesis steps are DEAD** (`tasks/lid.rs::get_segmentation_mode456`, from
+  `TwinBLSTMSpectralLID.cpp:640-902`): unlike modes 0/1/2/3 (per-segment `feedForward`, row index
+  `begin/_SpectrumShift`), modes 4/5/6 run `_LIDBLSTMNeuralNetwork.feedForwardBackward` ONCE over the
+  whole inputSeq (`:664`) into `LID_result_vec`, then the `:798-902` scoring reads blocks
+  `rowBegin = ceil((begin - LIDTimeOffset)/LIDTimeStep)`, `rowEnd = floor((next - LIDTimeOffset)/
+  LIDTimeStep)` (offset subtracted first -- load-bearing, since `LID_result_vec` is decimated by the
+  LID net's own subsampling, not indexed in periodogram frames). The LID FFB self-normalizes inputSeq
+  IN PLACE (type -1), so for mode 5 the SAD net's OWN FFB re-normalizes the already-LID-normalized
+  buffer (double self-norm, reproduced by calling the two FFBs on the same `&mut input_seq` in the
+  legacy order: LID first, SAD second). DEAD steps reproduced as no-ops (documented, not executed):
+  (a) mode 6's `:727-732` result_vec = `1 - LID_result_vec.col(0)` + the `timeStep`/`_DecisionThresh`
+  overwrites feed ONLY `results2segmentation`, which is SKIPPED for mode 6 (`_Mode != 4 && != 6`,
+  `:773`) -- the port computes the result_vec ONLY for the dumped `last_result_rows` row, and drops
+  the threshold overwrites; (b) `totalSpeechDuration` (`:799-806`) is never read by the `:798-902`
+  post-loop (it normalizes by `segmentsCount`/`numberOfFrames`, `:888-892`) -- skipped; (c) the
+  `score = segLID(targetIndex)` locals (`:860-861,:900-901`) are dead. Per-mode classification:
+  mode 4 = REFERENCE smoothed (`seg._Classification = seg._Reference` then `smoothSegmentation`,
+  `:779-783`, via the new `Segmentation::set_segments_from`); mode 5 = SAD VAD; mode 6 =
+  `LID2Segmentation` over `1 - LID_result_vec.col(0)` (`:678-691`). The `:798-902` accumulator is the
+  three `_PostProcessMode` forms shared with the mode-7 branch (`langID += isCostModified ?
+  segLID/rows : segLID`; post-loop `/= segmentsCount` or `/= numberOfFrames`, `PPM != 2 -> exp`,
+  row-normalize). *Why deferred:* provenance -- the offset-subtracted slice + the double-norm order +
+  the dead branches are the legacy's exact behavior. *Fix candidate:* N/A. *Pinned by:*
+  `sad_result_row_matches_dump`, `lid_classification_errors_match_dump`, `lid_confusion_matches_dump`,
+  `members_match_dump`, `boundaries_match_dump` (all EIGHT variants bit-exact), plus the non-vacuity
+  `mode6_lid2segmentation_non_vacuous` (LID2Seg produces speech spans `~[1.73,1.81]/[1.89,1.94]`
+  DIFFERING from the reference `[0.4,0.9]/[1.2,1.6]`) and `mode5_runs_sad_net_modes_4_6_do_not`
+  (`tests/phase4b_twin_golden.rs`). Mutation: (i) NOT subtracting `LIDTimeOffset` in the row slice
+  (`begin/LIDTimeStep`) shifts the sliced blocks and diverges the confusion/langID; (ii) reversing
+  the FFB order for mode 5 (SAD before LID) feeds the SAD net a differently-normalized input and
+  diverges `sad_result_row`; (iii) running `results2segmentation` for mode 6 (dropping the
+  `mode == 5` guard) overwrites the `LID2Segmentation` classification and breaks `boundaries_match_dump`.
 
 - **[phase4b] The SAD FFB normalizes `inputSeq` IN PLACE (non-const `Eigen::Ref`), so the concat +
   LID scoring consume the NORMALIZED SAD input; `getBLSTMLIDInputSequence` resamples the SAD hidden

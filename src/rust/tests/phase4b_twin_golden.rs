@@ -12,7 +12,7 @@
 //! (confusion + `_IsLIDCorrect` equality, `langid_max_abs ~ 1e-16`) against the REAL
 //! compiled Twin; a structural mismatch aborts fixture generation.
 //!
-//! Four config variants over the T2 corpus (`f1/f2/f3.wav`, lang 0/1/2, weight
+//! Config variants over the T2 corpus (`f1/f2/f3.wav`, lang 0/1/2, weight
 //! 0.5/0.75/1.0; the real 33,671-weight SAD net + a synthetic 3-class LID net):
 //! - `mode0`: LID scores the SAD classification, LID input 11 == feature width -> NO
 //!   concat (`concat_branch == 0`).
@@ -22,6 +22,14 @@
 //!   cleared, LID input 59 > 11 -> the concat is CALLED but takes the EMPTY fallback
 //!   (`concat_branch == 2`).
 //! - `mode3`: SAD BLSTM VAD + LID scores the REFERENCE (`concat_branch == 0`).
+//! - `mode1`: SAD result_vec synthesized constant 10 -> all-speech classification.
+//! - Task 7c `mode4/5/6` (the `:640-902` LID-train + scoring branch): the LID net trains
+//!   on the WHOLE inputSeq (`feedForwardBackward`, `:664`) and the scoring slices
+//!   `LID_result_vec` per speech span by `LIDTimeStep`/`LIDTimeOffset` (offset SUBTRACTED
+//!   before the divide, `:811-813`). mode 4 = REFERENCE smoothed classification
+//!   (`:779-783`, SAD net not run); mode 5 = SAD BLSTM VAD (`:713-717,:773`, on the
+//!   LID-normalized inputSeq); mode 6 = `LID2Segmentation` over `1 - LID_result_vec.col(0)`
+//!   (`:678-691`). All `concat_branch == 0` (never reach the `:1221` concat).
 //!
 //! Tolerance: the SAD result_vec, liderr, and cumulative_error are libm-dependent
 //! (periodogram cos / softmax / LogLaw), so canary-gated. The confusion, nb_of_classif,
@@ -48,7 +56,7 @@ struct Variant {
     set_ref: bool,
 }
 
-const VARIANTS: [Variant; 5] = [
+const VARIANTS: [Variant; 8] = [
     Variant {
         name: "mode0",
         concat: 0,
@@ -69,16 +77,32 @@ const VARIANTS: [Variant; 5] = [
         concat: 0,
         set_ref: true,
     },
-    // Modes-1/4 decision: mode 1 (result_vec synthesized constant 10 -> all-speech, LID
-    // scores the classification, LID2Segmentation overwrites) is reachable via the shared
-    // 0/1/2/3 branch but was UNEXERCISED by a T6 golden -- pinned here as a full golden
-    // (the harness `transcribeTwin` already handled it), NOT a probe, since the fixture is
-    // cheap (the same T2 wav corpus + synthetic LID net). Appended so the `mode2`/`mode3`
-    // differ-test indices below stay valid. (Mode 4 is deferred with modes 4/5/6.)
+    // mode 1 (result_vec synthesized constant 10 -> all-speech, LID scores the
+    // classification, LID2Segmentation overwrites) is reachable via the shared 0/1/2/3
+    // branch. Appended so the `mode2`/`mode3` differ-test indices [2]/[3] stay valid.
     Variant {
         name: "mode1",
         concat: 0,
         set_ref: false,
+    },
+    // Task 7c: modes 4/5/6 (the :640-902 LID-train + scoring branch). The LID net trains
+    // on the whole inputSeq (feedForwardBackward) and the scoring slices LID_result_vec
+    // per speech span by LIDTimeStep/LIDTimeOffset. No concat (0); always reference-driven.
+    // mode 4 = REF smoothed; mode 5 = SAD VAD; mode 6 = LID2Segmentation.
+    Variant {
+        name: "mode4",
+        concat: 0,
+        set_ref: true,
+    },
+    Variant {
+        name: "mode5",
+        concat: 0,
+        set_ref: true,
+    },
+    Variant {
+        name: "mode6",
+        concat: 0,
+        set_ref: true,
     },
 ];
 
@@ -417,5 +441,75 @@ fn mode2_and_mode3_differ_from_mode0() {
             "{} did not differ from mode0 (reference-driven behavior not exercised)",
             other.name
         );
+    }
+}
+
+fn variant_by_name(name: &str) -> &'static Variant {
+    VARIANTS.iter().find(|v| v.name == name).unwrap()
+}
+
+#[test]
+fn mode6_lid2segmentation_non_vacuous() {
+    // mode 6's classification comes from LID2Segmentation over 1 - LID_result_vec.col(0)
+    // (:678-691), NOT the reference. It must (a) produce a SPEECH span (beyond the seeded
+    // [Other, End]) and (b) DIFFER from mode4 (= the reference smoothed) on at least one
+    // file -- proving LID2Segmentation actually drives the mode-6 boundaries.
+    let m4 = variant_by_name("mode4");
+    let m6 = variant_by_name("mode6");
+    let mut saw_speech = false;
+    let mut differs = false;
+    for (file, lang, w) in FILES {
+        let (_, segs4) = run_file(m4, file, lang, w);
+        let (_, segs6) = run_file(m6, file, lang, w);
+        for chan in 0..segs6.len() {
+            if segs6[chan]
+                .segments()
+                .iter()
+                .any(|s| s.ty == SegClass::Speech)
+            {
+                saw_speech = true;
+            }
+            if segs4[chan].segments() != segs6[chan].segments() {
+                differs = true;
+            }
+        }
+    }
+    assert!(saw_speech, "mode6 LID2Segmentation produced no speech span");
+    assert!(
+        differs,
+        "mode6 (LID2Segmentation) never differed from mode4 (reference smoothed)"
+    );
+}
+
+#[test]
+fn mode5_runs_sad_net_modes_4_6_do_not() {
+    // The per-mode SAD assembly (:713-775): mode 5 runs the SAD BLSTM for the VAD
+    // (nb_of_classif > 0, cumulative_error != 0); modes 4/6 synthesize result_vec from
+    // LID_result_vec and never run the SAD net (nb_of_classif == 0, cumulative_error 0).
+    for (file, lang, w) in FILES {
+        let (d4, _) = run_file(variant_by_name("mode4"), file, lang, w);
+        let (d5, _) = run_file(variant_by_name("mode5"), file, lang, w);
+        let (d6, _) = run_file(variant_by_name("mode6"), file, lang, w);
+        for chan in 0..d5.nb_of_classif().len() {
+            assert!(
+                d5.nb_of_classif()[chan] > 0,
+                "mode5 {file} chan{chan}: SAD net not run"
+            );
+            assert_eq!(
+                d4.nb_of_classif()[chan],
+                0,
+                "mode4 {file} chan{chan}: SAD net ran unexpectedly"
+            );
+            assert_eq!(
+                d6.nb_of_classif()[chan],
+                0,
+                "mode6 {file} chan{chan}: SAD net ran unexpectedly"
+            );
+            assert_eq!(
+                d4.cumulative_error()[chan],
+                0.0,
+                "mode4 {file} chan{chan}: nonzero SAD cumulative_error"
+            );
+        }
     }
 }

@@ -227,6 +227,7 @@ struct TwinProbe : TwinBLSTMSpectralLID {
     using Segmenter::results2segmentation;
     using Segmenter::getTargets;
     using Segmenter::LID2Segmentation;
+    using Segmenter::smoothSegmentation; // Task 7c: modes 4/5/6 smooth the ref classif (:661,:782).
     using LongTermSpectralVariation::_SpectrumShift;
     using BLSTMSpectralSegmenter::_SpectrumShiftInFrames;
     using BLSTMSpectralSegmenter::_BLSTMNeuralNetwork;
@@ -10275,6 +10276,356 @@ int main(int argc, char** argv) {
             if (lidNoOverlap) probe._LIDWindowShift = 0.0;
         };
 
+        // Task 7c: TRANSCRIPTION of getSegmentation for MODES 4/5/6. UNLIKE transcribeTwin
+        // (0/1/2/3), the LID net runs feedForwardBackward ONCE over the WHOLE inputSeq
+        // (:664; reimpl = selfNorm in place + lidForward + the REAL LID CostLaw) and the
+        // scoring reads LID_result_vec blocks sliced by LIDTimeStep/LIDTimeOffset (offset
+        // SUBTRACTED before the divide, :811-813). Per-mode classification: mode 4 = REF
+        // smoothed (:779-783); mode 5 = SAD BLSTM VAD (blstmFeedForwardT6 on the LID-
+        // normalized inputSeq -> results2segmentation, :713-717,:773); mode 6 =
+        // LID2Segmentation over 1-LID_result_vec.col(0) (:678-691). getTargetsLID /
+        // smoothSegmentation / LID2Segmentation / results2segmentation / getTargets /
+        // compute_errors are REAL; only the two NN forwards are the reimpl. No concat
+        // (that lives in the :1194 branch). The :798-902 accumulator is the three
+        // _PostProcessMode forms shared with the mode-7 branch.
+        auto transcribeTwin456 = [&](TwinProbe& probe, CostLaw& costLawSad, CostLaw& costLawLid,
+                                     const std::vector<long>& lstmNN, const std::vector<long>& lstmSS,
+                                     const std::vector<long>& outNN, const std::vector<long>& outSS,
+                                     T6Net& lidFwd, T6Net& lidBwd, T6Net& lidOut, int mode,
+                                     AudioStruct& audio, Segmentation& seg, const std::string& cfgPath,
+                                     const std::string& tag, bool dump,
+                                     std::vector<Eigen::MatrixXd>& confusionOut,
+                                     std::vector<int>& isCorrectOut,
+                                     std::vector<Eigen::MatrixXd>& langidOut) {
+            Loki::Factory<AbstractFFT<double>, unsigned int> gfft_factory;
+            FactoryInit<GFFTList<GFFT, 1, Max>::Result>::apply(gfft_factory);
+            const double rate = (double) audio.getFrameRate();
+            const long sadSsr = probe._BLSTMNeuralNetwork.getSubSamplingRatio();
+            const long lidSsr = probe._LIDBLSTMNeuralNetwork.getSubSamplingRatio();
+            const long lidOutSize = probe._LIDBLSTMNeuralNetwork.getOutputSize();
+            const long classNb = std::max<long>(lidOutSize, 2);
+            const bool lidCostModified = costLawLid.isCostModified();
+
+            ConfigFile featConf(cfgPath, '_');
+            featConf._Params.erase("BLSTM_weightsFile");
+            const int postProcessMode = featConf.get<int>("BLSTM_LID_PostProcessMode", 0);
+            FeatureCfg c = readFeatureCfg(featConf, "BLSTM");
+            SpectralP s = deriveSpectral(c, rate, Max);
+            probe._SpectrumShiftInFrames = s.shift_frames;
+            probe._SpectrumShift = (double) s.shift_frames / rate;
+            const long ssif = s.shift_frames;
+
+            if (c.preemph > 0) audio.applyPreemph(c.preemph);
+            if (c.noise_seed > 0) audio.applyNoise(c.noise_ratio);
+
+            MelFilterBank mel;
+            if (c.nb_bins > 0)
+                mel = MelFilterBank(c.min_mel, c.max_mel, c.nb_bins, s.min_freq_snapped,
+                                    s.max_freq_snapped, rate, s.bins - 1, c.is_log, c.nb_dct,
+                                    c.ignore_first, c.deltas_nb, c.dd_nb);
+            const double PI = 3.14159265358979323846264338327;
+            long nbFilters = mel.notEmpty() ? (long) mel.getNbFilters() : 0;
+            long nbDct = c.nb_dct;
+            if (nbDct > nbFilters) nbDct = nbFilters;
+            Eigen::MatrixXd coeffs;
+            if (c.nb_bins > 0 && c.nb_dct > 0) {
+                coeffs = Eigen::MatrixXd::Zero(nbFilters, nbDct);
+                for (long col = 0; col < nbFilters; ++col)
+                    for (long row = 0; row < nbDct; ++row)
+                        coeffs(col, row) = std::cos(PI / nbFilters * (col + 0.5) * row);
+            }
+            Eigen::MatrixXd win = getWindowingCoefficients(c.win_type, false, s.window_size + 1, c.win_param);
+            Eigen::MatrixXd noConv;
+            MelFilterBank emptyMel;
+
+            // getBLSTMParam (SAD).
+            std::vector<double>::size_type BLSTM_window_size =
+                (std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / 2.0 / ssif);
+            if ((BLSTM_window_size != 0) && (BLSTM_window_size < (std::vector<double>::size_type) sadSsr))
+                BLSTM_window_size = sadSsr;
+            long BLSTM_window_shift = (long) boost::math::round(probe._WindowShift * rate / ssif);
+            bool noOverlap = false;
+            if ((BLSTM_window_size != 0) && (BLSTM_window_shift < 1)) {
+                noOverlap = true;
+                BLSTM_window_size = (((std::vector<double>::size_type) boost::math::round(probe._WindowSize * rate / ssif)) / sadSsr) * sadSsr;
+                if (BLSTM_window_size < 10 * (std::vector<double>::size_type) sadSsr) BLSTM_window_size = 10 * sadSsr;
+            }
+            if ((BLSTM_window_size == 0) || (BLSTM_window_shift < 1)) BLSTM_window_shift = 1;
+            probe._WindowShift = ((double) BLSTM_window_shift * ssif) / rate;
+            std::vector<double>::size_type vec_size = (std::vector<double>::size_type) audio.getFrameCount();
+            if ((vec_size / ssif) * ssif == vec_size) vec_size = vec_size / ssif;
+            else vec_size = vec_size / ssif + 1;
+            std::vector<double>::size_type real_vec_size = vec_size;
+            if (sadSsr > 1) {
+                for (auto r : probe._BLSTMNeuralNetwork.getLSTMSubSampling()) real_vec_size /= r;
+                for (auto r : probe._BLSTMNeuralNetwork.getOutputSubSampling()) real_vec_size /= r;
+            }
+
+            // getLIDBLSTMParam.
+            std::vector<double>::size_type LID_window_size =
+                (std::vector<double>::size_type) boost::math::round(probe._LIDWindowSize * rate / 2.0 / ssif);
+            if ((LID_window_size != 0) && (LID_window_size < (std::vector<double>::size_type) lidSsr))
+                LID_window_size = lidSsr;
+            long LID_window_shift = (long) boost::math::round(probe._LIDWindowShift * rate / ssif);
+            bool lidNoOverlap = false;
+            if ((LID_window_size != 0) && (LID_window_shift < 1)) {
+                lidNoOverlap = true;
+                LID_window_size = (((std::vector<double>::size_type) boost::math::round(probe._LIDWindowSize * rate / ssif)) / lidSsr) * lidSsr;
+                if (LID_window_size < 10 * (std::vector<double>::size_type) lidSsr) LID_window_size = 10 * lidSsr;
+            }
+            if ((LID_window_size == 0) || (LID_window_shift < 1)) LID_window_shift = 1;
+            probe._LIDWindowShift = ((double) LID_window_shift * ssif) / rate;
+            std::vector<double>::size_type lid_real_vec_size = vec_size;
+            if (lidSsr > 1) {
+                for (auto r : probe._LIDBLSTMNeuralNetwork.getLSTMSubSampling()) lid_real_vec_size /= r;
+                for (auto r : probe._LIDBLSTMNeuralNetwork.getOutputSubSampling()) lid_real_vec_size /= r;
+            }
+
+            // SAD timeStep/timeOffset (:696-706).
+            double timeStep = probe._WindowShift * sadSsr;
+            double timeOffset = timeStep / 2 - probe._WindowShift / 2;
+            if (BLSTM_window_size > 0) {
+                if (noOverlap) { timeStep = probe._WindowShift * sadSsr; timeOffset = timeStep / 2 - probe._WindowShift / 2; }
+                else { timeStep = probe._SpectrumShift * sadSsr; timeOffset = timeStep / 2 - probe._SpectrumShift / 2; }
+            }
+
+            // LIDTimeStep/LIDTimeOffset (:629-638).
+            double LIDTimeStep = probe._LIDWindowShift * lidSsr;
+            double LIDTimeOffset = LIDTimeStep / 2 - probe._LIDWindowShift / 2;
+            if (LID_window_size > 0) {
+                if (lidNoOverlap) { LIDTimeStep = probe._LIDWindowShift * lidSsr; LIDTimeOffset = LIDTimeStep / 2 - probe._LIDWindowShift / 2; }
+                else { LIDTimeStep = probe._SpectrumShift * lidSsr; LIDTimeOffset = LIDTimeStep / 2 - probe._SpectrumShift / 2; }
+            }
+
+            const int channelCount = audio.getChannelCount();
+            const long long endFull = audio.getFrameCount() - 1;
+            confusionOut.assign(channelCount, Eigen::MatrixXd());
+            isCorrectOut.assign(channelCount, 0);
+            langidOut.assign(channelCount, Eigen::MatrixXd());
+            double lidCostPonderation = 1.0;
+
+            for (int chan = 0; chan < channelCount; ++chan) {
+                audio.computeSegmentPeriodogramEstimates(s.order, s.shift_frames, chan, c.flag_dc,
+                                                         win, emptyMel, gfft_factory, noConv, 0, endFull);
+                Eigen::MatrixXd perio = audio._Periodogram;
+                Eigen::MatrixXd inputSeq;
+                if (mel.notEmpty()) {
+                    Eigen::MatrixXd fb = Eigen::MatrixXd::Zero(perio.rows(), mel.getNbFilters());
+                    mel.applyFilterBank(perio, fb);
+                    if (c.nb_dct > 0)
+                        inputSeq = applyDCTLoop(fb, coeffs, (int) nbDct, c.ignore_first, c.deltas_nb, c.dd_nb);
+                    else
+                        inputSeq = fb;
+                } else {
+                    inputSeq = (((perio.block(0, s.freq_beg, perio.rows(), s.freq_end - s.freq_beg + 1).array() + 1e-24).log()).matrix());
+                }
+                if (s.ltsv_half_window > 0) {
+                    long lb = mel.notEmpty() ? 0 : s.freq_beg;
+                    long le = mel.notEmpty() ? (long) inputSeq.cols() - 1 : s.freq_end;
+                    Eigen::MatrixXd ltsv = getLTSV(perio, s.ltsv_half_window, s.ltsv_shift, lb, le);
+                    Eigen::MatrixXd merged(inputSeq.rows(), inputSeq.cols() + 1);
+                    merged << inputSeq, ltsv;
+                    inputSeq = merged;
+                }
+
+                int targetIndex = audio.getRefLangIndex();
+                if (targetIndex >= (int) classNb) targetIndex = 0;
+                if (targetIndex < 0) targetIndex = 0;
+
+                // --- LID-train branch (:640-692) ---
+                Eigen::MatrixXd LID_result_vec = Eigen::MatrixXd::Zero(lid_real_vec_size, lidOutSize);
+                Eigen::MatrixXd LIDtargetSeq = Eigen::MatrixXd::Zero(lid_real_vec_size, lidOutSize);
+                if (seg._Reference.size() > 0) {
+                    seg.clearClassification(chan);
+                    seg._Classification.at(chan) = seg._Reference.at(chan);
+                    probe.smoothSegmentation(seg, chan);
+                    probe.getTargetsLID(seg, LIDTimeStep, LIDTimeOffset, LIDtargetSeq, chan, targetIndex);
+                }
+                seg.clearClassification(chan); // :663
+
+                // LID feedForwardBackward reimpl on the WHOLE inputSeq: self-norm IN PLACE
+                // (mode 5's SAD net sees the normalized input), forward, REAL LID cost.
+                selfNorm(inputSeq);
+                lidForward(lidFwd, lidBwd, lidOut, lstmNN, lstmSS, outNN, outSS, inputSeq, LID_result_vec);
+                double LIDNNCost = costLawLid.computeCost(LID_result_vec, LIDtargetSeq);
+                long LIDNbOfClassif = LID_result_vec.rows();
+
+                if (mode == 6) {
+                    seg.clearClassification(chan);
+                    Eigen::MatrixXd inv(LID_result_vec.rows(), 1);
+                    for (long r = 0; r < LID_result_vec.rows(); ++r) inv(r, 0) = 1.0 - LID_result_vec(r, 0);
+                    probe.LID2Segmentation(seg, LIDTimeStep, LIDTimeOffset, inv, chan, SPEECH,
+                                           probe._LIDDecisionThreshRising, probe._LIDDecisionThreshRising);
+                }
+
+                // --- SAD side (:694-796) ---
+                Eigen::MatrixXd sadTarget;
+                if (seg._Reference.size() > 0) {
+                    sadTarget = Eigen::MatrixXd::Zero(real_vec_size, 1);
+                    probe.getTargets(seg, timeStep, timeOffset, sadTarget, chan, SPEECH);
+                    if (lidOutSize == 1 && targetIndex != 1) sadTarget = 0 * sadTarget;
+                }
+                double nnCost = 0.0;
+                long nbClassif = 0;
+                Eigen::MatrixXd result_vec;
+                if (mode == 5) {
+                    selfNorm(inputSeq); // SAD re-normalizes the (LID-normalized) inputSeq.
+                    Eigen::MatrixXd oF, oB;
+                    result_vec = Eigen::MatrixXd::Zero(real_vec_size, 1);
+                    blstmFeedForwardT6(reimplNetSad, inputSeq, oF, oB, result_vec);
+                    if (sadTarget.rows() > 0) { nnCost = costLawSad.computeCost(result_vec, sadTarget); nbClassif = result_vec.rows(); }
+                } else if (mode == 4) {
+                    result_vec = Eigen::MatrixXd::Zero(LID_result_vec.rows(), 1);
+                    long col = (lidOutSize == 1) ? 0 : targetIndex;
+                    for (long r = 0; r < LID_result_vec.rows(); ++r) result_vec(r, 0) = LID_result_vec(r, col);
+                } else { // mode 6: 1 - LID_result_vec.col(0) (dead beyond the dumped row).
+                    result_vec = Eigen::MatrixXd::Zero(LID_result_vec.rows(), 1);
+                    for (long r = 0; r < LID_result_vec.rows(); ++r) result_vec(r, 0) = 1.0 - LID_result_vec(r, 0);
+                }
+
+                Eigen::MatrixXd result_vec2 = result_vec.transpose();
+                if (dump) {
+                    Matrix2BinaryFile(out + "twin_" + tag + "_result_chan" + std::to_string(chan + 1) + ".bin", result_vec2);
+                    ++dumps;
+                }
+                if (mode == 5) {
+                    Eigen::MatrixXd targetSeqTmp = result_vec;
+                    probe.results2segmentation(seg, timeStep, timeOffset, result_vec2, targetSeqTmp, chan, SPEECH);
+                }
+                double cumErr = nnCost;
+                long nbOfClassif = nbClassif;
+
+                if (mode == 4) {
+                    seg.clearClassification(chan);
+                    seg._Classification.at(chan) = seg._Reference.at(chan);
+                    probe.smoothSegmentation(seg, chan);
+                }
+
+                // --- scoring branch (:798-902) ---
+                Eigen::MatrixXd langID = Eigen::MatrixXd::Zero(1, classNb);
+                Eigen::MatrixXd confusion = Eigen::MatrixXd::Zero(classNb + 2, classNb + 2);
+                for (long kk = 0; kk < classNb + 1; ++kk) { confusion(0, kk) = kk; confusion(kk, 0) = kk; }
+                int segmentsCount = 0;
+                int numberOfFrames = 0;
+                std::deque<Segment>& classif = seg._Classification.at(chan);
+                auto it = classif.begin();
+                auto itEnd = classif.end();
+                while (it + 1 != itEnd) {
+                    if (it->_Type == SPEECH) {
+                        std::vector<double>::size_type rowBegin =
+                            (std::vector<double>::size_type) ((it->_BeginTime - LIDTimeOffset) / LIDTimeStep);
+                        if ((double) rowBegin != (it->_BeginTime - LIDTimeOffset) / LIDTimeStep) ++rowBegin;
+                        std::vector<double>::size_type rowEnd =
+                            (std::vector<double>::size_type) (((it + 1)->_BeginTime - LIDTimeOffset) / LIDTimeStep);
+                        if (rowEnd >= (std::vector<double>::size_type) LID_result_vec.rows()) rowEnd = LID_result_vec.rows() - 1;
+                        if (rowEnd >= rowBegin) {
+                            long nRows = rowEnd - rowBegin + 1;
+                            Eigen::MatrixXd outputSeq = LID_result_vec.block(rowBegin, 0, nRows, LID_result_vec.cols());
+                            if (outputSeq.cols() == 1) {
+                                outputSeq.conservativeResize(outputSeq.rows(), 2);
+                                outputSeq.col(1) = outputSeq.col(0);
+                                outputSeq.col(0) = 1.0 - outputSeq.col(0).array();
+                            }
+                            Eigen::MatrixXd segLID = Eigen::MatrixXd::Zero(1, outputSeq.cols());
+                            if (postProcessMode == 1) {
+                                for (long kk = 0; kk < outputSeq.rows(); ++kk) {
+                                    if (outputSeq(kk, 1) >= 0.0) {
+                                        double entropy = 0.0;
+                                        Eigen::MatrixXd logOutputSeq = Eigen::MatrixXd::Zero(1, outputSeq.cols());
+                                        for (long ll = 0; ll < outputSeq.cols(); ++ll) {
+                                            logOutputSeq(0, ll) = log(std::max(1e-24, outputSeq(kk, ll)));
+                                            entropy -= outputSeq(kk, ll) * logOutputSeq(0, ll);
+                                        }
+                                        entropy /= log(2);
+                                        if (entropy < 1e-24) entropy = 1e-24;
+                                        for (long ll = 0; ll < outputSeq.cols(); ++ll)
+                                            segLID(0, ll) += log(std::max(1e-24, outputSeq(kk, ll) / entropy));
+                                        ++numberOfFrames;
+                                    }
+                                }
+                            } else if (postProcessMode == 2) {
+                                for (long kk = 0; kk < outputSeq.rows(); ++kk) {
+                                    if (outputSeq(kk, 1) >= 0.0) {
+                                        int ii2, jj2; outputSeq.row(kk).maxCoeff(&ii2, &jj2);
+                                        segLID(0, jj2) += 1.0; ++numberOfFrames;
+                                    }
+                                }
+                            } else {
+                                for (long kk = 0; kk < outputSeq.rows(); ++kk) {
+                                    if (outputSeq(kk, 1) >= 0.0) {
+                                        for (long ll = 0; ll < outputSeq.cols(); ++ll)
+                                            segLID(0, ll) += log(std::max(1e-24, outputSeq(kk, ll)));
+                                        ++numberOfFrames;
+                                    }
+                                }
+                            }
+                            int i2, j2; segLID.maxCoeff(&i2, &j2);
+                            long posTarget = targetIndex + 1;
+                            if (j2 == targetIndex) {
+                                confusion(posTarget, posTarget) += 1.0;
+                                confusion(posTarget, classNb + 1) += 1.0;
+                                confusion(classNb + 1, posTarget) += 1.0;
+                            } else {
+                                long posBest = j2 + 1;
+                                confusion(posTarget, posBest) += 1.0;
+                                confusion(posTarget, classNb + 1) += 1.0;
+                                confusion(classNb + 1, posBest) += 1.0;
+                            }
+                            if (lidCostModified) langID += segLID / outputSeq.rows();
+                            else langID += segLID;
+                            ++segmentsCount;
+                        }
+                    }
+                    ++it;
+                }
+                if ((segmentsCount > 0) && (langID.sum() != 0.0)) {
+                    if (lidCostModified) langID /= segmentsCount;
+                    else langID /= numberOfFrames;
+                    if (postProcessMode != 2) langID = langID.array().exp();
+                    Eigen::MatrixXd adim = langID.rowwise().sum();
+                    for (long jj = 0; jj < langID.cols(); ++jj) langID.col(jj) = langID.col(jj).cwiseQuotient(adim);
+                } else {
+                    langID(0) = 1.0;
+                }
+
+                Eigen::MatrixXd targetLID = Eigen::MatrixXd::Zero(1, classNb);
+                targetLID(targetIndex) = -2.0;
+                Eigen::MatrixXd lidErr = 100 * (langID - targetLID);
+                int isCorrect = (langID(targetIndex) == langID.maxCoeff()) ? 100 : 0;
+                lidCostPonderation = probe._LIDBLSTMNeuralNetwork.getCostPonderation(targetIndex);
+                double lidCumErr = LIDNNCost * audio._Weight;
+                cumErr *= lidCostPonderation;
+
+                confusionOut[chan] = confusion;
+                isCorrectOut[chan] = isCorrect;
+                langidOut[chan] = langID;
+
+                if (dump) {
+                    std::string suf = "_chan" + std::to_string(chan + 1) + ".bin";
+                    Matrix2BinaryFile(out + "twin_" + tag + "_liderr" + suf, lidErr);
+                    Matrix2BinaryFile(out + "twin_" + tag + "_confusion" + suf, confusion);
+                    Eigen::MatrixXd members(1, 5);
+                    members(0, 0) = lidCumErr;
+                    members(0, 1) = (double) LIDNbOfClassif;
+                    members(0, 2) = (double) isCorrect;
+                    members(0, 3) = cumErr;
+                    members(0, 4) = (double) nbOfClassif;
+                    Matrix2BinaryFile(out + "twin_" + tag + "_members" + suf, members);
+                    const auto& segs = seg._Classification.at(chan);
+                    Eigen::MatrixXd b((long) segs.size(), 2);
+                    for (std::vector<double>::size_type bi = 0; bi < segs.size(); ++bi) {
+                        b((long) bi, 0) = segs[bi]._BeginTime;
+                        b((long) bi, 1) = (double) segs[bi]._Type;
+                    }
+                    Matrix2BinaryFile(out + "twin_" + tag + "_boundaries" + suf, b);
+                    dumps += 3;
+                }
+            }
+            seg.compute_errors();
+            if (noOverlap) probe._WindowShift = 0.0;
+            if (lidNoOverlap) probe._LIDWindowShift = 0.0;
+        };
+
         // Run ONE variant: reimpl transcription (dumps) + REAL getSegmentation SECONDARY
         // (SEG_STRUCT + LID_STRUCT; abort on structural mismatch).
         auto runTwinVariant = [&](const std::string& name, int mode, int langIndex, double weight,
@@ -10390,11 +10741,123 @@ int main(int argc, char** argv) {
             runFile("f3", 2, 1.0);
         };
 
+        // Task 7c: modes 4/5/6 driver (always reference-driven, no concat). Mirrors
+        // runTwinVariant but calls transcribeTwin456; the SECONDARY real getSegmentation
+        // + SEG_STRUCT/LID_STRUCT abort-on-mismatch is identical.
+        auto runTwinVariant456 = [&](const std::string& name, int mode) {
+            const std::string cfgPath = twinConfigDir + "/twin_" + name + ".config";
+            auto runFile = [&](const std::string& fname, int fLang, double fWeight) {
+                ConfigFile confT(cfgPath, '_');
+                confT._Params.erase("BLSTM_weightsFile");
+                CorpusItem it(lidCorpusDir + "/" + fname + ".wav", "", "lang", "dial", fLang, 0, fWeight);
+                AudioStruct audioT(OFFSET_SEC, MAX_DUR_SEC, 0, it);
+                TwinProbe probe(confT);
+                probe.setWeights(flatSad);
+                long nLid = probe.getWeightsLID().size();
+                Eigen::VectorXd lidW(nLid);
+                for (long i = 0; i < nLid; ++i)
+                    lidW(i) = 0.35 * std::sin(0.7 * i + 1.0) + 0.12 * std::cos(2.3 * i + 0.4);
+                probe.setWeightsLID(lidW);
+                if (fname == "f1") {
+                    Matrix2BinaryFile(out + "twin_" + name + "_lidweights.bin", lidW);
+                    ++dumps;
+                }
+                std::vector<long> lstmNN = confT.get_list<long>("BLSTM_LID_LSTMNeuronNb");
+                std::vector<long> lstmSS = confT.get_list<long>("BLSTM_LID_LSTMSubSampling");
+                std::vector<long> outNN = confT.get_list<long>("BLSTM_LID_OutputNeuronNb");
+                std::vector<long> outSS = confT.get_list<long>("BLSTM_LID_OutputSubSampling");
+                T6Net lidFwd, lidBwd, lidOut;
+                buildLidReimpl(lidW, lstmNN, lstmSS, outNN, outSS, lidFwd, lidBwd, lidOut);
+                CostLaw costLawSad(confT, "BLSTM");
+                CostLaw costLawLid(confT, "BLSTM_LID");
+                Segmentation seg(audioT, 0.5);
+                setTwinReference(seg, audioT);
+                std::vector<Eigen::MatrixXd> confR, langidR;
+                std::vector<int> isCorrectR;
+                const std::string tag = name + "_" + fname;
+                transcribeTwin456(probe, costLawSad, costLawLid, lstmNN, lstmSS, outNN, outSS, lidFwd,
+                                  lidBwd, lidOut, mode, audioT, seg, cfgPath, tag, true, confR, isCorrectR,
+                                  langidR);
+
+                // --- SECONDARY: REAL getSegmentation (Eigen forward) ---
+                ConfigFile confReal(cfgPath, '_');
+                confReal._Params.erase("BLSTM_weightsFile");
+                AudioStruct audioReal(OFFSET_SEC, MAX_DUR_SEC, 0, it);
+                TwinProbe probeReal(confReal);
+                probeReal.setWeights(flatSad);
+                probeReal.setWeightsLID(lidW);
+                Segmentation segReal(audioReal, 0.5);
+                setTwinReference(segReal, audioReal);
+                probeReal.getSegmentation(audioReal, segReal);
+
+                const int channelCount = audioReal.getChannelCount();
+                double segMaxDt = 0.0, langidMaxAbs = 0.0;
+                for (int chan = 0; chan < channelCount; ++chan) {
+                    const auto& segsReimpl = seg._Classification.at(chan);
+                    const auto& segsReal = segReal._Classification.at(chan);
+                    if (segsReimpl.size() != segsReal.size()) {
+                        std::cerr << "SEG_STRUCT site=twin_" << name << "_" << fname << " ABORT: count "
+                                  << segsReimpl.size() << " != " << segsReal.size() << "\n";
+                        std::abort();
+                    }
+                    for (std::vector<double>::size_type bi = 0; bi < segsReimpl.size(); ++bi) {
+                        if (segsReimpl[bi]._Type != segsReal[bi]._Type) {
+                            std::cerr << "SEG_STRUCT site=twin_" << name << "_" << fname
+                                      << " ABORT: type mismatch at " << bi << "\n";
+                            std::abort();
+                        }
+                        double dt = std::fabs(segsReimpl[bi]._BeginTime - segsReal[bi]._BeginTime);
+                        if (dt > segMaxDt) segMaxDt = dt;
+                    }
+                    const Eigen::MatrixXd& confReimpl = confR[chan];
+                    const Eigen::MatrixXd& confRealM = segReal._LIDSegmentsConfusion[chan];
+                    if (confReimpl.rows() != confRealM.rows() || confReimpl.cols() != confRealM.cols()) {
+                        std::cerr << "LID_STRUCT site=twin_" << name << "_" << fname << " ABORT: confusion shape\n";
+                        std::abort();
+                    }
+                    for (long r = 0; r < confReimpl.rows(); ++r)
+                        for (long cc = 0; cc < confReimpl.cols(); ++cc)
+                            if (confReimpl(r, cc) != confRealM(r, cc)) {
+                                std::cerr << "LID_STRUCT site=twin_" << name << "_" << fname << " chan=" << chan
+                                          << " ABORT: confusion[" << r << "," << cc << "] " << confReimpl(r, cc)
+                                          << " != " << confRealM(r, cc) << "\n";
+                                std::abort();
+                            }
+                    if (isCorrectR[chan] != segReal._IsLIDCorrect[chan]) {
+                        std::cerr << "LID_STRUCT site=twin_" << name << "_" << fname << " chan=" << chan
+                                  << " ABORT: isCorrect " << isCorrectR[chan] << " != " << segReal._IsLIDCorrect[chan] << "\n";
+                        std::abort();
+                    }
+                    const Eigen::MatrixXd& errReal = segReal._LIDClassificationErrors[chan];
+                    int ti = audioReal.getRefLangIndex();
+                    long cNb = confReimpl.rows() - 2;
+                    if (ti >= (int) cNb) ti = 0;
+                    if (ti < 0) ti = 0;
+                    for (long cc = 0; cc < cNb; ++cc) {
+                        double tlid = (cc == ti) ? -2.0 : 0.0;
+                        double d = std::fabs(langidR[chan](0, cc) - (errReal(0, cc) / 100.0 + tlid));
+                        if (d > langidMaxAbs) langidMaxAbs = d;
+                    }
+                }
+                std::cout << "SEG_STRUCT site=twin_" << name << "_" << fname << " ok=1 max_dt="
+                          << std::scientific << std::setprecision(3) << segMaxDt << "\n";
+                std::cout << "LID_STRUCT site=twin_" << name << "_" << fname
+                          << " ok=1 confusion_eq=1 iscorrect_eq=1 concat=0"
+                          << " langid_max_abs=" << std::scientific << std::setprecision(3) << langidMaxAbs << "\n";
+            };
+            runFile("f1", 0, 0.5);
+            runFile("f2", 1, 0.75);
+            runFile("f3", 2, 1.0);
+        };
+
         runTwinVariant("mode0", 0, 0, 1.0, false);
         runTwinVariant("mode0_concat", 0, 0, 1.0, false);
         runTwinVariant("mode1", 1, 0, 1.0, false);
         runTwinVariant("mode2", 2, 0, 1.0, true);
         runTwinVariant("mode3", 3, 0, 1.0, true);
+        runTwinVariant456("mode4", 4);
+        runTwinVariant456("mode5", 5);
+        runTwinVariant456("mode6", 6);
     }
 
     // =====================================================================
