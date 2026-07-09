@@ -3156,6 +3156,52 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   type=am" -- since the 03a script's content-line arm is itself a permanent typed bail
   (see above), a ported driver would have nothing left to drive. Not transcribed; recorded
   here per the task brief's explicit ask to note it.
+- **[4d] `WriteListing.m`'s worker-shard `fliplr(length(index)-jj+1:-nbworker:1)`
+  interleave leaves LEFTOVER files unevenly distributed across shards, front-loaded
+  toward the LAST worker** (`src/python/speech/batching.py::write_listing`/
+  `_worker_positions`, ported from `WriteListing.m:12-19`): when `length(index)` isn't
+  evenly divisible by `nbworker`, the descending-stride range starts at
+  `length(index)-jj+1` -- i.e. jj=1 starts CLOSEST to the end of the file list and steps
+  backward by `nbworker`, so jj=1 is the shard most likely to pick up an extra element
+  from the tail. Verified against the real vendored `.m` via Octave
+  (`tools/octave_harness/stage_writelisting.m`, 7 files / 3 workers = 3+2+2): jj=1 gets
+  3 files (positions 1,4,7), jj=2 and jj=3 get 2 each (3,6 and 2,5) -- the shards are a
+  clean partition (every position covered exactly once) but NOT round-robin in the
+  intuitive "worker 1 gets the extra" sense one might assume from `jj` ascending; it is
+  "worker 1 gets the item closest to the end of the (reversed) stride". Reproduced
+  exactly by `_worker_positions` (a straight 0-based port of the MATLAB range +
+  `fliplr`), not rebalanced. *Pinned by:*
+  `test_write_listing_worker_shards_match_golden`,
+  `test_write_listing_worker_shards_partition_all_items_exactly_once`,
+  `test_worker_positions_hand_derived` (`tests/test_phase4d_listing_writers.py`), byte-
+  exact against `tests/reference_data/phase4d/listing/plain_worker_{1,2,3}.flst`
+  (Octave TIER-1 goldens, `scripts/extract_phase4d_fixtures.py --listing-fixtures`).
+- **[4d] `WriteWeightedListing.m`'s worker-shard block is dead code -- COMMENTED OUT in
+  the vendored source, not ported** (`legacy/Optimizer_V6.2.2/functions/
+  WriteWeightedListing.m:10-21`): unlike `WriteListing.m`, whose worker-shard loop is
+  live, `WriteWeightedListing.m`'s otherwise-identical block is entirely `%`-commented.
+  `write_weighted_listing` therefore has no shard variant at all -- it always writes a
+  single flat file at the exact `path` given, with NO `.flst` suffix appended (contrast
+  `write_listing`, which always appends `.flst`). Recorded because the asymmetry between
+  the two nearly-identical sibling functions is easy to "fix" by accident when porting
+  by analogy. *Pinned by:* `test_write_weighted_listing_no_suffix_appended`
+  (`tests/test_phase4d_listing_writers.py`).
+- **[4d] Octave's `sprintf('%g', ...)` matches Python's `f"{x:g}"` byte-for-byte at every
+  probed style-switch boundary -- no port-side surprise found, but the surprise was
+  worth checking before trusting it** (`write_weighted_listing`'s two numeric fields):
+  both C-library-derived `%g` implementations agree on the style-switch rule (decimal
+  when `-4 <= exponent < precision(6)`, else scientific with a minimum 2-digit,
+  sign-forced exponent), 6-significant-figure rounding (`123456.789` -> `123457`),
+  rounding CARRIES that cross the style boundary (`999999.5` rounds to 6 sig figs as
+  `1.00000e+06`, printed as `1e+06`, not the decimal `1000000`), and negative zero
+  (`-0.0` -> `"-0"`, not `"0"`). Verified live against Octave 11.3.0
+  (aarch64-apple-darwin) across integers,
+  6-sig-fig rounding, the `1e-4`/`1e-5` and `1e5`/`1e6` exponent thresholds, and
+  negative numbers/zero, BEFORE committing to the plain `:g` format spec (no custom
+  formatter needed). *Pinned by:* the eight `test_weighted_listing_g_format_*` boundary
+  tests plus `test_write_weighted_listing_matches_golden`
+  (`tests/test_phase4d_listing_writers.py`), byte-exact against
+  `tests/reference_data/phase4d/listing/weighted.lst`.
 
 ## Toolchain deviations
 

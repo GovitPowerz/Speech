@@ -200,6 +200,12 @@ LIGHT_SCRIPT = LEGACY_TREE / "norm_stm_pkt_light.pl"
 FULL_SCRIPT = LEGACY_TREE / "norm_stm_pk_cts_all_trans_03a.pl"
 STM_DIR = PHASE4D_DIR / "stm"
 
+# --- Task 8: listing-writer live Octave byte-oracle fixtures -------------------------
+OCTAVE_HARNESS_DIR = REPO_ROOT / "tools" / "octave_harness"
+LISTING_DIR = PHASE4D_DIR / "listing"
+LISTING_STAGE_LINE_RE = re.compile(r"^OCTAVE_STAGE writelisting n=(?P<n>\d+) nbworker=(?P<nbworker>\d+) wn=(?P<wn>\d+)$", re.MULTILINE)
+LISTING_EXPECTED_FILES = ["plain.flst", "plain_worker_1.flst", "plain_worker_2.flst", "plain_worker_3.flst", "weighted.lst"]
+
 # `light` cases: every content line reaches norm_stm_pkt_light.pl's pure regex chain
 # (self-contained, no shell-out), so the oracle is safe end to end. Case coverage:
 #   case1 -- comments (both forms), a blank (whitespace-only) line, an `ignore_`
@@ -655,6 +661,95 @@ def extract_stm_fixtures() -> None:
     print(f"OK: stm normalizer fixtures ({len(cases)} cases, perl {perl_version.strip()}) -> {STM_DIR.relative_to(REPO_ROOT)}")
 
 
+def _find_octave() -> str | None:
+    return shutil.which("octave-cli") or shutil.which("octave")
+
+
+def _run_octave_stage(octave: str, stage: str, out_dir: Path) -> str:
+    result = subprocess.run(
+        [octave, "--no-gui", "--quiet", "--path", str(OCTAVE_HARNESS_DIR), "--eval", f"run_stage('{stage}', '{out_dir}')"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        raise SystemExit(f"octave stage {stage} failed ({result.returncode})")
+    return result.stdout
+
+
+def extract_listing_fixtures() -> None:
+    """Task 8 pass: drive `tools/octave_harness/stage_writelisting.m` (TIER 1: the real
+    vendored `WriteListing.m` / `WriteWeightedListing.m`, unmodified) and commit its raw
+    text output as goldens under `tests/reference_data/phase4d/listing/`. Unlike every
+    other fixture this file (or the phase4c extractor) produces, these goldens ARE the
+    Octave-written files verbatim -- no `.mat` -> `.bin` conversion step, since
+    WriteListing/WriteWeightedListing already write plain `;`-delimited text directly.
+
+    Runs the stage TWICE (into separate tempdirs) and requires byte-identical output --
+    the same determinism discipline as `--stm-fixtures` -- before committing.
+
+    SKIPS gracefully (prints and returns, does not raise) when octave-cli/octave is
+    absent -- CI never runs this stage, it only consumes the committed fixtures.
+    """
+    octave = _find_octave()
+    if octave is None:
+        print("SKIP: octave-cli not found on PATH -- listing fixtures not (re)generated")
+        return
+
+    LISTING_DIR.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp1, tempfile.TemporaryDirectory() as tmp2:
+        out1, out2 = Path(tmp1), Path(tmp2)
+        stdout1 = _run_octave_stage(octave, "writelisting", out1)
+        _run_octave_stage(octave, "writelisting", out2)
+
+        m = LISTING_STAGE_LINE_RE.search(stdout1)
+        if not m:
+            raise SystemExit("OCTAVE_STAGE writelisting line missing from stdout")
+        n, nbworker, wn = int(m["n"]), int(m["nbworker"]), int(m["wn"])
+        if (n, nbworker, wn) != (7, 3, 8):
+            raise SystemExit(f"unexpected writelisting stage params: n={n} nbworker={nbworker} wn={wn}")
+
+        cases: dict[str, dict[str, object]] = {}
+        for name in LISTING_EXPECTED_FILES:
+            p1, p2 = out1 / name, out2 / name
+            if not p1.is_file():
+                raise SystemExit(f"octave stage writelisting did not produce {name}")
+            b1, b2 = p1.read_bytes(), p2.read_bytes()
+            if b1 != b2:
+                raise SystemExit(f"{name}: octave stage not deterministic across two runs")
+            (LISTING_DIR / name).write_bytes(b1)
+            cases[name] = {"sha256": _sha256(b1), "bytes": len(b1)}
+
+    octave_version_out = subprocess.run([octave, "--version"], capture_output=True, text=True).stdout
+    ver_match = re.search(r"version (\S+)", octave_version_out)
+    octave_version = ver_match.group(1) if ver_match else "unknown"
+
+    manifest: dict[str, Any] = json.loads(MANIFEST_PATH.read_text())
+    manifest["listing_writer_fixtures"] = {
+        "text": (
+            "Task 8: live Octave TIER-1 byte-oracle for the two listing writers, driving "
+            "the REAL vendored WriteListing.m / WriteWeightedListing.m unchanged via "
+            "tools/octave_harness/stage_writelisting.m. `plain*` pins WriteListing's "
+            "worker-shard fliplr(length(index)-jj+1:-nbworker:1) interleave over 7 files "
+            "/ 3 workers (7=3+2+2, every position covered in exactly one shard, a "
+            "non-trivial overlap-free split). `weighted.lst` pins WriteWeightedListing's "
+            "two %g fields across the C-style style-switch boundaries (exponent<-4, or "
+            ">=precision 6) plus a rounding-carry-across-the-boundary case and a "
+            "negative-zero case; its commented-out worker-shard block (:10-21) is dead "
+            "code in the legacy source and is not ported on either side. Run twice per "
+            "extraction to confirm determinism."
+        ),
+        "stage": "tools/octave_harness/stage_writelisting.m",
+        "octave_version": octave_version,
+        "params": {"n": n, "nb_workers": nbworker, "weighted_n": wn},
+        "cases": cases,
+    }
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"OK: listing writer fixtures ({len(cases)} files, octave {octave_version}) -> {LISTING_DIR.relative_to(REPO_ROOT)}")
+
+
 def main() -> None:
     # --- 0. Gates: resurrected binary present, PRCTS wav present. ---
     check = subprocess.run(["bash", str(FSP_RUNTIME / "setup.sh"), "--check"], capture_output=True, text=True)
@@ -1101,10 +1196,23 @@ if __name__ == "__main__":
             "tree is absent. Independent of the parity-oracle main() pass."
         ),
     )
+    parser.add_argument(
+        "--listing-fixtures",
+        action="store_true",
+        help=(
+            "Task 8 pass: run the crafted listing cases through the real vendored "
+            "WriteListing.m / WriteWeightedListing.m (via tools/octave_harness) and "
+            "commit the raw text output under tests/reference_data/phase4d/listing/. "
+            "SKIPS gracefully if octave-cli is absent. Independent of the "
+            "parity-oracle main() pass."
+        ),
+    )
     args = parser.parse_args()
     if args.measure_deltas:
         measure_deltas()
     elif args.stm_fixtures:
         extract_stm_fixtures()
+    elif args.listing_fixtures:
+        extract_listing_fixtures()
     else:
         main()

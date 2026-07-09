@@ -1,0 +1,8 @@
+wfile_01.wav;wseg_01.xml;eng;us;1;30;
+wfile_02.wav;wseg_02.xml;fra;ca;0.5;123457;
+wfile_03.wav;wseg_03.xml;eng;us;2;1e+06;
+wfile_04.wav;wseg_04.xml;fra;ca;3;100000;
+wfile_05.wav;wseg_05.xml;eng;us;4;0.0001;
+wfile_06.wav;wseg_06.xml;fra;ca;5;1e-05;
+wfile_07.wav;wseg_07.xml;eng;us;1.23457e+06;1e+06;
+wfile_08.wav;wseg_08.xml;fra;ca;-0;0;
