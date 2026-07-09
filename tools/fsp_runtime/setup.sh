@@ -108,6 +108,8 @@ export LDFLAGS="-arch x86_64 -L$PREFIX/lib"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 
 fetch() {  # url outfile
+  # No sha256/checksum verification -- integrity relies solely on the version-pinned
+  # upstream URL (see the dep table below) plus HTTPS transport trust.
   [ -f "$WORK/$2" ] && return 0
   echo "download $2"
   curl -fsSL -o "$WORK/$2" "$1"

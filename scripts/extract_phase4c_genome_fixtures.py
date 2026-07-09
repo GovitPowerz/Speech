@@ -220,9 +220,17 @@ def main() -> None:
         _, _, vm_out_l = _read_bin(tmp_dir / "genome_vecmask_out_param.bin")
         vm_out = np.asarray(vm_out_l, dtype=np.float64)
         _VECMASK_SLICES: list[tuple[str, slice, list[float]]] = [
-            ("Forward_Layer_0_LSTMBlock_0_InputGateWeights", slice(47, 60), [x / 2 + 5 for x in [-2.5, -1.25, -0.625, 0, 0.625, 1.25, 2.5, 3.75, -3.75, 5, -5, 0.3125, -0.3125]]),
+            (
+                "Forward_Layer_0_LSTMBlock_0_InputGateWeights",
+                slice(47, 60),
+                [x / 2 + 5 for x in [-2.5, -1.25, -0.625, 0, 0.625, 1.25, 2.5, 3.75, -3.75, 5, -5, 0.3125, -0.3125]],
+            ),
             ("Forward_Layer_0_LSTMBlock_1_CellWeight", slice(134, 143), [x / 2 + 5 for x in [1.5, -1.5, 2.25, -2.25, 0, 4.5, -4.5, 6.75, -6.75]]),
-            ("Backward_Layer_0_LSTMBlock_0_OutputGateWeights", slice(169, 182), [x / 2 + 5 for x in [-4.5, 4.5, -0.75, 0.75, 8.5, -8.5, 1.125, -1.125, 2.75, -2.75, 0, 9.25, -9.25]]),
+            (
+                "Backward_Layer_0_LSTMBlock_0_OutputGateWeights",
+                slice(169, 182),
+                [x / 2 + 5 for x in [-4.5, 4.5, -0.75, 0.75, 8.5, -8.5, 1.125, -1.125, 2.75, -2.75, 0, 9.25, -9.25]],
+            ),
             ("Output_Layer_1_Neuron_0_Weights", slice(249, 252), [x / 2 + 5 for x in [-1.0, 2.5, -3.25]]),
             ("NormalizeInputMean", slice(252, 255), [(x + 1) / 2 for x in [0.5, -0.25, 0.125]]),
             ("NormalizeInputStd", slice(255, 258), [abs(x) - 1e-3 for x in [-2.0, 3.0, -0.5]]),

@@ -181,7 +181,9 @@ def convert_tab_file(audio_path: str, tab_path: str, tab_lines: list[str]) -> tu
 
 
 def process_opensad15(listing: Path, out_listing: Path) -> None:
-    """Port of `main()`'s per-listing loop (`:121-141`): read `listing` (one
+    """Port of the `if __name__ == '__main__':` block's per-listing loop
+    (`:121-141` -- NOT `main()`, which is a dead no-op `pass` the legacy calls
+    AFTER the block finishes, `:111-112,145`): read `listing` (one
     `audiofile;tabfile;...` row per line), convert each referenced `.tab` file via
     [`convert_tab_file`][speech.dataprep.opensad15.convert_tab_file], write the `.xml`/
     `.stm` next to the `.tab` (`tabfile[:-4]+".xml"`/`".stm"`), and append the resulting
@@ -196,8 +198,6 @@ def process_opensad15(listing: Path, out_listing: Path) -> None:
     lines = listing.read_text(encoding="ascii").splitlines()
     with out_listing.open("wb") as out_f:
         for line in lines:
-            if not line:
-                continue
             fields = line.split(";")
             audio_path, tab_path = fields[0], fields[1]
             tab_lines = Path(tab_path).read_text(encoding="ascii").splitlines()

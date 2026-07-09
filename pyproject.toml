@@ -50,8 +50,6 @@ python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
-# scaffolding: stub bodies are bare "..."; remove once modules are implemented
-allow_empty_bodies = true
 mypy_path = "src/python"
 exclude = ["legacy/"]
 

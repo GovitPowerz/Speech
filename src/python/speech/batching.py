@@ -185,7 +185,7 @@ def write_weighted_listing(path: Path, items: list[dict[str, str]], values: NDAr
     `.flst` suffix appended, unlike `write_listing` -- one
     `filename;refseg;lang;dial;%g;%g;\\n` row per item: `values[i, 0]` is
     `filesValues(index(i),2)` (the per-file weight/relevance score), `values[i, 1]` is
-    `listing{index(i)}.duration`. The legacy's worker-shard block (`:10-21`) is
+    `listing{index(i)}.duration`. The legacy's worker-shard block (`:11-22`) is
     COMMENTED OUT in the source and is NOT ported here -- there is no
     `write_weighted_listing` shard variant.
 

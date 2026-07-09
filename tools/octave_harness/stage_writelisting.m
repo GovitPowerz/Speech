@@ -20,7 +20,7 @@ function stage_writelisting(out_dir)
   % (switches to exponential), a rounding-carry case that crosses the exponent boundary
   % (999999.5 -> 1e+06), a 7-digit integer needing 6-sig-fig rounding+exponent
   % (1234567 -> 1.23457e+06), and negative zero (-0 -> "-0", not "0"). The worker-shard
-  % block (:10-21) is COMMENTED OUT in this function's legacy source -- not exercised.
+  % block (:11-22) is COMMENTED OUT in this function's legacy source -- not exercised.
 
   n = 7;
   PS = struct();

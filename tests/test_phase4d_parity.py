@@ -28,7 +28,14 @@ construction (the OpenSAD15 corpus is not committed). Activation procedure:
      inputs -- the un-localized 2015 config `1_worker_1.config`, its `fileslisting`
      + `language2classmapping.csv`, the referenced wav/stm corpus, the weight pack
      `NNweights_config1.bin`, and the SAVED 2015 `MultiConfigResults_worker_1.mat`.
-  2. `OPENSAD15_AUDIO_ROOT=/path/to/tupleA uv run pytest
+  2. The config is NOT runnable AS COMMITTED in the 2015 tree -- it still carries the
+     original host's absolute paths. Localize the SAME 4 path keys Task 1/3's
+     extractor rewrites for the committed parity fixtures
+     (`scripts/extract_phase4d_fixtures.py::CONFIG_PATH_KEYS`): `Display_Output_
+     Directory`, `BLSTM_weightsFile`, `language2classmapping`, `fileslisting` --
+     point each at the corresponding file inside `OPENSAD15_AUDIO_ROOT` (every other
+     key stays byte-preserved) before running.
+  3. `OPENSAD15_AUDIO_ROOT=/path/to/tupleA uv run pytest
      tests/test_phase4d_parity.py::test_tupleA_replay_vs_saved_2015_results`.
 
 It is NOT a phase exit criterion (user decision: audio maybe-later).

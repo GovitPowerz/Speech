@@ -129,3 +129,7 @@ the (clean) usage smoke, not the solo run's exit code.
 Rosetta 2 (`arch -x86_64 /usr/bin/true` must pass), `jq`, `curl`, Xcode command-line
 tools (clang cross-compiles to x86_64), and network access to `downloads.xiph.org`,
 `github.com`, `sourceforge.net`, and `ghcr.io`.
+
+On another host, edit `setup.sh`'s hard-coded `LEGACY_ROOT` (the local
+`FastSpeechProcessing-legacy` checkout path, outside this repo) and `GCC_VER` (the
+pinned ghcr.io gcc-bottle tag) at the top of the file before running it.

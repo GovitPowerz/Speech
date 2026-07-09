@@ -3198,7 +3198,7 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (Octave TIER-1 goldens, `scripts/extract_phase4d_fixtures.py --listing-fixtures`).
 - **[4d] `WriteWeightedListing.m`'s worker-shard block is dead code -- COMMENTED OUT in
   the vendored source, not ported** (`legacy/Optimizer_V6.2.2/functions/
-  WriteWeightedListing.m:10-21`): unlike `WriteListing.m`, whose worker-shard loop is
+  WriteWeightedListing.m:11-22`): unlike `WriteListing.m`, whose worker-shard loop is
   live, `WriteWeightedListing.m`'s otherwise-identical block is entirely `%`-commented.
   `write_weighted_listing` therefore has no shard variant at all -- it always writes a
   single flat file at the exact `path` given, with NO `.flst` suffix appended (contrast
@@ -3314,8 +3314,10 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   test_write_scores_matches_octave_golden_bytes` + `test_tie_break_is_stable_original_column_order`
   vs `tests/reference_data/phase4d/scr/expected.scr`.
 
-- **[4d] Task 12: the vec2struct mask-VECTOR arms + `_fmt_scalar` boundary formatting --
-  CLOSED, no port fix needed (4c T8 accepted debt).** The 4c T8 final review flagged two
+- **[4d] Task 12: SIX specific vec2struct mask-VECTOR arms (per-block LSTM weight masks,
+  the output-layer neuron mask, NormalizeInputMean/Std) + `_fmt_scalar` boundary
+  formatting -- CLOSED for the arms actually exercised, no port fix needed (4c T8
+  accepted debt).** The 4c T8 final review flagged two
   transcribed-but-uncovered items: (a) the per-block LSTM weight masks, output-layer neuron
   mask, and NormalizeInputMean/Std masks (`src/python/speech/genome.py::_nn_block`/
   `_output_neuron`/`_lstm_and_output`) were ported from `vec2struct.m` but only exercised
@@ -3347,6 +3349,12 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`field = self._mget_v(...)` instead of `np.abs(self._mget_v(...))`) fails both
   `test_out_param_inverse_matches[vecmask]` and `test_vecmask_arm_writes_expected_slice
   [NormalizeInputStd]` -- confirming the golden is non-vacuous, not merely present.
+  **Scope note (not closed by this entry):** two other vector-mask sites in `genome.py`
+  stay UNEXERCISED -- `_padding_block` (`:317-327`, backing `AlgName_speech_padding`/
+  `AlgName_min_silence`/`AlgName_min_speech`) and the `AlgName_TDC_lags` mask (`:552-555`,
+  `np.minimum(self._mget_v(...), thresh)`). Phase 4d is the last roadmap phase, so there
+  is no future phase to hand this to; it is recorded here as a permanent, honest gap
+  rather than folded into the "CLOSED" claim above.
 
 ### Mutation battery (Phase 4d)
 
@@ -3356,9 +3364,14 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   Each production mutation applied/run (named suite only, FOREGROUND)/reverted
   (`git checkout --`)/re-run in isolation; tree confirmed clean (`git status --porcelain`)
   between every step. (1) OpenSAD15 collar `2.0`->`1.0` (`src/python/speech/dataprep/
-  opensad15.py::convert_tab_file`, all five `SegsExcl` guard-band sites: the two `:149`/
-  `:159`-style `beg_f - 2.0` leading-collar sites, the two `:151`/`:161`-style `end_f +
-  2.0` trailing-collar sites, and the `:154` re-open threshold `beg_f - 2.0 - 0.1`)
+  opensad15.py::convert_tab_file`, SIX `SegsExcl` guard-band sites, not five as first
+  reported (final-review correction): the two `:149`/`:159`-style `beg_f - 2.0`
+  leading-collar sites, the THREE `:151`/`:157`/`:161`-style `end_f + 2.0`
+  trailing-collar sites, and the `:154` re-open threshold `beg_f - 2.0 - 0.1`. The `:157`
+  occurrence (the close-then-reopen `if` arm's trailing collar) is OUTPUT-INERT on this
+  fixture's corpus -- always overwritten before read, so mutating it alone produces
+  byte-identical output either way; the mutation as applied changed the literal
+  site-wide, so the other five sites still carried the FAILED verdict below)
   against `tests/test_phase4d_opensad15.py` -- FAILED as expected (6 of 27: all 5
   `test_convert_tab_file_matches_hand_computed_fixture` cases plus
   `test_process_opensad15_writes_xml_stm_and_listing`, each an STM excluded-region
