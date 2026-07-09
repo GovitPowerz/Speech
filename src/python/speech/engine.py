@@ -41,6 +41,7 @@ carry a `# legacy:` provenance comment at their site.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -325,6 +326,7 @@ def forward_backward(
     weights: list[NDArray[np.float64]],
     listing_override: Path | None = None,
     *,
+    make_engine: Callable[[Path], speech_rs.Engine] | None = None,
     config_idx: int = 1,
     l2: float = 0.0,
     is_bias: list[NDArray[np.float64]] | None = None,
@@ -348,12 +350,23 @@ def forward_backward(
     `algo == 6` LID block (:362/:554), leaving the seg side unregularized (IMPROVEMENTS).
     Defaults `l2 == 0` -> no L2 (the algo-3 seam path).
 
-    `listing_override` is ADVISORY: the coarse seam builds a fresh `Engine` per gradient
-    eval against the batch listing (the legacy `WriteWeightedListing` + engine rerun), so
-    by the time an `Engine` reaches here its corpus is already fixed at construction. The
-    per-batch rebuild is a driver-level concern deferred to Phase 4d; this function runs
-    whatever corpus the passed-in engine was built with.
+    `listing_override` is the LIVE hard-example mini-batch seam (Phase 4d Task 10). When
+    set (a per-step batch listing path -- the `WriteWeightedListing` output), the corpus is
+    SWAPPED for that listing by REBUILDING the engine on it via `make_engine(listing_override)`:
+    the in-process analogue of `ComputeGradient.m`'s per-gradient `WriteWeightedListing`
+    (:53/:77) + fresh-`fsp`-per-eval (`CostFunction` :104), since a `speech_rs.Engine`'s
+    corpus is fixed at construction and cannot be re-pointed in place. `make_engine` is
+    then REQUIRED -- a `Callable[[Path], Engine]` the driver supplies, closing over the
+    candidate config so the fresh engine carries the same nets + seed weights, only the
+    fileslisting differing -- and the passed-in `engine` is ignored. `listing_override is
+    None` runs the passed engine on its fixed construction-time corpus (the full-corpus
+    path the twin/algo-3 exit gates ride).
     """
+    if listing_override is not None:
+        if make_engine is None:
+            raise ValueError("forward_backward: listing_override requires make_engine to rebuild the engine on the batch listing")
+        engine = make_engine(listing_override)
+
     nets = [np.ascontiguousarray(np.asarray(w, dtype=F64)) for w in weights]
     engine.set_weights(0, nets)
     engine.run()

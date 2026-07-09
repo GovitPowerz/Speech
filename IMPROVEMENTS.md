@@ -3222,6 +3222,43 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   (`tests/test_phase4d_listing_writers.py`), byte-exact against
   `tests/reference_data/phase4d/listing/weighted.lst`.
 
+- **[phase4d] Hard-example mini-batch CADENCE + the batch-listing deviations**
+  (`src/python/speech/drivers/train.py` `_BatchRunner`/`_BatchStep`/`_files_values`;
+  `src/python/speech/engine.py` `forward_backward`). Task 10 wires mini-batching live. Three
+  things where the SOURCE overrides the plan prose or where the port simplifies, all
+  deliberate:
+  1. **Cadence correction (source wins over the brief's "epoch start").** `CreateBatches` is
+     called EXACTLY ONCE per training run, before the optimizer (`Train_BLSTM.m:71`), NOT at
+     epoch start -- there is no epoch loop around it; the `Batches` struct persists and only
+     its cursors mutate. `GetNewBatch` + `WriteWeightedListing` live inside `ComputeGradient.m`
+     (:53/:77) -- the ONLY live caller (Train_BLSTM.m's own GetNewBatch at :76 is a
+     commented-out validation probe) -- so one fresh batch + fresh engine is drawn PER
+     GRADIENT EVAL = per inner SMORMS3 step. The port matches: `create_batches` once in
+     `train` (batch RNG = `seed + 2`), `next_listing`/`make_engine` per inner step.
+     `WriteWeightedListing` at Train_BLSTM.m:932 (the QPSO-time write) sits in a dead `if 0`
+     block for the committed algo-6 config and is NOT the live path.
+  2. **WriteWeightedListing field-6 = duration, but Corpus reads field 6 as file_id.**
+     `WriteWeightedListing.m` writes `[weight;duration]` as CSV fields 5/6, but
+     `Corpus::from_config` (`corpus.rs:248-252`) reads field 6 as `fileId` via
+     `istringstream >> int` -- so the engine reads DURATION AS FILE_ID (int-truncated). A
+     genuine legacy field-role mismatch. The port has no per-file duration model, so
+     `_BatchRunner.next_listing` writes the record's file_id into field 6 -- the engine then
+     round-trips file_id correctly (the twin corpus default 1 -> `%g` "1" -> file_id 1),
+     avoiding the mismatch's payload while keeping the byte format identical. *Fix candidate:*
+     once durations are modeled, decide whether to reproduce the duration-as-file_id read for
+     strict parity, or fix the field roles.
+  3. **No per-eval class-balance rescale + ascending-index order.** `ComputeGradient.m:72-96`
+     rescales `filesValues(:,2)` by `nbOfElem/sumInClassIndex` (in-class = `classNb == 1`)
+     before writing; the port writes the RAW listing weight (`_files_values` col1) -- the
+     `langMapConf` in-class model the port's corpus does not carry. And the written index
+     ORDER is ascending file index (`np.unique`), a simplification of `count_unique` +
+     `sortrows(filesValues, -3)` (:55-58) -- the aggregate corpus cost is order-independent
+     (`compute_cost` sums the config's rows; `aggregate_workers` re-sorts by id). Both are
+     deterministic (the determinism gate is what matters for the optimizer path, S1). *Pinned
+     by:* `tests/test_phase4d_batchmode.py` (byte-exact batch listings + rotation + the live
+     `forward_backward` `listing_override`/`make_engine` rebuild) + the batch-mode determinism
+     exit gate `tests/pyo3/test_exit_gate.py::test_batch_mode_deterministic`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

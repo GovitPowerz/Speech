@@ -58,6 +58,43 @@ def _run_once(tmp: Path, seed: int) -> dict[str, bytes]:
     return artifacts
 
 
+def _run_once_batch(tmp: Path, seed: int) -> dict[str, bytes]:
+    """Phase 4d Task 10: the twin exit gate with hard-example mini-batching ON. minibatch=1
+    (single-file batches rotating over the 2-file corpus), nb_worst=0, nb_classes=1 -- so the
+    inner SMORMS3 loop draws a fresh batch listing + REBUILDS the engine on it per step
+    (`ComputeGradient.m` cadence), instead of the full corpus. Determinism must survive the
+    per-step engine rebuilds + the seeded `create_batches` shuffle (batch RNG = seed + 2)."""
+    config = _seed_twin_train(tmp)
+    state = init_run(config, tmp / "run")
+    result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=3, minibatch=1, nb_worst=0, nb_classes=1, multilingual=False)
+    ckpt = Path(result.checkpoint_dir)
+    artifacts = {name: (ckpt / name).read_bytes() for name in ("gbest.bin", "cost_history.bin", "inner_cost_history.bin", "sad_weights.bin", "lid_weights.bin")}
+    artifacts["_gbestval"] = np.float64(result.gbestval).tobytes()
+    return artifacts
+
+
+@pytest.mark.slow
+def test_batch_mode_deterministic(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The batch-mode analogue of the twin exit gate: mini-batching ON (per-inner-step
+    weighted-listing engine rebuilds via `forward_backward`'s live `listing_override`), run
+    twice at the same fixed seed, must produce bit-identical checkpoints. Pins that the
+    fresh-engine-per-step batch path + the seeded `create_batches`/`get_new_batch` rotation
+    are deterministic end to end. Also asserts the run actually mini-batched (a batch listing
+    was written to the workdir)."""
+    a_tmp = tmp_path_factory.mktemp("exit_gate_batch_a")
+    a = _run_once_batch(a_tmp, seed=20260709)
+    b = _run_once_batch(tmp_path_factory.mktemp("exit_gate_batch_b"), seed=20260709)
+
+    assert set(a) == set(b)
+    for name in a:
+        assert a[name] == b[name], f"batch-mode checkpoint artifact {name!r} is not bit-identical across two fixed-seed runs"
+
+    # Non-vacuity: mini-batching actually engaged (a batch listing exists) and the loop ran.
+    assert (a_tmp / "_batch.lst").is_file(), "batch mode must have written at least one weighted batch listing"
+    inner_hist = np.frombuffer(a["inner_cost_history.bin"], dtype="<f8")[2:]
+    assert inner_hist.size >= 3 and np.isfinite(inner_hist).all(), "the batched SMORMS3 inner loop (>=3 steps) must run + record finite costs"
+
+
 def _seed_tier2_spectral(dst: Path) -> Path:
     """Mirrors `tests/pyo3/test_seam_replay.py::_seed_tier2_spectral`: the Algo-3 (spectral,
     single-net SAD) 2-file corpus + config + the phase0 33,671-weight pack the config's
