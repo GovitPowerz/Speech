@@ -2542,6 +2542,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   candidate:* none -- a deliberate format choice. *Pinned by:* `test_run_state_json_roundtrip`
   (`tests/test_phase4c_drivers.py`, save/load equality).
 
+- **[phase4c] `retrain` seeds `nnet_best` only, not the legacy half-population reuse**
+  (`src/python/speech/drivers/retrain.py::retrain`; `ReTrain_BLSTM.m:803`
+  `PSOseedparam = [nnet_best nnet_in(:,1:ceil(size(nnet_in,2)/2))]'`): the legacy resume
+  seeds the QPSO population's first rows with BOTH the prior run's best genome (`nnet_best`)
+  AND the top half of its final population (`nnet_in`), preserving more of the prior search's
+  diversity across the resume boundary. This port's checkpoint (`RunState`/`TrainResult` JSON,
+  see the entry above) stores only the gbest genome (`gbest.bin`), not the full terminal
+  population, so `retrain` can only seed `nnet_best`. *Why:* consistent with the JSON-state
+  deviation -- the checkpoint format was never designed to carry a population, only the winner.
+  *Fix candidate:* if population diversity across resumes becomes load-bearing, checkpoint the
+  QPSO's final population alongside `gbest.bin` and thread it through `seed_from_checkpoint`.
+  *Pinned by:* `test_retrain_seed_from_checkpoint` (`tests/test_phase4c_drivers.py`, bit-exact
+  `gbest.bin` reload) -- the single-genome seeding itself, not the missing population half.
+
 - **[phase4c] QuantumPSO's four velocity banks are DEAD but STREAM-CONSUMING**
   (`legacy/Optimizer_V6.2.2/functions/QuantumPSO.m:375-411` vs the apply gate `:447`; ported in
   `src/python/speech/optimizers.py::quantum_pso`): each epoch computes `vel1..vel4` (Trelea sets

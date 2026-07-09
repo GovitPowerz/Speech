@@ -47,7 +47,10 @@ def _decode_lid_scores(error_vad_row: NDArray[np.float64]) -> NDArray[np.float64
 
 
 def _class_keys(mapping_path: Path) -> list[str]:
-    """Class keys ordered by class id, from the `lang;dial;classid` language mapping."""
+    """Class keys ordered by class id, from the `lang;dial;classid` language mapping.
+    Diverges from legacy `Test_BLSTM.m` (`keys(langMapConf)`, alphabetical by key, not by
+    class id); `evaluate` is best-effort/not golden-pinned, so this is noted but not fixed
+    -- revisit if `.scr` output is ever promoted to a parity target."""
     rows: list[tuple[int, str]] = []
     for line in mapping_path.read_text().splitlines():
         line = line.strip()

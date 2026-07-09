@@ -34,7 +34,12 @@ def retrain(
     inner_steps: int = 20,
 ) -> TrainResult:
     """Resume training, seeding the QPSO population's first rows with the checkpoint's
-    gbest genome (`ReTrain_BLSTM.m`'s `nnet_best` reuse)."""
+    gbest genome (`ReTrain_BLSTM.m`'s `nnet_best` reuse).
+
+    Deviation: legacy `ReTrain_BLSTM.m:803` seeds `nnet_best` PLUS half the prior
+    population (`nnet_in(:,1:ceil(N/2))`); this port seeds `nnet_best` ONLY, since the
+    JSON checkpoint stores the gbest genome, not the full population (see IMPROVEMENTS.md).
+    """
     nnet_best = seed_from_checkpoint(checkpoint)
     return train(
         state,

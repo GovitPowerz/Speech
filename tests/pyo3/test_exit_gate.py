@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from speech.drivers.init import init_run
-from speech.drivers.train import train
+from speech.drivers.train import score_genome, train
+from speech.genome import genome_length
 
 speech_rs = pytest.importorskip("speech_rs")
 
@@ -73,3 +74,30 @@ def test_full_train_loop_deterministic(tmp_path_factory: pytest.TempPathFactory)
     assert cost_hist.size > 0 and np.isfinite(cost_hist).all(), "QPSO cost history must be finite + non-empty"
     inner_hist = np.frombuffer(a["inner_cost_history.bin"], dtype="<f8")[2:]
     assert inner_hist.size >= 4 and np.isfinite(inner_hist).all(), "the SMORMS3 inner loop (>=4 steps) must run + record finite costs"
+
+
+def test_genome_ponderation_moves_cost(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The genome->engine non-vacuity pin. The exit gate's determinism claim is only
+    meaningful if the genome's decoded `CostPonderation` fields (`train.py`'s
+    `_eval_config_text` injection) actually move the engine cost -- otherwise QPSO would
+    be exploring a flat cost surface. Scores the SAME seeded twin state (via
+    `score_genome`, the `cost_fn` per-candidate body, no inner SMORMS3 refinement) at two
+    well-separated random genomes and asserts a healthy cost delta. No exact float is
+    pinned (libm-robust, no canary machinery)."""
+    tmp = tmp_path_factory.mktemp("genome_cost")
+    config = _seed_twin_train(tmp)
+    state = init_run(config, tmp / "run")
+    workdir = Path(state.config_path).parent
+    d = genome_length(state.ps)
+
+    genome_a = np.random.default_rng(1).uniform(0.0, state.ps.adim, size=d)
+    genome_b = np.random.default_rng(2).uniform(0.0, state.ps.adim, size=d)
+
+    cost_a, _ = score_genome(state, genome_a, None, workdir)
+    cost_b, _ = score_genome(state, genome_b, None, workdir)
+
+    assert np.isfinite(cost_a), f"cost_a is not finite: {cost_a}"
+    assert np.isfinite(cost_b), f"cost_b is not finite: {cost_b}"
+    assert abs(cost_a - cost_b) > 1e-3, (
+        f"distinct genomes decoded to near-identical costs ({cost_a} vs {cost_b}) -- the CostPonderation genome injection may be vacuous"
+    )

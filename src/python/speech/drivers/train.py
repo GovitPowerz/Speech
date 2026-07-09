@@ -144,6 +144,34 @@ def _ponderations(genome: NDArray[np.float64], mask: dict[str, object] | None, s
     return cfg["BLSTM_CostPonderation"], cfg["BLSTM_LID_CostPonderation"], out_param
 
 
+def score_genome(
+    state: RunState,
+    genome: NDArray[np.float64],
+    mask: dict[str, object] | None,
+    workdir: Path,
+) -> tuple[float, NDArray[np.float64]]:
+    """One QPSO candidate's cost (`cost_fn`'s per-particle body, no inner SMORMS3
+    refinement): vec2struct-decode the genome's two `CostPonderation` fields, inject
+    them onto the committed base config, and score the engine fold. Factored out of
+    `train` so it is independently callable -- e.g. the genome->engine non-vacuity pin
+    in `tests/pyo3/test_exit_gate.py`. Self-contained (chdirs into `workdir` itself),
+    so it is safe to call from outside `train`'s own `_chdir(workdir)` block."""
+    sad_pond, lid_pond, out_param = _ponderations(genome, mask, state)
+    sad_tail_len, lid_tail_len = _tail_lengths(state.base_config)
+    with _chdir(workdir):
+        cost, _w, _h = _score_engine(
+            _eval_config_text(state.base_config, sad_pond, lid_pond),
+            workdir,
+            state.balance,
+            state.ps.algo,
+            state.ps.BalanceBackProp,
+            None,
+            sad_tail_len,
+            lid_tail_len,
+        )
+    return cost, out_param
+
+
 def train(
     state: RunState,
     seed: int,
@@ -185,8 +213,7 @@ def train(
         costs = np.empty(pos.shape[0], dtype=F64)
         out = np.empty_like(pos)
         for i in range(pos.shape[0]):
-            sad_pond, lid_pond, out_param = _ponderations(pos[i], mask, state)
-            cost, _w, _h = _score_engine(_eval_config_text(base, sad_pond, lid_pond), workdir, balance, algo, bbp, None, sad_tail_len, lid_tail_len)
+            cost, out_param = score_genome(state, pos[i], mask, workdir)
             costs[i] = cost
             out[i] = out_param
         return costs, out
