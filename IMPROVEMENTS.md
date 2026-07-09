@@ -3036,6 +3036,90 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `test_pitch_tempo_command_uses_py2_str_float_not_python3_str` (a noisy-past-12-sig-figs pitch
   value) and `test_variant_filename_uses_fixed_point_not_py2_str_float`
   (`tests/test_phase4d_augment.py`).
+- **[4d] `norm_stm_pk_cts_all_trans_03a.pl`'s number-normalization arm is a TYPED BAIL,
+  `NormalizerUnavailable`, not a reproduction of a broken shell-out**
+  (`src/python/speech/dataprep/stm_normalize.py::normalize_stm_full`, ported from
+  `norm_stm_pk_cts_all_trans_03a.pl:109`): every content line (anything past the
+  comment/blank checks) hits an UNCONDITIONAL backtick shell-out, `` $text=`echo "$text"
+  | norm-tagger | norm-parser --lang=spa`; `` -- no branch sits between the `chomp` (:15)
+  and that call. Both LIMSI binaries are LOST (not merely absent from this host; per the
+  task brief they no longer exist anywhere), so this arm can never run for real. Verified
+  LIVE in this environment (perl 5.34.1, binaries genuinely missing): perl's backticks do
+  NOT raise on a missing command -- the shell writes "command not found" to stderr, stdout
+  is empty, and the script silently continues with `$text = ""`, eventually printing
+  `"$head ignore_time_segment_in_scoring\n"` for EVERY content line regardless of its
+  actual content. That is an accident of this host's missing binaries, not legacy
+  behavior (a host where `norm-tagger`/`norm-parser` exist would produce real tagged/
+  parsed output), so the port does not reproduce it -- `normalize_stm_full` raises
+  `NormalizerUnavailable(head, text)` at the equivalent point instead, carrying the
+  pre-bail state for inspection. *Pinned by:*
+  `test_full_content_line_raises_normalizer_unavailable`,
+  `test_full_content_line_raise_carries_prefix_state`,
+  `test_full_content_line_after_comments_still_raises` (`tests/test_phase4d_stm.py`).
+- **[4d] `normalize_stm_full`'s pure-regex PREFIX (:17-105) has NO live-oracle backing**
+  (`stm_normalize.py::_full_prefix`): unlike `normalize_stm_light` (byte-oracle-verified
+  end to end against the real perl script), the prefix computation this function performs
+  before bailing is NEVER observable through the real 03a script for a content line -- it
+  always reaches the shell-out first (see the entry above), so there is no live run to
+  diff against. Transcribed by hand from the source per the task brief ("port everything
+  up to that point that is pure regex") and verified only by manual regex reasoning, not
+  a live run -- the weakest-tier piece of this otherwise byte-oracle-verified module.
+  *Pinned by:* `test_full_content_line_raise_carries_prefix_state` (white-box, asserts a
+  specific computed value by hand-derivation, not by oracle diff).
+- **[4d] `norm_stm_pk_cts_all_trans_03a.pl:49`'s `\[[rien]\]` filler rule is a BUG: a
+  character class, not the literal word "rien"** (ported verbatim into
+  `_FULL_PREFIX_SUBS`): `[rien]` inside the pattern is an UNESCAPED bracket expression --
+  it matches any ONE of the characters r/i/e/n, not the 4-character literal string "rien"
+  the author evidently intended (contrast :52's correctly-escaped `\[rire\]`, three lines
+  later in the same file, which DOES match the literal word). Reproduced as-is (this whole
+  rule is unreachable in practice, see the two entries above, so the bug has zero
+  observable effect in this port -- recorded for completeness since the brief asked for
+  every perl-vs-python semantic surprise the oracle work exposed).
+- **[4d] `norm_stm_pkt_light.pl` vs `norm_stm_pk_cts_all_trans_03a.pl`: two silent
+  cross-script divergences in otherwise-parallel code** (both scripts share the same
+  head/text-split-then-substitution-cascade shape, but differ at two points): (1) the
+  text JOIN uses a single space in `light` (`join ' ', @line[6..$#line]`, light:20) vs a
+  DOUBLE space in `full` (`join '  ', @line[6..$#line]`, 03a:20); (2) the leading-space
+  STRIP removes ALL leading spaces in `light` (`s/^ +//`, light:47, `+` quantifier) but
+  only ONE in `full` (`s/^ //`, 03a:80, no quantifier). Both reproduced verbatim (`"
+  ".join(tokens[6:])` vs `"  ".join(tokens[6:])`; `re.compile(r"^ +")` vs
+  `re.compile(r"^ ")`). The `full` side of both has no live-oracle backing (see above);
+  the `light` side of both IS byte-oracle-verified (every `light_*` fixture's text is
+  built via the single-space join, and `light_case3`'s multi-`{fw}`-insertion cases
+  exercise the ALL-leading-spaces strip after substitutions widen the leading run).
+  *Pinned by:* `test_full_content_line_raise_carries_prefix_state` (documents both
+  divergences inline) plus the `light_*` byte-oracle fixtures (`tests/test_phase4d_stm.py`).
+- **[4d] `perl s///g`'s non-overlap semantics on the filler alternation rules --
+  Python's `re.sub` reproduces it with NO special-casing, verified against the live
+  oracle** (`norm_stm_pkt_light.pl:29,31`, ported as `_LIGHT_SUBS`' first two entries):
+  both filler rules are anchored `(^|\s)(alt1|alt2|...)(\s|$)`, and their replacement,
+  `" {fw} "`, re-inserts the boundary spaces it consumed. Because perl's (and Python's)
+  `s///g`/`re.sub` scan for non-overlapping matches and resume scanning from the END of
+  each match (not re-offering already-consumed characters), a match's TRAILING `\s` is
+  consumed as part of that match -- denying an immediately-adjacent next token its own
+  REQUIRED leading `\s`. The net effect on a run of adjacent filler tokens is an
+  ALTERNATING matched/unmatched pattern (1st, 3rd, 5th... replaced; 2nd, 4th... survive
+  untouched), not "every filler token replaced". Confirmed identical between perl and a
+  standalone Python `re.sub` on the exact same input BEFORE writing the port (not
+  discovered after the fact) -- see the task-7 report for the worked comparison. No
+  workaround needed: transcribing each rule as one plain `re.sub` call, in source order,
+  reproduces this quirk automatically. *Pinned by:*
+  `test_light_filler_class1_adjacent_tokens_alternate`,
+  `test_light_filler_class2_adjacent_tokens_alternate` (`tests/test_phase4d_stm.py`),
+  cross-checked against `light_case2`'s byte-oracle fixture.
+- **[4d] `norm_stm_train_05a_p5_Quaero.sh` (the corpus-batch `.sh` driver around the 03a
+  script) is NOT ported** (`legacy/norm_stm_train_05a_p5_Quaero.sh`, read-only reference):
+  a bash wrapper that iterates a hard-coded set of `/users/vieru/...` corpus directories,
+  lock-file-coordinates (`dotlockfile`) concurrent per-file processing across parallel
+  invocations, detects each file's encoding via `/home/gauvain/bin/txtfile` and
+  `iconv`s ISO-8859-1 files to UTF-8 before piping through
+  `$script/norm_stm_pk_cts_all_trans_03a.pl am` and back to ISO-8859-1, then `sed`s out a
+  couple of mojibake replacement-character bytes. Every path is a dead, personal/cluster-
+  specific absolute path (mirrors the `tasks/vrcts.rs` `/usr/local/vrcts/...` shell-out
+  precedent already in this repo) with no reusable logic beyond "call the 03a script with
+  type=am" -- since the 03a script's content-line arm is itself a permanent typed bail
+  (see above), a ported driver would have nothing left to drive. Not transcribed; recorded
+  here per the task brief's explicit ask to note it.
 
 ## Toolchain deviations
 

@@ -329,5 +329,65 @@
   "size_budget": {
     "total_bytes": 2555856,
     "limit_bytes": 8388608
+  },
+  "stm_normalizer_fixtures": {
+    "text": "Task 7: live byte-oracle for the two Perl STM normalizers, run via /usr/bin/perl through tools/perl_oracle/run_norm.sh (never modifies the read-only legacy tree). `light_*` pairs exercise norm_stm_pkt_light.pl (self-contained regex pipeline) end to end -- every case's .out is the real script's stdout, run twice per case to confirm determinism. `full_*` pairs exercise norm_stm_pk_cts_all_trans_03a.pl but are restricted to comment-passthrough + blank-line-drop: any content line in that script hits an UNCONDITIONAL shell-out to the lost norm-tagger/norm-parser LIMSI binaries (:109), and in this environment (binaries absent) perl's backticks silently fail rather than crash, so a live 'output' for a content line would pin a broken-environment artifact, not real legacy behavior -- verified live (see FULL_CASES' docstring in this script). The port's normalize_stm_full raises NormalizerUnavailable for any such line instead; that trigger is pinned by a non-oracle unit test.",
+    "perl_bin": "/usr/bin/perl",
+    "perl_version": "v5.34.1",
+    "legacy_scripts": {
+      "light": "FastSpeechProcessing-legacy/norm_stm_pkt_light.pl",
+      "full": "FastSpeechProcessing-legacy/norm_stm_pk_cts_all_trans_03a.pl"
+    },
+    "runner": "tools/perl_oracle/run_norm.sh",
+    "cases": {
+      "light_case1": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "e503e8d25b63fd31de44ff7edc34348128cef685a3ee75d9002e984e0d3bd89c",
+        "out_sha256": "27615e86ca2e31513f54da4c39cadbc8fa30806ad8bea10e929a7312842d3573",
+        "twice_run_identical": true
+      },
+      "light_case2": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "412b934bda1a774e1b75fe73833d33cfa20e5e3b747bbf9eb93e02aa4b862a07",
+        "out_sha256": "4b21058c751feb44142a8a375ce019cfbb741f830aae8eea41c486fe01247d3d",
+        "twice_run_identical": true
+      },
+      "light_case3": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "3bab591e2df0e697452ff14b3d52add2a8604b43c76b42f2ba84a91559c477fd",
+        "out_sha256": "451d62ff3d55bc4ec50c50d09bc682ac3d3b39ae656216d4012d5e94921908d2",
+        "twice_run_identical": true
+      },
+      "light_case4": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "3dca4f1caaf4f0094197c929cbed9d9f287b5eaf625edb1e3f8697b7a335ea3c",
+        "out_sha256": "ea3ef12bce984c222685a5f132ba0967328769aa1d4bcf36e9863da9669b313f",
+        "twice_run_identical": true
+      },
+      "light_case5": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "d750cf6c0baf40108b2634a3da44078998bf5dbd9c4d3aeb917012b43012ebc8",
+        "out_sha256": "c625d0ad68df4abb8ab5a0722e2743cb374c53b210120d3d7d6efcbffc96eb6a",
+        "twice_run_identical": true
+      },
+      "full_case1": {
+        "script": "norm_stm_pk_cts_all_trans_03a.pl",
+        "in_sha256": "045632da85ed23cd8753a3e120e3dba6162174e80e966ddc8fc07175c32b3e0a",
+        "out_sha256": "045632da85ed23cd8753a3e120e3dba6162174e80e966ddc8fc07175c32b3e0a",
+        "twice_run_identical": true
+      },
+      "full_case2": {
+        "script": "norm_stm_pk_cts_all_trans_03a.pl",
+        "in_sha256": "1ee7eea2c47462b34ee214c016afd453a12dcfa64a7c3ae3be440ecdb7734646",
+        "out_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "twice_run_identical": true
+      },
+      "full_case3": {
+        "script": "norm_stm_pk_cts_all_trans_03a.pl",
+        "in_sha256": "2fda38f6eedb372e86449bb9beaa30417451a42998e1affb89f53ec0bc34c792",
+        "out_sha256": "9d89ab9d533598a1b7dd7ce3ba8d7e2a196c2d13b2629864b74db3e23a5aa294",
+        "twice_run_identical": true
+      }
+    }
   }
 }

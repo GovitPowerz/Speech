@@ -1,0 +1,6 @@
+;; comment line one
+;;another comment, no space
+   
+file1 1'A spk_1 0.00 1.00 <o,f0> hello world
+file1_ignore_ 1 spkA 1.00 2.00 <o,f0> ignore_ this whole line stays
+file1 1'A spk_1 2.00 3.00 <o,f0> l'ami d'un ami

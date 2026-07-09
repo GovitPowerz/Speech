@@ -193,6 +193,96 @@ SIZE_BUDGET_BYTES = 8 * 1024 * 1024
 
 GCC_VERSION_RE = re.compile(r"\(Homebrew GCC [^)]*\)\s*(\S+)")
 
+# --- Task 7: STM normalizer live perl byte-oracle fixtures --------------------------
+PERL_BIN = Path("/usr/bin/perl")
+RUN_NORM = REPO_ROOT / "tools" / "perl_oracle" / "run_norm.sh"
+LIGHT_SCRIPT = LEGACY_TREE / "norm_stm_pkt_light.pl"
+FULL_SCRIPT = LEGACY_TREE / "norm_stm_pk_cts_all_trans_03a.pl"
+STM_DIR = PHASE4D_DIR / "stm"
+
+# `light` cases: every content line reaches norm_stm_pkt_light.pl's pure regex chain
+# (self-contained, no shell-out), so the oracle is safe end to end. Case coverage:
+#   case1 -- comments (both forms), a blank (whitespace-only) line, an `ignore_`
+#            passthrough line, a plain baseline line, apostrophes in the HEAD fields.
+#   case2 -- filler class 1 (euh|hm+|mm+|eh|huhum|hum) incl. ADJACENT tokens (the
+#            s///g non-overlap skip-one quirk), filler class 2 (ee|oo|ii|aa|m|em|d)
+#            incl. adjacent tokens, uppercase (case-sensitivity: no /i flag) and
+#            substring-embedded fillers (must NOT match).
+#   case3 -- %e/%o/%i/%a/%m/%em singles, the %[emoa]+ combo class, &word fillers, all
+#            4 respiro/noise=breath bracket spellings, a generic `[..]` bracket.
+#   case4 -- paren collapse + the reattachment quirks (both directions), partial-word
+#            `word-`/`-word` wrapping (both directions), a lone hyphen, the punctuation
+#            strip class, and token-join space normalization.
+#   case5 -- the empty-text -> `ignore_time_segment_in_scoring` branch, incl. a
+#            whitespace-only text field and an all-punctuation text field.
+LIGHT_CASES: dict[str, str] = {
+    "case1": (
+        ";; comment line one\n"
+        ";;another comment, no space\n"
+        "   \n"
+        "file1 1'A spk_1 0.00 1.00 <o,f0> hello world\n"
+        "file1_ignore_ 1 spkA 1.00 2.00 <o,f0> ignore_ this whole line stays\n"
+        "file1 1'A spk_1 2.00 3.00 <o,f0> l'ami d'un ami\n"
+    ),
+    "case2": (
+        "file1 1 spkA 0.00 1.00 <o,f0> euh bonjour\n"
+        "file1 1 spkA 1.00 2.00 <o,f0> hm mm eh huhum hum\n"
+        "file1 1 spkA 2.00 3.00 <o,f0> ee oo ii aa m em d\n"
+        "file1 1 spkA 3.00 4.00 <o,f0> EUH HM MM\n"
+        "file1 1 spkA 4.00 5.00 <o,f0> euheuh euh1 xeuh\n"
+    ),
+    "case3": (
+        "file1 1 spkA 0.00 1.00 <o,f0> %e %o %i %a %m %em\n"
+        "file1 1 spkA 1.00 2.00 <o,f0> %eemoa &blah\n"
+        "file1 1 spkA 2.00 3.00 <o,f0> [-respiro-] [respiro] [noise=breath] [-noise=breath-]\n"
+        "file1 1 spkA 3.00 4.00 <o,f0> [laugh] mot [random-tag]\n"
+    ),
+    "case4": (
+        "file1 1 spkA 0.00 1.00 <o,f0> avant (blah)apres suite\n"
+        "file1 1 spkA 1.00 2.00 <o,f0> au avant(blah) apres\n"
+        "file1 1 spkA 2.00 3.00 <o,f0> mot- suite\n"
+        "file1 1 spkA 3.00 4.00 <o,f0> suite -mot\n"
+        "file1 1 spkA 4.00 5.00 <o,f0> a - b\n"
+        'file1 1 spkA 5.00 6.00 <o,f0> . ! ? , " : ; \\ / # * ^ mot\n'
+        "file1 1 spkA 6.00 7.00 <o,f0> multiple    spaces     here\n"
+    ),
+    "case5": (
+        "file1 1 spkA 0.00 1.00 <o,f0>\n"
+        "file1 1 spkA 1.00 2.00 <o,f0>    \n"
+        "file1 1 spkA 2.00 3.00 <o,f0> . ! ?\n"
+    ),
+}
+
+# `full` cases: norm_stm_pk_cts_all_trans_03a.pl's per-content-line path is an
+# UNCONDITIONAL shell-out to the lost `norm-tagger`/`norm-parser` LIMSI binaries
+# (:109) -- verified live: in THIS environment (binaries absent), perl's backticks do
+# NOT crash, they silently capture empty stdout and the script keeps going, producing a
+# "file1 1 s 0 1 <o>  " artifact of the BROKEN pipeline, not a legacy-faithful output.
+# Committing that as an oracle fixture would pin a broken-environment accident, not the
+# real script's number-normalization behavior -- so `full` fixtures are restricted to
+# the genuinely environment-INDEPENDENT prefix: comment passthrough (`^;;`, both
+# spellings) and blank-line drop (both `^\s*\n` and `^\s*$` legacy checks), which never
+# reach the split/shell-out at all. The regex-core prefix (:17-105) IS transcribed in
+# `stm_normalize.normalize_stm_full` per the brief ("port everything up to that point
+# that is pure regex"), but has NO live-oracle backing (see the module docstring and
+# IMPROVEMENTS.md); its raise-on-content-line trigger is pinned by a plain (non-oracle)
+# unit test in tests/test_phase4d_stm.py instead.
+FULL_CASES: dict[str, str] = {
+    "case1": (
+        ";; header comment\n"
+        ";;no-space comment\n"
+        ";; trailing comment\n"
+    ),
+    "case2": "\n\n   \n",
+    "case3": (
+        ";; comment A\n"
+        "\n"
+        ";;comment B\n"
+        "   \n"
+        ";; comment C\n"
+    ),
+}
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -459,6 +549,98 @@ def measure_deltas() -> None:
 
     MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
     print("OK: task4_measured_deltas filled -- " + "; ".join(summary))
+
+
+def _run_norm(script: str, stdin_text: str) -> str:
+    """Invoke `tools/perl_oracle/run_norm.sh <script>` piping `stdin_text` in, return
+    stdout. Raises SystemExit with the captured stderr on a nonzero exit."""
+    result = subprocess.run(
+        ["bash", str(RUN_NORM), script],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(f"run_norm.sh {script} failed (exit {result.returncode}): {result.stderr}")
+    return result.stdout
+
+
+def extract_stm_fixtures() -> None:
+    """Task 7: live perl byte-oracle STM normalizer fixtures. Pipes the crafted
+    LIGHT_CASES/FULL_CASES inputs through the REAL vendored `.pl` scripts (via
+    `tools/perl_oracle/run_norm.sh`), each run TWICE to assert determinism, and commits
+    the (input, output) byte pairs under `tests/reference_data/phase4d/stm/` plus a
+    `stm_normalizer_fixtures` block in the shared phase4d manifest recording per-case
+    sha256 + provenance. `src/python/speech/dataprep/stm_normalize.py` is pinned
+    byte-for-byte against the `light_*` pairs; the `full_*` pairs cover only the
+    environment-independent comment/blank-line prefix (see FULL_CASES' docstring for
+    why content lines are excluded from this oracle).
+
+    SKIPS gracefully (prints and returns, does not raise) when /usr/bin/perl or the
+    legacy tree's two normalizer scripts are absent -- CI never runs this stage, it only
+    consumes the committed fixtures (mirrors every other LOCAL-ONLY stage in this file).
+    """
+    if not PERL_BIN.is_file():
+        print(f"SKIP: {PERL_BIN} not found -- stm fixtures not (re)generated")
+        return
+    if not LIGHT_SCRIPT.is_file() or not FULL_SCRIPT.is_file():
+        print(f"SKIP: legacy STM normalizer scripts not found under {LEGACY_TREE} -- stm fixtures not (re)generated")
+        return
+
+    STM_DIR.mkdir(parents=True, exist_ok=True)
+    cases: dict[str, dict[str, object]] = {}
+
+    for prefix, script, script_cases in (
+        ("light", "light", LIGHT_CASES),
+        ("full", "full", FULL_CASES),
+    ):
+        for name, text in script_cases.items():
+            out1 = _run_norm(script, text)
+            out2 = _run_norm(script, text)
+            if out1 != out2:
+                raise SystemExit(f"{prefix} {name}: perl oracle not deterministic across two runs")
+            in_path = STM_DIR / f"{prefix}_{name}.in"
+            out_path = STM_DIR / f"{prefix}_{name}.out"
+            in_path.write_text(text)
+            out_path.write_text(out1)
+            cases[f"{prefix}_{name}"] = {
+                "script": LIGHT_SCRIPT.name if script == "light" else FULL_SCRIPT.name,
+                "in_sha256": _sha256(in_path.read_bytes()),
+                "out_sha256": _sha256(out_path.read_bytes()),
+                "twice_run_identical": True,
+            }
+
+    perl_version = subprocess.run([str(PERL_BIN), "-e", "print $^V"], capture_output=True, text=True).stdout
+
+    manifest: dict[str, Any] = json.loads(MANIFEST_PATH.read_text())
+    manifest["stm_normalizer_fixtures"] = {
+        "text": (
+            "Task 7: live byte-oracle for the two Perl STM normalizers, run via "
+            "/usr/bin/perl through tools/perl_oracle/run_norm.sh (never modifies the "
+            "read-only legacy tree). `light_*` pairs exercise norm_stm_pkt_light.pl "
+            "(self-contained regex pipeline) end to end -- every case's .out is the "
+            "real script's stdout, run twice per case to confirm determinism. `full_*` "
+            "pairs exercise norm_stm_pk_cts_all_trans_03a.pl but are restricted to "
+            "comment-passthrough + blank-line-drop: any content line in that script "
+            "hits an UNCONDITIONAL shell-out to the lost norm-tagger/norm-parser LIMSI "
+            "binaries (:109), and in this environment (binaries absent) perl's "
+            "backticks silently fail rather than crash, so a live 'output' for a "
+            "content line would pin a broken-environment artifact, not real legacy "
+            "behavior -- verified live (see FULL_CASES' docstring in this script). The "
+            "port's normalize_stm_full raises NormalizerUnavailable for any such line "
+            "instead; that trigger is pinned by a non-oracle unit test."
+        ),
+        "perl_bin": str(PERL_BIN),
+        "perl_version": perl_version.strip(),
+        "legacy_scripts": {
+            "light": str(LIGHT_SCRIPT.relative_to(LEGACY_TREE.parent)),
+            "full": str(FULL_SCRIPT.relative_to(LEGACY_TREE.parent)),
+        },
+        "runner": str(RUN_NORM.relative_to(REPO_ROOT)),
+        "cases": cases,
+    }
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"OK: stm normalizer fixtures ({len(cases)} cases, perl {perl_version.strip()}) -> {STM_DIR.relative_to(REPO_ROOT)}")
 
 
 def main() -> None:
@@ -897,8 +1079,20 @@ if __name__ == "__main__":
             "the oracle or touch any other fixture (needs the built speech_rs module)."
         ),
     )
+    parser.add_argument(
+        "--stm-fixtures",
+        action="store_true",
+        help=(
+            "Task 7 pass: run the crafted STM inputs through the real perl normalizer "
+            "scripts (via tools/perl_oracle/run_norm.sh) and commit the byte pairs under "
+            "tests/reference_data/phase4d/stm/. SKIPS gracefully if perl or the legacy "
+            "tree is absent. Independent of the parity-oracle main() pass."
+        ),
+    )
     args = parser.parse_args()
     if args.measure_deltas:
         measure_deltas()
+    elif args.stm_fixtures:
+        extract_stm_fixtures()
     else:
         main()
