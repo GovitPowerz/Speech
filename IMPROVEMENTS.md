@@ -2933,5 +2933,6 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `[phase1]` finding that `InputStatistics::update`'s pooled variance/std merge is not exactly
   associative in floating point, a multi-threaded legacy run is not bit-reproducible across runs
   (and a rayon `par_iter` port with a different reduction order will not match any single legacy
-  run bit-for-bit either). Add the concrete `[phase3]`/`[phase4]` entry (with the Rust reduction
-  strategy chosen) once `engine/corpus_processor.rs`'s parallel driver lands.
+  run bit-for-bit either). CLOSED by the `[phase4a]` static-lane deterministic reduction entry
+  above (the chosen Rust strategy: file `j` -> lane `j % N`, ascending-lane fold; N=1 is the
+  golden-pinned legacy-sequential parity mode).

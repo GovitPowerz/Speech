@@ -351,8 +351,8 @@ def forward_backward(
     `listing_override` is ADVISORY: the coarse seam builds a fresh `Engine` per gradient
     eval against the batch listing (the legacy `WriteWeightedListing` + engine rerun), so
     by the time an `Engine` reaches here its corpus is already fixed at construction. The
-    per-batch rebuild is the T12 driver's job; this function runs whatever corpus the
-    passed-in engine was built with.
+    per-batch rebuild is a driver-level concern deferred to Phase 4d; this function runs
+    whatever corpus the passed-in engine was built with.
     """
     nets = [np.ascontiguousarray(np.asarray(w, dtype=F64)) for w in weights]
     engine.set_weights(0, nets)

@@ -2,8 +2,9 @@
 
 Ported from legacy MATLAB: SMORMS3.m (wired), Rprop.m (wired), QuantumPSO.m (wired --
 bespoke hand-port, do NOT swap for pymoo), cmaes.m (via the `cma` package, alternative
-branch), plus Adam.m, RMSprop.m, sfo.m, pso_Trelea_vectorized.m, BackPropagation.m
-pending. See design spec section 6.
+branch). Adam.m/RMSprop.m/sfo.m/pso_Trelea_vectorized.m are EXCLUDED (never wired in
+legacy, YAGNI per the Phase 4c spec); BackPropagation.m's inner-loop contract is
+implemented by `drivers/train.py::_backprop_inner`. See design spec section 6.
 
 SMORMS3/Rprop are bit-pinned against GNU Octave running the vendored .m sources unchanged
 (Phase 4c Task 6). QuantumPSO is bit-pinned against a MODIFIED-COPY of QuantumPSO.m
