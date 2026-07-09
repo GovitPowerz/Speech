@@ -1,0 +1,476 @@
+{
+  "text": "Phase 4c Task 6: the Octave harness foundation + the SMORMS3/Rprop bit-pins. GNU Octave executes the VENDORED legacy .m sources (legacy/Optimizer_V6.2.2/functions/{SMORMS3,Rprop}.m) to dump per-step optimizer state trajectories -- the MATLAB-side analog of the C++ oracle harness. LOCAL-ONLY dep (brew install octave); CI consumes only these committed fixtures. TIER 1 (real classdef / real function) for BOTH stages; the sole Octave accommodation is one value-neutral dummy varargin passed to SMORMS3 (the empty-cell lvalue cs-list miscount at SMORMS3.m:313; the gradient depends only on eval_count and the update math is untouched).",
+  "octave_version": "11.3.0",
+  "smorms3": {
+    "text": "SMORMS3.m per-step state (:324-363). Main run: 2-cell theta0 (3x1 vector + 2x2 matrix, M=7), 12 steps, pass-through theta_out; scripted grad_script (per-dim-distinct, step-to-step sign flips). Per-field libm status (the CROSS-LIBM rule): mms/steprate/delta/lrate are PURE arithmetic (EMA + mul + add + min/max) -> STRICT bits on every platform; theta/dtheta traverse sqrt(MMS) (a libm call, :335) -> canary-gated off the oracle env (tests/_libm_gate.py). lrate_traj proves the x10 geometric warmup (1e-9 -> 1e-1 by step 8) capped at 1e-1 (:347). Round-trip run (rt_*): f_df returns theta_out = theta + rt_offset (nonzero), pinning `theta = theta_out + dtheta` (:355) -- the update adds dtheta to the RETURNED theta, not the input. theta_final_cell{0,1} pin the column-major flat->original reconstruction (:286-303).",
+    "num_steps": 12,
+    "M": 7,
+    "rt_num_steps": 4,
+    "rt_M": 3,
+    "lrate_traj": [
+      1e-08,
+      1e-07,
+      1e-06,
+      9.999999999999999e-06,
+      9.999999999999999e-05,
+      0.001,
+      0.01,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1
+    ],
+    "shapes": {
+      "smorms3_grad_script.bin": [
+        7,
+        12
+      ],
+      "smorms3_theta0_flat.bin": [
+        7,
+        1
+      ],
+      "smorms3_theta_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_mms_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_steprate_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_delta_traj.bin": [
+        7,
+        12
+      ],
+      "smorms3_lrate_traj.bin": [
+        1,
+        12
+      ],
+      "smorms3_cost_traj.bin": [
+        1,
+        12
+      ],
+      "smorms3_theta_final_cell0.bin": [
+        3,
+        1
+      ],
+      "smorms3_theta_final_cell1.bin": [
+        2,
+        2
+      ],
+      "smorms3_rt_grad_script.bin": [
+        3,
+        4
+      ],
+      "smorms3_rt_theta0_flat.bin": [
+        3,
+        1
+      ],
+      "smorms3_rt_offset.bin": [
+        3,
+        1
+      ],
+      "smorms3_rt_theta_traj.bin": [
+        3,
+        4
+      ],
+      "smorms3_eps_grad_script.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_theta0_flat.bin": [
+        1,
+        1
+      ],
+      "smorms3_eps_theta_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_mms_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_steprate_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_delta_traj.bin": [
+        1,
+        3
+      ],
+      "smorms3_eps_lrate_traj.bin": [
+        1,
+        3
+      ]
+    },
+    "eps_guard": {
+      "text": "Near-zero-gradient run (M=1, 3 steps, grad=1e-8 constant), added per review finding: the main/round-trip sequences above leave both eps=1e-16 guards (SMORMS3.m:335 sqrt(MMS)+eps and the MMS+eps min-cap denominator, shared by the dtheta cap and the delta update) INACTIVE (MMS >> eps there, so an eps-placement mutation is a no-op). Here step-1 MMS = 0.5*grad^2 is the SAME ORDER as eps -- MMS+eps ~= 3*MMS, a measured effect, not rounding noise -- genuinely exercising both guards. delta_traj is PURE arithmetic (the MMS+eps term feeds it directly) -> STRICT bits; theta_traj is sqrt-bearing -> canary-gated.",
+      "eps": 1e-16,
+      "step1_mms": 5.0000000000000005e-17,
+      "step1_mms_over_eps_ratio": 0.5000000000000001,
+      "M": 1,
+      "num_steps": 3
+    }
+  },
+  "rprop": {
+    "text": "Rprop.m (iRPROP-, 38 LOC) per-step state over a crafted 5-weight x 6-step derivative/cost sequence. etap 1.2 / etam 0.5 / delta0 0.01 (the :5 rand is DEAD -- overwritten at :6, see IMPROVEMENTS) / deltamin 1e-9 / deltamax 1.0. All branches exercised: same-sign delta*=etap grow (delta_traj max 0.020736 = 0.01*1.2^4), sign-flip delta*=etam shrink (delta_traj min 0.0025 = 0.01*0.5^2) + the cost-gated backtrack (prev_cost<cost) + derivative-zeroing (derivout has 0 where deriv_script was nonzero), and the plain ==0 step. PURE arithmetic (sign, min/max, mul, add -- no libm) -> STRICT bits on every platform.",
+    "N": 5,
+    "K": 6,
+    "shapes": {
+      "rprop_deriv_script.bin": [
+        5,
+        6
+      ],
+      "rprop_cost_script.bin": [
+        1,
+        6
+      ],
+      "rprop_weights0.bin": [
+        5,
+        1
+      ],
+      "rprop_weights_traj.bin": [
+        5,
+        6
+      ],
+      "rprop_delta_traj.bin": [
+        5,
+        6
+      ],
+      "rprop_deltaweight_traj.bin": [
+        5,
+        6
+      ],
+      "rprop_derivout_traj.bin": [
+        5,
+        6
+      ]
+    }
+  },
+  "batching": {
+    "text": "Task 10: CreateBatches.m (158 LOC) + GetNewBatch.m (94 LOC), TIER 1 real functions, plus the FALLBACK-TIER getworstandbest_transcribed.m (verbatim transcription of getCases.m:116-165's private getWorstAndBest subfunction -- unreachable standalone, see that file's header). randperm is SHADOWED (batching_shadow/randperm.m) with a fixed reverse-order permutation (p=n:-1:1), reproducible AND trivially replicable in Python (tests/test_phase4c_batching.py), so create_batches's own shuffle is pinned, not just GetNewBatch's rotation. Cases: single (nbOfTargetClasses<=1), multi_nb (nbOfTargetClasses>1, non-multilingual, classes {1,2,5} -> clean aggregate), clobber (classes {0,1,2} -- the natural contiguous labeling silently OVERWRITES the aggregate slot with the top target class's data, losing the aggregate entirely -- structural-only, no rotation), sub (nbOfTargetClasses>1, multilingual, classes {1,2,5,8} -> two SubCases groups), degenerate (nbOfTargetClasses*nbOfWorstCases+nbOfCasesPerBatch > file_nb -- GetNewBatch takes the ~isfield(Batches,'currentClass') branch, Batch=Cases verbatim). PURE integer-cursor arithmetic throughout (no libm) -> STRICT bits everywhere.",
+    "single_n": 6,
+    "multi_nb_n": 6,
+    "sub_n": 6,
+    "degenerate_batch_len": 3,
+    "shapes": {
+      "batching_single_index.bin": [
+        6,
+        1
+      ],
+      "batching_single_worst_index.bin": [
+        1,
+        1
+      ],
+      "batching_single_batch_traj.bin": [
+        2,
+        8
+      ],
+      "batching_single_validation_traj.bin": [
+        6,
+        8
+      ],
+      "batching_single_countpass_traj.bin": [
+        1,
+        8
+      ],
+      "batching_multi_nb_case1_index.bin": [
+        2,
+        1
+      ],
+      "batching_multi_nb_case2_index.bin": [
+        2,
+        1
+      ],
+      "batching_multi_nb_case3_index.bin": [
+        2,
+        1
+      ],
+      "batching_multi_nb_worst1_index.bin": [
+        1,
+        1
+      ],
+      "batching_multi_nb_worst2_index.bin": [
+        1,
+        1
+      ],
+      "batching_multi_nb_worst3_index.bin": [
+        1,
+        1
+      ],
+      "batching_multi_nb_batch_traj.bin": [
+        2,
+        8
+      ],
+      "batching_multi_nb_validation_traj.bin": [
+        6,
+        8
+      ],
+      "batching_multi_nb_countpass_traj.bin": [
+        1,
+        8
+      ],
+      "batching_clobber_case3_index.bin": [
+        2,
+        1
+      ],
+      "batching_sub_case1_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_case2_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_case3_sub1_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_case3_sub2_index.bin": [
+        3,
+        1
+      ],
+      "batching_sub_worst1_index.bin": [
+        1,
+        1
+      ],
+      "batching_sub_worst2_index.bin": [
+        1,
+        1
+      ],
+      "batching_sub_worst3_index.bin": [
+        1,
+        1
+      ],
+      "batching_sub_batch_traj.bin": [
+        2,
+        10
+      ],
+      "batching_sub_validation_traj.bin": [
+        12,
+        10
+      ],
+      "batching_sub_countpass_traj.bin": [
+        1,
+        10
+      ],
+      "batching_degenerate_cases.bin": [
+        3,
+        1
+      ],
+      "batching_degenerate_batch.bin": [
+        3,
+        1
+      ],
+      "batching_degenerate_validation.bin": [
+        3,
+        1
+      ],
+      "batching_gwb_basic_indBest.bin": [
+        2,
+        1
+      ],
+      "batching_gwb_basic_indMiddle.bin": [
+        1,
+        1
+      ],
+      "batching_gwb_basic_indWorst.bin": [
+        3,
+        1
+      ],
+      "batching_gwb_basic_scoreBest.bin": [
+        2,
+        1
+      ],
+      "batching_gwb_basic_scoreMiddle.bin": [
+        1,
+        1
+      ],
+      "batching_gwb_basic_scoreWorst.bin": [
+        3,
+        1
+      ],
+      "batching_gwb_edge_indBest.bin": [
+        0,
+        0
+      ],
+      "batching_gwb_edge_indMiddle.bin": [
+        0,
+        0
+      ],
+      "batching_gwb_edge_indWorst.bin": [
+        0,
+        0
+      ]
+    }
+  },
+  "checkgrad": {
+    "text": "Task 10: CheckGrad.m (163 LOC), TIER 1 real function, driven with a harness-local quadratic-surrogate CostFunction.m shadow (checkgrad_shadow/, f(w)=0.5*sum(c.*(w-target).^2) over the REAL flat NN weight vector, re-derived from param via the REAL vec2struct + nnet2MatFile on every call -- so a weight-kk epsilon nudge applied by CheckGrad's own network2config/weights2nnet/vec2struct round trip is visible here) plus no-op figure/subplot/semilogy/hold/grid shadows (CheckGrad's diagnostic plot uses the old-style `subplot 211` form, which errors under this Octave/graphics-toolkit combination independent of headlessness). epsilon=1e-5 (:12, unconditional); the surrogate is an EXACT quadratic form, so central diff carries no truncation error. Surfaces a genuine legacy bug (not a harness artifact): weights2nnet.m (:150-186) never writes back the normalize mean/std tail nnet2MatFile.m (:140-141) appends to `weights` -- CheckGrad's last 2 (2*len(normalize.mean)) numeric derivatives are always exactly 0 regardless of the analytic value, an asymmetry vs the LID branch (:109), which explicitly trims that tail before its own loop. See IMPROVEMENTS.md.",
+    "n": 107,
+    "Kw": 53,
+    "shapes": {
+      "checkgrad_nnet_in.bin": [
+        107,
+        1
+      ],
+      "checkgrad_MultiWeights.bin": [
+        53,
+        1
+      ],
+      "checkgrad_MultiDeriv_BackProp.bin": [
+        53,
+        1
+      ],
+      "checkgrad_MultiDeriv_Num.bin": [
+        53,
+        1
+      ]
+    }
+  },
+  "masking": {
+    "text": "Task 10: MaskingValidation.m (54 LOC) + vec2struct.m, TIER 1 real functions, no shadow needed. PASS: a well-formed scalar mask (AlgName_decision_thresh_rising=0.7, the same case Task 8 bit-pins). FAIL: masking AlgName_min_speech (a _padding_block-family vector field) with a negative last component -- the encode ((fv+0.1)*adim, using the raw masked fv) is NOT the algebraic inverse of the decode (-0.1+abs(p/adim)) for fv<0 (abs() destroys the sign asymmetrically), so the round trip genuinely diverges and MaskingValidation correctly flags it -- discovered by direct execution, not guessed. See IMPROVEMENTS.md.",
+    "pass_failed": 0,
+    "fail_failed": 1,
+    "shapes": {
+      "masking_pass_hasFailed.bin": [
+        1,
+        1
+      ],
+      "masking_pass_count.bin": [
+        1,
+        1
+      ],
+      "masking_pass_vector.bin": [
+        265,
+        1
+      ],
+      "masking_fail_hasFailed.bin": [
+        1,
+        1
+      ],
+      "masking_fail_count.bin": [
+        1,
+        1
+      ],
+      "masking_fail_vector.bin": [
+        265,
+        1
+      ]
+    }
+  },
+  "qpso": {
+    "text": "Task 11: QuantumPSO.m (845 LOC) bit-pinned against a MODIFIED-COPY (tools/octave_harness/qpso_modified/QuantumPSO.m) whose rand/randperm/stblrnd are substituted by reads of a shared committed random table (qpso_random_table.bin, 5000 uniforms from numpy default_rng(seed=20260709), column-major stream) and whose CostFunction is the quadratic surrogate sum_j (x_j-center_j)^2 (center=[3.5,4.5,6.5]); the wall-clock reseed (:91) is removed. The legacy path is nondeterministic BY DESIGN, so no single RUN is reproducible -- the table makes the OPERATOR STRUCTURE pinnable. Small run: D=3, ps=4, me=3, PSOseed=1 (seed overwrites the first ps rows), trelea=3 (Clerc, needed for the dead vel3 bank's chi), ergrd=1e-99 ergrdep=500 errgoal=NaN. Structure exercised: init + opposition-based learning (:257-327); the 4 DEAD velocity banks that DRAW 8*ps*D per epoch but are never applied (:375-411, gate :447 unreachable); the QDPSO ranking-operator roulette + the log(1/u) jump (:414-443); DE recombination (randperm neighbours) + a Chambers-Mallows-Stuck Levy kick (:465-479); pbest/gbest updates (:623-686); stall gate (:751); final re-generation (:799-843). Per-value comparator split: init_* is PURE arithmetic (normmat division + surrogate + min/sortrows) -> STRICT bits; every *_traj is transcendental from epoch 1 (log(1/u) + the Levy tan/atan/sin/cos/log/pow) -> canary-gated (bit-exact on the oracle libm, measured; the ranking is libm-robust because gbestval+pbestval gaps are O(0.1)-O(1) >> ULP). cursor_end pins the exact draw count (== Python TableRng.cursor). levy_in/levy_out pin the standalone CMS sampler over table[0:16].",
+    "table_seed": 20260709,
+    "table_n": 5000,
+    "D": 3,
+    "ps": 4,
+    "me": 3,
+    "K": 8,
+    "cursor_end": 561,
+    "te": 3,
+    "min_pbestval_gap": 0.25905997177496315,
+    "params": {
+      "ac1": 2.1,
+      "ac2": 2.1,
+      "iw1": 0.9,
+      "iw2": 0.6,
+      "iwe": 300,
+      "ergrd": 1e-99,
+      "ergrdep": 500,
+      "errgoal": "NaN",
+      "trelea": 3,
+      "pso_seed": 1,
+      "minmax": 0,
+      "adim": 10.0,
+      "center": [
+        3.5,
+        4.5,
+        6.5
+      ],
+      "seed_value": [
+        [
+          5,
+          4,
+          6
+        ],
+        [
+          3,
+          5,
+          7
+        ],
+        [
+          6,
+          2,
+          4
+        ],
+        [
+          4,
+          6,
+          5
+        ]
+      ]
+    },
+    "shapes": {
+      "qpso_levy_in.bin": [
+        16,
+        1
+      ],
+      "qpso_levy_out.bin": [
+        1,
+        8
+      ],
+      "qpso_init_pos.bin": [
+        4,
+        3
+      ],
+      "qpso_init_pbest.bin": [
+        4,
+        3
+      ],
+      "qpso_init_pbestval.bin": [
+        4,
+        1
+      ],
+      "qpso_init_gbest.bin": [
+        1,
+        3
+      ],
+      "qpso_init_gbestval.bin": [
+        1,
+        1
+      ],
+      "qpso_pos_traj.bin": [
+        4,
+        9
+      ],
+      "qpso_pbest_traj.bin": [
+        4,
+        9
+      ],
+      "qpso_pbestval_traj.bin": [
+        4,
+        3
+      ],
+      "qpso_gbest_traj.bin": [
+        3,
+        3
+      ],
+      "qpso_gbestval_traj.bin": [
+        1,
+        3
+      ],
+      "qpso_final_out.bin": [
+        4,
+        1
+      ],
+      "qpso_cursor_end.bin": [
+        1,
+        1
+      ]
+    }
+  }
+}

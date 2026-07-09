@@ -8,8 +8,15 @@ Also hosts the numpy differential oracle for the Rust segmenter decision
 Python bit-for-bit on random inputs.
 """
 
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
+
+from speech.genome import RunConfig, vec2struct
 
 # SegClass codes, matching the Rust `SegClass as i32` (`segmentation.rs`) and the
 # legacy `segment_class` enum (`Segmentation.h`).
@@ -22,9 +29,156 @@ END_CODE = 22
 N_CLASSES = 23
 
 
-def confusion_matrix(scores: NDArray[np.float64], labels: NDArray[np.int64]) -> NDArray[np.int64]:
-    """Per-language confusion matrix with in-band target signaling (Phase 4)."""
-    ...
+def confusion_matrix(results_lid: NDArray[np.float64], thresh: float) -> NDArray[np.float64]:
+    """Port of legacy `confusionThresh.m` (`Optimizer_V6.2.2/functions/confusionThresh.m`).
+
+    `results_lid` is one row per scored file, one column per language class, with the
+    TARGET class in-band signaled via `score > 150` (real score `= value - 200`) -- the
+    same `>150`/`-200` encoding as the Rust `engine/confusion.rs::confusion_from_results`
+    (a different legacy source, `BagOfProcessors.cpp`'s `PrintConfusionMatrix`, but the
+    same in-band signaling convention). Returns a `(class_nb+2) x (class_nb+2)` matrix:
+    row/col 0 carry the `0..class_nb` axis labels, the last row/col accumulate per-row/
+    col totals. A file scores a HIT only if its target lands in matrix position 1 or 2
+    (0-based; the legacy's 1-based `posTarget` 2 or 3) AND clears the asymmetric
+    threshold (`thresh` at position 2, `100-thresh` at position 1); otherwise it is
+    charged against the best-scoring non-target class.
+
+    Reproduces a legacy quirk verbatim (see IMPROVEMENTS.md): `posTarget`/
+    `posBestNotTarget` are declared ONCE outside the file loop and never reset per row
+    (only `maxScoreNotTarget`/`scoreTarget` are) -- a file with no score `> 150` (no
+    target class signaled) silently reuses the PREVIOUS row's `posTarget`.
+
+    `class_nb <= 1` raises: the legacy's `if (classNb > 1)` has no `else`, so `confusion`
+    is never assigned and MATLAB itself would error "output argument not assigned".
+    """
+    results_lid = np.asarray(results_lid, dtype=np.float64)
+    class_nb = results_lid.shape[1] if results_lid.ndim == 2 else 0
+    if class_nb <= 1:
+        raise ValueError(f"confusion_matrix: class_nb={class_nb} <= 1 -- legacy confusionThresh.m leaves `confusion` unassigned here")
+
+    confusion = np.zeros((class_nb + 2, class_nb + 2), dtype=np.float64)
+    for kk in range(class_nb + 1):
+        confusion[0, kk] = kk
+        confusion[kk, 0] = kk
+
+    max_score_not_target = -1.0
+    pos_best_not_target = 0
+    pos_target = 0
+    score_target = -1.0
+
+    for jj in range(results_lid.shape[0]):
+        for kk in range(class_nb):
+            v = float(results_lid[jj, kk])
+            if v > 150.0:
+                score_target = v - 200.0
+                pos_target = kk + 1
+            elif v > max_score_not_target:
+                max_score_not_target = v
+                pos_best_not_target = kk + 1
+
+        if (pos_target == 2 and score_target > thresh) or (pos_target == 1 and score_target > 100.0 - thresh):
+            confusion[pos_target, pos_target] += 1.0
+            confusion[pos_target, class_nb + 1] += 1.0
+            confusion[class_nb + 1, pos_target] += 1.0
+        else:
+            confusion[pos_target, pos_best_not_target] += 1.0
+            confusion[pos_target, class_nb + 1] += 1.0
+            confusion[class_nb + 1, pos_best_not_target] += 1.0
+
+        max_score_not_target = -1.0
+        score_target = -1.0
+
+    return confusion
+
+
+@dataclass
+class CheckGradReport:
+    """Per-weight analytic-vs-numeric gradient table + the worst offender. DIAGNOSTIC
+    contract (mirrors `CheckGrad.m`): there is no pass/fail threshold here, the caller
+    inspects `max_error`/`max_error_index` (and the full tables) itself."""
+
+    analytic: NDArray[np.float64]
+    numeric: NDArray[np.float64]
+    max_error: float
+    max_error_index: int
+
+
+def check_grad(
+    cost_fn: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]],
+    weights: NDArray[np.float64],
+    epsilon: float = 1e-5,
+    denom_floor: float = 0.0,
+) -> CheckGradReport:
+    """Generic gradient checker, mirroring `CheckGrad.m`'s central-diff diagnostic
+    (`Optimizer_V6.2.2/functions/CheckGrad.m`): analytic gradient via ONE
+    `cost_fn` call (:36), then a per-weight central difference (:84)
+    `(cost(w+eps) - cost(w-eps)) / denom`.
+
+    Unlike the legacy (which perturbs NN weights indirectly through a
+    `vec2struct`/`nnet2MatFile`/`weights2nnet`/`network2config` round trip -- see
+    `tools/octave_harness/checkgrad_shadow/CostFunction.m` for why that matters), this
+    port perturbs `weights` DIRECTLY: `cost_fn` is any callable returning
+    `(cost, analytic_gradient)` for a given weight vector. `denom_floor` reproduces the
+    legacy's LID-branch divisor guard (`max(1e-24, 2*epsilon)`, :148); the SAD branch
+    uses the plain `2*epsilon` (:84), i.e. `denom_floor=0.0` (the default).
+    """
+    weights = np.asarray(weights, dtype=np.float64)
+    _, analytic = cost_fn(weights)
+    analytic = np.asarray(analytic, dtype=np.float64)
+    k = weights.shape[0]
+    numeric = np.zeros(k, dtype=np.float64)
+    denom = max(denom_floor, 2.0 * epsilon)
+    for kk in range(k):
+        plus = weights.copy()
+        plus[kk] += epsilon
+        minus = weights.copy()
+        minus[kk] -= epsilon
+        cost_plus, _ = cost_fn(plus)
+        cost_minus, _ = cost_fn(minus)
+        numeric[kk] = (cost_plus - cost_minus) / denom
+    err = np.abs(analytic - numeric)
+    idx = int(np.argmax(err)) if err.size else 0
+    return CheckGradReport(analytic=analytic, numeric=numeric, max_error=float(err[idx]) if err.size else 0.0, max_error_index=idx)
+
+
+def _is_numeric_field(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def masking_validation(param: NDArray[np.float64], mask: dict[str, object] | None, ps: RunConfig) -> list[str]:
+    """Port of `MaskingValidation.m` (`Optimizer_V6.2.2/functions/MaskingValidation.m`).
+
+    Double `vec2struct` round trip (:6-7): `vec2struct(param, mask, ps)` -> `configStruct`
+    (the mask-forced config) + `out_param` (the write-back), then
+    `vec2struct(out_param, None, ps)` -> `maskedConfigStruct` (out_param DECODED FRESH,
+    no mask). Every field present in `configStruct` is compared against the same field in
+    `maskedConfigStruct`: string fields via exact match (:31), numeric fields via
+    `abs(diff) > 1e-12` (:39/:45) -- `speech.genome.vec2struct` already returns the
+    printConfig-formatted STRING dict, so numeric-vs-string is decided by whether the
+    value parses as a float (matching the legacy `ischar` branch in spirit: `%d`/
+    `%15.15e`-formatted numbers always parse, genuine string fields like window-type
+    names or "true"/"false" never do).
+
+    Returns the list of mismatched field names (empty = pass, matching `hasFailed`
+    collection order -- `configStruct`'s field order, i.e. insertion order).
+    """
+    config, out_param, _ = vec2struct(param, mask, ps, 0)
+    masked_config, _, _ = vec2struct(out_param, None, ps, 0)
+
+    mismatches: list[str] = []
+    for name, v1 in config.items():
+        v2 = masked_config[name]
+        f1 = _is_numeric_field(v1)
+        if f1 is not None:
+            f2 = _is_numeric_field(v2)
+            if f2 is None or abs(f1 - f2) > 1e-12:
+                mismatches.append(name)
+        elif v1 != v2:
+            mismatches.append(name)
+    return mismatches
 
 
 def update_segmentation_oracle(

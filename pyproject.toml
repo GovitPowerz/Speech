@@ -55,7 +55,8 @@ allow_empty_bodies = true
 mypy_path = "src/python"
 exclude = ["legacy/"]
 
-# soundfile ships no type stubs / py.typed marker.
+# soundfile ships no type stubs / py.typed marker; speech_rs is the maturin-built pyo3
+# module (no py.typed) -- engine.py imports it only under TYPE_CHECKING for the seam hint.
 [[tool.mypy.overrides]]
-module = "soundfile"
+module = ["soundfile", "speech_rs"]
 ignore_missing_imports = true

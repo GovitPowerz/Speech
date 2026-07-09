@@ -211,7 +211,7 @@ impl CorpusProcessor {
                     kind: ModeKind::Multi,
                     verbose: false,
                 };
-                self.grad_check(self.epsilon)?;
+                self.grad_check_full(self.epsilon)?;
             } else {
                 // legacy: :126 cerr + continue.
                 eprintln!(
@@ -660,10 +660,12 @@ impl CorpusProcessor {
     /// `max_weights` caps the sweep (DEVIATION from the legacy full sweep, recorded
     /// in the manifest as `gradcheck_max_weights`; the legacy checks every weight).
     /// Returns the last-processed network's [`GradCheckReport`] (algo 3/4/5 have a
-    /// single NN; algo 6 iterates BOTH nets -- use
-    /// [`Self::grad_check_all_for_test`] to observe every per-network report).
-    fn grad_check(&mut self, epsilon: f64) -> Result<GradCheckReport> {
-        self.grad_check_capped(epsilon, usize::MAX)
+    /// single NN; algo 6 iterates BOTH nets -- use [`Self::grad_check`] to observe
+    /// every per-network report). Internal-only wrapper for the `run()` gradCheck
+    /// mode dispatch (`:214`); delegates to the public [`Self::grad_check`] (no
+    /// duplicate body).
+    fn grad_check_full(&mut self, epsilon: f64) -> Result<GradCheckReport> {
+        self.grad_check(epsilon, usize::MAX)
             .map(|mut v| v.pop().map(|(_, r)| r))?
             .ok_or_else(|| anyhow::anyhow!("gradCheck: no backprop-activated network in config 0"))
     }
@@ -822,6 +824,70 @@ impl CorpusProcessor {
         cost / counter
     }
 
+    // ==== Public seam API (the PyO3 seam surface, Phase 4c) ==================
+
+    /// The post-`transformResults` combined result matrix (`ResultsE`,
+    /// `CorpusProcessor.cpp:342-389`): rows `[file+1, conf+1, chan+1, res...]`
+    /// in ascending file/conf/chan order (see [`Self::transform_results_impl`]).
+    /// The PyO3 seam surface (Phase 4c).
+    ///
+    /// Contract: EMPTY (`0x0`) until the first completed `run()` -- populated
+    /// only by [`Self::transform_results`], which fires at the end of
+    /// `run_solo`/`train`/`grad_check_capped`'s internal epoch runs. Reading it
+    /// before any run observes the ctor's `Array2::zeros((0, 0))` seed.
+    pub fn results_matrix(&self) -> &Array2<f64> {
+        &self.results_e
+    }
+
+    /// Config-`pos`'s full weight-vector set: one flat vec per network (algo 6
+    /// -> `[sad, lid]`; algo 0/1/2, no NN -> empty `Vec`). The PyO3 seam
+    /// surface (Phase 4c); promoted from `get_config0_all_weights_for_test`
+    /// (Task 9), generalized from config-0-only to `pos` (the bag already
+    /// dispatches per-`pos` -- `BagOfProcessors::get_weights`).
+    pub fn weights(&self, pos: usize) -> Vec<Vec<f64>> {
+        self.processors.get_weights(pos)
+    }
+
+    /// Seed config-`pos`'s network(s): algo 6 pass `[sad, lid]`; algo 0/1/2 (no
+    /// NN) is a no-op. The PyO3 seam surface (Phase 4c); promoted from
+    /// `set_config0_all_weights_for_test` (Task 9), generalized from
+    /// config-0-only to `pos`.
+    pub fn set_weights(&mut self, pos: usize, nets: &[Vec<f64>]) -> Result<()> {
+        self.processors.set_weights(pos, nets)
+    }
+
+    /// Config-`pos`'s per-network `Nx2` derivative matrices (col 0 summed
+    /// deriv, col 1 count; algo 6 -> `[sad, lid]`). The PyO3 seam surface
+    /// (Phase 4c); no prior `_for_test` hook existed for this -- a new thin
+    /// delegation to `BagOfProcessors::get_weights_derivatives`, which already
+    /// dispatches per-`pos`.
+    pub fn weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
+        self.processors.get_weights_derivatives(pos)
+    }
+
+    /// Config-`pos`'s per-network input-normalization statistics (algo 6 ->
+    /// `[sad, lid]`). The PyO3 seam surface (Phase 4c); no prior `_for_test`
+    /// hook existed for this -- a new thin delegation to
+    /// `BagOfProcessors::get_input_statistics`, which already dispatches
+    /// per-`pos`.
+    pub fn input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
+        self.processors.get_input_statistics(pos)
+    }
+
+    /// Corpus-level gradient check (`CorpusProcessor::gradCheck`, `:237-340`),
+    /// capped at `max_weights` per network: one `(network_index, report)` per
+    /// backprop-active network of config 0, ascending index. The PyO3 seam
+    /// surface (Phase 4c); promoted from `grad_check_all_for_test` (Task 9)
+    /// verbatim -- the bag's per-network sweep was already general, nothing to
+    /// widen.
+    pub fn grad_check(
+        &mut self,
+        epsilon: f64,
+        max_weights: usize,
+    ) -> Result<Vec<(usize, GradCheckReport)>> {
+        self.grad_check_capped(epsilon, max_weights)
+    }
+
     // ==== Test-only hooks (pub for the integration test) ====================
 
     /// Pure `transformResults` core (test hook for `transform_results_ordering`).
@@ -837,14 +903,15 @@ impl CorpusProcessor {
     /// Corpus-level gradient check with a weight cap (test hook for
     /// `grad_check_synthetic`; Task 9's harness golden replays it). Returns the
     /// LAST backprop-active network's report (pre-Task-9 signature, kept for
-    /// the 4a single-net goldens).
+    /// the 4a single-net goldens). Delegates to the public [`Self::grad_check`]
+    /// (no duplicate body).
     #[doc(hidden)]
     pub fn grad_check_for_test(
         &mut self,
         epsilon: f64,
         max_weights: usize,
     ) -> Result<GradCheckReport> {
-        self.grad_check_capped(epsilon, max_weights)
+        self.grad_check(epsilon, max_weights)
             .map(|mut v| v.pop().map(|(_, r)| r))?
             .ok_or_else(|| anyhow::anyhow!("gradCheck: no backprop-activated network in config 0"))
     }
@@ -852,13 +919,14 @@ impl CorpusProcessor {
     /// Per-network gradient check (Task 9): one `(network_index, report)` per
     /// backprop-active network of config 0 -- for algo 6, index 0 is the SAD
     /// net (cost cols 4/len-1) and index 1 the LID net (cols 14/len-2).
+    /// Delegates to the public [`Self::grad_check`] (no duplicate body).
     #[doc(hidden)]
     pub fn grad_check_all_for_test(
         &mut self,
         epsilon: f64,
         max_weights: usize,
     ) -> Result<Vec<(usize, GradCheckReport)>> {
-        self.grad_check_capped(epsilon, max_weights)
+        self.grad_check(epsilon, max_weights)
     }
 
     /// The per-epoch config-0 weight snapshots captured during a training run
@@ -902,14 +970,11 @@ impl CorpusProcessor {
     }
 
     /// Config-0's flat weight vector (test hook for the grad-check restore assert).
-    /// Empty when config 0 is a non-NN algo (no weights).
+    /// Empty when config 0 is a non-NN algo (no weights). Delegates to the
+    /// public [`Self::weights`] (no duplicate body).
     #[doc(hidden)]
     pub fn get_config0_weights_for_test(&self) -> Vec<f64> {
-        self.processors
-            .get_weights(0)
-            .into_iter()
-            .next()
-            .unwrap_or_default()
+        self.weights(0).into_iter().next().unwrap_or_default()
     }
 
     /// Seed config-0's NN with a synthetic nonzero weight vector (test hook for
@@ -917,23 +982,26 @@ impl CorpusProcessor {
     /// operating point (near-zero gradients), so the gradcheck needs deterministic
     /// nonzero weights -- exactly the phase3 `synth_flat` pattern -- to exercise a
     /// smoothly-varying cost. No-op for a non-NN config 0.
+    /// Delegates to the public [`Self::set_weights`] (no duplicate body).
     #[doc(hidden)]
     pub fn set_config0_weights_for_test(&mut self, flat: &[f64]) -> Result<()> {
-        self.processors.set_weights(0, &[flat.to_vec()])
+        self.set_weights(0, &[flat.to_vec()])
     }
 
     /// Seed EVERY net of config 0 (Task 9): for algo 6 pass `[sad, lid]`; the
-    /// single-net variant of [`Self::set_config0_weights_for_test`].
+    /// single-net variant of [`Self::set_config0_weights_for_test`]. Delegates
+    /// to the public [`Self::set_weights`] (no duplicate body).
     #[doc(hidden)]
     pub fn set_config0_all_weights_for_test(&mut self, nets: &[Vec<f64>]) -> Result<()> {
-        self.processors.set_weights(0, nets)
+        self.set_weights(0, nets)
     }
 
     /// Config-0's full weight-vector set (test hook): one flat vec per network
-    /// (algo 6 -> `[sad, lid]`).
+    /// (algo 6 -> `[sad, lid]`). Delegates to the public [`Self::weights`] (no
+    /// duplicate body).
     #[doc(hidden)]
     pub fn get_config0_all_weights_for_test(&self) -> Vec<Vec<f64>> {
-        self.processors.get_weights(0)
+        self.weights(0)
     }
 
     /// The bag's captured per-conf `(errorPercLID, confusion)` pairs from the

@@ -60,6 +60,8 @@ jobs:
   python-test:
     name: Python (test)
     runs-on: ubuntu-latest
+    env:
+      HYPOTHESIS_PROFILE: ci
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -84,3 +86,5 @@ jobs:
         run: uv run maturin develop --release --manifest-path src/rust/speech-py/Cargo.toml
       - name: Import check
         run: uv run python -c "import speech_rs; print(speech_rs.version())"
+      - name: Run pyo3 tests
+        run: uv run pytest tests/pyo3 -v

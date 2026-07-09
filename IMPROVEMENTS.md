@@ -1944,6 +1944,32 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   the port-only underflow guard are themselves N/A (both unreachable -- `targetIndex` is clamped
   `>= 0`, and min-length SPEECH segments never underflow the slice).
 
+- **[phase4c] CLOSED: the lid5 (Algo 5) `LID_STRUCT` harness probe's `cost_max_abs`
+  calibration recorded the MAGNITUDE of the real value, not a real-vs-reimpl delta -- unlike
+  its sibling `langid_max_abs`** (`tools/oracle_harness/main.cpp`'s `runLidFile` lambda, the
+  `lid5` SECONDARY real-Eigen probe added in Phase 4b Task 4): `langid_max_abs` is a genuine
+  `std::fabs(langidR[chan](0,cc) - langidReal)` delta because the reimpl's per-channel `langID`
+  matrix is captured through an out-param (`langidR`, filled by `transcribeLid`). The sibling
+  `cost_max_abs` line instead read `std::fabs(segReal._LIDCumulativeError[chan])` -- the REAL
+  value's absolute magnitude alone, because `transcribeLid` never returned its per-channel
+  `NNCost` (`BLSTMSpectralLID.cpp:414`'s `seg._LIDCumulativeError[chan] = NNCost` counterpart)
+  for the caller to diff against. The committed manifest values (19.47/0.1376/19.47) were
+  therefore never a calibration signal at all -- they were just `|_LIDCumulativeError|`,
+  masking whatever the real reimpl-vs-real forward divergence actually was. Fixed:
+  `transcribeLid` gained a `cumErrOut` out-param (mirroring `langidOut`/`confusionOut`/
+  `isCorrectOut`), populated with the reimpl's raw per-channel `NNCost` (no `/segmentsCount`,
+  no weight scaling -- matching the real ctor's `seg._LIDCumulativeError[chan] = NNCost`
+  exactly); `runLidFile` now computes `std::fabs(segReal._LIDCumulativeError[chan] -
+  cumErrR[chan])`. Measured deltas after the fix: f1/f3 `3.553e-15`, f2 `1.11e-16` -- the same
+  order as `langid_max_abs`'s `1.11e-16` (the expected ascending-loop-vs-real-Eigen forward
+  noise floor), confirming the bug was purely a harness diagnostic defect, not a hidden
+  port-vs-legacy divergence. *Pinned by:* `tests/test_phase4b_fixtures.py::
+  test_lid5_calibration_cost_max_abs_is_a_true_delta` (asserts every `lid5.calibration.*.
+  cost_max_abs` is `< 1e-6`; RED against the stale manifest's `19.47`/`0.1376`/`19.47`, GREEN
+  after `scripts/extract_phase4b_fixtures.py` regenerated `manifest.json` with the fixed
+  harness -- byte-identical across two consecutive regenerations, and no other `phase4b/`
+  fixture drifted).
+
 - **[phase4b] The phSeq reader's phoneme count carries a fixed `10 + sum(len+10)` padding
   arithmetic -- 10 phantom head phonemes plus 10 phantom gap phonemes appended after EVERY
   sentence (including the last)** (`audio.rs::read_phseq`, from `AudioStruct.cpp:164,170`):
@@ -2183,18 +2209,12 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   guard). Mutation: N/A (dead code); the SAD-irrelevance is proven by the goldens passing with
   no SAD weights loaded.
 
-- **[phase4b] Mode-7 `classNb = max(2, outputSize)`, the DumpLIDInternals path is simplified,
-  and `_PostProcessMode 1` cancels in normalization** (`tasks/lid.rs`, from
-  `TwinBLSTMSpectralLID.cpp:624-625,906-921,1073-1179`): the committed LID net is BINARY
+- **[phase4b] Mode-7 `classNb = max(2, outputSize)`, and `_PostProcessMode 1` cancels in
+  normalization; the DumpLIDInternals filename is CLOSED (Phase 4c Task 2)** (`tasks/lid.rs`,
+  from `TwinBLSTMSpectralLID.cpp:624-625,906-921,1073-1179`): the committed LID net is BINARY
   (`OutputNeuronNb 48,1` -> `getOutputSize() = 1`), and `classNb` is forced to `max(2, 1) =
   2` (`:624-625`), so the brief's "3-class mapping" is superseded -- the fixtures use a
-  2-class mapping. `_DumpLIDInternals` derives the `.mat` filename from
-  `audio.getAudioFileName()` (`:906-913`); the port doesn't thread `Audio::audio_file_name`
-  (the field landed in Task 8, populated post-hoc by `bag_of_processors::apply_corpus_item`,
-  not by `read_audio`/`read_phseq`) into this dump path, so the dump lands at
-  `<_DumpDir>/chan<c>_lid_dump.mat` (cosmetic path deviation) -- the VARIABLE
-  names (`features_<n>` = `[_OutputForward | _OutputBackward]`, `matNb`) and values are the
-  faithful part. `_PostProcessMode 1` (entropy-weighted, `:1073-1089`) adds a per-row scalar
+  2-class mapping. `_PostProcessMode 1` (entropy-weighted, `:1073-1089`) adds a per-row scalar
   `-sum log(entropy)` EQUALLY across every `segLID` column, which is a column-constant offset
   -> it cancels in the softmax normalization (`:1169-1172`), so ppm1's normalized `langID`
   NEAR-coincides with ppm0's (exactly in real arithmetic, ~1 ULP in floating point). That pin
@@ -2202,14 +2222,38 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   match_real`'s ppm1 golden (`tests/phase4b_twin_mode7.rs`) sits only ~1 ULP from ppm0's, well
   inside the off-oracle hybrid bound (`common::assert_oracle_eq`, `<=4` ULP / `512*eps*scale`
   absolute), so a bug that collapsed ppm1's post-process path onto ppm0's could pass
-  undetected on CI glibc. *Why deferred:* the mode-7 driver predates `Audio::audio_file_name`
-  and hasn't been revisited for the dump path. *Fix candidate:* thread `audio_file_name` into
-  the dump path for the legacy-faithful filename, now that the field exists (4c-era). *Pinned
-  by:*
-  `dump_lid_internals_written_and_valued`, `post_process_mode_all_three_covered`
-  (`tests/phase4b_twin_mode7.rs`; ppm2 vote DISTINCT, ppm1 near-coincident, all three code
-  paths counter-asserted). Mutation: forcing `classNb = outputSize` (dropping the `max(2,.)`)
-  makes the confusion 3x3 and mismatches the REAL 4x4 dump.
+  undetected on CI glibc. *Why deferred (classNb/ppm1):* out of scope for this task, unrelated
+  to the filename fix. *Fix candidate:* none identified. *Pinned by:*
+  `post_process_mode_all_three_covered` (`tests/phase4b_twin_mode7.rs`; ppm2 vote DISTINCT,
+  ppm1 near-coincident, all three code paths counter-asserted). Mutation: forcing `classNb =
+  outputSize` (dropping the `max(2,.)`) makes the confusion 3x3 and mismatches the REAL 4x4
+  dump.
+  **CLOSED (Phase 4c Task 2), DumpLIDInternals filename:** `_DumpLIDInternals` derives the
+  `.mat` filename from `audio.getAudioFileName()` (`:906-913`, the `_DumpDir.size() > 0`
+  branch, the only one reachable here): strip the directory (the portion after the last `/`,
+  or the whole string if none), then ALWAYS drop exactly 4 trailing characters from that
+  basename -- NOT an extension-aware strip (a `.wav` name is cleanly de-extensioned; the
+  mode-7 phSeq arm's `.phSeq`, 6 chars, leaves a partial extension, e.g. `"s1.phSeq"` ->
+  `"s1.p"`); when the basename is shorter than 4 bytes, `std::string::substr`'s length-clamp
+  leaves it untouched instead of underflowing. The port previously didn't thread
+  `Audio::audio_file_name` (landed in 4b Task 8, populated post-hoc by
+  `bag_of_processors::apply_corpus_item`, not by `read_audio`/`read_phseq`) into this dump
+  path, so the dump landed at the cosmetic `<_DumpDir>/chan<c>_lid_dump.mat` instead of the
+  legacy-faithful `<_DumpDir>/<basename minus 4 chars>_chan<c>_lid_dump.mat`; the VARIABLE
+  names (`features_<n>` = `[_OutputForward | _OutputBackward]`, `matNb`) and values were
+  always the faithful part. Now fixed: `tasks/lid.rs::mode7_dump_basename` composes the
+  legacy-faithful name from `audio.audio_file_name`, threaded through
+  `get_segmentation_mode7`. Verified no oracle-harness or committed-fixture filename shared
+  this convention (`tools/oracle_harness/main.cpp`'s `mode7_dump_s1.mat` scipy-value probe
+  writes a harness-hardcoded literal name via a hand-rolled `Mat_Create` call, never going
+  through `getSegmentation`'s dump path, so no harness-side rename was needed; confirmed by a
+  no-op `git status` on `tests/reference_data/phase4b/` for every file except
+  `manifest.json`, whose diff is isolated to the unrelated `cost_max_abs` fix below). *Pinned
+  by:* `dump_lid_internals_written_and_valued` (`tests/phase4b_twin_mode7.rs`), TDD RED/GREEN
+  verified: the test's `phseq_audio` helper now sets `audio.audio_file_name` to the real
+  `.phSeq` path (previously left empty), and the assertion targets `s1.p_chan0_lid_dump.mat`
+  under the tempdir; reverting `tasks/lid.rs`'s driver change alone (test unchanged) fails the
+  test (file not found at the new path), confirming the rename is load-bearing.
 
 - **[phase4b] `VrctsPart` (Algo 0) hard-codes the legacy `vrcts_part` binary path, and its spawn
   failure semantics necessarily diverge from the legacy's discarded `system()` return** (`tasks/
@@ -2374,6 +2418,505 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   over. Full transcript (diffs, commands, exact output) in
   `.superpowers/sdd/task-11-report.md`.
 
+- **[phase4c] SMORMS3.m header mislabeled "Sum of Functions Optimizer (SFO)"**
+  (`legacy/Optimizer_V6.2.2/functions/SMORMS3.m:1-47`; ported in `src/python/speech/optimizers.py`
+  `Smorms3`): the file's entire doc-comment header (title, arXiv 1311.2115 reference, the
+  `obj = sfo(f_df, theta, subfunction_references, ...)` synopsis, "Author: Jascha Sohl-Dickstein")
+  describes the SFO quasi-Newton optimizer, but the `classdef` at `:49` is `SMORMS3 < handle` and
+  the `optimization_step` at `:324-363` implements the SMORMS3 update (`r = 1/(delta+1)`, RMS EMA,
+  `min(lrate, stepRate^2/(MMS+eps))` per-param cap), NOT SFO. The SFO scaffolding (subspace
+  `P`/`b`, Hessian banks, active-set growth) survives only as commented-out properties (`:55-146`).
+  A copy-paste-from-sfo.m header the author never rewrote; harmless (comment only) but misleading.
+  *Fix candidate:* rewrite the header to describe SMORMS3 once the optimizer zoo is settled. The
+  port's docstring names the algorithm correctly and cites the real update lines.
+
+- **[phase4c] Rprop.m dead `rand` at `:5`** (`legacy/Optimizer_V6.2.2/functions/Rprop.m:5-6`;
+  ported in `src/python/speech/optimizers.py` `rprop_step`): line 5 computes
+  `delta0 = 0.001*(0.9*rand+0.1)` (a random step-size seed), then line 6 UNCONDITIONALLY overwrites
+  it with `delta0 = 0.01`. The `rand` draw at `:5` is discarded -- its only observable effect would
+  be advancing the global RNG stream, but Rprop is a standalone leaf function that draws nothing
+  else and is called fresh each step, so the discarded draw is value-neutral. The port hard-codes
+  `delta0 = 0.01` and calls no RNG, matching the LIVE `:6` value bit-for-bit. *Fix candidate:*
+  delete the dead `:5` line after parity. **Mutation:** restoring `:5` as the live delta0 (deleting
+  `:6`) makes the init-branch `deltaweight = -sign(deriv)*delta0` random -> `rprop_sequence_bit_exact`
+  fails on step 1.
+
+- **[phase4c] Octave-compat: SMORMS3 empty-varargin lvalue cs-list miscount**
+  (`tools/octave_harness/{smorms3_f_df,stage_smorms3}.m`; the .m source `SMORMS3.m:313` is
+  UNCHANGED -- this is a harness-executor accommodation, not a source edit): `f_df_wrapper`
+  assigns `[f, df_full, theta_local_out, obj.varargin_stored{:}] = obj.f_df(...)`. When SMORMS3 is
+  constructed with no trailing varargin (`SMORMS3(f_df, theta)`), `obj.varargin_stored` is `{}` and
+  the trailing `{:}` should expand to zero lvalues -- MATLAB requests 3 outputs, but Octave 11.3.0
+  miscounts and raises `f_df: function called with too many outputs`. The smallest accommodation
+  that keeps TIER 1 (the real classdef ctor + `optimization_step` + `f_df_wrapper` + update math all
+  run unchanged): pass exactly ONE dummy varargin (`struct()`), so the cs-list is a well-defined
+  single element, and have the injected `smorms3_f_df` echo it back as a 4th output. It is
+  VALUE-NEUTRAL: the scripted gradient depends only on `eval_count`, and the update math never reads
+  the varargin. The Python port (`Smorms3`) takes no such varargin -- its `f_df(theta, eval_count)`
+  is the clean contract; the dummy exists only to work around Octave's lvalue-expansion bug in the
+  oracle. Adjudicated per the CLAUDE.md rule "the .m source stays the contract; Octave the executor".
+
+- **[phase4c] SMORMS3.m:335-336 `eps=1e-16` guards -- now pinned by a near-zero-gradient
+  fixture** (`tools/octave_harness/stage_smorms3.m` eps-guard run; ported in
+  `src/python/speech/optimizers.py` `Smorms3.optimization_step`): the review finding
+  above (main-run coverage gap) noted `MMS >> eps` everywhere on the M=7/12-step main
+  run and the round-trip run, so an `eps`-placement mutation was a no-op there. Closed
+  by a third `stage_smorms3.m` sequence (M=1, 3 steps, constant `grad=1e-8`): step-1
+  `MMS = 0.5*grad^2 ~= 5e-17`, the same order as `eps=1e-16` (`MMS+eps ~= 3*MMS`,
+  extractor-asserted non-vacuous within 2 orders of magnitude, `scripts/
+  extract_phase4c_fixtures.py::EPS_GUARD_RATIO_BAND`). *Pinned by:*
+  `test_smorms3_eps_guard_active` (`tests/test_phase4c_optimizers.py`).
+  **Mutation results (local, hand-verified, not committed as code):** (1) dropping
+  `+eps` from `sqrt(MMS)+eps` (the dtheta denominator) changes `theta` at step 1 on
+  this fixture, while leaving the main/round-trip goldens bit-identical -- confirms
+  that guard is exercised HERE and only here. (2) dropping `+eps` from the `MMS+eps`
+  occurrence at the delta-update site (`self.delta = 1 + self.delta * (1 -
+  step_rate**2/(MMS+eps))`) changes `delta` at step 1 by ~22% (1.5 vs 1.8333) -- a
+  real, non-ULP effect. (3) **honest gap, still open:** the OTHER `MMS+eps` occurrence
+  -- the dtheta min-cap ratio inside `min(lrate, step_rate**2/(MMS+eps))` -- is a NO-OP
+  even on this near-zero-gradient fixture, because `lrate` is still `1e-9`
+  (pre-warmup) at step 1 and the `min()` saturates to `lrate` regardless of the ratio's
+  value; dropping `eps` there alone leaves `dtheta`/`delta`/`theta` bit-identical.
+  *Fix candidate:* none identified -- that occurrence would need a fixture where
+  `step_rate^2/(MMS+eps) < lrate` AND `MMS` is eps-scale simultaneously, i.e. `lrate`
+  warmed up (later step) while gradients stay near-zero (mms doesn't grow); left as a
+  narrower follow-up if that call site ever needs its own golden.
+
+- **[phase4c] Fixed-seed / injected-source determinism deviation -- REALIZED for QuantumPSO**
+  (`src/python/speech/optimizers.py::quantum_pso`, `TableRng`; `QuantumPSO.m:91`): the legacy
+  optimizer path is nondeterministic BY DESIGN (`QuantumPSO.m:91` `rand('state',sum(100*clock))`
+  reseeds `rand` from the wall clock; no fixed seed anywhere), so no single legacy RUN is
+  reproducible in principle. The port routes EVERY stochastic draw (rand/randperm/stblrnd) through
+  an injected source -- a `TableRng` (sequential f64 reads of a committed table) for bit-pinning, or
+  a plain numpy `Generator` for production. This preserves each operator's draw STRUCTURE/ORDER and
+  makes the operator behaviour pinnable, but does not bit-match any wall-clock legacy run. The
+  oracle is a MODIFIED-COPY of `QuantumPSO.m` (`tools/octave_harness/qpso_modified/`, NOT an edit to
+  `legacy/`) with the clock reseed removed and rand/randperm/stblrnd substituted by the SAME table
+  reads; both sides consume the identical committed `qpso_random_table.bin` (fixed numpy seed
+  20260709). *Pinned by:* `test_qpso_trajectory_bit_exact_given_table` (bit-exact init +
+  canary-gated trajectory + exact `cursor_end` draw count). *Fix candidate:* none -- a deliberate,
+  documented divergence. SMORMS3/Rprop still draw no randomness, so their goldens remain fully
+  deterministic without a table.
+
+- **[phase4c] Exit-gate genome<->engine binding: DSP-config injection, not `config2weights`**
+  (`src/python/speech/drivers/train.py`; legacy `CostFunction.m` -> `vec2struct` + `nnet2MatFile`
+  + `network2config`): the legacy QPSO cost path decodes the FULL engine config AND the initial NN
+  weights from each candidate genome, trains them, and writes the trained weights BACK into the
+  genome (`network2config` -> the `out_param` re-encode). This port sizes/validates the search with
+  the REAL vec2struct genome (`genome_length` + `masking_validation`, exactly the legacy), but binds
+  it to the engine by SURGICALLY injecting only the two genome-decoded `CostPonderation` fields onto
+  the byte-known-good committed base `.config` (the rest of the config stays identical to the
+  committed one, so the engine never sees a malformed genome-derived config). The `[sad, lid]`
+  weights are seeded from the config's committed `.bin` packs, NOT decoded from the genome, and the
+  SMORMS3-trained weights are re-seeded per eval, NOT written back into the genome. *Why:* this keeps
+  the exit gate a faithful full-loop DETERMINISM contract (QPSO outer + SMORMS3 inner + real engine
+  via the seam) without the `config2weights`/`network2config` round trip -- and per-value legacy
+  parity of the optimizer path is impossible in principle anyway (the clock-reseed deviation above).
+  *Fix candidate:* wire the `weight_bridge` `config2weights` + `network2config` genome<->weight round
+  trip at the end-to-end inference-output parity milestone. *Pinned by:*
+  `test_full_train_loop_deterministic` (`tests/pyo3/test_exit_gate.py`, bit-identical checkpoints +
+  cost history across two fixed-seed runs) + `test_twin_genome_length_and_masking`
+  (`tests/test_phase4c_drivers.py`, the vec2struct sizing/gate is real). The BackPropagation.m
+  normalize-tail strip (`weights(1:end-2*length(normalize.mean))`, :29/:57) IS reproduced faithfully:
+  SMORMS3 steps the tail-stripped head, and the mean/std tail is folded back before every
+  `Engine.set_weights` because the Rust `BLSTMNeuralNetwork::setWeights` demands the FULL vector
+  (`flat.len() >= nb_of_weights()`, an `Err` below that).
+
+- **[phase4c] Exit-gate config forces BOTH nets' backprop ON (the committed twin config has SAD off)**
+  (`src/python/speech/drivers/train.py::_eval_config_text`; `tests/reference_data/phase4b/twin_train.config`):
+  the committed twin config is `BLSTM_BackPropagationActivated false` / `BLSTM_LID_BackPropagationActivated
+  true` -- only the LID net trains internally. `engine.forward_backward` reads
+  `weights_derivatives(0)` = `[sad_deriv, lid_deriv]`; with SAD backprop OFF the SAD derivative matrix
+  comes back EMPTY (`0x0`), so `average_derivs` indexes out of bounds. The exit-gate config therefore
+  forces BOTH flags `true` (+ `Epochs 1` for the T9 single-eval semantics) so the 2-cell `[sad, lid]`
+  SMORMS3 contract is genuinely exercised (both derivatives populated). *Fix candidate:* none needed
+  -- an exit-gate config choice (train both nets), documented because it diverges from the committed
+  config's flags. *Pinned by:* `test_full_train_loop_deterministic`.
+
+- **[phase4c] `RunState` persists as JSON, not `ParamStruct.mat`**
+  (`src/python/speech/drivers/state.py`; `Init_BLSTM.m:217` `save(...'ParamStruct.mat','PS')`): the
+  legacy saves the free-form `PS` god-struct as a MATLAB `.mat`. The port persists a typed pydantic
+  `RunState` as `run_state.json`. Safe deviation: the ENGINE consumes the flat `.config` + `.bin`
+  weight packs and NEVER `ParamStruct.mat` (which is MATLAB-only optimizer bookkeeping), so the
+  orchestrator's own state format is free to be a plain, diffable, deterministic JSON blob. *Fix
+  candidate:* none -- a deliberate format choice. *Pinned by:* `test_run_state_json_roundtrip`
+  (`tests/test_phase4c_drivers.py`, save/load equality).
+
+- **[phase4c] `retrain` seeds `nnet_best` only, not the legacy half-population reuse**
+  (`src/python/speech/drivers/retrain.py::retrain`; `ReTrain_BLSTM.m:803`
+  `PSOseedparam = [nnet_best nnet_in(:,1:ceil(size(nnet_in,2)/2))]'`): the legacy resume
+  seeds the QPSO population's first rows with BOTH the prior run's best genome (`nnet_best`)
+  AND the top half of its final population (`nnet_in`), preserving more of the prior search's
+  diversity across the resume boundary. This port's checkpoint (`RunState`/`TrainResult` JSON,
+  see the entry above) stores only the gbest genome (`gbest.bin`), not the full terminal
+  population, so `retrain` can only seed `nnet_best`. *Why:* consistent with the JSON-state
+  deviation -- the checkpoint format was never designed to carry a population, only the winner.
+  *Fix candidate:* if population diversity across resumes becomes load-bearing, checkpoint the
+  QPSO's final population alongside `gbest.bin` and thread it through `seed_from_checkpoint`.
+  *Pinned by:* `test_retrain_seed_from_checkpoint` (`tests/test_phase4c_drivers.py`, bit-exact
+  `gbest.bin` reload) -- the single-genome seeding itself, not the missing population half.
+
+- **[phase4c] QuantumPSO's four velocity banks are DEAD but STREAM-CONSUMING**
+  (`legacy/Optimizer_V6.2.2/functions/QuantumPSO.m:375-411` vs the apply gate `:447`; ported in
+  `src/python/speech/optimizers.py::quantum_pso`): each epoch computes `vel1..vel4` (Trelea sets
+  1/2, Clerc type-1" with `chi`, common-PSO with linear `iwt`), drawing EIGHT `rand([ps,D])`
+  matrices (`:375,376,382,383,389,390,403,404`). The only place those velocities are APPLIED to
+  `pos` is inside `if (i > 20*me/2)` (`:447`) -- i.e. `i > 10*me`, which is unreachable for the
+  loop `i = 1:me`. So the banks never move a particle, yet their 8*ps*D draws per epoch DO advance
+  the shared RNG stream; dropping them shifts every downstream value (QDPSO update, DE/Levy gates,
+  cost order). The port keeps the draws (a documented consume-and-discard) but skips the dead vel
+  ARITHMETIC (parity-neutral: it feeds only the unreachable apply). The Octave modified-copy keeps
+  the arithmetic verbatim for faithfulness. Same class of quirk as `:420` (a `sign(rand(ps,D)-0.5)`
+  drawn then overwritten at `:442`) and the fully-dead-in-both-directions `MBest = mean(pbest)`
+  (`:418`, unused since `:421` is commented). *Fix candidate:* delete the dead banks (and fix the
+  `20*me/2` gate if velocity PSO was ever intended) after parity. *Pinned by:*
+  `test_dead_banks_consume_stream`. **Mutation:** the `_dead_banks=False` variant (skipping the 8
+  per-epoch vel draws) diverges the position trajectory from the pinned run at epoch 0 -- the
+  non-vacuity proof that the dead draws are load-bearing for stream alignment.
+
+- **[phase4c] QuantumPSO oracle substitution adjudications (Octave modified-copy)**
+  (`tools/octave_harness/qpso_modified/{QuantumPSO,tbl_rand,tbl_randperm,tbl_stblrnd}.m`): the four
+  RNG substitutions that make the wall-clock-reseeded `QuantumPSO.m` table-reproducible, each
+  mirrored bit-for-bit by the Python `TableRng`/`levy_stable_cms`. (1) **Column-major fill**:
+  MATLAB `rand([m,n])` lays its stream out column-major, so `tbl_rand`/`TableRng.rand` read `m*n`
+  values and reshape with `order='F'` (Octave `reshape` default); numpy's default row-major fill
+  would silently transpose every matrix draw. (2) **randperm**: MATLAB's builtin `randperm(n,k)` is
+  not table-reproducible, so BOTH sides substitute an identical Durstenfeld/Fisher-Yates over 1..n
+  consuming exactly `n-1` draws (`j=floor(rand*i)+1; swap p(i),p(j)`), then take the first k -- the
+  selected neighbour indices match. (3) **stblrnd**: `stblrnd(1.3,1,0.5,0,1,D)` hits only the
+  general `alpha!=1` Chambers-Mallows-Stuck branch (`stblrnd.m:75-82,96`), which draws V then W;
+  ported as `levy_stable_cms`, table-fed in the same order. (4) **the backprop gate** (`:481`
+  `(BackPropagationActivated>0) && (rand<0.5)`): with `BackPropagationActivated=0` the `&&`
+  short-circuits and NO `rand<0.5` is drawn -- the port matches (a HOOK; T12 wires the real
+  refinement). *Measurement:* on the oracle libm (Apple, this repo's oracle env) the ENTIRE
+  trajectory including the transcendental `log(1/u)` + Levy path is bit-exact between Octave 11.3.0
+  and numpy (measured 0-ULP); the `*_traj` comparators are canary-gated only for cross-libm CI. The
+  copy shadows the vendored `QuantumPSO.m` via `addpath(...,'-begin')` (no other stage calls it).
+
+- **[phase4c] printConfig.m emits the Forward_/Backward_/LID peephole-flag + MaxSaturation
+  fields -- the ACTIVE inline condition DIVERGES from the commented-out `isNotExcluded`**
+  (`legacy/Optimizer_V6.2.2/functions/printConfig.m:8-9` vs the dead `:45-77`; ported in
+  `src/python/speech/genome.py::_printconfig_written`): the clean refactored `isNotExcluded`
+  helper lists `AlgName_Forward_` / `AlgName_Backward_` / their `MaxSaturation` +
+  `Is*PeepholesActive` variants ALL as excluded prefixes, so it would drop every
+  `AlgName_Forward_*` field. But that helper is COMMENTED OUT at the call site (`:10`); the
+  live boolean (`:8-9`) whitelists `MaxSaturation` + the three peephole-flag families (and any
+  `_ActivationClocks`-suffixed field) with `~= 0` OR-arms, excluding ONLY the weight matrices
+  (`Layer_*Weights` / `LSTMBlock` / `Output_Layer` / `NormalizeInput`). The port mirrors the
+  LIVE condition, not the helper. *Verified against* the real `1_worker_1.config`
+  (`tests/reference_data/phase0/`): `BLSTM_Forward_IsCellsPeepholesActive true` etc. ARE
+  present, weight lines absent. *Pinned by:* `test_configstruct_fields_match`
+  (`tests/test_phase4c_genome.py`, spectral/twin cases -- both emit the six peephole flags).
+  *Mutation:* switching `_printconfig_written` to the `isNotExcluded` semantics (exclude every
+  `AlgName_Forward_`/`Backward_`) drops the six peephole-flag lines -> the config golden fails.
+
+- **[phase4c] vec2struct.m:964 LID `decision_thresh_falling` is unconditionally overwritten
+  with `-decision_thresh_rising`** (`legacy/Optimizer_V6.2.2/functions/vec2struct.m:954-965`;
+  ported in `src/python/speech/genome.py::_lid`): the LID falling threshold runs the full
+  param-decode + mask + `> rising` clamp branch (all of which write `out_param`), then the very
+  next line before `setfield` does `fieldValue = -configStruct.AlgName_LID_decision_thresh_rising`
+  -- discarding the just-computed value for the STORED config (out_param keeps the branch
+  result). The SAD `decision_thresh_falling` (`:50-60`) has no such negate -- a load-bearing
+  asymmetry. *Pinned by:* `test_twin_lid_falling_negate_quirk` (`falling == -rising`).
+  *Mutation:* dropping the `fieldValue = -rising` line makes the twin config's
+  `BLSTM_LID_decision_thresh_falling` carry the clamped decode instead of `-rising` -> fails.
+
+- **[phase4c] The calibration `CostLawParam*`/`CostLawThresh*` fields encode `out_param`
+  UNCONDITIONALLY (not just under a mask), and clamp to [0,1]; `ComputeDeltasNb` rounds WITHOUT
+  `abs`; `min_speech(3)` is floored at 0 only for algo < 5** (`vec2struct.m:1384-1421`, `:580`,
+  `:239-241`; ported in `genome.py::_clamped01`, `_algo_spectral`, `_front_matter`): the six
+  calibration clamps write `out_param(count) = fieldValue*adim` before the `isfield` mask check
+  (so a sorted/clamped genome round-trips even unmasked); the law strings decode via
+  `rem(round(5*|p|/adim),5) -> {log,linear,square,sqrt,cubic}`. `ComputeDeltasNb` uses
+  `round(param)` (signed) unlike its `abs`-guarded neighbours. `min_speech`'s third element is
+  `max(0,.)`-floored only below algo 5. *Pinned by:* `test_calib_law_decode_and_clamps`
+  (sqrt/cubic + clamp-high `1`/clamp-low `0`) + `test_out_param_inverse_matches` (bit-exact).
+  *Mutation:* gating the `_clamped01` out_param write behind the mask (as the string-law fields
+  are) leaves the calib `out_param` == input param at those positions -> the out_param golden fails.
+
+- **[phase4c] `count_param` (the genome length) is the 1-based cursor's FINAL value =
+  `len(genome) + 1`, and is a pure function of the PS spec (algo + net sizes + balance +
+  flags), independent of param values and the mask** (`vec2struct.m:30` init `count_param = 1`,
+  returned at `:1`; `genome_length` in `src/python/speech/genome.py`): `Train_BLSTM_Seg.m:682`
+  sets `PS.NS.ncoef = count_param` (the +1 form) then immediately overwrites it with `5e4`
+  (`:683`) -- a harmless over-allocation, so the off-by-one never bites operationally. The port
+  returns the identical `count_param`; `genome_length` runs the same walk over a zero genome
+  (mask-independent). *Pinned by:* `test_count_param_matches` (STRICT vs Octave per case, and
+  `count == len(param)+1`, and `genome_length == count`). *Mutation:* any single miscounted
+  block (e.g. Cell `nbNeed` using `+2+3` instead of `+1`) shifts every downstream genome index
+  -> both the count and out_param goldens fail (risk R3).
+
+- **[phase4c] L2 regularization is wired for the LID net ONLY, never the SAD/seg net**
+  (`ComputeCost.m:362` gradient `MultiDerivLID += L2_regul*(MultiWeightsLID.*(1-isBiasLID))` and
+  `:554` cost `NNCostLID += L2_regul*sum((MultiWeightsLID.*(1-isBiasLID)).^2)/2`, both inside the
+  `if (PS.VP.algo == 6)` LID block; the SAD deriv `MultiDeriv` is averaged at `:357` with NO L2
+  term and `NNCostSeg` at `:430` gets none either; ported in `engine.py::forward_backward`): the
+  seg/SAD network is left unregularized regardless of `L2_regul`. The port reproduces the
+  asymmetry -- `forward_backward` applies `l2_penalty` to net index 1 (LID) only, never net 0.
+  *Pinned by:* `test_l2_penalty` (the helper) + `test_forward_backward_tier2_determinism` (algo 3,
+  `l2` default 0 -> no L2 on the seg net). *Mutation:* applying `l2_penalty` to `gradients[0]`
+  (the SAD net) in `forward_backward` would double-count regularization the legacy never applies.
+
+- **[phase4c] ComputeCost stage is FALLBACK-TIER (stage-local transcription of the assembly
+  lines), not TIER 1** (`tools/octave_harness/stage_computecost.m`; adjudication): unlike the
+  SMORMS3/Rprop/vec2struct stages (which `addpath` + CALL the vendored `.m` unchanged),
+  `ComputeCost.m` cannot be driven wholesale in Octave -- its top half shells out to the engine
+  (`system('python RunFsp.py ...')`, `:173-191`) after a `vec2struct`+`nnet2MatFile` config-write
+  loop and then LOADS the worker `.mat`/`.bin` the shell-out wrote (`:216-282`), and the
+  `!`-escape cleaning (`:37`) deletes any pre-injected worker files before the shell-out, so there
+  is no injection point that leaves the vendored `.m` unmodified. The stage transcribes the PURE
+  assembly lines (`:285-652`: sortrows `[1 2 3]`, deriv averaging, pooled stats, L2, the balance
+  0/3/4/5/10 error + cost) line-for-line with `% legacy:` provenance and lets Octave execute the
+  real MATLAB builtins (sortrows/median/hist/std/cumsum/exp/log). The engine-shelling top half is
+  the seam -- covered separately by `tests/pyo3` against `speech_rs.Engine`, not by this stage.
+  *Pinned by:* `tests/test_phase4c_engine_cost.py` (all groups). *Mutation:* the balance-3-vs-4
+  over-90 saturation coefficient (`0*` vs `1*`, `:450`/`:458`) is checked to DIVERGE
+  (`test_balance_3_vs_4_over90_saturation` + the extractor's non-vacuity guard).
+
+- **[phase4c] The fractional-error `mean`/`mean(.^2)` cost scalars need an always-tolerant
+  comparator (`close`), NOT the oracle-exact libm canary -- and NOT because of summation order**
+  (`engine.py::compute_cost` `:626-651` balance cost; `tests/test_phase4c_engine_cost.py::
+  _assert_close_always`). Originally misdiagnosed as a numpy-pairwise-vs-Octave-sequential
+  summation-order difference; a review pass (empirical) found that diagnosis wrong: a plain
+  sequential Python loop (`s=0.0; for v in x: s+=v; s/len(x)`) reproduces `np.mean`'s bit pattern
+  EXACTLY on every case below, so the residual cannot be reduction order (order is invariant in
+  IEEE double at these `n`, and numpy's pairwise summation only diverges from sequential at much
+  larger `n` than these 3-4-element vectors anyway). The real cause is that Octave accumulates
+  `mean`/`sum` internally in EXTENDED precision (x87 80-bit / long-double on this toolchain), so
+  its result can land 1 ULP away from ANY double-precision loop-order variant -- a gap that is
+  LOOP-ORDER-INVARIANT in double and therefore genuinely unfixable by "port the summation order
+  more faithfully" (the repo's usual ascending-loop-vs-numpy-pairwise fix for this class of gap
+  does not apply here). A tolerant bound is the correct and only remedy.
+
+  Evidence (measured on the oracle env; `np.mean(x) == seq_mean(x)` bit-for-bit in every row,
+  yet both differ from Octave by 1 ULP on 3 of 8 cases):
+
+  | golden | np.mean | sequential-loop mean | == np.mean? | Octave | ULP(np vs Octave) |
+  |---|---|---|---|---|---|
+  | cb0_cost | 102.66666666666667 | 102.66666666666667 | yes | 102.66666666666667 | 0 |
+  | cb5_cost | 45.0 | 45.0 | yes | 45.0 | 0 |
+  | cb3_cost | 0.4833333333333334 | 0.4833333333333334 | yes | 0.48333333333333334 | 1 |
+  | cb4_cost | 0.5666666666666668 | 0.5666666666666668 | yes | 0.5666666666666667 | 1 |
+  | tier2_b0_cost | 84.0967032967033 | 84.0967032967033 | yes | 84.0967032967033 | 0 |
+  | tier2_b5_cost | 36.78 | 36.78 | yes | 36.78 | 0 |
+  | b10a_cost | 3.6027306048400947 | 3.6027306048400947 | yes | 3.602730604840095 | 1 |
+  | b10b_cost | 2.8405808008508533 | 2.8405808008508533 | yes | 2.8405808008508533 | 0 |
+
+  cb0/cb5 (INTEGER-error means, exact `/n`, no accumulated rounding to disagree about) and the
+  3 goldens measuring 0 ULP above (tier2_b0/tier2_b5/b10b) are promoted to the oracle-exact
+  `canary` comparator; only the genuinely 1-ULP-off cases (cb3/cb4/b10a) stay `close`
+  (always-tolerant `<=4 ULP or 512*2^-52*max(|want|,1)`, applied on every platform including the
+  oracle env, since the gap is not a libm split `canary` could gate on). *Pinned by:* the
+  `close`/`canary`-classified goldens in the manifest. *Mutation:* classifying cb3_cost as
+  `canary` (as first drafted) fails on the oracle env -- the extended-precision gap survives the
+  libm gate, because it was never a libm gate in the first place.
+
+- **[phase4c] The 8 `computecost_*_cpumean.bin` goldens were dumped but never asserted** (review
+  follow-up to Task 9): `ComputeCost.m:432-436`'s `cpu_mean = median(Error_vad(:,4))` term feeds
+  balances 0/3/4/5/10 (`engine.py::compute_cost`'s `cpu_term`/`error` formulas), and the extractor
+  already dumped a `cpumean` golden alongside every `error`/`cost`/`nnseg` group, but no test read
+  them back -- pure dead pinning. Now asserted in every balance-law test via `bd.cpu_mean` against
+  `computecost_<group>_cpumean.bin`. All 9 cases (cb0/3/4/5, tier2_b0/b5, b10a/b10b/b10c) measure
+  bit-exact numpy-vs-Octave (`np.median` vs Octave `median`) and are classified STRICT: `median` is
+  a single sort + at-most-one `/2` on already-materialized values, not a multi-term reduction, so
+  it never exhibits the extended-precision accumulation gap the `mean`/`mean(.^2)` cost scalars
+  above do. *Pinned by:* the `_cpumean` assertions added to `test_balance_crafted`,
+  `test_balance_tier2_committed`, `test_balance10_two_class_cutoff_search`,
+  `test_balance10_three_class_else_branch`, `test_balance10_two_class_zero_zero_interior_cutoff`.
+
+- **[phase4c] The balance-10 zero-zero interior-cutoff branch (`ComputeCost.m:571-572`) was
+  transcribed but unpinned** (review follow-up to Task 9): `_balance10_cutoff`'s
+  `if n[pos]==0 and n2[pos]==0: cutoff = (centers[first_n]+centers[last_n2])/2` branch fires only
+  when the two per-class score CDFs (`n` ascending, `n2` descending) leave an interior span of the
+  0-99.99 hist grid where BOTH are identically zero -- i.e. the class-1-fired and class-2-fired
+  score clusters are cleanly separated with a gap between them, so the plain `argmin(|n-n2|)`
+  position lands in a flat zero-zero plateau rather than on a genuine crossing, and the code
+  instead bridges the gap by taking the midpoint of the two clusters' nearest edges. Neither b10a
+  (crossing inside an overlapping plateau, both curves at 50) nor b10b (>2-class else branch, no
+  `n`/`n2` at all) exercises it. Added a crafted 2-class case (`b10c`: class-1-fired scores
+  ~290/295 -> `tmp2` max 10; class-2-fired scores ~280/285 -> `tmp` min 80, leaving the zero-zero
+  span `(10,80)`) that lands the branch's midpoint cutoff at 44.995 -- bit-exact Python vs Octave,
+  and far from the ~10.005 a reverted/un-guarded `cutoff = t(pos)` branch would emit instead (the
+  first bin of the zero-zero plateau, since `argmin`/Octave `min` both return the first minimum).
+  *Pinned by:* `test_balance10_two_class_zero_zero_interior_cutoff` (`tests/
+  test_phase4c_engine_cost.py`); the extractor's non-vacuity guard SystemExits if `b10c_cutoff`
+  falls outside `(30, 60)`. *Mutation:* deleting the `if` guard (always taking `cutoff = t(pos)`)
+  would move b10c's cutoff to ~10.005, failing both the golden compare and the `(30, 60)` band.
+
+- **[phase4c] `CreateBatches.m`'s non-multilingual `nbOfTargetClasses>1` branch indexes
+  `Cases`/`WorstCases` by LOOP POSITION, not class VALUE -- silently clobbering the aggregate
+  slot for the natural contiguous class labeling** (`CreateBatches.m:43-60`; `src/python/speech/
+  batching.py::create_batches`). The loop is `for ii = 1:length(possibleValues)`, and for a
+  target class (`0 < possibleValues(ii) < nbOfTargetClasses`) it writes `Cases(ii)` -- the LOOP
+  COUNTER `ii`, not `possibleValues(ii)` (the class value itself). `possibleValues` is
+  `unique(...)`, sorted ascending. When class values are the natural contiguous labeling
+  `0, 1, ..., nbOfTargetClasses-1` (0 = non-target catch-all, 1..N-1 = targets -- the obvious
+  choice), the LAST loop position (`ii = nbOfTargetClasses`) lands on `possibleValues(ii) =
+  nbOfTargetClasses-1`, which is ITSELF a valid target (`0 < nbOfTargetClasses-1 <
+  nbOfTargetClasses`) -- so it overwrites `Cases(nbOfTargetClasses)`, the SAME slot pre-reserved
+  for the non-target aggregate, with the top target class's data. Class-0's files (assigned to
+  the aggregate at `ii=1`) are silently lost; `WorstCases(nbOfTargetClasses)` (derived from
+  `Cases(nbOfTargetClasses)` AFTER the loop) inherits the same clobber. Ported faithfully: the
+  Python `create_batches` writes `cases[ii]` (the Python loop position) for target classes,
+  exactly mirroring the bug. A SEPARATE non-multilingual quirk: the aggregate's own accumulation
+  branch (`Cases(nbOfTargetClasses).index = [Cases(...).index; find(...)]`, no `randperm` call)
+  is NEVER shuffled, unlike every target class's pool -- also ported verbatim (`create_batches`'s
+  `else` branch concatenates `find`-order indices with no `shuffled(...)` call).
+  *Pinned by:* `test_create_batches_clobber_quirk` (contiguous `{0,1,2}`/`nb_classes=3` ->
+  `Cases(3)` ends up as class-2's data) vs `test_create_batches_multi_nb_clean_aggregate_and_
+  rotation` (non-contiguous `{1,2,5}`/`nb_classes=3` -> no clobber, clean aggregate) in `tests/
+  test_phase4c_batching.py`; the extractor's non-vacuity guard SystemExits unless the clobber
+  case measures class-2's data. *Mutation:* indexing by `possibleValues(ii)` instead of `ii`
+  (the "obviously correct" fix) would change `test_create_batches_clobber_quirk`'s expected
+  `Cases(3)` content and fail against the real Octave dump.
+
+- **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
+  `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
+  shuffles every per-class index pool via the builtin `randperm`, which would make the
+  extractor's output non-reproducible run to run (breaking the "run twice, byte-identical"
+  determinism contract every other Phase 4c stage relies on). Shadowed (via `addpath` ordering,
+  the shadow dir added AFTER `functions_dir` so it wins -- Octave `addpath` prepends, so the
+  LATER call takes precedence; verified empirically, since this is easy to get backwards) with
+  `p = n:-1:1`, a closed-form function of `n` trivial to replicate in Python (a duck-typed
+  `rng.permutation` stand-in reversing its input, `tests/test_phase4c_batching.py::_ReverseRng`)
+  -- so `create_batches`'s OWN shuffle output is bit-pinned against the real `CreateBatches.m`,
+  not just `GetNewBatch.m`'s RNG-free rotation. `CreateBatches.m` itself is unmodified (TIER 1).
+
+- **[phase4c] Octave-compat: `CheckGrad.m`'s real `CostFunction.m` and diagnostic plot are both
+  unusable in the harness -- shadowed via `addpath` precedence, `CheckGrad.m` itself untouched**
+  (`tools/octave_harness/checkgrad_shadow/`). Two independent problems: (1) the real
+  `CostFunction.m` shells out to the engine (`system('python RunFsp.py ...')`) -- unusable in a
+  fast, hermetic Octave-only harness; shadowed with a pure quadratic surrogate
+  `f(w)=0.5*sum(c.*(w-target).^2)` over the REAL flat NN weight vector, re-derived from `param`
+  via the REAL `vec2struct`+`nnet2MatFile` on every call (so `CheckGrad`'s own per-weight
+  `network2config`/`weights2nnet`/`vec2struct` perturbation round trip is genuinely exercised and
+  visible to the surrogate). (2) `CheckGrad.m`'s per-genome diagnostic plot (`:91-96`/`:155-159`)
+  uses the old-style `subplot 211` call form, which errors ("invalid axes handle or RCN
+  argument") under this Octave/FLTK combination independent of headlessness -- shadowed with
+  no-op `figure`/`subplot`/`semilogy`/`hold`/`grid` stand-ins (verified empirically: the real
+  calls error even with `--no-gui`, and the no-ops let the unmodified function run to completion).
+  Both shadows live only in `checkgrad_shadow/`, added to the Octave path AFTER `functions_dir`.
+
+- **[phase4c] Genuine legacy bug surfaced by driving the real `CheckGrad.m`: `weights2nnet.m`
+  never writes back the normalize mean/std tail `nnet2MatFile.m` appends to `weights`, so
+  CheckGrad's last `2*length(normalize.mean)` numeric derivatives are always exactly 0**
+  (`nnet2MatFile.m:140-141` appends `nnet.normalize.mean;nnet.normalize.std` to the flat
+  `weights` vector CheckGrad iterates `kk = 1:length(weights)` over; `weights2nnet.m:150-186`
+  reconstructs `nnet.output.layer(*).weights` from `weights` and then RETURNS -- it never reads
+  or writes `nnet.normalize.*` at all). So perturbing weight index `kk` in the tail (`modWeights
+  (kk) = modWeights(kk)+epsilon`) has NO EFFECT on the reconstructed `nnet_mod`, hence no effect
+  on the config/param round trip, hence the central-diff numerator is always `PlusNNCost -
+  MinusNNCost = 0` for those 2 entries -- while the analytic backprop derivative at the same
+  index is whatever the (real or surrogate) `CostFunction` computed, generally nonzero. This is
+  an ASYMMETRY vs the LID branch (`CheckGrad.m:109`, `weightsLID = weightsLID(1:end-2*length
+  (normalizeLID.mean));`), which explicitly TRIMS that untestable tail before its own loop -- the
+  SAD branch (`:45-96`) has no equivalent trim. Measured on the Task 10 golden (algo-3, tiny net,
+  `Kw=53`, `2*length(normalize.mean)=2`): `MultiDeriv_Num(52:53) = [0, 0]` while `MultiDeriv_
+  BackProp(52:53)` are both nonzero (~13.5 and ~5.6). NOT reproduced by the Python port:
+  `speech.scoring.check_grad` is a GENERIC central-diff utility that perturbs its `weights`
+  argument DIRECTLY (no config round trip), so it has no way to inherit this bug and correctly
+  produces a proper nonzero numeric derivative at those indices -- a deliberate, documented,
+  and tested divergence, not an oversight. *Pinned by:* `test_checkgrad_normalize_tail_quirk_
+  recorded` (`tests/test_phase4c_fixtures.py`, guards the golden fixture itself) and
+  `test_check_grad_normalize_tail_quirk_documented_not_reproduced` (`tests/
+  test_phase4c_scoring.py`, asserts the Python port's numeric/analytic AGREE at those indices,
+  the opposite of the Octave golden). *Mutation:* the extractor's non-vacuity guard SystemExits
+  if the golden's last 2 numeric entries are ever nonzero (would mean the bug -- or the harness
+  setup exercising it -- silently stopped firing).
+
+- **[phase4c] `MaskingValidation.m`'s FAIL case exploits a genuine encode/decode asymmetry in
+  `vec2struct.m`'s `_padding_block`-family fields for negative mask values** (`vec2struct.m`
+  `_padding_block`/`genome.py::_Walk._padding_block`, feeding `AlgName_speech_padding`/
+  `AlgName_min_silence`/`AlgName_min_speech`). The ENCODE (mask branch) writes `out_param =
+  (fv+0.1)*adim` using the RAW masked value `fv`; the DECODE (both the plain param->field path
+  and the re-decode `MaskingValidation.m` performs on `out_param` with an EMPTY mask) computes
+  `fv' = -0.1 + abs(p/adim)`. For `fv >= 0` these are inverses (`abs` is a no-op on a
+  non-negative argument). For `fv < 0` they are NOT: encoding `fv=-5` (`adim=10`) gives
+  `out_param = (-5+0.1)*10 = -49`; decoding `-49` gives `fv' = -0.1+abs(-4.9) = 4.8`, nothing like
+  `-5` (mask-forced value, used by the FIRST `vec2struct` call's `configStruct`) OR `0` (the
+  algo<5 floor-at-0 clamp genome.py's `_front_matter` applies to `min_speech[2]` specifically,
+  also visible only in the first call's `cfg`, not in `out_param`). So `MaskingValidation.m`'s
+  double round trip (`configStruct` from `vec2struct(vector,mask,...)` vs `maskedConfigStruct`
+  from `vec2struct(out_param,[],...)`) genuinely diverges and correctly reports a mismatch --
+  this is the validator doing its job (catching a mask value outside the field's implicit
+  non-negative domain), not a false positive. Not "fixed" in the port (`speech.genome.vec2struct`
+  reproduces the same asymmetric encode/decode); discovered by directly running the vendored
+  `.m` with a crafted negative mask value, not by reading source alone.
+  *Pinned by:* `test_masking_validation_fail_case` + `test_masking_validation_pass_case`
+  (`tests/test_phase4c_scoring.py`) and `test_masking_manifest_present_and_pass_fail_split`
+  (`tests/test_phase4c_fixtures.py`); the extractor's non-vacuity guard SystemExits unless
+  `(pass_failed, fail_failed) == (0, 1)`. *Mutation:* clamping `fv` to `>= 0` before the mask
+  encode (the "obviously correct" fix) would make the FAIL case pass too, collapsing the pinned
+  contrast.
+
+- **[phase4c] Mutation battery (Task 13): 8/8 mutations break a test as designed; one
+  (item 2) via a different, adjacent test than the literally-named catcher -- recorded
+  honestly, not papered over; no gap.** Each applied/run(targeted suite only, FOREGROUND)/
+  reverted(`git checkout --`)/re-run in isolation; no Rust touched, so `cargo test` was
+  skipped per the brief and only `uv run pytest tests` + `./lint_code.sh` ran once at the
+  end. (1) SMORMS3 lrate warmup x10->x2 (`optimizers.py::Smorms3.optimization_step:94`,
+  `self.lrate = min(self.lrate * 10, ...)` -> `* 2`) against
+  `tests/test_phase4c_optimizers.py` -- FAILED as expected
+  (`test_smorms3_lrate_warmup_x10_capped`: "lrate step 1: `0x1.12e0be826d695p-29` !=
+  `0x1.5798ee2308c3ap-27`"; 4 more tests in the same file cascade-failed since `lrate`
+  feeds `theta`); reverted, PASS. (2) One `eps=1e-16` placement moved: dropped `+ self.eps`
+  from the dtheta line's `(np.sqrt(self.mms) + self.eps)` denominator
+  (`optimizers.py:92`), leaving `eps` only at the `(self.mms + self.eps)` occurrence (the
+  min-cap term, also independently present in the `self.delta` update) -- against
+  `tests/test_phase4c_optimizers.py` -- the NAMED catcher `test_smorms3_trajectory_bit_exact`
+  did NOT fail (the main run has `MMS >> eps` everywhere, consistent with the standing
+  eps-guard finding above), but `test_smorms3_eps_guard_active` (the dedicated
+  near-zero-gradient fixture) DID: "eps theta[0] step 1: `0.4999999985857864` !=
+  `0.4999999985857865`" (a genuine 1-ULP divergence, not noise, per `assert_f64_close`'s
+  strict-bits branch on this oracle env); the actual catcher differs from the plan's named
+  one, recorded per the brief's allowance, not treated as a gap since a test DID break;
+  reverted, PASS. (3) theta_out round-trip dropped: `self.theta = theta_out + dtheta` ->
+  `self.theta = self.theta + dtheta` (`optimizers.py:96`, keeping the pre-`f_df` theta
+  instead of the value `f_df` returned) against `tests/test_phase4c_optimizers.py` --
+  FAILED as expected, ONLY `test_smorms3_theta_out_roundtrip_pinned`: "rt theta[0] step 1:
+  `0.9999999985857865` != `1.0499999985857864`" (diverges by the crafted nonzero offset);
+  reverted, PASS. (4) vec2struct mask-inverse write-back dropped: removed
+  `self._set(0, fv * adim)` from the `AlgName_decision_thresh_rising` mask branch
+  (`genome.py::_Walk._front_matter:238`) against `tests/test_phase4c_genome.py` -- FAILED
+  as expected on both `test_out_param_inverse_matches[masked]` ("out_param bit mismatch")
+  and `test_mask_fixes_field_and_writes_back` ("`0.5385131705458746` != `7.0`"); reverted,
+  PASS. (5) `average_derivs`'s zero-count guard dropped: `d[:,0]/np.maximum(1.0, d[:,1])`
+  -> `d[:,0]/d[:,1]` (`engine.py:128`) against `tests/test_phase4c_engine_cost.py` --
+  FAILED as expected (`test_average_derivs`: "avg_out[1] strict: `inf` != `10.0`", plus a
+  `RuntimeWarning: divide by zero"); reverted, PASS. (6) `l2_penalty` bias-exclusion
+  flipped: `keep = 1.0 - is_bias` -> `keep = is_bias` (`engine.py:166`) against
+  `tests/test_phase4c_engine_cost.py` -- FAILED as expected (`test_l2_penalty`:
+  "l2_cost[0] strict: `0.053125000000000006` != `0.225`"); reverted, PASS. (7) QPSO
+  contraction-expansion coefficient sign inverted: `pos = attractor + coef_exp_contr *
+  signs * ...` -> `pos = attractor - coef_exp_contr * signs * ...`
+  (`optimizers.py::quantum_pso:490`) against `tests/test_phase4c_qpso.py` -- FAILED as
+  expected: `test_qpso_trajectory_bit_exact_given_table` ("pos_traj[0][0]:
+  `3.0000301340132474` != `2.9999698659867526`") plus a cascading failure in
+  `test_dead_banks_consume_stream` (reuses the same epoch-0 golden); reverted, PASS.
+  (8) `get_new_batch` rotation off-by-one: `while len(batch) < batches.nb_cases_per_batch:`
+  -> `<=` in the non-multilingual branch (`batching.py::get_new_batch:363`) against
+  `tests/test_phase4c_batching.py` -- FAILED as expected on both non-multilingual rotation
+  goldens: `test_create_batches_single_and_rotation` ("single step 0: batch mismatch,
+  `[4, 3, 2]` == `[4, 3]`" -- one extra element pulled per call) and
+  `test_create_batches_multi_nb_clean_aggregate_and_rotation` ("multi_nb step 0: batch
+  mismatch, `[0, 2, 5]` == `[0, 2]`"); `test_create_batches_sub_and_rotation` is on the
+  OTHER (multilingual) branch and correctly stayed green; reverted, PASS. *Process note,
+  not committed as code:* two more literal "cursor advance/wrap" off-by-one variants were
+  tried FIRST and discarded before ever reaching pytest -- advancing the cursor by 2
+  instead of 1, and wrapping one index early (`>= case.index.size - 1`) -- each produces a
+  GENUINE INFINITE LOOP on the committed `single`/`multi_nb` fixtures: both have a case
+  group of size 2 whose single worst-excluded element becomes the cursor's fixed point
+  under either mutation (confirmed with a bounded, alarm-guarded standalone harness, not
+  committed; the runaway `pytest` processes were killed rather than left spinning). This is
+  a real property of `get_new_batch`'s unbounded `while len(batch) < ...` loop -- it has no
+  iteration cap, so a sufficiently-adversarial (or buggily-mutated) rotation state can spin
+  forever on a small, single-worst-element case group; not a currently-shipping bug (the
+  landed cursor logic is golden-pinned correct), but worth a future defensive iteration cap
+  if `get_new_batch` is ever exposed to untrusted/adversarial batch configs. *Net verdict:*
+  8/8 mutations break a test; item 2's catcher differs from the plan's named one (both are
+  in the same suite, both true positives) -- no gap this round. Full transcript (diffs,
+  commands, exact output) in `.superpowers/sdd/task-13-report.md`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
@@ -2390,5 +2933,6 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `[phase1]` finding that `InputStatistics::update`'s pooled variance/std merge is not exactly
   associative in floating point, a multi-threaded legacy run is not bit-reproducible across runs
   (and a rayon `par_iter` port with a different reduction order will not match any single legacy
-  run bit-for-bit either). Add the concrete `[phase3]`/`[phase4]` entry (with the Rust reduction
-  strategy chosen) once `engine/corpus_processor.rs`'s parallel driver lands.
+  run bit-for-bit either). CLOSED by the `[phase4a]` static-lane deterministic reduction entry
+  above (the chosen Rust strategy: file `j` -> lane `j % N`, ascending-lane fold; N=1 is the
+  golden-pinned legacy-sequential parity mode).

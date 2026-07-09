@@ -719,6 +719,38 @@ fn twin_bool_default(m: &IndexMap<String, String>, key: &str, default: bool) -> 
     }
 }
 
+/// Port of `TwinBLSTMSpectralLID.cpp:906-913`'s `_DumpDir.size() > 0` branch (the only
+/// branch reachable here, since the call site already guards on `!dump_dir.is_empty()`):
+///
+/// ```cpp
+/// basefilename = audio.getAudioFileName().substr(
+///     audio.getAudioFileName().find_last_of('/')+1,
+///     audio.getAudioFileName().size()-audio.getAudioFileName().find_last_of('/')-1-4);
+/// basefilename = _DumpDir+"/"+basefilename;
+/// ```
+///
+/// Strips the directory (the portion after the last `/`, or the whole string if there is
+/// none) then ALWAYS drops exactly 4 trailing characters from that basename -- NOT an
+/// extension-aware strip. For a `.wav` name this cleanly removes `.wav`; for the mode-7
+/// phSeq arm's `.phSeq` (6 chars) it leaves a partial extension (`"s1.phSeq"` ->
+/// `"s1.p"`), a load-bearing legacy quirk reproduced verbatim (see IMPROVEMENTS.md). When
+/// the basename is shorter than 4 bytes, `std::string::substr`'s length-clamping (the
+/// requested length underflows to a huge `size_t`, then gets clamped to the remaining
+/// string) leaves it untouched rather than panicking -- well-defined in C++, reproduced
+/// here with an explicit length check instead of relying on unsigned wraparound.
+fn mode7_dump_basename(audio_file_name: &str, dump_dir: &str) -> String {
+    let after_slash = match audio_file_name.rfind('/') {
+        Some(i) => &audio_file_name[i + 1..],
+        None => audio_file_name,
+    };
+    let stem = if after_slash.len() >= 4 {
+        &after_slash[..after_slash.len() - 4]
+    } else {
+        after_slash
+    };
+    format!("{dump_dir}/{stem}")
+}
+
 /// Twin/Siamese spectral LID driver (Algo 6; `TwinBLSTMSpectralLID.{h,cpp}`).
 ///
 /// UNLIKE Algo 5 (`BlstmSpectralLid`, whose SAD is LTSV-driven), Algo 6's SAD IS the
@@ -1222,13 +1254,11 @@ impl TwinBlstmSpectralLid {
     }
 
     /// Override the DumpLIDInternals output directory (`_DumpDir`). The legacy derives
-    /// the `.mat` filename from `audio.getAudioFileName()` (`:906-913`); this driver
-    /// does not thread `Audio::audio_file_name` (the field landed in Task 8, populated
-    /// post-hoc by `engine::bag_of_processors::apply_corpus_item`, not by
-    /// `read_audio`/`read_phseq`) into this dump path, so the dump filename stays
-    /// `<dir>/chan<c>_lid_dump.mat` -- a cosmetic path deviation (IMPROVEMENTS'd, now a
-    /// real 4c-era fix candidate since the field exists); the VARIABLE names
-    /// (`features_<n>`, `matNb`) and values are the faithful part.
+    /// the `.mat` filename from `audio.getAudioFileName()` (`:906-913`, see
+    /// [`mode7_dump_basename`]) -- `<dir>/<audio basename minus 4 trailing chars>_chan<c>
+    /// _lid_dump.mat`. Closed 4c-era fix: `Audio::audio_file_name` (landed in 4b Task 8,
+    /// populated post-hoc by `engine::bag_of_processors::apply_corpus_item`, not by
+    /// `read_audio`/`read_phseq`) is now threaded into this dump path.
     pub fn set_dump_dir(&mut self, dir: String) {
         self.driver_cfg.dump_dir = dir;
     }
@@ -1360,6 +1390,7 @@ impl TwinBlstmSpectralLid {
         let mut lid_cost_ponderation = 1.0f64;
         // External features are shared across channels (phSeq has _ChannelsCount = 1).
         let external_features = audio.external_features.clone();
+        let audio_file_name = audio.audio_file_name.clone();
 
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             // targetIndex = clamp(lang_index, [0, classNb)) (`:626-628`).
@@ -1395,7 +1426,8 @@ impl TwinBlstmSpectralLid {
                 .set_processing_type(lid_window_size > 0, !lid_no_overlap); // :971
 
             let mut dump = if dump_lid_internals && !dump_dir.is_empty() {
-                let p = std::path::Path::new(&dump_dir).join(format!("chan{chan}_lid_dump.mat"));
+                let base = mode7_dump_basename(&audio_file_name, &dump_dir);
+                let p = std::path::PathBuf::from(format!("{base}_chan{chan}_lid_dump.mat"));
                 Some(crate::io::matfile::MatWriter::create(&p)?)
             } else {
                 None

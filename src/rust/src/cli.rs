@@ -102,10 +102,19 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
     Ok(CliInvocation { mode, configs })
 }
 
+/// Load a config file, dispatching on extension: `.toml` -> the Phase 4c canonical
+/// TOML config (`toml_config::toml_to_map`); anything else (incl. the legacy
+/// extensionless / `.config` convention) -> the legacy whitespace importer
+/// unchanged. Both paths collapse to the same `IndexMap<String, String>` shape.
 fn load_config(path: &str) -> Result<IndexMap<String, String>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("cannot read config file '{path}': {e}"))?;
-    Ok(parse_legacy_config(&text))
+    if path.ends_with(".toml") {
+        crate::toml_config::toml_to_map(&text)
+            .map_err(|e| anyhow::anyhow!("invalid TOML config '{path}': {e:#}"))
+    } else {
+        Ok(parse_legacy_config(&text))
+    }
 }
 
 /// Apply one `--key=val` override to `map` (legacy `:47-52`): `arg` must start
