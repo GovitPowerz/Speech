@@ -3089,6 +3089,42 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   exercise the ALL-leading-spaces strip after substitutions widen the leading run).
   *Pinned by:* `test_full_content_line_raise_carries_prefix_state` (documents both
   divergences inline) plus the `light_*` byte-oracle fixtures (`tests/test_phase4d_stm.py`).
+- **[4d] FIX-WAVE (Task 7 review): `@line[0..5]` undef-padding vs Python slice
+  truncation -- both normalizers' head split silently diverged on short lines**
+  (`stm_normalize.py::normalize_stm_light` and `::normalize_stm_full`, both :19, ported
+  from `norm_stm_pkt_light.pl:19` / `norm_stm_pk_cts_all_trans_03a.pl:19`): this is a
+  QUIRK CLASS worth naming on its own, distinct from the two cross-script divergences
+  above -- perl array slices with a FIXED literal range (`@line[0..5]`) always read six
+  indices regardless of the array's actual length; an out-of-range index reads as
+  `undef`, and `join`'s separator is still emitted for it (undef stringifies to `""`,
+  but the separator between it and its neighbors is real). The shipped port instead used
+  `" ".join(tokens[0:6])`, a Python slice, which silently TRUNCATES to `len(tokens)`
+  elements for `len(tokens) < 6` and emits NO separator for the missing ones -- so every
+  content line with fewer than 6 whitespace-delimited fields lost one join-separator
+  space per missing field (`n` real fields, `6-n` missing: `6-n` fewer bytes in `head`,
+  plus the outer `"$head $text\n"` format's own space is unaffected since it always
+  fires). Lines with `n>=6` fields were never affected (`tokens[0:6]` and `@line[0..5]`
+  agree exactly once the array is at least 6 long). VERIFIED LIVE against
+  `/usr/bin/perl` (`tools/perl_oracle/run_norm.sh light`): a 3-field line
+  (`file1 1 hi`) produces real-perl head `"file1 1 hi   "` (3 trailing pad spaces, one
+  per undef slot) where the pre-fix port produced `"file1 1 hi"` (0 trailing spaces); a
+  5-field line (`file1 1 spkA 0.00 hi`) produces real-perl head
+  `"file1 1 spkA 0.00 hi "` (1 trailing pad space) vs the pre-fix port's 0. Fixed by a
+  shared `_pad_head(tokens) -> tokens[:6] + [""] * max(0, 6 - len(tokens))` helper used
+  by both callers' `:19` line, reproducing perl's join-with-undef byte output exactly
+  for every `n`. `normalize_stm_full` has no live oracle for content lines (see above),
+  but `head` is built at `:19`, strictly before the `:109`-equivalent
+  `NormalizerUnavailable` raise, so the padded head IS observable on the exception even
+  there -- pinned by hand-derivation, not by oracle diff. *Pinned by:*
+  `test_pad_head_no_padding_when_six_or_more_tokens`,
+  `test_pad_head_pads_short_token_lists_with_empty_strings` (direct pin on the shared
+  helper), `test_light_short_line_head_matches_perl_undef_padding` +
+  `test_normalize_stm_light_matches_perl_oracle[case6]` against the live-perl
+  `light_case6.{in,out}` fixture (`tests/reference_data/phase4d/stm/`, added by this
+  fix wave, `scripts/extract_phase4d_fixtures.py --stm-fixtures`, run twice per case
+  plus twice across separate invocations to confirm determinism), and
+  `test_full_short_line_head_is_padded_not_truncated` (hand-derived, exception-observed)
+  (`tests/test_phase4d_stm.py`).
 - **[4d] `perl s///g`'s non-overlap semantics on the filler alternation rules --
   Python's `re.sub` reproduces it with NO special-casing, verified against the live
   oracle** (`norm_stm_pkt_light.pl:29,31`, ported as `_LIGHT_SUBS`' first two entries):

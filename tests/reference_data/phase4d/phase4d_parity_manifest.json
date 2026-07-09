@@ -370,6 +370,12 @@
         "out_sha256": "c625d0ad68df4abb8ab5a0722e2743cb374c53b210120d3d7d6efcbffc96eb6a",
         "twice_run_identical": true
       },
+      "light_case6": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "fe257e74f0575ebb1a593afe556d3ef9f92ab0c4fa40848a883f5f707b0ea604",
+        "out_sha256": "b54a80266f37f99c8900054b3c9692ffce340c71a608ec9ffcbaecb862d16a1f",
+        "twice_run_identical": true
+      },
       "full_case1": {
         "script": "norm_stm_pk_cts_all_trans_03a.pl",
         "in_sha256": "045632da85ed23cd8753a3e120e3dba6162174e80e966ddc8fc07175c32b3e0a",

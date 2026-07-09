@@ -14,11 +14,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from speech.dataprep.stm_normalize import NormalizerUnavailable, normalize_stm_full, normalize_stm_light
+from speech.dataprep.stm_normalize import NormalizerUnavailable, _pad_head, normalize_stm_full, normalize_stm_light
 
 STM_DIR = Path(__file__).resolve().parent / "reference_data" / "phase4d" / "stm"
 
-LIGHT_CASES = ["case1", "case2", "case3", "case4", "case5"]
+LIGHT_CASES = ["case1", "case2", "case3", "case4", "case5", "case6"]
 FULL_CASES = ["case1", "case2", "case3"]
 
 
@@ -127,6 +127,38 @@ def test_light_whitespace_only_text_becomes_ignore_time_segment() -> None:
     assert out == "f1 1 s 0.00 1.00 <o> ignore_time_segment_in_scoring\n"
 
 
+# --- _pad_head: fix-wave hand-derived pin (shared by both normalizers, :19 in each) ---
+# Perl's `@line[0..5]` reads six fixed indices regardless of array length: an
+# out-of-range index reads as undef, and `join` still emits a separator for it. The
+# original `tokens[0:6]` Python slice TRUNCATES instead of padding for short lines --
+# caught live via light_case6 (see below); this pins the shared helper directly, byte
+# for byte, independent of either caller.
+
+
+def test_pad_head_no_padding_when_six_or_more_tokens() -> None:
+    assert _pad_head(["a", "b", "c", "d", "e", "f"]) == ["a", "b", "c", "d", "e", "f"]
+    assert _pad_head(["a", "b", "c", "d", "e", "f", "g"]) == ["a", "b", "c", "d", "e", "f"]
+
+
+def test_pad_head_pads_short_token_lists_with_empty_strings() -> None:
+    assert _pad_head([]) == ["", "", "", "", "", ""]
+    assert _pad_head(["a"]) == ["a", "", "", "", "", ""]
+    assert _pad_head(["a", "b", "c"]) == ["a", "b", "c", "", "", ""]
+    assert _pad_head(["a", "b", "c", "d", "e"]) == ["a", "b", "c", "d", "e", ""]
+
+
+def test_light_short_line_head_matches_perl_undef_padding() -> None:
+    """Non-vacuity check for the fix: `light_case6`'s live-oracle fixture is a 3-field
+    line and a 5-field line, each with trailing spaces in the head the OLD `tokens[0:6]`
+    truncation would have dropped (verified against the pre-fix code: it produced
+    'file1 1 hi' / 'file1 1 spkA 0.00 hi' with no trailing pad space, one join-separator
+    short of the real perl's undef-padded output)."""
+    out = normalize_stm_light(["file1 1 hi\n"])[0]
+    assert out == "file1 1 hi    ignore_time_segment_in_scoring\n"
+    out = normalize_stm_light(["file1 1 spkA 0.00 hi\n"])[0]
+    assert out == "file1 1 spkA 0.00 hi  ignore_time_segment_in_scoring\n"
+
+
 # --- full: comment/blank prefix + the typed bail --------------------------------------
 
 
@@ -157,6 +189,18 @@ def test_full_content_line_raise_carries_prefix_state() -> None:
     # strip (no `+`, unlike light's :47) removes exactly the ONE leading pad space,
     # leaving the trailing pad space untouched.
     assert exc_info.value.text == "hello  world "
+
+
+def test_full_short_line_head_is_padded_not_truncated() -> None:
+    """`normalize_stm_full` builds `head` (:19, via `_pad_head`) BEFORE raising
+    `NormalizerUnavailable` (:109-equivalent), so the padded head IS observable on the
+    exception for a short (fewer than 6 fields) content line -- no live oracle reaches
+    this (see the module docstring), so this is a hand-derived pin, not a byte-oracle
+    one, but it exercises the real caller, not just the shared `_pad_head` helper in
+    isolation."""
+    with pytest.raises(NormalizerUnavailable) as exc_info:
+        normalize_stm_full(["file1 1 hi\n"])
+    assert exc_info.value.head == "file1 1 hi   "
 
 
 def test_full_content_line_after_comments_still_raises() -> None:

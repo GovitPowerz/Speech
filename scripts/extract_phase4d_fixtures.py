@@ -215,6 +215,14 @@ STM_DIR = PHASE4D_DIR / "stm"
 #            strip class, and token-join space normalization.
 #   case5 -- the empty-text -> `ignore_time_segment_in_scoring` branch, incl. a
 #            whitespace-only text field and an all-punctuation text field.
+#   case6 -- fix-wave (Task 7 follow-up): lines with FEWER than 6 whitespace-delimited
+#            fields (a 3-field line, a 5-field line). Perl's `@line[0..5]` (:19) reads
+#            six fixed indices regardless of array length -- an out-of-range index reads
+#            as undef, and `join` still emits a separator for it, so the head is PADDED
+#            with empty strings, not truncated. This is the case that caught the
+#            original `tokens[0:6]` (Python slice truncation) bug: every line here has
+#            n < 6 fields, so the un-padded port silently diverged from the real perl
+#            byte for byte (extra join separators go missing).
 LIGHT_CASES: dict[str, str] = {
     "case1": (
         ";; comment line one\n"
@@ -250,6 +258,10 @@ LIGHT_CASES: dict[str, str] = {
         "file1 1 spkA 0.00 1.00 <o,f0>\n"
         "file1 1 spkA 1.00 2.00 <o,f0>    \n"
         "file1 1 spkA 2.00 3.00 <o,f0> . ! ?\n"
+    ),
+    "case6": (
+        "file1 1 hi\n"
+        "file1 1 spkA 0.00 hi\n"
     ),
 }
 

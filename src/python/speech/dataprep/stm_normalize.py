@@ -6,15 +6,19 @@ interpreter left), Perl 5.34 is present on this host, so this module gets the st
 validation tier available in Phase 4d dataprep.
 
 Both scripts share the same per-line shape: a `while (<STDIN>)` loop reading one STM
-record per line, `head = fields[0:6]` / `text = fields[6:]` split, then a fixed cascade
-of `s///g` regex substitutions applied to `text` IN SOURCE LINE ORDER (never reordered --
-several rules depend on an earlier rule having already run, e.g. the paren-reattachment
-rules consume `(-)` tokens the paren-collapse rule produced two lines earlier).
+record per line, `head = @line[0..5]` / `text = @line[6..$#line]` split (`_pad_head`
+below), then a fixed cascade of `s///g` regex substitutions applied to `text` IN SOURCE
+LINE ORDER (never reordered -- several rules depend on an earlier rule having already
+run, e.g. the paren-reattachment rules consume `(-)` tokens the paren-collapse rule
+produced two lines earlier).
 
 `normalize_stm_light` (`norm_stm_pkt_light.pl`, 57 live lines, no external dependency)
-is fully self-contained and BYTE-ORACLE-VERIFIED end to end: every `light_*` fixture
-under `tests/reference_data/phase4d/stm/` is the real script's stdout, run twice per
-case to confirm determinism (`scripts/extract_phase4d_fixtures.py --stm-fixtures`).
+is fully self-contained and BYTE-ORACLE-VERIFIED end to end, INCLUDING short (fewer than
+6 whitespace-delimited fields) lines: every `light_*` fixture under
+`tests/reference_data/phase4d/stm/` is the real script's stdout, run twice per case to
+confirm determinism (`scripts/extract_phase4d_fixtures.py --stm-fixtures`); `light_case6`
+is the short-line case that caught the original `_pad_head` truncation bug (see
+IMPROVEMENTS.md).
 
 `normalize_stm_full` (`norm_stm_pk_cts_all_trans_03a.pl`, 210 lines) is different: EVERY
 content line (anything past the comment/blank checks) hits an UNCONDITIONAL shell-out at
@@ -43,6 +47,15 @@ intermediate value for a content line (it always reaches the shell-out first), s
 source, not against a live run. See IMPROVEMENTS.md and `tests/test_phase4d_stm.py`.
 
 Legacy quirks reproduced verbatim (see IMPROVEMENTS.md for the full list):
+  * `@line[0..5]` (:19, both scripts) reads six FIXED indices no matter how many fields
+    the line actually split into: an out-of-range index reads as perl `undef`, and
+    `join` still emits a separator for it, so a line with fewer than 6 fields gets its
+    head PADDED with empty strings, not truncated -- each padding slot costs exactly one
+    extra space in the head, plus the outer `"$head $text\\n"` join's own space. Python
+    slicing (`tokens[0:6]`) truncates silently instead; `_pad_head` reproduces the
+    padding explicitly. Caught live via a short-line oracle case (`light_case6`,
+    3- and 5-field lines) after the original `tokens[0:6]` transcription shipped without
+    one -- see IMPROVEMENTS.md.
   * `light`'s two filler alternation rules (`(^|\\s)(euh|hm+|...)(\\s|$)` and the second
     hesitation class) exhibit perl `s///g`'s classic non-overlap skip: a match's trailing
     `\\s` is CONSUMED, so an immediately adjacent token loses its own leading boundary and
@@ -97,6 +110,17 @@ _LIGHT_SUBS_COMPILED = [(re.compile(p), r) for p, r in _LIGHT_SUBS]
 _EMPTY_TEXT_RE = re.compile(r"^\s*$")
 
 
+def _pad_head(tokens: list[str]) -> list[str]:
+    """Perl's `@line[0..5]` (:19) reads six fixed indices regardless of array length:
+    an out-of-range index reads as `undef`, and `join` still emits a separator for it --
+    so a line with fewer than 6 whitespace-delimited fields gets PADDED with empty
+    strings, not truncated. Python's `tokens[0:6]` silently truncates for `len(tokens) <
+    6` instead, which is the bug this helper fixes: shared by both `normalize_stm_light`
+    (:19) and `normalize_stm_full` (:19), since both scripts open with the identical
+    `@line[0..5]` head split."""
+    return tokens[:6] + [""] * max(0, 6 - len(tokens))
+
+
 def normalize_stm_light(lines: list[str]) -> list[str]:
     """Port of `norm_stm_pkt_light.pl` (57 live lines), byte-oracle-verified against the
     real script (`tests/reference_data/phase4d/stm/light_*.{in,out}`).
@@ -124,7 +148,7 @@ def normalize_stm_light(lines: list[str]) -> list[str]:
 
         line = raw[:-1] if raw.endswith("\n") else raw  # :15 chomp
         tokens = line.split()  # :17
-        head = " ".join(tokens[0:6])  # :19
+        head = " ".join(_pad_head(tokens))  # :19 -- perl @line[0..5] undef-pads, doesn't truncate
         text = " ".join(tokens[6:])  # :20
 
         head = _APOSTROPHE_RE.sub("_", head)  # :22
@@ -250,7 +274,7 @@ def normalize_stm_full(lines: list[str]) -> list[str]:
 
         line = raw[:-1] if raw.endswith("\n") else raw  # :15 chomp
         tokens = line.split()  # :17
-        head = " ".join(tokens[0:6])  # :19
+        head = " ".join(_pad_head(tokens))  # :19 -- perl @line[0..5] undef-pads, doesn't truncate
         text = "  ".join(tokens[6:])  # :20 -- DOUBLE-SPACE join, unlike light's single
 
         text = " " + text + " "  # :22
