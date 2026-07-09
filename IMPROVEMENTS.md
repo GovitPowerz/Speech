@@ -2995,6 +2995,47 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   corpora. *Pinned by:*
   `test_lang_fallback_raises_indexerror_without_two_underscore_tokens`
   (`tests/test_phase4d_opensad15.py`).
+- **[4d] Corpus augmentation: injected RNG is a DOCUMENTED CONVENTION, not a parity claim**
+  (`src/python/speech/dataprep/augment.py`, ported from `AugmentCorpus.py:46-57`): the legacy
+  draws `noise`/`noisetype`/`pitch`/`tempo` from `numpy.random` seeded implicitly off the
+  Python 2 process's wall clock -- no legacy run is reproducible even against itself, so unlike
+  every bit-exact-pinned module in this repo there is no trajectory to match, live or hand-
+  computed. The port instead takes an injected `numpy.random.Generator` and preserves the
+  legacy's DRAW ORDER verbatim (noise first, then noisetype, then pitch, then tempo, x5 per
+  passing file) so a seeded run is at least reproducible within this port. *Pinned by:*
+  `test_draw_variant_order_is_noise_then_noisetype_then_pitch_then_tempo` (an independent
+  re-derivation off a freshly seeded generator, not a call into the function under test) and
+  `test_draw_variant_noisetype_ladder` (4 brute-force-found seeds, one per ladder bucket)
+  (`tests/test_phase4d_augment.py`).
+- **[4d] Corpus augmentation: hard-coded `noise.wav`/`mod.wav` scratch-file collision hazard**
+  (`AugmentCorpus.py:39,58,60,63,66`, ported as the `_NOISE_SCRATCH`/`_MOD_SCRATCH` constants in
+  `augment.py`): every sox invocation -- the per-file silence-strip duration probe AND all 5
+  per-variant pitch/tempo/noise/mix steps -- reads and writes the SAME two relative filenames in
+  the current working directory. The legacy is safe only because it runs strictly sequentially,
+  one `os.system()` call at a time, in one process/one cwd; nothing in this port changes that
+  assumption (no unique temp names, no injectable scratch directory), so it inherits the same
+  restriction: `augment_corpus` must not be run concurrently (multiple processes/threads sharing
+  a cwd) or its scratch writes will race. Reproduced as-is rather than "fixed", since the whole
+  command-string surface is the pinned artifact (see the module docstring). *Fix candidate:* a
+  scratch-directory parameter with per-call-unique filenames, once nothing depends on the pinned
+  literal `noise.wav`/`mod.wav` command tokens. *Pinned by:* the module docstring's collision-
+  hazard note plus every `RecordingRunner`-based test in `tests/test_phase4d_augment.py` (the
+  recorder's `duration()` intentionally cannot key readings by path -- only by call order --
+  because the path is always the same overwritten `noise.wav`).
+- **[4d] Corpus augmentation: `str(pitch)`/`str(tempo)`/`str(noise)` inside the sox COMMAND
+  strings are Python 2's `str(float)`, reused from the OpenSAD15 `py2_str_float` helper**
+  (`AugmentCorpus.py:60,63`, ported as `pitch_tempo_command`/`noise_synth_command` calling
+  `speech.dataprep.opensad15.py2_str_float`): same CPython-2-vs-3 `str(float)` divergence
+  documented for the OpenSAD15 converter (Task 5) -- `%.12g`-style 12-significant-digit
+  formatting vs Python 3's shortest-round-trip `repr`-backed `str`. Only the SOX COMMAND
+  arguments go through this path; the `%.3f`-formatted VARIANT FILENAME (`AugmentCorpus.py:58`,
+  ported as `variant_filename`) is fixed-precision `%f`-style formatting, which does NOT diverge
+  between Python 2 and 3, so it stays a plain `f"{x:.3f}"` with no `py2_str_float` involved --
+  the two format paths in the same line of legacy code are NOT interchangeable and must not be
+  collapsed into one helper. *Pinned by:*
+  `test_pitch_tempo_command_uses_py2_str_float_not_python3_str` (a noisy-past-12-sig-figs pitch
+  value) and `test_variant_filename_uses_fixed_point_not_py2_str_float`
+  (`tests/test_phase4d_augment.py`).
 
 ## Toolchain deviations
 
