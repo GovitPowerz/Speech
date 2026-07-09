@@ -3348,6 +3348,91 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `test_out_param_inverse_matches[vecmask]` and `test_vecmask_arm_writes_expected_slice
   [NormalizeInputStd]` -- confirming the golden is non-vacuous, not merely present.
 
+### Mutation battery (Phase 4d)
+
+- **[phase4d] Mutation battery (Task 14): 7 of 8 mutations break their named golden as
+  designed; item 7 is a targeted comparator demonstration (not an apply/revert
+  production mutation), and it confirms the structural gate is load-bearing -- no gap.**
+  Each production mutation applied/run (named suite only, FOREGROUND)/reverted
+  (`git checkout --`)/re-run in isolation; tree confirmed clean (`git status --porcelain`)
+  between every step. (1) OpenSAD15 collar `2.0`->`1.0` (`src/python/speech/dataprep/
+  opensad15.py::convert_tab_file`, all five `SegsExcl` guard-band sites: the two `:149`/
+  `:159`-style `beg_f - 2.0` leading-collar sites, the two `:151`/`:161`-style `end_f +
+  2.0` trailing-collar sites, and the `:154` re-open threshold `beg_f - 2.0 - 0.1`)
+  against `tests/test_phase4d_opensad15.py` -- FAILED as expected (6 of 27: all 5
+  `test_convert_tab_file_matches_hand_computed_fixture` cases plus
+  `test_process_opensad15_writes_xml_stm_and_listing`, each an STM excluded-region
+  boundary-time mismatch, e.g. case1 `1.4118` (mutated) vs `2.4118` (golden)); reverted,
+  PASS. (2) S/RI filter widened: added an `or (len(label) == 2 and label.startswith("S"))`
+  arm to `convert_tab_file`'s `:113` filter (accepting 2-char `S`-prefixed labels like
+  `"SP"`, previously excluded) against the same suite -- FAILED as expected, exactly the
+  named catcher `test_case4_filter_excludes_non_s_non_ri_labels` (`assert 3 == 2`, the
+  excluded `"SP"` row now contributes a segment) plus the case4 fixture golden; reverted,
+  PASS. (3) `audio_path[:-5]` -> `audio_path[:-4]` (`convert_tab_file:117`, the XML
+  `AudioDoc` stem) against the same suite -- FAILED as expected (7 of 27: the named
+  `test_case5_extension_length_quirk_truncates_stem` plus all 5 fixture cases and the
+  process-driver test, since every stem now truncates one character short); reverted,
+  PASS. (4) Light-normalizer filler regex dropped: removed the `(euh|hm+|mm+|eh|huhum|
+  hum)` cascade entry (`src/python/speech/dataprep/stm_normalize.py::_LIGHT_SUBS`, the
+  `:29`-sourced tuple) against `tests/test_phase4d_stm.py` -- FAILED as expected, the
+  named `test_light_filler_class1_adjacent_tokens_alternate` plus the byte-oracle
+  `test_normalize_stm_light_matches_perl_oracle[case2]` (the fixture's `hm mm eh huhum
+  hum` line, now left unfiltered); reverted, PASS. (5) `write_listing` fliplr stride
+  off-by-one: `_worker_positions`'s `range(a, 0, -nb_workers)` -> `range(a, 0,
+  -(nb_workers - 1))` (`src/python/speech/batching.py:159`) against
+  `tests/test_phase4d_listing_writers.py` -- FAILED as expected, the named
+  `test_worker_positions_hand_derived` (`_worker_positions(7,1,3)` now `[0,2,4,6]` vs the
+  hand-derived `[0,3,6]`) plus the golden shard bytes and the partition non-vacuity check
+  (now double-covers file 0 and skips file 4); reverted, PASS. (6) Augment noisetype
+  ladder boundary moved: `elif noisetype < 2` -> `elif noisetype < 2.5`
+  (`src/python/speech/dataprep/augment.py::draw_variant:104`, the pink/tpdf rung) against
+  `tests/test_phase4d_augment.py` -- FAILED as expected, exactly the named
+  `test_draw_variant_noisetype_ladder[4-tpdfnoise]` (seed 4's draw `2.0453...` now
+  resolves to `"pinknoise"` instead of `"tpdfnoise"`); reverted, PASS. (8) Batch-mode
+  rotation wiring bypassed: `_BatchRunner.next_listing`'s `batch, _ =
+  get_new_batch(self.batches)` -> `batch = list(self.last_index) if
+  self.last_index.size else get_new_batch(self.batches)[0]` (`src/python/speech/drivers/
+  train.py:170`, reusing the prior step's index instead of rotating) against
+  `tests/test_phase4d_batchmode.py` -- FAILED as expected, exactly the named
+  `test_batch_listing_bytes_rotates_across_steps` (step 1's index stayed `[0,1]` instead
+  of advancing to `[2,3]`); reverted, PASS.
+  *Item 7* (parity structural assert weakened) is not a production mutation by
+  construction -- the brief's own alternative framing (craft a flipped fixture COPY,
+  point a temporary test-local comparison at it) was used since the assert in question
+  lives in a *test* (`tests/test_phase4d_parity.py::test_vrcts_structural_and_boundaries`),
+  not production code: a COPY of `tests/reference_data/phase4d/parity_tupleA_vrcts_
+  chan1.xml` had its trailing `<SpeechSegment stime="56.9852" etime="59.9999">` dropped
+  (a segment-type flip: Speech -> excluded/Other), written to the session scratchpad, the
+  COMMITTED fixture untouched. Two throwaway test functions were appended to
+  `tests/test_phase4d_parity.py` (never committed, reverted via `git checkout --` after
+  the run), both driving the REAL `speech_rs.Engine` over tupleA to get the real 8-segment
+  port output, then diffed against the 7-segment flipped copy: (a) the CURRENT code path
+  (`:168`'s explicit `assert len(port) == len(oracle)`) raised `AssertionError: ...
+  STRUCTURAL count mismatch port=8 oracle=7` as expected -- the gate FAILS on the flipped
+  copy, confirmed via `pytest.raises`; (b) a WEAKENED comparison (the explicit count
+  assert dropped, `zip(port, oracle, strict=True)` relaxed to non-strict `zip`) run
+  against the identical port/flipped-copy inputs raised NOTHING and the test PASSED --
+  non-strict zip silently truncates to the shorter (7-element) side, so the port's extra
+  trailing segment (the dropped-in-legacy regression the flip simulates) goes completely
+  unnoticed. Non-obvious finding: `strict=True` on the per-boundary `zip` (`:170`) is
+  ALSO independently load-bearing for a count mismatch (it raises `ValueError` on its
+  own, redundant with the explicit `:168` assert for a raw length difference) -- but
+  ONLY the explicit assert's non-strict-zip removal in the weakened variant above was
+  needed to demonstrate the pass-through, since dropping just one of the two guards
+  already suffices; the two guards are not fully redundant in general (a REORDERING
+  mutation with an unchanged count would slip past the `:168` count assert but still be
+  caught by strict `zip`'s per-element comparison against `pinned_dt`). Both `assert
+  len(port) == len(oracle)` (:168) and `zip(..., strict=True)` (:170) are therefore
+  independently load-bearing, not decorative; no port-side fix needed, this is a
+  demonstration, not a discovered bug. *Net verdict:* 7 of 8 fresh production mutations
+  break their named golden exactly as designed (item 8 uses catcher-suite numbering `8`
+  per the brief's own list, so this entry skips numeral `7` deliberately, not by
+  omission); item 7's comparator-swap demonstration confirms the structural gate is
+  genuinely load-bearing, closing the brief's requested check with no coverage gap
+  found. Full pytest (`uv run pytest tests`) + `cd src/rust && cargo test` + `./lint_code.sh`
+  ran once at the end, all green (see the Task 14 report,
+  `.superpowers/sdd/task-14-report.md`, for exact commands/logs).
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
