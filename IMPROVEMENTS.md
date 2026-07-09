@@ -3056,6 +3056,15 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   hazard note plus every `RecordingRunner`-based test in `tests/test_phase4d_augment.py` (the
   recorder's `duration()` intentionally cannot key readings by path -- only by call order --
   because the path is always the same overwritten `noise.wav`).
+- **[4d] Corpus augmentation: a short listing line (fewer than 6 `;`-fields) raises an unguarded
+  `IndexError`** (`AugmentCorpus.py:69` indexes `elems[1]`..`elems[5]` directly; ported as-is at
+  `augment.py`'s listing-row emission): the legacy crashes identically at the same read, so the
+  port reproduces rather than guards -- the same latent-crash class as opensad15's lang-fallback
+  `[-2]` (its sibling entry above). Only fires on a gate-passing file whose listing row is
+  malformed. *Fix candidate:* none while reproduce-bugs-exactly governs. *Pinned by:*
+  `tests/test_phase4d_augment.py::test_augment_corpus_short_line_raises_indexerror_on_gate_pass`
+  (this bullet was added in the T16 final-review cleanup for consistency with the sibling
+  precedent; the docstring + test landed with Task 6 itself).
 - **[4d] Corpus augmentation: `str(pitch)`/`str(tempo)`/`str(noise)` inside the sox COMMAND
   strings are Python 2's `str(float)`, reused from the OpenSAD15 `py2_str_float` helper**
   (`AugmentCorpus.py:60,63`, ported as `pitch_tempo_command`/`noise_synth_command` calling

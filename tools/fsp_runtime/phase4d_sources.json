@@ -20,6 +20,6 @@
     "site": "BLSTMNeuralNetwork::saveWeights -> iof::fmtr filename formatting (best-weight persistence path)",
     "cause": "resurrection artifact: the 2015 binary links libstdc++.6 current 7.20.0 (gcc 4.9); the closest obtainable x86_64 macOS libstdc++ is gcc-14 current 7.33.0, and the binary's old-ABI std::string / iof::fmtr interaction faults under it. The 2015 legacy dir contains weights_bestNNWeight_1_*.mat, proving saveWeights completed on the original toolchain.",
     "impact": "none on the segmentation oracle (VRCTS is written pre-crash); the MultiConfigResults .mat (cost/counter columns) is NOT written because saveResults runs after the crashing saveAndUpdate. Extractors must tolerate exit 139 and consume the VRCTS output.",
-    "fallback_available": "if a downstream task needs a clean-exiting oracle for the results-.mat numeric columns, add a -ffast-math rebuild mode to tools/oracle_harness/build.sh and set oracle=fastmath-rebuild here. Not needed for segmentation parity."
+    "fallback_available": "LIVE since Task 3: the results-.mat numeric columns come from the -ffast-math rebuild oracle (tools/oracle_harness/build.sh --fastmath -> oracle_harness_fastmath + phase4d_parity.cpp), which exits cleanly and scores for real; per-fixture provenance lives in tests/reference_data/phase4d/phase4d_parity_manifest.json (oracle: real-binary for VRCTS, fastmath-rebuild for mcr). This binary remains the segmentation oracle."
   }
 }

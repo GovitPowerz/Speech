@@ -119,10 +119,13 @@ VRCTS). The crash is content-independent (a short output filename crashes identi
 tolerate exit 139 and consume the VRCTS output; `setup.sh --check` therefore gates on
 the (clean) usage smoke, not the solo run's exit code.
 
-**Fallback (not used):** if a later task needs a clean-exiting oracle for the results
-`.mat` numeric columns, add a `-ffast-math` rebuild mode to
-`tools/oracle_harness/build.sh` and flip `phase4d_sources.json` to
-`oracle: fastmath-rebuild`. It is not needed for the segmentation oracle.
+**The numeric-column complement (LIVE since Task 3):** the results `.mat` cost/counter
+columns come from the `-ffast-math` REBUILD oracle -- `tools/oracle_harness/build.sh
+--fastmath` -> `oracle_harness_fastmath` driving `phase4d_parity.cpp` -- which exits
+cleanly and scores for real. The parity manifest records per-fixture provenance
+(`oracle: real-binary` for the VRCTS legs, `oracle: fastmath-rebuild` for mcr); the two
+oracles' VRCTS agree byte-for-byte on all committed combos. This binary remains the
+SEGMENTATION oracle.
 
 ## Requirements
 

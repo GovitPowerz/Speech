@@ -1265,6 +1265,16 @@ def main() -> None:
             },
             "size_budget": {"total_bytes": total_bytes, "limit_bytes": SIZE_BUDGET_BYTES},
         }
+        # Preserve the OTHER stages' manifest blocks (stm/listing/scr) across a parity
+        # regeneration -- they are owned by their own read-modify-write stages, and a
+        # wholesale rewrite here would silently drop them (final-review finding F1).
+        # task4_measured_deltas IS deliberately reset to null: new parity fixtures need
+        # re-measurement, and the guard test fails loudly until --measure-deltas runs.
+        if MANIFEST_PATH.exists():
+            prior = json.loads(MANIFEST_PATH.read_text())
+            for stage_key in ("stm_normalizer_fixtures", "listing_writer_fixtures", "scr_fixtures"):
+                if stage_key in prior:
+                    manifest[stage_key] = prior[stage_key]
         (staging / "phase4d_parity_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
         # --- 9. Commit: every check passed -> copy staged fixtures into PHASE4D_DIR. ---
