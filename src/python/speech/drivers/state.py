@@ -1,0 +1,167 @@
+"""Typed run state -- the pydantic replacement for the legacy `PS` god-struct.
+
+Ported from the `PS.*` field usage across `Init_BLSTM.m` / `Train_BLSTM.m` /
+`Test_BLSTM.m`. The legacy `PS` is a free-form MATLAB struct persisted as
+`ParamStruct.mat`; here it is a typed `RunState` persisted as JSON -- a documented
+deviation from the `.mat` seam (the engine consumes the flat `.config` + `.bin`
+weights, never `ParamStruct.mat`, so the outer orchestrator's own state format is
+free to be a plain, diffable, deterministic JSON blob). See IMPROVEMENTS.md.
+
+`RunConfig`/`LidNetSpec` are RE-EXPORTED from `speech.genome` (not moved): `genome.py`
+and `scoring.py` already import them there, and moving would churn both for zero
+benefit (the task brief's stated preference).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic import BaseModel, ConfigDict
+
+from speech.batching import read_listing
+from speech.config_bridge import parse_legacy_config
+from speech.genome import LidNetSpec, RunConfig
+
+__all__ = ["LidNetSpec", "RunConfig", "RunState", "TrainResult", "ps_from_config"]
+
+
+def _ints(cfg: dict[str, str], key: str) -> list[int]:
+    return [int(x) for x in cfg[key].split(",")]
+
+
+def _flag(cfg: dict[str, str], key: str, default: int = 0) -> int:
+    return 1 if cfg.get(key, "false") == "true" else default
+
+
+def _lid_from_config(cfg: dict[str, str]) -> LidNetSpec:
+    """PS.NS.LID.* from the `BLSTM_LID_*` engine keys (algo 6 only). Optimizer-only
+    fields (NNType, backprop flag) default to the Train_BLSTM.m algo-6 values."""
+    return LidNetSpec(
+        NNType=0,
+        BackPropagationActivated=1,
+        LSTM_net_size=_ints(cfg, "BLSTM_LID_LSTMNeuronNb"),
+        LSTMSubSampling=_ints(cfg, "BLSTM_LID_LSTMSubSampling"),
+        Output_net_size=_ints(cfg, "BLSTM_LID_OutputNeuronNb"),
+        OutputSubSampling=_ints(cfg, "BLSTM_LID_OutputSubSampling"),
+        Mode=int(cfg["BLSTM_LID_Mode"]),
+        PostProcessMode=int(cfg.get("BLSTM_LID_PostProcessMode", "0")),
+        TargetEnforcementStep=int(cfg.get("BLSTM_LID_TargetEnforcementStep", "0")),
+        BackPropWER=float(cfg.get("BLSTM_LID_BackPropWER", "-1.0")),
+        classes_ponderations=[],
+        InputNormalizationType=int(cfg.get("BLSTM_LID_InputNormalizationType", "0")),
+        IsCellsPeepholesActive=_flag(cfg, "BLSTM_LID_Forward_IsCellsPeepholesActive", 1),
+        IsGatesPeepholesActive=_flag(cfg, "BLSTM_LID_Forward_IsGatesPeepholesActive", 1),
+        IsGatesRecurrentPeepholesActive=_flag(cfg, "BLSTM_LID_Forward_IsGatesRecurrentPeepholesActive", 1),
+        LSTM_MaxSat=float(cfg.get("BLSTM_LID_Forward_MaxSaturation", "-10.0")),
+        nnmatfile=cfg.get("BLSTM_LID_weightsFile", "LIDNNweights.mat"),
+    )
+
+
+def ps_from_config(
+    cfg: dict[str, str],
+    *,
+    adim: float = 10.0,
+    coeff_nn: float = 5.0,
+    balance: int | None = None,
+) -> RunConfig:
+    """Build the vec2struct `RunConfig` (the fields `vec2struct` reads) from a parsed
+    engine `.config`. The DSP/net-size/flag fields come from the config; the outer
+    optimizer knobs (`adim`, `coeff_NN`, `balance`, `BalanceBackProp`) are NOT engine
+    config keys -- they carry the Train_BLSTM.m defaults (algo 6 -> balance 10, the LID
+    calibration objective). NNType 0 only (SRN/CWRNN unported)."""
+    algo = int(cfg["Algo_choice"])
+    if balance is None:
+        balance = 10 if algo in (5, 6) else 5
+    lid = _lid_from_config(cfg) if algo == 6 else None
+    return RunConfig(
+        numOuterThreads=int(cfg.get("numOuterThreads", "1")),
+        numInnerThreads=int(cfg.get("numInnerThreads", "1")),
+        OutputFile=cfg.get("multiConfigResultsOutputFile", "MultiConfigResults.mat"),
+        Display_MillisecondsPerPixel=float(cfg.get("Display_MillisecondsPerPixel", "64")),
+        name_dir_fig=cfg.get("Display_Output_Directory", "figs"),
+        offset=float(cfg.get("Audio_offset", "0")),
+        durmax=float(cfg.get("Audio_max_duration", "120")),
+        algo=algo,
+        nbworker=1,
+        name_dir="run",
+        epoch=0,
+        adim=adim,
+        coeff_NN=coeff_nn,
+        VRCTS_isFast=1,
+        VRCTS_force=0,
+        balance=balance,
+        exclude_nontrans=1 if cfg.get("exclude_nontrans", "false") == "true" else 0,
+        useVRCTSFeatures=int(cfg.get("BLSTM_use_cep_files", "0")),
+        nnmatfile=cfg.get("BLSTM_weightsFile", "NNweights.mat"),
+        minSegmentLength=0.0,
+        addNoise=0.0,
+        mappingFile=cfg["language2classmapping"],
+        listing=cfg["fileslisting"],
+        BackPropagationActivated=1,
+        NNType=0,
+        LSTM_net_size=_ints(cfg, "BLSTM_LSTMNeuronNb"),
+        LSTMSubSampling=_ints(cfg, "BLSTM_LSTMSubSampling"),
+        Output_net_size=_ints(cfg, "BLSTM_OutputNeuronNb"),
+        OutputSubSampling=_ints(cfg, "BLSTM_OutputSubSampling"),
+        LSTM_MaxSat=float(cfg.get("BLSTM_Forward_MaxSaturation", "-10.0")),
+        BackPropWER=float(cfg.get("BLSTM_BackPropWER", "-1.0")),
+        BalanceBackProp=0.5,
+        InputNormalizationType=int(cfg.get("BLSTM_InputNormalizationType", "0")),
+        IsCellsPeepholesActive=_flag(cfg, "BLSTM_Forward_IsCellsPeepholesActive", 1),
+        IsGatesPeepholesActive=_flag(cfg, "BLSTM_Forward_IsGatesPeepholesActive", 1),
+        IsGatesRecurrentPeepholesActive=_flag(cfg, "BLSTM_Forward_IsGatesRecurrentPeepholesActive", 1),
+        lid=lid,
+    )
+
+
+class RunState(BaseModel):
+    """The typed run state: the parsed engine config, the derived vec2struct `RunConfig`,
+    the corpus listing records, and the run directories. Persisted as JSON."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    config_path: str  # absolute path to the engine .config (its dir holds the corpus)
+    out_dir: str  # where checkpoints land
+    algo: int
+    balance: int
+    base_config: dict[str, str]  # the parsed engine config (the byte-known-good base)
+    ps: RunConfig  # the vec2struct genome spec
+    listing: list[dict[str, str]]  # read_listing records
+
+    def save(self, path: Path) -> None:
+        Path(path).write_text(self.model_dump_json(indent=2))
+
+    @classmethod
+    def load(cls, path: Path) -> RunState:
+        return cls.model_validate_json(Path(path).read_text())
+
+    @classmethod
+    def from_config(cls, config: Path, out_dir: Path) -> RunState:
+        config = Path(config).resolve()
+        cfg = parse_legacy_config(config.read_text())
+        ps = ps_from_config(cfg)
+        listing_path = config.parent / cfg["fileslisting"]
+        listing = read_listing(listing_path) if listing_path.exists() else []
+        return cls(
+            config_path=str(config),
+            out_dir=str(Path(out_dir).resolve()),
+            algo=ps.algo,
+            balance=ps.balance,
+            base_config=cfg,
+            ps=ps,
+            listing=listing,
+        )
+
+
+class TrainResult(BaseModel):
+    """The outer-loop outcome + checkpoint location. `gbest` is the QPSO genome,
+    `cost_history` the per-epoch gbestval trajectory, `inner_cost_history` the final
+    SMORMS3 inner-loop cost trace (BackPropagation on the gbest)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    gbest: list[float]
+    gbestval: float
+    cost_history: list[float]
+    inner_cost_history: list[float]
+    checkpoint_dir: str

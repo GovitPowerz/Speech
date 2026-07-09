@@ -2498,6 +2498,50 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   documented divergence. SMORMS3/Rprop still draw no randomness, so their goldens remain fully
   deterministic without a table.
 
+- **[phase4c] Exit-gate genome<->engine binding: DSP-config injection, not `config2weights`**
+  (`src/python/speech/drivers/train.py`; legacy `CostFunction.m` -> `vec2struct` + `nnet2MatFile`
+  + `network2config`): the legacy QPSO cost path decodes the FULL engine config AND the initial NN
+  weights from each candidate genome, trains them, and writes the trained weights BACK into the
+  genome (`network2config` -> the `out_param` re-encode). This port sizes/validates the search with
+  the REAL vec2struct genome (`genome_length` + `masking_validation`, exactly the legacy), but binds
+  it to the engine by SURGICALLY injecting only the two genome-decoded `CostPonderation` fields onto
+  the byte-known-good committed base `.config` (the rest of the config stays identical to the
+  committed one, so the engine never sees a malformed genome-derived config). The `[sad, lid]`
+  weights are seeded from the config's committed `.bin` packs, NOT decoded from the genome, and the
+  SMORMS3-trained weights are re-seeded per eval, NOT written back into the genome. *Why:* this keeps
+  the exit gate a faithful full-loop DETERMINISM contract (QPSO outer + SMORMS3 inner + real engine
+  via the seam) without the `config2weights`/`network2config` round trip -- and per-value legacy
+  parity of the optimizer path is impossible in principle anyway (the clock-reseed deviation above).
+  *Fix candidate:* wire the `weight_bridge` `config2weights` + `network2config` genome<->weight round
+  trip at the end-to-end inference-output parity milestone. *Pinned by:*
+  `test_full_train_loop_deterministic` (`tests/pyo3/test_exit_gate.py`, bit-identical checkpoints +
+  cost history across two fixed-seed runs) + `test_twin_genome_length_and_masking`
+  (`tests/test_phase4c_drivers.py`, the vec2struct sizing/gate is real). The BackPropagation.m
+  normalize-tail strip (`weights(1:end-2*length(normalize.mean))`, :29/:57) IS reproduced faithfully:
+  SMORMS3 steps the tail-stripped head, and the mean/std tail is folded back before every
+  `Engine.set_weights` because the Rust `BLSTMNeuralNetwork::setWeights` demands the FULL vector
+  (`flat.len() >= nb_of_weights()`, an `Err` below that).
+
+- **[phase4c] Exit-gate config forces BOTH nets' backprop ON (the committed twin config has SAD off)**
+  (`src/python/speech/drivers/train.py::_eval_config_text`; `tests/reference_data/phase4b/twin_train.config`):
+  the committed twin config is `BLSTM_BackPropagationActivated false` / `BLSTM_LID_BackPropagationActivated
+  true` -- only the LID net trains internally. `engine.forward_backward` reads
+  `weights_derivatives(0)` = `[sad_deriv, lid_deriv]`; with SAD backprop OFF the SAD derivative matrix
+  comes back EMPTY (`0x0`), so `average_derivs` indexes out of bounds. The exit-gate config therefore
+  forces BOTH flags `true` (+ `Epochs 1` for the T9 single-eval semantics) so the 2-cell `[sad, lid]`
+  SMORMS3 contract is genuinely exercised (both derivatives populated). *Fix candidate:* none needed
+  -- an exit-gate config choice (train both nets), documented because it diverges from the committed
+  config's flags. *Pinned by:* `test_full_train_loop_deterministic`.
+
+- **[phase4c] `RunState` persists as JSON, not `ParamStruct.mat`**
+  (`src/python/speech/drivers/state.py`; `Init_BLSTM.m:217` `save(...'ParamStruct.mat','PS')`): the
+  legacy saves the free-form `PS` god-struct as a MATLAB `.mat`. The port persists a typed pydantic
+  `RunState` as `run_state.json`. Safe deviation: the ENGINE consumes the flat `.config` + `.bin`
+  weight packs and NEVER `ParamStruct.mat` (which is MATLAB-only optimizer bookkeeping), so the
+  orchestrator's own state format is free to be a plain, diffable, deterministic JSON blob. *Fix
+  candidate:* none -- a deliberate format choice. *Pinned by:* `test_run_state_json_roundtrip`
+  (`tests/test_phase4c_drivers.py`, save/load equality).
+
 - **[phase4c] QuantumPSO's four velocity banks are DEAD but STREAM-CONSUMING**
   (`legacy/Optimizer_V6.2.2/functions/QuantumPSO.m:375-411` vs the apply gate `:447`; ported in
   `src/python/speech/optimizers.py::quantum_pso`): each epoch computes `vel1..vel4` (Trelea sets
