@@ -1,4 +1,5 @@
-"""Phase 4d Task 3: the end-to-end PARITY oracle fixtures, from a SPLIT oracle.
+"""Phase 4d Task 3 (+ fix-wave): the end-to-end PARITY oracle fixtures, from a SPLIT,
+DUAL-MODE oracle.
 
 Two independent oracles produce the committed fixtures, recorded per artifact in the
 manifest (`oracle: real-binary | fastmath-rebuild`):
@@ -11,26 +12,37 @@ manifest (`oracle: real-binary | fastmath-rebuild`):
       the segmentation oracle: parity_tuple{A,B}_vrcts_chan{1,2}.xml.
 
   (b) NUMERIC-COLUMN leg -- a -ffast-math REBUILD (tools/oracle_harness/build.sh
-      --fastmath -> oracle_harness_fastmath) drives the SAME solo run through the REAL
-      COMPILED legacy CorpusProcessor stack, but exits cleanly, so saveResults writes
-      MultiConfigResults.mat (the cost/counter/duration columns the crashing binary never
-      reaches). Converted to .bin (scipy, wall-clock col masked) as
+      --fastmath -> oracle_harness_fastmath) drives the REAL COMPILED legacy
+      CorpusProcessor stack in TWO modes (-s for VRCTS structural calibration only,
+      unscored; -m for the numeric columns), but exits cleanly either way, so
+      saveResults writes MultiConfigResults.mat (the cost/counter/duration columns the
+      crashing real binary never reaches). The -m leg is run against a REAL reference
+      .stm (prcts_excerpt.stm, derived from the companion legacy .stm -- see
+      _derive_excerpt_stm), so its columns are genuinely SCORED, not the near-vacuous
+      all-zero columns an absent/empty reference would produce -- BagOfProcessors.cpp's
+      exit(1) for -m/-M/-t/-T only fires when the .stm FAILS TO OPEN, not merely when it
+      matches no lines in the excerpt window (see the manifest's `stm_leg` section for
+      the full corrected rationale). Converted to .bin (scipy, wall-clock col masked) as
       parity_tuple{A,B}_{mcr,result_rows}.bin.
 
-The fastmath rebuild's VRCTS is compared to the real binary's as calibration evidence
+The fastmath rebuild's -s VRCTS is compared to the real binary's as calibration evidence
 (structural + boundary agreement recorded in the manifest); the committed VRCTS is the
-REAL BINARY's, not the rebuild's.
+REAL BINARY's, not the rebuild's. Seeding a real reference .stm does not perturb the -s
+VRCTS leg (verified against the pre-fix-wave committed fixtures on every run, see the
+`vrcts_before` STOP gate below) -- reference presence only gates the SCORED branch in
+BagOfProcessors.cpp, never the -s hypothesis/segmentation path.
 
 INPUTS committed here: prcts_excerpt.wav (a deterministic 60 s stereo 8 kHz cut of the
 legacy PRCTS wav, chosen so both channels carry leading silence + multiple speech
-segments), parity_tuple{A,B}.config (the Task-1 real configs with ONLY path keys
-localized to relative names a test cwd provides), and the shared aux inputs
-fileslisting / languagemapping.csv / prcts_excerpt.stm.
+segments), prcts_excerpt.stm (a derived 60 s excerpt of the companion legacy .stm,
+transcript text redacted to an ASCII placeholder token), parity_tuple{A,B}.config (the
+Task-1 real configs with ONLY path keys localized to relative names a test cwd
+provides), and the shared aux inputs fileslisting / languagemapping.csv.
 
 LOCAL-ONLY (like the other extractors): needs the resurrected binary (gated via
-`tools/fsp_runtime/setup.sh --check`), the external legacy PRCTS wav, and Homebrew g++
-for the fastmath build. CI never runs this -- it consumes only the committed fixtures +
-manifest (tests/test_phase4d_fixtures.py guards them WITHOUT any oracle).
+`tools/fsp_runtime/setup.sh --check`), the external legacy PRCTS wav + .stm, and Homebrew
+g++ for the fastmath build. CI never runs this -- it consumes only the committed fixtures
++ manifest (tests/test_phase4d_fixtures.py guards them WITHOUT any oracle).
 
 Usage: uv run python scripts/extract_phase4d_fixtures.py
 """
@@ -56,6 +68,7 @@ import soundfile as sf
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LEGACY_TREE = Path("/Users/govit/Git/Govit/FastSpeechProcessing-legacy")
 PRCTS_WAV = LEGACY_TREE / "PRCTS_RUS_RU_0000263489_01.wav"
+PRCTS_STM = LEGACY_TREE / "PRCTS_RUS_RU_0000263489_01.stm"
 FSP_RUNTIME = REPO_ROOT / "tools" / "fsp_runtime"
 SEGMENT_BIN = FSP_RUNTIME / "bin" / "Segment"
 HARNESS_DIR = REPO_ROOT / "tools" / "oracle_harness"
@@ -75,6 +88,56 @@ MCR_TIMING_COL = 6
 # Shared aux inputs (relative-path fixtures the localized configs reference).
 LANGMAP_TEXT = "fax;non;0\nchi;man;1\nspa;spa;2\n"
 FILESLISTING_TEXT = "prcts_excerpt.wav;prcts_excerpt.stm;fax;non;1;30.0;\n"
+
+# The reference .stm placeholder swapped in for the real (Cyrillic) transcript field --
+# Segmentation::load_ref_from_stm only requires token 7 to EXIST (`iss >> first >> chan >>
+# second >> beg >> end >> third >> fourth`); its content is never read. ASCII, single
+# token (no embedded whitespace, so it never shifts the 7-token count).
+STM_PLACEHOLDER_TOKEN = "PLACEHOLDER"
+
+
+def _derive_excerpt_stm(source_text: str, window_sec: float) -> tuple[str, dict[str, object]]:
+    """Derive the 0..window_sec excerpt of a real .stm, transcript text replaced by
+    STM_PLACEHOLDER_TOKEN. Mirrors Segmentation::load_ref_from_stm's own tokenization
+    (`iss >> first >> chan >> second >> beg >> end >> third >> fourth`): a line is kept
+    if it has >=5 whitespace-delimited fields (enough to read the begin time, field
+    index 3) and its begin time is < window_sec; the label loader clamps/filters the
+    rest (channel bound, end-time overlap) itself, so this stays a superset cut, not an
+    exact replica of the loader's own accept/reject logic. Comment lines (";;...") are
+    dropped -- they carry no `first >> chan >> ...` fields the loader could parse anyway.
+    Any line with a 7th+ field (an actual transcript) has that field collapsed to the
+    single ASCII placeholder token; lines with no 7th field (e.g. inter_segment_gap,
+    which the loader itself always skips: it never satisfies the `iss >> ... >> fourth`
+    extraction) are copied through unchanged.
+    """
+    out_lines: list[str] = []
+    n_kept = 0
+    n_placeholder = 0
+    for line in source_text.splitlines():
+        if line.startswith(";;") or not line.strip():
+            continue
+        parts = line.split(None, 6)
+        if len(parts) < 5:
+            continue
+        beg = float(parts[3])
+        if beg >= window_sec:
+            continue
+        if len(parts) >= 7:
+            parts[6] = STM_PLACEHOLDER_TOKEN
+            n_placeholder += 1
+        out_lines.append(" ".join(parts))
+        n_kept += 1
+    excerpt = "\n".join(out_lines) + "\n"
+    if not excerpt.isascii():
+        raise SystemExit("derived excerpt .stm is not ASCII")
+    derivation = {
+        "source_stm": str(PRCTS_STM),
+        "window_sec": window_sec,
+        "placeholder_token": STM_PLACEHOLDER_TOKEN,
+        "lines_kept": n_kept,
+        "lines_with_transcript_redacted": n_placeholder,
+    }
+    return excerpt, derivation
 
 # Config path keys localized to relative names + the target value. Every OTHER key is
 # byte-preserved. BLSTM_weightsFile in the Task-1 tupleA config points at a dead .mat
@@ -154,14 +217,14 @@ def _segments(xml_path: Path) -> list[tuple[float, float]]:
     ]
 
 
-def _seed_workdir(workdir: Path, config_name: str, config_text: str, weights_src: Path, excerpt_src: Path) -> None:
+def _seed_workdir(workdir: Path, config_name: str, config_text: str, weights_src: Path, excerpt_src: Path, stm_text: str) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(excerpt_src, workdir / "prcts_excerpt.wav")
     shutil.copy2(weights_src, workdir / "NNweights_config1.bin")
     (workdir / config_name).write_text(config_text)
     (workdir / "languagemapping.csv").write_text(LANGMAP_TEXT)
     (workdir / "fileslisting").write_text(FILESLISTING_TEXT)
-    (workdir / "prcts_excerpt.stm").write_text("")
+    (workdir / "prcts_excerpt.stm").write_text(stm_text)
 
 
 def _run_real_binary(workdir: Path, config_name: str) -> None:
@@ -177,16 +240,16 @@ def _run_real_binary(workdir: Path, config_name: str) -> None:
     )
 
 
-def _run_fastmath(workdir: Path, config_name: str) -> None:
+def _run_fastmath(workdir: Path, config_name: str, mode: str) -> None:
     result = subprocess.run(
-        [str(FASTMATH_BIN), str(workdir), config_name],
+        [str(FASTMATH_BIN), str(workdir), config_name, mode],
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
         sys.stderr.write(result.stdout)
         sys.stderr.write(result.stderr)
-        raise SystemExit(f"fastmath harness failed ({result.returncode}) for {config_name}")
+        raise SystemExit(f"fastmath harness failed ({result.returncode}) for {config_name} mode={mode}")
 
 
 def _masked_mcr(mat_path: Path) -> np.ndarray:
@@ -205,6 +268,8 @@ def main() -> None:
         raise SystemExit("fsp_runtime --check gate failed: the 2015 Segment oracle is not present")
     if not PRCTS_WAV.is_file():
         raise SystemExit(f"legacy PRCTS wav not found: {PRCTS_WAV}")
+    if not PRCTS_STM.is_file():
+        raise SystemExit(f"legacy PRCTS stm not found: {PRCTS_STM}")
 
     # --- 1. Build the fastmath oracle (separate binary, never clobbers oracle_harness). ---
     build = subprocess.run(["bash", str(HARNESS_DIR / "build.sh"), "--fastmath"], capture_output=True, text=True)
@@ -218,6 +283,14 @@ def main() -> None:
 
     # --- 2. Regression snapshot of the Task-1 committed fixtures. ---
     task1_before = {n: _sha256((PHASE4D_DIR / n).read_bytes()) for n in TASK1_FILES}
+
+    # --- 2b. Snapshot the currently-committed VRCTS xml (Task 3 fix-wave mode-invariance
+    # gate): the .stm now loads (was empty before), so this run must reproduce IDENTICAL
+    # VRCTS bytes on the -s (real-binary) leg -- see the file-header note + task item (c).
+    # If it does not, the .stm's presence alters the -s segmentation path and that is an
+    # adjudication-worthy divergence, not something to silently absorb.
+    vrcts_names = [f"parity_{t}_vrcts_chan{c}.xml" for t in TUPLES for c in (1, 2)]
+    vrcts_before = {n: (PHASE4D_DIR / n).read_bytes() for n in vrcts_names if (PHASE4D_DIR / n).is_file()}
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -236,16 +309,23 @@ def main() -> None:
             raise SystemExit("excerpt cut is not byte-deterministic")
         excerpt_info = sf.info(excerpt_path)
 
+        # --- 3b. Derive the SCORED reference .stm: the same 0..60s window as the wav
+        # excerpt, transcript text redacted to STM_PLACEHOLDER_TOKEN (see the function
+        # docstring). This is what turns the -m leg from unscored (all-zero cost/error
+        # columns) into a genuinely scored run.
+        excerpt_stm_text, stm_derivation = _derive_excerpt_stm(PRCTS_STM.read_text(encoding="utf-8"), float(EXCERPT_LEN_SEC))
+
         # Aux inputs (shared).
         (staging / "languagemapping.csv").write_text(LANGMAP_TEXT)
         (staging / "fileslisting").write_text(FILESLISTING_TEXT)
-        (staging / "prcts_excerpt.stm").write_text("")
+        (staging / "prcts_excerpt.stm").write_text(excerpt_stm_text)
 
         fixtures: dict[str, dict[str, object]] = {}
         config_localization: dict[str, object] = {}
         determinism_real: dict[str, object] = {}
         determinism_fastmath: dict[str, object] = {}
         structural: dict[str, object] = {}
+        masked1_by_tuple: dict[str, np.ndarray] = {}
 
         for tuple_name, spec in TUPLES.items():
             source_config = (PHASE4D_DIR / spec["config"]).read_text()
@@ -255,11 +335,16 @@ def main() -> None:
             config_localization[tuple_name] = {"source": spec["config"], "key_diff": key_diff}
             weights_src = PHASE4D_DIR / spec["weights"]
 
-            # --- 4. REAL BINARY (segmentation oracle), run TWICE for determinism. ---
+            # --- 4. REAL BINARY (segmentation oracle), run TWICE for determinism. Seeded
+            # with the now-real (non-empty) excerpt .stm -- the -s mode reference-scoring
+            # branch stays gated off regardless (BagOfProcessors.cpp's scored/unscored
+            # split keys off the mode letter, not reference presence), so this is
+            # expected to reproduce byte-identical VRCTS to the prior (empty-.stm) run;
+            # verified below against the pre-run committed snapshot. ---
             real1 = tmp_dir / f"{tuple_name}_real1"
             real2 = tmp_dir / f"{tuple_name}_real2"
-            _seed_workdir(real1, parity_config_name, localized, weights_src, excerpt_path)
-            _seed_workdir(real2, parity_config_name, localized, weights_src, excerpt_path)
+            _seed_workdir(real1, parity_config_name, localized, weights_src, excerpt_path, excerpt_stm_text)
+            _seed_workdir(real2, parity_config_name, localized, weights_src, excerpt_path, excerpt_stm_text)
             _run_real_binary(real1, parity_config_name)
             _run_real_binary(real2, parity_config_name)
 
@@ -275,6 +360,19 @@ def main() -> None:
                 # Commit the REAL BINARY's xml as the segmentation oracle.
                 dst = staging / f"parity_{tuple_name}_vrcts_chan{chan}.xml"
                 shutil.copy2(x1, dst)
+                # STOP gate: the -s VRCTS leg must be byte-identical to what is already
+                # committed (mode-invariance -- see the header note). A change here means
+                # the reference alters the -s path and needs adjudication, not a silent
+                # fixture bump.
+                prior = vrcts_before.get(dst.name)
+                if (prior is not None) and (prior != dst.read_bytes()):
+                    raise SystemExit(
+                        f"STOP: {dst.name} changed after seeding a real reference .stm -- "
+                        f"the -s VRCTS leg is supposed to be mode-invariant (reference "
+                        f"presence should only affect scored modes -m/-M/-t/-T). This "
+                        f"means the .stm alters the -s path; needs adjudication, not a "
+                        f"silent fixture bump."
+                    )
             determinism_real[tuple_name] = det_real
 
             # Non-vacuity: >1 speech segment per channel.
@@ -287,27 +385,49 @@ def main() -> None:
             if not all(det_real.values()):
                 raise SystemExit(f"{tuple_name}: real binary VRCTS not deterministic across two runs")
 
-            # --- 5. FASTMATH REBUILD (numeric columns), run TWICE for masked-mcr determinism. ---
+            # --- 5a. FASTMATH REBUILD, -s LEG (VRCTS structural-calibration oracle only,
+            # unscored -- unaffected by the fix-wave, kept exactly as before). ---
             fm1 = tmp_dir / f"{tuple_name}_fm1"
             fm2 = tmp_dir / f"{tuple_name}_fm2"
-            _seed_workdir(fm1, parity_config_name, localized, weights_src, excerpt_path)
-            _seed_workdir(fm2, parity_config_name, localized, weights_src, excerpt_path)
-            _run_fastmath(fm1, parity_config_name)
-            _run_fastmath(fm2, parity_config_name)
+            _seed_workdir(fm1, parity_config_name, localized, weights_src, excerpt_path, excerpt_stm_text)
+            _seed_workdir(fm2, parity_config_name, localized, weights_src, excerpt_path, excerpt_stm_text)
+            _run_fastmath(fm1, parity_config_name, "s")
+            _run_fastmath(fm2, parity_config_name, "s")
 
             mcr_name = re.search(r"^multiConfigResultsOutputFile\s+(\S+)", localized, re.MULTILINE)
             if not mcr_name:
                 raise SystemExit(f"{tuple_name}: multiConfigResultsOutputFile key missing from config")
-            mat1 = fm1 / mcr_name.group(1)
-            mat2 = fm2 / mcr_name.group(1)
+
+            # --- 5b. FASTMATH REBUILD, -m LEG (the SCORED numeric-column oracle -- Task 3
+            # fix-wave): -m + the real excerpt .stm exercises BagOfProcessors.cpp's scored
+            # branch for real, so the mcr/result_rows fixtures below carry genuine
+            # Pfa/Pmiss/globalError/cumulativeError/NbOfClassif columns rather than the
+            # near-vacuous unscored zeros the -s leg (or a missing/empty reference) would
+            # produce. Run TWICE for masked-mcr determinism, same as before. ---
+            fmM1 = tmp_dir / f"{tuple_name}_fmM1"
+            fmM2 = tmp_dir / f"{tuple_name}_fmM2"
+            _seed_workdir(fmM1, parity_config_name, localized, weights_src, excerpt_path, excerpt_stm_text)
+            _seed_workdir(fmM2, parity_config_name, localized, weights_src, excerpt_path, excerpt_stm_text)
+            _run_fastmath(fmM1, parity_config_name, "m")
+            _run_fastmath(fmM2, parity_config_name, "m")
+
+            mat1 = fmM1 / mcr_name.group(1)
+            mat2 = fmM2 / mcr_name.group(1)
             if not mat1.is_file():
-                raise SystemExit(f"{tuple_name}: fastmath run produced no {mcr_name.group(1)}")
+                raise SystemExit(f"{tuple_name}: fastmath -m run produced no {mcr_name.group(1)}")
             masked1 = _masked_mcr(mat1)
             masked2 = _masked_mcr(mat2)
             det_fm = bool(np.array_equal(masked1.view(np.uint64), masked2.view(np.uint64)))
             if not det_fm:
-                raise SystemExit(f"{tuple_name}: fastmath masked MultiConfigResults not deterministic")
+                raise SystemExit(f"{tuple_name}: fastmath -m masked MultiConfigResults not deterministic")
             determinism_fastmath[tuple_name] = det_fm
+
+            # Non-vacuity gate (Task 3 fix-wave): the scored run must actually score --
+            # NbOfClassif (last column) > 0 rules out the near-vacuous all-zero columns
+            # the T3 review flagged.
+            if not bool(np.any(masked1[:, -1] > 0)):
+                raise SystemExit(f"{tuple_name}: scored -m leg is still vacuous (NbOfClassif all zero)")
+            masked1_by_tuple[tuple_name] = masked1
 
             # mcr.bin (masked) + result_rows.bin (data cols = mcr[:, 3:], timing already 0).
             mcr_bin = staging / f"parity_{tuple_name}_mcr.bin"
@@ -315,7 +435,10 @@ def main() -> None:
             _write_bin(mcr_bin, masked1)
             _write_bin(rows_bin, masked1[:, 3:])
 
-            # --- 6. Structural agreement: real vs fastmath VRCTS (calibration). ---
+            # --- 6. Structural agreement: real vs fastmath VRCTS (calibration, -s leg only
+            # -- the -m leg writes no VRCTS at all here, since Dump_Directory is unset in
+            # both tuple configs and BagOfProcessors.cpp's scored branch only writes VRCTS
+            # when dumpDir is non-empty; the unscored -s branch writes it unconditionally). ---
             struct_tuple = {}
             for chan in (1, 2):
                 fm_xml = fm1 / f"prcts_excerpt_chan_{chan}.xml"
@@ -352,6 +475,8 @@ def main() -> None:
                 name = f"parity_{tuple_name}_{suffix}.bin"
                 fixtures[name] = {
                     "oracle": "fastmath-rebuild",
+                    "mode": "m",
+                    "scored": True,
                     "sha256": _sha256((staging / name).read_bytes()),
                     "shape": [int(arr.shape[0]), int(arr.shape[1])],
                 }
@@ -376,23 +501,51 @@ def main() -> None:
         if drifted:
             raise SystemExit(f"REGRESSION: Task-1 fixtures changed: {drifted}")
 
+        # mcr full-row column indices (3-column [file,conf,chan] prefix + tmp payload,
+        # see mcr_columns below): Pfa=3, Pmiss=4, globalError=5, cumulativeError=7,
+        # speechDuration=9, NbOfClassif=last.
+        scored_values = {
+            tuple_name: {
+                f"chan{chan}": {
+                    "Pfa": float(masked1_by_tuple[tuple_name][chan - 1, 3]),
+                    "Pmiss": float(masked1_by_tuple[tuple_name][chan - 1, 4]),
+                    "globalError": float(masked1_by_tuple[tuple_name][chan - 1, 5]),
+                    "cumulativeError": float(masked1_by_tuple[tuple_name][chan - 1, 7]),
+                    "speechDuration": float(masked1_by_tuple[tuple_name][chan - 1, 9]),
+                    "NbOfClassif": float(masked1_by_tuple[tuple_name][chan - 1, -1]),
+                }
+                for chan in (1, 2)
+            }
+            for tuple_name in TUPLES
+        }
+
         manifest = {
             "text": (
-                "Phase 4d Task 3: end-to-end PARITY oracle fixtures from a SPLIT oracle. The "
-                "resurrected 2015 x86_64 -ffast-math production `Segment` binary "
-                "(tools/fsp_runtime/bin/Segment, Rosetta 2, OMP_NUM_THREADS=1) serves the "
+                "Phase 4d Task 3 (+ fix-wave): end-to-end PARITY oracle fixtures from a SPLIT, "
+                "DUAL-MODE oracle. The resurrected 2015 x86_64 -ffast-math production `Segment` "
+                "binary (tools/fsp_runtime/bin/Segment, Rosetta 2, OMP_NUM_THREADS=1) serves the "
                 "SEGMENTATION leg: its solo (-s) run writes VRCTS xml per channel then SIGSEGVs "
                 "(exit 139) in the post-inference saveWeights path AFTER the xml is written (a "
                 "resurrection artifact; the xml is consumed, the exit code ignored). It never "
                 "reaches saveResults, so the NUMERIC-COLUMN leg (MultiConfigResults) comes from a "
                 "-ffast-math REBUILD (tools/oracle_harness/build.sh --fastmath -> "
-                "oracle_harness_fastmath) that drives the SAME solo run through the REAL COMPILED "
-                "legacy CorpusProcessor stack but exits cleanly. Both oracles' VRCTS agree "
-                "byte-for-byte at 4-decimal VRCTS precision on both tuples (see "
-                "structural_agreement_real_vs_fastmath). Solo (-s) is the only viable mode: -m/-t "
-                "exit(1) without a reference STM (BagOfProcessors.cpp:302), which an arbitrary "
-                "excerpt has none of; -s is unscored, so the cost/error columns are 0 and the "
-                "inference-derived numeric is the speechDuration column (mcr col 9)."
+                "oracle_harness_fastmath, tools/oracle_harness/phase4d_parity.cpp) that drives the "
+                "SAME run through the REAL COMPILED legacy CorpusProcessor stack but exits cleanly, "
+                "in TWO modes: -s (unscored, VRCTS-calibration only -- agrees byte-for-byte with "
+                "the real binary's VRCTS at 4-decimal precision, see "
+                "structural_agreement_real_vs_fastmath) and -m (SCORED, the mcr/result_rows "
+                "source). The fix-wave (T3 review) replaced the empty placeholder .stm with a real "
+                "excerpt derived from the companion legacy PRCTS .stm (excerpt_stm below) and added "
+                "the -m leg: BagOfProcessors.cpp:302's exit(1) fires only when the reference .stm "
+                "FAILS TO OPEN (the fstream ctor's `if (!infile)` branch), not merely when it "
+                "carries no matching lines in the excerpt window -- a corrected rationale from the "
+                "original Task 3 writeup, which conflated 'no reference given' with 'file absent'. "
+                "With the .stm present and open, -m scores for real: Pfa/Pmiss/globalError/"
+                "cumulativeError/NbOfClassif are non-vacuous (see scored_values). The -s VRCTS leg "
+                "(the real binary AND the fastmath -s calibration run) is verified BYTE-IDENTICAL "
+                "to the prior empty-.stm fixtures -- reference presence only gates the scored "
+                "branch in BagOfProcessors.cpp, never the -s hypothesis/VRCTS path (see "
+                "stm_leg.vrcts_mode_invariance below)."
             ),
             "excerpt": {
                 "source_wav": str(PRCTS_WAV),
@@ -420,7 +573,7 @@ def main() -> None:
                     "exit_code_note": "SIGSEGV (exit 139) AFTER the VRCTS xml is written; tolerated",
                 },
                 "fastmath_rebuild": {
-                    "role": "numeric columns (MultiConfigResults)",
+                    "role": "numeric columns (MultiConfigResults) + VRCTS calibration",
                     "binary": "tools/oracle_harness/oracle_harness_fastmath",
                     "build": "tools/oracle_harness/build.sh --fastmath",
                     "driver": "tools/oracle_harness/phase4d_parity.cpp",
@@ -433,22 +586,74 @@ def main() -> None:
                         "flags a 2015 x86_64 -ffast-math build carried do not apply and gcc rejects "
                         "them. Recorded, not applied."
                     ),
+                    "modes": {
+                        "s": {
+                            "role": "unscored, VRCTS structural-calibration only (compared to the real binary)",
+                            "run": "oracle_harness_fastmath <workdir> <config> s",
+                        },
+                        "m": {
+                            "role": "SCORED numeric columns -- the mcr/result_rows fixture source (Task 3 fix-wave)",
+                            "run": "oracle_harness_fastmath <workdir> <config> m",
+                            "vrcts_note": (
+                                "writes NO VRCTS xml: Dump_Directory is unset in both tuple configs, "
+                                "and BagOfProcessors.cpp's scored branch only calls toFile_VRCTS when "
+                                "dumpDir is non-empty (the unscored -s branch writes it "
+                                "unconditionally instead). Not a defect -- the -s leg above remains "
+                                "the sole VRCTS source."
+                            ),
+                        },
+                    },
                 },
             },
             "aux_inputs": {
                 "fileslisting": FILESLISTING_TEXT.strip(),
                 "languagemapping.csv": LANGMAP_TEXT.replace("\n", " ").strip(),
-                "prcts_excerpt.stm": "empty (unscored solo run needs no reference)",
+                "prcts_excerpt.stm": (
+                    "real excerpt derived from the companion legacy .stm (see excerpt_stm); "
+                    "enables the -m leg's scoring"
+                ),
+            },
+            "excerpt_stm": stm_derivation,
+            "stm_leg": {
+                "exit1_rationale_corrected": (
+                    "BagOfProcessors.cpp:302's exit(1) ('no valid reference segmentation was "
+                    "given') fires when seg._ClassificationErrors is empty, which happens iff "
+                    "Segmentation::compute_errors() short-circuits on _Reference.size()==0, which "
+                    "happens iff the Segmentation ctor's `ifstream infile(_RefSegFilename); if "
+                    "(!infile)` branch was taken -- i.e. the .stm FAILED TO OPEN (missing file / "
+                    "bad path), not merely 'an arbitrary excerpt has none [of a matching "
+                    "reference]'. A .stm that opens successfully but matches zero lines in the "
+                    "excerpt window still populates _Reference (to the seeded [Other, End] "
+                    "boundary pair per channel) and computes (possibly all-miss) "
+                    "_ClassificationErrors -- exit(1) never fires. The original Task 3 writeup's "
+                    "'-s is the only viable mode' rationale conflated these two cases; corrected "
+                    "here and in .superpowers/sdd/task-3-report.md."
+                ),
+                "vrcts_mode_invariance": (
+                    "Verified this run: BagOfProcessors.cpp's scored/unscored split (whether "
+                    "Pfa/Pmiss/globalError/cumulativeError/NbOfClassif are computed from "
+                    "seg._ClassificationErrors or hardcoded to 0.0) is keyed on the MODE LETTER "
+                    "(m/M/t/T vs s/S/i/I), not on reference presence; results2segmentation's own "
+                    "`if (seg._Reference.size() > 0)` block (Segmenter.cpp:860) is entirely "
+                    "commented-out dead code, so it cannot perturb seg._Classification either. "
+                    "Seeding a real (non-empty) excerpt .stm therefore leaves the -s hypothesis "
+                    "and its VRCTS xml unchanged; asserted byte-for-byte against the "
+                    "pre-fix-wave committed fixtures (see the extractor's vrcts_before snapshot "
+                    "and STOP gate) -- this run passed, no adjudication needed."
+                ),
             },
             "config_localization": config_localization,
             "mcr_masked_col": MCR_TIMING_COL,
             "mcr_columns": (
-                "[0]file [1]conf [2]chan [3-5]Pfa/Pmiss/globalError (unscored=0) [6]time_per_hour "
-                "(WALL-CLOCK -> masked to 0.0) [7]cumulativeError (unscored=0) [8]signalDuration "
-                "[9]speechDuration (inference-derived) [10]nbWords (legacy default -1) [11-18] "
-                "WER+LID fields (0) [19]LIDNbOfClassif (0) [20]NbOfClassif (unscored=0). "
-                "parity_*_result_rows.bin = mcr[:, 3:] (the per-channel data columns)."
+                "[0]file [1]conf [2]chan [3-5]Pfa/Pmiss/globalError (SCORED, non-vacuous as of the "
+                "Task 3 fix-wave) [6]time_per_hour (WALL-CLOCK -> masked to 0.0) [7]cumulativeError "
+                "(SCORED) [8]signalDuration [9]speechDuration (inference-derived, mode-invariant) "
+                "[10]nbWords (legacy default -1) [11-18] WER+LID fields (0 -- no ASR hypothesis "
+                "text or live LID net is wired into this excerpt run) [19]LIDNbOfClassif (0) "
+                "[20]NbOfClassif (SCORED, non-vacuous). parity_*_result_rows.bin = mcr[:, 3:] (the "
+                "per-channel data columns)."
             ),
+            "scored_values": scored_values,
             "fixtures": fixtures,
             "determinism": {
                 "real_binary_vrcts_twice_identical": determinism_real,

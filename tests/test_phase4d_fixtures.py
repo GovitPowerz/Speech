@@ -1,14 +1,18 @@
 """Phase 4d Task 3 parity-fixture guards.
 
-The extractor (`scripts/extract_phase4d_fixtures.py`) drives the SPLIT oracle -- the
-resurrected 2015 `Segment` binary for the VRCTS segmentation legs and a -ffast-math
-rebuild of the legacy CorpusProcessor for the MultiConfigResults numeric columns -- and
-commits the excerpt + localized configs + oracle outputs + manifest. These tests guard
-the committed fixtures WITHOUT any oracle (both are local-only): the manifest is present
-and records the excerpt cut + per-artifact oracle provenance, every committed file's
-sha256 matches the manifest, every VRCTS xml parses to its recorded (non-vacuous) segment
-count, the .bin numeric fixtures parse to their recorded shapes with the wall-clock column
-masked, and the whole phase4d dir stays under the 8 MB budget.
+The extractor (`scripts/extract_phase4d_fixtures.py`) drives the SPLIT, DUAL-MODE oracle
+-- the resurrected 2015 `Segment` binary for the VRCTS segmentation leg (-s) and a
+-ffast-math rebuild of the legacy CorpusProcessor for the MultiConfigResults numeric
+columns, run in TWO modes (-s for VRCTS structural calibration, -m for the SCORED numeric
+columns) -- and commits the excerpt wav + a real derived reference .stm + localized
+configs + oracle outputs + manifest. These tests guard the committed fixtures WITHOUT any
+oracle (both are local-only): the manifest is present and records the excerpt cut +
+per-artifact oracle provenance, every committed file's sha256 matches the manifest, every
+VRCTS xml parses to its recorded (non-vacuous) segment count, the .bin numeric fixtures
+parse to their recorded shapes with the wall-clock column masked, the -m leg's mcr columns
+are genuinely SCORED (non-vacuous Pfa/NbOfClassif -- the Task 3 fix-wave's core guard,
+correcting the original writeup's exit(1) rationale), and the whole phase4d dir stays
+under the 8 MB budget.
 """
 
 from __future__ import annotations
@@ -107,6 +111,51 @@ def test_mcr_bins_shape_and_timing_masked() -> None:
         assert rr_rows == mcr_rows and rr_cols == mcr_cols - 3, "result_rows must be mcr[:, 3:]"
         # result_rows == mcr with the first 3 (prefix) columns dropped.
         assert rows_data == mcr[3 * mcr_rows :], f"{tuple_name}: result_rows != mcr[:, 3:]"
+
+
+def test_mcr_scored_leg_is_non_vacuous() -> None:
+    """Task 3 fix-wave non-vacuity guard: the -m leg is genuinely SCORED via the excerpt
+    reference .stm, so Pfa/globalError/cumulativeError/NbOfClassif must not be all-zero
+    (the near-vacuous state the T3 review flagged and this fix-wave corrected)."""
+    m = _manifest()
+    fixtures = cast(dict[str, dict[str, object]], m["fixtures"])
+    for tuple_name in TUPLES:
+        assert fixtures[f"parity_{tuple_name}_mcr.bin"]["mode"] == "m"
+        assert fixtures[f"parity_{tuple_name}_mcr.bin"]["scored"] is True
+        mcr_rows, mcr_cols, mcr = _read_bin(PHASE4D / f"parity_{tuple_name}_mcr.bin")
+        # column-major: col c occupies mcr[c*rows : (c+1)*rows]. col 3 = Pfa, last col =
+        # NbOfClassif (see the manifest's mcr_columns doc).
+        pfa = mcr[3 * mcr_rows : 4 * mcr_rows]
+        nb_of_classif = mcr[(mcr_cols - 1) * mcr_rows : mcr_cols * mcr_rows]
+        assert any(v != 0.0 for v in pfa), f"{tuple_name}: Pfa column is still all-zero (vacuous)"
+        assert all(v > 0.0 for v in nb_of_classif), f"{tuple_name}: NbOfClassif column is still zero (vacuous)"
+
+
+def test_excerpt_stm_derivation_recorded_and_ascii() -> None:
+    """The reference .stm fixture is a real (non-empty) derived excerpt: ASCII-only,
+    committed with its derivation recorded in the manifest (source .stm, window, the
+    placeholder token that replaced the transcript field)."""
+    m = _manifest()
+    stm_path = PHASE4D / "prcts_excerpt.stm"
+    assert stm_path.is_file()
+    text = stm_path.read_text()
+    assert text.isascii(), "prcts_excerpt.stm must be ASCII-only"
+    assert text.strip(), "prcts_excerpt.stm must not be empty (it must enable scoring)"
+    ex = cast(dict[str, object], m["excerpt_stm"])
+    assert ex["window_sec"] == 60.0
+    assert cast(str, ex["placeholder_token"]).strip()
+    assert cast(int, ex["lines_kept"]) > 0
+    fixtures = cast(dict[str, dict[str, object]], m["fixtures"])
+    assert fixtures["prcts_excerpt.stm"]["sha256"] == hashlib.sha256(stm_path.read_bytes()).hexdigest()
+
+
+def test_stm_leg_vrcts_mode_invariance_recorded() -> None:
+    """The manifest records the corrected exit(1) rationale and the mode-invariance
+    verification (the -s VRCTS leg is unaffected by the now-real reference .stm)."""
+    m = _manifest()
+    stm_leg = cast(dict[str, str], m["stm_leg"])
+    assert "FAILED TO OPEN" in stm_leg["exit1_rationale_corrected"]
+    assert stm_leg["vrcts_mode_invariance"].strip()
 
 
 def test_config_localization_recorded() -> None:
