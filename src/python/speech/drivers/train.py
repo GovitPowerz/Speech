@@ -56,23 +56,31 @@ def _chdir(path: Path) -> Iterator[None]:
         os.chdir(prev)
 
 
-def _tail_lengths(cfg: dict[str, str]) -> tuple[int, int]:
+def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
     """The normalize mean/std tail length per net = `2 * NNetInputSize`
-    (`BLSTMNeuralNetwork::setWeights` :225-227 consumes mean then std, each inputSize)."""
-    sad = 2 * int(cfg["BLSTM_NNetInputSize"])
-    lid = 2 * int(cfg.get("BLSTM_LID_NNetInputSize", "0"))
-    return sad, lid
+    (`BLSTMNeuralNetwork::setWeights` :225-227 consumes mean then std, each inputSize).
+
+    Returns one entry per BackPropagation net: `[sad]` for the single-net algos (3/4/5),
+    `[sad, lid]` only for the algo-6 Twin -- the `BackPropagation.m:11-13` cell contract
+    (`weightsIni{2}` populated iff `algo == 6`)."""
+    tails = [2 * int(cfg["BLSTM_NNetInputSize"])]
+    if algo == 6:
+        tails.append(2 * int(cfg["BLSTM_LID_NNetInputSize"]))
+    return tails
 
 
-def _eval_config_text(base: dict[str, str], sad_pond: str, lid_pond: str) -> str:
-    """The committed base config with the genome's two `CostPonderation` fields injected
-    and BackPropagation forced on for a single-eval gradient (`Epochs 1`) -- the T9
-    single-eval semantics so `Engine.run()` is one forward/backward the Python loop owns."""
+def _eval_config_text(base: dict[str, str], ponds: list[str], algo: int) -> str:
+    """The committed base config with the genome's `CostPonderation` field(s) injected and
+    BackPropagation forced on for a single-eval gradient (`Epochs 1`) -- the T9 single-eval
+    semantics so `Engine.run()` is one forward/backward the Python loop owns. Only the algo-6
+    Twin gets the `BLSTM_LID_*` injection; a single-net config's LID side is never touched
+    (`BackPropagation.m` never builds the LID cell for algo != 6)."""
     cfg = dict(base)
     cfg["BLSTM_BackPropagationActivated"] = "true"
-    cfg["BLSTM_LID_BackPropagationActivated"] = "true"
-    cfg["BLSTM_CostPonderation"] = sad_pond
-    cfg["BLSTM_LID_CostPonderation"] = lid_pond
+    cfg["BLSTM_CostPonderation"] = ponds[0]
+    if algo == 6:
+        cfg["BLSTM_LID_BackPropagationActivated"] = "true"
+        cfg["BLSTM_LID_CostPonderation"] = ponds[1]
     cfg["Neural_Networks_BackPropagation_Epochs"] = "1"
     return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
 
@@ -80,35 +88,33 @@ def _eval_config_text(base: dict[str, str], sad_pond: str, lid_pond: str) -> str
 def _backprop_inner(
     engine: object,
     inner_steps: int,
-    sad_tail_len: int,
-    lid_tail_len: int,
+    tails: list[int],
 ) -> tuple[list[NDArray[np.float64]], list[float]]:
-    """`BackPropagation.m`'s inner SMORMS3 loop over the 2-cell `[sad, lid]` weights.
+    """`BackPropagation.m`'s inner SMORMS3 loop over the `[sad]` (algo 3/4/5) or `[sad, lid]`
+    (algo 6) weight cells.
 
     Reads the full config-seeded weights, strips each net's normalize mean/std tail
     (`weights(1:end-2*length(normalize.mean))`), runs `inner_steps` SMORMS3 steps over
     `forward_backward` (folding the tail back for `set_weights`, dropping it from the
-    gradient), and returns the FULL trained `[sad, lid]` weights + the inner cost trace."""
+    gradient), and returns the FULL trained weights + the inner cost trace. The net count
+    is `len(tails)` -- 1 or 2 -- so `engine.weights(0)[1]` is never indexed on a single-net
+    engine (the RED IndexError)."""
     full = engine.weights(0)  # type: ignore[attr-defined]
-    sad_full = np.asarray(full[0], dtype=F64)
-    lid_full = np.asarray(full[1], dtype=F64)
-    sad_tail = sad_full[len(sad_full) - sad_tail_len :].copy()
-    lid_tail = lid_full[len(lid_full) - lid_tail_len :].copy()
-    theta0 = [sad_full[: len(sad_full) - sad_tail_len].copy(), lid_full[: len(lid_full) - lid_tail_len].copy()]
+    n = len(tails)
+    fulls = [np.asarray(full[k], dtype=F64) for k in range(n)]
+    net_tails = [fulls[k][len(fulls[k]) - tails[k] :].copy() for k in range(n)]
+    theta0 = [fulls[k][: len(fulls[k]) - tails[k]].copy() for k in range(n)]
 
     def f_df(theta: list[NDArray[np.float64]], _ec: int) -> tuple[float, list[NDArray[np.float64]], list[NDArray[np.float64]]]:
-        sf = np.concatenate([theta[0], sad_tail])
-        lf = np.concatenate([theta[1], lid_tail])
-        cost, grads = forward_backward(engine, [sf, lf], None)  # type: ignore[arg-type]
-        gs = grads[0][: theta[0].shape[0]]
-        gl = grads[1][: theta[1].shape[0]]
-        return cost, [gs, gl], theta  # theta_out is a pass-through (SMORMS3 adds dtheta)
+        packed = [np.concatenate([theta[k], net_tails[k]]) for k in range(n)]
+        cost, grads = forward_backward(engine, packed, None)  # type: ignore[arg-type]
+        gs = [grads[k][: theta[k].shape[0]] for k in range(n)]
+        return cost, gs, theta  # theta_out is a pass-through (SMORMS3 adds dtheta)
 
     opt = Smorms3(f_df, theta0)
     trained = opt.optimize(inner_steps)
-    sad_out = np.concatenate([trained[0], sad_tail])
-    lid_out = np.concatenate([trained[1], lid_tail])
-    return [sad_out, lid_out], list(opt.hist_f_flat)
+    out = [np.concatenate([trained[k], net_tails[k]]) for k in range(n)]
+    return out, list(opt.hist_f_flat)
 
 
 def _score_engine(
@@ -118,30 +124,34 @@ def _score_engine(
     algo: int,
     balance_backprop: float,
     inner_steps: int | None,
-    sad_tail_len: int,
-    lid_tail_len: int,
+    tails: list[int],
 ) -> tuple[float, list[NDArray[np.float64]], list[float]]:
     """Build a fresh engine from `config_text`, optionally run the SMORMS3 inner loop,
     then score the corpus fold via the balance-law cost (`ComputeCost.m`). Returns
-    (outer cost, final `[sad, lid]` weights, inner cost trace)."""
+    (outer cost, final `[sad]`/`[sad, lid]` weights, inner cost trace)."""
     import speech_rs  # local: the pyo3 module is only needed on the engine path
 
     (workdir / "_eval.config").write_text(config_text)
     engine = speech_rs.Engine(["_eval.config"], "-m")
     inner_hist: list[float] = []
     if inner_steps is not None:
-        trained, inner_hist = _backprop_inner(engine, inner_steps, sad_tail_len, lid_tail_len)
-        engine.set_weights(0, [list(trained[0]), list(trained[1])])
+        trained, inner_hist = _backprop_inner(engine, inner_steps, tails)
+        engine.set_weights(0, [list(w) for w in trained])
     engine.run()
     results = np.asarray(engine.results_matrix(), dtype=F64)
     cost, _ = compute_cost(results, 1, balance, CostParams(mode=0, balance_backprop=balance_backprop, algo=algo))
     return cost, [np.asarray(w, dtype=F64) for w in engine.weights(0)], inner_hist
 
 
-def _ponderations(genome: NDArray[np.float64], mask: dict[str, object] | None, state: RunState) -> tuple[str, str, NDArray[np.float64]]:
-    """vec2struct the genome, returning the two engine ponderation strings + out_param."""
+def _ponderations(genome: NDArray[np.float64], mask: dict[str, object] | None, state: RunState) -> tuple[list[str], NDArray[np.float64]]:
+    """vec2struct the genome, returning the engine ponderation string(s) + out_param. The
+    algo-6 Twin adds the `BLSTM_LID_CostPonderation` field; single-net algos read the SAD
+    `BLSTM_CostPonderation` alone (reading the absent LID field is the RED KeyError)."""
     cfg, out_param, _ = vec2struct(genome, mask, state.ps, 0)
-    return cfg["BLSTM_CostPonderation"], cfg["BLSTM_LID_CostPonderation"], out_param
+    ponds = [cfg["BLSTM_CostPonderation"]]
+    if state.ps.algo == 6:
+        ponds.append(cfg["BLSTM_LID_CostPonderation"])
+    return ponds, out_param
 
 
 def score_genome(
@@ -156,18 +166,17 @@ def score_genome(
     `train` so it is independently callable -- e.g. the genome->engine non-vacuity pin
     in `tests/pyo3/test_exit_gate.py`. Self-contained (chdirs into `workdir` itself),
     so it is safe to call from outside `train`'s own `_chdir(workdir)` block."""
-    sad_pond, lid_pond, out_param = _ponderations(genome, mask, state)
-    sad_tail_len, lid_tail_len = _tail_lengths(state.base_config)
+    ponds, out_param = _ponderations(genome, mask, state)
+    tails = _tail_lengths(state.base_config, state.ps.algo)
     with _chdir(workdir):
         cost, _w, _h = _score_engine(
-            _eval_config_text(state.base_config, sad_pond, lid_pond),
+            _eval_config_text(state.base_config, ponds, state.ps.algo),
             workdir,
             state.balance,
             state.ps.algo,
             state.ps.BalanceBackProp,
             None,
-            sad_tail_len,
-            lid_tail_len,
+            tails,
         )
     return cost, out_param
 
@@ -192,7 +201,7 @@ def train(
     balance = state.balance
     algo = ps.algo
     bbp = ps.BalanceBackProp
-    sad_tail_len, lid_tail_len = _tail_lengths(base)
+    tails = _tail_lengths(base, algo)
 
     mask: dict[str, object] | None = None  # full-DSP-free: the genome drives every field
     d = genome_length(ps)
@@ -224,8 +233,8 @@ def train(
         pos = np.atleast_2d(np.asarray(positions, dtype=F64))
         costs = np.empty(pos.shape[0], dtype=F64)
         for i in range(pos.shape[0]):
-            sad_pond, lid_pond, _out = _ponderations(pos[i], mask, state)
-            cost, _w, _h = _score_engine(_eval_config_text(base, sad_pond, lid_pond), workdir, balance, algo, bbp, inner_steps, sad_tail_len, lid_tail_len)
+            ponds, _out = _ponderations(pos[i], mask, state)
+            cost, _w, _h = _score_engine(_eval_config_text(base, ponds, algo), workdir, balance, algo, bbp, inner_steps, tails)
             costs[i] = cost
         return costs, pos
 
@@ -253,10 +262,8 @@ def train(
         result = quantum_pso(cost_fn, params, d, np.random.default_rng(seed), backprop_refine=backprop_refine)
         # legacy: Train_BLSTM.m:973 -- BackPropagation on the QPSO winner. This produces
         # the final trained weights (and guarantees the inner loop runs at least once).
-        sad_pond, lid_pond, _out = _ponderations(result.gbest, mask, state)
-        _final_cost, final_w, inner_hist = _score_engine(
-            _eval_config_text(base, sad_pond, lid_pond), workdir, balance, algo, bbp, inner_steps, sad_tail_len, lid_tail_len
-        )
+        ponds, _out = _ponderations(result.gbest, mask, state)
+        _final_cost, final_w, inner_hist = _score_engine(_eval_config_text(base, ponds, algo), workdir, balance, algo, bbp, inner_steps, tails)
 
     gbest = np.asarray(result.gbest, dtype=F64)
     cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
@@ -265,7 +272,9 @@ def train(
     write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
     write_bin(inner_arr.shape[0], 1, inner_arr, ckpt_dir / "inner_cost_history.bin")
     write_bin(final_w[0].shape[0], 1, final_w[0], ckpt_dir / "sad_weights.bin")
-    write_bin(final_w[1].shape[0], 1, final_w[1], ckpt_dir / "lid_weights.bin")
+    if len(final_w) >= 2:
+        # legacy: only the algo-6 Twin trains a second (LID) net -- BackPropagation.m:11-13.
+        write_bin(final_w[1].shape[0], 1, final_w[1], ckpt_dir / "lid_weights.bin")
 
     tr = TrainResult(
         gbest=[float(x) for x in gbest],

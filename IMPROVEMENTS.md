@@ -2522,6 +2522,25 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `Engine.set_weights` because the Rust `BLSTMNeuralNetwork::setWeights` demands the FULL vector
   (`flat.len() >= nb_of_weights()`, an `Err` below that).
 
+- **[phase4d] CLOSED: the 4c lifecycle drivers shipped ALGO-6-ONLY -- now generalized to single-net
+  algo-3 configs** (`src/python/speech/drivers/{train.py,state.py,test.py}`; cross-ref the two
+  `[phase4c]` exit-gate entries above/below): the 4c drivers hard-assumed the 2-cell `[sad, lid]`
+  shape everywhere -- `_backprop_inner` indexed `engine.weights(0)[1]` (IndexError on a single-net
+  engine), `_ponderations` read `cfg["BLSTM_LID_CostPonderation"]` (KeyError -- an algo-3 vec2struct
+  emits no LID field), `_tail_lengths` returned a `(sad, lid)` 2-tuple, `train` wrote `lid_weights.bin`
+  from `final_w[1]`, and `evaluate` set `[sad, lid]` weights unconditionally. A single-net algo-3
+  config therefore KeyError'd/IndexError'd (flagged as an Info finding in the 4c final review). Task 9
+  drives the net count off `BackPropagation.m:11-13`'s cell contract (`weightsIni = cell(2,1)`, cell 1
+  iff `PS.NS.BackPropagationActivated == 1`, cell 2 iff `(algo == 6) && LID.BackPropagationActivated`):
+  `_tail_lengths(cfg, algo)` returns a `len`-1-or-2 list, `_ponderations` returns a `len`-1-or-2
+  ponderation list, `_eval_config_text` injects `BLSTM_LID_*` only for algo 6, and `train`/`evaluate`
+  gate the LID pack write/read on the algo. The algo-6 Twin path is behaviour-identical (the 4c exit
+  gate `test_full_train_loop_deterministic` stays green untouched -- the regression sentinel). *Pinned
+  by:* `tests/test_phase4d_algo3_drivers.py` (the 1-cell contract on the committed `parity_tupleA.config`
+  vs the algo-6 `twin_train.config` foil) + `test_full_train_loop_algo3_deterministic`
+  (`tests/pyo3/test_exit_gate.py`, the algo-3 analogue of the twin exit gate on the tier-2 spectral
+  corpus, bit-identical checkpoints across two fixed-seed runs, no `lid_weights.bin` written).
+
 - **[phase4c] Exit-gate config forces BOTH nets' backprop ON (the committed twin config has SAD off)**
   (`src/python/speech/drivers/train.py::_eval_config_text`; `tests/reference_data/phase4b/twin_train.config`):
   the committed twin config is `BLSTM_BackPropagationActivated false` / `BLSTM_LID_BackPropagationActivated

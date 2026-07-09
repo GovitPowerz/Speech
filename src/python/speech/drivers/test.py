@@ -75,18 +75,23 @@ def evaluate(state: RunState, checkpoint: Path) -> Path:
 
     cfg = dict(state.base_config)
     cfg["BLSTM_BackPropagationActivated"] = "false"
-    cfg["BLSTM_LID_BackPropagationActivated"] = "false"
+    if state.algo == 6:
+        cfg["BLSTM_LID_BackPropagationActivated"] = "false"
     config_text = "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
+
+    # The checkpoint packs the training driver actually wrote: `[sad]` for the single-net
+    # algos (3/4/5), `[sad, lid]` only for the algo-6 Twin -- so a single-net engine is
+    # never handed a 2-element weight list (`BackPropagation.m:11-13`).
+    pack_names = ["sad_weights.bin"] + (["lid_weights.bin"] if state.algo == 6 else [])
 
     prev = Path.cwd()
     os.chdir(workdir)
     try:
         (workdir / "_eval.config").write_text(config_text)
         engine = speech_rs.Engine(["_eval.config"], "-m")
-        if (ckpt / "sad_weights.bin").exists() and (ckpt / "lid_weights.bin").exists():
-            sad = read_weight_vector(ckpt / "sad_weights.bin")
-            lid = read_weight_vector(ckpt / "lid_weights.bin")
-            engine.set_weights(0, [list(sad), list(lid)])
+        if all((ckpt / name).exists() for name in pack_names):
+            nets = [list(read_weight_vector(ckpt / name)) for name in pack_names]
+            engine.set_weights(0, nets)
         engine.run()
         results = np.asarray(engine.results_matrix(), dtype=F64)
     finally:
