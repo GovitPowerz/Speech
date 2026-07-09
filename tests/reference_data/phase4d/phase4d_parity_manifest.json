@@ -296,12 +296,34 @@
   },
   "task4_measured_deltas": {
     "tupleA": {
-      "port_vs_oracle_boundary_dt": null,
-      "port_vs_oracle_mcr_col_deltas": null
+      "port_vs_oracle_boundary_dt": {
+        "measured_max_s": 0.0,
+        "pinned_abs_s": 0.0001,
+        "headroom": "absolute floor: measured_max_s == 0.0 across both channels (the port's -s VRCTS is byte-identical to the 2015 -ffast-math oracle at 4-decimal precision); pinned = one VRCTS display quantum (1e-4 s), the tightest cross-libm-safe floor. Segment count + type sequence is a separate EXACT gate."
+      },
+      "port_vs_oracle_mcr_col_deltas": {
+        "measured_max_abs": 4.547473508864641e-13,
+        "measured_max_rel": 1.234268499948682e-15,
+        "pinned_ulp": 4,
+        "pinned_abs_factor": 512.0,
+        "eps": 2.220446049250313e-16,
+        "headroom": "absolute floor: the -ffast-math oracle is not bit-matchable even on-host, so no strict arm; measured sits at fp bit-noise. Pinned element bound = ULP<=4 OR |diff|<=512*eps*max(|oracle|,1) (the phase1/4a cross-libm comparator), whose absolute arm scales with column magnitude and sits ~200x above the on-host measured, 9+ orders below the 1e-3 STOP line."
+      }
     },
     "tupleB": {
-      "port_vs_oracle_boundary_dt": null,
-      "port_vs_oracle_mcr_col_deltas": null
+      "port_vs_oracle_boundary_dt": {
+        "measured_max_s": 0.0,
+        "pinned_abs_s": 0.0001,
+        "headroom": "absolute floor: measured_max_s == 0.0 across both channels (the port's -s VRCTS is byte-identical to the 2015 -ffast-math oracle at 4-decimal precision); pinned = one VRCTS display quantum (1e-4 s), the tightest cross-libm-safe floor. Segment count + type sequence is a separate EXACT gate."
+      },
+      "port_vs_oracle_mcr_col_deltas": {
+        "measured_max_abs": 1.1368683772161603e-13,
+        "measured_max_rel": 3.266076173324581e-15,
+        "pinned_ulp": 4,
+        "pinned_abs_factor": 512.0,
+        "eps": 2.220446049250313e-16,
+        "headroom": "absolute floor: the -ffast-math oracle is not bit-matchable even on-host, so no strict arm; measured sits at fp bit-noise. Pinned element bound = ULP<=4 OR |diff|<=512*eps*max(|oracle|,1) (the phase1/4a cross-libm comparator), whose absolute arm scales with column magnitude and sits ~200x above the on-host measured, 9+ orders below the 1e-3 STOP line."
+      }
     }
   },
   "size_budget": {

@@ -184,13 +184,25 @@ def test_structural_agreement_real_vs_fastmath() -> None:
             assert rec["real_segs"] == rec["fastmath_segs"]
 
 
-def test_task4_placeholders_present_and_empty() -> None:
+def test_task4_measured_deltas_filled() -> None:
+    """Task 4 filled the placeholders (measured-then-pinned tolerances the parity
+    gates read). Guard the shape + the load-bearing invariants: boundary dt measured
+    0.0 pinned to one display quantum, mcr measured at fp bit-noise (well below the
+    1e-3 STOP line) pinned to the cross-libm floor params."""
     m = _manifest()
     t4 = cast(dict[str, dict[str, object]], m["task4_measured_deltas"])
     for tuple_name in TUPLES:
         assert tuple_name in t4
-        assert t4[tuple_name]["port_vs_oracle_boundary_dt"] is None
-        assert t4[tuple_name]["port_vs_oracle_mcr_col_deltas"] is None
+        dt = cast(dict[str, object], t4[tuple_name]["port_vs_oracle_boundary_dt"])
+        assert dt["measured_max_s"] == 0.0, f"{tuple_name}: VRCTS not byte-identical"
+        assert dt["pinned_abs_s"] == 1e-4, f"{tuple_name}: dt pin must be one display quantum"
+
+        mcr = cast(dict[str, object], t4[tuple_name]["port_vs_oracle_mcr_col_deltas"])
+        assert cast(float, mcr["measured_max_rel"]) < 1e-3, f"{tuple_name}: mcr rel past STOP line"
+        assert cast(float, mcr["measured_max_abs"]) < 1e-6, f"{tuple_name}: mcr abs past STOP line"
+        assert mcr["pinned_ulp"] == 4
+        assert mcr["pinned_abs_factor"] == 512.0
+        assert cast(float, mcr["eps"]) > 0.0
 
 
 def test_size_budget() -> None:

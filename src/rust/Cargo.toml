@@ -39,6 +39,7 @@ approx = "0.5"
 rstest = "0.26"
 proptest = "1"
 tempfile = "3"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 speech = { path = ".", features = ["test-support"] }
 
 [profile.release]
