@@ -1,5 +1,5 @@
 {
-  "text": "Phase 4c Task 8: the vec2struct genome<->config bijection bit-pins. GNU Octave runs the VENDORED legacy/Optimizer_V6.2.2/functions/vec2struct.m (+ printConfig.m at mode==1) over six algo/mask/PS cases, dumping the INPUT param, the returned out_param (the mask/sortrows/clamp re-encoding), count_param (the genome-length walk invariant), and the printConfig engine-facing key->value dict (weights excluded, emitted via the .bin codec). TIER 1 (real function). vec2struct is PURE arithmetic (rem/round/abs/min/max/sortrows -- no libm), so param is read byte-for-byte and the port reproduces out_param bit-exactly + the config string-exactly on every platform. Cases: algo0 VRCTS, tdc (algo1), calib (algo2 -- law decode + [0,1] clamps in isolation), spectral (algo3 -- full NN weight walk), twin (algo6 -- SAD + LID mirror incl. the LID falling=-rising negate quirk), masked (algo3 + Force_Symetry/Force_Identical_Rows block ties + a scalar-field mask write-back).",
+  "text": "Phase 4c Task 8 (+ Phase 4d Task 12 closure): the vec2struct genome<->config bijection bit-pins. GNU Octave runs the VENDORED legacy/Optimizer_V6.2.2/functions/vec2struct.m (+ printConfig.m at mode==1) over seven algo/mask/PS cases, dumping the INPUT param, the returned out_param (the mask/sortrows/clamp re-encoding), count_param (the genome-length walk invariant), and the printConfig engine-facing key->value dict (weights excluded, emitted via the .bin codec). TIER 1 (real function). vec2struct is PURE arithmetic (rem/round/abs/min/max/sortrows -- no libm), so param is read byte-for-byte and the port reproduces out_param bit-exactly + the config string-exactly on every platform. Cases: algo0 VRCTS, tdc (algo1), calib (algo2 -- law decode + [0,1] clamps in isolation), spectral (algo3 -- full NN weight walk), twin (algo6 -- SAD + LID mirror incl. the LID falling=-rising negate quirk), masked (algo3 + Force_Symetry/Force_Identical_Rows block ties + a scalar-field mask write-back), vecmask (Task 12 -- algo3 + the mask-VECTOR arms: per-block LSTM weight masks incl. the narrow CellWeight layout, an output-layer neuron mask, and the NormalizeInputMean/Std masks incl. the Std abs() asymmetry, each isolated from Force_Symetry/Force_Identical_Rows). A separate artifact, fmt_scalar_boundaries.config, pins genome.py's _fmt_scalar %d/%15.15e boundary formatting via a direct real-printConfig.m call over a battery of boundary values (integers incl. -0 and a big exact integer, the 1e-5/1e+5 magnitude boundaries on both sides, a round(v)==v near-integer decode edge, long-precision fractions).",
   "octave_version": "11.3.0",
   "counts": {
     "algo0": 29,
@@ -7,7 +7,8 @@
     "calib": 45,
     "spectral": 266,
     "twin": 505,
-    "masked": 266
+    "masked": 266,
+    "vecmask": 266
   },
   "shapes": {
     "genome_algo0_param.bin": [
@@ -57,6 +58,14 @@
     "genome_masked_out_param.bin": [
       265,
       1
+    ],
+    "genome_vecmask_param.bin": [
+      265,
+      1
+    ],
+    "genome_vecmask_out_param.bin": [
+      265,
+      1
     ]
   },
   "configs": [
@@ -65,6 +74,30 @@
     "genome_calib.config",
     "genome_spectral.config",
     "genome_twin.config",
-    "genome_masked.config"
-  ]
+    "genome_masked.config",
+    "genome_vecmask.config"
+  ],
+  "fmt_scalar_boundaries": {
+    "file": "fmt_scalar_boundaries.config",
+    "names": [
+      "b_zero",
+      "b_neg_zero",
+      "b_one",
+      "b_neg_one",
+      "b_int_1e5",
+      "b_neg_int_1e5",
+      "b_frac_above_1em5",
+      "b_neg_frac_above_1em5",
+      "b_frac_below_1em5",
+      "b_frac_at_1em5",
+      "b_frac_above_1e5",
+      "b_frac_below_1e5",
+      "b_long_precision",
+      "b_long_precision_neg",
+      "b_near_integer_boundary",
+      "b_big_int",
+      "b_five",
+      "b_neg_five"
+    ]
+  }
 }

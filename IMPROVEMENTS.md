@@ -3313,6 +3313,40 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   test_write_scores_matches_octave_golden_bytes` + `test_tie_break_is_stable_original_column_order`
   vs `tests/reference_data/phase4d/scr/expected.scr`.
 
+- **[4d] Task 12: the vec2struct mask-VECTOR arms + `_fmt_scalar` boundary formatting --
+  CLOSED, no port fix needed (4c T8 accepted debt).** The 4c T8 final review flagged two
+  transcribed-but-uncovered items: (a) the per-block LSTM weight masks, output-layer neuron
+  mask, and NormalizeInputMean/Std masks (`src/python/speech/genome.py::_nn_block`/
+  `_output_neuron`/`_lstm_and_output`) were ported from `vec2struct.m` but only exercised
+  through `Force_Symetry`/`Force_Identical_Rows` (which tie blocks to EACH OTHER, never hit
+  a raw `isfield(maskStruct, fieldName)` vector branch); (b) `_fmt_scalar`'s `%d`/`%15.15e`
+  boundary formatting had no explicit unit table, only incidental coverage via whole-config
+  string comparisons. Both closed by a new `vecmask` vec2struct case (`tools/octave_harness/
+  stage_vec2struct.m`) that masks six fields in isolation -- `Forward_Layer_0_LSTMBlock_0_
+  InputGateWeights` (13-row gate layout), `Forward_Layer_0_LSTMBlock_1_CellWeight` (9-row
+  narrow peephole-free layout, the CellWeight parity hazard), `Backward_Layer_0_LSTMBlock_0_
+  OutputGateWeights` (Backward direction), `Output_Layer_1_Neuron_0_Weights` (ii=2, so the
+  `Force_Identical_Rows` ii==1 repmat branch never shadows it), and `NormalizeInputMean`/
+  `NormalizeInputStd` (Std's mask is deliberately signed to hit the abs() asymmetry:
+  `vec2struct.m:933-938` stores `abs(mask)` in both the config field and the out_param
+  write-back, unlike Mean which passes the (equally signed) mask through unmodified aside
+  from the `(field+1)/2` encode) -- plus a direct real-`printConfig.m` probe
+  (`fmt_scalar_boundaries.config`) over 18 boundary values (integers incl. -0 and a
+  1234567890123-magnitude exact integer that must not flip to e-notation, negatives, the
+  1e-5/1e+5 magnitude boundaries on both sides, a `round(v)==v` near-integer decode edge
+  `2.9999999999999996`, and 15-significant-digit fractions). Every arm matched the real
+  `vec2struct.m`/`printConfig.m` output bit-exact/string-exact on the first run (verified by
+  independently hand-deriving each arm's expected out_param slice from the walk order --
+  see `task-12-report.md` -- before wiring the golden, not by trusting the port's own
+  output): no divergence, no port change. *Pinned by:* `tests/test_phase4c_genome.py::
+  test_vecmask_arm_writes_expected_slice` (6 arms) + `test_vecmask_arms_are_non_vacuous_vs_
+  unmasked` + `test_normalize_std_mask_applies_abs_asymmetry` + `test_fmt_scalar_boundary_
+  matches_octave` (18 boundary values) + the generic `CASES`-parametrized count/config/
+  out_param tests now covering `vecmask` too. *Mutation:* dropping the Std mask's `abs()`
+  (`field = self._mget_v(...)` instead of `np.abs(self._mget_v(...))`) fails both
+  `test_out_param_inverse_matches[vecmask]` and `test_vecmask_arm_writes_expected_slice
+  [NormalizeInputStd]` -- confirming the golden is non-vacuous, not merely present.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
