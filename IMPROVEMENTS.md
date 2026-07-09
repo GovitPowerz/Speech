@@ -2917,6 +2917,85 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   in the same suite, both true positives) -- no gap this round. Full transcript (diffs,
   commands, exact output) in `.superpowers/sdd/task-13-report.md`.
 
+- **[4d] OpenSAD15 converter: NO LIVE ORACLE tier** (`src/python/speech/dataprep/opensad15.py`,
+  ported from Python 2 `ProcessOpenSAD15Corpus.py:23-108`): unlike every other module in this
+  repo, there is no interpreter left that can execute the legacy source -- Python 2 is EOL and
+  not installed (or reasonably obtainable) in this environment, so nothing here can be
+  cross-run against a live original. This is the phase's honest weakest validation tier:
+  every fixture under `tests/reference_data/phase4d/opensad15/` is HAND-COMPUTED from a
+  line-by-line reading of the legacy source (a second, independent-of-the-implementation
+  arithmetic pass, not a dump from any run), plus one real cross-check beyond pure
+  transcription -- the emitted VRCTS XML is parsed by the engine's own `load_vrcts`.
+  *Pinned by:* `tests/test_phase4d_opensad15.py` (27 cases) + `src/rust/tests/phase4d_opensad15_vrcts.rs`.
+- **[4d] OpenSAD15 `audiofile[:-5]` hard-coded 5-char extension strip**
+  (`ProcessOpenSAD15Corpus.py:48,67,100`, ported as `_path_leaf(audio_path[:-5])`): the stem
+  used for the XML `AudioDoc` name, the STM name field, and the lang fallback is derived by
+  unconditionally slicing off the LAST 5 CHARACTERS of `audiofile`, not by stripping a detected
+  extension. Correct only when the extension is exactly 5 chars including the dot (e.g.
+  `.flac`); any other extension length silently corrupts the stem -- a 4-char `.sph` loses the
+  last real character (`"rec01.sph"` -> stem `"corpus/rec0"` -> name `"rec0"`, dropping the
+  `1`). Reproduced verbatim, not extension-aware. *Fix candidate:* switch to
+  `Path(audiofile).stem` after parity (the legacy's own docs corpus is `.flac`-only, so this
+  never manifested there). *Pinned by:*
+  `test_case5_extension_length_quirk_truncates_stem` (`tests/test_phase4d_opensad15.py`).
+- **[4d] OpenSAD15 `duration`/`lang` last-physical-row quirk (two instances, not one)**
+  (`ProcessOpenSAD15Corpus.py:35-39`): inside the per-tab-row loop, `beg`/`endS`/`lang` are
+  read from `tmp[2]`/`tmp[3]`/`tmp[8]` and `duration = endS` is assigned on EVERY row, BEFORE
+  the S/RI filter `if` on line 39 -- so after the loop, both `duration` (the XML `sigdur` and
+  the listing line's duration field) and `lang` (absent an explicit later fallback) hold
+  whatever the LAST PHYSICAL ROW in the tab file had, whether or not that row passed the
+  filter. A tab file's trailing annotation row is very often a non-speech sentinel (silence,
+  end-of-file marker, etc.), so `duration`/`lang` routinely come from a row that never
+  contributes a segment. Reproduced verbatim (single `duration = end_s` assignment inside the
+  unconditional prefix of the loop body, ahead of the filter `if`, in `convert_tab_file`).
+  *Pinned by:* `test_case1_duration_and_lang_taken_from_last_row_regardless_of_filter` and
+  `test_case3_lang_from_last_row_overrides_earlier_explicit_lang`
+  (`tests/test_phase4d_opensad15.py`) -- case1's last row is a filtered-out `NS` row with an
+  empty lang field (exercising both the duration quirk and the lang-fallback path in one
+  fixture); case3's two rows carry deliberately DIFFERENT explicit lang codes to prove the
+  physically-last row wins over the only speech row.
+- **[4d] OpenSAD15 `str(float)` is Python 2's 12-significant-digit format, not Python 3's
+  shortest round-trip repr** (`ProcessOpenSAD15Corpus.py:53,57,61,100-102,106`, ported as
+  `py2_str_float`): CPython 2.7's `float.__str__` formats via `PyOS_double_to_string(v, 'g',
+  12, ...)` (C `%.12g`), while `float.__repr__` -- and Python 3's `str`, which is `repr` --
+  uses the shortest decimal string that round-trips. The two diverge exactly when a float
+  carries floating-point noise past 12 significant digits, which happens routinely when
+  summing segment durations (e.g. case1's `spdur` lands on the double `16.366300000000003`;
+  Python 2's `str()` prints `16.3663`, Python 3's plain `str()` would leak
+  `16.366300000000003` verbatim into the XML/STM/listing outputs). Reproduced via
+  `py2_str_float(x) = f"{x:.12g}"` plus Python 2's "always show a `.` or exponent" completion
+  for bare-integral results (`f"{1.0:.12g}"` is the C-style `"1"`; Python 2's `str(1.0)` is
+  `"1.0"`). Not validated against a live Python 2 interpreter (see the no-live-oracle entry
+  above); derived from documented CPython 2.7 source behavior and the task brief's worked
+  example. *Pinned by:* `test_py2_str_float_pinned_cases` (10 cases incl. the brief's
+  `143.76000000000002` -> `"143.76"` example and both fixtures' actual noisy `spdur` values),
+  `test_py2_str_float_nan_inf`, and `test_py2_str_float_differs_from_python3_str_on_noisy_case`
+  (`tests/test_phase4d_opensad15.py`).
+- **[4d] OpenSAD15 `Pool(20).imap` -> sequential loop (determinism deviation)**
+  (`ProcessOpenSAD15Corpus.py:131-135`, ported as `process_opensad15`'s plain `for line in
+  lines` loop): the legacy parallelizes `treat_file` over a 20-worker pool and writes results
+  to the output listing in `imap` completion order, which need not match input order under
+  uneven per-file work. The port processes the listing SEQUENTIALLY, so output order always
+  equals input order -- a documented determinism deviation (an improvement, not a bug to
+  preserve: nothing downstream depends on a specific non-deterministic order, and a
+  reproducible order is strictly more testable). *Pinned by:*
+  `test_process_opensad15_sequential_preserves_listing_order` (3-entry listing,
+  deliberately out-of-alphabetical-order, asserts the output preserves exactly that order;
+  `tests/test_phase4d_opensad15.py`).
+- **[4d] OpenSAD15 lang-fallback `IndexError` latent bug (discovered, not exercised by the
+  golden cases)** (`ProcessOpenSAD15Corpus.py:66-67`: `lang = path_leaf(audiofile[:-5]).split
+  ('_')[-2]`): when the last tab row's lang field is empty AND the (possibly `[:-5]`-corrupted,
+  see above) audio stem has fewer than 2 underscore-separated tokens, `split('_')[-2]` indexes
+  past the result and raises -- `IndexError` in CPython 2 identically to Python 3's list
+  indexing, so this needed no special handling to reproduce; Python 3's `list.__getitem__`
+  raises the same way. Not a defensive addition -- the port lets it raise naturally, matching
+  the legacy's crash-equivalent behavior on this input shape. None of the 5 golden fixtures
+  exercise this path (all either give an explicit lang or use a 2+-token stem); recorded here
+  as a discovered latent bug worth knowing about before pointing this converter at unvetted
+  corpora. *Pinned by:*
+  `test_lang_fallback_raises_indexerror_without_two_underscore_tokens`
+  (`tests/test_phase4d_opensad15.py`).
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
