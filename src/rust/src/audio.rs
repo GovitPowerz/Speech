@@ -847,4 +847,22 @@ mod tests {
         normalize_channels(&mut z); // adim floors at 1e-3
         assert_eq!(z[[0, 0]], 0.0);
     }
+
+    #[test]
+    fn read_audio_file_type_2_bails() {
+        // Task 13 (Phase 4d blocked-four closure): `file_type` 2/3/4 (cep/phSeq-N/mat,
+        // AudioStruct.cpp:183-412) has no local data to validate against -- typed bail, no
+        // read attempted. The bail fires before any file I/O (`:642` precedes `File::open`),
+        // so a nonexistent path is sufficient; previously unpinned at this call site (the
+        // only existing pin, `engine::bag_of_processors::tests::file_type_2_bails`, exercises
+        // the higher-level corpus-bag gate, which short-circuits before `read_audio` is ever
+        // reached).
+        match read_audio(Path::new("/nonexistent/does/not/matter.cep"), 0.0, 3.6e6, 2) {
+            Err(e) => assert!(
+                e.to_string().contains("file_type"),
+                "unexpected read_audio file_type-2 error: {e}"
+            ),
+            Ok(_) => panic!("expected file_type 2 (cep, unported) to bail"),
+        }
+    }
 }

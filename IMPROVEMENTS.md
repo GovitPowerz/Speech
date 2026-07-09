@@ -3347,6 +3347,164 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   `test_out_param_inverse_matches[vecmask]` and `test_vecmask_arm_writes_expected_slice
   [NormalizeInputStd]` -- confirming the golden is non-vacuous, not merely present.
 
+## Complete-as-portable closures (Phase 4d)
+
+Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
+placeholders waiting on a future task. Each entry names the typed bail(s) that make the
+blocked behavior fail loudly (never silently), cites its pinning test, and states
+concretely what would have to exist for the block to lift. Cross-referenced by the
+README roadmap (T15).
+
+- **Cost balances 6-9 (the WER shell-out laws): source LOST, not deferred-portable.**
+  `ComputeCost.m` computes balances 6/7/8/9 by shelling out to an external Python
+  scorer at `/people/gelly/Scripts/xml2wer{,_multi,_list}.py` over `ssh` to named 2015-era
+  lab workstations (`PS.VP.serversname{t.ID}`, hostnames like `UV00000123-P000`).
+  *Evidence:* `legacy/Optimizer_V6.2.2/functions/ComputeCost.m:376-397` (balance==8
+  pre-loop: multi-worker `ssh gelly@<server> "... python /people/gelly/Scripts/
+  xml2wer_multi.py -i <xmlpart> -c <refctmdir> -l <fileList> -d <durmax> -p
+  <BalanceBackProp> ..."`, plus the single-worker fallback at `:396`); `:399-427`
+  (balance==-9 pre-loop, same shape over `xml2wer_list.py -l <listing>.flst -t
+  <PruningThresh>`); `:469-490` (balance==6 branch, the literal shell at `:480`:
+  `system(['python ~/Scripts/xml2wer.py -i xmlpart_%d -c ... -l ... -d ... -p ...'])`);
+  `:491-516` (balance==7, shell at `:504`, same script, `foo.csv` output consumed at
+  `:505-512`); `:517-534` (balance==8's PER-NETWORK branch: no shell of its own, it
+  `load()`s `xmlpart_%d/results.csv` at `:525`, i.e. the OUTPUT the `:396` pre-loop shell
+  produced); `:535-550` (balance==9: no `system()` call at all, but consumes WER-derived
+  `Error_vad` columns 10-14 that only the same `xml2wer` family populates in this
+  codebase -- grouped with 6-8 as "the WER shell-out laws" per this repo's own module
+  map, not independently verified to have a different provenance). Confirmed lost, not
+  just unvendored: `find / -iname "*xml2wer*"` and `find / -iname "*gelly*"` (repo tree
+  and local filesystem, depth-bounded) both return zero hits -- neither the scripts nor
+  a `/people/gelly` home directory exist anywhere on this machine, and `legacy/` is a
+  source-only C++ + `.m` snapshot (no external tooling was ever vendored alongside it).
+  *Typed bail:* `src/python/speech/engine.py:304`, `compute_cost`: `raise ValueError(
+  f"compute_cost ports balances 0/3/4/5/10, got {balance} (6-9 are deferred to 4d)")`.
+  *Pinning test:* `tests/test_phase4c_engine_cost.py::
+  test_compute_cost_rejects_deferred_balances` (`:260-263`), parametrized over
+  `balance in (6, 7, 8, 9)`, asserts `pytest.raises(ValueError, match="deferred to
+  4d")` -- pre-existing, verified still passing.
+  *What it would take:* recovering or rewriting `xml2wer.py`/`xml2wer_multi.py`/
+  `xml2wer_list.py`. The CLI contract is partially reconstructable from the `system()`
+  call sites above (`-i`/`-c`/`-l`/`-d`/`-p`/`-t` flags, a `foo.csv`/`results.csv`
+  output with columns consumed at `ComputeCost.m:485,509,528-529`), but the actual
+  WER-scoring algorithm (word alignment against a CTM/XML reference, pruning) is nowhere
+  in this repo. It would also need a corpus with real word-level CTM references
+  (`PS.VP.refctmdir`) -- every committed fixture carries only STM segment boundaries
+  (SAD/LID labels), no word transcriptions. This is a from-scratch reimplementation
+  against an unknown legacy format with no oracle to validate against; only attemptable
+  if a corpus with matching WER references ever surfaces.
+
+- **Twin pitch second pass: reference-based, structurally diverges from the (ported)
+  base spectral pitch pass -- deferred, portable in principle.**
+  `TwinBlstmSpectralLid`'s pitch second pass (`TDCwindow > 0`) is a DIFFERENT algorithm
+  from `BlstmSpectralSegmenter`'s pitch pass (`tasks/sad.rs`, already ported and
+  golden-tested), not a reusable variant of it. *Evidence:* legacy
+  `TwinBLSTMSpectralLID.cpp:349-614` is the per-channel setup block, executed
+  UNCONDITIONALLY for every mode including 7 (the `if (_Mode != 7)` guard at `:353` is
+  commented out, dead). The pitch sub-block, `:363-403`: `seg._Classification.at(chan) =
+  seg._Reference.at(chan)` (`:367`) then `smoothSegmentation` (`:368`) BEFORE `pitch =
+  this->getPitch(...)` (`:369`) -- pitch is derived from the REFERENCE segmentation, not
+  a forward-pass hypothesis -- then the periodogram is warped in place (`:372-401`,
+  `coeff_homo = pitch/300`) BEFORE the single forward pass that follows at `:617+`.
+  Contrast the ALREADY-PORTED base driver, `BLSTMSpectralSegmenter.cpp:740-804`: pass-1
+  forward (`:740`) -> `results2segmentation` writes the HYPOTHESIS into `seg` (`:751`)
+  -> `getPitch` over that hypothesis (`:758`) -> warp -> pass-2 forward (`:793`, gated
+  `if (pitch > 0)`). The base is a genuine two-pass self-bootstrapping scheme that needs
+  no ground truth (it works on unlabeled audio at inference time); the Twin's version
+  requires `seg._Reference` populated before it can run at all -- a reference-dependent
+  algorithm, not a code-reuse opportunity.
+  *Typed bail:* two call sites in `src/rust/src/tasks/lid.rs`. (a) the shared mode
+  0/1/2/3 path, `get_segmentation` `:2226-2234`: `if let Some(tdc) = s.tdc.as_ref() &&
+  tdc.half_window > 0 { return Err(anyhow!("TwinBlstmSpectralLid: pitch second pass
+  (TDCwindow > 0) not ported (legacy :349-614)")); }`. (b) the mode-7 path,
+  `get_segmentation_mode7` `:1283-1289`, same shape: `"TwinBlstmSpectralLid mode 7:
+  pitch pass (TDCwindow > 0) not ported"`. Every committed twin config under
+  `tests/reference_data/phase4b/twin_*.config` ships `BLSTM_TDCwindow 0` (gate off), so
+  neither branch had ever been exercised by a golden.
+  *Pinning test:* previously NONE at either site. Added in Task 13: `src/rust/tests/
+  phase4b_twin_golden.rs::pitch_second_pass_bails_wav_modes` (site a) and `src/rust/
+  tests/phase4b_twin_mode7.rs::mode7_pitch_second_pass_bails` (site b) -- both override
+  `BLSTM_TDCwindow`/`_TDCshift`/`_TDC_lags`/`_TDC_balance`/`_TDC_windowing_type`/
+  `_TDC_windowing_param` to the same values that activate the BASE driver's ported pitch
+  pass in `phase2b_spectral_golden.rs::pitch_map` (`TDCwindow 0.032 -> TDC_window_size
+  128 > 0`), then assert the `Err` fires with the expected message text. Both pass
+  (`cargo test`, this task).
+  *What it would take:* transcribing `TwinBLSTMSpectralLID.cpp:349-614` as its own
+  driver path. The low-level pieces are already ported and reusable (`get_pitch` +
+  the periodogram-warp math are the identical routines `BlstmSpectralSegmenter`'s pitch
+  pass already exercises), but the ORDERING is Twin-specific: seed-from-reference +
+  smooth (`Segmentation::set_segments_from`, already landed for Twin mode 4) must run
+  BEFORE the first and only forward pass, and the warp must land on
+  `audio.periodogram`/`_FilterBankedPeriodogram`/`_CepstreCoefficients` before
+  `getBLSTMInputSequence` is (re)built. Needs a new golden: a twin config with
+  `TDCwindow > 0` plus a real reference segmentation wired through `refs`, and harness
+  (`tools/oracle_harness` `TwinProbe`) support for the reimpl-swap under this path. No
+  missing external data -- this closure is portable, just not yet scheduled.
+
+- **Mode-7 WAV/CNN arm: broken-as-committed since Phase 2 -- deferred until the CNN
+  itself is fixed (out of current scope).**
+  `TwinBlstmSpectralLid`'s Mode-7 WAV arm runs `_LIDConvNeuralNetwork`, the SAME
+  Convolutional net excluded since Phase 2 for being broken-as-committed (see the
+  `[phase2] CNN is broken-as-committed` entry above, `~line 593`: empty `_Layers`
+  indexed on every real-config LID run is UB, the weights are orphaned/unserializable,
+  `feedBackward` returns nothing). *Evidence:* legacy `TwinBLSTMSpectralLID.cpp:903-1193`
+  (the `abs(_Mode)==7` branch), specifically `:922-963`:
+  `if (audio.hasReadWavFile()) { ... _LIDConvNeuralNetwork.feedForward(inputCNN);
+  inputSeq = _LIDConvNeuralNetwork.getOutputMatrix(); ... }` (the CNN call itself at
+  `:927-928`). The `[phase4b]` entries earlier in this file (`~2027-2060`, `~2195+`)
+  already name this arm as deferred alongside the pitch pass.
+  *Typed bail:* `src/rust/src/tasks/lid.rs`, `get_segmentation_mode7` `:1276-1280`: `if
+  audio.periodogram.is_none() { return Err(anyhow!("TwinBlstmSpectralLid mode 7: wav arm
+  runs the CNN (not ported); only File_Type 1 (phSeq) supported (legacy :922-963)")); }`
+  -- `audio.periodogram.is_some()` is the port's proxy for `!hasReadWavFile()`, so
+  `is_none()` <-> a real wav decode <-> the CNN arm.
+  *Pinning test:* previously NONE -- every existing Mode-7 golden in `phase4b_twin_
+  mode7.rs` uses the phSeq corpus (`corpus_phseq/s{1,2,3}.phSeq`), which never reaches
+  this branch. Added in Task 13: `src/rust/tests/phase4b_twin_mode7.rs::
+  mode7_wav_arm_bails_cnn_not_ported`, feeding a real wav decode (`corpus_lid/f1.wav`,
+  `file_type=0` -> `periodogram: None`) into the mode-7 driver and asserting the `Err`
+  mentions "CNN". Passes (`cargo test`, this task).
+  *What it would take:* fixing the Phase-2-excluded CNN first (the `_Layers` ctor guard,
+  the orphaned-weight serialization, the missing `feedBackward` return) -- out of scope
+  per the locked Phase 2 spec decision. No real `lid.config` in this repo (including the
+  vendored `configs/legacy/LID_BLSTM.config`) ever configures CNN keys; LID always runs
+  via phSeq, so there is no evidence this arm was ever exercised even in production
+  legacy runs. Fixing it means inventing correct CNN semantics with no working reference
+  to validate against.
+
+- **Cep ingestion (`File_Type` 2+): no local data anywhere to validate against --
+  deferred pending a corpus that uses it.**
+  `AudioStruct.cpp`'s ctor dispatch (`:36-412`) ports `file_type` 0 (wav, `:36-128`) and
+  1 (phSeq, `:138-182`) only; `:183-412` (file_type 2 cep, 3 phSeq-N variant, 4 mat) is
+  entirely unported. *Evidence:* no committed fixture, `legacy/` corpus, or `dataprep/`
+  output anywhere in this repo carries `.cep`/mat-format audio -- `dataprep/`'s own
+  scope (augmentation, OpenSAD15 conversion, STM normalization, listing writers) never
+  produces or consumes cep files either.
+  *Typed bail:* two call sites. (a) `src/rust/src/audio.rs::read_audio` `:642-646`: `if
+  file_type != 0 { bail!("read_audio: file_type {file_type} not supported (Phase 4b:
+  0=wav, 1=phSeq ported; 2/3/4 unported)"); }` (guards AFTER the file_type==1 phSeq
+  dispatch at `:634-641`, so this specifically catches 2/3/4). (b) `src/rust/src/
+  engine/bag_of_processors.rs::BagOfProcessors::from_configs` `:282-287`: `if file_type
+  != 0 && file_type != 1 { bail!("File_Type {file_type} not ported (Phase 4b): only wav
+  (0) and phSeq (1) are supported"); }` -- the higher-level corpus-bag gate, reached
+  FIRST in the real construction path (the bag never calls `read_audio` for a
+  `File_Type` it hasn't already accepted).
+  *Pinning test:* (b) was already pinned: `engine::bag_of_processors::tests::
+  file_type_2_bails` (inline `#[cfg(test)]`, `src/rust/src/engine/bag_of_processors.rs`,
+  `mod tests` at `:1230`) -- pre-existing, verified still passing. (a) was UNPINNED:
+  since `read_audio` is only ever called from `bag_of_processors.rs` post-gate, its own
+  file_type-2/3/4 branch had no direct test. Added in Task 13: `audio::tests::
+  read_audio_file_type_2_bails` (`src/rust/src/audio.rs`), calling `read_audio` directly
+  with `file_type=2` against a nonexistent path (the bail fires before any file I/O, so
+  no fixture is needed) and asserting the error text contains `"file_type"`. Passes
+  (`cargo test`, this task).
+  *What it would take:* real cep-format (or mat-format) audio fixtures, plus the
+  compiled legacy `AudioStruct` cep reader as an oracle to golden-test against -- neither
+  exists locally, and no committed corpus/listing in this repo references File_Type 2+.
+  Without a live oracle this would be an unvalidatable transcription of dead code (the
+  same objection the module map raises for `dataprep/`'s formerly-all-stub status), so
+  it stays deferred pending a corpus that actually exercises File_Type 2+.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

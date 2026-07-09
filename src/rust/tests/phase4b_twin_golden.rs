@@ -516,3 +516,35 @@ fn mode5_runs_sad_net_modes_4_6_do_not() {
         }
     }
 }
+
+#[test]
+fn pitch_second_pass_bails_wav_modes() {
+    // Task 13 (Phase 4d blocked-four closure): the reference-based pitch second pass
+    // (legacy TwinBLSTMSpectralLID.cpp:363-403, gated on TDC_window_size > 0) is deferred
+    // -- it diverges structurally from BLSTMSpectralSegmenter's post-forward pitch pass
+    // (BLSTMSpectralSegmenter.cpp:757-804, which IS ported): the Twin seeds the
+    // classification straight from `seg._Reference` before any forward pass, where the
+    // base runs a genuine pass-1 forward -> hypothesis -> getPitch -> pass-2 forward.
+    // Every committed twin config ships BLSTM_TDCwindow 0 (gate off); this pins the ELSE
+    // branch (`tasks/lid.rs`'s `TDCwindow > 0` guard in `get_segmentation`'s wav-mode
+    // 0/1/2/3 path), previously unpinned.
+    let mut map = variant_map("mode0");
+    map.insert("BLSTM_TDCwindow".into(), "0.032".into());
+    map.insert("BLSTM_TDCshift".into(), "0.01".into());
+    map.insert("BLSTM_TDC_lags".into(), "0.002,0.016".into());
+    map.insert("BLSTM_TDC_balance".into(), "0.7".into());
+    map.insert("BLSTM_TDC_windowing_type".into(), "hamming".into());
+    map.insert("BLSTM_TDC_windowing_param".into(), "0.8".into());
+    let sad_w = real_weights();
+    let lid_w = lid_weights("mode0");
+    let mut drv = TwinBlstmSpectralLid::from_legacy(&map, Some(&sad_w), Some(&lid_w)).unwrap();
+    let mut audio = corpus_audio("f1", 0, 0.5);
+    let mut segs = fresh_segs(&audio);
+    let err = drv
+        .get_segmentation(&mut audio, &mut segs, None)
+        .expect_err("TDCwindow > 0 must bail the unported pitch second pass");
+    assert!(
+        err.to_string().contains("pitch second pass"),
+        "unexpected pitch-gate error: {err}"
+    );
+}
