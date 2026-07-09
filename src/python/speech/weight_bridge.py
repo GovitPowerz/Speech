@@ -4,8 +4,16 @@ Ported from legacy MATLAB: config2network*.m, network2config*.m,
 config2weights*.m, nnet2MatFile.m, weights2nnet.m, Write/ReadMatrixFromBinary.m,
 CombineNNets.m, ModifyOutputNetwork.m, ForceLSTMBiais.m. See design spec section 6.
 
-High-risk: the column-major flat layout + adim_coeff scaling are the seam to the
-Rust engine - round-trip property tests are mandatory when implemented (Phase 3).
+High-risk: the flat weight-PACK layout (row-major PER MATRIX -- see `nnet_to_flat`/
+`_pack_lstm_layer` below) + `adim_coeff` scaling are the seam to the Rust engine. Do not
+confuse this with the SEPARATE `.bin` FILE convention `read_bin`/`write_bin` implement
+(column-major payload, matching `io::binary.rs`'s doc comment) -- the two are different
+axes entirely: the flat PACK is a 1-D vector built by flattening each weight sub-matrix
+row-major, while the `.bin` CONTAINER format is how any 2-D array (including that same
+1-D pack, trivially, since a vector's row-/column-major flattenings coincide) is
+serialized to bytes. Round-trip property tests are mandatory (`pack_weights`/
+`unpack_weights` landed Phase 4c Task 7; hypothesis-tested in
+`tests/test_phase4c_weight_bridge.py`).
 """
 
 import json
