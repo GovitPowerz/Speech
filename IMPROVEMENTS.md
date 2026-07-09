@@ -3240,13 +3240,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   2. **WriteWeightedListing field-6 = duration, but Corpus reads field 6 as file_id.**
      `WriteWeightedListing.m` writes `[weight;duration]` as CSV fields 5/6, but
      `Corpus::from_config` (`corpus.rs:248-252`) reads field 6 as `fileId` via
-     `istringstream >> int` -- so the engine reads DURATION AS FILE_ID (int-truncated). A
-     genuine legacy field-role mismatch. The port has no per-file duration model, so
-     `_BatchRunner.next_listing` writes the record's file_id into field 6 -- the engine then
-     round-trips file_id correctly (the twin corpus default 1 -> `%g` "1" -> file_id 1),
-     avoiding the mismatch's payload while keeping the byte format identical. *Fix candidate:*
-     once durations are modeled, decide whether to reproduce the duration-as-file_id read for
-     strict parity, or fix the field roles.
+     `istringstream >> int` -- so the legacy engine reads DURATION AS FILE_ID (int-truncated;
+     the trailing ';' token is popped, tokens.size()==6, the read fires whenever field 5 is
+     non-empty). A genuine legacy field-role mismatch, but NOT load-bearing for batching: the
+     legacy fileId's ONLY consumer is `getRefFileId()` -> the LID TRAINING-TARGET class index
+     (`TwinBLSTMSpectralLID.cpp:1067`, clamped `>= outputSize -> 0`); hard-example tracking
+     (`getCases.m`/`GetNewBatch`) is file-INDEX-based and never touches fileId. The PORT's
+     engine reads field 6 and DROPS it (`CorpusItem.file_id` is copied to no `Audio` field;
+     the port's LID target sources `lang_index` -- a deliberate Phase-4b divergence from
+     `getRefFileId`). Field 6 is therefore INERT in the port, and `_BatchRunner.next_listing`
+     writes the record's file_id there simply as a deterministic placeholder that keeps the
+     byte format identical -- writing duration would be numerically indistinguishable.
+     *Fix candidate:* if the LID-target-from-fileId legacy path is ever ported for strict
+     parity, BOTH the duration-as-file_id read and the `feedForward(targetIndex)` consumption
+     (`BLSTMNeuralNetwork.cpp:843-918`) must land together; the listing field alone is inert.
   3. **No per-eval class-balance rescale + ascending-index order.** `ComputeGradient.m:72-96`
      rescales `filesValues(:,2)` by `nbOfElem/sumInClassIndex` (in-class = `classNb == 1`)
      before writing; the port writes the RAW listing weight (`_files_values` col1) -- the
