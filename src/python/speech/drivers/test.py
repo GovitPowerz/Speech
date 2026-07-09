@@ -64,7 +64,7 @@ def _class_keys(mapping_path: Path) -> list[str]:
         if not line:
             continue
         parts = line.split(";")
-        if len(parts) < 2:
+        if len(parts) < 3:
             continue
         keys.add(parts[0] + "_" + parts[1])
     return sorted(keys)
