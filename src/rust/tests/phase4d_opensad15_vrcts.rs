@@ -18,7 +18,8 @@ fn fixture_path() -> PathBuf {
 
 #[test]
 fn opensad15_case1_xml_parses_via_load_vrcts() {
-    let xml = std::fs::read_to_string(fixture_path()).expect("case1_expected.xml must be committed");
+    let xml =
+        std::fs::read_to_string(fixture_path()).expect("case1_expected.xml must be committed");
 
     // sigdur="50.0" in the fixture; off=0 covers the whole file.
     let seg = load_vrcts(&xml, 0.0, 50.0);
@@ -33,7 +34,11 @@ fn opensad15_case1_xml_parses_via_load_vrcts() {
     // tests/test_phase4d_opensad15.py::CASES / write_fixtures.py in the Task 5
     // report): [3.4118,9.7781], [20.0,25.0], [40.0,45.0].
     let expected = [(3.4118, 9.7781), (20.0, 25.0), (40.0, 45.0)];
-    assert_eq!(speech.len(), expected.len(), "SPEECH segment count mismatch");
+    assert_eq!(
+        speech.len(),
+        expected.len(),
+        "SPEECH segment count mismatch"
+    );
     for (i, (got, want)) in speech.iter().zip(expected.iter()).enumerate() {
         assert!(
             (got.0 - want.0).abs() < 1e-9 && (got.1 - want.1).abs() < 1e-9,
