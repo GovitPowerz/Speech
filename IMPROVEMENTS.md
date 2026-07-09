@@ -2206,8 +2206,9 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   broken-as-committed (Phase 2); the negative modes are dead. *Fix candidate:* port the CNN
   if a mode-7 wav corpus is ever needed. *Pinned by:* the mode-7 goldens above (phSeq arm) +
   the driver's typed wav bail (unit-covered by `get_segmentation_mode7`'s `periodogram.is_none()`
-  guard). Mutation: N/A (dead code); the SAD-irrelevance is proven by the goldens passing with
-  no SAD weights loaded.
+  guard -- the "unit-covered" claim was an overclaim: no such test existed; corrected +
+  genuinely pinned by the [phase4d] complete-as-portable closure entry below). Mutation: N/A
+  (dead code); the SAD-irrelevance is proven by the goldens passing with no SAD weights loaded.
 
 - **[phase4b] Mode-7 `classNb = max(2, outputSize)`, and `_PostProcessMode 1` cancels in
   normalization; the DumpLIDInternals filename is CLOSED (Phase 4c Task 2)** (`tasks/lid.rs`,
@@ -3413,22 +3414,33 @@ README roadmap (T15).
   no ground truth (it works on unlabeled audio at inference time); the Twin's version
   requires `seg._Reference` populated before it can run at all -- a reference-dependent
   algorithm, not a code-reuse opportunity.
-  *Typed bail:* two call sites in `src/rust/src/tasks/lid.rs`. (a) the shared mode
+  *Typed bail:* three call sites in `src/rust/src/tasks/lid.rs`. (a) the shared mode
   0/1/2/3 path, `get_segmentation` `:2226-2234`: `if let Some(tdc) = s.tdc.as_ref() &&
   tdc.half_window > 0 { return Err(anyhow!("TwinBlstmSpectralLid: pitch second pass
   (TDCwindow > 0) not ported (legacy :349-614)")); }`. (b) the mode-7 path,
   `get_segmentation_mode7` `:1283-1289`, same shape: `"TwinBlstmSpectralLid mode 7:
-  pitch pass (TDCwindow > 0) not ported"`. Every committed twin config under
+  pitch pass (TDCwindow > 0) not ported"`. (c) the mode-4/5/6 path,
+  `get_segmentation_mode456` `:1680-1686`, its OWN independent guard reached BEFORE the
+  shared (a) branch ever runs (`get_segmentation`'s trait entry dispatches
+  `self.mode in {4,5,6}` straight to `get_segmentation_mode456`, `:2212-2214`): `if let
+  Some(tdc) = s.tdc.as_ref() && tdc.half_window > 0 { return Err(anyhow!(
+  "TwinBlstmSpectralLid mode {}: pitch second pass (TDCwindow > 0) not ported",
+  self.mode)); }`. Every committed twin config under
   `tests/reference_data/phase4b/twin_*.config` ships `BLSTM_TDCwindow 0` (gate off), so
-  neither branch had ever been exercised by a golden.
-  *Pinning test:* previously NONE at either site. Added in Task 13: `src/rust/tests/
-  phase4b_twin_golden.rs::pitch_second_pass_bails_wav_modes` (site a) and `src/rust/
-  tests/phase4b_twin_mode7.rs::mode7_pitch_second_pass_bails` (site b) -- both override
+  none of the three branches had ever been exercised by a golden.
+  *Pinning test:* previously NONE at any site. Added in Task 13: `src/rust/tests/
+  phase4b_twin_golden.rs::pitch_second_pass_bails_wav_modes` (site a),
+  `src/rust/tests/phase4b_twin_mode7.rs::mode7_pitch_second_pass_bails` (site b), and
+  `src/rust/tests/phase4b_twin_golden.rs::pitch_second_pass_bails_mode456` (site c,
+  fix-wave) -- all three override
   `BLSTM_TDCwindow`/`_TDCshift`/`_TDC_lags`/`_TDC_balance`/`_TDC_windowing_type`/
   `_TDC_windowing_param` to the same values that activate the BASE driver's ported pitch
   pass in `phase2b_spectral_golden.rs::pitch_map` (`TDCwindow 0.032 -> TDC_window_size
-  128 > 0`), then assert the `Err` fires with the expected message text. Both pass
-  (`cargo test`, this task).
+  128 > 0`), then assert the `Err` fires with the expected message text. All three pass
+  (`cargo test`, this task); site c's non-vacuity was mutation-checked (guarding on
+  `if false && ...` makes `pitch_second_pass_bails_mode456` fail while
+  `pitch_second_pass_bails_wav_modes` stays green, confirming the two tests exercise
+  distinct call sites, not the same one twice).
   *What it would take:* transcribing `TwinBLSTMSpectralLID.cpp:349-614` as its own
   driver path. The low-level pieces are already ported and reusable (`get_pitch` +
   the periodogram-warp math are the identical routines `BlstmSpectralSegmenter`'s pitch

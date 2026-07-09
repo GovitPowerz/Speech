@@ -548,3 +548,39 @@ fn pitch_second_pass_bails_wav_modes() {
         "unexpected pitch-gate error: {err}"
     );
 }
+
+#[test]
+fn pitch_second_pass_bails_mode456() {
+    // Task 13 fix-wave: `get_segmentation_mode456` (`tasks/lid.rs:1672-1687`, modes 4/5/6)
+    // has its OWN independent `TDCwindow > 0` guard (`:1680-1686`) -- a THIRD call site
+    // distinct from the shared 0/1/2/3 branch (`pitch_second_pass_bails_wav_modes`,
+    // above) and the mode-7 branch (`phase4b_twin_mode7.rs::
+    // mode7_pitch_second_pass_bails`). `TwinBlstmSpectralLid::get_segmentation` (the
+    // trait entry) dispatches mode in {4,5,6} to `get_segmentation_mode456` BEFORE ever
+    // reaching the shared branch's own guard, so this site was previously unpinned by
+    // any of the other two tests. Uses mode 4 (REFERENCE-smoothed); the guard fires
+    // before `refs` is ever consulted, so `None` is fine here too.
+    let mut map = variant_map("mode4");
+    map.insert("BLSTM_TDCwindow".into(), "0.032".into());
+    map.insert("BLSTM_TDCshift".into(), "0.01".into());
+    map.insert("BLSTM_TDC_lags".into(), "0.002,0.016".into());
+    map.insert("BLSTM_TDC_balance".into(), "0.7".into());
+    map.insert("BLSTM_TDC_windowing_type".into(), "hamming".into());
+    map.insert("BLSTM_TDC_windowing_param".into(), "0.8".into());
+    let sad_w = real_weights();
+    let lid_w = lid_weights("mode4");
+    let mut drv = TwinBlstmSpectralLid::from_legacy(&map, Some(&sad_w), Some(&lid_w)).unwrap();
+    let mut audio = corpus_audio("f1", 0, 0.5);
+    let mut segs = fresh_segs(&audio);
+    let err = drv
+        .get_segmentation(&mut audio, &mut segs, None)
+        .expect_err("TDCwindow > 0 must bail the unported mode456 pitch second pass");
+    assert!(
+        err.to_string().contains("pitch second pass"),
+        "unexpected pitch-gate error: {err}"
+    );
+    assert!(
+        err.to_string().contains("mode 4"),
+        "expected the mode456 site's mode-numbered message, got: {err}"
+    );
+}
