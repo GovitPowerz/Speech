@@ -206,6 +206,11 @@ LISTING_DIR = PHASE4D_DIR / "listing"
 LISTING_STAGE_LINE_RE = re.compile(r"^OCTAVE_STAGE writelisting n=(?P<n>\d+) nbworker=(?P<nbworker>\d+) wn=(?P<wn>\d+)$", re.MULTILINE)
 LISTING_EXPECTED_FILES = ["plain.flst", "plain_worker_1.flst", "plain_worker_2.flst", "plain_worker_3.flst", "weighted.lst"]
 
+# --- Task 11: .scr score-file writer live Octave byte-oracle fixtures ----------------
+SCR_DIR = PHASE4D_DIR / "scr"
+SCR_STAGE_LINE_RE = re.compile(r"^OCTAVE_STAGE scr n_classes=(?P<n>\d+) produced_name=(?P<name>\S+)$", re.MULTILINE)
+SCR_EXPECTED_FILES = ["expected.scr", "mapping.csv", "listing.csv", "keys_alpha_order.txt"]
+
 # `light` cases: every content line reaches norm_stm_pkt_light.pl's pure regex chain
 # (self-contained, no shell-out), so the oracle is safe end to end. Case coverage:
 #   case1 -- comments (both forms), a blank (whitespace-only) line, an `ignore_`
@@ -750,6 +755,109 @@ def extract_listing_fixtures() -> None:
     print(f"OK: listing writer fixtures ({len(cases)} files, octave {octave_version}) -> {LISTING_DIR.relative_to(REPO_ROOT)}")
 
 
+def extract_scr_fixtures() -> None:
+    """Task 11 pass: drive `tools/octave_harness/stage_scr.m` (HYBRID tier -- real Tier-1
+    `processListing.m` for `keys(langMapConf)` + the crafted listing/mapping, FALLBACK-TIER
+    transcription of Test_BLSTM.m:251-269's writer loop over an injected `scores_test`
+    row; see the stage's own docstring for the full tier adjudication) and commit its raw
+    text/csv output as goldens under `tests/reference_data/phase4d/scr/`, plus a
+    `scores_input.json` the Python test replays directly (no scipy/.mat dependency at
+    test time).
+
+    Runs the stage TWICE (into separate tempdirs) and requires byte-identical output --
+    the same determinism discipline as `--listing-fixtures` -- before committing.
+
+    SKIPS gracefully (prints and returns, does not raise) when octave-cli/octave is
+    absent -- CI never runs this stage, it only consumes the committed fixtures.
+    """
+    octave = _find_octave()
+    if octave is None:
+        print("SKIP: octave-cli not found on PATH -- scr fixtures not (re)generated")
+        return
+
+    SCR_DIR.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp1, tempfile.TemporaryDirectory() as tmp2:
+        out1, out2 = Path(tmp1), Path(tmp2)
+        stdout1 = _run_octave_stage(octave, "scr", out1)
+        _run_octave_stage(octave, "scr", out2)
+
+        m = SCR_STAGE_LINE_RE.search(stdout1)
+        if not m:
+            raise SystemExit("OCTAVE_STAGE scr line missing from stdout")
+        n_classes, produced_name = int(m["n"]), m["name"]
+        if n_classes != 5:
+            raise SystemExit(f"unexpected scr stage n_classes: {n_classes}")
+
+        cases: dict[str, dict[str, object]] = {}
+        for name in SCR_EXPECTED_FILES:
+            p1, p2 = out1 / name, out2 / name
+            if not p1.is_file():
+                raise SystemExit(f"octave stage scr did not produce {name}")
+            b1, b2 = p1.read_bytes(), p2.read_bytes()
+            if b1 != b2:
+                raise SystemExit(f"{name}: octave stage not deterministic across two runs")
+            (SCR_DIR / name).write_bytes(b1)
+            cases[name] = {"sha256": _sha256(b1), "bytes": len(b1)}
+
+        # scr_scores.mat -> the raw (already-decoded) per-class scores, in the SAME
+        # alphabetical key order as keys_alpha_order.txt (both dumped from the identical
+        # `keySet` loop in stage_scr.m); folded into scores_input.json so the pytest side
+        # never needs scipy at test time.
+        mat1 = scipy.io.loadmat(out1 / "scr_scores.mat")
+        mat2 = scipy.io.loadmat(out2 / "scr_scores.mat")
+        raw1 = np.asarray(mat1["raw_scores_ordered"], dtype=np.float64).reshape(-1).tolist()
+        raw2 = np.asarray(mat2["raw_scores_ordered"], dtype=np.float64).reshape(-1).tolist()
+        if raw1 != raw2:
+            raise SystemExit("scr_scores.mat: octave stage not deterministic across two runs")
+
+        keys_alpha_order = (out1 / "keys_alpha_order.txt").read_text().splitlines()
+        full_filename = (out1 / "listing.csv").read_text().split(";", 1)[0]
+        filename_stem = produced_name.removesuffix(".scr")
+
+        scores_input = {
+            "full_filename": full_filename,
+            "filename_stem": filename_stem,
+            "keys_alpha_order": keys_alpha_order,
+            "raw_scores_ordered": raw1,
+        }
+        scores_input_bytes = (json.dumps(scores_input, indent=2) + "\n").encode()
+        (SCR_DIR / "scores_input.json").write_bytes(scores_input_bytes)
+        cases["scores_input.json"] = {"sha256": _sha256(scores_input_bytes), "bytes": len(scores_input_bytes)}
+
+    octave_version_out = subprocess.run([octave, "--version"], capture_output=True, text=True).stdout
+    ver_match = re.search(r"version (\S+)", octave_version_out)
+    octave_version = ver_match.group(1) if ver_match else "unknown"
+
+    manifest: dict[str, Any] = json.loads(MANIFEST_PATH.read_text())
+    manifest["scr_fixtures"] = {
+        "text": (
+            "Task 11: live Octave HYBRID-tier byte-oracle for the .scr score-file writer "
+            "(no legacy .scr file exists anywhere -- this stage IS the oracle). Real "
+            "Tier-1 processListing.m supplies keys(langMapConf) (5 classes, mapping.csv "
+            "ids deliberately NOT in alphabetical order: zzz=0, aaa=1, mmm=2, bbb=3, "
+            "nnn=4 -- keys() returns aaa_11, bbb_22, mmm_unk, nnn_33, zzz_99, visibly "
+            "different from id order); the writer loop itself (Test_BLSTM.m:251-269) is "
+            "FALLBACK-TIER transcription driven on an injected 5-column raw score row "
+            "(aaa_11=bbb_22=250.0 tie probing sortrows' stable tie-break, mmm_unk=-1000.0 "
+            "near-zero after softmax, nnn_33=0.0, zzz_99=123.456789) over a >21-char "
+            "basename (filename(1:end-21) truncation). Confirms the writer receives "
+            "ALREADY-DECODED scores (ComputeCost.m:708 applies the >150->-200 sentinel "
+            "before CostFunction.m:409 assigns LIDscoreDet, so the raw 250.0 passes "
+            "through the softmax law unmodified) and pins the 'lang_dial' key composition "
+            "(processListing.m:10 keys on `[lang '_' dial]`) that makes the "
+            "tmp(end-2:end) dial slice expose a leading underscore for 2-char dials "
+            "('aaa-_11') but not 3-char dials ('mmm-unk')."
+        ),
+        "stage": "tools/octave_harness/stage_scr.m",
+        "octave_version": octave_version,
+        "params": {"n_classes": n_classes, "produced_name": produced_name},
+        "cases": cases,
+    }
+    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"OK: scr fixtures ({len(cases)} files, octave {octave_version}) -> {SCR_DIR.relative_to(REPO_ROOT)}")
+
+
 def main() -> None:
     # --- 0. Gates: resurrected binary present, PRCTS wav present. ---
     check = subprocess.run(["bash", str(FSP_RUNTIME / "setup.sh"), "--check"], capture_output=True, text=True)
@@ -1207,6 +1315,17 @@ if __name__ == "__main__":
             "parity-oracle main() pass."
         ),
     )
+    parser.add_argument(
+        "--scr-fixtures",
+        action="store_true",
+        help=(
+            "Task 11 pass: drive the crafted .scr writer inputs through the real vendored "
+            "processListing.m + a FALLBACK-TIER transcription of Test_BLSTM.m's writer "
+            "loop (via tools/octave_harness) and commit the golden .scr + injected inputs "
+            "under tests/reference_data/phase4d/scr/. SKIPS gracefully if octave-cli is "
+            "absent. Independent of the parity-oracle main() pass."
+        ),
+    )
     args = parser.parse_args()
     if args.measure_deltas:
         measure_deltas()
@@ -1214,5 +1333,7 @@ if __name__ == "__main__":
         extract_stm_fixtures()
     elif args.listing_fixtures:
         extract_listing_fixtures()
+    elif args.scr_fixtures:
+        extract_scr_fixtures()
     else:
         main()

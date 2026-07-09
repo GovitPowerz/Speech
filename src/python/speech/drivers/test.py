@@ -47,20 +47,27 @@ def _decode_lid_scores(error_vad_row: NDArray[np.float64]) -> NDArray[np.float64
 
 
 def _class_keys(mapping_path: Path) -> list[str]:
-    """Class keys ordered by class id, from the `lang;dial;classid` language mapping.
-    Diverges from legacy `Test_BLSTM.m` (`keys(langMapConf)`, alphabetical by key, not by
-    class id); `evaluate` is best-effort/not golden-pinned, so this is noted but not fixed
-    -- revisit if `.scr` output is ever promoted to a parity target."""
-    rows: list[tuple[int, str]] = []
+    """Class keys in legacy `keys(langMapConf)` order, from the `lang;dial;classid`
+    language mapping: the composed `lang_dial` key (`processListing.m:10`, note the
+    underscore -- it is what `write_scores`' `key[-3:]` dial slice sees for a 2-char
+    dial, e.g. 'aaa_11' -> 'aaa-_11'), unique (containers.Map), sorted ALPHABETICALLY
+    (MATLAB `keys()` = ASCII byte order; Python's code-point sort agrees on ASCII keys).
+    The mapping's class-id column is IGNORED, exactly like the legacy writer:
+    `processListing.m:85-88` overwrites langMapConf's values with alphabetical
+    positions, so `Test_BLSTM.m:249/:263` labels score column ii with the ii-th
+    alphabetical key regardless of the file's ids. Pinned byte-exact vs the Octave
+    golden (`tests/test_phase4d_scr.py`); closes the Phase 4c class-id-order
+    divergence."""
+    keys: set[str] = set()
     for line in mapping_path.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
         parts = line.split(";")
-        if len(parts) < 3:
+        if len(parts) < 2:
             continue
-        rows.append((int(parts[2]), parts[0] + parts[1]))
-    return [key for _cid, key in sorted(rows)]
+        keys.add(parts[0] + "_" + parts[1])
+    return sorted(keys)
 
 
 def evaluate(state: RunState, checkpoint: Path) -> Path:

@@ -3266,6 +3266,53 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
      `forward_backward` `listing_override`/`make_engine` rebuild) + the batch-mode determinism
      exit gate `tests/pyo3/test_exit_gate.py::test_batch_mode_deterministic`.
 
+- **[4d] `.scr` writer class order: the Phase 4c class-id divergence CLOSED -- legacy is
+  `keys(langMapConf)` = ASCII-alphabetical `lang_dial` keys, and the mapping file's
+  class-id column is IGNORED by the writer** (`src/python/speech/drivers/test.py::_class_keys`;
+  legacy `Test_BLSTM.m:249/:263`, `processListing.m:10/:85-88`). The Phase 4c port ordered
+  class keys by the `lang;dial;classid` mapping's id column and composed them WITHOUT the
+  underscore (`parts[0] + parts[1]`) -- flagged as a documented divergence in the Task-12-4c
+  report (item 4, "Evaluate class-key ordering divergence noted") since no `.scr` oracle
+  existed then. Task 11 built the oracle (Octave `tools/octave_harness/stage_scr.m`, HYBRID
+  tier: the REAL Tier-1 `processListing.m` supplies `keys(langMapConf)`; the writer loop
+  Test_BLSTM.m:251-269 is FALLBACK-TIER transcription with `% legacy:` provenance --
+  Test_BLSTM.m is a top-level script whose `scores_test` comes from `CostFunction.m`'s
+  engine shell-out, so there is no injection point that leaves the vendored source
+  unmodified, the same adjudication as `stage_computecost.m`) and the golden settled it:
+  `processListing.m:85-88` OVERWRITES `langMapConf`'s values with alphabetical positions,
+  so the writer labels score column ii with the ii-th alphabetical composed
+  `[lang '_' dial]` key regardless of the file's ids (MATLAB/Octave `keys()` returns ASCII
+  byte order -- verified live, 'Aaa_01' < 'aaa_11'; Python's code-point `sorted()` agrees
+  on ASCII keys). The underscore composition is itself load-bearing: `write_scores`' dial
+  slice (`tmp(end-2:end)`, Test_BLSTM.m:265) sees the underscore for a 2-char dial, so
+  'aaa_11' renders as 'aaa-_11', NOT 'aaa-11' -- a genuine legacy composition artifact
+  reproduced, not fixed. *Pinned by:* `tests/test_phase4d_scr.py` (byte-exact vs
+  `tests/reference_data/phase4d/scr/expected.scr` on the oracle libm, canary-gated off it;
+  `test_class_id_order_fails_golden` is the mutation check -- the OLD id order must FAIL
+  the golden, proven non-vacuous by a mapping whose ids are deliberately not in
+  alphabetical order).
+
+- **[4d] `num2str(val,'%15.15f')` == Python `%.15f` byte-for-byte, and the `.scr` writer
+  receives ALREADY-DECODED LID scores (the `>150` sentinel is applied upstream, not in
+  the writer)** (`src/python/speech/drivers/test.py::write_scores`; legacy
+  `Test_BLSTM.m:261-266`, `ComputeCost.m:708`, `CostFunction.m:409`). Two facts the Octave
+  golden settled, no port-side change needed: (1) `num2str` applies the format via sprintf
+  then trims spaces; `%15.15f`'s width 15 is strictly less than the minimum rendered length
+  (every softmax output is `0.` + 15 decimals = 17+ chars, and the values are non-negative
+  by construction), so the width padding NEVER fires and the trim is a no-op -- the 4c
+  `%.15f` choice was already byte-correct across all probed magnitudes (a 250/250 tie pair,
+  a near-zero 1.58e-6, exp(0), and a many-decimal softmax quotient). (2) The in-band
+  `targetLID` sentinel (`>150 -> value-200`) is decoded at `ComputeCost.m:708` BEFORE
+  `CostFunction.m:409` assigns `PS.VP.BP.LIDscoreDet`, so `scores_test` reaches the writer
+  already decoded and the writer block contains no sentinel handling of its own -- the
+  stage injects a raw 250.0 (> 150) and the golden shows `exp(2.5)`, not `exp(0.5)`,
+  making the pass-through observable. The port mirrors this split: `_decode_lid_scores`
+  decodes, `write_scores` does not. Also pinned: MATLAB `sortrows(x',-1)` descending is
+  STABLE (the 250/250 tie preserves original column order; numpy `argsort(-s,
+  kind="stable")` agrees). *Pinned by:* `tests/test_phase4d_scr.py::
+  test_write_scores_matches_octave_golden_bytes` + `test_tie_break_is_stable_original_column_order`
+  vs `tests/reference_data/phase4d/scr/expected.scr`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.

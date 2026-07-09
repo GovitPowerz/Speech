@@ -427,5 +427,36 @@
         "bytes": 337
       }
     }
+  },
+  "scr_fixtures": {
+    "text": "Task 11: live Octave HYBRID-tier byte-oracle for the .scr score-file writer (no legacy .scr file exists anywhere -- this stage IS the oracle). Real Tier-1 processListing.m supplies keys(langMapConf) (5 classes, mapping.csv ids deliberately NOT in alphabetical order: zzz=0, aaa=1, mmm=2, bbb=3, nnn=4 -- keys() returns aaa_11, bbb_22, mmm_unk, nnn_33, zzz_99, visibly different from id order); the writer loop itself (Test_BLSTM.m:251-269) is FALLBACK-TIER transcription driven on an injected 5-column raw score row (aaa_11=bbb_22=250.0 tie probing sortrows' stable tie-break, mmm_unk=-1000.0 near-zero after softmax, nnn_33=0.0, zzz_99=123.456789) over a >21-char basename (filename(1:end-21) truncation). Confirms the writer receives ALREADY-DECODED scores (ComputeCost.m:708 applies the >150->-200 sentinel before CostFunction.m:409 assigns LIDscoreDet, so the raw 250.0 passes through the softmax law unmodified) and pins the 'lang_dial' key composition (processListing.m:10 keys on `[lang '_' dial]`) that makes the tmp(end-2:end) dial slice expose a leading underscore for 2-char dials ('aaa-_11') but not 3-char dials ('mmm-unk').",
+    "stage": "tools/octave_harness/stage_scr.m",
+    "octave_version": "11.3.0",
+    "params": {
+      "n_classes": 5,
+      "produced_name": "conversation_.scr"
+    },
+    "cases": {
+      "expected.scr": {
+        "sha256": "8f15ceb033f8a9b715b8184b00404c821b0ca352906c3b1ad8c8e4d8b6df4a0b",
+        "bytes": 200
+      },
+      "mapping.csv": {
+        "sha256": "13c4f6204b64f1fe6cde0842fd89e245dca7271622651d6820ae8e8b3adf25b2",
+        "bytes": 46
+      },
+      "listing.csv": {
+        "sha256": "f0b89cc9134acbeb93a096dd17af3d24917b1c9ddc6b0be3d1be68a2c953c9df",
+        "bytes": 120
+      },
+      "keys_alpha_order.txt": {
+        "sha256": "55956acc375060ebb18c630e8fb94e1b223eccf3d67a44f017a8eac16a08e433",
+        "bytes": 36
+      },
+      "scores_input.json": {
+        "sha256": "611fa6b09feaa9dabc99f4187a04728dc5c08a6899c0d98271e4770dca4563f0",
+        "bytes": 302
+      }
+    }
   }
 }
