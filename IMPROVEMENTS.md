@@ -2849,6 +2849,74 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   encode (the "obviously correct" fix) would make the FAIL case pass too, collapsing the pinned
   contrast.
 
+- **[phase4c] Mutation battery (Task 13): 8/8 mutations break a test as designed; one
+  (item 2) via a different, adjacent test than the literally-named catcher -- recorded
+  honestly, not papered over; no gap.** Each applied/run(targeted suite only, FOREGROUND)/
+  reverted(`git checkout --`)/re-run in isolation; no Rust touched, so `cargo test` was
+  skipped per the brief and only `uv run pytest tests` + `./lint_code.sh` ran once at the
+  end. (1) SMORMS3 lrate warmup x10->x2 (`optimizers.py::Smorms3.optimization_step:94`,
+  `self.lrate = min(self.lrate * 10, ...)` -> `* 2`) against
+  `tests/test_phase4c_optimizers.py` -- FAILED as expected
+  (`test_smorms3_lrate_warmup_x10_capped`: "lrate step 1: `0x1.12e0be826d695p-29` !=
+  `0x1.5798ee2308c3ap-27`"; 4 more tests in the same file cascade-failed since `lrate`
+  feeds `theta`); reverted, PASS. (2) One `eps=1e-16` placement moved: dropped `+ self.eps`
+  from the dtheta line's `(np.sqrt(self.mms) + self.eps)` denominator
+  (`optimizers.py:92`), leaving `eps` only at the `(self.mms + self.eps)` occurrence (the
+  min-cap term, also independently present in the `self.delta` update) -- against
+  `tests/test_phase4c_optimizers.py` -- the NAMED catcher `test_smorms3_trajectory_bit_exact`
+  did NOT fail (the main run has `MMS >> eps` everywhere, consistent with the standing
+  eps-guard finding above), but `test_smorms3_eps_guard_active` (the dedicated
+  near-zero-gradient fixture) DID: "eps theta[0] step 1: `0.4999999985857864` !=
+  `0.4999999985857865`" (a genuine 1-ULP divergence, not noise, per `assert_f64_close`'s
+  strict-bits branch on this oracle env); the actual catcher differs from the plan's named
+  one, recorded per the brief's allowance, not treated as a gap since a test DID break;
+  reverted, PASS. (3) theta_out round-trip dropped: `self.theta = theta_out + dtheta` ->
+  `self.theta = self.theta + dtheta` (`optimizers.py:96`, keeping the pre-`f_df` theta
+  instead of the value `f_df` returned) against `tests/test_phase4c_optimizers.py` --
+  FAILED as expected, ONLY `test_smorms3_theta_out_roundtrip_pinned`: "rt theta[0] step 1:
+  `0.9999999985857865` != `1.0499999985857864`" (diverges by the crafted nonzero offset);
+  reverted, PASS. (4) vec2struct mask-inverse write-back dropped: removed
+  `self._set(0, fv * adim)` from the `AlgName_decision_thresh_rising` mask branch
+  (`genome.py::_Walk._front_matter:238`) against `tests/test_phase4c_genome.py` -- FAILED
+  as expected on both `test_out_param_inverse_matches[masked]` ("out_param bit mismatch")
+  and `test_mask_fixes_field_and_writes_back` ("`0.5385131705458746` != `7.0`"); reverted,
+  PASS. (5) `average_derivs`'s zero-count guard dropped: `d[:,0]/np.maximum(1.0, d[:,1])`
+  -> `d[:,0]/d[:,1]` (`engine.py:128`) against `tests/test_phase4c_engine_cost.py` --
+  FAILED as expected (`test_average_derivs`: "avg_out[1] strict: `inf` != `10.0`", plus a
+  `RuntimeWarning: divide by zero"); reverted, PASS. (6) `l2_penalty` bias-exclusion
+  flipped: `keep = 1.0 - is_bias` -> `keep = is_bias` (`engine.py:166`) against
+  `tests/test_phase4c_engine_cost.py` -- FAILED as expected (`test_l2_penalty`:
+  "l2_cost[0] strict: `0.053125000000000006` != `0.225`"); reverted, PASS. (7) QPSO
+  contraction-expansion coefficient sign inverted: `pos = attractor + coef_exp_contr *
+  signs * ...` -> `pos = attractor - coef_exp_contr * signs * ...`
+  (`optimizers.py::quantum_pso:490`) against `tests/test_phase4c_qpso.py` -- FAILED as
+  expected: `test_qpso_trajectory_bit_exact_given_table` ("pos_traj[0][0]:
+  `3.0000301340132474` != `2.9999698659867526`") plus a cascading failure in
+  `test_dead_banks_consume_stream` (reuses the same epoch-0 golden); reverted, PASS.
+  (8) `get_new_batch` rotation off-by-one: `while len(batch) < batches.nb_cases_per_batch:`
+  -> `<=` in the non-multilingual branch (`batching.py::get_new_batch:363`) against
+  `tests/test_phase4c_batching.py` -- FAILED as expected on both non-multilingual rotation
+  goldens: `test_create_batches_single_and_rotation` ("single step 0: batch mismatch,
+  `[4, 3, 2]` == `[4, 3]`" -- one extra element pulled per call) and
+  `test_create_batches_multi_nb_clean_aggregate_and_rotation` ("multi_nb step 0: batch
+  mismatch, `[0, 2, 5]` == `[0, 2]`"); `test_create_batches_sub_and_rotation` is on the
+  OTHER (multilingual) branch and correctly stayed green; reverted, PASS. *Process note,
+  not committed as code:* two more literal "cursor advance/wrap" off-by-one variants were
+  tried FIRST and discarded before ever reaching pytest -- advancing the cursor by 2
+  instead of 1, and wrapping one index early (`>= case.index.size - 1`) -- each produces a
+  GENUINE INFINITE LOOP on the committed `single`/`multi_nb` fixtures: both have a case
+  group of size 2 whose single worst-excluded element becomes the cursor's fixed point
+  under either mutation (confirmed with a bounded, alarm-guarded standalone harness, not
+  committed; the runaway `pytest` processes were killed rather than left spinning). This is
+  a real property of `get_new_batch`'s unbounded `while len(batch) < ...` loop -- it has no
+  iteration cap, so a sufficiently-adversarial (or buggily-mutated) rotation state can spin
+  forever on a small, single-worst-element case group; not a currently-shipping bug (the
+  landed cursor logic is golden-pinned correct), but worth a future defensive iteration cap
+  if `get_new_batch` is ever exposed to untrusted/adversarial batch configs. *Net verdict:*
+  8/8 mutations break a test; item 2's catcher differs from the plan's named one (both are
+  in the same suite, both true positives) -- no gap this round. Full transcript (diffs,
+  commands, exact output) in `.superpowers/sdd/task-13-report.md`.
+
 ## Toolchain deviations
 
 - **[phase1] Oracle harness builds with -std=gnu++14, not the plan's -std=gnu++0x** (tools/oracle_harness/build.sh): Homebrew Boost 1.90 and Eigen headers require >= C++14; parity-neutral because bit-exactness is governed by -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, not the language standard. Also: shims/x86intrin.h redirects to sse2neon so legacy fmath.hpp parses on arm64; fmath is not odr-used by the Task-1 dumps, and the Phase-1 plan double-pins fmath::log via a numpy float32 oracle when it lands. See build.sh comments and .superpowers/sdd/task-1-report.md for full rationale.
