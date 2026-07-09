@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AudioDoc name="prcts_excerpt" path="prcts_excerpt.wav">
+<ProcList>
+<Proc name="vrcts_part" version="1.3"/>
+</ProcList>
+<ChannelList>
+<Channel num="1" sigdur="60.00" spdur="22.14"/>
+</ChannelList>
+<SpeakerList>
+<Speaker ch="1" dur="22.14" gender="1" spkid="1"/>
+</SpeakerList>
+<SegmentList>
+<SpeechSegment ch="1" sconf="1.00" stime="4.8312" etime="6.5993" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="7.6392" etime="9.0628" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="9.5909" etime="9.9763" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="10.3762" etime="10.7901" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="11.0860" etime="11.4370" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="12.1103" etime="13.8706" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="14.3305" etime="23.5875" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="30.1772" etime="31.0511" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="34.3358" etime="35.7847" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="42.5897" etime="43.4283" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="51.7206" etime="52.1087" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="53.0012" etime="54.4905" spkid="1"/>
+<SpeechSegment ch="1" sconf="1.00" stime="58.2561" etime="59.9999" spkid="1"/>
+</SegmentList>
+</AudioDoc>

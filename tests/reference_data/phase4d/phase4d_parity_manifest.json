@@ -1,0 +1,243 @@
+{
+  "text": "Phase 4d Task 3: end-to-end PARITY oracle fixtures from a SPLIT oracle. The resurrected 2015 x86_64 -ffast-math production `Segment` binary (tools/fsp_runtime/bin/Segment, Rosetta 2, OMP_NUM_THREADS=1) serves the SEGMENTATION leg: its solo (-s) run writes VRCTS xml per channel then SIGSEGVs (exit 139) in the post-inference saveWeights path AFTER the xml is written (a resurrection artifact; the xml is consumed, the exit code ignored). It never reaches saveResults, so the NUMERIC-COLUMN leg (MultiConfigResults) comes from a -ffast-math REBUILD (tools/oracle_harness/build.sh --fastmath -> oracle_harness_fastmath) that drives the SAME solo run through the REAL COMPILED legacy CorpusProcessor stack but exits cleanly. Both oracles' VRCTS agree byte-for-byte at 4-decimal VRCTS precision on both tuples (see structural_agreement_real_vs_fastmath). Solo (-s) is the only viable mode: -m/-t exit(1) without a reference STM (BagOfProcessors.cpp:302), which an arbitrary excerpt has none of; -s is unscored, so the cost/error columns are 0 and the inference-derived numeric is the speechDuration column (mcr col 9).",
+  "excerpt": {
+    "source_wav": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/PRCTS_RUS_RU_0000263489_01.wav",
+    "start_sec": 0,
+    "length_sec": 60,
+    "samplerate": 8000,
+    "channels": 2,
+    "frames": 480000,
+    "subtype": "PCM_16",
+    "sha256": "fd0332152f5430d9281c9e2a61d035d5eee81a51037decb2f005e3c58122733c",
+    "adjudication": "start=0 length=60 s chosen once: both channels carry leading silence (chan1 first speech ~3.41 s, chan2 ~1.78 s) plus multiple speech segments and inter-segment silence. Non-degenerate (>1 speech segment/channel) on BOTH configs and BOTH oracles: tupleA chan1=8/chan2=3, tupleB chan1=13/chan2=15. No re-cut was needed."
+  },
+  "oracles": {
+    "real_binary": {
+      "role": "segmentation (VRCTS xml)",
+      "binary": "tools/fsp_runtime/bin/Segment",
+      "run": "OMP_NUM_THREADS=1 arch -x86_64 Segment -s <config>",
+      "gate": "tools/fsp_runtime/setup.sh --check",
+      "exit_code_note": "SIGSEGV (exit 139) AFTER the VRCTS xml is written; tolerated"
+    },
+    "fastmath_rebuild": {
+      "role": "numeric columns (MultiConfigResults)",
+      "binary": "tools/oracle_harness/oracle_harness_fastmath",
+      "build": "tools/oracle_harness/build.sh --fastmath",
+      "driver": "tools/oracle_harness/phase4d_parity.cpp",
+      "gcc": "16.1.0",
+      "flags": "-O3 -ffast-math -std=gnu++14 -fpermissive",
+      "dropped_strict_ieee_flags": [
+        "-fno-fast-math",
+        "-ffp-contract=off",
+        "-DEIGEN_DONT_VECTORIZE"
+      ],
+      "dropped_x86_flags": [
+        "-msse2",
+        "-mfpmath=sse",
+        "-march=core2"
+      ],
+      "dropped_x86_note": "absent by construction: this host is arm64, where these x86-only tuning flags a 2015 x86_64 -ffast-math build carried do not apply and gcc rejects them. Recorded, not applied."
+    }
+  },
+  "aux_inputs": {
+    "fileslisting": "prcts_excerpt.wav;prcts_excerpt.stm;fax;non;1;30.0;",
+    "languagemapping.csv": "fax;non;0 chi;man;1 spa;spa;2",
+    "prcts_excerpt.stm": "empty (unscored solo run needs no reference)"
+  },
+  "config_localization": {
+    "tupleA": {
+      "source": "tupleA_1_worker_1.config",
+      "key_diff": [
+        {
+          "key": "Display_Output_Directory",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.2/Figures/15-Oct-2015_BLSTM_OpenSAD15_Train",
+          "localized": "."
+        },
+        {
+          "key": "BLSTM_weightsFile",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.2/Figures/15-Oct-2015_BLSTM_OpenSAD15_Train/NNweights_epoch995.mat",
+          "localized": "NNweights_config1.bin"
+        },
+        {
+          "key": "language2classmapping",
+          "original": "/Users/Govit/Documents/AudioFiles/OpenSAD15/languagemapping.csv",
+          "localized": "languagemapping.csv"
+        },
+        {
+          "key": "fileslisting",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/plot",
+          "localized": "fileslisting"
+        }
+      ]
+    },
+    "tupleB": {
+      "source": "tupleB_1_worker_1.config",
+      "key_diff": [
+        {
+          "key": "Display_Output_Directory",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.1/Figures/14-Oct-2015_BLSTM_OpenSAD15_Train",
+          "localized": "."
+        },
+        {
+          "key": "BLSTM_weightsFile",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.1/Executables/14-Oct-2015_BLSTM_OpenSAD15/NNweights_config1.bin",
+          "localized": "NNweights_config1.bin"
+        },
+        {
+          "key": "language2classmapping",
+          "original": "/Users/Govit/Documents/AudioFiles/OpenSAD15/languagemapping.csv",
+          "localized": "languagemapping.csv"
+        },
+        {
+          "key": "fileslisting",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.1/Executables/14-Oct-2015_BLSTM_OpenSAD15/full",
+          "localized": "fileslisting"
+        }
+      ]
+    }
+  },
+  "mcr_masked_col": 6,
+  "mcr_columns": "[0]file [1]conf [2]chan [3-5]Pfa/Pmiss/globalError (unscored=0) [6]time_per_hour (WALL-CLOCK -> masked to 0.0) [7]cumulativeError (unscored=0) [8]signalDuration [9]speechDuration (inference-derived) [10]nbWords (legacy default -1) [11-18] WER+LID fields (0) [19]LIDNbOfClassif (0) [20]NbOfClassif (unscored=0). parity_*_result_rows.bin = mcr[:, 3:] (the per-channel data columns).",
+  "fixtures": {
+    "parity_tupleA_vrcts_chan1.xml": {
+      "oracle": "real-binary",
+      "sha256": "fadaa74134719eadd916f259354eac34d572982df5d31432dd9e43c703c4e488",
+      "speech_segments": 8
+    },
+    "parity_tupleA_vrcts_chan2.xml": {
+      "oracle": "real-binary",
+      "sha256": "f2913338fb5dfee3c9bb0ebda5c3ac88143f9459799cca8085e71ac34cddd1d2",
+      "speech_segments": 3
+    },
+    "parity_tupleA_mcr.bin": {
+      "oracle": "fastmath-rebuild",
+      "sha256": "bd824b59eb066ac9ef3dd0676c501af5af27d570262fe3959348826ecd4f8c3d",
+      "shape": [
+        2,
+        21
+      ]
+    },
+    "parity_tupleA_result_rows.bin": {
+      "oracle": "fastmath-rebuild",
+      "sha256": "5cdefb3cc5b6c6e179a6c0c91663cd98478394de22f8a6ebef555ca175666dc4",
+      "shape": [
+        2,
+        18
+      ]
+    },
+    "parity_tupleB_vrcts_chan1.xml": {
+      "oracle": "real-binary",
+      "sha256": "828f9c7f7aefd5dd6459cdfe9487bd3af78afb54f21f68b1b585c2fcb5be0517",
+      "speech_segments": 13
+    },
+    "parity_tupleB_vrcts_chan2.xml": {
+      "oracle": "real-binary",
+      "sha256": "5aa0b452bb378e704a1761c563757622a723bd98ea169c6324b155bdb7210613",
+      "speech_segments": 15
+    },
+    "parity_tupleB_mcr.bin": {
+      "oracle": "fastmath-rebuild",
+      "sha256": "3589f6665514af9347a7308d090cd7ac28bebf2392c2b06a90550cc4c847e6ee",
+      "shape": [
+        2,
+        21
+      ]
+    },
+    "parity_tupleB_result_rows.bin": {
+      "oracle": "fastmath-rebuild",
+      "sha256": "69563a0026ea034f764063768e1b917548c8aec7273761f478549c34cf6d28f9",
+      "shape": [
+        2,
+        18
+      ]
+    },
+    "prcts_excerpt.wav": {
+      "oracle": "input",
+      "sha256": "fd0332152f5430d9281c9e2a61d035d5eee81a51037decb2f005e3c58122733c"
+    },
+    "languagemapping.csv": {
+      "oracle": "input",
+      "sha256": "404dd1ad11b9d6572690faf6782214b832c5e675fee9acfe339e630ee5d068d8"
+    },
+    "fileslisting": {
+      "oracle": "input",
+      "sha256": "aed407834d990ba5397e84e488479beb8a63f23c57a1001d54834160aa6b71f7"
+    },
+    "prcts_excerpt.stm": {
+      "oracle": "input",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "parity_tupleA.config": {
+      "oracle": "input",
+      "sha256": "cb067f0c6211347c768f6efd86bcb401f33189cbc565105d3277081a1b40780d"
+    },
+    "parity_tupleB.config": {
+      "oracle": "input",
+      "sha256": "5666c5a14bfc1c1157272b0478b87f01fb7de1a9b9b910b0d13a053518fe3f48"
+    }
+  },
+  "determinism": {
+    "real_binary_vrcts_twice_identical": {
+      "tupleA": {
+        "chan1": true,
+        "chan2": true
+      },
+      "tupleB": {
+        "chan1": true,
+        "chan2": true
+      }
+    },
+    "fastmath_masked_mcr_twice_identical": {
+      "tupleA": true,
+      "tupleB": true
+    }
+  },
+  "structural_agreement_real_vs_fastmath": {
+    "tupleA": {
+      "chan1": {
+        "real_segs": 8,
+        "fastmath_segs": 8,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      },
+      "chan2": {
+        "real_segs": 3,
+        "fastmath_segs": 3,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      }
+    },
+    "tupleB": {
+      "chan1": {
+        "real_segs": 13,
+        "fastmath_segs": 13,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      },
+      "chan2": {
+        "real_segs": 15,
+        "fastmath_segs": 15,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      }
+    }
+  },
+  "task4_measured_deltas": {
+    "tupleA": {
+      "port_vs_oracle_boundary_dt": null,
+      "port_vs_oracle_mcr_col_deltas": null
+    },
+    "tupleB": {
+      "port_vs_oracle_boundary_dt": null,
+      "port_vs_oracle_mcr_col_deltas": null
+    }
+  },
+  "size_budget": {
+    "total_bytes": 2552297,
+    "limit_bytes": 8388608
+  }
+}
