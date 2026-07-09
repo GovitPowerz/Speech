@@ -1,0 +1,25 @@
+{
+  "_comment": "Phase 4d oracle provenance stub, seeded by Task 2. Downstream fixture manifests (Tasks 3/4) carry the `oracle` field so every generated fixture records which oracle produced it.",
+  "oracle": "real-binary",
+  "oracle_binary": {
+    "name": "Segment",
+    "source": "FastSpeechProcessing-legacy/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/Segment",
+    "built": "15-Oct-2015",
+    "arch": "x86_64 (Mach-O), run under Rosetta 2",
+    "runtime": "tools/fsp_runtime/bin/Segment (local-only; produced by tools/fsp_runtime/setup.sh)",
+    "check_gate": "tools/fsp_runtime/setup.sh --check",
+    "run": "OMP_NUM_THREADS=1 arch -x86_64 tools/fsp_runtime/bin/Segment <mode> [--k=v ...] <config>"
+  },
+  "segmentation_oracle": {
+    "status": "working",
+    "artifact": "VRCTS xml (<name>_chan_<n>.xml per channel), written during segmentation",
+    "note": "Full BLSTM spectral SAD inference runs end-to-end and writes valid, parseable VRCTS segmentation before any crash."
+  },
+  "known_limitation": {
+    "symptom": "solo -s (and any mode that reaches saveAndUpdate) SIGSEGVs (exit 139) AFTER writing the VRCTS output",
+    "site": "BLSTMNeuralNetwork::saveWeights -> iof::fmtr filename formatting (best-weight persistence path)",
+    "cause": "resurrection artifact: the 2015 binary links libstdc++.6 current 7.20.0 (gcc 4.9); the closest obtainable x86_64 macOS libstdc++ is gcc-14 current 7.33.0, and the binary's old-ABI std::string / iof::fmtr interaction faults under it. The 2015 legacy dir contains weights_bestNNWeight_1_*.mat, proving saveWeights completed on the original toolchain.",
+    "impact": "none on the segmentation oracle (VRCTS is written pre-crash); the MultiConfigResults .mat (cost/counter columns) is NOT written because saveResults runs after the crashing saveAndUpdate. Extractors must tolerate exit 139 and consume the VRCTS output.",
+    "fallback_available": "if a downstream task needs a clean-exiting oracle for the results-.mat numeric columns, add a -ffast-math rebuild mode to tools/oracle_harness/build.sh and set oracle=fastmath-rebuild here. Not needed for segmentation parity."
+  }
+}
