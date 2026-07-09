@@ -206,6 +206,19 @@ def test_process_opensad15_sequential_preserves_listing_order(tmp_path: Path) ->
     assert [line.split(";")[0] for line in out_lines] == [CASES["case3"], CASES["case1"], CASES["case4"]]
 
 
+def test_process_opensad15_blank_listing_line_raises_indexerror(tmp_path: Path) -> None:
+    """The port's earlier `if not line: continue` guard (an undocumented defensive
+    divergence, caught in review and removed for legacy parity) is gone: a blank listing
+    line splits to `[""]`, so the `fields[1]` read raises IndexError exactly like the
+    legacy's own unguarded `tmp[1]` on an empty `treat_file('')` row -- crash-equivalent,
+    not silently skipped."""
+    listing = tmp_path / "in.flst"
+    listing.write_text("\n", encoding="ascii")
+    out_listing = tmp_path / "out.flst"
+    with pytest.raises(IndexError):
+        process_opensad15(listing, out_listing)
+
+
 def test_process_opensad15_empty_segments_writes_empty_stm(tmp_path: Path) -> None:
     """No S/RI rows at all -> Segs and SegsExcl both stay empty -> an empty .stm file
     (matching the legacy: the file is opened and closed with nothing ever written)."""

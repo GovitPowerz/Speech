@@ -3015,6 +3015,20 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   corpora. *Pinned by:*
   `test_lang_fallback_raises_indexerror_without_two_underscore_tokens`
   (`tests/test_phase4d_opensad15.py`).
+- **[4d] `process_opensad15`'s blank-listing-line guard: added as an undocumented
+  defensive divergence, removed in Task 15 for legacy parity** (`ProcessOpenSAD15Corpus.py`'s
+  `treat_file(line)`, the per-listing-line loop ported as `process_opensad15`): an earlier
+  pass of this port added `if not line: continue` ahead of the `line.split(";")` read, silently
+  skipping blank rows in the input listing -- a defensive guard with no legacy counterpart and
+  no test exercising it. The Task 5/T15 review caught this as an undocumented behavior
+  divergence (ledgered in `.superpowers/sdd/progress.md`'s T5 finding) and Task 15 resolved it
+  by REMOVAL, not documentation: the legacy `treat_file` has no such guard, so `tmp = line.
+  split(';'); tmp[1]` on a blank line (`tmp == ['']`) raises `IndexError` in CPython 2 exactly
+  as `fields = line.split(";"); fields[1]` does here in CPython 3 -- crash-equivalent, matching
+  the same "let it raise naturally" posture already established for the lang-fallback
+  `IndexError` above, not a fresh divergence. Removal was zero-test-breakage (no fixture ever
+  fed a blank listing line). *Pinned by:*
+  `test_process_opensad15_blank_listing_line_raises_indexerror` (`tests/test_phase4d_opensad15.py`).
 - **[4d] Corpus augmentation: injected RNG is a DOCUMENTED CONVENTION, not a parity claim**
   (`src/python/speech/dataprep/augment.py`, ported from `AugmentCorpus.py:46-57`): the legacy
   draws `noise`/`noisetype`/`pitch`/`tempo` from `numpy.random` seeded implicitly off the
