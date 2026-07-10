@@ -190,9 +190,10 @@ def test_qpso_levy_nonzero_and_input_is_table_prefix() -> None:
     assert levy_in == table[:16], "levy_in must be exactly table[0:16] (V=table[0:8], W=table[8:16])"
 
 
-# --- Task 8: vec2struct genome-bijection fixtures ---
+# --- Task 8 (+ Phase 4d Task 12) : vec2struct genome-bijection fixtures ---
 GENOME_MANIFEST = PHASE4C / "genome_manifest.json"
-GENOME_CASES = ["algo0", "tdc", "calib", "spectral", "twin", "masked"]
+GENOME_CASES = ["algo0", "tdc", "calib", "spectral", "twin", "masked", "vecmask"]
+FMT_SCALAR_BOUNDARIES_CONFIG = PHASE4C / "fmt_scalar_boundaries.config"
 
 
 def _genome_manifest() -> dict[str, object]:
@@ -224,3 +225,13 @@ def test_genome_configs_and_count_consistency() -> None:
         assert conf.is_file() and conf.read_text().strip(), f"{conf.name} missing/empty"
         rows, _, _ = _read_bin(PHASE4C / f"genome_{case}_param.bin")
         assert counts[case] == rows + 1, f"{case}: count {counts[case]} != len(param)+1 ({rows + 1})"
+
+
+def test_fmt_scalar_boundaries_fixture_present() -> None:
+    """Task 12: the `_fmt_scalar` boundary probe (real printConfig.m, not a vec2struct
+    case) is committed and its manifest entry names every boundary."""
+    assert FMT_SCALAR_BOUNDARIES_CONFIG.is_file() and FMT_SCALAR_BOUNDARIES_CONFIG.read_text().strip()
+    m = _genome_manifest()
+    fsb = cast(dict[str, object], m["fmt_scalar_boundaries"])
+    assert fsb["file"] == "fmt_scalar_boundaries.config"
+    assert len(cast(list[str], fsb["names"])) == 18

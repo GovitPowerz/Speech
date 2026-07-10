@@ -1,0 +1,6 @@
+meeting04 1 excluded_region 0.0 1.0 toto toto
+meeting04 1 meeting04 1.0 3.0 toto toto
+meeting04 1 excluded_region 3.0 5.0 toto toto
+meeting04 1 excluded_region 18.0 20.0 toto toto
+meeting04 1 meeting04 20.0 22.0 toto toto
+meeting04 1 excluded_region 22.0 24.0 toto toto

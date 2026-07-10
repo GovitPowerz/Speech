@@ -1,0 +1,1 @@
+corpus/meeting04.flac;case4.stm;deu;non;1.0;40.0;4.0;

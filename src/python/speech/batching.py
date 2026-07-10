@@ -135,6 +135,74 @@ def read_listing(path: Path) -> list[dict[str, str]]:
 
 
 # --------------------------------------------------------------------------- #
+# WriteListing.m / WriteWeightedListing.m: the two listing writers. `items` is already
+# the index-selected, ORDERED record list -- the port has no separate `liste`/`index`
+# split (unlike the legacy's `PS.VP.files.liste(index(ii))` indirection), so `items[i]`
+# IS `index[i]`'s record. Both functions reuse read_listing's field names (`filename`/
+# `refseg`/`lang`/`dial`) rather than introducing new ones per struct; `refseg` covers
+# both WriteListing's `refsegfiles.liste(...).name` and WriteWeightedListing's
+# `.segfilename` (the same concept -- a reference segmentation file path).
+# --------------------------------------------------------------------------- #
+
+
+def _worker_positions(n: int, jj: int, nb_workers: int) -> list[int]:
+    """0-based port of `worker_index(jj).index = fliplr(length(index)-jj+1:-nbworker:1)`
+    (`WriteListing.m:12`). `jj` is 1-based, matching the legacy loop variable exactly
+    (the caller ranges `jj` over `1..nb_workers`). The descending MATLAB range
+    `a:-nbworker:1` (inclusive of the endpoint 1) becomes Python's `range(a, 0,
+    -nb_workers)` (exclusive of 0) -- both stop at the same last positive term, since
+    the endpoint is a plain integer arithmetic sequence, not a boundary that differs
+    under MATLAB's inclusive-vs-Python's exclusive convention. `fliplr` (ascending
+    order) is `[::-1]`; the final `- 1` shifts each 1-based MATLAB position to a 0-based
+    Python index into `items`."""
+    a = n - jj + 1
+    return [p - 1 for p in range(a, 0, -nb_workers)][::-1]
+
+
+def write_listing(base: Path, items: list[dict[str, str]], nb_workers: int) -> None:
+    """Port of `WriteListing.m` (22 lines). Writes `<base>.flst` -- one
+    `filename;refseg;lang;dial;\\n` row per item, in `items` order -- then, for
+    `jj = 1..min(nb_workers, len(items))`, a round-robin shard file
+    `<base>_worker_<jj>.flst` selecting `items` at `_worker_positions(len(items), jj,
+    nb_workers)` (see that function for the 1-based -> 0-based translation). The shards
+    partition `items` exactly once each when `len(items)` isn't evenly divisible by
+    `nb_workers` -- e.g. 7 items / 3 workers splits 3+2+2, every item in exactly one
+    shard (non-vacuity pinned in `tests/test_phase4d_listing_writers.py`)."""
+
+    def _row(it: dict[str, str]) -> str:
+        return f"{it['filename']};{it['refseg']};{it['lang']};{it['dial']};\n"
+
+    (base.parent / f"{base.name}.flst").write_text("".join(_row(it) for it in items))
+
+    nb_workers = min(nb_workers, len(items))
+    for jj in range(1, nb_workers + 1):
+        shard = [items[p] for p in _worker_positions(len(items), jj, nb_workers)]
+        (base.parent / f"{base.name}_worker_{jj}.flst").write_text("".join(_row(it) for it in shard))
+
+
+def write_weighted_listing(path: Path, items: list[dict[str, str]], values: NDArray[np.float64]) -> None:
+    """Port of `WriteWeightedListing.m` (22 lines). Writes `path` AS GIVEN -- no
+    `.flst` suffix appended, unlike `write_listing` -- one
+    `filename;refseg;lang;dial;%g;%g;\\n` row per item: `values[i, 0]` is
+    `filesValues(index(i),2)` (the per-file weight/relevance score), `values[i, 1]` is
+    `listing{index(i)}.duration`. The legacy's worker-shard block (`:11-22`) is
+    COMMENTED OUT in the source and is NOT ported here -- there is no
+    `write_weighted_listing` shard variant.
+
+    The two `%g` fields use Python's `:g` format spec, which is byte-identical to
+    Octave's C-style `sprintf('%g', ...)` at every probed style-switch boundary
+    (exponent < -4 or >= precision 6, negative zero, exponent-digit-count, rounding
+    carries) -- verified against a live Octave oracle; see
+    `tests/reference_data/phase4d/listing/weighted.lst` and its extractor stage
+    docstring for the specific probed values."""
+    lines = []
+    for it, row in zip(items, values, strict=True):
+        weight, duration = float(row[0]), float(row[1])
+        lines.append(f"{it['filename']};{it['refseg']};{it['lang']};{it['dial']};{weight:g};{duration:g};\n")
+    path.write_text("".join(lines))
+
+
+# --------------------------------------------------------------------------- #
 # CreateBatches.m / GetNewBatch.m / getCases.m's getWorstAndBest
 # --------------------------------------------------------------------------- #
 

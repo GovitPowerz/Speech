@@ -1,6 +1,6 @@
 function stage_vec2struct(out_dir)
   % Drive the REAL vendored vec2struct.m (legacy/Optimizer_V6.2.2/functions/vec2struct.m,
-  % 1693 LOC) over crafted param vectors + masks for six algo/config cases, dumping the
+  % 1693 LOC) over crafted param vectors + masks for seven algo/config cases, dumping the
   % genome<->config bijection goldens the Python port (src/python/speech/genome.py) is
   % bit-pinned against. TIER 1: the real function (+ the real printConfig.m it calls at
   % mode==1) are exercised unchanged.
@@ -10,14 +10,19 @@ function stage_vec2struct(out_dir)
   % printConfig-serialized .config text (the engine-facing key->value dict, weights excluded
   % and emitted via the .bin codec instead). Cases: algo0 VRCTS, algo1 TDC, algo2 LTSV
   % (calibration-law decode + clamps in isolation, no NN), algo3 spectral+BLSTM (full NN
-  % weight walk), algo6 twin (SAD + LID mirror), and a masked algo3 (Force_Symetry +
-  % Force_Identical_Rows tie blocks, plus a scalar-field mask write-back).
+  % weight walk), algo6 twin (SAD + LID mirror), a masked algo3 (Force_Symetry +
+  % Force_Identical_Rows tie blocks, plus a scalar-field mask write-back), and vecmask --
+  % Task 12: the MASK-VECTOR arms transcribed-but-uncovered since 4c T8 (per-block LSTM
+  % weight masks incl. the narrow CellWeight layout, an output-layer neuron mask, and the
+  % NormalizeInputMean/Std masks incl. the Std abs() encode/decode asymmetry), isolated
+  % from Force_Symetry/Force_Identical_Rows so each `isfield(maskStruct,fieldName)` arm is
+  % exercised on its own.
   %
   % param is a deterministic per-case formula (sin/cos of the index) -- vec2struct is PURE
   % arithmetic (rem/round/abs/min/max/sortrows, no libm), so every golden is STRICT bits /
   % string-exact on every platform.
 
-  cases = {'algo0', 'tdc', 'calib', 'spectral', 'twin', 'masked'};
+  cases = {'algo0', 'tdc', 'calib', 'spectral', 'twin', 'masked', 'vecmask'};
   counts = struct();
   R = struct();
 
@@ -46,8 +51,40 @@ function stage_vec2struct(out_dir)
 
   save('-v7', fullfile(out_dir, 'vec2struct.mat'), '-struct', 'R');
 
-  printf('OCTAVE_STAGE vec2struct algo0=%d tdc=%d calib=%d spectral=%d twin=%d masked=%d\n', ...
-         counts.algo0, counts.tdc, counts.calib, counts.spectral, counts.twin, counts.masked);
+  probe_fmt_scalar(out_dir);
+
+  printf('OCTAVE_STAGE vec2struct algo0=%d tdc=%d calib=%d spectral=%d twin=%d masked=%d vecmask=%d\n', ...
+         counts.algo0, counts.tdc, counts.calib, counts.spectral, counts.twin, counts.masked, counts.vecmask);
+end
+
+
+function probe_fmt_scalar(out_dir)
+  % Task 12: pins genome.py's `_fmt_scalar` %d/%15.15e boundary formatting via the REAL
+  % printConfig.m (TIER 1, unmodified) -- printConfig's scalar branch (:32-37, `round(v)==v
+  % -> '%d' else '%15.15e'`, via num2str) is exactly what `_fmt_scalar` ports. A synthetic
+  % configStruct (algName='' so field names pass through unrenamed) drives one real
+  % printConfig call over a battery of boundary values: integers (incl. -0, and a big exact
+  % integer that must NOT flip to e-notation), negatives, values straddling the 1e-5 and
+  % 1e+5 magnitude boundaries on both sides, a near-integer non-integer decode edge
+  % (round(v)==v is false only because v itself isn't exactly the rounded value), and
+  % long-precision fractions (15 significant digits, where a dtoa-vs-printf rounding
+  % divergence between Octave and Python would first show up).
+  names = {'b_zero', 'b_neg_zero', 'b_one', 'b_neg_one', 'b_int_1e5', 'b_neg_int_1e5', ...
+           'b_frac_above_1em5', 'b_neg_frac_above_1em5', 'b_frac_below_1em5', ...
+           'b_frac_at_1em5', 'b_frac_above_1e5', 'b_frac_below_1e5', ...
+           'b_long_precision', 'b_long_precision_neg', 'b_near_integer_boundary', ...
+           'b_big_int', 'b_five', 'b_neg_five'};
+  vals = [0, -0, 1, -1, 100000, -100000, ...
+          0.000015, -0.000015, 0.0000099, ...
+          0.00001, 123456.789, 99999.99999, ...
+          0.123456789012345, -3.14159265358979, 2.9999999999999996, ...
+          1234567890123.0, 5, -5];
+
+  cfg = struct('algName', '');
+  for i = 1:numel(names)
+    cfg.(names{i}) = vals(i);
+  end
+  printConfig(cfg, fullfile(out_dir, 'fmt_scalar_boundaries.config'));
 end
 
 
@@ -90,6 +127,30 @@ function [PS, mask, overrides] = build_case(name)
       mask.Force_Symetry = 1;         % backward LSTM blocks tied to forward
       mask.Force_Identical_Rows = 1;  % block jj>1 tied to block 0; output ii==1 repmat
       mask.AlgName_decision_thresh_rising = 0.7;  % scalar-field mask + write-back
+    case 'vecmask'
+      % Task 12: the mask-VECTOR arms, each isolated from Force_Symetry/Force_Identical_Rows
+      % (neither flag is set here) so every `isfield(maskStruct,fieldName)` vector branch
+      % fires on its own crafted value, not via a tie-block rewrite. LSTM_net_size=[3,2],
+      % LSTMSubSampling=[2] -> InputGateWeights/ForgetGateWeights/OutputGateWeights need 13
+      % rows (fan-in*sub + fan-out + 2 + 3), CellWeight needs 9 (the narrower peephole-free
+      % layout, fan-in*sub + fan-out + 1) -- covering Forward AND Backward direction, block
+      % jj=1 AND jj=2, and the Input/Output gate + narrow Cell weight kinds. Output_net_size=
+      % [4,2,1] -> Layer_1_Neuron_0 (ii=2) needs 3 rows (out_net(1)*out_sub(1)+1), chosen
+      % over a Layer_0 neuron so the mask arm is never shadowed by the ii==1 Force_Identical_
+      % Rows repmat branch (covered separately by the 'masked' case). NormalizeInputStd's
+      % mask carries NEGATIVE values to exercise the abs() encode/decode asymmetry (cfg
+      % stores abs(mask), out_param write-back is abs(mask)-1e-3) alongside
+      % NormalizeInputMean's unsigned write-back ((mask+1)/2, no abs).
+      PS = base_ps(3);
+      mask.AlgName_Forward_Layer_0_LSTMBlock_0_InputGateWeights = ...
+        [-2.5; -1.25; -0.625; 0; 0.625; 1.25; 2.5; 3.75; -3.75; 5; -5; 0.3125; -0.3125];
+      mask.AlgName_Forward_Layer_0_LSTMBlock_1_CellWeight = ...
+        [1.5; -1.5; 2.25; -2.25; 0; 4.5; -4.5; 6.75; -6.75];
+      mask.AlgName_Backward_Layer_0_LSTMBlock_0_OutputGateWeights = ...
+        [-4.5; 4.5; -0.75; 0.75; 8.5; -8.5; 1.125; -1.125; 2.75; -2.75; 0; 9.25; -9.25];
+      mask.AlgName_Output_Layer_1_Neuron_0_Weights = [-1.0; 2.5; -3.25];
+      mask.AlgName_NormalizeInputMean = [0.5; -0.25; 0.125];
+      mask.AlgName_NormalizeInputStd = [-2.0; 3.0; -0.5];
     otherwise
       error('stage_vec2struct: unknown case %s', name);
   end

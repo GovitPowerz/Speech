@@ -367,3 +367,64 @@ fn mode7_noise_table_indexing_strict() {
     }
     common::assert_bits_eq(&got, &want, "mode7 noise indexing");
 }
+
+#[test]
+fn mode7_wav_arm_bails_cnn_not_ported() {
+    // Task 13 (Phase 4d blocked-four closure): the `abs(_Mode)==7` wav arm (legacy
+    // TwinBLSTMSpectralLID.cpp:922-963) runs `_LIDConvNeuralNetwork`, which is NOT ported
+    // (broken-as-committed since Phase 2, see IMPROVEMENTS.md). `get_segmentation_mode7`
+    // (`tasks/lid.rs`) gates on `audio.periodogram.is_none()` -- true for a real wav decode
+    // (`read_audio(.., file_type=0)`), false for the phSeq corpus every other mode7 test in
+    // this file uses. Was previously unpinned; this is the missing pin.
+    let lidw = lid_weights();
+    let mut drv =
+        TwinBlstmSpectralLid::from_legacy(&map_of("twin_mode7"), None, Some(&lidw)).unwrap();
+    let mut audio = read_audio(&phase4b("corpus_lid").join("f1.wav"), 0.0, 2.0, 0).unwrap();
+    assert!(
+        audio.periodogram.is_none(),
+        "wav decode must leave periodogram unset (the mode7 gate's precondition)"
+    );
+    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
+        .map(|_| Segmentation::new(dur))
+        .collect();
+    let err = drv
+        .get_segmentation(&mut audio, &mut segs, None)
+        .expect_err("mode7 wav arm (CNN) must bail, not silently run");
+    assert!(
+        err.to_string().contains("CNN"),
+        "unexpected mode7 wav-arm error: {err}"
+    );
+}
+
+#[test]
+fn mode7_pitch_second_pass_bails() {
+    // Task 13 (Phase 4d blocked-four closure): `get_segmentation_mode7` re-checks the same
+    // TDCwindow > 0 gate as the wav-mode 0/1/2/3 path (`tasks/lid.rs`) -- in the legacy the
+    // per-channel spectrum/pitch setup block (TwinBLSTMSpectralLID.cpp:349-614) runs
+    // UNCONDITIONALLY ahead of the `abs(_Mode)==7` dispatch (the `if (_Mode != 7)` guard at
+    // `:353` is commented out), so mode 7 is reachable by the same reference-based pitch
+    // pass deferral. Every committed twin_mode7 config ships BLSTM_TDCwindow 0; this pins
+    // the ELSE branch at this second call site, previously unpinned.
+    let mut map = map_of("twin_mode7");
+    map.insert("BLSTM_TDCwindow".into(), "0.032".into());
+    map.insert("BLSTM_TDCshift".into(), "0.01".into());
+    map.insert("BLSTM_TDC_lags".into(), "0.002,0.016".into());
+    map.insert("BLSTM_TDC_balance".into(), "0.7".into());
+    map.insert("BLSTM_TDC_windowing_type".into(), "hamming".into());
+    map.insert("BLSTM_TDC_windowing_param".into(), "0.8".into());
+    let lidw = lid_weights();
+    let mut drv = TwinBlstmSpectralLid::from_legacy(&map, None, Some(&lidw)).unwrap();
+    let mut audio = phseq_audio("s1", 0, 1.0);
+    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
+        .map(|_| Segmentation::new(dur))
+        .collect();
+    let err = drv
+        .get_segmentation(&mut audio, &mut segs, None)
+        .expect_err("mode7 TDCwindow > 0 must bail the unported pitch second pass");
+    assert!(
+        err.to_string().contains("pitch"),
+        "unexpected mode7 pitch-gate error: {err}"
+    );
+}

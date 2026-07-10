@@ -1,0 +1,7 @@
+session02 1 excluded_region 3.0 5.0 toto toto
+session02 1 session02 5.0 10.0 toto toto
+session02 1 excluded_region 10.0 12.5 toto toto
+session02 1 session02 12.5 15.0 toto toto
+session02 1 excluded_region 15.0 16.0 toto toto
+session02 1 session02 16.0 18.0 toto toto
+session02 1 excluded_region 18.0 18.0 toto toto

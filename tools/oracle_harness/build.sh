@@ -11,8 +11,26 @@
 # via eigen@3. This does NOT relax the parity guarantee: bit-exactness comes from
 # -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE, which govern IEEE FP
 # semantics independently of the language standard.
+#
+# Modes:
+#   ./build.sh              STRICT (default): main.cpp -> oracle_harness, the bit-exact
+#                           IEEE build every prior-phase extractor consumes.
+#   ./build.sh --fastmath   Phase 4d parity leg: phase4d_parity.cpp -> a SEPARATE binary
+#                           oracle_harness_fastmath with -O3 -ffast-math and the
+#                           strict-IEEE flags DROPPED (see the fastmath block below). It
+#                           NEVER clobbers the strict oracle_harness. This is the
+#                           numeric-column oracle: the resurrected 2015 -ffast-math binary
+#                           crashes before writing MultiConfigResults.mat, so a clean-
+#                           exiting native -ffast-math rebuild of the same CorpusProcessor
+#                           stack supplies those columns (tools/fsp_runtime/README.md).
 set -euo pipefail
 cd "$(dirname "$0")"
+
+MODE="${1:-strict}"
+case "$MODE" in
+  strict|--fastmath) : ;;
+  *) echo "ERROR: unknown build mode '$MODE' (use no arg for strict, or --fastmath)" >&2; exit 1 ;;
+esac
 
 BREW="$(brew --prefix)"
 
@@ -106,25 +124,51 @@ SRC=../../legacy/src
 #                                committed at RUNTIME, but links; never constructed
 #                                for algo 1/2 in this stage).
 #
+# The legacy translation units required to compile+link the harness (shared by both
+# modes). This is the full legacy engine the strict main.cpp battery links; the fastmath
+# driver (phase4d_parity.cpp) reuses the SAME set so its CorpusProcessor run is byte-for-
+# byte the same engine, only the FP flags differ.
+LEGACY_TUS=(
+  "$SRC/AudioStruct.cpp" "$SRC/MelFilterBank.cpp" "$SRC/InputStatistics.cpp"
+  "$SRC/ConfigFile.cpp" "$SRC/CorpusItem.cpp" "$SRC/Timer.cpp" "$SRC/tinythread.cpp"
+  "$SRC/BLSTMNeuralNetwork.cpp" "$SRC/LSTMLayer.cpp" "$SRC/NeuronLayer.cpp"
+  "$SRC/SRNLayer.cpp" "$SRC/CWRNNLayer.cpp" "$SRC/CostLaw.cpp" "$SRC/Rprop.cpp"
+  "$SRC/Segmenter.cpp" "$SRC/Segmentation.cpp" "$SRC/BLSTMSpectralSegmenter.cpp"
+  "$SRC/BLSTMSignalSegmenter.cpp" "$SRC/LongTermSpectralVariation.cpp"
+  "$SRC/TimeDomainCorrel.cpp"
+  "$SRC/CorpusProcessor.cpp" "$SRC/BagOfProcessors.cpp" "$SRC/Corpus.cpp"
+  "$SRC/VRCTSpart.cpp" "$SRC/BLSTMSpectralLID.cpp" "$SRC/TwinBLSTMSpectralLID.cpp"
+  "$SRC/FileDispatcher.cpp" "$SRC/ConvolutionalNeuralNetwork.cpp" "$SRC/ConvolutionalLayer.cpp"
+)
+
 # -include boost/math/special_functions/round.hpp: modern Boost's tr1.hpp (pulled
 # by Helpers.hpp) no longer re-exports boost::math::round, which getWindowingCoeff
 # calls. AudioStruct.cpp includes this header directly, but the other TUs that pull
 # Helpers.hpp do not; force-including it (a compiler flag, no legacy edit) restores
 # the symbol for all TUs.
-"$GXX" -O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE \
-  -include boost/math/special_functions/round.hpp \
-  -I shims -I "$SRC" -I "$EIGEN3" -I "$BREW/include" \
-  main.cpp \
-  "$SRC/AudioStruct.cpp" "$SRC/MelFilterBank.cpp" "$SRC/InputStatistics.cpp" \
-  "$SRC/ConfigFile.cpp" "$SRC/CorpusItem.cpp" "$SRC/Timer.cpp" "$SRC/tinythread.cpp" \
-  "$SRC/BLSTMNeuralNetwork.cpp" "$SRC/LSTMLayer.cpp" "$SRC/NeuronLayer.cpp" \
-  "$SRC/SRNLayer.cpp" "$SRC/CWRNNLayer.cpp" "$SRC/CostLaw.cpp" "$SRC/Rprop.cpp" \
-  "$SRC/Segmenter.cpp" "$SRC/Segmentation.cpp" "$SRC/BLSTMSpectralSegmenter.cpp" \
-  "$SRC/BLSTMSignalSegmenter.cpp" "$SRC/LongTermSpectralVariation.cpp" \
-  "$SRC/TimeDomainCorrel.cpp" \
-  "$SRC/CorpusProcessor.cpp" "$SRC/BagOfProcessors.cpp" "$SRC/Corpus.cpp" \
-  "$SRC/VRCTSpart.cpp" "$SRC/BLSTMSpectralLID.cpp" "$SRC/TwinBLSTMSpectralLID.cpp" \
-  "$SRC/FileDispatcher.cpp" "$SRC/ConvolutionalNeuralNetwork.cpp" "$SRC/ConvolutionalLayer.cpp" \
-  -L "$BREW/lib" -lsndfile -lmatio -lpng -o oracle_harness
+COMMON_INC=( -include boost/math/special_functions/round.hpp
+             -I shims -I "$SRC" -I "$EIGEN3" -I "$BREW/include" )
+COMMON_LINK=( -L "$BREW/lib" -lsndfile -lmatio -lpng )
 
-echo "OK: built oracle_harness with $GXX"
+if [ "$MODE" = "--fastmath" ]; then
+  # Phase 4d numeric-column oracle. -O3 -ffast-math, with the strict-IEEE flags
+  # (-fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE) DROPPED: this leg
+  # deliberately matches the 2015 -ffast-math production binary's FP regime, not the
+  # bit-exact IEEE port target, so Task 4 compares its columns under TOLERANCE.
+  #
+  # x86-only tuning flags (-msse2 / -mfpmath=sse / -march=core2) that a 2015 x86_64
+  # -ffast-math build would carry are ABSENT here by construction: this host is arm64,
+  # where those flags do not apply and gcc would reject them. Recorded in the Phase 4d
+  # manifest (fastmath_build.dropped_x86_flags).
+  "$GXX" -O3 -ffast-math -std=gnu++14 -fpermissive \
+    "${COMMON_INC[@]}" \
+    phase4d_parity.cpp "${LEGACY_TUS[@]}" \
+    "${COMMON_LINK[@]}" -o oracle_harness_fastmath
+  echo "OK: built oracle_harness_fastmath (-O3 -ffast-math) with $GXX"
+else
+  "$GXX" -O2 -std=gnu++14 -fpermissive -fno-fast-math -ffp-contract=off -DEIGEN_DONT_VECTORIZE \
+    "${COMMON_INC[@]}" \
+    main.cpp "${LEGACY_TUS[@]}" \
+    "${COMMON_LINK[@]}" -o oracle_harness
+  echo "OK: built oracle_harness with $GXX"
+fi

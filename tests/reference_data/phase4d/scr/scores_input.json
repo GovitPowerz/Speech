@@ -1,0 +1,18 @@
+{
+  "full_filename": "corpus/session01/conversation_utt00001_channelA.wav",
+  "filename_stem": "conversation_",
+  "keys_alpha_order": [
+    "aaa_11",
+    "bbb_22",
+    "mmm_unk",
+    "nnn_33",
+    "zzz_99"
+  ],
+  "raw_scores_ordered": [
+    250.0,
+    250.0,
+    -1000.0,
+    0.0,
+    123.456789
+  ]
+}

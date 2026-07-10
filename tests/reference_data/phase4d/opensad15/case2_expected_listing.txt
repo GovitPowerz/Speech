@@ -1,0 +1,1 @@
+corpus/session02.flac;case2.stm;fra;non;1.0;18.0;9.5;

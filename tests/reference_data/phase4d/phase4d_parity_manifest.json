@@ -1,0 +1,462 @@
+{
+  "text": "Phase 4d Task 3 (+ fix-wave): end-to-end PARITY oracle fixtures from a SPLIT, DUAL-MODE oracle. The resurrected 2015 x86_64 -ffast-math production `Segment` binary (tools/fsp_runtime/bin/Segment, Rosetta 2, OMP_NUM_THREADS=1) serves the SEGMENTATION leg: its solo (-s) run writes VRCTS xml per channel then SIGSEGVs (exit 139) in the post-inference saveWeights path AFTER the xml is written (a resurrection artifact; the xml is consumed, the exit code ignored). It never reaches saveResults, so the NUMERIC-COLUMN leg (MultiConfigResults) comes from a -ffast-math REBUILD (tools/oracle_harness/build.sh --fastmath -> oracle_harness_fastmath, tools/oracle_harness/phase4d_parity.cpp) that drives the SAME run through the REAL COMPILED legacy CorpusProcessor stack but exits cleanly, in TWO modes: -s (unscored, VRCTS-calibration only -- agrees byte-for-byte with the real binary's VRCTS at 4-decimal precision, see structural_agreement_real_vs_fastmath) and -m (SCORED, the mcr/result_rows source). The fix-wave (T3 review) replaced the empty placeholder .stm with a real excerpt derived from the companion legacy PRCTS .stm (excerpt_stm below) and added the -m leg: BagOfProcessors.cpp:302's exit(1) fires only when the reference .stm FAILS TO OPEN (the fstream ctor's `if (!infile)` branch), not merely when it carries no matching lines in the excerpt window -- a corrected rationale from the original Task 3 writeup, which conflated 'no reference given' with 'file absent'. With the .stm present and open, -m scores for real: Pfa/Pmiss/globalError/cumulativeError/NbOfClassif are non-vacuous (see scored_values). The -s VRCTS leg (the real binary AND the fastmath -s calibration run) is verified BYTE-IDENTICAL to the prior empty-.stm fixtures -- reference presence only gates the scored branch in BagOfProcessors.cpp, never the -s hypothesis/VRCTS path (see stm_leg.vrcts_mode_invariance below).",
+  "excerpt": {
+    "source_wav": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/PRCTS_RUS_RU_0000263489_01.wav",
+    "start_sec": 0,
+    "length_sec": 60,
+    "samplerate": 8000,
+    "channels": 2,
+    "frames": 480000,
+    "subtype": "PCM_16",
+    "sha256": "fd0332152f5430d9281c9e2a61d035d5eee81a51037decb2f005e3c58122733c",
+    "adjudication": "start=0 length=60 s chosen once: both channels carry leading silence (chan1 first speech ~3.41 s, chan2 ~1.78 s) plus multiple speech segments and inter-segment silence. Non-degenerate (>1 speech segment/channel) on BOTH configs and BOTH oracles: tupleA chan1=8/chan2=3, tupleB chan1=13/chan2=15. No re-cut was needed."
+  },
+  "oracles": {
+    "real_binary": {
+      "role": "segmentation (VRCTS xml)",
+      "binary": "tools/fsp_runtime/bin/Segment",
+      "run": "OMP_NUM_THREADS=1 arch -x86_64 Segment -s <config>",
+      "gate": "tools/fsp_runtime/setup.sh --check",
+      "exit_code_note": "SIGSEGV (exit 139) AFTER the VRCTS xml is written; tolerated"
+    },
+    "fastmath_rebuild": {
+      "role": "numeric columns (MultiConfigResults) + VRCTS calibration",
+      "binary": "tools/oracle_harness/oracle_harness_fastmath",
+      "build": "tools/oracle_harness/build.sh --fastmath",
+      "driver": "tools/oracle_harness/phase4d_parity.cpp",
+      "gcc": "16.1.0",
+      "flags": "-O3 -ffast-math -std=gnu++14 -fpermissive",
+      "dropped_strict_ieee_flags": [
+        "-fno-fast-math",
+        "-ffp-contract=off",
+        "-DEIGEN_DONT_VECTORIZE"
+      ],
+      "dropped_x86_flags": [
+        "-msse2",
+        "-mfpmath=sse",
+        "-march=core2"
+      ],
+      "dropped_x86_note": "absent by construction: this host is arm64, where these x86-only tuning flags a 2015 x86_64 -ffast-math build carried do not apply and gcc rejects them. Recorded, not applied.",
+      "modes": {
+        "s": {
+          "role": "unscored, VRCTS structural-calibration only (compared to the real binary)",
+          "run": "oracle_harness_fastmath <workdir> <config> s"
+        },
+        "m": {
+          "role": "SCORED numeric columns -- the mcr/result_rows fixture source (Task 3 fix-wave)",
+          "run": "oracle_harness_fastmath <workdir> <config> m",
+          "vrcts_note": "writes NO VRCTS xml: Dump_Directory is unset in both tuple configs, and BagOfProcessors.cpp's scored branch only calls toFile_VRCTS when dumpDir is non-empty (the unscored -s branch writes it unconditionally instead). Not a defect -- the -s leg above remains the sole VRCTS source."
+        }
+      }
+    }
+  },
+  "aux_inputs": {
+    "fileslisting": "prcts_excerpt.wav;prcts_excerpt.stm;fax;non;1;30.0;",
+    "languagemapping.csv": "fax;non;0 chi;man;1 spa;spa;2",
+    "prcts_excerpt.stm": "real excerpt derived from the companion legacy .stm (see excerpt_stm); enables the -m leg's scoring"
+  },
+  "excerpt_stm": {
+    "source_stm": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/PRCTS_RUS_RU_0000263489_01.stm",
+    "window_sec": 60.0,
+    "placeholder_token": "PLACEHOLDER",
+    "lines_kept": 42,
+    "lines_with_transcript_redacted": 23
+  },
+  "stm_leg": {
+    "exit1_rationale_corrected": "BagOfProcessors.cpp:302's exit(1) ('no valid reference segmentation was given') fires when seg._ClassificationErrors is empty, which happens iff Segmentation::compute_errors() short-circuits on _Reference.size()==0, which happens iff the Segmentation ctor's `ifstream infile(_RefSegFilename); if (!infile)` branch was taken -- i.e. the .stm FAILED TO OPEN (missing file / bad path), not merely 'an arbitrary excerpt has none [of a matching reference]'. A .stm that opens successfully but matches zero lines in the excerpt window still populates _Reference (to the seeded [Other, End] boundary pair per channel) and computes (possibly all-miss) _ClassificationErrors -- exit(1) never fires. The original Task 3 writeup's '-s is the only viable mode' rationale conflated these two cases; corrected here and in .superpowers/sdd/task-3-report.md.",
+    "vrcts_mode_invariance": "Verified this run: BagOfProcessors.cpp's scored/unscored split (whether Pfa/Pmiss/globalError/cumulativeError/NbOfClassif are computed from seg._ClassificationErrors or hardcoded to 0.0) is keyed on the MODE LETTER (m/M/t/T vs s/S/i/I), not on reference presence; results2segmentation's own `if (seg._Reference.size() > 0)` block (Segmenter.cpp:860) is entirely commented-out dead code, so it cannot perturb seg._Classification either. Seeding a real (non-empty) excerpt .stm therefore leaves the -s hypothesis and its VRCTS xml unchanged; asserted byte-for-byte against the pre-fix-wave committed fixtures (see the extractor's vrcts_before snapshot and STOP gate) -- this run passed, no adjudication needed."
+  },
+  "config_localization": {
+    "tupleA": {
+      "source": "tupleA_1_worker_1.config",
+      "key_diff": [
+        {
+          "key": "Display_Output_Directory",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.2/Figures/15-Oct-2015_BLSTM_OpenSAD15_Train",
+          "localized": "."
+        },
+        {
+          "key": "BLSTM_weightsFile",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.2/Figures/15-Oct-2015_BLSTM_OpenSAD15_Train/NNweights_epoch995.mat",
+          "localized": "NNweights_config1.bin"
+        },
+        {
+          "key": "language2classmapping",
+          "original": "/Users/Govit/Documents/AudioFiles/OpenSAD15/languagemapping.csv",
+          "localized": "languagemapping.csv"
+        },
+        {
+          "key": "fileslisting",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/plot",
+          "localized": "fileslisting"
+        }
+      ]
+    },
+    "tupleB": {
+      "source": "tupleB_1_worker_1.config",
+      "key_diff": [
+        {
+          "key": "Display_Output_Directory",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.1/Figures/14-Oct-2015_BLSTM_OpenSAD15_Train",
+          "localized": "."
+        },
+        {
+          "key": "BLSTM_weightsFile",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.1/Executables/14-Oct-2015_BLSTM_OpenSAD15/NNweights_config1.bin",
+          "localized": "NNweights_config1.bin"
+        },
+        {
+          "key": "language2classmapping",
+          "original": "/Users/Govit/Documents/AudioFiles/OpenSAD15/languagemapping.csv",
+          "localized": "languagemapping.csv"
+        },
+        {
+          "key": "fileslisting",
+          "original": "/Users/Govit/Documents/QT/FastSpeechProcessing/Optimizer_V6.2.1/Executables/14-Oct-2015_BLSTM_OpenSAD15/full",
+          "localized": "fileslisting"
+        }
+      ]
+    }
+  },
+  "mcr_masked_col": 6,
+  "mcr_columns": "[0]file [1]conf [2]chan [3-5]Pfa/Pmiss/globalError (SCORED, non-vacuous as of the Task 3 fix-wave) [6]time_per_hour (WALL-CLOCK -> masked to 0.0) [7]cumulativeError (SCORED) [8]signalDuration [9]speechDuration (inference-derived, mode-invariant) [10]nbWords (legacy default -1) [11-18] WER+LID fields (0 -- no ASR hypothesis text or live LID net is wired into this excerpt run) [19]LIDNbOfClassif (0) [20]NbOfClassif (SCORED, non-vacuous). parity_*_result_rows.bin = mcr[:, 3:] (the per-channel data columns).",
+  "scored_values": {
+    "tupleA": {
+      "chan1": {
+        "Pfa": 48.924617524339325,
+        "Pmiss": 0.0,
+        "globalError": 31.6623574760519,
+        "cumulativeError": 820.3665162746187,
+        "speechDuration": 38.22647499999999,
+        "NbOfClassif": 6055.0
+      },
+      "chan2": {
+        "Pfa": 57.419149975574015,
+        "Pmiss": 0.0,
+        "globalError": 20.602499129051537,
+        "cumulativeError": 377.2145795621549,
+        "speechDuration": 49.505675000000004,
+        "NbOfClassif": 6055.0
+      }
+    },
+    "tupleB": {
+      "chan1": {
+        "Pfa": 11.222253129346315,
+        "Pmiss": 7.6143342750910294,
+        "globalError": 9.949257311560103,
+        "cumulativeError": 290.7493566408607,
+        "speechDuration": 22.141875000000006,
+        "NbOfClassif": 2393.0
+      },
+      "chan2": {
+        "Pfa": 0.5749877870053748,
+        "Pmiss": 10.075758870143787,
+        "globalError": 6.666798130583129,
+        "cumulativeError": 276.7416865897031,
+        "speechDuration": 33.011875,
+        "NbOfClassif": 2393.0
+      }
+    }
+  },
+  "fixtures": {
+    "parity_tupleA_vrcts_chan1.xml": {
+      "oracle": "real-binary",
+      "sha256": "fadaa74134719eadd916f259354eac34d572982df5d31432dd9e43c703c4e488",
+      "speech_segments": 8
+    },
+    "parity_tupleA_vrcts_chan2.xml": {
+      "oracle": "real-binary",
+      "sha256": "f2913338fb5dfee3c9bb0ebda5c3ac88143f9459799cca8085e71ac34cddd1d2",
+      "speech_segments": 3
+    },
+    "parity_tupleA_mcr.bin": {
+      "oracle": "fastmath-rebuild",
+      "mode": "m",
+      "scored": true,
+      "sha256": "10cb3428c3b0c241bb3a081359de8e0e39f1276cf305334544078ab6c284cb54",
+      "shape": [
+        2,
+        21
+      ]
+    },
+    "parity_tupleA_result_rows.bin": {
+      "oracle": "fastmath-rebuild",
+      "mode": "m",
+      "scored": true,
+      "sha256": "99418842d2465f74db1b38282d6be42c6fba55701006c038d8bee7691eeed5bd",
+      "shape": [
+        2,
+        18
+      ]
+    },
+    "parity_tupleB_vrcts_chan1.xml": {
+      "oracle": "real-binary",
+      "sha256": "828f9c7f7aefd5dd6459cdfe9487bd3af78afb54f21f68b1b585c2fcb5be0517",
+      "speech_segments": 13
+    },
+    "parity_tupleB_vrcts_chan2.xml": {
+      "oracle": "real-binary",
+      "sha256": "5aa0b452bb378e704a1761c563757622a723bd98ea169c6324b155bdb7210613",
+      "speech_segments": 15
+    },
+    "parity_tupleB_mcr.bin": {
+      "oracle": "fastmath-rebuild",
+      "mode": "m",
+      "scored": true,
+      "sha256": "12efb14f5bbc6164c944cf6a19afe6e06c415641cb5e3a82e5bf097a40a105ad",
+      "shape": [
+        2,
+        21
+      ]
+    },
+    "parity_tupleB_result_rows.bin": {
+      "oracle": "fastmath-rebuild",
+      "mode": "m",
+      "scored": true,
+      "sha256": "b8781a2acc1e6061caf11205f27fdad6786154364cd8e99d83586fe252432722",
+      "shape": [
+        2,
+        18
+      ]
+    },
+    "prcts_excerpt.wav": {
+      "oracle": "input",
+      "sha256": "fd0332152f5430d9281c9e2a61d035d5eee81a51037decb2f005e3c58122733c"
+    },
+    "languagemapping.csv": {
+      "oracle": "input",
+      "sha256": "404dd1ad11b9d6572690faf6782214b832c5e675fee9acfe339e630ee5d068d8"
+    },
+    "fileslisting": {
+      "oracle": "input",
+      "sha256": "aed407834d990ba5397e84e488479beb8a63f23c57a1001d54834160aa6b71f7"
+    },
+    "prcts_excerpt.stm": {
+      "oracle": "input",
+      "sha256": "d7cf05d73312925cbe33cfdb50476faf5b9d639f3be1892558ce9fa5ada2389b"
+    },
+    "parity_tupleA.config": {
+      "oracle": "input",
+      "sha256": "cb067f0c6211347c768f6efd86bcb401f33189cbc565105d3277081a1b40780d"
+    },
+    "parity_tupleB.config": {
+      "oracle": "input",
+      "sha256": "5666c5a14bfc1c1157272b0478b87f01fb7de1a9b9b910b0d13a053518fe3f48"
+    }
+  },
+  "determinism": {
+    "real_binary_vrcts_twice_identical": {
+      "tupleA": {
+        "chan1": true,
+        "chan2": true
+      },
+      "tupleB": {
+        "chan1": true,
+        "chan2": true
+      }
+    },
+    "fastmath_masked_mcr_twice_identical": {
+      "tupleA": true,
+      "tupleB": true
+    }
+  },
+  "structural_agreement_real_vs_fastmath": {
+    "tupleA": {
+      "chan1": {
+        "real_segs": 8,
+        "fastmath_segs": 8,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      },
+      "chan2": {
+        "real_segs": 3,
+        "fastmath_segs": 3,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      }
+    },
+    "tupleB": {
+      "chan1": {
+        "real_segs": 13,
+        "fastmath_segs": 13,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      },
+      "chan2": {
+        "real_segs": 15,
+        "fastmath_segs": 15,
+        "structural_match": true,
+        "vrcts_byte_identical": true,
+        "max_boundary_dt_4dp": 0.0
+      }
+    }
+  },
+  "task4_measured_deltas": {
+    "tupleA": {
+      "port_vs_oracle_boundary_dt": {
+        "measured_max_s": 0.0,
+        "pinned_abs_s": 0.0001,
+        "headroom": "absolute floor: measured_max_s == 0.0 across both channels (the port's -s VRCTS is byte-identical to the 2015 -ffast-math oracle at 4-decimal precision); pinned = one VRCTS display quantum (1e-4 s), the tightest cross-libm-safe floor. Segment count + type sequence is a separate EXACT gate."
+      },
+      "port_vs_oracle_mcr_col_deltas": {
+        "measured_max_abs": 4.547473508864641e-13,
+        "measured_max_rel": 1.234268499948682e-15,
+        "pinned_ulp": 4,
+        "pinned_abs_factor": 512.0,
+        "eps": 2.220446049250313e-16,
+        "headroom": "absolute floor: the -ffast-math oracle is not bit-matchable even on-host, so no strict arm; measured sits at fp bit-noise. Pinned element bound = ULP<=4 OR |diff|<=512*eps*max(|oracle|,1) (the phase1/4a cross-libm comparator), whose absolute arm scales with column magnitude and sits ~200x above the on-host measured, 9+ orders below the 1e-3 STOP line."
+      }
+    },
+    "tupleB": {
+      "port_vs_oracle_boundary_dt": {
+        "measured_max_s": 0.0,
+        "pinned_abs_s": 0.0001,
+        "headroom": "absolute floor: measured_max_s == 0.0 across both channels (the port's -s VRCTS is byte-identical to the 2015 -ffast-math oracle at 4-decimal precision); pinned = one VRCTS display quantum (1e-4 s), the tightest cross-libm-safe floor. Segment count + type sequence is a separate EXACT gate."
+      },
+      "port_vs_oracle_mcr_col_deltas": {
+        "measured_max_abs": 1.1368683772161603e-13,
+        "measured_max_rel": 3.266076173324581e-15,
+        "pinned_ulp": 4,
+        "pinned_abs_factor": 512.0,
+        "eps": 2.220446049250313e-16,
+        "headroom": "absolute floor: the -ffast-math oracle is not bit-matchable even on-host, so no strict arm; measured sits at fp bit-noise. Pinned element bound = ULP<=4 OR |diff|<=512*eps*max(|oracle|,1) (the phase1/4a cross-libm comparator), whose absolute arm scales with column magnitude and sits ~200x above the on-host measured, 9+ orders below the 1e-3 STOP line."
+      }
+    }
+  },
+  "size_budget": {
+    "total_bytes": 2555856,
+    "limit_bytes": 8388608
+  },
+  "stm_normalizer_fixtures": {
+    "text": "Task 7: live byte-oracle for the two Perl STM normalizers, run via /usr/bin/perl through tools/perl_oracle/run_norm.sh (never modifies the read-only legacy tree). `light_*` pairs exercise norm_stm_pkt_light.pl (self-contained regex pipeline) end to end -- every case's .out is the real script's stdout, run twice per case to confirm determinism. `full_*` pairs exercise norm_stm_pk_cts_all_trans_03a.pl but are restricted to comment-passthrough + blank-line-drop: any content line in that script hits an UNCONDITIONAL shell-out to the lost norm-tagger/norm-parser LIMSI binaries (:109), and in this environment (binaries absent) perl's backticks silently fail rather than crash, so a live 'output' for a content line would pin a broken-environment artifact, not real legacy behavior -- verified live (see FULL_CASES' docstring in this script). The port's normalize_stm_full raises NormalizerUnavailable for any such line instead; that trigger is pinned by a non-oracle unit test.",
+    "perl_bin": "/usr/bin/perl",
+    "perl_version": "v5.34.1",
+    "legacy_scripts": {
+      "light": "FastSpeechProcessing-legacy/norm_stm_pkt_light.pl",
+      "full": "FastSpeechProcessing-legacy/norm_stm_pk_cts_all_trans_03a.pl"
+    },
+    "runner": "tools/perl_oracle/run_norm.sh",
+    "cases": {
+      "light_case1": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "e503e8d25b63fd31de44ff7edc34348128cef685a3ee75d9002e984e0d3bd89c",
+        "out_sha256": "27615e86ca2e31513f54da4c39cadbc8fa30806ad8bea10e929a7312842d3573",
+        "twice_run_identical": true
+      },
+      "light_case2": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "412b934bda1a774e1b75fe73833d33cfa20e5e3b747bbf9eb93e02aa4b862a07",
+        "out_sha256": "4b21058c751feb44142a8a375ce019cfbb741f830aae8eea41c486fe01247d3d",
+        "twice_run_identical": true
+      },
+      "light_case3": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "3bab591e2df0e697452ff14b3d52add2a8604b43c76b42f2ba84a91559c477fd",
+        "out_sha256": "451d62ff3d55bc4ec50c50d09bc682ac3d3b39ae656216d4012d5e94921908d2",
+        "twice_run_identical": true
+      },
+      "light_case4": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "3dca4f1caaf4f0094197c929cbed9d9f287b5eaf625edb1e3f8697b7a335ea3c",
+        "out_sha256": "ea3ef12bce984c222685a5f132ba0967328769aa1d4bcf36e9863da9669b313f",
+        "twice_run_identical": true
+      },
+      "light_case5": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "d750cf6c0baf40108b2634a3da44078998bf5dbd9c4d3aeb917012b43012ebc8",
+        "out_sha256": "c625d0ad68df4abb8ab5a0722e2743cb374c53b210120d3d7d6efcbffc96eb6a",
+        "twice_run_identical": true
+      },
+      "light_case6": {
+        "script": "norm_stm_pkt_light.pl",
+        "in_sha256": "fe257e74f0575ebb1a593afe556d3ef9f92ab0c4fa40848a883f5f707b0ea604",
+        "out_sha256": "b54a80266f37f99c8900054b3c9692ffce340c71a608ec9ffcbaecb862d16a1f",
+        "twice_run_identical": true
+      },
+      "full_case1": {
+        "script": "norm_stm_pk_cts_all_trans_03a.pl",
+        "in_sha256": "045632da85ed23cd8753a3e120e3dba6162174e80e966ddc8fc07175c32b3e0a",
+        "out_sha256": "045632da85ed23cd8753a3e120e3dba6162174e80e966ddc8fc07175c32b3e0a",
+        "twice_run_identical": true
+      },
+      "full_case2": {
+        "script": "norm_stm_pk_cts_all_trans_03a.pl",
+        "in_sha256": "1ee7eea2c47462b34ee214c016afd453a12dcfa64a7c3ae3be440ecdb7734646",
+        "out_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "twice_run_identical": true
+      },
+      "full_case3": {
+        "script": "norm_stm_pk_cts_all_trans_03a.pl",
+        "in_sha256": "2fda38f6eedb372e86449bb9beaa30417451a42998e1affb89f53ec0bc34c792",
+        "out_sha256": "9d89ab9d533598a1b7dd7ce3ba8d7e2a196c2d13b2629864b74db3e23a5aa294",
+        "twice_run_identical": true
+      }
+    }
+  },
+  "listing_writer_fixtures": {
+    "text": "Task 8: live Octave TIER-1 byte-oracle for the two listing writers, driving the REAL vendored WriteListing.m / WriteWeightedListing.m unchanged via tools/octave_harness/stage_writelisting.m. `plain*` pins WriteListing's worker-shard fliplr(length(index)-jj+1:-nbworker:1) interleave over 7 files / 3 workers (7=3+2+2, every position covered in exactly one shard, a non-trivial overlap-free split). `weighted.lst` pins WriteWeightedListing's two %g fields across the C-style style-switch boundaries (exponent<-4, or >=precision 6) plus a rounding-carry-across-the-boundary case and a negative-zero case; its commented-out worker-shard block (:10-21) is dead code in the legacy source and is not ported on either side. Run twice per extraction to confirm determinism.",
+    "stage": "tools/octave_harness/stage_writelisting.m",
+    "octave_version": "11.3.0",
+    "params": {
+      "n": 7,
+      "nb_workers": 3,
+      "weighted_n": 8
+    },
+    "cases": {
+      "plain.flst": {
+        "sha256": "593c23088758cf9f2459002f89d43e741e986619cad8992f9c1e39cd2deb8e3c",
+        "bytes": 287
+      },
+      "plain_worker_1.flst": {
+        "sha256": "bd4be9c46c7faa55a1c56e0e319cead5513de60ef2b89460d8a84f479f9664f9",
+        "bytes": 123
+      },
+      "plain_worker_2.flst": {
+        "sha256": "e4b912ef0419cb9c41d2471639d19e52aa74cad75a1cbafada51cec0c8b242e5",
+        "bytes": 82
+      },
+      "plain_worker_3.flst": {
+        "sha256": "bf820dbd8cb9c975be5626811bf32a1425aa309eabb35f76049c58267c4e5a2e",
+        "bytes": 82
+      },
+      "weighted.lst": {
+        "sha256": "9209231395e0d465979734bb930e5e5570184e431329567312695f3d2b81d3f4",
+        "bytes": 337
+      }
+    }
+  },
+  "scr_fixtures": {
+    "text": "Task 11: live Octave HYBRID-tier byte-oracle for the .scr score-file writer (no legacy .scr file exists anywhere -- this stage IS the oracle). Real Tier-1 processListing.m supplies keys(langMapConf) (5 classes, mapping.csv ids deliberately NOT in alphabetical order: zzz=0, aaa=1, mmm=2, bbb=3, nnn=4 -- keys() returns aaa_11, bbb_22, mmm_unk, nnn_33, zzz_99, visibly different from id order); the writer loop itself (Test_BLSTM.m:251-269) is FALLBACK-TIER transcription driven on an injected 5-column raw score row (aaa_11=bbb_22=250.0 tie probing sortrows' stable tie-break, mmm_unk=-1000.0 near-zero after softmax, nnn_33=0.0, zzz_99=123.456789) over a >21-char basename (filename(1:end-21) truncation). Confirms the writer receives ALREADY-DECODED scores (ComputeCost.m:708 applies the >150->-200 sentinel before CostFunction.m:409 assigns LIDscoreDet, so the raw 250.0 passes through the softmax law unmodified) and pins the 'lang_dial' key composition (processListing.m:10 keys on `[lang '_' dial]`) that makes the tmp(end-2:end) dial slice expose a leading underscore for 2-char dials ('aaa-_11') but not 3-char dials ('mmm-unk').",
+    "stage": "tools/octave_harness/stage_scr.m",
+    "octave_version": "11.3.0",
+    "params": {
+      "n_classes": 5,
+      "produced_name": "conversation_.scr"
+    },
+    "cases": {
+      "expected.scr": {
+        "sha256": "8f15ceb033f8a9b715b8184b00404c821b0ca352906c3b1ad8c8e4d8b6df4a0b",
+        "bytes": 200
+      },
+      "mapping.csv": {
+        "sha256": "13c4f6204b64f1fe6cde0842fd89e245dca7271622651d6820ae8e8b3adf25b2",
+        "bytes": 46
+      },
+      "listing.csv": {
+        "sha256": "f0b89cc9134acbeb93a096dd17af3d24917b1c9ddc6b0be3d1be68a2c953c9df",
+        "bytes": 120
+      },
+      "keys_alpha_order.txt": {
+        "sha256": "55956acc375060ebb18c630e8fb94e1b223eccf3d67a44f017a8eac16a08e433",
+        "bytes": 36
+      },
+      "scores_input.json": {
+        "sha256": "611fa6b09feaa9dabc99f4187a04728dc5c08a6899c0d98271e4770dca4563f0",
+        "bytes": 302
+      }
+    }
+  }
+}

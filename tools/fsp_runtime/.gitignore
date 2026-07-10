@@ -1,0 +1,7 @@
+# Local-only resurrection artifacts (never committed):
+#   bin/     - the copied + rewired 2015 Segment binary
+#   prefix/  - the x86_64 dependency dylibs built/harvested by setup.sh
+#   work/    - source tarballs, build trees, downloaded bottles, self-test scratch
+bin/
+prefix/
+work/

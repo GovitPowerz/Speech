@@ -2206,8 +2206,9 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   broken-as-committed (Phase 2); the negative modes are dead. *Fix candidate:* port the CNN
   if a mode-7 wav corpus is ever needed. *Pinned by:* the mode-7 goldens above (phSeq arm) +
   the driver's typed wav bail (unit-covered by `get_segmentation_mode7`'s `periodogram.is_none()`
-  guard). Mutation: N/A (dead code); the SAD-irrelevance is proven by the goldens passing with
-  no SAD weights loaded.
+  guard -- the "unit-covered" claim was an overclaim: no such test existed; corrected +
+  genuinely pinned by the [phase4d] complete-as-portable closure entry below). Mutation: N/A
+  (dead code); the SAD-irrelevance is proven by the goldens passing with no SAD weights loaded.
 
 - **[phase4b] Mode-7 `classNb = max(2, outputSize)`, and `_PostProcessMode 1` cancels in
   normalization; the DumpLIDInternals filename is CLOSED (Phase 4c Task 2)** (`tasks/lid.rs`,
@@ -2521,6 +2522,25 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   SMORMS3 steps the tail-stripped head, and the mean/std tail is folded back before every
   `Engine.set_weights` because the Rust `BLSTMNeuralNetwork::setWeights` demands the FULL vector
   (`flat.len() >= nb_of_weights()`, an `Err` below that).
+
+- **[phase4d] CLOSED: the 4c lifecycle drivers shipped ALGO-6-ONLY -- now generalized to single-net
+  algo-3 configs** (`src/python/speech/drivers/{train.py,state.py,test.py}`; cross-ref the two
+  `[phase4c]` exit-gate entries above/below): the 4c drivers hard-assumed the 2-cell `[sad, lid]`
+  shape everywhere -- `_backprop_inner` indexed `engine.weights(0)[1]` (IndexError on a single-net
+  engine), `_ponderations` read `cfg["BLSTM_LID_CostPonderation"]` (KeyError -- an algo-3 vec2struct
+  emits no LID field), `_tail_lengths` returned a `(sad, lid)` 2-tuple, `train` wrote `lid_weights.bin`
+  from `final_w[1]`, and `evaluate` set `[sad, lid]` weights unconditionally. A single-net algo-3
+  config therefore KeyError'd/IndexError'd (flagged as an Info finding in the 4c final review). Task 9
+  drives the net count off `BackPropagation.m:11-13`'s cell contract (`weightsIni = cell(2,1)`, cell 1
+  iff `PS.NS.BackPropagationActivated == 1`, cell 2 iff `(algo == 6) && LID.BackPropagationActivated`):
+  `_tail_lengths(cfg, algo)` returns a `len`-1-or-2 list, `_ponderations` returns a `len`-1-or-2
+  ponderation list, `_eval_config_text` injects `BLSTM_LID_*` only for algo 6, and `train`/`evaluate`
+  gate the LID pack write/read on the algo. The algo-6 Twin path is behaviour-identical (the 4c exit
+  gate `test_full_train_loop_deterministic` stays green untouched -- the regression sentinel). *Pinned
+  by:* `tests/test_phase4d_algo3_drivers.py` (the 1-cell contract on the committed `parity_tupleA.config`
+  vs the algo-6 `twin_train.config` foil) + `test_full_train_loop_algo3_deterministic`
+  (`tests/pyo3/test_exit_gate.py`, the algo-3 analogue of the twin exit gate on the tier-2 spectral
+  corpus, bit-identical checkpoints across two fixed-seed runs, no `lid_weights.bin` written).
 
 - **[phase4c] Exit-gate config forces BOTH nets' backprop ON (the committed twin config has SAD off)**
   (`src/python/speech/drivers/train.py::_eval_config_text`; `tests/reference_data/phase4b/twin_train.config`):
@@ -2916,6 +2936,707 @@ Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.m
   8/8 mutations break a test; item 2's catcher differs from the plan's named one (both are
   in the same suite, both true positives) -- no gap this round. Full transcript (diffs,
   commands, exact output) in `.superpowers/sdd/task-13-report.md`.
+
+- **[4d] OpenSAD15 converter: NO LIVE ORACLE tier** (`src/python/speech/dataprep/opensad15.py`,
+  ported from Python 2 `ProcessOpenSAD15Corpus.py:23-108`): unlike every other module in this
+  repo, there is no interpreter left that can execute the legacy source -- Python 2 is EOL and
+  not installed (or reasonably obtainable) in this environment, so nothing here can be
+  cross-run against a live original. This is the phase's honest weakest validation tier:
+  every fixture under `tests/reference_data/phase4d/opensad15/` is HAND-COMPUTED from a
+  line-by-line reading of the legacy source (a second, independent-of-the-implementation
+  arithmetic pass, not a dump from any run), plus one real cross-check beyond pure
+  transcription -- the emitted VRCTS XML is parsed by the engine's own `load_vrcts`.
+  *Pinned by:* `tests/test_phase4d_opensad15.py` (27 cases) + `src/rust/tests/phase4d_opensad15_vrcts.rs`.
+- **[4d] OpenSAD15 `audiofile[:-5]` hard-coded 5-char extension strip**
+  (`ProcessOpenSAD15Corpus.py:48,67,100`, ported as `_path_leaf(audio_path[:-5])`): the stem
+  used for the XML `AudioDoc` name, the STM name field, and the lang fallback is derived by
+  unconditionally slicing off the LAST 5 CHARACTERS of `audiofile`, not by stripping a detected
+  extension. Correct only when the extension is exactly 5 chars including the dot (e.g.
+  `.flac`); any other extension length silently corrupts the stem -- a 4-char `.sph` loses the
+  last real character (`"rec01.sph"` -> stem `"corpus/rec0"` -> name `"rec0"`, dropping the
+  `1`). Reproduced verbatim, not extension-aware. *Fix candidate:* switch to
+  `Path(audiofile).stem` after parity (the legacy's own docs corpus is `.flac`-only, so this
+  never manifested there). *Pinned by:*
+  `test_case5_extension_length_quirk_truncates_stem` (`tests/test_phase4d_opensad15.py`).
+- **[4d] OpenSAD15 `duration`/`lang` last-physical-row quirk (two instances, not one)**
+  (`ProcessOpenSAD15Corpus.py:35-39`): inside the per-tab-row loop, `beg`/`endS`/`lang` are
+  read from `tmp[2]`/`tmp[3]`/`tmp[8]` and `duration = endS` is assigned on EVERY row, BEFORE
+  the S/RI filter `if` on line 39 -- so after the loop, both `duration` (the XML `sigdur` and
+  the listing line's duration field) and `lang` (absent an explicit later fallback) hold
+  whatever the LAST PHYSICAL ROW in the tab file had, whether or not that row passed the
+  filter. A tab file's trailing annotation row is very often a non-speech sentinel (silence,
+  end-of-file marker, etc.), so `duration`/`lang` routinely come from a row that never
+  contributes a segment. Reproduced verbatim (single `duration = end_s` assignment inside the
+  unconditional prefix of the loop body, ahead of the filter `if`, in `convert_tab_file`).
+  *Pinned by:* `test_case1_duration_and_lang_taken_from_last_row_regardless_of_filter` and
+  `test_case3_lang_from_last_row_overrides_earlier_explicit_lang`
+  (`tests/test_phase4d_opensad15.py`) -- case1's last row is a filtered-out `NS` row with an
+  empty lang field (exercising both the duration quirk and the lang-fallback path in one
+  fixture); case3's two rows carry deliberately DIFFERENT explicit lang codes to prove the
+  physically-last row wins over the only speech row.
+- **[4d] OpenSAD15 `str(float)` is Python 2's 12-significant-digit format, not Python 3's
+  shortest round-trip repr** (`ProcessOpenSAD15Corpus.py:53,57,61,100-102,106`, ported as
+  `py2_str_float`): CPython 2.7's `float.__str__` formats via `PyOS_double_to_string(v, 'g',
+  12, ...)` (C `%.12g`), while `float.__repr__` -- and Python 3's `str`, which is `repr` --
+  uses the shortest decimal string that round-trips. The two diverge exactly when a float
+  carries floating-point noise past 12 significant digits, which happens routinely when
+  summing segment durations (e.g. case1's `spdur` lands on the double `16.366300000000003`;
+  Python 2's `str()` prints `16.3663`, Python 3's plain `str()` would leak
+  `16.366300000000003` verbatim into the XML/STM/listing outputs). Reproduced via
+  `py2_str_float(x) = f"{x:.12g}"` plus Python 2's "always show a `.` or exponent" completion
+  for bare-integral results (`f"{1.0:.12g}"` is the C-style `"1"`; Python 2's `str(1.0)` is
+  `"1.0"`). Not validated against a live Python 2 interpreter (see the no-live-oracle entry
+  above); derived from documented CPython 2.7 source behavior and the task brief's worked
+  example. *Pinned by:* `test_py2_str_float_pinned_cases` (10 cases incl. the brief's
+  `143.76000000000002` -> `"143.76"` example and both fixtures' actual noisy `spdur` values),
+  `test_py2_str_float_nan_inf`, and `test_py2_str_float_differs_from_python3_str_on_noisy_case`
+  (`tests/test_phase4d_opensad15.py`).
+- **[4d] OpenSAD15 `Pool(20).imap` -> sequential loop (determinism deviation)**
+  (`ProcessOpenSAD15Corpus.py:131-135`, ported as `process_opensad15`'s plain `for line in
+  lines` loop): the legacy parallelizes `treat_file` over a 20-worker pool and writes results
+  to the output listing in `imap` completion order, which need not match input order under
+  uneven per-file work. The port processes the listing SEQUENTIALLY, so output order always
+  equals input order -- a documented determinism deviation (an improvement, not a bug to
+  preserve: nothing downstream depends on a specific non-deterministic order, and a
+  reproducible order is strictly more testable). *Pinned by:*
+  `test_process_opensad15_sequential_preserves_listing_order` (3-entry listing,
+  deliberately out-of-alphabetical-order, asserts the output preserves exactly that order;
+  `tests/test_phase4d_opensad15.py`).
+- **[4d] OpenSAD15 lang-fallback `IndexError` latent bug (discovered, not exercised by the
+  golden cases)** (`ProcessOpenSAD15Corpus.py:66-67`: `lang = path_leaf(audiofile[:-5]).split
+  ('_')[-2]`): when the last tab row's lang field is empty AND the (possibly `[:-5]`-corrupted,
+  see above) audio stem has fewer than 2 underscore-separated tokens, `split('_')[-2]` indexes
+  past the result and raises -- `IndexError` in CPython 2 identically to Python 3's list
+  indexing, so this needed no special handling to reproduce; Python 3's `list.__getitem__`
+  raises the same way. Not a defensive addition -- the port lets it raise naturally, matching
+  the legacy's crash-equivalent behavior on this input shape. None of the 5 golden fixtures
+  exercise this path (all either give an explicit lang or use a 2+-token stem); recorded here
+  as a discovered latent bug worth knowing about before pointing this converter at unvetted
+  corpora. *Pinned by:*
+  `test_lang_fallback_raises_indexerror_without_two_underscore_tokens`
+  (`tests/test_phase4d_opensad15.py`).
+- **[4d] `process_opensad15`'s blank-listing-line guard: added as an undocumented
+  defensive divergence, removed in Task 15 for legacy parity** (`ProcessOpenSAD15Corpus.py`'s
+  `treat_file(line)`, the per-listing-line loop ported as `process_opensad15`): an earlier
+  pass of this port added `if not line: continue` ahead of the `line.split(";")` read, silently
+  skipping blank rows in the input listing -- a defensive guard with no legacy counterpart and
+  no test exercising it. The Task 5/T15 review caught this as an undocumented behavior
+  divergence (ledgered in `.superpowers/sdd/progress.md`'s T5 finding) and Task 15 resolved it
+  by REMOVAL, not documentation: the legacy `treat_file` has no such guard, so `tmp = line.
+  split(';'); tmp[1]` on a blank line (`tmp == ['']`) raises `IndexError` in CPython 2 exactly
+  as `fields = line.split(";"); fields[1]` does here in CPython 3 -- crash-equivalent, matching
+  the same "let it raise naturally" posture already established for the lang-fallback
+  `IndexError` above, not a fresh divergence. Removal was zero-test-breakage (no fixture ever
+  fed a blank listing line). *Pinned by:*
+  `test_process_opensad15_blank_listing_line_raises_indexerror` (`tests/test_phase4d_opensad15.py`).
+- **[4d] Corpus augmentation: injected RNG is a DOCUMENTED CONVENTION, not a parity claim**
+  (`src/python/speech/dataprep/augment.py`, ported from `AugmentCorpus.py:46-57`): the legacy
+  draws `noise`/`noisetype`/`pitch`/`tempo` from `numpy.random` seeded implicitly off the
+  Python 2 process's wall clock -- no legacy run is reproducible even against itself, so unlike
+  every bit-exact-pinned module in this repo there is no trajectory to match, live or hand-
+  computed. The port instead takes an injected `numpy.random.Generator` and preserves the
+  legacy's DRAW ORDER verbatim (noise first, then noisetype, then pitch, then tempo, x5 per
+  passing file) so a seeded run is at least reproducible within this port. *Pinned by:*
+  `test_draw_variant_order_is_noise_then_noisetype_then_pitch_then_tempo` (an independent
+  re-derivation off a freshly seeded generator, not a call into the function under test) and
+  `test_draw_variant_noisetype_ladder` (4 brute-force-found seeds, one per ladder bucket)
+  (`tests/test_phase4d_augment.py`).
+- **[4d] Corpus augmentation: hard-coded `noise.wav`/`mod.wav` scratch-file collision hazard**
+  (`AugmentCorpus.py:39,58,60,63,66`, ported as the `_NOISE_SCRATCH`/`_MOD_SCRATCH` constants in
+  `augment.py`): every sox invocation -- the per-file silence-strip duration probe AND all 5
+  per-variant pitch/tempo/noise/mix steps -- reads and writes the SAME two relative filenames in
+  the current working directory. The legacy is safe only because it runs strictly sequentially,
+  one `os.system()` call at a time, in one process/one cwd; nothing in this port changes that
+  assumption (no unique temp names, no injectable scratch directory), so it inherits the same
+  restriction: `augment_corpus` must not be run concurrently (multiple processes/threads sharing
+  a cwd) or its scratch writes will race. Reproduced as-is rather than "fixed", since the whole
+  command-string surface is the pinned artifact (see the module docstring). *Fix candidate:* a
+  scratch-directory parameter with per-call-unique filenames, once nothing depends on the pinned
+  literal `noise.wav`/`mod.wav` command tokens. *Pinned by:* the module docstring's collision-
+  hazard note plus every `RecordingRunner`-based test in `tests/test_phase4d_augment.py` (the
+  recorder's `duration()` intentionally cannot key readings by path -- only by call order --
+  because the path is always the same overwritten `noise.wav`).
+- **[4d] Corpus augmentation: a short listing line (fewer than 6 `;`-fields) raises an unguarded
+  `IndexError`** (`AugmentCorpus.py:69` indexes `elems[1]`..`elems[5]` directly; ported as-is at
+  `augment.py`'s listing-row emission): the legacy crashes identically at the same read, so the
+  port reproduces rather than guards -- the same latent-crash class as opensad15's lang-fallback
+  `[-2]` (its sibling entry above). Only fires on a gate-passing file whose listing row is
+  malformed. *Fix candidate:* none while reproduce-bugs-exactly governs. *Pinned by:*
+  `tests/test_phase4d_augment.py::test_augment_corpus_short_line_raises_indexerror_on_gate_pass`
+  (this bullet was added in the T16 final-review cleanup for consistency with the sibling
+  precedent; the docstring + test landed with Task 6 itself).
+- **[4d] Corpus augmentation: `str(pitch)`/`str(tempo)`/`str(noise)` inside the sox COMMAND
+  strings are Python 2's `str(float)`, reused from the OpenSAD15 `py2_str_float` helper**
+  (`AugmentCorpus.py:60,63`, ported as `pitch_tempo_command`/`noise_synth_command` calling
+  `speech.dataprep.opensad15.py2_str_float`): same CPython-2-vs-3 `str(float)` divergence
+  documented for the OpenSAD15 converter (Task 5) -- `%.12g`-style 12-significant-digit
+  formatting vs Python 3's shortest-round-trip `repr`-backed `str`. Only the SOX COMMAND
+  arguments go through this path; the `%.3f`-formatted VARIANT FILENAME (`AugmentCorpus.py:58`,
+  ported as `variant_filename`) is fixed-precision `%f`-style formatting, which does NOT diverge
+  between Python 2 and 3, so it stays a plain `f"{x:.3f}"` with no `py2_str_float` involved --
+  the two format paths in the same line of legacy code are NOT interchangeable and must not be
+  collapsed into one helper. *Pinned by:*
+  `test_pitch_tempo_command_uses_py2_str_float_not_python3_str` (a noisy-past-12-sig-figs pitch
+  value) and `test_variant_filename_uses_fixed_point_not_py2_str_float`
+  (`tests/test_phase4d_augment.py`).
+- **[4d] `norm_stm_pk_cts_all_trans_03a.pl`'s number-normalization arm is a TYPED BAIL,
+  `NormalizerUnavailable`, not a reproduction of a broken shell-out**
+  (`src/python/speech/dataprep/stm_normalize.py::normalize_stm_full`, ported from
+  `norm_stm_pk_cts_all_trans_03a.pl:109`): every content line (anything past the
+  comment/blank checks) hits an UNCONDITIONAL backtick shell-out, `` $text=`echo "$text"
+  | norm-tagger | norm-parser --lang=spa`; `` -- no branch sits between the `chomp` (:15)
+  and that call. Both LIMSI binaries are LOST (not merely absent from this host; per the
+  task brief they no longer exist anywhere), so this arm can never run for real. Verified
+  LIVE in this environment (perl 5.34.1, binaries genuinely missing): perl's backticks do
+  NOT raise on a missing command -- the shell writes "command not found" to stderr, stdout
+  is empty, and the script silently continues with `$text = ""`, eventually printing
+  `"$head ignore_time_segment_in_scoring\n"` for EVERY content line regardless of its
+  actual content. That is an accident of this host's missing binaries, not legacy
+  behavior (a host where `norm-tagger`/`norm-parser` exist would produce real tagged/
+  parsed output), so the port does not reproduce it -- `normalize_stm_full` raises
+  `NormalizerUnavailable(head, text)` at the equivalent point instead, carrying the
+  pre-bail state for inspection. *Pinned by:*
+  `test_full_content_line_raises_normalizer_unavailable`,
+  `test_full_content_line_raise_carries_prefix_state`,
+  `test_full_content_line_after_comments_still_raises` (`tests/test_phase4d_stm.py`).
+- **[4d] `normalize_stm_full`'s pure-regex PREFIX (:17-105) has NO live-oracle backing**
+  (`stm_normalize.py::_full_prefix`): unlike `normalize_stm_light` (byte-oracle-verified
+  end to end against the real perl script), the prefix computation this function performs
+  before bailing is NEVER observable through the real 03a script for a content line -- it
+  always reaches the shell-out first (see the entry above), so there is no live run to
+  diff against. Transcribed by hand from the source per the task brief ("port everything
+  up to that point that is pure regex") and verified only by manual regex reasoning, not
+  a live run -- the weakest-tier piece of this otherwise byte-oracle-verified module.
+  *Pinned by:* `test_full_content_line_raise_carries_prefix_state` (white-box, asserts a
+  specific computed value by hand-derivation, not by oracle diff).
+- **[4d] `norm_stm_pk_cts_all_trans_03a.pl:49`'s `\[[rien]\]` filler rule is a BUG: a
+  character class, not the literal word "rien"** (ported verbatim into
+  `_FULL_PREFIX_SUBS`): `[rien]` inside the pattern is an UNESCAPED bracket expression --
+  it matches any ONE of the characters r/i/e/n, not the 4-character literal string "rien"
+  the author evidently intended (contrast :52's correctly-escaped `\[rire\]`, three lines
+  later in the same file, which DOES match the literal word). Reproduced as-is (this whole
+  rule is unreachable in practice, see the two entries above, so the bug has zero
+  observable effect in this port -- recorded for completeness since the brief asked for
+  every perl-vs-python semantic surprise the oracle work exposed).
+- **[4d] `norm_stm_pkt_light.pl` vs `norm_stm_pk_cts_all_trans_03a.pl`: two silent
+  cross-script divergences in otherwise-parallel code** (both scripts share the same
+  head/text-split-then-substitution-cascade shape, but differ at two points): (1) the
+  text JOIN uses a single space in `light` (`join ' ', @line[6..$#line]`, light:20) vs a
+  DOUBLE space in `full` (`join '  ', @line[6..$#line]`, 03a:20); (2) the leading-space
+  STRIP removes ALL leading spaces in `light` (`s/^ +//`, light:47, `+` quantifier) but
+  only ONE in `full` (`s/^ //`, 03a:80, no quantifier). Both reproduced verbatim (`"
+  ".join(tokens[6:])` vs `"  ".join(tokens[6:])`; `re.compile(r"^ +")` vs
+  `re.compile(r"^ ")`). The `full` side of both has no live-oracle backing (see above);
+  the `light` side of both IS byte-oracle-verified (every `light_*` fixture's text is
+  built via the single-space join, and `light_case3`'s multi-`{fw}`-insertion cases
+  exercise the ALL-leading-spaces strip after substitutions widen the leading run).
+  *Pinned by:* `test_full_content_line_raise_carries_prefix_state` (documents both
+  divergences inline) plus the `light_*` byte-oracle fixtures (`tests/test_phase4d_stm.py`).
+- **[4d] FIX-WAVE (Task 7 review): `@line[0..5]` undef-padding vs Python slice
+  truncation -- both normalizers' head split silently diverged on short lines**
+  (`stm_normalize.py::normalize_stm_light` and `::normalize_stm_full`, both :19, ported
+  from `norm_stm_pkt_light.pl:19` / `norm_stm_pk_cts_all_trans_03a.pl:19`): this is a
+  QUIRK CLASS worth naming on its own, distinct from the two cross-script divergences
+  above -- perl array slices with a FIXED literal range (`@line[0..5]`) always read six
+  indices regardless of the array's actual length; an out-of-range index reads as
+  `undef`, and `join`'s separator is still emitted for it (undef stringifies to `""`,
+  but the separator between it and its neighbors is real). The shipped port instead used
+  `" ".join(tokens[0:6])`, a Python slice, which silently TRUNCATES to `len(tokens)`
+  elements for `len(tokens) < 6` and emits NO separator for the missing ones -- so every
+  content line with fewer than 6 whitespace-delimited fields lost one join-separator
+  space per missing field (`n` real fields, `6-n` missing: `6-n` fewer bytes in `head`,
+  plus the outer `"$head $text\n"` format's own space is unaffected since it always
+  fires). Lines with `n>=6` fields were never affected (`tokens[0:6]` and `@line[0..5]`
+  agree exactly once the array is at least 6 long). VERIFIED LIVE against
+  `/usr/bin/perl` (`tools/perl_oracle/run_norm.sh light`): a 3-field line
+  (`file1 1 hi`) produces real-perl head `"file1 1 hi   "` (3 trailing pad spaces, one
+  per undef slot) where the pre-fix port produced `"file1 1 hi"` (0 trailing spaces); a
+  5-field line (`file1 1 spkA 0.00 hi`) produces real-perl head
+  `"file1 1 spkA 0.00 hi "` (1 trailing pad space) vs the pre-fix port's 0. Fixed by a
+  shared `_pad_head(tokens) -> tokens[:6] + [""] * max(0, 6 - len(tokens))` helper used
+  by both callers' `:19` line, reproducing perl's join-with-undef byte output exactly
+  for every `n`. `normalize_stm_full` has no live oracle for content lines (see above),
+  but `head` is built at `:19`, strictly before the `:109`-equivalent
+  `NormalizerUnavailable` raise, so the padded head IS observable on the exception even
+  there -- pinned by hand-derivation, not by oracle diff. *Pinned by:*
+  `test_pad_head_no_padding_when_six_or_more_tokens`,
+  `test_pad_head_pads_short_token_lists_with_empty_strings` (direct pin on the shared
+  helper), `test_light_short_line_head_matches_perl_undef_padding` +
+  `test_normalize_stm_light_matches_perl_oracle[case6]` against the live-perl
+  `light_case6.{in,out}` fixture (`tests/reference_data/phase4d/stm/`, added by this
+  fix wave, `scripts/extract_phase4d_fixtures.py --stm-fixtures`, run twice per case
+  plus twice across separate invocations to confirm determinism), and
+  `test_full_short_line_head_is_padded_not_truncated` (hand-derived, exception-observed)
+  (`tests/test_phase4d_stm.py`).
+- **[4d] `perl s///g`'s non-overlap semantics on the filler alternation rules --
+  Python's `re.sub` reproduces it with NO special-casing, verified against the live
+  oracle** (`norm_stm_pkt_light.pl:29,31`, ported as `_LIGHT_SUBS`' first two entries):
+  both filler rules are anchored `(^|\s)(alt1|alt2|...)(\s|$)`, and their replacement,
+  `" {fw} "`, re-inserts the boundary spaces it consumed. Because perl's (and Python's)
+  `s///g`/`re.sub` scan for non-overlapping matches and resume scanning from the END of
+  each match (not re-offering already-consumed characters), a match's TRAILING `\s` is
+  consumed as part of that match -- denying an immediately-adjacent next token its own
+  REQUIRED leading `\s`. The net effect on a run of adjacent filler tokens is an
+  ALTERNATING matched/unmatched pattern (1st, 3rd, 5th... replaced; 2nd, 4th... survive
+  untouched), not "every filler token replaced". Confirmed identical between perl and a
+  standalone Python `re.sub` on the exact same input BEFORE writing the port (not
+  discovered after the fact) -- see the task-7 report for the worked comparison. No
+  workaround needed: transcribing each rule as one plain `re.sub` call, in source order,
+  reproduces this quirk automatically. *Pinned by:*
+  `test_light_filler_class1_adjacent_tokens_alternate`,
+  `test_light_filler_class2_adjacent_tokens_alternate` (`tests/test_phase4d_stm.py`),
+  cross-checked against `light_case2`'s byte-oracle fixture.
+- **[4d] `norm_stm_train_05a_p5_Quaero.sh` (the corpus-batch `.sh` driver around the 03a
+  script) is NOT ported** (`legacy/norm_stm_train_05a_p5_Quaero.sh`, read-only reference):
+  a bash wrapper that iterates a hard-coded set of `/users/vieru/...` corpus directories,
+  lock-file-coordinates (`dotlockfile`) concurrent per-file processing across parallel
+  invocations, detects each file's encoding via `/home/gauvain/bin/txtfile` and
+  `iconv`s ISO-8859-1 files to UTF-8 before piping through
+  `$script/norm_stm_pk_cts_all_trans_03a.pl am` and back to ISO-8859-1, then `sed`s out a
+  couple of mojibake replacement-character bytes. Every path is a dead, personal/cluster-
+  specific absolute path (mirrors the `tasks/vrcts.rs` `/usr/local/vrcts/...` shell-out
+  precedent already in this repo) with no reusable logic beyond "call the 03a script with
+  type=am" -- since the 03a script's content-line arm is itself a permanent typed bail
+  (see above), a ported driver would have nothing left to drive. Not transcribed; recorded
+  here per the task brief's explicit ask to note it.
+- **[4d] `WriteListing.m`'s worker-shard `fliplr(length(index)-jj+1:-nbworker:1)`
+  interleave leaves LEFTOVER files unevenly distributed across shards, front-loaded
+  toward the LAST worker** (`src/python/speech/batching.py::write_listing`/
+  `_worker_positions`, ported from `WriteListing.m:12-19`): when `length(index)` isn't
+  evenly divisible by `nbworker`, the descending-stride range starts at
+  `length(index)-jj+1` -- i.e. jj=1 starts CLOSEST to the end of the file list and steps
+  backward by `nbworker`, so jj=1 is the shard most likely to pick up an extra element
+  from the tail. Verified against the real vendored `.m` via Octave
+  (`tools/octave_harness/stage_writelisting.m`, 7 files / 3 workers = 3+2+2): jj=1 gets
+  3 files (positions 1,4,7), jj=2 and jj=3 get 2 each (3,6 and 2,5) -- the shards are a
+  clean partition (every position covered exactly once) but NOT round-robin in the
+  intuitive "worker 1 gets the extra" sense one might assume from `jj` ascending; it is
+  "worker 1 gets the item closest to the end of the (reversed) stride". Reproduced
+  exactly by `_worker_positions` (a straight 0-based port of the MATLAB range +
+  `fliplr`), not rebalanced. *Pinned by:*
+  `test_write_listing_worker_shards_match_golden`,
+  `test_write_listing_worker_shards_partition_all_items_exactly_once`,
+  `test_worker_positions_hand_derived` (`tests/test_phase4d_listing_writers.py`), byte-
+  exact against `tests/reference_data/phase4d/listing/plain_worker_{1,2,3}.flst`
+  (Octave TIER-1 goldens, `scripts/extract_phase4d_fixtures.py --listing-fixtures`).
+- **[4d] `WriteWeightedListing.m`'s worker-shard block is dead code -- COMMENTED OUT in
+  the vendored source, not ported** (`legacy/Optimizer_V6.2.2/functions/
+  WriteWeightedListing.m:11-22`): unlike `WriteListing.m`, whose worker-shard loop is
+  live, `WriteWeightedListing.m`'s otherwise-identical block is entirely `%`-commented.
+  `write_weighted_listing` therefore has no shard variant at all -- it always writes a
+  single flat file at the exact `path` given, with NO `.flst` suffix appended (contrast
+  `write_listing`, which always appends `.flst`). Recorded because the asymmetry between
+  the two nearly-identical sibling functions is easy to "fix" by accident when porting
+  by analogy. *Pinned by:* `test_write_weighted_listing_no_suffix_appended`
+  (`tests/test_phase4d_listing_writers.py`).
+- **[4d] Octave's `sprintf('%g', ...)` matches Python's `f"{x:g}"` byte-for-byte at every
+  probed style-switch boundary -- no port-side surprise found, but the surprise was
+  worth checking before trusting it** (`write_weighted_listing`'s two numeric fields):
+  both C-library-derived `%g` implementations agree on the style-switch rule (decimal
+  when `-4 <= exponent < precision(6)`, else scientific with a minimum 2-digit,
+  sign-forced exponent), 6-significant-figure rounding (`123456.789` -> `123457`),
+  rounding CARRIES that cross the style boundary (`999999.5` rounds to 6 sig figs as
+  `1.00000e+06`, printed as `1e+06`, not the decimal `1000000`), and negative zero
+  (`-0.0` -> `"-0"`, not `"0"`). Verified live against Octave 11.3.0
+  (aarch64-apple-darwin) across integers,
+  6-sig-fig rounding, the `1e-4`/`1e-5` and `1e5`/`1e6` exponent thresholds, and
+  negative numbers/zero, BEFORE committing to the plain `:g` format spec (no custom
+  formatter needed). *Pinned by:* the eight `test_weighted_listing_g_format_*` boundary
+  tests plus `test_write_weighted_listing_matches_golden`
+  (`tests/test_phase4d_listing_writers.py`), byte-exact against
+  `tests/reference_data/phase4d/listing/weighted.lst`.
+
+- **[phase4d] Hard-example mini-batch CADENCE + the batch-listing deviations**
+  (`src/python/speech/drivers/train.py` `_BatchRunner`/`_BatchStep`/`_files_values`;
+  `src/python/speech/engine.py` `forward_backward`). Task 10 wires mini-batching live. Three
+  things where the SOURCE overrides the plan prose or where the port simplifies, all
+  deliberate:
+  1. **Cadence correction (source wins over the brief's "epoch start").** `CreateBatches` is
+     called EXACTLY ONCE per training run, before the optimizer (`Train_BLSTM.m:71`), NOT at
+     epoch start -- there is no epoch loop around it; the `Batches` struct persists and only
+     its cursors mutate. `GetNewBatch` + `WriteWeightedListing` live inside `ComputeGradient.m`
+     (:53/:77) -- the ONLY live caller (Train_BLSTM.m's own GetNewBatch at :76 is a
+     commented-out validation probe) -- so one fresh batch + fresh engine is drawn PER
+     GRADIENT EVAL = per inner SMORMS3 step. The port matches: `create_batches` once in
+     `train` (batch RNG = `seed + 2`), `next_listing`/`make_engine` per inner step.
+     `WriteWeightedListing` at Train_BLSTM.m:932 (the QPSO-time write) sits in a dead `if 0`
+     block for the committed algo-6 config and is NOT the live path.
+  2. **WriteWeightedListing field-6 = duration, but Corpus reads field 6 as file_id.**
+     `WriteWeightedListing.m` writes `[weight;duration]` as CSV fields 5/6, but
+     `Corpus::from_config` (`corpus.rs:248-252`) reads field 6 as `fileId` via
+     `istringstream >> int` -- so the legacy engine reads DURATION AS FILE_ID (int-truncated;
+     the trailing ';' token is popped, tokens.size()==6, the read fires whenever field 5 is
+     non-empty). A genuine legacy field-role mismatch, but NOT load-bearing for batching: the
+     legacy fileId's ONLY consumer is `getRefFileId()` -> the LID TRAINING-TARGET class index
+     (`TwinBLSTMSpectralLID.cpp:1067`, clamped `>= outputSize -> 0`); hard-example tracking
+     (`getCases.m`/`GetNewBatch`) is file-INDEX-based and never touches fileId. The PORT's
+     engine reads field 6 and DROPS it (`CorpusItem.file_id` is copied to no `Audio` field;
+     the port's LID target sources `lang_index` -- a deliberate Phase-4b divergence from
+     `getRefFileId`). Field 6 is therefore INERT in the port, and `_BatchRunner.next_listing`
+     writes the record's file_id there simply as a deterministic placeholder that keeps the
+     byte format identical -- writing duration would be numerically indistinguishable.
+     *Fix candidate:* if the LID-target-from-fileId legacy path is ever ported for strict
+     parity, BOTH the duration-as-file_id read and the `feedForward(targetIndex)` consumption
+     (`BLSTMNeuralNetwork.cpp:843-918`) must land together; the listing field alone is inert.
+  3. **No per-eval class-balance rescale + ascending-index order.** `ComputeGradient.m:72-96`
+     rescales `filesValues(:,2)` by `nbOfElem/sumInClassIndex` (in-class = `classNb == 1`)
+     before writing; the port writes the RAW listing weight (`_files_values` col1) -- the
+     `langMapConf` in-class model the port's corpus does not carry. And the written index
+     ORDER is ascending file index (`np.unique`), a simplification of `count_unique` +
+     `sortrows(filesValues, -3)` (:55-58) -- the aggregate corpus cost is order-independent
+     (`compute_cost` sums the config's rows; `aggregate_workers` re-sorts by id). Both are
+     deterministic (the determinism gate is what matters for the optimizer path, S1). *Pinned
+     by:* `tests/test_phase4d_batchmode.py` (byte-exact batch listings + rotation + the live
+     `forward_backward` `listing_override`/`make_engine` rebuild) + the batch-mode determinism
+     exit gate `tests/pyo3/test_exit_gate.py::test_batch_mode_deterministic`.
+
+- **[4d] `.scr` writer class order: the Phase 4c class-id divergence CLOSED -- legacy is
+  `keys(langMapConf)` = ASCII-alphabetical `lang_dial` keys, and the mapping file's
+  class-id column is IGNORED by the writer** (`src/python/speech/drivers/test.py::_class_keys`;
+  legacy `Test_BLSTM.m:249/:263`, `processListing.m:10/:85-88`). The Phase 4c port ordered
+  class keys by the `lang;dial;classid` mapping's id column and composed them WITHOUT the
+  underscore (`parts[0] + parts[1]`) -- flagged as a documented divergence in the Task-12-4c
+  report (item 4, "Evaluate class-key ordering divergence noted") since no `.scr` oracle
+  existed then. Task 11 built the oracle (Octave `tools/octave_harness/stage_scr.m`, HYBRID
+  tier: the REAL Tier-1 `processListing.m` supplies `keys(langMapConf)`; the writer loop
+  Test_BLSTM.m:251-269 is FALLBACK-TIER transcription with `% legacy:` provenance --
+  Test_BLSTM.m is a top-level script whose `scores_test` comes from `CostFunction.m`'s
+  engine shell-out, so there is no injection point that leaves the vendored source
+  unmodified, the same adjudication as `stage_computecost.m`) and the golden settled it:
+  `processListing.m:85-88` OVERWRITES `langMapConf`'s values with alphabetical positions,
+  so the writer labels score column ii with the ii-th alphabetical composed
+  `[lang '_' dial]` key regardless of the file's ids (MATLAB/Octave `keys()` returns ASCII
+  byte order -- verified live, 'Aaa_01' < 'aaa_11'; Python's code-point `sorted()` agrees
+  on ASCII keys). The underscore composition is itself load-bearing: `write_scores`' dial
+  slice (`tmp(end-2:end)`, Test_BLSTM.m:265) sees the underscore for a 2-char dial, so
+  'aaa_11' renders as 'aaa-_11', NOT 'aaa-11' -- a genuine legacy composition artifact
+  reproduced, not fixed. *Pinned by:* `tests/test_phase4d_scr.py` (byte-exact vs
+  `tests/reference_data/phase4d/scr/expected.scr` on the oracle libm, canary-gated off it;
+  `test_class_id_order_fails_golden` is the mutation check -- the OLD id order must FAIL
+  the golden, proven non-vacuous by a mapping whose ids are deliberately not in
+  alphabetical order).
+
+- **[4d] `num2str(val,'%15.15f')` == Python `%.15f` byte-for-byte, and the `.scr` writer
+  receives ALREADY-DECODED LID scores (the `>150` sentinel is applied upstream, not in
+  the writer)** (`src/python/speech/drivers/test.py::write_scores`; legacy
+  `Test_BLSTM.m:261-266`, `ComputeCost.m:708`, `CostFunction.m:409`). Two facts the Octave
+  golden settled, no port-side change needed: (1) `num2str` applies the format via sprintf
+  then trims spaces; `%15.15f`'s width 15 is strictly less than the minimum rendered length
+  (every softmax output is `0.` + 15 decimals = 17+ chars, and the values are non-negative
+  by construction), so the width padding NEVER fires and the trim is a no-op -- the 4c
+  `%.15f` choice was already byte-correct across all probed magnitudes (a 250/250 tie pair,
+  a near-zero 1.58e-6, exp(0), and a many-decimal softmax quotient). (2) The in-band
+  `targetLID` sentinel (`>150 -> value-200`) is decoded at `ComputeCost.m:708` BEFORE
+  `CostFunction.m:409` assigns `PS.VP.BP.LIDscoreDet`, so `scores_test` reaches the writer
+  already decoded and the writer block contains no sentinel handling of its own -- the
+  stage injects a raw 250.0 (> 150) and the golden shows `exp(2.5)`, not `exp(0.5)`,
+  making the pass-through observable. The port mirrors this split: `_decode_lid_scores`
+  decodes, `write_scores` does not. Also pinned: MATLAB `sortrows(x',-1)` descending is
+  STABLE (the 250/250 tie preserves original column order; numpy `argsort(-s,
+  kind="stable")` agrees). *Pinned by:* `tests/test_phase4d_scr.py::
+  test_write_scores_matches_octave_golden_bytes` + `test_tie_break_is_stable_original_column_order`
+  vs `tests/reference_data/phase4d/scr/expected.scr`.
+
+- **[4d] Task 12: SIX specific vec2struct mask-VECTOR arms (per-block LSTM weight masks,
+  the output-layer neuron mask, NormalizeInputMean/Std) + `_fmt_scalar` boundary
+  formatting -- CLOSED for the arms actually exercised, no port fix needed (4c T8
+  accepted debt).** The 4c T8 final review flagged two
+  transcribed-but-uncovered items: (a) the per-block LSTM weight masks, output-layer neuron
+  mask, and NormalizeInputMean/Std masks (`src/python/speech/genome.py::_nn_block`/
+  `_output_neuron`/`_lstm_and_output`) were ported from `vec2struct.m` but only exercised
+  through `Force_Symetry`/`Force_Identical_Rows` (which tie blocks to EACH OTHER, never hit
+  a raw `isfield(maskStruct, fieldName)` vector branch); (b) `_fmt_scalar`'s `%d`/`%15.15e`
+  boundary formatting had no explicit unit table, only incidental coverage via whole-config
+  string comparisons. Both closed by a new `vecmask` vec2struct case (`tools/octave_harness/
+  stage_vec2struct.m`) that masks six fields in isolation -- `Forward_Layer_0_LSTMBlock_0_
+  InputGateWeights` (13-row gate layout), `Forward_Layer_0_LSTMBlock_1_CellWeight` (9-row
+  narrow peephole-free layout, the CellWeight parity hazard), `Backward_Layer_0_LSTMBlock_0_
+  OutputGateWeights` (Backward direction), `Output_Layer_1_Neuron_0_Weights` (ii=2, so the
+  `Force_Identical_Rows` ii==1 repmat branch never shadows it), and `NormalizeInputMean`/
+  `NormalizeInputStd` (Std's mask is deliberately signed to hit the abs() asymmetry:
+  `vec2struct.m:933-938` stores `abs(mask)` in both the config field and the out_param
+  write-back, unlike Mean which passes the (equally signed) mask through unmodified aside
+  from the `(field+1)/2` encode) -- plus a direct real-`printConfig.m` probe
+  (`fmt_scalar_boundaries.config`) over 18 boundary values (integers incl. -0 and a
+  1234567890123-magnitude exact integer that must not flip to e-notation, negatives, the
+  1e-5/1e+5 magnitude boundaries on both sides, a `round(v)==v` near-integer decode edge
+  `2.9999999999999996`, and 15-significant-digit fractions). Every arm matched the real
+  `vec2struct.m`/`printConfig.m` output bit-exact/string-exact on the first run (verified by
+  independently hand-deriving each arm's expected out_param slice from the walk order --
+  see `task-12-report.md` -- before wiring the golden, not by trusting the port's own
+  output): no divergence, no port change. *Pinned by:* `tests/test_phase4c_genome.py::
+  test_vecmask_arm_writes_expected_slice` (6 arms) + `test_vecmask_arms_are_non_vacuous_vs_
+  unmasked` + `test_normalize_std_mask_applies_abs_asymmetry` + `test_fmt_scalar_boundary_
+  matches_octave` (18 boundary values) + the generic `CASES`-parametrized count/config/
+  out_param tests now covering `vecmask` too. *Mutation:* dropping the Std mask's `abs()`
+  (`field = self._mget_v(...)` instead of `np.abs(self._mget_v(...))`) fails both
+  `test_out_param_inverse_matches[vecmask]` and `test_vecmask_arm_writes_expected_slice
+  [NormalizeInputStd]` -- confirming the golden is non-vacuous, not merely present.
+  **Scope note (not closed by this entry):** two other vector-mask sites in `genome.py`
+  stay UNEXERCISED -- `_padding_block` (`:317-327`, backing `AlgName_speech_padding`/
+  `AlgName_min_silence`/`AlgName_min_speech`) and the `AlgName_TDC_lags` mask (`:552-555`,
+  `np.minimum(self._mget_v(...), thresh)`). Phase 4d is the last roadmap phase, so there
+  is no future phase to hand this to; it is recorded here as a permanent, honest gap
+  rather than folded into the "CLOSED" claim above.
+
+### Mutation battery (Phase 4d)
+
+- **[phase4d] Mutation battery (Task 14): 7 of 8 mutations break their named golden as
+  designed; item 7 is a targeted comparator demonstration (not an apply/revert
+  production mutation), and it confirms the structural gate is load-bearing -- no gap.**
+  Each production mutation applied/run (named suite only, FOREGROUND)/reverted
+  (`git checkout --`)/re-run in isolation; tree confirmed clean (`git status --porcelain`)
+  between every step. (1) OpenSAD15 collar `2.0`->`1.0` (`src/python/speech/dataprep/
+  opensad15.py::convert_tab_file`, SIX `SegsExcl` guard-band sites, not five as first
+  reported (final-review correction): the two `:149`/`:159`-style `beg_f - 2.0`
+  leading-collar sites, the THREE `:151`/`:157`/`:161`-style `end_f + 2.0`
+  trailing-collar sites, and the `:154` re-open threshold `beg_f - 2.0 - 0.1`. The `:157`
+  occurrence (the close-then-reopen `if` arm's trailing collar) is OUTPUT-INERT on this
+  fixture's corpus -- always overwritten before read, so mutating it alone produces
+  byte-identical output either way; the mutation as applied changed the literal
+  site-wide, so the other five sites still carried the FAILED verdict below)
+  against `tests/test_phase4d_opensad15.py` -- FAILED as expected (6 of 27: all 5
+  `test_convert_tab_file_matches_hand_computed_fixture` cases plus
+  `test_process_opensad15_writes_xml_stm_and_listing`, each an STM excluded-region
+  boundary-time mismatch, e.g. case1 `1.4118` (mutated) vs `2.4118` (golden)); reverted,
+  PASS. (2) S/RI filter widened: added an `or (len(label) == 2 and label.startswith("S"))`
+  arm to `convert_tab_file`'s `:113` filter (accepting 2-char `S`-prefixed labels like
+  `"SP"`, previously excluded) against the same suite -- FAILED as expected, exactly the
+  named catcher `test_case4_filter_excludes_non_s_non_ri_labels` (`assert 3 == 2`, the
+  excluded `"SP"` row now contributes a segment) plus the case4 fixture golden; reverted,
+  PASS. (3) `audio_path[:-5]` -> `audio_path[:-4]` (`convert_tab_file:117`, the XML
+  `AudioDoc` stem) against the same suite -- FAILED as expected (7 of 27: the named
+  `test_case5_extension_length_quirk_truncates_stem` plus all 5 fixture cases and the
+  process-driver test, since every stem now truncates one character short); reverted,
+  PASS. (4) Light-normalizer filler regex dropped: removed the `(euh|hm+|mm+|eh|huhum|
+  hum)` cascade entry (`src/python/speech/dataprep/stm_normalize.py::_LIGHT_SUBS`, the
+  `:29`-sourced tuple) against `tests/test_phase4d_stm.py` -- FAILED as expected, the
+  named `test_light_filler_class1_adjacent_tokens_alternate` plus the byte-oracle
+  `test_normalize_stm_light_matches_perl_oracle[case2]` (the fixture's `hm mm eh huhum
+  hum` line, now left unfiltered); reverted, PASS. (5) `write_listing` fliplr stride
+  off-by-one: `_worker_positions`'s `range(a, 0, -nb_workers)` -> `range(a, 0,
+  -(nb_workers - 1))` (`src/python/speech/batching.py:159`) against
+  `tests/test_phase4d_listing_writers.py` -- FAILED as expected, the named
+  `test_worker_positions_hand_derived` (`_worker_positions(7,1,3)` now `[0,2,4,6]` vs the
+  hand-derived `[0,3,6]`) plus the golden shard bytes and the partition non-vacuity check
+  (now double-covers file 0 and skips file 4); reverted, PASS. (6) Augment noisetype
+  ladder boundary moved: `elif noisetype < 2` -> `elif noisetype < 2.5`
+  (`src/python/speech/dataprep/augment.py::draw_variant:104`, the pink/tpdf rung) against
+  `tests/test_phase4d_augment.py` -- FAILED as expected, exactly the named
+  `test_draw_variant_noisetype_ladder[4-tpdfnoise]` (seed 4's draw `2.0453...` now
+  resolves to `"pinknoise"` instead of `"tpdfnoise"`); reverted, PASS. (8) Batch-mode
+  rotation wiring bypassed: `_BatchRunner.next_listing`'s `batch, _ =
+  get_new_batch(self.batches)` -> `batch = list(self.last_index) if
+  self.last_index.size else get_new_batch(self.batches)[0]` (`src/python/speech/drivers/
+  train.py:170`, reusing the prior step's index instead of rotating) against
+  `tests/test_phase4d_batchmode.py` -- FAILED as expected, exactly the named
+  `test_batch_listing_bytes_rotates_across_steps` (step 1's index stayed `[0,1]` instead
+  of advancing to `[2,3]`); reverted, PASS.
+  *Item 7* (parity structural assert weakened) is not a production mutation by
+  construction -- the brief's own alternative framing (craft a flipped fixture COPY,
+  point a temporary test-local comparison at it) was used since the assert in question
+  lives in a *test* (`tests/test_phase4d_parity.py::test_vrcts_structural_and_boundaries`),
+  not production code: a COPY of `tests/reference_data/phase4d/parity_tupleA_vrcts_
+  chan1.xml` had its trailing `<SpeechSegment stime="56.9852" etime="59.9999">` dropped
+  (a segment-type flip: Speech -> excluded/Other), written to the session scratchpad, the
+  COMMITTED fixture untouched. Two throwaway test functions were appended to
+  `tests/test_phase4d_parity.py` (never committed, reverted via `git checkout --` after
+  the run), both driving the REAL `speech_rs.Engine` over tupleA to get the real 8-segment
+  port output, then diffed against the 7-segment flipped copy: (a) the CURRENT code path
+  (`:168`'s explicit `assert len(port) == len(oracle)`) raised `AssertionError: ...
+  STRUCTURAL count mismatch port=8 oracle=7` as expected -- the gate FAILS on the flipped
+  copy, confirmed via `pytest.raises`; (b) a WEAKENED comparison (the explicit count
+  assert dropped, `zip(port, oracle, strict=True)` relaxed to non-strict `zip`) run
+  against the identical port/flipped-copy inputs raised NOTHING and the test PASSED --
+  non-strict zip silently truncates to the shorter (7-element) side, so the port's extra
+  trailing segment (the dropped-in-legacy regression the flip simulates) goes completely
+  unnoticed. Non-obvious finding: `strict=True` on the per-boundary `zip` (`:170`) is
+  ALSO independently load-bearing for a count mismatch (it raises `ValueError` on its
+  own, redundant with the explicit `:168` assert for a raw length difference) -- but
+  ONLY the explicit assert's non-strict-zip removal in the weakened variant above was
+  needed to demonstrate the pass-through, since dropping just one of the two guards
+  already suffices; the two guards are not fully redundant in general (a REORDERING
+  mutation with an unchanged count would slip past the `:168` count assert but still be
+  caught by strict `zip`'s per-element comparison against `pinned_dt`). Both `assert
+  len(port) == len(oracle)` (:168) and `zip(..., strict=True)` (:170) are therefore
+  independently load-bearing, not decorative; no port-side fix needed, this is a
+  demonstration, not a discovered bug. *Net verdict:* 7 of 8 fresh production mutations
+  break their named golden exactly as designed (item 8 uses catcher-suite numbering `8`
+  per the brief's own list, so this entry skips numeral `7` deliberately, not by
+  omission); item 7's comparator-swap demonstration confirms the structural gate is
+  genuinely load-bearing, closing the brief's requested check with no coverage gap
+  found. Full pytest (`uv run pytest tests`) + `cd src/rust && cargo test` + `./lint_code.sh`
+  ran once at the end, all green (see the Task 14 report,
+  `.superpowers/sdd/task-14-report.md`, for exact commands/logs).
+
+## Complete-as-portable closures (Phase 4d)
+
+Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
+placeholders waiting on a future task. Each entry names the typed bail(s) that make the
+blocked behavior fail loudly (never silently), cites its pinning test, and states
+concretely what would have to exist for the block to lift. Cross-referenced by the
+README roadmap (T15).
+
+- **Cost balances 6-9 (the WER shell-out laws): source LOST, not deferred-portable.**
+  `ComputeCost.m` computes balances 6/7/8/9 by shelling out to an external Python
+  scorer at `/people/gelly/Scripts/xml2wer{,_multi,_list}.py` over `ssh` to named 2015-era
+  lab workstations (`PS.VP.serversname{t.ID}`, hostnames like `UV00000123-P000`).
+  *Evidence:* `legacy/Optimizer_V6.2.2/functions/ComputeCost.m:376-397` (balance==8
+  pre-loop: multi-worker `ssh gelly@<server> "... python /people/gelly/Scripts/
+  xml2wer_multi.py -i <xmlpart> -c <refctmdir> -l <fileList> -d <durmax> -p
+  <BalanceBackProp> ..."`, plus the single-worker fallback at `:396`); `:399-427`
+  (balance==-9 pre-loop, same shape over `xml2wer_list.py -l <listing>.flst -t
+  <PruningThresh>`); `:469-490` (balance==6 branch, the literal shell at `:480`:
+  `system(['python ~/Scripts/xml2wer.py -i xmlpart_%d -c ... -l ... -d ... -p ...'])`);
+  `:491-516` (balance==7, shell at `:504`, same script, `foo.csv` output consumed at
+  `:505-512`); `:517-534` (balance==8's PER-NETWORK branch: no shell of its own, it
+  `load()`s `xmlpart_%d/results.csv` at `:525`, i.e. the OUTPUT the `:396` pre-loop shell
+  produced); `:535-550` (balance==9: no `system()` call at all, but consumes WER-derived
+  `Error_vad` columns 10-14 that only the same `xml2wer` family populates in this
+  codebase -- grouped with 6-8 as "the WER shell-out laws" per this repo's own module
+  map, not independently verified to have a different provenance). Confirmed lost, not
+  just unvendored: `find / -iname "*xml2wer*"` and `find / -iname "*gelly*"` (repo tree
+  and local filesystem, depth-bounded) both return zero hits -- neither the scripts nor
+  a `/people/gelly` home directory exist anywhere on this machine, and `legacy/` is a
+  source-only C++ + `.m` snapshot (no external tooling was ever vendored alongside it).
+  *Typed bail:* `src/python/speech/engine.py:304`, `compute_cost`: `raise ValueError(
+  f"compute_cost ports balances 0/3/4/5/10, got {balance} (6-9 are deferred to 4d)")`.
+  *Pinning test:* `tests/test_phase4c_engine_cost.py::
+  test_compute_cost_rejects_deferred_balances` (`:260-263`), parametrized over
+  `balance in (6, 7, 8, 9)`, asserts `pytest.raises(ValueError, match="deferred to
+  4d")` -- pre-existing, verified still passing.
+  *What it would take:* recovering or rewriting `xml2wer.py`/`xml2wer_multi.py`/
+  `xml2wer_list.py`. The CLI contract is partially reconstructable from the `system()`
+  call sites above (`-i`/`-c`/`-l`/`-d`/`-p`/`-t` flags, a `foo.csv`/`results.csv`
+  output with columns consumed at `ComputeCost.m:485,509,528-529`), but the actual
+  WER-scoring algorithm (word alignment against a CTM/XML reference, pruning) is nowhere
+  in this repo. It would also need a corpus with real word-level CTM references
+  (`PS.VP.refctmdir`) -- every committed fixture carries only STM segment boundaries
+  (SAD/LID labels), no word transcriptions. This is a from-scratch reimplementation
+  against an unknown legacy format with no oracle to validate against; only attemptable
+  if a corpus with matching WER references ever surfaces.
+
+- **Twin pitch second pass: reference-based, structurally diverges from the (ported)
+  base spectral pitch pass -- deferred, portable in principle.**
+  `TwinBlstmSpectralLid`'s pitch second pass (`TDCwindow > 0`) is a DIFFERENT algorithm
+  from `BlstmSpectralSegmenter`'s pitch pass (`tasks/sad.rs`, already ported and
+  golden-tested), not a reusable variant of it. *Evidence:* legacy
+  `TwinBLSTMSpectralLID.cpp:349-614` is the per-channel setup block, executed
+  UNCONDITIONALLY for every mode including 7 (the `if (_Mode != 7)` guard at `:353` is
+  commented out, dead). The pitch sub-block, `:363-403`: `seg._Classification.at(chan) =
+  seg._Reference.at(chan)` (`:367`) then `smoothSegmentation` (`:368`) BEFORE `pitch =
+  this->getPitch(...)` (`:369`) -- pitch is derived from the REFERENCE segmentation, not
+  a forward-pass hypothesis -- then the periodogram is warped in place (`:372-401`,
+  `coeff_homo = pitch/300`) BEFORE the single forward pass that follows at `:617+`.
+  Contrast the ALREADY-PORTED base driver, `BLSTMSpectralSegmenter.cpp:740-804`: pass-1
+  forward (`:740`) -> `results2segmentation` writes the HYPOTHESIS into `seg` (`:751`)
+  -> `getPitch` over that hypothesis (`:758`) -> warp -> pass-2 forward (`:793`, gated
+  `if (pitch > 0)`). The base is a genuine two-pass self-bootstrapping scheme that needs
+  no ground truth (it works on unlabeled audio at inference time); the Twin's version
+  requires `seg._Reference` populated before it can run at all -- a reference-dependent
+  algorithm, not a code-reuse opportunity.
+  *Typed bail:* three call sites in `src/rust/src/tasks/lid.rs`. (a) the shared mode
+  0/1/2/3 path, `get_segmentation` `:2226-2234`: `if let Some(tdc) = s.tdc.as_ref() &&
+  tdc.half_window > 0 { return Err(anyhow!("TwinBlstmSpectralLid: pitch second pass
+  (TDCwindow > 0) not ported (legacy :349-614)")); }`. (b) the mode-7 path,
+  `get_segmentation_mode7` `:1283-1289`, same shape: `"TwinBlstmSpectralLid mode 7:
+  pitch pass (TDCwindow > 0) not ported"`. (c) the mode-4/5/6 path,
+  `get_segmentation_mode456` `:1680-1686`, its OWN independent guard reached BEFORE the
+  shared (a) branch ever runs (`get_segmentation`'s trait entry dispatches
+  `self.mode in {4,5,6}` straight to `get_segmentation_mode456`, `:2212-2214`): `if let
+  Some(tdc) = s.tdc.as_ref() && tdc.half_window > 0 { return Err(anyhow!(
+  "TwinBlstmSpectralLid mode {}: pitch second pass (TDCwindow > 0) not ported",
+  self.mode)); }`. Every committed twin config under
+  `tests/reference_data/phase4b/twin_*.config` ships `BLSTM_TDCwindow 0` (gate off), so
+  none of the three branches had ever been exercised by a golden.
+  *Pinning test:* previously NONE at any site. Added in Task 13: `src/rust/tests/
+  phase4b_twin_golden.rs::pitch_second_pass_bails_wav_modes` (site a),
+  `src/rust/tests/phase4b_twin_mode7.rs::mode7_pitch_second_pass_bails` (site b), and
+  `src/rust/tests/phase4b_twin_golden.rs::pitch_second_pass_bails_mode456` (site c,
+  fix-wave) -- all three override
+  `BLSTM_TDCwindow`/`_TDCshift`/`_TDC_lags`/`_TDC_balance`/`_TDC_windowing_type`/
+  `_TDC_windowing_param` to the same values that activate the BASE driver's ported pitch
+  pass in `phase2b_spectral_golden.rs::pitch_map` (`TDCwindow 0.032 -> TDC_window_size
+  128 > 0`), then assert the `Err` fires with the expected message text. All three pass
+  (`cargo test`, this task); site c's non-vacuity was mutation-checked (guarding on
+  `if false && ...` makes `pitch_second_pass_bails_mode456` fail while
+  `pitch_second_pass_bails_wav_modes` stays green, confirming the two tests exercise
+  distinct call sites, not the same one twice).
+  *What it would take:* transcribing `TwinBLSTMSpectralLID.cpp:349-614` as its own
+  driver path. The low-level pieces are already ported and reusable (`get_pitch` +
+  the periodogram-warp math are the identical routines `BlstmSpectralSegmenter`'s pitch
+  pass already exercises), but the ORDERING is Twin-specific: seed-from-reference +
+  smooth (`Segmentation::set_segments_from`, already landed for Twin mode 4) must run
+  BEFORE the first and only forward pass, and the warp must land on
+  `audio.periodogram`/`_FilterBankedPeriodogram`/`_CepstreCoefficients` before
+  `getBLSTMInputSequence` is (re)built. Needs a new golden: a twin config with
+  `TDCwindow > 0` plus a real reference segmentation wired through `refs`, and harness
+  (`tools/oracle_harness` `TwinProbe`) support for the reimpl-swap under this path. No
+  missing external data -- this closure is portable, just not yet scheduled.
+
+- **Mode-7 WAV/CNN arm: broken-as-committed since Phase 2 -- deferred until the CNN
+  itself is fixed (out of current scope).**
+  `TwinBlstmSpectralLid`'s Mode-7 WAV arm runs `_LIDConvNeuralNetwork`, the SAME
+  Convolutional net excluded since Phase 2 for being broken-as-committed (see the
+  `[phase2] CNN is broken-as-committed` entry above, `~line 593`: empty `_Layers`
+  indexed on every real-config LID run is UB, the weights are orphaned/unserializable,
+  `feedBackward` returns nothing). *Evidence:* legacy `TwinBLSTMSpectralLID.cpp:903-1193`
+  (the `abs(_Mode)==7` branch), specifically `:922-963`:
+  `if (audio.hasReadWavFile()) { ... _LIDConvNeuralNetwork.feedForward(inputCNN);
+  inputSeq = _LIDConvNeuralNetwork.getOutputMatrix(); ... }` (the CNN call itself at
+  `:927-928`). The `[phase4b]` entries earlier in this file (`~2027-2060`, `~2195+`)
+  already name this arm as deferred alongside the pitch pass.
+  *Typed bail:* `src/rust/src/tasks/lid.rs`, `get_segmentation_mode7` `:1276-1280`: `if
+  audio.periodogram.is_none() { return Err(anyhow!("TwinBlstmSpectralLid mode 7: wav arm
+  runs the CNN (not ported); only File_Type 1 (phSeq) supported (legacy :922-963)")); }`
+  -- `audio.periodogram.is_some()` is the port's proxy for `!hasReadWavFile()`, so
+  `is_none()` <-> a real wav decode <-> the CNN arm.
+  *Pinning test:* previously NONE -- every existing Mode-7 golden in `phase4b_twin_
+  mode7.rs` uses the phSeq corpus (`corpus_phseq/s{1,2,3}.phSeq`), which never reaches
+  this branch. Added in Task 13: `src/rust/tests/phase4b_twin_mode7.rs::
+  mode7_wav_arm_bails_cnn_not_ported`, feeding a real wav decode (`corpus_lid/f1.wav`,
+  `file_type=0` -> `periodogram: None`) into the mode-7 driver and asserting the `Err`
+  mentions "CNN". Passes (`cargo test`, this task).
+  *What it would take:* fixing the Phase-2-excluded CNN first (the `_Layers` ctor guard,
+  the orphaned-weight serialization, the missing `feedBackward` return) -- out of scope
+  per the locked Phase 2 spec decision. No real `lid.config` in this repo (including the
+  vendored `configs/legacy/LID_BLSTM.config`) ever configures CNN keys; LID always runs
+  via phSeq, so there is no evidence this arm was ever exercised even in production
+  legacy runs. Fixing it means inventing correct CNN semantics with no working reference
+  to validate against.
+
+- **Cep ingestion (`File_Type` 2+): no local data anywhere to validate against --
+  deferred pending a corpus that uses it.**
+  `AudioStruct.cpp`'s ctor dispatch (`:36-412`) ports `file_type` 0 (wav, `:36-128`) and
+  1 (phSeq, `:138-182`) only; `:183-412` (file_type 2 cep, 3 phSeq-N variant, 4 mat) is
+  entirely unported. *Evidence:* no committed fixture, `legacy/` corpus, or `dataprep/`
+  output anywhere in this repo carries `.cep`/mat-format audio -- `dataprep/`'s own
+  scope (augmentation, OpenSAD15 conversion, STM normalization, listing writers) never
+  produces or consumes cep files either.
+  *Typed bail:* two call sites. (a) `src/rust/src/audio.rs::read_audio` `:642-646`: `if
+  file_type != 0 { bail!("read_audio: file_type {file_type} not supported (Phase 4b:
+  0=wav, 1=phSeq ported; 2/3/4 unported)"); }` (guards AFTER the file_type==1 phSeq
+  dispatch at `:634-641`, so this specifically catches 2/3/4). (b) `src/rust/src/
+  engine/bag_of_processors.rs::BagOfProcessors::from_configs` `:282-287`: `if file_type
+  != 0 && file_type != 1 { bail!("File_Type {file_type} not ported (Phase 4b): only wav
+  (0) and phSeq (1) are supported"); }` -- the higher-level corpus-bag gate, reached
+  FIRST in the real construction path (the bag never calls `read_audio` for a
+  `File_Type` it hasn't already accepted).
+  *Pinning test:* (b) was already pinned: `engine::bag_of_processors::tests::
+  file_type_2_bails` (inline `#[cfg(test)]`, `src/rust/src/engine/bag_of_processors.rs`,
+  `mod tests` at `:1230`) -- pre-existing, verified still passing. (a) was UNPINNED:
+  since `read_audio` is only ever called from `bag_of_processors.rs` post-gate, its own
+  file_type-2/3/4 branch had no direct test. Added in Task 13: `audio::tests::
+  read_audio_file_type_2_bails` (`src/rust/src/audio.rs`), calling `read_audio` directly
+  with `file_type=2` against a nonexistent path (the bail fires before any file I/O, so
+  no fixture is needed) and asserting the error text contains `"file_type"`. Passes
+  (`cargo test`, this task).
+  *What it would take:* real cep-format (or mat-format) audio fixtures, plus the
+  compiled legacy `AudioStruct` cep reader as an oracle to golden-test against -- neither
+  exists locally, and no committed corpus/listing in this repo references File_Type 2+.
+  Without a live oracle this would be an unvalidatable transcription of dead code (the
+  same objection the module map raises for `dataprep/`'s formerly-all-stub status), so
+  it stays deferred pending a corpus that actually exercises File_Type 2+.
 
 ## Toolchain deviations
 

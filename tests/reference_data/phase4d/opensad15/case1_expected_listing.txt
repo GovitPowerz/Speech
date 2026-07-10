@@ -1,0 +1,1 @@
+corpus/spk1_eng_001.flac;case1.stm;eng;non;1.0;50.0;16.3663;

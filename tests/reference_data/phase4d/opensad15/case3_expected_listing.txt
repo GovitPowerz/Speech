@@ -1,0 +1,1 @@
+corpus/interview03.flac;case3.stm;spa;non;1.0;100.0;95.9;

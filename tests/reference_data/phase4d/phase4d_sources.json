@@ -1,0 +1,41 @@
+{
+  "_comment": "Phase 4d Task 1: provenance for the two independent real 2015 production weight-pack/config tuples closing the Phase-0a packer/adim deferral (no independent legacy golden pack was known to exist at Phase 0a time -- see CLAUDE.md 'Phase 0a status'). Source tree is the full legacy copy at /Users/govit/Git/Govit/FastSpeechProcessing-legacy (READ-ONLY, git-ignored, NOT the same as this repo's vendored legacy/). Tuple A happens to be byte-identical to the already-committed tests/reference_data/phase0/{1_worker_1.config,NNweights_config1.bin} (same production run); Tuple B is a genuinely new, previously-unused artifact from a different Optimizer build/date.",
+  "tuples": {
+    "A": {
+      "source_dir": "Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15",
+      "files": {
+        "tupleA_1_worker_1.config": {
+          "source_path": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/1_worker_1.config",
+          "size_bytes": 2917,
+          "source_mtime": "2015-10-19",
+          "sha256": "475f3f0375e36666f3ef7949b9271c5b991109608bd25f45abdc54d26209363b"
+        },
+        "tupleA_NNweights_config1.bin": {
+          "source_path": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Optimizer_V6.2.2/Executables/15-Oct-2015_BLSTM_OpenSAD15/NNweights_config1.bin",
+          "size_bytes": 269384,
+          "source_mtime": "2015-10-17",
+          "sha256": "959f20477fd4646d14012ed0f01be24c6aeb4f5e05f945b03f3434bc45fa0e6d"
+        }
+      },
+      "note": "Byte-identical to tests/reference_data/phase0/1_worker_1.config and tests/reference_data/phase0/NNweights_config1.bin (verified via sha256 before copying). Element count 33,671 (the familiar Phase-0a shape family: LSTMNeuronNb 23,24,24 / LSTMSubSampling 4,1 / OutputNeuronNb 48,12,1 / NNetInputSize 23)."
+    },
+    "B": {
+      "source_dir": "Optimizer_V6.2.1/Executables/14-Oct-2015_BLSTM_OpenSAD15",
+      "files": {
+        "tupleB_1_worker_1.config": {
+          "source_path": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Optimizer_V6.2.1/Executables/14-Oct-2015_BLSTM_OpenSAD15/1_worker_1.config",
+          "size_bytes": 2720,
+          "source_mtime": "2015-10-15",
+          "sha256": "e449a1c9e2a6e8370df46788d099d87e35b9edc61d948c9f13e33964e3789da3"
+        },
+        "tupleB_NNweights_config1.bin": {
+          "source_path": "/Users/govit/Git/Govit/FastSpeechProcessing-legacy/Optimizer_V6.2.1/Executables/14-Oct-2015_BLSTM_OpenSAD15/NNweights_config1.bin",
+          "size_bytes": 343304,
+          "source_mtime": "2015-10-15",
+          "sha256": "cf798cc5ea766cd2edb6ca93936b9513da93dab273826340555dd6b14186e718"
+        }
+      },
+      "note": "Genuinely new fixture pair, never previously used in this repo. Different Optimizer build (V6.2.1 vs V6.2.2) and a wider front end (NNetInputSize 35 vs 23, nb_DCT 12 vs 4). MEASURED element count 42,911 (LSTMNeuronNb 35,24,24 / LSTMSubSampling 4,1 / OutputNeuronNb 48,12,1 / NNetInputSize 35), cross-checked against the raw file size: (343304 - 16) / 8 = 42911."
+    }
+  }
+}

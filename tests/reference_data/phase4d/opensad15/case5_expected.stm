@@ -1,0 +1,6 @@
+rec0 1 excluded_region 0.5 2.5 toto toto
+rec0 1 rec0 2.5 6.75 toto toto
+rec0 1 excluded_region 6.75 8.75 toto toto
+rec0 1 excluded_region 13.0 15.0 toto toto
+rec0 1 rec0 15.0 19.33 toto toto
+rec0 1 excluded_region 19.33 21.33 toto toto
