@@ -25,8 +25,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 from speech.drivers.init import init_run
-from speech.drivers.train import score_genome, train
-from speech.genome import genome_length
+from speech.drivers.train import (
+    _HYPERPARAM_PENALTY,
+    score_genome,
+    score_hyperparam_genome,
+    train,
+    train_hyperparam_search,
+)
+from speech.genome import genome_length, weight_block_mask
 
 speech_rs = pytest.importorskip("speech_rs")
 
@@ -192,3 +198,82 @@ def test_genome_ponderation_moves_cost(tmp_path_factory: pytest.TempPathFactory)
     assert abs(cost_a - cost_b) > 1e-3, (
         f"distinct genomes decoded to near-identical costs ({cost_a} vs {cost_b}) -- the CostPonderation genome injection may be vacuous"
     )
+
+
+# ---- Phase 5 Task 9: the NARROWED (non-weight) genome search ----------------------------
+#
+# The stronger sibling of `test_genome_ponderation_moves_cost`: with the weight blocks pinned OUT
+# of the genome and the FULL non-weight DSP key set injected (not just the 2 CostPonderation
+# fields), two candidates over the narrowed genome must produce DISTINCT engine configs AND
+# distinct costs. The perturbation stays in the dimension-SAFE front-matter slice (decision
+# thresholds/areas, windowing, DC/preemph/noise -- 12 DSP keys) so the FIXED base net's input
+# dimension is preserved: freely searching the feature-DIMENSION keys against a fixed net is an
+# invalid region the from-scratch search penalizes (exercised by the determinism gate below), not
+# a per-candidate non-vacuity claim.
+_SAFE_FRONT_MATTER_DIMS = 12
+
+
+def test_hyperparam_search_narrowed_distinct_configs_and_costs(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The 4c non-vacuity pattern over the NARROWED genome + FULL key set: two searchable genomes
+    (differing across the safe DSP front-matter slice) injected onto the base produce DISTINCT
+    engine configs AND distinct finite costs. Far stronger than the old 2-key check -- the injected
+    keys are genuine DSP hyperparameters (decision thresholds, windowing, preemph, noise) that
+    reshape the SAD segmentation, not just the calibration ponderation."""
+    tmp = tmp_path_factory.mktemp("hyperparam_nonvac")
+    config = _seed_tier2_spectral(tmp)
+    state = init_run(config, tmp / "run")
+    assert state.algo == 3, "the non-vacuity smoke uses the single-net spectral corpus (real audio)"
+    workdir = Path(state.config_path).parent
+
+    mask, searchable = weight_block_mask(state.ps)
+    n = int(searchable.sum())
+    assert n < genome_length(state.ps) - 1, "the narrowed genome must be SMALLER than the full weight-carrying genome"
+
+    def _front_matter_genome(seed: int) -> np.ndarray:
+        g = np.zeros(n, dtype=np.float64)
+        g[:_SAFE_FRONT_MATTER_DIMS] = np.random.default_rng(seed).uniform(0.0, state.ps.adim, size=_SAFE_FRONT_MATTER_DIMS)
+        return g
+
+    cost_a, _out_a, text_a = score_hyperparam_genome(state, _front_matter_genome(1), mask, searchable, workdir)
+    cost_b, _out_b, text_b = score_hyperparam_genome(state, _front_matter_genome(2), mask, searchable, workdir)
+
+    assert np.isfinite(cost_a) and np.isfinite(cost_b), f"costs must be finite: {cost_a}, {cost_b}"
+    assert text_a != text_b, "distinct hyperparameter genomes must inject DISTINCT engine configs"
+    assert abs(cost_a - cost_b) > 1e-3, (
+        f"distinct DSP hyperparameters decoded to near-identical costs ({cost_a} vs {cost_b}) -- the full-key-set injection may be vacuous"
+    )
+    # the injected configs are forward-only (fixed base weights) and carry no weight matrices.
+    assert "Neural_Networks_BackPropagation_Epochs 0" in text_a
+    assert not any(("_LSTMBlock_" in ln or "NormalizeInput" in ln) for ln in text_a.split("\n"))
+
+
+@pytest.mark.slow
+def test_hyperparam_search_runs_and_is_deterministic(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """`train_hyperparam_search` (QuantumPSO over the narrowed non-weight genome, ps=2/me=2, no
+    inner SMORMS3) runs end to end on the single-net spectral corpus and is DETERMINISTIC: run
+    twice at the same fixed seed, the checkpoints (gbest searchable genome, cost history) are
+    bit-identical. Pins that (a) the narrowed search is runnable despite invalid DSP subregions
+    (penalized, not fatal) and (b) it finds a VALID gbest (below the invalid-region penalty)."""
+
+    def _run_once(tmp: Path) -> tuple[dict[str, bytes], float, int]:
+        config = _seed_tier2_spectral(tmp)
+        state = init_run(config, tmp / "run")
+        _mask, searchable = weight_block_mask(state.ps)
+        result = train_hyperparam_search(state, seed=20260716, qpso_particles=2, qpso_epochs=2)
+        ckpt = Path(result.checkpoint_dir)
+        arts = {name: (ckpt / name).read_bytes() for name in ("gbest.bin", "cost_history.bin")}
+        arts["_best_config"] = (ckpt / "best_hyperparam.config").read_bytes()
+        return arts, result.gbestval, int(searchable.sum())
+
+    a, gbestval_a, n_search = _run_once(tmp_path_factory.mktemp("hyperparam_search_a"))
+    b, gbestval_b, _ = _run_once(tmp_path_factory.mktemp("hyperparam_search_b"))
+
+    assert set(a) == set(b)
+    for name in a:
+        assert a[name] == b[name], f"narrowed-search checkpoint {name!r} is not bit-identical across two fixed-seed runs"
+    assert gbestval_a == gbestval_b
+
+    # the search ran over the narrowed genome and found a VALID config (below the invalid penalty).
+    gbest = np.frombuffer(a["gbest.bin"], dtype="<f8")[2:]  # skip the (rows, cols) header
+    assert gbest.size == n_search, f"gbest must be the narrowed genome ({gbest.size} != {n_search})"
+    assert np.isfinite(gbestval_a) and gbestval_a < _HYPERPARAM_PENALTY, f"the search must find a valid (non-penalty) gbest, got {gbestval_a}"

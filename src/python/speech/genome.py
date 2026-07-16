@@ -956,3 +956,79 @@ def genome_length(ps: RunConfig) -> int:
     w = _Walk(None, None, ps)
     w.run()
     return w.count
+
+
+# ---- Phase 5 Task 9: the non-weight (DSP/config hyperparameter) genome ------------------
+#
+# The modern regime (user-locked, 2026-07-10): network WEIGHTS train by gradient (the modern
+# SMORMS3 loop), so the outer QuantumPSO search must NOT carry them -- it searches DSP/config
+# hyperparameters ONLY. `weight_block_mask` carves the weight/normalize dims out of the genome
+# by DERIVING them from the walk itself (no hardcoded dim counts), so the carve-out tracks the
+# net architecture automatically. This is a DELIBERATE, documented break from the legacy genome
+# (which carried the weights in-band by design) -- see IMPROVEMENTS.md `phase5-qpso-nonweight-genome`.
+
+
+class _MaskTraceWalk(_Walk):
+    """A count-only walk (`param is None`) that records the genome dim ranges consumed by the
+    weight/normalize arms -- the `_nn_block` / `_output_neuron` matrices and the NormalizeInput
+    Mean/Std tail, all of which live inside `_lstm_and_output`. The count advances are param-
+    independent (they depend only on the net sizes), so the zero-arg walk traces the exact same
+    ranges any real genome would consume. Used by `weight_block_mask` to build the searchable-dim
+    selector structurally."""
+
+    def __init__(self, ps: RunConfig) -> None:
+        super().__init__(None, None, ps)
+        self.masked_ranges: list[tuple[int, int, str]] = []  # (start0, stop0, field_key)
+
+    def _nn_block(self, name: str, nb_need: int, fir_ref: str | None, fs_ref: str | None) -> None:
+        start = self.count - 1
+        super()._nn_block(name, nb_need, fir_ref, fs_ref)
+        self.masked_ranges.append((start, self.count - 1, name))
+
+    def _output_neuron(self, name: str, nb: int, ii: int, out_net: list[int], out_sub: list[int]) -> None:
+        start = self.count - 1
+        super()._output_neuron(name, nb, ii, out_net, out_sub)
+        self.masked_ranges.append((start, self.count - 1, name))
+
+    def _lstm_and_output(self, pfx: str, nntype: int, lstm: list[int], lsub: list[int], out_net: list[int], out_sub: list[int]) -> None:
+        super()._lstm_and_output(pfx, nntype, lstm, lsub, out_net, out_sub)
+        # The `_nn_block`/`_output_neuron` sub-ranges are recorded above; the NormalizeInputMean/Std
+        # tail is the LAST 2*inputSize dims of this call (mean then std, each == NNetInputSize), the
+        # only weight/normalize consumption not routed through the two overridden primitives.
+        nb = out_net[0] if lstm[0] == 0 else lstm[0]  # == NNetInputSize, mirroring _lstm_and_output
+        stop = self.count - 1
+        self.masked_ranges.append((stop - 2 * nb, stop - nb, f"{pfx}_NormalizeInputMean"))
+        self.masked_ranges.append((stop - nb, stop, f"{pfx}_NormalizeInputStd"))
+
+
+def weight_block_mask(ps: RunConfig) -> tuple[dict[str, object], NDArray[np.bool_]]:
+    """The permanent weight/normalize mask + the searchable-dim selector, both derived from the
+    vec2struct walk (NO hardcoded dim counts). Returns `(mask, searchable)`:
+
+      * `mask` -- a vec2struct field-name mask pinning every weight-block / normalize-tail FIELD
+        (exactly the cfg keys `printConfig` drops: the `_nn_block`/`_output_neuron` matrices +
+        NormalizeInputMean/Std) to its zero-genome-decoded value. Passed as vec2struct's `mask`
+        arg it forces those fields regardless of the (placeholder) weight dims, so the outer search
+        never touches a network weight. The pinned VALUES are natural decode outputs, so the mask
+        round-trips (`masking_validation` passes); they are irrelevant to the engine anyway -- the
+        weights reach it through the committed `.bin` pack, and printConfig never writes these keys.
+      * `searchable` -- a bool array over the genome's coefficients (length `genome_length-1`), True
+        where the dim feeds a searchable DSP/config hyperparameter (freq bands, windows, LTSV/TDC,
+        decision thresholds, calibration laws, ponderations), False where it feeds a masked
+        weight/normalize field.
+
+    The `mask` key set is `{k for k in cfg if not _printconfig_written(k)}` -- printConfig's OWN
+    weight/normalize classification -- and the `searchable` False-set is the union of the traced
+    `_MaskTraceWalk` ranges; the two agree by construction (every dropped key is a dim-consuming
+    weight/normalize arm, and every such arm's key is dropped), which the T9 tests cross-check."""
+    total = genome_length(ps) - 1
+    w0 = _Walk(np.zeros(total, dtype=np.float64), None, ps)
+    w0.run()
+    mask: dict[str, object] = {k: v for k, v in w0.cfg.items() if not _printconfig_written(k)}
+
+    tw = _MaskTraceWalk(ps)
+    tw.run()
+    searchable = np.ones(total, dtype=bool)
+    for start, stop, _key in tw.masked_ranges:
+        searchable[start:stop] = False
+    return mask, searchable

@@ -3096,6 +3096,46 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (spec S2 step 1: nothing to fail, since the port never reproduced the bug in the first
   place -- a doc-only flip per the sweep's own adjudication, not a code fix).
 
+- **[phase5] The QPSO genome no longer carries network weights -- a DELIBERATE DESIGN BREAK
+  from the legacy genome (Task 9), NOT a fix flip** (`genome.weight_block_mask`/`_MaskTraceWalk`,
+  `drivers/train.build_hyperparam_mask`/`train_hyperparam_search`)
+  **Legacy behavior (still faithfully reproduced by `vec2struct`, untouched):** the legacy
+  optimizer's genome is a flat vector that INTERLEAVES DSP/config hyperparameters with EVERY
+  network weight/bias -- `vec2struct.m`'s `_nn_block`/`_output_neuron` arms decode the LSTM gate
+  + cell matrices and the output-layer neurons straight out of the genome (`coeff_NN*(2p/adim-1)`),
+  and the NormalizeInputMean/Std tail too, so QuantumPSO co-searched the weights alongside the
+  hyperparameters (a candidate's net was SIZED and INITIALIZED from its own genome via the
+  `config2network`/`network2config` round trip). `speech.genome.vec2struct` ports this bit-exactly
+  and its 4c/4d Octave goldens are UNCHANGED by this task (the regression sentinel
+  `test_phase5_genome_narrowing.py::test_vec2struct_4c_goldens_still_byte_green` re-runs them).
+  **The modern-regime decision (user-locked, 2026-07-10):** network weights train by GRADIENT (the
+  modern SMORMS3 loop, Task 8), so the outer QuantumPSO search is narrowed PERMANENTLY to the
+  non-weight (DSP/config) genome -- `build_hyperparam_mask` pins every weight-block + normalize-tail
+  FIELD out via a vec2struct field-name mask, and `train_hyperparam_search` searches only the
+  remaining searchable dims (e.g. the tuple-A/tier2 algo-3 net: 265 total genome dims -> 54
+  searchable; the twin: 504 -> 66). This is a DESIGN DIVERGENCE, not a legacy-bug fix, so the S2
+  RED->re-pin->mutation protocol does not apply (there is no "old behavior" to fail against -- the
+  legacy genome is a different, still-correct object; only its ROLE changed). **Two engine-level
+  consequences, documented not-yet-closed (Phase 6 concern):** (1) the per-candidate eval scores
+  the FIXED base weights forward-only (backprop OFF, `Epochs 0`) -- unlike the legacy, which
+  re-init'd weights per candidate -- so a searchable genome that changes the FEATURE DIMENSION
+  (nb_bins/nb_DCT/deltas) mismatches the fixed net's input size, and one that sets `TDCwindow > 0`
+  hits the Twin's typed-bailed Mode-7 pitch pass; both are INVALID subregions of the DSP space that
+  `train_hyperparam_search` PENALIZES (`_HYPERPARAM_PENALTY = 1e6`, caught incl. the pyo3
+  `PanicException`) rather than crashing on -- a from-scratch search must steer away from invalid
+  regions, but a cleaner fix (re-sizing/re-init'ing the net per candidate, or masking the
+  dimension-defining keys too) is deferred to Phase 6 real training. (2) The generalized injection
+  overlays the FULL decoded non-weight config (every DSP key, not just the 2 legacy
+  `CostPonderation` fields) onto the byte-known-good base; the weights still reach the engine
+  through the base config's committed `.bin` pack, never the genome. *Pinned by:*
+  `tests/test_phase5_genome_narrowing.py` (mask carves EXACTLY the weight/normalize dims -- derived
+  from the walk + an independent net-structure count, no magic numbers; injection covers exactly the
+  non-weight keys; masking_validation passes; the vec2struct sentinel) + `tests/pyo3/test_exit_gate.py`
+  (the narrowed 2-candidate non-vacuity: distinct DSP hyperparameters -> distinct engine configs AND
+  distinct costs; and `train_hyperparam_search` runs deterministically end to end, finding a valid
+  non-penalty gbest). *Oracle-divergence note:* the Octave `vec2struct`/`QuantumPSO` harnesses still
+  describe the legacy weight-carrying genome; the port narrows it by design.
+
 - **[phase4c] `MaskingValidation.m`'s FAIL case exploits a genuine encode/decode asymmetry in
   `vec2struct.m`'s `_padding_block`-family fields for negative mask values** (`vec2struct.m`
   `_padding_block`/`genome.py::_Walk._padding_block`, feeding `AlgName_speech_padding`/

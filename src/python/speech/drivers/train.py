@@ -41,7 +41,7 @@ from speech.batching import Batches, create_batches, get_new_batch, write_weight
 from speech.config_bridge import nnet_spec
 from speech.drivers.state import EpochRecord, ModernTrainParams, ModernTrainResult, RunState, TrainResult
 from speech.engine import CostParams, compute_cost, forward_backward
-from speech.genome import genome_length, vec2struct
+from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
 from speech.optimizers import QpsoParams, Smorms3, quantum_pso
 from speech.scoring import confusion_matrix, masking_validation
@@ -811,3 +811,189 @@ def train_modern(
             break
 
     return _write_history(stopped=stopped_early)
+
+
+# ---- The narrowed outer search (Phase 5 Task 9) -----------------------------------------
+#
+# The modern regime (user-locked, 2026-07-10): network WEIGHTS train by gradient (the modern
+# loop above), so the outer QuantumPSO search is NARROWED to the DSP/config hyperparameter
+# genome ONLY -- the weight-block + normalize-tail dims are pinned OUT of the genome permanently
+# by `build_hyperparam_mask`. This is a DELIBERATE, documented break from the legacy genome (which
+# carried the weights in-band by design); the legacy `train` above is byte-untouched as the
+# legacy-regime driver. See IMPROVEMENTS.md `phase5-qpso-nonweight-genome`.
+
+
+def build_hyperparam_mask(ps: RunConfig) -> dict[str, object]:
+    """The PERMANENT weight-block + normalize-tail vec2struct mask: every network weight/bias
+    matrix (`_nn_block`/`_output_neuron`) and the NormalizeInputMean/Std tail pinned out of the
+    QPSO genome, so the outer search touches ONLY DSP/config hyperparameters. Derived from the
+    walk (`genome.weight_block_mask`) -- no magic dim counts, so it tracks the net architecture
+    automatically. Consumed by `masking_validation` (the round-trip gate) and by vec2struct (the
+    per-candidate decode)."""
+    mask, _searchable = weight_block_mask(ps)
+    return mask
+
+
+def _hyperparam_config_text(base: dict[str, str], config_struct: dict[str, str], algo: int) -> str:
+    """Overlay the FULL vec2struct-decoded non-weight config (`config_struct` -- printConfig has
+    already stripped the weight/normalize matrices) onto the byte-known-good base config,
+    FORWARD-ONLY (backprop OFF, `Epochs 0`) so the search scores the FIXED base weights against
+    the genome's DSP hyperparameters (no engine-internal training). The generalized sibling of
+    `_eval_config_text` (which injects only the 2 `CostPonderation` fields): here EVERY searchable
+    DSP key -- freq bands, windows, LTSV/TDC, decision thresholds, calibration laws, ponderations
+    -- is injected. `dict(base)` preserves base key positions (byte-stable ordering, the same trick
+    `_eval_config_text` uses); decoded keys overwrite in place / append. The weights reach the
+    engine through the base config's committed `.bin` pack (`weightsFile`), untouched."""
+    cfg = dict(base)
+    for k, v in config_struct.items():
+        cfg[k] = v
+    cfg["BLSTM_BackPropagationActivated"] = "false"
+    if algo == 6:
+        cfg["BLSTM_LID_BackPropagationActivated"] = "false"
+    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
+    return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
+
+
+# A candidate whose decoded DSP config drives the FIXED base net into an invalid region (a
+# feature dimension the net was not sized for, or an engine path the port typed-bails, e.g. the
+# Twin's Mode-7 pitch pass) is PENALIZED, not fatal -- the from-scratch search must steer away
+# from invalid subregions of the DSP space, not crash on them. The penalty exceeds any real
+# balance-law cost (~O(100)), so an invalid particle can never become the QPSO gbest.
+_HYPERPARAM_PENALTY = 1.0e6
+
+
+def _decode_hyperparam(
+    state: RunState,
+    reduced: NDArray[np.float64],
+    mask: dict[str, object],
+    searchable: NDArray[np.bool_],
+) -> tuple[str, NDArray[np.float64]]:
+    """The PURE (engine-free, never-crashing) half of a candidate eval: scatter the searchable-space
+    genome `reduced` into the full vec2struct genome (masked weight dims filled with 0 -- the mask
+    overrides them regardless), decode WITH the permanent weight mask, and inject the full non-weight
+    config onto the base. Returns `(injected_config_text, reduced_out_param)` -- the searchable-space
+    out_param (the sortrows/clamp write-back at the searchable positions; the masked positions carry
+    only the mask inverse-encode and are dropped)."""
+    full = np.zeros(searchable.shape[0], dtype=F64)
+    full[searchable] = np.asarray(reduced, dtype=F64)
+    config_struct, out_param, _ = vec2struct(full, mask, state.ps, 0)
+    text = _hyperparam_config_text(state.base_config, config_struct, state.ps.algo)
+    return text, out_param[searchable].copy()
+
+
+def score_hyperparam_genome(
+    state: RunState,
+    reduced: NDArray[np.float64],
+    mask: dict[str, object],
+    searchable: NDArray[np.bool_],
+    workdir: Path,
+) -> tuple[float, NDArray[np.float64], str]:
+    """One narrowed-QPSO candidate's forward-only cost (the `cost_fn` per-particle body). Decode the
+    searchable-space genome (`_decode_hyperparam`), then score the engine fold with FIXED base weights
+    (no inner SMORMS3, no engine-internal training -- backprop OFF, `Epochs 0`). Returns
+    `(cost, reduced_out_param, injected_config_text)`; the config text is returned for the non-vacuity
+    pin (distinct hyperparameters -> distinct engine configs). Self-contained (chdirs into `workdir`
+    itself), like `score_genome`. Raises through any engine failure -- `train_hyperparam_search`'s
+    cost_fn is the layer that penalizes an invalid candidate."""
+    import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+    text, reduced_out = _decode_hyperparam(state, reduced, mask, searchable)
+    with _chdir(workdir):
+        (workdir / "_hyperparam_eval.config").write_text(text)
+        engine = speech_rs.Engine(["_hyperparam_eval.config"], "-m")
+        engine.run()
+        results = np.asarray(engine.results_matrix(), dtype=F64)
+    cost, _ = compute_cost(results, 1, state.balance, CostParams(mode=0, balance_backprop=state.ps.BalanceBackProp, algo=state.ps.algo))
+    return float(cost), reduced_out, text
+
+
+def train_hyperparam_search(
+    state: RunState,
+    seed: int,
+    *,
+    qpso_particles: int = 24,
+    qpso_epochs: int = 100,
+    seed_value: NDArray[np.float64] | None = None,
+) -> TrainResult:
+    """The NARROWED outer search (Phase 5 Task 9): QuantumPSO over the DSP/config hyperparameter
+    genome ONLY -- network weights pinned out by `build_hyperparam_mask`, trained separately by
+    gradient (`train_modern`). Each candidate is scored FORWARD-ONLY against the fixed base weights
+    (`score_hyperparam_genome`); there is NO inner SMORMS3 and NO `backprop_refine` (the modern
+    regime does not train weights inside the search, `backprop_activated=0`). Deterministic under a
+    single fixed-seed numpy `Generator`. Checkpoints the gbest searchable genome + the QPSO cost
+    history + the best decoded engine config (feed it to `train_modern` for the weight training).
+
+    Distinct from the legacy `train` (byte-untouched, `mask=None` -> the full weight-carrying genome
+    + 2-key `CostPonderation` injection): this searches the PERMANENTLY narrowed genome."""
+    ps = state.ps
+    mask, searchable = weight_block_mask(ps)
+    n_search = int(searchable.sum())
+
+    # MaskingValidation gate on the narrowed mask (Train_BLSTM.m:621-626 analogue): the mask must
+    # round-trip. Full-length param (matching `train`'s size=genome_length convention), its own rng.
+    gate_rng = np.random.default_rng(seed + 1)
+    if masking_validation(gate_rng.uniform(0.0, ps.adim, size=genome_length(ps)), mask, ps):
+        raise ValueError("MaskingValidation failed: the narrowed hyperparameter mask does not round-trip on this ps")
+
+    workdir = Path(state.config_path).parent
+    ckpt_dir = Path(state.out_dir) / "checkpoint"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    def cost_fn(positions: NDArray[np.float64], _mode: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        pos = np.atleast_2d(np.asarray(positions, dtype=F64))
+        costs = np.empty(pos.shape[0], dtype=F64)
+        out = np.empty_like(pos)
+        for i in range(pos.shape[0]):
+            try:
+                cost, reduced_out, _text = score_hyperparam_genome(state, pos[i], mask, searchable, workdir)
+            except BaseException as exc:  # noqa: BLE001 -- must catch the pyo3 PanicException (a direct BaseException subclass)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                # invalid DSP config (feature-dim mismatch / a typed-bailed engine path): penalize so
+                # QPSO steers away. out_param is the PURE vec2struct write-back (decode never crashes).
+                cost = _HYPERPARAM_PENALTY
+                _text, reduced_out = _decode_hyperparam(state, pos[i], mask, searchable)
+            costs[i] = cost
+            out[i] = reduced_out
+        return costs, out
+
+    params = QpsoParams(
+        ps=qpso_particles,
+        me=qpso_epochs,
+        ac1=2.1,
+        ac2=2.1,
+        iw1=0.9,
+        iw2=0.6,
+        iwe=qpso_epochs,
+        ergrd=1e-99,
+        ergrdep=500,
+        errgoal=float("nan"),
+        trelea=3,
+        pso_seed=1 if seed_value is not None else 0,
+        minmax=0,
+        vr=np.column_stack([np.zeros(n_search), np.full(n_search, ps.adim)]),
+        mv=np.full(n_search, ps.adim / 2.0),
+        seed_value=seed_value,
+        backprop_activated=0,  # no weight refinement in the narrowed search
+    )
+
+    with _chdir(workdir):
+        result = quantum_pso(cost_fn, params, n_search, np.random.default_rng(seed))
+        # the best decoded engine config (feed to train_modern for the weight training)
+        _cost, _out, best_text = score_hyperparam_genome(state, np.asarray(result.gbest, dtype=F64), mask, searchable, workdir)
+
+    gbest = np.asarray(result.gbest, dtype=F64)
+    cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
+    write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
+    write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
+    (ckpt_dir / "best_hyperparam.config").write_text(best_text)
+
+    tr = TrainResult(
+        gbest=[float(x) for x in gbest],
+        gbestval=float(result.gbestval),
+        cost_history=[float(x) for x in cost_hist],
+        inner_cost_history=[],
+        checkpoint_dir=str(ckpt_dir),
+    )
+    (ckpt_dir / "checkpoint.json").write_text(tr.model_dump_json(indent=2))
+    return tr
