@@ -15,6 +15,7 @@ benefit (the task brief's stated preference).
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -22,7 +23,16 @@ from speech.batching import read_listing
 from speech.config_bridge import parse_legacy_config
 from speech.genome import LidNetSpec, RunConfig
 
-__all__ = ["LidNetSpec", "RunConfig", "RunState", "TrainResult", "ps_from_config"]
+__all__ = [
+    "EpochRecord",
+    "LidNetSpec",
+    "ModernTrainParams",
+    "ModernTrainResult",
+    "RunConfig",
+    "RunState",
+    "TrainResult",
+    "ps_from_config",
+]
 
 
 def _ints(cfg: dict[str, str], key: str) -> list[int]:
@@ -164,4 +174,59 @@ class TrainResult(BaseModel):
     gbestval: float
     cost_history: list[float]
     inner_cost_history: list[float]
+    checkpoint_dir: str
+
+
+class ModernTrainParams(BaseModel):
+    """Driver-side knobs for `drivers.train.train_modern` -- the MODERN loop (from-scratch
+    seeded init + SMORMS3 epochs + forward-only validation + early-stop). These are ALL
+    driver-side (there are NO engine `.config`/TOML keys for them; the `[training]` section
+    in `configs/lid/lid_blstm.toml` is a commented CONVENTION example only, never parsed by
+    the engine). `epochs` is the TOTAL target (resume continues toward it, not `+epochs`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    epochs: int = 50  # total epochs (resume continues toward this)
+    patience: int = 5  # early-stop after this many epochs with no validation-cost improvement
+    steps_per_epoch: int = 10  # SMORMS3 steps per epoch (no LR schedule; fresh optimizer per epoch)
+    valid_listing: str | None = None  # validation fileslisting (rel to config dir); None -> reuse the training listing
+    # hard-example mini-batching (Task 4/5 fixed batching); minibatch == 0 -> full-corpus training per epoch.
+    minibatch: int = 0
+    nb_worst: int = 0
+    nb_classes: int = 1
+    multilingual: bool = False
+    # from-scratch seeded init (Task 3 `init_weights`); ignored when `resume_from` is set.
+    init_scheme: Literal["xavier", "he"] = "xavier"
+    init_seed: int = 0
+    forget_bias_one: bool = True
+    resume_from: str | None = None  # checkpoint dir to resume from (loads last_*.bin + train_history.json); None -> from-scratch
+
+
+class EpochRecord(BaseModel):
+    """One epoch's recorded metrics in `train_history.json`. `confusion_error` is the
+    FIXED (F5) confusion misclassification rate on the validation set (algo 6 only; `None`
+    for the single-net SAD algos, which carry no LID confusion)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    epoch: int
+    train_cost: float
+    val_cost: float
+    confusion_error: float | None
+    is_best: bool
+
+
+class ModernTrainResult(BaseModel):
+    """`train_modern`'s outcome + the checkpoint location (also serialized to
+    `train_history.json` for resume). Distinct from `TrainResult` (the QPSO-shaped legacy
+    outcome): the modern loop has no genome, so `gbest`/`gbestval` would be meaningless --
+    this carries the best-epoch selection, the per-epoch history, and the early-stop flag."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    best_epoch: int
+    best_val_cost: float
+    epochs_run: int
+    stopped_early: bool
+    history: list[EpochRecord]
     checkpoint_dir: str

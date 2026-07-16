@@ -29,7 +29,7 @@ the returned gradient, so SMORMS3 only ever steps the trainable head.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,12 +38,19 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
-from speech.drivers.state import RunState, TrainResult
+from speech.config_bridge import nnet_spec
+from speech.drivers.state import EpochRecord, ModernTrainParams, ModernTrainResult, RunState, TrainResult
 from speech.engine import CostParams, compute_cost, forward_backward
 from speech.genome import genome_length, vec2struct
+from speech.init_weights import init_weights
 from speech.optimizers import QpsoParams, Smorms3, quantum_pso
-from speech.scoring import masking_validation
-from speech.weight_bridge import write_bin
+from speech.scoring import confusion_matrix, masking_validation
+from speech.weight_bridge import read_bin, write_bin
+
+# Modern-loop hook types (Phase 5 Task 8): the engine-backed defaults are injectable so the
+# state machine is unit-testable against a stub -- see `train_modern`.
+TrainEpochFn = Callable[[list[NDArray[np.float64]], int], tuple[list[NDArray[np.float64]], float]]
+ValidateFn = Callable[[list[NDArray[np.float64]], int], tuple[float, float | None]]
 
 F64 = np.float64
 
@@ -314,7 +321,8 @@ def _backprop_inner(
     engine: object,
     inner_steps: int,
     tails: list[int],
-    batch: _BatchStep | None = None,
+    batch: _BatchStep | _ModernBatchStep | None = None,
+    seed_weights: list[NDArray[np.float64]] | None = None,
 ) -> tuple[list[NDArray[np.float64]], list[float]]:
     """`BackPropagation.m`'s inner SMORMS3 loop over the `[sad]` (algo 3/4/5) or `[sad, lid]`
     (algo 6) weight cells.
@@ -328,8 +336,13 @@ def _backprop_inner(
 
     `batch` (Phase 4d): when set, each SMORMS3 step draws a fresh mini-batch listing and
     rebuilds the engine on it (`ComputeGradient.m`'s per-gradient GetNewBatch + fresh-fsp);
-    when None, all steps run the passed engine's fixed full corpus (the 4c path)."""
-    full = engine.weights(0)  # type: ignore[attr-defined]
+    when None, all steps run the passed engine's fixed full corpus (the 4c path).
+
+    `seed_weights` (Phase 5 Task 8): when set, SMORMS3 starts from THESE weights instead of
+    the engine's config-seeded pack -- the modern loop threads the current epoch's weights
+    in (init or the previous epoch's trained weights) so each epoch continues from where the
+    last left off. `None` preserves the 4c/4d behavior exactly (read the pack off `engine`)."""
+    full = seed_weights if seed_weights is not None else engine.weights(0)  # type: ignore[attr-defined]
     n = len(tails)
     fulls = [np.asarray(full[k], dtype=F64) for k in range(n)]
     net_tails = [fulls[k][len(fulls[k]) - tails[k] :].copy() for k in range(n)]
@@ -549,3 +562,252 @@ def train(
     )
     (ckpt_dir / "checkpoint.json").write_text(tr.model_dump_json(indent=2))
     return tr
+
+
+# ---- The modern training loop (Phase 5 Task 8) ------------------------------------------
+#
+# Distinct from `train` (the legacy QuantumPSO-outer + SMORMS3-inner over the vec2struct
+# genome): `train_modern` is a from-scratch SEEDED-init loop -- SMORMS3 epochs over the
+# (batch-mode) training corpus, per-epoch FORWARD-ONLY validation on a held-out listing,
+# early-stop on validation-cost patience, best+last checkpoints. NO genome, NO QuantumPSO,
+# NO LR schedule; each epoch runs a FRESH SMORMS3 from the current weights (so the weights
+# fully capture the trainable state, which is what makes resume-from-`last_*.bin` clean).
+
+
+def _net_names(algo: int) -> list[str]:
+    """The per-net checkpoint suffixes: `[sad]` for the single-net algos, `[sad, lid]` for
+    the algo-6 Twin (same net count as `_tail_lengths`)."""
+    return ["sad", "lid"] if algo == 6 else ["sad"]
+
+
+def _save_ckpt(ckpt_dir: Path, prefix: str, weights: list[NDArray[np.float64]], net_names: list[str]) -> None:
+    """Write one `<prefix>_<net>.bin` per net (the column-major `.bin` codec, same as
+    `train`'s `sad_weights.bin`)."""
+    for name, w in zip(net_names, weights, strict=True):
+        arr = np.asarray(w, dtype=F64)
+        write_bin(arr.shape[0], 1, arr, ckpt_dir / f"{prefix}_{name}.bin")
+
+
+def _resume(resume_from: Path, algo: int) -> tuple[list[NDArray[np.float64]], list[EpochRecord], float, int, int]:
+    """Reload the checkpoint written by a prior `train_modern`: the `last_<net>.bin` weights
+    + the `train_history.json` bookkeeping (history, best cost/epoch, epochs already run).
+    Returns `(weights, history, best_val, best_epoch, start_epoch)`; `start_epoch` is the
+    number of epochs already run, so the loop continues toward `params.epochs` (the TOTAL)."""
+    rd = Path(resume_from)
+    prev = ModernTrainResult.model_validate_json((rd / "train_history.json").read_text())
+    weights = [np.asarray(read_bin(rd / f"last_{name}.bin")[2], dtype=F64) for name in _net_names(algo)]
+    return weights, list(prev.history), prev.best_val_cost, prev.best_epoch, prev.epochs_run
+
+
+def _init_weights_from_scratch(state: RunState, params: ModernTrainParams) -> list[NDArray[np.float64]]:
+    """Seeded Xavier/He init (Task 3) for each net's flat pack -- `[sad]` for single-net
+    algos, `[sad, lid]` for the Twin. One shared `Generator(init_seed)` draws both nets in
+    order (deterministic)."""
+    rng = np.random.default_rng(params.init_seed)
+    prefixes = ["BLSTM"] + (["BLSTM_LID"] if state.ps.algo == 6 else [])
+    weights: list[NDArray[np.float64]] = []
+    for prefix in prefixes:
+        weights += init_weights(nnet_spec(state.base_config, prefix), rng, params.init_scheme, params.forget_bias_one)
+    return weights
+
+
+def _modern_config_text(base: dict[str, str], algo: int, *, backprop: bool, fileslisting: str | None = None) -> str:
+    """The base config with backprop toggled (both nets) -- `Epochs 1` when ON (one
+    forward/backward the Python loop owns), `Epochs 0` when OFF (a pure forward scoring
+    pass; the backprop flag gates only the gradient, so `engine.run()` still fills the
+    MultiConfigResults cost columns for validation). UNLIKE `_eval_config_text`, this does
+    NOT inject `CostPonderation` -- the modern loop has no genome, so the config's own cost
+    law stands (or the engine's default when the key is absent)."""
+    cfg = dict(base)
+    flag = "true" if backprop else "false"
+    cfg["BLSTM_BackPropagationActivated"] = flag
+    if algo == 6:
+        cfg["BLSTM_LID_BackPropagationActivated"] = flag
+    cfg["Neural_Networks_BackPropagation_Epochs"] = "1" if backprop else "0"
+    if fileslisting is not None:
+        cfg["fileslisting"] = fileslisting
+    return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
+
+
+@dataclass
+class _ModernBatchStep:
+    """The modern loop's per-step batch binding: `next_listing` rotates the shared
+    `_BatchRunner`'s cursors, `make_engine` rebuilds a backprop-ON engine on that listing
+    WITHOUT the genome ponderation injection (unlike `_BatchStep`). Threaded into
+    `_backprop_inner` exactly like `_BatchStep` (`.next_listing()` + `.make_engine`)."""
+
+    runner: _BatchRunner
+    base: dict[str, str]
+    algo: int
+
+    def next_listing(self) -> Path:
+        return self.runner.next_listing()
+
+    def make_engine(self, listing_path: Path) -> object:
+        import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+        text = _modern_config_text(self.base, self.algo, backprop=True, fileslisting=Path(listing_path).name)
+        (self.runner.workdir / "_train_modern_batch.config").write_text(text)
+        return speech_rs.Engine(["_train_modern_batch.config"], "-m")
+
+
+def _confusion_error(results: NDArray[np.float64], algo: int) -> float | None:
+    """The FIXED (F5) confusion misclassification rate on the validation results, Twin-only
+    (single-net SAD algos carry no LID confusion -> None). Extracts the per-file LID score
+    block (`Error_vad[:, 16:-2]`, the `>150`/`-200` in-band columns) and derives
+    `1 - hits/trials` from `scoring.confusion_matrix`. Returns None on any degeneracy
+    (algo != 6, <2 classes, empty/ill-formed block) -- it is a recorded side-metric, never
+    the early-stop signal."""
+    if algo != 6:
+        return None
+    sel = results[results[:, 1] == 1]
+    if sel.shape[0] == 0 or sel.shape[1] <= 3:
+        return None
+    scores = np.asarray(sel[:, 3:][:, 16:-2], dtype=F64)
+    if scores.ndim != 2 or scores.shape[1] < 2:
+        return None
+    try:
+        conf = confusion_matrix(scores, 50.0)
+    except ValueError:
+        return None
+    class_nb = scores.shape[1]
+    hits = float(sum(conf[k, k] for k in range(1, class_nb + 1)))
+    trials = float(sum(conf[k, class_nb + 1] for k in range(1, class_nb + 1)))
+    return None if trials <= 0.0 else 1.0 - hits / trials
+
+
+def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdir: Path, tails: list[int], seed: int) -> TrainEpochFn:
+    """The engine-backed per-epoch trainer: `steps_per_epoch` SMORMS3 steps over
+    `forward_backward` (backprop ON), seeded from the CURRENT weights. When `minibatch > 0`
+    a persistent `_BatchRunner` (built ONCE here, cursors rotating across epochs) drives the
+    per-step hard-example batch listing; else every step folds the full training corpus.
+    The `create_batches` shuffle uses the master `seed + 2` (matching `train`); weight init
+    uses `params.init_seed` -- two independent streams."""
+    base = state.base_config
+    algo = state.ps.algo
+
+    runner: _BatchRunner | None = None
+    if params.minibatch > 0:
+        fv = _files_values(state)
+        batch_rng = np.random.default_rng(seed + 2)
+        batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, batch_rng)
+        runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
+
+    def train_epoch(weights: list[NDArray[np.float64]], epoch: int) -> tuple[list[NDArray[np.float64]], float]:
+        import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+        # chdir into the workdir: the engine reads its config + corpus paths relative to CWD
+        # (the same seam `train`/`score_genome` use). Checkpoints are absolute, unaffected.
+        with _chdir(workdir):
+            batch = _ModernBatchStep(runner, base, algo) if runner is not None else None
+            engine: object | None = None
+            if batch is None:
+                (workdir / "_train_modern.config").write_text(_modern_config_text(base, algo, backprop=True))
+                engine = speech_rs.Engine(["_train_modern.config"], "-m")
+            trained, hist = _backprop_inner(engine, params.steps_per_epoch, tails, batch=batch, seed_weights=weights)
+        return trained, (float(hist[-1]) if hist else float("nan"))
+
+    return train_epoch
+
+
+def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: Path) -> ValidateFn:
+    """The engine-backed forward-only validator: build a backprop-OFF engine on
+    `valid_listing` (defaults to the training listing when unset), set the current weights,
+    run one scoring pass, and read back the balance-law cost + the FIXED confusion metric."""
+    base = state.base_config
+    algo = state.ps.algo
+    balance = state.balance
+    bbp = state.ps.BalanceBackProp
+    valid_listing = params.valid_listing if params.valid_listing is not None else base["fileslisting"]
+
+    def validate(weights: list[NDArray[np.float64]], epoch: int) -> tuple[float, float | None]:
+        import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+        with _chdir(workdir):
+            (workdir / "_valid_modern.config").write_text(_modern_config_text(base, algo, backprop=False, fileslisting=valid_listing))
+            engine = speech_rs.Engine(["_valid_modern.config"], "-m")
+            engine.set_weights(0, [list(np.asarray(w, dtype=F64)) for w in weights])
+            engine.run()
+            results = np.asarray(engine.results_matrix(), dtype=F64)
+        val_cost, _ = compute_cost(results, 1, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
+        return float(val_cost), _confusion_error(results, algo)
+
+    return validate
+
+
+def train_modern(
+    state: RunState,
+    seed: int,
+    params: ModernTrainParams,
+    *,
+    train_epoch: TrainEpochFn | None = None,
+    validate: ValidateFn | None = None,
+    init_weights_override: list[NDArray[np.float64]] | None = None,
+) -> ModernTrainResult:
+    """The MODERN training loop: seeded-init (or checkpoint-resume) -> SMORMS3 epochs over
+    batch mode -> per-epoch forward-only validation -> early-stop on validation-cost
+    patience -> best/last checkpoints (`best_<net>.bin`, `last_<net>.bin`, `train_history.json`).
+
+    The engine work is behind two injectable hooks -- `train_epoch(weights, epoch) ->
+    (new_weights, train_cost)` and `validate(weights, epoch) -> (val_cost, confusion_error)`
+    -- each defaulting to an engine-backed implementation. The unit tests pass STUBS, so the
+    epoch/validation/early-stop/checkpoint/resume STATE MACHINE is exercised with no engine.
+
+    Init: `resume_from` (load `last_<net>.bin` + `train_history.json`) takes precedence, then
+    `init_weights_override` (test injection), then from-scratch seeded init. `epochs` is the
+    TOTAL target -- a resumed run continues toward it, appending epochs.
+
+    Early-stop: after `patience` epochs with no strict improvement in `val_cost`, stop.
+    `best_<net>.bin` holds the argmin-val_cost epoch's weights; `last_<net>.bin` the latest."""
+    algo = state.ps.algo
+    net_names = _net_names(algo)
+    ckpt_dir = Path(state.out_dir) / "checkpoint"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    workdir = Path(state.config_path).parent
+
+    if params.resume_from is not None:
+        weights, history, best_val, best_epoch, start_epoch = _resume(Path(params.resume_from), algo)
+    elif init_weights_override is not None:
+        weights = [np.asarray(w, dtype=F64) for w in init_weights_override]
+        history, best_val, best_epoch, start_epoch = [], float("inf"), -1, 0
+    else:
+        weights = _init_weights_from_scratch(state, params)
+        history, best_val, best_epoch, start_epoch = [], float("inf"), -1, 0
+
+    if train_epoch is None:
+        train_epoch = _make_default_train_epoch(state, params, workdir, _tail_lengths(state.base_config, algo), seed)
+    if validate is None:
+        validate = _make_default_validate(state, params, workdir)
+
+    def _write_history(stopped: bool) -> ModernTrainResult:
+        res = ModernTrainResult(
+            best_epoch=best_epoch,
+            best_val_cost=float(best_val),
+            epochs_run=len(history),
+            stopped_early=stopped,
+            history=history,
+            checkpoint_dir=str(ckpt_dir),
+        )
+        (ckpt_dir / "train_history.json").write_text(res.model_dump_json(indent=2))
+        return res
+
+    stopped_early = False
+    for epoch in range(start_epoch, params.epochs):
+        weights, train_cost = train_epoch(weights, epoch)
+        val_cost, conf_err = validate(weights, epoch)
+
+        _save_ckpt(ckpt_dir, "last", weights, net_names)
+        is_best = val_cost < best_val
+        if is_best:
+            best_val, best_epoch = val_cost, epoch
+            _save_ckpt(ckpt_dir, "best", weights, net_names)
+
+        history.append(EpochRecord(epoch=epoch, train_cost=float(train_cost), val_cost=float(val_cost), confusion_error=conf_err, is_best=is_best))
+        _write_history(stopped=False)  # per-epoch, so a resume sees the latest bookkeeping
+
+        # Early-stop: `patience` epochs since the best (best_epoch < 0 only if val never finite).
+        if best_epoch >= 0 and epoch - best_epoch >= params.patience:
+            stopped_early = True
+            break
+
+    return _write_history(stopped=stopped_early)
