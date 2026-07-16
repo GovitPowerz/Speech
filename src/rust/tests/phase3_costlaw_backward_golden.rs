@@ -126,6 +126,17 @@ fn scalar_delta_polynomial_bit_exact() {
     );
 }
 
+/// F7 (phase5): map -0.0 -> +0.0 (`x + 0.0` is bit-identity for every other f64,
+/// including subnormals/inf/NaN), so the LogLaw deriv fix's true-zero saturated
+/// gradient compares equal to the legacy harness's SIGNED-zero dump. At the grid
+/// endpoints output -> {0,1} the log-below deriv is now `0.0`, but the legacy dumped
+/// `A/1e-24 * (+0.0 fold)` = a signed zero; both are numerically 0 and provably
+/// training-neutral (SMORMS3 treats +0.0/-0.0 identically). This normalization leaves
+/// every nonzero magnitude bit-exact, so the canary still pins the real values.
+fn norm_neg_zero(m: &ndarray::Array2<f64>) -> ndarray::Array2<f64> {
+    m.mapv(|x| x + 0.0)
+}
+
 #[test]
 fn scalar_delta_log_sqrt_canary() {
     let log = log_law();
@@ -133,12 +144,19 @@ fn scalar_delta_log_sqrt_canary() {
     let got_log_other = sweep(&log, 0.0);
     let want_log_speech = common::load_bin_phase3("cost_deriv_scalar_log_speech.bin");
     let want_log_other = common::load_bin_phase3("cost_deriv_scalar_log_other.bin");
+    // F7: signed-zero-normalized (the log deriv fix returns +0.0 in the saturated
+    // region where the legacy harness dumped -0.0; magnitudes stay bit-exact). The C++
+    // harness stays legacy -- it still dumps A/y in that region; see IMPROVEMENTS.md.
     common::assert_oracle_eq(
-        &got_log_speech,
-        &want_log_speech,
+        &norm_neg_zero(&got_log_speech),
+        &norm_neg_zero(&want_log_speech),
         "log scalar delta (speech)",
     );
-    common::assert_oracle_eq(&got_log_other, &want_log_other, "log scalar delta (other)");
+    common::assert_oracle_eq(
+        &norm_neg_zero(&got_log_other),
+        &norm_neg_zero(&want_log_other),
+        "log scalar delta (other)",
+    );
 
     let sqrt = sqrt_law();
     let got_sqrt_speech = sweep(&sqrt, 1.0);

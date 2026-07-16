@@ -46,10 +46,35 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (defaults `10.0`/`-1.0`) for the runtime branch predicate. Almost certainly an unintended
   double-read; load-bearing for the sweep goldens. *Fix candidate:* unify to a single, clamped
   threshold after parity.
-- **[0b-i] LogLaw cost/deriv Adim asymmetry** (`cost.rs` from `CostLaw.h:119-149`): `cost()` divides
-  `y` by `Adim` before clamp+log; `deriv()` clamps the RAW `y` (not divided) then returns `A/y`. The
-  derivative is inconsistent with the cost -- a genuine legacy bug. *Fix candidate:* make `deriv` the
-  true derivative of `cost` after parity (will shift training gradients slightly).
+- **[0b-i] LogLaw cost/deriv Adim asymmetry -- FIXED (phase 5, F7, this commit)** (`cost.rs`
+  `Law::deriv` from `CostLaw.h:119-149`): LEGACY behavior (recorded): `cost()` divides `y` by `Adim`
+  before clamp+log (`b + A*ln(clamp(y/Adim, 1e-24, 1))`); `deriv()` clamped the RAW `y` (not divided)
+  then returned `A/y` UNCONDITIONALLY. Where the forward's argument is clamped the cost is CONSTANT, so
+  the true gradient is 0, but the legacy `A/y` was NONZERO there -- a genuine wrong gradient reachable on
+  every real `CostLaw = log` config (the `1_worker_1.config`/`LID_BLSTM.config`/twin configs all use
+  log/log). **FIX (phase 5, F7):** `deriv` for `Log` now computes the derivative of the CLAMPED forward:
+  `z = y/Adim; if z < 1e-24 || z > 1.0 { 0.0 } else { a/y }`. The interior value is UNCHANGED (`a/y`
+  equals the true `d/dy[b + A*ln(y/Adim)]` because the `Adim` cancels via the chain rule -- the legacy
+  was only ever wrong in the saturated region, not the interior). This is a Rust seam-side fix only:
+  `engine.py`'s cost assembly reads the derivatives BACK from the engine (`weights_derivatives`) and
+  never reimplements `deriv` -- it is the single source of the gradient consumed by the SMORMS3 loop, so
+  no Python change was needed (verified).
+  **RED / re-pin:** `phase3_costlaw_backward_golden::scalar_delta_log_sqrt_canary` went RED at
+  output=0 -- but ONLY on the SIGN OF ZERO (`+0.0` fixed vs the harness's `-0.0` = its bogus `A/1e-24`
+  times the `+0.0` logistic fold). On the committed VAD grids (k/64 and the 1000-point sweep) the
+  divergence lands ONLY at output -> {0,1}, where `compute_unitary_delta`'s logistic fold
+  `output*(1-output)` zeros the contribution -- so every nonzero magnitude stays bit-exact and the only
+  golden movement is a training-neutral signed zero (SMORMS3 treats +0.0/-0.0 identically). Re-pinned by
+  normalizing signed zeros in the canary (`x + 0.0`, bit-identity for every other f64) and by a NEW
+  off-grid directed test `phase0b_costlaw::log_deriv_consistent_with_clamped_forward` (pins `0.0` in the
+  lower- and upper-clamp saturated regions with the legacy-would-be value computed inline for
+  non-vacuity). `deriv_sweep_bit_exact` (linear law) and the `log_speech_cost_and_deriv_asymmetry`
+  interior point are UNAFFECTED (both stay bit-exact -- the interior is unchanged).
+  **Mutation:** reverting `deriv` to the unconditional `A/y` makes `log_deriv_consistent_with_clamped_forward`
+  FAIL at the lower-clamp point (verified: `assertion left == right failed`, delta ~ -0.05 vs 0.0).
+  **Oracle divergence:** the C++ `tools/oracle_harness/` stays LEGACY -- it still dumps `A/y` in the
+  saturated region; the committed fixtures never sample it (they only reach output -> {0,1} where the
+  fold zeros both), so they were NOT regenerated. Deliberate, per the S2 oracle-divergence protocol.
 - **[0b-i] AboveThreshCubic name-dependent coefficients** (`cost.rs` from `CostLaw.h:84-117`): the
   above-threshold cubic law switches its `A`/`B` coefficient formulas on the law-name STRING
   (`square`/`cubic` vs `linear`/`log`). Fragile and surprising. *Fix candidate:* refactor to explicit
