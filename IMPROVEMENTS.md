@@ -1834,6 +1834,11 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   genuine TDD RED: the first hand-derived `sentinel_decode_and_argmax` expectation assumed a
   per-row reset and failed against both the Rust implementation (written directly from source) and
   the independently cross-validated harness dump, forcing a re-read of `:509-510` vs `:533-534`.
+  PRECISION (T6 review): the quirk was LATENT on all real Algo-5/6 data -- both drivers clamp
+  `targetIndex` to `[0, classNb-1]` before the `targetLID = -2.0` write, so EVERY real result row
+  carries exactly one `>150` sentinel and sticky-vs-per-row decode coincide; an actual out-of-set
+  file is misattributed to class 0, never rendered no-target. The fix is degenerate-case
+  correctness + phase-6 insurance, not an active-corruption repair.
   *Why deferred:* provenance; the confusion matrix's row/col attribution for degenerate (no-target)
   rows is directly observable and load-bearing for any LID confusion-matrix consumer built on this
   in Phase 4b's later tasks. This corrupts phase-6 EER/DCF (row/col attribution depends spuriously
