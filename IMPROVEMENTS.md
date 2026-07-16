@@ -445,17 +445,25 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   Rust signature for parity with the `Layer` dispatch and the legacy call sites; bound to `let _ =`.
   Provenance note, not a bug.
 
-- **[phase2] `NeuronLayer` output softmax is UNSTABILIZED -- no max-subtraction overflow guard**
-  (`nn/layers.rs` `NeuronLayer::feed_forward`, from `NeuronLayer.cpp:138-142`): `lastLayer && O>1`
-  computes `exp(a+b)` directly on the raw pre-activation values with no `- max(row)` shift before the
-  exponential, unlike a numerically-stabilized softmax. Large pre-activations can overflow `exp` to
-  `inf` (and `inf/inf = NaN` in the row-sum quotient); the legacy has no guard against this and the port
-  reproduces it exactly, incl. the row-sum being a SEQUENTIAL per-row loop over ascending columns
-  (`:139`, not a reduction) followed by a per-COLUMN `cwiseQuotient` (`:140-142`). Confirmed neutral by
-  the harness NN_TOL probe: the ascending-loop reimpl matches the REAL compiled
-  `NeuronLayer::feedForward` with `max_ulp=0` over the whole dump grid. *Fix candidate:* after parity,
-  add a `- rowwise().maxCoeff()` shift before the `exp` for numerical safety on unseen inputs with large
-  activations; no overflow triggers on the committed fixtures or the real-net E2E run.
+- **[phase2] `NeuronLayer` output softmax overflow -- FIXED (phase 5, F8, this commit; port-hardening,
+  golden-neutral)** (`nn/layers.rs` `NeuronLayer::feed_forward`, from `NeuronLayer.cpp:138-142`): LEGACY
+  behavior (recorded): `lastLayer && O>1` computed `exp(a+b)` directly on the raw pre-activation values
+  with NO `- max(row)` shift, so a large pre-activation overflowed `exp` to `inf` and the `inf/inf`
+  row-sum quotient was `NaN`. **FIX (phase 5, F8):** an OVERFLOW-GUARD-ONLY stabilization -- the per-row
+  max is subtracted before `exp` ONLY when it exceeds `EXP_OVERFLOW_GUARD = 700.0` (`exp(x)` is finite
+  iff `x <= ln(f64::MAX) ~ 709.78`; 700 leaves headroom for the O-term row sum). Below the threshold the
+  code path is LITERALLY `pre_act.exp()`, byte-identical to the legacy; above it the shift makes the row
+  finite and correct (softmax is shift-invariant). The row-sum stays a SEQUENTIAL ascending-column loop
+  (`:139`) and the per-COLUMN `cwiseQuotient` (`:140-142`) is unchanged. This is a from-scratch-training
+  NaN-proofing (the modern loop, F8's motivation): no committed fixture overflows, so the fix is
+  golden-neutral -- NO RED, ZERO re-pins, the FULL `cargo test` stays green (asserted). Pinned by
+  `phase2_layers_golden::dense_softmax_overflow_guarded` (a dedicated overflow-input case: a row with
+  both logits > 700 that the legacy would return NaN for now yields the correct finite shift-invariant
+  softmax, while a moderate row in the same call stays bit-identical to the raw path -- proving the guard
+  is per-row and the sub-threshold path is untouched). The harness NN_TOL probe (ascending-loop reimpl
+  == real compiled `feedForward`, `max_ulp=0`) is unaffected: it never probed the overflow regime, and
+  the guard is inert below the threshold. *Fix candidate (superseded):* the earlier note proposed an
+  UNCONDITIONAL `- rowwise().maxCoeff()`; the guarded form was chosen instead so no existing golden moves.
 
 - **[phase2] `NeuralNetwork` copy constructor is ILL-FORMED C++ (never ported)** (`NeuralNetwork.hpp:39-51`):
   the copy ctor body writes `_NeuronNb(neuralNetwork._NeuronNb);` etc as *statements* -- calling
