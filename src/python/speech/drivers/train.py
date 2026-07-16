@@ -29,6 +29,7 @@ the returned gradient, so SMORMS3 only ever steps the trainable head.
 from __future__ import annotations
 
 import os
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -924,7 +925,22 @@ def train_hyperparam_search(
     history + the best decoded engine config (feed it to `train_modern` for the weight training).
 
     Distinct from the legacy `train` (byte-untouched, `mask=None` -> the full weight-carrying genome
-    + 2-key `CostPonderation` injection): this searches the PERMANENTLY narrowed genome."""
+    + 2-key `CostPonderation` injection): this searches the PERMANENTLY narrowed genome.
+
+    `qpso_epochs` must be >= 2: the QDPSO exploration/contraction coefficient schedule
+    (`QuantumPSO.m:415`, `coef_exp_contr = 0.75 - 0.5*(i-1)/(me-1)`, transcribed in
+    `optimizers.quantum_pso`) divides by `me - 1`, so `qpso_epochs == 1` would raise a bare
+    `ZeroDivisionError` deep inside the QPSO loop; guarded here with a clear message instead.
+
+    Penalized-eval observability (Phase 5 Task 9 fix wave): a per-candidate eval that hits an
+    invalid DSP subregion (feature-dim mismatch against the fixed base net, a typed-bailed engine
+    path) is caught and penalized rather than raised -- see `cost_fn` below -- but the SAME catch
+    also swallows a genuine engine defect, so the returned `TrainResult.penalized_evals`/
+    `penalized_types` (a `type(exc).__name__` breakdown) let a caller tell the two apart. A run
+    that ends with `gbestval >= _HYPERPARAM_PENALTY` (every eval penalized) or with over half its
+    evals penalized emits a `warnings.warn`."""
+    if qpso_epochs < 2:
+        raise ValueError("qpso_epochs must be >= 2 (the legacy (i-1)/(me-1) schedule)")
     ps = state.ps
     mask, searchable = weight_block_mask(ps)
     n_search = int(searchable.sum())
@@ -939,11 +955,19 @@ def train_hyperparam_search(
     ckpt_dir = Path(state.out_dir) / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # Penalized-eval observability (fix wave): counts + exception-type breakdown across every
+    # candidate this run scores, surfaced on the returned TrainResult so a genuine engine defect
+    # can be told apart from a legitimately-invalid DSP subregion (both currently land here).
+    penalized_counts: dict[str, int] = {}
+    total_evals = 0
+
     def cost_fn(positions: NDArray[np.float64], _mode: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        nonlocal total_evals
         pos = np.atleast_2d(np.asarray(positions, dtype=F64))
         costs = np.empty(pos.shape[0], dtype=F64)
         out = np.empty_like(pos)
         for i in range(pos.shape[0]):
+            total_evals += 1
             try:
                 cost, reduced_out, _text = score_hyperparam_genome(state, pos[i], mask, searchable, workdir)
             except BaseException as exc:  # noqa: BLE001 -- must catch the pyo3 PanicException (a direct BaseException subclass)
@@ -953,6 +977,7 @@ def train_hyperparam_search(
                 # QPSO steers away. out_param is the PURE vec2struct write-back (decode never crashes).
                 cost = _HYPERPARAM_PENALTY
                 _text, reduced_out = _decode_hyperparam(state, pos[i], mask, searchable)
+                penalized_counts[type(exc).__name__] = penalized_counts.get(type(exc).__name__, 0) + 1
             costs[i] = cost
             out[i] = reduced_out
         return costs, out
@@ -979,10 +1004,35 @@ def train_hyperparam_search(
 
     with _chdir(workdir):
         result = quantum_pso(cost_fn, params, n_search, np.random.default_rng(seed))
-        # the best decoded engine config (feed to train_modern for the weight training)
-        _cost, _out, best_text = score_hyperparam_genome(state, np.asarray(result.gbest, dtype=F64), mask, searchable, workdir)
+        gbest = np.asarray(result.gbest, dtype=F64)
+        if result.gbestval >= _HYPERPARAM_PENALTY:
+            # a fully-penalized run: gbest sits in the SAME invalid region every candidate did
+            # (gbestval can only reach the penalty if NO eval ever beat it), so re-scoring it
+            # through the engine would raise the identical way -- skip straight to the pure,
+            # never-crashing decode instead of crashing on the checkpoint step.
+            best_text, _out = _decode_hyperparam(state, gbest, mask, searchable)
+        else:
+            # the best decoded engine config (feed to train_modern for the weight training)
+            _cost, _out, best_text = score_hyperparam_genome(state, gbest, mask, searchable, workdir)
 
-    gbest = np.asarray(result.gbest, dtype=F64)
+    penalized_evals = sum(penalized_counts.values())
+    penalized_fraction = (penalized_evals / total_evals) if total_evals else 0.0
+    if result.gbestval >= _HYPERPARAM_PENALTY:
+        warnings.warn(
+            f"train_hyperparam_search: gbestval ({result.gbestval:g}) >= the penalty ({_HYPERPARAM_PENALTY:g}) -- "
+            f"an all-penalized/degenerate search, {penalized_evals}/{total_evals} evals penalized "
+            f"(types={penalized_counts!r}). This may be a genuine engine defect rather than an "
+            "invalid DSP region -- inspect penalized_types before trusting this run.",
+            stacklevel=2,
+        )
+    elif penalized_fraction > 0.5:
+        warnings.warn(
+            f"train_hyperparam_search: {penalized_evals}/{total_evals} evals ({penalized_fraction:.0%}) "
+            f"were penalized (types={penalized_counts!r}) -- over half the searched DSP hyperparameter "
+            "space was invalid; inspect penalized_types before trusting this run.",
+            stacklevel=2,
+        )
+
     cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
     write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
     write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
@@ -994,6 +1044,8 @@ def train_hyperparam_search(
         cost_history=[float(x) for x in cost_hist],
         inner_cost_history=[],
         checkpoint_dir=str(ckpt_dir),
+        penalized_evals=penalized_evals,
+        penalized_types=dict(penalized_counts),
     )
     (ckpt_dir / "checkpoint.json").write_text(tr.model_dump_json(indent=2))
     return tr

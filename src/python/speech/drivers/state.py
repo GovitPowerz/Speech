@@ -17,7 +17,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from speech.batching import read_listing
 from speech.config_bridge import parse_legacy_config
@@ -166,7 +166,12 @@ class RunState(BaseModel):
 class TrainResult(BaseModel):
     """The outer-loop outcome + checkpoint location. `gbest` is the QPSO genome,
     `cost_history` the per-epoch gbestval trajectory, `inner_cost_history` the final
-    SMORMS3 inner-loop cost trace (BackPropagation on the gbest)."""
+    SMORMS3 inner-loop cost trace (BackPropagation on the gbest). `penalized_evals`/
+    `penalized_types` are `train_hyperparam_search`-only observability (Phase 5 Task 9 fix
+    wave): a count of per-candidate evals that hit the `_HYPERPARAM_PENALTY` catch, broken
+    down by `type(exc).__name__`, so a genuine engine defect can be told apart from a
+    legitimately-invalid DSP subregion. The legacy `train` never penalizes (no catch on its
+    eval path), so both default to empty/zero for that path."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -175,6 +180,8 @@ class TrainResult(BaseModel):
     cost_history: list[float]
     inner_cost_history: list[float]
     checkpoint_dir: str
+    penalized_evals: int = 0
+    penalized_types: dict[str, int] = Field(default_factory=dict)
 
 
 class ModernTrainParams(BaseModel):
