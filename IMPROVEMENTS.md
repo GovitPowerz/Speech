@@ -7,6 +7,33 @@ bit-exactly on purpose so the goldens match.
 **Maintainer note:** every phase that reproduces a legacy quirk/bug adds an entry to the Legacy
 Quirks section below (what / where / why deferred / fix candidate). See CLAUDE.md for the pointer.
 
+## Phase 5 fix protocol (the golden-regime change starts here)
+
+Phase 5 opens Roadmap 2 (`docs/superpowers/specs/2026-07-10-phase-5-unquirk-training-foundation-design.md`)
+and flips the regime the rest of this file was written under: from here on, goldens assert
+PORT-TRUTH, not legacy-truth, because Phase 5+ tasks deliberately FIX legacy bugs instead of
+reproducing them -- the "nothing here should be fixed mid-port" rule above no longer holds
+unconditionally. The bit/tolerance parity proof against the resurrected 2015 production binary
+is frozen first, at the `legacy-parity-v1` tag (main@74284d6), before any fix lands (see
+README.md/CLAUDE.md for the pointer). Every un-quirk task from here on follows this protocol
+(design spec S2), no exceptions:
+
+1. **RED**: the existing golden/test FAILS under the fix (proof the fix is observable; a fix
+   nothing catches is either untested legacy surface -- add the pin FIRST against the old
+   behavior, then fix -- or not correctness-critical, drop it back).
+2. **Re-pin**: the golden regenerates/re-derives to the FIXED behavior.
+3. **Mutation**: revert-the-fix breaks the new golden (recorded per fix, battery-style).
+4. **IMPROVEMENTS.md**: the entry flips to "FIXED (phase 5, commit `<hash>`)" keeping the
+   original legacy-behavior description for the record, plus the oracle-divergence note where an
+   oracle harness still describes the legacy behavior.
+
+Oracle harnesses (the C++ `tools/oracle_harness/`, Octave `tools/octave_harness/`, Perl
+`tools/perl_oracle/`, and the resurrected-binary `tools/fsp_runtime/` families) are NOT
+regenerated for fixed sites -- each fix's IMPROVEMENTS entry documents the now-deliberate
+divergence (the harness still describes the LEGACY behavior; the port has left it on purpose).
+Entries below with no "FIXED (phase 5, ...)" flip are unchanged: reproduced bit-exactly on
+purpose, either kept-documented by the Phase 5 sweep's own adjudication or not yet swept.
+
 ## Legacy Quirks (reproduced bit-exactly; revisit after parity)
 
 - **[0a] adim bias restore vs MATLAB FP path** (`config.rs` `apply_adim`, `weight_bridge.py`): we
