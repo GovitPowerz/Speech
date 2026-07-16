@@ -109,3 +109,22 @@ Kept by the Phase-5 sweep's own adjudication. Categories, then the plan-adjacent
 **Task 7 is empty** (LTSVshift already de-UB'd -- doc-flip only); **F4 (tail-drop) is doc-only**.
 Two borderline families (cost-law derivatives, unstabilized softmax) flagged for a Phase-6
 training-correctness pass, not fixed here.
+
+## Post-review scope amendment (user-ratified, 2026-07-10)
+
+Two flagged-borderline items PROMOTED to FIX, assigned to Task 8 (train_modern), per the
+T2 review's recommendation and explicit user ratification:
+
+- **F7 - LogLaw derivative inconsistency** (the [0b-i] cost-law entry's derivative arm,
+  IMPROVEMENTS ~:49): `deriv()` returns `A/y` inside the clamp boundary where the
+  clamped forward makes the true derivative 0 -- a genuine reachable wrong-gradient bug
+  on every real `CostLaw = log` config. Fix in `cost.rs` (the Rust deriv seam the
+  SMORMS3 loop consumes via the engine) following the S2 protocol; re-pins the
+  cost-law backward golden family (the phase3 deltas fixtures for the log law;
+  polynomial laws untouched). Both-language check: `engine.py`'s cost assembly does
+  not reimplement the deriv (seam-side only) -- verify and state in the task.
+- **F8 - guarded softmax stabilization** (`nn/layers.rs` NeuronLayer output softmax,
+  the unstabilized path at ~:937): an OVERFLOW-GUARD-ONLY stabilization (engage
+  max-subtraction solely when the max logit exceeds the exp-overflow threshold) --
+  bit-identical on every existing golden (no re-pin expected; assert that), NaN-proof
+  for from-scratch weights. A dedicated overflow-input unit test pins the guarded path.
