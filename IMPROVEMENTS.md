@@ -348,14 +348,23 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   incremental variance/std pooling, not a bug to fix.
 
 - **[phase1] `_LTSVWindowShift != 0.0` guards the LTSVshift read on an UNINITIALIZED member (UB); guard
-  dropped** (`features/pipeline.rs` `FeatureConfig::from_legacy`, from `BLSTMSpectralSegmenter.cpp:50`):
+  dropped -- FIXED-BY-DESIGN (phase 5, this commit; no code change)** (`features/pipeline.rs` `FeatureConfig::from_legacy`, from `BLSTMSpectralSegmenter.cpp:50`):
   the legacy reads `_LTSVWindowShift` from config only `if (_LTSVWindowShift != 0.0)`, but at that point
   `_LTSVWindowShift` is a default-constructed `double` member with no in-class initializer and an empty
   ctor body -- so the branch condition reads an INDETERMINATE value (undefined behavior). The port drops
   the UB guard and reads `LTSVshift` unconditionally when the key is present (the oracle harness does the
-  same, so the golden stays valid; all four variant configs supply `LTSVshift` explicitly). *Fix
-  candidate:* after parity, either give `_LTSVWindowShift` a defined default or make the read
-  unconditional in the legacy (already the effective behavior here). *Phase 4b Task 9 addendum --
+  same, so the golden stays valid; all four variant configs supply `LTSVshift` explicitly).
+  **FIXED-BY-DESIGN (phase 5 adjudication; Task 2 sweep finding, folded into the F5/F6 commit):**
+  the port NEVER carried this UB. The original Phase-1 guard-drop already reads `LTSVshift`
+  UNCONDITIONALLY (`FeatureConfig::from_legacy`, `pipeline.rs:219`, `get_f64(...)?` -- it ERRORS if
+  the key is absent, rather than branching on an indeterminate member), so there is no
+  uninitialized-member read anywhere in the port and no UB-era value that could ever go RED. The
+  algo-5/6 LID drivers consume the deterministic `feature_cfg.ltsv_shift` config value
+  (`lid.rs:906/1313/1704/2253`); every `lid5_*` golden already pins that deterministic branch (the
+  harness itself was fixed to match -- the "UB KILL" comment below). The killed Task 7 (a standalone
+  "reproduce then un-quirk the LTSVshift UB" task) therefore collapsed to this documentation
+  verification: no code change, no re-pin, nothing to mutate -- the port was already correct. The
+  legacy-UB description is kept below for the record. *Phase 4b Task 9 addendum --
   the UB observed LIVE:* the Task-9 harness stage drives the REAL compiled `BLSTMSpectralLID`
   (whose ctor runs the real `buildFromConf`), and the process's FIRST construction landed on a
   zeroed heap page -> the `!= 0.0` gate SKIPPED the read -> `_LTSVWindowShift` stayed `0.0` ->
@@ -1460,7 +1469,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `unscored_mode_zero_columns_and_vrcts` + `dump_dir_vrcts` (`tests/phase4a_segfn.rs`).
 
 - **[phase4a] CSV reference loads ONLY for single-channel audio (2-channel `buf` left empty ->
-  no reference)** (`engine/bag_of_processors.rs::segmentation_function`, from
+  no reference) -- FIXED (phase 5, this commit, F6)** (`engine/bag_of_processors.rs::segmentation_function`, from
   `Segmentation.cpp:745-806`): `load_ref_from_csv` loops over `_ChannelNb` and builds the file-to-open
   string `buf` ONLY in the `_ChannelNb == 1` branch (`:748-749` `buf << filename`); the
   `_ChannelNb == 2` branch (`:750-752`) emits a "wrong path" LOG line and NEVER writes `buf`, so
@@ -1468,12 +1477,25 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   parses lines is skipped for EVERY channel. Net effect: a `.csv` reference is honored only for
   mono audio; for stereo (or any `_ChannelNb != 1`) the reference is silently empty, so a scored
   stereo run with a CSV reference would hit the mandatory-reference bail (`:302-305`). The port
-  reproduces this: CSV builds a reference only when `channel_count == 1`; otherwise `None`. *Why
-  deferred:* load-bearing legacy bug directly affecting whether scoring runs; "fixing" it (loading
-  the CSV for both channels) would diverge from the oracle. *Fix candidate:* after end-to-end parity,
-  decide whether stereo CSV references should load channel 0 (or per-channel columns). *Pinned by:*
-  the `channel_count == 1` guard in `segmentation_function` (the Phase 4a tests exercise the STM path
-  on the 2-channel excerpt; a mono-CSV golden lands with the corpus-processor fixtures).
+  reproduced this until Phase 5: CSV built a reference only when `channel_count == 1`; otherwise
+  `None`. A scored stereo-CSV run went silently unscored (bailed on the mandatory-reference gate),
+  a wrong RESULT the Phase-5 sweep promoted to a FIX.
+  **FIX (phase 5, F6):** the CSV match arm now fires for EVERY channel count. CSV is
+  channel-independent (unlike STM, there is no per-channel column), so the file is parsed ONCE and
+  the segmentation cloned per channel, matching how STM references already load; `nb_words` (the
+  dead WER surface, KEEP) stays the single parse's count, shared across channels. The mono
+  (`channel_count == 1`) path is byte-identical to before (`vec![seg]` == one clone). *Oracle-
+  divergence note (protocol step 4):* the C++ oracle harness and the resurrected 2015 binary still
+  drop the stereo reference; the port diverges by design. *Pin-old-first + re-pin:*
+  `stereo_csv_reference_loads_per_channel` (`tests/phase4a_segfn.rs`) first pinned the current
+  mandatory-reference BAIL on a stereo-CSV corpus (RED once the fix landed), then re-pinned to the
+  fixed behavior -- the scored run succeeds on BOTH channels and its cols 0-2 (Pfa/Pmiss/global)
+  match an independent `load_ref_csv` + `compute_errors` oracle per channel, with a non-vacuity
+  guard that the CSV reference carries a real SPEECH span. *Mutation:* restoring the
+  `channel_count == 1` gate re-introduces the bail -> RED, then restore. *Cascade:* none -- no
+  committed corpus golden uses a CSV reference on stereo audio (the `.csv` fixtures under
+  `tests/reference_data/` are listing/mapping files, not reference segmentations); mono-CSV goldens
+  are unaffected (byte-identical path).
 
 - **[phase4a] `.trs` reference loader unported; `segmentation_function` bails on a TRS reference**
   (`engine/bag_of_processors.rs::segmentation_function` + `extension_of`, from `Segmentation.cpp:101-109`
@@ -1799,8 +1821,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   claim is asserted on production code.
 
 - **[phase4b] `PrintConfusionMatrix`'s `posTarget`/`posBestNotTarget` are STICKY across rows, NOT
-  reset per row** (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:
-  509-510,533-534`): both position variables are declared OUTSIDE the row loop and initialized to
+  reset per row -- FIXED (phase 5, this commit, F5, BOTH languages)** (`engine/confusion.rs::
+  confusion_from_results` + `scoring.py::confusion_matrix`, from `BagOfProcessors.cpp:
+  509-510,533-534` and the sibling `confusionThresh.m`): both position variables are declared OUTSIDE the row loop and initialized to
   `0` exactly ONCE, before row 0; the end-of-row reset (`:533-534`) touches only
   `scoreTarget`/`maxScoreNotTarget`. So a row with no target sentinel at all (every column `<=
   150`) does NOT attribute its miss to `posTarget = 0` (the index-header slot) in general -- it
@@ -1813,13 +1836,40 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   the independently cross-validated harness dump, forcing a re-read of `:509-510` vs `:533-534`.
   *Why deferred:* provenance; the confusion matrix's row/col attribution for degenerate (no-target)
   rows is directly observable and load-bearing for any LID confusion-matrix consumer built on this
-  in Phase 4b's later tasks. *Fix candidate:* reset `posTarget`/`posBestNotTarget` to `0` at every
-  row boundary alongside `scoreTarget`/`maxScoreNotTarget`, once end-to-end LID parity holds. *Pinned
-  by:* `sentinel_decode_and_argmax`, `no_target_as_first_row_uses_header_zero_slot`
-  (`src/engine/confusion.rs`), `confusion_matrix_matches_harness_transcription`
-  (`tests/phase4b_confusion_golden.rs`) -- the latter cross-validated against the REAL compiled
-  `PrintConfusionMatrix`/`Confusion2String` via the oracle harness's `phase4b_confusion` stage
-  (`error1 == error2` non-vacuity gate).
+  in Phase 4b's later tasks. This corrupts phase-6 EER/DCF (row/col attribution depends spuriously
+  on file order), so the Phase-5 sweep promoted it to a FIX.
+  **FIX (phase 5, F5):** the four decode accumulators (`score_target`/`max_score_not_target`/
+  `pos_target`/`pos_best_not_target`) are now declared INSIDE the row loop in BOTH ports, so no row
+  inherits a prior row's index; the fix is IDENTICAL across the two (the Rust `PrintConfusionMatrix`
+  variant and the Python `confusionThresh.m` variant differ only in their win/hit predicate, which
+  is unchanged). **No-target-row semantics -- adjudicated:** the naive "reset to 0" prescription
+  would credit a no-target row to `pos_target = 0`, the index-HEADER row/col (e.g. the pre-fix
+  `no_target_as_first_row` test showed label `2.0 -> 3.0` pollution). Instead, a row with NO in-band
+  target (`pos_target == 0`, no column `> 150`) is SKIPPED entirely: it is an out-of-set LID trial
+  with no true class in the closed set, so it belongs in no cell and no total (routing it to the
+  aggregate row `class_nb+1` was rejected -- the aggregate row/col index collides, double-counting
+  the col-total, and fabricates a prediction attribution for an unknown true class). Skipping is
+  order-independent, pollutes nothing, and is the standard closed-set treatment of out-of-set
+  trials; downstream `confusion_error` reads only per-class diagonals + row totals, which skipping
+  leaves correct. *Oracle-divergence note (protocol step 4):* the C++ `phase4b_confusion` harness
+  stage and the Octave `confusionThresh.m` still encode the legacy sticky matrix; the port
+  deliberately diverges. *Re-pinned to port-truth:* `sentinel_decode_and_argmax`,
+  `no_target_row_skipped_never_pollutes_header` (renamed from `no_target_as_first_row_uses_header_
+  zero_slot`), `cross_language_identity_no_target_skip` (new, mirrors the Python twin)
+  (`src/engine/confusion.rs`); `confusion_matrix_matches_harness_transcription` +
+  `confusion_matrix.bin` RE-DERIVED port-side (`tests/phase4b_confusion_golden.rs`);
+  `confusion_error.bin` is UNCHANGED (the error aggregate is invariant -- the skipped no-target row
+  only ever hit an off-diagonal cell, never a diagonal). Python: `test_confusion_matrix_no_target_
+  row_skipped` (renamed from `test_confusion_matrix_sticky_pos_target_quirk`) +
+  `test_confusion_cross_language_identity_no_target_skip` (new, byte-identical matrix to the Rust
+  twin -- no PyO3 seam exists for confusion, so the identity is pinned by mirrored hardcoded
+  matrices) (`tests/test_phase4c_scoring.py`). *Mutation battery:* (M1) drop the `pos_target == 0`
+  skip -> a no-target row pollutes the header, RED in both languages; (M2) move the decls back
+  outside the loop (restore stickiness) -> RED in both languages; both restore green. The LID
+  DRIVER per-file confusion (`tasks/lid.rs`, `_LIDSegmentsConfusion`) is a SEPARATE path (it knows
+  the target index `ti` directly, no sticky sentinel scan, no no-target case) and is UNAFFECTED;
+  the all-target corpus goldens (`lid5_*`/`twin_mode*`/`mode7_*`/`twin_train_epoch_weights_golden`)
+  never hit a no-target row, so they stay green.
 
 - **[phase4b] An exact score tie sends the target to the MISS branch (strict `>` only)**
   (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:524`): the win

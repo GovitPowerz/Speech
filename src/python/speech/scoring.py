@@ -43,10 +43,17 @@ def confusion_matrix(results_lid: NDArray[np.float64], thresh: float) -> NDArray
     threshold (`thresh` at position 2, `100-thresh` at position 1); otherwise it is
     charged against the best-scoring non-target class.
 
-    Reproduces a legacy quirk verbatim (see IMPROVEMENTS.md): `posTarget`/
-    `posBestNotTarget` are declared ONCE outside the file loop and never reset per row
-    (only `maxScoreNotTarget`/`scoreTarget` are) -- a file with no score `> 150` (no
-    target class signaled) silently reuses the PREVIOUS row's `posTarget`.
+    PER-ROW DECODE (FIXED in phase 5; see IMPROVEMENTS.md): the four decode accumulators
+    (`scoreTarget`/`maxScoreNotTarget`/`posTarget`/`posBestNotTarget`) are declared INSIDE
+    the file loop, so a row can never inherit a prior row's target/competitor index. A file
+    with no score `> 150` (no target class signaled, `pos_target == 0`) is an out-of-set
+    trial with no true class in the closed set, so it is SKIPPED entirely -- credited to no
+    cell and never to the index-header slot, making the matrix ORDER-INDEPENDENT. The
+    legacy `confusionThresh.m` instead declared `posTarget`/`posBestNotTarget` ONCE outside
+    the loop (only `maxScoreNotTarget`/`scoreTarget` reset per row), so a no-target file
+    silently reused the PREVIOUS row's `posTarget`; the Octave oracle still describes that
+    sticky behavior, the port deliberately diverges. Fixed identically to the Rust
+    `engine/confusion.rs::confusion_from_results` (F5, both languages).
 
     `class_nb <= 1` raises: the legacy's `if (classNb > 1)` has no `else`, so `confusion`
     is never assigned and MATLAB itself would error "output argument not assigned".
@@ -61,12 +68,11 @@ def confusion_matrix(results_lid: NDArray[np.float64], thresh: float) -> NDArray
         confusion[0, kk] = kk
         confusion[kk, 0] = kk
 
-    max_score_not_target = -1.0
-    pos_best_not_target = 0
-    pos_target = 0
-    score_target = -1.0
-
     for jj in range(results_lid.shape[0]):
+        max_score_not_target = -1.0
+        pos_best_not_target = 0
+        pos_target = 0
+        score_target = -1.0
         for kk in range(class_nb):
             v = float(results_lid[jj, kk])
             if v > 150.0:
@@ -76,6 +82,10 @@ def confusion_matrix(results_lid: NDArray[np.float64], thresh: float) -> NDArray
                 max_score_not_target = v
                 pos_best_not_target = kk + 1
 
+        if pos_target == 0:
+            # No in-band target this row: out-of-set trial, credited to no class.
+            continue
+
         if (pos_target == 2 and score_target > thresh) or (pos_target == 1 and score_target > 100.0 - thresh):
             confusion[pos_target, pos_target] += 1.0
             confusion[pos_target, class_nb + 1] += 1.0
@@ -84,9 +94,6 @@ def confusion_matrix(results_lid: NDArray[np.float64], thresh: float) -> NDArray
             confusion[pos_target, pos_best_not_target] += 1.0
             confusion[pos_target, class_nb + 1] += 1.0
             confusion[class_nb + 1, pos_best_not_target] += 1.0
-
-        max_score_not_target = -1.0
-        score_target = -1.0
 
     return confusion
 
