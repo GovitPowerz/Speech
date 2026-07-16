@@ -3538,6 +3538,20 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
      gate's flat-1.0 and the rescale -- re-derive the weight from `listing`'s own records, the
      same source col1 was built from).
 
+     TEMPORAL scope (T5 review addendum): the legacy `filesValues(:,2)` persists across
+     optimizer calls within one run (`SMORMS3.m:306-321` threads `PS` through
+     `varargin_stored`), but `ComputeGradient.m:279-280` resets the whole column to 1 at the
+     end of EVERY call where the periodic re-evaluation block (`:170-278`) does not fire --
+     which is every call under `Train_BLSTM.m`'s own hardcoded defaults
+     (`adjustFileImportance = -1`, permanently off). The port's recompute-from-raw-CSV on
+     every call therefore reproduces the canonical every-call-behaves-like-call-1 trace. The
+     `Train_BLSTM_LIDSeg.m` variant (`adjustFileImportance = 1, RunFull = 50`), where the
+     reset skips every 50th call and weights COMPOUND call-over-call, is NOT modeled -- a
+     documented residual for a future multi-step-training pass, not an oversight. Perf note
+     (durable record of the T5 report's concern): `class_balance_values` re-parses the
+     mapping CSV from disk on every gradient eval (tiny files, per the 2-arg contract);
+     cache it if a profile ever shows it.
+
      *RED:* confirmed two ways against the pre-fix code (git-stashed just the test file,
      keeping the fix, to reconstruct the old assertions). (1) Signature-level: the OLD
      `_runner()`/`_BatchRunner(...)` call sites (no `mapping_path`/`algo`) raise `TypeError:

@@ -155,6 +155,16 @@ def class_balance_values(listing_records: list[dict[str, str]], mapping_path: Pa
     not the whole corpus (the port carries no persistent corpus-wide `filesValues` state;
     see the docstring of `_BatchRunner.next_listing` for why that is the correct scope).
 
+    TEMPORAL scope (Phase 5 T5 review): the legacy `filesValues(:,2)` DOES persist across
+    optimizer calls within one run (`SMORMS3.m:306-321` threads `PS`), but
+    `ComputeGradient.m:279-280` resets the whole column to 1 at the end of EVERY call
+    where the periodic re-evaluation block (`:170-278`) does not fire -- which is every
+    call under `Train_BLSTM.m`'s own hardcoded defaults (`adjustFileImportance = -1`).
+    Recomputing from the raw CSV weight on every call therefore reproduces the canonical
+    every-call-behaves-like-call-1 trace. The `Train_BLSTM_LIDSeg.m` variant
+    (`adjustFileImportance = 1, RunFull = 50`), where the reset skips every 50th call and
+    weights compound, is NOT modeled -- a documented residual, not an oversight.
+
     Law, read directly off the source (one term per KEY in the mapping file, matching
     `keySet = keys(PS.Corpora.Train.langMapConf)` / `PS.Corpora.langMap(keySet{ii})` --
     `langMapConf`'s keyset is `langMap`'s keyset plus any listing-only unmapped keys that
