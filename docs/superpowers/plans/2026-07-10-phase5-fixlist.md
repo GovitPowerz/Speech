@@ -128,3 +128,34 @@ T2 review's recommendation and explicit user ratification:
   max-subtraction solely when the max logit exceeds the exp-overflow threshold) --
   bit-identical on every existing golden (no re-pin expected; assert that), NaN-proof
   for from-scratch weights. A dedicated overflow-input unit test pins the guarded path.
+
+## Post-review scope amendment 2 (Task 4 review finding, 2026-07-16)
+
+One further item, discovered during Task 4's OWN code review after F1/F2 already landed --
+not part of the original T2 sweep or the 2026-07-10 amendment above, and NOT a pre-existing
+IMPROVEMENTS.md legacy-quirk entry. Fixed in the same Task 4 fix wave, immediately:
+
+- **F9 - multilingual `CreateBatches` aggregate-slot clobber, PORT-INTRODUCED (not
+  legacy-faithful)**: `create_batches`'s multilingual `nb_classes>1` branch
+  (`batching.py:359-364`) wrote `cases[ii] = CaseGroup(...)` -- a whole-object dataclass
+  replace -- on every target-class write. When a target's loop position collides with the
+  reserved aggregate slot under contiguous 0-based labeling (reviewer repro:
+  `create_batches(fv=[0,0,1,1,2,2], nb_classes=3, multilingual=True)`), the replace wipes
+  `.sub_cases`, and the next `get_new_batch` call reaching that slot raises
+  `IndexError` at `case.sub_cases[case.current_sub_class]` (`batching.py:449`) -- a live
+  crash, reviewer-reproduced. Adjudicated at source (per the reviewer's explicit
+  instruction not to assume F1's class-value-indexing mechanism transfers): read
+  `legacy/Optimizer_V6.2.2/functions/CreateBatches.m`'s multilingual branch (`:61-86`)
+  and `GetNewBatch.m` directly. MATLAB's `Cases(ii).index = X` is a PER-FIELD struct
+  write that leaves `.SubCases` untouched, and `GetNewBatch.m`'s multilingual aggregate
+  branch never reads `.index`/`.currentPos` on that slot (only `.SubCases`/
+  `.currentSubClass`) -- so the same collision is legacy-BENIGN, unlike F1's
+  non-multilingual clobber (which IS legacy-observable, since that branch's
+  `GetNewBatch.m` counterpart DOES read `.index` on every slot). F1's class-value-indexing
+  mechanism does NOT apply here: the colliding fields are dead regardless of which value's
+  data lands there. Fixed by mutating the existing `CaseGroup`'s `.current_pos`/`.index`
+  fields in place instead of replacing the object -- restoring MATLAB's actual per-field
+  semantics. Full RED/mutation evidence: IMPROVEMENTS.md (new `[phase5]` F9 entry) and
+  `.superpowers/sdd/task-4-report.md`'s fix-wave section. Fixed in the Task 4 fix wave,
+  commit `fix(phase5): multilingual aggregate-slot clobber (port-introduced) + cap
+  docstring caveat`.

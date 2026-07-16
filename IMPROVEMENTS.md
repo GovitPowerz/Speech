@@ -2844,6 +2844,93 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   loop position 0 corresponds to class value 0, which is never a target) -- confirmed, then
   reverted back to the fix.
 
+- **[phase5] `create_batches`'s multilingual `nbOfTargetClasses>1` branch replaced the whole
+  `CaseGroup` on a target-write collision with the aggregate slot, wiping `sub_cases` --
+  PORT-INTRODUCED bug, NOT a legacy quirk, found+fixed in the Task 4 fix-wave review (F9)**
+  (`src/python/speech/batching.py::create_batches`, the `else`/multilingual branch,
+  `:359-364` at review time). Same loop-position collision mechanism as F1
+  (`for ii, v in enumerate(possible): if 0 < v < nb_classes: cases[ii] = ...` -- `ii` is the
+  LOOP POSITION, not the class value; under the natural contiguous 0-based labeling the last
+  target write lands on `cases[nb_classes-1]`, the reserved aggregate slot), but a DIFFERENT
+  downstream consequence: read the real vendored
+  `legacy/Optimizer_V6.2.2/functions/CreateBatches.m:61-86` (the multilingual branch) and
+  `GetNewBatch.m` directly to adjudicate. MATLAB's `Cases(ii).index = X` /
+  `Cases(ii).currentPos = 1` are PER-FIELD struct writes -- they do not touch
+  `Cases(ii).SubCases`/`.currentSubClass`, whatever those hold. And `GetNewBatch.m`'s
+  multilingual branch (`:7-55`) never reads `Cases(N).index`/`.currentPos` for the aggregate
+  slot `N = nbOfTargetClasses`: once `currentClass == length(Cases)`, the code only ever
+  reads `.SubCases(subClass).index` and `.currentSubClass` (`:28-53`). So in the legacy, a
+  target write colliding with the aggregate slot silently clobbers two DEAD fields
+  (`.index`/`.currentPos` there are never read again) and is completely benign -- there is no
+  legacy bug to reproduce here, unlike F1's non-multilingual branch, where
+  `GetNewBatch.m`'s non-multilingual path (`:57-81`) DOES read `Cases(currentClass).index`
+  unconditionally for every slot including the aggregate.
+
+  The Python port's pre-fix multilingual branch instead used
+  `cases[ii] = CaseGroup(current_pos=0, index=idx)` -- a WHOLE-OBJECT REPLACE, not a
+  per-field write. `CaseGroup` is a `@dataclass` with `sub_cases: list[SubCaseGroup] =
+  field(default_factory=list)`; replacing the instance resets `sub_cases` to a FRESH EMPTY
+  LIST, discarding anything appended there by an earlier non-target loop iteration. When a
+  target's loop position collides with the aggregate slot (contiguous 0-based labeling, e.g.
+  `fv=[0,0,1,1,2,2]`, `nb_classes=3`: `possible=[0,1,2]`, loop position 0/value 0 seeds
+  `cases[2].sub_cases` via the non-target branch, then loop position 2/value 2 is itself a
+  target -- `0 < 2 < 3` -- and collides with slot `nb_classes-1=2`), the whole-object replace
+  wipes the just-appended `SubCaseGroup`. `get_new_batch`'s multilingual branch then reaches
+  `sub = case.sub_cases[case.current_sub_class]` (`:449` at review time) against an EMPTY
+  list -- `IndexError: list index out of range`, a live crash, not a silent wrong-result.
+  This is a MATLAB-to-Python translation gap (mutable struct-array per-field semantics vs.
+  an immutable-by-convention dataclass replace), with NO analog in the legacy MATLAB itself
+  -- confirmed by the source read above, not assumed.
+
+  Note the asymmetry with `worst`/`WorstCases`: the multilingual branch's post-loop line
+  `worst[nb_classes - 1] = WorstCaseGroup(index=agg_arr, ...)` unconditionally reassigns the
+  WHOLE aggregate `WorstCaseGroup` after the loop, from a separately and
+  correctly-tracked `agg_worst` accumulator -- so any mid-loop collision on `worst[ii]` is
+  fully repaired regardless (and `WorstCaseGroup` has no sibling field like `sub_cases` to
+  lose in the first place). `cases` has no such repair -- the post-loop
+  `cases[nb_classes - 1].current_sub_class = 0` line only touches `current_sub_class`, never
+  reconstructs `sub_cases`.
+
+  **FIX (phase 5, F9):** `create_batches`'s multilingual target-write branch now MUTATES the
+  existing `CaseGroup`'s fields in place (`cases[ii].current_pos = 0; cases[ii].index = idx`)
+  instead of replacing the object -- mirroring MATLAB's per-field struct-write semantics
+  exactly. This is NOT F1's class-value-indexing fix (`cases[int(v) - 1]`): that mechanism
+  does not transfer here, since (per the source read above) the colliding fields are dead
+  regardless of which value's data ends up there -- moving the collision to a different slot
+  via value-indexing would not change the outcome; only field-level mutation (matching what
+  MATLAB actually does) is legacy-faithful. For non-colliding slots, field-mutation and
+  whole-object-replace are behaviorally identical (both start from the same pre-seeded
+  default-empty `CaseGroup` and set the same two fields), so this is a targeted fix, not a
+  generalization that risks changing already-golden-tested rotation goldens.
+
+  *RED:* no pre-existing test pinned the crash (a crash is not committed-suite "expected"
+  behavior). Reproduced the reviewer's exact repro directly against the unmodified pre-fix
+  code (`fv=[0,0,1,1,2,2]`, `nb_classes=3`, `multilingual=True`, `minibatch=2`,
+  `nb_worst=1`): `IndexError` at `batching.py:449`, `case.sub_cases[case.current_sub_class]`
+  against a wiped `[]`, matching the reviewer's citation exactly. New test added:
+  `tests/test_phase4c_batching.py::test_create_batches_multilingual_aggregate_slot_survives_
+  collision` -- FAILS (`IndexError`, uncaught) against the unmodified pre-fix code, PASSES
+  post-fix, asserting the aggregate's `sub_cases` (length 1, `[1, 0]`) survives the collision
+  and `get_new_batch` returns `[2, 0]` cleanly. Both pre-fix (crash) and post-fix (values)
+  states were verified by running the actual code, not hand-derived only.
+
+  *Mutation (revert-the-fix):* temporarily restored the whole-object replace
+  (`cases[ii] = CaseGroup(current_pos=0, index=idx)`), reran the new test: fails at
+  `assert len(batches.cases[2].sub_cases) == 1` (`0 == 1`, the aggregate's SubCases wiped
+  again) -- confirmed the test is load-bearing on the field-mutation mechanism specifically,
+  not some other incidental effect (the sibling dead-field assertion,
+  `cases[2].index.tolist() == [5, 4]`, still passes under the mutation, since both
+  mechanisms assign the identical `.index` value -- only `.sub_cases` discriminates, as
+  designed). Reverted back to the fix; full `tests/test_phase4c_batching.py` (18 tests) and
+  the fixed test rerun green.
+
+  *Cross-reference:* `tests/test_phase4c_fixtures.py::test_batching_clobber_quirk_recorded`
+  is the guard that keeps the F1 Octave-fixture divergence (`batching_clobber_case3_index.bin`,
+  still pinning `CreateBatches.m`'s legacy clobbered output) honest -- it fails if that
+  fixture is ever regenerated to match the fixed port output instead of staying the
+  legacy-oracle record; unaffected by F9 (a different branch, no shared fixture), noted here
+  since both are `create_batches` clobber-family fixes discovered/fixed one task apart.
+
 - **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
   `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
   shuffles every per-class index pool via the builtin `randperm`, which would make the

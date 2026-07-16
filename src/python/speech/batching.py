@@ -290,6 +290,21 @@ def create_batches(
     class's data and losing class-0's files from every batch. The aggregate's own
     accumulation branch (`else`, no `randperm` call) is still never shuffled, unlike
     every target class's pool -- that half of the quirk is unaffected and stays verbatim.
+
+    Phase 5 fix (F9, IMPROVEMENTS.md -- PORT-INTRODUCED, NOT a legacy quirk): the
+    multilingual `nb_classes>1` branch (`:61-86`) has the SAME loop-position collision at
+    `ii == nb_classes-1` as F1's non-multilingual branch, but `GetNewBatch.m` never reads
+    `.index`/`.currentPos` on the multilingual aggregate slot (only `.SubCases`/
+    `.currentSubClass`), so the collision is legacy-BENIGN there -- MATLAB's per-field
+    struct write (`Cases(ii).index = ...`) leaves `.SubCases` untouched. The pre-fix
+    Python instead replaced the whole `CaseGroup` instance on every target write
+    (`cases[ii] = CaseGroup(...)`), which wipes `.sub_cases` (dataclass default: a fresh
+    empty list) whenever a target write collides with the aggregate slot -- `get_new_batch`
+    then IndexErrors on `case.sub_cases[case.current_sub_class]`. Fixed by mutating
+    `cases[ii]`'s `.current_pos`/`.index` fields in place instead of replacing the object,
+    matching MATLAB's field-level semantics exactly -- NOT F1's class-value-indexing
+    mechanism, which does not apply here since the colliding fields are simply never read
+    downstream (a value-indexing scheme would just move the dead write elsewhere).
     """
     file_nb = files_values.shape[0]
     validation = np.zeros(file_nb, dtype=np.int64)
@@ -359,7 +374,13 @@ def create_batches(
         for ii, v in enumerate(possible):
             if 0 < v < nb_classes:
                 idx = shuffled(files_values[:, 0] == v)
-                cases[ii] = CaseGroup(current_pos=0, index=idx)
+                # F9 (IMPROVEMENTS.md): MUTATE the existing CaseGroup's fields, mirroring
+                # MATLAB's per-field struct write `Cases(ii).index = ...`, instead of
+                # replacing the object outright. A same-slot collision at ii == nb_classes-1
+                # (contiguous 0-based labeling) must leave sub_cases/current_sub_class
+                # intact, or get_new_batch's aggregate branch IndexErrors on a wiped list.
+                cases[ii].current_pos = 0
+                cases[ii].index = idx
                 k = min(nb_worst, idx.size)
                 worst[ii] = WorstCaseGroup(index=idx[:k].copy(), score=np.zeros(k))
             else:
@@ -412,8 +433,16 @@ def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
     and the multilingual SubCases branch can legitimately need one fruitless pass over
     ALL regular classes PER sub-class before the sub-class that finally succeeds is
     reached -- both scale with corpus composition, not just the class count. The file
-    count safely dominates both (every class/sub-class pool is a subset of the corpus),
-    while a genuinely stuck rotation (proven: fruitless branches never mutate
+    count safely dominates both PROVIDED `nb_classes` itself does not dominate the file
+    count -- a caveat, not a proof-grade bound: `nb_worst=0` bypasses the degenerate
+    gate's `nb_classes` term entirely (`nb_classes*0+minibatch > file_nb` depends only on
+    `minibatch`), so a pathological caller-supplied `nb_classes >> file_nb` reaches this
+    code with `len(cases) == nb_classes` mostly-EMPTY slots (`index.size == 0`) that each
+    cost one fruitless advance per lap -- a count set by `nb_classes`, not `file_nb`. On
+    that self-defeating config the cap can trip as a NON-HANGING false positive
+    (`BatchRotationStuck` on a rotation that would eventually have succeeded) rather than
+    silent wrongness; every committed fixture keeps `nb_classes <= file_nb`, where a
+    genuinely stuck rotation (proven: fruitless branches never mutate
     `current_pos`/`current_sub_class`, so one full non-progressing lap repeats forever)
     is still caught well within twice that bound.
     """

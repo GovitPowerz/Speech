@@ -225,6 +225,45 @@ def test_create_batches_sub_and_rotation() -> None:
     _assert_rotation_matches(batches, "sub", 10)
 
 
+def test_create_batches_multilingual_aggregate_slot_survives_collision() -> None:
+    """Phase 5 fix (F9, IMPROVEMENTS.md): PORT-INTRODUCED bug, NOT a legacy quirk -- there
+    is no legacy behavior to pin here. Adjudicated against the real vendored
+    `legacy/Optimizer_V6.2.2/functions/CreateBatches.m:61-86`/`GetNewBatch.m`: MATLAB's
+    `Cases(ii).index = X` is a per-field struct write that leaves `.SubCases` untouched,
+    and `GetNewBatch.m` never reads `.index`/`.currentPos` on the multilingual aggregate
+    slot (only `.SubCases`/`.currentSubClass`) -- so a same-slot collision is
+    legacy-BENIGN there (unlike F1's non-multilingual clobber, which IS legacy-observable).
+
+    The PRE-FIX Python instead REPLACED the whole `CaseGroup` instance on every target
+    write (`cases[ii] = CaseGroup(...)`), which wipes `.sub_cases` (dataclass default: a
+    fresh empty list) whenever a target's loop position collides with the aggregate slot.
+    Reproduces the reviewer's exact repro: contiguous 0-based labels `fv=[0,0,1,1,2,2]`,
+    `nb_classes=3` sort `possible` to `[0,1,2]`; loop position 0 (value 0, non-target)
+    seeds the aggregate's SubCases, then loop position 2 (value 2, target, since
+    `0<2<3`) collides with slot `nb_classes-1=2`. Pre-fix this raised `IndexError` inside
+    `get_new_batch` (`case.sub_cases[case.current_sub_class]` on the wiped empty list,
+    `batching.py:449`) as soon as rotation reached the aggregate slot -- confirmed via a
+    standalone repro against the unmodified pre-fix code before writing this test (see the
+    phase-5 task-4 fix-wave report); there was no prior committed pin for the crash since a
+    crash is not behavior a suite should assert as "expected." This test's ability to run
+    to completion IS the pin now.
+
+    All numeric values below (including the dead-field `cases[2].index`, clobbered by
+    class-2's data but never read downstream) were verified by running the fixed
+    `create_batches`/`get_new_batch` directly, not hand-derived only."""
+    fv = np.array([0, 0, 1, 1, 2, 2], dtype=np.float64).reshape(-1, 1)
+    batches = create_batches(fv, minibatch=2, nb_worst=1, multilingual=True, nb_classes=3, rng=_rng())
+    # Non-vacuity: the collision actually happened (the aggregate slot's OWN .index was
+    # overwritten by class-2's data, a dead field never read downstream) AND the
+    # aggregate's SubCases survived it (the fix's whole point).
+    assert batches.cases[2].index.tolist() == [5, 4]
+    assert len(batches.cases[2].sub_cases) == 1
+    assert batches.cases[2].sub_cases[0].index.tolist() == [1, 0]
+
+    batch, batches = get_new_batch(batches)
+    assert batch == [2, 0]
+
+
 def test_create_batches_degenerate_gate() -> None:
     """nbOfTargetClasses*nbOfWorstCases+nbOfCasesPerBatch > file_nb (CreateBatches.m:15-17):
     no shuffling at all -- degenerate_index is the flat, unshuffled (1:file_nb)'."""
