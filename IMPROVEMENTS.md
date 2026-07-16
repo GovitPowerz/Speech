@@ -2960,7 +2960,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
 - **[phase4c] Genuine legacy bug surfaced by driving the real `CheckGrad.m`: `weights2nnet.m`
   never writes back the normalize mean/std tail `nnet2MatFile.m` appends to `weights`, so
-  CheckGrad's last `2*length(normalize.mean)` numeric derivatives are always exactly 0**
+  CheckGrad's last `2*length(normalize.mean)` numeric derivatives are always exactly 0 --
+  FIXED-BY-DESIGN (phase 5, this commit, F4)**
   (`nnet2MatFile.m:140-141` appends `nnet.normalize.mean;nnet.normalize.std` to the flat
   `weights` vector CheckGrad iterates `kk = 1:length(weights)` over; `weights2nnet.m:150-186`
   reconstructs `nnet.output.layer(*).weights` from `weights` and then RETURNS -- it never reads
@@ -2984,6 +2985,28 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   the opposite of the Octave golden). *Mutation:* the extractor's non-vacuity guard SystemExits
   if the golden's last 2 numeric entries are ever nonzero (would mean the bug -- or the harness
   setup exercising it -- silently stopped firing).
+
+  **FIXED-BY-DESIGN (phase 5, F4):** the Phase 5 sweep's own correction (`docs/superpowers/
+  plans/2026-07-10-phase5-fixlist.md`, "Plan corrections" item 2) already found this entry
+  states the port does NOT reproduce the bug: `weight_bridge.nnet_to_flat` appends the
+  mean/std tail (`weight_bridge.py:198-` -- see `element_count`/`_pack_lstm_layer` for the
+  tail-inclusive element count) and `flat_to_nnet` takes it back, so the tail round-trips
+  through `pack_weights`/`unpack_weights` like every other element, not silently dropped the
+  way `weights2nnet.m` drops it. Verified (Phase 5, Task 5), no code change: the directed
+  tests the correction cites were re-read and confirmed genuinely VALUE-exact, not merely
+  structural --
+  `tests/test_phase4c_weight_bridge.py::test_pack_unpack_flat_roundtrip`/
+  `test_unpack_pack_net_roundtrip` round-trip `unpack_weights(flat, spec)` ->
+  `pack_weights(...)` and assert `mean`/`std` equal via `_assert_nets_equal` (`np.array_equal`,
+  exact) on hypothesis-generated data, `test_unpack_weights_matches_flat_to_nnet_on_real_
+  fixture` closes the same loop on a REAL committed `.bin` fixture; and this entry's own
+  `test_check_grad_normalize_tail_quirk_documented_not_reproduced` (`tests/
+  test_phase4c_scoring.py`) already asserts the port's `check_grad` produces a proper
+  nonzero numeric derivative at the tail indices, the opposite of the legacy bug. No
+  DIRECTED tail-round-trip assert was missing, so no new pin was added -- see
+  `.superpowers/sdd/task-5-report.md` for the verification trace. RED/mutation do not apply
+  (spec S2 step 1: nothing to fail, since the port never reproduced the bug in the first
+  place -- a doc-only flip per the sweep's own adjudication, not a code fix).
 
 - **[phase4c] `MaskingValidation.m`'s FAIL case exploits a genuine encode/decode asymmetry in
   `vec2struct.m`'s `_padding_block`-family fields for negative mask values** (`vec2struct.m`
@@ -3471,17 +3494,97 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
      *Fix candidate:* if the LID-target-from-fileId legacy path is ever ported for strict
      parity, BOTH the duration-as-file_id read and the `feedForward(targetIndex)` consumption
      (`BLSTMNeuralNetwork.cpp:843-918`) must land together; the listing field alone is inert.
-  3. **No per-eval class-balance rescale + ascending-index order.** `ComputeGradient.m:72-96`
-     rescales `filesValues(:,2)` by `nbOfElem/sumInClassIndex` (in-class = `classNb == 1`)
-     before writing; the port writes the RAW listing weight (`_files_values` col1) -- the
-     `langMapConf` in-class model the port's corpus does not carry. And the written index
-     ORDER is ascending file index (`np.unique`), a simplification of `count_unique` +
-     `sortrows(filesValues, -3)` (:55-58) -- the aggregate corpus cost is order-independent
-     (`compute_cost` sums the config's rows; `aggregate_workers` re-sorts by id). Both are
-     deterministic (the determinism gate is what matters for the optimizer path, S1). *Pinned
-     by:* `tests/test_phase4d_batchmode.py` (byte-exact batch listings + rotation + the live
-     `forward_backward` `listing_override`/`make_engine` rebuild) + the batch-mode determinism
-     exit gate `tests/pyo3/test_exit_gate.py::test_batch_mode_deterministic`.
+  3. **No per-eval class-balance rescale -- FIXED (phase 5, this commit, F3); ascending-index
+     order stays a kept simplification.** `ComputeGradient.m:72-96` rescales
+     `filesValues(:,2)` by `nbOfElem/sumInClassIndex` (in-class = `classNb == 1`) before
+     writing; the port used to write the RAW listing weight (`_files_values` col1) verbatim --
+     the `langMapConf` in-class model the port's corpus did not carry. SEPARATELY, and NOT
+     part of this fix: the written index ORDER is ascending file index (`np.unique`), a
+     simplification of `count_unique` + `sortrows(filesValues, -3)` (:55-58) -- the aggregate
+     corpus cost is order-independent (`compute_cost` sums the config's rows;
+     `aggregate_workers` re-sorts by id), so this stays a documented, deterministic
+     simplification (the determinism gate is what matters for the optimizer path, S1),
+     unchanged by F3. *Was pinned by:* `tests/test_phase4d_batchmode.py` (byte-exact batch
+     listings pinning the RAW weight) + the batch-mode determinism exit gate
+     `tests/pyo3/test_exit_gate.py::test_batch_mode_deterministic`.
+
+     **FIX (phase 5, F3):** read `ComputeGradient.m:53-96` directly (not just the plan's
+     one-line gloss). The rescale is gated by `:74-76`:
+     `if ((PS.VP.algo < 5)||(PS.Corpora.Train.Batches.nbOfTargetClasses > 2))
+     PS.Corpora.Train.filesValues(:,2) = 1; end` -- a HARD OVERRIDE (not a fallback) that
+     discards BOTH the raw weight AND the rescale, for every non-LID algo or any >2-class LID
+     split; only `algo >= 5` (LID) with `nbOfTargetClasses <= 2` (a binary target/non-target
+     split) lets the rescale itself reach `WriteWeightedListing`. The rescale law (`:59-73`,
+     `tmp` = the batch selection `count_unique([new_batch;worstCases])`, matching the port's
+     existing `idx`): for every KEY in the mapping file (`keys(PS.Corpora.Train.langMapConf)`
+     ~= `keys(PS.Corpora.langMap)` for a well-formed listing, since `langMapConf`'s only extra
+     keys are listing-only-unmapped ones that would themselves error the `langMap` lookup --
+     the port reads the mapping file's own keys directly, per spec R2), `classNb =
+     langMap(key)`; if `classNb == 1`: `sumIn += sum(batch rows with that classNb)`, `nbOfElem
+     += count(...)`; else: `sumOut += sum(...)`. Then `weight[class==1] *= nbOfElem/sumIn`,
+     `weight[class!=1] *= nbOfElem/sumOut`. Iterating per KEY (not per unique classid) is
+     reproduced verbatim -- a mapping file where two keys share a classid would double-count
+     that classid's contribution, exactly like the legacy (not reachable by any committed
+     1-key-per-classid fixture, deliberately not "cleaned up"). Division uses plain IEEE-754
+     double semantics (`numpy` scalars, `0/0 -> nan`, matching MATLAB) so a batch with zero
+     representation on one side produces a nan/inf factor that is provably never applied (its
+     row selection is then empty).
+
+     Ported as `speech.drivers.train.class_balance_values(listing_records, mapping_path) ->
+     NDArray` (the pure `:59-73` law only) + the `:74-76` gate inlined into
+     `_BatchRunner.next_listing` (needs `algo`/`Batches.nb_target_classes`, outside
+     `class_balance_values`'s 2-argument contract). `_BatchRunner` gained `mapping_path`/`algo`
+     fields; `_files_values`'s col1 is no longer read by `next_listing` (both branches -- the
+     gate's flat-1.0 and the rescale -- re-derive the weight from `listing`'s own records, the
+     same source col1 was built from).
+
+     *RED:* confirmed two ways against the pre-fix code (git-stashed just the test file,
+     keeping the fix, to reconstruct the old assertions). (1) Signature-level: the OLD
+     `_runner()`/`_BatchRunner(...)` call sites (no `mapping_path`/`algo`) raise `TypeError:
+     _BatchRunner.__init__() missing 2 required positional arguments` against the fixed
+     dataclass -- `test_batch_listing_bytes_step0`, `_rotates_across_steps`,
+     `_includes_worst_cases`, `test_files_values_degenerate_gate_full_corpus` all failed this
+     way. (2) Value-level (the more direct RED, isolating the fix from the signature change):
+     re-ran the OLD single-class 5-file corpus (`_records`/`_files_values`) with the NEW
+     required args supplied (`algo=6`, so the rescale -- not the gate -- is what runs) and
+     compared against the OLD golden byte string
+     `b"f0;r0;eng;us;1;1;\nf1;r1;eng;us;0.5;1;\n"`: got
+     `b"f0;r0;eng;us;1.33333;1;\nf1;r1;eng;us;0.666667;1;\n"` instead (every file here is the
+     corpus's only `eng_us` key, always in-class, so `factor_in = nbOfElem/sumIn = 2/1.5 =
+     1.33333`) -- a genuine mismatch, not just a broken constructor.
+
+     *Re-pin:* the two rotation goldens (`test_batch_listing_bytes_step0`,
+     `_rotates_across_steps`) now use `algo=3` (a SAD algo, `_runner`'s new default) so the
+     `:74-76` gate always wins and their weight field collapses to a flat `1` for every row
+     (simple re-derivation: "the gate forces 1.0", no rescale arithmetic needed for tests whose
+     real purpose is rotation-cursor coverage, not weight-value coverage). A crafted 2-class
+     corpus (f0/f1 -> classid 1, weights 1.0/3.0; f2 -> classid 2, weight 2.0; f3 -> classid 3,
+     weight 6.0; mapping file `eng;us;1` / `fra;fr;2` / `deu;de;3`) drives THREE new tests: a
+     direct `class_balance_values` pin (hand-derivation in the docstring: `sumIn=4.0,
+     nbOfElem=2, sumOut=8.0` -> `factor_in=0.5, factor_out=0.25` -> `[0.5, 1.5, 0.5, 1.5]`), the
+     same corpus through `_BatchRunner.next_listing` end to end (algo=6, nb_classes=1, gate
+     open -- byte-exact rescaled listing), and the SAME corpus with `nb_classes=3` (gate's
+     other clause, `nb_target_classes > 2`) proving the rescale is computable but never
+     written (flat `1` again). *Pinned by:* `tests/test_phase4d_batchmode.py::
+     test_batch_listing_bytes_step0`, `::test_batch_listing_bytes_rotates_across_steps`
+     (re-pinned), `::test_class_balance_values_matches_hand_derivation`, `::
+     test_batch_listing_bytes_class_balance_rescale`, `::
+     test_batch_listing_gate_forces_flat_weight_when_nb_target_classes_exceeds_two` (new).
+
+     *Mutation (revert-the-fix, 3 variants, each applied then reverted):* (a) dropping the
+     `nb_target_classes > 2` gate clause (`self.algo < 5` alone) breaks exactly
+     `test_batch_listing_gate_forces_flat_weight_when_nb_target_classes_exceeds_two`; (b)
+     deleting the whole gate (`class_balance_values` always wins) breaks exactly the THREE
+     gate-dependent tests (`test_batch_listing_bytes_step0`, `_rotates_across_steps`,
+     `_gate_forces_flat_weight_...`) while the two rescale-specific tests -- correctly ungated
+     at `nb_classes<=2` -- stay green; (c) dropping the rescale multiply inside
+     `class_balance_values` (`out = raw_weight.copy(); return out`) breaks exactly
+     `test_class_balance_values_matches_hand_derivation` and
+     `test_batch_listing_bytes_class_balance_rescale`, leaving the gate-dependent tests green
+     (the gate short-circuits before `class_balance_values` is even called for those). Full
+     `tests/test_phase4d_batchmode.py` (10 tests) reruns green after each revert. NOT
+     independently mutation-tested: the per-KEY-not-per-unique-classid double-count quirk (no
+     committed fixture has two keys sharing a classid).
 
 - **[4d] `.scr` writer class order: the Phase 4c class-id divergence CLOSED -- legacy is
   `keys(langMapConf)` = ASCII-alphabetical `lang_dial` keys, and the mapping file's

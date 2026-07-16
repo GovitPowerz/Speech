@@ -110,33 +110,107 @@ def _eval_config_text(base: dict[str, str], ponds: list[str], algo: int, filesli
 #     `listing_override`/`make_engine`).
 
 
-def _read_class_mapping(state: RunState) -> dict[tuple[str, str], int]:
-    """Parse the `language2classmapping` CSV into `(lang, dial) -> class` (the
-    `PS.Corpora.langMap` the corpus builds). Resolved relative to the config's own dir,
-    like every other corpus path."""
-    path = Path(state.config_path).parent / state.base_config["language2classmapping"]
+def _mapping_path(state: RunState) -> Path:
+    """Resolve the `language2classmapping` CSV path, like every other corpus path
+    (relative to the config's own dir)."""
+    return Path(state.config_path).parent / state.base_config["language2classmapping"]
+
+
+def _parse_class_mapping(path: Path) -> dict[tuple[str, str], int]:
+    """Parse a `language2classmapping` CSV into `(lang, dial) -> class` (`PS.Corpora.
+    langMap`, `processListing.m:8-10`): last-line-wins on a duplicate `(lang, dial)` key,
+    matching MATLAB `containers.Map` assignment semantics (a later `langMap(key) = ...`
+    overwrites silently, same as a plain dict literal loop)."""
     mapping: dict[tuple[str, str], int] = {}
-    for line in path.read_text().splitlines():
+    for line in Path(path).read_text().splitlines():
         toks = line.split(";")
         if len(toks) >= 3 and toks[0]:
             mapping[(toks[0], toks[1])] = int(float(toks[2]))
     return mapping
 
 
+def _read_class_mapping(state: RunState) -> dict[tuple[str, str], int]:
+    """`PS.Corpora.langMap` for `state`'s corpus -- see `_mapping_path`/`_parse_class_mapping`."""
+    return _parse_class_mapping(_mapping_path(state))
+
+
 def _files_values(state: RunState) -> NDArray[np.float64]:
     """Build `Corpora.filesValues`'s two batch-relevant columns from the listing records:
-    col0 = class index (mapping lookup, legacy unknown -> -1), col1 = per-file weight
-    (`filesValues(:,2)`). `create_batches` reads col0; `_BatchRunner.next_listing` reads
-    col1 for the weighted listing's weight field.
-
-    DEVIATION (IMPROVEMENTS): the port does NOT reproduce `ComputeGradient.m`'s per-eval
-    class-balance RESCALE of col1 (:72-96, `nbOfElem/sumInClassIndex` etc.) -- that needs
-    the `langMapConf`/in-class (`classNb == 1`) model the port's corpus does not carry. The
-    raw listing weight is written instead; deterministic, and the cost impact is a per-file
-    ponderation, not a determinism concern."""
+    col0 = class index (mapping lookup, legacy unknown -> -1), col1 = per-file RAW weight
+    (`filesValues(:,2)` as loaded by `processListing.m`, pre-rescale). `create_batches`
+    reads col0 to stratify the batch pools; col1 is no longer what ends up in the weighted
+    listing (Phase 5, F3, IMPROVEMENTS.md -- FIXED, this commit): `_BatchRunner.next_listing`
+    now derives the WRITTEN weight per eval via `class_balance_values` + the algo/
+    nb_target_classes gate, matching `ComputeGradient.m:59-76`, instead of reading this raw
+    column directly."""
     mapping = _read_class_mapping(state)
     rows = [(float(mapping.get((rec["lang"], rec["dial"]), -1)), float(rec["weight"])) for rec in state.listing]
     return np.array(rows, dtype=np.float64) if rows else np.zeros((0, 2), dtype=np.float64)
+
+
+def class_balance_values(listing_records: list[dict[str, str]], mapping_path: Path) -> NDArray[np.float64]:
+    """Port of `ComputeGradient.m:59-73` -- the per-eval class-balance rescale (Phase 5,
+    F3, IMPROVEMENTS.md). `listing_records` is the CURRENT BATCH's selection (`tmp` =
+    `count_unique([new_batch;worstCases])`, `:53-58`) -- the sums below run over the batch,
+    not the whole corpus (the port carries no persistent corpus-wide `filesValues` state;
+    see the docstring of `_BatchRunner.next_listing` for why that is the correct scope).
+
+    Law, read directly off the source (one term per KEY in the mapping file, matching
+    `keySet = keys(PS.Corpora.Train.langMapConf)` / `PS.Corpora.langMap(keySet{ii})` --
+    `langMapConf`'s keyset is `langMap`'s keyset plus any listing-only unmapped keys that
+    would themselves error on the `langMap` lookup, so a well-formed listing -- every
+    lang/dial covered by the mapping file -- makes the two keysets coincide; the port reads
+    the mapping file's own keys directly, per the brief's documented scope, spec R2):
+
+        for (lang, dial), classNb in mapping.items():
+            rows = <batch records whose OWN classNb (via the SAME mapping) == this classNb>
+            if classNb == 1:  sumIn  += sum(rows' raw weight); nbOfElem += len(rows)
+            else:             sumOut += sum(rows' raw weight)
+        weight[classNb == 1]  *= nbOfElem / sumIn
+        weight[classNb != 1]  *= nbOfElem / sumOut
+
+    Iterating per MAPPING KEY (not per distinct classid) is load-bearing and reproduced
+    VERBATIM: if two keys ever shared a classid, that classid's batch contribution would be
+    summed once PER KEY -- a legacy double-count quirk, not reachable by any 1-key-per-
+    classid fixture (every committed corpus is 1:1) but deliberately not "cleaned up" to a
+    per-unique-classid loop, since that would silently change the law on a corpus where it
+    matters.
+
+    Division follows plain IEEE-754 double semantics (0/0 -> nan, x/0 -> inf, matching
+    MATLAB exactly) via `numpy` scalars, not Python floats (which raise ZeroDivisionError on
+    a literal `0.0/0.0`) -- a batch with zero representation on one side of the split
+    produces a nan/inf factor for that side, but it is applied only to that side's row
+    selection, which is then necessarily EMPTY, so the factor is computed but never actually
+    written into `out` (no observable effect, matching how legacy's own equivalent
+    zero-batch-representation case behaves on the port's per-batch scope).
+
+    Does NOT apply the `ComputeGradient.m:74-76` algo/`nbOfTargetClasses` gate
+    (`filesValues(:,2) = 1` override for `algo < 5` or `nbOfTargetClasses > 2`) -- that
+    decision needs `algo`/`nb_target_classes`, outside this function's 2-argument contract;
+    `_BatchRunner.next_listing` applies it."""
+    mapping = _parse_class_mapping(mapping_path)
+    class_of = np.array([float(mapping.get((r["lang"], r["dial"]), -1)) for r in listing_records], dtype=np.float64)
+    raw_weight = np.array([float(r["weight"]) for r in listing_records], dtype=np.float64)
+
+    sum_in = np.float64(0.0)
+    sum_out = np.float64(0.0)
+    nb_elem = np.float64(0.0)
+    for classid in mapping.values():
+        rows = raw_weight[class_of == float(classid)]
+        if classid == 1:
+            sum_in += rows.sum()
+            nb_elem += rows.size
+        else:
+            sum_out += rows.sum()
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        factor_in = nb_elem / sum_in
+        factor_out = nb_elem / sum_out
+
+    out = raw_weight.copy()
+    out[class_of == 1] *= factor_in
+    out[class_of != 1] *= factor_out
+    return out
 
 
 @dataclass
@@ -144,12 +218,20 @@ class _BatchRunner:
     """The persistent hard-example scheduler for one training run. Holds the shuffled-once
     `Batches` struct (its cursors mutate across steps) + the corpus records + `filesValues`.
     `next_listing` is the per-inner-step draw: `get_new_batch` -> union with the fixed worst
-    cases -> `write_weighted_listing` to the workdir batch listing."""
+    cases -> `write_weighted_listing` to the workdir batch listing.
+
+    `files_values` is retained for parity with `create_batches`'s own input (constructed
+    once, upstream, from the same `_files_values` call) but its col1 (raw weight) is no
+    longer read by `next_listing` post-Phase-5-F3 -- `class_balance_values` re-derives the
+    per-file weight straight from `listing`'s own records, which is the same source col1
+    was built from in the first place."""
 
     listing: list[dict[str, str]]
     files_values: NDArray[np.float64]
     batches: Batches
     workdir: Path
+    mapping_path: Path
+    algo: int
     last_index: NDArray[np.int64] = field(default_factory=lambda: np.zeros(0, dtype=np.int64))
 
     def next_listing(self) -> Path:
@@ -162,18 +244,30 @@ class _BatchRunner:
         -3)` re-sort -- the aggregate corpus cost is order-independent (compute_cost sums
         over the config's rows; `aggregate_workers` re-sorts by id).
 
-        The weighted listing's two `%g` columns: weight = `filesValues(:,2)`; the 6th CSV
-        field is the record's file_id, NOT a duration -- `WriteWeightedListing.m` writes
-        `listing{i}.duration` there but `Corpus::from_config` reads field 6 as file_id (a
-        legacy field-role mismatch, IMPROVEMENTS), so the port round-trips file_id and the
-        engine sees the same file_id the full corpus would."""
+        WEIGHT column (Phase 5, F3, IMPROVEMENTS.md -- FIXED, this commit):
+        `ComputeGradient.m:74-76` gates the whole `:59-73` rescale block -- `algo < 5`
+        (every non-LID algo) or `nbOfTargetClasses > 2` (a >2-class LID split) OVERRIDES
+        `filesValues(:,2)` to a flat 1.0 for EVERY selected row, discarding both the raw
+        listing weight and the rescale; only `algo >= 5` (LID) with `nbOfTargetClasses <= 2`
+        (a binary target/non-target split) lets `class_balance_values`'s rescale survive
+        into the written listing. This is a hard override, not a fallback: the raw listing
+        weight is NEVER what gets written once batch mode is on, in either branch.
+
+        The weighted listing's OTHER `%g` column (the 6th CSV field) is the record's
+        file_id, NOT a duration -- `WriteWeightedListing.m` writes `listing{i}.duration`
+        there but `Corpus::from_config` reads field 6 as file_id (a legacy field-role
+        mismatch, IMPROVEMENTS), so the port round-trips file_id and the engine sees the
+        same file_id the full corpus would."""
         batch, _ = get_new_batch(self.batches)
         parts = [np.asarray(batch, dtype=np.int64)]
         parts += [w.index for w in self.batches.worst_cases if w.index.size]
         idx = np.unique(np.concatenate(parts)) if any(p.size for p in parts) else np.zeros(0, dtype=np.int64)
 
         items = [self.listing[int(i)] for i in idx]
-        weight_col = self.files_values[idx, 1] if idx.size else np.zeros(0, dtype=np.float64)
+        if self.algo < 5 or self.batches.nb_target_classes > 2:
+            weight_col = np.ones(idx.size, dtype=np.float64)
+        else:
+            weight_col = class_balance_values(items, self.mapping_path)
         file_id_col = np.array([float(self.listing[int(i)]["file_id"]) for i in idx], dtype=np.float64)
         values = np.column_stack([weight_col, file_id_col]) if idx.size else np.zeros((0, 2), dtype=np.float64)
 
@@ -373,7 +467,7 @@ def train(
         fv = _files_values(state)
         batch_rng = np.random.default_rng(seed + 2)
         batches = create_batches(fv, minibatch, nb_worst, multilingual, nb_classes, batch_rng)
-        runner = _BatchRunner(state.listing, fv, batches, workdir)
+        runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
 
     def cost_fn(positions: NDArray[np.float64], _mode: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         pos = np.atleast_2d(np.asarray(positions, dtype=F64))
