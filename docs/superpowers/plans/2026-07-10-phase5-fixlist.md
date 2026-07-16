@@ -159,3 +159,19 @@ IMPROVEMENTS.md legacy-quirk entry. Fixed in the same Task 4 fix wave, immediate
   `.superpowers/sdd/task-4-report.md`'s fix-wave section. Fixed in the Task 4 fix wave,
   commit `fix(phase5): multilingual aggregate-slot clobber (port-introduced) + cap
   docstring caveat`.
+
+## T10 discovery amendments (2026-07-17)
+
+- **F10 - the zero-gradient release seam** (PORT-INTRODUCED, latent since 4c): `run_epoch`
+  folds gradients on the per-lane CLONES (the R6 static-lane model) and discards the folded
+  map; the public `weights_derivatives(0)` reads the main bag's never-updated accumulator ->
+  `forward_backward` returns exactly zero gradient and SMORMS3 never moves a weight.
+  Invisible to every finiteness/determinism gate; caught by T10's improvement gate. Fix:
+  persist the folded derivatives back where the seam reads them (the T10 prototype: stash
+  the folded map; regression-safe on 25 pyo3 + 2 Rust goldens). RED = a NEW pin asserting a
+  NONZERO gradient + weight movement through the release seam (the always-missing test).
+- **F11 - single-eval semantics need Epochs=0** (seam misroute): `Epochs=1` runs the
+  engine-internal `train()` (3 folds + 2 Rprop updates) so the seam's cost/gradient are
+  evaluated at engine-moved weights, not the input theta. Fix: the modern/eval config text
+  uses `Epochs=0` (`run_solo` - one forward/backward at theta). The legacy-regime
+  `_eval_config_text` adjudicated in the fix (same misroute or intentional?).
