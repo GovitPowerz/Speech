@@ -272,15 +272,24 @@ def create_batches(
     (mirrors `Corpora.filesValues(:,1)`); `rng.permutation(array)` replaces every
     `randperm`-driven shuffle (the ONLY RNG use in this module).
 
-    Reproduces two legacy quirks verbatim (documented in IMPROVEMENTS.md):
+    Reproduces one legacy quirk verbatim (documented in IMPROVEMENTS.md):
       * degenerate gate (`:15-17`): `nb_classes*nb_worst+minibatch > file_nb` skips all
         shuffling -- every file is one flat, unshuffled batch.
-      * the non-multilingual `nb_classes>1` branch (`:43-60`) assigns
-        `cases[ii]` using the LOOP POSITION `ii` over `sorted(unique(class values))`, NOT
-        the class VALUE itself. When class values are the natural contiguous labeling
-        `0..nb_classes-1`, the LAST loop position collides with the aggregate slot
-        (`nb_classes-1`) reserved for non-target files, silently OVERWRITING it with the
-        top target class's data and losing the aggregate.
+
+    Phase 5 fix (F1, IMPROVEMENTS.md -- "FIXED (phase 5, ...)"): the non-multilingual
+    `nb_classes>1` branch (`:43-60`) now assigns `cases`/`worst` by CLASS VALUE
+    (`cases[int(v) - 1]` for a target `v` satisfying `0 < v < nb_classes`), not LOOP
+    POSITION. `0 < v < nb_classes` restricts `v` to the integers `1..nb_classes-1`, which
+    biject onto the non-reserved slots `0..nb_classes-2` via `v - 1` -- the reserved
+    aggregate slot `nb_classes-1` is therefore never written by a target class, for ANY
+    labeling (contiguous or not). Previously, target classes were written to `cases[ii]`
+    using `ii`, the 0-based LOOP POSITION over `sorted(unique(class values))`: under the
+    natural contiguous labeling `0..nb_classes-1` (0 = non-target catch-all, 1..N-1 =
+    targets), the last loop position landed on `cases[nb_classes-1]` -- the SAME slot
+    reserved for the non-target aggregate -- silently overwriting it with the top target
+    class's data and losing class-0's files from every batch. The aggregate's own
+    accumulation branch (`else`, no `randperm` call) is still never shuffled, unlike
+    every target class's pool -- that half of the quirk is unaffected and stays verbatim.
     """
     file_nb = files_values.shape[0]
     validation = np.zeros(file_nb, dtype=np.int64)
@@ -332,12 +341,13 @@ def create_batches(
     worst = [WorstCaseGroup(index=np.array([], dtype=np.int64), score=np.array([])) for _ in range(nb_classes)]
 
     if not multilingual:
-        for ii, v in enumerate(possible):
+        for v in possible:
             if 0 < v < nb_classes:
                 idx = shuffled(files_values[:, 0] == v)
-                cases[ii] = CaseGroup(current_pos=0, index=idx)  # legacy quirk: slot ii, not value v
+                slot = int(v) - 1  # class VALUE, not loop position -- see IMPROVEMENTS.md (F1)
+                cases[slot] = CaseGroup(current_pos=0, index=idx)
                 k = min(nb_worst, idx.size)
-                worst[ii] = WorstCaseGroup(index=idx[:k].copy(), score=np.zeros(k))
+                worst[slot] = WorstCaseGroup(index=idx[:k].copy(), score=np.zeros(k))
             else:
                 extra = np.flatnonzero(files_values[:, 0] == v).astype(np.int64)
                 cases[nb_classes - 1].index = np.concatenate([cases[nb_classes - 1].index, extra])
@@ -374,25 +384,55 @@ def create_batches(
     )
 
 
+class BatchRotationStuck(Exception):
+    """Raised by `get_new_batch` (Phase 5 hardening, F2 -- IMPROVEMENTS.md) when the
+    rotation cursor cannot make progress: every reachable class (or, in the multilingual
+    `SubCases` branch, every sub-class) is fully worst-excluded (`case.index.size <=
+    worst.index.size` everywhere reachable), so the legacy `GetNewBatch.m` loop -- which
+    has NO iteration cap -- would advance `currentClass` forever without ever appending
+    an element. See `get_new_batch`'s docstring for the cap derivation."""
+
+
 def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
     """Port of `GetNewBatch.m`. PURE integer-cursor rotation -- no RNG. Mutates and
     returns `batches` (matching the legacy's in/out struct semantics); `batches.validation`
     and `batches.count_pass` are updated in place before returning.
+
+    Phase 5 hardening (F2, IMPROVEMENTS.md): the legacy `while len(batch) <
+    nbOfCasesPerBatch` loops have NO iteration cap -- a state where every class/sub-class
+    is fully worst-excluded advances `current_class` forever without ever appending
+    (confirmed via a bounded, signal-alarm-guarded standalone harness against the
+    unmodified pre-fix code, not committed -- see the phase-5 task-4 report). Both loops
+    here now raise `BatchRotationStuck` after `2 * len(batches.validation)` CONSECUTIVE
+    "fruitless" advances (an iteration that does not grow `batch`); the counter resets on
+    every successful append. `len(batches.validation)` (the corpus file count) is used
+    rather than `len(batches.cases)` (the class count) because the class-count bound is
+    NOT safe in general: a single class can legitimately need up to `nb_worst` fruitless
+    in-class misses before succeeding (pigeonhole over its own worst-excluded positions),
+    and the multilingual SubCases branch can legitimately need one fruitless pass over
+    ALL regular classes PER sub-class before the sub-class that finally succeeds is
+    reached -- both scale with corpus composition, not just the class count. The file
+    count safely dominates both (every class/sub-class pool is a subset of the corpus),
+    while a genuinely stuck rotation (proven: fruitless branches never mutate
+    `current_pos`/`current_sub_class`, so one full non-progressing lap repeats forever)
+    is still caught well within twice that bound.
     """
     if batches.current_class is None:
         assert batches.degenerate_index is not None
         batch = [int(x) for x in batches.degenerate_index]
     else:
         batch = []
+        cap = max(2, 2 * int(batches.validation.size))
+        fruitless = 0
         if batches.is_multilingual and batches.nb_target_classes > 1:
             while len(batch) < batches.nb_cases_per_batch:
                 cc = batches.current_class
+                has_changed = False
                 if cc < len(batches.cases) - 1:
                     case = batches.cases[cc]
                     worst = batches.worst_cases[cc]
                     if case.index.size > worst.index.size:
                         elem = int(case.index[case.current_pos])
-                        has_changed = False
                         if worst.index.size == 0 or not np.any(worst.index == elem):
                             batch.append(elem)
                             has_changed = True
@@ -410,7 +450,6 @@ def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
                     diff_sub = np.setdiff1d(sub.index, worst.index)
                     if diff_sub.size > 0:
                         elem = int(sub.index[sub.current_pos])
-                        has_changed = False
                         if worst.index.size == 0 or not np.any(worst.index == elem):
                             batch.append(elem)
                             has_changed = True
@@ -427,14 +466,24 @@ def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
                         if case.current_sub_class >= len(case.sub_cases):
                             case.current_sub_class = 0
                         batches.current_class = 0
+                if has_changed:
+                    fruitless = 0
+                else:
+                    fruitless += 1
+                    if fruitless >= cap:
+                        raise BatchRotationStuck(
+                            f"get_new_batch: no progress after {fruitless} consecutive fruitless "
+                            f"rotation advances (cap={cap}); every reachable class/sub-class "
+                            "appears fully worst-excluded"
+                        )
         else:
             while len(batch) < batches.nb_cases_per_batch:
                 cc = batches.current_class
+                has_changed = False
                 case = batches.cases[cc]
                 worst = batches.worst_cases[cc]
                 if case.index.size > worst.index.size:
                     elem = int(case.index[case.current_pos])
-                    has_changed = False
                     if worst.index.size == 0 or not np.any(worst.index == elem):
                         batch.append(elem)
                         has_changed = True
@@ -447,6 +496,16 @@ def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
                 else:
                     nxt = cc + 1
                     batches.current_class = nxt if nxt < len(batches.cases) else 0
+                if has_changed:
+                    fruitless = 0
+                else:
+                    fruitless += 1
+                    if fruitless >= cap:
+                        raise BatchRotationStuck(
+                            f"get_new_batch: no progress after {fruitless} consecutive fruitless "
+                            f"rotation advances (cap={cap}); every reachable class appears fully "
+                            "worst-excluded"
+                        )
 
     batch_arr = np.array(batch, dtype=np.int64)
     if batch_arr.size:

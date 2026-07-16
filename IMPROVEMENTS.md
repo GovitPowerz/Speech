@@ -2792,8 +2792,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
 - **[phase4c] `CreateBatches.m`'s non-multilingual `nbOfTargetClasses>1` branch indexes
   `Cases`/`WorstCases` by LOOP POSITION, not class VALUE -- silently clobbering the aggregate
-  slot for the natural contiguous class labeling** (`CreateBatches.m:43-60`; `src/python/speech/
-  batching.py::create_batches`). The loop is `for ii = 1:length(possibleValues)`, and for a
+  slot for the natural contiguous class labeling -- FIXED (phase 5, this commit)**
+  (`CreateBatches.m:43-60`; `src/python/speech/batching.py::create_batches`). The loop is
+  `for ii = 1:length(possibleValues)`, and for a
   target class (`0 < possibleValues(ii) < nbOfTargetClasses`) it writes `Cases(ii)` -- the LOOP
   COUNTER `ii`, not `possibleValues(ii)` (the class value itself). `possibleValues` is
   `unique(...)`, sorted ascending. When class values are the natural contiguous labeling
@@ -2803,19 +2804,45 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   nbOfTargetClasses`) -- so it overwrites `Cases(nbOfTargetClasses)`, the SAME slot pre-reserved
   for the non-target aggregate, with the top target class's data. Class-0's files (assigned to
   the aggregate at `ii=1`) are silently lost; `WorstCases(nbOfTargetClasses)` (derived from
-  `Cases(nbOfTargetClasses)` AFTER the loop) inherits the same clobber. Ported faithfully: the
-  Python `create_batches` writes `cases[ii]` (the Python loop position) for target classes,
-  exactly mirroring the bug. A SEPARATE non-multilingual quirk: the aggregate's own accumulation
+  `Cases(nbOfTargetClasses)` AFTER the loop) inherits the same clobber. Was ported faithfully:
+  the Python `create_batches` used to write `cases[ii]` (the Python loop position) for target
+  classes, exactly mirroring the bug. A SEPARATE non-multilingual quirk, NOT part of this fix,
+  still reproduced verbatim: the aggregate's own accumulation
   branch (`Cases(nbOfTargetClasses).index = [Cases(...).index; find(...)]`, no `randperm` call)
-  is NEVER shuffled, unlike every target class's pool -- also ported verbatim (`create_batches`'s
+  is NEVER shuffled, unlike every target class's pool (`create_batches`'s
   `else` branch concatenates `find`-order indices with no `shuffled(...)` call).
-  *Pinned by:* `test_create_batches_clobber_quirk` (contiguous `{0,1,2}`/`nb_classes=3` ->
+  *Was pinned by:* `test_create_batches_clobber_quirk` (contiguous `{0,1,2}`/`nb_classes=3` ->
   `Cases(3)` ends up as class-2's data) vs `test_create_batches_multi_nb_clean_aggregate_and_
   rotation` (non-contiguous `{1,2,5}`/`nb_classes=3` -> no clobber, clean aggregate) in `tests/
   test_phase4c_batching.py`; the extractor's non-vacuity guard SystemExits unless the clobber
-  case measures class-2's data. *Mutation:* indexing by `possibleValues(ii)` instead of `ii`
-  (the "obviously correct" fix) would change `test_create_batches_clobber_quirk`'s expected
-  `Cases(3)` content and fail against the real Octave dump.
+  case measures class-2's data. *Old mutation record:* indexing by `possibleValues(ii)` instead
+  of `ii` (the "obviously correct" fix) would change `test_create_batches_clobber_quirk`'s
+  expected `Cases(3)` content and fail against the real Octave dump -- this is EXACTLY the fix
+  applied below.
+  **FIX (phase 5, F1):** `create_batches` now writes each target class to
+  `cases[int(v) - 1]` -- the class VALUE `v` (satisfying `0 < v < nbOfTargetClasses`, so
+  `v` ranges over the integers `1..nbOfTargetClasses-1`), 0-based-shifted by `-1`, never the
+  loop position. `v - 1` bijects onto the non-reserved slots `0..nbOfTargetClasses-2`, so the
+  reserved aggregate slot `nbOfTargetClasses-1` is never written by a target class for ANY
+  labeling. RED: `test_create_batches_clobber_quirk` FAILED post-fix exactly as the old
+  mutation record predicted (`cases[2].index` moved from the clobbered class-2 data `[5,4]`
+  to the correct aggregate `[0,1]`); renamed and re-pinned as
+  `test_create_batches_class_value_indexing`, asserting the fixed values (`cases[0]==[3,2]`
+  for class value 1, `cases[1]==[5,4]` for class value 2, `cases[2]==[0,1]` for the
+  aggregate) directly rather than via a golden file. ORACLE DIVERGENCE (documented, not
+  regenerated per the Phase 5 fix protocol): the committed `batching_clobber_case3_index.bin`
+  Octave fixture still pins the LEGACY `CreateBatches.m` output (`[4,5]`, 0-based) -- the real
+  `CreateBatches.m` still has this bug, unmodified, so that fixture's value no longer matches
+  the port on this one case; the fixture file is left in place, unused by the re-pinned test,
+  as the legacy-oracle record. `test_create_batches_multi_nb_clean_aggregate_and_rotation` and
+  `test_create_batches_single_and_rotation` were checked (per the sweep's cascade-analysis
+  caution) and are UNAFFECTED -- both ran unchanged, still green, because their class values
+  happen to sort into loop positions that already coincided with the class-value-derived slots
+  (no non-contiguous-vs-contiguous mismatch in those fixtures); NOT blindly re-pinned.
+  New mutation (revert-the-fix): reintroducing loop-position indexing (`slot = ii`) breaks
+  `test_create_batches_class_value_indexing` (`cases[0].index` goes from `[3,2]` to `[]`, since
+  loop position 0 corresponds to class value 0, which is never a target) -- confirmed, then
+  reverted back to the fix.
 
 - **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
   `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
@@ -2963,6 +2990,58 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   8/8 mutations break a test; item 2's catcher differs from the plan's named one (both are
   in the same suite, both true positives) -- no gap this round. Full transcript (diffs,
   commands, exact output) in `.superpowers/sdd/task-13-report.md`.
+
+- **[phase4c/4d->phase5] `get_new_batch`'s two `while len(batch) < nbOfCasesPerBatch` loops
+  had NO iteration cap -- a fully worst-excluded rotation state spins forever -- FIXED
+  (phase 5, this commit)** (`GetNewBatch.m` has no cap anywhere; `src/python/speech/
+  batching.py::get_new_batch`; hazard first surfaced as a process-note during the Phase 4d
+  Task 13 mutation battery, see the entry directly above, ~line 2985). A state where EVERY
+  reachable class (non-multilingual branch) or class/sub-class (multilingual branch) is
+  fully worst-excluded (`case.index.size <= worst.index.size` everywhere reachable) makes
+  every loop iteration take a branch that advances `current_class`/`current_sub_class`
+  WITHOUT appending -- and since that branch never mutates `current_pos`, the state after
+  one full non-progressing lap is IDENTICAL to the state before it, so the loop repeats
+  identically forever. Not a currently-shipping bug on any committed fixture (the Task 13
+  note already established this), but a genuine liveness hazard reachable once `get_new_batch`
+  is wired into an untrusted/adversarial or from-scratch training loop (Phase 5 Task 8/10).
+  RED (pin-old-behavior-first, per protocol -- a hang cannot be pinned directly in a
+  committed test): a crafted single-class `Batches` (`index=[0,1]`, `worst=[0,1]`, i.e. the
+  worst set IS the whole class) was run against the UNMODIFIED pre-fix `get_new_batch` in a
+  standalone, `signal.alarm`-bounded harness (5s bound, not committed, mirroring the Task 13
+  battery's own "bounded, alarm-guarded standalone harness" pattern) -- confirmed genuine
+  non-termination (no return within 5s) before any fix landed.
+  **FIX (phase 5, F2):** a new exported exception `BatchRotationStuck`
+  (`src/python/speech/batching.py`), raised by BOTH loops after `2 * len(batches.validation)`
+  CONSECUTIVE fruitless advances (an iteration that does not grow `batch`); the counter
+  resets on every successful append, so a healthy rotation needing only a handful of
+  worst-excluded misses per element never trips it. Cap derivation note: `len(batches.cases)`
+  (the class count) was considered and REJECTED as the cap basis -- it is provably unsafe,
+  since a single class can legitimately need up to `nb_worst` consecutive fruitless misses
+  before succeeding (pigeonhole over its own worst-excluded positions), and the multilingual
+  `SubCases` branch can legitimately need one full fruitless pass over every regular class
+  PER sub-class before reaching the sub-class that finally succeeds -- both scale with corpus
+  composition, not the class count (a single-class, `nb_worst>1` scenario demonstrates the
+  class-count cap under-triggers-safety in exactly the direction that matters: false
+  positives on a healthy rotation). `len(batches.validation)` (the corpus file count) safely
+  dominates both, since every class/sub-class pool is a subset of the corpus. Pinned by two
+  new tests in `tests/test_phase4c_batching.py`:
+  `test_get_new_batch_raises_when_single_class_fully_excluded` (non-multilingual branch, the
+  same crafted fixture as the RED harness) and
+  `test_get_new_batch_raises_when_multilingual_fully_excluded` (multilingual branch: one
+  regular target class plus the aggregate's one `SubCases` group, both fully excluded --
+  `current_class` cycles `0 -> 1 -> 0 -> ...` forever pre-fix); plus a negative control,
+  `test_get_new_batch_cap_does_not_false_trigger_on_a_healthy_rotation` (50 consecutive
+  successful rotations over a non-excluded class, cap never trips). All pre-existing
+  `test_phase4c_batching.py` rotation goldens (`single`, `multi_nb`, `sub`) were re-run
+  unchanged post-fix and stay green -- the cap does not disturb any legitimate rotation.
+  Mutation (revert-the-fix): disabling both `raise BatchRotationStuck` sites (`if fruitless
+  >= cap and False:`) and re-running BOTH crafted fixtures through the same
+  `signal.alarm`-bounded harness reproduces a genuine hang on EACH branch independently (5s
+  bound, confirmed, not committed) -- proving the two new tests are load-bearing on the raise
+  actually firing, not on some other incidental early exit; reverted back to the fix
+  immediately after. No oracle-harness divergence to record: `GetNewBatch.m` itself has no
+  iteration-cap concept to diverge from (there is no legacy behavior at the cap boundary to
+  preserve a description of -- the legacy simply hangs, unconditionally, in this state).
 
 - **[4d] OpenSAD15 converter: NO LIVE ORACLE tier** (`src/python/speech/dataprep/opensad15.py`,
   ported from Python 2 `ProcessOpenSAD15Corpus.py:23-108`): unlike every other module in this
