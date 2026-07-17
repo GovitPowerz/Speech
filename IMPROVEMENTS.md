@@ -4038,6 +4038,141 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   ran once at the end, all green (see the Task 14 report,
   `.superpowers/sdd/task-14-report.md`, for exact commands/logs).
 
+### Mutation battery (Phase 5)
+
+- **[phase5] Mutation battery (Task 11): 11/11 battery items (12 apply-fail-revert-pass
+  production-code cycles -- item 7 counts twice, Rust + Python -- plus one test-side
+  demonstration) break/behave exactly as predicted; zero coverage gaps found.** Every fix
+  landed across Tasks 4-9 (F1/F3/F5/F7/F8/F10/F11) is RE-VERIFIED here from the committed,
+  fully-integrated Phase 5 state (not merely re-trusting the per-fix land-time note), plus
+  the four loop-foundation pieces (seeded init, the modern training loop's early-stop
+  cadence, the narrowed QPSO genome mask, the SAD convergence margin). Each production
+  mutation applied/run (named suite only, FOREGROUND)/reverted (`git checkout --`)/re-run
+  in isolation; `git status --porcelain` confirmed clean between every step. Baselined
+  first: every named catcher (32 pytest cases across 8 files, 5 targeted `cargo test`
+  invocations, 2 pyo3 seam tests) confirmed GREEN pre-mutation.
+
+  (1) init forget-bias flag dropped: removed the `if forget_bias_one:` write
+  (`src/python/speech/init_weights.py:94-95`, `_init_lstm_gates`) against
+  `tests/test_phase5_init_weights.py::test_forget_bias_one_positions` -- FAILED as
+  expected on both tuple-A/B parametrizations (`assert np.all(layer["forget"][:, -1] ==
+  1.0)` -> `np.False_`, the forget-gate bias column stayed all-zero); reverted, PASS.
+
+  (2) The modern loop's early-stop cadence bypassed: `if best_epoch >= 0 and epoch -
+  best_epoch >= params.patience:` -> `if False and ...`
+  (`src/python/speech/drivers/train.py:830`, `train_modern`) against BOTH
+  `tests/test_phase5_train_modern.py::test_early_stop_patience_triggers_at_crafted_epoch`
+  (the T8 stub state-machine unit) AND `tests/pyo3/test_exit_gate.py::
+  test_early_stop_triggers` (the REAL engine-backed gate) -- BOTH FAILED as expected
+  (`assert res.stopped_early is True` -> `False`, the loop ran the full epoch budget on
+  both the crafted-plateau stub and the real stuck-at-30.0 engine fixture); reverted,
+  both PASS. Stronger than the brief's "and/or" hedge: both named catchers exist (the
+  pyo3 one lives in `test_exit_gate.py`, not `test_phase5_train_modern_smoke.py`, which
+  its name might suggest) and both fire.
+
+  (3) The per-eval class-balance rescale skipped: `_BatchRunner.next_listing`'s
+  `algo>=5`-and-`nb_target_classes<=2` branch collapsed to an unconditional
+  `weight_col = np.ones(idx.size)` (`src/python/speech/drivers/train.py:297-300`) against
+  `tests/test_phase4d_batchmode.py` -- FAILED as expected, exactly the named
+  `test_batch_listing_bytes_class_balance_rescale` (1 of 10; byte mismatch at index 13,
+  `1` written where the rescaled `0.5`/`1.5` was expected); the other 9 (incl. the sibling
+  gate test asserting the FLAT-1.0 branch, untouched by this mutation) stayed green;
+  reverted, PASS.
+
+  (4) The genome mask widened to include a weight dim: `searchable[start:stop] = False`
+  -> `searchable[start:stop - 1] = False` (`src/python/speech/genome.py:1032-1033`,
+  `weight_block_mask`, leaving the last dim of every masked range wrongly searchable)
+  against `tests/test_phase5_genome_narrowing.py` -- FAILED as expected, 6 of 24
+  (`test_masked_dims_match_derived_net_structure` + `test_every_masked_dim_is_a_weight_
+  normalize_key`, all 3 net-shape params -- twin/spectral/signal -- each: "traced
+  weight/normalize ranges != mask complement" / masked-dim count below the independently
+  derived net-structure expectation); the other 18 (incl. the `mask` DICT-keyed tests,
+  untouched since the mutation only touches the `searchable` bool array) stayed green;
+  reverted, all 24 PASS.
+
+  (5) *Not a production mutation* (the item-7-4d pattern): the SAD convergence margin's
+  bite, demonstrated test-side. A throwaway test appended to `tests/pyo3/test_exit_gate.py`
+  (never committed, reverted via `git checkout --` after the run) built a STAGNANT
+  "trainer" -- two `forward_backward` reads at the SAME init weights, zero SMORMS3 steps
+  -- measuring EXACTLY `0.0` train-cost improvement. A zero-margin gate
+  (`improvement >= 0.0`) PASSED trivially on it (proving a zero margin certifies nothing);
+  the REAL `_SAD_TRAIN_MARGIN = 0.026` gate FAILED on the identical stagnant run
+  (`pytest.raises(AssertionError)` fired as expected) -- confirming the margin is
+  load-bearing, not cosmetic. Test removed after the run; `git status --porcelain` clean.
+
+  (6) F1 revert (the clobber restored): `create_batches`'s non-multilingual branch
+  reverted from class-VALUE indexing (`slot = int(v) - 1`) back to loop-POSITION indexing
+  (`for ii, v in enumerate(possible): slot = ii`,
+  `src/python/speech/batching.py:359-365`) against `tests/test_phase4c_batching.py` --
+  FAILED as expected, exactly the named `test_create_batches_class_value_indexing`
+  (1 of 18; `cases[0].index` went from `[3, 2]` to `[]`, matching -- bit for bit -- the
+  "old mutation record" prediction written when F1 originally landed); reverted, all 18
+  PASS.
+
+  (7) F5 revert (sticky decls moved back outside the row loop), BOTH languages, one at a
+  time. **Rust:** `pos_target`/`pos_best_not_target` moved out of the `for jj in
+  0..results_lid.nrows()` loop (kept `score_target`/`max_score_not_target` reset per row,
+  matching the legacy's own `:533-534`) in `src/rust/src/engine/confusion.rs:67-71`
+  (`confusion_from_results`) -- `cargo test --lib engine::confusion::tests::` FAILED 2 of
+  9 (`sentinel_decode_and_argmax`, `cross_language_identity_no_target_skip`;
+  `no_target_row_skipped_never_pollutes_header` correctly stayed green -- the degenerate
+  first-row case where sticky and per-row decode coincide, as documented at F5 land time)
+  and `cargo test --test phase4b_confusion_golden confusion_matrix_matches_harness_
+  transcription` FAILED ("mismatch at (1, 2): a=2 b=1"); reverted, all green. **Python:**
+  the identical decl move in `src/python/speech/scoring.py:71-75` (`confusion_matrix`) --
+  `tests/test_phase4c_scoring.py` FAILED 2 of 15, exactly the named
+  `test_confusion_matrix_no_target_row_skipped` (`cm[1,2]` `2.0` vs expected `1.0`) and
+  `test_confusion_cross_language_identity_no_target_skip` (matrix mismatch, the sticky row
+  double-charging the competitor cell); reverted, all 15 PASS.
+
+  (8) F7 revert (LogLaw deriv unconditional A/y): `Law::deriv`'s `Log` arm's clamp-
+  consistency guard removed, back to unconditional `a / y`
+  (`src/rust/src/cost.rs:99-100`) against `cargo test --test phase0b_costlaw
+  log_deriv_consistent_with_clamped_forward` -- FAILED as expected ("assertion `left ==
+  right` failed: left: -0.49999999999999994, right: 0.0", the lower-clamp saturated-region
+  probe point); reverted, PASS.
+
+  (9) F8 revert (the overflow guard removed): the per-row `row_max`/`EXP_OVERFLOW_GUARD`
+  shift deleted, `NeuronLayer::feed_forward`'s softmax back to unconditional
+  `pre_act[[t, j]].exp()` (`src/rust/src/nn/layers.rs:952-969`) against `cargo test --test
+  phase2_layers_golden dense_softmax_overflow_guarded` -- FAILED as expected (panicked
+  "row 0 must be finite, not NaN", the >700-logit row overflowed again); reverted, PASS.
+
+  (10) F10 revert (`weights_derivatives` reads the bare bag): the `seam_derivs` stash
+  check dropped, back to `self.processors.get_weights_derivatives(pos)` unconditionally
+  (`src/rust/src/engine/corpus_processor.rs:913-918`). Rust: `cargo test --test
+  phase4c_api weights_derivatives_nonzero_through_seam` FAILED as expected ("F10: the
+  release seam must return the folded (nonzero) gradient; got all-zero col0"). PyO3 (the
+  ONLY mutation in this battery needing an extension rebuild -- `uv run maturin develop
+  --release --manifest-path src/rust/speech-py/Cargo.toml`, ~19s): both
+  `tests/pyo3/test_seam_replay.py::test_forward_backward_returns_nonzero_gradient`
+  ("got 0/33671 nonzero") and `::test_forward_backward_smorms3_moves_weights`
+  ("||trained-init||=0.0") FAILED as expected -- the exact T10-diagnosed no-op,
+  reproduced from the fully-integrated state; reverted + rebuilt, all three PASS.
+
+  (11) F11 revert (`Epochs=1` in `_modern_config_text`, scoped to that ONE builder per the
+  brief -- `_eval_config_text` deliberately left untouched):
+  `cfg["Neural_Networks_BackPropagation_Epochs"] = "0"` -> `"1"`
+  (`src/python/speech/drivers/train.py:647`) against `tests/test_phase4d_algo3_drivers.py`
+  -- FAILED as expected, exactly the named `test_config_texts_single_eval_are_epochs_
+  zero_f11` (1 of 10; `assert '1' == '0'`); the two `_eval_config_text`-only tests
+  (`test_eval_config_text_algo3_no_lid_keys`, `test_eval_config_text_algo6_injects_lid`)
+  correctly stayed green, confirming the mutation's scope landed on exactly the one
+  builder intended; reverted, all 10 PASS. *Exit-gate impact (described, not re-run, per
+  the brief):* the original F11 land-time note already recorded that reverting either
+  builder to `Epochs 1` "re-introduces the moved-weights cost anchor" while a
+  gradient-nonzero check alone stays green (the fold still runs, just at the wrong theta)
+  -- this battery did NOT re-run the slow `test_from_scratch_sad_converges` gate to
+  re-confirm that trace shift; relying on the land-time evidence rather than fresh
+  evidence is the one place in this battery where the verification is secondhand.
+
+  *Verdict:* every one of the 11 battery items produced its predicted RED, and every
+  revert produced a clean, fully green re-run -- no coverage gaps, no catcher surprises
+  beyond the one explicitly anticipated by the brief (item 2's "and/or", which turned out
+  to be "and": both named catchers exist and both fire). Full `uv run pytest tests`
+  (505 passed) + `cd src/rust && cargo test` ran once at the end, both green; working
+  tree at completion contains ONLY this IMPROVEMENTS.md entry.
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
