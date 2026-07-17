@@ -900,22 +900,29 @@ impl BagOfProcessors {
                         .collect();
                     (Some(refs), -1)
                 }
-                // CSV: the legacy `load_ref_from_csv` (`Segmentation.cpp:745-806`)
-                // only builds `buf` (the filename to open) for `_ChannelNb == 1`;
-                // for `_ChannelNb == 2` it leaves `buf` EMPTY (`:750-752`, a
-                // log-only branch -- the `buf << filename` write is missing), so
-                // `ifstream("")` fails and NO `_Reference` is pushed for ANY
-                // channel. Reproduced: a CSV reference loads only for single-channel
-                // audio; 2+ channels get no reference at all (load-bearing legacy
-                // bug, IMPROVEMENTS).
-                (RefExt::Csv, Some(Some(text))) if channel_count == 1 => {
+                // CSV reference. FIXED (phase 5, F6): the legacy `load_ref_from_csv`
+                // (`Segmentation.cpp:745-806`) built the file-to-open string `buf` ONLY
+                // in the `_ChannelNb == 1` branch (`:748-749` `buf << filename`); the
+                // `_ChannelNb == 2` branch (`:750-752`) emitted a "wrong path" LOG line
+                // and NEVER wrote `buf`, so `ifstream("")` failed and NO `_Reference`
+                // was pushed for ANY channel -- a CSV reference silently loaded for mono
+                // only, and a scored stereo run bailed on the mandatory-reference gate.
+                // The port now loads the reference for EVERY channel, the way STM refs
+                // already do. CSV is channel-independent (no per-channel column, unlike
+                // STM), so the file is parsed ONCE and the segmentation cloned per
+                // channel; `nb_words` (the dead WER surface, KEEP) stays the single
+                // parse's count, shared across channels. The C++/resurrected-binary
+                // oracles still drop the stereo reference; the port diverges by design.
+                // See IMPROVEMENTS.md ([phase4a] CSV reference loads ONLY ...).
+                (RefExt::Csv, Some(Some(text))) => {
                     let (seg, nb) = load_ref_csv(
                         text,
                         self.offset_begin,
                         audio_duration,
                         self.pruning_thresholds[ii],
                     );
-                    (Some(vec![seg]), nb)
+                    let refs = (0..channel_count).map(|_| seg.clone()).collect();
+                    (Some(refs), nb)
                 }
                 _ => (None, -1),
             };

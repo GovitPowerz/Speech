@@ -619,6 +619,74 @@ fn dense_hand_case_softmax_o2_t1() {
     assert_eq!(output[[0, 1]].to_bits(), y1.to_bits(), "softmax y1");
 }
 
+#[test]
+fn dense_softmax_overflow_guarded() {
+    // F8 (phase5): the overflow-GUARDED softmax. I=1, O=2, T=2 exercises the PER-ROW
+    // guard: row 0's pre-activations both exceed the exp-overflow threshold (700) so the
+    // legacy unstabilized path would overflow to inf and yield inf/inf = NaN; row 1 is
+    // moderate so it MUST take the byte-identical raw path.
+    //
+    // col-major flat (I=1, O=2): weights [w_out0, w_out1] then bias [b0, b1].
+    // pre_act[t,j] = input[t,0]*w[j] + b[j].
+    let flat = vec![1.0_f64, 1.0, 0.0, -50.0]; // w_out0=1, w_out1=1, b0=0, b1=-50
+    let mut layer = NeuronLayer::new(1, 2);
+    let tail = layer.set_weights(&flat);
+    assert_eq!(tail.len(), 0);
+
+    // Row 0: input 800 -> pre_act [800, 750], BOTH > 700 (overflow regime).
+    // Row 1: input 1   -> pre_act [1, -49], max 1 < 700 (raw regime).
+    let input = Array2::from_shape_vec((2, 1), vec![800.0_f64, 1.0]).unwrap();
+    let mut output = Array2::<f64>::zeros((2, 2));
+    layer.feed_forward(&input, &mut output, true);
+
+    // Premise: the legacy raw path WOULD overflow on row 0 (documents why the guard exists
+    // + is the revert-mutation signal: drop the guard and output[0,*] becomes NaN).
+    assert!(
+        (800.0_f64).exp().is_infinite(),
+        "premise: exp(800) overflows to inf"
+    );
+
+    // Row 0 (guarded): finite + the shift-invariant softmax (shift by row_max=800).
+    let e00 = (800.0_f64 - 800.0).exp(); // exp(0) = 1
+    let e01 = (750.0_f64 - 800.0).exp(); // exp(-50)
+    let s0 = e00 + e01; // ascending-column sum, matching :139
+    assert!(
+        output[[0, 0]].is_finite() && output[[0, 1]].is_finite(),
+        "row 0 must be finite, not NaN"
+    );
+    assert_eq!(
+        output[[0, 0]].to_bits(),
+        (e00 / s0).to_bits(),
+        "row0 col0 shifted softmax"
+    );
+    assert_eq!(
+        output[[0, 1]].to_bits(),
+        (e01 / s0).to_bits(),
+        "row0 col1 shifted softmax"
+    );
+    assert!(
+        (output[[0, 0]] + output[[0, 1]] - 1.0).abs() < 1e-12,
+        "row 0 softmax must sum to 1"
+    );
+    assert!(output[[0, 0]] > 0.99, "row0 col0 (the max logit) dominates");
+
+    // Row 1 (raw path): BIT-IDENTICAL to the legacy unstabilized exp(a+b)/sum -- proves the
+    // guard leaves the sub-threshold path byte-for-byte unchanged.
+    let e10 = (1.0_f64).exp();
+    let e11 = (-49.0_f64).exp();
+    let s1 = e10 + e11;
+    assert_eq!(
+        output[[1, 0]].to_bits(),
+        (e10 / s1).to_bits(),
+        "row1 col0 raw softmax bit-identical"
+    );
+    assert_eq!(
+        output[[1, 1]].to_bits(),
+        (e11 / s1).to_bits(),
+        "row1 col1 raw softmax bit-identical"
+    );
+}
+
 // === Task 5: Python-oracle cross-check =======================================
 //
 // `dense_cases.json` (scripts/extract_phase2_oracle_cases.py) holds the Python

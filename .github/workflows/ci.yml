@@ -87,4 +87,4 @@ jobs:
       - name: Import check
         run: uv run python -c "import speech_rs; print(speech_rs.version())"
       - name: Run pyo3 tests
-        run: uv run pytest tests/pyo3 tests/test_phase4d_parity.py -v
+        run: uv run pytest tests/pyo3 -v

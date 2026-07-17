@@ -29,16 +29,22 @@ use ndarray::Array2;
 /// iff its decoded score is STRICTLY greater than the best competitor's score
 /// (`:524`); a tie falls to the best-competitor branch (`:528-532`).
 ///
-/// STICKY INDICES (legacy quirk, reproduced verbatim): `posTarget` and
-/// `posBestNotTarget` are declared OUTSIDE the row loop (`:509-510`) and are
-/// reset to `0` only ONCE, before row 0 -- the end-of-row reset (`:533-534`)
-/// touches only `scoreTarget`/`maxScoreNotTarget`, NOT the two position
-/// variables. So a row with no target sentinel at all (`scoreTarget` stays
-/// `-1.0`) does NOT fall back to `posTarget = 0`; it inherits `posTarget`
-/// (and, unless overwritten by a competitor score, `posBestNotTarget`) from
-/// the LAST row that set them. Only a no-target row that is ALSO the very
-/// first row ever processed (nothing has set them yet) attributes its miss to
-/// row/col index `0` (the index-header slot). See IMPROVEMENTS.md.
+/// PER-ROW DECODE (FIXED in phase 5; the legacy sticky quirk is left behind):
+/// the four decode accumulators (`score_target`/`max_score_not_target`/
+/// `pos_target`/`pos_best_not_target`) are declared INSIDE the row loop, so a
+/// row can never inherit a prior row's target/competitor index. A row with NO
+/// in-band target (`pos_target` stays `0` -- no column `> 150`) is an
+/// out-of-set trial with no true class in the closed set, so it is SKIPPED
+/// entirely: credited to no cell, no total, and never to the index-header slot
+/// (row/col `0`). The matrix is therefore ORDER-INDEPENDENT.
+///
+/// The legacy `BagOfProcessors::PrintConfusionMatrix` instead declared
+/// `posTarget`/`posBestNotTarget` OUTSIDE the loop and reset only
+/// `scoreTarget`/`maxScoreNotTarget` per row (`:509-510,533-534`), so a
+/// no-target row inherited the LAST row's `posTarget` (or, on the very first
+/// row, the header slot `0`) -- a spurious, row-order-dependent attribution.
+/// The C++/Octave oracle harnesses still describe that sticky behavior; the
+/// port deliberately diverges here. See IMPROVEMENTS.md ([phase4b] STICKY).
 ///
 /// `classNb <= 1` reproduces the legacy's own gate (`:501`, `if (classNb >
 /// 1)`): no matrix is built, error stays `0.0`.
@@ -55,13 +61,14 @@ pub fn confusion_from_results(results_lid: &Array2<f64>) -> (Array2<f64>, f64) {
         confusion[[kk, 0]] = kk as f64;
     }
 
-    let mut max_score_not_target = -1.0_f64;
-    let mut pos_best_not_target = 0usize;
-    let mut pos_target = 0usize;
-    let mut score_target = -1.0_f64;
-
     // legacy: :512-535, ascending row loop (product/accumulation contract).
+    // FIXED (phase 5): the four decode accumulators are declared PER ROW (below),
+    // and a no-target row (`pos_target == 0`) is skipped -- see the fn doc.
     for jj in 0..results_lid.nrows() {
+        let mut max_score_not_target = -1.0_f64;
+        let mut pos_best_not_target = 0usize;
+        let mut pos_target = 0usize;
+        let mut score_target = -1.0_f64;
         for kk in 0..class_nb {
             let v = results_lid[[jj, kk]];
             if v > 150.0 {
@@ -72,6 +79,10 @@ pub fn confusion_from_results(results_lid: &Array2<f64>) -> (Array2<f64>, f64) {
                 pos_best_not_target = kk + 1;
             }
         }
+        if pos_target == 0 {
+            // No in-band target this row: out-of-set trial, credited to no class.
+            continue;
+        }
         if score_target > max_score_not_target {
             confusion[[pos_target, pos_target]] += 1.0;
             confusion[[pos_target, class_nb + 1]] += 1.0;
@@ -81,8 +92,6 @@ pub fn confusion_from_results(results_lid: &Array2<f64>) -> (Array2<f64>, f64) {
             confusion[[pos_target, class_nb + 1]] += 1.0;
             confusion[[class_nb + 1, pos_best_not_target]] += 1.0;
         }
-        max_score_not_target = -1.0;
-        score_target = -1.0;
     }
 
     let error = confusion_error(&confusion);
@@ -162,12 +171,13 @@ mod tests {
     }
 
     /// Hand-computed expected confusion matrix for `crafted_rows` (row A
-    /// wins, B loses, C has no target, D ties). Row C's miss lands at
-    /// `posBestNotTarget` paired with `posTarget = 1` -- STICKY from row B's
-    /// sentinel, NOT `0` -- since `posTarget` is reset only once, before row
-    /// 0 (`:509-510`), not at every row boundary (`:533-534` resets only
-    /// `scoreTarget`/`maxScoreNotTarget`). Row A therefore ends up with NO
-    /// increments credited to its own row/col in the final matrix.
+    /// wins, B loses, C has no target, D ties). FIXED (phase 5): row C has no
+    /// in-band target (`pos_target == 0`), so it is SKIPPED entirely -- it no
+    /// longer inherits row B's sticky `posTarget = 1` and no longer credits
+    /// `(1,2)`/`(1,4)`/`(4,2)`. Row A's win lands at `(2,2)`, row B's miss at
+    /// `(1,2)`, row D's tie-miss at `(3,1)`. Contrast the pre-fix sticky matrix
+    /// (row C credited `(1,2)`, so `(1,2)==2`, `(4,2)==3`): the diff is exactly
+    /// row C's removed contribution.
     #[test]
     fn sentinel_decode_and_argmax() {
         let (confusion, _error) = confusion_from_results(&crafted_rows());
@@ -175,22 +185,25 @@ mod tests {
             (5, 5),
             vec![
                 0.0, 1.0, 2.0, 3.0, 0.0, //
-                1.0, 0.0, 2.0, 0.0, 2.0, // row B's miss (1x) + row C's sticky miss (1x)
+                1.0, 0.0, 1.0, 0.0, 1.0, // row B's miss (1x); row C SKIPPED (no target)
                 2.0, 0.0, 1.0, 0.0, 1.0, // row A's win
                 3.0, 1.0, 0.0, 0.0, 1.0, // row D's tie-miss
-                0.0, 1.0, 3.0, 0.0, 0.0,
+                0.0, 1.0, 2.0, 0.0, 0.0,
             ],
         )
         .unwrap();
         assert_eq!(confusion, want);
     }
 
-    /// `confusion_error` on the same crafted matrix: row1 total is 2 (B + C's
-    /// sticky miss), rows 2/3 total 1 each; every nonzero off-diagonal cell
-    /// still normalizes to exactly 100.0 (2*(100/2)=100, 1*(100/1)=100), so
-    /// the diagonal deficit sums to (100-0)+(100-100)+(100-0) = 200, /classNb
-    /// (3) = 200/3 exactly (IEEE754 division is correctly-rounded, so this is
-    /// bit-reproducible on every platform -- no libm involved).
+    /// `confusion_error` on the same crafted matrix: FIXED (phase 5) each of
+    /// rows 1/2/3 now has total 1 (row C, the no-target row that used to inflate
+    /// row1 to 2, is skipped); every nonzero off-diagonal cell normalizes to
+    /// exactly 100.0 (1*(100/1)=100), so the diagonal deficit sums to
+    /// (100-0)+(100-100)+(100-0) = 200, /classNb (3) = 200/3 exactly. The error
+    /// aggregate is INVARIANT to the fix (row C only ever hit an off-diagonal
+    /// cell, never a diagonal, and the aggregate row is not read by
+    /// `confusion_error`), so this value matches the pre-fix golden bit-for-bit;
+    /// IEEE754 division is correctly-rounded, bit-reproducible on every platform.
     #[test]
     fn error_matches_hand_norm_crafted() {
         let (confusion, error) = confusion_from_results(&crafted_rows());
@@ -198,26 +211,55 @@ mod tests {
         assert_eq!(error, 200.0 / 3.0);
     }
 
-    /// The genuine row-0/header-slot quirk: a no-target row that is the VERY
-    /// FIRST row processed (nothing has set `posTarget`/`posBestNotTarget`
-    /// yet) attributes its miss to index `0` -- the index-header row/col --
-    /// because the two position variables are declared outside the loop and
-    /// initialized to `0` exactly once (`:509-510`), unlike the crafted-rows
-    /// case above where a later no-target row inherits a NONZERO sticky index
-    /// from an earlier row instead.
+    /// FIXED (phase 5): a no-target row (no column `> 150`, `pos_target == 0`)
+    /// is SKIPPED entirely -- it credits nothing and never pollutes the
+    /// index-header row/col `0`. This is the same crafted single no-target row
+    /// the pre-fix test used to charge to the header slot (`(0,2)`/`(0,4)`/
+    /// `(4,2)`); the fixed matrix is just the clean labels, byte-for-byte.
+    /// Order-independence: identical whether this row is first, last, or alone.
     #[test]
-    fn no_target_as_first_row_uses_header_zero_slot() {
+    fn no_target_row_skipped_never_pollutes_header() {
         let rows = Array2::from_shape_vec((1, 3), vec![10.0, 90.0, 40.0]).unwrap();
         let (confusion, _error) = confusion_from_results(&rows);
-        // posTarget stays 0 (never set); posBestNotTarget ends at 2 (col1=90 wins).
         let want = Array2::from_shape_vec(
             (5, 5),
             vec![
-                0.0, 1.0, 3.0, 3.0, 1.0, // (0,2) and (0,4) credited to the header row
+                0.0, 1.0, 2.0, 3.0, 0.0, // labels untouched (no header pollution)
                 1.0, 0.0, 0.0, 0.0, 0.0, //
                 2.0, 0.0, 0.0, 0.0, 0.0, //
                 3.0, 0.0, 0.0, 0.0, 0.0, //
-                0.0, 0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+        )
+        .unwrap();
+        assert_eq!(confusion, want);
+    }
+
+    /// BOTH-LANGUAGE IDENTITY (F5): the Rust `confusion_from_results` and the
+    /// Python `speech.scoring.confusion_matrix` are DIFFERENT legacy sources
+    /// (`PrintConfusionMatrix`'s `score_target > max_competitor` win vs
+    /// `confusionThresh.m`'s asymmetric-threshold hit), so they only produce an
+    /// identical matrix on an input where the win/hit decisions coincide -- but
+    /// the SHARED F5 fix (per-row decode + skip no-target rows) is exercised
+    /// identically. This crafted 2-class input is engineered so both agree: row0
+    /// has a col-1 target (score 60) that clears BOTH win rules (60 > competitor
+    /// 5, and 60 > thresh 10), and row1 has no target so BOTH skip it. There is
+    /// no PyO3 seam for confusion (it is not on the `speech_rs.Engine` surface),
+    /// so the identity is pinned by this Rust test plus its byte-identical mirror
+    /// `test_confusion_cross_language_identity_no_target_skip`
+    /// (`tests/test_phase4c_scoring.py`) -- the two hardcode the SAME expected
+    /// matrix.
+    #[test]
+    fn cross_language_identity_no_target_skip() {
+        let input = Array2::from_shape_vec((2, 2), vec![5.0, 260.0, 20.0, 30.0]).unwrap();
+        let (confusion, _error) = confusion_from_results(&input);
+        let want = Array2::from_shape_vec(
+            (4, 4),
+            vec![
+                0.0, 1.0, 2.0, 0.0, // labels clean (row1 no-target -> skipped)
+                1.0, 0.0, 0.0, 0.0, //
+                2.0, 0.0, 1.0, 1.0, // row0 win at (2,2)
+                0.0, 0.0, 1.0, 0.0,
             ],
         )
         .unwrap();

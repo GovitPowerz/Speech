@@ -892,11 +892,16 @@ impl NeuronLayer {
     ///   product. Via `matmul_seq` (the measured ascending-loop contract).
     /// - Bias added `.rowwise()` BEFORE activation (`:136-137`), shared by all
     ///   three activation paths below.
-    /// - `last_layer && output_size > 1`: UNSTABILIZED softmax (`:138-142`) --
-    ///   `exp(a+b)` computed directly with NO max-subtraction overflow guard (a
-    ///   load-bearing legacy quirk, reproduced on purpose), per-row sum via a
-    ///   SEQUENTIAL ascending-column loop (not a reduction), then per-COLUMN
-    ///   quotient by that sum.
+    /// - `last_layer && output_size > 1`: softmax (`:138-142`). The legacy is
+    ///   UNSTABILIZED (`exp(a+b)` computed directly, no max-subtraction); F8
+    ///   (phase5) adds an OVERFLOW-GUARD-ONLY shift -- the per-row max is
+    ///   subtracted ONLY when it exceeds the exp-overflow threshold (700; `exp`
+    ///   is finite iff its arg `<= ln(f64::MAX) ~ 709.78), so below the threshold
+    ///   the raw `exp(a+b)` path is BIT-IDENTICAL to the legacy (every committed
+    ///   golden is unchanged) and above it the shift makes an otherwise
+    ///   inf/inf=NaN row finite + correct (softmax is shift-invariant). Per-row
+    ///   sum via a SEQUENTIAL ascending-column loop (not a reduction), then
+    ///   per-COLUMN quotient by that sum. See IMPROVEMENTS.md [phase2]/[phase5].
     /// - `last_layer && output_size == 1`: `Logistic` (`:144`).
     /// - `!last_layer`: `Maxmin2`/asinh (`:147`).
     pub fn feed_forward(
@@ -933,12 +938,34 @@ impl NeuronLayer {
         output.fill(0.0);
         if last_layer && o > 1 {
             // :138 exp(a+b); :139 SEQUENTIAL per-row sum (ascending columns, not a
-            // reduction); :140-142 per-COLUMN cwiseQuotient. NO max-subtraction --
-            // the legacy softmax is unstabilized by construction.
+            // reduction); :140-142 per-COLUMN cwiseQuotient.
+            //
+            // F8 (phase5): OVERFLOW-GUARDED stabilization. The legacy softmax is
+            // unstabilized (no max-subtraction), so a large pre-activation overflows
+            // `exp` to inf and the inf/inf row-quotient is NaN. `exp(x)` is finite iff
+            // `x <= ln(f64::MAX) ~ 709.78`; the guard subtracts the per-row max ONLY
+            // when it exceeds EXP_OVERFLOW_GUARD (700, leaving headroom for the O-term
+            // sum). Below the threshold the else-branch is LITERALLY `pre_act.exp()`,
+            // byte-identical to the legacy path -- so every committed golden (none
+            // overflow) stays bit-exact; above it the shift makes the row finite and
+            // correct (softmax is shift-invariant). Pinned by `dense_softmax_overflow_guarded`.
+            const EXP_OVERFLOW_GUARD: f64 = 700.0;
             let mut exp_out = Array2::<f64>::zeros((t_len, o));
             for t in 0..t_len {
+                let mut row_max = f64::NEG_INFINITY;
                 for j in 0..o {
-                    exp_out[[t, j]] = pre_act[[t, j]].exp();
+                    if pre_act[[t, j]] > row_max {
+                        row_max = pre_act[[t, j]];
+                    }
+                }
+                if row_max > EXP_OVERFLOW_GUARD {
+                    for j in 0..o {
+                        exp_out[[t, j]] = (pre_act[[t, j]] - row_max).exp();
+                    }
+                } else {
+                    for j in 0..o {
+                        exp_out[[t, j]] = pre_act[[t, j]].exp();
+                    }
                 }
             }
             let mut row_sum = vec![0.0f64; t_len];

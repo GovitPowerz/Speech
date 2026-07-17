@@ -77,6 +77,16 @@ pub struct CorpusProcessor {
     cost_lid_mem: Array2<f64>,
     bad_classif_lid_mem: Array2<f64>,
     best_cost: BTreeMap<usize, f64>,
+    /// F10 (phase 5): the folded per-conf derivatives from the LAST completed
+    /// `run_epoch` fold, keyed by conf index (each value the per-network `Nx2`
+    /// vec, `[sad]` or `[sad, lid]`). The public [`Self::weights_derivatives`]
+    /// returns this so the release seam sees the gradient `run_epoch` actually
+    /// folded on the per-lane clones (the R6 static-lane model), NOT the main
+    /// bag's never-updated accumulator. Written at the end of every fold;
+    /// CLEARED by [`Self::set_weights`] (a weights change invalidates the cached
+    /// gradient, so a set-without-run correctly falls back to the bag's reset
+    /// state). Empty until the first fold. See IMPROVEMENTS.md `[phase5] F10`.
+    seam_derivs: BTreeMap<usize, Vec<Array2<f64>>>,
     /// Test-observation hook (Task 9): after each `save_and_update_epoch` in a
     /// training run, snapshot config-0's flat weight vector AND whether the
     /// best-cost gate fired that epoch. No legacy counterpart; the tier-2 train
@@ -170,6 +180,7 @@ impl CorpusProcessor {
             cost_lid_mem: Array2::zeros((1, nb_of_conf)),
             bad_classif_lid_mem: Array2::zeros((1, nb_of_conf)),
             best_cost,
+            seam_derivs: BTreeMap::new(),
             #[cfg(feature = "test-support")]
             epoch_weight_trace: Vec::new(),
             #[cfg(feature = "test-support")]
@@ -453,6 +464,17 @@ impl CorpusProcessor {
                 .unwrap_or_else(|| Array2::zeros((0, 0))),
         );
 
+        // F10 (phase 5): stash the folded gradient so the release seam
+        // (`weights_derivatives`) returns the SAME values `run_epoch` folded on
+        // the per-lane clones, before `save_and_update_epoch`'s Rprop consumes
+        // `derivs`. This is what `grad_check`'s own local map (`analytic_derivs`,
+        // filled by the identical fold) already sees; the main bag never runs
+        // backprop, so without this the seam read the reset-state accumulator
+        // (col0 = 0) and the whole modern loop trained on a zero gradient. An
+        // empty `derivs` (no results this epoch) stashes empty -> the read falls
+        // back to the bag. See IMPROVEMENTS.md `[phase5] F10`.
+        self.seam_derivs = derivs.clone();
+
         // legacy: :215-234 transform + saveAndUpdate + saveResults gating.
         if !self.results.is_empty() {
             self.transform_results();
@@ -679,6 +701,13 @@ impl CorpusProcessor {
     ) -> Result<Vec<(usize, GradCheckReport)>> {
         // legacy: :238 snapshot the WHOLE bag.
         let proc_mem = self.processors.clone();
+        // F10 (phase 5): snapshot the folded-gradient stash alongside the bag. The
+        // perturbation sweep below runs `run_epoch` per +/-eps step, and each of those
+        // OVERWRITES `self.seam_derivs` with the fold at the PERTURBED weights -- so
+        // without restoring it, gradCheck would leave the seam returning a gradient at
+        // the last -eps point while `weights(0)` reads the restored theta. Restored at
+        // the epilogue so gradCheck is transparent to the seam invariant.
+        let seam_mem = self.seam_derivs.clone();
         let nb = self.processors.nb_of_conf();
         // legacy: :239-242 zero the four mem matrices to 1 x nConfs.
         self.cost_mem = Array2::zeros((1, nb));
@@ -772,6 +801,11 @@ impl CorpusProcessor {
         // no legacy counterpart (legacy leaves _Processors perturbed) -- unobservable
         // since gradCheck is terminal in run().
         self.processors = proc_mem;
+        // F10 (phase 5): restore the folded-gradient stash the sweep clobbered, so the
+        // seam invariant holds -- `weights_derivatives(0)` matches the restored
+        // `weights(0)`, not a stale gradient at the last -eps perturbation. Observable
+        // through the PyO3 seam (a `grad_check` call followed by `weights_derivatives`).
+        self.seam_derivs = seam_mem;
 
         Ok(reports)
     }
@@ -852,16 +886,34 @@ impl CorpusProcessor {
     /// NN) is a no-op. The PyO3 seam surface (Phase 4c); promoted from
     /// `set_config0_all_weights_for_test` (Task 9), generalized from
     /// config-0-only to `pos`.
+    ///
+    /// F10 (phase 5): clears the folded-gradient stash -- a weights change
+    /// invalidates the last fold's derivatives, so a `set_weights` NOT followed
+    /// by a `run()` makes [`Self::weights_derivatives`] fall back to the bag's
+    /// reset accumulator instead of returning a stale gradient at old weights.
+    /// The seam's own flow (`set_weights` -> `run` -> `weights_derivatives`)
+    /// repopulates the stash in the intervening `run`, so this is invisible
+    /// there; it only guards the set-without-run footgun.
     pub fn set_weights(&mut self, pos: usize, nets: &[Vec<f64>]) -> Result<()> {
+        self.seam_derivs.clear();
         self.processors.set_weights(pos, nets)
     }
 
     /// Config-`pos`'s per-network `Nx2` derivative matrices (col 0 summed
     /// deriv, col 1 count; algo 6 -> `[sad, lid]`). The PyO3 seam surface
-    /// (Phase 4c); no prior `_for_test` hook existed for this -- a new thin
-    /// delegation to `BagOfProcessors::get_weights_derivatives`, which already
-    /// dispatches per-`pos`.
+    /// (Phase 4c).
+    ///
+    /// F10 (phase 5): returns the folded gradient from the last completed
+    /// `run_epoch` (the [`Self::seam_derivs`] stash) when present -- the
+    /// deterministic ascending-lane reduction the fold computed on the per-lane
+    /// clones, identical to what `grad_check`'s local map sees. Falls back to
+    /// the main bag's accumulator only when no fold has run since construction
+    /// or the last `set_weights` (the bag's reset state, col0 = 0), which is the
+    /// pre-F10 behavior and the reason the seam returned an all-zero gradient.
     pub fn weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
+        if let Some(d) = self.seam_derivs.get(&pos) {
+            return d.clone();
+        }
         self.processors.get_weights_derivatives(pos)
     }
 

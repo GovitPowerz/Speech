@@ -17,16 +17,30 @@
 //! Both `confusion_from_results` and `confusion_error` are pure
 //! integer-threshold/division arithmetic (no libm), so every assert here is
 //! STRICT BITS on every platform (no oracle/canary gate).
+//!
+//! PHASE 5 (F5): `confusion_from_results` was un-quirked (per-row decode + skip
+//! no-target rows). `confusion_matrix.bin` is re-derived to port-truth (see the
+//! `confusion_matrix_matches_harness_transcription` doc); `confusion_error.bin`
+//! is UNCHANGED -- the error aggregate is invariant to the fix (the skipped
+//! no-target row only ever hit an off-diagonal cell), so it still matches the
+//! harness's `error1 == error2` dump bit-for-bit.
 
 mod common;
 
 use common::{assert_bits_eq, load_bin_phase4b};
 use speech::engine::confusion::{confusion_error, confusion_from_results};
 
-/// The harness's own transcribed matrix, replayed through the Rust
-/// `confusion_from_results` on the SAME input, must match bit-exactly -- and
-/// that transcription was itself cross-validated against the REAL compiled
-/// `PrintConfusionMatrix` inside the harness (see the module doc).
+/// FIXED (phase 5, F5): `confusion_from_results` now decodes PER ROW and skips
+/// no-target rows, so it deliberately DIVERGES from the legacy sticky
+/// `PrintConfusionMatrix` the C++ harness transcribes. `confusion_matrix.bin` was
+/// therefore RE-DERIVED port-side (hand-computed from the F5 adjudication, not
+/// re-dumped from the harness) to the port-truth skip matrix: the crafted
+/// no-target row C no longer inherits row B's sticky index, so its `(1,2)`/`(4,2)`
+/// contribution is gone (the pre-fix fixture had `(1,2)==2`/`(4,2)==3`). The port
+/// output must match that re-pinned fixture bit-exactly. Oracle-divergence note
+/// (protocol step 4): the harness stage still encodes the legacy sticky matrix;
+/// this fixture no longer matches it by design. The test name is kept for fixlist
+/// traceability.
 #[test]
 fn confusion_matrix_matches_harness_transcription() {
     let input = load_bin_phase4b("confusion_input.bin");

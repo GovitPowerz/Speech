@@ -24,8 +24,19 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
+import pytest
 from numpy.typing import NDArray
-from speech.batching import Batches, create_batches, get_new_batch, get_worst_and_best, read_listing
+from speech.batching import (
+    Batches,
+    BatchRotationStuck,
+    CaseGroup,
+    SubCaseGroup,
+    WorstCaseGroup,
+    create_batches,
+    get_new_batch,
+    get_worst_and_best,
+    read_listing,
+)
 from speech.weight_bridge import read_bin
 
 PHASE4C = Path(__file__).resolve().parent / "reference_data" / "phase4c"
@@ -168,17 +179,34 @@ def test_create_batches_multi_nb_clean_aggregate_and_rotation() -> None:
     _assert_rotation_matches(batches, "multi_nb", 8)
 
 
-def test_create_batches_clobber_quirk() -> None:
-    """The natural contiguous class labeling {0,1,2} with nb_classes=3: the LAST loop
-    position (over sorted unique class values) is ITSELF a valid target class (value=2),
-    so it silently OVERWRITES the aggregate slot (index nb_classes-1) reserved for
-    non-target files -- class-0's indices are lost entirely. See IMPROVEMENTS.md."""
+def test_create_batches_class_value_indexing() -> None:
+    """Phase 5 fix (F1, IMPROVEMENTS.md): the natural contiguous class labeling {0,1,2}
+    with nb_classes=3 no longer clobbers the aggregate slot. `cases`/`worst_cases` are
+    now indexed by CLASS VALUE (`slot = int(v) - 1` for a target `v`), so class value 1
+    lands in `cases[0]`, class value 2 in `cases[1]`, and the reserved aggregate slot
+    `cases[2]` is left untouched by any target write -- it holds ONLY the non-target
+    (class-0) accumulation, exactly as `CreateBatches.m` intends (`0 < v < nbOfTargetClasses`
+    selects values 1..nbOfTargetClasses-1, which biject onto slots 0..nbOfTargetClasses-2).
+
+    PORT-TRUTH DIVERGENCE from the committed Octave golden (documented, not regenerated
+    per the Phase 5 fix protocol): `batching_clobber_case3_index.bin` pins the LEGACY
+    `CreateBatches.m`'s clobbered output (`cases[2].index == class-2's files [4,5]`, since
+    the real `CreateBatches.m` has the same loop-position bug -- see IMPROVEMENTS.md). This
+    test asserts the FIXED port-truth values directly instead of loading that fixture; the
+    fixture itself is left in place (unregenerated) as the legacy-oracle record."""
     fv = np.array([0, 0, 1, 1, 2, 2], dtype=np.float64).reshape(-1, 1)
     batches = create_batches(fv, minibatch=2, nb_worst=1, multilingual=False, nb_classes=3, rng=_rng())
-    clobbered = _load_i64_1based("clobber_case3_index")
-    assert np.array_equal(batches.cases[2].index, clobbered)
-    # Non-vacuity: this is class-2's data (files 4,5, 0-based), NOT class-0's (files 0,1).
-    assert set(batches.cases[2].index.tolist()) == {4, 5}
+    # class value 1 (files 2,3) -> slot 0; class value 2 (files 4,5) -> slot 1; both
+    # reverse-shuffled by the harness's `_ReverseRng`.
+    assert batches.cases[0].index.tolist() == [3, 2]
+    assert batches.cases[1].index.tolist() == [5, 4]
+    assert batches.worst_cases[0].index.tolist() == [3]
+    assert batches.worst_cases[1].index.tolist() == [5]
+    # Non-vacuity: the aggregate slot (index nb_classes-1) now holds class-0's files
+    # (0,1, unshuffled find-order -- the separate "aggregate never shuffled" quirk stays
+    # verbatim), NOT class-2's data -- the clobber is gone.
+    assert batches.cases[2].index.tolist() == [0, 1]
+    assert batches.worst_cases[2].index.tolist() == [0]
 
 
 def test_create_batches_sub_and_rotation() -> None:
@@ -195,6 +223,45 @@ def test_create_batches_sub_and_rotation() -> None:
     assert np.array_equal(batches.worst_cases[1].index, _load_i64_1based("sub_worst2_index"))
     assert np.array_equal(batches.worst_cases[2].index, _load_i64_1based("sub_worst3_index"))
     _assert_rotation_matches(batches, "sub", 10)
+
+
+def test_create_batches_multilingual_aggregate_slot_survives_collision() -> None:
+    """Phase 5 fix (F9, IMPROVEMENTS.md): PORT-INTRODUCED bug, NOT a legacy quirk -- there
+    is no legacy behavior to pin here. Adjudicated against the real vendored
+    `legacy/Optimizer_V6.2.2/functions/CreateBatches.m:61-86`/`GetNewBatch.m`: MATLAB's
+    `Cases(ii).index = X` is a per-field struct write that leaves `.SubCases` untouched,
+    and `GetNewBatch.m` never reads `.index`/`.currentPos` on the multilingual aggregate
+    slot (only `.SubCases`/`.currentSubClass`) -- so a same-slot collision is
+    legacy-BENIGN there (unlike F1's non-multilingual clobber, which IS legacy-observable).
+
+    The PRE-FIX Python instead REPLACED the whole `CaseGroup` instance on every target
+    write (`cases[ii] = CaseGroup(...)`), which wipes `.sub_cases` (dataclass default: a
+    fresh empty list) whenever a target's loop position collides with the aggregate slot.
+    Reproduces the reviewer's exact repro: contiguous 0-based labels `fv=[0,0,1,1,2,2]`,
+    `nb_classes=3` sort `possible` to `[0,1,2]`; loop position 0 (value 0, non-target)
+    seeds the aggregate's SubCases, then loop position 2 (value 2, target, since
+    `0<2<3`) collides with slot `nb_classes-1=2`. Pre-fix this raised `IndexError` inside
+    `get_new_batch` (`case.sub_cases[case.current_sub_class]` on the wiped empty list,
+    `batching.py:449`) as soon as rotation reached the aggregate slot -- confirmed via a
+    standalone repro against the unmodified pre-fix code before writing this test (see the
+    phase-5 task-4 fix-wave report); there was no prior committed pin for the crash since a
+    crash is not behavior a suite should assert as "expected." This test's ability to run
+    to completion IS the pin now.
+
+    All numeric values below (including the dead-field `cases[2].index`, clobbered by
+    class-2's data but never read downstream) were verified by running the fixed
+    `create_batches`/`get_new_batch` directly, not hand-derived only."""
+    fv = np.array([0, 0, 1, 1, 2, 2], dtype=np.float64).reshape(-1, 1)
+    batches = create_batches(fv, minibatch=2, nb_worst=1, multilingual=True, nb_classes=3, rng=_rng())
+    # Non-vacuity: the collision actually happened (the aggregate slot's OWN .index was
+    # overwritten by class-2's data, a dead field never read downstream) AND the
+    # aggregate's SubCases survived it (the fix's whole point).
+    assert batches.cases[2].index.tolist() == [5, 4]
+    assert len(batches.cases[2].sub_cases) == 1
+    assert batches.cases[2].sub_cases[0].index.tolist() == [1, 0]
+
+    batch, batches = get_new_batch(batches)
+    assert batch == [2, 0]
 
 
 def test_create_batches_degenerate_gate() -> None:
@@ -221,6 +288,78 @@ def test_create_batches_degenerate_batch_equals_cases_verbatim() -> None:
     batch, _ = get_new_batch(batches)
     assert batches.degenerate_index is not None
     assert batch == batches.degenerate_index.tolist()
+
+
+# --------------------------------------------------------------------------- #
+# get_new_batch: BatchRotationStuck (Phase 5 fix F2, IMPROVEMENTS.md)
+# --------------------------------------------------------------------------- #
+
+
+def test_get_new_batch_raises_when_single_class_fully_excluded() -> None:
+    """Non-multilingual branch (`batching.py`'s `else` loop): a crafted Batches whose
+    ONE class is fully worst-excluded (`index.size <= worst.index.size`) -- the legacy
+    `while len(batch) < nbOfCasesPerBatch` loop has no iteration cap and, pre-fix, spins
+    forever (`current_class` wraps 0 -> 0 -> ... since `len(cases) == 1`, no state ever
+    changes; confirmed via a bounded signal-alarm standalone harness against the
+    unmodified code, not committed -- see the phase-5 task-4 report). Built directly
+    (not via `create_batches`, whose degenerate gate would intercept this exact shape)."""
+    idx = np.array([0, 1], dtype=np.int64)
+    batches = Batches(
+        nb_cases_per_batch=1,
+        nb_worst_cases=2,
+        is_multilingual=False,
+        nb_target_classes=1,
+        validation=np.zeros(2, dtype=np.int64),
+        current_class=0,
+        cases=[CaseGroup(current_pos=0, index=idx)],
+        worst_cases=[WorstCaseGroup(index=idx.copy(), score=np.zeros(2))],
+    )
+    with pytest.raises(BatchRotationStuck):
+        get_new_batch(batches)
+
+
+def test_get_new_batch_raises_when_multilingual_fully_excluded() -> None:
+    """Multilingual branch (`nbOfTargetClasses>1`): one regular target class AND the
+    aggregate's one SubCases group are both fully worst-excluded -- `current_class`
+    cycles 0 (regular, skip) -> 1 (aggregate, subclass exhausted, skip) -> 0 -> ...
+    forever pre-fix, never appending (same unbounded-loop hazard as the non-multilingual
+    branch, on the OTHER of the two `while` loops `batching.py` defines)."""
+    idx0 = np.array([0, 1], dtype=np.int64)
+    idx1 = np.array([2, 3], dtype=np.int64)
+    batches = Batches(
+        nb_cases_per_batch=1,
+        nb_worst_cases=2,
+        is_multilingual=True,
+        nb_target_classes=2,
+        validation=np.zeros(4, dtype=np.int64),
+        current_class=0,
+        cases=[
+            CaseGroup(current_pos=0, index=idx0),
+            CaseGroup(
+                current_pos=0,
+                index=np.array([], dtype=np.int64),
+                current_sub_class=0,
+                sub_cases=[SubCaseGroup(current_pos=0, index=idx1)],
+            ),
+        ],
+        worst_cases=[
+            WorstCaseGroup(index=idx0.copy(), score=np.zeros(2)),
+            WorstCaseGroup(index=idx1.copy(), score=np.zeros(2)),
+        ],
+    )
+    with pytest.raises(BatchRotationStuck):
+        get_new_batch(batches)
+
+
+def test_get_new_batch_cap_does_not_false_trigger_on_a_healthy_rotation() -> None:
+    """Negative control: a class that is NOT fully excluded (index.size > worst.index.size)
+    keeps succeeding every call across many rotations -- the fruitless counter resets on
+    every append, so a long-running healthy rotation never trips the cap."""
+    fv = np.zeros((6, 1))
+    batches = create_batches(fv, minibatch=2, nb_worst=1, multilingual=False, nb_classes=1, rng=_rng())
+    for _ in range(50):
+        batch, batches = get_new_batch(batches)
+        assert len(batch) == 2
 
 
 # --------------------------------------------------------------------------- #

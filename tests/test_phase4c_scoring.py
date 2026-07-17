@@ -243,23 +243,47 @@ def test_confusion_matrix_miss_charges_best_non_target() -> None:
     assert cm[1, 1] == 0.0  # not a diagonal hit
 
 
-def test_confusion_matrix_sticky_pos_target_quirk() -> None:
-    """`posTarget`/`posBestNotTarget` are declared ONCE outside the file loop and never
-    reset per row (confusionThresh.m has no per-row reset, only maxScoreNotTarget/
-    scoreTarget are reset) -- a row with NO score > 150 silently reuses the PREVIOUS
-    row's posTarget/posBestNotTarget, decided against the CURRENT row's threshold check
-    (using the stale scoreTarget=-1.0, reset at the end of every row)."""
+def test_confusion_matrix_no_target_row_skipped() -> None:
+    """FIXED (phase 5, F5): `posTarget`/`posBestNotTarget` are declared PER ROW, so a file
+    with no score > 150 (no target signaled) no longer inherits the previous row's
+    posTarget -- it is an out-of-set trial with no true class in the closed set, skipped
+    entirely. Pre-fix (sticky) the 2nd row reused row0's posTarget=1/posBestNotTarget=2 and
+    double-charged cm[1,2] to 2.0; post-fix only row0's miss counts, so cm[1,2]==1.0. The
+    Octave oracle still describes the sticky behavior; the port diverges by design. Fixed
+    identically to the Rust engine/confusion.rs::confusion_from_results."""
     scores = np.array(
         [
-            [151.0, 10.0],  # row0: target=class0, best-not-target=class1
-            [20.0, 30.0],  # row1: no target signaled -> posTarget/posBestNotTarget STICKY
+            [151.0, 10.0],  # row0: target=class0 (score -49), best-not-target=class1 -> miss
+            [20.0, 30.0],  # row1: no target signaled -> SKIPPED (not sticky-charged)
         ]
     )
     cm = confusion_matrix(scores, thresh=10.0)
-    # Both rows charge pos_target=1 (sticky), pos_best_not_target=2: cm[1,2] accumulates 2.
-    assert cm[1, 2] == 2.0
-    assert cm[1, 3] == 2.0
-    assert cm[3, 2] == 2.0
+    assert cm[1, 2] == 1.0
+    assert cm[1, 3] == 1.0
+    assert cm[3, 2] == 1.0
+
+
+def test_confusion_cross_language_identity_no_target_skip() -> None:
+    """BOTH-LANGUAGE IDENTITY (F5): byte-identical mirror of the Rust
+    `engine::confusion::tests::cross_language_identity_no_target_skip`. The two confusion
+    ports are different legacy sources (confusionThresh.m's asymmetric threshold vs
+    PrintConfusionMatrix's max-competitor win), so they only produce the same matrix when
+    the win/hit decisions coincide -- this crafted 2-class input is engineered so both
+    agree: row0's col-1 target (score 60) clears BOTH the thresh=10 hit and the
+    max-competitor win, and row1 has no target so BOTH skip it. There is no PyO3 seam for
+    confusion (it is not on the speech_rs.Engine surface), so the identity is pinned by
+    this test plus its Rust twin hardcoding the SAME expected matrix."""
+    scores = np.array([[5.0, 260.0], [20.0, 30.0]])
+    cm = confusion_matrix(scores, thresh=10.0)
+    want = np.array(
+        [
+            [0.0, 1.0, 2.0, 0.0],  # labels clean (row1 no-target -> skipped)
+            [1.0, 0.0, 0.0, 0.0],
+            [2.0, 0.0, 1.0, 1.0],  # row0 win at (2,2)
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+    )
+    assert np.array_equal(cm, want), cm
 
 
 def test_confusion_matrix_class_nb_le_1_raises() -> None:

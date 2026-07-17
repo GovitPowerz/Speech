@@ -373,12 +373,17 @@ def test_same_seed_determinism(tmp_path_factory: pytest.TempPathFactory) -> None
 
 
 def _seed_tier2_single_epoch(dst: Path) -> None:
-    """`_seed_tier2_spectral` + override the config's `Epochs 3` down to 1 (last-wins),
-    so `Engine.run()` is a SINGLE forward-backward + deriv dump -- the gradient eval
-    `forward_backward` needs, not the full 3-epoch train."""
+    """`_seed_tier2_spectral` + override the config's `Epochs 3` down to 0 (last-wins),
+    so `Engine.run()` is the run_solo SINGLE forward-backward at theta -- the gradient eval
+    `forward_backward` needs, NOT the engine-internal 3-fold+2-Rprop `train()`.
+
+    F11 (phase 5): Epochs 0, not 1. `Epochs >= 1` routes `run()` through `train()`, so the
+    seam measured cost/gradient at engine-moved weights, not the input theta (the T10
+    misroute). `Epochs 0` -> run_solo (one fold at theta); backprop is gated on
+    `BackPropagationActivated`, still on here, so the fold harvests the gradient."""
     _seed_tier2_spectral(dst)
     with (dst / "tier2_spectral.config").open("a") as fh:
-        fh.write("\nNeural_Networks_BackPropagation_Epochs 1\n")
+        fh.write("\nNeural_Networks_BackPropagation_Epochs 0\n")
 
 
 def test_forward_backward_tier2_determinism(tmp_path_factory: pytest.TempPathFactory) -> None:
@@ -423,6 +428,43 @@ def test_forward_backward_drives_smorms3(tmp_path: Path) -> None:
         assert opt.theta.shape == theta0[0].shape, "theta stays the flat net length"
         assert np.isfinite(opt.theta).all(), "one SMORMS3 step must keep theta finite"
         assert opt.hist_f_flat and math.isfinite(opt.hist_f_flat[-1]), "the recorded cost must be finite"
+
+
+def test_forward_backward_returns_nonzero_gradient(tmp_path: Path) -> None:
+    """F10 (phase 5): the release seam returns the FOLDED gradient, so `forward_backward`
+    reports a gradient with nonzero elements -- NOT the pre-F10 all-zero gradient (the main
+    bag's never-folded accumulator) that made the modern SMORMS3 loop a silent no-op. Epochs
+    0 -> run_solo (one fold at theta), backprop ON -> the fold harvests the real gradient."""
+    _seed_tier2_single_epoch(tmp_path)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
+        seed = np.array(eng.weights(0)[0], dtype=np.float64, copy=True)
+        f, grads = forward_backward(eng, [seed], None)
+        assert len(grads) == 1, "algo 3 -> a single [sad] gradient"
+        assert math.isfinite(f), "cost must be finite"
+        nonzero = int(np.count_nonzero(grads[0]))
+        assert nonzero > 0, f"F10: forward_backward must return a nonzero gradient, got {nonzero}/{grads[0].size} nonzero"
+
+
+def test_forward_backward_smorms3_moves_weights(tmp_path: Path) -> None:
+    """F10 + F11 (phase 5): a few SMORMS3 steps over `forward_backward` (Epochs 0, the F11
+    single-eval-at-theta) actually MOVE the weights. On HEAD the seam's zero gradient left
+    `||trained - init|| == 0` (the modern loop trained nothing); with the folded gradient
+    flowing, SMORMS3 steps the net."""
+    _seed_tier2_single_epoch(tmp_path)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
+        theta0 = np.array(eng.weights(0)[0], dtype=np.float64, copy=True)
+
+        def f_df(theta: list[NDArray[np.float64]], _ec: int) -> tuple[float, list[NDArray[np.float64]], list[NDArray[np.float64]]]:
+            cost, grads = forward_backward(eng, theta, None)
+            return cost, grads, theta
+
+        opt = Smorms3(f_df, [theta0.copy()])
+        trained = opt.optimize(4)
+        moved = float(np.linalg.norm(trained[0] - theta0))
+        assert moved > 0.0, f"F10/F11: SMORMS3 must move the weights off init, ||trained-init||={moved}"
+        assert np.isfinite(trained[0]).all(), "trained weights must be finite"
 
 
 # ==== Task 3 minors folded in =================================================

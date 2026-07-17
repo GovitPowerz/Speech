@@ -141,3 +141,25 @@ law_thresh_speech = 1
 law_thresh_no_speech = 0
 ponderation = "0.93311"
 
+# ---------------------------------------------------------------------------------------
+# [training] -- the modern training loop convention (Phase 5 Task 8). COMMENTED example.
+#
+# These are DRIVER-SIDE knobs for `speech.drivers.train.train_modern` (the pydantic
+# `ModernTrainParams`), NOT engine keys: the Rust engine never parses `[training]`, so it
+# is not in toml_config.rs KEY_TABLE and this block stays commented. It documents the
+# field names + typical values; a driver/CLI reads them into `ModernTrainParams`.
+#
+# [training]
+# epochs = 50               # total epochs (a resumed run continues toward this)
+# patience = 5              # early-stop after this many epochs with no validation-cost gain
+# steps_per_epoch = 10      # SMORMS3 steps per epoch (no LR schedule; fresh optimizer/epoch)
+# valid_listing = "listing_valid.csv"   # held-out validation fileslisting (rel to this config's dir)
+# minibatch = 0             # hard-example mini-batch size (0 = full-corpus training per epoch)
+# nb_worst = 0
+# nb_classes = 1
+# multilingual = false
+# init_scheme = "xavier"    # "xavier" (Glorot uniform) or "he" (He normal)
+# init_seed = 0
+# forget_bias_one = true    # seed the LSTM forget-gate bias at 1.0
+# resume_from = ""          # a checkpoint dir to resume from (loads last_*.bin + train_history.json)
+

@@ -168,9 +168,11 @@ fn cubic_speech_cost_and_deriv() {
 fn log_speech_cost_and_deriv_asymmetry() {
     // Speech log, P=0.5, q=0, t=0.5, branch raw=0.5.
     // A = -0.5*(1-0) = -0.5, B = 0.5*0 = 0, Adim = 0.5.
-    // output=0.25 < 0.5 => below (log).
+    // output=0.25 < 0.5 => below (log). z = 0.25/0.5 = 0.5, INTERIOR (not clamped).
     // cost: y = 0.25/0.5 = 0.5 (in [1e-24,1]); cost = 0 + (-0.5)*ln(0.5).
-    // deriv ASYMMETRY: clamps RAW y=0.25 (NOT y/Adim); deriv = A/0.25 = -2.0.
+    // deriv (F7, phase5): in the interior the true derivative is A/output (the Adim
+    // cancels via the chain rule) = -0.5/0.25 = -2.0 -- UNCHANGED by the F7 fix, which
+    // only zeros the SATURATED region (see log_deriv_consistent_with_clamped_forward).
     // delta = -2.0 * 0.25 * 0.75.
     let law = speech::cost::CostLaw::from_config(
         &cfg(&[
@@ -184,9 +186,82 @@ fn log_speech_cost_and_deriv_asymmetry() {
     );
     let expected_cost = -0.5 * (0.5_f64).ln();
     assert_eq!(law.compute_unitary_cost(0.25, 1.0), expected_cost);
-    // If deriv (wrongly) divided by Adim first it would be A/(0.25/0.5)=A/0.5=-1.0.
-    // The legacy quirk uses RAW y=0.25 => A/0.25=-2.0. Verify we reproduce -2.0.
+    // Interior true derivative A/output = -2.0 (NOT A/(y/Adim)=-1.0, which was never the
+    // derivative of anything; NOT 0, which is the fixed SATURATED value only).
     assert_eq!(law.compute_unitary_delta(0.25, 1.0), -2.0 * 0.25 * 0.75);
+}
+
+/// F7 (phase5): the LogLaw derivative is now CONSISTENT with the clamped forward.
+/// `cost()` computes `b + A*ln(clamp(output/Adim, 1e-24, 1))`; where that argument is
+/// clamped the cost is CONSTANT, so the true gradient is 0. The legacy deriv returned
+/// `A/clamp(output,1e-24,1)` UNCONDITIONALLY -- a nonzero (wrong) gradient in the
+/// saturated region (IMPROVEMENTS [0b-i]).
+///
+/// This region is only reachable at output -> {0,1} on the committed k/64 and
+/// 1000-point VAD grids, where the logistic fold `output*(1-output)` in
+/// `compute_unitary_delta` zeros the contribution -- so NO existing golden moves
+/// (`deriv_sweep_bit_exact`, `scalar_delta_log_sqrt_canary` stay bit-exact; verified).
+/// This directed test samples the saturated region OFF that grid.
+///
+/// Port-truth (no C++ harness): the fixed values are re-derived here (0 in the clamped
+/// region); the legacy-would-be value is computed inline to prove non-vacuity. The C++
+/// harness stays legacy (it dumps `A/y`); it is intentionally NOT rebuilt, since the
+/// committed fixtures never sample the divergence. REVERT-MUTATION: reverting the fix
+/// (deriv `A/y` unconditional) makes the two `== 0.0` asserts fail (legacy is nonzero).
+#[test]
+fn log_deriv_consistent_with_clamped_forward() {
+    // thresh 0.5 -> branch selector raw=0.5 AND Adim=clamp(0.5)=0.5, so output<0.5 stays
+    // in the below-log branch; A = -cp*(1-q) = -0.5, q=0.
+    let law = speech::cost::CostLaw::from_config(
+        &cfg(&[
+            ("BLSTM_CostLawSpeech", "log"),
+            ("BLSTM_CostLawNoSpeech", "log"),
+            ("BLSTM_CostPonderation", "0.5"),
+            ("BLSTM_CostLawParamSpeech", "0"),
+            ("BLSTM_CostLawThreshSpeech", "0.5"),
+        ]),
+        "BLSTM",
+    );
+    let a = -0.5_f64;
+
+    // (1) INTERIOR (z = output/Adim in (1e-24,1)): the fix preserves the true derivative
+    // A/output (Adim cancels) -- nonzero, unchanged from the legacy.
+    let interior = 0.25_f64; // z = 0.5
+    assert_eq!(
+        law.compute_unitary_delta(interior, 1.0),
+        (a / interior) * interior * (1.0 - interior)
+    );
+    assert_ne!(law.compute_unitary_delta(interior, 1.0), 0.0);
+
+    // (2) LOWER-CLAMP saturated (z = output/Adim < 1e-24): forward constant -> gradient 0.
+    let lo = 1e-25_f64; // z = 2e-25 < 1e-24
+    assert_eq!(law.compute_unitary_delta(lo, 1.0), 0.0);
+    // Non-vacuity: the LEGACY formula A/clamp(y,1e-24,1) * fold is decidedly nonzero here.
+    let legacy_lo = (a / 1e-24_f64) * lo * (1.0 - lo);
+    assert!(
+        legacy_lo.abs() > 1e-3,
+        "legacy_lo={legacy_lo} must be a real gradient, not a sliver"
+    );
+
+    // (3) UPPER-CLAMP saturated via the double-read: branch raw=10 keeps the below-log law
+    // live up to output=1, while Adim=clamp(10)=1-1e-6 clamps output>1-1e-6.
+    let law_hi = speech::cost::CostLaw::from_config(
+        &cfg(&[
+            ("BLSTM_CostLawSpeech", "log"),
+            ("BLSTM_CostLawNoSpeech", "log"),
+            ("BLSTM_CostPonderation", "0.5"),
+            ("BLSTM_CostLawParamSpeech", "0"),
+            ("BLSTM_CostLawThreshSpeech", "10"),
+        ]),
+        "BLSTM",
+    );
+    let hi = 1.0 - 5e-7_f64; // > 1-1e-6 => clamped; < 10 => below-log branch
+    assert_eq!(law_hi.compute_unitary_delta(hi, 1.0), 0.0);
+    let legacy_hi = (a / hi) * hi * (1.0 - hi);
+    assert_ne!(
+        legacy_hi, 0.0,
+        "legacy_hi must be nonzero (a genuine divergence point)"
+    );
 }
 
 #[test]

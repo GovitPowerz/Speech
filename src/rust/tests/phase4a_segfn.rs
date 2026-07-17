@@ -13,7 +13,7 @@ use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::BagOfProcessors;
 use speech::engine::corpus::CorpusItem;
 use speech::tasks::segmentation::Segmentation;
-use speech::tasks::segmentation_io::{compute_errors, load_ref_stm};
+use speech::tasks::segmentation_io::{compute_errors, load_ref_csv, load_ref_stm};
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
@@ -69,6 +69,15 @@ excerpt 1 excerpt 0.20 0.80 <o,f0,unk> hello world
 excerpt 2 excerpt 0.30 0.90 <o,f0,unk> hello world
 ";
     std::fs::write(&p, body).unwrap();
+    p
+}
+
+/// A CSV reference (channel-independent, unlike STM). `load_ref_csv` parses
+/// `beg,end,type,conf` per line (commas -> spaces): one in-window SPEECH span
+/// (`C` -> Speech) at conf 1.0 >= the default `Pruning_Threshold` 0.0.
+fn write_csv(dir: &std::path::Path) -> PathBuf {
+    let p = dir.join("ref.csv");
+    std::fs::write(&p, "0.20,0.80,C,1.0\n").unwrap();
     p
 }
 
@@ -160,6 +169,77 @@ fn missing_reference_in_scored_mode_errors() {
             "expected mandatory-reference error, got: {e}"
         ),
         Ok(_) => panic!("expected scored mode with empty reference to bail"),
+    }
+}
+
+// === stereo_csv_reference_loads_per_channel (F6) ============================
+// FIXED (phase 5, F6): pre-fix, `load_ref_csv` fired only for `channel_count == 1`
+// (mirroring the legacy `_ChannelNb == 1`-only `buf` build), so a stereo CSV
+// reference loaded NOTHING and a scored (-m) run hit the mandatory-reference bail.
+// PIN-OLD-FIRST verified: this test first pinned that bail (RED), then the fix
+// (load the CSV ref for EVERY channel, cloned from the single channel-independent
+// parse) makes the scored run succeed on BOTH channels. The scored columns are
+// matched against an independent `load_ref_csv` + `compute_errors` oracle per
+// channel -- proving the reference is genuinely CSV-derived, not an empty stub.
+#[test]
+fn stereo_csv_reference_loads_per_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let wav = wav_in(dir.path()); // the 2-channel excerpt
+    let csv = write_csv(dir.path());
+
+    let mut cfg = tdc_bag_config();
+    let mut bag =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+
+    let it = item(wav.to_str().unwrap(), csv.to_str().unwrap());
+    // No longer bails: the CSV reference loads for both channels of the stereo file.
+    let results = bag.segmentation_function(&it, multi_mode()).unwrap();
+    let cfg0 = &results[&0];
+    assert_eq!(cfg0.len(), 2, "two channels scored");
+
+    // Independent oracle: CSV is channel-independent, so BOTH channels score against
+    // the SAME `load_ref_csv` segmentation. Re-run the driver (TDC ignores the ref) to
+    // get the hyp, then compute_errors per channel with the CSV ref + its nb_words
+    // (the exact call the bag makes) and match cols 0-2 (Pfa/Pmiss/global).
+    let csv_text = std::fs::read_to_string(&csv).unwrap();
+    let mut audio = read_audio(&wav, 0.0, 2.0, 0).unwrap();
+    let audio_duration = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let n_chan = audio.data.nrows();
+    assert_eq!(
+        n_chan, 2,
+        "fixture must be stereo (else the F6 bug is untested)"
+    );
+    let mut hyp: Vec<Segmentation> = (0..n_chan)
+        .map(|_| Segmentation::new(audio_duration))
+        .collect();
+    let mut cfg2 = tdc_bag_config();
+    let mut bag2 =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2), multi_mode()).unwrap();
+    bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
+
+    // Pruning_Threshold is absent from tdc_bag_config -> default 0.0.
+    let (refc, nb) = load_ref_csv(&csv_text, 0.0, 2.0, 0.0);
+    // Non-vacuity: the reference actually carries a SPEECH span (not an empty stub).
+    assert!(
+        refc.segments()
+            .iter()
+            .any(|s| s.ty == speech::tasks::segmentation::SegClass::Speech),
+        "the CSV reference must carry a SPEECH span (non-vacuous)"
+    );
+    for (chan, row) in cfg0 {
+        let chan = *chan;
+        let mut h = hyp[chan].clone();
+        let report = compute_errors(&mut h, Some(&refc), nb);
+        let speech = report.per_class[speech::tasks::segmentation::SegClass::Speech as usize];
+        let mut global = 0.0;
+        for j in (speech::tasks::segmentation::SegClass::Other as usize)
+            ..(speech::tasks::segmentation::SegClass::Excluded as usize)
+        {
+            global += report.per_class[j].error_rate;
+        }
+        assert_eq!(row[0], 100.0 * speech.pfa, "col0 Pfa chan {chan}");
+        assert_eq!(row[1], 100.0 * speech.pmiss, "col1 Pmiss chan {chan}");
+        assert_eq!(row[2], 100.0 * global, "col2 global error rate chan {chan}");
     }
 }
 

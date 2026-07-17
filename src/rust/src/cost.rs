@@ -1,8 +1,10 @@
 //! Piecewise VAD cost laws + multiclass softmax cross-entropy with ignore-mask.
 //!
 //! Ported bit-exactly from legacy C++: CostLaw.{h,cpp}. Preserves the double-read
-//! quirk, the LogLaw cost/deriv Adim asymmetry, and the AboveThreshCubic name
-//! routing (see IMPROVEMENTS.md Legacy Quirks). See design spec section 3.
+//! quirk and the AboveThreshCubic name routing (see IMPROVEMENTS.md Legacy Quirks).
+//! The legacy LogLaw cost/deriv Adim asymmetry (a wrong gradient in the saturated
+//! region) was FIXED in phase5 (F7): `Law::deriv` for `Log` is now consistent with
+//! the clamped forward. See design spec section 3.
 //!
 //! The scalar dispatch mirrors CostLaw.cpp:122-189 (cost) and 278-345 (delta):
 //! the no-speech regime tests `output > switching_thresh_no_speech`, feeds the
@@ -28,8 +30,9 @@ enum Law {
 }
 
 impl Law {
-    // The LogLaw arms use legacy sequential-if clamps (order + NaN semantics differ
-    // from f64::clamp, and the deriv clamps RAW y, not y/adim); do not "simplify".
+    // The Log/Sqrt COST arms use legacy sequential-if clamps (order + NaN semantics
+    // differ from f64::clamp); do not "simplify". The Log DERIV arm was made consistent
+    // with the clamped forward in phase5 (F7) -- see its arm below + IMPROVEMENTS.md.
     #[allow(clippy::manual_clamp)]
     fn cost(&self, y: f64) -> f64 {
         match *self {
@@ -68,7 +71,9 @@ impl Law {
         }
     }
 
-    #[allow(clippy::manual_clamp)]
+    // manual_range_contains: the explicit `z < 1e-24 || z > 1.0` mirrors the forward's
+    // two separate clamp conditions (and keeps NaN -> NaN, not -> 0, exact); do not fold.
+    #[allow(clippy::manual_range_contains)]
     fn deriv(&self, y: f64) -> f64 {
         match *self {
             Law::Linear { a, .. } => a,
@@ -78,16 +83,21 @@ impl Law {
                 let y = 1.0 - y;
                 -2.0 * b * y - 3.0 * a * y * y
             }
-            Law::Log { a, .. } => {
-                // ASYMMETRY: deriv clamps RAW y (not divided by adim). Legacy quirk, reproduced.
-                let mut y = y;
-                if y < 1e-24 {
-                    y = 1e-24;
-                }
-                if y > 1.0 {
-                    y = 1.0;
-                }
-                a / y
+            Law::Log { a, adim, .. } => {
+                // F7 (phase5; was IMPROVEMENTS [0b-i] LogLaw asymmetry): the derivative
+                // CONSISTENT with the clamped forward. `cost()` computes
+                // `b + a*ln(clamp(y/adim, 1e-24, 1))`; where that argument is clamped the
+                // cost is CONSTANT, so the true gradient is 0. In the unclamped interior
+                // `d/dy [b + a*ln(y/adim)] = a/y` (the adim cancels via the chain rule, so
+                // the interior value is unchanged from the legacy). The legacy returned
+                // `a/clamp(y,1e-24,1)` UNCONDITIONALLY -- a nonzero WRONG gradient in the
+                // saturated region. On the committed VAD grids the divergence only lands at
+                // output -> {0,1}, where the logistic fold `output*(1-output)` in
+                // `compute_unitary_delta` zeros the contribution, so no existing golden
+                // moves; the divergence is pinned off-grid by
+                // `log_deriv_consistent_with_clamped_forward`. See IMPROVEMENTS.md.
+                let z = y / adim;
+                if z < 1e-24 || z > 1.0 { 0.0 } else { a / y }
             }
             Law::BelowSqrt { a, adim, .. } => {
                 let mut y = 1.0 - y / adim;
