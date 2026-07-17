@@ -337,7 +337,10 @@ def test_hyperparam_search_runs_and_is_deterministic(tmp_path_factory: pytest.Te
 # is flat on these fixtures: a forward-only score at the fixed base weights).
 
 # Margins are HALF the measured from-scratch improvement (~2x honest headroom), NOT tuned to
-# green. Measured (seed 7, xavier, the 8-step engine-reused trajectory below):
+# green -- TRUNCATED to 3 decimals (0.02640 -> 0.026, 0.01070 -> 0.010), so each margin sits
+# fractionally BELOW true half (by 0.0004 / 0.0007): direction-safe (the coded bound is
+# marginally easier to clear than exact-half phrasing implies, never harder), not a precision
+# bug. Measured (seed 7, xavier, the 8-step engine-reused trajectory below):
 #   SAD train cost-at-theta: 0.34742 -> 0.29462   improvement 0.05280 -> margin 0.026
 #   SAD held-out (f2, forward NNCostSeg): 0.35065 -> 0.32925   improvement 0.02140 -> margin 0.010
 # The run is BOUNDED at 8 SMORMS3 steps because the trajectory OVERSHOOTS from step 9: the
@@ -454,12 +457,13 @@ def test_from_scratch_sad_converges(tmp_path_factory: pytest.TempPathFactory) ->
     for i in range(1, trace.size):
         assert trace[i] <= trace[i - 1] + 1e-4, f"cost-at-theta rose at step {i}: {trace[i]} > {trace[i - 1]} (overshoot inside the budget?)"
     # (a) convergence: the best cost (= trace[-1], the min by monotonicity) is strictly below
-    # the epoch-0 cost by the stated margin (>= half the measured 0.05280 improvement).
+    # the epoch-0 cost by the stated margin (a truncated-to-3-decimals half of the measured
+    # 0.05280 improvement -- see the module-level margin derivation, direction-safe).
     assert best_cost == float(np.min(trace)), f"the trained-weights cost must be the minimum of the bounded trace: {best_cost} vs {float(np.min(trace))}"
     assert init_cost - best_cost >= _SAD_TRAIN_MARGIN, f"SAD train did not converge: improvement {init_cost - best_cost:.5f} < margin {_SAD_TRAIN_MARGIN}"
 
     # (b) held-out generalization: the trained model beats the untrained init on f2 (forward
-    # NNCostSeg), by >= half the measured 0.02140 held-out improvement.
+    # NNCostSeg), by a truncated-to-3-decimals half of the measured 0.02140 held-out improvement.
     ho_imp = r.ho_init - r.ho_best
     assert ho_imp >= _SAD_HELDOUT_MARGIN, f"SAD did not generalize: held-out improvement {ho_imp:.5f} < margin {_SAD_HELDOUT_MARGIN}"
 

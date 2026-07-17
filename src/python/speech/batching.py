@@ -502,8 +502,9 @@ def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
                     if fruitless >= cap:
                         raise BatchRotationStuck(
                             f"get_new_batch: no progress after {fruitless} consecutive fruitless "
-                            f"rotation advances (cap={cap}); every reachable class/sub-class "
-                            "appears fully worst-excluded"
+                            f"rotation advances (cap={cap}); every reachable class/sub-class appears "
+                            "fully worst-excluded (or nb_classes is pathologically large relative to "
+                            "the corpus -- see get_new_batch's docstring)"
                         )
         else:
             while len(batch) < batches.nb_cases_per_batch:
@@ -533,7 +534,8 @@ def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
                         raise BatchRotationStuck(
                             f"get_new_batch: no progress after {fruitless} consecutive fruitless "
                             f"rotation advances (cap={cap}); every reachable class appears fully "
-                            "worst-excluded"
+                            "worst-excluded (or nb_classes is pathologically large relative to the "
+                            "corpus -- see get_new_batch's docstring)"
                         )
 
     batch_arr = np.array(batch, dtype=np.int64)

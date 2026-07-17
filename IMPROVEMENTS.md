@@ -41,12 +41,15 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   differs by up to 1 ULP on ~34 biases. We chose original-restore so Rust == Python. *Fix candidate:*
   once the Phase-4 inference golden lands, decide whether strict legacy parity requires replicating
   `(x/adim)*adim` on the bias.
-- **[0b-i] CostLaw double-read** (`cost.rs` from `CostLaw.cpp:68-69`): `CostLawThresh{Speech,NoSpeech}`
+- **[0b-i] CostLaw double-read -- kept by decision, phase 5** (`cost.rs` from `CostLaw.cpp:68-69`): `CostLawThresh{Speech,NoSpeech}`
   is read TWICE -- clamped (`1e-6..1-1e-6`) for the law coefficients, then re-read RAW/unclamped
   (defaults `10.0`/`-1.0`) for the runtime branch predicate. Almost certainly an unintended
   double-read; load-bearing for the sweep goldens. *Fix candidate:* unify to a single, clamped
-  threshold after parity.
-- **[0b-i] LogLaw cost/deriv Adim asymmetry -- FIXED (phase 5, F7, this commit)** (`cost.rs`
+  threshold after parity. **Phase 5 Task 2 adjudication:** reviewed as a candidate against the
+  S0.3 correctness-critical criterion and explicitly KEPT-documented (not correctness-critical
+  in the wrong-result/UB sense; a load-bearing convention) -- see the KEEP list in
+  `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`.
+- **[0b-i] LogLaw cost/deriv Adim asymmetry -- FIXED (phase 5, F7, commit `09151ed`)** (`cost.rs`
   `Law::deriv` from `CostLaw.h:119-149`): LEGACY behavior (recorded): `cost()` divides `y` by `Adim`
   before clamp+log (`b + A*ln(clamp(y/Adim, 1e-24, 1))`); `deriv()` clamped the RAW `y` (not divided)
   then returned `A/y` UNCONDITIONALLY. Where the forward's argument is clamped the cost is CONSTANT, so
@@ -75,17 +78,27 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   **Oracle divergence:** the C++ `tools/oracle_harness/` stays LEGACY -- it still dumps `A/y` in the
   saturated region; the committed fixtures never sample it (they only reach output -> {0,1} where the
   fold zeros both), so they were NOT regenerated. Deliberate, per the S2 oracle-divergence protocol.
-- **[0b-i] AboveThreshCubic name-dependent coefficients** (`cost.rs` from `CostLaw.h:84-117`): the
+- **[0b-i] AboveThreshCubic name-dependent coefficients -- kept by decision, phase 5** (`cost.rs` from `CostLaw.h:84-117`): the
   above-threshold cubic law switches its `A`/`B` coefficient formulas on the law-name STRING
   (`square`/`cubic` vs `linear`/`log`). Fragile and surprising. *Fix candidate:* refactor to explicit
-  per-law types after parity.
-- **[0b-i] Softmax `compute_deltas` ponderation-scaling asymmetry** (`cost.rs` `compute_deltas`, from
+  per-law types after parity. **Phase 5 Task 2 adjudication:** part of the cost-law
+  derivative-consistency family the sweep confirmed REACHABLE (real configs set `CostLaw=log`)
+  but scoped OUT -- a retrain-affecting semantic change belonging in a dedicated Phase 6
+  cost-law-correctness pass, not this sweep's narrower wrong-result/UB fix list (spec S0.3
+  explicitly names the cost-law family documented-not-fixed). See
+  `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s "Plan corrections" item 5
+  ("CONSIDERED, SCOPED OUT").
+- **[0b-i] Softmax `compute_deltas` ponderation-scaling asymmetry -- kept by decision, phase 5** (`cost.rs` `compute_deltas`, from
   `CostLaw.cpp:358-419`): the WER path scales EACH element by its own class's ponderation
   (`_ClassesPonderations(0,kk)`, per `kk`); the non-WER path instead captures a single ponderation
   from the frame's on-class column and scales the WHOLE frame row by it (`deltas.row(jj) *=
   ponderation`, `CostLaw.cpp:417`). The two paths disagree on granularity for no reason apparent in
   the math; reproduced verbatim (see `cost.rs` doc-comment on `compute_deltas`). *Fix candidate:*
-  make the non-WER path scale per-element like the WER path, after parity.
+  make the non-WER path scale per-element like the WER path, after parity. **Phase 5 Task 2
+  adjudication:** the third member of the cost-law derivative-consistency family the sweep
+  confirmed REACHABLE but scoped OUT to a Phase 6 cost-law-correctness pass -- see
+  `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s "Plan corrections" item 5
+  ("CONSIDERED, SCOPED OUT"), same adjudication as the `AboveThreshCubic` entry above.
 - **[0b-i] `suppress_short` no-advance-after-erase** (`src/rust/src/tasks/segmentation.rs`
   `suppress_short`, from `Segmentation.cpp:245-282`): after any erase branch, the loop does NOT
   advance `i` -- the erased slot shifts the next segment into the current index, which must be
@@ -373,7 +386,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   incremental variance/std pooling, not a bug to fix.
 
 - **[phase1] `_LTSVWindowShift != 0.0` guards the LTSVshift read on an UNINITIALIZED member (UB); guard
-  dropped -- FIXED-BY-DESIGN (phase 5, this commit; no code change)** (`features/pipeline.rs` `FeatureConfig::from_legacy`, from `BLSTMSpectralSegmenter.cpp:50`):
+  dropped -- FIXED-BY-DESIGN (phase 5, commit `53de2ca`; no code change)** (`features/pipeline.rs` `FeatureConfig::from_legacy`, from `BLSTMSpectralSegmenter.cpp:50`):
   the legacy reads `_LTSVWindowShift` from config only `if (_LTSVWindowShift != 0.0)`, but at that point
   `_LTSVWindowShift` is a default-constructed `double` member with no in-class initializer and an empty
   ctor body -- so the branch condition reads an INDETERMINATE value (undefined behavior). The port drops
@@ -445,7 +458,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   Rust signature for parity with the `Layer` dispatch and the legacy call sites; bound to `let _ =`.
   Provenance note, not a bug.
 
-- **[phase2] `NeuronLayer` output softmax overflow -- FIXED (phase 5, F8, this commit; port-hardening,
+- **[phase2] `NeuronLayer` output softmax overflow -- FIXED (phase 5, F8, commit `05f2aed`; port-hardening,
   golden-neutral)** (`nn/layers.rs` `NeuronLayer::feed_forward`, from `NeuronLayer.cpp:138-142`): LEGACY
   behavior (recorded): `lastLayer && O>1` computed `exp(a+b)` directly on the raw pre-activation values
   with NO `- max(row)` shift, so a large pre-activation overflowed `exp` to `inf` and the `inf/inf`
@@ -1502,7 +1515,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `unscored_mode_zero_columns_and_vrcts` + `dump_dir_vrcts` (`tests/phase4a_segfn.rs`).
 
 - **[phase4a] CSV reference loads ONLY for single-channel audio (2-channel `buf` left empty ->
-  no reference) -- FIXED (phase 5, this commit, F6)** (`engine/bag_of_processors.rs::segmentation_function`, from
+  no reference) -- FIXED (phase 5, commit `53de2ca`, F6)** (`engine/bag_of_processors.rs::segmentation_function`, from
   `Segmentation.cpp:745-806`): `load_ref_from_csv` loops over `_ChannelNb` and builds the file-to-open
   string `buf` ONLY in the `_ChannelNb == 1` branch (`:748-749` `buf << filename`); the
   `_ChannelNb == 2` branch (`:750-752`) emits a "wrong path" LOG line and NEVER writes `buf`, so
@@ -1516,7 +1529,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   **FIX (phase 5, F6):** the CSV match arm now fires for EVERY channel count. CSV is
   channel-independent (unlike STM, there is no per-channel column), so the file is parsed ONCE and
   the segmentation cloned per channel, matching how STM references already load; `nb_words` (the
-  dead WER surface, KEEP) stays the single parse's count, shared across channels. The mono
+  dead WER surface, kept by decision, phase 5) stays the single parse's count, shared across channels. The mono
   (`channel_count == 1`) path is byte-identical to before (`vec![seg]` == one clone). *Oracle-
   divergence note (protocol step 4):* the C++ oracle harness and the resurrected 2015 binary still
   drop the stereo reference; the port diverges by design. *Pin-old-first + re-pin:*
@@ -1854,7 +1867,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   claim is asserted on production code.
 
 - **[phase4b] `PrintConfusionMatrix`'s `posTarget`/`posBestNotTarget` are STICKY across rows, NOT
-  reset per row -- FIXED (phase 5, this commit, F5, BOTH languages)** (`engine/confusion.rs::
+  reset per row -- FIXED (phase 5, commit `53de2ca`, F5, BOTH languages)** (`engine/confusion.rs::
   confusion_from_results` + `scoring.py::confusion_matrix`, from `BagOfProcessors.cpp:
   509-510,533-534` and the sibling `confusionThresh.m`): both position variables are declared OUTSIDE the row loop and initialized to
   `0` exactly ONCE, before row 0; the end-of-row reset (`:533-534`) touches only
@@ -1909,7 +1922,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   the all-target corpus goldens (`lid5_*`/`twin_mode*`/`mode7_*`/`twin_train_epoch_weights_golden`)
   never hit a no-target row, so they stay green.
 
-- **[phase4b] An exact score tie sends the target to the MISS branch (strict `>` only)**
+- **[phase4b] An exact score tie sends the target to the MISS branch (strict `>` only) -- kept by decision, phase 5**
   (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:524`): the win
   condition is `scoreTarget > maxScoreNotTarget`, so `scoreTarget == maxScoreNotTarget` (the
   decoded target score exactly equals the best competitor's raw score) falls to the
@@ -1918,10 +1931,13 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   on every exact tie. *Fix candidate:* none identified without knowing the original intent. *Pinned
   by:* the row-D case (an exact 50.0/50.0 tie) in `sentinel_decode_and_argmax`
   (`src/engine/confusion.rs`); a `>` -> `>=` mutation was run and confirmed to break this test (see
-  the Task 1 report).
+  the Task 1 report). **Phase 5 Task 2 adjudication:** reviewed alongside F5's sticky-index fix
+  (the SAME function) and explicitly KEPT -- matches the legacy exactly, no clear "correct"
+  alternative, and distinct from the order-dependence bug F5 actually fixes; see
+  `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s KEEP list ("confusion family, non-sticky").
 
 - **[phase4b] `Confusion2String`'s zero-row-total normalization guard leaves that row's diagonal
-  cell as a RAW COUNT, not a percentage** (`engine/confusion.rs::confusion_error`, from
+  cell as a RAW COUNT, not a percentage -- kept by decision, phase 5** (`engine/confusion.rs::confusion_error`, from
   `Helpers.hpp:375`): the per-row scaling only fires `if (confusion(kk+1, classNb+1) > 0)`; a class
   with zero samples in this crafted batch keeps its raw (unscaled) diagonal count feeding directly
   into the `100 - normalized(ii,ii)` deficit sum, which is only a sensible percentage-deficit for
@@ -1929,17 +1945,21 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   for genuinely empty classes. *Fix candidate:* none identified -- an empty class arguably
   shouldn't contribute to the error average at all; revisit once a real (non-crafted) confusion
   matrix with an empty class is observed. *Pinned by:* `zero_total_row_left_unnormalized`
-  (`src/engine/confusion.rs`).
+  (`src/engine/confusion.rs`). **Phase 5 Task 2 adjudication:** reviewed alongside F5 and
+  explicitly KEPT -- see `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s KEEP list
+  ("confusion family, non-sticky").
 
 - **[phase4b] `Confusion2String`'s ill-conditioned-matrix gate (`exit(1)` in the legacy) ported as
-  a Rust panic** (`engine/confusion.rs::confusion_error`, from `Helpers.hpp:369-371`): `classNb =
+  a Rust panic -- kept by decision, phase 5** (`engine/confusion.rs::confusion_error`, from `Helpers.hpp:369-371`): `classNb =
   confusion.rows()-2 < 2`, or `rows-2 != cols-2`, is fatal in the legacy (`exit(1)`, no exception,
   no recovery). Rust has no direct equivalent that stays testable via `#[should_panic]`, so this
   port uses `panic!`. *Why deferred:* this branch is reachable only from a deliberately malformed
   matrix (never from `confusion_from_results`'s own construction, which always builds a valid
   square matrix or returns the `classNb <= 1` empty case without calling `confusion_error` at all);
   revisit if a future caller needs graceful-`Result` handling instead. *Fix candidate:* none
-  identified. *Pinned by:* `ill_conditioned_matrix_panics` (`src/engine/confusion.rs`).
+  identified. *Pinned by:* `ill_conditioned_matrix_panics` (`src/engine/confusion.rs`). **Phase 5
+  Task 2 adjudication:** reviewed alongside F5 and explicitly KEPT -- see
+  `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s KEEP list ("confusion family, non-sticky").
 
 - **[phase4b] `BagOfProcessors::PrintConfusionMatrix`'s classNb==2 binary ROC-curve variant and a
   duplicate normalization/print block are commented-out DEAD CODE, not ported**
@@ -2880,7 +2900,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
 - **[phase4c] `CreateBatches.m`'s non-multilingual `nbOfTargetClasses>1` branch indexes
   `Cases`/`WorstCases` by LOOP POSITION, not class VALUE -- silently clobbering the aggregate
-  slot for the natural contiguous class labeling -- FIXED (phase 5, this commit)**
+  slot for the natural contiguous class labeling -- FIXED (phase 5, commit `1a18d18`)**
   (`CreateBatches.m:43-60`; `src/python/speech/batching.py::create_batches`). The loop is
   `for ii = 1:length(possibleValues)`, and for a
   target class (`0 < possibleValues(ii) < nbOfTargetClasses`) it writes `Cases(ii)` -- the LOOP
@@ -2934,7 +2954,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
 - **[phase5] `create_batches`'s multilingual `nbOfTargetClasses>1` branch replaced the whole
   `CaseGroup` on a target-write collision with the aggregate slot, wiping `sub_cases` --
-  PORT-INTRODUCED bug, NOT a legacy quirk, found+fixed in the Task 4 fix-wave review (F9)**
+  PORT-INTRODUCED bug, NOT a legacy quirk -- FIXED (phase 5, commit `124d908`, F9), found in
+  the Task 4 fix-wave review**
   (`src/python/speech/batching.py::create_batches`, the `else`/multilingual branch,
   `:359-364` at review time). Same loop-position collision mechanism as F1
   (`for ii, v in enumerate(possible): if 0 < v < nb_classes: cases[ii] = ...` -- `ii` is the
@@ -2948,9 +2969,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   multilingual branch (`:7-55`) never reads `Cases(N).index`/`.currentPos` for the aggregate
   slot `N = nbOfTargetClasses`: once `currentClass == length(Cases)`, the code only ever
   reads `.SubCases(subClass).index` and `.currentSubClass` (`:28-53`). So in the legacy, a
-  target write colliding with the aggregate slot silently clobbers two DEAD fields
-  (`.index`/`.currentPos` there are never read again) and is completely benign -- there is no
-  legacy bug to reproduce here, unlike F1's non-multilingual branch, where
+  target write colliding with the aggregate slot silently clobbers two DEAD `Cases` FIELDS
+  specifically (`.index`/`.currentPos` there are never read again) and is benign FOR THOSE
+  TWO FIELDS -- there is no `Cases`-side legacy bug to reproduce here, unlike F1's
+  non-multilingual branch, where
   `GetNewBatch.m`'s non-multilingual path (`:57-81`) DOES read `Cases(currentClass).index`
   unconditionally for every slot including the aggregate.
 
@@ -2978,6 +3000,39 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   lose in the first place). `cases` has no such repair -- the post-loop
   `cases[nb_classes - 1].current_sub_class = 0` line only touches `current_sub_class`, never
   reconstructs `sub_cases`.
+
+  WORST-SIDE LEGACY-OBSERVABLE DIVERGENCE (found verifying the above by hand-simulating both
+  `CreateBatches.m:61-86` and `GetNewBatch.m` against the real vendored source, T12 review):
+  the port's `worst[nb_classes-1]` REPAIR mechanism (the paragraph above) is a PORT-ONLY
+  design -- the raw legacy MATLAB has no `agg_worst`-style running accumulator at all;
+  `WorstCases(nbOfTargetClasses).index` is a PLAIN FIELD OVERWRITE at BOTH the `else`
+  (aggregate) branch (`:81`, incremental concat) and the colliding `if` (target) branch
+  (`:70`, `Cases(ii).index(1:min(...))` -- the SAME statement F1 fixes for `Cases`, unfixed
+  here since `Cases`/`WorstCases` are different fields with different read sites), so on a
+  collision the LAST write wins: the colliding target class's OWN worst subset clobbers the
+  aggregate's, exactly the F1-style mechanism, just observable here because (unlike `Cases`)
+  `WorstCases(nbOfTargetClasses)` IS read downstream (`GetNewBatch.m`'s aggregate branch
+  compares `sub.index` against `worst.index`). On the collision input
+  `fv=[0,0,1,1,2,2]`/`nb_classes=3`/`nb_worst=1` (the same fixture
+  `test_create_batches_multilingual_aggregate_slot_survives_collision` uses, shadowed
+  `randperm` reversed): the PORT's `agg_worst` accumulator yields
+  `worst[2].index=[1]` (0-based) so `get_new_batch` returns `[2, 0]` (matching that test);
+  hand-simulating the LEGACY's field-overwrite instead yields `WorstCases(3).index=[6]`
+  (1-based, i.e. `[5]` 0-based -- the colliding class-2's own worst pick, not the aggregate's);
+  feeding that legacy-consistent `worst[2]` into the port's own (F9-unaffected)
+  `get_new_batch` rotation, otherwise unchanged, then returns `[2, 1]` on the identical
+  inputs -- a genuine, independently-reproduced VALUE divergence on the worst side,
+  `port [2,0]` vs `legacy [2,1]`.
+  Not part of F9's fix (F9 touches only `Cases`/`.sub_cases` field-mutation-vs-replace; this
+  `worst[]` design predates Phase 5 and is UNCHANGED by F9), and not itself a bug: the port's
+  `agg_worst` accumulator computes the semantically-intended aggregate worst set (files
+  actually excluded from every non-target class's rotation), while the legacy's collision
+  artifact is an incidental byproduct of loop order, not a "correct" alternative worth
+  matching bit-for-bit -- author-intent-defensible, in the same FIXED-BY-DESIGN family as F4
+  (a port choice that was already right, not a regression to chase). *Not independently
+  pinned* (no dedicated test asserts the legacy-would-be `[2, 1]` value -- the divergence is
+  a documentation finding, verified by hand simulation against `legacy/Optimizer_V6.2.2/
+  functions/{CreateBatches,GetNewBatch}.m`, not by a committed oracle run).
 
   **FIX (phase 5, F9):** `create_batches`'s multilingual target-write branch now MUTATES the
   existing `CaseGroup`'s fields in place (`cases[ii].current_pos = 0; cases[ii].index = idx`)
@@ -3020,8 +3075,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   since both are `create_batches` clobber-family fixes discovered/fixed one task apart.
 
 - **[phase5] The release seam returned an all-zero gradient -- the folded derivatives were
-  discarded (F10)** -- PORT-INTRODUCED, latent since Phase 4c; a translation-gap/latent-seam
-  bug in the class F9 belongs to, caught by the Task 10 exit-gate discovery
+  discarded -- FIXED (phase 5, commit `ff025ee`, F10)** -- PORT-INTRODUCED, latent since
+  Phase 4c; a translation-gap/latent-seam bug in the class F9 belongs to, caught by the Task
+  10 exit-gate discovery
   (`src/rust/src/engine/corpus_processor.rs::run_epoch` + `::weights_derivatives`). LEGACY
   behavior has no analog: the legacy C++ `saveWeights` writes the folded derivatives to
   `bestNNWeight_*.bin` and MATLAB reads them back, so the gradient always reached the
@@ -3063,7 +3119,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   counterpart (the legacy wrote derivs via a different mechanism); nothing regenerated.
 
 - **[phase5] Single-eval gradient routed through the engine-internal `train()` -- Epochs=1
-  was a 4c misroute (F11)** -- PORT-INTRODUCED, latent since Phase 4c
+  was a 4c misroute -- FIXED (phase 5, commit `55bee98`, F11)** -- PORT-INTRODUCED, latent
+  since Phase 4c
   (`src/python/speech/drivers/train.py::_modern_config_text`, `::_eval_config_text`). LEGACY
   behavior: the optimizer computes the gradient at theta by shelling `fsp` once per gradient
   eval (`ComputeGradient.m -> CostFunction.m -> ComputeCost.m`), with the inner Rprop loop
@@ -3150,6 +3207,37 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   mechanism the harness does not model); nothing regenerated. **Phase 6 pointer:** re-attach the
   twin convergence gate once LRE03/07 (or a sourced SAD corpus) supplies >= 2 files per language.
 
+- **[phase5] `train_modern`'s balance-5 forward "validation" cost is UNFIT for from-scratch
+  guidance on the committed fixtures; the Phase 5 training foundation is certified PIECEWISE,
+  not end-to-end (Task 10 closeout, ratified scope)** (`drivers/train.py::_make_default_validate`/
+  `train_modern`). The per-epoch validation signal `train_modern` records
+  (`compute_cost(..., balance, ...)`, the discrete balance-law error rate -- the role
+  `valid_batch.m` never got to play in the port) is STUCK at 30.0 across the whole from-scratch
+  SAD trajectory on the tier-2 spectral corpus: the net's posteriors never cross the decision
+  threshold from a fresh Xavier/He init, so the signal is a flat, useless plateau. Not a bug --
+  it is exactly what a discrete VAD error rate does on an undertrained net -- but not a guidance
+  signal either. `test_early_stop_triggers` (`tests/pyo3/test_exit_gate.py`) EXPLOITS this
+  deliberately (the stuck plateau reliably fires patience, a genuine if unglamorous use of it).
+  The Phase-5 exit gates (`test_from_scratch_sad_converges`/`test_from_scratch_twin_mechanical`)
+  therefore do NOT anchor on this signal at all: they call `engine.forward_backward` directly and
+  measure the DIFFERENTIABLE `NNCostSeg` objective (the same objective SMORMS3 descends),
+  bypassing `train_modern`'s own validation wrapper entirely.
+  **What this means for certification:** the training foundation is certified PIECEWISE -- the
+  core primitives (`forward_backward`'s F10/F11-fixed gradient, SMORMS3, from-scratch convergence
+  itself) are proven end to end on `NNCostSeg`; the WRAPPER's state machine (epoch loop,
+  early-stop, checkpoint/resume) is proven correct as MACHINERY via the Task 8 stub-injected unit
+  tests (patience boundary exact, strict-`<`-best selection, resume-from-last true equivalence)
+  plus one engine-backed smoke/early-stop-firing test -- but no committed fixture demonstrates the
+  WRAPPER'S OWN validation-driven early-stop selecting a genuinely-better model on a signal that
+  actually moves.
+  **Phase-6 pointer:** once real training data makes `NNCostSeg` itself (or a comparable
+  continuous signal) usable as the per-epoch validation metric -- not the discrete balance-5 error
+  rate -- re-validate `train_modern`'s early-stop/checkpoint selection end to end against it before
+  trusting the wrapper unsupervised on real corpora.
+  **Oracle divergence:** none -- `train_modern` and its validation wrapper are port-only; the
+  legacy never wired per-epoch validation into a from-scratch loop at all, so there is no legacy
+  behavior to diverge from.
+
 - **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
   `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
   shuffles every per-class index pool via the builtin `randperm`, which would make the
@@ -3180,7 +3268,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 - **[phase4c] Genuine legacy bug surfaced by driving the real `CheckGrad.m`: `weights2nnet.m`
   never writes back the normalize mean/std tail `nnet2MatFile.m` appends to `weights`, so
   CheckGrad's last `2*length(normalize.mean)` numeric derivatives are always exactly 0 --
-  FIXED-BY-DESIGN (phase 5, this commit, F4)**
+  FIXED-BY-DESIGN (phase 5, commit `2590e48`, F4)**
   (`nnet2MatFile.m:140-141` appends `nnet.normalize.mean;nnet.normalize.std` to the flat
   `weights` vector CheckGrad iterates `kk = 1:length(weights)` over; `weights2nnet.m:150-186`
   reconstructs `nnet.output.layer(*).weights` from `weights` and then RETURNS -- it never reads
@@ -3362,7 +3450,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
 - **[phase4c/4d->phase5] `get_new_batch`'s two `while len(batch) < nbOfCasesPerBatch` loops
   had NO iteration cap -- a fully worst-excluded rotation state spins forever -- FIXED
-  (phase 5, this commit)** (`GetNewBatch.m` has no cap anywhere; `src/python/speech/
+  (phase 5, commit `1a18d18`)** (`GetNewBatch.m` has no cap anywhere; `src/python/speech/
   batching.py::get_new_batch`; hazard first surfaced as a process-note during the Phase 4d
   Task 13 mutation battery, see the entry directly above, ~line 2985). A state where EVERY
   reachable class (non-multilingual branch) or class/sub-class (multilingual branch) is
@@ -3411,6 +3499,16 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   immediately after. No oracle-harness divergence to record: `GetNewBatch.m` itself has no
   iteration-cap concept to diverge from (there is no legacy behavior at the cap boundary to
   preserve a description of -- the legacy simply hangs, unconditionally, in this state).
+  T12 nit (deliberate, not an oversight): the `BatchRotationStuck` message originally read
+  "every reachable class/sub-class appears fully worst-excluded" unconditionally, which is
+  not the whole truth -- the docstring's own caveat above documents a SECOND, pathological
+  trigger (`nb_classes` absurdly large relative to `file_nb`, reachable only when
+  `nb_worst=0` bypasses the degenerate gate's `nb_classes` term) where the cap fires as a
+  non-hanging FALSE POSITIVE on a rotation that was merely slow, not stuck. Both raise sites
+  now append "(or nb_classes is pathologically large relative to the corpus -- see
+  get_new_batch's docstring)" so the message itself does not overclaim certainty about which
+  case fired. String-only change (no test asserts on the message text, only the exception
+  type via `pytest.raises(BatchRotationStuck)`), verified no test needed updating.
 
 - **[4d] OpenSAD15 converter: NO LIVE ORACLE tier** (`src/python/speech/dataprep/opensad15.py`,
   ported from Python 2 `ProcessOpenSAD15Corpus.py:23-108`): unlike every other module in this
@@ -3753,7 +3851,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
      *Fix candidate:* if the LID-target-from-fileId legacy path is ever ported for strict
      parity, BOTH the duration-as-file_id read and the `feedForward(targetIndex)` consumption
      (`BLSTMNeuralNetwork.cpp:843-918`) must land together; the listing field alone is inert.
-  3. **No per-eval class-balance rescale -- FIXED (phase 5, this commit, F3); ascending-index
+  3. **No per-eval class-balance rescale -- FIXED (phase 5, commit `2590e48`, F3); ascending-index
      order stays a kept simplification.** `ComputeGradient.m:72-96` rescales
      `filesValues(:,2)` by `nbOfElem/sumInClassIndex` (in-class = `classNb == 1`) before
      writing; the port used to write the RAW listing weight (`_files_values` col1) verbatim --
@@ -4040,9 +4138,14 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
 ### Mutation battery (Phase 5)
 
-- **[phase5] Mutation battery (Task 11): 11/11 battery items (12 apply-fail-revert-pass
-  production-code cycles -- item 7 counts twice, Rust + Python -- plus one test-side
-  demonstration) break/behave exactly as predicted; zero coverage gaps found.** Every fix
+- **[phase5] Mutation battery (Task 11): 11/11 battery items (11 apply-fail-revert-pass
+  production-code cycles -- item 7 counts twice, Rust + Python -- plus item 5's one
+  test-side demonstration, 12 exercises total) break/behave exactly as predicted; zero
+  coverage gaps found.** [T12 phrasing fix: the prior wording's "12 production-code
+  cycles ... plus one test-side demonstration" mislabeled item 5 as a production cycle
+  while simultaneously counting it again as an addition -- 9 single-mutation items
+  (1,2,3,4,6,8,9,10,11) + item 7's 2 (Rust+Python) = 11 production cycles; item 5 is the
+  ONE non-production (test-side) exercise, for 12 total, not 13.] Every fix
   landed across Tasks 4-9 (F1/F3/F5/F7/F8/F10/F11) is RE-VERIFIED here from the committed,
   fully-integrated Phase 5 state (not merely re-trusting the per-fix land-time note), plus
   the four loop-foundation pieces (seeded init, the modern training loop's early-stop
