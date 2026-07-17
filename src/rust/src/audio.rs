@@ -620,11 +620,172 @@ fn read_phseq(path: &Path) -> anyhow::Result<Audio> {
     })
 }
 
+/// `AudioStruct` ctor, `file_type == 2` branch (`AudioStruct.cpp:183-256`): cepstral
+/// feature binary reader (the LRE `.plp8f0mvsdd` PLP+f0+deltas family the 2015 LID net
+/// trained on). `_ChannelsCount = 1`, `_Framerate = 8000` (hardcoded, `:188-189`).
+///
+/// Binary layout (little-endian -- the 2015 x86_64 native encoding, matching this
+/// port's LE hard-assumption elsewhere in the codec):
+/// ```text
+///   int32 nbRecords | int16 vectorSize | int16 magic          8-byte header      (:202-210)
+///   int32 vectorNb  x nbRecords                               per-record row table (:212-216)
+///   float32 payload x sum(vectorNb_m * vectorSize)            row-major per record (:230-241)
+/// ```
+/// The record dtype is `float32` (`sizeof(float)`, `:230`), widened to f64 here. `magic`
+/// is READ but never validated -- the legacy only logs it (`:223`), so it is ignored
+/// (real corpus files carry `magic == 0`). Each record `m` becomes one
+/// `(vectorNb_m x vectorSize)` matrix (rows = frames, cols = feature dim) pushed to
+/// `external_features` in file order -- NOT one row per record: a single LRE utterance
+/// is typically one record with `vectorNb` in the thousands (surveyed `nbRecords`
+/// 1..=14, `vectorSize == 23 == NNetInputSize`). Records with `vectorSize*vectorNb <= 0`
+/// are SKIPPED (`:229`), faithfully dropping empty/negative-count padding records rather
+/// than erroring; the row-major fill (col fastest, `:234-240`) is preserved.
+///
+/// PORT-TRUTH divergence (Roadmap 2, un-quirk -- see IMPROVEMENTS.md): the legacy
+/// silently zero-fills a truncated payload (its read loop `:234` stops on a failed read,
+/// leaving the `Eigen::Zero` remainder), silently ignores excess trailing bytes, and
+/// `exit(1)`s a malformed header. This reader instead validates the total byte length
+/// against the header arithmetic EXACTLY and returns a typed `Err` on any mismatch (zero
+/// records / short header / short record table / short-or-excess payload / non-positive
+/// vectorSize). Every real corpus file (34k surveyed) matches its header arithmetic to
+/// the byte, so the strict check never rejects valid input; it only turns silent
+/// corruption into a loud, recoverable error.
+fn read_cep(path: &Path) -> anyhow::Result<Audio> {
+    // legacy: :194-197 `ifstream` bool-conversion failure -> exit(1). Whole-file slurp
+    // (files are <=few MB) so lengths can be validated up front, no unbounded alloc.
+    let buf = std::fs::read(path).with_context(|| {
+        format!(
+            "No .cep file given or wrong path for the file \"{}\".",
+            path.display()
+        )
+    })?;
+
+    // Header (:202-210): int32 nbRecords, int16 vectorSize, int16 magic.
+    if buf.len() < 8 {
+        bail!(
+            ".cep file \"{}\" truncated header: {} bytes, need 8 (nbRecords+vectorSize+magic).",
+            path.display(),
+            buf.len()
+        );
+    }
+    let nb_records = i32::from_le_bytes(buf[0..4].try_into().unwrap());
+    // legacy: :203 `nbRecords <= 0 -> exit(1)`.
+    if nb_records <= 0 {
+        bail!(
+            ".cep file empty for the file \"{}\" (nbRecords = {nb_records}).",
+            path.display()
+        );
+    }
+    let nb_records = nb_records as usize;
+    let vector_size = i16::from_le_bytes(buf[4..6].try_into().unwrap());
+    // magic = buf[6..8]: read but ignored (legacy only logs it, :223).
+    if vector_size <= 0 {
+        bail!(
+            ".cep file \"{}\" malformed vectorSize {vector_size} (must be > 0).",
+            path.display()
+        );
+    }
+    let vector_size = vector_size as usize;
+
+    // Per-record vectorNb table (:212-216).
+    let table_end = 8 + 4 * nb_records;
+    if buf.len() < table_end {
+        bail!(
+            ".cep file \"{}\" truncated record table: {} bytes, need {table_end} for {nb_records} records.",
+            path.display(),
+            buf.len()
+        );
+    }
+    let vector_nbs: Vec<i32> = (0..nb_records)
+        .map(|m| i32::from_le_bytes(buf[8 + 4 * m..12 + 4 * m].try_into().unwrap()))
+        .collect();
+
+    // Expected payload size from the header arithmetic: only records with
+    // `vectorSize*vectorNb > 0` (:229) contribute floats. Strict equality (PORT-TRUTH).
+    let expected_floats: usize = vector_nbs
+        .iter()
+        .filter(|&&v| v > 0)
+        .map(|&v| v as usize * vector_size)
+        .sum();
+    if expected_floats == 0 {
+        bail!(
+            ".cep file empty for the file \"{}\" (no records with vectorSize*vectorNb > 0).",
+            path.display()
+        );
+    }
+    let payload_bytes = buf.len() - table_end;
+    let expected_bytes = 4 * expected_floats;
+    if payload_bytes != expected_bytes {
+        let kind = if payload_bytes < expected_bytes {
+            "truncated payload"
+        } else {
+            "excess trailing bytes"
+        };
+        bail!(
+            ".cep file \"{}\" byte-length mismatch ({kind}): payload is {payload_bytes} bytes, header arithmetic expects {expected_bytes} (vectorSize {vector_size}, records {vector_nbs:?}).",
+            path.display()
+        );
+    }
+
+    // Read records row-major (:230-244); numberOfFrames accumulator seeds at 2 (:218).
+    let mut external_features: Vec<Array2<f64>> = Vec::new();
+    let mut number_of_frames: i64 = 2;
+    let mut off = table_end;
+    for &vector_nb in &vector_nbs {
+        // legacy :229 gate; vector_size > 0 here, so it reduces to `vector_nb > 0`.
+        if vector_nb <= 0 {
+            continue;
+        }
+        let rows = vector_nb as usize;
+        let mut feat = Array2::<f64>::zeros((rows, vector_size));
+        for r in 0..rows {
+            for c in 0..vector_size {
+                feat[[r, c]] = f32::from_le_bytes(buf[off..off + 4].try_into().unwrap()) as f64;
+                off += 4;
+            }
+        }
+        number_of_frames += rows as i64 + 2; // legacy :242.
+        external_features.push(feat);
+    }
+
+    // _FramesCount / _DataRaw / _Data (:247-249). Same left-associative frame-count
+    // arithmetic as the phSeq branch (:247 mirrors :173), so reuse the pinned helper.
+    let frames_count = phseq_frames_count(number_of_frames, 8000) as usize;
+    let data_raw = Array2::<f64>::zeros((1, frames_count));
+    let data = Array2::<f64>::zeros((1, frames_count));
+
+    // _Periodogram (:250-255): (numberOfFrames x maxCols) zeroed, block-filled from
+    // rowBegin = 1 with a 2-row gap between records. maxCols == vector_size because
+    // every kept record has vectorSize columns (:243), and at least one is kept here.
+    let mut periodogram = Array2::<f64>::zeros((number_of_frames as usize, vector_size));
+    let mut row_begin: usize = 1; // legacy :251.
+    for feat in &external_features {
+        let rows = feat.nrows();
+        periodogram
+            .slice_mut(ndarray::s![row_begin..row_begin + rows, ..])
+            .assign(feat);
+        row_begin += rows + 2; // legacy :254.
+    }
+
+    Ok(Audio {
+        sample_rate: 8000,
+        data,
+        data_raw,
+        lang_index: -1,
+        weight: 1.0,
+        external_features,
+        periodogram: Some(periodogram),
+        audio_file_name: String::new(),
+        ref_seg_file_name: String::new(),
+        audio_offset: 0.0,
+    })
+}
+
 /// `AudioStruct` ctor dispatch (`AudioStruct.cpp:36-412`). `file_type == 0`: decode a
 /// wav file, apply the legacy offset/duration truncation, then normalize
-/// (`:36-128`). `file_type == 1`: phSeq text reader (`:138-182`, see
-/// [`read_phseq`]). Any other value is unported (`file_type` 2/3/4 -- cep/phSeq-N/
-/// mat readers, AudioStruct.cpp:183-412).
+/// (`:36-128`). `file_type == 1`: phSeq text reader (`:138-182`, see [`read_phseq`]).
+/// `file_type == 2`: cep feature-binary reader (`:183-256`, see [`read_cep`], Phase 6).
+/// `file_type` 3/4 (phSeq-N variant, mat) remain unported (`:257-412`).
 pub fn read_audio(
     path: &Path,
     offset_sec: f64,
@@ -639,9 +800,17 @@ pub fn read_audio(
         audio.audio_offset = offset_sec;
         return Ok(audio);
     }
+    if file_type == 2 {
+        // legacy: AudioStruct.cpp:190 `_OffsetBegin = audio_offset;` -- stored on the
+        // struct but never read again in the cep branch (no offset/duration truncation
+        // of the feature data), same as the phSeq path above.
+        let mut audio = read_cep(path)?;
+        audio.audio_offset = offset_sec;
+        return Ok(audio);
+    }
     if file_type != 0 {
         bail!(
-            "read_audio: file_type {file_type} not supported (Phase 4b: 0=wav, 1=phSeq ported; 2/3/4 unported)"
+            "read_audio: file_type {file_type} not supported (0=wav, 1=phSeq, 2=cep ported; 3/4 unported)"
         );
     }
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
@@ -849,20 +1018,38 @@ mod tests {
     }
 
     #[test]
-    fn read_audio_file_type_2_bails() {
-        // Task 13 (Phase 4d blocked-four closure): `file_type` 2/3/4 (cep/phSeq-N/mat,
-        // AudioStruct.cpp:183-412) has no local data to validate against -- typed bail, no
-        // read attempted. The bail fires before any file I/O (`:642` precedes `File::open`),
-        // so a nonexistent path is sufficient; previously unpinned at this call site (the
-        // only existing pin, `engine::bag_of_processors::tests::file_type_2_bails`, exercises
-        // the higher-level corpus-bag gate, which short-circuits before `read_audio` is ever
-        // reached).
+    fn read_audio_file_type_2_reads_not_bails() {
+        // Phase 6 Task 1: `file_type == 2` (cep) is no longer an unported bail -- it now
+        // dispatches into `read_cep`. Re-pins the former `read_audio_file_type_2_bails`
+        // (Phase 4d Task 13, which asserted an "unsupported file_type" bail). A nonexistent
+        // path must now surface a FILE-OPEN error ("No .cep file"), NOT the old
+        // "not supported" gate bail -- proving the dispatch reaches the reader.
         match read_audio(Path::new("/nonexistent/does/not/matter.cep"), 0.0, 3.6e6, 2) {
+            Err(e) => {
+                let s = e.to_string();
+                assert!(
+                    !s.contains("not supported"),
+                    "file_type 2 must reach the cep reader, not the unported bail: {s}"
+                );
+                assert!(
+                    s.contains("No .cep file"),
+                    "expected a cep file-open error for a missing path, got: {s}"
+                );
+            }
+            Ok(_) => panic!("expected a file-open error for a nonexistent cep path"),
+        }
+    }
+
+    #[test]
+    fn read_audio_file_type_3_bails() {
+        // File_Type 3/4 (phSeq-N variant, mat -- AudioStruct.cpp:257-412) stay unported:
+        // typed bail, no read attempted (the bail fires before any file I/O).
+        match read_audio(Path::new("/nonexistent/does/not/matter.mat"), 0.0, 3.6e6, 3) {
             Err(e) => assert!(
-                e.to_string().contains("file_type"),
-                "unexpected read_audio file_type-2 error: {e}"
+                e.to_string().contains("not supported"),
+                "unexpected read_audio file_type-3 error: {e}"
             ),
-            Ok(_) => panic!("expected file_type 2 (cep, unported) to bail"),
+            Ok(_) => panic!("expected file_type 3 (unported) to bail"),
         }
     }
 }

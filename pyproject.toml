@@ -36,7 +36,10 @@ packages = ["src/python/speech"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src/python", "."]
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "corpus: marks tests that require the licensed LRE03/07 corpus (skipped if absent)",
+]
 
 [tool.ruff]
 line-length = 160

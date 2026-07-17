@@ -258,9 +258,9 @@ impl BagOfProcessors {
     /// Algo 0 (`VRCTSPart`) is wired here since Phase 4b Task 8
     /// (`Processor::Vrcts`); Algo 5/6 (`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`)
     /// since Phase 4b Task 9 (`Processor::Lid`/`Processor::TwinLid`).
-    /// `File_Type` 2/3/4 (cep/phSeq-N/mat input) remain unported -- `bail!`,
-    /// IMPROVEMENTS entry; `File_Type` 0 (wav) and 1 (phSeq, Task 5) are both
-    /// supported.
+    /// `File_Type` 3/4 (phSeq-N variant, mat input) remain unported -- `bail!`,
+    /// IMPROVEMENTS entry; `File_Type` 0 (wav), 1 (phSeq, Task 5), and 2 (cep,
+    /// Phase 6 Task 1) are all supported.
     pub fn from_configs(
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
@@ -279,11 +279,11 @@ impl BagOfProcessors {
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
 
-        if file_type != 0 && file_type != 1 {
-            // legacy: AudioStruct non-wav/non-phSeq read paths (cep/phSeq-N/mat,
-            // file_type 2/3/4) -- unported (Phase 4b).
+        if file_type != 0 && file_type != 1 && file_type != 2 {
+            // legacy: AudioStruct phSeq-N/mat read paths (file_type 3/4) -- unported.
+            // wav (0), phSeq (1), and cep (2, Phase 6 Task 1) are supported.
             bail!(
-                "File_Type {file_type} not ported (Phase 4b): only wav (0) and phSeq (1) are supported"
+                "File_Type {file_type} not ported: only wav (0), phSeq (1), and cep (2) are supported"
             );
         }
 
@@ -1400,12 +1400,26 @@ mod tests {
     }
 
     #[test]
-    fn file_type_2_bails() {
+    fn file_type_2_allowed() {
+        // Phase 6 Task 1: File_Type 2 (cep) is now a supported gate value. Re-pins the
+        // former `file_type_2_bails`. Construction doesn't touch read_audio (the gate runs
+        // before the per-config driver loop), so a plain TDC config with the gate flipped
+        // must succeed.
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "2".to_string());
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode())
+            .expect("File_Type 2 (cep) must be accepted by the gate");
+        assert_eq!(bag.file_type(), 2);
+    }
+
+    #[test]
+    fn file_type_3_bails() {
+        // File_Type 3/4 (phSeq-N variant, mat) stay unported -- the gate still bails.
+        let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
+        cfg.insert("File_Type".to_string(), "3".to_string());
         match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()) {
             Err(e) => assert!(e.to_string().contains("File_Type")),
-            Ok(_) => panic!("expected File_Type 2 (cep, unported) to bail"),
+            Ok(_) => panic!("expected File_Type 3 (unported) to bail"),
         }
     }
 

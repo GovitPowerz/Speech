@@ -4282,7 +4282,9 @@ Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not
 placeholders waiting on a future task. Each entry names the typed bail(s) that make the
 blocked behavior fail loudly (never silently), cites its pinning test, and states
 concretely what would have to exist for the block to lift. Cross-referenced by the
-README roadmap (T15).
+README roadmap (T15). **Update (Phase 6 Task 1):** the fourth item (cep / `File_Type` 2)
+was the one deferred "pending a corpus" -- that corpus arrived, so its block LIFTED and
+it is now a real reader; the other three remain blocked. See its flipped entry below.
 
 - **Cost balances 6-9 (the WER shell-out laws): source LOST, not deferred-portable.**
   `ComputeCost.m` computes balances 6/7/8/9 by shelling out to an external Python
@@ -4412,38 +4414,65 @@ README roadmap (T15).
   legacy runs. Fixing it means inventing correct CNN semantics with no working reference
   to validate against.
 
-- **Cep ingestion (`File_Type` 2+): no local data anywhere to validate against --
-  deferred pending a corpus that uses it.**
-  `AudioStruct.cpp`'s ctor dispatch (`:36-412`) ports `file_type` 0 (wav, `:36-128`) and
-  1 (phSeq, `:138-182`) only; `:183-412` (file_type 2 cep, 3 phSeq-N variant, 4 mat) is
-  entirely unported. *Evidence:* no committed fixture, `legacy/` corpus, or `dataprep/`
-  output anywhere in this repo carries `.cep`/mat-format audio -- `dataprep/`'s own
-  scope (augmentation, OpenSAD15 conversion, STM normalization, listing writers) never
-  produces or consumes cep files either.
-  *Typed bail:* two call sites. (a) `src/rust/src/audio.rs::read_audio` `:642-646`: `if
-  file_type != 0 { bail!("read_audio: file_type {file_type} not supported (Phase 4b:
-  0=wav, 1=phSeq ported; 2/3/4 unported)"); }` (guards AFTER the file_type==1 phSeq
-  dispatch at `:634-641`, so this specifically catches 2/3/4). (b) `src/rust/src/
-  engine/bag_of_processors.rs::BagOfProcessors::from_configs` `:282-287`: `if file_type
-  != 0 && file_type != 1 { bail!("File_Type {file_type} not ported (Phase 4b): only wav
-  (0) and phSeq (1) are supported"); }` -- the higher-level corpus-bag gate, reached
-  FIRST in the real construction path (the bag never calls `read_audio` for a
-  `File_Type` it hasn't already accepted).
-  *Pinning test:* (b) was already pinned: `engine::bag_of_processors::tests::
-  file_type_2_bails` (inline `#[cfg(test)]`, `src/rust/src/engine/bag_of_processors.rs`,
-  `mod tests` at `:1230`) -- pre-existing, verified still passing. (a) was UNPINNED:
-  since `read_audio` is only ever called from `bag_of_processors.rs` post-gate, its own
-  file_type-2/3/4 branch had no direct test. Added in Task 13: `audio::tests::
-  read_audio_file_type_2_bails` (`src/rust/src/audio.rs`), calling `read_audio` directly
-  with `file_type=2` against a nonexistent path (the bail fires before any file I/O, so
-  no fixture is needed) and asserting the error text contains `"file_type"`. Passes
-  (`cargo test`, this task).
-  *What it would take:* real cep-format (or mat-format) audio fixtures, plus the
-  compiled legacy `AudioStruct` cep reader as an oracle to golden-test against -- neither
-  exists locally, and no committed corpus/listing in this repo references File_Type 2+.
-  Without a live oracle this would be an unvalidatable transcription of dead code (the
-  same objection the module map raises for `dataprep/`'s formerly-all-stub status), so
-  it stays deferred pending a corpus that actually exercises File_Type 2+.
+- **Cep ingestion (`File_Type` 2): PORTED (phase 6 Task 1, commit `this commit`) -- the
+  LRE03/07 corpus arrived; `File_Type` 3/4 stay deferred (still no data).**
+  *Legacy behavior (recorded, `AudioStruct.cpp:183-256`):* the cep binary is `int32
+  nbRecords | int16 vectorSize | int16 magic` (little-endian), then an `int32
+  vectorNb`-per-record table, then `float32` payload (`sizeof(float)`) row-major per
+  record; `magic` is read but only LOGGED (never validated); records with
+  `vectorSize*vectorNb <= 0` are SKIPPED (`:229`); `_FramesCount =
+  numberOfFrames*0.01*_Framerate` with `numberOfFrames` seeded at 2 and accumulating
+  `vectorNb+2` per kept record, and `_Periodogram` block-filled from `rowBegin = 1` with
+  a 2-row gap between records; a truncated payload is SILENTLY zero-filled (the read loop
+  `:234` stops on a failed read, leaving the `Eigen::Zero` remainder), excess trailing
+  bytes are ignored, and a malformed header (`nbRecords <= 0`) `exit(1)`s.
+  *Original deferral (Phase 4d Task 13, for the record):* no committed fixture, `legacy/`
+  corpus, or `dataprep/` output carried `.cep` audio and no oracle existed, so this was
+  one of the Phase 4d "four" -- deferred (NOT permanently blocked) "pending a corpus that
+  actually exercises File_Type 2+".
+  *What landed (Phase 6 Task 1):* that corpus is now `data/LRE03-LRE07/` (34k
+  `.plp8f0mvsdd` LID feature files, gitignored + licensed, byte arithmetic exact on every
+  surveyed file, `vectorSize == 23 == NNetInputSize`, `nbRecords` 1..=14).
+  `src/rust/src/audio.rs::read_cep` reads the layout above into `external_features` (one
+  `(vectorNb x vectorSize)` matrix per kept record -- NOT one row per record; a single
+  LRE utterance is typically one record of a few thousand frames) plus the block-filled
+  `periodogram`, mirroring the phSeq plumbing and reusing the pinned `phseq_frames_count`
+  helper. The `read_audio` file_type==2 dispatch and the
+  `BagOfProcessors::from_configs` File_Type gate both open for 2; 3/4 still bail.
+  *PORT-TRUTH divergence (Roadmap 2, DELIBERATE -- not a reproduced quirk):* the port does
+  NOT reproduce the legacy silent zero-fill / excess-ignore / `exit(1)`. It validates the
+  total byte length against the header arithmetic EXACTLY and returns a typed `Err` on any
+  mismatch (zero records, short header, short record table, short-or-excess payload,
+  non-positive vectorSize) -- silent corruption becomes a loud, recoverable error. No C++
+  oracle harness was ever built for the cep reader, so there is none left describing the
+  legacy behavior; this entry is the record of the divergence. The layout itself is
+  ground-truthed against the real corpus (the corpus-gated tests below), not a harness.
+  *Pinned by (re-pins of the two former bails + new pins):* `audio::tests::
+  read_audio_file_type_2_reads_not_bails` (was `read_audio_file_type_2_bails` -- File_Type
+  2 now reaches the reader; a missing path yields a cep file-open error, not the unported
+  bail) and `engine::bag_of_processors::tests::file_type_2_allowed` (was
+  `file_type_2_bails` -- the gate now accepts 2); File_Type 3/4 stay pinned by the new
+  `audio::tests::read_audio_file_type_3_bails` and `bag_of_processors::tests::
+  file_type_3_bails`. Reader pins: `src/rust/tests/phase6_cep.rs` -- 8 hand-crafted
+  synthetic fixtures under `tests/reference_data/phase6/cep/` (happy single/multi-record
+  incl. magic-ignored + empty-record skip; typed-error edges: zero records, truncated
+  header/table, short payload, excess payload, bad vectorSize) plus a `write_cep`/read
+  round-trip. Corpus-gated layout confirmation (skips cleanly if the licensed corpus is
+  absent): `corpus_first_file_consistency` (Rust, independent header parse + reader
+  round-trip) and `test_cep_layout_byte_arithmetic` (Python, `tests/test_phase6_corpus.py`,
+  independent pure-`struct` parse) -- both on the deterministic first file `ara_1.
+  plp8f0mvsdd` (nbRecords=1, vectorSize=23, 3261 frames, 32.61s, max|x|=4.82).
+  *Mutation:* reverting `read_cep` to the old bail breaks both re-pins; swapping the
+  float payload to big-endian or column-major fill breaks the `tiny_ok`/`multi_ok`
+  hardcoded-value asserts and the corpus plausibility bounds; relaxing the strict
+  byte-length check to the legacy's silent zero-fill breaks `truncated_payload_errors`/
+  `excess_payload_errors`.
+  *Still deferred:* `File_Type` 3 (phSeq-N variant) and 4 (mat), `AudioStruct.cpp:257-412`
+  -- the `data/LRE03-LRE07` corpus uses only cep (File_Type 2) for LID features and phSeq
+  (File_Type 1); nothing exercises 3/4, so they keep the typed bail pending such data.
+  This is now the shared Phase 6 corpus-gate infrastructure's first consumer:
+  `common::corpus_root_or_skip` (Rust, `src/rust/tests/common/mod.rs`) and `CORPUS_ROOT`
+  + `requires_corpus` (Python, `tests/conftest.py`), reused by every later Phase 6 task.
 
 ## Toolchain deviations
 
