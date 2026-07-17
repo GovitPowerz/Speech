@@ -356,3 +356,74 @@ fn results_matrix_after_run() {
         assert_eq!(m[[r, 2]], chan_id, "row {r} chan id");
     }
 }
+
+// === weights_derivatives_nonzero_through_seam (F10) ==========================
+// F10 (phase 5): the release seam `weights_derivatives(pos)` must return the
+// gradient `run_epoch` FOLDED on the per-lane clones (the R6 static-lane model),
+// NOT the main bag's never-updated accumulator (col0 = 0). The pre-F10 bug: the
+// main-bag read returned an all-zero gradient, so `forward_backward` reported a
+// zero gradient and the modern SMORMS3 loop never moved a weight (T10 discovery).
+//
+// The gradcheck synthetic net (algo 4, backprop ON) with epsilon forced to 0
+// takes the runSolo path (Epochs 0 + Epsilon 0 -> the `else` branch of `run()`),
+// a SINGLE fold at theta -- exactly `forward_backward`'s contract. RED on HEAD:
+// every col0 entry of the seam matrix is 0.
+#[test]
+fn weights_derivatives_nonzero_through_seam() {
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    seed_gradcheck(dir.path());
+    let mut cfg = load_config_at(&dir.path().join("tier2_gradcheck.config"));
+    // epsilon 0 -> run() dispatches to runSolo (a single fold at theta), not
+    // gradCheck; Epochs is already 0 and backprop already ON in the config.
+    cfg.insert(
+        "Neural_Networks_Gradient_Check_Epsilon".to_string(),
+        "0".to_string(),
+    );
+    let _cwd = CwdGuard::enter(dir.path());
+
+    let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::UnitTest)).unwrap();
+
+    // Seed the phase3 synth_flat pattern (the non-degenerate cost the gradcheck
+    // golden exercises), so the fold is a real, smoothly-varying gradient.
+    let seed = load_bin_phase4a("tier2_gradcheck_seed.bin");
+    let nb = cp.weights(0)[0].len();
+    assert_eq!(seed.dim(), (nb, 1), "seed length == net weight count");
+    let seed_flat: Vec<f64> = (0..nb).map(|k| seed[[k, 0]]).collect();
+    cp.set_weights(0, std::slice::from_ref(&seed_flat)).unwrap();
+
+    cp.run().unwrap();
+
+    let seam = cp.weights_derivatives(0);
+    assert_eq!(seam.len(), 1, "algo 4 -> a single net's derivative matrix");
+    let dmat = &seam[0];
+    assert!(dmat.nrows() > 0, "the derivative matrix must have rows");
+    let nonzero_col0 = (0..dmat.nrows()).filter(|&k| dmat[[k, 0]] != 0.0).count();
+    assert!(
+        nonzero_col0 > 0,
+        "F10: the release seam must return the folded (nonzero) gradient; got all-zero col0 \
+         (the pre-fix bug -- the seam read the never-folded main bag)"
+    );
+
+    // Identity: the seam's normalized gradient (col0/col1) must EQUAL what
+    // grad_check's own analytic fold sees at the SAME weights -- both are the
+    // identical `run_epoch` fold. runSolo moved the in-memory weights by one
+    // Rprop step (save_and_update -> update_weights), so re-seed to theta before
+    // grad_check snapshots + checks there.
+    let seam_norm: Vec<f64> = (0..dmat.nrows())
+        .map(|k| dmat[[k, 0]] / dmat[[k, 1]])
+        .collect();
+    cp.set_weights(0, &[seed_flat]).unwrap();
+    let reports = cp.grad_check(1e-5, 10).unwrap();
+    assert_eq!(reports.len(), 1, "one backprop-active net");
+    let (net_idx, report) = &reports[0];
+    assert_eq!(*net_idx, 0);
+    for (k, (backprop, _num, _diff)) in report.per_weight.iter().enumerate() {
+        assert_eq!(
+            seam_norm[k].to_bits(),
+            backprop.to_bits(),
+            "F10: seam normalized gradient[{k}] must bit-match grad_check's analytic backprop \
+             (both are the same run_epoch fold at theta)"
+        );
+    }
+}

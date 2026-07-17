@@ -3019,6 +3019,49 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   legacy-oracle record; unaffected by F9 (a different branch, no shared fixture), noted here
   since both are `create_batches` clobber-family fixes discovered/fixed one task apart.
 
+- **[phase5] The release seam returned an all-zero gradient -- the folded derivatives were
+  discarded (F10)** -- PORT-INTRODUCED, latent since Phase 4c; a translation-gap/latent-seam
+  bug in the class F9 belongs to, caught by the Task 10 exit-gate discovery
+  (`src/rust/src/engine/corpus_processor.rs::run_epoch` + `::weights_derivatives`). LEGACY
+  behavior has no analog: the legacy C++ `saveWeights` writes the folded derivatives to
+  `bestNNWeight_*.bin` and MATLAB reads them back, so the gradient always reached the
+  optimizer. The port's PyO3 seam is a NEW surface: `forward_backward` (`engine.py`) does
+  `set_weights -> run -> weights_derivatives(0)`, and the public `weights_derivatives(pos)`
+  delegated to the MAIN bag's per-segmenter accumulator. But under the R6 static-lane
+  determinism model (`run_epoch:355-442`), each lane CLONES the epoch-start bag, runs the
+  backward on the CLONE, and folds the per-file derivatives into a LOCAL `derivs: BTreeMap`
+  that `save_and_update_epoch` (Rprop) consumes and drops. The main bag's segmenters never
+  run backprop, so their accumulator stays at the `set_weights` reset state (col0 = 0, only
+  the normalize-tail counts present). The seam therefore returned an EXACTLY-ZERO gradient
+  for every weight, and the modern SMORMS3 loop moved nothing (`||trained - init|| = 0`):
+  the training foundation never trained. Invisible to every existing gate -- the seam-replay
+  determinism/finiteness pins are all trivially satisfied by a zero gradient, and `grad_check`
+  reads its OWN local `analytic_derivs` map (not the seam), so it was nonzero-correct the
+  whole time, masking the seam bug.
+  **FIX (phase 5, F10):** `run_epoch` now STASHES the folded `derivs` map on the processor
+  (`seam_derivs: BTreeMap<usize, Vec<Array2<f64>>>`) at the end of the fold, before
+  `save_and_update_epoch` consumes it; `weights_derivatives(pos)` returns the stash when
+  present (the deterministic ascending-lane reduction -- IDENTICAL to what `grad_check`'s
+  local map sees, by construction: same fold code), falling back to the bag only when no fold
+  has run. `set_weights` CLEARS the stash (a weights change invalidates the cached gradient,
+  so a set-without-run correctly falls back to the bag's reset state; the seam's own
+  set->run->read flow repopulates it in the intervening run, so this is invisible there).
+  Rust-side only: `engine.py` reads the derivatives back through the seam and never
+  reimplements the fold.
+  **RED / re-pin:** the always-missing pin. NEW Rust test
+  `src/rust/tests/phase4c_api.rs::weights_derivatives_nonzero_through_seam` -- a backprop-on
+  algo-4 corpus, Epochs 0 + Epsilon 0 (run_solo), asserts the seam returns a NONZERO col0 AND
+  that its normalized `col0/col1` bit-matches `grad_check`'s analytic backprop column (the
+  identity the F10 correctness claim rests on). NEW pyo3 pins
+  `tests/pyo3/test_seam_replay.py::test_forward_backward_returns_nonzero_gradient` and
+  `::test_forward_backward_smorms3_moves_weights` (a few SMORMS3 steps move the weights off
+  init). No golden re-pinned (this surface had no prior gradient assertion).
+  **Mutation (revert-the-fix):** with `weights_derivatives` reverted to the bare bag read, the
+  Rust test fails at "got all-zero col0" and the pyo3 `smorms3_moves_weights` fails with
+  `||trained-init||=0.0` -- the exact T10-diagnosed no-op. Reverted back.
+  **Oracle divergence:** none -- the seam is a port-only surface with no C++/Octave harness
+  counterpart (the legacy wrote derivs via a different mechanism); nothing regenerated.
+
 - **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
   `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
   shuffles every per-class index pool via the builtin `randperm`, which would make the
