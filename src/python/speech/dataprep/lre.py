@@ -167,15 +167,15 @@ def _wav_xml_pairs(train_audio_root: Path) -> tuple[list[tuple[Path, Path]], int
     """Pair each `*.wav` under `train_audio_root` with its `*.xml` sibling in the
     SAME directory, matched by "filename up to (not including) the first '.'" --
     observed naming (Task 2 audit): LRE03 wavs carry a `.MT1.mp1.wav` middle segment
-    the xml drops entirely (`ar_4240_a.MT1.mp1.wav` <-> `ar_4240_a.part.xml`), LRE07
-    wavs have no middle segment at all (`AE-001244-A-con.wav` <->
-    `AE-001244-A-con.part.xml`) -- both fall out of the SAME first-dot rule, so
+    the xml drops entirely (`xx_0001_a.MT1.mp1.wav` <-> `xx_0001_a.part.xml`), LRE07
+    wavs have no middle segment at all (`XX-000001-A-con.wav` <->
+    `XX-000001-A-con.part.xml`) -- both fall out of the SAME first-dot rule, so
     there is no need to hardcode the `.part.xml` suffix specifically (any same-stem
     `*.xml` sibling matches).
 
     Returns `(pairs, n_orphan_wav, n_orphan_xml)`: a wav with no matching xml, or an
-    xml with no matching wav (2 real cases in the archive:
-    `sp_4379_{a,b}.part.xml`), are EXCLUDED from `pairs` and counted separately --
+    xml with no matching wav (2 real cases in the archive, illustrative naming:
+    `xx_0099_{a,b}.part.xml`), are EXCLUDED from `pairs` and counted separately --
     never silently merged into a mismatched pair.
     """
 

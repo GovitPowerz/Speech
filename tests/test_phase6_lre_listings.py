@@ -246,13 +246,13 @@ def test_wav_xml_pairs_matches_by_first_dot_stem_and_counts_orphans(tmp_path: pa
 
 
 def test_wav_xml_pairs_no_middle_segment_naming_also_matches(tmp_path: pathlib.Path) -> None:
-    """LRE07-style naming (no `.MT1.mp1` middle segment): `AE-001244-A-con.wav` <->
-    `AE-001244-A-con.part.xml` -- the same first-dot rule as LRE03's naming."""
+    """LRE07-style naming (no `.MT1.mp1` middle segment): `XX-000001-A-con.wav` <->
+    `XX-000001-A-con.part.xml` -- the same first-dot rule as LRE03's naming."""
     root = tmp_path / "corpus_root"
     audio = root / "train" / "audio" / "LRE07"
     audio.mkdir(parents=True)
-    (audio / "AE-001244-A-con.wav").write_bytes(b"RIFF")
-    (audio / "AE-001244-A-con.part.xml").write_bytes(_toy_vrcts_xml())
+    (audio / "XX-000001-A-con.wav").write_bytes(b"RIFF")
+    (audio / "XX-000001-A-con.part.xml").write_bytes(_toy_vrcts_xml())
 
     pairs, n_orphan_wav, n_orphan_xml = _wav_xml_pairs(audio)
 
@@ -376,8 +376,8 @@ def test_derive_sad_listings_real_corpus(tmp_path: pathlib.Path) -> None:
     split = derive_sad_listings(CORPUS_ROOT, out_dir, seed=0)
 
     # Measured (Task 2 audit): 598 LRE03 + 1468 LRE07 wav/xml pairs, all matched;
-    # the only orphans are LRE03's 2 reference-only files (sp_4379_{a,b}.part.xml,
-    # no matching wav in the archive).
+    # the only orphans are LRE03's 2 reference-only files (illustrative naming:
+    # xx_0099_{a,b}.part.xml, no matching wav in the archive).
     assert split.n_total == 2066
     assert split.n_orphan_wav == 0
     assert split.n_orphan_xml == 2
