@@ -427,3 +427,71 @@ fn weights_derivatives_nonzero_through_seam() {
         );
     }
 }
+
+// === grad_check_restores_seam_derivs_invariant (F10 rider) ===================
+// gradCheck's perturbation sweep runs `run_epoch` per +/-eps step, and each of
+// those OVERWRITES the F10 `seam_derivs` stash with the fold at the PERTURBED
+// weights. The epilogue restores `self.processors` to the pre-sweep snapshot; it
+// must ALSO restore `seam_derivs`, or `weights_derivatives(0)` would return a
+// stale gradient at the last -eps perturbation while `weights(0)` reads the
+// restored theta -- an inconsistent seam observable through the PyO3 surface (a
+// `grad_check` call followed by `weights_derivatives`).
+//
+// Invariant: gradCheck is TRANSPARENT to the stash -- the seam gradient is
+// bit-identical before and after a `grad_check` call when the weights do not
+// change across it. Here `before` is the reset-bag fallback (no run() since
+// `set_weights` -> the accumulator's col0 is all-zero), so the non-vacuity check
+// (col0 all-zero) is exactly what a mutation (dropping the epilogue restore, which
+// leaves the nonzero last -eps perturbation fold) would violate.
+#[test]
+fn grad_check_restores_seam_derivs_invariant() {
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    seed_gradcheck(dir.path());
+    let cfg = load_config_at(&dir.path().join("tier2_gradcheck.config"));
+    let _cwd = CwdGuard::enter(dir.path());
+
+    let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::UnitTest)).unwrap();
+
+    // Seed the phase3 synth pattern so the sweep's perturbation folds are real
+    // (nonzero) -- that nonzero fold is exactly what would pollute the stash if the
+    // epilogue restore were missing.
+    let seed = load_bin_phase4a("tier2_gradcheck_seed.bin");
+    let nb = cp.weights(0)[0].len();
+    let seed_flat: Vec<f64> = (0..nb).map(|k| seed[[k, 0]]).collect();
+    cp.set_weights(0, std::slice::from_ref(&seed_flat)).unwrap();
+
+    // The seam BEFORE gradCheck: no run() since set_weights, so the stash is empty
+    // and `weights_derivatives` falls back to the bag's reset accumulator (col0 = 0).
+    let before = cp.weights_derivatives(0);
+    let reports = cp.grad_check(1e-5, 5).unwrap();
+    assert_eq!(reports.len(), 1, "one backprop-active net");
+    let after = cp.weights_derivatives(0);
+
+    // Invariant: the weights are unchanged across the gradCheck, so the seam
+    // gradient must be too -- gradCheck restored the stash it found.
+    assert_eq!(before.len(), after.len(), "same net count across gradCheck");
+    for (b, a) in before.iter().zip(after.iter()) {
+        assert_eq!(b.dim(), a.dim(), "same derivative matrix shape");
+        for (bv, av) in b.iter().zip(a.iter()) {
+            assert_eq!(
+                bv.to_bits(),
+                av.to_bits(),
+                "gradCheck must leave weights_derivatives bit-identical for unchanged weights \
+                 (the epilogue must restore seam_derivs, not leave the last -eps perturbation)"
+            );
+        }
+    }
+
+    // Non-vacuity: `after` IS the reset-bag fallback (col0 all-zero), the consistent
+    // state for these unchanged-and-unrun weights -- so a mutation leaving the
+    // nonzero last -eps perturbation fold is detectable, not silently absorbed.
+    let col0_nonzero = (0..after[0].nrows())
+        .filter(|&k| after[0][[k, 0]] != 0.0)
+        .count();
+    assert_eq!(
+        col0_nonzero, 0,
+        "unchanged, unrun weights -> the seam falls back to the reset bag (col0 all zero); a \
+         nonzero col0 would mean gradCheck left a stale perturbation gradient"
+    );
+}

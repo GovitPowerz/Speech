@@ -701,6 +701,13 @@ impl CorpusProcessor {
     ) -> Result<Vec<(usize, GradCheckReport)>> {
         // legacy: :238 snapshot the WHOLE bag.
         let proc_mem = self.processors.clone();
+        // F10 (phase 5): snapshot the folded-gradient stash alongside the bag. The
+        // perturbation sweep below runs `run_epoch` per +/-eps step, and each of those
+        // OVERWRITES `self.seam_derivs` with the fold at the PERTURBED weights -- so
+        // without restoring it, gradCheck would leave the seam returning a gradient at
+        // the last -eps point while `weights(0)` reads the restored theta. Restored at
+        // the epilogue so gradCheck is transparent to the seam invariant.
+        let seam_mem = self.seam_derivs.clone();
         let nb = self.processors.nb_of_conf();
         // legacy: :239-242 zero the four mem matrices to 1 x nConfs.
         self.cost_mem = Array2::zeros((1, nb));
@@ -794,6 +801,11 @@ impl CorpusProcessor {
         // no legacy counterpart (legacy leaves _Processors perturbed) -- unobservable
         // since gradCheck is terminal in run().
         self.processors = proc_mem;
+        // F10 (phase 5): restore the folded-gradient stash the sweep clobbered, so the
+        // seam invariant holds -- `weights_derivatives(0)` matches the restored
+        // `weights(0)`, not a stale gradient at the last -eps perturbation. Observable
+        // through the PyO3 seam (a `grad_check` call followed by `weights_derivatives`).
+        self.seam_derivs = seam_mem;
 
         Ok(reports)
     }
