@@ -27,11 +27,14 @@ import pytest
 from speech.drivers.init import init_run
 from speech.drivers.train import (
     _HYPERPARAM_PENALTY,
-    score_genome,
+    _chdir,
+    _eval_config_text,
+    _ponderations,
     score_hyperparam_genome,
     train,
     train_hyperparam_search,
 )
+from speech.engine import forward_backward
 from speech.genome import genome_length, weight_block_mask
 
 speech_rs = pytest.importorskip("speech_rs")
@@ -173,15 +176,26 @@ def test_full_train_loop_deterministic(tmp_path_factory: pytest.TempPathFactory)
     assert inner_hist.size >= 4 and np.isfinite(inner_hist).all(), "the SMORMS3 inner loop (>=4 steps) must run + record finite costs"
 
 
-def test_genome_ponderation_moves_cost(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """The genome->engine non-vacuity pin. The exit gate's determinism claim is only
-    meaningful if the genome's decoded `CostPonderation` fields (`train.py`'s
-    `_eval_config_text` injection) actually move the engine cost -- otherwise QPSO would
-    be exploring a flat cost surface. Scores the SAME seeded twin state (via
-    `score_genome`, the `cost_fn` per-candidate body, no inner SMORMS3 refinement) at two
-    well-separated random genomes and asserts a healthy cost delta. No exact float is
-    pinned (libm-robust, no canary machinery)."""
-    tmp = tmp_path_factory.mktemp("genome_cost")
+def test_genome_ponderation_moves_gradient(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The genome->engine non-vacuity pin, F11-corrected (was `test_genome_ponderation_moves_cost`).
+
+    The exit gate's determinism claim is only meaningful if the genome's decoded
+    `CostPonderation` fields (`train.py`'s `_eval_config_text` injection) actually move the
+    engine. F11 (phase 5) makes the single-eval `Epochs 0` (run_solo, forward-only scoring at
+    the fixed base weights), which exposes the true role of the CostPonderation: it is a
+    BACKWARD / cost-law WEIGHTING knob, NOT a forward-scoring knob. It does NOT move the
+    forward-scoring cost on these fixtures -- balance-5 mode-0 zeroes the `nn_cost_seg` term
+    and balance-10 scores the (ponderation-invariant) LID calibration columns -- so the old
+    `score_genome` cost-delta assertion is invalid: it only ever passed via the pre-F11
+    `Epochs 1` misroute that trained each candidate 3 folds + 2 Rprop before scoring.
+
+    The ponderation's real, robust, non-vacuous effect is on the GRADIENT
+    (`ponderate_weights_derivatives` scales col0 -- the summed derivative -- but NOT the col1
+    frame count, so `col0/col1` moves with it), which is what drives the inner SMORMS3 that
+    the exit gate's final BackPropagation runs. Two well-separated ponderation genomes ->
+    robustly different LID gradients at the same theta. No exact float is pinned (libm-robust,
+    no canary machinery)."""
+    tmp = tmp_path_factory.mktemp("genome_grad")
     config = _seed_twin_train(tmp)
     state = init_run(config, tmp / "run")
     workdir = Path(state.config_path).parent
@@ -190,13 +204,23 @@ def test_genome_ponderation_moves_cost(tmp_path_factory: pytest.TempPathFactory)
     genome_a = np.random.default_rng(1).uniform(0.0, state.ps.adim, size=d)
     genome_b = np.random.default_rng(2).uniform(0.0, state.ps.adim, size=d)
 
-    cost_a, _ = score_genome(state, genome_a, None, workdir)
-    cost_b, _ = score_genome(state, genome_b, None, workdir)
+    def _lid_gradient(genome: np.ndarray) -> np.ndarray:
+        ponds, _ = _ponderations(genome, None, state)
+        with _chdir(workdir):
+            (workdir / "_pond_eval.config").write_text(_eval_config_text(state.base_config, ponds, state.ps.algo))
+            eng = speech_rs.Engine(["_pond_eval.config"], "-m")
+            theta = [np.asarray(w, dtype=np.float64) for w in eng.weights(0)]
+            _f, grads = forward_backward(eng, theta, None)
+        assert len(grads) == 2, "twin -> [sad, lid] gradients"
+        return np.asarray(grads[1], dtype=np.float64)
 
-    assert np.isfinite(cost_a), f"cost_a is not finite: {cost_a}"
-    assert np.isfinite(cost_b), f"cost_b is not finite: {cost_b}"
-    assert abs(cost_a - cost_b) > 1e-3, (
-        f"distinct genomes decoded to near-identical costs ({cost_a} vs {cost_b}) -- the CostPonderation genome injection may be vacuous"
+    grad_a = _lid_gradient(genome_a)
+    grad_b = _lid_gradient(genome_b)
+
+    assert np.isfinite(grad_a).all() and np.isfinite(grad_b).all(), "gradients must be finite"
+    lid_delta = float(np.linalg.norm(grad_a - grad_b))
+    assert lid_delta > 1e-2, (
+        f"distinct ponderation genomes produced near-identical LID gradients (delta {lid_delta}) -- the CostPonderation genome injection may be vacuous"
     )
 
 

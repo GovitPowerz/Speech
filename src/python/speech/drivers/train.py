@@ -81,10 +81,22 @@ def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
 
 def _eval_config_text(base: dict[str, str], ponds: list[str], algo: int, fileslisting: str | None = None) -> str:
     """The committed base config with the genome's `CostPonderation` field(s) injected and
-    BackPropagation forced on for a single-eval gradient (`Epochs 1`) -- the T9 single-eval
-    semantics so `Engine.run()` is one forward/backward the Python loop owns. Only the algo-6
-    Twin gets the `BLSTM_LID_*` injection; a single-net config's LID side is never touched
-    (`BackPropagation.m` never builds the LID cell for algo != 6).
+    BackPropagation forced on for a single-eval gradient (`Epochs 0`) -- the F11 single-eval
+    semantics so `Engine.run()` is ONE forward/backward at the input theta that the Python
+    loop owns. Only the algo-6 Twin gets the `BLSTM_LID_*` injection; a single-net config's
+    LID side is never touched (`BackPropagation.m` never builds the LID cell for algo != 6).
+
+    F11 (phase 5): `Epochs 0`, not `1`. `Epochs >= 1` routes `Engine.run()` through the
+    engine-internal `train()` (3 folds + 2 Rprop updates), so the seam's cost/gradient are
+    measured at engine-MOVED weights, not the input theta -- a 4c misroute. `Epochs 0` takes
+    the `run_solo` path (one fold at theta; backprop is gated on `BackPropagationActivated`,
+    not on Epochs, so the fold still harvests the gradient into the F10 seam stash). This
+    matches the LEGACY: `ComputeGradient.m -> CostFunction.m -> ComputeCost.m` shells `fsp`
+    with the base config's `Neural_Networks_BackPropagation_Epochs` UNCHANGED, and the real
+    production `1_worker_1.config` has NO such key (default 0), so the legacy `fsp` ran
+    `runSolo` per gradient call -- the inner Rprop loop lived in MATLAB
+    (`CostFunction.m:248-291`), re-shelling `fsp` per step, exactly as this port's
+    `_backprop_inner` owns the inner SMORMS3 loop. See IMPROVEMENTS.md `[phase5] F11`.
 
     `fileslisting` (Phase 4d Task 10): when given, overrides the corpus listing key so the
     engine folds over the per-step batch listing instead of the committed full corpus -- the
@@ -96,7 +108,7 @@ def _eval_config_text(base: dict[str, str], ponds: list[str], algo: int, filesli
     if algo == 6:
         cfg["BLSTM_LID_BackPropagationActivated"] = "true"
         cfg["BLSTM_LID_CostPonderation"] = ponds[1]
-    cfg["Neural_Networks_BackPropagation_Epochs"] = "1"
+    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
     if fileslisting is not None:
         cfg["fileslisting"] = fileslisting
     return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
@@ -613,18 +625,26 @@ def _init_weights_from_scratch(state: RunState, params: ModernTrainParams) -> li
 
 
 def _modern_config_text(base: dict[str, str], algo: int, *, backprop: bool, fileslisting: str | None = None) -> str:
-    """The base config with backprop toggled (both nets) -- `Epochs 1` when ON (one
-    forward/backward the Python loop owns), `Epochs 0` when OFF (a pure forward scoring
-    pass; the backprop flag gates only the gradient, so `engine.run()` still fills the
-    MultiConfigResults cost columns for validation). UNLIKE `_eval_config_text`, this does
-    NOT inject `CostPonderation` -- the modern loop has no genome, so the config's own cost
-    law stands (or the engine's default when the key is absent)."""
+    """The base config with backprop toggled (both nets) -- ALWAYS `Epochs 0`, whether
+    backprop is ON (one forward/backward at theta the Python SMORMS3 loop owns; the fold
+    harvests the gradient into the F10 seam stash) or OFF (a pure forward scoring pass for
+    validation). The `BackPropagationActivated` flag -- NOT Epochs -- gates whether the fold
+    computes a gradient, so `engine.run()` fills the MultiConfigResults cost columns either
+    way. UNLIKE `_eval_config_text`, this does NOT inject `CostPonderation` -- the modern
+    loop has no genome, so the config's own cost law stands (or the engine's default when the
+    key is absent).
+
+    F11 (phase 5): `Epochs 0`, not `1`, for the backprop-ON case. `Epochs >= 1` routes
+    `run()` through the engine-internal `train()` (3 folds + 2 Rprop), so `forward_backward`
+    reported cost/gradient at engine-moved weights, not the input theta -- the modern loop
+    then trained on a wrongly-anchored gradient (T10 discovery). See IMPROVEMENTS.md
+    `[phase5] F11`."""
     cfg = dict(base)
     flag = "true" if backprop else "false"
     cfg["BLSTM_BackPropagationActivated"] = flag
     if algo == 6:
         cfg["BLSTM_LID_BackPropagationActivated"] = flag
-    cfg["Neural_Networks_BackPropagation_Epochs"] = "1" if backprop else "0"
+    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
     if fileslisting is not None:
         cfg["fileslisting"] = fileslisting
     return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"

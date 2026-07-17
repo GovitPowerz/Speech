@@ -3062,6 +3062,55 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   **Oracle divergence:** none -- the seam is a port-only surface with no C++/Octave harness
   counterpart (the legacy wrote derivs via a different mechanism); nothing regenerated.
 
+- **[phase5] Single-eval gradient routed through the engine-internal `train()` -- Epochs=1
+  was a 4c misroute (F11)** -- PORT-INTRODUCED, latent since Phase 4c
+  (`src/python/speech/drivers/train.py::_modern_config_text`, `::_eval_config_text`). LEGACY
+  behavior: the optimizer computes the gradient at theta by shelling `fsp` once per gradient
+  eval (`ComputeGradient.m -> CostFunction.m -> ComputeCost.m`), with the inner Rprop loop
+  living in MATLAB (`CostFunction.m:248-291` re-shells `fsp` per Rprop step). `ComputeCost.m`
+  writes the config via `vec2struct/printConfig` with the base config's
+  `Neural_Networks_BackPropagation_Epochs` UNCHANGED, and the real production
+  `1_worker_1.config` has NEITHER `Neural_Networks_BackPropagation_Epochs` NOR
+  `Neural_Networks_Gradient_Check_Epsilon` (both default 0 in the C++ ctor,
+  `CorpusProcessor.cpp:60-63`), so `fsp` dispatched to `runSolo()` -- a SINGLE fold at theta.
+  The port's own architecture mirrors this: `_backprop_inner` owns the inner SMORMS3 loop, so
+  each `forward_backward` must be one fold at theta. But the 4c config builders set
+  `Neural_Networks_BackPropagation_Epochs = 1`, which the SAME C++ dispatch
+  (`corpus_processor.rs::run` mirrors `CorpusProcessor.cpp:114-135`) routes through `train()`
+  (epoch-0 solo + inner epoch + final eval = 3 folds, with 2 internal Rprop updates between
+  them). So `forward_backward`'s reported cost and (post-F10) stashed gradient were measured
+  at engine-INTERNALLY-Rprop-moved weights, not the input theta the outer SMORMS3 owns
+  (measured on the SAD fixture: Epochs=1 f=0.1278 at moved weights vs Epochs=0 f=0.3474 at
+  theta). Adjudicated at the legacy source: the legacy ran a SINGLE eval (runSolo), so
+  Epochs=1 was a 4c misroute, fixed in BOTH builders (not "faithful-and-kept").
+  **FIX (phase 5, F11):** `_modern_config_text` and `_eval_config_text` emit
+  `Neural_Networks_BackPropagation_Epochs = 0`. `Epochs 0` -> `run_solo` (one fold at theta);
+  backprop is gated on `BackPropagationActivated`, not Epochs, so the fold still harvests the
+  gradient into the F10 stash. Combined with F10, from-scratch SAD training now converges
+  (cost-at-theta 0.348 -> ~0.300 in ~8 SMORMS3 steps, then overshoots as SMORMS3 is expected
+  to past the minimum).
+  **RED / re-pin:** the config-text pins in
+  `tests/test_phase4d_algo3_drivers.py` (`test_eval_config_text_algo{3,6}_*` now assert
+  `Epochs 0`; new `test_config_texts_single_eval_are_epochs_zero_f11` covers both builders,
+  backprop ON and OFF); the `test_forward_backward_smorms3_moves_weights` pin depends on the
+  theta-anchored gradient (F11) to actually move. `tests/pyo3/test_seam_replay.py`'s
+  `_seed_tier2_single_epoch` helper flipped from Epochs 1 to 0 (its name is now accurate).
+  RE-PINS: the 4c exit-gate determinism tests (`test_exit_gate.py`,
+  `test_phase5_train_modern_smoke.py`) SHIFT values but stay deterministic (they assert
+  run-twice bit-identity, not absolute bytes) -- re-verified green, no hardcoded value
+  changed. `test_genome_ponderation_moves_cost` BROKE and was re-derived: under forward-only
+  Epochs-0 scoring the `CostPonderation` is a BACKWARD/cost-law weighting knob that does NOT
+  move the forward-scoring cost (balance-5 mode-0 zeroes `nn_cost_seg`; balance-10 scores the
+  ponderation-invariant LID calibration columns -- the old cost-delta only existed via the
+  Epochs=1 training misroute). Re-pinned as `test_genome_ponderation_moves_gradient`: the
+  ponderation robustly moves the LID gradient (`ponderate_weights_derivatives` scales col0,
+  not col1; measured LID-gradient delta 0.42 between two genomes vs 0.0 forward-cost delta).
+  **Mutation (revert-the-fix):** reverting either builder to `Epochs 1` makes the config
+  pins fail and re-introduces the moved-weights cost anchor; `_seed_tier2_single_epoch` at
+  Epochs 1 leaves `smorms3_moves_weights` green (the fold still runs) but at the wrong theta.
+  **Oracle divergence:** none -- the config-text builders are port-only orchestration
+  (the legacy wrote its config via `printConfig`); nothing regenerated.
+
 - **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
   `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
   shuffles every per-class index pool via the builtin `randperm`, which would make the

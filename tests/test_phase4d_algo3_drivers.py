@@ -129,6 +129,9 @@ def test_eval_config_text_algo3_no_lid_keys() -> None:
     lines = dict(line.split(" ", 1) for line in text.strip().splitlines() if " " in line)
     assert lines["BLSTM_CostPonderation"] == "0.5"
     assert lines["BLSTM_BackPropagationActivated"] == "true"
+    # F11: a single-eval gradient is Epochs 0 (run_solo, one fold at theta), NOT the
+    # engine-internal train() that Epochs >= 1 routes to.
+    assert lines["Neural_Networks_BackPropagation_Epochs"] == "0"
     assert "BLSTM_LID_CostPonderation" not in lines
     assert "BLSTM_LID_BackPropagationActivated" not in lines
 
@@ -141,3 +144,29 @@ def test_eval_config_text_algo6_injects_lid() -> None:
     assert lines["BLSTM_CostPonderation"] == "0.5"
     assert lines["BLSTM_LID_CostPonderation"] == "0.7"
     assert lines["BLSTM_LID_BackPropagationActivated"] == "true"
+    assert lines["Neural_Networks_BackPropagation_Epochs"] == "0"  # F11
+
+
+def test_config_texts_single_eval_are_epochs_zero_f11() -> None:
+    """F11 (phase 5): BOTH single-eval config builders emit `Epochs 0`, so `Engine.run()`
+    is one forward/backward at the input theta (run_solo), NOT the engine-internal `train()`
+    (3 folds + 2 Rprop) that `Epochs >= 1` routes to and that measured cost/gradient at
+    engine-moved weights (the T10 misroute). Covers `_eval_config_text` (legacy-regime,
+    backprop always on) AND `_modern_config_text` (both backprop ON and OFF)."""
+    base = _cfg(ALGO3_CONFIG)
+
+    def _epochs(text: str) -> str:
+        lines = dict(line.split(" ", 1) for line in text.strip().splitlines() if " " in line)
+        return lines["Neural_Networks_BackPropagation_Epochs"]
+
+    assert _epochs(T._eval_config_text(base, ["0.5"], 3)) == "0"
+    # modern loop: backprop ON (a gradient eval) and OFF (validation) are BOTH run_solo.
+    on = T._modern_config_text(base, 3, backprop=True)
+    off = T._modern_config_text(base, 3, backprop=False)
+    assert _epochs(on) == "0"
+    assert _epochs(off) == "0"
+    # non-vacuity: the backprop flag still differs (only Epochs is pinned to 0).
+    on_lines = dict(line.split(" ", 1) for line in on.strip().splitlines() if " " in line)
+    off_lines = dict(line.split(" ", 1) for line in off.strip().splitlines() if " " in line)
+    assert on_lines["BLSTM_BackPropagationActivated"] == "true"
+    assert off_lines["BLSTM_BackPropagationActivated"] == "false"
