@@ -1,0 +1,85 @@
+{
+  "name": "03_nonspeech_classes",
+  "description": "NS/NT/RS/RX all merge into one nonspeech region [1,5]; a hyp that calls the whole middle speech makes pfa (and its denominator) sensitive to every one of those four kinds being treated as non-speech.",
+  "ref": [
+    [
+      0.0,
+      1.0,
+      "S"
+    ],
+    [
+      1.0,
+      2.0,
+      "NS"
+    ],
+    [
+      2.0,
+      3.0,
+      "NT"
+    ],
+    [
+      3.0,
+      4.0,
+      "RS"
+    ],
+    [
+      4.0,
+      5.0,
+      "RX"
+    ],
+    [
+      5.0,
+      6.0,
+      "S"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      0.5,
+      "non-speech"
+    ],
+    [
+      0.5,
+      5.5,
+      "speech"
+    ],
+    [
+      5.5,
+      6.0,
+      "non-speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.5,
+      "pfa": 1.0,
+      "dcf": 0.625
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.5,
+      "pfa": 1.0,
+      "dcf": 0.625
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.5,
+      "pfa": 1.0,
+      "dcf": 0.625
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.5,
+      "pfa": 1.0,
+      "dcf": 0.625
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.5,
+      "pfa": 0.0,
+      "dcf": 0.375
+    }
+  ]
+}

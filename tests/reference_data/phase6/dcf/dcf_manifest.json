@@ -1,0 +1,72 @@
+{
+  "text": "Phase 6 Task 4: live value-oracle for the DCF SAD scorer. Each <case>.json is the REAL vendored NIST scoreFile_SAD.pl (v2.1) run over the crafted ref/hyp intervals via /usr/bin/perl through tools/perl_oracle/run_sad_scorer.sh (never modifies the read-only legacy tree), with the five per-collar Prob_Miss / Prob_FalseAlarm / DCF values parsed from its STDOUT at the scorer's printed 5-decimal precision. src/python/speech/evaluate.py::dcf is pinned value-for-value against these; each case is scored twice per extraction to confirm determinism. Column convention is ComputeDCF.py's (-s 2 -e 3 -g 4 -t 5 -f 6 -u 7).",
+  "perl_bin": "/usr/bin/perl",
+  "perl_version": "v5.34.1",
+  "scorer": "FastSpeechProcessing-legacy/Optimizer_V6.2.2/scoreFile_SAD.pl",
+  "runner": "tools/perl_oracle/run_sad_scorer.sh",
+  "collar_sizes": [
+    0.0,
+    0.25,
+    0.5,
+    1.0,
+    2.0
+  ],
+  "cases": {
+    "01_plain_overlap": {
+      "sha256": "0c1eb9a1a86b20b2b5247eb7fe24ca34bbc03d93b81d68f751a9f4b738a3f017",
+      "bytes": 1002
+    },
+    "02_ri_counts_as_speech": {
+      "sha256": "fcd7f4628fbb59d1d82cbe9274c6a4de3d800b57695dbf603664a29bd8776e08",
+      "bytes": 1036
+    },
+    "03_nonspeech_classes": {
+      "sha256": "d5f1ea7e2924dc335095f6fbb46242030cfcca06265a6e6112ce1024c51e641b",
+      "bytes": 1194
+    },
+    "04_collar_boundary_fp": {
+      "sha256": "4449c8915efbfed05b03f8ab31998d51ce76f727ce88ca2c0925e7730d38ebac",
+      "bytes": 1210
+    },
+    "05_all_speech_perfect": {
+      "sha256": "daa17f93bcb1fcf857e29e290597d1acb8eed9b644a2e80c0267ac7ca6a7526b",
+      "bytes": 833
+    },
+    "06_all_speech_miss": {
+      "sha256": "e166a09d288edaf1c442e99722dadfd8560c864a177f140c601ab523e6b55b39",
+      "bytes": 862
+    },
+    "07_all_nonspeech_perfect": {
+      "sha256": "d226dd6db278532160f55cd319bbaa9ab0dbd32bb3db3a5cba8edd42e88e4ee3",
+      "bytes": 882
+    },
+    "08_all_nonspeech_fp": {
+      "sha256": "e1d07424e2c975a0d0e914565c408d6293b0e49500e4cb15dd28c9bd78b99b8d",
+      "bytes": 953
+    },
+    "09_sub_collar_micro": {
+      "sha256": "e03a30752c9a39b650e4d6cc0df8cbea02a365c7caa758c3dc724f531a398d5b",
+      "bytes": 996
+    },
+    "10_hyp_shorter_pad": {
+      "sha256": "6695a362f4dcf448cfaeb26859a1b65d8298e092482ab897f4d34a92d01b609f",
+      "bytes": 828
+    },
+    "11_hyp_longer_truncate": {
+      "sha256": "9562b67994cea9ebbbf516bc621b9027aab5eafc70081d3681287bf3fa0b3457",
+      "bytes": 1000
+    },
+    "12_ref_starts_late_exnihilate": {
+      "sha256": "063c9a0b62dff2801cece29330ec803db0691c270a260506cb719a57dead499f",
+      "bytes": 1010
+    },
+    "13_exact_threshold_boundary": {
+      "sha256": "c69f1d1c6aa6749fe70220ff261436f3937a1002fd5419d51c7c27c48c5e21d1",
+      "bytes": 1053
+    },
+    "14_all_collar_dcf_zero": {
+      "sha256": "f8099a693bba7010c17e931987813a0a87fae7f0efa0720ff2d456f8c9d18604",
+      "bytes": 892
+    }
+  }
+}

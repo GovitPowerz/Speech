@@ -1,0 +1,60 @@
+{
+  "name": "09_sub_collar_micro",
+  "description": "A 0.3s interior nonspeech island -- below every interior collar threshold (smallest is 2*0.25+0.1=0.6) -- so it is wholly a collar (excluded) for all four nonzero collars; only the no-collar pass scores it (pfa 1.0 there). Sub-collar micro-segment coverage.",
+  "ref": [
+    [
+      0.0,
+      2.0,
+      "S"
+    ],
+    [
+      2.0,
+      2.3,
+      "NS"
+    ],
+    [
+      2.3,
+      5.0,
+      "S"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      5.0,
+      "speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 1.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    }
+  ]
+}

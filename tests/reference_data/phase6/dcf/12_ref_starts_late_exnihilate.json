@@ -1,0 +1,55 @@
+{
+  "name": "12_ref_starts_late_exnihilate",
+  "description": "Ref first seg starts at 1.0 (> 0): the scorer exnihilates a leading NonSpeech [0,1] (:89-95). That fabricated seg then drives the leading collar carve, and the trailing NonSpeech [3,5] drives an interior carve -- a hyp of all-speech makes both nonspeech regions FP so the collar denominators are visible.",
+  "ref": [
+    [
+      1.0,
+      3.0,
+      "S"
+    ],
+    [
+      3.0,
+      5.0,
+      "NS"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      5.0,
+      "speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 1.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 1.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 1.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "name": "05_all_speech_perfect",
+  "description": "Degenerate all-speech ref, perfectly hypothesized: nonspeech sum == 0 (pfa zero-guard) and FN == 0, so every collar is 0/0/0 -- the v2.1 zero-not-NaN semantics on the speech-only side.",
+  "ref": [
+    [
+      0.0,
+      6.0,
+      "S"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      6.0,
+      "speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    }
+  ]
+}

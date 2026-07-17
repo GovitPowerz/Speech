@@ -1,0 +1,65 @@
+{
+  "name": "02_ri_counts_as_speech",
+  "description": "RI merges into the speech region (S then RI -> speech [0,2]); a partial-hit hyp makes pmiss/pfa sensitive to the RI classification (RI-as-nonspeech would flip the 0.5s of FN into 0.5s of FP with a different denominator).",
+  "ref": [
+    [
+      0.0,
+      1.0,
+      "S"
+    ],
+    [
+      1.0,
+      2.0,
+      "RI"
+    ],
+    [
+      2.0,
+      4.0,
+      "NS"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      1.5,
+      "speech"
+    ],
+    [
+      1.5,
+      4.0,
+      "non-speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    }
+  ]
+}

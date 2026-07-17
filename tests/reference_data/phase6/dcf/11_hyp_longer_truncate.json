@@ -1,0 +1,65 @@
+{
+  "name": "11_hyp_longer_truncate",
+  "description": "Hyp runs to 6.0 but the ref ends at 4.0: the scorer pops the fully-past-refEnd trailing Speech seg (:381-383) and the scoring sweep bounds the rest at refEnd, so the [4,6] hyp tail never scores.",
+  "ref": [
+    [
+      0.0,
+      2.0,
+      "S"
+    ],
+    [
+      2.0,
+      4.0,
+      "NS"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      3.0,
+      "speech"
+    ],
+    [
+      3.0,
+      4.5,
+      "non-speech"
+    ],
+    [
+      4.5,
+      6.0,
+      "speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 0.5,
+      "dcf": 0.125
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 0.5,
+      "dcf": 0.125
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 0.5,
+      "dcf": 0.125
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    }
+  ]
+}
