@@ -3111,6 +3111,45 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   **Oracle divergence:** none -- the config-text builders are port-only orchestration
   (the legacy wrote its config via `printConfig`); nothing regenerated.
 
+- **[phase5] The Twin's from-scratch CONVERGENCE gate is DEFERRED to Phase 6; Phase 5 ships a
+  MECHANICAL twin gate only (Task 10, user-ratified 2026-07-16)** -- a SPEC DEVIATION from the
+  original Task 10 brief's dual-head convergence gate, not a fix flip.
+  **Why the twin convergence gate is unsatisfiable on the committed data:** the committed Twin
+  corpora hold exactly ONE file per language (the Mode-7 `twin_train` phSeq corpus is `s1`
+  eng/us + `s2` vie/vie; the Mode-5 `twin_gradcheck` corpus is a single vie/vie wav). Gate (b)
+  of the exit-gate contract (spec S1.7) requires the trained model to beat the untrained init
+  on a HELD-OUT file of the SAME distribution, but any disjoint train/held-out split of a
+  1-file-per-language corpus trains on one language and validates on a DIFFERENT one -- asking a
+  2-class LID net to generalize from one example of one language to a held-out example of the
+  OTHER is structurally impossible (measured in the T10 discovery: held-out 0.48509 -> 0.49546,
+  i.e. WORSE). Gate (a) is also near-vacuous for the Twin: the one-hot phSeq input + tiny net
+  drives near-saturated posteriors and a near-zero init train cost (~0.046), so the train-cost
+  improvement over a bounded run is a negligible ~2% (0.04640 -> 0.04540), well below any honest
+  margin. Neither is a foundation defect -- both engine bugs the discovery surfaced (F10 zero
+  gradient, F11 Epochs misroute) are FIXED, and nonzero per-net gradients demonstrably flow --
+  they are a CORPUS limitation that a real >= 2-file-per-language corpus (Phase 6) resolves.
+  **User ratification (2026-07-16):** SAD carries the FULL convergence gate (`test_from_scratch
+  _sad_converges` -- (a) train convergence, (b) held-out generalization on the 2-file tier-2
+  spectral corpus where the held-out language DOES appear in training, (c) determinism); the
+  Twin keeps a MECHANICAL gate only. `test_from_scratch_twin_mechanical` asserts, from a
+  seeded He init through the modern loop's `_backprop_inner` core, that BOTH nets receive a
+  nonzero gradient, BOTH nets' weights move off init, and the run is bit-deterministic -- the
+  foundation the Phase 6 convergence gate will ride, minus the convergence claim itself.
+  **Fixture choice (Mode 5, not Mode 7):** the mechanical gate uses `twin_gradcheck.config`
+  (Mode 5, both nets `BackPropagationActivated true`), NOT `twin_train.config` (Mode 7, which
+  ships `BLSTM_BackPropagationActivated false` -- the SAD net is a frozen feature extractor
+  feeding the LID net and takes NO gradient, measured 0/537 nonzero even when the flag is
+  forced on, so a "both nets move" gate is impossible on it). The config's `Gradient_Check_
+  Epsilon` is overridden to 0 so `run()` takes the run_solo fold path, not gradCheck.
+  **Discrimination:** the mechanical gate fails under the F10 mutation (revert `weights_
+  derivatives` to the bare bag read) -- `forward_backward` then returns an all-zero gradient
+  for both nets (the nonzero-gradient assert fails) and `_backprop_inner` moves nothing
+  (`||trained-init|| == 0`, the movement assert fails), the exact pre-F10 no-op the T10
+  discovery diagnosed. **Oracle divergence:** none -- the twin gate is a port-only from-scratch
+  training contract (the legacy trained the twin via `saveWeights`/Rprop to `.bin`, a different
+  mechanism the harness does not model); nothing regenerated. **Phase 6 pointer:** re-attach the
+  twin convergence gate once LRE03/07 (or a sourced SAD corpus) supplies >= 2 files per language.
+
 - **[phase4c] Octave-compat: `randperm` shadowed with a fixed reverse permutation for the
   `batching` stage** (`tools/octave_harness/batching_shadow/randperm.m`). `CreateBatches.m`
   shuffles every per-class index pool via the builtin `randperm`, which would make the

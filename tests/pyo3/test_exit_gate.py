@@ -14,6 +14,14 @@ This is the phase's end-to-end determinism contract; per-value legacy parity is
 NOT the target for the optimizer path (impossible in principle -- S1 determinism
 deviation).
 
+Phase 5 Task 10 adds the FROM-SCRATCH exit gates (bottom of the file):
+`test_from_scratch_sad_converges` (the full (a) convergence / (b) held-out / (c)
+determinism gate, anchored on the modern loop's SMORMS3-over-`forward_backward`
+core), `test_from_scratch_twin_mechanical` (the user-ratified REDUCED twin gate --
+nonzero gradients + weight movement + determinism for BOTH nets; the Twin's
+CONVERGENCE gate is deferred to Phase 6, see IMPROVEMENTS.md), and
+`test_early_stop_triggers` (the real-path plateau early-stop).
+
 Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-pyo3 job.
 """
 
@@ -21,21 +29,31 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
+from speech.config_bridge import nnet_spec
 from speech.drivers.init import init_run
+from speech.drivers.state import ModernTrainParams
 from speech.drivers.train import (
     _HYPERPARAM_PENALTY,
+    _backprop_inner,
     _chdir,
     _eval_config_text,
+    _modern_config_text,
     _ponderations,
+    _tail_lengths,
     score_hyperparam_genome,
     train,
     train_hyperparam_search,
+    train_modern,
 )
 from speech.engine import forward_backward
 from speech.genome import genome_length, weight_block_mask
+from speech.init_weights import init_weights
+from speech.optimizers import Smorms3
 
 speech_rs = pytest.importorskip("speech_rs")
 
@@ -301,3 +319,240 @@ def test_hyperparam_search_runs_and_is_deterministic(tmp_path_factory: pytest.Te
     gbest = np.frombuffer(a["gbest.bin"], dtype="<f8")[2:]  # skip the (rows, cols) header
     assert gbest.size == n_search, f"gbest must be the narrowed genome ({gbest.size} != {n_search})"
     assert np.isfinite(gbestval_a) and gbestval_a < _HYPERPARAM_PENALTY, f"the search must find a valid (non-penalty) gbest, got {gbestval_a}"
+
+
+# ---- Phase 5 Task 10: the from-scratch exit gates ---------------------------------------
+#
+# The dual-head convergence adjudication (user-ratified, 2026-07-16): SAD carries the FULL
+# convergence gate; the Twin's CONVERGENCE gate is DEFERRED to Phase 6, so the Twin keeps a
+# MECHANICAL gate only. The Twin's committed corpus is 1 file per language, so any disjoint
+# train/held-out split puts a DIFFERENT language in the held-out than in training -- LID
+# generalization is structurally unsatisfiable on it -- and the near-saturated tiny net's train
+# improvement is a negligible ~2%. See IMPROVEMENTS.md `[phase5]` (Task 10 twin deferred
+# convergence) for the full spec-deviation record.
+#
+# Both gates are anchored on the MODERN loop's core -- SMORMS3 over `engine.forward_backward`
+# (F11 single-eval-at-theta, Epochs 0; F10 folded gradient), the exact inner primitive
+# `train_modern`'s `_backprop_inner` rides -- NOT the legacy `train`'s QuantumPSO surface (which
+# is flat on these fixtures: a forward-only score at the fixed base weights).
+
+# Margins are HALF the measured from-scratch improvement (~2x honest headroom), NOT tuned to
+# green. Measured (seed 7, xavier, the 8-step engine-reused trajectory below):
+#   SAD train cost-at-theta: 0.34742 -> 0.29462   improvement 0.05280 -> margin 0.026
+#   SAD held-out (f2, forward NNCostSeg): 0.35065 -> 0.32925   improvement 0.02140 -> margin 0.010
+# The run is BOUNDED at 8 SMORMS3 steps because the trajectory OVERSHOOTS from step 9: the
+# cost-at-theta series 0.34742 0.34742 0.34742 0.34742 0.34741 0.34737 0.34692 0.34248 0.29462
+# (steps 0..8) is monotone down, then step 9 jumps to 0.45633 and step 10 to 3.59834 (SMORMS3's
+# lrate has ramped 1e-9 -> 1e-1 by then and steps past the minimum). The monotone assertion in
+# gate (a) would FAIL if the budget reached step 9 -- the bound is load-bearing, not cosmetic.
+_SAD_TRAIN_MARGIN = 0.026
+_SAD_HELDOUT_MARGIN = 0.010
+_SAD_STEPS = 8
+
+
+class _SadRun(NamedTuple):
+    trace: NDArray[np.float64]  # cost-at-theta, f@theta_0 .. f@theta_{_SAD_STEPS}
+    trained: NDArray[np.float64]
+    init: NDArray[np.float64]
+    ho_init: float  # held-out (f2) forward NNCostSeg at the init weights
+    ho_best: float  # held-out (f2) forward NNCostSeg at the trained weights
+
+
+class _TwinRun(NamedTuple):
+    nonzero: list[int]  # per-net nonzero-gradient count [sad, lid]
+    move: list[float]  # per-net ||trained - init|| [sad, lid]
+    trained: list[NDArray[np.float64]]
+
+
+def _seed_twin_gradcheck(dst: Path) -> Path:
+    """The Mode-5 Twin corpus (1 wav file, vie/vie) + config + both TINY seed packs. Mirrors
+    `tests/pyo3/test_seam_replay.py::_seed_twin_gradcheck`. Chosen over `_seed_twin_train`
+    (Mode 7) for the MECHANICAL gate because Mode 7's committed config has `BLSTM_Back
+    PropagationActivated false` -- the SAD net is a FROZEN feature extractor feeding the LID
+    net, so it takes no gradient and never moves (a "both nets move" gate is unsatisfiable on
+    it). Mode 5 is the committed Twin config where BOTH nets are backprop-active (the same
+    fixture `test_grad_check_seam` pins as having nonzero per-net gradients)."""
+    for f in ("twin_gradcheck.config", "languagemapping_lid7.csv", "listing_gc_wav.csv", "tiny_sad_seed.bin", "tiny_lid_seed.bin"):
+        shutil.copy(PHASE4B / f, dst / f)
+    wav = dst / "corpus_lid"
+    wav.mkdir(parents=True, exist_ok=True)
+    for f in ("f1.wav", "f1.stm", "f1_gc.stm"):
+        shutil.copy(PHASE4B / "corpus_lid" / f, wav / f)
+    return dst / "twin_gradcheck.config"
+
+
+def _sad_from_scratch(tmp: Path, seed: int) -> _SadRun:
+    """One from-scratch SAD (algo 3) training run through the modern loop's core: seeded Xavier
+    init -> `_SAD_STEPS` SMORMS3 steps over `forward_backward` (backprop ON, Epochs 0) on the
+    TRAIN listing (f1 only) with the engine REUSED across steps (the `_backprop_inner`
+    semantics) -> a forward NNCostSeg readout of the trained weights on the HELD-OUT file (f2).
+
+    Splits the committed 2-file listing into `train_f1.csv` / `heldout_f2.csv` in the workdir
+    so training never sees f2 (gate (b) is a genuine held-out generalization check). Returns
+    the cost-at-theta trace (`f@theta_0 .. f@theta_{_SAD_STEPS}`, the last from a forward-only
+    readout at the trained weights -- NOT a further step, so the run stops at-or-before step 8),
+    the trained + init weight vectors, and the two held-out costs."""
+    corpus = tmp / "corpus"
+    corpus.mkdir(parents=True, exist_ok=True)
+    for f in ("f1", "f2"):
+        shutil.copy(PHASE4A / "corpus" / f"{f}.wav", corpus / f"{f}.wav")
+        shutil.copy(PHASE4A / "corpus" / f"{f}.stm", corpus / f"{f}.stm")
+    for f in ("language2classmapping.csv", "tier2_fileslisting.csv", "tier2_spectral.config"):
+        shutil.copy(PHASE4A / f, tmp / f)
+    shutil.copy(PHASE0 / "NNweights_config1.bin", tmp / "NNweights_config1.bin")
+    (tmp / "vrcts_tier2").mkdir()
+    lines = (tmp / "tier2_fileslisting.csv").read_text().splitlines()
+    (tmp / "train_f1.csv").write_text(lines[0] + "\n")  # f1: eng/us, class 0
+    (tmp / "heldout_f2.csv").write_text(lines[1] + "\n")  # f2: unmapped (held out of training)
+
+    state = init_run(tmp / "tier2_spectral.config", tmp / "run")
+    assert state.algo == 3 and state.ps.lid is None, "the SAD gate must exercise the single-net path"
+    base = state.base_config
+    workdir = Path(state.config_path).parent
+    init_pack = init_weights(nnet_spec(base, "BLSTM"), np.random.default_rng(seed), "xavier", True)
+
+    with _chdir(workdir):
+        (workdir / "_sad_train.config").write_text(_modern_config_text(base, 3, backprop=True, fileslisting="train_f1.csv"))
+        eng = speech_rs.Engine(["_sad_train.config"], "-m")
+
+        def f_df(theta: list[np.ndarray], _ec: int) -> tuple[float, list[np.ndarray], list[np.ndarray]]:
+            cost, grads = forward_backward(eng, theta, None)
+            return cost, grads, theta
+
+        opt = Smorms3(f_df, [init_pack[0].copy()])
+        trained = opt.optimize(_SAD_STEPS)  # _SAD_STEPS evals at theta_0..theta_{S-1}, final = theta_S
+        best_cost, _g = forward_backward(eng, [trained[0]], None)  # forward readout at theta_S (NOT a step)
+        trace = np.array([*opt.hist_f_flat, best_cost], dtype=np.float64)  # f@theta_0 .. f@theta_S
+
+        (workdir / "_sad_heldout.config").write_text(_modern_config_text(base, 3, backprop=True, fileslisting="heldout_f2.csv"))
+        heng = speech_rs.Engine(["_sad_heldout.config"], "-m")
+        ho_init, _ = forward_backward(heng, [init_pack[0]], None)
+        ho_best, _ = forward_backward(heng, [trained[0]], None)
+
+    return _SadRun(trace=trace, trained=trained[0], init=init_pack[0], ho_init=float(ho_init), ho_best=float(ho_best))
+
+
+@pytest.mark.slow
+def test_from_scratch_sad_converges(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The SAD (algo 3) from-scratch convergence exit gate (a)/(b)/(c). From a seeded Xavier
+    init, SMORMS3 over `forward_backward` (the modern loop's core) genuinely descends on the
+    differentiable NNCostSeg objective, generalizes to a held-out file, and is deterministic.
+
+    Anchored on the differentiable NNCostSeg (via `forward_backward`), NOT the balance-5 forward
+    "validation" cost `train_modern` records per epoch -- that is a discrete error-rate step
+    function stuck at 30.0 from scratch on this fixture (the net's posteriors never cross the
+    decision threshold), a useless early-stop signal here (a separate finding; `test_early_stop
+    _triggers` uses it deliberately as a plateau). The run is bounded at `_SAD_STEPS` steps
+    because the trajectory overshoots from step 9 (see the module-level margin derivation)."""
+    r = _sad_from_scratch(tmp_path_factory.mktemp("sad_conv_a"), seed=7)
+    trace = r.trace
+    init_cost, best_cost = float(trace[0]), float(trace[-1])
+
+    # (a) monotone non-increasing within the 8-step budget: the measured trajectory descends
+    # from step 0 to step 8; a tolerance of 1e-4 absorbs cross-libm jitter on the near-flat
+    # early steps while still catching the step-9 overshoot (+0.16, far above 1e-4).
+    for i in range(1, trace.size):
+        assert trace[i] <= trace[i - 1] + 1e-4, f"cost-at-theta rose at step {i}: {trace[i]} > {trace[i - 1]} (overshoot inside the budget?)"
+    # (a) convergence: the best cost (= trace[-1], the min by monotonicity) is strictly below
+    # the epoch-0 cost by the stated margin (>= half the measured 0.05280 improvement).
+    assert best_cost == float(np.min(trace)), f"the trained-weights cost must be the minimum of the bounded trace: {best_cost} vs {float(np.min(trace))}"
+    assert init_cost - best_cost >= _SAD_TRAIN_MARGIN, f"SAD train did not converge: improvement {init_cost - best_cost:.5f} < margin {_SAD_TRAIN_MARGIN}"
+
+    # (b) held-out generalization: the trained model beats the untrained init on f2 (forward
+    # NNCostSeg), by >= half the measured 0.02140 held-out improvement.
+    ho_imp = r.ho_init - r.ho_best
+    assert ho_imp >= _SAD_HELDOUT_MARGIN, f"SAD did not generalize: held-out improvement {ho_imp:.5f} < margin {_SAD_HELDOUT_MARGIN}"
+
+    # (c) determinism: a second fixed-seed run reproduces the trajectory + trained weights bit-for-bit.
+    r2 = _sad_from_scratch(tmp_path_factory.mktemp("sad_conv_b"), seed=7)
+    assert np.array_equal(trace.view(np.uint64), r2.trace.view(np.uint64)), "the cost-at-theta trace must be bit-identical across two fixed-seed runs"
+    assert np.array_equal(r.trained.view(np.uint64), r2.trained.view(np.uint64)), "the trained SAD weights must be bit-identical across two fixed-seed runs"
+
+
+def _twin_mechanical(tmp: Path, seed: int, n_steps: int) -> _TwinRun:
+    """One from-scratch Twin (algo 6) mechanical run on the Mode-5 corpus (both nets
+    backprop-active): seeded He init of BOTH nets -> one `forward_backward` for the per-net
+    gradients -> `n_steps` of `_backprop_inner` (the modern loop's inner primitive) for the
+    per-net weight movement. Overrides `Gradient_Check_Epsilon` to 0 so `Engine.run()` takes
+    the run_solo single-fold path (the config ships Epsilon 1e-5 for its gradCheck role, which
+    would otherwise route `run()` to gradCheck instead of a forward/backward fold)."""
+    config = _seed_twin_gradcheck(tmp)
+    state = init_run(config, tmp / "run")
+    assert state.algo == 6 and state.ps.lid is not None, "the twin gate must exercise the two-net path"
+    base = dict(state.base_config)
+    base["Neural_Networks_Gradient_Check_Epsilon"] = "0"  # run_solo (a fold at theta), not gradCheck
+    workdir = Path(state.config_path).parent
+    tails = _tail_lengths(base, 6)
+    rng = np.random.default_rng(seed)
+    init_pack = init_weights(nnet_spec(base, "BLSTM"), rng, "he", True) + init_weights(nnet_spec(base, "BLSTM_LID"), rng, "he", True)
+
+    with _chdir(workdir):
+        (workdir / "_twin_mech.config").write_text(_modern_config_text(base, 6, backprop=True))
+        eng = speech_rs.Engine(["_twin_mech.config"], "-m")
+        _f, grads = forward_backward(eng, [init_pack[0], init_pack[1]], None)
+        nonzero = [int(np.count_nonzero(g)) for g in grads]
+
+        eng2 = speech_rs.Engine(["_twin_mech.config"], "-m")
+        trained, _hist = _backprop_inner(eng2, n_steps, tails, batch=None, seed_weights=init_pack)
+        move = [float(np.linalg.norm(np.asarray(trained[k]) - init_pack[k])) for k in range(2)]
+
+    return _TwinRun(nonzero=nonzero, move=move, trained=[np.asarray(w, dtype=np.float64) for w in trained])
+
+
+@pytest.mark.slow
+def test_from_scratch_twin_mechanical(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The Twin (algo 6) from-scratch MECHANICAL exit gate -- the user-ratified REDUCED gate.
+
+    DEFERRED CONVERGENCE (spec deviation, user-ratified 2026-07-16; IMPROVEMENTS.md `[phase5]`
+    Task 10 twin deferred convergence): a full dual-head convergence gate (train + held-out)
+    is UNSATISFIABLE on the committed Twin corpus -- it holds exactly 1 file per language, so
+    any disjoint train/held-out split trains on one language and validates on a DIFFERENT one
+    (LID generalization is structurally impossible), and the near-saturated tiny net's train
+    improvement is a negligible ~2%. The SAD head carries the full convergence gate
+    (`test_from_scratch_sad_converges`); the Twin's convergence gate moves to Phase 6, gated on
+    a real >= 2-file-per-language corpus.
+
+    What this gate DOES prove (the foundation the Phase 6 convergence gate will ride): from a
+    seeded He init, the modern-loop core drives BOTH nets -- nonzero per-net gradients flow
+    (the F10 folded-gradient seam; a zero gradient here is exactly the pre-F10 no-op the T10
+    discovery surfaced), the weights MOVE for both nets, and the whole run is deterministic
+    (bit-identical trained weights across two fixed-seed runs). Uses the Mode-5 corpus, where
+    both nets are backprop-active -- see `_seed_twin_gradcheck` for why Mode 7 is unusable."""
+    r = _twin_mechanical(tmp_path_factory.mktemp("twin_mech_a"), seed=3, n_steps=5)
+    assert r.nonzero[0] > 0 and r.nonzero[1] > 0, f"both nets must receive a NONZERO gradient (F10): sad/lid nonzero counts {r.nonzero}"
+    assert r.move[0] > 0.0 and r.move[1] > 0.0, f"both nets' weights must MOVE off init: ||trained-init|| sad/lid {r.move}"
+
+    r2 = _twin_mechanical(tmp_path_factory.mktemp("twin_mech_b"), seed=3, n_steps=5)
+    for k, name in enumerate(("sad", "lid")):
+        assert np.array_equal(r.trained[k].view(np.uint64), r2.trained[k].view(np.uint64)), (
+            f"the trained {name} weights must be bit-identical across two fixed-seed runs"
+        )
+
+
+@pytest.mark.slow
+def test_early_stop_triggers(tmp_path: Path) -> None:
+    """The real-path early-stop gate: `train_modern` with the engine-backed default hooks (no
+    stubs) on the SAD fixture, `patience=1`, must STOP before the epoch budget. The forward-only
+    balance-5 validation cost is stuck at 30.0 from scratch on this fixture (the net's posteriors
+    never cross the decision threshold), so it never strictly improves after epoch 0 -- a genuine
+    plateau -- and early-stop fires at epoch 1 (`epochs_run == 2 < epochs == 4`). Distinct from
+    the stub-driven state-machine unit tests (`tests/test_phase5_train_modern.py`): this drives
+    the REAL engine loop end to end."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(parents=True, exist_ok=True)
+    for f in ("f1", "f2"):
+        shutil.copy(PHASE4A / "corpus" / f"{f}.wav", corpus / f"{f}.wav")
+        shutil.copy(PHASE4A / "corpus" / f"{f}.stm", corpus / f"{f}.stm")
+    for f in ("language2classmapping.csv", "tier2_fileslisting.csv", "tier2_spectral.config"):
+        shutil.copy(PHASE4A / f, tmp_path / f)
+    shutil.copy(PHASE0 / "NNweights_config1.bin", tmp_path / "NNweights_config1.bin")
+    (tmp_path / "vrcts_tier2").mkdir()
+
+    state = init_run(tmp_path / "tier2_spectral.config", tmp_path / "run")
+    params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", init_seed=7)
+    res = train_modern(state, seed=0, params=params)
+
+    assert res.stopped_early is True, "early-stop must fire on the stuck-validation plateau"
+    assert res.epochs_run < params.epochs, f"early-stop must halt before the {params.epochs}-epoch budget, ran {res.epochs_run}"
+    # the plateau was detected AT the best epoch (no strict improvement afterward).
+    assert res.best_epoch == 0, f"the stuck-at-30.0 validation makes epoch 0 the (only) best, got best_epoch={res.best_epoch}"
