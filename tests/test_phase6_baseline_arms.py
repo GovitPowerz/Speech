@@ -65,15 +65,17 @@ def test_stratified_splits_seed_sensitive() -> None:
     assert a != c and len(a) == len(c), "a different seed must draw a different sample of the same size"
 
 
-def test_stratified_splits_full_train_when_none() -> None:
+def test_stratified_splits_none_train_fills_heldout() -> None:
     recs = _records({"ara": 20, "chi": 20})
     train, valid, test = B.stratified_splits(recs, n_train=None, n_valid=4, n_test=4, seed=0)
-    # n_train=None: train takes ALL remaining after valid+test are carved (priority train
-    # first -> valid -> test); with plenty of files every split is filled and disjoint.
+    # n_train=None (the full-run path): valid/test are carved to their full quotas FIRST and
+    # train takes the per-language REMAINDER -- so with plenty of files EVERY split is filled
+    # and the three stay disjoint. Regression pin: the pre-fix code gave train ALL files and
+    # left valid/test EMPTY (empirically 40/0/0).
     assert len(train) + len(valid) + len(test) <= len(recs)
     tr, va, te = ({r["filename"] for r in s} for s in (train, valid, test))
     assert tr.isdisjoint(va) and tr.isdisjoint(te) and va.isdisjoint(te)
-    assert len(train) > 0
+    assert len(train) > 0 and len(valid) > 0 and len(test) > 0, "n_train=None must still fill the held-out valid AND test splits"
 
 
 def test_stratified_splits_deterministic() -> None:

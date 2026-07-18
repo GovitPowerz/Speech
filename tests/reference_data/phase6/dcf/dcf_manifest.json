@@ -25,8 +25,8 @@
       "bytes": 1194
     },
     "04_collar_boundary_fp": {
-      "sha256": "4449c8915efbfed05b03f8ab31998d51ce76f727ce88ca2c0925e7730d38ebac",
-      "bytes": 1210
+      "sha256": "1f83510bc407f2941f9f34b34ecd99bf8ce54c1512ec60253ef48ad50053232d",
+      "bytes": 1409
     },
     "05_all_speech_perfect": {
       "sha256": "daa17f93bcb1fcf857e29e290597d1acb8eed9b644a2e80c0267ac7ca6a7526b",
@@ -61,8 +61,8 @@
       "bytes": 1010
     },
     "13_exact_threshold_boundary": {
-      "sha256": "c69f1d1c6aa6749fe70220ff261436f3937a1002fd5419d51c7c27c48c5e21d1",
-      "bytes": 1053
+      "sha256": "77306db2b47831c2f1d6f933cafa408b1a75527c667a160a8b7b18fb014bfb84",
+      "bytes": 1196
     },
     "14_all_collar_dcf_zero": {
       "sha256": "f8099a693bba7010c17e931987813a0a87fae7f0efa0720ff2d456f8c9d18604",

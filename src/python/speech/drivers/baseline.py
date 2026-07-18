@@ -133,15 +133,13 @@ def _by_language(records: Sequence[dict[str, str]]) -> dict[str, list[dict[str, 
     return dict(groups)
 
 
-def _per_language_counts(groups: dict[str, list[dict[str, str]]], total: int | None) -> dict[str, int]:
+def _per_language_counts(groups: dict[str, list[dict[str, str]]], total: int) -> dict[str, int]:
     """Per-language quota for a PROPORTIONAL draw of `total` files -- each language gets
     `round(total * n_lang / n_all)`, floored at 1 (min 1/language present) and capped at its
     own count, so the draw preserves the source's per-language proportions AND keeps every
-    language (all 12 LID classes) represented even for a small `total`. `total is None` takes
-    the FULL per-language count. Shared by `stratified_splits` so train/valid/test all use one
-    proportional rule."""
-    if total is None:
-        return {lang: len(items) for lang, items in groups.items()}
+    language (all 12 LID classes) represented even for a small `total`. Used by
+    `stratified_splits` for the valid/test quotas and for train when `n_train` is an explicit
+    count (the `n_train=None` full-run path derives train's quota as the remainder instead)."""
     n_all = sum(len(v) for v in groups.values())
     return {lang: min(len(items), max(1, round(total * len(items) / n_all))) for lang, items in groups.items()}
 
@@ -157,15 +155,24 @@ def stratified_splits(
     from `records` -- by explicit target COUNTS, so training cost (~`n_train`) is decoupled
     from held-out size (a big, cheap-to-score `n_test` gives a stable LID error even though
     training stays small). Each split's size is allocated proportionally across languages
-    (min 1/language present), then carved from a per-language seeded shuffle in
-    train->valid->test order so the three never overlap. `n_train=None` takes ALL remaining
-    files per language for train (the full-run launcher). A language with too few files
-    fills train/valid/test in that priority order and simply runs out -- no row is
-    fabricated or shared across splits. Deterministic (per-language derived seed)."""
+    (min 1/language present), then carved from a per-language seeded shuffle so the three
+    never overlap. With an explicit `n_train` the size priority is train->valid->test;
+    `n_train=None` (the full-run launcher) instead carves the valid/test quotas FIRST and
+    gives train the per-language REMAINDER, so the held-out splits stay filled rather than
+    train swallowing every file. A language with too few files fills the splits in priority
+    order and simply runs out -- no row is fabricated or shared across splits. Deterministic
+    (per-language derived seed)."""
     groups = _by_language(records)
     q_valid = _per_language_counts(groups, n_valid)
     q_test = _per_language_counts(groups, n_test)
-    q_train = _per_language_counts(groups, n_train)
+    if n_train is None:
+        # Full-run path: valid/test take their full proportional quotas FIRST, train takes
+        # the per-language REMAINDER -- so a None n_train FILLS the held-out splits instead of
+        # swallowing every file (pre-fix that left valid/test empty, 40/0/0). Equivalent to
+        # `q_train = n - q_valid - q_test`, floored at 0.
+        q_train = {lang: max(0, len(items) - q_valid[lang] - q_test[lang]) for lang, items in groups.items()}
+    else:
+        q_train = _per_language_counts(groups, n_train)
     train: list[dict[str, str]] = []
     valid: list[dict[str, str]] = []
     test: list[dict[str, str]] = []
