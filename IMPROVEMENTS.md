@@ -4352,6 +4352,97 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (505 passed) + `cd src/rust && cargo test` ran once at the end, both green; working
   tree at completion contains ONLY this IMPROVEMENTS.md entry.
 
+### Mutation battery (Phase 6)
+
+- **[phase6] Mutation battery (Task 11): 8/8 battery items break their named catcher exactly
+  as predicted; three single-catcher coverage narrownesses and one corpus-gating are recorded
+  as honest gaps, no un-caught mutation found.** Every load-bearing phase-6 mechanism re-verified
+  from the committed, fully-integrated state via an apply-FAIL-revert-PASS cycle. Each mutation
+  applied (minimal, surgical) / run against the NAMED catcher only (FOREGROUND, scoped) / reverted
+  (`git checkout -- <file>`) / re-run to confirm GREEN; `git status --porcelain` confirmed clean
+  between every cycle and at the end. IMPROVEMENTS.md is the only committed diff.
+
+  (1) DCF collar arithmetic off-by-one: `_build_collar_segs`'s interior-nonspeech carve boundary
+  `end - c` -> `end - c - 0.05` (both the NonSpeech end and the Collar start,
+  `src/python/speech/evaluate.py:213-214`) against `tests/test_phase6_evaluate.py::
+  test_dcf_matches_perl_oracle` -- FAILED as expected (`11_hyp_longer_truncate` collar=0.25 pfa
+  `0.51724 != 0.50000`, the shifted collar moved the scored-nonspeech denominator off the perl's);
+  1 of 14 perl goldens broke (the others carry no interior scored-nonspeech region under the
+  perturbed branch); reverted, all 14 PASS.
+
+  (2) The RI-is-speech flip: the `_REF_SPEECH`/`_REF_NONSPEECH` partition edited to move `RI` from
+  speech to non-speech (`evaluate.py:48-49`) against `test_dcf_matches_perl_oracle` +
+  `test_dcf_ri_counts_as_speech_not_nonspeech` -- BOTH FAILED (`02_ri_counts_as_speech` golden +
+  the dedicated semantics test: `pmiss 0.0` vs expected `0.5`, the RI span no longer counted toward
+  the speech region); reverted, all 15 PASS.
+
+  (3) lid_error argmax tie-handling: `preds = scores_a.argmax(axis=1)` -> a reversed-argmax
+  LAST-maximum (`evaluate.py:372`) against `test_lid_error_*` -- FAILED exactly
+  `test_lid_error_tie_takes_first_maximum_matching_matlab_max` (`100.0 != 0.0`, the `[0.5,0.5,0.1]`
+  tie resolved to column 1 instead of MATLAB's first-max column 0); the 5 no-tie cases stayed green
+  (last==first max absent a tie); reverted, all 6 PASS. GAP: the "asymmetric fixture"
+  (`test_lid_error_known_confusion_is_a_percentage`) carries no tie, so the tie test is the SOLE
+  committed catcher for a last-maximum flip.
+
+  (4) The cep header stride misread: `vector_size` read `i16::from_le_bytes(buf[4..6])` ->
+  `i32::from_le_bytes(buf[4..8])` (`src/rust/src/audio.rs:680`) against `cargo test -p speech
+  --test phase6_cep` -- FAILED exactly `multi_record_magic_ignored_empty_skipped` (the `magic=7`
+  bytes leaked into vectorSize -> `458754`, byte-length mismatch "expects 5505048"); 17 of 18 stayed
+  green. Rust-side catcher, NO maturin rebuild needed (cargo recompiles the crate directly); the
+  pyo3-side cep consumers are corpus-gated (`test_phase6_corpus.py`, `test_phase6_gates.py`), not
+  the named catcher, so their leg was not exercised. Reverted, all 18 PASS. GAP: the stride error
+  only manifests when `magic != 0`, so only the one non-zero-magic synthetic fixture catches it --
+  `corpus_first_file_consistency` (real LRE files carry `magic == 0`) does NOT.
+
+  (5) The localization existence-check dropped: `primary_ok = local_filename.is_file()` ->
+  `primary_ok = True` (`src/python/speech/dataprep/lre.py:113`) against
+  `tests/test_phase6_lre_listings.py` -- FAILED `test_localize_listing_found_and_missing_rows` +
+  `test_localize_listing_missing_both_columns_reported_combined` (missing rows passed through:
+  `missing_by_reason {'refseg': 1}` vs expected `{'primary+refseg': 1}`, and rows_found 2 not 1);
+  reverted, all 6 PASS.
+
+  (6) The NNCostSeg validation signal wired back to balance-only: `val_metric` default
+  `"nn_cost_seg"` -> `"balance"` (`src/python/speech/drivers/state.py:205`) against BOTH named legs --
+  the engine-free unit `tests/test_phase5_train_modern.py::test_val_metric_field_default_and_literal`
+  (`'balance' != 'nn_cost_seg'`) AND the engine-backed pyo3 smoke
+  `tests/pyo3/test_phase5_train_modern_smoke.py::test_val_metric_nn_cost_seg_moves_where_balance_plateaus`
+  (the default arm froze at `[30.0, 30.0, 30.0, 30.0]`, `len(set(default_costs)) > 1` fired) --
+  both FAILED as predicted; reverted, both PASS.
+
+  (7) A subset gate's trainer no-opped (the item-7-4d stagnant-trainer pattern): `_backprop_inner`'s
+  `trained = opt.optimize(inner_steps)` -> `opt.optimize(0)` (zero SMORMS3 steps -- `optimize(0)`
+  runs an empty step loop and returns theta unchanged, `src/python/speech/drivers/train.py:375`)
+  against `tests/pyo3/test_phase6_gates.py::test_sad_subset_trains_and_scores` (the fastest gate,
+  run PER-TEST) -- FAILED on the trained-vs-init margin (`trained Pmiss 1.000`, `assert 1.0 < 0.5`;
+  the run log shows `held-out DCF@0.5=0.7500` for trained == init, `improvement +0.0000`, the
+  all-non-speech collapse of an untrained net); the no-op made the run finish in 9.5s (no training
+  forward passes). Reverted, PASS with real training (107s). GAP: corpus-gated (`@requires_corpus`)
+  -- catches only where the licensed LRE03/07 corpus is present locally (it is here); SKIPS in CI.
+
+  (8) A Cavg constant perturbed: `cavg`'s `p_target: float = 0.5` default -> `0.4`
+  (`evaluate.py:414`) against the formula cases -- FAILED `test_cavg_hand_derived_three_language_case`
+  (the hand-derived `0.375` pin moved); reverted, PASS. GAP: `test_cavg_ptarget_constant_is_load_bearing`
+  asserts only p_target SENSITIVITY (an inequality between two p_target values), so a constant-value
+  shift leaves it green -- it guards a different failure mode (decoupling p_target from the result),
+  not a value change; the hand-derived 0.375 case is thus the SOLE committed non-corpus catcher for
+  this mutation. The corpus-gated `test_cavg_matches_nist_oracle_on_real_dev_confusion`
+  (Scoring_LRE15, present locally) would also catch it (its oracle hardcodes 0.5) but was NOT run
+  per-item per the brief -- it rides the final full pass.
+
+  *Verdict:* every one of the 8 battery items produced its predicted RED, and every revert produced
+  a clean, fully green re-run -- no un-caught mutation. Four honest gaps recorded, none a defect: the
+  tie flip (3), the magic-stride misread (4), and the Cavg constant (8) each have exactly ONE
+  committed catcher (the tie test / the sole non-zero-magic fixture / the hand-derived 0.375 case)
+  rather than a broad family, because each mutation only bites a degenerate sliver of the input
+  space; and the SAD trainer no-op (7) is corpus-gated, provable only where the licensed corpus is
+  present (local, not CI). Final pass (all green at the committed state): `uv run pytest tests -q
+  -m "not slow"` -> 607 passed, 1 skipped, 22 deselected; the slow pyo3 files per-file --
+  `tests/pyo3/test_phase6_gates.py` (all three arms: LID features / SAD / LID phonotactic Mode-7,
+  subset + deterministic + dry-run each) 9 passed (991 s), `tests/pyo3/test_exit_gate.py` 9 passed,
+  `tests/pyo3/test_phase5_train_modern_smoke.py` 6 passed; `cd src/rust && cargo test` exit 0 (every
+  binary green); `./lint_code.sh` clean (ruff imports/format/lint + mypy, 81 files). Working tree at
+  completion contains ONLY this IMPROVEMENTS.md entry.
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
