@@ -22,7 +22,8 @@ use crate::tasks::sad::{
 };
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{
-    ScoreReport, WerStats, compute_errors, load_ref_csv, load_ref_stm, write_vrcts_multichannel,
+    ScoreReport, WerStats, compute_errors, load_ref_csv, load_ref_stm, load_ref_vrcts,
+    write_vrcts_multichannel,
 };
 use crate::tasks::vrcts::VrctsPart;
 
@@ -826,7 +827,9 @@ impl BagOfProcessors {
     /// Reference load dispatches on `item.ref_seg`'s extension (mirroring the
     /// legacy `Segmentation` ctor `:72-110`): `.stm` -> [`load_ref_stm`] per
     /// channel, `.csv` -> [`load_ref_csv`] (also yields `nb_words` for WER),
-    /// `.trs` -> `bail!` (unported), anything else / empty -> no reference.
+    /// `.xml` -> [`load_ref_vrcts`] per channel (VRCTS reference, channel-sliced
+    /// by the `ch=` attribute; Phase 6 Task 2b), `.trs` -> `bail!` (unported),
+    /// anything else / empty -> no reference.
     /// The mandatory-reference check (`:302-305`): a scored mode with no loadable
     /// reference is an error (legacy `exit(1)`).
     pub fn segmentation_function(
@@ -923,6 +926,25 @@ impl BagOfProcessors {
                     );
                     let refs = (0..channel_count).map(|_| seg.clone()).collect();
                     (Some(refs), nb)
+                }
+                // VRCTS (.xml) reference. Port of `Segmentation::load_ref_from_vrcts`
+                // (`Segmentation.cpp:808-829`), the ctor `.xml` branch (`:89-100`) -- a
+                // DIFFERENT legacy function from `load_from_vrcts` (which the port's
+                // `load_vrcts` mirrors for `VrctsPart`). Wired here in Phase 6 Task 2b to
+                // unblock scored SAD training on the corpus `.part.xml` references. Unlike
+                // the STM/CSV clones, the reference is CHANNEL-SLICED by the 1-based
+                // `ch="N"` attribute (segment -> channel N-1), so `load_ref_vrcts` is
+                // called per channel and each channel keeps only its own `ch` segments.
+                // Windowed on `audio_duration` (the audio frame count, `_AudioDuration`),
+                // NOT the embedded `<Channel sigdur>` -- a `.part.xml` sigdur can exceed a
+                // `_DurationMax`-capped audio. `nb_words` stays the -1 default (WER Pass 1
+                // suppressed), like STM. See IMPROVEMENTS.md ([phase4a] CLOSED (phase 6):
+                // `.xml` (VRCTS) reference loading).
+                (RefExt::Xml, Some(Some(text))) => {
+                    let refs = (0..channel_count)
+                        .map(|chan| load_ref_vrcts(text, chan, self.offset_begin, audio_duration))
+                        .collect();
+                    (Some(refs), -1)
                 }
                 _ => (None, -1),
             };
@@ -1071,14 +1093,16 @@ fn apply_corpus_item(audio: &mut Audio, item: &CorpusItem) {
 enum RefExt {
     Stm,
     Csv,
+    Xml,
     Trs,
     None,
 }
 
 /// Classify `ref_seg` by its trailing 4 chars (`:73`), matching the legacy
-/// `.substr(size-4)` compare: an empty/short name is no reference; `.stm`/`.csv`
-/// dispatch to their loaders; `.xml` (VRCTS) is not wired here (no corpus in 4a
-/// uses it -- deferred with the TRS path); everything else (incl. `.trs`) is TRS.
+/// `.substr(size-4)` compare: an empty/short name is no reference; `.stm`/`.csv`/
+/// `.xml` dispatch to their loaders (`.xml` -> VRCTS reference via
+/// [`load_ref_vrcts`], Phase 6 Task 2b); everything else (incl. `.trs`) is TRS,
+/// still bailed (unported -- IMPROVEMENTS.md `[phase4a] .trs reference loader`).
 fn extension_of(ref_seg: &str) -> RefExt {
     if ref_seg.len() <= 4 {
         // legacy: :106 size > 0 -> TRS; size 0 -> no reference.
@@ -1091,6 +1115,7 @@ fn extension_of(ref_seg: &str) -> RefExt {
     match &ref_seg[ref_seg.len() - 4..] {
         ".stm" => RefExt::Stm,
         ".csv" => RefExt::Csv,
+        ".xml" => RefExt::Xml,
         _ => RefExt::Trs,
     }
 }

@@ -1549,11 +1549,48 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   reference extension (and any name too short for an extension) to `load_ref_from_trs` (a Transcriber
   `.trs` XML parser). That loader is not ported (`segmentation_io.rs` carries STM/CSV/VRCTS only), so
   the reference dispatch here `bail!`s on a TRS reference rather than silently producing an empty
-  reference. `.xml` (VRCTS) reference loading is also not wired into this dispatch -- no Phase 4a
-  corpus uses it -- and currently falls into the TRS bail branch. *Why deferred:* the Phase 4a parity
-  corpora use STM (SAD) and CSV (WER) references only; TRS/VRCTS reference inputs were never exercised.
-  *Fix candidate:* port `load_ref_from_trs` (and wire `load_vrcts` into the reference dispatch) when a
-  corpus needs them. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
+  reference. *Why deferred:* the Phase 4a parity corpora use STM (SAD) and CSV (WER) references only;
+  TRS reference inputs were never exercised (the `.xml`/VRCTS half of this dispatch is now wired --
+  see the CLOSED (phase 6) entry directly below). *Fix candidate:* port `load_ref_from_trs` when a
+  corpus needs it. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
+
+- **[phase4a] CLOSED (phase 6): `.xml` (VRCTS) reference loading wired into the reference dispatch**
+  (`engine/bag_of_processors.rs::segmentation_function` + `extension_of` +
+  `tasks/segmentation_io.rs::load_ref_vrcts`, from `Segmentation.cpp:89-100` (the ctor `.xml` branch)
+  + `:808-829` `load_ref_from_vrcts`): Phase 6's SAD track trains on the corpus `.part.xml` VRCTS
+  references (`derive_sad_listings`'s wav/xml pairs); before Task 2b, `extension_of` classified `.xml`
+  as `RefExt::Trs`, so every scored (`-m`/`-t`) run on a `.xml` reference hit the TRS bail above.
+  *Fix (Task 2b):* `extension_of` now maps `.xml -> RefExt::Xml`, and the new `(RefExt::Xml, ...)`
+  dispatch arm builds the per-channel reference via a new faithful loader
+  `load_ref_vrcts(text, chan, off, dur)`. **Source-governed distinction:** the ctor `.xml` branch
+  calls `load_ref_from_vrcts` (`:808-829`), the REFERENCE loader -- a DIFFERENT legacy function from
+  `load_from_vrcts` (`:592-614`, the DUMP parse-back the port's `load_vrcts` mirrors for `VrctsPart`).
+  The two share the line format but differ in two load-bearing ways, so `load_vrcts` was NOT reused:
+  (1) the reference loader is CHANNEL-SLICED by the 1-based `ch="N"` attribute (`--chan`;
+  `_Reference.at(chan)` guarded by `chan < _ChannelNb`), ported as a per-channel equality
+  (`ch-1 == chan`, the same shape as `load_ref_stm`'s `line_chan == chan` gate -- calling it once per
+  channel reconstructs the legacy single-pass multi-channel fill), whereas `load_vrcts` ignores `ch=`
+  and dumps every segment into one caller-passed channel; (2) it seeds the segmentation `End` sentinel
+  at `_AudioDuration` (the audio frame count, passed as `dur`), NOT the embedded `<Channel sigdur>` (a
+  corpus `.part.xml` carries e.g. sigdur=1721.62s while the audio is `_DurationMax`-capped) --
+  `load_vrcts` uses sigdur for the extent, correct for the dump round-trip but wrong for a reference
+  scored against a capped-audio hyp. `nb_words` stays the -1 default (WER Pass 1 suppressed), like STM.
+  The only deviations from the legacy reference loader are the same benign ones `load_ref_stm` already
+  carries: the display-only `_RefCount`/percentage log (`:824-828`) is omitted, and a malformed
+  `ch="0"` (`ch-1 == -1`) is dropped rather than hitting the legacy `_Reference.at(-1)` UB. *Pinned by:*
+  `tests/phase6_xml_ref.rs` -- `xml_reference_scored_run_through_dispatch` (RED: the pre-wiring TRS
+  bail; GREEN: a scored 2-channel `-m` run whose cols 0-2 match an independent `load_ref_vrcts` +
+  `compute_errors` oracle per channel, with non-vacuity + nonzero-error guards),
+  `xml_reference_is_channel_sliced` (chan 0 carries only the `ch="1"` span, chan 1 only `ch="2"`),
+  `xml_reference_windows_on_audio_duration_not_sigdur` (the `End`-sentinel divergence vs `load_vrcts`),
+  and a corpus-gated smoke `xml_reference_real_corpus_part_xml` (a real LRE03 `.part.xml` + wav scored
+  end-to-end; skips cleanly when `data/LRE03-LRE07` is absent). *Mutation:* reverting the
+  `.xml -> RefExt::Xml` arm re-introduces the TRS bail -> RED, then restore. *Cascade:* none -- no
+  committed golden used a `.xml` reference (the TRS bail was the only prior behavior), and `load_vrcts`
+  / `VrctsPart` are byte-untouched. *Oracle:* no C++/Octave harness covered the reference-load path
+  (`load_ref_from_vrcts` was never exercised; the harness pins the writer `toFile_VRCTS` and the dump
+  loader `load_from_vrcts`), so this is pinned by synthetic + corpus-gated fixtures, not a regenerated
+  golden.
 
 - **[phase4a] CLOSED (Task 8): multi-channel VRCTS write on the corpus path**
   (`engine/bag_of_processors.rs::segmentation_function` VRCTS write sites +

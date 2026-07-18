@@ -491,6 +491,60 @@ pub fn load_vrcts(text: &str, off: f64, dur: f64) -> Segmentation {
     seg
 }
 
+/// Load a reference [`Segmentation`] from VRCTS XML text, single-channel
+/// projection. Direct port of `Segmentation::load_ref_from_vrcts`
+/// (`Segmentation.cpp:808-829`) -- the REFERENCE loader the `Segmentation` ctor
+/// `.xml` branch (`:89-100`) calls. This is a DIFFERENT legacy function from
+/// [`load_vrcts`], which ports `load_from_vrcts` (`:592-614`), the DUMP
+/// parse-back loader `VrctsPart` uses. They share the line format but differ in
+/// two load-bearing ways, both verified at source:
+///
+///   1. CHANNEL-SLICED. Each `<SpeechSegment>` carries a 1-based `ch="N"`
+///      attribute; the legacy does `--chan` then routes the segment to
+///      `_Reference.at(chan)` guarded by `chan < _ChannelNb` (`:816-820`). Our
+///      per-channel API narrows that to an equality on `chan` (a segment is kept
+///      iff `N-1 == chan`), the same shape as [`load_ref_stm`]'s
+///      `line_chan == chan` gate -- calling this once per channel reconstructs
+///      the legacy single-pass multi-channel fill. [`load_vrcts`] ignores `ch=`
+///      entirely (it takes an explicit `chan` param and dumps every segment into
+///      that one channel). A malformed `ch="0"` (`N-1 == -1`) matches no channel
+///      here and is dropped, where the legacy `_Reference.at(-1)` is UB.
+///   2. DURATION SOURCE. The reference loader windows on `_AudioDuration` (the
+///      audio frame count, passed here as `dur`) -- NOT the embedded
+///      `<Channel sigdur>`. A corpus `.part.xml` whose `sigdur` (e.g. 1800.00)
+///      exceeds a `_DurationMax`-capped audio must still window at the true audio
+///      duration, so this loader never reads `sigdur`. [`load_vrcts`] reads
+///      `sigdur` and uses it as both the window and the `End` sentinel, which is
+///      correct for the DUMP round-trip but wrong for a reference against capped
+///      audio.
+///
+/// A `SpeechSegment` is kept iff its `ch-1 == chan`, `end >= off`, and
+/// `begin < off + dur` (`:817`); `beg`/`end` are shifted by `-off` before
+/// labeling, and `sanitize()` runs after all lines. The legacy also fills
+/// `_RefCount` and logs per-channel speech percentages (`:824-828`); that is
+/// display-only bookkeeping, omitted here exactly as [`load_ref_stm`] omits it.
+pub fn load_ref_vrcts(text: &str, chan: usize, off: f64, dur: f64) -> Segmentation {
+    let mut seg = Segmentation::new(dur);
+
+    for line in text.lines() {
+        if !line.starts_with("<SpeechSegment ") {
+            continue;
+        }
+        let ch = extract_attr(line, "ch").and_then(|s| s.parse::<i64>().ok());
+        let stime = extract_attr(line, "stime").and_then(|s| s.parse::<f64>().ok());
+        let etime = extract_attr(line, "etime").and_then(|s| s.parse::<f64>().ok());
+        if let (Some(ch), Some(begin), Some(end)) = (ch, stime, etime)
+            && ch - 1 == chan as i64
+            && end >= off
+            && begin < off + dur
+        {
+            seg.label_segment(begin - off, end - off, SegClass::Speech);
+        }
+    }
+    seg.sanitize();
+    seg
+}
+
 /// Load a reference [`Segmentation`] from STM text, single-channel projection.
 /// Direct port of `Segmentation::load_ref_from_stm` (`Segmentation.cpp:616-635`).
 ///
