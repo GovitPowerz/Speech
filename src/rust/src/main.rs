@@ -35,6 +35,54 @@ fn main() {
         return;
     }
 
+    // Port-only tooling (Phase 7 Task 1), NOT a legacy CLI surface: the
+    // wall-clock/RTF/peak-RSS bench harness. `speech bench [--repeat=N]
+    // [--path=exact] <config>`. Handled before `parse_cli` (own arg grammar,
+    // not a legacy mode flag), same precedent as `--convert-config` above.
+    if args.len() >= 2 && args[1] == "bench" {
+        let invocation = match speech::cli::parse_bench_args(&args[2..]) {
+            Ok(inv) => inv,
+            Err(e) => {
+                eprintln!("Error: {e}\n");
+                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact] config_file");
+                std::process::exit(2);
+            }
+        };
+        let path = match speech::bench::BenchPath::parse(&invocation.path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error: {e}\n");
+                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact] config_file");
+                std::process::exit(2);
+            }
+        };
+        let report = match speech::bench::run_bench(&[invocation.config], invocation.repeat, path) {
+            Ok(r) => r,
+            Err(e) => {
+                // `{e:#}` (the full anyhow cause chain, the same convention
+                // `speech-py/src/lib.rs` uses at its PyO3 error seam) --
+                // bench staging mistakes are usually several `.context()`
+                // layers deep (config parse -> corpus listing -> per-file
+                // read_audio), and the bare top-level message alone is
+                // rarely enough to diagnose which layer failed.
+                eprintln!("Error: {e:#}");
+                std::process::exit(1);
+            }
+        };
+        for run in &report.runs {
+            println!(
+                "BENCH path={} wall_s={:.6} audio_s={:.6} rtf={:.6} maxrss_mb={:.3} files={}",
+                run.path.as_str(),
+                run.wall_s,
+                run.audio_s,
+                run.rtf,
+                run.maxrss_mb,
+                run.files
+            );
+        }
+        return;
+    }
+
     // legacy: :43-64 pass argv[1..] (mode + overrides/configs) to the parser;
     // argv[0] (progname) is not part of the parsed slice.
     let invocation = match parse_cli(&args[1..]) {

@@ -95,6 +95,22 @@ pub fn fixture_phase6(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Absolute path to a file under `tests/reference_data/phase0/` (the tuple-A
+/// weight pack, `NNweights_config1.bin`).
+pub fn fixture_phase0(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase0")
+        .join(name)
+}
+
+/// Absolute path to a file under `tests/reference_data/phase4d/` (the 60 s
+/// `prcts_excerpt.wav` bench fixture).
+pub fn fixture_phase4d(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase4d")
+        .join(name)
+}
+
 /// Absolute path to the licensed LRE03/07 corpus root (`data/LRE03-LRE07` at the repo
 /// root, i.e. `CARGO_MANIFEST_DIR/../..`). The corpus is 27 GB, gitignored, and licensed
 /// -- present locally for Phase 6 training/validation, absent in CI. Phase-6 corpus-gated

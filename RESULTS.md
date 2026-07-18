@@ -209,3 +209,98 @@ and the held-out scores -- LID `scores/` (`.scr`) -> `lid_error`/`cavg`; SAD `sc
 Known limitation (machinery): `forget_bias_one` (the LSTM forget-gate 1.0 init, default on) is
 threaded correctly through `ModernTrainParams` end to end but has NO CLI flag on `speech baseline`
 -- only its default (`True`) is exercised; a `False` sweep would need the flag added.
+
+---
+
+## Phase 7 -- performance
+
+The measure-then-pin exact-path baseline (Task 1): `speech bench [--repeat=N] [--path=exact]
+<config>` runs a corpus config end to end (the `-i` image-mode `CorpusProcessor` path, a single
+unscored forward pass -- `Neural_Networks_BackPropagation_Epochs 0` and, per config,
+`*_BackPropagationActivated false`) and prints one `BENCH path=exact wall_s=<f> audio_s=<f>
+rtf=<f> maxrss_mb=<f> files=<n>` line per run. `rtf = wall_s / audio_s`; `maxrss_mb` is the
+process-lifetime peak RSS (`getrusage(RUSAGE_SELF)`, bytes on macOS / KB on Linux, normalized to
+MB). Every number below is `--repeat=1` (a single fresh process per measurement, so `maxrss_mb`
+is a clean per-run peak, not inflated by repeated in-process construction -- `--repeat>1` in one
+process accumulates allocator high-water-mark across runs by design, see `bench.rs`'s doc). No
+fast path exists yet (`--path` accepts only `exact` until Task 2+ land `fast`); these numbers are
+the baseline every later fast-path task's RTF/memory claim is measured against.
+
+Hardware: Apple Silicon dev box (arm64, this machine), `cargo build --release` (LTO on, the
+committed release profile).
+
+### 60 s fixture (CI workhorse)
+
+`tests/reference_data/phase4a/tier2_spectral.config` (Algo 3 spectral SAD, the tier-2 golden
+net) staged with the tuple-A weight pack (`phase0/NNweights_config1.bin`) and the committed 60 s
+`phase4d/prcts_excerpt.wav` (stereo, 8 kHz) as a single-file, no-reference listing -- the exact
+recipe `tests/phase7_bench.rs::stage_bench_config` builds and `bench_line_parses`/
+`bench_rejects_unknown_path` pin.
+
+| run | wall_s | audio_s | rtf | maxrss_mb | files |
+|---|---|---|---|---|---|
+| 1 | 0.318309 | 120.000000 | 0.002653 | 57.469 | 1 |
+| 2 | 0.317524 | 120.000000 | 0.002646 | 57.641 | 1 |
+| 3 | 0.312214 | 120.000000 | 0.002602 | 57.734 | 1 |
+
+Sanity cross-check (design spec's scouting numbers, RTF ~0.004 / ~0.6 MB per audio-second):
+measured RTF ~0.0026-0.0027 (same order of magnitude, ~1.5x faster here) and ~0.48 MB/audio-s
+(57.6 MB / 120 s) -- consistent.
+
+### Corpus-gated (real LRE03/07 files, runtime sorted-first selection)
+
+Per the license bright line, the two files below are selected at RUNTIME as the
+lexicographically-FIRST match under their respective corpus subtree (`sort` over a glob, no
+duration- or content-based picking) -- neither filename nor any per-file content-derived value is
+recorded anywhere in this repo; only the resulting BENCH measurements are. This is a one-off
+local measurement (not a committed automated test -- corpus-gated performance numbers follow the
+same "user/session gathers, RESULTS.md records" convention as the Phase 6 subset-gate rows
+above), reproducible by re-running the recipe below against the same locally-licensed corpus
+snapshot.
+
+**SAD leg** -- the SAME `tier2_spectral.config` recipe as the 60 s fixture above, with
+`fileslisting` repointed at the sorted-first `*.wav` under `data/LRE03-LRE07/train/audio/**`
+(mono, 8 kHz; `Audio_max_duration` lifted so the full file is processed uncapped). This
+particular sorted-first file happens to be short (75 s) -- well inside the corpus's documented
+576-1800 s range (see the SAD baseline section above) but not itself the "typical" ~600 s scale;
+recorded honestly rather than re-selected to hit a target duration (measure-then-pin, no
+content-based cherry-picking).
+
+| run | wall_s | audio_s | rtf | maxrss_mb | files |
+|---|---|---|---|---|---|
+| 1 | 0.199811 | 75.000000 | 0.002664 | 55.062 | 1 |
+| 2 | 0.211289 | 75.000000 | 0.002817 | 54.797 | 1 |
+| 3 | 0.199949 | 75.000000 | 0.002666 | 54.781 | 1 |
+
+**LID phonotactic leg (Twin, Mode 7)** -- `tests/reference_data/phase4b/twin_mode7.config` (the
+Phase 4b flagship fixture net; both nets' `*_BackPropagationActivated` are already `false` in the
+committed config, so no override was needed) with `fileslisting` repointed at the sorted-first
+`*.phSeqbis` under `data/LRE03-LRE07/train/phSeq/**`. phSeq's "processed duration" is content-
+derived (`phseq_frames_count`, NOT `Audio_max_duration`-capped -- see `audio.rs::read_phseq`), so
+this leg's audio_s (42.5 s) reflects that specific file's phoneme-sequence length, not a
+wav-clock duration.
+
+| run | wall_s | audio_s | rtf | maxrss_mb | files |
+|---|---|---|---|---|---|
+| 1 | 0.068943 | 42.540000 | 0.001621 | 34.047 | 1 |
+| 2 | 0.064122 | 42.540000 | 0.001507 | 31.609 | 1 |
+| 3 | 0.058129 | 42.540000 | 0.001366 | 31.531 | 1 |
+
+Reading: both corpus-gated legs land in the same RTF ballpark as the 60 s CI fixture (~0.0014 -
+0.0028, all comfortably sub-1.0 -- i.e. the exact path already runs far faster than real time on
+this hardware) and the same rough MB-per-audio-second scale (~0.7-0.75 here vs ~0.48 for the
+stereo 60 s fixture -- channel count and net size both shift this, not a discrepancy). The
+phonotactic (Mode 7) leg is fastest/lightest per audio-second, consistent with its much smaller
+net (11,12-unit LSTM layers vs the SAD net's 23,24,24) and Mode 7's frozen-SAD contract (only the
+LID net actually runs). These are exact-path numbers only -- Task 2+'s fast path is compared
+against this table, not against the scouting sanity figures.
+
+### Criterion micro-benches
+
+`cargo bench` (`src/rust/benches/kernels.rs`) times the three exact kernels Task 2+ will grow f32
+twins for, on shapes read off `tier2_spectral.config` itself: `matmul_seq_92x96` (92 frames x
+`BLSTM_NNetInputSize 23` into `23 x 4*24`, the LSTM input-projection product), `gfft_1024`
+(`BLSTM_spectrum_order 10` -> a 1024-point GFFT), `mel_apply_513x20` (the resulting 513-column
+periodogram through a `BLSTM_nb_bins 20` log-mel filterbank). Task 1 only wires the harness +
+smoke-tests it (`cargo bench -- --test`); no timing numbers are pinned here yet -- that lands
+when Task 2+'s fast twins need a same-shape comparison baseline.

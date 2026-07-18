@@ -106,7 +106,11 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
 /// TOML config (`toml_config::toml_to_map`); anything else (incl. the legacy
 /// extensionless / `.config` convention) -> the legacy whitespace importer
 /// unchanged. Both paths collapse to the same `IndexMap<String, String>` shape.
-fn load_config(path: &str) -> Result<IndexMap<String, String>> {
+///
+/// `pub(crate)` (Phase 7 Task 1): `bench.rs::run_bench` reuses this exact
+/// dispatch to load its own `<config>` argument, rather than re-implementing
+/// the `.toml`-vs-legacy extension check a second time.
+pub(crate) fn load_config(path: &str) -> Result<IndexMap<String, String>> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("cannot read config file '{path}': {e}"))?;
     if path.ends_with(".toml") {
@@ -135,4 +139,52 @@ fn apply_override(map: &mut IndexMap<String, String>, arg: &str) -> Result<()> {
         map.insert(key.to_string(), val.to_string());
     }
     Ok(())
+}
+
+/// A parsed `speech bench` invocation. Port-only subcommand (Phase 7 Task 1,
+/// the `--convert-config` precedent) -- NOT part of the legacy `fsp` mode-flag
+/// grammar `parse_cli`/`Mode::from_flag` handle above; `main.rs` dispatches to
+/// this parser on the literal `bench` first argument, before `parse_cli` ever
+/// runs. `path` is the raw `--path` string, unvalidated here -- `bench::
+/// BenchPath::parse` owns the `exact`-only contract so this module stays
+/// bench-semantics-free (pure CLI token shape only, matching `parse_cli`'s own
+/// scope).
+#[derive(Debug, Clone)]
+pub struct BenchInvocation {
+    pub config: String,
+    pub repeat: usize,
+    pub path: String,
+}
+
+/// Parse `speech bench [--repeat=N] [--path=exact] <config>` (the `bench`
+/// literal itself already consumed by the caller). `--repeat` defaults to 1,
+/// `--path` defaults to `"exact"`; exactly one non-flag argument (the config
+/// path) is required.
+pub fn parse_bench_args(args: &[String]) -> Result<BenchInvocation> {
+    let mut repeat: usize = 1;
+    let mut path = "exact".to_string();
+    let mut config: Option<String> = None;
+
+    for arg in args {
+        if let Some(rest) = arg.strip_prefix("--repeat=") {
+            repeat = rest
+                .parse::<usize>()
+                .map_err(|e| anyhow::anyhow!("invalid --repeat value '{rest}': {e}"))?;
+        } else if let Some(rest) = arg.strip_prefix("--path=") {
+            path = rest.to_string();
+        } else if arg.starts_with("--") {
+            bail!("unknown bench option: {arg}");
+        } else if config.is_some() {
+            bail!("bench takes exactly one config path (got a second: {arg})");
+        } else {
+            config = Some(arg.clone());
+        }
+    }
+
+    let config = config.ok_or_else(|| anyhow::anyhow!("bench requires a config path"))?;
+    Ok(BenchInvocation {
+        config,
+        repeat,
+        path,
+    })
 }
