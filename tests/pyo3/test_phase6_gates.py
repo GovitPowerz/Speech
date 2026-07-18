@@ -7,12 +7,15 @@ held-out slice end to end -- `drivers/test.py::evaluate` -> `.scr` -> `read_scr_
 `lid_error` + `cavg` (Task 5). These are the phase's FIRST real headline numbers.
 
 WHY THE IMPROVEMENT SIGNAL IS ARGMAX ERROR, NOT THE CE VALIDATION COST (a Task-8 finding):
-from scratch the softmax cross-entropy VALIDATION cost can RISE while the argmax accuracy
+from scratch the softmax cross-entropy VALIDATION cost CAN rise while the argmax accuracy
 improves -- the net grows confident on the (majority-leaning) classes it learns first, so
-its held-out CE overfits even as it starts getting languages right. So the honest,
-direction-safe improvement here is the held-out LID argmax error: it must (a) beat the
-12-way chance error (91.67%) with headroom and (b) beat the model's OWN untrained-init error
-on the identical test set. The TRAIN cost descending is the separate machinery-works signal.
+its held-out CE can overfit even as it starts getting languages right. This is a GENERAL
+caution (observed in exploratory/longer runs), NOT necessarily this committed 2-epoch run,
+whose val cost actually DECREASED (best_epoch=1); either way the gate keys off the TASK
+metric regardless. So the honest, direction-safe improvement here is the held-out LID argmax
+error: it must (a) beat the 12-way chance error (91.67%) with headroom and (b) beat the
+model's OWN untrained-init error on the identical test set. The TRAIN cost descending is the
+separate machinery-works signal.
 The net mode-collapses toward the majority classes on this tiny subset (an inherent property
 of from-scratch 12-way LID on a few files per language, NOT a bug -- the full-corpus launcher
 run is where genuine 12-way discrimination lands); the 48-file held-out set makes the
@@ -153,7 +156,7 @@ def test_sad_subset_trains_and_scores(tmp_path: Path) -> None:
         steps_per_epoch=10,  # ~30 SMORMS3 steps: past warm-up, into the all-speech attractor
         patience=99,
         seed=0,
-        audio_max_duration=20.0,  # cap the 1800 s CallFriend recordings; the ref windows to match
+        audio_max_duration=20.0,  # cap the 576-1800 s CallFriend recordings (median ~600 s); the ref windows to match
         score_init=True,  # also score the untrained init on the SAME test set (the DCF baseline)
     )
 

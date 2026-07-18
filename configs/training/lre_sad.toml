@@ -19,6 +19,13 @@
 # would drive the net at the wrong input width. CostLaw is `log` (the T7-verified
 # derivative-consistent live path).
 #
+# DIVERGENCES from 1_worker_1.config (the complete list -- all RUNTIME/orchestration
+# keys, none DSP/net/cost, so the "seeded VERBATIM" claim above holds for the modeled
+# keys): max_duration (capped for a bounded run, run_baseline overrides), num_outer_threads
+# (N-lane fold width), results_file, backpropagation_epochs (0 -- the modern loop's run_solo
+# path, not the engine-internal train()), exclude_nontrans (false, see below), and
+# dump_directory (empty during training, runtime-set for the scoring pass).
+#
 # LICENSE HYGIENE: no corpus path/filename is committed. `[corpus]` fileslisting +
 # language2classmapping are RUNTIME placeholders -- `speech.drivers.baseline.run_baseline`
 # derives the SAD wav/xml listings (`dataprep.lre.derive_sad_listings`) and a
@@ -65,9 +72,9 @@ wave_all_width = 1000
 offset = 0
 # A moderate default cap; run_baseline overrides this (the subset gate caps short
 # to fit the < 10 min budget, the full-run launcher lifts it). The corpus wavs are
-# 1800 s CallFriend recordings, so a cap is mandatory for a bounded run, and the
-# held-out DCF windows the reference to the same capped span (matching the engine's
-# own _AudioDuration reference windowing).
+# 576-1800 s CallFriend recordings (median ~600 s), so a cap is mandatory for a
+# bounded run, and the held-out DCF windows the reference to the same capped span
+# (matching the engine's own _AudioDuration reference windowing).
 max_duration = 120
 
 [spectrum]

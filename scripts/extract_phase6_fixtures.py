@@ -85,11 +85,13 @@ CASES: dict[str, tuple[str, list[Interval], list[Interval]]] = {
         [(0.0, 0.5, "non-speech"), (0.5, 5.5, "speech"), (5.5, 6.0, "non-speech")],
     ),
     "04_collar_boundary_fp": (
-        "Interior nonspeech of duration 2.1s (== the one-second interior threshold "
-        "2*1.0+0.1) with an FP straddling both collar edges: the FP falls inside the "
-        "collar (excluded) once the collar grows past 0.25s, so pfa/dcf step across "
-        "collar sizes; the 2.0s collar swallows the whole segment (nonspeech sum -> 0, "
-        "the pfa zero-guard + the 'nonspeech==0' DCF branch).",
+        "Interior nonspeech near the one-second interior threshold (2*1.0+0.1 = 2.1s), 2.0->4.1, "
+        "with an FP straddling both collar edges: the FP falls inside the collar (excluded) once "
+        "the collar grows past 0.25s, so pfa/dcf step across collar sizes; the 2.0s collar swallows "
+        "the whole segment (nonspeech sum -> 0, the pfa zero-guard + the 'nonspeech==0' DCF branch). "
+        "NB not a >= vs > discriminator at the 1.0s collar -- the carve/merge scores the same (0/0) "
+        "either way; the >= inclusivity rests on the perl's hex-verified threshold bit-identity, "
+        "not this golden.",
         [(0.0, 2.0, "S"), (2.0, 4.1, "NS"), (4.1, 6.0, "S")],
         [(0.0, 2.25, "speech"), (2.25, 3.85, "non-speech"), (3.85, 6.0, "speech")],
     ),
@@ -150,10 +152,11 @@ CASES: dict[str, tuple[str, list[Interval], list[Interval]]] = {
         [(0.0, 5.0, "speech")],
     ),
     "13_exact_threshold_boundary": (
-        "Interior nonspeech of duration exactly 0.6s == the quarter-second interior "
-        "threshold (2*0.25+0.1): the >= boundary is inclusive so the 0.25s collar CARVES "
-        "(0.1s scored middle) while the 0.5s collar (threshold 1.1) MERGES it to a whole "
-        "collar -- pins the exact float comparison at the carve/merge boundary.",
+        "Interior nonspeech near the quarter-second interior threshold (2*0.25+0.1 = 0.6s): the "
+        "1.6-1.0 span is ~1 ULP ABOVE 0.6, so the 0.25s collar CARVES (0.1s scored middle) while "
+        "the 0.5s collar (threshold 1.1) MERGES it to a whole collar -- exercises the carve-vs-merge "
+        "BRANCHES. It does NOT distinguish >= from > (the span is strictly above 0.6 either way); the "
+        ">= inclusivity rests on the perl's hex-verified threshold bit-identity, not this golden.",
         [(0.0, 1.0, "S"), (1.0, 1.6, "NS"), (1.6, 3.0, "S")],
         [(0.0, 3.0, "speech")],
     ),

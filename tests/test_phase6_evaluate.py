@@ -6,8 +6,10 @@ via the committed `tests/reference_data/phase6/dcf/*.json` goldens -- each produ
 `/usr/bin/perl` (`tools/perl_oracle/run_sad_scorer.sh`). The perl prints Prob_Miss /
 Prob_FalseAlarm / DCF at `%7.5f` (5 decimals); the port reproduces the scorer's exact
 double-precision segment accumulation, so pinning is 5-decimal string equality (`{:.5f}`)
--- the literal "float equality to the scorer's printed precision". CI never runs the perl;
-it only consumes these goldens.
+-- a ~5e-6 string-equality CLASS, not literal float bit-equality, but safe here because the
+underlying accumulation is bit-identical to the perl's (no value sits within that ~5e-6 window
+of a different true result, so the rounding never masks a real difference). CI never runs the
+perl; it only consumes these goldens.
 
 The `load_tab_ref` / `load_vrcts_hyp` adapters are pinned separately on crafted inputs.
 """

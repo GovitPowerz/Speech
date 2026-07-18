@@ -637,7 +637,7 @@ fn read_phseq(path: &Path) -> anyhow::Result<Audio> {
 /// `(vectorNb_m x vectorSize)` matrix (rows = frames, cols = feature dim) pushed to
 /// `external_features` in file order -- NOT one row per record: a single LRE utterance
 /// is typically one record with `vectorNb` in the thousands (surveyed `nbRecords`
-/// 1..=14, `vectorSize == 23 == NNetInputSize`). Records with `vectorSize*vectorNb <= 0`
+/// 1..=15, `vectorSize == 23 == NNetInputSize`). Records with `vectorSize*vectorNb <= 0`
 /// are SKIPPED (`:229`), faithfully dropping empty/negative-count padding records rather
 /// than erroring; the row-major fill (col fastest, `:234-240`) is preserved.
 ///

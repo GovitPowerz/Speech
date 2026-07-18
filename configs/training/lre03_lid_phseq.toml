@@ -30,11 +30,14 @@
 # documented-optional legacy-comparability work.
 #
 # BYTE-DIFF vs the sibling `lre03_lid_features.toml` (the cep Mode-7 arm, Task 8), the
-# ONLY deltas (everything else -- the inert SAD front-end DSP, the frozen [nn] SAD net,
-# the [cost]/[cost_lid] laws -- is identical, both descend from the twin_mode7 lineage):
+# ONLY deltas (three functional + one cosmetic placeholder; everything else -- the inert
+# SAD front-end DSP, the frozen [nn] SAD net, the [cost]/[cost_lid] laws -- is identical,
+# both descend from the twin_mode7 lineage):
 #   * [engine] file_type          2  -> 1   (cep binary -> phSeq one-hot)
 #   * [nn_lid] nnet_input_size    23  -> 38  (cep vectorSize -> letterMapping width)
 #   * [nn_lid] lstm_neuron_nb  "23,24" -> "38,24"  (input row must equal nnet_input_size)
+#   * [corpus] fileslisting  "lre03_lid_features_train.flst" -> "lre03_lid_phseq_train.flst"
+#     (cosmetic placeholder name only -- run_baseline rewrites both at runtime)
 # The LID output stays "48,12" (2*hidden 24 = 48 BLSTM concat; 12 LRE03 classes).
 #
 # Value convention (toml_config.rs KEY_TABLE): booleans/integers native TOML;

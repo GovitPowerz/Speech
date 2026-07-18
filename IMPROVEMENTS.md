@@ -135,9 +135,13 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `tests/reference_data/phase4c/genome_calib.config`, a vec2struct BIJECTION fixture, never a training
   config. Per the Task-7 rule (a law with no live phase-6 path stays documented-not-fixed), it is not
   fixed now. `scalar_delta_midthresh_sqrt_above_branch` (`phase3_costlaw_backward_golden.rs`) pins the
-  legacy-faithful behavior bit-exact vs the real compiled `AboveThreshSqrtLaw::deriv`; a future phase
-  that sets `CostLaw = sqrt` on a live path would fix it (restore the `1/_Adim` factor) and re-pin that
-  golden to port-truth. Oracle harness unregenerated (describes the legacy forever).
+  legacy-faithful ABOVE-arm behavior bit-exact vs the real compiled `AboveThreshSqrtLaw::deriv`; the
+  BELOW-arm interior is pinned SEPARATELY by `scalar_delta_log_sqrt_canary` (same file, via
+  `cost_deriv_scalar_sqrt_{speech,other}.bin`). A future phase that sets `CostLaw = sqrt` on a live
+  path would fix it (restore the `1/_Adim` factor) and must re-pin BOTH sites to port-truth -- a cold
+  `1/_Adim` fix shifts the below-arm derivative by ~1e-6 (>> the 4-ULP canary tolerance), so
+  `scalar_delta_log_sqrt_canary` breaks too, not just the above-branch golden (the T7 review finding).
+  Oracle harness unregenerated (describes the legacy forever).
 - **[0b-i] `suppress_short` no-advance-after-erase** (`src/rust/src/tasks/segmentation.rs`
   `suppress_short`, from `Segmentation.cpp:245-282`): after any erase branch, the loop does NOT
   advance `i` -- the erased slot shifts the next segment into the current index, which must be
@@ -1593,7 +1597,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   see the CLOSED (phase 6) entry directly below). *Fix candidate:* port `load_ref_from_trs` when a
   corpus needs it. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
 
-- **[phase4a] CLOSED (phase 6): `.xml` (VRCTS) reference loading wired into the reference dispatch**
+- **[phase4a] CLOSED (phase 6, Task 2b, commit `694b29b`): `.xml` (VRCTS) reference loading wired into the reference dispatch**
   (`engine/bag_of_processors.rs::segmentation_function` + `extension_of` +
   `tasks/segmentation_io.rs::load_ref_vrcts`, from `Segmentation.cpp:89-100` (the ctor `.xml` branch)
   + `:808-829` `load_ref_from_vrcts`): Phase 6's SAD track trains on the corpus `.part.xml` VRCTS
@@ -3306,7 +3310,19 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   plus one engine-backed smoke/early-stop-firing test -- but no committed fixture demonstrates the
   WRAPPER'S OWN validation-driven early-stop selecting a genuinely-better model on a signal that
   actually moves.
-  **Phase-6 pointer:** once real training data makes `NNCostSeg` itself (or a comparable
+  **CLOSED (phase 6, Task 6, commit `deb635a`):** the pointer's precondition is met and its ask is
+  done -- the certification flips from PIECEWISE to END-TO-END for the wrapper's early-stop/checkpoint
+  state machine. `train_modern`'s default validation metric flipped from the stuck balance-5 rate to
+  the CONTINUOUS `NNCostSeg` objective (`ModernTrainParams.val_metric`/`RunState`, default
+  `"nn_cost_seg"`; for the algo-6 Twin it silently adds `+NNCostLID`, mirroring `forward_backward`'s
+  `f`), and `tests/pyo3/test_phase5_train_modern_smoke.py::test_early_stop_triggers_on_moving_nn_cost_seg`
+  now demonstrates EXACTLY the case this entry said no fixture covered: the wrapper's own
+  validation-driven early-stop firing patience and selecting the best epoch on a signal that ACTUALLY
+  MOVES (no longer the flat plateau `test_early_stop_triggers` deliberately exploited). The three
+  Phase-6 baseline arms (Tasks 8/9/10) exercise the same moving-`NNCostSeg` loop on real corpus data.
+  The two sentences above are kept for the record -- they described the Phase-5 state and the
+  "no committed fixture demonstrates..." claim is no longer true.
+  **Phase-6 pointer (now closed):** once real training data makes `NNCostSeg` itself (or a comparable
   continuous signal) usable as the per-epoch validation metric -- not the discrete balance-5 error
   rate -- re-validate `train_modern`'s early-stop/checkpoint selection end to end against it before
   trusting the wrapper unsupervised on real corpora.
@@ -4581,7 +4597,7 @@ it is now a real reader; the other three remain blocked. See its flipped entry b
   legacy runs. Fixing it means inventing correct CNN semantics with no working reference
   to validate against.
 
-- **Cep ingestion (`File_Type` 2): PORTED (phase 6 Task 1, commit `this commit`) -- the
+- **Cep ingestion (`File_Type` 2): PORTED (phase 6 Task 1, commit `7704b23`) -- the
   LRE03/07 corpus arrived; `File_Type` 3/4 stay deferred (still no data).**
   *Legacy behavior (recorded, `AudioStruct.cpp:183-256`):* the cep binary is `int32
   nbRecords | int16 vectorSize | int16 magic` (little-endian), then an `int32
@@ -4599,7 +4615,7 @@ it is now a real reader; the other three remain blocked. See its flipped entry b
   actually exercises File_Type 2+".
   *What landed (Phase 6 Task 1):* that corpus is now `data/LRE03-LRE07/` (34k
   `.plp8f0mvsdd` LID feature files, gitignored + licensed, byte arithmetic exact on every
-  surveyed file, `vectorSize == 23 == NNetInputSize`, `nbRecords` 1..=14).
+  surveyed file, `vectorSize == 23 == NNetInputSize`, `nbRecords` 1..=15).
   `src/rust/src/audio.rs::read_cep` reads the layout above into `external_features` (one
   `(vectorNb x vectorSize)` matrix per kept record -- NOT one row per record; a single
   LRE utterance is typically one record of a few thousand frames) plus the block-filled

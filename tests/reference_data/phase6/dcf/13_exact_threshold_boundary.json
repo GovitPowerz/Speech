@@ -1,6 +1,6 @@
 {
   "name": "13_exact_threshold_boundary",
-  "description": "Interior nonspeech of duration exactly 0.6s == the quarter-second interior threshold (2*0.25+0.1): the >= boundary is inclusive so the 0.25s collar CARVES (0.1s scored middle) while the 0.5s collar (threshold 1.1) MERGES it to a whole collar -- pins the exact float comparison at the carve/merge boundary.",
+  "description": "Interior nonspeech near the quarter-second interior threshold (2*0.25+0.1 = 0.6s): the 1.6-1.0 span is ~1 ULP ABOVE 0.6, so the 0.25s collar CARVES (0.1s scored middle) while the 0.5s collar (threshold 1.1) MERGES it to a whole collar -- exercises the carve-vs-merge BRANCHES. It does NOT distinguish >= from > (the span is strictly above 0.6 either way); the >= inclusivity rests on the perl's hex-verified threshold bit-identity, not this golden.",
   "ref": [
     [
       0.0,

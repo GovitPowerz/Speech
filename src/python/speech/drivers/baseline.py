@@ -49,8 +49,8 @@ scored end to end with the T4 DCF harness: the engine dumps one VRCTS hypothesis
 test file (`Dump_Directory`), those are read back via `evaluate.load_vrcts_hyp`, the
 `.part.xml` references via `evaluate.load_vrcts_ref` (windowed to the capped-audio span),
 and pooled through `evaluate.dcf` -> the first real DCF numbers (trained vs its own
-from-scratch init). The corpus wavs are 1800 s CallFriend recordings, so `Audio_max_duration`
-caps them; the reference is windowed to the same span (matching the engine's own
+from-scratch init). The corpus wavs are 576-1800 s CallFriend recordings (median ~600 s), so
+`Audio_max_duration` caps them; the reference is windowed to the same span (matching the engine's own
 `_AudioDuration` reference windowing). NOTE (measured, honest): on a tiny subset the
 from-scratch net mode-collapses toward the window-majority (all-speech) -- the same
 inherent-property caveat the LID arm carries for its majority classes; the trained-vs-init
@@ -645,8 +645,8 @@ def run_baseline(
     `out_dir/checkpoint`'s `last_*.bin`. `lanes`: the engine's `numOuterThreads` fold width
     (recorded in metadata; N=1 is the deterministic parity mode). `lre_listing` (LID only):
     localize this 2015 listing instead of deriving from the corpus tree. `audio_max_duration`
-    (SAD only): override `Audio_max_duration` (the corpus wavs are 1800 s; a cap bounds the
-    run and the held-out DCF windows the reference to the same span). `_train_fn` injects a
+    (SAD only): override `Audio_max_duration` (the corpus wavs are 576-1800 s, median ~600 s; a cap
+    bounds the run and the held-out DCF windows the reference to the same span). `_train_fn` injects a
     stub `train_modern` for tests.
 
     The arm dispatch differs in three places -- the listings (LID globs cep + a synthesized
@@ -867,7 +867,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps-per-epoch", type=int, default=8)
     parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
     parser.add_argument("--lre-listing", type=Path, default=None, help="LID arm: localize this 2015 listing instead of deriving from the corpus tree")
-    parser.add_argument("--audio-max-duration", type=float, default=None, help="SAD arm: cap Audio_max_duration (s); the corpus wavs are 1800 s")
+    parser.add_argument(
+        "--audio-max-duration", type=float, default=None, help="SAD arm: cap Audio_max_duration (s); the corpus wavs are 576-1800 s (median ~600 s)"
+    )
     parser.add_argument("--resume", action="store_true", help="continue from out_dir/checkpoint")
     parser.add_argument("--dry-run", action="store_true", help="1-step smoke: tiny subset, 1 epoch, 1 step, still scored")
     return parser

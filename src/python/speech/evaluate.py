@@ -100,7 +100,9 @@ def dcf(
 def load_tab_ref(path: Path, start_col: int = 2, end_col: int = 3, type_col: int = 4) -> list[Interval]:
     """Read a TAB-delimited NIST ref file into raw intervals. Column defaults are the
     ComputeDCF.py convention (-s 2 -e 3 -g 4); kinds are returned verbatim (S/NS/NT/RI/RS/RX)
-    for `dcf()` to interpret."""
+    for `dcf()` to interpret. The named-int-column signature (`start_col`/`end_col`/`type_col`)
+    is a benign deviation from the plan's `cols`-tuple sketch -- same columns, clearer call
+    sites."""
     out: list[Interval] = []
     for line in path.read_text().splitlines():
         if not line.strip():
@@ -193,7 +195,12 @@ def _build_collar_segs(no_collar: list[Interval], c: float) -> list[Interval]:
     """Port of scoreFile_SAD.pl:128-268 -- carve collars of width `c` out of the nonspeech
     segments. The leading nonspeech gets one trailing collar (threshold c+0.1); interior
     nonspeech gets a collar on each side (threshold 2c+0.1); if a segment is too short to
-    leave >= 0.1s of scored nonspeech it becomes a whole collar. Speech is unchanged."""
+    leave >= 0.1s of scored nonspeech it becomes a whole collar. Speech is unchanged.
+
+    The perl's two inner carve guards (re-checking that the just-computed scored middle is
+    >= 0.1s before emitting it) are VESTIGIAL -- provably always-true given the outer
+    `>= c+0.1` / `>= 2c+0.1` threshold test that already gates the carve -- so they are
+    DROPPED here (behavior-preserving; the T4 review proved both always-true)."""
     out: list[Interval] = []
     start, end, kind = no_collar[0]
     if kind == "NonSpeech":
@@ -366,7 +373,9 @@ def lid_error(scores: NDArray[np.float64], refs: NDArray[np.int_]) -> float:
     Scope: `compare_scores.m` assembles `scores_test` by scaling each detector column with
     a PSO fusion weight (`pso_out(ii)`, :10) and later trains a `patternnet(40)` fusion
     (:50-58). Both are OUT of scope -- `lid_error` takes the already-assembled score
-    matrix and does only the argmax + error; any calibration/fusion is the caller's."""
+    matrix and does only the argmax + error; any calibration/fusion is the caller's. To
+    reproduce the `.m`'s fused number exactly, apply the `pso_out` per-detector weighting
+    upstream before passing the score matrix here."""
     scores_a = np.asarray(scores, dtype=F64)
     refs_a = np.asarray(refs)
     preds = scores_a.argmax(axis=1)

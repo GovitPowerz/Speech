@@ -202,6 +202,8 @@ class ModernTrainParams(BaseModel):
     # F10-fixed) -- it MOVES from scratch. "balance": the phase-5 balance-law cost, which on the SAD
     # from-scratch fixture collapses to the discrete `100 - success` rate STUCK at 30.0 -- a useless
     # early-stop plateau (why nn_cost_seg is now the default; see IMPROVEMENTS.md / the pyo3 smoke).
+    # NB for the algo-6 Twin, "nn_cost_seg" SILENTLY adds +NNCostLID (mirroring forward_backward's
+    # f = NNCostSeg + NNCostLID, train.py:775-779) -- the metric name names only the SAD half.
     val_metric: Literal["nn_cost_seg", "balance"] = "nn_cost_seg"
     # hard-example mini-batching (Task 4/5 fixed batching); minibatch == 0 -> full-corpus training per epoch.
     minibatch: int = 0

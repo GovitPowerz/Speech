@@ -99,10 +99,12 @@ its own untrained init by 20.83 pt on a disjoint 48-file held-out slice, determi
 in ~4.7 min. On this tiny subset (~3 train files/language) the net mode-collapses toward the
 majority classes -- an inherent property of from-scratch 12-way LID on little data, honestly
 noted; the 48-file held-out set makes the beat-chance count (13 correct vs chance ~4) robust.
-The train objective descends (2.368 -> 2.216); the softmax-CE VALIDATION cost can rise from
-scratch (the net grows confident on the classes it learns first) even as argmax accuracy
-improves, so the direction-safe improvement signal is the argmax error, not the CE. Genuine
-12-way discrimination is the full-corpus launcher's job.
+The train objective descends (2.368 -> 2.216). A general from-scratch caution (NOT this
+committed run's behavior): the softmax-CE VALIDATION cost CAN rise (the net grows confident on
+the classes it learns first) even as argmax accuracy improves -- observed in exploratory/longer
+runs; the committed 2-epoch run's val cost actually DECREASED (best_epoch=1). Either way the gate
+keys off the direction-safe TASK metric -- the held-out argmax error (beats chance AND beats
+init) -- not the CE. Genuine 12-way discrimination is the full-corpus launcher's job.
 
 ### SAD (Algo 3 spectral, File_Type 0 wav) -- Task 9
 
@@ -114,7 +116,10 @@ with the T4 DCF harness: the engine dumps one VRCTS hypothesis xml per test file
 `_AudioDuration` reference windowing); pooled through `evaluate.dcf`. These are the FIRST REAL
 DCF numbers under this protocol. DCF pooled per-collar over the whole held-out slice (Pmiss/Pfa
 accumulated across a concatenated timeline, the single-number analogue of the LID arm's pooled
-argmax error).
+argmax error). This is a MICRO-average (one concatenated timeline, one `dcf()` call =
+duration-weighted, `_pool_dcf`); the 2015 `ComputeDCF.py` pooling convention is not ported (and
+no copy survives in the archive) -- confirming the port's micro-pooling matches it is a FULL-RUN-ERA
+verification item, deferred to when a launcher run produces numbers to compare.
 
 | split | files (train/valid/test) | DCF@0 | DCF@0.25 | DCF@0.5 | DCF@1 | DCF@2 | Pmiss/Pfa @0.5 | config | seed |
 |---|---|---|---|---|---|---|---|---|---|
@@ -149,7 +154,11 @@ seed (`best_sad.bin == sad_seed.bin` byte-for-byte, asserted in the gate). ONLY 
 trains. Data source: `train/phSeq/*.file.phSeqbis` (598 CallFriend whole-utterance files, all 12
 languages, language from the 2-letter filename prefix) -- the 2015 phSeq listings localize to 0
 rows on this archive (they anchor on `eval/` but the files sit under `train/phSeq/`), so the
-corpus tree is globbed directly.
+corpus tree is globbed directly. FULL-RUN PROVENANCE NOTE: the archive's 2015 eval phSeq
+listings name 1199 `lidXXXXX` files that PHYSICALLY sit under `train/phSeq/` and carry the
+listing's own language labels; they are usable for a fuller run via a RE-ANCHORED localizer
+(pointing the `train`/`eval` anchor at `train/phSeq/`) instead of the 2-letter-prefix glob the
+subset gate uses -- a full-run-era option, unused by the committed glob arm.
 
 | split | files (train/valid/test) | LID error % | Cavg | chance % | config | seed |
 |---|---|---|---|---|---|---|
@@ -157,7 +166,8 @@ corpus tree is globbed directly.
 | subset gate -- untrained init baseline | (same test set) | 91.11 | 0.48 | 91.67 | (seed packs, no training) | 0 |
 | full run | TBD | TBD | TBD | 91.67 | `lre03_lid_phseq.toml` | TBD |
 
-Subset-gate reading (measured seed 0, ~232 s per run, run-twice bit-identical): the from-scratch
+Subset-gate reading (measured seed 0, ~193-232 s per run box-dependent -- the training portion
+is ~193 s, the full run_baseline call ~232 s; run-twice bit-identical): the from-scratch
 12-class phonotactic LID net beats 12-way chance by **7.22 pt** and its own untrained init by
 **6.67 pt** on a disjoint 45-file held-out slice, deterministically, with the SAD net PROVABLY
 frozen (only the LID net moved). HONEST FRAMING (spec S1.9, no overclaim): these margins are THIN
@@ -180,7 +190,7 @@ speech baseline lid-features --corpus-root data/LRE03-LRE07 --out-dir runs/lid_f
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25
 
 # SAD (Algo 3 spectral, wav) -- --audio-max-duration lifts the subset gate's short cap; omit
-# it to score full-length recordings (the corpus wavs are 1800 s CallFriend files).
+# it to score full-length recordings (the corpus wavs are 576-1800 s CallFriend files, median ~600 s).
 speech baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_full \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 
@@ -195,3 +205,7 @@ pairs; LID: the whole localized corpus); `--lanes N` sets the fold width (record
 (seed/lanes/subset/config-hash/audio cap), `checkpoint/` (best/last packs + `train_history.json`),
 and the held-out scores -- LID `scores/` (`.scr`) -> `lid_error`/`cavg`; SAD `score_trained/`
 (VRCTS hyp xml) -> pooled `dcf`. Paste the resulting numbers into the `full run` rows above.
+
+Known limitation (machinery): `forget_bias_one` (the LSTM forget-gate 1.0 init, default on) is
+threaded correctly through `ModernTrainParams` end to end but has NO CLI flag on `speech baseline`
+-- only its default (`True`) is exercised; a `False` sweep would need the flag added.
