@@ -58,9 +58,9 @@ def _toy_vrcts_xml() -> bytes:
 
 def test_localize_path_strips_2015_prefix_at_train_anchor(tmp_path: pathlib.Path) -> None:
     corpus_root = tmp_path / "corpus"
-    raw = "/Users/Govit/Documents/AudioFiles/LRE03/train/LID_Features/plp8f0mvsdd/LRE03/ara_1.plp8f0mvsdd"
+    raw = "/Users/Govit/Documents/AudioFiles/LRE03/train/LID_Features/plp8f0mvsdd/LRE03/xxx_0001.plp8f0mvsdd"
     got = _localize_path(raw, corpus_root)
-    assert got == corpus_root / "train" / "LID_Features" / "plp8f0mvsdd" / "LRE03" / "ara_1.plp8f0mvsdd"
+    assert got == corpus_root / "train" / "LID_Features" / "plp8f0mvsdd" / "LRE03" / "xxx_0001.plp8f0mvsdd"
 
 
 def test_localize_path_strips_2015_prefix_at_eval_anchor(tmp_path: pathlib.Path) -> None:

@@ -4643,8 +4643,9 @@ it is now a real reader; the other three remain blocked. See its flipped entry b
   round-trip. Corpus-gated layout confirmation (skips cleanly if the licensed corpus is
   absent): `corpus_first_file_consistency` (Rust, independent header parse + reader
   round-trip) and `test_cep_layout_byte_arithmetic` (Python, `tests/test_phase6_corpus.py`,
-  independent pure-`struct` parse) -- both on the deterministic first file `ara_1.
-  plp8f0mvsdd` (nbRecords=1, vectorSize=23, 3261 frames, 32.61s, max|x|=4.82).
+  independent pure-`struct` parse) -- both on the deterministically-selected first file of
+  the LRE03 features tree (sorted order, selected at runtime, never named in committed
+  source).
   *Mutation:* reverting `read_cep` to the old bail breaks both re-pins; swapping the
   float payload to big-endian or column-major fill breaks the `tiny_ok`/`multi_ok`
   hardcoded-value asserts and the corpus plausibility bounds; relaxing the strict

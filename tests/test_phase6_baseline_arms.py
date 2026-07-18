@@ -131,8 +131,8 @@ def test_config_hash_stable_and_sensitive() -> None:
 def test_derive_lid_features_records_from_synthetic_tree(tmp_path: Path) -> None:
     root = tmp_path / "train" / "LID_Features" / "plp8f0mvsdd" / "LRE03"
     root.mkdir(parents=True)
-    for name in ("ara_1.plp8f0mvsdd", "spa_9.plp8f0mvsdd", "vie_3.plp8f0mvsdd", "zzz_1.plp8f0mvsdd"):
-        (root / name).write_bytes(b"")  # empty stand-in; derivation only reads names
+    for name in ("ara_0001.plp8f0mvsdd", "spa_0001.plp8f0mvsdd", "vie_0001.plp8f0mvsdd", "zzz_0001.plp8f0mvsdd"):
+        (root / name).write_bytes(b"")  # empty stand-in, synthetic ids (no real corpus filename committed); derivation only reads names
     ref = tmp_path / "ref.stm"
     recs = B.derive_lid_features_records(tmp_path, ref)
     langs = sorted(r["lang"] for r in recs)
