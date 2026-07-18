@@ -1,0 +1,50 @@
+{
+  "name": "10_hyp_shorter_pad",
+  "description": "Hyp ends at 3.0 but the ref runs to 4.0: the scorer pads the trailing Speech hyp with a fabricated NonSpeech [3,4] (:390-393), turning the uncovered tail into FN.",
+  "ref": [
+    [
+      0.0,
+      4.0,
+      "S"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      3.0,
+      "speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.25,
+      "pfa": 0.0,
+      "dcf": 0.1875
+    }
+  ]
+}

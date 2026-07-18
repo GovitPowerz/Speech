@@ -20,6 +20,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
+import pytest
+from pydantic import ValidationError
 from speech.drivers.init import init_run
 from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
@@ -203,3 +205,19 @@ def test_missing_hook_without_engine_is_the_only_engine_dependency(tmp_path: Pat
         init_weights_override=[np.array([0.0])],
     )
     assert res.epochs_run == 2
+
+
+def test_val_metric_field_default_and_literal() -> None:
+    """Phase 6 Task 6: `val_metric` selects the forward-only validation signal and DEFAULTS to
+    `nn_cost_seg` -- the continuous F10 objective the modern loop's early-stop can actually
+    follow (the balance-law cost is a stuck-at-30.0 from-scratch plateau; see the pyo3 smoke).
+    Engine-free: pins the field, its new default, and the `Literal` + `extra="forbid"` guard.
+
+    This is part of the RED for the carry-forward fix: before the field lands,
+    `ModernTrainParams(val_metric=...)` raises `ValidationError` (extra="forbid") and the
+    default assertion has no field to read."""
+    assert ModernTrainParams().val_metric == "nn_cost_seg"  # the NEW default
+    assert ModernTrainParams(val_metric="balance").val_metric == "balance"
+    assert ModernTrainParams(val_metric="nn_cost_seg").val_metric == "nn_cost_seg"
+    with pytest.raises(ValidationError):  # the Literal + extra="forbid" rejects an out-of-set value
+        ModernTrainParams(val_metric="bogus")  # type: ignore[arg-type]

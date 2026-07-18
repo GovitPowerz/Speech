@@ -41,7 +41,7 @@ from numpy.typing import NDArray
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
 from speech.config_bridge import nnet_spec
 from speech.drivers.state import EpochRecord, ModernTrainParams, ModernTrainResult, RunState, TrainResult
-from speech.engine import CostParams, compute_cost, forward_backward
+from speech.engine import CostParams, _error_vad, _nn_cost_lid, _nn_cost_seg, compute_cost, forward_backward
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
 from speech.optimizers import QpsoParams, Smorms3, quantum_pso
@@ -734,12 +734,34 @@ def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdi
 def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: Path) -> ValidateFn:
     """The engine-backed forward-only validator: build a backprop-OFF engine on
     `valid_listing` (defaults to the training listing when unset), set the current weights,
-    run one scoring pass, and read back the balance-law cost + the FIXED confusion metric."""
+    run ONE scoring pass, and read back the validation cost + the FIXED confusion metric.
+
+    `params.val_metric` selects the early-stop cost (Phase 6 Task 6, a Phase-5 carry-forward):
+
+      * "nn_cost_seg" (DEFAULT): the forward-only NNCostSeg objective, assembled off the
+        results matrix EXACTLY as `engine.forward_backward` assembles its `f`
+        (`f = NNCostSeg (+ NNCostLID for the algo-6 Twin)`, engine.py:378-385) -- so the
+        validation signal is the held-out value of the SAME quantity SMORMS3 descends in
+        training. A CONTINUOUS signal that moves from scratch. No gradient is harvested
+        (`weights_derivatives` is never read): forward-only means the seg/LID-cost columns
+        the cost reads suffice, and the engine's cost block accumulates them on ANY forward
+        fold with references present (`BLSTMNeuralNetwork.cpp` gates the cost on
+        `target.rows() > 0`, NOT on backprop), so the backprop-OFF config here still fills
+        them.
+      * "balance": the phase-5 balance-law cost (`compute_cost`) -- preserved verbatim. On
+        the from-scratch SAD fixture balance-5 mode-0 collapses to the discrete `100-success`
+        error rate, stuck at 30.0 (the seeded net's posteriors never cross the decision
+        threshold), a useless early-stop plateau -- which is why nn_cost_seg is the default.
+
+    Reuses `_modern_config_text(..., backprop=False)` (the established forward-only builder) --
+    NO third config builder: both metrics run the identical backprop-OFF fold on
+    `valid_listing`; only the cost read off the results differs."""
     base = state.base_config
     algo = state.ps.algo
     balance = state.balance
     bbp = state.ps.BalanceBackProp
     valid_listing = params.valid_listing if params.valid_listing is not None else base["fileslisting"]
+    metric = params.val_metric
 
     def validate(weights: list[NDArray[np.float64]], epoch: int) -> tuple[float, float | None]:
         import speech_rs  # local: the pyo3 module is only needed on the engine path
@@ -750,7 +772,13 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
             engine.set_weights(0, [list(np.asarray(w, dtype=F64)) for w in weights])
             engine.run()
             results = np.asarray(engine.results_matrix(), dtype=F64)
-        val_cost, _ = compute_cost(results, 1, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
+        if metric == "nn_cost_seg":
+            error_vad = _error_vad(results, 1)
+            val_cost = _nn_cost_seg(error_vad)
+            if algo == 6:
+                val_cost += _nn_cost_lid(error_vad)  # mirror forward_backward's f = NNCostSeg + NNCostLID (Twin)
+        else:
+            val_cost, _ = compute_cost(results, 1, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
         return float(val_cost), _confusion_error(results, algo)
 
     return validate

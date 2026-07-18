@@ -1,0 +1,50 @@
+{
+  "name": "07_all_nonspeech_perfect",
+  "description": "Degenerate all-nonspeech ref, perfectly hypothesized: speech sum == 0 (pmiss zero-guard), FP == 0, every collar 0/0/0. Also exercises the LEADING-nonspeech collar carve (one trailing collar of width c off the single segment).",
+  "ref": [
+    [
+      0.0,
+      6.0,
+      "NS"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      6.0,
+      "non-speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    }
+  ]
+}

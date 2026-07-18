@@ -1,0 +1,50 @@
+{
+  "name": "14_all_collar_dcf_zero",
+  "description": "A 0.3s all-nonspeech ref: below the leading threshold 0.25+0.1=0.35 for every nonzero collar, so the whole ref becomes a single collar -> both speech and nonspeech sums are 0 -> the hardcoded 'DCF == 0.00000' both-zero branch (:575-576).",
+  "ref": [
+    [
+      0.0,
+      0.3,
+      "NS"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      0.3,
+      "non-speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    }
+  ]
+}

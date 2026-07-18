@@ -47,3 +47,7 @@ output/*
 # === Claude Code ===
 .claude/
 .superpowers/
+
+# Phase 6: local corpora + scoring toolkits (never committed - gigabytes of licensed LDC audio)
+data/LRE03-LRE07/
+data/Scoring_LRE15/

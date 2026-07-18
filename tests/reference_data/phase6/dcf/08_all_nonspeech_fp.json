@@ -1,0 +1,55 @@
+{
+  "name": "08_all_nonspeech_fp",
+  "description": "All-nonspeech ref with a leading FP far from the trailing collar: pfa > 0 and DCF takes the 'speech sum == 0' branch (0.25*pfa only); the pfa denominator shrinks as the trailing collar grows, stepping pfa across collar sizes.",
+  "ref": [
+    [
+      0.0,
+      6.0,
+      "NS"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      2.0,
+      "speech"
+    ],
+    [
+      2.0,
+      6.0,
+      "non-speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 0.33333,
+      "dcf": 0.08333
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 0.34783,
+      "dcf": 0.08696
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 0.36364,
+      "dcf": 0.09091
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.4,
+      "dcf": 0.1
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.5,
+      "dcf": 0.125
+    }
+  ]
+}

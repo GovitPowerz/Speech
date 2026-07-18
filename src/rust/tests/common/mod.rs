@@ -88,6 +88,37 @@ pub fn load_bin_phase4b(name: &str) -> Array2<f64> {
     Array2::from_shape_vec((rows, cols).f(), data).unwrap()
 }
 
+/// Absolute path to a file under `tests/reference_data/phase6/`.
+pub fn fixture_phase6(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase6")
+        .join(name)
+}
+
+/// Absolute path to the licensed LRE03/07 corpus root (`data/LRE03-LRE07` at the repo
+/// root, i.e. `CARGO_MANIFEST_DIR/../..`). The corpus is 27 GB, gitignored, and licensed
+/// -- present locally for Phase 6 training/validation, absent in CI. Phase-6 corpus-gated
+/// tests call [`corpus_root_or_skip`] to opt out cleanly when it is missing.
+pub fn corpus_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data/LRE03-LRE07")
+}
+
+/// Returns the corpus root if it exists, else `None` after printing a skip notice.
+/// Pattern: `let Some(root) = corpus_root_or_skip() else { return; };` at the top of a
+/// corpus-gated test -- the test no-ops (passes) when the licensed corpus is absent.
+pub fn corpus_root_or_skip() -> Option<PathBuf> {
+    let root = corpus_root();
+    if root.is_dir() {
+        Some(root)
+    } else {
+        eprintln!(
+            "SKIP: licensed LRE03/07 corpus absent at {} (set up data/LRE03-LRE07 to run)",
+            root.display()
+        );
+        None
+    }
+}
+
 /// Elementwise bit-exact comparison; reports the first mismatch index + hex bits.
 /// Used for PORTABLE goldens (pure arithmetic): they stay bit-exact on every libm.
 pub fn assert_bits_eq(a: &Array2<f64>, b: &Array2<f64>, label: &str) {

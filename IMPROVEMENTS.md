@@ -88,6 +88,17 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   explicitly names the cost-law family documented-not-fixed). See
   `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s "Plan corrections" item 5
   ("CONSIDERED, SCOPED OUT").
+  **Phase 6 cost-law pass adjudication (Task 7) -- KEPT: convention, not a wrong result.** The
+  sweep re-examined this and found NO derivative inconsistency to fix. The port's `AboveCubic::deriv`
+  IS the exact analytic derivative of `AboveCubic::cost` (finite-difference-confirmed, rel ~5e-10 at
+  the mid-thresh points that `scalar_delta_midthresh_cubic_above_branch` already pins bit-exact vs
+  the real compiled legacy). The name-dependent `A`/`B` formulas are a C1-continuity construction;
+  string-vs-per-type dispatch yields IDENTICAL numbers, so a refactor is code-clarity only -- out of
+  scope for a wrong-result pass and pointless risk on a bit-exact-golden-pinned surface. Live-path
+  reachability is moot anyway: the real `1_worker_1.config`'s `CostLawThreshSpeech 1`/
+  `CostLawThreshNoSpeech 0` put the above-thresh branch only at `output` -> {1,0}, where the
+  `output*(1-output)` logistic fold (`CostLaw.cpp:344`) zeros the gradient. Documented-not-fixed;
+  oracle harness unregenerated.
 - **[0b-i] Softmax `compute_deltas` ponderation-scaling asymmetry -- kept by decision, phase 5** (`cost.rs` `compute_deltas`, from
   `CostLaw.cpp:358-419`): the WER path scales EACH element by its own class's ponderation
   (`_ClassesPonderations(0,kk)`, per `kk`); the non-WER path instead captures a single ponderation
@@ -99,6 +110,38 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   confirmed REACHABLE but scoped OUT to a Phase 6 cost-law-correctness pass -- see
   `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s "Plan corrections" item 5
   ("CONSIDERED, SCOPED OUT"), same adjudication as the `AboveThreshCubic` entry above.
+  **Phase 6 cost-law pass adjudication (Task 7) -- KEPT: the LIVE path is already correct; the
+  flagged "fix" would INTRODUCE a bug.** The sweep found the fix candidate backwards. The non-WER
+  path scaling the whole frame row by the ON-CLASS ponderation `w_c` IS the mathematically correct
+  gradient of the non-WER `compute_cost` (frame cost `w_c*(-ln o_c)` => `dcost/dz_j =
+  w_c*(o_j - onehot_j)`, i.e. the whole row times `w_c`; the committed `ponderation_plumbing` test
+  already pins exactly this `plain*factor` whole-row scaling). Making it per-element like the WER arm
+  would DE-consistency it. The WER arm's per-element `w_j`/`10*target_j` scaling is the inconsistent
+  one, but it is DEAD on every live phase-6 config: `BLSTM_BackPropWER`/`BLSTM_LID_BackPropWER` are
+  `-0.02` (WER off), and every `classes_ponderations` line is COMMENTED OUT (`use_pond` false), so the
+  live LID multiclass delta is the plain `output - onehot` softmax-CE gradient. No live wrong result.
+  Documented-not-fixed; oracle harness unregenerated.
+- **[phase6] BelowThreshSqrt/AboveThreshSqrt deriv omits the `1/_Adim` chain-rule factor -- KEPT
+  (dead training-path), NEW finding from the Task-7 sweep** (`cost.rs` `Law::deriv` Sqrt arms, from
+  `CostLaw.h:151-212`): the per-law forward/deriv audit surfaced a genuine F7-pattern inconsistency
+  the phase-5 sweep did not enumerate (same class of bug F7 fixed on `LogLaw`, still latent here).
+  LEGACY behavior (recorded, faithfully ported): `cost()` is `_B + _A*sqrt(1 - clamp(y/_Adim, .., 1))`,
+  so the true `dcost/dy = -_A/(2*_Adim*sqrt(1 - y/_Adim))`, but `deriv()` returns
+  `-_A/(2*sqrt(1 - y/_Adim))` -- MISSING the `1/_Adim` factor (`CostLaw.h:173-175`/`:206-208`).
+  Finite-difference-confirmed: at `_Adim = 0.5` the returned raw derivative is EXACTLY half the true
+  `dcost/dy` (rel 0.5, both below- and above-thresh arms, speech and no-speech). **Adjudication --
+  KEPT / documented-not-fixed:** `sqrt` is on NO live phase-6 training path -- the SAD config
+  (`1_worker_1.config`) and every Twin/LID config use `CostLaw = log/log`; `sqrt` appears only in
+  `tests/reference_data/phase4c/genome_calib.config`, a vec2struct BIJECTION fixture, never a training
+  config. Per the Task-7 rule (a law with no live phase-6 path stays documented-not-fixed), it is not
+  fixed now. `scalar_delta_midthresh_sqrt_above_branch` (`phase3_costlaw_backward_golden.rs`) pins the
+  legacy-faithful ABOVE-arm behavior bit-exact vs the real compiled `AboveThreshSqrtLaw::deriv`; the
+  BELOW-arm interior is pinned SEPARATELY by `scalar_delta_log_sqrt_canary` (same file, via
+  `cost_deriv_scalar_sqrt_{speech,other}.bin`). A future phase that sets `CostLaw = sqrt` on a live
+  path would fix it (restore the `1/_Adim` factor) and must re-pin BOTH sites to port-truth -- a cold
+  `1/_Adim` fix shifts the below-arm derivative by ~1e-6 (>> the 4-ULP canary tolerance), so
+  `scalar_delta_log_sqrt_canary` breaks too, not just the above-branch golden (the T7 review finding).
+  Oracle harness unregenerated (describes the legacy forever).
 - **[0b-i] `suppress_short` no-advance-after-erase** (`src/rust/src/tasks/segmentation.rs`
   `suppress_short`, from `Segmentation.cpp:245-282`): after any erase branch, the loop does NOT
   advance `i` -- the erased slot shifts the next segment into the current index, which must be
@@ -1549,11 +1592,48 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   reference extension (and any name too short for an extension) to `load_ref_from_trs` (a Transcriber
   `.trs` XML parser). That loader is not ported (`segmentation_io.rs` carries STM/CSV/VRCTS only), so
   the reference dispatch here `bail!`s on a TRS reference rather than silently producing an empty
-  reference. `.xml` (VRCTS) reference loading is also not wired into this dispatch -- no Phase 4a
-  corpus uses it -- and currently falls into the TRS bail branch. *Why deferred:* the Phase 4a parity
-  corpora use STM (SAD) and CSV (WER) references only; TRS/VRCTS reference inputs were never exercised.
-  *Fix candidate:* port `load_ref_from_trs` (and wire `load_vrcts` into the reference dispatch) when a
-  corpus needs them. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
+  reference. *Why deferred:* the Phase 4a parity corpora use STM (SAD) and CSV (WER) references only;
+  TRS reference inputs were never exercised (the `.xml`/VRCTS half of this dispatch is now wired --
+  see the CLOSED (phase 6) entry directly below). *Fix candidate:* port `load_ref_from_trs` when a
+  corpus needs it. *Pinned by:* the `RefExt::Trs` bail path (inline in `segmentation_function`).
+
+- **[phase4a] CLOSED (phase 6, Task 2b, commit `694b29b`): `.xml` (VRCTS) reference loading wired into the reference dispatch**
+  (`engine/bag_of_processors.rs::segmentation_function` + `extension_of` +
+  `tasks/segmentation_io.rs::load_ref_vrcts`, from `Segmentation.cpp:89-100` (the ctor `.xml` branch)
+  + `:808-829` `load_ref_from_vrcts`): Phase 6's SAD track trains on the corpus `.part.xml` VRCTS
+  references (`derive_sad_listings`'s wav/xml pairs); before Task 2b, `extension_of` classified `.xml`
+  as `RefExt::Trs`, so every scored (`-m`/`-t`) run on a `.xml` reference hit the TRS bail above.
+  *Fix (Task 2b):* `extension_of` now maps `.xml -> RefExt::Xml`, and the new `(RefExt::Xml, ...)`
+  dispatch arm builds the per-channel reference via a new faithful loader
+  `load_ref_vrcts(text, chan, off, dur)`. **Source-governed distinction:** the ctor `.xml` branch
+  calls `load_ref_from_vrcts` (`:808-829`), the REFERENCE loader -- a DIFFERENT legacy function from
+  `load_from_vrcts` (`:592-614`, the DUMP parse-back the port's `load_vrcts` mirrors for `VrctsPart`).
+  The two share the line format but differ in two load-bearing ways, so `load_vrcts` was NOT reused:
+  (1) the reference loader is CHANNEL-SLICED by the 1-based `ch="N"` attribute (`--chan`;
+  `_Reference.at(chan)` guarded by `chan < _ChannelNb`), ported as a per-channel equality
+  (`ch-1 == chan`, the same shape as `load_ref_stm`'s `line_chan == chan` gate -- calling it once per
+  channel reconstructs the legacy single-pass multi-channel fill), whereas `load_vrcts` ignores `ch=`
+  and dumps every segment into one caller-passed channel; (2) it seeds the segmentation `End` sentinel
+  at `_AudioDuration` (the audio frame count, passed as `dur`), NOT the embedded `<Channel sigdur>` (a
+  corpus `.part.xml` carries e.g. sigdur=1721.62s while the audio is `_DurationMax`-capped) --
+  `load_vrcts` uses sigdur for the extent, correct for the dump round-trip but wrong for a reference
+  scored against a capped-audio hyp. `nb_words` stays the -1 default (WER Pass 1 suppressed), like STM.
+  The only deviations from the legacy reference loader are the same benign ones `load_ref_stm` already
+  carries: the display-only `_RefCount`/percentage log (`:824-828`) is omitted, and a malformed
+  `ch="0"` (`ch-1 == -1`) is dropped rather than hitting the legacy `_Reference.at(-1)` UB. *Pinned by:*
+  `tests/phase6_xml_ref.rs` -- `xml_reference_scored_run_through_dispatch` (RED: the pre-wiring TRS
+  bail; GREEN: a scored 2-channel `-m` run whose cols 0-2 match an independent `load_ref_vrcts` +
+  `compute_errors` oracle per channel, with non-vacuity + nonzero-error guards),
+  `xml_reference_is_channel_sliced` (chan 0 carries only the `ch="1"` span, chan 1 only `ch="2"`),
+  `xml_reference_windows_on_audio_duration_not_sigdur` (the `End`-sentinel divergence vs `load_vrcts`),
+  and a corpus-gated smoke `xml_reference_real_corpus_part_xml` (a real LRE03 `.part.xml` + wav scored
+  end-to-end; skips cleanly when `data/LRE03-LRE07` is absent). *Mutation:* reverting the
+  `.xml -> RefExt::Xml` arm re-introduces the TRS bail -> RED, then restore. *Cascade:* none -- no
+  committed golden used a `.xml` reference (the TRS bail was the only prior behavior), and `load_vrcts`
+  / `VrctsPart` are byte-untouched. *Oracle:* no C++/Octave harness covered the reference-load path
+  (`load_ref_from_vrcts` was never exercised; the harness pins the writer `toFile_VRCTS` and the dump
+  loader `load_from_vrcts`), so this is pinned by synthetic + corpus-gated fixtures, not a regenerated
+  golden.
 
 - **[phase4a] CLOSED (Task 8): multi-channel VRCTS write on the corpus path**
   (`engine/bag_of_processors.rs::segmentation_function` VRCTS write sites +
@@ -3230,7 +3310,19 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   plus one engine-backed smoke/early-stop-firing test -- but no committed fixture demonstrates the
   WRAPPER'S OWN validation-driven early-stop selecting a genuinely-better model on a signal that
   actually moves.
-  **Phase-6 pointer:** once real training data makes `NNCostSeg` itself (or a comparable
+  **CLOSED (phase 6, Task 6, commit `deb635a`):** the pointer's precondition is met and its ask is
+  done -- the certification flips from PIECEWISE to END-TO-END for the wrapper's early-stop/checkpoint
+  state machine. `train_modern`'s default validation metric flipped from the stuck balance-5 rate to
+  the CONTINUOUS `NNCostSeg` objective (`ModernTrainParams.val_metric`/`RunState`, default
+  `"nn_cost_seg"`; for the algo-6 Twin it silently adds `+NNCostLID`, mirroring `forward_backward`'s
+  `f`), and `tests/pyo3/test_phase5_train_modern_smoke.py::test_early_stop_triggers_on_moving_nn_cost_seg`
+  now demonstrates EXACTLY the case this entry said no fixture covered: the wrapper's own
+  validation-driven early-stop firing patience and selecting the best epoch on a signal that ACTUALLY
+  MOVES (no longer the flat plateau `test_early_stop_triggers` deliberately exploited). The three
+  Phase-6 baseline arms (Tasks 8/9/10) exercise the same moving-`NNCostSeg` loop on real corpus data.
+  The two sentences above are kept for the record -- they described the Phase-5 state and the
+  "no committed fixture demonstrates..." claim is no longer true.
+  **Phase-6 pointer (now closed):** once real training data makes `NNCostSeg` itself (or a comparable
   continuous signal) usable as the per-epoch validation metric -- not the discrete balance-5 error
   rate -- re-validate `train_modern`'s early-stop/checkpoint selection end to end against it before
   trusting the wrapper unsupervised on real corpora.
@@ -4276,13 +4368,106 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (505 passed) + `cd src/rust && cargo test` ran once at the end, both green; working
   tree at completion contains ONLY this IMPROVEMENTS.md entry.
 
+### Mutation battery (Phase 6)
+
+- **[phase6] Mutation battery (Task 11): 8/8 battery items break their named catcher exactly
+  as predicted; three single-catcher coverage narrownesses and one corpus-gating are recorded
+  as honest gaps, no un-caught mutation found.** Every load-bearing phase-6 mechanism re-verified
+  from the committed, fully-integrated state via an apply-FAIL-revert-PASS cycle. Each mutation
+  applied (minimal, surgical) / run against the NAMED catcher only (FOREGROUND, scoped) / reverted
+  (`git checkout -- <file>`) / re-run to confirm GREEN; `git status --porcelain` confirmed clean
+  between every cycle and at the end. IMPROVEMENTS.md is the only committed diff.
+
+  (1) DCF collar arithmetic off-by-one: `_build_collar_segs`'s interior-nonspeech carve boundary
+  `end - c` -> `end - c - 0.05` (both the NonSpeech end and the Collar start,
+  `src/python/speech/evaluate.py:213-214`) against `tests/test_phase6_evaluate.py::
+  test_dcf_matches_perl_oracle` -- FAILED as expected (`11_hyp_longer_truncate` collar=0.25 pfa
+  `0.51724 != 0.50000`, the shifted collar moved the scored-nonspeech denominator off the perl's);
+  1 of 14 perl goldens broke (the others carry no interior scored-nonspeech region under the
+  perturbed branch); reverted, all 14 PASS.
+
+  (2) The RI-is-speech flip: the `_REF_SPEECH`/`_REF_NONSPEECH` partition edited to move `RI` from
+  speech to non-speech (`evaluate.py:48-49`) against `test_dcf_matches_perl_oracle` +
+  `test_dcf_ri_counts_as_speech_not_nonspeech` -- BOTH FAILED (`02_ri_counts_as_speech` golden +
+  the dedicated semantics test: `pmiss 0.0` vs expected `0.5`, the RI span no longer counted toward
+  the speech region); reverted, all 15 PASS.
+
+  (3) lid_error argmax tie-handling: `preds = scores_a.argmax(axis=1)` -> a reversed-argmax
+  LAST-maximum (`evaluate.py:372`) against `test_lid_error_*` -- FAILED exactly
+  `test_lid_error_tie_takes_first_maximum_matching_matlab_max` (`100.0 != 0.0`, the `[0.5,0.5,0.1]`
+  tie resolved to column 1 instead of MATLAB's first-max column 0); the 5 no-tie cases stayed green
+  (last==first max absent a tie); reverted, all 6 PASS. GAP: the "asymmetric fixture"
+  (`test_lid_error_known_confusion_is_a_percentage`) carries no tie, so the tie test is the SOLE
+  committed catcher for a last-maximum flip.
+
+  (4) The cep header stride misread: `vector_size` read `i16::from_le_bytes(buf[4..6])` ->
+  `i32::from_le_bytes(buf[4..8])` (`src/rust/src/audio.rs:680`) against `cargo test -p speech
+  --test phase6_cep` -- FAILED exactly `multi_record_magic_ignored_empty_skipped` (the `magic=7`
+  bytes leaked into vectorSize -> `458754`, byte-length mismatch "expects 5505048"); 17 of 18 stayed
+  green. Rust-side catcher, NO maturin rebuild needed (cargo recompiles the crate directly); the
+  pyo3-side cep consumers are corpus-gated (`test_phase6_corpus.py`, `test_phase6_gates.py`), not
+  the named catcher, so their leg was not exercised. Reverted, all 18 PASS. GAP: the stride error
+  only manifests when `magic != 0`, so only the one non-zero-magic synthetic fixture catches it --
+  `corpus_first_file_consistency` (real LRE files carry `magic == 0`) does NOT.
+
+  (5) The localization existence-check dropped: `primary_ok = local_filename.is_file()` ->
+  `primary_ok = True` (`src/python/speech/dataprep/lre.py:113`) against
+  `tests/test_phase6_lre_listings.py` -- FAILED `test_localize_listing_found_and_missing_rows` +
+  `test_localize_listing_missing_both_columns_reported_combined` (missing rows passed through:
+  `missing_by_reason {'refseg': 1}` vs expected `{'primary+refseg': 1}`, and rows_found 2 not 1);
+  reverted, all 6 PASS.
+
+  (6) The NNCostSeg validation signal wired back to balance-only: `val_metric` default
+  `"nn_cost_seg"` -> `"balance"` (`src/python/speech/drivers/state.py:205`) against BOTH named legs --
+  the engine-free unit `tests/test_phase5_train_modern.py::test_val_metric_field_default_and_literal`
+  (`'balance' != 'nn_cost_seg'`) AND the engine-backed pyo3 smoke
+  `tests/pyo3/test_phase5_train_modern_smoke.py::test_val_metric_nn_cost_seg_moves_where_balance_plateaus`
+  (the default arm froze at `[30.0, 30.0, 30.0, 30.0]`, `len(set(default_costs)) > 1` fired) --
+  both FAILED as predicted; reverted, both PASS.
+
+  (7) A subset gate's trainer no-opped (the item-7-4d stagnant-trainer pattern): `_backprop_inner`'s
+  `trained = opt.optimize(inner_steps)` -> `opt.optimize(0)` (zero SMORMS3 steps -- `optimize(0)`
+  runs an empty step loop and returns theta unchanged, `src/python/speech/drivers/train.py:375`)
+  against `tests/pyo3/test_phase6_gates.py::test_sad_subset_trains_and_scores` (the fastest gate,
+  run PER-TEST) -- FAILED on the trained-vs-init margin (`trained Pmiss 1.000`, `assert 1.0 < 0.5`;
+  the run log shows `held-out DCF@0.5=0.7500` for trained == init, `improvement +0.0000`, the
+  all-non-speech collapse of an untrained net); the no-op made the run finish in 9.5s (no training
+  forward passes). Reverted, PASS with real training (107s). GAP: corpus-gated (`@requires_corpus`)
+  -- catches only where the licensed LRE03/07 corpus is present locally (it is here); SKIPS in CI.
+
+  (8) A Cavg constant perturbed: `cavg`'s `p_target: float = 0.5` default -> `0.4`
+  (`evaluate.py:414`) against the formula cases -- FAILED `test_cavg_hand_derived_three_language_case`
+  (the hand-derived `0.375` pin moved); reverted, PASS. GAP: `test_cavg_ptarget_constant_is_load_bearing`
+  asserts only p_target SENSITIVITY (an inequality between two p_target values), so a constant-value
+  shift leaves it green -- it guards a different failure mode (decoupling p_target from the result),
+  not a value change; the hand-derived 0.375 case is thus the SOLE committed non-corpus catcher for
+  this mutation. The corpus-gated `test_cavg_matches_nist_oracle_on_real_dev_confusion`
+  (Scoring_LRE15, present locally) would also catch it (its oracle hardcodes 0.5) but was NOT run
+  per-item per the brief -- it rides the final full pass.
+
+  *Verdict:* every one of the 8 battery items produced its predicted RED, and every revert produced
+  a clean, fully green re-run -- no un-caught mutation. Four honest gaps recorded, none a defect: the
+  tie flip (3), the magic-stride misread (4), and the Cavg constant (8) each have exactly ONE
+  committed catcher (the tie test / the sole non-zero-magic fixture / the hand-derived 0.375 case)
+  rather than a broad family, because each mutation only bites a degenerate sliver of the input
+  space; and the SAD trainer no-op (7) is corpus-gated, provable only where the licensed corpus is
+  present (local, not CI). Final pass (all green at the committed state): `uv run pytest tests -q
+  -m "not slow"` -> 607 passed, 1 skipped, 22 deselected; the slow pyo3 files per-file --
+  `tests/pyo3/test_phase6_gates.py` (all three arms: LID features / SAD / LID phonotactic Mode-7,
+  subset + deterministic + dry-run each) 9 passed (991 s), `tests/pyo3/test_exit_gate.py` 9 passed,
+  `tests/pyo3/test_phase5_train_modern_smoke.py` 6 passed; `cd src/rust && cargo test` exit 0 (every
+  binary green); `./lint_code.sh` clean (ruff imports/format/lint + mypy, 81 files). Working tree at
+  completion contains ONLY this IMPROVEMENTS.md entry.
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
 placeholders waiting on a future task. Each entry names the typed bail(s) that make the
 blocked behavior fail loudly (never silently), cites its pinning test, and states
 concretely what would have to exist for the block to lift. Cross-referenced by the
-README roadmap (T15).
+README roadmap (T15). **Update (Phase 6 Task 1):** the fourth item (cep / `File_Type` 2)
+was the one deferred "pending a corpus" -- that corpus arrived, so its block LIFTED and
+it is now a real reader; the other three remain blocked. See its flipped entry below.
 
 - **Cost balances 6-9 (the WER shell-out laws): source LOST, not deferred-portable.**
   `ComputeCost.m` computes balances 6/7/8/9 by shelling out to an external Python
@@ -4412,38 +4597,66 @@ README roadmap (T15).
   legacy runs. Fixing it means inventing correct CNN semantics with no working reference
   to validate against.
 
-- **Cep ingestion (`File_Type` 2+): no local data anywhere to validate against --
-  deferred pending a corpus that uses it.**
-  `AudioStruct.cpp`'s ctor dispatch (`:36-412`) ports `file_type` 0 (wav, `:36-128`) and
-  1 (phSeq, `:138-182`) only; `:183-412` (file_type 2 cep, 3 phSeq-N variant, 4 mat) is
-  entirely unported. *Evidence:* no committed fixture, `legacy/` corpus, or `dataprep/`
-  output anywhere in this repo carries `.cep`/mat-format audio -- `dataprep/`'s own
-  scope (augmentation, OpenSAD15 conversion, STM normalization, listing writers) never
-  produces or consumes cep files either.
-  *Typed bail:* two call sites. (a) `src/rust/src/audio.rs::read_audio` `:642-646`: `if
-  file_type != 0 { bail!("read_audio: file_type {file_type} not supported (Phase 4b:
-  0=wav, 1=phSeq ported; 2/3/4 unported)"); }` (guards AFTER the file_type==1 phSeq
-  dispatch at `:634-641`, so this specifically catches 2/3/4). (b) `src/rust/src/
-  engine/bag_of_processors.rs::BagOfProcessors::from_configs` `:282-287`: `if file_type
-  != 0 && file_type != 1 { bail!("File_Type {file_type} not ported (Phase 4b): only wav
-  (0) and phSeq (1) are supported"); }` -- the higher-level corpus-bag gate, reached
-  FIRST in the real construction path (the bag never calls `read_audio` for a
-  `File_Type` it hasn't already accepted).
-  *Pinning test:* (b) was already pinned: `engine::bag_of_processors::tests::
-  file_type_2_bails` (inline `#[cfg(test)]`, `src/rust/src/engine/bag_of_processors.rs`,
-  `mod tests` at `:1230`) -- pre-existing, verified still passing. (a) was UNPINNED:
-  since `read_audio` is only ever called from `bag_of_processors.rs` post-gate, its own
-  file_type-2/3/4 branch had no direct test. Added in Task 13: `audio::tests::
-  read_audio_file_type_2_bails` (`src/rust/src/audio.rs`), calling `read_audio` directly
-  with `file_type=2` against a nonexistent path (the bail fires before any file I/O, so
-  no fixture is needed) and asserting the error text contains `"file_type"`. Passes
-  (`cargo test`, this task).
-  *What it would take:* real cep-format (or mat-format) audio fixtures, plus the
-  compiled legacy `AudioStruct` cep reader as an oracle to golden-test against -- neither
-  exists locally, and no committed corpus/listing in this repo references File_Type 2+.
-  Without a live oracle this would be an unvalidatable transcription of dead code (the
-  same objection the module map raises for `dataprep/`'s formerly-all-stub status), so
-  it stays deferred pending a corpus that actually exercises File_Type 2+.
+- **Cep ingestion (`File_Type` 2): PORTED (phase 6 Task 1, commit `7704b23`) -- the
+  LRE03/07 corpus arrived; `File_Type` 3/4 stay deferred (still no data).**
+  *Legacy behavior (recorded, `AudioStruct.cpp:183-256`):* the cep binary is `int32
+  nbRecords | int16 vectorSize | int16 magic` (little-endian), then an `int32
+  vectorNb`-per-record table, then `float32` payload (`sizeof(float)`) row-major per
+  record; `magic` is read but only LOGGED (never validated); records with
+  `vectorSize*vectorNb <= 0` are SKIPPED (`:229`); `_FramesCount =
+  numberOfFrames*0.01*_Framerate` with `numberOfFrames` seeded at 2 and accumulating
+  `vectorNb+2` per kept record, and `_Periodogram` block-filled from `rowBegin = 1` with
+  a 2-row gap between records; a truncated payload is SILENTLY zero-filled (the read loop
+  `:234` stops on a failed read, leaving the `Eigen::Zero` remainder), excess trailing
+  bytes are ignored, and a malformed header (`nbRecords <= 0`) `exit(1)`s.
+  *Original deferral (Phase 4d Task 13, for the record):* no committed fixture, `legacy/`
+  corpus, or `dataprep/` output carried `.cep` audio and no oracle existed, so this was
+  one of the Phase 4d "four" -- deferred (NOT permanently blocked) "pending a corpus that
+  actually exercises File_Type 2+".
+  *What landed (Phase 6 Task 1):* that corpus is now `data/LRE03-LRE07/` (34k
+  `.plp8f0mvsdd` LID feature files, gitignored + licensed, byte arithmetic exact on every
+  surveyed file, `vectorSize == 23 == NNetInputSize`, `nbRecords` 1..=15).
+  `src/rust/src/audio.rs::read_cep` reads the layout above into `external_features` (one
+  `(vectorNb x vectorSize)` matrix per kept record -- NOT one row per record; a single
+  LRE utterance is typically one record of a few thousand frames) plus the block-filled
+  `periodogram`, mirroring the phSeq plumbing and reusing the pinned `phseq_frames_count`
+  helper. The `read_audio` file_type==2 dispatch and the
+  `BagOfProcessors::from_configs` File_Type gate both open for 2; 3/4 still bail.
+  *PORT-TRUTH divergence (Roadmap 2, DELIBERATE -- not a reproduced quirk):* the port does
+  NOT reproduce the legacy silent zero-fill / excess-ignore / `exit(1)`. It validates the
+  total byte length against the header arithmetic EXACTLY and returns a typed `Err` on any
+  mismatch (zero records, short header, short record table, short-or-excess payload,
+  non-positive vectorSize) -- silent corruption becomes a loud, recoverable error. No C++
+  oracle harness was ever built for the cep reader, so there is none left describing the
+  legacy behavior; this entry is the record of the divergence. The layout itself is
+  ground-truthed against the real corpus (the corpus-gated tests below), not a harness.
+  *Pinned by (re-pins of the two former bails + new pins):* `audio::tests::
+  read_audio_file_type_2_reads_not_bails` (was `read_audio_file_type_2_bails` -- File_Type
+  2 now reaches the reader; a missing path yields a cep file-open error, not the unported
+  bail) and `engine::bag_of_processors::tests::file_type_2_allowed` (was
+  `file_type_2_bails` -- the gate now accepts 2); File_Type 3/4 stay pinned by the new
+  `audio::tests::read_audio_file_type_3_bails` and `bag_of_processors::tests::
+  file_type_3_bails`. Reader pins: `src/rust/tests/phase6_cep.rs` -- 8 hand-crafted
+  synthetic fixtures under `tests/reference_data/phase6/cep/` (happy single/multi-record
+  incl. magic-ignored + empty-record skip; typed-error edges: zero records, truncated
+  header/table, short payload, excess payload, bad vectorSize) plus a `write_cep`/read
+  round-trip. Corpus-gated layout confirmation (skips cleanly if the licensed corpus is
+  absent): `corpus_first_file_consistency` (Rust, independent header parse + reader
+  round-trip) and `test_cep_layout_byte_arithmetic` (Python, `tests/test_phase6_corpus.py`,
+  independent pure-`struct` parse) -- both on the deterministically-selected first file of
+  the LRE03 features tree (sorted order, selected at runtime, never named in committed
+  source).
+  *Mutation:* reverting `read_cep` to the old bail breaks both re-pins; swapping the
+  float payload to big-endian or column-major fill breaks the `tiny_ok`/`multi_ok`
+  hardcoded-value asserts and the corpus plausibility bounds; relaxing the strict
+  byte-length check to the legacy's silent zero-fill breaks `truncated_payload_errors`/
+  `excess_payload_errors`.
+  *Still deferred:* `File_Type` 3 (phSeq-N variant) and 4 (mat), `AudioStruct.cpp:257-412`
+  -- the `data/LRE03-LRE07` corpus uses only cep (File_Type 2) for LID features and phSeq
+  (File_Type 1); nothing exercises 3/4, so they keep the typed bail pending such data.
+  This is now the shared Phase 6 corpus-gate infrastructure's first consumer:
+  `common::corpus_root_or_skip` (Rust, `src/rust/tests/common/mod.rs`) and `CORPUS_ROOT`
+  + `requires_corpus` (Python, `tests/conftest.py`), reused by every later Phase 6 task.
 
 ## Toolchain deviations
 

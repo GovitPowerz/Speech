@@ -22,7 +22,8 @@ use crate::tasks::sad::{
 };
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{
-    ScoreReport, WerStats, compute_errors, load_ref_csv, load_ref_stm, write_vrcts_multichannel,
+    ScoreReport, WerStats, compute_errors, load_ref_csv, load_ref_stm, load_ref_vrcts,
+    write_vrcts_multichannel,
 };
 use crate::tasks::vrcts::VrctsPart;
 
@@ -258,9 +259,9 @@ impl BagOfProcessors {
     /// Algo 0 (`VRCTSPart`) is wired here since Phase 4b Task 8
     /// (`Processor::Vrcts`); Algo 5/6 (`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`)
     /// since Phase 4b Task 9 (`Processor::Lid`/`Processor::TwinLid`).
-    /// `File_Type` 2/3/4 (cep/phSeq-N/mat input) remain unported -- `bail!`,
-    /// IMPROVEMENTS entry; `File_Type` 0 (wav) and 1 (phSeq, Task 5) are both
-    /// supported.
+    /// `File_Type` 3/4 (phSeq-N variant, mat input) remain unported -- `bail!`,
+    /// IMPROVEMENTS entry; `File_Type` 0 (wav), 1 (phSeq, Task 5), and 2 (cep,
+    /// Phase 6 Task 1) are all supported.
     pub fn from_configs(
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
@@ -279,11 +280,11 @@ impl BagOfProcessors {
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
 
-        if file_type != 0 && file_type != 1 {
-            // legacy: AudioStruct non-wav/non-phSeq read paths (cep/phSeq-N/mat,
-            // file_type 2/3/4) -- unported (Phase 4b).
+        if file_type != 0 && file_type != 1 && file_type != 2 {
+            // legacy: AudioStruct phSeq-N/mat read paths (file_type 3/4) -- unported.
+            // wav (0), phSeq (1), and cep (2, Phase 6 Task 1) are supported.
             bail!(
-                "File_Type {file_type} not ported (Phase 4b): only wav (0) and phSeq (1) are supported"
+                "File_Type {file_type} not ported: only wav (0), phSeq (1), and cep (2) are supported"
             );
         }
 
@@ -826,7 +827,9 @@ impl BagOfProcessors {
     /// Reference load dispatches on `item.ref_seg`'s extension (mirroring the
     /// legacy `Segmentation` ctor `:72-110`): `.stm` -> [`load_ref_stm`] per
     /// channel, `.csv` -> [`load_ref_csv`] (also yields `nb_words` for WER),
-    /// `.trs` -> `bail!` (unported), anything else / empty -> no reference.
+    /// `.xml` -> [`load_ref_vrcts`] per channel (VRCTS reference, channel-sliced
+    /// by the `ch=` attribute; Phase 6 Task 2b), `.trs` -> `bail!` (unported),
+    /// anything else / empty -> no reference.
     /// The mandatory-reference check (`:302-305`): a scored mode with no loadable
     /// reference is an error (legacy `exit(1)`).
     pub fn segmentation_function(
@@ -923,6 +926,25 @@ impl BagOfProcessors {
                     );
                     let refs = (0..channel_count).map(|_| seg.clone()).collect();
                     (Some(refs), nb)
+                }
+                // VRCTS (.xml) reference. Port of `Segmentation::load_ref_from_vrcts`
+                // (`Segmentation.cpp:808-829`), the ctor `.xml` branch (`:89-100`) -- a
+                // DIFFERENT legacy function from `load_from_vrcts` (which the port's
+                // `load_vrcts` mirrors for `VrctsPart`). Wired here in Phase 6 Task 2b to
+                // unblock scored SAD training on the corpus `.part.xml` references. Unlike
+                // the STM/CSV clones, the reference is CHANNEL-SLICED by the 1-based
+                // `ch="N"` attribute (segment -> channel N-1), so `load_ref_vrcts` is
+                // called per channel and each channel keeps only its own `ch` segments.
+                // Windowed on `audio_duration` (the audio frame count, `_AudioDuration`),
+                // NOT the embedded `<Channel sigdur>` -- a `.part.xml` sigdur can exceed a
+                // `_DurationMax`-capped audio. `nb_words` stays the -1 default (WER Pass 1
+                // suppressed), like STM. See IMPROVEMENTS.md ([phase4a] CLOSED (phase 6):
+                // `.xml` (VRCTS) reference loading).
+                (RefExt::Xml, Some(Some(text))) => {
+                    let refs = (0..channel_count)
+                        .map(|chan| load_ref_vrcts(text, chan, self.offset_begin, audio_duration))
+                        .collect();
+                    (Some(refs), -1)
                 }
                 _ => (None, -1),
             };
@@ -1071,14 +1093,16 @@ fn apply_corpus_item(audio: &mut Audio, item: &CorpusItem) {
 enum RefExt {
     Stm,
     Csv,
+    Xml,
     Trs,
     None,
 }
 
 /// Classify `ref_seg` by its trailing 4 chars (`:73`), matching the legacy
-/// `.substr(size-4)` compare: an empty/short name is no reference; `.stm`/`.csv`
-/// dispatch to their loaders; `.xml` (VRCTS) is not wired here (no corpus in 4a
-/// uses it -- deferred with the TRS path); everything else (incl. `.trs`) is TRS.
+/// `.substr(size-4)` compare: an empty/short name is no reference; `.stm`/`.csv`/
+/// `.xml` dispatch to their loaders (`.xml` -> VRCTS reference via
+/// [`load_ref_vrcts`], Phase 6 Task 2b); everything else (incl. `.trs`) is TRS,
+/// still bailed (unported -- IMPROVEMENTS.md `[phase4a] .trs reference loader`).
 fn extension_of(ref_seg: &str) -> RefExt {
     if ref_seg.len() <= 4 {
         // legacy: :106 size > 0 -> TRS; size 0 -> no reference.
@@ -1091,6 +1115,7 @@ fn extension_of(ref_seg: &str) -> RefExt {
     match &ref_seg[ref_seg.len() - 4..] {
         ".stm" => RefExt::Stm,
         ".csv" => RefExt::Csv,
+        ".xml" => RefExt::Xml,
         _ => RefExt::Trs,
     }
 }
@@ -1400,12 +1425,26 @@ mod tests {
     }
 
     #[test]
-    fn file_type_2_bails() {
+    fn file_type_2_allowed() {
+        // Phase 6 Task 1: File_Type 2 (cep) is now a supported gate value. Re-pins the
+        // former `file_type_2_bails`. Construction doesn't touch read_audio (the gate runs
+        // before the per-config driver loop), so a plain TDC config with the gate flipped
+        // must succeed.
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "2".to_string());
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode())
+            .expect("File_Type 2 (cep) must be accepted by the gate");
+        assert_eq!(bag.file_type(), 2);
+    }
+
+    #[test]
+    fn file_type_3_bails() {
+        // File_Type 3/4 (phSeq-N variant, mat) stay unported -- the gate still bails.
+        let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
+        cfg.insert("File_Type".to_string(), "3".to_string());
         match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()) {
             Err(e) => assert!(e.to_string().contains("File_Type")),
-            Ok(_) => panic!("expected File_Type 2 (cep, unported) to bail"),
+            Ok(_) => panic!("expected File_Type 3 (unported) to bail"),
         }
     }
 

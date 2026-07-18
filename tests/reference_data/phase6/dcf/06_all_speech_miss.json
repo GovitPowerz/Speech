@@ -1,0 +1,55 @@
+{
+  "name": "06_all_speech_miss",
+  "description": "All-speech ref with a trailing miss: pmiss > 0, pfa == 0 (no nonspeech), and DCF takes the 'nonspeech sum == 0' branch (0.75*pmiss only).",
+  "ref": [
+    [
+      0.0,
+      6.0,
+      "S"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      4.0,
+      "speech"
+    ],
+    [
+      4.0,
+      6.0,
+      "non-speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.33333,
+      "pfa": 0.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.33333,
+      "pfa": 0.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.33333,
+      "pfa": 0.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.33333,
+      "pfa": 0.0,
+      "dcf": 0.25
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.33333,
+      "pfa": 0.0,
+      "dcf": 0.25
+    }
+  ]
+}

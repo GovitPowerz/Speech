@@ -1,0 +1,70 @@
+{
+  "name": "04_collar_boundary_fp",
+  "description": "Interior nonspeech near the one-second interior threshold (2*1.0+0.1 = 2.1s), 2.0->4.1, with an FP straddling both collar edges: the FP falls inside the collar (excluded) once the collar grows past 0.25s, so pfa/dcf step across collar sizes; the 2.0s collar swallows the whole segment (nonspeech sum -> 0, the pfa zero-guard + the 'nonspeech==0' DCF branch). NB not a >= vs > discriminator at the 1.0s collar -- the carve/merge scores the same (0/0) either way; the >= inclusivity rests on the perl's hex-verified threshold bit-identity, not this golden.",
+  "ref": [
+    [
+      0.0,
+      2.0,
+      "S"
+    ],
+    [
+      2.0,
+      4.1,
+      "NS"
+    ],
+    [
+      4.1,
+      6.0,
+      "S"
+    ]
+  ],
+  "hyp": [
+    [
+      0.0,
+      2.25,
+      "speech"
+    ],
+    [
+      2.25,
+      3.85,
+      "non-speech"
+    ],
+    [
+      3.85,
+      6.0,
+      "speech"
+    ]
+  ],
+  "collars": [
+    {
+      "collar": 0.0,
+      "pmiss": 0.0,
+      "pfa": 0.2381,
+      "dcf": 0.05952
+    },
+    {
+      "collar": 0.25,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 0.5,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 1.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    },
+    {
+      "collar": 2.0,
+      "pmiss": 0.0,
+      "pfa": 0.0,
+      "dcf": 0.0
+    }
+  ]
+}

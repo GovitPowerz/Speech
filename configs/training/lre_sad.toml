@@ -1,0 +1,176 @@
+# Canonical TOML training config for the Phase 6 SAD arm.
+#
+# Algo_choice 3 (BLSTM spectral SAD) + File_Type 0 (raw wav). This is the 2015
+# production SAD regime: the DSP front-end (periodogram -> Mel/log/DCT + deltas +
+# delta-deltas -> the 23-dim acoustic input) feeds a bidirectional peephole-LSTM
+# stack + output MLP whose single speech-posterior output drives the
+# rising/falling hysteresis segmenter. The net trains FROM SCRATCH here (Phase 5
+# proved SAD from-scratch convergence on the tiny fixture); this arm scales it to
+# the real LRE03/07 corpus wav/xml pairs.
+#
+# SEED PROVENANCE (design spec S1.8 / plan Task 9): every DSP + net + cost key is
+# seeded VERBATIM from the committed algo-3 production config
+# `tests/reference_data/phase0/1_worker_1.config` (the real 15-Oct-2015
+# BLSTM_OpenSAD15 SAD config, also the source of the phase4a tier-2 spectral
+# fixtures). Keeping the DSP keys and the net topology from ONE config is
+# load-bearing: `nnet_input_size = 23` must equal the feature-pipeline output
+# dimension THIS DSP config produces (nb_dct 4 + deltas 5 + delta-deltas 3,
+# ignore_first_dct, the mel bank) AND `lstm_neuron_nb[0]`; a mismatched pairing
+# would drive the net at the wrong input width. CostLaw is `log` (the T7-verified
+# derivative-consistent live path).
+#
+# DIVERGENCES from 1_worker_1.config (the complete list -- all RUNTIME/orchestration
+# keys, none DSP/net/cost, so the "seeded VERBATIM" claim above holds for the modeled
+# keys): max_duration (capped for a bounded run, run_baseline overrides), num_outer_threads
+# (N-lane fold width), results_file, backpropagation_epochs (0 -- the modern loop's run_solo
+# path, not the engine-internal train()), exclude_nontrans (false, see below), and
+# dump_directory (empty during training, runtime-set for the scoring pass).
+#
+# LICENSE HYGIENE: no corpus path/filename is committed. `[corpus]` fileslisting +
+# language2classmapping are RUNTIME placeholders -- `speech.drivers.baseline.run_baseline`
+# derives the SAD wav/xml listings (`dataprep.lre.derive_sad_listings`) and a
+# minimal SAD class mapping under out_dir and rewrites these two keys. The refs are
+# the corpus `.part.xml` VRCTS files (routed through the engine's `.xml` reference
+# dispatch, Task 2b).
+#
+# Value convention (toml_config.rs KEY_TABLE): booleans/integers native TOML;
+# floats/comma-lists/words/paths are quoted strings carrying the decimal text
+# verbatim. run_baseline flattens this via `speech_rs.load_toml_config`.
+
+[engine]
+algo_choice = 3
+num_outer_threads = 1
+num_inner_threads = 1
+results_file = "MultiConfigResults.mat"
+file_type = 0
+backpropagation_epochs = 0
+# false: include every derived wav/xml pair (the VRCTS refs are speech references,
+# not STM transcriptions, so the legacy non-transcribed-exclusion is inapplicable
+# here). Divergence from 1_worker_1.config's `true`, documented -- our derived
+# listings carry only files that already paired with a loadable `.part.xml`.
+exclude_nontrans = false
+# empty during training (no VRCTS dump); the held-out DCF scoring pass overrides
+# this to a scores directory so the engine writes one hyp `<basename>.xml` per file.
+dump_directory = ""
+
+[corpus]
+# SYNTHESIZED AT RUNTIME -- run_baseline writes the SAD train/valid/test listings
+# (derive_sad_listings' seeded 70/15/15 split, subset for the gate) + a minimal
+# SAD mapping under out_dir and rewrites these placeholders. Kept here only so the
+# committed TOML round-trips as a valid config with no embedded corpus path.
+fileslisting = "sad_train.flst"
+language2classmapping = "sad_mapping.csv"
+
+[display]
+height = 0
+milliseconds_per_pixel = 64
+output_directory = "figs"
+wave_all_height = 50
+wave_all_width = 1000
+
+[audio]
+offset = 0
+# A moderate default cap; run_baseline overrides this (the subset gate caps short
+# to fit the < 10 min budget, the full-run launcher lifts it). The corpus wavs are
+# 576-1800 s CallFriend recordings (median ~600 s), so a cap is mandatory for a
+# bounded run, and the held-out DCF windows the reference to the same capped span
+# (matching the engine's own _AudioDuration reference windowing).
+max_duration = 120
+
+[spectrum]
+order = 10
+shift = "1.000000000000000e-02"
+temporal_convolution_size = 0
+temporal_convolution_type = "uniform"
+frame_window = "3.250000000000000e+00"
+frame_shift = "8.000000000000000e-01"
+windowing_type = "hHCw"
+windowing_param = "3.714451255350461e-01"
+min_freq = 100
+max_freq = 3800
+min_mel_freq = "1.861001763856132e+02"
+max_mel_freq = "2.502400490895474e+03"
+nb_bins = 20
+is_log_mel = true
+nb_dct = 4
+ignore_first_dct = true
+compute_deltas_nb = 5
+compute_delta_deltas_nb = 3
+flag_dc_offset = false
+
+[preprocess]
+preemph_ratio = "-9.700000000000000e-01"
+noise_seed = -3
+noise_ratio = "1.000000000000000e-02"
+
+[decision]
+thresh_rising = "7.518115745476025e-01"
+area_rising = "4.772617530230577e-03"
+thresh_falling = "3.741996429789448e-01"
+area_falling = "5.818475450112438e-02"
+convolution_window_size = 9
+convolution_window_type = "hHCw"
+speech_padding = "6.796823542501181e-01,6.044711584504888e-01,5.853720381521982e-01,-9.999138798037756e-02"
+min_speech = "7.951248859803287e-02,-1.345268011073333e-02,3.405293909506348e-01"
+min_silence = "-1.221811915542272e-02,-3.945343559874014e-02"
+
+[pitch]
+ltsv_window = 0
+ltsv_shift = "5.657759158904229e-02"
+tdc_window = 0
+tdc_shift = "2.000000000000000e-01"
+tdc_balance = "5.439183651566210e-01"
+tdc_lags = "0,0"
+tdc_windowing_type = "uniform"
+tdc_windowing_param = "5.534716888700572e-01"
+
+# ---------------------------------------------------------------------------------------
+# [nn] -- the TRAINABLE SAD net (the real 2015 topology). nnet_input_size == 23 ==
+# lstm_neuron_nb[0] == the [spectrum] feature dimension; output_neuron_nb ends at 1
+# (the single speech posterior the hysteresis segmenter thresholds). weights_file is a
+# runtime-synthesized seed pack (init_weights), re-inited from scratch by train_modern.
+# ---------------------------------------------------------------------------------------
+
+[nn]
+lstm_neuron_nb = "23,24,24"
+lstm_sub_sampling = "4,1"
+nn_type = 0
+nnet_input_size = 23
+output_neuron_nb = "48,12,1"
+output_subsampling = "1,1"
+two_sweeps = false
+input_normalization_type = -1
+use_cep_files = 0
+weights_file = "sad_seed.bin"
+backpropagation_activated = false
+backward_cells_peepholes_active = true
+backward_gates_peepholes_active = true
+backward_gates_recurrent_peepholes_active = true
+forward_cells_peepholes_active = true
+forward_gates_peepholes_active = true
+forward_gates_recurrent_peepholes_active = true
+
+[cost]
+law_speech = "log"
+law_no_speech = "log"
+law_param_speech = 0
+law_param_no_speech = 0
+law_thresh_speech = 1
+law_thresh_no_speech = 0
+ponderation = "1.0"
+
+# ---------------------------------------------------------------------------------------
+# [training] -- DRIVER-SIDE knobs for `speech.drivers.train.train_modern` (the pydantic
+# `ModernTrainParams`), NOT engine keys (the engine never parses [training]). run_baseline
+# reads these defaults + the subset/full-run overrides. val_metric MUST stay nn_cost_seg
+# (the moving signal; the balance-law cost plateaus from scratch -- Task 6 / IMPROVEMENTS.md).
+#
+# [training]
+# epochs = 40               # total epochs (a resumed run continues toward this)
+# patience = 6              # early-stop after this many epochs with no validation-cost gain
+# steps_per_epoch = 8       # SMORMS3 steps per epoch (no LR schedule; fresh optimizer/epoch)
+# val_metric = "nn_cost_seg"
+# minibatch = 0             # hard-example mini-batch size (0 = full-corpus training per epoch)
+# init_scheme = "xavier"    # "xavier" (Glorot uniform) or "he" (He normal)
+# init_seed = 0
+# forget_bias_one = true    # seed the LSTM forget-gate bias at 1.0

@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from speech.drivers.baseline import build_parser as _baseline_parser
+from speech.drivers.baseline import run_baseline
 from speech.drivers.init import init_run
 from speech.drivers.retrain import retrain
 from speech.drivers.state import RunState
@@ -35,6 +37,10 @@ def _build_parser() -> argparse.ArgumentParser:
             p.add_argument("--particles", type=int, default=24)
             p.add_argument("--epochs", type=int, default=100)
             p.add_argument("--inner-steps", type=int, default=20)
+
+    # Phase 6 baseline arms (from-scratch SAD/LID training). Reuses the baseline module's own
+    # argument set so the flags stay defined in one place; `parents=` mounts them here.
+    sub.add_parser("baseline", parents=[_baseline_parser()], add_help=False, help="from-scratch Phase 6 baseline training arms")
     return parser
 
 
@@ -48,6 +54,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "init":
         init_run(args.config, args.out_dir)
+        return 0
+
+    if args.command == "baseline":
+        run_baseline(
+            args.arm,
+            args.corpus_root,
+            args.out_dir,
+            resume=args.resume,
+            lanes=args.lanes,
+            subset=args.subset,
+            dry_run=args.dry_run,
+            seed=args.seed,
+            epochs=args.epochs,
+            patience=args.patience,
+            steps_per_epoch=args.steps_per_epoch,
+            init_scheme=args.init_scheme,
+            lre_listing=args.lre_listing,
+            audio_max_duration=args.audio_max_duration,
+        )
         return 0
 
     state = RunState.load(Path(args.out_dir) / "run_state.json")

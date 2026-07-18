@@ -231,11 +231,14 @@ fn wav_path_unchanged() {
 
 #[test]
 fn unsupported_file_type_bails() {
+    // Phase 6 Task 1 re-pin: file_type 2 (cep) is now ported (see tests/phase6_cep.rs),
+    // so only 3/4/-1 remain unsupported. Each must bail with a "file_type"-tagged error
+    // (the bail fires before any I/O, so a wav path is a fine stand-in target).
     let wav = common::fixture("excerpt_2ch_8k.wav");
-    for ft in [2, 3, 4, -1] {
+    for ft in [3, 4, -1] {
         match read_audio(&wav, 0.0, 0.1, ft) {
             Err(e) => assert!(e.to_string().contains("file_type")),
-            Ok(_) => panic!("file_type {ft} must not be accepted (only 0/1 are ported)"),
+            Ok(_) => panic!("file_type {ft} must not be accepted (0/1/2 are ported)"),
         }
     }
 }
