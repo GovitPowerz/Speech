@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import pytest
 from speech.drivers.test import write_scores
-from speech.evaluate import CollarScore, DcfReport, Interval, cavg, dcf, lid_error, load_tab_ref, load_vrcts_hyp, read_scr_scores
+from speech.evaluate import CollarScore, DcfReport, Interval, cavg, dcf, lid_error, load_tab_ref, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 
 DCF_DIR = Path(__file__).resolve().parent / "reference_data" / "phase6" / "dcf"
 GOLDENS = sorted(p for p in DCF_DIR.glob("*.json") if p.name != "dcf_manifest.json")
@@ -186,6 +186,25 @@ def test_load_vrcts_hyp_no_speech_is_all_nonspeech(tmp_path: Path) -> None:
     xml = tmp_path / "hyp.xml"
     xml.write_text(_vrcts(5.0, []))
     assert load_vrcts_hyp(xml) == [(0.0, 5.0, "non-speech")]
+
+
+def test_load_vrcts_ref_maps_to_nist_kinds(tmp_path: Path) -> None:
+    """The SAD-arm reference adapter: `load_vrcts_hyp`'s contiguous intervals with the kinds
+    remapped to the NIST ref labels (speech -> S, non-speech -> NS) -- the same span/gap
+    structure, so it feeds dcf()'s reference side directly."""
+    xml = tmp_path / "ref.xml"
+    xml.write_text(_vrcts(10.0, [(1.0, 3.0), (5.0, 7.0)]))
+    assert load_vrcts_ref(xml) == [
+        (0.0, 1.0, "NS"),
+        (1.0, 3.0, "S"),
+        (3.0, 5.0, "NS"),
+        (5.0, 7.0, "S"),
+        (7.0, 10.0, "NS"),
+    ]
+    # feeds dcf's reference side (contiguous, starts at 0, raw NIST kinds).
+    hyp = load_vrcts_hyp(xml)  # score the ref against itself -> zero error
+    s = dcf(load_vrcts_ref(xml), hyp).by_collar(0.0)
+    assert s.pmiss == 0.0 and s.pfa == 0.0
 
 
 def test_load_vrcts_hyp_feeds_dcf(tmp_path: Path) -> None:

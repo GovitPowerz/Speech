@@ -104,12 +104,38 @@ scratch (the net grows confident on the classes it learns first) even as argmax 
 improves, so the direction-safe improvement signal is the argmax error, not the CE. Genuine
 12-way discrimination is the full-corpus launcher's job.
 
-### SAD (Algo 3 spectral) -- Task 9
+### SAD (Algo 3 spectral, File_Type 0 wav) -- Task 9
 
-| split | files | DCF (collar 0 / 0.25 / 0.5 / 1 / 2 s) | config | seed |
-|---|---|---|---|---|
-| subset gate | TBD | TBD | `lre_sad.toml` | TBD |
-| full run | TBD | TBD | `lre_sad.toml` | TBD |
+From-scratch algo-3 spectral SAD on the `train/audio` wav+xml pairs (the seeded 70/15/15 split
+of the 2066 pairs, `dataprep.lre.derive_sad_listings`). The held-out slice is scored END TO END
+with the T4 DCF harness: the engine dumps one VRCTS hypothesis xml per test file
+(`Dump_Directory`), read back via `evaluate.load_vrcts_hyp`; the `.part.xml` references via
+`evaluate.load_vrcts_ref` (windowed to the capped-audio span, matching the engine's own
+`_AudioDuration` reference windowing); pooled through `evaluate.dcf`. These are the FIRST REAL
+DCF numbers under this protocol. DCF pooled per-collar over the whole held-out slice (Pmiss/Pfa
+accumulated across a concatenated timeline, the single-number analogue of the LID arm's pooled
+argmax error).
+
+| split | files (train/valid/test) | DCF@0 | DCF@0.25 | DCF@0.5 | DCF@1 | DCF@2 | Pmiss/Pfa @0.5 | config | seed |
+|---|---|---|---|---|---|---|---|---|---|
+| subset gate (2026-07-18, this box) | 10 / 8 / 24 | **0.2500** | **0.2500** | **0.2500** | **0.2500** | **0.2500** | 0.00 / 1.00 | `lre_sad.toml`, 3 ep x 10 steps, 20 s cap | 0 |
+| subset gate -- untrained init baseline | (same test set) | 0.7500 | 0.7500 | 0.7500 | 0.7500 | 0.7500 | 1.00 / 0.00 | (seed pack, no training) | 0 |
+| full run | TBD | TBD | TBD | TBD | TBD | TBD | TBD | `lre_sad.toml` | TBD |
+
+Subset-gate reading (measured seed 0, ~80 s per run, run-twice bit-identical): the from-scratch
+SAD net moves the held-out DCF from the untrained init's **0.7500** to **0.2500** at every
+collar (+0.50), deterministically. HONEST CAVEAT (the SAD analogue of the LID mode-collapse
+note): the capped audio windows are ~53% speech, so on a 10-file subset the net mode-collapses
+toward the window-majority -- the seeded init sits BELOW the rising threshold everywhere (all
+non-speech, Pmiss 1.0, DCF 0.75), and ~30 SMORMS3 steps drive it ABOVE the threshold everywhere
+(all speech, Pmiss 0.0, Pfa 1.0, DCF 0.25). There is no partial-discrimination sweet spot at
+this scale (measured: the net jumps from all-non-speech straight to all-speech; the NNCostSeg
+train objective descends into the ~0.03-0.06 floor). The direction-safe TASK metric is
+therefore the trained-vs-init held-out DCF (the net LEARNED TO FIRE: trained Pmiss ~0 vs init
+Pmiss ~1); a DCF below the all-speech 0.25 baseline -- genuine speech/non-speech discrimination
+-- is the FULL-RUN launcher's job (more data, more epochs). Because both endpoints are
+degenerate (all-one-class), the DCF is exactly 0.25/0.75 with no libm-sensitive boundary jitter,
+so the numbers are rock-stable cross-machine.
 
 ### LID -- phonotactic regime (Algo 6, Mode 7, File_Type 1) -- Task 10
 
@@ -123,12 +149,19 @@ improves, so the direction-safe improvement signal is the argmax error, not the 
 ## Firing a full run (post-phase, user-fired)
 
 ```
+# LID features (Algo 6, Mode 7, cep)
 speech baseline lid-features --corpus-root data/LRE03-LRE07 --out-dir runs/lid_features_full \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25
+
+# SAD (Algo 3 spectral, wav) -- --audio-max-duration lifts the subset gate's short cap; omit
+# it to score full-length recordings (the corpus wavs are 1800 s CallFriend files).
+speech baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_full \
+    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 ```
 
-Omit `--subset` to train on the whole localized corpus (~15.4k LRE03 files); `--lanes N` sets
-the fold width (record N here); `--resume` continues from `<out-dir>/checkpoint`. The run
-writes `run_metadata.json` (seed/lanes/subset/config-hash), `checkpoint/` (best/last packs +
-`train_history.json`), and `scores/` (`.scr`), from which `lid_error`/`cavg` are read. Paste
-the resulting numbers into the `full run` rows above.
+Omit `--subset` to train on the whole split (SAD: the full 70% train split of the 2066 wav/xml
+pairs; LID: the whole localized corpus); `--lanes N` sets the fold width (record N here);
+`--resume` continues from `<out-dir>/checkpoint`. The run writes `run_metadata.json`
+(seed/lanes/subset/config-hash/audio cap), `checkpoint/` (best/last packs + `train_history.json`),
+and the held-out scores -- LID `scores/` (`.scr`) -> `lid_error`/`cavg`; SAD `score_trained/`
+(VRCTS hyp xml) -> pooled `dcf`. Paste the resulting numbers into the `full run` rows above.

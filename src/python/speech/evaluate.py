@@ -110,6 +110,25 @@ def load_tab_ref(path: Path, start_col: int = 2, end_col: int = 3, type_col: int
     return out
 
 
+def load_vrcts_ref(path: Path) -> list[Interval]:
+    """Read a VRCTS xml as a dcf() REFERENCE: `load_vrcts_hyp`'s contiguous
+    speech/non-speech intervals with the kinds mapped to the NIST ref labels
+    (`speech -> S`, `non-speech -> NS`). The SAD corpus references are the same
+    AudioDoc/Channel/SpeechSegment `.part.xml` files the engine's own reference
+    dispatch consumes (Task 2b), so the ONLY adaptation from the hyp loader is this
+    kind mapping -- the xml parse is not re-implemented.
+
+    The result satisfies `dcf`'s reference preprocessing (`_build_ref_no_collar`):
+    `load_vrcts_hyp` already gap-fills to a single contiguous run starting at 0 and
+    ending at the channel `sigdur`, so there is no un-annotated gap for the
+    splice/exnihilate walk to reject. To score against a duration-CAPPED hypothesis
+    (the engine caps audio at `Audio_max_duration`, so its hyp spans only [0, cap]),
+    window this reference to the hyp's span before calling `dcf` -- the engine windows
+    its OWN reference on the same `_AudioDuration`, so a capped ref keeps the two
+    scoring spans aligned."""
+    return [(s, e, "S" if k in _HYP_SPEECH else "NS") for s, e, k in load_vrcts_hyp(path)]
+
+
 def load_vrcts_hyp(path: Path) -> list[Interval]:
     """Read the engine's VRCTS xml (the AudioDoc/Channel/SpeechSegment family
     `tasks/segmentation_io.rs` writes) into contiguous speech/non-speech intervals: the

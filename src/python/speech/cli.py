@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             steps_per_epoch=args.steps_per_epoch,
             init_scheme=args.init_scheme,
             lre_listing=args.lre_listing,
+            audio_max_duration=args.audio_max_duration,
         )
         return 0
 

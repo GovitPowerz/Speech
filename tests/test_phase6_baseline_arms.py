@@ -197,13 +197,14 @@ def test_unknown_arm_rejected(tmp_path: Path) -> None:
 
 
 def test_unimplemented_arm_raises(tmp_path: Path) -> None:
-    # sad / lid-phseq are declared later (Tasks 9/10); only lid-features is wired now.
-    B._ARM_CONFIGS["sad"] = "configs/training/lre_sad.toml"  # simulate a later-task entry
+    # lid-phseq is declared later (Task 10): registered in _ARM_CONFIGS but not yet branched
+    # in run_baseline's arm dispatch -> NotImplementedError. lid-features + sad ARE wired.
+    B._ARM_CONFIGS["lid-phseq"] = "configs/training/lre03_lid_phseq.toml"  # simulate a later-task entry
     try:
         with pytest.raises(NotImplementedError):
-            B.run_baseline("sad", tmp_path, tmp_path)
+            B.run_baseline("lid-phseq", tmp_path, tmp_path)
     finally:
-        del B._ARM_CONFIGS["sad"]
+        del B._ARM_CONFIGS["lid-phseq"]
 
 
 def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,3 +254,155 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["seed"] == 5 and meta["lanes"] == 2
     assert res.n_train > 0  # a tiny subset was drawn from the synthetic tree
+
+
+# --------------------------------------------------------------------------------------- #
+# SAD arm units (Task 9): single-net config assembly, the VRCTS ref adapter + pooled DCF,
+# split plumbing over a synthetic wav/xml tree, CLI wiring. Every fixture synthetic.
+# --------------------------------------------------------------------------------------- #
+
+
+def _vrcts_xml(sigdur: float, segs: list[tuple[float, float]]) -> str:
+    """A minimal VRCTS xml (the AudioDoc/Channel/SpeechSegment shape `load_vrcts_hyp` reads)."""
+    lines = "".join(f'<SpeechSegment ch="1" sconf="1.00" stime="{s:.2f}" etime="{e:.2f}" spkid="1"/>' for s, e in segs)
+    return f'<AudioDoc name="x"><ChannelList><Channel num="1" sigdur="{sigdur:.2f}" spdur="0.00"/></ChannelList><SegmentList>{lines}</SegmentList></AudioDoc>'
+
+
+def test_assemble_flat_config_single_net_no_lid_seed() -> None:
+    base = {"fileslisting": "P", "language2classmapping": "P", "BLSTM_weightsFile": "x", "numOuterThreads": "1", "Audio_max_duration": "120"}
+    cfg = B.assemble_flat_config(base, fileslisting="t.flst", mapping="m.csv", sad_seed="s.bin", lanes=2, extra={"Audio_max_duration": "20.0"})
+    # single-net: NO BLSTM_LID_weightsFile is invented (that key would dangle on an algo-3 config).
+    assert cfg["BLSTM_weightsFile"] == "s.bin" and "BLSTM_LID_weightsFile" not in cfg
+    assert cfg["fileslisting"] == "t.flst" and cfg["language2classmapping"] == "m.csv" and cfg["numOuterThreads"] == "2"
+    # extra overlays the audio cap in place (the key already existed, so its position is kept).
+    assert cfg["Audio_max_duration"] == "20.0"
+    assert base["Audio_max_duration"] == "120", "assemble_flat_config must not mutate its input"
+
+
+def test_write_sad_mapping(tmp_path: Path) -> None:
+    p = tmp_path / "sad_mapping.csv"
+    B.write_sad_mapping(p)
+    assert p.read_text() == "unk;unk;0\n"
+
+
+def test_hyp_xml_for_strips_extension() -> None:
+    d = Path("/scores")
+    # strip_last_4 (drop the 4-char .wav), then .xml -- the engine's own dump-target rule.
+    # (synthetic names: multi-dot LRE03-style + single-dot LRE07-style, no real corpus file.)
+    assert B._hyp_xml_for("/a/b/zz_0000_a.MT1.mp1.wav", d) == d / "zz_0000_a.MT1.mp1.xml"
+    assert B._hyp_xml_for("ZZ-000000-A-con.wav", d) == d / "ZZ-000000-A-con.xml"
+
+
+def test_windowed_vrcts_ref_clips_and_pads(tmp_path: Path) -> None:
+    x = tmp_path / "ref.xml"
+    x.write_text(_vrcts_xml(100.0, [(10.0, 20.0), (30.0, 40.0)]))
+    # clip mid-gap: the ref ends EXACTLY at the window (no trailing pad needed).
+    assert B._windowed_vrcts_ref(x, 25.0) == [(0.0, 10.0, "NS"), (10.0, 20.0, "S"), (20.0, 25.0, "NS")]
+    # window past sigdur: the ref pads with NS to the window end (so pooling has no gap).
+    r = B._windowed_vrcts_ref(x, 120.0)
+    assert r[0] == (0.0, 10.0, "NS") and r[-1] == (100.0, 120.0, "NS")
+    # a window before the first segment is one whole NS span.
+    assert B._windowed_vrcts_ref(x, 5.0) == [(0.0, 5.0, "NS")]
+
+
+def test_pool_dcf_perfect_and_false_alarm() -> None:
+    # file1: speech, correctly detected. file2: nonspeech, all flagged speech.
+    # pooled -> speech_sum=10 fn=0, nonspeech_sum=10 fp=10 -> Pmiss 0, Pfa 1, DCF=0.25 (no-collar).
+    f1 = ([(0.0, 10.0, "S")], [(0.0, 10.0, "speech")])
+    f2 = ([(0.0, 10.0, "NS")], [(0.0, 10.0, "speech")])
+    c = B._pool_dcf([f1, f2], (0.0,)).by_collar(0.0)
+    assert abs(c.pmiss - 0.0) < 1e-9 and abs(c.pfa - 1.0) < 1e-9 and abs(c.dcf - 0.25) < 1e-9
+
+
+def _sad_corpus_tree(root: Path, n: int) -> None:
+    audio = root / "train" / "audio" / "LRE03"
+    audio.mkdir(parents=True)
+    for i in range(n):
+        (audio / f"xx_{i:03d}.MT1.mp1.wav").write_bytes(b"")
+        (audio / f"xx_{i:03d}.part.xml").write_text(_vrcts_xml(60.0, [(1.0, 5.0)]))
+
+
+def test_prepare_sad_listings_split_plumbing(tmp_path: Path) -> None:
+    from rich.console import Console
+
+    root = tmp_path / "corpus"
+    _sad_corpus_tree(root, 40)  # derive_sad_listings 70/15/15 -> 28/6/6
+    out = tmp_path / "out"
+    out.mkdir()
+    tr, va, te, tn, vn, ten, mn = B._prepare_sad_listings(root, out, seed=0, subset=8, valid_size=3, test_size=4, console=Console())
+    assert len(tr) == 8 and len(va) == 3 and len(te) == 4  # first-N subsets of each split
+    assert (tn, vn, ten, mn) == ("sad_train_subset.flst", "sad_valid_subset.flst", "sad_test_subset.flst", "sad_mapping.csv")
+    assert (out / tn).is_file() and (out / mn).read_text() == "unk;unk;0\n"
+    trf, vaf, tef = ({r["filename"] for r in s} for s in (tr, va, te))
+    assert trf.isdisjoint(vaf) and trf.isdisjoint(tef) and vaf.isdisjoint(tef), "the subsets stay disjoint (the base split is)"
+    assert all(r["refseg"].endswith(".part.xml") for r in tr), "SAD refs are the corpus VRCTS .part.xml files"
+
+
+def test_run_baseline_sad_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SAD arm dispatch (single-net config, no LID seed, audio cap) + dry_run overrides +
+    metadata, with the engine boundary stubbed (`speech_rs`, seed-pack init, `RunState`, the
+    DCF scorer). Proves run_baseline routes the sad arm without touching the engine/corpus."""
+    import sys
+    import types
+
+    root = tmp_path / "corpus"
+    _sad_corpus_tree(root, 12)
+
+    fake_rs = types.ModuleType("speech_rs")
+    fake_flat = {
+        "Algo_choice": "3",
+        "BLSTM_NNetInputSize": "23",
+        "fileslisting": "x",
+        "language2classmapping": "y",
+        "BLSTM_weightsFile": "s",
+        "numOuterThreads": "1",
+        "Audio_max_duration": "120",
+    }
+    setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
+    monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
+    monkeypatch.setattr(B, "_generate_sad_seed_pack", lambda flat, out, seed, scheme, forget: None)
+    monkeypatch.setattr(B, "RunState", type("RS", (), {"from_config": staticmethod(lambda *a, **k: object())}))
+    monkeypatch.setattr(B, "_score_sad_pack_on_test", lambda *a, **k: (None, None))
+
+    class _Res:
+        checkpoint_dir = str(tmp_path / "out" / "checkpoint")
+        epochs_run, best_epoch, best_val_cost = 1, 0, 1.0
+        history: list[object] = []
+
+    out = tmp_path / "out"
+    (out / "checkpoint").mkdir(parents=True)
+    res = B.run_baseline("sad", root, out, dry_run=True, seed=5, lanes=2, audio_max_duration=15.0, _train_fn=lambda state, seed, params: _Res())
+
+    meta = json.loads((out / "run_metadata.json").read_text())
+    assert meta["arm"] == "sad" and meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
+    assert meta["seed"] == 5 and meta["lanes"] == 2 and meta["audio_max_duration"] == 15.0
+    assert res.n_train > 0
+    # single-net config: no LID weight-file key, and the audio cap threaded into base.config.
+    cfg_text = (out / "base.config").read_text()
+    assert "BLSTM_LID_weightsFile" not in cfg_text and "Audio_max_duration 15.0" in cfg_text
+
+
+def test_build_parser_sad_audio_cap_wiring() -> None:
+    args = B.build_parser().parse_args(["sad", "--corpus-root", "/c", "--out-dir", "/o", "--audio-max-duration", "20.0"])
+    assert args.arm == "sad" and args.audio_max_duration == 20.0
+
+
+def test_baseline_main_sad_forwards_audio_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(arm: str, corpus_root: Path, out_dir: Path, **kw: object) -> None:
+        captured["arm"] = arm
+        captured.update(kw)
+
+    monkeypatch.setattr(B, "run_baseline", fake_run)
+    rc = B.main(["sad", "--corpus-root", "/c", "--out-dir", "/o", "--audio-max-duration", "30.0"])
+    assert rc == 0 and captured["arm"] == "sad" and captured["audio_max_duration"] == 30.0
+
+
+def test_speech_cli_mounts_baseline_sad(monkeypatch: pytest.MonkeyPatch) -> None:
+    import speech.cli as cli
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    rc = cli.main(["baseline", "sad", "--corpus-root", "/c", "--out-dir", "/o", "--audio-max-duration", "25.0"])
+    assert rc == 0 and captured["arm"] == "sad" and captured["audio_max_duration"] == 25.0

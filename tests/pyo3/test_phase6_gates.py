@@ -26,6 +26,7 @@ reviewers, skips in CI. Measured whole-file runtime ~6 min on the dev box (main 
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -108,7 +109,106 @@ def test_lid_features_dry_run_smoke(tmp_path: Path) -> None:
     assert res.metadata_path.is_file()
     assert res.lid_error is not None and np.isfinite(res.lid_error), "dry-run must still score the held-out slice end to end"
     # the dry-run metadata records the forced 1-step regime.
-    import json
+    meta = json.loads(res.metadata_path.read_text())
+    assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
+
+
+# ============================== SAD ARM (Task 9) =============================================
+#
+# From-scratch algo-3 spectral SAD (File_Type 0 wav) on the real corpus wav/xml pairs, scored
+# END TO END with the T4 DCF harness -- the engine's dumped VRCTS hyps vs the `.part.xml`
+# references (windowed to the capped-audio span) -> pooled `dcf` -> the FIRST REAL DCF NUMBERS.
+#
+# WHY THE SIGNAL IS THE TRAINED-VS-INIT DCF, NOT A BEAT-TRIVIAL DCF (the honest caveat, the SAD
+# analogue of the LID mode-collapse note above): the corpus wavs cap to ~53% speech windows, so
+# on a tiny subset the from-scratch net mode-collapses toward the window-majority -- the seeded
+# init sits BELOW the rising threshold everywhere (all non-speech, DCF ~0.75), and a few SMORMS3
+# epochs drive it ABOVE the threshold everywhere (all speech, DCF ~0.25). There is no
+# partial-discrimination sweet spot at this scale (measured: the net jumps from all-non-speech
+# straight to all-speech). The direction-safe TASK metric is therefore the trained-vs-init
+# held-out DCF (init all-non-speech ~0.75 -> trained fires ~0.25, +0.50 at every collar), plus
+# "the net learned to fire" (trained Pmiss ~0 vs init Pmiss ~1); genuine speech/non-speech
+# discrimination (a DCF below the all-speech 0.25 baseline) is the FULL-RUN launcher's job (more
+# data, more epochs). Because both endpoints are degenerate (all-one-class), the DCF is exactly
+# 0.25/0.75 with no libm-sensitive boundary jitter -- rock-stable cross-machine. Margins were
+# MEASURED on this box (2026-07-18, seed 0) and PINNED with generous headroom.
+
+
+@pytest.mark.slow
+@requires_corpus
+def test_sad_subset_trains_and_scores(tmp_path: Path) -> None:
+    """Train algo-3 SAD from scratch on a 10-file subset (20 s cap), then score a disjoint
+    24-file held-out slice END TO END via the T4 DCF harness. Pins (measured 2026-07-18, seed
+    0, ~80 s): held-out DCF@0.5 trained 0.2500 (Pmiss 0.0 Pfa 1.0) vs init 0.7500 (Pmiss 1.0
+    Pfa 0.0), +0.50 at every collar; the trained net fires (all-speech collapse), the init
+    does not (all-non-speech)."""
+    res = B.run_baseline(
+        "sad",
+        CORPUS_ROOT,
+        tmp_path / "run",
+        subset=10,  # 10 train wavs (seeded first-N of the 70/15/15 SAD split)
+        valid_size=8,
+        test_size=24,  # a stable pooled-DCF denominator, disjoint from train/valid
+        epochs=3,
+        steps_per_epoch=10,  # ~30 SMORMS3 steps: past warm-up, into the all-speech attractor
+        patience=99,
+        seed=0,
+        audio_max_duration=20.0,  # cap the 1800 s CallFriend recordings; the ref windows to match
+        score_init=True,  # also score the untrained init on the SAME test set (the DCF baseline)
+    )
+
+    # --- both DCF reports landed, valid ranges ---
+    assert res.dcf is not None and res.init_dcf is not None
+    tr = res.dcf.by_collar(0.5)
+    ini = res.init_dcf.by_collar(0.5)
+    assert np.isfinite(tr.dcf) and 0.0 <= tr.dcf <= 1.0 and 0.0 <= ini.dcf <= 1.0
+
+    # --- the net learned to FIRE: trained detects speech, the untrained init misses ~all ---
+    assert tr.pmiss < 0.5, f"trained must detect held-out speech (Pmiss {tr.pmiss:.3f})"
+    assert ini.pmiss > 0.9, f"the untrained init misses ~all speech (Pmiss {ini.pmiss:.3f})"
+
+    # --- the direction-safe task metric: trained held-out DCF beats its OWN init by a margin ---
+    #     (measured trained 0.25 vs init 0.75, gap 0.50; pin a conservative 0.2 gap).
+    assert tr.dcf < ini.dcf - 0.2, f"trained DCF {tr.dcf:.4f} must beat init {ini.dcf:.4f} by margin"
+    # trained beats the all-non-speech baseline (0.75) with headroom; init sits near it.
+    assert tr.dcf <= 0.5, f"trained DCF {tr.dcf:.4f} must beat the all-non-speech baseline (0.75) with headroom"
+    assert ini.dcf >= 0.6, f"untrained init should sit near the all-non-speech baseline, got {ini.dcf:.4f}"
+
+    # --- self-describing run: metadata + checkpoint + the dumped VRCTS hyps landed ---
+    assert res.metadata_path.is_file()
+    assert (res.checkpoint_dir / "best_sad.bin").is_file() and (res.checkpoint_dir / "last_sad.bin").is_file()
+    assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.xml"))) == res.n_test
+
+
+@pytest.mark.slow
+@requires_corpus
+def test_sad_deterministic(tmp_path: Path) -> None:
+    """Run-twice determinism at a fixed seed: bit-identical trained weights + identical pooled
+    held-out DCF. A SHORT config (determinism is a pipeline property, provable cheaply); the
+    full gate's determinism was measured separately (2026-07-18, bit-identical best_sad.bin)."""
+    kw = dict(subset=8, valid_size=6, test_size=8, epochs=1, steps_per_epoch=8, patience=99, seed=0, audio_max_duration=15.0)
+    a = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "a", **kw)  # type: ignore[arg-type]
+    b = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "b", **kw)  # type: ignore[arg-type]
+
+    for name in ("last_sad.bin", "best_sad.bin"):
+        assert (a.checkpoint_dir / name).read_bytes() == (b.checkpoint_dir / name).read_bytes(), f"{name} not bit-identical across two fixed-seed runs"
+    assert a.dcf is not None and b.dcf is not None
+    assert a.dcf.by_collar(0.5).dcf == b.dcf.by_collar(0.5).dcf, "pooled held-out DCF not reproducible"
+
+
+@pytest.mark.slow
+@requires_corpus
+def test_sad_dry_run_smoke(tmp_path: Path) -> None:
+    """The `--dry-run` 1-step smoke for the SAD arm: init + 1 epoch on a tiny slice at a short
+    audio cap + DCF scoring, no long training. Proves the whole arm wiring (derive_sad_listings,
+    config, seeded init, engine VRCTS dump, dcf) runs fast end to end."""
+    res = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "dry", dry_run=True, seed=0)
+    assert res.epochs_run == 1, "dry-run must run exactly 1 epoch"
+    assert res.n_train > 0 and res.n_test > 0
+    assert res.metadata_path.is_file()
+    assert res.dcf is not None, "dry-run must still score the held-out slice end to end (a valid DcfReport)"
+    assert np.isfinite(res.dcf.by_collar(0.5).dcf)
 
     meta = json.loads(res.metadata_path.read_text())
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
+    assert meta["audio_max_duration"] == 10.0, "the SAD dry-run forces a short audio cap"

@@ -22,6 +22,26 @@ R2 (vtln vs plain): the archive's TRAIN side carries only plain `plp8f0mvsdd`; a
 vtln/cmllr-train pairing is structurally impossible, so the baseline pairing is PLAIN
 features on both train and eval (RESULTS.md carries the evidence).
 
+THE SAD ARM (`arm="sad"`, Task 9): from-scratch algo-3 spectral SAD (Algo 3, File_Type 0)
+over the real corpus wav/xml pairs. The DSP front-end (periodogram -> Mel/DCT + deltas)
+feeds a single trainable BLSTM whose speech-posterior output drives the hysteresis
+segmenter; `train_modern` descends the NNCostSeg objective (SAD = NNCostSeg alone, algo-3
+single-net). The listings come from `dataprep.lre.derive_sad_listings` (the seeded 70/15/15
+split of the 2066 wav+xml pairs); the references are the corpus `.part.xml` VRCTS files
+(routed through the engine's `.xml` reference dispatch, Task 2b). The held-out slice is
+scored end to end with the T4 DCF harness: the engine dumps one VRCTS hypothesis xml per
+test file (`Dump_Directory`), those are read back via `evaluate.load_vrcts_hyp`, the
+`.part.xml` references via `evaluate.load_vrcts_ref` (windowed to the capped-audio span),
+and pooled through `evaluate.dcf` -> the first real DCF numbers (trained vs its own
+from-scratch init). The corpus wavs are 1800 s CallFriend recordings, so `Audio_max_duration`
+caps them; the reference is windowed to the same span (matching the engine's own
+`_AudioDuration` reference windowing). NOTE (measured, honest): on a tiny subset the
+from-scratch net mode-collapses toward the window-majority (all-speech) -- the same
+inherent-property caveat the LID arm carries for its majority classes; the trained-vs-init
+DCF improvement (init is all-non-speech, DCF ~0.75; trained fires, DCF ~0.25) is the
+direction-safe task metric, and genuine speech/non-speech discrimination is the full-run
+launcher's job.
+
 LICENSE HYGIENE: nothing corpus-derived is committed. The listing, mapping, reference, and
 seed weight packs are all synthesized at RUNTIME under `out_dir` from `corpus_root`; the
 committed TOML carries only DSP hyperparameter numbers + placeholder path strings.
@@ -32,6 +52,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import time
 from collections import defaultdict
@@ -42,19 +63,25 @@ from pathlib import Path
 import numpy as np
 from rich.console import Console
 
+from speech.batching import read_listing
 from speech.config_bridge import nnet_spec
-from speech.dataprep.lre import LRE03_LANGUAGES, localize_listing
+from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
 from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
-from speech.evaluate import cavg, lid_error, read_scr_scores
+from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 from speech.init_weights import init_weights
-from speech.weight_bridge import write_bin
+from speech.weight_bridge import read_weight_vector, write_bin
 
 # The committed canonical TOML for each arm (relative to the repo root). Task 8 ships
-# lid-features; Tasks 9/10 add the sad + lid-phseq entries.
+# lid-features; Task 9 adds sad; Task 10 adds lid-phseq.
 _ARM_CONFIGS: dict[str, str] = {
     "lid-features": "configs/training/lre03_lid_features.toml",
+    "sad": "configs/training/lre_sad.toml",
 }
+
+# The five DCF collar sizes (design spec S0): no-collar + 0.25/0.5/1.0/2.0 s. The 0.5 s
+# collar is the reported headline (the T4 scorer pins all five vs the NIST perl oracle).
+_DCF_COLLARS: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 2.0)
 
 # The single whole-file-speech STM reference the cep listings point at (synthesized under
 # out_dir). One line, huge end time; `load_ref_stm` clamps it to each file's own duration
@@ -198,21 +225,31 @@ def assemble_flat_config(
     fileslisting: str,
     mapping: str,
     sad_seed: str,
-    lid_seed: str,
     lanes: int,
+    lid_seed: str | None = None,
+    extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Overlay the runtime corpus/weight/lane keys onto the TOML-flattened base config
     (`speech_rs.load_toml_config` output). PURE -- no engine, no I/O -- so the unit tests
     exercise it with a synthetic flat dict. `dict(flat)` preserves the base key order
     (byte-stable), and each overwritten key already exists in the base so its position is
     kept. `numOuterThreads` = `lanes` records the N-lane fold width in the config the engine
-    reads (deterministic-but-N-dependent, the R6-4a model; RESULTS.md fixes N per run)."""
+    reads (deterministic-but-N-dependent, the R6-4a model; RESULTS.md fixes N per run).
+
+    `lid_seed` is set ONLY for the algo-6 Twin (the LID features arm); a single-net algo-3
+    SAD config has no `BLSTM_LID_weightsFile` key, and adding one would leave a dangling
+    weight-file reference for a net that never exists -- so `lid_seed=None` skips it. `extra`
+    overlays any further arm-specific keys (the SAD arm's `Audio_max_duration` cap); a key
+    already in `flat` keeps its position, a new one appends."""
     cfg = dict(flat)
     cfg["fileslisting"] = fileslisting
     cfg["language2classmapping"] = mapping
     cfg["BLSTM_weightsFile"] = sad_seed
-    cfg["BLSTM_LID_weightsFile"] = lid_seed
+    if lid_seed is not None:
+        cfg["BLSTM_LID_weightsFile"] = lid_seed
     cfg["numOuterThreads"] = str(lanes)
+    for k, v in (extra or {}).items():
+        cfg[k] = v
     return cfg
 
 
@@ -237,6 +274,28 @@ def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_sc
     for prefix, name in (("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")):
         pack = init_weights(nnet_spec(flat, prefix), rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
         write_bin(pack.shape[0], 1, pack, out_dir / name)
+
+
+def _generate_sad_seed_pack(flat: dict[str, str], out_dir: Path, seed: int, init_scheme: str, forget_bias_one: bool) -> None:
+    """The single-net (algo-3 SAD) analogue of `_generate_seed_packs`: one `BLSTM` pack
+    (`sad_seed.bin`) the engine loads at construction. `train_modern` re-inits from scratch
+    and overrides it, but the engine still needs a loadable, correctly-sized pack to build
+    the net; the pack ALSO doubles as the scored `score_init` baseline, so it MUST be drawn
+    under the SAME `init_scheme`/`forget_bias_one` the training call uses (the Task 8 review
+    lesson) -- otherwise the held-out DCF would compare the trained net against an init drawn
+    under a different scheme than training actually started from. One draw, deterministic."""
+    rng = np.random.default_rng(seed)
+    pack = init_weights(nnet_spec(flat, "BLSTM"), rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
+    write_bin(pack.shape[0], 1, pack, out_dir / "sad_seed.bin")
+
+
+def write_sad_mapping(path: Path) -> None:
+    """A minimal `language2classmapping` for the SAD arm: `unk;unk;0`. SAD carries no
+    per-file language target (`derive_sad_listings` writes `lang`/`dial` = `unk`), so the
+    engine's mapping lookup returns class 0 for every file and the class is never used in
+    the speech/non-speech decision. The engine's `Corpus::from_config` still requires the
+    `language2classmapping` key to point at a real file, so this writes the one-line stub."""
+    path.write_text("unk;unk;0\n")
 
 
 # --------------------------------------------------------------------------------------- #
@@ -285,6 +344,115 @@ def _score_packs_on_test(
 
 
 # --------------------------------------------------------------------------------------- #
+# SAD scoring: the engine's VRCTS hyp dumps vs the xml-derived refs -> the T4 DCF harness
+# --------------------------------------------------------------------------------------- #
+
+
+def _hyp_xml_for(wav_filename: str, dump_dir: Path) -> Path:
+    """The VRCTS hypothesis xml the engine writes for `wav_filename` under `dump_dir`. The
+    engine's dump target is the audio basename with its 4-char extension stripped, then
+    `.xml` (`bag_of_processors.rs::base_from_last_slash` -> `strip_last_4`; the corpus is
+    mono so there is no `_chan_<n>` fan-out). `[:-4]` mirrors `strip_last_4` exactly (drop
+    the last 4 chars of `.wav`), so `zz_0000_a.MT1.mp1.wav -> zz_0000_a.MT1.mp1.xml`."""
+    return dump_dir / (Path(wav_filename).name[:-4] + ".xml")
+
+
+def _windowed_vrcts_ref(ref_xml: Path, end: float) -> list[Interval]:
+    """The `.part.xml` reference (`load_vrcts_ref`, kinds S/NS) clipped to `[0, end]` -- the
+    span the engine's capped-audio hypothesis actually covers (`end` = the hyp's own
+    `sigdur`). The engine windows its OWN reference on `_AudioDuration` identically (Task 2b),
+    so this keeps the DCF scoring span aligned with the hyp. `load_vrcts_ref` yields a
+    contiguous run from 0, so clipping preserves contiguity; a trailing `NS` pad guarantees
+    the ref ends EXACTLY at `end` (so the pooled concatenation below has no inter-file gap),
+    and an empty clip (a reference whose first segment starts past `end`) becomes one whole
+    `NS` span."""
+    out: list[Interval] = []
+    for s, e, k in load_vrcts_ref(ref_xml):
+        if s >= end:
+            break
+        out.append((s, min(e, end), k))
+    if not out:
+        return [(0.0, end, "NS")]
+    if out[-1][1] < end:
+        out.append((out[-1][1], end, "NS"))
+    return out
+
+
+def _pool_dcf(pairs: Sequence[tuple[list[Interval], list[Interval]]], collars: Sequence[float]) -> DcfReport:
+    """Pool per-file (ref, hyp) pairs into ONE DCF over a concatenated timeline: each file's
+    intervals are offset by the running sum of the preceding files' spans, then scored with a
+    single `dcf` call (the duration-weighted pooled DCF -- the single-number analogue of the
+    LID arm's pooled argmax error). Contiguity holds because every `_windowed_vrcts_ref` +
+    `load_vrcts_hyp` pair spans exactly `[0, span]` and starts at 0, so file i+1 begins where
+    file i ended -- no gap for `dcf`'s reference walk to reject. The only cross-file artifact
+    is that a collar may straddle a file boundary, a negligible fraction of a multi-file
+    timeline and identical across the trained/init passes (so the direction is unaffected)."""
+    all_ref: list[Interval] = []
+    all_hyp: list[Interval] = []
+    offset = 0.0
+    for ref, hyp in pairs:
+        span = hyp[-1][1]  # == the file's capped audio span (the ref is windowed to it)
+        all_ref += [(s + offset, e + offset, k) for s, e, k in ref]
+        all_hyp += [(s + offset, e + offset, k) for s, e, k in hyp]
+        offset += span
+    return dcf(all_ref, all_hyp, collars)
+
+
+def _score_sad_pack_on_test(
+    base_cfg: dict[str, str],
+    workdir: Path,
+    pack_path: Path,
+    dump_dir: Path,
+    test_records: Sequence[dict[str, str]],
+    test_listing_name: str,
+) -> tuple[DcfReport | None, Path]:
+    """Score one SAD weight pack on the held-out test split end to end: run the engine
+    (scored `-m`) over the test listing with `Dump_Directory` set so it writes one VRCTS
+    hypothesis xml per file, then pool `dcf` over (`.part.xml` ref windowed to the hyp span,
+    engine hyp). The pack (a trained `best_sad.bin` or the untrained `sad_seed.bin`) is
+    loaded via `set_weights` -- the SAME scorer measures both the trained model and its own
+    from-scratch init on the identical test set (the direction-safe DCF improvement).
+
+    Returns `(DcfReport | None, dump_dir)`; `None` only if no hyp xml was produced (a
+    structurally empty test set). Mirrors `drivers.test.evaluate`'s engine-driving shape
+    (chdir into `workdir`, backprop-OFF forward-only config, `set_weights` then `run`)."""
+    import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    cfg = dict(base_cfg)
+    cfg["fileslisting"] = test_listing_name
+    cfg["Dump_Directory"] = str(dump_dir.resolve())
+    cfg["BLSTM_BackPropagationActivated"] = "false"
+    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
+    eval_config = workdir / f"_sad_eval_{dump_dir.name}.config"
+    eval_config.write_text(_config_text(cfg))
+
+    prev = Path.cwd()
+    os.chdir(workdir)
+    try:
+        engine = speech_rs.Engine([eval_config.name], "-m")
+        engine.set_weights(0, [list(read_weight_vector(pack_path))])
+        engine.run()
+    finally:
+        os.chdir(prev)
+
+    pairs: list[tuple[list[Interval], list[Interval]]] = []
+    for rec in test_records:
+        hyp_xml = _hyp_xml_for(rec["filename"], dump_dir)
+        if not hyp_xml.is_file():
+            continue
+        hyp = load_vrcts_hyp(hyp_xml)
+        if not hyp:
+            continue
+        span = hyp[-1][1]
+        ref = _windowed_vrcts_ref(Path(rec["refseg"]), span)
+        pairs.append((ref, hyp))
+    if not pairs:
+        return None, dump_dir
+    return _pool_dcf(pairs, _DCF_COLLARS), dump_dir
+
+
+# --------------------------------------------------------------------------------------- #
 # Run metadata
 # --------------------------------------------------------------------------------------- #
 
@@ -327,9 +495,48 @@ class BaselineResult:
     init_lid_error: float | None = None  # untrained-init held-out error (scored iff score_init)
     init_cavg: float | None = None
     scores_dir: Path | None = None
+    # SAD arm (arm="sad"): the pooled held-out DCF report (per collar) for the trained model
+    # and, when `score_init`, its own from-scratch init on the identical test set.
+    dcf: DcfReport | None = None
+    init_dcf: DcfReport | None = None
     n_train: int = 0
     n_valid: int = 0
     n_test: int = 0
+
+
+def _prepare_sad_listings(
+    corpus_root: Path,
+    out_dir: Path,
+    seed: int,
+    subset: int | None,
+    valid_size: int,
+    test_size: int,
+    console: Console,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], str, str, str, str]:
+    """SAD listing prep: `derive_sad_listings` (the seeded 70/15/15 split of the wav/xml
+    pairs) then a deterministic first-N SUBSET of each split (the split is already a seeded
+    permutation, so `[:subset]` is a reproducible sample). Writes the subset train/valid/test
+    `.flst` + a minimal `unk` mapping under out_dir; returns the records + the four listing
+    filenames. `subset=None` trains on the full train split (the launcher). The refs are the
+    corpus `.part.xml` paths the derived listings already carry (absolute)."""
+    split = derive_sad_listings(Path(corpus_root), out_dir, seed)
+    console.log(
+        f"SAD corpus: {split.n_total} wav/xml pairs ({split.n_orphan_wav} orphan wav, "
+        f"{split.n_orphan_xml} orphan xml); base split {split.n_train}/{split.n_valid}/{split.n_test}"
+    )
+    train_all = read_listing(split.train_path)
+    valid_all = read_listing(split.valid_path)
+    test_all = read_listing(split.test_path)
+    train_rec = train_all if subset is None else train_all[:subset]
+    valid_rec = valid_all[:valid_size]
+    test_rec = test_all[:test_size]
+
+    train_name, valid_name, test_name, mapping_name = "sad_train_subset.flst", "sad_valid_subset.flst", "sad_test_subset.flst", "sad_mapping.csv"
+    _write_listing_rows(out_dir / train_name, train_rec)
+    _write_listing_rows(out_dir / valid_name, valid_rec)
+    _write_listing_rows(out_dir / test_name, test_rec)
+    write_sad_mapping(out_dir / mapping_name)
+    return train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name
 
 
 def run_baseline(
@@ -351,6 +558,7 @@ def run_baseline(
     test_size: int = 48,
     minibatch: int = 0,
     score_init: bool = False,
+    audio_max_duration: float | None = None,
     console: Console | None = None,
     _train_fn: Callable[..., object] | None = None,
 ) -> BaselineResult:
@@ -358,20 +566,28 @@ def run_baseline(
     config, seeded from-scratch init (or resume), `train_modern` with the moving NNCostSeg
     validation signal, then score a held-out slice (LID: `.scr` -> `lid_error` + `cavg`).
 
-    `subset`: the TRAIN sample size (per-language proportional, seeded) -- the CI-gate regime
-    (< 10 min); `None` trains on the whole corpus (the launcher). `valid_size`/`test_size`
-    are SEPARATE, disjoint held-out sizes -- decoupled from `subset` so a big, cheap-to-score
-    test set gives a stable LID error while training stays small (scoring is
-    O(test x forward); training is O(subset x steps x epochs)). `dry_run`: a 1-step smoke (a
-    tiny train subset, 1 epoch, 1 step) still scored end to end. `resume`: continue from
+    `subset`: the TRAIN sample size (per-language proportional for LID, a seeded first-N of
+    the SAD split for SAD) -- the CI-gate regime (< 10 min); `None` trains on the whole
+    corpus (the launcher). `valid_size`/`test_size` are SEPARATE, disjoint held-out sizes --
+    decoupled from `subset` so a big, cheap-to-score test set gives a stable held-out metric
+    while training stays small. `dry_run`: a 1-step smoke (a tiny train subset, 1 epoch, 1
+    step, and for SAD a short audio cap) still scored end to end. `resume`: continue from
     `out_dir/checkpoint`'s `last_*.bin`. `lanes`: the engine's `numOuterThreads` fold width
-    (recorded in metadata; N=1 is the deterministic parity mode). `lre_listing`: localize
-    this 2015 listing instead of deriving from the corpus tree. `_train_fn` injects a stub
-    `train_modern` for tests."""
+    (recorded in metadata; N=1 is the deterministic parity mode). `lre_listing` (LID only):
+    localize this 2015 listing instead of deriving from the corpus tree. `audio_max_duration`
+    (SAD only): override `Audio_max_duration` (the corpus wavs are 1800 s; a cap bounds the
+    run and the held-out DCF windows the reference to the same span). `_train_fn` injects a
+    stub `train_modern` for tests.
+
+    The arm dispatch differs in three places -- the listings (LID globs cep + a synthesized
+    speech STM; SAD derives wav/xml pairs with the corpus `.part.xml` refs), the seed packs
+    (LID a `[sad, lid]` Twin pair; SAD a single `[sad]` net), and the held-out scoring (LID
+    `.scr` -> `lid_error` + `cavg`; SAD VRCTS hyps -> pooled `dcf`); the split/params/train/
+    metadata skeleton is shared."""
     if arm not in _ARM_CONFIGS:
         raise ValueError(f"unknown arm {arm!r}; known arms: {sorted(_ARM_CONFIGS)}")
-    if arm != "lid-features":
-        raise NotImplementedError(f"arm {arm!r} lands in a later task (only lid-features is wired in Task 8)")
+    if arm not in ("lid-features", "sad"):
+        raise NotImplementedError(f"arm {arm!r} lands in a later task (lid-features + sad are wired through Task 9)")
 
     console = console or Console()
     out_dir = Path(out_dir).resolve()
@@ -380,49 +596,59 @@ def run_baseline(
     repo_root = Path(__file__).resolve().parents[4]
     toml_path = repo_root / _ARM_CONFIGS[arm]
 
+    # dry_run overrides -- arm-aware: SAD wav ingestion is slower per file than cep, so the
+    # SAD smoke draws a smaller subset AND caps the audio short (else a 1-step smoke over
+    # long CallFriend recordings would blow the "fast" promise).
     if dry_run:
-        subset, epochs, steps_per_epoch, patience, test_size, valid_size = (subset or 24), 1, 1, 99, min(test_size, 24), min(valid_size, 12)
+        if arm == "sad":
+            subset, epochs, steps_per_epoch, patience, test_size, valid_size = (subset or 6), 1, 1, 99, min(test_size, 6), min(valid_size, 4)
+            audio_max_duration = audio_max_duration if audio_max_duration is not None else 10.0
+        else:
+            subset, epochs, steps_per_epoch, patience, test_size, valid_size = (subset or 24), 1, 1, 99, min(test_size, 24), min(valid_size, 12)
 
     t0 = time.time()
     console.log(f"[bold]baseline {arm}[/bold]: corpus={corpus_root} out={out_dir} subset={subset} lanes={lanes} seed={seed} dry_run={dry_run}")
 
-    # --- 1. listings + mapping + reference (synthesized under out_dir) --------------------
-    ref_stm = out_dir / "ref_speech.stm"
-    ref_stm.write_text(_SPEECH_STM)
-    if lre_listing is not None:
-        localized = out_dir / "localized_lre03.csv"
-        rep = localize_listing(Path(lre_listing), corpus_root, localized)
-        console.log(f"localized {rep.rows_found}/{rep.rows_total} rows ({rep.rows_missing} missing)")
-        records = _records_from_localized(localized, ref_stm)
+    # --- 1. listings + mapping (+ reference) synthesized under out_dir --------------------
+    if arm == "sad":
+        train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name = _prepare_sad_listings(
+            corpus_root, out_dir, seed, subset, valid_size, test_size, console
+        )
+        n_classes = 1
     else:
-        records = derive_lid_features_records(corpus_root, ref_stm)
-    if not records:
-        raise RuntimeError(f"no LID features found under {corpus_root} (expected train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd)")
-    console.log(f"corpus records: {len(records)}")
-
-    train_rec, valid_rec, test_rec = stratified_splits(records, subset, valid_size, test_size, seed)
+        ref_stm = out_dir / "ref_speech.stm"
+        ref_stm.write_text(_SPEECH_STM)
+        if lre_listing is not None:
+            localized = out_dir / "localized_lre03.csv"
+            rep = localize_listing(Path(lre_listing), corpus_root, localized)
+            console.log(f"localized {rep.rows_found}/{rep.rows_total} rows ({rep.rows_missing} missing)")
+            records = _records_from_localized(localized, ref_stm)
+        else:
+            records = derive_lid_features_records(corpus_root, ref_stm)
+        if not records:
+            raise RuntimeError(f"no LID features found under {corpus_root} (expected train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd)")
+        console.log(f"corpus records: {len(records)}")
+        train_rec, valid_rec, test_rec = stratified_splits(records, subset, valid_size, test_size, seed)
+        train_name, valid_name, test_name = "lre03_lid_features_train.flst", "lre03_lid_features_valid.flst", "lre03_lid_features_test.flst"
+        mapping_name = "language2classmapping_lre12.csv"
+        _write_listing_rows(out_dir / train_name, train_rec)
+        _write_listing_rows(out_dir / valid_name, valid_rec)
+        _write_listing_rows(out_dir / test_name, test_rec)
+        write_lre_mapping_12(out_dir / mapping_name)
+        n_classes = len(_LANGS)
     console.log(f"split: train={len(train_rec)} valid={len(valid_rec)} test={len(test_rec)}")
 
-    train_lst = out_dir / "lre03_lid_features_train.flst"
-    valid_lst = out_dir / "lre03_lid_features_valid.flst"
-    test_lst = out_dir / "lre03_lid_features_test.flst"
-    _write_listing_rows(train_lst, train_rec)
-    _write_listing_rows(valid_lst, valid_rec)
-    _write_listing_rows(test_lst, test_rec)
-    mapping = out_dir / "language2classmapping_lre12.csv"
-    write_lre_mapping_12(mapping)
-
     # --- 2. training params + config assembly + seed packs -------------------------------
-    # Built here (not down in step 4) so `_generate_seed_packs` can be handed the SAME
+    # Built here (not down in step 4) so the seed-pack init is handed the SAME
     # init_scheme/forget_bias_one the training call below will use (Task 8 review fix).
     params = ModernTrainParams(
         epochs=epochs,
         patience=patience,
         steps_per_epoch=steps_per_epoch,
-        valid_listing=valid_lst.name if valid_rec else None,
+        valid_listing=valid_name if valid_rec else None,
         val_metric="nn_cost_seg",
         minibatch=minibatch,
-        nb_classes=len(_LANGS),
+        nb_classes=n_classes,
         multilingual=minibatch > 0,
         init_scheme=init_scheme,  # type: ignore[arg-type]
         init_seed=seed,
@@ -432,11 +658,18 @@ def run_baseline(
     import speech_rs  # local: the pyo3 module is only needed on the engine path
 
     flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
-    cfg = assemble_flat_config(flat, fileslisting=train_lst.name, mapping=mapping.name, sad_seed="sad_seed.bin", lid_seed="lid_seed.bin", lanes=lanes)
+    extra = {"Audio_max_duration": str(audio_max_duration)} if audio_max_duration is not None else None
+    if arm == "sad":
+        cfg = assemble_flat_config(flat, fileslisting=train_name, mapping=mapping_name, sad_seed="sad_seed.bin", lanes=lanes, extra=extra)
+        _generate_sad_seed_pack(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
+    else:
+        cfg = assemble_flat_config(
+            flat, fileslisting=train_name, mapping=mapping_name, sad_seed="sad_seed.bin", lid_seed="lid_seed.bin", lanes=lanes, extra=extra
+        )
+        _generate_seed_packs(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
     cfg_text = _config_text(cfg)
     base_config = out_dir / "base.config"
     base_config.write_text(cfg_text)
-    _generate_seed_packs(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
 
     # --- 3. run metadata -----------------------------------------------------------------
     metadata_path = write_run_metadata(
@@ -453,6 +686,7 @@ def run_baseline(
             "minibatch": minibatch,
             "init_scheme": init_scheme,
             "val_metric": "nn_cost_seg",
+            "audio_max_duration": audio_max_duration,
             "config_hash": _config_hash(cfg_text),
             "config_toml": str(toml_path.relative_to(repo_root)),
             "corpus_root": str(corpus_root),
@@ -477,12 +711,26 @@ def run_baseline(
     cavg_val: float | None = None
     init_err: float | None = None
     init_cavg_val: float | None = None
+    dcf_rep: DcfReport | None = None
+    init_dcf_rep: DcfReport | None = None
     scores_dir: Path | None = None
     ckpt = Path(res.checkpoint_dir)  # type: ignore[attr-defined]
-    if test_rec:
+    if test_rec and arm == "sad":
+        dcf_rep, scores_dir = _score_sad_pack_on_test(cfg, out_dir, ckpt / "best_sad.bin", out_dir / "score_trained", test_rec, test_name)
+        if dcf_rep is not None:
+            c = dcf_rep.by_collar(0.5)
+            console.log(f"held-out DCF@0.5={c.dcf:.4f} (Pmiss={c.pmiss:.4f} Pfa={c.pfa:.4f})")
+        else:
+            console.log("held-out: no VRCTS hyps produced (empty test split)")
+        if score_init:
+            init_dcf_rep, _ = _score_sad_pack_on_test(cfg, out_dir, out_dir / "sad_seed.bin", out_dir / "score_init", test_rec, test_name)
+            if init_dcf_rep is not None and dcf_rep is not None:
+                gain = init_dcf_rep.by_collar(0.5).dcf - dcf_rep.by_collar(0.5).dcf
+                console.log(f"init baseline: DCF@0.5={init_dcf_rep.by_collar(0.5).dcf:.4f} (improvement {gain:+.4f})")
+    elif test_rec:
         eval_base = out_dir / "eval_base.config"
         eval_cfg = dict(cfg)
-        eval_cfg["fileslisting"] = test_lst.name
+        eval_cfg["fileslisting"] = test_name
         eval_base.write_text(_config_text(eval_cfg))
         eval_state = RunState.from_config(eval_base, out_dir)
         lid_err, cavg_val, scores_dir = _score_packs_on_test(eval_state, ckpt / "best_sad.bin", ckpt / "best_lid.bin", out_dir / "score_trained", test_rec)
@@ -512,6 +760,8 @@ def run_baseline(
         cavg=cavg_val,
         init_lid_error=init_err,
         init_cavg=init_cavg_val,
+        dcf=dcf_rep,
+        init_dcf=init_dcf_rep,
         scores_dir=scores_dir,
         n_train=len(train_rec),
         n_valid=len(valid_rec),
@@ -538,7 +788,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=6)
     parser.add_argument("--steps-per-epoch", type=int, default=8)
     parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
-    parser.add_argument("--lre-listing", type=Path, default=None, help="localize this 2015 listing instead of deriving from the corpus tree")
+    parser.add_argument("--lre-listing", type=Path, default=None, help="LID arm: localize this 2015 listing instead of deriving from the corpus tree")
+    parser.add_argument("--audio-max-duration", type=float, default=None, help="SAD arm: cap Audio_max_duration (s); the corpus wavs are 1800 s")
     parser.add_argument("--resume", action="store_true", help="continue from out_dir/checkpoint")
     parser.add_argument("--dry-run", action="store_true", help="1-step smoke: tiny subset, 1 epoch, 1 step, still scored")
     return parser
@@ -561,6 +812,7 @@ def main(argv: list[str] | None = None) -> int:
         steps_per_epoch=args.steps_per_epoch,
         init_scheme=args.init_scheme,
         lre_listing=args.lre_listing,
+        audio_max_duration=args.audio_max_duration,
     )
     return 0
 
