@@ -1,11 +1,11 @@
-"""SAD detection-cost (DCF) scoring -- a faithful port of the NIST OpenSAD scorer.
+"""SAD detection-cost (DCF) scoring + LID argmax-error / Cavg metrics.
 
-`dcf()` reproduces `Optimizer_V6.2.2/scoreFile_SAD.pl` (v2.1, Greg Sanders, public
-domain) segment-for-segment: the reference ingestion (splicing consecutive same-class
-segments, exnihilating a leading NonSpeech when the ref starts after 0), the five collar
-constructions (no-collar + 0.25/0.5/1.0/2.0s), the hypothesis trim/pad to the reference
-span, and the interval sweep that accumulates speech/nonspeech time into
-miss/false-alarm sums. Per collar it reports Prob_Miss, Prob_FalseAlarm, and
+The SAD half -- `dcf()` -- reproduces `Optimizer_V6.2.2/scoreFile_SAD.pl` (v2.1, Greg
+Sanders, public domain) segment-for-segment: the reference ingestion (splicing
+consecutive same-class segments, exnihilating a leading NonSpeech when the ref starts
+after 0), the five collar constructions (no-collar + 0.25/0.5/1.0/2.0s), the hypothesis
+trim/pad to the reference span, and the interval sweep that accumulates speech/nonspeech
+time into miss/false-alarm sums. Per collar it reports Prob_Miss, Prob_FalseAlarm, and
 DCF = 0.75*Pmiss + 0.25*Pfa, including v2.1's zero-not-NaN semantics on degenerate
 (all-speech or all-nonspeech) files.
 
@@ -17,6 +17,13 @@ scorer's printed 5-decimal precision.
 Reference kinds are the raw NIST tab kinds (S / RI count as speech; NS / NT / RS / RX as
 non-speech); hypothesis kinds are `speech` / `non-speech` (`nonspeech` also accepted, as
 the perl does). `Interval` is `(start, end, kind)`.
+
+The LID half -- `lid_error()` / `read_scr_scores()` / `cavg()` -- scores spoken-language
+identification. `lid_error` is the argmax error percentage per `compare_scores.m`;
+`read_scr_scores` adapts the engine's `.scr` outputs (drivers/test.py's writer) into a
+score matrix; `cavg` is the NIST LRE closed-set identification Cavg per the 2015
+`ComputeCavgNIST.py` convention. See each function's docstring for the source lines and
+the softmax-invariance / convention notes.
 """
 
 from __future__ import annotations
@@ -25,6 +32,11 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
+from numpy.typing import NDArray
+
+F64 = np.float64
 
 # (start, end, kind). Ref kinds: S/NS/NT/RI/RS/RX. Hyp kinds: speech/non-speech.
 Interval = tuple[float, float, str]
@@ -313,3 +325,119 @@ def _score_collar(ref_segs: list[Interval], hyp_segs: list[Interval], collar: fl
         dcf_val = 0.75 * (fn / speech_sum) + 0.25 * (fp / nonspeech_sum)
 
     return CollarScore(collar=collar, pmiss=pmiss, pfa=pfa, dcf=dcf_val)
+
+
+# --- LID metrics: argmax error + Cavg -------------------------------------------------
+
+
+def lid_error(scores: NDArray[np.float64], refs: NDArray[np.int_]) -> float:
+    """The closed-set LID error PERCENTAGE, per `compare_scores.m:19-20`:
+
+        [val,pos] = max(scores_test,[],2);
+        sum(ref_test ~= pos)/length(ref_test)*100
+
+    `scores` is `(n_files, n_langs)` -- column `k` is language `k`'s detector score for
+    each file -- and `refs` is `(n_files,)` of true class indices. Returns
+    `mismatches / n_files * 100` (a PERCENT in [0, 100], NOT a fraction; the legacy `*100`
+    is load-bearing). MATLAB `max(...,[],2)` returns the FIRST maximum per row on a tie;
+    numpy `argmax` matches (first occurrence), so the tie semantics agree. The mismatch
+    count is invariant to the index base as long as `refs` and the argmax share it -- the
+    legacy is 1-based for both, this port is numpy's 0-based for both.
+
+    Scope: `compare_scores.m` assembles `scores_test` by scaling each detector column with
+    a PSO fusion weight (`pso_out(ii)`, :10) and later trains a `patternnet(40)` fusion
+    (:50-58). Both are OUT of scope -- `lid_error` takes the already-assembled score
+    matrix and does only the argmax + error; any calibration/fusion is the caller's."""
+    scores_a = np.asarray(scores, dtype=F64)
+    refs_a = np.asarray(refs)
+    preds = scores_a.argmax(axis=1)
+    return float(np.sum(refs_a != preds)) / len(refs_a) * 100.0
+
+
+def read_scr_scores(scores_dir: Path, class_keys: list[str]) -> tuple[NDArray[np.float64], list[str]]:
+    """Read the engine's per-file `.scr` outputs (`drivers/test.py::write_scores`) into a
+    `(n_files, n_langs)` score matrix + the parallel file-name list.
+
+    Each `.scr` line is `filename lang-dial score`, one per class, sorted DESCENDING by
+    score -- so lines are NOT in class order. `write_scores` derives the `lang-dial` label
+    from the class key as `key[:3] + '-' + key[-3:]` (the 2-char-dial underscore quirk:
+    'aaa_11' -> 'aaa-_11'); `read_scr_scores` inverts the SAME rule to map each line back
+    to its class-key COLUMN. `class_keys` must be the writer's alphabetical composed keys
+    (`drivers/test.py::_class_keys`); a label collision across two keys is a lossy round
+    trip and raises.
+
+    The returned scores are the SOFTMAXED `.scr` values the writer wrote
+    (`exp(s/100)/max(1e-3, sum)`), NOT the raw scores -- and that is deliberate. `softmax`
+    is strictly monotone (exp is increasing; the per-row denominator, floored at 1e-3, is
+    a single positive per-row constant), so `argmax(softmax(s)) == argmax(s)`: `lid_error`
+    and the argmax inside `cavg` return the identical result on these values as on the raw
+    scores. `files` are the `.scr` stems (name minus the `.scr` suffix), sorted."""
+    label_to_col = {f"{k[:3]}-{k[-3:]}": i for i, k in enumerate(class_keys)}
+    if len(label_to_col) != len(class_keys):
+        raise ValueError("ambiguous class-key labels: two keys share a lang-dial label")
+
+    n = len(class_keys)
+    rows: list[NDArray[np.float64]] = []
+    files: list[str] = []
+    for path in sorted(Path(scores_dir).glob("*.scr")):
+        row = np.zeros(n, dtype=F64)
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            _fname, label, score = line.rsplit(None, 2)
+            row[label_to_col[label]] = float(score)
+        rows.append(row)
+        files.append(path.name.removesuffix(".scr"))
+    scores = np.array(rows, dtype=F64).reshape(len(rows), n)
+    return scores, files
+
+
+def cavg(scores: NDArray[np.float64], refs: NDArray[np.int_], p_target: float = 0.5) -> float:
+    """The NIST LRE closed-set identification Cavg, per the 2015 `ComputeCavgNIST.py`
+    (`data/Scoring_LRE15/Scripts/ComputeCavgNIST.py:167-192`, the "Cavg max all dialects"
+    path):
+
+        Cavg = mean_t [ C_Miss*P_target*P_Miss(t) + C_FA*P_nontarget * mean_{n!=t} P_FA(t,n) ]
+
+    with `N = scores.shape[1]` languages, hard (argmax) decisions, `P_target = 0.5` (the
+    LRE convention; `P_nontarget = 1 - P_target`; `C_Miss = C_FA = 1`, folded into the 0.5
+    factors the script hardcodes). `P_Miss(t)` is the fraction of true-`t` files whose
+    argmax is not `t`; `P_FA(t,n)` is the fraction of true-`n` files whose argmax is `t`.
+    Denominators are guarded `max(1.0, count)` exactly as the script does, so a language
+    with zero reference trials contributes 0 (and still counts toward N in the outer
+    average -- a subset that omits some of the 12 languages scores without NaN).
+
+    This is the CLOSED-SET (hard-decision) Cavg, the directly-defined metric for an argmax
+    identifier. The detection-with-threshold Cavg variant needs calibrated per-language
+    LLRs and a decision threshold, which the port's raw score matrix does not carry -- a
+    deliberate scope choice (spec R5/R6). The score matrix is used only for its per-file
+    argmax; the Cavg value is a function of the resulting confusion matrix.
+
+    NB the script groups false alarms by the TRUE language and divides by its count; this
+    implementation groups by the DETECTOR `t` and divides by the non-target's count. Both
+    are the same complete sum over ordered language pairs, so the scalar is identical --
+    cross-checked against a by-true-language transcription of the script on a real 2015
+    confusion matrix (`tests/test_phase6_evaluate.py`, corpus-gated)."""
+    scores_a = np.asarray(scores, dtype=F64)
+    refs_a = np.asarray(refs)
+    n = scores_a.shape[1]
+    preds = scores_a.argmax(axis=1)
+
+    count = np.bincount(refs_a, minlength=n).astype(F64)
+    conf = np.zeros((n, n), dtype=F64)  # conf[i, j] = #(ref i -> argmax j)
+    np.add.at(conf, (refs_a, preds), 1.0)
+
+    p_nontarget = 1.0 - p_target
+    total = 0.0
+    for t in range(n):
+        denom_t = count[t] if count[t] >= 1.0 else 1.0
+        p_miss = (count[t] - conf[t, t]) / denom_t
+        pfa_sum = 0.0
+        for m in range(n):
+            if m == t:
+                continue
+            denom_m = count[m] if count[m] >= 1.0 else 1.0
+            pfa_sum += conf[m, t] / denom_m
+        pfa_avg = pfa_sum / (n - 1) if n > 1 else 0.0
+        total += p_target * p_miss + p_nontarget * pfa_avg
+    return float(total / n)
