@@ -88,6 +88,17 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   explicitly names the cost-law family documented-not-fixed). See
   `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s "Plan corrections" item 5
   ("CONSIDERED, SCOPED OUT").
+  **Phase 6 cost-law pass adjudication (Task 7) -- KEPT: convention, not a wrong result.** The
+  sweep re-examined this and found NO derivative inconsistency to fix. The port's `AboveCubic::deriv`
+  IS the exact analytic derivative of `AboveCubic::cost` (finite-difference-confirmed, rel ~5e-10 at
+  the mid-thresh points that `scalar_delta_midthresh_cubic_above_branch` already pins bit-exact vs
+  the real compiled legacy). The name-dependent `A`/`B` formulas are a C1-continuity construction;
+  string-vs-per-type dispatch yields IDENTICAL numbers, so a refactor is code-clarity only -- out of
+  scope for a wrong-result pass and pointless risk on a bit-exact-golden-pinned surface. Live-path
+  reachability is moot anyway: the real `1_worker_1.config`'s `CostLawThreshSpeech 1`/
+  `CostLawThreshNoSpeech 0` put the above-thresh branch only at `output` -> {1,0}, where the
+  `output*(1-output)` logistic fold (`CostLaw.cpp:344`) zeros the gradient. Documented-not-fixed;
+  oracle harness unregenerated.
 - **[0b-i] Softmax `compute_deltas` ponderation-scaling asymmetry -- kept by decision, phase 5** (`cost.rs` `compute_deltas`, from
   `CostLaw.cpp:358-419`): the WER path scales EACH element by its own class's ponderation
   (`_ClassesPonderations(0,kk)`, per `kk`); the non-WER path instead captures a single ponderation
@@ -99,6 +110,34 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   confirmed REACHABLE but scoped OUT to a Phase 6 cost-law-correctness pass -- see
   `docs/superpowers/plans/2026-07-10-phase5-fixlist.md`'s "Plan corrections" item 5
   ("CONSIDERED, SCOPED OUT"), same adjudication as the `AboveThreshCubic` entry above.
+  **Phase 6 cost-law pass adjudication (Task 7) -- KEPT: the LIVE path is already correct; the
+  flagged "fix" would INTRODUCE a bug.** The sweep found the fix candidate backwards. The non-WER
+  path scaling the whole frame row by the ON-CLASS ponderation `w_c` IS the mathematically correct
+  gradient of the non-WER `compute_cost` (frame cost `w_c*(-ln o_c)` => `dcost/dz_j =
+  w_c*(o_j - onehot_j)`, i.e. the whole row times `w_c`; the committed `ponderation_plumbing` test
+  already pins exactly this `plain*factor` whole-row scaling). Making it per-element like the WER arm
+  would DE-consistency it. The WER arm's per-element `w_j`/`10*target_j` scaling is the inconsistent
+  one, but it is DEAD on every live phase-6 config: `BLSTM_BackPropWER`/`BLSTM_LID_BackPropWER` are
+  `-0.02` (WER off), and every `classes_ponderations` line is COMMENTED OUT (`use_pond` false), so the
+  live LID multiclass delta is the plain `output - onehot` softmax-CE gradient. No live wrong result.
+  Documented-not-fixed; oracle harness unregenerated.
+- **[phase6] BelowThreshSqrt/AboveThreshSqrt deriv omits the `1/_Adim` chain-rule factor -- KEPT
+  (dead training-path), NEW finding from the Task-7 sweep** (`cost.rs` `Law::deriv` Sqrt arms, from
+  `CostLaw.h:151-212`): the per-law forward/deriv audit surfaced a genuine F7-pattern inconsistency
+  the phase-5 sweep did not enumerate (same class of bug F7 fixed on `LogLaw`, still latent here).
+  LEGACY behavior (recorded, faithfully ported): `cost()` is `_B + _A*sqrt(1 - clamp(y/_Adim, .., 1))`,
+  so the true `dcost/dy = -_A/(2*_Adim*sqrt(1 - y/_Adim))`, but `deriv()` returns
+  `-_A/(2*sqrt(1 - y/_Adim))` -- MISSING the `1/_Adim` factor (`CostLaw.h:173-175`/`:206-208`).
+  Finite-difference-confirmed: at `_Adim = 0.5` the returned raw derivative is EXACTLY half the true
+  `dcost/dy` (rel 0.5, both below- and above-thresh arms, speech and no-speech). **Adjudication --
+  KEPT / documented-not-fixed:** `sqrt` is on NO live phase-6 training path -- the SAD config
+  (`1_worker_1.config`) and every Twin/LID config use `CostLaw = log/log`; `sqrt` appears only in
+  `tests/reference_data/phase4c/genome_calib.config`, a vec2struct BIJECTION fixture, never a training
+  config. Per the Task-7 rule (a law with no live phase-6 path stays documented-not-fixed), it is not
+  fixed now. `scalar_delta_midthresh_sqrt_above_branch` (`phase3_costlaw_backward_golden.rs`) pins the
+  legacy-faithful behavior bit-exact vs the real compiled `AboveThreshSqrtLaw::deriv`; a future phase
+  that sets `CostLaw = sqrt` on a live path would fix it (restore the `1/_Adim` factor) and re-pin that
+  golden to port-truth. Oracle harness unregenerated (describes the legacy forever).
 - **[0b-i] `suppress_short` no-advance-after-erase** (`src/rust/src/tasks/segmentation.rs`
   `suppress_short`, from `Segmentation.cpp:245-282`): after any erase branch, the loop does NOT
   advance `i` -- the erased slot shifts the next segment into the current index, which must be
