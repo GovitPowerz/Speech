@@ -25,6 +25,9 @@ byteorder = "1.5"
 bytemuck = "1"
 rustfft = "6"
 realfft = "3"
+# Phase 7 Task 2: `fast::nn` f32 BLSTM forward -- pure-Rust SIMD matmuls
+# (batched input projection) with no system BLAS.
+faer = { version = "0.24", default-features = false, features = ["std"] }
 symphonia = { version = "0.5", features = ["wav", "flac", "ogg", "vorbis"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
 # Phase 7 Task 1: `bench.rs::maxrss_mb` (`getrusage(RUSAGE_SELF)`) -- a real
