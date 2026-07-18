@@ -212,3 +212,118 @@ def test_sad_dry_run_smoke(tmp_path: Path) -> None:
     meta = json.loads(res.metadata_path.read_text())
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["audio_max_duration"] == 10.0, "the SAD dry-run forces a short audio cap"
+
+
+# ============================== LID PHONOTACTIC ARM (Task 10) ================================
+#
+# The 2015 FLAGSHIP regime: the 12-class Twin (Algo 6) in Mode 7 over File_Type 1 phSeq (the
+# fully-ported, bit-exact-lineage phSeq reader), trained FROM SCRATCH via train_modern, then
+# scored on a disjoint held-out slice -> `.scr` -> lid_error + cavg (Task 5). Same shape as the
+# LID FEATURES arm above; the DISTINCTIVE proof here is THE FROZEN-SAD CONTRACT, asserted
+# byte-for-byte.
+#
+# THE FROZEN-SAD CONTRACT (the phase-5 finding, plan/spec S1.9, VERIFIED at the seam for this
+# task -- see .superpowers/sdd/task-10-report.md). In Mode 7 the SAD net (BLSTM_*) is NEVER run:
+# `tasks/lid.rs::get_segmentation_mode7` synthesizes its result_vec constant 10.0 (:1407) and
+# feeds the LID net the phSeq one-hot DIRECTLY (:1448-1476) -- the SAD hidden states never enter
+# the LID input (unlike modes 0-3). The SAD net's weight derivatives are RESET (:1352) then only
+# SCALED at the epilogue (:1643), NEVER accumulated -> `weights_derivatives(sad)` is structurally
+# ZERO. Through the seam (`engine.forward_backward` -> SMORMS3, `optimizers.py:93` dtheta = -grad*
+# ... = 0 with `_backprop_inner`'s pass-through theta) the SAD net stays EXACTLY at its from-scratch
+# seed while ONLY the LID net descends. Both nets ARE seeded (the engine needs a loadable Twin);
+# ONLY the LID net trains. The gate proves this: best_sad.bin == last_sad.bin == sad_seed.bin
+# byte-for-byte (sad_seed.bin equals train_modern's own from-scratch SAD init byte-for-byte), while
+# best_lid.bin != lid_seed.bin. The Twin validation metric (nn_cost_seg = NNCostSeg + NNCostLID) is
+# still right for a LID-only arm: the frozen SAD's Mode-7 NNCostSeg contribution is weight-
+# independent (a constant offset on the validation curve); only NNCostLID moves.
+#
+# WHY THE SIGNAL IS THE HELD-OUT ARGMAX, NOT THE TRAIN/CE COST (the T8 lesson, and SHARPER here):
+# from scratch the per-epoch train cost can RISE while held-out argmax accuracy IMPROVES (measured:
+# this config's train_costs ASCEND 2.41 -> 2.93 across the two epochs, yet the held-out error DROPS
+# 6.8 pt below chance). So the honest, direction-safe improvement is the held-out LID argmax error:
+# it must (a) beat 12-way chance (91.67%) and (b) beat the model's OWN untrained-init error on the
+# identical test set. MODE-COLLAPSE-HONEST FRAMING (spec S1.9, "no overclaim"): phonotactic LID from
+# scratch on a tiny per-language subset is HARD and UNSTABLE -- the 2-epoch structure reliably beats
+# init (measured +4.4 pt at subset 24, +6.7 pt at subset 16), but a single-epoch cut can go NEGATIVE
+# (measured -3.0 pt). The margins here are THIN vs the acoustic arm's ~20 pt: the 2015 story was
+# phonotactic >> acoustic, but only WITH FULL DATA -- on this subset phonotactic is WEAKER, exactly
+# the "needs more data than acoustic" flip side, honestly noted. Margins MEASURED (2026-07-18,
+# seed 0) + PINNED with headroom; run-twice determinism proves reproducibility on this box.
+
+
+@pytest.mark.slow
+@requires_corpus
+def test_lid_phseq_subset_trains_and_scores(tmp_path: Path) -> None:
+    """Train the 12-class Twin (Mode 7, File_Type 1 phSeq) from scratch on a stratified subset,
+    then score a disjoint held-out 45-file slice end to end. Pins (measured 2026-07-18, seed 0):
+    lid_error 84.44%, init 91.11% (+6.67 pt), cavg 0.49, train_costs 2.41 -> 2.93 (ascending;
+    argmax still improves), ~232 s; the SAD net frozen (byte-identical to seed), only the LID
+    net trains."""
+    res = B.run_baseline(
+        "lid-phseq",
+        CORPUS_ROOT,
+        tmp_path / "run",
+        subset=16,  # ~1-2 train files/language (per-language proportional, seeded); n_train ~15
+        valid_size=12,
+        test_size=48,  # a stable argmax-error denominator, disjoint from train/valid
+        epochs=2,  # the 2-epoch structure reliably beats init; a 1-epoch cut can go negative
+        steps_per_epoch=12,  # past SMORMS3's warm-up
+        patience=99,
+        seed=0,
+        score_init=True,  # also score the untrained init on the SAME test set (the improvement baseline)
+    )
+
+    # --- THE FROZEN-SAD CONTRACT (the crux): the SAD net NEVER moves; only the LID net trains ---
+    seed_sad = (res.out_dir / "sad_seed.bin").read_bytes()
+    assert (res.checkpoint_dir / "best_sad.bin").read_bytes() == seed_sad, "best_sad must equal the from-scratch seed (SAD frozen in Mode 7)"
+    assert (res.checkpoint_dir / "last_sad.bin").read_bytes() == seed_sad, "last_sad must equal the from-scratch seed (SAD frozen in Mode 7)"
+    assert (res.checkpoint_dir / "best_lid.bin").read_bytes() != (res.out_dir / "lid_seed.bin").read_bytes(), "the LID net must train (move off seed)"
+
+    # --- the end-to-end held-out LID error is real, beats chance, and beats its own init ---
+    assert res.lid_error is not None and res.init_lid_error is not None
+    assert np.isfinite(res.lid_error)
+    # (a) beats 12-way chance (measured 84.44%, +7.2 pt; pin <= chance - 2.0 -> ~5 pt headroom,
+    #     robust to descent jitter on the 45-file test set).
+    assert res.lid_error <= _CHANCE - 2.0, f"held-out LID error {res.lid_error:.2f}% must beat chance {_CHANCE:.2f}% with margin"
+    # (b) beats the model's OWN untrained-init error on the identical test set (measured +6.67 pt).
+    assert res.lid_error < res.init_lid_error - 2.0, f"trained {res.lid_error:.2f}% must beat init {res.init_lid_error:.2f}% by margin"
+
+    # --- cavg RECORDED (a valid closed-set Cavg in [0, 1]); no hard pin (not stable at this scale) ---
+    assert res.cavg is not None and 0.0 <= res.cavg <= 1.0, f"cavg must be a valid closed-set value, got {res.cavg}"
+
+    # --- the run is self-describing: metadata + both checkpoints + the .scr scores landed ---
+    assert res.metadata_path.is_file()
+    assert (res.checkpoint_dir / "best_lid.bin").is_file() and (res.checkpoint_dir / "best_sad.bin").is_file()
+    assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.scr"))) == res.n_test
+
+
+@pytest.mark.slow
+@requires_corpus
+def test_lid_phseq_deterministic(tmp_path: Path) -> None:
+    """Run-twice determinism at a fixed seed: bit-identical trained weights (incl. the frozen SAD
+    net) + identical held-out error. A SHORT config (determinism is a pipeline property, provable
+    cheaply)."""
+    kw = dict(subset=12, valid_size=8, test_size=12, epochs=1, steps_per_epoch=6, patience=99, seed=0)
+    a = B.run_baseline("lid-phseq", CORPUS_ROOT, tmp_path / "a", **kw)  # type: ignore[arg-type]
+    b = B.run_baseline("lid-phseq", CORPUS_ROOT, tmp_path / "b", **kw)  # type: ignore[arg-type]
+
+    for name in ("last_lid.bin", "best_lid.bin", "last_sad.bin", "best_sad.bin"):
+        assert (a.checkpoint_dir / name).read_bytes() == (b.checkpoint_dir / name).read_bytes(), f"{name} not bit-identical across two fixed-seed runs"
+    assert a.lid_error == b.lid_error, f"held-out error not reproducible: {a.lid_error} vs {b.lid_error}"
+
+
+@pytest.mark.slow
+@requires_corpus
+def test_lid_phseq_dry_run_smoke(tmp_path: Path) -> None:
+    """The `--dry-run` 1-step smoke for the phonotactic arm: init + 1 epoch on a tiny slice +
+    score, no long training. Proves the whole arm wiring (phSeq glob, config, seeded init, engine
+    Mode-7 forward, scoring) runs fast -- and that the frozen-SAD contract holds even in 1 step."""
+    res = B.run_baseline("lid-phseq", CORPUS_ROOT, tmp_path / "dry", dry_run=True, seed=0)
+    assert res.epochs_run == 1, "dry-run must run exactly 1 epoch"
+    assert res.n_train > 0 and res.n_test > 0
+    assert res.metadata_path.is_file()
+    assert res.lid_error is not None and np.isfinite(res.lid_error), "dry-run must still score the held-out slice end to end"
+    # the frozen-SAD contract holds even in a 1-step smoke.
+    assert (res.checkpoint_dir / "best_sad.bin").read_bytes() == (res.out_dir / "sad_seed.bin").read_bytes()
+    meta = json.loads(res.metadata_path.read_text())
+    assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1

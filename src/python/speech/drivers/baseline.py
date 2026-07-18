@@ -22,6 +22,22 @@ R2 (vtln vs plain): the archive's TRAIN side carries only plain `plp8f0mvsdd`; a
 vtln/cmllr-train pairing is structurally impossible, so the baseline pairing is PLAIN
 features on both train and eval (RESULTS.md carries the evidence).
 
+THE LID PHONOTACTIC ARM (`arm="lid-phseq"`, Task 10): the 2015 FLAGSHIP regime -- the
+same 12-class Twin (Algo 6) in Mode 7, but File_Type 1 (phSeq) instead of File_Type 2
+(cep). The LID net scores the phSeq one-hot phoneme sequences (`audio.external_features`,
+`read_phseq`: one row per phoneme, a 38-wide one-hot over the letterMapping) DIRECTLY, so
+the LID net's input is 38 (vs the cep arm's 23). The FROZEN-SAD contract is identical (and
+here VERIFIED at the seam, Task 10 report): Mode 7 never runs the SAD net -- its result_vec
+is synthesized constant 10.0 and its weight derivatives are reset-then-scaled but NEVER
+accumulated, so `weights_derivatives(sad)` is structurally zero; through the seam a zero
+gradient leaves the SAD net EXACTLY at its from-scratch seed (`best_sad.bin == sad_seed.bin`,
+asserted in the gate). Both nets are seeded; ONLY the LID net trains. The phSeq files are
+sourced by globbing `train/phSeq/*.file.phSeqbis` (the whole-utterance-per-line variant, one
+sequence per file) with the language from the 2-letter filename prefix -- the 2015 phSeq
+listings localize to 0 rows on this archive (`derive_lid_phseq_records`). The two LID arms
+share the entire training/scoring skeleton (`_LID_ARMS`); they differ only in File_Type and
+the record derivation.
+
 THE SAD ARM (`arm="sad"`, Task 9): from-scratch algo-3 spectral SAD (Algo 3, File_Type 0)
 over the real corpus wav/xml pairs. The DSP front-end (periodogram -> Mel/DCT + deltas)
 feeds a single trainable BLSTM whose speech-posterior output drives the hysteresis
@@ -77,7 +93,13 @@ from speech.weight_bridge import read_weight_vector, write_bin
 _ARM_CONFIGS: dict[str, str] = {
     "lid-features": "configs/training/lre03_lid_features.toml",
     "sad": "configs/training/lre_sad.toml",
+    "lid-phseq": "configs/training/lre03_lid_phseq.toml",
 }
+
+# The two LID arms share the whole Twin/Mode-7 skeleton (algo-6, `.scr` -> lid_error/cavg
+# scoring, both-nets-seeded/only-LID-trains); they differ ONLY in the File_Type and the
+# corpus record derivation. This set gates the shared LID dispatch below.
+_LID_ARMS: frozenset[str] = frozenset({"lid-features", "lid-phseq"})
 
 # The five DCF collar sizes (design spec S0): no-collar + 0.25/0.5/1.0/2.0 s. The 0.5 s
 # collar is the reported headline (the T4 scorer pins all five vs the NIST perl oracle).
@@ -187,6 +209,54 @@ def derive_lid_features_records(corpus_root: Path, ref_stm: Path) -> list[dict[s
     for path in sorted(root.glob("*.plp8f0mvsdd")):
         lang = path.name.split("_", 1)[0]
         if lang not in _CLASS_OF:
+            continue
+        records.append({"filename": str(path), "refseg": str(ref_stm), "lang": lang, "dial": "non", "weight": "1.0", "file_id": "1.0"})
+    return records
+
+
+# The CallFriend/LRE03 2-letter phSeq filename prefix -> the 3-letter LRE03 language code
+# (the `_LANGS`/mapping base). The archive's `train/phSeq/*.file.phSeqbis` files are
+# CallFriend-named (the shape `<2-letter-lang>_<id>...file.phSeqbis`), carrying the language
+# ONLY as this 2-letter prefix -- the 2015 phSeq listings that would supply a 3-letter `lang` column
+# localize to ZERO rows on this archive (they anchor on `eval/` but the files sit under
+# `train/phSeq/`; Task 10 report), so the filename prefix is the language source. The 12
+# codes biject onto the 12 LRE03 languages; "ma" = Mandarin -> "chi" (the LRE03 tag for
+# Chinese), corroborated by the 3 highest-count prefixes (ma/en/sp) matching the 3
+# highest-count cep languages (chi/eng/spa, design spec S0 counts).
+_PHSEQ_PREFIX_TO_LANG: dict[str, str] = {
+    "ar": "ara",
+    "ma": "chi",
+    "en": "eng",
+    "fa": "fas",
+    "fr": "fre",
+    "ge": "ger",
+    "hi": "hin",
+    "ja": "jap",
+    "ko": "kor",
+    "sp": "spa",
+    "ta": "tam",
+    "vi": "vie",
+}
+
+
+def derive_lid_phseq_records(corpus_root: Path, ref_stm: Path) -> list[dict[str, str]]:
+    """Build LID phonotactic listing records straight from the corpus phSeq tree
+    (self-contained -- the 2015 phSeq listings localize to 0 rows on this archive, so there
+    is nothing to localize; Task 10 report). Globs `train/phSeq/*.file.phSeqbis` (the
+    WHOLE-utterance-per-line variant the 2015 Mode-7 flagship used -- one sequence per file,
+    the phonotactic-LID premise), takes the language from the 2-letter filename prefix via
+    `_PHSEQ_PREFIX_TO_LANG`, keeps only the 12 known LRE03 languages (the eval-style
+    `lidXXXXX.file.phSeqbis` files have a numeric prefix not in the map, so they drop out),
+    and points every refseg at the synthesized whole-file-speech STM. Every path is absolute
+    (glob results) and provably exists (it was globbed). Sorted by filename for determinism.
+    Mirrors `derive_lid_features_records`'s shape exactly -- only the tree + the
+    filename->language rule differ."""
+    root = (corpus_root / "train" / "phSeq").resolve()
+    records: list[dict[str, str]] = []
+    for path in sorted(root.glob("*.file.phSeqbis")):
+        prefix = path.name.split("_", 1)[0]
+        lang = _PHSEQ_PREFIX_TO_LANG.get(prefix)
+        if lang is None or lang not in _CLASS_OF:
             continue
         records.append({"filename": str(path), "refseg": str(ref_stm), "lang": lang, "dial": "non", "weight": "1.0", "file_id": "1.0"})
     return records
@@ -586,8 +656,8 @@ def run_baseline(
     metadata skeleton is shared."""
     if arm not in _ARM_CONFIGS:
         raise ValueError(f"unknown arm {arm!r}; known arms: {sorted(_ARM_CONFIGS)}")
-    if arm not in ("lid-features", "sad"):
-        raise NotImplementedError(f"arm {arm!r} lands in a later task (lid-features + sad are wired through Task 9)")
+    if arm not in _LID_ARMS and arm != "sad":
+        raise NotImplementedError(f"arm {arm!r} is not wired (known: lid-features, sad, lid-phseq)")
 
     console = console or Console()
     out_dir = Path(out_dir).resolve()
@@ -618,18 +688,26 @@ def run_baseline(
     else:
         ref_stm = out_dir / "ref_speech.stm"
         ref_stm.write_text(_SPEECH_STM)
+        # Both LID arms share this block; only the corpus record derivation differs
+        # (lid-phseq globs the phSeq tree, lid-features the cep tree). The `lre_listing`
+        # override localizes a 2015 listing for either arm (unused on this archive for
+        # phSeq -- those listings resolve 0 rows -- but kept symmetric with lid-features).
         if lre_listing is not None:
-            localized = out_dir / "localized_lre03.csv"
+            localized = out_dir / "localized_lre.csv"
             rep = localize_listing(Path(lre_listing), corpus_root, localized)
             console.log(f"localized {rep.rows_found}/{rep.rows_total} rows ({rep.rows_missing} missing)")
             records = _records_from_localized(localized, ref_stm)
+        elif arm == "lid-phseq":
+            records = derive_lid_phseq_records(corpus_root, ref_stm)
         else:
             records = derive_lid_features_records(corpus_root, ref_stm)
         if not records:
-            raise RuntimeError(f"no LID features found under {corpus_root} (expected train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd)")
+            hint = "train/phSeq/*.file.phSeqbis" if arm == "lid-phseq" else "train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd"
+            raise RuntimeError(f"no LID records found under {corpus_root} (expected {hint})")
         console.log(f"corpus records: {len(records)}")
         train_rec, valid_rec, test_rec = stratified_splits(records, subset, valid_size, test_size, seed)
-        train_name, valid_name, test_name = "lre03_lid_features_train.flst", "lre03_lid_features_valid.flst", "lre03_lid_features_test.flst"
+        stem = "lre03_lid_phseq" if arm == "lid-phseq" else "lre03_lid_features"
+        train_name, valid_name, test_name = f"{stem}_train.flst", f"{stem}_valid.flst", f"{stem}_test.flst"
         mapping_name = "language2classmapping_lre12.csv"
         _write_listing_rows(out_dir / train_name, train_rec)
         _write_listing_rows(out_dir / valid_name, valid_rec)

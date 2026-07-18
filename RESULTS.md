@@ -137,12 +137,38 @@ Pmiss ~1); a DCF below the all-speech 0.25 baseline -- genuine speech/non-speech
 degenerate (all-one-class), the DCF is exactly 0.25/0.75 with no libm-sensitive boundary jitter,
 so the numbers are rock-stable cross-machine.
 
-### LID -- phonotactic regime (Algo 6, Mode 7, File_Type 1) -- Task 10
+### LID -- phonotactic regime (Algo 6, Mode 7, File_Type 1 phSeq) -- Task 10
+
+The 2015 FLAGSHIP regime: the same 12-class Twin as the features arm but in Mode 7 over the
+phSeq one-hot phoneme sequences (File_Type 1, the fully-ported bit-exact-lineage reader). The
+LID net's input is 38 (the letterMapping width) vs the cep arm's 23. THE FROZEN-SAD CONTRACT
+(the phase-5 finding, VERIFIED at the seam this task): in Mode 7 the SAD net is never run --
+its result_vec is synthesized constant and its weight derivatives are reset-then-scaled but
+never accumulated, so its gradient is structurally ZERO and it stays EXACTLY at its from-scratch
+seed (`best_sad.bin == sad_seed.bin` byte-for-byte, asserted in the gate). ONLY the LID net
+trains. Data source: `train/phSeq/*.file.phSeqbis` (598 CallFriend whole-utterance files, all 12
+languages, language from the 2-letter filename prefix) -- the 2015 phSeq listings localize to 0
+rows on this archive (they anchor on `eval/` but the files sit under `train/phSeq/`), so the
+corpus tree is globbed directly.
 
 | split | files (train/valid/test) | LID error % | Cavg | chance % | config | seed |
 |---|---|---|---|---|---|---|
-| subset gate | TBD | TBD | TBD | 91.67 | `lre03_lid_phseq.toml` | TBD |
+| subset gate (2026-07-18, this box) | 15 / 15 / 45 | **84.44** | **0.49** | 91.67 | `lre03_lid_phseq.toml`, 2 ep x 12 steps | 0 |
+| subset gate -- untrained init baseline | (same test set) | 91.11 | 0.48 | 91.67 | (seed packs, no training) | 0 |
 | full run | TBD | TBD | TBD | 91.67 | `lre03_lid_phseq.toml` | TBD |
+
+Subset-gate reading (measured seed 0, ~232 s per run, run-twice bit-identical): the from-scratch
+12-class phonotactic LID net beats 12-way chance by **7.22 pt** and its own untrained init by
+**6.67 pt** on a disjoint 45-file held-out slice, deterministically, with the SAD net PROVABLY
+frozen (only the LID net moved). HONEST FRAMING (spec S1.9, no overclaim): these margins are THIN
+compared to the acoustic features arm's ~20 pt, and the regime is UNSTABLE from scratch -- the
+per-epoch train cost ASCENDS (2.41 -> 2.93) even as the held-out argmax improves (the T8 lesson,
+sharper here), and a single-epoch training cut goes NEGATIVE (measured -3.0 pt vs init). The 2015
+story was phonotactic >> acoustic, but only WITH FULL DATA; on this tiny per-language subset (~1-2
+files/language) phonotactic is WEAKER than acoustic -- exactly the "needs more data than acoustic"
+flip side. The direction-safe signal is the held-out argmax (beats chance + beats init), not the
+CE/train cost; genuine phonotactic discrimination (and the phonotactic >> acoustic crossover) is
+the full-run launcher's job (more data, more epochs).
 
 ---
 
@@ -157,6 +183,10 @@ speech baseline lid-features --corpus-root data/LRE03-LRE07 --out-dir runs/lid_f
 # it to score full-length recordings (the corpus wavs are 1800 s CallFriend files).
 speech baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_full \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
+
+# LID phonotactic (Algo 6, Mode 7, File_Type 1 phSeq) -- the 2015 flagship regime.
+speech baseline lid-phseq --corpus-root data/LRE03-LRE07 --out-dir runs/lid_phseq_full \
+    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25
 ```
 
 Omit `--subset` to train on the whole split (SAD: the full 70% train split of the 2066 wav/xml

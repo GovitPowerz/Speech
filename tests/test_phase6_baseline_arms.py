@@ -141,6 +141,37 @@ def test_derive_lid_features_records_from_synthetic_tree(tmp_path: Path) -> None
     assert all(Path(r["filename"]).is_absolute() for r in recs)
 
 
+def test_derive_lid_phseq_records_from_synthetic_tree(tmp_path: Path) -> None:
+    root = tmp_path / "train" / "phSeq"
+    root.mkdir(parents=True)
+    # SYNTHETIC names (fake IDs -- no real corpus filename is committed): a 2-letter language
+    # prefix + underscore + the rest, matching the CallFriend `<lang>_<id>...file.phSeqbis`
+    # SHAPE without being a real file. Covers: three known prefixes, a numeric no-prefix file
+    # (dropped), an unknown prefix (dropped), and the non-`.file` variant (not globbed).
+    for name in (
+        "ar_0.file.phSeqbis",  # ara
+        "ma_0.file.phSeqbis",  # chi (Mandarin)
+        "vi_0.file.phSeqbis",  # vie
+        "lid0.file.phSeqbis",  # numeric, no underscore -> prefix not in the map -> dropped
+        "zz_0.file.phSeqbis",  # unknown 2-letter prefix -> dropped
+        "ar_0.phSeqbis",  # the per-sentence variant (NOT .file) -> not globbed
+    ):
+        (root / name).write_text(".a.\n")
+    ref = tmp_path / "ref.stm"
+    recs = B.derive_lid_phseq_records(tmp_path, ref)
+    langs = sorted(r["lang"] for r in recs)
+    assert langs == ["ara", "chi", "vie"], "only .file.phSeqbis with a known 2-letter prefix survive"
+    assert all(r["refseg"] == str(ref) and r["dial"] == "non" for r in recs)
+    assert all(Path(r["filename"]).is_absolute() and r["filename"].endswith(".file.phSeqbis") for r in recs)
+
+
+def test_phseq_prefix_map_bijects_onto_the_12_classes() -> None:
+    # every 2-letter prefix maps to a distinct one of the 12 alphabetical LRE03 classes.
+    assert sorted(B._PHSEQ_PREFIX_TO_LANG.values()) == sorted(B._LANGS)
+    assert len(set(B._PHSEQ_PREFIX_TO_LANG.values())) == 12
+    assert B._PHSEQ_PREFIX_TO_LANG["ma"] == "chi", "Mandarin prefix 'ma' maps to the LRE03 'chi' tag"
+
+
 def test_write_lre_mapping_12_alphabetical(tmp_path: Path) -> None:
     path = tmp_path / "map.csv"
     B.write_lre_mapping_12(path)
@@ -196,15 +227,20 @@ def test_unknown_arm_rejected(tmp_path: Path) -> None:
         B.run_baseline("nonsense", tmp_path, tmp_path)
 
 
-def test_unimplemented_arm_raises(tmp_path: Path) -> None:
-    # lid-phseq is declared later (Task 10): registered in _ARM_CONFIGS but not yet branched
-    # in run_baseline's arm dispatch -> NotImplementedError. lid-features + sad ARE wired.
-    B._ARM_CONFIGS["lid-phseq"] = "configs/training/lre03_lid_phseq.toml"  # simulate a later-task entry
-    try:
-        with pytest.raises(NotImplementedError):
-            B.run_baseline("lid-phseq", tmp_path, tmp_path)
-    finally:
-        del B._ARM_CONFIGS["lid-phseq"]
+def test_all_three_arms_wired() -> None:
+    # Task 10 completes the arm set: lid-features, sad, lid-phseq are all registered AND
+    # dispatched (none raise NotImplementedError anymore). A registered arm that reached the
+    # NotImplementedError guard would be a wiring gap; there are none left.
+    assert set(B._ARM_CONFIGS) == {"lid-features", "sad", "lid-phseq"}
+    assert set(B._LID_ARMS) == {"lid-features", "lid-phseq"}
+
+
+def test_lid_phseq_dispatches_into_lid_path(tmp_path: Path) -> None:
+    # lid-phseq is WIRED (Task 10): it no longer hits the NotImplementedError guard. On an
+    # empty corpus tree it proceeds into the LID record-derivation path and raises the
+    # "no LID records" RuntimeError with the phSeq-specific hint -- proving it dispatched.
+    with pytest.raises(RuntimeError, match=r"no LID records.*phSeq"):
+        B.run_baseline("lid-phseq", tmp_path, tmp_path)
 
 
 def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,6 +290,69 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["seed"] == 5 and meta["lanes"] == 2
     assert res.n_train > 0  # a tiny subset was drawn from the synthetic tree
+
+
+def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lid-phseq dispatch (phSeq tree glob, 12-class Twin, File_Type 1, LID input 38) +
+    dry_run overrides + metadata, with the engine boundary stubbed. Proves run_baseline routes
+    the phonotactic arm through the shared LID path (both nets seeded, `.scr` scorer) without
+    touching the engine/corpus, and that the config it assembles carries File_Type 1."""
+    import sys
+    import types
+
+    root = tmp_path / "corpus"
+    phseq = root / "train" / "phSeq"
+    phseq.mkdir(parents=True)
+    for prefix in ("ar", "ma", "en", "sp", "vi", "ta", "ko", "ja", "hi", "ge", "fr", "fa"):
+        for i in range(4):
+            (phseq / f"{prefix}_{i}.file.phSeqbis").write_text(".a.\n")  # synthetic (fake id), no real corpus filename
+
+    fake_rs = types.ModuleType("speech_rs")
+    fake_flat = {
+        "Algo_choice": "6",
+        "File_Type": "1",
+        "BLSTM_NNetInputSize": "11",
+        "BLSTM_LID_NNetInputSize": "38",
+        "fileslisting": "x",
+        "language2classmapping": "y",
+        "BLSTM_weightsFile": "s",
+        "BLSTM_LID_weightsFile": "l",
+        "numOuterThreads": "1",
+    }
+    setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
+    monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
+    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one: None)
+    monkeypatch.setattr(B, "RunState", type("RS", (), {"from_config": staticmethod(lambda *a, **k: object())}))
+    monkeypatch.setattr(B, "_score_packs_on_test", lambda *a, **k: (None, None, None))
+
+    class _Res:
+        checkpoint_dir = str(tmp_path / "out" / "checkpoint")
+        epochs_run, best_epoch, best_val_cost = 1, 0, 1.0
+        history: list[object] = []
+
+    out = tmp_path / "out"
+    (out / "checkpoint").mkdir(parents=True)
+    res = B.run_baseline("lid-phseq", root, out, dry_run=True, seed=5, lanes=2, _train_fn=lambda state, seed, params: _Res())
+
+    meta = json.loads((out / "run_metadata.json").read_text())
+    assert meta["arm"] == "lid-phseq" and meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
+    assert meta["seed"] == 5 and meta["lanes"] == 2
+    assert meta["config_toml"] == "configs/training/lre03_lid_phseq.toml"
+    assert res.n_train > 0
+    # the phonotactic arm is a Twin (both nets seeded) at File_Type 1.
+    cfg_text = (out / "base.config").read_text()
+    assert "File_Type 1" in cfg_text and "BLSTM_LID_weightsFile lid_seed.bin" in cfg_text
+    # listings carry the phseq stem.
+    assert (out / "lre03_lid_phseq_train.flst").is_file()
+
+
+def test_speech_cli_mounts_baseline_lid_phseq(monkeypatch: pytest.MonkeyPatch) -> None:
+    import speech.cli as cli
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    rc = cli.main(["baseline", "lid-phseq", "--corpus-root", "/c", "--out-dir", "/o", "--subset", "24"])
+    assert rc == 0 and captured["arm"] == "lid-phseq" and captured["subset"] == 24
 
 
 # --------------------------------------------------------------------------------------- #
