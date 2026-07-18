@@ -1,0 +1,205 @@
+# Canonical TOML training config for the Phase 6 LID FEATURES arm.
+#
+# Algo_choice 6 (Twin BLSTM) + BLSTM_LID_Mode 7 + File_Type 2 (the custom cep
+# binary reader, AudioStruct.cpp:183-256). This is the 2015-comparable acoustic
+# LID regime: the LID net scores the precomputed `.plp8f0mvsdd` cep features
+# (23-dim, 8 kHz, 100 fps) DIRECTLY -- Mode 7 is the only twin mode that consumes
+# `audio.external_features` (every other mode recomputes a periodogram from the
+# waveform, which for a cep file is a zeroed dummy). The SAD net is a FROZEN
+# feature gate in Mode 7 (its result_vec is synthesized constant 10.0, so the
+# whole utterance is one speech segment and the LID net scores the entire cep
+# block); ONLY the LID net trains -- the same structural finding the phonotactic
+# Mode-7 arm carries. See docs/superpowers/plans/2026-07-17-phase-6-baseline-training.md
+# (Task 8) and RESULTS.md.
+#
+# THE 12-CLASS HEAD (design spec S1.7): the port-native multiclass LID Twin
+# (output size 12, the FIXED F5 confusion machinery), NOT 2015's 12 one-vs-rest
+# detectors -- argmax error stays directly comparable, the one-vs-rest replication
+# is documented-optional legacy-comparability work.
+#
+# THE vtln/cmllr R2 ADJUDICATION (design spec R2, adjudicated at Task 8): the
+# archive's TRAIN side carries ONLY the plain `plp8f0mvsdd` feature variant; the
+# EVAL side carries plain `plp8f0mvsdd` AND cmllr/vtln-adapted `plp8f0mvscmllr(dd)`.
+# Since no cmllr variant exists on the train side, a vtln-train pairing is
+# structurally impossible with this archive, and the defensible default (match
+# train and eval variants) coincides with the only consistent choice: PLAIN
+# `plp8f0mvsdd` on BOTH sides. No 2015 `.config` survives anywhere in the archive
+# to say otherwise (verified by exhaustive fd/rg). Evidence + counts in RESULTS.md.
+#
+# Value convention (toml_config.rs KEY_TABLE): booleans/integers native TOML;
+# floats/comma-lists/words/paths are quoted strings carrying the decimal text
+# verbatim. `speech.drivers.baseline.run_baseline` flattens this via
+# `speech_rs.load_toml_config` and OVERRIDES the [corpus] paths + weight files at
+# runtime (license hygiene: no corpus path/filename is committed here).
+
+[engine]
+algo_choice = 6
+num_outer_threads = 1
+num_inner_threads = 1
+results_file = "MultiConfigResults.mat"
+file_type = 2
+backpropagation_epochs = 0
+
+[corpus]
+# SYNTHESIZED AT RUNTIME -- run_baseline localizes the 2015 LID features listing
+# against corpus_root and writes the 12-class mapping under out_dir, then rewrites
+# these two keys to the runtime filenames. These placeholders keep the committed
+# TOML a valid, round-trippable config WITHOUT embedding any corpus path.
+fileslisting = "lre03_lid_features_train.flst"
+language2classmapping = "language2classmapping_lre12.csv"
+
+[display]
+height = 0
+milliseconds_per_pixel = 64
+output_directory = "figs"
+wave_all_height = 50
+wave_all_width = 1000
+
+[audio]
+offset = 0
+max_duration = 120
+
+# ---------------------------------------------------------------------------------------
+# [spectrum]/[preprocess]/[decision]/[pitch] parameterize the SAD front-end. In Mode 7
+# over cep the SAD net is never run and no waveform is decoded, so these are inert here
+# (carried at the committed lid_blstm.toml values so the config constructs validly).
+# ---------------------------------------------------------------------------------------
+
+[spectrum]
+order = 9
+shift = "2.500000000000000e-02"
+temporal_convolution_size = 0
+temporal_convolution_type = "hamming"
+frame_window = "5.0"
+frame_shift = 0
+windowing_type = "none"
+windowing_param = "8.842614840690313e-01"
+min_freq = "1.156988075220142e+02"
+max_freq = 4400
+min_mel_freq = "1.861001763856132e+02"
+max_mel_freq = "2.502400490895474e+03"
+nb_bins = 20
+is_log_mel = true
+nb_dct = 8
+ignore_first_dct = true
+compute_deltas_nb = -3
+compute_delta_deltas_nb = 3
+flag_dc_offset = false
+
+[preprocess]
+preemph_ratio = "-9.700000000000000e-01"
+noise_seed = 3
+noise_ratio = "2.921428128844371e-02"
+
+[decision]
+thresh_rising = "0.6"
+area_rising = "0.0"
+thresh_falling = "3.795068189162301e-01"
+area_falling = "0.0"
+convolution_window_size = 0
+convolution_window_type = "hHCw"
+speech_padding = "0.1,0.1,0.0,0.0"
+min_speech = "0.0,0.0,0.0"
+min_silence = "0.5,0.0"
+
+[pitch]
+ltsv_window = 0
+ltsv_shift = "1.965217312933439e-01"
+tdc_window = 0
+tdc_shift = "7.992420714637314e-01"
+tdc_balance = "1.124303052287790e+00"
+tdc_lags = "0,0"
+tdc_windowing_type = "hann"
+tdc_windowing_param = "1.358255922816280e+00"
+
+# ---------------------------------------------------------------------------------------
+# [nn] -- the SAD net (FROZEN in Mode 7: never run, so its size is arbitrary; kept small).
+# nnet_input_size MUST equal lstm_neuron_nb[0] (the normalize-tail length is 2*input_size,
+# consumed by BLSTMNeuralNetwork::setWeights). weights_file is a runtime-synthesized seed
+# pack (init_weights, overwritten from-scratch by train_modern anyway).
+# ---------------------------------------------------------------------------------------
+
+[nn]
+lstm_neuron_nb = "11,12"
+nnet_input_size = 11
+lstm_sub_sampling = 4
+output_neuron_nb = "24,1"
+output_subsampling = 1
+pruning_thresh = 0
+two_sweeps = true
+input_normalization_type = -1
+use_cep_files = 0
+weights_file = "sad_seed.bin"
+backprop_wer = "-0.02"
+backpropagation_activated = false
+backward_cells_peepholes_active = true
+backward_gates_peepholes_active = true
+backward_gates_recurrent_peepholes_active = true
+forward_cells_peepholes_active = true
+forward_gates_peepholes_active = true
+forward_gates_recurrent_peepholes_active = true
+
+[cost]
+law_speech = "log"
+law_no_speech = "log"
+law_param_speech = 0
+law_param_no_speech = 0
+law_thresh_speech = 1
+law_thresh_no_speech = 0
+ponderation = "0.2"
+
+# ---------------------------------------------------------------------------------------
+# [nn_lid] -- the TRAINABLE 12-class LID net. Input 23 == the cep vectorSize (verified
+# corpus-wide, Task 1). lstm_neuron_nb[0] == nnet_input_size == 23; the BLSTM concat feeds
+# output_neuron_nb[0] == 2*hidden == 48; output_neuron_nb[-1] == 12 (the 12 LRE03 classes).
+# ---------------------------------------------------------------------------------------
+
+[nn_lid]
+lstm_neuron_nb = "23,24"
+nnet_input_size = 23
+lstm_sub_sampling = 1
+output_neuron_nb = "48,12"
+output_subsampling = 1
+two_sweeps = true
+input_normalization_type = 0
+weights_file = "lid_seed.bin"
+backprop_wer = "-0.02"
+backpropagation_activated = false
+backward_cells_peepholes_active = true
+backward_gates_peepholes_active = true
+backward_gates_recurrent_peepholes_active = true
+forward_cells_peepholes_active = true
+forward_gates_peepholes_active = true
+forward_gates_recurrent_peepholes_active = true
+mode = 7
+decision_thresh_falling = "-0.5"
+decision_thresh_rising = "0.5"
+shift = "0.0"
+window = "0.25"
+detection_threshold = "0.6"
+
+[cost_lid]
+law_speech = "log"
+law_no_speech = "log"
+law_param_speech = 0
+law_param_no_speech = 0
+law_thresh_speech = 1
+law_thresh_no_speech = 0
+ponderation = "0.93311"
+
+# ---------------------------------------------------------------------------------------
+# [training] -- DRIVER-SIDE knobs for `speech.drivers.train.train_modern` (the pydantic
+# `ModernTrainParams`), NOT engine keys (the engine never parses [training]; it stays
+# commented, not in toml_config.rs KEY_TABLE). run_baseline reads these defaults and the
+# subset/full-run overrides. val_metric MUST stay nn_cost_seg (the moving signal; balance
+# plateaus from scratch -- Task 6 / IMPROVEMENTS.md).
+#
+# [training]
+# epochs = 40               # total epochs (a resumed run continues toward this)
+# patience = 6              # early-stop after this many epochs with no validation-cost gain
+# steps_per_epoch = 8       # SMORMS3 steps per epoch (no LR schedule; fresh optimizer/epoch)
+# val_metric = "nn_cost_seg"
+# minibatch = 0             # hard-example mini-batch size (0 = full-corpus training per epoch)
+# init_scheme = "xavier"    # "xavier" (Glorot uniform) or "he" (He normal)
+# init_seed = 0
+# forget_bias_one = true    # seed the LSTM forget-gate bias at 1.0
