@@ -9,16 +9,21 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
 
 import pytest
+import soundfile as sf
 from speech.batching import read_listing
 from speech.dataprep.lre import (
     LRE03_LANGUAGES,
+    RealSphRunner,
     _localize_path,
     _wav_xml_pairs,
+    convert_sph_listing,
     derive_sad_listings,
     localize_listing,
     parse_vrcts_structural,
+    sph2wav_command,
     write_lre_mapping,
 )
 
@@ -363,6 +368,138 @@ def test_parse_vrcts_structural_no_segments_is_empty_not_an_error(tmp_path: path
 
 
 # --------------------------------------------------------------------------------- #
+# convert_sph_listing / sph2wav_command
+# --------------------------------------------------------------------------------- #
+
+
+class RecordingSphRunner:
+    """Test double for `SphRunner`: records every `run()` call's argv tokens, no real
+    subprocess and no real file written -- mirrors `test_phase4d_augment.py`'s
+    `RecordingRunner` idiom exactly. Because no file is actually created, a target
+    wav's `is_file()` check stays False across repeated calls within one test unless
+    the test itself pre-creates the target (see the idempotence test below)."""
+
+    def __init__(self) -> None:
+        self.commands: list[list[str]] = []
+
+    def run(self, cmd: list[str]) -> None:
+        self.commands.append(cmd)
+
+
+def test_sph2wav_command_exact_string() -> None:
+    assert sph2wav_command("corpus/a.sph", pathlib.Path("/out/a.wav")) == ["sph2pipe", "-f", "wav", "corpus/a.sph", "/out/a.wav"]
+
+
+def test_convert_sph_listing_pins_command_vector_for_sph_row(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text("corpus/audio/a.sph;corpus/ref/a.xml;eng;non;1.0;10.0;\n")
+    out_dir = tmp_path / "wavs"
+    runner = RecordingSphRunner()
+
+    convert_sph_listing(listing, out_dir, runner)
+
+    expected_wav = out_dir.resolve() / "a.wav"
+    assert runner.commands == [["sph2pipe", "-f", "wav", "corpus/audio/a.sph", str(expected_wav)]]
+
+
+def test_convert_sph_listing_mixed_sph_and_non_sph_rows(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text(
+        "corpus/a.sph;corpus/a.xml;eng;non;1.0;10.0;\ncorpus/b.wav;corpus/b.xml;chi;non;1.0;8.0;\n",
+    )
+    out_dir = tmp_path / "wavs"
+    runner = RecordingSphRunner()
+
+    out_listing = convert_sph_listing(listing, out_dir, runner)
+
+    rows = read_listing(out_listing)
+    assert len(rows) == 2
+    assert rows[0]["filename"] == str(out_dir.resolve() / "a.wav")
+    assert rows[1]["filename"] == "corpus/b.wav"  # non-sph row untouched
+    assert len(runner.commands) == 1  # only the sph row triggers a conversion
+
+
+def test_convert_sph_listing_preserves_non_path_fields_byte_for_byte(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text("corpus/a.sph;corpus/a.xml;eng;non;0.500;07.0;\n")
+    out_dir = tmp_path / "wavs"
+    runner = RecordingSphRunner()
+
+    out_listing = convert_sph_listing(listing, out_dir, runner)
+
+    rows = read_listing(out_listing)
+    assert rows[0]["lang"] == "eng"
+    assert rows[0]["dial"] == "non"
+    assert rows[0]["weight"] == "0.500"  # original token text, not reformatted to "0.5"
+    assert rows[0]["file_id"] == "07.0"  # original token text, not reformatted to "7.0"
+    assert rows[0]["refseg"] == "corpus/a.xml"  # refseg is not itself a .sph -- untouched
+
+
+def test_convert_sph_listing_creates_out_dir(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text("corpus/a.sph;;eng;non;1.0;1.0;\n")
+    out_dir = tmp_path / "does" / "not" / "exist" / "yet"
+    assert not out_dir.exists()
+    runner = RecordingSphRunner()
+
+    convert_sph_listing(listing, out_dir, runner)
+
+    assert out_dir.is_dir()
+
+
+def test_convert_sph_listing_returns_rewritten_listing_under_out_dir(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text("corpus/a.sph;;eng;non;1.0;1.0;\n")
+    out_dir = tmp_path / "wavs"
+    runner = RecordingSphRunner()
+
+    out_listing = convert_sph_listing(listing, out_dir, runner)
+
+    assert out_listing == out_dir.resolve() / "in.csv"
+    assert out_listing.is_file()
+
+
+def test_convert_sph_listing_skips_conversion_when_target_wav_already_exists(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text("corpus/a.sph;;eng;non;1.0;1.0;\n")
+    out_dir = tmp_path / "wavs"
+    out_dir.mkdir()
+    (out_dir / "a.wav").write_bytes(b"already-converted")
+    runner = RecordingSphRunner()
+
+    out_listing = convert_sph_listing(listing, out_dir, runner)
+
+    assert runner.commands == []  # no conversion command issued
+    rows = read_listing(out_listing)
+    assert rows[0]["filename"] == str(out_dir.resolve() / "a.wav")  # listing still rewritten
+
+
+def test_convert_sph_listing_basename_collision_raises(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text(
+        "corpus/3/x.sph;;eng;non;1.0;1.0;\ncorpus/10/x.sph;;eng;non;1.0;1.0;\n",
+    )
+    out_dir = tmp_path / "wavs"
+    runner = RecordingSphRunner()
+
+    with pytest.raises(ValueError, match="collision"):
+        convert_sph_listing(listing, out_dir, runner)
+
+
+def test_convert_sph_listing_same_source_repeated_is_not_a_collision(tmp_path: pathlib.Path) -> None:
+    listing = tmp_path / "in.csv"
+    listing.write_text("corpus/a.sph;;eng;non;1.0;1.0;\ncorpus/a.sph;;chi;non;1.0;1.0;\n")
+    out_dir = tmp_path / "wavs"
+    runner = RecordingSphRunner()
+
+    out_listing = convert_sph_listing(listing, out_dir, runner)  # must not raise
+
+    rows = read_listing(out_listing)
+    assert len(rows) == 2
+    assert rows[0]["filename"] == rows[1]["filename"]
+
+
+# --------------------------------------------------------------------------------- #
 # Corpus-gated audits (local-only; skip cleanly in CI / without the corpus)
 # --------------------------------------------------------------------------------- #
 
@@ -439,3 +576,32 @@ def test_write_lre_mapping_covers_real_listing_languages(tmp_path: pathlib.Path)
     assert langs_lre03 <= set(LRE03_LANGUAGES)
     assert langs_lre07 <= set(LRE03_LANGUAGES)
     assert langs_lre03 == set(LRE03_LANGUAGES)  # LRE03 uses all 12
+
+
+@pytest.mark.corpus
+@requires_corpus
+def test_convert_sph_listing_real_sph_converts_to_valid_wav(tmp_path: pathlib.Path) -> None:
+    """Glob-discovered (never hardcoded, license hygiene): find any one real `.sph`
+    under the corpus, convert it with the REAL subprocess-backed runner, and read the
+    result back via soundfile to prove it is a valid wav. Skips with a named reason if
+    either precondition (a `.sph` in the archive, `sph2pipe` on PATH) is unmet."""
+    sph_files = sorted(CORPUS_ROOT.rglob("*.sph"))
+    if not sph_files:
+        pytest.skip(f"no .sph files under {CORPUS_ROOT}")
+    if shutil.which("sph2pipe") is None:
+        pytest.skip("sph2pipe not installed (a documented local prerequisite, not vendored)")
+
+    sph_path = sph_files[0]
+    listing = tmp_path / "real_sph.csv"
+    listing.write_text(f"{sph_path};;eng;non;1.0;1.0;\n")
+    out_dir = tmp_path / "wavs"
+
+    out_listing = convert_sph_listing(listing, out_dir, RealSphRunner())
+
+    rows = read_listing(out_listing)
+    wav_path = pathlib.Path(rows[0]["filename"])
+    assert wav_path.is_file()
+
+    info = sf.info(str(wav_path))
+    assert info.frames > 0
+    assert info.samplerate > 0

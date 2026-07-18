@@ -28,9 +28,11 @@ find it, is a separate, smaller decision left to whichever task writes that conf
 from __future__ import annotations
 
 import json
+import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 import numpy as np
 
@@ -342,3 +344,114 @@ def write_lre_mapping(out: Path) -> None:
     """
     langs = sorted(LRE03_LANGUAGES)
     out.write_text("".join(f"{lang};non;{i}\n" for i, lang in enumerate(langs)))
+
+
+# --------------------------------------------------------------------------------- #
+# sph2pipe conversion (design spec S1.4, plan Task 3): the eval listings ship raw NIST
+# SPHERE (`.sph`) audio -- 3840 files under `eval/audio/{3,10,30}`, none under
+# `train/` (Task 3 audit) -- that nothing in this port can decode (symphonia has no
+# SPHERE support; the legacy relied on libsndfile's built-in NIST reader). Feeds the
+# wav-eval LID arm only when wanted; NOT on the features-regime (File_Type 2) critical
+# path. Port-only tooling, no legacy Python source to port.
+# --------------------------------------------------------------------------------- #
+
+
+class SphRunner(Protocol):
+    """Injection seam for the `sph2pipe` shell-out -- mirrors
+    `dataprep.augment.SoxRunner`'s established pattern (a `Protocol` plus a real
+    subprocess-backed default) verbatim rather than inventing a parallel convention.
+    Unlike `augment.py`'s `AugmentCorpus.py` ancestor, this is port-only tooling with
+    no legacy `os.system(command)` string convention to stay faithful to."""
+
+    def run(self, cmd: list[str]) -> None:
+        """Execute one sph2pipe command, given as argv tokens."""
+        ...
+
+
+class RealSphRunner:
+    """Default `SphRunner`: a real, shell-free subprocess (`subprocess.run(cmd,
+    shell=False)`, argv tokens directly -- no intermediate command string). Uses
+    `check=True`: unlike `augment.RealSoxRunner`'s deliberate `check=False` (a
+    documented parity concession to the legacy's exit-code-ignoring `os.system`),
+    there is no legacy behavior to match here, so a real sph2pipe failure surfaces
+    immediately as `CalledProcessError` instead of silently leaving no wav behind for
+    a later, more confusing `FileNotFoundError`/soundfile read failure to report."""
+
+    def run(self, cmd: list[str]) -> None:
+        subprocess.run(cmd, check=True)
+
+
+def sph2wav_command(sph_path: str, wav_path: Path) -> list[str]:
+    """The pinned command surface (design spec S1.4 / plan Task 3): `sph2pipe -f wav
+    <in> <out>`, built directly as argv tokens. Unlike `augment.py`'s command
+    builders, there is no legacy `os.system(single_string)` call this needs to
+    byte-match, so a path containing whitespace is never a hazard here."""
+    return ["sph2pipe", "-f", "wav", sph_path, str(wav_path)]
+
+
+def convert_sph_listing(listing: Path, out_dir: Path, runner: SphRunner) -> Path:
+    """Rewrite `listing` (`batching.read_listing`'s ';'-separated schema) so every
+    `.sph` `filename` (primary audio) column points at a converted `.wav` instead,
+    write the result to `out_dir / listing.name`, and return that path.
+
+    Only the `filename` column is inspected for the `.sph` suffix -- `refseg` and
+    every other column (`lang`/`dial`/`weight`/`file_id`) pass through UNCHANGED, via
+    `read_listing`'s own token-preserving parse (the same technique `localize_listing`
+    already relies on in this module: a present token is carried through verbatim,
+    never reparsed-and-reformatted). A non-`.sph` `filename` (already a wav, or a
+    precomputed-feature path on the vtln listings) passes through unchanged too --
+    this function has nothing to do on those rows.
+
+    Each `.sph` row converts to `out_dir.resolve() / f"{Path(filename).stem}.wav"`
+    (flat -- no nested subdirectories are reconstructed; `out_dir` is resolved so
+    every row this function writes stays ABSOLUTE, matching the module-wide
+    convention documented at the top of this file). Two DIFFERENT source `.sph` paths
+    that happen to share a basename would silently overwrite one another's target and
+    corrupt the listing (one row's audio pointing at the other's file) -- guarded
+    here with an explicit `ValueError` rather than left as a silent hazard; verified
+    absent on the real corpus (3840 files, 3840 unique basenames, Task 3 audit) but
+    not something to assume holds for every future sph tree.
+
+    IDEMPOTENCE: a `.sph` row is skipped (no `runner.run()` call) once its target wav
+    already exists on disk. `augment.py` has no analogous convention of its own to
+    mirror here -- its variant filenames are freshly drawn every call, so an
+    already-there output is never a concern there -- but re-decoding an
+    already-converted file on every re-run against a 27 GB, gitignored corpus is
+    wasteful, and sph2pipe is a pure function of its input. This instead follows the
+    OTHER existing precedent in this codebase, `tasks/vrcts.rs`'s `VrctsPart`
+    skip-if-output-exists semantics (Rust; cited as prior art only, no code shared).
+
+    `out_dir` IS created (`mkdir(parents=True, exist_ok=True)`) -- a deliberate
+    deviation from `localize_listing`/`derive_sad_listings`'s no-mkdir convention
+    elsewhere in this module (both of those only ever write a small listing text file
+    into a caller-managed location; this function writes real multi-MB wav payloads
+    into `out_dir`, so creating it is part of the job, not left to the caller).
+
+    No guard against a malformed listing row beyond what `read_listing` itself already
+    provides (short-row field defaulting) -- matching this module's other
+    listing-consuming functions.
+    """
+    out_dir = out_dir.resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    records = read_listing(listing)
+
+    source_by_target: dict[Path, str] = {}
+    rows: list[str] = []
+    for rec in records:
+        filename = rec["filename"]
+        if filename.endswith(".sph"):
+            wav_path = out_dir / f"{Path(filename).stem}.wav"
+            prior_source = source_by_target.get(wav_path)
+            if prior_source is not None and prior_source != filename:
+                raise ValueError(f"sph2pipe basename collision: {prior_source!r} and {filename!r} both target {wav_path}")
+            source_by_target[wav_path] = filename
+            if not wav_path.is_file():
+                runner.run(sph2wav_command(filename, wav_path))
+            new_filename = str(wav_path)
+        else:
+            new_filename = filename
+        rows.append(f"{new_filename};{rec['refseg']};{rec['lang']};{rec['dial']};{rec['weight']};{rec['file_id']};\n")
+
+    out_listing = out_dir / listing.name
+    out_listing.write_text("".join(rows))
+    return out_listing
