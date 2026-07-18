@@ -535,13 +535,20 @@ def test_from_scratch_twin_mechanical(tmp_path_factory: pytest.TempPathFactory) 
 
 @pytest.mark.slow
 def test_early_stop_triggers(tmp_path: Path) -> None:
-    """The real-path early-stop gate: `train_modern` with the engine-backed default hooks (no
-    stubs) on the SAD fixture, `patience=1`, must STOP before the epoch budget. The forward-only
-    balance-5 validation cost is stuck at 30.0 from scratch on this fixture (the net's posteriors
-    never cross the decision threshold), so it never strictly improves after epoch 0 -- a genuine
+    """The real-path early-stop gate on the LEGACY balance signal (explicitly `val_metric=
+    "balance"`): `train_modern` with the engine-backed default hooks (no stubs) on the SAD
+    fixture, `patience=1`, must STOP before the epoch budget. The forward-only balance-5
+    validation cost is stuck at 30.0 from scratch on this fixture (the net's posteriors never
+    cross the decision threshold), so it never strictly improves after epoch 0 -- a genuine
     plateau -- and early-stop fires at epoch 1 (`epochs_run == 2 < epochs == 4`). Distinct from
     the stub-driven state-machine unit tests (`tests/test_phase5_train_modern.py`): this drives
-    the REAL engine loop end to end."""
+    the REAL engine loop end to end.
+
+    Phase 6 Task 6 flipped the DEFAULT validation metric to `nn_cost_seg` (a continuous signal
+    that does NOT plateau here), so this gate now pins `val_metric="balance"` to keep exercising
+    the phase-5 balance-plateau behavior deliberately; the honest early-stop on the moving
+    nn_cost_seg signal is pinned separately by
+    `test_phase5_train_modern_smoke.py::test_early_stop_triggers_on_moving_nn_cost_seg`."""
     corpus = tmp_path / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
     for f in ("f1", "f2"):
@@ -553,7 +560,7 @@ def test_early_stop_triggers(tmp_path: Path) -> None:
     (tmp_path / "vrcts_tier2").mkdir()
 
     state = init_run(tmp_path / "tier2_spectral.config", tmp_path / "run")
-    params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", init_seed=7)
+    params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", init_seed=7, val_metric="balance")
     res = train_modern(state, seed=0, params=params)
 
     assert res.stopped_early is True, "early-stop must fire on the stuck-validation plateau"

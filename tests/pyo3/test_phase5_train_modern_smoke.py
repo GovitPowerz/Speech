@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from speech.drivers.init import init_run
-from speech.drivers.state import ModernTrainParams
+from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 
 pytest.importorskip("speech_rs")
@@ -111,3 +111,99 @@ def test_train_modern_resume_smoke(tmp_path: Path) -> None:
     res = train_modern(state, seed=0, params=ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, resume_from=ckpt))
     assert res.epochs_run == 2
     assert [r.epoch for r in res.history] == [0, 1]
+
+
+# ---- Phase 6 Task 6: the NNCostSeg validation signal (carry-forward) --------------------
+#
+# The Phase-5 closeout finding: `train_modern`'s balance-5 forward "validation" cost is a
+# useless from-scratch early-stop signal -- on the tier2 SAD fixture it collapses to the
+# discrete `100 - success` error rate, STUCK at 30.0 (the seeded net's posteriors never
+# cross the decision threshold), so it never strictly improves and best-selection freezes at
+# epoch 0. The differentiable NNCostSeg (the SAME quantity `forward_backward` descends --
+# `f = NNCostSeg (+ NNCostLID)`, F10-fixed) is CONTINUOUS and moves from scratch. Task 6
+# makes it the default validation metric (`ModernTrainParams.val_metric`), so early-stop runs
+# on the moving signal. These smoke tests exercise the REAL default validate hook end to end
+# (no stubs), which is where the moving-vs-stuck contrast only exists.
+
+
+def _sad_state(dst: Path) -> RunState:
+    """Seed + `init_run` the tier2 (algo-3 SAD) fixture into `dst`; returns the RunState."""
+    config = _seed_tier2_spectral(dst)
+    return init_run(config, dst / "run")
+
+
+@pytest.mark.slow
+def test_val_metric_nn_cost_seg_moves_where_balance_plateaus(tmp_path: Path) -> None:
+    """RED/GREEN: the SAME fixture, SAME budget -- the DEFAULT (`nn_cost_seg`) validation cost
+    MOVES across epochs while the explicit `balance` cost is a FROZEN plateau (stuck at 30.0,
+    best_epoch pinned at 0). Both runs use `patience=99` so all epochs run (no early stop) and
+    the raw per-epoch validation signal is what is compared.
+
+    Before Task 6 lands this is RED two ways: `ModernTrainParams(val_metric="balance")` raises
+    (extra="forbid", no such field), and the default run scores the OLD stuck balance cost, so
+    the `default MOVES` assertion fails. It also mutation-guards the DEFAULT: flip the state.py
+    default back to `balance` and the default arm freezes -> `len(set(default_costs)) > 1` fails."""
+    default_res = train_modern(  # no val_metric -> the new nn_cost_seg default
+        _sad_state(tmp_path / "default"),
+        seed=0,
+        params=ModernTrainParams(epochs=4, patience=99, steps_per_epoch=2, init_scheme="xavier", init_seed=7),
+    )
+    balance_res = train_modern(
+        _sad_state(tmp_path / "balance"),
+        seed=0,
+        params=ModernTrainParams(epochs=4, patience=99, steps_per_epoch=2, init_scheme="xavier", init_seed=7, val_metric="balance"),
+    )
+
+    bal_costs = [r.val_cost for r in balance_res.history]
+    default_costs = [r.val_cost for r in default_res.history]
+
+    # balance: the discrete `100 - success` error rate is a frozen plateau; best-selection can
+    # never advance off epoch 0 (no strict improvement ever).
+    assert len(set(bal_costs)) == 1, f"balance validation must be a frozen plateau, got {bal_costs}"
+    assert balance_res.best_epoch == 0, f"the balance plateau makes epoch 0 the (only) best, got {balance_res.best_epoch}"
+
+    # nn_cost_seg (the default): a continuous signal that MOVES -- more than one distinct value,
+    # and best-selection advances off epoch 0 (structurally impossible under the frozen signal).
+    assert len(set(default_costs)) > 1, f"the default (nn_cost_seg) validation must MOVE, got {default_costs}"
+    assert default_res.best_epoch > 0, f"a moving signal must let best-selection advance past epoch 0, got {default_res.best_epoch}"
+    assert all(np.isfinite(c) for c in default_costs)
+
+
+@pytest.mark.slow
+def test_val_metric_both_deterministic(tmp_path: Path) -> None:
+    """The both-metrics deterministic smoke: each metric, run twice at a fixed seed, produces a
+    bit-identical per-epoch validation trajectory AND bit-identical `last_sad.bin`. Proves both
+    validation paths are deterministic (the property the modern loop's resume/checkpoint story
+    relies on)."""
+    for metric in ("nn_cost_seg", "balance"):
+        params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="xavier", init_seed=7, val_metric=metric)  # type: ignore[arg-type]
+        a = train_modern(_sad_state(tmp_path / f"{metric}_a"), seed=0, params=params)
+        b = train_modern(_sad_state(tmp_path / f"{metric}_b"), seed=0, params=params)
+        assert [r.val_cost for r in a.history] == [r.val_cost for r in b.history], f"{metric}: validation trajectory not deterministic"
+        assert np.isfinite([r.val_cost for r in a.history]).all(), f"{metric}: validation cost must be finite"
+        assert (Path(a.checkpoint_dir) / "last_sad.bin").read_bytes() == (Path(b.checkpoint_dir) / "last_sad.bin").read_bytes(), (
+            f"{metric}: trained weights not bit-identical across two fixed-seed runs"
+        )
+
+
+@pytest.mark.slow
+def test_early_stop_triggers_on_moving_nn_cost_seg(tmp_path: Path) -> None:
+    """The early-stop machinery re-pinned against the MOVING signal: with `nn_cost_seg` and a
+    step budget large enough to overshoot the minimum (`steps_per_epoch=8`), the validation cost
+    genuinely improves for several epochs, reaches a real best at an epoch > 0, then rises --
+    and early-stop fires on `patience`. This is the NON-DEGENERATE early-stop the balance
+    plateau could never produce (there best_epoch is frozen at 0 and any "stop" is an artifact
+    of the frozen signal). Distinct from the balance-plateau early-stop gate
+    (`test_exit_gate.py::test_early_stop_triggers`, deliberately pinned to `val_metric=balance`).
+
+    Assertions are qualitative (stopped_early, best_epoch > 0, ran under budget), not an exact
+    overshoot epoch, so they survive cross-libm jitter -- the overshoot span here is ~0.2, far
+    above any libm noise floor."""
+    res = train_modern(
+        _sad_state(tmp_path),
+        seed=0,
+        params=ModernTrainParams(epochs=16, patience=2, steps_per_epoch=8, init_scheme="xavier", init_seed=7, val_metric="nn_cost_seg"),
+    )
+    assert res.stopped_early is True, "early-stop must fire on the moving nn_cost_seg signal's post-improvement overshoot"
+    assert res.best_epoch > 0, f"the moving signal must reach its best at a genuine epoch > 0 (not the frozen-plateau epoch 0), got {res.best_epoch}"
+    assert res.epochs_run < 16, f"early-stop must halt before the 16-epoch budget, ran {res.epochs_run}"

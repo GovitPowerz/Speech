@@ -197,6 +197,12 @@ class ModernTrainParams(BaseModel):
     patience: int = 5  # early-stop after this many epochs with no validation-cost improvement
     steps_per_epoch: int = 10  # SMORMS3 steps per epoch (no LR schedule; fresh optimizer per epoch)
     valid_listing: str | None = None  # validation fileslisting (rel to config dir); None -> reuse the training listing
+    # The forward-only validation cost the early-stop follows (Phase 6 Task 6, a Phase-5 carry-forward).
+    # "nn_cost_seg" (DEFAULT): the CONTINUOUS NNCostSeg objective (the same `f` forward_backward descends,
+    # F10-fixed) -- it MOVES from scratch. "balance": the phase-5 balance-law cost, which on the SAD
+    # from-scratch fixture collapses to the discrete `100 - success` rate STUCK at 30.0 -- a useless
+    # early-stop plateau (why nn_cost_seg is now the default; see IMPROVEMENTS.md / the pyo3 smoke).
+    val_metric: Literal["nn_cost_seg", "balance"] = "nn_cost_seg"
     # hard-example mini-batching (Task 4/5 fixed batching); minibatch == 0 -> full-corpus training per epoch.
     minibatch: int = 0
     nb_worst: int = 0
