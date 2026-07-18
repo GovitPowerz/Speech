@@ -251,7 +251,7 @@ measured RTF ~0.0026-0.0027 (same order of magnitude, ~1.5x faster here) and ~0.
 
 Per the license bright line, the two files below are selected at RUNTIME as the
 lexicographically-FIRST match under their respective corpus subtree (`sort` over a glob, no
-duration- or content-based picking) -- neither filename nor any per-file content-derived value is
+duration- or content-based picking) -- no filename, path, or corpus-identifying label is
 recorded anywhere in this repo; only the resulting BENCH measurements are. This is a one-off
 local measurement (not a committed automated test -- corpus-gated performance numbers follow the
 same "user/session gathers, RESULTS.md records" convention as the Phase 6 subset-gate rows

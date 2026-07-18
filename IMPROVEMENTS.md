@@ -1482,6 +1482,22 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `tier2_train_epoch_weights_golden` (`tests/phase4a_train_golden.rs`): the glued-name siblings
   (`weights_bestNNWeight_1_tier2_spectral.mat`, io::binary despite the `.mat` suffix) are compared
   value-for-value against the REAL legacy `saveWeights` output from the harness train stage.
+  *Phase 7 Task 1 addendum -- the same anti-pattern one call layer down, at the CALLER:*
+  `engine/bag_of_processors.rs::save_and_update` composes the `<filename>` this function receives
+  in the first place -- `format!("bestNNWeight_{}_{filename}", ii + 1)`
+  (`bag_of_processors.rs:775-776`, from `BagOfProcessors.cpp:462-464`) string-prepends
+  `bestNNWeight_<pos+1>_` onto the WHOLE `output_file_name` (the `multiConfigResultsOutputFile`
+  config value), path separators included, then hands that composed string straight to
+  `save_weights` above -- which prefixes it AGAIN. So an absolute `multiConfigResultsOutputFile`
+  breaks at the OUTER layer already: the composed `bestNNWeight_1_/abs/path/out.mat` targets a
+  nonexistent directory and the write fails with a bare `os error 2` (no `.context()` at that read
+  site, so even the full anyhow chain shows nothing extra). Pre-existing, same age as the sibling
+  quirk above (Phase 4a, commit `a3979b3b`); every committed fixture avoids it via a bare relative
+  `multiConfigResultsOutputFile` (e.g. `tier2_spectral.mat`, no directory component). Found by
+  Phase 7 Task 1's bench-staging work while gathering corpus-gated numbers with an absolute output
+  path (`.superpowers/sdd/task-1-report.md` Concerns #1); deferred, not fixed here -- out of Task 1
+  scope. *Fix candidate:* same as above -- prepend at the basename, not the whole path, for both
+  call sites together.
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning** (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):

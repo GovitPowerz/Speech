@@ -54,6 +54,10 @@ impl BenchPath {
 pub struct BenchRun {
     pub path: BenchPath,
     pub wall_s: f64,
+    /// Sum of processed audio duration across ALL channels of every corpus
+    /// file (per-channel summing, not per-file wall-clock duration) -- e.g. a
+    /// 60 s stereo file contributes `120.0`, not `60.0`. See
+    /// `corpus_audio_seconds` for the exact per-file formula.
     pub audio_s: f64,
     pub rtf: f64,
     pub maxrss_mb: f64,
@@ -126,9 +130,12 @@ fn maxrss_mb() -> f64 {
 /// -- the `-i` compute path (`CorpusProcessor::run` dispatches to `run_solo`
 /// when the config's own `Neural_Networks_BackPropagation_Epochs`/
 /// `..._Gradient_Check_Epsilon` are 0, matching an ordinary single-pass `-i`
-/// invocation; `run_bench` does not force this, see the module doc). One
-/// [`BenchRun`] per (config, repeat) pair, in nested `configs` x `repeat`
-/// order. `repeat == 0` is treated as `1` (at least one measurement).
+/// invocation; `run_bench` does not force this, see the module doc). The
+/// timed region (`wall_s`) starts AFTER `CorpusProcessor::new()` returns --
+/// weight load and net construction are excluded, while the per-file
+/// decode/feature-extraction/forward-pass work inside `run()` is 100%
+/// covered. One [`BenchRun`] per (config, repeat) pair, in nested `configs` x
+/// `repeat` order. `repeat == 0` is treated as `1` (at least one measurement).
 pub fn run_bench(configs: &[String], repeat: usize, path: BenchPath) -> Result<BenchReport> {
     let repeat = repeat.max(1);
     let mut runs = Vec::with_capacity(configs.len() * repeat);
