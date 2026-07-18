@@ -151,7 +151,7 @@ def derive_lid_features_records(corpus_root: Path, ref_stm: Path) -> list[dict[s
     """Build LID features listing records straight from the corpus tree (self-contained --
     no dependency on the local-only 2015 legacy listing). Globs
     `train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd`, taking the language from the
-    filename prefix (`ara_293.plp8f0mvsdd` -> `ara`), keeping only the 12 known LRE03
+    filename prefix (`xxx_0001.plp8f0mvsdd` -> `xxx`), keeping only the 12 known LRE03
     languages, and pointing every row's refseg at the synthesized whole-file-speech STM.
     Every path is absolute (glob results) and every file provably exists (it was globbed).
     Sorted by filename for determinism."""
@@ -220,16 +220,22 @@ def _config_text(cfg: dict[str, str]) -> str:
     return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
 
 
-def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int) -> None:
+def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_scheme: str, forget_bias_one: bool) -> None:
     """Write valid seed weight packs the engine loads at construction (`BLSTM_weightsFile`/
     `BLSTM_LID_weightsFile`). `train_modern` re-inits from scratch and overrides these, but
     the engine still needs a loadable, correctly-sized pack to build the net -- so this
     mirrors the phase-5 twin smoke's committed-seed-pack pattern, generated at runtime here
     (no corpus-derived bytes) via the SAME `init_weights` the training loop uses. Both nets
-    are drawn from one shared `Generator` in `[sad, lid]` order (deterministic)."""
+    are drawn from one shared `Generator` in `[sad, lid]` order (deterministic).
+
+    `init_scheme`/`forget_bias_one` MUST match the `ModernTrainParams` the training call
+    actually uses (Task 8 review fix -- previously hardcoded "xavier"/True regardless): the
+    seed pack doubles as the SCORED `score_init` baseline, so a mismatched scheme here would
+    silently compare a trained net (e.g. a `--init-scheme he` run) against an init baseline
+    drawn under a different scheme than the one training actually started from."""
     rng = np.random.default_rng(seed)
     for prefix, name in (("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")):
-        pack = init_weights(nnet_spec(flat, prefix), rng, "xavier", True)[0]
+        pack = init_weights(nnet_spec(flat, prefix), rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
         write_bin(pack.shape[0], 1, pack, out_dir / name)
 
 
@@ -259,7 +265,11 @@ def _score_packs_on_test(
     score_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy(sad_pack, score_dir / "sad_weights.bin")
     shutil.copy(lid_pack, score_dir / "lid_weights.bin")
-    scores_dir = evaluate(eval_state, score_dir)
+    # Nested under score_dir (already distinct per pass -- "score_trained" vs "score_init")
+    # so the trained and init `.scr` outputs never share one directory (Task 8 review fix:
+    # `evaluate`'s default output dir is fixed per `eval_state`, so two calls against the
+    # SAME eval_state used to clobber each other's `.scr` files on disk).
+    scores_dir = evaluate(eval_state, score_dir, scores_dir=score_dir / "scores")
 
     mapping_path = Path(eval_state.config_path).parent / eval_state.base_config["language2classmapping"]
     class_keys = _class_keys(mapping_path)
@@ -402,7 +412,23 @@ def run_baseline(
     mapping = out_dir / "language2classmapping_lre12.csv"
     write_lre_mapping_12(mapping)
 
-    # --- 2. config assembly + seed packs -------------------------------------------------
+    # --- 2. training params + config assembly + seed packs -------------------------------
+    # Built here (not down in step 4) so `_generate_seed_packs` can be handed the SAME
+    # init_scheme/forget_bias_one the training call below will use (Task 8 review fix).
+    params = ModernTrainParams(
+        epochs=epochs,
+        patience=patience,
+        steps_per_epoch=steps_per_epoch,
+        valid_listing=valid_lst.name if valid_rec else None,
+        val_metric="nn_cost_seg",
+        minibatch=minibatch,
+        nb_classes=len(_LANGS),
+        multilingual=minibatch > 0,
+        init_scheme=init_scheme,  # type: ignore[arg-type]
+        init_seed=seed,
+        resume_from=str(out_dir / "checkpoint") if resume else None,
+    )
+
     import speech_rs  # local: the pyo3 module is only needed on the engine path
 
     flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
@@ -410,7 +436,7 @@ def run_baseline(
     cfg_text = _config_text(cfg)
     base_config = out_dir / "base.config"
     base_config.write_text(cfg_text)
-    _generate_seed_packs(cfg, out_dir, seed)
+    _generate_seed_packs(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
 
     # --- 3. run metadata -----------------------------------------------------------------
     metadata_path = write_run_metadata(
@@ -439,19 +465,6 @@ def run_baseline(
 
     # --- 4. train (from scratch or resume) -----------------------------------------------
     state = RunState.from_config(base_config, out_dir)
-    params = ModernTrainParams(
-        epochs=epochs,
-        patience=patience,
-        steps_per_epoch=steps_per_epoch,
-        valid_listing=valid_lst.name if valid_rec else None,
-        val_metric="nn_cost_seg",
-        minibatch=minibatch,
-        nb_classes=len(_LANGS),
-        multilingual=minibatch > 0,
-        init_scheme=init_scheme,  # type: ignore[arg-type]
-        init_seed=seed,
-        resume_from=str(out_dir / "checkpoint") if resume else None,
-    )
     train = _train_fn if _train_fn is not None else train_modern
     console.log(f"training: {epochs} epochs x {steps_per_epoch} steps (patience {patience})")
     res = train(state, seed, params)  # type: ignore[operator]

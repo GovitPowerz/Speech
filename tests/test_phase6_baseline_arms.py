@@ -235,7 +235,7 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     }
     setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
     monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
-    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed: None)
+    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one: None)
     monkeypatch.setattr(B, "RunState", type("RS", (), {"from_config": staticmethod(lambda *a, **k: object())}))
 
     class _Res:

@@ -76,9 +76,15 @@ def _class_keys(mapping_path: Path) -> list[str]:
     return sorted(keys)
 
 
-def evaluate(state: RunState, checkpoint: Path) -> Path:
+def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) -> Path:
     """Score the corpus with the checkpoint weights and write per-file `.scr` outputs to
-    `<out_dir>/scores/`. Returns the scores directory.
+    `scores_dir` (default `<out_dir>/scores/`). Returns the scores directory.
+
+    `scores_dir`: override the output directory (Task 8 review fix). Callers that
+    `evaluate` more than one checkpoint against the SAME `state` -- e.g. a trained pack and
+    its own untrained-init baseline -- must pass DISTINCT dirs, or the second call's `.scr`
+    files silently overwrite the first's on disk (the default `<out_dir>/scores/` is fixed
+    per `state`, not per call).
 
     Only meaningful for the Twin (algo 6): `.scr` is a LID artifact, and a single-net
     checkpoint (algo 3/4/5, post-Task-9 generalized drivers) degrades SILENTLY, not with
@@ -90,7 +96,7 @@ def evaluate(state: RunState, checkpoint: Path) -> Path:
 
     workdir = Path(state.config_path).parent
     ckpt = Path(checkpoint)
-    scores_dir = Path(state.out_dir) / "scores"
+    scores_dir = Path(scores_dir) if scores_dir is not None else Path(state.out_dir) / "scores"
     scores_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = dict(state.base_config)
