@@ -297,7 +297,12 @@ def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, Pat
 def test_sad_metric_parity() -> None:
     """SAD (algo-3 spectral, File_Type 0 wav): fast vs exact on the phase-6 subset checkpoint.
     Per-file VRCTS boundaries IDENTICAL (count + types + times); pooled DCF delta EXACTLY 0.0
-    at every collar."""
+    at every collar.
+
+    T11 note: `n_scored` counts files that produced a hyp xml on BOTH paths (a file missing
+    a hyp on either path is skipped via `continue`); it is a SCORED-file count, not an
+    assertion that every `test_records` entry was covered -- the only coverage gate is
+    `n_scored > 0`."""
     a = _ensure_arm("sad")
     rep_e, dump_e = _score_sad(a, "exact", "exact")
     rep_f, dump_f = _score_sad(a, "fast", "fast")

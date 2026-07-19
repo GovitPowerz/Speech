@@ -156,6 +156,12 @@ fn maxrss_mb() -> f64 {
 /// covered. One [`BenchRun`] per (config, repeat) pair, in nested `configs` x
 /// `repeat` order. `repeat == 0` is treated as `1` (at least one measurement).
 ///
+/// COVERAGE (T1/T11 honest record): every committed `phase7_bench.rs` fixture is a
+/// single-file listing (`files=1`, `repeat=1`), so the multi-file `audio_s`
+/// summation in [`corpus_audio_seconds`] and the `repeat.max(1)` clamp / `repeat>1`
+/// in-process accumulation are exercised only in ad-hoc local runs, not by a
+/// committed test.
+///
 /// `Inference_Path` is overlaid onto the loaded map to `path.as_str()` ONCE
 /// per config, before `corpus_audio_seconds`/the repeat loop (see the module
 /// doc's "ONE deliberate key" note) -- `corpus_audio_seconds` itself never

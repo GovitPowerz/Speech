@@ -630,6 +630,13 @@ impl BagOfProcessors {
     /// return a single-element vec of the net's `InputStatistics`; algo 6 the
     /// paired `[regular, LID]` vec (`:123-126`); everything else falls through
     /// to the legacy's EMPTY default (`:128-129`).
+    ///
+    /// T6b AUDIT (Phase 7, carry-note): the fast arms share the same inert-empty
+    /// read-shaped pattern as `get_weights`/`get_weights_derivatives` below -- a
+    /// self-describing empty Vec, not a bail. The same verdict applies (read-shaped,
+    /// safe, never indexed back out for a fast `pos`); it stays inert rather than
+    /// fallible so the internal per-file bookkeeping never breaks on a plain
+    /// inference/scoring run.
     pub fn get_input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.input_statistics().clone()],

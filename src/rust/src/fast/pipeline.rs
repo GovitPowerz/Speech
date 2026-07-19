@@ -58,7 +58,13 @@
 //!    fresh-zeroed per-frame buffer reproduces the exact periodogram bit-for-bit (mod
 //!    f32). This path zeroes per frame -- simpler and equivalent. (`begin=0`,
 //!    `end=frames-1` also makes `index >= frames` unreachable, so the `get_sequence`
-//!    no-op branch never fires.)
+//!    no-op branch never fires.) CAUTION (Phase 7 Task 10 battery, item 5): the
+//!    per-frame reset in `fill_frame` is LOAD-BEARING beyond run-twice bit-identity --
+//!    the no-op proof above holds ONLY for a per-frame-FRESH buffer. A right-edge frame
+//!    writes only `[0, nb_elem)`, leaving stale INTERIOR data in the FFT-read window
+//!    `[nb_elem, window_size)` on a REUSED buffer, so dropping the reset diverges WITHIN
+//!    a single call, breaking the TOLERANCE parity pins, not merely the run-twice
+//!    bit-identity pin. Do not refactor the reset away.
 //!
 //! 4. MEL/DCT REUSE (f64), scoped divergence. The mel filterbank + DCT table are built
 //!    ONCE at construction (`MelFilterBank::new`, the load-bearing "banks built once" of
@@ -197,7 +203,8 @@ impl FastPipeline {
                 .map(|v| v.iter().map(|&x| x as f32).collect());
 
         // Mel filterbank + DCT table, built ONCE (f64, reused golden ctor). Args match
-        // assemble_from_periodogram (`features/pipeline.rs:558-572`) exactly.
+        // build_mel_bank (`features/pipeline.rs:544-563`, the exact path's canonical
+        // MelFilterBank::new site since the Task 8 hoist) exactly.
         let bank = if cfg.nb_bins > 0 {
             Some(MelFilterBank::new(
                 cfg.min_mel,
@@ -251,7 +258,7 @@ impl FastPipeline {
     }
 
     /// Build the full BLSTM input sequence for one channel of f32 samples
-    /// (`build_input_sequence`, `features/pipeline.rs:602-610`, f32). Returns the
+    /// (`build_input_sequence`, `features/pipeline.rs:637-645`, f32). Returns the
     /// `T x cols` assembled MFCC/mel/raw sequence.
     pub fn build_input_sequence(&mut self, samples: &[f32]) -> &FastMatrix {
         self.build_input_sequence_parts(samples).0

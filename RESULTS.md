@@ -269,7 +269,7 @@ process is a cold-cache warm-up outlier; steady-state is the remaining five per 
 
 | build | wall_s (run1: r1,r2,r3 / run2: r1,r2,r3) | steady-state best | steady-state median |
 |---|---|---|---|
-| before (baseline) | 0.285129\*, 0.262430, 0.265041 / 0.264634, 0.263967, 0.264996 | 0.2624 | 0.2650 |
+| before (baseline) | 0.285129\*, 0.262430, 0.265041 / 0.264634, 0.263967, 0.264996 | 0.2624 | 0.2646 |
 | after (hoist)     | 0.277200\*, 0.264986, 0.264126 / 0.265300, 0.267099, 0.265569 | 0.2641 | 0.2653 |
 
 (\* = first-repeat warm-up, excluded from steady-state.) `audio_s`=120 both builds; `maxrss_mb`
@@ -411,7 +411,11 @@ mutation is Task 10's mutation-battery item 7).
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5):** future local runs of this exact recipe are expected to land within:
 - SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
-  widening tax above is real and expected, not a regression signal up to this ratio).
+  widening tax above is real and expected, not a regression signal up to this ratio). HEADROOM
+  NOTE: the 1.4x ceiling sits only ~9-10% above the measured 1.22-1.28x maxrss ratios, and the
+  peak is a whole-process high-water mark whose day-to-day spread exceeds the committed 3-repeat
+  range (a review re-run of this recipe touched 1.288x). So a future 1.3-1.35x reading is plausible
+  measurement noise, NOT a regression -- only a reading meaningfully above 1.4x is the signal.
 - LID Mode-7 arms (algo 6, phSeq/cep): wall speedup >= 2.5x, memory <= 0.8x of exact (fast should
   stay LIGHTER here; memory creeping toward or above 1.0x would be the regression signal, since
   nothing in this arm's fast path should need more memory than exact).

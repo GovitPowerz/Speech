@@ -224,6 +224,10 @@ fn sad_parity_scored_columns() {
     // boundaries are identical (main leg), so the shared-f64 `compute_errors` is
     // bit-identical. The pins keep headroom for a possible sub-tick x86 boundary shift
     // (error percentages move ~1e-3 %/tick), guarded by the OR (rel OR abs) below.
+    // T11 note: that OR-lenient comparator is currently MOOT (both terms measured 0.0)
+    // -- the assertion is effectively BOUNDARY-GATED (identical boundaries force
+    // bit-identical scored columns), so the OR exists solely as headroom against a
+    // future sub-tick shift, never as a live tolerance on today's fixtures.
     const SCORED_REL_PIN: f64 = 5.0e-2;
     const SCORED_ABS_PIN: f64 = 5.0e-2;
 

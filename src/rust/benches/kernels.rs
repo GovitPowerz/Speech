@@ -72,8 +72,8 @@ fn bench_gfft(c: &mut Criterion) {
 fn bench_mel_apply(c: &mut Criterion) {
     // Params read verbatim off tier2_spectral.config; spectrum_size = 512
     // (`bins - 1` where `bins == periodogram_length == 513`, the SAME
-    // convention `features/pipeline.rs:559-572`'s real `MelFilterBank::new`
-    // call site uses) -- the periodogram INPUT itself stays 513 columns wide
+    // convention `features/pipeline.rs:544-563`'s real `build_mel_bank`
+    // `MelFilterBank::new` call site uses) -- the periodogram INPUT itself stays 513 columns wide
     // (indices 0..=512), matching `mel_apply_513x20`'s name.
     let bank = MelFilterBank::new(
         186.1001763856132, // BLSTM_minMelFreq

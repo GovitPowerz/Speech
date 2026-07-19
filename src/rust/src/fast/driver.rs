@@ -989,6 +989,11 @@ impl Segmenter for FastTwinLid {
                 // segLID accumulation per _PostProcessMode (`:1486-1534`). The legacy
                 // `short_result_vec > 0.5` gate is always true, so only `outputSeq(kk,1)
                 // >= 0` gates (always true for the logistic posterior).
+                // COVERAGE (T5/T11 honest record): the mode-1 (entropy-weighted) and
+                // mode-2 (vote) arms below are transcribed from the exact Twin but are
+                // NOT pinned by a committed parity fixture -- both gate configs (phSeq +
+                // cep) use `_PostProcessMode 0` (the `_` arm), the only path the CI
+                // parity legs exercise. Modes 1/2 stay transcribed-but-unpinned.
                 let mut seg_lid = vec![0.0f64; out_cols];
                 match post_process_mode {
                     1 => {
