@@ -15,7 +15,7 @@ use crate::audio::{Audio, read_audio};
 use crate::cli::{Mode, ModeKind};
 use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
-use crate::fast::driver::FastSpectralSegmenter;
+use crate::fast::driver::{FastSpectralSegmenter, FastTwinLid};
 use crate::features::stats::InputStatistics;
 use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
@@ -95,14 +95,17 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// interface for a lint, not a correctness issue.
 ///
 /// `FastSpectral` (Phase 7 Task 4) is the f32 fast-inference counterpart of
-/// `Spectral` (algo 3), selected by the `Inference_Path fast` config key. It is
-/// inference-only: its `getSegmentation`/`dumpDir`/cost/classif arms delegate to the
-/// fast driver (like `Spectral`), and its TRAINING arms (weights/derivatives/stats/
-/// save/update/isBackProp) group with the non-NN variants' inert defaults, since the
-/// fast path never trains (training stays exact f64 -- spec S1; the fast driver
-/// exposes no trainable f64 surface). It IS `Clone` (deep-copying the f32 net +
-/// workspace), so the bag's `#[derive(Clone)]` still holds; the clone sites
-/// (grad-check snapshot, per-lane training fan-out) are exact-path-only, so a
+/// `Spectral` (algo 3), selected by the `Inference_Path fast` config key. `FastTwinLid`
+/// (Phase 7 Task 5) is the f32 counterpart of `TwinLid` (algo 6), restricted to the
+/// Mode-7 phSeq/cep LID arm. Both are inference-only: their
+/// `getSegmentation`/`dumpDir`/cost/classif arms delegate to the fast driver, and their
+/// TRAINING arms (weights/derivatives/stats/save/update/isBackProp) group with the
+/// non-NN variants' inert defaults, since the fast path never trains (training stays
+/// exact f64 -- spec S1; the fast drivers expose no trainable f64 surface). `FastTwinLid`
+/// DOES surface `lid_row_data` (it writes the LID members), so the scored result row's
+/// confusion columns flow exactly as the exact Twin's. Both are `Clone` (deep-copying
+/// the f32 net + workspace), so the bag's `#[derive(Clone)]` still holds; the clone
+/// sites (grad-check snapshot, per-lane training fan-out) are exact-path-only, so a
 /// fast-variant deep copy is not on any hot path.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -115,6 +118,7 @@ pub enum Processor {
     Lid(BlstmSpectralLid),
     TwinLid(TwinBlstmSpectralLid),
     FastSpectral(FastSpectralSegmenter),
+    FastTwinLid(FastTwinLid),
 }
 
 /// Per-channel LID result-row data (`seg._LID*` members): the `:338-349` scored
@@ -149,6 +153,7 @@ impl Processor {
             Processor::Lid(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::TwinLid(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::FastSpectral(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::FastTwinLid(s) => s.get_segmentation(audio, seg_per_chan, refs),
         }
     }
 
@@ -164,6 +169,7 @@ impl Processor {
             Processor::Lid(s) => s.dump_dir(),
             Processor::TwinLid(s) => s.dump_dir(),
             Processor::FastSpectral(s) => s.dump_dir(),
+            Processor::FastTwinLid(s) => s.dump_dir(),
         }
     }
 
@@ -183,6 +189,9 @@ impl Processor {
             // Fast SAD is forward-only: cost is not harvested, so this is all-zeros
             // (a documented divergence from the exact algo-3 driver).
             Processor::FastSpectral(s) => s.cumulative_error().to_vec(),
+            // Fast Mode-7 LID: the SAD net is never run, so this is all-zeros (same as
+            // the exact Twin's Mode-7 `:1421`).
+            Processor::FastTwinLid(s) => s.cumulative_error().to_vec(),
         }
     }
 
@@ -198,6 +207,8 @@ impl Processor {
             Processor::TwinLid(s) => s.nb_of_classif().to_vec(),
             // Fast SAD is forward-only: all-zeros (see cumulative_error).
             Processor::FastSpectral(s) => s.nb_of_classif().to_vec(),
+            // Fast Mode-7 LID: the SAD net is never run -> all-zeros.
+            Processor::FastTwinLid(s) => s.nb_of_classif().to_vec(),
         }
     }
 
@@ -215,6 +226,15 @@ impl Processor {
                 nb_of_classif: s.lid_nb_of_classif()[chan],
             }),
             Processor::TwinLid(s) => Some(LidRowData {
+                cumulative_error: s.lid_cumulative_error()[chan],
+                is_correct: s.is_lid_correct()[chan] as f64,
+                classification_errors: s.lid_classification_errors()[chan].clone(),
+                nb_of_classif: s.lid_nb_of_classif()[chan],
+            }),
+            // Fast Mode-7 LID writes the same LID members (langID-derived); the confusion
+            // columns flow exactly as the exact Twin's. `lid_cumulative_error`/
+            // `lid_nb_of_classif` are 0 (forward-only), a documented divergence.
+            Processor::FastTwinLid(s) => Some(LidRowData {
                 cumulative_error: s.lid_cumulative_error()[chan],
                 is_correct: s.is_lid_correct()[chan] as f64,
                 classification_errors: s.lid_classification_errors()[chan].clone(),
@@ -286,7 +306,12 @@ impl BagOfProcessors {
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
     ) -> Result<BagOfProcessors> {
-        let _ = mode; // accepted per legacy signature; not yet consulted (Task 5).
+        // Task 5: the fast+training rider consults the mode. Training runs only in Multi
+        // mode (the `-m`/`-M` epoch loop); Image/Solo/UnitTest drive inference via
+        // `get_segmentation`, so the training-shaped-config bail is Multi-gated (the brief's
+        // "inference/image/solo modes unaffected"). tier2/the SAD configs carry a training
+        // tail (Epochs/backprop) but run fast INFERENCE in Image mode -- must not bail.
+        let is_multi_mode = mode.kind == ModeKind::Multi;
 
         if configs.is_empty() {
             bail!("BagOfProcessors::from_configs: at least one config is required");
@@ -336,21 +361,47 @@ impl BagOfProcessors {
             let pruning_thresh = get_f64_default(map, "Pruning_Threshold", 0.0)?;
             pruning_thresholds.push(pruning_thresh);
 
-            // Phase 7 Task 4: `Inference_Path fast` picks the f32 fast-inference driver
-            // per config. Currently only algo 3 (spectral SAD) has a fast counterpart;
-            // algo 6 Mode-7 LID joins in Task 5, everything else stays exact-only ->
-            // typed-bail. `FastSpectral` load-weights mirrors the exact algo-3 arm
-            // (`from_legacy(map, None)` then `load_weights_file`).
+            // Phase 7 Task 4/5: `Inference_Path fast` picks the f32 fast-inference driver
+            // per config -- algo 3 (spectral SAD, Task 4) and algo 6 (Mode-7 LID Twin,
+            // Task 5); everything else stays exact-only -> typed-bail. Load-weights
+            // mirrors the exact arms (`from_legacy(.., None)` then `load_weights_file`).
+            //
+            // RIDER: the fast path is inference-only (training stays exact f64), so a
+            // Multi-mode (training) run with a TRAINING-shaped config
+            // (`Neural_Networks_BackPropagation_Epochs > 0` OR a `BackPropagationActivated`-on
+            // net) is a config error under `Inference_Path fast` -- caught loudly here so the
+            // seam can't silently drop to a no-op fast "training" run. Guards both algo 3 and
+            // 6 (hardening the Task-4 surface too); inference/image/solo modes are unaffected
+            // (they carry the same training-tail configs but drive inference).
             if use_fast {
+                if is_multi_mode {
+                    let epochs = get_i32_default(map, "Neural_Networks_BackPropagation_Epochs", 0)?;
+                    let bp_sad = get_bool_default(map, "BLSTM_BackPropagationActivated", false)?;
+                    let bp_lid =
+                        get_bool_default(map, "BLSTM_LID_BackPropagationActivated", false)?;
+                    if epochs > 0 || bp_sad || bp_lid {
+                        bail!(
+                            "Inference_Path fast is inference-only (training stays exact f64), but \
+                             this Multi-mode run is training-shaped (Epochs {epochs}, \
+                             BackPropagationActivated SAD={bp_sad}/LID={bp_lid}); train on the \
+                             exact path"
+                        );
+                    }
+                }
                 let processor = match algo {
                     3 => {
                         let mut seg = FastSpectralSegmenter::from_legacy(map, None)?;
                         seg.load_weights_file(map)?;
                         Processor::FastSpectral(seg)
                     }
+                    6 => {
+                        let mut seg = FastTwinLid::from_legacy(map, None, None)?;
+                        seg.load_weights_file(map)?;
+                        Processor::FastTwinLid(seg)
+                    }
                     other => bail!(
                         "Inference_Path fast is not supported for algo {other} (only algo 3 \
-                         spectral SAD; algo 6 Mode-7 LID joins in Task 5)"
+                         spectral SAD + algo 6 Mode-7 LID)"
                     ),
                 };
                 processors.push(processor);
@@ -483,7 +534,8 @@ impl BagOfProcessors {
             Processor::Vrcts(_)
             | Processor::Tdc(_)
             | Processor::Ltsv(_)
-            | Processor::FastSpectral(_) => vec![false],
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => vec![false],
         }
     }
 
@@ -504,7 +556,8 @@ impl BagOfProcessors {
             Processor::Vrcts(_)
             | Processor::Tdc(_)
             | Processor::Ltsv(_)
-            | Processor::FastSpectral(_) => Vec::new(),
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => Vec::new(),
         }
     }
 
@@ -527,7 +580,8 @@ impl BagOfProcessors {
             Processor::Vrcts(_)
             | Processor::Tdc(_)
             | Processor::Ltsv(_)
-            | Processor::FastSpectral(_) => Ok(()),
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => Ok(()),
         }
     }
 
@@ -548,7 +602,8 @@ impl BagOfProcessors {
             Processor::Vrcts(_)
             | Processor::Tdc(_)
             | Processor::Ltsv(_)
-            | Processor::FastSpectral(_) => Vec::new(),
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => Vec::new(),
         }
     }
 
@@ -569,7 +624,8 @@ impl BagOfProcessors {
             Processor::Vrcts(_)
             | Processor::Tdc(_)
             | Processor::Ltsv(_)
-            | Processor::FastSpectral(_) => Vec::new(),
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => Vec::new(),
         }
     }
 
@@ -632,7 +688,8 @@ impl BagOfProcessors {
             Processor::Vrcts(_)
             | Processor::Tdc(_)
             | Processor::Ltsv(_)
-            | Processor::FastSpectral(_) => {
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
@@ -682,7 +739,8 @@ impl BagOfProcessors {
             Processor::Vrcts(_)
             | Processor::Tdc(_)
             | Processor::Ltsv(_)
-            | Processor::FastSpectral(_) => {
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }

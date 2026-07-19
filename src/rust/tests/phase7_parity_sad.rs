@@ -284,7 +284,7 @@ fn peephole_default_aligns_with_exact() {
         "sanity: NnetSpec defaults absent peepholes FALSE"
     );
     assert_eq!(
-        build_aligned_spec(&omit).unwrap().peepholes,
+        build_aligned_spec(&omit, "BLSTM").unwrap().peepholes,
         [true; 6],
         "aligned spec must match the exact BlstmConfig default (TRUE)"
     );
@@ -295,7 +295,7 @@ fn peephole_default_aligns_with_exact() {
         all_false.insert(k.into(), "false".into());
     }
     assert_eq!(
-        build_aligned_spec(&all_false).unwrap().peepholes,
+        build_aligned_spec(&all_false, "BLSTM").unwrap().peepholes,
         [false; 6],
         "aligned spec must READ explicit false flags, not hardcode TRUE"
     );
