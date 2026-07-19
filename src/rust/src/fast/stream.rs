@@ -53,14 +53,18 @@
 //! the end rows clamp at the true last frame, resolved at `flush`. SDC (`ComputeDeltasNb <
 //! 0`) has a different, un-gate-exercised reach and typed-bails at construction.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
+use indexmap::IndexMap;
 
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
+use crate::nn::blstm::BlstmConfig;
+use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
 
-use super::nn::{FastBlstm, FastMatrix, window_begin, window_end};
+use super::driver::build_aligned_spec;
+use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, window_begin, window_end};
 use super::pipeline::FastPipeline;
 
 /// The chunked-input SAD feature front-end. See the module docs for the bit-equal
@@ -1017,6 +1021,15 @@ impl StreamDecision {
     /// newly-final convolved values, and -- when a new raw segment lands -- re-smooths and
     /// emits the newly-settled prefix.
     pub fn push_rows(&mut self, rows: &FastMatrix) -> Vec<EmittedSegment> {
+        // The decision layer reads ONLY column 0 (the binary SAD posterior); a
+        // multi-column posterior would silently drop columns and the offline
+        // `results.len()` == rows*cols tail quirk would differ (T4 report concern 3,
+        // T4-review rider). Pin the mono/binary-SAD assumption in the assert style of
+        // the sibling StreamOverlap/StreamFrontEnd debug_asserts.
+        debug_assert_eq!(
+            rows.cols, 1,
+            "StreamDecision::push_rows expects the binary SAD posterior column (output_size 1)"
+        );
         for r in 0..rows.rows {
             self.conv.push(rows.get(r, 0) as f64);
         }
@@ -1118,5 +1131,432 @@ impl StreamDecision {
         }
         self.emitted_count = i;
         out
+    }
+}
+
+// ===========================================================================
+// StreamingSession (Phase 8 Task 5): the composed SAD streaming session + gate.
+// ===========================================================================
+
+/// The chunked-input SAD streaming session (Phase 8 Task 5): the online twin of the
+/// offline fast algo-3 driver ([`crate::fast::driver::FastSpectralSegmenter`]), composing
+/// the three landed layers -- [`StreamFrontEnd`] (T2: gain/preemph-carry/dither-index plus
+/// per-range feature extraction), [`StreamOverlap`] (T3: the windowed BLSTM forward with
+/// bounded lookahead), and [`StreamDecision`] (T4: the incremental hysteresis, convolution,
+/// re-smooth-and-emit) -- over the phase-7 [`FastPipeline`] + [`FastBlstm`] kernels,
+/// UNCHANGED. The session only WIRES the layers (feature rows -> type-1 norm -> overlap ->
+/// decision) and owns the sample counter + latency accounting; every bit-equal contract is
+/// already carried by T2/T3/T4.
+///
+/// MONO-FIRST, FROZEN-STATS (spec S1.2). The session processes ONE channel via
+/// [`push`](Self::push), under FROZEN normalization: a config-fixed `Audio_fixed_gain`
+/// (front-end-side, per sample, `audio.rs::apply_fixed_gain`) + the pack-carried type-1
+/// input statistics (a per-column affine, applied per feature-row front-end-side --
+/// [`super::nn::external_normalize_f32`]). Both whole-file statistics that block causality
+/// (the `(2*RMS+max)/2` audio normalization + the type -1 per-sequence self-normalization,
+/// spec S0) are thereby replaced by frozen constants, so nothing needs whole-file
+/// lookahead. [`new`](Self::new) typed-bails everything outside this contract.
+///
+/// BIT-EQUAL TO OFFLINE-FROZEN (THE PHASE GATE, spec S1.6/S2). At any chunking,
+/// [`finish`](Self::finish)'s [`Segmentation`] AND the (test-observable) posterior history
+/// equal the offline fast bag run on the SAME audio under the SAME frozen config,
+/// BIT-IDENTICAL. The three layers each carry that contract (T2 feature rows, T3 overlap
+/// output incl. the `0/0=NaN` uncovered rows, T4 decision), and streaming changes only
+/// TIMING, never arithmetic.
+///
+/// SIGNATURE NOTE (the T4-precedent correction). The Task-5 brief sketches `new(map)`, but
+/// the offline path threads `audio.sample_rate` into `SpectralParams::derive` +
+/// `getBLSTMParam` and the source channel count into the per-channel loop; neither lives in
+/// the config. `new` therefore takes `rate` and `channels` too (the `speech stream` CLI /
+/// PyO3 binding read both from the wav header / caller before pushing samples). `channels`
+/// is validated `== 1` and then unused (the mono-first bail); it exists so a multi-channel
+/// source fails LOUDLY at construction rather than silently dropping the cross-channel
+/// `result_vec` seeding (deferred, spec S0/S1.2).
+///
+/// LATENCY (spec S1.8). Every emission is stamped with the session's audio-time-pushed
+/// clock (`(total_pushed-1)/rate`) and its per-emission lag (`emitted_at - end_s`) is
+/// tracked (running max/mean, O(1) memory). The lag is bounded by the DERIVED structural
+/// budget [`derived_latency_bound_s`](Self::derived_latency_bound_s) = front-end reach + NN
+/// window finalization + convolution half-width + the smoothing holdback, plus a
+/// data-dependent AREA term measured on the fixtures (`tests/phase8_gate.rs`).
+pub struct StreamingSession {
+    front: StreamFrontEnd,
+    pipeline: FastPipeline,
+    overlap: StreamOverlap,
+    net: FastBlstm,
+    decision: StreamDecision,
+
+    /// The pack-carried type-1 normalize tail (narrowed f32), applied per feature-row
+    /// front-end-side (the documented T3/T4 seam: type 1 is a per-column affine, so it
+    /// commutes with row-streaming and is bit-identical to the offline whole-sequence
+    /// application).
+    norm_mean: Vec<f32>,
+    norm_std: Vec<f32>,
+
+    rate: f64,
+    total_pushed: usize, // absolute sample count == the audio-time clock source
+    finished: bool,
+
+    // Latency budget (config-derived once at construction; the pins read these back).
+    feature_reach_s: f64, // (reach*shift_frames + half_window)/rate
+    nn_window_s: f64,     // 2*window_size_feature * spectrum_shift_sec
+    conv_delay_s: f64,    // conv_half * time_step
+
+    // Running per-emission lag stats (O(1) memory -- the low-memory streaming goal).
+    lag_max: f64,
+    lag_sum: f64,
+    lag_count: usize,
+
+    /// Posterior history (the StreamOverlap output, `output_size`-wide f32) -- the gate's
+    /// bit-equivalence observable, mirroring the offline `last_result_rows`. Accumulated
+    /// ONLY under `test-support` (it grows unbounded; production streaming never keeps it,
+    /// per the phase's low-memory goal), the SAME pattern as `BagOfProcessors`'
+    /// `last_audio_abs_sum`.
+    #[cfg(feature = "test-support")]
+    posterior_history: Vec<f32>,
+}
+
+impl StreamingSession {
+    /// Build the session from the SAME legacy config `map` the bag consumes, the stream
+    /// `rate`, and the source `channels` count. Validates the streaming contract (each bail
+    /// pinned by `tests/phase8_gate.rs::validation_bails`): algo 3, mono, `Audio_fixed_gain`
+    /// present, `InputNormalizationType 1`, and the overlap windowing (plain/truncate bail).
+    /// Loads the frozen net once and builds the phase-7 pipeline/BLSTM + the three streaming
+    /// layers.
+    pub fn new(
+        map: &IndexMap<String, String>,
+        rate: f64,
+        channels: usize,
+    ) -> Result<StreamingSession> {
+        // --- Validation bails (each pinned) ---
+        let algo = map
+            .get("Algo_choice")
+            .ok_or_else(|| anyhow!("streaming: missing Algo_choice"))?
+            .trim()
+            .parse::<i32>()
+            .map_err(|e| anyhow!("streaming: Algo_choice parse: {e}"))?;
+        if algo != 3 {
+            bail!("streaming: only algo 3 (spectral SAD) is supported (got {algo})");
+        }
+        if channels != 1 {
+            bail!(
+                "streaming: mono only (got {channels} channels); multi-channel streaming (the \
+                 cross-channel result_vec seeding) is deferred (spec S0/S1.2)"
+            );
+        }
+        let fixed_gain = match map.get("Audio_fixed_gain") {
+            Some(s) => s
+                .trim()
+                .parse::<f64>()
+                .map_err(|e| anyhow!("streaming: Audio_fixed_gain parse: {e}"))?,
+            None => bail!(
+                "streaming requires Audio_fixed_gain (frozen-norm mode; the whole-file \
+                 (2*RMS+max)/2 audio normalization is not streamable)"
+            ),
+        };
+        let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
+        if bc.input_normalization_type != 1 {
+            bail!(
+                "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen stats); \
+                 got {} (type -1 self-normalization needs whole-sequence lookahead)",
+                bc.input_normalization_type
+            );
+        }
+
+        // --- Config surfaces (shared with the offline fast driver) ---
+        let feature_cfg = FeatureConfig::from_legacy(map, "BLSTM")?;
+        let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
+        let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
+        let spec = build_aligned_spec(map, "BLSTM")?;
+
+        // --- Frozen net (loaded once) ---
+        let weights_file = map
+            .get("BLSTM_weightsFile")
+            .map(String::as_str)
+            .unwrap_or("");
+        if weights_file.is_empty() {
+            bail!("streaming: BLSTM_weightsFile is empty (the frozen net must be loaded once)");
+        }
+        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
+        let net = FastBlstm::from_flat(&spec, &flat)?;
+
+        // --- Framing + pipeline (built once, at `rate`) ---
+        let params = SpectralParams::derive(&feature_cfg, rate);
+        let pipeline = FastPipeline::new(&params, &feature_cfg, rate)?;
+
+        let ssr = spec.lstm_subsampling.iter().product::<usize>()
+            * spec.output_subsampling.iter().product::<usize>();
+        // `params.shift_frames` == round(shift_sec*rate) == the quantized spectrum shift in
+        // frames (`ssif`); `params.shift_sec` == ssif/rate (the offline driver's
+        // `spectrum_shift_sec` after its own re-quantization, tasks/sad.rs:290-291).
+        let ssif = params.shift_frames;
+        let spectrum_shift_sec = params.shift_sec;
+
+        // getBLSTMParam window/shift. `frame_count` is passed 0: only `real_vec_size`
+        // depends on it, and StreamOverlap derives its OWN output-row count (`total/ssr`)
+        // at flush -- the session never needs `real_vec_size`. window_size/window_shift/
+        // no_overlap are frame_count-independent.
+        let mut window_shift_sec = driver_cfg.window_shift_sec;
+        let (window_size, window_shift, no_overlap, _real_vec_size) = get_blstm_param(
+            driver_cfg.window_size_sec,
+            &mut window_shift_sec,
+            rate,
+            ssif,
+            ssr,
+            &spec.lstm_subsampling,
+            &spec.output_subsampling,
+            0,
+        );
+        if window_size == 0 {
+            bail!(
+                "streaming: the plain (non-windowed) forward is unsupported (BLSTM_window \
+                 resolves window_size 0); the gate config uses windowed overlap"
+            );
+        }
+        if no_overlap {
+            bail!(
+                "streaming: the truncate (non-overlap) windowing is unsupported (window_shift \
+                 resolves < 1); the gate config uses overlap"
+            );
+        }
+
+        // timeStep/timeOffset, OVERLAP branch (fast/driver.rs:346-347) -- passed to the
+        // decision layer exactly as the offline driver computes them.
+        let time_step = spectrum_shift_sec * ssr as f64;
+        let time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
+
+        // preemph/noise gates (the offline driver's, fast/driver.rs:296-301). Both no-ops on
+        // tier2 (preemph -0.97 <= 0, noise_seed -3 <= 0). The front-end gates preemph on
+        // `> 0.0` internally (passed the raw ratio); noise maps `noise_seed > 0 ?
+        // noise_ratio : 0.0`. THE HARD ASSERTION (T2-review rider): a seeding config
+        // (`noise_seed > 0`) with a NEGATIVE `noise_ratio` would make the offline
+        // `apply_noise(ratio)` (unconditional on the seed) and the front-end's
+        // `noise_magnitude > 0.0` gate DISAGREE in shape -- caught loudly here.
+        let preemph = feature_cfg.preemph_ratio;
+        let noise_magnitude = if feature_cfg.noise_seed > 0 {
+            assert!(
+                feature_cfg.noise_ratio >= 0.0,
+                "streaming: BLSTM_noise_ratio must be >= 0 when seeding (noise_seed > 0); the \
+                 offline apply_noise / front-end noise-gate SHAPES only agree for a \
+                 non-negative magnitude"
+            );
+            feature_cfg.noise_ratio
+        } else {
+            0.0
+        };
+
+        let front = StreamFrontEnd::new(
+            &params,
+            &feature_cfg,
+            rate,
+            fixed_gain,
+            noise_magnitude,
+            preemph,
+        )?;
+        let output_size = net.output_size();
+        let overlap = StreamOverlap::new(window_size, window_shift, ssr, output_size);
+
+        // Derived latency components (config-derived; `derived_latency_bound_s` sums these +
+        // holdback). See that method + the module-level LATENCY note.
+        let reach = if feature_cfg.deltas_nb > 0 {
+            feature_cfg.deltas_nb as usize
+                + if feature_cfg.dd_nb > 0 {
+                    feature_cfg.dd_nb as usize
+                } else {
+                    0
+                }
+        } else {
+            0
+        };
+        let half_window = params.window_size / 2;
+        let feature_reach_s = (reach * ssif + half_window) as f64 / rate;
+        let nn_window_s = 2.0 * window_size as f64 * spectrum_shift_sec;
+        let conv_half = driver_cfg
+            .conv_coeff
+            .as_deref()
+            .map_or(0, |c| if c.len() > 1 { (c.len() - 1) / 2 } else { 0 });
+        let conv_delay_s = conv_half as f64 * time_step;
+
+        let norm_mean = net.normalize_mean().to_vec();
+        let norm_std = net.normalize_std().to_vec();
+        let decision = StreamDecision::new(driver_cfg, seg_cfg, time_step, time_offset);
+
+        Ok(StreamingSession {
+            front,
+            pipeline,
+            overlap,
+            net,
+            decision,
+            norm_mean,
+            norm_std,
+            rate,
+            total_pushed: 0,
+            finished: false,
+            feature_reach_s,
+            nn_window_s,
+            conv_delay_s,
+            lag_max: f64::NEG_INFINITY,
+            lag_sum: 0.0,
+            lag_count: 0,
+            #[cfg(feature = "test-support")]
+            posterior_history: Vec::new(),
+        })
+    }
+
+    /// Push a chunk of RAW mono f32 samples (`i16/32768`-scaled, PRE-gain -- the front-end
+    /// applies the frozen gain/preemph/noise per sample) and return the segments FINALIZED
+    /// by this call, each stamped with the session's audio-time-pushed clock. Buffers the
+    /// samples, extracts + type-1-normalizes any newly-final feature rows, fires the
+    /// newly-fireable overlap windows, and drives the incremental decision layer.
+    pub fn push(&mut self, samples: &[f32]) -> Vec<EmittedSegment> {
+        if self.finished {
+            return Vec::new();
+        }
+        self.front.push(samples);
+        self.total_pushed += samples.len();
+        let mut rows = self.front.take_ready_rows(&mut self.pipeline);
+        let now = self.current_audio_time();
+        let emitted = self.step_rows(&mut rows);
+        self.stamp_and_track(emitted, now)
+    }
+
+    /// EOS: flush the front-end tail (right-edge feature rows), fire the clamped tail
+    /// overlap windows, and flush the decision layer -- returning the final emissions + the
+    /// COMPLETE [`Segmentation`] (BIT-IDENTICAL to the offline fast bag run on the same
+    /// audio, spec S1.6). Idempotent (a second call returns no emissions + the same
+    /// segmentation).
+    pub fn finish(&mut self) -> (Vec<EmittedSegment>, Segmentation) {
+        let audio_duration = self.current_audio_time();
+        if self.finished {
+            // Idempotent: the layers' own flush guards make this a re-derivation only.
+            let (_e, seg) = self.decision.flush(audio_duration);
+            return (Vec::new(), seg);
+        }
+        self.finished = true;
+
+        // Front-end EOS -> the right-edge tail feature rows (delta reach clamps at the TRUE
+        // last frame); type-1-normalize them front-end-side, exactly like mid-stream.
+        let mut tail = self.front.flush(&mut self.pipeline);
+        if tail.rows > 0 {
+            external_normalize_f32(&mut tail, &self.norm_mean, &self.norm_std);
+        }
+        // These tail rows make the last UNCLAMPED windows fireable (push_rows), then the
+        // overlap flush fires the CLAMPED tail windows -- contiguous posterior-row ranges,
+        // fed to the decision layer in order.
+        let p1 = self.overlap.push_rows(&tail, &mut self.net);
+        let p2 = self.overlap.flush(&mut self.net);
+        let mut emitted = self.consume_posteriors(&p1);
+        emitted.extend(self.consume_posteriors(&p2));
+
+        let (tail_emitted, seg) = self.decision.flush(audio_duration);
+        emitted.extend(tail_emitted);
+
+        let stamped = self.stamp_and_track(emitted, audio_duration);
+        (stamped, seg)
+    }
+
+    /// Type-1-normalize + overlap + decision for a batch of feature rows (the shared push /
+    /// finish body, minus the front-end fetch). Returns UNSTAMPED emissions.
+    fn step_rows(&mut self, rows: &mut FastMatrix) -> Vec<EmittedSegment> {
+        if rows.rows > 0 {
+            // Type-1 is a per-column affine, so per-row == whole-sequence (the documented
+            // T3/T4 seam) -- bit-identical to the offline `external_normalize_f32` over the
+            // whole input sequence.
+            external_normalize_f32(rows, &self.norm_mean, &self.norm_std);
+        }
+        let posts = self.overlap.push_rows(rows, &mut self.net);
+        self.consume_posteriors(&posts)
+    }
+
+    /// Record the posterior rows (test-support observable) and drive the decision layer.
+    fn consume_posteriors(&mut self, posts: &FastMatrix) -> Vec<EmittedSegment> {
+        #[cfg(feature = "test-support")]
+        self.posterior_history.extend_from_slice(&posts.data);
+        self.decision.push_rows(posts)
+    }
+
+    /// Stamp each emission with `now` (the session audio-time-pushed clock) and fold its lag
+    /// (`now - end_s`) into the running max/mean.
+    fn stamp_and_track(
+        &mut self,
+        mut emitted: Vec<EmittedSegment>,
+        now: f64,
+    ) -> Vec<EmittedSegment> {
+        for seg in emitted.iter_mut() {
+            seg.emitted_at_audio_s = now;
+            let lag = now - seg.end_s;
+            if lag > self.lag_max {
+                self.lag_max = lag;
+            }
+            self.lag_sum += lag;
+            self.lag_count += 1;
+        }
+        emitted
+    }
+
+    /// The audio-time of the last-pushed sample (`(total_pushed-1)/rate`), the session's
+    /// latency clock -- consistent with the offline `Segmentation` seed
+    /// `dur = (frames-1)/rate`.
+    fn current_audio_time(&self) -> f64 {
+        if self.total_pushed == 0 {
+            0.0
+        } else {
+            (self.total_pushed - 1) as f64 / self.rate
+        }
+    }
+
+    /// The derived STRUCTURAL latency bound in seconds (spec S1.8, the T4 spec correction):
+    /// front-end reach + NN window finalization + convolution half-width + the smoothing
+    /// holdback -- ALL config-derived (never a literal). The measured per-emission lag is
+    /// bounded by this plus a data-dependent AREA term (`tests/phase8_gate.rs`).
+    pub fn derived_latency_bound_s(&self) -> f64 {
+        self.feature_reach_s + self.nn_window_s + self.conv_delay_s + self.decision.holdback()
+    }
+
+    /// The feature-extraction reach component `(reach*shift_frames + half_window)/rate`.
+    pub fn feature_reach_s(&self) -> f64 {
+        self.feature_reach_s
+    }
+    /// The NN-window-finalization component `2*window_size_feature * spectrum_shift_sec`
+    /// (the full-window lookahead the overlap incurs before an output row finalizes).
+    pub fn nn_window_s(&self) -> f64 {
+        self.nn_window_s
+    }
+    /// The convolution half-width component `conv_half * time_step`.
+    pub fn conv_delay_s(&self) -> f64 {
+        self.conv_delay_s
+    }
+    /// The smoothing holdback component (`StreamDecision::holdback`).
+    pub fn holdback_s(&self) -> f64 {
+        self.decision.holdback()
+    }
+
+    /// The maximum per-emission lag observed so far (`0.0` if nothing has been emitted).
+    pub fn max_lag_s(&self) -> f64 {
+        if self.lag_count == 0 {
+            0.0
+        } else {
+            self.lag_max
+        }
+    }
+    /// The mean per-emission lag observed so far (`0.0` if nothing has been emitted).
+    pub fn mean_lag_s(&self) -> f64 {
+        if self.lag_count == 0 {
+            0.0
+        } else {
+            self.lag_sum / self.lag_count as f64
+        }
+    }
+    /// The number of emissions tracked so far.
+    pub fn emission_count(&self) -> usize {
+        self.lag_count
+    }
+
+    /// Test hook: the accumulated posterior history (the StreamOverlap output, one
+    /// `output_size`-wide row per posterior row, incl. the `NaN` uncovered rows) -- the
+    /// gate's bit-equivalence observable vs the offline `last_result_rows`.
+    #[cfg(feature = "test-support")]
+    pub fn posterior_history(&self) -> &[f32] {
+        &self.posterior_history
     }
 }
