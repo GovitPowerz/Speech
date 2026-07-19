@@ -57,6 +57,8 @@ use anyhow::{Result, bail};
 
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
+use crate::tasks::segmentation::{SegClass, Segmentation};
+use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
 
 use super::nn::{FastBlstm, FastMatrix, window_begin, window_end};
 use super::pipeline::FastPipeline;
@@ -578,5 +580,537 @@ impl StreamOverlap {
                 .drain(0..(keep_from - self.input_base) * self.input_cols);
             self.input_base = keep_from;
         }
+    }
+}
+
+// ===========================================================================
+// StreamDecision (Phase 8 Task 4): the incremental decision layer.
+// ===========================================================================
+
+/// One finalized streaming segment. `begin_s`/`end_s` are the SMOOTHED partition
+/// boundaries (absolute audio time, `time_offset` folded in, post-smoothing);
+/// `class` is the segment's type ([`SegClass::Speech`] or [`SegClass::Other`] -- the
+/// smoothed partition covers the whole timeline); `emitted_at_audio_s` is the
+/// posterior-row frontier time when the segment finalized (`received_rows * time_step
+/// + time_offset`), for the latency accounting T5 pins (lag = emitted_at - end_s).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmittedSegment {
+    pub begin_s: f64,
+    pub end_s: f64,
+    pub class: SegClass,
+    pub emitted_at_audio_s: f64,
+}
+
+/// The persistent hysteresis-with-area state machine -- the streaming twin of
+/// [`crate::tasks::segmenter::update_segmentation_raw`] (`segmenter.rs:290-415`),
+/// transcribed LOOP-STATE-for-LOOP-STATE and advanced one posterior value at a time.
+///
+/// The batch loop keeps `begin/end/begin_area/end_area/has_begun/has_ended` plus the
+/// running index `ii` and `results[ii-1]`; the only work is to persist all of them
+/// across calls. `advance` runs one iteration of the batch body (the INIT check for the
+/// first value, `:312-315`; the loop body for the rest, `:317-407`), returning a raw
+/// segment `(begin+off, end+off)` on the iteration that labels one. `flush_tail` is the
+/// tail force-emit (`:409-412`), where the legacy `dt * results.len()` end time uses
+/// `results.len()` == the total convolved-value count == `idx` at EOS.
+struct HystState {
+    t_r: f64,
+    a_r: f64,
+    t_f: f64,
+    a_f: f64,
+    off: f64,
+    dt: f64,
+    begin: f64,
+    end: f64,
+    begin_area: f64,
+    end_area: f64,
+    has_begun: bool,
+    has_ended: bool,
+    idx: usize, // number of values processed so far (== the batch loop's `ii`)
+    prev: f64,  // the previous value (the batch `results[ii-1]`)
+}
+
+impl HystState {
+    fn new(cfg: &SegmenterConfig, off: f64, dt: f64) -> HystState {
+        HystState {
+            t_r: cfg.rising,
+            a_r: cfg.area_rising,
+            t_f: cfg.falling,
+            a_f: cfg.area_falling,
+            off,
+            dt,
+            begin: -1.0,
+            end: -1.0,
+            begin_area: -1.0,
+            end_area: -1.0,
+            has_begun: false,
+            has_ended: false,
+            idx: 0,
+            prev: 0.0,
+        }
+    }
+
+    /// Advance one convolved posterior value. Returns the raw segment labeled on this
+    /// step, if any (at most one per value, exactly as the batch loop labels at most once
+    /// per `ii`). Direct transcription of `update_segmentation_raw`.
+    fn advance(&mut self, r: f64) -> Option<(f64, f64)> {
+        if self.idx == 0 {
+            // INIT (:312-315): begin/begin_area seed, WITHOUT has_begun; the ii>=1 body's
+            // rising branch then keys off `begin < 0` being false.
+            if r >= self.t_r {
+                self.begin = 0.0;
+                self.begin_area = 0.0;
+            }
+            self.prev = r;
+            self.idx = 1;
+            return None;
+        }
+
+        let ii = self.idx as f64;
+        let r_prev = self.prev;
+        let (t_r, a_r, t_f, a_f, dt) = (self.t_r, self.a_r, self.t_f, self.a_f, self.dt);
+        let mut out = None;
+
+        if !self.has_begun {
+            if self.begin < 0.0 {
+                if r >= t_r && r_prev < t_r {
+                    self.begin = dt * (ii - (r - t_r) / (r - r_prev));
+                    self.begin_area = (ii - self.begin / dt) * (r - t_r) / 2.0;
+                    if self.begin_area >= a_r {
+                        self.has_begun = true;
+                    }
+                }
+            } else if r >= t_r {
+                self.begin_area += (r + r_prev - t_r * 2.0) / 2.0;
+                if self.begin_area >= a_r {
+                    self.has_begun = true;
+                }
+            } else if r < t_r && r_prev >= t_r {
+                self.begin_area += (r_prev - t_r) * (t_r - r_prev) / (r - r_prev) / 2.0;
+                if self.begin_area >= a_r {
+                    self.has_begun = true;
+                } else {
+                    self.begin = -1.0;
+                    self.begin_area = -1.0;
+                    self.has_begun = false;
+                }
+            } else {
+                self.begin = -1.0;
+                self.begin_area = -1.0;
+                self.has_begun = false;
+            }
+        }
+
+        if self.has_begun {
+            if self.end < 0.0 {
+                if r <= t_f && r_prev > t_f {
+                    self.end = dt * (ii - (r - t_f) / (r - r_prev));
+                    self.end_area = (ii - self.end / dt) * (t_f - r) / 2.0;
+                    if self.end_area >= a_f {
+                        self.has_ended = true;
+                    }
+                }
+            } else if r <= t_f {
+                self.end_area += (2.0 * t_f - r - r_prev) / 2.0;
+                if self.end_area >= a_f {
+                    self.has_ended = true;
+                }
+            } else if r > t_f && r_prev <= t_f {
+                self.end_area += (t_f - r_prev) * (t_f - r_prev) / (r - r_prev) / 2.0;
+                if self.end_area >= a_f {
+                    self.has_ended = true;
+                } else {
+                    self.end = -1.0;
+                    self.end_area = -1.0;
+                    self.has_ended = false;
+                }
+            } else {
+                self.end = -1.0;
+                self.end_area = -1.0;
+                self.has_ended = false;
+            }
+
+            if self.has_ended {
+                if self.begin < self.end {
+                    out = Some((self.begin + self.off, self.end + self.off));
+                    self.begin = -1.0;
+                    self.begin_area = -1.0;
+                    self.has_begun = false;
+                    self.end = -1.0;
+                    self.end_area = -1.0;
+                    self.has_ended = false;
+
+                    // Re-run rising after label (:390-396) at the SAME ii.
+                    if r >= t_r && r_prev < t_r {
+                        self.begin = dt * (ii - (r - t_r) / (r - r_prev));
+                        self.begin_area = (ii - self.begin / dt) * (r - t_r) / 2.0;
+                        if self.begin_area >= a_r {
+                            self.has_begun = true;
+                        }
+                    }
+                } else {
+                    self.begin = -1.0;
+                    self.begin_area = -1.0;
+                    self.has_begun = false;
+                    self.end = -1.0;
+                    self.end_area = -1.0;
+                    self.has_ended = false;
+                }
+            }
+        }
+
+        self.prev = r;
+        self.idx += 1;
+        out
+    }
+
+    /// The tail force-emit (`:409-412`): if a segment is still open at EOS, close it at
+    /// `dt * results.len()` (== `dt * idx`, since every convolved value has been fed).
+    fn flush_tail(&mut self) -> Option<(f64, f64)> {
+        if self.has_begun {
+            let end = self.dt * self.idx as f64;
+            self.has_begun = false;
+            return Some((self.begin + self.off, end + self.off));
+        }
+        None
+    }
+}
+
+/// The streaming edge-truncating convolution -- the online twin of the in-place
+/// [`crate::audio::convolution_horiz_slice`] the offline
+/// [`crate::tasks::segmenter::results_to_segmentation`] runs before the hysteresis
+/// (`segmenter.rs:268-272`, gated `conv.len() > 1`).
+///
+/// The offline convolution snapshots the WHOLE result vector first, so each output
+/// depends ONLY on inputs (no output feedback) -- streamable. Output `ii` reads
+/// `[ii-half, ii+half]` edge-truncated at the TRUE stream ends (`audio.rs::conv_taps`):
+/// a left-edge output (`ii < half`) drops the missing left taps (known from the first
+/// value -- the true start), a right-edge output (`ii + half >= N`) drops the missing
+/// right taps (known only at [`flush`](ConvStream::flush), with the true `N`). An
+/// interior/left-edge output `ii` is FINAL once `ii + half < received` (then `ii+half <
+/// N` regardless of the still-unknown `N`, so the full `2*half`-tap window applies and is
+/// bit-identical to offline). Hence `received - half` values finalize mid-stream; the
+/// last `half` (the right-edge tail) finalize at `flush` with `N == received`.
+struct ConvStream {
+    coeffs: Vec<f64>, // empty iff no convolution (offline `conv.len() <= 1`)
+    half: usize,      // (coeffs.len()-1)/2, or 0 when no convolution
+    ring: Vec<f64>,   // absolute index `i` at ring[i - base]
+    base: usize,
+    received: usize,  // total posterior scalars received
+    finalized: usize, // convolved values finalized (fed to the hysteresis)
+}
+
+impl ConvStream {
+    fn new(conv_coeff: Option<&[f64]>) -> ConvStream {
+        // Offline gate: convolution applies iff coeffs present AND len > 1.
+        let coeffs = match conv_coeff {
+            Some(c) if c.len() > 1 => c.to_vec(),
+            _ => Vec::new(),
+        };
+        let half = if coeffs.is_empty() {
+            0
+        } else {
+            (coeffs.len() - 1) / 2
+        };
+        ConvStream {
+            coeffs,
+            half,
+            ring: Vec::new(),
+            base: 0,
+            received: 0,
+            finalized: 0,
+        }
+    }
+
+    fn push(&mut self, v: f64) {
+        self.ring.push(v);
+        self.received += 1;
+    }
+
+    /// The convolved value at absolute index `ii`, computed against total length `n`
+    /// exactly as `audio.rs::conv_taps` + `convolution_horiz_slice` do (same tap range,
+    /// same ascending accumulation order -> bit-identical to offline).
+    fn conv_at(&self, ii: usize, n: usize) -> f64 {
+        if self.coeffs.is_empty() {
+            return self.ring[ii - self.base];
+        }
+        let hw = self.half as isize;
+        let iis = ii as isize;
+        let len = n as isize;
+        let (begin1, begin2) = if iis < hw {
+            (-(hw - iis), (hw - iis) as usize)
+        } else {
+            (iis - hw, 0usize)
+        };
+        let end = if iis + hw < len {
+            (2 * hw) as usize
+        } else {
+            (len - 1 - begin1) as usize
+        };
+        let mut acc = 0.0;
+        for jj in begin2..=end {
+            let src = (begin1 + jj as isize) as usize;
+            acc += self.ring[src - self.base] * self.coeffs[jj];
+        }
+        acc
+    }
+
+    /// Finalize the newly-final (non-right-edge) convolved values `[finalized, received -
+    /// half)` and return them in order. Each is computed with the FULL window (its
+    /// `ii + half < received <= N`, so it is not a right-edge frame).
+    fn take_ready(&mut self) -> Vec<f64> {
+        let target = self.received.saturating_sub(self.half);
+        if target <= self.finalized {
+            return Vec::new();
+        }
+        let out: Vec<f64> = (self.finalized..target)
+            .map(|ii| self.conv_at(ii, self.received))
+            .collect();
+        self.finalized = target;
+        self.trim();
+        out
+    }
+
+    /// EOS: finalize the right-edge tail `[finalized, received)` with the TRUE total
+    /// `N == received` (the missing right taps truncate at the true stream end).
+    fn flush(&mut self) -> Vec<f64> {
+        let n = self.received;
+        if n <= self.finalized {
+            return Vec::new();
+        }
+        let out: Vec<f64> = (self.finalized..n).map(|ii| self.conv_at(ii, n)).collect();
+        self.finalized = n;
+        out
+    }
+
+    /// Drop ring elements no future finalize reads. Future output `ii >= finalized` reads
+    /// sources back to `ii - half >= finalized - half` (and the flush tail reads back to
+    /// `(received-half) - half`, the same floor once `finalized == received - half`).
+    fn trim(&mut self) {
+        let keep_from = self.finalized.saturating_sub(self.half);
+        if keep_from > self.base {
+            self.ring.drain(0..keep_from - self.base);
+            self.base = keep_from;
+        }
+    }
+}
+
+/// The incremental SAD decision layer (Phase 8 Task 4): the streaming twin of the offline
+/// [`crate::tasks::segmenter::results_to_segmentation`] + [`smooth_segmentation`] the fast
+/// driver hands off to (`fast/driver.rs:405-419`). Consumes the FINALIZED posterior rows
+/// [`StreamOverlap`] emits (f32, `k x 1` for the binary SAD net) and produces stable
+/// [`EmittedSegment`]s as they settle, plus the complete [`Segmentation`] at EOS.
+///
+/// PIPELINE. Each posterior scalar is widened f32 -> f64 (the exact `fast/driver.rs:405`
+/// seam), fed to the streaming [`ConvStream`] (the 19-tap edge-truncating convolution,
+/// finalizing with a `half`-value lookahead), then the finalized convolved values drive
+/// the persistent [`HystState`] (the latched hysteresis, boundaries never revised). Each
+/// raw segment the hysteresis labels is FINAL (causal + latched), appended to
+/// `raw_segments`.
+///
+/// RE-SMOOTH-AND-EMIT-STABLE-PREFIX. The 8-step [`smooth_segmentation`] is NOT streamable
+/// incrementally, but it is cheap and its output is a pure function of the raw-segment
+/// list + the End sentinel. On each new raw segment we re-run the SHARED `smooth_segmentation`
+/// on a fresh clone and emit the settled PREFIX -- segments whose end `< last_raw_boundary -
+/// HOLDBACK`. The final [`flush`](Self::flush) re-runs the SAME shared code on the complete
+/// raw list seeded at the true `audio_duration`, so it is BIT-IDENTICAL to the offline
+/// decision pipeline (same raw segments, same `label_segment` replay, same smoothing).
+///
+/// THE HOLDBACK (the design's one new invariant, spec S1.3 / R2). A smoothed segment can
+/// change only while later raw structure -- which lands at time `>= last_raw_boundary` --
+/// can still reach it through the smoothing. Each smoothing step moves/merges boundaries by
+/// at most its own threshold: [`Segmentation::add_padding`] extends a Speech segment left by
+/// `before` and right by `after`; [`Segmentation::suppress_short`] removes/merges a segment
+/// only across its own `<= threshold` span. A future Speech segment can therefore reach an
+/// earlier segment's END at most `pad_before + pad_after + suppress` to its left, and the
+/// two paddings compose on one segment (the brief's warned worst case) -- chains through
+/// EARLIER segments happen identically with or without the future segment (their gaps are
+/// past-known), so they do not extend the future segment's reach. HOLDBACK is the
+/// CONSERVATIVE sum of EVERY (clamped) smoothing threshold -- `sum(min_speech) +
+/// sum(min_silence) + sum(padding)` -- which dominates any single reach and any composition
+/// of them; it also keeps the mid-stream clone's End sentinel (placed `>= last_raw_boundary`)
+/// at least HOLDBACK to the right of the emitted region, so the tail special-casing never
+/// touches it. Param-driven at construction: a config with different padding moves the
+/// holdback. If it were ever too small, the prefix-consistency gate catches it as a
+/// retraction (R2); too large only adds latency.
+pub struct StreamDecision {
+    seg_cfg: SegmenterConfig,
+    class: SegClass, // SAD -> Speech (the offline driver's `SegClass::Speech`)
+    dt: f64,         // time_step
+    off: f64,        // time_offset
+    holdback: f64,   // derived from seg_cfg at construction
+
+    conv: ConvStream,
+    hyst: HystState,
+
+    /// Closed raw segments `(begin+off, end+off)`, append-only + final (the latched
+    /// hysteresis never revises them). The offline `update_segmentation`'s `label_segment`
+    /// replay list.
+    raw_segments: Vec<(f64, f64)>,
+    /// Count of smoothed-partition segments already emitted (a stable prefix index: the
+    /// settled prefix is byte-stable across re-smooths, so this index is consistent).
+    emitted_count: usize,
+    finished: bool,
+}
+
+impl StreamDecision {
+    /// Build from the driver config (the convolution kernel), the segmenter config (the
+    /// decision thresholds + the smoothing params the holdback derives from), and the
+    /// per-file `time_step`/`time_offset` the offline overlap branch computes
+    /// (`fast/driver.rs:346-347`).
+    ///
+    /// NOTE ON THE SIGNATURE: the Task-4 brief sketches `new(driver_cfg, seg_cfg,
+    /// time_step)`, but the hysteresis is defined against `time_offset` too (the offline
+    /// `update_segmentation`'s `off`), so it is a required argument here. The T5 session
+    /// computes both scalars exactly as the driver does and passes them.
+    pub fn new(
+        driver_cfg: DriverConfig,
+        seg_cfg: SegmenterConfig,
+        time_step: f64,
+        time_offset: f64,
+    ) -> StreamDecision {
+        let holdback = seg_cfg.min_speech.iter().sum::<f64>()
+            + seg_cfg.min_silence.iter().sum::<f64>()
+            + seg_cfg.padding.iter().sum::<f64>();
+        let conv = ConvStream::new(driver_cfg.conv_coeff.as_deref());
+        let hyst = HystState::new(&seg_cfg, time_offset, time_step);
+        StreamDecision {
+            seg_cfg,
+            class: SegClass::Speech,
+            dt: time_step,
+            off: time_offset,
+            holdback,
+            conv,
+            hyst,
+            raw_segments: Vec::new(),
+            emitted_count: 0,
+            finished: false,
+        }
+    }
+
+    /// The derived smoothing holdback in seconds (see the type docs). Exposed for the
+    /// latency accounting + the param-driven-derivation gate.
+    pub fn holdback(&self) -> f64 {
+        self.holdback
+    }
+
+    /// The closed raw-segment list `(begin+off, end+off)` accumulated so far (the offline
+    /// `update_segmentation_raw` output; the flush tail is included after `flush`).
+    pub fn raw_segments(&self) -> &[(f64, f64)] {
+        &self.raw_segments
+    }
+
+    /// The posterior-row frontier time: `received_rows * dt + off`. Used as the mid-stream
+    /// clone's End sentinel and as `emitted_at_audio_s`.
+    fn current_audio_time(&self) -> f64 {
+        self.conv.received as f64 * self.dt + self.off
+    }
+
+    /// Push a chunk of finalized posterior rows (`k x 1`, the binary SAD posterior column,
+    /// f32) and return the segments that FINALIZED this call. Buffers the (widened)
+    /// scalars through the streaming convolution, advances the latched hysteresis over the
+    /// newly-final convolved values, and -- when a new raw segment lands -- re-smooths and
+    /// emits the newly-settled prefix.
+    pub fn push_rows(&mut self, rows: &FastMatrix) -> Vec<EmittedSegment> {
+        for r in 0..rows.rows {
+            self.conv.push(rows.get(r, 0) as f64);
+        }
+        let ready = self.conv.take_ready();
+        let mut new_raw = false;
+        for v in ready {
+            if let Some(seg) = self.hyst.advance(v) {
+                self.raw_segments.push(seg);
+                new_raw = true;
+            }
+        }
+        if new_raw {
+            self.resmooth_and_emit()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// EOS: finalize the right-edge convolution tail + the open hysteresis segment, then
+    /// build the COMPLETE segmentation (seeded at the true `audio_duration`) via the SHARED
+    /// offline smoothing and emit every remaining settled segment. Returns the final
+    /// emissions + the complete [`Segmentation`] (BIT-IDENTICAL to the offline decision
+    /// pipeline on the same rows). Idempotent (a second call returns no emissions + the
+    /// same segmentation).
+    pub fn flush(&mut self, audio_duration: f64) -> (Vec<EmittedSegment>, Segmentation) {
+        if !self.finished {
+            self.finished = true;
+            for v in self.conv.flush() {
+                if let Some(seg) = self.hyst.advance(v) {
+                    self.raw_segments.push(seg);
+                }
+            }
+            if let Some(seg) = self.hyst.flush_tail() {
+                self.raw_segments.push(seg);
+            }
+        }
+
+        // The complete segmentation: seed at the TRUE audio_duration, replay every raw
+        // segment, smooth once -- identical to `results_to_segmentation` + smoothing.
+        let final_seg = self.build_smoothed(audio_duration);
+
+        // Emit every remaining segment (no holdback at EOS -- everything is final).
+        let now = self.current_audio_time();
+        let emitted = self.collect_prefix(&final_seg, f64::INFINITY, now);
+        (emitted, final_seg)
+    }
+
+    /// Build a smoothed [`Segmentation`] seeded at `audio_dur` from the current raw
+    /// segments -- the SHARED offline path (`Segmentation::new` -> `label_segment` replay
+    /// -> `smooth_segmentation`), run read-only on a clone.
+    fn build_smoothed(&self, audio_dur: f64) -> Segmentation {
+        let mut seg = Segmentation::new(audio_dur);
+        for &(b, e) in &self.raw_segments {
+            seg.label_segment(b, e, self.class);
+        }
+        smooth_segmentation(&mut seg, &self.seg_cfg);
+        seg
+    }
+
+    /// Re-smooth the current raw segments (clone seeded at the posterior frontier, `>=
+    /// last_raw_boundary`) and emit the newly-settled prefix -- segments whose end `<
+    /// last_raw_boundary - holdback`.
+    fn resmooth_and_emit(&mut self) -> Vec<EmittedSegment> {
+        let last_rb = match self.raw_segments.last() {
+            Some(&(_, e)) => e,
+            None => return Vec::new(),
+        };
+        let now = self.current_audio_time();
+        // The clone's End sentinel: past all processed structure (>= last_rb), so the
+        // emitted region stays >= holdback to its left and the tail special-casing cannot
+        // reach it.
+        let mid_dur = now.max(last_rb);
+        let seg = self.build_smoothed(mid_dur);
+        let threshold = last_rb - self.holdback;
+        self.collect_prefix(&seg, threshold, now)
+    }
+
+    /// Emit the contiguous prefix of `seg`'s partition (from `emitted_count`) whose
+    /// segments END strictly before `threshold`, stamping `emitted_at`. Advances
+    /// `emitted_count`. Segment `i` is `[segs[i].begin, segs[i+1].begin)` of type
+    /// `segs[i].ty`; its end is `segs[i+1].begin`.
+    fn collect_prefix(
+        &mut self,
+        seg: &Segmentation,
+        threshold: f64,
+        emitted_at: f64,
+    ) -> Vec<EmittedSegment> {
+        let segs = seg.segments();
+        let mut out = Vec::new();
+        let mut i = self.emitted_count;
+        while i + 1 < segs.len() && segs[i + 1].begin < threshold {
+            out.push(EmittedSegment {
+                begin_s: segs[i].begin,
+                end_s: segs[i + 1].begin,
+                class: segs[i].ty,
+                emitted_at_audio_s: emitted_at,
+            });
+            i += 1;
+        }
+        self.emitted_count = i;
+        out
     }
 }
