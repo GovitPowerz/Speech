@@ -250,6 +250,37 @@ Sanity cross-check (design spec's scouting numbers, RTF ~0.004 / ~0.6 MB per aud
 measured RTF ~0.0026-0.0027 (same order of magnitude, ~1.5x faster here) and ~0.48 MB/audio-s
 (57.6 MB / 120 s) -- consistent.
 
+### Task 8 -- exact-path mel-bank hoist (before/after, behaviorally-neutral)
+
+Task 8 (shared-code hygiene) removed one of the two per-channel `MelFilterBank::new`
+constructions on the exact algo-3 path. `build_input_sequence_parts` used to build the bank
+TWICE per channel with identical args -- once to query `nb_dct()`/`nb_filters()` for the LTSV
+width, once inside `assemble_from_periodogram` to apply it; the hoist builds it once (via the new
+`build_mel_bank`) and shares it through `assemble_with_bank`. `MelFilterBank::new` is pure
+arithmetic of `(cfg, s, rate)` (no shared/mutable state), so the collapse is byte-identical -- the
+full phase-1/2b feature goldens (`inputseq_*`, mel, spectral, LTSV) and the 4a/4b corpus goldens
+all stay byte-stable. The pitch-pass third construction (`tasks/sad.rs`, warped periodogram) is
+provably identical but intentionally left standalone (it never runs on this TDCwindow-0 fixture,
+and threading it out would change a public return type -- see the Task 8 report).
+
+Same 60 s stereo fixture + recipe as the CI-workhorse table above, `--path=exact`, 3 repeats x 2
+fresh processes per build (Apple M4 Pro, arm64, release/LTO). The first repeat of each fresh
+process is a cold-cache warm-up outlier; steady-state is the remaining five per build:
+
+| build | wall_s (run1: r1,r2,r3 / run2: r1,r2,r3) | steady-state best | steady-state median |
+|---|---|---|---|
+| before (baseline) | 0.285129\*, 0.262430, 0.265041 / 0.264634, 0.263967, 0.264996 | 0.2624 | 0.2650 |
+| after (hoist)     | 0.277200\*, 0.264986, 0.264126 / 0.265300, 0.267099, 0.265569 | 0.2641 | 0.2653 |
+
+(\* = first-repeat warm-up, excluded from steady-state.) `audio_s`=120 both builds; `maxrss_mb`
+~55-66 both (no measurable RSS change -- the bank is a few hundred floats). The before/after wall
+delta (~0.1-1.7 ms) sits BELOW the ~2-3 ms steady-state run-to-run spread (the warm-up outliers
+alone span ~8 ms): the two builds are statistically indistinguishable at this fixture, because
+bank construction is a negligible fraction of the BLSTM-forward-dominated ~0.26 s wall (~1500
+periodogram frames x fwd/bwd). The hoist's value is code hygiene + one fewer allocation per channel,
+NOT a measurable speedup here -- recorded honestly (measure-then-pin, no delta promised beyond what
+the instrument resolves).
+
 ### Corpus-gated (real LRE03/07 files, runtime sorted-first selection)
 
 Per the license bright line, the two files below are selected at RUNTIME as the

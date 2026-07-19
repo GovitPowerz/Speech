@@ -30,6 +30,16 @@ use crate::constants::random_uniform;
 pub struct Audio {
     pub sample_rate: u32,
     pub data: Array2<f64>,
+    /// The decoded+normalized signal held a SECOND time (memory cost: one extra
+    /// `channels x frames` f64 buffer alongside `data`). Its ONLY reader is
+    /// [`Audio::reset`] (`self.data = self.data_raw.clone()`), whose ONLY caller is the
+    /// multi-config bag loop (`engine::bag_of_processors`, legacy `:403 audio.reset()`):
+    /// when one decoded audio is processed through several configs in sequence, `reset`
+    /// restores `data` to the pre-effect signal so the next config re-applies its own
+    /// preemph/noise from a clean baseline. LIVE for real multi-config bags (even where
+    /// the committed single-config fixtures never trigger the reset), so it is KEPT --
+    /// Phase 7 Task 8 adjudicated it KEEP-DOCUMENTED, not removable: dropping it would
+    /// break that restore path.
     pub data_raw: Array2<f64>,
     /// `AudioStruct::_LangIndex` (AudioStruct.h:64), set from the owning
     /// `CorpusItem::getClassOfFile()` (AudioStruct.cpp:53 and its four other
