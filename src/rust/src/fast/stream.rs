@@ -394,7 +394,8 @@ impl StreamOverlap {
     /// whole-BLSTM `ssr` ([`FastBlstm::sub_sampling_ratio`]), and the posterior
     /// `output_size` ([`FastBlstm::output_size`]). `window_shift >= 1` and `ssr >= 1` are
     /// required (the driver's `get_blstm_param` floors the shift at 1 and bails the
-    /// non-overlap path); `window_size >= ssr` is assumed (every real overlap config).
+    /// non-overlap path); `window_size >= ssr` is required too (every real overlap config;
+    /// the partition proof above depends on it) -- all three are debug-asserted below.
     pub fn new(
         net_window: usize,
         net_shift: usize,
@@ -406,6 +407,11 @@ impl StreamOverlap {
             "window_shift must be >= 1 (else the window loop stalls)"
         );
         debug_assert!(ssr >= 1, "ssr must be >= 1");
+        // The type docs' partition proof (property 1, IDENTICAL WINDOW SET) assumes this.
+        debug_assert!(
+            net_window >= ssr,
+            "window_size must be >= ssr (a ws < ssr config silently diverges from offline windowing)"
+        );
         StreamOverlap {
             window_size: net_window,
             window_shift: net_shift,

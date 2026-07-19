@@ -4,18 +4,21 @@
 //!
 //! The oracle is the offline fast `FastBlstm::feed_forward_overlap` on the WHOLE
 //! (already-normalized) input sequence (spec S2: same kernels, only chunking differs).
-//! Four legs:
+//! Five legs:
 //! - `overlap_rows_bit_equal_offline`: streamed emissions concatenated == the offline
 //!   overlap output, BIT-IDENTICAL incl. the 0/0 = NaN uncovered rows, across dense-
-//!   overlap AND gappy (uncovered-row) configs and divisible/non-divisible lengths.
+//!   overlap AND gappy (uncovered-row) configs, divisible/non-divisible lengths, and
+//!   (T3-review addendum) the ssr=4 production decimation + the ssr=1 no-grid boundary.
 //! - `overlap_chunk_invariance`: the same input streamed at 1 / 13 / 100 / 7 (non-
 //!   divisor) row granularities -> all bit-identical (chunking changes timing, never
-//!   arithmetic).
+//!   arithmetic); same config sweep, incl. the ssr=4/ssr=1 addendum rows.
 //! - `finalization_bound_holds`: pushing 1 row at a time, every output row's emission
 //!   input-frame index <= its input frame (`row * ssr`) + 2*window_size + ssr slack
 //!   (the structural full-window lookahead), with a non-vacuity lag floor.
 //! - `eos_tail_matches_offline`: the `flush()` tail (the clamped/snapped partial
 //!   windows) is non-empty and matches the corresponding offline tail rows bit-for-bit.
+//! - `flush_is_idempotent`: a second/third `flush()` call returns empty and does not
+//!   re-emit or mutate state (the `finished` guard).
 //!
 //! The net + inputs are synthetic (arbitrary f32 -- the bit-equal contract is about the
 //! WINDOWING, not "nice" values; the type-1 normalization is a per-row affine the caller
@@ -29,11 +32,13 @@ use speech::fast::stream::StreamOverlap;
 // Synthetic net + inputs (mirroring phase7_fast_nn.rs' shapes).
 // ---------------------------------------------------------------------------
 
-/// LSTM [3,4,2] sub [2,1] (ssr 2), output [4,5,2] sub [1,1]; peepholes default true.
-fn synth_spec() -> NnetSpec {
+/// LSTM [3,4,2] sub `[ssr,1]` (whole-net ssr == `ssr`, since the 2nd LSTM layer and both
+/// output layers stay sub 1), output [4,5,2] sub [1,1]; peepholes default true. `ssr`
+/// selects the decimation-grid variant under test -- see [`CONFIGS`]' T3-review addendum.
+fn synth_spec(ssr: usize) -> NnetSpec {
     NnetSpec {
         lstm_neuron_nb: vec![3, 4, 2],
-        lstm_subsampling: vec![2, 1],
+        lstm_subsampling: vec![ssr, 1],
         output_neuron_nb: vec![4, 5, 2],
         output_subsampling: vec![1, 1],
         input_size: 3,
@@ -56,8 +61,8 @@ fn synth_flat(spec: &NnetSpec) -> Vec<f64> {
     flat
 }
 
-fn build_net() -> FastBlstm {
-    let spec = synth_spec();
+fn build_net(ssr: usize) -> FastBlstm {
+    let spec = synth_spec(ssr);
     FastBlstm::from_flat(&spec, &synth_flat(&spec)).unwrap()
 }
 
@@ -84,8 +89,9 @@ fn slice_rows(m: &FastMatrix, start: usize, end: usize) -> FastMatrix {
 
 /// The offline oracle: `feed_forward_overlap` on the WHOLE input into a zeroed output of
 /// `input.rows / ssr` rows (the driver's `real_vec_size`; mono channel 0 starts zeroed).
-fn offline_overlap(input: &FastMatrix, ws: usize, shift: usize) -> FastMatrix {
-    let mut net = build_net();
+/// `net_ssr` selects the synthetic net variant (see [`synth_spec`]).
+fn offline_overlap(input: &FastMatrix, ws: usize, shift: usize, net_ssr: usize) -> FastMatrix {
+    let mut net = build_net(net_ssr);
     let ssr = net.sub_sampling_ratio();
     let output_size = net.output_size();
     let mut output = FastMatrix::zeros(input.rows / ssr, output_size);
@@ -94,9 +100,16 @@ fn offline_overlap(input: &FastMatrix, ws: usize, shift: usize) -> FastMatrix {
 }
 
 /// Stream `input` through a fresh `StreamOverlap` in `chunk`-row pushes, concatenating
-/// every `push_rows` return plus the `flush` tail into one FastMatrix.
-fn stream_all(input: &FastMatrix, ws: usize, shift: usize, chunk: usize) -> FastMatrix {
-    let mut net = build_net();
+/// every `push_rows` return plus the `flush` tail into one FastMatrix. `net_ssr` selects
+/// the synthetic net variant (see [`synth_spec`]).
+fn stream_all(
+    input: &FastMatrix,
+    ws: usize,
+    shift: usize,
+    chunk: usize,
+    net_ssr: usize,
+) -> FastMatrix {
+    let mut net = build_net(net_ssr);
     let ssr = net.sub_sampling_ratio();
     let output_size = net.output_size();
     let mut overlap = StreamOverlap::new(ws, shift, ssr, output_size);
@@ -142,17 +155,28 @@ fn assert_bits_eq(got: &FastMatrix, want: &FastMatrix, label: &str) {
     }
 }
 
-/// The test config matrix: (window_size, window_shift, n_rows, input_cols). Covers
-/// dense overlap (gap-free) + gappy (shift >> window -> uncovered NaN rows), divisible
-/// and non-divisible lengths, and a wider input (the feed_forward crop gate).
-const CONFIGS: &[(usize, usize, usize, usize)] = &[
-    (6, 3, 50, 3),  // dense overlap, divisible
-    (6, 3, 51, 3),  // dense overlap, non-divisible
-    (2, 10, 50, 3), // gappy: trailing NaN (last window unclamped)
-    (2, 10, 51, 3), // gappy: clamped tail window covers the last row
-    (5, 2, 64, 3),  // heavy overlap
-    (6, 3, 50, 8),  // wider input -> feed_forward crop gate
-    (7, 4, 37, 3),  // odd sizes
+/// The test config matrix: (net_ssr, window_size, window_shift, n_rows, input_cols).
+/// `net_ssr` selects the synthetic net's whole-BLSTM decimation ratio ([`synth_spec`]).
+/// The original 7 rows (all ssr=2) cover dense overlap (gap-free) + gappy (shift >>
+/// window -> uncovered NaN rows), divisible and non-divisible lengths, and a wider input
+/// (the feed_forward crop gate).
+///
+/// T3-REVIEW ADDENDUM: those 7 rows only ever ran ssr=2, leaving BOTH the production
+/// decimation (ssr=4 -- `fast/stream.rs`'s `StreamOverlap` docs cite the real SAD gate
+/// config as `window 163, ssr 4`) and the ssr=1 no-grid boundary (every `jj` IS its own
+/// `obeg`; `window_begin`/`window_end`'s `/ssr` floor-div is a no-op) untested at the
+/// streaming-vs-offline bit-equality level. The last 2 rows close that gap, run through
+/// the SAME bit-equal + chunk-invariance legs as the rest of the sweep.
+const CONFIGS: &[(usize, usize, usize, usize, usize)] = &[
+    (2, 6, 3, 50, 3),  // dense overlap, divisible
+    (2, 6, 3, 51, 3),  // dense overlap, non-divisible
+    (2, 2, 10, 50, 3), // gappy: trailing NaN (last window unclamped)
+    (2, 2, 10, 51, 3), // gappy: clamped tail window covers the last row
+    (2, 5, 2, 64, 3),  // heavy overlap
+    (2, 6, 3, 50, 8),  // wider input -> feed_forward crop gate
+    (2, 7, 4, 37, 3),  // odd sizes
+    (4, 8, 4, 101, 3), // ssr=4: production decimation, dense overlap, non-divisible
+    (1, 4, 3, 53, 3),  // ssr=1: no-grid boundary, dense overlap, non-divisible
 ];
 
 // ---------------------------------------------------------------------------
@@ -161,18 +185,20 @@ const CONFIGS: &[(usize, usize, usize, usize)] = &[
 
 #[test]
 fn overlap_rows_bit_equal_offline() {
-    for &(ws, shift, n, cols) in CONFIGS {
+    for &(ssr, ws, shift, n, cols) in CONFIGS {
         let input = make_input(n, cols, 31, 17, 7);
-        let offline = offline_overlap(&input, ws, shift);
-        assert_eq!(offline.rows, n / 2, "sanity: offline rows == n/ssr");
+        let offline = offline_overlap(&input, ws, shift, ssr);
+        assert_eq!(offline.rows, n / ssr, "sanity: offline rows == n/ssr");
 
         // A few chunk granularities -- each must match offline bit-for-bit.
         for &chunk in &[1usize, 7, 13, n] {
-            let streamed = stream_all(&input, ws, shift, chunk.max(1));
+            let streamed = stream_all(&input, ws, shift, chunk.max(1), ssr);
             assert_bits_eq(
                 &streamed,
                 &offline,
-                &format!("bit-equal ws={ws} shift={shift} n={n} cols={cols} chunk={chunk}"),
+                &format!(
+                    "bit-equal ssr={ssr} ws={ws} shift={shift} n={n} cols={cols} chunk={chunk}"
+                ),
             );
         }
     }
@@ -180,7 +206,7 @@ fn overlap_rows_bit_equal_offline() {
     // Non-vacuity: at least one gappy config MUST contain a NaN row (else the 0/0 = NaN
     // leg of the contract is never exercised).
     let gappy = make_input(50, 3, 31, 17, 7);
-    let off = offline_overlap(&gappy, 2, 10);
+    let off = offline_overlap(&gappy, 2, 10, 2);
     assert!(
         off.data.iter().any(|v| v.is_nan()),
         "sanity: the gappy config must yield uncovered NaN rows"
@@ -193,13 +219,13 @@ fn overlap_rows_bit_equal_offline() {
 
 #[test]
 fn overlap_chunk_invariance() {
-    for &(ws, shift, n, cols) in CONFIGS {
+    for &(ssr, ws, shift, n, cols) in CONFIGS {
         let input = make_input(n, cols, 23, 41, 3);
-        let a = stream_all(&input, ws, shift, 1);
-        let b = stream_all(&input, ws, shift, 13);
-        let c = stream_all(&input, ws, shift, 100);
-        let d = stream_all(&input, ws, shift, 7);
-        let label = format!("chunk-invariance ws={ws} shift={shift} n={n} cols={cols}");
+        let a = stream_all(&input, ws, shift, 1, ssr);
+        let b = stream_all(&input, ws, shift, 13, ssr);
+        let c = stream_all(&input, ws, shift, 100, ssr);
+        let d = stream_all(&input, ws, shift, 7, ssr);
+        let label = format!("chunk-invariance ssr={ssr} ws={ws} shift={shift} n={n} cols={cols}");
         assert_bits_eq(&a, &b, &format!("{label} 1-vs-13"));
         assert_bits_eq(&a, &c, &format!("{label} 1-vs-100"));
         assert_bits_eq(&a, &d, &format!("{label} 1-vs-7"));
@@ -213,7 +239,7 @@ fn overlap_chunk_invariance() {
 #[test]
 fn finalization_bound_holds() {
     let (ws, shift, n) = (6usize, 3usize, 80usize);
-    let mut net = build_net();
+    let mut net = build_net(2);
     let ssr = net.sub_sampling_ratio();
     let output_size = net.output_size();
     let input = make_input(n, 3, 31, 17, 5);
@@ -271,9 +297,9 @@ fn eos_tail_matches_offline() {
     // partial-window clamp+snap path and emits a non-empty tail.
     let (ws, shift, n) = (6usize, 3usize, 51usize);
     let input = make_input(n, 3, 19, 29, 11);
-    let offline = offline_overlap(&input, ws, shift);
+    let offline = offline_overlap(&input, ws, shift, 2);
 
-    let mut net = build_net();
+    let mut net = build_net(2);
     let ssr = net.sub_sampling_ratio();
     let output_size = net.output_size();
     let mut overlap = StreamOverlap::new(ws, shift, ssr, output_size);
@@ -318,4 +344,41 @@ fn eos_tail_matches_offline() {
         data: all,
     };
     assert_bits_eq(&streamed, &offline, "eos-full-concat");
+}
+
+// ---------------------------------------------------------------------------
+// (5) flush() is idempotent: the `finished` guard.
+// ---------------------------------------------------------------------------
+
+/// A second (and third) `flush()` call must return empty (no re-emitted/duplicated rows)
+/// and leave the engine's externally-visible behavior unchanged -- the `finished` guard
+/// short-circuits every call after the first.
+#[test]
+fn flush_is_idempotent() {
+    let (ws, shift, n) = (6usize, 3usize, 51usize);
+    let input = make_input(n, 3, 13, 7, 2);
+    let mut net = build_net(2);
+    let ssr = net.sub_sampling_ratio();
+    let output_size = net.output_size();
+    let mut overlap = StreamOverlap::new(ws, shift, ssr, output_size);
+
+    overlap.push_rows(&input, &mut net);
+    let first = overlap.flush(&mut net);
+    assert!(
+        first.rows > 0,
+        "sanity: the first flush() must emit the tail"
+    );
+
+    let second = overlap.flush(&mut net);
+    assert_eq!(second.rows, 0, "a second flush() must return no rows");
+    assert_eq!(
+        second.cols, output_size,
+        "flush() col count stays output_size even when empty"
+    );
+
+    let third = overlap.flush(&mut net);
+    assert_eq!(
+        third.rows, 0,
+        "a third flush() must still return no rows (state unchanged, not re-armed)"
+    );
 }
