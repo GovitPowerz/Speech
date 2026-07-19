@@ -9,16 +9,29 @@
 //! frozen-stats mode a streaming session needs, since no whole-file lookahead
 //! exists online.
 //!
-//! Five tests: (1)/(2) `read_audio`-level RED->GREEN pins (inert when absent,
+//! Seven tests: (1)/(2) `read_audio`-level RED->GREEN pins (inert when absent,
 //! exact raw/gain when present); (3) a `BagOfProcessors`-level thread proof (the
 //! config key genuinely reaches the internal `read_audio` call in
-//! `segmentation_function`, not merely stored inertly); (4) the fast type-1
+//! `segmentation_function`, not merely stored inertly); (3b) T1-review hardening
+//! (finding 1): the SAME thread proof but DISCRIMINATING -- (3)'s staged gain
+//! equals the fixture's own self-norm adim by construction, so a regression that
+//! silently drops the gain (falling back to `normalize_channels`) would still
+//! pass it. Doubling the staged gain does NOT fix this (measured, not assumed:
+//! `tier2_spectral.config`'s `IgnoreFirstDCT true` + no LTSV/TDC makes the
+//! FastSpectral posterior provably invariant to ANY `Audio_fixed_gain` value --
+//! see the test's own comment for the two exact cancellations); (3b) instead
+//! observes a gain-sensitive digest of the internally-decoded audio via a new
+//! minimal test-support hook on `BagOfProcessors`; (4) the fast type-1
 //! external-normalization unit pin (the fast-tree companion change this task
 //! required: `external_normalize_f32` vs the exact `feed_forward_backward`
 //! type-1 branch on the same input + the same tuple-A normalize tail,
 //! measured-then-pinned); (5) the S1.7 causality-cost leg (offline-frozen vs
 //! offline-self-norm on the staged mono fixture, MEASURED and RECORDED, never
-//! gated -- this run also exercises the new type-1 fast path end to end).
+//! gated -- this run also exercises the new type-1 fast path end to end); (6)
+//! T1-review hardening (finding 2): commits the T1 report's adjudication claim
+//! in-tree -- the EXACT tree, run on the SAME staged frozen config, reproduces
+//! the fast path's boundary-row count and agrees on posteriors within a
+//! measured-then-pinned bound.
 
 mod common;
 
@@ -184,6 +197,118 @@ fn bag_threads_fixed_gain_to_internal_read_audio() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// (3b): T1-review hardening (finding 1) -- a DISCRIMINATING thread proof.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bag_threads_fixed_gain_discriminates_dropped_gain() {
+    // T1-review finding 1 (IMPORTANT): `bag_threads_fixed_gain_to_internal_
+    // read_audio` above cannot discriminate "fixed_gain threaded to
+    // read_audio" from "fixed_gain silently dropped, passed as None
+    // internally" -- `stage_frozen_tier2` bakes `Audio_fixed_gain` to EXACTLY
+    // this channel's own `normalize_channels` adim (spec R4), so
+    // `apply_fixed_gain(raw, g)` == `normalize_channels(raw)` bit-identically
+    // on that fixture: a regression that drops `self.fixed_gain` would STILL
+    // pass that test.
+    //
+    // A NAIVE fix -- stage `Audio_fixed_gain = 2*g` and compare the SAME
+    // downstream observable the existing test uses (FastSpectral posterior
+    // rows) -- was tried FIRST and DISPROVEN empirically, not assumed:
+    // `tier2_spectral.config` sets `BLSTM_IgnoreFirstDCT true`, and
+    // `BLSTM_LTSVwindow`/`BLSTM_TDCwindow` are both 0, so this net's ENTIRE
+    // 23-dim input is DCT-coefficient-and-derivative-based. That makes the
+    // posterior provably invariant to `Audio_fixed_gain`'s value, by TWO
+    // independent exact cancellations, not a numerical near-miss:
+    //   (a) a global per-file gain shifts every frame's log-mel value by the
+    //       SAME constant (log(power/gain^2) = log(power) - 2*log(gain)); a
+    //       DCT-II basis vector for coefficient index n>=1 sums to zero over a
+    //       full period, so it projects a spatially-uniform shift to exactly
+    //       zero -- every RETAINED static DCT coefficient (C1+, C0 dropped by
+    //       IgnoreFirstDCT) is gain-invariant.
+    //   (b) `features/mel.rs`'s "drop first column" step removes ONLY the
+    //       static C0 column; the delta/delta-delta blocks are computed from
+    //       the FULL product (C0 included) BEFORE that drop, so `delta[:,0]`
+    //       (the delta OF C0) survives into the feature vector. But a delta is
+    //       a difference ACROSS TIME, and the gain's shift is the SAME
+    //       constant at every frame, so it cancels there too (temporal, not
+    //       spatial, cancellation) -- delta-of-C0 is ALSO gain-invariant.
+    // MEASURED directly (an earlier revision of this test, posterior-based):
+    // a 2x-vs-1x staged gain produced a BIT-IDENTICAL FastSpectral posterior,
+    // 0.0 max-abs delta over all 1500 rows. This holds for ANY multiplier (the
+    // cancellation is algebraic, not value-specific), so no choice of staged
+    // gain can make the posterior discriminate `Audio_fixed_gain` threading
+    // for this config -- the reviewer's suggested observable does not work
+    // here, full stop; this is reported, not silently worked around.
+    //
+    // The fix observes a layer upstream of the DCT, where the gain IS
+    // load-bearing: `segmentation_function`'s internally-decoded
+    // `audio.data_raw`. That object is not otherwise exposed (the `Processor`
+    // dispatch surface is NN-output-shaped), so this test uses a new, minimal
+    // `#[cfg(feature = "test-support")]` capture on `BagOfProcessors`
+    // (`last_audio_abs_sum`/`last_audio_abs_sum_for_test`,
+    // `engine/bag_of_processors.rs`) -- the SAME established pattern as
+    // `last_confusion`/`last_result_rows` elsewhere in this codebase, zero
+    // production-reachable surface (see that field's doc for the full
+    // rationale). `sum(|x|)` is a cheap, trivially-ground-truthable digest
+    // that scales as `1/gain` for fixed raw samples.
+    let dir = tempfile::tempdir().unwrap();
+    let stage = common::stage_frozen_tier2_with_gain_multiplier(dir.path(), 2.0);
+    let frozen_text = std::fs::read_to_string(&stage.config_path).unwrap();
+
+    let mut map_a = speech::legacy_config::parse_legacy_config(&frozen_text);
+    let mut bag_a =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_a), image_mode()).unwrap();
+    assert_eq!(
+        bag_a.fixed_gain(),
+        Some(stage.fixed_gain),
+        "sanity: the bag must have read the doubled Audio_fixed_gain from the config"
+    );
+    let item = CorpusItem {
+        file_name: stage.wav_path.to_str().unwrap().to_string(),
+        ref_seg: String::new(),
+        language: "unk".into(),
+        dialect: "unk".into(),
+        class_index: 0,
+        file_id: 1,
+        weight: 1.0,
+    };
+    bag_a.segmentation_function(&item, image_mode()).unwrap();
+    let got_abs_sum = bag_a
+        .last_audio_abs_sum_for_test()
+        .expect("segmentation_function must have captured the internal read_audio result");
+
+    // Ground truth for BOTH hypotheses via independent, direct read_audio calls
+    // that bypass the bag entirely (same technique as the existing test's leg
+    // (b)), using the SAME offset/duration the staged config carries.
+    let audio_correct =
+        read_audio(&stage.wav_path, 0.0, 3600.0, 0, Some(stage.fixed_gain)).unwrap();
+    let want_correct: f64 = audio_correct.data_raw.iter().map(|v| v.abs()).sum();
+    let audio_dropped = read_audio(&stage.wav_path, 0.0, 3600.0, 0, None).unwrap();
+    let want_dropped: f64 = audio_dropped.data_raw.iter().map(|v| v.abs()).sum();
+
+    assert!(
+        (want_correct - want_dropped).abs() > 1.0,
+        "sanity: the two hypotheses must be numerically distinguishable \
+         (correct(2g)={want_correct} dropped(self-norm fallback)={want_dropped})"
+    );
+    assert_eq!(
+        got_abs_sum.to_bits(),
+        want_correct.to_bits(),
+        "segmentation_function's internally-read audio (abs_sum={got_abs_sum}) must \
+         match the CORRECT-threading expectation raw/(2g)={want_correct}: the \
+         doubled gain must reach the internal read_audio call bit-exactly"
+    );
+    assert_ne!(
+        got_abs_sum.to_bits(),
+        want_dropped.to_bits(),
+        "the internally-read audio (abs_sum={got_abs_sum}) must NOT coincide with \
+         the None/self-norm fallback expectation raw/g={want_dropped}: if it did, \
+         a regression dropping self.fixed_gain (passing None internally) would \
+         pass this test"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -404,5 +529,95 @@ fn causality_cost_frozen_vs_self_norm() {
     assert!(
         n_finite > 0 && max_abs.is_finite(),
         "the posterior comparison must cover finite rows"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (6): T1-review hardening (finding 2) -- commit the exact-vs-fast adjudication.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn frozen_norm_exact_matches_fast_adjudication_pin() {
+    // T1-review finding 2 (MINOR, fold in): the T1 report's load-bearing
+    // adjudication claim behind `causality_cost_frozen_vs_self_norm`'s MEASURED
+    // comment above -- that the EXACT tree, run under the SAME frozen stats
+    // (Audio_fixed_gain + BLSTM_InputNormalizationType 1) as the fast path,
+    // reproduces the SAME 2-row collapse (the untouched [Other@0, End@dur] seed
+    // hypothesis, zero detections) -- previously lived only in prose. This test
+    // commits that evidence in-tree: run the staged frozen config through the
+    // bag under Inference_Path exact AND fast (the ONLY config difference
+    // between the two legs), and assert both agree on the boundary-row count
+    // and on posteriors within a measured-then-pinned bound.
+    //
+    // MEASURED (independent reproduction, Apple Silicon dev box): posterior
+    // max-abs delta 1.279e-7, boundary rows IDENTICAL (exact=2, fast=2). Pin at
+    // 1e-5 -- the established f32 fast-vs-exact headroom convention (e.g.
+    // `phase7_parity_sad.rs`'s POST_ABS_PIN=5e-5, `fast_type1_normalization_
+    // matches_exact`'s REL_PIN=1e-5 above), ~78x headroom over measured. CI-safe:
+    // the staged fixture only, no corpus gate.
+    const POST_ABS_PIN: f64 = 1.0e-5;
+
+    let dir = tempfile::tempdir().unwrap();
+    let stage = common::stage_frozen_tier2(dir.path());
+    let frozen_text = std::fs::read_to_string(&stage.config_path).unwrap();
+
+    // fast leg: the staged config's own `Inference_Path fast` (unchanged).
+    let mut map_fast = speech::legacy_config::parse_legacy_config(&frozen_text);
+    let (post_fast, seg_fast) = run_fast(&mut map_fast, &stage.wav_path, Some(stage.fixed_gain));
+
+    // exact leg: the SAME frozen stats, only `Inference_Path` overridden -- the
+    // ONE variable that differs between the two legs.
+    let mut map_exact = speech::legacy_config::parse_legacy_config(&frozen_text);
+    map_exact.insert("Inference_Path".into(), "exact".into());
+    let mut bag_exact =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_exact), image_mode()).unwrap();
+    let mut audio_exact =
+        read_audio(&stage.wav_path, 0.0, 3600.0, 0, Some(stage.fixed_gain)).unwrap();
+    let dur = (audio_exact.data.ncols() as f64 - 1.0) / audio_exact.sample_rate as f64;
+    let mut seg_exact_vec = vec![Segmentation::new(dur)];
+    bag_exact
+        .run_get_segmentation(0, &mut audio_exact, &mut seg_exact_vec)
+        .unwrap();
+    let post_exact = match bag_exact.processor(0) {
+        Processor::Spectral(s) => s.last_result_rows()[0].clone(),
+        _ => panic!("expected Spectral (exact) for the frozen staged config"),
+    };
+    let seg_exact = seg_exact_vec.remove(0);
+
+    assert_eq!(
+        post_exact.len(),
+        post_fast.len(),
+        "posterior row length must match (same audio, same net shape, same frozen stats)"
+    );
+    let mut max_abs = 0.0_f64;
+    for (&e, &f) in post_exact.iter().zip(post_fast.iter()) {
+        if e.is_nan() || f.is_nan() {
+            assert_eq!(e.is_nan(), f.is_nan(), "NaN pattern mismatch exact vs fast");
+            continue;
+        }
+        max_abs = max_abs.max((e - f).abs());
+    }
+
+    let se = seg_exact.segments();
+    let sf = seg_fast.segments();
+    assert_eq!(
+        se.len(),
+        sf.len(),
+        "boundary-row COUNT must match between exact and fast under the SAME \
+         frozen stats -- this is the T1 adjudication claim: the 2-row collapse \
+         is the MODE for this pack/config pairing (the exact tree reproduces it \
+         independently), not a fast-path defect"
+    );
+
+    println!(
+        "MEASURE frozen_norm_exact_fast_adjudication: post_max_abs={max_abs:.3e} \
+         boundary_rows exact={} fast={}",
+        se.len(),
+        sf.len()
+    );
+    assert!(
+        max_abs < POST_ABS_PIN,
+        "exact-vs-fast posterior max_abs {max_abs} exceeds pin {POST_ABS_PIN} \
+         under the frozen-stats config"
     );
 }

@@ -258,15 +258,33 @@ pub struct FrozenStage {
 /// tail -- nothing fabricated, spec R4). Baking the MEASURED gain makes the frozen
 /// and self-norm paths coincide on the AUDIO scale for this fixture (both divide by
 /// the identical `adim`), so a later frozen-vs-self-norm comparison isolates the
-/// type-1-vs-self-norm INPUT NORMALIZATION delta alone (spec S1.7).
+/// type-1-vs-self-norm INPUT NORMALIZATION delta alone (spec S1.7). Thin wrapper
+/// over [`stage_frozen_tier2_with_gain_multiplier`] at `gain_multiplier == 1.0`.
 pub fn stage_frozen_tier2(dir: &Path) -> FrozenStage {
+    stage_frozen_tier2_with_gain_multiplier(dir, 1.0)
+}
+
+/// T1-review hardening (`phase8_frozen_norm.rs`
+/// `bag_threads_fixed_gain_discriminates_dropped_gain`): like [`stage_frozen_tier2`],
+/// but scales the measured self-norm gain by `gain_multiplier` before baking it
+/// into `Audio_fixed_gain`.
+///
+/// At `gain_multiplier == 1.0` the staged gain equals the channel's OWN
+/// `normalize_channels` adim exactly, which is what the S1.7 frozen-vs-self-norm
+/// causality comparison wants -- but it also means `apply_fixed_gain(raw, g)` and
+/// `normalize_channels(raw)` coincide BIT-IDENTICALLY on this fixture, so a
+/// config-threading proof built only on that case cannot tell "fixed_gain reached
+/// `read_audio`" apart from "fixed_gain silently dropped, fell back to
+/// `normalize_channels`": both produce raw/adim. `gain_multiplier != 1.0` breaks
+/// that coincidence on purpose so a dropped gain becomes observable.
+pub fn stage_frozen_tier2_with_gain_multiplier(dir: &Path, gain_multiplier: f64) -> FrozenStage {
     let (sample_rate, channels, samples) = read_wav_pcm16(&fixture_phase4d("prcts_excerpt.wav"));
     assert_eq!(
         channels, 2,
         "prcts_excerpt.wav must be stereo (mono-extraction assumption)"
     );
     let chan0: Vec<i16> = samples.iter().step_by(2).copied().collect();
-    let fixed_gain = measure_fixed_gain(&chan0);
+    let fixed_gain = measure_fixed_gain(&chan0) * gain_multiplier;
 
     let wav_path = dir.join("prcts_excerpt_mono.wav");
     write_wav_pcm16_mono(&wav_path, sample_rate, &chan0);

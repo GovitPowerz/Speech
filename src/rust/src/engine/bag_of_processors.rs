@@ -303,6 +303,30 @@ pub struct BagOfProcessors {
     /// [`Self::print_confusion_matrix`]). Cleared at each `save_and_update`.
     #[cfg(feature = "test-support")]
     last_confusion: Vec<(f64, Array2<f64>)>,
+    /// T1-review hardening (Phase 8 Task 1, finding 1; no legacy counterpart):
+    /// sum-of-`|x|` over `data_raw` from the LAST [`Self::segmentation_function`]
+    /// internal [`read_audio`] call. `segmentation_function`'s dispatch surface
+    /// (the `Processor` enum) is NN-output-shaped, not audio-shaped, so the
+    /// internally-decoded audio is otherwise unobservable from outside the
+    /// function. This exists because the posterior/segmentation observable
+    /// (`Processor::FastSpectral`/`Spectral::last_result_rows`) turns out to be
+    /// PROVABLY INVARIANT to `Audio_fixed_gain`'s value for a DCT-based config
+    /// with `IgnoreFirstDCT true` (e.g. `tier2_spectral.config`): a global
+    /// per-file amplitude gain shifts every frame's log-mel value by the SAME
+    /// constant, which (a) a DCT-II basis vector for coefficient index >= 1
+    /// projects to exactly zero (the retained AC coefficients), and (b) a
+    /// temporal delta/delta-delta cancels exactly too (differencing removes a
+    /// time-constant offset, including on the delta OF the dropped DC/C0 term,
+    /// which is not itself dropped from the delta block -- only the static C0
+    /// column is). MEASURED (`tests/phase8_frozen_norm.rs`, an earlier version
+    /// of `bag_threads_fixed_gain_discriminates_dropped_gain`): a 2x-vs-1x
+    /// staged gain produced a BIT-IDENTICAL FastSpectral posterior, 0.0
+    /// max-abs delta over all 1500 rows -- not a near-miss, the exact
+    /// algebraic cancellation above. `sum(|x|)` is a cheap, trivially-verified,
+    /// provably gain-SENSITIVE stand-in (scales as `1/gain` for fixed raw
+    /// samples) captured at the one place `Audio_fixed_gain` IS load-bearing.
+    #[cfg(feature = "test-support")]
+    last_audio_abs_sum: Option<f64>,
 }
 
 impl BagOfProcessors {
@@ -498,6 +522,8 @@ impl BagOfProcessors {
             exclude_nontrans,
             #[cfg(feature = "test-support")]
             last_confusion: Vec::new(),
+            #[cfg(feature = "test-support")]
+            last_audio_abs_sum: None,
         })
     }
 
@@ -899,6 +925,14 @@ impl BagOfProcessors {
         &self.last_confusion
     }
 
+    /// Test-observation hook (Phase 8 Task 1, T1-review hardening finding 1, no
+    /// legacy counterpart): see [`Self::last_audio_abs_sum`]'s field doc for why
+    /// this exists.
+    #[cfg(feature = "test-support")]
+    pub fn last_audio_abs_sum_for_test(&self) -> Option<f64> {
+        self.last_audio_abs_sum
+    }
+
     /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
     /// column-sum/mean aggregation over the file x channel result rows, cost/
     /// badClassif/costLID/badLIDClassif derivation, WER percent scaling, the
@@ -1098,6 +1132,12 @@ impl BagOfProcessors {
             self.file_type,
             self.fixed_gain,
         )?;
+        // T1-review hardening (finding 1): capture a gain-sensitive digest of the
+        // internal read for `last_audio_abs_sum_for_test` -- see that field's doc.
+        #[cfg(feature = "test-support")]
+        {
+            self.last_audio_abs_sum = Some(audio.data_raw.iter().map(|v| v.abs()).sum());
+        }
         // legacy: AudioStruct ctor sets _LangIndex/_Weight from the CorpusItem
         // (AudioStruct.cpp:53,60) -- see apply_corpus_item's doc for the
         // placement deviation.
