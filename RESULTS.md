@@ -304,3 +304,44 @@ twins for, on shapes read off `tier2_spectral.config` itself: `matmul_seq_92x96`
 periodogram through a `BLSTM_nb_bins 20` log-mel filterbank). Task 1 only wires the harness +
 smoke-tests it (`cargo bench -- --test`); no timing numbers are pinned here yet -- that lands
 when Task 2+'s fast twins need a same-shape comparison baseline.
+
+### Metric parity: fast vs exact on the phase-6 subset checkpoints (corpus-gated)
+
+`tests/pyo3/test_phase7_parity.py` (Task 6) lifts the Rust CI parity legs
+(`phase7_parity_{sad,lid}.rs`, which pin boundary/argmax equality on committed fixtures) onto REAL
+corpus data at the METRIC level: each phase-6 subset checkpoint (trained from scratch on the EXACT
+f64 path via the exact `test_phase6_gates.py` recipe) is scored on its own disjoint held-out slice
+under BOTH `Inference_Path` values, and the per-file DECISIONS + the reported metrics are compared.
+The prediction from the CI legs -- identical decisions => identical metrics => EXACTLY 0.0 metric
+delta -- holds on all three arms (measured 2026-07-19, Apple Silicon dev box, seed 0):
+
+| arm | held-out files | per-file decision agreement | metric delta (fast - exact) | score-value max_abs |
+|---|---|---|---|---|
+| SAD (algo-3 spectral) | 24 | VRCTS boundaries identical (count+types+times, max_dt 0.0 s) | DCF 0.0 at every collar (0/0.25/0.5/1/2 s) | n/a (boundaries) |
+| LID features (Twin M7, cep) | 48 | argmax identical, 0 flips | lid_error 0.0, cavg 0.0 | 3.5e-10 |
+| LID phonotactic (Twin M7, phSeq) | 45 | argmax identical, 0 flips | lid_error 0.0, cavg 0.0 | 1.4e-10 |
+
+`lid_error`/`cavg` are argmax-only functions (softmax is monotone), so identical per-file argmax
+forces a bit-identical metric -- the 0.0 deltas are not a tolerance, they are float equality. The
+SAD boundaries come from the SHARED f64 decision layer both paths hand off to, so identical
+posteriors-to-the-decision => byte-identical VRCTS hyps => DCF 0.0. The `.scr` score VALUES still
+carry the f32 divergence (~1e-10 after the softmax normalization compresses it; the raw pre-softmax
+divergence is the ~1e-6 the Rust legs measured), reported as a diagnostic -- it is the DECISIONS
+that hold, not the last bit of the score. Any future flip fails the test (the R1 drift detector);
+adjudication (file count + delta distribution) is not silently absorbed.
+
+WEIGHT-INJECTION NOTE (load-bearing for the test): the fast drivers load weights ONLY at
+construction (`load_weights_file`, from `BLSTM_weightsFile`/`BLSTM_LID_weightsFile`);
+`BagOfProcessors::set_weights` is a SILENT NO-OP for `Processor::FastSpectral`/`FastTwinLid`
+(`bag_of_processors.rs:583`). So the parity test points BOTH configs' weight keys at the trained
+checkpoint (the fast path's only injection mechanism, identical for both paths) rather than relying
+on the seam's `set_weights` -- otherwise the fast path would silently score the config's SEED pack
+while exact scores the injected trained pack, a 100%-divergence artefact (observed and diagnosed
+during Task 6, NOT a real parity failure). See the concerns in `.superpowers/sdd/task-6-report.md`.
+
+Runtime: warm-cache (checkpoints present) scoring is seconds -- exact 1.7-5.0 s, fast 0.6-1.4 s per
+arm (the fast path is consistently ~2.5-3.5x faster to score, the RTF win these numbers exist to
+prove); the whole 3-arm file re-runs in ~12 s warm. Cold-cache training (once per arm, EXACT path)
+dominates at ~60 s (SAD) / ~180 s (phSeq) / ~276 s (cep). Checkpoints cache under the gitignored
+`data/phase7_parity_cache/` (holds corpus-path listings -- never committed); `run_baseline` at a
+fixed seed is deterministic, so a warm cache is bit-identical to a fresh run.

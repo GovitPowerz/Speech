@@ -51,3 +51,6 @@ output/*
 # Phase 6: local corpora + scoring toolkits (never committed - gigabytes of licensed LDC audio)
 data/LRE03-LRE07/
 data/Scoring_LRE15/
+
+# Phase 7: the metric-parity tier's checkpoint cache (holds corpus-path listings - never committed)
+data/phase7_parity_cache/
