@@ -314,6 +314,16 @@ selection, no filename/path recorded). 3 independent `--repeat=1` processes per 
 mean and [min-max] range reported; hardware: Apple M4 Pro (arm64), macOS 26.5.2, `cargo build
 --release` (LTO on).
 
+Scope note: every `exact` row runs through `nn/blstm.rs::feed_forward_backward` with
+`*_BackPropagationActivated false` (forward-only, no gradient computed) -- but the underlying
+`Network` container retains its per-layer `layers_output` activation cache UNCONDITIONALLY
+during the forward drive itself (`network.rs`, populated inside `drive`, not gated on whether a
+later `feed_backward` call happens), so the exact path's measured memory here already includes
+that retained-cache cost; it is not a stripped-down "pure inference, no backward machinery"
+build. This is an inference-vs-inference comparison exactly AS CONFIGURED (the same way both
+paths are actually invoked elsewhere in this repo -- Image mode, backprop off), not a claim that
+the exact path has no backward-shaped allocations at all.
+
 | leg | audio_s | path | wall_s (mean [range]) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
 | SAD 60 s fixture (stereo) | 120.00 | exact | 0.2638 [0.2588-0.2693] | 0.002198 | 55.641 | 0.4637 | baseline |
