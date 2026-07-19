@@ -146,9 +146,9 @@ fn apply_override(map: &mut IndexMap<String, String>, arg: &str) -> Result<()> {
 /// grammar `parse_cli`/`Mode::from_flag` handle above; `main.rs` dispatches to
 /// this parser on the literal `bench` first argument, before `parse_cli` ever
 /// runs. `path` is the raw `--path` string, unvalidated here -- `bench::
-/// BenchPath::parse` owns the `exact`-only contract so this module stays
-/// bench-semantics-free (pure CLI token shape only, matching `parse_cli`'s own
-/// scope).
+/// BenchPath::parse` owns the `exact`/`fast` contract (Task 7 widened it from
+/// `exact`-only) so this module stays bench-semantics-free (pure CLI token
+/// shape only, matching `parse_cli`'s own scope).
 #[derive(Debug, Clone)]
 pub struct BenchInvocation {
     pub config: String,
@@ -156,7 +156,7 @@ pub struct BenchInvocation {
     pub path: String,
 }
 
-/// Parse `speech bench [--repeat=N] [--path=exact] <config>` (the `bench`
+/// Parse `speech bench [--repeat=N] [--path=exact|fast] <config>` (the `bench`
 /// literal itself already consumed by the caller). `--repeat` defaults to 1,
 /// `--path` defaults to `"exact"`; exactly one non-flag argument (the config
 /// path) is required.

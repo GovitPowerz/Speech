@@ -964,8 +964,14 @@ fn copy_view_into(in_data: &[f32], rows: usize, cols: usize, stride: usize, out:
 /// I input cols; `cols < I` -> top `cols` weight rows). `in_data` is row-major with
 /// `in_stride`; `w` is column-major `w_rows x w_cols`; `dst` is a contiguous row-major
 /// `t x w_cols` slice. This is the mandated faer matmul site.
+///
+/// `pub` (Phase 7 Task 7): `benches/kernels.rs`'s `faer_project_92x96` calls this
+/// EXACT function (not a bench-local reimplementation) at the `matmul_seq_92x96`
+/// shape, so the criterion twin measures the real kernel every LSTM gate/dense
+/// projection in this module actually dispatches through, mirroring how
+/// `nn/layers.rs::matmul_seq` was widened `pub` in Task 1 for the same reason.
 #[allow(clippy::too_many_arguments)]
-fn faer_project(
+pub fn faer_project(
     in_data: &[f32],
     t: usize,
     in_cols: usize,

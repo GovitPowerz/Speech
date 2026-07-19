@@ -1,18 +1,31 @@
 //! `speech bench`: end-to-end wall-clock / real-time-factor / peak-RSS harness
-//! over the compute path selected by `--path` (only `exact` until Task 4 wires
-//! `fast`). Port-only tooling (the `--convert-config` precedent, `main.rs`) --
-//! no legacy source. This is the Phase 7 "measure-then-pin" instrument: Task 1
-//! establishes the exact-path baseline every later fast-path task is compared
-//! against (design spec, Global Constraints: "every tolerance and budget is
-//! MEASURED first, pinned with headroom").
+//! over the compute path selected by `--path` (`exact` or, since Task 7,
+//! `fast` -- the f32/SIMD counterpart Tasks 2-5 landed). Port-only tooling (the
+//! `--convert-config` precedent, `main.rs`) -- no legacy source. This is the
+//! Phase 7 "measure-then-pin" instrument: Task 1 established the exact-path
+//! baseline; Task 7 wires `fast` in and measures the exact-vs-fast matrix
+//! every pinned budget in `RESULTS.md` is derived from (design spec, Global
+//! Constraints: "every tolerance and budget is MEASURED first, pinned with
+//! headroom").
 //!
-//! `run_bench` performs NO config mutation -- it runs exactly what the given
-//! config says, once per `repeat`, via the `-i` (Image) mode `CorpusProcessor`
-//! path. A caller that wants a single-pass, unscored, forward-only measurement
-//! (the Task 1 baseline recipe) gets that by STAGING the config accordingly
-//! (`Neural_Networks_BackPropagation_Epochs 0`, no reference in the listing,
-//! `*_BackPropagationActivated false`) -- see `tests/phase7_bench.rs` and
-//! `RESULTS.md`'s "Phase 7 -- performance" section for the staged recipe.
+//! `run_bench` performs NO config mutation EXCEPT ONE deliberate key: it
+//! overlays `Inference_Path` onto a cloned copy of the loaded map, set to
+//! `path.as_str()`, before constructing the `CorpusProcessor` -- every other
+//! key runs exactly as the caller's config says. This is the entire point of
+//! `--path`: ONE config, comparable exact-vs-fast, without hand-authoring two
+//! near-duplicate files that could drift apart. `BenchRun::path` therefore
+//! always reflects what actually ran, not merely what the config happened to
+//! say on disk. A caller that wants a single-pass, unscored, forward-only
+//! measurement (the Task 1 baseline recipe) still gets that by STAGING the
+//! rest of the config accordingly (`Neural_Networks_BackPropagation_Epochs
+//! 0`, no reference in the listing, `*_BackPropagationActivated false`) --
+//! see `tests/phase7_bench.rs` and `RESULTS.md`'s "Phase 7 -- performance"
+//! section for the staged recipe. `fast` additionally requires the config to
+//! meet the fast drivers' own construction-time contract (algo 3 spectral SAD
+//! or algo 6 Mode-7 LID Twin, `InputNormalizationType -1`/`0` as appropriate,
+//! no pitch pass, ...; see `engine/bag_of_processors.rs` and `fast/driver.rs`)
+//! -- an incompatible config bails loudly at `CorpusProcessor::new`, same as
+//! any other fast-path construction error.
 
 use std::path::Path;
 use std::time::Instant;
@@ -25,26 +38,32 @@ use crate::engine::bag_of_processors::{get_f64_default, get_i32_default};
 use crate::engine::corpus::Corpus;
 use crate::engine::corpus_processor::CorpusProcessor;
 
-/// Compute path selector. Only `Exact` exists until Task 4 wires the fast
-/// (f32/SIMD) twin path alongside it.
+/// Compute path selector -- `Exact` (the byte-untouched f64 tree) or `Fast`
+/// (Phase 7's f32/faer/realfft counterpart, Tasks 2-5). The string form
+/// (`as_str`) is exactly the `Inference_Path` config value `run_bench`
+/// overlays, so `BenchPath` and the engine's own dispatch key can never drift
+/// apart (one literal pair, `"exact"`/`"fast"`, used on both sides).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchPath {
     Exact,
+    Fast,
 }
 
 impl BenchPath {
     /// Parse a `--path` value. Unknown values are a usage error (only `exact`
-    /// is accepted at all today).
+    /// and `fast` are accepted).
     pub fn parse(s: &str) -> Result<BenchPath> {
         match s {
             "exact" => Ok(BenchPath::Exact),
-            other => bail!("unknown --path value '{other}' (only 'exact' is supported)"),
+            "fast" => Ok(BenchPath::Fast),
+            other => bail!("unknown --path value '{other}' (expected 'exact' or 'fast')"),
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             BenchPath::Exact => "exact",
+            BenchPath::Fast => "fast",
         }
     }
 }
@@ -136,12 +155,20 @@ fn maxrss_mb() -> f64 {
 /// decode/feature-extraction/forward-pass work inside `run()` is 100%
 /// covered. One [`BenchRun`] per (config, repeat) pair, in nested `configs` x
 /// `repeat` order. `repeat == 0` is treated as `1` (at least one measurement).
+///
+/// `Inference_Path` is overlaid onto the loaded map to `path.as_str()` ONCE
+/// per config, before `corpus_audio_seconds`/the repeat loop (see the module
+/// doc's "ONE deliberate key" note) -- `corpus_audio_seconds` itself never
+/// dispatches through the fast/exact processors, so the overlay's ordering
+/// relative to it is a don't-care; it is placed first only to compute the
+/// duration off the SAME map the timed runs use.
 pub fn run_bench(configs: &[String], repeat: usize, path: BenchPath) -> Result<BenchReport> {
     let repeat = repeat.max(1);
     let mut runs = Vec::with_capacity(configs.len() * repeat);
 
     for config_path in configs {
-        let map = load_config(config_path)?;
+        let mut map = load_config(config_path)?;
+        map.insert("Inference_Path".to_string(), path.as_str().to_string());
         let (audio_s, files) = corpus_audio_seconds(&map)?;
 
         for _ in 0..repeat {

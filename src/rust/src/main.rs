@@ -35,16 +35,17 @@ fn main() {
         return;
     }
 
-    // Port-only tooling (Phase 7 Task 1), NOT a legacy CLI surface: the
-    // wall-clock/RTF/peak-RSS bench harness. `speech bench [--repeat=N]
-    // [--path=exact] <config>`. Handled before `parse_cli` (own arg grammar,
-    // not a legacy mode flag), same precedent as `--convert-config` above.
+    // Port-only tooling (Phase 7 Task 1, `fast` wired in Task 7), NOT a legacy
+    // CLI surface: the wall-clock/RTF/peak-RSS bench harness. `speech bench
+    // [--repeat=N] [--path=exact|fast] <config>`. Handled before `parse_cli`
+    // (own arg grammar, not a legacy mode flag), same precedent as
+    // `--convert-config` above.
     if args.len() >= 2 && args[1] == "bench" {
         let invocation = match speech::cli::parse_bench_args(&args[2..]) {
             Ok(inv) => inv,
             Err(e) => {
                 eprintln!("Error: {e}\n");
-                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact] config_file");
+                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact|fast] config_file");
                 std::process::exit(2);
             }
         };
@@ -52,7 +53,7 @@ fn main() {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Error: {e}\n");
-                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact] config_file");
+                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact|fast] config_file");
                 std::process::exit(2);
             }
         };

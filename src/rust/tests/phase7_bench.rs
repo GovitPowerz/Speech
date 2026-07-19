@@ -1,4 +1,9 @@
-//! Phase 7 Task 1: the `speech bench` end-to-end harness.
+//! Phase 7 Task 1: the `speech bench` end-to-end harness. Task 7 wires
+//! `--path=fast` in (RED: `bench_rejects_unknown_path` used to spawn
+//! `--path=fast` and assert rejection -- it now spawns a genuinely-unknown
+//! value, and the flipped acceptance case moves to `bench_path_fast_runs`)
+//! plus the CI budget smoke (`bench_fast_not_slower_than_exact_ci_smoke`,
+//! `fast wall <= exact wall * 1.5`, spec R5 wide headroom).
 //!
 //! Port-only tooling (no legacy source) -- spawns the ACTUAL compiled `speech`
 //! binary (`CARGO_BIN_EXE_speech`), the same idiom `phase4a_cli.rs::
@@ -7,7 +12,11 @@
 //! (`phase0/NNweights_config1.bin`), and `phase4a/tier2_spectral.config` with
 //! a last-wins override tail (mirroring the fixture's own "Phase 4a Task 9"
 //! tail) pointing it at the staged files and forcing a single unscored
-//! forward pass.
+//! forward pass. This SAME staged config is fast-path-compatible as-is (algo
+//! 3, `InputNormalizationType -1`, no pitch pass -- the identical config the
+//! Task 4 CI parity leg uses), so no separate fast staging recipe is needed;
+//! `speech bench --path=fast` on it dispatches to `FastSpectralSegmenter` via
+//! the `Inference_Path` overlay `bench::run_bench` now applies (Task 7).
 
 mod common;
 
@@ -85,6 +94,37 @@ fn parse_bench_line(line: &str) -> HashMap<&str, &str> {
     out
 }
 
+/// Spawn `speech bench --repeat=1 --path=<path> <cfg_name>` in `dir`, assert a
+/// clean exit + exactly one BENCH line, and return its parsed fields (owned,
+/// so the caller isn't tied to the `Output`'s borrow).
+fn run_bench_cli(dir: &Path, cfg_name: &str, path: &str) -> HashMap<String, String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_speech"))
+        .current_dir(dir)
+        .args(["bench", "--repeat=1", &format!("--path={path}"), cfg_name])
+        .output()
+        .expect("failed to run speech binary");
+
+    assert!(
+        output.status.success(),
+        "speech bench --path={path} exited non-zero: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let bench_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("BENCH ")).collect();
+    assert_eq!(
+        bench_lines.len(),
+        1,
+        "expected exactly one BENCH line (--repeat=1), got:\n{stdout}"
+    );
+    parse_bench_line(bench_lines[0])
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
 #[test]
 fn bench_line_parses() {
     let dir = tempfile::tempdir().unwrap();
@@ -146,19 +186,24 @@ fn bench_line_parses() {
 
 #[test]
 fn bench_rejects_unknown_path() {
+    // Phase 7 Task 7 RED->flip: `--path=fast` used to be the rejected value
+    // (fast wasn't wired until Task 4/7); it now runs cleanly (see
+    // `bench_path_fast_runs` below). This test keeps covering
+    // `BenchPath::parse`'s genuine-usage-error branch with a value that is
+    // NEVER going to be valid.
     let dir = tempfile::tempdir().unwrap();
     let cfg_path = stage_bench_config(dir.path());
     let cfg_name = cfg_path.file_name().unwrap().to_str().unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_speech"))
         .current_dir(dir.path())
-        .args(["bench", "--path=fast", cfg_name])
+        .args(["bench", "--path=turbo", cfg_name])
         .output()
         .expect("failed to run speech binary");
 
     assert!(
         !output.status.success(),
-        "speech bench --path=fast must exit non-zero: 'fast' is not wired until Task 4"
+        "speech bench --path=turbo must exit non-zero: only 'exact'/'fast' are supported"
     );
     assert!(
         String::from_utf8_lossy(&output.stderr)
@@ -166,5 +211,81 @@ fn bench_rejects_unknown_path() {
             .contains("path"),
         "stderr should mention the bad --path value: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bench_path_fast_runs() {
+    // Phase 7 Task 7: the flipped acceptance half of the RED above --
+    // `--path=fast` on the SAME staged config now runs cleanly end to end
+    // (BagOfProcessors dispatches algo 3 + `Inference_Path fast` to
+    // `FastSpectralSegmenter`) and reports `path=fast`, not silently falling
+    // back to exact.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = stage_bench_config(dir.path());
+    let cfg_name = cfg_path.file_name().unwrap().to_str().unwrap();
+
+    let fields = run_bench_cli(dir.path(), cfg_name, "fast");
+    assert_eq!(fields.get("path").map(String::as_str), Some("fast"));
+
+    let wall_s: f64 = fields["wall_s"].parse().expect("wall_s must parse as f64");
+    assert!(wall_s > 0.0, "wall_s must be > 0, got {wall_s}");
+
+    let rtf: f64 = fields["rtf"].parse().expect("rtf must parse as f64");
+    assert!(rtf > 0.0, "rtf must be > 0, got {rtf}");
+
+    // Same 60 s x 2 channel wav as the exact leg (bench_line_parses) -- the
+    // fast path reads the SAME audio, so audio_s must match exactly.
+    let audio_s: f64 = fields["audio_s"]
+        .parse()
+        .expect("audio_s must parse as f64");
+    let want_audio_s = 120.0;
+    assert!(
+        (audio_s - want_audio_s).abs() / want_audio_s < 0.01,
+        "audio_s {audio_s} not within 1% of {want_audio_s}"
+    );
+
+    let maxrss_mb: f64 = fields["maxrss_mb"]
+        .parse()
+        .expect("maxrss_mb must parse as f64");
+    assert!(
+        maxrss_mb > 1.0 && maxrss_mb < 4096.0,
+        "maxrss_mb {maxrss_mb} not in a sane range (unit-normalization bug?)"
+    );
+
+    let files: usize = fields["files"].parse().expect("files must parse as usize");
+    assert_eq!(files, 1, "single-file staged listing");
+}
+
+#[test]
+fn bench_fast_not_slower_than_exact_ci_smoke() {
+    // The CI budget smoke (spec R5): fast must not be CATASTROPHICALLY slower
+    // than exact on the 60 s fixture. WIDE headroom (1.5x, not a tight bound)
+    // -- shared CI runners make sub-second wall-clock timing flaky (spec R5),
+    // so this exists to catch a structural regression (e.g. the fast path
+    // accidentally falling back to a slow scalar loop), not to pin the real
+    // measured ratio. The real numbers, measured with more repeats on this
+    // box, are recorded in RESULTS.md's Phase 7 section as local regression
+    // bounds -- not this test (see that file for the measured speedup).
+    const CI_SLOWDOWN_BUDGET: f64 = 1.5;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = stage_bench_config(dir.path());
+    let cfg_name = cfg_path.file_name().unwrap().to_str().unwrap();
+
+    let exact = run_bench_cli(dir.path(), cfg_name, "exact");
+    let fast = run_bench_cli(dir.path(), cfg_name, "fast");
+
+    let exact_wall: f64 = exact["wall_s"].parse().unwrap();
+    let fast_wall: f64 = fast["wall_s"].parse().unwrap();
+
+    println!(
+        "MEASURE bench_fast_not_slower_than_exact_ci_smoke: exact_wall={exact_wall:.6}s fast_wall={fast_wall:.6}s ratio={:.3}",
+        fast_wall / exact_wall
+    );
+    assert!(
+        fast_wall <= exact_wall * CI_SLOWDOWN_BUDGET,
+        "fast wall {fast_wall}s exceeds {CI_SLOWDOWN_BUDGET}x the exact wall {exact_wall}s \
+         (CI budget smoke -- a catastrophic fast-path regression, not a tight timing pin)"
     );
 }

@@ -222,9 +222,12 @@ rtf=<f> maxrss_mb=<f> files=<n>` line per run. `rtf = wall_s / audio_s`; `maxrss
 process-lifetime peak RSS (`getrusage(RUSAGE_SELF)`, bytes on macOS / KB on Linux, normalized to
 MB). Every number below is `--repeat=1` (a single fresh process per measurement, so `maxrss_mb`
 is a clean per-run peak, not inflated by repeated in-process construction -- `--repeat>1` in one
-process accumulates allocator high-water-mark across runs by design, see `bench.rs`'s doc). No
-fast path exists yet (`--path` accepts only `exact` until Task 2+ land `fast`); these numbers are
-the baseline every later fast-path task's RTF/memory claim is measured against.
+process accumulates allocator high-water-mark across runs by design, see `bench.rs`'s doc). At
+Task 1 time no fast path existed yet (`--path` accepted only `exact`); these numbers were the
+baseline every later fast-path task's RTF/memory claim is measured against. **Since Task 7**,
+`--path=fast` is wired (`Inference_Path` overlaid onto the config by `run_bench`, see `bench.rs`'s
+doc) -- see "Exact vs fast: the measured matrix + pinned budgets" below for the comparison this
+baseline exists to support.
 
 Hardware: Apple Silicon dev box (arm64, this machine), `cargo build --release` (LTO on, the
 committed release profile).
@@ -295,15 +298,133 @@ net (11,12-unit LSTM layers vs the SAD net's 23,24,24) and Mode 7's frozen-SAD c
 LID net actually runs). These are exact-path numbers only -- Task 2+'s fast path is compared
 against this table, not against the scouting sanity figures.
 
+### Exact vs fast: the measured matrix + pinned budgets (Task 7)
+
+`speech bench --path=fast <config>` (Task 7) dispatches through the SAME config `--path=exact`
+uses, with `Inference_Path` overlaid to `fast` -- the ONE deliberate exception to `run_bench`'s
+"no config mutation" contract (see `bench.rs`'s doc). Every leg below reuses the identical
+staging recipe already established (the 60 s CI fixture's `tests/phase7_bench.rs::
+stage_bench_config`; the two corpus-gated legs' sorted-first file selection, unchanged from the
+Task 1 baseline above -- SAME files, confirmed by identical `audio_s` -- 75.00 s / 42.54 s -- to
+the Task 1 table); the LID cep leg is NEW (Task 1 only measured phSeq), sorted-first
+`*.plp8f0mvsdd` under `data/LRE03-LRE07/train/LID_Features/**` via the same `twin_mode7.config`
+recipe with `File_Type 2`. Every corpus-gated number is a one-off local measurement (not a
+committed automated test), same posture and license discipline as Task 1's (sorted-first
+selection, no filename/path recorded). 3 independent `--repeat=1` processes per (leg, path) --
+mean and [min-max] range reported; hardware: Apple M4 Pro (arm64), macOS 26.5.2, `cargo build
+--release` (LTO on).
+
+| leg | audio_s | path | wall_s (mean [range]) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |
+|---|---|---|---|---|---|---|---|
+| SAD 60 s fixture (stereo) | 120.00 | exact | 0.2638 [0.2588-0.2693] | 0.002198 | 55.641 | 0.4637 | baseline |
+| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0573 [0.0569-0.0580] | 0.000477 | 67.693 | 0.5641 | **4.60x** |
+| SAD corpus-gated (mono) | 75.00 | exact | 0.1679 [0.1626-0.1775] | 0.002238 | 53.656 | 0.7154 | baseline |
+| SAD corpus-gated (mono) | 75.00 | fast | 0.0366 [0.0364-0.0370] | 0.000489 | 68.459 | 0.9128 | **4.58x** |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0445 [0.0441-0.0450] | 0.001045 | 29.964 | 0.7044 | baseline |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0126 [0.0125-0.0127] | 0.000296 | 19.786 | 0.4651 | **3.53x** |
+| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0339 [0.0338-0.0340] | 0.001037 | 20.255 | 0.6204 | baseline |
+| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0095 [0.0095-0.0095] | 0.000291 | 11.979 | 0.3669 | **3.57x** |
+
+Reading -- speedup lands ABOVE the T6 Python-level scoring range (2.6-3.6x, warm-cache `.scr`/DCF
+scoring incl. PyO3 crossing + file I/O): 3.5-4.6x here, exactly the T6 report's own prediction
+("your dedicated bench isolates the compute better so the ratio may be higher") -- SAD is faster
+than LID relatively (4.6x vs 3.5x) because its FFT+matmul-dominated pipeline hits the biggest
+per-kernel wins (see the criterion numbers below), while Mode 7's LID arms are a single small
+truncate-windowed BLSTM forward over a short pre-extracted feature block, less compute to
+amortize a fixed per-call overhead against.
+
+**MEMORY FINDING, attributed not flagged as an anomaly (T3 review obligation, see `fast/
+pipeline.rs`'s "MEL/DCT REUSE" doc note):** the SAD arms use MORE memory on fast (1.22-1.28x),
+while the LID arms use LESS (0.59-0.66x) -- a real, documented split, not noise. `fast::
+pipeline::FastPipeline::build_input_sequence_parts` allocates a FRESH f64 `Array2` every call to
+widen its f32 periodogram before reusing the exact `apply_filter_bank` (deliberately NOT a
+preallocated/reused scratch buffer, unlike every other buffer in that module's workspace) --
+confirmed via source read (`fast/driver.rs:338`) that ONLY `FastSpectralSegmenter` (algo 3, the
+SAD driver) constructs a `FastPipeline` at all; `FastTwinLid` (algo 6, Mode 7) consumes
+pre-extracted phSeq/cep `external_features` directly and never builds a periodogram, so it carries
+NONE of this cost -- consistent with the LID arms' fast path using genuinely LESS memory (smaller
+net, f32 buffers throughout, no widening tax). Sizing the SAD arm's per-channel buffer directly, in the SAME MiB-as-"MB" unit `bench.rs::
+maxrss_mb()` itself reports (`ru_maxrss bytes / 1024^2` on macOS): the 60 s fixture's
+`BLSTM_spectrum_shift 0.01` at 8 kHz gives `shift_frames=80`, so a 60 s channel decodes to
+`frame_nb = 480000/80 = 6000` periodogram rows; `perio64` is `6000 x 513 x 8 bytes / 1024^2 =
+23.48 MB` per channel -- the right order of magnitude for the measured maxrss delta (12.05 MB on
+the 120 s-audio-equivalent stereo fixture, 14.80 MB on the 75 s mono corpus leg), smaller than the
+raw buffer size because `getrusage`'s peak is a WHOLE-PROCESS high-water mark, not a clean
+per-buffer attribution (both paths carry other large transient buffers competing for the same
+peak snapshot; channel 2's widen-buffer can also reuse channel 1's freed allocation). This is the
+documented consequence of a deliberate, source-cited design decision (module doc: "the exact
+`mel.rs` is UNTOUCHABLE ... an f32 re-transcription ... would be pure duplication risk with no
+measurable speed benefit"), not a bug and not a target for this task to fix.
+
+#### Pinned budgets
+
+**CI-asserted (`tests/phase7_bench.rs::bench_fast_not_slower_than_exact_ci_smoke`, runs in CI
+forever):** `fast wall_s <= exact wall_s * 1.5` on the 60 s CI fixture. WIDE headroom by design
+(spec R5 -- shared CI runners make sub-second wall-clock timing flaky); the measured ratio on this
+box is ~0.217x (fast is ~4.6x FASTER), so the pin carries ~6.9x headroom over measured -- it
+exists to catch a catastrophic fast-path regression (e.g. an accidental fallback to a slow scalar
+path), not to track the real number. Verified non-vacuous by manual mutation (temporarily set the
+budget to `0.001x`, confirmed the assertion fails, reverted -- see the task report; the same
+mutation is Task 10's mutation-battery item 7).
+
+**Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
+R5):** future local runs of this exact recipe are expected to land within:
+- SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
+  widening tax above is real and expected, not a regression signal up to this ratio).
+- LID Mode-7 arms (algo 6, phSeq/cep): wall speedup >= 2.5x, memory <= 0.8x of exact (fast should
+  stay LIGHTER here; memory creeping toward or above 1.0x would be the regression signal, since
+  nothing in this arm's fast path should need more memory than exact).
+
+A local run landing meaningfully below these (not within measurement noise -- the ranges above
+already carry headroom under the measured 3.53-4.60x speedups and 0.367-1.276x memory ratios) is a
+FINDING to investigate, the same "measure, don't silently widen" discipline the CI parity gates
+(Tasks 4-6) already established for correctness; there is no automated enforcement of these bounds
+(spec R5: "the real numbers are local... no CI assertion on them").
+
 ### Criterion micro-benches
 
-`cargo bench` (`src/rust/benches/kernels.rs`) times the three exact kernels Task 2+ will grow f32
-twins for, on shapes read off `tier2_spectral.config` itself: `matmul_seq_92x96` (92 frames x
-`BLSTM_NNetInputSize 23` into `23 x 4*24`, the LSTM input-projection product), `gfft_1024`
-(`BLSTM_spectrum_order 10` -> a 1024-point GFFT), `mel_apply_513x20` (the resulting 513-column
-periodogram through a `BLSTM_nb_bins 20` log-mel filterbank). Task 1 only wires the harness +
-smoke-tests it (`cargo bench -- --test`); no timing numbers are pinned here yet -- that lands
-when Task 2+'s fast twins need a same-shape comparison baseline.
+`cargo bench` (`src/rust/benches/kernels.rs`) times three exact kernels and, since Task 7, their
+fast-path twins, on shapes read off `tier2_spectral.config` itself: `matmul_seq_92x96` (92 frames
+x `BLSTM_NNetInputSize 23` into `23 x 4*24`, the LSTM input-projection product) vs
+`faer_project_92x96` (the SAME shape, f32, calling the real `fast::nn::faer_project` -- not a
+bench-local reimplementation); `gfft_1024` (`BLSTM_spectrum_order 10` -> a 1024-point GFFT) vs
+`realfft_1024` (one real `realfft` forward at `window_size=1024`, f32); `mel_apply_513x20` (the
+resulting 513-column periodogram through a `BLSTM_nb_bins 20` log-mel filterbank) vs
+`mel_apply_widened_f64` -- HONESTLY named and scoped (T3 review obligation): the fast path has NO
+f32 mel kernel, so this bench measures the REAL fast-path procedure end to end (widen the f32
+periodogram into a fresh f64 `Array2`, then reuse the identical `apply_filter_bank` the exact
+target calls), not a fabricated f32 kernel. Measured (`cargo bench`, 100 samples/target, Apple M4
+Pro, `bench` profile):
+
+| target | path | scope | time |
+|---|---|---|---|
+| `matmul_seq_92x96` | exact | 92x23 * 23x96, f64 ascending loop | 57.408 us |
+| `faer_project_92x96` | fast | SAME shape, f32, real `fast::nn::faer_project` | 4.624 us |
+| `gfft_1024` | exact | 1024-pt complex FFT, 2 real 1024-sample frames packed per call | 17.898 us/call (8.949 us/frame) |
+| `realfft_1024` | fast | 1024-sample real FFT, 1 frame per call | 0.765 us/call (= 0.765 us/frame) |
+| `mel_apply_513x20` | exact | 100x513 f64 periodogram already in hand -> log-mel | 24.135 us |
+| `mel_apply_widened_f64` | fast | SAME shape, f32->f64 widen (fresh alloc) + SAME `apply_filter_bank` | 58.309 us |
+
+Reading: `faer_project_92x96` is **12.41x faster** than `matmul_seq_92x96` at the identical shape --
+the single biggest per-kernel win, and (with the LSTM recurrence itself unbenched here, see
+`fast/nn.rs`'s doc on why it stays a hand-written dot rather than a per-frame faer matvec) the main
+driver of the SAD/LID wall-clock speedups above. `realfft_1024` is **23.4x faster per call**, or
+**11.7x faster per FRAME** once the exact GFFT's two-real packing (one call amortizes TWO windowed
+frames, not one -- see `fast/pipeline.rs`'s equivalence proof) is normalized out; either framing is
+a large win.
+
+**FINDING (reported honestly, not hidden -- exactly the brief's ask):**
+`mel_apply_widened_f64` is **2.42x SLOWER** than `mel_apply_513x20` at the identical shape, not
+faster. This is the PRECISE, measured answer to "where does the fast path spend relatively more
+time": the mandatory f32->f64 widen-and-fresh-allocate step (see the memory finding above) is a
+real per-call cost that the reused f64 `apply_filter_bank` call alone does not carry on the exact
+side (which already has its periodogram in f64, no widening needed). It does not erase the SAD
+arm's overall 4.58-4.60x end-to-end win -- the FFT (11.7x/frame) and matmul (12.41x) gains
+elsewhere in the same pipeline dominate the total -- but it is the one component of the fast SAD
+path that is measurably, unambiguously slower than its exact counterpart, and it is the direct
+mechanism behind the SAD-arm memory increase documented above. A fully-f32 mel kernel (removing
+the widen step entirely) is exactly the "possible future tightening" `fast/pipeline.rs`'s module
+doc already names as out of THIS task's scope.
 
 ### Metric parity: fast vs exact on the phase-6 subset checkpoints (corpus-gated)
 
@@ -331,13 +452,20 @@ that hold, not the last bit of the score. Any future flip fails the test (the R1
 adjudication (file count + delta distribution) is not silently absorbed.
 
 WEIGHT-INJECTION NOTE (load-bearing for the test): the fast drivers load weights ONLY at
-construction (`load_weights_file`, from `BLSTM_weightsFile`/`BLSTM_LID_weightsFile`);
-`BagOfProcessors::set_weights` is a SILENT NO-OP for `Processor::FastSpectral`/`FastTwinLid`
-(`bag_of_processors.rs:583`). So the parity test points BOTH configs' weight keys at the trained
-checkpoint (the fast path's only injection mechanism, identical for both paths) rather than relying
-on the seam's `set_weights` -- otherwise the fast path would silently score the config's SEED pack
-while exact scores the injected trained pack, a 100%-divergence artefact (observed and diagnosed
-during Task 6, NOT a real parity failure). See the concerns in `.superpowers/sdd/task-6-report.md`.
+construction (`load_weights_file`, from `BLSTM_weightsFile`/`BLSTM_LID_weightsFile`). At T6
+measurement time `BagOfProcessors::set_weights` was a SILENT NO-OP for `Processor::FastSpectral`/
+`FastTwinLid`, so the parity test points BOTH configs' weight keys at the trained checkpoint (the
+fast path's only injection mechanism, identical for both paths) rather than relying on the seam's
+`set_weights` -- otherwise the fast path would silently score the config's SEED pack while exact
+scores the injected trained pack, a 100%-divergence artefact (observed and diagnosed during Task 6,
+NOT a real parity failure). **T6b (commit `2081212`, same branch) hardened this into a LOUD bail**
+(`Processor::FastSpectral`/`FastTwinLid` now `bail!` naming `Inference_Path` + the
+`BLSTM_weightsFile`/`BLSTM_LID_weightsFile` keys on any `set_weights` call, `bag_of_processors.rs`)
+-- the config-repoint injection above is unchanged and still required (it is the fast path's ONLY
+weight-injection mechanism), but the two Python callers that used to rely on the silent no-op
+(`evaluate()`, `_score_sad_pack_on_test`) now SKIP their own redundant `set_weights` call under
+`Inference_Path fast` instead of hitting the new bail. See `.superpowers/sdd/task-6-report.md`'s
+"T6b" section for the full mechanism + the sibling-method audit.
 
 Runtime: warm-cache (checkpoints present) scoring is seconds -- exact 1.7-5.0 s, fast 0.6-1.4 s per
 arm (the fast path is consistently ~2.5-3.5x faster to score, the RTF win these numbers exist to
