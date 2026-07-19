@@ -645,19 +645,23 @@ fn noise_gate_seeded_nonnegative_constructs() {
 }
 
 #[test]
-#[should_panic(expected = "noise_ratio must be >= 0 when seeding")]
-fn noise_gate_seeded_negative_panics() {
-    // The HARD ASSERTION: a SEEDING config (`noise_seed > 0`) with a NEGATIVE ratio would
-    // make the offline `apply_noise(ratio)` (which still applies a negative magnitude) and
-    // the front-end's `noise_magnitude > 0.0` gate (which would SKIP noise) DIVERGE in
-    // shape -- caught loudly (T2-review gate-shape finding).
+fn noise_gate_seeded_negative_bails() {
+    // THE TYPED BAIL: a SEEDING config (`noise_seed > 0`) with a NEGATIVE ratio would make
+    // the offline `apply_noise(ratio)` (which still applies a negative magnitude) and the
+    // front-end's `noise_magnitude > 0.0` gate (which would SKIP noise) DIVERGE in shape --
+    // refused loudly (T2-review gate-shape finding; T5-review promoted assert! -> bail! for
+    // consistency with the four sibling construction bails).
     let dir = tempfile::tempdir().unwrap();
     let stage = common::stage_frozen_tier2(dir.path());
     let text = std::fs::read_to_string(&stage.config_path).unwrap();
     let mut m = parse(&text);
     m.insert("BLSTM_noise_seed".into(), "5".into());
     m.insert("BLSTM_noise_ratio".into(), "-0.01".into());
-    let _ = StreamingSession::new(&m, 8000.0, 1);
+    let msg = bail_msg(StreamingSession::new(&m, 8000.0, 1));
+    assert!(
+        msg.contains("noise_ratio must be >= 0 when seeding"),
+        "negative-ratio bail message: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -669,19 +673,30 @@ fn latency_bounds() {
     // The calibrated-tail variant (REAL segments -> real mid-stream emission lags). The
     // DERIVED structural bound = front-end reach + NN window finalization + convolution
     // half-width + the smoothing holdback, ALL config-derived (never a literal, the T4 spec
-    // correction: the holdback ALONE is 2.28957 s; the design's 1.02 s is DEAD). The
-    // data-dependent AREA term is measured on this fixture and pinned with headroom.
+    // correction: the holdback ALONE is 2.28957 s; the design's 1.02 s is DEAD).
+    //
+    // THE TIME-ADVANCE DECOMPOSITION (T5-review, the consumed-frontier trigger). Emission is
+    // now attempted on EVERY push, so a SPEECH segment emits during the FOLLOWING silence the
+    // moment the consumed frontier (minus holdback) clears its end -- at the STRUCTURAL BOUND,
+    // no longer waiting for the next raw segment. An OTHER (silence) segment is different: its
+    // right boundary IS the onset of the following speech, which enters `raw_segments` only
+    // when that speech COMMITS (its falling edge, the latched raw-segment model), so an
+    // other-segment's lag is the FOLLOWING SPEECH DURATION + the forward pipeline delay
+    // (feature_reach + nn_window + conv_delay). We pin the two classes separately.
     //
     // MEASURED (Apple Silicon dev box, 60 s staged mono, calibrated tail, 100 ms chunks):
-    //   feature_reach = 0.14400 s  ((reach 8 * shift 80 + half_window 512) / 8000)
-    //   nn_window     = 3.26000 s  (2 * window_size 163 * spectrum_shift 0.01)
-    //   conv_delay    = 0.36000 s  (conv_half 9 * time_step 0.04)
-    //   holdback      = 2.28957 s  (sum(min_speech)+sum(min_silence)+sum(padding), clamped)
-    //   DERIVED BOUND = 6.05357 s  (the config-derived structural floor)
-    //   push (mid-stream) max lag = 16.80428 s, mean lag 8.64831 s over 13 emissions;
-    //   the excess 10.75 s over the bound is the wait-for-trigger (inter-segment silence:
-    //   the emit-on-next-raw-segment design; the global max inter-speech-end gap is
-    //   14.30570 s); the EOS-drain (finish) max lag is 4.96767 s over 3 emissions.
+    //   feature_reach    = 0.14400 s  ((reach 8 * shift 80 + half_window 512) / 8000)
+    //   nn_window        = 3.26000 s  (2 * window_size 163 * spectrum_shift 0.01)
+    //   conv_delay       = 0.36000 s  (conv_half 9 * time_step 0.04)
+    //   holdback         = 2.28957 s  (sum(min_speech)+sum(min_silence)+sum(padding), clamped)
+    //   DERIVED BOUND    = 6.05357 s  (the config-derived structural floor)
+    //   pipeline_forward = 3.76400 s  (feature_reach + nn_window + conv_delay; bound - holdback)
+    //   SPEECH push max lag = 5.84460 s  (< bound -- delivered within the structural floor;
+    //     the time-advance win, down from the old 16.8 s wait-for-next-raw-segment)
+    //   OTHER  push max lag = 15.84618 s (= max_speech_dur 13.34760 + pipeline_forward 3.76400
+    //     - a small residual; the silence-before-long-speech commit wait, inherent to the
+    //     latched raw-segment model -- NOT reduced by the consumed-frontier trigger)
+    //   EOS-drain (finish) max lag = 4.96767 s over 3 emissions.
     let dir = tempfile::tempdir().unwrap();
     let base = common::stage_frozen_tier2(dir.path());
     let cal_config = stage_calibrated(dir.path(), &base);
@@ -701,6 +716,10 @@ fn latency_bounds() {
     let ssr = spec.lstm_subsampling.iter().product::<usize>()
         * spec.output_subsampling.iter().product::<usize>();
     let ssif = params.shift_frames;
+    // NOTE (cross-check coincidence): the session GUARDS this (`deltas_nb > 0 ? .. : 0`,
+    // `dd_nb > 0 ? .. : 0`); the unguarded sum here is tier2-coincident (both counts > 0). A
+    // valid future config with a non-positive delta count would fail the to_bits cross-check
+    // below without the session being wrong.
     let reach = feature_cfg.deltas_nb as usize + feature_cfg.dd_nb as usize;
     let half_window = params.window_size / 2;
     let re_feature = (reach * ssif + half_window) as f64 / rate;
@@ -720,6 +739,11 @@ fn latency_bounds() {
         .conv_coeff
         .as_deref()
         .map_or(0, |c| if c.len() > 1 { (c.len() - 1) / 2 } else { 0 });
+    // NOTE (cross-check coincidence): the session computes `conv_half * time_step` with
+    // `time_step = shift_sec * ssr`, i.e. `conv_half * (shift_sec * ssr)`; this left-assoc
+    // `(conv_half * shift_sec) * ssr` groups the multiply differently and is only
+    // tier2-coincident. A valid future config could fail the to_bits cross-check below on
+    // the grouping alone without the session being wrong.
     let re_conv = conv_half as f64 * params.shift_sec * ssr as f64;
     let re_holdback = seg_cfg.min_speech.iter().sum::<f64>()
         + seg_cfg.min_silence.iter().sum::<f64>()
@@ -752,34 +776,45 @@ fn latency_bounds() {
         "bound = sum of components"
     );
 
-    // Per-emission lag = structural lookahead + WAIT-FOR-TRIGGER: the emit-on-next-raw-
-    // segment design only re-smooths + emits when a NEW raw segment lands, so a settled
-    // segment waits until the NEXT raw segment closes -- absorbing the inter-segment silence
-    // into the lag (data-dependent, S1.8/R5; the "area term"). The DERIVED structural bound
-    // is the guaranteed floor; the wait is bounded by the longest inter-speech-end gap in
-    // the fixture. Decompose so the STRUCTURAL part stays tightly pinned.
+    // Per-emission lag decomposes by SEGMENT CLASS (the T5-review consumed-frontier trigger).
+    // SPEECH segments emit during the FOLLOWING silence at the STRUCTURAL BOUND (the win);
+    // OTHER (silence) segments wait for the following speech to COMMIT -- their right boundary
+    // is that speech's onset, which enters raw_segments only at its falling edge -- so their
+    // lag is the following speech DURATION + the forward pipeline delay. Pin the two classes
+    // separately: the structural win stays tightly bounded, the residual silence-commit wait
+    // is characterised honestly.
     let push_max = max_lag_of(&run.push_emissions);
     let finish_max = max_lag_of(&run.finish_emissions);
-    let segs = run.seg.segments();
-    // The longest gap between consecutive SPEECH-segment ends (the max wait for a
-    // triggering next raw segment). Speech ends are the boundaries of Speech segments.
-    let speech_ends: Vec<f64> = segs
+    let speech_push_max = run
+        .push_emissions
+        .iter()
+        .filter(|e| e.class == SegClass::Speech)
+        .map(|e| e.emitted_at_audio_s - e.end_s)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let other_push_max = run
+        .push_emissions
+        .iter()
+        .filter(|e| e.class == SegClass::Other)
+        .map(|e| e.emitted_at_audio_s - e.end_s)
+        .fold(f64::NEG_INFINITY, f64::max);
+    // The forward pipeline delay (sample frontier -> consumed convolved frontier) == bound -
+    // holdback; an other-segment incurs this on top of the following speech's duration.
+    let pipeline_forward = run.feature_reach + run.nn_window + run.conv_delay;
+    // The longest SPEECH segment: the worst-case commit wait an OTHER segment can incur (it
+    // emits only once the following speech closes, one speech-duration past its own end).
+    let max_speech_dur = run
+        .seg
+        .segments()
         .windows(2)
         .filter(|w| w[0].ty == SegClass::Speech)
-        .map(|w| w[1].begin)
-        .collect();
-    let max_trigger_gap = speech_ends
-        .windows(2)
-        .map(|w| w[1] - w[0])
+        .map(|w| w[1].begin - w[0].begin)
         .fold(0.0_f64, f64::max);
-    // The residual after subtracting the structural floor + the measured trigger gap (the
-    // hysteresis falling-area + the ssr grid slack + smoothing boundary shifts).
-    let residual = push_max - run.bound - max_trigger_gap;
     println!(
         "MEASURE latency: feature_reach={:.5} nn_window={:.5} conv_delay={:.5} holdback={:.5} \
-         bound={:.5} push_max_lag={push_max:.5} max_trigger_gap={max_trigger_gap:.5} \
-         residual={residual:.5} finish_max_lag={finish_max:.5} session_max_lag={:.5} \
-         session_mean_lag={:.5} push_emissions={} finish_emissions={} seg_rows={}",
+         bound={:.5} pipeline_forward={pipeline_forward:.5} speech_push_max={speech_push_max:.5} \
+         other_push_max={other_push_max:.5} max_speech_dur={max_speech_dur:.5} \
+         finish_max_lag={finish_max:.5} session_max_lag={:.5} session_mean_lag={:.5} \
+         push_emissions={} finish_emissions={} seg_rows={}",
         run.feature_reach,
         run.nn_window,
         run.conv_delay,
@@ -792,47 +827,151 @@ fn latency_bounds() {
         run.seg.segments().len()
     );
 
-    // Non-vacuity: real mid-stream emissions with real lags.
+    // Non-vacuity: real mid-stream emissions with real lags, in BOTH classes.
     assert!(run.emission_count > 1, "latency leg needs real emissions");
     assert!(
         !run.push_emissions.is_empty(),
         "latency leg needs mid-stream (push) emissions to bound the structural latency"
     );
-    // The full structural lookahead IS incurred mid-stream (the holdback alone < the lag).
     assert!(
-        push_max > run.holdback,
-        "mid-stream max lag {push_max} must exceed the holdback alone {} (the full \
-         window+conv+reach lookahead is incurred on top)",
+        speech_push_max.is_finite() && other_push_max.is_finite(),
+        "latency leg needs BOTH speech and other mid-stream emissions (speech={speech_push_max} \
+         other={other_push_max})"
+    );
+
+    // (1) THE STRUCTURAL WIN (tight): every SPEECH emission is delivered within the DERIVED
+    // structural bound (+ a small allowance for the ssr grid slack + the 100 ms push
+    // granularity + smoothing boundary shifts). This is the consumed-frontier trigger paying
+    // off: a settled speech segment emits DURING the following silence at ~bound, no longer
+    // waiting the full inter-speech gap (the old 16.8 s). A regression back to the wait-for-
+    // next-raw-segment cadence (speech lag ~= the trigger gap) fails here LOUDLY.
+    const SPEECH_ALLOWANCE: f64 = 0.5;
+    assert!(
+        speech_push_max <= run.bound + SPEECH_ALLOWANCE,
+        "SPEECH mid-stream max lag {speech_push_max} exceeds the structural bound {} + \
+         allowance {SPEECH_ALLOWANCE} (the time-advance trigger must deliver speech at ~bound)",
+        run.bound
+    );
+    // The bound is genuinely incurred (the holdback alone is far below it): a real end-to-end
+    // lookahead, not a trivially-loose pin.
+    assert!(
+        speech_push_max > run.holdback,
+        "SPEECH mid-stream max lag {speech_push_max} must exceed the holdback alone {} (the \
+         full window+conv+reach lookahead is incurred on top)",
         run.holdback
     );
 
-    // THE STRUCTURAL DECOMPOSITION PIN (meaningful): the max mid-stream lag is bounded by
-    // the DERIVED structural bound + the longest inter-speech-end gap in the fixture (the
-    // max wait-for-trigger, measured from the OUTPUT segmentation) + a small RESIDUAL
-    // (hysteresis falling-area + ssr grid slack + smoothing boundary shifts). The measured
-    // residual is -3.55 s (slack -- the max-lag emission's own gap 10.75 s is smaller than
-    // the global max gap 14.31 s), so this holds comfortably; it catches a lag that grows
-    // faster than the structure + fixture gaps explain (a >~4.5 s regression).
-    const RESIDUAL_ALLOWANCE: f64 = 1.0;
+    // (2) THE SILENCE-COMMIT WAIT (honest, data-dependent): an OTHER segment cannot emit until
+    // the following speech commits at its falling edge, so its lag is at most the longest
+    // speech-segment duration + the forward pipeline delay (+ a small residual for smoothing
+    // shifts). This residual area term is NOT reduced by the consumed-frontier trigger (the
+    // silence segment's right boundary is genuinely unknown until the next speech closes) --
+    // flagged for a possible future begin-commit refinement (see the T5 report).
+    const OTHER_ALLOWANCE: f64 = 1.0;
+    let silence_commit_bound = max_speech_dur + pipeline_forward + OTHER_ALLOWANCE;
     assert!(
-        push_max <= run.bound + max_trigger_gap + RESIDUAL_ALLOWANCE,
-        "mid-stream max lag {push_max} exceeds bound {} + max trigger gap {max_trigger_gap} + \
-         residual {RESIDUAL_ALLOWANCE} (residual was {residual})",
+        other_push_max <= silence_commit_bound,
+        "OTHER mid-stream max lag {other_push_max} exceeds max_speech_dur {max_speech_dur} + \
+         pipeline_forward {pipeline_forward} + allowance {OTHER_ALLOWANCE} (the silence-commit \
+         wait is bounded by the longest following speech)"
+    );
+
+    // (3) THE GLOBAL FIXTURE PIN: max observed lag (push + EOS drain) <= the silence-commit
+    // bound. The EOS-drain (finish) lags are strictly smaller here (the fixture ends on
+    // speech), so the class-(2) bound covers ALL emissions.
+    let observed_max = push_max.max(finish_max);
+    assert!(
+        observed_max <= silence_commit_bound,
+        "max observed lag {observed_max} exceeds the silence-commit bound {silence_commit_bound} \
+         (max_speech_dur {max_speech_dur} + pipeline_forward {pipeline_forward} + allowance \
+         {OTHER_ALLOWANCE})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (e') THE TIME-ADVANCE WIN: a settled speech segment emits DURING silence (T5-review).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn settled_speech_emits_during_silence() {
+    // T5-review finding 2: the consumed-frontier time-advance means a SETTLED speech segment
+    // is delivered MID-STREAM, DURING the following silence, at ~structural-bound latency --
+    // no longer waiting for the next raw segment to close (the old ~16.8 s wait). The
+    // calibrated fixture's 14.3 s max inter-speech-end gap is the vehicle: the SPEECH segment
+    // whose end OPENS that gap must emit well before the gap ends, with lag <= the derived
+    // structural bound + a small allowance (NOT the old bound + trigger-gap form).
+    let dir = tempfile::tempdir().unwrap();
+    let base = common::stage_frozen_tier2(dir.path());
+    let cal_config = stage_calibrated(dir.path(), &base);
+    let text = std::fs::read_to_string(&cal_config).unwrap();
+    let (rate, samples) = mono_samples(&base.wav_path);
+
+    let run = run_session(&text, rate, &samples, (0.1 * rate) as usize);
+
+    // The final partition's speech ends (a Speech segment's right boundary). The longest gap
+    // between consecutive speech ends is the target silence; the speech segment ENDING at the
+    // start of that gap is the "segment before the gap".
+    let segs = run.seg.segments();
+    let speech_ends: Vec<f64> = segs
+        .windows(2)
+        .filter(|w| w[0].ty == SegClass::Speech)
+        .map(|w| w[1].begin)
+        .collect();
+    assert!(
+        speech_ends.len() >= 2,
+        "need >= 2 speech ends to have an inter-speech gap"
+    );
+    let (gap_i, max_gap) = speech_ends
+        .windows(2)
+        .enumerate()
+        .map(|(i, w)| (i, w[1] - w[0]))
+        .fold((0usize, 0.0f64), |acc, x| if x.1 > acc.1 { x } else { acc });
+    let gap_start = speech_ends[gap_i]; // the speech end opening the gap
+    let gap_end = speech_ends[gap_i + 1]; // the next speech end (gap close)
+
+    // Non-vacuity: the target gap must be a REAL silence wider than the structural bound (so
+    // "emit during silence at ~bound" is a meaningful claim, not a gap the bound swallows).
+    assert!(
+        max_gap > run.bound,
+        "the target inter-speech gap {max_gap} must exceed the structural bound {} for the \
+         during-silence claim to bite",
         run.bound
     );
 
-    // THE FIXTURE PIN (the brief's literal max-lag pin, S1.8): max observed lag <= derived
-    // bound + a measured AREA allowance. AREA is dominated by the fixture's inter-segment
-    // silence (the wait-for-trigger, FIXTURE-SPECIFIC per R5), MEASURED at ~10.75 s (push
-    // max_lag 16.80 - bound 6.05) and pinned at 13 s with headroom. The EOS-drain (finish)
-    // lags are strictly smaller here (finish_max 4.97 s, the fixture ends on speech, no
-    // trailing silence), so this single pin bounds ALL emissions.
-    const AREA_ALLOWANCE: f64 = 13.0;
-    let observed_max = push_max.max(finish_max);
+    // The speech segment ending at `gap_start` must have been emitted MID-STREAM (push). Its
+    // end is bit-identical to the partition boundary (same f64), so match exactly.
+    let before_gap = run
+        .push_emissions
+        .iter()
+        .find(|e| e.class == SegClass::Speech && e.end_s == gap_start)
+        .unwrap_or_else(|| {
+            panic!(
+                "the speech segment ending at the gap start {gap_start} must be a MID-STREAM \
+                 (push) emission"
+            )
+        });
+    let lag = before_gap.emitted_at_audio_s - before_gap.end_s;
+    println!(
+        "MEASURE during_silence: gap_start={gap_start:.5} gap_end={gap_end:.5} \
+         max_gap={max_gap:.5} emitted_at={:.5} lag={lag:.5} bound={:.5}",
+        before_gap.emitted_at_audio_s, run.bound
+    );
+
+    // (a) EMITTED WELL BEFORE THE GAP ENDS (the during-silence claim): the emission lands
+    // before the next speech even begins -- the whole point of the time-advance trigger.
     assert!(
-        observed_max <= run.bound + AREA_ALLOWANCE,
-        "max observed lag {observed_max} exceeds derived structural bound {} + area allowance \
-         {AREA_ALLOWANCE} (fixture-specific, dominated by the inter-segment silence)",
+        before_gap.emitted_at_audio_s < gap_end,
+        "the segment before the gap emitted at {} but the gap only ends at {gap_end} (it did \
+         NOT emit during the silence -- the time-advance trigger regressed)",
+        before_gap.emitted_at_audio_s
+    );
+    // (b) AT ~STRUCTURAL-BOUND LATENCY (NOT bound + trigger-gap): the settled speech segment's
+    // lag is the derived structural bound + a small allowance, INDEPENDENT of the 14.3 s gap.
+    const ALLOWANCE: f64 = 0.5;
+    assert!(
+        lag <= run.bound + ALLOWANCE,
+        "the segment-before-the-gap lag {lag} exceeds the structural bound {} + allowance \
+         {ALLOWANCE} (it must emit at ~bound during silence, not wait the {max_gap} s gap)",
         run.bound
     );
 }

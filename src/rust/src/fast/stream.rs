@@ -919,15 +919,20 @@ impl ConvStream {
 ///
 /// RE-SMOOTH-AND-EMIT-STABLE-PREFIX. The 8-step [`smooth_segmentation`] is NOT streamable
 /// incrementally, but it is cheap and its output is a pure function of the raw-segment
-/// list + the End sentinel. On each new raw segment we re-run the SHARED `smooth_segmentation`
-/// on a fresh clone and emit the settled PREFIX -- segments whose end `< last_raw_boundary -
-/// HOLDBACK`. The final [`flush`](Self::flush) re-runs the SAME shared code on the complete
-/// raw list seeded at the true `audio_duration`, so it is BIT-IDENTICAL to the offline
-/// decision pipeline (same raw segments, same `label_segment` replay, same smoothing).
+/// list + the End sentinel. On EVERY push (the T5-review consumed-frontier time-advance,
+/// [`resmooth_and_emit`](Self::resmooth_and_emit)) we re-run the SHARED `smooth_segmentation`
+/// on a fresh clone and emit the settled PREFIX -- segments whose end `< frontier - HOLDBACK`,
+/// where `frontier = max(last_raw_boundary, consumed_frontier - dt)` advances with the
+/// hysteresis's CONSUMED frontier even while no new raw segment lands. The final
+/// [`flush`](Self::flush) re-runs the SAME shared code on the complete raw list seeded at the
+/// true `audio_duration`, so it is BIT-IDENTICAL to the offline decision pipeline (same raw
+/// segments, same `label_segment` replay, same smoothing).
 ///
 /// THE HOLDBACK (the design's one new invariant, spec S1.3 / R2). A smoothed segment can
-/// change only while later raw structure -- which lands at time `>= last_raw_boundary` --
-/// can still reach it through the smoothing. Each smoothing step moves/merges boundaries by
+/// change only while later raw structure -- which lands at time `>= frontier` (the emission
+/// frontier [`resmooth_and_emit`](Self::resmooth_and_emit) derives: `>= last_raw_boundary`
+/// AND `>= consumed_frontier - dt`) -- can still reach it through the smoothing. Each
+/// smoothing step moves/merges boundaries by
 /// at most its own threshold: [`Segmentation::add_padding`] extends a Speech segment left by
 /// `before` and right by `after`; [`Segmentation::suppress_short`] removes/merges a segment
 /// only across its own `<= threshold` span. A future Speech segment can therefore reach an
@@ -937,9 +942,10 @@ impl ConvStream {
 /// past-known), so they do not extend the future segment's reach. HOLDBACK is the
 /// CONSERVATIVE sum of EVERY (clamped) smoothing threshold -- `sum(min_speech) +
 /// sum(min_silence) + sum(padding)` -- which dominates any single reach and any composition
-/// of them; it also keeps the mid-stream clone's End sentinel (placed `>= last_raw_boundary`)
-/// at least HOLDBACK to the right of the emitted region, so the tail special-casing never
-/// touches it. Param-driven at construction: a config with different padding moves the
+/// of them; it also keeps the mid-stream clone's End sentinel (placed at `now >= frontier`,
+/// since the received frontier is `>= the consumed frontier`) at least HOLDBACK to the right
+/// of the emitted region, so the tail special-casing never touches it. Param-driven at
+/// construction: a config with different padding moves the
 /// holdback. If it were ever too small, the prefix-consistency gate catches it as a
 /// retraction (R2); too large only adds latency.
 pub struct StreamDecision {
@@ -1018,8 +1024,9 @@ impl StreamDecision {
     /// Push a chunk of finalized posterior rows (`k x 1`, the binary SAD posterior column,
     /// f32) and return the segments that FINALIZED this call. Buffers the (widened)
     /// scalars through the streaming convolution, advances the latched hysteresis over the
-    /// newly-final convolved values, and -- when a new raw segment lands -- re-smooths and
-    /// emits the newly-settled prefix.
+    /// newly-final convolved values, then re-smooths and emits the newly-settled prefix on
+    /// EVERY push (the consumed-frontier time-advance -- a settled segment can finalize as
+    /// the frontier advances through silence, without waiting for a new raw segment).
     pub fn push_rows(&mut self, rows: &FastMatrix) -> Vec<EmittedSegment> {
         // The decision layer reads ONLY column 0 (the binary SAD posterior); a
         // multi-column posterior would silently drop columns and the offline
@@ -1034,18 +1041,20 @@ impl StreamDecision {
             self.conv.push(rows.get(r, 0) as f64);
         }
         let ready = self.conv.take_ready();
-        let mut new_raw = false;
         for v in ready {
             if let Some(seg) = self.hyst.advance(v) {
                 self.raw_segments.push(seg);
-                new_raw = true;
             }
         }
-        if new_raw {
-            self.resmooth_and_emit()
-        } else {
-            Vec::new()
-        }
+        // TIME-ADVANCE EMISSION: attempt an emit on EVERY push, not only when a new raw
+        // segment lands. During a long inter-speech silence no raw segment closes, yet the
+        // hysteresis keeps consuming convolved values -- so the CONSUMED frontier advances and
+        // a settled earlier segment becomes emittable once that frontier (minus holdback)
+        // passes it. This delivers bounded-latency output instead of waiting for the next
+        // triggering raw segment. `resmooth_and_emit` is a no-op until at least one raw
+        // segment exists and never re-emits an already-emitted segment (the `emitted_count`
+        // prefix cursor), so calling it unconditionally is safe + idempotent.
+        self.resmooth_and_emit()
     }
 
     /// EOS: finalize the right-edge convolution tail + the open hysteresis segment, then
@@ -1089,21 +1098,43 @@ impl StreamDecision {
         seg
     }
 
-    /// Re-smooth the current raw segments (clone seeded at the posterior frontier, `>=
-    /// last_raw_boundary`) and emit the newly-settled prefix -- segments whose end `<
-    /// last_raw_boundary - holdback`.
+    /// Re-smooth the current raw segments (clone seeded at the posterior frontier) and emit
+    /// the newly-settled prefix -- segments whose end `< frontier - holdback`, where
+    /// `frontier` is the CONSUMED-frontier trigger derived below.
     fn resmooth_and_emit(&mut self) -> Vec<EmittedSegment> {
         let last_rb = match self.raw_segments.last() {
             Some(&(_, e)) => e,
             None => return Vec::new(),
         };
         let now = self.current_audio_time();
-        // The clone's End sentinel: past all processed structure (>= last_rb), so the
-        // emitted region stays >= holdback to its left and the tail special-casing cannot
-        // reach it.
+        // The clone's End sentinel: past all processed structure (>= last_rb AND >= the
+        // emission frontier -- `now >= frontier` since received >= finalized), so the emitted
+        // region stays >= holdback to its left and the tail special-casing cannot reach it.
         let mid_dur = now.max(last_rb);
         let seg = self.build_smoothed(mid_dur);
-        let threshold = last_rb - self.holdback;
+
+        // THE EMISSION FRONTIER (the time-advance trigger). A smoothed segment can still be
+        // revised only by FUTURE raw structure, which lands no earlier than
+        //   frontier = max(last_rb, hyst_frontier - dt)
+        // -- `last_rb` because raw segments close in ascending order (the next one begins
+        // after this one ends), and `hyst_frontier - dt` because the CONSUMED frontier is
+        // `hyst_frontier = conv.finalized*dt + off` (the hysteresis has advanced through
+        // exactly `conv.finalized` convolved values; `StreamDecision` owns both `conv` and
+        // `hyst`, so no session threading is needed) and the earliest a not-yet-consumed
+        // value can interpolate a boundary back to is one grid step (`dt`) before it.
+        //
+        // THE SAFETY ARGUMENT: the T4 holdback-dominance proof (see the type docs) licenses
+        // emitting any segment whose smoothed form cannot be reached by raw structure at or
+        // beyond the frontier -- and the consumed frontier minus one grid step is the earliest
+        // a future raw boundary can interpolate back to, so every segment ending strictly
+        // before `frontier - holdback` is final. (Using the RECEIVED frontier `now` here
+        // would be UNSAFE: `now` runs ahead of the consumed frontier by the convolution
+        // lookahead + a grid step, so it could license emitting a segment a still-pending
+        // convolved value can still move.) The prefix-consistency gate legs are the safety
+        // net -- any too-large frontier surfaces there as a retraction.
+        let hyst_frontier = self.conv.finalized as f64 * self.dt + self.off;
+        let frontier = last_rb.max(hyst_frontier - self.dt);
+        let threshold = frontier - self.holdback;
         self.collect_prefix(&seg, threshold, now)
     }
 
@@ -1175,10 +1206,15 @@ impl StreamDecision {
 ///
 /// LATENCY (spec S1.8). Every emission is stamped with the session's audio-time-pushed
 /// clock (`(total_pushed-1)/rate`) and its per-emission lag (`emitted_at - end_s`) is
-/// tracked (running max/mean, O(1) memory). The lag is bounded by the DERIVED structural
+/// tracked (running max/mean, O(1) memory). With the T5-review consumed-frontier time-advance
+/// ([`StreamDecision::push_rows`]), a SPEECH segment is delivered within the DERIVED structural
 /// budget [`derived_latency_bound_s`](Self::derived_latency_bound_s) = front-end reach + NN
-/// window finalization + convolution half-width + the smoothing holdback, plus a
-/// data-dependent AREA term measured on the fixtures (`tests/phase8_gate.rs`).
+/// window finalization + convolution half-width + the smoothing holdback -- it emits during
+/// the FOLLOWING silence, no longer waiting for the next raw segment. An OTHER (silence)
+/// segment still waits for the following speech to COMMIT (its right boundary is that speech's
+/// onset, latched only at the falling edge), so its lag is that speech's DURATION + the forward
+/// pipeline delay -- the data-dependent AREA term pinned per-class on the fixtures
+/// (`tests/phase8_gate.rs`).
 pub struct StreamingSession {
     front: StreamFrontEnd,
     pipeline: FastPipeline,
@@ -1328,18 +1364,20 @@ impl StreamingSession {
         // preemph/noise gates (the offline driver's, fast/driver.rs:296-301). Both no-ops on
         // tier2 (preemph -0.97 <= 0, noise_seed -3 <= 0). The front-end gates preemph on
         // `> 0.0` internally (passed the raw ratio); noise maps `noise_seed > 0 ?
-        // noise_ratio : 0.0`. THE HARD ASSERTION (T2-review rider): a seeding config
-        // (`noise_seed > 0`) with a NEGATIVE `noise_ratio` would make the offline
-        // `apply_noise(ratio)` (unconditional on the seed) and the front-end's
-        // `noise_magnitude > 0.0` gate DISAGREE in shape -- caught loudly here.
+        // noise_ratio : 0.0`. THE TYPED BAIL (T2-review rider; T5-review promoted it from an
+        // assert! to a bail! for consistency with the four sibling construction bails): a
+        // seeding config (`noise_seed > 0`) with a NEGATIVE `noise_ratio` would make the
+        // offline `apply_noise(ratio)` (unconditional on the seed) and the front-end's
+        // `noise_magnitude > 0.0` gate DISAGREE in shape -- refused loudly here.
         let preemph = feature_cfg.preemph_ratio;
         let noise_magnitude = if feature_cfg.noise_seed > 0 {
-            assert!(
-                feature_cfg.noise_ratio >= 0.0,
-                "streaming: BLSTM_noise_ratio must be >= 0 when seeding (noise_seed > 0); the \
-                 offline apply_noise / front-end noise-gate SHAPES only agree for a \
-                 non-negative magnitude"
-            );
+            if feature_cfg.noise_ratio < 0.0 {
+                bail!(
+                    "streaming: BLSTM_noise_ratio must be >= 0 when seeding (noise_seed > 0); \
+                     the offline apply_noise / front-end noise-gate SHAPES only agree for a \
+                     non-negative magnitude"
+                );
+            }
             feature_cfg.noise_ratio
         } else {
             0.0
@@ -1354,6 +1392,16 @@ impl StreamingSession {
             preemph,
         )?;
         let output_size = net.output_size();
+        // Binary-SAD only: the decision layer reads posterior column 0 and the offline
+        // `results.len()` == rows*cols tail quirk would differ for a wider posterior. Refuse
+        // loudly at construction (the sibling of `StreamDecision::push_rows`' cols==1
+        // debug_assert, promoted to a construction bail per the T5 review).
+        if output_size != 1 {
+            bail!(
+                "streaming: only the binary SAD net (output_size 1) is supported; got \
+                 {output_size} (the decision layer reads column 0 only)"
+            );
+        }
         let overlap = StreamOverlap::new(window_size, window_shift, ssr, output_size);
 
         // Derived latency components (config-derived; `derived_latency_bound_s` sums these +
