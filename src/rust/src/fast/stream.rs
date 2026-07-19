@@ -58,7 +58,7 @@ use anyhow::{Result, bail};
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 
-use super::nn::FastMatrix;
+use super::nn::{FastBlstm, FastMatrix, window_begin, window_end};
 use super::pipeline::FastPipeline;
 
 /// The chunked-input SAD feature front-end. See the module docs for the bit-equal
@@ -318,6 +318,265 @@ impl StreamFrontEnd {
             self.pgram
                 .drain(0..(keep_from - self.pgram_base) * self.bins);
             self.pgram_base = keep_from;
+        }
+    }
+}
+
+/// The streaming OVERLAP engine (Phase 8 Task 3): the online twin of
+/// [`FastBlstm::feed_forward_overlap`]. It consumes the (ALREADY-NORMALIZED) feature-row
+/// stream [`StreamFrontEnd`] emits, fires each overlap window as soon as its input span
+/// exists, accumulates per-output-row sums + window counts in a rolling ring, and emits
+/// each output row (posterior = sum/count) the moment its LAST covering window has fired.
+///
+/// BIT-EQUAL CONTRACT (spec S2, the task gate). The concatenation of every
+/// [`push_rows`](Self::push_rows) return plus the [`flush`](Self::flush) tail equals the
+/// offline `feed_forward_overlap` on the WHOLE sequence, BIT-IDENTICAL -- including the
+/// `0/0 = NaN` uncovered rows -- at any row-push granularity. Two properties carry it:
+///  1. IDENTICAL WINDOW SET. The offline loop steps `jj` by `window_shift` while `jj <
+///     input_rows`, each window spanning `[window_begin(jj), window_end(begin, ..,
+///     input_rows)]`. `begin` is `input_rows`-independent; the end-clamp is the only
+///     `input_rows`-dependent part. A window fires HERE mid-stream once `begin +
+///     2*window_size < rows_so_far` -- exactly the offline UNCLAMPED windows (the clamp
+///     branch of [`window_end`] is then dead, so the span matches); the CLAMPED tail
+///     windows (largest `jj`, `begin + 2*window_size >= input_rows`) fire at
+///     [`flush`](Self::flush) with the true total. Every offline window fires exactly once
+///     (the fire gate assumes `window_size >= ssr`, true for every real overlap config --
+///     the SAD gate config has window 163, ssr 4).
+///  2. IDENTICAL ACCUMULATION ORDER. The `+=` is order-sensitive in f32; a row covered by
+///     several windows must sum them in `jj`-ascending order. `window_begin` is monotonic
+///     in `jj`, so windows become fireable in `jj` order and flush windows (the `jj` tail)
+///     come strictly after every mid-stream window -- so each row accumulates in the
+///     offline order, through the SHARED [`FastBlstm::overlap_window_step`].
+///
+/// FINALIZATION. Output row `orow` is covered by windows with `obeg <= orow` (`obeg =
+/// begin/ssr`); its LAST covering window is the largest `jj` with `obeg(jj) <= orow`.
+/// After firing a window, the next window is `next_jj`; no window at or beyond it covers a
+/// row `< obeg(next_jj)` (monotone `obeg`), so rows `[emitted, obeg(next_jj))` are final
+/// and emitted. The structural emission lag is a FULL window: `orow` finalizes no later
+/// than input frame `orow*ssr + 2*window_size` (+ up to `ssr` grid slack).
+///
+/// SEAM (mono, spec S1.2). `push_rows` receives rows ALREADY type-1 normalized: type-1 is
+/// a per-row affine (`(x - mean_col)/std_col`, [`super::nn::external_normalize_f32`]), so
+/// it commutes with row-streaming -- the front-end/caller applies it per row before
+/// pushing, keeping this layer purely about windowing. The whole-sequence type -1
+/// self-normalization is NOT streamable and the session bails on it upstream (Task 1/T5).
+/// Output rows start from ZERO (channel 0; the cross-channel `result_vec` seeding is a
+/// multi-channel concern deferred by the mono-first design).
+pub struct StreamOverlap {
+    // Window geometry (from the SAD driver's getBLSTMParam, in periodogram-frame units).
+    window_size: usize,
+    window_shift: usize,
+    ssr: usize,
+    output_size: usize, // posterior width == emitted/accumulator column count
+
+    // Input feature-row ring: absolute row `i` lives at `input_ring[(i - input_base)*cols]`.
+    input_cols: usize, // 0 until the first push establishes it
+    input_ring: Vec<f32>,
+    input_base: usize,
+    rows_so_far: usize, // total input feature rows pushed
+
+    // Window cursor + output accumulator ring. `acc_base == emitted` invariant (emitted
+    // rows are drained immediately), so absolute output row `i` lives at
+    // `acc[(i - acc_base)*output_size]`, count at `counts[i - acc_base]`.
+    next_jj: usize,
+    acc: Vec<f32>,
+    counts: Vec<f32>,
+    acc_base: usize,
+    emitted: usize,
+    finished: bool,
+}
+
+impl StreamOverlap {
+    /// Build the overlap engine from the SAD net's window geometry: `net_window`
+    /// (`window_size`) + `net_shift` (`window_shift`) in periodogram-frame units, the
+    /// whole-BLSTM `ssr` ([`FastBlstm::sub_sampling_ratio`]), and the posterior
+    /// `output_size` ([`FastBlstm::output_size`]). `window_shift >= 1` and `ssr >= 1` are
+    /// required (the driver's `get_blstm_param` floors the shift at 1 and bails the
+    /// non-overlap path); `window_size >= ssr` is assumed (every real overlap config).
+    pub fn new(
+        net_window: usize,
+        net_shift: usize,
+        ssr: usize,
+        output_size: usize,
+    ) -> StreamOverlap {
+        debug_assert!(
+            net_shift >= 1,
+            "window_shift must be >= 1 (else the window loop stalls)"
+        );
+        debug_assert!(ssr >= 1, "ssr must be >= 1");
+        StreamOverlap {
+            window_size: net_window,
+            window_shift: net_shift,
+            ssr,
+            output_size,
+            input_cols: 0,
+            input_ring: Vec::new(),
+            input_base: 0,
+            rows_so_far: 0,
+            next_jj: 0,
+            acc: Vec::new(),
+            counts: Vec::new(),
+            acc_base: 0,
+            emitted: 0,
+            finished: false,
+        }
+    }
+
+    /// Buffer a chunk of ALREADY-NORMALIZED feature rows, fire every window whose input
+    /// span now exists (`begin + 2*window_size < rows_so_far`), and return the output rows
+    /// that finalized this call (`k x output_size`, `k == 0` when nothing completed).
+    pub fn push_rows(&mut self, rows: &FastMatrix, net: &mut FastBlstm) -> FastMatrix {
+        if rows.rows > 0 {
+            if self.input_cols == 0 {
+                self.input_cols = rows.cols;
+            }
+            debug_assert_eq!(
+                rows.cols, self.input_cols,
+                "push_rows col count must be stable"
+            );
+            self.input_ring.extend_from_slice(&rows.data);
+            self.rows_so_far += rows.rows;
+        }
+
+        // Fire every window whose UNCLAMPED span now fits (the clamp branch of window_end
+        // is dead here, so the span == the offline unclamped span for these windows).
+        loop {
+            let begin = window_begin(self.next_jj, self.window_size, self.ssr);
+            if begin + 2 * self.window_size >= self.rows_so_far {
+                break;
+            }
+            let end = window_end(begin, self.window_size, self.ssr, self.rows_so_far);
+            self.fire(net, begin, end + 1 - begin);
+            self.next_jj += self.window_shift;
+        }
+        self.trim_input_ring();
+
+        // Rows below the next (unfired) window's obeg can never be covered again -> final.
+        let frontier = window_begin(self.next_jj, self.window_size, self.ssr) / self.ssr;
+        self.emit_upto(frontier)
+    }
+
+    /// EOS: fire the remaining CLAMPED tail windows (partial windows snapped to the true
+    /// total) and emit every remaining output row -- rows uncovered by any window divide
+    /// `0/0 -> NaN`, exactly as the offline post-loop division does. Idempotent (a second
+    /// call returns empty). After `flush`, the full concatenation is the offline overlap.
+    pub fn flush(&mut self, net: &mut FastBlstm) -> FastMatrix {
+        if self.finished {
+            return FastMatrix::zeros(0, self.output_size);
+        }
+        self.finished = true;
+
+        let total = self.rows_so_far;
+        while self.next_jj < total {
+            let begin = window_begin(self.next_jj, self.window_size, self.ssr);
+            let end = window_end(begin, self.window_size, self.ssr, total);
+            let length_seq = end + 1 - begin;
+            if length_seq / self.ssr > 0 {
+                self.fire(net, begin, length_seq);
+            }
+            self.next_jj += self.window_shift;
+        }
+
+        // The offline output has `input_rows / ssr` rows (== the driver's real_vec_size,
+        // and == the max covered row for every overlap config); emit all remaining.
+        let output_rows = total / self.ssr;
+        debug_assert!(
+            self.acc_base + self.counts.len() <= output_rows,
+            "window coverage {} exceeds derived output rows {output_rows}",
+            self.acc_base + self.counts.len()
+        );
+        self.emit_upto(output_rows)
+    }
+
+    /// Forward one window (`input[begin, begin+length_seq)`) and accumulate it into the
+    /// ring at `obeg = begin/ssr`, via the SHARED [`FastBlstm::overlap_window_step`] so
+    /// the forward + `+=` are bit-identical to the offline path. A `length_short == 0`
+    /// window is skipped (matching the offline `if length_short > 0` gate).
+    fn fire(&mut self, net: &mut FastBlstm, begin: usize, length_seq: usize) {
+        let length_short = length_seq / self.ssr;
+        if length_short == 0 {
+            return;
+        }
+        let cols = self.input_cols;
+        let lo = (begin - self.input_base) * cols;
+        let hi = (begin + length_seq - self.input_base) * cols;
+        let block = FastMatrix {
+            data: self.input_ring[lo..hi].to_vec(),
+            rows: length_seq,
+            cols,
+        };
+        let obeg = begin / self.ssr;
+        self.grow_acc(obeg + length_short);
+        debug_assert!(
+            obeg >= self.acc_base,
+            "window obeg underruns the accumulator ring"
+        );
+        let obeg_local = obeg - self.acc_base;
+        let got = net.overlap_window_step(
+            &block,
+            obeg_local,
+            &mut self.acc,
+            &mut self.counts,
+            self.output_size,
+        );
+        debug_assert_eq!(got, length_short, "stream overlap window output-row count");
+    }
+
+    /// Grow the accumulator ring so it holds absolute output rows `[acc_base, top)` (new
+    /// rows sum 0 / count 0 -> `NaN` on division for the uncovered ones).
+    fn grow_acc(&mut self, top: usize) {
+        let need = top - self.acc_base;
+        if self.counts.len() < need {
+            self.counts.resize(need, 0.0);
+            self.acc.resize(need * self.output_size, 0.0);
+        }
+    }
+
+    /// Emit finalized output rows `[emitted, frontier)` as `sum/count` (NaN for count 0),
+    /// draining them from the ring. Returns a `(frontier-emitted) x output_size` matrix.
+    fn emit_upto(&mut self, frontier: usize) -> FastMatrix {
+        if frontier <= self.emitted {
+            return FastMatrix::zeros(0, self.output_size);
+        }
+        self.grow_acc(frontier); // pad any uncovered gap/tail rows (count 0)
+        let cols = self.output_size;
+        let n = frontier - self.emitted;
+        let mut data = Vec::with_capacity(n * cols);
+        for row in self.emitted..frontier {
+            let li = row - self.acc_base;
+            let cnt = self.counts[li];
+            for c in 0..cols {
+                data.push(self.acc[li * cols + c] / cnt);
+            }
+        }
+        let drop = frontier - self.acc_base;
+        self.acc.drain(0..drop * cols);
+        self.counts.drain(0..drop);
+        self.acc_base = frontier;
+        self.emitted = frontier;
+        FastMatrix {
+            data,
+            rows: n,
+            cols,
+        }
+    }
+
+    /// Drop input-ring rows no future window reads. The next window to fire is `next_jj`;
+    /// its (and every later window's) leftmost input row is `window_begin(next_jj)`. Capped
+    /// at `rows_so_far`: with a large shift the next window can begin BEYOND the buffered
+    /// rows (a gap not yet arrived), so we drop all buffered rows but never past what
+    /// exists (the ring stays contiguous `[input_base, rows_so_far)`; `input_base` never
+    /// passes the pending window's begin, so its rows are retained once they arrive).
+    fn trim_input_ring(&mut self) {
+        if self.input_cols == 0 {
+            return;
+        }
+        let keep_from =
+            window_begin(self.next_jj, self.window_size, self.ssr).min(self.rows_so_far);
+        if keep_from > self.input_base {
+            self.input_ring
+                .drain(0..(keep_from - self.input_base) * self.input_cols);
+            self.input_base = keep_from;
         }
     }
 }
