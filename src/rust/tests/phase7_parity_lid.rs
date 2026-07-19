@@ -380,6 +380,38 @@ fn fast_dispatch_routes_algo6_to_fast_twin() {
     );
 }
 
+/// T6b (bag_of_processors.rs): `set_weights` on a fast-dispatched Twin conf must bail
+/// loudly instead of the pre-fix silent `Ok(())` no-op -- the same closed hole as the
+/// FastSpectral case (`bag_of_processors.rs`'s own `fast_spectral_set_weights_bails_loudly`
+/// unit test), pinned here too since `FastTwinLid` is the OTHER fast arm sharing that match
+/// statement and needs its own construction fixture (`twin_map_fast`, Mode-7-shaped).
+#[test]
+fn fast_twin_set_weights_bails_loudly() {
+    let mut m = twin_map_fast();
+    let mut bag =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
+    assert!(matches!(bag.processor(0), Processor::FastTwinLid(_)));
+
+    let dummy_sad = vec![0.0; 4];
+    let lidw = lid_weights();
+    match bag.set_weights(0, &[dummy_sad, lidw]) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("Inference_Path"),
+                "error must name Inference_Path, got: {msg}"
+            );
+            assert!(
+                msg.contains("BLSTM_weightsFile"),
+                "error must name the config-time weight-file mechanism, got: {msg}"
+            );
+        }
+        Ok(()) => {
+            panic!("set_weights on a fast-dispatched Twin conf must bail, not silently no-op")
+        }
+    }
+}
+
 #[test]
 fn fast_bails_on_training_shaped_config() {
     // Rider: Inference_Path fast + a MULTI-mode (training) run with a training-shaped

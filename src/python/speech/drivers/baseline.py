@@ -486,9 +486,13 @@ def _score_sad_pack_on_test(
     """Score one SAD weight pack on the held-out test split end to end: run the engine
     (scored `-m`) over the test listing with `Dump_Directory` set so it writes one VRCTS
     hypothesis xml per file, then pool `dcf` over (`.part.xml` ref windowed to the hyp span,
-    engine hyp). The pack (a trained `best_sad.bin` or the untrained `sad_seed.bin`) is
-    loaded via `set_weights` -- the SAME scorer measures both the trained model and its own
-    from-scratch init on the identical test set (the direction-safe DCF improvement).
+    engine hyp). On `Inference_Path exact` (the default), the pack (a trained `best_sad.bin`
+    or the untrained `sad_seed.bin`) is loaded via `set_weights` -- the SAME scorer measures
+    both the trained model and its own from-scratch init on the identical test set (the
+    direction-safe DCF improvement). On `Inference_Path fast`, `set_weights` is SKIPPED
+    (bag_of_processors.rs T6b: it now bails loudly on a fast conf instead of the old silent
+    no-op) -- `base_cfg["BLSTM_weightsFile"]` must already point at `pack_path` for that case
+    (the caller's responsibility; see `tests/pyo3/test_phase7_parity.py::_score_sad`).
 
     Returns `(DcfReport | None, dump_dir)`; `None` only if no hyp xml was produced (a
     structurally empty test set). Mirrors `drivers.test.evaluate`'s engine-driving shape
@@ -508,7 +512,15 @@ def _score_sad_pack_on_test(
     os.chdir(workdir)
     try:
         engine = speech_rs.Engine([eval_config.name], "-m")
-        engine.set_weights(0, [list(read_weight_vector(pack_path))])
+        # `Inference_Path fast` processors load weights ONLY at construction, from the
+        # config's own BLSTM_weightsFile key; `set_weights` now bails loudly on them
+        # (bag_of_processors.rs T6b) instead of the old silent no-op. Skip the call on
+        # fast: `pack_path` is already the config-time-injected pack there (callers point
+        # BLSTM_weightsFile at it before building this config), so the call is redundant
+        # on fast and load-bearing only on exact (whose BLSTM_weightsFile is the arm's seed
+        # pack, not `pack_path`).
+        if cfg.get("Inference_Path", "exact") != "fast":
+            engine.set_weights(0, [list(read_weight_vector(pack_path))])
         engine.run()
     finally:
         os.chdir(prev)

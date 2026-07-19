@@ -107,6 +107,18 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// the f32 net + workspace), so the bag's `#[derive(Clone)]` still holds; the clone
 /// sites (grad-check snapshot, per-lane training fan-out) are exact-path-only, so a
 /// fast-variant deep copy is not on any hot path.
+///
+/// T6b AUDIT (Phase 7): "inert defaults" above is NOT one blanket judgment -- each
+/// Vec-valued dispatch method was re-examined per its OWN call sites. `set_weights` was
+/// found unsafe (a real seam caller can plausibly expect it to inject trained weights,
+/// unlike the algo-0/1/2 case) and now bails loudly instead of silently discarding the
+/// caller's data -- see its doc comment. `get_weights`/`get_weights_derivatives` and the
+/// `save_weights`/`update_weights` save-side arms stay inert defaults -- see their doc
+/// comments for why each is safe. `reset_weights_derivatives` has no dispatch here at
+/// all: it lives on `Network`/layer internals, invoked automatically from within a
+/// net's OWN `feed_backward`; the fast drivers never call `feed_backward` (no backward
+/// implementation exists), so it is unreachable for them by construction, not by a
+/// gate this file maintains.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Processor {
@@ -545,6 +557,15 @@ impl BagOfProcessors {
     /// through to the legacy's EMPTY `vector<Eigen::VectorXd>()` default
     /// (`:100`) -- an empty Vec, unlike `isBackPropActivated`'s single-`false`
     /// default.
+    ///
+    /// T6b AUDIT: kept as an inert default for the fast variants too (empty Vec,
+    /// no bail) -- unlike `set_weights`'s pre-fix no-op, an empty READ cannot be
+    /// mistaken for real data: the return value itself is the "nothing here"
+    /// signal, self-describing to any caller that inspects it. This method is also
+    /// called unconditionally by internal bookkeeping (the `epoch_weight_trace_lid`
+    /// test-support snapshot reads `get_weights(0)` every epoch regardless of
+    /// processor kind); making it fallible would ripple into that internal
+    /// plumbing for no safety gain.
     pub fn get_weights(&self, pos: usize) -> Vec<Vec<f64>> {
         use crate::tasks::segmenter::Segmenter;
         match &self.processors[pos] {
@@ -565,6 +586,17 @@ impl BagOfProcessors {
     /// `new_weights[0]` to the net's `setWeights`; algo 6 forwards `at(0)` to
     /// the SAD net and `at(1)` to the LID net (`:110-113`); algo 0/1/2 (no
     /// legacy `else` branch) are a no-op.
+    ///
+    /// T6b AUDIT (Phase 7): the fast variants USED TO share the algo-0/1/2
+    /// `Ok(())` no-op arm below, but that convention does not transfer. Algo 0/1/2
+    /// genuinely have no weight concept -- no plausible caller expects a
+    /// VRCTS/TDC/LTSV `set_weights` to do anything. A fast driver, in contrast, IS
+    /// the trainable-net counterpart of an exact algo (its weights are simply
+    /// fixed after construction), so a seam caller injecting a freshly-trained
+    /// pack via `set_weights` is a realistic mistake, not a misuse: the T6 SAD run
+    /// silently scored 24/24 held-out files against stale seed weights this exact
+    /// way, and `Ok(())` gave no signal the injection had been dropped. Bail
+    /// loudly instead -- see the fast arm below for the supported mechanism.
     pub fn set_weights(&mut self, pos: usize, new_weights: &[Vec<f64>]) -> Result<()> {
         use crate::tasks::segmenter::Segmenter;
         match &mut self.processors[pos] {
@@ -575,13 +607,22 @@ impl BagOfProcessors {
                 seg.set_weights(&new_weights[0])?;
                 seg.set_weights_lid(&new_weights[1])
             }
-            // Fast SAD has no settable f64 weight surface (inference-only, weights
-            // fixed at construction) -- no-op like the non-NN variants.
-            Processor::Vrcts(_)
-            | Processor::Tdc(_)
-            | Processor::Ltsv(_)
-            | Processor::FastSpectral(_)
-            | Processor::FastTwinLid(_) => Ok(()),
+            // algo 0/1/2 have no weight concept at all (no legacy `else` branch) --
+            // genuinely inert, matching the legacy exactly. See the T6b audit note
+            // above for why this convention does NOT extend to the fast arms below.
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
+            // Fast SAD/LID (`Inference_Path fast`) load weights ONLY at construction,
+            // via the config-time `BLSTM_weightsFile` / `BLSTM_LID_weightsFile` keys
+            // (`load_weights_file`) -- there is no settable-after-construction f64
+            // weight surface. Bail loudly rather than silently discarding the
+            // caller's weights (T6b: closes the silent-seam-no-op hole).
+            Processor::FastSpectral(_) | Processor::FastTwinLid(_) => bail!(
+                "set_weights: config {pos} runs Inference_Path `fast`, which exposes no \
+                 settable-after-construction weight surface (fast drivers load weights \
+                 only at construction, via the config-time BLSTM_weightsFile / \
+                 BLSTM_LID_weightsFile keys). Point those keys at the trained pack and \
+                 reconstruct the Engine instead of calling set_weights on a fast config."
+            ),
         }
     }
 
@@ -611,6 +652,19 @@ impl BagOfProcessors {
     /// 3/4/5 return a single-element vec of the net's `Nx2` derivative matrix;
     /// algo 6 the paired `[regular, LID]` vec (`:139-142`); everything else
     /// falls through to the legacy's EMPTY default (`:143-144`).
+    ///
+    /// T6b AUDIT: kept as an inert default for the fast variants too (empty Vec,
+    /// no bail), DESPITE being called UNCONDITIONALLY for every conf on every file
+    /// of every epoch (`corpus_processor.rs::run_epoch`'s per-file harvest loop,
+    /// which does not gate on `is_back_prop_activated`) -- making this fallible
+    /// would break that internal harvest for a fast conf even during a plain
+    /// inference/scoring run (Solo/Image/Multi with training off), which is
+    /// exactly the CI parity path this phase depends on. It is safe: the empty
+    /// Vec this returns is folded into the `derivs` map at `pos` but NEVER
+    /// indexed back out for a fast/non-NN `pos` (`save_weights`/`update_weights`'s
+    /// matching arms don't touch `derivs[&pos]` at all for those confs), so an
+    /// empty read here cannot silently corrupt a gradient sum a training caller
+    /// would consume -- it is inert by construction, not merely by convention.
     pub fn get_weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.get_weights_derivatives()],
@@ -636,6 +690,12 @@ impl BagOfProcessors {
     /// and saves BOTH nets -- the LID save via `saveWeightsLID`, which prefixes
     /// the filename with `LID_` internally (`:176`).
     /// Arity mirrors the legacy signature (`:148`) verbatim.
+    ///
+    /// T6b AUDIT: the fast arm's no-op is genuinely unreachable-in-spirit, not
+    /// merely unexercised -- `is_back_prop_activated` hardcodes `false` for both
+    /// fast variants, so a fast conf never accumulates a real save criterion, and
+    /// this arm (grouped with algo 0/1/2) never reads `derivs`/`stats` regardless.
+    /// Matches the legacy's own algo-0/1/2 no-branch shape; no bail needed.
     #[allow(clippy::too_many_arguments)]
     fn save_weights(
         &mut self,
@@ -704,6 +764,11 @@ impl BagOfProcessors {
     /// gate is LIVE for both LID arms (the commented-out `saveCriterion > 0`
     /// skip at `:199-203` is dead: the update runs unconditionally, -1.0 cost
     /// included).
+    ///
+    /// T6b AUDIT: same verdict as `save_weights` -- the fast arm's no-op is
+    /// unreachable-in-spirit (`is_back_prop_activated` hardcodes `false`), and
+    /// this arm never reads `derivs` for a fast/non-NN `pos` regardless. No bail
+    /// needed.
     fn update_weights(
         &mut self,
         pos: usize,
@@ -1713,5 +1778,47 @@ mod tests {
             ),
             Ok(_) => panic!("fast + algo 4 must bail (no fast algo-4 driver)"),
         }
+    }
+
+    /// T6b: `set_weights` on a fast-dispatched conf must bail loudly (the silent
+    /// `Ok(())` no-op used to let a seam caller believe an injected weight pack had
+    /// taken effect when it was discarded -- the T6 SAD-run failure mode). The error
+    /// text must name `Inference_Path` and the config-time weight-file mechanism, so
+    /// a caller hitting this in practice is pointed at the fix, not just told "no".
+    #[test]
+    fn fast_spectral_set_weights_bails_loudly() {
+        let mut fast3 = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+        fast3.insert("BLSTM_weightsFile".to_string(), String::new());
+        fast3.insert("Inference_Path".to_string(), "fast".to_string());
+        let mut bag =
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        assert!(matches!(bag.processor(0), Processor::FastSpectral(_)));
+
+        match bag.set_weights(0, &[vec![1.0, 2.0, 3.0]]) {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("Inference_Path"),
+                    "error must name Inference_Path, got: {msg}"
+                );
+                assert!(
+                    msg.contains("BLSTM_weightsFile"),
+                    "error must name the config-time weight-file mechanism, got: {msg}"
+                );
+            }
+            Ok(()) => panic!("set_weights on a fast-dispatched conf must bail, not silently no-op"),
+        }
+    }
+
+    /// T6b sibling-audit control: the SAME call on the algo-0/1/2 non-NN arms (which
+    /// genuinely have no weight concept) must stay the legacy-matching `Ok(())` no-op --
+    /// the fast-arm bail must not have widened to cover them too.
+    #[test]
+    fn non_nn_set_weights_stays_inert_ok() {
+        let tdc = with_bag_keys(load_config("phase2b/tdc.config"), 1);
+        let mut cfgs = vec![tdc];
+        let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        assert!(matches!(bag.processor(0), Processor::Tdc(_)));
+        assert!(bag.set_weights(0, &[vec![1.0, 2.0, 3.0]]).is_ok());
     }
 }

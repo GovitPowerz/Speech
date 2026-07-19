@@ -80,6 +80,20 @@ _TEST_LISTING: dict[str, str] = {
     "sad": "sad_test_subset.flst",
 }
 
+# Exact-path sanity pins (T6 review): `_RECIPES` + `seed=0` are deterministic (the phase-6
+# determinism gates), so the EXACT-path metric on a freshly-trained checkpoint reproduces
+# bit-for-bit run to run. Pinning it turns silent checkpoint-provenance drift (a stale cache,
+# or a recipe/seed edit that changes the trained weights without updating this pin) into a
+# loud failure here, instead of a fast-vs-exact parity check that keeps passing against the
+# WRONG checkpoint. Values rounded to 4dp, matching the `:.4f`/`:.6f` print formatting below.
+# Re-derive deliberately (never just widen/overwrite on a red run without checking WHY --
+# `rm -rf data/phase7_parity_cache/<arm>` first, per `_ensure_arm`'s cache-staleness note).
+_EXPECTED_EXACT_LID_ERROR: dict[str, float] = {
+    "lid-features": 72.9167,
+    "lid-phseq": 84.4444,
+}
+_EXPECTED_EXACT_SAD_DCF_AT_0_5 = 0.2500
+
 
 @dataclass
 class _Arm:
@@ -100,7 +114,15 @@ def _ensure_arm(arm: str) -> _Arm:
     """Train the arm's checkpoint on the EXACT path (phase-6 subset recipe) if the cache is
     cold, else reuse it. The `.parity_ready.json` sentinel marks a COMPLETE run (written only
     after run_baseline returns), so an interrupted training leaves no sentinel and the next
-    call retrains from a clean dir."""
+    call retrains from a clean dir.
+
+    CACHE-STALENESS CAVEAT (T6 review): the sentinel guards INTERRUPTED runs only -- it says
+    nothing about whether `_RECIPES[arm]`, the training code (`run_baseline`/`train_modern`/
+    the arm's TOML), or `_EXPECTED_EXACT_LID_ERROR`/`_EXPECTED_EXACT_SAD_DCF_AT_0_5` have
+    drifted apart since the cache was written. A warm cache is reused as-is even if the recipe
+    or training code changed underneath it. Touching training code or an arm's recipe requires
+    `rm -rf data/phase7_parity_cache/<arm>` to force a clean retrain before trusting this
+    tier's pins again."""
     out_dir = (_CACHE / arm).resolve()
     ckpt = out_dir / "checkpoint"
     sentinel = out_dir / ".parity_ready.json"
@@ -133,15 +155,21 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
 
     THE WEIGHT KEYS ARE REPOINTED AT THE TRAINED CHECKPOINT (not the base config's seed
     pack): the fast drivers load weights ONLY at construction via `load_weights_file`
-    (`BLSTM_weightsFile`/`BLSTM_LID_weightsFile`), and `BagOfProcessors::set_weights` is a
-    SILENT NO-OP for `Processor::FastSpectral`/`FastTwinLid` (`bag_of_processors.rs:583`) --
-    so the seam's `set_weights(trained_pack)` does nothing on the fast path and it would
-    otherwise score the config's SEED weights while exact scores the injected TRAINED ones (a
-    100%-divergence artefact, NOT a real parity failure). Loading trained weights from the
-    config is the fast path's only injection mechanism (and how a real fast deployment loads
-    them), and it is identical for both paths -- so this is the apples-to-apples comparison.
-    In Mode 7 the SAD net is frozen (`best_sad == sad_seed`), so `BLSTM_weightsFile` is
-    weight-neutral there; `BLSTM_LID_weightsFile` carries the trained LID net."""
+    (`BLSTM_weightsFile`/`BLSTM_LID_weightsFile`) -- there is no settable-after-construction
+    f64 weight surface, so `BagOfProcessors::set_weights` now BAILS LOUDLY on
+    `Processor::FastSpectral`/`FastTwinLid` (T6b, `bag_of_processors.rs`'s `set_weights`
+    match arms; pre-T6b it was a SILENT NO-OP, which is the failure mode this repoint
+    guards against -- the seam would otherwise score the config's SEED weights while exact
+    scores the injected TRAINED ones, a 100%-divergence artefact, NOT a real parity
+    failure). `evaluate()`/`_score_packs_on_test`/`_score_sad_pack_on_test` all SKIP their
+    `set_weights` call under `Inference_Path fast` (also T6b) specifically because this
+    repoint already did the injection at config time -- the two mechanisms are the same
+    injection, so skipping is semantics-preserving, not a workaround. Loading trained
+    weights from the config is the fast path's only injection mechanism (and how a real
+    fast deployment loads them), and it is identical for both paths -- so this is the
+    apples-to-apples comparison. In Mode 7 the SAD net is frozen (`best_sad == sad_seed`),
+    so `BLSTM_weightsFile` is weight-neutral there; `BLSTM_LID_weightsFile` carries the
+    trained LID net."""
     cfg = dict(parse_legacy_config(a.base_config.read_text()))
     cfg["fileslisting"] = a.test_listing.name
     cfg["BLSTM_weightsFile"] = str((a.ckpt / "best_sad.bin").resolve())
@@ -201,6 +229,13 @@ def _run_lid_parity(arm: str) -> None:
         f"score_fast_s={a.timings.get('score_fast_s', 0):.2f}"
     )
 
+    # HARD (T6 review): the EXACT-path lid_error matches the pinned phase-6 checkpoint value
+    # -- catches checkpoint-provenance drift (stale/mismatched cache, a recipe/seed edit)
+    # that would otherwise let the fast-vs-exact comparison below pass against the wrong
+    # checkpoint silently. See `_EXPECTED_EXACT_LID_ERROR`'s note before touching this pin.
+    expected = _EXPECTED_EXACT_LID_ERROR[arm]
+    assert round(err_e, 4) == expected, f"{arm}: exact-path lid_error={err_e:.4f} != pinned {expected} (stale/mismatched checkpoint cache?)"
+
     # HARD (R1 drift detector): identical per-file argmax fast-vs-exact. If this ever fails,
     # STOP and adjudicate with the printed disagree count + files -- do NOT widen.
     assert len(disagree) == 0, f"{arm}: {len(disagree)} of {len(files_e)} files flipped argmax fast-vs-exact (indices {disagree.tolist()[:20]})"
@@ -238,10 +273,13 @@ def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, Pat
     dir (the per-file hyp xmls, for the boundary comparison)."""
     cfg = dict(parse_legacy_config(a.base_config.read_text()))
     # Point the weight-file key at the TRAINED checkpoint: the fast SAD driver loads weights
-    # only at construction (`set_weights` is a no-op on `Processor::FastSpectral`, see
-    # `_eval_config`'s note), so both paths must load the trained pack from the config to
-    # score the same net. `_score_sad_pack_on_test` also `set_weights`-injects the same pack
-    # (redundant on exact, inert on fast) -- both end at the trained checkpoint.
+    # only at construction (`set_weights` now BAILS LOUDLY on `Processor::FastSpectral`,
+    # T6b -- see `_eval_config`'s note), so both paths must load the trained pack from the
+    # config to score the same net. `_score_sad_pack_on_test` also `set_weights`-injects the
+    # same pack on exact (redundant there -- config-time injection already did it -- but
+    # load-bearing for `run_baseline`'s OWN internal exact-only scoring calls, which do NOT
+    # repoint BLSTM_weightsFile this way); on fast it SKIPS the call entirely (T6b) since
+    # the config repoint above is that path's only, already-sufficient injection.
     cfg["BLSTM_weightsFile"] = str((a.ckpt / "best_sad.bin").resolve())
     cfg["Inference_Path"] = inference_path
     dump_dir = a.out_dir / f"parity_sad_{tag}"
@@ -290,6 +328,15 @@ def test_sad_metric_parity() -> None:
         f"dcf_deltas={ {c: f'{d:.3e}' for c, d in dcf_deltas.items()} } "
         f"train_s={a.train_s:.1f} (cold={a.trained_now}) score_exact_s={a.timings.get('score_exact_s', 0):.2f} "
         f"score_fast_s={a.timings.get('score_fast_s', 0):.2f}"
+    )
+
+    # HARD (T6 review): the EXACT-path DCF@0.5 matches the pinned phase-6 checkpoint value --
+    # catches checkpoint-provenance drift (stale/mismatched cache, a recipe/seed edit) that
+    # would otherwise let the fast-vs-exact comparison below pass against the wrong checkpoint
+    # silently. See `_EXPECTED_EXACT_SAD_DCF_AT_0_5`'s note before touching this pin.
+    exact_dcf_0_5 = rep_e.by_collar(0.5).dcf
+    assert round(exact_dcf_0_5, 4) == _EXPECTED_EXACT_SAD_DCF_AT_0_5, (
+        f"sad: exact-path DCF@0.5={exact_dcf_0_5:.6f} != pinned {_EXPECTED_EXACT_SAD_DCF_AT_0_5} (stale/mismatched checkpoint cache?)"
     )
 
     # HARD (R1 drift detector): identical per-file segment count+types, identical boundary
