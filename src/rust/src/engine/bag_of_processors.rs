@@ -15,6 +15,7 @@ use crate::audio::{Audio, read_audio};
 use crate::cli::{Mode, ModeKind};
 use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
+use crate::fast::driver::{FastSpectralSegmenter, FastTwinLid};
 use crate::features::stats::InputStatistics;
 use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
@@ -92,6 +93,32 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// `large_enum_variant` allowed: the brief's signature is exact
 /// (`Spectral(BlstmSpectralSegmenter)`, no `Box`); boxing would change the public
 /// interface for a lint, not a correctness issue.
+///
+/// `FastSpectral` (Phase 7 Task 4) is the f32 fast-inference counterpart of
+/// `Spectral` (algo 3), selected by the `Inference_Path fast` config key. `FastTwinLid`
+/// (Phase 7 Task 5) is the f32 counterpart of `TwinLid` (algo 6), restricted to the
+/// Mode-7 phSeq/cep LID arm. Both are inference-only: their
+/// `getSegmentation`/`dumpDir`/cost/classif arms delegate to the fast driver, and their
+/// TRAINING arms (weights/derivatives/stats/save/update/isBackProp) group with the
+/// non-NN variants' inert defaults, since the fast path never trains (training stays
+/// exact f64 -- spec S1; the fast drivers expose no trainable f64 surface). `FastTwinLid`
+/// DOES surface `lid_row_data` (it writes the LID members), so the scored result row's
+/// confusion columns flow exactly as the exact Twin's. Both are `Clone` (deep-copying
+/// the f32 net + workspace), so the bag's `#[derive(Clone)]` still holds; the clone
+/// sites (grad-check snapshot, per-lane training fan-out) are exact-path-only, so a
+/// fast-variant deep copy is not on any hot path.
+///
+/// T6b AUDIT (Phase 7): "inert defaults" above is NOT one blanket judgment -- each
+/// Vec-valued dispatch method was re-examined per its OWN call sites. `set_weights` was
+/// found unsafe (a real seam caller can plausibly expect it to inject trained weights,
+/// unlike the algo-0/1/2 case) and now bails loudly instead of silently discarding the
+/// caller's data -- see its doc comment. `get_weights`/`get_weights_derivatives` and the
+/// `save_weights`/`update_weights` save-side arms stay inert defaults -- see their doc
+/// comments for why each is safe. `reset_weights_derivatives` has no dispatch here at
+/// all: it lives on `Network`/layer internals, invoked automatically from within a
+/// net's OWN `feed_backward`; the fast drivers never call `feed_backward` (no backward
+/// implementation exists), so it is unreachable for them by construction, not by a
+/// gate this file maintains.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Processor {
@@ -102,6 +129,8 @@ pub enum Processor {
     Signal(BlstmSignalSegmenter),
     Lid(BlstmSpectralLid),
     TwinLid(TwinBlstmSpectralLid),
+    FastSpectral(FastSpectralSegmenter),
+    FastTwinLid(FastTwinLid),
 }
 
 /// Per-channel LID result-row data (`seg._LID*` members): the `:338-349` scored
@@ -135,6 +164,8 @@ impl Processor {
             Processor::Signal(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::Lid(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::TwinLid(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::FastSpectral(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::FastTwinLid(s) => s.get_segmentation(audio, seg_per_chan, refs),
         }
     }
 
@@ -149,6 +180,8 @@ impl Processor {
             Processor::Signal(s) => s.dump_dir(),
             Processor::Lid(s) => s.dump_dir(),
             Processor::TwinLid(s) => s.dump_dir(),
+            Processor::FastSpectral(s) => s.dump_dir(),
+            Processor::FastTwinLid(s) => s.dump_dir(),
         }
     }
 
@@ -165,6 +198,12 @@ impl Processor {
             Processor::Signal(s) => s.cumulative_error().to_vec(),
             Processor::Lid(s) => s.cumulative_error(),
             Processor::TwinLid(s) => s.cumulative_error().to_vec(),
+            // Fast SAD is forward-only: cost is not harvested, so this is all-zeros
+            // (a documented divergence from the exact algo-3 driver).
+            Processor::FastSpectral(s) => s.cumulative_error().to_vec(),
+            // Fast Mode-7 LID: the SAD net is never run, so this is all-zeros (same as
+            // the exact Twin's Mode-7 `:1421`).
+            Processor::FastTwinLid(s) => s.cumulative_error().to_vec(),
         }
     }
 
@@ -178,6 +217,10 @@ impl Processor {
             Processor::Signal(s) => s.nb_of_classif().to_vec(),
             Processor::Lid(s) => s.nb_of_classif(),
             Processor::TwinLid(s) => s.nb_of_classif().to_vec(),
+            // Fast SAD is forward-only: all-zeros (see cumulative_error).
+            Processor::FastSpectral(s) => s.nb_of_classif().to_vec(),
+            // Fast Mode-7 LID: the SAD net is never run -> all-zeros.
+            Processor::FastTwinLid(s) => s.nb_of_classif().to_vec(),
         }
     }
 
@@ -195,6 +238,15 @@ impl Processor {
                 nb_of_classif: s.lid_nb_of_classif()[chan],
             }),
             Processor::TwinLid(s) => Some(LidRowData {
+                cumulative_error: s.lid_cumulative_error()[chan],
+                is_correct: s.is_lid_correct()[chan] as f64,
+                classification_errors: s.lid_classification_errors()[chan].clone(),
+                nb_of_classif: s.lid_nb_of_classif()[chan],
+            }),
+            // Fast Mode-7 LID writes the same LID members (langID-derived); the confusion
+            // columns flow exactly as the exact Twin's. `lid_cumulative_error`/
+            // `lid_nb_of_classif` are 0 (forward-only), a documented divergence.
+            Processor::FastTwinLid(s) => Some(LidRowData {
                 cumulative_error: s.lid_cumulative_error()[chan],
                 is_correct: s.is_lid_correct()[chan] as f64,
                 classification_errors: s.lid_classification_errors()[chan].clone(),
@@ -266,7 +318,12 @@ impl BagOfProcessors {
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
     ) -> Result<BagOfProcessors> {
-        let _ = mode; // accepted per legacy signature; not yet consulted (Task 5).
+        // Task 5: the fast+training rider consults the mode. Training runs only in Multi
+        // mode (the `-m`/`-M` epoch loop); Image/Solo/UnitTest drive inference via
+        // `get_segmentation`, so the training-shaped-config bail is Multi-gated (the brief's
+        // "inference/image/solo modes unaffected"). tier2/the SAD configs carry a training
+        // tail (Epochs/backprop) but run fast INFERENCE in Image mode -- must not bail.
+        let is_multi_mode = mode.kind == ModeKind::Multi;
 
         if configs.is_empty() {
             bail!("BagOfProcessors::from_configs: at least one config is required");
@@ -279,6 +336,17 @@ impl BagOfProcessors {
         let lock_files_dir = get_string_default(&configs[0], "LockFilesDir", "");
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
+
+        // Inference_Path (Phase 7 Task 4): `exact` (default, absent) selects the exact
+        // f64 drivers; `fast` selects the f32 fast-inference counterparts. A global
+        // key (read from configs[0], like File_Type/Audio_offset); any other value is
+        // a construction error (loud, not a silent fallback).
+        let inference_path = get_string_default(&configs[0], "Inference_Path", "exact");
+        let use_fast = match inference_path.as_str() {
+            "exact" => false,
+            "fast" => true,
+            other => bail!("Inference_Path `{other}` not recognized (expected `exact` or `fast`)"),
+        };
 
         if file_type != 0 && file_type != 1 && file_type != 2 {
             // legacy: AudioStruct phSeq-N/mat read paths (file_type 3/4) -- unported.
@@ -304,6 +372,53 @@ impl BagOfProcessors {
             algo_types.push(algo);
             let pruning_thresh = get_f64_default(map, "Pruning_Threshold", 0.0)?;
             pruning_thresholds.push(pruning_thresh);
+
+            // Phase 7 Task 4/5: `Inference_Path fast` picks the f32 fast-inference driver
+            // per config -- algo 3 (spectral SAD, Task 4) and algo 6 (Mode-7 LID Twin,
+            // Task 5); everything else stays exact-only -> typed-bail. Load-weights
+            // mirrors the exact arms (`from_legacy(.., None)` then `load_weights_file`).
+            //
+            // RIDER: the fast path is inference-only (training stays exact f64), so a
+            // Multi-mode (training) run with a TRAINING-shaped config
+            // (`Neural_Networks_BackPropagation_Epochs > 0` OR a `BackPropagationActivated`-on
+            // net) is a config error under `Inference_Path fast` -- caught loudly here so the
+            // seam can't silently drop to a no-op fast "training" run. Guards both algo 3 and
+            // 6 (hardening the Task-4 surface too); inference/image/solo modes are unaffected
+            // (they carry the same training-tail configs but drive inference).
+            if use_fast {
+                if is_multi_mode {
+                    let epochs = get_i32_default(map, "Neural_Networks_BackPropagation_Epochs", 0)?;
+                    let bp_sad = get_bool_default(map, "BLSTM_BackPropagationActivated", false)?;
+                    let bp_lid =
+                        get_bool_default(map, "BLSTM_LID_BackPropagationActivated", false)?;
+                    if epochs > 0 || bp_sad || bp_lid {
+                        bail!(
+                            "Inference_Path fast is inference-only (training stays exact f64), but \
+                             this Multi-mode run is training-shaped (Epochs {epochs}, \
+                             BackPropagationActivated SAD={bp_sad}/LID={bp_lid}); train on the \
+                             exact path"
+                        );
+                    }
+                }
+                let processor = match algo {
+                    3 => {
+                        let mut seg = FastSpectralSegmenter::from_legacy(map, None)?;
+                        seg.load_weights_file(map)?;
+                        Processor::FastSpectral(seg)
+                    }
+                    6 => {
+                        let mut seg = FastTwinLid::from_legacy(map, None, None)?;
+                        seg.load_weights_file(map)?;
+                        Processor::FastTwinLid(seg)
+                    }
+                    other => bail!(
+                        "Inference_Path fast is not supported for algo {other} (only algo 3 \
+                         spectral SAD + algo 6 Mode-7 LID)"
+                    ),
+                };
+                processors.push(processor);
+                continue;
+            }
 
             let processor = match algo {
                 0 => Processor::Vrcts(VrctsPart::from_legacy(map)?),
@@ -425,7 +540,14 @@ impl BagOfProcessors {
                 seg.is_back_prop_activated(),
                 seg.is_back_prop_activated_lid(),
             ],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => vec![false],
+            // Fast SAD is inference-only (never trains), so it groups with the non-NN
+            // variants' `vector<bool>(1, false)` default -- the training dispatch never
+            // reaches a fast driver (training stays exact f64).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => vec![false],
         }
     }
 
@@ -435,6 +557,15 @@ impl BagOfProcessors {
     /// through to the legacy's EMPTY `vector<Eigen::VectorXd>()` default
     /// (`:100`) -- an empty Vec, unlike `isBackPropActivated`'s single-`false`
     /// default.
+    ///
+    /// T6b AUDIT: kept as an inert default for the fast variants too (empty Vec,
+    /// no bail) -- unlike `set_weights`'s pre-fix no-op, an empty READ cannot be
+    /// mistaken for real data: the return value itself is the "nothing here"
+    /// signal, self-describing to any caller that inspects it. This method is also
+    /// called unconditionally by internal bookkeeping (the `epoch_weight_trace_lid`
+    /// test-support snapshot reads `get_weights(0)` every epoch regardless of
+    /// processor kind); making it fallible would ripple into that internal
+    /// plumbing for no safety gain.
     pub fn get_weights(&self, pos: usize) -> Vec<Vec<f64>> {
         use crate::tasks::segmenter::Segmenter;
         match &self.processors[pos] {
@@ -442,7 +573,12 @@ impl BagOfProcessors {
             Processor::Signal(seg) => vec![seg.get_weights()],
             Processor::Lid(seg) => vec![seg.get_weights()],
             Processor::TwinLid(seg) => vec![seg.get_weights(), seg.get_weights_lid()],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            // Fast SAD exposes no trainable f64 weight surface (inference-only).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => Vec::new(),
         }
     }
 
@@ -450,6 +586,17 @@ impl BagOfProcessors {
     /// `new_weights[0]` to the net's `setWeights`; algo 6 forwards `at(0)` to
     /// the SAD net and `at(1)` to the LID net (`:110-113`); algo 0/1/2 (no
     /// legacy `else` branch) are a no-op.
+    ///
+    /// T6b AUDIT (Phase 7): the fast variants USED TO share the algo-0/1/2
+    /// `Ok(())` no-op arm below, but that convention does not transfer. Algo 0/1/2
+    /// genuinely have no weight concept -- no plausible caller expects a
+    /// VRCTS/TDC/LTSV `set_weights` to do anything. A fast driver, in contrast, IS
+    /// the trainable-net counterpart of an exact algo (its weights are simply
+    /// fixed after construction), so a seam caller injecting a freshly-trained
+    /// pack via `set_weights` is a realistic mistake, not a misuse: the T6 SAD run
+    /// silently scored 24/24 held-out files against stale seed weights this exact
+    /// way, and `Ok(())` gave no signal the injection had been dropped. Bail
+    /// loudly instead -- see the fast arm below for the supported mechanism.
     pub fn set_weights(&mut self, pos: usize, new_weights: &[Vec<f64>]) -> Result<()> {
         use crate::tasks::segmenter::Segmenter;
         match &mut self.processors[pos] {
@@ -460,7 +607,22 @@ impl BagOfProcessors {
                 seg.set_weights(&new_weights[0])?;
                 seg.set_weights_lid(&new_weights[1])
             }
+            // algo 0/1/2 have no weight concept at all (no legacy `else` branch) --
+            // genuinely inert, matching the legacy exactly. See the T6b audit note
+            // above for why this convention does NOT extend to the fast arms below.
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
+            // Fast SAD/LID (`Inference_Path fast`) load weights ONLY at construction,
+            // via the config-time `BLSTM_weightsFile` / `BLSTM_LID_weightsFile` keys
+            // (`load_weights_file`) -- there is no settable-after-construction f64
+            // weight surface. Bail loudly rather than silently discarding the
+            // caller's weights (T6b: closes the silent-seam-no-op hole).
+            Processor::FastSpectral(_) | Processor::FastTwinLid(_) => bail!(
+                "set_weights: config {pos} runs Inference_Path `fast`, which exposes no \
+                 settable-after-construction weight surface (fast drivers load weights \
+                 only at construction, via the config-time BLSTM_weightsFile / \
+                 BLSTM_LID_weightsFile keys). Point those keys at the trained pack and \
+                 reconstruct the Engine instead of calling set_weights on a fast config."
+            ),
         }
     }
 
@@ -468,6 +630,13 @@ impl BagOfProcessors {
     /// return a single-element vec of the net's `InputStatistics`; algo 6 the
     /// paired `[regular, LID]` vec (`:123-126`); everything else falls through
     /// to the legacy's EMPTY default (`:128-129`).
+    ///
+    /// T6b AUDIT (Phase 7, carry-note): the fast arms share the same inert-empty
+    /// read-shaped pattern as `get_weights`/`get_weights_derivatives` below -- a
+    /// self-describing empty Vec, not a bail. The same verdict applies (read-shaped,
+    /// safe, never indexed back out for a fast `pos`); it stays inert rather than
+    /// fallible so the internal per-file bookkeeping never breaks on a plain
+    /// inference/scoring run.
     pub fn get_input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.input_statistics().clone()],
@@ -477,7 +646,12 @@ impl BagOfProcessors {
                 seg.input_statistics().clone(),
                 seg.get_input_statistics_lid().clone(),
             ],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            // Fast SAD folds no input statistics (inference-only).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => Vec::new(),
         }
     }
 
@@ -485,6 +659,19 @@ impl BagOfProcessors {
     /// 3/4/5 return a single-element vec of the net's `Nx2` derivative matrix;
     /// algo 6 the paired `[regular, LID]` vec (`:139-142`); everything else
     /// falls through to the legacy's EMPTY default (`:143-144`).
+    ///
+    /// T6b AUDIT: kept as an inert default for the fast variants too (empty Vec,
+    /// no bail), DESPITE being called UNCONDITIONALLY for every conf on every file
+    /// of every epoch (`corpus_processor.rs::run_epoch`'s per-file harvest loop,
+    /// which does not gate on `is_back_prop_activated`) -- making this fallible
+    /// would break that internal harvest for a fast conf even during a plain
+    /// inference/scoring run (Solo/Image/Multi with training off), which is
+    /// exactly the CI parity path this phase depends on. It is safe: the empty
+    /// Vec this returns is folded into the `derivs` map at `pos` but NEVER
+    /// indexed back out for a fast/non-NN `pos` (`save_weights`/`update_weights`'s
+    /// matching arms don't touch `derivs[&pos]` at all for those confs), so an
+    /// empty read here cannot silently corrupt a gradient sum a training caller
+    /// would consume -- it is inert by construction, not merely by convention.
     pub fn get_weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
         match &self.processors[pos] {
             Processor::Spectral(seg) => vec![seg.get_weights_derivatives()],
@@ -494,7 +681,12 @@ impl BagOfProcessors {
                 seg.get_weights_derivatives(),
                 seg.get_weights_derivatives_lid(),
             ],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            // Fast SAD produces no gradients (forward-only, inference).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => Vec::new(),
         }
     }
 
@@ -505,6 +697,12 @@ impl BagOfProcessors {
     /// and saves BOTH nets -- the LID save via `saveWeightsLID`, which prefixes
     /// the filename with `LID_` internally (`:176`).
     /// Arity mirrors the legacy signature (`:148`) verbatim.
+    ///
+    /// T6b AUDIT: the fast arm's no-op is genuinely unreachable-in-spirit, not
+    /// merely unexercised -- `is_back_prop_activated` hardcodes `false` for both
+    /// fast variants, so a fast conf never accumulates a real save criterion, and
+    /// this arm (grouped with algo 0/1/2) never reads `derivs`/`stats` regardless.
+    /// Matches the legacy's own algo-0/1/2 no-branch shape; no bail needed.
     #[allow(clippy::too_many_arguments)]
     fn save_weights(
         &mut self,
@@ -553,7 +751,12 @@ impl BagOfProcessors {
                     best_cost.insert(pos, save_criterion);
                 }
             }
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
+            // Fast SAD never trains (inference-only) -- no save gate, like algo 0/1/2.
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
@@ -568,6 +771,11 @@ impl BagOfProcessors {
     /// gate is LIVE for both LID arms (the commented-out `saveCriterion > 0`
     /// skip at `:199-203` is dead: the update runs unconditionally, -1.0 cost
     /// included).
+    ///
+    /// T6b AUDIT: same verdict as `save_weights` -- the fast arm's no-op is
+    /// unreachable-in-spirit (`is_back_prop_activated` hardcodes `false`), and
+    /// this arm never reads `derivs` for a fast/non-NN `pos` regardless. No bail
+    /// needed.
     fn update_weights(
         &mut self,
         pos: usize,
@@ -599,7 +807,12 @@ impl BagOfProcessors {
                 seg.update_weights(&derivs[&pos][0], cost);
                 seg.update_weights_lid(&derivs[&pos][1], cost_lid);
             }
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
+            // Fast SAD never trains (inference-only) -- no-op, like algo 0/1/2.
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_)
+            | Processor::FastTwinLid(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
@@ -1513,5 +1726,106 @@ mod tests {
         assert_eq!(bag.get_weights_derivatives(3).len(), 1);
         // The real config-1 net's weight vector is the known 33,671 length.
         assert_eq!(bag.get_weights(2)[0].len(), 33_671);
+    }
+
+    /// Phase 7 Task 4 dispatch unit: `Inference_Path` selects the driver variant.
+    /// - `fast` + algo 3  -> `Processor::FastSpectral`
+    /// - absent           -> `Processor::Spectral` (exact, default)
+    /// - junk value       -> construction error
+    /// - `fast` + algo 4  -> bail (only algo 3 has a fast counterpart in Task 4)
+    ///
+    /// tier2_spectral.config is the algo-3 vehicle (TDCwindow 0 + InputNormalization
+    /// -1, so the fast driver's construction bails don't fire); `BLSTM_weightsFile`
+    /// is emptied so construction does not need the weight pack on disk.
+    #[test]
+    fn inference_path_dispatch() {
+        let base3 = || {
+            let mut m = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+            m.insert("BLSTM_weightsFile".to_string(), String::new());
+            m
+        };
+
+        // fast + algo 3 -> FastSpectral.
+        let mut fast3 = base3();
+        fast3.insert("Inference_Path".to_string(), "fast".to_string());
+        let bag =
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        assert!(
+            matches!(bag.processor(0), Processor::FastSpectral(_)),
+            "fast + algo 3 must dispatch to FastSpectral"
+        );
+
+        // absent -> exact Spectral.
+        let mut exact3 = base3();
+        let bag =
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3), solo_mode()).unwrap();
+        assert!(
+            matches!(bag.processor(0), Processor::Spectral(_)),
+            "absent Inference_Path must dispatch to the exact Spectral"
+        );
+
+        // junk value -> error.
+        let mut junk = base3();
+        junk.insert("Inference_Path".to_string(), "turbo".to_string());
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut junk), solo_mode()) {
+            Err(e) => assert!(
+                e.to_string().contains("Inference_Path"),
+                "junk value error must name Inference_Path, got: {e}"
+            ),
+            Ok(_) => panic!("junk Inference_Path must bail"),
+        }
+
+        // fast + algo 4 -> bail (only algo 3 supported in Task 4).
+        let mut fast4 = with_bag_keys(load_config("phase2b/signal.config"), 4);
+        fast4.insert("Inference_Path".to_string(), "fast".to_string());
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut fast4), solo_mode()) {
+            Err(e) => assert!(
+                e.to_string().to_lowercase().contains("fast"),
+                "fast + algo 4 bail must mention fast, got: {e}"
+            ),
+            Ok(_) => panic!("fast + algo 4 must bail (no fast algo-4 driver)"),
+        }
+    }
+
+    /// T6b: `set_weights` on a fast-dispatched conf must bail loudly (the silent
+    /// `Ok(())` no-op used to let a seam caller believe an injected weight pack had
+    /// taken effect when it was discarded -- the T6 SAD-run failure mode). The error
+    /// text must name `Inference_Path` and the config-time weight-file mechanism, so
+    /// a caller hitting this in practice is pointed at the fix, not just told "no".
+    #[test]
+    fn fast_spectral_set_weights_bails_loudly() {
+        let mut fast3 = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+        fast3.insert("BLSTM_weightsFile".to_string(), String::new());
+        fast3.insert("Inference_Path".to_string(), "fast".to_string());
+        let mut bag =
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        assert!(matches!(bag.processor(0), Processor::FastSpectral(_)));
+
+        match bag.set_weights(0, &[vec![1.0, 2.0, 3.0]]) {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("Inference_Path"),
+                    "error must name Inference_Path, got: {msg}"
+                );
+                assert!(
+                    msg.contains("BLSTM_weightsFile"),
+                    "error must name the config-time weight-file mechanism, got: {msg}"
+                );
+            }
+            Ok(()) => panic!("set_weights on a fast-dispatched conf must bail, not silently no-op"),
+        }
+    }
+
+    /// T6b sibling-audit control: the SAME call on the algo-0/1/2 non-NN arms (which
+    /// genuinely have no weight concept) must stay the legacy-matching `Ok(())` no-op --
+    /// the fast-arm bail must not have widened to cover them too.
+    #[test]
+    fn non_nn_set_weights_stays_inert_ok() {
+        let tdc = with_bag_keys(load_config("phase2b/tdc.config"), 1);
+        let mut cfgs = vec![tdc];
+        let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        assert!(matches!(bag.processor(0), Processor::Tdc(_)));
+        assert!(bag.set_weights(0, &[vec![1.0, 2.0, 3.0]]).is_ok());
     }
 }

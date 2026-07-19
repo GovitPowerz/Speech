@@ -536,27 +536,14 @@ pub fn assemble_input_sequence(
     }
 }
 
-/// Mel/DCT + LTSV-hcat assembly from an ALREADY-COMPUTED periodogram
-/// (`getBLSTMInputSequence` :561-591, feature side): run the mel filterbank + DCT per
-/// config on `perio`, then hcat `ltsv` as the last column when `Some`. Split out of
-/// [`build_input_sequence`] so the pitch second pass can rebuild the input from the
-/// WARPED periodogram while reusing the OLD (pass-1) LTSV column
-/// (`BLSTMSpectralSegmenter.cpp:777-792` -- the LTSV is NOT recomputed on the warped
-/// periodogram, a load-bearing quirk).
-///
-/// `ltsv` is the caller-owned column (pass 1 computes it via [`get_ltsv`]; the pitch
-/// pass hands the SAME slice back in). The mel bank is re-derived here from `cfg`/`s`
-/// (config-time constant), matching the legacy re-`applyFilterBank`/`applyDCT`.
-/// `rate` is the sample rate (the mel bank ctor arg).
-pub fn assemble_from_periodogram(
-    perio: &Array2<f64>,
-    cfg: &FeatureConfig,
-    s: &SpectralParams,
-    rate: f64,
-    ltsv: Option<&[f64]>,
-) -> Array2<f64> {
-    let (mel_out, dct_out) = if cfg.nb_bins > 0 {
-        let bank = MelFilterBank::new(
+/// Build the mel filterbank the spectral feature path applies, or `None` when the
+/// config disables mel binning (`nb_bins <= 0` -> the raw-band path). The bank is a
+/// PURE function of `(cfg, s, rate)` (config-time constants; `MelFilterBank::new` reads
+/// only its args -- no shared/mutable state), so every site that needs it can share ONE
+/// construction instead of rebuilding an identical bank (Phase 7 Task 8 hoist).
+fn build_mel_bank(cfg: &FeatureConfig, s: &SpectralParams, rate: f64) -> Option<MelFilterBank> {
+    if cfg.nb_bins > 0 {
+        Some(MelFilterBank::new(
             cfg.min_mel,
             cfg.max_mel,
             cfg.nb_bins,
@@ -569,16 +556,36 @@ pub fn assemble_from_periodogram(
             cfg.ignore_first,
             cfg.deltas_nb,
             cfg.dd_nb,
-        );
-        let fb = bank.apply_filter_bank(perio);
-        if cfg.nb_dct > 0 {
-            let dct = bank.apply_dct(&fb);
-            (Some(fb), Some(dct))
-        } else {
-            (Some(fb), None)
-        }
+        ))
     } else {
-        (None, None)
+        None
+    }
+}
+
+/// Mel/DCT + LTSV-hcat assembly from an already-computed periodogram and a PRE-BUILT
+/// mel bank (`None` for the raw-band path). Callers that already hold the bank -- e.g.
+/// [`build_input_sequence_parts`], which also needs it for the `spectral_cols` width --
+/// pass it here to avoid a redundant [`MelFilterBank::new`]. `bank.is_dct_activated()`
+/// is exactly `cfg.nb_dct > 0` (the bank stores that flag at construction), so the DCT
+/// gate is unchanged.
+fn assemble_with_bank(
+    perio: &Array2<f64>,
+    bank: Option<&MelFilterBank>,
+    ltsv: Option<&[f64]>,
+    freq_beg: usize,
+    freq_end: usize,
+) -> Array2<f64> {
+    let (mel_out, dct_out) = match bank {
+        Some(bank) => {
+            let fb = bank.apply_filter_bank(perio);
+            if bank.is_dct_activated() {
+                let dct = bank.apply_dct(&fb);
+                (Some(fb), Some(dct))
+            } else {
+                (Some(fb), None)
+            }
+        }
+        None => (None, None),
     };
 
     assemble_input_sequence(
@@ -586,9 +593,37 @@ pub fn assemble_from_periodogram(
         mel_out.as_ref(),
         dct_out.as_ref(),
         ltsv,
-        s.freq_beg,
-        s.freq_end,
+        freq_beg,
+        freq_end,
     )
+}
+
+/// Mel/DCT + LTSV-hcat assembly from an ALREADY-COMPUTED periodogram
+/// (`getBLSTMInputSequence` :561-591, feature side): run the mel filterbank + DCT per
+/// config on `perio`, then hcat `ltsv` as the last column when `Some`. Split out of
+/// [`build_input_sequence`] so the pitch second pass can rebuild the input from the
+/// WARPED periodogram while reusing the OLD (pass-1) LTSV column
+/// (`BLSTMSpectralSegmenter.cpp:777-792` -- the LTSV is NOT recomputed on the warped
+/// periodogram, a load-bearing quirk).
+///
+/// `ltsv` is the caller-owned column (pass 1 computes it via [`get_ltsv`]; the pitch
+/// pass hands the SAME slice back in). The mel bank is (re-)derived here from `cfg`/`s`
+/// (config-time constant) via [`build_mel_bank`], matching the legacy
+/// re-`applyFilterBank`/`applyDCT`. `rate` is the sample rate (the mel bank ctor arg).
+/// The pitch second pass (`tasks/sad.rs`) calls THIS entry point on the warped
+/// periodogram: the bank it rebuilds is provably identical to pass 1's (same
+/// `cfg`/`s`/`rate`), so the result is unchanged -- see the Phase 7 Task 8 report for
+/// why that third construction is intentionally left standalone rather than threaded
+/// through the segmenter.
+pub fn assemble_from_periodogram(
+    perio: &Array2<f64>,
+    cfg: &FeatureConfig,
+    s: &SpectralParams,
+    rate: f64,
+    ltsv: Option<&[f64]>,
+) -> Array2<f64> {
+    let bank = build_mel_bank(cfg, s, rate);
+    assemble_with_bank(perio, bank.as_ref(), ltsv, s.freq_beg, s.freq_end)
 }
 
 /// Build the full BLSTM input sequence for one channel: windowing -> periodogram
@@ -633,32 +668,24 @@ pub fn build_input_sequence_parts(
         end,
     );
 
+    // Mel bank built ONCE here (config-time constant, pure in `(cfg, s, rate)`): shared
+    // by the `spectral_cols` width query below AND the apply step in
+    // `assemble_with_bank`, collapsing the former double `MelFilterBank::new` (this
+    // query site + one inside `assemble_from_periodogram`) into a single identical-args
+    // construction (Phase 7 Task 8; byte-identical output, goldens unmoved).
+    let bank = build_mel_bank(cfg, s, audio.sample_rate as f64);
+
     // Spectral output columns (before LTSV) drive the mel-variant LTSV band. Match
     // the legacy: mel/DCT output width when mel is active, else the raw spectral band.
-    let spectral_cols = if cfg.nb_bins > 0 {
-        // Re-derive the mel/DCT width without re-running the bank (cheap: getNbFilters/
-        // getNbDCT). Building the bank once and querying is simplest.
-        let bank = MelFilterBank::new(
-            cfg.min_mel,
-            cfg.max_mel,
-            cfg.nb_bins,
-            s.min_freq,
-            s.max_freq,
-            audio.sample_rate as f64,
-            s.bins - 1,
-            cfg.is_log,
-            cfg.nb_dct,
-            cfg.ignore_first,
-            cfg.deltas_nb,
-            cfg.dd_nb,
-        );
-        if cfg.nb_dct > 0 {
-            bank.nb_dct()
-        } else {
-            bank.nb_filters()
+    let spectral_cols = match &bank {
+        Some(bank) => {
+            if cfg.nb_dct > 0 {
+                bank.nb_dct()
+            } else {
+                bank.nb_filters()
+            }
         }
-    } else {
-        s.freq_end - s.freq_beg + 1
+        None => s.freq_end - s.freq_beg + 1,
     };
 
     // LTSV column (band asymmetry): mel active -> (0, spectral_cols-1); else the
@@ -674,7 +701,12 @@ pub fn build_input_sequence_parts(
         None
     };
 
-    let input_seq =
-        assemble_from_periodogram(&perio, cfg, s, audio.sample_rate as f64, ltsv.as_deref());
+    let input_seq = assemble_with_bank(
+        &perio,
+        bank.as_ref(),
+        ltsv.as_deref(),
+        s.freq_beg,
+        s.freq_end,
+    );
     (input_seq, perio, ltsv)
 }

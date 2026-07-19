@@ -93,6 +93,7 @@ static KEY_TABLE: &[KeyMapping] = &[
     ("Neural_Networks_BackPropagation_Epochs",   "engine", "backpropagation_epochs"),
     ("Neural_Networks_Gradient_Check_Epsilon",   "engine", "gradient_check_epsilon"),
     ("exclude_nontrans",                         "engine", "exclude_nontrans"),
+    ("Inference_Path",                           "engine", "inference_path"),
 
     // --- corpus: listing / class-mapping CSV paths ---------------------------
     ("fileslisting",                             "corpus", "fileslisting"),

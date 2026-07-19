@@ -18,15 +18,24 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.9"
 indexmap = { version = "2", features = ["serde"] }
-nalgebra = "0.35"
 ndarray = "0.16"
 rayon = "1.10"
 byteorder = "1.5"
 bytemuck = "1"
-rustfft = "6"
 realfft = "3"
+# Phase 7 Task 2: `fast::nn` f32 BLSTM forward -- pure-Rust SIMD matmuls
+# (batched input projection) with no system BLAS.
+faer = { version = "0.24", default-features = false, features = ["std"] }
 symphonia = { version = "0.5", features = ["wav", "flac", "ogg", "vorbis"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
+# Phase 7 Task 1: `bench.rs::maxrss_mb` (`getrusage(RUSAGE_SELF)`) -- a real
+# [dependencies] entry, not dev-only, since `speech bench` ships in the actual
+# CLI binary.
+libc = "0.2"
+
+[[bench]]
+name = "kernels"
+harness = false
 
 [features]
 # Test-only observation hooks (e.g. BlstmSpectralSegmenter's update-costLID
@@ -41,6 +50,8 @@ proptest = "1"
 tempfile = "3"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 speech = { path = ".", features = ["test-support"] }
+# Phase 7 Task 1: `benches/kernels.rs` micro-benches over the exact kernels.
+criterion = "0.8"
 
 [profile.release]
 opt-level = 3

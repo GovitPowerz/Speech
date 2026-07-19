@@ -15,7 +15,14 @@ use super::activations::{
 /// DIVERGES from ascending loops on the LSTM input-projection shape, and is bit-
 /// exact on the recurrence row-product; the harness reimpl uses `matSeq` for both,
 /// so the Rust port mirrors it uniformly). Matches `main.cpp`'s `matSeq`.
-pub(crate) fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+///
+/// `pub` (Phase 7 Task 1, "bench plumbing outside the compute path" -- the
+/// plan's one allowed exact-tree edit for this task): widened from
+/// `pub(crate)` so `benches/kernels.rs` (a separate compilation unit outside
+/// the crate) can call it directly for the `matmul_seq_92x96` criterion
+/// target. Visibility only -- behavior is byte-for-byte unchanged, verified by
+/// the full existing golden suite (`cargo test`) staying green.
+pub fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     let (m, k) = a.dim();
     let (kb, n) = b.dim();
     debug_assert_eq!(k, kb, "matmul_seq inner dim mismatch");

@@ -11,11 +11,13 @@
 // reinstating a crate-wide blanket.
 
 pub mod audio;
+pub mod bench;
 pub mod cli;
 pub mod config;
 pub mod constants;
 pub mod cost;
 pub mod engine;
+pub mod fast;
 pub mod features;
 pub mod io;
 pub mod legacy_config;

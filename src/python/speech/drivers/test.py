@@ -115,7 +115,12 @@ def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) 
     try:
         (workdir / "_eval.config").write_text(config_text)
         engine = speech_rs.Engine(["_eval.config"], "-m")
-        if all((ckpt / name).exists() for name in pack_names):
+        # `Inference_Path fast` processors load weights ONLY at construction, from the
+        # config's own BLSTM_weightsFile/BLSTM_LID_weightsFile keys; `set_weights` now bails
+        # loudly on them (bag_of_processors.rs T6b) instead of the old silent no-op, so this
+        # call is skipped on fast -- the config-time injection is that path's only mechanism,
+        # and callers that need a DIFFERENT pack than the config's must point those keys at it.
+        if cfg.get("Inference_Path", "exact") != "fast" and all((ckpt / name).exists() for name in pack_names):
             nets = [list(read_weight_vector(ckpt / name)) for name in pack_names]
             engine.set_weights(0, nets)
         engine.run()

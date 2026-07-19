@@ -1482,6 +1482,22 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `tier2_train_epoch_weights_golden` (`tests/phase4a_train_golden.rs`): the glued-name siblings
   (`weights_bestNNWeight_1_tier2_spectral.mat`, io::binary despite the `.mat` suffix) are compared
   value-for-value against the REAL legacy `saveWeights` output from the harness train stage.
+  *Phase 7 Task 1 addendum -- the same anti-pattern one call layer down, at the CALLER:*
+  `engine/bag_of_processors.rs::save_and_update` composes the `<filename>` this function receives
+  in the first place -- `format!("bestNNWeight_{}_{filename}", ii + 1)`
+  (`bag_of_processors.rs:775-776`, from `BagOfProcessors.cpp:462-464`) string-prepends
+  `bestNNWeight_<pos+1>_` onto the WHOLE `output_file_name` (the `multiConfigResultsOutputFile`
+  config value), path separators included, then hands that composed string straight to
+  `save_weights` above -- which prefixes it AGAIN. So an absolute `multiConfigResultsOutputFile`
+  breaks at the OUTER layer already: the composed `bestNNWeight_1_/abs/path/out.mat` targets a
+  nonexistent directory and the write fails with a bare `os error 2` (no `.context()` at that read
+  site, so even the full anyhow chain shows nothing extra). Pre-existing, same age as the sibling
+  quirk above (Phase 4a, commit `a3979b3b`); every committed fixture avoids it via a bare relative
+  `multiConfigResultsOutputFile` (e.g. `tier2_spectral.mat`, no directory component). Found by
+  Phase 7 Task 1's bench-staging work while gathering corpus-gated numbers with an absolute output
+  path (`.superpowers/sdd/task-1-report.md` Concerns #1); deferred, not fixed here -- out of Task 1
+  scope. *Fix candidate:* same as above -- prepend at the basename, not the whole path, for both
+  call sites together.
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning** (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):
@@ -4458,6 +4474,119 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `tests/pyo3/test_phase5_train_modern_smoke.py` 6 passed; `cd src/rust && cargo test` exit 0 (every
   binary green); `./lint_code.sh` clean (ruff imports/format/lint + mypy, 81 files). Working tree at
   completion contains ONLY this IMPROVEMENTS.md entry.
+
+### Mutation battery (Phase 7)
+
+- **[phase7] Mutation battery (Task 10): 6 of 8 battery items break their named catcher exactly
+  as predicted; item 8 is the DESIGNED neutrality no-op (no catcher fires, as intended), and item
+  6 surfaced a genuine COVERAGE BOUNDARY (the literal named mutation is invisible to the parity
+  leg, but a faithful variant IS caught -- the leg is proven non-vacuous).** Every load-bearing
+  Phase-7 fast-path mechanism re-verified from the committed, fully-integrated state via an
+  apply-FAIL-revert-PASS cycle. Each mutation applied (minimal, surgical) / run against the NAMED
+  catcher only (FOREGROUND, scoped to the test file/binary) / reverted (`git checkout -- <file>`)
+  / re-run to confirm GREEN; `git status --porcelain` confirmed clean between every cycle and at
+  the end. No mutation touched a pyo3-side catcher, so no per-cycle maturin rebuild was needed (all
+  catchers are cargo-side); `speech_rs` was rebuilt once at HEAD for the pyo3 leg of the final pass
+  only. IMPROVEMENTS.md is the only committed diff.
+
+  (1) Skip the adim application before f32 narrowing: `from_flat` consumes a PRE-adim pack (adim
+  already applied by the config-reader path), so it must narrow the block VERBATIM; the mutation
+  multiplies the forward layer-0 input weights by the layer adim `sqrt(i+o)` (`src/rust/src/fast/
+  nn.rs::from_flat`, in `build_lstm_layer`), undoing the baked scaling ("skip adim"). Against
+  `cargo test --test phase7_fast_nn` -- FAILED exactly `from_flat_narrows_first_block_bit_exact`
+  (`narrowing mismatch at flat[0]: stored=6.8717413 expected=0.63802516`, i.e. `0.638*sqrt(116)`)
+  plus the three parity pins (`synthetic_multiclass`/`synthetic_binary`/`real_tuple_a_forward`);
+  `from_flat_output_depends_only_on_f32_narrowing` correctly stayed GREEN (it compares two
+  identically-scaled nets, so the scaling cancels -- it guards the narrowing-is-the-only-lossy-step
+  property, not the adim value). Reverted, 10 PASS.
+
+  (2) Transpose the faer input-projection operands: swap `lhs`/`rhs` in the mandated
+  `faer::linalg::matmul` call (`fast/nn.rs::faer_project`, the single site every LSTM-gate/dense
+  projection dispatches through). Against `phase7_fast_nn` -- FAILED the synthetic tolerance pins
+  (`synthetic_multiclass`/`synthetic_binary`) plus `real_tuple_a_forward`, each via faer's
+  dimension assertion (`dst_nrows == lhs_nrows`: `20 != 6` synth, `50 != 92` real -- the transposed
+  operands are shape-incompatible). The activation-unit + construction-narrow pins stayed GREEN
+  (they never project). Reverted, 10 PASS.
+
+  (3) Break the realfft normalization (drop the Welch-style scale): remove `/ n_f` from the
+  periodogram (`fast/pipeline.rs::compute_periodogram`, `z.re*z.re + z.im*z.im`). Against
+  `cargo test --test phase7_fast_pipeline` -- FAILED `pipeline_parity_prcts_60s` (`rel 0.5167 exceeds
+  pin`). NUANCE / honest note: `pipeline_parity_excerpt_3s` stayed GREEN -- dropping `/n_f` scales
+  the periodogram by `n=1024`, a UNIFORM `+ln(1024)` log-mel offset that lands in the DC (0th) DCT
+  coefficient which `IgnoreFirstDCT` drops, and the deltas difference out constants; the 3 s excerpt
+  is fully absorbed, while the 60 s file's near-SILENT frames (where `ln(1024*fb+1e-24) != ln(fb+
+  1e-24)+ln(1024)` at the mel floor) break the constant-offset cancellation and become the effective
+  catcher. Reverted, 7 PASS.
+
+  (4) Flip the `Inference_Path` default from `exact` to `fast` (`engine/bag_of_processors.rs`'s
+  `get_string_default(&configs[0], "Inference_Path", "exact")`). Against `cargo test --lib
+  inference_path_dispatch` -- FAILED exactly the default-exact assertion (`absent Inference_Path
+  must dispatch to the exact Spectral`, `bag_of_processors.rs:1756`); an absent key now routed to
+  `FastSpectral`. Reverted, PASS.
+
+  (5) Poison the workspace between calls (skip the reset): remove the per-frame `frame_buf`
+  zero-reset in `fast/pipeline.rs::fill_frame`. Against `phase7_fast_pipeline` -- FAILED the
+  run-twice bit-identity pin `build_input_sequence_twice_bit_identical` (`repeated call diverged at
+  0` -- the second call inherits the prior call's stale buffer, poisoning the left-edge pad). The
+  reset proved MORE load-bearing than the pin's framing alone: the two tolerance-parity pins ALSO
+  broke, because right-edge frames write only `[0, nb_elem)` and leave stale INTERIOR data in the
+  FFT-read window `[nb_elem, window_size)` -- so a reused buffer diverges WITHIN a single call, not
+  only across calls (the stale-buffer no-op proof holds only for a per-frame-fresh buffer). Reverted,
+  7 PASS.
+
+  (6) Run the Twin's SAD net in fast Mode 7 (the synthesized-constant result_vec,
+  `fast/driver.rs::FastTwinLid::get_segmentation`). HONEST COVERAGE BOUNDARY: the LITERAL mutation
+  -- replacing the constant `10.0` SAD `result_vec2` with a non-constant ramp -- is INVISIBLE to
+  the parity leg (`cargo test --test phase7_parity_lid lid_parity`: both `lid_parity_phseq`/
+  `lid_parity_cep` still PASS). In fast Mode 7 the SAD result feeds ONLY the SHARED f64 SAD
+  segmentation `seg`, which `run_exact`/`run_fast` DISCARD (they return only the LID members --
+  `lid_classification_errors`/`is_lid_correct`/`lid_segments_confusion`), and those are computed
+  purely from the `external_features` LID-scoring loop, SAD-result-independent (confirmed at source:
+  `tasks/lid.rs::get_segmentation_mode7:1448-1476` reads only `external_features` + the LID net; the
+  fast Twin holds NO SAD net object, only the SAD shape). So the parity_lid leg does NOT cover the
+  frozen-SAD result_vec value. To prove the leg is NOT vacuous, a FAITHFUL realization -- inject the
+  SAD net's own characteristic operation (`self_normalize_f32`, the algo-3 SAD input
+  self-normalization) onto the Mode-7 LID input block before scoring -- IS caught: both legs FAIL
+  (`phseq s1: is_lid_correct FLIP (R1 STOP: exact=100 fast=0)` argmax moved; `cep score abs 39.06
+  exceeds pin`). Both cycles reverted; 2 PASS. VERDICT for item 6: the leg is a real catcher for a
+  SAD-net intrusion on the LID SCORING path, but the narrower frozen-SAD-result_vec edit is a
+  demonstrated coverage boundary, not a catch -- the brief's "cost columns move" holds only when the
+  SAD computation reaches the LID input, which Mode 7 structurally prevents.
+
+  (7) Widen the CI budget smoke's operand (fast = exact*10): substitute `exact_wall * 10.0` for the
+  fast operand in `phase7_bench.rs::bench_fast_not_slower_than_exact_ci_smoke`'s assertion. The
+  smoke FAILED (`exact*10 <= exact*1.5` is false) -- the designed sanity that the smoke CAN fail
+  (it is not vacuous). The MEASURE line incidentally recorded the REAL ratio: `exact_wall=21.42s
+  fast_wall=3.98s ratio=0.186` (the fast path is ~5.4x faster on the 60 s wav, the unmutated assert
+  passing with huge headroom). Reverted, PASS.
+
+  (8) Un-hoist Task 8's mel bank (restore the double `MelFilterBank::new`): rebuild a SECOND
+  identical bank for the assemble step in `features/pipeline.rs::build_input_sequence_parts` (the
+  `bank` stays for the `spectral_cols` query, a fresh `bank2` feeds `assemble_with_bank`). This is
+  an EXACT-TREE mutation and the DESIGNED expected-gap: `MelFilterBank::new` is a pure function of
+  `(cfg, s, rate)`, so the two banks are byte-identical and the output is UNCHANGED -- NO catcher
+  fires. Ran the full would-catch golden set (`phase1_mel_golden` 27, `phase1_pipeline_golden` 32,
+  `phase2b_spectral_golden` 33, `phase7_fast_pipeline` 7): ALL GREEN, 0 failed. The goldens CANNOT
+  catch the un-hoist BECAUSE the T8 hoist was proven behaviorally neutral -- that neutrality IS the
+  point of the demonstration; the only observable is the bench delta (an extra per-call
+  construction). Reverted; the mandatory full-suite-green-after-revert is the final pass below.
+
+  *Verdict:* 8/8 cycles executed cleanly (apply-FAIL-revert-PASS or, for the two gaps,
+  apply-observe-revert). Six mutations (1-5, 7) break their named catcher exactly as predicted.
+  Item 8 is the designed neutrality no-op (no catcher fires, as intended -- the hoist's proven
+  behavioral neutrality is what makes it uncatchable). Item 6 is a genuine, newly-recorded coverage
+  boundary: the parity_lid leg compares SAD-result-INDEPENDENT LID members, so the literal
+  frozen-SAD result_vec perturbation is invisible to it -- but a faithful SAD-op-into-LID mutation
+  IS caught, proving the leg non-vacuous. Every revert produced a clean, fully green re-run; no
+  un-recorded un-caught mutation. Final pass (all green at the committed state): `cd src/rust &&
+  cargo test` exit 0 (68 test sections ok, 0 failed -- also the item-8 exact-tree
+  full-suite-green-after-revert); `uv run pytest tests -q -m "not slow"` -> 607 passed, 1 skipped,
+  25 deselected; the slow pyo3 files per-file (`speech_rs` rebuilt at HEAD via `maturin develop
+  --release`) -- `tests/pyo3/test_phase7_parity.py` 3 passed (corpus present: LID-features/LID-phseq/
+  SAD metric parity), `tests/pyo3/test_exit_gate.py` 9 passed, `tests/pyo3/test_phase5_train_modern_
+  smoke.py` 6 passed, `tests/pyo3/test_phase6_gates.py` 9 passed (per-arm to fit the tool timeout:
+  sad 3/64 s, lid-features 3/257 s, lid-phseq 3/222 s); `./lint_code.sh` clean (ruff imports/format/
+  lint + mypy, 82 files). Working tree at completion contains ONLY this IMPROVEMENTS.md entry.
 
 ## Complete-as-portable closures (Phase 4d)
 
