@@ -24,6 +24,7 @@ use indexmap::IndexMap;
 use speech::audio::{Audio, read_audio};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::{BagOfProcessors, Processor};
+use speech::engine::corpus_processor::CorpusProcessor;
 use speech::fast::driver::FastTwinLid;
 use speech::io::binary::read_weight_vector;
 use speech::tasks::lid::TwinBlstmSpectralLid;
@@ -335,6 +336,23 @@ fn twin_map_fast() -> IndexMap<String, String> {
         phase4b("LID_bestNNWeight_1.bin").to_str().unwrap().into(),
     );
     m.insert("Inference_Path".into(), "fast".into());
+    // twin_mode7.config's committed `fileslisting`/`language2classmapping` values are
+    // repo-root-relative; `cargo test` runs with CWD == the crate dir (`src/rust`), so
+    // absolutize them here (T5 finding 2's CorpusProcessor-level tests are the first
+    // users of this helper that go through Corpus::from_config, which opens these files
+    // directly). Every OTHER existing caller of this helper only feeds the map to
+    // BagOfProcessors::from_configs, which never reads either key, so this is additive.
+    m.insert(
+        "language2classmapping".into(),
+        phase4b("languagemapping_lid7.csv").to_str().unwrap().into(),
+    );
+    m.insert(
+        "fileslisting".into(),
+        phase4b("corpus_phseq/listing_lid7.csv")
+            .to_str()
+            .unwrap()
+            .into(),
+    );
     m
 }
 
@@ -416,6 +434,65 @@ fn fast_bails_on_training_shaped_config() {
     }
 }
 
+#[test]
+fn fast_training_guard_blocks_image_mode_epochs() {
+    // T5 finding 2 (review): the from_configs training-shaped bail above is Multi-gated
+    // (`is_multi_mode`), so it does NOT fire for Image -- without the run()->train() guard
+    // in CorpusProcessor::train(), a fast + Image + Epochs>0 config would construct fine
+    // and then silently no-op-train (the fast processors' training arms are inert).
+    let mut m = twin_map_fast();
+    m.insert("Neural_Networks_BackPropagation_Epochs".into(), "2".into());
+    let mut cp = CorpusProcessor::new(vec![m], image_mode()).unwrap();
+    let err = cp
+        .run()
+        .expect_err("fast + Image + Epochs>0 must error, not silently no-op-train");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Inference_Path"),
+        "error must name Inference_Path, got: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("image"),
+        "error must name the training mode (Image), got: {msg}"
+    );
+}
+
+/// `listing_lid7.csv`'s committed rows point at `corpus_phseq/sN.phSeq`, relative to
+/// `tests/reference_data/phase4b/` (where the fixture was authored) -- not `cargo test`'s
+/// CWD (the crate dir). An unscored run (this listing's refseg column is empty, and
+/// Image-mode-no-reference is unscored per `bag_of_processors.rs`'s `scored` gate) ALWAYS
+/// writes its VRCTS hypothesis NEXT TO THE AUDIO when `Dump_Directory` is empty (a
+/// documented legacy quirk, `bag_of_processors.rs:1163-1200) -- so merely absolutizing the
+/// listing to point at the COMMITTED fixture dir would write a stray `.xml` there on every
+/// run. COPY the 3 phSeq files into a fresh tempdir instead, and point the listing at the
+/// copies, so that write (and CorpusProcessor::run()'s real audio decode) lands in the
+/// tempdir. No process-global `set_current_dir` needed (self-contained, parallel-safe).
+fn tempdir_lid7_listing(dir: &std::path::Path) -> String {
+    for f in ["s1.phSeq", "s2.phSeq", "s3.phSeq"] {
+        std::fs::copy(phase4b(&format!("corpus_phseq/{f}")), dir.join(f)).unwrap();
+    }
+    let text = std::fs::read_to_string(phase4b("corpus_phseq/listing_lid7.csv")).unwrap();
+    let abs_prefix = dir.to_str().unwrap().to_string();
+    let rewritten = text.replace("corpus_phseq/", &format!("{abs_prefix}/"));
+    let out = dir.join("listing_lid7_abs.csv");
+    std::fs::write(&out, rewritten).unwrap();
+    out.to_str().unwrap().to_string()
+}
+
+#[test]
+fn fast_training_guard_allows_image_mode_no_epochs() {
+    // The parity legs' shape: twin_mode7.config carries no Epochs key (defaults to 0), so
+    // Image mode takes the run_solo (inference) path -- train() is never reached, so the
+    // new guard must not affect it. Exercises a REAL audio decode (unlike the guard-error
+    // leg above), so the listing needs a tempdir corpus (see tempdir_lid7_listing).
+    let dir = tempfile::tempdir().unwrap();
+    let mut m = twin_map_fast();
+    m.insert("fileslisting".into(), tempdir_lid7_listing(dir.path()));
+    let mut cp = CorpusProcessor::new(vec![m], image_mode()).unwrap();
+    cp.run()
+        .expect("fast + Image + Epochs=0 (inference) must run cleanly");
+}
+
 // ---------------------------------------------------------------------------
 // Typed-bail pins (unexercised fast Mode-7 surfaces).
 // ---------------------------------------------------------------------------
@@ -475,6 +552,39 @@ fn fast_twin_bails_on_non_zero_lid_normalization() {
             "expected a LID-normalization bail, got: {e}"
         ),
         Ok(_) => panic!("fast Twin + LID InputNormalizationType != 0 must bail"),
+    }
+}
+
+#[test]
+fn fast_twin_bails_on_negative_target_enforcement_step() {
+    // T5 finding 1 (review): a negative BLSTM_LID_TargetEnforcementStep makes the exact
+    // path's truncate-windowed cost block overwrite interior OUTPUT rows with -0.5
+    // (nn/blstm.rs:1244-1265), which the fast path's forward-only scoring never
+    // reproduces -- must typed-bail at construction, naming the key.
+    let mut m = map_of("twin_mode7");
+    m.insert("BLSTM_LID_TargetEnforcementStep".into(), "-1".into());
+    match build_fast_twin(&m) {
+        Err(e) => assert!(
+            e.to_string().contains("TargetEnforcementStep"),
+            "expected a TargetEnforcementStep bail, got: {e}"
+        ),
+        Ok(_) => panic!("fast Twin + negative BLSTM_LID_TargetEnforcementStep must bail"),
+    }
+}
+
+#[test]
+fn fast_twin_bails_on_mlp_mode() {
+    // T5 finding 3 (review, minor): contract symmetry with the exact dispatch's is_mlp
+    // route to the MLP drivers (nn/blstm.rs:1032-1043) -- the fast LID scoring always
+    // runs the truncate BLSTM forward, never MLP, so an is_mlp LID config must bail.
+    let mut m = map_of("twin_mode7");
+    m.insert("BLSTM_LID_LSTMNeuronNb".into(), "0,48".into());
+    match build_fast_twin(&m) {
+        Err(e) => assert!(
+            e.to_string().to_lowercase().contains("mlp"),
+            "expected an MLP-mode bail, got: {e}"
+        ),
+        Ok(_) => panic!("fast Twin + is_mlp LID config must bail"),
     }
 }
 

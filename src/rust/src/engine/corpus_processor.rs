@@ -35,7 +35,9 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
-use crate::engine::bag_of_processors::{BagOfProcessors, get_f64_default, get_i32_default};
+use crate::engine::bag_of_processors::{
+    BagOfProcessors, Processor, get_f64_default, get_i32_default,
+};
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
 use crate::io::matfile::MatWriter;
@@ -263,6 +265,34 @@ impl CorpusProcessor {
     /// (`isLog = false`); a final eval at epoch `N+1` with `_Mode`. Timer prints are
     /// display-only (dropped).
     fn train(&mut self) -> Result<()> {
+        // T5 finding 2 (review, an exact-tree touch sanctioned as selection-plumbing):
+        // `Inference_Path fast` is inference-only (spec S1) -- the fast processors'
+        // training arms are inert no-ops. `BagOfProcessors::from_configs` already bails on
+        // a training-shaped fast config, but ONLY when `mode.kind == Multi`; that gate
+        // never fires for Image/UnitTest, so a fast processor reaching `train()` via those
+        // modes would otherwise silently no-op-train instead of failing loudly. `train()`
+        // is only ever called from `run()`, and only inside a `self.training_epochs > 0`
+        // guard (both call sites), so that half of the condition is already a structural
+        // invariant here -- this loop only needs to check for a fast variant. DEAD CODE on
+        // every exact-path run: no config ever builds `Processor::FastSpectral`/
+        // `Processor::FastTwinLid` outside `Inference_Path fast`, so the match below never
+        // fires there.
+        for ii in 0..self.processors.nb_of_conf() {
+            if matches!(
+                self.processors.processor(ii),
+                Processor::FastSpectral(_) | Processor::FastTwinLid(_)
+            ) {
+                bail!(
+                    "Inference_Path fast is inference-only (training stays exact f64), but \
+                     this {:?}-mode run has Neural_Networks_BackPropagation_Epochs {} > 0 \
+                     (the fast processors' training arms are inert, so this would silently \
+                     no-op-train); train on the exact path",
+                    self.mode.kind,
+                    self.training_epochs
+                );
+            }
+        }
+
         let nb = self.processors.nb_of_conf();
         let rows = self.training_epochs + 2;
         self.cost_mem = Array2::zeros((rows, nb));

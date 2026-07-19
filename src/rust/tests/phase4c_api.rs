@@ -357,6 +357,45 @@ fn results_matrix_after_run() {
     }
 }
 
+// === image_mode_trains_exact_path_unblocked (T5 finding 2) ===================
+// The `run()`->`train()` fast-processor guard (`corpus_processor.rs::train`, T5 review)
+// must be DEAD CODE on every exact-path run. `tier1_tdc.config` already defaults
+// `Neural_Networks_BackPropagation_Epochs` to 2 (no Inference_Path key -> exact, no
+// FastSpectral/FastTwinLid processor ever built), so Image mode (in the run() `allowed`
+// set) routes straight to `train()`. TDC (algo 1) has no NN, but train()'s epoch loop /
+// mode dispatch / final transform_results run identically regardless -- this must still
+// complete exactly as it did before the guard landed.
+#[test]
+fn image_mode_trains_exact_path_unblocked() {
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    seed_tier1_corpus(dir.path());
+    let _cwd = CwdGuard::enter(dir.path());
+
+    let mut cfg = load_config("phase4a/tier1_tdc.config");
+    cfg.insert(
+        "multiConfigResultsOutputFile".to_string(),
+        "phase7_t5_image_train.mat".to_string(),
+    );
+    cfg.insert(
+        "Dump_Directory".to_string(),
+        "vrcts_t5_image_train".to_string(),
+    );
+    std::fs::create_dir_all("vrcts_t5_image_train").unwrap();
+
+    let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::Image)).unwrap();
+    cp.run().expect(
+        "exact + Image + Epochs>0 must still train (the fast-processor guard is dead code here)",
+    );
+
+    let m = cp.results_matrix();
+    assert_eq!(
+        m.dim(),
+        (6, 21),
+        "3 files x 2 channels, 3 id + 18 result cols, same shape as the Solo/Epochs=0 run"
+    );
+}
+
 // === weights_derivatives_nonzero_through_seam (F10) ==========================
 // F10 (phase 5): the release seam `weights_derivatives(pos)` must return the
 // gradient `run_epoch` FOLDED on the per-lane clones (the R6 static-lane model),

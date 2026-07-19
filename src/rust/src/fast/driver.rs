@@ -464,6 +464,12 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 ///   pitch second pass (`TDCwindow > 0`), and `DumpLIDInternals` typed-bail.
 /// - The LID net's InputNormalizationType must be 0 (the gate configs' value; a non-0
 ///   type would need the normalization the fast scoring skips) -- bail at construction.
+/// - A negative `BLSTM_LID_TargetEnforcementStep` typed-bails at construction (T5 finding
+///   1, review): it makes the exact path's truncate-windowed cost block overwrite interior
+///   OUTPUT rows with -0.5 (risk R7, `nn/blstm.rs:1244-1265`), which the fast path's
+///   forward-only scoring never reproduces; the gate configs use a non-negative step.
+/// - MLP mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`) typed-bails at construction (T5 finding 3,
+///   review, contract symmetry with the exact dispatch's is_mlp route to the MLP drivers).
 /// - The LID windowed dispatch must resolve to TRUNCATE (`lid_window_size > 0`,
 ///   `lid_no_overlap true`, what the gate configs give); plain/overlap bail at
 ///   `get_segmentation`.
@@ -582,6 +588,47 @@ impl FastTwinLid {
                 lid_bc.input_normalization_type
             );
         }
+
+        // T5 finding 1 (review): Mode 7's target_index (the clamped audio.lang_index) is
+        // ALWAYS >= 0, so the exact scoring path (`BlstmNetwork::feed_forward_scoring`)
+        // always builds a non-empty target sequence -- gated on targets being PRESENT, not
+        // on backprop being active. For the truncate windowing both gate configs resolve
+        // to, that target sequence is fed through `feed_forward_backward_truncate` ->
+        // `feed_forward_backward_truncate_sweep`, which runs `feed_forward_backward_plain`
+        // per window block. `_TargetEnforcementStep < 0` there makes the COST block
+        // (nn/blstm.rs:1244-1265) overwrite interior rows of the caller-visible OUTPUT
+        // with -0.5 before `computeCost` -- not just the target. The fast path never
+        // builds targets, so it always returns true posteriors: a silent structural
+        // divergence for a negative step. Bail loudly instead.
+        if lid_bc.target_enforcement_step < 0 {
+            bail!(
+                "fast TwinLid: a negative BLSTM_LID_TargetEnforcementStep is not supported on \
+                 the fast path (got {}); the exact path's cost block overwrites interior \
+                 output rows with -0.5 for a negative step (risk R7, nn/blstm.rs:1244-1265), \
+                 which the fast path's forward-only scoring never reproduces; the gate configs \
+                 use a non-negative step",
+                lid_bc.target_enforcement_step
+            );
+        }
+
+        // T5 finding 3 (review, minor): contract symmetry with the exact dispatch, which
+        // routes is_mlp configs (LSTMNeuronNb[0]==0) to the MLP drivers
+        // (nn/blstm.rs:1032-1043) instead of the truncate BLSTM path the fast LID scoring
+        // always runs. `FastBlstm::from_flat` (fast/nn.rs:340-342) independently bails on
+        // this shape, but only once weights are actually loaded -- when `lid_weights` is
+        // `None` here (the deferred `load_weights_file` path), `from_legacy` would
+        // otherwise return `Ok` for an is_mlp config, so `from_flat`'s bail does NOT
+        // provably fire first on every such config. Bail on the SAME derived flag the
+        // exact dispatch gates on so construction fails loudly regardless of when weights
+        // arrive.
+        if lid_bc.is_mlp {
+            bail!(
+                "fast TwinLid: MLP mode (BLSTM_LID_LSTMNeuronNb[0] == 0) is not supported on \
+                 the fast path (the fast LID scoring always runs the truncate BLSTM forward, \
+                 never the MLP drivers); the gate configs use a non-zero LSTM width"
+            );
+        }
+
         let cost_modified = lid_bc.cost_law.is_cost_modified();
         let lid_two_sweeps = lid_bc.two_sweeps;
 
