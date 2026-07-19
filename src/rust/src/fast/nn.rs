@@ -56,12 +56,16 @@ use crate::config::{self, NnetSpec};
 // ---------------------------------------------------------------------------
 
 /// f32 analogue of `Log<double>::expLimit` (`ln(f64::MAX)`): `ln(f32::MAX)`
-/// (~88.7228). On the fast path the exp-overflow bound is f32's, so the gate/
+/// (~88.72284). On the fast path the exp-overflow bound is f32's, so the gate/
 /// logistic saturation guards test against this, not the exact f64 limit ~709.78.
-#[inline]
-fn exp_limit_f32() -> f32 {
-    f32::MAX.ln()
-}
+///
+/// Const (Phase 7 Task 4, mirroring `EXP_OVERFLOW_GUARD_F32` below): the literal
+/// `ln(f32::MAX)` value, promoted from the previous `f32::MAX.ln()` call. The gate/
+/// logistic guards only fire in saturation (`|scaled| >= ~88.72`), unreachable on
+/// real posteriors, so the sub-ULP difference between this literal and
+/// `f32::MAX.ln()` never moves a non-degenerate value (the committed activation
+/// grids sample far from the edge).
+const EXP_LIMIT_F32: f32 = 88.72284;
 
 /// `Maxmin2::fn`/`Identity::fn` (ActivationFunctions.h:158-160,206-208): `asinh`, f32.
 #[inline]
@@ -74,9 +78,8 @@ pub fn asinh_f32(x: f32) -> f32 {
 #[inline]
 pub fn gates_fn_f32(x: f32) -> f32 {
     let scaled = 0.1_f32 * x;
-    let lim = exp_limit_f32();
-    if scaled < lim {
-        if scaled > -lim {
+    if scaled < EXP_LIMIT_F32 {
+        if scaled > -EXP_LIMIT_F32 {
             1.0 / (1.0 + (-scaled).exp())
         } else {
             0.0
@@ -90,15 +93,60 @@ pub fn gates_fn_f32(x: f32) -> f32 {
 /// plain sigmoid, saturation guards, f32.
 #[inline]
 pub fn logistic_f32(x: f32) -> f32 {
-    let lim = exp_limit_f32();
-    if x < lim {
-        if x > -lim {
+    if x < EXP_LIMIT_F32 {
+        if x > -EXP_LIMIT_F32 {
             1.0 / (1.0 + (-x).exp())
         } else {
             0.0
         }
     } else {
         1.0
+    }
+}
+
+/// f32 whole-sequence self-normalization (`BLSTMNeuralNetwork::self_normalize`,
+/// `nn/blstm.rs:769-801`, the input-normalization type -1 branch): all per-column
+/// means, then center all; all per-column stds `sqrt((sum(centered^2) + 1e-32)/rows)`,
+/// then `asinh(x/std)` all. In-place, mirroring the exact 4-pass structure.
+///
+/// The algo-3 fast SAD driver applies this to the whole input sequence ONCE per
+/// channel BEFORE the overlap windowing, exactly as the exact scoring path applies
+/// it at the top of `feed_forward_backward` (`nn/blstm.rs:1025-1028`) before it
+/// dispatches to `feed_forward_backward_overlap`. f32 divergence from the exact f64
+/// normalization is by design (spec S4).
+pub fn self_normalize_f32(m: &mut FastMatrix) {
+    let r = m.rows;
+    let c = m.cols;
+    if r == 0 {
+        return;
+    }
+    let rf = r as f32;
+    let mut mean = vec![0.0_f32; c];
+    for (col, mn) in mean.iter_mut().enumerate() {
+        let mut acc = 0.0_f32;
+        for row in 0..r {
+            acc += m.data[row * c + col];
+        }
+        *mn = acc / rf;
+    }
+    for row in 0..r {
+        for (col, &mn) in mean.iter().enumerate() {
+            m.data[row * c + col] -= mn;
+        }
+    }
+    let mut stdv = vec![0.0_f32; c];
+    for (col, sd) in stdv.iter_mut().enumerate() {
+        let mut acc = 0.0_f32;
+        for row in 0..r {
+            let v = m.data[row * c + col];
+            acc += v * v;
+        }
+        *sd = ((acc + 1e-32) / rf).sqrt();
+    }
+    for row in 0..r {
+        for (col, &sd) in stdv.iter().enumerate() {
+            m.data[row * c + col] = (m.data[row * c + col] / sd).asinh();
+        }
     }
 }
 
@@ -187,6 +235,7 @@ impl FastMatrix {
 /// reads them column-major), so faer views them zero-copy; `peep` is transposed to
 /// ROW-major (`peep[row*O + j]`) for contiguous per-unit peephole reads. Gate column
 /// blocks are `[i|f|o|g]` (0..O input, O..2O forget, 2O..3O output, 3O..4O cell/g).
+#[derive(Clone)]
 struct FastLstmLayer {
     input_size: usize,
     output_size: usize,
@@ -200,6 +249,7 @@ struct FastLstmLayer {
 }
 
 /// One dense output layer's f32 weights (col-major `I x O`, plus the `O` bias row).
+#[derive(Clone)]
 struct FastDenseLayer {
     input_size: usize,
     output_size: usize,
@@ -215,7 +265,7 @@ struct FastDenseLayer {
 /// geometrically by `ensure_len` (never per-frame) and sliced to the exact live
 /// length at each use, so over-sized tails are inert and repeated calls are
 /// bit-identical (the workspace-hygiene contract).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Scratch {
     sub: Vec<f32>,        // sub_sample output (T x C*R)
     proj: Vec<f32>,       // gate/dense projection (T x 4O or T x O)
@@ -229,7 +279,7 @@ struct Scratch {
 
 /// The full workspace: the per-net `Scratch` plus the buffers that must persist
 /// simultaneously (the two LSTM-net outputs feeding the HCAT).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Workspace {
     scratch: Scratch,
     lstm_fwd: Vec<f32>, // forward LSTM-net output (T x lstm_out)
@@ -257,6 +307,11 @@ fn ensure_len(v: &mut Vec<f32>, n: usize) {
 /// committed config has `LSTMNeuronNb[0] != 0`). FORWARD ONLY: no backward, no
 /// trainer, no input normalization (the driver, Task 4, normalizes upstream exactly
 /// as the exact scoring path does before calling the core forward).
+///
+/// `Clone` deep-copies the narrowed f32 weights + the (reusable) workspace/output
+/// buffers, so the enclosing `Processor::FastSpectral` satisfies the bag's
+/// `#[derive(Clone)]`; the fast path is inference-only, so a clone is off any hot path.
+#[derive(Clone)]
 pub struct FastBlstm {
     lstm_neuron_nb: Vec<usize>,
     lstm_subsampling: Vec<usize>,
@@ -498,6 +553,158 @@ impl FastBlstm {
         self.output.rows = o_rows;
         self.output.cols = o_cols;
         &self.output
+    }
+
+    /// `getSubSamplingRatio` (`nn/blstm.rs:403-410`): the whole-BLSTM decimation
+    /// ratio -- product of the forward LSTM sub-samplings times the output-net
+    /// sub-samplings (non-MLP; every committed SAD config is non-MLP).
+    pub fn sub_sampling_ratio(&self) -> usize {
+        let mut r = 1usize;
+        for &s in &self.lstm_subsampling {
+            r *= s;
+        }
+        for &s in &self.output_subsampling {
+            r *= s;
+        }
+        r
+    }
+
+    /// Overlapping-window forward accumulation (`BLSTMNeuralNetwork::
+    /// feedForwardBackwardOverLap`, `nn/blstm.rs:1594-1726`; forward + OUTPUT-only).
+    /// Mirrors the windowed driver the algo-3 SAD path dispatches to when
+    /// `window_size > 0 && overlaps` (tier2 / the phase-6 SAD config): each window
+    /// is a `feed_forward` over a contiguous row-slice of `input`, its posteriors
+    /// accumulated into `output` at `begin/ssr` with a per-row count, then the whole
+    /// `output` divided by the counts (rows covered by NO window -> `0/0 = NaN`,
+    /// reproduced with no guard, per `:1710`).
+    ///
+    /// `output` is the CALLER'S buffer and is NOT zeroed here: the exact driver
+    /// reuses ONE `result_vec` across channels and the `+=` accumulation seeds
+    /// channel N from channel N-1's post-division contents (the load-bearing
+    /// cross-channel reuse quirk, `tasks/sad.rs:1433-1436` + `:1594-1726`) -- the
+    /// caller reproduces it by passing the same `output` for every channel and NOT
+    /// re-zeroing between channels. The LSTM hidden-state accumulators
+    /// (`_OutputForward`/`_OutputBackward`, `:1612-1613`) are NOT tracked: the SAD
+    /// result path never reads them (only the LID Twin's hidden-state concat does,
+    /// out of scope for the algo-3 driver).
+    ///
+    /// f32 + faer divergence from the exact f64 overlap is by design (spec S4); the
+    /// windowing STRUCTURE (grid-snapped begin/end, partial-window recompute,
+    /// count-quotient) is transcribed bit-for-bit in integer arithmetic.
+    pub fn feed_forward_overlap(
+        &mut self,
+        input: &FastMatrix,
+        window_size: usize,
+        window_shift: usize,
+        output: &mut FastMatrix,
+    ) {
+        let lstm_ratios = self.lstm_subsampling.clone();
+        let out_ratios = self.output_subsampling.clone();
+        let ssr = self.sub_sampling_ratio();
+        let is_sub = ssr > 1; // :1604 isSubSamplingUsed
+
+        // :1620-1630 nominal window output length: (2*window_size+1) divided
+        // sequentially by each LSTM then Output ratio (only when subsampling is on).
+        let mut length = 2 * window_size + 1;
+        if is_sub {
+            for &r in &lstm_ratios {
+                length /= r;
+            }
+            for &r in &out_ratios {
+                length /= r;
+            }
+        }
+        let nominal_len = length; // :1630
+
+        let cols = output.cols;
+        let in_cols = input.cols;
+        let input_rows = input.rows;
+        let mut output_count = vec![0.0_f32; output.rows]; // :1614
+
+        let mut jj = 0usize;
+        while jj < input_rows {
+            // :1638-1645 begin snapped DOWN to the ssr grid, end snapped UP.
+            let mut begin = jj.saturating_sub(window_size);
+            begin = (begin / ssr) * ssr;
+            let mut end = begin + 2 * window_size;
+            if end >= input_rows {
+                end = input_rows - 1;
+            }
+            end = ((end + 1) / ssr) * ssr - 1;
+            let length_seq = end - begin + 1; // :1646
+
+            // :1649-1664 partial-window length recompute (sequential floors).
+            let length_short = if length_seq != 2 * window_size + 1 {
+                let mut ls = length_seq;
+                if is_sub {
+                    for &r in &lstm_ratios {
+                        ls /= r;
+                    }
+                    for &r in &out_ratios {
+                        ls /= r;
+                    }
+                }
+                ls
+            } else {
+                nominal_len
+            };
+
+            // :1667-1705 process the window; accumulate sums + counts.
+            if length_short > 0 {
+                // block = input rows [begin, begin+length_seq), all cols. Rows are
+                // contiguous in row-major, so the slice is one copy (mirrors the
+                // exact `input.slice(begin..).to_owned()`, `:1668-1670`).
+                let block = FastMatrix {
+                    data: input.data[begin * in_cols..(begin + length_seq) * in_cols].to_vec(),
+                    rows: length_seq,
+                    cols: in_cols,
+                };
+                let out_short = self.feed_forward(&block);
+                debug_assert_eq!(
+                    out_short.rows, length_short,
+                    "overlap window output-row count"
+                );
+                // :1687-1693 output sum + count at begin/ssr; `+=` seeds from the
+                // caller's prior contents (cross-channel quirk).
+                let obeg = begin / ssr;
+                for r in 0..length_short {
+                    for c in 0..cols {
+                        output.data[(obeg + r) * cols + c] += out_short.get(r, c);
+                    }
+                    output_count[obeg + r] += 1.0;
+                }
+            }
+            jj += window_shift;
+        }
+
+        // :1712-1716 divide by the per-row counts (0/0 -> NaN on uncovered rows).
+        // `r` indexes both `output.data` (2D `r*cols+c`) and `output_count`, so a plain
+        // range loop is clearest here.
+        #[allow(clippy::needless_range_loop)]
+        for r in 0..output.rows {
+            for c in 0..cols {
+                output.data[r * cols + c] /= output_count[r];
+            }
+        }
+    }
+
+    /// Test hook: the effective per-direction peephole flags in the
+    /// `NnetSpec.peepholes` order `[fwd.cells, bwd.cells, fwd.gates, bwd.gates,
+    /// fwd.gates_rec, bwd.gates_rec]`, read back from layer 0 of each direction.
+    /// Pins the RIDER-1 peephole-default alignment (the fast driver builds its spec
+    /// with `BlstmConfig`-default-TRUE peepholes, not `NnetSpec`'s default-FALSE).
+    #[cfg(feature = "test-support")]
+    pub fn debug_peepholes(&self) -> [bool; 6] {
+        let f = &self.forward_layers[0];
+        let b = &self.backward_layers[0];
+        [
+            f.cells_peep,
+            b.cells_peep,
+            f.gates_peep,
+            b.gates_peep,
+            f.gates_rec_peep,
+            b.gates_rec_peep,
+        ]
     }
 }
 

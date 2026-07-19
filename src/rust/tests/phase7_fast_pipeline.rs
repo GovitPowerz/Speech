@@ -202,6 +202,49 @@ fn pipeline_parity_prcts_60s() {
     println!("MEASURE pipeline_parity_prcts_60s: max_abs={worst_abs:.3e} max_rel={worst_rel:.3e}");
 }
 
+#[test]
+fn pipeline_parity_dc_offset_branch() {
+    // tier2 has flag_DCOffset false, so the fast pipeline's per-frame DC-subtraction
+    // branch (`fill_frame`'s `if dc { ... }`, f32) is UNEXERCISED by the gate config
+    // (Phase 7 Task 4 rider). Flip it true and re-check parity: both the exact
+    // (`get_sequence`) and fast (`fill_frame`) framing subtract the full-buffer mean,
+    // so the assembled sequences must still agree at tolerance -- but WIDER than the
+    // no-DC path: subtracting an f32-computed full-buffer mean amplifies the f32 error
+    // on low-energy periodogram bins (a near-zero bin's log-mel diverges), so the DC
+    // branch diverges ~2 orders more than the flag-off 3 s test (rel 3.0e-6). MEASURED
+    // (Apple Silicon dev box): max_abs=9.784e-3, max_rel=5.704e-4 over both channels of
+    // the 3 s excerpt. Pinned rel ~10x / abs ~5x over measured (the DC branch is an
+    // UNEXERCISED gate path -- a documented, wider f32 tolerance, spec S4).
+    const REL_PIN: f64 = 6.0e-3;
+    const ABS_PIN: f64 = 5.0e-2;
+    let (mut map, _) = tier2_cfg();
+    map.insert("BLSTM_flag_DCOffset".into(), "true".into());
+    let cfg = FeatureConfig::from_legacy(&map, "BLSTM").unwrap();
+    let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0).unwrap();
+    let rate = audio.sample_rate as f64;
+    let s = SpectralParams::derive(&cfg, rate);
+
+    let mut worst_abs = 0.0_f64;
+    let mut worst_rel = 0.0_f64;
+    for chan in 0..audio.data.nrows() {
+        let (exact, fast) = run_both(&cfg, &s, &audio, chan, rate);
+        let (abs, rel) = measure(&exact, &fast);
+        worst_abs = worst_abs.max(abs);
+        worst_rel = worst_rel.max(rel);
+        assert!(
+            rel < REL_PIN,
+            "dc-branch rel {rel} exceeds pin (chan={chan})"
+        );
+        assert!(
+            abs < ABS_PIN,
+            "dc-branch abs {abs} exceeds pin (chan={chan})"
+        );
+    }
+    println!(
+        "MEASURE pipeline_parity_dc_offset_branch: max_abs={worst_abs:.3e} max_rel={worst_rel:.3e}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Typed-bail pins (unexercised gate paths).
 // ---------------------------------------------------------------------------

@@ -167,6 +167,30 @@ impl FastPipeline {
         let buffer_size = params.buffer_size;
         let bins = params.bins;
 
+        // RATE-CONSISTENCY guard (Phase 7 Task 4, T3-review rider): `params` was
+        // derived at some rate; this `rate` argument must be the SAME one, or the
+        // mel bank (built below from `rate`) is placed on a frequency grid
+        // inconsistent with the `params.freq_beg/freq_end` band. `derive` sets
+        // `max_freq = freq_end * freqStep` with `freqStep = rate/2/(bins-1)`
+        // (`features/pipeline.rs:351,367`); recomputing `freqStep` from THIS `rate`
+        // and checking the identity is exact when the rates match (same inputs, same
+        // f64 op) and fails by the rate ratio when they differ. `bins >= 2` for every
+        // order >= 1, so `bins-1 >= 1`. Debug-only: the driver binds ONE
+        // `audio.sample_rate` to both `derive` and `new`, so this never fires in
+        // release; it is a belt-and-suspenders against a future caller that forgets.
+        debug_assert!(
+            {
+                let freq_step = rate / 2.0 / (bins as f64 - 1.0);
+                (params.freq_end as f64 * freq_step - params.max_freq).abs()
+                    <= 1e-9 * params.max_freq.abs().max(1.0)
+            },
+            "FastPipeline::new rate {rate} is inconsistent with the SpectralParams it \
+             was given (freq_end {} * freqStep(rate) != max_freq {}); derive and new \
+             must share one sample_rate binding",
+            params.freq_end,
+            params.max_freq
+        );
+
         // f32 window coefficients (narrowed once from the exact f64 coeffs).
         let win_coeffs =
             crate::audio::windowing_coefficients(&cfg.win_type, false, buffer_size, cfg.win_param)

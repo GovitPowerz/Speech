@@ -15,6 +15,7 @@ use crate::audio::{Audio, read_audio};
 use crate::cli::{Mode, ModeKind};
 use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
+use crate::fast::driver::FastSpectralSegmenter;
 use crate::features::stats::InputStatistics;
 use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
@@ -92,6 +93,17 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// `large_enum_variant` allowed: the brief's signature is exact
 /// (`Spectral(BlstmSpectralSegmenter)`, no `Box`); boxing would change the public
 /// interface for a lint, not a correctness issue.
+///
+/// `FastSpectral` (Phase 7 Task 4) is the f32 fast-inference counterpart of
+/// `Spectral` (algo 3), selected by the `Inference_Path fast` config key. It is
+/// inference-only: its `getSegmentation`/`dumpDir`/cost/classif arms delegate to the
+/// fast driver (like `Spectral`), and its TRAINING arms (weights/derivatives/stats/
+/// save/update/isBackProp) group with the non-NN variants' inert defaults, since the
+/// fast path never trains (training stays exact f64 -- spec S1; the fast driver
+/// exposes no trainable f64 surface). It IS `Clone` (deep-copying the f32 net +
+/// workspace), so the bag's `#[derive(Clone)]` still holds; the clone sites
+/// (grad-check snapshot, per-lane training fan-out) are exact-path-only, so a
+/// fast-variant deep copy is not on any hot path.
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Processor {
@@ -102,6 +114,7 @@ pub enum Processor {
     Signal(BlstmSignalSegmenter),
     Lid(BlstmSpectralLid),
     TwinLid(TwinBlstmSpectralLid),
+    FastSpectral(FastSpectralSegmenter),
 }
 
 /// Per-channel LID result-row data (`seg._LID*` members): the `:338-349` scored
@@ -135,6 +148,7 @@ impl Processor {
             Processor::Signal(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::Lid(s) => s.get_segmentation(audio, seg_per_chan, refs),
             Processor::TwinLid(s) => s.get_segmentation(audio, seg_per_chan, refs),
+            Processor::FastSpectral(s) => s.get_segmentation(audio, seg_per_chan, refs),
         }
     }
 
@@ -149,6 +163,7 @@ impl Processor {
             Processor::Signal(s) => s.dump_dir(),
             Processor::Lid(s) => s.dump_dir(),
             Processor::TwinLid(s) => s.dump_dir(),
+            Processor::FastSpectral(s) => s.dump_dir(),
         }
     }
 
@@ -165,6 +180,9 @@ impl Processor {
             Processor::Signal(s) => s.cumulative_error().to_vec(),
             Processor::Lid(s) => s.cumulative_error(),
             Processor::TwinLid(s) => s.cumulative_error().to_vec(),
+            // Fast SAD is forward-only: cost is not harvested, so this is all-zeros
+            // (a documented divergence from the exact algo-3 driver).
+            Processor::FastSpectral(s) => s.cumulative_error().to_vec(),
         }
     }
 
@@ -178,6 +196,8 @@ impl Processor {
             Processor::Signal(s) => s.nb_of_classif().to_vec(),
             Processor::Lid(s) => s.nb_of_classif(),
             Processor::TwinLid(s) => s.nb_of_classif().to_vec(),
+            // Fast SAD is forward-only: all-zeros (see cumulative_error).
+            Processor::FastSpectral(s) => s.nb_of_classif().to_vec(),
         }
     }
 
@@ -280,6 +300,17 @@ impl BagOfProcessors {
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
 
+        // Inference_Path (Phase 7 Task 4): `exact` (default, absent) selects the exact
+        // f64 drivers; `fast` selects the f32 fast-inference counterparts. A global
+        // key (read from configs[0], like File_Type/Audio_offset); any other value is
+        // a construction error (loud, not a silent fallback).
+        let inference_path = get_string_default(&configs[0], "Inference_Path", "exact");
+        let use_fast = match inference_path.as_str() {
+            "exact" => false,
+            "fast" => true,
+            other => bail!("Inference_Path `{other}` not recognized (expected `exact` or `fast`)"),
+        };
+
         if file_type != 0 && file_type != 1 && file_type != 2 {
             // legacy: AudioStruct phSeq-N/mat read paths (file_type 3/4) -- unported.
             // wav (0), phSeq (1), and cep (2, Phase 6 Task 1) are supported.
@@ -304,6 +335,27 @@ impl BagOfProcessors {
             algo_types.push(algo);
             let pruning_thresh = get_f64_default(map, "Pruning_Threshold", 0.0)?;
             pruning_thresholds.push(pruning_thresh);
+
+            // Phase 7 Task 4: `Inference_Path fast` picks the f32 fast-inference driver
+            // per config. Currently only algo 3 (spectral SAD) has a fast counterpart;
+            // algo 6 Mode-7 LID joins in Task 5, everything else stays exact-only ->
+            // typed-bail. `FastSpectral` load-weights mirrors the exact algo-3 arm
+            // (`from_legacy(map, None)` then `load_weights_file`).
+            if use_fast {
+                let processor = match algo {
+                    3 => {
+                        let mut seg = FastSpectralSegmenter::from_legacy(map, None)?;
+                        seg.load_weights_file(map)?;
+                        Processor::FastSpectral(seg)
+                    }
+                    other => bail!(
+                        "Inference_Path fast is not supported for algo {other} (only algo 3 \
+                         spectral SAD; algo 6 Mode-7 LID joins in Task 5)"
+                    ),
+                };
+                processors.push(processor);
+                continue;
+            }
 
             let processor = match algo {
                 0 => Processor::Vrcts(VrctsPart::from_legacy(map)?),
@@ -425,7 +477,13 @@ impl BagOfProcessors {
                 seg.is_back_prop_activated(),
                 seg.is_back_prop_activated_lid(),
             ],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => vec![false],
+            // Fast SAD is inference-only (never trains), so it groups with the non-NN
+            // variants' `vector<bool>(1, false)` default -- the training dispatch never
+            // reaches a fast driver (training stays exact f64).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_) => vec![false],
         }
     }
 
@@ -442,7 +500,11 @@ impl BagOfProcessors {
             Processor::Signal(seg) => vec![seg.get_weights()],
             Processor::Lid(seg) => vec![seg.get_weights()],
             Processor::TwinLid(seg) => vec![seg.get_weights(), seg.get_weights_lid()],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            // Fast SAD exposes no trainable f64 weight surface (inference-only).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_) => Vec::new(),
         }
     }
 
@@ -460,7 +522,12 @@ impl BagOfProcessors {
                 seg.set_weights(&new_weights[0])?;
                 seg.set_weights_lid(&new_weights[1])
             }
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
+            // Fast SAD has no settable f64 weight surface (inference-only, weights
+            // fixed at construction) -- no-op like the non-NN variants.
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_) => Ok(()),
         }
     }
 
@@ -477,7 +544,11 @@ impl BagOfProcessors {
                 seg.input_statistics().clone(),
                 seg.get_input_statistics_lid().clone(),
             ],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            // Fast SAD folds no input statistics (inference-only).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_) => Vec::new(),
         }
     }
 
@@ -494,7 +565,11 @@ impl BagOfProcessors {
                 seg.get_weights_derivatives(),
                 seg.get_weights_derivatives_lid(),
             ],
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Vec::new(),
+            // Fast SAD produces no gradients (forward-only, inference).
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_) => Vec::new(),
         }
     }
 
@@ -553,7 +628,11 @@ impl BagOfProcessors {
                     best_cost.insert(pos, save_criterion);
                 }
             }
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
+            // Fast SAD never trains (inference-only) -- no save gate, like algo 0/1/2.
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
@@ -599,7 +678,11 @@ impl BagOfProcessors {
                 seg.update_weights(&derivs[&pos][0], cost);
                 seg.update_weights_lid(&derivs[&pos][1], cost_lid);
             }
-            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => {
+            // Fast SAD never trains (inference-only) -- no-op, like algo 0/1/2.
+            Processor::Vrcts(_)
+            | Processor::Tdc(_)
+            | Processor::Ltsv(_)
+            | Processor::FastSpectral(_) => {
                 // legacy: no `if` branch for algo 0/1/2 -- no-op.
             }
         }
@@ -1513,5 +1596,64 @@ mod tests {
         assert_eq!(bag.get_weights_derivatives(3).len(), 1);
         // The real config-1 net's weight vector is the known 33,671 length.
         assert_eq!(bag.get_weights(2)[0].len(), 33_671);
+    }
+
+    /// Phase 7 Task 4 dispatch unit: `Inference_Path` selects the driver variant.
+    /// - `fast` + algo 3  -> `Processor::FastSpectral`
+    /// - absent           -> `Processor::Spectral` (exact, default)
+    /// - junk value       -> construction error
+    /// - `fast` + algo 4  -> bail (only algo 3 has a fast counterpart in Task 4)
+    ///
+    /// tier2_spectral.config is the algo-3 vehicle (TDCwindow 0 + InputNormalization
+    /// -1, so the fast driver's construction bails don't fire); `BLSTM_weightsFile`
+    /// is emptied so construction does not need the weight pack on disk.
+    #[test]
+    fn inference_path_dispatch() {
+        let base3 = || {
+            let mut m = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+            m.insert("BLSTM_weightsFile".to_string(), String::new());
+            m
+        };
+
+        // fast + algo 3 -> FastSpectral.
+        let mut fast3 = base3();
+        fast3.insert("Inference_Path".to_string(), "fast".to_string());
+        let bag =
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        assert!(
+            matches!(bag.processor(0), Processor::FastSpectral(_)),
+            "fast + algo 3 must dispatch to FastSpectral"
+        );
+
+        // absent -> exact Spectral.
+        let mut exact3 = base3();
+        let bag =
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3), solo_mode()).unwrap();
+        assert!(
+            matches!(bag.processor(0), Processor::Spectral(_)),
+            "absent Inference_Path must dispatch to the exact Spectral"
+        );
+
+        // junk value -> error.
+        let mut junk = base3();
+        junk.insert("Inference_Path".to_string(), "turbo".to_string());
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut junk), solo_mode()) {
+            Err(e) => assert!(
+                e.to_string().contains("Inference_Path"),
+                "junk value error must name Inference_Path, got: {e}"
+            ),
+            Ok(_) => panic!("junk Inference_Path must bail"),
+        }
+
+        // fast + algo 4 -> bail (only algo 3 supported in Task 4).
+        let mut fast4 = with_bag_keys(load_config("phase2b/signal.config"), 4);
+        fast4.insert("Inference_Path".to_string(), "fast".to_string());
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut fast4), solo_mode()) {
+            Err(e) => assert!(
+                e.to_string().to_lowercase().contains("fast"),
+                "fast + algo 4 bail must mention fast, got: {e}"
+            ),
+            Ok(_) => panic!("fast + algo 4 must bail (no fast algo-4 driver)"),
+        }
     }
 }
