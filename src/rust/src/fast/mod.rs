@@ -14,7 +14,8 @@
 //! RESULTS.md -- NEVER IMPROVEMENTS.md (which tracks legacy-quirk debt, not this
 //! deliberate f32/f64 split). No contorting the fast path toward bit-parity.
 //!
-//! Task 2 lands `nn` (the f32 BLSTM forward core); Tasks 3/4/5 add `pipeline`,
-//! `driver`.
+//! Task 2 lands `nn` (the f32 BLSTM forward core); Task 3 adds `pipeline`; Tasks 4/5
+//! add `driver`.
 
 pub mod nn;
+pub mod pipeline;
