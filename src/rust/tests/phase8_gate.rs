@@ -29,7 +29,7 @@
 
 mod common;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use indexmap::IndexMap;
 
@@ -38,7 +38,6 @@ use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::{BagOfProcessors, Processor};
 use speech::fast::driver::build_aligned_spec;
 use speech::fast::nn::FastMatrix;
-use speech::fast::pipeline::FastPipeline;
 use speech::fast::stream::{EmittedSegment, StreamDecision, StreamingSession};
 use speech::features::pipeline::{FeatureConfig, SpectralParams};
 use speech::tasks::segmentation::{SegClass, Segmentation};
@@ -217,84 +216,9 @@ fn boundary_check(streamed: &Segmentation, offline: &Segmentation, label: &str) 
     max_dt
 }
 
-// ---------------------------------------------------------------------------
-// The calibrated-tail staging (gate-construction calibration, R4 posture).
-// ---------------------------------------------------------------------------
-
-/// Stage the CALIBRATED-TAIL variant: patch a COPY of the tuple-A pack's type-1 normalize
-/// tail with the fixture's OWN self-norm per-column mean/std (measured here via the exact
-/// `self_normalize` formulas), so the frozen type-1 mode approximates self-norm and
-/// produces a REAL boundary set. Returns the calibrated config path. GATE-CONSTRUCTION
-/// CALIBRATION, NOT A TRAINED TAIL (spec R4).
-fn stage_calibrated(dir: &Path, base: &common::FrozenStage) -> PathBuf {
-    let base_text = std::fs::read_to_string(&base.config_path).unwrap();
-    let map = parse(&base_text);
-    let feature_cfg = FeatureConfig::from_legacy(&map, "BLSTM").unwrap();
-
-    // Build the input sequence exactly as the offline driver does: gained channel 0 ->
-    // f32 -> FastPipeline (tier2 preemph/noise are no-ops, so no mutation before framing).
-    let audio = read_audio(&base.wav_path, 0.0, 3600.0, 0, Some(base.fixed_gain)).unwrap();
-    let rate = audio.sample_rate as f64;
-    let params = SpectralParams::derive(&feature_cfg, rate);
-    let mut pipeline = FastPipeline::new(&params, &feature_cfg, rate).unwrap();
-    let samples: Vec<f32> = audio.data.row(0).iter().map(|&x| x as f32).collect();
-    let input = pipeline.build_input_sequence(&samples).clone();
-    let (t, c) = (input.rows, input.cols);
-    let spec = build_aligned_spec(&map, "BLSTM").unwrap();
-    // The net input width == the normalize-tail length; the assembled feature dim `c` is
-    // NARROWER (11 vs 23 on tier2 -- the LSTM width-tolerates), so `external_normalize_f32`
-    // touches only the FIRST `c` columns (`max_col = c.min(mean.len())`). We patch exactly
-    // those `c` tail entries, at the `input_size`-based tail offsets.
-    let input_size = spec.lstm_neuron_nb[0];
-    assert!(
-        c <= input_size,
-        "assembled input dim {c} must fit the net input width {input_size}"
-    );
-
-    // Per-column self-norm mean/std over the `c` assembled columns (population mean; std =
-    // sqrt((sumsq+1e-32)/rows) -- the exact `fast/nn.rs::self_normalize_f32` formulas, in f64).
-    let mut mean = vec![0.0f64; c];
-    let mut std = vec![0.0f64; c];
-    for (col, m) in mean.iter_mut().enumerate() {
-        let mut acc = 0.0;
-        for row in 0..t {
-            acc += input.get(row, col) as f64;
-        }
-        *m = acc / t as f64;
-    }
-    for (col, sd) in std.iter_mut().enumerate() {
-        let mut acc = 0.0;
-        for row in 0..t {
-            let d = input.get(row, col) as f64 - mean[col];
-            acc += d * d;
-        }
-        *sd = ((acc + 1e-32) / t as f64).sqrt();
-    }
-
-    // Patch the tuple-A pack's normalize tail: mean tail is `data[n-2*input_size ..
-    // n-input_size]`, std tail is `data[n-input_size .. n]` (per `FastBlstm::from_flat`).
-    // Only the first `c` entries of each are read by `external_normalize_f32`.
-    let pack_path = common::fixture_phase0("NNweights_config1.bin");
-    let (rows, cols, mut data) = speech::io::binary::read_matrix(&pack_path).unwrap();
-    assert_eq!(cols, 1, "the weight pack is an N x 1 column vector");
-    let n = data.len();
-    for (col, (&m, &sd)) in mean.iter().zip(std.iter()).enumerate() {
-        data[n - 2 * input_size + col] = m;
-        data[n - input_size + col] = sd;
-    }
-    let patched = dir.join("calibrated_pack.bin");
-    speech::io::binary::write_matrix(&patched, rows, cols, &data).unwrap();
-
-    let cal_text = format!(
-        "{base_text}\n\
-# ==== calibrated-tail (gate-construction calibration, NOT a trained tail; spec R4) ====\n\
-BLSTM_weightsFile {}\n",
-        patched.display()
-    );
-    let cal_config = dir.join("calibrated_tier2.config");
-    std::fs::write(&cal_config, cal_text).unwrap();
-    cal_config
-}
+// The calibrated-tail staging (gate-construction calibration, R4 posture) moved to
+// `common::stage_calibrated` (Phase 8 Task 6) so the `speech stream` CLI test drives real
+// segments off the identical staged config; the callers below use it.
 
 // ---------------------------------------------------------------------------
 // (a) OFFLINE EQUIVALENCE -- primary (tuple-A frozen tail).
@@ -335,7 +259,7 @@ fn stream_finish_equals_offline_frozen() {
 fn stream_finish_equals_offline_calibrated() {
     let dir = tempfile::tempdir().unwrap();
     let base = common::stage_frozen_tier2(dir.path());
-    let cal_config = stage_calibrated(dir.path(), &base);
+    let cal_config = common::stage_calibrated(dir.path(), &base);
     let text = std::fs::read_to_string(&cal_config).unwrap();
     let (rate, samples) = mono_samples(&base.wav_path);
 
@@ -426,7 +350,7 @@ fn chunking_bit_invariance() {
 
     // CALIBRATED tail: REAL segments, so posteriors + emitted set + segmentation are ALL
     // non-degenerate (the strongest invariance leg).
-    let cal_config = stage_calibrated(dir.path(), &base);
+    let cal_config = common::stage_calibrated(dir.path(), &base);
     let cal_text = std::fs::read_to_string(&cal_config).unwrap();
     check_chunk_invariance(&cal_text, rate, &samples, "calibrated");
 }
@@ -439,7 +363,7 @@ fn chunking_bit_invariance() {
 fn prefix_consistency_e2e() {
     let dir = tempfile::tempdir().unwrap();
     let base = common::stage_frozen_tier2(dir.path());
-    let cal_config = stage_calibrated(dir.path(), &base);
+    let cal_config = common::stage_calibrated(dir.path(), &base);
     let text = std::fs::read_to_string(&cal_config).unwrap();
     let (rate, samples) = mono_samples(&base.wav_path);
 
@@ -665,6 +589,44 @@ fn noise_gate_seeded_negative_bails() {
 }
 
 // ---------------------------------------------------------------------------
+// (d'') THE BINARY-SAD-ONLY CONSTRUCTION BAIL (T5-review fast-follow (a)).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn output_size_not_one_bails() {
+    // The `StreamingSession::new` output_size != 1 bail: the decision layer reads posterior
+    // column 0 only, and the offline `results.len() == rows*cols` tail quirk would differ for
+    // a wider posterior -- so a multi-output net is refused loudly at construction (the
+    // sibling of `StreamDecision::push_rows`' cols==1 debug_assert). Mirror the noise-bail
+    // pattern: mutate the frozen config's output net to 2 neurons (48,12,2 -> output_size 2),
+    // synth a matching ZEROS pack sized to that spec (so `FastBlstm::from_flat` SUCCEEDS -- the
+    // bail we want is output_size, NOT a too-short pack), and assert the message.
+    let dir = tempfile::tempdir().unwrap();
+    let stage = common::stage_frozen_tier2(dir.path());
+    let text = std::fs::read_to_string(&stage.config_path).unwrap();
+    let mut m = parse(&text);
+    m.insert("BLSTM_OutputNeuronNb".into(), "48,12,2".into());
+
+    // A zeros pack of exactly `element_count(spec)` for the mutated (output-2) spec, so the
+    // net loads and the flow reaches the output_size check (algo 3 / mono / gain / type-1 /
+    // window all still pass -- they are net-topology-independent).
+    let spec = build_aligned_spec(&m, "BLSTM").unwrap();
+    let needed = speech::config::element_count(&spec);
+    let pack = dir.path().join("out2_pack.bin");
+    speech::io::binary::write_matrix(&pack, needed, 1, &vec![0.0; needed]).unwrap();
+    m.insert(
+        "BLSTM_weightsFile".into(),
+        pack.to_str().unwrap().to_string(),
+    );
+
+    let msg = bail_msg(StreamingSession::new(&m, 8000.0, 1));
+    assert!(
+        msg.contains("output_size 1"),
+        "output-2 bail message: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // (e) LATENCY BOUNDS (the DERIVED structural budget + a measured area allowance).
 // ---------------------------------------------------------------------------
 
@@ -691,7 +653,7 @@ fn latency_bounds() {
     //   holdback         = 2.28957 s  (sum(min_speech)+sum(min_silence)+sum(padding), clamped)
     //   DERIVED BOUND    = 6.05357 s  (the config-derived structural floor)
     //   pipeline_forward = 3.76400 s  (feature_reach + nn_window + conv_delay; bound - holdback)
-    //   SPEECH push max lag = 5.84460 s  (< bound -- delivered within the structural floor;
+    //   SPEECH push max lag = 5.84457 s  (< bound -- delivered within the structural floor;
     //     the time-advance win, down from the old 16.8 s wait-for-next-raw-segment)
     //   OTHER  push max lag = 15.84618 s (= max_speech_dur 13.34760 + pipeline_forward 3.76400
     //     - a small residual; the silence-before-long-speech commit wait, inherent to the
@@ -699,7 +661,7 @@ fn latency_bounds() {
     //   EOS-drain (finish) max lag = 4.96767 s over 3 emissions.
     let dir = tempfile::tempdir().unwrap();
     let base = common::stage_frozen_tier2(dir.path());
-    let cal_config = stage_calibrated(dir.path(), &base);
+    let cal_config = common::stage_calibrated(dir.path(), &base);
     let text = std::fs::read_to_string(&cal_config).unwrap();
     let (rate, samples) = mono_samples(&base.wav_path);
 
@@ -902,7 +864,7 @@ fn settled_speech_emits_during_silence() {
     // structural bound + a small allowance (NOT the old bound + trigger-gap form).
     let dir = tempfile::tempdir().unwrap();
     let base = common::stage_frozen_tier2(dir.path());
-    let cal_config = stage_calibrated(dir.path(), &base);
+    let cal_config = common::stage_calibrated(dir.path(), &base);
     let text = std::fs::read_to_string(&cal_config).unwrap();
     let (rate, samples) = mono_samples(&base.wav_path);
 

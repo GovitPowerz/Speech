@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ndarray::{Array2, ShapeBuilder};
+use speech::audio::read_audio;
+use speech::fast::driver::build_aligned_spec;
+use speech::fast::pipeline::FastPipeline;
+use speech::features::pipeline::{FeatureConfig, SpectralParams};
 
 /// Absolute path to a file under `tests/reference_data/phase1/`.
 pub fn fixture(name: &str) -> PathBuf {
@@ -315,6 +319,84 @@ BLSTM_InputNormalizationType 1\n",
         config_path,
         fixed_gain,
     }
+}
+
+/// Stage the CALIBRATED-TAIL variant (Phase 8 gate + Task 6 CLI oracle staging): patch a
+/// COPY of the tuple-A pack's type-1 normalize tail with the fixture's OWN self-norm
+/// per-column mean/std (measured here via the exact `self_normalize` formulas), so the
+/// frozen type-1 mode approximates self-norm and produces a REAL boundary set. Returns the
+/// calibrated config path. GATE-CONSTRUCTION CALIBRATION, NOT A TRAINED TAIL (spec R4).
+///
+/// Lives in `common` (not the phase8_gate binary) so BOTH the gate and the `speech stream`
+/// CLI test (`phase8_cli.rs`) drive real segments off the identical staged config.
+pub fn stage_calibrated(dir: &Path, base: &FrozenStage) -> PathBuf {
+    let base_text = std::fs::read_to_string(&base.config_path).unwrap();
+    let map = speech::legacy_config::parse_legacy_config(&base_text);
+    let feature_cfg = FeatureConfig::from_legacy(&map, "BLSTM").unwrap();
+
+    // Build the input sequence exactly as the offline driver does: gained channel 0 ->
+    // f32 -> FastPipeline (tier2 preemph/noise are no-ops, so no mutation before framing).
+    let audio = read_audio(&base.wav_path, 0.0, 3600.0, 0, Some(base.fixed_gain)).unwrap();
+    let rate = audio.sample_rate as f64;
+    let params = SpectralParams::derive(&feature_cfg, rate);
+    let mut pipeline = FastPipeline::new(&params, &feature_cfg, rate).unwrap();
+    let samples: Vec<f32> = audio.data.row(0).iter().map(|&x| x as f32).collect();
+    let input = pipeline.build_input_sequence(&samples).clone();
+    let (t, c) = (input.rows, input.cols);
+    let spec = build_aligned_spec(&map, "BLSTM").unwrap();
+    // The net input width == the normalize-tail length; the assembled feature dim `c` is
+    // NARROWER (11 vs 23 on tier2 -- the LSTM width-tolerates), so `external_normalize_f32`
+    // touches only the FIRST `c` columns (`max_col = c.min(mean.len())`). We patch exactly
+    // those `c` tail entries, at the `input_size`-based tail offsets.
+    let input_size = spec.lstm_neuron_nb[0];
+    assert!(
+        c <= input_size,
+        "assembled input dim {c} must fit the net input width {input_size}"
+    );
+
+    // Per-column self-norm mean/std over the `c` assembled columns (population mean; std =
+    // sqrt((sumsq+1e-32)/rows) -- the exact `fast/nn.rs::self_normalize_f32` formulas, in f64).
+    let mut mean = vec![0.0f64; c];
+    let mut std = vec![0.0f64; c];
+    for (col, m) in mean.iter_mut().enumerate() {
+        let mut acc = 0.0;
+        for row in 0..t {
+            acc += input.get(row, col) as f64;
+        }
+        *m = acc / t as f64;
+    }
+    for (col, sd) in std.iter_mut().enumerate() {
+        let mut acc = 0.0;
+        for row in 0..t {
+            let d = input.get(row, col) as f64 - mean[col];
+            acc += d * d;
+        }
+        *sd = ((acc + 1e-32) / t as f64).sqrt();
+    }
+
+    // Patch the tuple-A pack's normalize tail: mean tail is `data[n-2*input_size ..
+    // n-input_size]`, std tail is `data[n-input_size .. n]` (per `FastBlstm::from_flat`).
+    // Only the first `c` entries of each are read by `external_normalize_f32`.
+    let pack_path = fixture_phase0("NNweights_config1.bin");
+    let (rows, cols, mut data) = speech::io::binary::read_matrix(&pack_path).unwrap();
+    assert_eq!(cols, 1, "the weight pack is an N x 1 column vector");
+    let n = data.len();
+    for (col, (&m, &sd)) in mean.iter().zip(std.iter()).enumerate() {
+        data[n - 2 * input_size + col] = m;
+        data[n - input_size + col] = sd;
+    }
+    let patched = dir.join("calibrated_pack.bin");
+    speech::io::binary::write_matrix(&patched, rows, cols, &data).unwrap();
+
+    let cal_text = format!(
+        "{base_text}\n\
+# ==== calibrated-tail (gate-construction calibration, NOT a trained tail; spec R4) ====\n\
+BLSTM_weightsFile {}\n",
+        patched.display()
+    );
+    let cal_config = dir.join("calibrated_tier2.config");
+    std::fs::write(&cal_config, cal_text).unwrap();
+    cal_config
 }
 
 /// Elementwise bit-exact comparison; reports the first mismatch index + hex bits.

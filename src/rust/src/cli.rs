@@ -188,3 +188,52 @@ pub fn parse_bench_args(args: &[String]) -> Result<BenchInvocation> {
         path,
     })
 }
+
+/// A parsed `speech stream` invocation. Port-only subcommand (Phase 8 Task 6,
+/// the `bench` / `--convert-config` precedent) -- NOT part of the legacy `fsp`
+/// mode-flag grammar; `main.rs` dispatches to this parser on the literal
+/// `stream` first argument, before `parse_cli` ever runs. `config`/`wav` are
+/// the two required positional paths (config then wav, in that order);
+/// `chunk_ms` is the streaming push granularity in milliseconds.
+#[derive(Debug, Clone)]
+pub struct StreamInvocation {
+    pub config: String,
+    pub wav: String,
+    pub chunk_ms: u64,
+}
+
+/// Parse `speech stream [--chunk-ms=N] <config> <wav>` (the `stream` literal
+/// itself already consumed by the caller). `--chunk-ms` defaults to 100 (the
+/// `--key=val` shape, matching `bench`'s `--repeat=`/`--path=`); exactly two
+/// non-flag arguments are required, in `<config> <wav>` order.
+pub fn parse_stream_args(args: &[String]) -> Result<StreamInvocation> {
+    let mut chunk_ms: u64 = 100;
+    let mut positionals: Vec<String> = Vec::new();
+
+    for arg in args {
+        if let Some(rest) = arg.strip_prefix("--chunk-ms=") {
+            chunk_ms = rest
+                .parse::<u64>()
+                .map_err(|e| anyhow::anyhow!("invalid --chunk-ms value '{rest}': {e}"))?;
+        } else if arg.starts_with("--") {
+            bail!("unknown stream option: {arg}");
+        } else {
+            positionals.push(arg.clone());
+        }
+    }
+
+    if chunk_ms == 0 {
+        bail!("--chunk-ms must be > 0");
+    }
+    if positionals.len() != 2 {
+        bail!(
+            "stream takes exactly two positional args: <config> <wav> (got {})",
+            positionals.len()
+        );
+    }
+    Ok(StreamInvocation {
+        config: positionals[0].clone(),
+        wav: positionals[1].clone(),
+        chunk_ms,
+    })
+}
