@@ -133,7 +133,7 @@ fn xml_reference_scored_run_through_dispatch() {
     // Independent oracle: re-run the NN-free TDC driver to recover the per-channel
     // hyp, then score each channel against its OWN VRCTS reference (channel-sliced).
     let xml_text = std::fs::read_to_string(&xml).unwrap();
-    let mut audio = read_audio(&wav, 0.0, 2.0, 0).unwrap();
+    let mut audio = read_audio(&wav, 0.0, 2.0, 0, None).unwrap();
     let audio_duration = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let n_chan = audio.data.nrows();
     assert_eq!(

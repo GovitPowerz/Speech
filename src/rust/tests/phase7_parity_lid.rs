@@ -69,7 +69,7 @@ fn map_of(variant: &str) -> IndexMap<String, String> {
 
 fn phseq_audio(f: &str, lang: i32) -> Audio {
     let path = phase4b("corpus_phseq").join(format!("{f}.phSeq"));
-    let mut a = read_audio(&path, 0.0, 120.0, 1).unwrap();
+    let mut a = read_audio(&path, 0.0, 120.0, 1, None).unwrap();
     a.lang_index = lang;
     a.weight = 1.0;
     a.audio_file_name = path.to_string_lossy().into_owned();
@@ -78,7 +78,7 @@ fn phseq_audio(f: &str, lang: i32) -> Audio {
 
 fn cep_audio(name: &str, lang: i32) -> Audio {
     let path = phase6(&format!("cep/{name}"));
-    let mut a = read_audio(&path, 0.0, 3.6e6, 2).unwrap();
+    let mut a = read_audio(&path, 0.0, 3.6e6, 2, None).unwrap();
     a.lang_index = lang;
     a.weight = 1.0;
     a.audio_file_name = path.to_string_lossy().into_owned();
@@ -271,7 +271,7 @@ fn lid_parity_cep_exact_vs_fast() {
         "bad_vecsize.plp",
     ] {
         assert!(
-            read_audio(&phase6(&format!("cep/{name}")), 0.0, 3.6e6, 2).is_err(),
+            read_audio(&phase6(&format!("cep/{name}")), 0.0, 3.6e6, 2, None).is_err(),
             "malformed cep {name} must error at read (shared, not a driver-parity case)"
         );
     }
@@ -625,7 +625,7 @@ fn fast_twin_bails_on_wav_arm() {
     // A real wav decode leaves periodogram unset -> the wav CNN arm bail at get_segmentation.
     let lidw = lid_weights();
     let mut drv = FastTwinLid::from_legacy(&map_of("twin_mode7"), None, Some(&lidw)).unwrap();
-    let mut audio = read_audio(&phase4b("corpus_lid").join("f1.wav"), 0.0, 2.0, 0).unwrap();
+    let mut audio = read_audio(&phase4b("corpus_lid").join("f1.wav"), 0.0, 2.0, 0, None).unwrap();
     assert!(
         audio.periodogram.is_none(),
         "wav decode leaves periodogram unset"

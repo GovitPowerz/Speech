@@ -150,6 +150,38 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
     }
 }
 
+/// f32 external (type 1) input normalization (`BLSTMNeuralNetwork::
+/// feedForwardBackward` `:720-723`, exact port `nn/blstm.rs:1008-1021`, the
+/// `input_normalization_type == 1` branch): per column `jj < min(cols,
+/// mean.len())`, `(x - mean_jj) / max(1e-12, std_jj)`; columns beyond the
+/// mean/std tail are UNTOUCHED. `mean`/`std` are the pack-carried normalize
+/// tail ([`FastBlstm::normalize_mean`]/[`FastBlstm::normalize_std`], narrowed
+/// f64 -> f32 once at `from_flat`). No centering/asinh structure here -- unlike
+/// the type -1 self-normalization above, type 1 is a plain affine transform.
+///
+/// Phase 8 Task 1 (spec S1.1): the frozen-stats input normalization the
+/// streaming reference mode requires -- the fast SAD driver applies this ONCE
+/// per channel before the overlap windowing, at the SAME pipeline position
+/// where the -1 self-norm runs (the exact path's pre-dispatch application at
+/// `nn/blstm.rs:1008`). The exact type-1 branch also feeds the normalized
+/// snapshot to `analyse_input_seq` (`:1022-1023`, InputStatistics accumulation
+/// -- a training-side bookkeeping read); the fast path is FORWARD-ONLY and
+/// carries no InputStatistics (the phase-7 T6b audit: `get_input_statistics`
+/// is an inert-empty read on fast), so that call is deliberately absent here.
+pub fn external_normalize_f32(m: &mut FastMatrix, mean: &[f32], std: &[f32]) {
+    let r = m.rows;
+    let c = m.cols;
+    let max_col = c.min(mean.len());
+    for jj in 0..max_col {
+        let denom = 1e-12_f32.max(std[jj]);
+        let mn = mean[jj];
+        for row in 0..r {
+            let v = &mut m.data[row * c + jj];
+            *v = (*v - mn) / denom;
+        }
+    }
+}
+
 /// f32 softmax overflow guard (exact path `nn/layers.rs:959` uses f64 `700.0`).
 /// f32's `exp` is finite iff arg `<= ln(f32::MAX) ~ 88.72`; `80.0` leaves headroom
 /// for the per-row class-count sum. Below this the path is literally

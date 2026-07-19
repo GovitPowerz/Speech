@@ -56,7 +56,7 @@ fn phseq_bin_dims(name: &str) -> (i64, i64) {
 #[test]
 fn phseq_onehot_golden() {
     for name in FILES {
-        let audio = read_audio(&phseq_path(name), 0.0, 0.0, 1).expect("decode phSeq");
+        let audio = read_audio(&phseq_path(name), 0.0, 0.0, 1, None).expect("decode phSeq");
 
         let want_p = common::load_bin_phase4b(&format!("phseq_{name}_periodogram.bin"));
         let got_p = audio
@@ -92,7 +92,7 @@ fn phseq_metadata_matches_manifest() {
         ("f3", 1, 45, 3600),
     ];
     for (name, lines, phonemes, frames) in expect {
-        let audio = read_audio(&phseq_path(name), 0.0, 0.0, 1).expect("decode phSeq");
+        let audio = read_audio(&phseq_path(name), 0.0, 0.0, 1, None).expect("decode phSeq");
         assert_eq!(audio.external_features.len(), lines, "{name} line count");
         assert_eq!(
             audio.periodogram.as_ref().unwrap().nrows(),
@@ -122,7 +122,7 @@ fn phseq_metadata_matches_manifest() {
 fn phseq_zero_length_line_is_a_zero_row_block() {
     // f1's middle blank line -> a 0-row one-hot matrix, and a 10-row (not 6+10) gap
     // in the periodogram between sentence 1 and sentence 3.
-    let audio = read_audio(&phseq_path("f1"), 0.0, 0.0, 1).expect("decode phSeq");
+    let audio = read_audio(&phseq_path("f1"), 0.0, 0.0, 1, None).expect("decode phSeq");
     assert_eq!(audio.external_features[1].dim(), (0, 38));
     let p = audio.periodogram.unwrap();
     // sentence1 "bozawa" occupies rows 5..11; the 0-length sentence2 contributes no
@@ -160,7 +160,7 @@ fn frames_count_arithmetic() {
     let line: String = std::iter::repeat_n('a', 783).collect();
     std::fs::write(&path, format!("{line}\n")).unwrap();
 
-    let audio = read_audio(&path, 0.0, 0.0, 1).expect("decode synthetic phSeq");
+    let audio = read_audio(&path, 0.0, 0.0, 1, None).expect("decode synthetic phSeq");
     assert_eq!(
         audio.periodogram.as_ref().unwrap().nrows(),
         803,
@@ -186,7 +186,7 @@ fn out_of_domain_char_bails() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("bad.phSeq");
     std::fs::write(&path, "aqz\n").unwrap();
-    match read_audio(&path, 0.0, 0.0, 1) {
+    match read_audio(&path, 0.0, 0.0, 1, None) {
         Err(e) => assert!(
             e.to_string().contains('q'),
             "error should name the offending char: {e}"
@@ -200,7 +200,7 @@ fn missing_file_bails() {
     // legacy AudioStruct.cpp:149-152: ifstream open failure -> exit(1). Ported as
     // a recoverable Err (the crate never calls exit/abort on I/O failure).
     let missing = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("does/not/exist.phSeq");
-    assert!(read_audio(&missing, 0.0, 0.0, 1).is_err());
+    assert!(read_audio(&missing, 0.0, 0.0, 1, None).is_err());
 }
 
 // === wav path regression guard (full suite guard) =============================
@@ -211,7 +211,7 @@ fn wav_path_unchanged() {
     // the existing file_type==0 dispatch: File_Type 0 (wav) must still match the
     // Phase 1-pinned sig_norm.bin golden, and the two new Audio fields must stay at
     // their wav-path defaults (empty / None).
-    let audio = read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0)
+    let audio = read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0, None)
         .expect("decode excerpt wav");
     assert_eq!(audio.sample_rate, 8000);
     assert!(
@@ -236,7 +236,7 @@ fn unsupported_file_type_bails() {
     // (the bail fires before any I/O, so a wav path is a fine stand-in target).
     let wav = common::fixture("excerpt_2ch_8k.wav");
     for ft in [3, 4, -1] {
-        match read_audio(&wav, 0.0, 0.1, ft) {
+        match read_audio(&wav, 0.0, 0.1, ft, None) {
             Err(e) => assert!(e.to_string().contains("file_type")),
             Ok(_) => panic!("file_type {ft} must not be accepted (0/1/2 are ported)"),
         }

@@ -24,8 +24,10 @@
 //! exercise, everything else typed-bails loudly so scope creep is loud):
 //! - The PITCH second pass (`BLSTM_TDCwindow > 0`, spec R4) typed-bails at
 //!   construction.
-//! - `InputNormalizationType != -1` typed-bails at construction (the gate configs --
-//!   `tier2_spectral.config` + the phase-6 `lre_sad.toml` -- both use -1).
+//! - `InputNormalizationType` outside {-1, 1} typed-bails at construction (the
+//!   phase-7 gate configs -- `tier2_spectral.config` + the phase-6 `lre_sad.toml` --
+//!   both use -1; type 1, the pack-carried external mean/std, joined in Phase 8
+//!   Task 1 as the frozen-stats reference mode, spec S1.1).
 //! - The PLAIN (window 0) and TRUNCATE (non-overlap) windowed variants typed-bail at
 //!   `get_segmentation` (both gate configs resolve to OVERLAP: `BLSTM_window 3.25 /
 //!   BLSTM_shift 0.8` -> `window_size > 0`, `no_overlap false`).
@@ -50,7 +52,7 @@ use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
 
-use super::nn::{FastBlstm, FastMatrix, self_normalize_f32};
+use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, self_normalize_f32};
 use super::pipeline::FastPipeline;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 
@@ -122,6 +124,13 @@ pub struct FastSpectralSegmenter {
     output_sub_sampling: Vec<usize>,
     ssr: usize,
 
+    /// `BLSTM_InputNormalizationType`: -1 (whole-sequence self-normalization, the
+    /// phase-7 gate configs) or 1 (pack-carried external mean/std -- the Phase 8
+    /// frozen-stats reference mode, S1.1); every other value typed-bails at
+    /// construction. Dispatched per channel in `get_segmentation`, mirroring the
+    /// exact `feed_forward_backward` top (`nn/blstm.rs:1008-1030`).
+    input_normalization_type: i16,
+
     /// Stateful `_SpectrumShift`/`_SpectrumShiftInFrames`/`_WindowShift`/
     /// `_LTSVWindowShift` members, re-quantized per `get_segmentation` call exactly
     /// as the exact driver does (mirrors `tasks/sad.rs` for state faithfulness).
@@ -149,7 +158,8 @@ impl FastSpectralSegmenter {
     /// two-step `from_legacy(map, None)` + `load_weights_file` pattern).
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast-mode surfaces: the
-    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType != -1`.
+    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType` outside
+    /// {-1, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode).
     pub fn from_legacy(
         map: &IndexMap<String, String>,
         weights: Option<&[f64]>,
@@ -170,12 +180,15 @@ impl FastSpectralSegmenter {
         // Peephole-default alignment (rider 1).
         let spec = build_aligned_spec(map, "BLSTM")?;
 
-        // Only self-normalization (type -1) is on the SAD gate path.
+        // Normalization types on the fast SAD path: -1 (self-normalization, the
+        // phase-7 gate configs) and 1 (pack-carried external mean/std -- Phase 8
+        // S1.1, the frozen-stats reference mode). Everything else typed-bails.
         let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
-        if bc.input_normalization_type != -1 {
+        if bc.input_normalization_type != -1 && bc.input_normalization_type != 1 {
             bail!(
-                "fast SAD: only InputNormalizationType -1 (self-normalization) is supported on the \
-                 fast path (got {}); the gate configs use -1",
+                "fast SAD: only InputNormalizationType -1 (self-normalization) or 1 (external \
+                 pack-carried mean/std, the phase-8 frozen mode) are supported on the fast path \
+                 (got {})",
                 bc.input_normalization_type
             );
         }
@@ -203,6 +216,7 @@ impl FastSpectralSegmenter {
             lstm_sub_sampling,
             output_sub_sampling,
             ssr,
+            input_normalization_type: bc.input_normalization_type,
             spectrum_shift_sec,
             spectrum_shift_in_frames: 0,
             window_shift_sec,
@@ -347,6 +361,14 @@ impl Segmenter for FastSpectralSegmenter {
             anyhow!("fast SAD net has no weights loaded (BLSTM_weightsFile empty)")
         })?;
         let output_size = net.output_size();
+        // Type-1 external normalization needs the pack-carried mean/std tail; copied
+        // out (tiny: input_size floats each) so the loop below can keep the single
+        // `&mut net` borrow for feed_forward_overlap.
+        let (norm_mean, norm_std) = if self.input_normalization_type == 1 {
+            (net.normalize_mean().to_vec(), net.normalize_std().to_vec())
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         // result_buf: ONE buffer reused across channels (the cross-channel reuse quirk,
         // tasks/sad.rs:1436). Zeros once; NOT re-zeroed between channels --
@@ -364,10 +386,15 @@ impl Segmenter for FastSpectralSegmenter {
             let samples: Vec<f32> = audio.data.row(chan).iter().map(|&x| x as f32).collect();
             let mut input = pipeline.build_input_sequence(&samples).clone();
 
-            // Type -1 self-normalization over the whole sequence, ONCE (matching the
-            // exact feed_forward_backward top, blstm.rs:1027, before the overlap
-            // windowing).
-            self_normalize_f32(&mut input);
+            // Input normalization over the whole sequence, ONCE (matching the exact
+            // feed_forward_backward top, blstm.rs:1008-1030, before the overlap
+            // windowing): type -1 self-normalization, or type 1 external pack-carried
+            // mean/std (Phase 8 S1.1, the frozen-stats mode). The construction bail
+            // guarantees no other value reaches here.
+            match self.input_normalization_type {
+                1 => external_normalize_f32(&mut input, &norm_mean, &norm_std),
+                _ => self_normalize_f32(&mut input),
+            }
 
             // Overlap forward: accumulate into the shared result_buf (seeded from the
             // prior channel; NOT zeroed here).

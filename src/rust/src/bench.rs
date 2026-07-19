@@ -113,8 +113,13 @@ fn corpus_audio_seconds(map: &IndexMap<String, String>) -> Result<(f64, usize)> 
     let mut audio_s = 0.0;
     for idx in 0..corpus.nb_of_files() {
         let item = corpus.item(idx);
-        let audio =
-            crate::audio::read_audio(Path::new(&item.file_name), offset, duration_max, file_type)?;
+        let audio = crate::audio::read_audio(
+            Path::new(&item.file_name),
+            offset,
+            duration_max,
+            file_type,
+            None,
+        )?;
         let (channels, frames) = audio.data.dim();
         audio_s += channels as f64 * frames as f64 / audio.sample_rate as f64;
     }

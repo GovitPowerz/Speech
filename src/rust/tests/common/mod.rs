@@ -5,7 +5,7 @@
 //! dead code here rather than forcing each test to touch all helpers.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use ndarray::{Array2, ShapeBuilder};
@@ -132,6 +132,170 @@ pub fn corpus_root_or_skip() -> Option<PathBuf> {
             root.display()
         );
         None
+    }
+}
+
+// ============================================================================
+// Phase 8 Task 1: minimal WAV I/O + frozen-norm gate staging.
+//
+// Independent of `symphonia` (the production decoder) by design -- these helpers
+// give phase8 tests RAW ground truth (exact i16 samples, no library in the loop)
+// to assert `read_audio`'s `fixed_gain` arithmetic against, and to synthesize the
+// mono-extracted staging fixture the streaming session tasks (2/3/5/6) reuse.
+// Support exactly the shape the committed fixtures use: PCM16, one "fmt " + one
+// "data" chunk, no extension chunks -- not a general WAV reader/writer.
+// ============================================================================
+
+/// Parse a minimal PCM16 WAV file: `(sample_rate, channels, interleaved i16
+/// samples)`. Walks RIFF chunks (word-aligned per the WAV spec) looking for
+/// "fmt "/"data"; panics if the file is not linear PCM16 (the only format the
+/// committed fixtures use).
+pub fn read_wav_pcm16(path: &Path) -> (u32, u16, Vec<i16>) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    assert_eq!(&bytes[0..4], b"RIFF", "{path:?}: not a RIFF file");
+    assert_eq!(&bytes[8..12], b"WAVE", "{path:?}: not a WAVE file");
+
+    let mut pos = 12;
+    let mut sample_rate = 0u32;
+    let mut channels = 0u16;
+    let mut bits_per_sample = 0u16;
+    let mut audio_format = 0u16;
+    let mut data: &[u8] = &[];
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        let body = &bytes[pos + 8..pos + 8 + size];
+        if id == b"fmt " {
+            audio_format = u16::from_le_bytes(body[0..2].try_into().unwrap());
+            channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
+            sample_rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            bits_per_sample = u16::from_le_bytes(body[14..16].try_into().unwrap());
+        } else if id == b"data" {
+            data = body;
+        }
+        pos += 8 + size + (size % 2); // chunks are word-aligned
+    }
+    assert_eq!(
+        audio_format, 1,
+        "{path:?}: only linear PCM (format 1) supported"
+    );
+    assert_eq!(bits_per_sample, 16, "{path:?}: only PCM16 supported");
+    assert!(
+        channels > 0 && sample_rate > 0 && !data.is_empty(),
+        "{path:?}: missing fmt/data chunk"
+    );
+
+    let samples = data
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    (sample_rate, channels, samples)
+}
+
+/// Write a minimal mono PCM16 WAV (standard 44-byte RIFF/WAVE/"fmt "/"data" header,
+/// no extension chunks) from raw i16 samples.
+pub fn write_wav_pcm16_mono(path: &Path, sample_rate: u32, samples: &[i16]) {
+    let data_bytes = samples.len() * 2;
+    let mut buf = Vec::with_capacity(44 + data_bytes);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36u32 + data_bytes as u32).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    let block_align = 2u16; // 1 channel * 16 bits / 8
+    let byte_rate = sample_rate * block_align as u32;
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&(data_bytes as u32).to_le_bytes());
+    for s in samples {
+        buf.extend_from_slice(&s.to_le_bytes());
+    }
+    std::fs::write(path, &buf).unwrap_or_else(|e| panic!("write {path:?}: {e}"));
+}
+
+/// `(2*rms + max_abs)/2` over `i16 as f64 / 32768.0`-scaled samples -- the SAME
+/// formula and accumulation order as `audio.rs::normalize_channels` (no `1e-3`
+/// floor applied here; real audio never needs it, and `apply_fixed_gain` floors
+/// again at read time regardless). Used to bake a fixed-gain config value that
+/// reproduces `normalize_channels`' own computed `adim` on the SAME samples.
+pub fn measure_fixed_gain(samples: &[i16]) -> f64 {
+    let n = samples.len() as f64;
+    let mut sum_sq = 0.0;
+    let mut max_abs = 0.0_f64;
+    for &s in samples {
+        let x = s as f64 / 32768.0;
+        sum_sq += x * x;
+        max_abs = max_abs.max(x.abs());
+    }
+    let rms = (sum_sq / n).sqrt();
+    (2.0 * rms + max_abs) / 2.0
+}
+
+/// [`stage_frozen_tier2`]'s return: paths into the caller-owned tempdir plus the
+/// measured gain (for building a self-norm sibling config or for report numbers).
+pub struct FrozenStage {
+    pub wav_path: PathBuf,
+    pub config_path: PathBuf,
+    pub fixed_gain: f64,
+}
+
+/// Phase 8 Task 1: stage the frozen-norm reference gate config reused by Tasks
+/// 2/3/5/6. Extracts channel 0 of the committed 60 s `phase4d/prcts_excerpt.wav`
+/// (stereo) into a fresh mono PCM16 wav in `dir` (the streaming session is
+/// mono-first), measures that mono channel's `(2*rms+max_abs)/2` with the exact
+/// `normalize_channels` formula ([`measure_fixed_gain`]), and writes
+/// `tier2_spectral.config` + a last-wins override tail: `numOuterThreads 1`,
+/// `Audio_offset 0.0`, `Audio_max_duration 3600` (covers the whole 60 s file), the
+/// tuple-A pack, `Inference_Path fast` (so a `BagOfProcessors` built from this
+/// config dispatches straight to the fast driver -- Task 5's "offline fast bag run
+/// on the frozen config" reference), `Audio_fixed_gain <measured>`,
+/// `BLSTM_InputNormalizationType 1` (tuple-A already carries a trained normalize
+/// tail -- nothing fabricated, spec R4). Baking the MEASURED gain makes the frozen
+/// and self-norm paths coincide on the AUDIO scale for this fixture (both divide by
+/// the identical `adim`), so a later frozen-vs-self-norm comparison isolates the
+/// type-1-vs-self-norm INPUT NORMALIZATION delta alone (spec S1.7).
+pub fn stage_frozen_tier2(dir: &Path) -> FrozenStage {
+    let (sample_rate, channels, samples) = read_wav_pcm16(&fixture_phase4d("prcts_excerpt.wav"));
+    assert_eq!(
+        channels, 2,
+        "prcts_excerpt.wav must be stereo (mono-extraction assumption)"
+    );
+    let chan0: Vec<i16> = samples.iter().step_by(2).copied().collect();
+    let fixed_gain = measure_fixed_gain(&chan0);
+
+    let wav_path = dir.join("prcts_excerpt_mono.wav");
+    write_wav_pcm16_mono(&wav_path, sample_rate, &chan0);
+
+    let dump_dir = dir.join("vrcts_frozen");
+    std::fs::create_dir_all(&dump_dir).unwrap();
+
+    let base = std::fs::read_to_string(fixture_phase4a("tier2_spectral.config")).unwrap();
+    let staged = format!(
+        "{base}\n\
+# ==== Phase 8 Task 1 frozen-norm overrides (last-wins) ====\n\
+numOuterThreads 1\n\
+Audio_offset 0.0\n\
+Audio_max_duration 3600\n\
+BLSTM_weightsFile {}\n\
+Dump_Directory {}\n\
+Inference_Path fast\n\
+Audio_fixed_gain {fixed_gain}\n\
+BLSTM_InputNormalizationType 1\n",
+        fixture_phase0("NNweights_config1.bin").display(),
+        dump_dir.display(),
+    );
+    let config_path = dir.join("frozen_tier2.config");
+    std::fs::write(&config_path, staged).unwrap();
+
+    FrozenStage {
+        wav_path,
+        config_path,
+        fixed_gain,
     }
 }
 

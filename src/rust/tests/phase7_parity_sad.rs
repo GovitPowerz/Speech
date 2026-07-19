@@ -70,7 +70,8 @@ fn run_path(inference: Option<&str>) -> (Vec<Vec<f64>>, Vec<Segmentation>) {
     let mut bag =
         BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
 
-    let mut audio = read_audio(&fixture("phase4d/prcts_excerpt.wav"), 0.0, 3600.0, 0).unwrap();
+    let mut audio =
+        read_audio(&fixture("phase4d/prcts_excerpt.wav"), 0.0, 3600.0, 0, None).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let n_chan = audio.data.nrows();
     let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();
@@ -331,15 +332,26 @@ fn fast_bails_on_pitch_pass() {
 
 #[test]
 fn fast_bails_on_non_self_normalization() {
-    // Only InputNormalizationType -1 is supported on the fast SAD path.
-    let mut m = tier2_map(Some("fast"));
-    m.insert("BLSTM_InputNormalizationType".into(), "1".into());
-    match build_fast_bag(&mut m) {
-        Err(e) => assert!(
-            e.to_string().contains("InputNormalizationType"),
-            "expected a normalization-type bail, got: {e}"
-        ),
-        Ok(_) => panic!("fast + InputNormalizationType != -1 must bail"),
+    // Phase 8 Task 1 NARROWED this bail: the fast SAD path now supports
+    // InputNormalizationType -1 (self-norm, phase 7) AND 1 (pack-carried external
+    // mean/std, the phase-8 frozen-stats reference mode) -- type 1 used to be the
+    // RED value here and must now CONSTRUCT. Everything else (0, -2, ...) still
+    // typed-bails.
+    let mut type1 = tier2_map(Some("fast"));
+    type1.insert("BLSTM_InputNormalizationType".into(), "1".into());
+    build_fast_bag(&mut type1)
+        .expect("fast + InputNormalizationType 1 must construct (phase-8 frozen mode)");
+
+    for bad in ["0", "-2", "2"] {
+        let mut m = tier2_map(Some("fast"));
+        m.insert("BLSTM_InputNormalizationType".into(), bad.into());
+        match build_fast_bag(&mut m) {
+            Err(e) => assert!(
+                e.to_string().contains("InputNormalizationType"),
+                "expected a normalization-type bail for type {bad}, got: {e}"
+            ),
+            Ok(_) => panic!("fast + InputNormalizationType {bad} must bail"),
+        }
     }
 }
 
@@ -347,7 +359,7 @@ fn fast_bails_on_non_self_normalization() {
 /// window/shift so the dispatch reaches an unsupported windowed variant.
 fn run_fast_small(map: &mut IndexMap<String, String>) -> anyhow::Result<()> {
     let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map), image_mode())?;
-    let mut audio = read_audio(&fixture("phase1/excerpt_2ch_8k.wav"), 0.0, 3.0, 0).unwrap();
+    let mut audio = read_audio(&fixture("phase1/excerpt_2ch_8k.wav"), 0.0, 3.0, 0, None).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let n_chan = audio.data.nrows();
     let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();

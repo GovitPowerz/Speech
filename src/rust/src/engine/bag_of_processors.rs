@@ -52,6 +52,21 @@ pub(crate) fn get_f64_default(
     }
 }
 
+/// `conf.get<double>(name)` as `Option`: missing key -> `None`, present -> `Some`.
+/// Phase 8 S1.1: the `Audio_fixed_gain` reader -- unlike every other config key here,
+/// absence is not a fallback VALUE but a fallback MODE (`read_audio`'s `None` selects
+/// the legacy `normalize_channels` path entirely, not merely a default gain).
+pub(crate) fn get_f64_opt(map: &IndexMap<String, String>, key: &str) -> Result<Option<f64>> {
+    match map.get(key) {
+        None => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as f64: {e}")),
+    }
+}
+
 /// `conf.get<int>(name, default)`: missing key -> default.
 pub(crate) fn get_i32_default(
     map: &IndexMap<String, String>,
@@ -270,6 +285,13 @@ pub struct BagOfProcessors {
     offset_begin: f64,
     duration_max: f64,
     file_type: i32,
+    /// Phase 8 S1.1 `Audio_fixed_gain` (config-0-only, like `Audio_offset`/
+    /// `Audio_max_duration`/`File_Type` above it): threaded to every
+    /// [`read_audio`] call in [`Self::segmentation_function`]. `None` (the key
+    /// absent, true for every pre-phase-8 committed config) reproduces the
+    /// legacy `normalize_channels` path byte-identically -- the sanctioned
+    /// inert-by-default guard.
+    fixed_gain: Option<f64>,
     lock_files_dir: String,
     lock_files_prefix: String,
     algo_types: Vec<i32>,
@@ -291,7 +313,10 @@ impl BagOfProcessors {
     /// `Audio_max_duration` 3.6e6, `File_Type` 0, `LockFilesDir`/`LockFilesPrefix`
     /// "". `exclude_nontrans` (NOT a legacy `BagOfProcessors` member -- read from
     /// configs[0] here so it's available alongside the bag for Task 5's reference
-    /// loading, default false).
+    /// loading, default false). `Audio_fixed_gain` (Phase 8 S1.1, port-only, no
+    /// legacy source): absent -> `None`, threaded to every `read_audio` call in
+    /// [`Self::segmentation_function`] -- the one sanctioned exact-tree touch of
+    /// the streaming phase.
     ///
     /// Per-config (`:20-49`): the ctor first sets `files`/`refsegfiles`/
     /// `reflangfiles` to `""` in EVERY config map (`:21-23`, a memory quirk --
@@ -333,6 +358,10 @@ impl BagOfProcessors {
         let offset_begin = get_f64_default(&configs[0], "Audio_offset", 0.0)?;
         let duration_max = get_f64_default(&configs[0], "Audio_max_duration", 3.6e6)?;
         let file_type = get_i32_default(&configs[0], "File_Type", 0)?;
+        // Phase 8 S1.1: `Audio_fixed_gain`, config-0-only like its Audio_* siblings
+        // above. Absent (every pre-phase-8 config) -> `None` -> read_audio's legacy
+        // normalize_channels path, byte-identical to before this key existed.
+        let fixed_gain = get_f64_opt(&configs[0], "Audio_fixed_gain")?;
         let lock_files_dir = get_string_default(&configs[0], "LockFilesDir", "");
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
@@ -460,6 +489,7 @@ impl BagOfProcessors {
             offset_begin,
             duration_max,
             file_type,
+            fixed_gain,
             lock_files_dir,
             lock_files_prefix,
             algo_types,
@@ -500,6 +530,11 @@ impl BagOfProcessors {
 
     pub fn file_type(&self) -> i32 {
         self.file_type
+    }
+
+    /// Phase 8 S1.1: the parsed `Audio_fixed_gain` value, if the config carried one.
+    pub fn fixed_gain(&self) -> Option<f64> {
+        self.fixed_gain
     }
 
     pub fn lock_files_dir(&self) -> &str {
@@ -1053,12 +1088,15 @@ impl BagOfProcessors {
         let mut results: BTreeMap<usize, BTreeMap<usize, Vec<f64>>> = BTreeMap::new();
 
         // legacy: :254 AudioStruct audio(_OffsetBegin, _DurationMax, _FileType, corpusItem);
+        // Phase 8 S1.1: `self.fixed_gain` threads `Audio_fixed_gain` here -- the ONE
+        // sanctioned exact-tree touch of the phase (see `read_audio`'s doc).
         let file_name = &item.file_name;
         let mut audio = read_audio(
             Path::new(file_name),
             self.offset_begin,
             self.duration_max,
             self.file_type,
+            self.fixed_gain,
         )?;
         // legacy: AudioStruct ctor sets _LangIndex/_Weight from the CorpusItem
         // (AudioStruct.cpp:53,60) -- see apply_corpus_item's doc for the
@@ -1509,9 +1547,14 @@ mod tests {
     // flow (which requires a real decodable wav).
     #[test]
     fn apply_corpus_item_sets_lang_index_and_weight() {
-        let mut audio =
-            crate::audio::read_audio(&ref_dir().join("phase1/excerpt_2ch_8k.wav"), 0.0, 0.1, 0)
-                .unwrap();
+        let mut audio = crate::audio::read_audio(
+            &ref_dir().join("phase1/excerpt_2ch_8k.wav"),
+            0.0,
+            0.1,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(audio.lang_index, -1, "read_audio default");
         assert_eq!(audio.weight, 1.0, "read_audio default");
 

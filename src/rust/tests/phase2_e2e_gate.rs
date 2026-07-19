@@ -48,7 +48,7 @@ fn real_weights() -> Vec<f64> {
 
 fn excerpt_audio(preemph_ratio: f64) -> Audio {
     let mut audio =
-        read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0).expect("decode");
+        read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0, None).expect("decode");
     // legacy gate: `if (preemphRatio > 0)` (BLSTMSpectralSegmenter.cpp:216). The real
     // config's preemph_ratio is -0.97 < 0, so this is SKIPPED.
     if preemph_ratio > 0.0 {

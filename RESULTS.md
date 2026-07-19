@@ -518,3 +518,41 @@ prove); the whole 3-arm file re-runs in ~12 s warm. Cold-cache training (once pe
 dominates at ~60 s (SAD) / ~180 s (phSeq) / ~276 s (cep). Checkpoints cache under the gitignored
 `data/phase7_parity_cache/` (holds corpus-path listings -- never committed); `run_baseline` at a
 fixed seed is deterministic, so a warm cache is bit-identical to a fresh run.
+
+## Phase 8 -- online/streaming mode
+
+### Task 1 -- the frozen-norm reference mode + the causality-cost CI leg
+
+`Audio_fixed_gain` (S1.1, the one sanctioned exact-tree touch: `read_audio` gains
+`fixed_gain: Option<f64>`, `None` = the legacy path byte-identical -- full golden suite green) plus
+the fast SAD path's type-1 external normalization (`fast/nn.rs::external_normalize_f32`, the
+frozen-stats input mode; the phase-7 `InputNormalizationType` bail narrowed from {-1} to {-1, 1}).
+The staged frozen gate config (`common::stage_frozen_tier2`, consumed by Tasks 2/3/5/6): channel 0
+of the 60 s `phase4d/prcts_excerpt.wav` extracted MONO at staging, the tuple-A pack, tier2 +
+`Inference_Path fast` + `Audio_fixed_gain <measured>` + `BLSTM_InputNormalizationType 1`. The gain
+is baked to the mono channel's own measured `(2*RMS+max)/2` (= 4.924708e-1), so the audio-norm
+halves of the frozen and self-norm modes coincide numerically on THIS fixture and the remaining
+delta isolates the type-1-vs-self-norm input-normalization change alone.
+
+The causality-cost CI leg (S1.7, REPORTED never gated;
+`phase8_frozen_norm.rs::causality_cost_frozen_vs_self_norm`, measured 2026-07-19, Apple Silicon dev
+box, 60 s mono, tuple-A pack BOTH sides per R4):
+
+| quantity | offline-frozen (type 1 + fixed gain) vs offline-self-norm (type -1) |
+|---|---|
+| posterior max_abs delta | 9.956e-1 |
+| boundary rows | frozen 2 (the seed hypothesis -- ZERO detections) vs self-norm 17 |
+| NaN-pattern mismatches | 0 (identical overlap coverage) |
+
+MECHANISM (adjudicated before recording, exact-tree cross-run: the exact f64 path under the SAME
+frozen stats reproduces the IDENTICAL 2-row collapse, inter-path posterior delta 1.28e-7 = f32
+noise -- the collapse is the MODE, not a fast-path defect): the tuple-A net was TRAINED under
+type -1 self-normalization (per-sequence standardize + asinh); its pack-carried type-1 tail is a
+plain affine standardization with 2015-training-corpus statistics, under which this net's posterior
+saturates high (~0.9995) for the whole fixture -- no rising crossing ever fires. The causality cost
+for THIS pack/config pairing is therefore total on the decision level; the honest number, stated as
+measured. The corpus tier (Task 8) re-measures on the phase-6 SAD checkpoint (held-out DCF, both
+modes scored). The fast type-1 transcription itself is pinned two ways: the unit pin
+(`fast_type1_normalization_matches_exact`, fast f32 vs the exact `nn/blstm.rs:1008-1021` branch on
+the same input + tuple-A tail: measured max_rel 1.913e-7, pinned 1e-5) and the causality leg's own
+end-to-end run through the frozen bag.

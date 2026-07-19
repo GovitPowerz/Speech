@@ -5,14 +5,14 @@ use speech::audio::{convolution_horiz, convolution_vert, read_audio, windowing_c
 
 #[test]
 fn decode_normalize_matches_oracle() {
-    let audio = read_audio(&fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0).unwrap();
+    let audio = read_audio(&fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0, None).unwrap();
     assert_eq!(audio.sample_rate, 8000);
     assert_bits_eq(&audio.data_raw, &load_bin("sig_norm.bin"), "sig_norm");
 }
 
 #[test]
 fn preemph_noise_match_oracle() {
-    let mut audio = read_audio(&fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0).unwrap();
+    let mut audio = read_audio(&fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0, None).unwrap();
     audio.apply_preemph(0.97);
     assert_bits_eq(&audio.data, &load_bin("sig_preemph.bin"), "sig_preemph");
     audio.apply_noise(0.001);

@@ -59,7 +59,7 @@ fn map_of(variant: &str) -> indexmap::IndexMap<String, String> {
 
 fn phseq_audio(f: &str, lang: i32, weight: f64) -> Audio {
     let path = phase4b("corpus_phseq").join(format!("{f}.phSeq"));
-    let mut a = read_audio(&path, 0.0, 120.0, 1).unwrap();
+    let mut a = read_audio(&path, 0.0, 120.0, 1, None).unwrap();
     a.lang_index = lang;
     a.weight = weight;
     // Mirrors `engine::bag_of_processors::apply_corpus_item` (Phase 4b Task 8), which sets
@@ -379,7 +379,7 @@ fn mode7_wav_arm_bails_cnn_not_ported() {
     let lidw = lid_weights();
     let mut drv =
         TwinBlstmSpectralLid::from_legacy(&map_of("twin_mode7"), None, Some(&lidw)).unwrap();
-    let mut audio = read_audio(&phase4b("corpus_lid").join("f1.wav"), 0.0, 2.0, 0).unwrap();
+    let mut audio = read_audio(&phase4b("corpus_lid").join("f1.wav"), 0.0, 2.0, 0, None).unwrap();
     assert!(
         audio.periodogram.is_none(),
         "wav decode must leave periodogram unset (the mode7 gate's precondition)"

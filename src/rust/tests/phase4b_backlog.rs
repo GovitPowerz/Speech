@@ -510,7 +510,7 @@ fn build_pitch_scored() -> BlstmSpectralSegmenter {
 /// for the SAME file, so this test's audio window is the one the committed
 /// `f1.stm` reference was written against.
 fn f1_audio() -> speech::audio::Audio {
-    speech::audio::read_audio(&phase4a_corpus_dir().join("f1.wav"), 0.0, 2.0, 0)
+    speech::audio::read_audio(&phase4a_corpus_dir().join("f1.wav"), 0.0, 2.0, 0, None)
         .expect("decode f1.wav")
 }
 
