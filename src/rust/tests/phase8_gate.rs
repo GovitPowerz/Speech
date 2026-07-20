@@ -492,7 +492,8 @@ fn prefix_consistency_near_reach_profile() {
 }
 
 // ---------------------------------------------------------------------------
-// (d) VALIDATION BAILS (algo != 3, multi-channel, missing gain, type != 1).
+// (d) VALIDATION BAILS (algo != 3, multi-channel, missing gain, type != 1,
+// window_size 0, no_overlap/truncate, empty BLSTM_weightsFile).
 // ---------------------------------------------------------------------------
 
 /// The bail message from a session construction that MUST fail (StreamingSession is not
@@ -538,6 +539,43 @@ fn validation_bails() {
     assert!(
         msg.contains("InputNormalizationType 1"),
         "type -1 bail message: {msg}"
+    );
+
+    // (5) BLSTM_window resolves window_size 0 -- the plain (non-windowed) forward
+    // bail (stream.rs:1352-1357). `get_blstm_param` (tasks/sad.rs) computes
+    // `window_size = round(window_size_sec * rate / 2 / ssif)`, so a zero
+    // `window_size_sec` resolves `window_size` 0 unconditionally, independent of
+    // ssif/rate/ssr.
+    let mut m = parse(&text);
+    m.insert("BLSTM_window".into(), "0".into());
+    let msg = bail_msg(StreamingSession::new(&m, rate, 1));
+    assert!(
+        msg.contains("resolves window_size 0"),
+        "window_size-0 bail message: {msg}"
+    );
+
+    // (6) BLSTM_shift resolves the no_overlap (truncate) branch -- the
+    // :1358-1363 bail. `get_blstm_param` computes
+    // `window_shift = round(window_shift_sec * rate / ssif)`, so a zero
+    // `window_shift_sec` resolves `window_shift` 0 (< 1) unconditionally; leaving
+    // BLSTM_window at its staged nonzero value keeps `window_size != 0`, so
+    // `get_blstm_param`'s `window_size != 0 && window_shift < 1` guard routes
+    // into the no_overlap branch (not the window_size-0 branch above).
+    let mut m = parse(&text);
+    m.insert("BLSTM_shift".into(), "0".into());
+    let msg = bail_msg(StreamingSession::new(&m, rate, 1));
+    assert!(
+        msg.contains("window_shift resolves < 1"),
+        "no_overlap bail message: {msg}"
+    );
+
+    // (7) BLSTM_weightsFile empty -- the frozen-net-load bail (stream.rs:1319-1321).
+    let mut m = parse(&text);
+    m.insert("BLSTM_weightsFile".into(), "".into());
+    let msg = bail_msg(StreamingSession::new(&m, rate, 1));
+    assert!(
+        msg.contains("BLSTM_weightsFile is empty"),
+        "empty-weightsFile bail message: {msg}"
     );
 
     // Sanity: the un-mutated config constructs cleanly.

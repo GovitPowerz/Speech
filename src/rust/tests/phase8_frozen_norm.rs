@@ -450,6 +450,19 @@ fn causality_cost_frozen_vs_self_norm() {
     // the two runs by construction; the remaining delta isolates the
     // type-1-vs-self-norm INPUT NORMALIZATION change alone.
     //
+    // CAVEAT (gain-inertness): "coincides by construction" is not doing causal
+    // work here -- it is IRRELEVANT on this all-DCT config.
+    // `bag_threads_fixed_gain_discriminates_dropped_gain` (finding 1, (3b) above)
+    // already proved this config (`IgnoreFirstDCT true`, `LTSVwindow`/
+    // `TDCwindow` both 0) is posterior-invariant to `Audio_fixed_gain`'s VALUE:
+    // ANY positive gain yields the SAME posterior, via the same two exact
+    // cancellations (the DCT-basis zero-sum + the temporal delta-of-C0
+    // cancellation). So matching the staged gain to the fixture's own self-norm
+    // statistic isolates nothing extra here -- the measured delta below would be
+    // identical for any other positive `Audio_fixed_gain` choice too. The "by
+    // construction" framing would only start mattering on a config where LTSV/
+    // TDC or the raw (non-dropped) DCT C0 term were live.
+    //
     // MEASURED (Apple Silicon dev box, 60 s mono, tuple-A): fixed_gain=4.9247e-1,
     // post_max_abs=9.956e-1, boundary rows frozen=2 (the untouched seed
     // hypothesis [Other@0, End@dur] -- ZERO detections) vs self_norm=17. The
