@@ -52,6 +52,21 @@ pub(crate) fn get_f64_default(
     }
 }
 
+/// `conf.get<double>(name)` as `Option`: missing key -> `None`, present -> `Some`.
+/// Phase 8 S1.1: the `Audio_fixed_gain` reader -- unlike every other config key here,
+/// absence is not a fallback VALUE but a fallback MODE (`read_audio`'s `None` selects
+/// the legacy `normalize_channels` path entirely, not merely a default gain).
+pub(crate) fn get_f64_opt(map: &IndexMap<String, String>, key: &str) -> Result<Option<f64>> {
+    match map.get(key) {
+        None => Ok(None),
+        Some(s) => s
+            .trim()
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as f64: {e}")),
+    }
+}
+
 /// `conf.get<int>(name, default)`: missing key -> default.
 pub(crate) fn get_i32_default(
     map: &IndexMap<String, String>,
@@ -270,6 +285,13 @@ pub struct BagOfProcessors {
     offset_begin: f64,
     duration_max: f64,
     file_type: i32,
+    /// Phase 8 S1.1 `Audio_fixed_gain` (config-0-only, like `Audio_offset`/
+    /// `Audio_max_duration`/`File_Type` above it): threaded to every
+    /// [`read_audio`] call in [`Self::segmentation_function`]. `None` (the key
+    /// absent, true for every pre-phase-8 committed config) reproduces the
+    /// legacy `normalize_channels` path byte-identically -- the sanctioned
+    /// inert-by-default guard.
+    fixed_gain: Option<f64>,
     lock_files_dir: String,
     lock_files_prefix: String,
     algo_types: Vec<i32>,
@@ -281,6 +303,30 @@ pub struct BagOfProcessors {
     /// [`Self::print_confusion_matrix`]). Cleared at each `save_and_update`.
     #[cfg(feature = "test-support")]
     last_confusion: Vec<(f64, Array2<f64>)>,
+    /// T1-review hardening (Phase 8 Task 1, finding 1; no legacy counterpart):
+    /// sum-of-`|x|` over `data_raw` from the LAST [`Self::segmentation_function`]
+    /// internal [`read_audio`] call. `segmentation_function`'s dispatch surface
+    /// (the `Processor` enum) is NN-output-shaped, not audio-shaped, so the
+    /// internally-decoded audio is otherwise unobservable from outside the
+    /// function. This exists because the posterior/segmentation observable
+    /// (`Processor::FastSpectral`/`Spectral::last_result_rows`) turns out to be
+    /// PROVABLY INVARIANT to `Audio_fixed_gain`'s value for a DCT-based config
+    /// with `IgnoreFirstDCT true` (e.g. `tier2_spectral.config`): a global
+    /// per-file amplitude gain shifts every frame's log-mel value by the SAME
+    /// constant, which (a) a DCT-II basis vector for coefficient index >= 1
+    /// projects to exactly zero (the retained AC coefficients), and (b) a
+    /// temporal delta/delta-delta cancels exactly too (differencing removes a
+    /// time-constant offset, including on the delta OF the dropped DC/C0 term,
+    /// which is not itself dropped from the delta block -- only the static C0
+    /// column is). MEASURED (`tests/phase8_frozen_norm.rs`, an earlier version
+    /// of `bag_threads_fixed_gain_discriminates_dropped_gain`): a 2x-vs-1x
+    /// staged gain produced a BIT-IDENTICAL FastSpectral posterior, 0.0
+    /// max-abs delta over all 1500 rows -- not a near-miss, the exact
+    /// algebraic cancellation above. `sum(|x|)` is a cheap, trivially-verified,
+    /// provably gain-SENSITIVE stand-in (scales as `1/gain` for fixed raw
+    /// samples) captured at the one place `Audio_fixed_gain` IS load-bearing.
+    #[cfg(feature = "test-support")]
+    last_audio_abs_sum: Option<f64>,
 }
 
 impl BagOfProcessors {
@@ -291,7 +337,10 @@ impl BagOfProcessors {
     /// `Audio_max_duration` 3.6e6, `File_Type` 0, `LockFilesDir`/`LockFilesPrefix`
     /// "". `exclude_nontrans` (NOT a legacy `BagOfProcessors` member -- read from
     /// configs[0] here so it's available alongside the bag for Task 5's reference
-    /// loading, default false).
+    /// loading, default false). `Audio_fixed_gain` (Phase 8 S1.1, port-only, no
+    /// legacy source): absent -> `None`, threaded to every `read_audio` call in
+    /// [`Self::segmentation_function`] -- the one sanctioned exact-tree touch of
+    /// the streaming phase.
     ///
     /// Per-config (`:20-49`): the ctor first sets `files`/`refsegfiles`/
     /// `reflangfiles` to `""` in EVERY config map (`:21-23`, a memory quirk --
@@ -333,6 +382,10 @@ impl BagOfProcessors {
         let offset_begin = get_f64_default(&configs[0], "Audio_offset", 0.0)?;
         let duration_max = get_f64_default(&configs[0], "Audio_max_duration", 3.6e6)?;
         let file_type = get_i32_default(&configs[0], "File_Type", 0)?;
+        // Phase 8 S1.1: `Audio_fixed_gain`, config-0-only like its Audio_* siblings
+        // above. Absent (every pre-phase-8 config) -> `None` -> read_audio's legacy
+        // normalize_channels path, byte-identical to before this key existed.
+        let fixed_gain = get_f64_opt(&configs[0], "Audio_fixed_gain")?;
         let lock_files_dir = get_string_default(&configs[0], "LockFilesDir", "");
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
@@ -460,6 +513,7 @@ impl BagOfProcessors {
             offset_begin,
             duration_max,
             file_type,
+            fixed_gain,
             lock_files_dir,
             lock_files_prefix,
             algo_types,
@@ -468,6 +522,8 @@ impl BagOfProcessors {
             exclude_nontrans,
             #[cfg(feature = "test-support")]
             last_confusion: Vec::new(),
+            #[cfg(feature = "test-support")]
+            last_audio_abs_sum: None,
         })
     }
 
@@ -500,6 +556,11 @@ impl BagOfProcessors {
 
     pub fn file_type(&self) -> i32 {
         self.file_type
+    }
+
+    /// Phase 8 S1.1: the parsed `Audio_fixed_gain` value, if the config carried one.
+    pub fn fixed_gain(&self) -> Option<f64> {
+        self.fixed_gain
     }
 
     pub fn lock_files_dir(&self) -> &str {
@@ -864,6 +925,14 @@ impl BagOfProcessors {
         &self.last_confusion
     }
 
+    /// Test-observation hook (Phase 8 Task 1, T1-review hardening finding 1, no
+    /// legacy counterpart): see [`Self::last_audio_abs_sum`]'s field doc for why
+    /// this exists.
+    #[cfg(feature = "test-support")]
+    pub fn last_audio_abs_sum_for_test(&self) -> Option<f64> {
+        self.last_audio_abs_sum
+    }
+
     /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
     /// column-sum/mean aggregation over the file x channel result rows, cost/
     /// badClassif/costLID/badLIDClassif derivation, WER percent scaling, the
@@ -1053,13 +1122,22 @@ impl BagOfProcessors {
         let mut results: BTreeMap<usize, BTreeMap<usize, Vec<f64>>> = BTreeMap::new();
 
         // legacy: :254 AudioStruct audio(_OffsetBegin, _DurationMax, _FileType, corpusItem);
+        // Phase 8 S1.1: `self.fixed_gain` threads `Audio_fixed_gain` here -- the ONE
+        // sanctioned exact-tree touch of the phase (see `read_audio`'s doc).
         let file_name = &item.file_name;
         let mut audio = read_audio(
             Path::new(file_name),
             self.offset_begin,
             self.duration_max,
             self.file_type,
+            self.fixed_gain,
         )?;
+        // T1-review hardening (finding 1): capture a gain-sensitive digest of the
+        // internal read for `last_audio_abs_sum_for_test` -- see that field's doc.
+        #[cfg(feature = "test-support")]
+        {
+            self.last_audio_abs_sum = Some(audio.data_raw.iter().map(|v| v.abs()).sum());
+        }
         // legacy: AudioStruct ctor sets _LangIndex/_Weight from the CorpusItem
         // (AudioStruct.cpp:53,60) -- see apply_corpus_item's doc for the
         // placement deviation.
@@ -1509,9 +1587,14 @@ mod tests {
     // flow (which requires a real decodable wav).
     #[test]
     fn apply_corpus_item_sets_lang_index_and_weight() {
-        let mut audio =
-            crate::audio::read_audio(&ref_dir().join("phase1/excerpt_2ch_8k.wav"), 0.0, 0.1, 0)
-                .unwrap();
+        let mut audio = crate::audio::read_audio(
+            &ref_dir().join("phase1/excerpt_2ch_8k.wav"),
+            0.0,
+            0.1,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(audio.lang_index, -1, "read_audio default");
         assert_eq!(audio.weight, 1.0, "read_audio default");
 

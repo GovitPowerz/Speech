@@ -24,8 +24,10 @@
 //! exercise, everything else typed-bails loudly so scope creep is loud):
 //! - The PITCH second pass (`BLSTM_TDCwindow > 0`, spec R4) typed-bails at
 //!   construction.
-//! - `InputNormalizationType != -1` typed-bails at construction (the gate configs --
-//!   `tier2_spectral.config` + the phase-6 `lre_sad.toml` -- both use -1).
+//! - `InputNormalizationType` outside {-1, 1} typed-bails at construction (the
+//!   phase-7 gate configs -- `tier2_spectral.config` + the phase-6 `lre_sad.toml` --
+//!   both use -1; type 1, the pack-carried external mean/std, joined in Phase 8
+//!   Task 1 as the frozen-stats reference mode, spec S1.1).
 //! - The PLAIN (window 0) and TRUNCATE (non-overlap) windowed variants typed-bail at
 //!   `get_segmentation` (both gate configs resolve to OVERLAP: `BLSTM_window 3.25 /
 //!   BLSTM_shift 0.8` -> `window_size > 0`, `no_overlap false`).
@@ -50,7 +52,7 @@ use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
 
-use super::nn::{FastBlstm, FastMatrix, self_normalize_f32};
+use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, self_normalize_f32};
 use super::pipeline::FastPipeline;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 
@@ -122,6 +124,13 @@ pub struct FastSpectralSegmenter {
     output_sub_sampling: Vec<usize>,
     ssr: usize,
 
+    /// `BLSTM_InputNormalizationType`: -1 (whole-sequence self-normalization, the
+    /// phase-7 gate configs) or 1 (pack-carried external mean/std -- the Phase 8
+    /// frozen-stats reference mode, S1.1); every other value typed-bails at
+    /// construction. Dispatched per channel in `get_segmentation`, mirroring the
+    /// exact `feed_forward_backward` top (`nn/blstm.rs:1008-1030`).
+    input_normalization_type: i16,
+
     /// Stateful `_SpectrumShift`/`_SpectrumShiftInFrames`/`_WindowShift`/
     /// `_LTSVWindowShift` members, re-quantized per `get_segmentation` call exactly
     /// as the exact driver does (mirrors `tasks/sad.rs` for state faithfulness).
@@ -149,7 +158,8 @@ impl FastSpectralSegmenter {
     /// two-step `from_legacy(map, None)` + `load_weights_file` pattern).
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast-mode surfaces: the
-    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType != -1`.
+    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType` outside
+    /// {-1, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode).
     pub fn from_legacy(
         map: &IndexMap<String, String>,
         weights: Option<&[f64]>,
@@ -170,12 +180,15 @@ impl FastSpectralSegmenter {
         // Peephole-default alignment (rider 1).
         let spec = build_aligned_spec(map, "BLSTM")?;
 
-        // Only self-normalization (type -1) is on the SAD gate path.
+        // Normalization types on the fast SAD path: -1 (self-normalization, the
+        // phase-7 gate configs) and 1 (pack-carried external mean/std -- Phase 8
+        // S1.1, the frozen-stats reference mode). Everything else typed-bails.
         let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
-        if bc.input_normalization_type != -1 {
+        if bc.input_normalization_type != -1 && bc.input_normalization_type != 1 {
             bail!(
-                "fast SAD: only InputNormalizationType -1 (self-normalization) is supported on the \
-                 fast path (got {}); the gate configs use -1",
+                "fast SAD: only InputNormalizationType -1 (self-normalization) or 1 (external \
+                 pack-carried mean/std, the phase-8 frozen mode) are supported on the fast path \
+                 (got {})",
                 bc.input_normalization_type
             );
         }
@@ -203,6 +216,7 @@ impl FastSpectralSegmenter {
             lstm_sub_sampling,
             output_sub_sampling,
             ssr,
+            input_normalization_type: bc.input_normalization_type,
             spectrum_shift_sec,
             spectrum_shift_in_frames: 0,
             window_shift_sec,
@@ -347,6 +361,14 @@ impl Segmenter for FastSpectralSegmenter {
             anyhow!("fast SAD net has no weights loaded (BLSTM_weightsFile empty)")
         })?;
         let output_size = net.output_size();
+        // Type-1 external normalization needs the pack-carried mean/std tail; copied
+        // out (tiny: input_size floats each) so the loop below can keep the single
+        // `&mut net` borrow for feed_forward_overlap.
+        let (norm_mean, norm_std) = if self.input_normalization_type == 1 {
+            (net.normalize_mean().to_vec(), net.normalize_std().to_vec())
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         // result_buf: ONE buffer reused across channels (the cross-channel reuse quirk,
         // tasks/sad.rs:1436). Zeros once; NOT re-zeroed between channels --
@@ -364,10 +386,15 @@ impl Segmenter for FastSpectralSegmenter {
             let samples: Vec<f32> = audio.data.row(chan).iter().map(|&x| x as f32).collect();
             let mut input = pipeline.build_input_sequence(&samples).clone();
 
-            // Type -1 self-normalization over the whole sequence, ONCE (matching the
-            // exact feed_forward_backward top, blstm.rs:1027, before the overlap
-            // windowing).
-            self_normalize_f32(&mut input);
+            // Input normalization over the whole sequence, ONCE (matching the exact
+            // feed_forward_backward top, blstm.rs:1008-1030, before the overlap
+            // windowing): type -1 self-normalization, or type 1 external pack-carried
+            // mean/std (Phase 8 S1.1, the frozen-stats mode). The construction bail
+            // guarantees no other value reaches here.
+            match self.input_normalization_type {
+                1 => external_normalize_f32(&mut input, &norm_mean, &norm_std),
+                _ => self_normalize_f32(&mut input),
+            }
 
             // Overlap forward: accumulate into the shared result_buf (seeded from the
             // prior channel; NOT zeroed here).
@@ -831,24 +858,20 @@ impl Segmenter for FastTwinLid {
             audio.data.ncols(),
         );
 
-        // getLIDBLSTMParam: LID window/shift derivation (the exact `:1330-1353`).
+        // getLIDBLSTMParam: LID window/shift derivation (the exact `:1330-1353`), via the
+        // shared `derive_lid_window` so the offline + streaming (`lid_score_params`) window
+        // sizes cannot drift. `lid_window_shift` is still derived inline for the stateful
+        // `self.lid_window_shift_sec` bookkeeping (the epilogue reset at `:1160` reads it).
         let lid_ssr = self.lid_ssr;
         let ssifd = ssif as f64;
-        let mut lid_window_size =
-            f64::round(self.lid_window_size_sec * rate / 2.0 / ssifd) as usize;
-        if lid_window_size != 0 && lid_window_size < lid_ssr {
-            lid_window_size = lid_ssr;
-        }
+        let (lid_window_size, lid_no_overlap) = derive_lid_window(
+            self.lid_window_size_sec,
+            self.lid_window_shift_sec,
+            lid_ssr,
+            ssif,
+            rate,
+        );
         let mut lid_window_shift = f64::round(self.lid_window_shift_sec * rate / ssifd) as i64;
-        let mut lid_no_overlap = false;
-        if lid_window_size != 0 && lid_window_shift < 1 {
-            lid_no_overlap = true;
-            let raw = f64::round(self.lid_window_size_sec * rate / ssifd) as usize;
-            lid_window_size = (raw / lid_ssr) * lid_ssr;
-            if lid_window_size < 10 * lid_ssr {
-                lid_window_size = 10 * lid_ssr;
-            }
-        }
         if lid_window_size == 0 || lid_window_shift < 1 {
             lid_window_shift = 1;
         }
@@ -905,6 +928,28 @@ impl Segmenter for FastTwinLid {
         self.lid_segments_confusion = vec![Array2::<f64>::zeros((0, 0)); channels];
         self.is_lid_correct = vec![0; channels];
 
+        // Build the shared LID scoring params once. targetIndex = clamp(lang_index, [0,
+        // classNb)) (the exact `:1396-1404`) is loop-invariant (`lang_index` is the whole-file
+        // target; the offline derived it per channel, identically each time).
+        let mut ti = lang_index;
+        if ti >= class_nb as i32 {
+            ti = 0;
+        }
+        if ti < 0 {
+            ti = 0;
+        }
+        let params = LidScoreParams {
+            lid_ssr,
+            min_nb_of_frames,
+            noise_magnitude,
+            lid_window_size,
+            two_sweeps,
+            post_process_mode,
+            class_nb,
+            ti: ti as usize,
+            cost_modified,
+        };
+
         // Move the LID net out so self's result buffers are freely writable in the loop
         // (put back before returning; the loop body has no fallible op, so no early exit).
         let mut net = self
@@ -913,16 +958,6 @@ impl Segmenter for FastTwinLid {
             .ok_or_else(|| anyhow!("fast TwinLid: LID net has no weights loaded"))?;
 
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
-            // targetIndex = clamp(lang_index, [0, classNb)) (the exact `:1396-1404`).
-            let mut target_index = lang_index;
-            if target_index >= class_nb as i32 {
-                target_index = 0;
-            }
-            if target_index < 0 {
-                target_index = 0;
-            }
-            let ti = target_index as usize;
-
             // SAD else branch (`:1407`): result_vec = constant 10.0 -> the SHARED f64
             // decision layer (bit-identical to the exact path -- no NN, pure f64).
             let mut result_vec2 = vec![10.0f64; real_vec_size];
@@ -939,186 +974,24 @@ impl Segmenter for FastTwinLid {
             self.cumulative_error[chan] = 0.0;
             self.nb_of_classif[chan] = 0;
 
-            // --- abs(_Mode)==7 external-features loop (`:1448-1591`) ------------------
-            let mut langid = vec![0.0f64; class_nb];
-            let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
-            for kk in 0..class_nb + 1 {
-                confusion[[0, kk]] = kk as f64;
-                confusion[[kk, 0]] = kk as f64;
-            }
-            let mut segments_count = 0i32;
-            let mut number_of_frames = 0i32;
-
+            // abs(_Mode)==7 external-features loop (`:1448-1591`) + epilogue (`:1599-1634`),
+            // via the SHARED kernel (`score_lid_entry` / `finalize_lid_channel`) -- the SAME
+            // code the streaming session folds through, so streaming is bit-identical to this
+            // offline path by construction (see the kernel section below `get_segmentation`).
+            let mut acc = LidChannelAcc::new(class_nb);
             for feat in &external_features {
-                // _MinNbOfFrames + ssr guard (`:1450`).
-                if feat.nrows() < lid_ssr || (feat.nrows() as i32) < min_nb_of_frames {
-                    continue;
-                }
-                // Gaussian noise (`:1456-1466`), applied in f64 on the block (randinit
-                // fixed 0, matching the exact port); the pure table lookup is portable.
-                let mut feat_noised = feat.clone();
-                if noise_magnitude > 0.0 {
-                    let cols = feat.ncols();
-                    let randinit = 0usize;
-                    for r in 0..feat.nrows() {
-                        for c in 0..cols {
-                            let m = random_gauss(r * cols + c + randinit) - 0.5;
-                            feat_noised[[r, c]] += noise_magnitude * m;
-                        }
-                    }
-                }
-                // Narrow the block to f32 at the driver seam, then score.
-                let (fr, fc) = feat_noised.dim();
-                let mut fdata = Vec::with_capacity(fr * fc);
-                for r in 0..fr {
-                    for c in 0..fc {
-                        fdata.push(feat_noised[[r, c]] as f32);
-                    }
-                }
-                let fin = FastMatrix {
-                    data: fdata,
-                    rows: fr,
-                    cols: fc,
-                };
-                let out_f32 = net.feed_forward_scoring(&fin, lid_window_size, two_sweeps);
-                let out_cols = out_f32.cols;
-                // Widen the posteriors back to f64 (the member seam).
-                let output_seq: Vec<f64> = out_f32.data.iter().map(|&x| x as f64).collect();
-                let get = |r: usize, c: usize| output_seq[r * out_cols + c];
-
-                // segLID accumulation per _PostProcessMode (`:1486-1534`). The legacy
-                // `short_result_vec > 0.5` gate is always true, so only `outputSeq(kk,1)
-                // >= 0` gates (always true for the logistic posterior).
-                // COVERAGE (T5/T11 honest record): the mode-1 (entropy-weighted) and
-                // mode-2 (vote) arms below are transcribed from the exact Twin but are
-                // NOT pinned by a committed parity fixture -- both gate configs (phSeq +
-                // cep) use `_PostProcessMode 0` (the `_` arm), the only path the CI
-                // parity legs exercise. Modes 1/2 stay transcribed-but-unpinned.
-                let mut seg_lid = vec![0.0f64; out_cols];
-                match post_process_mode {
-                    1 => {
-                        for kk in 0..out_f32.rows {
-                            if get(kk, 1) >= 0.0 {
-                                let mut entropy = 0.0;
-                                let mut log_out = vec![0.0f64; out_cols];
-                                for (ll, lo) in log_out.iter_mut().enumerate() {
-                                    *lo = f64::max(1e-24, get(kk, ll)).ln();
-                                    entropy -= get(kk, ll) * *lo;
-                                }
-                                entropy /= 2.0f64.ln();
-                                if entropy < 1e-24 {
-                                    entropy = 1e-24;
-                                }
-                                for (ll, sl) in seg_lid.iter_mut().enumerate() {
-                                    *sl += f64::max(1e-24, get(kk, ll) / entropy).ln();
-                                }
-                                number_of_frames += 1;
-                            }
-                        }
-                    }
-                    2 => {
-                        for kk in 0..out_f32.rows {
-                            if get(kk, 1) >= 0.0 {
-                                let mut j = 0usize;
-                                let mut best = get(kk, 0);
-                                for c in 1..out_cols {
-                                    if get(kk, c) > best {
-                                        best = get(kk, c);
-                                        j = c;
-                                    }
-                                }
-                                seg_lid[j] += 1.0;
-                                number_of_frames += 1;
-                            }
-                        }
-                    }
-                    _ => {
-                        for kk in 0..out_f32.rows {
-                            if get(kk, 1) >= 0.0 {
-                                for (ll, sl) in seg_lid.iter_mut().enumerate() {
-                                    *sl += f64::max(1e-24, get(kk, ll)).ln();
-                                }
-                                number_of_frames += 1;
-                            }
-                        }
-                    }
-                }
-
-                // argmax j (`:1537-1544`), confusion (`:1545-1555`).
-                let mut j = 0usize;
-                let mut best = seg_lid[0];
-                for (c, &v) in seg_lid.iter().enumerate().skip(1) {
-                    if v > best {
-                        best = v;
-                        j = c;
-                    }
-                }
-                let pos_target = ti + 1;
-                if j == ti {
-                    confusion[[pos_target, pos_target]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_target]] += 1.0;
-                } else {
-                    let pos_best = j + 1;
-                    confusion[[pos_target, pos_best]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_best]] += 1.0;
-                }
-
-                // langID (`:1558-1567`).
-                let rows = out_f32.rows as f64;
-                if cost_modified {
-                    for (c, &v) in seg_lid.iter().enumerate() {
-                        langid[c] += v / rows;
-                    }
-                } else {
-                    for (c, &v) in seg_lid.iter().enumerate() {
-                        langid[c] += v;
-                    }
-                }
-
-                segments_count += 1;
+                score_lid_entry(feat, &mut net, &params, &mut acc);
             }
-
-            // langID normalization (`:1599-1620`).
-            if segments_count > 0 && langid.iter().sum::<f64>() != 0.0 {
-                if cost_modified {
-                    for v in langid.iter_mut() {
-                        *v /= segments_count as f64;
-                    }
-                } else {
-                    for v in langid.iter_mut() {
-                        *v /= number_of_frames as f64;
-                    }
-                }
-                if post_process_mode != 2 {
-                    for v in langid.iter_mut() {
-                        *v = v.exp();
-                    }
-                }
-                let adim: f64 = langid.iter().sum();
-                for v in langid.iter_mut() {
-                    *v /= adim;
-                }
-            } else {
-                langid[0] = 1.0;
-            }
+            let agg = finalize_lid_channel(&acc, &params);
 
             // Member writes (`:1622-1634`). Forward-only: lid_cumulative_error /
-            // lid_nb_of_classif stay 0 (documented divergence, the fast path never
-            // harvests the LID NN cost/classif count).
-            let mut target_lid = vec![0.0f64; class_nb];
-            target_lid[ti] = -2.0;
+            // lid_nb_of_classif stay 0 (documented divergence, the fast path never harvests
+            // the LID NN cost/classif count).
             self.lid_cumulative_error[chan] = 0.0;
             self.lid_nb_of_classif[chan] = 0;
-            let mut lid_errors = vec![0.0f64; class_nb];
-            for c in 0..class_nb {
-                lid_errors[c] = 100.0 * (langid[c] - target_lid[c]);
-            }
-            self.lid_classification_errors[chan] = lid_errors;
-            self.lid_segments_confusion[chan] = confusion;
-            let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            self.is_lid_correct[chan] = if langid[ti] == max_langid { 100 } else { 0 };
+            self.lid_classification_errors[chan] = agg.classification_errors;
+            self.lid_segments_confusion[chan] = agg.confusion;
+            self.is_lid_correct[chan] = agg.is_lid_correct;
         }
         self.lid_net = Some(net);
 
@@ -1134,5 +1007,377 @@ impl Segmenter for FastTwinLid {
             self.lid_window_shift_sec = 0.0;
         }
         Ok(())
+    }
+}
+
+// ===========================================================================
+// The shared Mode-7 LID scoring kernel (Phase 8 Task 7).
+//
+// The offline `FastTwinLid::get_segmentation` per-channel loop AND the per-utterance
+// `StreamingLidSession` (`fast::stream_lid`) fold `external_features` entries through the
+// SAME per-entry body ([`score_lid_entry`]) + epilogue ([`finalize_lid_channel`]) below, so
+// streaming is bit-identical to offline BY CONSTRUCTION (nothing is re-implemented) -- the
+// phase-7 LID parity legs (`phase7_parity_lid.rs`) are the no-offline-regression proof.
+// ===========================================================================
+
+/// The finalized per-channel LID members -- the offline `get_segmentation` writes these into
+/// its per-channel member vectors, and the streaming session returns this as its
+/// utterance-granular result. `classification_errors`/`confusion`/`is_lid_correct` are
+/// bit-identical to the offline `lid_classification_errors`/`lid_segments_confusion`/
+/// `is_lid_correct`; `predicted_language`/`segments_count` are the streaming-useful extras
+/// (the argmax of the normalized langID + the scored-utterance count so far).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LidAggregate {
+    /// In-band `100*(langID - targetLID)` per class (the `.scr`/confusion column source) --
+    /// normalized langID, the offline `lid_classification_errors` row.
+    pub classification_errors: Vec<f64>,
+    /// The per-block argmax-count confusion matrix accumulated so far (the offline
+    /// `lid_segments_confusion`; NOT normalized by the epilogue).
+    pub confusion: Array2<f64>,
+    /// `100` iff the normalized langID argmax is the target, else `0` (offline
+    /// `is_lid_correct`).
+    pub is_lid_correct: i32,
+    /// The predicted language: argmax of the normalized langID (first-max).
+    pub predicted_language: usize,
+    /// Scored (not skipped) utterances folded so far -- the offline `segments_count`.
+    pub segments_count: i32,
+}
+
+/// The per-channel LID scoring constants (derived once from config + rate + target
+/// language), invariant across a channel's external-features entries.
+pub(super) struct LidScoreParams {
+    pub(super) lid_ssr: usize,
+    pub(super) min_nb_of_frames: i32,
+    pub(super) noise_magnitude: f64,
+    pub(super) lid_window_size: usize,
+    pub(super) two_sweeps: bool,
+    pub(super) post_process_mode: i32,
+    pub(super) class_nb: usize,
+    pub(super) ti: usize,
+    pub(super) cost_modified: bool,
+}
+
+/// The per-channel LID accumulator the Mode-7 external-features loop folds each entry into.
+/// [`new`](Self::new) seeds the confusion index header exactly as the offline `:970-975`.
+pub(super) struct LidChannelAcc {
+    pub(super) langid: Vec<f64>,
+    pub(super) confusion: Array2<f64>,
+    pub(super) segments_count: i32,
+    pub(super) number_of_frames: i32,
+}
+
+impl LidChannelAcc {
+    pub(super) fn new(class_nb: usize) -> LidChannelAcc {
+        let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
+        for kk in 0..class_nb + 1 {
+            confusion[[0, kk]] = kk as f64;
+            confusion[[kk, 0]] = kk as f64;
+        }
+        LidChannelAcc {
+            langid: vec![0.0f64; class_nb],
+            confusion,
+            segments_count: 0,
+            number_of_frames: 0,
+        }
+    }
+}
+
+/// One scored utterance's per-entry observables: the offline `seg_lid` (post-
+/// `_PostProcessMode` accumulator) + its argmax `j`.
+pub(super) struct LidEntryOutcome {
+    pub(super) seg_lid: Vec<f64>,
+    pub(super) argmax: usize,
+}
+
+/// First-max argmax (strict `>`), matching the offline inline argmax (`:1075-1082`,
+/// `:1147-1148`-adjacent langID pick).
+fn argmax_f64(v: &[f64]) -> usize {
+    let mut j = 0usize;
+    let mut best = v[0];
+    for (c, &x) in v.iter().enumerate().skip(1) {
+        if x > best {
+            best = x;
+            j = c;
+        }
+    }
+    j
+}
+
+/// LID window derivation (`get_segmentation_mode7` `:1330-1353`): returns
+/// `(lid_window_size, lid_no_overlap)`. `ssif` is the (mode-7 forced) spectrum shift in
+/// frames. Shared by `get_segmentation` and [`FastTwinLid::lid_score_params`] so the offline
+/// and streaming window sizes cannot drift.
+fn derive_lid_window(
+    size_sec: f64,
+    shift_sec: f64,
+    lid_ssr: usize,
+    ssif: usize,
+    rate: f64,
+) -> (usize, bool) {
+    let ssifd = ssif as f64;
+    let mut lid_window_size = f64::round(size_sec * rate / 2.0 / ssifd) as usize;
+    if lid_window_size != 0 && lid_window_size < lid_ssr {
+        lid_window_size = lid_ssr;
+    }
+    let lid_window_shift = f64::round(shift_sec * rate / ssifd) as i64;
+    let mut lid_no_overlap = false;
+    if lid_window_size != 0 && lid_window_shift < 1 {
+        lid_no_overlap = true;
+        let raw = f64::round(size_sec * rate / ssifd) as usize;
+        lid_window_size = (raw / lid_ssr) * lid_ssr;
+        if lid_window_size < 10 * lid_ssr {
+            lid_window_size = 10 * lid_ssr;
+        }
+    }
+    (lid_window_size, lid_no_overlap)
+}
+
+/// Fold ONE external-features entry into `acc` -- the exact body of the Mode-7 `:1448-1591`
+/// inner loop. Returns `None` if the entry is skipped (`nrows < lid_ssr` or `< MinNbOfFrames`,
+/// `:1450`), else the per-entry observables. The noise `randinit` is fixed 0 PER ENTRY
+/// (`:989`), NOT entry-order-dependent, so a per-utterance call reproduces the offline
+/// sequential call's noise indexing exactly.
+pub(super) fn score_lid_entry(
+    feat: &Array2<f64>,
+    net: &mut FastBlstm,
+    p: &LidScoreParams,
+    acc: &mut LidChannelAcc,
+) -> Option<LidEntryOutcome> {
+    // :1450 _MinNbOfFrames + ssr guard.
+    if feat.nrows() < p.lid_ssr || (feat.nrows() as i32) < p.min_nb_of_frames {
+        return None;
+    }
+    // :1456-1466 Gaussian noise (randinit fixed 0), applied in f64 on the block.
+    let mut feat_noised = feat.clone();
+    if p.noise_magnitude > 0.0 {
+        let cols = feat.ncols();
+        let randinit = 0usize;
+        for r in 0..feat.nrows() {
+            for c in 0..cols {
+                let m = random_gauss(r * cols + c + randinit) - 0.5;
+                feat_noised[[r, c]] += p.noise_magnitude * m;
+            }
+        }
+    }
+    // Narrow the block to f32 at the driver seam, then score.
+    let (fr, fc) = feat_noised.dim();
+    let mut fdata = Vec::with_capacity(fr * fc);
+    for r in 0..fr {
+        for c in 0..fc {
+            fdata.push(feat_noised[[r, c]] as f32);
+        }
+    }
+    let fin = FastMatrix {
+        data: fdata,
+        rows: fr,
+        cols: fc,
+    };
+    let out_f32 = net.feed_forward_scoring(&fin, p.lid_window_size, p.two_sweeps);
+    let out_cols = out_f32.cols;
+    let output_seq: Vec<f64> = out_f32.data.iter().map(|&x| x as f64).collect();
+    let get = |r: usize, c: usize| output_seq[r * out_cols + c];
+
+    // :1486-1534 segLID accumulation per _PostProcessMode. Modes 1/2 stay transcribed-but-
+    // unpinned (the gate configs use mode 0), mirroring the offline driver.
+    let mut seg_lid = vec![0.0f64; out_cols];
+    match p.post_process_mode {
+        1 => {
+            for kk in 0..out_f32.rows {
+                if get(kk, 1) >= 0.0 {
+                    let mut entropy = 0.0;
+                    let mut log_out = vec![0.0f64; out_cols];
+                    for (ll, lo) in log_out.iter_mut().enumerate() {
+                        *lo = f64::max(1e-24, get(kk, ll)).ln();
+                        entropy -= get(kk, ll) * *lo;
+                    }
+                    entropy /= 2.0f64.ln();
+                    if entropy < 1e-24 {
+                        entropy = 1e-24;
+                    }
+                    for (ll, sl) in seg_lid.iter_mut().enumerate() {
+                        *sl += f64::max(1e-24, get(kk, ll) / entropy).ln();
+                    }
+                    acc.number_of_frames += 1;
+                }
+            }
+        }
+        2 => {
+            for kk in 0..out_f32.rows {
+                if get(kk, 1) >= 0.0 {
+                    let mut j = 0usize;
+                    let mut best = get(kk, 0);
+                    for c in 1..out_cols {
+                        if get(kk, c) > best {
+                            best = get(kk, c);
+                            j = c;
+                        }
+                    }
+                    seg_lid[j] += 1.0;
+                    acc.number_of_frames += 1;
+                }
+            }
+        }
+        _ => {
+            for kk in 0..out_f32.rows {
+                if get(kk, 1) >= 0.0 {
+                    for (ll, sl) in seg_lid.iter_mut().enumerate() {
+                        *sl += f64::max(1e-24, get(kk, ll)).ln();
+                    }
+                    acc.number_of_frames += 1;
+                }
+            }
+        }
+    }
+
+    // :1537-1544 argmax j, :1545-1555 confusion.
+    let j = argmax_f64(&seg_lid);
+    let pos_target = p.ti + 1;
+    if j == p.ti {
+        acc.confusion[[pos_target, pos_target]] += 1.0;
+        acc.confusion[[pos_target, p.class_nb + 1]] += 1.0;
+        acc.confusion[[p.class_nb + 1, pos_target]] += 1.0;
+    } else {
+        let pos_best = j + 1;
+        acc.confusion[[pos_target, pos_best]] += 1.0;
+        acc.confusion[[pos_target, p.class_nb + 1]] += 1.0;
+        acc.confusion[[p.class_nb + 1, pos_best]] += 1.0;
+    }
+
+    // :1558-1567 langID.
+    let rows = out_f32.rows as f64;
+    if p.cost_modified {
+        for (c, &v) in seg_lid.iter().enumerate() {
+            acc.langid[c] += v / rows;
+        }
+    } else {
+        for (c, &v) in seg_lid.iter().enumerate() {
+            acc.langid[c] += v;
+        }
+    }
+
+    acc.segments_count += 1;
+    Some(LidEntryOutcome { seg_lid, argmax: j })
+}
+
+/// The finalized per-channel members (`:1599-1634` epilogue applied to `acc`): normalize a
+/// CLONE of langID (so a mid-stream snapshot never consumes the accumulator), then derive
+/// the in-band classification errors + is_lid_correct + predicted language. Read-only in
+/// `acc`, so the offline (once) and the streaming session (per push) both call it.
+pub(super) fn finalize_lid_channel(acc: &LidChannelAcc, p: &LidScoreParams) -> LidAggregate {
+    // :1599-1620 langID normalization (on a clone -- the offline mutated in place then read
+    // it; the values are identical, and the offline never reads langID after the epilogue).
+    let mut langid = acc.langid.clone();
+    if acc.segments_count > 0 && langid.iter().sum::<f64>() != 0.0 {
+        if p.cost_modified {
+            for v in langid.iter_mut() {
+                *v /= acc.segments_count as f64;
+            }
+        } else {
+            for v in langid.iter_mut() {
+                *v /= acc.number_of_frames as f64;
+            }
+        }
+        if p.post_process_mode != 2 {
+            for v in langid.iter_mut() {
+                *v = v.exp();
+            }
+        }
+        let adim: f64 = langid.iter().sum();
+        for v in langid.iter_mut() {
+            *v /= adim;
+        }
+    } else {
+        langid[0] = 1.0;
+    }
+
+    // :1622-1634 member writes.
+    let mut target_lid = vec![0.0f64; p.class_nb];
+    target_lid[p.ti] = -2.0;
+    let mut errors = vec![0.0f64; p.class_nb];
+    for c in 0..p.class_nb {
+        errors[c] = 100.0 * (langid[c] - target_lid[c]);
+    }
+    let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let is_lid_correct = if langid[p.ti] == max_langid { 100 } else { 0 };
+    let predicted_language = argmax_f64(&langid);
+
+    LidAggregate {
+        classification_errors: errors,
+        confusion: acc.confusion.clone(),
+        is_lid_correct,
+        predicted_language,
+        segments_count: acc.segments_count,
+    }
+}
+
+impl FastTwinLid {
+    /// Derive the per-channel LID scoring params for streaming (the window resolution + skip/
+    /// scoring constants from `get_segmentation`, minus the SAD side). Mode 7 forces
+    /// `_SpectrumShiftInFrames = 80` (`:1296-1301`: the phSeq/cep periodogram is always
+    /// present), so `ssif` is a constant here. Bails if the window does not resolve to
+    /// TRUNCATE (the only windowing the fast LID scoring implements, mirroring
+    /// `get_segmentation`'s plain/overlap bails). `ti = clamp(lang_index, [0, class_nb))`.
+    pub(super) fn lid_score_params(&self, rate: f64, lang_index: i32) -> Result<LidScoreParams> {
+        let ssif = 80usize; // mode-7 forced (:1296-1301)
+        let (lid_window_size, lid_no_overlap) = derive_lid_window(
+            self.lid_window_size_sec,
+            self.lid_window_shift_sec,
+            self.lid_ssr,
+            ssif,
+            rate,
+        );
+        if lid_window_size == 0 {
+            bail!(
+                "streaming LID: the plain (non-windowed) LID forward is unsupported; the gate \
+                 configs resolve to windowed truncate"
+            );
+        }
+        if !lid_no_overlap {
+            bail!(
+                "streaming LID: the overlap LID windowing is unsupported; the gate configs \
+                 resolve to truncate"
+            );
+        }
+        let mut ti = lang_index;
+        if ti >= self.class_nb as i32 {
+            ti = 0;
+        }
+        if ti < 0 {
+            ti = 0;
+        }
+        Ok(LidScoreParams {
+            lid_ssr: self.lid_ssr,
+            min_nb_of_frames: self.min_nb_of_frames,
+            noise_magnitude: self.noise_magnitude,
+            lid_window_size,
+            two_sweeps: self.lid_two_sweeps,
+            post_process_mode: self.post_process_mode,
+            class_nb: self.class_nb,
+            ti: ti as usize,
+            cost_modified: self.cost_modified,
+        })
+    }
+
+    /// Whether the LID net is loaded -- so the streaming session bails at construction rather
+    /// than deferring the failure to the first push.
+    pub(super) fn lid_net_loaded(&self) -> bool {
+        self.lid_net.is_some()
+    }
+
+    /// Fold one external-features entry through the LID net into `acc` (the streaming seam --
+    /// delegates to the shared [`score_lid_entry`] with the internal net). Panics only if the
+    /// net is unloaded, which the session forbids at construction ([`lid_net_loaded`](Self::
+    /// lid_net_loaded)).
+    pub(super) fn fold_entry(
+        &mut self,
+        feat: &Array2<f64>,
+        p: &LidScoreParams,
+        acc: &mut LidChannelAcc,
+    ) -> Option<LidEntryOutcome> {
+        let net = self
+            .lid_net
+            .as_mut()
+            .expect("LID net loaded (checked at session construction)");
+        score_lid_entry(feat, net, p, acc)
     }
 }

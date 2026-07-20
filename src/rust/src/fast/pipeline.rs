@@ -403,6 +403,172 @@ impl FastPipeline {
         }
     }
 
+    // ==========================================================================
+    // Phase 8 streaming: per-range feature extraction (fast::stream::StreamFrontEnd).
+    //
+    // The whole-sequence path above (`build_input_sequence*` / `compute_periodogram` /
+    // `fill_frame`) is UNTOUCHED -- the phase-7 pipeline pins stay byte-stable. These
+    // additions let a streaming session compute a CONTIGUOUS RANGE of periodogram
+    // frames from a rolling sample ring, then assemble a RANGE of feature rows from a
+    // rolling periodogram ring, both producing values BIT-IDENTICAL to the
+    // whole-sequence path for the rows they cover (the per-frame FFT is independent, and
+    // `assemble_input_sequence`/`apply_filter_bank`/`apply_dct` are per-row EXCEPT the
+    // `regression_deltas` cross-row window inside `apply_dct`, whose interior rows depend
+    // only on periodogram rows `[r-reach, r+reach]` and whose start/end rows clamp at the
+    // TRUE sequence start/end -- see `fast::stream` for the finalization arithmetic).
+    // ==========================================================================
+
+    /// The number of periodogram frames a whole-sequence pass over `n` samples produces
+    /// (`compute_periodogram`'s `frame_nb`, `AudioStruct.cpp:531-534`): the inclusive-count
+    /// ceil-divide of the sample span over the shift. Public so the streaming front-end
+    /// derives its EOS frame count from the same arithmetic (no divergence).
+    pub fn frame_count(&self, n: usize) -> usize {
+        let shift = self.shift_frames;
+        if shift == 0 {
+            0
+        } else if (n / shift) * shift == n {
+            n / shift
+        } else {
+            n / shift + 1
+        }
+    }
+
+    /// Compute periodogram frames `[from_frame, to_frame)` from a caller-provided sample
+    /// ring, appending one `bins`-wide row per frame to `out` (row-major). `samples` is a
+    /// contiguous slice of the ring whose element 0 is ABSOLUTE sample index `ring_base`;
+    /// `total_samples` is the total sample count seen so far (the `frames` the framing
+    /// geometry clamps against -- mid-stream every requested frame is interior/left-edge,
+    /// at EOS the tail frames use the right-edge zero-pad). Reuses the pipeline's own
+    /// realfft plan + per-frame scratch (`fft_in`/`fft_out`/`fft_scratch`/`frame_buf`);
+    /// each frame is independent, so a frame computed here is bit-identical to the same
+    /// frame in a whole-sequence `compute_periodogram`.
+    pub fn append_periodogram_frames(
+        &mut self,
+        samples: &[f32],
+        ring_base: usize,
+        from_frame: usize,
+        to_frame: usize,
+        total_samples: usize,
+        out: &mut Vec<f32>,
+    ) {
+        let n = self.window_size;
+        let n_f = n as f32;
+        let shift = self.shift_frames;
+        let r2c = self.r2c.clone();
+        for cf in from_frame..to_frame {
+            let center = cf * shift;
+            self.fill_frame_ring(samples, ring_base, center, total_samples);
+            self.fft_in.copy_from_slice(&self.frame_buf[..n]);
+            r2c.process_with_scratch(&mut self.fft_in, &mut self.fft_out, &mut self.fft_scratch)
+                .expect("realfft process (fixed power-of-two length)");
+            for m in 0..self.bins {
+                let z = self.fft_out[m];
+                out.push((z.re * z.re + z.im * z.im) / n_f);
+            }
+        }
+    }
+
+    /// Assemble feature rows from a periodogram-ring WINDOW, returning only local rows
+    /// `[from_local, to_local)`. `perio_window` is `window_rows x bins` (row-major f32),
+    /// widened once to f64 for the reused golden `apply_filter_bank`/`apply_dct`/
+    /// `assemble_input_sequence` (exactly the whole-sequence path's mel/DCT apply), then
+    /// narrowed back to f32. The caller sizes the window so every EXTRACTED row's
+    /// `regression_deltas` reach lands on real neighbours (interior) or on the true
+    /// sequence start/end (clamped edge), making the extracted rows bit-identical to the
+    /// whole-sequence assembly. `&self` (read-only: reuses `bank`/`use_dct`/`freq_beg`/
+    /// `freq_end`, never the whole-sequence `perio`/`input` buffers).
+    pub fn assemble_perio_window(
+        &self,
+        perio_window: &[f32],
+        window_rows: usize,
+        from_local: usize,
+        to_local: usize,
+    ) -> FastMatrix {
+        let mut perio64 = Array2::<f64>::zeros((window_rows, self.bins));
+        for r in 0..window_rows {
+            let base = r * self.bins;
+            for c in 0..self.bins {
+                perio64[[r, c]] = perio_window[base + c] as f64;
+            }
+        }
+
+        let (mel, dct) = match &self.bank {
+            Some(bank) => {
+                let fb = bank.apply_filter_bank(&perio64);
+                if self.use_dct {
+                    let d = bank.apply_dct(&fb);
+                    (Some(fb), Some(d))
+                } else {
+                    (Some(fb), None)
+                }
+            }
+            None => (None, None),
+        };
+
+        let input64 = assemble_input_sequence(
+            &perio64,
+            mel.as_ref(),
+            dct.as_ref(),
+            None, // LTSV bailed at construction
+            self.freq_beg,
+            self.freq_end,
+        );
+
+        let ic = input64.ncols();
+        let rows = to_local - from_local;
+        let mut out = FastMatrix {
+            data: Vec::with_capacity(rows * ic),
+            rows,
+            cols: ic,
+        };
+        for r in from_local..to_local {
+            for c in 0..ic {
+                out.data.push(input64[[r, c]] as f32);
+            }
+        }
+        out
+    }
+
+    /// [`fill_frame`] for the streaming sample ring: identical windowing arithmetic, but
+    /// reading absolute sample index `i` from `samples[i - ring_base]` and taking the
+    /// total frame count `total` explicitly (so the right-edge branch fires at EOS on the
+    /// same geometry the whole-sequence `fill_frame` derives from `samples.len()`). Kept
+    /// SEPARATE from `fill_frame` so the whole-sequence path is provably untouched.
+    fn fill_frame_ring(&mut self, samples: &[f32], ring_base: usize, index: usize, total: usize) {
+        let hw = self.half_window;
+        let cols = self.buffer_size;
+        let dc = self.flag_dc_offset;
+
+        for v in self.frame_buf.iter_mut() {
+            *v = 0.0;
+        }
+        let (beg_win, nb_elem, beg_data) = if index < hw {
+            (hw - index, hw + index + 1, 0usize)
+        } else if index >= total - hw {
+            (0usize, total + hw - index, index - hw)
+        } else {
+            (0usize, cols, index - hw)
+        };
+        let src_start = beg_data - ring_base;
+        self.frame_buf[beg_win..beg_win + nb_elem]
+            .copy_from_slice(&samples[src_start..src_start + nb_elem]);
+        if dc {
+            let mut sum = 0.0_f32;
+            for &v in self.frame_buf.iter() {
+                sum += v;
+            }
+            let mean = sum / cols as f32;
+            for v in self.frame_buf.iter_mut() {
+                *v -= mean;
+            }
+        }
+        if let Some(coeffs) = &self.win_coeffs {
+            for (v, &c) in self.frame_buf.iter_mut().zip(coeffs.iter()) {
+                *v *= c;
+            }
+        }
+    }
+
     /// Test hook: the stored f32 window coefficients (narrowed once from the exact f64
     /// `windowing_coefficients`), for the f32-vs-f64 windowing-coefficient pin.
     #[cfg(feature = "test-support")]

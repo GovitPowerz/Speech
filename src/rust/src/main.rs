@@ -84,6 +84,29 @@ fn main() {
         return;
     }
 
+    // Port-only tooling (Phase 8 Task 6), NOT a legacy CLI surface: the online
+    // SAD streaming replay. `speech stream [--chunk-ms=N] config_file wav_file`.
+    // Handled before `parse_cli` (own arg grammar, not a legacy mode flag), same
+    // precedent as `bench` / `--convert-config` above.
+    if args.len() >= 2 && args[1] == "stream" {
+        let inv = match speech::cli::parse_stream_args(&args[2..]) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("Error: {e}\n");
+                eprintln!("Usage : {progname} stream [--chunk-ms=N] config_file wav_file");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = speech::stream_cli::run_stream(&inv.config, &inv.wav, inv.chunk_ms) {
+            // `{e:#}` (the full anyhow cause chain, the bench/PyO3 convention) --
+            // a streaming failure is usually several `.context()` layers deep
+            // (config parse -> session contract validation -> weight load).
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // legacy: :43-64 pass argv[1..] (mode + overrides/configs) to the parser;
     // argv[0] (progname) is not part of the parsed slice.
     let invocation = match parse_cli(&args[1..]) {

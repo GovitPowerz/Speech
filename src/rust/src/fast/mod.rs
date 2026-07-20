@@ -20,3 +20,5 @@
 pub mod driver;
 pub mod nn;
 pub mod pipeline;
+pub mod stream;
+pub mod stream_lid;

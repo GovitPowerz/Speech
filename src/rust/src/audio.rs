@@ -481,6 +481,23 @@ pub fn normalize_channels(data: &mut Array2<f64>) {
     }
 }
 
+/// Phase 8 S1.1: the frozen-norm counterpart to [`normalize_channels`] -- every
+/// channel divides by ONE caller-supplied constant instead of its own
+/// `(2*rms+max_abs)/2`, so a streaming session (or an offline reference run under
+/// frozen stats) never needs the whole-file statistic `normalize_channels` requires.
+/// Mirrors the legacy `1e-3` floor (`AudioStruct.cpp:121-126`) so a near-zero
+/// caller-supplied gain cannot blow up the signal. Port-only: no legacy source
+/// (`Audio_fixed_gain` does not exist in the C++ engine).
+fn apply_fixed_gain(data: &mut Array2<f64>, gain: f64) {
+    let gain = gain.max(1e-3);
+    let (channels, frames) = data.dim();
+    for c in 0..channels {
+        for k in 0..frames {
+            data[[c, k]] /= gain;
+        }
+    }
+}
+
 /// legacy: `static std::map<char,int> letterMapping` (AudioStruct.h:18), a 38-entry
 /// char -> column bijection used by the phSeq readers (`file_type` 1 and 3, only 1
 /// ported here). A `std::map` is queried only via `.at()` in the legacy (never
@@ -796,11 +813,24 @@ fn read_cep(path: &Path) -> anyhow::Result<Audio> {
 /// (`:36-128`). `file_type == 1`: phSeq text reader (`:138-182`, see [`read_phseq`]).
 /// `file_type == 2`: cep feature-binary reader (`:183-256`, see [`read_cep`], Phase 6).
 /// `file_type` 3/4 (phSeq-N variant, mat) remain unported (`:257-412`).
+///
+/// `fixed_gain` (Phase 8 S1.1 `Audio_fixed_gain`, spec
+/// `2026-07-19-phase-8-streaming-design.md`): the ONE sanctioned exact-tree touch of
+/// the phase, port-only (no legacy source). Consulted ONLY on the wav path
+/// (`file_type == 0`, the only branch that ever calls [`normalize_channels`]):
+/// `Some(g)` skips the whole-file `(2*rms+max_abs)/2` statistic and divides every
+/// channel by [`apply_fixed_gain`]'s `g.max(1e-3)` instead -- the frozen-norm mode a
+/// streaming session needs (no whole-file lookahead available online); `None` is the
+/// legacy path, BYTE-IDENTICAL to before this parameter existed (the phase-7
+/// sanctioned inert-by-default guard class: no committed config sets
+/// `Audio_fixed_gain`, so every existing golden stays untouched -- the full suite
+/// green is the proof). Ignored on the phSeq/cep paths, neither of which normalizes.
 pub fn read_audio(
     path: &Path,
     offset_sec: f64,
     max_duration_sec: f64,
     file_type: i32,
+    fixed_gain: Option<f64>,
 ) -> anyhow::Result<Audio> {
     if file_type == 1 {
         // legacy: AudioStruct.cpp:145 `_OffsetBegin = audio_offset;` -- set from
@@ -903,7 +933,10 @@ pub fn read_audio(
         }
     }
 
-    normalize_channels(&mut data_raw);
+    match fixed_gain {
+        Some(g) => apply_fixed_gain(&mut data_raw, g),
+        None => normalize_channels(&mut data_raw),
+    }
     let data = data_raw.clone();
 
     Ok(Audio {
@@ -1034,7 +1067,13 @@ mod tests {
         // (Phase 4d Task 13, which asserted an "unsupported file_type" bail). A nonexistent
         // path must now surface a FILE-OPEN error ("No .cep file"), NOT the old
         // "not supported" gate bail -- proving the dispatch reaches the reader.
-        match read_audio(Path::new("/nonexistent/does/not/matter.cep"), 0.0, 3.6e6, 2) {
+        match read_audio(
+            Path::new("/nonexistent/does/not/matter.cep"),
+            0.0,
+            3.6e6,
+            2,
+            None,
+        ) {
             Err(e) => {
                 let s = e.to_string();
                 assert!(
@@ -1054,7 +1093,13 @@ mod tests {
     fn read_audio_file_type_3_bails() {
         // File_Type 3/4 (phSeq-N variant, mat -- AudioStruct.cpp:257-412) stay unported:
         // typed bail, no read attempted (the bail fires before any file I/O).
-        match read_audio(Path::new("/nonexistent/does/not/matter.mat"), 0.0, 3.6e6, 3) {
+        match read_audio(
+            Path::new("/nonexistent/does/not/matter.mat"),
+            0.0,
+            3.6e6,
+            3,
+            None,
+        ) {
             Err(e) => assert!(
                 e.to_string().contains("not supported"),
                 "unexpected read_audio file_type-3 error: {e}"

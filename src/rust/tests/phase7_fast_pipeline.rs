@@ -116,7 +116,7 @@ fn build_input_sequence_twice_bit_identical() {
     // pipeline give BIT-IDENTICAL f32 output (the mel bank + realfft plan are built
     // once and reused; no per-call allocation contaminates the result).
     let (_, cfg) = tier2_cfg();
-    let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0).unwrap();
+    let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0, None).unwrap();
     let s = SpectralParams::derive(&cfg, audio.sample_rate as f64);
     let mut pipe = FastPipeline::new(&s, &cfg, audio.sample_rate as f64).unwrap();
     let samples = samples_f32(&audio, 0);
@@ -132,7 +132,7 @@ fn build_input_sequence_twice_bit_identical() {
     // A different-length input between the two identical calls (channel 1 has the same
     // length here, so use the 60 s file's channel to force a workspace resize) must not
     // perturb the repeat.
-    let big = read_audio(std::path::Path::new(PRCTS), 0.0, 3.6e6, 0).unwrap();
+    let big = read_audio(std::path::Path::new(PRCTS), 0.0, 3.6e6, 0, None).unwrap();
     let _ = pipe.build_input_sequence(&samples_f32(&big, 0));
     let third = pipe.build_input_sequence(&samples).clone();
     for (i, (&a, &b)) in first.data.iter().zip(third.data.iter()).enumerate() {
@@ -157,7 +157,7 @@ fn pipeline_parity_excerpt_3s() {
     const REL_PIN: f64 = 5.0e-5;
     const ABS_PIN: f64 = 1.0e-4;
     let (_, cfg) = tier2_cfg();
-    let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0).unwrap();
+    let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0, None).unwrap();
     let rate = audio.sample_rate as f64;
     let s = SpectralParams::derive(&cfg, rate);
 
@@ -185,7 +185,7 @@ fn pipeline_parity_prcts_60s() {
     const REL_PIN: f64 = 1.5e-4;
     const ABS_PIN: f64 = 3.0e-4;
     let (_, cfg) = tier2_cfg();
-    let audio = read_audio(std::path::Path::new(PRCTS), 0.0, 3.6e6, 0).unwrap();
+    let audio = read_audio(std::path::Path::new(PRCTS), 0.0, 3.6e6, 0, None).unwrap();
     let rate = audio.sample_rate as f64;
     let s = SpectralParams::derive(&cfg, rate);
 
@@ -220,7 +220,7 @@ fn pipeline_parity_dc_offset_branch() {
     let (mut map, _) = tier2_cfg();
     map.insert("BLSTM_flag_DCOffset".into(), "true".into());
     let cfg = FeatureConfig::from_legacy(&map, "BLSTM").unwrap();
-    let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0).unwrap();
+    let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0, None).unwrap();
     let rate = audio.sample_rate as f64;
     let s = SpectralParams::derive(&cfg, rate);
 

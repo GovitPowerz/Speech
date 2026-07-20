@@ -242,8 +242,9 @@ fn tdc_params() -> TdcParams {
 /// Preemph+noise excerpt audio (chan 0), the same recipe every earlier phase-1
 /// audio golden uses (offset 0.35, dur 2.0, preemph 0.97, noise 0.001).
 fn excerpt_audio() -> speech::audio::Audio {
-    let mut audio = speech::audio::read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0)
-        .expect("decode excerpt");
+    let mut audio =
+        speech::audio::read_audio(&common::fixture("excerpt_2ch_8k.wav"), 0.35, 2.0, 0, None)
+            .expect("decode excerpt");
     audio.apply_preemph(0.97);
     audio.apply_noise(0.001);
     audio

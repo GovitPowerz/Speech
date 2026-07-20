@@ -4588,6 +4588,125 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   sad 3/64 s, lid-features 3/257 s, lid-phseq 3/222 s); `./lint_code.sh` clean (ruff imports/format/
   lint + mypy, 82 files). Working tree at completion contains ONLY this IMPROVEMENTS.md entry.
 
+### Mutation battery (Phase 8)
+
+- **[phase8] Mutation battery (Task 9): 8/8 battery items break their named catcher, each via an
+  apply-FAIL-revert-PASS cycle; two honest coverage notes recorded (item 5's 2x-holdback cut is
+  caught by only one of the three prefix-consistency legs; item 7's floor-drop half is inert on
+  every committed fixture). PLUS a T7-review test addition: the shipped-but-unasserted
+  `LidAggregate.predicted_language` field is now pinned against the offline argmax.** Every
+  load-bearing Phase-8 streaming mechanism (the SAD front-end's pre-emphasis carry + periodogram
+  ring + frame-completion arithmetic, `StreamOverlap`'s early-emit frontier + EOS tail flush,
+  `StreamDecision`'s smoothing holdback, the shared `apply_fixed_gain`, and the LID session's
+  running aggregate) re-verified from the committed state. Each mutation minimal + surgical / run
+  FOREGROUND against the NAMED catcher only (`cargo test --test <file> <testname>`) / reverted /
+  re-run GREEN; `git status --porcelain` confirmed showing ONLY this IMPROVEMENTS.md entry (plus the
+  disclosed `tests/phase8_stream_lid.rs` addition) between every cycle and at the end. Run in the
+  debug test profile (the self-dev-dep `speech = { features = ["test-support"] }` auto-enables the
+  `test-support` hooks the gate/frozen-norm legs read); each item's release behaviour under CI's
+  `cargo test --release` (debug_asserts off) is stated where it differs (items 3 and 6 fall to
+  release-safe bounds panics, never debug-assert-only). No pyo3/maturin rebuild was needed -- every
+  catcher is cargo-side. IMPROVEMENTS.md + the one test-file addition are the only committed diff.
+
+  (1) Drop the cross-chunk pre-emphasis carry: reset `self.prev_gained = 0.0` at the top of
+  `StreamFrontEnd::push` (`fast/stream.rs`), so each chunk's first sample computes `gained -
+  ratio*0` instead of `gained - ratio*(previous chunk's last gained sample)` -- the carry is
+  treated as chunk-local. Against `cargo test --test phase8_stream_frontend preemph` -- FAILED both
+  the T2 carry legs, `preemph_carry_across_chunks` and `frontend_preemph_noise_bit_equal_offline`,
+  via the bit-equal comparator (`mismatch at [0,0]: got 0xc0e031cf (-7.00608) want 0xc059ee65
+  (-3.4051754)`). The two gain-only bit-equal legs (`frontend_rows_bit_equal_offline`/`frontend_
+  chunk_invariance`) correctly stay GREEN -- preemph is inert there (tier2 `ratio -0.97 <= 0`), so
+  `prev_gained` is never read. Reverted, 2 PASS.
+
+  (2) Break the periodogram-ring index arithmetic (ring-window off-by-one): in
+  `StreamFrontEnd::assemble_range` (`fast/stream.rs`), change the window's left bound
+  `window_lo = from.saturating_sub(self.reach)` to `from.saturating_sub(self.reach - 1)`, so the
+  delta-context window drops its leftmost periodogram row and every extracted row near the window's
+  left edge clamps its `regression_deltas` one row early. Against `cargo test --test phase8_stream_
+  frontend frontend_rows_bit_equal_offline` -- FAILED via the bit-equal comparator (`mismatch at
+  [16,7]: got 0x3e6d7539 (0.23189248) want 0x3e6c7597 (0.23091732)`), a VALUE divergence (not the
+  ring's own `debug_assert`, which still holds: `window_lo` moves UP by one, never underrunning
+  `pgram_base`), so it is caught in release too. Reverted, PASS.
+
+  (3) Emit an output row one window early: in `StreamOverlap::push_rows` (`fast/stream.rs`), change
+  the finalization frontier from `emit_upto(frontier)` to `emit_upto(frontier + 1)`, releasing the
+  row at `obeg(next_jj)` before its last covering window (`next_jj`) has fired. Against `cargo test
+  --test phase8_stream_overlap overlap_rows_bit_equal_offline` -- FAILED: the premature emit drains
+  the accumulator ring up to `frontier+1`, so `acc_base` overtakes the next window's `obeg`, and the
+  following `fire` underruns the ring (`window obeg underruns the accumulator ring`, the `fire`
+  debug_assert at `stream.rs:522`). RELEASE NOTE (debug_assert is off in `--release`/CI): the same
+  underrun then wraps `obeg - acc_base` (usize) and panics on the out-of-bounds accumulator write in
+  `overlap_window_step`, so the named leg fails in release too -- via a bounds panic rather than the
+  bit-equal comparator. Reverted, PASS.
+
+  (4) Skip `StreamOverlap::flush`'s clamped-tail enumeration: delete the `while self.next_jj <
+  total { ... fire(...) ... }` loop in `flush` (`fast/stream.rs`), so the partial (EOS-snapped)
+  tail windows never fire and `emit_upto(total/ssr)` divides the last output rows against a count
+  that is missing the tail windows' contributions. TWO named catchers, both confirmed: (a) `cargo
+  test --test phase8_stream_overlap eos_tail_matches_offline` -- FAILED via the test's own comparator
+  (`EOS tail mismatch at output row 21 col 0: got 0.66179353 want 0.6620833`); (b) `cargo test
+  --test phase8_gate stream_finish_equals_offline` -- FAILED BOTH the frozen and calibrated
+  equivalence legs (`boundary max_dt must be EXACTLY 0.0`, got `1.140e-2` -- the missing tail
+  windows shift the final segmentation, the R1 STOP). Reverted, PASS.
+
+  (5) Halve the smoothing holdback: in `StreamDecision::resmooth_and_emit` (`fast/stream.rs`),
+  change the emission threshold `frontier - self.holdback` to `frontier - self.holdback / 2.0`, so
+  a settled-prefix segment is emitted before later raw structure that can still reach it through the
+  smoothing has been ruled out. CAUGHT, with a coverage nuance (recorded honestly): `cargo test
+  --test phase8_gate prefix_consistency_e2e` -- FAILED with an R2 retraction on the calibrated
+  real-fixture (`emission (3.3371, 7.3361, Speech) not present in the final partition (retraction --
+  R2)`). The OTHER two prefix-consistency legs SURVIVE a 2x cut and stay GREEN: `phase8_stream_
+  decision::prefix_consistency_holds` (its profiles space bursts by 6 s silences, far past the true
+  smoothing reach, so half the conservative holdback still clears them) and `phase8_gate::prefix_
+  consistency_near_reach_profile` (its regular 2.2 s gaps carry no suppress/merge structure in the
+  [reach, holdback/2] window to retract). So the holdback is genuinely conservative: a 2x cut is
+  caught only by the irregular real-fixture e2e leg; a larger cut would trip the crafted legs too.
+  Reverted, PASS.
+
+  (6) Leak chunk size into the framing (process a partial frame before its right edge exists): in
+  `StreamFrontEnd::pgram_ready` (`fast/stream.rs`), change the finalizable-frame count `(n - 1 -
+  hw) / shift + 1` to `(n - hw) / shift + 1`, marking a periodogram frame ready when its right edge
+  is at sample index `n` -- one sample before it has arrived (valid indices are `0..n-1`). Against
+  `cargo test --test phase8_stream_frontend frontend_chunk_invariance` -- FAILED via a bounds panic
+  (`pipeline.rs:554: range end index 673 out of range for slice of length 672`): only the 7 ms
+  (non-divisor) chunking lands a push exactly at `n = 672 (== 32 mod 80, >= half_window+1)`, where
+  the prematurely-ready left-edge frame's window reaches sample 672 before it exists -- so the read
+  overruns the ring. This is precisely chunk-dependent: the 20 ms/100 ms/1 s chunkings step over
+  the aligned `n` and stay correct, which is the exact leakage the chunk-invariance leg is built to
+  catch. Release-safe (slice bounds are always checked). Reverted, PASS.
+
+  (7) Misapply the fixed gain (apply it twice): in `audio.rs::apply_fixed_gain` (the ONE shared
+  gain-application site both the offline `read_audio(.., Some(gain))` path and the gate's offline
+  oracle use), change `data[[c,k]] /= gain` to `/= gain * gain`. TWO named catchers, both confirmed:
+  (a) `cargo test --test phase8_frozen_norm fixed_gain_replaces_normalization` -- FAILED (`fixed_gain
+  path must equal raw/gain exactly`, now `raw/gain^2`, vs the independent `read_wav_pcm16` ground
+  truth); (b) `cargo test --test phase8_gate stream_finish_equals_offline` -- FAILED BOTH the frozen
+  and calibrated legs on the posterior-history equivalence (`bits at 0 (s=0.024067992 o=0.024067968)`)
+  -- the streaming `StreamFrontEnd` applies the gain ONCE (`x / self.fixed_gain`, unmutated) while the
+  offline oracle now applies it twice, so the two diverge. HONEST GAP on the FLOOR half of this item:
+  the sibling mutation "drop the `.max(1e-3)` floor" (in `apply_fixed_gain` AND in `StreamFrontEnd::
+  new`) is INERT on every committed fixture -- all use `Audio_fixed_gain > 1e-3` (tier2 ~0.49247,
+  frozen-norm GAIN 0.5), so the floor never binds and no test discriminates it; a sub-1e-3-gain
+  fixture would be needed to catch it, which no gate config exercises. Reverted, PASS.
+
+  (8) LID running-aggregate off-by-one-entry: in `StreamingLidSession::push_utterance` (`fast/
+  stream_lid.rs`), compute `finalize_lid_channel(&self.acc, ..)` BEFORE `fold_entry` instead of
+  after, so the returned `running_aggregate` reflects the accumulator state one entry behind (k-1
+  entries after the k-th push). Against `cargo test --test phase8_stream_lid running_aggregate_is_
+  prefix_correct_phseq` -- FAILED at the first prefix step (`phseq s1 prefix k=1: classification_
+  errors must be bit-identical to offline`, got the degenerate 0-entry aggregate `[300.0, 0.0]`
+  (segments_count 0 -> `langid[0]=1.0`) vs the real offline-on-1-entry `[257.75, 42.25]`). The
+  offline `FastTwinLid` on the first k entries is the oracle, so the lag surfaces immediately. A
+  clean value assertion (caught in release too). Reverted, PASS.
+
+  (9) TEST ADDITION (not a mutation): `LidAggregate.predicted_language` (the argmax of the normalized
+  langID) shipped in Phase 8 Task 7 without a committed assertion. `tests/phase8_stream_lid.rs`'s
+  `per_utterance_equals_offline` now pins `finish().predicted_language` against the offline argmax,
+  recovered from the offline `classification_errors` oracle (`langid[c] = errors[c]/100 + target_
+  lid[c]`, then first-max argmax) -- so the field is tied to the already-asserted, offline-oracle'd
+  errors row. Runs on all five fixtures (phSeq s1/s2/s3, cep tiny_ok/multi_ok). Added GREEN on the
+  first run (no port fix needed); committed WITH this battery record and disclosed in the commit body.
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
@@ -4806,3 +4925,20 @@ it is now a real reader; the other three remain blocked. See its flipped entry b
   run bit-for-bit either). CLOSED by the `[phase4a]` static-lane deterministic reduction entry
   above (the chosen Rust strategy: file `j` -> lane `j % N`, ascending-lane fold; N=1 is the
   golden-pinned legacy-sequential parity mode).
+- **[phase8 -> phase9] Provisional-begin peek: bound the SILENCE-class streaming latency to the
+  structural floor** (`fast/stream.rs`, `StreamDecision`/`HystState`). The Task-5 consumed-frontier
+  trigger delivers the SPEECH class within the derived structural bound (~6.05 s), but an OTHER
+  (silence) segment still commits only at its FOLLOWING speech's falling edge -- its right boundary
+  IS that speech's onset -- so its latency is the following speech's DURATION + the forward pipeline
+  delay (measured 15.85 s on the gate fixture, the data-dependent AREA term, pinned per-class in
+  `tests/phase8_gate.rs`). This is INHERENT to emitting CLOSED-interval raw segments and is a
+  documented characteristic, NOT a defect. THE REFINEMENT (named for phase 9, beside the
+  causal-architecture upgrade -- the causal-friendly nets upgrade this phase's windowed-lookahead to
+  truly causal): emit a PROVISIONAL silence-close as soon as the hysteresis has LATCHED a pending
+  open Speech segment (`has_begun == true`), reading its recorded `begin` as the silence's
+  provisional right boundary. The T5 re-review's finding: `HystState.begin`/`begin_area` are
+  UNTOUCHED once `has_begun` latches (`fast/stream.rs:685-697`), so the peeked value is STABLE
+  (lower-risk than an in-flight read presumed), and the silence-class lag would drop to ~the
+  structural bound. Deferred, not implemented: it introduces PROVISIONAL (revisable-until-committed)
+  emission semantics the current bit-exact-FINAL contract does not have, so it is a phase-9 design
+  decision, not a Task-5 omission.

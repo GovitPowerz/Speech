@@ -138,7 +138,7 @@ fn lid_weights(variant: &str) -> Vec<f64> {
 
 fn corpus_audio(name: &str, lang: i32, weight: f64) -> Audio {
     let p = phase4b("corpus_lid").join(format!("{name}.wav"));
-    let mut a = read_audio(&p, 0.35, 2.0, 0).expect("decode corpus wav");
+    let mut a = read_audio(&p, 0.35, 2.0, 0, None).expect("decode corpus wav");
     a.lang_index = lang;
     a.weight = weight;
     a

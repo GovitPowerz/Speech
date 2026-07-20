@@ -53,7 +53,7 @@ fn cep_path(name: &str) -> PathBuf {
 fn read_cep_fixture(name: &str) -> Result<Audio, String> {
     // File_Type 2, generous max-duration (the cep branch never truncates by it).
     // Flatten to String so the test crate needn't name the engine's `anyhow` dep.
-    read_audio(&cep_path(name), 0.0, 3.6e6, 2).map_err(|e| format!("{e:#}"))
+    read_audio(&cep_path(name), 0.0, 3.6e6, 2, None).map_err(|e| format!("{e:#}"))
 }
 
 // -- happy path -------------------------------------------------------------------
@@ -130,7 +130,7 @@ fn write_read_roundtrip_arbitrary_matrix() {
     let path = dir.path().join("rt.plp");
     std::fs::write(&path, &bytes).unwrap();
 
-    let audio = read_audio(&path, 0.0, 3.6e6, 2).expect("round-trip cep must read");
+    let audio = read_audio(&path, 0.0, 3.6e6, 2, None).expect("round-trip cep must read");
     assert_eq!(audio.external_features.len(), 1);
     let expected: Array2<f64> = arr2(&[
         [0.125, -0.25, 8.0, -16.5, 100.0],
@@ -242,7 +242,7 @@ fn corpus_first_file_consistency() {
     // (2) The reader itself must accept the file (its strict byte check passing IS a
     // second confirmation of the layout) and produce finite, plausible, non-degenerate
     // features whose implied duration lands in a sane LRE range.
-    let audio = read_audio(first, 0.0, 3.6e6, 2).expect("real cep file must read");
+    let audio = read_audio(first, 0.0, 3.6e6, 2, None).expect("real cep file must read");
     assert!(!audio.external_features.is_empty(), "at least one record");
     assert_eq!(audio.external_features[0].ncols(), 23, "feature dim 23");
 

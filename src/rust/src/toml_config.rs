@@ -18,7 +18,9 @@
 //! list, both directions read off the SAME table (no separate encode/decode maps to
 //! drift apart). It covers every key used by the committed fixture configs (the
 //! phase0/phase4a/phase4b `.config` fixtures plus `configs/legacy/LID_BLSTM.config`
-//! -- 175 distinct legacy keys as of this writing), grouped into sections that
+//! -- 175 distinct legacy keys as of this writing) plus one port-only Phase 8
+//! addition (`Audio_fixed_gain`, S1.1 -- no legacy source, not part of that fixture
+//! union), grouped into sections that
 //! extend the `configs/lid/lid_blstm.toml` scaffold's original four
 //! (`engine`/`audio`/`decision`/`spectrum`/`preprocess`) with new ones per
 //! algorithm family: `corpus`, `display`, `pitch` (the BLSTM spectral segmenter's
@@ -109,6 +111,7 @@ static KEY_TABLE: &[KeyMapping] = &[
     // --- audio: per-file offset/duration clamp --------------------------------
     ("Audio_offset",                             "audio", "offset"),
     ("Audio_max_duration",                       "audio", "max_duration"),
+    ("Audio_fixed_gain",                         "audio", "fixed_gain"),
 
     // --- spectrum: BLSTM (main SAD net) feature extraction --------------------
     ("BLSTM_spectrum_order",                     "spectrum", "order"),

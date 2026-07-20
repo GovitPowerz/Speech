@@ -518,3 +518,116 @@ prove); the whole 3-arm file re-runs in ~12 s warm. Cold-cache training (once pe
 dominates at ~60 s (SAD) / ~180 s (phSeq) / ~276 s (cep). Checkpoints cache under the gitignored
 `data/phase7_parity_cache/` (holds corpus-path listings -- never committed); `run_baseline` at a
 fixed seed is deterministic, so a warm cache is bit-identical to a fresh run.
+
+## Phase 8 -- online/streaming mode
+
+### Task 1 -- the frozen-norm reference mode + the causality-cost CI leg
+
+`Audio_fixed_gain` (S1.1, the one sanctioned exact-tree touch: `read_audio` gains
+`fixed_gain: Option<f64>`, `None` = the legacy path byte-identical -- full golden suite green) plus
+the fast SAD path's type-1 external normalization (`fast/nn.rs::external_normalize_f32`, the
+frozen-stats input mode; the phase-7 `InputNormalizationType` bail narrowed from {-1} to {-1, 1}).
+The staged frozen gate config (`common::stage_frozen_tier2`, consumed by Tasks 2/3/5/6): channel 0
+of the 60 s `phase4d/prcts_excerpt.wav` extracted MONO at staging, the tuple-A pack, tier2 +
+`Inference_Path fast` + `Audio_fixed_gain <measured>` + `BLSTM_InputNormalizationType 1`. The gain
+is baked to the mono channel's own measured `(2*RMS+max)/2` (= 4.924708e-1), so the audio-norm
+halves of the frozen and self-norm modes coincide numerically on THIS fixture and the remaining
+delta isolates the type-1-vs-self-norm input-normalization change alone.
+
+The causality-cost CI leg (S1.7, REPORTED never gated;
+`phase8_frozen_norm.rs::causality_cost_frozen_vs_self_norm`, measured 2026-07-19, Apple Silicon dev
+box, 60 s mono, tuple-A pack BOTH sides per R4):
+
+| quantity | offline-frozen (type 1 + fixed gain) vs offline-self-norm (type -1) |
+|---|---|
+| posterior max_abs delta | 9.956e-1 |
+| boundary rows | frozen 2 (the seed hypothesis -- ZERO detections) vs self-norm 17 |
+| NaN-pattern mismatches | 0 (identical overlap coverage) |
+
+MECHANISM (adjudicated before recording, exact-tree cross-run: the exact f64 path under the SAME
+frozen stats reproduces the IDENTICAL 2-row collapse, inter-path posterior delta 1.28e-7 = f32
+noise -- the collapse is the MODE, not a fast-path defect): the tuple-A net was TRAINED under
+type -1 self-normalization (per-sequence standardize + asinh); its pack-carried type-1 tail is a
+plain affine standardization with 2015-training-corpus statistics, under which this net's posterior
+saturates high (~0.9995) for the whole fixture -- no rising crossing ever fires. The causality cost
+for THIS pack/config pairing is therefore total on the decision level; the honest number, stated as
+measured. The corpus tier (Task 8) re-measures on the phase-6 SAD checkpoint (held-out DCF, both
+modes scored). The fast type-1 transcription itself is pinned two ways: the unit pin
+(`fast_type1_normalization_matches_exact`, fast f32 vs the exact `nn/blstm.rs:1008-1021` branch on
+the same input + tuple-A tail: measured max_rel 1.913e-7, pinned 1e-5) and the causality leg's own
+end-to-end run through the frozen bag.
+
+### Task 8 -- the corpus tier: streaming parity + the causality cost on REAL data
+
+`tests/pyo3/test_phase8_parity.py` (corpus-gated, `slow`, local-only) lifts the Rust CI gate
+(`phase8_gate.rs`, streamed == offline-frozen BIT-EQUAL on the committed 60 s tuple-A fixture) onto
+REAL LRE03/07 data with the TRAINED phase-6 SAD subset checkpoint (`best_sad.bin`, the SHARED
+phase-7 parity cache -- warm-cache reuse, no re-train), through the Python `speech_rs` seam. The
+file is selected at RUNTIME as the lexicographically-first `*.wav` under `train/audio/**` (the
+license bright line -- no filename/path recorded); it is a 75 s mono 8 kHz recording. Measured
+2026-07-20, Apple M4 Pro (arm64), macOS 26.5.2, seed 0 (the phase-6 recipe).
+
+THE TAIL FINDING (`test_frozen_tail_is_identity`): the checkpoint's normalize tail (last
+`2*23=46` pack elements of the 33,671-element pack) is EXACTLY identity (`max|mean|=0`,
+`max|std-1|=0`) -- `init_weights` seeds it identity and type -1 training never descends it (the
+frozen tail is not the descent target). So `BLSTM_InputNormalizationType 1` is a NO-OP on this
+pack and the frozen posteriors are driven by UN-normalized input. Under this net's `IgnoreFirstDCT`
++ no-LTSV/TDC config the per-file audio gain is moreover DECISION-INVARIANT (the DCT cancellation,
+`phase8_frozen_norm.rs` finding 1), so the causality cost isolates the type-1-vs-self-norm INPUT
+normalization alone. EVIDENTIARY SCOPE (stated explicitly): because that tail is EXACTLY identity,
+`(x - 0)/1` is INDISTINGUISHABLE from skipping type-1 entirely, so this corpus equivalence does
+NOT independently exercise the type-1 threading through the streaming front-end -- that coverage
+lives in Task 1's fast-vs-exact unit pin (`fast_type1_normalization_matches_exact`), which runs the
+type-1 branch against a NONZERO tuple-A tail (max_rel 1.913e-7, pinned 1e-5). This corpus leg pins
+the streaming-vs-offline equivalence and the causality-cost regime, not the type-1 arithmetic.
+
+**S1.9 EQUIVALENCE (`test_streaming_equivalence_on_corpus`)** -- streamed (PyO3 session, 100 ms
+chunks) vs the offline-frozen fast `Engine` run on the SAME file/pack/gain (fixed_gain 5.805032e-1):
+
+| quantity | streamed | offline-frozen | verdict |
+|---|---|---|---|
+| speech segments | 1 | 1 | IDENTICAL count (R1 gate) |
+| speech interval | `[0, 74.999875]` | `[0, 74.9999]` (VRCTS `%f.4`) | boundary max_dt 2.500e-5 s, WITHIN the VRCTS 4-decimal write quantum (a quarter of the 1e-4 write resolution, half the 5e-5 half-quantum tolerance); at the 4-dp comparison grain the interval SETS are IDENTICAL (0.0) |
+| prefix consistency | emitted set == final partition (1 == 1, no retraction/re-emission) | | PASS |
+| chunk invariance | 100 ms vs 101-sample granularity -> identical segmentation + emitted set | | PASS |
+
+The frozen SAD net collapses to ALL-SPEECH (the whole 75 s file is one speech segment) -- the same
+mode-collapse the phase-6 subset checkpoint carries (RESULTS.md's SAD subset-gate reading: the net
+fires everywhere, Pmiss ~0). The equivalence is EXACT: the only Python-side gap is the offline
+segmentation being observable solely through the engine's `%f.4` VRCTS dump, so the streamed
+full-precision boundary and the offline rounded boundary differ by LESS than one 4-decimal quantum
+(2.500e-5 < 1e-4) and coincide bit-for-bit at that grain. A COUNT mismatch or a boundary delta
+beyond the quantum is an R1 STOP -- neither occurred.
+
+LATENCY (S1.8, recorded): max_lag 0.0000 s, mean_lag 0.0000 s. The all-speech collapse yields a
+single segment finalized at EOS (`emitted_at == end_s`), so the measured lag is degenerately zero
+-- honestly recorded, not illustrative on this file; the mid-stream latency budget is exercised on
+the crafted-posterior Rust gate (`phase8_gate.rs::latency_bounds`). The DERIVED structural bound is
+6.05357 s (feature_reach 0.14400 + nn_window 3.26000 + conv_delay 0.36000 + holdback 2.28957),
+cited from that gate: `lre_sad.toml` is seeded VERBATIM from the SAME `1_worker_1.config` as the
+tier2 gate config, so every bound-relevant key is byte-identical; the test RECOMPUTES the
+value-dependent holdback from THIS config (2.28957, clamped-negatives sum of
+min_speech/min_silence/speech_padding) and cross-checks it, proving the lineage. Timings:
+stream 0.04 s, offline 0.04 s (75 s audio, warm cache).
+
+**S1.7 CAUSALITY COST (REPORTED, never gated)** -- offline-frozen vs offline-self-norm:
+
+| leg | self-norm (type -1, per-file gain) | offline-frozen (type 1 + fixed gain) | delta |
+|---|---|---|---|
+| single-file speech coverage | 75.000 s (1 seg) | 75.000 s (1 seg) | **0.000 s** |
+| held-out pooled DCF (24 files, all collars 0/0.25/0.5/1/2 s) | 0.2500 | 0.2500 | **+0.0000** |
+
+MECHANISM (named, honest): this from-scratch subset checkpoint mode-collapsed to ALL-SPEECH during
+training (the documented phase-6 SAD behavior -- "the net jumps from all-non-speech straight to
+all-speech"). An all-speech-saturated net fires everywhere under BOTH input normalizations, so the
+DECISION (all speech, Pmiss ~0 / Pfa ~1, DCF 0.25) is normalization-INVARIANT here and the
+causality cost on both the boundary and the held-out DCF is EXACTLY ZERO. This is the honest
+contrast to the Task-1 tuple-A leg, where the selective 2015 production net's causality cost was
+TOTAL (frozen collapsed to the all-non-speech seed while self-norm gave 17 boundaries): the cost is
+REGIME-DEPENDENT -- zero for a collapsed subset net, total for a selective one. Both are the honest
+measured number for their pack. A genuinely selective net (the full-corpus launcher's job) is where
+a non-degenerate corpus causality cost would surface. The single `Audio_fixed_gain` scores all 24
+held-out files consistently because the gain is decision-invariant for this config (the DCT
+cancellation above), so one global gain equals a per-file gain on the decision. Sanity holds (both
+DCFs finite, in [0,1], same order of magnitude -- here identical). Timings: self-norm scoring
+5.51 s, frozen 5.36 s (24 files each, warm cache).

@@ -11,14 +11,16 @@
 //! The copy site is doc-commented on each method. Zero-copy is a later
 //! hot-loop concern.
 
-use numpy::{IntoPyArray, PyArray1, PyArray2, ToPyArray};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, ToPyArray};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use speech::cli::Mode;
 use speech::engine::corpus_processor::CorpusProcessor;
+use speech::fast::stream::{EmittedSegment, StreamingSession as RsStreamingSession};
 use speech::legacy_config::parse_legacy_config as parse_legacy_config_rs;
+use speech::stream_cli::class_str;
 use speech::toml_config::toml_to_map as toml_to_map_rs;
 
 /// Convert an engine error into a Python `RuntimeError`, formatting the FULL
@@ -194,11 +196,109 @@ impl Engine {
     }
 }
 
+/// One emitted segment as the plain Python tuple `push`/`finish` yield (aliased to keep
+/// the method signatures readable, per clippy::type_complexity).
+type EmissionTuple = (f64, f64, String, f64);
+/// One segmentation boundary row as `(begin_s, class)`.
+type SegRow = (f64, String);
+
+/// One emitted segment as a plain `(begin_s, end_s, class, emitted_at_audio_s)` tuple.
+fn seg_to_tuple(s: EmittedSegment) -> EmissionTuple {
+    (s.begin_s, s.end_s, class_str(s.class), s.emitted_at_audio_s)
+}
+
+/// The chunked-input SAD streaming session (Phase 8 Task 6): a thin wrapper over
+/// `speech::fast::stream::StreamingSession` (the online twin of the offline fast
+/// algo-3 driver). Construct from a config PATH + the wav header's `rate`/`channels`,
+/// then drive it with `push(samples)` / `finish()`. Mono, frozen-stats only -- the
+/// construction validates the streaming contract (algo 3, mono, `Audio_fixed_gain`,
+/// `InputNormalizationType 1`, windowed overlap, binary SAD net) and bails otherwise.
+#[pyclass]
+struct StreamingSession {
+    inner: RsStreamingSession,
+}
+
+#[pymethods]
+impl StreamingSession {
+    /// Build from a config PATH (dispatched by extension like `Engine::new`: `.toml`
+    /// -> `toml_config::toml_to_map`, else the legacy `.config` parser), the stream
+    /// `rate` (Hz) and source `channels` count -- both read from the wav header by the
+    /// caller (the session is mono-first; `channels != 1` bails). COPY: the config is
+    /// read from disk + parsed into an owned map.
+    #[new]
+    fn new(config_path: &str, rate: f64, channels: usize) -> PyResult<Self> {
+        let text = std::fs::read_to_string(config_path).map_err(|e| {
+            PyRuntimeError::new_err(format!("cannot read config file '{config_path}': {e}"))
+        })?;
+        let map = if config_path.ends_with(".toml") {
+            toml_to_map_rs(&text).map_err(|e| {
+                PyRuntimeError::new_err(format!("invalid TOML config '{config_path}': {e:#}"))
+            })?
+        } else {
+            parse_legacy_config_rs(&text)
+        };
+        let inner = RsStreamingSession::new(&map, rate, channels).map_err(to_pyerr)?;
+        Ok(StreamingSession { inner })
+    }
+
+    /// Push a chunk of RAW mono f32 samples (`i16/32768`-scaled, PRE-gain -- the
+    /// front-end applies the frozen gain/preemph/noise per sample) and return the
+    /// segments FINALIZED by this call as `(begin_s, end_s, class, emitted_at_audio_s)`
+    /// tuples (`class` in {"Speech", "Other"}). COPY: the numpy array is read into an
+    /// owned `Vec<f32>` while the GIL is held, then the GIL is RELEASED
+    /// (`Python::detach`) for the streaming compute.
+    fn push(
+        &mut self,
+        py: Python<'_>,
+        samples: PyReadonlyArray1<'_, f32>,
+    ) -> PyResult<Vec<EmissionTuple>> {
+        let owned: Vec<f32> = samples
+            .as_slice()
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!("samples must be a contiguous 1-D f32 array: {e}"))
+            })?
+            .to_vec();
+        let emitted = py.detach(|| self.inner.push(&owned));
+        Ok(emitted.into_iter().map(seg_to_tuple).collect())
+    }
+
+    /// EOS: flush the tail and return `(final_emissions, segmentation_rows)`. The
+    /// emissions are the same `(begin_s, end_s, class, emitted_at_audio_s)` tuples;
+    /// `segmentation_rows` is the complete partition boundary list as `(begin_s, class)`
+    /// pairs (the last row is the `End` sentinel at the audio duration). COPY + the GIL
+    /// is RELEASED for the flush compute. Idempotent (a second call yields no emissions
+    /// and the same segmentation rows).
+    fn finish(&mut self, py: Python<'_>) -> (Vec<EmissionTuple>, Vec<SegRow>) {
+        py.detach(|| {
+            let (emitted, seg) = self.inner.finish();
+            let ems: Vec<EmissionTuple> = emitted.into_iter().map(seg_to_tuple).collect();
+            let rows: Vec<SegRow> = seg
+                .segments()
+                .iter()
+                .map(|s| (s.begin, class_str(s.ty)))
+                .collect();
+            (ems, rows)
+        })
+    }
+
+    /// The maximum per-emission lag (`emitted_at_audio_s - end_s`) observed so far
+    /// (`0.0` if nothing has been emitted).
+    fn max_lag_s(&self) -> f64 {
+        self.inner.max_lag_s()
+    }
+
+    /// The mean per-emission lag observed so far (`0.0` if nothing has been emitted).
+    fn mean_lag_s(&self) -> f64 {
+        self.inner.mean_lag_s()
+    }
+}
+
 #[pymodule]
 fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(parse_legacy_config, m)?)?;
     m.add_function(wrap_pyfunction!(load_toml_config, m)?)?;
     m.add_class::<Engine>()?;
+    m.add_class::<StreamingSession>()?;
     Ok(())
 }

@@ -150,6 +150,38 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
     }
 }
 
+/// f32 external (type 1) input normalization (`BLSTMNeuralNetwork::
+/// feedForwardBackward` `:720-723`, exact port `nn/blstm.rs:1008-1021`, the
+/// `input_normalization_type == 1` branch): per column `jj < min(cols,
+/// mean.len())`, `(x - mean_jj) / max(1e-12, std_jj)`; columns beyond the
+/// mean/std tail are UNTOUCHED. `mean`/`std` are the pack-carried normalize
+/// tail ([`FastBlstm::normalize_mean`]/[`FastBlstm::normalize_std`], narrowed
+/// f64 -> f32 once at `from_flat`). No centering/asinh structure here -- unlike
+/// the type -1 self-normalization above, type 1 is a plain affine transform.
+///
+/// Phase 8 Task 1 (spec S1.1): the frozen-stats input normalization the
+/// streaming reference mode requires -- the fast SAD driver applies this ONCE
+/// per channel before the overlap windowing, at the SAME pipeline position
+/// where the -1 self-norm runs (the exact path's pre-dispatch application at
+/// `nn/blstm.rs:1008`). The exact type-1 branch also feeds the normalized
+/// snapshot to `analyse_input_seq` (`:1022-1023`, InputStatistics accumulation
+/// -- a training-side bookkeeping read); the fast path is FORWARD-ONLY and
+/// carries no InputStatistics (the phase-7 T6b audit: `get_input_statistics`
+/// is an inert-empty read on fast), so that call is deliberately absent here.
+pub fn external_normalize_f32(m: &mut FastMatrix, mean: &[f32], std: &[f32]) {
+    let r = m.rows;
+    let c = m.cols;
+    let max_col = c.min(mean.len());
+    for jj in 0..max_col {
+        let denom = 1e-12_f32.max(std[jj]);
+        let mn = mean[jj];
+        for row in 0..r {
+            let v = &mut m.data[row * c + jj];
+            *v = (*v - mn) / denom;
+        }
+    }
+}
+
 /// f32 softmax overflow guard (exact path `nn/layers.rs:959` uses f64 `700.0`).
 /// f32's `exp` is finite iff arg `<= ln(f32::MAX) ~ 88.72`; `80.0` leaves headroom
 /// for the per-row class-count sum. Below this the path is literally
@@ -623,14 +655,12 @@ impl FastBlstm {
 
         let mut jj = 0usize;
         while jj < input_rows {
-            // :1638-1645 begin snapped DOWN to the ssr grid, end snapped UP.
-            let mut begin = jj.saturating_sub(window_size);
-            begin = (begin / ssr) * ssr;
-            let mut end = begin + 2 * window_size;
-            if end >= input_rows {
-                end = input_rows - 1;
-            }
-            end = ((end + 1) / ssr) * ssr - 1;
+            // :1638-1645 begin snapped DOWN to the ssr grid, end snapped UP -- the
+            // window-span arithmetic is now the shared `window_begin`/`window_end`
+            // helpers, so the streaming overlap engine (`fast::stream::StreamOverlap`)
+            // fires BYTE-IDENTICAL window spans off the same code.
+            let begin = window_begin(jj, window_size, ssr);
+            let end = window_end(begin, window_size, ssr, input_rows);
             let length_seq = end - begin + 1; // :1646
 
             // :1649-1664 partial-window length recompute (sequential floors).
@@ -649,7 +679,10 @@ impl FastBlstm {
                 nominal_len
             };
 
-            // :1667-1705 process the window; accumulate sums + counts.
+            // :1667-1705 process the window; accumulate sums + counts via the shared
+            // per-window step ([`overlap_window_step`]) -- `fast::stream::StreamOverlap`
+            // runs the SAME step, so the forward + `+=` accumulate are bit-identical
+            // across the offline and streaming overlap paths.
             if length_short > 0 {
                 // block = input rows [begin, begin+length_seq), all cols. Rows are
                 // contiguous in row-major, so the slice is one copy (mirrors the
@@ -659,20 +692,17 @@ impl FastBlstm {
                     rows: length_seq,
                     cols: in_cols,
                 };
-                let out_short = self.feed_forward(&block);
-                debug_assert_eq!(
-                    out_short.rows, length_short,
-                    "overlap window output-row count"
-                );
                 // :1687-1693 output sum + count at begin/ssr; `+=` seeds from the
                 // caller's prior contents (cross-channel quirk).
                 let obeg = begin / ssr;
-                for r in 0..length_short {
-                    for c in 0..cols {
-                        output.data[(obeg + r) * cols + c] += out_short.get(r, c);
-                    }
-                    output_count[obeg + r] += 1.0;
-                }
+                let got = self.overlap_window_step(
+                    &block,
+                    obeg,
+                    &mut output.data,
+                    &mut output_count,
+                    cols,
+                );
+                debug_assert_eq!(got, length_short, "overlap window output-row count");
             }
             jj += window_shift;
         }
@@ -686,6 +716,42 @@ impl FastBlstm {
                 output.data[r * cols + c] /= output_count[r];
             }
         }
+    }
+
+    /// One overlap window: forward `block` and accumulate its posteriors into `sums`
+    /// (row-major, `cols` wide) with a per-row `+=1.0` into `counts`, at LOCAL output-row
+    /// offset `obeg` (`begin/ssr` minus the caller's buffer base). Returns the window's
+    /// output-row count (`out_short.rows`).
+    ///
+    /// SHARED (Phase 8 Task 3) by the offline [`feed_forward_overlap`] (base 0, `sums =
+    /// output.data`, `counts = output_count`) and the streaming
+    /// [`crate::fast::stream::StreamOverlap`] (base = its accumulator ring base): both run
+    /// THE SAME forward + `+=` accumulate, so the f32 accumulation is BYTE-IDENTICAL.
+    /// The accumulation ORDER across windows (`jj`-ascending) is the caller's contract --
+    /// the offline loop steps `jj` up by `window_shift`; the streaming engine fires windows
+    /// in that same ascending order as their input spans arrive, so any row covered by
+    /// multiple windows sums its contributions in the identical order.
+    ///
+    /// `sums`/`counts` MUST already be sized to cover `[obeg, obeg + out_short.rows)` (the
+    /// offline caller pre-sizes to `output.rows`; the streaming caller grows its ring
+    /// first). `cols` is the OUTPUT (posterior) width.
+    pub(crate) fn overlap_window_step(
+        &mut self,
+        block: &FastMatrix,
+        obeg: usize,
+        sums: &mut [f32],
+        counts: &mut [f32],
+        cols: usize,
+    ) -> usize {
+        let out_short = self.feed_forward(block);
+        let length_short = out_short.rows;
+        for r in 0..length_short {
+            for c in 0..cols {
+                sums[(obeg + r) * cols + c] += out_short.get(r, c);
+            }
+            counts[obeg + r] += 1.0;
+        }
+        length_short
     }
 
     /// Scoring windowed forward for the Mode-7 LID Twin (Task 5), the f32 counterpart
@@ -884,6 +950,34 @@ impl FastBlstm {
             b.gates_rec_peep,
         ]
     }
+}
+
+// ---------------------------------------------------------------------------
+// Overlap window-span arithmetic (shared offline / streaming, Phase 8 Task 3).
+// ---------------------------------------------------------------------------
+
+/// The window-`jj` begin (`feed_forward_overlap` `:1638-1640`, legacy `:1638-1640`):
+/// `max(0, jj - window_size)` snapped DOWN to the `ssr` grid. INPUT-ROWS-INDEPENDENT --
+/// the streaming engine computes it without knowing the total length.
+#[inline]
+pub(crate) fn window_begin(jj: usize, window_size: usize, ssr: usize) -> usize {
+    let begin = jj.saturating_sub(window_size);
+    (begin / ssr) * ssr
+}
+
+/// The window end for a given `begin` (`feed_forward_overlap` `:1641-1645`): `begin +
+/// 2*window_size`, CLAMPED to `input_rows - 1`, then snapped UP to the `ssr` grid
+/// (`((end+1)/ssr)*ssr - 1`). The clamp is the ONLY `input_rows`-dependent part: the
+/// streaming engine only fires a window mid-stream once `begin + 2*window_size <
+/// rows_so_far`, which makes the clamp branch dead there, so it reproduces the offline
+/// span exactly (and applies the true clamp at flush, when the total is known).
+#[inline]
+pub(crate) fn window_end(begin: usize, window_size: usize, ssr: usize, input_rows: usize) -> usize {
+    let mut end = begin + 2 * window_size;
+    if end >= input_rows {
+        end = input_rows - 1;
+    }
+    ((end + 1) / ssr) * ssr - 1
 }
 
 // ---------------------------------------------------------------------------
