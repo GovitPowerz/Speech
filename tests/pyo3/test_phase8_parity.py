@@ -75,9 +75,11 @@ _COLLARS: tuple[float, ...] = B._DCF_COLLARS
 # seeded VERBATIM from the SAME `1_worker_1.config` as tier2, so every bound-relevant key
 # (spectrum shift/window/order, BLSTM window/shift, convolution_window_size, deltas,
 # lstm/output subsampling, min_speech/min_silence/speech_padding) is BYTE-IDENTICAL and this
-# derived bound holds verbatim. `_holdback_from_config` recomputes the value-dependent holdback
-# from THIS config and cross-checks it against 2.28957, proving the lineage that licenses the
-# cited whole-bound constant.
+# derived bound holds verbatim. `_holdback_from_config` recomputes ONLY the value-dependent
+# holdback summand from THIS config and cross-checks it against 2.28957; the other three
+# summands (feature_reach/nn_window/conv_delay) are CITED from the Rust gate, not re-derived
+# Python-side. So this is a config-LINEAGE cross-check (the holdback match evidences the shared
+# 1_worker_1.config), not an independent Python re-derivation of the whole bound.
 _DERIVED_BOUND_S = 6.05357
 _HOLDBACK_S = 2.28957
 
@@ -310,8 +312,10 @@ def test_streaming_equivalence_on_corpus() -> None:
     cfg_path = arm.out_dir / "_t8_frozen_stream.config"
     cfg_path.write_text(_config_text(cfg))
 
-    # Holdback cross-check: THIS config's clamped decision sums must match the gate's 2.28957,
-    # proving the 1_worker_1.config lineage that licenses the cited whole derived bound.
+    # Holdback cross-check: THIS config's clamped decision sums must match the gate's 2.28957 --
+    # ONLY the holdback summand is recomputed here (the other three bound components are cited
+    # from the Rust gate); the match evidences the shared 1_worker_1.config lineage, not an
+    # independent Python re-derivation of the whole 6.05357 s bound.
     holdback = _holdback_from_config(cfg)
     assert abs(holdback - _HOLDBACK_S) < 5e-5, f"holdback {holdback:.5f} != gate-pinned {_HOLDBACK_S} (config lineage drift?)"
 

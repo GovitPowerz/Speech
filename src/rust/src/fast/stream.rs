@@ -29,8 +29,10 @@
 //!
 //! FRAME-COMPLETION ARITHMETIC. Framing mirrors `compute_periodogram`/`fill_frame`
 //! (`fast/pipeline.rs`): periodogram frame `cf` is centred on sample `cf*shift` and reads
-//! window `[cf*shift - hw, cf*shift + hw]` (`hw = window_size/2`), left-clamped to 0 and
-//! right-clamped to the last sample. A frame is FINAL once its right edge sample
+//! window `[cf*shift - hw, cf*shift + hw]` (`hw = window_size/2`, in SAMPLES -- the framing
+//! half-window, 512 on tier2; DISTINCT from the NN half-window, which is a count of FEATURE
+//! frames -- 163 on tier2 -- entering the latency budget as `nn_window`, not this `hw`),
+//! left-clamped to 0 and right-clamped to the last sample. A frame is FINAL once its right edge sample
 //! `cf*shift + hw` has arrived AND that arrival proves the frame is not a right-edge frame
 //! (its window fits within the samples so far, so its interior/left-edge computation is
 //! final and independent of the still-unknown total). Hence
@@ -936,13 +938,17 @@ impl ConvStream {
 /// at most its own threshold: [`Segmentation::add_padding`] extends a Speech segment left by
 /// `before` and right by `after`; [`Segmentation::suppress_short`] removes/merges a segment
 /// only across its own `<= threshold` span. A future Speech segment can therefore reach an
-/// earlier segment's END at most `pad_before + pad_after + suppress` to its left, and the
-/// two paddings compose on one segment (the brief's warned worst case) -- chains through
-/// EARLIER segments happen identically with or without the future segment (their gaps are
-/// past-known), so they do not extend the future segment's reach. HOLDBACK is the
-/// CONSERVATIVE sum of EVERY (clamped) smoothing threshold -- `sum(min_speech) +
-/// sum(min_silence) + sum(padding)` -- which dominates any single reach and any composition
-/// of them; it also keeps the mid-stream clone's End sentinel (placed at `now >= frontier`,
+/// earlier segment's END at most `pad_before + suppress` to its LEFT -- the `after` paddings
+/// extend the future segment RIGHTWARD (away from earlier segments), so they add NO leftward
+/// reach; the true leftward drivers are the two `before` paddings plus the Speech
+/// `suppress_short` spans (the worst-case chain the T4 review derived independently -- ~1.685 s
+/// on the gate config). Chains through EARLIER segments happen identically with or without the
+/// future segment (their gaps are past-known), so they do not extend the future segment's
+/// reach. HOLDBACK is the CONSERVATIVE sum of EVERY (clamped) smoothing threshold --
+/// `sum(min_speech) + sum(min_silence) + sum(padding)` -- which STRICTLY dominates that true
+/// leftward reach precisely BECAUSE it ALSO sums in the rightward-only `after` paddings on top
+/// (the measured ~0.604 s over-coverage on the gate config); it also keeps the mid-stream
+/// clone's End sentinel (placed at `now >= frontier`,
 /// since the received frontier is `>= the consumed frontier`) at least HOLDBACK to the right
 /// of the emitted region, so the tail special-casing never touches it. Param-driven at
 /// construction: a config with different padding moves the

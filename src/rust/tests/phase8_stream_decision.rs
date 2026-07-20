@@ -275,6 +275,13 @@ fn decision_final_equals_offline() {
 // (2) prefix consistency: every mid-stream emission appears unchanged finally.
 // ---------------------------------------------------------------------------
 
+// COVERAGE NUANCE (Phase 8 battery item 5): the profiles here space bursts by ~6 s silences
+// -- far past the true smoothing reach -- so they do NOT stress a small holdback cut: a 2x
+// holdback halving still clears their gaps and this leg stays GREEN. The near-reach 2.2 s-gap
+// profile (`phase8_gate.rs::prefix_consistency_near_reach_profile`) tightens the margin but
+// likewise survives a 2x cut; the LOAD-BEARING catcher for an under-sized holdback is the
+// calibrated real-fixture e2e leg (`phase8_gate.rs::prefix_consistency_e2e`), which retracts
+// under the halving. See IMPROVEMENTS.md's Phase-8 battery item (5).
 #[test]
 fn prefix_consistency_holds() {
     let (seg_cfg, drv) = gate_cfgs();

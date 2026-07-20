@@ -4608,14 +4608,6 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   release-safe bounds panics, never debug-assert-only). No pyo3/maturin rebuild was needed -- every
   catcher is cargo-side. IMPROVEMENTS.md + the one test-file addition are the only committed diff.
 
-  (9) TEST ADDITION (not a mutation): `LidAggregate.predicted_language` (the argmax of the normalized
-  langID) shipped in Phase 8 Task 7 without a committed assertion. `tests/phase8_stream_lid.rs`'s
-  `per_utterance_equals_offline` now pins `finish().predicted_language` against the offline argmax,
-  recovered from the offline `classification_errors` oracle (`langid[c] = errors[c]/100 + target_
-  lid[c]`, then first-max argmax) -- so the field is tied to the already-asserted, offline-oracle'd
-  errors row. Runs on all five fixtures (phSeq s1/s2/s3, cep tiny_ok/multi_ok). Added GREEN on the
-  first run (no port fix needed); committed WITH this battery record and disclosed in the commit body.
-
   (1) Drop the cross-chunk pre-emphasis carry: reset `self.prev_gained = 0.0` at the top of
   `StreamFrontEnd::push` (`fast/stream.rs`), so each chunk's first sample computes `gained -
   ratio*0` instead of `gained - ratio*(previous chunk's last gained sample)` -- the carry is
@@ -4706,6 +4698,14 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (segments_count 0 -> `langid[0]=1.0`) vs the real offline-on-1-entry `[257.75, 42.25]`). The
   offline `FastTwinLid` on the first k entries is the oracle, so the lag surfaces immediately. A
   clean value assertion (caught in release too). Reverted, PASS.
+
+  (9) TEST ADDITION (not a mutation): `LidAggregate.predicted_language` (the argmax of the normalized
+  langID) shipped in Phase 8 Task 7 without a committed assertion. `tests/phase8_stream_lid.rs`'s
+  `per_utterance_equals_offline` now pins `finish().predicted_language` against the offline argmax,
+  recovered from the offline `classification_errors` oracle (`langid[c] = errors[c]/100 + target_
+  lid[c]`, then first-max argmax) -- so the field is tied to the already-asserted, offline-oracle'd
+  errors row. Runs on all five fixtures (phSeq s1/s2/s3, cep tiny_ok/multi_ok). Added GREEN on the
+  first run (no port fix needed); committed WITH this battery record and disclosed in the commit body.
 
 ## Complete-as-portable closures (Phase 4d)
 
@@ -4925,3 +4925,20 @@ it is now a real reader; the other three remain blocked. See its flipped entry b
   run bit-for-bit either). CLOSED by the `[phase4a]` static-lane deterministic reduction entry
   above (the chosen Rust strategy: file `j` -> lane `j % N`, ascending-lane fold; N=1 is the
   golden-pinned legacy-sequential parity mode).
+- **[phase8 -> phase9] Provisional-begin peek: bound the SILENCE-class streaming latency to the
+  structural floor** (`fast/stream.rs`, `StreamDecision`/`HystState`). The Task-5 consumed-frontier
+  trigger delivers the SPEECH class within the derived structural bound (~6.05 s), but an OTHER
+  (silence) segment still commits only at its FOLLOWING speech's falling edge -- its right boundary
+  IS that speech's onset -- so its latency is the following speech's DURATION + the forward pipeline
+  delay (measured 15.85 s on the gate fixture, the data-dependent AREA term, pinned per-class in
+  `tests/phase8_gate.rs`). This is INHERENT to emitting CLOSED-interval raw segments and is a
+  documented characteristic, NOT a defect. THE REFINEMENT (named for phase 9, beside the
+  causal-architecture upgrade -- the causal-friendly nets upgrade this phase's windowed-lookahead to
+  truly causal): emit a PROVISIONAL silence-close as soon as the hysteresis has LATCHED a pending
+  open Speech segment (`has_begun == true`), reading its recorded `begin` as the silence's
+  provisional right boundary. The T5 re-review's finding: `HystState.begin`/`begin_area` are
+  UNTOUCHED once `has_begun` latches (`fast/stream.rs:685-697`), so the peeked value is STABLE
+  (lower-risk than an in-flight read presumed), and the silence-class lag would drop to ~the
+  structural bound. Deferred, not implemented: it introduces PROVISIONAL (revisable-until-committed)
+  emission semantics the current bit-exact-FINAL contract does not have, so it is a phase-9 design
+  decision, not a Task-5 omission.

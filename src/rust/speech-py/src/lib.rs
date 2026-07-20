@@ -20,7 +20,7 @@ use speech::cli::Mode;
 use speech::engine::corpus_processor::CorpusProcessor;
 use speech::fast::stream::{EmittedSegment, StreamingSession as RsStreamingSession};
 use speech::legacy_config::parse_legacy_config as parse_legacy_config_rs;
-use speech::tasks::segmentation::SegClass;
+use speech::stream_cli::class_str;
 use speech::toml_config::toml_to_map as toml_to_map_rs;
 
 /// Convert an engine error into a Python `RuntimeError`, formatting the FULL
@@ -196,17 +196,6 @@ impl Engine {
     }
 }
 
-/// The `Speech`/`Other` label for a SAD partition segment (Phase 8). The decision
-/// layer only labels these two; the `End` sentinel and any other class fall back to
-/// their debug name.
-fn class_string(c: SegClass) -> String {
-    match c {
-        SegClass::Speech => "Speech".to_string(),
-        SegClass::Other => "Other".to_string(),
-        other => format!("{other:?}"),
-    }
-}
-
 /// One emitted segment as the plain Python tuple `push`/`finish` yield (aliased to keep
 /// the method signatures readable, per clippy::type_complexity).
 type EmissionTuple = (f64, f64, String, f64);
@@ -215,12 +204,7 @@ type SegRow = (f64, String);
 
 /// One emitted segment as a plain `(begin_s, end_s, class, emitted_at_audio_s)` tuple.
 fn seg_to_tuple(s: EmittedSegment) -> EmissionTuple {
-    (
-        s.begin_s,
-        s.end_s,
-        class_string(s.class),
-        s.emitted_at_audio_s,
-    )
+    (s.begin_s, s.end_s, class_str(s.class), s.emitted_at_audio_s)
 }
 
 /// The chunked-input SAD streaming session (Phase 8 Task 6): a thin wrapper over
@@ -291,7 +275,7 @@ impl StreamingSession {
             let rows: Vec<SegRow> = seg
                 .segments()
                 .iter()
-                .map(|s| (s.begin, class_string(s.ty)))
+                .map(|s| (s.begin, class_str(s.ty)))
                 .collect();
             (ems, rows)
         })

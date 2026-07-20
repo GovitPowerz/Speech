@@ -287,3 +287,27 @@ fn stream_usage_error_on_missing_args() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn cli_wav_parser_matches_common_helper() {
+    // T6-review: pin the CLI's own minimal PCM16 parser (`stream_cli::read_wav_pcm16_raw`)
+    // DIRECTLY against the test helper on the same fixture -- a cheaper, isolated diagnosis
+    // than the e2e binary spawn if the two parsers ever diverge. The committed
+    // prcts_excerpt.wav is STEREO; the parser is channel-agnostic (returns interleaved
+    // samples), so this is a pure byte-for-byte parse comparison (the session's mono check
+    // is a separate concern, exercised by `stream_rejects_stereo_input`).
+    let wav = common::fixture_phase4d("prcts_excerpt.wav");
+    let (raw_rate, raw_channels, raw_samples) =
+        speech::stream_cli::read_wav_pcm16_raw(&wav).expect("CLI parser must read the fixture");
+    let (rate, channels, samples) = common::read_wav_pcm16(&wav);
+    assert_eq!(raw_rate, rate as f64, "sample rate must match the helper");
+    assert_eq!(
+        raw_channels, channels as usize,
+        "channel count must match the helper"
+    );
+    let expected: Vec<f32> = samples.iter().map(|&x| x as f32 / 32768.0).collect();
+    assert_eq!(
+        raw_samples, expected,
+        "the CLI parser's raw f32 samples must equal the helper's i16/32768"
+    );
+}

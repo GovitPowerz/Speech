@@ -38,8 +38,9 @@ use crate::fast::stream::{EmittedSegment, StreamingSession};
 use crate::tasks::segmentation::SegClass;
 
 /// The `Speech`/`Other` label for a SAD partition segment (the SAD decision layer
-/// only ever labels these two; anything else falls back to its debug name).
-fn class_str(c: SegClass) -> String {
+/// only ever labels these two; anything else falls back to its debug name). Exported
+/// so the PyO3 binding (`speech-py`) shares this single definition (T6-review dedupe).
+pub fn class_str(c: SegClass) -> String {
     match c {
         SegClass::Speech => "Speech".to_string(),
         SegClass::Other => "Other".to_string(),
@@ -51,7 +52,9 @@ fn class_str(c: SegClass) -> String {
 /// where each sample is `i16 as f32 / 32768.0`, interleaved by channel. Walks the
 /// word-aligned RIFF chunks for "fmt "/"data"; bails on anything that is not linear
 /// PCM16 (the only format the streaming CLI accepts, matching the phase8 fixtures).
-fn read_wav_pcm16_raw(path: &Path) -> Result<(f64, usize, Vec<f32>)> {
+/// Exported so an integration test can pin it directly against `common::read_wav_pcm16`
+/// (a cheaper diagnosis than the e2e binary spawn if the two parsers diverge; T6-review).
+pub fn read_wav_pcm16_raw(path: &Path) -> Result<(f64, usize, Vec<f32>)> {
     let bytes = std::fs::read(path)
         .map_err(|e| anyhow::anyhow!("cannot read wav '{}': {e}", path.display()))?;
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {

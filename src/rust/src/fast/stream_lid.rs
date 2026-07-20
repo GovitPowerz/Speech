@@ -50,7 +50,10 @@ pub struct UtteranceScore {
     pub scores: Vec<f64>,
     /// This utterance's argmax over `scores` (the offline per-block `j`); `None` iff skipped.
     pub argmax: Option<usize>,
-    /// Whether this utterance's argmax hit the target language (`j == ti`); `None` iff skipped.
+    /// Whether THIS utterance's argmax hit the target language (`j == ti`); `None` iff skipped.
+    /// NOTE: distinct from `running_aggregate.is_lid_correct` -- that is the CUMULATIVE decision
+    /// (the offline `is_lid_correct`: `100` iff the argmax of the langID accumulated over ALL
+    /// utterances so far is the target), whereas this is the per-utterance hit/miss.
     pub is_correct: Option<bool>,
     /// The running aggregate AFTER folding this utterance -- the finalized snapshot, bit-
     /// identical to the offline `FastTwinLid` run on the first k entries.

@@ -574,7 +574,12 @@ frozen tail is not the descent target). So `BLSTM_InputNormalizationType 1` is a
 pack and the frozen posteriors are driven by UN-normalized input. Under this net's `IgnoreFirstDCT`
 + no-LTSV/TDC config the per-file audio gain is moreover DECISION-INVARIANT (the DCT cancellation,
 `phase8_frozen_norm.rs` finding 1), so the causality cost isolates the type-1-vs-self-norm INPUT
-normalization alone.
+normalization alone. EVIDENTIARY SCOPE (stated explicitly): because that tail is EXACTLY identity,
+`(x - 0)/1` is INDISTINGUISHABLE from skipping type-1 entirely, so this corpus equivalence does
+NOT independently exercise the type-1 threading through the streaming front-end -- that coverage
+lives in Task 1's fast-vs-exact unit pin (`fast_type1_normalization_matches_exact`), which runs the
+type-1 branch against a NONZERO tuple-A tail (max_rel 1.913e-7, pinned 1e-5). This corpus leg pins
+the streaming-vs-offline equivalence and the causality-cost regime, not the type-1 arithmetic.
 
 **S1.9 EQUIVALENCE (`test_streaming_equivalence_on_corpus`)** -- streamed (PyO3 session, 100 ms
 chunks) vs the offline-frozen fast `Engine` run on the SAME file/pack/gain (fixed_gain 5.805032e-1):
@@ -582,7 +587,7 @@ chunks) vs the offline-frozen fast `Engine` run on the SAME file/pack/gain (fixe
 | quantity | streamed | offline-frozen | verdict |
 |---|---|---|---|
 | speech segments | 1 | 1 | IDENTICAL count (R1 gate) |
-| speech interval | `[0, 74.999875]` | `[0, 74.9999]` (VRCTS `%f.4`) | boundary max_dt 2.500e-5 s = exactly the VRCTS 4-decimal write quantum; at the 4-dp comparison grain the interval SETS are IDENTICAL (0.0) |
+| speech interval | `[0, 74.999875]` | `[0, 74.9999]` (VRCTS `%f.4`) | boundary max_dt 2.500e-5 s, WITHIN the VRCTS 4-decimal write quantum (a quarter of the 1e-4 write resolution, half the 5e-5 half-quantum tolerance); at the 4-dp comparison grain the interval SETS are IDENTICAL (0.0) |
 | prefix consistency | emitted set == final partition (1 == 1, no retraction/re-emission) | | PASS |
 | chunk invariance | 100 ms vs 101-sample granularity -> identical segmentation + emitted set | | PASS |
 
@@ -590,9 +595,9 @@ The frozen SAD net collapses to ALL-SPEECH (the whole 75 s file is one speech se
 mode-collapse the phase-6 subset checkpoint carries (RESULTS.md's SAD subset-gate reading: the net
 fires everywhere, Pmiss ~0). The equivalence is EXACT: the only Python-side gap is the offline
 segmentation being observable solely through the engine's `%f.4` VRCTS dump, so the streamed
-full-precision boundary and the offline rounded boundary differ by exactly one 4-decimal quantum
-and coincide bit-for-bit at that grain. A COUNT mismatch or a boundary delta beyond the quantum is
-an R1 STOP -- neither occurred.
+full-precision boundary and the offline rounded boundary differ by LESS than one 4-decimal quantum
+(2.500e-5 < 1e-4) and coincide bit-for-bit at that grain. A COUNT mismatch or a boundary delta
+beyond the quantum is an R1 STOP -- neither occurred.
 
 LATENCY (S1.8, recorded): max_lag 0.0000 s, mean_lag 0.0000 s. The all-speech collapse yields a
 single segment finalized at EOS (`emitted_at == end_s`), so the measured lag is degenerately zero
