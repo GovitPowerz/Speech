@@ -155,6 +155,14 @@ fn per_utterance_equals_offline(audio: Audio, lang: i32, tag: &str) {
     let fin = sess.finish();
     let offline = run_offline(audio);
     assert_members_eq(&format!("{tag} finish"), &fin, &offline);
+    // T9 pin: the shipped-but-previously-unasserted predicted_language field == the offline
+    // argmax, recovered from the offline classification_errors oracle (langid[c] =
+    // errors[c]/100 + target_lid[c]; target_lid[ti] = -2, else 0), then first-max argmax.
+    let want_pred = offline_predicted_language(&offline.errors, sess_target(lang));
+    assert_eq!(
+        fin.predicted_language, want_pred,
+        "{tag}: predicted_language must equal the offline argmax (recovered from errors)"
+    );
     // finish() == the last push's running aggregate (they finalize the same state).
     if let Some(la) = last {
         assert_eq!(la.classification_errors, fin.classification_errors);
@@ -185,6 +193,19 @@ fn argmax(v: &[f64]) -> usize {
         }
     }
     j
+}
+
+/// The offline predicted language (oracle for `LidAggregate.predicted_language`): recover the
+/// normalized langID from the offline `classification_errors` (`errors[c] = 100*(langid[c] -
+/// target_lid[c])`, `target_lid[ti] = -2`, else 0), then take its first-max argmax -- the same
+/// argmax the driver's `finalize_lid_channel` computes, routed through the asserted errors row.
+fn offline_predicted_language(errors: &[f64], ti: usize) -> usize {
+    let langid: Vec<f64> = errors
+        .iter()
+        .enumerate()
+        .map(|(c, &e)| e / 100.0 + if c == ti { -2.0 } else { 0.0 })
+        .collect();
+    argmax(&langid)
 }
 
 #[test]
