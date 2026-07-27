@@ -390,11 +390,18 @@ fn sweep(
                 r.worst_pair.0,
                 r.worst_pair.1
             );
+            // PROPORTIONATE non-vacuity: the MAJOR set must be at least a quarter of the
+            // resolvable one, not merely non-empty. A bare `>= 2` would keep passing while
+            // the discriminating metric quietly shrank onto a handful of weights.
+            // MEASURED ratio over this whole grid (both cells, all seeds): 0.66 worst
+            // (mamba t=9 in=4 out=6, major 331 of 504 resolvable), 0.94+ on every sLSTM
+            // leg -- so the 0.25 bar carries ~2.6x headroom at the tightest point.
             assert!(
-                r.major >= 2,
-                "{at}: only {} MAJOR weights -- max_rel_major is computed over too small \
-                 a set to mean anything",
-                r.major
+                r.major * 4 >= r.resolvable,
+                "{at}: only {} MAJOR weights of {} resolvable -- max_rel_major is computed \
+                 over too small a set to mean anything",
+                r.major,
+                r.resolvable
             );
             assert!(
                 r.max_rel_major < major_pin,
@@ -596,31 +603,76 @@ fn mamba_dead(t: usize, d_state: usize, d_conv: usize, d_inner: usize) -> usize 
 /// (1.6e-7 of the pack maximum), i.e. a derivative a few hundred ULP above the
 /// central-difference floor, while every weight within `1e-4` of the maximum agrees
 /// to 7.4e-6 or better.
+///
+/// WHICH BOUND IS THE GUARD, said plainly: `major_pin` is. Every `major_pin` on the grid
+/// (3.1e-6 / 4.1e-5 / 4.6e-5 / 7.4e-5) sits under the brief's 1e-4 STOP threshold, and
+/// that is the assertion a wrong adjoint term trips. `rel_pin` is NOT a sanctioned error
+/// budget -- two of its rows (2.6e-4 at `t=7` and 7.7e-4 at `t=23`) are ABOVE 1e-4 on
+/// purpose, because they are set by the smallest resolvable weights, whose relative error
+/// is the central-difference floor divided by a near-zero number and says nothing about
+/// the derivation. Reading `rel_pin` as "the gradient is accurate to 7.7e-4" would be
+/// wrong in both directions: the dominant weights are 100x better than that, and the tiny
+/// ones are not measurable at all. `rel_pin` exists only to catch a gross regime shift.
 const MAMBA_EPS: f64 = 5e-4;
+
+/// One mamba grid row. NAMED, for the same reason [`Case`] is: nine positional fields --
+/// six adjacent `usize` (four of them geometry, one a length, one a count) and two
+/// adjacent `f64` pins -- is precisely the shape a transposed-argument bug hides in, and
+/// unlike `Case` this one carries the geometry the layer is CONSTRUCTED from, so a
+/// silent swap would build a different net rather than fail a bound.
+struct MambaCase {
+    t: usize,
+    input_size: usize,
+    output_size: usize,
+    d_state: usize,
+    d_conv: usize,
+    expand: usize,
+    resolvable_floor: usize,
+    rel_pin: f64,
+    major_pin: f64,
+}
 
 #[test]
 fn mamba_backward_matches_central_difference() {
-    // (t, in, out, d_state, d_conv, expand, resolvable_floor, rel_pin, major_pin)
-    type MambaRow = (usize, usize, usize, usize, usize, usize, usize, f64, f64);
-    let grid: &[MambaRow] = &[
-        (1, 3, 3, 2, 2, 1, 49, 6.0e-5, 3.1e-6),
-        (7, 3, 3, 4, 3, 2, 173, 2.6e-4, 4.1e-5),
-        (9, 4, 6, 4, 4, 2, 502, 4.6e-5, 4.6e-5),
-        (23, 6, 6, 8, 4, 2, 616, 7.7e-4, 7.4e-5),
+    let row = |t: usize,
+               input_size: usize,
+               output_size: usize,
+               d_state: usize,
+               d_conv: usize,
+               expand: usize,
+               resolvable_floor: usize,
+               rel_pin: f64,
+               major_pin: f64| MambaCase {
+        t,
+        input_size,
+        output_size,
+        d_state,
+        d_conv,
+        expand,
+        resolvable_floor,
+        rel_pin,
+        major_pin,
+    };
+    let grid: &[MambaCase] = &[
+        row(1, 3, 3, 2, 2, 1, 49, 6.0e-5, 3.1e-6),
+        row(7, 3, 3, 4, 3, 2, 173, 2.6e-4, 4.1e-5),
+        row(9, 4, 6, 4, 4, 2, 502, 4.6e-5, 4.6e-5),
+        row(23, 6, 6, 8, 4, 2, 616, 7.7e-4, 7.4e-5),
     ];
     let (mut worst_rel, mut worst_abs, mut worst_err) = (0.0_f64, 0.0_f64, 0.0_f64);
-    for &(t, i, o, ds, dc, ex, floor, rel_pin, major_pin) in grid {
-        let total = mamba_total(i, o, ds, dc, ex);
-        let resolvable = total - mamba_dead(t, ds, dc, ex * o);
+    for g in grid {
+        let (ds, dc, ex) = (g.d_state, g.d_conv, g.expand);
+        let total = mamba_total(g.input_size, g.output_size, ds, dc, ex);
+        let resolvable = total - mamba_dead(g.t, ds, dc, ex * g.output_size);
         let label = format!("mamba ds={ds} dc={dc} ex={ex}");
         let cases: &[Case] = &[Case {
-            t,
-            input_size: i,
-            output_size: o,
-            resolvable_floor: floor,
+            t: g.t,
+            input_size: g.input_size,
+            output_size: g.output_size,
+            resolvable_floor: g.resolvable_floor,
             resolvable_structural: resolvable,
-            rel_pin,
-            major_pin,
+            rel_pin: g.rel_pin,
+            major_pin: g.major_pin,
             eps: MAMBA_EPS,
         }];
         let (r, a, e) = sweep(
