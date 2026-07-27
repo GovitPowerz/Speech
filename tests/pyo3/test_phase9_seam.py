@@ -29,8 +29,9 @@ WHAT THE TIER PINS, and why each leg exists:
 
 - **F10 regression class**: `weights_derivatives` after `run()` must be finite and NOT the
   all-zero pre-F10 gradient. Asserted on BLOCK SUMS / whole-vector aggregates, NEVER per
-  row: sLSTM's `b_i` rows are EXACTLY zero by construction (`nn/cells/slstm.rs`), so a
-  per-row nonzero assert would be wrong rather than strict.
+  row: sLSTM's `b_i` rows carry no gradient by construction (`nn/cells/slstm.rs`; residue
+  only, see [`BIAS_I_RESIDUE_PIN`]), so a per-row nonzero assert would be wrong rather than
+  strict.
 
 THE ERROR METRIC ([`scaled_errors`]) is a scale-floored relative error, NOT the raw
 `|a-b|/|b|` the engine's own `mean_relative_error` reports. These nets span ~5 decades of
@@ -39,8 +40,13 @@ raw relative error on a 1e-20 component divides FD ROUNDOFF by ~nothing. The flo
 `1e-3 * max|gradient| over the compared set`, i.e. "components below a thousandth of the
 largest gradient are compared against that thousandth" -- the standard gradient-check
 criterion, and the same near-zero partition (for the same reason) the unit tier introduced
-in `src/rust/tests/phase9_cell_grad.rs`. The unit tier is what pins the cells' backward
-per-weight; this tier pins that the cell is WIRED correctly through the whole corpus stack.
+in `src/rust/tests/phase9_cell_grad.rs`. ITS BLIND SPOT, stated plainly: a component whose
+true derivative sits below ~1e-3 of the largest one can be 100% WRONG and still pass, since
+the floor caps the denominator. What bounds that is the block-sum legs, which require every
+named block to receive a nonzero gradient (and the two blocks that must NOT are named and
+pinned dead), plus the unit tier, which pins the cells' backward per-weight. This tier's job
+is to pin that the cell is WIRED correctly through the whole corpus stack, not to re-prove
+the math.
 
 MEASURE-THEN-PIN (spec R4): every tolerance below is `measured * 10` with the measured value
 beside it, and every pin is < 1e-4. Measured on this box (M4 Pro / macOS 25.5 / Apple libm);
@@ -48,10 +54,14 @@ FD-vs-analytic AGREEMENT is a difference of two quantities computed through the 
 so it carries far less platform sensitivity than an absolute golden -- but a CI failure here
 should be read as "re-measure", never as "widen".
 
-The SAD fixture configs use SQUARE cost laws, matching the phase-4b `twin_gradcheck.config`
-precedent. Under the live `log` pair the corpus cost saturates and analytic-vs-FD agreement
-collapses -- CELL-AGNOSTICALLY, reproduced on the legacy LSTM (see the generator docstring
-for the numbers). A gradcheck fixture has to measure the cell backward, not that regime.
+The SAD fixture configs use SQUARE cost laws rather than the live `log` pair -- NOT because
+`log` gives a wrong answer at these weights (with only the law names flipped, the committed
+`mamba_bidirectional` reads cost 1.105 and a worst scaled error of 1.26e-8 with a textbook
+U-curve), but because `log` stops being a valid gradcheck INSTRUMENT once the outputs
+approach `Law::Log`'s clamps: the central difference loses its convergence plateau, and
+further in the clamp-consistent derivative (F7) is exactly zero. `square` is smooth
+everywhere on this corpus. See `scripts/extract_phase9_fixtures.py` and the Task 5 report
+for the recipes, numbers, and the training-side (T8) consequence.
 """
 
 from __future__ import annotations
@@ -82,6 +92,10 @@ PHASE9 = REPO_ROOT / "tests" / "reference_data" / "phase9"
 MANIFEST = cast(dict[str, Any], json.loads((PHASE9 / "manifest.json").read_text()))
 FIXTURES = cast(dict[str, Any], MANIFEST["fixtures"])
 GEOMETRY = cast(dict[str, int], MANIFEST["geometry"])
+# The manifest carries the epsilons + `max_weights` every pin below was measured at, and it
+# is the one committed file its own per-file digest table cannot cover. Pinned here instead
+# (T5 review I3) so a manifest edit cannot silently move a tolerance's operating point.
+MANIFEST_SHA256 = "64d112591d0ef1880a97ec82d433fe5f44f84aaa948387d19a4ce8f2c5bb78f6"
 
 SAD_FIXTURES = ("slstm_bidirectional", "slstm_forward", "mamba_bidirectional", "mamba_forward")
 SAD_EPSILON = float(cast(float, MANIFEST["measured"]["sad_epsilon"]))
@@ -97,8 +111,9 @@ FLOOR_FRACTION = 1e-3
 # scales the stabilizer's C and N equally, so h = sigmoid(o~) * C/N is invariant). The
 # CANCELLATION IS ARITHMETIC, not a structural skip in the code, so what survives a corpus
 # fold is floating-point residue, not a hard zero. MEASURED worst ratio of a `b_i` block sum
-# to the pack's largest gradient: 1.033e-16 (slstm_bidirectional); pinned at measured*10.
-BIAS_I_RESIDUE_PIN = 1.1e-15
+# to the pack's largest gradient, over all four sites that check it: 1.796e-16 (the mode-5
+# Twin's LID net; slstm_bidirectional reads 1.033e-16). Pinned at measured*10.
+BIAS_I_RESIDUE_PIN = 1.8e-15
 
 
 @contextmanager
@@ -244,19 +259,25 @@ def load_pack(name: str) -> NDArray[np.float64]:
     return read_weight_vector(PHASE9 / f"{name}_seed.bin")
 
 
-def corpus_cost(eng: Any) -> float:
-    """The scalar `grad_check` differentiates, recomputed from the seam.
+def corpus_cost(eng: Any, net: int = 0) -> float:
+    """The scalar `grad_check` differentiates for network `net`, recomputed from the seam.
 
-    `CorpusProcessor::grad_check_cost` (algo 3/4) accumulates `row[4] / row[len-1]` over the
-    per-file result rows; `results_matrix` is those rows with 3 leading id columns
-    (`[file+1, conf+1, chan+1, ...]`), so the cost column is `3 + 4` and the counter is the
-    last. That identification is not asserted anywhere directly -- it is VALIDATED by the
-    block probe agreeing with the analytic fold to ~1e-7, which it could not do if this were
-    the wrong column.
+    `CorpusProcessor::grad_check_cost` accumulates `row[cost] / row[counter]` over the
+    per-file result rows, with the column pair switching on the algo AND the network index:
+    algo 3/4 and algo-6 net 0 -> `row[4] / row[len-1]`; algo-6 net 1 (the LID net) ->
+    `row[14] / row[len-2]`. `results_matrix` is those rows with 3 leading id columns
+    (`[file+1, conf+1, chan+1, ...]`), so the cost column is `3 + 4` or `3 + 14` and the
+    counter is `-1` or `-2`.
+
+    That identification is cross-checked directly by
+    `test_corpus_cost_columns_match_the_engine_gradcheck` (this helper's FD against
+    `grad_check(eps, 1)`'s own numerical entry, both nets) as well as implicitly by the block
+    probe agreeing with the analytic fold to ~1e-7.
     """
     eng.run()
     r = np.asarray(eng.results_matrix(), dtype=np.float64)
-    return float(r[:, 3 + 4].sum() / r[:, -1].sum())
+    cost_col, counter_col = (3 + 4, -1) if net == 0 else (3 + 14, -2)
+    return float(r[:, cost_col].sum() / r[:, counter_col].sum())
 
 
 def analytic_gradient(eng: Any, net: int = 0) -> NDArray[np.float64]:
@@ -268,14 +289,18 @@ def analytic_gradient(eng: Any, net: int = 0) -> NDArray[np.float64]:
     return cast(NDArray[np.float64], dv[:, 0] / dv[:, 1])
 
 
-def central_difference(eng: Any, pack: NDArray[np.float64], index: int, eps: float) -> float:
-    plus, minus = pack.copy(), pack.copy()
-    plus[index] += eps
-    minus[index] -= eps
-    eng.set_weights(0, [plus])
-    cost_plus = corpus_cost(eng)
-    eng.set_weights(0, [minus])
-    cost_minus = corpus_cost(eng)
+def central_difference(eng: Any, packs: list[NDArray[np.float64]], net: int, index: int, eps: float) -> float:
+    """Central difference of network `net`'s corpus cost w.r.t. its flat weight `index`.
+    `packs` is the FULL per-network weight list the bag holds (one entry for algo 3, the
+    `[sad, lid]` pair for algo 6) -- only `packs[net]` is perturbed."""
+    plus = [p.copy() for p in packs]
+    minus = [p.copy() for p in packs]
+    plus[net][index] += eps
+    minus[net][index] -= eps
+    eng.set_weights(0, plus)
+    cost_plus = corpus_cost(eng, net)
+    eng.set_weights(0, minus)
+    cost_minus = corpus_cost(eng, net)
     return (cost_plus - cost_minus) / (2.0 * eps)
 
 
@@ -351,7 +376,7 @@ def test_block_probe_matches_finite_difference(name: str, tmp_path: Path) -> Non
         assert analytic_all.shape == pack.shape
         labels = list(blocks)
         analytic = np.array([analytic_all[blocks[label][0]] for label in labels], dtype=np.float64)
-        numerical = np.array([central_difference(eng, pack, blocks[label][0], SAD_EPSILON) for label in labels], dtype=np.float64)
+        numerical = np.array([central_difference(eng, [pack], 0, blocks[label][0], SAD_EPSILON) for label in labels], dtype=np.float64)
     errors = scaled_errors(analytic, numerical)
     worst_index = int(errors.argmax())
     worst = float(errors[worst_index])
@@ -547,13 +572,22 @@ def test_mamba_output_projection_gates_the_recurrent_blocks(name: str, tmp_path:
 # `BLSTM_LID_Cell_Type slstm` dispatches with zero driver-side work. These tests pin that.
 #
 # TWO fixtures, because neither covers the other:
-#   * Mode 5 (wav) is the gradcheck regime -- BOTH nets backprop-active, so `grad_check`
-#     visits the legacy-LSTM SAD net AND the swapped sLSTM LID net.
-#   * Mode 7 (phSeq) is the LIVE regime `speech baseline lid-phseq` trains, and the only one
-#     where the LID net's `weights_derivatives` fold is readable at the seam. On Mode 5 that
-#     fold comes back all-zero after a `run()` -- PRE-EXISTING and cell-agnostic (reproduced
-#     on the committed phase-4b `twin_gradcheck.config` with its legacy LSTM LID net), so
-#     the F10 leg for the Twin lives on the Mode-7 fixture, not this one.
+#   * Mode 5 (wav) is the two-nets-live regime -- BOTH nets backprop-active, so `grad_check`
+#     visits the legacy-LSTM SAD net AND the swapped sLSTM LID net, and the block probe can
+#     finite-difference the LID net's own cost columns (`14 / len-2`).
+#   * Mode 7 (phSeq) is the LIVE regime `speech baseline lid-phseq` trains: one-hot
+#     `external_features` instead of wav, and a FROZEN SAD net, so `grad_check` visits the
+#     LID net alone.
+#
+# A T5-review CORRECTION lives here: an earlier revision claimed Mode 5's
+# `weights_derivatives` came back all-zero after a `run()` as a "pre-existing, mode-specific"
+# property. It was not. The Mode-5 fixture had INHERITED
+# `Neural_Networks_Gradient_Check_Epsilon 1e-5` from its phase-4b source, which routes
+# `run()` into `grad_check_full` (`corpus_processor.rs:208`), whose epilogue restores
+# `seam_derivs` -- so the seam read the reset accumulator. The "control" that appeared to
+# confirm the diagnosis (the unmodified phase-4b config) carries the SAME key, so it
+# confirmed the key, not the mode. The generator now strips the line, and the Mode-5 fold is
+# live: the F10 + block-probe legs below are the ones that were wrongly thought impossible.
 
 # MEASURED worst scaled error over the 12-weight sweep at eps 1e-4, pinned at measured*10.
 TWIN_GRAD_CHECK_PINS = {0: (5.390e-9, 5.4e-8), 1: (3.585e-6, 3.6e-5)}
@@ -610,27 +644,109 @@ def test_twin_grad_check_both_nets(tmp_path: Path) -> None:
 
 
 def test_twin_run_twice_is_bit_identical(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Determinism on the two-net bag: results AND both `grad_check` reports bit-identical
-    across independent Engines."""
+    """Determinism on the two-net bag, across independent Engines: the forward `results_matrix`
+    AT THETA, BOTH nets' folded gradients at theta, and both `grad_check` sweeps.
+
+    The forward is measured on a SEPARATE Engine from the sweep on purpose:
+    `grad_check_capped` restores `processors` and `seam_derivs` at its epilogue but NOT
+    `self.results`, so a `results_matrix()` read after a sweep reports the last `-eps`
+    perturbation rather than theta. (Before the T5-review C1 fix this leg was worse than
+    that: the fixture's inherited `Gradient_Check_Epsilon` made even the "forward" Engine's
+    `run()` a full uncapped gradCheck, which is where ~4.7 s of this file's runtime went.)
+    """
     timing_col = 6
     results: list[NDArray[np.float64]] = []
+    gradients: list[list[NDArray[np.float64]]] = []
     sweeps: list[list[NDArray[np.float64]]] = []
     for i in range(2):
         dst = tmp_path_factory.mktemp(f"p9_twin_det_{i}")
         seed_twin(dst)
         with chdir(dst):
-            eng = speech_rs.Engine(["twin_lid_slstm.config"], "-m")
-            sweeps.append(
-                [np.array(cast(NDArray[np.float64], rep["per_weight"]), dtype=np.float64, copy=True) for _, rep in eng.grad_check(TWIN_EPSILON, MAX_WEIGHTS)]
-            )
-            eng2 = speech_rs.Engine(["twin_lid_slstm.config"], "-m")
-            eng2.run()
-            r = np.array(eng2.results_matrix(), dtype=np.float64, copy=True)
+            forward = speech_rs.Engine(["twin_lid_slstm.config"], "-m")
+            forward.run()
+            r = np.array(forward.results_matrix(), dtype=np.float64, copy=True)
             r[:, timing_col] = 0.0
             results.append(r)
+            gradients.append([np.array(analytic_gradient(forward, net), dtype=np.float64, copy=True) for net in (0, 1)])
+
+            sweeper = speech_rs.Engine(["twin_lid_slstm.config"], "-m")
+            sweeps.append(
+                [
+                    np.array(cast(NDArray[np.float64], rep["per_weight"]), dtype=np.float64, copy=True)
+                    for _, rep in sweeper.grad_check(TWIN_EPSILON, MAX_WEIGHTS)
+                ]
+            )
     assert np.array_equal(results[0].view(np.uint64), results[1].view(np.uint64)), "twin results_matrix is not deterministic"
     for net in (0, 1):
+        assert np.array_equal(gradients[0][net].view(np.uint64), gradients[1][net].view(np.uint64)), f"twin net {net} folded gradient is not deterministic"
         assert np.array_equal(sweeps[0][net].view(np.uint64), sweeps[1][net].view(np.uint64)), f"twin net {net} grad_check sweep is not deterministic"
+
+
+# MEASURED worst scaled error across the mode-5 LID net's block map at eps 1e-4 (the same
+# epsilon its grad_check leg uses), pinned at measured*10.
+TWIN_LID_BLOCK_PROBE_PIN = (3.876e-7, 3.9e-6)
+
+
+def test_twin_lid_gradient_is_finite_and_block_wise_alive(tmp_path: Path) -> None:
+    """F10 regression class on the swapped sLSTM LID net in the MODE-5 (two-nets-live) regime
+    -- the leg the pre-C1 fixture made look impossible (see the section comment). Block sums,
+    never per row; `b_i` is output-invariant for the same sLSTM reason as on the SAD side.
+
+    The legacy-LSTM SAD net's own fold is checked alive as an aggregate too: it is the control
+    that says the bag folded BOTH nets, not just the swapped one.
+    """
+    lid_pack = load_pack("twin_lid_slstm")
+    # `BLSTM_LID_LSTMNeuronNb 12,6` with `BLSTM_LID_LSTMSubSampling 1` -> out 6, fan-in 12.
+    blocks = slstm_blocks(6, 12)
+    seed_twin(tmp_path)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine(["twin_lid_slstm.config"], "-m")
+        eng.run()
+        sad_gradient = analytic_gradient(eng, 0)
+        gradient = analytic_gradient(eng, 1)
+    assert np.isfinite(sad_gradient).all() and int(np.count_nonzero(sad_gradient)) > 0, (
+        "the legacy-LSTM SAD net's fold is dead -- the bag did not fold both nets"
+    )
+    assert gradient.shape == lid_pack.shape
+    assert np.isfinite(gradient).all(), "the LID gradient is not finite"
+    assert int(np.count_nonzero(gradient)) > 0, "F10 regression -- the LID seam returned an all-zero gradient"
+    scale = float(np.abs(gradient).max())
+    for label, (start, n) in blocks.items():
+        block_sum = float(np.abs(gradient[start : start + n]).sum())
+        if label == "b_i":
+            ratio = block_sum / scale
+            assert ratio <= BIAS_I_RESIDUE_PIN, (
+                f"mode-5 LID block {label}: sum |g| / scale = {ratio:.4e} > {BIAS_I_RESIDUE_PIN:.1e} -- b_i is no longer output-invariant"
+            )
+        else:
+            assert block_sum > 0.0, f"mode-5 LID block {label}: sum |g| == 0, the block receives no gradient at all"
+
+
+def test_twin_lid_block_probe_matches_finite_difference(tmp_path: Path) -> None:
+    """The block probe on the SWAPPED LID net: one representative index per named sLSTM block,
+    the folded analytic gradient vs a central difference of the LID net's OWN corpus cost
+    (`row[14] / row[len-2]` -- the algo-6 net-1 column pair). Only possible because C1 made
+    the mode-5 fold live; it is what carries per-block backward coverage for the LID cell,
+    which `grad_check`'s 12-weight prefix (all inside `R_i`) cannot reach."""
+    measured, pin = TWIN_LID_BLOCK_PROBE_PIN
+    assert pin < 1e-4, "spec R4: a pin above 1e-4 is a STOP"
+    blocks = slstm_blocks(6, 12)
+    lid_pack = load_pack("twin_lid_slstm")
+    sad_pack = read_weight_vector(PHASE4B / "tiny_sad_seed.bin")
+    packs = [sad_pack, lid_pack]
+    seed_twin(tmp_path)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine(["twin_lid_slstm.config"], "-m")
+        eng.run()
+        analytic_all = analytic_gradient(eng, 1)
+        labels = list(blocks)
+        analytic = np.array([analytic_all[blocks[label][0]] for label in labels], dtype=np.float64)
+        numerical = np.array([central_difference(eng, packs, 1, blocks[label][0], TWIN_EPSILON) for label in labels], dtype=np.float64)
+    errors = scaled_errors(analytic, numerical)
+    worst_index = int(errors.argmax())
+    worst = float(errors[worst_index])
+    detail = f"block {labels[worst_index]}: analytic {analytic[worst_index]!r} vs FD {numerical[worst_index]!r}"
+    assert worst <= pin, f"mode-5 LID: worst scaled error {worst:.4e} > pin {pin:.1e} (measured {measured:.4e}) at {detail}"
 
 
 def test_twin_mode7_lid_grad_check(tmp_path: Path) -> None:
@@ -726,10 +842,69 @@ def test_real_lre_sad_config_defaults_to_lstm_bidirectional(tmp_path: Path) -> N
 
 def test_committed_fixture_digests_match_the_manifest() -> None:
     """The generator records a sha256 per emitted file; a fixture edited by hand (rather than
-    by re-running `scripts/extract_phase9_fixtures.py`) fails here first."""
+    by re-running `scripts/extract_phase9_fixtures.py`) fails here first.
+
+    `manifest.json` cannot self-digest, and it is TOLERANCE-AFFECTING test input (the three
+    epsilons and `max_weights` are read from it, and a changed epsilon silently invalidates
+    every measured pin below). So its own sha256 is pinned HERE instead -- a T5-review item.
+    Re-running the generator is what legitimately changes it; update this constant in the
+    same commit, having RE-MEASURED the pins.
+    """
+    manifest_sha = hashlib.sha256((PHASE9 / "manifest.json").read_bytes()).hexdigest()
+    assert manifest_sha == MANIFEST_SHA256, f"manifest.json changed (sha256 {manifest_sha}) -- re-measure the pins, then update MANIFEST_SHA256"
+
     digests = cast(dict[str, str], MANIFEST["files"])
     on_disk = {p.name for p in PHASE9.iterdir() if p.name != "manifest.json"}
     assert on_disk == set(digests), f"the phase9 fixture set drifted: {on_disk ^ set(digests)}"
     for name, want in digests.items():
         got = hashlib.sha256((PHASE9 / name).read_bytes()).hexdigest()
         assert got == want, f"{name}: sha256 {got} != manifest {want}"
+
+
+def test_fixture_configs_leave_mamba_dt_rank_at_the_auto_default() -> None:
+    """[`mamba_blocks`] recomputes `Mamba_Dt_Rank 0`'s auto rule (`ceil(d_model/16)`)
+    INDEPENDENTLY of Rust, so every block offset after `W_x` silently depends on the key
+    being absent. Pin that it is -- a stated `Mamba_Dt_Rank` in a fixture would shift the
+    whole tail of the block map with nothing else complaining.
+
+    The three geometry keys the mamba fixtures DO state are pinned against the manifest at
+    the same time, since `fixture_blocks` reads them from there rather than from the config.
+    """
+    for name in ("mamba_bidirectional", "mamba_forward"):
+        text = (PHASE9 / f"{name}.config").read_text()
+        assert "Mamba_Dt_Rank" not in text, f"{name}.config states Mamba_Dt_Rank -- mamba_blocks' auto-rule arithmetic no longer applies"
+        for key, value in (
+            ("Mamba_D_State", GEOMETRY["mamba_d_state"]),
+            ("Mamba_D_Conv", GEOMETRY["mamba_d_conv"]),
+            ("Mamba_Expand", GEOMETRY["mamba_expand"]),
+        ):
+            assert f"\n{key} {value}\n" in text, f"{name}.config: {key} does not match the manifest geometry ({value})"
+
+
+@pytest.mark.parametrize("name,net", [("slstm_bidirectional", 0), ("twin_lid_slstm", 0), ("twin_lid_slstm", 1)])
+def test_corpus_cost_columns_match_the_engine_gradcheck(name: str, net: int, tmp_path: Path) -> None:
+    """[`corpus_cost`]'s column identification, cross-checked against the ENGINE's own
+    arithmetic rather than only against the analytic fold.
+
+    `grad_check(eps, 1)` differentiates flat weight 0 of each backprop-active net using
+    `grad_check_cost`'s internal column pair; this helper's own central difference of the
+    same weight must reproduce that numerical entry. If `corpus_cost` read the wrong column
+    (say the SAD pair for the LID net) the two would diverge grossly -- so this pins the
+    `4 / len-1` vs `14 / len-2` switch, which otherwise only shows up indirectly.
+    """
+    if name == "twin_lid_slstm":
+        seed_twin(tmp_path)
+        packs = [read_weight_vector(PHASE4B / "tiny_sad_seed.bin"), load_pack(name)]
+        eps = TWIN_EPSILON
+    else:
+        seed_sad(tmp_path, name)
+        packs = [load_pack(name)]
+        eps = SAD_EPSILON
+    with chdir(tmp_path):
+        eng = speech_rs.Engine([f"{name}.config"], "-m")
+        engine_numerical = {idx: float(grad_check_columns(rep)[1][0]) for idx, rep in eng.grad_check(eps, 1)}
+        assert net in engine_numerical, f"{name}: network {net} is not backprop-active"
+        mine = central_difference(eng, packs, net, 0, eps)
+    want = engine_numerical[net]
+    assert abs(want) > 1e-12, f"{name} net {net}: the engine's own numerical derivative is ~0 (degenerate cross-check)"
+    assert mine == want, f"{name} net {net}: corpus_cost FD {mine!r} != the engine's grad_check numerical {want!r} -- wrong cost/counter columns"
