@@ -5,14 +5,18 @@
 //!   `BLSTM{,_LID}_Direction`) round-trip in BOTH directions -- flat -> TOML puts
 //!   them in their declared section (never `[legacy.raw]`), and TOML -> flat -> TOML
 //!   is a fixed point;
+//! - the four `Mamba_*` geometry rows (Task 3, spec S3.3/S6) round-trip the same way
+//!   into `[nn_mamba]`;
 //! - a real committed fixture config (`phase4a/tier2_spectral.config`, the Algo-3
-//!   spectral SAD net) carrying `BLSTM_Cell_Type mamba` typed-bails at driver
-//!   construction with the not-yet-implemented wording, while `slstm` (Task 2, landed)
-//!   BUILDS.
+//!   spectral SAD net) BUILDS a working driver under every cell type -- `lstm`
+//!   (default), `slstm` (Task 2) and `mamba` (Task 3).
 //!
-//! REMOVE `unimplemented_cell_type_bails_on_the_tier2_fixture` when Task 3 lands
-//! `MambaLayer` -- the bail is scaffolding, not a permanent contract. Task 2 already
-//! flipped the `slstm` arm into `slstm_cell_type_builds_on_the_tier2_fixture`.
+//! The Task-1 scaffolding test `unimplemented_cell_type_bails_on_the_tier2_fixture`
+//! is GONE: with Task 3 landed there is no unimplemented cell left to bail on, and
+//! `mamba_cell_type_builds_on_the_tier2_fixture` replaced it (as
+//! `slstm_cell_type_builds_on_the_tier2_fixture` replaced the `slstm` arm at Task 2).
+//! A future `CellType` variant is caught by the exhaustive `match cell_type` in
+//! `BlstmNetwork::from_config` -- a compile error, not a runtime bail.
 
 use std::path::PathBuf;
 
@@ -42,6 +46,11 @@ fn cell_and_direction_keys_round_trip_through_their_declared_sections() {
     map.insert("BLSTM_Direction".into(), "forward".into());
     map.insert("BLSTM_LID_Cell_Type".into(), "mamba".into());
     map.insert("BLSTM_LID_Direction".into(), "bidirectional".into());
+    // Task 3: the Mamba geometry, UNPREFIXED by design (one geometry per config).
+    map.insert("Mamba_D_State".into(), "8".into());
+    map.insert("Mamba_D_Conv".into(), "4".into());
+    map.insert("Mamba_Expand".into(), "2".into());
+    map.insert("Mamba_Dt_Rank".into(), "0".into());
 
     let toml = map_to_toml(&map);
     assert!(
@@ -55,6 +64,11 @@ fn cell_and_direction_keys_round_trip_through_their_declared_sections() {
         "[nn_lid]",
         "cell_type = \"mamba\"",
         "direction = \"bidirectional\"",
+        "[nn_mamba]",
+        "d_state = 8",
+        "d_conv = 4",
+        "expand = 2",
+        "dt_rank = 0",
     ] {
         assert!(toml.contains(want), "missing {want:?} in:\n{toml}");
     }
@@ -71,26 +85,73 @@ fn tier2_fixture_round_trips_with_the_new_keys_added() {
     let mut map = tier2_map();
     assert!(!map.contains_key("BLSTM_Cell_Type"));
     assert!(!map.contains_key("BLSTM_Direction"));
+    assert!(!map.contains_key("Mamba_D_State"));
     map.insert("BLSTM_Cell_Type".into(), "lstm".into());
     map.insert("BLSTM_Direction".into(), "bidirectional".into());
+    map.insert("Mamba_D_State".into(), "16".into());
+    map.insert("Mamba_Dt_Rank".into(), "0".into());
 
     let toml = map_to_toml(&map);
     assert_eq!(toml_to_map(&toml).unwrap(), map);
 }
 
-/// A real fixture config asking for a cell Phase 9 has not landed yet fails LOUDLY
-/// at construction, with the exact spec wording -- no silent fallback to LSTM.
+/// Task 3 FLIP (this replaced `unimplemented_cell_type_bails_on_the_tier2_fixture`):
+/// the same real fixture config with `BLSTM_Cell_Type mamba` plus a small
+/// `Mamba_*` geometry now BUILDS a working Algo-3 driver, and the geometry keys
+/// actually reach the cell -- doubling `Mamba_D_State` changes the pack length by
+/// exactly the `A_log` + `W_x` growth the S3.2 layout predicts, which no silent
+/// fallback to another cell could produce.
 #[test]
-fn unimplemented_cell_type_bails_on_the_tier2_fixture() {
-    let cell = "mamba";
+fn mamba_cell_type_builds_on_the_tier2_fixture() {
+    let mamba_map = |d_state: usize| {
+        let mut map = tier2_map();
+        map.insert("BLSTM_Cell_Type".into(), "mamba".into());
+        map.insert("Mamba_D_State".into(), d_state.to_string());
+        map.insert("Mamba_D_Conv".into(), "3".into());
+        map.insert("Mamba_Expand".into(), "1".into());
+        map
+    };
+
+    let lstm = BlstmSpectralSegmenter::from_legacy(&tier2_map(), None)
+        .expect("the untouched fixture must build");
+    let mamba = BlstmSpectralSegmenter::from_legacy(&mamba_map(4), None)
+        .expect("mamba must build on the fixture");
+    let (n_lstm, n_mamba) = (lstm.get_weights().len(), mamba.get_weights().len());
+    assert!(n_lstm > 0 && n_mamba > 0);
+    assert_ne!(
+        n_mamba, n_lstm,
+        "the Mamba pack must differ from the LSTM one -- equal counts would mean the \
+         driver silently kept the LSTM stacks"
+    );
+
+    // The geometry key is LIVE: d_state 4 -> 8 adds, per mamba layer, d_inner*4 more
+    // A_log entries and 2*4*d_inner more W_x entries.
+    let wider = BlstmSpectralSegmenter::from_legacy(&mamba_map(8), None).unwrap();
+    assert!(
+        wider.get_weights().len() > n_mamba,
+        "Mamba_D_State did not reach the cell"
+    );
+
+    // Same seam contract as any other cell: a full-length pack round-trips.
+    let mut net = BlstmSpectralSegmenter::from_legacy(&mamba_map(4), None).unwrap();
+    let w: Vec<f64> = (0..n_mamba).map(|k| 0.11 - 0.0003 * (k as f64)).collect();
+    net.set_weights(&w).unwrap();
+    assert_eq!(net.get_weights(), w);
+}
+
+/// A malformed `Mamba_*` value fails LOUDLY at driver construction rather than
+/// silently defaulting -- a silent default would change the weight-pack LENGTH.
+#[test]
+fn a_malformed_mamba_geometry_bails_on_the_tier2_fixture() {
     let mut map = tier2_map();
-    map.insert("BLSTM_Cell_Type".into(), cell.into());
+    map.insert("BLSTM_Cell_Type".into(), "mamba".into());
+    map.insert("Mamba_Expand".into(), "0".into());
     // `BlstmSpectralSegmenter` is not `Debug`, so match instead of `unwrap_err`.
     match BlstmSpectralSegmenter::from_legacy(&map, None) {
-        Ok(_) => panic!("cell type '{cell}' must not be constructible yet"),
-        Err(e) => assert_eq!(
-            format!("{e:#}"),
-            format!("cell type '{cell}' not yet implemented")
+        Ok(_) => panic!("'Mamba_Expand 0' must not build"),
+        Err(e) => assert!(
+            format!("{e:#}").contains("'Mamba_Expand' must be >= 1 (got 0)"),
+            "{e:#}"
         ),
     }
 }

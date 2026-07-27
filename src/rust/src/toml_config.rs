@@ -21,14 +21,17 @@
 //! -- 175 distinct legacy keys as of this writing) plus the port-only additions with
 //! no legacy source at all (and therefore no place in that fixture union): Phase 7's
 //! `Inference_Path`, Phase 8's `Audio_fixed_gain` (S1.1), and Phase 9's cell/direction
-//! pairs `BLSTM{,_LID}_Cell_Type` / `BLSTM{,_LID}_Direction` (S6 -- the `_LID_`-prefixed
-//! twins land in `[nn_lid]`, this table's existing spelling for the Twin's LID net,
-//! NOT a nested `[nn.lid]`, which the leaf-only decoder would reject). Sections are
+//! pairs `BLSTM{,_LID}_Cell_Type` / `BLSTM{,_LID}_Direction` plus the UNPREFIXED Mamba
+//! geometry `Mamba_D_State` / `Mamba_D_Conv` / `Mamba_Expand` / `Mamba_Dt_Rank` (S6 --
+//! the `_LID_`-prefixed twins land in `[nn_lid]` and the mamba four in `[nn_mamba]`,
+//! this table's existing FLAT section spelling, NOT nested `[nn.lid]`/`[nn.mamba]`,
+//! which the leaf-only decoder would reject). Sections are
 //! grouped so they extend the `configs/lid/lid_blstm.toml` scaffold's original four
 //! (`engine`/`audio`/`decision`/`spectrum`/`preprocess`) with new ones per
 //! algorithm family: `corpus`, `display`, `pitch` (the BLSTM spectral segmenter's
 //! inner TDC/LTSV sub-passes used for pitch warping), `nn`/`cost` (the main BLSTM
-//! SAD net), `nn_lid`/`cost_lid` (the Twin's `BLSTM_LID_*` net), `ltsv`/`tdc` (the
+//! SAD net), `nn_lid`/`cost_lid` (the Twin's `BLSTM_LID_*` net), `nn_mamba` (the
+//! Phase 9 Mamba geometry), `ltsv`/`tdc` (the
 //! two NN-free standalone algorithms), and `cnn` (dead-per-`CLAUDE.md` but present
 //! in fixtures, kept for round-trip completeness).
 //!
@@ -187,6 +190,17 @@ static KEY_TABLE: &[KeyMapping] = &[
     ("BLSTM_Forward_IsGatesRecurrentPeepholesActive",  "nn", "forward_gates_recurrent_peepholes_active"),
     ("BLSTM_Cell_Type",                          "nn", "cell_type"),
     ("BLSTM_Direction",                          "nn", "direction"),
+
+    // --- nn_mamba: the Mamba geometry (Phase 9 S3.3/S6, port-only) ------------
+    // UNPREFIXED flat keys by design: the spec provides ONE mamba geometry per
+    // config, shared by whichever net(s) select `mamba` (a per-net override is an
+    // explicit non-goal this phase). Section `nn_mamba` follows this table's FLAT
+    // spelling convention (the `nn_lid` precedent) -- a nested `[nn.mamba]` would
+    // be rejected by the leaf-only decoder.
+    ("Mamba_D_State",                            "nn_mamba", "d_state"),
+    ("Mamba_D_Conv",                             "nn_mamba", "d_conv"),
+    ("Mamba_Expand",                             "nn_mamba", "expand"),
+    ("Mamba_Dt_Rank",                            "nn_mamba", "dt_rank"),
 
     // --- cost: BLSTM (main SAD net) cost law ----------------------------------
     ("BLSTM_CostLawSpeech",                      "cost", "law_speech"),

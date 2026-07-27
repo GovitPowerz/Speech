@@ -13,9 +13,12 @@
 //!
 //! `CellLayer` implements `Layer` by match delegation -- the
 //! `engine::bag_of_processors::Processor` precedent: a CLOSED set, static dispatch,
-//! the concrete methods stay reachable, no trait-object gymnastics. Variants grow
-//! with the phase: `Lstm` (Task 1), `Slstm` (Task 2, landed) and `Mamba` (Task 3,
-//! still typed-bailed at `BlstmNetwork::from_config`). The
+//! the concrete methods stay reachable, no trait-object gymnastics. Variants grew
+//! with the phase and the set is now COMPLETE for the exact tree: `Lstm` (Task 1),
+//! `Slstm` (Task 2) and `Mamba` (Task 3) all build from
+//! `BlstmNetwork::from_config` -- no cell is typed-bailed there any more, and a
+//! FUTURE variant is forced to declare itself by that ctor's exhaustive
+//! `match cell_type` (a compile error, not a runtime bail). The
 //! existing `impl Layer for LstmLayer` in [`super::network`] STAYS (the phase-2/3
 //! unit + golden suites drive `LstmLayer` directly); `CellLayer::Lstm` wraps that
 //! same struct, so every f64 operation below the enum is byte-untouched -- the wrap
