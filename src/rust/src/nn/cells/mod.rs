@@ -40,10 +40,12 @@
 //! legacy source): it is documented in module docs + `RESULTS.md`, NEVER
 //! `IMPROVEMENTS.md` (which tracks legacy-quirk debt only -- the phase-7 rule).
 
+pub mod mamba;
 pub mod slstm;
 
 use ndarray::Array2;
 
+pub use mamba::MambaLayer;
 pub use slstm::SlstmLayer;
 
 use super::layers::LstmLayer;
@@ -51,12 +53,22 @@ use super::network::Layer;
 
 /// The recurrent cell a `Network<CellLayer>` stacks. One variant per architecture;
 /// the set is closed and statically dispatched (see the module doc).
+///
+/// `large_enum_variant` is allowed, following `engine::bag_of_processors::Processor`
+/// (the precedent this enum was modelled on): [`MambaLayer`] carries twelve weight
+/// blocks plus twelve derivative twins plus the forward cache, so it is much larger
+/// than the LSTM/sLSTM variants -- but a `Network` holds one cell per LAYER (a
+/// handful per net, constructed once), never a large collection, so boxing would buy
+/// an indirection on every timestep to save a few hundred bytes of stack, once.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum CellLayer {
     /// The legacy peephole LSTM (`nn::layers::LstmLayer`), byte-untouched.
     Lstm(LstmLayer),
     /// The xLSTM paper's scalar-memory cell ([`SlstmLayer`], spec S2; Task 2).
     Slstm(SlstmLayer),
+    /// Mamba/S6 in recurrent form ([`MambaLayer`], spec S3; Task 3).
+    Mamba(MambaLayer),
 }
 
 impl Layer for CellLayer {
@@ -64,6 +76,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::feed_forward(l, input, output, last_layer),
             CellLayer::Slstm(l) => SlstmLayer::feed_forward(l, input, output, last_layer),
+            CellLayer::Mamba(l) => MambaLayer::feed_forward(l, input, output, last_layer),
         }
     }
 
@@ -76,6 +89,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::feed_forward_reverse(l, input, output, last_layer),
             CellLayer::Slstm(l) => SlstmLayer::feed_forward_reverse(l, input, output, last_layer),
+            CellLayer::Mamba(l) => MambaLayer::feed_forward_reverse(l, input, output, last_layer),
         }
     }
 
@@ -97,6 +111,14 @@ impl Layer for CellLayer {
                 last_layer,
             ),
             CellLayer::Slstm(l) => SlstmLayer::feed_backward(
+                l,
+                input,
+                output,
+                deltas,
+                inv_sub_sampling_ratio,
+                last_layer,
+            ),
+            CellLayer::Mamba(l) => MambaLayer::feed_backward(
                 l,
                 input,
                 output,
@@ -132,6 +154,14 @@ impl Layer for CellLayer {
                 inv_sub_sampling_ratio,
                 last_layer,
             ),
+            CellLayer::Mamba(l) => MambaLayer::feed_backward_reverse(
+                l,
+                input,
+                output,
+                deltas,
+                inv_sub_sampling_ratio,
+                last_layer,
+            ),
         }
     }
 
@@ -139,6 +169,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::get_weights_derivatives(l, out),
             CellLayer::Slstm(l) => SlstmLayer::get_weights_derivatives(l, out),
+            CellLayer::Mamba(l) => MambaLayer::get_weights_derivatives(l, out),
         }
     }
 
@@ -146,6 +177,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::reset_weights_derivatives(l),
             CellLayer::Slstm(l) => SlstmLayer::reset_weights_derivatives(l),
+            CellLayer::Mamba(l) => MambaLayer::reset_weights_derivatives(l),
         }
     }
 
@@ -153,6 +185,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::ponderate_weights_derivatives(l, factor),
             CellLayer::Slstm(l) => SlstmLayer::ponderate_weights_derivatives(l, factor),
+            CellLayer::Mamba(l) => MambaLayer::ponderate_weights_derivatives(l, factor),
         }
     }
 
@@ -160,6 +193,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::set_weights(l, flat),
             CellLayer::Slstm(l) => SlstmLayer::set_weights(l, flat),
+            CellLayer::Mamba(l) => MambaLayer::set_weights(l, flat),
         }
     }
 
@@ -167,6 +201,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::get_weights(l, out),
             CellLayer::Slstm(l) => SlstmLayer::get_weights(l, out),
+            CellLayer::Mamba(l) => MambaLayer::get_weights(l, out),
         }
     }
 
@@ -174,6 +209,7 @@ impl Layer for CellLayer {
         match self {
             CellLayer::Lstm(l) => LstmLayer::nb_of_weights(l),
             CellLayer::Slstm(l) => SlstmLayer::nb_of_weights(l),
+            CellLayer::Mamba(l) => MambaLayer::nb_of_weights(l),
         }
     }
 }
