@@ -1645,6 +1645,66 @@ mod tests {
         );
     }
 
+    /// THE CAUSAL CONV TAP ORDER is a CONVENTION, and this pins which one: tap
+    /// `d_conv - 1` sees the CURRENT sample and tap `0` the oldest (the left-padded
+    /// `conv1d` convention the module doc states, and the one the backward's flipped
+    /// correlation mirrors).
+    ///
+    /// Worth its own test because NOTHING else can see it. The FD tier catches a
+    /// forward-only or backward-only flip (measured: relative error 1.39 -- they stop
+    /// being each other's adjoint), but a CONSISTENTLY mirrored pair is a
+    /// different-yet-self-consistent model that agrees with its own gradient
+    /// perfectly. And the hand-computed single-step test runs at `d_conv = 1`, where
+    /// the two orders coincide. So: a `[1, 0]` kernel must be a pure ONE-STEP DELAY,
+    /// and `[0, 1]` the identity.
+    #[test]
+    fn the_causal_conv_kernel_puts_the_current_sample_in_the_last_tap() {
+        let sigmoid = |z: f64| 1.0 / (1.0 + (-z).exp());
+        let x = Array2::from_shape_vec((2, 1), vec![0.75, -0.5]).unwrap();
+        // Everything past the conv is zeroed, so `conv_activations` is the whole
+        // observable: g | W_in[u|res] | conv[oldest|current] | b_conv | W_x(3)
+        //             | W_dt | b_dt | A_log | D | W_out
+        let run = |taps: [f64; 2]| {
+            let mut c = MambaLayer::new(1, 1, 1, 2, 1, 0);
+            let flat = vec![
+                1.0, // g
+                1.0, 0.0, // W_in [u | res]
+                taps[0], taps[1], // conv
+                0.0,     // b_conv
+                0.0, 0.0, 0.0, // W_x
+                0.0, 0.0, // W_dt | b_dt
+                0.0, // A_log
+                0.0, // D
+                0.0, // W_out
+            ];
+            assert_eq!(flat.len(), c.nb_of_weights());
+            c.set_weights(&flat);
+            let _ = forward(&mut c, &x);
+            let u: Vec<f64> = (0..2).map(|t| x[[t, 0]] * c.rms_inv()[t]).collect();
+            let uc: Vec<f64> = (0..2).map(|t| c.conv_activations()[[t, 0]]).collect();
+            (u, uc)
+        };
+
+        // [1, 0]: only the OLDEST tap is live -> a one-step delay, and row 0 sees
+        // nothing but the causal left-padding.
+        let (u, uc) = run([1.0, 0.0]);
+        assert_eq!(uc[0], 0.0, "tap 0 must not reach the current sample");
+        assert_eq!(
+            uc[1],
+            u[0] * sigmoid(u[0]),
+            "tap 0 must be the ONE-STEP-BACK sample"
+        );
+        // Non-vacuity: the two samples are genuinely different, so the delay is
+        // observable rather than a coincidence.
+        assert_ne!(u[0], u[1]);
+
+        // [0, 1]: only the LAST tap is live -> the identity.
+        let (u, uc) = run([0.0, 1.0]);
+        for t in 0..2 {
+            assert_eq!(uc[t], u[t] * sigmoid(u[t]), "row {t} is not the identity");
+        }
+    }
+
     /// The residual adds `x'` -- the ADAPTED input -- not the raw `x_t` (spec S3.1).
     /// Zeroing `W_out` kills the whole SSM branch, so the output must be EXACTLY
     /// `P x + p`.
