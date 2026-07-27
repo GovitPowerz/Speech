@@ -48,6 +48,7 @@ use ndarray::Array2;
 use crate::cost::CostLaw;
 use crate::features::stats::InputStatistics;
 
+use super::cells::CellLayer;
 use super::layers::NeuronLayer;
 use super::network::Network;
 use super::train::Rprop;
@@ -225,8 +226,13 @@ impl BlstmConfig {
 }
 
 /// `BLSTMNeuralNetwork<LSTMLayer>` (`BLSTMNeuralNetwork.cpp`): forward + backward
-/// LSTM `Network`s (absent in MLP mode) feeding a `NeuronLayer` output `Network`,
-/// plus the input-normalization mean/std tail and bookkeeping fields.
+/// recurrent `Network`s (absent in MLP mode) feeding a `NeuronLayer` output
+/// `Network`, plus the input-normalization mean/std tail and bookkeeping fields.
+///
+/// Phase 9 Task 1 re-typed the two recurrent stacks `Network<LstmLayer> ->
+/// `Network<CellLayer>` (spec S1.1): the cell is now a closed enum this wrapper
+/// never inspects. `CellLayer::Lstm` wraps the same `LstmLayer` the legacy path
+/// always used, so the arithmetic is byte-untouched -- sanctioned touch class (a).
 ///
 /// `Clone` mirrors the legacy copy ctor (`:155-173`) plus the buffers/accumulators
 /// it omits (the ill-formed legacy ctor leaves `_OutputForward`/`_InputStatistics`/
@@ -236,8 +242,8 @@ impl BlstmConfig {
 #[derive(Clone)]
 pub struct BlstmNetwork {
     cfg: BlstmConfig,
-    forward_network: Option<Network<super::layers::LstmLayer>>,
-    backward_network: Option<Network<super::layers::LstmLayer>>,
+    forward_network: Option<Network<CellLayer>>,
+    backward_network: Option<Network<CellLayer>>,
     output_network: Network<NeuronLayer>,
 
     normalize_input_mean: Vec<f64>,
@@ -277,26 +283,26 @@ impl BlstmNetwork {
                 cfg.lstm_neuron_nb.clone(),
                 cfg.lstm_sub_sampling.clone(),
                 |_layer_id, input, output| {
-                    super::layers::LstmLayer::new(
+                    CellLayer::Lstm(super::layers::LstmLayer::new(
                         input,
                         output,
                         fwd_peep.cells,
                         fwd_peep.gates,
                         fwd_peep.gates_recurrent,
-                    )
+                    ))
                 },
             );
             let backward = Network::new(
                 cfg.lstm_neuron_nb.clone(),
                 cfg.lstm_sub_sampling.clone(),
                 |_layer_id, input, output| {
-                    super::layers::LstmLayer::new(
+                    CellLayer::Lstm(super::layers::LstmLayer::new(
                         input,
                         output,
                         bwd_peep.cells,
                         bwd_peep.gates,
                         bwd_peep.gates_recurrent,
-                    )
+                    ))
                 },
             );
             (Some(forward), Some(backward))
