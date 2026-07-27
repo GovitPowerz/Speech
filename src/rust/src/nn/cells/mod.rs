@@ -5,7 +5,7 @@
 //! (the cut) and S1.4 (the discipline).
 //!
 //! The cut is at the LAYER, not the network: [`super::network::Network`] is already
-//! generic over the 10-method [`Layer`](super::network::Layer) trait (whole-sequence
+//! generic over the 10-method [`Layer`] trait (whole-sequence
 //! `Array2<f64>` in/out), so swapping a recurrent cell means swapping `L` and nothing
 //! else. `Network` itself, the output `Network<NeuronLayer>`, the four windowed
 //! drivers, input normalization, scoring/cost accumulation, the flat-weight seam,

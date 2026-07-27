@@ -18,10 +18,13 @@
 //! list, both directions read off the SAME table (no separate encode/decode maps to
 //! drift apart). It covers every key used by the committed fixture configs (the
 //! phase0/phase4a/phase4b `.config` fixtures plus `configs/legacy/LID_BLSTM.config`
-//! -- 175 distinct legacy keys as of this writing) plus one port-only Phase 8
-//! addition (`Audio_fixed_gain`, S1.1 -- no legacy source, not part of that fixture
-//! union), grouped into sections that
-//! extend the `configs/lid/lid_blstm.toml` scaffold's original four
+//! -- 175 distinct legacy keys as of this writing) plus the port-only additions with
+//! no legacy source at all (and therefore no place in that fixture union): Phase 7's
+//! `Inference_Path`, Phase 8's `Audio_fixed_gain` (S1.1), and Phase 9's cell/direction
+//! pairs `BLSTM{,_LID}_Cell_Type` / `BLSTM{,_LID}_Direction` (S6 -- the `_LID_`-prefixed
+//! twins land in `[nn_lid]`, this table's existing spelling for the Twin's LID net,
+//! NOT a nested `[nn.lid]`, which the leaf-only decoder would reject). Sections are
+//! grouped so they extend the `configs/lid/lid_blstm.toml` scaffold's original four
 //! (`engine`/`audio`/`decision`/`spectrum`/`preprocess`) with new ones per
 //! algorithm family: `corpus`, `display`, `pitch` (the BLSTM spectral segmenter's
 //! inner TDC/LTSV sub-passes used for pitch warping), `nn`/`cost` (the main BLSTM
@@ -182,6 +185,8 @@ static KEY_TABLE: &[KeyMapping] = &[
     ("BLSTM_Forward_IsCellsPeepholesActive",     "nn", "forward_cells_peepholes_active"),
     ("BLSTM_Forward_IsGatesPeepholesActive",     "nn", "forward_gates_peepholes_active"),
     ("BLSTM_Forward_IsGatesRecurrentPeepholesActive",  "nn", "forward_gates_recurrent_peepholes_active"),
+    ("BLSTM_Cell_Type",                          "nn", "cell_type"),
+    ("BLSTM_Direction",                          "nn", "direction"),
 
     // --- cost: BLSTM (main SAD net) cost law ----------------------------------
     ("BLSTM_CostLawSpeech",                      "cost", "law_speech"),
@@ -279,6 +284,8 @@ static KEY_TABLE: &[KeyMapping] = &[
     ("BLSTM_LID_window",                         "nn_lid", "window"),
     ("BLSTM_LID_DetectionThreshold",             "nn_lid", "detection_threshold"),
     ("BLSTM_LID_DumpInternals",                  "nn_lid", "dump_internals"),
+    ("BLSTM_LID_Cell_Type",                      "nn_lid", "cell_type"),
+    ("BLSTM_LID_Direction",                      "nn_lid", "direction"),
 
     // --- cost_lid: Twin LID net cost law ---------------------------------------
     ("BLSTM_LID_CostLawSpeech",                  "cost_lid", "law_speech"),
