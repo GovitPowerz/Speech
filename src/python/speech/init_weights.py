@@ -84,9 +84,9 @@ log(s+1)` (S4D-real, so `A = -exp(A_log) = -(s+1)`), `b_dt = softplus^-1(Delta_0
 the repo Xavier/He convention, and the two structural biases (`p`, `b_conv`) are 0. The
 depthwise conv's fans are `fan_in = fan_out = d_conv` (each output channel sees `d_conv` taps
 of exactly one input channel -- the standard depthwise reading of
-`kernel * in_channels/groups`). `softplus^-1(y) = log(e^y - 1)` is evaluated as
-`y + log1p(-e^{-y})`, which stays accurate across the whole `[1e-3, 1e-1]` band where the
-direct form cancels catastrophically.
+`kernel * in_channels/groups`). `softplus^-1(y) = log(e^y - 1)` is evaluated as the
+algebraically identical `y + log1p(-e^{-y})` -- for DOMAIN SAFETY (the direct form overflows
+`exp` above `y ~ 709.78`), not for accuracy on this band, where both agree to ~1e-13.
 
 Draw ORDER for the new cells is the FLAT ORDER (block by block). There is no legacy trajectory
 to match -- only same-seed reproducibility matters -- so the least surprising order wins.
@@ -125,6 +125,15 @@ def _draw(rng: np.random.Generator, shape: tuple[int, int], fan_in: int, fan_out
     if scheme == "xavier":
         return _xavier_uniform(rng, shape, fan_in, fan_out)
     return _he_normal(rng, shape, fan_in)
+
+
+def _check_scheme(scheme: str) -> None:
+    """Validated at every PUBLIC entry point, because `_draw`'s `else` branch is He: an
+    unrecognized string would otherwise be silently honoured as "he" rather than rejected
+    (`Scheme` is a `Literal`, so only a static checker catches it, and the per-cell builders
+    are reachable from untyped callers)."""
+    if scheme not in ("xavier", "he"):
+        raise ValueError(f"unknown scheme: {scheme!r}")
 
 
 def _init_lstm_gates(rng: np.random.Generator, out: int, fin: int, scheme: Scheme, forget_bias_one: bool) -> dict[str, np.ndarray]:
@@ -200,6 +209,7 @@ def init_slstm_flat(
     pre-activation, exactly as for the legacy LSTM -- see the module docstring); `fan_out` is
     `out`. Biases are 0 except `b_f = 1` under `forget_bias_one` (spec S2.4). `b_i` stays 0
     and is non-identifiable (module docstring)."""
+    _check_scheme(scheme)
     combined_fan_in = input_size + output_size
     parts: list[NDArray[np.float64]] = []
     for gate in range(4):  # [i | f | o | z]
@@ -213,8 +223,14 @@ def init_slstm_flat(
 
 
 def _softplus_inverse(y: NDArray[np.float64]) -> NDArray[np.float64]:
-    """`log(e^y - 1)` written as `y + log1p(-e^{-y})` -- accurate across the whole
-    `[1e-3, 1e-1]` band where the direct difference cancels."""
+    """`log(e^y - 1)`, written as the algebraically identical `y + log1p(-e^{-y})`.
+
+    The advantage is DOMAIN SAFETY, not accuracy on this band: the direct form overflows
+    `exp` for `y > ~709.78` and returns `-inf`/`nan` where the true value is just `y`, while
+    this one degrades gracefully (`e^{-y}` underflows harmlessly). On S3.4's actual
+    `[1e-3, 1e-1]` draw both forms agree to ~1e-13, so nothing here rides on the choice --
+    it simply removes a caveat, and mirrors the same guarded shape `mamba.rs::softplus` uses
+    in the forward direction."""
     return cast(NDArray[np.float64], y + np.log1p(-np.exp(-y)))
 
 
@@ -236,6 +252,7 @@ def init_mamba_flat(
     of them TRANSPOSED, which the walk absorbs, so the flat order is the math order.
 
     The S3.4 constants are spec text (see the module docstring): copied, not re-derived."""
+    _check_scheme(scheme)
     d_model = output_size
     d_inner = geom.d_inner(d_model)
     d_state, d_conv = geom.d_state, geom.d_conv
@@ -338,8 +355,7 @@ def init_weights(
     `{prefix}_Cell_Type` / `{prefix}_Direction` / `Mamba_*`), so every caller learns the
     architecture from the same config the engine does. Absent entries mean the legacy shape
     and this function is byte-for-byte what it was before phase 9."""
-    if scheme not in ("xavier", "he"):
-        raise ValueError(f"unknown scheme: {scheme!r}")
+    _check_scheme(scheme)
     cell_type = cast(str, spec.get("CellType", "lstm"))
     if cell_type not in ("lstm", "slstm", "mamba"):
         raise ValueError(f"unknown cell type: {cell_type!r} (expected 'lstm', 'slstm' or 'mamba')")

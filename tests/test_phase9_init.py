@@ -14,6 +14,7 @@ under `tests/pyo3/`, which is the only tree the `python-pyo3` CI job runs.
 """
 
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -87,15 +88,16 @@ def mamba_nb(out: int, fin: int, geom: MambaGeometry) -> int:
     return mamba_blocks(out, fin, geom)[-1][1]
 
 
-def net_length(spec: dict[str, object], cell_nb: object) -> int:
-    """The full-net pack length: cell stacks (twice when bidirectional) + output MLP + tail."""
+def net_length(spec: dict[str, object], cell_nb: Callable[[int, int], int]) -> int:
+    """The full-net pack length: cell stacks (twice when bidirectional) + output MLP + tail.
+    `cell_nb(out, fin)` is the per-layer count for the cell under test."""
     lstm = cast(list[int], spec["LSTMNeuronNb"])
     lsub = cast(list[int], spec["LSTMSubSampling"])
     outn = cast(list[int], spec["OutputNeuronNb"])
     dirs = 1 if spec.get("Direction", "bidirectional") == "forward" else 2
     total = 0
     for i in range(len(lstm) - 1):
-        total += dirs * cast(object, cell_nb)(lstm[i + 1], lstm[i] * lsub[i])  # type: ignore[operator]
+        total += dirs * cell_nb(lstm[i + 1], lstm[i] * lsub[i])
     for i in range(len(outn) - 1):
         total += outn[i + 1] * outn[i] + outn[i + 1]
     return total + 2 * lstm[0]
@@ -240,6 +242,114 @@ def test_mamba_spec_pinned_constants(out: int, fin: int) -> None:
     assert np.all(np.abs(w_dt) <= dr**-0.5)
 
 
+# ------------------------------------------------------------------------------------- #
+# WHOLE-PACK RECONSTRUCTION: the pin that catches a BLOCK SHEAR
+# ------------------------------------------------------------------------------------- #
+#
+# THE GAP THIS CLOSES (T4 review, I1). Every other assertion in this file is blind to a
+# permutation of two ADJACENT DRAWN blocks. The fingerprint pins locate only the CONSTANT
+# blocks (`g`, `D`, `A_log`, the zero biases); the band checks cannot separate `W_x` from
+# `W_dt` because Xavier's limit for `W_x` falls inside `W_dt`'s `+-dt_rank^{-1/2}` band; and
+# a flat `set_weights`/`get_weights` round trip through the Engine is permutation-blind BY
+# CONSTRUCTION, since both directions drive the same walk. A reviewer built exactly that
+# shear (emit `W_dt` before `W_x`) and every committed assertion still passed.
+#
+# These two tests reconstruct the ENTIRE pack from a fresh `default_rng(seed)`, drawing block
+# by block in spec order at the documented per-block shape/fans, and assert BIT-identity. A
+# shear moves a draw to a different position in the stream AND gives it a different limit, so
+# it cannot survive: position, scale, shape and draw order are all pinned at once. The draw
+# helpers below are written out here rather than imported from `init_weights`, so this is an
+# independent transcription, not a tautology.
+
+
+def _xavier(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
+    limit = math.sqrt(6.0 / (fan_in + fan_out))
+    return np.asarray(rng.uniform(-limit, limit, size=shape), dtype=np.float64).reshape(-1)
+
+
+def _he(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int) -> np.ndarray:
+    return np.asarray(rng.normal(0.0, math.sqrt(2.0 / fan_in), size=shape), dtype=np.float64).reshape(-1)
+
+
+def _blk(rng: np.random.Generator, scheme: str, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
+    return _xavier(rng, shape, fan_in, fan_out) if scheme == "xavier" else _he(rng, shape, fan_in)
+
+
+@pytest.mark.parametrize("scheme", ["xavier", "he"])
+@pytest.mark.parametrize(("out", "fin"), SHAPES)
+def test_slstm_pack_is_reproducible_block_by_block(out: int, fin: int, scheme: str) -> None:
+    """S2.2 order `[i|f|o|z] x [R | W | b]`, `R`/`W` sharing the combined `fan_in = in + out`
+    with `fan_out = out`, biases undrawn (0, or 1 for the forget gate)."""
+    want: list[np.ndarray] = []
+    rng = np.random.default_rng(21)
+    for gate in range(4):
+        want.append(_blk(rng, scheme, (out, out), fin + out, out))
+        want.append(_blk(rng, scheme, (out, fin), fin + out, out))
+        want.append(np.full(out, 1.0 if gate == 1 else 0.0))
+    got = init_slstm_flat(np.random.default_rng(21), out, fin, scheme)  # type: ignore[arg-type]
+    assert np.array_equal(got, np.concatenate(want))
+
+
+@pytest.mark.parametrize("scheme", ["xavier", "he"])
+@pytest.mark.parametrize(("out", "fin"), SHAPES)
+def test_mamba_pack_is_reproducible_block_by_block(out: int, fin: int, scheme: str) -> None:
+    """S3.2 order with the S3.4 constants, block by block. `W_x` and `W_dt` are ADJACENT
+    DRAWN blocks with overlapping value ranges -- transposing them is precisely the shear no
+    other assertion in this file can see."""
+    geom = MambaGeometry(d_state=4, d_conv=3, expand=2, dt_rank=0)
+    di, ds, dc = geom.d_inner(out), geom.d_state, geom.d_conv
+    dr = geom.resolve_dt_rank(out)
+
+    want: list[np.ndarray] = []
+    rng = np.random.default_rng(22)
+    if fin != out:
+        want.append(_blk(rng, scheme, (out, fin), fin, out))  # P
+        want.append(np.zeros(out))  # p
+    want.append(np.ones(out))  # g
+    want.append(_blk(rng, scheme, (2 * di, out), out, 2 * di))  # W_in
+    want.append(_blk(rng, scheme, (di, dc), dc, dc))  # conv (depthwise: fan_in = fan_out = d_conv)
+    want.append(np.zeros(di))  # b_conv
+    want.append(_blk(rng, scheme, (dr + 2 * ds, di), di, dr + 2 * ds))  # W_x
+    want.append(np.asarray(rng.uniform(-(dr**-0.5), dr**-0.5, size=(di, dr))).reshape(-1))  # W_dt
+    delta0 = np.exp(rng.uniform(math.log(1e-3), math.log(1e-1), size=di))  # log-uniform per channel
+    want.append(delta0 + np.log1p(-np.exp(-delta0)))  # b_dt = softplus^-1(Delta_0)
+    want.append(np.tile(np.log(np.arange(1, ds + 1, dtype=np.float64)), (di, 1)).reshape(-1))  # A_log
+    want.append(np.ones(di))  # D
+    want.append(_blk(rng, scheme, (out, di), di, out))  # W_out
+
+    got = init_mamba_flat(np.random.default_rng(22), out, fin, geom, scheme)  # type: ignore[arg-type]
+    assert np.array_equal(got, np.concatenate(want))
+
+
+def test_mamba_reconstruction_rejects_a_wx_wdt_shear() -> None:
+    """Non-vacuity for the pin above, and the exact review finding: swapping the two adjacent
+    drawn blocks `W_x`/`W_dt` must NOT reproduce the builder's pack."""
+    out, fin = 3, 3
+    geom = MambaGeometry(d_state=4, d_conv=3, expand=2, dt_rank=0)
+    di, ds, dc = geom.d_inner(out), geom.d_state, geom.d_conv
+    dr = geom.resolve_dt_rank(out)
+
+    sheared: list[np.ndarray] = []
+    rng = np.random.default_rng(22)
+    sheared.append(np.ones(out))
+    sheared.append(_xavier(rng, (2 * di, out), out, 2 * di))
+    sheared.append(_xavier(rng, (di, dc), dc, dc))
+    sheared.append(np.zeros(di))
+    # THE SHEAR: W_dt emitted before W_x.
+    sheared.append(np.asarray(rng.uniform(-(dr**-0.5), dr**-0.5, size=(di, dr))).reshape(-1))
+    sheared.append(_xavier(rng, (dr + 2 * ds, di), di, dr + 2 * ds))
+    delta0 = np.exp(rng.uniform(math.log(1e-3), math.log(1e-1), size=di))
+    sheared.append(delta0 + np.log1p(-np.exp(-delta0)))
+    sheared.append(np.tile(np.log(np.arange(1, ds + 1, dtype=np.float64)), (di, 1)).reshape(-1))
+    sheared.append(np.ones(di))
+    sheared.append(_xavier(rng, (out, di), di, out))
+
+    got = init_mamba_flat(np.random.default_rng(22), out, fin, geom)
+    bad = np.concatenate(sheared)
+    assert got.shape == bad.shape  # same LENGTH -- which is why a length pin cannot see it.
+    assert not np.array_equal(got, bad)
+
+
 def test_mamba_projection_blocks_are_non_degenerate() -> None:
     """The Xavier/He-drawn blocks (`W_in`, `W_x`, `W_out`, `conv`) are actually drawn -- a
     zero-filled projection would make every S3.4 constant above pass vacuously."""
@@ -329,6 +439,33 @@ def test_determinism_same_seed_is_bit_identical(cell: str) -> None:
     assert np.array_equal(a, b)
     c = init_weights(spec, np.random.default_rng(12))[0]
     assert not np.array_equal(a, c)
+
+
+def test_unknown_scheme_raises_in_every_public_entry_point() -> None:
+    """`_draw`'s else-branch is He, so an unrecognized string would otherwise be silently
+    honoured as "he" in the per-cell builders (reachable from untyped callers)."""
+    rng = np.random.default_rng(0)
+    with pytest.raises(ValueError, match="scheme"):
+        init_slstm_flat(rng, 3, 3, "bogus")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="scheme"):
+        init_mamba_flat(rng, 3, 3, MambaGeometry(2, 2, 1, 1), "bogus")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="scheme"):
+        init_weights(cell_spec("slstm", "bidirectional"), rng, "bogus")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(("key", "value"), [("Mamba_D_State", "0"), ("Mamba_D_Conv", "0"), ("Mamba_Expand", "0")])
+def test_degenerate_mamba_geometry_is_rejected(key: str, value: str) -> None:
+    """`MambaParams::from_legacy` (blstm.rs:252-255) hard-bails below 1; mirrored here because
+    the builders are reachable without the engine, where a 0 would emit a silently degenerate
+    pack. `dt_rank = 0` stays legal -- it means auto."""
+    cfg = config_bridge.parse_legacy_config((REF / "tupleA_1_worker_1.config").read_text())
+    cfg[key] = value
+    with pytest.raises(ValueError, match=key):
+        config_bridge.nnet_spec(cfg, prefix="BLSTM")
+
+    cfg2 = config_bridge.parse_legacy_config((REF / "tupleA_1_worker_1.config").read_text())
+    cfg2["Mamba_Dt_Rank"] = "0"
+    assert cast(dict[str, int], config_bridge.nnet_spec(cfg2, prefix="BLSTM")["Mamba"])["dt_rank"] == 0
 
 
 def test_unknown_cell_type_raises() -> None:

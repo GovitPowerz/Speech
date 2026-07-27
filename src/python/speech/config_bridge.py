@@ -34,7 +34,19 @@ def _mamba_geometry(cfg: dict[str, str]) -> dict[str, int]:
     geometry would change the weight-pack LENGTH without telling anyone)."""
     defaults = {"d_state": 16, "d_conv": 4, "expand": 2, "dt_rank": 0}
     keys = {"d_state": "Mamba_D_State", "d_conv": "Mamba_D_Conv", "expand": "Mamba_Expand", "dt_rank": "Mamba_Dt_Rank"}
-    return {name: int(cfg[key]) if key in cfg else defaults[name] for name, key in keys.items()}
+    # `d_state`/`d_conv`/`expand` must be >= 1; `dt_rank` may be 0 (= auto). The SAME
+    # two-sided check `MambaParams::from_legacy` (blstm.rs:252-255) makes -- mirrored rather
+    # than left to the Rust because the Python builders are reachable WITHOUT the engine
+    # (`init_weights` straight off a spec), where a 0 would silently emit a degenerate pack
+    # (empty conv/state blocks) that no length assert could distinguish from a valid one.
+    out: dict[str, int] = {}
+    for name, key in keys.items():
+        value = int(cfg[key]) if key in cfg else defaults[name]
+        minimum = 0 if name == "dt_rank" else 1
+        if value < minimum:
+            raise ValueError(f"'{key}' must be >= {minimum} (got {value})")
+        out[name] = value
+    return out
 
 
 def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
