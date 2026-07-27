@@ -39,7 +39,11 @@
 //! legacy source): it is documented in module docs + `RESULTS.md`, NEVER
 //! `IMPROVEMENTS.md` (which tracks legacy-quirk debt only -- the phase-7 rule).
 
+pub mod slstm;
+
 use ndarray::Array2;
+
+pub use slstm::SlstmLayer;
 
 use super::layers::LstmLayer;
 use super::network::Layer;
