@@ -110,15 +110,37 @@ def read_weight_vector(path: Path) -> NDArray[np.float64]:
 # Nnet has the same shape but nnet-domain (adim applied) matrices.
 
 
+def spec_directions(spec: dict) -> tuple[str, ...]:
+    """The recurrent stacks a pack carries, in flat-order: `("forward", "backward")` for the
+    legacy bidirectional shape, `("forward",)` for the phase-9 causal one (spec S1.2/S6).
+
+    Read off the spec's own `Direction` entry (`config_bridge.nnet_spec`), so ABSENT means
+    bidirectional and every pre-phase-9 caller is byte-unchanged. This is the ONE place the
+    direction string is validated -- `element_count`, `flat_to_nnet` and `init_weights` all
+    come through here, mirroring `BlstmNetwork::set_weights`'s single `Direction` dispatch.
+    """
+    direction = spec.get("Direction", "bidirectional")
+    if direction == "forward":
+        return ("forward",)
+    if direction != "bidirectional":
+        raise ValueError(f"unknown direction: {direction!r} (expected 'bidirectional' or 'forward')")
+    return ("forward", "backward")
+
+
 def element_count(spec: dict) -> int:
+    """Flat-pack length for an LSTM-cell net. Phase 9: the recurrent term is multiplied by the
+    NUMBER OF STACKS (`spec_directions`), not the hardcoded 2 -- unchanged for every spec
+    without a `Direction` entry. The new cells have no structured/nnet domain at all (spec
+    S1.3), so their lengths come from `init_weights.py`'s builders, not from here."""
     lstm = spec["LSTMNeuronNb"]
     lsub = spec["LSTMSubSampling"]
     outn = spec["OutputNeuronNb"]
+    stacks = len(spec_directions(spec))
     total = 0
     for i in range(len(lstm) - 1):
         out = lstm[i + 1]
         fin = lstm[i] * lsub[i]
-        total += 2 * (4 * out * fin + 4 * out * out + 12 * out + 4 * out)
+        total += stacks * (4 * out * fin + 4 * out * out + 12 * out + 4 * out)
     for i in range(len(outn) - 1):
         total += outn[i + 1] * outn[i] + outn[i + 1]
     total += 2 * lstm[0]
@@ -233,8 +255,15 @@ def load_structured(manifest_path: Path, bin_path: Path) -> tuple[dict, dict]:
 
 
 def flat_to_nnet(flat: np.ndarray, spec: dict) -> dict:
-    """Inverse of nnet_to_flat: slice the flat vector back into nnet-domain matrices."""
+    """Inverse of nnet_to_flat: slice the flat vector back into nnet-domain matrices.
+
+    LSTM-cell only (the sLSTM/Mamba packs have no structured domain to slice into, spec
+    S1.3), and direction-aware since phase 9: a `Direction forward` spec has no backward
+    stack to consume, so `nnet["backward"]` comes back EMPTY rather than eating the output
+    MLP's bytes. `nnet_to_flat` needs no such branch -- it walks the lists it is given.
+    """
     lstm, lsub, outn = spec["LSTMNeuronNb"], spec["LSTMSubSampling"], spec["OutputNeuronNb"]
+    directions = spec_directions(spec)
     pos = 0
     nnet: dict = {"forward": [], "backward": [], "output": []}
 
@@ -244,7 +273,7 @@ def flat_to_nnet(flat: np.ndarray, spec: dict) -> dict:
         pos += k
         return seg
 
-    for direction in ("forward", "backward"):
+    for direction in directions:
         for i in range(len(lstm) - 1):
             out, fin = lstm[i + 1], lstm[i] * lsub[i]
             ncols = fin + out + 5  # I/F/O gate frame; the cell matrix is narrower (fin+out+1, no peepholes).
