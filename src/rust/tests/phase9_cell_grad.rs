@@ -218,17 +218,29 @@ pub fn fd_check(
 type Case = (usize, usize, usize, usize);
 
 /// Run `fd_check` over a shape x seed grid, asserting BOTH regimes plus the
-/// resolvable count, and return `(worst relative, worst near-zero absolute)`.
-fn sweep(cases: &[Case], rel_pin: f64, near_zero_pin: f64, abs_pin: f64) -> (f64, f64, f64) {
+/// resolvable count, and return `(worst relative, worst near-zero absolute, worst
+/// absolute)`.
+///
+/// CELL-AGNOSTIC: `make(input_size, output_size)` is the only cell-specific thing in
+/// this file's machinery, so Task 3 pins `MambaLayer` by calling this with its own
+/// constructor, its own case table and its own measured pins -- no edit here.
+fn sweep(
+    label: &str,
+    make: impl Fn(usize, usize) -> Box<dyn Layer>,
+    cases: &[Case],
+    rel_pin: f64,
+    near_zero_pin: f64,
+    abs_pin: f64,
+) -> (f64, f64, f64) {
     let (mut worst_rel, mut worst_abs, mut worst_err) = (0.0_f64, 0.0_f64, 0.0_f64);
     for &(t, i, o, resolvable) in cases {
         for seed in [1u64, 2, 3] {
-            let mut cell = SlstmLayer::new(i, o);
-            let r = fd_check(&mut cell, t, i, o, seed, 1e-6);
+            let mut cell = make(i, o);
+            let r = fd_check(cell.as_mut(), t, i, o, seed, 1e-6);
             // The measure-then-pin instrument: `cargo test -- --nocapture` re-prints
             // every number quoted in the pin comments below.
             println!(
-                "FD slstm t={t} in={i} out={o} seed={seed}: max_rel={:e} at w[{}] \
+                "FD {label} t={t} in={i} out={o} seed={seed}: max_rel={:e} at w[{}] \
                  (fd {:e} vs an {:e}) | near-zero max_abs={:e} at w[{}] | \
                  resolvable {}/{} | max_abs_err={:e} | max|an|={:e}",
                 r.max_rel,
@@ -242,7 +254,7 @@ fn sweep(cases: &[Case], rel_pin: f64, near_zero_pin: f64, abs_pin: f64) -> (f64
                 r.max_abs_err,
                 r.max_abs_analytic
             );
-            let at = format!("(t={t}, in={i}, out={o}, seed={seed})");
+            let at = format!("{label} (t={t}, in={i}, out={o}, seed={seed})");
             assert!(
                 r.max_abs_analytic > 1e-6,
                 "{at}: the analytic gradient is all ~zero -- the check is vacuous"
@@ -319,7 +331,14 @@ fn slstm_backward_matches_central_difference() {
         (11, 5, 4, 4 * 4 * (4 + 5 + 1) - 4),
         (23, 7, 3, 4 * 3 * (3 + 7 + 1) - 3),
     ];
-    let (worst_rel, worst_abs, worst_err) = sweep(cases, 1.7e-5, 2.5e-9, 1.4e-8);
+    let (worst_rel, worst_abs, worst_err) = sweep(
+        "slstm",
+        |i, o| Box::new(SlstmLayer::new(i, o)),
+        cases,
+        1.7e-5,
+        2.5e-9,
+        1.4e-8,
+    );
     assert!(
         worst_rel > 0.0 && worst_abs > 0.0 && worst_err > 0.0,
         "a whole regime came back at exactly 0 error -- suspicious"
