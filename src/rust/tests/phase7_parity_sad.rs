@@ -330,6 +330,67 @@ fn fast_bails_on_pitch_pass() {
     }
 }
 
+/// PHASE 9 TASK 2 RIDER (spec S4.2): the fast tree parses the port-only structural
+/// keys but implements the peephole-LSTM BIDIRECTIONAL twin ONLY. A config selecting
+/// a new cell or the causal direction must fail LOUDLY at construction, not silently
+/// run an LSTM.
+///
+/// This is not hypothetical arithmetic-free bookkeeping: before the bail, an sLSTM
+/// config's only symptom was `FastBlstm::from_flat`'s length check -- which fires
+/// only for a SHORT pack. An sLSTM pack at least as long as the LSTM one was
+/// consumed head-first and RAN, producing an LSTM's numbers under an sLSTM's name.
+#[test]
+fn fast_bails_on_unsupported_cell_type_and_direction() {
+    for cell in ["slstm", "mamba"] {
+        let mut m = tier2_map(Some("fast"));
+        m.insert("BLSTM_Cell_Type".into(), cell.into());
+        match build_fast_bag(&mut m) {
+            Err(e) => assert!(
+                e.to_string().contains(&format!(
+                    "cell type '{cell}' is not supported on the fast inference path"
+                )),
+                "expected a cell-type bail for {cell}, got: {e}"
+            ),
+            Ok(_) => panic!("fast + cell type {cell} must bail"),
+        }
+    }
+
+    // Direction: the causal shape needs a `hidden`-wide output MLP, so the config
+    // has to declare one for `BlstmConfig::from_legacy` to accept it at all -- the
+    // fast bail must fire on a config that is otherwise VALID.
+    let mut m = tier2_map(Some("fast"));
+    m.insert("BLSTM_Direction".into(), "forward".into());
+    let hidden: usize = m["BLSTM_LSTMNeuronNb"]
+        .split(',')
+        .next_back()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Narrow ONLY the output MLP's FIRST layer (`2*hidden -> hidden`); the rest of
+    // the list must survive, or `_OutputSubSampling`'s length check fires first and
+    // the test would pass for the wrong reason.
+    let mut out_layers: Vec<String> = m["BLSTM_OutputNeuronNb"]
+        .split(',')
+        .map(|v| v.trim().to_string())
+        .collect();
+    out_layers[0] = hidden.to_string();
+    m.insert("BLSTM_OutputNeuronNb".into(), out_layers.join(","));
+    match build_fast_bag(&mut m) {
+        Err(e) => assert!(
+            e.to_string()
+                .contains("Direction 'forward' is not supported on the fast inference path"),
+            "expected a direction bail, got: {e}"
+        ),
+        Ok(_) => panic!("fast + Direction forward must bail"),
+    }
+
+    // The EXACT path is unaffected: the same slstm config builds there (Task 2).
+    let mut exact = tier2_map(Some("exact"));
+    exact.insert("BLSTM_Cell_Type".into(), "slstm".into());
+    build_fast_bag(&mut exact).expect("Inference_Path exact + slstm must build");
+}
+
 #[test]
 fn fast_bails_on_non_self_normalization() {
     // Phase 8 Task 1 NARROWED this bail: the fast SAD path now supports

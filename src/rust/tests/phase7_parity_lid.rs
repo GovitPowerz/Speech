@@ -547,6 +547,58 @@ fn fast_twin_bails_on_non_mode7() {
     }
 }
 
+/// PHASE 9 TASK 2 RIDER: the `BLSTM_LID_*` structural keys are bailed too -- the
+/// Twin's LID net is the one that actually RUNS on the fast path, so a new cell there
+/// would be a wrong-architecture inference. Pinned on BOTH prefixes because they are
+/// separate `build_aligned_spec` calls.
+#[test]
+fn fast_twin_bails_on_unsupported_cell_type_and_direction() {
+    for (key, value, want) in [
+        (
+            "BLSTM_LID_Cell_Type",
+            "slstm",
+            "cell type 'slstm' is not supported on the fast inference path",
+        ),
+        (
+            "BLSTM_Cell_Type",
+            "mamba",
+            "cell type 'mamba' is not supported on the fast inference path",
+        ),
+        (
+            "BLSTM_LID_Direction",
+            "forward",
+            "Direction 'forward' is not supported on the fast inference path",
+        ),
+    ] {
+        let mut m = map_of("twin_mode7");
+        m.insert(key.into(), value.into());
+        if key == "BLSTM_LID_Direction" {
+            // A causal net declares a `hidden`-wide output MLP head (see
+            // `BlstmConfig::from_legacy`), else the width check fires first.
+            let hidden: usize = m["BLSTM_LID_LSTMNeuronNb"]
+                .split(',')
+                .next_back()
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let mut out: Vec<String> = m["BLSTM_LID_OutputNeuronNb"]
+                .split(',')
+                .map(|v| v.trim().to_string())
+                .collect();
+            out[0] = hidden.to_string();
+            m.insert("BLSTM_LID_OutputNeuronNb".into(), out.join(","));
+        }
+        match build_fast_twin(&m) {
+            Err(e) => assert!(
+                e.to_string().contains(want),
+                "expected {want:?} for {key}={value}, got: {e}"
+            ),
+            Ok(_) => panic!("fast Twin + {key}={value} must bail"),
+        }
+    }
+}
+
 #[test]
 fn fast_twin_bails_on_dump_internals() {
     let mut m = map_of("twin_mode7");

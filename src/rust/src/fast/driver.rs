@@ -46,7 +46,7 @@ use ndarray::Array2;
 use crate::audio::Audio;
 use crate::config::NnetSpec;
 use crate::constants::random_gauss;
-use crate::nn::blstm::BlstmConfig;
+use crate::nn::blstm::{BlstmConfig, CellType, Direction};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
@@ -55,6 +55,43 @@ use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_
 use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, self_normalize_f32};
 use super::pipeline::FastPipeline;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
+
+/// Typed bail for the port-only STRUCTURAL keys the fast/streaming trees parse but
+/// cannot honour (Phase 9 Task 2 rider, spec S4.2).
+///
+/// [`FastBlstm`] is a peephole-LSTM, BIDIRECTIONAL f32 twin and nothing else: it
+/// reads `NnetSpec`, which carries no cell type and no direction, so a config
+/// selecting `slstm`/`mamba` or `Direction forward` would silently get an LSTM
+/// bidirectional forward on the fast path -- a WRONG-ARCHITECTURE run with no
+/// tolerance to widen and no gate to catch it. This closes that hole at the ONE
+/// choke point every fast/streaming construction passes through
+/// ([`build_aligned_spec`], reached from `FastSpectralSegmenter::from_legacy`,
+/// `FastTwinLid::from_legacy` for BOTH nets, and `stream::StreamingSession::new`).
+///
+/// Today the only in-tree symptom would be a length mismatch inside
+/// `FastBlstm::from_flat` -- and only for a SHORT pack: an sLSTM pack that happens to
+/// be at least as long as the LSTM one is silently consumed head-first and RUNS.
+/// Phase 9 Task 6 replaces these bails with real causal fast twins; until then the
+/// bail IS the contract.
+fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
+    if bc.cell_type != CellType::Lstm {
+        bail!(
+            "cell type '{}' is not supported on the fast inference path (net '{prefix}'); the \
+             f32 fast tree implements the legacy peephole LSTM only -- run this config on the \
+             exact path (Inference_Path exact)",
+            bc.cell_type.as_str()
+        );
+    }
+    if bc.direction != Direction::Bidirectional {
+        bail!(
+            "Direction '{}' is not supported on the fast inference path (net '{prefix}'); the \
+             f32 fast tree builds the bidirectional stack pair only -- run this config on the \
+             exact path (Inference_Path exact)",
+            bc.direction.as_str()
+        );
+    }
+    Ok(())
+}
 
 /// Build the `NnetSpec` for the fast net (under config `prefix`, e.g. `"BLSTM"` for
 /// the SAD net or `"BLSTM_LID"` for the Twin's LID net) with peephole flags aligned to
@@ -93,6 +130,7 @@ pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Resul
         NnetSpec::from_legacy(&m, prefix)?
     };
     let bc = BlstmConfig::from_legacy(map, prefix)?;
+    bail_unsupported_shape(&bc, prefix)?;
     spec.peepholes = [
         bc.forward_peep.cells,
         bc.backward_peep.cells,

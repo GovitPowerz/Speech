@@ -14,7 +14,8 @@
 //! `CellLayer` implements `Layer` by match delegation -- the
 //! `engine::bag_of_processors::Processor` precedent: a CLOSED set, static dispatch,
 //! the concrete methods stay reachable, no trait-object gymnastics. Variants grow
-//! with the phase: `Lstm` here, `Slstm` (Task 2) and `Mamba` (Task 3) next. The
+//! with the phase: `Lstm` (Task 1), `Slstm` (Task 2, landed) and `Mamba` (Task 3,
+//! still typed-bailed at `BlstmNetwork::from_config`). The
 //! existing `impl Layer for LstmLayer` in [`super::network`] STAYS (the phase-2/3
 //! unit + golden suites drive `LstmLayer` directly); `CellLayer::Lstm` wraps that
 //! same struct, so every f64 operation below the enum is byte-untouched -- the wrap
@@ -54,12 +55,15 @@ use super::network::Layer;
 pub enum CellLayer {
     /// The legacy peephole LSTM (`nn::layers::LstmLayer`), byte-untouched.
     Lstm(LstmLayer),
+    /// The xLSTM paper's scalar-memory cell ([`SlstmLayer`], spec S2; Task 2).
+    Slstm(SlstmLayer),
 }
 
 impl Layer for CellLayer {
     fn feed_forward(&mut self, input: &Array2<f64>, output: &mut Array2<f64>, last_layer: bool) {
         match self {
             CellLayer::Lstm(l) => LstmLayer::feed_forward(l, input, output, last_layer),
+            CellLayer::Slstm(l) => SlstmLayer::feed_forward(l, input, output, last_layer),
         }
     }
 
@@ -71,6 +75,7 @@ impl Layer for CellLayer {
     ) {
         match self {
             CellLayer::Lstm(l) => LstmLayer::feed_forward_reverse(l, input, output, last_layer),
+            CellLayer::Slstm(l) => SlstmLayer::feed_forward_reverse(l, input, output, last_layer),
         }
     }
 
@@ -84,6 +89,14 @@ impl Layer for CellLayer {
     ) -> Array2<f64> {
         match self {
             CellLayer::Lstm(l) => LstmLayer::feed_backward(
+                l,
+                input,
+                output,
+                deltas,
+                inv_sub_sampling_ratio,
+                last_layer,
+            ),
+            CellLayer::Slstm(l) => SlstmLayer::feed_backward(
                 l,
                 input,
                 output,
@@ -111,42 +124,56 @@ impl Layer for CellLayer {
                 inv_sub_sampling_ratio,
                 last_layer,
             ),
+            CellLayer::Slstm(l) => SlstmLayer::feed_backward_reverse(
+                l,
+                input,
+                output,
+                deltas,
+                inv_sub_sampling_ratio,
+                last_layer,
+            ),
         }
     }
 
     fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
         match self {
             CellLayer::Lstm(l) => LstmLayer::get_weights_derivatives(l, out),
+            CellLayer::Slstm(l) => SlstmLayer::get_weights_derivatives(l, out),
         }
     }
 
     fn reset_weights_derivatives(&mut self) {
         match self {
             CellLayer::Lstm(l) => LstmLayer::reset_weights_derivatives(l),
+            CellLayer::Slstm(l) => SlstmLayer::reset_weights_derivatives(l),
         }
     }
 
     fn ponderate_weights_derivatives(&mut self, factor: f64) {
         match self {
             CellLayer::Lstm(l) => LstmLayer::ponderate_weights_derivatives(l, factor),
+            CellLayer::Slstm(l) => SlstmLayer::ponderate_weights_derivatives(l, factor),
         }
     }
 
     fn set_weights<'a>(&mut self, flat: &'a [f64]) -> &'a [f64] {
         match self {
             CellLayer::Lstm(l) => LstmLayer::set_weights(l, flat),
+            CellLayer::Slstm(l) => SlstmLayer::set_weights(l, flat),
         }
     }
 
     fn get_weights(&self, out: &mut Vec<f64>) {
         match self {
             CellLayer::Lstm(l) => LstmLayer::get_weights(l, out),
+            CellLayer::Slstm(l) => SlstmLayer::get_weights(l, out),
         }
     }
 
     fn nb_of_weights(&self) -> usize {
         match self {
             CellLayer::Lstm(l) => LstmLayer::nb_of_weights(l),
+            CellLayer::Slstm(l) => SlstmLayer::nb_of_weights(l),
         }
     }
 }

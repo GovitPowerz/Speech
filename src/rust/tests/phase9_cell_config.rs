@@ -6,18 +6,20 @@
 //!   them in their declared section (never `[legacy.raw]`), and TOML -> flat -> TOML
 //!   is a fixed point;
 //! - a real committed fixture config (`phase4a/tier2_spectral.config`, the Algo-3
-//!   spectral SAD net) carrying `BLSTM_Cell_Type slstm` typed-bails at driver
-//!   construction with the not-yet-implemented wording.
+//!   spectral SAD net) carrying `BLSTM_Cell_Type mamba` typed-bails at driver
+//!   construction with the not-yet-implemented wording, while `slstm` (Task 2, landed)
+//!   BUILDS.
 //!
-//! REMOVE the `slstm` arm of `unimplemented_cell_type_bails_on_the_tier2_fixture`
-//! when Task 2 lands `SlstmLayer` (and the `mamba` arm when Task 3 lands
-//! `MambaLayer`) -- the bail is scaffolding, not a permanent contract.
+//! REMOVE `unimplemented_cell_type_bails_on_the_tier2_fixture` when Task 3 lands
+//! `MambaLayer` -- the bail is scaffolding, not a permanent contract. Task 2 already
+//! flipped the `slstm` arm into `slstm_cell_type_builds_on_the_tier2_fixture`.
 
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
 use speech::legacy_config::parse_legacy_config;
 use speech::tasks::sad::BlstmSpectralSegmenter;
+use speech::tasks::segmenter::Segmenter;
 use speech::toml_config::{map_to_toml, toml_to_map};
 
 fn repo_root() -> PathBuf {
@@ -80,18 +82,46 @@ fn tier2_fixture_round_trips_with_the_new_keys_added() {
 /// at construction, with the exact spec wording -- no silent fallback to LSTM.
 #[test]
 fn unimplemented_cell_type_bails_on_the_tier2_fixture() {
-    for cell in ["slstm", "mamba"] {
-        let mut map = tier2_map();
-        map.insert("BLSTM_Cell_Type".into(), cell.into());
-        // `BlstmSpectralSegmenter` is not `Debug`, so match instead of `unwrap_err`.
-        match BlstmSpectralSegmenter::from_legacy(&map, None) {
-            Ok(_) => panic!("cell type '{cell}' must not be constructible yet"),
-            Err(e) => assert_eq!(
-                format!("{e:#}"),
-                format!("cell type '{cell}' not yet implemented")
-            ),
-        }
+    let cell = "mamba";
+    let mut map = tier2_map();
+    map.insert("BLSTM_Cell_Type".into(), cell.into());
+    // `BlstmSpectralSegmenter` is not `Debug`, so match instead of `unwrap_err`.
+    match BlstmSpectralSegmenter::from_legacy(&map, None) {
+        Ok(_) => panic!("cell type '{cell}' must not be constructible yet"),
+        Err(e) => assert_eq!(
+            format!("{e:#}"),
+            format!("cell type '{cell}' not yet implemented")
+        ),
     }
+}
+
+/// Task 2 FLIP: the same real fixture config with `BLSTM_Cell_Type slstm` now BUILDS
+/// a working Algo-3 driver -- the cell reaches production config through the full
+/// `Segmenter` path, not just the unit seam. The weight-pack length changes with the
+/// cell (sLSTM has no peepholes), which is the observable proof that the driver holds
+/// sLSTM stacks rather than silently falling back to LSTM.
+#[test]
+fn slstm_cell_type_builds_on_the_tier2_fixture() {
+    let lstm = BlstmSpectralSegmenter::from_legacy(&tier2_map(), None)
+        .expect("the untouched fixture must build");
+
+    let mut map = tier2_map();
+    map.insert("BLSTM_Cell_Type".into(), "slstm".into());
+    let slstm =
+        BlstmSpectralSegmenter::from_legacy(&map, None).expect("slstm must build on the fixture");
+
+    let (n_lstm, n_slstm) = (lstm.get_weights().len(), slstm.get_weights().len());
+    assert!(n_lstm > 0 && n_slstm > 0);
+    assert_ne!(
+        n_slstm, n_lstm,
+        "the sLSTM pack must differ from the LSTM one -- equal counts would mean the \
+         driver silently kept the LSTM stacks"
+    );
+    // Same seam contract as any other cell: a full-length pack round-trips.
+    let mut net = BlstmSpectralSegmenter::from_legacy(&map, None).unwrap();
+    let w: Vec<f64> = (0..n_slstm).map(|k| 0.11 - 0.0003 * (k as f64)).collect();
+    net.set_weights(&w).unwrap();
+    assert_eq!(net.get_weights(), w);
 }
 
 /// The same fixture with the key ABSENT (or explicitly `lstm`) builds -- the bail is

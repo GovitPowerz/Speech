@@ -148,7 +148,9 @@ impl CellType {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    /// The config-text spelling. `pub` so the fast/streaming trees can NAME the cell
+    /// in their unsupported-cell bails (`fast::driver::build_aligned_spec`).
+    pub fn as_str(self) -> &'static str {
         match self {
             CellType::Lstm => "lstm",
             CellType::Slstm => "slstm",
@@ -180,6 +182,14 @@ impl Direction {
         match self {
             Direction::Bidirectional => 2,
             Direction::Forward => 1,
+        }
+    }
+
+    /// The config-text spelling (the `CellType::as_str` twin, same reason).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Direction::Bidirectional => "bidirectional",
+            Direction::Forward => "forward",
         }
     }
 
@@ -372,33 +382,46 @@ impl BlstmNetwork {
     /// fixtures rather than the legacy `.mat`).
     ///
     /// Phase 9 (spec S1.1/S1.2) added two port-only dispatches, both inert on every
-    /// legacy config: the CELL type (only [`CellType::Lstm`] is constructible this
-    /// task; `slstm`/`mamba` typed-bail until Tasks 2/3) and the DIRECTION
+    /// legacy config: the CELL type ([`CellType::Lstm`] and [`CellType::Slstm`] both
+    /// build; `mamba` typed-bails until Task 3) and the DIRECTION
     /// ([`Direction::Forward`] builds NO backward stack, and the output MLP the
     /// config already declared is `hidden`- rather than `2*hidden`-wide, validated
     /// in [`BlstmConfig::from_legacy`]). MLP mode has no recurrent stacks at all, so
     /// both dispatches sit inside the non-MLP branch and a cell type is inert there.
+    ///
+    /// The peephole flags are LSTM-only (an sLSTM has no peepholes, spec S2.2): a
+    /// config carrying them alongside `slstm` is not an error, they are simply
+    /// unread by that cell.
     pub fn from_config(cfg: BlstmConfig) -> Result<BlstmNetwork> {
         let (forward_network, backward_network) = if cfg.is_mlp {
             (None, None)
         } else {
-            if cfg.cell_type != CellType::Lstm {
+            if cfg.cell_type == CellType::Mamba {
                 bail!("cell type '{}' not yet implemented", cfg.cell_type.as_str());
             }
-            let fwd_peep = cfg.forward_peep;
-            let bwd_peep = cfg.backward_peep;
+            let cell_type = cfg.cell_type;
+            // One builder per direction; the cell dispatch is inside so both stacks
+            // stay structurally identical. A NEW variant must add its arm here AND a
+            // bail above -- never fall through to the LSTM.
+            let make = |peep: PeepholeFlags| {
+                move |_layer_id: usize, input: usize, output: usize| match cell_type {
+                    CellType::Lstm => CellLayer::Lstm(super::layers::LstmLayer::new(
+                        input,
+                        output,
+                        peep.cells,
+                        peep.gates,
+                        peep.gates_recurrent,
+                    )),
+                    CellType::Slstm => {
+                        CellLayer::Slstm(super::cells::SlstmLayer::new(input, output))
+                    }
+                    CellType::Mamba => unreachable!("mamba is rejected above"),
+                }
+            };
             let forward = Network::new(
                 cfg.lstm_neuron_nb.clone(),
                 cfg.lstm_sub_sampling.clone(),
-                |_layer_id, input, output| {
-                    CellLayer::Lstm(super::layers::LstmLayer::new(
-                        input,
-                        output,
-                        fwd_peep.cells,
-                        fwd_peep.gates,
-                        fwd_peep.gates_recurrent,
-                    ))
-                },
+                make(cfg.forward_peep),
             );
             // Causal mode builds NO reverse stack (spec S1.2). Dead on every legacy
             // config -- `Direction` defaults to `Bidirectional`.
@@ -407,15 +430,7 @@ impl BlstmNetwork {
                 Direction::Bidirectional => Some(Network::new(
                     cfg.lstm_neuron_nb.clone(),
                     cfg.lstm_sub_sampling.clone(),
-                    |_layer_id, input, output| {
-                        CellLayer::Lstm(super::layers::LstmLayer::new(
-                            input,
-                            output,
-                            bwd_peep.cells,
-                            bwd_peep.gates,
-                            bwd_peep.gates_recurrent,
-                        ))
-                    },
+                    make(cfg.backward_peep),
                 )),
             };
             (Some(forward), backward)
@@ -2204,31 +2219,102 @@ mod direction_tests {
     fn output_net_width_check_follows_the_direction() {
         // Bidirectional wants 2*HIDDEN; HIDDEN is rejected with the legacy wording.
         let err = BlstmConfig::from_legacy(&map_for("bidirectional", HIDDEN), "X").unwrap_err();
-        assert!(err.to_string().contains("twice"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "The first layer of the output network must contains twice the number of LSTM \
+             cells in last layer of the LSTM networks.",
+            "the legacy wording must survive verbatim"
+        );
 
         // Forward wants HIDDEN; 2*HIDDEN is rejected, naming the direction.
         let err = BlstmConfig::from_legacy(&map_for("forward", 2 * HIDDEN), "X").unwrap_err();
         assert!(err.to_string().contains("forward"), "{err}");
     }
 
-    /// `slstm`/`mamba` parse but are not constructible until Phase 9 Tasks 2/3.
-    /// REMOVE these arms as each cell lands.
+    /// `mamba` parses but is not constructible until Phase 9 Task 3. REMOVE this
+    /// test when the cell lands (Task 2 already removed the `slstm` arm -- see
+    /// `slstm_cell_type_builds_a_real_recurrent_stack` below).
     #[test]
     fn unimplemented_cell_types_bail_at_construction() {
-        for cell in ["slstm", "mamba"] {
-            let mut m = map_for("", 2 * HIDDEN);
-            m.insert("X_Cell_Type".into(), cell.into());
-            let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
-            assert_eq!(cfg.cell_type, CellType::parse(cell).unwrap());
-            // `BlstmNetwork` is not `Debug`, so match instead of `unwrap_err`.
-            match BlstmNetwork::from_config(cfg) {
-                Ok(_) => panic!("cell type '{cell}' must not be constructible yet"),
-                Err(e) => assert_eq!(
-                    e.to_string(),
-                    format!("cell type '{cell}' not yet implemented")
-                ),
-            }
+        let cell = "mamba";
+        let mut m = map_for("", 2 * HIDDEN);
+        m.insert("X_Cell_Type".into(), cell.into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        assert_eq!(cfg.cell_type, CellType::parse(cell).unwrap());
+        // `BlstmNetwork` is not `Debug`, so match instead of `unwrap_err`.
+        match BlstmNetwork::from_config(cfg) {
+            Ok(_) => panic!("cell type '{cell}' must not be constructible yet"),
+            Err(e) => assert_eq!(
+                e.to_string(),
+                format!("cell type '{cell}' not yet implemented")
+            ),
         }
+    }
+
+    /// Phase 9 Task 2: `slstm` no longer bails -- it builds a REAL recurrent stack.
+    /// The pack length is the sLSTM formula (`4*out*(out+in+1)` per layer, NOT the
+    /// LSTM's peephole-carrying count), the seam round-trips, and a forward produces
+    /// a genuine normalized posterior that moves across time.
+    #[test]
+    fn slstm_cell_type_builds_a_real_recurrent_stack() {
+        for direction in ["bidirectional", "forward"] {
+            let out_in = if direction == "forward" {
+                HIDDEN
+            } else {
+                2 * HIDDEN
+            };
+            let mut m = map_for(direction, out_in);
+            m.insert("X_Cell_Type".into(), "slstm".into());
+            let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+            assert_eq!(cfg.cell_type, CellType::Slstm);
+            let mut net = BlstmNetwork::from_config(cfg).expect("slstm must build");
+
+            // SlstmLayer(3,2) = 4*2*(2+3+1) = 48 per stack; NeuronLayer(2,2) = 6 /
+            // (4,2) = 10; tail = 2*IN. Contrast: the LSTM stack is 72.
+            let stacks = if direction == "forward" { 1 } else { 2 };
+            let mlp = if direction == "forward" { 6 } else { 10 };
+            assert_eq!(net.nb_of_weights(), stacks * 48 + mlp + 2 * IN);
+
+            let w = ramp(net.nb_of_weights());
+            net.set_weights(&w).unwrap();
+            assert_eq!(net.get_weights(), w);
+
+            let mut output = Array2::<f64>::zeros((T, CLASSES));
+            net.feed_forward(&input_seq(), &mut output);
+            for r in 0..T {
+                let s: f64 = (0..CLASSES).map(|c| output[[r, c]]).sum();
+                assert!((s - 1.0).abs() < 1e-12, "{direction} row {r}: {s}");
+            }
+            assert!(
+                (0..T).any(|r| (output[[r, 0]] - output[[0, 0]]).abs() > 1e-12),
+                "{direction}: every frame scored identically -- the stack is inert"
+            );
+        }
+    }
+
+    /// The gradient reaches the sLSTM stack through the whole wrapper (output MLP ->
+    /// hcat split -> cell BPTT), and every harvested row carries a frame count -- the
+    /// contract `update_weights`' element-wise quotient needs.
+    #[test]
+    fn slstm_stack_receives_gradient_through_the_wrapper() {
+        let mut m = map_for("bidirectional", 2 * HIDDEN);
+        m.insert("X_Cell_Type".into(), "slstm".into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        let mut net = BlstmNetwork::from_config(cfg).unwrap();
+        net.set_weights(&ramp(net.nb_of_weights())).unwrap();
+
+        let mut input = input_seq();
+        let mut output = Array2::<f64>::zeros((T, CLASSES));
+        net.feed_forward_backward(&mut input, 0, 0, &mut output, &one_hot_targets());
+
+        let derivs = net.get_weights_derivatives();
+        assert_eq!(derivs.nrows(), net.nb_of_weights());
+        // The two sLSTM stacks are the pack's first 2*48 rows.
+        let fwd: f64 = (0..48).map(|k| derivs[[k, 0]].abs()).sum();
+        let bwd: f64 = (48..96).map(|k| derivs[[k, 0]].abs()).sum();
+        assert!(fwd > 0.0, "the forward sLSTM stack received no gradient");
+        assert!(bwd > 0.0, "the backward sLSTM stack received no gradient");
+        assert!((0..derivs.nrows()).all(|k| derivs[[k, 1]] > 0.0));
     }
 
     /// An explicit `lstm` is the default path, and an unknown value is a hard error
@@ -2253,8 +2339,7 @@ mod direction_tests {
                 .contains("unknown cell type 'gru'")
         );
 
-        let mut bad_dir = map_for("backward", 2 * HIDDEN);
-        bad_dir.insert("X_TwoSweeps".into(), "false".into());
+        let bad_dir = map_for("backward", 2 * HIDDEN);
         assert!(
             BlstmConfig::from_legacy(&bad_dir, "X")
                 .unwrap_err()

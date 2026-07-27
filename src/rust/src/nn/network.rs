@@ -769,6 +769,13 @@ pub fn repeat_rows(input: &Array2<f64>, n: usize) -> Array2<f64> {
     out
 }
 
+/// Spec S1.2 / touch class (b): the `Direction::Forward` zero-width-`second` path
+/// through `feed_forward_double` / `feed_backward_double`.
+///
+/// These assertions pin the CONTRACT (double-with-an-empty-right-half == plain), not
+/// the branch: the short-circuit is pure copy elision, so deleting it leaves every
+/// number here unchanged. What would fail is a branch that stopped agreeing with the
+/// general path -- e.g. a half-split applied to a zero-width `second`.
 #[cfg(test)]
 mod forward_only_double_tests {
     use super::*;
@@ -871,5 +878,7 @@ mod forward_only_double_tests {
         let mut output = Array2::<f64>::zeros((T, OUT));
         narrow_output_net().feed_forward_double(&hidden, &Array2::zeros((T, 0)), &mut output);
         assert!(output.iter().all(|v| v.is_finite()));
+        // Non-vacuity: the dense head really produced a softmax row, not zeros.
+        assert!((output.row(0).sum() - 1.0).abs() < 1e-12);
     }
 }

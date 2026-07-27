@@ -578,6 +578,40 @@ fn validation_bails() {
         "empty-weightsFile bail message: {msg}"
     );
 
+    // (8) PHASE 9 TASK 2 RIDER: the port-only structural keys. The streaming session
+    // runs the phase-7 `FastBlstm` (peephole LSTM, bidirectional), so a config asking
+    // for a new cell or the causal direction must bail rather than stream an LSTM
+    // under another architecture's name -- the bail reaches here through the shared
+    // `build_aligned_spec` choke point, not a stream-local check.
+    let mut m = parse(&text);
+    m.insert("BLSTM_Cell_Type".into(), "slstm".into());
+    let msg = bail_msg(StreamingSession::new(&m, rate, 1));
+    assert!(
+        msg.contains("cell type 'slstm' is not supported on the fast inference path"),
+        "slstm bail message: {msg}"
+    );
+
+    let mut m = parse(&text);
+    m.insert("BLSTM_Direction".into(), "forward".into());
+    let hidden: usize = m["BLSTM_LSTMNeuronNb"]
+        .split(',')
+        .next_back()
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut out: Vec<String> = m["BLSTM_OutputNeuronNb"]
+        .split(',')
+        .map(|v| v.trim().to_string())
+        .collect();
+    out[0] = hidden.to_string();
+    m.insert("BLSTM_OutputNeuronNb".into(), out.join(","));
+    let msg = bail_msg(StreamingSession::new(&m, rate, 1));
+    assert!(
+        msg.contains("Direction 'forward' is not supported on the fast inference path"),
+        "causal-direction bail message: {msg}"
+    );
+
     // Sanity: the un-mutated config constructs cleanly.
     let m = parse(&text);
     assert!(StreamingSession::new(&m, rate, 1).is_ok());
