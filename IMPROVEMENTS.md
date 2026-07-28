@@ -4821,8 +4821,11 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
   (6) **Packer block-order swap.** THE LITERAL S8.6 MUTATION IS VACUOUS, proven not asserted:
   `init_weights.py::init_slstm_flat`'s `for gate in range(4)  # [i|f|o|z]` -> `for gate in
-  [0, 1, 3, 2]  # [i|f|z|o]` leaves the emitted pack BYTE-IDENTICAL (sha256 `f986fdd0207bc948
-  740b5a42bbae86b1`, 108 elements at `out=3, fin=5`, before AND after), and `uv run pytest
+  [0, 1, 3, 2]  # [i|f|z|o]` leaves the emitted pack BYTE-IDENTICAL, before AND after, at
+  `init_slstm_flat(np.random.default_rng(21), 3, 5)` (SEED 21, `out=3, fin=5`, 108 elements):
+  `sha256(pack.tobytes()) = f986fdd0207bc948740b5a42bbae86b19727eb255c52fcf2febc495d80a5b157`
+  (the full 64-hex digest -- an earlier revision of this entry quoted only its first 32 chars,
+  which reads misleadingly like an MD5). `uv run pytest
   tests/test_phase9_init.py -k slstm` stayed 19/19 GREEN. The reason: all four gate blocks are
   iid draws of identical shape emitted in draw order, and the only content that distinguishes
   them -- `b_f = 1` -- sits at loop position 1 in both orders, so an `o`/`z` relabel has no
