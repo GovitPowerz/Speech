@@ -16,7 +16,15 @@
 //!
 //! Task 2 lands `nn` (the f32 BLSTM forward core); Task 3 adds `pipeline`; Task 4 adds
 //! `driver` (the algo-3 fast SAD; Task 5 extends it with the Mode-7 LID Twin).
+//!
+//! Phase 9 Task 6 adds `cells`: the f32 CAUSAL twins of the new `nn::cells` family
+//! (`FastSlstm`/`FastMamba` + `FastCausalNet`), built around an explicit per-timestep
+//! `step` kernel so the offline fast path and the Task-7 causal streaming session run
+//! the SAME arithmetic (spec S4.1-S4.3). The phase-7 `nn`/`pipeline`/`driver` BLSTM
+//! path is untouched by it -- the causal net is a sibling the driver dispatches to on
+//! `Cell_Type` + `Direction`, never a change to `FastBlstm`.
 
+pub mod cells;
 pub mod driver;
 pub mod nn;
 pub mod pipeline;

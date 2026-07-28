@@ -393,17 +393,25 @@ fn fast_bails_on_unsupported_cell_type_and_direction() {
 
 #[test]
 fn fast_bails_on_non_self_normalization() {
-    // Phase 8 Task 1 NARROWED this bail: the fast SAD path now supports
-    // InputNormalizationType -1 (self-norm, phase 7) AND 1 (pack-carried external
-    // mean/std, the phase-8 frozen-stats reference mode) -- type 1 used to be the
-    // RED value here and must now CONSTRUCT. Everything else (0, -2, ...) still
-    // typed-bails.
-    let mut type1 = tier2_map(Some("fast"));
-    type1.insert("BLSTM_InputNormalizationType".into(), "1".into());
-    build_fast_bag(&mut type1)
-        .expect("fast + InputNormalizationType 1 must construct (phase-8 frozen mode)");
+    // This bail has been NARROWED twice, each time by a phase that needed one more
+    // genuinely-supported type; both narrowings are recorded here rather than
+    // rewritten away, because "which types used to be RED" is the contract's history:
+    //
+    // - Phase 8 Task 1 admitted type 1 (pack-carried external mean/std, the
+    //   frozen-stats reference mode).
+    // - Phase 9 Task 6 admitted type 0 (NO normalization) -- the exact path's
+    //   `_ => {}` arm (`nn/blstm.rs:1271`), a no-op on BOTH sides, which the committed
+    //   phase-9 causal gate fixtures use.
+    //
+    // Everything else (-2, 2, ...) still typed-bails.
+    for ok in ["1", "0"] {
+        let mut m = tier2_map(Some("fast"));
+        m.insert("BLSTM_InputNormalizationType".into(), ok.into());
+        build_fast_bag(&mut m)
+            .unwrap_or_else(|e| panic!("fast + InputNormalizationType {ok} must construct: {e}"));
+    }
 
-    for bad in ["0", "-2", "2"] {
+    for bad in ["-2", "2"] {
         let mut m = tier2_map(Some("fast"));
         m.insert("BLSTM_InputNormalizationType".into(), bad.into());
         match build_fast_bag(&mut m) {

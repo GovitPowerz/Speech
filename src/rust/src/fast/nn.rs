@@ -282,11 +282,11 @@ struct FastLstmLayer {
 
 /// One dense output layer's f32 weights (col-major `I x O`, plus the `O` bias row).
 #[derive(Clone)]
-struct FastDenseLayer {
-    input_size: usize,
-    output_size: usize,
-    weights: Vec<f32>, // col-major (I x O)
-    biases: Vec<f32>,  // O
+pub(crate) struct FastDenseLayer {
+    pub(crate) input_size: usize,
+    pub(crate) output_size: usize,
+    pub(crate) weights: Vec<f32>, // col-major (I x O)
+    pub(crate) biases: Vec<f32>,  // O
 }
 
 // ---------------------------------------------------------------------------
@@ -298,15 +298,15 @@ struct FastDenseLayer {
 /// length at each use, so over-sized tails are inert and repeated calls are
 /// bit-identical (the workspace-hygiene contract).
 #[derive(Default, Clone)]
-struct Scratch {
-    sub: Vec<f32>,        // sub_sample output (T x C*R)
-    proj: Vec<f32>,       // gate/dense projection (T x 4O or T x O)
-    ping: Vec<f32>,       // layer-output ping (also the materialized net input)
-    pong: Vec<f32>,       // layer-output pong
-    prev_gates: Vec<f32>, // rolling previous-step activated gates (4O)
-    prev_cell: Vec<f32>,  // rolling previous-step cell state (O)
-    prev_out: Vec<f32>,   // rolling previous-step output (O)
-    cur_cell: Vec<f32>,   // current-step cell state (O)
+pub(crate) struct Scratch {
+    pub(crate) sub: Vec<f32>,  // sub_sample output (T x C*R)
+    proj: Vec<f32>,            // gate/dense projection (T x 4O or T x O)
+    pub(crate) ping: Vec<f32>, // layer-output ping (also the materialized net input)
+    pub(crate) pong: Vec<f32>, // layer-output pong
+    prev_gates: Vec<f32>,      // rolling previous-step activated gates (4O)
+    prev_cell: Vec<f32>,       // rolling previous-step cell state (O)
+    prev_out: Vec<f32>,        // rolling previous-step output (O)
+    cur_cell: Vec<f32>,        // current-step cell state (O)
 }
 
 /// The full workspace: the per-net `Scratch` plus the buffers that must persist
@@ -323,7 +323,7 @@ struct Workspace {
 /// shrinking. New tail is zeroed but every live slice is fully overwritten before
 /// read, so the zero-fill is inert.
 #[inline]
-fn ensure_len(v: &mut Vec<f32>, n: usize) {
+pub(crate) fn ensure_len(v: &mut Vec<f32>, n: usize) {
     if v.len() < n {
         let new_len = n.max(v.len().saturating_mul(2));
         v.resize(new_len, 0.0);
@@ -987,7 +987,7 @@ pub(crate) fn window_end(begin: usize, window_size: usize, ssr: usize, input_row
 /// `sub_sample` (`network.rs:695-708`): `T x C -> floor(T/R) x C*R`, row `jj*R+kk`
 /// into output columns `[kk*C, (kk+1)*C)` of row `jj`; trailing `T mod R` dropped.
 /// Reads `in_data[r*in_stride + c]` for `c in 0..in_cols`.
-fn sub_sample_into(
+pub(crate) fn sub_sample_into(
     ratio: usize,
     in_data: &[f32],
     in_rows: usize,
@@ -1042,7 +1042,13 @@ fn pad_replicate_ends_f32(m: &FastMatrix, front: usize, back: usize) -> FastMatr
 
 /// Copy a possibly-strided view `(rows x cols, row stride)` into a contiguous
 /// `rows x cols` buffer (materializes the crop-gate view before the layer loop).
-fn copy_view_into(in_data: &[f32], rows: usize, cols: usize, stride: usize, out: &mut Vec<f32>) {
+pub(crate) fn copy_view_into(
+    in_data: &[f32],
+    rows: usize,
+    cols: usize,
+    stride: usize,
+    out: &mut Vec<f32>,
+) {
     ensure_len(out, rows * cols);
     if stride == cols {
         out[..rows * cols].copy_from_slice(&in_data[..rows * cols]);
@@ -1358,7 +1364,7 @@ fn dense_layer_forward(
 /// HCAT (`in_rows x in_cols`); it is materialized into `scr.ping`, then layers chain
 /// with per-layer subsampling. The final (last) layer applies softmax/Logistic and
 /// writes `dest`; hidden layers apply asinh into the ping/pong scratch.
-fn dense_net_forward(
+pub(crate) fn dense_net_forward(
     layers: &[FastDenseLayer],
     subs: &[usize],
     in_data: &[f32],
