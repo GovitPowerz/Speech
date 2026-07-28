@@ -1425,3 +1425,266 @@ pub(crate) fn dense_net_forward(
     }
     (cur_rows, cur_cols)
 }
+
+/// The PER-ROW driver for a dense output-MLP stack -- the row-granular twin of
+/// [`dense_net_forward`], and the SHARED kernel both the offline causal net
+/// ([`super::cells::FastCausalNet::feed_forward`]) and the causal streaming session
+/// ([`super::stream::StreamCausal`]) run, so a streamed posterior row is BIT-IDENTICAL
+/// to the offline one BY CONSTRUCTION (the phase-7/8 shared-kernel precedent).
+///
+/// WHY THIS EXISTS (Phase 9 Task 7 finding). Task 6's `fast::cells` module doc argues
+/// that batching the dense MLP through faer is safe because "it is a per-row map, so
+/// batching it is state-free". MEASURED, that is FALSE: `faer_project`'s reduction over
+/// `k` is `m`-INDEPENDENT only when `w_cols == 1` (a matrix-VECTOR product); at
+/// `w_cols > 1` faer selects a blocked micro-kernel whose accumulation order depends on
+/// the row count, so a `t == 1` call and a `t == T` call disagree in the last f32 ULP
+/// (measured on this box: 0/37 differing rows at `(k, o) = (4, 1)`/`(24, 1)`/`(96, 1)`,
+/// but 42/111 at `(4, 3)`, 401/444 at `(24, 12)`, 47/74 at `(48, 2)`). The real causal
+/// SAD arm (`configs/training/lre_sad.toml`, `output_neuron_nb = "48,12,1"` -> `24,12,1`
+/// under `Direction forward`) carries exactly such a WIDE hidden dense layer, so a
+/// streaming session that batched differently from offline would break the phase-9
+/// bit-equal gate on the very checkpoint the phase exists to stream. Routing BOTH sides
+/// through this per-row chain removes the question instead of pinning a faer internal:
+/// both call `dense_layer_forward` at `t == 1`, always.
+///
+/// This is behaviour-free for the phase-7 [`FastBlstm`], which keeps [`dense_net_forward`]
+/// untouched, and ZERO-CHANGE on every committed phase-9 fixture (their output MLP is the
+/// single `4 -> 1` layer, where `t == 1` and `t == T` are bit-identical as measured above).
+///
+/// SUB-SAMPLING. `subs[jj] > 1` buffers `subs[jj]` input rows and concatenates them in
+/// arrival order (`sub_sample`'s `row jj*R+kk -> columns [kk*C, (kk+1)*C)` layout,
+/// `sub_sample_into`), so a trailing partial group is DROPPED exactly as the batched
+/// `T mod R` truncation drops it -- here by simply never completing.
+#[derive(Clone)]
+pub(crate) struct DenseRowChain {
+    pend: Vec<Vec<f32>>, // per layer: the pending sub-sample row accumulator
+    fill: Vec<usize>,    // per layer: rows accumulated into `pend`
+    outs: Vec<Vec<f32>>, // per layer: this layer's output row (>= output_size long)
+    proj: Vec<f32>,      // the shared projection scratch (dense_layer_forward's)
+}
+
+impl DenseRowChain {
+    pub(crate) fn new(n_layers: usize) -> DenseRowChain {
+        DenseRowChain {
+            pend: vec![Vec::new(); n_layers],
+            fill: vec![0; n_layers],
+            outs: vec![Vec::new(); n_layers],
+            proj: Vec::new(),
+        }
+    }
+
+    /// Drop every partially-buffered sub-sample group (the offline driver calls this at
+    /// the top of each whole-sequence forward, so a reused chain starts each call in the
+    /// same state a fresh one would -- the run-twice bit-identity contract).
+    pub(crate) fn reset(&mut self) {
+        for p in self.pend.iter_mut() {
+            p.clear();
+        }
+        for f in self.fill.iter_mut() {
+            *f = 0;
+        }
+    }
+
+    /// Feed ONE input row through the whole stack. Returns `true` when a posterior row
+    /// completed (read it back with [`Self::output`]); `false` while a sub-sampling stage
+    /// is still buffering.
+    pub(crate) fn push_row(
+        &mut self,
+        layers: &[FastDenseLayer],
+        subs: &[usize],
+        row: &[f32],
+    ) -> bool {
+        let n = layers.len();
+        for jj in 0..n {
+            let ratio = subs[jj].max(1);
+            if ratio == 1 {
+                self.pend[jj].clear();
+            }
+            if jj == 0 {
+                self.pend[0].extend_from_slice(row);
+            } else {
+                let w = layers[jj - 1].output_size;
+                self.pend[jj].extend_from_slice(&self.outs[jj - 1][..w]);
+            }
+            if ratio > 1 {
+                self.fill[jj] += 1;
+                if self.fill[jj] < ratio {
+                    return false;
+                }
+                self.fill[jj] = 0;
+            }
+            let cols = self.pend[jj].len();
+            dense_layer_forward(
+                &layers[jj],
+                &self.pend[jj],
+                1,
+                cols,
+                cols,
+                jj == n - 1,
+                &mut self.proj,
+                &mut self.outs[jj],
+            );
+            self.pend[jj].clear();
+        }
+        true
+    }
+
+    /// The last completed posterior row (valid only after a `true` from
+    /// [`Self::push_row`]).
+    pub(crate) fn output(&self, layers: &[FastDenseLayer]) -> &[f32] {
+        let last = layers.len() - 1;
+        &self.outs[last][..layers[last].output_size]
+    }
+}
+
+#[cfg(test)]
+mod dense_row_chain_tests {
+    use super::*;
+
+    /// A deterministic, bounded dense layer at `(in, out)`.
+    fn layer(i: usize, o: usize) -> FastDenseLayer {
+        FastDenseLayer {
+            input_size: i,
+            output_size: o,
+            weights: (0..i * o)
+                .map(|k| (0.3 + 0.37 * k as f64).sin() as f32)
+                .collect(),
+            biases: (0..o).map(|k| (0.11 * k as f64).cos() as f32).collect(),
+        }
+    }
+
+    fn input(rows: usize, cols: usize) -> Vec<f32> {
+        (0..rows * cols)
+            .map(|k| (0.21 * k as f64).sin() as f32)
+            .collect()
+    }
+
+    /// Rows where the batched [`dense_net_forward`] and the per-row [`DenseRowChain`]
+    /// disagree in bits, for a single-layer `(i, o)` stack over `t` rows.
+    fn row_granularity_diffs(i: usize, o: usize, t: usize) -> usize {
+        let layers = vec![layer(i, o)];
+        let subs = vec![1usize];
+        let data = input(t, i);
+
+        let mut scr = Scratch::default();
+        let mut batched = Vec::new();
+        dense_net_forward(&layers, &subs, &data, t, i, &mut scr, &mut batched);
+
+        let mut chain = DenseRowChain::new(1);
+        let mut per_row: Vec<f32> = Vec::new();
+        for r in 0..t {
+            assert!(chain.push_row(&layers, &subs, &data[r * i..r * i + i]));
+            per_row.extend_from_slice(chain.output(&layers));
+        }
+
+        (0..t * o)
+            .filter(|&k| batched[k].to_bits() != per_row[k].to_bits())
+            .count()
+    }
+
+    /// THE MEASUREMENT THE DESIGN RESTS ON (Phase 9 Task 7). `faer_project` reduces over
+    /// `k` in an `m`-INDEPENDENT order only when the weight matrix has ONE column: at
+    /// `w_cols == 1` it is a matrix-vector product, at `w_cols > 1` faer selects a blocked
+    /// micro-kernel whose accumulation depends on the row count. That is why the causal
+    /// tree routes BOTH its offline and its streaming dense stage through
+    /// [`DenseRowChain`] instead of pinning faer's kernel-selection behaviour -- and why
+    /// Task 6's "batching it is state-free" reading of the dense MLP was wrong.
+    ///
+    /// A CHANGE HERE IS NOT A FAILURE TO WIDEN. If the `o == 1` column ever starts
+    /// differing, the phase-7 `FastBlstm` (which keeps the BATCHED form) and the causal
+    /// tree have drifted apart on a shape they used to agree on: re-measure and adjudicate.
+    /// If the `o > 1` column ever stops differing, this test's premise is stale but the
+    /// per-row design is still correct (it just stopped being load-bearing).
+    #[test]
+    fn dense_row_granularity_is_faer_column_dependent() {
+        // ONE output column: per-row == batched, on every width tried.
+        for (i, o) in [(1usize, 1usize), (3, 1), (4, 1), (23, 1), (24, 1), (96, 1)] {
+            let d = row_granularity_diffs(i, o, 37);
+            println!("MEASURE dense row-granularity i={i} o={o}: {d}/37 differing rows");
+            assert_eq!(
+                d, 0,
+                "a single-column dense projection must be row-count-independent (i={i})"
+            );
+        }
+        // WIDER: the batched and per-row forms genuinely disagree, which is what makes the
+        // shared per-row chain load-bearing rather than cosmetic (the real causal SAD arm's
+        // MLP is `24,12,1` -- a 12-wide hidden layer).
+        let mut wide_diffs = 0;
+        for (i, o) in [(4usize, 3usize), (48, 2), (24, 12), (12, 5)] {
+            let d = row_granularity_diffs(i, o, 37);
+            println!(
+                "MEASURE dense row-granularity i={i} o={o}: {d}/{} differing rows",
+                37 * o
+            );
+            wide_diffs += d;
+        }
+        assert!(
+            wide_diffs > 0,
+            "the wide-layer divergence is the whole reason DenseRowChain exists; if faer no \
+             longer diverges, re-adjudicate (the per-row design stays correct either way)"
+        );
+    }
+
+    /// The chain reproduces the batched stack under OUTPUT SUB-SAMPLING too, including the
+    /// trailing `T mod R` drop -- the layout claim in [`DenseRowChain`]'s docs.
+    #[test]
+    fn dense_row_chain_reproduces_sub_sampled_batching() {
+        // Two layers: a 2:1 decimating first layer (input 6 -> 12 columns after the
+        // sub-sample), then a 1-wide output. `o == 1` on BOTH layers keeps the comparison
+        // against the batched form exact (see the measurement above).
+        let layers = vec![layer(12, 1), layer(1, 1)];
+        let subs = vec![2usize, 1];
+        let t = 13; // odd: the trailing row is dropped by the 2:1 stage
+        let data = input(t, 6);
+
+        let mut scr = Scratch::default();
+        let mut batched = Vec::new();
+        let (b_rows, b_cols) =
+            dense_net_forward(&layers, &subs, &data, t, 6, &mut scr, &mut batched);
+        assert_eq!(
+            (b_rows, b_cols),
+            (6, 1),
+            "13/2 = 6 rows, trailing 1 dropped"
+        );
+
+        let mut chain = DenseRowChain::new(2);
+        let mut per_row: Vec<f32> = Vec::new();
+        for r in 0..t {
+            if chain.push_row(&layers, &subs, &data[r * 6..r * 6 + 6]) {
+                per_row.extend_from_slice(chain.output(&layers));
+            }
+        }
+        assert_eq!(per_row.len(), b_rows * b_cols, "row count");
+        for k in 0..per_row.len() {
+            assert_eq!(
+                per_row[k].to_bits(),
+                batched[k].to_bits(),
+                "sub-sampled chain bits at {k}"
+            );
+        }
+
+        // THE LEAK `reset` PREVENTS: 13 rows leave the 2:1 stage holding ONE pending row,
+        // so without a reset the next sequence's FIRST row would complete a group built
+        // from the previous sequence. Demonstrate both halves.
+        assert!(
+            chain.push_row(&layers, &subs, &data[0..6]),
+            "a stale partial group completes on a single row (the leak)"
+        );
+        chain.reset();
+        assert!(
+            !chain.push_row(&layers, &subs, &data[0..6]),
+            "after reset the 2:1 stage needs two rows again"
+        );
+        chain.reset();
+        let mut again: Vec<f32> = Vec::new();
+        for r in 0..t {
+            if chain.push_row(&layers, &subs, &data[r * 6..r * 6 + 6]) {
+                again.extend_from_slice(chain.output(&layers));
+            }
+        }
+        assert_eq!(
+            again, per_row,
+            "reset must restore a fresh-chain start state"
+        );
+    }
+}

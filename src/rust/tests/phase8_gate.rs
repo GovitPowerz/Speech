@@ -532,7 +532,12 @@ fn validation_bails() {
         "missing-gain bail message: {msg}"
     );
 
-    // (4) InputNormalizationType != 1.
+    // (4) InputNormalizationType outside the accepted set. Phase 9 Task 7 WIDENED that set
+    // from {1} to {0, 1} (type 0 is the exact path's no-op arm -- no whole-file statistic
+    // exists, so there is nothing to freeze and nothing to break causality); type -1
+    // (per-sequence self-normalization) still bails, because it needs the whole sequence
+    // before the first frame can be normalized. That widening ACCEPTS MORE configs and
+    // changes the behaviour of NONE that phase 8 already accepted.
     let mut m = parse(&text);
     m.insert("BLSTM_InputNormalizationType".into(), "-1".into());
     let msg = bail_msg(StreamingSession::new(&m, rate, 1));

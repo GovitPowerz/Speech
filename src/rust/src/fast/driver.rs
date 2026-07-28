@@ -102,7 +102,7 @@ pub enum FastNetShape {
 /// The two message bodies are UNCHANGED from Task 2 so the phase-7/8 legs that pin
 /// them (`phase7_parity_sad.rs`, `phase7_parity_lid.rs`, `phase8_gate.rs`) keep
 /// asserting the same contract for the combinations that are still unsupported.
-fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<FastNetShape> {
+pub(crate) fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<FastNetShape> {
     match (bc.cell_type, bc.direction) {
         (CellType::Lstm, Direction::Bidirectional) => Ok(FastNetShape::Blstm),
         (cell, Direction::Forward) if cell != CellType::Lstm => Ok(FastNetShape::Causal(cell)),
@@ -175,7 +175,7 @@ pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Resul
 /// aligned to an already-parsed [`BlstmConfig`]. Split out by Task 6 so the algo-3 SAD
 /// driver can classify the shape itself (and build a causal net) off the same
 /// peephole-aligned spec, with no second config parse.
-fn build_spec_aligned_to(
+pub(crate) fn build_spec_aligned_to(
     map: &IndexMap<String, String>,
     prefix: &str,
     bc: &BlstmConfig,

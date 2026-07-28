@@ -68,8 +68,8 @@ use crate::config::NnetSpec;
 use crate::nn::blstm::{CellType, MambaParams};
 
 use super::nn::{
-    FastDenseLayer, FastMatrix, Scratch, copy_view_into, dense_net_forward, ensure_len,
-    logistic_f32, sub_sample_into,
+    DenseRowChain, FastDenseLayer, FastMatrix, Scratch, copy_view_into, ensure_len, logistic_f32,
+    sub_sample_into,
 };
 
 // ---------------------------------------------------------------------------
@@ -801,6 +801,12 @@ pub struct FastCausalNet {
     scratch: Scratch,
     hidden: Vec<f32>,
     output: FastMatrix,
+    /// The dense output MLP's PER-ROW driver -- the same [`DenseRowChain`] the causal
+    /// streaming session runs, so offline and streamed posteriors are bit-identical by
+    /// construction (see that type's docs for the measured faer `m`-dependence this
+    /// removes). Reused across calls (the preallocation contract) and `reset` at the top
+    /// of every [`Self::feed_forward`].
+    dense_chain: DenseRowChain,
 }
 
 impl FastCausalNet {
@@ -950,6 +956,7 @@ impl FastCausalNet {
         // the release build is exactly where that must not pass quietly.
         assert_eq!(pos, needed, "from_flat consumed != element_count");
 
+        let dense_chain = DenseRowChain::new(output_layers.len());
         Ok(FastCausalNet {
             lstm_neuron_nb: lstm.clone(),
             lstm_subsampling: lsub.clone(),
@@ -962,6 +969,7 @@ impl FastCausalNet {
             scratch: Scratch::default(),
             hidden: Vec::new(),
             output: FastMatrix::zeros(0, 0),
+            dense_chain,
         })
     }
 
@@ -990,11 +998,42 @@ impl FastCausalNet {
         &self.cells
     }
 
+    /// The per-cell-layer sub-sampling ratios (Task 7's streaming stack buffers by them).
+    pub fn lstm_subsampling(&self) -> &[usize] {
+        &self.lstm_subsampling
+    }
+
+    /// The per-output-layer sub-sampling ratios.
+    pub fn output_subsampling(&self) -> &[usize] {
+        &self.output_subsampling
+    }
+
+    /// The net's declared input width (`LSTMNeuronNb[0]`) -- the [`Self::feed_forward`]
+    /// crop-gate threshold Task 7's streaming stack has to reproduce.
+    pub fn input_width(&self) -> usize {
+        self.lstm_neuron_nb[0]
+    }
+
+    /// The dense output MLP's layers. `pub(crate)`: [`FastDenseLayer`] is a crate-private
+    /// type, and the only consumer is the sibling streaming session.
+    pub(crate) fn output_layers(&self) -> &[FastDenseLayer] {
+        &self.output_layers
+    }
+
     /// Whole-sequence causal forward, the f32 twin of `BlstmNetwork::feed_forward`
     /// under `Direction::Forward`: output length = rows divided SEQUENTIALLY by each
     /// recurrent sub-sampling ratio; the `LSTMRatios[0] > 1 && netInput < inputCols`
     /// crop gate; ONE stack (no reverse pass, no HCAT); then the output MLP over
     /// `hidden` columns. Returns the posteriors, held in the reused `output` buffer.
+    ///
+    /// THE DENSE STAGE IS PER-ROW (Phase 9 Task 7): it runs [`DenseRowChain`], NOT the
+    /// batched [`super::nn::dense_net_forward`] the phase-7 `FastBlstm` keeps, so the
+    /// causal streaming session can reproduce it row by row BIT-IDENTICALLY. See
+    /// [`DenseRowChain`]'s docs for the measured faer row-count dependence that makes the
+    /// batched form unstreamable at `output_size > 1`. Zero-change for every committed
+    /// phase-9 fixture (single `4 -> 1` output layer, where batched and per-row are
+    /// bit-identical); at a wider hidden dense layer it moves the last f32 ULP, inside the
+    /// `CELL_F32_PIN` band the stacked legs pin.
     pub fn feed_forward(&mut self, input: &FastMatrix) -> &FastMatrix {
         let frames = input.rows;
         let mut out_len = frames;
@@ -1024,17 +1063,24 @@ impl FastCausalNet {
             &mut self.hidden,
         );
 
-        let (o_rows, o_cols) = dense_net_forward(
-            &self.output_layers,
-            &self.output_subsampling,
-            &self.hidden,
-            rows,
-            cols,
-            &mut self.scratch,
-            &mut self.output.data,
-        );
+        // The dense output MLP, ONE hidden row at a time through the shared chain.
+        self.dense_chain.reset();
+        self.output.data.clear();
+        let mut o_rows = 0usize;
+        for r in 0..rows {
+            let row = &self.hidden[r * cols..r * cols + cols];
+            if self
+                .dense_chain
+                .push_row(&self.output_layers, &self.output_subsampling, row)
+            {
+                self.output
+                    .data
+                    .extend_from_slice(self.dense_chain.output(&self.output_layers));
+                o_rows += 1;
+            }
+        }
         self.output.rows = o_rows;
-        self.output.cols = o_cols;
+        self.output.cols = self.output_size;
         &self.output
     }
 }
