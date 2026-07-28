@@ -4707,6 +4707,193 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   errors row. Runs on all five fixtures (phSeq s1/s2/s3, cep tiny_ok/multi_ok). Added GREEN on the
   first run (no port fix needed); committed WITH this battery record and disclosed in the commit body.
 
+### Mutation battery (Phase 9)
+
+- **[phase9] Mutation battery (Task 10): 8/8 battery items break A named catcher via an
+  apply-FAIL-revert-PASS cycle, but only 5/8 break the catcher the spec NAMED -- three items
+  (3, 7, and the T8 half of 8) are recorded as HONEST GAPS with the leg that actually fired,
+  plus one VACUOUS-mutation finding on item 6 that forced two non-vacuous replacements, and a
+  bonus item 9 that verified one of T2's three deferred probe gaps.** Each mutation minimal +
+  surgical / run FOREGROUND against the NAMED catcher (`cargo test --release --lib <testname>`,
+  `cargo test --release --test <file> <testname>`, `uv run pytest <file> -k <filter>`) / reverted
+  / re-run GREEN; `git status --porcelain` + `git diff --stat` confirmed EMPTY between every
+  cycle and at the end (IMPROVEMENTS.md is the only committed file). Run in the RELEASE profile
+  throughout (CI's own profile -- no debug-assert-only catch is claimed anywhere below). Item 5
+  additionally rebuilt `speech_rs` (`maturin develop --release`) for the pyo3 seam leg, twice.
+
+  The battery's headline epistemic result is that phase 9's SELF-CONSISTENT legs (split-state
+  bit-identity, chunk-invariance, the streaming gate) are STRUCTURALLY BLIND to any mutation
+  applied inside the shared kernel both sides run -- they pin state THREADING, not kernel
+  ARITHMETIC. The arithmetic is pinned by the fast-vs-exact parity legs and the exact-cell
+  unit tier. That is the correct division of labour, but the S8.6 catcher naming for items 3
+  and 7 did not reflect it; the corrected mapping is recorded per item.
+
+  (1) **sLSTM stabilizer dropped.** `nn/cells/slstm.rs::feed_forward`: `let m_t = if fm > i_pre
+  { fm } else { i_pre };` -> `let m_t = 0.0;`. NAMED CATCHER FIRED: `cargo test --release --lib
+  stabilizer_survives` -- `nn::cells::slstm::tests::stabilizer_survives_huge_pre_activations`
+  FAILED (`sign=1: non-finite output [[NaN], [NaN], [NaN], [NaN], [NaN]]`, `slstm.rs:891`), the
+  unstabilized `exp(800)` overflowing to `inf` and the `inf/inf` ratio to `NaN`. THE FD HALF OF
+  THE NAMED PAIR DID NOT FIRE, correctly and provably: `slstm_backward_matches_central_difference`
+  stayed GREEN, as did `fast::cells::tests::slstm_matches_the_exact_cell_within_the_f32_band`.
+  The stabilizer is an ALGEBRAIC IDENTITY on the output -- `c_t = C_t e^{-m_t}` and `n_t = N_t
+  e^{-m_t}` share the same factor, so `h = o' (c_t/n_t) = o' (C_t/N_t)` is independent of `m`
+  entirely; dropping it changes DYNAMIC RANGE only. The backward already holds `m` constant
+  (spec S2.3), which stays exact when `m == 0` is also constant, so gradient consistency is
+  untouched. So the overflow probe is not merely the FIRST catcher of this mutation, it is the
+  ONLY possible one -- and this is the reason that probe exists. Reverted, both PASS.
+
+  (2) **Mamba `A_log` sign flip.** `nn/cells/mamba.rs::feed_forward` step 7: `a_mat[[c, s]] =
+  -w.a_log[[c, s]].exp();` -> `= w.a_log[[c, s]].exp();`, so `A > 0` and the selective
+  recurrence's decay becomes growth. BOTH NAMED CATCHERS FIRED. (a) `cargo test --release --lib
+  abar_stays_strictly` -- `abar_stays_strictly_inside_the_unit_interval` FAILED (`Abar
+  2.1801087305776257e0 left (0,1)`, `mamba.rs:1573`), the S3.1 stability-by-construction claim
+  broken at the first sweep draw. (b) `cargo test --release --test phase9_cell_grad
+  mamba_backward_matches_central_difference` FAILED (`mamba ds=4 dc=3 ex=2 (t=7, in=3, out=3,
+  seed=2): max abs err over ALL weights 1.8270980588486196e-6 >= pin 2.4e-7`). NOTE the FD leg
+  fails on the ABSOLUTE pin, not a wrong derivative: `dA/dA_log = -exp(A_log) = A` under the
+  committed sign AND `= +exp(A_log) = A` under the flipped one, so `mamba.rs:1000`'s
+  `acc.a_log += dabar * ab * dl * a` stays the correct chain rule either way and the RELATIVE
+  errors stay ~3e-6. What trips the pin is the MAGNITUDE blowup the growing recurrence causes
+  (`max|an|` 7.22e-1 at t=7, vs the healthy regime the pin was measured in), which inflates the
+  central difference's truncation term. The FD tier therefore catches this as an instability
+  detector, not as a sign detector -- the `Abar in (0,1)` probe is the sign detector. Reverted,
+  both PASS.
+
+  (3) **Mamba conv-ring off-by-one.** `fast/cells.rs::FastMamba::step` step 4: the tap-slot
+  index `let sl = (slot + dc - off) % dc;` -> `(slot + dc - off + 1) % dc`, rotating every
+  depthwise-conv tap one ring slot. **HONEST GAP: BOTH NAMED CATCHERS SURVIVED.** `cargo test
+  --release --lib mamba_split_state_reproduces_the_unsplit_run` PASSED and `cargo test --release
+  --test phase9_stream_causal chunking_bit_invariance` PASSED (as did all 19 legs of that file).
+  The reason is structural, not accidental: the ring index is a pure function of the CARRIED
+  `ring_pos`, which both sides of every self-consistency comparison thread identically, so a
+  uniform tap rotation cancels out of split-vs-unsplit and of every chunking. WHAT DID CATCH IT
+  (run to close the loop): `cargo test --release --lib mamba_matches_the_exact_cell` -- `fast::
+  cells::tests::mamba_matches_the_exact_cell_within_the_f32_band` FAILED (`mamba f32
+  transcription drift: 9.398650232325769e-5` vs the 5e-6 pin) and `mamba_without_the_adapter_
+  matches_the_exact_cell` with it; and `cargo test --release --test phase9_fast_parity
+  causal_parity` FAILED BOTH legs at the fixture level (`mamba: posterior drift
+  max_abs=1.6208032322658505e-1 max_rel=1.0272929029099005e0`, with `max_dt=0.0017` -- a nonzero
+  boundary delta, the R1 STOP). So the mutation is caught HARD, by the exact-vs-fast tier: the
+  conv ring is ARITHMETIC, and arithmetic is the parity legs' job. S8.6's naming of the
+  streaming legs for this item is the mis-assignment, not a coverage hole.
+
+  (4) **Step-state lifetime across boundaries.** Two sub-variants, because the S8.6 items 4 and
+  7 COLLAPSE onto the same constructor family (`FastSlstm::state`/`FastMamba::state`) and there
+  is no "state reused across files" site to break at all: `fast/cells.rs::run_sequence` --
+  documented as "THE one place the offline stack loops `step`" -- constructs `cell.state()`
+  unconditionally per sequence, so per-file freshness is a structural guarantee with no toggle.
+  (4a) THE MIRROR-IMAGE VARIANT, state RESET where it must PERSIST: `fast/stream.rs::StreamCausal
+  ::push_rows` re-seeds `self.states` from `self.net.cells().iter().map(|c| c.state())` at the
+  top of every push, so the carried recurrent state is thrown away at each chunk boundary. NAMED
+  CATCHERS FIRED, and hard: `cargo test --release --test phase9_stream_causal` -- 5 legs FAILED,
+  including both named ones. `stream_finish_equals_offline_causal` (`slstm: boundary max_dt must
+  be EXACTLY 0.0 (R1 STOP on nonzero)`, left `5.277099999999999`), `chunking_bit_invariance`
+  (`[slstm] chunk 800 vs chunk 0: finish Segmentation must be bit-identical`, 14 boundary rows
+  vs 12), plus `stream_finish_equals_offline_causal_frozen_type1` (`slstm/type1: segment count`
+  2 vs 3), `latency_bounds` (`SPEECH mid-stream max lag 25.287575 exceeds the structural bound
+  1.734 + allowance 0.5`) and `stream_causal_matches_offline_on_the_real_arm_geometry`. (4b) THE
+  BRIEF'S NAMED SECOND VARIANT, the conv ring not zeroed at construction: `FastMamba::state`'s
+  `conv_ring: vec![0.0; dc * di]` -> `vec![0.1; dc * di]` (a leaked left-pad). CAUGHT by the T6
+  state test directly -- `mamba_state_ring_starts_zeroed_at_slot_zero` FAILED (`assertion failed:
+  st.conv_ring.iter().all(|&v| v == 0.0)`, `cells.rs:1311`) -- and by both exact-vs-fast cell
+  legs (`mamba f32 transcription drift: 4.39191772433425e-2`). `mamba_split_state_reproduces_the_
+  unsplit_run` again SURVIVED, the same seed-blindness as item 3 (both sides seed from the same
+  mutated constructor). Reverted after each, all PASS.
+
+  (5) **`Direction` hcat misroute (feed `2*hidden` on forward).** The T1 review had already
+  recorded that `nn/network.rs::forward_only_double_tests` are CONTRACT pins (double-with-empty
+  == plain) that a mere branch removal cannot break, so the strongest FAITHFUL variant was
+  applied instead -- breaking the forward-only WIDTH: `nn/blstm.rs::feed_forward`'s reverse
+  accumulator `Array2::zeros((output_length, self.backward_network.as_ref().map_or(0, |b|
+  b.output_size())))` -> `.map_or(forward.output_size(), ...)`, so a causal net allocates a
+  `hidden`-wide zero reverse half and hcats `2*hidden` into an output MLP sized for `hidden`.
+  BOTH NAMED CATCHERS FIRED. (a) T1 shape units, `cargo test --release --lib forward_direction`
+  -- 3 of 4 FAILED (`forward_direction_feeds_hidden_wide_rows_into_the_output_net`,
+  `..._survives_the_overlap_windowed_driver`, `..._backward_routes_deltas_to_the_forward_stack_
+  only`), each at `network.rs:418` (`double: first|second cols must sum to neuron_nb[0]`, left 4
+  right 2). (b) T5 seam, `uv run pytest tests/pyo3/test_phase9_seam.py -k forward` -- 10 FAILED /
+  4 passed, the same assertion surfacing through pyo3 as a `PanicException` (left 8 right 4) on
+  every `slstm_forward`/`mamba_forward` leg that runs a forward (`test_grad_check_seam`,
+  `test_block_probe_matches_finite_difference`, `test_weights_derivatives_are_finite_and_block_
+  wise_alive`, `test_run_twice_is_bit_identical`, `test_slstm_input_gate_bias_block_is_output_
+  inert`, `test_mamba_output_projection_gates_the_recurrent_blocks`). Reverted + rebuilt, 4/4 and
+  14/14 PASS.
+
+  (6) **Packer block-order swap.** THE LITERAL S8.6 MUTATION IS VACUOUS, proven not asserted:
+  `init_weights.py::init_slstm_flat`'s `for gate in range(4)  # [i|f|o|z]` -> `for gate in
+  [0, 1, 3, 2]  # [i|f|z|o]` leaves the emitted pack BYTE-IDENTICAL (sha256 `f986fdd0207bc948
+  740b5a42bbae86b1`, 108 elements at `out=3, fin=5`, before AND after), and `uv run pytest
+  tests/test_phase9_init.py -k slstm` stayed 19/19 GREEN. The reason: all four gate blocks are
+  iid draws of identical shape emitted in draw order, and the only content that distinguishes
+  them -- `b_f = 1` -- sits at loop position 1 in both orders, so an `o`/`z` relabel has no
+  observable. A SECOND vacuity was found the same way: swapping the two `parts.append(_draw(...))`
+  statements (`[R | W]` -> `[W | R]`) ALSO left the pack unchanged and the suite 19/19 GREEN,
+  because moving the append statements moves the DRAW sites with them and the concatenation
+  re-serializes the same rng prefix. Both were reverted and replaced by two NON-VACUOUS variants
+  that decouple layout from draw order: (6b) draw `R` then `W` but APPEND `w_blk` before `r_blk`
+  -- `test_slstm_pack_is_reproducible_block_by_block` FAILED on all 6 parametrizations
+  (`3-3-xavier`, `3-3-he`, `7-2-xavier`, `7-2-he`, `1-1-xavier`, `1-1-he`; at `1-1` the diff is
+  visible element-wise, `[1.51067731, 0.35877341, 0.0, ...]` vs `[0.35877341, 1.51067731, 0.0,
+  ...]`); (6c) move the forget-gate bias one block (`if gate == 1` -> `if gate == 2`), the only
+  content-distinguishable aspect of the `[i|f|o|z]` order -- 9 FAILED, the same 6 reconstruction
+  legs PLUS all 3 `test_slstm_forget_bias_block_is_exactly_one_and_the_others_zero`
+  parametrizations. So the T4 whole-pack pins DO see layout, on both the drawn blocks and the
+  structural bias; what they cannot see (and nothing can) is a permutation of iid same-shape
+  blocks emitted in draw order. MUTATION-DESIGN LESSON, recorded for future batteries: in an
+  rng-sequential builder, reordering `append(draw(...))` statements is a no-op -- only a
+  mutation that separates the draw from its emission position probes the layout. Reverted, 19/19
+  PASS.
+
+  (7) **Fast f32 sLSTM state seeded `m = 0`.** `fast/cells.rs::FastSlstm::state`: `m:
+  vec![M_INIT_F32; o]` -> `vec![0.0; o]`. **HONEST GAP: THE NAMED CATCHER SURVIVED.** `cargo test
+  --release --test phase9_fast_parity causal_parity` PASSED both legs, and so did all 19 legs of
+  `phase9_stream_causal` and 5 of the 6 `fast::cells::tests::slstm*` units. The single catcher is
+  the dedicated contract pin `slstm_state_is_zeroed_with_the_m_sentinel`, which FAILED (`left:
+  [0.0, 0.0, 0.0]  right: [-1e30, -1e30, -1e30]`, `cells.rs:1296`). The reason the behavioural
+  legs are blind is again algebraic, and is the same identity as item 1: at `t = 0` the seed `m`
+  enters ONLY through `f' = exp(f~ + m_{-1} - m_0)`, which multiplies `c_{-1} = n_{-1} = 0`, so
+  its contribution is zero regardless; the residual effect is a common scale `e^{-m_0}` on BOTH
+  `c_0` and `n_0`, which cancels in `h_0 = o'(c_0/n_0)` and then cancels again at every later
+  step (`f'_1 c_0 = e^{f~+m_0-m_1} C_0 e^{-m_0} = e^{f~-m_1} C_0`). `M_INIT_F32` is therefore a
+  CONVENTION (the official xLSTM `f'_0 = 0` exactly) with no observable numeric consequence at a
+  fresh state -- it is not even load-bearing for overflow, since `m_0 = max(f~, i~)` under the
+  zero seed still bounds both exponent arguments at `<= 0`. It IS load-bearing the moment a
+  nonzero `(c, n)` is carried in, which is why the contract pin exists and why it is the right
+  place for this to be caught. Reverted, 6/6 + 2/2 PASS.
+
+  (8) **Mamba init `A_log` scheme swap.** `init_weights.py::init_mamba_flat`: the S3.4 constant
+  `a_log = np.log(np.arange(1, d_state + 1))` tiled over `d_inner` -> `_draw(rng, (d_inner,
+  d_state), d_state, d_state, scheme)`, i.e. S4D-real replaced by a Xavier/He draw. NAMED CATCHER
+  (a) FIRED: `uv run pytest tests/test_phase9_init.py -k mamba` -- 9 FAILED, all 3
+  `test_mamba_spec_pinned_constants` parametrizations (`assert np.array_equal(a_log,
+  np.tile(want_row, (di, 1)))`, `test_phase9_init.py:217`, drawn values `[0.12767914,
+  -0.61286247, ...]` vs the pinned `[0.0, 0.69314718, 1.09861229, 1.38629436, 1.60943791]`) and
+  all 6 `test_mamba_pack_is_reproducible_block_by_block`. NAMED CATCHER (b), the CORPUS-GATED T8
+  leg, DID NOT FIRE -- **honest gap, recorded**: `uv run pytest tests/pyo3/test_phase9_gates.py
+  -k "mamba and (init_is_trainable or deterministic)"` (RUN LOCALLY against the present corpus,
+  4 selected) PASSED 4/4 in 27.65 s. Both halves are blind by construction: `test_deterministic`
+  re-runs the same SEED, and the mutated init is still deterministic, so bit-identity holds; and
+  `test_init_is_trainable`'s preflight asserts BOUNDED HEADROOM (cost `< 5%` of the log clamp,
+  `grad_l2 > 1e-3`, dead-count floor + slack), which a uniform `A_log` does not violate because
+  `A = -exp(A_log) < 0` for ANY real `A_log` -- the recurrence stays stable, just badly
+  conditioned. The T8 legs gate TRAINABILITY, not the init RECIPE; the recipe is the T4 pins'
+  job, and they hold it decisively. Reverted, 30/30 PASS.
+
+  (9) **BONUS -- verifying one of T2's three deferred probe gaps.** T2's review deferred three
+  sLSTM backward sub-terms as "covered by the existing FD rel pins" without a dedicated probe:
+  the `dn * n_prev` half of `df~`, the `sigma'` factor in `do~`, and the R-block row-vs-row-1
+  pairing. ONE was verified by executing it as a real mutation: `nn/cells/slstm.rs::feed_backward`
+  `let d_f_pre = (dc * c_prev + dn * n_prev) * fp;` -> `(dc * c_prev) * fp`. CLAIM CONFIRMED --
+  `cargo test --release --test phase9_cell_grad slstm_backward_matches_central_difference` FAILED
+  (`slstm (t=7, in=3, out=2, seed=1): max rel 1.4509560215524258e0 >= pin 9e-6 at weight 28 (fd
+  8.747383650753449e-4 vs analytic -3.9446853301365094e-4)` -- a SIGN-OPPOSITE analytic value,
+  not a tolerance nibble). The instructive detail: all three `t=1` cases stayed within pin
+  (`max_rel` 4.4e-8 / 3.8e-9 / 5.5e-10), because `n_{-1} = 0` makes the dropped term structurally
+  inert at a single timestep -- the multi-step case is what carries this coverage, so the FD
+  tier's `t=7` legs are load-bearing for it and a `t=1`-only tier would have missed it entirely.
+  The other two deferrals (`sigma'` in `do~`, the R-block pairing) were NOT executed and remain
+  review-judgement, not measurement. Reverted, 2/2 PASS.
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
