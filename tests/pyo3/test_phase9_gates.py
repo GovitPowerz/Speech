@@ -58,11 +58,14 @@ consistent derivative there is EXACTLY ZERO. A from-scratch net whose output sat
 therefore a PERMANENT STALL under this law, not noisy descent, and it would look like a
 flat cost curve rather than a crash. The preflight leg asserts, at the from-scratch theta
 BEFORE any training: the pack length, a finite initial NNCostSeg sitting in the log law's
-INTERIOR (measured 0.27-0.34, i.e. ~0.1% of the saturated-forward constant
-`-ln(1e-24) = 55.262`), and a strictly POSITIVE analytic gradient L2 norm at epoch 0
-(measured 0.36-0.73). A saturated init would trip the interiority pin or the gradient pin.
-Whole-vector norms only: sLSTM's `b_i` is structurally non-identifiable (exactly zero
-gradient by construction, proven in T2), so no per-element gradient assert is meaningful.
+INTERIOR (measured 0.27-0.34, i.e. ~0.5% of the saturated-forward constant
+`-ln(1e-24) = 55.262`, worst case 0.62%) both in aggregate and for every INDIVIDUAL file
+(worst per-file normalized cost 0.2, 0.36% of the clamp -- the aggregate is frame-weighted,
+so it alone could hide a saturated minority), and a strictly POSITIVE analytic gradient L2
+norm at epoch 0 (measured 0.36-0.73). A saturated init would trip an interiority pin or the
+gradient pin. Whole-vector norms only: sLSTM's `b_i` is structurally non-identifiable
+(exactly zero gradient by construction, proven in T2), so no per-element gradient assert is
+meaningful.
 
 =====================================================================================
 vs BLSTM -- RECORDED, NOT GATED (spec R5, verbatim)
@@ -102,18 +105,32 @@ pytest.importorskip("speech_rs")
 
 from speech.drivers import baseline as B  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
 from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
-from speech.drivers.train import _init_weights_from_scratch, _modern_config_text, _tail_lengths  # noqa: E402
+from speech.drivers.train import _init_weights_from_scratch, _modern_config_text  # noqa: E402
 from speech.engine import forward_backward  # noqa: E402
 
-# (cell, direction, expected pack length) -- the S8.2 matrix, lengths from the table above
-# (T4 cross-pinned each against the Rust `BlstmNetwork::nb_of_weights()`).
+# (cell, direction, expected pack length, structurally-dead weight count) -- the S8.2 matrix.
+# Lengths: T4 cross-pinned each against the Rust `BlstmNetwork::nb_of_weights()`.
+# Dead counts: `D * blocks * out * 48 + 46` (see the dead-column caveat above) -- `D` = 2
+# bidirectional / 1 forward, `blocks` = 4 gate matrices per sLSTM layer but a SINGLE input
+# projection per Mamba layer, `out` = 24, 48 = the never-read fan-in columns, 46 = the frozen
+# normalize tail. Only LAYER 0 contributes (layer 1's fan-in is the previous layer's output,
+# fully live). This is the committed guard for the phase's dead-column claim.
 _CONFIGS = [
-    ("slstm", "bidirectional", 32519),
-    ("slstm", "forward", 16295),
-    ("mamba", "bidirectional", 30359),
-    ("mamba", "forward", 15215),
+    ("slstm", "bidirectional", 32519, 2 * 4 * 24 * 48 + 46),  # 9262
+    ("slstm", "forward", 16295, 1 * 4 * 24 * 48 + 46),  # 4654
+    ("mamba", "bidirectional", 30359, 2 * 1 * 24 * 48 + 46),  # 2350
+    ("mamba", "forward", 15215, 1 * 1 * 24 * 48 + 46),  # 1198
 ]
-_IDS = [f"{cell}-{direction}" for cell, direction, _ in _CONFIGS]
+_IDS = [f"{cell}-{direction}" for cell, direction, _, _ in _CONFIGS]
+# Slack above the structural dead-count floor. The count is a FLOOR, not an equality: a live
+# weight's gradient can land on exactly 0.0 by coincidence, and one measurably does -- the
+# sLSTM/forward pack reads 4654 (== the floor, extra 0 / missing 0 against the predicted index
+# SET) at this test's probe recipe but 4655 at a wider one (subset 4 / 20 s cap). So an `==`
+# pin would be a data- and libm-dependent flake. The floor is the load-bearing direction
+# (every predicted-dead weight IS dead); the slack keeps the guard two-sided so a pathological
+# jump in dead weight still fails. 64 is ~1.4% of the smallest floor, ~64x the one coincidence
+# ever observed.
+_DEAD_SLACK = 64
 
 # The phase-6 SAD subset-gate recipe, VERBATIM (`test_phase6_gates.py::test_sad_subset_*`)
 # -- shared so the vs-BLSTM comparison differs only in cell/direction.
@@ -170,15 +187,21 @@ def _probe(out: dict[str, float]) -> Callable[[RunState, int, ModernTrainParams]
             (workdir / "_preflight.config").write_text(_modern_config_text(state.base_config, algo, backprop=True))
             engine = speech_rs.Engine(["_preflight.config"], "-m")
             cost, grads = forward_backward(engine, weights)
+            results = np.asarray(engine.results_matrix(), dtype=np.float64)
         finally:
             os.chdir(prev)
 
         grad = np.asarray(grads[0], dtype=np.float64)
         out["pack_len"] = float(len(weights[0]))
-        out["theta_len"] = float(len(weights[0]) - _tail_lengths(state.base_config, algo)[0])
         out["init_cost"] = float(cost)
         out["grad_l2"] = float(np.linalg.norm(grad))
         out["grad_linf"] = float(np.max(np.abs(grad)))
+        out["dead"] = float(np.count_nonzero(grad == 0.0))
+        # PER-FILE normalized cost (algo-3 layout: cost col 4, counter the last col, config-1
+        # rows). The aggregate `init_cost` above is frame-weighted, so a saturated MINORITY of
+        # files could hide inside it; this max is the per-file worst case and cannot.
+        sel = results[results[:, 1] == 1]
+        out["per_file_cost_max"] = float(np.max(sel[:, 4] / np.maximum(1.0, sel[:, -1])))
         ckpt = Path(state.out_dir) / "checkpoint"
         ckpt.mkdir(parents=True, exist_ok=True)
         return _Shim(checkpoint_dir=str(ckpt), history=[_Rec(float(cost), float(cost))], best_val_cost=float(cost))
@@ -188,24 +211,28 @@ def _probe(out: dict[str, float]) -> Callable[[RunState, int, ModernTrainParams]
 
 @pytest.mark.slow
 @requires_corpus
-@pytest.mark.parametrize(("cell", "direction", "pack_len"), _CONFIGS, ids=_IDS)
-def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: int) -> None:
+@pytest.mark.parametrize(("cell", "direction", "pack_len", "dead_expected"), _CONFIGS, ids=_IDS)
+def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: int, dead_expected: int) -> None:
     """PREFLIGHT (the T5 log-law hazard + the T6 output-saturation hazard): before any
-    training, the from-scratch init must be param-matched, cost-INTERIOR under the log law,
-    and carry a NONZERO analytic gradient at epoch 0. Measured 2026-07-28, seed 0:
+    training, the from-scratch init must be param-matched, cost-INTERIOR under the log law
+    BOTH in aggregate and per file, and carry a NONZERO analytic gradient at epoch 0.
+    Measured 2026-07-28, seed 0 (`/clamp` = init cost over `-ln(1e-24) = 55.262`):
 
-    | config             | pack  | init NNCostSeg | /clamp   | grad L2 | grad Linf |
-    |--------------------|-------|----------------|----------|---------|-----------|
-    | lstm-bi (baseline) | 33671 | 0.29801        | 5.39e-03 | 0.46107 | 0.20218   |
-    | slstm-bi           | 32519 | 0.27728        | 5.02e-03 | 0.35638 | 0.19403   |
-    | slstm-forward      | 16295 | 0.27435        | 4.96e-03 | 0.36181 | 0.19235   |
-    | mamba-bi           | 30359 | 0.32665        | 5.91e-03 | 0.72742 | 0.19291   |
-    | mamba-forward      | 15215 | 0.33953        | 6.14e-03 | 0.57140 | 0.20565   |
+    | config             | pack  | init NNCostSeg | /clamp   | per-file max | grad L2 | grad Linf | dead  |
+    |--------------------|-------|----------------|----------|--------------|---------|-----------|-------|
+    | lstm-bi (baseline) | 33671 | 0.29801        | 5.39e-03 | 0.04888      | 0.46107 | 0.20218   | 9262  |
+    | slstm-bi           | 32519 | 0.27728        | 5.02e-03 | 0.04888      | 0.35638 | 0.19403   | 9262  |
+    | slstm-forward      | 16295 | 0.27435        | 4.96e-03 | 0.20000      | 0.36181 | 0.19235   | 4654  |
+    | mamba-bi           | 30359 | 0.32665        | 5.91e-03 | 0.04888      | 0.72742 | 0.19291   | 2350  |
+    | mamba-forward      | 15215 | 0.33953        | 6.14e-03 | 0.20000      | 0.57140 | 0.20565   | 1198  |
 
-    No config's init sits near the saturated-forward constant (all ~0.5% of it) and every
-    gradient norm is far from zero -- so none of the four starts in the zero-gradient death
-    the log law would otherwise make permanent. Cheap (~2 s: no valid/test split, no
-    training, one fold over 2 files)."""
+    No config's init sits near the saturated-forward constant (all ~0.5% of it, worst 0.62%),
+    no INDIVIDUAL file does either (worst per-file 0.2, 0.36% of the clamp), and every gradient
+    norm is far from zero -- so none of the four starts in the zero-gradient death the log law
+    would otherwise make permanent. The `dead` column is the structurally-dead weight count,
+    guarded here against the `_CONFIGS` prediction (the committed check on the dead-column
+    finding). Cheap (~0.2 s per config: no valid/test split, no training, one fold over 2
+    files; ~0.7 s for all four)."""
     out: dict[str, float] = {}
     B.run_baseline(
         "sad",
@@ -227,17 +254,31 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     # (0) param match: the pack the arm actually seeds is the S8.2-sized one.
     assert out["pack_len"] == pack_len, f"{cell}/{direction} pack length {out['pack_len']:.0f} != the pinned {pack_len}"
 
-    # (a) the initial cost is finite AND in the log law's interior, not pinned at its clamp.
+    # (a) the initial cost is finite AND in the log law's interior, not pinned at its clamp --
+    #     in AGGREGATE and, separately, for EVERY file (the frame-weighted aggregate could
+    #     otherwise hide a saturated minority behind a healthy majority).
     assert np.isfinite(out["init_cost"]), f"init cost must be finite, got {out['init_cost']}"
     assert out["init_cost"] > 0.0, f"init cost must be positive, got {out['init_cost']}"
     # measured <= 0.34, i.e. <= 0.62% of the clamp constant; pin 5% -> ~8x headroom.
     assert out["init_cost"] < 0.05 * _LOG_CLAMP, f"init cost {out['init_cost']:.5f} sits near the log-law clamp {_LOG_CLAMP:.3f} (saturated init)"
+    # per-file normalized worst case: measured <= 0.2 (0.36% of the clamp); same 5% pin.
+    assert out["per_file_cost_max"] < 0.05 * _LOG_CLAMP, (
+        f"{cell}/{direction} worst per-file cost {out['per_file_cost_max']:.5f} sits near the log-law clamp {_LOG_CLAMP:.3f} (a saturated file)"
+    )
 
     # (b) the analytic gradient at epoch 0 is NONZERO -- the zero-gradient death assert.
     #     Whole-vector norm (sLSTM's b_i is structurally non-identifiable, T2).
     #     Measured 0.356-0.727; pin 1e-3 -> ~350x headroom.
     assert out["grad_l2"] > 1e-3, f"{cell}/{direction} epoch-0 gradient norm {out['grad_l2']:.6f} is ~zero: the log-law saturation stall"
     assert np.isfinite(out["grad_linf"])
+
+    # (c) the DEAD-COLUMN prediction (the header caveat's arithmetic), guarded. A FLOOR plus
+    #     bounded slack, not an equality -- see `_DEAD_SLACK`. Falling BELOW the floor means
+    #     the dead block moved (a packer block-order or fan-in-width change); running far
+    #     ABOVE it means weights died that the arithmetic does not account for.
+    dead = int(out["dead"])
+    assert dead >= dead_expected, f"{cell}/{direction} dead-weight count {dead} is below the structural floor {dead_expected}: the dead block moved"
+    assert dead <= dead_expected + _DEAD_SLACK, f"{cell}/{direction} dead-weight count {dead} far exceeds the structural floor {dead_expected}"
 
 
 # ------------------------------------------------------------------------------------- #
@@ -247,21 +288,24 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
 
 @pytest.mark.slow
 @requires_corpus
-@pytest.mark.parametrize(("cell", "direction", "pack_len"), _CONFIGS, ids=_IDS)
-def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, pack_len: int) -> None:
+@pytest.mark.parametrize(("cell", "direction", "pack_len", "dead_expected"), _CONFIGS, ids=_IDS)
+def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, pack_len: int, dead_expected: int) -> None:
     """THE HARD LEG (spec S8.2 / S9.2): train this cell x direction from scratch on the
     10-file subset, then score a disjoint 24-file held-out slice END TO END through the T4
     DCF harness -- the trained pooled DCF must beat its own untrained init's, deterministically.
     Measured 2026-07-28, seed 0 (all five collars identical per row):
 
-    | config        | trained DCF | Pmiss/Pfa   | init DCF | wall  |
-    |---------------|-------------|-------------|----------|-------|
-    | slstm-bi      | 0.250000    | 0.00 / 1.00 | 0.750000 | ~41 s |
-    | slstm-forward | 0.250000    | 0.00 / 1.00 | 0.750000 | ~16 s |
-    | mamba-bi      | 0.250000    | 0.00 / 1.00 | 0.750000 | ~65 s |
-    | mamba-forward | 0.249625    | 0.00 / 1.00 | 0.750000 | ~19 s |
+    | config        | trained DCF | Pmiss / Pfa     | init DCF | wall  |
+    |---------------|-------------|-----------------|----------|-------|
+    | slstm-bi      | 0.250000    | 0.0000 / 1.0000 | 0.750000 | ~41 s |
+    | slstm-forward | 0.250000    | 0.0000 / 1.0000 | 0.750000 | ~16 s |
+    | mamba-bi      | 0.250000    | 0.0000 / 1.0000 | 0.750000 | ~65 s |
+    | mamba-forward | 0.249625    | 0.0000 / 0.9985 | 0.750000 | ~19 s |
 
     (phase-6 BLSTM, same recipe: 0.2500 vs 0.7500 -- RECORDED in RESULTS.md, NOT gated, R5.)
+    The wall column is NOT a speed comparison: `--direction forward` also switches the
+    windowing regime (`cell_overlay` forces `BLSTM_window 0`, the plain whole-sequence run,
+    vs the bidirectional rows' windowed overlap), so the forward rows differ in TWO ways.
 
     The pins are the phase-6 SAD gate's, unchanged: both endpoints are degenerate
     (all-one-class collapse), so the DCF is essentially exactly 0.25/0.75 with no
@@ -312,8 +356,8 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
 
 @pytest.mark.slow
 @requires_corpus
-@pytest.mark.parametrize(("cell", "direction", "pack_len"), _CONFIGS, ids=_IDS)
-def test_deterministic(tmp_path: Path, cell: str, direction: str, pack_len: int) -> None:
+@pytest.mark.parametrize(("cell", "direction", "pack_len", "dead_expected"), _CONFIGS, ids=_IDS)
+def test_deterministic(tmp_path: Path, cell: str, direction: str, pack_len: int, dead_expected: int) -> None:
     """Run-twice determinism at a fixed seed: bit-identical trained weight BYTES + identical
     pooled held-out DCF, per cell x direction. A SHORT config (the phase-6 pattern --
     determinism is a pipeline property, provable cheaply); the FULL-recipe run-twice

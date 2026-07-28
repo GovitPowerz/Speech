@@ -651,6 +651,16 @@ SMORMS3 steps, 20 s audio cap, seed 0, `val_metric=nn_cost_seg`), same end-to-en
 the direction differ, driven by the T4 `--cell-type` / `--direction` knobs on
 `speech baseline sad`. Measured 2026-07-28, Apple M4 Pro (arm64), macOS 26.5.2, N=1 lane.
 
+ONE RIDER on "only the cell and the direction differ", so the wall-time column below is not
+misread as a speed result: `--direction forward` necessarily changes TWO things, because a
+causal net cannot run the windowed regime meaningfully (a window boundary resets the
+recurrent state, spec S1.2). `cell_overlay` therefore forces `BLSTM_window 0` on every
+forward run -- the plain WHOLE-SEQUENCE regime -- while the bidirectional rows keep
+`frame_window 3.25`'s windowed overlap. The forward rows are consequently faster for a
+reason that is NOT the cell (no per-window recompute, half the recurrent stack, a smaller
+output MLP), and none of these wall times is a controlled RTF measurement. The controlled
+speed comparison is the fast-path bench (a later phase-9 task), not this table.
+
 #### Sizing (spec S8.2 param match, +-15%) -- HOLDS AT THE S6 DEFAULTS, no resizing
 
 The arm topology is fixed by the config (`LSTMNeuronNb 23,24,24` + `LSTMSubSampling 4,1` ->
@@ -707,27 +717,37 @@ six. The init decision is all-non-speech for all six -- the same starting regime
 phase-6 BLSTM arm documented, which is why the beat-init leg is the direction-safe metric.
 The preflight is a committed leg (`test_init_is_trainable`), not a one-off. EVIDENTIARY
 SCOPE, stated: the seam exposes the cost and the gradient, not the posterior vector (that
-is a Rust `test-support` hook), so "not saturated" here means COST-INTERIOR +
-GRADIENT-NONZERO + the net subsequently trains -- the three observables that decide whether
-the log law's zero-gradient region bites -- not a directly measured posterior range.
+is a Rust `test-support` hook), so "not saturated" here means COST-INTERIOR (in aggregate AND
+per file -- the aggregate is frame-weighted, so the committed leg also pins the worst
+per-file normalized cost, measured 0.04888 bidirectional / 0.2 forward, i.e. <= 0.36% of the
+clamp) + GRADIENT-NONZERO + the net subsequently trains -- the observables that decide
+whether the log law's zero-gradient region bites -- not a directly measured posterior range.
 
 **DEAD INPUT COLUMNS (a PRE-EXISTING arm property, found while explaining the nonzero-grad
 column above; not a phase-9 regression and not touched here).** The `nonzero grad` counts
 are exactly accounted for. `lre_sad.toml` sets `NNetInputSize 23`, but the DSP front-end it
 also specifies produces an **11**-wide feature vector: `mel.rs`'s width law for
 `compute_deltas_nb > 0` is `(dd_nb > 0 ? 3 : 2) * nb_dct - ignore_first_dct`, i.e.
-`3*4 - 1 = 11` (3 statics + 5 deltas + 3 delta-deltas; phase-8's independent
-`reach = deltas_nb + dd_nb = 8` confirms those two keys are counts). With
+`3*4 - 1 = 11` (4 statics + 4 deltas + 4 delta-deltas = 12, minus the dropped c0;
+`compute_deltas_nb`/`compute_delta_deltas_nb` are regression ORDERS, not column counts --
+phase-8's `reach = 5+3 = 8` is their chained temporal reach). With
 `LSTMSubSampling 4`, layer 0's fan-in is sized `4*23 = 92` but only `4*11 = 44` columns
 ever carry data, so the trailing 48 columns of every layer-0 fan-in row are never read.
-That predicts, exactly:
+That predicts, per direction count `D` (2 bidirectional / 1 forward), exactly:
 
-    LSTM / sLSTM  2 dirs x 4 gates x 24 units x 48 cols + 46 (frozen normalize tail) = 9262
-    Mamba         2 dirs x 1 input projection x 24 x 48 + 46                         = 2350
+    LSTM / sLSTM  D x 4 gates x 24 units x 48 cols + 46 (frozen normalize tail)  bi 9262 / fwd 4654
+    Mamba         D x 1 input projection x 24 x 48 + 46                          bi 2350 / fwd 1198
 
-and the measured zero counts are 9262 / 9262 / 2350 -- exact, with the zeros landing as a
-contiguous `[44, 92)` tail in every row (the engine's documented input-width tolerance crop
-absorbing the mismatch silently). So ~27% of the BLSTM/sLSTM arm's weights are structurally
+and the measured zero counts are 9262 / 9262 / 2350 bidirectional and 4654 / 4654 / 1198
+forward -- exact, with the zeros landing as a contiguous `[44, 92)` tail in every row (the
+engine's documented input-width tolerance crop absorbing the mismatch silently). Index-set
+checked, not just counted: for sLSTM in both directions the measured zero SET equals the
+predicted set (extra 0, missing 0). One coincidence exists and is NOT structural -- at a
+wider probe recipe (subset 4 / 20 s cap) sLSTM/forward reads 4655, one live weight's gradient
+landing on exactly 0.0 on that data; it is not a `b_i` slot (the same recipe leaves sLSTM
+bidirectional at exactly 9262), so the committed guard
+(`test_init_is_trainable`) pins the count as a FLOOR plus bounded slack rather than an
+equality. So ~27% of the BLSTM/sLSTM arm's weights are structurally
 untrainable, and the config comment claiming `nnet_input_size 23` equals the produced
 feature dimension is wrong. This is inherited VERBATIM from the 2015 production
 `1_worker_1.config` (33671 is that net's pack size), so the 2015 production SAD net carried
@@ -742,7 +762,7 @@ baseline this section is measured against.
 | sLSTM / bidirectional | 10 / 8 / 24 | **0.250000** | 0.000 / 1.000 | 0.750000 | **+0.500000** | 42 s |
 | sLSTM / forward (causal) | 10 / 8 / 24 | **0.250000** | 0.000 / 1.000 | 0.750000 | **+0.500000** | 17 s |
 | Mamba / bidirectional | 10 / 8 / 24 | **0.250000** | 0.000 / 1.000 | 0.750000 | **+0.500000** | 67 s |
-| Mamba / forward (causal) | 10 / 8 / 24 | **0.249625** | 0.000 / 0.998 | 0.750000 | **+0.500375** | 20 s |
+| Mamba / forward (causal) | 10 / 8 / 24 | **0.249625** | 0.000 / 0.998498 | 0.750000 | **+0.500375** | 20 s |
 | *BLSTM / bidirectional (phase-6 Task 9, same recipe)* | *10 / 8 / 24* | *0.250000* | *0.000 / 1.000* | *0.750000* | *+0.500000* | *~80 s* |
 | full-corpus runs (all cells) | TBD | TBD | TBD | TBD | TBD | TBD |
 
