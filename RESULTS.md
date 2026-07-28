@@ -631,3 +631,158 @@ held-out files consistently because the gain is decision-invariant for this conf
 cancellation above), so one global gain equals a per-file gain on the decision. Sanity holds (both
 DCFs finite, in [0,1], same order of magnitude -- here identical). Timings: self-norm scoring
 5.51 s, frozen 5.36 s (24 files each, warm cache).
+
+---
+
+## Phase 9 -- new architectures
+
+The Phase 9 record: the new recurrent cells (sLSTM, Mamba) in both directions
+(bidirectional, forward/causal), trained FROM SCRATCH through the phase-5/6 machinery and
+compared against the phase-6 BLSTM baseline. This section grows across the phase (Task 8
+lands the from-scratch subset gates; later tasks add the bench + streaming rows).
+
+### Task 8 -- the four from-scratch subset gates (SAD arm, corpus-gated)
+
+`tests/pyo3/test_phase9_gates.py` (corpus-gated, `slow`, local-only). Spec S8.2, the
+phase-6 SAD protocol VERBATIM -- same arm (`configs/training/lre_sad.toml`, Algo 3
+spectral, File_Type 0 wav), same recipe (subset 10 / valid 8 / test 24, 3 epochs x 10
+SMORMS3 steps, 20 s audio cap, seed 0, `val_metric=nn_cost_seg`), same end-to-end scorer
+(engine VRCTS hyp dumps + the `.part.xml` refs -> pooled `evaluate.dcf`). ONLY the cell and
+the direction differ, driven by the T4 `--cell-type` / `--direction` knobs on
+`speech baseline sad`. Measured 2026-07-28, Apple M4 Pro (arm64), macOS 26.5.2, N=1 lane.
+
+#### Sizing (spec S8.2 param match, +-15%) -- HOLDS AT THE S6 DEFAULTS, no resizing
+
+The arm topology is fixed by the config (`LSTMNeuronNb 23,24,24` + `LSTMSubSampling 4,1` ->
+two cell layers, layer 0 fed `4*23 = 92` stacked frames; `OutputNeuronNb 48,12,1`; a
+`2*23 = 46` normalize tail). A cell swap changes only the per-layer block:
+
+| cell | per-layer block | per-direction stack | bidirectional pack | vs BLSTM | forward pack | vs BLSTM |
+|---|---|---|---|---|---|---|
+| LSTM (baseline) | `4*out*(out+in) + 12*out + 4*out` | 11520 + 4992 = 16512 | **33671** | -- | **16871** | -- |
+| sLSTM | `4*out*(out+in+1)` (S2.2) | 11232 + 4704 = 15936 | **32519** | **-3.42%** | **16295** | **-3.41%** |
+| Mamba | S3.2 blocks, `d_inner = 2*24 = 48`, `d_state 16`, `d_conv 4`, `dt_rank auto = 2` | 8544 + 6312 = 14856 | **30359** | **-9.84%** | **15215** | **-9.82%** |
+
+`pack = D * stack + MLP + 46`, `D = 2` bidirectional / `1` forward; MLP = 601
+(bidirectional, input `2*24`) or 313 (forward -- `cell_overlay` rewrites
+`OutputNeuronNb 48,12,1 -> 24,12,1` because there is no reverse half to concatenate). Both
+cells land inside +-15% at the spec's own default geometry, so nothing was resized. T4
+cross-pinned every length against the Rust `BlstmNetwork::nb_of_weights()`; 33671 is also
+the 2015 production tuple-A pack size, an independent anchor on the unchanged LSTM path.
+
+**LIVE-parameter caveat (surfaced by the preflight, honest):** these are NOMINAL pack
+lengths, and the arm carries a block of STRUCTURALLY DEAD weights that the three cells do
+NOT share proportionally -- see the dead-input-column finding below. Counting only weights
+with a nonzero gradient, the ordering inverts for Mamba: LSTM 24409, sLSTM 23257 (-4.72%),
+Mamba 28009 (**+14.75%**). Mamba is the smallest net nominally and the LARGEST net
+effectively, because the dead columns hit a `4 gates x out x 48` block in the gate cells but
+only a single `out x 48` input-projection block in Mamba. Both readings are inside a
+loose param-match reading of S8.2 (+-15%), but the nominal table alone would misdescribe
+the comparison -- recorded rather than papered over.
+
+#### Preflight -- the log-law saturation hazard, measured before firing the runs
+
+The arm trains under `CostLaw log/log`, whose forward `b + a*ln(clamp(y/adim, 1e-24, 1))`
+is CONSTANT wherever the argument clamps -- so F7's consistent derivative there is EXACTLY
+ZERO and a saturated from-scratch net is a PERMANENT STALL, not noisy descent. Every config
+was probed at its from-scratch theta (one forward+backward through the seam, no training)
+before the training runs were fired:
+
+| config | pack | init NNCostSeg | / clamp constant | grad L2 | grad Linf | nonzero grad | init decision |
+|---|---|---|---|---|---|---|---|
+| lstm / bidirectional (baseline) | 33671 | 0.29801 | 5.39e-03 | 0.46107 | 0.20218 | 24409/33671 | all-non-speech |
+| lstm / forward | 16871 | 0.27479 | 4.97e-03 | 0.45322 | 0.19222 | 12217/16871 | all-non-speech |
+| sLSTM / bidirectional | 32519 | 0.27728 | 5.02e-03 | 0.35638 | 0.19403 | 23257/32519 | all-non-speech |
+| sLSTM / forward | 16295 | 0.27435 | 4.96e-03 | 0.36181 | 0.19235 | 11640/16295 | all-non-speech |
+| Mamba / bidirectional | 30359 | 0.32665 | 5.91e-03 | 0.72742 | 0.19291 | 28009/30359 | all-non-speech |
+| Mamba / forward | 15215 | 0.33953 | 6.14e-03 | 0.57140 | 0.20565 | 14017/15215 | all-non-speech |
+
+The clamp constant is `-ln(1e-24) = 55.262`; every init sits at ~0.5% of it, i.e. deep in
+the law's interior, and every epoch-0 gradient norm is far from zero. NO config started in
+the zero-gradient death, and none needed a scheme-constant change (the S2.4/S3.4 constants
+are spec text and were not touched). The T6 observation that a seeded Mamba fixture's
+posteriors saturate the output logistic did NOT reproduce as a training hazard on this
+net-sized arm: Mamba's init cost is interior and its gradient norm is the LARGEST of the
+six. The init decision is all-non-speech for all six -- the same starting regime the
+phase-6 BLSTM arm documented, which is why the beat-init leg is the direction-safe metric.
+The preflight is a committed leg (`test_init_is_trainable`), not a one-off. EVIDENTIARY
+SCOPE, stated: the seam exposes the cost and the gradient, not the posterior vector (that
+is a Rust `test-support` hook), so "not saturated" here means COST-INTERIOR +
+GRADIENT-NONZERO + the net subsequently trains -- the three observables that decide whether
+the log law's zero-gradient region bites -- not a directly measured posterior range.
+
+**DEAD INPUT COLUMNS (a PRE-EXISTING arm property, found while explaining the nonzero-grad
+column above; not a phase-9 regression and not touched here).** The `nonzero grad` counts
+are exactly accounted for. `lre_sad.toml` sets `NNetInputSize 23`, but the DSP front-end it
+also specifies produces an **11**-wide feature vector: `mel.rs`'s width law for
+`compute_deltas_nb > 0` is `(dd_nb > 0 ? 3 : 2) * nb_dct - ignore_first_dct`, i.e.
+`3*4 - 1 = 11` (3 statics + 5 deltas + 3 delta-deltas; phase-8's independent
+`reach = deltas_nb + dd_nb = 8` confirms those two keys are counts). With
+`LSTMSubSampling 4`, layer 0's fan-in is sized `4*23 = 92` but only `4*11 = 44` columns
+ever carry data, so the trailing 48 columns of every layer-0 fan-in row are never read.
+That predicts, exactly:
+
+    LSTM / sLSTM  2 dirs x 4 gates x 24 units x 48 cols + 46 (frozen normalize tail) = 9262
+    Mamba         2 dirs x 1 input projection x 24 x 48 + 46                         = 2350
+
+and the measured zero counts are 9262 / 9262 / 2350 -- exact, with the zeros landing as a
+contiguous `[44, 92)` tail in every row (the engine's documented input-width tolerance crop
+absorbing the mismatch silently). So ~27% of the BLSTM/sLSTM arm's weights are structurally
+untrainable, and the config comment claiming `nnet_input_size 23` equals the produced
+feature dimension is wrong. This is inherited VERBATIM from the 2015 production
+`1_worker_1.config` (33671 is that net's pack size), so the 2015 production SAD net carried
+the same dead block -- a legacy property, not a port bug. Left UNCHANGED deliberately:
+correcting `NNetInputSize` would resize every pack and invalidate the phase-6 comparison
+baseline this section is measured against.
+
+#### The four gates -- HARD leg: trained held-out DCF beats own init
+
+| cell / direction | files (train/valid/test) | trained DCF (all 5 collars) | Pmiss / Pfa @0.5 | init DCF | gain | wall |
+|---|---|---|---|---|---|---|
+| sLSTM / bidirectional | 10 / 8 / 24 | **0.250000** | 0.000 / 1.000 | 0.750000 | **+0.500000** | 42 s |
+| sLSTM / forward (causal) | 10 / 8 / 24 | **0.250000** | 0.000 / 1.000 | 0.750000 | **+0.500000** | 17 s |
+| Mamba / bidirectional | 10 / 8 / 24 | **0.250000** | 0.000 / 1.000 | 0.750000 | **+0.500000** | 67 s |
+| Mamba / forward (causal) | 10 / 8 / 24 | **0.249625** | 0.000 / 0.998 | 0.750000 | **+0.500375** | 20 s |
+| *BLSTM / bidirectional (phase-6 Task 9, same recipe)* | *10 / 8 / 24* | *0.250000* | *0.000 / 1.000* | *0.750000* | *+0.500000* | *~80 s* |
+| full-corpus runs (all cells) | TBD | TBD | TBD | TBD | TBD | TBD |
+
+All four HARD legs pass at every collar (0 / 0.25 / 0.5 / 1 / 2 s), deterministically:
+run-twice at a fixed seed gives bit-identical `best_sad.bin` / `last_sad.bin` bytes and an
+identical pooled DCF, on the short determinism recipe (all four cells) and on the FULL
+gate recipe (spot-checked on Mamba/bidirectional, the slowest and most complex). The
+causal variants converge honestly too -- the streaming artifact is not a training
+regression.
+
+**vs BLSTM -- RECORDED, NOT GATED (spec R5, verbatim): "subset vs-BLSTM numbers are
+reported as-is with the thinness caveat; no architecture-superiority claim is made from
+subset scale."** All four new configs TIE the phase-6 BLSTM arm's 0.2500, and that tie is
+exactly what an identical mode collapse looks like: on a 10-file subset every from-scratch
+SAD net jumps from all-non-speech (init, Pmiss 1.0, DCF 0.75) straight to all-speech
+(trained, Pmiss 0.0, Pfa 1.0, DCF 0.25) -- the documented phase-6 behavior, with no
+partial-discrimination sweet spot at this scale. A cell could tie 0.2500 by collapsing
+identically, so the tie is NOT evidence of architectural equivalence and no ranking is
+claimed from it. The one row that is not exactly degenerate is Mamba/forward (Pfa 0.998498
+-- it correctly rejects a sliver of non-speech, landing 0.000375 below the all-speech
+baseline); recorded as measured rather than rounded into the collapse story, and far too
+small to read as an architectural signal. Genuine speech/non-speech discrimination -- a DCF
+below the all-speech 0.25 line -- is the FULL-CORPUS user-fired launcher's job, and those
+runs are the referee for any cell-vs-cell claim.
+
+**The CE is not the signal** (the phase-6 lesson, sharper on Mamba): Mamba/bidirectional's
+per-epoch train cost ASCENDS 1.090 -> 1.263 -> 2.073 across the three epochs while the
+held-out DCF still lands at 0.2500, and its validation cost falls 4.675 -> 0.527 -> 0.429
+over the same epochs. Only the held-out TASK metric is gated.
+
+#### Firing the new-cell arms (post-phase, user-fired)
+
+```
+# Any {lstm,slstm,mamba} x {bidirectional,forward} combination, same launcher as phase 6.
+speech baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_slstm_full \
+    --cell-type slstm --direction bidirectional \
+    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
+```
+
+`--direction forward` additionally forces `BLSTM_window 0` (the plain whole-sequence causal
+regime -- a window boundary would reset the recurrent state) and resizes the output MLP's
+input width; both are automatic (`drivers/baseline.py::cell_overlay`). Paste resulting
+numbers into the `full-corpus runs` row above.
