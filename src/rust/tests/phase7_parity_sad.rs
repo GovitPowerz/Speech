@@ -330,10 +330,14 @@ fn fast_bails_on_pitch_pass() {
     }
 }
 
-/// PHASE 9 TASK 2 RIDER (spec S4.2): the fast tree parses the port-only structural
-/// keys but implements the peephole-LSTM BIDIRECTIONAL twin ONLY. A config selecting
-/// a new cell or the causal direction must fail LOUDLY at construction, not silently
-/// run an LSTM.
+/// PHASE 9 TASK 2 RIDER (spec S4.2), NARROWED BY TASK 6: the fast tree parses the
+/// port-only structural keys and implements TWO shapes -- the peephole-LSTM
+/// BIDIRECTIONAL twin (phase 7) and the CAUSAL new-cell twins (`slstm`/`mamba` +
+/// `Direction forward`, `fast::cells`). This file pins the tier2 config, which is
+/// LSTM + bidirectional, so BOTH mutations below are still refusals: a new cell here
+/// is a new cell in the BIDIRECTIONAL direction (a named follow-on), and
+/// `Direction forward` here is a causal LSTM (also a named follow-on). The causal
+/// combinations that now BUILD are pinned in `tests/phase9_fast_parity.rs`.
 ///
 /// This is not hypothetical arithmetic-free bookkeeping: before the bail, an sLSTM
 /// config's only symptom was `FastBlstm::from_flat`'s length check -- which fires

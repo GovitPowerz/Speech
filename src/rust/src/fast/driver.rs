@@ -318,13 +318,17 @@ pub struct FastSpectralSegmenter {
 impl FastSpectralSegmenter {
     /// Build from a legacy config map + optional f64 weight pack, mirroring
     /// [`crate::tasks::sad::BlstmSpectralSegmenter::from_legacy`]'s config surface.
-    /// `weights: Some(flat)` builds the [`FastBlstm`] immediately (narrowing f64 ->
-    /// f32 once, after adim); `None` defers to [`Self::load_weights_file`] (the bag's
-    /// two-step `from_legacy(map, None)` + `load_weights_file` pattern).
+    /// `weights: Some(flat)` builds the net SELECTED BY [`classify_fast_shape`]
+    /// immediately -- [`FastBlstm`] or [`FastCausalNet`], both narrowing f64 -> f32
+    /// once, after adim (new cells carry no adim by construction, spec S1.3); `None`
+    /// defers to [`Self::load_weights_file`] (the bag's two-step
+    /// `from_legacy(map, None)` + `load_weights_file` pattern).
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast-mode surfaces: the
-    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType` outside
-    /// {-1, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode).
+    /// two `Cell_Type` x `Direction` combinations [`classify_fast_shape`] refuses, the
+    /// pitch second pass (`TDCwindow > 0`), and any `InputNormalizationType` outside
+    /// {-1, 0, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode;
+    /// 0 in Phase 9 Task 6 -- the exact path's no-op arm).
     pub fn from_legacy(
         map: &IndexMap<String, String>,
         weights: Option<&[f64]>,
@@ -409,8 +413,10 @@ impl FastSpectralSegmenter {
 
     /// `<prefix>_weightsFile` load (mirrors [`crate::nn::blstm::BlstmNetwork::
     /// load_weights_file`]): an EMPTY key leaves the net unloaded (a subsequent
-    /// `get_segmentation` errors); otherwise read the `.bin` and (re)build the
-    /// [`FastBlstm`] from it. `FastBlstm::from_flat` enforces the length check
+    /// `get_segmentation` errors); otherwise read the `.bin` and (re)build the net
+    /// from it -- through the SAME [`build_sad_net`] the ctor uses, so the deferred
+    /// load cannot pick a different arm than [`Self::from_legacy`] classified. Both
+    /// `FastBlstm::from_flat` and `FastCausalNet::from_flat` enforce the length check
     /// (`< element_count` -> `Err`).
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         let weights_file = map
@@ -633,6 +639,15 @@ impl Segmenter for FastSpectralSegmenter {
                             result_buf.cols
                         );
                     }
+                    // ONE DEGENERATE-CASE DIVERGENCE, documented not fixed: on a
+                    // sequence so short that the net emits ZERO rows, the exact plain
+                    // path never reaches `NeuronLayer::feed_forward` (`Network::drive`
+                    // returns early on an empty input, `network.rs:326`) and leaves
+                    // `result_vec` UNTOUCHED -- i.e. holding the previous channel's
+                    // contents -- while this zeroes it. Unreachable on any real file
+                    // (it needs fewer feature rows than the sub-sampling ratio) and the
+                    // fast behaviour is the saner of the two; recorded so a future
+                    // reader does not mistake it for an oversight.
                     result_buf.data.fill(0.0);
                     let cols = result_buf.cols;
                     for r in 0..out.rows {

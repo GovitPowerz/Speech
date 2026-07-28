@@ -237,12 +237,22 @@ fn causal_parity_exact_vs_fast() {
 fn causal_parity_crossing_is_exercised() {
     let tmp = tempfile::tempdir().unwrap();
     for cell in ["slstm", "mamba"] {
-        // The output layer's bias is the LAST weight before the 2*input_size normalize
-        // tail (pack layout `[stack | output MLP | mean | std]`, and the fixture's
-        // output MLP is a single `4 -> 1` layer: 4 weights then 1 bias).
+        // The output layer's bias is the LAST weight before the `2*input_size`
+        // normalize tail (pack layout `[stack | output MLP | mean | std]`, and the
+        // fixture's output MLP is a single `4 -> 1` layer: 4 weights then 1 bias). The
+        // tail length is DERIVED from the config's own `BLSTM_LSTMNeuronNb[0]`, not
+        // hardcoded, so a fixture regeneration at a different input width relocates the
+        // index instead of silently perturbing some interior weight.
+        let input_size: usize = causal_map(cell, None, None)["BLSTM_LSTMNeuronNb"]
+            .split(',')
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         let seed = fixture(&format!("phase9/{cell}_forward_seed.bin"));
         let base = read_weight_vector(&seed).unwrap();
-        let bias_idx = base.len() - 2 * 23 - 1;
+        let bias_idx = base.len() - 2 * input_size - 1;
         let path = tmp.path().join(format!("{cell}_crossing.bin"));
 
         // `0.0` FIRST, so a fixture that already crosses is used AS COMMITTED and the

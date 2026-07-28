@@ -1856,8 +1856,12 @@ impl BlstmNetwork {
         // :596 lengthOutputLSTM = outputSeq.rows() * outputNetRatio.
         let length_output_lstm = output.nrows() * output_net_ratio;
         let fwd_out = self.forward_network.as_ref().unwrap().output_size();
-        // `Direction::Forward` has no reverse stack, so the backward accumulator
-        // is zero-width and every write into it below is a no-op (spec S1.2).
+        // `Direction::Forward` has no reverse stack, so the backward accumulator is
+        // ZERO-WIDTH. That makes every backward touch below inert ONLY because each
+        // one is `bwd_out`-bounded -- which the final quotient loop was NOT until
+        // Phase 9 Task 6 (it used the legacy's `fwd_out` bound for both halves and
+        // panicked on an empty matrix; see the comment there). Any new backward
+        // access added here must be `bwd_out`-bounded too, not assumed inert.
         let bwd_out = self
             .backward_network
             .as_ref()
@@ -1968,9 +1972,23 @@ impl BlstmNetwork {
             }
         }
         // :677-679 quotient loop bound = _OutputForward.cols() for BOTH fwd and bwd.
+        //
+        // PHASE 9 (spec S1.4 touch class (b), the `Direction` forward-only branch):
+        // the backward half is bounded by `bwd_out`, NOT by the legacy's `fwd_out`.
+        // BYTE-IDENTICAL on every bidirectional config -- both stacks are built from
+        // the same `cfg.lstm_neuron_nb`, so `bwd_out == fwd_out` there and this is the
+        // same loop with the same divisions (splitting the two columns loops changes
+        // no value: each element is divided independently). Under
+        // `Direction::Forward` `bwd_out` is 0 and the legacy bound INDEXED AN EMPTY
+        // MATRIX -- `output_backward[[r, 0]]` panicked (`ndarray: index out of
+        // bounds`), which is what a windowed causal config hit. The truncate driver's
+        // twin copy loop was already `bwd_out`-bounded (`:1680`); this makes the two
+        // agree.
         for r in 0..length_output_lstm {
             for c in 0..fwd_out {
                 output_forward[[r, c]] /= output_count_lstm[r];
+            }
+            for c in 0..bwd_out {
                 output_backward[[r, c]] /= output_count_lstm[r];
             }
         }
@@ -2269,6 +2287,53 @@ mod direction_tests {
         let mut ffb_out = Array2::<f64>::zeros((T, CLASSES));
         net.feed_forward_backward(&mut input, 0, 0, &mut ffb_out, &one_hot_targets());
         assert_eq!(ffb_out, output);
+    }
+
+    /// THE WINDOWED-CAUSAL REGRESSION (Phase 9 Task 6). The OVERLAP windowed driver
+    /// used to PANIC on a `Direction::Forward` net: its final quotient loop bounded
+    /// BOTH accumulators by `_OutputForward.cols()` (the legacy quirk), and a causal
+    /// net's backward accumulator is ZERO-width, so `output_backward[[r, 0]]` indexed
+    /// an empty matrix (`ndarray: index out of bounds`).
+    ///
+    /// This is not a hypothetical config: the phase's own causal SAD arm is
+    /// `configs/training/lre_sad.toml` (+ `drivers/baseline.py::cell_overlay`), whose
+    /// `frame_window 3.25` resolves `window_size > 0` -> this driver on the EXACT
+    /// TRAINING path. Windowed-causal stays POINTLESS (window boundaries reset the
+    /// recurrent state, spec S1.2) -- it is now merely pointless instead of fatal.
+    ///
+    /// The bidirectional twin runs the same driver on the same input as the contrast,
+    /// proving the test exercises a real windowed dispatch rather than a degenerate
+    /// one that skips the loop.
+    #[test]
+    fn forward_direction_survives_the_overlap_windowed_driver() {
+        for (direction, output_in) in [("forward", HIDDEN), ("bidirectional", 2 * HIDDEN)] {
+            let mut net = net_for(direction, output_in);
+            net.set_weights(&ramp(net.nb_of_weights())).unwrap();
+            // setProcessingType(window > 0, !noOverlap) -> the OVERLAP driver.
+            net.set_processing_type(true, true);
+            assert!(net.truncates_sequence() && net.overlaps());
+
+            let mut input = input_seq();
+            let mut output = Array2::<f64>::zeros((T, CLASSES));
+            net.feed_forward_backward(&mut input, 1, 1, &mut output, &one_hot_targets());
+
+            assert_eq!(output.dim(), (T, CLASSES), "{direction}: output shape");
+            assert!(
+                output.iter().all(|v| v.is_finite()),
+                "{direction}: non-finite posterior out of the overlap driver"
+            );
+            assert_eq!(
+                net.output_forward.dim(),
+                (T, HIDDEN),
+                "{direction}: forward accumulator shape"
+            );
+            let want_bwd = if direction == "forward" { 0 } else { HIDDEN };
+            assert_eq!(
+                net.output_backward.dim(),
+                (T, want_bwd),
+                "{direction}: backward accumulator shape"
+            );
+        }
     }
 
     /// The backward routes ALL of `feed_backward_double`'s deltas to the forward

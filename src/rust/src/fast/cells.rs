@@ -815,6 +815,21 @@ impl FastCausalNet {
         let lsub = &spec.lstm_subsampling;
         let outn = &spec.output_neuron_nb;
         let osub = &spec.output_subsampling;
+        // A spec with fewer than two entries in either list describes no layer at all;
+        // the `len() - 1` loop bounds below would underflow-panic on it.
+        if lstm.len() < 2
+            || outn.len() < 2
+            || lsub.len() < lstm.len() - 1
+            || osub.len() < outn.len() - 1
+        {
+            bail!(
+                "fast::cells::FastCausalNet: malformed NnetSpec (lstm {:?} / sub {:?}, output {:?} / sub {:?})",
+                lstm.len(),
+                lsub.len(),
+                outn.len(),
+                osub.len()
+            );
+        }
         let mut n = 0usize;
         for jj in 0..lstm.len() - 1 {
             let i = lstm[jj] * lsub[jj];
@@ -930,7 +945,10 @@ impl FastCausalNet {
         pos += input_size;
         let normalize_std = narrow(&flat[pos..pos + input_size]);
         pos += input_size;
-        debug_assert_eq!(pos, needed, "from_flat consumed != element_count");
+        // Construction-time, once per net: a plain assert (not `debug_assert`), since
+        // a layout/count disagreement here silently decodes the WHOLE pack wrong and
+        // the release build is exactly where that must not pass quietly.
+        assert_eq!(pos, needed, "from_flat consumed != element_count");
 
         Ok(FastCausalNet {
             lstm_neuron_nb: lstm.clone(),
@@ -1073,6 +1091,7 @@ fn cell_stack_forward(
 
 #[cfg(test)]
 mod tests {
+    use indexmap::IndexMap;
     use ndarray::Array2;
 
     use super::*;
@@ -1092,6 +1111,17 @@ mod tests {
     fn weights(n: usize) -> Vec<f64> {
         (0..n)
             .map(|k| 0.31 - 0.013 * (k as f64) + 0.007 * ((k % 5) as f64))
+            .collect()
+    }
+
+    /// A BOUNDED deterministic weight fill for the whole-NET legs. [`weights`]'s linear
+    /// ramp runs to large negative values over a net-sized pack (~1e3 elements), which
+    /// saturates the output layer's logistic to a constant column -- fine for a
+    /// single tiny cell, useless as a value comparison. This stays in `[-0.35, 0.35]`
+    /// at every index, so the stacked chain produces a posterior that actually varies.
+    fn bounded_weights(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|k| 0.35 * (0.61 * (k as f64) + 0.3).sin())
             .collect()
     }
 
@@ -1553,6 +1583,110 @@ mod tests {
             );
             // Run twice: bit-identical (workspace hygiene).
             assert_eq!(net.feed_forward(&input), &out);
+        }
+    }
+
+    /// A legacy config map for the SAME geometry [`spec`] describes, as a causal
+    /// `BlstmNetwork` under prefix `"X"` -- the exact-tree oracle for the multi-layer
+    /// value pin below. Mirrors `nn::blstm`'s own `direction_tests::map_for`.
+    fn exact_map(
+        cell: CellType,
+        lstm: &[usize],
+        lsub: &[usize],
+        outn: &[usize],
+        osub: &[usize],
+    ) -> IndexMap<String, String> {
+        let join = |v: &[usize]| {
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let p = mamba_params();
+        let mut m: IndexMap<String, String> = IndexMap::new();
+        m.insert("X_LSTMNeuronNb".into(), join(lstm));
+        m.insert("X_LSTMSubSampling".into(), join(lsub));
+        m.insert("X_OutputNeuronNb".into(), join(outn));
+        m.insert("X_OutputSubSampling".into(), join(osub));
+        m.insert("X_InputNormalizationType".into(), "0".into());
+        m.insert("X_TwoSweeps".into(), "false".into());
+        m.insert("X_Direction".into(), "forward".into());
+        m.insert("X_Cell_Type".into(), cell.as_str().into());
+        m.insert("Mamba_D_State".into(), p.d_state.to_string());
+        m.insert("Mamba_D_Conv".into(), p.d_conv.to_string());
+        m.insert("Mamba_Expand".into(), p.expand.to_string());
+        m.insert("Mamba_Dt_Rank".into(), p.dt_rank.to_string());
+        m
+    }
+
+    /// THE MULTI-LAYER VALUE PIN (Task 6 review, I1). The committed phase-9 parity
+    /// fixtures are SINGLE-layer, and `causal_net_supports_stacks_and_sub_sampling`
+    /// above only checks counts, shapes, finiteness and run-twice -- so the STACKED
+    /// chain (the surface the sub-sampling/stacks decision added) had no exact-vs-fast
+    /// VALUE comparison anywhere. This is it: the same 2-layer, sub-sampled geometry
+    /// and the SAME flat pack driven through the exact f64 `BlstmNetwork`
+    /// (`Direction forward` + the same cell, i.e. `Network<CellLayer>` over
+    /// `SlstmLayer`/`MambaLayer`) and through `FastCausalNet`, compared at
+    /// [`CELL_F32_PIN`].
+    ///
+    /// It also cross-pins [`FastCausalNet::element_count`] against the exact net's own
+    /// `nb_of_weights()` at a stacked geometry -- if the two disagreed, the shared pack
+    /// would decode differently on each side and the value comparison would be
+    /// meaningless rather than failing.
+    #[test]
+    fn causal_net_stack_matches_the_exact_net_within_the_f32_band() {
+        let (lstm, lsub, outn, osub) = (
+            [6usize, 5, 4].as_slice(),
+            [2usize, 1].as_slice(),
+            [4usize, 3, 1].as_slice(),
+            [1usize, 1].as_slice(),
+        );
+        let sp = spec(lstm, lsub, outn, osub);
+        let p = mamba_params();
+
+        for cell in [CellType::Slstm, CellType::Mamba] {
+            let cfg = crate::nn::blstm::BlstmConfig::from_legacy(
+                &exact_map(cell, lstm, lsub, outn, osub),
+                "X",
+            )
+            .unwrap();
+            let mut exact = crate::nn::blstm::BlstmNetwork::from_config(cfg).unwrap();
+
+            let n = FastCausalNet::element_count(&sp, cell, &p).unwrap();
+            assert_eq!(
+                n,
+                exact.nb_of_weights(),
+                "{cell:?}: fast element_count != the exact net's pack length"
+            );
+            let flat = bounded_weights(n);
+            exact.set_weights(&flat).unwrap();
+            let mut fast = FastCausalNet::from_flat(&sp, cell, &p, &flat).unwrap();
+
+            // 13 rows -> layer-0 sub-sampling 2 drops the odd tail -> 6 output rows.
+            let input = seq(13, 6, 0.2);
+            let input_f64 = as_exact(&input);
+            let mut out_e = Array2::<f64>::zeros((6, 1));
+            exact.feed_forward(&input_f64, &mut out_e);
+            let out_f = fast.feed_forward(&input).clone();
+            assert_eq!((out_f.rows, out_f.cols), (6, 1), "{cell:?}: fast shape");
+
+            // Non-vacuity: the stacked chain must actually vary across time, or the
+            // comparison would pass on a constant column.
+            let first = out_e[[0, 0]];
+            assert!(
+                (0..6).any(|r| (out_e[[r, 0]] - first).abs() > 1e-9),
+                "{cell:?}: the exact stack output is constant -- the pin is vacuous"
+            );
+
+            // MEASURED on this box: sLSTM 7.91e-8, mamba 6.14e-8. Pinned at
+            // [`CELL_F32_PIN`] (5e-6), the same measure-then-pin band as the
+            // single-cell legs above.
+            let worst = max_rel(&out_e, &out_f);
+            println!("MEASURE causal STACK {cell:?} exact-vs-fast max_rel = {worst:e}");
+            assert!(
+                worst < CELL_F32_PIN,
+                "{cell:?}: multi-layer causal drift {worst:e}"
+            );
         }
     }
 

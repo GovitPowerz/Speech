@@ -336,7 +336,7 @@ def _config_text(cfg: dict[str, str]) -> str:
 
 def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[str, str]:
     """The Phase 9 (spec S7.2) architecture overlay for the SAD arm: the port-only S6 keys
-    `BLSTM_Cell_Type` / `BLSTM_Direction`, plus the ONE derived key `forward` forces.
+    `BLSTM_Cell_Type` / `BLSTM_Direction`, plus the TWO derived keys `forward` forces.
 
     EMPTY at the defaults (`lstm` / `bidirectional`), so a default run's config text is
     byte-identical to today's -- the whole point of the knob being additive. The `Mamba_*`
@@ -345,12 +345,24 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
     (`init_weights.MambaGeometry`), so omitting them at default values keeps the config text
     minimal and the two sides agreeing by construction.
 
-    THE DERIVED KEY: `BlstmConfig::from_legacy` requires `OutputNeuronNb[0] ==
-    hidden_multiplier * lstm_neuron_nb[-1]` -- `2*hidden` bidirectional, `hidden` forward
-    (there is no reverse half to concatenate). Writing only `BLSTM_Direction forward` would
-    therefore produce a config the engine REFUSES to build, so the overlay resizes the output
-    MLP's input layer to match. Everything else in the config (the DSP front-end, the cost
-    law, the hidden widths) is untouched."""
+    DERIVED KEY 1 (the output MLP's width): `BlstmConfig::from_legacy` requires
+    `OutputNeuronNb[0] == hidden_multiplier * lstm_neuron_nb[-1]` -- `2*hidden`
+    bidirectional, `hidden` forward (there is no reverse half to concatenate). Writing only
+    `BLSTM_Direction forward` would therefore produce a config the engine REFUSES to build,
+    so the overlay resizes the output MLP's input layer to match.
+
+    DERIVED KEY 2 (`BLSTM_window 0`, Phase 9 Task 6): a causal net runs the PLAIN
+    whole-sequence regime. `lre_sad.toml` carries `frame_window 3.25`, which resolves
+    `window_size > 0` and dispatches the WINDOWED drivers -- and a window boundary RESETS the
+    recurrent state, so a windowed causal run is defined-but-pointless (spec S1.2) and the
+    streaming session refuses it outright (S5.3). Forcing window 0 here is what makes
+    `speech baseline sad --direction forward` train the regime the phase actually targets,
+    and it is also the regime the f32 fast twin implements (`fast::cells::FastCausalNet`) --
+    so the exact and fast paths stay comparable arm-for-arm. Bidirectional runs are
+    UNTOUCHED (they keep `frame_window`'s windowed overlap).
+
+    Everything else in the config (the DSP front-end, the cost law, the hidden widths) is
+    untouched."""
     if cell_type not in ("lstm", "slstm", "mamba"):
         raise ValueError(f"unknown cell type {cell_type!r} (expected lstm, slstm or mamba)")
     if direction not in ("bidirectional", "forward"):
@@ -363,6 +375,7 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
         hidden = [int(x) for x in flat["BLSTM_LSTMNeuronNb"].split(",")][-1]
         outn = [int(x) for x in flat["BLSTM_OutputNeuronNb"].split(",")]
         overlay["BLSTM_OutputNeuronNb"] = ",".join(str(v) for v in [hidden, *outn[1:]])
+        overlay["BLSTM_window"] = "0"
     return overlay
 
 

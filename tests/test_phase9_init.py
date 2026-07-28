@@ -591,12 +591,30 @@ def test_direction_knob_also_resizes_the_output_mlp_input() -> None:
     -- 24, not 48, under `forward`. A knob that only wrote the direction key would produce a
     config the engine refuses to build, so the overlay carries the derived resize."""
     overlay = baseline.cell_overlay(_SAD_FLAT, "lstm", "forward")
-    assert overlay == {"BLSTM_Direction": "forward", "BLSTM_OutputNeuronNb": "24,12,1"}
+    assert overlay == {"BLSTM_Direction": "forward", "BLSTM_OutputNeuronNb": "24,12,1", "BLSTM_window": "0"}
+
+
+def test_direction_knob_forces_the_plain_window_regime() -> None:
+    """Phase 9 Task 6. `lre_sad.toml` carries `frame_window 3.25`, which resolves
+    `window_size > 0` and dispatches the WINDOWED drivers -- and a window boundary RESETS a
+    causal cell's recurrent state, so a windowed causal run is defined-but-pointless (spec
+    S1.2), the streaming session refuses it (S5.3), and the f32 fast twin refuses it too. The
+    overlay therefore forces `BLSTM_window 0` on `forward`, and MUST NOT touch the window
+    keys on `bidirectional` (whose windowed overlap is the phase-6/7 regime)."""
+    for cell in ("lstm", "slstm", "mamba"):
+        assert baseline.cell_overlay(_SAD_FLAT, cell, "forward")["BLSTM_window"] == "0"
+        bidir = baseline.cell_overlay(_SAD_FLAT, cell, "bidirectional")
+        assert not any(k.startswith("BLSTM_window") or k == "BLSTM_shift" for k in bidir), bidir
 
 
 def test_knobs_compose() -> None:
     overlay = baseline.cell_overlay(_SAD_FLAT, "mamba", "forward")
-    assert overlay == {"BLSTM_Cell_Type": "mamba", "BLSTM_Direction": "forward", "BLSTM_OutputNeuronNb": "24,12,1"}
+    assert overlay == {
+        "BLSTM_Cell_Type": "mamba",
+        "BLSTM_Direction": "forward",
+        "BLSTM_OutputNeuronNb": "24,12,1",
+        "BLSTM_window": "0",
+    }
 
 
 def test_overlaid_config_seeds_through_the_matching_builder() -> None:
