@@ -725,8 +725,17 @@ fn latency_bounds() {
     //   holdback         = 2.28957 s  (sum(min_speech)+sum(min_silence)+sum(padding), clamped)
     //   DERIVED BOUND    = 6.05357 s  (the config-derived structural floor)
     //   pipeline_forward = 3.76400 s  (feature_reach + nn_window + conv_delay; bound - holdback)
-    //   SPEECH push max lag = 5.84457 s  (< bound -- delivered within the structural floor;
-    //     the time-advance win, down from the old 16.8 s wait-for-next-raw-segment)
+    //   SPEECH push max lag = 16.80428 s (POST the Phase-9 Task-9 pending-open frontier fix,
+    //     re-measured; see the revision note above assertion (1)). It is the ONE BLOCKED
+    //     segment [3.33710, 9.79560], which a raw segment reopening 2.2232 s after its end
+    //     holds back until that segment closes -- so it inherits the OTHER class's
+    //     commit-wait ceiling (15.84618 <= 16.80428 <= 18.11160) rather than the structural
+    //     floor. The five UNBLOCKED speech emissions are unmoved by the fix and still carry
+    //     the time-advance win: 5.39698 / 5.49408 / 5.54447 / 5.69858 / 5.84457 s, every one
+    //     < bound; assertion (1) pins that unblocked MAJORITY, assertion (2') the max.
+    //     (Pre-fix this line read "5.84457 s < bound" as an unconditional max -- true only
+    //     of the unblocked subset, and 5.84457 was never the blocked segment's own pre-fix
+    //     lag either: that was 5.60428 s.)
     //   OTHER  push max lag = 15.84618 s (= max_speech_dur 13.34760 + pipeline_forward 3.76400
     //     - a small residual; the silence-before-long-speech commit wait, inherent to the
     //     latched raw-segment model -- NOT reduced by the consumed-frontier trigger)
@@ -985,7 +994,10 @@ fn latency_bounds() {
 fn settled_speech_emits_during_silence() {
     // T5-review finding 2: the consumed-frontier time-advance means a SETTLED speech segment
     // is delivered MID-STREAM, DURING the following silence, at ~structural-bound latency --
-    // no longer waiting for the next raw segment to close (the old ~16.8 s wait). The
+    // no longer waiting for the next raw segment to close (the pre-T5 cadence, ~16.8 s on
+    // this fixture; do NOT confuse that historical number with the 16.80428 s a BLOCKED
+    // segment legitimately costs post-T9, below -- they coincide numerically here by
+    // accident of the same gap driving both). The
     // calibrated fixture's inter-speech-end gaps are the vehicle: a SPEECH segment whose end
     // OPENS a gap wider than the bound must emit well before that gap ends, with lag <= the
     // derived structural bound + a small allowance (NOT the old bound + trigger-gap form).

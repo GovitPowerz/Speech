@@ -976,7 +976,7 @@ fn latency_bounds() {
         // ssr grid slack, the 100 ms push granularity and the smoothing boundary shifts).
         // MEASURED here the allowance is genuinely consumed, unlike phase 8's: slstm
         // 1.80148 and mamba 1.82867 sit ~0.07-0.09 s ABOVE the 1.73400 s structural bound,
-        // which the 100 ms push quantum alone accounts for (phase 8's 5.84457 s sat under
+        // which the 100 ms push quantum alone accounts for (phase 8's UNBLOCKED 5.84457 s sat under
         // its 6.05357 s bound only because that bound is 3.5x larger, not because the
         // quantization was absent). The bound stays purely CONFIG-derived -- the chunk size
         // is a runtime choice, so folding it into the derivation would be wrong. A
