@@ -1498,6 +1498,26 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   path (`.superpowers/sdd/task-1-report.md` Concerns #1); deferred, not fixed here -- out of Task 1
   scope. *Fix candidate:* same as above -- prepend at the basename, not the whole path, for both
   call sites together.
+  *Phase 9 Task 9 addendum -- it bit a SECOND time, and the DIAGNOSTIC is the real cost:* the
+  phase-9 causal bench staging (`RESULTS.md`'s S8.7 rows) hit the identical trap while pointing
+  each arm's config at a per-arm output directory. Two properties make it far more confusing than
+  its one-line mechanism deserves, both verified against the code rather than inferred:
+  (a) WHAT THE OPERATOR SEES is a bare `No such file or directory (os error 2)` -- no path, no key
+  name, no hint that the failing write is a WEIGHT-SAVE side effect of a key set for RESULTS -- and
+  it fires only AFTER the whole epoch's corpus fold has already run (`run_epoch` calls
+  `save_and_update_epoch` after every file is processed, `corpus_processor.rs:514`/`:538`), so
+  a full inference pass completes and only then dies on a filename.
+  (b) IT IS PATH-ASYMMETRIC BETWEEN THE TWO BENCH ARMS, which is precisely the wrong shape for a
+  benchmark: `save_weights`'s match has NO save arm for `Processor::FastSpectral`/`FastTwinLid`
+  (inference-only, `bag_of_processors.rs:815-821`), so `speech bench --path=fast` runs FINE with an
+  absolute key and `--path=exact` dies -- reading, at first glance, as a defect in the exact path
+  rather than a config-naming trap. The gate is open on the first call regardless (`best_cost`
+  seeds at `1e20`, `corpus_processor.rs:157`), so there is no "run it again" escape either.
+  THE RULE, stated once so the next bench/staging task does not rediscover it:
+  `multiConfigResultsOutputFile` must be a BARE BASENAME with no directory component; put the run
+  in its own working directory instead of putting the directory in the key.
+  Still pre-existing legacy naming, still UNTOUCHED (the fix candidate above is unchanged, and it
+  is a two-call-site change with golden implications, not a bench-task edit).
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning** (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):

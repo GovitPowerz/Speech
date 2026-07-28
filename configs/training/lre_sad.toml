@@ -2,7 +2,8 @@
 #
 # Algo_choice 3 (BLSTM spectral SAD) + File_Type 0 (raw wav). This is the 2015
 # production SAD regime: the DSP front-end (periodogram -> Mel/log/DCT + deltas +
-# delta-deltas -> the 23-dim acoustic input) feeds a bidirectional peephole-LSTM
+# delta-deltas -> an 11-column acoustic frame, fed into a 23-wide declared input --
+# see the dead-column note below) feeds a bidirectional peephole-LSTM
 # stack + output MLP whose single speech-posterior output drives the
 # rising/falling hysteresis segmenter. The net trains FROM SCRATCH here (Phase 5
 # proved SAD from-scratch convergence on the tiny fixture); this arm scales it to
@@ -13,11 +14,19 @@
 # `tests/reference_data/phase0/1_worker_1.config` (the real 15-Oct-2015
 # BLSTM_OpenSAD15 SAD config, also the source of the phase4a tier-2 spectral
 # fixtures). Keeping the DSP keys and the net topology from ONE config is
-# load-bearing: `nnet_input_size = 23` must equal the feature-pipeline output
-# dimension THIS DSP config produces (nb_dct 4 + deltas 5 + delta-deltas 3,
-# ignore_first_dct, the mel bank) AND `lstm_neuron_nb[0]`; a mismatched pairing
-# would drive the net at the wrong input width. CostLaw is `log` (the T7-verified
-# derivative-consistent live path).
+# load-bearing: `nnet_input_size = 23` sizes the layer-0 fan-in and must equal
+# `lstm_neuron_nb[0]`. It does NOT equal the feature dimension this DSP config
+# actually produces -- an earlier revision of this comment claimed it did, and that
+# was WRONG. The front-end emits 11 columns (`3*nb_dct - ignore_first_dct` = 3*4 - 1;
+# `deltas 5` / `delta_deltas 3` are regression ORDERS, not column counts), so with
+# `lstm_sub_sampling 4` only 44 of layer 0's 92 fan-in columns ever carry data and
+# the trailing 48 are structurally gradient-dead. That mismatch is inherited VERBATIM
+# from the 2015 production config (its own 33671-element pack carries the same dead
+# block) and is deliberately LEFT AS IS -- correcting it would resize every pack and
+# invalidate the phase-6 baseline. Measured, counted and index-set-verified in
+# `RESULTS.md`'s "DEAD INPUT COLUMNS" note (Phase 9 Task 8), guarded by
+# `tests/pyo3/test_phase9_gates.py::test_init_is_trainable`. CostLaw is `log`
+# (the T7-verified derivative-consistent live path).
 #
 # DIVERGENCES from 1_worker_1.config (the complete list -- all RUNTIME/orchestration
 # keys, none DSP/net/cost, so the "seeded VERBATIM" claim above holds for the modeled
@@ -126,7 +135,9 @@ tdc_windowing_param = "5.534716888700572e-01"
 
 # ---------------------------------------------------------------------------------------
 # [nn] -- the TRAINABLE SAD net (the real 2015 topology). nnet_input_size == 23 ==
-# lstm_neuron_nb[0] == the [spectrum] feature dimension; output_neuron_nb ends at 1
+# lstm_neuron_nb[0], but NOT the [spectrum] feature dimension (that is 11 -- the 2015
+# mismatch documented in the header + RESULTS.md's "DEAD INPUT COLUMNS" note);
+# output_neuron_nb ends at 1
 # (the single speech posterior the hysteresis segmenter thresholds). weights_file is a
 # runtime-synthesized seed pack (init_weights), re-inited from scratch by train_modern.
 # ---------------------------------------------------------------------------------------

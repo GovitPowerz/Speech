@@ -39,8 +39,11 @@ pub fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     out
 }
 
-/// Peephole LSTM layer (legacy `LSTMLayer`). Task 3 ports the weight layout +
-/// flat (de)serialization; forward/backward (Task 4+) are not yet implemented.
+/// Peephole LSTM layer (legacy `LSTMLayer`): the weight layout + flat
+/// (de)serialization (Phase 0a), the forward (Phase 2) and the analytic BPTT
+/// backward (Phase 3) are all implemented here. Since Phase 9 this same struct is
+/// also wrapped by [`super::cells::CellLayer::Lstm`], which delegates every `Layer`
+/// method to it unchanged -- the arithmetic below is byte-untouched by that wrap.
 ///
 /// Member sizes are the CTOR RESIZES (`LSTMLayer.cpp:19-22`), NOT the stale size
 /// comments in `LSTMLayer.h:35-36` (which claim `_PeepWeight` is `3*_OutputSize`

@@ -639,7 +639,9 @@ retraction on a trained causal net. The fix (`fast/stream.rs::resmooth_and_emit`
 frontier to `hyst.pending_begin()`) makes the SPEECH-class structural bound CONDITIONAL: a speech
 segment whose following silence is interrupted by a raw speech segment reopening within the
 holdback now waits for that segment to close, inheriting the OTHER class's commit-wait area term.
-On this fixture that moves ONE of six speech emissions -- the segment `[3.33710, 9.79560]`,
+On the phase-8 GATE fixture (the crafted-posterior one the bound above is cited from -- not this
+corpus file, whose all-speech collapse emits nothing mid-stream at all) that moves ONE of six
+speech emissions -- the segment `[3.33710, 9.79560]`,
 measured in BOTH regimes at 5.60428 -> 16.80428 s, still inside the 18.11 s commit-wait ceiling;
 the other five are unmoved, and the 5.84457 s headline max above belongs to one of THOSE (the
 segment `[41.35350, 43.95530]`), not to the blocked one. Nothing else in this section changes --
@@ -652,8 +654,12 @@ concern `finish`, which the fix never touches).
 
 The Phase 9 record: the new recurrent cells (sLSTM, Mamba) in both directions
 (bidirectional, forward/causal), trained FROM SCRATCH through the phase-5/6 machinery and
-compared against the phase-6 BLSTM baseline. This section grows across the phase (Task 8
-lands the from-scratch subset gates; later tasks add the bench + streaming rows).
+compared against the phase-6 BLSTM baseline. Two sections, both landed: **Task 8** -- the four
+from-scratch subset gates, their sizing/preflight tables, and the dead-input-column finding;
+**Task 9** -- the corpus tier (the phase-8 emission-frontier defect it found, the causal
+streaming equivalence, the derived causal latency bound, the first non-zero causality cost,
+fast-vs-exact metric parity) plus the RTF/peak-RSS bench rows. The full-corpus headline runs
+stay POST-PHASE, user-fired (the launcher recipe is under Task 8).
 
 ### Task 8 -- the four from-scratch subset gates (SAD arm, corpus-gated)
 

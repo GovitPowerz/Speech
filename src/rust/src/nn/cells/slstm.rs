@@ -27,10 +27,25 @@
 //! State is zero-init per call (`c_{-1} = n_{-1} = h_{-1} = 0`) and `m_{-1} =
 //! [`M_INIT`]`. At `t = 0` the max resolves to `m_0 = i~_0` (the sentinel is
 //! absorbed: `f~_0 + (-1e30) == -1e30` for any `|f~_0| < ~1e14`), so `i'_0 = exp(0) =
-//! 1` and `f'_0 = exp(-1e30 - i~_0)` UNDERFLOWS to exactly 0 -- which is what makes
-//! the zero initial state inert rather than merely small. That is the official xLSTM
-//! `m_1 = i~_1` convention (S2.4), reached without an `if t == 0` branch in the
+//! 1` and `f'_0 = exp(-1e30 - i~_0)` UNDERFLOWS to exactly 0. That is the official
+//! xLSTM `m_1 = i~_1` convention (S2.4), reached without an `if t == 0` branch in the
 //! recurrence.
+//!
+//! WHAT THE SENTINEL DOES AND DOES NOT DO (corrected Phase 9 Task 10 -- an earlier
+//! revision of this paragraph credited the underflow with making the zero initial
+//! state inert, which is backwards). The forget branch is inert at `t = 0` REGARDLESS
+//! of `f'_0`, because it multiplies `c_{-1} = n_{-1} = 0`. What `M_INIT` actually
+//! buys is the CONVENTION: it selects `m_0 = i~_0` (rather than `max(f~_0, i~_0)`)
+//! and makes `f'_0` exactly `0` rather than merely small. At a FRESH state that is
+//! numerically unobservable -- a different `m_0` is a common factor `e^{-m_0}` on
+//! both `c_0` and `n_0`, and it cancels in `h_0 = o'(c_0/n_0)` and again at every
+//! later step. It becomes load-bearing the moment a NON-zero `(c, n)` is carried in
+//! -- the streaming `fast::cells::FastSlstm` state -- which is why the f32 twin pins
+//! its seed with a dedicated CONTRACT test
+//! (`fast::cells::tests::slstm_state_is_zeroed_with_the_m_sentinel`) instead of
+//! relying on a behavioural leg: no behavioural leg can see it at a fresh state.
+//! Here the absorption itself is asserted directly (see the `t = 0` case in the
+//! tests below).
 //!
 //! `max(f', i') = exp(0) = 1` by construction, so `n_t >= 1 > 0` for every `t` by
 //! induction (`n_0 = i'_0 = 1`; if `f' = 1` then `n_t >= n_{t-1}`, else `i' = 1` and
