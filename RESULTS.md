@@ -947,9 +947,18 @@ in principle -- and (b) the FROZEN streamable regime (`Audio_fixed_gain` + type 
 | cell | regime | DCF @ 0 / 0.25 / 0.5 / 1 / 2 s | Pmiss / Pfa @0.5 | delta (frozen - self) @0.5 |
 |---|---|---|---|---|
 | sLSTM / fwd | self-norm (-1) | 0.250000 / 0.250000 / 0.250000 / 0.250000 / 0.250000 | 0.000000 / 1.000000 | -- |
-| sLSTM / fwd | frozen (type 0 + gain) | 0.250061 / 0.250076 / 0.250103 / 0.250103 / 0.250104 | 0.000138 / 0.999999 | **+0.000103** |
+| sLSTM / fwd | frozen (type 0 + gain) | 0.251607 / 0.251627 / 0.251774 / 0.252623 / 0.252623 | 0.003497 / 0.996607 | **+0.001774** |
 | Mamba / fwd | self-norm (-1) | 0.249259 / 0.249367 / 0.249625 / 0.250000 / 0.250000 | 0.000000 / 0.998498 | -- |
-| Mamba / fwd | frozen (type 0 + gain) | 0.248146 / 0.247672 / 0.247121 / 0.245790 / 0.245590 | 0.000000 / 0.988485 | **-0.002503** |
+| Mamba / fwd | frozen (type 0 + gain) | 0.248000 / 0.247357 / 0.246641 / 0.245562 / 0.245254 | 0.000000 / 0.986564 | **-0.002984** |
+
+The two sides differ in the THREE normalization keys and nothing else: `Audio_offset` /
+`Audio_max_duration` stay the arm's own (the T8 recipe's 20 s cap) on BOTH sides. A first
+revision of this leg applied a whole-file overlay to the frozen side only -- it scored the FULL
+held-out files against the native side's first 20 s, i.e. a duration artefact wearing a causality
+cost's clothes. Caught in self-review by a 10x scoring-time asymmetry (2.76-3.63 s vs 0.31-0.36 s);
+the corrected legs run 0.32 / 0.32 s and 0.40 / 0.41 s. Recorded because the tell generalizes: on
+a comparison this small, a wall-clock asymmetry between two supposedly-identical workloads is the
+cheapest available check that the two sides really are identical.
 
 MECHANISM (named, honest). This is the FIRST non-zero causality cost this repo has measured: the
 phase-8 corpus leg reported EXACTLY 0.0 because its checkpoint was a total all-speech collapse
@@ -957,14 +966,14 @@ phase-8 corpus leg reported EXACTLY 0.0 because its checkpoint was a total all-s
 because the selective 2015 net collapsed under freezing. These two causal checkpoints sit in
 between -- near-collapsed but not exactly (Mamba already rejects a sliver of non-speech, Pfa
 0.9985) -- so switching the input normalization moves a handful of frame decisions, and the cost is
-both TINY and SIGN-VARYING: +1.0e-4 DCF for sLSTM (frozen slightly worse), -2.5e-3 for Mamba
-(frozen slightly BETTER, rejecting more non-speech: Pfa 0.9985 -> 0.9885). A sign-varying
-sub-1e-2 delta on a mode-collapsed pair is NOISE around a degenerate operating point, NOT evidence
-that freezing helps; a genuinely selective full-corpus net remains where a real causality cost
-would surface. The single `Audio_fixed_gain` scores all 24 files consistently because the gain is
-decision-invariant on this all-DCT / `IgnoreFirstDCT` front-end (the phase-8 DCT-cancellation
-finding). Timings: native 0.31-0.36 s, frozen 2.76-3.63 s (24 files; the frozen leg re-decodes
-audio under the fixed gain).
+both TINY and SIGN-VARYING: +1.8e-3 DCF for sLSTM (frozen worse: it starts MISSING a little
+speech, Pmiss 0.0000 -> 0.0035), -3.0e-3 for Mamba (frozen BETTER, rejecting more non-speech:
+Pfa 0.9985 -> 0.9866). A sign-varying sub-1e-2 delta on a mode-collapsed pair is NOISE around a
+degenerate operating point, NOT evidence that freezing helps; a genuinely selective full-corpus net
+remains where a real causality cost would surface. The single `Audio_fixed_gain` scores all 24
+files consistently because the gain is decision-invariant on this all-DCT / `IgnoreFirstDCT`
+front-end (the phase-8 DCT-cancellation finding). Timings: 0.32 s / 0.32 s (sLSTM) and 0.40 s /
+0.41 s (Mamba), native / frozen, 24 files each.
 
 #### S4.3 on real data -- fast vs exact causal metric parity
 

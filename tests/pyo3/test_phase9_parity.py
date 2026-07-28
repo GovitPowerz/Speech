@@ -302,17 +302,28 @@ def _inference_cfg(arm: _CausalArm, overlay: dict[str, str], *, fileslisting: st
 
 
 def _frozen_overlay(gain: float, norm_type: str = "0") -> dict[str, str]:
-    """The STREAMABLE (causality-cut) regime: the frozen per-sample `Audio_fixed_gain`
-    replaces the whole-file `(2*RMS+max)/2` audio normalization, and the input normalization
-    moves off type -1 (per-sequence self-normalization, un-streamable) onto the causal arm's
-    type 0 / type 1. `Inference_Path fast` is the streaming session's own kernel family."""
+    """The STREAMABLE (causality-cut) regime, and NOTHING ELSE: the frozen per-sample
+    `Audio_fixed_gain` replaces the whole-file `(2*RMS+max)/2` audio normalization, and the
+    input normalization moves off type -1 (per-sequence self-normalization, un-streamable)
+    onto the causal arm's type 0 / type 1. `Inference_Path fast` is the streaming session's
+    own kernel family.
+
+    DELIBERATELY NO `Audio_offset`/`Audio_max_duration` HERE. Those are a WINDOWING choice,
+    not part of the causality cut, and the causality-cost leg compares this overlay against
+    the arm's NATIVE config -- so if this overlay moved the duration cap, the two sides would
+    score DIFFERENT spans of every held-out file and the reported delta would be a
+    duration artefact rather than a normalization one. The whole-file legs (which need the
+    full 75 s wav on BOTH sides) apply `_WHOLE_FILE` explicitly instead."""
     return {
         "Inference_Path": "fast",
         "Audio_fixed_gain": repr(gain),
         "BLSTM_InputNormalizationType": norm_type,
-        "Audio_offset": "0.0",
-        "Audio_max_duration": "3600",
     }
+
+
+# The whole-file windowing overlay for the single-file streaming legs -- applied to BOTH
+# sides of every comparison there (the streamed session and the offline reference).
+_WHOLE_FILE: dict[str, str] = {"Audio_offset": "0.0", "Audio_max_duration": "3600"}
 
 
 def _single_file_listing(arm: _CausalArm, wav: Path, name: str) -> Path:
@@ -429,7 +440,7 @@ def test_streaming_equivalence_on_corpus(cell: str) -> None:
     dur = (len(chan) - 1) / rate
 
     listing = _single_file_listing(arm, wav, "_t9_single.flst")
-    cfg = _inference_cfg(arm, _frozen_overlay(gain), fileslisting=listing.name)
+    cfg = _inference_cfg(arm, _frozen_overlay(gain) | _WHOLE_FILE, fileslisting=listing.name)
     cfg_path = arm.out_dir / f"_t9_stream_{cell}.config"
     cfg_path.write_text(B._config_text(cfg))
 
@@ -521,8 +532,12 @@ def test_frozen_overlay_is_type1_equivalent(cell: str) -> None:
     gain = _measure_gain(chan)
     listing = _single_file_listing(arm, wav, "_t9_single.flst")
 
-    hyp0 = _run_offline_image(arm, _inference_cfg(arm, _frozen_overlay(gain, "0"), fileslisting=listing.name), arm.out_dir / f"_t9_n0_{cell}", f"{cell}_n0")
-    hyp1 = _run_offline_image(arm, _inference_cfg(arm, _frozen_overlay(gain, "1"), fileslisting=listing.name), arm.out_dir / f"_t9_n1_{cell}", f"{cell}_n1")
+    hyp0 = _run_offline_image(
+        arm, _inference_cfg(arm, _frozen_overlay(gain, "0") | _WHOLE_FILE, fileslisting=listing.name), arm.out_dir / f"_t9_n0_{cell}", f"{cell}_n0"
+    )
+    hyp1 = _run_offline_image(
+        arm, _inference_cfg(arm, _frozen_overlay(gain, "1") | _WHOLE_FILE, fileslisting=listing.name), arm.out_dir / f"_t9_n1_{cell}", f"{cell}_n1"
+    )
     print(f"\n[NORM0-vs-NORM1 {cell}/forward] segs={len(hyp0)}/{len(hyp1)} identical={hyp0 == hyp1}")
     assert hyp0 == hyp1, f"{cell}: type-0 and type-1 partitions differ on an IDENTITY tail: {hyp0} vs {hyp1}"
 
@@ -541,7 +556,14 @@ def test_causality_cost_dcf_on_corpus(cell: str) -> None:
     and the T8 gate measured) and (b) the FROZEN streamable regime (`Audio_fixed_gain` +
     type 0), and REPORT the pooled DCF delta with its mechanism. This is the price of
     causality on this checkpoint: (a) is not streamable in principle. REPORTED, never gated
-    (sanity only: both DCFs finite and in range)."""
+    (sanity only: both DCFs finite and in range).
+
+    THE TWO SIDES DIFFER IN THE THREE NORMALIZATION KEYS AND NOTHING ELSE. In particular the
+    duration windowing (`Audio_offset` / `Audio_max_duration 20`, the T8 recipe's cap) is the
+    arm's own on BOTH sides -- `_frozen_overlay` deliberately carries no windowing keys, and
+    a `_WHOLE_FILE` overlay here would have scored the frozen side on the FULL held-out files
+    while the native side saw only their first 20 s, turning a duration artefact into a fake
+    causality cost (caught in self-review; the tell was a 10x scoring-time asymmetry)."""
     arm = _ensure_causal_arm(cell)
     # A representative fixed gain: the sorted-first train file's. On this arm's all-DCT /
     # `IgnoreFirstDCT` front-end a uniform per-file log-shift is annihilated by the AC DCT
