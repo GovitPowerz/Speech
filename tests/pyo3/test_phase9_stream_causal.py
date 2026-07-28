@@ -145,9 +145,15 @@ def test_streaming_session_causal_chunk_invariance_and_prefix(tmp_path: Path) ->
     assert _triples(push_a + fin_a) == _triples(push_b + fin_b), "the emitted (begin/end/class) SET must not depend on push granularity"
 
     # (2) PREFIX CONSISTENCY: emitted set == final partition (no retraction, nothing extra).
-    emitted = _triples(push_a + fin_a)
+    all_a = push_a + fin_a
+    emitted = _triples(all_a)
     partition = _partition(rows_a)
     assert emitted == partition, f"emitted set != final partition (retraction/extra): missing={partition - emitted} extra={emitted - partition}"
+    # ...and each partition segment was emitted EXACTLY ONCE. The set comparison above is
+    # blind to duplicates (a re-emitted segment collapses into the same element), so without
+    # this the "no re-emission" half of prefix consistency goes unasserted -- the phase-8
+    # sibling's `len(seg_lines) == len(cli_set)` catch, restated through the binding.
+    assert len(all_a) == len(partition), f"emissions must be unique (no re-emission): {len(all_a)} emitted vs {len(partition)} partition segments"
     assert len(push_a) > 0, "non-vacuity: the causal arm must emit MID-STREAM, not only at EOS"
 
 

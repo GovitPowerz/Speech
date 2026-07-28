@@ -687,8 +687,9 @@ pub struct StreamCausal {
     net: FastCausalNet,
     /// One live carried state per cell layer (never reset mid-stream -- the whole point).
     states: Vec<FastCellState>,
-    crop: usize,    // LSTMNeuronNb[0], the crop-gate threshold
-    in_cols: usize, // resolved on the first pushed batch (0 = unresolved)
+    crop: usize,         // LSTMNeuronNb[0], the crop-gate threshold
+    in_cols: usize,      // the CROPPED net-input width, resolved on the first pushed batch
+    in_cols_seen: usize, // the RAW arriving width (0 = unresolved); the stability check
 
     // Per-cell-layer sub-sampling buffers (the `sub_sample_into` row concatenation).
     pend: Vec<Vec<f32>>,
@@ -714,6 +715,7 @@ impl StreamCausal {
             states,
             crop,
             in_cols: 0,
+            in_cols_seen: 0,
             pend: vec![Vec::new(); n_cells],
             fill: vec![0; n_cells],
             outs: vec![Vec::new(); n_cells],
@@ -740,18 +742,21 @@ impl StreamCausal {
         if rows.rows == 0 {
             return FastMatrix::zeros(0, self.output_size);
         }
-        if self.in_cols == 0 {
+        if self.in_cols_seen == 0 {
             // The `feed_forward` crop gate, resolved once (the feature width is a
-            // stream-wide constant).
+            // stream-wide constant). `in_cols_seen` is the RAW arriving width, kept
+            // separately from the possibly-narrower cropped `in_cols` so the stability
+            // check below can compare like with like (the phase-8 sibling's `input_cols`).
             let subs = self.net.lstm_subsampling();
+            self.in_cols_seen = rows.cols;
             self.in_cols = if !subs.is_empty() && subs[0] > 1 && self.crop < rows.cols {
                 self.crop
             } else {
                 rows.cols
             };
         }
-        debug_assert!(
-            self.in_cols <= rows.cols,
+        debug_assert_eq!(
+            rows.cols, self.in_cols_seen,
             "StreamCausal::push_rows col count must be stable across pushes"
         );
 
@@ -1411,6 +1416,22 @@ impl StreamDecision {
 // StreamingSession (Phase 8 Task 5): the composed SAD streaming session + gate.
 // ===========================================================================
 
+/// The session's NN stage, per the config's `Cell_Type` x `Direction` pair (spec S5.2).
+/// A CLOSED set with static dispatch, exactly like `fast::driver`'s `FastSadNet`: the
+/// windowed-BLSTM arm is the phase-8 path, BEHAVIOUR-UNTOUCHED; the causal arm is Task 7.
+/// Both feed the SAME [`StreamDecision`], so `push`/`finish` keep one shape and the
+/// `speech stream` CLI + the PyO3 `StreamingSession` gain the causal mode with ZERO new
+/// surface.
+enum StreamNn {
+    /// Phase 8: windowed overlap over the bidirectional peephole-LSTM twin.
+    Windowed {
+        overlap: StreamOverlap,
+        net: FastBlstm,
+    },
+    /// Phase 9 Task 7: the per-row causal stack (`slstm`/`mamba` + `Direction forward`).
+    Causal(StreamCausal),
+}
+
 /// The chunked-input SAD streaming session (Phase 8 Task 5): the online twin of the
 /// offline fast algo-3 driver ([`crate::fast::driver::FastSpectralSegmenter`]), composing
 /// the three landed layers -- [`StreamFrontEnd`] (T2: gain/preemph-carry/dither-index plus
@@ -1452,8 +1473,11 @@ impl StreamDecision {
 /// [`FastCausalNet`]; everything else here -- the front-end, the decision layer, the
 /// frozen-gain contract, `push`/`finish`, the latency accounting -- is shared verbatim.
 /// The bit-equal oracle on the causal arm is the offline fast CAUSAL bag run
-/// (`tests/phase9_stream_causal.rs`), and the input-normalization contract widens to
-/// `{0, 1}` (type 0 is causality-trivial: nothing whole-file to freeze).
+/// (`tests/phase9_stream_causal.rs`). The input-normalization contract widens to `{0, 1}`
+/// ON THE CAUSAL ARM ONLY (type 0 is causality-trivial -- nothing whole-file to freeze --
+/// and it is what the committed phase-9 causal fixtures carry); the WINDOWED arm keeps
+/// phase 8's `{1}` byte-identically, so no config phase 8 accepted or refused changed
+/// status.
 ///
 /// LATENCY (spec S1.8, S5.5). Every emission is stamped with the session's audio-time-pushed
 /// clock (`(total_pushed-1)/rate`) and its per-emission lag (`emitted_at - end_s`) is
@@ -1467,24 +1491,8 @@ impl StreamDecision {
 /// smaller sub-sample buffering term instead, which is the phase-9 latency win. An OTHER (silence)
 /// segment still waits for the following speech to COMMIT (its right boundary is that speech's
 /// onset, latched only at the falling edge), so its lag is that speech's DURATION + the forward
-/// pipeline delay -- the data-dependent AREA term pinned per-class on the fixtures
-/// (`tests/phase8_gate.rs`).
-/// The session's NN stage, per the config's `Cell_Type` x `Direction` pair (spec S5.2).
-/// A CLOSED set with static dispatch, exactly like `fast::driver`'s `FastSadNet`: the
-/// windowed-BLSTM arm is the phase-8 path, BEHAVIOUR-UNTOUCHED; the causal arm is Task 7.
-/// Both feed the SAME [`StreamDecision`], so `push`/`finish` keep one shape and the
-/// `speech stream` CLI + the PyO3 `StreamingSession` gain the causal mode with ZERO new
-/// surface.
-enum StreamNn {
-    /// Phase 8: windowed overlap over the bidirectional peephole-LSTM twin.
-    Windowed {
-        overlap: StreamOverlap,
-        net: FastBlstm,
-    },
-    /// Phase 9 Task 7: the per-row causal stack (`slstm`/`mamba` + `Direction forward`).
-    Causal(StreamCausal),
-}
-
+/// pipeline delay -- the data-dependent AREA term pinned per-class on BOTH arms'
+/// fixtures (`tests/phase8_gate.rs` windowed, `tests/phase9_stream_causal.rs` causal).
 pub struct StreamingSession {
     front: StreamFrontEnd,
     pipeline: FastPipeline,
@@ -1516,7 +1524,8 @@ pub struct StreamingSession {
     lag_sum: f64,
     lag_count: usize,
 
-    /// Posterior history (the StreamOverlap output, `output_size`-wide f32) -- the gate's
+    /// Posterior history (the NN stage's output -- [`StreamOverlap`] on the windowed arm,
+    /// [`StreamCausal`] on the causal one -- `output_size`-wide f32) -- the gate's
     /// bit-equivalence observable, mirroring the offline `last_result_rows`. Accumulated
     /// ONLY under `test-support` (it grows unbounded; production streaming never keeps it,
     /// per the phase's low-memory goal), the SAME pattern as `BagOfProcessors`'
@@ -1527,11 +1536,28 @@ pub struct StreamingSession {
 
 impl StreamingSession {
     /// Build the session from the SAME legacy config `map` the bag consumes, the stream
-    /// `rate`, and the source `channels` count. Validates the streaming contract (each bail
-    /// pinned by `tests/phase8_gate.rs::validation_bails`): algo 3, mono, `Audio_fixed_gain`
-    /// present, `InputNormalizationType 1`, and the overlap windowing (plain/truncate bail).
-    /// Loads the frozen net once and builds the phase-7 pipeline/BLSTM + the three streaming
-    /// layers.
+    /// `rate`, and the source `channels` count. Loads the frozen net ONCE, builds the
+    /// phase-7 [`FastPipeline`], and wires the front-end + NN stage + decision layer.
+    ///
+    /// THE NN STAGE IS DISPATCHED (spec S5.2) on `Cell_Type` x `Direction`, through
+    /// `fast::driver`'s own `classify_fast_shape` choke point -- so a pair the offline fast
+    /// tree refuses (a bidirectional new cell, a causal LSTM) is refused HERE with the
+    /// IDENTICAL wording rather than a second, drifting copy:
+    ///  - `lstm` + bidirectional -> [`StreamNn::Windowed`] ([`StreamOverlap`] + [`FastBlstm`]),
+    ///    the phase-8 path;
+    ///  - `slstm`/`mamba` + forward -> [`StreamNn::Causal`] ([`StreamCausal`] over a
+    ///    [`FastCausalNet`]), Phase 9 Task 7.
+    ///
+    /// Validated contract, each bail pinned (`tests/phase8_gate.rs::validation_bails` for the
+    /// windowed arm, `tests/phase9_stream_causal.rs::validation_bails` +
+    /// `causal_output_size_not_one_bails` for the causal one): algo 3, MONO,
+    /// `Audio_fixed_gain` present, `output_size 1`, plus the two ARM-DEPENDENT rules --
+    ///  - INPUT NORMALIZATION: `1` (the pack-carried frozen tail) on either arm, and `0`
+    ///    (no normalization) on the CAUSAL arm only; `-1` (per-sequence self-normalization)
+    ///    always bails, since it needs the whole sequence before the first frame;
+    ///  - WINDOWING: the windowed arm requires OVERLAP (plain and truncate bail); the causal
+    ///    arm requires the PLAIN regime (`window_size` 0), because a causal cell's state
+    ///    would be reset at every window boundary.
     pub fn new(
         map: &IndexMap<String, String>,
         rate: f64,
@@ -1572,16 +1598,34 @@ impl StreamingSession {
         let shape = classify_fast_shape(&bc, "BLSTM")?;
         let causal = matches!(shape, FastNetShape::Causal(_));
 
-        // Input normalization: 1 (the pack-carried frozen tail -- the phase-8 causality
-        // cut) or 0 (NOTHING, the exact path's `_ => {}` arm, causality-trivial: there is
-        // no whole-file statistic to freeze). The phase-9 committed causal fixtures carry
-        // type 0. Type -1 (per-sequence self-normalization) still bails: it needs the
-        // whole sequence before the first frame can be normalized.
-        if ![0, 1].contains(&bc.input_normalization_type) {
+        // Input normalization, ARM-DEPENDENT and deliberately CONSERVATIVE:
+        //  - type 1 (the pack-carried frozen tail -- the phase-8 causality cut) on EITHER
+        //    arm;
+        //  - type 0 (NOTHING, the exact path's `_ => {}` arm) on the CAUSAL arm only. It is
+        //    causality-trivial (no whole-file statistic exists, so there is nothing to
+        //    freeze) and it is what the committed phase-9 causal fixtures carry -- but the
+        //    WINDOWED arm keeps phase 8's `{1}` set BYTE-IDENTICALLY, message included, so
+        //    no config phase 8 accepted or refused changes status here. Widening it there
+        //    too would be defensible and untested; untested is the part that matters.
+        //  - type -1 (per-sequence self-normalization) ALWAYS bails: it needs the whole
+        //    sequence before the first frame can be normalized.
+        let norm_ok = if causal {
+            matches!(bc.input_normalization_type, 0 | 1)
+        } else {
+            bc.input_normalization_type == 1
+        };
+        if !norm_ok {
+            if causal {
+                bail!(
+                    "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen \
+                     stats) or 0 (no input normalization); got {} (type -1 self-normalization \
+                     needs whole-sequence lookahead)",
+                    bc.input_normalization_type
+                );
+            }
             bail!(
-                "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen stats) \
-                 or 0 (no input normalization); got {} (type -1 self-normalization needs \
-                 whole-sequence lookahead)",
+                "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen stats); \
+                 got {} (type -1 self-normalization needs whole-sequence lookahead)",
                 bc.input_normalization_type
             );
         }

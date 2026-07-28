@@ -999,23 +999,26 @@ impl FastCausalNet {
     }
 
     /// The per-cell-layer sub-sampling ratios (Task 7's streaming stack buffers by them).
-    pub fn lstm_subsampling(&self) -> &[usize] {
+    /// `pub(crate)` with [`Self::output_subsampling`] / [`Self::input_width`] /
+    /// [`Self::output_layers`]: these four exist ONLY so the sibling `fast::stream` module
+    /// can reproduce [`Self::feed_forward`]'s geometry row by row, and widening them to the
+    /// public API would advertise internals no external caller has a use for.
+    pub(crate) fn lstm_subsampling(&self) -> &[usize] {
         &self.lstm_subsampling
     }
 
     /// The per-output-layer sub-sampling ratios.
-    pub fn output_subsampling(&self) -> &[usize] {
+    pub(crate) fn output_subsampling(&self) -> &[usize] {
         &self.output_subsampling
     }
 
     /// The net's declared input width (`LSTMNeuronNb[0]`) -- the [`Self::feed_forward`]
     /// crop-gate threshold Task 7's streaming stack has to reproduce.
-    pub fn input_width(&self) -> usize {
+    pub(crate) fn input_width(&self) -> usize {
         self.lstm_neuron_nb[0]
     }
 
-    /// The dense output MLP's layers. `pub(crate)`: [`FastDenseLayer`] is a crate-private
-    /// type, and the only consumer is the sibling streaming session.
+    /// The dense output MLP's layers ([`FastDenseLayer`] is crate-private anyway).
     pub(crate) fn output_layers(&self) -> &[FastDenseLayer] {
         &self.output_layers
     }

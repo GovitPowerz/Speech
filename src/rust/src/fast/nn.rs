@@ -1434,12 +1434,15 @@ pub(crate) fn dense_net_forward(
 ///
 /// WHY THIS EXISTS (Phase 9 Task 7 finding). Task 6's `fast::cells` module doc argues
 /// that batching the dense MLP through faer is safe because "it is a per-row map, so
-/// batching it is state-free". MEASURED, that is FALSE: `faer_project`'s reduction over
-/// `k` is `m`-INDEPENDENT only when `w_cols == 1` (a matrix-VECTOR product); at
-/// `w_cols > 1` faer selects a blocked micro-kernel whose accumulation order depends on
-/// the row count, so a `t == 1` call and a `t == T` call disagree in the last f32 ULP
-/// (measured on this box: 0/37 differing rows at `(k, o) = (4, 1)`/`(24, 1)`/`(96, 1)`,
-/// but 42/111 at `(4, 3)`, 401/444 at `(24, 12)`, 47/74 at `(48, 2)`). The real causal
+/// batching it is state-free". MEASURED, that is FALSE: `faer_project`'s result DEPENDS
+/// on the row count `m` once the weight matrix has more than one column. Measured on this
+/// box, `t == 1` vs `t == T` differ in the last f32 ULP at 42/111 rows for `(k, o) =
+/// (4, 3)`, 401/444 at `(24, 12)` and 47/74 at `(48, 2)`, while `o == 1` agrees exactly
+/// (0/37 at `(4, 1)`/`(24, 1)`/`(96, 1)`). The MECHANISM is not pinned here -- the
+/// observation is consistent with faer selecting a blocked micro-kernel whose accumulation
+/// order varies with `m` above the matrix-VECTOR case, but this doc claims only the
+/// measurement, and `dense_row_granularity_is_faer_column_dependent` is what enforces it.
+/// The real causal
 /// SAD arm (`configs/training/lre_sad.toml`, `output_neuron_nb = "48,12,1"` -> `24,12,1`
 /// under `Direction forward`) carries exactly such a WIDE hidden dense layer, so a
 /// streaming session that batched differently from offline would break the phase-9
@@ -1582,13 +1585,13 @@ mod dense_row_chain_tests {
             .count()
     }
 
-    /// THE MEASUREMENT THE DESIGN RESTS ON (Phase 9 Task 7). `faer_project` reduces over
-    /// `k` in an `m`-INDEPENDENT order only when the weight matrix has ONE column: at
-    /// `w_cols == 1` it is a matrix-vector product, at `w_cols > 1` faer selects a blocked
-    /// micro-kernel whose accumulation depends on the row count. That is why the causal
-    /// tree routes BOTH its offline and its streaming dense stage through
-    /// [`DenseRowChain`] instead of pinning faer's kernel-selection behaviour -- and why
-    /// Task 6's "batching it is state-free" reading of the dense MLP was wrong.
+    /// THE MEASUREMENT THE DESIGN RESTS ON (Phase 9 Task 7). `faer_project`'s result is
+    /// `m`-INDEPENDENT when the weight matrix has ONE column, and NOT when it has more.
+    /// That is the claim this test enforces; the mechanism (plausibly a blocked
+    /// micro-kernel selected above the matrix-vector case) is NOT asserted, which is
+    /// precisely why the causal tree routes BOTH its offline and its streaming dense stage
+    /// through [`DenseRowChain`] rather than depending on faer's kernel selection -- and
+    /// why Task 6's "batching it is state-free" reading of the dense MLP was wrong.
     ///
     /// A CHANGE HERE IS NOT A FAILURE TO WIDEN. If the `o == 1` column ever starts
     /// differing, the phase-7 `FastBlstm` (which keeps the BATCHED form) and the causal

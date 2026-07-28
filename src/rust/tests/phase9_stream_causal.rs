@@ -354,15 +354,43 @@ fn interior_boundaries(seg: &Segmentation) -> usize {
         .count()
 }
 
-/// Sweep the output-layer bias until the OFFLINE causal run built by `build` carries
-/// interior boundaries, and return that offset. `0.0` FIRST, so a fixture that already
-/// crosses is used AS COMMITTED and the sweep is a fallback, not a default detour.
-/// `build` is a closure so the same sweep serves the plain (type-0) and the
+/// The interior-boundary floor the PLAIN (type-0) legs demand -- the ones carrying the
+/// headline `max_dt == 0.0` claim. TWO, not one: a single interior boundary means the
+/// posterior crossed the rising threshold once and never came back, so the comparison
+/// exercises one hysteresis edge and not the other. Measured, the plain legs clear this
+/// comfortably (slstm 12, mamba 16), so the floor is a REGRESSION DETECTOR -- if a future
+/// fixture or kernel change quietly thins the boundary set to a single edge, the sweep
+/// moves on rather than silently weakening the gate.
+/// The default push granularity every end-to-end leg streams at, in SECONDS. Shared so the
+/// latency leg's tight pin (`bound + PUSH_CHUNK_S`) and the chunk size it actually pushes at
+/// cannot drift apart -- the emission clock advances once per `push`, so that pin is only
+/// valid for THIS granularity.
+const PUSH_CHUNK_S: f64 = 0.1;
+
+const MIN_INTERIOR_PLAIN: usize = 2;
+
+/// The floor the CALIBRATED TYPE-1 leg demands. ONE, and that is a MEASURED CEILING, not a
+/// lowered bar: on the committed sLSTM fixture under a calibrated type-1 tail, `>= 2` is
+/// structurally unreachable -- a 12-point sweep over `[0.30, 0.90]` (plus the coarse
+/// `[-3, +2]` list) finds the posterior crossing at ONLY three offsets (0.50/0.55/0.60) and
+/// crossing exactly ONCE at each; every other offset yields zero. The calibrated tail
+/// normalizes this tiny 4-unit net's input to zero-mean/unit-std, which compresses the
+/// posterior's dynamic range until it merely grazes the rising threshold. That leg is
+/// therefore worth exactly what it claims: type-1 THREADING through the causal arm (the
+/// tail demonstrably moves the posteriors -- asserted separately in the leg) plus ONE real
+/// interior boundary compared bit-for-bit. It is NOT a rich boundary-set comparison; the
+/// plain legs are.
+const MIN_INTERIOR_TYPE1: usize = 1;
+
+/// Sweep the output-layer bias until the OFFLINE causal run built by `build` carries at
+/// least `min_interior` interior boundaries, and return that offset. `0.0` FIRST, so a
+/// fixture that already crosses is used AS COMMITTED and the sweep is a fallback, not a
+/// default detour. `build` is a closure so the same sweep serves the plain (type-0) and the
 /// calibrated-tail (type-1) legs, whose posteriors sit at different levels.
-fn crossing_offset(label: &str, build: impl Fn(f64) -> CausalStage) -> f64 {
+fn crossing_offset(label: &str, min_interior: usize, build: impl Fn(f64) -> CausalStage) -> f64 {
     for offset in [0.0_f64, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0, 1.5, -3.0, 2.0] {
         let (_, seg) = run_offline(&build(offset));
-        if interior_boundaries(&seg) > 0 {
+        if interior_boundaries(&seg) >= min_interior {
             println!(
                 "MEASURE crossing[{label}]: output-bias offset {offset:+} -> {} interior \
                  boundaries ({} segment rows)",
@@ -372,12 +400,12 @@ fn crossing_offset(label: &str, build: impl Fn(f64) -> CausalStage) -> f64 {
             return offset;
         }
     }
-    panic!("{label}: no output-bias offset produced an interior boundary");
+    panic!("{label}: no output-bias offset produced >= {min_interior} interior boundaries");
 }
 
 /// The plain (type-0) sweep: the committed fixture config at `offset`.
 fn plain_crossing(dir: &Path, cell: &str, tag: &str) -> f64 {
-    crossing_offset(cell, |o| stage(dir, cell, o, tag))
+    crossing_offset(cell, MIN_INTERIOR_PLAIN, |o| stage(dir, cell, o, tag))
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +420,12 @@ fn stream_finish_equals_offline_causal() {
         let st = stage(dir.path(), cell, offset, "gate");
         let (off_post, off_seg) = run_offline(&st);
         let (rate, samples) = mono_samples(&st.wav);
-        let run = run_session(&st.config_text, rate, &samples, (0.1 * rate) as usize);
+        let run = run_session(
+            &st.config_text,
+            rate,
+            &samples,
+            (PUSH_CHUNK_S * rate) as usize,
+        );
 
         assert!(
             run.is_causal,
@@ -414,7 +447,7 @@ fn stream_finish_equals_offline_causal() {
         assert_posteriors_bit_equal(&run.posteriors, &off_post, &format!("{cell} posteriors"));
         // Non-vacuity: real interior boundaries AND a posterior sequence that moves.
         assert!(
-            interior_boundaries(&off_seg) > 0,
+            interior_boundaries(&off_seg) >= MIN_INTERIOR_PLAIN,
             "{cell}: the boundary comparison is vacuous (no interior boundary)"
         );
         let first = off_post[0];
@@ -442,7 +475,7 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
         // Sweep the crossing on the CALIBRATED config: the calibrated tail shifts the
         // posterior level, so the type-0 sweep's offset does not carry over (measured: at
         // offset 0 the sLSTM type-1 run collapses to the 2-row seed).
-        let offset = crossing_offset(&format!("{cell}/type1"), |o| {
+        let offset = crossing_offset(&format!("{cell}/type1"), MIN_INTERIOR_TYPE1, |o| {
             let b = stage(dir.path(), cell, o, "t1sweep");
             calibrate(dir.path(), &b, cell, "t1sweep")
         });
@@ -451,7 +484,12 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
         let (off_post, off_seg) = run_offline(&cal);
         let (plain_post, _) = run_offline(&base);
         let (rate, samples) = mono_samples(&cal.wav);
-        let run = run_session(&cal.config_text, rate, &samples, (0.1 * rate) as usize);
+        let run = run_session(
+            &cal.config_text,
+            rate,
+            &samples,
+            (PUSH_CHUNK_S * rate) as usize,
+        );
 
         assert!(run.is_causal, "{cell}: type-1 leg must take the causal arm");
         let max_dt = boundary_check(&run.seg, &off_seg, &format!("{cell}/type1"));
@@ -472,7 +510,7 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
             &format!("{cell}/type1 posteriors"),
         );
         assert!(
-            interior_boundaries(&off_seg) > 0,
+            interior_boundaries(&off_seg) >= MIN_INTERIOR_TYPE1,
             "{cell}/type1: the boundary comparison is vacuous (no interior boundary)"
         );
         // Non-vacuity: the calibrated tail is NOT the identity, so it genuinely moved the
@@ -558,7 +596,12 @@ fn prefix_consistency_e2e() {
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "prefix");
         let (rate, samples) = mono_samples(&st.wav);
-        let run = run_session(&st.config_text, rate, &samples, (0.1 * rate) as usize);
+        let run = run_session(
+            &st.config_text,
+            rate,
+            &samples,
+            (PUSH_CHUNK_S * rate) as usize,
+        );
 
         let final_ids: std::collections::HashSet<(u64, u64, i32)> = run
             .seg
@@ -795,7 +838,12 @@ fn latency_bounds() {
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "latency");
         let (rate, samples) = mono_samples(&st.wav);
-        let run = run_session(&st.config_text, rate, &samples, (0.1 * rate) as usize);
+        let run = run_session(
+            &st.config_text,
+            rate,
+            &samples,
+            (PUSH_CHUNK_S * rate) as usize,
+        );
 
         // Cross-check every component against a from-config recomputation, BY BITS, so the
         // derivation is COMPUTED rather than a session-internal literal we trust blindly.
@@ -898,13 +946,15 @@ fn latency_bounds() {
             "MEASURE latency[{cell}]: feature_reach={:.5} nn_window={:.5} sub_sample={:.5} \
              conv_delay={:.5} holdback={:.5} bound={:.5} pipeline_forward={pipeline_forward:.5} \
              speech_push_max={speech_push_max:.5} other_push_max={other_push_max:.5} \
-             max_speech_dur={max_speech_dur:.5} push={} finish={} seg_rows={}",
+             max_speech_dur={max_speech_dur:.5} tight_margin={:+.5} push={} finish={} \
+             seg_rows={}",
             run.feature_reach,
             run.nn_window,
             run.sub_sample,
             run.conv_delay,
             run.holdback,
             run.bound,
+            speech_push_max - run.bound - PUSH_CHUNK_S,
             run.push_emissions.len(),
             run.finish_emissions.len(),
             run.seg.segments().len()
@@ -946,6 +996,33 @@ fn latency_bounds() {
             "{cell}: SPEECH mid-stream max lag {speech_push_max} must exceed the holdback alone \
              {} (else the pipeline delay is not being measured at all)",
             run.holdback
+        );
+        // THE TIGHT COMPANION -- the pin that actually asserts S5.5's claim. The 0.5 s
+        // sibling above is 29% of a 1.73400 s bound (phase 8's identical allowance was 8% of
+        // 6.05357 s and went unconsumed), so on its own it would let a real regression of up
+        // to half a second pass unnoticed. The ONLY structural reason a SPEECH emission may
+        // land past the config-derived bound is the push quantum: the emission clock is
+        // `(total_pushed-1)/rate`, advanced once per `push`, so a segment that settles just
+        // after a push is stamped up to one chunk late. Pin exactly that, no slack beyond it,
+        // turning "the push quantum accounts for the excess" from narrative into a bound.
+        // MEASURED margin at 100 ms chunks (printed as `tight_margin` above): -0.03252 s
+        // (slstm) / -0.00533 s (mamba) -- both under, and mamba by only ~5 ms. That thinness
+        // is the point: the pin sits right where the structural argument predicts, so it has
+        // real discriminating power. It also means this leg is chunk-size-COUPLED -- running
+        // the gate at a coarser granularity would legitimately need `chunk_s` to follow the
+        // actual chunk (it is hardcoded to the 0.1 the leg pushes at, deliberately, so the
+        // two cannot silently drift apart).
+        // A FAILURE HERE IS NOT A FAILURE TO WIDEN (R1): it means an emission waited on
+        // something other than the derived pipeline + one chunk, which is a latency
+        // regression to adjudicate, not a constant to bump.
+        let chunk_s = PUSH_CHUNK_S;
+        assert!(
+            speech_push_max <= run.bound + chunk_s,
+            "{cell}: SPEECH mid-stream max lag {speech_push_max} exceeds the derived bound {} \
+             plus ONE push quantum {chunk_s} (margin {:+.5}) -- the excess is no longer \
+             explained by the emission clock's granularity",
+            run.bound,
+            speech_push_max - run.bound - chunk_s
         );
 
         // (2) THE SILENCE-COMMIT WAIT (honest, data-dependent): an OTHER segment cannot
@@ -997,7 +1074,12 @@ fn stream_cli_drives_the_causal_arm() {
     let (rate, samples) = mono_samples(&st.wav);
 
     // The in-process oracle at the SAME 100 ms chunking the CLI flag selects.
-    let run = run_session(&st.config_text, rate, &samples, (0.1 * rate) as usize);
+    let run = run_session(
+        &st.config_text,
+        rate,
+        &samples,
+        (PUSH_CHUNK_S * rate) as usize,
+    );
     assert!(run.is_causal, "the CLI leg must exercise the causal arm");
     let ref_set: std::collections::HashSet<(String, String, String)> = run
         .seg
