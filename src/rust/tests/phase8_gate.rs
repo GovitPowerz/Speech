@@ -829,9 +829,25 @@ fn latency_bounds() {
     // TRUE leftward reach is 1.68510 s and the holdback deliberately over-covers it by the
     // rightward-only after-paddings). The pre-fix code emitted it at ~bound UNSAFELY: it is
     // exactly the same rule that produced a real R2 retraction on corpus data
-    // (`tests/pyo3/test_phase9_parity.py`). Measured lags, 2026-07-28: five unblocked speech
-    // emissions at 5.39698 / 5.49408 / 5.54447 / 5.69858 / 5.84457 s (all <= bound 6.05357),
-    // the blocked one at 16.80428 s.
+    // (`tests/pyo3/test_phase9_parity.py`).
+    //
+    // MEASURED TRANSITION, 2026-07-28, both regimes instrumented. The BLOCKED emission is the
+    // speech segment [3.33710, 9.79560]: its lag goes 5.60428 -> 16.80428 s. NOTE that
+    // 5.84457 is a DIFFERENT segment ([41.35350, 43.95530]) -- it merely happens to be the
+    // phase-8 headline SPEECH max, and it is UNMOVED by this fix; do not read it as the
+    // blocked segment's pre-fix value. The five unblocked speech emissions measure
+    // 5.39698 / 5.49408 / 5.54447 / 5.69858 / 5.84457 s (all <= bound 6.05357), unchanged
+    // across the fix.
+    //
+    // THE HOLDBACK STAYS (T9 review, adjudicated). The 0.0664 s margin above is real, but the
+    // pending term is a FRONTIER bound handled exactly like the other two (holdback is
+    // subtracted once from their `min`), so there is nothing to disentangle per-term; giving
+    // it its own tighter constant would put a second underived, unpinned number on the exact
+    // code path -- and it is precisely a tight-reach argument that was just proved incomplete
+    // here. The checkable part of the alternative is only that the tighter reach would have
+    // kept THIS fixture unblocked. Tightening the reach is a PHASE-LEVEL follow-on if ever
+    // taken: tighten `holdback` GLOBALLY (all three frontier terms), derive it code-side,
+    // pin it, and re-prove leftward dominance -- never a per-term second constant.
     let push_max = max_lag_of(&run.push_emissions);
     let finish_max = max_lag_of(&run.finish_emissions);
     let speech_lags: Vec<f64> = run
@@ -1053,9 +1069,13 @@ fn settled_speech_emits_during_silence() {
         )
     });
 
-    // (b) THE WIDEST gap's opening segment is still a MID-STREAM (push) emission -- it is never
-    //     deferred to the EOS drain -- and its lag is bounded by the commit-wait ceiling it
-    //     inherits when a reopening raw segment blocks it (see the header).
+    // (b) THE WIDEST gap's opening segment is still a MID-STREAM (push) emission carrying a real
+    //     positive lag -- it is never deferred to the EOS drain, even when a reopening raw
+    //     segment blocks it. Deliberately NOT asserted here: the commit-wait CEILING that lag
+    //     obeys. That ceiling needs `max_speech_dur + pipeline_forward`, which is derived and
+    //     pinned once in `latency_bounds` (assertion 2') on the same fixture; recomputing it
+    //     here would duplicate the derivation, so this leg pins existence + mid-streamness and
+    //     `latency_bounds` owns the magnitude.
     let (widest_start, _widest_end, widest_width) = *wide[0];
     let widest = emission_ending_at(widest_start).unwrap_or_else(|| {
         panic!(

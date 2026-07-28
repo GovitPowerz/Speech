@@ -639,8 +639,10 @@ retraction on a trained causal net. The fix (`fast/stream.rs::resmooth_and_emit`
 frontier to `hyst.pending_begin()`) makes the SPEECH-class structural bound CONDITIONAL: a speech
 segment whose following silence is interrupted by a raw speech segment reopening within the
 holdback now waits for that segment to close, inheriting the OTHER class's commit-wait area term.
-On this fixture that moves ONE of six speech emissions (5.84 s -> 16.80428 s, still inside the
-18.11 s commit-wait ceiling); the other five are unmoved. Nothing else in this section changes --
+On this fixture that moves ONE of six speech emissions -- the segment `[3.33710, 9.79560]`,
+measured in BOTH regimes at 5.60428 -> 16.80428 s, still inside the 18.11 s commit-wait ceiling;
+the other five are unmoved, and the 5.84457 s headline max above belongs to one of THOSE (the
+segment `[41.35350, 43.95530]`), not to the blocked one. Nothing else in this section changes --
 the equivalence, prefix, chunk-invariance, and causality-cost results are all unaffected (they
 concern `finish`, which the fix never touches).
 
@@ -875,20 +877,31 @@ SPEECH-class structural bound is CONDITIONAL, not universal: a speech segment wh
 silence is interrupted by a raw speech segment reopening within the holdback must wait for that
 segment to close, inheriting the same data-dependent commit-wait area term the OTHER class always
 carried. On the phase-8 calibrated fixture exactly one of six speech emissions is so blocked
-(a raw segment opens at 12.01876, 2.2232 s after the 9.79560 end, inside the 2.28957 holdback);
-its lag goes 5.84 s -> 16.80428 s, still inside the commit-wait ceiling
-`max_speech_dur + pipeline_forward + 1.0 = 18.11`. The other five are unmoved (5.39698 / 5.49408 /
-5.54447 / 5.69858 / 5.84457 s, all <= the 6.05357 bound). `phase8_gate.rs::latency_bounds` now pins
+(a raw segment opens at 12.01876, 2.2232 s after the 9.79560 end, inside the 2.28957 holdback).
+That blocked emission is the speech segment `[3.33710, 9.79560]`, and BOTH REGIMES WERE
+INSTRUMENTED to attribute the transition: its lag goes **5.60428 -> 16.80428 s**, still inside the
+commit-wait ceiling `max_speech_dur + pipeline_forward + 1.0 = 18.11`. The other five speech
+emissions are unmoved (5.39698 / 5.49408 / 5.54447 / 5.69858 / 5.84457 s, all <= the 6.05357
+bound). NOTE, because an earlier revision of this section got it wrong: **5.84457 is a DIFFERENT
+segment** (`[41.35350, 43.95530]`) -- it is the phase-8 headline SPEECH max and it is UNMOVED by
+this fix; it is not the blocked segment's pre-fix value. `phase8_gate.rs::latency_bounds` now pins
 the unblocked MAJORITY at ~bound plus the commit-wait ceiling on the max;
 `settled_speech_emits_during_silence` became EXISTENTIAL over the gaps wider than the bound (the
-7.50160 s gap carries the win at lag 5.69858) and records the widest gap's blocked case. NOTE the
-margin: the block is by 0.0664 s only, because `holdback` (2.28957) deliberately over-covers the
-TRUE leftward reach (1.68510, the T4-review derivation -- the difference is exactly the
-rightward-only after-paddings). Using the tighter reach for the PENDING term alone would keep the
-phase-8 fixture unblocked AND still catch the corpus retraction (mamba's pending begin sits
-1.27-1.87 s past the emitted end, inside 1.68510 by construction of the merge) -- a NAMED,
-quantified follow-on, deliberately NOT taken here: shipping a tighter, previously doc-only safety
-constant to preserve a latency number is the wrong trade for a measurement task.
+7.50160 s gap carries the win at lag 5.69858) and records the widest gap's blocked case.
+
+**THE HOLDBACK STAYS (T9 review, adjudicated).** The block is by 0.0664 s only, because `holdback`
+(2.28957) deliberately over-covers the TRUE leftward reach (1.68510, the T4-review derivation --
+the difference is exactly the rightward-only after-paddings), and the tempting move is to give the
+PENDING term that tighter constant. Ruled out: the pending term is a FRONTIER bound handled exactly
+like the other two (holdback is subtracted once from their `min`), so there is no per-term
+conflation to fix, and a per-term constant would put a second underived, unpinned number on the
+exact code path -- when it is precisely a tight-reach argument that was just proved incomplete
+here. The only checkable claim is that the tighter reach would have kept THIS fixture unblocked;
+whether it would also have caught the corpus retraction is NOT established (the natural comparison
+mixes reference frames -- a raw-end measurement against a smoothed-end constant). If the reach is
+ever tightened it is a PHASE-LEVEL change: tighten `holdback` GLOBALLY across all three frontier
+terms, derive it code-side, pin it, and re-prove leftward dominance. Never a per-term second
+constant.
 
 #### The frozen-overlay contract on a `-1`-trained pack
 
@@ -978,8 +991,10 @@ front-end (the phase-8 DCT-cancellation finding). Timings: 0.32 s / 0.32 s (sLST
 #### S4.3 on real data -- fast vs exact causal metric parity
 
 Each T8 checkpoint scored on its own 24-file held-out slice under both `Inference_Path` values in
-its NATIVE config (type -1, `BLSTM_window 0`, no fixed gain) -- byte-identical configs except that
-one key:
+its NATIVE config (type -1, `BLSTM_window 0`, no fixed gain) -- identical configs except
+`Inference_Path` and the per-path `Dump_Directory` the scorer points at its own VRCTS output (that
+second key is a write TARGET, read by nothing in the compute path, and it must differ or the two
+runs would overwrite each other's hyps):
 
 | cell / direction | files | per-file decision agreement | DCF delta (fast - exact) | exact DCF@0.5 (T8-pinned) |
 |---|---|---|---|---|

@@ -90,7 +90,7 @@ from speech.weight_bridge import read_weight_vector  # noqa: E402
 _COLLARS: tuple[float, ...] = B._DCF_COLLARS
 
 # Session-persistent, gitignored checkpoint cache (holds corpus-path listings -> NEVER
-# committed; `.gitignore` carries `/data/phase9_parity_cache/`). parents[2] = repo root.
+# committed; `.gitignore` carries `data/phase9_parity_cache/`). parents[2] = repo root.
 _CACHE = Path(__file__).resolve().parents[2] / "data" / "phase9_parity_cache"
 
 # The T8 subset-gate recipe, VERBATIM (`test_phase9_gates.py::_GATE`) -- so this tier's
@@ -495,17 +495,33 @@ def test_streaming_equivalence_on_corpus(cell: str) -> None:
     # PREFIX consistency: the emitted set equals the final partition (no missing, no extra).
     emitted_set = {(round(e[0], 4), round(e[1], 4), e[2]) for e in push_a + fin_a}
     part_set = {(round(seg_a[i][0], 4), round(seg_a[i + 1][0], 4), seg_a[i][1]) for i in range(len(seg_a) - 1)}
-    assert emitted_set == part_set, f"{cell}: emitted set != final partition (retraction/extra -- R2): {len(emitted_set)} vs {len(part_set)}"
+    assert emitted_set == part_set, f"{cell}: emitted set != final partition (retraction/extra -- phase-8 R2): {len(emitted_set)} vs {len(part_set)}"
     assert len(push_a + fin_a) == len(part_set), f"{cell}: emitted count must equal the partition size (no re-emission)"
 
     # CHUNK invariance: a different push granularity yields the identical segmentation + set.
     assert seg_a == seg_b, f"{cell}: the final segmentation must be chunk-invariant"
     assert emitted_set == {(round(e[0], 4), round(e[1], 4), e[2]) for e in push_b + fin_b}, f"{cell}: the emitted set must be chunk-invariant"
 
+    # DEGENERACY PIN (T9 review minor 4) -- a TRIPWIRE, not a property claim. Both T8 subset
+    # checkpoints mode-collapse to all-speech on this file, so the partition is a SINGLE speech
+    # interval spanning it, nothing is emitted mid-stream, and the prefix + latency legs below
+    # pass TRIVIALLY. Pinning that degeneracy means a future, genuinely selective checkpoint
+    # (the full-corpus launcher's output) fails HERE, loudly, instead of quietly continuing to
+    # satisfy assertions that no longer test anything -- at which point this leg must be
+    # strengthened to a real interior-boundary comparison (the Rust gate's swept-bias fixtures
+    # are the model). Read a failure here as "the checkpoint got better, go strengthen the
+    # test", never as a streaming regression.
+    assert len(streamed_speech) == 1 and abs(streamed_speech[0][0]) < 1e-9 and abs(streamed_speech[0][1] - dur) < 1e-3, (
+        f"{cell}: this leg is pinned to the all-speech-collapsed regime (expected one speech interval spanning [0, {dur:.4f}], "
+        f"got {streamed_speech}); a selective checkpoint makes the prefix/latency legs below non-trivial -- STRENGTHEN them"
+    )
+    assert not push_a and len(fin_a) == 1, f"{cell}: the collapsed regime emits nothing mid-stream (push={len(push_a)} finish={len(fin_a)})"
+
     # LATENCY (S5.5, recorded): the measured max lag sits inside the config-derived causal
-    # bound. Trivially so under an all-speech collapse (one segment finalized at EOS); the
-    # mid-stream budget is exercised on the crafted Rust gate (`phase9_stream_causal.rs::
-    # latency_bounds`), which sweeps the output bias until real interior boundaries exist.
+    # bound. Trivially so under the all-speech collapse pinned just above (one segment
+    # finalized at EOS -> lag 0); the mid-stream budget is exercised on the crafted Rust gate
+    # (`phase9_stream_causal.rs::latency_bounds`), which sweeps the output bias until real
+    # interior boundaries exist.
     assert max_lag <= comp["bound"], f"{cell}: max_lag {max_lag:.4f}s exceeds the derived causal bound {comp['bound']:.5f}s"
     assert max_lag >= mean_lag >= 0.0, f"{cell}: lag stats must be sane (max >= mean >= 0)"
 
@@ -611,8 +627,11 @@ def test_causality_cost_dcf_on_corpus(cell: str) -> None:
 def _score_causal(arm: _CausalArm, inference_path: str) -> tuple[B.DcfReport, Path]:
     """Score the trained causal pack on the held-out slice under `inference_path`, in the
     arm's NATIVE config (type -1, `BLSTM_window 0`, no fixed gain) -- so exact and fast
-    configs are byte-identical except that ONE key and the comparison isolates the f32 causal
-    kernels. `_score_sad_pack_on_test` `set_weights`-injects on exact (redundant: the config
+    configs are identical except `Inference_Path` and the per-path `Dump_Directory`
+    `_score_sad_pack_on_test` writes its VRCTS hyps into (a write TARGET, read by nothing in the
+    compute path, and necessarily distinct or the two runs would clobber each other's output), so
+    the comparison isolates the f32 causal kernels.
+    `_score_sad_pack_on_test` `set_weights`-injects on exact (redundant: the config
     repoint already did it) and SKIPS on fast (T6b)."""
     cfg = _inference_cfg(arm, {"Inference_Path": inference_path})
     dump_dir = arm.out_dir / f"_t9_par_{inference_path}"
