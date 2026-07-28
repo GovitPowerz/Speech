@@ -632,6 +632,18 @@ cancellation above), so one global gain equals a per-file gain on the decision. 
 DCFs finite, in [0,1], same order of magnitude -- here identical). Timings: self-norm scoring
 5.51 s, frozen 5.36 s (24 files each, warm cache).
 
+**REVISED BY PHASE 9 TASK 9 (read that section before quoting the latency numbers above).** The
+phase-8 emission frontier had a third, missing term -- an OPEN (un-closed) raw segment, whose begin
+sits behind the consumed frontier -- and the phase-9 corpus streaming tier caught it as a real R2
+retraction on a trained causal net. The fix (`fast/stream.rs::resmooth_and_emit`, clamp the
+frontier to `hyst.pending_begin()`) makes the SPEECH-class structural bound CONDITIONAL: a speech
+segment whose following silence is interrupted by a raw speech segment reopening within the
+holdback now waits for that segment to close, inheriting the OTHER class's commit-wait area term.
+On this fixture that moves ONE of six speech emissions (5.84 s -> 16.80428 s, still inside the
+18.11 s commit-wait ceiling); the other five are unmoved. Nothing else in this section changes --
+the equivalence, prefix, chunk-invariance, and causality-cost results are all unaffected (they
+concern `finish`, which the fix never touches).
+
 ---
 
 ## Phase 9 -- new architectures
@@ -818,3 +830,207 @@ speech baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_slstm_full
 regime -- a window boundary would reset the recurrent state) and resizes the output MLP's
 input width; both are automatic (`drivers/baseline.py::cell_overlay`). Paste resulting
 numbers into the `full-corpus runs` row above.
+
+### Task 9 -- the corpus tier (causal streaming, causality cost, fast-vs-exact) + the bench rows
+
+`tests/pyo3/test_phase9_parity.py` (corpus-gated, `slow`, local-only) lifts BOTH phase-9 Rust CI
+gates -- `phase9_fast_parity.rs` (exact-causal vs fast-causal offline) and
+`phase9_stream_causal.rs` (streamed `finish()` bit-equal to the offline fast causal run) -- onto
+real LRE03/07 data with the T8 FROM-SCRATCH CAUSAL checkpoints, through the `speech_rs` seam. The
+structure is the phase-7 (`test_phase7_parity.py`) + phase-8 (`test_phase8_parity.py`) corpus
+tiers, on phase-9 artefacts. Checkpoints train under T8's `_GATE` recipe VERBATIM (subset 10 /
+valid 8 / test 24, 3 epochs x 10 SMORMS3 steps, 20 s cap, seed 0) into the gitignored
+`data/phase9_parity_cache/` (cold train 14.4 s sLSTM / 17.6 s Mamba; warm-cache whole file 10 s).
+The streamed file is selected at RUNTIME as the lexicographically-first `*.wav` under
+`train/audio/**` (the license bright line -- no filename recorded); it is the same 75 s mono 8 kHz
+recording the phase-7/8 corpus legs used. Measured 2026-07-28, Apple M4 Pro (arm64), macOS 26.5.2.
+
+#### A REAL DEFECT, FOUND HERE: the emission frontier ignored an OPEN raw segment (R2)
+
+The mamba/forward streaming leg RETRACTED on its first run: `[0, 7.3051] Speech` was emitted
+mid-stream at 10.1999 s, and `finish` then reported ONE `[0, 74.9999]` segment -- the emitted
+boundary had moved. Adjudicated (never widened, spec R1/R2) to a genuine PHASE-8 bug in
+`fast/stream.rs::resmooth_and_emit`, inherited unchanged by the phase-9 causal arm:
+
+- The emission frontier was `max(last_raw_boundary, consumed_frontier - dt)`, and its safety
+  argument concluded "future raw structure lands no earlier than the frontier".
+- That is FALSE while the hysteresis is INSIDE an un-closed raw segment. Such a segment's begin
+  lies BEHIND the consumed frontier and is not yet in `raw_segments`, so neither term sees it;
+  when it closes, its `add_padding` `before` reach can merge it into the previous speech segment
+  and MOVE a boundary the trigger already emitted. Here speech resumed ~1.3-2.6 s after the 7.3051
+  end -- inside the 2.28957 s holdback -- and the final smoothing merged the two.
+- FIX: a THIRD frontier term, `hyst.pending_begin()` (the open/tentative begin), clamped in with
+  `min`. It costs LATENCY, never correctness -- clamping only emits LESS.
+- PINNED: `phase8_stream_decision.rs::pending_open_segment_blocks_emission` + the new `reopen`
+  profile (burst A, a 1.6 s merging gap, an 8 s burst B that stays open past A's emission point).
+  MUTATION-VERIFIED: reverting the clamp fails three legs (`pending_open_segment_blocks_emission`,
+  `prefix_consistency_holds`, `chunk_invariance`).
+- COVERAGE LESSON, recorded honestly: with the clamp reverted the ENTIRE phase-8 gate stays GREEN
+  (19/19) and so does the phase-9 causal gate (19/19). Neither synthetic fixture nor the crafted
+  60 s tuple-A fixture ever produced the retraction -- only real data with a real trained causal
+  net did. That is the corpus tier earning its keep.
+
+**PHASE-8 LATENCY CLAIM, REVISED (a spec S1.8/S5.5 deviation surfaced, not absorbed).** The
+SPEECH-class structural bound is CONDITIONAL, not universal: a speech segment whose following
+silence is interrupted by a raw speech segment reopening within the holdback must wait for that
+segment to close, inheriting the same data-dependent commit-wait area term the OTHER class always
+carried. On the phase-8 calibrated fixture exactly one of six speech emissions is so blocked
+(a raw segment opens at 12.01876, 2.2232 s after the 9.79560 end, inside the 2.28957 holdback);
+its lag goes 5.84 s -> 16.80428 s, still inside the commit-wait ceiling
+`max_speech_dur + pipeline_forward + 1.0 = 18.11`. The other five are unmoved (5.39698 / 5.49408 /
+5.54447 / 5.69858 / 5.84457 s, all <= the 6.05357 bound). `phase8_gate.rs::latency_bounds` now pins
+the unblocked MAJORITY at ~bound plus the commit-wait ceiling on the max;
+`settled_speech_emits_during_silence` became EXISTENTIAL over the gaps wider than the bound (the
+7.50160 s gap carries the win at lag 5.69858) and records the widest gap's blocked case. NOTE the
+margin: the block is by 0.0664 s only, because `holdback` (2.28957) deliberately over-covers the
+TRUE leftward reach (1.68510, the T4-review derivation -- the difference is exactly the
+rightward-only after-paddings). Using the tighter reach for the PENDING term alone would keep the
+phase-8 fixture unblocked AND still catch the corpus retraction (mamba's pending begin sits
+1.27-1.87 s past the emitted end, inside 1.68510 by construction of the merge) -- a NAMED,
+quantified follow-on, deliberately NOT taken here: shipping a tighter, previously doc-only safety
+constant to preserve a latency number is the wrong trade for a measurement task.
+
+#### The frozen-overlay contract on a `-1`-trained pack
+
+The arm trains under `BLSTM_InputNormalizationType -1` (per-sequence self-normalization), which the
+streaming session ALWAYS refuses (it needs the whole sequence before the first frame). Resolution,
+evidenced rather than asserted: the trained pack's normalize tail is EXACTLY identity
+(`test_frozen_tail_is_identity`, both cells: `max|mean| = 0`, `max|std-1| = 0` over the last
+`2*23 = 46` elements of the 16295 / 15215 packs) because `init_weights` seeds it identity and type
+-1 training never descends it -- so the streamable type-0 arm and the type-1 frozen-affine arm are
+the SAME map here. `test_frozen_overlay_is_type1_equivalent` pins that end to end: same pack, same
+file, same fixed gain, `InputNormalizationType 0` and `1` produce the IDENTICAL VRCTS partition on
+both cells. `BLSTM_window 0` needs no overlay -- `cell_overlay` already forces it on every
+`--direction forward` run. EVIDENTIARY SCOPE (the phase-8 wording, unchanged): because the tail IS
+identity, this leg does NOT exercise the type-1 arithmetic through the causal front-end; that
+coverage is the Rust gate's calibrated NON-identity tail
+(`phase9_stream_causal.rs::stream_finish_equals_offline_causal_frozen_type1`).
+
+#### S5.6 on real data -- streamed vs offline fast causal
+
+Streamed (PyO3 `StreamingSession`, 100 ms chunks) vs the offline fast CAUSAL `Engine` run on the
+SAME file / pack / overlaid config (`Inference_Path fast`, `Audio_fixed_gain 5.805032e-01`,
+`InputNormalizationType 0`):
+
+| cell / direction | speech segs streamed vs offline | boundary max_dt | 4-dp interval sets | prefix | chunk invariance | max_lag |
+|---|---|---|---|---|---|---|
+| sLSTM / forward | 1 vs 1 (IDENTICAL) | 2.500e-05 s (< the 5e-05 VRCTS half-quantum) | IDENTICAL | no retraction, no re-emission | 100 ms == 101 samples | 0.0000 s |
+| Mamba / forward | 1 vs 1 (IDENTICAL) | 2.500e-05 s | IDENTICAL | no retraction, no re-emission | 100 ms == 101 samples | 0.0000 s |
+
+Both nets collapse to ALL-SPEECH on this file (one segment spanning the whole 75 s) -- the same
+mode collapse the thin subset checkpoints carry everywhere (see the T8 gate table). The residual
+2.5e-05 s is purely the offline segmentation being observable only through the engine's `%f.4`
+VRCTS dump; at that write grain the interval SETS are bit-identical. A count mismatch or a delta
+past the quantum is an R1 STOP -- neither occurred. Both `max_lag` values are degenerately 0
+(a single segment finalized at EOS), honestly recorded: post-fix nothing is emitted mid-stream on
+this file at all, which is exactly the correct behaviour for a net that never stops speaking.
+Timings: stream 0.03 s, offline 0.02 s per cell.
+
+**THE DERIVED CAUSAL LATENCY BOUND on this arm (spec S5.5), recomputed from the config:**
+
+    feature_reach 0.14400 + nn_window 0.00000 + sub_sample 0.03000 + conv_delay 0.36000
+                                                      + holdback 2.28957  =  2.82357 s
+
+versus the phase-8 WINDOWED arm's 6.05357 s on the byte-identical `1_worker_1.config` lineage --
+a **2.14x structural improvement**, and the `nn_window` term (3.26000 s) DIES entirely because a
+causal cell has no lookahead. The test cross-checks the three lineage-shared summands
+(feature_reach / conv_delay / holdback) against the phase-8 constants bit-for-bit; only
+`sub_sample` (the causal decimation buffering) is new. (The phase-9 synthetic gate's own bound is
+1.73400 s on its own smaller fixture -- a different config, not comparable.)
+
+#### The causality cost, MEASURED (REPORTED, never gated)
+
+Same trained pack, T8 held-out slice (24 files), scored under (a) its NATIVE type -1 self-norm +
+per-file `(2*RMS+max)/2` gain -- what training and the T8 gate measured, and what is NOT streamable
+in principle -- and (b) the FROZEN streamable regime (`Audio_fixed_gain` + type 0):
+
+| cell | regime | DCF @ 0 / 0.25 / 0.5 / 1 / 2 s | Pmiss / Pfa @0.5 | delta (frozen - self) @0.5 |
+|---|---|---|---|---|
+| sLSTM / fwd | self-norm (-1) | 0.250000 / 0.250000 / 0.250000 / 0.250000 / 0.250000 | 0.000000 / 1.000000 | -- |
+| sLSTM / fwd | frozen (type 0 + gain) | 0.250061 / 0.250076 / 0.250103 / 0.250103 / 0.250104 | 0.000138 / 0.999999 | **+0.000103** |
+| Mamba / fwd | self-norm (-1) | 0.249259 / 0.249367 / 0.249625 / 0.250000 / 0.250000 | 0.000000 / 0.998498 | -- |
+| Mamba / fwd | frozen (type 0 + gain) | 0.248146 / 0.247672 / 0.247121 / 0.245790 / 0.245590 | 0.000000 / 0.988485 | **-0.002503** |
+
+MECHANISM (named, honest). This is the FIRST non-zero causality cost this repo has measured: the
+phase-8 corpus leg reported EXACTLY 0.0 because its checkpoint was a total all-speech collapse
+(decision normalization-invariant), and the phase-8 Task-1 tuple-A leg reported a TOTAL cost
+because the selective 2015 net collapsed under freezing. These two causal checkpoints sit in
+between -- near-collapsed but not exactly (Mamba already rejects a sliver of non-speech, Pfa
+0.9985) -- so switching the input normalization moves a handful of frame decisions, and the cost is
+both TINY and SIGN-VARYING: +1.0e-4 DCF for sLSTM (frozen slightly worse), -2.5e-3 for Mamba
+(frozen slightly BETTER, rejecting more non-speech: Pfa 0.9985 -> 0.9885). A sign-varying
+sub-1e-2 delta on a mode-collapsed pair is NOISE around a degenerate operating point, NOT evidence
+that freezing helps; a genuinely selective full-corpus net remains where a real causality cost
+would surface. The single `Audio_fixed_gain` scores all 24 files consistently because the gain is
+decision-invariant on this all-DCT / `IgnoreFirstDCT` front-end (the phase-8 DCT-cancellation
+finding). Timings: native 0.31-0.36 s, frozen 2.76-3.63 s (24 files; the frozen leg re-decodes
+audio under the fixed gain).
+
+#### S4.3 on real data -- fast vs exact causal metric parity
+
+Each T8 checkpoint scored on its own 24-file held-out slice under both `Inference_Path` values in
+its NATIVE config (type -1, `BLSTM_window 0`, no fixed gain) -- byte-identical configs except that
+one key:
+
+| cell / direction | files | per-file decision agreement | DCF delta (fast - exact) | exact DCF@0.5 (T8-pinned) |
+|---|---|---|---|---|
+| sLSTM / forward | 24 | VRCTS boundaries identical (count + types + times, max_dt 0.0 s) | **0.0 at every collar** | 0.250000 |
+| Mamba / forward | 24 | VRCTS boundaries identical (count + types + times, max_dt 0.0 s) | **0.0 at every collar** | 0.249625 |
+
+Float equality, not tolerance -- the phase-7 prediction (identical decisions => identical metrics)
+reproduces on the causal cells. The exact-path DCF@0.5 column doubles as the checkpoint-provenance
+pin against T8's own gate numbers, so a stale cache or a recipe drift fails loudly here instead of
+letting the parity comparison pass against the wrong net. Scoring: exact 0.83-0.91 s, fast
+0.33-0.39 s per cell (a ~2.4x Python-level scoring speedup, consistent with the phase-7 tier).
+
+#### S8.7 -- the bench rows (RTF + peak RSS), causal cells vs the BLSTM baseline
+
+`speech bench --path=exact|fast` on ONE 75 s mono 8 kHz corpus wav (runtime sorted-first, no
+filename recorded), each arm's config repointed at its own trained checkpoint, `Audio_max_duration`
+lifted, backprop off, `numOuterThreads 1`. Local one-off measurement, same posture and license
+discipline as the phase-7 corpus-gated bench legs (not a committed automated test). Apple M4 Pro
+(arm64), macOS 26.5.2, `cargo build --release` (LTO on). Headline table = 3 INDEPENDENT
+`--repeat=1` processes (the phase-7 recipe, so `maxrss` is a clean per-process high-water mark
+rather than an accumulating one); `--repeat=3` single-process runs were taken too and agree on
+wall-clock to within the ranges below.
+
+| cell / direction | window regime | path | wall_s mean [range] | rtf | maxrss_mb | fast vs exact |
+|---|---|---|---|---|---|---|
+| lstm / bidirectional (phase-6 baseline) | 3.25 windowed overlap | exact | 0.163284 [0.158799-0.171087] | 0.002177 | 53.73 | baseline |
+| lstm / bidirectional (phase-6 baseline) | 3.25 windowed overlap | fast | 0.035443 [0.035162-0.035613] | 0.000473 | 68.56 | **4.61x** |
+| lstm / forward (control) | 0, plain | exact | 0.098132 [0.097867-0.098532] | 0.001308 | 54.84 | n/a (fast typed-bails, S5.3) |
+| slstm / forward | 0, plain | exact | 0.096118 [0.095678-0.096488] | 0.001282 | 56.98 | baseline |
+| slstm / forward | 0, plain | fast | 0.019138 [0.018831-0.019292] | 0.000255 | 68.15 | **5.02x** |
+| mamba / forward | 0, plain | exact | 0.104328 [0.104099-0.104699] | 0.001391 | 107.82 | baseline |
+| mamba / forward | 0, plain | fast | 0.024225 [0.023873-0.024492] | 0.000323 | 67.98 | **4.31x** |
+
+**THE LINEAR-TIME HYPOTHESIS, MEASURED -- AND THE CONFOUND REMOVED.** The headline comparison
+(causal cell fast vs windowed-BLSTM fast) confirms the direction: sLSTM **1.85x** and Mamba
+**1.46x** faster end to end than the windowed BLSTM on the fast path (1.70x / 1.57x on exact). But
+`--direction forward` changes TWO things at once -- the cell AND the windowing regime
+(`cell_overlay` forces `BLSTM_window 0`, plus a single-direction stack and a 313- rather than
+601-weight output MLP) -- so that number is NOT a cell result. The `lstm / forward` control row
+exists to separate them, and it settles the question:
+
+- REGIME effect (same LSTM cell, windowed-bi -> plain-causal, exact path): 0.163284 -> 0.098132,
+  **1.66x**. This is essentially the whole win.
+- CELL effect (all forward, all window 0, exact path): LSTM 0.098132, sLSTM 0.096118 (**1.02x
+  faster**), Mamba 0.104328 (**0.94x -- 6% SLOWER**). A wash.
+
+So the causal cells buy their speed by being CAUSAL (no window recompute, half the recurrent
+stack), not by being cheaper per step than a peephole LSTM: every cell here is already O(T), and at
+this width (24 units, `d_state 16`, `d_conv 4`) Mamba's per-step block is slightly heavier than an
+LSTM's. Stated as measured rather than assumed, per spec S8.7.
+
+**MEMORY.** On the fast path all three land at ~68 MB -- the per-call f64 periodogram widen in
+`FastPipeline` dominates and is cell-independent (the documented phase-7 SAD-arm memory finding,
+unchanged). On the EXACT path Mamba costs 107.8 MB vs 54.8-57.0 MB for the gate cells: ~2x, and the
+one place a cell choice is visibly expensive. That is the per-timestep SSM activation cache the
+`Network` container retains unconditionally during the forward drive (the phase-7 scope note: the
+exact path keeps `layers_output` whether or not a backward follows). Reported, not tuned.
+
+**Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
+R5),** the phase-7 local-vs-CI split: future local runs of this recipe are expected at fast-vs-exact
+wall speedup >= 3.5x on every row, causal-fast-vs-BLSTM-fast >= 1.3x, and fast maxrss within
+1.3x of the ~68 MB plateau. A reading meaningfully below these (not within the ranges above, which
+already carry headroom) is a FINDING to investigate; there is no automated enforcement.

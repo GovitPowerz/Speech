@@ -1016,6 +1016,26 @@ impl HystState {
         out
     }
 
+    /// The audio-time BEGIN of a raw segment that is currently OPEN or TENTATIVELY open --
+    /// i.e. a rising crossing has been recorded (`begin >= 0`) and not yet either closed
+    /// into `raw_segments` or retracted by a failed area test. `None` when the hysteresis
+    /// carries no candidate begin at all.
+    ///
+    /// THIS IS THE THIRD SOURCE OF FUTURE RAW STRUCTURE (Phase 9 Task 9 fix, found by the
+    /// corpus streaming tier `tests/pyo3/test_phase9_parity.py`). A pending begin lies
+    /// BEHIND the consumed frontier -- the hysteresis passed it and is still inside the
+    /// segment -- so [`StreamDecision::resmooth_and_emit`]'s emission frontier must clamp to
+    /// it; `max(last_raw_boundary, consumed_frontier - dt)` alone does NOT bound where the
+    /// next raw segment begins. Both audio-time offsets match the closed-segment tuple
+    /// (`begin + off`, `advance`'s label site).
+    fn pending_begin(&self) -> Option<f64> {
+        if self.begin >= 0.0 {
+            Some(self.begin + self.off)
+        } else {
+            None
+        }
+    }
+
     /// The tail force-emit (`:409-412`): if a segment is still open at EOS, close it at
     /// `dt * results.len()` (== `dt * idx`, since every convolved value has been fed).
     fn flush_tail(&mut self) -> Option<(f64, f64)> {
@@ -1173,8 +1193,10 @@ impl ConvStream {
 ///
 /// THE HOLDBACK (the design's one new invariant, spec S1.3 / R2). A smoothed segment can
 /// change only while later raw structure -- which lands at time `>= frontier` (the emission
-/// frontier [`resmooth_and_emit`](Self::resmooth_and_emit) derives: `>= last_raw_boundary`
-/// AND `>= consumed_frontier - dt`) -- can still reach it through the smoothing. Each
+/// frontier [`resmooth_and_emit`](Self::resmooth_and_emit) derives: `>= last_raw_boundary`,
+/// `>= consumed_frontier - dt`, AND `>= the hysteresis's pending open begin` -- that third
+/// term is the Phase-9 Task-9 fix, see the derivation there) -- can still reach it
+/// through the smoothing. Each
 /// smoothing step moves/merges boundaries by
 /// at most its own threshold: [`Segmentation::add_padding`] extends a Speech segment left by
 /// `before` and right by `after`; [`Segmentation::suppress_short`] removes/merges a segment
@@ -1361,26 +1383,47 @@ impl StreamDecision {
         let seg = self.build_smoothed(mid_dur);
 
         // THE EMISSION FRONTIER (the time-advance trigger). A smoothed segment can still be
-        // revised only by FUTURE raw structure, which lands no earlier than
-        //   frontier = max(last_rb, hyst_frontier - dt)
-        // -- `last_rb` because raw segments close in ascending order (the next one begins
-        // after this one ends), and `hyst_frontier - dt` because the CONSUMED frontier is
-        // `hyst_frontier = conv.finalized*dt + off` (the hysteresis has advanced through
-        // exactly `conv.finalized` convolved values; `StreamDecision` owns both `conv` and
-        // `hyst`, so no session threading is needed) and the earliest a not-yet-consumed
-        // value can interpolate a boundary back to is one grid step (`dt`) before it.
+        // revised only by FUTURE raw structure -- raw segments not yet in `raw_segments`.
+        // There are THREE places such a segment's BEGIN can come from, and the frontier is
+        // the EARLIEST of them:
+        //   1. `last_rb` -- raw segments close in ascending order, so the next one begins
+        //      after this one ends;
+        //   2. `hyst_frontier - dt` -- the CONSUMED frontier is `hyst_frontier =
+        //      conv.finalized*dt + off` (the hysteresis has advanced through exactly
+        //      `conv.finalized` convolved values; `StreamDecision` owns both `conv` and
+        //      `hyst`, so no session threading is needed) and the earliest a not-yet-consumed
+        //      value can interpolate a boundary back to is one grid step (`dt`) before it;
+        //   3. `hyst.pending_begin()` -- a segment the hysteresis has ALREADY OPENED (or
+        //      tentatively opened) and not yet closed. Its begin lies BEHIND the consumed
+        //      frontier, so 1+2 do NOT bound it.
+        //
+        // (3) IS A PHASE-9 TASK-9 FIX, not part of the original T5-review derivation. The
+        // phase-8 argument enumerated only 1+2 and concluded "future raw structure lands no
+        // earlier than the frontier" -- FALSE while a raw segment is open: speech that
+        // resumes within the holdback of the previous segment's end is already open (and so
+        // invisible to `last_rb`) at the moment the time-advance trigger would license
+        // emitting that previous segment, and its `add_padding` `before` reach then merges
+        // the two, MOVING an already-emitted boundary. Found on real data by the corpus
+        // streaming tier (`tests/pyo3/test_phase9_parity.py`, mamba/forward: `[0, 7.3051]
+        // Speech` emitted at 10.1999 s while `finish` reported one `[0, 74.9999]` segment --
+        // a genuine R2 retraction), pinned synthetically by
+        // `phase8_stream_decision.rs::pending_open_segment_blocks_emission`. It costs
+        // LATENCY, never correctness: clamping the frontier only emits LESS.
         //
         // THE SAFETY ARGUMENT: the T4 holdback-dominance proof (see the type docs) licenses
         // emitting any segment whose smoothed form cannot be reached by raw structure at or
-        // beyond the frontier -- and the consumed frontier minus one grid step is the earliest
-        // a future raw boundary can interpolate back to, so every segment ending strictly
-        // before `frontier - holdback` is final. (Using the RECEIVED frontier `now` here
-        // would be UNSAFE: `now` runs ahead of the consumed frontier by the convolution
-        // lookahead + a grid step, so it could license emitting a segment a still-pending
-        // convolved value can still move.) The prefix-consistency gate legs are the safety
-        // net -- any too-large frontier surfaces there as a retraction.
+        // beyond the frontier -- and the three terms above bound where that structure can
+        // begin, so every segment ending strictly before `frontier - holdback` is final.
+        // (Using the RECEIVED frontier `now` here would be UNSAFE: `now` runs ahead of the
+        // consumed frontier by the convolution lookahead + a grid step, so it could license
+        // emitting a segment a still-pending convolved value can still move.) The
+        // prefix-consistency gate legs are the safety net -- any too-large frontier surfaces
+        // there as a retraction.
         let hyst_frontier = self.conv.finalized as f64 * self.dt + self.off;
-        let frontier = last_rb.max(hyst_frontier - self.dt);
+        let mut frontier = last_rb.max(hyst_frontier - self.dt);
+        if let Some(pending) = self.hyst.pending_begin() {
+            frontier = frontier.min(pending);
+        }
         let threshold = frontier - self.holdback;
         self.collect_prefix(&seg, threshold, now)
     }
