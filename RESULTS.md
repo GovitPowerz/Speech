@@ -696,18 +696,30 @@ The arm trains under `CostLaw log/log`, whose forward `b + a*ln(clamp(y/adim, 1e
 is CONSTANT wherever the argument clamps -- so F7's consistent derivative there is EXACTLY
 ZERO and a saturated from-scratch net is a PERMANENT STALL, not noisy descent. Every config
 was probed at its from-scratch theta (one forward+backward through the seam, no training)
-before the training runs were fired:
+before the training runs were fired. Every value below is measured at the COMMITTED
+preflight leg's own recipe (subset 2, 10 s cap, seed 0); `%clamp` is the column to its left
+over the clamp constant:
 
-| config | pack | init NNCostSeg | / clamp constant | grad L2 | grad Linf | nonzero grad | init decision |
-|---|---|---|---|---|---|---|---|
-| lstm / bidirectional (baseline) | 33671 | 0.29801 | 5.39e-03 | 0.46107 | 0.20218 | 24409/33671 | all-non-speech |
-| lstm / forward | 16871 | 0.27479 | 4.97e-03 | 0.45322 | 0.19222 | 12217/16871 | all-non-speech |
-| sLSTM / bidirectional | 32519 | 0.27728 | 5.02e-03 | 0.35638 | 0.19403 | 23257/32519 | all-non-speech |
-| sLSTM / forward | 16295 | 0.27435 | 4.96e-03 | 0.36181 | 0.19235 | 11640/16295 | all-non-speech |
-| Mamba / bidirectional | 30359 | 0.32665 | 5.91e-03 | 0.72742 | 0.19291 | 28009/30359 | all-non-speech |
-| Mamba / forward | 15215 | 0.33953 | 6.14e-03 | 0.57140 | 0.20565 | 14017/15215 | all-non-speech |
+| config | pack | init NNCostSeg | %clamp | worst per-file cost | %clamp | grad L2 | grad Linf | nonzero grad | init decision |
+|---|---|---|---|---|---|---|---|---|---|
+| lstm / bidirectional (baseline) | 33671 | 0.30034 | 0.543% | 0.42557 | 0.770% | 0.46050 | 0.20256 | 24409/33671 | all-non-speech |
+| lstm / forward | 16871 | 0.26899 | 0.487% | 0.38775 | 0.702% | 0.43706 | 0.18776 | 12217/16871 | all-non-speech |
+| sLSTM / bidirectional | 32519 | 0.26942 | 0.488% | 0.37362 | 0.676% | 0.35736 | 0.18957 | 23257/32519 | all-non-speech |
+| sLSTM / forward | 16295 | 0.27500 | 0.498% | 0.40237 | 0.728% | 0.37443 | 0.19126 | 11641/16295 | all-non-speech |
+| Mamba / bidirectional | 30359 | 0.31969 | 0.578% | 0.41293 | 0.747% | 0.72178 | 0.18946 | 28009/30359 | all-non-speech |
+| Mamba / forward | 15215 | 0.31930 | 0.578% | 0.44149 | 0.799% | 0.49350 | 0.19512 | 14017/15215 | all-non-speech |
 
-The clamp constant is `-ln(1e-24) = 55.262`; every init sits at ~0.5% of it, i.e. deep in
+CORRECTION (review): an earlier revision of this table published a `per-frame cost` column of
+0.04888 / 0.2 -- those were NOT costs. They were `100*Pmiss/counter`, read from the wrong
+column of the PREFIXED `results_matrix()` (`[file+1, conf+1, chan+1, res...]`, so the res
+block must be sliced off before applying the per-res convention). The tell was visible in the
+published numbers themselves: a per-file max BELOW the frame-weighted mean is arithmetically
+impossible, and the value was identical across three architectures. The true per-file costs
+are the column above; the committed leg now slices as `engine.py::_error_vad` does and
+asserts `per_file_max >= aggregate_mean` so the confusion cannot recur.
+
+The clamp constant is `-ln(1e-24) = 55.262`; every init sits at ~0.5% of it (worst 0.58%),
+every INDIVIDUAL file at <= 0.80%, i.e. deep in
 the law's interior, and every epoch-0 gradient norm is far from zero. NO config started in
 the zero-gradient death, and none needed a scheme-constant change (the S2.4/S3.4 constants
 are spec text and were not touched). The T6 observation that a seeded Mamba fixture's
@@ -719,7 +731,7 @@ The preflight is a committed leg (`test_init_is_trainable`), not a one-off. EVID
 SCOPE, stated: the seam exposes the cost and the gradient, not the posterior vector (that
 is a Rust `test-support` hook), so "not saturated" here means COST-INTERIOR (in aggregate AND
 per file -- the aggregate is frame-weighted, so the committed leg also pins the worst
-per-file normalized cost, measured 0.04888 bidirectional / 0.2 forward, i.e. <= 0.36% of the
+per-file normalized cost, measured 0.374-0.442 across the six configs, i.e. <= 0.80% of the
 clamp) + GRADIENT-NONZERO + the net subsequently trains -- the observables that decide
 whether the log law's zero-gradient region bites -- not a directly measured posterior range.
 

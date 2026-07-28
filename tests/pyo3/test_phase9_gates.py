@@ -58,11 +58,11 @@ consistent derivative there is EXACTLY ZERO. A from-scratch net whose output sat
 therefore a PERMANENT STALL under this law, not noisy descent, and it would look like a
 flat cost curve rather than a crash. The preflight leg asserts, at the from-scratch theta
 BEFORE any training: the pack length, a finite initial NNCostSeg sitting in the log law's
-INTERIOR (measured 0.27-0.34, i.e. ~0.5% of the saturated-forward constant
-`-ln(1e-24) = 55.262`, worst case 0.62%) both in aggregate and for every INDIVIDUAL file
-(worst per-file normalized cost 0.2, 0.36% of the clamp -- the aggregate is frame-weighted,
-so it alone could hide a saturated minority), and a strictly POSITIVE analytic gradient L2
-norm at epoch 0 (measured 0.36-0.73). A saturated init would trip an interiority pin or the
+INTERIOR (measured 0.269-0.320, i.e. ~0.5% of the saturated-forward constant
+`-ln(1e-24) = 55.262`, worst 0.58%) both in aggregate and for every INDIVIDUAL file (worst
+per-file normalized cost 0.442, 0.80% of the clamp -- the aggregate is frame-weighted, so it
+alone could hide a saturated minority), and a strictly POSITIVE analytic gradient L2 norm at
+epoch 0 (measured 0.357-0.722). A saturated init would trip an interiority pin or the
 gradient pin. Whole-vector norms only: sLSTM's `b_i` is structurally non-identifiable
 (exactly zero gradient by construction, proven in T2), so no per-element gradient assert is
 meaningful.
@@ -128,8 +128,10 @@ _IDS = [f"{cell}-{direction}" for cell, direction, _, _ in _CONFIGS]
 # SET) at this test's probe recipe but 4655 at a wider one (subset 4 / 20 s cap). So an `==`
 # pin would be a data- and libm-dependent flake. The floor is the load-bearing direction
 # (every predicted-dead weight IS dead); the slack keeps the guard two-sided so a pathological
-# jump in dead weight still fails. 64 is ~1.4% of the smallest floor, ~64x the one coincidence
-# ever observed.
+# jump in dead weight still fails. 64 is 64x the one coincidence ever observed, but it is a
+# LOOSE bound, not a tight one: on the smallest floor (mamba/forward, 1198) it is 5.3%, and it
+# exceeds that config's per-column granularity of 24 -- so it would absorb up to two whole dead
+# input columns there before firing. It catches a pathological jump, not a subtle one.
 _DEAD_SLACK = 64
 
 # The phase-6 SAD subset-gate recipe, VERBATIM (`test_phase6_gates.py::test_sad_subset_*`)
@@ -197,11 +199,15 @@ def _probe(out: dict[str, float]) -> Callable[[RunState, int, ModernTrainParams]
         out["grad_l2"] = float(np.linalg.norm(grad))
         out["grad_linf"] = float(np.max(np.abs(grad)))
         out["dead"] = float(np.count_nonzero(grad == 0.0))
-        # PER-FILE normalized cost (algo-3 layout: cost col 4, counter the last col, config-1
-        # rows). The aggregate `init_cost` above is frame-weighted, so a saturated MINORITY of
-        # files could hide inside it; this max is the per-file worst case and cannot.
-        sel = results[results[:, 1] == 1]
-        out["per_file_cost_max"] = float(np.max(sel[:, 4] / np.maximum(1.0, sel[:, -1])))
+        # PER-FILE normalized cost. `results_matrix()` rows are PREFIXED
+        # (`[file+1, conf+1, chan+1, res...]`, corpus_processor.rs), so the res block must be
+        # sliced off exactly as `engine.py::_error_vad` does (`[:, 3:]`) BEFORE applying the
+        # per-res column convention -- `res[4]` is the cumulative error and `res[-1]` the
+        # counter, the same pair `_nn_cost_seg` sums. Indexing the prefixed matrix directly
+        # would read `res[1]` (100*Pmiss) instead: a bug this file shipped once, see the
+        # invariant assert in the test below.
+        error_vad = results[results[:, 1] == 1][:, 3:]
+        out["per_file_cost_max"] = float(np.max(error_vad[:, 4] / np.maximum(1.0, error_vad[:, -1])))
         ckpt = Path(state.out_dir) / "checkpoint"
         ckpt.mkdir(parents=True, exist_ok=True)
         return _Shim(checkpoint_dir=str(ckpt), history=[_Rec(float(cost), float(cost))], best_val_cost=float(cost))
@@ -216,23 +222,27 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     """PREFLIGHT (the T5 log-law hazard + the T6 output-saturation hazard): before any
     training, the from-scratch init must be param-matched, cost-INTERIOR under the log law
     BOTH in aggregate and per file, and carry a NONZERO analytic gradient at epoch 0.
-    Measured 2026-07-28, seed 0 (`/clamp` = init cost over `-ln(1e-24) = 55.262`):
+    Measured 2026-07-28, seed 0, AT THIS LEG'S OWN RECIPE (subset 2, 10 s cap -- an earlier
+    revision published a mix of this leg's numbers and a wider exploratory run's; every value
+    below now comes from the run this test performs). `%clamp` is the column left of it over
+    `-ln(1e-24) = 55.262`:
 
-    | config             | pack  | init NNCostSeg | /clamp   | per-file max | grad L2 | grad Linf | dead  |
-    |--------------------|-------|----------------|----------|--------------|---------|-----------|-------|
-    | lstm-bi (baseline) | 33671 | 0.29801        | 5.39e-03 | 0.04888      | 0.46107 | 0.20218   | 9262  |
-    | slstm-bi           | 32519 | 0.27728        | 5.02e-03 | 0.04888      | 0.35638 | 0.19403   | 9262  |
-    | slstm-forward      | 16295 | 0.27435        | 4.96e-03 | 0.20000      | 0.36181 | 0.19235   | 4654  |
-    | mamba-bi           | 30359 | 0.32665        | 5.91e-03 | 0.04888      | 0.72742 | 0.19291   | 2350  |
-    | mamba-forward      | 15215 | 0.33953        | 6.14e-03 | 0.20000      | 0.57140 | 0.20565   | 1198  |
+    | config             | pack  | init NNCostSeg | %clamp | per-file max | %clamp | grad L2 | grad Linf | dead |
+    |--------------------|-------|----------------|--------|--------------|--------|---------|-----------|------|
+    | lstm-bi (baseline) | 33671 | 0.30034        | 0.543% | 0.42557      | 0.770% | 0.46050 | 0.20256   | 9262 |
+    | lstm-forward       | 16871 | 0.26899        | 0.487% | 0.38775      | 0.702% | 0.43706 | 0.18776   | 4654 |
+    | slstm-bi           | 32519 | 0.26942        | 0.488% | 0.37362      | 0.676% | 0.35736 | 0.18957   | 9262 |
+    | slstm-forward      | 16295 | 0.27500        | 0.498% | 0.40237      | 0.728% | 0.37443 | 0.19126   | 4654 |
+    | mamba-bi           | 30359 | 0.31969        | 0.578% | 0.41293      | 0.747% | 0.72178 | 0.18946   | 2350 |
+    | mamba-forward      | 15215 | 0.31930        | 0.578% | 0.44149      | 0.799% | 0.49350 | 0.19512   | 1198 |
 
-    No config's init sits near the saturated-forward constant (all ~0.5% of it, worst 0.62%),
-    no INDIVIDUAL file does either (worst per-file 0.2, 0.36% of the clamp), and every gradient
-    norm is far from zero -- so none of the four starts in the zero-gradient death the log law
-    would otherwise make permanent. The `dead` column is the structurally-dead weight count,
-    guarded here against the `_CONFIGS` prediction (the committed check on the dead-column
-    finding). Cheap (~0.2 s per config: no valid/test split, no training, one fold over 2
-    files; ~0.7 s for all four)."""
+    No config's init sits near the saturated-forward constant (all ~0.5% of it, worst 0.58%),
+    no INDIVIDUAL file does either (worst per-file 0.442, 0.80% of the clamp), and every
+    gradient norm is far from zero -- so none of the four starts in the zero-gradient death the
+    log law would otherwise make permanent. The `dead` column is the structurally-dead weight
+    count, guarded here against the `_CONFIGS` prediction (the committed check on the
+    dead-column finding). Cheap (~0.2 s per config: no valid/test split, no training, one fold
+    over 2 files; ~0.7 s for all four)."""
     out: dict[str, float] = {}
     B.run_baseline(
         "sad",
@@ -259,9 +269,19 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     #     otherwise hide a saturated minority behind a healthy majority).
     assert np.isfinite(out["init_cost"]), f"init cost must be finite, got {out['init_cost']}"
     assert out["init_cost"] > 0.0, f"init cost must be positive, got {out['init_cost']}"
-    # measured <= 0.34, i.e. <= 0.62% of the clamp constant; pin 5% -> ~8x headroom.
+    # measured <= 0.320, i.e. <= 0.58% of the clamp constant; pin 5% -> ~8.6x headroom.
     assert out["init_cost"] < 0.05 * _LOG_CLAMP, f"init cost {out['init_cost']:.5f} sits near the log-law clamp {_LOG_CLAMP:.3f} (saturated init)"
-    # per-file normalized worst case: measured <= 0.2 (0.36% of the clamp); same 5% pin.
+    # SELF-CHECK FIRST: `init_cost` is a count-weighted MEAN of the per-file normalized costs,
+    # so it can never exceed their max. If this fires, the two quantities are not the pair they
+    # claim to be -- which is exactly how the first version of this pin shipped broken (it read
+    # the prefixed matrix's column 4 = `res[1]` = 100*Pmiss, giving a "max" BELOW the mean and
+    # an assert bounded by 100/count that could not fail).
+    assert out["per_file_cost_max"] >= out["init_cost"] - 1e-9, (
+        f"{cell}/{direction} per-file max {out['per_file_cost_max']:.6f} < aggregate mean {out['init_cost']:.6f}: "
+        "the per-file quantity is not the cost (wrong results_matrix column?)"
+    )
+    # per-file normalized worst case: measured <= 0.442 (0.80% of the clamp); same 5% pin
+    # -> 6.3x headroom on the worst config (mamba/forward).
     assert out["per_file_cost_max"] < 0.05 * _LOG_CLAMP, (
         f"{cell}/{direction} worst per-file cost {out['per_file_cost_max']:.5f} sits near the log-law clamp {_LOG_CLAMP:.3f} (a saturated file)"
     )
@@ -274,8 +294,15 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
 
     # (c) the DEAD-COLUMN prediction (the header caveat's arithmetic), guarded. A FLOOR plus
     #     bounded slack, not an equality -- see `_DEAD_SLACK`. Falling BELOW the floor means
-    #     the dead block moved (a packer block-order or fan-in-width change); running far
-    #     ABOVE it means weights died that the arithmetic does not account for.
+    #     fewer weights are dead than the fan-in-width arithmetic predicts; running far ABOVE
+    #     it means weights died that the arithmetic does not account for.
+    #     BLIND SPOTS, named rather than implied: this is a CARDINALITY check, so it cannot see
+    #     (i) a pure block-order PERMUTATION of the pack (the dead set moves, the count does
+    #     not -- S8.6 mutation 6 owns that), nor (ii) a compensating pair (n weights coming
+    #     alive while n others die). The index-SET check that does see both was run during
+    #     development (measured extra 0 / missing 0 for sLSTM in both directions, recorded in
+    #     RESULTS + the task report) but is NOT committed here -- it needs a per-cell flat
+    #     layout model, which would duplicate the packer.
     dead = int(out["dead"])
     assert dead >= dead_expected, f"{cell}/{direction} dead-weight count {dead} is below the structural floor {dead_expected}: the dead block moved"
     assert dead <= dead_expected + _DEAD_SLACK, f"{cell}/{direction} dead-weight count {dead} far exceeds the structural floor {dead_expected}"
