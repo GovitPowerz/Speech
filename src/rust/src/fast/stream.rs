@@ -17,8 +17,10 @@
 //! `push`/`finish`, the `speech stream` CLI and the PyO3 `StreamingSession` gain the causal
 //! mode with ZERO new surface.
 //!
-//! THE S5.3 DEVIATION -- SUB-SAMPLING IS SUPPORTED, NOT BAILED. Spec S5.3 lists
-//! `sub_sampling 1` among the causal-streaming requirements. It is deliberately NOT
+//! THE SUB-SAMPLING DEVIATION -- SUPPORTED, NOT BAILED. The PLAN's Task-7 brief listed
+//! `sub_sampling 1` among the S5.3 causal-streaming requirements; the spec's own S5.3 is
+//! SILENT on sub-sampling (the plan text overshot it -- the Task-6 adjudication, recorded
+//! in the ledger). The requirement is deliberately NOT
 //! enforced, mirroring Task 6's adjudicated deviation on the offline side: the phase's own
 //! causal SAD arm (`configs/training/lre_sad.toml` under the `Direction forward` overlay)
 //! runs `lstm_sub_sampling = "4,1"`, so a sub-sampling bail would make the arm's own

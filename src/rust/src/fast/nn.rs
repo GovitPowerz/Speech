@@ -1436,8 +1436,9 @@ pub(crate) fn dense_net_forward(
 /// that batching the dense MLP through faer is safe because "it is a per-row map, so
 /// batching it is state-free". MEASURED, that is FALSE: `faer_project`'s result DEPENDS
 /// on the row count `m` once the weight matrix has more than one column. Measured on this
-/// box, `t == 1` vs `t == T` differ in the last f32 ULP at 42/111 rows for `(k, o) =
-/// (4, 3)`, 401/444 at `(24, 12)` and 47/74 at `(48, 2)`, while `o == 1` agrees exactly
+/// box, `t == 1` vs `t == T` differ in the last f32 ULP at 42/111 output VALUES (of the
+/// `t*o` matrix, `t = 37`) for `(k, o) = (4, 3)`, 401/444 at `(24, 12)` and 47/74 at
+/// `(48, 2)`, while `o == 1` agrees exactly
 /// (0/37 at `(4, 1)`/`(24, 1)`/`(96, 1)`). The MECHANISM is not pinned here -- the
 /// observation is consistent with faer selecting a blocked micro-kernel whose accumulation
 /// order varies with `m` above the matrix-VECTOR case, but this doc claims only the
@@ -1562,8 +1563,9 @@ mod dense_row_chain_tests {
             .collect()
     }
 
-    /// Rows where the batched [`dense_net_forward`] and the per-row [`DenseRowChain`]
-    /// disagree in bits, for a single-layer `(i, o)` stack over `t` rows.
+    /// Count of output VALUES (over the `t*o` output matrix) where the batched
+    /// [`dense_net_forward`] and the per-row [`DenseRowChain`] disagree in bits, for a
+    /// single-layer `(i, o)` stack over `t` rows.
     fn row_granularity_diffs(i: usize, o: usize, t: usize) -> usize {
         let layers = vec![layer(i, o)];
         let subs = vec![1usize];

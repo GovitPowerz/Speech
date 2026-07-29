@@ -26,7 +26,8 @@
 //! equivalence/latency leg runs on that offset -- so `max_dt == 0.0` compares real interior
 //! boundaries, not two copies of the seeded `[Other@0, End@dur]`.
 //!
-//! THE S5.3 DEVIATION (sub-sampling): the fixtures run `BLSTM_LSTMSubSampling 4`, so every
+//! THE SUB-SAMPLING DEVIATION (the plan's S5.3 transcription, not the spec's own text): the
+//! fixtures run `BLSTM_LSTMSubSampling 4`, so every
 //! leg here exercises the buffered decimation `StreamCausal` implements instead of bailing.
 //! See that type's docs and the module doc of `fast/stream.rs` for why.
 
