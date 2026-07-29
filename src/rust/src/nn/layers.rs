@@ -39,8 +39,8 @@ pub fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     out
 }
 
-/// Peephole LSTM layer (legacy `LSTMLayer`): the weight layout + flat
-/// (de)serialization (Phase 0a), the forward (Phase 2) and the analytic BPTT
+/// Peephole LSTM layer (legacy `LSTMLayer`): the weight layout, the flat
+/// (de)serialization and the forward (all Phase 2) plus the analytic BPTT
 /// backward (Phase 3) are all implemented here. Since Phase 9 this same struct is
 /// also wrapped by [`super::cells::CellLayer::Lstm`], which delegates every `Layer`
 /// method to it unchanged -- the arithmetic below is byte-untouched by that wrap.

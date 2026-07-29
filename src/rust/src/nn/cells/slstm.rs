@@ -31,11 +31,11 @@
 //! xLSTM `m_1 = i~_1` convention (S2.4), reached without an `if t == 0` branch in the
 //! recurrence.
 //!
-//! WHAT THE SENTINEL DOES AND DOES NOT DO (corrected Phase 9 Task 10 -- an earlier
-//! revision of this paragraph credited the underflow with making the zero initial
-//! state inert, which is backwards). The forget branch is inert at `t = 0` REGARDLESS
-//! of `f'_0`, because it multiplies `c_{-1} = n_{-1} = 0`. What `M_INIT` actually
-//! buys is the CONVENTION: it selects `m_0 = i~_0` (rather than `max(f~_0, i~_0)`)
+//! WHAT THE SENTINEL DOES AND DOES NOT DO (found Phase 9 Task 10, landed T11 -- an
+//! earlier revision of this paragraph credited the underflow with making the zero
+//! initial state inert, which is backwards). The forget branch is inert at `t = 0`
+//! REGARDLESS of `f'_0`, because it multiplies `c_{-1} = n_{-1} = 0`. What `M_INIT`
+//! actually buys is the CONVENTION: it selects `m_0 = i~_0` (not `max(f~_0, i~_0)`)
 //! and makes `f'_0` exactly `0` rather than merely small. At a FRESH state that is
 //! numerically unobservable -- a different `m_0` is a common factor `e^{-m_0}` on
 //! both `c_0` and `n_0`, and it cancels in `h_0 = o'(c_0/n_0)` and again at every

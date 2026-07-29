@@ -40,8 +40,12 @@
 //!    the step loop". A batched projection would make the offline and streaming
 //!    numbers differ in the last f32 ULP, which is exactly the class of drift the
 //!    phase-8 gate exists to forbid. So every projection here is a per-step dot over
-//!    a contiguous weight row. The dense output MLP is unchanged (it is a per-row
-//!    map, so batching it is state-free) and still runs on faer.
+//!    a contiguous weight row. The dense output MLP runs the shared
+//!    `super::nn::DenseRowChain` -- still the faer kernel, but driven ONE ROW at a
+//!    time, NOT the batched `dense_net_forward` the phase-7 [`super::nn::FastBlstm`]
+//!    keeps. (An earlier revision of this line said the dense stage was "a per-row
+//!    map, so batching it is state-free"; Task 7 MEASURED that FALSE at wide layers --
+//!    see `DenseRowChain`'s docs and [`FastCausalNet::feed_forward`] below.)
 //! 3. The `exp` saturation guards are the f32 analogues via
 //!    [`super::nn::logistic_f32`] (`ln(f32::MAX) ~ 88.72`), not the exact path's f64
 //!    `~709.78` -- the same reasoning as `fast::nn`.

@@ -23,8 +23,8 @@
 # the trailing 48 are structurally gradient-dead. That mismatch is inherited VERBATIM
 # from the 2015 production config (its own 33671-element pack carries the same dead
 # block) and is deliberately LEFT AS IS -- correcting it would resize every pack and
-# invalidate the phase-6 baseline. Measured, counted and index-set-verified in
-# `RESULTS.md`'s "DEAD INPUT COLUMNS" note (Phase 9 Task 8), guarded by
+# invalidate the phase-6 baseline. Measured and counted (and index-set-verified on
+# sLSTM) in `RESULTS.md`'s "DEAD INPUT COLUMNS" note (Phase 9 Task 8), guarded by
 # `tests/pyo3/test_phase9_gates.py::test_init_is_trainable`. CostLaw is `log`
 # (the T7-verified derivative-consistent live path).
 #
