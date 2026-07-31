@@ -746,8 +746,8 @@ struct CfcCase {
 ///
 /// The DISCRIMINATING metric (`max_rel_major`) and the absolute error BOTH bottom at
 /// `1e-5`: to its left the roundoff floor `ulp(|L|)/(2 eps)` dominates, to its right
-/// truncation does -- and the `1e-4` column's `max_abs_err` is exactly `100x` the
-/// `1e-5` one, the `eps^2` signature, i.e. a SYSTEMATIC bias rather than noise. That
+/// truncation does -- and the `1e-4` column's `max_abs_err` is ~`95x` the `1e-5` one
+/// (`1.25e-8` vs `1.32e-10`), the `eps^2` signature, a SYSTEMATIC bias not noise. That
 /// is why `1e-4` is not chosen even though it would put the (uninformative) `max_rel`
 /// column at its minimum: a systematic FD bias is a worse instrument for catching a
 /// small wrong adjoint term than roundoff noise of the same size.
@@ -790,9 +790,8 @@ const CFC_EPS: f64 = 1e-5;
 /// signature, one decade per decade (`1.21e-7 / 1.27e-8 / 1.13e-9`). A WRONG adjoint
 /// term is a MULTIPLICATIVE error and would be eps-INVARIANT -- a FLAT row, which is
 /// what the sweep would have shown. The STOP assert in the test body is therefore on
-/// `major_pin` -- the
-/// bound a wrong adjoint actually trips -- and every one of those is <= `5.6e-7`,
-/// ~180x under the threshold.
+/// `major_pin` -- the bound a wrong adjoint actually trips -- and every one of those
+/// is <= `5.6e-7`, ~180x under the threshold.
 ///
 /// THE NEAR-ZERO REGIME IS EXACTLY ZERO HERE, which is STRONGER than sLSTM's ~1e-10
 /// floor and is asserted as an equality below. At `T > 1` the bucket is EMPTY (every

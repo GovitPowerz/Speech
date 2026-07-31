@@ -1130,9 +1130,14 @@ impl MambaLayer {
         dpl
     }
 
-    /// Reverse-time BPTT: flip input/output/deltas, run the forward-order body, flip
-    /// the returned deltas back. The caches are already time-reversed by
+    /// Reverse-time BPTT: flip input/deltas, run the forward-order body, flip the
+    /// returned deltas back. The caches are already time-reversed by
     /// [`Self::feed_forward_reverse`] and are consumed AS-IS (do NOT un-reverse).
+    ///
+    /// `output` is forwarded UNFLIPPED: [`Self::feed_backward`] discards it outright
+    /// (its own doc says why), so flipping it only allocated a `T x width` copy for a
+    /// body that never reads it. `input` IS flipped -- that one is genuinely consumed,
+    /// by `reconcile_input`.
     pub fn feed_backward_reverse(
         &mut self,
         input: &Array2<f64>,
@@ -1142,11 +1147,10 @@ impl MambaLayer {
         last_layer: bool,
     ) -> Array2<f64> {
         let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
-        let output_rev = output.slice(ndarray::s![..;-1, ..]).to_owned();
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
         let dpl = self.feed_backward(
             &input_rev,
-            &output_rev,
+            output,
             &deltas_rev,
             inv_sub_sampling_ratio,
             last_layer,

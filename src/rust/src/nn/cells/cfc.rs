@@ -558,20 +558,18 @@ impl CfcLayer {
     /// Accumulates the weight-deriv blocks + the frame count, and returns the deltas
     /// propagated to the previous layer (`T x in`).
     ///
-    /// `deltas` is `dL/dh`. `input`, `output` and `last_layer` are UNUSED: every
-    /// quantity the adjoints need is in the forward caches ([`Self::z_cache`] already
-    /// carries both the reconciled input and `h_{t-1}`), which is what makes it
-    /// impossible for the two passes to disagree about the layer's own view of its
-    /// input. The arguments stay for `Layer` signature parity.
+    /// `deltas` is `dL/dh`. The `Layer` trait's `input`, `output` and `last_layer`
+    /// arguments are ABSENT from this signature ON PURPOSE: every quantity the
+    /// adjoints need is in the forward caches ([`Self::z_cache`] already carries both
+    /// the reconciled input and `h_{t-1}`), which is what makes it impossible for the
+    /// two passes to disagree about the layer's own view of its input. The trait impl
+    /// below discards them at the boundary, so the COMPILER enforces that contract
+    /// rather than a `let _ = (..)` and a comment.
     pub fn feed_backward(
         &mut self,
-        input: &Array2<f64>,
-        output: &Array2<f64>,
         deltas: &Array2<f64>,
         inv_sub_sampling_ratio: usize,
-        last_layer: bool,
     ) -> Array2<f64> {
-        let _ = (input, output, last_layer);
         let (i, h, b, l) = (
             self.input_size,
             self.output_size,
@@ -694,27 +692,18 @@ impl CfcLayer {
     /// deltas back. The caches are already time-reversed by
     /// [`Self::feed_forward_reverse`] and are consumed AS-IS (do NOT un-reverse).
     ///
-    /// `input` and `output` are forwarded UNFLIPPED on purpose: [`Self::feed_backward`]
-    /// ignores both arguments outright (every quantity it needs is in the caches -- see
-    /// its own doc), so flipping them would allocate two `T x width` copies for a body
-    /// that never reads them. `deltas` is the one argument that is genuinely consumed
-    /// and therefore the one that is genuinely flipped.
+    /// `deltas` is the ONLY argument here for the same reason it is the only one on
+    /// [`Self::feed_backward`]: it is the single quantity that body consumes, so it is
+    /// the single one that needs flipping. There is no `input`/`output` pair to flip
+    /// (and therefore no pair of `T x width` copies to allocate for a body that would
+    /// never read them).
     pub fn feed_backward_reverse(
         &mut self,
-        input: &Array2<f64>,
-        output: &Array2<f64>,
         deltas: &Array2<f64>,
         inv_sub_sampling_ratio: usize,
-        last_layer: bool,
     ) -> Array2<f64> {
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
-        let dpl = self.feed_backward(
-            input,
-            output,
-            &deltas_rev,
-            inv_sub_sampling_ratio,
-            last_layer,
-        );
+        let dpl = self.feed_backward(&deltas_rev, inv_sub_sampling_ratio);
         dpl.slice(ndarray::s![..;-1, ..]).to_owned()
     }
 }
@@ -744,14 +733,8 @@ impl Layer for CfcLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        CfcLayer::feed_backward(
-            self,
-            input,
-            output,
-            deltas,
-            inv_sub_sampling_ratio,
-            last_layer,
-        )
+        let _ = (input, output, last_layer);
+        CfcLayer::feed_backward(self, deltas, inv_sub_sampling_ratio)
     }
     fn feed_backward_reverse(
         &mut self,
@@ -761,14 +744,8 @@ impl Layer for CfcLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        CfcLayer::feed_backward_reverse(
-            self,
-            input,
-            output,
-            deltas,
-            inv_sub_sampling_ratio,
-            last_layer,
-        )
+        let _ = (input, output, last_layer);
+        CfcLayer::feed_backward_reverse(self, deltas, inv_sub_sampling_ratio)
     }
     fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
         CfcLayer::get_weights_derivatives(self, out);
@@ -1141,9 +1118,12 @@ mod tests {
         let input = seq(T, I, 0.4);
         let deltas = seq(T, O, -0.2);
 
-        let out = forward(&mut cell, &input);
+        // Every `let _ = forward(..)` below is LOAD-BEARING despite the discarded return:
+        // it fills the caches [`CfcLayer::feed_backward`] reads (which is exactly why that
+        // signature takes no `input`/`output`), it just no longer feeds them by argument.
+        let _ = forward(&mut cell, &input);
         cell.reset_weights_derivatives();
-        let _ = cell.feed_backward(&input, &out, &deltas, 1, false);
+        let _ = cell.feed_backward(&deltas, 1);
         let mut once = Vec::new();
         cell.get_weights_derivatives(&mut once);
         assert!(
@@ -1152,7 +1132,7 @@ mod tests {
         );
         assert!(once.iter().all(|r| r[1] == T as f64));
 
-        let _ = cell.feed_backward(&input, &out, &deltas, 1, false);
+        let _ = cell.feed_backward(&deltas, 1);
         let mut twice = Vec::new();
         cell.get_weights_derivatives(&mut twice);
         for k in 0..once.len() {
@@ -1187,9 +1167,9 @@ mod tests {
         for (t, want_zero) in [(1usize, true), (2, false)] {
             let mut cell = loaded(i, o, b, l);
             let input = seq(t, i, 0.4);
-            let out = forward(&mut cell, &input);
+            let _ = forward(&mut cell, &input);
             cell.reset_weights_derivatives();
-            let _ = cell.feed_backward(&input, &out, &seq(t, o, -0.2), 1, false);
+            let _ = cell.feed_backward(&seq(t, o, -0.2), 1);
             let d = derivs(&cell);
             let worst = state_slots
                 .iter()
@@ -1225,10 +1205,10 @@ mod tests {
         let mut cell = loaded(I, O, B, L);
         let input = seq(T, I, 0.4);
         let deltas = seq(T, O, -0.2);
-        let out = forward(&mut cell, &input);
+        let _ = forward(&mut cell, &input);
 
         cell.reset_weights_derivatives();
-        let _ = cell.feed_backward(&input, &out, &deltas, 1, false);
+        let _ = cell.feed_backward(&deltas, 1);
         let mut base = Vec::new();
         cell.get_weights_derivatives(&mut base);
         cell.ponderate_weights_derivatives(0.25);
@@ -1240,9 +1220,9 @@ mod tests {
         }
 
         let mut scaled = loaded(I, O, B, L);
-        let out2 = forward(&mut scaled, &input);
+        let _ = forward(&mut scaled, &input);
         scaled.reset_weights_derivatives();
-        let _ = scaled.feed_backward(&input, &out2, &deltas, 3, false);
+        let _ = scaled.feed_backward(&deltas, 3);
         let mut rows = Vec::new();
         scaled.get_weights_derivatives(&mut rows);
         for k in 0..base.len() {
@@ -1260,20 +1240,14 @@ mod tests {
         let mut a = loaded(I, O, B, L);
         let mut out_rev = Array2::<f64>::zeros((T, O));
         a.feed_forward_reverse(&input, &mut out_rev, false);
-        let dpl_rev = a.feed_backward_reverse(&input, &out_rev, &deltas, 1, false);
+        let dpl_rev = a.feed_backward_reverse(&deltas, 1);
         let mut da = Vec::new();
         a.get_weights_derivatives(&mut da);
 
         let mut b = loaded(I, O, B, L);
         let input_f = input.slice(ndarray::s![..;-1, ..]).to_owned();
-        let out_f = forward(&mut b, &input_f);
-        let dpl_f = b.feed_backward(
-            &input_f,
-            &out_f,
-            &deltas.slice(ndarray::s![..;-1, ..]).to_owned(),
-            1,
-            false,
-        );
+        let _ = forward(&mut b, &input_f);
+        let dpl_f = b.feed_backward(&deltas.slice(ndarray::s![..;-1, ..]).to_owned(), 1);
         let mut db = Vec::new();
         b.get_weights_derivatives(&mut db);
 
@@ -1293,7 +1267,7 @@ mod tests {
             let mut cell = loaded(I, O, B, L);
             let out = forward(&mut cell, input);
             assert_eq!(out.dim(), (T, O));
-            let dpl = cell.feed_backward(input, &out, &seq(T, O, -0.2), 1, false);
+            let dpl = cell.feed_backward(&seq(T, O, -0.2), 1);
             assert_eq!(dpl.dim(), (T, I));
         }
 

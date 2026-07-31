@@ -139,14 +139,10 @@ impl Layer for CellLayer {
                 inv_sub_sampling_ratio,
                 last_layer,
             ),
-            CellLayer::Cfc(l) => CfcLayer::feed_backward(
-                l,
-                input,
-                output,
-                deltas,
-                inv_sub_sampling_ratio,
-                last_layer,
-            ),
+            // The CfC inherent backward takes only what it consumes (phase-10 T3
+            // rider I-1): `input`/`output`/`last_layer` are not arguments to narrow
+            // away here, they simply do not exist on that signature.
+            CellLayer::Cfc(l) => CfcLayer::feed_backward(l, deltas, inv_sub_sampling_ratio),
         }
     }
 
@@ -183,14 +179,7 @@ impl Layer for CellLayer {
                 inv_sub_sampling_ratio,
                 last_layer,
             ),
-            CellLayer::Cfc(l) => CfcLayer::feed_backward_reverse(
-                l,
-                input,
-                output,
-                deltas,
-                inv_sub_sampling_ratio,
-                last_layer,
-            ),
+            CellLayer::Cfc(l) => CfcLayer::feed_backward_reverse(l, deltas, inv_sub_sampling_ratio),
         }
     }
 
