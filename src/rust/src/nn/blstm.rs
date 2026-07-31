@@ -125,9 +125,9 @@ impl PeepholeFlags {
 /// spec S1.1/S6). Read from `{prefix}_Cell_Type`; ABSENT means [`CellType::Lstm`],
 /// so every legacy/committed config keeps the legacy shape untouched.
 ///
-/// `Slstm`/`Mamba` PARSE here but are not constructible yet: [`BlstmNetwork::
-/// from_config`](BlstmNetwork::from_config) typed-bails on them until Phase 9 Tasks
-/// 2/3 land the cells.
+/// Every variant is constructible on the EXACT tree ([`BlstmNetwork::from_config`]'s
+/// exhaustive `match`); the FAST tree supports a subset and typed-bails the rest
+/// (`fast::driver::classify_fast_shape`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellType {
     /// The legacy peephole LSTM (`nn::layers::LstmLayer`).
@@ -136,6 +136,8 @@ pub enum CellType {
     Slstm,
     /// Mamba/S6 in recurrent form (spec S3; Phase 9 Task 3).
     Mamba,
+    /// The closed-form continuous-time cell (phase-10 spec S1; Phase 10 Task 1).
+    Cfc,
 }
 
 impl CellType {
@@ -144,7 +146,10 @@ impl CellType {
             "lstm" => Ok(CellType::Lstm),
             "slstm" => Ok(CellType::Slstm),
             "mamba" => Ok(CellType::Mamba),
-            other => bail!("unknown cell type '{other}' (expected 'lstm', 'slstm' or 'mamba')"),
+            "cfc" => Ok(CellType::Cfc),
+            other => {
+                bail!("unknown cell type '{other}' (expected 'lstm', 'slstm', 'mamba' or 'cfc')")
+            }
         }
     }
 
@@ -155,6 +160,7 @@ impl CellType {
             CellType::Lstm => "lstm",
             CellType::Slstm => "slstm",
             CellType::Mamba => "mamba",
+            CellType::Cfc => "cfc",
         }
     }
 }
@@ -263,6 +269,64 @@ impl MambaParams {
     }
 }
 
+/// CfC geometry (port-only, NO legacy source; phase-10 spec S1.4/S2). Read from the
+/// UNPREFIXED flat keys `Cfc_Backbone_Units` / `Cfc_Backbone_Layers` -- deliberately
+/// NOT `{prefix}_`-scoped, the [`MambaParams`] precedent verbatim: ONE CfC geometry
+/// per config, shared by whichever net(s) select `cfc` (a per-net override is an
+/// explicit non-goal).
+///
+/// `backbone_units` defaults to [`CFC_DEFAULT_BACKBONE_UNITS`] -- PROVISIONAL, see
+/// that constant. `backbone_layers` defaults to 1 (the spec S2 table's value). Both
+/// must be `>= 1`; absent keys mean the defaults, so a config that never says `cfc`
+/// is untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CfcParams {
+    pub backbone_units: usize,
+    pub backbone_layers: usize,
+}
+
+/// The provisional default backbone width (phase-10 spec S1.4). Task 1 LANDS the key
+/// with this placeholder; Task 2's SIZING PROCEDURE (match the full-net pack to the
+/// same lineage's LSTM pack within +-15%) finalizes it -- deliberately a ONE-LINE
+/// change here, noted in both task briefs.
+pub const CFC_DEFAULT_BACKBONE_UNITS: usize = 24;
+
+impl Default for CfcParams {
+    fn default() -> CfcParams {
+        CfcParams {
+            backbone_units: CFC_DEFAULT_BACKBONE_UNITS,
+            backbone_layers: 1,
+        }
+    }
+}
+
+impl CfcParams {
+    /// Read the two keys. A present-but-unparseable or `< 1` value is a HARD error,
+    /// for exactly [`MambaParams::from_legacy`]'s reason: these keys have no legacy
+    /// source to stay bug-compatible with, and a silently-defaulted geometry would
+    /// change the weight-pack LENGTH without telling anyone.
+    fn from_legacy(map: &IndexMap<String, String>) -> Result<CfcParams> {
+        let d = CfcParams::default();
+        let read = |key: &str, default: usize| -> Result<usize> {
+            let v = match map.get(key) {
+                Some(s) => s
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|e| anyhow::anyhow!("cannot read '{s}' as a size for '{key}': {e}"))?,
+                None => return Ok(default),
+            };
+            if v < 1 {
+                bail!("'{key}' must be >= 1 (got {v})");
+            }
+            Ok(v)
+        };
+        Ok(CfcParams {
+            backbone_units: read("Cfc_Backbone_Units", d.backbone_units)?,
+            backbone_layers: read("Cfc_Backbone_Layers", d.backbone_layers)?,
+        })
+    }
+}
+
 /// Parsed BLSTM config (`BLSTMNeuralNetwork.cpp:26-122`): LSTM/output topology,
 /// per-direction peephole flags, and the scalar knobs read at construction.
 #[derive(Debug, Clone)]
@@ -296,6 +360,9 @@ pub struct BlstmConfig {
     /// The `Mamba_*` geometry (port-only, spec S3.3/S6), read UNPREFIXED and inert
     /// unless [`Self::cell_type`] is [`CellType::Mamba`].
     pub mamba: MambaParams,
+    /// The `Cfc_*` geometry (port-only, phase-10 spec S1.4/S2), read UNPREFIXED and
+    /// inert unless [`Self::cell_type`] is [`CellType::Cfc`].
+    pub cfc: CfcParams,
 }
 
 impl BlstmConfig {
@@ -317,6 +384,9 @@ impl BlstmConfig {
         // unconditionally so a malformed value is caught even on a non-mamba config;
         // the parsed struct is inert unless the cell type asks for it.
         let mamba = MambaParams::from_legacy(map)?;
+        // Same posture as `mamba` above: UNPREFIXED, read unconditionally so a
+        // malformed value is caught even on a non-cfc config, inert otherwise.
+        let cfc = CfcParams::from_legacy(map)?;
 
         let lstm_neuron_nb = get_list(map, &k("_LSTMNeuronNb"))?;
         if lstm_neuron_nb.len() < 2 {
@@ -397,6 +467,7 @@ impl BlstmConfig {
             cell_type,
             direction,
             mamba,
+            cfc,
         })
     }
 }
@@ -470,6 +541,7 @@ impl BlstmNetwork {
         } else {
             let cell_type = cfg.cell_type;
             let mamba = cfg.mamba;
+            let cfc = cfg.cfc;
             // One builder per direction; the cell dispatch is inside so both stacks
             // stay structurally identical. The `match cell_type` below is EXHAUSTIVE
             // and that is what forces a new `CellType` variant to be handled here --
@@ -496,6 +568,14 @@ impl BlstmNetwork {
                         mamba.d_conv,
                         mamba.expand,
                         mamba.dt_rank,
+                    )),
+                    // `output` IS the cell's state width H (phase-10 S1.1); the
+                    // backbone geometry is the cell's own business.
+                    CellType::Cfc => CellLayer::Cfc(super::cells::CfcLayer::new(
+                        input,
+                        output,
+                        cfc.backbone_units,
+                        cfc.backbone_layers,
                     )),
                 }
             };

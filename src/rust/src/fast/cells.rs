@@ -858,6 +858,21 @@ impl FastCausalNet {
                     "fast::cells::FastCausalNet is for the phase-9 causal cells only; the LSTM \
                      cell has no forward-only fast twin (spec S4.2)"
                 ),
+                // PHASE 10 TASK 1, INTERIM (removed by Task 6, which lands `FastCfc`
+                // + a `FastCell::Cfc` arm and turns this into a real weight count).
+                // `classify_fast_shape`'s causal arm deliberately admits ANY non-LSTM
+                // cell, so `Inference_Path fast` + `cfc`/`forward` reaches HERE -- and
+                // this is the choke point BOTH causal construction sites
+                // (`fast::driver` and `fast::stream`) funnel through, since
+                // `from_flat` calls `element_count` first. A typed bail here is what
+                // stops the cfc pack being consumed head-first by another
+                // architecture's reader (the exact hazard Task 2's rider closed for
+                // sLSTM in phase 9).
+                CellType::Cfc => bail!(
+                    "the CfC cell has no fast twin yet (phase-10 Task 1 landed the exact \
+                     f64 cell only; the causal f32 twin is Task 6) -- run this config on \
+                     the exact path (Inference_Path exact)"
+                ),
             };
         }
         for jj in 0..outn.len() - 1 {
@@ -926,8 +941,9 @@ impl FastCausalNet {
                         mamba.dt_rank,
                     ),
                 ),
-                // Unreachable: `element_count` above already bailed on Lstm.
+                // Unreachable: `element_count` above already bailed on both.
                 CellType::Lstm => unreachable!("LSTM has no causal fast twin"),
+                CellType::Cfc => unreachable!("CfC has no causal fast twin yet"),
             };
             cells.push(cell);
             pos += used;
@@ -1613,7 +1629,7 @@ mod tests {
                     FastMamba::weight_count(12, 5, p.d_state, p.d_conv, p.expand, p.dt_rank)
                         + FastMamba::weight_count(5, 4, p.d_state, p.d_conv, p.expand, p.dt_rank)
                 }
-                CellType::Lstm => unreachable!(),
+                CellType::Lstm | CellType::Cfc => unreachable!(),
             };
             assert_eq!(
                 n,
@@ -1772,6 +1788,53 @@ mod tests {
             err.to_string().contains("no forward-only fast twin"),
             "expected an LSTM bail, got: {err}"
         );
+    }
+
+    /// THE CfC FAST-PATH BEHAVIOUR, pinned as it stands after phase-10 Task 1 (this
+    /// test is Task 6's to flip): `classify_fast_shape` ADMITS `(cfc, forward)` into
+    /// the causal shape -- its arm is `cell != Lstm`, deliberately cell-open -- and
+    /// the refusal happens one layer down, at `FastCausalNet::element_count`, as a
+    /// TYPED ERROR naming the cell. No panic, no silent head-first consumption of the
+    /// pack by another architecture's reader.
+    ///
+    /// Why the bail lives THERE and not in `classify_fast_shape`: `element_count` is
+    /// the single choke point both causal construction sites reach (`fast::driver`'s
+    /// `build_fast_sad_net` and `fast::stream::StreamingSession::new` both call
+    /// `from_flat`, which calls `element_count` first), it is where the LSTM's
+    /// identical "named follow-on" refusal already lives, and Task 6's removal is then
+    /// a pure swap of this arm for a real `FastCfc` weight count -- inside the file
+    /// Task 6 is editing anyway.
+    #[test]
+    fn cfc_is_classified_causal_but_has_no_fast_twin_yet() {
+        let mut map = IndexMap::new();
+        map.insert("BLSTM_LSTMNeuronNb".to_string(), "4,3".to_string());
+        map.insert("BLSTM_LSTMSubSampling".to_string(), "1".to_string());
+        map.insert("BLSTM_OutputNeuronNb".to_string(), "3,1".to_string());
+        map.insert("BLSTM_OutputSubSampling".to_string(), "1".to_string());
+        map.insert("BLSTM_InputNormalizationType".to_string(), "0".to_string());
+        map.insert("BLSTM_TwoSweeps".to_string(), "false".to_string());
+        map.insert("BLSTM_Cell_Type".to_string(), "cfc".to_string());
+        map.insert("BLSTM_Direction".to_string(), "forward".to_string());
+        let bc = crate::nn::blstm::BlstmConfig::from_legacy(&map, "BLSTM").unwrap();
+
+        assert_eq!(
+            crate::fast::driver::classify_fast_shape(&bc, "BLSTM").unwrap(),
+            crate::fast::driver::FastNetShape::Causal(CellType::Cfc),
+            "the causal arm is cell-open by design -- it must NOT special-case cfc"
+        );
+
+        let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
+        let err = FastCausalNet::element_count(&sp, CellType::Cfc, &mamba_params()).unwrap_err();
+        assert!(
+            err.to_string().contains("no fast twin yet"),
+            "expected a CfC bail, got: {err}"
+        );
+        // ... and it is the SAME error through the whole-net entry point, so no
+        // construction site can reach the `unreachable!` in `from_flat`.
+        let err = FastCausalNet::from_flat(&sp, CellType::Cfc, &mamba_params(), &weights(4096))
+            .err()
+            .expect("the CfC cell must be rejected at construction too");
+        assert!(err.to_string().contains("no fast twin yet"), "got: {err}");
     }
 
     /// MLP mode (`LSTMNeuronNb[0] == 0`) is not a causal shape.

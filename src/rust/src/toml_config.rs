@@ -31,7 +31,9 @@
 //! algorithm family: `corpus`, `display`, `pitch` (the BLSTM spectral segmenter's
 //! inner TDC/LTSV sub-passes used for pitch warping), `nn`/`cost` (the main BLSTM
 //! SAD net), `nn_lid`/`cost_lid` (the Twin's `BLSTM_LID_*` net), `nn_mamba` (the
-//! Phase 9 Mamba geometry), `ltsv`/`tdc` (the
+//! Phase 9 Mamba geometry), `nn_cfc` (the Phase 10 CfC geometry
+//! `Cfc_Backbone_Units` / `Cfc_Backbone_Layers`, the same
+//! UNPREFIXED-one-geometry-per-config posture), `ltsv`/`tdc` (the
 //! two NN-free standalone algorithms), and `cnn` (dead-per-`CLAUDE.md` but present
 //! in fixtures, kept for round-trip completeness).
 //!
@@ -201,6 +203,12 @@ static KEY_TABLE: &[KeyMapping] = &[
     ("Mamba_D_Conv",                             "nn_mamba", "d_conv"),
     ("Mamba_Expand",                             "nn_mamba", "expand"),
     ("Mamba_Dt_Rank",                            "nn_mamba", "dt_rank"),
+
+    // --- nn_cfc: the CfC geometry (Phase 10 S1.4/S2, port-only) ---------------
+    // The `nn_mamba` row's reasoning verbatim: UNPREFIXED flat keys, ONE geometry
+    // per config, FLAT section spelling.
+    ("Cfc_Backbone_Units",                       "nn_cfc", "backbone_units"),
+    ("Cfc_Backbone_Layers",                      "nn_cfc", "backbone_layers"),
 
     // --- cost: BLSTM (main SAD net) cost law ----------------------------------
     ("BLSTM_CostLawSpeech",                      "cost", "law_speech"),
