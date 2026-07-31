@@ -1,9 +1,27 @@
-"""Phase 9 Task 5: the SEAM tier for the new cells (spec S8.1 SEAM, S8.3, S1.3).
+"""Phase 9 Task 5 + Phase 10 Task 3: the SEAM tier for the port-only cells (phase-9 spec
+S8.1 SEAM / S8.3 / S1.3; phase-10 spec S9.2 for the CfC rows).
 
 The phase-9 counterpart of `test_seam_replay.py`: everything here drives the committed
-SYNTHETIC phase-9 gate fixtures (`tests/reference_data/phase9/`, written by
+SYNTHETIC gate fixtures (`tests/reference_data/phase9/`, written by
 `scripts/extract_phase9_fixtures.py`) through `speech_rs.Engine` in-process. No corpus, no
 oracle, no gating -- CI's `python-pyo3` job runs the whole file.
+
+PHASE 10 added three rows on exactly the phase-9 recipe -- `cfc_{bidirectional,forward}`
+(SAD) and `twin_mode7_lid_cfc` (the LID mechanical wiring) -- plus one new structural leg
+([`test_cfc_time_gate_saturation_selects_one_head`]). They also carry a COVERAGE CLOSURE the
+CfC cell's own unit + FD tiers structurally cannot. Those tiers drive `CfcLayer` DIRECTLY,
+and `phase9_cell_config.rs` reaches only the WEIGHT-SEAM arms of the enum
+(`set_weights`/`get_weights`/`nb_of_weights`, via driver construction), so `CellLayer::Cfc`'s
+FORWARD, BACKWARD and DERIVATIVE-HARVEST arms were compiled-but-never-executed: a mis-wired
+one (`feed_forward` delegating to `feed_forward_reverse`, say) would have passed every test
+in the repo. The Engine path here runs a real corpus forward AND backward THROUGH the enum,
+and [`test_grad_check_seam`] is the leg that discriminates -- it compares the engine's own
+central difference of the FORWARD against the analytic fold from the BACKWARD, so any arm
+swap that desynchronizes the two fails it loudly. Verified by mutation, not asserted: each
+of the two swaps above fails 5 legs (both `grad_check` rows, both block probes, the mode-7
+Twin). The Task 3 report records them, plus the one class this is blind to -- a CONSISTENT
+double swap of forward AND backward, which is self-consistent (the phase-9 battery lesson
+verbatim: a leg comparing two runs of the same kernel cannot see inside it).
 
 WHAT THE TIER PINS, and why each leg exists:
 
@@ -79,7 +97,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from speech.config_bridge import nnet_spec
+from speech.config_bridge import nnet_spec, parse_legacy_config
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_weight_vector, write_bin
 
@@ -95,12 +113,14 @@ GEOMETRY = cast(dict[str, int], MANIFEST["geometry"])
 # The manifest carries the epsilons + `max_weights` every pin below was measured at, and it
 # is the one committed file its own per-file digest table cannot cover. Pinned here instead
 # (T5 review I3) so a manifest edit cannot silently move a tolerance's operating point.
-MANIFEST_SHA256 = "64d112591d0ef1880a97ec82d433fe5f44f84aaa948387d19a4ce8f2c5bb78f6"
+MANIFEST_SHA256 = "02c1f70aeaea5b0868fa99eaf9391d6effb21a6bd629b7dfec76ff9e76cc3dd2"
 
-SAD_FIXTURES = ("slstm_bidirectional", "slstm_forward", "mamba_bidirectional", "mamba_forward")
+SAD_FIXTURES = ("slstm_bidirectional", "slstm_forward", "mamba_bidirectional", "mamba_forward", "cfc_bidirectional", "cfc_forward")
+MODE7_TWINS = ("twin_mode7_lid_slstm", "twin_mode7_lid_cfc")
 SAD_EPSILON = float(cast(float, MANIFEST["measured"]["sad_epsilon"]))
 TWIN_EPSILON = float(cast(float, MANIFEST["measured"]["twin_epsilon"]))
 TWIN_MODE7_EPSILON = float(cast(float, MANIFEST["measured"]["twin_mode7_epsilon"]))
+TWIN_MODE7_CFC_EPSILON = float(cast(float, MANIFEST["measured"]["twin_mode7_cfc_epsilon"]))
 MAX_WEIGHTS = int(cast(int, MANIFEST["measured"]["grad_check_max_weights"]))
 
 # The scale floor, as a fraction of the largest gradient in the compared set (see the module
@@ -165,16 +185,17 @@ def seed_twin(dst: Path) -> None:
         shutil.copy(PHASE9 / f, dst / f)
 
 
-def seed_twin_mode7(dst: Path) -> None:
+def seed_twin_mode7(dst: Path, name: str = "twin_mode7_lid_slstm") -> None:
     """The Mode-7 phSeq Twin (the live phase-6 LID training regime), over the committed
-    phase-4b phSeq corpus."""
+    phase-4b phSeq corpus. `name` selects the LID cell (`..._slstm` / `..._cfc`) -- both
+    fixtures share this corpus and the UNCHANGED phase-4b `tiny_sad_seed.bin`."""
     for f in ("languagemapping_lid7.csv", "tiny_sad_seed.bin"):
         shutil.copy(PHASE4B / f, dst / f)
     phseq = dst / "corpus_phseq"
     phseq.mkdir(parents=True, exist_ok=True)
     for f in ("s1.phSeq", "s2.phSeq", "s1.stm", "s2.stm", "listing_train.csv"):
         shutil.copy(PHASE4B / "corpus_phseq" / f, phseq / f)
-    for f in ("twin_mode7_lid_slstm.config", "twin_mode7_lid_slstm_seed.bin"):
+    for f in (f"{name}.config", f"{name}_seed.bin"):
         shutil.copy(PHASE9 / f, dst / f)
 
 
@@ -225,6 +246,29 @@ def mamba_blocks(out: int, fin: int, d_state: int, d_conv: int, expand: int) -> 
     return blocks
 
 
+def cfc_blocks(out: int, backbone_units: int, backbone_layers: int, fin: int) -> dict[str, tuple[int, int]]:
+    """One CfC layer, phase-10 spec S1.2 order: the backbone stack `W_bb{l} | b_bb{l}`
+    (`l = 0` is `B x (in+H)`, the deeper ones `B x B`), then the three heads
+    `W_ff1 | b_ff1 | W_ff2 | b_ff2 | W_g | b_g`, each `H x B` plus `H`.
+
+    Transcribed from the spec, not from Rust and not from `init_weights` -- the same
+    independence the two sibling maps above have, and what makes the block probe and
+    [`test_cfc_time_gate_saturation_selects_one_head`] able to disagree with the engine."""
+    b, h = backbone_units, out
+    sizes: list[tuple[str, int]] = []
+    for layer in range(backbone_layers):
+        fan_in = fin + h if layer == 0 else b
+        sizes += [(f"W_bb{layer}", b * fan_in), (f"b_bb{layer}", b)]
+    for head in ("ff1", "ff2", "g"):
+        sizes += [(f"W_{head}", h * b), (f"b_{head}", h)]
+    blocks: dict[str, tuple[int, int]] = {}
+    position = 0
+    for label, n in sizes:
+        blocks[label] = (position, n)
+        position += n
+    return blocks
+
+
 def fixture_blocks(name: str) -> dict[str, tuple[int, int]]:
     """The FULL flat pack of a SAD fixture as named blocks, in `Blstm::set_weights` order:
     `fwd stack | bwd stack (bidirectional only) | output MLP | mean | std`."""
@@ -233,6 +277,8 @@ def fixture_blocks(name: str) -> dict[str, tuple[int, int]]:
     fin = GEOMETRY["sad_input"] * GEOMETRY["sad_sub_sampling"]
     if info["cell_type"] == "slstm":
         layer = slstm_blocks(out, fin)
+    elif info["cell_type"] == "cfc":
+        layer = cfc_blocks(out, GEOMETRY["cfc_backbone_units"], GEOMETRY["cfc_backbone_layers"], fin)
     else:
         layer = mamba_blocks(out, fin, GEOMETRY["mamba_d_state"], GEOMETRY["mamba_d_conv"], GEOMETRY["mamba_expand"])
     layer_len = sum(n for _, n in layer.values())
@@ -318,6 +364,14 @@ GRAD_CHECK_PINS = {
     "slstm_forward": (3.197e-6, 3.2e-5),
     "mamba_bidirectional": (6.593e-9, 6.6e-8),
     "mamba_forward": (7.130e-9, 7.2e-8),
+    # The phase-10 CfC rows run at the SAME `sad_epsilon` rather than getting one of their
+    # own, and that reuse is MEASURED, not assumed: a 5-point sweep (1e-7 .. 1e-3) reads
+    #   bi   5.92e-6 / 1.70e-7 / 3.14e-7 / 3.13e-5 / 3.13e-3
+    #   fwd  2.81e-6 / 3.41e-7 / 1.17e-8 / 1.17e-6 / 1.17e-4
+    # i.e. a textbook U bottoming at 1e-6 (bi) and 1e-5 (fwd) with the right half the clean
+    # `eps^2` truncation ramp. 1e-5 sits at or beside both minima, ~2 decades under the STOP.
+    "cfc_bidirectional": (3.138e-7, 3.2e-6),
+    "cfc_forward": (1.169e-8, 1.2e-7),
 }
 
 
@@ -350,6 +404,8 @@ BLOCK_PROBE_PINS = {
     "slstm_forward": (8.754e-8, 8.8e-7),
     "mamba_bidirectional": (2.015e-7, 2.1e-6),
     "mamba_forward": (7.110e-8, 7.2e-7),
+    "cfc_bidirectional": (1.417e-8, 1.5e-7),
+    "cfc_forward": (1.027e-8, 1.1e-7),
 }
 
 
@@ -435,6 +491,11 @@ def test_weights_derivatives_are_finite_and_block_wise_alive(name: str, tmp_path
     here rather than being allowed to hide inside a whole-vector nonzero check: sLSTM's `b_i`
     (invariant up to floating-point residue, see [`BIAS_I_RESIDUE_PIN`]) and the
     `norm.mean`/`norm.std` tail (exactly zero -- inert at `InputNormalizationType 0`).
+
+    The CfC rows take NO exemption and that is the claim: phase-10 spec S1.3 predicts no
+    dead block at `T > 1` (its one structural zero, `W_bb`'s state columns, is a `T = 1`
+    artefact and this corpus is ~50 timesteps deep), so all eight CfC blocks go through the
+    `> 0.0` branch. MEASURED: only `norm.*` comes back zero on either CfC fixture.
     """
     blocks = fixture_blocks(name)
     pack = load_pack(name)
@@ -564,6 +625,70 @@ def test_mamba_output_projection_gates_the_recurrent_blocks(name: str, tmp_path:
         assert cost_of(rewrite(pack, "fwd.A_log", 0.25)) != live_cost, f"{name}: A_log is inert even with W_out live -- the gating leg proves nothing"
 
 
+# `Logistic::fn`'s INCLUSIVE saturation bound (`nn/activations.rs::exp_limit`, `ln(f64::MAX)
+# ~ 709.78`): a gate pre-activation at or beyond it returns EXACTLY 1.0 / 0.0, no rounding
+# argument needed. 800 clears it with room and is nowhere near overflowing anything.
+CFC_GATE_SATURATION = 800.0
+
+
+@pytest.mark.parametrize("name", ("cfc_bidirectional", "cfc_forward"))
+def test_cfc_time_gate_saturation_selects_one_head(name: str, tmp_path: Path) -> None:
+    """Saturating CfC's time gate must make EXACTLY ONE of the two candidate heads inert,
+    and WHICH one flips with the sign -- three block offsets, four decoded consequences.
+
+    Why it discriminates (phase-10 spec S1.1: `h = ff1 (1 - g) + ff2 g`, `g = sigmoid(.)`):
+    zero the `W_g` block and drive `b_g` past the logistic's saturation bound, and `g` is
+    EXACTLY 1.0 (or 0.0) at every timestep, so `h` collapses to `ff2` (or `ff1`) bit-for-bit.
+    Rewriting the collapsed-away head's weight AND bias blocks must then leave the corpus
+    cost BIT-identical, while rewriting the surviving head's must move it -- and the whole
+    picture must MIRROR when the sign flips. That is what pins the three head blocks in the
+    S1.2 order: a `ff1`/`ff2` swap flips which regime is inert (both asserts fail), and any
+    permutation that puts something else where `b_g` is stops saturating the gate at all
+    (the "dead" head stays live). The `norm`-tail and backbone blocks are pinned by the block
+    probe instead; this leg is about the head triple.
+
+    NOTE the bidirectional fixture needs BOTH stacks saturated -- the reverse half feeds the
+    same output MLP, so leaving it live would make every assert below vacuous.
+    """
+    blocks = fixture_blocks(name)
+    pack = load_pack(name)
+    stacks = ("fwd", "bwd") if any(label.startswith("bwd.") for label in blocks) else ("fwd",)
+    seed_sad(tmp_path, name)
+
+    def rewrite(base_pack: NDArray[np.float64], label: str, value: float) -> NDArray[np.float64]:
+        start, n = blocks[label]
+        out = base_pack.copy()
+        out[start : start + n] = value
+        return out
+
+    with chdir(tmp_path):
+        eng = speech_rs.Engine([f"{name}.config"], "-m")
+
+        def cost_of(candidate: NDArray[np.float64]) -> float:
+            eng.set_weights(0, [candidate])
+            return corpus_cost(eng)
+
+        for sign, survivor, collapsed in ((+1.0, "ff2", "ff1"), (-1.0, "ff1", "ff2")):
+            saturated = pack
+            for stack in stacks:
+                saturated = rewrite(saturated, f"{stack}.W_g", 0.0)
+                saturated = rewrite(saturated, f"{stack}.b_g", sign * CFC_GATE_SATURATION)
+            gated_cost = cost_of(saturated)
+            assert math.isfinite(gated_cost)
+            for block in (f"fwd.W_{collapsed}", f"fwd.b_{collapsed}"):
+                assert cost_of(rewrite(saturated, block, 0.3)) == gated_cost, (
+                    f"{name}: with the gate saturated to {survivor}, rewriting {block} moved the cost -- a head block offset is wrong"
+                )
+            assert cost_of(rewrite(saturated, f"fwd.W_{survivor}", 0.3)) != gated_cost, (
+                f"{name}: with the gate saturated to {survivor}, that head is inert too -- the probe is vacuous"
+            )
+
+        live_cost = cost_of(pack)
+        assert cost_of(rewrite(pack, "fwd.b_g", 1.5)) != live_cost, (
+            f"{name}: the gate bias is inert at the committed weights -- the saturation leg proves nothing"
+        )
+
+
 # ==== S8.3: the Twin's LID mechanical wiring =================================
 #
 # FINDING (brief step 3): `tasks/lid.rs` needed NO change. `TwinBlstmSpectralLid::from_legacy`
@@ -571,13 +696,19 @@ def test_mamba_output_projection_gates_the_recurrent_blocks(name: str, tmp_path:
 # the same T1 constructor that reads `{prefix}_Cell_Type` / `{prefix}_Direction` -- so
 # `BLSTM_LID_Cell_Type slstm` dispatches with zero driver-side work. These tests pin that.
 #
-# TWO fixtures, because neither covers the other:
+# TWO REGIMES, because neither covers the other:
 #   * Mode 5 (wav) is the two-nets-live regime -- BOTH nets backprop-active, so `grad_check`
 #     visits the legacy-LSTM SAD net AND the swapped sLSTM LID net, and the block probe can
 #     finite-difference the LID net's own cost columns (`14 / len-2`).
 #   * Mode 7 (phSeq) is the LIVE regime `speech baseline lid-phseq` trains: one-hot
 #     `external_features` instead of wav, and a FROZEN SAD net, so `grad_check` visits the
 #     LID net alone.
+#
+# The phase-10 CfC row (spec S9.2) takes MODE 7 ONLY -- the live regime, deliberately, not
+# for want of a mode-5 clone: what the LID leg pins is the CTOR DISPATCH plus the flat-pack
+# length agreement between `init_weights.py` and `CfcLayer::nb_of_weights`, and mode 5 would
+# re-run the identical wiring against a second corpus. The two-nets-live gradient path is
+# already pinned cell-agnostically by the sLSTM mode-5 rows below.
 #
 # A T5-review CORRECTION lives here: an earlier revision claimed Mode 5's
 # `weights_derivatives` came back all-zero after a `run()` as a "pre-existing, mode-specific"
@@ -591,9 +722,24 @@ def test_mamba_output_projection_gates_the_recurrent_blocks(name: str, tmp_path:
 
 # MEASURED worst scaled error over the 12-weight sweep at eps 1e-4, pinned at measured*10.
 TWIN_GRAD_CHECK_PINS = {0: (5.390e-9, 5.4e-8), 1: (3.585e-6, 3.6e-5)}
-# Mode 7, MEASURED at its own eps 1e-3 (see the manifest note: its LID gradient is ~9e-7,
-# three decades below the mode-5 one, so its FD optimum sits at a wider step).
-TWIN_MODE7_GRAD_CHECK_PIN = (9.197e-7, 9.2e-6)
+# Mode 7, per fixture: `(epsilon, measured, pin)`. Each epsilon is the MEASURED U-curve
+# minimum for THAT net -- the sLSTM Twin's LID gradient is ~9e-7 (three decades below the
+# mode-5 one, so its FD optimum is at a wide 1e-3), the phase-10 CfC Twin's is ~5.6e-5, ~60x
+# bigger, and its optimum accordingly sits one decade lower (sweep 1e-7 .. 1e-3:
+# 2.04e-6 / 6.67e-8 / 1.74e-8 / 2.63e-9 / 3.29e-7).
+TWIN_MODE7_ROWS = {
+    "twin_mode7_lid_slstm": (TWIN_MODE7_EPSILON, 9.197e-7, 9.2e-6),
+    "twin_mode7_lid_cfc": (TWIN_MODE7_CFC_EPSILON, 2.630e-9, 2.7e-8),
+}
+
+
+def mode7_lid_blocks(name: str) -> dict[str, tuple[int, int]]:
+    """The Mode-7 Twin's LID-net block map: `BLSTM_LID_LSTMNeuronNb 12,6` with
+    `BLSTM_LID_LSTMSubSampling 1` -> out 6, fan-in 12, in whichever cell's layout the
+    fixture's `BLSTM_LID_Cell_Type` selects."""
+    if FIXTURES[name]["lid_cell_type"] == "cfc":
+        return cfc_blocks(6, GEOMETRY["cfc_backbone_units"], GEOMETRY["cfc_backbone_layers"], 12)
+    return slstm_blocks(6, 12)
 
 
 def test_twin_lid_cell_swap_constructs_and_roundtrips(tmp_path: Path) -> None:
@@ -749,49 +895,88 @@ def test_twin_lid_block_probe_matches_finite_difference(tmp_path: Path) -> None:
     assert worst <= pin, f"mode-5 LID: worst scaled error {worst:.4e} > pin {pin:.1e} (measured {measured:.4e}) at {detail}"
 
 
-def test_twin_mode7_lid_grad_check(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", MODE7_TWINS)
+def test_twin_mode7_lid_packs_load_and_roundtrip(name: str, tmp_path: Path) -> None:
+    """S8.3 / phase-10 S9.2 step 1: the Twin BUILDS with the swapped LID cell beside its
+    legacy-LSTM SAD net, loads BOTH committed packs bit-exactly, and round-trips both.
+
+    The length check is the load-bearing half for a NEW cell: `BlstmNetwork::set_weights`
+    consumes `nb_of_weights()` per layer head-first, so a Python builder that emitted the
+    wrong CfC block sizes would either fail construction here or (worse) silently eat the
+    output MLP's bytes -- which is exactly what `spec_directions`/`init_cfc_flat` agreeing
+    with `CfcLayer::nb_of_weights` prevents."""
+    info = cast(dict[str, Any], FIXTURES[name])
+    lid_pack = load_pack(name)
+    sad_pack = read_weight_vector(PHASE4B / "tiny_sad_seed.bin")
+    assert lid_pack.shape[0] == info["lid_pack_length"]
+    assert sad_pack.shape[0] == info["sad_pack_length"]
+    seed_twin_mode7(tmp_path, name)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine([f"{name}.config"], "-m")
+        weights = eng.weights(0)
+        assert len(weights) == 2, "algo 6 -> [sad, lid]"
+        assert np.array_equal(weights[0].view(np.uint64), sad_pack.view(np.uint64)), f"{name}: the SAD pack was not loaded bit-exactly"
+        assert np.array_equal(weights[1].view(np.uint64), lid_pack.view(np.uint64)), f"{name}: the LID pack was not loaded bit-exactly"
+
+        sad_pattern = np.array([((k * 5 + 1) % 89) / 89.0 - 0.5 for k in range(sad_pack.shape[0])], dtype=np.float64)
+        lid_pattern = np.array([((k * 13 + 7) % 103) / 103.0 - 0.5 for k in range(lid_pack.shape[0])], dtype=np.float64)
+        eng.set_weights(0, [sad_pattern, lid_pattern])
+        got = eng.weights(0)
+        assert np.array_equal(got[0].view(np.uint64), sad_pattern.view(np.uint64)), f"{name}: SAD round trip is not bit-exact"
+        assert np.array_equal(got[1].view(np.uint64), lid_pattern.view(np.uint64)), f"{name}: LID round trip is not bit-exact"
+
+
+@pytest.mark.parametrize("name", MODE7_TWINS)
+def test_twin_mode7_lid_grad_check(name: str, tmp_path: Path) -> None:
     """S8.3 in the LIVE regime: the same cell swap under Mode 7 phSeq (what
     `speech baseline lid-phseq` trains). The Mode-7 contract freezes the SAD net, so
-    `grad_check` visits the sLSTM LID net ALONE -- exactly one report, which is itself part
-    of the pin (a second report would mean the frozen-SAD contract moved)."""
-    measured, pin = TWIN_MODE7_GRAD_CHECK_PIN
+    `grad_check` visits the swapped LID net ALONE -- exactly one report, which is itself part
+    of the pin (a second report would mean the frozen-SAD contract moved).
+
+    THE PHASE-10 FINDING, pinned rather than assumed: `tasks/lid.rs` needed NO change for the
+    CfC row either. `TwinBlstmSpectralLid::from_legacy` builds its LID net through
+    `BlstmConfig::from_legacy(map, "BLSTM_LID")`, whose EXHAUSTIVE `match cell_type` gained
+    the `Cfc` arm in T1 -- so a fourth cell is a config key and a seeded pack, nothing else.
+    This leg is what turns that from a code reading into a measurement."""
+    epsilon, measured, pin = TWIN_MODE7_ROWS[name]
     assert pin < 1e-4, "spec R4: a grad_check pin above 1e-4 is a STOP"
-    seed_twin_mode7(tmp_path)
+    seed_twin_mode7(tmp_path, name)
     with chdir(tmp_path):
-        eng = speech_rs.Engine(["twin_mode7_lid_slstm.config"], "-m")
-        reports = eng.grad_check(TWIN_MODE7_EPSILON, MAX_WEIGHTS)
+        eng = speech_rs.Engine([f"{name}.config"], "-m")
+        reports = eng.grad_check(epsilon, MAX_WEIGHTS)
         assert len(reports) == 1 and reports[0][0] == 1, "Mode 7 freezes the SAD net -> the LID net (index 1) is the only backprop-active one"
         analytic, numerical = grad_check_columns(reports[0][1])
-        assert float(np.abs(numerical).max()) > 1e-12, "mode-7 twin: the whole numerical sweep is ~0"
+        assert float(np.abs(numerical).max()) > 1e-12, f"{name}: the whole numerical sweep is ~0"
         worst = float(scaled_errors(analytic, numerical).max())
-        assert worst <= pin, f"mode-7 twin LID: worst scaled error {worst:.4e} > pin {pin:.1e} (measured {measured:.4e})"
+        assert worst <= pin, f"{name} LID: worst scaled error {worst:.4e} > pin {pin:.1e} (measured {measured:.4e})"
 
 
-def test_twin_mode7_lid_gradient_is_finite_and_block_wise_alive(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", MODE7_TWINS)
+def test_twin_mode7_lid_gradient_is_finite_and_block_wise_alive(name: str, tmp_path: Path) -> None:
     """F10 regression class on the swapped LID net, in the only Twin regime where the seam's
-    folded gradient is readable (see the section comment). Block sums, never per row: `b_i`
-    is output-invariant for the same sLSTM reason as on the SAD side."""
-    lid_pack = load_pack("twin_mode7_lid_slstm")
-    # `BLSTM_LID_LSTMNeuronNb 12,6` with `BLSTM_LID_LSTMSubSampling 1` -> out 6, fan-in 12.
-    blocks = slstm_blocks(6, 12)
-    seed_twin_mode7(tmp_path)
+    folded gradient is readable (see the section comment). Block sums, never per row: sLSTM's
+    `b_i` is output-invariant for the same reason as on the SAD side, and the CfC row takes
+    no exemption at all (no dead block at `T > 1`)."""
+    lid_pack = load_pack(name)
+    blocks = mode7_lid_blocks(name)
+    seed_twin_mode7(tmp_path, name)
     with chdir(tmp_path):
-        eng = speech_rs.Engine(["twin_mode7_lid_slstm.config"], "-m")
+        eng = speech_rs.Engine([f"{name}.config"], "-m")
         eng.run()
         gradient = analytic_gradient(eng, 1)
     assert gradient.shape == lid_pack.shape
-    assert np.isfinite(gradient).all(), "the LID gradient is not finite"
-    assert int(np.count_nonzero(gradient)) > 0, "F10 regression -- the LID seam returned an all-zero gradient"
+    assert np.isfinite(gradient).all(), f"{name}: the LID gradient is not finite"
+    assert int(np.count_nonzero(gradient)) > 0, f"{name}: F10 regression -- the LID seam returned an all-zero gradient"
     scale = float(np.abs(gradient).max())
     for label, (start, n) in blocks.items():
         block_sum = float(np.abs(gradient[start : start + n]).sum())
         if label == "b_i":
             ratio = block_sum / scale
             assert ratio <= BIAS_I_RESIDUE_PIN, (
-                f"LID block {label}: sum |g| / scale = {ratio:.4e} > {BIAS_I_RESIDUE_PIN:.1e} -- b_i is no longer output-invariant"
+                f"{name} LID block {label}: sum |g| / scale = {ratio:.4e} > {BIAS_I_RESIDUE_PIN:.1e} -- b_i is no longer output-invariant"
             )
         else:
-            assert block_sum > 0.0, f"LID block {label}: sum |g| == 0, the block receives no gradient at all"
+            assert block_sum > 0.0, f"{name} LID block {label}: sum |g| == 0, the block receives no gradient at all"
 
 
 # ==== The real committed SAD config still defaults to the legacy shape =======
@@ -879,6 +1064,46 @@ def test_fixture_configs_leave_mamba_dt_rank_at_the_auto_default() -> None:
             ("Mamba_Expand", GEOMETRY["mamba_expand"]),
         ):
             assert f"\n{key} {value}\n" in text, f"{name}.config: {key} does not match the manifest geometry ({value})"
+
+
+def test_fixture_configs_state_the_cfc_geometry() -> None:
+    """[`cfc_blocks`] sizes every block off the manifest geometry, so a fixture that dropped
+    the `Cfc_*` keys would silently fall back to the SIZED phase-10 default (B=45) on BOTH
+    sides and shift the whole block map with nothing else complaining. Pin that all three CfC
+    fixtures state them, and that they match the manifest -- the `Mamba_Dt_Rank` precedent.
+    """
+    for name in ("cfc_bidirectional", "cfc_forward", "twin_mode7_lid_cfc"):
+        text = (PHASE9 / f"{name}.config").read_text()
+        for key, value in (
+            ("Cfc_Backbone_Units", GEOMETRY["cfc_backbone_units"]),
+            ("Cfc_Backbone_Layers", GEOMETRY["cfc_backbone_layers"]),
+        ):
+            assert f"\n{key} {value}\n" in text, f"{name}.config: {key} does not match the manifest geometry ({value})"
+
+
+def test_no_fixture_config_reroutes_run_into_the_engine_gradcheck() -> None:
+    """THE STRIP-LIST GUARD, asserted at PARSE level over every committed fixture (the T5
+    review's C1 lesson, generalized so a future clone cannot re-import the hazard).
+
+    Two keys decide what `Engine.run()` actually does, and every leg in this file assumes
+    the same answer -- one forward+backward fold at theta:
+      * `Neural_Networks_Gradient_Check_Epsilon` present -> `CorpusProcessor::run()` takes
+        the `grad_check_full` branch, whose epilogue RESETS `seam_derivs`, so
+        `weights_derivatives` reads an all-zero gradient and the F10/block-probe legs
+        silently measure nothing.
+      * `Neural_Networks_BackPropagation_Epochs != 0` -> `run()` is the engine-internal
+        training loop, so the reported cost/gradient are at engine-MOVED weights, not theta
+        (the phase-5 F11 convention).
+    Parse level, not `grep`: the parser is last-wins, and the two Mode-7 Twins inherit an
+    `Epochs 6` from `twin_train.config` that an appended `0` overrides -- a text scan would
+    read whichever line it hit first.
+    """
+    for name in sorted(cast(dict[str, Any], MANIFEST["fixtures"])):
+        flat = parse_legacy_config((PHASE9 / f"{name}.config").read_text())
+        assert "Neural_Networks_Gradient_Check_Epsilon" not in flat, f"{name}.config carries a gradient-check epsilon -- run() is no longer a forward fold"
+        assert flat.get("Neural_Networks_BackPropagation_Epochs") == "0", (
+            f"{name}.config: effective Epochs is {flat.get('Neural_Networks_BackPropagation_Epochs')!r}, not 0"
+        )
 
 
 @pytest.mark.parametrize("name,net", [("slstm_bidirectional", 0), ("twin_lid_slstm", 0), ("twin_lid_slstm", 1)])
