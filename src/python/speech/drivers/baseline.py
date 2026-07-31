@@ -334,6 +334,51 @@ def _config_text(cfg: dict[str, str]) -> str:
     return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
 
 
+def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[str, str]:
+    """The Phase 9 (spec S7.2) architecture overlay for the SAD arm: the port-only S6 keys
+    `BLSTM_Cell_Type` / `BLSTM_Direction`, plus the TWO derived keys `forward` forces.
+
+    EMPTY at the defaults (`lstm` / `bidirectional`), so a default run's config text is
+    byte-identical to today's -- the whole point of the knob being additive. The `Mamba_*`
+    geometry keys are deliberately NOT written: their defaults live Rust-side
+    (`blstm.rs::MambaParams::default`) and Python reads the same defaults
+    (`init_weights.MambaGeometry`), so omitting them at default values keeps the config text
+    minimal and the two sides agreeing by construction.
+
+    DERIVED KEY 1 (the output MLP's width): `BlstmConfig::from_legacy` requires
+    `OutputNeuronNb[0] == hidden_multiplier * lstm_neuron_nb[-1]` -- `2*hidden`
+    bidirectional, `hidden` forward (there is no reverse half to concatenate). Writing only
+    `BLSTM_Direction forward` would therefore produce a config the engine REFUSES to build,
+    so the overlay resizes the output MLP's input layer to match.
+
+    DERIVED KEY 2 (`BLSTM_window 0`, Phase 9 Task 6): a causal net runs the PLAIN
+    whole-sequence regime. `lre_sad.toml` carries `frame_window 3.25`, which resolves
+    `window_size > 0` and dispatches the WINDOWED drivers -- and a window boundary RESETS the
+    recurrent state, so a windowed causal run is defined-but-pointless (spec S1.2) and the
+    streaming session refuses it outright (S5.3). Forcing window 0 here is what makes
+    `speech baseline sad --direction forward` train the regime the phase actually targets,
+    and it is also the regime the f32 fast twin implements (`fast::cells::FastCausalNet`) --
+    so the exact and fast paths stay comparable arm-for-arm. Bidirectional runs are
+    UNTOUCHED (they keep `frame_window`'s windowed overlap).
+
+    Everything else in the config (the DSP front-end, the cost law, the hidden widths) is
+    untouched."""
+    if cell_type not in ("lstm", "slstm", "mamba"):
+        raise ValueError(f"unknown cell type {cell_type!r} (expected lstm, slstm or mamba)")
+    if direction not in ("bidirectional", "forward"):
+        raise ValueError(f"unknown direction {direction!r} (expected bidirectional or forward)")
+    overlay: dict[str, str] = {}
+    if cell_type != "lstm":
+        overlay["BLSTM_Cell_Type"] = cell_type
+    if direction != "bidirectional":
+        overlay["BLSTM_Direction"] = direction
+        hidden = [int(x) for x in flat["BLSTM_LSTMNeuronNb"].split(",")][-1]
+        outn = [int(x) for x in flat["BLSTM_OutputNeuronNb"].split(",")]
+        overlay["BLSTM_OutputNeuronNb"] = ",".join(str(v) for v in [hidden, *outn[1:]])
+        overlay["BLSTM_window"] = "0"
+    return overlay
+
+
 def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_scheme: str, forget_bias_one: bool) -> None:
     """Write valid seed weight packs the engine loads at construction (`BLSTM_weightsFile`/
     `BLSTM_LID_weightsFile`). `train_modern` re-inits from scratch and overrides these, but
@@ -648,6 +693,8 @@ def run_baseline(
     minibatch: int = 0,
     score_init: bool = False,
     audio_max_duration: float | None = None,
+    cell_type: str = "lstm",
+    direction: str = "bidirectional",
     console: Console | None = None,
     _train_fn: Callable[..., object] | None = None,
 ) -> BaselineResult:
@@ -672,11 +719,23 @@ def run_baseline(
     speech STM; SAD derives wav/xml pairs with the corpus `.part.xml` refs), the seed packs
     (LID a `[sad, lid]` Twin pair; SAD a single `[sad]` net), and the held-out scoring (LID
     `.scr` -> `lid_error` + `cavg`; SAD VRCTS hyps -> pooled `dcf`); the split/params/train/
-    metadata skeleton is shared."""
+    metadata skeleton is shared.
+
+    `cell_type`/`direction` (Phase 9, spec S7.2): overlay the port-only S6 architecture keys
+    onto the arm config (`cell_overlay`) and, since seeding reads the architecture back out of
+    that config via `nnet_spec`, route the from-scratch init through the matching per-cell
+    builder automatically -- both the engine-construction seed pack here and `train_modern`'s
+    own re-init. Defaults are today's BLSTM arm, byte-identical."""
     if arm not in _ARM_CONFIGS:
         raise ValueError(f"unknown arm {arm!r}; known arms: {sorted(_ARM_CONFIGS)}")
     if arm not in _LID_ARMS and arm != "sad":
         raise NotImplementedError(f"arm {arm!r} is not wired (known: lid-features, sad, lid-phseq)")
+    # The knobs target the `BLSTM_` net. On a Twin arm that net is the FROZEN SAD gate (Mode 7
+    # never runs it, so it stays byte-exactly at its seed), which makes a cell/direction swap
+    # there a silent no-op on everything that actually trains -- bail loudly instead. The LID
+    # net's own `BLSTM_LID_Cell_Type`/`_Direction` wiring is Task 5's.
+    if arm in _LID_ARMS and (cell_type != "lstm" or direction != "bidirectional"):
+        raise ValueError(f"--cell-type/--direction are SAD-arm knobs; arm {arm!r} trains only its LID net (Task 5 wires BLSTM_LID_*)")
 
     console = console or Console()
     out_dir = Path(out_dir).resolve()
@@ -755,7 +814,11 @@ def run_baseline(
     import speech_rs  # local: the pyo3 module is only needed on the engine path
 
     flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
-    extra = {"Audio_max_duration": str(audio_max_duration)} if audio_max_duration is not None else None
+    # EMPTY at the default lstm/bidirectional knobs, so `extra` -- and therefore the whole
+    # config text -- is byte-identical to a pre-phase-9 run.
+    extra = dict(cell_overlay(flat, cell_type, direction))
+    if audio_max_duration is not None:
+        extra["Audio_max_duration"] = str(audio_max_duration)
     if arm == "sad":
         cfg = assemble_flat_config(flat, fileslisting=train_name, mapping=mapping_name, sad_seed="sad_seed.bin", lanes=lanes, extra=extra)
         _generate_sad_seed_pack(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
@@ -784,6 +847,8 @@ def run_baseline(
             "init_scheme": init_scheme,
             "val_metric": "nn_cost_seg",
             "audio_max_duration": audio_max_duration,
+            "cell_type": cell_type,
+            "direction": direction,
             "config_hash": _config_hash(cfg_text),
             "config_toml": str(toml_path.relative_to(repo_root)),
             "corpus_root": str(corpus_root),
@@ -885,6 +950,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=6)
     parser.add_argument("--steps-per-epoch", type=int, default=8)
     parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
+    parser.add_argument(
+        "--cell-type", choices=("lstm", "slstm", "mamba"), default="lstm", help="SAD arm: recurrent cell (spec S6; default = today's peephole BLSTM)"
+    )
+    parser.add_argument(
+        "--direction",
+        choices=("bidirectional", "forward"),
+        default="bidirectional",
+        help="SAD arm: forward drops the backward stack (and halves the output MLP's input width)",
+    )
     parser.add_argument("--lre-listing", type=Path, default=None, help="LID arm: localize this 2015 listing instead of deriving from the corpus tree")
     parser.add_argument(
         "--audio-max-duration", type=float, default=None, help="SAD arm: cap Audio_max_duration (s); the corpus wavs are 576-1800 s (median ~600 s)"
@@ -912,6 +986,8 @@ def main(argv: list[str] | None = None) -> int:
         init_scheme=args.init_scheme,
         lre_listing=args.lre_listing,
         audio_max_duration=args.audio_max_duration,
+        cell_type=args.cell_type,
+        direction=args.direction,
     )
     return 0
 

@@ -397,6 +397,14 @@ impl<L: Layer> Network<L> {
     /// `(rows x neuron_nb[0])` matrix (forward half on the LEFT), then normal forward.
     /// Empty `first` (0 rows) -> no-op. Requires `first.ncols() + second.ncols() ==
     /// neuron_nb[0]` and equal row counts.
+    ///
+    /// FORWARD-ONLY branch (port-only, phase-9 spec S1.2, sanctioned touch class
+    /// (b)): a zero-COLUMN `second` means the caller has no reverse half at all (a
+    /// `Direction::Forward` net), so the hcat is skipped and `first` drives the
+    /// network directly -- its width already IS `neuron_nb[0]`, as the surviving
+    /// assert states. Behavior-identical to hcat'ing an empty right half, minus the
+    /// copy. DEAD on every legacy config: a bidirectional net's reverse stack always
+    /// contributes at least one column.
     pub fn feed_forward_double(
         &mut self,
         first: &Array2<f64>,
@@ -412,6 +420,10 @@ impl<L: Layer> Network<L> {
             self.neuron_nb[0],
             "double: first|second cols must sum to neuron_nb[0]"
         );
+        if second.ncols() == 0 {
+            self.feed_forward(first, output);
+            return;
+        }
         let rows = first.nrows();
         let mut hcat = Array2::zeros((rows, self.neuron_nb[0]));
         let fc = first.ncols();
@@ -631,6 +643,12 @@ impl<L: Layer> Network<L> {
     /// `feedBackwardDouble` (`NeuralNetwork.hpp:353-362`): hcat `first | second` (forward
     /// half on the LEFT) into an `(rows x neuron_nb[0])` matrix, run `feed_backward`, and
     /// return the split-ready `deltas_out`. Empty `first` (0 rows) -> empty result.
+    ///
+    /// FORWARD-ONLY branch (port-only, phase-9 spec S1.2, sanctioned touch class
+    /// (b)): the `feed_forward_double` twin -- a zero-COLUMN `second` skips the hcat,
+    /// and the returned `deltas_out` is `hidden`- rather than `2*hidden`-wide, so the
+    /// caller routes ALL of it to the forward stack (no half-split). DEAD on every
+    /// legacy config.
     pub fn feed_backward_double(
         &mut self,
         first: &Array2<f64>,
@@ -647,6 +665,9 @@ impl<L: Layer> Network<L> {
             self.neuron_nb[0],
             "double: first|second cols must sum to neuron_nb[0]"
         );
+        if second.ncols() == 0 {
+            return self.feed_backward(first, output_seq, deltas);
+        }
         let rows = first.nrows();
         let mut hcat = Array2::zeros((rows, self.neuron_nb[0]));
         let fc = first.ncols();
@@ -746,4 +767,118 @@ pub fn repeat_rows(input: &Array2<f64>, n: usize) -> Array2<f64> {
         }
     }
     out
+}
+
+/// Spec S1.2 / touch class (b): the `Direction::Forward` zero-width-`second` path
+/// through `feed_forward_double` / `feed_backward_double`.
+///
+/// These assertions pin the CONTRACT (double-with-an-empty-right-half == plain), not
+/// the branch: the short-circuit is pure copy elision, so deleting it leaves every
+/// number here unchanged. What would fail is a branch that stopped agreeing with the
+/// general path -- e.g. a half-split applied to a zero-width `second`.
+#[cfg(test)]
+mod forward_only_double_tests {
+    use super::*;
+    use crate::nn::cells::CellLayer;
+
+    const IN: usize = 3;
+    const HIDDEN: usize = 2;
+    const OUT: usize = 2;
+    const T: usize = 4;
+
+    fn recurrent_net() -> Network<CellLayer> {
+        let mut net = Network::<CellLayer>::new(vec![IN, HIDDEN], vec![1], |_id, i, o| {
+            CellLayer::Lstm(LstmLayer::new(i, o, true, true, true))
+        });
+        let nb = net.nb_of_weights();
+        let w: Vec<f64> = (0..nb)
+            .map(|k| 0.19 - 0.006 * (k as f64) + 0.003 * ((k % 5) as f64))
+            .collect();
+        net.set_weights(&w);
+        net
+    }
+
+    /// The output MLP a `Direction::Forward` net owns: `hidden` in, `OUT` out (the
+    /// bidirectional twin would declare `2*hidden` in).
+    fn narrow_output_net() -> Network<NeuronLayer> {
+        let mut net = Network::<NeuronLayer>::new(vec![HIDDEN, OUT], vec![1], |_id, i, o| {
+            NeuronLayer::new(i, o)
+        });
+        let nb = net.nb_of_weights();
+        let w: Vec<f64> = (0..nb).map(|k| 0.4 - 0.05 * (k as f64)).collect();
+        net.set_weights(&w);
+        net
+    }
+
+    fn hidden_rows() -> Array2<f64> {
+        Array2::from_shape_fn((T, HIDDEN), |(r, c)| {
+            0.2 + 0.31 * (r as f64) - 0.17 * (c as f64)
+        })
+    }
+
+    /// Spec S1.2 / touch class (b): a zero-COLUMN `second` short-circuits the hcat.
+    /// The branch is behavior-PRESERVING -- it must agree bit-for-bit with the
+    /// general path fed a zero-width right half, and with a plain `feed_forward`.
+    #[test]
+    fn forward_only_double_matches_the_plain_forward_bit_for_bit() {
+        let rows = hidden_rows();
+        let empty = Array2::<f64>::zeros((T, 0));
+
+        let mut via_double = Array2::<f64>::zeros((T, OUT));
+        narrow_output_net().feed_forward_double(&rows, &empty, &mut via_double);
+
+        let mut via_plain = Array2::<f64>::zeros((T, OUT));
+        narrow_output_net().feed_forward(&rows, &mut via_plain);
+
+        assert_eq!(via_double, via_plain);
+        // Non-vacuity: the dense layer actually did something (softmax rows).
+        assert!(via_plain.iter().all(|v| v.is_finite()));
+        assert!((via_plain.row(0).sum() - 1.0).abs() < 1e-12);
+    }
+
+    /// The backward twin: `feed_backward_double` with a zero-width `second` returns
+    /// the FULL `hidden`-wide delta block (no half-split for the caller to make),
+    /// bit-identical to `feed_backward` on the same input.
+    #[test]
+    fn forward_only_backward_double_returns_full_width_deltas() {
+        let rows = hidden_rows();
+        let empty = Array2::<f64>::zeros((T, 0));
+        let deltas =
+            Array2::from_shape_fn((T, OUT), |(r, c)| 0.05 * (r as f64) - 0.09 * (c as f64));
+
+        let mut net_a = narrow_output_net();
+        let mut out_a = Array2::<f64>::zeros((T, OUT));
+        net_a.feed_forward_double(&rows, &empty, &mut out_a);
+        let via_double = net_a.feed_backward_double(&rows, &empty, &out_a, &deltas);
+
+        let mut net_b = narrow_output_net();
+        let mut out_b = Array2::<f64>::zeros((T, OUT));
+        net_b.feed_forward(&rows, &mut out_b);
+        let via_plain = net_b.feed_backward(&rows, &out_b, &deltas);
+
+        assert_eq!(via_double.dim(), (T, HIDDEN));
+        assert_eq!(via_double, via_plain);
+        assert!(
+            via_double.iter().any(|v| *v != 0.0),
+            "no deltas propagated -- the test is vacuous"
+        );
+    }
+
+    /// The forward-only path is genuinely wired to a recurrent stack: `hidden`-wide
+    /// rows out of a `Network<CellLayer>` feed the narrow output net directly.
+    #[test]
+    fn recurrent_hidden_rows_feed_the_narrow_output_net() {
+        let mut stack = recurrent_net();
+        let input =
+            Array2::from_shape_fn((T, IN), |(r, c)| 0.3 + 0.11 * (r as f64) - 0.2 * (c as f64));
+        let mut hidden = Array2::<f64>::zeros((T, HIDDEN));
+        stack.feed_forward(&input, &mut hidden);
+        assert_eq!(hidden.ncols(), HIDDEN);
+
+        let mut output = Array2::<f64>::zeros((T, OUT));
+        narrow_output_net().feed_forward_double(&hidden, &Array2::zeros((T, 0)), &mut output);
+        assert!(output.iter().all(|v| v.is_finite()));
+        // Non-vacuity: the dense head really produced a softmax row, not zeros.
+        assert!((output.row(0).sum() - 1.0).abs() < 1e-12);
+    }
 }

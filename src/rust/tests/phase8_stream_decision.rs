@@ -230,6 +230,26 @@ fn profiles() -> Vec<(&'static str, Vec<f32>)> {
                 (lo, 30),
             ]),
         ),
+        // PENDING-REOPEN (Phase 9 Task 9): burst A, a MERGING gap (1.6 s < the 1.8696 s
+        // pad_after+pad_before reach), then a LONG burst B that stays OPEN well past the
+        // point the consumed-frontier trigger would otherwise license emitting A. Under the
+        // pre-fix frontier (`max(last_raw_boundary, consumed_frontier - dt)`, blind to an
+        // open hysteresis segment) A emits alone mid-stream and is then MERGED into A+B by
+        // the final smoothing -- a real R2 retraction. Burst C after a long silence keeps the
+        // profile's mid-stream emissions non-vacuous. See
+        // `pending_open_segment_blocks_emission`.
+        (
+            "reopen",
+            runs(&[
+                (lo, 25),
+                (hi, 30),
+                (lo, 40),
+                (hi, 200),
+                (lo, GAP),
+                (hi, 30),
+                (lo, 40),
+            ]),
+        ),
         // A dense sub-padding cluster (merges into one speech) then long silences.
         (
             "dense",
@@ -319,6 +339,107 @@ fn prefix_consistency_holds() {
         total_midstream > 0,
         "non-vacuity: the profiles must produce mid-stream emissions (else prefix \
          consistency is trivially satisfied)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (2') the PENDING-OPEN hazard: an already-open raw segment clamps the frontier.
+// ---------------------------------------------------------------------------
+
+/// PHASE 9 TASK 9 -- the synthetic pin for the emission-frontier fix
+/// (`fast/stream.rs::resmooth_and_emit`, third frontier term `hyst.pending_begin()`).
+///
+/// THE HAZARD. The phase-8 frontier was `max(last_raw_boundary, consumed_frontier - dt)` and
+/// its safety argument concluded "future raw structure lands no earlier than the frontier".
+/// That is FALSE while the hysteresis is INSIDE an un-closed raw segment: that segment's
+/// begin lies BEHIND the consumed frontier, it is not yet in `raw_segments` (so `last_rb`
+/// does not see it), and when it eventually closes its `add_padding` `before` reach can merge
+/// it into the previous speech segment -- MOVING a boundary the trigger already emitted.
+///
+/// THE PROFILE. `reopen` (see [`profiles`]): burst A, a 1.6 s gap (inside the 1.8696 s
+/// pad_after + pad_before merge reach), then an 8 s burst B that stays open far past the
+/// point A would otherwise be licensed for emission. Pre-fix this profile RETRACTS (A emits
+/// alone, then the final smoothing merges A+B); post-fix the frontier clamps to B's pending
+/// begin and A is held until B closes. Verified by mutation: reverting the `pending_begin`
+/// clamp makes this test fail with the retraction message.
+///
+/// The leg checks BOTH directions -- the R2 property (no retraction, at four chunk sizes)
+/// AND non-vacuity (the merge is real, and the profile still produces mid-stream emissions,
+/// so the fix costs latency rather than emitting nothing at all).
+#[test]
+fn pending_open_segment_blocks_emission() {
+    let (seg_cfg, drv) = gate_cfgs();
+    let scalars = profiles()
+        .into_iter()
+        .find(|(name, _)| *name == "reopen")
+        .expect("the `reopen` profile must exist")
+        .1;
+    let audio_dur = DT * scalars.len() as f64 + OFF;
+
+    // NON-VACUITY (a): the hazard is real -- A and B merge into ONE speech segment, so an
+    // emission of A alone would necessarily be a retraction. Expect exactly TWO speech
+    // segments in the final partition (the merged A+B, and the far-separated C).
+    let final_seg = offline_final(&scalars, &seg_cfg, &drv, audio_dur);
+    let speech_spans: Vec<(f64, f64)> = final_seg
+        .segments()
+        .windows(2)
+        .filter(|w| w[0].ty == SegClass::Speech)
+        .map(|w| (w[0].begin, w[1].begin))
+        .collect();
+    let a_end_raw = DT * 55.0 + OFF; // burst A's last hi row (rows 25..54)
+    let b_begin_raw = DT * 95.0 + OFF; // burst B's first hi row
+    println!(
+        "MEASURE pending_open: speech_spans={speech_spans:?} a_end_raw={a_end_raw:.5} \
+         b_begin_raw={b_begin_raw:.5} holdback={:.5}",
+        seg_cfg.min_speech.iter().sum::<f64>()
+            + seg_cfg.min_silence.iter().sum::<f64>()
+            + seg_cfg.padding.iter().sum::<f64>()
+    );
+    assert_eq!(
+        speech_spans.len(),
+        2,
+        "the profile must smooth to exactly two speech segments (merged A+B, then C): \
+         {speech_spans:?}"
+    );
+    let (merged_begin, merged_end) = speech_spans[0];
+    assert!(
+        merged_begin < a_end_raw && merged_end > b_begin_raw,
+        "the first speech span [{merged_begin}, {merged_end}] must cover BOTH burst A (ends \
+         {a_end_raw}) and burst B (begins {b_begin_raw}) -- else the merge hazard is absent"
+    );
+
+    // (b) THE R2 PROPERTY on this hazard profile, at four push granularities.
+    let mut total_midstream = 0usize;
+    for &chunk in &[1usize, 3, 7, 40] {
+        let rows = as_rows(&scalars);
+        let mut dec = StreamDecision::new(drv.clone(), seg_cfg.clone(), DT, OFF);
+        let mut midstream: Vec<EmittedSegment> = Vec::new();
+        let mut i = 0;
+        while i < rows.rows {
+            let end = (i + chunk).min(rows.rows);
+            midstream.extend(dec.push_rows(&slice_rows(&rows, i, end)));
+            i = end;
+        }
+        total_midstream += midstream.len();
+        let (_tail, streamed_final) = dec.flush(audio_dur);
+        let allowed = final_triples(&streamed_final);
+        for e in &midstream {
+            assert!(
+                allowed.contains(&(e.begin_s.to_bits(), e.end_s.to_bits(), e.class)),
+                "pending-open RETRACTION (chunk={chunk}): mid-stream emission [{:.6}, {:.6}] \
+                 {:?} is absent from the final segmentation -- the emission frontier ignored \
+                 an OPEN raw segment (R2)",
+                e.begin_s,
+                e.end_s,
+                e.class
+            );
+        }
+    }
+    // NON-VACUITY (b): the clamp must not silence the stream entirely.
+    assert!(
+        total_midstream > 0,
+        "the fix must still deliver mid-stream emissions on this profile (burst C settles \
+         through the trailing 6 s silence)"
     );
 }
 

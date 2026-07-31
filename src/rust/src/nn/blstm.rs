@@ -48,6 +48,7 @@ use ndarray::Array2;
 use crate::cost::CostLaw;
 use crate::features::stats::InputStatistics;
 
+use super::cells::CellLayer;
 use super::layers::NeuronLayer;
 use super::network::Network;
 use super::train::Rprop;
@@ -120,6 +121,148 @@ impl PeepholeFlags {
     }
 }
 
+/// The recurrent cell a net's stacks are built from (port-only, NO legacy source;
+/// spec S1.1/S6). Read from `{prefix}_Cell_Type`; ABSENT means [`CellType::Lstm`],
+/// so every legacy/committed config keeps the legacy shape untouched.
+///
+/// `Slstm`/`Mamba` PARSE here but are not constructible yet: [`BlstmNetwork::
+/// from_config`](BlstmNetwork::from_config) typed-bails on them until Phase 9 Tasks
+/// 2/3 land the cells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellType {
+    /// The legacy peephole LSTM (`nn::layers::LstmLayer`).
+    Lstm,
+    /// The xLSTM paper's scalar-memory cell (spec S2; Phase 9 Task 2).
+    Slstm,
+    /// Mamba/S6 in recurrent form (spec S3; Phase 9 Task 3).
+    Mamba,
+}
+
+impl CellType {
+    fn parse(s: &str) -> Result<CellType> {
+        match s {
+            "lstm" => Ok(CellType::Lstm),
+            "slstm" => Ok(CellType::Slstm),
+            "mamba" => Ok(CellType::Mamba),
+            other => bail!("unknown cell type '{other}' (expected 'lstm', 'slstm' or 'mamba')"),
+        }
+    }
+
+    /// The config-text spelling. `pub` so the fast/streaming trees can NAME the cell
+    /// in their unsupported-cell bails (`fast::driver::build_aligned_spec`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CellType::Lstm => "lstm",
+            CellType::Slstm => "slstm",
+            CellType::Mamba => "mamba",
+        }
+    }
+}
+
+/// Structural direction of a net's recurrent stacks (port-only, NO legacy source;
+/// spec S1.2/S6). Read from `{prefix}_Direction`; ABSENT means
+/// [`Direction::Bidirectional`], the legacy shape.
+///
+/// `Bidirectional`: a forward stack + a reverse stack, their outputs hcat'd into an
+/// output MLP whose first layer is `2*hidden` wide. `Forward` (causal): only the
+/// forward stack is built (`backward_network = None`) and the output MLP consumes
+/// `hidden` columns. Every forward-only branch this enum selects is DEAD on every
+/// legacy/committed config -- none carries the key, and the default is
+/// `Bidirectional` (spec S1.4, sanctioned touch class (b)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Bidirectional,
+    Forward,
+}
+
+impl Direction {
+    /// The output MLP's first-layer width per recurrent hidden unit: 2 for the
+    /// hcat'd bidirectional shape, 1 for the causal forward-only shape.
+    fn hidden_multiplier(self) -> usize {
+        match self {
+            Direction::Bidirectional => 2,
+            Direction::Forward => 1,
+        }
+    }
+
+    /// The config-text spelling (the `CellType::as_str` twin, same reason).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Direction::Bidirectional => "bidirectional",
+            Direction::Forward => "forward",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Direction> {
+        match s {
+            "bidirectional" => Ok(Direction::Bidirectional),
+            "forward" => Ok(Direction::Forward),
+            other => bail!("unknown direction '{other}' (expected 'bidirectional' or 'forward')"),
+        }
+    }
+}
+
+/// Mamba geometry (port-only, NO legacy source; spec S3.3/S6). Read from the
+/// UNPREFIXED flat keys `Mamba_D_State` / `Mamba_D_Conv` / `Mamba_Expand` /
+/// `Mamba_Dt_Rank` -- deliberately NOT `{prefix}_`-scoped: the spec provides ONE
+/// mamba geometry per config, shared by whichever net(s) select `mamba` (a per-net
+/// override is an explicit non-goal this phase).
+///
+/// Every key is optional; the defaults are the spec's (`16 / 4 / 2 / 0`), and
+/// `dt_rank == 0` means "auto", resolved to `ceil(d_model / 16)` inside
+/// [`MambaLayer::new`](super::cells::MambaLayer::new) where `d_model` is known.
+/// Absent keys mean the defaults, so a config that never says `mamba` is untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MambaParams {
+    pub d_state: usize,
+    pub d_conv: usize,
+    pub expand: usize,
+    /// `0` = auto (`ceil(d_model / 16)`); any other value is used verbatim.
+    pub dt_rank: usize,
+}
+
+impl Default for MambaParams {
+    fn default() -> MambaParams {
+        MambaParams {
+            d_state: 16,
+            d_conv: 4,
+            expand: 2,
+            dt_rank: 0,
+        }
+    }
+}
+
+impl MambaParams {
+    /// Read the four keys. A present-but-unparseable value is a HARD error (unlike
+    /// the legacy `get_*_default` helpers' silent fallback): these keys have no
+    /// legacy source, so there is no compatibility reason to swallow a typo, and a
+    /// silently-defaulted geometry would change the weight-pack LENGTH without
+    /// telling anyone. `d_state`/`d_conv`/`expand` must be `>= 1`; `dt_rank` may be
+    /// `0` (auto).
+    fn from_legacy(map: &IndexMap<String, String>) -> Result<MambaParams> {
+        let d = MambaParams::default();
+        let read = |key: &str, default: usize, min: usize| -> Result<usize> {
+            let v = match map.get(key) {
+                Some(s) => s
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|e| anyhow::anyhow!("cannot read '{s}' as a size for '{key}': {e}"))?,
+                None => return Ok(default),
+            };
+            if v < min {
+                bail!("'{key}' must be >= {min} (got {v})");
+            }
+            Ok(v)
+        };
+        Ok(MambaParams {
+            d_state: read("Mamba_D_State", d.d_state, 1)?,
+            d_conv: read("Mamba_D_Conv", d.d_conv, 1)?,
+            expand: read("Mamba_Expand", d.expand, 1)?,
+            dt_rank: read("Mamba_Dt_Rank", d.dt_rank, 0)?,
+        })
+    }
+}
+
 /// Parsed BLSTM config (`BLSTMNeuralNetwork.cpp:26-122`): LSTM/output topology,
 /// per-direction peephole flags, and the scalar knobs read at construction.
 #[derive(Debug, Clone)]
@@ -145,12 +288,35 @@ pub struct BlstmConfig {
     /// step size, default `1e-2`. The real `1_worker_1.config` has NO such key, so the
     /// default path is the live one.
     pub rprop_init: f64,
+    /// `{prefix}_Cell_Type` (port-only, spec S6), default [`CellType::Lstm`].
+    pub cell_type: CellType,
+    /// `{prefix}_Direction` (port-only, spec S6), default
+    /// [`Direction::Bidirectional`].
+    pub direction: Direction,
+    /// The `Mamba_*` geometry (port-only, spec S3.3/S6), read UNPREFIXED and inert
+    /// unless [`Self::cell_type`] is [`CellType::Mamba`].
+    pub mamba: MambaParams,
 }
 
 impl BlstmConfig {
     /// Read + validate `{prefix}_*` keys (`BLSTMNeuralNetwork.cpp:27-108`).
     pub fn from_legacy(map: &IndexMap<String, String>, prefix: &str) -> Result<BlstmConfig> {
         let k = |suffix: &str| format!("{prefix}{suffix}");
+
+        // Port-only structural keys (spec S6). Absent means the legacy shape, so
+        // every committed config decodes exactly as before.
+        let cell_type = match map.get(&k("_Cell_Type")) {
+            Some(v) => CellType::parse(v)?,
+            None => CellType::Lstm,
+        };
+        let direction = match map.get(&k("_Direction")) {
+            Some(v) => Direction::parse(v)?,
+            None => Direction::Bidirectional,
+        };
+        // UNPREFIXED by design (spec S6: one mamba geometry per config). Read
+        // unconditionally so a malformed value is caught even on a non-mamba config;
+        // the parsed struct is inert unless the cell type asks for it.
+        let mamba = MambaParams::from_legacy(map)?;
 
         let lstm_neuron_nb = get_list(map, &k("_LSTMNeuronNb"))?;
         if lstm_neuron_nb.len() < 2 {
@@ -168,12 +334,20 @@ impl BlstmConfig {
         if output_neuron_nb.len() < 2 {
             bail!("The number layers in the output neural network must be > 1.");
         }
-        if lstm_neuron_nb[0] != 0
-            && output_neuron_nb[0] != 2 * lstm_neuron_nb[lstm_neuron_nb.len() - 1]
-        {
-            bail!(
-                "The first layer of the output network must contains twice the number of LSTM cells in last layer of the LSTM networks."
-            );
+        // `:43-46` widened by the direction multiplier (spec S1.2): 2 for the
+        // legacy hcat'd bidirectional shape (message kept verbatim), 1 for the
+        // causal forward-only shape, which has no reverse half to concatenate.
+        let want_output_in =
+            direction.hidden_multiplier() * lstm_neuron_nb[lstm_neuron_nb.len() - 1];
+        if lstm_neuron_nb[0] != 0 && output_neuron_nb[0] != want_output_in {
+            match direction {
+                Direction::Bidirectional => bail!(
+                    "The first layer of the output network must contains twice the number of LSTM cells in last layer of the LSTM networks."
+                ),
+                Direction::Forward => bail!(
+                    "The first layer of the output network must contain exactly {want_output_in} neurons (the number of cells in the last recurrent layer) when Direction is 'forward'."
+                ),
+            }
         }
         let output_sub_sampling = get_list(map, &k("_OutputSubSampling"))?;
         if output_sub_sampling.len() != output_neuron_nb.len() - 1 {
@@ -220,13 +394,21 @@ impl BlstmConfig {
             target_enforcement_step,
             cost_law,
             rprop_init,
+            cell_type,
+            direction,
+            mamba,
         })
     }
 }
 
 /// `BLSTMNeuralNetwork<LSTMLayer>` (`BLSTMNeuralNetwork.cpp`): forward + backward
-/// LSTM `Network`s (absent in MLP mode) feeding a `NeuronLayer` output `Network`,
-/// plus the input-normalization mean/std tail and bookkeeping fields.
+/// recurrent `Network`s (absent in MLP mode) feeding a `NeuronLayer` output
+/// `Network`, plus the input-normalization mean/std tail and bookkeeping fields.
+///
+/// Phase 9 Task 1 re-typed the two recurrent stacks `Network<LstmLayer> ->
+/// `Network<CellLayer>` (spec S1.1): the cell is now a closed enum this wrapper
+/// never inspects. `CellLayer::Lstm` wraps the same `LstmLayer` the legacy path
+/// always used, so the arithmetic is byte-untouched -- sanctioned touch class (a).
 ///
 /// `Clone` mirrors the legacy copy ctor (`:155-173`) plus the buffers/accumulators
 /// it omits (the ill-formed legacy ctor leaves `_OutputForward`/`_InputStatistics`/
@@ -236,8 +418,8 @@ impl BlstmConfig {
 #[derive(Clone)]
 pub struct BlstmNetwork {
     cfg: BlstmConfig,
-    forward_network: Option<Network<super::layers::LstmLayer>>,
-    backward_network: Option<Network<super::layers::LstmLayer>>,
+    forward_network: Option<Network<CellLayer>>,
+    backward_network: Option<Network<CellLayer>>,
     output_network: Network<NeuronLayer>,
 
     normalize_input_mean: Vec<f64>,
@@ -267,39 +449,72 @@ impl BlstmNetwork {
     /// structural half; weight loading from a `_weightsFile` key is the caller's
     /// job via `set_weights`, matching how this port is driven from real `.bin`
     /// fixtures rather than the legacy `.mat`).
+    ///
+    /// Phase 9 (spec S1.1/S1.2) added two port-only dispatches, both inert on every
+    /// legacy config: the CELL type (all three of [`CellType::Lstm`],
+    /// [`CellType::Slstm`] and [`CellType::Mamba`] build as of Task 3) and the
+    /// DIRECTION ([`Direction::Forward`] builds NO backward stack, and the output MLP
+    /// the config already declared is `hidden`- rather than `2*hidden`-wide,
+    /// validated in [`BlstmConfig::from_legacy`]). MLP mode has no recurrent stacks
+    /// at all, so both dispatches sit inside the non-MLP branch and a cell type is
+    /// inert there.
+    ///
+    /// The peephole flags are LSTM-only (neither the sLSTM nor the Mamba cell has
+    /// peepholes, spec S2.2/S3.2): a config carrying them alongside `slstm`/`mamba`
+    /// is not an error, they are simply unread by those cells. Likewise the
+    /// `Mamba_*` geometry ([`MambaParams`]) is parsed for every config and consumed
+    /// only by the mamba arm.
     pub fn from_config(cfg: BlstmConfig) -> Result<BlstmNetwork> {
         let (forward_network, backward_network) = if cfg.is_mlp {
             (None, None)
         } else {
-            let fwd_peep = cfg.forward_peep;
-            let bwd_peep = cfg.backward_peep;
+            let cell_type = cfg.cell_type;
+            let mamba = cfg.mamba;
+            // One builder per direction; the cell dispatch is inside so both stacks
+            // stay structurally identical. The `match cell_type` below is EXHAUSTIVE
+            // and that is what forces a new `CellType` variant to be handled here --
+            // adding one without an arm is a compile error, not a silent fall-through
+            // to the LSTM.
+            let make = |peep: PeepholeFlags| {
+                move |_layer_id: usize, input: usize, output: usize| match cell_type {
+                    CellType::Lstm => CellLayer::Lstm(super::layers::LstmLayer::new(
+                        input,
+                        output,
+                        peep.cells,
+                        peep.gates,
+                        peep.gates_recurrent,
+                    )),
+                    CellType::Slstm => {
+                        CellLayer::Slstm(super::cells::SlstmLayer::new(input, output))
+                    }
+                    // `output` IS `d_model` (spec S3.1); `d_inner = expand * d_model`
+                    // and the resolved `dt_rank` are the cell's own business.
+                    CellType::Mamba => CellLayer::Mamba(super::cells::MambaLayer::new(
+                        input,
+                        output,
+                        mamba.d_state,
+                        mamba.d_conv,
+                        mamba.expand,
+                        mamba.dt_rank,
+                    )),
+                }
+            };
             let forward = Network::new(
                 cfg.lstm_neuron_nb.clone(),
                 cfg.lstm_sub_sampling.clone(),
-                |_layer_id, input, output| {
-                    super::layers::LstmLayer::new(
-                        input,
-                        output,
-                        fwd_peep.cells,
-                        fwd_peep.gates,
-                        fwd_peep.gates_recurrent,
-                    )
-                },
+                make(cfg.forward_peep),
             );
-            let backward = Network::new(
-                cfg.lstm_neuron_nb.clone(),
-                cfg.lstm_sub_sampling.clone(),
-                |_layer_id, input, output| {
-                    super::layers::LstmLayer::new(
-                        input,
-                        output,
-                        bwd_peep.cells,
-                        bwd_peep.gates,
-                        bwd_peep.gates_recurrent,
-                    )
-                },
-            );
-            (Some(forward), Some(backward))
+            // Causal mode builds NO reverse stack (spec S1.2). Dead on every legacy
+            // config -- `Direction` defaults to `Bidirectional`.
+            let backward = match cfg.direction {
+                Direction::Forward => None,
+                Direction::Bidirectional => Some(Network::new(
+                    cfg.lstm_neuron_nb.clone(),
+                    cfg.lstm_sub_sampling.clone(),
+                    make(cfg.backward_peep),
+                )),
+            };
+            (Some(forward), backward)
         };
 
         let output_network = Network::new(
@@ -438,21 +653,27 @@ impl BlstmNetwork {
     }
 
     /// `getNbOfWeights` (`:227-238`): sum of sub-network weight counts plus
-    /// `2*inputSize`.
+    /// `2*inputSize`. A [`Direction::Forward`] net has no backward stack, so that
+    /// term drops out (spec S1.2) -- identical to the legacy sum whenever it exists.
     pub fn nb_of_weights(&self) -> usize {
         let input_size = self.input_size();
         let sub_nets = if self.cfg.is_mlp {
             self.output_network.nb_of_weights()
         } else {
             self.forward_network.as_ref().unwrap().nb_of_weights()
-                + self.backward_network.as_ref().unwrap().nb_of_weights()
+                + self
+                    .backward_network
+                    .as_ref()
+                    .map_or(0, |b| b.nb_of_weights())
                 + self.output_network.nb_of_weights()
         };
         sub_nets + 2 * input_size
     }
 
     /// `setWeights` (`:209-224`): Forward -> Backward -> Output -> mean -> std, in
-    /// that order, MLP mode skipping the Forward/Backward step. Legacy tolerance:
+    /// that order, MLP mode skipping the Forward/Backward step and
+    /// [`Direction::Forward`] skipping the Backward step alone (spec S1.2). Legacy
+    /// tolerance:
     /// `flat.len() < nb_of_weights()` is an error (`exit(1)` there, `Err` here);
     /// `flat.len() > nb_of_weights()` is accepted (warning-only there, silently
     /// accepted here) and only the head is consumed.
@@ -468,7 +689,11 @@ impl BlstmNetwork {
         let mut rest = flat;
         if !self.cfg.is_mlp {
             rest = self.forward_network.as_mut().unwrap().set_weights(rest);
-            rest = self.backward_network.as_mut().unwrap().set_weights(rest);
+            // Absent only in causal mode (spec S1.2); the block is simply skipped,
+            // so a forward-only pack is `forward | output | mean | std`.
+            if let Some(backward) = self.backward_network.as_mut() {
+                rest = backward.set_weights(rest);
+            }
         }
         rest = self.output_network.set_weights(rest);
 
@@ -484,10 +709,9 @@ impl BlstmNetwork {
         let mut out = Vec::with_capacity(self.nb_of_weights());
         if !self.cfg.is_mlp {
             self.forward_network.as_ref().unwrap().get_weights(&mut out);
-            self.backward_network
-                .as_ref()
-                .unwrap()
-                .get_weights(&mut out);
+            if let Some(backward) = self.backward_network.as_ref() {
+                backward.get_weights(&mut out);
+            }
         }
         self.output_network.get_weights(&mut out);
         out.extend_from_slice(&self.normalize_input_mean);
@@ -507,10 +731,9 @@ impl BlstmNetwork {
                 .as_mut()
                 .unwrap()
                 .reset_weights_derivatives();
-            self.backward_network
-                .as_mut()
-                .unwrap()
-                .reset_weights_derivatives();
+            if let Some(backward) = self.backward_network.as_mut() {
+                backward.reset_weights_derivatives();
+            }
             self.output_network.reset_weights_derivatives();
         }
         self.input_statistics = InputStatistics::new();
@@ -520,7 +743,8 @@ impl BlstmNetwork {
     /// object -- col0 the SUMMED derivative, col1 the `_NbOfSeqFedBackward` frame count
     /// replicated per element (spec S3). Empty when `_BackPropagationActivated` is off
     /// (`:273-274`). Layout: MLP mode -> `output | [Zero|Ones|Zero|Ones]` stats tail;
-    /// non-MLP -> `fwd | bwd | output | [Zero|Ones|Zero|Ones]`, with the fwd/bwd LSTM
+    /// non-MLP -> `fwd | bwd | output | [Zero|Ones|Zero|Ones]` (the `bwd` block is
+    /// absent under [`Direction::Forward`], spec S1.2), with the fwd/bwd LSTM
     /// col0 multiplied by `_OutputNetwork.getSubSamplingRatio()` when that ratio > 1
     /// (`:266-269`). The 4-block tail is `2*inputSize` rows each `[0.0, 1.0]` (mean rows
     /// then std rows; stats never move, count 1). The col0 ordering matches the P0a flat
@@ -540,10 +764,9 @@ impl BlstmNetwork {
                 .as_ref()
                 .unwrap()
                 .get_weights_derivatives(&mut rows);
-            self.backward_network
-                .as_ref()
-                .unwrap()
-                .get_weights_derivatives(&mut rows);
+            if let Some(backward) = self.backward_network.as_ref() {
+                backward.get_weights_derivatives(&mut rows);
+            }
             if out_ratio > 1 {
                 for r in rows[start_fwd..].iter_mut() {
                     r[0] *= out_ratio as f64;
@@ -583,10 +806,9 @@ impl BlstmNetwork {
                 .as_mut()
                 .unwrap()
                 .ponderate_weights_derivatives(factor);
-            self.backward_network
-                .as_mut()
-                .unwrap()
-                .ponderate_weights_derivatives(factor);
+            if let Some(backward) = self.backward_network.as_mut() {
+                backward.ponderate_weights_derivatives(factor);
+            }
             self.output_network.ponderate_weights_derivatives(factor);
         }
     }
@@ -807,13 +1029,15 @@ impl BlstmNetwork {
     /// gate crops `leftCols(input size)`; the output net's `feed_forward_double`
     /// (forward LEFT) writes `output`. Fills `output_forward`/`output_backward`.
     /// Panics in MLP mode (the legacy dispatches MLP through `feed_forward_mlp`).
+    ///
+    /// [`Direction::Forward`] (spec S1.2): no reverse stack exists, so
+    /// `output_backward` is a `(rows x 0)` matrix and `feed_forward_double` takes its
+    /// forward-only branch (no hcat; the output net's input width is `hidden`, not
+    /// `2*hidden`). Dead on every legacy config.
     pub fn feed_forward(&mut self, input: &Array2<f64>, output: &mut Array2<f64>) {
-        let (forward, backward) = match (
-            self.forward_network.as_mut(),
-            self.backward_network.as_mut(),
-        ) {
-            (Some(f), Some(b)) => (f, b),
-            _ => panic!("feed_forward is BLSTM-only; MLP mode uses feed_forward_mlp"),
+        let forward = match self.forward_network.as_mut() {
+            Some(f) => f,
+            None => panic!("feed_forward is BLSTM-only; MLP mode uses feed_forward_mlp"),
         };
         let ratios = forward.sub_samplings().to_vec();
         let mut output_length = input.nrows();
@@ -822,15 +1046,24 @@ impl BlstmNetwork {
         }
         let fwd_in = forward.input_size();
         let mut out_forward = Array2::zeros((output_length, forward.output_size()));
-        let mut out_backward = Array2::zeros((output_length, backward.output_size()));
+        let mut out_backward = Array2::zeros((
+            output_length,
+            self.backward_network
+                .as_ref()
+                .map_or(0, |b| b.output_size()),
+        ));
 
         if ratios[0] > 1 && fwd_in < input.ncols() {
             let cropped = input.slice(ndarray::s![.., ..fwd_in]).to_owned();
             forward.feed_forward(&cropped, &mut out_forward);
-            backward.feed_forward_reverse(&cropped, &mut out_backward);
+            if let Some(backward) = self.backward_network.as_mut() {
+                backward.feed_forward_reverse(&cropped, &mut out_backward);
+            }
         } else {
             forward.feed_forward(input, &mut out_forward);
-            backward.feed_forward_reverse(input, &mut out_backward);
+            if let Some(backward) = self.backward_network.as_mut() {
+                backward.feed_forward_reverse(input, &mut out_backward);
+            }
         }
 
         self.output_network
@@ -863,7 +1096,9 @@ impl BlstmNetwork {
     /// forward LSTM net `feed_backward` + the backward LSTM net `feed_backward_reverse`,
     /// with the SAME `LSTMRatios[0] > 1 && input_size < input.cols()` crop gate the
     /// forward uses (`:452-454`). MLP-mode nets never reach here (their backward is
-    /// `feed_backward_mlp`), so `forward_network`/`backward_network` are present.
+    /// `feed_backward_mlp`), so `forward_network` is always present;
+    /// `backward_network` is too EXCEPT under [`Direction::Forward`], which routes
+    /// the un-split deltas to the forward stack alone (spec S1.2).
     ///
     /// The commented `targetSeq.cols() > 1 -> deltas = output - target` branch (`:441`)
     /// is DEAD in the legacy: the live path always allocates `Zero(target.rows,
@@ -910,9 +1145,19 @@ impl BlstmNetwork {
 
         // :451-458 split left/right halves and drive the LSTM stacks. The crop gate
         // mirrors the forward's leftCols(inputSize) (:452-454).
-        let half = split.ncols() / 2;
-        let left = split.slice(ndarray::s![.., ..half]).to_owned();
-        let right = split.slice(ndarray::s![.., half..]).to_owned();
+        //
+        // [`Direction::Forward`] (spec S1.2): the output net consumed `hidden` (not
+        // `2*hidden`) columns, so `split` is ALL forward -- no halving, no reverse
+        // stack to feed. Dead on every legacy config.
+        let (left, right) = if self.backward_network.is_some() {
+            let half = split.ncols() / 2;
+            (
+                split.slice(ndarray::s![.., ..half]).to_owned(),
+                split.slice(ndarray::s![.., half..]).to_owned(),
+            )
+        } else {
+            (split, Array2::<f64>::zeros((0, 0)))
+        };
 
         let forward = self.forward_network.as_ref().unwrap();
         let fwd_in = forward.input_size();
@@ -925,19 +1170,17 @@ impl BlstmNetwork {
                 .as_mut()
                 .unwrap()
                 .feed_backward(&cropped, &output_forward, &left);
-            self.backward_network
-                .as_mut()
-                .unwrap()
-                .feed_backward_reverse(&cropped, &output_backward, &right);
+            if let Some(backward) = self.backward_network.as_mut() {
+                backward.feed_backward_reverse(&cropped, &output_backward, &right);
+            }
         } else {
             self.forward_network
                 .as_mut()
                 .unwrap()
                 .feed_backward(input, &output_forward, &left);
-            self.backward_network
-                .as_mut()
-                .unwrap()
-                .feed_backward_reverse(input, &output_backward, &right);
+            if let Some(backward) = self.backward_network.as_mut() {
+                backward.feed_backward_reverse(input, &output_backward, &right);
+            }
         }
         self.output_forward = output_forward;
         self.output_backward = output_backward;
@@ -1347,7 +1590,12 @@ impl BlstmNetwork {
             length_output_lstm /= r;
         }
         let fwd_out = self.forward_network.as_ref().unwrap().output_size();
-        let bwd_out = self.backward_network.as_ref().unwrap().output_size();
+        // `Direction::Forward` has no reverse stack, so the backward accumulator
+        // is zero-width and every write into it below is a no-op (spec S1.2).
+        let bwd_out = self
+            .backward_network
+            .as_ref()
+            .map_or(0, |b| b.output_size());
         let mut output_forward = Array2::<f64>::zeros((length_output_lstm, fwd_out));
         let mut output_backward = Array2::<f64>::zeros((length_output_lstm, bwd_out));
 
@@ -1608,7 +1856,16 @@ impl BlstmNetwork {
         // :596 lengthOutputLSTM = outputSeq.rows() * outputNetRatio.
         let length_output_lstm = output.nrows() * output_net_ratio;
         let fwd_out = self.forward_network.as_ref().unwrap().output_size();
-        let bwd_out = self.backward_network.as_ref().unwrap().output_size();
+        // `Direction::Forward` has no reverse stack, so the backward accumulator is
+        // ZERO-WIDTH. That makes every backward touch below inert ONLY because each
+        // one is `bwd_out`-bounded -- which the final quotient loop was NOT until
+        // Phase 9 Task 6 (it used the legacy's `fwd_out` bound for both halves and
+        // panicked on an empty matrix; see the comment there). Any new backward
+        // access added here must be `bwd_out`-bounded too, not assumed inert.
+        let bwd_out = self
+            .backward_network
+            .as_ref()
+            .map_or(0, |b| b.output_size());
         let mut output_forward = Array2::<f64>::zeros((length_output_lstm, fwd_out)); // :597
         let mut output_backward = Array2::<f64>::zeros((length_output_lstm, bwd_out)); // :598
         let mut output_count = vec![0.0_f64; output.nrows()]; // :599
@@ -1715,9 +1972,23 @@ impl BlstmNetwork {
             }
         }
         // :677-679 quotient loop bound = _OutputForward.cols() for BOTH fwd and bwd.
+        //
+        // PHASE 9 (spec S1.4 touch class (b), the `Direction` forward-only branch):
+        // the backward half is bounded by `bwd_out`, NOT by the legacy's `fwd_out`.
+        // BYTE-IDENTICAL on every bidirectional config -- both stacks are built from
+        // the same `cfg.lstm_neuron_nb`, so `bwd_out == fwd_out` there and this is the
+        // same loop with the same divisions (splitting the two columns loops changes
+        // no value: each element is divided independently). Under
+        // `Direction::Forward` `bwd_out` is 0 and the legacy bound INDEXED AN EMPTY
+        // MATRIX -- `output_backward[[r, 0]]` panicked (`ndarray: index out of
+        // bounds`), which is what a windowed causal config hit. The truncate driver's
+        // twin copy loop was already `bwd_out`-bounded (`:1680`); this makes the two
+        // agree.
         for r in 0..length_output_lstm {
             for c in 0..fwd_out {
                 output_forward[[r, c]] /= output_count_lstm[r];
+            }
+            for c in 0..bwd_out {
                 output_backward[[r, c]] /= output_count_lstm[r];
             }
         }
@@ -1902,5 +2173,478 @@ mod analyse_input_seq_tests {
         let empty = Array2::<f64>::zeros((0, 5));
         net.analyse_input_seq(&empty);
         assert_eq!(net.input_statistics, before);
+    }
+}
+
+#[cfg(test)]
+mod direction_tests {
+    use super::*;
+
+    const IN: usize = 3;
+    const HIDDEN: usize = 2;
+    const CLASSES: usize = 2;
+    const T: usize = 4;
+
+    /// A tiny recurrent net (in=3, hidden=2, 2 classes, no sub-sampling). The
+    /// output net's first layer is sized by the direction: `2*HIDDEN` for the
+    /// legacy hcat'd shape, `HIDDEN` for the causal one.
+    fn map_for(direction: &str, output_in: usize) -> IndexMap<String, String> {
+        let mut m: IndexMap<String, String> = IndexMap::new();
+        m.insert("X_LSTMNeuronNb".into(), format!("{IN},{HIDDEN}"));
+        m.insert("X_LSTMSubSampling".into(), "1".into());
+        m.insert("X_OutputNeuronNb".into(), format!("{output_in},{CLASSES}"));
+        m.insert("X_OutputSubSampling".into(), "1".into());
+        m.insert("X_InputNormalizationType".into(), "0".into());
+        m.insert("X_TwoSweeps".into(), "false".into());
+        m.insert("X_BackPropagationActivated".into(), "true".into());
+        if !direction.is_empty() {
+            m.insert("X_Direction".into(), direction.into());
+        }
+        m
+    }
+
+    fn net_for(direction: &str, output_in: usize) -> BlstmNetwork {
+        let cfg = BlstmConfig::from_legacy(&map_for(direction, output_in), "X").unwrap();
+        BlstmNetwork::from_config(cfg).unwrap()
+    }
+
+    fn ramp(n: usize) -> Vec<f64> {
+        (0..n)
+            .map(|k| 0.21 - 0.007 * (k as f64) + 0.004 * ((k % 5) as f64))
+            .collect()
+    }
+
+    fn input_seq() -> Array2<f64> {
+        Array2::from_shape_fn((T, IN), |(r, c)| {
+            0.3 + 0.11 * (r as f64) - 0.23 * (c as f64)
+        })
+    }
+
+    fn one_hot_targets() -> Array2<f64> {
+        Array2::from_shape_fn(
+            (T, CLASSES),
+            |(r, c)| if r % CLASSES == c { 1.0 } else { 0.0 },
+        )
+    }
+
+    /// Causal mode builds NO reverse stack, and the weight pack loses exactly that
+    /// stack's block: `forward | output | mean | std`.
+    #[test]
+    fn forward_direction_drops_the_backward_stack_from_the_pack() {
+        let fwd_only = net_for("forward", HIDDEN);
+        let bidir = net_for("bidirectional", 2 * HIDDEN);
+
+        // LstmLayer(3,2) = 72, NeuronLayer(2,2) = 6, NeuronLayer(4,2) = 10, tail = 2*3.
+        assert_eq!(fwd_only.nb_of_weights(), 72 + 6 + 2 * IN);
+        assert_eq!(bidir.nb_of_weights(), 2 * 72 + 10 + 2 * IN);
+        assert!(fwd_only.backward_network.is_none());
+        assert!(fwd_only.forward_network.is_some());
+        assert!(bidir.backward_network.is_some());
+
+        // The seam round-trips over the shortened pack (no backward block to skip).
+        let mut net = net_for("forward", HIDDEN);
+        let w = ramp(net.nb_of_weights());
+        net.set_weights(&w).unwrap();
+        assert_eq!(net.get_weights(), w);
+    }
+
+    /// An ABSENT `_Direction` key is the legacy bidirectional shape -- the default
+    /// that keeps every committed config untouched.
+    #[test]
+    fn absent_direction_key_defaults_to_bidirectional() {
+        let cfg = BlstmConfig::from_legacy(&map_for("", 2 * HIDDEN), "X").unwrap();
+        assert_eq!(cfg.direction, Direction::Bidirectional);
+        assert_eq!(cfg.cell_type, CellType::Lstm);
+        let net = BlstmNetwork::from_config(cfg).unwrap();
+        assert!(net.backward_network.is_some());
+    }
+
+    /// The forward-only shape end to end: the recurrent stack's output is HIDDEN
+    /// columns wide pre-MLP (not `2*HIDDEN`), the reverse half is zero-width, and
+    /// the output net still produces a normalized posterior per frame.
+    #[test]
+    fn forward_direction_feeds_hidden_wide_rows_into_the_output_net() {
+        let mut net = net_for("forward", HIDDEN);
+        net.set_weights(&ramp(net.nb_of_weights())).unwrap();
+
+        let mut input = input_seq();
+        let mut output = Array2::<f64>::zeros((T, CLASSES));
+        net.feed_forward(&input, &mut output);
+
+        assert_eq!(net.output_forward.dim(), (T, HIDDEN));
+        assert_eq!(net.output_backward.dim(), (T, 0));
+        for r in 0..T {
+            let s: f64 = (0..CLASSES).map(|c| output[[r, c]]).sum();
+            assert!((s - 1.0).abs() < 1e-12, "row {r} is not a softmax: {s}");
+        }
+        // Non-vacuity: the recurrence actually moves the posteriors across time.
+        assert!(
+            (0..T).any(|r| (output[[r, 0]] - output[[0, 0]]).abs() > 1e-12),
+            "every frame scored identically -- the forward stack is inert"
+        );
+
+        // The same net driven through the full FFB path (plain window) agrees.
+        let mut ffb_out = Array2::<f64>::zeros((T, CLASSES));
+        net.feed_forward_backward(&mut input, 0, 0, &mut ffb_out, &one_hot_targets());
+        assert_eq!(ffb_out, output);
+    }
+
+    /// THE WINDOWED-CAUSAL REGRESSION (Phase 9 Task 6). The OVERLAP windowed driver
+    /// used to PANIC on a `Direction::Forward` net: its final quotient loop bounded
+    /// BOTH accumulators by `_OutputForward.cols()` (the legacy quirk), and a causal
+    /// net's backward accumulator is ZERO-width, so `output_backward[[r, 0]]` indexed
+    /// an empty matrix (`ndarray: index out of bounds`).
+    ///
+    /// This is not a hypothetical config: the phase's own causal SAD arm is
+    /// `configs/training/lre_sad.toml` (+ `drivers/baseline.py::cell_overlay`), whose
+    /// `frame_window 3.25` resolves `window_size > 0` -> this driver on the EXACT
+    /// TRAINING path. Windowed-causal stays POINTLESS (window boundaries reset the
+    /// recurrent state, spec S1.2) -- it is now merely pointless instead of fatal.
+    ///
+    /// The bidirectional twin runs the same driver on the same input as the contrast,
+    /// proving the test exercises a real windowed dispatch rather than a degenerate
+    /// one that skips the loop.
+    #[test]
+    fn forward_direction_survives_the_overlap_windowed_driver() {
+        for (direction, output_in) in [("forward", HIDDEN), ("bidirectional", 2 * HIDDEN)] {
+            let mut net = net_for(direction, output_in);
+            net.set_weights(&ramp(net.nb_of_weights())).unwrap();
+            // setProcessingType(window > 0, !noOverlap) -> the OVERLAP driver.
+            net.set_processing_type(true, true);
+            assert!(net.truncates_sequence() && net.overlaps());
+
+            let mut input = input_seq();
+            let mut output = Array2::<f64>::zeros((T, CLASSES));
+            net.feed_forward_backward(&mut input, 1, 1, &mut output, &one_hot_targets());
+
+            assert_eq!(output.dim(), (T, CLASSES), "{direction}: output shape");
+            assert!(
+                output.iter().all(|v| v.is_finite()),
+                "{direction}: non-finite posterior out of the overlap driver"
+            );
+            assert_eq!(
+                net.output_forward.dim(),
+                (T, HIDDEN),
+                "{direction}: forward accumulator shape"
+            );
+            let want_bwd = if direction == "forward" { 0 } else { HIDDEN };
+            assert_eq!(
+                net.output_backward.dim(),
+                (T, want_bwd),
+                "{direction}: backward accumulator shape"
+            );
+        }
+    }
+
+    /// The backward routes ALL of `feed_backward_double`'s deltas to the forward
+    /// stack (there is no half-split and no reverse stack), and the harvested Nx2
+    /// gradient carries exactly the shortened pack's rows.
+    #[test]
+    fn forward_direction_backward_routes_deltas_to_the_forward_stack_only() {
+        let mut net = net_for("forward", HIDDEN);
+        net.set_weights(&ramp(net.nb_of_weights())).unwrap();
+
+        let mut input = input_seq();
+        let mut output = Array2::<f64>::zeros((T, CLASSES));
+        net.feed_forward_backward(&mut input, 0, 0, &mut output, &one_hot_targets());
+
+        let derivs = net.get_weights_derivatives();
+        assert_eq!(derivs.nrows(), net.nb_of_weights());
+        // The forward stack's block is the pack's HEAD (72 rows) -- it must have
+        // received deltas, which is the whole point of the no-split routing.
+        let fwd_block: f64 = (0..72).map(|k| derivs[[k, 0]].abs()).sum();
+        assert!(fwd_block > 0.0, "the forward stack received no gradient");
+        // Every deriv row carries a frame count (col1), so `update_weights`'
+        // element-wise quotient is well defined across the shortened pack.
+        assert!((0..derivs.nrows()).all(|k| derivs[[k, 1]] > 0.0));
+    }
+
+    /// The output-net width check follows the direction: `2*hidden` (legacy message
+    /// kept verbatim) vs `hidden`.
+    #[test]
+    fn output_net_width_check_follows_the_direction() {
+        // Bidirectional wants 2*HIDDEN; HIDDEN is rejected with the legacy wording.
+        let err = BlstmConfig::from_legacy(&map_for("bidirectional", HIDDEN), "X").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "The first layer of the output network must contains twice the number of LSTM \
+             cells in last layer of the LSTM networks.",
+            "the legacy wording must survive verbatim"
+        );
+
+        // Forward wants HIDDEN; 2*HIDDEN is rejected, naming the direction.
+        let err = BlstmConfig::from_legacy(&map_for("forward", 2 * HIDDEN), "X").unwrap_err();
+        assert!(err.to_string().contains("forward"), "{err}");
+    }
+
+    /// Phase 9 Task 3 FLIP (this replaced `unimplemented_cell_types_bail_at_
+    /// construction`): `mamba` no longer bails -- it builds a REAL recurrent stack,
+    /// with the pack length the S3.2 layout dictates and a live forward. Every
+    /// `CellType` variant is now constructible, so no not-yet-implemented bail
+    /// remains in this ctor; a FUTURE variant is forced to add its arm by the
+    /// exhaustive `match cell_type`, which is a compile error rather than a runtime
+    /// one.
+    #[test]
+    fn mamba_cell_type_builds_a_real_recurrent_stack() {
+        for direction in ["bidirectional", "forward"] {
+            let out_in = if direction == "forward" {
+                HIDDEN
+            } else {
+                2 * HIDDEN
+            };
+            let mut m = map_for(direction, out_in);
+            m.insert("X_Cell_Type".into(), "mamba".into());
+            // A small geometry: the defaults (16/4/2) would be silly at HIDDEN = 2.
+            m.insert("Mamba_D_State".into(), "2".into());
+            m.insert("Mamba_D_Conv".into(), "2".into());
+            m.insert("Mamba_Expand".into(), "1".into());
+            let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+            assert_eq!(cfg.cell_type, CellType::Mamba);
+            assert_eq!(cfg.mamba.d_state, 2);
+            let mut net = BlstmNetwork::from_config(cfg).expect("mamba must build");
+
+            // MambaLayer(IN=3, OUT=2, ds=2, dc=2, ex=1, dt_rank auto=1): adapter
+            // (2*3 + 2 = 8) + g 2 + W_in 2*2*2=8 + conv 2*2=4 + b_conv 2 +
+            // W_x (1+4)*2=10 + W_dt 2 + b_dt 2 + A_log 4 + D 2 + W_out 4 = 48.
+            // Contrast: the LSTM stack is 72, the sLSTM 48-by-coincidence-of-shape,
+            // so the FORWARD probe below is what proves the cell actually changed.
+            let stacks = if direction == "forward" { 1 } else { 2 };
+            let mlp = if direction == "forward" { 6 } else { 10 };
+            assert_eq!(net.nb_of_weights(), stacks * 48 + mlp + 2 * IN);
+
+            let w = ramp(net.nb_of_weights());
+            net.set_weights(&w).unwrap();
+            assert_eq!(net.get_weights(), w);
+
+            let mut output = Array2::<f64>::zeros((T, CLASSES));
+            net.feed_forward(&input_seq(), &mut output);
+            for r in 0..T {
+                let s: f64 = (0..CLASSES).map(|c| output[[r, c]]).sum();
+                assert!((s - 1.0).abs() < 1e-12, "{direction} row {r}: {s}");
+            }
+            assert!(
+                (0..T).any(|r| (output[[r, 0]] - output[[0, 0]]).abs() > 1e-12),
+                "{direction}: every frame scored identically -- the stack is inert"
+            );
+
+            // The driver really holds mamba stacks, not a same-length sLSTM: the same
+            // weights through an sLSTM config give a DIFFERENT posterior.
+            let mut ms = map_for(direction, out_in);
+            ms.insert("X_Cell_Type".into(), "slstm".into());
+            let mut other =
+                BlstmNetwork::from_config(BlstmConfig::from_legacy(&ms, "X").unwrap()).unwrap();
+            assert_eq!(other.nb_of_weights(), net.nb_of_weights());
+            other.set_weights(&w).unwrap();
+            let mut other_out = Array2::<f64>::zeros((T, CLASSES));
+            other.feed_forward(&input_seq(), &mut other_out);
+            assert_ne!(output, other_out, "{direction}: mamba scored like an sLSTM");
+        }
+    }
+
+    /// The gradient reaches the Mamba stack through the whole wrapper, and every
+    /// harvested row carries a frame count (the `update_weights` contract).
+    #[test]
+    fn mamba_stack_receives_gradient_through_the_wrapper() {
+        let mut m = map_for("bidirectional", 2 * HIDDEN);
+        m.insert("X_Cell_Type".into(), "mamba".into());
+        m.insert("Mamba_D_State".into(), "2".into());
+        m.insert("Mamba_D_Conv".into(), "2".into());
+        m.insert("Mamba_Expand".into(), "1".into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        let mut net = BlstmNetwork::from_config(cfg).unwrap();
+        net.set_weights(&ramp(net.nb_of_weights())).unwrap();
+
+        let mut input = input_seq();
+        let mut output = Array2::<f64>::zeros((T, CLASSES));
+        net.feed_forward_backward(&mut input, 0, 0, &mut output, &one_hot_targets());
+
+        let derivs = net.get_weights_derivatives();
+        assert_eq!(derivs.nrows(), net.nb_of_weights());
+        let fwd: f64 = (0..48).map(|k| derivs[[k, 0]].abs()).sum();
+        let bwd: f64 = (48..96).map(|k| derivs[[k, 0]].abs()).sum();
+        assert!(fwd > 0.0, "the forward Mamba stack received no gradient");
+        assert!(bwd > 0.0, "the backward Mamba stack received no gradient");
+        assert!((0..derivs.nrows()).all(|k| derivs[[k, 1]] > 0.0));
+    }
+
+    /// The `Mamba_*` keys (spec S3.3/S6): UNPREFIXED, defaulted when absent, and a
+    /// malformed or out-of-range value is a HARD error rather than a silent default
+    /// (which would change the weight-pack length behind the caller's back).
+    #[test]
+    fn mamba_geometry_keys_default_and_validate() {
+        let base = map_for("bidirectional", 2 * HIDDEN);
+        assert_eq!(
+            BlstmConfig::from_legacy(&base, "X").unwrap().mamba,
+            MambaParams::default()
+        );
+        assert_eq!(
+            MambaParams::default(),
+            MambaParams {
+                d_state: 16,
+                d_conv: 4,
+                expand: 2,
+                dt_rank: 0,
+            }
+        );
+
+        let mut m = base.clone();
+        m.insert("Mamba_D_State".into(), "8".into());
+        m.insert("Mamba_D_Conv".into(), "3".into());
+        m.insert("Mamba_Expand".into(), "1".into());
+        m.insert("Mamba_Dt_Rank".into(), "5".into());
+        let got = BlstmConfig::from_legacy(&m, "X").unwrap().mamba;
+        assert_eq!(
+            got,
+            MambaParams {
+                d_state: 8,
+                d_conv: 3,
+                expand: 1,
+                dt_rank: 5,
+            }
+        );
+        // The keys are NOT `{prefix}`-scoped -- a prefixed spelling is simply unread.
+        let mut prefixed = base.clone();
+        prefixed.insert("X_Mamba_D_State".into(), "8".into());
+        assert_eq!(
+            BlstmConfig::from_legacy(&prefixed, "X")
+                .unwrap()
+                .mamba
+                .d_state,
+            16
+        );
+
+        for (key, bad, needle) in [
+            ("Mamba_D_State", "0", "must be >= 1"),
+            ("Mamba_D_Conv", "0", "must be >= 1"),
+            ("Mamba_Expand", "0", "must be >= 1"),
+            ("Mamba_D_State", "-4", "cannot read"),
+            ("Mamba_Dt_Rank", "two", "cannot read"),
+        ] {
+            let mut bad_map = base.clone();
+            bad_map.insert(key.into(), bad.into());
+            let err = BlstmConfig::from_legacy(&bad_map, "X").unwrap_err();
+            assert!(
+                err.to_string().contains(needle),
+                "{key}={bad}: {err} (wanted {needle:?})"
+            );
+        }
+        // dt_rank 0 IS legal -- it means "auto".
+        let mut auto = base.clone();
+        auto.insert("Mamba_Dt_Rank".into(), "0".into());
+        assert_eq!(
+            BlstmConfig::from_legacy(&auto, "X").unwrap().mamba.dt_rank,
+            0
+        );
+    }
+
+    /// Phase 9 Task 2: `slstm` no longer bails -- it builds a REAL recurrent stack.
+    /// The pack length is the sLSTM formula (`4*out*(out+in+1)` per layer, NOT the
+    /// LSTM's peephole-carrying count), the seam round-trips, and a forward produces
+    /// a genuine normalized posterior that moves across time.
+    #[test]
+    fn slstm_cell_type_builds_a_real_recurrent_stack() {
+        for direction in ["bidirectional", "forward"] {
+            let out_in = if direction == "forward" {
+                HIDDEN
+            } else {
+                2 * HIDDEN
+            };
+            let mut m = map_for(direction, out_in);
+            m.insert("X_Cell_Type".into(), "slstm".into());
+            let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+            assert_eq!(cfg.cell_type, CellType::Slstm);
+            let mut net = BlstmNetwork::from_config(cfg).expect("slstm must build");
+
+            // SlstmLayer(3,2) = 4*2*(2+3+1) = 48 per stack; NeuronLayer(2,2) = 6 /
+            // (4,2) = 10; tail = 2*IN. Contrast: the LSTM stack is 72.
+            let stacks = if direction == "forward" { 1 } else { 2 };
+            let mlp = if direction == "forward" { 6 } else { 10 };
+            assert_eq!(net.nb_of_weights(), stacks * 48 + mlp + 2 * IN);
+
+            let w = ramp(net.nb_of_weights());
+            net.set_weights(&w).unwrap();
+            assert_eq!(net.get_weights(), w);
+
+            let mut output = Array2::<f64>::zeros((T, CLASSES));
+            net.feed_forward(&input_seq(), &mut output);
+            for r in 0..T {
+                let s: f64 = (0..CLASSES).map(|c| output[[r, c]]).sum();
+                assert!((s - 1.0).abs() < 1e-12, "{direction} row {r}: {s}");
+            }
+            assert!(
+                (0..T).any(|r| (output[[r, 0]] - output[[0, 0]]).abs() > 1e-12),
+                "{direction}: every frame scored identically -- the stack is inert"
+            );
+        }
+    }
+
+    /// The gradient reaches the sLSTM stack through the whole wrapper (output MLP ->
+    /// hcat split -> cell BPTT), and every harvested row carries a frame count -- the
+    /// contract `update_weights`' element-wise quotient needs.
+    #[test]
+    fn slstm_stack_receives_gradient_through_the_wrapper() {
+        let mut m = map_for("bidirectional", 2 * HIDDEN);
+        m.insert("X_Cell_Type".into(), "slstm".into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        let mut net = BlstmNetwork::from_config(cfg).unwrap();
+        net.set_weights(&ramp(net.nb_of_weights())).unwrap();
+
+        let mut input = input_seq();
+        let mut output = Array2::<f64>::zeros((T, CLASSES));
+        net.feed_forward_backward(&mut input, 0, 0, &mut output, &one_hot_targets());
+
+        let derivs = net.get_weights_derivatives();
+        assert_eq!(derivs.nrows(), net.nb_of_weights());
+        // The two sLSTM stacks are the pack's first 2*48 rows.
+        let fwd: f64 = (0..48).map(|k| derivs[[k, 0]].abs()).sum();
+        let bwd: f64 = (48..96).map(|k| derivs[[k, 0]].abs()).sum();
+        assert!(fwd > 0.0, "the forward sLSTM stack received no gradient");
+        assert!(bwd > 0.0, "the backward sLSTM stack received no gradient");
+        assert!((0..derivs.nrows()).all(|k| derivs[[k, 1]] > 0.0));
+    }
+
+    /// An explicit `lstm` is the default path, and an unknown value is a hard error
+    /// for both port-only keys (no silent fallback to the legacy shape).
+    #[test]
+    fn explicit_lstm_is_the_default_and_unknown_values_are_rejected() {
+        let mut m = map_for("bidirectional", 2 * HIDDEN);
+        m.insert("X_Cell_Type".into(), "lstm".into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        assert_eq!(cfg.cell_type, CellType::Lstm);
+        assert_eq!(
+            BlstmNetwork::from_config(cfg).unwrap().nb_of_weights(),
+            net_for("", 2 * HIDDEN).nb_of_weights()
+        );
+
+        let mut bad_cell = map_for("", 2 * HIDDEN);
+        bad_cell.insert("X_Cell_Type".into(), "gru".into());
+        assert!(
+            BlstmConfig::from_legacy(&bad_cell, "X")
+                .unwrap_err()
+                .to_string()
+                .contains("unknown cell type 'gru'")
+        );
+
+        let bad_dir = map_for("backward", 2 * HIDDEN);
+        assert!(
+            BlstmConfig::from_legacy(&bad_dir, "X")
+                .unwrap_err()
+                .to_string()
+                .contains("unknown direction 'backward'")
+        );
+    }
+
+    /// MLP mode has no recurrent stacks at all, so a cell type is INERT there -- the
+    /// whole cell dispatch sits inside the non-MLP branch by design, and no
+    /// `Mamba_*` geometry is consulted.
+    #[test]
+    fn cell_type_is_inert_in_mlp_mode() {
+        let mut m = map_for("", 2 * HIDDEN);
+        m.insert("X_LSTMNeuronNb".into(), format!("0,{HIDDEN}"));
+        m.insert("X_Cell_Type".into(), "mamba".into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        assert!(cfg.is_mlp);
+        let net = BlstmNetwork::from_config(cfg).unwrap();
+        assert!(net.forward_network.is_none() && net.backward_network.is_none());
     }
 }

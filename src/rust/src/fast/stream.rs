@@ -1,4 +1,37 @@
-//! `fast::stream` -- the SAD streaming front-end (Phase 8 Task 2).
+//! `fast::stream` -- the SAD streaming path (Phase 8 Tasks 2-5, Phase 9 Task 7).
+//!
+//! PHASE 9 TASK 7 (spec S5.1-S5.6): the module now carries TWO NN stages behind one
+//! [`StreamingSession`]. [`StreamOverlap`] (phase 8) streams the windowed bidirectional
+//! peephole-LSTM twin; [`StreamCausal`] (this task) streams a CAUSAL stack
+//! (`slstm`/`mamba` + `Direction forward`) ROW BY ROW, with no window and no lookahead.
+//! [`StreamFrontEnd`], [`StreamDecision`] and the frozen-gain plumbing are SHARED and
+//! UNCHANGED -- the causal arm swaps exactly one layer of the four-layer composition:
+//!
+//! ```text
+//!   samples -> StreamFrontEnd -> type-1 norm (or nothing) -> | StreamOverlap |  -> StreamDecision
+//!              (shared, T2)      (shared, widened to type 0) | StreamCausal  |     (shared, T4)
+//! ```
+//!
+//! `StreamingSession::new` picks the arm off the config's `Cell_Type` x `Direction` pair
+//! through `fast::driver`'s own `classify_fast_shape` choke point (spec S5.2), so
+//! `push`/`finish`, the `speech stream` CLI and the PyO3 `StreamingSession` gain the causal
+//! mode with ZERO new surface.
+//!
+//! THE SUB-SAMPLING DEVIATION -- SUPPORTED, NOT BAILED. The PLAN's Task-7 brief listed
+//! `sub_sampling 1` among the S5.3 causal-streaming requirements; the spec's own S5.3 is
+//! SILENT on sub-sampling (the plan text overshot it -- the Task-6 adjudication, recorded
+//! in the ledger). The requirement is deliberately NOT
+//! enforced, mirroring Task 6's adjudicated deviation on the offline side: the phase's own
+//! causal SAD arm (`configs/training/lre_sad.toml` under the `Direction forward` overlay)
+//! runs `lstm_sub_sampling = "4,1"`, so a sub-sampling bail would make the arm's own
+//! checkpoint unstreamable and take the Task-9 corpus leg with it. [`StreamCausal`]
+//! instead reproduces `Network::drive`'s decimation by BUFFERING (see its docs), which is
+//! the offline semantics rather than new logic, and the bit-equal gate
+//! (`tests/phase9_stream_causal.rs`) enforces that -- including the trailing `T mod R`
+//! row drop. The three remaining S5.3 requirements (window 0, MONO, `Audio_fixed_gain`)
+//! are enforced, and the normalization set is `{0, 1}` rather than phase 8's `{1}`: type 0
+//! is the exact path's no-op arm, causality-trivial because there is no whole-file
+//! statistic to freeze, and it is what the committed phase-9 causal fixtures carry.
 //!
 //! [`StreamFrontEnd`] turns a chunked f32 sample stream into the SAME assembled BLSTM
 //! feature rows the offline fast path ([`super::pipeline::FastPipeline::build_input_sequence`])
@@ -65,8 +98,11 @@ use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
 
-use super::driver::build_aligned_spec;
-use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, window_begin, window_end};
+use super::cells::{FastCausalNet, FastCellState};
+use super::driver::{FastNetShape, build_spec_aligned_to, classify_fast_shape};
+use super::nn::{
+    DenseRowChain, FastBlstm, FastMatrix, external_normalize_f32, window_begin, window_end,
+};
 use super::pipeline::FastPipeline;
 
 /// The chunked-input SAD feature front-end. See the module docs for the bit-equal
@@ -596,6 +632,213 @@ impl StreamOverlap {
 }
 
 // ===========================================================================
+// StreamCausal (Phase 9 Task 7): the per-row causal NN stage.
+// ===========================================================================
+
+/// The streaming CAUSAL engine (Phase 9 Task 7, spec S5.1): the online twin of
+/// [`FastCausalNet::feed_forward`], and the layer that REPLACES [`StreamOverlap`] in the
+/// four-layer composition when the config selects a causal net. It consumes the
+/// (already-normalized) feature-row stream [`StreamFrontEnd`] emits and produces posterior
+/// rows with NO lookahead at all: the `nn_window` term that dominates the phase-8 latency
+/// budget simply does not exist here, because a causal cell needs no future frames.
+///
+/// BIT-EQUAL CONTRACT (the task gate). The concatenation of every
+/// [`push_rows`](Self::push_rows) return equals the offline `FastCausalNet::feed_forward`
+/// on the WHOLE sequence, BIT-IDENTICAL, at any row-push granularity. THREE facts carry
+/// it, and each is a shared kernel rather than a re-derivation:
+///
+///  1. THE CELL STEP. `fast::cells`' `step(x, &mut state, out)` IS the offline kernel
+///     (`run_sequence` is literally a loop over it), and a carried state reproduces an
+///     unsplit run bit-for-bit -- pinned by `cells.rs`'s `*_split_state_reproduces_the_
+///     unsplit_run` legs, which exist precisely as this task's precondition. Streaming
+///     keeps ONE state per cell layer alive for the whole stream, so the state sequence
+///     is the offline one.
+///  2. THE SUB-SAMPLE BUFFERING. `Network::drive`'s decimation (`sub_sample_into`:
+///     `R x C -> 1 x R*C`, row `jj*R+kk` into output columns `[kk*C, (kk+1)*C)`,
+///     trailing `T mod R` rows DROPPED) is reproduced by accumulating `R` arriving rows
+///     into one flat buffer IN ARRIVAL ORDER -- which is exactly that column layout --
+///     and never completing a trailing partial group. Offline processes the sequence
+///     layer-by-layer and streaming interleaves the layers, but each layer still sees
+///     the identical input rows in the identical order, and a cell is a pure sequential
+///     recurrence, so the interleaving is value-neutral.
+///  3. THE DENSE MLP. The output stack runs [`DenseRowChain`] -- the SAME per-row chain
+///     `FastCausalNet::feed_forward` was moved onto in this task. See that type's docs
+///     for the measured reason (faer's batched projection is NOT row-count-independent
+///     at `output_size > 1`, so the offline batched form was structurally unstreamable
+///     for the real `24,12,1` causal SAD arm).
+///
+/// THE CROP GATE. `feed_forward` narrows its net input to `LSTMNeuronNb[0]` columns iff
+/// `lstm_subsampling[0] > 1 && LSTMNeuronNb[0] < input.cols`. That predicate depends only
+/// on the feature WIDTH, which is a stream-wide constant, so it is resolved once on the
+/// first pushed batch and applied per row thereafter.
+///
+/// EOS. There is nothing to flush: a partially-filled sub-sample group is DROPPED, which
+/// is the offline `T mod R` truncation. [`flush`](Self::flush) exists to say so
+/// explicitly and returns an empty matrix.
+///
+/// ROW-COUNT IDENTITY (why no zero-padded tail is needed). The offline fast driver copies
+/// the net's posteriors into a `real_vec_size`-row buffer that it zero-fills first, so a
+/// SHORT net output would leave zero rows in the driver's result vector that streaming
+/// never produces. Those two counts coincide STRUCTURALLY, not by luck:
+/// `get_blstm_param`'s `vec_size` is `ceil(frame_count / spectrum_shift_in_frames)`, which
+/// is exactly [`FastPipeline::frame_count`] -- the feature-row count the front-end emits --
+/// and its `real_vec_size` then divides by each `lstm`/`output` sub-sampling ratio in the
+/// same order and with the same integer truncation this chain does. The gate's
+/// posterior-history length equality is the standing proof.
+pub struct StreamCausal {
+    net: FastCausalNet,
+    /// One live carried state per cell layer (never reset mid-stream -- the whole point).
+    states: Vec<FastCellState>,
+    crop: usize,         // LSTMNeuronNb[0], the crop-gate threshold
+    in_cols: usize,      // the CROPPED net-input width, resolved on the first pushed batch
+    in_cols_seen: usize, // the RAW arriving width (0 = unresolved); the stability check
+
+    // Per-cell-layer sub-sampling buffers (the `sub_sample_into` row concatenation).
+    pend: Vec<Vec<f32>>,
+    fill: Vec<usize>,
+    outs: Vec<Vec<f32>>,
+
+    dense: DenseRowChain,
+    output_size: usize,
+    emitted: usize,
+}
+
+impl StreamCausal {
+    /// Take ownership of the frozen causal net (loaded once, like the phase-8 session's
+    /// [`FastBlstm`]) and seed one seq-start state per cell layer.
+    pub fn new(net: FastCausalNet) -> StreamCausal {
+        let states: Vec<FastCellState> = net.cells().iter().map(|c| c.state()).collect();
+        let n_cells = net.cells().len();
+        let dense = DenseRowChain::new(net.output_layers().len());
+        let crop = net.input_width();
+        let output_size = net.output_size();
+        StreamCausal {
+            net,
+            states,
+            crop,
+            in_cols: 0,
+            in_cols_seen: 0,
+            pend: vec![Vec::new(); n_cells],
+            fill: vec![0; n_cells],
+            outs: vec![Vec::new(); n_cells],
+            dense,
+            output_size,
+            emitted: 0,
+        }
+    }
+
+    /// The posterior width (`output_size`), mirroring [`FastBlstm::output_size`].
+    pub fn output_size(&self) -> usize {
+        self.output_size
+    }
+
+    /// Posterior rows emitted so far (the streaming twin of the offline output row count).
+    pub fn emitted(&self) -> usize {
+        self.emitted
+    }
+
+    /// Buffer + forward a chunk of ALREADY-NORMALIZED feature rows, returning the
+    /// posterior rows that completed this call (`k x output_size`, `k == 0` while the
+    /// sub-sampling stages are still filling).
+    pub fn push_rows(&mut self, rows: &FastMatrix) -> FastMatrix {
+        if rows.rows == 0 {
+            return FastMatrix::zeros(0, self.output_size);
+        }
+        if self.in_cols_seen == 0 {
+            // The `feed_forward` crop gate, resolved once (the feature width is a
+            // stream-wide constant). `in_cols_seen` is the RAW arriving width, kept
+            // separately from the possibly-narrower cropped `in_cols` so the stability
+            // check below can compare like with like (the phase-8 sibling's `input_cols`).
+            let subs = self.net.lstm_subsampling();
+            self.in_cols_seen = rows.cols;
+            self.in_cols = if !subs.is_empty() && subs[0] > 1 && self.crop < rows.cols {
+                self.crop
+            } else {
+                rows.cols
+            };
+        }
+        debug_assert_eq!(
+            rows.cols, self.in_cols_seen,
+            "StreamCausal::push_rows col count must be stable across pushes"
+        );
+
+        let mut data: Vec<f32> = Vec::new();
+        let mut produced = 0usize;
+        for r in 0..rows.rows {
+            let src_lo = r * rows.cols;
+            if self.step_stack(&rows.data[src_lo..src_lo + self.in_cols]) && self.dense_step() {
+                data.extend_from_slice(self.dense.output(self.net.output_layers()));
+                produced += 1;
+            }
+        }
+        self.emitted += produced;
+        FastMatrix {
+            data,
+            rows: produced,
+            cols: self.output_size,
+        }
+    }
+
+    /// EOS: nothing to flush (a partial sub-sample group is DROPPED, the offline
+    /// `T mod R` truncation). Present for symmetry with [`StreamOverlap::flush`] and to
+    /// make the absence of a tail an explicit, documented fact rather than an omission.
+    pub fn flush(&mut self) -> FastMatrix {
+        FastMatrix::zeros(0, self.output_size)
+    }
+
+    /// Drive ONE cropped feature row through the cell stack. Returns `true` when the
+    /// stack produced a hidden row (readable at `self.outs[last]`), `false` while a
+    /// sub-sampling stage is still buffering.
+    fn step_stack(&mut self, row: &[f32]) -> bool {
+        let cells = self.net.cells();
+        let subs = self.net.lstm_subsampling();
+        let n = cells.len();
+        for jj in 0..n {
+            let ratio = subs[jj].max(1);
+            if ratio == 1 {
+                self.pend[jj].clear();
+            }
+            if jj == 0 {
+                self.pend[0].extend_from_slice(row);
+            } else {
+                let w = cells[jj - 1].output_size();
+                self.pend[jj].extend_from_slice(&self.outs[jj - 1][..w]);
+            }
+            if ratio > 1 {
+                self.fill[jj] += 1;
+                if self.fill[jj] < ratio {
+                    return false;
+                }
+                self.fill[jj] = 0;
+            }
+            let o = cells[jj].output_size();
+            if self.outs[jj].len() < o {
+                self.outs[jj].resize(o, 0.0);
+            }
+            cells[jj].step(
+                &self.pend[jj],
+                &mut self.states[jj],
+                &mut self.outs[jj][..o],
+            );
+            self.pend[jj].clear();
+        }
+        true
+    }
+
+    /// Feed the stack's hidden row into the dense output MLP chain.
+    fn dense_step(&mut self) -> bool {
+        let cells = self.net.cells();
+        let last = cells.len() - 1;
+        let w = cells[last].output_size();
+        self.dense.push_row(
+            self.net.output_layers(),
+            self.net.output_subsampling(),
+            &self.outs[last][..w],
+        )
+    }
+}
+
+// ===========================================================================
 // StreamDecision (Phase 8 Task 4): the incremental decision layer.
 // ===========================================================================
 
@@ -775,6 +1018,26 @@ impl HystState {
         out
     }
 
+    /// The audio-time BEGIN of a raw segment that is currently OPEN or TENTATIVELY open --
+    /// i.e. a rising crossing has been recorded (`begin >= 0`) and not yet either closed
+    /// into `raw_segments` or retracted by a failed area test. `None` when the hysteresis
+    /// carries no candidate begin at all.
+    ///
+    /// THIS IS THE THIRD SOURCE OF FUTURE RAW STRUCTURE (Phase 9 Task 9 fix, found by the
+    /// corpus streaming tier `tests/pyo3/test_phase9_parity.py`). A pending begin lies
+    /// BEHIND the consumed frontier -- the hysteresis passed it and is still inside the
+    /// segment -- so [`StreamDecision::resmooth_and_emit`]'s emission frontier must clamp to
+    /// it; `max(last_raw_boundary, consumed_frontier - dt)` alone does NOT bound where the
+    /// next raw segment begins. Both audio-time offsets match the closed-segment tuple
+    /// (`begin + off`, `advance`'s label site).
+    fn pending_begin(&self) -> Option<f64> {
+        if self.begin >= 0.0 {
+            Some(self.begin + self.off)
+        } else {
+            None
+        }
+    }
+
     /// The tail force-emit (`:409-412`): if a segment is still open at EOS, close it at
     /// `dt * results.len()` (== `dt * idx`, since every convolved value has been fed).
     fn flush_tail(&mut self) -> Option<(f64, f64)> {
@@ -932,8 +1195,10 @@ impl ConvStream {
 ///
 /// THE HOLDBACK (the design's one new invariant, spec S1.3 / R2). A smoothed segment can
 /// change only while later raw structure -- which lands at time `>= frontier` (the emission
-/// frontier [`resmooth_and_emit`](Self::resmooth_and_emit) derives: `>= last_raw_boundary`
-/// AND `>= consumed_frontier - dt`) -- can still reach it through the smoothing. Each
+/// frontier [`resmooth_and_emit`](Self::resmooth_and_emit) derives: `>= last_raw_boundary`,
+/// `>= consumed_frontier - dt`, AND `>= the hysteresis's pending open begin` -- that third
+/// term is the Phase-9 Task-9 fix, see the derivation there) -- can still reach it
+/// through the smoothing. Each
 /// smoothing step moves/merges boundaries by
 /// at most its own threshold: [`Segmentation::add_padding`] extends a Speech segment left by
 /// `before` and right by `after`; [`Segmentation::suppress_short`] removes/merges a segment
@@ -1120,26 +1385,47 @@ impl StreamDecision {
         let seg = self.build_smoothed(mid_dur);
 
         // THE EMISSION FRONTIER (the time-advance trigger). A smoothed segment can still be
-        // revised only by FUTURE raw structure, which lands no earlier than
-        //   frontier = max(last_rb, hyst_frontier - dt)
-        // -- `last_rb` because raw segments close in ascending order (the next one begins
-        // after this one ends), and `hyst_frontier - dt` because the CONSUMED frontier is
-        // `hyst_frontier = conv.finalized*dt + off` (the hysteresis has advanced through
-        // exactly `conv.finalized` convolved values; `StreamDecision` owns both `conv` and
-        // `hyst`, so no session threading is needed) and the earliest a not-yet-consumed
-        // value can interpolate a boundary back to is one grid step (`dt`) before it.
+        // revised only by FUTURE raw structure -- raw segments not yet in `raw_segments`.
+        // There are THREE places such a segment's BEGIN can come from, and the frontier is
+        // the EARLIEST of them:
+        //   1. `last_rb` -- raw segments close in ascending order, so the next one begins
+        //      after this one ends;
+        //   2. `hyst_frontier - dt` -- the CONSUMED frontier is `hyst_frontier =
+        //      conv.finalized*dt + off` (the hysteresis has advanced through exactly
+        //      `conv.finalized` convolved values; `StreamDecision` owns both `conv` and
+        //      `hyst`, so no session threading is needed) and the earliest a not-yet-consumed
+        //      value can interpolate a boundary back to is one grid step (`dt`) before it;
+        //   3. `hyst.pending_begin()` -- a segment the hysteresis has ALREADY OPENED (or
+        //      tentatively opened) and not yet closed. Its begin lies BEHIND the consumed
+        //      frontier, so 1+2 do NOT bound it.
+        //
+        // (3) IS A PHASE-9 TASK-9 FIX, not part of the original T5-review derivation. The
+        // phase-8 argument enumerated only 1+2 and concluded "future raw structure lands no
+        // earlier than the frontier" -- FALSE while a raw segment is open: speech that
+        // resumes within the holdback of the previous segment's end is already open (and so
+        // invisible to `last_rb`) at the moment the time-advance trigger would license
+        // emitting that previous segment, and its `add_padding` `before` reach then merges
+        // the two, MOVING an already-emitted boundary. Found on real data by the corpus
+        // streaming tier (`tests/pyo3/test_phase9_parity.py`, mamba/forward: `[0, 7.3051]
+        // Speech` emitted at 10.1999 s while `finish` reported one `[0, 74.9999]` segment --
+        // a genuine R2 retraction), pinned synthetically by
+        // `phase8_stream_decision.rs::pending_open_segment_blocks_emission`. It costs
+        // LATENCY, never correctness: clamping the frontier only emits LESS.
         //
         // THE SAFETY ARGUMENT: the T4 holdback-dominance proof (see the type docs) licenses
         // emitting any segment whose smoothed form cannot be reached by raw structure at or
-        // beyond the frontier -- and the consumed frontier minus one grid step is the earliest
-        // a future raw boundary can interpolate back to, so every segment ending strictly
-        // before `frontier - holdback` is final. (Using the RECEIVED frontier `now` here
-        // would be UNSAFE: `now` runs ahead of the consumed frontier by the convolution
-        // lookahead + a grid step, so it could license emitting a segment a still-pending
-        // convolved value can still move.) The prefix-consistency gate legs are the safety
-        // net -- any too-large frontier surfaces there as a retraction.
+        // beyond the frontier -- and the three terms above bound where that structure can
+        // begin, so every segment ending strictly before `frontier - holdback` is final.
+        // (Using the RECEIVED frontier `now` here would be UNSAFE: `now` runs ahead of the
+        // consumed frontier by the convolution lookahead + a grid step, so it could license
+        // emitting a segment a still-pending convolved value can still move.) The
+        // prefix-consistency gate legs are the safety net -- any too-large frontier surfaces
+        // there as a retraction.
         let hyst_frontier = self.conv.finalized as f64 * self.dt + self.off;
-        let frontier = last_rb.max(hyst_frontier - self.dt);
+        let mut frontier = last_rb.max(hyst_frontier - self.dt);
+        if let Some(pending) = self.hyst.pending_begin() {
+            frontier = frontier.min(pending);
+        }
         let threshold = frontier - self.holdback;
         self.collect_prefix(&seg, threshold, now)
     }
@@ -1174,6 +1460,22 @@ impl StreamDecision {
 // ===========================================================================
 // StreamingSession (Phase 8 Task 5): the composed SAD streaming session + gate.
 // ===========================================================================
+
+/// The session's NN stage, per the config's `Cell_Type` x `Direction` pair (spec S5.2).
+/// A CLOSED set with static dispatch, exactly like `fast::driver`'s `FastSadNet`: the
+/// windowed-BLSTM arm is the phase-8 path, BEHAVIOUR-UNTOUCHED; the causal arm is Task 7.
+/// Both feed the SAME [`StreamDecision`], so `push`/`finish` keep one shape and the
+/// `speech stream` CLI + the PyO3 `StreamingSession` gain the causal mode with ZERO new
+/// surface.
+enum StreamNn {
+    /// Phase 8: windowed overlap over the bidirectional peephole-LSTM twin.
+    Windowed {
+        overlap: StreamOverlap,
+        net: FastBlstm,
+    },
+    /// Phase 9 Task 7: the per-row causal stack (`slstm`/`mamba` + `Direction forward`).
+    Causal(StreamCausal),
+}
 
 /// The chunked-input SAD streaming session (Phase 8 Task 5): the online twin of the
 /// offline fast algo-3 driver ([`crate::fast::driver::FastSpectralSegmenter`]), composing
@@ -1210,22 +1512,36 @@ impl StreamDecision {
 /// source fails LOUDLY at construction rather than silently dropping the cross-channel
 /// `result_vec` seeding (deferred, spec S0/S1.2).
 ///
-/// LATENCY (spec S1.8). Every emission is stamped with the session's audio-time-pushed
+/// PHASE 9 TASK 7: the same session also drives the CAUSAL arm. `new` dispatches on
+/// `Cell_Type` x `Direction` (spec S5.2) and builds either the phase-8
+/// [`StreamOverlap`] + [`FastBlstm`] pair or [`StreamCausal`] over a
+/// [`FastCausalNet`]; everything else here -- the front-end, the decision layer, the
+/// frozen-gain contract, `push`/`finish`, the latency accounting -- is shared verbatim.
+/// The bit-equal oracle on the causal arm is the offline fast CAUSAL bag run
+/// (`tests/phase9_stream_causal.rs`). The input-normalization contract widens to `{0, 1}`
+/// ON THE CAUSAL ARM ONLY (type 0 is causality-trivial -- nothing whole-file to freeze --
+/// and it is what the committed phase-9 causal fixtures carry); the WINDOWED arm keeps
+/// phase 8's `{1}` byte-identically, so no config phase 8 accepted or refused changed
+/// status.
+///
+/// LATENCY (spec S1.8, S5.5). Every emission is stamped with the session's audio-time-pushed
 /// clock (`(total_pushed-1)/rate`) and its per-emission lag (`emitted_at - end_s`) is
 /// tracked (running max/mean, O(1) memory). With the T5-review consumed-frontier time-advance
 /// ([`StreamDecision::push_rows`]), a SPEECH segment is delivered within the DERIVED structural
 /// budget [`derived_latency_bound_s`](Self::derived_latency_bound_s) = front-end reach + NN
-/// window finalization + convolution half-width + the smoothing holdback -- it emits during
-/// the FOLLOWING silence, no longer waiting for the next raw segment. An OTHER (silence)
+/// window finalization + sub-sample buffering + convolution half-width + the smoothing
+/// holdback -- it emits during
+/// the FOLLOWING silence, no longer waiting for the next raw segment. THE CAUSAL ARM DROPS
+/// THE `nn_window` TERM ENTIRELY (spec S5.5: no window, no lookahead) and pays the far
+/// smaller sub-sample buffering term instead, which is the phase-9 latency win. An OTHER (silence)
 /// segment still waits for the following speech to COMMIT (its right boundary is that speech's
 /// onset, latched only at the falling edge), so its lag is that speech's DURATION + the forward
-/// pipeline delay -- the data-dependent AREA term pinned per-class on the fixtures
-/// (`tests/phase8_gate.rs`).
+/// pipeline delay -- the data-dependent AREA term pinned per-class on BOTH arms'
+/// fixtures (`tests/phase8_gate.rs` windowed, `tests/phase9_stream_causal.rs` causal).
 pub struct StreamingSession {
     front: StreamFrontEnd,
     pipeline: FastPipeline,
-    overlap: StreamOverlap,
-    net: FastBlstm,
+    nn: StreamNn,
     decision: StreamDecision,
 
     /// The pack-carried type-1 normalize tail (narrowed f32), applied per feature-row
@@ -1234,6 +1550,9 @@ pub struct StreamingSession {
     /// application).
     norm_mean: Vec<f32>,
     norm_std: Vec<f32>,
+    /// `InputNormalizationType 1` -> apply the frozen tail per feature row; type 0 ->
+    /// nothing (the exact path's `_ => {}` arm). No other value reaches construction.
+    apply_norm: bool,
 
     rate: f64,
     total_pushed: usize, // absolute sample count == the audio-time clock source
@@ -1241,7 +1560,8 @@ pub struct StreamingSession {
 
     // Latency budget (config-derived once at construction; the pins read these back).
     feature_reach_s: f64, // (reach*shift_frames + half_window)/rate
-    nn_window_s: f64,     // 2*window_size_feature * spectrum_shift_sec
+    nn_window_s: f64,     // 2*window_size_feature * spectrum_shift_sec (0.0 when causal)
+    sub_sample_s: f64,    // (ssr-1) * spectrum_shift_sec (0.0 when windowed)
     conv_delay_s: f64,    // conv_half * time_step
 
     // Running per-emission lag stats (O(1) memory -- the low-memory streaming goal).
@@ -1249,7 +1569,8 @@ pub struct StreamingSession {
     lag_sum: f64,
     lag_count: usize,
 
-    /// Posterior history (the StreamOverlap output, `output_size`-wide f32) -- the gate's
+    /// Posterior history (the NN stage's output -- [`StreamOverlap`] on the windowed arm,
+    /// [`StreamCausal`] on the causal one -- `output_size`-wide f32) -- the gate's
     /// bit-equivalence observable, mirroring the offline `last_result_rows`. Accumulated
     /// ONLY under `test-support` (it grows unbounded; production streaming never keeps it,
     /// per the phase's low-memory goal), the SAME pattern as `BagOfProcessors`'
@@ -1260,11 +1581,28 @@ pub struct StreamingSession {
 
 impl StreamingSession {
     /// Build the session from the SAME legacy config `map` the bag consumes, the stream
-    /// `rate`, and the source `channels` count. Validates the streaming contract (each bail
-    /// pinned by `tests/phase8_gate.rs::validation_bails`): algo 3, mono, `Audio_fixed_gain`
-    /// present, `InputNormalizationType 1`, and the overlap windowing (plain/truncate bail).
-    /// Loads the frozen net once and builds the phase-7 pipeline/BLSTM + the three streaming
-    /// layers.
+    /// `rate`, and the source `channels` count. Loads the frozen net ONCE, builds the
+    /// phase-7 [`FastPipeline`], and wires the front-end + NN stage + decision layer.
+    ///
+    /// THE NN STAGE IS DISPATCHED (spec S5.2) on `Cell_Type` x `Direction`, through
+    /// `fast::driver`'s own `classify_fast_shape` choke point -- so a pair the offline fast
+    /// tree refuses (a bidirectional new cell, a causal LSTM) is refused HERE with the
+    /// IDENTICAL wording rather than a second, drifting copy:
+    ///  - `lstm` + bidirectional -> [`StreamNn::Windowed`] ([`StreamOverlap`] + [`FastBlstm`]),
+    ///    the phase-8 path;
+    ///  - `slstm`/`mamba` + forward -> [`StreamNn::Causal`] ([`StreamCausal`] over a
+    ///    [`FastCausalNet`]), Phase 9 Task 7.
+    ///
+    /// Validated contract, each bail pinned (`tests/phase8_gate.rs::validation_bails` for the
+    /// windowed arm, `tests/phase9_stream_causal.rs::validation_bails` +
+    /// `causal_output_size_not_one_bails` for the causal one): algo 3, MONO,
+    /// `Audio_fixed_gain` present, `output_size 1`, plus the two ARM-DEPENDENT rules --
+    ///  - INPUT NORMALIZATION: `1` (the pack-carried frozen tail) on either arm, and `0`
+    ///    (no normalization) on the CAUSAL arm only; `-1` (per-sequence self-normalization)
+    ///    always bails, since it needs the whole sequence before the first frame;
+    ///  - WINDOWING: the windowed arm requires OVERLAP (plain and truncate bail); the causal
+    ///    arm requires the PLAIN regime (`window_size` 0), because a causal cell's state
+    ///    would be reset at every window boundary.
     pub fn new(
         map: &IndexMap<String, String>,
         rate: f64,
@@ -1297,19 +1635,52 @@ impl StreamingSession {
             ),
         };
         let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
-        if bc.input_normalization_type != 1 {
+
+        // Cell x direction dispatch (spec S5.2), through the SAME `classify_fast_shape`
+        // choke point the offline fast SAD driver uses -- so a config the fast tree
+        // refuses (a bidirectional new cell, a causal LSTM) is refused HERE with the
+        // identical wording, and the supported pair selects the arm.
+        let shape = classify_fast_shape(&bc, "BLSTM")?;
+        let causal = matches!(shape, FastNetShape::Causal(_));
+
+        // Input normalization, ARM-DEPENDENT and deliberately CONSERVATIVE:
+        //  - type 1 (the pack-carried frozen tail -- the phase-8 causality cut) on EITHER
+        //    arm;
+        //  - type 0 (NOTHING, the exact path's `_ => {}` arm) on the CAUSAL arm only. It is
+        //    causality-trivial (no whole-file statistic exists, so there is nothing to
+        //    freeze) and it is what the committed phase-9 causal fixtures carry -- but the
+        //    WINDOWED arm keeps phase 8's `{1}` set BYTE-IDENTICALLY, message included, so
+        //    no config phase 8 accepted or refused changes status here. Widening it there
+        //    too would be defensible and untested; untested is the part that matters.
+        //  - type -1 (per-sequence self-normalization) ALWAYS bails: it needs the whole
+        //    sequence before the first frame can be normalized.
+        let norm_ok = if causal {
+            matches!(bc.input_normalization_type, 0 | 1)
+        } else {
+            bc.input_normalization_type == 1
+        };
+        if !norm_ok {
+            if causal {
+                bail!(
+                    "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen \
+                     stats) or 0 (no input normalization); got {} (type -1 self-normalization \
+                     needs whole-sequence lookahead)",
+                    bc.input_normalization_type
+                );
+            }
             bail!(
                 "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen stats); \
                  got {} (type -1 self-normalization needs whole-sequence lookahead)",
                 bc.input_normalization_type
             );
         }
+        let apply_norm = bc.input_normalization_type == 1;
 
         // --- Config surfaces (shared with the offline fast driver) ---
         let feature_cfg = FeatureConfig::from_legacy(map, "BLSTM")?;
         let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
         let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
-        let spec = build_aligned_spec(map, "BLSTM")?;
+        let spec = build_spec_aligned_to(map, "BLSTM", &bc)?;
 
         // --- Frozen net (loaded once) ---
         let weights_file = map
@@ -1320,7 +1691,16 @@ impl StreamingSession {
             bail!("streaming: BLSTM_weightsFile is empty (the frozen net must be loaded once)");
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        let net = FastBlstm::from_flat(&spec, &flat)?;
+        let causal_net = match shape {
+            FastNetShape::Causal(cell) => {
+                Some(FastCausalNet::from_flat(&spec, cell, &bc.mamba, &flat)?)
+            }
+            FastNetShape::Blstm => None,
+        };
+        let blstm_net = match shape {
+            FastNetShape::Blstm => Some(FastBlstm::from_flat(&spec, &flat)?),
+            FastNetShape::Causal(_) => None,
+        };
 
         // --- Framing + pipeline (built once, at `rate`) ---
         let params = SpectralParams::derive(&feature_cfg, rate);
@@ -1349,23 +1729,51 @@ impl StreamingSession {
             &spec.output_subsampling,
             0,
         );
-        if window_size == 0 {
-            bail!(
-                "streaming: the plain (non-windowed) forward is unsupported (BLSTM_window \
-                 resolves window_size 0); the gate config uses windowed overlap"
-            );
-        }
-        if no_overlap {
-            bail!(
-                "streaming: the truncate (non-overlap) windowing is unsupported (window_shift \
-                 resolves < 1); the gate config uses overlap"
-            );
+        // The windowing regime is TIED TO THE ARM, exactly as it is in the offline fast
+        // driver (`fast/driver.rs`'s `causal` dispatch):
+        //  - WINDOWED (phase 8): overlap only -- plain (window_size 0) and truncate
+        //    (window_shift < 1) typed-bail.
+        //  - CAUSAL (Task 7, spec S5.3): the PLAIN regime only. A causal cell inside a
+        //    window has its state RESET at every window boundary, and the streaming
+        //    session's whole premise is one unbroken carried state -- so a causal config
+        //    that resolves a nonzero window is refused STREAMING-side even though the
+        //    offline fast driver merely bails it too.
+        if causal {
+            if window_size != 0 {
+                bail!(
+                    "streaming: causal streaming requires the plain regime (BLSTM_window \
+                     resolves window_size {window_size}); a causal cell's state is reset at \
+                     every window boundary -- the phase-9 causal configs use BLSTM_window 0"
+                );
+            }
+        } else {
+            if window_size == 0 {
+                bail!(
+                    "streaming: the plain (non-windowed) forward is unsupported (BLSTM_window \
+                     resolves window_size 0); the gate config uses windowed overlap"
+                );
+            }
+            if no_overlap {
+                bail!(
+                    "streaming: the truncate (non-overlap) windowing is unsupported (window_shift \
+                     resolves < 1); the gate config uses overlap"
+                );
+            }
         }
 
-        // timeStep/timeOffset, OVERLAP branch (fast/driver.rs:346-347) -- passed to the
-        // decision layer exactly as the offline driver computes them.
-        let time_step = spectrum_shift_sec * ssr as f64;
-        let time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
+        // timeStep/timeOffset (`tasks/sad.rs:1451-1461`, mirrored at
+        // `fast/driver.rs:530-534`): the BASE pair is `_WindowShift`-derived and the
+        // OVERLAP branch OVERRIDES it with `_SpectrumShift`. `window_size == 0` -- the
+        // causal regime -- keeps the base pair, where `window_shift_sec` is the value
+        // `get_blstm_param` just MUTATED (`window_shift * ssif / rate`, and `window_shift`
+        // is floored to 1 whenever `window_size == 0`).
+        let (time_step, time_offset) = if window_size > 0 {
+            let ts = spectrum_shift_sec * ssr as f64;
+            (ts, ts / 2.0 - spectrum_shift_sec / 2.0)
+        } else {
+            let ts = window_shift_sec * ssr as f64;
+            (ts, ts / 2.0 - window_shift_sec / 2.0)
+        };
 
         // preemph/noise gates (the offline driver's, fast/driver.rs:296-301). Both no-ops on
         // tier2 (preemph -0.97 <= 0, noise_seed -3 <= 0). The front-end gates preemph on
@@ -1397,7 +1805,20 @@ impl StreamingSession {
             noise_magnitude,
             preemph,
         )?;
-        let output_size = net.output_size();
+        let (output_size, norm_mean, norm_std) = match (&causal_net, &blstm_net) {
+            (Some(n), _) => (
+                n.output_size(),
+                n.normalize_mean().to_vec(),
+                n.normalize_std().to_vec(),
+            ),
+            (_, Some(n)) => (
+                n.output_size(),
+                n.normalize_mean().to_vec(),
+                n.normalize_std().to_vec(),
+            ),
+            // Unreachable: `shape` is a closed two-arm enum and each arm builds its net.
+            _ => unreachable!("one net arm is always built"),
+        };
         // Binary-SAD only: the decision layer reads posterior column 0 and the offline
         // `results.len()` == rows*cols tail quirk would differ for a wider posterior. Refuse
         // loudly at construction (the sibling of `StreamDecision::push_rows`' cols==1
@@ -1408,7 +1829,14 @@ impl StreamingSession {
                  {output_size} (the decision layer reads column 0 only)"
             );
         }
-        let overlap = StreamOverlap::new(window_size, window_shift, ssr, output_size);
+        let nn = match (causal_net, blstm_net) {
+            (Some(n), _) => StreamNn::Causal(StreamCausal::new(n)),
+            (_, Some(net)) => StreamNn::Windowed {
+                overlap: StreamOverlap::new(window_size, window_shift, ssr, output_size),
+                net,
+            },
+            _ => unreachable!("one net arm is always built"),
+        };
 
         // Derived latency components (config-derived; `derived_latency_bound_s` sums these +
         // holdback). See that method + the module-level LATENCY note.
@@ -1424,30 +1852,44 @@ impl StreamingSession {
         };
         let half_window = params.window_size / 2;
         let feature_reach_s = (reach * ssif + half_window) as f64 / rate;
+        // WINDOWED: the full-window lookahead an output row waits for. CAUSAL: 0.0 --
+        // there is no window and no lookahead (spec S5.5: "the nn_window term DIES").
         let nn_window_s = 2.0 * window_size as f64 * spectrum_shift_sec;
+        // CAUSAL: the sub-sampling BUFFERING delay. Posterior row `p` needs feature rows
+        // through `(p+1)*ssr - 1`, i.e. up to `ssr - 1` feature rows past the first of its
+        // group, so the wait is at most `(ssr-1) * spectrum_shift_sec`. (The exact wait,
+        // measured against the row's own decision TIME `p*dt + time_offset`, is half that
+        // -- `time_offset` is precisely `(ssr-1)*spectrum_shift_sec/2` -- so this term is
+        // deliberately conservative by one `time_offset`.) WINDOWED: 0.0, the phase-8
+        // budget is unchanged, and `x + 0.0 == x` exactly, so the phase-8 bound stays
+        // BIT-IDENTICAL (`tests/phase8_gate.rs::latency_bounds` cross-checks it by bits).
+        let sub_sample_s = if causal {
+            (ssr - 1) as f64 * spectrum_shift_sec
+        } else {
+            0.0
+        };
         let conv_half = driver_cfg
             .conv_coeff
             .as_deref()
             .map_or(0, |c| if c.len() > 1 { (c.len() - 1) / 2 } else { 0 });
         let conv_delay_s = conv_half as f64 * time_step;
 
-        let norm_mean = net.normalize_mean().to_vec();
-        let norm_std = net.normalize_std().to_vec();
         let decision = StreamDecision::new(driver_cfg, seg_cfg, time_step, time_offset);
 
         Ok(StreamingSession {
             front,
             pipeline,
-            overlap,
-            net,
+            nn,
             decision,
             norm_mean,
             norm_std,
+            apply_norm,
             rate,
             total_pushed: 0,
             finished: false,
             feature_reach_s,
             nn_window_s,
+            sub_sample_s,
             conv_delay_s,
             lag_max: f64::NEG_INFINITY,
             lag_sum: 0.0,
@@ -1491,14 +1933,18 @@ impl StreamingSession {
         // Front-end EOS -> the right-edge tail feature rows (delta reach clamps at the TRUE
         // last frame); type-1-normalize them front-end-side, exactly like mid-stream.
         let mut tail = self.front.flush(&mut self.pipeline);
-        if tail.rows > 0 {
-            external_normalize_f32(&mut tail, &self.norm_mean, &self.norm_std);
-        }
-        // These tail rows make the last UNCLAMPED windows fireable (push_rows), then the
-        // overlap flush fires the CLAMPED tail windows -- contiguous posterior-row ranges,
-        // fed to the decision layer in order.
-        let p1 = self.overlap.push_rows(&tail, &mut self.net);
-        let p2 = self.overlap.flush(&mut self.net);
+        self.normalize_rows(&mut tail);
+        // WINDOWED: these tail rows make the last UNCLAMPED windows fireable (push_rows),
+        // then the overlap flush fires the CLAMPED tail windows -- contiguous posterior-row
+        // ranges, fed to the decision layer in order. CAUSAL: `push_rows` is the whole EOS
+        // (there is no window flush; a partial sub-sample group is DROPPED, the offline
+        // `T mod R` truncation), and `StreamCausal::flush` returns empty by construction.
+        let (p1, p2) = match &mut self.nn {
+            StreamNn::Windowed { overlap, net } => {
+                (overlap.push_rows(&tail, net), overlap.flush(net))
+            }
+            StreamNn::Causal(c) => (c.push_rows(&tail), c.flush()),
+        };
         let mut emitted = self.consume_posteriors(&p1);
         emitted.extend(self.consume_posteriors(&p2));
 
@@ -1509,16 +1955,24 @@ impl StreamingSession {
         (stamped, seg)
     }
 
-    /// Type-1-normalize + overlap + decision for a batch of feature rows (the shared push /
-    /// finish body, minus the front-end fetch). Returns UNSTAMPED emissions.
-    fn step_rows(&mut self, rows: &mut FastMatrix) -> Vec<EmittedSegment> {
-        if rows.rows > 0 {
-            // Type-1 is a per-column affine, so per-row == whole-sequence (the documented
-            // T3/T4 seam) -- bit-identical to the offline `external_normalize_f32` over the
-            // whole input sequence.
+    /// Apply the frozen type-1 input normalization to a batch of feature rows, if the
+    /// config asked for it. Type 1 is a per-COLUMN affine, so applying it per row is
+    /// bit-identical to the offline whole-sequence application (the documented T3/T4 seam);
+    /// type 0 does nothing, mirroring the exact path's `_ => {}` arm.
+    fn normalize_rows(&self, rows: &mut FastMatrix) {
+        if rows.rows > 0 && self.apply_norm {
             external_normalize_f32(rows, &self.norm_mean, &self.norm_std);
         }
-        let posts = self.overlap.push_rows(rows, &mut self.net);
+    }
+
+    /// Normalize + NN stage + decision for a batch of feature rows (the shared push /
+    /// finish body, minus the front-end fetch). Returns UNSTAMPED emissions.
+    fn step_rows(&mut self, rows: &mut FastMatrix) -> Vec<EmittedSegment> {
+        self.normalize_rows(rows);
+        let posts = match &mut self.nn {
+            StreamNn::Windowed { overlap, net } => overlap.push_rows(rows, net),
+            StreamNn::Causal(c) => c.push_rows(rows),
+        };
         self.consume_posteriors(&posts)
     }
 
@@ -1559,12 +2013,22 @@ impl StreamingSession {
         }
     }
 
-    /// The derived STRUCTURAL latency bound in seconds (spec S1.8, the T4 spec correction):
-    /// front-end reach + NN window finalization + convolution half-width + the smoothing
-    /// holdback -- ALL config-derived (never a literal). The measured per-emission lag is
-    /// bounded by this plus a data-dependent AREA term (`tests/phase8_gate.rs`).
+    /// The derived STRUCTURAL latency bound in seconds (spec S1.8 / S5.5): the sum of
+    /// front-end reach, NN window finalization, sub-sample buffering, convolution
+    /// half-width and the smoothing holdback -- ALL config-derived (never a literal). The
+    /// measured per-emission lag is bounded by this plus a data-dependent AREA term
+    /// (`tests/phase8_gate.rs`, `tests/phase9_stream_causal.rs`).
+    ///
+    /// The two arms populate DISJOINT middle terms: the windowed arm carries `nn_window`
+    /// with `sub_sample == 0.0`, the causal arm carries `sub_sample` with
+    /// `nn_window == 0.0` (spec S5.5: no lookahead exists). Adding an exact `0.0` is the
+    /// f64 identity, so the phase-8 bound is bit-unchanged by the new term.
     pub fn derived_latency_bound_s(&self) -> f64 {
-        self.feature_reach_s + self.nn_window_s + self.conv_delay_s + self.decision.holdback()
+        self.feature_reach_s
+            + self.nn_window_s
+            + self.sub_sample_s
+            + self.conv_delay_s
+            + self.decision.holdback()
     }
 
     /// The feature-extraction reach component `(reach*shift_frames + half_window)/rate`.
@@ -1573,8 +2037,20 @@ impl StreamingSession {
     }
     /// The NN-window-finalization component `2*window_size_feature * spectrum_shift_sec`
     /// (the full-window lookahead the overlap incurs before an output row finalizes).
+    /// EXACTLY `0.0` on the causal arm -- a causal cell has no lookahead (spec S5.5).
     pub fn nn_window_s(&self) -> f64 {
         self.nn_window_s
+    }
+    /// The sub-sampling buffering component `(ssr-1) * spectrum_shift_sec` (a posterior
+    /// row waits for the last feature row of its decimation group). EXACTLY `0.0` on the
+    /// windowed arm, whose far larger `nn_window` already dominates it.
+    pub fn sub_sample_s(&self) -> f64 {
+        self.sub_sample_s
+    }
+    /// `true` when this session runs the Phase-9 causal per-row stack, `false` for the
+    /// phase-8 windowed BLSTM path (a test/report observable for the S5.2 dispatch).
+    pub fn is_causal(&self) -> bool {
+        matches!(self.nn, StreamNn::Causal(_))
     }
     /// The convolution half-width component `conv_half * time_step`.
     pub fn conv_delay_s(&self) -> f64 {

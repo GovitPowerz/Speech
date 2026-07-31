@@ -54,3 +54,6 @@ data/Scoring_LRE15/
 
 # Phase 7: the metric-parity tier's checkpoint cache (holds corpus-path listings - never committed)
 data/phase7_parity_cache/
+
+# Phase 9: the causal-checkpoint cache + the local bench staging (same posture as phase 7)
+data/phase9_parity_cache/

@@ -1,0 +1,118 @@
+{
+  "corpus": {
+    "sad": "tests/reference_data/phase4a (tier2_gc_fileslisting.csv + corpus/f1.{wav,stm})",
+    "twin": "tests/reference_data/phase4b (listing_gc_wav.csv + corpus_lid/f1.{wav,stm} + tiny_sad_seed.bin)",
+    "twin_mode7": "tests/reference_data/phase4b (corpus_phseq/ + languagemapping_lid7.csv + tiny_sad_seed.bin)"
+  },
+  "files": {
+    "mamba_bidirectional.config": "94a18fa547640e81baba32c04eb01171f2ae3efebd5708f2ff58c00d33f7da5d",
+    "mamba_bidirectional_seed.bin": "dd12fd8b710a348599d8c0e7fbf2dcd9385e56d2bcde105db4638b58f06d061d",
+    "mamba_forward.config": "6a8d827021134b0d0e7a7f858f37c6ca63a587754b62d53f06a93f57a8965e00",
+    "mamba_forward_seed.bin": "512f5a1491ef904e72555c23057d45f7aaee4148486dd6b49bfec87c7f688364",
+    "slstm_bidirectional.config": "b963cac363df2e4dba5e5e831b54fa0b31b8f63c672b11f51c63927dfb1f9022",
+    "slstm_bidirectional_seed.bin": "bbb2f425448e10c361bd79fc60d29c435a04aefcc81168e90b97dcc31240f8ac",
+    "slstm_forward.config": "a21320b112def504a70d1712c638d2cee8d8e76b041105632140aadcd243949f",
+    "slstm_forward_seed.bin": "4c09903822d80db3d733483f2f5399faada6f5a36d2e44b503e3f4676dca23c8",
+    "twin_lid_slstm.config": "3804f955012f009b93c6de5f792cd291d88020f579d810c214500cb00b8bc6b7",
+    "twin_lid_slstm_seed.bin": "35d9ae936dce35c11e5859a625947cce08badd39b9e05d740075d39847aa1573",
+    "twin_mode7_lid_slstm.config": "0f6aea3af1906fbb41ad48034ac2a9bb63bdfcc11e903473d5ed6aab3c571eac",
+    "twin_mode7_lid_slstm_seed.bin": "f06205b029bf67f4e96a9da5f1987c7a0f4b1a5efa634381f07db92662dbb66c"
+  },
+  "fixtures": {
+    "mamba_bidirectional": {
+      "algo": 3,
+      "cell_type": "mamba",
+      "config": "mamba_bidirectional.config",
+      "direction": "bidirectional",
+      "forget_bias_one": true,
+      "init_scheme": "xavier",
+      "nets": 1,
+      "pack_length": 1319,
+      "seed": 920503,
+      "weights": "mamba_bidirectional_seed.bin"
+    },
+    "mamba_forward": {
+      "algo": 3,
+      "cell_type": "mamba",
+      "config": "mamba_forward.config",
+      "direction": "forward",
+      "forget_bias_one": true,
+      "init_scheme": "xavier",
+      "nets": 1,
+      "pack_length": 683,
+      "seed": 920504,
+      "weights": "mamba_forward_seed.bin"
+    },
+    "slstm_bidirectional": {
+      "algo": 3,
+      "cell_type": "slstm",
+      "config": "slstm_bidirectional.config",
+      "direction": "bidirectional",
+      "forget_bias_one": true,
+      "init_scheme": "xavier",
+      "nets": 1,
+      "pack_length": 3159,
+      "seed": 920501,
+      "weights": "slstm_bidirectional_seed.bin"
+    },
+    "slstm_forward": {
+      "algo": 3,
+      "cell_type": "slstm",
+      "config": "slstm_forward.config",
+      "direction": "forward",
+      "forget_bias_one": true,
+      "init_scheme": "xavier",
+      "nets": 1,
+      "pack_length": 1603,
+      "seed": 920502,
+      "weights": "slstm_forward_seed.bin"
+    },
+    "twin_lid_slstm": {
+      "algo": 6,
+      "cell_type": "lstm",
+      "config": "twin_lid_slstm.config",
+      "direction": "bidirectional",
+      "forget_bias_one": true,
+      "init_scheme": "xavier",
+      "lid_cell_type": "slstm",
+      "lid_mode": 5,
+      "lid_pack_length": 949,
+      "nets": 2,
+      "sad_pack_length": 537,
+      "seed": 920505,
+      "weights": "twin_lid_slstm_seed.bin"
+    },
+    "twin_mode7_lid_slstm": {
+      "algo": 6,
+      "cell_type": "lstm",
+      "config": "twin_mode7_lid_slstm.config",
+      "direction": "bidirectional",
+      "forget_bias_one": true,
+      "init_scheme": "xavier",
+      "lid_cell_type": "slstm",
+      "lid_mode": 7,
+      "lid_pack_length": 949,
+      "nets": 2,
+      "sad_pack_length": 537,
+      "seed": 920506,
+      "weights": "twin_mode7_lid_slstm_seed.bin"
+    }
+  },
+  "generator": "scripts/extract_phase9_fixtures.py",
+  "geometry": {
+    "mamba_d_conv": 3,
+    "mamba_d_state": 4,
+    "mamba_expand": 2,
+    "sad_hidden": 4,
+    "sad_input": 23,
+    "sad_sub_sampling": 4
+  },
+  "measured": {
+    "grad_check_max_weights": 12,
+    "sad_epsilon": 1e-05,
+    "twin_epsilon": 0.0001,
+    "twin_mode7_epsilon": 0.001
+  },
+  "phase": 9,
+  "task": 5
+}

@@ -20,17 +20,29 @@
 //! - `nn/blstm.rs::feed_forward_backward_overlap` (`:1594-1726`): reproduced in
 //!   [`super::nn::FastBlstm::feed_forward_overlap`] (output-only).
 //!
+//! TWO NET SHAPES (Phase 9 Task 6, spec S4.2). `FastSpectralSegmenter` dispatches on
+//! `BLSTM_Cell_Type` x `BLSTM_Direction` at construction ([`classify_fast_shape`]):
+//! `(lstm, bidirectional)` builds the phase-7 [`FastBlstm`], `(slstm|mamba, forward)`
+//! builds the causal [`FastCausalNet`] ([`super::cells`]). The other two combinations
+//! typed-bail. THE WINDOWING REGIME FOLLOWS THE SHAPE -- BLSTM runs the OVERLAP
+//! windowed driver only, causal runs the PLAIN whole-sequence forward only -- because
+//! a causal cell inside a window has its state reset at every window boundary.
+//!
 //! SCOPE (spec S1.2/S1.3, the house typed-bail pattern -- what the gate configs
 //! exercise, everything else typed-bails loudly so scope creep is loud):
 //! - The PITCH second pass (`BLSTM_TDCwindow > 0`, spec R4) typed-bails at
 //!   construction.
-//! - `InputNormalizationType` outside {-1, 1} typed-bails at construction (the
+//! - `InputNormalizationType` outside {-1, 0, 1} typed-bails at construction (the
 //!   phase-7 gate configs -- `tier2_spectral.config` + the phase-6 `lre_sad.toml` --
 //!   both use -1; type 1, the pack-carried external mean/std, joined in Phase 8
-//!   Task 1 as the frozen-stats reference mode, spec S1.1).
-//! - The PLAIN (window 0) and TRUNCATE (non-overlap) windowed variants typed-bail at
-//!   `get_segmentation` (both gate configs resolve to OVERLAP: `BLSTM_window 3.25 /
-//!   BLSTM_shift 0.8` -> `window_size > 0`, `no_overlap false`).
+//!   Task 1 as the frozen-stats reference mode, spec S1.1; type 0, NO normalization
+//!   at all -- the exact path's `_ => {}` arm and therefore a no-op on both sides --
+//!   joined in Phase 9 Task 6, which is what the committed causal gate fixtures use).
+//! - BLSTM shape: the PLAIN (window 0) and TRUNCATE (non-overlap) windowed variants
+//!   typed-bail at `get_segmentation` (both phase-7/8 gate configs resolve to OVERLAP:
+//!   `BLSTM_window 3.25 / BLSTM_shift 0.8` -> `window_size > 0`, `no_overlap false`).
+//! - CAUSAL shape: any WINDOWED dispatch (`window_size != 0`) typed-bails there
+//!   instead (the phase-9 causal configs use `BLSTM_window 0`).
 //!
 //! FORWARD-ONLY: the fast path is inference-only (spec: training stays exact f64), so
 //! `cumulative_error`/`nb_of_classif` (the NN-cost result columns 4 / `len-1`) stay
@@ -46,15 +58,99 @@ use ndarray::Array2;
 use crate::audio::Audio;
 use crate::config::NnetSpec;
 use crate::constants::random_gauss;
-use crate::nn::blstm::BlstmConfig;
+use crate::nn::blstm::{BlstmConfig, CellType, Direction, MambaParams};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
 
+use super::cells::FastCausalNet;
 use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, self_normalize_f32};
 use super::pipeline::FastPipeline;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
+
+/// Which fast net shape a config's `Cell_Type` x `Direction` pair selects
+/// (Phase 9 Task 6, spec S4.2). A CLOSED set: the phase-7 bidirectional peephole-LSTM
+/// twin, or a causal (`Direction forward`) stack of one of the new cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FastNetShape {
+    /// [`FastBlstm`] -- LSTM + bidirectional, the phase-7 path (BYTE-UNTOUCHED).
+    Blstm,
+    /// [`FastCausalNet`] -- `slstm`/`mamba` + `Direction forward` (Task 6).
+    Causal(CellType),
+}
+
+/// Classify a net's `(cell_type, direction)` pair, typed-bailing the two combinations
+/// the fast tree does NOT implement (spec S4.2).
+///
+/// Supported: `(lstm, bidirectional)` -> [`FastNetShape::Blstm`] (phase 7);
+/// `(slstm|mamba, forward)` -> [`FastNetShape::Causal`] (this task).
+///
+/// Bailed, each pinned by a test:
+/// - a NEW CELL with `Direction bidirectional`. Bidirectional new-cell inference stays
+///   on the exact tree this phase (spec's non-goals: "a bidirectional fast twin is a
+///   mechanical follow-on -- named, not landed"). The hazard the bail closes is not
+///   hypothetical: `NnetSpec` carries neither cell type nor direction, so before
+///   Task 2's rider an sLSTM pack at least as long as the LSTM one was consumed
+///   head-first by `FastBlstm::from_flat` and RAN -- an LSTM's numbers under another
+///   architecture's name, with no tolerance to widen and no gate to catch it.
+/// - `Direction forward` with the LSTM cell. A forward-only LSTM fast twin is a NAMED
+///   FOLLOW-ON (spec S5.3 gives it the same status as the bidirectional new-cell
+///   twins), not an oversight: the exact tree builds it fine, only the f32 twin is
+///   missing.
+///
+/// The two message bodies are UNCHANGED from Task 2 so the phase-7/8 legs that pin
+/// them (`phase7_parity_sad.rs`, `phase7_parity_lid.rs`, `phase8_gate.rs`) keep
+/// asserting the same contract for the combinations that are still unsupported.
+pub(crate) fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<FastNetShape> {
+    match (bc.cell_type, bc.direction) {
+        (CellType::Lstm, Direction::Bidirectional) => Ok(FastNetShape::Blstm),
+        (cell, Direction::Forward) if cell != CellType::Lstm => Ok(FastNetShape::Causal(cell)),
+        (cell, Direction::Bidirectional) => bail!(
+            "cell type '{}' is not supported on the fast inference path (net '{prefix}') in the \
+             BIDIRECTIONAL direction; the f32 fast tree implements the legacy peephole LSTM \
+             bidirectionally and the phase-9 cells CAUSALLY (Direction forward) -- run this \
+             config on the exact path (Inference_Path exact)",
+            cell.as_str()
+        ),
+        (_, Direction::Forward) => bail!(
+            "Direction '{}' is not supported on the fast inference path (net '{prefix}') with \
+             the legacy peephole LSTM cell; a forward-only LSTM fast twin is a named follow-on \
+             (spec S5.3) -- run this config on the exact path (Inference_Path exact), or select \
+             a phase-9 causal cell (BLSTM_Cell_Type slstm|mamba)",
+            bc.direction.as_str()
+        ),
+    }
+}
+
+/// Typed bail for the port-only STRUCTURAL keys a fast/streaming CALLER parses but
+/// cannot honour: everything that is not the phase-7 bidirectional peephole-LSTM twin
+/// (Phase 9 Task 2 rider, tightened by Task 6's [`classify_fast_shape`]).
+///
+/// This is the BLSTM-ONLY gate, reached through [`build_aligned_spec`] from
+/// `FastTwinLid::from_legacy` (BOTH nets) and `stream::StreamingSession::new`. The
+/// algo-3 SAD driver no longer routes through it -- it classifies instead, and builds
+/// a causal net when the config asks for one.
+///
+/// THE TWIN KEEPS THIS GATE ON ITS SAD NET, deliberately (Task 6 decision). In Mode 7
+/// the SAD net is never run (the frozen-SAD contract: its `result_vec` is a
+/// synthesized constant), so only its SHAPE keys are read and relaxing the check would
+/// be harmless -- but "harmless" is a claim about a path no gate exercises, and the
+/// phase's LID arms train the LID net alone (`drivers/baseline.py` rejects
+/// `--cell-type`/`--direction` on the LID arms outright). Keeping it conservative
+/// costs nothing real and keeps the fast Twin's accepted surface exactly what
+/// phase 7 pinned; Task 7/9 can relax it against a gate that actually covers it.
+fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
+    if classify_fast_shape(bc, prefix)? != FastNetShape::Blstm {
+        bail!(
+            "cell type '{}' is not supported on the fast inference path (net '{prefix}'); this \
+             net runs the f32 peephole-LSTM bidirectional twin only (the causal fast twins are \
+             the algo-3 SAD driver's) -- run this config on the exact path (Inference_Path exact)",
+            bc.cell_type.as_str()
+        );
+    }
+    Ok(())
+}
 
 /// Build the `NnetSpec` for the fast net (under config `prefix`, e.g. `"BLSTM"` for
 /// the SAD net or `"BLSTM_LID"` for the Twin's LID net) with peephole flags aligned to
@@ -70,6 +166,20 @@ use crate::features::pipeline::{FeatureConfig, SpectralParams};
 /// explicitly (so the override is value-preserving there), but the alignment is pinned
 /// against an omitting config in `tests/phase7_parity_sad.rs`.
 pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Result<NnetSpec> {
+    let bc = BlstmConfig::from_legacy(map, prefix)?;
+    bail_unsupported_shape(&bc, prefix)?;
+    build_spec_aligned_to(map, prefix, &bc)
+}
+
+/// [`build_aligned_spec`] WITHOUT the BLSTM-only shape gate: the spec assembly alone,
+/// aligned to an already-parsed [`BlstmConfig`]. Split out by Task 6 so the algo-3 SAD
+/// driver can classify the shape itself (and build a causal net) off the same
+/// peephole-aligned spec, with no second config parse.
+pub(crate) fn build_spec_aligned_to(
+    map: &IndexMap<String, String>,
+    prefix: &str,
+    bc: &BlstmConfig,
+) -> Result<NnetSpec> {
     // `NnetSpec::from_legacy` REQUIRES `<prefix>_NNetInputSize`, but the Twin config omits
     // it (the exact `BlstmConfig` derives `input_size = LSTMNeuronNb[0]` instead). The fast
     // net also reads `LSTMNeuronNb[0]` for its input width and NEVER consults
@@ -92,7 +202,6 @@ pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Resul
         m.insert(input_key, lstm0);
         NnetSpec::from_legacy(&m, prefix)?
     };
-    let bc = BlstmConfig::from_legacy(map, prefix)?;
     spec.peepholes = [
         bc.forward_peep.cells,
         bc.backward_peep.cells,
@@ -102,6 +211,57 @@ pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Resul
         bc.backward_peep.gates_recurrent,
     ];
     Ok(spec)
+}
+
+/// The algo-3 SAD net actually built, per [`FastNetShape`]. The windowing regime is
+/// tied to the variant and NOT interchangeable, which is why the dispatch lives here
+/// rather than behind a trait: [`FastSadNet::Blstm`] runs the OVERLAP windowed driver
+/// (phase 7, `window_size > 0`), [`FastSadNet::Causal`] runs the PLAIN whole-sequence
+/// forward (`window_size == 0`) -- a causal cell inside a window would have its state
+/// reset at every window boundary, which is the "pointless-but-defined" regime spec
+/// S1.2 names and S5.3 forbids for streaming.
+#[derive(Clone)]
+enum FastSadNet {
+    Blstm(FastBlstm),
+    Causal(FastCausalNet),
+}
+
+impl FastSadNet {
+    fn output_size(&self) -> usize {
+        match self {
+            FastSadNet::Blstm(n) => n.output_size(),
+            FastSadNet::Causal(n) => n.output_size(),
+        }
+    }
+    fn normalize_mean(&self) -> &[f32] {
+        match self {
+            FastSadNet::Blstm(n) => n.normalize_mean(),
+            FastSadNet::Causal(n) => n.normalize_mean(),
+        }
+    }
+    fn normalize_std(&self) -> &[f32] {
+        match self {
+            FastSadNet::Blstm(n) => n.normalize_std(),
+            FastSadNet::Causal(n) => n.normalize_std(),
+        }
+    }
+}
+
+/// Build the algo-3 SAD net for a classified [`FastNetShape`] from the flat f64 pack.
+/// ONE place, so `from_legacy(map, Some(flat))` and the deferred
+/// `load_weights_file` cannot pick different arms.
+fn build_sad_net(
+    spec: &NnetSpec,
+    shape: FastNetShape,
+    mamba: &MambaParams,
+    flat: &[f64],
+) -> Result<FastSadNet> {
+    Ok(match shape {
+        FastNetShape::Blstm => FastSadNet::Blstm(FastBlstm::from_flat(spec, flat)?),
+        FastNetShape::Causal(cell) => {
+            FastSadNet::Causal(FastCausalNet::from_flat(spec, cell, mamba, flat)?)
+        }
+    })
 }
 
 /// f32 spectral SAD segmenter (algo 3), the fast counterpart of
@@ -116,7 +276,12 @@ pub struct FastSpectralSegmenter {
     seg_cfg: SegmenterConfig,
     feature_cfg: FeatureConfig,
     spec: NnetSpec,
-    net: Option<FastBlstm>,
+    /// The net SHAPE the config selected (Phase 9 Task 6) -- kept so the deferred
+    /// `load_weights_file` rebuild picks the same arm `from_legacy` did.
+    shape: FastNetShape,
+    /// The `Mamba_*` geometry, inert unless [`Self::shape`] is `Causal(Mamba)`.
+    mamba: MambaParams,
+    net: Option<FastSadNet>,
 
     /// Sub-sampling factors + whole-BLSTM ratio, cached from the spec for
     /// [`get_blstm_param`] (which needs them without a live net borrow).
@@ -153,13 +318,17 @@ pub struct FastSpectralSegmenter {
 impl FastSpectralSegmenter {
     /// Build from a legacy config map + optional f64 weight pack, mirroring
     /// [`crate::tasks::sad::BlstmSpectralSegmenter::from_legacy`]'s config surface.
-    /// `weights: Some(flat)` builds the [`FastBlstm`] immediately (narrowing f64 ->
-    /// f32 once, after adim); `None` defers to [`Self::load_weights_file`] (the bag's
-    /// two-step `from_legacy(map, None)` + `load_weights_file` pattern).
+    /// `weights: Some(flat)` builds the net SELECTED BY [`classify_fast_shape`]
+    /// immediately -- [`FastBlstm`] or [`FastCausalNet`], both narrowing f64 -> f32
+    /// once, after adim (new cells carry no adim by construction, spec S1.3); `None`
+    /// defers to [`Self::load_weights_file`] (the bag's two-step
+    /// `from_legacy(map, None)` + `load_weights_file` pattern).
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast-mode surfaces: the
-    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType` outside
-    /// {-1, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode).
+    /// two `Cell_Type` x `Direction` combinations [`classify_fast_shape`] refuses, the
+    /// pitch second pass (`TDCwindow > 0`), and any `InputNormalizationType` outside
+    /// {-1, 0, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode;
+    /// 0 in Phase 9 Task 6 -- the exact path's no-op arm).
     pub fn from_legacy(
         map: &IndexMap<String, String>,
         weights: Option<&[f64]>,
@@ -177,18 +346,30 @@ impl FastSpectralSegmenter {
             );
         }
 
-        // Peephole-default alignment (rider 1).
-        let spec = build_aligned_spec(map, "BLSTM")?;
+        // Cell x direction dispatch (Phase 9 Task 6, spec S4.2) + peephole-default
+        // alignment (rider 1). `classify_fast_shape` typed-bails the two unsupported
+        // combinations; everything else builds a net below.
+        let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
+        let shape = classify_fast_shape(&bc, "BLSTM")?;
+        let spec = build_spec_aligned_to(map, "BLSTM", &bc)?;
 
         // Normalization types on the fast SAD path: -1 (self-normalization, the
-        // phase-7 gate configs) and 1 (pack-carried external mean/std -- Phase 8
-        // S1.1, the frozen-stats reference mode). Everything else typed-bails.
-        let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
-        if bc.input_normalization_type != -1 && bc.input_normalization_type != 1 {
+        // phase-7 gate configs), 1 (pack-carried external mean/std -- Phase 8 S1.1,
+        // the frozen-stats reference mode) and 0 (NO normalization, joined in Phase 9
+        // Task 6). Everything else typed-bails.
+        //
+        // Type 0 is the exact path's `_ => {}` arm (`nn/blstm.rs:1271`, the
+        // `feed_forward_backward` normalization match): a genuine no-op on BOTH sides,
+        // so admitting it cannot introduce a divergence -- it only stops a config that
+        // asks for nothing from being rejected for asking for something unsupported.
+        // The phase-9 committed gate fixtures use it, and the previously-bailing
+        // configs it un-bails are exactly the ones on which the two paths agree by
+        // construction. -2 (the plain-FFB self-normalized COPY) is still out.
+        if ![-1, 0, 1].contains(&bc.input_normalization_type) {
             bail!(
-                "fast SAD: only InputNormalizationType -1 (self-normalization) or 1 (external \
-                 pack-carried mean/std, the phase-8 frozen mode) are supported on the fast path \
-                 (got {})",
+                "fast SAD: only InputNormalizationType -1 (self-normalization), 1 (external \
+                 pack-carried mean/std, the phase-8 frozen mode) or 0 (none) are supported on \
+                 the fast path (got {})",
                 bc.input_normalization_type
             );
         }
@@ -199,7 +380,7 @@ impl FastSpectralSegmenter {
             * output_sub_sampling.iter().product::<usize>();
 
         let net = match weights {
-            Some(flat) => Some(FastBlstm::from_flat(&spec, flat)?),
+            Some(flat) => Some(build_sad_net(&spec, shape, &bc.mamba, flat)?),
             None => None,
         };
 
@@ -212,6 +393,8 @@ impl FastSpectralSegmenter {
             seg_cfg,
             feature_cfg,
             spec,
+            shape,
+            mamba: bc.mamba,
             net,
             lstm_sub_sampling,
             output_sub_sampling,
@@ -230,8 +413,10 @@ impl FastSpectralSegmenter {
 
     /// `<prefix>_weightsFile` load (mirrors [`crate::nn::blstm::BlstmNetwork::
     /// load_weights_file`]): an EMPTY key leaves the net unloaded (a subsequent
-    /// `get_segmentation` errors); otherwise read the `.bin` and (re)build the
-    /// [`FastBlstm`] from it. `FastBlstm::from_flat` enforces the length check
+    /// `get_segmentation` errors); otherwise read the `.bin` and (re)build the net
+    /// from it -- through the SAME [`build_sad_net`] the ctor uses, so the deferred
+    /// load cannot pick a different arm than [`Self::from_legacy`] classified. Both
+    /// `FastBlstm::from_flat` and `FastCausalNet::from_flat` enforce the length check
     /// (`< element_count` -> `Err`).
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         let weights_file = map
@@ -242,7 +427,7 @@ impl FastSpectralSegmenter {
             return Ok(());
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.net = Some(FastBlstm::from_flat(&self.spec, &flat)?);
+        self.net = Some(build_sad_net(&self.spec, self.shape, &self.mamba, &flat)?);
         Ok(())
     }
 
@@ -323,28 +508,52 @@ impl Segmenter for FastSpectralSegmenter {
             audio.data.ncols(),
         );
 
-        // Dispatch (setProcessingType(window > 0, !noOverlap), tasks/sad.rs:1447): the
-        // fast SAD path implements ONLY the overlap windowed driver -- what both gate
-        // configs (tier2 + phase-6 SAD, window 3.25 / shift 0.8) exercise. Plain and
-        // truncate typed-bail as unexercised in fast mode (spec S1.2 house pattern).
-        if window_size == 0 {
-            bail!(
-                "fast SAD: the plain (non-windowed) forward is unsupported (BLSTM_window resolves \
-                 window_size 0); the gate configs use windowed overlap"
-            );
-        }
-        if no_overlap {
-            bail!(
-                "fast SAD: the truncate (non-overlap) windowing is unsupported (window_shift \
-                 resolves < 1); the gate configs use overlap"
-            );
+        // Dispatch (setProcessingType(window > 0, !noOverlap), tasks/sad.rs:1447). The
+        // supported windowing regime is TIED TO THE NET SHAPE:
+        //
+        // - BLSTM (phase 7): the OVERLAP windowed driver ONLY -- what both phase-7/8
+        //   gate configs (tier2 + phase-6 SAD, window 3.25 / shift 0.8) exercise.
+        //   Plain and truncate typed-bail as unexercised in fast mode.
+        // - CAUSAL (Task 6): the PLAIN whole-sequence forward ONLY (`window_size == 0`).
+        //   Windowing a causal cell resets its state at every window boundary -- the
+        //   "pointless-but-defined" regime of spec S1.2, which S5.3 forbids outright
+        //   for the streaming session. The phase's causal configs use window 0.
+        let causal = matches!(self.shape, FastNetShape::Causal(_));
+        if causal {
+            if window_size != 0 {
+                bail!(
+                    "fast causal SAD: windowed inference is unsupported (BLSTM_window resolves \
+                     window_size {window_size}); a causal cell's state is reset at every window \
+                     boundary (spec S1.2) -- the phase-9 causal configs use BLSTM_window 0"
+                );
+            }
+        } else {
+            if window_size == 0 {
+                bail!(
+                    "fast SAD: the plain (non-windowed) forward is unsupported (BLSTM_window \
+                     resolves window_size 0); the gate configs use windowed overlap"
+                );
+            }
+            if no_overlap {
+                bail!(
+                    "fast SAD: the truncate (non-overlap) windowing is unsupported (window_shift \
+                     resolves < 1); the gate configs use overlap"
+                );
+            }
         }
 
-        // timeStep/timeOffset, OVERLAP branch (tasks/sad.rs:1459-1460): _SpectrumShift-
-        // based (the asymmetry vs the signal driver's _WindowShift). self.window_shift_sec
-        // here is the post-getBLSTMParam value.
-        let time_step = self.spectrum_shift_sec * ssr as f64;
-        let time_offset = time_step / 2.0 - self.spectrum_shift_sec / 2.0;
+        // timeStep/timeOffset (tasks/sad.rs:1451-1461). The BASE pair is
+        // `_WindowShift`-derived; the OVERLAP branch OVERRIDES it with `_SpectrumShift`
+        // (the asymmetry vs the signal driver). `window_size == 0` -- the causal
+        // regime -- keeps the base pair, exactly as the exact driver does.
+        // `self.window_shift_sec` here is the post-`get_blstm_param` value.
+        let (time_step, time_offset) = if window_size > 0 {
+            let ts = self.spectrum_shift_sec * ssr as f64;
+            (ts, ts / 2.0 - self.spectrum_shift_sec / 2.0)
+        } else {
+            let ts = self.window_shift_sec * ssr as f64;
+            (ts, ts / 2.0 - self.window_shift_sec / 2.0)
+        };
 
         // Build the fast pipeline ONCE (banks + FFT plan), with the SAME `rate` that
         // derived `s` (rider 2). FastPipeline::new typed-bails an active LTSV column or
@@ -387,18 +596,67 @@ impl Segmenter for FastSpectralSegmenter {
             let mut input = pipeline.build_input_sequence(&samples).clone();
 
             // Input normalization over the whole sequence, ONCE (matching the exact
-            // feed_forward_backward top, blstm.rs:1008-1030, before the overlap
-            // windowing): type -1 self-normalization, or type 1 external pack-carried
-            // mean/std (Phase 8 S1.1, the frozen-stats mode). The construction bail
-            // guarantees no other value reaches here.
+            // feed_forward_backward top, blstm.rs:1251-1272, before the windowed
+            // dispatch): type -1 self-normalization, type 1 external pack-carried
+            // mean/std (Phase 8 S1.1, the frozen-stats mode), or type 0 NOTHING (the
+            // exact `_ => {}` arm). The construction bail guarantees no other value
+            // reaches here; the `0` arm is spelled out rather than folded into the
+            // catch-all, because "do nothing" and "self-normalize" are not
+            // interchangeable defaults.
             match self.input_normalization_type {
                 1 => external_normalize_f32(&mut input, &norm_mean, &norm_std),
-                _ => self_normalize_f32(&mut input),
+                -1 => self_normalize_f32(&mut input),
+                _ => {}
             }
 
-            // Overlap forward: accumulate into the shared result_buf (seeded from the
-            // prior channel; NOT zeroed here).
-            net.feed_forward_overlap(&input, window_size, window_shift, &mut result_buf);
+            // The forward, per net shape. BLSTM: the overlap accumulation into the
+            // SHARED result_buf (seeded from the prior channel; NOT zeroed here -- the
+            // cross-channel reuse quirk). CAUSAL: the plain whole-sequence forward,
+            // whose posteriors are COPIED into a result_buf that is zeroed first --
+            // mirroring the exact plain path, where `NeuronLayer::feed_forward` does
+            // its own `output.fill(0.0)` (`nn/layers.rs:939`) and then writes exactly
+            // `output_length` rows, so any tail beyond the net's own output length
+            // stays zero and NOTHING seeds from the previous channel.
+            match net {
+                FastSadNet::Blstm(n) => {
+                    n.feed_forward_overlap(&input, window_size, window_shift, &mut result_buf);
+                }
+                FastSadNet::Causal(n) => {
+                    let out = n.feed_forward(&input);
+                    // A net output LONGER than the result vector is a geometry
+                    // mismatch, not something to truncate silently: the exact path
+                    // indexes straight into its `real_vec_size x 1` buffer and PANICS
+                    // there (`NeuronLayer::feed_forward`'s `output[[t, j]]` write), so
+                    // a quiet clamp here would mask a real disagreement between
+                    // `get_blstm_param`'s sizing and the feature front-end's row count.
+                    if out.rows > result_buf.rows || out.cols != result_buf.cols {
+                        bail!(
+                            "fast causal SAD: net output {}x{} does not fit the result vector \
+                             {}x{} (getBLSTMParam sizing vs the feature row count)",
+                            out.rows,
+                            out.cols,
+                            result_buf.rows,
+                            result_buf.cols
+                        );
+                    }
+                    // ONE DEGENERATE-CASE DIVERGENCE, documented not fixed: on a
+                    // sequence so short that the net emits ZERO rows, the exact plain
+                    // path never reaches `NeuronLayer::feed_forward` (`Network::drive`
+                    // returns early on an empty input, `network.rs:326`) and leaves
+                    // `result_vec` UNTOUCHED -- i.e. holding the previous channel's
+                    // contents -- while this zeroes it. Unreachable on any real file
+                    // (it needs fewer feature rows than the sub-sampling ratio) and the
+                    // fast behaviour is the saner of the two; recorded so a future
+                    // reader does not mistake it for an oversight.
+                    result_buf.data.fill(0.0);
+                    let cols = result_buf.cols;
+                    for r in 0..out.rows {
+                        for c in 0..cols {
+                            result_buf.data[r * cols + c] = out.data[r * out.cols + c];
+                        }
+                    }
+                }
+            }
 
             // Widen the post-division f32 result to f64 (the posterior seam). For the
             // binary SAD net (output_size 1) this is the single result column.
