@@ -690,9 +690,15 @@ impl CfcLayer {
         deltas_previous_layer
     }
 
-    /// Reverse-time BPTT: flip input/output/deltas, run the forward-order body, flip
-    /// the returned deltas back. The caches are already time-reversed by
+    /// Reverse-time BPTT: flip `deltas`, run the forward-order body, flip the returned
+    /// deltas back. The caches are already time-reversed by
     /// [`Self::feed_forward_reverse`] and are consumed AS-IS (do NOT un-reverse).
+    ///
+    /// `input` and `output` are forwarded UNFLIPPED on purpose: [`Self::feed_backward`]
+    /// ignores both arguments outright (every quantity it needs is in the caches -- see
+    /// its own doc), so flipping them would allocate two `T x width` copies for a body
+    /// that never reads them. `deltas` is the one argument that is genuinely consumed
+    /// and therefore the one that is genuinely flipped.
     pub fn feed_backward_reverse(
         &mut self,
         input: &Array2<f64>,
@@ -701,12 +707,10 @@ impl CfcLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
-        let output_rev = output.slice(ndarray::s![..;-1, ..]).to_owned();
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
         let dpl = self.feed_backward(
-            &input_rev,
-            &output_rev,
+            input,
+            output,
             &deltas_rev,
             inv_sub_sampling_ratio,
             last_layer,

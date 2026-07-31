@@ -740,8 +740,8 @@ struct CfcCase {
 /// ```text
 /// eps            1e-8      1e-7      1e-6      1e-5      1e-4      1e-3
 /// max_rel        9.91e-3   1.92e-3   7.07e-5   1.72e-5   8.34e-6   7.44e-4
-/// max_rel_major     --        --     4.23e-7   5.53e-8   2.70e-7   (rising)
-/// max_abs_err       --        --     1.13e-9   1.32e-10  1.25e-8   (rising)
+/// max_rel_major  1.97e-5   4.07e-6   4.23e-7   5.53e-8   2.70e-7   (rising)
+/// max_abs_err    1.21e-7   1.27e-8   1.13e-9   1.32e-10  1.25e-8   (rising)
 /// ```
 ///
 /// The DISCRIMINATING metric (`max_rel_major`) and the absolute error BOTH bottom at
@@ -782,10 +782,15 @@ const CFC_EPS: f64 = 1e-5;
 /// analytic derivative is `1.84e-6`, i.e. `1e-6` OF THE PACK MAXIMUM (1.79): its
 /// relative error is the central-difference floor divided by a near-zero number and
 /// says nothing about the derivation. That it is FD noise and not a wrong term is
-/// checkable, not asserted: its value scales as `1/eps` across the sweep
-/// (`9.9e-3 / 1.9e-3 / 7.1e-5 / 1.7e-5 / 8.3e-6` at `1e-8 .. 1e-4`), the roundoff
-/// signature, whereas a wrong adjoint term is a MULTIPLICATIVE error and would be
-/// eps-INVARIANT. The STOP assert in the test body is therefore on `major_pin` -- the
+/// checkable, not asserted: across the sweep above the whole `max_rel` column falls
+/// ~3 orders MONOTONICALLY as `eps` grows from `1e-8` to `1e-4`
+/// (`9.9e-3 / 1.9e-3 / 7.1e-5 / 1.7e-5 / 8.3e-6`) -- roundoff-dominated, the decade
+/// steps being uneven only because the arg-max weight moves between columns; the
+/// `max_abs_err` row over the same left half is the clean textbook `1/eps` roundoff
+/// signature, one decade per decade (`1.21e-7 / 1.27e-8 / 1.13e-9`). A WRONG adjoint
+/// term is a MULTIPLICATIVE error and would be eps-INVARIANT -- a FLAT row, which is
+/// what the sweep would have shown. The STOP assert in the test body is therefore on
+/// `major_pin` -- the
 /// bound a wrong adjoint actually trips -- and every one of those is <= `5.6e-7`,
 /// ~180x under the threshold.
 ///
