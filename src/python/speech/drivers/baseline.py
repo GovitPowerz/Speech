@@ -340,10 +340,11 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
 
     EMPTY at the defaults (`lstm` / `bidirectional`), so a default run's config text is
     byte-identical to today's -- the whole point of the knob being additive. The `Mamba_*`
-    geometry keys are deliberately NOT written: their defaults live Rust-side
-    (`blstm.rs::MambaParams::default`) and Python reads the same defaults
-    (`init_weights.MambaGeometry`), so omitting them at default values keeps the config text
-    minimal and the two sides agreeing by construction.
+    (and, since phase 10, `Cfc_*`) geometry keys are deliberately NOT written: their defaults
+    live Rust-side (`blstm.rs::MambaParams::default` / `CFC_DEFAULT_BACKBONE_UNITS`) and
+    Python reads the same defaults (`init_weights.MambaGeometry` /
+    `config_bridge.CFC_DEFAULT_BACKBONE_UNITS`), so omitting them at default values keeps the
+    config text minimal and the two sides agreeing by construction.
 
     DERIVED KEY 1 (the output MLP's width): `BlstmConfig::from_legacy` requires
     `OutputNeuronNb[0] == hidden_multiplier * lstm_neuron_nb[-1]` -- `2*hidden`
@@ -363,8 +364,8 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
 
     Everything else in the config (the DSP front-end, the cost law, the hidden widths) is
     untouched."""
-    if cell_type not in ("lstm", "slstm", "mamba"):
-        raise ValueError(f"unknown cell type {cell_type!r} (expected lstm, slstm or mamba)")
+    if cell_type not in ("lstm", "slstm", "mamba", "cfc"):
+        raise ValueError(f"unknown cell type {cell_type!r} (expected lstm, slstm, mamba or cfc)")
     if direction not in ("bidirectional", "forward"):
         raise ValueError(f"unknown direction {direction!r} (expected bidirectional or forward)")
     overlay: dict[str, str] = {}
@@ -951,7 +952,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--steps-per-epoch", type=int, default=8)
     parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
     parser.add_argument(
-        "--cell-type", choices=("lstm", "slstm", "mamba"), default="lstm", help="SAD arm: recurrent cell (spec S6; default = today's peephole BLSTM)"
+        "--cell-type",
+        choices=("lstm", "slstm", "mamba", "cfc"),
+        default="lstm",
+        help="SAD arm: recurrent cell (spec S6 + phase-10 S1; default = today's peephole BLSTM)",
     )
     parser.add_argument(
         "--direction",

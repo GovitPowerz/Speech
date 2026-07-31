@@ -206,7 +206,9 @@ static KEY_TABLE: &[KeyMapping] = &[
 
     // --- nn_cfc: the CfC geometry (Phase 10 S1.4/S2, port-only) ---------------
     // The `nn_mamba` row's reasoning verbatim: UNPREFIXED flat keys, ONE geometry
-    // per config, FLAT section spelling.
+    // per config, FLAT section spelling. Absent keys mean the defaults --
+    // `backbone_units` = the SIZED `blstm.rs::CFC_DEFAULT_BACKBONE_UNITS` (45, Task
+    // 2's +-15% pack match against the v2 lineage), `backbone_layers` = 1.
     ("Cfc_Backbone_Units",                       "nn_cfc", "backbone_units"),
     ("Cfc_Backbone_Layers",                      "nn_cfc", "backbone_layers"),
 

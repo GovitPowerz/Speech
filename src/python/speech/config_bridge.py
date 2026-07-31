@@ -49,6 +49,37 @@ def _mamba_geometry(cfg: dict[str, str]) -> dict[str, int]:
     return out
 
 
+#: The SIZED CfC backbone width (phase-10 spec S1.4), mirroring
+#: `blstm.rs::CFC_DEFAULT_BACKBONE_UNITS`. It is a MIRROR, not an independent choice: the
+#: engine builds the net from the Rust constant and Python seeds the pack from this one, so
+#: a drift between them is a length mismatch at `set_weights` (pinned against the Rust
+#: source by `tests/test_phase10_init.py::test_the_rust_and_python_defaults_agree`).
+#: 45 is the value that puts the v2-lineage CfC pack within +0.25% of the same lineage's
+#: LSTM pack -- the full sizing arithmetic for BOTH lineages is in that test module's
+#: docstring.
+CFC_DEFAULT_BACKBONE_UNITS = 45
+CFC_DEFAULT_BACKBONE_LAYERS = 1
+
+
+def _cfc_geometry(cfg: dict[str, str]) -> dict[str, int]:
+    """The two `Cfc_*` keys (phase-10 spec S1.4/S2), UNPREFIXED by design -- one CfC geometry
+    per config, shared by whichever net(s) select `cfc`, exactly as `blstm.rs::CfcParams`
+    reads them (the `Mamba_*` precedent verbatim). Absent keys mean the Rust defaults; a
+    present-but-unparseable or `< 1` value raises, mirroring `CfcParams::from_legacy`'s hard
+    error -- these keys have no legacy source to stay bug-compatible with, the Python
+    builders are reachable WITHOUT the engine, and a silently-defaulted geometry would change
+    the weight-pack LENGTH with nothing to catch it."""
+    defaults = {"backbone_units": CFC_DEFAULT_BACKBONE_UNITS, "backbone_layers": CFC_DEFAULT_BACKBONE_LAYERS}
+    keys = {"backbone_units": "Cfc_Backbone_Units", "backbone_layers": "Cfc_Backbone_Layers"}
+    out: dict[str, int] = {}
+    for name, key in keys.items():
+        value = int(cfg[key]) if key in cfg else defaults[name]
+        if value < 1:
+            raise ValueError(f"'{key}' must be >= 1 (got {value})")
+        out[name] = value
+    return out
+
+
 def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
     """Extract the NNType-0 network spec from a parsed legacy config.
 
@@ -58,6 +89,10 @@ def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
     the architecture from the SAME config the engine reads, with no call-site churn. Absent
     keys mean the legacy shape (`lstm` / `bidirectional`), so every pre-phase-9 config
     decodes exactly as before.
+
+    Phase 10 (spec S1.4/S2) added a fourth, `Cfc`, on the same terms: the unprefixed
+    `Cfc_Backbone_Units` / `Cfc_Backbone_Layers`, defaulting to the SIZED Rust values. It is
+    emitted unconditionally like `Mamba` and is inert unless `CellType` is `cfc`.
     """
     p = f"{prefix}_"
     peephole_keys = [
@@ -80,4 +115,5 @@ def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
         "CellType": cfg.get(f"{p}Cell_Type", "lstm"),
         "Direction": cfg.get(f"{p}Direction", "bidirectional"),
         "Mamba": _mamba_geometry(cfg),
+        "Cfc": _cfc_geometry(cfg),
     }

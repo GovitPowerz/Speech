@@ -275,7 +275,7 @@ impl MambaParams {
 /// per config, shared by whichever net(s) select `cfc` (a per-net override is an
 /// explicit non-goal).
 ///
-/// `backbone_units` defaults to [`CFC_DEFAULT_BACKBONE_UNITS`] -- PROVISIONAL, see
+/// `backbone_units` defaults to [`CFC_DEFAULT_BACKBONE_UNITS`] -- the SIZED value, see
 /// that constant. `backbone_layers` defaults to 1 (the spec S2 table's value). Both
 /// must be `>= 1`; absent keys mean the defaults, so a config that never says `cfc`
 /// is untouched.
@@ -285,11 +285,17 @@ pub struct CfcParams {
     pub backbone_layers: usize,
 }
 
-/// The provisional default backbone width (phase-10 spec S1.4). Task 1 LANDS the key
-/// with this placeholder; Task 2's SIZING PROCEDURE (match the full-net pack to the
-/// same lineage's LSTM pack within +-15%) finalizes it -- deliberately a ONE-LINE
-/// change here, noted in both task briefs.
-pub const CFC_DEFAULT_BACKBONE_UNITS: usize = 24;
+/// The SIZED default backbone width (phase-10 spec S1.4), finalized by Task 2's sizing
+/// procedure: pick `B` (at `Cfc_Backbone_Layers 1`) so the full-net CfC pack lands
+/// within the +-15% S8.2 band of the SAME lineage's LSTM pack. Sized against the v2
+/// lineage (`LSTMNeuronNb 11,24,24`), whose LSTM pack is 24431 and whose CfC pack is
+/// `524*B + 911`: `B = 45` gives 24491, +0.25%. It also leaves the v1 lineage
+/// (`23,24,24`, LSTM 33671, CfC `620*B + 935` -> 28835) at -14.36%, inside the band,
+/// so ONE default serves both lineages and no config overrides it. The full arithmetic
+/// for both lineages is recorded in `tests/test_phase10_init.py`'s module docstring;
+/// the Python mirror is `config_bridge.CFC_DEFAULT_BACKBONE_UNITS` (pinned against
+/// THIS line by `test_the_rust_and_python_defaults_agree`).
+pub const CFC_DEFAULT_BACKBONE_UNITS: usize = 45;
 
 impl Default for CfcParams {
     fn default() -> CfcParams {
