@@ -20,13 +20,20 @@
 //! - `nn/blstm.rs::feed_forward_backward_overlap` (`:1594-1726`): reproduced in
 //!   [`super::nn::FastBlstm::feed_forward_overlap`] (output-only).
 //!
-//! TWO NET SHAPES (Phase 9 Task 6, spec S4.2). `FastSpectralSegmenter` dispatches on
-//! `BLSTM_Cell_Type` x `BLSTM_Direction` at construction ([`classify_fast_shape`]):
-//! `(lstm, bidirectional)` builds the phase-7 [`FastBlstm`], `(slstm|mamba|cfc, forward)`
-//! builds the causal [`FastCausalNet`] ([`super::cells`]). The other two combinations
-//! typed-bail. THE WINDOWING REGIME FOLLOWS THE SHAPE -- BLSTM runs the OVERLAP
-//! windowed driver only, causal runs the PLAIN whole-sequence forward only -- because
-//! a causal cell inside a window has its state reset at every window boundary.
+//! THREE NET SHAPES (Phase 9 Task 6 + phase-10 Task 7, spec S4.2/S5).
+//! `FastSpectralSegmenter` dispatches on `BLSTM_Cell_Type` x `BLSTM_Direction` at
+//! construction ([`classify_fast_shape`]): `(lstm, bidirectional)` builds the phase-7
+//! [`FastBlstm`], `(slstm|mamba|cfc, forward)` builds the causal [`FastCausalNet`]
+//! ([`super::cells`]), and `(slstm|mamba|cfc, bidirectional)` builds
+//! [`FastBiCell`] ([`super::bicell`]). Only `(lstm, forward)` typed-bails now (a
+//! forward-only LSTM fast twin is phase-10 Task 8).
+//!
+//! THE WINDOWING REGIME FOLLOWS THE SHAPE. BLSTM runs the OVERLAP windowed driver only;
+//! causal runs the PLAIN whole-sequence forward only (a causal cell inside a window has
+//! its state reset at every window boundary); BiCell runs EITHER, per the config, exactly
+//! as the exact tree does -- a bidirectional cell inside a window is the same well-defined
+//! regime a bidirectional LSTM is. TRUNCATE (non-overlap) windowing is refused on every
+//! shape.
 //!
 //! SCOPE (spec S1.2/S1.3, the house typed-bail pattern -- what the gate configs
 //! exercise, everything else typed-bails loudly so scope creep is loud):
@@ -43,6 +50,7 @@
 //!   `BLSTM_window 3.25 / BLSTM_shift 0.8` -> `window_size > 0`, `no_overlap false`).
 //! - CAUSAL shape: any WINDOWED dispatch (`window_size != 0`) typed-bails there
 //!   instead (the phase-9 causal configs use `BLSTM_window 0`).
+//! - BiCELL shape: only TRUNCATE typed-bails; plain and overlap both run (spec S5).
 //!
 //! FORWARD-ONLY: the fast path is inference-only (spec: training stays exact f64), so
 //! `cumulative_error`/`nb_of_classif` (the NN-cost result columns 4 / `len-1`) stay
@@ -64,6 +72,7 @@ use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
 
+use super::bicell::FastBiCell;
 use super::cells::FastCausalNet;
 use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, self_normalize_f32};
 use super::pipeline::FastPipeline;
@@ -79,6 +88,10 @@ pub enum FastNetShape {
     /// [`FastCausalNet`] -- `slstm`/`mamba` (phase 9) or `cfc` (phase-10 Task 6) +
     /// `Direction forward`.
     Causal(CellType),
+    /// [`FastBiCell`] -- `slstm`/`mamba`/`cfc` + `Direction bidirectional` (phase-10
+    /// Task 7, spec S5). OFFLINE ONLY: bidirectional inference is unstreamable by
+    /// construction, so `fast::stream` typed-bails this variant.
+    BiCell(CellType),
 }
 
 /// Classify a net's `(cell_type, direction)` pair, typed-bailing the two combinations
@@ -87,35 +100,31 @@ pub enum FastNetShape {
 /// Supported: `(lstm, bidirectional)` -> [`FastNetShape::Blstm`] (phase 7);
 /// `(slstm|mamba|cfc, forward)` -> [`FastNetShape::Causal`] (`cfc` joined in phase-10
 /// Task 6; the arm is `cell != Lstm`, so it needed no edit -- only the `FastCausalNet`
-/// weight count below it did).
+/// weight count below it did); `(slstm|mamba|cfc, bidirectional)` ->
+/// [`FastNetShape::BiCell`] (phase-10 Task 7, spec S5 -- the arm that FLIPPED from a
+/// typed bail to a real shape).
 ///
-/// Bailed, each pinned by a test:
-/// - a NEW CELL with `Direction bidirectional`. Bidirectional new-cell inference stays
-///   on the exact tree this phase (spec's non-goals: "a bidirectional fast twin is a
-///   mechanical follow-on -- named, not landed"). The hazard the bail closes is not
-///   hypothetical: `NnetSpec` carries neither cell type nor direction, so before
-///   Task 2's rider an sLSTM pack at least as long as the LSTM one was consumed
-///   head-first by `FastBlstm::from_flat` and RAN -- an LSTM's numbers under another
-///   architecture's name, with no tolerance to widen and no gate to catch it.
+/// THE BIDIRECTIONAL BAIL DID NOT DISAPPEAR, IT MOVED. Its hazard argument still holds
+/// verbatim -- `NnetSpec` carries neither cell type nor direction, so a pack at least as
+/// long as another architecture's is consumed head-first and RUNS, producing one
+/// architecture's numbers under another's name, with no tolerance to widen and no gate
+/// to catch it. What changed is that this classifier can now name the shape, so the
+/// SIZING check (`FastBiCell::element_count`, two stacks) is what closes the hazard here,
+/// and the refusal survives where the shape genuinely cannot run: `fast::stream::
+/// StreamingSession::new` (bidirectional is unstreamable by construction) and
+/// [`bail_unsupported_shape`] (the Twin's BLSTM-only gate). Both keep the original
+/// message body, which is why `phase8_gate.rs` / `phase9_stream_causal.rs` /
+/// `phase7_parity_lid.rs` pin it UNCHANGED.
+///
+/// Still bailed here, pinned by a test:
 /// - `Direction forward` with the LSTM cell. A forward-only LSTM fast twin is a NAMED
-///   FOLLOW-ON (spec S5.3 gives it the same status as the bidirectional new-cell
-///   twins), not an oversight: the exact tree builds it fine, only the f32 twin is
-///   missing.
-///
-/// The two message bodies are UNCHANGED from Task 2 so the phase-7/8 legs that pin
-/// them (`phase7_parity_sad.rs`, `phase7_parity_lid.rs`, `phase8_gate.rs`) keep
-/// asserting the same contract for the combinations that are still unsupported.
+///   FOLLOW-ON (spec S6, phase-10 Task 8), not an oversight: the exact tree builds it
+///   fine, only the f32 twin is missing.
 pub(crate) fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<FastNetShape> {
     match (bc.cell_type, bc.direction) {
         (CellType::Lstm, Direction::Bidirectional) => Ok(FastNetShape::Blstm),
         (cell, Direction::Forward) if cell != CellType::Lstm => Ok(FastNetShape::Causal(cell)),
-        (cell, Direction::Bidirectional) => bail!(
-            "cell type '{}' is not supported on the fast inference path (net '{prefix}') in the \
-             BIDIRECTIONAL direction; the f32 fast tree implements the legacy peephole LSTM \
-             bidirectionally and the phase-9 cells CAUSALLY (Direction forward) -- run this \
-             config on the exact path (Inference_Path exact)",
-            cell.as_str()
-        ),
+        (cell, Direction::Bidirectional) => Ok(FastNetShape::BiCell(cell)),
         (_, Direction::Forward) => bail!(
             "Direction '{}' is not supported on the fast inference path (net '{prefix}') with \
              the legacy peephole LSTM cell; a forward-only LSTM fast twin is a named follow-on \
@@ -135,20 +144,27 @@ pub(crate) fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<Fast
 /// algo-3 SAD driver no longer routes through it -- it classifies instead, and builds
 /// a causal net when the config asks for one.
 ///
-/// THE TWIN KEEPS THIS GATE ON ITS SAD NET, deliberately (Task 6 decision). In Mode 7
-/// the SAD net is never run (the frozen-SAD contract: its `result_vec` is a
-/// synthesized constant), so only its SHAPE keys are read and relaxing the check would
-/// be harmless -- but "harmless" is a claim about a path no gate exercises, and the
-/// phase's LID arms train the LID net alone (`drivers/baseline.py` rejects
-/// `--cell-type`/`--direction` on the LID arms outright). Keeping it conservative
-/// costs nothing real and keeps the fast Twin's accepted surface exactly what
-/// phase 7 pinned; Task 7/9 can relax it against a gate that actually covers it.
+/// THE TWIN KEEPS THIS GATE ON ITS SAD NET, deliberately (Task 6 decision, RE-EXAMINED
+/// AND RE-AFFIRMED in phase-10 Task 7 under spec S5's "revisited ONLY if a covering gate
+/// exists" condition -- it does not, so it stays). In Mode 7 the SAD net is never run
+/// (the frozen-SAD contract: its `result_vec` is a synthesized constant), so only its
+/// SHAPE keys are read and relaxing the check would be harmless -- but "harmless" is a
+/// claim about a path no gate exercises, and nothing in Task 7 adds one: the
+/// bidirectional twins land behind the algo-3 SAD driver, the phase's LID arms train the
+/// LID net alone, and `drivers/baseline.py` rejects `--cell-type`/`--direction` on the
+/// LID arms outright. Keeping it conservative costs nothing real and keeps the fast
+/// Twin's accepted surface exactly what phase 7 pinned.
+///
+/// The message body is UNCHANGED where `phase7_parity_lid.rs` pins it (the leading "cell
+/// type '<x>' is not supported on the fast inference path"); only the parenthetical now
+/// names both sibling shapes.
 fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
     if classify_fast_shape(bc, prefix)? != FastNetShape::Blstm {
         bail!(
             "cell type '{}' is not supported on the fast inference path (net '{prefix}'); this \
-             net runs the f32 peephole-LSTM bidirectional twin only (the causal fast twins are \
-             the algo-3 SAD driver's) -- run this config on the exact path (Inference_Path exact)",
+             net runs the f32 peephole-LSTM bidirectional twin only (the causal and \
+             bidirectional new-cell fast twins are the algo-3 SAD driver's) -- run this config \
+             on the exact path (Inference_Path exact)",
             bc.cell_type.as_str()
         );
     }
@@ -222,11 +238,22 @@ pub(crate) fn build_spec_aligned_to(
 /// (phase 7, `window_size > 0`), [`FastSadNet::Causal`] runs the PLAIN whole-sequence
 /// forward (`window_size == 0`) -- a causal cell inside a window would have its state
 /// reset at every window boundary, which is the "pointless-but-defined" regime spec
-/// S1.2 names and S5.3 forbids for streaming.
+/// S1.2 names and S5.3 forbids for streaming -- and [`FastSadNet::BiCell`] runs EITHER
+/// (phase-10 Task 7, spec S5: "BiCell runs OVERLAP or plain per the config, exactly as
+/// the exact tree does"), because a bidirectional cell inside a window is the same
+/// well-defined regime a bidirectional LSTM is.
+///
+/// `large_enum_variant` allowed on the house precedent (`Processor`, `CellLayer`,
+/// `FastCell`): a `FastSadNet` is built ONCE per driver and then only borrowed -- one
+/// per `FastSpectralSegmenter`, never a collection -- so the unused tag padding costs
+/// nothing measurable, while boxing would put a pointer chase in front of the per-file
+/// forward.
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 enum FastSadNet {
     Blstm(FastBlstm),
     Causal(FastCausalNet),
+    BiCell(FastBiCell),
 }
 
 impl FastSadNet {
@@ -234,18 +261,21 @@ impl FastSadNet {
         match self {
             FastSadNet::Blstm(n) => n.output_size(),
             FastSadNet::Causal(n) => n.output_size(),
+            FastSadNet::BiCell(n) => n.output_size(),
         }
     }
     fn normalize_mean(&self) -> &[f32] {
         match self {
             FastSadNet::Blstm(n) => n.normalize_mean(),
             FastSadNet::Causal(n) => n.normalize_mean(),
+            FastSadNet::BiCell(n) => n.normalize_mean(),
         }
     }
     fn normalize_std(&self) -> &[f32] {
         match self {
             FastSadNet::Blstm(n) => n.normalize_std(),
             FastSadNet::Causal(n) => n.normalize_std(),
+            FastSadNet::BiCell(n) => n.normalize_std(),
         }
     }
 }
@@ -265,7 +295,48 @@ fn build_sad_net(
         FastNetShape::Causal(cell) => {
             FastSadNet::Causal(FastCausalNet::from_flat(spec, cell, mamba, cfc, flat)?)
         }
+        FastNetShape::BiCell(cell) => {
+            FastSadNet::BiCell(FastBiCell::from_flat(spec, cell, mamba, cfc, flat)?)
+        }
     })
+}
+
+/// Copy a PLAIN (non-windowed) net forward's posteriors into the shared `result_buf`.
+/// Used by the causal shape (always) and the bidirectional-cell shape (when the config
+/// resolves `window_size 0`); `label` names the shape in the geometry-mismatch message.
+///
+/// A net output LONGER than the result vector is a geometry mismatch, not something to
+/// truncate silently: the exact path indexes straight into its `real_vec_size x 1` buffer
+/// and PANICS there (`NeuronLayer::feed_forward`'s `output[[t, j]]` write), so a quiet
+/// clamp here would mask a real disagreement between `get_blstm_param`'s sizing and the
+/// feature front-end's row count.
+///
+/// ONE DEGENERATE-CASE DIVERGENCE, documented not fixed: on a sequence so short that the
+/// net emits ZERO rows, the exact plain path never reaches `NeuronLayer::feed_forward`
+/// (`Network::drive` returns early on an empty input, `network.rs:326`) and leaves
+/// `result_vec` UNTOUCHED -- i.e. holding the previous channel's contents -- while this
+/// zeroes it. Unreachable on any real file (it needs fewer feature rows than the
+/// sub-sampling ratio) and the fast behaviour is the saner of the two; recorded so a
+/// future reader does not mistake it for an oversight.
+fn copy_plain_output(label: &str, out: &FastMatrix, result_buf: &mut FastMatrix) -> Result<()> {
+    if out.rows > result_buf.rows || out.cols != result_buf.cols {
+        bail!(
+            "{label}: net output {}x{} does not fit the result vector {}x{} (getBLSTMParam \
+             sizing vs the feature row count)",
+            out.rows,
+            out.cols,
+            result_buf.rows,
+            result_buf.cols
+        );
+    }
+    result_buf.data.fill(0.0);
+    let cols = result_buf.cols;
+    for r in 0..out.rows {
+        for c in 0..cols {
+            result_buf.data[r * cols + c] = out.data[r * out.cols + c];
+        }
+    }
+    Ok(())
 }
 
 /// f32 spectral SAD segmenter (algo 3), the fast counterpart of
@@ -533,27 +604,44 @@ impl Segmenter for FastSpectralSegmenter {
         //   Windowing a causal cell resets its state at every window boundary -- the
         //   "pointless-but-defined" regime of spec S1.2, which S5.3 forbids outright
         //   for the streaming session. The phase's causal configs use window 0.
-        let causal = matches!(self.shape, FastNetShape::Causal(_));
-        if causal {
-            if window_size != 0 {
-                bail!(
-                    "fast causal SAD: windowed inference is unsupported (BLSTM_window resolves \
-                     window_size {window_size}); a causal cell's state is reset at every window \
-                     boundary (spec S1.2) -- the phase-9 causal configs use BLSTM_window 0"
-                );
+        // - BiCELL (phase-10 Task 7, spec S5): BOTH the plain forward and the OVERLAP
+        //   windowed driver, "exactly as the exact tree does" -- a bidirectional cell
+        //   inside a window is the same well-defined regime a bidirectional LSTM is
+        //   (each window is an independent whole-sequence run over its own rows), so
+        //   there is nothing to refuse. TRUNCATE stays refused, as for `FastBlstm`.
+        match self.shape {
+            FastNetShape::Causal(_) => {
+                if window_size != 0 {
+                    bail!(
+                        "fast causal SAD: windowed inference is unsupported (BLSTM_window \
+                         resolves window_size {window_size}); a causal cell's state is reset at \
+                         every window boundary (spec S1.2) -- the phase-9 causal configs use \
+                         BLSTM_window 0"
+                    );
+                }
             }
-        } else {
-            if window_size == 0 {
-                bail!(
-                    "fast SAD: the plain (non-windowed) forward is unsupported (BLSTM_window \
-                     resolves window_size 0); the gate configs use windowed overlap"
-                );
+            FastNetShape::Blstm => {
+                if window_size == 0 {
+                    bail!(
+                        "fast SAD: the plain (non-windowed) forward is unsupported (BLSTM_window \
+                         resolves window_size 0); the gate configs use windowed overlap"
+                    );
+                }
+                if no_overlap {
+                    bail!(
+                        "fast SAD: the truncate (non-overlap) windowing is unsupported \
+                         (window_shift resolves < 1); the gate configs use overlap"
+                    );
+                }
             }
-            if no_overlap {
-                bail!(
-                    "fast SAD: the truncate (non-overlap) windowing is unsupported (window_shift \
-                     resolves < 1); the gate configs use overlap"
-                );
+            FastNetShape::BiCell(_) => {
+                if no_overlap {
+                    bail!(
+                        "fast bidirectional SAD: the truncate (non-overlap) windowing is \
+                         unsupported (window_shift resolves < 1); FastBiCell implements the \
+                         plain and OVERLAP regimes (spec S5)"
+                    );
+                }
             }
         }
 
@@ -638,37 +726,19 @@ impl Segmenter for FastSpectralSegmenter {
                 }
                 FastSadNet::Causal(n) => {
                     let out = n.feed_forward(&input);
-                    // A net output LONGER than the result vector is a geometry
-                    // mismatch, not something to truncate silently: the exact path
-                    // indexes straight into its `real_vec_size x 1` buffer and PANICS
-                    // there (`NeuronLayer::feed_forward`'s `output[[t, j]]` write), so
-                    // a quiet clamp here would mask a real disagreement between
-                    // `get_blstm_param`'s sizing and the feature front-end's row count.
-                    if out.rows > result_buf.rows || out.cols != result_buf.cols {
-                        bail!(
-                            "fast causal SAD: net output {}x{} does not fit the result vector \
-                             {}x{} (getBLSTMParam sizing vs the feature row count)",
-                            out.rows,
-                            out.cols,
-                            result_buf.rows,
-                            result_buf.cols
-                        );
-                    }
-                    // ONE DEGENERATE-CASE DIVERGENCE, documented not fixed: on a
-                    // sequence so short that the net emits ZERO rows, the exact plain
-                    // path never reaches `NeuronLayer::feed_forward` (`Network::drive`
-                    // returns early on an empty input, `network.rs:326`) and leaves
-                    // `result_vec` UNTOUCHED -- i.e. holding the previous channel's
-                    // contents -- while this zeroes it. Unreachable on any real file
-                    // (it needs fewer feature rows than the sub-sampling ratio) and the
-                    // fast behaviour is the saner of the two; recorded so a future
-                    // reader does not mistake it for an oversight.
-                    result_buf.data.fill(0.0);
-                    let cols = result_buf.cols;
-                    for r in 0..out.rows {
-                        for c in 0..cols {
-                            result_buf.data[r * cols + c] = out.data[r * out.cols + c];
-                        }
+                    copy_plain_output("fast causal SAD", out, &mut result_buf)?;
+                }
+                // Phase-10 Task 7: the bidirectional cells run EITHER regime, selected
+                // by the config exactly as the exact tree selects it
+                // (`feed_forward_backward`'s `truncates_sequence && overlaps` dispatch,
+                // `nn/blstm.rs:1373-1387`). `no_overlap` is refused above, so
+                // `window_size > 0` here means OVERLAP and nothing else.
+                FastSadNet::BiCell(n) => {
+                    if window_size > 0 {
+                        n.feed_forward_overlap(&input, window_size, window_shift, &mut result_buf);
+                    } else {
+                        let out = n.feed_forward(&input);
+                        copy_plain_output("fast bidirectional SAD", out, &mut result_buf)?;
                     }
                 }
             }

@@ -70,10 +70,14 @@
 //!    zero-seeded `h` writes the identical bits -- a memcpy, not an arithmetic
 //!    identity.
 //!
-//! SCOPE. Causal (`Direction::Forward`) only, forward only, no MLP mode, no backward,
-//! no trainer. Bidirectional new-cell inference stays on the exact tree this phase
-//! (spec S4.2); the fast SAD driver's dispatch + typed bails are in
-//! [`super::driver`].
+//! SCOPE. Forward only, no MLP mode, no backward, no trainer. The NET here
+//! ([`FastCausalNet`]) is causal-only (`Direction::Forward`); the CELL kernels and the
+//! stack driver are not, and phase-10 Task 7 reuses them for the BIDIRECTIONAL twin --
+//! `super::bicell::FastBiCell` runs two [`cell_stack_forward`] passes (one with
+//! `reverse = true`) over the same [`FastCell`] `step` kernels. The per-cell sizing and
+//! construction tables ([`cell_weight_count`] / [`build_cell`]) are shared by both nets,
+//! so a NEW cell is one arm in each rather than two that can disagree. The fast SAD
+//! driver's dispatch + typed bails are in [`super::driver`].
 
 use anyhow::{Result, bail};
 
@@ -1049,15 +1053,103 @@ impl FastCell {
     }
 }
 
+/// The flat-pack element count ONE cell layer of `cell_type` consumes at
+/// `(input_size, output_size)` -- `None` for the legacy peephole LSTM, which has no
+/// f32 cell kernel here (its fast twin is `super::nn::FastBlstm`).
+///
+/// THE single per-cell sizing table. Both net builders ([`FastCausalNet`] and the
+/// bidirectional [`super::bicell::FastBiCell`]) read it, so a new cell is one arm here
+/// rather than two arms that can disagree -- and the caller's `match` on `None` is what
+/// keeps each of them free to bail in its own words.
+pub(crate) fn cell_weight_count(
+    cell_type: CellType,
+    i: usize,
+    o: usize,
+    mamba: &MambaParams,
+    cfc: &CfcParams,
+) -> Option<usize> {
+    match cell_type {
+        CellType::Slstm => Some(FastSlstm::weight_count(i, o)),
+        CellType::Mamba => Some(FastMamba::weight_count(
+            i,
+            o,
+            mamba.d_state,
+            mamba.d_conv,
+            mamba.expand,
+            mamba.dt_rank,
+        )),
+        CellType::Cfc => Some(FastCfc::weight_count(
+            i,
+            o,
+            cfc.backbone_units,
+            cfc.backbone_layers,
+        )),
+        CellType::Lstm => None,
+    }
+}
+
+/// Build ONE cell layer from the head of `flat`, returning it with the element count it
+/// consumed; `None` for the LSTM cell (see [`cell_weight_count`]). The count returned is
+/// [`cell_weight_count`]'s, by construction -- the two cannot drift.
+pub(crate) fn build_cell(
+    cell_type: CellType,
+    flat: &[f64],
+    i: usize,
+    o: usize,
+    mamba: &MambaParams,
+    cfc: &CfcParams,
+) -> Option<(FastCell, usize)> {
+    let used = cell_weight_count(cell_type, i, o, mamba, cfc)?;
+    let cell = match cell_type {
+        CellType::Slstm => FastCell::Slstm(FastSlstm::from_flat(flat, i, o)),
+        CellType::Mamba => FastCell::Mamba(FastMamba::from_flat(
+            flat,
+            i,
+            o,
+            mamba.d_state,
+            mamba.d_conv,
+            mamba.expand,
+            mamba.dt_rank,
+        )),
+        CellType::Cfc => FastCell::Cfc(FastCfc::from_flat(
+            flat,
+            i,
+            o,
+            cfc.backbone_units,
+            cfc.backbone_layers,
+        )),
+        // `cell_weight_count` returned `Some`, so the LSTM arm is already excluded.
+        CellType::Lstm => unreachable!("LSTM has no f32 cell kernel"),
+    };
+    Some((cell, used))
+}
+
 /// Drive `rows` timesteps of one cell over a contiguous row-major `in_data`
 /// (`rows x in_cols`) into `out` (`rows x output_size`), from a FRESH state.
 ///
 /// THE one place the offline stack loops `step`, so [`FastCausalNet`] and the
 /// per-cell `feed_forward` wrappers cannot drift: both are this loop.
-fn run_sequence(cell: &FastCell, in_data: &[f32], rows: usize, in_cols: usize, out: &mut [f32]) {
+///
+/// `reverse` (Phase 10 Task 7) walks time DESCENDING, writing each output at its own
+/// natural-order row index. That is EXACTLY the exact tree's
+/// `Layer::feed_forward_reverse` (`nn/cells/slstm.rs:453-463` and its siblings:
+/// flip the input rows -> plain forward -> flip the output rows back), with the two
+/// flip buffers algebraically removed rather than materialized: the flipped run's
+/// output row `k` is `f(in[T-1-k])` conditioned on `in[T-1..T-k]`, and flipping it back
+/// puts it at row `T-1-k` -- which is what `out[t] = step(in[t])` under a descending `t`
+/// writes, op for op, in the same order. Bit-identical, one fewer copy.
+pub(crate) fn run_sequence(
+    cell: &FastCell,
+    in_data: &[f32],
+    rows: usize,
+    in_cols: usize,
+    out: &mut [f32],
+    reverse: bool,
+) {
     let o = cell.output_size();
     let mut st = cell.state();
-    for t in 0..rows {
+    for k in 0..rows {
+        let t = if reverse { rows - 1 - k } else { k };
         let (ilo, ihi) = (t * in_cols, t * in_cols + in_cols);
         let (olo, ohi) = (t * o, t * o + o);
         cell.step(&in_data[ilo..ihi], &mut st, &mut out[olo..ohi]);
@@ -1139,30 +1231,19 @@ impl FastCausalNet {
         for jj in 0..lstm.len() - 1 {
             let i = lstm[jj] * lsub[jj];
             let o = lstm[jj + 1];
-            n += match cell_type {
-                CellType::Slstm => FastSlstm::weight_count(i, o),
-                CellType::Mamba => FastMamba::weight_count(
-                    i,
-                    o,
-                    mamba.d_state,
-                    mamba.d_conv,
-                    mamba.expand,
-                    mamba.dt_rank,
+            // Phase 10 Task 7 routed the per-cell sizing through the shared
+            // [`cell_weight_count`] table (Task 6's inline match, verbatim, minus the
+            // duplication the bidirectional net would otherwise have added). This is
+            // the choke point BOTH causal construction sites (`fast::driver` and
+            // `fast::stream`) funnel through (`from_flat` calls `element_count` first),
+            // so getting the count right HERE is what keeps a pack from being consumed
+            // head-first by another architecture's reader.
+            n += match cell_weight_count(cell_type, i, o, mamba, cfc) {
+                Some(c) => c,
+                None => bail!(
+                    "fast::cells::FastCausalNet is for the phase-9/10 causal cells only; the \
+                     LSTM cell has no forward-only fast twin (spec S4.2)"
                 ),
-                CellType::Lstm => bail!(
-                    "fast::cells::FastCausalNet is for the phase-9 causal cells only; the LSTM \
-                     cell has no forward-only fast twin (spec S4.2)"
-                ),
-                // Phase 10 Task 6: the CfC arm, which REPLACED Task 1's interim
-                // "no fast twin yet" bail. `classify_fast_shape`'s causal arm admits
-                // ANY non-LSTM cell, and this is the choke point BOTH causal
-                // construction sites (`fast::driver` and `fast::stream`) funnel through
-                // (`from_flat` calls `element_count` first), so getting the count right
-                // HERE is what keeps the cfc pack from being consumed head-first by
-                // another architecture's reader.
-                CellType::Cfc => {
-                    FastCfc::weight_count(i, o, cfc.backbone_units, cfc.backbone_layers)
-                }
             };
         }
         for jj in 0..outn.len() - 1 {
@@ -1208,43 +1289,9 @@ impl FastCausalNet {
         for jj in 0..lstm.len() - 1 {
             let i = lstm[jj] * lsub[jj];
             let o = lstm[jj + 1];
-            let (cell, used) = match cell_type {
-                CellType::Slstm => (
-                    FastCell::Slstm(FastSlstm::from_flat(&flat[pos..], i, o)),
-                    FastSlstm::weight_count(i, o),
-                ),
-                CellType::Mamba => (
-                    FastCell::Mamba(FastMamba::from_flat(
-                        &flat[pos..],
-                        i,
-                        o,
-                        mamba.d_state,
-                        mamba.d_conv,
-                        mamba.expand,
-                        mamba.dt_rank,
-                    )),
-                    FastMamba::weight_count(
-                        i,
-                        o,
-                        mamba.d_state,
-                        mamba.d_conv,
-                        mamba.expand,
-                        mamba.dt_rank,
-                    ),
-                ),
-                CellType::Cfc => (
-                    FastCell::Cfc(FastCfc::from_flat(
-                        &flat[pos..],
-                        i,
-                        o,
-                        cfc.backbone_units,
-                        cfc.backbone_layers,
-                    )),
-                    FastCfc::weight_count(i, o, cfc.backbone_units, cfc.backbone_layers),
-                ),
-                // Unreachable: `element_count` above already bailed on it.
-                CellType::Lstm => unreachable!("LSTM has no causal fast twin"),
-            };
+            // Unreachable `None`: `element_count` above already bailed on the LSTM cell.
+            let (cell, used) = build_cell(cell_type, &flat[pos..], i, o, mamba, cfc)
+                .unwrap_or_else(|| unreachable!("LSTM has no causal fast twin"));
             cells.push(cell);
             pos += used;
         }
@@ -1384,6 +1431,7 @@ impl FastCausalNet {
             input.cols,
             &mut self.scratch,
             &mut self.hidden,
+            false,
         );
 
         // The dense output MLP, ONE hidden row at a time through the shared chain.
@@ -1408,11 +1456,21 @@ impl FastCausalNet {
     }
 }
 
-/// One causal stack forward (`Network::drive` with cell layers), the twin of
+/// One cell stack forward (`Network::drive` with cell layers), the twin of
 /// `fast::nn::lstm_net_forward`: materialize the (crop-gate) net input, then chain
 /// layers with per-layer sub-sampling, each layer a fresh-state [`run_sequence`].
+///
+/// `reverse` selects the per-layer temporal direction, EXACTLY as `Network::drive`'s own
+/// `reverse` flag does (`nn/network.rs:328-394`: one driver, the layer call is the only
+/// thing that differs, and the ASCENDING layer order is unchanged either way). The
+/// sub-sampling happens on NATURAL-ORDER rows in both directions, because in the exact
+/// tree the flip lives INSIDE the layer (`Layer::feed_forward_reverse`) and `drive`
+/// sub-samples the previous layer's natural-order output before handing it over.
+///
+/// Phase 10 Task 7 added the flag + `pub(crate)`; the causal caller passes `false`, so
+/// [`FastCausalNet`] is behavior-unchanged (its parity + streaming gates are the proof).
 #[allow(clippy::too_many_arguments)]
-fn cell_stack_forward(
+pub(crate) fn cell_stack_forward(
     cells: &[FastCell],
     subs: &[usize],
     in_data: &[f32],
@@ -1421,6 +1479,7 @@ fn cell_stack_forward(
     in_stride: usize,
     scr: &mut Scratch,
     dest: &mut Vec<f32>,
+    reverse: bool,
 ) -> (usize, usize) {
     copy_view_into(in_data, in_rows, in_cols, in_stride, &mut scr.ping);
     let mut cur_rows = in_rows;
@@ -1438,7 +1497,14 @@ fn cell_stack_forward(
                 &mut scr.sub,
             );
             ensure_len(&mut scr.pong, sr * o);
-            run_sequence(cell, &scr.sub[..sr * sc], sr, sc, &mut scr.pong[..sr * o]);
+            run_sequence(
+                cell,
+                &scr.sub[..sr * sc],
+                sr,
+                sc,
+                &mut scr.pong[..sr * o],
+                reverse,
+            );
             cur_rows = sr;
         } else {
             ensure_len(&mut scr.pong, cur_rows * o);
@@ -1448,6 +1514,7 @@ fn cell_stack_forward(
                 cur_rows,
                 cur_cols,
                 &mut scr.pong[..cur_rows * o],
+                reverse,
             );
         }
         cur_cols = o;

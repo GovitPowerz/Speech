@@ -338,33 +338,44 @@ fn fast_bails_on_pitch_pass() {
     }
 }
 
-/// PHASE 9 TASK 2 RIDER (spec S4.2), NARROWED BY TASK 6: the fast tree parses the
-/// port-only structural keys and implements TWO shapes -- the peephole-LSTM
-/// BIDIRECTIONAL twin (phase 7) and the CAUSAL new-cell twins (`slstm`/`mamba` +
-/// `Direction forward`, `fast::cells`). This file pins the tier2 config, which is
-/// LSTM + bidirectional, so BOTH mutations below are still refusals: a new cell here
-/// is a new cell in the BIDIRECTIONAL direction (a named follow-on), and
-/// `Direction forward` here is a causal LSTM (also a named follow-on). The causal
-/// combinations that now BUILD are pinned in `tests/phase9_fast_parity.rs`.
+/// THE (cell x direction) DISPATCH TABLE from the tier2 config's point of view.
+/// NARROWED TWICE, each narrowing recorded rather than rewritten away, because "which
+/// combinations used to be RED" is the contract's history:
 ///
-/// This is not hypothetical arithmetic-free bookkeeping: before the bail, an sLSTM
-/// config's only symptom was `FastBlstm::from_flat`'s length check -- which fires
-/// only for a SHORT pack. An sLSTM pack at least as long as the LSTM one was
-/// consumed head-first and RAN, producing an LSTM's numbers under an sLSTM's name.
+/// - PHASE 9 TASK 6 landed the CAUSAL new-cell twins (`slstm`/`mamba` + `Direction
+///   forward`), pinned in `tests/phase9_fast_parity.rs`.
+/// - PHASE 10 TASK 7 landed the BIDIRECTIONAL new-cell twins (`fast::bicell::FastBiCell`,
+///   spec S5), pinned in `tests/phase10_bicell_parity.rs`. So the loop below FLIPPED from
+///   "must bail" to "must build": on the tier2 config (bidirectional) a `Cell_Type slstm`
+///   is now a supported shape.
+///
+/// WHAT THE FLIP COSTS, stated plainly rather than left implicit. The bail this loop used
+/// to assert existed because `NnetSpec` carries neither cell type nor direction, so a
+/// pack at least as long as the reader expects is consumed HEAD-FIRST and RUNS --
+/// producing one architecture's numbers under another's name. That hazard is NOT fully
+/// closed by naming the shape: the sizing check (`FastBiCell::element_count`) catches a
+/// SHORT pack only, and an sLSTM bidirectional net is SHORTER than the LSTM one at this
+/// geometry, so the config below builds an sLSTM net from tier2's LSTM pack. It is the
+/// same inherent property the causal cells have carried since phase 9 (a `slstm_forward`
+/// config pointed at an LSTM pack builds too) and it is a property of an UNTAGGED flat
+/// pack, not of this dispatch: the config declares the architecture, and pointing it at
+/// another architecture's `.bin` is a user error the format cannot detect. What the
+/// dispatch does guarantee is that the declared architecture is the one that RUNS.
+///
+/// `Direction forward` with the LSTM cell is STILL a refusal (a forward-only LSTM fast
+/// twin is phase-10 Task 8, spec S6).
 #[test]
-fn fast_bails_on_unsupported_cell_type_and_direction() {
+fn fast_dispatch_per_cell_type_and_direction() {
+    // The tier2 config is BIDIRECTIONAL, so a new cell here selects `FastBiCell`.
     for cell in ["slstm", "mamba"] {
         let mut m = tier2_map(Some("fast"));
         m.insert("BLSTM_Cell_Type".into(), cell.into());
-        match build_fast_bag(&mut m) {
-            Err(e) => assert!(
-                e.to_string().contains(&format!(
-                    "cell type '{cell}' is not supported on the fast inference path"
-                )),
-                "expected a cell-type bail for {cell}, got: {e}"
-            ),
-            Ok(_) => panic!("fast + cell type {cell} must bail"),
-        }
+        let bag = build_fast_bag(&mut m)
+            .unwrap_or_else(|e| panic!("fast + bidirectional {cell} must build: {e}"));
+        assert!(
+            matches!(bag.processor(0), Processor::FastSpectral(_)),
+            "{cell}: expected the fast SAD driver"
+        );
     }
 
     // Direction: the causal shape needs a `hidden`-wide output MLP, so the config

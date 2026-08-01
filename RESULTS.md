@@ -1460,3 +1460,105 @@ the phase-7 "SAD arms: memory <= 1.4x of exact" becomes **<= 0.85x of exact** (m
 and the phase-9 "fast maxrss within 1.3x of the ~68 MB plateau" becomes **within 1.3x of the
 ~42 MB plateau**. A future local run landing back near 67 MB on a fast SAD/causal leg means the
 f64 widen has crept back in. Still NOT CI-asserted; this-box numbers, hardware named per R5.
+
+## Phase 10 -- the bidirectional f32 cell twins (Task 7, spec S5)
+
+`fast::bicell::FastBiCell` closes the `(cell x direction)` fast matrix on the bidirectional
+side: `{slstm, mamba, cfc} x bidirectional` moved from a typed bail to a real f32 shape
+(forward stack + REVERSED stack + hcat + the shared per-row `DenseRowChain`), driven by a
+FRESH windowed-overlap loop over the already-shared span helpers. `FastBlstm` and its
+`overlap_window_step` are BYTE-UNTOUCHED (approach A) -- the diff does not touch
+`src/rust/src/fast/nn.rs` at all.
+
+### Parity: exact f64 bidirectional vs `FastBiCell` (`tests/phase10_bicell_parity.rs`, CI)
+
+Both regimes are live and pinned. PLAIN is the committed `BLSTM_window 0.0`; OVERLAP is an
+in-test `BLSTM_window 0.5` overlay resolving `window_size 25` / `window_shift 10` at 8 kHz
+(a real overlapping grid, stride 10 over a 51-frame span), which is what exercises the fresh
+accumulate/average loop. `overlap_and_plain_are_distinct_regimes` is the guard that keeps the
+second leg from being a copy of the first: the exact path's own plain-vs-overlap posteriors
+differ on 50/50 rows, and the fast path's on 47/50.
+
+| leg | max_abs | max_rel | boundary count/type | max_dt |
+|---|---|---|---|---|
+| slstm plain / overlap | 7.34e-7 / 7.51e-7 | 3.69e-6 / 3.81e-6 | IDENTICAL | **0.0** |
+| mamba plain / overlap | 1.87e-6 / 1.86e-6 | **1.81e-5** / 1.80e-5 | IDENTICAL | **0.0** |
+| cfc plain / overlap | 9.52e-7 / 9.43e-7 | 3.25e-6 / 3.07e-6 | IDENTICAL | **0.0** |
+| crossing legs (6, see below) | worst **2.00e-6** | worst 6.39e-6 | IDENTICAL | **0.0** |
+
+PINS: `2.0e-4` relative (`measured * 10` rounded up, set by mamba) and `1.0e-4` absolute
+(~50x headroom). The relative pin is LOOSER than the causal tier's `1.0e-4` and that is a
+measurement, not a concession -- the bidirectional mamba row is 2.3x the causal one's
+(7.74e-6), which is what a second recurrent stack plus a twice-as-wide dense fan-in buys.
+Mamba's `max_rel` is a genuine relative number, not a small-denominator artifact: it is a
+~1.9e-6 absolute delta over a posterior of ~0.10, well above the comparator's 1e-2 scale
+floor.
+
+**THE CROSSING SWEEP NEEDED A SECOND KNOB, and the reason is worth recording.** Phase 9's
+decision-layer leg sweeps the output MLP's BIAS until the segmentation carries interior
+boundaries. That is enough for five of the six (cell x regime) rows here, but NOT for
+`slstm/plain`: its posterior spans `[0.105, 0.516]`, a logit swing of 2.20 against the 1.25 a
+rising/falling round trip (0.6 / 0.3) needs, leaving no offset whose crossings survive
+`min_speech`/`min_silence` 0.2 s (5 rows at this 0.04 s step). MEASURED: a 129-point
+bias-only sweep over `[-8, +8]` finds ZERO interior boundaries there. The sweep therefore
+tries `gain 1` (bias only, the phase-9 knob) first at every offset and reaches for a gain on
+the dense weight ROWS only when that fails -- an affine map on the pre-activation, so both
+cell stacks stay untouched and the compared crossings are crossings of the real curve.
+Settled points: slstm plain `gain 2, +2.0` (1 boundary); slstm overlap `gain 1, +0.75` (1);
+mamba plain/overlap `gain 1, +0.0` -- i.e. AS COMMITTED (3 each); cfc plain `gain 1, +1.0`
+(1); cfc overlap `gain 1, +0.5` (1).
+
+### Bench: RTF + peak RSS per cell, both regimes
+
+`speech bench --repeat=1 --path={exact,fast}`, 3 independent fresh processes per (leg, path),
+the committed 60 s stereo `phase4d/prcts_excerpt.wav` (`audio_s = 120.00`), the phase-9
+bidirectional fixture configs + seed packs staged against it, backprop off,
+`Neural_Networks_BackPropagation_Epochs 0`. Apple M4 Pro (arm64), macOS 26.5.2,
+`cargo build --release -j 4`. Means of 3.
+
+| cell | regime | exact rtf | fast rtf | speedup | exact maxrss_mb | fast maxrss_mb | rss ratio |
+|---|---|---|---|---|---|---|---|
+| slstm | plain | 0.001194 | 0.000175 | **6.82x** | 54.740 | 43.865 | 0.801x |
+| mamba | plain | 0.001138 | 0.000175 | **6.50x** | 57.438 | 42.453 | 0.739x |
+| cfc | plain | 0.001139 | 0.000178 | **6.40x** | 57.333 | 42.448 | 0.740x |
+| slstm | overlap | 0.001361 | 0.000209 | **6.50x** | 53.422 | 41.297 | 0.773x |
+| mamba | overlap | 0.001254 | 0.000227 | **5.52x** | 54.125 | 42.115 | 0.778x |
+| cfc | overlap | 0.001257 | 0.000224 | **5.60x** | 53.433 | 41.338 | 0.774x |
+
+READ THESE AS A FRONT-END MEASUREMENT, not a cell comparison (R5). The committed fixtures are
+TINY nets (`23,4` recurrent / `8,1` output), so the three cells' fast wall-clocks land within
+2% of each other in the plain regime (0.021003 / 0.020996 / 0.021363 s) -- the FFT + mel
+front-end dominates and the cell is noise against it, exactly as the phase-9 regime-vs-cell
+decomposition and the Task-5 causal bench row found. What the table does establish:
+
+- **The fast RSS lands on the ~42 MB post-mel plateau for all three cells and both regimes**
+  (41.3-43.9 MB), i.e. the Task-5 plateau is cell- AND direction-independent. A second
+  recurrent stack costs nothing visible in peak RSS at this width, because the plateau is set
+  by the front-end, not the net.
+- **The exact path is 53-57 MB across the board.** The phase-9 finding that exact-Mamba costs
+  ~2x (107.8 MB) is a WIDTH effect (the per-timestep SSM activation cache `Network` retains);
+  at this fixture's width the three cells are within 4 MB of each other.
+- **The overlap regime costs ~20-30% more wall-clock than plain on the fast path** (0.0210 ->
+  0.0251 s slstm, 0.0210 -> 0.0272 mamba, 0.0214 -> 0.0269 cfc) and slightly LESS peak RSS
+  (each window is a bounded block rather than the whole sequence). Windows overlap, so rows
+  are forwarded more than once; that is the regime's definition, not a fast-path artifact --
+  the exact path pays the same ~10-15%.
+
+### The Twin's frozen-SAD gate: RE-EXAMINED, STAYS CONSERVATIVE
+
+Spec S5 says the Twin's `bail_unsupported_shape` is revisited ONLY if a covering gate exists.
+It does not, so it stays, and the doc comment now says so explicitly. Nothing in this task
+adds one: the bidirectional twins land behind the algo-3 SAD driver; in Mode 7 the Twin's SAD
+net is never run (the frozen-SAD contract); and `drivers/baseline.py` rejects
+`--cell-type`/`--direction` on the LID arms outright. The refusal costs nothing real and
+keeps the fast Twin's accepted surface exactly what phase 7 pinned.
+
+### No streaming leg, by construction
+
+A bidirectional net is UNSTREAMABLE: the reverse stack's state at time `t` is a function of
+the samples AFTER `t`, so its first frame's output depends on the last one. There is no
+bounded lookahead that makes it causal -- unlike the phase-8 windowed BLSTM (bounded by the
+window) or the phase-9 causal cells (no lookahead at all). `StreamingSession::new` typed-bails
+the shape; the bail message body MOVED from `classify_fast_shape` (which now names the shape,
+because the offline tree implements it) into the streaming session VERBATIM, which is why
+`phase8_gate.rs` and `phase9_stream_causal.rs` pin it UNMODIFIED.

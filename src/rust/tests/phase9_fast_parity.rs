@@ -383,25 +383,58 @@ fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
         );
     }
 
-    // BAILED (1): a new cell in the BIDIRECTIONAL direction -- the bidirectional fast
-    // twin is a named follow-on (spec non-goals), so it must fail LOUDLY rather than
-    // run half an architecture.
+    // WAS BAILED (1), NOW BUILDS: a new cell in the BIDIRECTIONAL direction. Phase-10
+    // Task 7 landed `fast::bicell::FastBiCell`, so this combination is a supported shape
+    // rather than a named follow-on; its parity legs live in
+    // `tests/phase10_bicell_parity.rs` (which drives the committed BIDIRECTIONAL
+    // fixtures, not these forward ones). Kept here as the DISPATCH statement: the
+    // forward-fixture config, re-declared bidirectional, must now classify and build.
     for cell in ["slstm", "mamba", "cfc"] {
         let mut m = causal_map(cell, Some("fast"), None);
         m.insert("BLSTM_Direction".into(), "bidirectional".into());
         // A bidirectional net's output MLP consumes 2*hidden, so widen it or
         // `BlstmConfig::from_legacy` rejects the config before the fast dispatch runs.
         m.insert("BLSTM_OutputNeuronNb".into(), "8,1".into());
-        m.insert("BLSTM_weightsFile".into(), String::new());
-        let err = build(&mut m)
+        // Point at the matching BIDIRECTIONAL pack: this shape carries TWO recurrent
+        // stacks, and the forward-sized seed is short by exactly one of them (the
+        // length check that leg is pinned by, in the phase-10 suite).
+        m.insert(
+            "BLSTM_weightsFile".into(),
+            fixture(&format!("phase9/{cell}_bidirectional_seed.bin"))
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        let bag =
+            build(&mut m).unwrap_or_else(|e| panic!("fast + bidirectional {cell} must build: {e}"));
+        assert!(
+            matches!(bag.processor(0), Processor::FastSpectral(_)),
+            "{cell}: expected the fast SAD driver"
+        );
+    }
+
+    // STILL BAILED, and where it matters most: STREAMING. A bidirectional net is
+    // unstreamable by construction (the reverse pass reads the whole sequence), so the
+    // shape the offline tree now builds must still be refused there -- the phase-8 /
+    // phase-9 streaming legs pin the message body UNMODIFIED, and this asserts the same
+    // contract from the cell-parametric side.
+    for cell in ["slstm", "mamba", "cfc"] {
+        let mut m = causal_map(cell, Some("fast"), None);
+        m.insert("BLSTM_Direction".into(), "bidirectional".into());
+        m.insert("BLSTM_OutputNeuronNb".into(), "8,1".into());
+        // The streaming session's own earlier bails (algo 3, mono, frozen gain) come
+        // BEFORE the shape dispatch, so the config has to clear them or this leg would
+        // pass on the wrong bail.
+        m.insert("Audio_fixed_gain".into(), "0.5".into());
+        let err = speech::fast::stream::StreamingSession::new(&m, 8000.0, 1)
             .err()
-            .unwrap_or_else(|| panic!("fast + bidirectional {cell} must bail"));
+            .unwrap_or_else(|| panic!("streaming + bidirectional {cell} must bail"));
         let msg = err.to_string();
         assert!(
             msg.contains(&format!(
                 "cell type '{cell}' is not supported on the fast inference path"
             )) && msg.contains("BIDIRECTIONAL"),
-            "expected a bidirectional-cell bail for {cell}, got: {err}"
+            "expected a bidirectional-streaming bail for {cell}, got: {err}"
         );
     }
 
