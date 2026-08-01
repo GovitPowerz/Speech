@@ -2819,6 +2819,11 @@ mod tests {
         let slstm = FastSlstm::from_flat(&weights(FastSlstm::weight_count(I, O)), I, O);
         let mamba = fast_mamba(I, O);
         let cfc = fast_cfc(I, O);
+        // Phase-10 Task 8 (T8 REVIEW I-1): the LSTM row was MISSING here. Its
+        // `k_in = x.len().min(i)` crop is the same contract as its siblings' and was
+        // correct by inspection, but "correct by inspection" is not a pin -- and the
+        // task's own report cited this test for it. Cited and now true.
+        let lstm = fast_lstm(I, O);
         let wide = seq(T, I + 2, 0.4);
         let mut cropped = FastMatrix::zeros(T, I);
         for r in 0..T {
@@ -2828,6 +2833,7 @@ mod tests {
         assert_eq!(slstm.feed_forward(&wide), slstm.feed_forward(&cropped));
         assert_eq!(mamba.feed_forward(&wide), mamba.feed_forward(&cropped));
         assert_eq!(cfc.feed_forward(&wide), cfc.feed_forward(&cropped));
+        assert_eq!(lstm.feed_forward(&wide), lstm.feed_forward(&cropped));
 
         let narrow = seq(T, 2, 0.4);
         assert_eq!(slstm.feed_forward(&narrow).cols, O);
@@ -2852,6 +2858,18 @@ mod tests {
         assert!(
             mamba
                 .feed_forward(&narrow)
+                .data
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        // The LSTM narrow leg, matching the sLSTM/mamba pattern (finite + right width)
+        // rather than the CfC's stronger element-for-element claim: like sLSTM, this cell
+        // absorbs a narrow input by summing FEWER TERMS, which is the exact path's
+        // "use the top `cols` weight rows" branch and not a literal zero-pad into a
+        // materialized row.
+        assert_eq!(lstm.feed_forward(&narrow).cols, O);
+        assert!(
+            lstm.feed_forward(&narrow)
                 .data
                 .iter()
                 .all(|v| v.is_finite())

@@ -10,7 +10,7 @@
     "cfc_bidirectional_seed.bin": "dab7e6cccf364933d76c33db401f97c64f4ba66790ae6a2feb6d495de8d9313b",
     "cfc_forward.config": "9906407b86b6684783173836731fcaf8765803681a82a3b47f0090f27995915f",
     "cfc_forward_seed.bin": "db2c2ae9615145791e940f04647552f3791f3989bde4bb0aaf4dc3ef87184808",
-    "lstm_forward.config": "587ae721b01070b2ca4423090beb1c4a78a973d7ab941a386d9d4764f1bd3628",
+    "lstm_forward.config": "4e5c4a7544392bde3c278718577add61b1d7deeeb5731c43c6e704f87d67dc53",
     "lstm_forward_seed.bin": "745b77a845de350c185a9aa1f4c77597f81b51e783b10de8edcab259a4e7300e",
     "mamba_bidirectional.config": "94a18fa547640e81baba32c04eb01171f2ae3efebd5708f2ff58c00d33f7da5d",
     "mamba_bidirectional_seed.bin": "dd12fd8b710a348599d8c0e7fbf2dcd9385e56d2bcde105db4638b58f06d061d",
