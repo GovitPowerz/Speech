@@ -43,9 +43,14 @@
 //! AFTER `t`, so its output at the first frame depends on the last one -- there is no
 //! bounded lookahead that makes it causal, unlike the phase-8 windowed BLSTM (bounded by
 //! the window) or the phase-9 causal cells (no lookahead at all). `fast::stream::
-//! StreamingSession::new` therefore typed-bails this shape, pinned by
-//! `phase8_gate.rs` + `phase9_stream_causal.rs` (both UNMODIFIED: the bail message body
-//! moved from `classify_fast_shape` to the streaming session, wording intact).
+//! StreamingSession::new` therefore typed-bails this shape, pinned by `phase8_gate.rs` +
+//! `phase9_stream_causal.rs`, BOTH UNMODIFIED. Precisely why they stay green: the refusal
+//! moved from `classify_fast_shape` to the streaming session with its LEADING CLAUSE
+//! preserved (`cell type '<x>' is not supported on the fast inference path ... in the
+//! BIDIRECTIONAL direction`), which is exactly what those legs assert -- a PREFIX
+//! SUBSTRING, not the whole body. The TAIL was rewritten, deliberately: the classifier's
+//! old advice ("run this config on the exact path") is now WRONG, because the offline
+//! fast path implements this shape.
 //!
 //! SCOPE, same posture as the rest of `fast/`: INFERENCE-ONLY (forward, no backward, no
 //! trainer), no MLP mode, and the two windowing regimes the exact tree's algo-3 SAD
@@ -399,7 +404,7 @@ impl FastBiCell {
     ///
     /// | exact | here |
     /// |---|---|
-    /// | `:1964-1973` nominal length `(2w+1)` / each LSTM then output ratio, gated on `is_sub` | identical |
+    /// | `:1963-1973` nominal length `(2w+1)` / each LSTM then output ratio, gated on `is_sub` | identical |
     /// | `:1981-1982` begin = `max(0, jj-w)` snapped DOWN to the ssr grid | [`window_begin`] |
     /// | `:1984-1988` end = `begin + 2w`, clamped to `rows-1`, snapped UP | [`window_end`] |
     /// | `:1992-2007` partial-window `length_short` recompute (sequential floors) | identical |
@@ -824,11 +829,15 @@ mod tests {
             let mut net = FastBiCell::from_flat(&sp, cell, &p, &c, &weights(n)).unwrap();
             let input = seq(21, 4, 0.45);
             // jj = 0, 7, 14 -> begins 0, 4, 11 with `window_begin`'s `jj - w`... so a
-            // hand-built expectation would re-derive the grid. Instead assert the
-            // WEAKER but independent property: every row is covered (finite) and the
-            // first window's rows match a direct `feed_forward` of that exact block,
-            // since window 0 covers rows [0, 7) alone (begin 0, end 6) and jj = 7's
-            // window begins at 4 -- so rows [0, 4) are single-covered.
+            // hand-built expectation would re-derive the whole grid. Instead assert the
+            // WEAKER but independent SINGLE-COVERED-PREFIX property: window 0 covers rows
+            // [0, 7) alone (begin 0, end 6) and jj = 7's window begins at 4, so rows
+            // [0, 4) are covered exactly ONCE -- their count quotient is a division by
+            // 1.0, and they must therefore be BIT-identical to a direct `feed_forward` of
+            // that block. (Coverage is NOT total here: at window 3 / shift 7 the last
+            // window begins at 11 and ends at 17, so rows 18-20 are genuinely uncovered
+            // and carry the reproduced `0/0` NaN -- which is what
+            // `overlap_leaves_uncovered_rows_nan` pins.)
             let mut out = FastMatrix::zeros(21, 1);
             net.feed_forward_overlap(&input, 3, 7, &mut out);
             let block = FastMatrix {

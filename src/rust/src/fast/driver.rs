@@ -112,9 +112,12 @@ pub enum FastNetShape {
 /// SIZING check (`FastBiCell::element_count`, two stacks) is what closes the hazard here,
 /// and the refusal survives where the shape genuinely cannot run: `fast::stream::
 /// StreamingSession::new` (bidirectional is unstreamable by construction) and
-/// [`bail_unsupported_shape`] (the Twin's BLSTM-only gate). Both keep the original
-/// message body, which is why `phase8_gate.rs` / `phase9_stream_causal.rs` /
-/// `phase7_parity_lid.rs` pin it UNCHANGED.
+/// [`bail_unsupported_shape`] (the Twin's BLSTM-only gate). Both keep the refusal's
+/// LEADING CLAUSE -- which is what `phase8_gate.rs` / `phase9_stream_causal.rs` /
+/// `phase7_parity_lid.rs` actually assert (a PREFIX SUBSTRING, not the body), hence all
+/// three stay green UNMODIFIED. The streaming site REWRITES the tail, deliberately: the
+/// old "run this config on the exact path" advice is now wrong there, since the offline
+/// fast path implements the shape.
 ///
 /// Still bailed here, pinned by a test:
 /// - `Direction forward` with the LSTM cell. A forward-only LSTM fast twin is a NAMED
@@ -313,7 +316,7 @@ fn build_sad_net(
 ///
 /// ONE DEGENERATE-CASE DIVERGENCE, documented not fixed: on a sequence so short that the
 /// net emits ZERO rows, the exact plain path never reaches `NeuronLayer::feed_forward`
-/// (`Network::drive` returns early on an empty input, `network.rs:326`) and leaves
+/// (`Network::drive` returns early on an empty input, `network.rs:329`) and leaves
 /// `result_vec` UNTOUCHED -- i.e. holding the previous channel's contents -- while this
 /// zeroes it. Unreachable on any real file (it needs fewer feature rows than the
 /// sub-sampling ratio) and the fast behaviour is the saner of the two; recorded so a
@@ -717,7 +720,7 @@ impl Segmenter for FastSpectralSegmenter {
             // cross-channel reuse quirk). CAUSAL: the plain whole-sequence forward,
             // whose posteriors are COPIED into a result_buf that is zeroed first --
             // mirroring the exact plain path, where `NeuronLayer::feed_forward` does
-            // its own `output.fill(0.0)` (`nn/layers.rs:939`) and then writes exactly
+            // its own `output.fill(0.0)` (`nn/layers.rs:948`) and then writes exactly
             // `output_length` rows, so any tail beyond the net's own output length
             // stays zero and NOTHING seeds from the previous channel.
             match net {

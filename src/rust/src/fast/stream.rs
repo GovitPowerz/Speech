@@ -1597,7 +1597,8 @@ impl StreamingSession {
     /// BIDIRECTIONAL new cell. `classify_fast_shape` now names it (`FastNetShape::BiCell`,
     /// built offline by `fast::bicell::FastBiCell`), but it is unstreamable BY
     /// CONSTRUCTION -- the reverse stack reads the whole sequence -- so the session bails
-    /// on it with the message body that used to live in the classifier, unchanged.
+    /// on it, keeping the LEADING CLAUSE of the refusal that used to live in the
+    /// classifier (what the phase-8/9 streaming legs pin) and rewriting its tail.
     ///
     /// Validated contract, each bail pinned (`tests/phase8_gate.rs::validation_bails` for the
     /// windowed arm, `tests/phase9_stream_causal.rs::validation_bails` +
@@ -1643,9 +1644,10 @@ impl StreamingSession {
         let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
 
         // Cell x direction dispatch (spec S5.2), through the SAME `classify_fast_shape`
-        // choke point the offline fast SAD driver uses -- so a config the fast tree
-        // refuses (a bidirectional new cell, a causal LSTM) is refused HERE with the
-        // identical wording, and the supported pair selects the arm.
+        // choke point the offline fast SAD driver uses -- so a config the OFFLINE fast
+        // tree refuses (a causal LSTM) is refused HERE with the identical wording, and a
+        // supported pair selects the arm. The one shape refused here but NOT offline
+        // (a bidirectional new cell) is handled immediately below.
         let shape = classify_fast_shape(&bc, "BLSTM")?;
         // BIDIRECTIONAL IS UNSTREAMABLE BY CONSTRUCTION (phase-10 Task 7, spec S5): the
         // reverse stack's state at time `t` is a function of the samples AFTER `t`, so
@@ -1653,9 +1655,12 @@ impl StreamingSession {
         // lookahead that makes it causal -- unlike the phase-8 windowed BLSTM (bounded by
         // the window) or the phase-9 causal cells (no lookahead at all). The refusal used
         // to come from `classify_fast_shape` itself, which now NAMES the shape because the
-        // OFFLINE fast tree implements it (`fast::bicell::FastBiCell`); the message body
-        // moved here VERBATIM, which is why `phase8_gate.rs` and
-        // `phase9_stream_causal.rs` pin it unchanged.
+        // OFFLINE fast tree implements it (`fast::bicell::FastBiCell`). The refusal moved
+        // here with its LEADING CLAUSE preserved -- which is what `phase8_gate.rs` and
+        // `phase9_stream_causal.rs` assert (a PREFIX SUBSTRING, not the body), hence both
+        // stay green UNMODIFIED -- and its TAIL REWRITTEN, because the classifier's old
+        // advice ("run this config on the exact path") is now wrong here: the offline fast
+        // path DOES implement this shape, it is streaming that cannot.
         if let FastNetShape::BiCell(cell) = shape {
             bail!(
                 "cell type '{}' is not supported on the fast inference path (net 'BLSTM') in the \

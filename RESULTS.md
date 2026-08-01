@@ -1559,6 +1559,15 @@ A bidirectional net is UNSTREAMABLE: the reverse stack's state at time `t` is a 
 the samples AFTER `t`, so its first frame's output depends on the last one. There is no
 bounded lookahead that makes it causal -- unlike the phase-8 windowed BLSTM (bounded by the
 window) or the phase-9 causal cells (no lookahead at all). `StreamingSession::new` typed-bails
-the shape; the bail message body MOVED from `classify_fast_shape` (which now names the shape,
-because the offline tree implements it) into the streaming session VERBATIM, which is why
-`phase8_gate.rs` and `phase9_stream_causal.rs` pin it UNMODIFIED.
+the shape.
+
+WHY THE PHASE-8/9 STREAMING LEGS STAY GREEN UNMODIFIED, stated precisely (the earlier
+"moved verbatim" phrasing was wrong and is corrected here): the refusal moved out of
+`classify_fast_shape` -- which now NAMES the shape, because the offline tree implements it --
+into the streaming session with its LEADING CLAUSE preserved (`cell type '<x>' is not
+supported on the fast inference path ... in the BIDIRECTIONAL direction`) and its TAIL
+REWRITTEN. The pins survive because `phase8_gate.rs:590`, `phase9_stream_causal.rs:812-813`
+and `phase7_parity_lid.rs:569` assert PREFIX SUBSTRINGS, not the message body. The tail had
+to change: the classifier's old advice ("run this config on the exact path") is now WRONG at
+the streaming site, because the offline fast path DOES implement this shape -- it is
+streaming, specifically, that cannot.
