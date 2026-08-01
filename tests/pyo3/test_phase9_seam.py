@@ -113,8 +113,14 @@ GEOMETRY = cast(dict[str, int], MANIFEST["geometry"])
 # The manifest carries the epsilons + `max_weights` every pin below was measured at, and it
 # is the one committed file its own per-file digest table cannot cover. Pinned here instead
 # (T5 review I3) so a manifest edit cannot silently move a tolerance's operating point.
-MANIFEST_SHA256 = "02c1f70aeaea5b0868fa99eaf9391d6effb21a6bd629b7dfec76ff9e76cc3dd2"
+MANIFEST_SHA256 = "ee13c8e3ac20fc0b6efe347fd220cd84a0b7ae10135826cca52814119c6a591f"
 
+# The port-only cells' SAD fixtures -- the ones this file's `grad_check` tier exists for.
+# `lstm_forward` (phase-10 Task 8) is IN the manifest but deliberately NOT here: the
+# legacy peephole LSTM's backward already has a real oracle (the phase-2/3 goldens against
+# the compiled `LSTMLayer`), and that row was generated for the RUST fast-parity/streaming
+# tiers. The whole-manifest legs below (digests, the gradcheck-reroute strip guard) still
+# cover it. See `scripts/extract_phase9_fixtures.py`'s PROVENANCE note.
 SAD_FIXTURES = ("slstm_bidirectional", "slstm_forward", "mamba_bidirectional", "mamba_forward", "cfc_bidirectional", "cfc_forward")
 MODE7_TWINS = ("twin_mode7_lid_slstm", "twin_mode7_lid_cfc")
 SAD_EPSILON = float(cast(float, MANIFEST["measured"]["sad_epsilon"]))

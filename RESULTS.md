@@ -1039,7 +1039,7 @@ wall-clock to within the ranges below.
 |---|---|---|---|---|---|---|
 | lstm / bidirectional (phase-6 baseline) | 3.25 windowed overlap | exact | 0.163284 [0.158799-0.171087] | 0.002177 | 53.73 | baseline |
 | lstm / bidirectional (phase-6 baseline) | 3.25 windowed overlap | fast | 0.035443 [0.035162-0.035613] | 0.000473 | 68.56 | **4.61x** |
-| lstm / forward (control) | 0, plain | exact | 0.098132 [0.097867-0.098532] | 0.001308 | 54.84 | n/a (fast typed-bails, S5.3) |
+| lstm / forward (control) | 0, plain | exact | 0.098132 [0.097867-0.098532] | 0.001308 | 54.84 | (was n/a; FILLED by phase-10 T8 -- **5.97x**, re-measured, see below) |
 | slstm / forward | 0, plain | exact | 0.096118 [0.095678-0.096488] | 0.001282 | 56.98 | baseline |
 | slstm / forward | 0, plain | fast | 0.019138 [0.018831-0.019292] | 0.000255 | 68.15 | **5.02x** |
 | mamba / forward | 0, plain | exact | 0.104328 [0.104099-0.104699] | 0.001391 | 107.82 | baseline |
@@ -1057,6 +1057,14 @@ exists to separate them, and it settles the question:
   **1.66x**. This is essentially the whole win.
 - CELL effect (all forward, all window 0, exact path): LSTM 0.098132, sLSTM 0.096118 (**1.02x
   faster**), Mamba 0.104328 (**0.94x -- 6% SLOWER**). A wash.
+
+(PHASE-10 TASK 8 FOLLOW-UP: the `lstm / forward` fast cell is no longer `n/a` -- `FastLstm`
+landed and the row was RE-MEASURED end to end on the current build. The numbers live in the
+Task-8 section at the end of this file rather than being back-filled here, because this
+table's fast rows predate the Task-5 f32-mel front-end and mixing builds inside one table
+would make its ratios meaningless. The headline: fast-vs-exact **5.97x** on that row, and the
+REGIME decomposition below gains its missing FAST-tier half -- **1.95x**, against the 1.66x
+measured here on the exact tier.)
 
 So the causal cells buy their speed by being CAUSAL (no window recompute, half the recurrent
 stack), not by being cheaper per step than a peephole LSTM: every cell here is already O(T), and at
@@ -1566,8 +1574,183 @@ WHY THE PHASE-8/9 STREAMING LEGS STAY GREEN UNMODIFIED, stated precisely (the ea
 `classify_fast_shape` -- which now NAMES the shape, because the offline tree implements it --
 into the streaming session with its LEADING CLAUSE preserved (`cell type '<x>' is not
 supported on the fast inference path ... in the BIDIRECTIONAL direction`) and its TAIL
-REWRITTEN. The pins survive because `phase8_gate.rs:590`, `phase9_stream_causal.rs:812-813`
-and `phase7_parity_lid.rs:569` assert PREFIX SUBSTRINGS, not the message body. The tail had
+REWRITTEN. The pins survive because `phase8_gate.rs`, `phase9_stream_causal.rs::validation_bails`
+and `phase7_parity_lid.rs` assert PREFIX SUBSTRINGS, not the message body. The tail had
 to change: the classifier's old advice ("run this config on the exact path") is now WRONG at
 the streaming site, because the offline fast path DOES implement this shape -- it is
 streaming, specifically, that cannot.
+
+## Phase 10 -- the forward-only LSTM fast twin (Task 8, spec S6)
+
+`fast::cells::FastLstm` -- the f32 CAUSAL peephole-LSTM step kernel -- completes the causal
+set `{lstm, slstm, mamba, cfc}` and empties the last shape bail out of
+`fast::driver::classify_fast_shape`, which is now a TOTAL function. Measured 2026-08-01,
+Apple M4 Pro (arm64), macOS 26.5.2, `cargo build --release -j 4`.
+
+### What landed, and what it is NOT
+
+The new kernel is the CAUSAL twin: one forward stack, per-step `dot_f32` projections, a
+`step(x_t, &mut LstmState)` the offline loop and the streaming session both drive. It does
+NOT replace `fast::nn::FastBlstm`, which stays the BIDIRECTIONAL twin (batched faer
+projection, offline only) and is BYTE-UNTOUCHED by this task -- the phase-7/8 suites passing
+without edits are the proof. Two LSTM kernels, two regimes, two parity legs, deliberately.
+
+THE ONE RULE THAT SHAPED THE CODE (spec S6, the `DenseRowChain` lesson): every projection is
+a per-step ascending `dot_f32` over a contiguous weight row, FROM DAY ONE. Reusing the
+batched `lstm_layer_forward` would have made offline and streamed numbers differ in the last
+f32 ULP at re-chunked granularities -- the exact drift the phase-8 gate exists to forbid --
+so the batched kernel is never reachable from this path.
+
+### Transcription fidelity (`fast::cells` unit tier, CI)
+
+The oracle is the exact f64 `nn::layers::LstmLayer::feed_forward` per-timestep body. Same
+weights, same input, all three peephole families live:
+
+| leg | shape | max_abs | max_rel | pin |
+|---|---|---|---|---|
+| `lstm_matches_the_exact_cell_within_the_f32_band` | 5 -> 3, T=11 | 1.05e-7 | 1.96e-7 | `CELL_F32_PIN` 5e-6 |
+| `lstm_matches_the_exact_cell_at_the_arm_geometry` | 92 -> 24, T=31 | 1.42e-7 | 1.42e-5 | 1.5e-6 abs / 1.5e-4 rel |
+
+Both absolute deltas are ~1 f32 ULP of an O(1) output (`f32::EPSILON` = 1.19e-7), i.e. the
+narrowing and nothing else. The 92x24 row's RELATIVE number is FLOOR-LIMITED and says so:
+it is exactly 100x the absolute one, which is the tell that `max_rel`'s `1e-2` scale floor is
+the denominator (an LSTM output is `o_t * asinh(c_t)`, and a shut output gate drives it
+arbitrarily close to zero). The absolute pin is the discriminating statement there; the
+relative pin is widened for that leg only rather than pretending 5e-6 means something against
+a 1e-2 denominator. Same honesty the CfC cell's pins carry.
+
+THE PEEPHOLE FAMILIES ARE PROVEN LIVE, which is what makes those two rows worth their ink.
+`lstm_peephole_families_are_distinguishable` toggles each of the three flags independently
+and measures the output shift from dropping it: **8.96e-2** (cells), **8.32e-2** (gates),
+**3.92e-2** (gates-recurrent) -- five decades above the f32 band, so a mis-assigned peephole
+row cannot hide in a dead branch. With each family off, fast still tracks exact inside
+`CELL_F32_PIN`.
+
+Also pinned: the weight count against `LstmLayer::nb_of_weights` at five shapes (and that the
+`12*O` bundle is reserved regardless of the flags), the committed fixture's 1651-element pack
+length against the Python packer's, wrapper-is-the-step-loop, run-twice bit-identity, and the
+split-state legs (which check ALL THREE carried vectors are non-trivial at the cut).
+
+### Driver parity: exact f64 vs fast f32 (`phase9_fast_parity.rs`, CI)
+
+The committed `lstm_forward` fixture (new, same `scripts/extract_phase9_fixtures.py` recipe,
+seed 1008001, 1651-element pack) through `BagOfProcessors` on the synthetic tier-2 excerpt:
+
+| leg | max_abs | max_rel | max_dt | interior boundaries |
+|---|---|---|---|---|
+| plain (fixture as committed) | 4.40e-7 | 3.12e-6 | **0.0** | 0 |
+| crossing (output gain 3, bias +3) | 1.30e-6 | 1.05e-5 | **0.0** | **3** |
+
+Segment count and types IDENTICAL, `max_dt` EXACTLY 0.0, against the unchanged `POST_*_PIN`
+of 1e-4 (~9.5x headroom). The crossing row is now the WORST of the eight (cell x leg) runs,
+displacing mamba's 7.74e-6 -- structurally, not alarmingly: the gain lever sharpens the logit
+3x, so the same input-side f32 delta lands on a steeper part of the logistic.
+
+**A NEW LEVER WAS NEEDED, and the reason is measured.** Every other cell's crossing sweep
+shifts the output bias. On the LSTM fixture that CANNOT work: a 129-point bias sweep over
+`[-16, +16]` at 0.25 yields ZERO interior boundaries at every offset, even though the
+posterior traverses the full `[0, 1]` range across the sweep. The cause is the shape of this
+net's posterior on the excerpt -- its highest rows are its EARLIEST, so as the level rises the
+hysteresis latches SPEECH at frame 0 and the whole file becomes one segment, and as it falls
+nothing crosses at all. A pure level shift cannot manufacture an interior edge out of a
+monotone-onset curve. Scaling the output layer's four WEIGHTS can: it multiplies the logit's
+variable part (sharpening contrast) while the bias re-centres it, and it is the same class of
+intervention -- output-layer only, post-recurrence, every cell weight untouched. A 2-D
+(gain x offset) probe found gain 3 / bias +3 the richest rung (3 interior boundaries,
+posterior span `[0.014, 0.842]`: sharpened, not saturated). The escalation is a SWEEP, not a
+hardcoded pair, and it only runs when gain 1 finds nothing -- so the slstm/mamba/cfc rows
+settle on exactly the offsets they settled on before.
+
+### Streaming: streamed vs offline (`phase9_stream_causal.rs`, CI)
+
+All 19 legs green with the `lstm` row added, FIRST RUN, no machinery changed -- `StreamCausal`
+drives `FastCell`/`FastCellState` generically, which is the S5.2 "zero new surface" claim
+being cashed again:
+
+| leg | lstm result |
+|---|---|
+| crossing sweep (60 s staged fixture) | bias `+0.5` -> **4** interior boundaries (6 segment rows) |
+| `finish()` vs offline fast, plain (type 0) | boundary `max_dt` EXACTLY **0.0**, posteriors bit-equal (1500 rows) |
+| `finish()` vs offline fast, calibrated type 1 | boundary `max_dt` EXACTLY **0.0**, posteriors bit-equal |
+| chunk invariance (20/100/1000/7 ms) | segmentation + posteriors + emission set bit-identical |
+| prefix consistency | 4 mid-stream emissions, ZERO retractions |
+| real-arm geometry (`23,24,24` / `4,1`, wide dense) | 143 rows -> 35 posteriors, bit-identical at chunks 1/3/4/7/143 |
+| latency | bound **1.73400 s** (identical to the other three cells), speech lag 1.75688 s, tight margin **-0.07712 s** |
+
+THE LSTM ROW IS THE ONE THIS SUITE IS BEST PLACED TO CATCH A BUG IN, and that is worth saying
+plainly: the peephole LSTM carries the RICHEST state of the four cells -- `h`, `c`, AND the
+previous step's POST-activation gate row, which three separate peephole families read at
+`t-1`. A kernel that rolled `h` and `c` but not `gates` would compute correct whole-sequence
+output and WRONG streamed output at every chunk boundary. The split-state and chunk-invariance
+legs are what measure that; the `synth_net` helper's peephole flags were flipped from
+`[false; 6]` to `[true; 6]` for exactly this reason (inert for the other three cells, which
+have no peepholes, so those rows are bit-unchanged).
+
+The identical 1.73400 s bound across all four cells is the point rather than a coincidence:
+the fixture configs are byte-identical bar the cell keys, so the causal latency win is a
+property of the REGIME, not of any cell -- now demonstrated with the legacy cell itself.
+
+### Bench: the `n/a` cell FILLED, and the fast-tier regime control
+
+`speech bench --repeat=1 --path={exact,fast}`, 3 independent fresh processes per (row, path),
+the phase-9 corpus bench recipe UNCHANGED (one 75 s mono 8 kHz corpus wav selected at runtime,
+no filename recorded; each config repointed at its own phase-9 trained checkpoint; backprop
+off, `Epochs 0`, `numOuterThreads 1`). RE-MEASURED on the current build, so these four rows
+are self-consistent with each other and NOT with the phase-9 table (whose fast rows predate
+the Task-5 f32 mel).
+
+| cell / direction | window regime | path | wall_s mean [range] | rtf | maxrss_mb | fast vs exact |
+|---|---|---|---|---|---|---|
+| lstm / bidirectional | 3.25 windowed overlap | exact | 0.167335 [0.166705-0.167773] | 0.002231 | 53.97 | baseline |
+| lstm / bidirectional | 3.25 windowed overlap | fast | 0.034228 [0.034102-0.034334] | 0.000457 | 37.21 | **4.89x** |
+| lstm / forward | 0, plain | exact | 0.104963 [0.099500-0.112279] | 0.001400 | 54.37 | baseline |
+| lstm / forward | 0, plain | fast | 0.017587 [0.017419-0.017764] | 0.000234 | 37.42 | **5.97x** |
+
+**THE FAST-TIER REGIME CONTROL** -- the number phase 9 could not measure, because the
+`lstm / forward` fast cell did not exist. Same cell, same weights-shape lineage, only the
+regime differs (windowed-bidirectional -> plain-causal):
+
+- EXACT tier: 0.167335 -> 0.104963 = **1.59x** (phase 9 measured 1.66x on its own build).
+- FAST tier: 0.034228 -> 0.017587 = **1.95x**.
+
+So the regime win is LARGER on the fast path than on the exact one, and the direction makes
+sense: the f32 tree's per-window overhead (the overlap accumulate/average pass and the
+re-forwarding of overlapping rows) is a bigger share of a much smaller total once the
+front-end is f32 end to end. Phase 9's conclusion is unchanged and now doubly grounded -- the
+causal speedup is a REGIME effect, not a cell effect.
+
+MEMORY: the fast path lands at 37.2-37.4 MB on both regimes (the Task-5 post-f32-mel plateau,
+here on a mono 75 s file rather than the 60 s stereo fixture that measured ~42 MB), against
+53.97-54.37 MB exact -- a **0.69x** ratio, i.e. the phase-7 SAD-arm memory regression stays
+reversed on this cell too.
+
+### The four sibling assertions this flip touched, and why each moved
+
+Retiring the last shape bail invalidated four `must bail` assertions in suites this task
+otherwise leaves alone. Each was INVERTED or RE-AIMED rather than deleted, and none was
+weakened:
+
+| suite / leg | before | after |
+|---|---|---|
+| `phase9_fast_parity::fast_dispatch_bails_and_builds_per_cell_and_direction` | `(lstm, forward)` -> shape bail | an sLSTM-sized pack under `Cell_Type lstm` must fail on LENGTH (1603 vs 1651), which is what the shape bail was protecting |
+| `phase10_bicell_parity::fast_dispatch_builds_bidirectional_cells` | `(lstm, forward)` -> shape bail | must BUILD, from the matching committed pack |
+| `phase7_parity_sad::fast_dispatch_per_cell_type_and_direction` | `Direction forward` -> shape bail | must BUILD (with the untagged-pack caveat that leg already documents, in its other direction: an over-long bidirectional pack is consumed head-first by design) |
+| `phase8_gate::validation_bails` | `Direction forward` -> shape bail | still bails, on the WINDOWING rule instead (`causal streaming requires the plain regime`) -- tier2 carries `BLSTM_window 3.25`, and that is the refusal that actually matters for streaming |
+| `phase7_parity_lid::fast_twin_bails_on_unsupported_cell_type_and_direction` | classifier's `Direction 'forward' ...` wording | the TWIN'S OWN gate's wording (`cell type 'lstm' is not supported ...` + `bidirectional twin only`), because `bail_unsupported_shape` -- deliberately conservative, re-affirmed in Task 7 -- is now what catches a causal LID net |
+
+The Twin's frozen-SAD/LID gate is UNCHANGED in behaviour: it still refuses every shape that
+is not `FastNetShape::Blstm`. Only the message a causal LID config receives changed, because
+the classifier no longer produces one.
+
+### The corpus check, reported HONESTLY as degenerate
+
+The same 75 s corpus file, same trained forward-LSTM checkpoint, run through BOTH paths with
+separate dump directories: the emitted VRCTS xml is BYTE-IDENTICAL. That is a true statement
+and a WEAK one, so it is recorded as corroboration rather than evidence: the phase-9 subset
+checkpoint is MODE-COLLAPSED on this file (a single all-speech segment spanning `0.0000` to
+`74.9999`), exactly the degeneracy the phase-8/9 corpus tiers already document for these
+subset nets. A threshold sweep confirms there is nothing to find -- rising/falling at
+0.9/0.99/0.999/0.9999 all give the same one segment, and at 0.999999 both paths give zero
+segments. The DISCRIMINATING parity evidence for this cell is the committed-fixture tier
+above (3 interior boundaries at `max_dt` 0.0) and the streaming tier (4 boundaries, bit-equal),
+not this run.

@@ -573,10 +573,18 @@ fn fast_twin_bails_on_unsupported_cell_type_and_direction() {
             "mamba",
             "cell type 'mamba' is not supported on the fast inference path",
         ),
+        // The MESSAGE for this row changed in phase-10 Task 8, the refusal did NOT.
+        // `classify_fast_shape` used to bail on `(lstm, forward)` and its wording is what
+        // this leg asserted; Task 8 implemented that shape (`fast::cells::FastLstm`), so
+        // the classifier now NAMES it and the Twin's OWN gate -- `bail_unsupported_shape`,
+        // deliberately BLSTM-only and re-affirmed conservative in Task 7 -- is what
+        // refuses it here. Asserting the gate's own leading clause plus its
+        // "bidirectional twin only" clause keeps the leg discriminating: it still fails
+        // if the Twin ever silently accepts a causal LID net.
         (
             "BLSTM_LID_Direction",
             "forward",
-            "Direction 'forward' is not supported on the fast inference path",
+            "cell type 'lstm' is not supported on the fast inference path",
         ),
     ] {
         let mut m = map_of("twin_mode7");
@@ -599,10 +607,19 @@ fn fast_twin_bails_on_unsupported_cell_type_and_direction() {
             m.insert("BLSTM_LID_OutputNeuronNb".into(), out.join(","));
         }
         match build_fast_twin(&m) {
-            Err(e) => assert!(
-                e.to_string().contains(want),
-                "expected {want:?} for {key}={value}, got: {e}"
-            ),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains(want),
+                    "expected {want:?} for {key}={value}, got: {e}"
+                );
+                if key == "BLSTM_LID_Direction" {
+                    assert!(
+                        msg.contains("bidirectional twin only"),
+                        "the causal-LID refusal must still name the direction it accepts, got: {e}"
+                    );
+                }
+            }
             Ok(_) => panic!("fast Twin + {key}={value} must bail"),
         }
     }

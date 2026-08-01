@@ -64,7 +64,9 @@ use anyhow::{Result, bail};
 use crate::config::NnetSpec;
 use crate::nn::blstm::{CellType, CfcParams, MambaParams};
 
-use super::cells::{FastCell, build_cell, cell_stack_forward, cell_weight_count};
+use super::cells::{
+    FastCell, backward_peep, build_cell, cell_stack_forward, cell_weight_count, forward_peep,
+};
 use super::nn::{
     DenseRowChain, FastDenseLayer, FastMatrix, Scratch, ensure_len, window_begin, window_end,
 };
@@ -146,17 +148,26 @@ impl FastBiCell {
                 osub.len()
             );
         }
+        // THE LSTM REFUSAL, now EXPLICIT (phase-10 Task 8). It used to fall out of
+        // `cell_weight_count`'s `None` sentinel, which that task retired when it gave the
+        // LSTM a real f32 cell kernel ([`super::cells::FastLstm`]). The refusal itself is
+        // UNCHANGED and still load-bearing: a bidirectional LSTM's fast twin is
+        // `super::nn::FastBlstm` (batched faer projection, phase-7-pinned), and routing
+        // one through a cell stack would silently swap it for the per-step kernel. It is
+        // also unreachable through the dispatch -- `classify_fast_shape` maps
+        // `(lstm, bidirectional)` to `FastNetShape::Blstm` -- so this is the belt to that
+        // braces, pinned by `bicell_bails_on_the_lstm_cell`.
+        if cell_type == CellType::Lstm {
+            bail!(
+                "fast::bicell::FastBiCell is for the phase-9/10 cells only; the legacy \
+                 peephole LSTM's bidirectional fast twin is `super::nn::FastBlstm` (spec S5)"
+            );
+        }
         let mut n = 0usize;
         for jj in 0..lstm.len() - 1 {
             let i = lstm[jj] * lsub[jj];
             let o = lstm[jj + 1];
-            let per_layer = match cell_weight_count(cell_type, i, o, mamba, cfc) {
-                Some(c) => c,
-                None => bail!(
-                    "fast::bicell::FastBiCell is for the phase-9/10 cells only; the legacy \
-                     peephole LSTM's bidirectional fast twin is `super::nn::FastBlstm` (spec S5)"
-                ),
-            };
+            let per_layer = cell_weight_count(cell_type, i, o, mamba, cfc);
             // TWICE: the forward stack and the backward stack are separate weight
             // blocks of identical shape (`BlstmNetwork::from_config` builds both from
             // the same `lstm_neuron_nb`).
@@ -210,21 +221,25 @@ impl FastBiCell {
         // interleaved per layer (`BlstmNetwork::set_weights` hands the tail from
         // `forward_network.set_weights` to `backward_network.set_weights`, and each of
         // those walks all of its own layers).
-        let stack = |pos: &mut usize| -> Vec<FastCell> {
+        let stack = |pos: &mut usize, peep: [bool; 3]| -> Vec<FastCell> {
             let mut cells = Vec::with_capacity(lstm.len() - 1);
             for jj in 0..lstm.len() - 1 {
                 let i = lstm[jj] * lsub[jj];
                 let o = lstm[jj + 1];
-                // Unreachable `None`: `element_count` above already bailed on the LSTM.
-                let (cell, used) = build_cell(cell_type, &flat[*pos..], i, o, mamba, cfc)
-                    .unwrap_or_else(|| unreachable!("LSTM has no bidirectional cell twin"));
+                let (cell, used) = build_cell(cell_type, &flat[*pos..], i, o, mamba, cfc, peep);
                 cells.push(cell);
                 *pos += used;
             }
             cells
         };
-        let cells_fwd = stack(&mut pos);
-        let cells_rev = stack(&mut pos);
+        // Each stack takes ITS OWN peephole triple, mirroring `BlstmNetwork::from_config`
+        // (`nn/blstm.rs:588-602`: `make(cfg.forward_peep)` then `make(cfg.backward_peep)`).
+        // Read by the LSTM cell alone, which `element_count` above refuses here -- so this
+        // threading is correctness-by-construction for a cell this net cannot currently
+        // build, not live behaviour. Passing one triple to both stacks would be the
+        // subtle wrong thing to leave lying around.
+        let cells_fwd = stack(&mut pos, forward_peep(spec));
+        let cells_rev = stack(&mut pos, backward_peep(spec));
 
         let narrow = |s: &[f64]| -> Vec<f32> { s.iter().map(|&x| x as f32).collect() };
         let mut output_layers = Vec::with_capacity(outn.len() - 1);
@@ -638,7 +653,7 @@ mod tests {
         let p = mamba_params();
         let c = cfc_params();
         for cell in CELLS {
-            let stack = cell_weight_count(cell, 4, 3, &p, &c).unwrap();
+            let stack = cell_weight_count(cell, 4, 3, &p, &c);
             let n = FastBiCell::element_count(&sp, cell, &p, &c).unwrap();
             // Make the two stacks byte-IDENTICAL, so any difference in their outputs is
             // the time direction and nothing else.
@@ -706,7 +721,7 @@ mod tests {
         let p = mamba_params();
         let c = cfc_params();
         for cell in CELLS {
-            let stack = cell_weight_count(cell, 4, hidden, &p, &c).unwrap();
+            let stack = cell_weight_count(cell, 4, hidden, &p, &c);
             let n = FastBiCell::element_count(&sp, cell, &p, &c).unwrap();
             let base = weights(n);
             // The single dense layer sits after both stacks; col-major (I x O) with

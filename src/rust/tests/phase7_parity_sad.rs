@@ -362,8 +362,15 @@ fn fast_bails_on_pitch_pass() {
 /// another architecture's `.bin` is a user error the format cannot detect. What the
 /// dispatch does guarantee is that the declared architecture is the one that RUNS.
 ///
-/// `Direction forward` with the LSTM cell is STILL a refusal (a forward-only LSTM fast
-/// twin is phase-10 Task 8, spec S6).
+/// `Direction forward` with the LSTM cell FLIPPED THE SAME WAY in phase-10 Task 8
+/// (`fast::cells::FastLstm`, spec S6), so the second block below asserts a BUILD too and
+/// `classify_fast_shape` has no shape refusal left at all. The untagged-pack caveat above
+/// applies to it verbatim, in its other direction: a forward net is SHORTER than the
+/// bidirectional pack this config carries, and an over-long pack is consumed head-first by
+/// design (the legacy contract, `FastBlstm::from_flat`'s docs) -- so the build below runs a
+/// causal net off the head of a bidirectional pack. Again: the config declares the
+/// architecture, the dispatch guarantees the declared one RUNS, and pointing a config at
+/// the wrong `.bin` is a user error the format cannot detect.
 #[test]
 fn fast_dispatch_per_cell_type_and_direction() {
     // The tier2 config is BIDIRECTIONAL, so a new cell here selects `FastBiCell`.
@@ -380,7 +387,7 @@ fn fast_dispatch_per_cell_type_and_direction() {
 
     // Direction: the causal shape needs a `hidden`-wide output MLP, so the config
     // has to declare one for `BlstmConfig::from_legacy` to accept it at all -- the
-    // fast bail must fire on a config that is otherwise VALID.
+    // dispatch must be exercised on a config that is otherwise VALID.
     let mut m = tier2_map(Some("fast"));
     m.insert("BLSTM_Direction".into(), "forward".into());
     let hidden: usize = m["BLSTM_LSTMNeuronNb"]
@@ -399,14 +406,12 @@ fn fast_dispatch_per_cell_type_and_direction() {
         .collect();
     out_layers[0] = hidden.to_string();
     m.insert("BLSTM_OutputNeuronNb".into(), out_layers.join(","));
-    match build_fast_bag(&mut m) {
-        Err(e) => assert!(
-            e.to_string()
-                .contains("Direction 'forward' is not supported on the fast inference path"),
-            "expected a direction bail, got: {e}"
-        ),
-        Ok(_) => panic!("fast + Direction forward must bail"),
-    }
+    let bag = build_fast_bag(&mut m)
+        .unwrap_or_else(|e| panic!("fast + Direction forward must build (Task 8): {e}"));
+    assert!(
+        matches!(bag.processor(0), Processor::FastSpectral(_)),
+        "causal LSTM: expected the fast SAD driver"
+    );
 
     // The EXACT path is unaffected: the same slstm config builds there (Task 2).
     let mut exact = tier2_map(Some("exact"));

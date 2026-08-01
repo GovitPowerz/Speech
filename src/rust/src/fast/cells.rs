@@ -16,6 +16,12 @@
 //!   layout S1.2): `z_t = [x_t | h_{t-1}]`, the `L`-layer `lecun_tanh` backbone, the
 //!   three heads (`tanh` `ff1`/`ff2` + the logistic time-interpolation gate `g`) and
 //!   `h_t = ff1*(1-g) + ff2*g`.
+//! - [`FastLstm`] mirrors `nn::layers::LstmLayer::feed_forward`'s PER-TIMESTEP body
+//!   (phase-10 spec S6): the `[i|f|o|g]` gate blocks, the 12-row peephole bundle with its
+//!   three families and their exact application order, and the `asinh` cell/output +
+//!   `sigmoid(0.1z)` gate activations. It COMPLETES the causal set
+//!   `{lstm, slstm, mamba, cfc}`; the phase-7 `super::nn::FastBlstm` (bidirectional,
+//!   batched faer projection) is untouched and remains the offline bidirectional twin.
 //! - [`FastCausalNet`] mirrors `nn::blstm::BlstmNetwork::feed_forward` under
 //!   [`crate::nn::blstm::Direction::Forward`]: ONE stack (no reverse half, no HCAT),
 //!   `Network::drive`'s per-layer sub-sampling chain, then the SAME f32 dense/softmax
@@ -68,7 +74,12 @@
 //!    exact cell's `if t > 0` guard merely SKIPS WRITING the `h_{t-1}` tail of `z_t`
 //!    into an already-zeroed row, so [`FastCfc::step`]'s unconditional copy of a
 //!    zero-seeded `h` writes the identical bits -- a memcpy, not an arithmetic
-//!    identity.
+//!    identity. [`FastLstm`] (phase-10 Task 8) extends the same argument to the WIDEST
+//!    `t == 0` special case in the tree: the exact peephole LSTM skips the recurrence,
+//!    ALL the `t-1` peephole cross-terms, the row-11 output-gate term AND the
+//!    `c_{t-1}*f_t` product at `t = 0`, and every one of them is inert against the
+//!    zero-seeded state (`dot(w, 0) == +0.0`, `0.0 * p == +-0.0`, and `x + (+-0.0) == x`
+//!    bar an unreachable `-0.0` accumulator). See [`FastLstm::step`].
 //!
 //! SCOPE. Forward only, no MLP mode, no backward, no trainer. The NET here
 //! ([`FastCausalNet`]) is causal-only (`Direction::Forward`); the CELL kernels and the
@@ -85,8 +96,8 @@ use crate::config::NnetSpec;
 use crate::nn::blstm::{CellType, CfcParams, MambaParams};
 
 use super::nn::{
-    DenseRowChain, FastDenseLayer, FastMatrix, Scratch, copy_view_into, ensure_len, logistic_f32,
-    sub_sample_into,
+    DenseRowChain, FastDenseLayer, FastMatrix, Scratch, asinh_f32, copy_view_into, ensure_len,
+    gates_fn_f32, logistic_f32, sub_sample_into,
 };
 
 // ---------------------------------------------------------------------------
@@ -985,14 +996,368 @@ impl FastCfc {
 }
 
 // ---------------------------------------------------------------------------
+// Peephole LSTM, forward-only (phase-10 Task 8, spec S6).
+// ---------------------------------------------------------------------------
+
+/// Per-step temporaries for [`FastLstm::step`], living INSIDE [`LstmState`] for exactly
+/// [`MambaScratch`]'s reason: `step` takes `&self`, this tree forbids per-frame
+/// allocation, so the scratch hangs off the only `&mut` the kernel gets. It carries NO
+/// information between steps (every element is written before it is read), so it is
+/// private and absent from state equality.
+#[derive(Clone, Debug, Default)]
+struct LstmScratch {
+    /// `4O`: this step's gate row, in the `[i|f|o|g]` block order -- the exact cell's
+    /// `gates.row(t)`. It CANNOT be [`LstmState::gates`] itself: the peephole
+    /// cross-terms read the PREVIOUS step's activated gates while this row is being
+    /// built (`f_t` reads `i_{t-1}`, `:362-363`), so writing in place would feed a
+    /// half-updated row back into its own recurrence.
+    pre: Vec<f32>,
+}
+
+/// The peephole-LSTM carried state (spec S4.1's shape, one entry per thing the exact
+/// forward reads at `t-1`):
+///
+/// - `h` -- `y_{t-1}`, the layer output that drives the recurrent projection (`:351`);
+/// - `c` -- `c_{t-1}`, read by the cell-peephole terms (`:353-356`) AND by the cell
+///   recurrence itself (`:387`);
+/// - `gates` -- the `4O` POST-activation `[i|f|o|g]` of `t-1`, read by the
+///   gates/gates-recurrent peephole cross-terms (`:357-363`, `:395`).
+///
+/// A fresh state is ALL ZEROS, which is exactly the exact cell's `t == 0` special case
+/// (see the module doc's divergence 4, extended to this cell in [`FastLstm::step`]).
+/// `PartialEq` compares the three carried fields only; construct via [`FastLstm::state`],
+/// which is where the scratch is sized.
+#[derive(Clone, Debug)]
+pub struct LstmState {
+    pub h: Vec<f32>,
+    pub c: Vec<f32>,
+    pub gates: Vec<f32>,
+    scratch: LstmScratch,
+}
+
+impl PartialEq for LstmState {
+    fn eq(&self, other: &LstmState) -> bool {
+        self.h == other.h && self.c == other.c && self.gates == other.gates
+    }
+}
+
+/// f32 forward-only peephole LSTM cell -- the legacy cell, in the CAUSAL per-step shape
+/// the streaming session needs. Its offline twin `super::nn::FastBlstm` already exists
+/// and is BYTE-UNTOUCHED by this: that one is bidirectional and batches its input
+/// projection through faer, which is precisely why it cannot be the streaming kernel.
+///
+/// THE DENSEROWCHAIN LESSON, APPLIED AT CONSTRUCTION (spec S6, and the reason this is a
+/// separate kernel rather than a call into `lstm_layer_forward`): `faer_project`'s result
+/// depends on the ROW COUNT `m` once the weight matrix has more than one column
+/// (measured in Task 7 of phase 9 -- see [`super::nn::DenseRowChain`]), so a batched
+/// projection makes the offline and streamed numbers differ in the last f32 ULP at
+/// re-chunked granularities. Every projection here is therefore a per-step ascending
+/// [`dot_f32`] over a CONTIGUOUS weight row, from day one, exactly like [`FastSlstm`],
+/// [`FastMamba`] and [`FastCfc`].
+///
+/// Weight buffers, all narrowed `f64 -> f32` ONCE at [`Self::from_flat`] and laid out so
+/// that "one output element" is "one contiguous slice". `LstmLayer::set_weights`
+/// (`nn/layers.rs:139-150`) reads `input_weights` (`I x 4O`) and `feedback_weights`
+/// (`O x 4O`) in COLUMN-major element order, and a gate COLUMN is `(a*O + j)` for gate
+/// block `a` and unit `j` -- so the flat pack ALREADY delivers each output element's
+/// weights contiguously and `from_flat` is a straight narrowing copy, not a transpose:
+///
+/// | buffer | index | holds |
+/// |---|---|---|
+/// | `inp` | `(a*O + j)*I + k` | `input_weights[k, a*O + j]` |
+/// | `rec` | `(a*O + j)*O + k` | `feedback_weights[k, a*O + j]` |
+/// | `peep` | `r*O + j` | `peep_weight[r, j]`, `r` in `0..12` |
+/// | `bias` | `a*O + j` | `biases[0, a*O + j]` |
+///
+/// `peep` is the ONE block that is transposed: the pack carries the `12 x O` bundle
+/// column-major (12 contiguous values per unit), and the step reads it ROW-major (one
+/// peephole family across all units), which is the [`super::nn::FastLstmLayer`] choice
+/// verbatim.
+///
+/// THE CELLWEIGHT-NARROW ASYMMETRY IS UPSTREAM OF THIS TYPE, and that is worth stating
+/// because the hazard list flags it as easy to over-generalize: the `g`/cell gate carries
+/// NO peepholes, so in the CONFIG-domain structured model its rows are `out+in+1` against
+/// the `i`/`f`/`o` rows' `out+in+5` (`config.rs:66-68`). `config::pack_lstm_layer`
+/// (`:198-253`) resolves that asymmetry when it BUILDS the flat pack -- it emits four
+/// equal `out x in` fan-in blocks, four equal `out x out` recurrent blocks, ONE `out x 12`
+/// peephole bundle gathered from the i/f/o rows alone, and four `out`-long bias blocks --
+/// so by the time a flat vector reaches this reader every block is rectangular and the
+/// narrow row never appears. Reproducing the asymmetry here would be the bug.
+#[derive(Clone)]
+pub struct FastLstm {
+    input_size: usize,
+    output_size: usize,
+    cells_peep: bool,
+    gates_peep: bool,
+    gates_rec_peep: bool,
+    inp: Vec<f32>,  // 4O x I, row-major by output index
+    rec: Vec<f32>,  // 4O x O, row-major by output index
+    peep: Vec<f32>, // 12 x O, row-major
+    bias: Vec<f32>, // 4O
+}
+
+impl FastLstm {
+    /// `4*I*O + 4*O*O + 12*O + 4*O` -- the arithmetic mirror of
+    /// `LstmLayer::nb_of_weights` (`nn/layers.rs:126-131`), pinned against it by
+    /// `lstm_weight_count_matches_the_exact_cell`. The `12*O` term is the peephole
+    /// bundle and is present whether or not the flags are on: the exact ctor resizes
+    /// `_PeepWeight` to `12 x _OutputSize` unconditionally, so a flags-off net still
+    /// carries (and skips) those weights.
+    pub fn weight_count(input_size: usize, output_size: usize) -> usize {
+        4 * input_size * output_size
+            + 4 * output_size * output_size
+            + 12 * output_size
+            + 4 * output_size
+    }
+
+    /// Build from the head of the f64 flat pack (adim ALREADY applied by the
+    /// config-reader path, exactly as `super::nn::FastBlstm::from_flat` consumes it),
+    /// narrowing `f64 -> f32` ONCE. `peep` is `[cells, gates, gates_recurrent]`, the
+    /// `NnetSpec::peepholes` triple for THIS direction.
+    ///
+    /// Consumes exactly [`Self::weight_count`] elements and PANICS on a shorter slice --
+    /// the length check belongs to the net-level builder ([`FastCausalNet::from_flat`],
+    /// which returns a typed `Err`), the [`FastSlstm::from_flat`] contract verbatim.
+    pub fn from_flat(
+        flat: &[f64],
+        input_size: usize,
+        output_size: usize,
+        peep_flags: [bool; 3],
+    ) -> FastLstm {
+        let (o, i) = (output_size, input_size);
+        let narrow = |s: &[f64]| -> Vec<f32> { s.iter().map(|&x| x as f32).collect() };
+        let mut pos = 0usize;
+        let mut take = |k: usize| -> &[f64] {
+            let seg = &flat[pos..pos + k];
+            pos += k;
+            seg
+        };
+
+        let inp = narrow(take(4 * o * i));
+        let rec = narrow(take(4 * o * o));
+        // The bundle arrives COLUMN-major (`seg[j*12 + r]`); store it ROW-major.
+        let peep_seg = take(12 * o);
+        let mut peep = vec![0.0_f32; 12 * o];
+        for r in 0..12 {
+            for j in 0..o {
+                peep[r * o + j] = peep_seg[j * 12 + r] as f32;
+            }
+        }
+        let bias = narrow(take(4 * o));
+
+        FastLstm {
+            input_size: i,
+            output_size: o,
+            cells_peep: peep_flags[0],
+            gates_peep: peep_flags[1],
+            gates_rec_peep: peep_flags[2],
+            inp,
+            rec,
+            peep,
+            bias,
+        }
+    }
+
+    pub fn input_size(&self) -> usize {
+        self.input_size
+    }
+
+    pub fn output_size(&self) -> usize {
+        self.output_size
+    }
+
+    /// The effective peephole flags `[cells, gates, gates_recurrent]`. Exposed because
+    /// they are the one part of this cell's behaviour that comes from the CONFIG rather
+    /// than the pack, and the peephole-default asymmetry (`build_aligned_spec`'s rider 1)
+    /// makes "which flags did this net actually get" a question worth being able to ask.
+    pub fn peep_flags(&self) -> [bool; 3] {
+        [self.cells_peep, self.gates_peep, self.gates_rec_peep]
+    }
+
+    /// A fresh ALL-ZERO state (see [`LstmState`]) plus the sized scratch.
+    pub fn state(&self) -> LstmState {
+        let o = self.output_size;
+        LstmState {
+            h: vec![0.0; o],
+            c: vec![0.0; o],
+            gates: vec![0.0; 4 * o],
+            scratch: LstmScratch {
+                pre: vec![0.0; 4 * o],
+            },
+        }
+    }
+
+    /// ONE timestep, the streaming kernel: `LstmLayer::feed_forward`'s per-timestep body
+    /// (`nn/layers.rs:257-334`, legacy `LSTMLayer.cpp:350-412`) transcribed op for op.
+    ///
+    /// Stage order, which IS the numeric contract (do NOT reorder -- the exact forward's
+    /// combined expressions at `:362-363` and `:387` are single fused elementwise passes,
+    /// not two adds):
+    ///
+    /// 1. per gate element: input projection (ascending `k`), `+ bias`, `+ recurrence`
+    ///    (ascending `k`) -- the fused-per-element form of the exact path's three separate
+    ///    passes, which is bit-identical because gate elements are independent of each
+    ///    other at this stage;
+    /// 2. peepholes into `i` and `f`, IN THE EXACT ORDER: cells (rows 0, 1) ->
+    ///    gates-recurrent (rows 3, 7) -> gates, each ONE combined expression
+    ///    (`i += f_{t-1}*P4 + o_{t-1}*P5`, `f += i_{t-1}*P6 + o_{t-1}*P8`);
+    /// 3. activate `i`, `f` (`GatesFunction`) then `g` (`Maxmin2`/asinh);
+    /// 4. `c_t = i_t*g_t + c_{t-1}*f_t`, one combined expression;
+    /// 5. the `o`-gate extras IN ORDER: `c_t*P2` (cells) -> `i_t*P9`, `f_t*P10` (gates)
+    ///    -> `o_{t-1}*P11` (gates-recurrent);
+    /// 6. activate `o`; `y_t = o_t * asinh(c_t)`;
+    /// 7. roll `gates`/`c`/`h` forward -- `gates` and `h` AFTER the whole row is done, so
+    ///    the next step reads a complete previous row.
+    ///
+    /// THE `t == 0` SPECIAL CASE IS NOT REPRODUCED AS A BRANCH -- the module doc's
+    /// divergence 4, which this cell extends to three more terms. The exact forward's
+    /// `t = 0` block (`:218-254`) omits the recurrence, ALL the `t-1` peephole
+    /// cross-terms, the row-11 output-gate term, and the `c_{t-1}*f_t` product. Here every
+    /// one of them is applied unconditionally against the ZERO-seeded state, which is
+    /// numerically identical: `dot(w, 0) == +0.0` and `0.0 * p == +-0.0`, and `x + (+-0.0)
+    /// == x` for every `x` except a `-0.0` accumulator (unreachable -- it needs an
+    /// all-zero projection AND an all-zero bias). It is also REQUIRED by streaming: a
+    /// session resumed mid-sequence carries a NON-zero state, and a `t == 0` skip would
+    /// drop the recurrence at every chunk boundary.
+    ///
+    /// Width tolerance is the exact `:313-319` projection contract: a wider `x` is CROPPED
+    /// to the left `input_size` columns, a narrower one sums fewer terms (equivalent to
+    /// the exact path's "use the top `cols` weight rows", since `inp`'s per-element row is
+    /// indexed by the input index).
+    ///
+    /// `needless_range_loop` is allowed for the sibling cells' reason: `j` indexes several
+    /// buffers at once and the ascending index order IS the numeric contract.
+    #[allow(clippy::needless_range_loop)]
+    pub fn step(&self, x: &[f32], s: &mut LstmState, out: &mut [f32]) {
+        let (o, i) = (self.output_size, self.input_size);
+        let four_o = 4 * o;
+        let LstmState {
+            h,
+            c,
+            gates,
+            scratch,
+        } = s;
+        let pre = &mut scratch.pre;
+        let k_in = x.len().min(i);
+        let xs = &x[..k_in];
+
+        // 1. proj + bias + recurrence, per gate element (`:206-210` + `:258-263`).
+        for jj in 0..four_o {
+            let bi = jj * i;
+            let mut acc = dot_f32(&self.inp[bi..bi + k_in], xs);
+            acc += self.bias[jj];
+            let br = jj * o;
+            acc += dot_f32(&self.rec[br..br + o], &h[..o]);
+            pre[jj] = acc;
+        }
+
+        let p = &self.peep;
+        // 2a. cells peep into i, f (rows 0, 1) -- `:264-272`.
+        if self.cells_peep {
+            for j in 0..o {
+                pre[j] += c[j] * p[j];
+            }
+            for j in 0..o {
+                pre[o + j] += c[j] * p[o + j];
+            }
+        }
+        // 2b. gates-recurrent peep into i, f (rows 3, 7) -- `:273-281`.
+        if self.gates_rec_peep {
+            for j in 0..o {
+                pre[j] += gates[j] * p[3 * o + j];
+            }
+            for j in 0..o {
+                pre[o + j] += gates[o + j] * p[7 * o + j];
+            }
+        }
+        // 2c. gates peep into i, f (rows 4, 5 / 6, 8), each ONE combined expression --
+        // `:282-293`.
+        if self.gates_peep {
+            for j in 0..o {
+                pre[j] += gates[o + j] * p[4 * o + j] + gates[2 * o + j] * p[5 * o + j];
+            }
+            for j in 0..o {
+                pre[o + j] += gates[j] * p[6 * o + j] + gates[2 * o + j] * p[8 * o + j];
+            }
+        }
+
+        // 3. activate i, f then g (`:294-300`).
+        for j in 0..2 * o {
+            pre[j] = gates_fn_f32(pre[j]);
+        }
+        for j in 0..o {
+            pre[3 * o + j] = asinh_f32(pre[3 * o + j]);
+        }
+
+        // 4. c_t = i_t*g_t + c_{t-1}*f_t, one combined expression (`:301-305`). In place:
+        // the RHS reads `c[j]` (still `c_{t-1}`) before the assignment, and units are
+        // independent.
+        for j in 0..o {
+            c[j] = pre[j] * pre[3 * o + j] + c[j] * pre[o + j];
+        }
+
+        // 5. o-gate extras IN ORDER (`:306-324`).
+        if self.cells_peep {
+            for j in 0..o {
+                pre[2 * o + j] += c[j] * p[2 * o + j];
+            }
+        }
+        if self.gates_peep {
+            for j in 0..o {
+                pre[2 * o + j] += pre[j] * p[9 * o + j];
+            }
+            for j in 0..o {
+                pre[2 * o + j] += pre[o + j] * p[10 * o + j];
+            }
+        }
+        if self.gates_rec_peep {
+            for j in 0..o {
+                pre[2 * o + j] += gates[2 * o + j] * p[11 * o + j];
+            }
+        }
+
+        // 6. activate o; y_t = o_t * asinh(c_t) (`:325-334`).
+        for j in 0..o {
+            pre[2 * o + j] = gates_fn_f32(pre[2 * o + j]);
+        }
+        for j in 0..o {
+            out[j] = pre[2 * o + j] * asinh_f32(c[j]);
+        }
+
+        // 7. Roll the previous-step state forward. `gates` and `h` are rolled only now:
+        // stages 2 and 5 read the PREVIOUS row, so neither may be overwritten mid-step.
+        gates[..four_o].copy_from_slice(&pre[..four_o]);
+        h[..o].copy_from_slice(&out[..o]);
+    }
+
+    /// Whole-sequence forward: a fresh [`Self::state`] then [`Self::step`] per row.
+    pub fn feed_forward(&self, seq: &FastMatrix) -> FastMatrix {
+        let o = self.output_size;
+        let mut out = FastMatrix::zeros(seq.rows, o);
+        let mut st = self.state();
+        for t in 0..seq.rows {
+            let (lo, hi) = (t * o, t * o + o);
+            self.step(seq.row(t), &mut st, &mut out.data[lo..hi]);
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The cell enum (the fast twin of `nn::cells::CellLayer`).
 // ---------------------------------------------------------------------------
 
-/// One causal fast cell. A CLOSED set with static dispatch, exactly like
-/// `nn::cells::CellLayer` and `engine::bag_of_processors::Processor`: the `match` arms
-/// below are exhaustive, so a new cell type is a compile error rather than a silent
-/// fall-through. `CellType::Lstm` has NO arm here -- a forward-only LSTM fast twin is
-/// out of scope this phase (spec S4.2) and typed-bails in [`super::driver`].
+/// One fast cell. A CLOSED set with static dispatch, exactly like `nn::cells::CellLayer`
+/// and `engine::bag_of_processors::Processor`: the `match` arms below are exhaustive, so
+/// a new cell type is a compile error rather than a silent fall-through.
+///
+/// SINCE PHASE-10 TASK 8 THE SET IS COMPLETE -- [`FastCell::Lstm`] closes it, and the
+/// enum now mirrors `CellType` one-for-one. That is what makes [`cell_weight_count`] and
+/// [`build_cell`] TOTAL functions rather than `Option`-returning ones, and what lets
+/// `super::driver::classify_fast_shape` map every `(cell, direction)` pair to a shape.
+/// Note the LSTM arm here is the CAUSAL per-step kernel; the bidirectional LSTM's fast
+/// twin remains `super::nn::FastBlstm` (batched faer projection, offline only), which
+/// this does not replace and does not touch.
 ///
 /// `large_enum_variant` allowed, on the `Processor`-enum precedent: a [`FastCell`] is
 /// built ONCE PER LAYER (a handful per net) and then only borrowed, so the unused
@@ -1001,6 +1366,7 @@ impl FastCfc {
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum FastCell {
+    Lstm(FastLstm),
     Slstm(FastSlstm),
     Mamba(FastMamba),
     Cfc(FastCfc),
@@ -1009,6 +1375,7 @@ pub enum FastCell {
 /// The carried state of a [`FastCell`], variant-matched to its cell.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FastCellState {
+    Lstm(LstmState),
     Slstm(SlstmState),
     Mamba(MambaState),
     Cfc(CfcState),
@@ -1017,6 +1384,7 @@ pub enum FastCellState {
 impl FastCell {
     pub fn input_size(&self) -> usize {
         match self {
+            FastCell::Lstm(c) => c.input_size(),
             FastCell::Slstm(c) => c.input_size(),
             FastCell::Mamba(c) => c.input_size(),
             FastCell::Cfc(c) => c.input_size(),
@@ -1025,6 +1393,7 @@ impl FastCell {
 
     pub fn output_size(&self) -> usize {
         match self {
+            FastCell::Lstm(c) => c.output_size(),
             FastCell::Slstm(c) => c.output_size(),
             FastCell::Mamba(c) => c.output_size(),
             FastCell::Cfc(c) => c.output_size(),
@@ -1034,6 +1403,7 @@ impl FastCell {
     /// A fresh zero state for this cell.
     pub fn state(&self) -> FastCellState {
         match self {
+            FastCell::Lstm(c) => FastCellState::Lstm(c.state()),
             FastCell::Slstm(c) => FastCellState::Slstm(c.state()),
             FastCell::Mamba(c) => FastCellState::Mamba(c.state()),
             FastCell::Cfc(c) => FastCellState::Cfc(c.state()),
@@ -1045,6 +1415,7 @@ impl FastCell {
     /// mismatched state.
     pub fn step(&self, x: &[f32], s: &mut FastCellState, out: &mut [f32]) {
         match (self, s) {
+            (FastCell::Lstm(c), FastCellState::Lstm(st)) => c.step(x, st, out),
             (FastCell::Slstm(c), FastCellState::Slstm(st)) => c.step(x, st, out),
             (FastCell::Mamba(c), FastCellState::Mamba(st)) => c.step(x, st, out),
             (FastCell::Cfc(c), FastCellState::Cfc(st)) => c.step(x, st, out),
@@ -1054,43 +1425,49 @@ impl FastCell {
 }
 
 /// The flat-pack element count ONE cell layer of `cell_type` consumes at
-/// `(input_size, output_size)` -- `None` for the legacy peephole LSTM, which has no
-/// f32 cell kernel here (its fast twin is `super::nn::FastBlstm`).
+/// `(input_size, output_size)`.
 ///
 /// THE single per-cell sizing table. Both net builders ([`FastCausalNet`] and the
 /// bidirectional [`super::bicell::FastBiCell`]) read it, so a new cell is one arm here
-/// rather than two arms that can disagree -- and the caller's `match` on `None` is what
-/// keeps each of them free to bail in its own words.
+/// rather than two arms that can disagree.
+///
+/// TOTAL since phase-10 Task 8 (it returned `Option`, `None` meaning "the LSTM has no
+/// f32 cell kernel", until [`FastLstm`] landed). The two callers' LSTM refusals did NOT
+/// simply disappear with the sentinel: [`FastCausalNet`]'s is GONE because the causal
+/// LSTM is exactly what this task implements, while [`super::bicell::FastBiCell`]'s
+/// survives as an EXPLICIT guard -- a bidirectional LSTM's fast twin is
+/// `super::nn::FastBlstm`, and routing it through a cell stack instead would silently
+/// swap the batched-faer kernel for the per-step one.
 pub(crate) fn cell_weight_count(
     cell_type: CellType,
     i: usize,
     o: usize,
     mamba: &MambaParams,
     cfc: &CfcParams,
-) -> Option<usize> {
+) -> usize {
     match cell_type {
-        CellType::Slstm => Some(FastSlstm::weight_count(i, o)),
-        CellType::Mamba => Some(FastMamba::weight_count(
+        CellType::Lstm => FastLstm::weight_count(i, o),
+        CellType::Slstm => FastSlstm::weight_count(i, o),
+        CellType::Mamba => FastMamba::weight_count(
             i,
             o,
             mamba.d_state,
             mamba.d_conv,
             mamba.expand,
             mamba.dt_rank,
-        )),
-        CellType::Cfc => Some(FastCfc::weight_count(
-            i,
-            o,
-            cfc.backbone_units,
-            cfc.backbone_layers,
-        )),
-        CellType::Lstm => None,
+        ),
+        CellType::Cfc => FastCfc::weight_count(i, o, cfc.backbone_units, cfc.backbone_layers),
     }
 }
 
 /// Build ONE cell layer from the head of `flat`, returning it with the element count it
-/// consumed; `None` for the LSTM cell (see [`cell_weight_count`]). The count returned is
-/// [`cell_weight_count`]'s, by construction -- the two cannot drift.
+/// consumed -- [`cell_weight_count`]'s, by construction, so the two cannot drift.
+///
+/// `peep` is `[cells, gates, gates_recurrent]` for the stack being built (the
+/// `NnetSpec::peepholes` triple for THIS direction). It is read by the LSTM arm alone;
+/// the three port-only cells have no peepholes at all (spec S2.2/S3.2/S1.2), which is why
+/// they ignore it -- the same "parsed for every config, consumed by one arm" shape
+/// `BlstmNetwork::from_config` gives the `Mamba_*` geometry.
 pub(crate) fn build_cell(
     cell_type: CellType,
     flat: &[f64],
@@ -1098,9 +1475,11 @@ pub(crate) fn build_cell(
     o: usize,
     mamba: &MambaParams,
     cfc: &CfcParams,
-) -> Option<(FastCell, usize)> {
-    let used = cell_weight_count(cell_type, i, o, mamba, cfc)?;
+    peep: [bool; 3],
+) -> (FastCell, usize) {
+    let used = cell_weight_count(cell_type, i, o, mamba, cfc);
     let cell = match cell_type {
+        CellType::Lstm => FastCell::Lstm(FastLstm::from_flat(flat, i, o, peep)),
         CellType::Slstm => FastCell::Slstm(FastSlstm::from_flat(flat, i, o)),
         CellType::Mamba => FastCell::Mamba(FastMamba::from_flat(
             flat,
@@ -1118,10 +1497,27 @@ pub(crate) fn build_cell(
             cfc.backbone_units,
             cfc.backbone_layers,
         )),
-        // `cell_weight_count` returned `Some`, so the LSTM arm is already excluded.
-        CellType::Lstm => unreachable!("LSTM has no f32 cell kernel"),
     };
-    Some((cell, used))
+    (cell, used)
+}
+
+/// The FORWARD stack's peephole triple `[cells, gates, gates_recurrent]` from a spec.
+///
+/// `NnetSpec::peepholes` is the six-element `[fwd.cells, bwd.cells, fwd.gates, bwd.gates,
+/// fwd.gates_rec, bwd.gates_rec]` layout (`config.rs:46-53`), i.e. direction-INTERLEAVED,
+/// which is exactly the sort of indexing that gets copied wrong. It lives here once, next
+/// to its `backward` twin, so both net builders read the same two functions rather than
+/// open-coding `[0], [2], [4]`.
+///
+/// A `Direction::Forward` net uses THIS triple and only this one: `BlstmNetwork::
+/// from_config` (`nn/blstm.rs:588-602`) builds its single stack with `cfg.forward_peep`.
+pub(crate) fn forward_peep(spec: &NnetSpec) -> [bool; 3] {
+    [spec.peepholes[0], spec.peepholes[2], spec.peepholes[4]]
+}
+
+/// The BACKWARD stack's peephole triple -- [`forward_peep`]'s odd-index twin.
+pub(crate) fn backward_peep(spec: &NnetSpec) -> [bool; 3] {
+    [spec.peepholes[1], spec.peepholes[3], spec.peepholes[5]]
 }
 
 /// Drive `rows` timesteps of one cell over a contiguous row-major `in_data`
@@ -1237,14 +1633,10 @@ impl FastCausalNet {
             // the choke point BOTH causal construction sites (`fast::driver` and
             // `fast::stream`) funnel through (`from_flat` calls `element_count` first),
             // so getting the count right HERE is what keeps a pack from being consumed
-            // head-first by another architecture's reader.
-            n += match cell_weight_count(cell_type, i, o, mamba, cfc) {
-                Some(c) => c,
-                None => bail!(
-                    "fast::cells::FastCausalNet is for the phase-9/10 causal cells only; the \
-                     LSTM cell has no forward-only fast twin (spec S4.2)"
-                ),
-            };
+            // head-first by another architecture's reader. Phase 10 Task 8 DROPPED the
+            // LSTM bail that used to sit here (the causal set is complete), leaving the
+            // table total.
+            n += cell_weight_count(cell_type, i, o, mamba, cfc);
         }
         for jj in 0..outn.len() - 1 {
             n += outn[jj] * osub[jj] * outn[jj + 1] + outn[jj + 1];
@@ -1254,8 +1646,9 @@ impl FastCausalNet {
     }
 
     /// Build from a `NnetSpec` + the cell type/geometry + the flat f64 pack, narrowing
-    /// once per block. Errors on MLP mode, on the LSTM cell (no causal fast twin), and
-    /// on a pack shorter than [`Self::element_count`] (mirroring `FastBlstm::from_flat`
+    /// once per block. Errors on MLP mode and on a pack shorter than
+    /// [`Self::element_count`] -- it no longer errors on the LSTM cell, which phase-10
+    /// Task 8 implemented ([`FastLstm`]) -- (mirroring `FastBlstm::from_flat`
     /// and the exact `set_weights`; an OVER-long pack consumes only the head, as the
     /// legacy does).
     pub fn from_flat(
@@ -1286,12 +1679,16 @@ impl FastCausalNet {
 
         let mut pos = 0usize;
         let mut cells = Vec::with_capacity(lstm.len() - 1);
+        // A causal net has ONE stack and it is the FORWARD one, so it takes the forward
+        // peephole triple -- `BlstmNetwork::from_config` builds its single
+        // `Direction::Forward` stack with `cfg.forward_peep` (`nn/blstm.rs:588-602`).
+        // Read by the LSTM cell alone (phase-10 Task 8); the other three have no
+        // peepholes.
+        let peep = forward_peep(spec);
         for jj in 0..lstm.len() - 1 {
             let i = lstm[jj] * lsub[jj];
             let o = lstm[jj + 1];
-            // Unreachable `None`: `element_count` above already bailed on the LSTM cell.
-            let (cell, used) = build_cell(cell_type, &flat[pos..], i, o, mamba, cfc)
-                .unwrap_or_else(|| unreachable!("LSTM has no causal fast twin"));
+            let (cell, used) = build_cell(cell_type, &flat[pos..], i, o, mamba, cfc, peep);
             cells.push(cell);
             pos += used;
         }
@@ -1532,6 +1929,7 @@ mod tests {
 
     use super::*;
     use crate::nn::cells::{CfcLayer, MambaLayer, SlstmLayer};
+    use crate::nn::layers::LstmLayer;
 
     const I: usize = 5;
     const O: usize = 3;
@@ -1664,6 +2062,22 @@ mod tests {
         cell
     }
 
+    /// The peephole triple every LSTM leg uses: ALL THREE FAMILIES ON, which is what
+    /// every committed config carries (`BLSTM_{Forward,Backward}_Is*PeepholesActive true`)
+    /// and, more to the point, the only setting under which the 12-row bundle is fully
+    /// exercised. The flags-off contrast is `lstm_peephole_flags_are_live`.
+    const LSTM_PEEP: [bool; 3] = [true, true, true];
+
+    fn fast_lstm(i: usize, o: usize) -> FastLstm {
+        FastLstm::from_flat(&weights(FastLstm::weight_count(i, o)), i, o, LSTM_PEEP)
+    }
+
+    fn exact_lstm(i: usize, o: usize) -> LstmLayer {
+        let mut cell = LstmLayer::new(i, o, LSTM_PEEP[0], LSTM_PEEP[1], LSTM_PEEP[2]);
+        cell.set_weights(&weights(cell.nb_of_weights()));
+        cell
+    }
+
     fn fast_mamba(i: usize, o: usize) -> FastMamba {
         let p = mamba_params();
         let n = FastMamba::weight_count(i, o, p.d_state, p.d_conv, p.expand, p.dt_rank);
@@ -1728,6 +2142,68 @@ mod tests {
         }
     }
 
+    /// THE LAYOUT PIN, block by block and element for element -- the phase-9 Task-4
+    /// technique (whole-pack reconstruction), which closes a hole a value comparison alone
+    /// leaves open: a PERMUTATION that happens to be self-consistent under a smooth weight
+    /// fill. `from_flat` is inverted here from an INDEPENDENT transcription of the four
+    /// `LstmLayer::set_weights` blocks (`nn/layers.rs:139-150`), and the reconstruction must
+    /// equal the original pack narrowed to f32, exactly.
+    ///
+    /// Note the ONE transposed block: `peep` arrives COLUMN-major (12 contiguous values per
+    /// unit) and is stored ROW-major, so a reversed transpose would survive a smooth fill's
+    /// value test at some shapes but cannot survive this.
+    #[test]
+    fn lstm_from_flat_inverts_the_set_weights_block_order() {
+        for (i, o) in [(5usize, 3usize), (92, 4), (1, 1)] {
+            let n = FastLstm::weight_count(i, o);
+            let flat = weights(n);
+            let cell = FastLstm::from_flat(&flat, i, o, LSTM_PEEP);
+
+            let mut rebuilt = Vec::with_capacity(n);
+            // Block 1: InputWeights (I x 4O) COLUMN-major -> `inp[(a*O+j)*I + k]`.
+            for col in 0..4 * o {
+                for k in 0..i {
+                    rebuilt.push(cell.inp[col * i + k]);
+                }
+            }
+            // Block 2: FeedbackWeights (O x 4O) COLUMN-major -> `rec[(a*O+j)*O + k]`.
+            for col in 0..4 * o {
+                for k in 0..o {
+                    rebuilt.push(cell.rec[col * o + k]);
+                }
+            }
+            // Block 3: PeepWeight (12 x O) COLUMN-major -> `peep[r*O + j]` (transposed).
+            for j in 0..o {
+                for r in 0..12 {
+                    rebuilt.push(cell.peep[r * o + j]);
+                }
+            }
+            // Block 4: Biaises (1 x 4O).
+            rebuilt.extend_from_slice(&cell.bias);
+
+            assert_eq!(rebuilt.len(), n, "in={i} out={o}: reconstruction length");
+            let want: Vec<f32> = flat.iter().map(|&x| x as f32).collect();
+            assert_eq!(rebuilt, want, "in={i} out={o}: block order / transpose");
+        }
+    }
+
+    /// The peephole-LSTM count, against the exact cell's own `getNbOfWeights` walk --
+    /// INDEPENDENT of the flags, since the exact ctor resizes `_PeepWeight` to `12 x O`
+    /// unconditionally. Both are asserted: a flags-off net must still reserve the bundle,
+    /// or the pack decodes shifted.
+    #[test]
+    fn lstm_weight_count_matches_the_exact_cell() {
+        for (i, o) in [(5usize, 3usize), (92, 4), (1, 1), (23, 24), (96, 24)] {
+            let want = LstmLayer::new(i, o, true, true, true).nb_of_weights();
+            assert_eq!(FastLstm::weight_count(i, o), want, "in={i} out={o}");
+            assert_eq!(
+                LstmLayer::new(i, o, false, false, false).nb_of_weights(),
+                want,
+                "in={i} out={o}: the peephole bundle is reserved regardless of the flags"
+            );
+        }
+    }
+
     /// The two lecun-tanh constants are the exact cell's, narrowed -- not hand-retyped
     /// decimals that happen to look the same in source.
     #[test]
@@ -1761,6 +2237,12 @@ mod tests {
         // is 717 -- the cross-check that the fast element count agrees with the Python
         // builder that wrote `cfc_forward_seed.bin`.
         assert_eq!(FastCfc::weight_count(i, o, 6, 1) + mlp + tail, 717);
+        // ...and the phase-10 Task 8 forward-LSTM fixture (`lstm_forward.config`), whose
+        // manifest pack_length is 1651. Same cross-check, and the one that matters most
+        // for this cell: `init_weights.py` builds the LSTM pack through the SHARED
+        // `weight_bridge.nnet_to_flat` packer, so agreement here means the fast reader and
+        // the golden-tested packer describe the same 13 blocks.
+        assert_eq!(FastLstm::weight_count(i, o) + mlp + tail, 1651);
     }
 
     // --- construction + state -------------------------------------------------
@@ -1816,6 +2298,22 @@ mod tests {
         assert!(st.scratch.u.iter().all(|&v| v == 0.0));
     }
 
+    /// The LSTM state is THREE zeroed vectors -- and the all-zero seed is not decoration,
+    /// it is the whole `t == 0` special case (the module doc's divergence 4): the exact
+    /// forward's `t = 0` block omits the recurrence, every `t-1` peephole cross-term and
+    /// the `c_{t-1}*f_t` product, all of which are inert against these zeros.
+    #[test]
+    fn lstm_state_is_three_zeroed_vectors() {
+        let cell = fast_lstm(I, O);
+        let st = cell.state();
+        assert_eq!(st.h, vec![0.0; O]);
+        assert_eq!(st.c, vec![0.0; O]);
+        assert_eq!(st.gates, vec![0.0; 4 * O]);
+        assert_eq!(st.scratch.pre.len(), 4 * O);
+        assert!(st.scratch.pre.iter().all(|&v| v == 0.0));
+        assert_eq!(cell.peep_flags(), LSTM_PEEP);
+    }
+
     #[test]
     fn mamba_adapter_presence_follows_the_width() {
         assert!(fast_mamba(I, O).has_adapter());
@@ -1868,6 +2366,24 @@ mod tests {
     #[test]
     fn cfc_wrapper_is_the_step_loop() {
         let cell = fast_cfc(I, O);
+        let input = seq(T, I, 0.4);
+        let wrapped = cell.feed_forward(&input);
+
+        let mut manual = FastMatrix::zeros(T, O);
+        let mut st = cell.state();
+        for t in 0..T {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st, &mut manual.data[lo..hi]);
+        }
+        assert_eq!(wrapped, manual, "wrapper != step loop");
+        assert!(wrapped.data.iter().all(|v| v.is_finite()));
+        assert!(wrapped.data.iter().any(|&v| v != wrapped.data[0]));
+        assert_eq!(cell.feed_forward(&input), wrapped);
+    }
+
+    #[test]
+    fn lstm_wrapper_is_the_step_loop() {
+        let cell = fast_lstm(I, O);
         let input = seq(T, I, 0.4);
         let wrapped = cell.feed_forward(&input);
 
@@ -1983,6 +2499,49 @@ mod tests {
             cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
         }
         assert!(st.h.iter().any(|&v| v != 0.0), "carried h is all zero");
+        for t in SPLIT..T {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
+        }
+        assert_eq!(spliced, whole, "split-state run diverged");
+
+        let mut reset = FastMatrix::zeros(T, O);
+        let mut st2 = cell.state();
+        for t in 0..SPLIT {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st2, &mut reset.data[lo..hi]);
+        }
+        let mut st3 = cell.state();
+        for t in SPLIT..T {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st3, &mut reset.data[lo..hi]);
+        }
+        assert_ne!(reset, whole, "a reset at the cut was indistinguishable");
+    }
+
+    /// The LSTM split-state leg. SPLIT = 4 of 11, as above. The carried state is checked
+    /// on ALL THREE fields, because they are read by different families and a kernel that
+    /// rolled only `h` and `c` (forgetting `gates`) would still pass a two-field check
+    /// while silently zeroing the peephole cross-terms at every chunk boundary.
+    #[test]
+    fn lstm_split_state_reproduces_the_unsplit_run() {
+        let cell = fast_lstm(I, O);
+        let input = seq(T, I, 0.4);
+        let whole = cell.feed_forward(&input);
+
+        const SPLIT: usize = 4;
+        let mut spliced = FastMatrix::zeros(T, O);
+        let mut st = cell.state();
+        for t in 0..SPLIT {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
+        }
+        assert!(st.h.iter().any(|&v| v != 0.0), "carried h is all zero");
+        assert!(st.c.iter().any(|&v| v != 0.0), "carried c is all zero");
+        assert!(
+            st.gates.iter().any(|&v| v != 0.0),
+            "carried gates are all zero"
+        );
         for t in SPLIT..T {
             let (lo, hi) = (t * O, t * O + O);
             cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
@@ -2128,6 +2687,128 @@ mod tests {
             worst_abs < CFC_CELL_ABS_PIN,
             "cfc L=1 absolute drift: {worst_abs:e}"
         );
+    }
+
+    /// THE TASK-8 TRANSCRIPTION CHECK -- the exact f64 `LstmLayer::feed_forward` (the
+    /// ORACLE) against [`FastLstm`], same weights, same input, ALL THREE peephole families
+    /// live. This is the leg the whole task rests on: it is the only place the 12-row
+    /// bundle's family assignment, its application ORDER, and the two activations are
+    /// compared against the thing they were transcribed from.
+    #[test]
+    fn lstm_matches_the_exact_cell_within_the_f32_band() {
+        let fast = fast_lstm(I, O);
+        let mut exact = exact_lstm(I, O);
+
+        let input = seq(T, I, 0.4);
+        let input_f64 = as_exact(&input);
+        let mut out_e = Array2::<f64>::zeros((T, O));
+        exact.feed_forward(&input_f64, &mut out_e, false);
+        let out_f = fast.feed_forward(&input);
+
+        // MEASURED on this box (M4 Pro): max_rel 1.96e-7, max_abs 1.05e-7 -- f32 epsilon
+        // scale (1.19e-7), i.e. the narrowing and nothing else. Pinned at
+        // [`CELL_F32_PIN`] (5e-6), the sibling cells' constant. A structural transcription
+        // error (a peephole row assigned to the wrong family, the o-gate extras reordered,
+        // `gates_fn` swapped for a plain logistic) moves this by orders of magnitude --
+        // `lstm_peephole_families_are_distinguishable` measures exactly how far
+        // (3.9e-2 to 9.0e-2 for merely DROPPING one family, i.e. ~5 decades above this).
+        let worst = max_rel(&out_e, &out_f);
+        let worst_abs = max_abs(&out_e, &out_f);
+        println!("MEASURE lstm cell exact-vs-fast max_rel = {worst:e} max_abs = {worst_abs:e}");
+        assert!(
+            worst < CELL_F32_PIN,
+            "lstm f32 transcription drift: {worst:e}"
+        );
+        // Non-vacuity: an all-zero output would make any comparison pass.
+        assert!(out_f.data.iter().any(|&v| v != out_f.data[0]));
+    }
+
+    /// The SAME comparison at the REAL causal SAD arm's layer-0 shape (`23*4 -> 24`), where
+    /// the 92-wide fan-in and the 24-unit recurrence are both long enough for accumulation
+    /// order to matter. `I = 5, O = 3` is a transcription check; this is a scale check.
+    #[test]
+    fn lstm_matches_the_exact_cell_at_the_arm_geometry() {
+        let (i, o) = (92usize, 24usize);
+        let n = FastLstm::weight_count(i, o);
+        // BOUNDED weights: the linear ramp saturates at this pack size (~11k elements).
+        let fast = FastLstm::from_flat(&bounded_weights(n), i, o, LSTM_PEEP);
+        let mut exact = LstmLayer::new(i, o, LSTM_PEEP[0], LSTM_PEEP[1], LSTM_PEEP[2]);
+        exact.set_weights(&bounded_weights(n));
+
+        let input = seq(31, i, -0.2);
+        let input_f64 = as_exact(&input);
+        let mut out_e = Array2::<f64>::zeros((31, o));
+        exact.feed_forward(&input_f64, &mut out_e, false);
+        let out_f = fast.feed_forward(&input);
+
+        // MEASURED on this box (M4 Pro): max_abs 1.4225e-7, max_rel 1.4225e-5. Note the
+        // relative number is EXACTLY 100x the absolute one, which is the tell that it is
+        // FLOOR-LIMITED: [`max_rel`]'s `1e-2` scale floor is the denominator, so the worst
+        // element's own magnitude is at or below `1e-2` -- an LSTM output is
+        // `o_t * asinh(c_t)`, and a saturated-shut output gate drives it arbitrarily close
+        // to zero. This is the CfC situation ([`CFC_CELL_F32_PIN`]) reproduced at a wider
+        // shape, and the honest response is the same: the ABSOLUTE delta is the
+        // discriminating statement (1.4e-7, ~1 f32 ULP of an O(1) output), and the
+        // relative pin is widened to `measured * 10` for THIS leg only rather than
+        // pretending 5e-6 is meaningful against a 1e-2 denominator. The tight
+        // [`CELL_F32_PIN`] still governs the `I = 5, O = 3` leg above, whose outputs do
+        // not land near zero.
+        let worst = max_rel(&out_e, &out_f);
+        let worst_abs = max_abs(&out_e, &out_f);
+        println!(
+            "MEASURE lstm cell (92x24) exact-vs-fast max_rel = {worst:e} max_abs = {worst_abs:e}"
+        );
+        assert!(worst < 1.5e-4, "lstm 92x24 relative drift: {worst:e}");
+        assert!(
+            worst_abs < 1.5e-6,
+            "lstm 92x24 absolute drift: {worst_abs:e}"
+        );
+        assert!(out_f.data.iter().any(|&v| v != out_f.data[0]));
+    }
+
+    /// THE PEEPHOLE FAMILIES ARE LIVE AND DISTINGUISHABLE, which is what makes the two
+    /// legs above worth their ink. Each of the three flags is toggled INDEPENDENTLY, and
+    /// each toggle must (a) change the output far beyond the f32 band on BOTH sides, and
+    /// (b) leave fast and exact still agreeing within it. Without this, a kernel that
+    /// silently ignored a family would pass every parity leg by agreeing with an exact
+    /// path that was ALSO given the flag -- the comparison would just be measuring two
+    /// copies of the same omission... except it would not, because the exact side is not
+    /// this code. The point of (a) is sharper: it proves the fixtures actually EXERCISE
+    /// each family, so a mis-assigned peephole row cannot hide in a dead branch.
+    #[test]
+    fn lstm_peephole_families_are_distinguishable() {
+        let n = FastLstm::weight_count(I, O);
+        let input = seq(T, I, 0.4);
+        let input_f64 = as_exact(&input);
+
+        let all_on = fast_lstm(I, O).feed_forward(&input);
+        for (k, name) in ["cells", "gates", "gates_recurrent"].iter().enumerate() {
+            let mut flags = LSTM_PEEP;
+            flags[k] = false;
+            let fast = FastLstm::from_flat(&weights(n), I, O, flags);
+            let mut exact = LstmLayer::new(I, O, flags[0], flags[1], flags[2]);
+            exact.set_weights(&weights(n));
+            let mut out_e = Array2::<f64>::zeros((T, O));
+            exact.feed_forward(&input_f64, &mut out_e, false);
+            let out_f = fast.feed_forward(&input);
+
+            // (b) fast still tracks exact with this family off.
+            let worst = max_rel(&out_e, &out_f);
+            assert!(worst < CELL_F32_PIN, "{name} off: f32 drift {worst:e}");
+            // (a) ...and turning it off MOVED the answer, far outside the f32 band.
+            let moved = out_f
+                .data
+                .iter()
+                .zip(all_on.data.iter())
+                .map(|(a, b)| (a - b).abs() as f64)
+                .fold(0.0_f64, f64::max);
+            println!("MEASURE lstm peephole[{name}] off -> max_abs shift {moved:e}");
+            assert!(
+                moved > 1e-3,
+                "the {name} peephole family is inert on this fixture (shift {moved:e}) -- \
+                 the parity legs would not catch a mis-assigned row"
+            );
+        }
     }
 
     /// Width tolerance, shared by both cells: a WIDER input is cropped to the left
@@ -2393,17 +3074,90 @@ mod tests {
         assert!(FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &weights(n + 17)).is_ok());
     }
 
-    /// The LSTM cell has NO causal fast twin this phase: `element_count` (and hence
-    /// `from_flat`) bails loudly rather than falling through to a wrong architecture.
+    /// THE LSTM FAST-PATH BEHAVIOUR, FLIPPED by phase-10 Task 8 (this test was Task 6's
+    /// bail pin -- `causal_net_bails_on_the_lstm_cell` -- and its subject is the same
+    /// choke point, now returning a real count instead of an error).
+    ///
+    /// What the removed bail protected is unchanged and re-asserted here: the count must
+    /// be the LSTM's OWN, equal to what the EXACT net built from the same config reports,
+    /// and NOT any other cell's -- otherwise the pack is consumed head-first by the wrong
+    /// reader, with no tolerance to widen and no gate to catch it.
+    // `identity_op` allowed for the CfC sibling's reason: `3 * 1 + 1` is the dense layer's
+    // LAYOUT FORMULA written out.
     #[test]
-    fn causal_net_bails_on_the_lstm_cell() {
-        let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
-        let err = FastCausalNet::element_count(&sp, CellType::Lstm, &mamba_params(), &cfc_params())
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("no forward-only fast twin"),
-            "expected an LSTM bail, got: {err}"
+    #[allow(clippy::identity_op)]
+    fn lstm_is_classified_causal_and_now_builds() {
+        let mut map = IndexMap::new();
+        map.insert("BLSTM_LSTMNeuronNb".to_string(), "4,3".to_string());
+        map.insert("BLSTM_LSTMSubSampling".to_string(), "1".to_string());
+        map.insert("BLSTM_OutputNeuronNb".to_string(), "3,1".to_string());
+        map.insert("BLSTM_OutputSubSampling".to_string(), "1".to_string());
+        map.insert("BLSTM_InputNormalizationType".to_string(), "0".to_string());
+        map.insert("BLSTM_TwoSweeps".to_string(), "false".to_string());
+        map.insert("BLSTM_Cell_Type".to_string(), "lstm".to_string());
+        map.insert("BLSTM_Direction".to_string(), "forward".to_string());
+        let bc = crate::nn::blstm::BlstmConfig::from_legacy(&map, "BLSTM").unwrap();
+
+        assert_eq!(
+            crate::fast::driver::classify_fast_shape(&bc),
+            crate::fast::driver::FastNetShape::Causal(CellType::Lstm),
+            "(lstm, forward) must classify causal now that FastLstm exists"
         );
+
+        let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
+        let p = mamba_params();
+        let c = cfc_params();
+        let n = FastCausalNet::element_count(&sp, CellType::Lstm, &p, &c).unwrap();
+        assert_eq!(n, FastLstm::weight_count(4, 3) + (3 * 1 + 1) + 2 * 4);
+        let exact = crate::nn::blstm::BlstmNetwork::from_config(bc.clone()).unwrap();
+        assert_eq!(
+            n,
+            exact.nb_of_weights(),
+            "the fast count must equal the exact net's pack length"
+        );
+        for other in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
+            assert_ne!(
+                n,
+                FastCausalNet::element_count(&sp, other, &p, &c).unwrap(),
+                "the LSTM count collided with {other:?}'s"
+            );
+        }
+
+        let net = FastCausalNet::from_flat(&sp, CellType::Lstm, &p, &c, &weights(n)).unwrap();
+        assert!(matches!(net.cells()[0], FastCell::Lstm(_)));
+        assert!(matches!(net.cells()[0].state(), FastCellState::Lstm(_)));
+    }
+
+    /// The BIDIRECTIONAL LSTM refusal SURVIVES phase-10 Task 8 -- it used to fall out of
+    /// `cell_weight_count`'s retired `None` sentinel and is now an explicit guard. It
+    /// matters because `FastBiCell` would otherwise build a per-step LSTM stack where the
+    /// phase-7-pinned `FastBlstm` (batched faer projection) is the twin, silently swapping
+    /// kernels. Unreachable via `classify_fast_shape` (which maps that pair to
+    /// `FastNetShape::Blstm`), which is exactly why it needs a direct pin.
+    #[test]
+    fn bicell_bails_on_the_lstm_cell() {
+        let sp = spec(&[4, 3], &[1], &[6, 1], &[1]);
+        let err = super::super::bicell::FastBiCell::element_count(
+            &sp,
+            CellType::Lstm,
+            &mamba_params(),
+            &cfc_params(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("bidirectional fast twin is"),
+            "expected a bidirectional-LSTM bail, got: {err}"
+        );
+        // ...and the three cells it IS for still size fine at the same shape.
+        for cell in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
+            super::super::bicell::FastBiCell::element_count(
+                &sp,
+                cell,
+                &mamba_params(),
+                &cfc_params(),
+            )
+            .unwrap_or_else(|e| panic!("{cell:?} must size: {e}"));
+        }
     }
 
     /// THE CfC FAST-PATH BEHAVIOUR, FLIPPED by phase-10 Task 6 (this test was Task 1's
@@ -2441,7 +3195,7 @@ mod tests {
         let bc = crate::nn::blstm::BlstmConfig::from_legacy(&map, "BLSTM").unwrap();
 
         assert_eq!(
-            crate::fast::driver::classify_fast_shape(&bc, "BLSTM").unwrap(),
+            crate::fast::driver::classify_fast_shape(&bc),
             crate::fast::driver::FastNetShape::Causal(CellType::Cfc),
             "the causal arm is cell-open by design -- it must NOT special-case cfc"
         );

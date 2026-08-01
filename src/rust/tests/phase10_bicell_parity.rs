@@ -456,8 +456,12 @@ fn bicell_parity_crossing_is_exercised() {
 }
 
 /// THE DISPATCH FLIP (spec S5): `(slstm|mamba|cfc, bidirectional)` was a typed bail
-/// through phase 9; it now BUILDS a `FastBiCell` behind the fast SAD driver. The
-/// `(lstm, forward)` combination stays bailed -- that is Task 8's.
+/// through phase 9; it now BUILDS a `FastBiCell` behind the fast SAD driver.
+///
+/// The `(lstm, forward)` tail of this leg USED TO assert the last remaining shape bail,
+/// naming Task 8 as its flipper. Task 8 flipped it (`fast::cells::FastLstm`), so the
+/// assertion is inverted rather than deleted: that combination must now BUILD, from the
+/// matching committed pack, which is the statement that `classify_fast_shape` is total.
 #[test]
 fn fast_dispatch_builds_bidirectional_cells() {
     for cell in CELLS {
@@ -470,19 +474,19 @@ fn fast_dispatch_builds_bidirectional_cells() {
         );
     }
 
-    // Still bailed: the LSTM cell in the CAUSAL direction (spec S6 / Task 8).
-    let mut m = bicell_map("slstm", Some("fast"), None, None);
+    // NO LONGER BAILED (phase-10 Task 8): the LSTM cell in the CAUSAL direction. The
+    // bidirectional fixture re-declared forward is EXACTLY the `lstm_forward` fixture's
+    // geometry (`23,4` recurrent / `4,1` output), so its committed pack is the right one.
+    let lstm_pack = fixture("phase9/lstm_forward_seed.bin");
+    let mut m = bicell_map("slstm", Some("fast"), Some(&lstm_pack), None);
     m.insert("BLSTM_Cell_Type".into(), "lstm".into());
     m.insert("BLSTM_Direction".into(), "forward".into());
     m.insert("BLSTM_OutputNeuronNb".into(), "4,1".into());
-    m.insert("BLSTM_weightsFile".into(), String::new());
-    let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
-        .err()
-        .unwrap_or_else(|| panic!("fast + causal LSTM must still bail"));
+    let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
+        .unwrap_or_else(|e| panic!("fast + causal LSTM must build now: {e}"));
     assert!(
-        err.to_string()
-            .contains("Direction 'forward' is not supported on the fast inference path"),
-        "expected a causal-LSTM bail, got: {err}"
+        matches!(bag.processor(0), Processor::FastSpectral(_)),
+        "causal LSTM: expected the fast SAD driver"
     );
 }
 

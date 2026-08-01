@@ -45,6 +45,20 @@
 //! pinned positively rather than skipped -- see [`min_interior_plain`] (its measured
 //! ONE-boundary ceiling) and [`expects_midstream_emissions`] (why that ceiling forces both
 //! of its segments into `finish()`, so it contributes no measured-lag row).
+//!
+//! PHASE 10 TASK 8 adds the `lstm` rows (`lstm_forward.config` + `lstm_forward_seed.bin`),
+//! completing the causal set. Again ZERO machinery: the same generic `FastCell` dispatch,
+//! the same choke point, one more entry in [`CAUSAL_CELLS`]. It is nonetheless the row
+//! this suite is best placed to catch a bug in, because the peephole LSTM carries the
+//! RICHEST state of the four -- `h`, `c`, AND the previous step's POST-activation gate row,
+//! which three separate peephole families read at `t-1`. A kernel that rolled `h` and `c`
+//! but not `gates` would compute correct whole-sequence output and WRONG streamed output at
+//! every chunk boundary; that is precisely what the split-state and chunk-invariance legs
+//! measure. MEASURED, all green, first run: crossing at bias `+0.5` -> 4 interior
+//! boundaries (6 segment rows), `finish()` bit-equal to offline with `max_dt` EXACTLY 0.0
+//! on both the plain and the calibrated type-1 configs, chunk-invariant at 20/100/1000/7 ms,
+//! zero prefix retractions, 4 mid-stream emissions, and the SAME 1.73400 s derived bound
+//! (measured speech lag 1.75688 s, i.e. -0.07712 s inside `bound + PUSH_CHUNK_S`).
 
 mod common;
 
@@ -383,6 +397,12 @@ fn interior_boundaries(seg: &Segmentation) -> usize {
 /// valid for THIS granularity.
 const PUSH_CHUNK_S: f64 = 0.1;
 
+/// Every cell the CAUSAL streaming arm now runs. `lstm` joined in phase-10 Task 8
+/// (`fast::cells::FastLstm` + the committed `lstm_forward` fixture); the legs below are
+/// parametric, so it is new DATA, not new machinery -- which is exactly the S5.2 claim
+/// that `StreamCausal` never learns the cell type.
+const CAUSAL_CELLS: [&str; 4] = ["slstm", "mamba", "cfc", "lstm"];
+
 const MIN_INTERIOR_PLAIN: usize = 2;
 
 /// The floor the CALIBRATED TYPE-1 leg demands. ONE, and that is a MEASURED CEILING, not a
@@ -489,7 +509,7 @@ fn plain_crossing(dir: &Path, cell: &str, tag: &str) -> f64 {
 
 #[test]
 fn stream_finish_equals_offline_causal() {
-    for cell in ["slstm", "mamba", "cfc"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "gate");
@@ -561,7 +581,7 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
     // the fixture's own statistics (so it is NOT the identity), asserts the streamed run is
     // still bit-identical to offline, and asserts the type-1 posteriors DIFFER from the
     // type-0 ones (else the threading claim would be vacuous).
-    for cell in ["slstm", "mamba", "cfc"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
         // Sweep the crossing on the CALIBRATED config: the calibrated tail shifts the
         // posterior level, so the type-0 sweep's offset does not carry over (measured: at
@@ -624,7 +644,7 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
 
 #[test]
 fn chunking_bit_invariance() {
-    for cell in ["slstm", "mamba", "cfc"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "chunks");
@@ -682,7 +702,7 @@ fn chunking_bit_invariance() {
 
 #[test]
 fn prefix_consistency_e2e() {
-    for cell in ["slstm", "mamba", "cfc"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "prefix");
@@ -814,14 +834,28 @@ fn validation_bails() {
         "bidirectional-cell bail message: {msg}"
     );
 
-    // (7) The CAUSAL direction with the legacy LSTM cell -- a forward-only LSTM fast twin
-    // is a named follow-on (spec S5.3), so streaming refuses it too.
+    // (7) WAS A BAIL, NOW A BUILD: the CAUSAL direction with the legacy LSTM cell. Phase-10
+    // Task 8 landed `fast::cells::FastLstm`, so `classify_fast_shape` is total and this
+    // session constructs on the CAUSAL arm -- staged from the committed `lstm_forward`
+    // fixture, since the config must carry an LSTM-sized pack.
+    //
+    // What survives from the old bail is the reason it existed: an sLSTM-sized pack must
+    // NOT decode as an LSTM. Asserted directly below, on the sLSTM staging with only the
+    // cell key flipped -- the pack lengths differ (1603 vs 1651), so it fails on LENGTH
+    // rather than silently running one architecture's weights through the other's kernel.
+    let lstm_stage = stage(dir.path(), "lstm", 0.0, "bails_lstm");
+    let m = parse(&lstm_stage.config_text);
+    let sess = StreamingSession::new(&m, rate, 1).expect("a causal LSTM config must build now");
+    assert!(
+        sess.is_causal(),
+        "the causal LSTM config must select the causal arm"
+    );
     let mut m = parse(text);
     m.insert("BLSTM_Cell_Type".into(), "lstm".into());
     let msg = bail_msg(StreamingSession::new(&m, rate, 1));
     assert!(
-        msg.contains("Direction 'forward' is not supported on the fast inference path"),
-        "causal-LSTM bail message: {msg}"
+        msg.contains("too short"),
+        "an sLSTM-sized pack must not decode as an LSTM: {msg}"
     );
 
     // (8) An empty weights file (the frozen net must be loaded once).
@@ -931,7 +965,7 @@ fn latency_bounds() {
     // which enters `raw_segments` only when that speech COMMITS at its falling edge, so its
     // lag is that speech's DURATION plus the forward pipeline delay -- the data-dependent
     // AREA term, inherent to closed-interval raw segments and NOT reduced by the trigger.
-    for cell in ["slstm", "mamba", "cfc"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "latency");
@@ -1308,7 +1342,12 @@ fn synth_net(
         output_neuron_nb: outn.to_vec(),
         output_subsampling: osub.to_vec(),
         input_size: lstm[0],
-        peepholes: [false; 6],
+        // ALL SIX PEEPHOLE FAMILIES ON (phase-10 Task 8, flipped from `[false; 6]`). Inert
+        // for slstm/mamba/cfc -- none of them has peepholes, and `cell_weight_count` does
+        // not read the flags either, so those rows are bit-unchanged -- but load-bearing
+        // for the LSTM row: with the flags off, the peephole half of its carried state
+        // would never be read and the split-state legs would prove nothing about it.
+        peepholes: [true; 6],
     };
     let p = speech::nn::blstm::MambaParams::default();
     // The FIXTURE geometry (`Cfc_Backbone_Units 6` / `Layers 1`), not the sized default:
@@ -1387,6 +1426,12 @@ fn stream_causal_matches_offline_on_the_real_arm_geometry() {
         speech::nn::blstm::CellType::Slstm,
         speech::nn::blstm::CellType::Mamba,
         speech::nn::blstm::CellType::Cfc,
+        // Phase-10 Task 8. This row matters MORE than its siblings, not less: the LSTM is
+        // the one cell here whose state is three separate carried vectors (`h`, `c` and the
+        // POST-activation `gates` the peephole cross-terms read), so a kernel that rolled
+        // only two of them would still pass every whole-sequence leg and fail exactly here,
+        // at a chunk boundary.
+        speech::nn::blstm::CellType::Lstm,
     ] {
         let mut net = synth_net(cell, &[23, 24, 24], &[4, 1], &[24, 12, 1], &[1, 1]);
         // 143 rows: NOT a multiple of the layer-0 ratio 4, so the trailing `143 mod 4 == 3`

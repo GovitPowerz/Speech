@@ -1585,13 +1585,14 @@ impl StreamingSession {
     /// phase-7 [`FastPipeline`], and wires the front-end + NN stage + decision layer.
     ///
     /// THE NN STAGE IS DISPATCHED (spec S5.2) on `Cell_Type` x `Direction`, through
-    /// `fast::driver`'s own `classify_fast_shape` choke point -- so a pair the offline fast
-    /// tree refuses (a causal LSTM) is refused HERE with the IDENTICAL wording rather than
-    /// a second, drifting copy:
+    /// `fast::driver`'s own `classify_fast_shape` choke point -- ONE classifier, so the
+    /// session and the offline driver cannot drift apart on which shape a config selects:
     ///  - `lstm` + bidirectional -> [`StreamNn::Windowed`] ([`StreamOverlap`] + [`FastBlstm`]),
     ///    the phase-8 path;
-    ///  - `slstm`/`mamba`/`cfc` + forward -> [`StreamNn::Causal`] ([`StreamCausal`] over a
-    ///    [`FastCausalNet`]), Phase 9 Task 7.
+    ///  - ANY cell + forward -> [`StreamNn::Causal`] ([`StreamCausal`] over a
+    ///    [`FastCausalNet`]), Phase 9 Task 7 -- with `lstm` joining in phase-10 Task 8
+    ///    (`FastLstm`), which is why the causal-LSTM refusal this doc used to describe is
+    ///    gone rather than moved: the shape is implemented.
     ///
     /// ONE SHAPE IS REFUSED HERE THAT THE OFFLINE TREE ACCEPTS (phase-10 Task 7): a
     /// BIDIRECTIONAL new cell. `classify_fast_shape` now names it (`FastNetShape::BiCell`,
@@ -1644,11 +1645,11 @@ impl StreamingSession {
         let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
 
         // Cell x direction dispatch (spec S5.2), through the SAME `classify_fast_shape`
-        // choke point the offline fast SAD driver uses -- so a config the OFFLINE fast
-        // tree refuses (a causal LSTM) is refused HERE with the identical wording, and a
-        // supported pair selects the arm. The one shape refused here but NOT offline
-        // (a bidirectional new cell) is handled immediately below.
-        let shape = classify_fast_shape(&bc, "BLSTM")?;
+        // choke point the offline fast SAD driver uses, so both sides agree on the shape
+        // by construction. The classifier is TOTAL since phase-10 Task 8; the ONE shape
+        // refused here but NOT offline (a bidirectional cell) is handled immediately
+        // below.
+        let shape = classify_fast_shape(&bc);
         // BIDIRECTIONAL IS UNSTREAMABLE BY CONSTRUCTION (phase-10 Task 7, spec S5): the
         // reverse stack's state at time `t` is a function of the samples AFTER `t`, so
         // its output at the first frame depends on the last one. There is no bounded

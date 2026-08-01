@@ -20,13 +20,14 @@
 //! - `nn/blstm.rs::feed_forward_backward_overlap` (`:1594-1726`): reproduced in
 //!   [`super::nn::FastBlstm::feed_forward_overlap`] (output-only).
 //!
-//! THREE NET SHAPES (Phase 9 Task 6 + phase-10 Task 7, spec S4.2/S5).
+//! THREE NET SHAPES (Phase 9 Task 6 + phase-10 Tasks 7/8, spec S4.2/S5/S6).
 //! `FastSpectralSegmenter` dispatches on `BLSTM_Cell_Type` x `BLSTM_Direction` at
 //! construction ([`classify_fast_shape`]): `(lstm, bidirectional)` builds the phase-7
-//! [`FastBlstm`], `(slstm|mamba|cfc, forward)` builds the causal [`FastCausalNet`]
-//! ([`super::cells`]), and `(slstm|mamba|cfc, bidirectional)` builds
-//! [`FastBiCell`] ([`super::bicell`]). Only `(lstm, forward)` typed-bails now (a
-//! forward-only LSTM fast twin is phase-10 Task 8).
+//! [`FastBlstm`], `(any cell, forward)` builds the causal [`FastCausalNet`]
+//! ([`super::cells`]), and `(any cell, bidirectional)` builds [`FastBiCell`]
+//! ([`super::bicell`]). NOTHING typed-bails on shape any more: phase-10 Task 8's
+//! `FastLstm` filled the last hole (`(lstm, forward)`), so the classifier is TOTAL and
+//! the cell set `{lstm, slstm, mamba, cfc}` is complete in both directions.
 //!
 //! THE WINDOWING REGIME FOLLOWS THE SHAPE. BLSTM runs the OVERLAP windowed driver only;
 //! causal runs the PLAIN whole-sequence forward only (a causal cell inside a window has
@@ -85,8 +86,8 @@ use crate::features::pipeline::{FeatureConfig, SpectralParams};
 pub enum FastNetShape {
     /// [`FastBlstm`] -- LSTM + bidirectional, the phase-7 path (BYTE-UNTOUCHED).
     Blstm,
-    /// [`FastCausalNet`] -- `slstm`/`mamba` (phase 9) or `cfc` (phase-10 Task 6) +
-    /// `Direction forward`.
+    /// [`FastCausalNet`] -- ANY cell + `Direction forward`: `slstm`/`mamba` (phase 9),
+    /// `cfc` (phase-10 Task 6), `lstm` (phase-10 Task 8, which completed the set).
     Causal(CellType),
     /// [`FastBiCell`] -- `slstm`/`mamba`/`cfc` + `Direction bidirectional` (phase-10
     /// Task 7, spec S5). OFFLINE ONLY: bidirectional inference is unstreamable by
@@ -94,47 +95,42 @@ pub enum FastNetShape {
     BiCell(CellType),
 }
 
-/// Classify a net's `(cell_type, direction)` pair, typed-bailing the two combinations
-/// the fast tree does NOT implement (spec S4.2).
+/// Classify a net's `(cell_type, direction)` pair into the fast net shape that runs it
+/// (spec S4.2, completed by phase-10 spec S6).
 ///
-/// Supported: `(lstm, bidirectional)` -> [`FastNetShape::Blstm`] (phase 7);
-/// `(slstm|mamba|cfc, forward)` -> [`FastNetShape::Causal`] (`cfc` joined in phase-10
-/// Task 6; the arm is `cell != Lstm`, so it needed no edit -- only the `FastCausalNet`
-/// weight count below it did); `(slstm|mamba|cfc, bidirectional)` ->
-/// [`FastNetShape::BiCell`] (phase-10 Task 7, spec S5 -- the arm that FLIPPED from a
-/// typed bail to a real shape).
+/// TOTAL since phase-10 Task 8 -- every pair maps to a shape, so this returns a
+/// [`FastNetShape`] rather than a `Result`:
+/// - `(lstm, bidirectional)` -> [`FastNetShape::Blstm`], the phase-7 batched twin;
+/// - `(any cell, forward)` -> [`FastNetShape::Causal`] (`cfc` joined in phase-10 Task 6,
+///   `lstm` in Task 8 -- which is what emptied the last bail arm);
+/// - `(any cell, bidirectional)` -> [`FastNetShape::BiCell`] (phase-10 Task 7, spec S5),
+///   except the `lstm` case caught by the first arm.
 ///
-/// THE BIDIRECTIONAL BAIL DID NOT DISAPPEAR, IT MOVED. Its hazard argument still holds
-/// verbatim -- `NnetSpec` carries neither cell type nor direction, so a pack at least as
-/// long as another architecture's is consumed head-first and RUNS, producing one
-/// architecture's numbers under another's name, with no tolerance to widen and no gate
-/// to catch it. What changed is that this classifier can now name the shape, so the
-/// SIZING check (`FastBiCell::element_count`, two stacks) is what closes the hazard here,
-/// and the refusal survives where the shape genuinely cannot run: `fast::stream::
-/// StreamingSession::new` (bidirectional is unstreamable by construction) and
-/// [`bail_unsupported_shape`] (the Twin's BLSTM-only gate). Both keep the refusal's
-/// LEADING CLAUSE -- which is what `phase8_gate.rs` / `phase9_stream_causal.rs` /
-/// `phase7_parity_lid.rs` actually assert (a PREFIX SUBSTRING, not the body), hence all
-/// three stay green UNMODIFIED. The streaming site REWRITES the tail, deliberately: the
-/// old "run this config on the exact path" advice is now wrong there, since the offline
-/// fast path implements the shape.
+/// THE TWO BAILS THAT USED TO LIVE HERE DID NOT DISAPPEAR AS HAZARDS, they moved or were
+/// implemented. The hazard argument is unchanged and worth restating, because it is what
+/// the SIZING checks downstream now carry: `NnetSpec` carries neither cell type nor
+/// direction, so a pack at least as long as another architecture's would be consumed
+/// head-first and RUN, producing one architecture's numbers under another's name, with no
+/// tolerance to widen and no gate to catch it. Each shape's `element_count`
+/// ([`FastBlstm::from_flat`], [`FastCausalNet::element_count`],
+/// [`FastBiCell::element_count`]) is the check that closes it.
 ///
-/// Still bailed here, pinned by a test:
-/// - `Direction forward` with the LSTM cell. A forward-only LSTM fast twin is a NAMED
-///   FOLLOW-ON (spec S6, phase-10 Task 8), not an oversight: the exact tree builds it
-///   fine, only the f32 twin is missing.
-pub(crate) fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<FastNetShape> {
+/// A refusal survives exactly where a shape genuinely cannot run, NOT here:
+/// `fast::stream::StreamingSession::new` refuses [`FastNetShape::BiCell`] (bidirectional
+/// is unstreamable by construction) and [`bail_unsupported_shape`] refuses anything but
+/// [`FastNetShape::Blstm`] for the Twin's frozen SAD net. Both keep the refusal's LEADING
+/// CLAUSE, which is what `phase8_gate.rs` / `phase9_stream_causal.rs` /
+/// `phase7_parity_lid.rs` assert (a PREFIX SUBSTRING, not the body).
+///
+/// TOTALITY IS NOT A LOOSENING. A future `CellType` variant added without a fast kernel
+/// does not silently fall through here: it reaches `super::cells::cell_weight_count`,
+/// whose `match` is exhaustive, so the omission is a COMPILE error -- a strictly earlier
+/// failure than the runtime bail this arm used to raise.
+pub(crate) fn classify_fast_shape(bc: &BlstmConfig) -> FastNetShape {
     match (bc.cell_type, bc.direction) {
-        (CellType::Lstm, Direction::Bidirectional) => Ok(FastNetShape::Blstm),
-        (cell, Direction::Forward) if cell != CellType::Lstm => Ok(FastNetShape::Causal(cell)),
-        (cell, Direction::Bidirectional) => Ok(FastNetShape::BiCell(cell)),
-        (_, Direction::Forward) => bail!(
-            "Direction '{}' is not supported on the fast inference path (net '{prefix}') with \
-             the legacy peephole LSTM cell; a forward-only LSTM fast twin is a named follow-on \
-             (spec S5.3) -- run this config on the exact path (Inference_Path exact), or select \
-             a causal cell (BLSTM_Cell_Type slstm|mamba|cfc)",
-            bc.direction.as_str()
-        ),
+        (CellType::Lstm, Direction::Bidirectional) => FastNetShape::Blstm,
+        (cell, Direction::Forward) => FastNetShape::Causal(cell),
+        (cell, Direction::Bidirectional) => FastNetShape::BiCell(cell),
     }
 }
 
@@ -162,7 +158,7 @@ pub(crate) fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<Fast
 /// type '<x>' is not supported on the fast inference path"); only the parenthetical now
 /// names both sibling shapes.
 fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
-    if classify_fast_shape(bc, prefix)? != FastNetShape::Blstm {
+    if classify_fast_shape(bc) != FastNetShape::Blstm {
         bail!(
             "cell type '{}' is not supported on the fast inference path (net '{prefix}'); this \
              net runs the f32 peephole-LSTM bidirectional twin only (the causal and \
@@ -407,10 +403,11 @@ impl FastSpectralSegmenter {
     /// `from_legacy(map, None)` + `load_weights_file` pattern).
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast-mode surfaces: the
-    /// two `Cell_Type` x `Direction` combinations [`classify_fast_shape`] refuses, the
-    /// pitch second pass (`TDCwindow > 0`), and any `InputNormalizationType` outside
+    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType` outside
     /// {-1, 0, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode;
-    /// 0 in Phase 9 Task 6 -- the exact path's no-op arm).
+    /// 0 in Phase 9 Task 6 -- the exact path's no-op arm). The `Cell_Type` x `Direction`
+    /// pair is NO LONGER among them: [`classify_fast_shape`] became total in phase-10
+    /// Task 8.
     pub fn from_legacy(
         map: &IndexMap<String, String>,
         weights: Option<&[f64]>,
@@ -429,10 +426,10 @@ impl FastSpectralSegmenter {
         }
 
         // Cell x direction dispatch (Phase 9 Task 6, spec S4.2) + peephole-default
-        // alignment (rider 1). `classify_fast_shape` typed-bails the two unsupported
-        // combinations; everything else builds a net below.
+        // alignment (rider 1). Every pair maps to a shape since phase-10 Task 8; the
+        // remaining refusals are per-shape (pack length, windowing regime, streaming).
         let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
-        let shape = classify_fast_shape(&bc, "BLSTM")?;
+        let shape = classify_fast_shape(&bc);
         let spec = build_spec_aligned_to(map, "BLSTM", &bc)?;
 
         // Normalization types on the fast SAD path: -1 (self-normalization, the
