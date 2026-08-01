@@ -12,6 +12,10 @@
 //!   projection, the LEFT-PADDED depthwise causal conv, the per-timestep selectivity
 //!   (`dt~`/`B`/`C`), the overflow-guarded `softplus`, the elementwise SSM recurrence,
 //!   the SiLU gate, and the `x'` residual.
+//! - [`FastCfc`] mirrors `nn::cells::cfc::CfcLayer::feed_forward` (phase-10 spec S1.1,
+//!   layout S1.2): `z_t = [x_t | h_{t-1}]`, the `L`-layer `lecun_tanh` backbone, the
+//!   three heads (`tanh` `ff1`/`ff2` + the logistic time-interpolation gate `g`) and
+//!   `h_t = ff1*(1-g) + ff2*g`.
 //! - [`FastCausalNet`] mirrors `nn::blstm::BlstmNetwork::feed_forward` under
 //!   [`crate::nn::blstm::Direction::Forward`]: ONE stack (no reverse half, no HCAT),
 //!   `Network::drive`'s per-layer sub-sampling chain, then the SAME f32 dense/softmax
@@ -59,7 +63,12 @@
 //!    drop the recurrence at every chunk boundary. The same argument covers Mamba's
 //!    `h_{-1} = 0` and its left-padded conv taps (the ring is zero-initialized, and
 //!    `acc += w * 0.0` on a `+0.0`-seeded accumulator is exactly the exact path's
-//!    "skip the out-of-range tap"). `split_state_*` pins the consequence.
+//!    "skip the out-of-range tap"). `split_state_*` pins the consequence. The CfC's
+//!    version of the same point is STRICTLY STRONGER and needs no argument at all: the
+//!    exact cell's `if t > 0` guard merely SKIPS WRITING the `h_{t-1}` tail of `z_t`
+//!    into an already-zeroed row, so [`FastCfc::step`]'s unconditional copy of a
+//!    zero-seeded `h` writes the identical bits -- a memcpy, not an arithmetic
+//!    identity.
 //!
 //! SCOPE. Causal (`Direction::Forward`) only, forward only, no MLP mode, no backward,
 //! no trainer. Bidirectional new-cell inference stays on the exact tree this phase
@@ -69,7 +78,7 @@
 use anyhow::{Result, bail};
 
 use crate::config::NnetSpec;
-use crate::nn::blstm::{CellType, MambaParams};
+use crate::nn::blstm::{CellType, CfcParams, MambaParams};
 
 use super::nn::{
     DenseRowChain, FastDenseLayer, FastMatrix, Scratch, copy_view_into, ensure_len, logistic_f32,
@@ -111,6 +120,25 @@ fn softplus_f32(x: f32) -> f32 {
 #[inline]
 fn silu_f32(x: f32) -> f32 {
     x * logistic_f32(x)
+}
+
+/// `nn::cells::cfc::LECUN_SCALE` in f32 -- the `1.7159` of `1.7159 tanh(2x/3)`. Part of
+/// the cell definition, not a tunable (phase-10 spec S1.1).
+pub const LECUN_SCALE_F32: f32 = 1.7159;
+
+/// `nn::cells::cfc::LECUN_SLOPE` in f32 -- the `2/3`. Written as a DIVISION for the same
+/// reason the exact constant is: the compiler folds it to the correctly-rounded f32
+/// nearest `2/3`, rather than trusting a hand-typed decimal. It is also exactly the
+/// exact constant narrowed (`LECUN_SLOPE as f32`), pinned by
+/// `cfc_activation_constants_are_the_exact_ones_narrowed`.
+pub const LECUN_SLOPE_F32: f32 = 2.0 / 3.0;
+
+/// `nn::cells::cfc::lecun_tanh` in f32: `1.7159 tanh(2x/3)`. NO saturation guard, for
+/// the exact cell's reason -- `tanh` is bounded and finite for every finite argument
+/// (and `+-1` at infinity), so unlike `exp` there is nothing to guard.
+#[inline]
+fn lecun_tanh_f32(x: f32) -> f32 {
+    LECUN_SCALE_F32 * (LECUN_SLOPE_F32 * x).tanh()
 }
 
 /// Ascending dot over two contiguous `n`-element slices -- the f32 stand-in for one
@@ -693,6 +721,266 @@ impl FastMamba {
 }
 
 // ---------------------------------------------------------------------------
+// CfC (phase-10 spec S1.1 forward, S1.2 layout).
+// ---------------------------------------------------------------------------
+
+/// `nn::cells::cfc::HEAD_NB`: the three equal-shaped output heads `[ff1 | ff2 | gate]`,
+/// in that column-block order (spec S1.1/S1.2).
+const CFC_HEAD_NB: usize = 3;
+
+/// Per-step temporaries for [`FastCfc::step`], living INSIDE [`CfcState`] for exactly
+/// [`MambaScratch`]'s reason: `step` takes `&self`, and this tree forbids per-frame
+/// allocation, so the scratch has to hang off the only `&mut` the kernel gets. It
+/// carries NO information between steps (every element is written before it is read),
+/// so it is private and absent from state equality.
+#[derive(Clone, Debug, Default)]
+struct CfcScratch {
+    /// `in + out`: `z_t = [x_t | h_{t-1}]`, the exact cell's `z_cache` row.
+    z: Vec<f32>,
+    /// `L * B`, layer-major: the backbone POST-activations, one `B`-slice per layer.
+    /// Flat (not `Vec<Vec<f32>>`) so a layer reads its predecessor through one
+    /// `split_at_mut` rather than a second level of indirection per frame.
+    bb: Vec<f32>,
+    /// `3H`: the combined head pre-activation row (`u`), block order `[ff1|ff2|gate]`.
+    u: Vec<f32>,
+}
+
+/// The CfC carried state (phase-10 S1.1): ONE `output_size`-long vector, the previous
+/// output `h_{t-1}`, which is the whole recurrence -- the cell has no cell/normalizer
+/// memory (sLSTM) and no conv ring or SSM state (Mamba).
+///
+/// `PartialEq` compares only `h` (the scratch is derived), so a state comparison in a
+/// test means what it says. Construct via [`FastCfc::state`] only -- the scratch is
+/// sized there, and a hand-built `CfcState` would index empty buffers.
+#[derive(Clone, Debug)]
+pub struct CfcState {
+    pub h: Vec<f32>,
+    scratch: CfcScratch,
+}
+
+impl PartialEq for CfcState {
+    fn eq(&self, other: &CfcState) -> bool {
+        self.h == other.h
+    }
+}
+
+/// f32 forward-only CfC cell. Every matrix is stored ROW-MAJOR BY ITS OUTPUT INDEX,
+/// which makes each output element one ascending [`dot_f32`] over a contiguous row --
+/// and which is ALREADY the spec S1.2 flat order (`for_each_slot` walks `j` outer, `k`
+/// inner), so `from_flat` is a sequence of contiguous narrowing copies and NOT a
+/// re-derivation of the layout:
+///
+/// | buffer | index | holds |
+/// |---|---|---|
+/// | `bb_w[l]` | `j*fan_in + k` | `W_l[j, k]` (`fan_in = in+H` at `l == 0`, else `B`) |
+/// | `bb_b[l]` | `j` | `b_l[j]` |
+/// | `head_w` | `(blk*H + j)*B + k` | `W_blk[j, k]`, `blk` in `[ff1, ff2, gate]` |
+/// | `head_b` | `blk*H + j` | `b_blk[j]` |
+///
+/// The backbone is a `Vec` of per-layer buffers because layer 0 is `(in+H) -> B` and the
+/// deeper ones are `B -> B` (the exact cell keeps a `Vec<Array2>` for the same reason);
+/// the three EQUAL-shaped heads share one buffer, mirroring the exact cell's combined
+/// `B x 3H` head matrix.
+#[derive(Clone)]
+pub struct FastCfc {
+    input_size: usize,
+    output_size: usize,
+    backbone_units: usize,
+    backbone_layers: usize,
+
+    bb_w: Vec<Vec<f32>>,
+    bb_b: Vec<Vec<f32>>,
+    head_w: Vec<f32>, // 3H*B
+    head_b: Vec<f32>, // 3H
+}
+
+impl FastCfc {
+    /// `B*(in+H+1) + (L-1)*B*(B+1) + 3*H*(B+1)` (spec S1.2) -- the arithmetic mirror of
+    /// `CfcLayer::nb_of_weights`, pinned against it by
+    /// `cfc_weight_count_matches_the_exact_cell`.
+    ///
+    /// `backbone_units`/`backbone_layers` are floored at 1 exactly as `CfcLayer::new`
+    /// floors them, so a degenerate geometry counts what the exact cell would build
+    /// rather than under-counting it (the config reader `CfcParams::from_legacy` rejects
+    /// a `0` loudly upstream of both).
+    pub fn weight_count(
+        input_size: usize,
+        output_size: usize,
+        backbone_units: usize,
+        backbone_layers: usize,
+    ) -> usize {
+        let b = backbone_units.max(1);
+        let l = backbone_layers.max(1);
+        let h = output_size;
+        b * (input_size + h + 1) + (l - 1) * b * (b + 1) + CFC_HEAD_NB * h * (b + 1)
+    }
+
+    /// Build from the head of the f64 flat pack, narrowing `f64 -> f32` ONCE, block by
+    /// block in the spec S1.2 order. PANICS on a short slice (see
+    /// [`FastSlstm::from_flat`] for why the length check lives at the net level).
+    pub fn from_flat(
+        flat: &[f64],
+        input_size: usize,
+        output_size: usize,
+        backbone_units: usize,
+        backbone_layers: usize,
+    ) -> FastCfc {
+        let (b, l, h) = (backbone_units.max(1), backbone_layers.max(1), output_size);
+
+        let mut pos = 0usize;
+        let mut take = |k: usize| -> Vec<f32> {
+            let seg = &flat[pos..pos + k];
+            pos += k;
+            seg.iter().map(|&x| x as f32).collect()
+        };
+
+        let mut bb_w = Vec::with_capacity(l);
+        let mut bb_b = Vec::with_capacity(l);
+        for li in 0..l {
+            let fan_in = if li == 0 { input_size + h } else { b };
+            bb_w.push(take(b * fan_in));
+            bb_b.push(take(b));
+        }
+        // The three heads are INTERLEAVED in the pack (`W_1 | b_1 | W_2 | b_2 | W_t |
+        // b_t`), so they are gathered per block rather than as two long runs.
+        let mut head_w = Vec::with_capacity(CFC_HEAD_NB * h * b);
+        let mut head_b = Vec::with_capacity(CFC_HEAD_NB * h);
+        for _ in 0..CFC_HEAD_NB {
+            head_w.extend_from_slice(&take(h * b));
+            head_b.extend_from_slice(&take(h));
+        }
+
+        FastCfc {
+            input_size,
+            output_size: h,
+            backbone_units: b,
+            backbone_layers: l,
+            bb_w,
+            bb_b,
+            head_w,
+            head_b,
+        }
+    }
+
+    pub fn input_size(&self) -> usize {
+        self.input_size
+    }
+
+    pub fn output_size(&self) -> usize {
+        self.output_size
+    }
+
+    pub fn backbone_units(&self) -> usize {
+        self.backbone_units
+    }
+
+    pub fn backbone_layers(&self) -> usize {
+        self.backbone_layers
+    }
+
+    /// A fresh state: `h_0 = 0` (the exact cell's zeroed `output` row) plus the sized
+    /// scratch.
+    pub fn state(&self) -> CfcState {
+        let (i, h, b, l) = (
+            self.input_size,
+            self.output_size,
+            self.backbone_units,
+            self.backbone_layers,
+        );
+        CfcState {
+            h: vec![0.0; h],
+            scratch: CfcScratch {
+                z: vec![0.0; i + h],
+                bb: vec![0.0; l * b],
+                u: vec![0.0; CFC_HEAD_NB * h],
+            },
+        }
+    }
+
+    /// ONE timestep (spec S1.1), the streaming kernel. Stages, in the exact forward's
+    /// order: `z_t = [x_t | h_{t-1}]` -> `L` `lecun_tanh` backbone layers -> the
+    /// combined head product -> `tanh`/`tanh`/logistic -> `h = ff1*(1-g) + ff2*g`.
+    ///
+    /// Width tolerance is the exact `CfcLayer::reconcile_input` contract, reproduced
+    /// LITERALLY rather than as sLSTM's fewer-terms trick: a wider `x` is CROPPED to the
+    /// left `input_size` columns and a narrower one is ZERO-PADDED into `z`, so the dot
+    /// runs over the full `in + H` width on every path exactly as `matmul_seq` does.
+    ///
+    /// `needless_range_loop` is allowed for the same reason the exact cells allow it:
+    /// the ascending index order IS the numeric contract.
+    #[allow(clippy::needless_range_loop)]
+    pub fn step(&self, x: &[f32], s: &mut CfcState, out: &mut [f32]) {
+        let (i, h, b, l) = (
+            self.input_size,
+            self.output_size,
+            self.backbone_units,
+            self.backbone_layers,
+        );
+        let CfcState {
+            h: h_prev,
+            scratch: sc,
+        } = s;
+        let CfcScratch { z, bb, u } = sc;
+
+        // 1. z_t = [x_t | h_{t-1}] (crop / zero-pad the input half; `h_{-1} = 0` is the
+        //    zero-seeded state, so no `t == 0` branch -- see the module doc's
+        //    divergence 4).
+        let k_in = x.len().min(i);
+        z[..k_in].copy_from_slice(&x[..k_in]);
+        for k in k_in..i {
+            z[k] = 0.0;
+        }
+        z[i..i + h].copy_from_slice(&h_prev[..h]);
+
+        // 2. Backbone: L lecun_tanh layers, the first fed z_t and the rest chained.
+        for li in 0..l {
+            let fan_in = if li == 0 { i + h } else { b };
+            let w = &self.bb_w[li];
+            let bias = &self.bb_b[li];
+            let (prev, cur) = bb.split_at_mut(li * b);
+            let src: &[f32] = if li == 0 {
+                &z[..fan_in]
+            } else {
+                &prev[(li - 1) * b..li * b]
+            };
+            for j in 0..b {
+                let base = j * fan_in;
+                cur[j] = lecun_tanh_f32(dot_f32(&w[base..base + fan_in], src) + bias[j]);
+            }
+        }
+
+        // 3. The three heads share one product (combined column blocks, `[ff1|ff2|g]`).
+        let last = &bb[(l - 1) * b..l * b];
+        for c in 0..CFC_HEAD_NB * h {
+            let base = c * b;
+            u[c] = dot_f32(&self.head_w[base..base + b], last);
+        }
+        for j in 0..h {
+            let (c1, c2, cg) = (j, h + j, 2 * h + j);
+            let ff1 = (u[c1] + self.head_b[c1]).tanh();
+            let ff2 = (u[c2] + self.head_b[c2]).tanh();
+            let g = logistic_f32(u[cg] + self.head_b[cg]);
+            out[j] = ff1 * (1.0 - g) + ff2 * g;
+        }
+        // h is rolled AFTER every unit is done, the `FastSlstm::step` convention: the
+        // next step's `z` must read this step's WHOLE output.
+        h_prev[..h].copy_from_slice(&out[..h]);
+    }
+
+    /// Whole-sequence forward: a fresh [`Self::state`] then [`Self::step`] per row.
+    pub fn feed_forward(&self, seq: &FastMatrix) -> FastMatrix {
+        let o = self.output_size;
+        let mut out = FastMatrix::zeros(seq.rows, o);
+        let mut st = self.state();
+        for t in 0..seq.rows {
+            let (lo, hi) = (t * o, t * o + o);
+            self.step(seq.row(t), &mut st, &mut out.data[lo..hi]);
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The cell enum (the fast twin of `nn::cells::CellLayer`).
 // ---------------------------------------------------------------------------
 
@@ -711,6 +999,7 @@ impl FastMamba {
 pub enum FastCell {
     Slstm(FastSlstm),
     Mamba(FastMamba),
+    Cfc(FastCfc),
 }
 
 /// The carried state of a [`FastCell`], variant-matched to its cell.
@@ -718,6 +1007,7 @@ pub enum FastCell {
 pub enum FastCellState {
     Slstm(SlstmState),
     Mamba(MambaState),
+    Cfc(CfcState),
 }
 
 impl FastCell {
@@ -725,6 +1015,7 @@ impl FastCell {
         match self {
             FastCell::Slstm(c) => c.input_size(),
             FastCell::Mamba(c) => c.input_size(),
+            FastCell::Cfc(c) => c.input_size(),
         }
     }
 
@@ -732,6 +1023,7 @@ impl FastCell {
         match self {
             FastCell::Slstm(c) => c.output_size(),
             FastCell::Mamba(c) => c.output_size(),
+            FastCell::Cfc(c) => c.output_size(),
         }
     }
 
@@ -740,6 +1032,7 @@ impl FastCell {
         match self {
             FastCell::Slstm(c) => FastCellState::Slstm(c.state()),
             FastCell::Mamba(c) => FastCellState::Mamba(c.state()),
+            FastCell::Cfc(c) => FastCellState::Cfc(c.state()),
         }
     }
 
@@ -750,6 +1043,7 @@ impl FastCell {
         match (self, s) {
             (FastCell::Slstm(c), FastCellState::Slstm(st)) => c.step(x, st, out),
             (FastCell::Mamba(c), FastCellState::Mamba(st)) => c.step(x, st, out),
+            (FastCell::Cfc(c), FastCellState::Cfc(st)) => c.step(x, st, out),
             _ => panic!("fast::cells: cell/state variant mismatch"),
         }
     }
@@ -820,6 +1114,7 @@ impl FastCausalNet {
         spec: &NnetSpec,
         cell_type: CellType,
         mamba: &MambaParams,
+        cfc: &CfcParams,
     ) -> Result<usize> {
         let lstm = &spec.lstm_neuron_nb;
         let lsub = &spec.lstm_subsampling;
@@ -858,21 +1153,16 @@ impl FastCausalNet {
                     "fast::cells::FastCausalNet is for the phase-9 causal cells only; the LSTM \
                      cell has no forward-only fast twin (spec S4.2)"
                 ),
-                // PHASE 10 TASK 1, INTERIM (removed by Task 6, which lands `FastCfc`
-                // + a `FastCell::Cfc` arm and turns this into a real weight count).
-                // `classify_fast_shape`'s causal arm deliberately admits ANY non-LSTM
-                // cell, so `Inference_Path fast` + `cfc`/`forward` reaches HERE -- and
-                // this is the choke point BOTH causal construction sites
-                // (`fast::driver` and `fast::stream`) funnel through, since
-                // `from_flat` calls `element_count` first. A typed bail here is what
-                // stops the cfc pack being consumed head-first by another
-                // architecture's reader (the exact hazard Task 2's rider closed for
-                // sLSTM in phase 9).
-                CellType::Cfc => bail!(
-                    "the CfC cell has no fast twin yet (phase-10 Task 1 landed the exact \
-                     f64 cell only; the causal f32 twin is Task 6) -- run this config on \
-                     the exact path (Inference_Path exact)"
-                ),
+                // Phase 10 Task 6: the CfC arm, which REPLACED Task 1's interim
+                // "no fast twin yet" bail. `classify_fast_shape`'s causal arm admits
+                // ANY non-LSTM cell, and this is the choke point BOTH causal
+                // construction sites (`fast::driver` and `fast::stream`) funnel through
+                // (`from_flat` calls `element_count` first), so getting the count right
+                // HERE is what keeps the cfc pack from being consumed head-first by
+                // another architecture's reader.
+                CellType::Cfc => {
+                    FastCfc::weight_count(i, o, cfc.backbone_units, cfc.backbone_layers)
+                }
             };
         }
         for jj in 0..outn.len() - 1 {
@@ -891,6 +1181,7 @@ impl FastCausalNet {
         spec: &NnetSpec,
         cell_type: CellType,
         mamba: &MambaParams,
+        cfc: &CfcParams,
         flat: &[f64],
     ) -> Result<FastCausalNet> {
         if spec.lstm_neuron_nb.is_empty() || spec.lstm_neuron_nb[0] == 0 {
@@ -899,7 +1190,7 @@ impl FastCausalNet {
                  unsupported"
             );
         }
-        let needed = Self::element_count(spec, cell_type, mamba)?;
+        let needed = Self::element_count(spec, cell_type, mamba, cfc)?;
         if flat.len() < needed {
             bail!(
                 "flat weight vector too short for the fast causal net: {} < {needed}",
@@ -941,9 +1232,18 @@ impl FastCausalNet {
                         mamba.dt_rank,
                     ),
                 ),
-                // Unreachable: `element_count` above already bailed on both.
+                CellType::Cfc => (
+                    FastCell::Cfc(FastCfc::from_flat(
+                        &flat[pos..],
+                        i,
+                        o,
+                        cfc.backbone_units,
+                        cfc.backbone_layers,
+                    )),
+                    FastCfc::weight_count(i, o, cfc.backbone_units, cfc.backbone_layers),
+                ),
+                // Unreachable: `element_count` above already bailed on it.
                 CellType::Lstm => unreachable!("LSTM has no causal fast twin"),
-                CellType::Cfc => unreachable!("CfC has no causal fast twin yet"),
             };
             cells.push(cell);
             pos += used;
@@ -1164,7 +1464,7 @@ mod tests {
     use ndarray::Array2;
 
     use super::*;
-    use crate::nn::cells::{MambaLayer, SlstmLayer};
+    use crate::nn::cells::{CfcLayer, MambaLayer, SlstmLayer};
 
     const I: usize = 5;
     const O: usize = 3;
@@ -1175,6 +1475,29 @@ mod tests {
     /// (sLSTM; mamba 1.22e-7 with the adapter, 1.06e-7 without), so this is
     /// `measured * 10` rounded up. A failure here means RE-MEASURE, never widen.
     const CELL_F32_PIN: f64 = 5.0e-6;
+
+    /// The CfC cell legs' RELATIVE pin, deliberately LOOSER than [`CELL_F32_PIN`] and
+    /// for a reason that is about the METRIC, not the cell. `h = ff1*(1-g) + ff2*g`
+    /// blends two `tanh` values, so an individual output element can land NEAR ZERO by
+    /// cancellation even while every intermediate is `O(1)`. [`max_rel`]'s `1e-2` scale
+    /// floor then divides an ordinary sub-ULP absolute delta by `1e-2` and reports
+    /// `~1e-6`; sLSTM's `o*(c/n)` and mamba's residual output simply do not produce
+    /// near-zero elements on these fixtures, which is the whole reason their relative
+    /// numbers look tighter. MEASURED: 4.63e-6 (`L = 2`) / 2.29e-6 (`L = 1`), pinned at
+    /// `measured * 10` rounded up.
+    ///
+    /// The DISCRIMINATING statement is therefore the ABSOLUTE one below, not this: the
+    /// measured absolute deltas are 1.04e-7 (`L = 2`) / 1.31e-7 (`L = 1`) against outputs
+    /// of magnitude ~1 -- i.e. ABOUT ONE f32 ULP of the output's own scale
+    /// (`f32::EPSILON` is 1.19e-7), which is the narrowing and nothing else. A structural
+    /// transcription error (a
+    /// swapped `1-g`/`g`, a dropped backbone layer, a permuted head block) moves BOTH by
+    /// orders of magnitude. A failure here means RE-MEASURE and adjudicate, never widen.
+    const CFC_CELL_F32_PIN: f64 = 5.0e-5;
+
+    /// The absolute companion to [`CFC_CELL_F32_PIN`] -- `measured * 10` on the worse of
+    /// the two legs (1.31e-7), rounded up.
+    const CFC_CELL_ABS_PIN: f64 = 1.4e-6;
 
     /// Deterministic, non-degenerate weight fill (the exact cells' unit-test fill).
     fn weights(n: usize) -> Vec<f64> {
@@ -1224,6 +1547,20 @@ mod tests {
         worst
     }
 
+    /// The plain max ABSOLUTE delta. [`max_rel`]'s `1e-2` scale floor is the right
+    /// comparator for a POSTERIOR (which is what the driver-level legs compare), but it
+    /// is floor-limited on a cell whose own output can land near zero -- see
+    /// [`CFC_CELL_F32_PIN`]. This is the un-floored companion.
+    fn max_abs(exact: &Array2<f64>, fast: &FastMatrix) -> f64 {
+        let mut worst = 0.0_f64;
+        for r in 0..exact.nrows() {
+            for c in 0..exact.ncols() {
+                worst = worst.max((exact[[r, c]] - fast.get(r, c) as f64).abs());
+            }
+        }
+        worst
+    }
+
     fn mamba_params() -> MambaParams {
         MambaParams {
             d_state: 4,
@@ -1231,6 +1568,29 @@ mod tests {
             expand: 2,
             dt_rank: 0,
         }
+    }
+
+    /// The CfC geometry every inline leg uses: a TINY backbone (`B = 4`, `L = 2`), so
+    /// the deeper `B x B` layer -- the one the single-layer committed fixture never
+    /// exercises -- is live in the unit tier.
+    fn cfc_params() -> CfcParams {
+        CfcParams {
+            backbone_units: 4,
+            backbone_layers: 2,
+        }
+    }
+
+    fn fast_cfc(i: usize, o: usize) -> FastCfc {
+        let p = cfc_params();
+        let n = FastCfc::weight_count(i, o, p.backbone_units, p.backbone_layers);
+        FastCfc::from_flat(&weights(n), i, o, p.backbone_units, p.backbone_layers)
+    }
+
+    fn exact_cfc(i: usize, o: usize) -> CfcLayer {
+        let p = cfc_params();
+        let mut cell = CfcLayer::new(i, o, p.backbone_units, p.backbone_layers);
+        cell.set_weights(&weights(cell.nb_of_weights()));
+        cell
     }
 
     fn fast_mamba(i: usize, o: usize) -> FastMamba {
@@ -1282,6 +1642,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cfc_weight_count_matches_the_exact_cell() {
+        // Both a single-layer backbone (the committed fixture's shape) and a deeper one,
+        // and both the fixture width and the S1.4 SIZED default `B = 45`.
+        for (b, l) in [(4usize, 2usize), (6, 1), (45, 1), (1, 1), (3, 4)] {
+            for (i, o) in [(5usize, 3usize), (92, 4), (23, 24), (1, 1)] {
+                assert_eq!(
+                    FastCfc::weight_count(i, o, b, l),
+                    CfcLayer::new(i, o, b, l).nb_of_weights(),
+                    "in={i} out={o} B={b} L={l}"
+                );
+            }
+        }
+    }
+
+    /// The two lecun-tanh constants are the exact cell's, narrowed -- not hand-retyped
+    /// decimals that happen to look the same in source.
+    #[test]
+    fn cfc_activation_constants_are_the_exact_ones_narrowed() {
+        assert_eq!(LECUN_SCALE_F32, crate::nn::cells::cfc::LECUN_SCALE as f32);
+        assert_eq!(LECUN_SLOPE_F32, crate::nn::cells::cfc::LECUN_SLOPE as f32);
+    }
+
     /// The committed T5 fixture geometry (`tests/reference_data/phase9/manifest.json`:
     /// sad_input 23, sad_sub_sampling 4, sad_hidden 4, output 4,1) must reproduce the
     /// manifest's recorded pack lengths EXACTLY -- the cross-check that the fast
@@ -1302,6 +1685,11 @@ mod tests {
             FastMamba::weight_count(i, o, p.d_state, p.d_conv, p.expand, p.dt_rank) + mlp + tail,
             683
         );
+        // ...and the phase-10 Task 3 CfC fixture (`cfc_forward.config`:
+        // `Cfc_Backbone_Units 6` / `Cfc_Backbone_Layers 1`), whose manifest pack_length
+        // is 717 -- the cross-check that the fast element count agrees with the Python
+        // builder that wrote `cfc_forward_seed.bin`.
+        assert_eq!(FastCfc::weight_count(i, o, 6, 1) + mlp + tail, 717);
     }
 
     // --- construction + state -------------------------------------------------
@@ -1331,6 +1719,24 @@ mod tests {
         assert!(st.conv_ring.iter().all(|&v| v == 0.0));
         assert_eq!(st.h.len(), cell.d_inner() * cell.d_state());
         assert!(st.h.iter().all(|&v| v == 0.0));
+    }
+
+    /// The CfC state is ONE zeroed vector -- there is no stabilizer sentinel, no ring
+    /// and no SSM state, and `h_0 = 0` is the whole `h_{-1}` convention (the exact
+    /// cell's zeroed `output` row). The scratch is sized here and nowhere else, which is
+    /// why `state()` is the only sanctioned constructor.
+    #[test]
+    fn cfc_state_is_a_single_zeroed_h() {
+        let cell = fast_cfc(I, O);
+        let st = cell.state();
+        assert_eq!(st.h, vec![0.0; O]);
+        assert_eq!(st.scratch.z.len(), I + O);
+        assert_eq!(
+            st.scratch.bb.len(),
+            cell.backbone_layers() * cell.backbone_units()
+        );
+        assert_eq!(st.scratch.u.len(), 3 * O);
+        assert!(st.scratch.z.iter().all(|&v| v == 0.0));
     }
 
     #[test]
@@ -1367,6 +1773,24 @@ mod tests {
     #[test]
     fn mamba_wrapper_is_the_step_loop() {
         let cell = fast_mamba(I, O);
+        let input = seq(T, I, 0.4);
+        let wrapped = cell.feed_forward(&input);
+
+        let mut manual = FastMatrix::zeros(T, O);
+        let mut st = cell.state();
+        for t in 0..T {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st, &mut manual.data[lo..hi]);
+        }
+        assert_eq!(wrapped, manual, "wrapper != step loop");
+        assert!(wrapped.data.iter().all(|v| v.is_finite()));
+        assert!(wrapped.data.iter().any(|&v| v != wrapped.data[0]));
+        assert_eq!(cell.feed_forward(&input), wrapped);
+    }
+
+    #[test]
+    fn cfc_wrapper_is_the_step_loop() {
+        let cell = fast_cfc(I, O);
         let input = seq(T, I, 0.4);
         let wrapped = cell.feed_forward(&input);
 
@@ -1466,6 +1890,42 @@ mod tests {
         assert_ne!(reset, whole, "a reset at the cut was indistinguishable");
     }
 
+    /// The CfC split-state leg. SPLIT = 4 of 11, as above: past any warm-up, not a half,
+    /// and not a multiple of the backbone depth.
+    #[test]
+    fn cfc_split_state_reproduces_the_unsplit_run() {
+        let cell = fast_cfc(I, O);
+        let input = seq(T, I, 0.4);
+        let whole = cell.feed_forward(&input);
+
+        const SPLIT: usize = 4;
+        let mut spliced = FastMatrix::zeros(T, O);
+        let mut st = cell.state();
+        for t in 0..SPLIT {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
+        }
+        assert!(st.h.iter().any(|&v| v != 0.0), "carried h is all zero");
+        for t in SPLIT..T {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
+        }
+        assert_eq!(spliced, whole, "split-state run diverged");
+
+        let mut reset = FastMatrix::zeros(T, O);
+        let mut st2 = cell.state();
+        for t in 0..SPLIT {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st2, &mut reset.data[lo..hi]);
+        }
+        let mut st3 = cell.state();
+        for t in SPLIT..T {
+            let (lo, hi) = (t * O, t * O + O);
+            cell.step(input.row(t), &mut st3, &mut reset.data[lo..hi]);
+        }
+        assert_ne!(reset, whole, "a reset at the cut was indistinguishable");
+    }
+
     // --- the transcription itself: f32 fast vs f64 exact ----------------------
 
     /// The CELL-level transcription check (the driver-level one is
@@ -1538,6 +1998,61 @@ mod tests {
         assert!(worst < CELL_F32_PIN, "mamba no-adapter drift: {worst:e}");
     }
 
+    #[test]
+    fn cfc_matches_the_exact_cell_within_the_f32_band() {
+        let fast = fast_cfc(I, O);
+        let mut exact = exact_cfc(I, O);
+
+        let input = seq(T, I, 0.4);
+        let input_f64 = as_exact(&input);
+        let mut out_e = Array2::<f64>::zeros((T, O));
+        exact.feed_forward(&input_f64, &mut out_e, false);
+        let out_f = fast.feed_forward(&input);
+
+        // MEASURED on this box (M4 Pro): max_rel 4.63e-6, max_abs 1.04e-7 (0.91 ULP of
+        // the output's own 0.96 max magnitude). See [`CFC_CELL_F32_PIN`] for why the relative
+        // number is floor-limited here and the absolute one is the load-bearing pin.
+        let worst = max_rel(&out_e, &out_f);
+        let worst_abs = max_abs(&out_e, &out_f);
+        println!("MEASURE cfc cell exact-vs-fast max_rel = {worst:e} max_abs = {worst_abs:e}");
+        assert!(
+            worst < CFC_CELL_F32_PIN,
+            "cfc f32 transcription drift: {worst:e}"
+        );
+        assert!(
+            worst_abs < CFC_CELL_ABS_PIN,
+            "cfc f32 absolute drift: {worst_abs:e}"
+        );
+    }
+
+    /// The SINGLE-LAYER backbone (`L = 1`) skips the deeper-layer chain entirely -- the
+    /// committed fixture's shape -- so it gets its own leg, exactly as mamba's
+    /// adapter-free shape does.
+    #[test]
+    fn cfc_single_backbone_layer_matches_the_exact_cell() {
+        let (b, l) = (6usize, 1usize);
+        let n = FastCfc::weight_count(I, O, b, l);
+        let fast = FastCfc::from_flat(&weights(n), I, O, b, l);
+        let mut exact = CfcLayer::new(I, O, b, l);
+        exact.set_weights(&weights(n));
+
+        let input = seq(T, I, -0.3);
+        let input_f64 = as_exact(&input);
+        let mut out_e = Array2::<f64>::zeros((T, O));
+        exact.feed_forward(&input_f64, &mut out_e, false);
+        let out_f = fast.feed_forward(&input);
+
+        // MEASURED: max_rel 2.29e-6, max_abs 1.31e-7 (again ~1 ULP of an O(1) output).
+        let worst = max_rel(&out_e, &out_f);
+        let worst_abs = max_abs(&out_e, &out_f);
+        println!("MEASURE cfc (L=1) exact-vs-fast max_rel = {worst:e} max_abs = {worst_abs:e}");
+        assert!(worst < CFC_CELL_F32_PIN, "cfc L=1 drift: {worst:e}");
+        assert!(
+            worst_abs < CFC_CELL_ABS_PIN,
+            "cfc L=1 absolute drift: {worst_abs:e}"
+        );
+    }
+
     /// Width tolerance, shared by both cells: a WIDER input is cropped to the left
     /// `input_size` columns (so it agrees with feeding those columns directly), and a
     /// NARROWER one is zero-padded rather than rejected.
@@ -1545,6 +2060,7 @@ mod tests {
     fn width_tolerance_crops_and_pads() {
         let slstm = FastSlstm::from_flat(&weights(FastSlstm::weight_count(I, O)), I, O);
         let mamba = fast_mamba(I, O);
+        let cfc = fast_cfc(I, O);
         let wide = seq(T, I + 2, 0.4);
         let mut cropped = FastMatrix::zeros(T, I);
         for r in 0..T {
@@ -1553,9 +2069,21 @@ mod tests {
         }
         assert_eq!(slstm.feed_forward(&wide), slstm.feed_forward(&cropped));
         assert_eq!(mamba.feed_forward(&wide), mamba.feed_forward(&cropped));
+        assert_eq!(cfc.feed_forward(&wide), cfc.feed_forward(&cropped));
 
         let narrow = seq(T, 2, 0.4);
         assert_eq!(slstm.feed_forward(&narrow).cols, O);
+        assert_eq!(cfc.feed_forward(&narrow).cols, O);
+        assert!(cfc.feed_forward(&narrow).data.iter().all(|v| v.is_finite()));
+        // The CfC zero-pads a narrow input LITERALLY (into `z`), so it must agree
+        // element-for-element with feeding the explicitly zero-padded matrix -- a
+        // stronger statement than "is finite", and the one the exact
+        // `reconcile_input` makes.
+        let mut padded = FastMatrix::zeros(T, I);
+        for r in 0..T {
+            padded.data[r * I..r * I + 2].copy_from_slice(&narrow.data[r * 2..r * 2 + 2]);
+        }
+        assert_eq!(cfc.feed_forward(&narrow), cfc.feed_forward(&padded));
         assert!(
             slstm
                 .feed_forward(&narrow)
@@ -1617,8 +2145,9 @@ mod tests {
     fn causal_net_supports_stacks_and_sub_sampling() {
         let sp = spec(&[6, 5, 4], &[2, 1], &[4, 3, 1], &[1, 1]);
         let p = mamba_params();
-        for cell in [CellType::Slstm, CellType::Mamba] {
-            let n = FastCausalNet::element_count(&sp, cell, &p).unwrap();
+        let c = cfc_params();
+        for cell in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
+            let n = FastCausalNet::element_count(&sp, cell, &p, &c).unwrap();
             // Independent arithmetic: two cell layers (in = neuron*sub) + two dense
             // layers + the 2*input_size tail.
             let want_cells = match cell {
@@ -1629,7 +2158,11 @@ mod tests {
                     FastMamba::weight_count(12, 5, p.d_state, p.d_conv, p.expand, p.dt_rank)
                         + FastMamba::weight_count(5, 4, p.d_state, p.d_conv, p.expand, p.dt_rank)
                 }
-                CellType::Lstm | CellType::Cfc => unreachable!(),
+                CellType::Cfc => {
+                    FastCfc::weight_count(12, 5, c.backbone_units, c.backbone_layers)
+                        + FastCfc::weight_count(5, 4, c.backbone_units, c.backbone_layers)
+                }
+                CellType::Lstm => unreachable!(),
             };
             assert_eq!(
                 n,
@@ -1637,7 +2170,7 @@ mod tests {
                 "{cell:?}"
             );
 
-            let mut net = FastCausalNet::from_flat(&sp, cell, &p, &weights(n)).unwrap();
+            let mut net = FastCausalNet::from_flat(&sp, cell, &p, &c, &weights(n)).unwrap();
             assert_eq!(net.sub_sampling_ratio(), 2);
             assert_eq!(net.cells().len(), 2);
 
@@ -1685,6 +2218,9 @@ mod tests {
         m.insert("Mamba_D_Conv".into(), p.d_conv.to_string());
         m.insert("Mamba_Expand".into(), p.expand.to_string());
         m.insert("Mamba_Dt_Rank".into(), p.dt_rank.to_string());
+        let c = cfc_params();
+        m.insert("Cfc_Backbone_Units".into(), c.backbone_units.to_string());
+        m.insert("Cfc_Backbone_Layers".into(), c.backbone_layers.to_string());
         m
     }
 
@@ -1712,8 +2248,9 @@ mod tests {
         );
         let sp = spec(lstm, lsub, outn, osub);
         let p = mamba_params();
+        let c = cfc_params();
 
-        for cell in [CellType::Slstm, CellType::Mamba] {
+        for cell in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
             let cfg = crate::nn::blstm::BlstmConfig::from_legacy(
                 &exact_map(cell, lstm, lsub, outn, osub),
                 "X",
@@ -1721,7 +2258,7 @@ mod tests {
             .unwrap();
             let mut exact = crate::nn::blstm::BlstmNetwork::from_config(cfg).unwrap();
 
-            let n = FastCausalNet::element_count(&sp, cell, &p).unwrap();
+            let n = FastCausalNet::element_count(&sp, cell, &p, &c).unwrap();
             assert_eq!(
                 n,
                 exact.nb_of_weights(),
@@ -1729,7 +2266,7 @@ mod tests {
             );
             let flat = bounded_weights(n);
             exact.set_weights(&flat).unwrap();
-            let mut fast = FastCausalNet::from_flat(&sp, cell, &p, &flat).unwrap();
+            let mut fast = FastCausalNet::from_flat(&sp, cell, &p, &c, &flat).unwrap();
 
             // 13 rows -> layer-0 sub-sampling 2 drops the odd tail -> 6 output rows.
             let input = seq(13, 6, 0.2);
@@ -1747,7 +2284,7 @@ mod tests {
                 "{cell:?}: the exact stack output is constant -- the pin is vacuous"
             );
 
-            // MEASURED on this box: sLSTM 7.91e-8, mamba 6.14e-8. Pinned at
+            // MEASURED on this box: sLSTM 7.91e-8, mamba 6.14e-8, cfc 9.85e-8. Pinned at
             // [`CELL_F32_PIN`] (5e-6), the same measure-then-pin band as the
             // single-cell legs above.
             let worst = max_rel(&out_e, &out_f);
@@ -1766,16 +2303,17 @@ mod tests {
     fn causal_net_length_check_is_typed() {
         let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
         let p = mamba_params();
-        let n = FastCausalNet::element_count(&sp, CellType::Slstm, &p).unwrap();
+        let c = cfc_params();
+        let n = FastCausalNet::element_count(&sp, CellType::Slstm, &p, &c).unwrap();
         let short = weights(n - 1);
-        let err = FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &short)
+        let err = FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &short)
             .err()
             .expect("a short pack must be rejected");
         assert!(
             err.to_string().contains("too short"),
             "expected a length bail, got: {err}"
         );
-        assert!(FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &weights(n + 17)).is_ok());
+        assert!(FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &weights(n + 17)).is_ok());
     }
 
     /// The LSTM cell has NO causal fast twin this phase: `element_count` (and hence
@@ -1783,29 +2321,35 @@ mod tests {
     #[test]
     fn causal_net_bails_on_the_lstm_cell() {
         let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
-        let err = FastCausalNet::element_count(&sp, CellType::Lstm, &mamba_params()).unwrap_err();
+        let err = FastCausalNet::element_count(&sp, CellType::Lstm, &mamba_params(), &cfc_params())
+            .unwrap_err();
         assert!(
             err.to_string().contains("no forward-only fast twin"),
             "expected an LSTM bail, got: {err}"
         );
     }
 
-    /// THE CfC FAST-PATH BEHAVIOUR, pinned as it stands after phase-10 Task 1 (this
-    /// test is Task 6's to flip): `classify_fast_shape` ADMITS `(cfc, forward)` into
-    /// the causal shape -- its arm is `cell != Lstm`, deliberately cell-open -- and
-    /// the refusal happens one layer down, at `FastCausalNet::element_count`, as a
-    /// TYPED ERROR naming the cell. No panic, no silent head-first consumption of the
-    /// pack by another architecture's reader.
+    /// THE CfC FAST-PATH BEHAVIOUR, FLIPPED by phase-10 Task 6 (this test was Task 1's
+    /// interim bail pin, and its docstring named this task as the flipper).
+    /// `classify_fast_shape` ADMITS `(cfc, forward)` into the causal shape -- its arm is
+    /// `cell != Lstm`, deliberately cell-open -- and the layer below now BUILDS instead
+    /// of refusing: `element_count` returns the real S1.2 pack length and `from_flat`
+    /// constructs a `FastCell::Cfc`.
     ///
-    /// Why the bail lives THERE and not in `classify_fast_shape`: `element_count` is
+    /// The bail it replaced lived at `element_count` rather than in
+    /// `classify_fast_shape` precisely so this flip would be local: `element_count` is
     /// the single choke point both causal construction sites reach (`fast::driver`'s
-    /// `build_fast_sad_net` and `fast::stream::StreamingSession::new` both call
-    /// `from_flat`, which calls `element_count` first), it is where the LSTM's
-    /// identical "named follow-on" refusal already lives, and Task 6's removal is then
-    /// a pure swap of this arm for a real `FastCfc` weight count -- inside the file
-    /// Task 6 is editing anyway.
+    /// `build_sad_net` and `fast::stream::StreamingSession::new` both call `from_flat`,
+    /// which calls `element_count` first), so ONE arm swap admits the cell everywhere.
+    /// What that arm still protects is unchanged and re-asserted here: the count must be
+    /// the CfC's own, not another architecture's, or the pack is consumed head-first by
+    /// the wrong reader with no tolerance to widen and no gate to catch it.
+    // `identity_op` allowed for the sibling legs' reason: the `3 * 1 + 1` is the dense
+    // layer's LAYOUT FORMULA (`outn[j]*osub[j]*outn[j+1] + outn[j+1]`) written out, and
+    // folding the `* 1` away hides which dimension the term is.
     #[test]
-    fn cfc_is_classified_causal_but_has_no_fast_twin_yet() {
+    #[allow(clippy::identity_op)]
+    fn cfc_is_classified_causal_and_now_builds() {
         let mut map = IndexMap::new();
         map.insert("BLSTM_LSTMNeuronNb".to_string(), "4,3".to_string());
         map.insert("BLSTM_LSTMSubSampling".to_string(), "1".to_string());
@@ -1815,6 +2359,8 @@ mod tests {
         map.insert("BLSTM_TwoSweeps".to_string(), "false".to_string());
         map.insert("BLSTM_Cell_Type".to_string(), "cfc".to_string());
         map.insert("BLSTM_Direction".to_string(), "forward".to_string());
+        map.insert("Cfc_Backbone_Units".to_string(), "4".to_string());
+        map.insert("Cfc_Backbone_Layers".to_string(), "2".to_string());
         let bc = crate::nn::blstm::BlstmConfig::from_legacy(&map, "BLSTM").unwrap();
 
         assert_eq!(
@@ -1824,26 +2370,45 @@ mod tests {
         );
 
         let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
-        let err = FastCausalNet::element_count(&sp, CellType::Cfc, &mamba_params()).unwrap_err();
-        assert!(
-            err.to_string().contains("no fast twin yet"),
-            "expected a CfC bail, got: {err}"
+        let n = FastCausalNet::element_count(&sp, CellType::Cfc, &mamba_params(), &bc.cfc).unwrap();
+        // The count is the CfC's OWN: one `4 -> 3` cell layer at this geometry, the
+        // `3 -> 1` dense layer, and the `2*4` normalize tail -- and it must equal what
+        // the EXACT net built from the same config reports, which is the property that
+        // makes a shared pack decode identically on both sides.
+        assert_eq!(n, FastCfc::weight_count(4, 3, 4, 2) + (3 * 1 + 1) + 2 * 4);
+        let exact = crate::nn::blstm::BlstmNetwork::from_config(bc.clone()).unwrap();
+        assert_eq!(
+            n,
+            exact.nb_of_weights(),
+            "the fast count must equal the exact net's pack length"
         );
-        // ... and it is the SAME error through the whole-net entry point, so no
-        // construction site can reach the `unreachable!` in `from_flat`.
-        let err = FastCausalNet::from_flat(&sp, CellType::Cfc, &mamba_params(), &weights(4096))
-            .err()
-            .expect("the CfC cell must be rejected at construction too");
-        assert!(err.to_string().contains("no fast twin yet"), "got: {err}");
+        // ...and it is NOT any other cell's count, which is what the removed bail was
+        // protecting against (a pack read head-first by the wrong architecture).
+        assert_ne!(
+            n,
+            FastCausalNet::element_count(&sp, CellType::Slstm, &mamba_params(), &bc.cfc).unwrap()
+        );
+
+        let net =
+            FastCausalNet::from_flat(&sp, CellType::Cfc, &mamba_params(), &bc.cfc, &weights(n))
+                .unwrap();
+        assert!(matches!(net.cells()[0], FastCell::Cfc(_)));
+        assert!(matches!(net.cells()[0].state(), FastCellState::Cfc(_)));
     }
 
     /// MLP mode (`LSTMNeuronNb[0] == 0`) is not a causal shape.
     #[test]
     fn causal_net_bails_on_mlp_mode() {
         let sp = spec(&[0, 3], &[1], &[3, 1], &[1]);
-        let err = FastCausalNet::from_flat(&sp, CellType::Slstm, &mamba_params(), &weights(64))
-            .err()
-            .expect("MLP mode must be rejected");
+        let err = FastCausalNet::from_flat(
+            &sp,
+            CellType::Slstm,
+            &mamba_params(),
+            &cfc_params(),
+            &weights(64),
+        )
+        .err()
+        .expect("MLP mode must be rejected");
         assert!(
             err.to_string().contains("MLP mode"),
             "expected an MLP bail, got: {err}"

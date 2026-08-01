@@ -22,7 +22,7 @@
 //!
 //! TWO NET SHAPES (Phase 9 Task 6, spec S4.2). `FastSpectralSegmenter` dispatches on
 //! `BLSTM_Cell_Type` x `BLSTM_Direction` at construction ([`classify_fast_shape`]):
-//! `(lstm, bidirectional)` builds the phase-7 [`FastBlstm`], `(slstm|mamba, forward)`
+//! `(lstm, bidirectional)` builds the phase-7 [`FastBlstm`], `(slstm|mamba|cfc, forward)`
 //! builds the causal [`FastCausalNet`] ([`super::cells`]). The other two combinations
 //! typed-bail. THE WINDOWING REGIME FOLLOWS THE SHAPE -- BLSTM runs the OVERLAP
 //! windowed driver only, causal runs the PLAIN whole-sequence forward only -- because
@@ -58,7 +58,7 @@ use ndarray::Array2;
 use crate::audio::Audio;
 use crate::config::NnetSpec;
 use crate::constants::random_gauss;
-use crate::nn::blstm::{BlstmConfig, CellType, Direction, MambaParams};
+use crate::nn::blstm::{BlstmConfig, CellType, CfcParams, Direction, MambaParams};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
@@ -76,7 +76,8 @@ use crate::features::pipeline::{FeatureConfig, SpectralParams};
 pub enum FastNetShape {
     /// [`FastBlstm`] -- LSTM + bidirectional, the phase-7 path (BYTE-UNTOUCHED).
     Blstm,
-    /// [`FastCausalNet`] -- `slstm`/`mamba` + `Direction forward` (Task 6).
+    /// [`FastCausalNet`] -- `slstm`/`mamba` (phase 9) or `cfc` (phase-10 Task 6) +
+    /// `Direction forward`.
     Causal(CellType),
 }
 
@@ -84,7 +85,9 @@ pub enum FastNetShape {
 /// the fast tree does NOT implement (spec S4.2).
 ///
 /// Supported: `(lstm, bidirectional)` -> [`FastNetShape::Blstm`] (phase 7);
-/// `(slstm|mamba, forward)` -> [`FastNetShape::Causal`] (this task).
+/// `(slstm|mamba|cfc, forward)` -> [`FastNetShape::Causal`] (`cfc` joined in phase-10
+/// Task 6; the arm is `cell != Lstm`, so it needed no edit -- only the `FastCausalNet`
+/// weight count below it did).
 ///
 /// Bailed, each pinned by a test:
 /// - a NEW CELL with `Direction bidirectional`. Bidirectional new-cell inference stays
@@ -117,7 +120,7 @@ pub(crate) fn classify_fast_shape(bc: &BlstmConfig, prefix: &str) -> Result<Fast
             "Direction '{}' is not supported on the fast inference path (net '{prefix}') with \
              the legacy peephole LSTM cell; a forward-only LSTM fast twin is a named follow-on \
              (spec S5.3) -- run this config on the exact path (Inference_Path exact), or select \
-             a phase-9 causal cell (BLSTM_Cell_Type slstm|mamba)",
+             a causal cell (BLSTM_Cell_Type slstm|mamba|cfc)",
             bc.direction.as_str()
         ),
     }
@@ -254,12 +257,13 @@ fn build_sad_net(
     spec: &NnetSpec,
     shape: FastNetShape,
     mamba: &MambaParams,
+    cfc: &CfcParams,
     flat: &[f64],
 ) -> Result<FastSadNet> {
     Ok(match shape {
         FastNetShape::Blstm => FastSadNet::Blstm(FastBlstm::from_flat(spec, flat)?),
         FastNetShape::Causal(cell) => {
-            FastSadNet::Causal(FastCausalNet::from_flat(spec, cell, mamba, flat)?)
+            FastSadNet::Causal(FastCausalNet::from_flat(spec, cell, mamba, cfc, flat)?)
         }
     })
 }
@@ -281,6 +285,10 @@ pub struct FastSpectralSegmenter {
     shape: FastNetShape,
     /// The `Mamba_*` geometry, inert unless [`Self::shape`] is `Causal(Mamba)`.
     mamba: MambaParams,
+    /// The `Cfc_*` geometry, inert unless [`Self::shape`] is `Causal(Cfc)`. Carried
+    /// beside `mamba` for the same reason: the deferred `load_weights_file` rebuild
+    /// must size the net exactly as `from_legacy` did.
+    cfc: CfcParams,
     net: Option<FastSadNet>,
 
     /// Sub-sampling factors + whole-BLSTM ratio, cached from the spec for
@@ -380,7 +388,7 @@ impl FastSpectralSegmenter {
             * output_sub_sampling.iter().product::<usize>();
 
         let net = match weights {
-            Some(flat) => Some(build_sad_net(&spec, shape, &bc.mamba, flat)?),
+            Some(flat) => Some(build_sad_net(&spec, shape, &bc.mamba, &bc.cfc, flat)?),
             None => None,
         };
 
@@ -395,6 +403,7 @@ impl FastSpectralSegmenter {
             spec,
             shape,
             mamba: bc.mamba,
+            cfc: bc.cfc,
             net,
             lstm_sub_sampling,
             output_sub_sampling,
@@ -427,7 +436,13 @@ impl FastSpectralSegmenter {
             return Ok(());
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.net = Some(build_sad_net(&self.spec, self.shape, &self.mamba, &flat)?);
+        self.net = Some(build_sad_net(
+            &self.spec,
+            self.shape,
+            &self.mamba,
+            &self.cfc,
+            &flat,
+        )?);
         Ok(())
     }
 

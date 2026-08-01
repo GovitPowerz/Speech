@@ -30,6 +30,21 @@
 //! fixtures run `BLSTM_LSTMSubSampling 4`, so every
 //! leg here exercises the buffered decimation `StreamCausal` implements instead of bailing.
 //! See that type's docs and the module doc of `fast/stream.rs` for why.
+//!
+//! PHASE 10 TASK 6 adds the `cfc` rows (`cfc_forward.config` + `cfc_forward_seed.bin`).
+//! `StreamCausal` needed NO change to accept them -- it drives `FastCell`/`FastCellState`
+//! generically, so the new cell arrives through the same `classify_fast_shape` choke point
+//! as the other two, which is the S5.2 "zero new surface" claim being cashed rather than
+//! restated. MEASURED, all green: `finish()` bit-equal to the offline fast causal run with
+//! boundary `max_dt` EXACTLY 0.0 on BOTH the plain and the calibrated type-1 configs,
+//! chunk-invariant at 20/100/1000/7 ms, zero prefix retractions, and the SAME 1.73400 s
+//! derived bound as sLSTM/mamba (the fixture configs are byte-identical bar the cell keys,
+//! so an identical bound is the point -- the causal win is a property of the REGIME).
+//!
+//! TWO CfC rows are HONESTLY NARROWER than their siblings, both structurally and both
+//! pinned positively rather than skipped -- see [`min_interior_plain`] (its measured
+//! ONE-boundary ceiling) and [`expects_midstream_emissions`] (why that ceiling forces both
+//! of its segments into `finish()`, so it contributes no measured-lag row).
 
 mod common;
 
@@ -389,7 +404,7 @@ const MIN_INTERIOR_TYPE1: usize = 1;
 /// default detour. `build` is a closure so the same sweep serves the plain (type-0) and the
 /// calibrated-tail (type-1) legs, whose posteriors sit at different levels.
 fn crossing_offset(label: &str, min_interior: usize, build: impl Fn(f64) -> CausalStage) -> f64 {
-    for offset in [0.0_f64, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0, 1.5, -3.0, 2.0] {
+    for offset in COARSE_OFFSETS.iter().copied().chain(fine_offsets()) {
         let (_, seg) = run_offline(&build(offset));
         if interior_boundaries(&seg) >= min_interior {
             println!(
@@ -404,9 +419,63 @@ fn crossing_offset(label: &str, min_interior: usize, build: impl Fn(f64) -> Caus
     panic!("{label}: no output-bias offset produced >= {min_interior} interior boundaries");
 }
 
+/// The COARSE offsets tried first -- phase 9's list verbatim, so every pre-phase-10 row
+/// settles on exactly the offset it settled on before (slstm plain `-0.5` / type1 `+0.5`,
+/// mamba `0.0` on both).
+const COARSE_OFFSETS: [f64; 10] = [0.0, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0, 1.5, -3.0, 2.0];
+
+/// The FINE fallback grid (1/16 steps over `[-1, +1]`), reached only when no coarse offset
+/// clears `min_interior`. THE CfC TYPE-1 ROW NEEDS IT: on the calibrated tail its crossing
+/// plateau is `[+0.0625, +0.3125]`, which the coarse list's half-unit steps jump straight
+/// over (`0.0` -> 0 boundaries, `+0.5` -> 0). The CfC PLAIN row does NOT need it -- offset
+/// `0.0` already crosses -- so that row runs the fixture AS COMMITTED.
+fn fine_offsets() -> impl Iterator<Item = f64> {
+    (-16i32..=16).map(|k| f64::from(k) * 0.0625)
+}
+
+/// The PLAIN-leg interior floor for `cell`. [`MIN_INTERIOR_PLAIN`] for the phase-9 cells;
+/// ONE for `cfc`, and that is a MEASURED CEILING rather than a lowered bar -- the same
+/// honest posture [`MIN_INTERIOR_TYPE1`] takes.
+///
+/// MEASURED by a 97-point sweep over `[-3, +3]` at 1/16 on the staged 60 s fixture: the
+/// committed CfC seed net's posterior spans `[0.325, 0.705]` at offset 0 and yields
+/// EXACTLY ONE interior boundary across a broad plateau (`-0.125` .. `+0.4375`), never
+/// two, at any offset. The cause is the same flatness the parity suite records: with
+/// rising 0.6 / falling 0.3 the decision layer needs a ~1.25 logit swing for a round
+/// trip, and this net's swing is ~0.8 -- so a level shift can buy ONE edge, never a pair.
+/// (sLSTM 12 and mamba 16 clear the floor of 2 comfortably, so it stays where it is for
+/// them and remains a real regression detector there.)
+///
+/// The CfC row is therefore worth exactly what it claims: `max_dt == 0.0` over ONE real
+/// interior boundary plus the full 1500-row posterior history compared BIT-for-bit. The
+/// posterior comparison is not weakened at all by the thin boundary set -- it is the same
+/// `assert_posteriors_bit_equal` every row runs.
+fn min_interior_plain(cell: &str) -> usize {
+    if cell == "cfc" { 1 } else { MIN_INTERIOR_PLAIN }
+}
+
+/// Does `cell`'s plain-leg run produce MID-STREAM (push-time) emissions at all?
+///
+/// FALSE for `cfc`, and structurally so rather than by accident. A segment emits
+/// mid-stream only once its RIGHT edge has settled: a Speech segment needs the following
+/// silence to hold past the holdback, and an Other segment's right edge IS the following
+/// speech's onset, so it waits for that speech to COMMIT at its falling edge (the phase-8
+/// per-class decomposition, unchanged here). With [`min_interior_plain`]'s measured
+/// ceiling of ONE interior boundary, the CfC row's whole partition is
+/// `Other@0 -> Speech@4.878 -> End@60`: the Other segment waits on a Speech that never
+/// falls (it runs to EOS) and the Speech segment ends AT EOS -- so BOTH necessarily land
+/// in `finish()`, and zero push emissions is the CORRECT behaviour, not a regression.
+///
+/// This is pinned POSITIVELY (`is_empty() == !expects_midstream_emissions(cell)`) rather
+/// than skipped: if a future change made the CfC row emit mid-stream, that is a real
+/// behavioural change and the suite should say so instead of quietly accepting it.
+fn expects_midstream_emissions(cell: &str) -> bool {
+    cell != "cfc"
+}
+
 /// The plain (type-0) sweep: the committed fixture config at `offset`.
 fn plain_crossing(dir: &Path, cell: &str, tag: &str) -> f64 {
-    crossing_offset(cell, MIN_INTERIOR_PLAIN, |o| stage(dir, cell, o, tag))
+    crossing_offset(cell, min_interior_plain(cell), |o| stage(dir, cell, o, tag))
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +484,7 @@ fn plain_crossing(dir: &Path, cell: &str, tag: &str) -> f64 {
 
 #[test]
 fn stream_finish_equals_offline_causal() {
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "gate");
@@ -448,7 +517,7 @@ fn stream_finish_equals_offline_causal() {
         assert_posteriors_bit_equal(&run.posteriors, &off_post, &format!("{cell} posteriors"));
         // Non-vacuity: real interior boundaries AND a posterior sequence that moves.
         assert!(
-            interior_boundaries(&off_seg) >= MIN_INTERIOR_PLAIN,
+            interior_boundaries(&off_seg) >= min_interior_plain(cell),
             "{cell}: the boundary comparison is vacuous (no interior boundary)"
         );
         let first = off_post[0];
@@ -471,7 +540,7 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
     // the fixture's own statistics (so it is NOT the identity), asserts the streamed run is
     // still bit-identical to offline, and asserts the type-1 posteriors DIFFER from the
     // type-0 ones (else the threading claim would be vacuous).
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         let dir = tempfile::tempdir().unwrap();
         // Sweep the crossing on the CALIBRATED config: the calibrated tail shifts the
         // posterior level, so the type-0 sweep's offset does not carry over (measured: at
@@ -534,7 +603,7 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
 
 #[test]
 fn chunking_bit_invariance() {
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "chunks");
@@ -592,7 +661,7 @@ fn chunking_bit_invariance() {
 
 #[test]
 fn prefix_consistency_e2e() {
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "prefix");
@@ -630,9 +699,15 @@ fn prefix_consistency_e2e() {
             all.len(),
             final_ids.len()
         );
-        assert!(
+        // Non-vacuity where it is structurally available, and a POSITIVE pin of the
+        // absence where it is not -- see [`expects_midstream_emissions`]. The retraction
+        // check above is unaffected either way: it compares EVERY emission (push and
+        // finish alike) against the final partition.
+        assert_eq!(
             !run.push_emissions.is_empty(),
-            "{cell}: non-vacuity -- mid-stream emissions must occur"
+            expects_midstream_emissions(cell),
+            "{cell}: mid-stream emission presence changed (got {} push emissions)",
+            run.push_emissions.len()
         );
     }
 }
@@ -755,6 +830,7 @@ fn causal_output_size_not_one_bails() {
         &spec,
         bc.cell_type,
         &speech::nn::blstm::MambaParams::default(),
+        &bc.cfc,
     )
     .unwrap();
     let pack = dir.path().join("causal_out2.bin");
@@ -834,7 +910,7 @@ fn latency_bounds() {
     // which enters `raw_segments` only when that speech COMMITS at its falling edge, so its
     // lag is that speech's DURATION plus the forward pipeline delay -- the data-dependent
     // AREA term, inherent to closed-interval raw segments and NOT reduced by the trigger.
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         let dir = tempfile::tempdir().unwrap();
         let offset = plain_crossing(dir.path(), cell, "sweep");
         let st = stage(dir.path(), cell, offset, "latency");
@@ -961,16 +1037,42 @@ fn latency_bounds() {
             run.seg.segments().len()
         );
 
-        // Non-vacuity: real mid-stream emissions in BOTH classes.
+        // Non-vacuity: real emissions.
         assert!(
             run.emission_count > 1,
             "{cell}: latency leg needs real emissions"
         );
-        assert!(
+
+        // THE MEASURED-LAG HALF needs mid-stream emissions in BOTH classes, which the CfC
+        // row structurally cannot produce (see [`expects_midstream_emissions`]: its whole
+        // partition is `Other -> Speech -> EOS`, so both segments necessarily land in
+        // `finish()`). Everything ABOVE this point -- the six bit-exact component
+        // cross-checks and the bound-is-their-sum identity, i.e. the S5.5 DERIVATION
+        // itself -- has already run for every cell, including CfC, and is what the
+        // structural claim rests on; the config the derivation reads is byte-identical
+        // across the three fixtures bar the cell keys, so CfC pinning the SAME 1.73400 s
+        // bound is the statement that the causal win is a property of the REGIME and not
+        // of one cell. The absence is pinned positively rather than skipped.
+        assert_eq!(
             speech_push_max.is_finite() && other_push_max.is_finite(),
-            "{cell}: latency leg needs BOTH speech and other mid-stream emissions \
-             (speech={speech_push_max} other={other_push_max})"
+            expects_midstream_emissions(cell),
+            "{cell}: mid-stream class coverage changed (speech={speech_push_max} \
+             other={other_push_max})"
         );
+        if !expects_midstream_emissions(cell) {
+            // ...and the two cell-independent structural asserts the leg ends on still
+            // apply, so run them here before moving on.
+            assert_eq!(
+                run.nn_window, 0.0,
+                "{cell}: the causal arm must carry NO window lookahead"
+            );
+            assert!(
+                run.bound < 2.5,
+                "{cell}: derived causal bound {}",
+                run.bound
+            );
+            continue;
+        }
 
         // (1) THE STRUCTURAL WIN (tight): every SPEECH emission lands within the DERIVED
         // bound (+ the SAME 0.5 s allowance `phase8_gate.rs::latency_bounds` uses, for the
@@ -1179,12 +1281,18 @@ fn synth_net(
         peepholes: [false; 6],
     };
     let p = speech::nn::blstm::MambaParams::default();
-    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &p).unwrap();
+    // The FIXTURE geometry (`Cfc_Backbone_Units 6` / `Layers 1`), not the sized default:
+    // this helper builds tiny synthetic nets and `B = 45` would dwarf them.
+    let c = speech::nn::blstm::CfcParams {
+        backbone_units: 6,
+        backbone_layers: 1,
+    };
+    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &p, &c).unwrap();
     // Bounded, non-degenerate: a linear ramp would saturate the output layer to a constant.
     let flat: Vec<f64> = (0..n)
         .map(|k| 0.35 * (0.61 * (k as f64) + 0.3).sin())
         .collect();
-    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &p, &flat).unwrap()
+    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &p, &c, &flat).unwrap()
 }
 
 /// A deterministic, bounded, non-constant input sequence.
@@ -1248,6 +1356,7 @@ fn stream_causal_matches_offline_on_the_real_arm_geometry() {
     for cell in [
         speech::nn::blstm::CellType::Slstm,
         speech::nn::blstm::CellType::Mamba,
+        speech::nn::blstm::CellType::Cfc,
     ] {
         let mut net = synth_net(cell, &[23, 24, 24], &[4, 1], &[24, 12, 1], &[1, 1]);
         // 143 rows: NOT a multiple of the layer-0 ratio 4, so the trailing `143 mod 4 == 3`

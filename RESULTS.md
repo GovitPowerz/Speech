@@ -443,6 +443,14 @@ periodogram into a fresh f64 `Array2`, then reuse the identical `apply_filter_ba
 target calls), not a fabricated f32 kernel. Measured (`cargo bench`, 100 samples/target, Apple M4
 Pro, `bench` profile):
 
+> **SUPERSEDED (Phase 10 Task 5) -- the `mel_apply_widened_f64` rows below are a PHASE-7
+> RECORD, not a live bench target.** `fast::mel32` landed a real f32 mel/DCT kernel at both
+> fast sites, the widen is DELETED, and the bench target was renamed `mel_apply_f32`
+> accordingly (`benches/kernels.rs`). Read the three `mel_apply_widened_f64` mentions in
+> this section as "what the phase-7 widen bridge cost, and why it was worth removing"; the
+> live numbers are in **Phase 10 -- the full-f32 mel front-end (Task 5, spec S4)** below.
+> Every other row in this table is still live.
+
 | target | path | scope | time |
 |---|---|---|---|
 | `matmul_seq_92x96` | exact | 92x23 * 23x96, f64 ascending loop | 57.408 us |
@@ -450,7 +458,7 @@ Pro, `bench` profile):
 | `gfft_1024` | exact | 1024-pt complex FFT, 2 real 1024-sample frames packed per call | 17.898 us/call (8.949 us/frame) |
 | `realfft_1024` | fast | 1024-sample real FFT, 1 frame per call | 0.765 us/call (= 0.765 us/frame) |
 | `mel_apply_513x20` | exact | 100x513 f64 periodogram already in hand -> log-mel | 24.135 us |
-| `mel_apply_widened_f64` | fast | SAME shape, f32->f64 widen (fresh alloc) + SAME `apply_filter_bank` | 58.309 us |
+| `mel_apply_widened_f64` (SUPERSEDED, see above) | fast | SAME shape, f32->f64 widen (fresh alloc) + SAME `apply_filter_bank` | 58.309 us |
 
 Reading: `faer_project_92x96` is **12.41x faster** than `matmul_seq_92x96` at the identical shape --
 the single biggest per-kernel win, and (with the LSTM recurrence itself unbenched here, see
@@ -460,7 +468,8 @@ driver of the SAD/LID wall-clock speedups above. `realfft_1024` is **23.4x faste
 frames, not one -- see `fast/pipeline.rs`'s equivalence proof) is normalized out; either framing is
 a large win.
 
-**FINDING (reported honestly, not hidden -- exactly the brief's ask):**
+**FINDING (reported honestly, not hidden -- exactly the brief's ask; SUPERSEDED by Phase 10
+Task 5, which is what this finding motivated -- see the callout above):**
 `mel_apply_widened_f64` is **2.42x SLOWER** than `mel_apply_513x20` at the identical shape, not
 faster. This is the PRECISE, measured answer to "where does the fast path spend relatively more
 time": the mandatory f32->f64 widen-and-fresh-allocate step (see the memory finding above) is a

@@ -37,6 +37,15 @@
 //!   (the head class is Speech, not the seeded Other) but has NO interior boundary, so
 //!   a boundary-time comparison on it would compare nothing.
 //!
+//! PHASE 10 TASK 6 adds the `cfc` rows (`cfc_forward.config` + `cfc_forward_seed.bin`,
+//! the committed Task-3 fixture) to every leg below -- the suite is cell-parametric, so
+//! this is new ROWS, not new machinery. It is also the INDEPENDENT-IMPLEMENTATION oracle
+//! that structurally closes the T3-recorded double-swap residual: the exact
+//! `CellLayer::Cfc` arms and the f32 `FastCfc` kernel are two separately-written
+//! transcriptions of spec S1.1/S1.2, and a same-direction mistake in the exact tree's
+//! enum delegation (a swapped arm, a mis-threaded geometry) no longer cancels out --
+//! it would have to be reproduced, identically, in a kernel that shares no code with it.
+//!
 //! [`causal_parity_crossing_is_exercised`] closes the gap uniformly: it sweeps a
 //! WEIGHT-SPACE offset on the output layer's single bias -- a pure post-recurrence
 //! level shift that leaves every cell weight, and therefore the whole SHAPE of the
@@ -191,6 +200,35 @@ fn compare(
 // The CI parity legs.
 // ---------------------------------------------------------------------------
 
+/// The COARSE output-bias offsets [`causal_parity_crossing_is_exercised`] tries first.
+/// Phase-9's list verbatim: sLSTM settles at `-0.5` and mamba at `0.0`, so both rows are
+/// byte-unchanged by the phase-10 fine-grid extension below.
+const COARSE_OFFSETS: [f64; 7] = [0.0, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0];
+
+/// The FINE fallback grid (1/16 steps over `[-1, +1]`), reached only when no coarse
+/// offset crosses. THE CfC ROW NEEDS IT, and the reason is a measured property of that
+/// fixture worth stating plainly rather than hiding behind a longer list.
+///
+/// The committed CfC seed net's posterior on the 2 s tier-2 excerpt is FLAT and
+/// OSCILLATORY -- it spans `[0.367, 0.705]` at offset 0, with the high region
+/// (indices ~5-20) broken by 1-3 frame dips and a uniformly ~0.45 tail. The decision
+/// layer's rising/falling pair (0.6 / 0.3) needs a logit swing of ~1.25 to make a round
+/// trip, and `min_speech`/`min_silence` 0.2 s (5 rows at this 0.04 s time step) plus
+/// 0.1 s padding then erase anything shorter. MEASURED by a 129-point sweep over
+/// `[-4, +4]` at 1/16: EXACTLY ONE offset (`-0.0625`) yields an interior boundary, and
+/// exactly ONE boundary there.
+///
+/// So this leg's CfC row is worth precisely what it claims -- ONE real interior
+/// boundary, compared bit-for-bit through the shared f64 decision layer (the
+/// `MIN_INTERIOR_TYPE1` posture in `phase9_stream_causal.rs`, same shape). It is NOT a
+/// rich boundary-set comparison; the sLSTM row (3 boundaries, including a full
+/// Other -> Speech -> Other) is. The thinness also means a front-end change that shifts
+/// the posterior slightly will make the sweep find NOTHING and PANIC with that exact
+/// message -- a loud failure to adjudicate, not a silent weakening.
+fn fine_offsets() -> impl Iterator<Item = f64> {
+    (-16i32..=16).map(|k| f64::from(k) * 0.0625)
+}
+
 /// MEASURED on this box (M4 Pro / macOS 25.5 / Apple libm) -- see the per-leg prints;
 /// the worst across all four (cell x leg) runs is `max_rel 7.74e-6` (mamba), leaving
 /// ~13x headroom. Pinned at `measured * 10` rounded up, then widened once for
@@ -201,12 +239,18 @@ fn compare(
 /// `max_rel` 4.13e-6 -> 7.74e-6 (mamba, unchanged leg-for-leg otherwise; slstm 1.40e-6),
 /// `max_dt` still EXACTLY 0.0 with boundary count/types identical on every leg, so the
 /// PINS ARE UNCHANGED -- the growth is absorbed by the existing headroom.
+///
+/// PHASE 10 TASK 6 adds the `cfc` rows, MEASURED: plain `max_abs 4.34e-7 / max_rel
+/// 6.90e-7`, crossing `max_abs 4.11e-7 / max_rel 6.77e-7`, `max_dt` EXACTLY 0.0 on both
+/// with boundary count/types identical. That is the TIGHTEST of the three cells (~145x
+/// headroom against these pins, against mamba's ~13x), so the pins stay UNCHANGED here
+/// too -- mamba remains the worst row and therefore what they are sized for.
 const POST_REL_PIN: f64 = 1.0e-4;
 const POST_ABS_PIN: f64 = 1.0e-4;
 
 #[test]
 fn causal_parity_exact_vs_fast() {
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         let e = run_path(cell, None, None);
         let f = run_path(cell, Some("fast"), None);
         let (max_abs, max_rel, max_dt) = compare(cell, &e, &f);
@@ -241,7 +285,7 @@ fn causal_parity_exact_vs_fast() {
 #[test]
 fn causal_parity_crossing_is_exercised() {
     let tmp = tempfile::tempdir().unwrap();
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         // The output layer's bias is the LAST weight before the `2*input_size`
         // normalize tail (pack layout `[stack | output MLP | mean | std]`, and the
         // fixture's output MLP is a single `4 -> 1` layer: 4 weights then 1 bias). The
@@ -261,14 +305,20 @@ fn causal_parity_crossing_is_exercised() {
         let path = tmp.path().join(format!("{cell}_crossing.bin"));
 
         // `0.0` FIRST, so a fixture that already crosses is used AS COMMITTED and the
-        // sweep is a fallback, not a default detour.
+        // sweep is a fallback, not a default detour. COARSE steps first (slstm settles at
+        // -0.5 and mamba at 0.0, both inside the original list, so those two rows are
+        // byte-unchanged by the phase-10 extension), then a FINE 1/16 grid over
+        // `[-1, +1]` -- see [`fine_offsets`] for why the CfC row needs it.
         let mut chosen: Option<(f64, usize)> = None;
-        for offset in [0.0_f64, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0] {
+        for offset in COARSE_OFFSETS.iter().copied().chain(fine_offsets()) {
             let mut probe = base.clone();
             probe[bias_idx] += offset;
             write_matrix(&path, probe.len(), 1, &probe).unwrap();
             let interior = interior_boundaries(&run_path(cell, None, Some(&path)).1);
             if interior > 0 {
+                println!(
+                    "MEASURE crossing[{cell}]: output-bias offset {offset:+} -> {interior} interior boundaries"
+                );
                 chosen = Some((offset, interior));
                 break;
             }
@@ -316,8 +366,10 @@ fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
         BagOfProcessors::from_configs(std::slice::from_mut(m), image_mode())
     };
 
-    // ACCEPTED: both causal cells build a fast net, from their committed packs.
-    for cell in ["slstm", "mamba"] {
+    // ACCEPTED: all THREE causal cells build a fast net, from their committed packs
+    // (`cfc` joined in phase-10 Task 6, which replaced its interim `element_count` bail
+    // with a real `FastCfc`).
+    for cell in ["slstm", "mamba", "cfc"] {
         let mut m = causal_map(cell, Some("fast"), None);
         let bag = build(&mut m).unwrap_or_else(|e| panic!("fast + causal {cell} must build: {e}"));
         assert!(
@@ -329,7 +381,7 @@ fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
     // BAILED (1): a new cell in the BIDIRECTIONAL direction -- the bidirectional fast
     // twin is a named follow-on (spec non-goals), so it must fail LOUDLY rather than
     // run half an architecture.
-    for cell in ["slstm", "mamba"] {
+    for cell in ["slstm", "mamba", "cfc"] {
         let mut m = causal_map(cell, Some("fast"), None);
         m.insert("BLSTM_Direction".into(), "bidirectional".into());
         // A bidirectional net's output MLP consumes 2*hidden, so widen it or

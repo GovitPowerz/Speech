@@ -1692,9 +1692,9 @@ impl StreamingSession {
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
         let causal_net = match shape {
-            FastNetShape::Causal(cell) => {
-                Some(FastCausalNet::from_flat(&spec, cell, &bc.mamba, &flat)?)
-            }
+            FastNetShape::Causal(cell) => Some(FastCausalNet::from_flat(
+                &spec, cell, &bc.mamba, &bc.cfc, &flat,
+            )?),
             FastNetShape::Blstm => None,
         };
         let blstm_net = match shape {

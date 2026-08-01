@@ -7,8 +7,13 @@
 //! and the per-call `T x bins` f64 widen buffer (the ~23.5 MB peak-RSS term the phase-7
 //! SAD bench measured) is GONE.
 //!
-//! THE EXACT `features/mel.rs` STAYS BYTE-UNTOUCHED -- it is the transcription ORACLE,
-//! not a dependency of this module. Every kernel below is transcribed OP-FOR-OP from it:
+//! THE EXACT `features/mel.rs` STAYS BYTE-UNTOUCHED -- it is the transcription ORACLE for
+//! every KERNEL here, not a source of them. (Precisely: this module does not reuse
+//! `mel.rs`'s private coefficient tables, its ctor, or any of its apply kernels; the one
+//! thing it does call is the pair of `pub` scalar `hz_to_mel`/`mel_to_hz` conversions --
+//! see the note at the import below, and read the "not a dependency" claim as scoped to
+//! the kernels, which is what the parity argument rests on.)
+//! Every kernel below is transcribed OP-FOR-OP from it:
 //! ascending loops in the same order over the same terms, f32 in place of f64. The
 //! phase-9 `fast/cells.rs` precedent governs (every reduction an ascending loop over a
 //! contiguous slice); no batched/BLAS product is used anywhere here, because the DCT
