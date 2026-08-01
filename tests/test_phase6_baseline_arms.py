@@ -232,9 +232,13 @@ def test_unknown_arm_rejected(tmp_path: Path) -> None:
 def test_all_three_arms_wired() -> None:
     # Task 10 completes the arm set: lid-features, sad, lid-phseq are all registered AND
     # dispatched (none raise NotImplementedError anymore). A registered arm that reached the
-    # NotImplementedError guard would be a wiring gap; there are none left.
-    assert set(B._ARM_CONFIGS) == {"lid-features", "sad", "lid-phseq"}
+    # NotImplementedError guard would be a wiring gap; there are none left. Phase 10 Task 4
+    # adds sad-v2 (the 11-wide lineage fork) -- registered here, dispatched through the SAME
+    # SAD path (`_SAD_ARMS`), so the "no arm reaches the guard" property still holds.
+    assert set(B._ARM_CONFIGS) == {"lid-features", "sad", "sad-v2", "lid-phseq"}
     assert set(B._LID_ARMS) == {"lid-features", "lid-phseq"}
+    assert set(B._SAD_ARMS) == {"sad", "sad-v2"}
+    assert set(B._LID_ARMS) | set(B._SAD_ARMS) == set(B._ARM_CONFIGS)
 
 
 def test_lid_phseq_dispatches_into_lid_path(tmp_path: Path) -> None:

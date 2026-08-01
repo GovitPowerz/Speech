@@ -1064,3 +1064,235 @@ R5),** the phase-7 local-vs-CI split: future local runs of this recipe are expec
 wall speedup >= 3.5x on every row, causal-fast-vs-BLSTM-fast >= 1.3x, and fast maxrss within
 1.3x of the ~68 MB plateau. A reading meaningfully below these (not within the ranges above, which
 already carry headroom) is a FINDING to investigate; there is no automated enforcement.
+
+## Phase 10 -- the `lre_sad_v2` lineage (Task 4)
+
+The v2 record: a ONE-VARIABLE fork of the phase-6/9 SAD arm that retires the
+2015-inherited dead-input-column block, its 8-gate from-scratch matrix
+({LSTM, sLSTM, Mamba, CfC} x {bidirectional, forward}), the zero-dead-columns INVERSE
+guard, and the like-for-like live-capacity comparison against v1. Gates:
+`tests/pyo3/test_phase10_gates.py` (corpus-gated, `slow`, local-only). Measured 2026-08-01,
+Apple M4 Pro (arm64), macOS 26.5.2, N=1 lane, seed 0. The full-corpus headline runs stay
+POST-PHASE, user-fired (launcher recipe at the end of this section).
+
+### The fork (spec S3.1)
+
+`configs/training/lre_sad_v2.toml` is `configs/training/lre_sad.toml` byte-for-byte except
+TWO values (verified by diffing the two files' non-comment lines: exactly these, nothing
+else) and the file headers:
+
+| key | v1 | v2 |
+|---|---|---|
+| `nnet_input_size` | 23 | **11** |
+| `lstm_neuron_nb` | `23,24,24` | **`11,24,24`** |
+
+plus the normalize mean/std tail those entail (`2*23 = 46` -> `2*11 = 22`), which appears in
+NO config: it self-sizes off `nnet_input_size` on both sides of the seam
+(`train.py::_tail_lengths`, `BLSTMNeuralNetwork::setWeights`). v1's own header gained a
+one-line pointer to v2 -- COMMENT-ONLY, and verified `config_hash`-safe by parsing both
+revisions through `speech_rs.load_toml_config` and asserting the maps are identical (the
+hash reads the parsed map, which TOML comments never enter), so every v1 run's recorded
+`config_hash` is unchanged. v1 stays FROZEN: `test_phase9_gates.py` is untouched and green.
+
+WHY: v1 declares a 23-wide input while its own DSP front-end emits 11 columns
+(`3*nb_dct - ignore_first_dct = 3*4 - 1`), so with `lstm_sub_sampling 4` only 44 of layer 0's
+92 fan-in columns carry data and the trailing 48 are structurally gradient-dead -- the
+phase-9 "DEAD INPUT COLUMNS" finding. v2's declared width IS the produced width.
+
+### Pack lengths, MEASURED (spec R4 -- no survey estimate survives)
+
+Every number produced by `init_weights` at the arm's own overlaid config, cross-checked
+in-test against the per-cell closed-form block arithmetic (`test_init_is_trainable` asserts
+both, so a pinned literal and the offset arithmetic cannot drift apart silently):
+
+| cell | v2 bidirectional | v2 forward | vs v2 LSTM (bi) | v1 bidirectional | v1 forward |
+|---|---|---|---|---|---|
+| LSTM (baseline) | **24431** | **12239** | -- | 33671 | 16871 |
+| sLSTM | **23279** | **11663** | **-4.72%** | 32519 | 16295 |
+| Mamba | **28031** | **14039** | **+14.74%** | 30359 | 15215 |
+| CfC (`B = 45`, `L = 1`) | **24491** | **12269** | **+0.25%** | 28835 | 14453 |
+
+All four land inside the S8.2-style +-15% band of the same lineage's LSTM pack. Mamba only
+just (+14.74%), and the near-miss is structural, not luck: Mamba's layer-0 input projection
+is a SINGLE `out x fin` width adapter, while the gate cells carry `4 x out x fin` and CfC
+`B x fin`. Halving `fin` (92 -> 44) therefore shrinks the gate cells and CfC much harder
+than it shrinks Mamba -- the same asymmetry that made Mamba the nominally-smallest but
+effectively-LARGEST net on v1.
+
+### The like-for-like LIVE-capacity comparison -- v2 changes ZERO trainable capacity
+
+The sharpest v1-vs-v2 statement, and it is an identity rather than a measurement.
+Counting only weights with a nonzero gradient (v1's counts are phase 9's; v2's are
+`pack - 22`, the 22-element frozen normalize tail being the ONLY dead block a v2 pack has,
+measured EXACTLY 22 on all eight rows):
+
+| cell | v1 live (bi) | v2 live (bi) | v1 live (fwd) | v2 live (fwd) |
+|---|---|---|---|---|
+| LSTM | 24409 | **24409** | 12217 | **12217** |
+| sLSTM | 23257 | **23257** | 11641 | **11641** |
+| Mamba | 28009 | **28009** | 14017 | **14017** |
+| CfC | 24469 | **24469** | 12247 | **12247** |
+
+Identical in every cell, in both directions. The arithmetic: v1's layer-0 input block is
+wider than v2's by exactly the dead column count (`4*out*48` for the gate cells, `out*48`
+for Mamba, `B*48` for CfC, per stack), and its normalize tail is wider by exactly 24, so
+`v1_pack - v2_pack = D*dead_per_stack + 24` while `v1_live = v1_pack - (D*dead_per_stack +
+46)` and `v2_live = v2_pack - 22` -- the two collapse to the same number. **The fork removes
+dead weight and NOTHING else.**
+
+So v1-vs-v2 is not a capacity question. What DOES differ, measurably:
+
+1. **Pack size / memory / I/O**: v2's LSTM pack is 27.4% smaller (33671 -> 24431), and the
+   layer-0 matmul is 2.09x narrower -- 48 of every 92 columns were multiplying constant
+   zeros at every timestep of every file.
+2. **The Xavier fan-in scaling of the LIVE weights.** `init_weights` sizes the layer-0
+   bound off the DECLARED fan-in, so v1 seeded its live weights as though half the
+   (constant-zero) fan-in were carrying signal. Measured layer-0 input-block magnitudes
+   (seed 0, `xavier`, forward rows): LSTM max `0.206985 -> 0.255375` (exactly
+   `sqrt(6/140) -> sqrt(6/92)`, a **1.234x** widening), sLSTM std `0.11973 -> 0.147567`
+   (1.233x), Mamba `0.132364 -> 0.168974` (1.277x), CfC `0.111370 -> 0.132902` (1.193x).
+
+**FRAMING (spec S3.4 / R5, stated so nobody reads more into this than was measured):** v1
+remains the ONLY 2015-capacity-comparable lineage -- its 33671 LSTM pack IS the production
+tuple-A size, and the phase-6 baseline numbers are v1's. v2 is a NEW lineage with no 2015
+counterpart. The corrected Xavier scaling is a MEASURABLE difference for the full-corpus
+launchers to ADJUDICATE, **not a promised win**; a wider init is not automatically a better
+one, and nothing at subset scale can settle it.
+
+### The inverse guard (spec S3.2) -- zero structurally-dead layer-0 input columns
+
+v1's gates pin dead-count FLOORS; v2's pin the mirror image. For every cell x direction and
+every stack, all 44 layer-0 input columns must carry gradient. The guard reads the layer-0
+INPUT-PROJECTION block only, addressing per cell (each derived from that cell's own flat
+walk; offsets are relative to the layer-0 base, `fin = 44`, `out = 24`, `B = 45`):
+
+| cell | input block | flat position of input column `k` | entries/column |
+|---|---|---|---|
+| LSTM | `input_weights (fin x 4*out)`, layer's first block, COLUMN-major | `c*fin + k`, `c < 4*out` | 96 |
+| sLSTM | `W_a (out x fin)` row-major, inside each gate block `[R_a \| W_a \| b_a]` | `a*out*(out+fin+1) + out*out + j*fin + k` | 96 |
+| Mamba | the width adapter `P (out x fin)` row-major, first block (present iff `fin != out`) | `j*fin + k`, `j < out` | 24 |
+| CfC | `W_bb0 (B x (fin+out))` row-major, first block, fan-in `z = [x \| h]` -- only `k < fin` are INPUT columns | `j*(fin+out) + k`, `j < B` | 45 |
+
+SCOPE, by BLOCK not by slack: cell-level gradient-dead blocks that are NOT input columns
+(sLSTM's non-identifiable `b_i`, Mamba's `A_log` at `T = 1`, CfC's `W_bb` STATE columns at
+`T = 1`) are a separate, already-pinned phenomenon and are excluded by never being
+addressed. TWO-SIDED, because "nonzero" alone is too weak: a structurally dead weight is
+EXACTLY `0.0` (nothing ever accumulates into it) while an analytically-zero-but-COMPUTED
+weight lands at cancellation scale -- measured, sLSTM's `b_i` reads ~1e-19 at this seam
+(max 8.33e-19), not a bit-exact zero. The guard therefore asserts the exact-zero property
+AND a magnitude floor of 1e-8: ~1e11 above the cancellation class it must reject, ~2.9e4
+below the smallest per-column magnitude ever measured here. A third leg pins the WHOLE-PACK
+zero count at exactly 22 (the frozen tail) -- so a dead block that MOVED somewhere the
+offsets do not address still fails.
+
+NON-VACUITY, proven not asserted: `test_v1_cfc_mechanical` runs the SAME machinery on the
+v1 arm and finds exactly the 48 dead columns `[44, 92)` per stack. If the offset arithmetic
+addressed biases, a recurrent block, or nothing, it would find 0 dead columns there and the
+v2 guard would be silently vacuous.
+
+### Preflight -- the log-law saturation hazard, measured before firing the runs
+
+Same hazard and same discipline as phase 9 (`CostLaw log/log`, whose forward is CONSTANT
+past the `1e-24` clamp, so a saturated from-scratch net is a PERMANENT STALL). Probed at the
+from-scratch theta, one forward+backward through the seam, no training; the leg's own recipe
+(subset 2, 10 s cap, seed 0). `%clamp` is the column to its left over `-ln(1e-24) = 55.262`;
+`min col` is the smallest per-input-column max|grad| over every stack -- the inverse guard's
+own margin against its 1e-8 floor:
+
+| config | pack | init NNCostSeg | %clamp | worst per-file | %clamp | grad L2 | grad Linf | zero-grad weights | dead cols | min col |
+|---|---|---|---|---|---|---|---|---|---|---|
+| LSTM / bidirectional | 24431 | 0.28007 | 0.507% | 0.40669 | 0.736% | 0.39567 | 0.19439 | 22 | **0** | 2.854e-4 |
+| LSTM / forward | 12239 | 0.27649 | 0.500% | 0.40178 | 0.727% | 0.37588 | 0.19127 | 22 | **0** | 3.493e-4 |
+| sLSTM / bidirectional | 23279 | 0.28918 | 0.523% | 0.40714 | 0.737% | 0.38630 | 0.19917 | 22 | **0** | 6.011e-4 |
+| sLSTM / forward | 11663 | 0.24322 | 0.440% | 0.33209 | 0.601% | 0.45236 | 0.17433 | 22 | **0** | 1.311e-3 |
+| Mamba / bidirectional | 28031 | 0.28676 | 0.519% | 0.40283 | 0.729% | 0.54261 | 0.18486 | 22 | **0** | 2.960e-3 |
+| Mamba / forward | 14039 | 0.29903 | 0.541% | 0.46646 | 0.844% | 0.50035 | 0.18487 | 22 | **0** | 3.856e-3 |
+| CfC / bidirectional | 24491 | 0.29857 | 0.540% | 0.41060 | 0.743% | 0.72674 | 0.19351 | 22 | **0** | 3.269e-3 |
+| CfC / forward | 12269 | 0.27922 | 0.505% | 0.39550 | 0.716% | 0.41801 | 0.19030 | 22 | **0** | 2.487e-3 |
+
+Every init sits at ~0.5% of the clamp constant (worst 0.54%), every INDIVIDUAL file at
+<= 0.84%, every epoch-0 gradient norm far from zero: no row starts in the zero-gradient
+death, CfC included, and no constant needed changing. The per-file column is read by slicing
+`results_matrix()`'s `[file+1, conf+1, chan+1, ...]` prefix off FIRST (`[:, 3:]`, as
+`engine.py::_error_vad` does) with a `per_file_max >= aggregate_mean` self-check ahead of the
+bound -- the phase-9 correction, carried forward by construction. EVIDENTIARY SCOPE
+(unchanged from phase 9): the seam exposes cost and gradient, not the posterior vector, so
+"not saturated" means COST-INTERIOR + GRADIENT-NONZERO + the net subsequently trains.
+
+The v1 CfC MECHANICAL leg (spec S3.3 -- construction + its own dead-count floor, no
+convergence gate and no param-match requirement on v1, run at the DEFAULT `B = 45` rather
+than T2's v1-matched 53 since no fair-size comparison is being made):
+
+| config | pack | init NNCostSeg | worst per-file | grad L2 | zero-grad weights | predicted floor | dead cols/stack |
+|---|---|---|---|---|---|---|---|
+| v1 CfC / bidirectional | 28835 | 0.34644 | 0.47582 | 0.97583 | 4366 | `2*45*48 + 46 = 4366` | 48 (== `[44, 92)`) |
+| v1 CfC / forward | 14453 | 0.29140 | 0.41856 | 0.55960 | 2206 | `1*45*48 + 46 = 2206` | 48 (== `[44, 92)`) |
+
+Both land EXACTLY on the derived floor. The CfC dead-block shape is `B * 48` per stack (the
+`W_bb0` row width), cell-dependent exactly as the phase-9 T8 pattern predicts -- `4*out*48`
+in the gate cells, `out*48` in Mamba.
+
+### The eight gates -- HARD leg: trained held-out DCF beats own init, every collar
+
+Phase-6 SAD protocol VERBATIM (subset 10 / valid 8 / test 24, 3 epochs x 10 SMORMS3 steps,
+20 s audio cap, seed 0, `val_metric=nn_cost_seg`, end-to-end VRCTS-dump -> `evaluate.dcf`
+scoring). Only the cell, the direction and the LINEAGE differ from phase 9's four rows:
+
+| cell / direction | trained DCF@0.5 | Pmiss / Pfa @0.5 | trained collar range | init DCF@0.5 | init collar range | gain@0.5 | wall |
+|---|---|---|---|---|---|---|---|
+| LSTM / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 37 s |
+| LSTM / forward | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 15 s |
+| sLSTM / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 34 s |
+| sLSTM / forward | **0.252430** | 0.026415 / 0.930474 | [0.248021, 0.255545] | 0.750000 | 0.750000 (all 5) | **+0.497570** | 15 s |
+| Mamba / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 62 s |
+| Mamba / forward | **0.248770** | 0.000000 / 0.995078 | [0.248770, 0.250000] | 0.737710 | [0.736969, 0.738062] | **+0.488940** | 19 s |
+| CfC / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 33 s |
+| CfC / forward | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 15 s |
+| full-corpus runs (any cell x direction) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+8/8 HARD legs pass at every collar (0 / 0.25 / 0.5 / 1 / 2 s) on the FIRST run, and
+deterministically: run-twice at a fixed seed gives bit-identical `best_sad.bin` /
+`last_sad.bin` bytes and an identical pooled DCF on all eight rows. Every DCF@0.5 above was
+also reproduced in a second, independent process to the printed precision. **CfC's
+convergence gate IS these two rows** (spec S3.3) and it passes both directions. The slowest
+single gate is 62 s against the asserted 600 s budget. Whole-file runtime: 1.4 s preflight
+(10 legs) + 227 s gates (8) + 76 s determinism (8) = ~5.1 min.
+
+The wall column is NOT a speed comparison: `--direction forward` also forces
+`BLSTM_window 0` (the plain whole-sequence causal regime -- a window boundary resets the
+recurrent state), so forward rows differ from bidirectional ones in TWO ways.
+
+**RECORDED, NOT GATED (spec R5, verbatim): "subset vs-BLSTM numbers are reported as-is with
+the thinness caveat; no architecture-superiority claim is made from subset scale."** SIX of
+the eight rows are degenerate at BOTH endpoints -- the documented phase-6 collapse
+(all-non-speech init -> all-speech trained) -- so their six-way tie at 0.250000 is what an
+identical collapse looks like, not evidence of architectural OR lineage equivalence. The
+phase-9 v1 rows tie at the same 0.2500 (bar Mamba/forward's 0.249625), so this run says
+nothing about v1 vs v2 either. TWO rows are honestly non-degenerate and are recorded as
+measured rather than rounded into the collapse story: `sLSTM / forward` genuinely rejects
+~7% of held-out non-speech at a 2.6% miss cost (its WORST collar, 0.255545, is still 0.494
+below its init), and `Mamba / forward` rejects a 0.49% sliver while its INIT is also not
+fully degenerate (Pmiss 0.982625 -- the one row whose init baseline is not exactly 0.75, and
+the row the `init Pmiss > 0.9` pin is sized for; that margin is real but thin). Genuine
+speech/non-speech discrimination, and any cell-vs-cell or v1-vs-v2 ranking, is the
+FULL-CORPUS user-fired launcher's job.
+
+**The CE is not the signal** (the standing phase-6 lesson): best-epoch validation costs
+across the eight rows span 0.02659 (CfC/forward) to 0.44689 (Mamba/forward), with best
+epochs at 0, 1 and 2 -- and every row still lands at the same held-out DCF. Only the
+held-out TASK metric is gated.
+
+### Firing the v2 arm (post-phase, user-fired)
+
+```
+# Any {lstm,slstm,mamba,cfc} x {bidirectional,forward} combination on the v2 lineage.
+speech baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_cfc_full \
+    --cell-type cfc --direction forward \
+    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
+```
+
+Identical in every knob to the phase-9 `speech baseline sad` recipe -- ONLY the arm name
+changes, since `sad-v2` shares the entire SAD skeleton (`_SAD_ARMS`) and every size derives
+from the config. To answer the lineage question, fire the SAME cell x direction on both arms
+and compare; the live-capacity table above says the comparison is about init scaling and
+pack size, not about capacity. Paste resulting numbers into the `full-corpus runs` row above.

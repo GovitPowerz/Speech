@@ -228,7 +228,7 @@ def twin_config(name: str) -> str:
     the module docstring names: with it set, `CorpusProcessor::run()` takes the
     `grad_check_full` branch (`:208`), and `grad_check_capped` restores `seam_derivs` at its
     epilogue -- so `Engine.run()` is a full uncapped weight sweep and the seam afterwards
-    reads the RESET accumulator (an all-zero gradient). The 4 SAD configs are written from
+    reads the RESET accumulator (an all-zero gradient). The 6 SAD configs are written from
     scratch and never had the key; only the two clone-based Twins could inherit it, and only
     this one did (`twin_train.config`, the mode-7 source, has no such key).
     """

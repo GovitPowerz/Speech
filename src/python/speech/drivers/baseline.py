@@ -58,6 +58,20 @@ DCF improvement (init is all-non-speech, DCF ~0.75; trained fires, DCF ~0.25) is
 direction-safe task metric, and genuine speech/non-speech discrimination is the full-run
 launcher's job.
 
+THE SAD V2 ARM (`arm="sad-v2"`, Phase 10 Task 4, spec S3): the SAME arm on the v2 lineage
+config (`configs/training/lre_sad_v2.toml`) -- v1 byte-for-byte except `nnet_input_size`
+23 -> 11 and `lstm_neuron_nb` `23,24,24` -> `11,24,24`, which makes the declared layer-0
+fan-in (`11*4 = 44`) equal the width the DSP front-end actually produces and so RETIRES the
+2015-inherited dead-column block (v1 leaves 48 of its 92 fan-in columns structurally
+gradient-dead). NO code path of its own: `_SAD_ARMS` covers both, every size downstream
+self-derives from the config (the normalize tail, the seed pack, the output MLP width under
+`--direction forward`). v1 stays FROZEN and remains the only 2015-capacity-comparable
+lineage; v2 is a new lineage whose corrected Xavier fan-in scaling is a MEASURABLE
+difference for the launchers to adjudicate, not a promised win (R5). Gates:
+`tests/pyo3/test_phase10_gates.py` -- 8 rows, {lstm, slstm, mamba, cfc} x {bidirectional,
+forward}, with the INVERSE guard (zero dead layer-0 input columns) where v1's gates pin
+dead-count floors.
+
 LICENSE HYGIENE: nothing corpus-derived is committed. The listing, mapping, reference, and
 seed weight packs are all synthesized at RUNTIME under `out_dir` from `corpus_root`; the
 committed TOML carries only DSP hyperparameter numbers + placeholder path strings.
@@ -88,11 +102,13 @@ from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrct
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_weight_vector, write_bin
 
-# The committed canonical TOML for each arm (relative to the repo root). Task 8 ships
-# lid-features; Task 9 adds sad; Task 10 adds lid-phseq.
+# The committed canonical TOML for each arm (relative to the repo root). Phase 6 Task 8
+# ships lid-features; Task 9 adds sad; Task 10 adds lid-phseq. Phase 10 Task 4 adds
+# sad-v2 (spec S3.4).
 _ARM_CONFIGS: dict[str, str] = {
     "lid-features": "configs/training/lre03_lid_features.toml",
     "sad": "configs/training/lre_sad.toml",
+    "sad-v2": "configs/training/lre_sad_v2.toml",
     "lid-phseq": "configs/training/lre03_lid_phseq.toml",
 }
 
@@ -100,6 +116,14 @@ _ARM_CONFIGS: dict[str, str] = {
 # scoring, both-nets-seeded/only-LID-trains); they differ ONLY in the File_Type and the
 # corpus record derivation. This set gates the shared LID dispatch below.
 _LID_ARMS: frozenset[str] = frozenset({"lid-features", "lid-phseq"})
+
+# The two SAD arms (Phase 10 spec S3.4) share the ENTIRE skeleton -- same algo 3, same
+# File_Type 0, same wav+xml listings, same DCF scoring path. They differ ONLY in which
+# committed TOML `_ARM_CONFIGS` hands them, and that TOML differs only in the declared
+# input width (v1's 2015-inherited 23 vs v2's honest 11; `lre_sad_v2.toml`'s header).
+# Everything downstream self-sizes off the config, so `sad-v2` needs no code path of its
+# own -- this set is what makes every `arm == "sad"` branch below cover both.
+_SAD_ARMS: frozenset[str] = frozenset({"sad", "sad-v2"})
 
 # The five DCF collar sizes (design spec S0): no-collar + 0.25/0.5/1.0/2.0 s. The 0.5 s
 # collar is the reported headline (the T4 scorer pins all five vs the NIST perl oracle).
@@ -729,8 +753,8 @@ def run_baseline(
     own re-init. Defaults are today's BLSTM arm, byte-identical."""
     if arm not in _ARM_CONFIGS:
         raise ValueError(f"unknown arm {arm!r}; known arms: {sorted(_ARM_CONFIGS)}")
-    if arm not in _LID_ARMS and arm != "sad":
-        raise NotImplementedError(f"arm {arm!r} is not wired (known: lid-features, sad, lid-phseq)")
+    if arm not in _LID_ARMS and arm not in _SAD_ARMS:
+        raise NotImplementedError(f"arm {arm!r} is not wired (known: {sorted(_ARM_CONFIGS)})")
     # The knobs target the `BLSTM_` net. On a Twin arm that net is the FROZEN SAD gate (Mode 7
     # never runs it, so it stays byte-exactly at its seed), which makes a cell/direction swap
     # there a silent no-op on everything that actually trains -- bail loudly instead. The LID
@@ -749,7 +773,7 @@ def run_baseline(
     # SAD smoke draws a smaller subset AND caps the audio short (else a 1-step smoke over
     # long CallFriend recordings would blow the "fast" promise).
     if dry_run:
-        if arm == "sad":
+        if arm in _SAD_ARMS:
             subset, epochs, steps_per_epoch, patience, test_size, valid_size = (subset or 6), 1, 1, 99, min(test_size, 6), min(valid_size, 4)
             audio_max_duration = audio_max_duration if audio_max_duration is not None else 10.0
         else:
@@ -759,7 +783,7 @@ def run_baseline(
     console.log(f"[bold]baseline {arm}[/bold]: corpus={corpus_root} out={out_dir} subset={subset} lanes={lanes} seed={seed} dry_run={dry_run}")
 
     # --- 1. listings + mapping (+ reference) synthesized under out_dir --------------------
-    if arm == "sad":
+    if arm in _SAD_ARMS:
         train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name = _prepare_sad_listings(
             corpus_root, out_dir, seed, subset, valid_size, test_size, console
         )
@@ -820,7 +844,7 @@ def run_baseline(
     extra = dict(cell_overlay(flat, cell_type, direction))
     if audio_max_duration is not None:
         extra["Audio_max_duration"] = str(audio_max_duration)
-    if arm == "sad":
+    if arm in _SAD_ARMS:
         cfg = assemble_flat_config(flat, fileslisting=train_name, mapping=mapping_name, sad_seed="sad_seed.bin", lanes=lanes, extra=extra)
         _generate_sad_seed_pack(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
     else:
@@ -878,7 +902,7 @@ def run_baseline(
     init_dcf_rep: DcfReport | None = None
     scores_dir: Path | None = None
     ckpt = Path(res.checkpoint_dir)  # type: ignore[attr-defined]
-    if test_rec and arm == "sad":
+    if test_rec and arm in _SAD_ARMS:
         dcf_rep, scores_dir = _score_sad_pack_on_test(cfg, out_dir, ckpt / "best_sad.bin", out_dir / "score_trained", test_rec, test_name)
         if dcf_rep is not None:
             c = dcf_rep.by_collar(0.5)

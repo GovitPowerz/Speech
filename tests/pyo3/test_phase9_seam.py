@@ -28,7 +28,7 @@ WHAT THE TIER PINS, and why each leg exists:
 - **`grad_check`** (S8.1 SEAM): the engine's own corpus-level central difference vs its
   analytic fold, per cell x direction, plus both Twins. This is the leg the spec names. Its
   one weakness is that `max_weights` caps a PREFIX of the flat pack, and at these geometries
-  the first 12 weights all live in ONE block (sLSTM `R_i`, mamba `P`).
+  the first 12 weights all live in ONE block (sLSTM `R_i`, mamba `P`, cfc `W_bb0`).
 
 - **block probe** (this task's addition, covering that weakness): for EVERY named block of
   each cell's flat layout (spec S2.2 / S3.2) it finite-differences one representative index
@@ -648,7 +648,8 @@ def test_cfc_time_gate_saturation_selects_one_head(name: str, tmp_path: Path) ->
     probe instead; this leg is about the head triple.
 
     NOTE the bidirectional fixture needs BOTH stacks saturated -- the reverse half feeds the
-    same output MLP, so leaving it live would make every assert below vacuous.
+    same output MLP, so the survivor-head liveness assert cannot be drowned by a live reverse
+    stack.
     """
     blocks = fixture_blocks(name)
     pack = load_pack(name)

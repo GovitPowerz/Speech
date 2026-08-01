@@ -1,34 +1,51 @@
-# Canonical TOML training config for the Phase 6 SAD arm.
+# Canonical TOML training config for the Phase 10 SAD v2 lineage (`speech baseline sad-v2`).
 #
-# Algo_choice 3 (BLSTM spectral SAD) + File_Type 0 (raw wav). This is the 2015
-# production SAD regime: the DSP front-end (periodogram -> Mel/log/DCT + deltas +
-# delta-deltas -> an 11-column acoustic frame, fed into a 23-wide declared input --
-# see the dead-column note below) feeds a bidirectional peephole-LSTM
-# stack + output MLP whose single speech-posterior output drives the
-# rising/falling hysteresis segmenter. The net trains FROM SCRATCH here (Phase 5
-# proved SAD from-scratch convergence on the tiny fixture); this arm scales it to
-# the real LRE03/07 corpus wav/xml pairs.
+# THE LINEAGE RELATIONSHIP (design spec S3.1): this file is `lre_sad.toml` (v1)
+# BYTE-FOR-BYTE except for TWO values and these headers --
 #
-# SEED PROVENANCE (design spec S1.8 / plan Task 9): every DSP + net + cost key is
-# seeded VERBATIM from the committed algo-3 production config
+#     nnet_input_size   23        -> 11
+#     lstm_neuron_nb    23,24,24  -> 11,24,24
+#
+# and the normalize mean/std tail that entails (2*23 = 46 -> 2*11 = 22), which is
+# NOT written anywhere: it self-sizes off `nnet_input_size` on both sides of the
+# seam (`train.py::_tail_lengths`, `BLSTMNeuralNetwork::setWeights`). ONE VARIABLE
+# CHANGES, so any v1-vs-v2 difference is cleanly attributable to it. Everything else
+# -- the DSP front-end, the hidden widths, the output MLP, the cost law, the decision
+# thresholds, every runtime/orchestration key -- is v1's, untouched.
+#
+# WHAT THE ONE VARIABLE FIXES. v1 declares a 23-wide input while its own DSP
+# front-end emits 11 columns (`3*nb_dct - ignore_first_dct` = 3*4 - 1; `deltas 5` /
+# `delta_deltas 3` are regression ORDERS, not column counts), so with
+# `lstm_sub_sampling 4` only 44 of layer 0's 92 fan-in columns ever carry data and the
+# trailing 48 are structurally gradient-dead -- ~27% of the gate-cell arms untrainable.
+# That mismatch is inherited VERBATIM from the 2015 production config and stays in v1
+# on purpose (fixing it there would resize every pack and invalidate the phase-6
+# baseline); it is measured, counted and index-set-verified in `RESULTS.md`'s
+# "DEAD INPUT COLUMNS" note (Phase 9 Task 8) and guarded by
+# `tests/pyo3/test_phase9_gates.py::test_init_is_trainable`. HERE the declared width
+# equals the produced width, so layer 0's fan-in is exactly `11*4 = 44` live columns
+# and the dead block does not exist. The INVERSE guard is
+# `tests/pyo3/test_phase10_gates.py::test_init_is_trainable`, which asserts ZERO
+# structurally-dead layer-0 input columns per cell (the mirror image of v1's
+# dead-count floors), and `RESULTS.md`'s Phase-10 v2 section carries the
+# like-for-like LIVE-capacity comparison.
+#
+# POSTURE (spec S3.4, R5): v1 remains the ONLY 2015-capacity-comparable lineage --
+# its 33671-element LSTM pack IS the 2015 production tuple-A size, and the phase-6
+# baseline numbers are v1's. v2 is a NEW lineage with no 2015 counterpart; the
+# corrected Xavier fan-in scaling it enables (fan_in 68 instead of 116 at layer 0,
+# half of which was feeding constant zeros) is a MEASURABLE difference for the
+# full-corpus launchers to adjudicate, NOT a promised win. No architecture or
+# lineage claim is made from subset-scale numbers.
+#
+# SEED PROVENANCE (unchanged from v1, design spec S1.8 / plan Task 9): every DSP +
+# net + cost key is seeded VERBATIM from the committed algo-3 production config
 # `tests/reference_data/phase0/1_worker_1.config` (the real 15-Oct-2015
 # BLSTM_OpenSAD15 SAD config, also the source of the phase4a tier-2 spectral
-# fixtures). Keeping the DSP keys and the net topology from ONE config is
-# load-bearing: `nnet_input_size = 23` sizes the layer-0 fan-in and must equal
-# `lstm_neuron_nb[0]`. It does NOT equal the feature dimension this DSP config
-# actually produces -- an earlier revision of this comment claimed it did, and that
-# was WRONG. The front-end emits 11 columns (`3*nb_dct - ignore_first_dct` = 3*4 - 1;
-# `deltas 5` / `delta_deltas 3` are regression ORDERS, not column counts), so with
-# `lstm_sub_sampling 4` only 44 of layer 0's 92 fan-in columns ever carry data and
-# the trailing 48 are structurally gradient-dead. That mismatch is inherited VERBATIM
-# from the 2015 production config (its own 33671-element pack carries the same dead
-# block) and is deliberately LEFT AS IS -- correcting it would resize every pack and
-# invalidate the phase-6 baseline. Measured and counted (and index-set-verified on
-# sLSTM) in `RESULTS.md`'s "DEAD INPUT COLUMNS" note (Phase 9 Task 8), guarded by
-# `tests/pyo3/test_phase9_gates.py::test_init_is_trainable`. The one-variable fork that
-# DOES correct it (11-wide, zero dead columns, a new non-2015-comparable lineage) is
-# `lre_sad_v2.toml` / `speech baseline sad-v2` (Phase 10 spec S3). CostLaw is `log`
-# (the T7-verified derivative-consistent live path).
+# fixtures) -- with the two width keys above as the deliberate, documented exception.
+# `nnet_input_size` sizes the layer-0 fan-in and must equal `lstm_neuron_nb[0]`;
+# that invariant holds here as it does in v1. CostLaw is `log` (the T7-verified
+# derivative-consistent live path).
 #
 # DIVERGENCES from 1_worker_1.config (the complete list -- all RUNTIME/orchestration
 # keys, none DSP/net/cost, so the "seeded VERBATIM" claim above holds for the modeled
@@ -136,19 +153,20 @@ tdc_windowing_type = "uniform"
 tdc_windowing_param = "5.534716888700572e-01"
 
 # ---------------------------------------------------------------------------------------
-# [nn] -- the TRAINABLE SAD net (the real 2015 topology). nnet_input_size == 23 ==
-# lstm_neuron_nb[0], but NOT the [spectrum] feature dimension (that is 11 -- the 2015
-# mismatch documented in the header + RESULTS.md's "DEAD INPUT COLUMNS" note);
+# [nn] -- the TRAINABLE SAD net (v1's topology at the corrected input width).
+# nnet_input_size == 11 == lstm_neuron_nb[0] == the [spectrum] feature dimension, which
+# is the WHOLE v2 change: layer 0's fan-in is 11*4 = 44 columns, all live (v1 declares
+# 23 and leaves 48 of its 92 columns dead -- header + RESULTS.md's "DEAD INPUT COLUMNS").
 # output_neuron_nb ends at 1
 # (the single speech posterior the hysteresis segmenter thresholds). weights_file is a
 # runtime-synthesized seed pack (init_weights), re-inited from scratch by train_modern.
 # ---------------------------------------------------------------------------------------
 
 [nn]
-lstm_neuron_nb = "23,24,24"
+lstm_neuron_nb = "11,24,24"
 lstm_sub_sampling = "4,1"
 nn_type = 0
-nnet_input_size = 23
+nnet_input_size = 11
 output_neuron_nb = "48,12,1"
 output_subsampling = "1,1"
 two_sweeps = false
