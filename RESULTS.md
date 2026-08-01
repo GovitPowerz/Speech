@@ -1142,9 +1142,20 @@ dead weight and NOTHING else.**
 
 So v1-vs-v2 is not a capacity question. What DOES differ, measurably:
 
-1. **Pack size / memory / I/O**: v2's LSTM pack is 27.4% smaller (33671 -> 24431), and the
-   layer-0 matmul is 2.09x narrower -- 48 of every 92 columns were multiplying constant
-   zeros at every timestep of every file.
+1. **Pack size / memory / I/O**: v2's LSTM pack is 27.4% smaller (33671 -> 24431). The
+   COMPUTE saving is CELL-DEPENDENT, because the two width-tolerance conventions differ --
+   an earlier revision of this bullet claimed a flat "2.09x narrower layer-0 matmul, 48 of
+   every 92 columns multiplying constant zeros", and that is FALSE for the cell it named.
+   `LstmLayer::feed_forward` (`layers.rs:194-198`) takes the `cols < i` branch and CROPS
+   the WEIGHT matrix to the input's width, so v1's layer-0 product was ALREADY
+   `T x 44` by `44 x 96` -- identical to v2's, and nothing ever multiplied a dead column.
+   v2's only LSTM compute win is dropping the per-call `44 x 96` slice copy that crop
+   makes. The three NEW cells take the opposite convention: `reconcile_input`
+   (`slstm.rs:358`, `mamba.rs:723`, `cfc.rs:460`) ZERO-PADS the input up to the declared
+   width, so their layer-0 products really do shrink -- sLSTM and Mamba 92 -> 44
+   (**2.09x**), CfC `in+h` 116 -> 68 (**1.71x**, its fan-in carries the state
+   concatenation). NONE of this was benched; it is shape arithmetic, not a measured
+   speedup.
 2. **The Xavier fan-in scaling of the LIVE weights.** `init_weights` sizes the layer-0
    bound off the DECLARED fan-in, so v1 seeded its live weights as though half the
    (constant-zero) fan-in were carrying signal. Measured layer-0 input-block magnitudes
@@ -1184,6 +1195,13 @@ AND a magnitude floor of 1e-8: ~1e11 above the cancellation class it must reject
 below the smallest per-column magnitude ever measured here. A third leg pins the WHOLE-PACK
 zero count at exactly 22 (the frozen tail) -- so a dead block that MOVED somewhere the
 offsets do not address still fails.
+
+Precisely, so three legs are not mistaken for three independent checks: the exact-zero leg
+is SUBSUMED by the floor leg (an exactly-0.0 column has max|grad| below the floor, so the
+dead set is a strict subset of the weak set), and is kept for its distinct failure message
+-- "structurally dead" and "gradient-inert" are different defects -- not for coverage. The
+whole-pack zero count is the one genuinely independent leg: it is the only one that can see
+a dead block relocated outside every per-column offset.
 
 NON-VACUITY, proven not asserted: `test_v1_cfc_mechanical` runs the SAME machinery on the
 v1 arm and finds exactly the 48 dead columns `[44, 92)` per stack. If the offset arithmetic

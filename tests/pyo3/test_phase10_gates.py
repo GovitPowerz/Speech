@@ -46,8 +46,8 @@ sLSTM 23257 / Mamba 28009). v2 makes NOMINAL == LIVE, which is the whole point o
 POSTURE (spec S3.4 / R5, stated so no reader infers more than was measured): v1 remains
 the ONLY 2015-capacity-comparable lineage (its 33671 LSTM pack IS the production tuple-A
 size). v2 is a NEW lineage with no 2015 counterpart. The corrected Xavier fan-in scaling
-it enables (layer-0 `fan_in` 68 instead of 116, half of which was multiplying constant
-zeros) is a MEASURABLE difference for the full-corpus launchers to adjudicate, NOT a
+it enables (layer-0 `fan_in` 68 instead of 116, half of which carried no data) is a
+MEASURABLE difference for the full-corpus launchers to adjudicate, NOT a
 promised win, and nothing here is evidence of one -- see the vs-BLSTM note below.
 
 =====================================================================================
@@ -73,6 +73,15 @@ than a bit-exact zero. So the guard asserts both the exact-zero property (the st
 claim) AND a magnitude floor `_LIVE_FLOOR = 1e-8`: ~1e11 above the cancellation class it
 must reject, and ~2.9e4 below the smallest per-column magnitude ever measured here
 (2.854e-04, lstm/bidirectional). It is a STRUCTURAL guard, not a tight numeric pin.
+
+GUARD STRUCTURE, stated precisely so the leg count is not mistaken for independence: the
+exact-zero leg is SUBSUMED by the floor leg (a column at exactly 0.0 has max|grad| 0.0 <
+`_LIVE_FLOOR`, so `dead` is a strict SUBSET of `weak` and the floor leg alone would catch
+everything the exact-zero leg catches). It is kept for its PRECISE failure message --
+"structurally dead" and "gradient-inert" are different defects and should not report as one
+-- not because it adds coverage. The genuinely independent third leg is the WHOLE-PACK
+zero count (`_V2_FROZEN_TAIL`), which sees a dead block that MOVED somewhere the per-column
+offsets never address.
 
 =====================================================================================
 THE PREFLIGHT LEG: the log-law hazard, asserted (phase-9 discipline, verbatim)
@@ -670,8 +679,12 @@ def test_v1_cfc_mechanical(tmp_path: Path, direction: str, pack_len: int, dead_e
     dead = _dead_columns(out["grad"], arch)
     for si, cols in dead.items():
         assert cols == list(range(44, 92)), f"v1 cfc/{direction} stack {si}: dead columns {cols[:3]}...{cols[-3:]} != [44, 92)"
-    live = [k for k in range(44) if any(abs(out["grad"][arch.stack_bases[0] + p]) >= _LIVE_FLOOR for p in arch.offsets[k])]
-    assert live == list(range(44)), f"v1 cfc/{direction}: columns [0, 44) must all be live, got {len(live)}"
+    # ... and the complement is LIVE in EVERY stack, not just the forward one -- the dead
+    # check above loops all stacks, so this one must too or the bidirectional row's reverse
+    # half would go unchecked on the liveness side.
+    for si, base in enumerate(arch.stack_bases):
+        live = [k for k in range(44) if any(abs(out["grad"][base + p]) >= _LIVE_FLOOR for p in arch.offsets[k])]
+        assert live == list(range(44)), f"v1 cfc/{direction} stack {si}: columns [0, 44) must all be live, got {len(live)}"
 
     # ... and the WHOLE-PACK dead count against the derived floor (phase-9 `_DEAD_SLACK` pattern)
     assert out["dead"] >= dead_expected, f"v1 cfc/{direction} dead-weight count {out['dead']} is below the structural floor {dead_expected}"

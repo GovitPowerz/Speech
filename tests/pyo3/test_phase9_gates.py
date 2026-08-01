@@ -64,8 +64,10 @@ per-file normalized cost 0.442, 0.80% of the clamp -- the aggregate is frame-wei
 alone could hide a saturated minority), and a strictly POSITIVE analytic gradient L2 norm at
 epoch 0 (measured 0.357-0.722). A saturated init would trip an interiority pin or the
 gradient pin. Whole-vector norms only: sLSTM's `b_i` is structurally non-identifiable
-(exactly zero gradient by construction, proven in T2), so no per-element gradient assert is
-meaningful.
+(analytically zero gradient by construction, proven in T2; the COMPUTED value is a
+cancellation residue -- `slstm.rs:1023` measures max |dL/db_i| = 6.25e-17, not a bit-exact
+zero, which is why `b_i`'s slots are EXCLUDED from the `_CONFIGS` dead-count floors rather
+than counted into them), so no per-element gradient assert is meaningful.
 
 =====================================================================================
 vs BLSTM -- RECORDED, NOT GATED (spec R5, verbatim)

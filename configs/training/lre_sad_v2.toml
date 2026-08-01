@@ -34,7 +34,7 @@
 # its 33671-element LSTM pack IS the 2015 production tuple-A size, and the phase-6
 # baseline numbers are v1's. v2 is a NEW lineage with no 2015 counterpart; the
 # corrected Xavier fan-in scaling it enables (fan_in 68 instead of 116 at layer 0,
-# half of which was feeding constant zeros) is a MEASURABLE difference for the
+# half of which carried no data) is a MEASURABLE difference for the
 # full-corpus launchers to adjudicate, NOT a promised win. No architecture or
 # lineage claim is made from subset-scale numbers.
 #
