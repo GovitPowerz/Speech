@@ -226,7 +226,12 @@ const COARSE_OFFSETS: [f64; 7] = [0.0, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0];
 /// the posterior slightly will make the sweep find NOTHING and PANIC with that exact
 /// message -- a loud failure to adjudicate, not a silent weakening.
 fn fine_offsets() -> impl Iterator<Item = f64> {
-    (-16i32..=16).map(|k| f64::from(k) * 0.0625)
+    // The coarse entries are FILTERED OUT: they have already been tried and failed by the
+    // time this iterator is reached, so re-running them would be wasted engine
+    // invocations.
+    (-16i32..=16)
+        .map(|k| f64::from(k) * 0.0625)
+        .filter(|o| !COARSE_OFFSETS.contains(o))
 }
 
 /// MEASURED on this box (M4 Pro / macOS 25.5 / Apple libm) -- see the per-leg prints;

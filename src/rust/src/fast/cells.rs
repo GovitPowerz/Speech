@@ -1480,8 +1480,12 @@ mod tests {
     /// for a reason that is about the METRIC, not the cell. `h = ff1*(1-g) + ff2*g`
     /// blends two `tanh` values, so an individual output element can land NEAR ZERO by
     /// cancellation even while every intermediate is `O(1)`. [`max_rel`]'s `1e-2` scale
-    /// floor then divides an ordinary sub-ULP absolute delta by `1e-2` and reports
-    /// `~1e-6`; sLSTM's `o*(c/n)` and mamba's residual output simply do not produce
+    /// floor then divides an ordinary sub-ULP absolute delta by a denominator AT OR NEAR
+    /// that `1e-2` floor and reports `~1e-6`. (Precisely what the measurement establishes
+    /// is the RATIO, hence a worst-element `|e| <= max_abs / max_rel ~= 0.0225`; whether
+    /// that element sits exactly on the floor or just above it is not pinned, and does not
+    /// need to be -- the point is that the denominator is ~50x smaller than the output's
+    /// own `O(1)` scale.) sLSTM's `o*(c/n)` and mamba's residual output simply do not produce
     /// near-zero elements on these fixtures, which is the whole reason their relative
     /// numbers look tighter. MEASURED: 4.63e-6 (`L = 2`) / 2.29e-6 (`L = 1`), pinned at
     /// `measured * 10` rounded up.
@@ -1736,7 +1740,13 @@ mod tests {
             cell.backbone_layers() * cell.backbone_units()
         );
         assert_eq!(st.scratch.u.len(), 3 * O);
+        // ALL THREE scratch buffers start zeroed, not just `z`. `step` fully overwrites
+        // each before reading it, so this is a construction contract rather than a
+        // correctness dependency -- but asserting one of the three and not the others
+        // would be decoration, so assert the lot.
         assert!(st.scratch.z.iter().all(|&v| v == 0.0));
+        assert!(st.scratch.bb.iter().all(|&v| v == 0.0));
+        assert!(st.scratch.u.iter().all(|&v| v == 0.0));
     }
 
     #[test]
@@ -2284,7 +2294,7 @@ mod tests {
                 "{cell:?}: the exact stack output is constant -- the pin is vacuous"
             );
 
-            // MEASURED on this box: sLSTM 7.91e-8, mamba 6.14e-8, cfc 9.85e-8. Pinned at
+            // MEASURED on this box: sLSTM 7.91e-8, mamba 6.14e-8, cfc 9.94e-8. Pinned at
             // [`CELL_F32_PIN`] (5e-6), the same measure-then-pin band as the
             // single-cell legs above.
             let worst = max_rel(&out_e, &out_f);

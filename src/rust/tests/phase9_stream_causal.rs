@@ -430,7 +430,12 @@ const COARSE_OFFSETS: [f64; 10] = [0.0, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0, 1.5, -
 /// over (`0.0` -> 0 boundaries, `+0.5` -> 0). The CfC PLAIN row does NOT need it -- offset
 /// `0.0` already crosses -- so that row runs the fixture AS COMMITTED.
 fn fine_offsets() -> impl Iterator<Item = f64> {
-    (-16i32..=16).map(|k| f64::from(k) * 0.0625)
+    // The coarse entries are FILTERED OUT: they have already been tried and failed by the
+    // time this iterator is reached, so re-running them would be a handful of wasted
+    // whole-file engine invocations per fallback cell.
+    (-16i32..=16)
+        .map(|k| f64::from(k) * 0.0625)
+        .filter(|o| !COARSE_OFFSETS.contains(o))
 }
 
 /// The PLAIN-leg interior floor for `cell`. [`MIN_INTERIOR_PLAIN`] for the phase-9 cells;
@@ -520,6 +525,22 @@ fn stream_finish_equals_offline_causal() {
             interior_boundaries(&off_seg) >= min_interior_plain(cell),
             "{cell}: the boundary comparison is vacuous (no interior boundary)"
         );
+        // ...and for cfc, the CEILING too. [`min_interior_plain`] documents a MEASURED
+        // one-boundary ceiling, but on its own it only RECORDS it: it feeds a `>=` floor
+        // and [`crossing_offset`] breaks at the first offset that clears it, so a fixture
+        // or kernel change that produced TWO boundaries would satisfy every assertion in
+        // this suite silently. Pin the ceiling so that change is a LOUD signal instead --
+        // and specifically the signal for T11 to enrich the fixture properly (see this
+        // task's report for the gain-sweep option that needs no fixture regeneration).
+        if cell == "cfc" {
+            assert_eq!(
+                interior_boundaries(&off_seg),
+                1,
+                "cfc: the measured one-interior-boundary ceiling MOVED -- adjudicate, do \
+                 not bump: this is the T11 signal that the fixture can now carry a richer \
+                 boundary set (see min_interior_plain)"
+            );
+        }
         let first = off_post[0];
         assert!(
             off_post.iter().any(|&v| v != first),
@@ -1060,6 +1081,15 @@ fn latency_bounds() {
              other={other_push_max})"
         );
         if !expects_midstream_emissions(cell) {
+            // The STRONGER form of the same statement, matching what
+            // `prefix_consistency_e2e` asserts: not merely "not both classes emitted
+            // mid-stream" (which the `assert_eq!` above gives) but ZERO mid-stream
+            // emissions, which is what the `Other -> Speech -> EOS` partition forces.
+            assert!(
+                run.push_emissions.is_empty(),
+                "{cell}: expected NO mid-stream emissions, got {}",
+                run.push_emissions.len()
+            );
             // ...and the two cell-independent structural asserts the leg ends on still
             // apply, so run them here before moving on.
             assert_eq!(
