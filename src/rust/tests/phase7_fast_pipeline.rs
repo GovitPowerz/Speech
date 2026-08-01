@@ -150,12 +150,20 @@ fn build_input_sequence_twice_bit_identical() {
 
 #[test]
 fn pipeline_parity_excerpt_3s() {
-    // MEASURED (Apple Silicon dev box): max_abs=8.263e-6, max_rel=3.044e-6 over both
-    // channels of the committed 3 s excerpt (T x 11 MFCC+delta sequence). Pinned at
-    // rel 5e-5 (~16x) / abs 1e-4 (~12x) headroom over measured; the f32 + realfft-vs-
-    // GFFT divergence is by design (module docs).
-    const REL_PIN: f64 = 5.0e-5;
-    const ABS_PIN: f64 = 1.0e-4;
+    // MEASURED (Apple Silicon dev box, Phase 10 Task 5 re-measurement): max_abs=3.589e-5,
+    // max_rel=1.807e-5 over both channels of the committed 3 s excerpt (T x 11 MFCC+delta
+    // sequence). Pinned at rel 2e-4 / abs 4e-4 (~11x each) over measured; the f32 +
+    // realfft-vs-GFFT divergence is by design (module docs).
+    //
+    // RE-PINNED ONCE by the S4 full-f32-mel sweep (was: max_abs=8.263e-6 / max_rel=3.044e-6
+    // at rel 5e-5 / abs 1e-4). The deltas grew ~4-6x because f32 error now accumulates
+    // through the mel dots, the DCT product and the delta regressions, not only the
+    // periodogram -- the phase-7 arrangement widened the f32 periodogram to f64 and ran
+    // the golden f64 mel on it. This is the ONE sanctioned re-measurement (spec S9.3);
+    // the decision-level gates it feeds (phase7_parity_sad's boundary count/types +
+    // max_dt) did NOT move, which is what R1 actually protects.
+    const REL_PIN: f64 = 2.0e-4;
+    const ABS_PIN: f64 = 4.0e-4;
     let (_, cfg) = tier2_cfg();
     let audio = read_audio(std::path::Path::new(EXCERPT), 0.0, 3.6e6, 0, None).unwrap();
     let rate = audio.sample_rate as f64;
@@ -177,13 +185,17 @@ fn pipeline_parity_excerpt_3s() {
 
 #[test]
 fn pipeline_parity_prcts_60s() {
-    // MEASURED (Apple Silicon dev box): max_abs=1.805e-5, max_rel=9.805e-6 over both
-    // channels of the committed 60 s prcts excerpt (6000 frames/channel). Pinned at
-    // rel 1.5e-4 (~15x) / abs 3e-4 (~17x) headroom over measured -- the wider pin than
-    // the 3 s test absorbs both the larger frame count and cross-platform realfft SIMD
-    // variance (CI is x86, this box is ARM).
-    const REL_PIN: f64 = 1.5e-4;
-    const ABS_PIN: f64 = 3.0e-4;
+    // MEASURED (Apple Silicon dev box, Phase 10 Task 5 re-measurement): max_abs=5.914e-5,
+    // max_rel=4.038e-5 over both channels of the committed 60 s prcts excerpt (6000
+    // frames/channel). Pinned at rel 6e-4 (~15x) / abs 9e-4 (~15x) headroom over measured
+    // -- the wider pin than the 3 s test absorbs both the larger frame count and
+    // cross-platform realfft SIMD variance (CI is x86, this box is ARM), the same
+    // rationale and the same headroom multiple as the phase-7 pin it replaces.
+    //
+    // RE-PINNED ONCE by the S4 full-f32-mel sweep (was: max_abs=1.805e-5 /
+    // max_rel=9.805e-6 at rel 1.5e-4 / abs 3e-4). See the 3 s test for the mechanism.
+    const REL_PIN: f64 = 6.0e-4;
+    const ABS_PIN: f64 = 9.0e-4;
     let (_, cfg) = tier2_cfg();
     let audio = read_audio(std::path::Path::new(PRCTS), 0.0, 3.6e6, 0, None).unwrap();
     let rate = audio.sample_rate as f64;
@@ -211,10 +223,14 @@ fn pipeline_parity_dc_offset_branch() {
     // so the assembled sequences must still agree at tolerance -- but WIDER than the
     // no-DC path: subtracting an f32-computed full-buffer mean amplifies the f32 error
     // on low-energy periodogram bins (a near-zero bin's log-mel diverges), so the DC
-    // branch diverges ~2 orders more than the flag-off 3 s test (rel 3.0e-6). MEASURED
-    // (Apple Silicon dev box): max_abs=9.784e-3, max_rel=5.704e-4 over both channels of
-    // the 3 s excerpt. Pinned rel ~10x / abs ~5x over measured (the DC branch is an
-    // UNEXERCISED gate path -- a documented, wider f32 tolerance, spec S4).
+    // branch diverges ~1.5 orders more than the flag-off 3 s test (rel 1.8e-5). MEASURED
+    // (Apple Silicon dev box, Phase 10 Task 5 re-measurement): max_abs=9.784e-3,
+    // max_rel=5.719e-4 over both channels of the 3 s excerpt. Pinned rel ~10x / abs ~5x
+    // over measured (the DC branch is an UNEXERCISED gate path -- a documented, wider f32
+    // tolerance, spec S4). The S4 full-f32 mel BARELY moved this leg (was abs 9.784e-3 /
+    // rel 5.704e-4, pins unchanged): here the divergence is already dominated by the
+    // f32 DC-mean subtraction upstream of the mel, so the mel's own f32 error is noise
+    // against it -- the one leg where the phase-7 pins survive the sweep untouched.
     const REL_PIN: f64 = 6.0e-3;
     const ABS_PIN: f64 = 5.0e-2;
     let (mut map, _) = tier2_cfg();

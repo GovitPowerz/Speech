@@ -192,10 +192,15 @@ fn compare(
 // ---------------------------------------------------------------------------
 
 /// MEASURED on this box (M4 Pro / macOS 25.5 / Apple libm) -- see the per-leg prints;
-/// the worst across all four (cell x leg) runs is `max_rel 4.13e-6` (mamba). Pinned at
-/// `measured * 10` rounded up, then widened once for cross-platform realfft/faer SIMD
-/// variance (CI is x86, this box is ARM), exactly as the phase-7 SAD leg documents. A
-/// FAILURE HERE MEANS RE-MEASURE AND ADJUDICATE, never widen.
+/// the worst across all four (cell x leg) runs is `max_rel 7.74e-6` (mamba), leaving
+/// ~13x headroom. Pinned at `measured * 10` rounded up, then widened once for
+/// cross-platform realfft/faer SIMD variance (CI is x86, this box is ARM), exactly as the
+/// phase-7 SAD leg documents. A FAILURE HERE MEANS RE-MEASURE AND ADJUDICATE, never widen.
+///
+/// RE-MEASURED by the Phase 10 Task 5 S4 sweep (full-f32 mel at both fast sites): worst
+/// `max_rel` 4.13e-6 -> 7.74e-6 (mamba, unchanged leg-for-leg otherwise; slstm 1.40e-6),
+/// `max_dt` still EXACTLY 0.0 with boundary count/types identical on every leg, so the
+/// PINS ARE UNCHANGED -- the growth is absorbed by the existing headroom.
 const POST_REL_PIN: f64 = 1.0e-4;
 const POST_ABS_PIN: f64 = 1.0e-4;
 

@@ -12,6 +12,15 @@
 //! A flip is R1 STOP-and-adjudicate -- it would mean f32 moved a decision on committed
 //! fixtures, not a silent widen.
 //!
+//! PHASE 10 TASK 5 (the S4 full-f32-mel sweep) RE-RAN THIS SUITE AND NOTHING MOVED --
+//! `max_abs`/`max_rel` bit-for-bit the phase-7 values on both legs, pins untouched. That
+//! is STRUCTURAL, not luck: Mode 7 consumes `external_features` (phSeq one-hots / cep
+//! records) and its SAD net is FROZEN (a synthesized-constant `result_vec`), so no
+//! periodogram, mel bank or DCT is ever built on this arm -- `FastPipeline` is not even
+//! constructed. The suite is recorded in the sweep table as an unchanged row precisely
+//! because an unexplained MOVE here would have meant the mel change leaked somewhere it
+//! has no business being.
+//!
 //! LID net shape (`BLSTM_LID_*`): `LSTMNeuronNb 36,24 / OutputNeuronNb 48,1` -> a BINARY
 //! (output_size 1) net, so `feed_forward_scoring` binary-expands to `[1-p, p]` and
 //! `class_nb = max(1, 2) = 2`. Every phSeq block (<= 9 chars) and cep record is smaller

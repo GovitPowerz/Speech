@@ -1092,7 +1092,9 @@ NO config: it self-sizes off `nnet_input_size` on both sides of the seam
 one-line pointer to v2 -- COMMENT-ONLY, and verified `config_hash`-safe by parsing both
 revisions through `speech_rs.load_toml_config` and asserting the maps are identical (the
 hash reads the parsed map, which TOML comments never enter), so every v1 run's recorded
-`config_hash` is unchanged. v1 stays FROZEN: `test_phase9_gates.py` is untouched and green.
+`config_hash` is unchanged. v1 stays FROZEN: `test_phase9_gates.py`'s asserts, pins and
+numbers are untouched and green (the T4 review corrected one module-docstring sentence
+about `b_i`'s computed-vs-analytic zero -- comment-only).
 
 WHY: v1 declares a 23-wide input while its own DSP front-end emits 11 columns
 (`3*nb_dct - ignore_first_dct = 3*4 - 1`), so with `lstm_sub_sampling 4` only 44 of layer 0's
@@ -1314,3 +1316,128 @@ changes, since `sad-v2` shares the entire SAD skeleton (`_SAD_ARMS`) and every s
 from the config. To answer the lineage question, fire the SAME cell x direction on both arms
 and compare; the live-capacity table above says the comparison is about init scaling and
 pack size, not about capacity. Paste resulting numbers into the `full-corpus runs` row above.
+
+## Phase 10 -- the full-f32 mel front-end (Task 5, spec S4)
+
+`fast/mel32.rs` replaces the phase-7 "widen the f32 periodogram to f64, run the golden f64
+`MelFilterBank`, narrow the assembled sequence back" bridge with f32 kernels transcribed
+op-for-op from `features/mel.rs` + `features/pipeline.rs::assemble_input_sequence`. BOTH fast
+sites route through it in one commit-unit -- the offline `FastPipeline::build_input_sequence_parts`
+and the streaming `assemble_perio_window` -- via ONE shared `assemble_rows` kernel, so
+offline-vs-streamed stays bit-identical BY CONSTRUCTION (the phase-8/9 streaming gates compare
+fast-vs-fast; they were re-run UNEDITED and stay green). The f64-widen path is DELETED, not kept
+as a mode; the exact `features/mel.rs` stays byte-untouched as the transcription ORACLE.
+
+The bank GEOMETRY is still derived in f64 (the sequential `freq += freq_step` grid, the
+floor/ceil band round-trip, the inclusive triangle edges, the whole-bank fallback) and only the
+coefficient VALUES narrow `as f32` once at construction: deriving the geometry in f32 could move
+filter MEMBERSHIP (an `is_valid_bank` flip, a triangle-edge inclusion flip), which is a structural
+change rather than a precision one. Banks are still built ONCE per pipeline.
+
+QUIRKS CARRIED (each pinned by its own inline unit, each doc-noted against its `mel.rs` line):
+the deltas-no-DCT static-block OVERWRITE layout (`mel.rs:412-417`); SDC's unconditional n=3
+regression kernel (`:272-276`) and its ignoreFirst last-static clobber (`:286-294`); the
+ignoreFirst branch-B FIRST-column drop (`:295-312`); `regression_deltas`' saturated-`j` denominator
+(`:431-475`); `ln(dot + 1e-24)` (`:352`); the whole-bank fallback (`:138-155`). A 10-config shape
+cross-check asserts `is_mel`/`is_dct_activated`/`nb_filters`/`nb_dct` agree with the exact bank
+element-for-element, so a geometry drift fails BEFORE any value pin.
+
+### The S4 re-pin sweep -- the ONE sanctioned pin re-measurement (spec S9.3)
+
+Every fast-vs-exact number moved once, by design. Boundary count/type identity and argmax
+zero-flips held EVERYWHERE -- no R1 STOP was reached. Measured on Apple M4 Pro (arm64),
+macOS 26.5.2, `cargo build --release` (LTO on), `--release` test profile.
+
+| suite / leg | metric | old measured | old pin | NEW measured | NEW pin | flips |
+|---|---|---|---|---|---|---|
+| `phase7_fast_pipeline::pipeline_parity_excerpt_3s` | max_rel | 3.044e-6 | 5.0e-5 | **1.807e-5** | **2.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_excerpt_3s` | max_abs | 8.263e-6 | 1.0e-4 | **3.589e-5** | **4.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_prcts_60s` | max_rel | 9.805e-6 | 1.5e-4 | **4.038e-5** | **6.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_prcts_60s` | max_abs | 1.805e-5 | 3.0e-4 | **5.914e-5** | **9.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_dc_offset_branch` | max_rel | 5.704e-4 | 6.0e-3 | 5.719e-4 | 6.0e-3 (kept) | n/a |
+| `phase7_fast_pipeline::pipeline_parity_dc_offset_branch` | max_abs | 9.784e-3 | 5.0e-2 | 9.784e-3 | 5.0e-2 (kept) | n/a |
+| `phase7_parity_sad::sad_parity_exact_vs_fast` | posterior max_rel | 1.398e-5 | 3.0e-4 | 1.361e-5 | 3.0e-4 (kept) | **0** |
+| `phase7_parity_sad::sad_parity_exact_vs_fast` | posterior max_abs | 2.416e-6 | 5.0e-5 | 2.416e-6 | 5.0e-5 (kept) | **0** |
+| `phase7_parity_sad::sad_parity_exact_vs_fast` | boundary max_dt | 0.0 | 1.0e-2 | **0.0 exactly** | 1.0e-2 (kept) | **0** |
+| `phase7_parity_sad::sad_parity_scored_columns` | scored max_rel/abs | 0.0 / 0.0 | 5.0e-2 | **0.0 / 0.0** | 5.0e-2 (kept) | **0** |
+| `phase7_parity_lid::lid_parity_phseq` | score max_abs / max_rel | 7.785e-7 / 1.662e-8 | 5e-4 / 5e-6 | 7.785e-7 / 1.662e-8 | unchanged | **0** |
+| `phase7_parity_lid::lid_parity_cep` | score max_abs / max_rel | 2.680e-6 / 2.733e-8 | 5e-4 / 5e-6 | 2.680e-6 / 2.733e-8 | unchanged | **0** |
+| `phase9_fast_parity` (worst of 4 cell x leg runs) | posterior max_rel | 4.13e-6 | 1.0e-4 | 7.740e-6 | 1.0e-4 (kept) | **0** |
+| `phase9_fast_parity` (worst of 4 cell x leg runs) | boundary max_dt | 0.0 | STOP on nonzero | **0.0 exactly** | STOP on nonzero | **0** |
+| `phase9_stream_causal` (19 legs, streamed-vs-offline-fast) | bit-equality | exact | exact | **exact, UNEDITED** | n/a | **0** |
+| `phase8_gate` / `phase8_stream_{frontend,overlap,decision,lid}` / `phase8_frozen_norm` (59 legs) | bit-equality | exact | exact | **exact, UNEDITED** | n/a | **0** |
+
+WHERE THE DELTAS GREW AND WHERE THEY DID NOT, mechanism-first (this is the interesting part, not
+the bookkeeping):
+
+- **The front-end pins grew ~4-6x** and are the only re-pinned numbers. f32 error now accumulates
+  through the mel triangle dots, the DCT product AND the delta/delta-delta regressions rather than
+  entering only via the periodogram -- the phase-7 bridge did the whole tail in f64.
+- **The DC-offset branch did NOT move** (rel 5.704e-4 -> 5.719e-4, abs identical to 4 figures).
+  There the divergence is already dominated by the f32 full-buffer DC-mean subtraction UPSTREAM of
+  the mel, so the mel's own f32 error is noise against it. The one leg whose phase-7 pins survive.
+- **The SAD posteriors did NOT move** (max_abs identical at 2.416e-6; max_rel 1.398e-5 -> 1.361e-5,
+  i.e. DOWN, which is the max simply landing in a different cell). A ~4e-5 perturbation of a
+  log-mel feature of magnitude ~10 is ~4e-6 relative -- below what the f32 LSTM recurrence already
+  contributes, so the NN's own error still sets the ceiling. This is why boundary max_dt stayed
+  EXACTLY 0.0 and the scored columns stayed bit-identical.
+- **The LID legs are bit-for-bit unchanged, STRUCTURALLY** -- Mode 7 consumes phSeq/cep
+  `external_features` with a FROZEN SAD net, so no periodogram, mel bank or DCT is ever built and
+  `FastPipeline` is not even constructed. Recorded as an unchanged row precisely because an
+  unexplained MOVE there would have meant the change leaked where it has no business being.
+- **The phase-9 causal posteriors grew ~1.9x** (4.13e-6 -> 7.740e-6, mamba; slstm 1.40e-6), inside
+  the existing 1e-4 pin at ~13x headroom, with `max_dt` still exactly 0.0.
+
+### The corpus metric tiers -- re-run locally, all deltas EXACTLY 0.0
+
+Not "within tolerance": float equality on the task metrics, on real LRE03/07 data through the
+phase-6/9 checkpoints. Corpus-gated + local-only as always (no filename or path recorded).
+
+| tier | leg | files | decision disagreements | metric delta (fast - exact) |
+|---|---|---|---|---|
+| `test_phase7_parity.py` | lid-features (cep) | 48 | argmax 0 | lid_error 0.000e+00, cavg 0.000e+00 |
+| `test_phase7_parity.py` | lid-phseq | 45 | argmax 0 | lid_error 0.000e+00, cavg 0.000e+00 |
+| `test_phase7_parity.py` | sad | 24 | boundary type/count 0, max_dt 0.000e+00 s | DCF 0.000e+00 at all 5 collars |
+| `test_phase9_parity.py` | slstm / forward | 24 | boundary type/count 0, max_dt 0.000e+00 s | DCF 0.000e+00 at all 5 collars |
+| `test_phase9_parity.py` | mamba / forward | 24 | boundary type/count 0, max_dt 0.000e+00 s | DCF 0.000e+00 at all 5 collars |
+| `test_phase8_parity.py` | streamed-vs-offline SAD | 1 (75 s) + 24 | streamed boundary_max_dt 2.500e-05 s (inside the 5.0e-05 VRCTS write quantum, unchanged) | causality DCF delta 0.000e+00 |
+
+### RSS: the phase-7 memory finding is REVERSED
+
+The phase-7 SAD-arm finding ("fast uses MORE memory, 1.22-1.28x -- the per-call f64
+periodogram-widen") is the thing this task was aimed at, and it is now the other way round.
+BEFORE/AFTER measured on IDENTICAL staging in the SAME session (the change stashed, rebuilt,
+re-measured, unstashed, rebuilt) so the two columns differ in exactly one variable: 3 independent
+`--repeat=1` fresh processes per (leg, path), `speech bench` on the committed 60 s stereo
+`prcts_excerpt.wav` (`audio_s = 120.00`), backprop off, `Neural_Networks_BackPropagation_Epochs 0`.
+Apple M4 Pro (arm64), macOS 26.5.2, `cargo build --release -j 4`. The causal row stages the
+committed `phase9/slstm_forward.config` + seed pack against the SAME wav (tiny 23,4 net, plain
+window-0 regime), so it isolates the front-end rather than the cell.
+
+| leg | path | maxrss_mb BEFORE | maxrss_mb AFTER | delta | wall_s BEFORE (mean) | wall_s AFTER (mean) |
+|---|---|---|---|---|---|---|
+| SAD tier2 (60 s stereo) | exact | 56.484 | 56.521 | +0.04 (unchanged, exact tree untouched) | 0.27638 | 0.27304 |
+| SAD tier2 (60 s stereo) | **fast** | **67.261** | **41.953** | **-25.31 MB (0.624x)** | 0.058897 | **0.055225 (1.066x faster)** |
+| causal slstm/fwd (60 s stereo) | exact | 53.302 | 54.016 | +0.71 (noise, exact tree untouched) | 0.13783 | 0.14065 |
+| causal slstm/fwd (60 s stereo) | **fast** | **67.026** | **41.729** | **-25.30 MB (0.623x)** | 0.023596 | **0.020763 (1.136x faster)** |
+
+- **THE SIGN FLIP:** fast-vs-exact peak RSS on the SAD arm goes **1.191x -> 0.743x**. The fast path
+  now uses roughly 26% LESS memory than exact, where phase 7 measured it using 19-28% MORE. The
+  phase-9 "~68 MB plateau, cell-independent" becomes a **~42 MB plateau** (both cells land within
+  0.23 MB of each other, still cell-independent -- it was never the cell).
+- **THE DROP MATCHES THE PREDICTED MECHANISM TO ~0.1 MB, which is the real evidence.** Phase 7
+  sized the per-channel widen buffer at `6000 x 513 x 8 bytes = 23.48 MB`; adding the other f64
+  transients that died with it (`fb` 6000x20x8 = 0.92 MB, `dct`/`input64` 6000x11x8 = 0.50 MB each)
+  gives ~25.4 MB against a measured 25.31 / 25.30 MB. The attribution was correct.
+- **BIGGER THAN THE SPEC'S EXPECTATION** (S4 predicted ~68 -> ~56 MB, i.e. the widen buffer alone):
+  the assembled/mel/DCT f64 intermediates went with it, so the measured landing is ~42 MB.
+- **Wall-clock is a small bonus, not the point:** 1.07x (SAD) / 1.14x (causal) on the fast path.
+  The f32 mel is cheaper than f64-widen-plus-f64-mel, but the FFT still dominates, exactly as the
+  phase-7 rationale for NOT doing this predicted. The RSS was the reason to do it.
+
+**SUPERSEDED BOUNDS.** Two local-only regression bounds recorded earlier are now stale and are
+restated here rather than edited in place (those sections are the record of their own phase):
+the phase-7 "SAD arms: memory <= 1.4x of exact" becomes **<= 0.85x of exact** (measured 0.743x),
+and the phase-9 "fast maxrss within 1.3x of the ~68 MB plateau" becomes **within 1.3x of the
+~42 MB plateau**. A future local run landing back near 67 MB on a fast SAD/causal leg means the
+f64 widen has crept back in. Still NOT CI-asserted; this-box numbers, hardware named per R5.

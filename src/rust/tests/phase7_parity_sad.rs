@@ -92,11 +92,19 @@ fn run_path(inference: Option<&str>) -> (Vec<Vec<f64>>, Vec<Segmentation>) {
 #[test]
 fn sad_parity_exact_vs_fast() {
     // MEASURED (Apple Silicon dev box, full 60 s x 2 ch): posterior max_abs=2.416e-6,
-    // max_rel=1.398e-5; boundary max_dt=0.0 s (segment count + types IDENTICAL, 0
+    // max_rel=1.361e-5; boundary max_dt=0.0 s (segment count + types IDENTICAL, 0
     // flips -- the 4-decimal-VRCTS-grade posterior agreement lands the hysteresis
     // crossings on identical f64 boundaries). Posterior pins carry ~20x headroom over
     // measured, widened for cross-platform realfft/faer SIMD variance (CI is x86, this
     // box is ARM -- the T3 pipeline test found the 60 s realfft delta grows on x86).
+    //
+    // RE-MEASURED by the Phase 10 Task 5 S4 sweep (full-f32 mel at both fast sites):
+    // max_abs UNMOVED at 2.416e-6, max_rel 1.398e-5 -> 1.361e-5, max_dt still EXACTLY
+    // 0.0, zero flips -- so the PINS ARE UNCHANGED. The front-end deltas grew ~4x
+    // (phase7_fast_pipeline re-pinned), but they do not reach here: the posterior
+    // divergence on this net is dominated by the f32 NN's own recurrence/matmul error,
+    // and a ~4e-5 perturbation of a log-mel feature of magnitude ~10 is ~4e-6 relative
+    // -- below what the LSTM's f32 arithmetic already contributes.
     // The segment COUNT + TYPES identical assert below is the HARD gate (spec S1.6a);
     // BOUNDARY_PIN (10 ms) is the soft max-dt bound over measured 0.0.
     const POST_REL_PIN: f64 = 3.0e-4;

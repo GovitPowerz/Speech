@@ -1,8 +1,9 @@
 //! `fast::pipeline` -- f32 feature extraction on realfft (Phase 7 Task 3).
 //!
 //! An `f32`, `realfft`-backed transcription of the exact feature front-end's
-//! framing + periodogram, feeding the (reused) golden f64 mel/DCT apply. The exact
-//! sources this mirrors line-for-line (cite them when auditing drift, per the plan's
+//! framing + periodogram, feeding the f32 mel/DCT apply in `fast::mel32` (Phase 10
+//! Task 5 -- it fed the reused golden f64 apply through a widen bridge until then).
+//! The exact sources this mirrors line-for-line (cite them when auditing drift, per the plan's
 //! R2):
 //!
 //! - `audio.rs::get_sequence` (`:269-314`, `AudioStruct::getSequence`
@@ -19,8 +20,8 @@
 //!   divergence + equivalence proof below.
 //! - `features/mel.rs::MelFilterBank` (`apply_filter_bank` `:337`, `apply_dct`
 //!   `:264`) + `features/pipeline.rs::assemble_input_sequence` (`:497`): the mel/DCT
-//!   apply + the DCT/mel/raw-band + LTSV priority. REUSED verbatim in f64 (see the
-//!   MEL-REUSE note).
+//!   apply + the DCT/mel/raw-band priority. TRANSCRIBED to f32 in `fast::mel32` since
+//!   Phase 10 Task 5 (see the FULL-f32 MEL note); no longer called from here.
 //! - `features/pipeline.rs::SpectralParams::derive` / `FeatureConfig::from_legacy`:
 //!   CONSUMED, not re-derived (the brief's mandate -- derivation is shared config
 //!   arithmetic).
@@ -66,19 +67,24 @@
 //!    a single call, breaking the TOLERANCE parity pins, not merely the run-twice
 //!    bit-identity pin. Do not refactor the reset away.
 //!
-//! 4. MEL/DCT REUSE (f64), scoped divergence. The mel filterbank + DCT table are built
-//!    ONCE at construction (`MelFilterBank::new`, the load-bearing "banks built once" of
-//!    the brief -- exactly what Task 8 protects), and the apply reuses the golden f64
-//!    `apply_filter_bank`/`apply_dct`/`assemble_input_sequence` on the f32-derived
-//!    periodogram WIDENED to f64, then narrows the assembled sequence to f32. Rationale:
-//!    the mel/DCT is a light post-process (T x 20 dots, T x 4 DCT) dominated by the
-//!    per-frame 1024-pt FFT, so the fast win lives in the FFT; and the exact `mel.rs` is
-//!    UNTOUCHABLE (its ctor fields are private -- an f32 re-transcription of the gnarly
-//!    triangle/grid/fallback ctor would be pure duplication risk with no measurable
-//!    speed benefit). A fully-f32 mel apply is a possible future tightening (like the
-//!    full-f32 decode the brief itself defers), not this task. The consequence: the
-//!    measured delta is TIGHTER than a fully-f32 path (only the periodogram carries f32
-//!    error into the mel).
+//! 4. FULL-f32 MEL/DCT (Phase 10 Task 5, spec S4). The mel filterbank + DCT table are
+//!    built ONCE at construction and the apply runs in f32 through `fast::mel32`
+//!    (`FastMelBank::apply_filter_bank`/`apply_dct` + `assemble_input_sequence_f32`), an
+//!    op-for-op transcription of the exact `features/mel.rs` + `assemble_input_sequence`
+//!    carrying their load-bearing quirks (see that module's doc for the per-quirk source
+//!    lines). SUPERSEDES the phase-7 arrangement, which reused the golden f64 mel on the
+//!    f32 periodogram WIDENED to f64 and narrowed the assembled sequence back: that
+//!    bridge allocated a `T x bins` f64 buffer PER CALL (~23.5 MB on the 60 s SAD bench
+//!    -- the measured mechanism behind phase 7's fast-path RSS being HIGHER than exact),
+//!    and it is DELETED here, not kept as a mode. Both sites (`build_input_sequence_parts`
+//!    and the streaming `assemble_perio_window`) drive ONE shared kernel
+//!    ([`FastPipeline::assemble_rows`]), so offline-vs-streamed stays bit-identical BY
+//!    CONSTRUCTION. The exact `features/mel.rs` remains byte-untouched -- it is the
+//!    transcription ORACLE, no longer a dependency of this module. CONSEQUENCE: the
+//!    measured fast-vs-exact deltas are WIDER than phase 7's (f32 error now accumulates
+//!    through the mel dots, the DCT product and the delta regressions, not only the
+//!    periodogram); every affected pin was re-measured in the S4 sweep (RESULTS.md), with
+//!    boundary/argmax identity unchanged.
 //!
 //! SEAM: the audio is held ONCE in f32 on this path. `build_input_sequence` consumes
 //! `samples: &[f32]` -- one channel of the EXISTING `read_audio` output narrowed once
@@ -98,16 +104,16 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use ndarray::Array2;
 use realfft::num_complex::Complex;
 use realfft::{RealFftPlanner, RealToComplex};
 
+use super::mel32::{FastMelBank, assemble_input_sequence_f32};
 use super::nn::FastMatrix;
-use crate::features::mel::MelFilterBank;
-use crate::features::pipeline::{FeatureConfig, SpectralParams, assemble_input_sequence};
+use crate::features::pipeline::{FeatureConfig, SpectralParams};
 
-/// f32 feature pipeline: windowing -> one real FFT per frame -> periodogram -> reused
-/// f64 mel/DCT -> f32 assembled input sequence. Banks + plan built ONCE.
+/// f32 feature pipeline: windowing -> one real FFT per frame -> periodogram -> f32
+/// mel/DCT (`fast::mel32`) -> f32 assembled input sequence, f32 END TO END. Banks +
+/// plan built ONCE.
 pub struct FastPipeline {
     // Framing constants (from SpectralParams / FeatureConfig).
     window_size: usize, // 1<<order (the real FFT length)
@@ -118,8 +124,8 @@ pub struct FastPipeline {
     flag_dc_offset: bool,
     win_coeffs: Option<Vec<f32>>, // length buffer_size, or None (rectangular)
 
-    // Mel/DCT (built ONCE, f64, reused golden code).
-    bank: Option<MelFilterBank>,
+    // Mel/DCT (built ONCE, f32 -- `fast::mel32`).
+    bank: Option<FastMelBank>,
     use_dct: bool,
     freq_beg: usize,
     freq_end: usize,
@@ -202,11 +208,12 @@ impl FastPipeline {
             crate::audio::windowing_coefficients(&cfg.win_type, false, buffer_size, cfg.win_param)
                 .map(|v| v.iter().map(|&x| x as f32).collect());
 
-        // Mel filterbank + DCT table, built ONCE (f64, reused golden ctor). Args match
-        // build_mel_bank (`features/pipeline.rs:544-563`, the exact path's canonical
-        // MelFilterBank::new site since the Task 8 hoist) exactly.
+        // Mel filterbank + DCT table, built ONCE (f32 -- `FastMelBank::new` runs the
+        // exact ctor's f64 geometry walk and narrows only the coefficient values). Args
+        // match build_mel_bank (`features/pipeline.rs:544-563`, the exact path's
+        // canonical MelFilterBank::new site since the Task 8 hoist) exactly.
         let bank = if cfg.nb_bins > 0 {
-            Some(MelFilterBank::new(
+            Some(FastMelBank::new(
                 cfg.min_mel,
                 cfg.max_mel,
                 cfg.nb_bins,
@@ -275,20 +282,31 @@ impl FastPipeline {
     ) -> (&FastMatrix, &FastMatrix, Option<Vec<f32>>) {
         self.compute_periodogram(samples);
 
-        // Widen the f32 periodogram to f64 for the reused golden mel/DCT apply (the
-        // f32 VALUE is preserved exactly by the widening).
+        // f32 mel/DCT/assembly, the SHARED kernel the streaming `assemble_perio_window`
+        // also drives (so offline and streamed are bit-identical by construction).
         let t = self.perio.rows;
-        let mut perio64 = Array2::<f64>::zeros((t, self.bins));
-        for r in 0..t {
-            let base = r * self.bins;
-            for c in 0..self.bins {
-                perio64[[r, c]] = self.perio.data[base + c] as f64;
-            }
-        }
+        let assembled = self.assemble_rows(&self.perio.data, t);
 
+        // Copy into the reused output buffer (its allocation survives across calls).
+        self.input.rows = assembled.rows;
+        self.input.cols = assembled.cols;
+        self.input.data.clear();
+        self.input.data.extend_from_slice(&assembled.data);
+
+        (&self.input, &self.perio, None)
+    }
+
+    /// THE ONE f32 mel/DCT/assembly kernel, driven by BOTH the whole-sequence path and
+    /// the streaming window path: `perio` is a row-major `rows x bins` f32 periodogram
+    /// (whole sequence or ring window), and the result is the assembled `rows x cols`
+    /// feature sequence. Per-row except `regression_deltas`' cross-row window inside
+    /// `apply_dct` -- which is exactly why the streaming caller sizes its window with
+    /// the delta REACH (see `fast::stream`). `&self`: the bank is immutable and the
+    /// kernel allocates its own output, so neither site can perturb the other.
+    fn assemble_rows(&self, perio: &[f32], rows: usize) -> FastMatrix {
         let (mel, dct) = match &self.bank {
             Some(bank) => {
-                let fb = bank.apply_filter_bank(&perio64);
+                let fb = bank.apply_filter_bank(perio, rows, self.bins);
                 if self.use_dct {
                     let d = bank.apply_dct(&fb);
                     (Some(fb), Some(d))
@@ -299,28 +317,15 @@ impl FastPipeline {
             None => (None, None),
         };
 
-        let input64 = assemble_input_sequence(
-            &perio64,
+        assemble_input_sequence_f32(
+            perio,
+            rows,
+            self.bins,
             mel.as_ref(),
             dct.as_ref(),
-            None, // LTSV bailed at construction
             self.freq_beg,
             self.freq_end,
-        );
-
-        // Narrow the assembled sequence to f32 into the reused output buffer.
-        let (it, ic) = input64.dim();
-        self.input.rows = it;
-        self.input.cols = ic;
-        self.input.data.clear();
-        self.input.data.reserve(it * ic);
-        for r in 0..it {
-            for c in 0..ic {
-                self.input.data.push(input64[[r, c]] as f32);
-            }
-        }
-
-        (&self.input, &self.perio, None)
+        )
     }
 
     /// The f32 framing + realfft + periodogram, into the reused `self.perio`
@@ -470,13 +475,14 @@ impl FastPipeline {
 
     /// Assemble feature rows from a periodogram-ring WINDOW, returning only local rows
     /// `[from_local, to_local)`. `perio_window` is `window_rows x bins` (row-major f32),
-    /// widened once to f64 for the reused golden `apply_filter_bank`/`apply_dct`/
-    /// `assemble_input_sequence` (exactly the whole-sequence path's mel/DCT apply), then
-    /// narrowed back to f32. The caller sizes the window so every EXTRACTED row's
-    /// `regression_deltas` reach lands on real neighbours (interior) or on the true
-    /// sequence start/end (clamped edge), making the extracted rows bit-identical to the
-    /// whole-sequence assembly. `&self` (read-only: reuses `bank`/`use_dct`/`freq_beg`/
-    /// `freq_end`, never the whole-sequence `perio`/`input` buffers).
+    /// run through the SAME [`assemble_rows`](Self::assemble_rows) kernel the
+    /// whole-sequence path drives -- f32 end to end since Phase 10 Task 5, so the two
+    /// sites cannot diverge even in the last ULP. The caller sizes the window so every
+    /// EXTRACTED row's `regression_deltas` reach lands on real neighbours (interior) or
+    /// on the true sequence start/end (clamped edge), making the extracted rows
+    /// bit-identical to the whole-sequence assembly. `&self` (read-only: reuses
+    /// `bank`/`use_dct`/`freq_beg`/`freq_end`, never the whole-sequence `perio`/`input`
+    /// buffers).
     pub fn assemble_perio_window(
         &self,
         perio_window: &[f32],
@@ -484,48 +490,17 @@ impl FastPipeline {
         from_local: usize,
         to_local: usize,
     ) -> FastMatrix {
-        let mut perio64 = Array2::<f64>::zeros((window_rows, self.bins));
-        for r in 0..window_rows {
-            let base = r * self.bins;
-            for c in 0..self.bins {
-                perio64[[r, c]] = perio_window[base + c] as f64;
-            }
-        }
+        let full = self.assemble_rows(perio_window, window_rows);
 
-        let (mel, dct) = match &self.bank {
-            Some(bank) => {
-                let fb = bank.apply_filter_bank(&perio64);
-                if self.use_dct {
-                    let d = bank.apply_dct(&fb);
-                    (Some(fb), Some(d))
-                } else {
-                    (Some(fb), None)
-                }
-            }
-            None => (None, None),
-        };
-
-        let input64 = assemble_input_sequence(
-            &perio64,
-            mel.as_ref(),
-            dct.as_ref(),
-            None, // LTSV bailed at construction
-            self.freq_beg,
-            self.freq_end,
-        );
-
-        let ic = input64.ncols();
+        let ic = full.cols;
         let rows = to_local - from_local;
         let mut out = FastMatrix {
             data: Vec::with_capacity(rows * ic),
             rows,
             cols: ic,
         };
-        for r in from_local..to_local {
-            for c in 0..ic {
-                out.data.push(input64[[r, c]] as f32);
-            }
-        }
+        out.data
+            .extend_from_slice(&full.data[from_local * ic..to_local * ic]);
         out
     }
 
