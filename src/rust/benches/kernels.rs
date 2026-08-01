@@ -3,9 +3,10 @@
 //! MelFilterBank::apply_filter_bank`), on fixture-shaped inputs. Phase 7 Task 7
 //! adds the three fast-path twins these target names were reserved for:
 //! `faer_project_92x96` (vs `matmul_seq_92x96`), `realfft_1024` (vs
-//! `gfft_1024`), `mel_apply_widened_f64` (vs `mel_apply_513x20`, HONESTLY named
-//! -- see that bench's own doc comment for why it is not called
-//! `mel_apply_f32`).
+//! `gfft_1024`), `mel_apply_f32` (vs `mel_apply_513x20`). Phase 10 Task 5
+//! RETARGETED the last of those from `mel_apply_widened_f64` (the phase-7
+//! widen-then-f64-apply bridge, now deleted) onto the real f32 kernel
+//! `fast::mel32::FastMelBank::apply_filter_bank` -- see that bench's doc.
 //!
 //! The three EXACT shapes chain together, all read off the REAL
 //! `tests/reference_data/phase4a/tier2_spectral.config` (Algo 3, the tier-2
@@ -32,6 +33,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ndarray::Array2;
 use realfft::RealFftPlanner;
+use speech::fast::mel32::FastMelBank;
 use speech::fast::nn::faer_project;
 use speech::features::fft::Gfft;
 use speech::features::mel::MelFilterBank;
@@ -188,23 +190,27 @@ fn bench_realfft(c: &mut Criterion) {
     });
 }
 
-/// HONEST TWIN (T3 review obligation, recorded in the phase-7 ledger): the
-/// fast path has NO f32 mel kernel. `fast::pipeline::FastPipeline::
-/// build_input_sequence_parts` widens its f32 periodogram to a FRESH f64
-/// `Array2` on EVERY call (a real per-call allocation, NOT a preallocated/
-/// reused scratch buffer like the rest of that module's workspace -- see its
-/// "MEL/DCT REUSE" doc note), then reuses the SAME golden f64
-/// `apply_filter_bank` `mel_apply_513x20` benches. This target is deliberately
-/// named `mel_apply_widened_f64`, not `mel_apply_f32` or similar -- there is
-/// no fast-path-specific mel kernel to name that way, and fabricating one
-/// would misrepresent the real dispatch. It measures exactly the real
-/// procedure: fresh-allocate `perio64`, widen element-by-element, call
-/// `apply_filter_bank`. Same bank params + 100x513 shape as `mel_apply_513x20`
-/// so the delta between the two isolates the widen-and-allocate overhead,
-/// nothing else (RESULTS.md's RSS reading attributes this per-call scratch
-/// cost to this documented decision, not to an anomaly).
-fn bench_mel_apply_widened_f64(c: &mut Criterion) {
-    let bank = MelFilterBank::new(
+/// The REAL f32 mel kernel the fast path runs (`fast::mel32::FastMelBank::
+/// apply_filter_bank`), at the SAME bank params + 100x513 shape as
+/// `mel_apply_513x20`, so the delta between the two is a straight f32-vs-f64
+/// KERNEL comparison -- same triangles, same ascending dot order, same
+/// `ln(x + 1e-24)`, different precision and different element width.
+///
+/// PHASE 10 TASK 5 RETARGET. This bench used to be `mel_apply_widened_f64`: it
+/// reproduced the phase-7 bridge (fresh-allocate a `T x bins` f64 `Array2`,
+/// widen element-by-element, call the golden f64 `apply_filter_bank`) and was
+/// honestly named that way BECAUSE there was no f32 mel kernel to name. There
+/// is one now (`fast/mel32.rs`), the widen procedure is DELETED from the fast
+/// tree, and both the old name and the old doc would have asserted the
+/// opposite of the dispatch. Consequence for readers of older numbers: the
+/// `mel_apply_widened_f64` row measured widen-plus-f64-apply and its delta vs
+/// `mel_apply_513x20` isolated the widen-and-allocate overhead; this row
+/// measures the f32 apply alone, so the two rows are NOT comparable across the
+/// rename.
+fn bench_mel_apply_f32(c: &mut Criterion) {
+    // Same arguments as `bench_mel_apply`'s f64 bank, in the same order (this
+    // is the point of the comparison -- only the kernel precision differs).
+    let bank = FastMelBank::new(
         186.1001763856132,
         2502.400490895474,
         20,
@@ -228,16 +234,13 @@ fn bench_mel_apply_widened_f64(c: &mut Criterion) {
         })
         .collect();
 
-    c.bench_function("mel_apply_widened_f64", |bch| {
+    c.bench_function("mel_apply_f32", |bch| {
         bch.iter(|| {
-            let mut perio64 = Array2::<f64>::zeros((rows, bins));
-            for r in 0..rows {
-                let base = r * bins;
-                for col in 0..bins {
-                    perio64[[r, col]] = perio_f32[base + col] as f64;
-                }
-            }
-            std::hint::black_box(bank.apply_filter_bank(std::hint::black_box(&perio64)))
+            std::hint::black_box(bank.apply_filter_bank(
+                std::hint::black_box(&perio_f32),
+                rows,
+                bins,
+            ))
         })
     });
 }
@@ -249,6 +252,6 @@ criterion_group!(
     bench_mel_apply,
     bench_faer_project,
     bench_realfft,
-    bench_mel_apply_widened_f64
+    bench_mel_apply_f32
 );
 criterion_main!(kernels);

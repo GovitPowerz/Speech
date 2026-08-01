@@ -1,4 +1,4 @@
-//! `fast::mel32` -- the f32 mel/DCT/deltas front-end tail (Phase 10 Task 4, spec S4).
+//! `fast::mel32` -- the f32 mel/DCT/deltas front-end tail (Phase 10 Task 5, spec S4).
 //!
 //! The f32 twin of `features/mel.rs` + `features/pipeline.rs::assemble_input_sequence`.
 //! It replaces the phase-7 "widen the f32 periodogram to f64, reuse the golden f64
@@ -56,6 +56,10 @@
 //! / raw-band priority (`features/pipeline.rs:497-521`) is transcribed alone.
 
 use super::nn::FastMatrix;
+// The two mel-scale conversions are `pub` on the exact bank and are PURE f64 scalar
+// math with no state, so this module CALLS them rather than re-transcribing: the
+// "mel.rs has no accessors" rationale covers its PRIVATE coefficient tables, not these.
+use crate::features::mel::{hz_to_mel, mel_to_hz};
 
 /// f32 triangular mel filterbank + DCT table, geometry-identical to
 /// [`crate::features::mel::MelFilterBank`] (same f64 ctor walk) with the coefficient
@@ -487,17 +491,6 @@ impl FastMelBank {
     }
 }
 
-/// `Hz2Mel(f) = 1125 * ln(1 + f/700)` (`mel.rs:39-41`). f64: bank GEOMETRY is derived in
-/// f64 (see the module doc) -- only coefficient values narrow.
-fn hz_to_mel(f: f64) -> f64 {
-    1125.0 * (1.0 + f / 700.0).ln()
-}
-
-/// `Mel2Hz(m) = 700 * (exp(m/1125) - 1)` (`mel.rs:44-46`).
-fn mel_to_hz(m: f64) -> f64 {
-    700.0 * ((m / 1125.0).exp() - 1.0)
-}
-
 /// f32 `regression_deltas` (`mel.rs:431-475`), block-op sequence preserved: for
 /// `j = 1..=n` form the shifted-difference matrix (edge rows corrected against row 0 /
 /// row T-1), accumulate `j * deltas`, then divide by `2 * sum j^2`. When `j > T` the
@@ -614,7 +607,35 @@ mod tests {
         deltas_nb: i32,
         dd_nb: i32,
     ) -> (MelFilterBank, FastMelBank) {
-        let (min_mel, max_mel, min_freq, max_freq, rate) = (0.0, 4000.0, 0.0, 4000.0, 8000.0);
+        banks_band(
+            nb_bins,
+            spectrum_size,
+            is_log,
+            nb_dct,
+            ignore_first,
+            deltas_nb,
+            dd_nb,
+            (0.0, 4000.0),
+        )
+    }
+
+    /// [`banks`] with an explicit `(min_freq, max_freq)` band. The default band starts at
+    /// 0 Hz, which makes `beg_freq == 0` and leaves the raw-band branches' `beg_freq + ii`
+    /// column offset (`mel.rs:362`/`:383`) structurally unexercised -- a NONZERO band is
+    /// the only way to put a value pin on it.
+    #[allow(clippy::too_many_arguments)]
+    fn banks_band(
+        nb_bins: i32,
+        spectrum_size: usize,
+        is_log: bool,
+        nb_dct: i32,
+        ignore_first: bool,
+        deltas_nb: i32,
+        dd_nb: i32,
+        band: (f64, f64),
+    ) -> (MelFilterBank, FastMelBank) {
+        let (min_mel, max_mel, rate) = (0.0, 4000.0, 8000.0);
+        let (min_freq, max_freq) = band;
         (
             MelFilterBank::new(
                 min_mel,
@@ -696,25 +717,67 @@ mod tests {
 
     #[test]
     fn filter_bank_and_dct_match_the_exact_path_at_tolerance() {
-        // MEASURED on this box (M4 Pro): worst max_rel over the six configs below is
+        // MEASURED on this box (M4 Pro): worst max_rel over the NINE configs below is
         // 1.861e-6 -- the f32 kernels reproduce the exact f64 mel/DCT to ~2e-6 on a
         // synthetic 5-decade periodogram. Pinned at 1e-4 (~54x), the same order as the
-        // phase-9 fast-parity posterior pin.
+        // phase-9 fast-parity posterior pin. The three branch-coverage rows added by the
+        // T5 review (the two raw-band fallbacks + the non-log mel dots) did NOT move the
+        // worst case, which sits on the log+mel DCT path as before -- expected, since the
+        // raw branches are a copy or a single `ln`, with no reduction to accumulate error.
+        //
+        // MUTATION-VERIFIED (T5 review, apply-FAIL-revert-PASS): dropping `beg_freq` from
+        // EITHER raw-band branch, and writing the SDC statics AFTER the extracted block
+        // (un-clobbering), each fail this test. HONEST LIMIT: a perturbation BELOW the pin
+        // is not caught here by construction -- scaling the non-log dots by 1.0000001
+        // passes, by 1.01 fails. This is a tolerance leg, not a bit-equality leg.
         const PIN: f64 = 1.0e-4;
         let (t, bins) = (37usize, 65usize);
         let p = synth_perio(t, bins);
         let p64 = to_f64(&p, t, bins);
         let mut worst = 0.0_f64;
-        for &(nb_dct, ignore, dn, ddn) in &[
-            (4i32, true, 5i32, 3i32), // tier2 shape: branch B
-            (4, false, 5, 3),         // branch C
-            (4, true, -3, 0),         // branch A (SDC) + ignoreFirst
-            (4, false, -3, 0),        // branch A (SDC)
-            (0, false, 5, 3),         // no DCT: the deltas OVERWRITE layout
-            (0, false, 0, 0),         // plain log-mel
+        // The last three rows exist because every OTHER row is `is_log && is_mel`: they
+        // cover the remaining three `apply_filter_bank` branches, which the exact oracle
+        // pins bit-exactly and which would otherwise have ZERO value coverage here --
+        // including the whole-bank FALLBACK's raw-band apply and its `beg_freq + ii`
+        // column offset (`mel.rs:359-364`), an offset no mel-branch row can exercise.
+        // The `(min_freq, max_freq)` band is 0..4000 everywhere except the two raw-band
+        // FALLBACK rows: those carry a NONZERO `min_freq` so `beg_freq > 0` and the
+        // pass-through branches' `p[.., beg_freq + ii]` column offset is actually pinned
+        // (with a 0 Hz band that offset is structurally zero and a dropped `beg_freq`
+        // would be invisible).
+        const FULL: (f64, f64) = (0.0, 4000.0);
+        const BAND: (f64, f64) = (500.0, 3500.0);
+        for &(nb_bins, is_log, nb_dct, ignore, dn, ddn, band) in &[
+            (20i32, true, 4i32, true, 5i32, 3i32, FULL), // tier2 shape: branch B
+            (20, true, 4, false, 5, 3, FULL),            // branch C
+            (20, true, 4, true, -3, 0, FULL),            // branch A (SDC) + ignoreFirst
+            (20, true, 4, false, -3, 0, FULL),           // branch A (SDC)
+            (20, true, 0, false, 5, 3, FULL),            // no DCT: deltas OVERWRITE layout
+            (20, true, 0, false, 0, 0, FULL),            // plain log-mel
+            (4000, true, 0, false, 0, 0, BAND),          // FALLBACK: is_log && !is_mel
+            (20, false, 0, false, 0, 0, FULL),           // !is_log && is_mel (plain dots)
+            (4000, false, 0, false, 0, 0, BAND),         // !is_log && !is_mel (raw copy)
         ] {
-            let (e, f) = banks(20, bins - 1, true, nb_dct, ignore, dn, ddn);
-            let tag = format!("nb_dct={nb_dct} ig={ignore} d={dn} dd={ddn}");
+            let (e, f) = banks_band(nb_bins, bins - 1, is_log, nb_dct, ignore, dn, ddn, band);
+            // Non-vacuity, twice over: the two `nb_bins 4000` rows must ACTUALLY have
+            // collapsed to the raw-band fallback (else they are just more log+mel rows),
+            // and the fallback's width must be the BANDED `end-beg+1`, not the full 65 --
+            // which is exactly the evidence that `beg_freq > 0` on those rows.
+            assert_eq!(
+                f.is_mel(),
+                nb_bins == 20,
+                "fallback expectation wrong for nb_bins={nb_bins}"
+            );
+            if !f.is_mel() {
+                assert_eq!(
+                    f.nb_filters(),
+                    49,
+                    "banded fallback width (beg 8 .. end 56)"
+                );
+            }
+            let tag = format!(
+                "nb_bins={nb_bins} log={is_log} nb_dct={nb_dct} ig={ignore} d={dn} dd={ddn}"
+            );
             let efb = e.apply_filter_bank(&p64);
             let ffb = f.apply_filter_bank(&p, t, bins);
             let r = max_rel(&efb, &ffb);
@@ -834,12 +897,48 @@ mod tests {
                 "SDC delta is not the unconditional n=3 kernel (diverged at {i})"
             );
         }
-        // The clobber: statics occupy [0, nb) but the SDC block starts at width - 7*nb
-        // = nb - 1, so exactly ONE static (the last, c_{nb-1}) is overwritten. Compare
-        // against the same bank's own statics: cols 0..nb-1 survive, col nb-1 does not.
+        // (2) THE CLOBBER, as a VALUE assert. The non-ignoreFirst SDC twin keeps ALL nb
+        // statics in `[0, nb)` and starts its 7*nb block at col nb; the ignoreFirst one
+        // is exactly one column narrower and starts at `width - 7*nb = nb-1`, i.e. it
+        // writes the SAME block ONE COLUMN LEFT, over the last static. Everything
+        // follows from that, and each line discriminates a plausible wrong variant:
+        //   cols [0, nb-1)   statics c_0..c_{nb-2}, IDENTICAL in both -- a
+        //                    drop-the-FIRST-static variant (branch B's rule misapplied
+        //                    here) would shift these and fail;
+        //   col   nb-1       the FIRST extracted SDC column (== twin's col nb), NOT the
+        //                    last static c_{nb-1} (== twin's col nb-1) -- a no-clobber
+        //                    variant would fail;
+        //   cols [nb, width) the rest of the block, shifted left by one.
         let nb = 4usize;
-        let col0 = o3.cols - 7 * nb;
-        assert_eq!(col0, nb - 1, "SDC block starts at nb-1 under ignoreFirst");
+        let (_, keep) = banks(20, bins - 1, true, 4, false, -3, 0);
+        let ok = keep.apply_dct(&keep.apply_filter_bank(&p, t, bins));
+        assert_eq!(ok.cols, nb + 7 * nb, "non-ignoreFirst SDC width");
+        let mut clobbered = 0usize;
+        for r in 0..t {
+            for c in 0..nb - 1 {
+                assert_eq!(
+                    o3.get(r, c).to_bits(),
+                    ok.get(r, c).to_bits(),
+                    "leading static c_{c} should survive the clobber (row {r})"
+                );
+            }
+            for c in nb - 1..o3.cols {
+                assert_eq!(
+                    o3.get(r, c).to_bits(),
+                    ok.get(r, c + 1).to_bits(),
+                    "SDC block is not shifted one column left at ({r},{c})"
+                );
+            }
+            if o3.get(r, nb - 1).to_bits() != ok.get(r, nb - 1).to_bits() {
+                clobbered += 1;
+            }
+        }
+        assert!(
+            clobbered > t / 2,
+            "clobber is vacuous: the first SDC column already equals the last static on \
+             {} of {t} rows",
+            t - clobbered
+        );
     }
 
     #[test]

@@ -409,7 +409,9 @@ budget to `0.001x`, confirmed the assertion fails, reverted -- see the task repo
 mutation is Task 10's mutation-battery item 7).
 
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
-R5):** future local runs of this exact recipe are expected to land within:
+R5).** SUPERSEDED for the memory half -- see Phase 10's f32-mel section (the widen is deleted; the
+SAD memory bound is now <= 0.85x of exact, measured 0.743x). Future local runs of this exact recipe
+are expected to land within:
 - SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
   widening tax above is real and expected, not a regression signal up to this ratio). HEADROOM
   NOTE: the 1.4x ceiling sits only ~9-10% above the measured 1.22-1.28x maxrss ratios, and the
@@ -1062,7 +1064,8 @@ exact path keeps `layers_output` whether or not a backward follows). Reported, n
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5),** the phase-7 local-vs-CI split: future local runs of this recipe are expected at fast-vs-exact
 wall speedup >= 3.5x on every row, causal-fast-vs-BLSTM-fast >= 1.3x, and fast maxrss within
-1.3x of the ~68 MB plateau. A reading meaningfully below these (not within the ranges above, which
+1.3x of the ~68 MB plateau (SUPERSEDED -- see Phase 10's f32-mel section: the plateau is now
+~42 MB). A reading meaningfully below these (not within the ranges above, which
 already carry headroom) is a FINDING to investigate; there is no automated enforcement.
 
 ## Phase 10 -- the `lre_sad_v2` lineage (Task 4)
@@ -1370,7 +1373,7 @@ macOS 26.5.2, `cargo build --release` (LTO on), `--release` test profile.
 WHERE THE DELTAS GREW AND WHERE THEY DID NOT, mechanism-first (this is the interesting part, not
 the bookkeeping):
 
-- **The front-end pins grew ~4-6x** and are the only re-pinned numbers. f32 error now accumulates
+- **The front-end pins grew ~3-6x** (3.28x to 5.94x across the four re-measured numbers) and are the only re-pinned numbers. f32 error now accumulates
   through the mel triangle dots, the DCT product AND the delta/delta-delta regressions rather than
   entering only via the periodogram -- the phase-7 bridge did the whole tail in f64.
 - **The DC-offset branch did NOT move** (rel 5.704e-4 -> 5.719e-4, abs identical to 4 figures).
@@ -1387,6 +1390,13 @@ the bookkeeping):
   unexplained MOVE there would have meant the change leaked where it has no business being.
 - **The phase-9 causal posteriors grew ~1.9x** (4.13e-6 -> 7.740e-6, mamba; slstm 1.40e-6), inside
   the existing 1e-4 pin at ~13x headroom, with `max_dt` still exactly 0.0.
+- **The remaining fast suites are structurally unaffected**, for the same kind of reason the LID
+  row is, and are named here so their absence from the table is a statement rather than an
+  omission: `phase7_fast_nn.rs` drives `FastBlstm` on synthetic in-memory matrices and never
+  constructs a `FastPipeline`; `phase7_bench.rs` and the phase-8 `stream` CLI legs assert
+  wall-clock budgets and output FORMATTING, not feature values; and every phase-8/9 streaming
+  bit-equality leg compares fast-vs-fast, so both sides move together by construction. All were
+  re-run green and UNEDITED.
 
 ### The corpus metric tiers -- re-run locally, all deltas EXACTLY 0.0
 
