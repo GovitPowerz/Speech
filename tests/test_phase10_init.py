@@ -76,8 +76,17 @@ REF = Path("tests/reference_data/phase4d")
 # literal -- and `test_the_rust_and_python_defaults_agree` pins the first two together.
 SIZED_BACKBONE_UNITS = 45
 
-# (out, fin, B, L): the degenerate 1x1, the FD grid's two-layer shape, a wide fan-in.
-SHAPES: tuple[tuple[int, int, int, int], ...] = ((1, 1, 1, 1), (4, 5, 8, 2), (2, 3, 4, 1), (3, 7, 8, 1))
+# (out, fin, B, L): the degenerate 1x1, the FD grid's two-layer shape, a wide fan-in, and a
+# THREE-layer shape.
+#
+# The L=3 row is not decoration. Every other shape here stops at `backbone_layers <= 2`,
+# where the deeper-layer chain is a ONE-element list and "reverse the deeper layers" is a
+# no-op -- so the parametrized reconstruction pin below was structurally blind to that
+# permutation, and `test_reconstruction_rejects_a_backbone_layer_swap` was its SOLE
+# detector (the phase-10 mutation battery's item 2b: 1 failed / 46 passed). With this row
+# the same mutation fails the pin too (MEASURED: 3 failed / 55 passed), so the permutation
+# has two independent catchers and neither is load-bearing alone.
+SHAPES: tuple[tuple[int, int, int, int], ...] = ((1, 1, 1, 1), (4, 5, 8, 2), (2, 3, 4, 1), (3, 7, 8, 1), (3, 5, 4, 3))
 
 
 # ------------------------------------------------------------------------------------- #
