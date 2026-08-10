@@ -22,7 +22,8 @@
 //!   with each layer's TIME direction flipped, and the per-layer sub-sampling still runs
 //!   on natural-order rows. Reproduced by `super::cells::cell_stack_forward(.., reverse
 //!   = true)`, which is the causal driver with one flag -- not a second copy.
-//! - `nn/blstm.rs::feed_forward_backward_overlap` (`:1928-2083`): the windowed OVERLAP
+//! - `nn/blstm.rs::feed_forward_backward_overlap` (`:1928-2083`, and see the CITATION
+//!   OFFSET note on [`FastBiCell::feed_forward_overlap`]'s table): the windowed OVERLAP
 //!   driver, reproduced FRESH in [`FastBiCell::feed_forward_overlap`] (see its docs for
 //!   the term-by-term correspondence and why it is a fresh loop rather than a call into
 //!   `FastBlstm::overlap_window_step`).
@@ -406,6 +407,16 @@ impl FastBiCell {
     /// Overlapping-window forward accumulation, the f32 twin of the FORWARD half of
     /// `BLSTMNeuralNetwork::feedForwardBackwardOverLap`
     /// (`nn/blstm.rs::feed_forward_backward_overlap`, `:1928-2083`).
+    ///
+    /// CITATION OFFSET, stated once for every `nn/blstm.rs` line number in this doc and the
+    /// table below (including the `:1928-2083` span above and the one in this module's own
+    /// header): they are AS OF TASK 7 (`c19bfac`). Task 9's retention work (`471c0be`)
+    /// inserted 55 lines above `:1963`, so ADD +55 to read them at HEAD -- e.g. the nominal
+    /// length block cited as `:1964-1973` lives at `:2019-2028` today. The numbers were left
+    /// as-authored rather than renumbered because they will drift again; the SYMBOL names
+    /// (`feed_forward_backward_overlap`, `window_begin`, `window_end`) are the stable handles,
+    /// and replacing line citations with symbol/anchor references tree-wide is a named
+    /// follow-on in `RESULTS.md`.
     ///
     /// A FRESH loop, deliberately (spec S5, approach A): it does NOT call
     /// `FastBlstm::overlap_window_step`, because that kernel is shared with

@@ -1096,6 +1096,119 @@ wall speedup >= 3.5x on every row, causal-fast-vs-BLSTM-fast >= 1.3x, and fast m
 ~42 MB). A reading meaningfully below these (not within the ranges above, which
 already carry headroom) is a FINDING to investigate; there is no automated enforcement.
 
+## Phase 10 -- the CfC cell (Tasks 1/2/3)
+
+The exact-f64 CfC record. NOTHING HERE WAS RE-MEASURED FOR THIS SECTION: every value is
+transcribed from the committed test that pins it, and each row carries its source, so this
+section can be re-derived by reading those files rather than by re-running anything. The cell
+itself is `src/rust/src/nn/cells/cfc.rs`; the tiers are the phase-9 harnesses reused unchanged
+(both are cell-agnostic, which is why the phase-9 filenames carry phase-10 rows). LINE NUMBERS
+BELOW ARE AS OF THIS COMMIT and every one is paired with the SYMBOL it points at -- prefer the
+symbol when they disagree (the phase's own citation-drift lesson: a later task inserting lines
+above a cited block silently invalidates the number, never the name).
+
+### The FD tier -- `src/rust/tests/phase9_cell_grad.rs::cfc_backward_matches_central_difference`
+
+Central differences vs the hand-derived analytic backward, per shape x 3 seeds, at
+`CFC_EPS = 1e-5` (`phase9_cell_grad.rs:754`; the value is MEASURED -- the doc records the
+`max_rel` column falling ~3 orders MONOTONICALLY as eps grows `1e-8 -> 1e-4`
+(`9.9e-3 / 1.9e-3 / 7.1e-5 / 1.7e-5 / 8.3e-6`), which is the roundoff signature; a wrong
+adjoint term is MULTIPLICATIVE and would be eps-INVARIANT).
+
+| shape `(t, in, out, B, L)` | `max_rel` (worst of 3 seeds) | `rel_pin` | `max_rel_major` | `major_pin` | resolvable |
+|---|---|---|---|---|---|
+| `(1, 3, 2, 4, 1)` | 8.126e-9 | 8.2e-8 | 8.126e-9 | 8.2e-8 | 46 of 54 |
+| `(7, 3, 2, 4, 1)` | 1.168e-7 | 1.2e-6 | 7.823e-9 | 7.9e-8 | 54 of 54 |
+| `(11, 5, 4, 8, 2)` | 2.398e-7 | 2.4e-6 | 2.653e-8 | 2.7e-7 | 260 of 260 |
+| `(23, 7, 3, 8, 1)` | **1.720e-5** | **1.8e-4** | **5.530e-8** | 5.6e-7 | 169 of 169 |
+
+Sources: the measured column is the doc block at `phase9_cell_grad.rs:764-770`; the pins are
+the four `CfcCase` literals at `:809-844`; the resolvable counts are the same doc block, and
+the test asserts them as an EXACT equality (`resolvable_floor == resolvable_structural`,
+`:868-869`) rather than a two-sided band, because nothing lands in the near-zero bucket by
+magnitude alone.
+
+- **The DISCRIMINATING bound is `max_rel_major`** (restricted to weights whose analytic
+  gradient is at least `1e-4` of the pack maximum): MEASURED at **`<= 5.530e-8`** across every
+  shape and seed, pinned at `5.6e-7` -- i.e. ~180x under the `1e-4` STOP threshold that the
+  test asserts in-body before running anything (`:851-857`).
+- **THE ONE PIN ABOVE 1e-4 IS DECLARED, NOT BURIED**: `t=23`'s `rel_pin` is `1.8e-4`, above
+  the STOP threshold and deliberately so (the two mamba rows set the precedent). It is fixed
+  by ONE weight on ONE seed (seed 2, `w[79]`) whose analytic derivative is `1.84e-6` -- `1e-6`
+  OF the pack maximum 1.79 -- so its relative error is the central-difference floor over a
+  near-zero denominator. `rel_pin` is explicitly NOT a sanctioned error budget; `major_pin` is
+  what a wrong adjoint trips, and that is what the in-test STOP guards (`:851-857`).
+- **THE NEAR-ZERO BUCKET IS EXACTLY 0.0, and is asserted as an EQUALITY** (`:884-897`) --
+  STRONGER than sLSTM's ~1e-10 floor. At `T > 1` the bucket is EMPTY (every weight
+  resolvable); at `T = 1` it holds exactly the `B*H` dead `W_bb` state columns, and perturbing
+  one cannot move the loss by a single bit (it multiplies `h_{-1} = 0`), so `L(w+eps)` and
+  `L(w-eps)` are BIT-IDENTICAL and the central difference is `0.0` against an analytic `0.0`.
+  The grid-wide absolute pins are `1e-12` near-zero / `1.4e-9` all-weights (`:878-879`).
+- **THE `T = 1` DEAD BLOCK IS PINNED SEPARATELY, IN THE CELL'S OWN UNIT TIER**:
+  `nn::cells::cfc::tests::backbone_state_columns_are_gradient_dead_at_t1` (`cfc.rs:1155-1167`)
+  addresses the `B*H` state slots of `W_bb0` by flat arithmetic derived HERE (row-major
+  `wlo + j*(i+o) + k`, `k in [in, in+out)`), asserts `== 0.0` at `T = 1` and NON-zero at
+  `T = 2` in the same body. NOTHING ELSE is dead: there is no CfC analogue of sLSTM's `b_i`
+  non-identifiability, because `tanh`/`sigmoid` carry no scale invariance for a bias shift to
+  be absorbed into.
+
+### The seam tier -- `tests/pyo3/test_phase9_seam.py`
+
+Corpus-level `grad_check` through `speech_rs.Engine` on the committed synthetic fixtures
+(`tests/reference_data/phase9/`, geometry `backbone_units 6` / `backbone_layers 1` per the
+manifest -- `B != H` DELIBERATELY, so a transposition cannot hide). Pack lengths from the same
+manifest: `cfc_bidirectional` **1387**, `cfc_forward` **717**, and the Mode-7 Twin's LID net
+**517** beside a 537-element SAD net.
+
+| fixture | eps | measured worst scaled error | pin | source |
+|---|---|---|---|---|
+| `cfc_bidirectional` | 1e-5 | **3.138e-7** | 3.2e-6 | `GRAD_CHECK_PINS`, `test_phase9_seam.py:387` |
+| `cfc_forward` | 1e-5 | **1.169e-8** | 1.2e-7 | `GRAD_CHECK_PINS`, `:388` |
+| `twin_mode7_lid_cfc` | 1e-4 | **2.630e-9** | 2.7e-8 | `TWIN_MODE7_ROWS`, `:747` |
+| `cfc_bidirectional` (block probe) | 1e-5 | 1.417e-8 | 1.5e-7 | `BLOCK_PROBE_PINS`, `:421` |
+| `cfc_forward` (block probe) | 1e-5 | 1.027e-8 | 1.1e-7 | `BLOCK_PROBE_PINS`, `:422` |
+
+Every pin is `measured * 10` and every one is under the `1e-4` STOP. The two epsilons are
+MEASURED, not inherited: the CfC SAD rows reuse the shared `sad_epsilon 1e-5` on the evidence
+of a 5-point sweep recorded in the file (`bi 5.92e-6 / 1.70e-7 / 3.14e-7 / 3.13e-5 / 3.13e-3`,
+`fwd 2.81e-6 / 3.41e-7 / 1.17e-8 / 1.17e-6 / 1.17e-4` -- a textbook U), while the CfC Twin
+takes its own `1e-4` (`manifest.json: measured.twin_mode7_cfc_epsilon`) because its LID
+gradient is ~5.6e-5, ~60x the sLSTM Twin's, so its optimum sits one decade lower.
+
+WHAT THE SEAM TIER ADDS THAT THE FD TIER CANNOT: the FD tier drives `CfcLayer` DIRECTLY, so
+`CellLayer::Cfc`'s forward / backward / derivative-harvest arms were compiled-but-never-
+executed; the Engine path runs a real corpus forward AND backward THROUGH the enum. Verified
+by mutation: each single-arm swap fails 5 legs. The consistent DOUBLE swap that stays
+self-consistent here is closed by Task 6's independent `FastCfc` implementation instead (see
+the fast-parity rows), which is the note now carried in the seam file's own docstring.
+
+### Sizing (spec S1.4) -- both closed forms, PINNED not prose
+
+`tests/test_phase10_init.py` computes both lineages' pack lengths from the block arithmetic
+and asserts the closed forms directly (`test_lineage_pack_lengths_are_the_documented_arithmetic`,
+`:428-437`):
+
+| lineage | LSTM pack | CfC closed form | at `B = 45` | vs LSTM |
+|---|---|---|---|---|
+| v1 (`23,24,24`, tail 46) | **33671** (the committed tuple-A length, independently reached) | `620*B + 935` | 28835 | **-14.36%** |
+| v2 (`11,24,24`, tail 22) | **24431** | `524*B + 911` | **24491** | **+0.25%** |
+
+`CFC_DEFAULT_BACKBONE_UNITS = 45` is therefore ONE default serving BOTH lineages, and both
+halves of that claim are asserted rather than argued: `B = 45` is v2's OPTIMUM (`rel[45]` is
+strictly below `rel[44]` and `rel[46]`, `test_the_default_matches_the_v2_lstm_pack_within_15_percent`,
+`:440-449`) AND the SMALLEST integer inside v1's +-15% band (`B = 44` is asserted OUT,
+`test_the_default_also_leaves_the_v1_lineage_in_band`, `:452-460`). v1's own optimum, recorded for completeness, is
+`B = 53 -> 33795` (+0.37%). Forward-only runs shed one stack and the MLP's doubled input on
+both sides, so the ratio barely shifts: v2 fwd LSTM 12239 vs CfC 12269 (+0.25%), v1 fwd LSTM
+16871 vs CfC 14453 (-14.33%).
+
+The Python builder emits the S1.2 flat order DIRECTLY (CfC has no structured/nnet domain to
+build, spec S1.3), so the layout risk the LSTM path retires by reusing the packer is retired
+here by WHOLE-PACK BLOCK-BY-BLOCK RECONSTRUCTION pins plus two shear companions -- and what
+those prove is block ORDER / LENGTH / FAN, NOT orientation (unobservable for iid init; He's
+asymmetric fan is what makes fans pinnable at all, which is why parametrizing over both
+schemes is load-bearing).
+
 ## Phase 10 -- the `lre_sad_v2` lineage (Task 4)
 
 The v2 record: a ONE-VARIABLE fork of the phase-6/9 SAD arm that retires the
@@ -1937,6 +2050,17 @@ stopped, with the reason and the shape of the work.
   (`z_cache`/`backbone_pre`/`backbone_post`/`heads`) each retain `T x 6-7 O` backward-only
   buffers unconditionally; `CellLayer::set_retain_cache`'s no-op arms are the SAFE direction
   (always retain), not an absence of work. The win is real and smaller than Mamba's.
+- **Symbol/anchor citations instead of line numbers into LIVE files.** This phase hit the
+  failure twice in one task: Task 7's `fast/bicell.rs` overlap table cites `nn/blstm.rs` line
+  spans that Task 9 silently invalidated (it inserted 55 lines above the cited block, so every
+  number there needs +55 at HEAD -- now stated in the file rather than renumbered), and Task
+  12's own first draft of the CfC section above cited `test_phase9_seam.py:379` when its own
+  docstring edit had already pushed those pins to `:387`. Line citations into files this repo
+  keeps editing decay by construction; the pattern that does not is what the CfC section above
+  uses -- name the SYMBOL (`GRAD_CHECK_PINS`, `feed_forward_backward_overlap`,
+  `cfc_backward_matches_central_difference`) and treat the number as a convenience. Converting
+  the existing ones tree-wide is mechanical but wide, so it is named here rather than done in
+  passing; citations into `legacy/` C++ sources are NOT affected (that tree never moves).
 - **A sub-unit gain rung for the streaming crossing sweep** (Task 11, recorded as a new
   observation). The `mamba` plain leg measures its 16 interior boundaries over a posterior
   span of `[0.0000, 1.0000]` at the NEUTRAL lever -- nothing swept it there, the committed
