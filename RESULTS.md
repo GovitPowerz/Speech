@@ -1827,29 +1827,59 @@ with a different (untrained, and irrelevant) weight pack, which is what makes th
 comparable. Local one-off measurement, same posture and license discipline as every other
 corpus bench row here: not a committed automated test, no automated enforcement.
 
-### The goldens are a NON-VACUOUS arbiter here
+### The golden evidence, SPLIT -- the two halves are not equally covered
 
-R2 names the committed golden suite as the arbiter of the behaviour-free claim, and in this
-case the suite genuinely exercises the skipped path rather than merely not contradicting it.
-`BackPropagationActivated false` is carried by, among others, `phase0/1_worker_1.config` (the
-real 2015 production config), `phase4a/tier2_spectral.config` + `tier2_gradcheck.config`,
-`phase2b/signal.config`, `phase0bii/lid.config`, seven `phase4b` Twin configs, both
-`phase4d` tuple-A/tuple-B configs plus both `parity_*` configs, and the two `phase9` Mode-7
-Twins. All of those now run with the retention OFF and stay byte-identical (1217/0/2, against
-1195/0/2 at base -- the delta is exactly this task's new unit legs).
+R2 names the committed golden suite as the arbiter, and it earns that name for ONE of the two
+changes here. Splitting them is the honest accounting.
 
-### What is NOT gated
+**The `layers_output` half IS live-golden-exercised.** Determined by PARSING each fixture
+(the config parser is last-wins, and a file-level `rg` is blind to a later override -- an
+error this section previously made): `BackPropagationActivated` resolves FALSE on
+`phase0/1_worker_1.config` (the real 2015 production config), `phase0bii/lid.config`,
+`phase2b/signal.config`, fifteen `phase4b` configs (`lid5`, `twin_e2e`, `twin_mode0` through
+`twin_mode7` incl. `twin_mode0_concat` / `twin_mode7_ppm1` / `_ppm2`), all four `phase4d`
+configs (`tupleA`/`tupleB_1_worker_1` + both `parity_*`), and the SAD net of both `phase9`
+Mode-7 Twins. Every one now runs with the retention OFF and stays byte-identical.
+CORRECTION: `phase4a/tier2_spectral.config` and `tier2_gradcheck.config` were previously
+listed here and do NOT belong -- both carry a later Task-9 override block setting
+`BLSTM_BackPropagationActivated true`, so they resolve TRUE and take the retaining path.
 
-sLSTM, CfC and the legacy LSTM keep no whole-sequence cache of their own -- their backwards
-read state back out of `layers_output`, which the network-level flag already covers -- so
-`CellLayer::set_retain_cache` is a documented no-op on those three arms. A no-op is the SAFE
-direction (it means "always retain"), so a cell that grows a cache later and forgets the arm
-loses memory, never correctness. The fast f32 path is unaffected: it never built these caches.
+FREE PER-NET-GRANULARITY EVIDENCE, unclaimed until now: five committed configs are MIXED --
+`phase4b/twin_train` + `twin_train_ns` and `phase9/twin_mode7_lid_{slstm,cfc}` (SAD false,
+LID true) and `phase4c/genome_twin` (SAD true, LID false). Inside ONE bag, one net retains
+and the other does not, and the goldens still match byte for byte -- so the flag is genuinely
+PER NET and does not leak across the pair.
+
+**The rolling-buffer half has NO committed golden, and that must be said plainly.** Every
+backprop-false fixture above runs the legacy LSTM cell, and every committed Mamba config
+(`phase9/mamba_{bidirectional,forward}`) is backprop-TRUE, so no golden ever executes the
+`retain_cache == false` indexing. Its arbiters are three purpose-built legs, in ascending
+strength: `nn::cells::mamba::tests::forward_is_bit_identical_without_the_cache` (bare cell,
+`T = 1 / 2 / 9`); `nn::blstm::inference_only_tests::the_forward_is_bit_identical_either_way`
+(the real net, all four cells); and the headline --
+`tests/pyo3/test_phase9_seam.py::test_turning_backprop_off_does_not_move_the_forward`, which
+runs the EXACT Mamba cell over a real corpus file through `speech_rs.Engine` with the rolling
+buffers ACTIVE and asserts `results_matrix` bit-identical to the retaining run. That last leg
+is the closest thing to a golden this half has, and it is the one to point at.
+
+### What is NOT gated -- and why that is a follow-on, not a nothing
+
+This phase gates MAMBA's cache only. The other three cells are NOT cache-free: `LstmLayer`
+holds `gates`/`cells_in`/`cell_states`, `SlstmLayer` holds
+`gates`/`cell_states`/`norm_states`/`m_states`, `CfcLayer` holds
+`z_cache`/`backbone_pre`/`backbone_post`/`heads` -- each on the order of `T x 6-7 O`, all
+backward-only, all still retained unconditionally. Gating them is a NAMED FOLLOW-ON with a
+real (if smaller than Mamba's `T x d_inner d_state`) win. `CellLayer::set_retain_cache` is a
+no-op on those arms because this task did not measure or pin them, NOT because there is
+nothing there; a no-op is simply the safe direction, since it means "always retain". The fast
+f32 path is unaffected either way: it never built any of these caches.
 
 ### The loud bails
 
 A backward after a non-retaining forward PANICS with a named message, in both places
-(`MambaLayer::feed_backward`, `Network::drive_backward`) -- never a silently wrong gradient.
+(`MambaLayer::feed_backward`, and `Network::drive_backward` -- the single choke point behind
+`feed_backward`, `feed_backward_reverse` and `feed_backward_double`, all three named in the
+message) -- never a silently wrong gradient.
 Both are pinned by `#[should_panic]` legs with a retaining contrast beside them, and by the
 R6 clone legs (a per-lane bag clone under the flag carries EMPTY caches, asserted at the cell,
 the network and the `BlstmNetwork` level). Inverting the gating (S9.4 mutation 7) fails 7 Rust

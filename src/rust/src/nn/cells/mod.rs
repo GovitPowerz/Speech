@@ -88,15 +88,20 @@ impl CellLayer {
     ///
     /// An INHERENT method on the concrete enum, NOT an eleventh `Layer` method: the trait
     /// stays exactly the ten the phase-9 seam defined, and `Network<L>` never learns that
-    /// retention exists (it owns its own `retain_layers_output` flag, which is what covers
-    /// the OTHER three cells -- their backwards read state back out of `layers_output`,
-    /// so gating them is the network's job, not the cell's).
+    /// cell-level retention exists (it owns its own `retain_layers_output` flag, a separate
+    /// axis covering the inter-layer buffers).
     ///
-    /// Only [`MambaLayer`] carries a whole-sequence forward cache of its own (`h` and
-    /// `abar` are each `T x (d_inner d_state)`), so it is the only arm that does anything
-    /// here; the other three are deliberate, documented no-ops. A no-op is the SAFE
-    /// direction -- it means "always retain", so a cell that grows a cache later and
-    /// forgets this arm loses memory, never correctness.
+    /// SCOPE, stated exactly: this phase gates MAMBA's cache only, because that is the one
+    /// the phase-9 bench measured as visibly expensive (`h` and `abar` are each
+    /// `T x (d_inner d_state)`). The other three cells are NOT cache-free -- every one of
+    /// them carries per-timestep forward caches the backward reads:
+    /// [`LstmLayer`] `gates`/`cells_in`/`cell_states`, [`SlstmLayer`]
+    /// `gates`/`cell_states`/`norm_states`/`m_states`, [`CfcLayer`]
+    /// `z_cache`/`backbone_pre`/`backbone_post`/`heads`, each on the order of `T x 6-7 O`.
+    /// Gating those is a NAMED FOLLOW-ON with a real (if smaller) win, not a no-op because
+    /// there is nothing to do. Their arms here are no-ops only because this task did not
+    /// measure or pin them -- and a no-op is the SAFE direction, since it means "always
+    /// retain": a cell whose arm is never filled in loses memory, never correctness.
     pub fn set_retain_cache(&mut self, retain: bool) {
         match self {
             CellLayer::Lstm(_) | CellLayer::Slstm(_) | CellLayer::Cfc(_) => {}

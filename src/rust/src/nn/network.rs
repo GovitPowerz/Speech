@@ -555,7 +555,7 @@ impl<L: Layer> Network<L> {
         // the promise checkable.)
         assert!(
             self.retain_layers_output,
-            "Network::feed_backward on a network constructed inference-only \
+            "Network::feed_backward/_reverse/_double on a network constructed inference-only \
              (retain_layers_output = false, phase-10 spec S7): the forward dropped its \
              intermediate layer outputs, so no gradient can be folded here. This net was \
              built with BackPropagationActivated off; turn backprop on for it (or call \
