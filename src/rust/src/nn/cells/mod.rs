@@ -82,6 +82,29 @@ pub enum CellLayer {
     Cfc(CfcLayer),
 }
 
+impl CellLayer {
+    /// Phase 10 spec S7: propagate the inference-only retention flag to whichever cells
+    /// keep a backward-only cache of their own.
+    ///
+    /// An INHERENT method on the concrete enum, NOT an eleventh `Layer` method: the trait
+    /// stays exactly the ten the phase-9 seam defined, and `Network<L>` never learns that
+    /// retention exists (it owns its own `retain_layers_output` flag, which is what covers
+    /// the OTHER three cells -- their backwards read state back out of `layers_output`,
+    /// so gating them is the network's job, not the cell's).
+    ///
+    /// Only [`MambaLayer`] carries a whole-sequence forward cache of its own (`h` and
+    /// `abar` are each `T x (d_inner d_state)`), so it is the only arm that does anything
+    /// here; the other three are deliberate, documented no-ops. A no-op is the SAFE
+    /// direction -- it means "always retain", so a cell that grows a cache later and
+    /// forgets this arm loses memory, never correctness.
+    pub fn set_retain_cache(&mut self, retain: bool) {
+        match self {
+            CellLayer::Lstm(_) | CellLayer::Slstm(_) | CellLayer::Cfc(_) => {}
+            CellLayer::Mamba(l) => l.set_retain_cache(retain),
+        }
+    }
+}
+
 impl Layer for CellLayer {
     fn feed_forward(&mut self, input: &Array2<f64>, output: &mut Array2<f64>, last_layer: bool) {
         match self {

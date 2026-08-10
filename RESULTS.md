@@ -1754,3 +1754,103 @@ subset nets. A threshold sweep confirms there is nothing to find -- rising/falli
 segments. The DISCRIMINATING parity evidence for this cell is the committed-fixture tier
 above (3 interior boundaries at `max_dt` 0.0) and the streaming tier (4 boundaries, bit-equal),
 not this run.
+
+## Phase 10 -- inference-only retention gating (Task 9, spec S7)
+
+The phase's ONE adjudicated behaviour-free touch inside `nn/` but outside `nn/cells/`. Two
+backward-only retentions -- Mamba's per-timestep `MambaCache` and `Network::layers_output` --
+are switched off at CONSTRUCTION for any `BlstmNetwork` whose backward can never run, closing
+the phase-9 exact-Mamba memory finding.
+
+### The condition, and the one it deliberately is not
+
+`BlstmNetwork::from_config` sets `inference_only = !BackPropagationActivated`, once, for the
+life of the net. Soundness is structural, not empirical: every backward inside `BlstmNetwork`
+funnels through `feed_forward_backward_plain` / `_mlp` (the four windowed drivers call one of
+those two per window), both gated on `back_propagation_activated && target.nrows() > 0`, and
+`feed_backward` / `feed_backward_mlp` are PRIVATE. So `!BackPropagationActivated` proves the
+backward unreachable, statically, at construction.
+
+That is a STRICT SUBSET of spec S7's stated condition (backprop active AND references
+present). Reference presence is a per-corpus-item property decided long after construction, so
+it is deliberately unused: a backprop-on net with no references keeps retaining, which costs
+memory and never correctness. The asymmetry is the safe one.
+
+`Neural_Networks_BackPropagation_Epochs` is NEVER read here -- the F11 lesson. `Epochs 0` +
+`BackPropagationActivated true` is exactly the modern loop's seam shape (one fold at theta,
+gradient harvested), and gating on `Epochs` would silently zero every gradient
+`drivers/train.py`'s SMORMS3 loop reads. `tests/pyo3/test_phase9_seam.py::
+test_epochs_zero_with_backprop_on_still_returns_a_real_gradient` is the standing regression.
+
+### Why "skip the fill" alone was not enough
+
+Skipping the cache ASSIGNMENT moved peak RSS from 109.2 to 81.4 MB -- one layer's worth, not
+the whole gap. `getrusage` reports a high-water mark, and `abar`/`h` (each
+`T x (d_inner d_state)`, ~11.5 MB per layer on this recipe) are LIVE during the forward
+whether or not they are kept afterwards. But neither is read by the forward at a distance:
+`abar` is write-only there and `h` is read only at `t-1`. So under `retain_cache == false`
+they shrink to rolling buffers (1 row / 2 alternating rows) and the recurrence runs on the
+same numbers, in the same order, from the same reads. The retain path's indexing is
+untouched. `nn::cells::mamba::tests::forward_is_bit_identical_without_the_cache` is the pin
+(3 sequence lengths incl. `T = 1` and `T = 2`); a mutation collapsing `tp` to `th` fails it.
+
+### The measurement (spec S10.4)
+
+`speech bench --repeat=1 --path=exact`, 3 INDEPENDENT fresh processes per row (the phase-7/9
+recipe, so `maxrss` is a clean per-process high-water mark), ONE 75 s mono 8 kHz corpus wav
+(runtime sorted-first, no filename recorded), `lre_sad.toml` under the `cell_overlay(cell,
+forward)` architecture overlay -- i.e. the phase-9 S8.7 geometry -- with `BackPropagationActivated
+false`, `Epochs 0`, `numOuterThreads 1`. Weights are a runtime `init_weights` seed pack rather
+than a trained checkpoint: peak RSS is weight-INDEPENDENT, and this keeps the row reproducible
+without a checkpoint. Apple M4 Pro (arm64), macOS 26.5.2, `cargo build --release -j 4`.
+
+| row | maxrss_mb (3 runs) | mean | wall_s mean |
+|---|---|---|---|
+| mamba / forward, exact -- BEFORE (base `83b56aa`) | 109.875 / 107.766 / 109.922 | **109.188** | 0.117746 |
+| mamba / forward, exact -- retention skip only | 82.453 / 82.000 / 79.812 | 81.422 | 0.118049 |
+| mamba / forward, exact -- AFTER (retention skip + rolling `h`/`abar`) | 59.969 / 57.844 / 57.844 | **58.552** | 0.112976 |
+| slstm / forward, exact -- CONTROL, same recipe + build (untouched by T9) | 55.625 / 55.594 / 55.547 | 55.589 | 0.097868 |
+
+(The AFTER and CONTROL rows are the FINAL re-measurement on the finished build, taken on an
+otherwise idle box; the intermediate "retention skip only" row is the one-variable probe that
+motivated the rolling buffers.)
+
+**1.86x less peak RSS on the exact-Mamba row (109.19 -> 58.55 MB), and the ~2x cell penalty
+is gone**: Mamba now sits 3.0 MB above the sLSTM control on the identical recipe, where before
+it sat ~53 MB above. This closes the phase-9 S8.7 memory finding ("the one place a cell choice
+is visibly expensive") -- with the phase-10 Task-7 caveat still standing that the ~2x was a
+WIDTH effect, invisible at the tiny committed-fixture width. Wall-clock is unmoved (0.1177 ->
+0.1130 s mean, inside the per-row spread); the change frees allocations, it does not add work.
+
+The 109.19 MB BEFORE row reproduces phase 9's 107.82 on the same audio length and geometry
+with a different (untrained, and irrelevant) weight pack, which is what makes the two tables
+comparable. Local one-off measurement, same posture and license discipline as every other
+corpus bench row here: not a committed automated test, no automated enforcement.
+
+### The goldens are a NON-VACUOUS arbiter here
+
+R2 names the committed golden suite as the arbiter of the behaviour-free claim, and in this
+case the suite genuinely exercises the skipped path rather than merely not contradicting it.
+`BackPropagationActivated false` is carried by, among others, `phase0/1_worker_1.config` (the
+real 2015 production config), `phase4a/tier2_spectral.config` + `tier2_gradcheck.config`,
+`phase2b/signal.config`, `phase0bii/lid.config`, seven `phase4b` Twin configs, both
+`phase4d` tuple-A/tuple-B configs plus both `parity_*` configs, and the two `phase9` Mode-7
+Twins. All of those now run with the retention OFF and stay byte-identical (1217/0/2, against
+1195/0/2 at base -- the delta is exactly this task's new unit legs).
+
+### What is NOT gated
+
+sLSTM, CfC and the legacy LSTM keep no whole-sequence cache of their own -- their backwards
+read state back out of `layers_output`, which the network-level flag already covers -- so
+`CellLayer::set_retain_cache` is a documented no-op on those three arms. A no-op is the SAFE
+direction (it means "always retain"), so a cell that grows a cache later and forgets the arm
+loses memory, never correctness. The fast f32 path is unaffected: it never built these caches.
+
+### The loud bails
+
+A backward after a non-retaining forward PANICS with a named message, in both places
+(`MambaLayer::feed_backward`, `Network::drive_backward`) -- never a silently wrong gradient.
+Both are pinned by `#[should_panic]` legs with a retaining contrast beside them, and by the
+R6 clone legs (a per-lane bag clone under the flag carries EMPTY caches, asserted at the cell,
+the network and the `BlstmNetwork` level). Inverting the gating (S9.4 mutation 7) fails 7 Rust
+legs and all 4 phase-10 seam legs.

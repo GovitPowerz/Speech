@@ -617,7 +617,9 @@ impl BlstmNetwork {
 
         let trainer = Rprop::new(cfg.rprop_init);
 
-        Ok(BlstmNetwork {
+        let inference_only = !cfg.back_propagation_activated;
+
+        let mut net = BlstmNetwork {
             cfg,
             forward_network,
             backward_network,
@@ -632,7 +634,60 @@ impl BlstmNetwork {
             overlaps: false,
             input_statistics: InputStatistics::new(),
             trainer,
-        })
+        };
+        // Phase 10 spec S7 -- the ONE construction site, and the ONE condition. See
+        // `set_inference_only` for why `back_propagation_activated` alone is the proof,
+        // and why `Epochs` must never appear here.
+        net.set_inference_only(inference_only);
+        Ok(net)
+    }
+
+    /// Phase 10 spec S7: declare that this network's BACKWARD will never run, so the two
+    /// backward-only retentions (`Network::layers_output` and, for a Mamba stack, the
+    /// per-timestep `MambaCache`) can be dropped at the end of every forward.
+    ///
+    /// THE CONDITION, and why it is sound. Every backward inside this type funnels through
+    /// `feed_forward_backward_plain` / `feed_forward_backward_mlp` -- the four windowed
+    /// drivers (truncate / two-sweeps / overlap / MLP-overlap) all call one of those two
+    /// per window -- and BOTH gate on `back_propagation_activated && target.nrows() > 0`.
+    /// `feed_backward` / `feed_backward_mlp` are PRIVATE, so there is no other way in.
+    /// `!back_propagation_activated` therefore proves the backward is unreachable for the
+    /// whole life of the net, statically, at construction. That is a STRICT SUBSET of the
+    /// spec's stated condition (backprop active AND references present): reference presence
+    /// is a per-corpus-item property decided long after construction, so it is deliberately
+    /// NOT used -- a net with backprop on but no references simply keeps retaining, which
+    /// costs memory and never correctness.
+    ///
+    /// NEVER `Neural_Networks_BackPropagation_Epochs` (the F11 lesson, `IMPROVEMENTS.md`):
+    /// `Epochs 0` + `BackPropagationActivated true` is precisely the modern training loop's
+    /// seam configuration -- one fold at theta that still harvests a gradient. Keying off
+    /// `Epochs` would silently zero every gradient that loop reads.
+    ///
+    /// `true` is the exceptional state; the default (`Network::new` /
+    /// `MambaLayer::new`) is always RETAIN, so anything constructed outside this ctor is
+    /// unaffected. A backward after a non-retaining forward bails loudly rather than
+    /// folding empty buffers.
+    pub fn set_inference_only(&mut self, inference_only: bool) {
+        let retain = !inference_only;
+        for net in [
+            self.forward_network.as_mut(),
+            self.backward_network.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            net.set_retain_layers_output(retain);
+            for cell in net.layers_mut() {
+                cell.set_retain_cache(retain);
+            }
+        }
+        self.output_network.set_retain_layers_output(retain);
+    }
+
+    /// Whether this network was constructed inference-only (spec S7; `false` -- retain --
+    /// unless `BackPropagationActivated` is off).
+    pub fn is_inference_only(&self) -> bool {
+        !self.output_network.retains_layers_output()
     }
 
     /// `getInputSize` (`:177-183`): `_OutputNetwork.getInputSize()` in MLP mode,
@@ -2732,5 +2787,191 @@ mod direction_tests {
         assert!(cfg.is_mlp);
         let net = BlstmNetwork::from_config(cfg).unwrap();
         assert!(net.forward_network.is_none() && net.backward_network.is_none());
+    }
+}
+
+// ==== Phase 10 Task 9 / spec S7: the inference-only construction site ====
+
+#[cfg(test)]
+mod inference_only_tests {
+    use super::*;
+    use crate::nn::cells::CellLayer;
+
+    const IN: usize = 3;
+    const HIDDEN: usize = 2;
+    const CLASSES: usize = 2;
+    const T: usize = 5;
+
+    /// A tiny BIDIRECTIONAL net over `cell`, with `BackPropagationActivated` as the one
+    /// variable. `_TargetEnforcementStep` stays at its default so the backward's target
+    /// path is the ordinary one.
+    fn map_for(cell: &str, backprop: bool) -> IndexMap<String, String> {
+        let mut m: IndexMap<String, String> = IndexMap::new();
+        m.insert("X_LSTMNeuronNb".into(), format!("{IN},{HIDDEN}"));
+        m.insert("X_LSTMSubSampling".into(), "1".into());
+        m.insert(
+            "X_OutputNeuronNb".into(),
+            format!("{},{CLASSES}", 2 * HIDDEN),
+        );
+        m.insert("X_OutputSubSampling".into(), "1".into());
+        m.insert("X_InputNormalizationType".into(), "0".into());
+        m.insert("X_TwoSweeps".into(), "false".into());
+        m.insert("X_BackPropagationActivated".into(), backprop.to_string());
+        if cell != "lstm" {
+            m.insert("X_Cell_Type".into(), cell.into());
+        }
+        m
+    }
+
+    fn net_for(cell: &str, backprop: bool) -> BlstmNetwork {
+        let cfg = BlstmConfig::from_legacy(&map_for(cell, backprop), "X").unwrap();
+        let mut net = BlstmNetwork::from_config(cfg).unwrap();
+        let nb = net.nb_of_weights();
+        let w: Vec<f64> = (0..nb)
+            .map(|k| 0.19 - 0.0037 * ((k % 31) as f64) + 0.0021 * ((k % 5) as f64))
+            .collect();
+        net.set_weights(&w).unwrap();
+        net
+    }
+
+    fn input_seq() -> Array2<f64> {
+        Array2::from_shape_fn((T, IN), |(r, c)| {
+            0.27 + 0.13 * (r as f64) - 0.19 * (c as f64)
+        })
+    }
+
+    fn one_hot() -> Array2<f64> {
+        Array2::from_shape_fn(
+            (T, CLASSES),
+            |(r, c)| if r % CLASSES == c { 1.0 } else { 0.0 },
+        )
+    }
+
+    /// The mamba stack's layer-0 cell, reached through the pub `Network::layers_mut`
+    /// seam the flag threading itself uses.
+    fn mamba_cache_rows(net: &mut BlstmNetwork) -> usize {
+        match &net.forward_network.as_mut().unwrap().layers_mut()[0] {
+            CellLayer::Mamba(l) => l.hidden_states().nrows(),
+            _ => panic!("expected a mamba cell, got a different CellLayer variant"),
+        }
+    }
+
+    /// THE CONDITION, both ways: `BackPropagationActivated` alone decides, at
+    /// construction, for every cell.
+    #[test]
+    fn backprop_off_constructs_inference_only_and_on_does_not() {
+        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+            assert!(
+                net_for(cell, false).is_inference_only(),
+                "{cell}: backprop off must construct inference-only"
+            );
+            assert!(
+                !net_for(cell, true).is_inference_only(),
+                "{cell}: backprop on must retain"
+            );
+        }
+    }
+
+    /// THE F11 GUARD, at the level the lesson lives: the decision must be a pure function
+    /// of `BackPropagationActivated`, so a config carrying `Epochs 0` (the modern loop's
+    /// seam shape) alongside backprop-on still RETAINS. `Epochs` is not even a
+    /// `BlstmConfig` key -- this pins that it stays that way.
+    #[test]
+    fn an_epochs_key_cannot_flip_the_decision() {
+        let mut m = map_for("mamba", true);
+        m.insert("Neural_Networks_BackPropagation_Epochs".into(), "0".into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        assert!(!BlstmNetwork::from_config(cfg).unwrap().is_inference_only());
+    }
+
+    /// The flag reaches BOTH recurrent stacks, the output MLP, and the cells themselves.
+    #[test]
+    fn the_flag_reaches_every_stack_and_the_cells() {
+        let mut net = net_for("mamba", false);
+        assert!(!net.output_network.retains_layers_output());
+        for stack in [net.forward_network.as_mut(), net.backward_network.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!stack.retains_layers_output());
+            for cell in stack.layers_mut() {
+                match cell {
+                    CellLayer::Mamba(l) => assert!(!l.retains_cache()),
+                    _ => panic!("expected a mamba cell, got a different CellLayer variant"),
+                }
+            }
+        }
+    }
+
+    /// THE BEHAVIOUR-FREE CLAIM at net level: the scoring forward is bit-for-bit the same
+    /// whichever way the flag sits. Driven per cell so a future cell that grows its own
+    /// cache is covered the day it is wired.
+    #[test]
+    fn the_forward_is_bit_identical_either_way() {
+        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+            let mut lean = net_for(cell, false);
+            let mut keeper = net_for(cell, false);
+            keeper.set_inference_only(false);
+            assert!(lean.is_inference_only() && !keeper.is_inference_only());
+
+            let (mut a, mut b) = (
+                Array2::<f64>::zeros((T, CLASSES)),
+                Array2::<f64>::zeros((T, CLASSES)),
+            );
+            lean.feed_forward(&input_seq(), &mut a);
+            keeper.feed_forward(&input_seq(), &mut b);
+            assert_eq!(a, b, "{cell}: the retention flag moved the forward");
+        }
+    }
+
+    /// An inference-only forward leaves the Mamba cache empty; a retaining one fills it.
+    /// This is the memory claim measured through the real net, not the bare cell.
+    #[test]
+    fn an_inference_only_net_leaves_the_mamba_cache_empty() {
+        let mut lean = net_for("mamba", false);
+        let mut out = Array2::<f64>::zeros((T, CLASSES));
+        lean.feed_forward(&input_seq(), &mut out);
+        assert_eq!(mamba_cache_rows(&mut lean), 0);
+
+        let mut keeper = net_for("mamba", true);
+        let mut out2 = Array2::<f64>::zeros((T, CLASSES));
+        keeper.feed_forward(&input_seq(), &mut out2);
+        assert_eq!(mamba_cache_rows(&mut keeper), T);
+    }
+
+    /// THE R6 CLONE NOTE (spec S7) at net level: `corpus_processor`'s static-lane fold
+    /// clones the whole bag -- and so this net -- at every epoch start. Under
+    /// inference-only the clone carries no cache to copy, with the retaining twin as the
+    /// non-vacuity contrast.
+    #[test]
+    fn a_clone_of_an_inference_only_net_carries_no_cache() {
+        let mut lean = net_for("mamba", false);
+        let mut out = Array2::<f64>::zeros((T, CLASSES));
+        lean.feed_forward(&input_seq(), &mut out);
+        let mut twin = lean.clone();
+        assert!(twin.is_inference_only());
+        assert_eq!(mamba_cache_rows(&mut twin), 0);
+
+        let mut keeper = net_for("mamba", true);
+        keeper.feed_forward(&input_seq(), &mut out);
+        assert_eq!(mamba_cache_rows(&mut keeper.clone()), T);
+    }
+
+    /// THE GRADIENT IS UNTOUCHED where it must be: with backprop ON, the scoring FFB
+    /// still folds a finite, non-zero gradient through the mamba stack. The F11 seam leg
+    /// in `tests/pyo3/test_phase9_seam.py` is the same assertion one level up.
+    #[test]
+    fn a_backprop_on_net_still_folds_a_real_gradient() {
+        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+            let mut net = net_for(cell, true);
+            let mut out = Array2::<f64>::zeros((T, CLASSES));
+            net.feed_forward_backward(&mut input_seq(), 0, 0, &mut out, &one_hot());
+            let g = net.get_weights_derivatives();
+            assert!(g.nrows() > 0, "{cell}: empty gradient");
+            assert!(
+                g.column(0).iter().any(|v| *v != 0.0) && g.iter().all(|v| v.is_finite()),
+                "{cell}: the folded gradient is all-zero or non-finite"
+            );
+        }
     }
 }

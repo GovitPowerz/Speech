@@ -1140,3 +1140,89 @@ def test_corpus_cost_columns_match_the_engine_gradcheck(name: str, net: int, tmp
     want = engine_numerical[net]
     assert abs(want) > 1e-12, f"{name} net {net}: the engine's own numerical derivative is ~0 (degenerate cross-check)"
     assert mine == want, f"{name} net {net}: corpus_cost FD {mine!r} != the engine's grad_check numerical {want!r} -- wrong cost/counter columns"
+
+
+# ==== Phase 10 Task 9 (spec S7): the inference-only retention gating =========
+#
+# T9 gates the two backward-only retentions (`MambaCache`, `Network::layers_output`) on
+# `BackPropagationActivated`, decided ONCE at `BlstmNetwork::from_config`. These two legs
+# are the seam-level halves of that claim: the gradient still flows where a backward can
+# run, and the forward is untouched where one cannot.
+
+
+@pytest.mark.parametrize("name", ("mamba_bidirectional", "mamba_forward"))
+def test_epochs_zero_with_backprop_on_still_returns_a_real_gradient(name: str, tmp_path: Path) -> None:
+    """THE F11 REGRESSION LEG (phase-10 spec S7).
+
+    `Epochs 0` + `BackPropagationActivated true` is the modern training loop's seam shape --
+    one forward+backward fold at theta, backprop harvested, no engine-internal weight move
+    (phase-5 F11, `drivers/train.py::_modern_config_text`). It is EXACTLY the configuration a
+    naive reading of "inference-only" would mistake for inference and gate the retention off,
+    which would silently zero every gradient the Python SMORMS3 loop reads -- the same class
+    of failure F10 and F11 already cost this repo twice.
+
+    The condition therefore keys off `BackPropagationActivated` ALONE, and this leg pins the
+    consequence on the two MAMBA fixtures (the cell whose cache the gating drops): `Epochs 0`
+    written EXPLICITLY into the config text, gradient finite and non-zero. Under the inverted
+    gating (retain in training / skip in inference, S9.4 mutation 7) the mamba backward
+    asserts and this leg fails loudly rather than reporting zeros.
+    """
+    pack = load_pack(name)
+    seed_sad(tmp_path, name)
+    cfg = tmp_path / f"{name}.config"
+    flat = parse_legacy_config(cfg.read_text())
+    assert flat["BLSTM_BackPropagationActivated"] == "true", f"{name}: this leg needs a backprop-ON config"
+    # Last-wins parser: appending re-states Epochs 0 in this config's own text, so the leg
+    # does not lean on the fixture generator having written it.
+    cfg.write_text(cfg.read_text() + "Neural_Networks_BackPropagation_Epochs 0\n")
+
+    with chdir(tmp_path):
+        eng = speech_rs.Engine([f"{name}.config"], "-m")
+        eng.set_weights(0, [pack])
+        eng.run()
+        dv = np.asarray(eng.weights_derivatives(0)[0], dtype=np.float64)
+
+    assert dv.size > 0, f"{name}: the seam returned an EMPTY gradient under Epochs 0 + backprop on"
+    assert np.isfinite(dv).all(), f"{name}: the folded gradient is not finite"
+    assert int(np.count_nonzero(dv[:, 0])) > 0, f"{name}: F11 regression -- the retention gating zeroed the gradient"
+
+
+@pytest.mark.parametrize("name", ("mamba_bidirectional", "mamba_forward"))
+def test_turning_backprop_off_does_not_move_the_forward(name: str, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """THE BEHAVIOUR-FREE CLAIM at the seam, on the corpus rather than on a synthetic layer.
+
+    `BackPropagationActivated false` is the exact condition that switches the retention off,
+    so this compares the two regimes' `results_matrix` BIT for bit (timing column masked, as
+    every determinism leg here masks it). The forward cost/counter columns are computed from
+    the same posteriors either way -- the backward runs BEFORE the cost block and touches
+    neither -- so any difference here would mean the retention gating changed a number, which
+    is precisely what spec S7 claims it cannot.
+
+    It also pins that an inference-only run COMPLETES: the two loud bails T9 adds
+    (`MambaLayer::feed_backward`, `Network::feed_backward`) must be unreachable on a
+    backprop-off corpus run, and a mis-scoped condition would surface here as a panic rather
+    than as a wrong number.
+    """
+    timing_col = 6
+    pack = load_pack(name)
+    rows: list[NDArray[np.float64]] = []
+    for i, backprop in enumerate(("true", "false")):
+        dst = tmp_path_factory.mktemp(f"p10_t9_{name}_{i}")
+        seed_sad(dst, name)
+        cfg = dst / f"{name}.config"
+        cfg.write_text(cfg.read_text() + f"BLSTM_BackPropagationActivated {backprop}\n")
+        with chdir(dst):
+            eng = speech_rs.Engine([f"{name}.config"], "-m")
+            eng.set_weights(0, [pack])
+            eng.run()
+            r = np.array(eng.results_matrix(), dtype=np.float64, copy=True)
+            r[:, timing_col] = 0.0
+            rows.append(r)
+            if backprop == "false":
+                dv = np.asarray(eng.weights_derivatives(0)[0], dtype=np.float64)
+                assert dv.size == 0, f"{name}: a backprop-off net reported a gradient ({dv.shape})"
+
+    assert rows[0].shape == rows[1].shape and rows[0].shape[0] > 0
+    assert np.array_equal(rows[0].view(np.uint64), rows[1].view(np.uint64)), (
+        f"{name}: the retention gating moved the forward -- results_matrix differs between backprop on and off"
+    )
