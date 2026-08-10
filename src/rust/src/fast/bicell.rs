@@ -419,7 +419,7 @@ impl FastBiCell {
     ///
     /// | exact | here |
     /// |---|---|
-    /// | `:1963-1973` nominal length `(2w+1)` / each LSTM then output ratio, gated on `is_sub` | identical |
+    /// | `:1964-1973` nominal length `(2w+1)` / each LSTM then output ratio, gated on `is_sub` | identical |
     /// | `:1981-1982` begin = `max(0, jj-w)` snapped DOWN to the ssr grid | [`window_begin`] |
     /// | `:1984-1988` end = `begin + 2w`, clamped to `rows-1`, snapped UP | [`window_end`] |
     /// | `:1992-2007` partial-window `length_short` recompute (sequential floors) | identical |

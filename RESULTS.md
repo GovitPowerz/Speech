@@ -1064,7 +1064,10 @@ Task-8 section at the end of this file rather than being back-filled here, becau
 table's fast rows predate the Task-5 f32-mel front-end and mixing builds inside one table
 would make its ratios meaningless. The headline: fast-vs-exact **5.97x** on that row, and the
 REGIME decomposition below gains its missing FAST-tier half -- **1.95x**, against the 1.66x
-measured here on the exact tier.)
+measured here on the exact tier. DO NOT DERIVE A FAST WALL-CLOCK FROM THIS TABLE'S ROW: the
+5.97x is the ratio of the Task-8 section's OWN re-measured PAIR (exact 0.104963 s / fast
+0.017587 s on the current build), not of the 0.098132 s exact wall recorded here on the
+phase-9 build. Dividing this row by 5.97 gives a number that was never measured.)
 
 So the causal cells buy their speed by being CAUSAL (no window recompute, half the recurrent
 stack), not by being cheaper per step than a peephole LSTM: every cell here is already O(T), and at
@@ -1077,6 +1080,14 @@ unchanged). On the EXACT path Mamba costs 107.8 MB vs 54.8-57.0 MB for the gate 
 one place a cell choice is visibly expensive. That is the per-timestep SSM activation cache the
 `Network` container retains unconditionally during the forward drive (the phase-7 scope note: the
 exact path keeps `layers_output` whether or not a backward follows). Reported, not tuned.
+
+> **BOTH MEMORY NUMBERS ARE SUPERSEDED (Phase 10), and by different tasks.** The ~68 MB fast
+> plateau became **~42 MB** once Task 5 deleted the f64 widen (see "the full-f32 mel front-end"),
+> and the 107.8 MB exact-Mamba row became **58.55 MB** once Task 9 stopped retaining
+> backward-only structures on an inference-only net (see "inference-only retention gating"),
+> which closes this paragraph's "one place a cell choice is visibly expensive" finding: Mamba
+> now sits 3.0 MB above the sLSTM control on the identical recipe. The rows above stay as the
+> phase-9 record of what was measured then.
 
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5),** the phase-7 local-vs-CI split: future local runs of this recipe are expected at fast-vs-exact
@@ -1836,7 +1847,7 @@ changes here. Splitting them is the honest accounting.
 (the config parser is last-wins, and a file-level `rg` is blind to a later override -- an
 error this section previously made): `BackPropagationActivated` resolves FALSE on
 `phase0/1_worker_1.config` (the real 2015 production config), `phase0bii/lid.config`,
-`phase2b/signal.config`, fifteen `phase4b` configs (`lid5`, `twin_e2e`, `twin_mode0` through
+`phase2b/signal.config`, thirteen `phase4b` configs (`lid5`, `twin_e2e`, `twin_mode0` through
 `twin_mode7` incl. `twin_mode0_concat` / `twin_mode7_ppm1` / `_ppm2`), all four `phase4d`
 configs (`tupleA`/`tupleB_1_worker_1` + both `parity_*`), and the SAD net of both `phase9`
 Mode-7 Twins. Every one now runs with the retention OFF and stays byte-identical.
@@ -1884,3 +1895,52 @@ Both are pinned by `#[should_panic]` legs with a retaining contrast beside them,
 R6 clone legs (a per-lane bag clone under the flag carries EMPTY caches, asserted at the cell,
 the network and the `BlstmNetwork` level). Inverting the gating (S9.4 mutation 7) fails 7 Rust
 legs and all 4 phase-10 seam legs.
+
+## Phase 10 -- the NAMED follow-ons (nothing lost, nothing promised)
+
+Collected at the phase closeout so each one is a tracked sentence rather than a report
+paragraph nobody reads again. None is a defect; each is a place where this phase deliberately
+stopped, with the reason and the shape of the work.
+
+- **The `fast/cells.rs` <-> `fast/bicell.rs` scaffolding dedupe** (Task 7, approach A, ~55
+  lines by T7's own count). `FastCausalNet` and `FastBiCell` already SHARE the parts that
+  matter -- `cell_weight_count`, `build_cell`, `cell_stack_forward`, `DenseRowChain`, and the
+  `window_begin`/`window_end` span helpers -- but each carries its own `element_count` walk,
+  its own dense-MLP construction in `from_flat`, and its own per-row output drive. Approach A
+  ratified dedupe-LATER over unification churn precisely so `FastBlstm`/`overlap_window_step`
+  would stay byte-untouched; the merge is a refactor to do when a fifth shape arrives, not
+  before, and the fast-vs-exact parity legs are what would keep it honest.
+- **A corpus tier for `FastBiCell`.** The bidirectional twins are pinned on committed
+  fixtures (`phase10_bicell_parity.rs`) but never carried onto real data, unlike the causal
+  cells (`test_phase9_parity.py`). The blocker is not the machinery, it is the checkpoints:
+  Task 4's bidirectional gate runs are EPHEMERAL (the gates train into a tempdir and discard),
+  so a corpus leg needs a cached-checkpoint recipe first -- train once per (cell, direction)
+  into a stable local path, then run the phase-9 fast-vs-exact metric comparison against it.
+- **The f32 mel bank-table pin, upgraded from geometry to VALUES** (Task 5, review M3). The
+  committed guard cross-checks the f32 bank's SHAPE metadata (`is_mel` / `is_dct_activated` /
+  `nb_filters` / `nb_dct`) against the exact bank and then compares assembled outputs at a
+  tolerance. `tests/phase1_mel_golden.rs:160-191` already shows the stronger move: drive a
+  ONE-HOT periodogram through `apply_filter_bank` and the output IS a single bank coefficient,
+  recoverable bit-for-bit through the public surface with no accessor. Repeating that per
+  filter would pin the f32 coefficient TABLE exactly (against the exact table narrowed `as
+  f32`), turning a tolerance comparison into an equality one.
+- **A `Cfc_Backbone_Layers >= 2` streaming fixture** (Task 6, M4; re-confirmed by Task 11's
+  rider 9). Both committed CfC fixtures are `L = 1`, so the multi-layer backbone chain is
+  exercised by the exact cell's unit/FD tiers and the Python reconstruction pins but NOT by
+  the fast twin or the streaming gate. No lever buys this one -- it is a FIXTURE property, so
+  closing it means regenerating `cfc_forward` at `L >= 2` through
+  `scripts/extract_phase9_fixtures.py` and re-measuring that row's pins.
+- **Retention gating for the other three cells** (Task 9). This phase gated MAMBA's cache
+  only, because that is the one the phase-9 bench measured as visibly expensive. `LstmLayer`
+  (`gates`/`cells_in`/`cell_states`), `SlstmLayer`
+  (`gates`/`cell_states`/`norm_states`/`m_states`) and `CfcLayer`
+  (`z_cache`/`backbone_pre`/`backbone_post`/`heads`) each retain `T x 6-7 O` backward-only
+  buffers unconditionally; `CellLayer::set_retain_cache`'s no-op arms are the SAFE direction
+  (always retain), not an absence of work. The win is real and smaller than Mamba's.
+- **A sub-unit gain rung for the streaming crossing sweep** (Task 11, recorded as a new
+  observation). The `mamba` plain leg measures its 16 interior boundaries over a posterior
+  span of `[0.0000, 1.0000]` at the NEUTRAL lever -- nothing swept it there, the committed
+  fixture is simply saturated -- so part of that row's richness is a saturation artefact,
+  where CfC's 6 at `[0.1229, 0.7759]` are not. Extending `GAIN_LADDER` BELOW 1 would let the
+  sweep de-saturate such a row instead of accepting it. Nothing about the bit-equality claims
+  changes either way; this is about how much the boundary comparison is worth.

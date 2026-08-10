@@ -168,6 +168,13 @@ fn stage(dir: &Path, cell: &str, lever: Lever, tag: &str) -> CausalStage {
     // `[bias_idx - dense_in, bias_idx)`). BOTH widths are DERIVED from the config, not
     // hardcoded, so a fixture regeneration relocates the indices instead of silently
     // perturbing some interior weight.
+    //
+    // THE ONE ASSUMPTION THAT IS NOT DERIVED: `dense_in` reads the FIRST field of
+    // `BLSTM_OutputNeuronNb`, which is the last dense layer's fan-in only while that key
+    // carries exactly TWO fields (one dense layer, `fan_in,fan_out` -- every committed
+    // causal fixture is `4,1`). A DEEPER output MLP (say `24,12,1`) would put `[bias_idx -
+    // dense_in, bias_idx)` inside the wrong layer, so a fixture regenerated with more than
+    // two fields must take the SECOND-TO-LAST field here instead.
     let map = parse(&text);
     let field =
         |key: &str| -> usize { map[key].split(',').next().unwrap().trim().parse().unwrap() };
@@ -549,6 +556,19 @@ fn fine_offsets() -> impl Iterator<Item = f64> {
 /// a LOUD signal to adjudicate, not a constant to bump. (The phase-10 T6 version of this
 /// tripwire pinned `== 1` under the bias-only knob, and firing is precisely what it was
 /// for: T11's rider-9 sweep found the gain rung, and this is that finding cashed.)
+///
+/// WHAT ADJUDICATION MEANS IF IT FIRES SOMEWHERE ELSE (stated because an exact count is a
+/// harder pin than a tolerance, and this suite runs in CI): the boundary set is a DISCRETE
+/// function of f32 posteriors, so a different libm/SIMD lowering could in principle move a
+/// crossing across a threshold and change the count without anything being wrong. That
+/// possibility does NOT make a fire ignorable -- it makes it a two-way question: re-measure
+/// on the failing box and decide between (a) a genuine kernel/fixture move, which is the
+/// STOP this pin exists for, and (b) platform variance, which is closed by re-deriving the
+/// count there and recording BOTH values, never by relaxing `==` to `>=`. The evidence for
+/// telling them apart is already printed: the gate leg's `MEASURE gate[cfc]` line carries
+/// the posterior span (`[0.1229, 0.7759]` here) and `boundary_max_dt`, so a fire that comes
+/// with an unchanged span and a still-`0.0` `max_dt` reads very differently from one that
+/// does not.
 const CFC_INTERIOR_PLAIN: usize = 6;
 
 /// The plain (type-0) sweep: the committed fixture config under the winning [`Lever`].
@@ -586,6 +606,12 @@ fn stream_finish_equals_offline_causal() {
         // sweep's "unsaturated" claim: a lever that drove the curve to `[0, 1]` would still
         // satisfy every assertion here while making the boundary set an artefact of
         // saturation rather than of the cell.
+        // MEASURED, and tracked here rather than left in a report: mamba's plain leg reads
+        // `[0.0000, 1.0000]` at the NEUTRAL lever (gain 1, offset 0 -- nothing swept it
+        // there), so its 16 interior boundaries are partly a saturation artefact, while
+        // CfC's 6 at `[0.1229, 0.7759]` are not. No action this phase (the row is committed
+        // as-is and its bit-equality claim is unaffected); a sub-unit gain rung is the
+        // NAMED follow-on that would de-saturate it -- see RESULTS' phase-10 follow-ons.
         let (lo, hi) = off_post
             .iter()
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &v| {

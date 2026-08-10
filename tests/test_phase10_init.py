@@ -84,8 +84,10 @@ SIZED_BACKBONE_UNITS = 45
 # no-op -- so the parametrized reconstruction pin below was structurally blind to that
 # permutation, and `test_reconstruction_rejects_a_backbone_layer_swap` was its SOLE
 # detector (the phase-10 mutation battery's item 2b: 1 failed / 46 passed). With this row
-# the same mutation fails the pin too (MEASURED: 3 failed / 55 passed), so the permutation
-# has two independent catchers and neither is load-bearing alone.
+# the same mutation fails the pin too (MEASURED: 3 failed / 49 passed of the 52 this file
+# collects -- an earlier revision of this line wrote "55 passed", which is impossible: it
+# would need 58 tests), so the permutation has two independent catchers and neither is
+# load-bearing alone.
 SHAPES: tuple[tuple[int, int, int, int], ...] = ((1, 1, 1, 1), (4, 5, 8, 2), (2, 3, 4, 1), (3, 7, 8, 1), (3, 5, 4, 3))
 
 

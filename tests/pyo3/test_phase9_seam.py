@@ -21,7 +21,15 @@ swap that desynchronizes the two fails it loudly. Verified by mutation, not asse
 of the two swaps above fails 5 legs (both `grad_check` rows, both block probes, the mode-7
 Twin). The Task 3 report records them, plus the one class this is blind to -- a CONSISTENT
 double swap of forward AND backward, which is self-consistent (the phase-9 battery lesson
-verbatim: a leg comparing two runs of the same kernel cannot see inside it).
+verbatim: a leg comparing two runs of the same kernel cannot see inside it). THAT RESIDUAL IS
+CLOSED, by a different tier rather than by this one: Task 6's `fast::cells::FastCfc` is an
+INDEPENDENT implementation of the same forward (its own f32 kernel, its own flat-layout
+reader, its own driver -- it shares no code, type or buffer with the exact cell), so
+`src/rust/tests/phase9_fast_parity.rs`'s cfc rows compare the exact tree against something
+that cannot have inherited the swap: they pin boundary count/types IDENTICAL at `max_dt`
+EXACTLY 0.0 (measured posterior `max_rel` 6.90e-7 plain / 6.77e-7 crossing). What survives
+that is NOT a swap but a shared MISREADING of spec S1.1 -- both implementations wrong the
+same way -- which no parity leg between the two can ever close.
 
 WHAT THE TIER PINS, and why each leg exists:
 

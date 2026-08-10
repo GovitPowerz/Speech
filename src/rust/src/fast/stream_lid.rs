@@ -29,9 +29,13 @@
 //! sketches `new(map)`, but the offline path threads `audio.sample_rate` into the LID window
 //! derivation and reads `audio.lang_index` for the scoring target, and the parity fixtures pass
 //! the LID weight pack explicitly. None of those live in the config, so [`new`](StreamingLidSession::new)
-//! takes `rate`, `lang_index`, and `lid_weights` too (a `speech stream-lid` CLI / PyO3 binding --
-//! DEFERRED to phase 9, this phase is LIB-ONLY -- would read the rate from the file header, the
-//! target from the corpus mapping, and the weights from `BLSTM_LID_weightsFile`).
+//! takes `rate`, `lang_index`, and `lid_weights` too. That parenthetical used to read "a
+//! `speech stream-lid` CLI / PyO3 binding -- DEFERRED to phase 9, this phase is LIB-ONLY";
+//! PHASE 10 TASK 10 LANDED BOTH (`stream_lid_cli.rs` + the `speech_rs.StreamingLidSession`
+//! pyclass) without touching a byte of this module, and each resolves those three arguments
+//! exactly as predicted: the rate off the loaded input (`read_audio`'s `sample_rate`), the
+//! target from `--lang` / the caller, and the weights from `BLSTM_LID_weightsFile` (`None`
+//! defers to the config).
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;

@@ -5042,9 +5042,28 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   = 1e-4` sized for cross-platform SIMD variance. **The structural conclusion, stated so it is
   not mistaken for a fixable hole:** the drift is 1.14x of the MEASURED value, so no pin sized
   on this repo's standard measured*10 convention (4.4e-6 here) could ever catch it either --
-  only a BIT-EXACT golden could, and a bit-exact fast-vs-exact golden is impossible across f32
-  kernels by construction. What the parity tier DOES own, and did assert green, is the
-  DECISION: boundary `max_dt` EXACTLY 0.0, segment count/types identical, zero argmax flips.
+  only a BIT-EXACT golden could, and a bit-exact fast-vs-EXACT golden is impossible across the
+  f32/f64 split by construction. "IMPOSSIBLE" IS TOO STRONG FOR THE WHOLE CLAIM, and the
+  precise version matters: a same-precision f32 SELF-golden (dump this kernel's own posteriors
+  once, pin them bit-for-bit) would catch this mutation outright. It is DECLINED, not
+  unavailable -- such a golden pins the host's SIMD lowering as well as the algorithm, so it
+  would need the phase-1 libm-canary treatment (bit-exact on the recording box, a tolerance
+  band elsewhere) and would convert every legitimate re-vectorisation into a CI failure. THE
+  PREVENTIVE CONTROL IS WHERE THIS RISK IS ACTUALLY MANAGED, and it is a design-time one, not a
+  test: `fast/cells.rs`'s DELIBERATE DIVERGENCE 2 ("NO batched (faer) projection ... every
+  projection here is a per-step dot over a contiguous weight row") forbids exactly the edit
+  this mutation makes, in the module doc of the file it would be made in. AND THE REALISTIC
+  VIOLATION IS CAUGHT: this mutation had to be applied INSIDE the shared `step` kernel to
+  escape, i.e. symmetrically to both sides. An ASYMMETRIC one -- batching the offline path
+  only, which is the shape a performance-motivated edit naturally takes -- is caught BY
+  CONSTRUCTION rather than by luck: `phase9_stream_causal` asserts streamed-vs-offline
+  posteriors BIT-equal, and the two sides would no longer be running the same kernel. (Not
+  re-measured here; it is the same structural argument the phase-8 shared-kernel design
+  rests on.) What the
+  parity tier DOES own, and did assert green, is the DECISION: boundary `max_dt` EXACTLY 0.0
+  with segment count and types IDENTICAL (this is the SAD driver leg -- an earlier revision of
+  this line also claimed "zero argmax flips", which belongs to the LID legs
+  `phase7_parity_lid` and is not what `FastLstm`'s catcher asserts).
   So the correct statement of phase 9's doctrine after this measurement is sharper than
   "parity owns arithmetic": the self-consistency legs own state THREADING, the parity legs own
   DECISIONS plus arithmetic at their pin's resolution, and last-ULP kernel-substitution
@@ -5133,6 +5152,19 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   CONTRAST, not just its level -- still post-recurrence and monotone, so frame ORDER is
   preserved, but the module docs would have to say so). The T6-I1 ceiling assert is the
   tripwire that would announce the change.
+  **ADOPTED at the phase closeout (commit `625ca7a`) -- test-side only: no production source,
+  no fixture regenerated, no pin widened.** `phase9_stream_causal.rs` gained the
+  `Lever { gain, offset }` affine map on the output MLP, both indices config-derived and the
+  ladder ordered gain-1-FIRST, so the slstm/mamba/lstm rows settle on byte-identical levers
+  and stay bit-unchanged. The CfC row escalates to gain 2 / offset -0.5 and MEASURES 6
+  interior boundaries (was 1) over the unsaturated span `[0.1229, 0.7759]`, with 6 mid-stream
+  emissions split 3 Speech / 3 Other and a speech lag of 1.81888 s (`-0.01512` s inside
+  `bound + PUSH_CHUNK_S`); `max_dt` stays EXACTLY 0.0 and the posteriors bit-equal. Both T6
+  narrowings (`min_interior_plain`, `expects_midstream_emissions`) are DELETED -- CfC now
+  carries its siblings' strong floors -- and the ceiling assert is re-pinned EXACT at
+  `CFC_INTERIOR_PLAIN = 6`. The forfeited level-shift invariant is stated in `Lever`'s own
+  doc, as this rider required. The `L >= 2` third criterion stays OPEN, unchanged: no lever
+  buys a fixture property.
 
   (R10 -- the T9 M6 handoff, SETTLED: the corpus/seam leg IS a second catcher.) T9's report
   recorded the collapsed-rolling-index probe (`nn/cells/mamba.rs`'s non-retain branch
@@ -5155,7 +5187,12 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   no pin at this repo's sizing convention could catch it -- the fast tree has no bit-exact
   oracle, so sub-pin arithmetic drift inside a shared f32 kernel is uncovered BY DESIGN;
   what is covered, and was verified unmoved, is every DECISION the drift could have changed.
-  (ii) Item 2b's deeper-layer permutation has exactly ONE catcher, and it is not the
+  (ii) [CLOSED at the phase closeout, commit `625ca7a`: `SHAPES` in
+  `tests/test_phase10_init.py` gained `(3, 5, 4, 3)`, its first `L > 2` row, and the same
+  mutation re-applied transiently now fails 3 tests (both new reconstruction-pin
+  parametrizations plus the dedicated leg) where it failed exactly ONE before -- so the gap
+  below is the record of what was measured, not a live hole.]
+  Item 2b's deeper-layer permutation has exactly ONE catcher, and it is not the
   parametrized reconstruction pin (whose `SHAPES` stop at `layers = 2`, where the
   permutation is a no-op) but the dedicated `test_reconstruction_rejects_a_backbone_layer_
   swap` -- worth knowing before anyone prunes it as redundant, and cheaply closable by
