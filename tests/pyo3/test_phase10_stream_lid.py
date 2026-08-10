@@ -27,6 +27,32 @@ pins the NEW Python surface:
   - the two construction bails (mirrors
     `tests/phase8_stream_lid.rs::new_bails_on_{non_mode7,missing_lid_net}`).
 
+T10 REVIEW STRENGTHENING (I-1): every check above compares the binding's OWN outputs
+against each other (prefix runs, an algebraic identity) -- none of them can catch a
+residual marshalling bug that yields a VALID-SHAPED but numerically wrong matrix (e.g. a
+transposed/row-vs-column-major `confusion`, or a `classification_errors` read from the
+wrong offset). `_EXPECTED` below closes that gap with LITERAL values computed OUTSIDE the
+binding entirely -- a one-time `tests/phase8_stream_lid.rs`-equivalent Rust run
+(`FastTwinLid::from_legacy` + `get_segmentation`, the same offline oracle
+`tests/phase8_stream_lid.rs::run_offline` already exercises, invoked via a temporary
+`--nocapture` test dump, transcribed here, then deleted -- see the Phase 10 Task 10 review
+strengthening commit). `test_push_utterance_literal_oracle_values` asserts `finish()`'s
+`classification_errors`/`confusion` against these transcribed numbers exactly.
+
+T10 REVIEW STRENGTHENING (I-2): `scored_count()` was exposed on the pyclass but never
+called by any test; `test_push_utterance_literal_oracle_values` now asserts it equals the
+`finish()` aggregate's `segments_count` field.
+
+T10 REVIEW (optional, I-3, SKIPPED as a MISS case -- stated why): a `lang != 0` MISS case
+is not achievable with the committed binary-net (`class_nb == 2`) cep fixtures -- the only
+non-zero target is 1, and both fixtures' raw NN posterior already favors class 1
+regardless of target (confirmed by the SAME one-time oracle dump: `lang=1` on
+`tiny_ok.plp` is a HIT, `is_lid_correct=100`, not a miss). Rather than skip the `ti=1` code
+path entirely, `test_push_utterance_literal_oracle_values[tiny_ok.plp-1]` pins that HIT
+case instead (still literal-value-pinned, still exercises the `ti=1` branch the other
+tests never touch) -- a real MISS at `ti=1` would need a different net/fixture, out of
+scope here; the CLI smoke's `s3` case is the committed genuine-MISS coverage this repo has.
+
 phSeq coverage (the OTHER `File_Type`) lives in the Rust CLI smoke
 (`tests/phase10_stream_lid_cli.rs`) instead of here, since building phSeq one-hot matrices
 in Python would mean re-implementing the 38-entry `letterMapping` table for no independent-
@@ -51,6 +77,31 @@ CONFIG = PHASE4B / "twin_mode7.config"
 LID_WEIGHTS = PHASE4B / "LID_bestNNWeight_1.bin"
 
 CEP_FIXTURES = [("tiny_ok.plp", 0), ("multi_ok.plp", 0)]
+
+# Literal INDEPENDENT-ORACLE values (I-1): computed OUTSIDE this binding, via a one-time
+# `FastTwinLid::from_legacy` + `get_segmentation` run (the same offline oracle
+# `tests/phase8_stream_lid.rs::run_offline` uses) over `twin_mode7.config` + the real
+# 12409-weight LID net + these exact committed cep fixtures, dumped with a temporary
+# `--nocapture` test (deleted after transcription -- not part of the committed suite).
+# Keyed by `(name, lang)`; each value is `(classification_errors, confusion, is_lid_correct)`.
+_EXPECTED: dict[tuple[str, int], tuple[list[float], list[list[float]], bool]] = {
+    ("tiny_ok.plp", 0): (
+        [207.77509335905583, 92.2249066409442],
+        [[0.0, 1.0, 2.0, 0.0], [1.0, 0.0, 1.0, 1.0], [2.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]],
+        False,
+    ),
+    ("multi_ok.plp", 0): (
+        [201.94480557785144, 98.05519442214855],
+        [[0.0, 1.0, 2.0, 0.0], [1.0, 0.0, 2.0, 2.0], [2.0, 0.0, 0.0, 0.0], [0.0, 0.0, 2.0, 0.0]],
+        False,
+    ),
+    # ti=1 case (I-3 note): a HIT, not a MISS -- see the module docstring's I-3 entry.
+    ("tiny_ok.plp", 1): (
+        [7.77509335905581, 292.2249066409442],
+        [[0.0, 1.0, 2.0, 0.0], [1.0, 0.0, 0.0, 0.0], [2.0, 0.0, 1.0, 1.0], [0.0, 0.0, 1.0, 0.0]],
+        True,
+    ),
+}
 
 
 def _read_cep(path: Path) -> list[np.ndarray]:
@@ -148,11 +199,36 @@ def test_push_utterance_self_consistent(tmp_path: Path, name: str, lang: int) ->
         assert eq, f"{name}: finish() must be idempotent"
 
     # predicted_language re-derivation (independent algebraic cross-check).
-    fin_errors, _confusion, _correct, fin_predicted, _count = fin
+    fin_errors, _confusion, _correct, fin_predicted, fin_count = fin
     ti = _target_index(lang, len(fin_errors))
     assert fin_predicted == _recompute_predicted_language(fin_errors, ti), (
         f"{name}: predicted_language must equal the argmax recovered from classification_errors"
     )
+
+    # I-2: scored_count() must equal the finish() aggregate's segments_count.
+    assert sess.scored_count() == fin_count, f"{name}: scored_count() must equal finish().segments_count"
+
+
+@pytest.mark.parametrize("name,lang", [*CEP_FIXTURES, ("tiny_ok.plp", 1)])
+def test_push_utterance_literal_oracle_values(tmp_path: Path, name: str, lang: int) -> None:
+    """I-1: `finish()`'s `classification_errors`/`confusion` (plus `is_lid_correct`) must
+    match LITERAL values computed OUTSIDE the binding entirely (see `_EXPECTED`'s
+    provenance comment) -- the residual marshalling-bug class (a valid-shaped but
+    numerically wrong matrix: transposed confusion, a wrong-offset errors read, ...) that
+    the binding's own self-consistency checks structurally cannot catch."""
+    feats = _read_cep(PHASE6 / "cep" / name)
+    sess = _session(tmp_path, lang)
+    for feat in feats:
+        sess.push_utterance(feat)
+    errors, confusion, is_lid_correct, _predicted, segments_count = sess.finish()
+
+    want_errors, want_confusion, want_correct = _EXPECTED[(name, lang)]
+    assert errors == pytest.approx(want_errors), f"{name} lang={lang}: classification_errors vs the independent oracle"
+    assert confusion.tolist() == want_confusion, f"{name} lang={lang}: confusion vs the independent oracle"
+    assert is_lid_correct == want_correct, f"{name} lang={lang}: is_lid_correct vs the independent oracle"
+
+    # I-2 (again, on this dedicated literal-value leg): scored_count() must agree.
+    assert sess.scored_count() == segments_count, f"{name} lang={lang}: scored_count() must equal segments_count"
 
 
 @pytest.mark.parametrize("name,lang", CEP_FIXTURES)
