@@ -237,3 +237,52 @@ pub fn parse_stream_args(args: &[String]) -> Result<StreamInvocation> {
         chunk_ms,
     })
 }
+
+/// A parsed `speech stream-lid` invocation. Port-only subcommand (Phase 10 Task 10,
+/// the `bench`/`stream` precedent) -- NOT part of the legacy `fsp` mode-flag grammar;
+/// `main.rs` dispatches to this parser on the literal `stream-lid` first argument,
+/// before `parse_cli` ever runs. `config`/`input` are the two required positional
+/// paths (config then the phSeq/cep utterances file, in that order); `lang` is the
+/// eval target language index (the offline `audio.lang_index`, clamped into
+/// `[0, class_nb)` by `fast::driver::FastTwinLid::lid_score_params` -- a negative
+/// value, the default, targets class 0).
+#[derive(Debug, Clone)]
+pub struct StreamLidInvocation {
+    pub config: String,
+    pub input: String,
+    pub lang: i32,
+}
+
+/// Parse `speech stream-lid [--lang=N] <config> <input>` (the `stream-lid` literal
+/// itself already consumed by the caller). `--lang` defaults to -1 (the "no known
+/// target" case, clamped to class 0 downstream, the same `--key=val` shape as
+/// `stream`'s `--chunk-ms=`); exactly two non-flag arguments are required, in
+/// `<config> <input>` order.
+pub fn parse_stream_lid_args(args: &[String]) -> Result<StreamLidInvocation> {
+    let mut lang: i32 = -1;
+    let mut positionals: Vec<String> = Vec::new();
+
+    for arg in args {
+        if let Some(rest) = arg.strip_prefix("--lang=") {
+            lang = rest
+                .parse::<i32>()
+                .map_err(|e| anyhow::anyhow!("invalid --lang value '{rest}': {e}"))?;
+        } else if arg.starts_with("--") {
+            bail!("unknown stream-lid option: {arg}");
+        } else {
+            positionals.push(arg.clone());
+        }
+    }
+
+    if positionals.len() != 2 {
+        bail!(
+            "stream-lid takes exactly two positional args: <config> <input> (got {})",
+            positionals.len()
+        );
+    }
+    Ok(StreamLidInvocation {
+        config: positionals[0].clone(),
+        input: positionals[1].clone(),
+        lang,
+    })
+}

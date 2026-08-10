@@ -23,6 +23,7 @@ pub mod io;
 pub mod legacy_config;
 pub mod nn;
 pub mod stream_cli;
+pub mod stream_lid_cli;
 pub mod tasks;
 pub mod toml_config;
 
