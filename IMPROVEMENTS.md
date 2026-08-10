@@ -4917,6 +4917,257 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   The other two deferrals (`sigma'` in `do~`, the R-block pairing) were NOT executed and remain
   review-judgement, not measurement. Reverted, 2/2 PASS.
 
+### Mutation battery (Phase 10)
+
+- **[phase10] Mutation battery (Task 11): all 8 spec-S9.4 items were applied as
+  apply-FAIL-revert-PASS cycles; 7/8 break the leg the SPEC NAMED, and item 6 (the fwd-LSTM
+  batched-projection substitution) breaks NOTHING AT ALL -- the battery's headline HONEST
+  GAP, measured rather than asserted. Three items were run as TWO sub-variants each,
+  because the spec's one-line description admits two materially different mutations and
+  they land on different legs: item 2 (a caught permutation, and one whose ONLY catcher is
+  a dedicated leg the parametrized pin structurally cannot see), item 3 (the named test
+  fires, but at its pack-length pin -- the dead-column guard itself had to be isolated to
+  show it is non-vacuous), and item 8 (a session-layer leak the prefix legs catch, and a
+  kernel-layer leak they are structurally BLIND to, caught by the T10-review LITERAL
+  ORACLE) -- the last re-confirming the phase-9 self-consistency doctrine from the opposite
+  direction.** Each mutation minimal + surgical / run FOREGROUND against the NAMED
+  catcher (`cargo test --release -j 4 --lib <path>`, `cargo test --release -j 4 --test
+  <file> [filter] -- --test-threads=4`, `uv run pytest <file> -k <filter>`) / reverted /
+  re-run GREEN; `git status --porcelain` + `git diff --stat` confirmed EMPTY between every
+  cycle and at the end (IMPROVEMENTS.md is the only committed file). RELEASE profile
+  throughout. Items 7, 8 and rider 10 additionally rebuilt `speech_rs` (`maturin develop
+  --release`) on both sides of the cycle for their pyo3 legs.
+
+  (1) **CfC gate inversion.** `nn/cells/cfc.rs::feed_forward` `output[[t, j]] = ff1 * (1.0
+  - g) + ff2 * g;` -> `ff1 * g + ff2 * (1.0 - g)` (the forward blend inverted, the backward
+  adjoints left as committed). BOTH NAMED CATCHERS FIRED. (a) FD tier -- `cargo test
+  --release --test phase9_cell_grad cfc` FAILED: `cfc B=4 L=1 (t=1, in=3, out=2, seed=1):
+  max rel 1.9999999999874312e0 >= pin 8.2e-8 at weight 52 (fd 2.6724698803937127e-2 vs
+  analytic -2.6724698804273025e-2)` -- a SIGN-OPPOSITE analytic value at `max_rel` exactly
+  2.0, which is the signature of a gradient that is right in magnitude and wrong in sign
+  (the backward still differentiates the committed blend). (b) The forward pins --
+  `single_step_matches_the_hand_computed_value` FAILED (`left: 0.1598676172796144, right:
+  0.18750278381647528`, `cfc.rs:1049`) and `the_gate_interpolates_between_the_two_heads`
+  FAILED (`row 0 unit 0: output 0.01720746466702957 is not the selected head
+  0.17156895655641133`, `cfc.rs:1079`) -- the saturation leg is what makes the direction of
+  the interpolation, not merely its endpoints, load-bearing. Reverted, both PASS.
+
+  (2) **`init_cfc_flat` backbone block-order swap** -- run as TWO sub-variants, because
+  "block-order swap" admits two very different permutations and they are caught by
+  different legs. (2a) THE W/b SWAP inside each backbone layer
+  (`src/python/speech/init_weights.py`: `parts.append(_draw(..))` /
+  `parts.append(np.zeros(b))` order exchanged, length unchanged). NAMED CATCHER FIRED:
+  `uv run pytest tests/test_phase10_init.py` -- `test_pack_is_reproducible_block_by_block`
+  FAILED on ALL 8 parametrizations (`assert np.array_equal(got, np.concatenate(want))`,
+  `test_phase10_init.py:245`), with `test_every_bias_block_is_exactly_zero` failing on all
+  4 shapes beside it (`AssertionError: b_bb0 ... array([1.27410374]) == 0.0`). 12 failed,
+  11 passed. (2b) THE DEEPER-LAYER DRAW-ORDER SWAP (the deeper `B x B` layers drawn and
+  emitted in reverse order -- literally the permutation
+  `test_reconstruction_rejects_a_backbone_layer_swap` was written for). **HONEST GAP, and a
+  precise one:** the parametrized reconstruction pin did NOT fire. `SHAPES` maxes out at
+  `backbone_layers = 2`, where "reverse the deeper layers" reverses a ONE-element list and
+  is a NO-OP, so 46 of 47 legs stayed green; the ONLY catcher was
+  `test_reconstruction_rejects_a_backbone_layer_swap` (`layers = 3`), which failed at
+  `assert not np.array_equal(got, bad)` (`test_phase10_init.py:284`) precisely because the
+  builder now produces the sheared pack the leg constructs by hand. Note what this makes
+  that leg: not merely a non-vacuity check for the pin above it, but the SOLE detector of
+  the `L >= 3` permutation -- if it were ever deleted as "redundant", nothing would replace
+  it. Reverted after each, 47/47 PASS.
+
+  (3) **v2 regression (the phase-9 dead-column defect re-introduced).**
+  `configs/training/lre_sad_v2.toml`: `nnet_input_size 11 -> 23` AND `lstm_neuron_nb
+  "11,24,24" -> "23,24,24"` (both, because the layer-0 fan-in comes from `lstm_neuron_nb[0]
+  * sub[0]`; changing the declared input size alone would not create a dead column, and the
+  two keys are required to agree). Corpus-gated catcher, corpus PRESENT, run. (3a) AS
+  SPECIFIED: `uv run pytest tests/pyo3/test_phase10_gates.py -k "init_is_trainable"` FAILED
+  on every matched row, but at assert (0), the PACK-LENGTH pin, not at the inverse guard:
+  `AssertionError: cfc/bidirectional pack length 28835 != the pinned 24491`
+  (`test_phase10_gates.py:461`). (3b) SO THE GUARD ITSELF WAS ISOLATED, by additionally
+  relaxing (0) to `out["pack_len"] == arch.pack_len` for the probe run: the INVERSE GUARD
+  then fires and says exactly what phase 9 measured -- `lstm/bidirectional has structurally
+  DEAD layer-0 input columns (v2 must have none): {0: [44..91], 1: [44..91]}`
+  (`test_phase10_gates.py:491`), identically for `slstm/bidirectional` and
+  `cfc/bidirectional`: 48 dead columns `[44, 92)` in BOTH stacks, the v1 defect exactly.
+  The pair is the honest reading: the length pin is a faster tripwire on the same
+  regression, and the zero-dead-columns claim is independently non-vacuous. Reverted, 8/8
+  rows PASS.
+
+  (4) **mel32 `ignoreFirst` branch-B first-column drop removed.** `fast/mel32.rs` branch B's
+  final copy `mfcc.data[r * width + c] = tmp.data[r * tw + 1 + c];` -> `tmp.data[r * tw +
+  c]` (keep `c0`, drop the LAST column -- the quirk inverted rather than deleted, so the
+  shape stays legal and the failure is a VALUE failure). BOTH NAMED CATCHERS FIRED. (a) The
+  inline value tests -- `ignore_first_branch_b_drops_the_first_column_not_the_last` FAILED
+  (`branch-B drop is not the first column at (0,0), left: 1107460115 right: 3248222888`,
+  bit patterns, `mel32.rs:875`) and `filter_bank_and_dct_match_the_exact_path_at_tolerance`
+  FAILED (`dct rel 11.60984058530558 exceeds pin (nb_bins=20 log=true nb_dct=4 ig=true d=5
+  dd=3)`). (b) The T5 re-pinned parity legs -- `cargo test --release --test
+  phase7_fast_pipeline` 3 of 7 FAILED: `pipeline_parity_prcts_60s` (`rel
+  458.5232493145762 exceeds pin`), `pipeline_parity_excerpt_3s`,
+  `pipeline_parity_dc_offset_branch` (`dc-branch rel 381.18320127670603 exceeds pin`).
+  Reverted, 8/8 + 7/7 PASS.
+
+  (5) **Bi-twin reverse-pass skip.** `fast/bicell.rs::feed_forward`: the second
+  `cell_stack_forward` call's `reverse` argument `true` -> `false`, so both halves run
+  forward in time and the hcat becomes two copies of the same pass. NAMED CATCHER FIRED --
+  `cargo test --release --test phase10_bicell_parity` 3 of 7 FAILED:
+  `bicell_parity_exact_vs_fast_plain`, `bicell_parity_exact_vs_fast_overlap` (`slstm:
+  overlap posterior drift max_abs=1.2782692517542527e-1 max_rel=6.001197606211808e-1`) and
+  `bicell_parity_crossing_is_exercised` (`slstm/plain: crossing posterior drift
+  max_abs=3.816281222188343e-1 max_rel=2.563024895960859e0`, at `max_dt=0.3135`, i.e. the
+  DECISION moved too). The inline probe `the_reverse_stack_is_not_the_forward_stack` also
+  FAILED, at its FIRST assert (`Slstm: the reverse stack reproduced the forward stack
+  exactly -- the time flip is not happening`, `bicell.rs:673`). RECORDED PRECISELY: the
+  brief's "row-`T-1` probe" is not a separate test but the SECOND half of that same test
+  body, so this mutation never reaches it -- the row-`T-1` assertions pin WHICH row each
+  pass starts on and would be the discriminating legs for an off-by-one in the reverse
+  indexing, a different mutation than this one. Reverted, 7/7 + 7/7 PASS.
+
+  (6) **fwd-LSTM batched-projection substitution -- THE DOCTRINE CHECK. HONEST GAP: NOTHING
+  CAUGHT IT, and the reason is structural rather than a missing leg.** `fast/cells.rs::
+  FastLstm::step`'s per-gate ascending `dot_f32` input projection replaced by ONE batched
+  `super::nn::faer_project` call over all `4*O` gates (the phase-7 faer kernel, SIMD-blocked
+  reduction), applied inside the SHARED `step` kernel so the offline and streamed sides move
+  TOGETHER -- exactly the substitution S9.4 asks for. (Deviation, declared: the batch is over
+  the GATE dimension per step, not over all timesteps. A whole-sequence batch is not
+  available to the streaming side BY CONSTRUCTION -- it consumes one row at a time -- so an
+  all-timesteps batch could not be applied to both sides, which is the property the doctrine
+  check requires.) RESULTS: `phase9_stream_causal` 19/19 GREEN (the streaming bit-identity
+  legs BLIND, as the doctrine predicts -- both sides run the mutated kernel);
+  `phase9_fast_parity` 4/4 GREEN; `fast::cells` unit tier 37/37 GREEN, including the exact-
+  cell oracle legs `lstm_matches_the_exact_cell_within_the_f32_band` and
+  `lstm_matches_the_exact_cell_at_the_arm_geometry`. THE MUTATION IS NOT VACUOUS -- measured:
+  the parity suite's own `MEASURE lstm causal exact-vs-fast` line moved `max_abs
+  4.4019159906039107e-7 -> 4.997962438357817e-7` (the other three cells' lines byte-identical,
+  as expected for a change confined to `FastLstm`). It is simply 200x below the `POST_ABS_PIN
+  = 1e-4` sized for cross-platform SIMD variance. **The structural conclusion, stated so it is
+  not mistaken for a fixable hole:** the drift is 1.14x of the MEASURED value, so no pin sized
+  on this repo's standard measured*10 convention (4.4e-6 here) could ever catch it either --
+  only a BIT-EXACT golden could, and a bit-exact fast-vs-exact golden is impossible across f32
+  kernels by construction. What the parity tier DOES own, and did assert green, is the
+  DECISION: boundary `max_dt` EXACTLY 0.0, segment count/types identical, zero argmax flips.
+  So the correct statement of phase 9's doctrine after this measurement is sharper than
+  "parity owns arithmetic": the self-consistency legs own state THREADING, the parity legs own
+  DECISIONS plus arithmetic at their pin's resolution, and last-ULP kernel-substitution
+  arithmetic BELOW that resolution is owned by NOTHING -- deliberately, because the fast path
+  has no bit-exact oracle to own it with. Reverted, all three suites re-run PASS.
+
+  (7) **Retention flag inverted (retain in inference / skip in training).**
+  `nn/blstm.rs::from_config`: `let inference_only = !cfg.back_propagation_activated;` ->
+  `= cfg.back_propagation_activated;`. ALL NAMED CATCHERS FIRED, at all three tiers.
+  (a) Rust unit -- `cargo test --release --lib` 12 of 183 FAILED: all 7
+  `nn::blstm::inference_only_tests` legs (`backprop_off_constructs_inference_only_and_on_
+  does_not`: `lstm: backprop off must construct inference-only`, `blstm.rs:2864`;
+  `an_epochs_key_cannot_flip_the_decision`; `the_flag_reaches_every_stack_and_the_cells`;
+  `the_forward_is_bit_identical_either_way`; `an_inference_only_net_leaves_the_mamba_cache_
+  empty`; `a_clone_of_an_inference_only_net_carries_no_cache`;
+  `a_backprop_on_net_still_folds_a_real_gradient`) plus 5 collateral
+  `nn::blstm::direction_tests` legs, every one of the latter through the DESIGNED loud bail
+  (`network.rs:556`: `Network::feed_backward/_reverse/_double on a network constructed
+  inference-only (retain_layers_output = false, phase-10 spec S7) ...`). (b) Committed
+  goldens -- `cargo test --release --test phase3_e2e_grad_gate` 4 of 12 FAILED
+  (`real_net_gradient_bit_exact`, `gradient_non_trivial_real`, `real_net_backtrack_fires`,
+  `real_net_one_irprop_step`). (c) The F11 seam tier (after `maturin develop --release`) --
+  `uv run pytest tests/pyo3/test_phase9_seam.py -k "epochs_zero or turning_backprop"` 4 of 4
+  FAILED, the F11 legs surfacing the bail as a `pyo3_runtime.PanicException` through the
+  seam. LOUD, NOT ZEROS: that is the whole point of the T9 design (F10/F11 cost this repo two
+  silent-zero-gradient regressions). Reverted + rebuilt, 183/183 + 12/12 + 4/4 PASS.
+
+  (8) **Stream-lid session state leak across utterances** -- TWO sub-variants, at the two
+  layers a "leak" can live at, and they land on DIFFERENT catchers. (8a) SESSION LAYER
+  (`fast/stream_lid.rs::push_utterance`, mutated transiently -- the module is otherwise
+  byte-frozen): `finalize_lid_channel` snapshotted BEFORE `fold_entry` instead of after, so
+  every push reports the PREVIOUS utterance's aggregate. NAMED CATCHERS FIRED, both tiers.
+  `cargo test --release --test phase8_stream_lid` 4 of 6 FAILED
+  (`running_aggregate_is_prefix_correct_phseq`: `phseq s1 prefix k=1: classification_errors
+  must be bit-identical to offline, left: [300.0, 0.0] right: [257.7516908220444,
+  42.2483091779556]`, `phase8_stream_lid.rs:104`; plus the `_cep` twin and both
+  `per_utterance_equals_offline_*`), and `uv run pytest
+  tests/pyo3/test_phase10_stream_lid.py` 4 of 9 FAILED
+  (`test_running_aggregate_is_prefix_correct` + `test_push_utterance_self_consistent`, both
+  fixtures). The literal-oracle leg PASSED, correctly: `finish()` is untouched by an
+  off-by-one in the per-push REPORT. (8b) KERNEL LAYER -- the truer "state leak":
+  `fast/nn.rs::lstm_layer_forward`'s `if step > 0` recurrence guard dropped, so step 0 folds
+  whatever the PREVIOUS call left in the rolling `prev_out`/`prev_cell`/`prev_gates`
+  buffers, i.e. the previous window's and the previous utterance's state. **THE NAMED
+  PREFIX/AGGREGATE LEGS ARE BLIND, by construction:** `phase8_stream_lid` 6/6 GREEN and
+  `test_phase10_stream_lid.py`'s prefix/self-consistency legs green, because the streamed
+  and offline sides fold the SAME entries through the SAME leaking kernel in the SAME order,
+  so they leak identically. WHAT CAUGHT IT: the T10-review LITERAL INDEPENDENT-ORACLE leg --
+  `test_push_utterance_literal_oracle_values` FAILED on 3 of 3 parametrizations (`Max
+  absolute difference: 0.0919059221857843`, obtained `[7.683187436870026,
+  292.31681256312993]` vs expected `[7.77509335905581, 292.2249066409442]`) -- and, run to
+  close the loop, the exact-vs-fast parity tier: `phase7_parity_lid` 2 of 16 FAILED (`phseq
+  score abs 0.36249693089902735 exceeds pin`, plus the cep leg) and `phase7_parity_sad` 1 of
+  7 FAILED. This is the phase-9 doctrine confirmed from the opposite direction, and it is
+  the concrete argument for the T10 review's insistence on a literal oracle: without it, a
+  real cross-utterance leak in the shared kernel would have been invisible to the entire
+  streaming LID tier. Reverted after each (+ rebuilt for the pyo3 legs), all PASS.
+
+  **THE RIDERS.**
+
+  (R9 -- the T6 CfC fixture-enrichment DECISION, ATTEMPTED AS A MEASUREMENT, POSITIVE.)
+  T6 handed T11 the question of whether an output-WEIGHT GAIN sweep (`bias_idx-4 ..=
+  bias_idx`, amplifying the fixture's ~0.8 logit swing instead of shifting its level) can
+  manufacture `>= 2` CfC interior boundaries on the COMMITTED fixture with zero
+  regeneration. Measured with a TRANSIENT probe in `phase9_stream_causal.rs` (8 gains x 33
+  offsets on the staged 60 s fixture, offline causal run, reverted after): **YES, and
+  comfortably.** Selected rows (`interior` = interior boundaries, `span` = posterior
+  min/max): gain 1 offset 0 -> 1 (`[0.3246, 0.7049]`, the committed ceiling); **gain 2
+  offset -0.5 -> 6** (`[0.1229, 0.7759]`); gain 3 offset -0.5 -> 15 (`[0.0631, 0.8921]`);
+  gain 4 offset -0.5 -> 19; gain 12 offset 0 -> 23 (`[0.0002, 1.0000]`, SATURATED -- the top
+  of the ladder buys boundaries by flattening the curve into a square wave, which is
+  exactly what an enrichment should NOT do). The streaming side at the moderate rung (gain
+  2, offset -0.5, `PUSH_CHUNK_S = 0.1`): **6 push (MID-STREAM) emissions + 1 finish
+  emission, 3 Other + 3 Speech** -- i.e. `>= 1` mid-stream emission per class, the second
+  T6 criterion, met at the same rung that keeps the posterior unsaturated. (gain 3 -> 14
+  push + 2 finish; gain 4 -> 18 push + 2 finish.) SO: two of T6's three acceptance criteria
+  are MET by a gain sweep alone, retiring D1's fine-grid fallback rationale and D2's
+  narrowed CfC rows and the `expects_midstream_emissions(cfc) == false` carve-out. THE
+  THIRD IS NOT, and cannot be by this route: `Cfc_Backbone_Layers >= 2` (the M4
+  multi-layer-chain gap) is a FIXTURE property, so retiring M4 still needs a regenerated
+  `cfc_forward` fixture at `L >= 2`. RECORDED FOR THE PHASE CLOSEOUT TO DECIDE, not landed
+  here: adopting it is a test-side change (a gain lever in `phase9_stream_causal.rs`'s
+  `stage`, mirroring the one `phase9_fast_parity.rs` already has, plus re-pinning
+  `min_interior_plain`/`expects_midstream_emissions` and the T6-I1 ceiling assert), and it
+  costs the streaming sweep's pure-LEVEL-SHIFT invariant (a gain changes the curve's
+  CONTRAST, not just its level -- still post-recurrence and monotone, so frame ORDER is
+  preserved, but the module docs would have to say so). The T6-I1 ceiling assert is the
+  tripwire that would announce the change.
+
+  (R10 -- the T9 M6 handoff, SETTLED: the corpus/seam leg IS a second catcher.) T9's report
+  recorded the collapsed-rolling-index probe (`nn/cells/mamba.rs`'s non-retain branch
+  `(0, t % 2, (t + 1) % 2)` -> `(0, t % 2, t % 2)`, so `h_prev` reads `h_{t-2}`) as failing
+  `forward_is_bit_identical_without_the_cache` ALONE among 1217 Rust tests, and NAMED that
+  as narrow-by-design; the reviewer and implementer both expected the corpus-granularity
+  seam leg to be a second catcher. Re-run here: it is. `uv run pytest
+  tests/pyo3/test_phase9_seam.py -k turning_backprop` FAILED on BOTH parametrizations
+  (`mamba_forward: the retention gating moved the forward -- results_matrix differs between
+  backprop on and off`, `test_phase9_seam.py:1226`; same for `mamba_bidirectional`), which
+  is exactly the leg's design -- it compares the `results_matrix` BIT for bit with backprop
+  on (retain path) vs off (rolling path), so a wrong rolling index is a forward difference
+  it cannot miss. The corrected statement: the rolling-index arithmetic has TWO catchers at
+  two granularities -- the Rust unit leg (`forward_is_bit_identical_without_the_cache`, cell
+  level) and the pyo3 seam leg (`test_turning_backprop_off_does_not_move_the_forward`,
+  corpus level) -- and T9's "one catcher" note is superseded. Reverted + rebuilt, 38/38
+  Rust + 2/2 seam PASS.
+
+  **THE HONEST GAPS, collected.** (i) Item 6 is caught by NOTHING, and the measurement says
+  no pin at this repo's sizing convention could catch it -- the fast tree has no bit-exact
+  oracle, so sub-pin arithmetic drift inside a shared f32 kernel is uncovered BY DESIGN;
+  what is covered, and was verified unmoved, is every DECISION the drift could have changed.
+  (ii) Item 2b's deeper-layer permutation has exactly ONE catcher, and it is not the
+  parametrized reconstruction pin (whose `SHAPES` stop at `layers = 2`, where the
+  permutation is a no-op) but the dedicated `test_reconstruction_rejects_a_backbone_layer_
+  swap` -- worth knowing before anyone prunes it as redundant, and cheaply closable by
+  adding an `L = 3` shape to `SHAPES`. (iii) Item 8b's named prefix/aggregate legs are
+  structurally blind to a shared-kernel leak; the literal-oracle leg is what covers it. (iv)
+  Item 3's dead-column guard is reached only after the pack-length pin, so as specified the
+  mutation is caught by the length pin first -- the guard's own non-vacuity had to be
+  demonstrated by relaxing that pin for the probe. (v) Item 5 never reaches the row-`T-1`
+  assertions inside its catcher (an earlier assert in the same test body fires), so those
+  remain review-judgement for the reverse-INDEXING class of defect rather than measured
+  here.
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub
