@@ -90,8 +90,10 @@ impl Segmentation {
     ///
     /// NOT VALIDATED (by design, mirroring `new`'s trust in its caller): `segs` must be
     /// a well-formed boundary list -- non-decreasing `begin`, ending with the
-    /// [`SegClass::End`] sentinel at `audio_duration`.
-    pub fn from_parts(segs: Vec<Segment>, audio_duration: f64) -> Self {
+    /// [`SegClass::End`] sentinel at `audio_duration`. `pub(crate)` precisely BECAUSE it
+    /// is unvalidated: the invariant is discharged by its single in-crate caller, so it
+    /// stays off the public crate surface and out of `speech-py`'s reach.
+    pub(crate) fn from_parts(segs: Vec<Segment>, audio_duration: f64) -> Self {
         Self {
             segs,
             audio_duration,

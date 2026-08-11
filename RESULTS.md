@@ -2127,16 +2127,18 @@ empty and the splice index 0.
 |---|---|---|---|
 | `tier2` | the committed gate config, verbatim | 2.28957 | 1.68510 |
 | `silence-active` | tier2 clamps BOTH `min_silence` to ZERO, so steps 4/7 -- the derivation's LOAD-BEARING seam case -- are NO-OPS on it | 3.21953 | 1.96505 |
-| `suppress-heavy` | `padding[0] = padding[2] = 0`, so the true reach EQUALS the holdback and the margin's slack is at the design's minimum | 1.85000 | 0.75000 |
+| `suppress-heavy` | `padding[0] = padding[2] = 0`, so the true reach EQUALS the holdback and the margin's slack is at the design's minimum | 1.90000 | 0.80000 |
 | `no-conv` | no convolution: bursts map to raw segments directly, so tiny near-threshold segments and sub-reach gaps get dense | 2.68957 | 1.68510 |
 
 MEASURED coverage across 4 profiles x 6 seeded streams x 2-4 chunkings (chunk 1 through
-whole-stream): 2877 raw segments, max 296 per stream, **9382 emissions and 9454 final
-segmentation entries compared bit-for-bit**, 477 gaps in the reopen band, 720 sub-reach gaps
-(the merging regime that drives seam case 4), 249 near-`min_speech` segments, 85 long
-segments (the `pending_begin` stall regime), 27736 pushes whose retained window STARTS on a
+whole-stream): 2919 raw segments, max 296 per stream, **9418 emissions and 9490 final
+segmentation entries compared bit-for-bit**, 476 gaps in the reopen band, 736 sub-reach gaps
+(the merging regime that drives seam case 4), 268 near-`min_speech` segments, 527 long
+segments (the `pending_begin` stall regime), 27422 pushes whose retained window STARTS on a
 segment straddling the truncation limit. Every one of those is an ASSERTED floor, not a
-printed hope.
+printed hope -- and since the review, the `tiny` and `long` floors are asserted PER PROFILE
+too, which is what exposed two structural holes a global sum had been covering for (see the
+review-fixes subsection below).
 
 ### The mutation ladder -- what the oracle can and cannot see
 
@@ -2158,11 +2160,14 @@ correct division of labour -- the same one the holdback itself has had since pha
 
 ### Bounded cost -- derived, measured, and pinned
 
-`K_derived = 2 + floor(window/dt)` with `window = 3*holdback + max(conv_delay + dt,
-open_span)`, from the cut invariant plus "at most one raw segment is LABELED per convolved
-value". It is DELIBERATELY loose (it assumes the hysteresis can close a segment at every grid
-step, which the area gating forbids): 450-553 across the four profiles against a measured
-worst of **6**. So the derived bound is the SAFETY pin -- it is what makes bounded per-push
+`K_derived = 3 + floor(window/dt)` with `window = 3*holdback + conv_delay + dt`, from the
+cut invariant plus "at most one raw segment is LABELED per convolved value". CONFIG-ONLY:
+the review's minor 8 removed an `open_span` term that carried the generator's burst cap and
+made the theorem read as experiment-conditional -- a long OPEN segment widens the window but
+cannot ADD retained segments, because no raw segment CLOSES while one is open. That
+TIGHTENED it from 450-553 to **184-205** across the four profiles, against a measured worst
+of **6**. It is still DELIBERATELY loose (it assumes the hysteresis can close a segment at
+every grid step, which the area gating forbids). So the derived bound is the SAFETY pin -- it is what makes bounded per-push
 cost a theorem, since it does not reference the stream at all -- and a measured*10 regression
 pin of 50 is the discriminating one. Tightening the derivation would mean bounding the
 posterior VALUES, which are a property of the net and the kernel, not of this layer.
@@ -2171,12 +2176,69 @@ Measured retained window, every profile x seed x length: **3-7 segments**, flat 
 list doubles (e.g. `no-conv` seed 11: raw 200 -> 399, retained 6 -> 6). The doubling leg
 asserts the raw list grows ~2x while `retained * 8 <= raw`.
 
-WALL CLOCK (M4 Pro, DEBUG build, informational -- printed by the oracle, never asserted; a
-wall-clock CI assert has no place here): a 42495-row stream (1699.8 s of audio, 267 raw
-segments, 664 pushes at chunk 64) takes **511.9 ms full-replay vs 12.2 ms incremental,
-41.9x**, per-push **770.9 us -> 18.4 us**. The ratio is not the point -- it GROWS with stream
-length, since the full path's per-push cost rises with `S` and the incremental path's does
-not.
+WALL CLOCK (M4 Pro, informational -- printed by the oracle, never asserted; a wall-clock CI
+assert has no place here, and the print now reports the build profile it actually ran under
+rather than claiming one). A 42495-row stream = 1699.8 s of audio, 267 raw segments, 664
+pushes at chunk 64:
+
+| build | full replay | incremental | speedup | per push |
+|---|---|---|---|---|
+| release | 69.0 ms | 0.9 ms | **77.6x** | 103.9 us -> 1.3 us |
+| debug | 511.9 ms | 12.2 ms | 41.9x | 770.9 us -> 18.4 us |
+
+The ratio is not the point -- it GROWS with stream length, since the full path's per-push
+cost rises with `S` and the incremental path's does not.
+
+### The review fixes -- two seam/coverage findings the first pass missed
+
+The review re-derived the whole cut argument independently and returned Spec PASS with two
+Importants, both landed. Recorded because each is a general lesson, not a typo.
+
+**A seam case whose REASON did not cover its own sub-case (the T9 shape, again).** Case 1
+said "the entry at `X` is Speech preceded by Other in BOTH lists, so no merge crosses the
+seam". That is FALSE when `e_{k-1} == b_k` exactly in f64: `label_segment`'s insertion walk
+stops BEFORE `O@e_{k-1}` (`segs[i].begin < begin` is false at equality), inserts `S@b_k` in
+front of it, and the overwrite loop erases it -- leaving adjacent Speech entries that
+`sanitize` merges, DELETING the entry at `X` the retained list keeps. The CONCLUSION survived
+(`D_1 = X^+`, absorbed by the slack); the reason did not. Exact arithmetic separates the two
+strictly; f64 need not, when the rising interpolation's fraction rounds to 1 at the next step
+index. Fixed as two sub-cases (disjoint / touching) AND -- more than documentation --
+`advance_cut`'s slide is now STRICT (`< limit`), so the invariant reads `X + margin <
+cut_time` and `X^+ <= cut_time` holds even at `holdback == 0`, where there is no slack at all
+and a non-strict slide would have let the splice READ the one entry that seam can differ on.
+
+**Global non-vacuity floors hid two STRUCTURALLY UNREACHABLE regimes.** The `tiny` and `long`
+floors were global-only, and the two profiles that most needed them were each missing one:
+
+| hole | measured cause |
+|---|---|
+| `silence-active` long = 0 on all six seeds | the old `4*holdback` criterion = 12.88 s = **322 frames > the 300-frame burst cap** -- so the `pending_begin` stall regime never occurred on the ONLY profile whose `min_silence` is live |
+| `suppress-heavy` tiny = 0 on all six seeds | the 19-tap convolution imposes a **floor of 0.32089 s** on raw-segment duration (identical on every convolved profile: a property of the kernel and the rising/falling thresholds, not of the stream), and that profile's `max(min_speech)` was 0.30 -- UNDER the floor |
+
+Diagnosed by printing the achieved per-profile duration range rather than guessing. Fixed by
+making `long` holdback-RELATIVE and reachable (`>= holdback`, the delay the clamp actually
+imposes), lifting `suppress-heavy`'s `min_speech[0]` 0.30 -> 0.35 above the measured floor
+(its defining property `padding[0] == padding[2] == 0` stays exact: reach = holdback = 1.90),
+and adding PER-PROFILE floors whose failure message names the unreachable-vs-unlucky
+distinction and prints the duration range, so the next such hole diagnoses itself.
+Post-fix, all four profiles hit all four regimes:
+
+| profile | raw | gaps in band | sub-reach gaps | tiny | long | raw duration range |
+|---|---|---|---|---|---|---|
+| `tier2` | 640 | 68 | 155 | 20 | 150 | [0.32089, 12.62410] |
+| `silence-active` | 664 | 95 | 152 | 24 | 88 | [0.32089, 11.93045] |
+| `suppress-heavy` | 633 | 146 | 56 | 19 | 182 | [0.32089, 20.57045] |
+| `no-conv` | 982 | 167 | 373 | 205 | 107 | [0.03552, 11.99552] |
+
+(`no-conv`'s 0.03552 minimum is the control confirming the 0.32089 floor belongs to the
+convolution: remove the kernel and it disappears.)
+
+TWO NAMED FOLLOW-ONS, recorded in the module doc rather than done: a REALISED-REACH
+diagnostic (instrument `D_8 - X` directly -- a pass/fail ladder localises the safe margin
+only to a quarter-holdback, so nobody should shrink `CUT_MARGIN_HOLDBACKS` on ladder evidence
+alone), and the straddle-count headline (it is PER PUSH, so fine chunkings inflate it; honest
+as a floor, misleading as a headline -- distinct straddling raw-segment indices is the
+quantity worth reporting).
 
 ### Posture
 

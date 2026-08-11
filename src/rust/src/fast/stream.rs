@@ -1312,23 +1312,52 @@ impl ConvStream {
 /// `< D_j + th`. Hence `D_{j+1} <= D_j + th_j` and, composing the eight steps,
 ///
 /// ```text
-///   D_8 <= X + sum(min_speech) + sum(min_silence) + padding[1] + padding[3] + 2e-6
-///       <= X + holdback + 2e-6                                  (padding[0,2] >= 0)
-///       <  X + CUT_MARGIN_HOLDBACKS * holdback  =  the invariant's bound
+///   D_8 <= X^+ + sum(min_speech) + sum(min_silence) + padding[1] + padding[3] + 2e-6
+///       <= X^+ + holdback + 2e-6                                 (padding[0,2] >= 0)
+///       <  X  + CUT_MARGIN_HOLDBACKS * holdback  <  cut_time     (the invariant, STRICT)
 /// ```
+///
+/// (`X^+` rather than `X` because of case 1(b) below -- the touching seam contributes an
+/// infinitesimal that the slack absorbs.)
 ///
 /// Only the two `after` paddings enter the reach (`before` extends a Speech segment
 /// LEFTWARD, away from the region at risk; its sole rightward footprint is the `+1e-6`
 /// re-close), so `holdback` -- which sums `before` too -- already over-covers; the margin
-/// is the SECOND holdback. The `2e-6` slop is dominated whenever an active `before`
-/// padding is at least `2e-6 s`, which every real config satisfies by four orders of
-/// magnitude (`sanitize` quantizes boundaries to `1e-4 s`, so a smaller padding could not
-/// move a boundary at all). The margin is expressed in HOLDBACK UNITS, never as a second
+/// is the SECOND holdback. The margin is expressed in HOLDBACK UNITS, never as a second
 /// per-term constant (the Task-9 adjudication).
 ///
+/// THE PRECONDITION OF THAT LAST `<`, stated rather than assumed: `holdback > 2e-6`. Then
+/// `holdback + 2e-6 < 2*holdback` and the step is strict. Two ends of the range:
+/// * `holdback == 0` -- EXACT, not approximate: every threshold is zero, so `suppress_short`
+///   returns early and `add_padding` skips both sides; the pipeline reduces to `sanitize`
+///   alone, whose reach is 0 (case 1a) or `X^+` (case 1b), and `advance_cut`'s STRICT `<`
+///   gives `X < cut_time`, which covers `X^+`. No `1e-6` term exists because the only code
+///   that writes one is inactive.
+/// * `0 < holdback <= 2e-6` -- the one EXCLUDED sliver, and it is not a real config: an
+///   active `before` padding would have to be positive yet below `2e-6 s`, i.e. under a
+///   fiftieth of the `1e-4 s` grid `sanitize` snaps every boundary to, so it could not move
+///   a boundary at all.
+///
 /// THE SEAM CASES, step by step (`D_j`'s advance, and why it cannot exceed it):
-/// 1. `sanitize` -- the entry at `X` is `Speech` preceded by `Other` in BOTH, so no merge
-///    crosses the seam. `D_1 = X`.
+/// 1. `sanitize` -- TWO sub-cases, and the second one is the reason this list is not a
+///    formality (it is the T9 shape again: a seam case whose stated reason covered only
+///    the situation that first came to mind).
+///    SUB-CASE (a), DISJOINT (`e_{k-1}` and `b_k` land on different `1e-4` grid points):
+///    the entry at `X` is `Speech` preceded by `Other` in BOTH lists, so no merge crosses
+///    the seam. `D_1 = X`.
+///    SUB-CASE (b), TOUCHING (`e_{k-1} == b_k` in f64, or both rounding to the same grid
+///    point): the FULL list's `label_segment(b_k, e_k)` stops its insertion walk BEFORE
+///    `O@e_{k-1}` (`segs[i].begin < begin` is false at equality), inserts `S@b_k` in front
+///    of it, and then ERASES it in the overwrite loop -- leaving `S@b_{k-1}, S@b_k`
+///    ADJACENT, which `sanitize` merges, DELETING the entry at `X` that the retained list
+///    keeps. (The rounding variant leaves a zero-duration `O@X` in the full list only, same
+///    shape.) So the entry AT `X` differs and agreement resumes at `X^+`: `D_1 = X^+`, an
+///    infinitesimal the slack absorbs. Reachable, not hypothetical -- the exact-arithmetic
+///    separation `b_k > e_{k-1}` can vanish in f64 when the rising interpolation's fraction
+///    rounds to 1 at the next step index. THIS IS ALSO WHY
+///    [`advance_cut`](Self::advance_cut) slides `keep_from` on a STRICT `<`: the invariant
+///    is then `X + margin < cut_time`, so `X^+ <= cut_time` holds even at `holdback == 0`,
+///    where there is no slack at all to absorb it.
 /// 2. `suppress_short(min_speech[0], Speech)` -- the first retained Speech has the SAME
 ///    duration in both and `previous_type == Other` in both (alternating list), so the
 ///    branch is identical. A prefix-only flip moves entries by `<= min_speech[0]`.
@@ -1348,12 +1377,22 @@ impl ConvStream {
 /// 7. `suppress_short(min_silence[1], Other)` -- as 4.
 /// 8. `suppress_short(min_speech[2], Speech)` -- as 5.
 ///
-/// THE TAIL CASES, which no step index covers: the `End` sentinel and the two positional
-/// predicates (`suppress_short`'s `i+2 == len`, `add_padding`'s backward `len-3` start)
-/// address the LAST entries, shared verbatim by both lists; `i == 0` addresses the leading
-/// `Other`, which is index 0 in both. None of the three can name a DIFFERENT segment in
-/// the two lists, which is the only way a positional predicate could leak the prefix's
-/// length into the shared region.
+/// THE TAIL CASES, which no step index covers, and they need BOTH halves:
+/// * NECESSARY -- the `End` sentinel and the two positional predicates
+///   (`suppress_short`'s `i+2 == len`, `add_padding`'s backward `len-3` start) address the
+///   LAST entries, shared verbatim by both lists; `i == 0` addresses the leading `Other`,
+///   which is index 0 in both. None of the three can name a DIFFERENT segment in the two
+///   lists, which is the only way a positional predicate could leak the prefix's length
+///   into the shared region.
+/// * SUFFICIENT -- and this is the half that keeps them away from the FROZEN region rather
+///   than merely consistent between the lists: the sentinel sits at least one `holdback`
+///   to the RIGHT of everything frozen. Mid-stream `mid_dur = max(now, last_rb) >= now`,
+///   and `cut_time <= threshold = frontier - holdback <= now - holdback`, so the tail
+///   special-casing's own `holdback`-bounded reach cannot touch an entry at
+///   `begin < cut_time`. At EOS the sentinel comes from the CALLER's clock, so
+///   [`flush`](Self::flush) re-checks this same inequality instead of assuming it (see its
+///   sentinel guard) -- the one place the argument is enforced at runtime rather than by
+///   construction.
 ///
 /// WHAT THE CUT COSTS: nothing in output and nothing in latency (it never gates an
 /// emission -- it only stops re-deriving what is already frozen), and `O(K^2)` per push
@@ -1370,6 +1409,29 @@ impl ConvStream {
 /// (the `test-support` equivalence oracle -- it simply never advances the cut, so the
 /// phase-8 code path is recovered EXACTLY, not re-implemented) and the flush-time
 /// sentinel guard in [`flush`](Self::flush).
+///
+/// WHAT THE CUT COSTS IN MEMORY, stated because it trades one growing list for two: the
+/// cut does NOT drain `raw_segments` (it is public API the phase-8 suite compares against
+/// the offline batch), and it ADDS `frozen`, a second `O(S)` list at 16 B/entry
+/// (`Segment` = an `f64` plus a `repr(i32)` tag, padded). At a dense conversational rate
+/// of one speech segment per 2 s that is ~2 entries/2 s, so a 24 h stream holds ~86400
+/// entries ~ 1.4 MB -- immaterial next to the compute it buys, and the reason this design
+/// spends memory rather than trying to bound it. Bounding `frozen` too would mean
+/// emitting-and-forgetting the settled prefix, which would change `flush`'s contract (it
+/// returns the COMPLETE `Segmentation`) and is a different design, not a tightening.
+///
+/// TWO NAMED FOLLOW-ONS, recorded rather than done (neither is a defect):
+/// * A REALISED-REACH DIAGNOSTIC, prerequisite for any future margin tightening. The
+///   oracle's mutation ladder localises the safe margin only to a quarter-holdback
+///   (`0.0` passes, `-0.25` fails), because a pass/fail probe measures where the streams
+///   BREAK, not how much reach they actually exercise. Instrumenting `D_8 - X` directly --
+///   compare the retained build against a full build per push and report the rightmost
+///   disagreement -- would turn "somewhere under one holdback" into a number, and nobody
+///   should shrink `CUT_MARGIN_HOLDBACKS` on ladder evidence alone.
+/// * THE STRADDLE COUNT IS PER-PUSH, so the oracle's headline figure is inflated by the
+///   fine chunkings (chunk 1 re-counts the same straddling configuration on every push).
+///   It is honest as a coverage floor and misleading as a headline; the quantity worth
+///   reporting is the number of DISTINCT straddling raw-segment indices.
 pub struct StreamDecision {
     seg_cfg: SegmenterConfig,
     class: SegClass, // SAD -> Speech (the offline driver's `SegClass::Speech`)
@@ -1653,21 +1715,27 @@ impl StreamDecision {
         }
         self.cut_time = threshold;
 
-        // Slide the retained window: keep the LAST raw segment beginning at or before
+        // Slide the retained window: keep the LAST raw segment beginning STRICTLY before
         // `cut_time - CUT_MARGIN_HOLDBACKS*holdback`, so the invariant
-        // `raw_segments[keep_from].0 + margin <= cut_time` holds by construction. At least
+        // `raw_segments[keep_from].0 + margin < cut_time` holds by construction. At least
         // one raw segment is always retained -- it anchors the seam structure the
         // derivation reasons about (`S@X` preceded by `Other` in both lists).
+        //
+        // THE `<` IS STRICT ON PURPOSE (review I-1). Seam case 1(b) advances agreement to
+        // `X^+`, not `X`, so a non-strict slide would leave `X == cut_time` admissible and
+        // the splice would then READ the one entry the touching seam can differ on. At any
+        // `holdback > 0` the margin swamps that, but at `holdback == 0` there is no slack
+        // at all and the strict comparison is the whole difference between exact and wrong.
         let limit = self.cut_time - CUT_MARGIN_HOLDBACKS * self.holdback;
         while self.keep_from + 1 < self.raw_segments.len()
-            && self.raw_segments[self.keep_from + 1].0 <= limit
+            && self.raw_segments[self.keep_from + 1].0 < limit
         {
             self.keep_from += 1;
         }
         debug_assert!(
             self.keep_from == 0
                 || self.raw_segments[self.keep_from].0 + CUT_MARGIN_HOLDBACKS * self.holdback
-                    <= self.cut_time,
+                    < self.cut_time,
             "cut invariant broken: retained window starts at {} but cut_time is {}",
             self.raw_segments[self.keep_from].0,
             self.cut_time

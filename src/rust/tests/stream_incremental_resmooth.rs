@@ -53,10 +53,12 @@ use speech::tasks::segmenter::{DriverConfig, SegmenterConfig};
 const DT: f64 = 0.04;
 const OFF: f64 = 0.015;
 
-/// The generator's hard cap on a speech burst, in posterior frames. It bounds the
-/// hysteresis's OPEN span, which is the one data-dependent term in the derived retained
-/// bound (`retained_window_is_bounded`) -- so it is a constant of the EXPERIMENT, read by
-/// the derivation, never a tuning knob for a pin.
+/// The generator's hard cap on a speech burst, in posterior frames (12 s at `DT`). Purely
+/// a property of the EXPERIMENT: since the review's minor 8 it no longer feeds
+/// [`derived_retained_bound`], which is config-only. It still bounds what the streams can
+/// REACH, which is why the `long` criterion is holdback-RELATIVE rather than a multiple
+/// (`4*holdback` on `silence-active` is 322 frames -- past this cap, hence structurally
+/// unreachable, hence a floor that could never fire).
 const MAX_BURST_FRAMES: usize = 300;
 
 /// Parse tier2_spectral.config -> (SegmenterConfig, DriverConfig) at the BLSTM prefix
@@ -100,10 +102,19 @@ fn cfg_profiles() -> Vec<(&'static str, SegmenterConfig, DriverConfig)> {
     // reach == holdback here: `holdback` sums the `before` paddings that the leftward
     // reach does not need, and this profile sets them to zero, so the SECOND holdback of
     // CUT_MARGIN_HOLDBACKS is the entire safety margin.
+    //
+    // `min_speech[0]` is 0.35 rather than the 0.30 first written here, and the reason is
+    // MEASURED, not cosmetic (review I-2): the 19-tap convolution imposes a FLOOR of
+    // 0.32089 s on raw-segment duration -- identical on every convolved profile, since it
+    // is a property of the kernel and the rising/falling thresholds, not of the stream --
+    // so a `tiny` criterion at `max(min_speech) = 0.30` was structurally UNREACHABLE and
+    // this profile measured tiny = 0 on all six seeds. The profile's DEFINING property is
+    // `padding[0] == padding[2] == 0` (reach == holdback), which these values leave exactly
+    // intact: reach = 0.80 + 0.55 + 0.30 + 0.25 = 1.90 = holdback.
     let mut s = base_seg.clone();
     s.padding = [0.0, 0.30, 0.0, 0.25];
     s.min_silence = [0.35, 0.20];
-    s.min_speech = [0.30, 0.20, 0.25];
+    s.min_speech = [0.35, 0.20, 0.25];
     out.push(("suppress-heavy", s, base_drv.clone()));
 
     let mut d = base_drv.clone();
@@ -469,6 +480,36 @@ struct Achieved {
     gaps_below_reach: usize,
     tiny_segments: usize,
     long_segments: usize,
+    /// The shortest / longest RAW segment actually produced. Reported because the
+    /// convolution imposes a FLOOR on raw-segment duration that no burst length can beat
+    /// (a 19-tap kernel spreads a short burst, so the hysteresis's interpolated
+    /// begin/end sit further apart than the burst itself), and a `tiny` criterion below
+    /// that floor is structurally unreachable rather than merely unlucky.
+    min_dur: f64,
+    max_dur: f64,
+}
+
+impl Achieved {
+    fn zero() -> Achieved {
+        Achieved {
+            raw: 0,
+            gaps_in_band: 0,
+            gaps_below_reach: 0,
+            tiny_segments: 0,
+            long_segments: 0,
+            min_dur: f64::INFINITY,
+            max_dur: 0.0,
+        }
+    }
+    fn fold(&mut self, o: &Achieved) {
+        self.raw += o.raw;
+        self.gaps_in_band += o.gaps_in_band;
+        self.gaps_below_reach += o.gaps_below_reach;
+        self.tiny_segments += o.tiny_segments;
+        self.long_segments += o.long_segments;
+        self.min_dur = self.min_dur.min(o.min_dur);
+        self.max_dur = self.max_dur.max(o.max_dur);
+    }
 }
 
 fn achieved(raw: &[(f64, f64)], cfg: &SegmenterConfig) -> Achieved {
@@ -481,6 +522,8 @@ fn achieved(raw: &[(f64, f64)], cfg: &SegmenterConfig) -> Achieved {
         gaps_below_reach: 0,
         tiny_segments: 0,
         long_segments: 0,
+        min_dur: f64::INFINITY,
+        max_dur: 0.0,
     };
     for w in raw.windows(2) {
         let gap = w[1].0 - w[0].1;
@@ -492,12 +535,23 @@ fn achieved(raw: &[(f64, f64)], cfg: &SegmenterConfig) -> Achieved {
         }
     }
     for &(b, e) in raw {
-        if e - b <= max_ms {
+        let dur = e - b;
+        if dur <= max_ms {
             a.tiny_segments += 1;
         }
-        if e - b >= 4.0 * holdback {
+        // THE STALL REGIME, criterion holdback-relative AND reachable. A segment held OPEN
+        // for at least one holdback is exactly where `pending_begin` measurably clamps the
+        // frontier (and so stalls the cut) -- one holdback IS the amount the clamp defers.
+        // The earlier `4*holdback` criterion was structurally UNREACHABLE on the profile
+        // that needs it most: `silence-active`'s `4*holdback = 12.88 s = 322 frames`
+        // exceeds MAX_BURST_FRAMES, so it measured long = 0 on all six seeds -- the
+        // pending_begin regime never occurred on the ONLY profile whose min_silence is
+        // live. Found by review, not by the floors, because the floor was global-only.
+        if dur >= holdback {
             a.long_segments += 1;
         }
+        a.min_dur = a.min_dur.min(dur);
+        a.max_dur = a.max_dur.max(dur);
     }
     a
 }
@@ -522,13 +576,7 @@ fn incremental_equals_full_replay() {
         (103, 40, &[1, 4, 11, 128]),
     ];
 
-    let mut grand = Achieved {
-        raw: 0,
-        gaps_in_band: 0,
-        gaps_below_reach: 0,
-        tiny_segments: 0,
-        long_segments: 0,
-    };
+    let mut grand = Achieved::zero();
     let mut tot_straddles = 0usize;
     let mut tot_emissions = 0usize;
     let mut tot_compared = 0usize;
@@ -537,13 +585,7 @@ fn incremental_equals_full_replay() {
     for (pname, seg_cfg, drv) in cfg_profiles() {
         let holdback = holdback_of(&seg_cfg);
         let reach = true_reach_of(&seg_cfg);
-        let mut prof = Achieved {
-            raw: 0,
-            gaps_in_band: 0,
-            gaps_below_reach: 0,
-            tiny_segments: 0,
-            long_segments: 0,
-        };
+        let mut prof = Achieved::zero();
         for &(seed, bursts, chunks) in cases {
             let mut rng = Rng::new(seed);
             let (scalars, plan) = gen_stream(&mut rng, &seg_cfg, bursts);
@@ -583,11 +625,7 @@ fn incremental_equals_full_replay() {
 
                 if chunk == chunks[0] {
                     let a = achieved(&got.raw, &seg_cfg);
-                    prof.raw += a.raw;
-                    prof.gaps_in_band += a.gaps_in_band;
-                    prof.gaps_below_reach += a.gaps_below_reach;
-                    prof.tiny_segments += a.tiny_segments;
-                    prof.long_segments += a.long_segments;
+                    prof.fold(&a);
                     println!(
                         "MEASURE oracle {label}: planned_bursts={} tiny_planned={} | raw={} \
                          gaps_in_band={} gaps_below_reach={} tiny={} long={} | emissions={} \
@@ -610,16 +648,27 @@ fn incremental_equals_full_replay() {
         println!(
             "MEASURE oracle PROFILE {pname}: holdback={holdback:.5} true_reach={reach:.5} \
              band=({reach:.5}, {holdback:.5}] min_silence={:?} raw={} gaps_in_band={} \
-             gaps_below_reach={} tiny={} long={}",
+             gaps_below_reach={} tiny={} long={} raw_dur=[{:.5}, {:.5}] \
+             tiny_thresh={:.5} long_thresh={:.5}",
             seg_cfg.min_silence,
             prof.raw,
             prof.gaps_in_band,
             prof.gaps_below_reach,
             prof.tiny_segments,
-            prof.long_segments
+            prof.long_segments,
+            prof.min_dur,
+            prof.max_dur,
+            seg_cfg.min_speech.iter().cloned().fold(0.0f64, f64::max),
+            holdback
         );
-        // PER PROFILE: every profile must reach both gap regimes, so no profile is a
-        // decorative repeat of another.
+        // PER PROFILE, ALL FOUR REGIMES. The gap floors were here from the start; the
+        // tiny/long floors were GLOBAL-only, which hid two structural holes a global sum
+        // cannot see (review I-2): `silence-active` measured long = 0 on every seed (its
+        // old `4*holdback` criterion exceeded the burst cap) and `suppress-heavy` measured
+        // tiny = 0 on every seed (its `max(min_speech)` sat just under the convolution's
+        // own floor on raw-segment duration) -- i.e. the two profiles that exist to
+        // exercise the live-min_silence and minimum-slack regimes were each missing one
+        // of the two segment regimes, and the global total covered for them.
         assert!(
             prof.gaps_in_band >= 3 && prof.gaps_below_reach >= 3,
             "adversarial coverage on profile {pname}: gaps_in_band={} gaps_below_reach={} \
@@ -627,11 +676,29 @@ fn incremental_equals_full_replay() {
             prof.gaps_in_band,
             prof.gaps_below_reach
         );
-        grand.raw += prof.raw;
-        grand.gaps_in_band += prof.gaps_in_band;
-        grand.gaps_below_reach += prof.gaps_below_reach;
-        grand.tiny_segments += prof.tiny_segments;
-        grand.long_segments += prof.long_segments;
+        assert!(
+            prof.tiny_segments >= 3,
+            "adversarial coverage on profile {pname}: tiny={} (raw durations spanned \
+             [{:.5}, {:.5}], threshold {:.5}) -- every profile must produce raw segments \
+             the suppress_short flip cases 2/5/8 can act on. If the measured minimum sits \
+             ABOVE the threshold the criterion is structurally unreachable on this profile, \
+             not unlucky: the convolution imposes a floor on raw-segment duration.",
+            prof.tiny_segments,
+            prof.min_dur,
+            prof.max_dur,
+            seg_cfg.min_speech.iter().cloned().fold(0.0f64, f64::max)
+        );
+        assert!(
+            prof.long_segments >= 3,
+            "adversarial coverage on profile {pname}: long={} (raw durations spanned \
+             [{:.5}, {:.5}], threshold {holdback:.5}) -- every profile must hold the \
+             hysteresis OPEN for at least one holdback, the regime where pending_begin \
+             clamps the frontier and stalls the cut",
+            prof.long_segments,
+            prof.min_dur,
+            prof.max_dur
+        );
+        grand.fold(&prof);
     }
 
     println!(
@@ -674,11 +741,16 @@ fn incremental_equals_full_replay() {
         grand.tiny_segments
     );
     assert!(
-        grand.long_segments >= 20,
-        "adversarial coverage: long segments (the pending_begin clamp regime, where the \
-         frontier and therefore the cut stall) must occur (got {})",
+        grand.long_segments >= 100,
+        "adversarial coverage: long segments (>= one holdback -- the pending_begin clamp \
+         regime, where the frontier and therefore the cut stall) must occur (got {})",
         grand.long_segments
     );
+    // NOTE (review minor 10, also recorded as a follow-on in `fast::stream`'s docs): this
+    // count is PER PUSH, so the fine chunkings inflate it -- chunk 1 re-counts the same
+    // straddling configuration on every push. It is honest as a coverage FLOOR and
+    // misleading as a headline; the quantity worth reporting is distinct straddling
+    // raw-segment indices.
     assert!(
         tot_straddles >= 100,
         "adversarial coverage: pushes whose retained window STARTS on a segment straddling \
@@ -694,20 +766,29 @@ fn incremental_equals_full_replay() {
 // (2) THE BOUNDED-COST LEG.
 // ---------------------------------------------------------------------------
 
-/// The retained-window bound, DERIVED from the config's own frontier/holdback arithmetic
-/// plus the experiment's burst cap -- no measured input.
+/// The retained-window bound, DERIVED from the config's own frontier/holdback arithmetic.
+/// CONFIG-ONLY -- no measured input and, since the review's minor 8, no generator
+/// parameter either: an earlier form carried the generator's `MAX_BURST_FRAMES` as an
+/// `open_span` term, which read as though the theorem were conditional on the experiment.
+/// It is not, and `fast::stream::StreamDecision`'s docs carry the stronger argument this
+/// mirrors: a long OPEN segment widens the window but CANNOT add retained segments,
+/// because no raw segment CLOSES while one is open.
 ///
 ///   limit  = cut_time - 2*holdback                        (the cut invariant)
 ///   cut_time >= frontier_now - holdback                   (cut_time is a running max)
-///   now - frontier <= max(conv_delay + dt, open_span)     (the three frontier terms;
+///   now - frontier <= max(conv_delay + dt, open_age)      (the three frontier terms;
 ///                                                          the third clamps to an OPEN
 ///                                                          segment's begin)
-///   => window = now - limit <= 3*holdback + max(conv_delay + dt, open_span)
 ///
-/// and at most one raw segment is LABELED per convolved value (`HystState::advance`
-/// returns at most one), while a retained segment's label time lies in `(limit, now]`, so
-/// at most `floor(window/dt) + 1` of them are retained -- plus one for the anchor segment
-/// the cut always keeps.
+/// If the third term dominates (a stall), every CLOSED raw segment in the window began
+/// before the open one did, so their begins lie in `(limit, pending_begin]` -- and there
+/// `frontier == pending_begin`, so that width is `<= 3*holdback`. Otherwise
+/// `now - frontier <= conv_delay + dt` and the width is `<= 3*holdback + conv_delay + dt`.
+/// Either way the CLOSED segments occupy a window of at most the latter. At most one raw
+/// segment is LABELED per convolved value (`HystState::advance` returns at most one) and a
+/// retained segment's label time lies in that window, so at most `floor(width/dt) + 1` are
+/// retained -- plus the anchor the cut always keeps, plus at most one just-closed segment
+/// from a stall.
 ///
 /// IT IS DELIBERATELY LOOSE, and that is worth stating plainly: the last step assumes the
 /// hysteresis can close a segment at EVERY grid step, which the area gating makes
@@ -724,11 +805,10 @@ fn derived_retained_bound(seg_cfg: &SegmenterConfig, drv: &DriverConfig) -> usiz
         _ => 0,
     };
     let conv_delay = conv_half as f64 * DT;
-    // The generator caps a burst at MAX_BURST_FRAMES, and the hysteresis closes it at the
-    // falling edge one convolution lookahead later.
-    let open_span = (MAX_BURST_FRAMES + conv_half + 1) as f64 * DT;
-    let window = 3.0 * holdback + (conv_delay + DT).max(open_span);
-    2 + (window / DT).floor() as usize
+    let window = 3.0 * holdback + conv_delay + DT;
+    // +2: the anchor segment the cut always retains, and at most one just-closed segment
+    // carried over from a stall.
+    3 + (window / DT).floor() as usize
 }
 
 /// The DISCRIMINATING retained-window pin: measured worst 5 (over every profile x seed x
@@ -840,8 +920,13 @@ fn wall_clock_is_recorded_not_asserted() {
     let inc_ms = t1.elapsed().as_secs_f64() * 1e3;
 
     let pushes = scalars.len().div_ceil(64);
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     println!(
-        "MEASURE wall-clock (debug build, informational): rows={} pushes={pushes} raw={} \
+        "MEASURE wall-clock ({profile} build, informational): rows={} pushes={pushes} raw={} \
          audio_s={audio_dur:.1} | full_replay={full_ms:.1} ms incremental={inc_ms:.1} ms \
          speedup={:.1}x | per-push full={:.1} us incremental={:.1} us | max_retained \
          full={} incremental={}",
