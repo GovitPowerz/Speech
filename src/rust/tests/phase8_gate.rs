@@ -591,6 +591,13 @@ fn validation_bails() {
         "slstm bail message: {msg}"
     );
 
+    // The CAUSAL direction on THIS config still bails -- but for a DIFFERENT, and
+    // sharper, reason since phase-10 Task 8. `classify_fast_shape` used to refuse
+    // `(lstm, forward)` outright; `fast::cells::FastLstm` implemented that shape, so the
+    // config now reaches the causal arm and is refused by the WINDOWING rule instead:
+    // tier2 carries `BLSTM_window 3.25` (-> `window_size 163`), and a causal cell's state
+    // would be reset at every window boundary (spec S5.3). The refusal is the one that
+    // matters for streaming and it is asserted here in its own words.
     let mut m = parse(&text);
     m.insert("BLSTM_Direction".into(), "forward".into());
     let hidden: usize = m["BLSTM_LSTMNeuronNb"]
@@ -608,7 +615,7 @@ fn validation_bails() {
     m.insert("BLSTM_OutputNeuronNb".into(), out.join(","));
     let msg = bail_msg(StreamingSession::new(&m, rate, 1));
     assert!(
-        msg.contains("Direction 'forward' is not supported on the fast inference path"),
+        msg.contains("causal streaming requires the plain regime"),
         "causal-direction bail message: {msg}"
     );
 

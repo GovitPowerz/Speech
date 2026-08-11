@@ -9,6 +9,17 @@
 //! `NeuralNetwork.hpp:251-362`) reads them and threads the `inv_sub_sample`
 //! (`:136-145`) delta inflation + running `invSubSamplingRatio` through the
 //! reverse-order layer loop.
+//!
+//! PHASE 10 (spec S7) added ONE port-only field, [`Network::retain_layers_output`], and
+//! it is this file's whole footprint in that task. It is the phase's declared
+//! SANCTIONED behaviour-free touch class -- the one diff inside `nn/` but outside
+//! `nn/cells/` -- adjudicated in the spec up front rather than argued after the fact:
+//! `_LayersOutput` is a BACKWARD-ONLY consumer (inside `drive` it is the inter-layer
+//! working buffer of a single call; the only reader that outlives the call is
+//! `drive_backward`, and there is no accessor), so a net whose backward can never run
+//! may drop it with no observable forward difference. R2 names the committed golden
+//! suite byte-green as the arbiter of that claim. See the field's own doc for the
+//! mechanism and `RESULTS.md`'s Task-9 row for the memory it buys back.
 
 use ndarray::Array2;
 
@@ -210,6 +221,23 @@ pub struct Network<L: Layer> {
     /// Retained intermediate outputs (`_LayersOutput`), one per non-final layer; the
     /// Phase 3 backward pass reads them. Filled by `feed_forward`/`feed_forward_reverse`.
     layers_output: Vec<Array2<f64>>,
+    /// PORT-ONLY, phase 10 spec S7 -- the phase's ONE adjudicated behaviour-free touch
+    /// class inside `nn/` but outside `nn/cells/` (spec S7 declares it up front; R2 names
+    /// the committed golden suite byte-green as its arbiter).
+    ///
+    /// `true` (the default, and every pre-phase-10 behaviour) keeps `layers_output` alive
+    /// after `drive` returns; `false` clears it on the way out. Behaviour-free because
+    /// `layers_output` has NO forward-path reader that outlives the call: inside `drive` it
+    /// is the inter-layer working buffer (layer `jj` writes what layer `jj+1` reads in the
+    /// SAME call, which is why the clear happens at the END, never in place of the writes),
+    /// and the only reader that survives the call is `drive_backward`. There is no
+    /// accessor, so no caller outside this module can observe the difference.
+    ///
+    /// Flipped at CONSTRUCTION only (`BlstmNetwork::set_inference_only`, keyed off
+    /// `BackPropagationActivated` -- NEVER off `Epochs`, the F11 lesson), so a net either
+    /// retains for its whole life or never does. A backward after a non-retaining forward
+    /// bails LOUDLY in `drive_backward` rather than folding a stale or empty buffer.
+    retain_layers_output: bool,
 }
 
 impl<L: Layer> Network<L> {
@@ -257,6 +285,38 @@ impl<L: Layer> Network<L> {
             sub_sampling_ratios,
             layers,
             layers_output,
+            retain_layers_output: true,
+        }
+    }
+
+    /// Phase 10 spec S7: turn the `layers_output` retention off (inference-only) or back on.
+    ///
+    /// Turning it OFF also drops whatever the last forward left behind, so a subsequent
+    /// backward hits the loud bail instead of folding a stale buffer from an earlier
+    /// sequence.
+    pub fn set_retain_layers_output(&mut self, retain: bool) {
+        self.retain_layers_output = retain;
+        if !retain {
+            self.clear_layers_output();
+        }
+    }
+
+    /// Whether this network retains its intermediate layer outputs (spec S7; `true` by
+    /// default).
+    pub fn retains_layers_output(&self) -> bool {
+        self.retain_layers_output
+    }
+
+    /// Mutable access to the layer stack, so a concrete instantiation (`Network<CellLayer>`)
+    /// can reach its cells' own inherent methods -- phase 10 spec S7 threads
+    /// `set_retain_cache` this way, WITHOUT widening the 10-method `Layer` trait.
+    pub fn layers_mut(&mut self) -> &mut [L] {
+        &mut self.layers
+    }
+
+    fn clear_layers_output(&mut self) {
+        for lo in &mut self.layers_output {
+            *lo = Array2::zeros((0, 0));
         }
     }
 
@@ -391,6 +451,13 @@ impl<L: Layer> Network<L> {
                 self.layers_output[jj] = buf;
             }
         }
+
+        // Spec S7: the retention, and the ONE place it is skipped. Deliberately AFTER the
+        // loop -- the writes above are the inter-layer working buffer this same call reads
+        // back, so only their survival past the call is optional.
+        if !self.retain_layers_output {
+            self.clear_layers_output();
+        }
     }
 
     /// `feedForwardDouble` (`:242-249`): hcat `first | second` into an
@@ -479,6 +546,22 @@ impl<L: Layer> Network<L> {
         deltas: &Array2<f64>,
         reverse: bool,
     ) -> Array2<f64> {
+        // Spec S7: an inference-only network dropped its intermediate outputs, so every
+        // hidden layer's retained input/output is gone. Bail LOUDLY rather than fold
+        // deltas against empty buffers -- a silently wrong gradient is the one failure
+        // mode this class of change must never produce. (A single-layer net never touches
+        // `layers_output` at all, but the bail stays unconditional: the flag says the
+        // CALLER promised no backward, and honouring that promise uniformly is what makes
+        // the promise checkable.)
+        assert!(
+            self.retain_layers_output,
+            "Network::feed_backward/_reverse/_double on a network constructed inference-only \
+             (retain_layers_output = false, phase-10 spec S7): the forward dropped its \
+             intermediate layer outputs, so no gradient can be folded here. This net was \
+             built with BackPropagationActivated off; turn backprop on for it (or call \
+             set_retain_layers_output(true) before the forward) if a backward is really \
+             wanted."
+        );
         // :252-253 deltas_out empty, invSubSamplingRatio = 1.
         let mut deltas_out: Array2<f64> = Array2::zeros((0, 0));
         let mut inv_sub_sampling_ratio = 1usize;
@@ -880,5 +963,149 @@ mod forward_only_double_tests {
         assert!(output.iter().all(|v| v.is_finite()));
         // Non-vacuity: the dense head really produced a softmax row, not zeros.
         assert!((output.row(0).sum() - 1.0).abs() < 1e-12);
+    }
+}
+
+// ==== Phase 10 Task 9 / spec S7: inference-only `layers_output` gating ====
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use crate::nn::cells::CellLayer;
+
+    const IN: usize = 3;
+    const HID: usize = 4;
+    const OUT: usize = 2;
+    const T: usize = 6;
+
+    /// A MULTI-layer net: the single-layer branch of `drive` never touches
+    /// `layers_output` at all, so it could not tell the two flag states apart.
+    fn net() -> Network<CellLayer> {
+        let mut n = Network::<CellLayer>::new(vec![IN, HID, OUT], vec![1, 1], |_id, i, o| {
+            CellLayer::Lstm(LstmLayer::new(i, o, true, true, true))
+        });
+        let nb = n.nb_of_weights();
+        let w: Vec<f64> = (0..nb)
+            .map(|k| 0.21 - 0.0043 * ((k % 29) as f64) + 0.0017 * ((k % 7) as f64))
+            .collect();
+        n.set_weights(&w);
+        n
+    }
+
+    fn input() -> Array2<f64> {
+        Array2::from_shape_fn((T, IN), |(r, c)| {
+            0.3 + 0.11 * (r as f64) - 0.19 * (c as f64)
+        })
+    }
+
+    fn run(n: &mut Network<CellLayer>, x: &Array2<f64>) -> Array2<f64> {
+        let mut out = Array2::<f64>::zeros((x.nrows(), OUT));
+        n.feed_forward(x, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_fresh_network_retains_its_layer_outputs() {
+        assert!(net().retains_layers_output());
+    }
+
+    /// THE BEHAVIOUR-FREE CLAIM: `layers_output` is the inter-layer working buffer of a
+    /// SINGLE `drive` call, so clearing it on the way out cannot move the output. Both
+    /// drivers (forward and reverse) are covered -- they share `drive`, but the reverse
+    /// leg is what proves the clear was not accidentally put inside the layer loop.
+    #[test]
+    fn forward_is_bit_identical_without_retention() {
+        let x = input();
+        let retained = run(&mut net(), &x);
+        let mut lean = net();
+        lean.set_retain_layers_output(false);
+        assert_eq!(retained, run(&mut lean, &x));
+
+        let mut a = net();
+        let mut b = net();
+        b.set_retain_layers_output(false);
+        let (mut oa, mut ob) = (
+            Array2::<f64>::zeros((T, OUT)),
+            Array2::<f64>::zeros((T, OUT)),
+        );
+        a.feed_forward_reverse(&x, &mut oa);
+        b.feed_forward_reverse(&x, &mut ob);
+        assert_eq!(oa, ob);
+    }
+
+    /// ... and the buffers really are released (the memory claim). The retaining twin is
+    /// the non-vacuity contrast: it must hold a `T x HID` block.
+    #[test]
+    fn an_inference_only_forward_releases_the_layer_outputs() {
+        let x = input();
+        let mut lean = net();
+        lean.set_retain_layers_output(false);
+        run(&mut lean, &x);
+        assert!(lean.layers_output.iter().all(|lo| lo.dim() == (0, 0)));
+
+        let mut keeper = net();
+        run(&mut keeper, &x);
+        assert_eq!(keeper.layers_output[0].dim(), (T, HID));
+    }
+
+    /// THE R6 CLONE NOTE (spec S7): the per-lane bag clone deep-copies these buffers, so
+    /// under inference-only the clone cost dies with them.
+    #[test]
+    fn a_clone_after_an_inference_only_forward_carries_no_layer_outputs() {
+        let mut lean = net();
+        lean.set_retain_layers_output(false);
+        run(&mut lean, &input());
+        let twin = lean.clone();
+        assert!(!twin.retains_layers_output());
+        assert!(twin.layers_output.iter().all(|lo| lo.dim() == (0, 0)));
+    }
+
+    /// Turning retention off drops what an earlier forward left behind (no stale buffer
+    /// can survive into a later backward).
+    #[test]
+    fn turning_retention_off_drops_the_existing_buffers() {
+        let mut n = net();
+        run(&mut n, &input());
+        assert_eq!(n.layers_output[0].dim(), (T, HID));
+        n.set_retain_layers_output(false);
+        assert!(n.layers_output.iter().all(|lo| lo.dim() == (0, 0)));
+    }
+
+    #[test]
+    #[should_panic(expected = "constructed inference-only")]
+    fn backward_after_an_inference_only_forward_panics() {
+        let x = input();
+        let mut n = net();
+        n.set_retain_layers_output(false);
+        let out = run(&mut n, &x);
+        let seed = Array2::from_shape_fn((T, OUT), |(r, c)| 0.05 * (r as f64) - 0.02 * (c as f64));
+        let _ = n.feed_backward(&x, &out, &seed);
+    }
+
+    /// The reverse driver shares `drive_backward`, so it must bail the same way -- pinned
+    /// because the two public entry points are what callers actually reach for.
+    #[test]
+    #[should_panic(expected = "constructed inference-only")]
+    fn reverse_backward_after_an_inference_only_forward_panics() {
+        let x = input();
+        let mut n = net();
+        n.set_retain_layers_output(false);
+        let mut out = Array2::<f64>::zeros((T, OUT));
+        n.feed_forward_reverse(&x, &mut out);
+        let seed = Array2::from_shape_fn((T, OUT), |(r, c)| 0.05 * (r as f64) - 0.02 * (c as f64));
+        let _ = n.feed_backward_reverse(&x, &out, &seed);
+    }
+
+    /// The contrast that makes the two panics a GATE: retention on, the backward runs and
+    /// returns full-width deltas.
+    #[test]
+    fn backward_still_works_when_retention_is_on() {
+        let x = input();
+        let mut n = net();
+        let out = run(&mut n, &x);
+        let seed = Array2::from_shape_fn((T, OUT), |(r, c)| 0.05 * (r as f64) - 0.02 * (c as f64));
+        let d = n.feed_backward(&x, &out, &seed);
+        assert_eq!(d.dim(), (T, IN));
+        assert!(d.iter().all(|v| v.is_finite()));
     }
 }

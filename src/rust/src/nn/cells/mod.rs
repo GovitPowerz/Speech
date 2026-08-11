@@ -14,11 +14,13 @@
 //! `CellLayer` implements `Layer` by match delegation -- the
 //! `engine::bag_of_processors::Processor` precedent: a CLOSED set, static dispatch,
 //! the concrete methods stay reachable, no trait-object gymnastics. Variants grew
-//! with the phase and the set is now COMPLETE for the exact tree: `Lstm` (Task 1),
-//! `Slstm` (Task 2) and `Mamba` (Task 3) all build from
-//! `BlstmNetwork::from_config` -- no cell is typed-bailed there any more, and a
-//! FUTURE variant is forced to declare itself by that ctor's exhaustive
-//! `match cell_type` (a compile error, not a runtime bail). The
+//! with the phases and every one of them builds from `BlstmNetwork::from_config`:
+//! `Lstm` (P9 Task 1), `Slstm` (P9 Task 2), `Mamba` (P9 Task 3) and `Cfc` (P10
+//! Task 1) -- no cell is typed-bailed there, and a FUTURE variant is forced to
+//! declare itself by that ctor's exhaustive `match cell_type` (a compile error, not
+//! a runtime bail). `Cfc` is the first variant added AFTER the seam was declared
+//! complete, and it cost exactly what the seam promised: this enum + its arms, a
+//! `Layer` impl inside `cells/`, the FD-tier cases, and the `KEY_TABLE` rows. The
 //! existing `impl Layer for LstmLayer` in [`super::network`] STAYS (the phase-2/3
 //! unit + golden suites drive `LstmLayer` directly); `CellLayer::Lstm` wraps that
 //! same struct, so every f64 operation below the enum is byte-untouched -- the wrap
@@ -43,11 +45,13 @@
 //! legacy source): it is documented in module docs + `RESULTS.md`, NEVER
 //! `IMPROVEMENTS.md` (which tracks legacy-quirk debt only -- the phase-7 rule).
 
+pub mod cfc;
 pub mod mamba;
 pub mod slstm;
 
 use ndarray::Array2;
 
+pub use cfc::CfcLayer;
 pub use mamba::MambaLayer;
 pub use slstm::SlstmLayer;
 
@@ -72,6 +76,38 @@ pub enum CellLayer {
     Slstm(SlstmLayer),
     /// Mamba/S6 in recurrent form ([`MambaLayer`], spec S3; Task 3).
     Mamba(MambaLayer),
+    /// The closed-form continuous-time cell ([`CfcLayer`], phase-10 spec S1; Phase 10
+    /// Task 1) -- the FOURTH variant, added through exactly the seam this enum's doc
+    /// promises: a variant, a `Layer` impl inside `cells/`, and the arms below.
+    Cfc(CfcLayer),
+}
+
+impl CellLayer {
+    /// Phase 10 spec S7: propagate the inference-only retention flag to whichever cells
+    /// keep a backward-only cache of their own.
+    ///
+    /// An INHERENT method on the concrete enum, NOT an eleventh `Layer` method: the trait
+    /// stays exactly the ten the phase-9 seam defined, and `Network<L>` never learns that
+    /// cell-level retention exists (it owns its own `retain_layers_output` flag, a separate
+    /// axis covering the inter-layer buffers).
+    ///
+    /// SCOPE, stated exactly: this phase gates MAMBA's cache only, because that is the one
+    /// the phase-9 bench measured as visibly expensive (`h` and `abar` are each
+    /// `T x (d_inner d_state)`). The other three cells are NOT cache-free -- every one of
+    /// them carries per-timestep forward caches the backward reads:
+    /// [`LstmLayer`] `gates`/`cells_in`/`cell_states`, [`SlstmLayer`]
+    /// `gates`/`cell_states`/`norm_states`/`m_states`, [`CfcLayer`]
+    /// `z_cache`/`backbone_pre`/`backbone_post`/`heads`, each on the order of `T x 6-7 O`.
+    /// Gating those is a NAMED FOLLOW-ON with a real (if smaller) win, not a no-op because
+    /// there is nothing to do. Their arms here are no-ops only because this task did not
+    /// measure or pin them -- and a no-op is the SAFE direction, since it means "always
+    /// retain": a cell whose arm is never filled in loses memory, never correctness.
+    pub fn set_retain_cache(&mut self, retain: bool) {
+        match self {
+            CellLayer::Lstm(_) | CellLayer::Slstm(_) | CellLayer::Cfc(_) => {}
+            CellLayer::Mamba(l) => l.set_retain_cache(retain),
+        }
+    }
 }
 
 impl Layer for CellLayer {
@@ -80,6 +116,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::feed_forward(l, input, output, last_layer),
             CellLayer::Slstm(l) => SlstmLayer::feed_forward(l, input, output, last_layer),
             CellLayer::Mamba(l) => MambaLayer::feed_forward(l, input, output, last_layer),
+            CellLayer::Cfc(l) => CfcLayer::feed_forward(l, input, output, last_layer),
         }
     }
 
@@ -93,6 +130,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::feed_forward_reverse(l, input, output, last_layer),
             CellLayer::Slstm(l) => SlstmLayer::feed_forward_reverse(l, input, output, last_layer),
             CellLayer::Mamba(l) => MambaLayer::feed_forward_reverse(l, input, output, last_layer),
+            CellLayer::Cfc(l) => CfcLayer::feed_forward_reverse(l, input, output, last_layer),
         }
     }
 
@@ -129,6 +167,10 @@ impl Layer for CellLayer {
                 inv_sub_sampling_ratio,
                 last_layer,
             ),
+            // The CfC inherent backward takes only what it consumes (phase-10 T3
+            // rider I-1): `input`/`output`/`last_layer` are not arguments to narrow
+            // away here, they simply do not exist on that signature.
+            CellLayer::Cfc(l) => CfcLayer::feed_backward(l, deltas, inv_sub_sampling_ratio),
         }
     }
 
@@ -165,6 +207,7 @@ impl Layer for CellLayer {
                 inv_sub_sampling_ratio,
                 last_layer,
             ),
+            CellLayer::Cfc(l) => CfcLayer::feed_backward_reverse(l, deltas, inv_sub_sampling_ratio),
         }
     }
 
@@ -173,6 +216,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::get_weights_derivatives(l, out),
             CellLayer::Slstm(l) => SlstmLayer::get_weights_derivatives(l, out),
             CellLayer::Mamba(l) => MambaLayer::get_weights_derivatives(l, out),
+            CellLayer::Cfc(l) => CfcLayer::get_weights_derivatives(l, out),
         }
     }
 
@@ -181,6 +225,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::reset_weights_derivatives(l),
             CellLayer::Slstm(l) => SlstmLayer::reset_weights_derivatives(l),
             CellLayer::Mamba(l) => MambaLayer::reset_weights_derivatives(l),
+            CellLayer::Cfc(l) => CfcLayer::reset_weights_derivatives(l),
         }
     }
 
@@ -189,6 +234,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::ponderate_weights_derivatives(l, factor),
             CellLayer::Slstm(l) => SlstmLayer::ponderate_weights_derivatives(l, factor),
             CellLayer::Mamba(l) => MambaLayer::ponderate_weights_derivatives(l, factor),
+            CellLayer::Cfc(l) => CfcLayer::ponderate_weights_derivatives(l, factor),
         }
     }
 
@@ -197,6 +243,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::set_weights(l, flat),
             CellLayer::Slstm(l) => SlstmLayer::set_weights(l, flat),
             CellLayer::Mamba(l) => MambaLayer::set_weights(l, flat),
+            CellLayer::Cfc(l) => CfcLayer::set_weights(l, flat),
         }
     }
 
@@ -205,6 +252,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::get_weights(l, out),
             CellLayer::Slstm(l) => SlstmLayer::get_weights(l, out),
             CellLayer::Mamba(l) => MambaLayer::get_weights(l, out),
+            CellLayer::Cfc(l) => CfcLayer::get_weights(l, out),
         }
     }
 
@@ -213,6 +261,7 @@ impl Layer for CellLayer {
             CellLayer::Lstm(l) => LstmLayer::nb_of_weights(l),
             CellLayer::Slstm(l) => SlstmLayer::nb_of_weights(l),
             CellLayer::Mamba(l) => MambaLayer::nb_of_weights(l),
+            CellLayer::Cfc(l) => CfcLayer::nb_of_weights(l),
         }
     }
 }

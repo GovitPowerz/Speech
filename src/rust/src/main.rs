@@ -107,6 +107,28 @@ fn main() {
         return;
     }
 
+    // Port-only tooling (Phase 10 Task 10), NOT a legacy CLI surface: the per-
+    // utterance LID streaming replay -- the deferral that fell off the phase-9
+    // spec's tracked list. `speech stream-lid [--lang=N] config_file input_file`.
+    // Handled before `parse_cli` (own arg grammar, not a legacy mode flag), same
+    // precedent as `stream` / `bench` / `--convert-config` above.
+    if args.len() >= 2 && args[1] == "stream-lid" {
+        let inv = match speech::cli::parse_stream_lid_args(&args[2..]) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("Error: {e}\n");
+                eprintln!("Usage : {progname} stream-lid [--lang=N] config_file input_file");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = speech::stream_lid_cli::run_stream_lid(&inv.config, &inv.input, inv.lang) {
+            // `{e:#}` (the full anyhow cause chain, the bench/stream/PyO3 convention).
+            eprintln!("Error: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // legacy: :43-64 pass argv[1..] (mode + overrides/configs) to the parser;
     // argv[0] (progname) is not part of the parsed slice.
     let invocation = match parse_cli(&args[1..]) {

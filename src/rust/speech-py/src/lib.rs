@@ -11,7 +11,7 @@
 //! The copy site is doc-commented on each method. Zero-copy is a later
 //! hot-loop concern.
 
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, ToPyArray};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -19,6 +19,7 @@ use pyo3::types::PyDict;
 use speech::cli::Mode;
 use speech::engine::corpus_processor::CorpusProcessor;
 use speech::fast::stream::{EmittedSegment, StreamingSession as RsStreamingSession};
+use speech::fast::stream_lid::{LidAggregate, StreamingLidSession as RsStreamingLidSession};
 use speech::legacy_config::parse_legacy_config as parse_legacy_config_rs;
 use speech::stream_cli::class_str;
 use speech::toml_config::toml_to_map as toml_to_map_rs;
@@ -293,6 +294,109 @@ impl StreamingSession {
     }
 }
 
+/// The finalized/running LID aggregate as `(classification_errors, confusion,
+/// is_lid_correct, predicted_language, segments_count)`
+/// (`speech::fast::stream_lid::LidAggregate`'s fields, in declaration order). `confusion`
+/// is a fresh numpy array (`IntoPyArray`, moved from the owned `Array2` -- no separate
+/// clone needed since the aggregate is consumed here).
+type LidAggTuple<'py> = (Vec<f64>, Bound<'py, PyArray2<f64>>, bool, usize, i32);
+
+/// One utterance's streaming LID score as `(scores, argmax, is_correct,
+/// running_aggregate)` (`speech::fast::stream_lid::UtteranceScore`'s fields, in
+/// declaration order).
+type UtteranceTuple<'py> = (Vec<f64>, Option<usize>, Option<bool>, LidAggTuple<'py>);
+
+/// Convert an owned `LidAggregate` into its Python tuple, moving `confusion` into a
+/// fresh numpy array.
+fn agg_to_tuple(py: Python<'_>, a: LidAggregate) -> LidAggTuple<'_> {
+    (
+        a.classification_errors,
+        a.confusion.into_pyarray(py),
+        a.is_lid_correct != 0,
+        a.predicted_language,
+        a.segments_count,
+    )
+}
+
+/// The per-utterance streaming LID session (Phase 10 Task 10): a thin wrapper over
+/// `speech::fast::stream_lid::StreamingLidSession` (the online twin of the offline fast
+/// Mode-7 LID Twin, `fast::driver::FastTwinLid`) -- the deferral that fell off the
+/// phase-9 spec's own Deferred list (spec S8). Construct from a config PATH + the
+/// utterances-stream `rate` (Hz -- the phSeq/cep readers hardcode 8000.0) + the eval
+/// target `lang_index`, then drive it one `external_features` entry ("utterance") at a
+/// time via `push_utterance` / `finish`. The LID net loads from the config's
+/// `BLSTM_LID_weightsFile` (mirroring `StreamingSession`'s own config-driven weight
+/// load, the T4/T5/T7 precedent `fast/stream_lid.rs`'s module doc names) -- construction
+/// bails if `BLSTM_LID_Mode != 7`, the LID window does not resolve to TRUNCATE, or no
+/// net loads.
+#[pyclass]
+struct StreamingLidSession {
+    inner: RsStreamingLidSession,
+}
+
+#[pymethods]
+impl StreamingLidSession {
+    /// Build from a config PATH (dispatched by extension like `Engine::new`/
+    /// `StreamingSession::new`: `.toml` -> `toml_config::toml_to_map`, else the legacy
+    /// `.config` parser), the stream `rate` (Hz), and the eval target `lang_index`
+    /// (clamped into `[0, class_nb)` by the Rust session -- a negative value targets
+    /// class 0). COPY: the config is read from disk + parsed into an owned map. The LID
+    /// weight pack is NOT passed explicitly here (mirrors `StreamingSession::new`'s
+    /// config-driven load): `None` defers to the config's `BLSTM_LID_weightsFile`.
+    #[new]
+    fn new(config_path: &str, rate: f64, lang_index: i32) -> PyResult<Self> {
+        let text = std::fs::read_to_string(config_path).map_err(|e| {
+            PyRuntimeError::new_err(format!("cannot read config file '{config_path}': {e}"))
+        })?;
+        let map = if config_path.ends_with(".toml") {
+            toml_to_map_rs(&text).map_err(|e| {
+                PyRuntimeError::new_err(format!("invalid TOML config '{config_path}': {e:#}"))
+            })?
+        } else {
+            parse_legacy_config_rs(&text)
+        };
+        let inner = RsStreamingLidSession::new(&map, rate, lang_index, None).map_err(to_pyerr)?;
+        Ok(StreamingLidSession { inner })
+    }
+
+    /// Fold ONE utterance -- an `(frames x feat_dim)` feature matrix, matching one
+    /// offline `external_features` entry (a phSeq one-hot block / a cep record) -- and
+    /// return `(scores, argmax, is_correct, running_aggregate)`: `scores` is this
+    /// utterance's per-block LID scores (empty iff skipped, too short / below
+    /// `MinNbOfFrames`), `argmax`/`is_correct` are `None` iff skipped, and
+    /// `running_aggregate` is the finalized snapshot after folding this utterance. COPY:
+    /// the numpy array is read into an owned `Array2<f64>` while the GIL is held, then
+    /// the GIL is RELEASED (`Python::detach`) for the fold itself.
+    fn push_utterance<'py>(
+        &mut self,
+        py: Python<'py>,
+        feat: PyReadonlyArray2<'_, f64>,
+    ) -> PyResult<UtteranceTuple<'py>> {
+        let owned = feat.as_array().to_owned();
+        let sc = py.detach(|| self.inner.push_utterance(&owned));
+        Ok((
+            sc.scores,
+            sc.argmax,
+            sc.is_correct,
+            agg_to_tuple(py, sc.running_aggregate),
+        ))
+    }
+
+    /// The finalized LID result on the utterances folded so far, as
+    /// `(classification_errors, confusion, is_lid_correct, predicted_language,
+    /// segments_count)` -- a pure snapshot (repeatable/idempotent; the session may keep
+    /// folding after a call). The GIL is RELEASED (`Python::detach`) for the read.
+    fn finish<'py>(&self, py: Python<'py>) -> LidAggTuple<'py> {
+        let agg = py.detach(|| self.inner.finish());
+        agg_to_tuple(py, agg)
+    }
+
+    /// The number of scored (not skipped) utterances folded so far.
+    fn scored_count(&self) -> i32 {
+        self.inner.scored_count()
+    }
+}
+
 #[pymodule]
 fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
@@ -300,5 +404,6 @@ fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_toml_config, m)?)?;
     m.add_class::<Engine>()?;
     m.add_class::<StreamingSession>()?;
+    m.add_class::<StreamingLidSession>()?;
     Ok(())
 }

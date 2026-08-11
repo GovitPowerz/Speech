@@ -409,7 +409,9 @@ budget to `0.001x`, confirmed the assertion fails, reverted -- see the task repo
 mutation is Task 10's mutation-battery item 7).
 
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
-R5):** future local runs of this exact recipe are expected to land within:
+R5).** SUPERSEDED for the memory half -- see Phase 10's f32-mel section (the widen is deleted; the
+SAD memory bound is now <= 0.85x of exact, measured 0.743x). Future local runs of this exact recipe
+are expected to land within:
 - SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
   widening tax above is real and expected, not a regression signal up to this ratio). HEADROOM
   NOTE: the 1.4x ceiling sits only ~9-10% above the measured 1.22-1.28x maxrss ratios, and the
@@ -441,6 +443,14 @@ periodogram into a fresh f64 `Array2`, then reuse the identical `apply_filter_ba
 target calls), not a fabricated f32 kernel. Measured (`cargo bench`, 100 samples/target, Apple M4
 Pro, `bench` profile):
 
+> **SUPERSEDED (Phase 10 Task 5) -- the `mel_apply_widened_f64` rows below are a PHASE-7
+> RECORD, not a live bench target.** `fast::mel32` landed a real f32 mel/DCT kernel at both
+> fast sites, the widen is DELETED, and the bench target was renamed `mel_apply_f32`
+> accordingly (`benches/kernels.rs`). Read the three `mel_apply_widened_f64` mentions in
+> this section as "what the phase-7 widen bridge cost, and why it was worth removing"; the
+> live numbers are in **Phase 10 -- the full-f32 mel front-end (Task 5, spec S4)** below.
+> Every other row in this table is still live.
+
 | target | path | scope | time |
 |---|---|---|---|
 | `matmul_seq_92x96` | exact | 92x23 * 23x96, f64 ascending loop | 57.408 us |
@@ -448,7 +458,7 @@ Pro, `bench` profile):
 | `gfft_1024` | exact | 1024-pt complex FFT, 2 real 1024-sample frames packed per call | 17.898 us/call (8.949 us/frame) |
 | `realfft_1024` | fast | 1024-sample real FFT, 1 frame per call | 0.765 us/call (= 0.765 us/frame) |
 | `mel_apply_513x20` | exact | 100x513 f64 periodogram already in hand -> log-mel | 24.135 us |
-| `mel_apply_widened_f64` | fast | SAME shape, f32->f64 widen (fresh alloc) + SAME `apply_filter_bank` | 58.309 us |
+| `mel_apply_widened_f64` (SUPERSEDED, see above) | fast | SAME shape, f32->f64 widen (fresh alloc) + SAME `apply_filter_bank` | 58.309 us |
 
 Reading: `faer_project_92x96` is **12.41x faster** than `matmul_seq_92x96` at the identical shape --
 the single biggest per-kernel win, and (with the LSTM recurrence itself unbenched here, see
@@ -458,7 +468,8 @@ driver of the SAD/LID wall-clock speedups above. `realfft_1024` is **23.4x faste
 frames, not one -- see `fast/pipeline.rs`'s equivalence proof) is normalized out; either framing is
 a large win.
 
-**FINDING (reported honestly, not hidden -- exactly the brief's ask):**
+**FINDING (reported honestly, not hidden -- exactly the brief's ask; SUPERSEDED by Phase 10
+Task 5, which is what this finding motivated -- see the callout above):**
 `mel_apply_widened_f64` is **2.42x SLOWER** than `mel_apply_513x20` at the identical shape, not
 faster. This is the PRECISE, measured answer to "where does the fast path spend relatively more
 time": the mandatory f32->f64 widen-and-fresh-allocate step (see the memory finding above) is a
@@ -1028,7 +1039,7 @@ wall-clock to within the ranges below.
 |---|---|---|---|---|---|---|
 | lstm / bidirectional (phase-6 baseline) | 3.25 windowed overlap | exact | 0.163284 [0.158799-0.171087] | 0.002177 | 53.73 | baseline |
 | lstm / bidirectional (phase-6 baseline) | 3.25 windowed overlap | fast | 0.035443 [0.035162-0.035613] | 0.000473 | 68.56 | **4.61x** |
-| lstm / forward (control) | 0, plain | exact | 0.098132 [0.097867-0.098532] | 0.001308 | 54.84 | n/a (fast typed-bails, S5.3) |
+| lstm / forward (control) | 0, plain | exact | 0.098132 [0.097867-0.098532] | 0.001308 | 54.84 | (was n/a; FILLED by phase-10 T8 -- **5.97x**, re-measured, see below) |
 | slstm / forward | 0, plain | exact | 0.096118 [0.095678-0.096488] | 0.001282 | 56.98 | baseline |
 | slstm / forward | 0, plain | fast | 0.019138 [0.018831-0.019292] | 0.000255 | 68.15 | **5.02x** |
 | mamba / forward | 0, plain | exact | 0.104328 [0.104099-0.104699] | 0.001391 | 107.82 | baseline |
@@ -1047,6 +1058,17 @@ exists to separate them, and it settles the question:
 - CELL effect (all forward, all window 0, exact path): LSTM 0.098132, sLSTM 0.096118 (**1.02x
   faster**), Mamba 0.104328 (**0.94x -- 6% SLOWER**). A wash.
 
+(PHASE-10 TASK 8 FOLLOW-UP: the `lstm / forward` fast cell is no longer `n/a` -- `FastLstm`
+landed and the row was RE-MEASURED end to end on the current build. The numbers live in the
+Task-8 section at the end of this file rather than being back-filled here, because this
+table's fast rows predate the Task-5 f32-mel front-end and mixing builds inside one table
+would make its ratios meaningless. The headline: fast-vs-exact **5.97x** on that row, and the
+REGIME decomposition below gains its missing FAST-tier half -- **1.95x**, against the 1.66x
+measured here on the exact tier. DO NOT DERIVE A FAST WALL-CLOCK FROM THIS TABLE'S ROW: the
+5.97x is the ratio of the Task-8 section's OWN re-measured PAIR (exact 0.104963 s / fast
+0.017587 s on the current build), not of the 0.098132 s exact wall recorded here on the
+phase-9 build. Dividing this row by 5.97 gives a number that was never measured.)
+
 So the causal cells buy their speed by being CAUSAL (no window recompute, half the recurrent
 stack), not by being cheaper per step than a peephole LSTM: every cell here is already O(T), and at
 this width (24 units, `d_state 16`, `d_conv 4`) Mamba's per-step block is slightly heavier than an
@@ -1059,8 +1081,990 @@ one place a cell choice is visibly expensive. That is the per-timestep SSM activ
 `Network` container retains unconditionally during the forward drive (the phase-7 scope note: the
 exact path keeps `layers_output` whether or not a backward follows). Reported, not tuned.
 
+> **BOTH MEMORY NUMBERS ARE SUPERSEDED (Phase 10), and by different tasks.** The ~68 MB fast
+> plateau became **~42 MB** once Task 5 deleted the f64 widen (see "the full-f32 mel front-end"),
+> and the 107.8 MB exact-Mamba row became **58.55 MB** once Task 9 stopped retaining
+> backward-only structures on an inference-only net (see "inference-only retention gating"),
+> which closes this paragraph's "one place a cell choice is visibly expensive" finding: Mamba
+> now sits 3.0 MB above the sLSTM control on the identical recipe. The rows above stay as the
+> phase-9 record of what was measured then.
+
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5),** the phase-7 local-vs-CI split: future local runs of this recipe are expected at fast-vs-exact
 wall speedup >= 3.5x on every row, causal-fast-vs-BLSTM-fast >= 1.3x, and fast maxrss within
-1.3x of the ~68 MB plateau. A reading meaningfully below these (not within the ranges above, which
+1.3x of the ~68 MB plateau (SUPERSEDED -- see Phase 10's f32-mel section: the plateau is now
+~42 MB). A reading meaningfully below these (not within the ranges above, which
 already carry headroom) is a FINDING to investigate; there is no automated enforcement.
+
+## Phase 10 -- the CfC cell (Tasks 1/2/3)
+
+The exact-f64 CfC record. NOTHING HERE WAS RE-MEASURED FOR THIS SECTION: every value is
+transcribed from the committed test that pins it, and each row carries its source, so this
+section can be re-derived by reading those files rather than by re-running anything. The cell
+itself is `src/rust/src/nn/cells/cfc.rs`; the tiers are the phase-9 harnesses reused unchanged
+(both are cell-agnostic, which is why the phase-9 filenames carry phase-10 rows). LINE NUMBERS
+BELOW ARE AS OF THIS COMMIT and every one is paired with the SYMBOL it points at -- prefer the
+symbol when they disagree (the phase's own citation-drift lesson: a later task inserting lines
+above a cited block silently invalidates the number, never the name).
+
+### The FD tier -- `src/rust/tests/phase9_cell_grad.rs::cfc_backward_matches_central_difference`
+
+Central differences vs the hand-derived analytic backward, per shape x 3 seeds, at
+`CFC_EPS = 1e-5` (`phase9_cell_grad.rs:754`; the value is MEASURED -- the doc records the
+`max_rel` column falling ~3 orders MONOTONICALLY as eps grows `1e-8 -> 1e-4`
+(`9.9e-3 / 1.9e-3 / 7.1e-5 / 1.7e-5 / 8.3e-6`), which is the roundoff signature; a wrong
+adjoint term is MULTIPLICATIVE and would be eps-INVARIANT).
+
+| shape `(t, in, out, B, L)` | `max_rel` (worst of 3 seeds) | `rel_pin` | `max_rel_major` | `major_pin` | resolvable |
+|---|---|---|---|---|---|
+| `(1, 3, 2, 4, 1)` | 8.126e-9 | 8.2e-8 | 8.126e-9 | 8.2e-8 | 46 of 54 |
+| `(7, 3, 2, 4, 1)` | 1.168e-7 | 1.2e-6 | 7.823e-9 | 7.9e-8 | 54 of 54 |
+| `(11, 5, 4, 8, 2)` | 2.398e-7 | 2.4e-6 | 2.653e-8 | 2.7e-7 | 260 of 260 |
+| `(23, 7, 3, 8, 1)` | **1.720e-5** | **1.8e-4** | **5.530e-8** | 5.6e-7 | 169 of 169 |
+
+Sources: the measured column is the doc block at `phase9_cell_grad.rs:764-770`; the pins are
+the four `CfcCase` literals at `:809-844`; the resolvable counts are the same doc block, and
+the test asserts them as an EXACT equality (`resolvable_floor == resolvable_structural`,
+`:868-869`) rather than a two-sided band, because nothing lands in the near-zero bucket by
+magnitude alone.
+
+- **The DISCRIMINATING bound is `max_rel_major`** (restricted to weights whose analytic
+  gradient is at least `1e-4` of the pack maximum): MEASURED at **`<= 5.530e-8`** across every
+  shape and seed, pinned at `5.6e-7` -- i.e. ~180x under the `1e-4` STOP threshold that the
+  test asserts in-body before running anything (`:851-857`).
+- **THE ONE PIN ABOVE 1e-4 IS DECLARED, NOT BURIED**: `t=23`'s `rel_pin` is `1.8e-4`, above
+  the STOP threshold and deliberately so (the two mamba rows set the precedent). It is fixed
+  by ONE weight on ONE seed (seed 2, `w[79]`) whose analytic derivative is `1.84e-6` -- `1e-6`
+  OF the pack maximum 1.79 -- so its relative error is the central-difference floor over a
+  near-zero denominator. `rel_pin` is explicitly NOT a sanctioned error budget; `major_pin` is
+  what a wrong adjoint trips, and that is what the in-test STOP guards (`:851-857`).
+- **THE NEAR-ZERO BUCKET IS EXACTLY 0.0, and is asserted as an EQUALITY** (`:884-897`) --
+  STRONGER than sLSTM's ~1e-10 floor. At `T > 1` the bucket is EMPTY (every weight
+  resolvable); at `T = 1` it holds exactly the `B*H` dead `W_bb` state columns, and perturbing
+  one cannot move the loss by a single bit (it multiplies `h_{-1} = 0`), so `L(w+eps)` and
+  `L(w-eps)` are BIT-IDENTICAL and the central difference is `0.0` against an analytic `0.0`.
+  The grid-wide absolute pins are `1e-12` near-zero / `1.4e-9` all-weights (`:878-879`).
+- **THE `T = 1` DEAD BLOCK IS PINNED SEPARATELY, IN THE CELL'S OWN UNIT TIER**:
+  `nn::cells::cfc::tests::backbone_state_columns_are_gradient_dead_at_t1` (`cfc.rs:1155-1167`)
+  addresses the `B*H` state slots of `W_bb0` by flat arithmetic derived HERE (row-major
+  `wlo + j*(i+o) + k`, `k in [in, in+out)`), asserts `== 0.0` at `T = 1` and NON-zero at
+  `T = 2` in the same body. NOTHING ELSE is dead: there is no CfC analogue of sLSTM's `b_i`
+  non-identifiability, because `tanh`/`sigmoid` carry no scale invariance for a bias shift to
+  be absorbed into.
+
+### The seam tier -- `tests/pyo3/test_phase9_seam.py`
+
+Corpus-level `grad_check` through `speech_rs.Engine` on the committed synthetic fixtures
+(`tests/reference_data/phase9/`, geometry `backbone_units 6` / `backbone_layers 1` per the
+manifest -- `B != H` DELIBERATELY, so a transposition cannot hide). Pack lengths from the same
+manifest: `cfc_bidirectional` **1387**, `cfc_forward` **717**, and the Mode-7 Twin's LID net
+**517** beside a 537-element SAD net.
+
+| fixture | eps | measured worst scaled error | pin | source |
+|---|---|---|---|---|
+| `cfc_bidirectional` | 1e-5 | **3.138e-7** | 3.2e-6 | `GRAD_CHECK_PINS`, `test_phase9_seam.py:387` |
+| `cfc_forward` | 1e-5 | **1.169e-8** | 1.2e-7 | `GRAD_CHECK_PINS`, `:388` |
+| `twin_mode7_lid_cfc` | 1e-4 | **2.630e-9** | 2.7e-8 | `TWIN_MODE7_ROWS`, `:747` |
+| `cfc_bidirectional` (block probe) | 1e-5 | 1.417e-8 | 1.5e-7 | `BLOCK_PROBE_PINS`, `:421` |
+| `cfc_forward` (block probe) | 1e-5 | 1.027e-8 | 1.1e-7 | `BLOCK_PROBE_PINS`, `:422` |
+
+Every pin is `measured * 10` and every one is under the `1e-4` STOP. The two epsilons are
+MEASURED, not inherited: the CfC SAD rows reuse the shared `sad_epsilon 1e-5` on the evidence
+of a 5-point sweep recorded in the file (`bi 5.92e-6 / 1.70e-7 / 3.14e-7 / 3.13e-5 / 3.13e-3`,
+`fwd 2.81e-6 / 3.41e-7 / 1.17e-8 / 1.17e-6 / 1.17e-4` -- a textbook U), while the CfC Twin
+takes its own `1e-4` (`manifest.json: measured.twin_mode7_cfc_epsilon`) because its LID
+gradient is ~5.6e-5, ~60x the sLSTM Twin's, so its optimum sits one decade lower.
+
+WHAT THE SEAM TIER ADDS THAT THE FD TIER CANNOT: the FD tier drives `CfcLayer` DIRECTLY, so
+`CellLayer::Cfc`'s forward / backward / derivative-harvest arms were compiled-but-never-
+executed; the Engine path runs a real corpus forward AND backward THROUGH the enum. Verified
+by mutation: each single-arm swap fails 5 legs. The consistent DOUBLE swap that stays
+self-consistent here is closed by Task 6's independent `FastCfc` implementation instead (see
+the fast-parity rows), which is the note now carried in the seam file's own docstring.
+
+### Sizing (spec S1.4) -- both closed forms, PINNED not prose
+
+`tests/test_phase10_init.py` computes both lineages' pack lengths from the block arithmetic
+and asserts the closed forms directly (`test_lineage_pack_lengths_are_the_documented_arithmetic`,
+`:428-437`):
+
+| lineage | LSTM pack | CfC closed form | at `B = 45` | vs LSTM |
+|---|---|---|---|---|
+| v1 (`23,24,24`, tail 46) | **33671** (the committed tuple-A length, independently reached) | `620*B + 935` | 28835 | **-14.36%** |
+| v2 (`11,24,24`, tail 22) | **24431** | `524*B + 911` | **24491** | **+0.25%** |
+
+`CFC_DEFAULT_BACKBONE_UNITS = 45` is therefore ONE default serving BOTH lineages, and both
+halves of that claim are asserted rather than argued: `B = 45` is v2's OPTIMUM (`rel[45]` is
+strictly below `rel[44]` and `rel[46]`, `test_the_default_matches_the_v2_lstm_pack_within_15_percent`,
+`:440-449`) AND the SMALLEST integer inside v1's +-15% band (`B = 44` is asserted OUT,
+`test_the_default_also_leaves_the_v1_lineage_in_band`, `:452-460`). v1's own optimum, recorded for completeness, is
+`B = 53 -> 33795` (+0.37%). Forward-only runs shed one stack and the MLP's doubled input on
+both sides, so the ratio barely shifts: v2 fwd LSTM 12239 vs CfC 12269 (+0.25%), v1 fwd LSTM
+16871 vs CfC 14453 (-14.33%).
+
+The Python builder emits the S1.2 flat order DIRECTLY (CfC has no structured/nnet domain to
+build, spec S1.3), so the layout risk the LSTM path retires by reusing the packer is retired
+here by WHOLE-PACK BLOCK-BY-BLOCK RECONSTRUCTION pins plus two shear companions -- and what
+those prove is block ORDER / LENGTH / FAN, NOT orientation (unobservable for iid init; He's
+asymmetric fan is what makes fans pinnable at all, which is why parametrizing over both
+schemes is load-bearing).
+
+## Phase 10 -- the `lre_sad_v2` lineage (Task 4)
+
+The v2 record: a ONE-VARIABLE fork of the phase-6/9 SAD arm that retires the
+2015-inherited dead-input-column block, its 8-gate from-scratch matrix
+({LSTM, sLSTM, Mamba, CfC} x {bidirectional, forward}), the zero-dead-columns INVERSE
+guard, and the like-for-like live-capacity comparison against v1. Gates:
+`tests/pyo3/test_phase10_gates.py` (corpus-gated, `slow`, local-only). Measured 2026-08-01,
+Apple M4 Pro (arm64), macOS 26.5.2, N=1 lane, seed 0. The full-corpus headline runs stay
+POST-PHASE, user-fired (launcher recipe at the end of this section).
+
+### The fork (spec S3.1)
+
+`configs/training/lre_sad_v2.toml` is `configs/training/lre_sad.toml` byte-for-byte except
+TWO values (verified by diffing the two files' non-comment lines: exactly these, nothing
+else) and the file headers:
+
+| key | v1 | v2 |
+|---|---|---|
+| `nnet_input_size` | 23 | **11** |
+| `lstm_neuron_nb` | `23,24,24` | **`11,24,24`** |
+
+plus the normalize mean/std tail those entail (`2*23 = 46` -> `2*11 = 22`), which appears in
+NO config: it self-sizes off `nnet_input_size` on both sides of the seam
+(`train.py::_tail_lengths`, `BLSTMNeuralNetwork::setWeights`). v1's own header gained a
+one-line pointer to v2 -- COMMENT-ONLY, and verified `config_hash`-safe by parsing both
+revisions through `speech_rs.load_toml_config` and asserting the maps are identical (the
+hash reads the parsed map, which TOML comments never enter), so every v1 run's recorded
+`config_hash` is unchanged. v1 stays FROZEN: `test_phase9_gates.py`'s asserts, pins and
+numbers are untouched and green (the T4 review corrected one module-docstring sentence
+about `b_i`'s computed-vs-analytic zero -- comment-only).
+
+WHY: v1 declares a 23-wide input while its own DSP front-end emits 11 columns
+(`3*nb_dct - ignore_first_dct = 3*4 - 1`), so with `lstm_sub_sampling 4` only 44 of layer 0's
+92 fan-in columns carry data and the trailing 48 are structurally gradient-dead -- the
+phase-9 "DEAD INPUT COLUMNS" finding. v2's declared width IS the produced width.
+
+### Pack lengths, MEASURED (spec R4 -- no survey estimate survives)
+
+Every number produced by `init_weights` at the arm's own overlaid config, cross-checked
+in-test against the per-cell closed-form block arithmetic (`test_init_is_trainable` asserts
+both, so a pinned literal and the offset arithmetic cannot drift apart silently):
+
+| cell | v2 bidirectional | v2 forward | vs v2 LSTM (bi) | v1 bidirectional | v1 forward |
+|---|---|---|---|---|---|
+| LSTM (baseline) | **24431** | **12239** | -- | 33671 | 16871 |
+| sLSTM | **23279** | **11663** | **-4.72%** | 32519 | 16295 |
+| Mamba | **28031** | **14039** | **+14.74%** | 30359 | 15215 |
+| CfC (`B = 45`, `L = 1`) | **24491** | **12269** | **+0.25%** | 28835 | 14453 |
+
+All four land inside the S8.2-style +-15% band of the same lineage's LSTM pack. Mamba only
+just (+14.74%), and the near-miss is structural, not luck: Mamba's layer-0 input projection
+is a SINGLE `out x fin` width adapter, while the gate cells carry `4 x out x fin` and CfC
+`B x fin`. Halving `fin` (92 -> 44) therefore shrinks the gate cells and CfC much harder
+than it shrinks Mamba -- the same asymmetry that made Mamba the nominally-smallest but
+effectively-LARGEST net on v1.
+
+### The like-for-like LIVE-capacity comparison -- v2 changes ZERO trainable capacity
+
+The sharpest v1-vs-v2 statement, and it is an identity rather than a measurement.
+Counting only weights with a nonzero gradient (v1's counts are phase 9's; v2's are
+`pack - 22`, the 22-element frozen normalize tail being the ONLY dead block a v2 pack has,
+measured EXACTLY 22 on all eight rows):
+
+| cell | v1 live (bi) | v2 live (bi) | v1 live (fwd) | v2 live (fwd) |
+|---|---|---|---|---|
+| LSTM | 24409 | **24409** | 12217 | **12217** |
+| sLSTM | 23257 | **23257** | 11641 | **11641** |
+| Mamba | 28009 | **28009** | 14017 | **14017** |
+| CfC | 24469 | **24469** | 12247 | **12247** |
+
+Identical in every cell, in both directions. The arithmetic: v1's layer-0 input block is
+wider than v2's by exactly the dead column count (`4*out*48` for the gate cells, `out*48`
+for Mamba, `B*48` for CfC, per stack), and its normalize tail is wider by exactly 24, so
+`v1_pack - v2_pack = D*dead_per_stack + 24` while `v1_live = v1_pack - (D*dead_per_stack +
+46)` and `v2_live = v2_pack - 22` -- the two collapse to the same number. **The fork removes
+dead weight and NOTHING else.**
+
+So v1-vs-v2 is not a capacity question. What DOES differ, measurably:
+
+1. **Pack size / memory / I/O**: v2's LSTM pack is 27.4% smaller (33671 -> 24431). The
+   COMPUTE saving is CELL-DEPENDENT, because the two width-tolerance conventions differ --
+   an earlier revision of this bullet claimed a flat "2.09x narrower layer-0 matmul, 48 of
+   every 92 columns multiplying constant zeros", and that is FALSE for the cell it named.
+   `LstmLayer::feed_forward` (`layers.rs:194-198`) takes the `cols < i` branch and CROPS
+   the WEIGHT matrix to the input's width, so v1's layer-0 product was ALREADY
+   `T x 44` by `44 x 96` -- identical to v2's, and nothing ever multiplied a dead column.
+   v2's only LSTM compute win is dropping the per-call `44 x 96` slice copy that crop
+   makes. The three NEW cells take the opposite convention: `reconcile_input`
+   (`slstm.rs:358`, `mamba.rs:723`, `cfc.rs:460`) ZERO-PADS the input up to the declared
+   width, so their layer-0 products really do shrink -- sLSTM and Mamba 92 -> 44
+   (**2.09x**), CfC `in+h` 116 -> 68 (**1.71x**, its fan-in carries the state
+   concatenation). NONE of this was benched; it is shape arithmetic, not a measured
+   speedup.
+2. **The Xavier fan-in scaling of the LIVE weights.** `init_weights` sizes the layer-0
+   bound off the DECLARED fan-in, so v1 seeded its live weights as though half the
+   (constant-zero) fan-in were carrying signal. Measured layer-0 input-block magnitudes
+   (seed 0, `xavier`, forward rows): LSTM max `0.206985 -> 0.255375` (exactly
+   `sqrt(6/140) -> sqrt(6/92)`, a **1.234x** widening), sLSTM std `0.11973 -> 0.147567`
+   (1.233x), Mamba `0.132364 -> 0.168974` (1.277x), CfC `0.111370 -> 0.132902` (1.193x).
+
+**FRAMING (spec S3.4 / R5, stated so nobody reads more into this than was measured):** v1
+remains the ONLY 2015-capacity-comparable lineage -- its 33671 LSTM pack IS the production
+tuple-A size, and the phase-6 baseline numbers are v1's. v2 is a NEW lineage with no 2015
+counterpart. The corrected Xavier scaling is a MEASURABLE difference for the full-corpus
+launchers to ADJUDICATE, **not a promised win**; a wider init is not automatically a better
+one, and nothing at subset scale can settle it.
+
+### The inverse guard (spec S3.2) -- zero structurally-dead layer-0 input columns
+
+v1's gates pin dead-count FLOORS; v2's pin the mirror image. For every cell x direction and
+every stack, all 44 layer-0 input columns must carry gradient. The guard reads the layer-0
+INPUT-PROJECTION block only, addressing per cell (each derived from that cell's own flat
+walk; offsets are relative to the layer-0 base, `fin = 44`, `out = 24`, `B = 45`):
+
+| cell | input block | flat position of input column `k` | entries/column |
+|---|---|---|---|
+| LSTM | `input_weights (fin x 4*out)`, layer's first block, COLUMN-major | `c*fin + k`, `c < 4*out` | 96 |
+| sLSTM | `W_a (out x fin)` row-major, inside each gate block `[R_a \| W_a \| b_a]` | `a*out*(out+fin+1) + out*out + j*fin + k` | 96 |
+| Mamba | the width adapter `P (out x fin)` row-major, first block (present iff `fin != out`) | `j*fin + k`, `j < out` | 24 |
+| CfC | `W_bb0 (B x (fin+out))` row-major, first block, fan-in `z = [x \| h]` -- only `k < fin` are INPUT columns | `j*(fin+out) + k`, `j < B` | 45 |
+
+SCOPE, by BLOCK not by slack: cell-level gradient-dead blocks that are NOT input columns
+(sLSTM's non-identifiable `b_i`, Mamba's `A_log` at `T = 1`, CfC's `W_bb` STATE columns at
+`T = 1`) are a separate, already-pinned phenomenon and are excluded by never being
+addressed. TWO-SIDED, because "nonzero" alone is too weak: a structurally dead weight is
+EXACTLY `0.0` (nothing ever accumulates into it) while an analytically-zero-but-COMPUTED
+weight lands at cancellation scale -- measured, sLSTM's `b_i` reads ~1e-19 at this seam
+(max 8.33e-19), not a bit-exact zero. The guard therefore asserts the exact-zero property
+AND a magnitude floor of 1e-8: ~1e11 above the cancellation class it must reject, ~2.9e4
+below the smallest per-column magnitude ever measured here. A third leg pins the WHOLE-PACK
+zero count at exactly 22 (the frozen tail) -- so a dead block that MOVED somewhere the
+offsets do not address still fails.
+
+Precisely, so three legs are not mistaken for three independent checks: the exact-zero leg
+is SUBSUMED by the floor leg (an exactly-0.0 column has max|grad| below the floor, so the
+dead set is a strict subset of the weak set), and is kept for its distinct failure message
+-- "structurally dead" and "gradient-inert" are different defects -- not for coverage. The
+whole-pack zero count is the one genuinely independent leg: it is the only one that can see
+a dead block relocated outside every per-column offset.
+
+NON-VACUITY, proven not asserted: `test_v1_cfc_mechanical` runs the SAME machinery on the
+v1 arm and finds exactly the 48 dead columns `[44, 92)` per stack. If the offset arithmetic
+addressed biases, a recurrent block, or nothing, it would find 0 dead columns there and the
+v2 guard would be silently vacuous.
+
+### Preflight -- the log-law saturation hazard, measured before firing the runs
+
+Same hazard and same discipline as phase 9 (`CostLaw log/log`, whose forward is CONSTANT
+past the `1e-24` clamp, so a saturated from-scratch net is a PERMANENT STALL). Probed at the
+from-scratch theta, one forward+backward through the seam, no training; the leg's own recipe
+(subset 2, 10 s cap, seed 0). `%clamp` is the column to its left over `-ln(1e-24) = 55.262`;
+`min col` is the smallest per-input-column max|grad| over every stack -- the inverse guard's
+own margin against its 1e-8 floor:
+
+| config | pack | init NNCostSeg | %clamp | worst per-file | %clamp | grad L2 | grad Linf | zero-grad weights | dead cols | min col |
+|---|---|---|---|---|---|---|---|---|---|---|
+| LSTM / bidirectional | 24431 | 0.28007 | 0.507% | 0.40669 | 0.736% | 0.39567 | 0.19439 | 22 | **0** | 2.854e-4 |
+| LSTM / forward | 12239 | 0.27649 | 0.500% | 0.40178 | 0.727% | 0.37588 | 0.19127 | 22 | **0** | 3.493e-4 |
+| sLSTM / bidirectional | 23279 | 0.28918 | 0.523% | 0.40714 | 0.737% | 0.38630 | 0.19917 | 22 | **0** | 6.011e-4 |
+| sLSTM / forward | 11663 | 0.24322 | 0.440% | 0.33209 | 0.601% | 0.45236 | 0.17433 | 22 | **0** | 1.311e-3 |
+| Mamba / bidirectional | 28031 | 0.28676 | 0.519% | 0.40283 | 0.729% | 0.54261 | 0.18486 | 22 | **0** | 2.960e-3 |
+| Mamba / forward | 14039 | 0.29903 | 0.541% | 0.46646 | 0.844% | 0.50035 | 0.18487 | 22 | **0** | 3.856e-3 |
+| CfC / bidirectional | 24491 | 0.29857 | 0.540% | 0.41060 | 0.743% | 0.72674 | 0.19351 | 22 | **0** | 3.269e-3 |
+| CfC / forward | 12269 | 0.27922 | 0.505% | 0.39550 | 0.716% | 0.41801 | 0.19030 | 22 | **0** | 2.487e-3 |
+
+Every init sits at ~0.5% of the clamp constant (worst 0.54%), every INDIVIDUAL file at
+<= 0.84%, every epoch-0 gradient norm far from zero: no row starts in the zero-gradient
+death, CfC included, and no constant needed changing. The per-file column is read by slicing
+`results_matrix()`'s `[file+1, conf+1, chan+1, ...]` prefix off FIRST (`[:, 3:]`, as
+`engine.py::_error_vad` does) with a `per_file_max >= aggregate_mean` self-check ahead of the
+bound -- the phase-9 correction, carried forward by construction. EVIDENTIARY SCOPE
+(unchanged from phase 9): the seam exposes cost and gradient, not the posterior vector, so
+"not saturated" means COST-INTERIOR + GRADIENT-NONZERO + the net subsequently trains.
+
+The v1 CfC MECHANICAL leg (spec S3.3 -- construction + its own dead-count floor, no
+convergence gate and no param-match requirement on v1, run at the DEFAULT `B = 45` rather
+than T2's v1-matched 53 since no fair-size comparison is being made):
+
+| config | pack | init NNCostSeg | worst per-file | grad L2 | zero-grad weights | predicted floor | dead cols/stack |
+|---|---|---|---|---|---|---|---|
+| v1 CfC / bidirectional | 28835 | 0.34644 | 0.47582 | 0.97583 | 4366 | `2*45*48 + 46 = 4366` | 48 (== `[44, 92)`) |
+| v1 CfC / forward | 14453 | 0.29140 | 0.41856 | 0.55960 | 2206 | `1*45*48 + 46 = 2206` | 48 (== `[44, 92)`) |
+
+Both land EXACTLY on the derived floor. The CfC dead-block shape is `B * 48` per stack (the
+`W_bb0` row width), cell-dependent exactly as the phase-9 T8 pattern predicts -- `4*out*48`
+in the gate cells, `out*48` in Mamba.
+
+### The eight gates -- HARD leg: trained held-out DCF beats own init, every collar
+
+Phase-6 SAD protocol VERBATIM (subset 10 / valid 8 / test 24, 3 epochs x 10 SMORMS3 steps,
+20 s audio cap, seed 0, `val_metric=nn_cost_seg`, end-to-end VRCTS-dump -> `evaluate.dcf`
+scoring). Only the cell, the direction and the LINEAGE differ from phase 9's four rows:
+
+| cell / direction | trained DCF@0.5 | Pmiss / Pfa @0.5 | trained collar range | init DCF@0.5 | init collar range | gain@0.5 | wall |
+|---|---|---|---|---|---|---|---|
+| LSTM / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 37 s |
+| LSTM / forward | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 15 s |
+| sLSTM / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 34 s |
+| sLSTM / forward | **0.252430** | 0.026415 / 0.930474 | [0.248021, 0.255545] | 0.750000 | 0.750000 (all 5) | **+0.497570** | 15 s |
+| Mamba / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 62 s |
+| Mamba / forward | **0.248770** | 0.000000 / 0.995078 | [0.248770, 0.250000] | 0.737710 | [0.736969, 0.738062] | **+0.488940** | 19 s |
+| CfC / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 33 s |
+| CfC / forward | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 15 s |
+| full-corpus runs (any cell x direction) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+8/8 HARD legs pass at every collar (0 / 0.25 / 0.5 / 1 / 2 s) on the FIRST run, and
+deterministically: run-twice at a fixed seed gives bit-identical `best_sad.bin` /
+`last_sad.bin` bytes and an identical pooled DCF on all eight rows. Every DCF@0.5 above was
+also reproduced in a second, independent process to the printed precision. **CfC's
+convergence gate IS these two rows** (spec S3.3) and it passes both directions. The slowest
+single gate is 62 s against the asserted 600 s budget. Whole-file runtime: 1.4 s preflight
+(10 legs) + 227 s gates (8) + 76 s determinism (8) = ~5.1 min.
+
+The wall column is NOT a speed comparison: `--direction forward` also forces
+`BLSTM_window 0` (the plain whole-sequence causal regime -- a window boundary resets the
+recurrent state), so forward rows differ from bidirectional ones in TWO ways.
+
+**RECORDED, NOT GATED (spec R5, verbatim): "subset vs-BLSTM numbers are reported as-is with
+the thinness caveat; no architecture-superiority claim is made from subset scale."** SIX of
+the eight rows are degenerate at BOTH endpoints -- the documented phase-6 collapse
+(all-non-speech init -> all-speech trained) -- so their six-way tie at 0.250000 is what an
+identical collapse looks like, not evidence of architectural OR lineage equivalence. The
+phase-9 v1 rows tie at the same 0.2500 (bar Mamba/forward's 0.249625), so this run says
+nothing about v1 vs v2 either. TWO rows are honestly non-degenerate and are recorded as
+measured rather than rounded into the collapse story: `sLSTM / forward` genuinely rejects
+~7% of held-out non-speech at a 2.6% miss cost (its WORST collar, 0.255545, is still 0.494
+below its init), and `Mamba / forward` rejects a 0.49% sliver while its INIT is also not
+fully degenerate (Pmiss 0.982625 -- the one row whose init baseline is not exactly 0.75, and
+the row the `init Pmiss > 0.9` pin is sized for; that margin is real but thin). Genuine
+speech/non-speech discrimination, and any cell-vs-cell or v1-vs-v2 ranking, is the
+FULL-CORPUS user-fired launcher's job.
+
+**The CE is not the signal** (the standing phase-6 lesson): best-epoch validation costs
+across the eight rows span 0.02659 (CfC/forward) to 0.44689 (Mamba/forward), with best
+epochs at 0, 1 and 2 -- and every row still lands at the same held-out DCF. Only the
+held-out TASK metric is gated.
+
+### Firing the v2 arm (post-phase, user-fired)
+
+```
+# Any {lstm,slstm,mamba,cfc} x {bidirectional,forward} combination on the v2 lineage.
+speech baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_cfc_full \
+    --cell-type cfc --direction forward \
+    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
+```
+
+Identical in every knob to the phase-9 `speech baseline sad` recipe -- ONLY the arm name
+changes, since `sad-v2` shares the entire SAD skeleton (`_SAD_ARMS`) and every size derives
+from the config. To answer the lineage question, fire the SAME cell x direction on both arms
+and compare; the live-capacity table above says the comparison is about init scaling and
+pack size, not about capacity. Paste resulting numbers into the `full-corpus runs` row above.
+
+## Phase 10 -- the full-f32 mel front-end (Task 5, spec S4)
+
+`fast/mel32.rs` replaces the phase-7 "widen the f32 periodogram to f64, run the golden f64
+`MelFilterBank`, narrow the assembled sequence back" bridge with f32 kernels transcribed
+op-for-op from `features/mel.rs` + `features/pipeline.rs::assemble_input_sequence`. BOTH fast
+sites route through it in one commit-unit -- the offline `FastPipeline::build_input_sequence_parts`
+and the streaming `assemble_perio_window` -- via ONE shared `assemble_rows` kernel, so
+offline-vs-streamed stays bit-identical BY CONSTRUCTION (the phase-8/9 streaming gates compare
+fast-vs-fast; they were re-run UNEDITED and stay green). The f64-widen path is DELETED, not kept
+as a mode; the exact `features/mel.rs` stays byte-untouched as the transcription ORACLE.
+
+The bank GEOMETRY is still derived in f64 (the sequential `freq += freq_step` grid, the
+floor/ceil band round-trip, the inclusive triangle edges, the whole-bank fallback) and only the
+coefficient VALUES narrow `as f32` once at construction: deriving the geometry in f32 could move
+filter MEMBERSHIP (an `is_valid_bank` flip, a triangle-edge inclusion flip), which is a structural
+change rather than a precision one. Banks are still built ONCE per pipeline.
+
+QUIRKS CARRIED (each pinned by its own inline unit, each doc-noted against its `mel.rs` line):
+the deltas-no-DCT static-block OVERWRITE layout (`mel.rs:412-417`); SDC's unconditional n=3
+regression kernel (`:272-276`) and its ignoreFirst last-static clobber (`:286-294`); the
+ignoreFirst branch-B FIRST-column drop (`:295-312`); `regression_deltas`' saturated-`j` denominator
+(`:431-475`); `ln(dot + 1e-24)` (`:352`); the whole-bank fallback (`:138-155`). A 10-config shape
+cross-check asserts `is_mel`/`is_dct_activated`/`nb_filters`/`nb_dct` agree with the exact bank
+element-for-element, so a geometry drift fails BEFORE any value pin.
+
+### The S4 re-pin sweep -- the ONE sanctioned pin re-measurement (spec S9.3)
+
+Every fast-vs-exact number moved once, by design. Boundary count/type identity and argmax
+zero-flips held EVERYWHERE -- no R1 STOP was reached. Measured on Apple M4 Pro (arm64),
+macOS 26.5.2, `cargo build --release` (LTO on), `--release` test profile.
+
+| suite / leg | metric | old measured | old pin | NEW measured | NEW pin | flips |
+|---|---|---|---|---|---|---|
+| `phase7_fast_pipeline::pipeline_parity_excerpt_3s` | max_rel | 3.044e-6 | 5.0e-5 | **1.807e-5** | **2.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_excerpt_3s` | max_abs | 8.263e-6 | 1.0e-4 | **3.589e-5** | **4.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_prcts_60s` | max_rel | 9.805e-6 | 1.5e-4 | **4.038e-5** | **6.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_prcts_60s` | max_abs | 1.805e-5 | 3.0e-4 | **5.914e-5** | **9.0e-4** | n/a |
+| `phase7_fast_pipeline::pipeline_parity_dc_offset_branch` | max_rel | 5.704e-4 | 6.0e-3 | 5.719e-4 | 6.0e-3 (kept) | n/a |
+| `phase7_fast_pipeline::pipeline_parity_dc_offset_branch` | max_abs | 9.784e-3 | 5.0e-2 | 9.784e-3 | 5.0e-2 (kept) | n/a |
+| `phase7_parity_sad::sad_parity_exact_vs_fast` | posterior max_rel | 1.398e-5 | 3.0e-4 | 1.361e-5 | 3.0e-4 (kept) | **0** |
+| `phase7_parity_sad::sad_parity_exact_vs_fast` | posterior max_abs | 2.416e-6 | 5.0e-5 | 2.416e-6 | 5.0e-5 (kept) | **0** |
+| `phase7_parity_sad::sad_parity_exact_vs_fast` | boundary max_dt | 0.0 | 1.0e-2 | **0.0 exactly** | 1.0e-2 (kept) | **0** |
+| `phase7_parity_sad::sad_parity_scored_columns` | scored max_rel/abs | 0.0 / 0.0 | 5.0e-2 | **0.0 / 0.0** | 5.0e-2 (kept) | **0** |
+| `phase7_parity_lid::lid_parity_phseq` | score max_abs / max_rel | 7.785e-7 / 1.662e-8 | 5e-4 / 5e-6 | 7.785e-7 / 1.662e-8 | unchanged | **0** |
+| `phase7_parity_lid::lid_parity_cep` | score max_abs / max_rel | 2.680e-6 / 2.733e-8 | 5e-4 / 5e-6 | 2.680e-6 / 2.733e-8 | unchanged | **0** |
+| `phase9_fast_parity` (worst of 4 cell x leg runs) | posterior max_rel | 4.13e-6 | 1.0e-4 | 7.740e-6 | 1.0e-4 (kept) | **0** |
+| `phase9_fast_parity` (worst of 4 cell x leg runs) | boundary max_dt | 0.0 | STOP on nonzero | **0.0 exactly** | STOP on nonzero | **0** |
+| `phase9_stream_causal` (19 legs, streamed-vs-offline-fast) | bit-equality | exact | exact | **exact, UNEDITED** | n/a | **0** |
+| `phase8_gate` / `phase8_stream_{frontend,overlap,decision,lid}` / `phase8_frozen_norm` (59 legs) | bit-equality | exact | exact | **exact, UNEDITED** | n/a | **0** |
+
+WHERE THE DELTAS GREW AND WHERE THEY DID NOT, mechanism-first (this is the interesting part, not
+the bookkeeping):
+
+- **The front-end pins grew ~3-6x** (3.28x to 5.94x across the four re-measured numbers) and are the only re-pinned numbers. f32 error now accumulates
+  through the mel triangle dots, the DCT product AND the delta/delta-delta regressions rather than
+  entering only via the periodogram -- the phase-7 bridge did the whole tail in f64.
+- **The DC-offset branch did NOT move** (rel 5.704e-4 -> 5.719e-4, abs identical to 4 figures).
+  There the divergence is already dominated by the f32 full-buffer DC-mean subtraction UPSTREAM of
+  the mel, so the mel's own f32 error is noise against it. The one leg whose phase-7 pins survive.
+- **The SAD posteriors did NOT move** (max_abs identical at 2.416e-6; max_rel 1.398e-5 -> 1.361e-5,
+  i.e. DOWN, which is the max simply landing in a different cell). A ~4e-5 perturbation of a
+  log-mel feature of magnitude ~10 is ~4e-6 relative -- below what the f32 LSTM recurrence already
+  contributes, so the NN's own error still sets the ceiling. This is why boundary max_dt stayed
+  EXACTLY 0.0 and the scored columns stayed bit-identical.
+- **The LID legs are bit-for-bit unchanged, STRUCTURALLY** -- Mode 7 consumes phSeq/cep
+  `external_features` with a FROZEN SAD net, so no periodogram, mel bank or DCT is ever built and
+  `FastPipeline` is not even constructed. Recorded as an unchanged row precisely because an
+  unexplained MOVE there would have meant the change leaked where it has no business being.
+- **The phase-9 causal posteriors grew ~1.9x** (4.13e-6 -> 7.740e-6, mamba; slstm 1.40e-6), inside
+  the existing 1e-4 pin at ~13x headroom, with `max_dt` still exactly 0.0.
+- **The remaining fast suites are structurally unaffected**, for the same kind of reason the LID
+  row is, and are named here so their absence from the table is a statement rather than an
+  omission: `phase7_fast_nn.rs` drives `FastBlstm` on synthetic in-memory matrices and never
+  constructs a `FastPipeline`; `phase7_bench.rs` and the phase-8 `stream` CLI legs assert
+  wall-clock budgets and output FORMATTING, not feature values; and every phase-8/9 streaming
+  bit-equality leg compares fast-vs-fast, so both sides move together by construction. All were
+  re-run green and UNEDITED.
+
+### The corpus metric tiers -- re-run locally, all deltas EXACTLY 0.0
+
+Not "within tolerance": float equality on the task metrics, on real LRE03/07 data through the
+phase-6/9 checkpoints. Corpus-gated + local-only as always (no filename or path recorded).
+
+| tier | leg | files | decision disagreements | metric delta (fast - exact) |
+|---|---|---|---|---|
+| `test_phase7_parity.py` | lid-features (cep) | 48 | argmax 0 | lid_error 0.000e+00, cavg 0.000e+00 |
+| `test_phase7_parity.py` | lid-phseq | 45 | argmax 0 | lid_error 0.000e+00, cavg 0.000e+00 |
+| `test_phase7_parity.py` | sad | 24 | boundary type/count 0, max_dt 0.000e+00 s | DCF 0.000e+00 at all 5 collars |
+| `test_phase9_parity.py` | slstm / forward | 24 | boundary type/count 0, max_dt 0.000e+00 s | DCF 0.000e+00 at all 5 collars |
+| `test_phase9_parity.py` | mamba / forward | 24 | boundary type/count 0, max_dt 0.000e+00 s | DCF 0.000e+00 at all 5 collars |
+| `test_phase8_parity.py` | streamed-vs-offline SAD | 1 (75 s) + 24 | streamed boundary_max_dt 2.500e-05 s (inside the 5.0e-05 VRCTS write quantum, unchanged) | causality DCF delta 0.000e+00 |
+
+### RSS: the phase-7 memory finding is REVERSED
+
+The phase-7 SAD-arm finding ("fast uses MORE memory, 1.22-1.28x -- the per-call f64
+periodogram-widen") is the thing this task was aimed at, and it is now the other way round.
+BEFORE/AFTER measured on IDENTICAL staging in the SAME session (the change stashed, rebuilt,
+re-measured, unstashed, rebuilt) so the two columns differ in exactly one variable: 3 independent
+`--repeat=1` fresh processes per (leg, path), `speech bench` on the committed 60 s stereo
+`prcts_excerpt.wav` (`audio_s = 120.00`), backprop off, `Neural_Networks_BackPropagation_Epochs 0`.
+Apple M4 Pro (arm64), macOS 26.5.2, `cargo build --release -j 4`. The causal row stages the
+committed `phase9/slstm_forward.config` + seed pack against the SAME wav (tiny 23,4 net, plain
+window-0 regime), so it isolates the front-end rather than the cell.
+
+| leg | path | maxrss_mb BEFORE | maxrss_mb AFTER | delta | wall_s BEFORE (mean) | wall_s AFTER (mean) |
+|---|---|---|---|---|---|---|
+| SAD tier2 (60 s stereo) | exact | 56.484 | 56.521 | +0.04 (unchanged, exact tree untouched) | 0.27638 | 0.27304 |
+| SAD tier2 (60 s stereo) | **fast** | **67.261** | **41.953** | **-25.31 MB (0.624x)** | 0.058897 | **0.055225 (1.066x faster)** |
+| causal slstm/fwd (60 s stereo) | exact | 53.302 | 54.016 | +0.71 (noise, exact tree untouched) | 0.13783 | 0.14065 |
+| causal slstm/fwd (60 s stereo) | **fast** | **67.026** | **41.729** | **-25.30 MB (0.623x)** | 0.023596 | **0.020763 (1.136x faster)** |
+
+- **THE SIGN FLIP:** fast-vs-exact peak RSS on the SAD arm goes **1.191x -> 0.743x**. The fast path
+  now uses roughly 26% LESS memory than exact, where phase 7 measured it using 19-28% MORE. The
+  phase-9 "~68 MB plateau, cell-independent" becomes a **~42 MB plateau** (both cells land within
+  0.23 MB of each other, still cell-independent -- it was never the cell).
+- **THE DROP MATCHES THE PREDICTED MECHANISM TO ~0.1 MB, which is the real evidence.** Phase 7
+  sized the per-channel widen buffer at `6000 x 513 x 8 bytes = 23.48 MB`; adding the other f64
+  transients that died with it (`fb` 6000x20x8 = 0.92 MB, `dct`/`input64` 6000x11x8 = 0.50 MB each)
+  gives ~25.4 MB against a measured 25.31 / 25.30 MB. The attribution was correct.
+- **BIGGER THAN THE SPEC'S EXPECTATION** (S4 predicted ~68 -> ~56 MB, i.e. the widen buffer alone):
+  the assembled/mel/DCT f64 intermediates went with it, so the measured landing is ~42 MB.
+- **Wall-clock is a small bonus, not the point:** 1.07x (SAD) / 1.14x (causal) on the fast path.
+  The f32 mel is cheaper than f64-widen-plus-f64-mel, but the FFT still dominates, exactly as the
+  phase-7 rationale for NOT doing this predicted. The RSS was the reason to do it.
+
+**SUPERSEDED BOUNDS.** Two local-only regression bounds recorded earlier are now stale and are
+restated here rather than edited in place (those sections are the record of their own phase):
+the phase-7 "SAD arms: memory <= 1.4x of exact" becomes **<= 0.85x of exact** (measured 0.743x),
+and the phase-9 "fast maxrss within 1.3x of the ~68 MB plateau" becomes **within 1.3x of the
+~42 MB plateau**. A future local run landing back near 67 MB on a fast SAD/causal leg means the
+f64 widen has crept back in. Still NOT CI-asserted; this-box numbers, hardware named per R5.
+
+## Phase 10 -- the bidirectional f32 cell twins (Task 7, spec S5)
+
+`fast::bicell::FastBiCell` closes the `(cell x direction)` fast matrix on the bidirectional
+side: `{slstm, mamba, cfc} x bidirectional` moved from a typed bail to a real f32 shape
+(forward stack + REVERSED stack + hcat + the shared per-row `DenseRowChain`), driven by a
+FRESH windowed-overlap loop over the already-shared span helpers. `FastBlstm` and its
+`overlap_window_step` are BYTE-UNTOUCHED (approach A) -- the diff does not touch
+`src/rust/src/fast/nn.rs` at all.
+
+### Parity: exact f64 bidirectional vs `FastBiCell` (`tests/phase10_bicell_parity.rs`, CI)
+
+Both regimes are live and pinned. PLAIN is the committed `BLSTM_window 0.0`; OVERLAP is an
+in-test `BLSTM_window 0.5` overlay resolving `window_size 25` / `window_shift 10` at 8 kHz
+(a real overlapping grid, stride 10 over a 51-frame span), which is what exercises the fresh
+accumulate/average loop. `overlap_and_plain_are_distinct_regimes` is the guard that keeps the
+second leg from being a copy of the first: the exact path's own plain-vs-overlap posteriors
+differ on 50/50 rows, and the fast path's on 47/50.
+
+| leg | max_abs | max_rel | boundary count/type | max_dt |
+|---|---|---|---|---|
+| slstm plain / overlap | 7.34e-7 / 7.51e-7 | 3.69e-6 / 3.81e-6 | IDENTICAL | **0.0** |
+| mamba plain / overlap | 1.87e-6 / 1.86e-6 | **1.81e-5** / 1.80e-5 | IDENTICAL | **0.0** |
+| cfc plain / overlap | 9.52e-7 / 9.43e-7 | 3.25e-6 / 3.07e-6 | IDENTICAL | **0.0** |
+| crossing legs (6, see below) | worst **2.00e-6** | worst 6.39e-6 | IDENTICAL | **0.0** |
+
+PINS: `2.0e-4` relative (`measured * 10` rounded up, set by mamba) and `1.0e-4` absolute
+(~50x headroom). The relative pin is LOOSER than the causal tier's `1.0e-4` and that is a
+measurement, not a concession -- the bidirectional mamba row is 2.3x the causal one's
+(7.74e-6), which is what a second recurrent stack plus a twice-as-wide dense fan-in buys.
+Mamba's `max_rel` is a genuine relative number, not a small-denominator artifact: it is a
+~1.9e-6 absolute delta over a posterior of ~0.10, well above the comparator's 1e-2 scale
+floor.
+
+**THE CROSSING SWEEP NEEDED A SECOND KNOB, and the reason is worth recording.** Phase 9's
+decision-layer leg sweeps the output MLP's BIAS until the segmentation carries interior
+boundaries. That is enough for five of the six (cell x regime) rows here, but NOT for
+`slstm/plain`: its posterior spans `[0.105, 0.516]`, a logit swing of 2.20 against the 1.25 a
+rising/falling round trip (0.6 / 0.3) needs, leaving no offset whose crossings survive
+`min_speech`/`min_silence` 0.2 s (5 rows at this 0.04 s step). MEASURED: a 129-point
+bias-only sweep over `[-8, +8]` finds ZERO interior boundaries there. The sweep therefore
+tries `gain 1` (bias only, the phase-9 knob) first at every offset and reaches for a gain on
+the dense weight ROWS only when that fails -- an affine map on the pre-activation, so both
+cell stacks stay untouched and the compared crossings are crossings of the real curve.
+Settled points: slstm plain `gain 2, +2.0` (1 boundary); slstm overlap `gain 1, +0.75` (1);
+mamba plain/overlap `gain 1, +0.0` -- i.e. AS COMMITTED (3 each); cfc plain `gain 1, +1.0`
+(1); cfc overlap `gain 1, +0.5` (1).
+
+### Bench: RTF + peak RSS per cell, both regimes
+
+`speech bench --repeat=1 --path={exact,fast}`, 3 independent fresh processes per (leg, path),
+the committed 60 s stereo `phase4d/prcts_excerpt.wav` (`audio_s = 120.00`), the phase-9
+bidirectional fixture configs + seed packs staged against it, backprop off,
+`Neural_Networks_BackPropagation_Epochs 0`. Apple M4 Pro (arm64), macOS 26.5.2,
+`cargo build --release -j 4`. Means of 3.
+
+| cell | regime | exact rtf | fast rtf | speedup | exact maxrss_mb | fast maxrss_mb | rss ratio |
+|---|---|---|---|---|---|---|---|
+| slstm | plain | 0.001194 | 0.000175 | **6.82x** | 54.740 | 43.865 | 0.801x |
+| mamba | plain | 0.001138 | 0.000175 | **6.50x** | 57.438 | 42.453 | 0.739x |
+| cfc | plain | 0.001139 | 0.000178 | **6.40x** | 57.333 | 42.448 | 0.740x |
+| slstm | overlap | 0.001361 | 0.000209 | **6.50x** | 53.422 | 41.297 | 0.773x |
+| mamba | overlap | 0.001254 | 0.000227 | **5.52x** | 54.125 | 42.115 | 0.778x |
+| cfc | overlap | 0.001257 | 0.000224 | **5.60x** | 53.433 | 41.338 | 0.774x |
+
+READ THESE AS A FRONT-END MEASUREMENT, not a cell comparison (R5). The committed fixtures are
+TINY nets (`23,4` recurrent / `8,1` output), so the three cells' fast wall-clocks land within
+2% of each other in the plain regime (0.021003 / 0.020996 / 0.021363 s) -- the FFT + mel
+front-end dominates and the cell is noise against it, exactly as the phase-9 regime-vs-cell
+decomposition and the Task-5 causal bench row found. What the table does establish:
+
+- **The fast RSS lands on the ~42 MB post-mel plateau for all three cells and both regimes**
+  (41.3-43.9 MB), i.e. the Task-5 plateau is cell- AND direction-independent. A second
+  recurrent stack costs nothing visible in peak RSS at this width, because the plateau is set
+  by the front-end, not the net.
+- **The exact path is 53-57 MB across the board.** The phase-9 finding that exact-Mamba costs
+  ~2x (107.8 MB) is a WIDTH effect (the per-timestep SSM activation cache `Network` retains);
+  at this fixture's width the three cells are within 4 MB of each other.
+- **The overlap regime costs ~20-30% more wall-clock than plain on the fast path** (0.0210 ->
+  0.0251 s slstm, 0.0210 -> 0.0272 mamba, 0.0214 -> 0.0269 cfc) and slightly LESS peak RSS
+  (each window is a bounded block rather than the whole sequence). Windows overlap, so rows
+  are forwarded more than once; that is the regime's definition, not a fast-path artifact --
+  the exact path pays the same ~10-15%.
+
+### The Twin's frozen-SAD gate: RE-EXAMINED, STAYS CONSERVATIVE
+
+Spec S5 says the Twin's `bail_unsupported_shape` is revisited ONLY if a covering gate exists.
+It does not, so it stays, and the doc comment now says so explicitly. Nothing in this task
+adds one: the bidirectional twins land behind the algo-3 SAD driver; in Mode 7 the Twin's SAD
+net is never run (the frozen-SAD contract); and `drivers/baseline.py` rejects
+`--cell-type`/`--direction` on the LID arms outright. The refusal costs nothing real and
+keeps the fast Twin's accepted surface exactly what phase 7 pinned.
+
+### No streaming leg, by construction
+
+A bidirectional net is UNSTREAMABLE: the reverse stack's state at time `t` is a function of
+the samples AFTER `t`, so its first frame's output depends on the last one. There is no
+bounded lookahead that makes it causal -- unlike the phase-8 windowed BLSTM (bounded by the
+window) or the phase-9 causal cells (no lookahead at all). `StreamingSession::new` typed-bails
+the shape.
+
+WHY THE PHASE-8/9 STREAMING LEGS STAY GREEN UNMODIFIED, stated precisely (the earlier
+"moved verbatim" phrasing was wrong and is corrected here): the refusal moved out of
+`classify_fast_shape` -- which now NAMES the shape, because the offline tree implements it --
+into the streaming session with its LEADING CLAUSE preserved (`cell type '<x>' is not
+supported on the fast inference path ... in the BIDIRECTIONAL direction`) and its TAIL
+REWRITTEN. The pins survive because `phase8_gate.rs`, `phase9_stream_causal.rs::validation_bails`
+and `phase7_parity_lid.rs` assert PREFIX SUBSTRINGS, not the message body. The tail had
+to change: the classifier's old advice ("run this config on the exact path") is now WRONG at
+the streaming site, because the offline fast path DOES implement this shape -- it is
+streaming, specifically, that cannot.
+
+## Phase 10 -- the forward-only LSTM fast twin (Task 8, spec S6)
+
+`fast::cells::FastLstm` -- the f32 CAUSAL peephole-LSTM step kernel -- completes the causal
+set `{lstm, slstm, mamba, cfc}` and empties the last shape bail out of
+`fast::driver::classify_fast_shape`, which is now a TOTAL function. Measured 2026-08-01,
+Apple M4 Pro (arm64), macOS 26.5.2, `cargo build --release -j 4`.
+
+### What landed, and what it is NOT
+
+The new kernel is the CAUSAL twin: one forward stack, per-step `dot_f32` projections, a
+`step(x_t, &mut LstmState)` the offline loop and the streaming session both drive. It does
+NOT replace `fast::nn::FastBlstm`, which stays the BIDIRECTIONAL twin (batched faer
+projection, offline only) and is BYTE-UNTOUCHED by this task -- the phase-7/8 suites passing
+without edits are the proof. Two LSTM kernels, two regimes, two parity legs, deliberately.
+
+THE ONE RULE THAT SHAPED THE CODE (spec S6, the `DenseRowChain` lesson): every projection is
+a per-step ascending `dot_f32` over a contiguous weight row, FROM DAY ONE. Reusing the
+batched `lstm_layer_forward` would have made offline and streamed numbers differ in the last
+f32 ULP at re-chunked granularities -- the exact drift the phase-8 gate exists to forbid --
+so the batched kernel is never reachable from this path.
+
+### Transcription fidelity (`fast::cells` unit tier, CI)
+
+The oracle is the exact f64 `nn::layers::LstmLayer::feed_forward` per-timestep body. Same
+weights, same input, all three peephole families live:
+
+| leg | shape | max_abs | max_rel | pin |
+|---|---|---|---|---|
+| `lstm_matches_the_exact_cell_within_the_f32_band` | 5 -> 3, T=11 | 1.05e-7 | 1.96e-7 | `CELL_F32_PIN` 5e-6 |
+| `lstm_matches_the_exact_cell_at_the_arm_geometry` | 92 -> 24, T=31 | 1.42e-7 | 1.42e-5 | 1.5e-6 abs / 1.5e-4 rel |
+
+Both absolute deltas are ~1 f32 ULP of an O(1) output (`f32::EPSILON` = 1.19e-7), i.e. the
+narrowing and nothing else. The 92x24 row's RELATIVE number is FLOOR-LIMITED and says so:
+it is exactly 100x the absolute one, which is the tell that `max_rel`'s `1e-2` scale floor is
+the denominator (an LSTM output is `o_t * asinh(c_t)`, and a shut output gate drives it
+arbitrarily close to zero). The absolute pin is the discriminating statement there; the
+relative pin is widened for that leg only rather than pretending 5e-6 means something against
+a 1e-2 denominator. Same honesty the CfC cell's pins carry.
+
+THE PEEPHOLE FAMILIES ARE PROVEN LIVE, which is what makes those two rows worth their ink.
+`lstm_peephole_families_are_distinguishable` toggles each of the three flags independently
+and measures the output shift from dropping it: **8.96e-2** (cells), **8.32e-2** (gates),
+**3.92e-2** (gates-recurrent) -- five decades above the f32 band, so a mis-assigned peephole
+row cannot hide in a dead branch. With each family off, fast still tracks exact inside
+`CELL_F32_PIN`.
+
+Also pinned: the weight count against `LstmLayer::nb_of_weights` at five shapes (and that the
+`12*O` bundle is reserved regardless of the flags), the committed fixture's 1651-element pack
+length against the Python packer's, wrapper-is-the-step-loop, run-twice bit-identity, and the
+split-state legs (which check ALL THREE carried vectors are non-trivial at the cut).
+
+### Driver parity: exact f64 vs fast f32 (`phase9_fast_parity.rs`, CI)
+
+The committed `lstm_forward` fixture (new, same `scripts/extract_phase9_fixtures.py` recipe,
+seed 1008001, 1651-element pack) through `BagOfProcessors` on the synthetic tier-2 excerpt:
+
+| leg | max_abs | max_rel | max_dt | interior boundaries |
+|---|---|---|---|---|
+| plain (fixture as committed) | 4.40e-7 | 3.12e-6 | **0.0** | 0 |
+| crossing (output gain 3, bias +3) | 1.30e-6 | 1.05e-5 | **0.0** | **3** |
+
+Segment count and types IDENTICAL, `max_dt` EXACTLY 0.0, against the unchanged `POST_*_PIN`
+of 1e-4 (~9.5x headroom). The crossing row is now the WORST of the eight (cell x leg) runs,
+displacing mamba's 7.74e-6 -- structurally, not alarmingly: the gain lever sharpens the logit
+3x, so the same input-side f32 delta lands on a steeper part of the logistic.
+
+**A NEW LEVER WAS NEEDED, and the reason is measured.** Every other cell's crossing sweep
+shifts the output bias. On the LSTM fixture that CANNOT work: a 129-point bias sweep over
+`[-16, +16]` at 0.25 yields ZERO interior boundaries at every offset, even though the
+posterior traverses the full `[0, 1]` range across the sweep. The cause is the shape of this
+net's posterior on the excerpt -- its highest rows are its EARLIEST, so as the level rises the
+hysteresis latches SPEECH at frame 0 and the whole file becomes one segment, and as it falls
+nothing crosses at all. A pure level shift cannot manufacture an interior edge out of a
+monotone-onset curve. Scaling the output layer's four WEIGHTS can: it multiplies the logit's
+variable part (sharpening contrast) while the bias re-centres it, and it is the same class of
+intervention -- output-layer only, post-recurrence, every cell weight untouched. A 2-D
+(gain x offset) probe found gain 3 / bias +3 the richest rung (3 interior boundaries,
+posterior span `[0.014, 0.842]`: sharpened, not saturated). The escalation is a SWEEP, not a
+hardcoded pair, and it only runs when gain 1 finds nothing -- so the slstm/mamba/cfc rows
+settle on exactly the offsets they settled on before.
+
+### Streaming: streamed vs offline (`phase9_stream_causal.rs`, CI)
+
+All 19 legs green with the `lstm` row added, FIRST RUN, no machinery changed -- `StreamCausal`
+drives `FastCell`/`FastCellState` generically, which is the S5.2 "zero new surface" claim
+being cashed again:
+
+| leg | lstm result |
+|---|---|
+| crossing sweep (60 s staged fixture) | bias `+0.5` -> **4** interior boundaries (6 segment rows) |
+| `finish()` vs offline fast, plain (type 0) | boundary `max_dt` EXACTLY **0.0**, posteriors bit-equal (1500 rows) |
+| `finish()` vs offline fast, calibrated type 1 | boundary `max_dt` EXACTLY **0.0**, posteriors bit-equal |
+| chunk invariance (20/100/1000/7 ms) | segmentation + posteriors + emission set bit-identical |
+| prefix consistency | 4 mid-stream emissions, ZERO retractions |
+| real-arm geometry (`23,24,24` / `4,1`, wide dense) | 143 rows -> 35 posteriors, bit-identical at chunks 1/3/4/7/143 |
+| latency | bound **1.73400 s** (identical to the other three cells), speech lag 1.75688 s, tight margin **-0.07712 s** |
+
+THE LSTM ROW IS THE ONE THIS SUITE IS BEST PLACED TO CATCH A BUG IN, and that is worth saying
+plainly: the peephole LSTM carries the RICHEST state of the four cells -- `h`, `c`, AND the
+previous step's POST-activation gate row, which three separate peephole families read at
+`t-1`. A kernel that rolled `h` and `c` but not `gates` would compute correct whole-sequence
+output and WRONG streamed output at every chunk boundary. The split-state and chunk-invariance
+legs are what measure that; the `synth_net` helper's peephole flags were flipped from
+`[false; 6]` to `[true; 6]` for exactly this reason (inert for the other three cells, which
+have no peepholes, so those rows are bit-unchanged).
+
+The identical 1.73400 s bound across all four cells is the point rather than a coincidence:
+the fixture configs are byte-identical bar the cell keys, so the causal latency win is a
+property of the REGIME, not of any cell -- now demonstrated with the legacy cell itself.
+
+### Bench: the `n/a` cell FILLED, and the fast-tier regime control
+
+`speech bench --repeat=1 --path={exact,fast}`, 3 independent fresh processes per (row, path),
+the phase-9 corpus bench recipe UNCHANGED (one 75 s mono 8 kHz corpus wav selected at runtime,
+no filename recorded; each config repointed at its own phase-9 trained checkpoint; backprop
+off, `Epochs 0`, `numOuterThreads 1`). RE-MEASURED on the current build, so these four rows
+are self-consistent with each other and NOT with the phase-9 table (whose fast rows predate
+the Task-5 f32 mel).
+
+| cell / direction | window regime | path | wall_s mean [range] | rtf | maxrss_mb | fast vs exact |
+|---|---|---|---|---|---|---|
+| lstm / bidirectional | 3.25 windowed overlap | exact | 0.167335 [0.166705-0.167773] | 0.002231 | 53.97 | baseline |
+| lstm / bidirectional | 3.25 windowed overlap | fast | 0.034228 [0.034102-0.034334] | 0.000457 | 37.21 | **4.89x** |
+| lstm / forward | 0, plain | exact | 0.104963 [0.099500-0.112279] | 0.001400 | 54.37 | baseline |
+| lstm / forward | 0, plain | fast | 0.017587 [0.017419-0.017764] | 0.000234 | 37.42 | **5.97x** |
+
+**THE FAST-TIER REGIME CONTROL** -- the number phase 9 could not measure, because the
+`lstm / forward` fast cell did not exist. Same cell, same weights-shape lineage, only the
+regime differs (windowed-bidirectional -> plain-causal):
+
+- EXACT tier: 0.167335 -> 0.104963 = **1.59x** (phase 9 measured 1.66x on its own build).
+- FAST tier: 0.034228 -> 0.017587 = **1.95x**.
+
+So the regime win is LARGER on the fast path than on the exact one, and the direction makes
+sense: the f32 tree's per-window overhead (the overlap accumulate/average pass and the
+re-forwarding of overlapping rows) is a bigger share of a much smaller total once the
+front-end is f32 end to end. Phase 9's conclusion is unchanged and now doubly grounded -- the
+causal speedup is a REGIME effect, not a cell effect.
+
+MEMORY: the fast path lands at 37.2-37.4 MB on both regimes (the Task-5 post-f32-mel plateau,
+here on a mono 75 s file rather than the 60 s stereo fixture that measured ~42 MB), against
+53.97-54.37 MB exact -- a **0.69x** ratio, i.e. the phase-7 SAD-arm memory regression stays
+reversed on this cell too.
+
+### The four sibling assertions this flip touched, and why each moved
+
+Retiring the last shape bail invalidated four `must bail` assertions in suites this task
+otherwise leaves alone. Each was INVERTED or RE-AIMED rather than deleted, and none was
+weakened:
+
+| suite / leg | before | after |
+|---|---|---|
+| `phase9_fast_parity::fast_dispatch_bails_and_builds_per_cell_and_direction` | `(lstm, forward)` -> shape bail | an sLSTM-sized pack under `Cell_Type lstm` must fail on LENGTH (1603 vs 1651), which is what the shape bail was protecting |
+| `phase10_bicell_parity::fast_dispatch_builds_bidirectional_cells` | `(lstm, forward)` -> shape bail | must BUILD, from the matching committed pack |
+| `phase7_parity_sad::fast_dispatch_per_cell_type_and_direction` | `Direction forward` -> shape bail | must BUILD (with the untagged-pack caveat that leg already documents, in its other direction: an over-long bidirectional pack is consumed head-first by design) |
+| `phase8_gate::validation_bails` | `Direction forward` -> shape bail | still bails, on the WINDOWING rule instead (`causal streaming requires the plain regime`) -- tier2 carries `BLSTM_window 3.25`, and that is the refusal that actually matters for streaming |
+| `phase7_parity_lid::fast_twin_bails_on_unsupported_cell_type_and_direction` | classifier's `Direction 'forward' ...` wording | the TWIN'S OWN gate's wording (`cell type 'lstm' is not supported ...` + `bidirectional twin only`), because `bail_unsupported_shape` -- deliberately conservative, re-affirmed in Task 7 -- is now what catches a causal LID net |
+
+The Twin's frozen-SAD/LID gate is UNCHANGED in behaviour: it still refuses every shape that
+is not `FastNetShape::Blstm`. Only the message a causal LID config receives changed, because
+the classifier no longer produces one.
+
+### The corpus check, reported HONESTLY as degenerate
+
+The same 75 s corpus file, same trained forward-LSTM checkpoint, run through BOTH paths with
+separate dump directories: the emitted VRCTS xml is BYTE-IDENTICAL. That is a true statement
+and a WEAK one, so it is recorded as corroboration rather than evidence: the phase-9 subset
+checkpoint is MODE-COLLAPSED on this file (a single all-speech segment spanning `0.0000` to
+`74.9999`), exactly the degeneracy the phase-8/9 corpus tiers already document for these
+subset nets. A threshold sweep confirms there is nothing to find -- rising/falling at
+0.9/0.99/0.999/0.9999 all give the same one segment, and at 0.999999 both paths give zero
+segments. The DISCRIMINATING parity evidence for this cell is the committed-fixture tier
+above (3 interior boundaries at `max_dt` 0.0) and the streaming tier (4 boundaries, bit-equal),
+not this run.
+
+## Phase 10 -- inference-only retention gating (Task 9, spec S7)
+
+The phase's ONE adjudicated behaviour-free touch inside `nn/` but outside `nn/cells/`. Two
+backward-only retentions -- Mamba's per-timestep `MambaCache` and `Network::layers_output` --
+are switched off at CONSTRUCTION for any `BlstmNetwork` whose backward can never run, closing
+the phase-9 exact-Mamba memory finding.
+
+### The condition, and the one it deliberately is not
+
+`BlstmNetwork::from_config` sets `inference_only = !BackPropagationActivated`, once, for the
+life of the net. Soundness is structural, not empirical: every backward inside `BlstmNetwork`
+funnels through `feed_forward_backward_plain` / `_mlp` (the four windowed drivers call one of
+those two per window), both gated on `back_propagation_activated && target.nrows() > 0`, and
+`feed_backward` / `feed_backward_mlp` are PRIVATE. So `!BackPropagationActivated` proves the
+backward unreachable, statically, at construction.
+
+That is a STRICT SUBSET of spec S7's stated condition (backprop active AND references
+present). Reference presence is a per-corpus-item property decided long after construction, so
+it is deliberately unused: a backprop-on net with no references keeps retaining, which costs
+memory and never correctness. The asymmetry is the safe one.
+
+`Neural_Networks_BackPropagation_Epochs` is NEVER read here -- the F11 lesson. `Epochs 0` +
+`BackPropagationActivated true` is exactly the modern loop's seam shape (one fold at theta,
+gradient harvested), and gating on `Epochs` would silently zero every gradient
+`drivers/train.py`'s SMORMS3 loop reads. `tests/pyo3/test_phase9_seam.py::
+test_epochs_zero_with_backprop_on_still_returns_a_real_gradient` is the standing regression.
+
+### Why "skip the fill" alone was not enough
+
+Skipping the cache ASSIGNMENT moved peak RSS from 109.2 to 81.4 MB -- one layer's worth, not
+the whole gap. `getrusage` reports a high-water mark, and `abar`/`h` (each
+`T x (d_inner d_state)`, ~11.5 MB per layer on this recipe) are LIVE during the forward
+whether or not they are kept afterwards. But neither is read by the forward at a distance:
+`abar` is write-only there and `h` is read only at `t-1`. So under `retain_cache == false`
+they shrink to rolling buffers (1 row / 2 alternating rows) and the recurrence runs on the
+same numbers, in the same order, from the same reads. The retain path's indexing is
+untouched. `nn::cells::mamba::tests::forward_is_bit_identical_without_the_cache` is the pin
+(3 sequence lengths incl. `T = 1` and `T = 2`); a mutation collapsing `tp` to `th` fails it.
+
+### The measurement (spec S10.4)
+
+`speech bench --repeat=1 --path=exact`, 3 INDEPENDENT fresh processes per row (the phase-7/9
+recipe, so `maxrss` is a clean per-process high-water mark), ONE 75 s mono 8 kHz corpus wav
+(runtime sorted-first, no filename recorded), `lre_sad.toml` under the `cell_overlay(cell,
+forward)` architecture overlay -- i.e. the phase-9 S8.7 geometry -- with `BackPropagationActivated
+false`, `Epochs 0`, `numOuterThreads 1`. Weights are a runtime `init_weights` seed pack rather
+than a trained checkpoint: peak RSS is weight-INDEPENDENT, and this keeps the row reproducible
+without a checkpoint. Apple M4 Pro (arm64), macOS 26.5.2, `cargo build --release -j 4`.
+
+| row | maxrss_mb (3 runs) | mean | wall_s mean |
+|---|---|---|---|
+| mamba / forward, exact -- BEFORE (base `83b56aa`) | 109.875 / 107.766 / 109.922 | **109.188** | 0.117746 |
+| mamba / forward, exact -- retention skip only | 82.453 / 82.000 / 79.812 | 81.422 | 0.118049 |
+| mamba / forward, exact -- AFTER (retention skip + rolling `h`/`abar`) | 59.969 / 57.844 / 57.844 | **58.552** | 0.112976 |
+| slstm / forward, exact -- CONTROL, same recipe + build (untouched by T9) | 55.625 / 55.594 / 55.547 | 55.589 | 0.097868 |
+
+(The AFTER and CONTROL rows are the FINAL re-measurement on the finished build, taken on an
+otherwise idle box; the intermediate "retention skip only" row is the one-variable probe that
+motivated the rolling buffers.)
+
+**1.86x less peak RSS on the exact-Mamba row (109.19 -> 58.55 MB), and the ~2x cell penalty
+is gone**: Mamba now sits 3.0 MB above the sLSTM control on the identical recipe, where before
+it sat ~53 MB above. This closes the phase-9 S8.7 memory finding ("the one place a cell choice
+is visibly expensive") -- with the phase-10 Task-7 caveat still standing that the ~2x was a
+WIDTH effect, invisible at the tiny committed-fixture width. Wall-clock is unmoved (0.1177 ->
+0.1130 s mean, inside the per-row spread); the change frees allocations, it does not add work.
+
+The 109.19 MB BEFORE row reproduces phase 9's 107.82 on the same audio length and geometry
+with a different (untrained, and irrelevant) weight pack, which is what makes the two tables
+comparable. Local one-off measurement, same posture and license discipline as every other
+corpus bench row here: not a committed automated test, no automated enforcement.
+
+### The golden evidence, SPLIT -- the two halves are not equally covered
+
+R2 names the committed golden suite as the arbiter, and it earns that name for ONE of the two
+changes here. Splitting them is the honest accounting.
+
+**The `layers_output` half IS live-golden-exercised.** Determined by PARSING each fixture
+(the config parser is last-wins, and a file-level `rg` is blind to a later override -- an
+error this section previously made): `BackPropagationActivated` resolves FALSE on
+`phase0/1_worker_1.config` (the real 2015 production config), `phase0bii/lid.config`,
+`phase2b/signal.config`, thirteen `phase4b` configs (`lid5`, `twin_e2e`, `twin_mode0` through
+`twin_mode7` incl. `twin_mode0_concat` / `twin_mode7_ppm1` / `_ppm2`), all four `phase4d`
+configs (`tupleA`/`tupleB_1_worker_1` + both `parity_*`), and the SAD net of both `phase9`
+Mode-7 Twins. Every one now runs with the retention OFF and stays byte-identical.
+CORRECTION: `phase4a/tier2_spectral.config` and `tier2_gradcheck.config` were previously
+listed here and do NOT belong -- both carry a later Task-9 override block setting
+`BLSTM_BackPropagationActivated true`, so they resolve TRUE and take the retaining path.
+
+FREE PER-NET-GRANULARITY EVIDENCE, unclaimed until now: five committed configs are MIXED --
+`phase4b/twin_train` + `twin_train_ns` and `phase9/twin_mode7_lid_{slstm,cfc}` (SAD false,
+LID true) and `phase4c/genome_twin` (SAD true, LID false). Inside ONE bag, one net retains
+and the other does not, and the goldens still match byte for byte -- so the flag is genuinely
+PER NET and does not leak across the pair.
+
+**The rolling-buffer half has NO committed golden, and that must be said plainly.** Every
+backprop-false fixture above runs the legacy LSTM cell, and every committed Mamba config
+(`phase9/mamba_{bidirectional,forward}`) is backprop-TRUE, so no golden ever executes the
+`retain_cache == false` indexing. Its arbiters are three purpose-built legs, in ascending
+strength: `nn::cells::mamba::tests::forward_is_bit_identical_without_the_cache` (bare cell,
+`T = 1 / 2 / 9`); `nn::blstm::inference_only_tests::the_forward_is_bit_identical_either_way`
+(the real net, all four cells); and the headline --
+`tests/pyo3/test_phase9_seam.py::test_turning_backprop_off_does_not_move_the_forward`, which
+runs the EXACT Mamba cell over a real corpus file through `speech_rs.Engine` with the rolling
+buffers ACTIVE and asserts `results_matrix` bit-identical to the retaining run. That last leg
+is the closest thing to a golden this half has, and it is the one to point at.
+
+### What is NOT gated -- and why that is a follow-on, not a nothing
+
+This phase gates MAMBA's cache only. The other three cells are NOT cache-free: `LstmLayer`
+holds `gates`/`cells_in`/`cell_states`, `SlstmLayer` holds
+`gates`/`cell_states`/`norm_states`/`m_states`, `CfcLayer` holds
+`z_cache`/`backbone_pre`/`backbone_post`/`heads` -- each on the order of `T x 6-7 O`, all
+backward-only, all still retained unconditionally. Gating them is a NAMED FOLLOW-ON with a
+real (if smaller than Mamba's `T x d_inner d_state`) win. `CellLayer::set_retain_cache` is a
+no-op on those arms because this task did not measure or pin them, NOT because there is
+nothing there; a no-op is simply the safe direction, since it means "always retain". The fast
+f32 path is unaffected either way: it never built any of these caches.
+
+### The loud bails
+
+A backward after a non-retaining forward PANICS with a named message, in both places
+(`MambaLayer::feed_backward`, and `Network::drive_backward` -- the single choke point behind
+`feed_backward`, `feed_backward_reverse` and `feed_backward_double`, all three named in the
+message) -- never a silently wrong gradient.
+Both are pinned by `#[should_panic]` legs with a retaining contrast beside them, and by the
+R6 clone legs (a per-lane bag clone under the flag carries EMPTY caches, asserted at the cell,
+the network and the `BlstmNetwork` level). Inverting the gating (S9.4 mutation 7) fails 7 Rust
+legs and all 4 phase-10 seam legs.
+
+## Phase 10 -- the NAMED follow-ons (nothing lost, nothing promised)
+
+Collected at the phase closeout so each one is a tracked sentence rather than a report
+paragraph nobody reads again. None is a defect; each is a place where this phase deliberately
+stopped, with the reason and the shape of the work.
+
+- **The `fast/cells.rs` <-> `fast/bicell.rs` scaffolding dedupe** (Task 7, approach A, ~55
+  lines by T7's own count). `FastCausalNet` and `FastBiCell` already SHARE the parts that
+  matter -- `cell_weight_count`, `build_cell`, `cell_stack_forward`, `DenseRowChain`, and the
+  `window_begin`/`window_end` span helpers -- but each carries its own `element_count` walk,
+  its own dense-MLP construction in `from_flat`, and its own per-row output drive. Approach A
+  ratified dedupe-LATER over unification churn precisely so `FastBlstm`/`overlap_window_step`
+  would stay byte-untouched; the merge is a refactor to do when a fifth shape arrives, not
+  before, and the fast-vs-exact parity legs are what would keep it honest.
+- **A corpus tier for `FastBiCell`.** The bidirectional twins are pinned on committed
+  fixtures (`phase10_bicell_parity.rs`) but never carried onto real data, unlike the causal
+  cells (`test_phase9_parity.py`). The blocker is not the machinery, it is the checkpoints:
+  Task 4's bidirectional gate runs are EPHEMERAL (the gates train into a tempdir and discard),
+  so a corpus leg needs a cached-checkpoint recipe first -- train once per (cell, direction)
+  into a stable local path, then run the phase-9 fast-vs-exact metric comparison against it.
+- **The f32 mel bank-table pin, upgraded from geometry to VALUES** (Task 5, review M3). The
+  committed guard cross-checks the f32 bank's SHAPE metadata (`is_mel` / `is_dct_activated` /
+  `nb_filters` / `nb_dct`) against the exact bank and then compares assembled outputs at a
+  tolerance. `tests/phase1_mel_golden.rs:160-191` already shows the stronger move: drive a
+  ONE-HOT periodogram through `apply_filter_bank` and the output IS a single bank coefficient,
+  recoverable bit-for-bit through the public surface with no accessor. Repeating that per
+  filter would pin the f32 coefficient TABLE exactly (against the exact table narrowed `as
+  f32`), turning a tolerance comparison into an equality one.
+- **A `Cfc_Backbone_Layers >= 2` streaming fixture** (Task 6, M4; re-confirmed by Task 11's
+  rider 9). Both committed CfC fixtures are `L = 1`, so the multi-layer backbone chain is
+  exercised by the exact cell's unit/FD tiers and the Python reconstruction pins but NOT by
+  the fast twin or the streaming gate. No lever buys this one -- it is a FIXTURE property, so
+  closing it means regenerating `cfc_forward` at `L >= 2` through
+  `scripts/extract_phase9_fixtures.py` and re-measuring that row's pins.
+- **Retention gating for the other three cells** (Task 9). This phase gated MAMBA's cache
+  only, because that is the one the phase-9 bench measured as visibly expensive. `LstmLayer`
+  (`gates`/`cells_in`/`cell_states`), `SlstmLayer`
+  (`gates`/`cell_states`/`norm_states`/`m_states`) and `CfcLayer`
+  (`z_cache`/`backbone_pre`/`backbone_post`/`heads`) each retain `T x 6-7 O` backward-only
+  buffers unconditionally; `CellLayer::set_retain_cache`'s no-op arms are the SAFE direction
+  (always retain), not an absence of work. The win is real and smaller than Mamba's.
+- **Symbol/anchor citations instead of line numbers into LIVE files.** This phase hit the
+  failure twice in one task: Task 7's `fast/bicell.rs` overlap table cites `nn/blstm.rs` line
+  spans that Task 9 silently invalidated (it inserted 55 lines above the cited block, so every
+  number there needs +55 at HEAD -- now stated in the file rather than renumbered), and Task
+  12's own first draft of the CfC section above cited `test_phase9_seam.py:379` when its own
+  docstring edit had already pushed those pins to `:387`. Line citations into files this repo
+  keeps editing decay by construction; the pattern that does not is what the CfC section above
+  uses -- name the SYMBOL (`GRAD_CHECK_PINS`, `feed_forward_backward_overlap`,
+  `cfc_backward_matches_central_difference`) and treat the number as a convenience. Converting
+  the existing ones tree-wide is mechanical but wide, so it is named here rather than done in
+  passing; citations into `legacy/` C++ sources are NOT affected (that tree never moves).
+- **A sub-unit gain rung for the streaming crossing sweep** (Task 11, recorded as a new
+  observation). The `mamba` plain leg measures its 16 interior boundaries over a posterior
+  span of `[0.0000, 1.0000]` at the NEUTRAL lever -- nothing swept it there, the committed
+  fixture is simply saturated -- so part of that row's richness is a saturation artefact,
+  where CfC's 6 at `[0.1229, 0.7759]` are not. Extending `GAIN_LADDER` BELOW 1 would let the
+  sweep de-saturate such a row instead of accepting it. Nothing about the bit-equality claims
+  changes either way; this is about how much the boundary comparison is worth.

@@ -42,7 +42,7 @@
 //! assert, pinned at measured*10.
 
 use ndarray::Array2;
-use speech::nn::cells::{MambaLayer, SlstmLayer};
+use speech::nn::cells::{CfcLayer, MambaLayer, SlstmLayer};
 use speech::nn::network::Layer;
 
 // ---------------------------------------------------------------------------
@@ -689,5 +689,210 @@ fn mamba_backward_matches_central_difference() {
     assert!(
         worst_rel > 0.0 && worst_abs > 0.0 && worst_err > 0.0,
         "a whole regime came back at exactly 0 error -- suspicious"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CfC (Phase 10 Task 1)
+// ---------------------------------------------------------------------------
+
+/// `CfcLayer::nb_of_weights` spelled out independently of the layer, so the
+/// resolvable-count arithmetic below is checked against a SECOND derivation of the
+/// phase-10 S1.2 layout rather than against the thing under test:
+/// `W_bb (B x (in+H)) | b_bb (B)` + `(L-1)` deeper `B x B | B` blocks + three heads
+/// `(H x B | H)`.
+fn cfc_total(i: usize, o: usize, b: usize, l: usize) -> usize {
+    b * (i + o + 1) + (l - 1) * b * (b + 1) + 3 * o * (b + 1)
+}
+
+/// Structurally gradient-dead weights at `T` -- see `nn/cells/cfc.rs`'s module doc and
+/// `backbone_state_columns_are_gradient_dead_at_t1` there for the direct `== 0.0` pin.
+///
+/// The ONLY structural zero the derivation finds is the `h_{t-1}` COLUMN BLOCK of the
+/// FIRST backbone matrix at `T == 1`: `z_0 = [x_0 | h_{-1}]` and `h_{-1} = 0`, so
+/// those `B * H` weights multiply an exact zero at the one and only step. At `T > 1`
+/// every weight is live -- there is NO CfC analogue of the sLSTM `b_i` degeneracy,
+/// because `tanh` and `sigmoid` are plain bounded activations with no scale invariance
+/// for a bias shift to be absorbed into.
+fn cfc_dead(t: usize, o: usize, b: usize) -> usize {
+    if t == 1 { b * o } else { 0 }
+}
+
+/// One CfC grid row -- NAMED for the same reason [`MambaCase`] is: the two geometry
+/// counts (`backbone_units`, `backbone_layers`) sit next to the shape counts, and a
+/// silent swap would build a different net rather than fail a bound.
+struct CfcCase {
+    t: usize,
+    input_size: usize,
+    output_size: usize,
+    backbone_units: usize,
+    backbone_layers: usize,
+    rel_pin: f64,
+    major_pin: f64,
+}
+
+/// [`cfc_backward_matches_central_difference`]'s step size: `1e-5`, the MEASURED
+/// valley, neither sLSTM's `1e-6` nor mamba's `5e-4` inherited on faith.
+///
+/// A 6-point sweep over the whole grid (every shape x every seed), worst point of each
+/// column:
+///
+/// ```text
+/// eps            1e-8      1e-7      1e-6      1e-5      1e-4      1e-3
+/// max_rel        9.91e-3   1.92e-3   7.07e-5   1.72e-5   8.34e-6   7.44e-4
+/// max_rel_major  1.97e-5   4.07e-6   4.23e-7   5.53e-8   2.70e-7   (rising)
+/// max_abs_err    1.21e-7   1.27e-8   1.13e-9   1.32e-10  1.25e-8   (rising)
+/// ```
+///
+/// The DISCRIMINATING metric (`max_rel_major`) and the absolute error BOTH bottom at
+/// `1e-5`: to its left the roundoff floor `ulp(|L|)/(2 eps)` dominates, to its right
+/// truncation does -- and the `1e-4` column's `max_abs_err` is ~`95x` the `1e-5` one
+/// (`1.25e-8` vs `1.32e-10`), the `eps^2` signature, a SYSTEMATIC bias not noise. That
+/// is why `1e-4` is not chosen even though it would put the (uninformative) `max_rel`
+/// column at its minimum: a systematic FD bias is a worse instrument for catching a
+/// small wrong adjoint term than roundoff noise of the same size.
+const CFC_EPS: f64 = 1e-5;
+
+/// THE backward pin (phase-10 spec S1.3, the phase-9 S8.1 unit-tier instrument reused
+/// verbatim -- no harness change, which is the cell-agnostic contract working):
+/// central differences vs the hand-derived analytic gradient over `(t, in, out, B, L)`
+/// in `{(1,3,2,4,1), (7,3,2,4,1), (11,5,4,8,2), (23,7,3,8,1)}` x 3 seeds, eps
+/// [`CFC_EPS`].
+///
+/// MEASURED (Apple M4 Pro, f64, this exact seed grid), re-printable with
+/// `cargo test --release --test phase9_cell_grad -- --nocapture cfc`:
+///
+/// ```text
+/// PER-SHAPE, worst of the 3 seeds:      max_rel    max_rel_major   resolvable
+///   t= 1 in=3 out=2 B=4 L=1             8.126e-9   8.126e-9         46 of 54
+///   t= 7 in=3 out=2 B=4 L=1             1.168e-7   7.823e-9         54 of 54
+///   t=11 in=5 out=4 B=8 L=2             2.398e-7   2.653e-8        260 of 260
+///   t=23 in=7 out=3 B=8 L=1             1.720e-5   5.530e-8        169 of 169
+/// max absolute error (near-zero weights) = EXACTLY 0.0 everywhere (see below)
+/// max absolute error (ALL weights)       = 1.321e-10 at t=11, seed 2
+/// ```
+///
+/// Pinned at measured*10 PER SHAPE: `8.2e-8`/`1.2e-6`/`2.4e-6`/`1.8e-4` relative and
+/// `8.2e-8`/`7.9e-8`/`2.7e-7`/`5.6e-7` MAJOR, plus `1e-12` near-zero and `1.4e-9`
+/// all-weights absolute (both grid-wide, the sLSTM/mamba convention).
+///
+/// THE ONE PIN ABOVE 1e-4, declared rather than buried: `t=23`'s `rel_pin` is `1.8e-4`
+/// -- above the brief's STOP threshold, and DELIBERATELY so, exactly as two of the
+/// mamba rows above are. It is set by ONE weight on ONE seed (seed 2, `w[79]`) whose
+/// analytic derivative is `1.84e-6`, i.e. `1e-6` OF THE PACK MAXIMUM (1.79): its
+/// relative error is the central-difference floor divided by a near-zero number and
+/// says nothing about the derivation. That it is FD noise and not a wrong term is
+/// checkable, not asserted: across the sweep above the whole `max_rel` column falls
+/// ~3 orders MONOTONICALLY as `eps` grows from `1e-8` to `1e-4`
+/// (`9.9e-3 / 1.9e-3 / 7.1e-5 / 1.7e-5 / 8.3e-6`) -- roundoff-dominated, the decade
+/// steps being uneven only because the arg-max weight moves between columns; the
+/// `max_abs_err` row over the same left half is the clean textbook `1/eps` roundoff
+/// signature, one decade per decade (`1.21e-7 / 1.27e-8 / 1.13e-9`). A WRONG adjoint
+/// term is a MULTIPLICATIVE error and would be eps-INVARIANT -- a FLAT row, which is
+/// what the sweep would have shown. The STOP assert in the test body is therefore on
+/// `major_pin` -- the bound a wrong adjoint actually trips -- and every one of those
+/// is <= `5.6e-7`, ~180x under the threshold.
+///
+/// THE NEAR-ZERO REGIME IS EXACTLY ZERO HERE, which is STRONGER than sLSTM's ~1e-10
+/// floor and is asserted as an equality below. At `T > 1` the bucket is EMPTY (every
+/// weight resolvable); at `T = 1` it holds exactly the `B*H` dead `W_bb` state
+/// columns, and perturbing one of those cannot move the loss by a single bit (it
+/// multiplies `h_{-1} = 0`), so `L(w+eps)` and `L(w-eps)` are BIT-IDENTICAL and the
+/// central difference is `0.0` against an analytic `0.0`.
+///
+/// The `resolvable_floor`s carry NO slack: measured == the DERIVED structural count on
+/// every row and every seed (46/54/260/169), so the two-sided count assert of [`Case`]
+/// degenerates to an exact equality, as it does for sLSTM.
+#[test]
+fn cfc_backward_matches_central_difference() {
+    let grid: &[CfcCase] = &[
+        CfcCase {
+            t: 1,
+            input_size: 3,
+            output_size: 2,
+            backbone_units: 4,
+            backbone_layers: 1,
+            rel_pin: 8.2e-8,
+            major_pin: 8.2e-8,
+        },
+        CfcCase {
+            t: 7,
+            input_size: 3,
+            output_size: 2,
+            backbone_units: 4,
+            backbone_layers: 1,
+            rel_pin: 1.2e-6,
+            major_pin: 7.9e-8,
+        },
+        CfcCase {
+            t: 11,
+            input_size: 5,
+            output_size: 4,
+            backbone_units: 8,
+            backbone_layers: 2,
+            rel_pin: 2.4e-6,
+            major_pin: 2.7e-7,
+        },
+        CfcCase {
+            t: 23,
+            input_size: 7,
+            output_size: 3,
+            backbone_units: 8,
+            backbone_layers: 1,
+            rel_pin: 1.8e-4,
+            major_pin: 5.6e-7,
+        },
+    ];
+    let (mut worst_rel, mut worst_abs, mut worst_err) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for c in grid {
+        // THE STOP ASSERT (spec R4): a pin above 1e-4 on the DISCRIMINATING bound is a
+        // STOP-and-adjudicate, never a widening. See the doc comment for why it is
+        // `major_pin` and not `rel_pin` that carries this.
+        assert!(
+            c.major_pin < 1e-4,
+            "cfc t={}: major_pin {:e} is at or above the 1e-4 STOP threshold -- \
+             adjudicate the adjoint, do NOT widen",
+            c.t,
+            c.major_pin
+        );
+        let (b, l) = (c.backbone_units, c.backbone_layers);
+        let total = cfc_total(c.input_size, c.output_size, b, l);
+        let resolvable = total - cfc_dead(c.t, c.output_size, b);
+        let label = format!("cfc B={b} L={l}");
+        let cases: &[Case] = &[Case {
+            t: c.t,
+            input_size: c.input_size,
+            output_size: c.output_size,
+            // floor == structural: like sLSTM (and unlike mamba) nothing lands in the
+            // near-zero bucket by magnitude alone, so the count is seed-independent.
+            resolvable_floor: resolvable,
+            resolvable_structural: resolvable,
+            rel_pin: c.rel_pin,
+            major_pin: c.major_pin,
+            eps: CFC_EPS,
+        }];
+        let (r, a, e) = sweep(
+            &label,
+            |i, o| Box::new(CfcLayer::new(i, o, b, l)),
+            cases,
+            1e-12,
+            1.4e-9,
+        );
+        worst_rel = worst_rel.max(r);
+        worst_abs = worst_abs.max(a);
+        worst_err = worst_err.max(e);
+    }
+    assert!(
+        worst_rel > 0.0 && worst_err > 0.0,
+        "a whole regime came back at exactly 0 error -- suspicious"
+    );
+    // NOT the sLSTM/mamba `worst_abs > 0.0`: for CfC the near-zero bucket holds only
+    // the T=1 dead block, whose central difference is bit-exactly 0.0 (see the doc
+    // comment). An equality is the right pin -- a nonzero value here would mean those
+    // weights became measurably live, which is a contract change.
+    assert_eq!(
+        worst_abs, 0.0,
+        "the near-zero (T=1 dead-block) regime came back non-zero -- those weights \
+         multiply h_(-1) = 0 and cannot move the loss at all"
     );
 }

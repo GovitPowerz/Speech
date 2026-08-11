@@ -23,9 +23,26 @@
 //! the SAME arithmetic (spec S4.1-S4.3). The phase-7 `nn`/`pipeline`/`driver` BLSTM
 //! path is untouched by it -- the causal net is a sibling the driver dispatches to on
 //! `Cell_Type` + `Direction`, never a change to `FastBlstm`.
+//!
+//! Phase 10 Task 7 adds `bicell`: the BIDIRECTIONAL f32 twins of those same cells
+//! (`FastBiCell` -- forward stack + reversed stack + hcat + the shared per-row dense
+//! chain, driven by a FRESH windowed-overlap loop over the already-shared span helpers).
+//! `FastBlstm` and its `overlap_window_step` are BYTE-UNTOUCHED by it (spec S5, approach
+//! A): they are the phase-8 streaming bit-identity kernels, and the phase-7/8 suites
+//! passing WITHOUT EDITS is the proof. Bidirectional inference has NO streaming twin --
+//! it is unstreamable by construction (the reverse pass reads the whole sequence).
+//!
+//! Phase 10 Task 5 adds `mel32`: the f32 mel/DCT/deltas twin of `features/mel.rs`,
+//! which retires the phase-7 f64 widen bridge at BOTH `pipeline` sites (spec S4) --
+//! the fast front-end is now f32 END TO END and the per-call `T x bins` f64 widen
+//! buffer is gone. That moved every fast-vs-exact tolerance once, by design; the S4
+//! sweep re-measured and re-pinned them (RESULTS.md), with boundary/argmax identity
+//! unchanged (R1: a flip would have been a STOP, not a widening).
 
+pub mod bicell;
 pub mod cells;
 pub mod driver;
+pub mod mel32;
 pub mod nn;
 pub mod pipeline;
 pub mod stream;

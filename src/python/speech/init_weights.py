@@ -88,6 +88,17 @@ of exactly one input channel -- the standard depthwise reading of
 algebraically identical `y + log1p(-e^{-y})` -- for DOMAIN SAFETY (the direct form overflows
 `exp` above `y ~ 709.78`), not for accuracy on this band, where both agree to ~1e-13.
 
+CfC init (spec S1.5), the phase-10 fourth cell: STATED OPENLY, it has no reference-lineage
+magic constants at all -- no S4D-real analogue, no Delta_0 band, nothing to copy. Every block
+is a plain dense layer, so the repo Xavier/He convention applies as-is and EVERY BIAS IS 0
+(there is no forget-gate analogue to open: the interpolation gate is a plain logistic between
+two live heads, not a memory valve). The fans come straight from the block shapes: the layer-0
+backbone reads the CONCATENATED `[x | h_{t-1}]` vector through ONE matrix, so its `fan_in` is
+`in + h` -- numerically the same combined value the LSTM/sLSTM paths reach by adding two
+separately-stored halves, here simply the matrix's own width; deeper backbone layers are
+`B -> B`; each of the three heads is `B -> h` and they do NOT share a combined fan (three
+separate pre-activations, one product each).
+
 Draw ORDER for the new cells is the FLAT ORDER (block by block). There is no legacy trajectory
 to match -- only same-seed reproducibility matters -- so the least surprising order wins.
 """
@@ -99,6 +110,7 @@ from typing import Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
+from speech.config_bridge import CFC_DEFAULT_BACKBONE_LAYERS, CFC_DEFAULT_BACKBONE_UNITS
 from speech.weight_bridge import nnet_to_flat, spec_directions
 
 _PEEPHOLE_SCALE = 0.1
@@ -108,7 +120,7 @@ _DELTA_MIN = 1e-3
 _DELTA_MAX = 1e-1
 
 Scheme = Literal["xavier", "he"]
-CellType = Literal["lstm", "slstm", "mamba"]
+CellType = Literal["lstm", "slstm", "mamba", "cfc"]
 
 
 def _xavier_uniform(rng: np.random.Generator, shape: tuple[int, int], fan_in: int, fan_out: int) -> NDArray[np.float64]:
@@ -279,6 +291,53 @@ def init_mamba_flat(
     return np.concatenate(parts)
 
 
+def cfc_geometry(spec: dict[str, object]) -> tuple[int, int]:
+    """The spec's `Cfc` entry (`config_bridge.nnet_spec`) as `(backbone_units,
+    backbone_layers)`; absent means the S1.4 defaults, matching a config that never states
+    the keys. Two plain ints, so no dataclass -- unlike `MambaGeometry` there is no derived
+    quantity (`d_inner`, the `dt_rank` auto-resolution) to carry with them."""
+    raw = cast(dict[str, int], spec.get("Cfc", {}))
+    return (
+        int(raw.get("backbone_units", CFC_DEFAULT_BACKBONE_UNITS)),
+        int(raw.get("backbone_layers", CFC_DEFAULT_BACKBONE_LAYERS)),
+    )
+
+
+def init_cfc_flat(
+    rng: np.random.Generator,
+    output_size: int,
+    input_size: int,
+    backbone_units: int,
+    backbone_layers: int,
+    scheme: Scheme = "xavier",
+) -> NDArray[np.float64]:
+    """ONE CfC cell layer's flat block, in the S1.2 order -- the
+    `nn/cells/cfc.rs::for_each_slot` walk, mirrored block for block:
+
+        W_bb (B x (in+h)) | b_bb (B)                     the layer-0 backbone
+        per deeper layer:  W_l (B x B) | b_l (B)         l = 2..L
+        W_1 (h x B) | b_1 (h) | W_2 | b_2 | W_t | b_t    the heads, [ff1 | ff2 | gate]
+
+    each matrix ROW-major at its MATH shape (output unit outer, source index inner); the Rust
+    stores every one of them TRANSPOSED and the walk absorbs that, so the flat order is the
+    math order. Length `B*(in+h+1) + (L-1)*B*(B+1) + 3*h*(B+1)`.
+
+    Fans and biases per S1.5 -- see the module docstring for why the layer-0 `fan_in` is
+    `in + h` and why the three heads do not share one. The geometry is validated ONCE, in
+    `config_bridge._cfc_geometry` (the `Mamba_*` precedent: the reader is the gate)."""
+    _check_scheme(scheme)
+    b, h = backbone_units, output_size
+    parts: list[NDArray[np.float64]] = []
+    for li in range(backbone_layers):
+        fan_in = input_size + h if li == 0 else b
+        parts.append(_draw(rng, (b, fan_in), fan_in, b, scheme).reshape(-1))
+        parts.append(np.zeros(b, dtype=np.float64))
+    for _ in range(3):  # [ff1 | ff2 | gate] -- same shape, same fans, three separate draws.
+        parts.append(_draw(rng, (h, b), b, h, scheme).reshape(-1))
+        parts.append(np.zeros(h, dtype=np.float64))
+    return np.concatenate(parts)
+
+
 def _init_lstm_pack(
     spec: dict[str, object],
     rng: np.random.Generator,
@@ -318,13 +377,14 @@ def _init_cell_pack(
     directions: tuple[str, ...],
     cell_type: CellType,
 ) -> NDArray[np.float64]:
-    """The sLSTM/Mamba path: emit the flat blocks directly (spec S1.3 -- these cells have no
-    structured domain), then the SAME output-MLP + normalize-tail blocks the LSTM pack ends
-    with, in `BlstmNetwork::set_weights`'s order."""
+    """The sLSTM/Mamba/CfC path: emit the flat blocks directly (spec S1.3 -- these cells have
+    no structured domain), then the SAME output-MLP + normalize-tail blocks the LSTM pack
+    ends with, in `BlstmNetwork::set_weights`'s order."""
     lstm = cast(list[int], spec["LSTMNeuronNb"])
     lsub = cast(list[int], spec["LSTMSubSampling"])
     outn = cast(list[int], spec["OutputNeuronNb"])
     geom = mamba_geometry(spec)
+    units, layers = cfc_geometry(spec)
 
     parts: list[NDArray[np.float64]] = []
     for _ in directions:
@@ -332,8 +392,10 @@ def _init_cell_pack(
             out, fin = lstm[i + 1], lstm[i] * lsub[i]
             if cell_type == "slstm":
                 parts.append(init_slstm_flat(rng, out, fin, scheme, forget_bias_one))
-            else:
+            elif cell_type == "mamba":
                 parts.append(init_mamba_flat(rng, out, fin, geom, scheme))
+            else:
+                parts.append(init_cfc_flat(rng, out, fin, units, layers, scheme))
     for i in range(len(outn) - 1):
         mat = _init_output_layer(rng, outn[i + 1], outn[i], scheme)
         parts.append(mat[:, :-1].reshape(-1))
@@ -357,8 +419,8 @@ def init_weights(
     and this function is byte-for-byte what it was before phase 9."""
     _check_scheme(scheme)
     cell_type = cast(str, spec.get("CellType", "lstm"))
-    if cell_type not in ("lstm", "slstm", "mamba"):
-        raise ValueError(f"unknown cell type: {cell_type!r} (expected 'lstm', 'slstm' or 'mamba')")
+    if cell_type not in ("lstm", "slstm", "mamba", "cfc"):
+        raise ValueError(f"unknown cell type: {cell_type!r} (expected 'lstm', 'slstm', 'mamba' or 'cfc')")
     directions = spec_directions(spec)
 
     if cell_type == "lstm":

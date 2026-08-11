@@ -21,15 +21,57 @@
 //!
 //! NON-VACUITY (the phase-2b SEG_STRUCT lesson, restated by Task 6's crossing sweep): a
 //! run whose posteriors never cross `BLSTM_decision_thresh_rising` proves nothing about
-//! boundary equality. [`crossing_offset`] sweeps a pure post-recurrence level shift on the
-//! output layer's single bias until the OFFLINE run carries interior boundaries, and every
-//! equivalence/latency leg runs on that offset -- so `max_dt == 0.0` compares real interior
-//! boundaries, not two copies of the seeded `[Other@0, End@dur]`.
+//! boundary equality. [`crossing_lever`] sweeps an output-layer [`Lever`] -- a bias level
+//! shift first, escalating to a weight-row gain only if no offset suffices -- until the
+//! OFFLINE run carries interior boundaries, and every equivalence/latency leg runs on that
+//! lever, so `max_dt == 0.0` compares real interior boundaries, not two copies of the
+//! seeded `[Other@0, End@dur]`. See [`Lever`] for what the gain rung costs and what it
+//! preserves.
 //!
 //! THE SUB-SAMPLING DEVIATION (the plan's S5.3 transcription, not the spec's own text): the
 //! fixtures run `BLSTM_LSTMSubSampling 4`, so every
 //! leg here exercises the buffered decimation `StreamCausal` implements instead of bailing.
 //! See that type's docs and the module doc of `fast/stream.rs` for why.
+//!
+//! PHASE 10 TASK 6 adds the `cfc` rows (`cfc_forward.config` + `cfc_forward_seed.bin`).
+//! `StreamCausal` needed NO change to accept them -- it drives `FastCell`/`FastCellState`
+//! generically, so the new cell arrives through the same `classify_fast_shape` choke point
+//! as the other two, which is the S5.2 "zero new surface" claim being cashed rather than
+//! restated. MEASURED, all green: `finish()` bit-equal to the offline fast causal run with
+//! boundary `max_dt` EXACTLY 0.0 on BOTH the plain and the calibrated type-1 configs,
+//! chunk-invariant at 20/100/1000/7 ms, zero prefix retractions, and the SAME 1.73400 s
+//! derived bound as sLSTM/mamba (the fixture configs are byte-identical bar the cell keys,
+//! so an identical bound is the point -- the causal win is a property of the REGIME).
+//!
+//! PHASE 10 TASK 11 RETIRED THE TWO NARROWED CfC ROWS. T6 landed that cell with a measured
+//! ONE-interior-boundary ceiling under the bias-only knob, which forced both of its
+//! segments into `finish()` and cost it the mid-stream and measured-lag legs entirely; the
+//! T6-I1 ceiling assert existed precisely to announce a fixture rich enough to do better.
+//! The T11 mutation battery's rider-9 sweep found it WITHOUT regenerating any fixture: the
+//! output-layer GAIN rung (see [`Lever`]) settles the CfC row at `gain 2 / bias -0.5`,
+//! MEASURED 6 interior boundaries (8 segment rows) over an UNSATURATED posterior span
+//! `[0.1229, 0.7759]`, 6 mid-stream emissions split 3 Speech / 3 Other, and a SPEECH lag of
+//! 1.81888 s -- `-0.01512` s inside `bound + PUSH_CHUNK_S`, the same knife-edge margin its
+//! siblings sit at. So it now carries the SAME strong floors as all three -- `min_interior
+//! >= 2`, mid-stream emissions in both classes, and the tight measured-lag pins. What that
+//! costs is the sweep's pure-level-shift invariant, stated in full on [`Lever`]. ONE T6
+//! residual stays OPEN and is not buyable this way:
+//! `Cfc_Backbone_Layers >= 2` (the multi-layer backbone chain) is a property of the
+//! committed fixture, so retiring it still needs a regenerated `cfc_forward` pack.
+//!
+//! PHASE 10 TASK 8 adds the `lstm` rows (`lstm_forward.config` + `lstm_forward_seed.bin`),
+//! completing the causal set. Again ZERO machinery: the same generic `FastCell` dispatch,
+//! the same choke point, one more entry in [`CAUSAL_CELLS`]. It is nonetheless the row
+//! this suite is best placed to catch a bug in, because the peephole LSTM carries the
+//! RICHEST state of the four -- `h`, `c`, AND the previous step's POST-activation gate row,
+//! which three separate peephole families read at `t-1`. A kernel that rolled `h` and `c`
+//! but not `gates` would compute correct whole-sequence output and WRONG streamed output at
+//! every chunk boundary; that is precisely what the split-state and chunk-invariance legs
+//! measure. MEASURED, all green, first run: crossing at bias `+0.5` -> 4 interior
+//! boundaries (6 segment rows), `finish()` bit-equal to offline with `max_dt` EXACTLY 0.0
+//! on both the plain and the calibrated type-1 configs, chunk-invariant at 20/100/1000/7 ms,
+//! zero prefix retractions, 4 mid-stream emissions, and the SAME 1.73400 s derived bound
+//! (measured speech lag 1.75688 s, i.e. -0.07712 s inside `bound + PUSH_CHUNK_S`).
 
 mod common;
 
@@ -76,30 +118,75 @@ struct CausalStage {
     pack: PathBuf,
 }
 
-/// Stage one causal cell's gate config in `dir`. `bias_offset` shifts the output layer's
-/// single bias in a LOCAL pack copy (the crossing sweep -- a post-recurrence level shift
-/// that leaves every cell weight, and so the whole SHAPE of the posterior curve,
-/// untouched); `tag` keeps concurrent stagings in the same tempdir from colliding.
-fn stage(dir: &Path, cell: &str, bias_offset: f64, tag: &str) -> CausalStage {
+/// THE CROSSING KNOB: a two-parameter AFFINE map on the output MLP's single pre-activation,
+/// `logit -> gain * (w . h) + b + offset`, i.e. the dense layer's weight ROWS scaled and its
+/// bias shifted. The precedent is `phase9_fast_parity.rs`/`phase10_bicell_parity.rs`, which
+/// both already carry exactly this two-knob lever.
+///
+/// THE INVARIANT TRADE, stated openly (phase 10 T11, the battery's rider 9). Phase 9's knob
+/// was the bias ALONE -- a pure post-recurrence LEVEL SHIFT, which leaves the posterior
+/// curve's SHAPE bit-for-bit what the committed net produces and merely re-centres it.
+/// `gain != 1` FORFEITS that: it scales the logit's variable part, so the curve's CONTRAST
+/// moves, not only its level. What survives, and is what the sweep actually needs:
+///
+///   * the map is MONOTONE in the logit (`gain > 0`), so frame ORDER is preserved -- every
+///     crossing compared below is a crossing of the REAL curve, at a real frame;
+///   * it is OUTPUT-LAYER ONLY and POST-RECURRENCE -- every cell weight is untouched, so
+///     the causal stack still produces the entire shape of `h`, and the cell is exercised
+///     end to end exactly as committed;
+///   * both sides of every comparison here are fast-vs-fast on IDENTICAL inputs (offline
+///     `feed_forward` vs the streamed `StreamCausal`), so the lever cannot flatter the
+///     equality it is used to demonstrate -- it can only make the boundary set richer or
+///     poorer.
+///
+/// The sweep tries `gain 1` (phase 9's weaker, more faithful knob) at EVERY offset first
+/// and only then escalates, so three of the four cells are pinned on the pure level shift
+/// and exactly one -- CfC -- is not. See [`crossing_lever`] for why CfC needs it.
+#[derive(Clone, Copy)]
+struct Lever {
+    gain: f64,
+    offset: f64,
+}
+
+impl Lever {
+    /// The committed pack, unperturbed.
+    const NEUTRAL: Lever = Lever {
+        gain: 1.0,
+        offset: 0.0,
+    };
+}
+
+/// Stage one causal cell's gate config in `dir`, with `lever` applied to a LOCAL pack copy
+/// (see [`Lever`]); `tag` keeps concurrent stagings in the same tempdir from colliding.
+fn stage(dir: &Path, cell: &str, lever: Lever, tag: &str) -> CausalStage {
     let base = common::stage_frozen_tier2(dir);
     let text = std::fs::read_to_string(fixture_phase9(&format!("{cell}_forward.config"))).unwrap();
 
     // The output layer's bias is the LAST pack element before the `2*input_size` normalize
     // tail (layout `[stack | output MLP | mean | std]`, and the fixture's output MLP is a
-    // single `4 -> 1` layer: 4 weights then 1 bias). `input_size` is DERIVED from the
-    // config, not hardcoded, so a fixture regeneration relocates the index.
+    // single `4 -> 1` layer: 4 weights then 1 bias, so the gained weight rows sit in
+    // `[bias_idx - dense_in, bias_idx)`). BOTH widths are DERIVED from the config, not
+    // hardcoded, so a fixture regeneration relocates the indices instead of silently
+    // perturbing some interior weight.
+    //
+    // THE ONE ASSUMPTION THAT IS NOT DERIVED: `dense_in` reads the FIRST field of
+    // `BLSTM_OutputNeuronNb`, which is the last dense layer's fan-in only while that key
+    // carries exactly TWO fields (one dense layer, `fan_in,fan_out` -- every committed
+    // causal fixture is `4,1`). A DEEPER output MLP (say `24,12,1`) would put `[bias_idx -
+    // dense_in, bias_idx)` inside the wrong layer, so a fixture regenerated with more than
+    // two fields must take the SECOND-TO-LAST field here instead.
     let map = parse(&text);
-    let input_size: usize = map["BLSTM_LSTMNeuronNb"]
-        .split(',')
-        .next()
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let field =
+        |key: &str| -> usize { map[key].split(',').next().unwrap().trim().parse().unwrap() };
+    let input_size = field("BLSTM_LSTMNeuronNb");
+    let dense_in = field("BLSTM_OutputNeuronNb");
     let mut flat =
         read_weight_vector(&fixture_phase9(&format!("{cell}_forward_seed.bin"))).unwrap();
     let bias_idx = flat.len() - 2 * input_size - 1;
-    flat[bias_idx] += bias_offset;
+    for w in flat[bias_idx - dense_in..bias_idx].iter_mut() {
+        *w *= lever.gain;
+    }
+    flat[bias_idx] += lever.offset;
     let pack = dir.join(format!("{cell}_{tag}_pack.bin"));
     write_matrix(&pack, flat.len(), 1, &flat).unwrap();
 
@@ -358,15 +445,21 @@ fn interior_boundaries(seg: &Segmentation) -> usize {
 /// The interior-boundary floor the PLAIN (type-0) legs demand -- the ones carrying the
 /// headline `max_dt == 0.0` claim. TWO, not one: a single interior boundary means the
 /// posterior crossed the rising threshold once and never came back, so the comparison
-/// exercises one hysteresis edge and not the other. Measured, the plain legs clear this
-/// comfortably (slstm 12, mamba 16), so the floor is a REGRESSION DETECTOR -- if a future
-/// fixture or kernel change quietly thins the boundary set to a single edge, the sweep
-/// moves on rather than silently weakening the gate.
+/// exercises one hysteresis edge and not the other. Measured, EVERY plain leg clears this
+/// (slstm 12, mamba 16, cfc 6, lstm 4), so the floor is a REGRESSION DETECTOR -- if a
+/// future fixture or kernel change quietly thins the boundary set to a single edge, the
+/// sweep moves on rather than silently weakening the gate.
 /// The default push granularity every end-to-end leg streams at, in SECONDS. Shared so the
 /// latency leg's tight pin (`bound + PUSH_CHUNK_S`) and the chunk size it actually pushes at
 /// cannot drift apart -- the emission clock advances once per `push`, so that pin is only
 /// valid for THIS granularity.
 const PUSH_CHUNK_S: f64 = 0.1;
+
+/// Every cell the CAUSAL streaming arm now runs. `lstm` joined in phase-10 Task 8
+/// (`fast::cells::FastLstm` + the committed `lstm_forward` fixture); the legs below are
+/// parametric, so it is new DATA, not new machinery -- which is exactly the S5.2 claim
+/// that `StreamCausal` never learns the cell type.
+const CAUSAL_CELLS: [&str; 4] = ["slstm", "mamba", "cfc", "lstm"];
 
 const MIN_INTERIOR_PLAIN: usize = 2;
 
@@ -383,30 +476,106 @@ const MIN_INTERIOR_PLAIN: usize = 2;
 /// plain legs are.
 const MIN_INTERIOR_TYPE1: usize = 1;
 
-/// Sweep the output-layer bias until the OFFLINE causal run built by `build` carries at
-/// least `min_interior` interior boundaries, and return that offset. `0.0` FIRST, so a
-/// fixture that already crosses is used AS COMMITTED and the sweep is a fallback, not a
-/// default detour. `build` is a closure so the same sweep serves the plain (type-0) and the
-/// calibrated-tail (type-1) legs, whose posteriors sit at different levels.
-fn crossing_offset(label: &str, min_interior: usize, build: impl Fn(f64) -> CausalStage) -> f64 {
-    for offset in [0.0_f64, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0, 1.5, -3.0, 2.0] {
-        let (_, seg) = run_offline(&build(offset));
+/// Sweep the output-layer [`Lever`] until the OFFLINE causal run built by `build` carries at
+/// least `min_interior` interior boundaries, and return the winning lever. `gain 1` at every
+/// offset FIRST (with `offset 0.0` leading, so a fixture that already crosses is used AS
+/// COMMITTED), and only then the [`GAIN_LADDER`] -- so the sweep always settles on the least
+/// invasive perturbation that works, deterministically. `build` is a closure so the same
+/// sweep serves the plain (type-0) and the calibrated-tail (type-1) legs, whose posteriors
+/// sit at different levels.
+///
+/// WHY THE GAIN RUNG EXISTS AT ALL -- the CfC row, measured rather than assumed. That
+/// fixture's posterior spans only `[0.325, 0.705]` at the neutral lever, a logit swing of
+/// ~0.8 against the ~1.25 the rising/falling pair (0.6 / 0.3) needs for a round trip, so a
+/// 97-point bias-only sweep over `[-3, +3]` yields EXACTLY ONE interior boundary across a
+/// broad plateau and never two: a pure level shift can buy one edge out of that curve,
+/// never a pair. Scaling the four output weights widens the swing instead, and the sweep
+/// settles at `gain 2` -- which is what lets the CfC row carry the SAME strong floors as
+/// its three siblings rather than the narrowed variants phase-10 T6 had to accept.
+fn crossing_lever(label: &str, min_interior: usize, build: impl Fn(Lever) -> CausalStage) -> Lever {
+    let gain1 = lever_offsets().map(|offset| Lever { gain: 1.0, offset });
+    let escalation = GAIN_LADDER
+        .into_iter()
+        .flat_map(|gain| lever_offsets().map(move |offset| Lever { gain, offset }));
+    for lever in gain1.chain(escalation) {
+        let (_, seg) = run_offline(&build(lever));
         if interior_boundaries(&seg) >= min_interior {
             println!(
-                "MEASURE crossing[{label}]: output-bias offset {offset:+} -> {} interior \
+                "MEASURE crossing[{label}]: output gain {} bias offset {:+} -> {} interior \
                  boundaries ({} segment rows)",
+                lever.gain,
+                lever.offset,
                 interior_boundaries(&seg),
                 seg.segments().len()
             );
-            return offset;
+            return lever;
         }
     }
-    panic!("{label}: no output-bias offset produced >= {min_interior} interior boundaries");
+    panic!(
+        "{label}: no (output gain, bias offset) pair produced >= {min_interior} interior boundaries"
+    );
 }
 
-/// The plain (type-0) sweep: the committed fixture config at `offset`.
-fn plain_crossing(dir: &Path, cell: &str, tag: &str) -> f64 {
-    crossing_offset(cell, MIN_INTERIOR_PLAIN, |o| stage(dir, cell, o, tag))
+/// The gain rungs the sweep escalates to when NO offset at gain 1 clears the floor.
+/// ASCENDING, so the least invasive scaling that works wins -- `phase10_bicell_parity.rs`'s
+/// ordering, not `phase9_fast_parity.rs`'s richness-first one, because here the boundary
+/// COUNT is pinned exactly (see the CfC ceiling assert) and a gain chosen for richness
+/// would be a knob tuned against its own tripwire.
+const GAIN_LADDER: [f64; 3] = [2.0, 3.0, 4.0];
+
+/// The offset grid every gain rung sweeps: [`COARSE_OFFSETS`] then the fine 1/16 fallback.
+fn lever_offsets() -> impl Iterator<Item = f64> {
+    COARSE_OFFSETS.into_iter().chain(fine_offsets())
+}
+
+/// The COARSE offsets tried first -- phase 9's list verbatim, so every pre-phase-10 row
+/// settles on exactly the offset it settled on before (slstm plain `-0.5` / type1 `+0.5`,
+/// mamba `0.0` on both).
+const COARSE_OFFSETS: [f64; 10] = [0.0, -0.5, -1.0, 0.5, -1.5, 1.0, -2.0, 1.5, -3.0, 2.0];
+
+/// The FINE fallback grid (1/16 steps over `[-1, +1]`), reached only when no coarse offset
+/// clears `min_interior`. THE CfC TYPE-1 ROW NEEDS IT: on the calibrated tail its crossing
+/// plateau is `[+0.0625, +0.3125]`, which the coarse list's half-unit steps jump straight
+/// over (`0.0` -> 0 boundaries, `+0.5` -> 0). The CfC PLAIN row does NOT need it -- offset
+/// `0.0` already crosses -- so that row runs the fixture AS COMMITTED.
+fn fine_offsets() -> impl Iterator<Item = f64> {
+    // The coarse entries are FILTERED OUT: they have already been tried and failed by the
+    // time this iterator is reached, so re-running them would be a handful of wasted
+    // whole-file engine invocations per fallback cell.
+    (-16i32..=16)
+        .map(|k| f64::from(k) * 0.0625)
+        .filter(|o| !COARSE_OFFSETS.contains(o))
+}
+
+/// The exact interior-boundary count the CfC plain leg produces at its swept lever.
+///
+/// [`MIN_INTERIOR_PLAIN`] is a `>=` floor and [`crossing_lever`] breaks at the FIRST lever
+/// clearing it, so a fixture or kernel change that moved the boundary set would satisfy
+/// every other assertion in this suite silently. This pins the count EXACTLY, on the one
+/// row whose lever was chosen by escalation rather than taken as committed -- so a move is
+/// a LOUD signal to adjudicate, not a constant to bump. (The phase-10 T6 version of this
+/// tripwire pinned `== 1` under the bias-only knob, and firing is precisely what it was
+/// for: T11's rider-9 sweep found the gain rung, and this is that finding cashed.)
+///
+/// WHAT ADJUDICATION MEANS IF IT FIRES SOMEWHERE ELSE (stated because an exact count is a
+/// harder pin than a tolerance, and this suite runs in CI): the boundary set is a DISCRETE
+/// function of f32 posteriors, so a different libm/SIMD lowering could in principle move a
+/// crossing across a threshold and change the count without anything being wrong. That
+/// possibility does NOT make a fire ignorable -- it makes it a two-way question: re-measure
+/// on the failing box and decide between (a) a genuine kernel/fixture move, which is the
+/// STOP this pin exists for, and (b) platform variance, which is closed by re-deriving the
+/// count there and recording BOTH values, never by relaxing `==` to `>=`. The evidence for
+/// telling them apart is already printed: the gate leg's `MEASURE gate[cfc]` line carries
+/// the posterior span (`[0.1229, 0.7759]` here) and `boundary_max_dt`, so a fire that comes
+/// with an unchanged span and a still-`0.0` `max_dt` reads very differently from one that
+/// does not.
+const CFC_INTERIOR_PLAIN: usize = 6;
+
+/// The plain (type-0) sweep: the committed fixture config under the winning [`Lever`].
+fn plain_crossing(dir: &Path, cell: &str, tag: &str) -> Lever {
+    crossing_lever(cell, MIN_INTERIOR_PLAIN, |lever| {
+        stage(dir, cell, lever, tag)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -415,10 +584,10 @@ fn plain_crossing(dir: &Path, cell: &str, tag: &str) -> f64 {
 
 #[test]
 fn stream_finish_equals_offline_causal() {
-    for cell in ["slstm", "mamba"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
-        let offset = plain_crossing(dir.path(), cell, "sweep");
-        let st = stage(dir.path(), cell, offset, "gate");
+        let lever = plain_crossing(dir.path(), cell, "sweep");
+        let st = stage(dir.path(), cell, lever, "gate");
         let (off_post, off_seg) = run_offline(&st);
         let (rate, samples) = mono_samples(&st.wav);
         let run = run_session(
@@ -433,9 +602,24 @@ fn stream_finish_equals_offline_causal() {
             "{cell}: the session must take the causal arm"
         );
         let max_dt = boundary_check(&run.seg, &off_seg, cell);
+        // The posterior SPAN is recorded (not gated) because it is the evidence behind the
+        // sweep's "unsaturated" claim: a lever that drove the curve to `[0, 1]` would still
+        // satisfy every assertion here while making the boundary set an artefact of
+        // saturation rather than of the cell.
+        // MEASURED, and tracked here rather than left in a report: mamba's plain leg reads
+        // `[0.0000, 1.0000]` at the NEUTRAL lever (gain 1, offset 0 -- nothing swept it
+        // there), so its 16 interior boundaries are partly a saturation artefact, while
+        // CfC's 6 at `[0.1229, 0.7759]` are not. No action this phase (the row is committed
+        // as-is and its bit-equality claim is unaffected); a sub-unit gain rung is the
+        // NAMED follow-on that would de-saturate it -- see RESULTS' phase-10 follow-ons.
+        let (lo, hi) = off_post
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &v| {
+                (l.min(v), h.max(v))
+            });
         println!(
             "MEASURE gate[{cell}]: seg_rows={} interior={} boundary_max_dt={max_dt:.3e} \
-             post_len={} emissions={}",
+             post_len={} emissions={} post_span=[{lo:.4}, {hi:.4}]",
             run.seg.segments().len(),
             interior_boundaries(&off_seg),
             off_post.len(),
@@ -449,8 +633,18 @@ fn stream_finish_equals_offline_causal() {
         // Non-vacuity: real interior boundaries AND a posterior sequence that moves.
         assert!(
             interior_boundaries(&off_seg) >= MIN_INTERIOR_PLAIN,
-            "{cell}: the boundary comparison is vacuous (no interior boundary)"
+            "{cell}: the boundary comparison is vacuous (fewer than {MIN_INTERIOR_PLAIN} \
+             interior boundaries)"
         );
+        // ...and for cfc, the EXACT count -- see [`CFC_INTERIOR_PLAIN`] for why that one
+        // row carries a tripwire its siblings do not.
+        if cell == "cfc" {
+            assert_eq!(
+                interior_boundaries(&off_seg),
+                CFC_INTERIOR_PLAIN,
+                "cfc: the interior-boundary count MOVED -- adjudicate, do not bump"
+            );
+        }
         let first = off_post[0];
         assert!(
             off_post.iter().any(|&v| v != first),
@@ -471,16 +665,16 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
     // the fixture's own statistics (so it is NOT the identity), asserts the streamed run is
     // still bit-identical to offline, and asserts the type-1 posteriors DIFFER from the
     // type-0 ones (else the threading claim would be vacuous).
-    for cell in ["slstm", "mamba"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
         // Sweep the crossing on the CALIBRATED config: the calibrated tail shifts the
         // posterior level, so the type-0 sweep's offset does not carry over (measured: at
         // offset 0 the sLSTM type-1 run collapses to the 2-row seed).
-        let offset = crossing_offset(&format!("{cell}/type1"), MIN_INTERIOR_TYPE1, |o| {
-            let b = stage(dir.path(), cell, o, "t1sweep");
+        let lever = crossing_lever(&format!("{cell}/type1"), MIN_INTERIOR_TYPE1, |l| {
+            let b = stage(dir.path(), cell, l, "t1sweep");
             calibrate(dir.path(), &b, cell, "t1sweep")
         });
-        let base = stage(dir.path(), cell, offset, "t1base");
+        let base = stage(dir.path(), cell, lever, "t1base");
         let cal = calibrate(dir.path(), &base, cell, "t1");
         let (off_post, off_seg) = run_offline(&cal);
         let (plain_post, _) = run_offline(&base);
@@ -534,10 +728,10 @@ fn stream_finish_equals_offline_causal_frozen_type1() {
 
 #[test]
 fn chunking_bit_invariance() {
-    for cell in ["slstm", "mamba"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
-        let offset = plain_crossing(dir.path(), cell, "sweep");
-        let st = stage(dir.path(), cell, offset, "chunks");
+        let lever = plain_crossing(dir.path(), cell, "sweep");
+        let st = stage(dir.path(), cell, lever, "chunks");
         let (rate, samples) = mono_samples(&st.wav);
         let chunks = [
             (0.020 * rate) as usize, // 160
@@ -592,10 +786,10 @@ fn chunking_bit_invariance() {
 
 #[test]
 fn prefix_consistency_e2e() {
-    for cell in ["slstm", "mamba"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
-        let offset = plain_crossing(dir.path(), cell, "sweep");
-        let st = stage(dir.path(), cell, offset, "prefix");
+        let lever = plain_crossing(dir.path(), cell, "sweep");
+        let st = stage(dir.path(), cell, lever, "prefix");
         let (rate, samples) = mono_samples(&st.wav);
         let run = run_session(
             &st.config_text,
@@ -624,15 +818,23 @@ fn prefix_consistency_e2e() {
             final_ids.len(),
             "{cell}: the emitted set must equal the final partition size"
         );
+        let push_class = |c: SegClass| run.push_emissions.iter().filter(|e| e.class == c).count();
         println!(
-            "MEASURE prefix[{cell}]: midstream={} total_emitted={} final_segments={}",
+            "MEASURE prefix[{cell}]: midstream={} (speech={} other={}) total_emitted={} \
+             final_segments={}",
             run.push_emissions.len(),
+            push_class(SegClass::Speech),
+            push_class(SegClass::Other),
             all.len(),
             final_ids.len()
         );
+        // NON-VACUITY, now demanded of EVERY cell (phase-10 T11: the CfC carve-out that
+        // used to pin this ABSENCE is retired -- see [`Lever`]). A run whose emissions all
+        // arrive in `finish()` exercises no mid-stream frontier at all, so the retraction
+        // check above would be comparing the final partition against itself.
         assert!(
             !run.push_emissions.is_empty(),
-            "{cell}: non-vacuity -- mid-stream emissions must occur"
+            "{cell}: no mid-stream emissions -- the retraction check is vacuous"
         );
     }
 }
@@ -651,7 +853,7 @@ fn bail_msg(r: anyhow::Result<StreamingSession>) -> String {
 #[test]
 fn validation_bails() {
     let dir = tempfile::tempdir().unwrap();
-    let st = stage(dir.path(), "slstm", 0.0, "bails");
+    let st = stage(dir.path(), "slstm", Lever::NEUTRAL, "bails");
     let text = &st.config_text;
     let rate = 8000.0;
 
@@ -718,14 +920,28 @@ fn validation_bails() {
         "bidirectional-cell bail message: {msg}"
     );
 
-    // (7) The CAUSAL direction with the legacy LSTM cell -- a forward-only LSTM fast twin
-    // is a named follow-on (spec S5.3), so streaming refuses it too.
+    // (7) WAS A BAIL, NOW A BUILD: the CAUSAL direction with the legacy LSTM cell. Phase-10
+    // Task 8 landed `fast::cells::FastLstm`, so `classify_fast_shape` is total and this
+    // session constructs on the CAUSAL arm -- staged from the committed `lstm_forward`
+    // fixture, since the config must carry an LSTM-sized pack.
+    //
+    // What survives from the old bail is the reason it existed: an sLSTM-sized pack must
+    // NOT decode as an LSTM. Asserted directly below, on the sLSTM staging with only the
+    // cell key flipped -- the pack lengths differ (1603 vs 1651), so it fails on LENGTH
+    // rather than silently running one architecture's weights through the other's kernel.
+    let lstm_stage = stage(dir.path(), "lstm", Lever::NEUTRAL, "bails_lstm");
+    let m = parse(&lstm_stage.config_text);
+    let sess = StreamingSession::new(&m, rate, 1).expect("a causal LSTM config must build now");
+    assert!(
+        sess.is_causal(),
+        "the causal LSTM config must select the causal arm"
+    );
     let mut m = parse(text);
     m.insert("BLSTM_Cell_Type".into(), "lstm".into());
     let msg = bail_msg(StreamingSession::new(&m, rate, 1));
     assert!(
-        msg.contains("Direction 'forward' is not supported on the fast inference path"),
-        "causal-LSTM bail message: {msg}"
+        msg.contains("too short"),
+        "an sLSTM-sized pack must not decode as an LSTM: {msg}"
     );
 
     // (8) An empty weights file (the frozen net must be loaded once).
@@ -745,7 +961,7 @@ fn causal_output_size_not_one_bails() {
     // SUCCEEDS and the flow reaches the output_size check, rather than tripping a
     // too-short-pack bail first).
     let dir = tempfile::tempdir().unwrap();
-    let st = stage(dir.path(), "slstm", 0.0, "out2");
+    let st = stage(dir.path(), "slstm", Lever::NEUTRAL, "out2");
     let mut m = parse(&st.config_text);
     m.insert("BLSTM_OutputNeuronNb".into(), "4,2".into());
 
@@ -755,6 +971,7 @@ fn causal_output_size_not_one_bails() {
         &spec,
         bc.cell_type,
         &speech::nn::blstm::MambaParams::default(),
+        &bc.cfc,
     )
     .unwrap();
     let pack = dir.path().join("causal_out2.bin");
@@ -834,10 +1051,10 @@ fn latency_bounds() {
     // which enters `raw_segments` only when that speech COMMITS at its falling edge, so its
     // lag is that speech's DURATION plus the forward pipeline delay -- the data-dependent
     // AREA term, inherent to closed-interval raw segments and NOT reduced by the trigger.
-    for cell in ["slstm", "mamba"] {
+    for cell in CAUSAL_CELLS {
         let dir = tempfile::tempdir().unwrap();
-        let offset = plain_crossing(dir.path(), cell, "sweep");
-        let st = stage(dir.path(), cell, offset, "latency");
+        let lever = plain_crossing(dir.path(), cell, "sweep");
+        let st = stage(dir.path(), cell, lever, "latency");
         let (rate, samples) = mono_samples(&st.wav);
         let run = run_session(
             &st.config_text,
@@ -961,14 +1178,19 @@ fn latency_bounds() {
             run.seg.segments().len()
         );
 
-        // Non-vacuity: real mid-stream emissions in BOTH classes.
+        // Non-vacuity: real emissions.
         assert!(
             run.emission_count > 1,
             "{cell}: latency leg needs real emissions"
         );
+
+        // THE MEASURED-LAG HALF needs mid-stream emissions in BOTH classes -- now demanded
+        // of EVERY cell, CfC included (phase-10 T11 retired the carve-out its narrower
+        // one-boundary lever forced; see [`Lever`] and [`CFC_INTERIOR_PLAIN`]). Without
+        // both classes present the two per-class pins below measure nothing.
         assert!(
             speech_push_max.is_finite() && other_push_max.is_finite(),
-            "{cell}: latency leg needs BOTH speech and other mid-stream emissions \
+            "{cell}: the measured-lag legs need mid-stream emissions in BOTH classes \
              (speech={speech_push_max} other={other_push_max})"
         );
 
@@ -1006,10 +1228,15 @@ fn latency_bounds() {
         // `(total_pushed-1)/rate`, advanced once per `push`, so a segment that settles just
         // after a push is stamped up to one chunk late. Pin exactly that, no slack beyond it,
         // turning "the push quantum accounts for the excess" from narrative into a bound.
-        // MEASURED margin at 100 ms chunks (printed as `tight_margin` above): -0.03252 s
-        // (slstm) / -0.00533 s (mamba) -- both under, and mamba by only ~5 ms. That thinness
-        // is the point: the pin sits right where the structural argument predicts, so it has
-        // real discriminating power. It also means this leg is chunk-size-COUPLED -- running
+        // MEASURED margin at 100 ms chunks (printed as `tight_margin` above), now for ALL
+        // FOUR cells since phase-10 T11 un-narrowed the CfC row: -0.03252 s (slstm) /
+        // -0.00533 s (mamba) / -0.01512 s (cfc) / -0.07712 s (lstm) -- every one under, and
+        // mamba by only ~5 ms. That thinness is the point: the pin sits right where the
+        // structural argument predicts, so it has real discriminating power. Note the CfC
+        // row lands in the same knife-edge band as its siblings, which is the substantive
+        // half of retiring its carve-out -- the gain lever bought a boundary set, and the
+        // latency behaviour it exposed is the REGIME's, not a CfC-specific artefact. It also
+        // means this leg is chunk-size-COUPLED -- running
         // the gate at a coarser granularity would legitimately need `chunk_s` to follow the
         // actual chunk (it is hardcoded to the 0.1 the leg pushes at, deliberately, so the
         // two cannot silently drift apart).
@@ -1068,8 +1295,8 @@ fn stream_cli_drives_the_causal_arm() {
     // pins the CLI's own formatting/summary contract on the windowed arm -- not repeated
     // here, since only the ARM changed.
     let dir = tempfile::tempdir().unwrap();
-    let offset = plain_crossing(dir.path(), "slstm", "sweep");
-    let st = stage(dir.path(), "slstm", offset, "cli");
+    let lever = plain_crossing(dir.path(), "slstm", "sweep");
+    let st = stage(dir.path(), "slstm", lever, "cli");
     let cfg = dir.path().join("causal_cli.config");
     std::fs::write(&cfg, &st.config_text).unwrap();
     let (rate, samples) = mono_samples(&st.wav);
@@ -1176,15 +1403,26 @@ fn synth_net(
         output_neuron_nb: outn.to_vec(),
         output_subsampling: osub.to_vec(),
         input_size: lstm[0],
-        peepholes: [false; 6],
+        // ALL SIX PEEPHOLE FAMILIES ON (phase-10 Task 8, flipped from `[false; 6]`). Inert
+        // for slstm/mamba/cfc -- none of them has peepholes, and `cell_weight_count` does
+        // not read the flags either, so those rows are bit-unchanged -- but load-bearing
+        // for the LSTM row: with the flags off, the peephole half of its carried state
+        // would never be read and the split-state legs would prove nothing about it.
+        peepholes: [true; 6],
     };
     let p = speech::nn::blstm::MambaParams::default();
-    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &p).unwrap();
+    // The FIXTURE geometry (`Cfc_Backbone_Units 6` / `Layers 1`), not the sized default:
+    // this helper builds tiny synthetic nets and `B = 45` would dwarf them.
+    let c = speech::nn::blstm::CfcParams {
+        backbone_units: 6,
+        backbone_layers: 1,
+    };
+    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &p, &c).unwrap();
     // Bounded, non-degenerate: a linear ramp would saturate the output layer to a constant.
     let flat: Vec<f64> = (0..n)
         .map(|k| 0.35 * (0.61 * (k as f64) + 0.3).sin())
         .collect();
-    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &p, &flat).unwrap()
+    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &p, &c, &flat).unwrap()
 }
 
 /// A deterministic, bounded, non-constant input sequence.
@@ -1248,6 +1486,13 @@ fn stream_causal_matches_offline_on_the_real_arm_geometry() {
     for cell in [
         speech::nn::blstm::CellType::Slstm,
         speech::nn::blstm::CellType::Mamba,
+        speech::nn::blstm::CellType::Cfc,
+        // Phase-10 Task 8. This row matters MORE than its siblings, not less: the LSTM is
+        // the one cell here whose state is three separate carried vectors (`h`, `c` and the
+        // POST-activation `gates` the peephole cross-terms read), so a kernel that rolled
+        // only two of them would still pass every whole-sequence leg and fail exactly here,
+        // at a chunk boundary.
+        speech::nn::blstm::CellType::Lstm,
     ] {
         let mut net = synth_net(cell, &[23, 24, 24], &[4, 1], &[24, 12, 1], &[1, 1]);
         // 143 rows: NOT a multiple of the layer-0 ratio 4, so the trailing `143 mod 4 == 3`

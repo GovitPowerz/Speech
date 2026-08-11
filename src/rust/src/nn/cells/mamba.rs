@@ -526,6 +526,18 @@ pub struct MambaLayer {
 
     weights: MambaWeights,
     cache: MambaCache,
+    /// Phase 10 spec S7 (the adjudicated retention class). `true` (the default, and every
+    /// pre-phase-10 behaviour) fills [`MambaCache`] at the end of every forward; `false`
+    /// drops it, which is behaviour-free because the cache has NO forward-path reader --
+    /// its only consumers are [`Self::feed_backward`] and the five accessors, all of which
+    /// exist to serve the backward. Flipped at CONSTRUCTION only
+    /// (`BlstmNetwork::set_inference_only`, driven by `BackPropagationActivated`), never
+    /// per call, so a net either retains for its whole life or never does.
+    ///
+    /// This is the phase's memory win: `h` and `abar` are each `T x (d_inner d_state)`,
+    /// which on a real-width SAD net over a 75 s file is tens of MB held for the lifetime
+    /// of the layer -- see `RESULTS.md`'s Task-9 row.
+    retain_cache: bool,
 
     derivatives: MambaWeights,
     nb_of_seq_fed_backward: i64,
@@ -578,8 +590,26 @@ impl MambaLayer {
             derivatives: weights.clone(),
             weights,
             cache: MambaCache::default(),
+            retain_cache: true,
             nb_of_seq_fed_backward: 0,
         }
+    }
+
+    /// Phase 10 spec S7: turn the backward cache retention off (inference-only) or back on.
+    ///
+    /// Turning it OFF also drops whatever the last forward left behind, so a subsequent
+    /// [`Self::feed_backward`] hits the loud bail rather than silently folding a stale
+    /// cache from an earlier sequence into the derivative accumulators.
+    pub fn set_retain_cache(&mut self, retain: bool) {
+        self.retain_cache = retain;
+        if !retain {
+            self.cache = MambaCache::default();
+        }
+    }
+
+    /// Whether this layer retains its backward cache (spec S7; `true` by default).
+    pub fn retains_cache(&self) -> bool {
+        self.retain_cache
     }
 
     pub fn input_size(&self) -> usize {
@@ -832,10 +862,28 @@ impl MambaLayer {
                 a_mat[[c, s]] = -w.a_log[[c, s]].exp();
             }
         }
-        let mut abar = Array2::<f64>::zeros((t_len, di * ds));
-        let mut h = Array2::<f64>::zeros((t_len, di * ds));
+        // Spec S7, and the reason "skip the fill" alone would NOT have moved peak RSS:
+        // `abar` and `h` are the two `T x (d_inner d_state)` blocks, by far the largest
+        // thing this forward touches, and dropping them at the END of the call leaves the
+        // high-water mark exactly where it was. Neither is read by the forward AT A
+        // DISTANCE though -- `abar` is write-only here, and `h` is read only at `t-1` --
+        // so when the cache is going to be dropped anyway they shrink to ROLLING buffers
+        // (1 row / 2 alternating rows) and the recurrence runs on the same numbers, in the
+        // same order, from the same reads. The retain path is byte-untouched (`ta`/`th`/
+        // `tp` are literally `t`/`t`/`t-1`), and `tests::forward_is_bit_identical_without_
+        // the_cache` is the pin that says the two indexings agree (it sweeps `T = 1`, where
+        // `tp` is out of range but never indexed, and `T = 2`, the rolling pair's wrap).
+        let retain = self.retain_cache;
+        let mut abar = Array2::<f64>::zeros((if retain { t_len } else { 1 }, di * ds));
+        let mut h = Array2::<f64>::zeros((if retain { t_len } else { 2.min(t_len) }, di * ds));
         let mut y = Array2::<f64>::zeros((t_len, di));
         for t in 0..t_len {
+            // (abar row, h row, previous h row). `tp` is only INDEXED under `t > 0`.
+            let (ta, th, tp) = if retain {
+                (t, t, t.wrapping_sub(1))
+            } else {
+                (0, t % 2, (t + 1) % 2)
+            };
             for c in 0..di {
                 let dl = delta[[t, c]];
                 let ucv = uc[[t, c]];
@@ -843,10 +891,10 @@ impl MambaLayer {
                 for s in 0..ds {
                     let idx = c * ds + s;
                     let ab = (dl * a_mat[[c, s]]).exp();
-                    let h_prev = if t > 0 { h[[t - 1, idx]] } else { 0.0 };
+                    let h_prev = if t > 0 { h[[tp, idx]] } else { 0.0 };
                     let hv = ab * h_prev + dl * ucv * zproj[[t, dr + s]];
-                    abar[[t, idx]] = ab;
-                    h[[t, idx]] = hv;
+                    abar[[ta, idx]] = ab;
+                    h[[th, idx]] = hv;
                     acc += zproj[[t, dr + ds + s]] * hv;
                 }
                 y[[t, c]] = acc + w.d_skip[[0, c]] * ucv;
@@ -868,22 +916,29 @@ impl MambaLayer {
             }
         }
 
-        self.cache = MambaCache {
-            x_adapted,
-            rms_inv,
-            xn,
-            proj,
-            pc,
-            uc,
-            zproj,
-            dtp,
-            delta,
-            a_mat,
-            abar,
-            h,
-            y,
-            v,
-        };
+        // Spec S7: the retention, and the ONE place it is skipped. Everything above was
+        // needed by the forward itself; only this assignment keeps it alive past the call,
+        // and only the backward ever reads it back.
+        if self.retain_cache {
+            self.cache = MambaCache {
+                x_adapted,
+                rms_inv,
+                xn,
+                proj,
+                pc,
+                uc,
+                zproj,
+                dtp,
+                delta,
+                a_mat,
+                abar,
+                h,
+                y,
+                v,
+            };
+        } else {
+            self.cache = MambaCache::default();
+        }
     }
 
     /// Reverse-direction forward: flip the input rows, run [`Self::feed_forward`],
@@ -921,6 +976,17 @@ impl MambaLayer {
         last_layer: bool,
     ) -> Array2<f64> {
         let _ = (output, last_layer);
+        // Spec S7: an inference-only layer never filled the cache, so there is nothing to
+        // fold. Bail LOUDLY rather than accumulate garbage -- a silently wrong gradient is
+        // the one failure mode this whole class of change must never produce.
+        assert!(
+            self.retain_cache,
+            "MambaLayer::feed_backward on a layer constructed inference-only \
+             (retain_cache = false, phase-10 spec S7): the forward never filled the backward \
+             cache, so no gradient can be folded here. This layer belongs to a net built with \
+             BackPropagationActivated off; turn backprop on for that net (or call \
+             set_retain_cache(true) before the forward) if a backward is really wanted."
+        );
         let (isz, dm, di, ds, dc, dr) = (
             self.input_size,
             self.output_size,
@@ -1130,9 +1196,14 @@ impl MambaLayer {
         dpl
     }
 
-    /// Reverse-time BPTT: flip input/output/deltas, run the forward-order body, flip
-    /// the returned deltas back. The caches are already time-reversed by
+    /// Reverse-time BPTT: flip input/deltas, run the forward-order body, flip the
+    /// returned deltas back. The caches are already time-reversed by
     /// [`Self::feed_forward_reverse`] and are consumed AS-IS (do NOT un-reverse).
+    ///
+    /// `output` is forwarded UNFLIPPED: [`Self::feed_backward`] discards it outright
+    /// (its own doc says why), so flipping it only allocated a `T x width` copy for a
+    /// body that never reads it. `input` IS flipped -- that one is genuinely consumed,
+    /// by `reconcile_input`.
     pub fn feed_backward_reverse(
         &mut self,
         input: &Array2<f64>,
@@ -1142,11 +1213,10 @@ impl MambaLayer {
         last_layer: bool,
     ) -> Array2<f64> {
         let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
-        let output_rev = output.slice(ndarray::s![..;-1, ..]).to_owned();
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
         let dpl = self.feed_backward(
             &input_rev,
-            &output_rev,
+            output,
             &deltas_rev,
             inv_sub_sampling_ratio,
             last_layer,
@@ -1988,5 +2058,108 @@ mod tests {
                 forward(&mut b, &wide.slice(ndarray::s![.., ..I]).to_owned())
             );
         }
+    }
+
+    // ==== Phase 10 Task 9 / spec S7: inference-only cache gating ====
+
+    /// The DEFAULT is retain, so nothing built outside `BlstmNetwork::from_config` can
+    /// lose its gradient by accident.
+    #[test]
+    fn a_fresh_layer_retains_its_cache() {
+        let c = loaded(I, O, DS, DC, EX);
+        assert!(c.retains_cache());
+    }
+
+    /// THE BEHAVIOUR-FREE CLAIM, measured: with the cache off, the forward's OUTPUT is
+    /// bit-for-bit what the retaining forward produces -- which is also the pin on the
+    /// rolling-buffer indexing (`ta`/`th`/`tp`), since a wrong `h_{t-1}` row would move
+    /// every downstream value. Run over three sequence lengths incl. `T = 1` (the
+    /// recurrence never reads `h_prev`) and `T = 2` (the rolling pair's first wrap).
+    #[test]
+    fn forward_is_bit_identical_without_the_cache() {
+        for t in [1usize, 2, T] {
+            let input = seq(t, I, 0.37);
+            let retained = forward(&mut loaded(I, O, DS, DC, EX), &input);
+
+            let mut lean = loaded(I, O, DS, DC, EX);
+            lean.set_retain_cache(false);
+            let dropped = forward(&mut lean, &input);
+
+            assert_eq!(retained, dropped, "T={t}: the cache flag moved the forward");
+            assert!(dropped.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    /// ... and the cache really is gone afterwards (the memory claim, not just the
+    /// numeric one). All five accessors, so a partially-cleared cache fails here.
+    #[test]
+    fn an_inference_only_forward_leaves_every_cache_field_empty() {
+        let mut c = loaded(I, O, DS, DC, EX);
+        c.set_retain_cache(false);
+        forward(&mut c, &seq(T, I, 0.37));
+        assert_eq!(c.hidden_states().dim(), (0, 0));
+        assert_eq!(c.abar().dim(), (0, 0));
+        assert_eq!(c.delta().dim(), (0, 0));
+        assert_eq!(c.conv_activations().dim(), (0, 0));
+        assert!(c.rms_inv().is_empty());
+    }
+
+    /// Turning retention OFF drops what an earlier forward left behind -- otherwise a
+    /// backward could fold a STALE cache from a different sequence and look plausible.
+    #[test]
+    fn turning_retention_off_drops_the_existing_cache() {
+        let mut c = loaded(I, O, DS, DC, EX);
+        forward(&mut c, &seq(T, I, 0.37));
+        assert_eq!(c.hidden_states().dim(), (T, EX * O * DS));
+        c.set_retain_cache(false);
+        assert_eq!(c.hidden_states().dim(), (0, 0));
+    }
+
+    /// THE R6 CLONE NOTE (spec S7): `corpus_processor`'s static-lane fold clones the whole
+    /// bag per lane at every epoch start, and a clone is a DEEP copy of this cache. Under
+    /// inference-only there is nothing to copy -- asserted here rather than assumed, on
+    /// the structure the bag clone actually duplicates.
+    #[test]
+    fn a_clone_after_an_inference_only_forward_carries_no_cache() {
+        let mut c = loaded(I, O, DS, DC, EX);
+        c.set_retain_cache(false);
+        forward(&mut c, &seq(T, I, 0.37));
+        let twin = c.clone();
+        assert!(
+            !twin.retains_cache(),
+            "the flag itself must survive the clone"
+        );
+        assert_eq!(twin.hidden_states().dim(), (0, 0));
+        assert_eq!(twin.abar().dim(), (0, 0));
+
+        // Non-vacuity: the SAME assertion on a retaining clone must fail, i.e. the clone
+        // does carry the cache when there is one.
+        let mut keeper = loaded(I, O, DS, DC, EX);
+        forward(&mut keeper, &seq(T, I, 0.37));
+        assert_eq!(keeper.clone().hidden_states().dim(), (T, EX * O * DS));
+    }
+
+    /// A backward after a non-retaining forward must PANIC, never fold garbage.
+    #[test]
+    #[should_panic(expected = "constructed inference-only")]
+    fn backward_after_an_inference_only_forward_panics() {
+        let input = seq(T, I, 0.37);
+        let mut c = loaded(I, O, DS, DC, EX);
+        c.set_retain_cache(false);
+        let out = forward(&mut c, &input);
+        let deltas = seq(T, O, -0.21);
+        let _ = c.feed_backward(&input, &out, &deltas, 1, false);
+    }
+
+    /// The retaining path still folds a real gradient -- the contrast that makes the
+    /// panic above a GATE rather than a blanket refusal.
+    #[test]
+    fn backward_still_works_when_the_cache_is_retained() {
+        let input = seq(T, I, 0.37);
+        let mut c = loaded(I, O, DS, DC, EX);
+        let out = forward(&mut c, &input);
+        let _ = c.feed_backward(&input, &out, &seq(T, O, -0.21), 1, false);
+        let g = derivs(&c);
+        assert!(g.iter().any(|v| *v != 0.0) && g.iter().all(|v| v.is_finite()));
     }
 }
