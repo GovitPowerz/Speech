@@ -1331,8 +1331,13 @@ impl ConvStream {
 /// * `holdback == 0` -- EXACT, not approximate: every threshold is zero, so `suppress_short`
 ///   returns early and `add_padding` skips both sides; the pipeline reduces to `sanitize`
 ///   alone, whose reach is 0 (case 1a) or `X^+` (case 1b), and `advance_cut`'s STRICT `<`
-///   gives `X < cut_time`, which covers `X^+`. No `1e-6` term exists because the only code
-///   that writes one is inactive.
+///   gives `X < cut_time`, which covers `X^+`. ONE caveat, sized honestly (review delta):
+///   the ROUNDING variant of case 1(b) disagrees at `round(X)`, up to `5e-5` right of `X`
+///   (half the `1e-4` grid), which `X < cut_time` does not formally cover -- there the
+///   strict `<` is backed by DATA rather than the invariant alone: `cut_time - X` exceeds
+///   the anchor segment's own duration, whose measured floor is `0.03552 s` unconvolved /
+///   `0.32089 s` under the 19-tap kernel, 700x-6400x the displacement. No `1e-6` term
+///   exists because the only code that writes one is inactive.
 /// * `0 < holdback <= 2e-6` -- the one EXCLUDED sliver, and it is not a real config: an
 ///   active `before` padding would have to be positive yet below `2e-6 s`, i.e. under a
 ///   fiftieth of the `1e-4 s` grid `sanitize` snaps every boundary to, so it could not move
@@ -1402,7 +1407,7 @@ impl ConvStream {
 /// frontier - holdback`) -- config-derived plus the open-segment age, and no raw segment
 /// CLOSES while one is open, so a long open span adds at most that ONE segment.
 /// `tests/stream_incremental_resmooth.rs::derived_retained_bound` turns this into a number
-/// (450-553 on the four profiles it runs) against a measured worst of 6; the gap is the
+/// (155-254 on the four profiles it runs) against a measured worst of 6; the gap is the
 /// last step's assumption that the hysteresis could close a segment at every grid step,
 /// which the area gating forbids but this layer cannot see.
 /// The full replay stays reachable two ways: [`set_full_replay`](Self::set_full_replay)

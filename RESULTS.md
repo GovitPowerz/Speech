@@ -2165,14 +2165,15 @@ cut invariant plus "at most one raw segment is LABELED per convolved value". CON
 the review's minor 8 removed an `open_span` term that carried the generator's burst cap and
 made the theorem read as experiment-conditional -- a long OPEN segment widens the window but
 cannot ADD retained segments, because no raw segment CLOSES while one is open. That
-TIGHTENED it from 450-553 to **184-205** across the four profiles, against a measured worst
+TIGHTENED it from 450-553 to **155-254** across the four profiles (tier2 184 /
+silence-active 254 / suppress-heavy 155 / no-conv 205), against a measured worst
 of **6**. It is still DELIBERATELY loose (it assumes the hysteresis can close a segment at
 every grid step, which the area gating forbids). So the derived bound is the SAFETY pin -- it is what makes bounded per-push
 cost a theorem, since it does not reference the stream at all -- and a measured*10 regression
 pin of 50 is the discriminating one. Tightening the derivation would mean bounding the
 posterior VALUES, which are a property of the net and the kernel, not of this layer.
 
-Measured retained window, every profile x seed x length: **3-7 segments**, flat as the raw
+Measured retained window, every profile x seed x length: **3-6 segments**, flat as the raw
 list doubles (e.g. `no-conv` seed 11: raw 200 -> 399, retained 6 -> 6). The doubling leg
 asserts the raw list grows ~2x while `retained * 8 <= raw`.
 

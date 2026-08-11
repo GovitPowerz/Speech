@@ -792,7 +792,7 @@ fn incremental_equals_full_replay() {
 ///
 /// IT IS DELIBERATELY LOOSE, and that is worth stating plainly: the last step assumes the
 /// hysteresis can close a segment at EVERY grid step, which the area gating makes
-/// impossible in practice (measured worst 5 against a derived 483 on tier2). Tightening it
+/// impossible in practice (measured worst 5 against a derived 184 on tier2). Tightening it
 /// would mean bounding the posterior VALUES, which are a property of the net and the
 /// convolution kernel, not of this layer -- so the derived bound is the SAFETY pin (it is
 /// what makes "bounded per-push cost" a theorem rather than an observation, since it does
@@ -811,10 +811,12 @@ fn derived_retained_bound(seg_cfg: &SegmenterConfig, drv: &DriverConfig) -> usiz
     3 + (window / DT).floor() as usize
 }
 
-/// The DISCRIMINATING retained-window pin: measured worst 5 (over every profile x seed x
-/// length in this file, printed by the leg below) at this repo's measured*10 convention.
+/// The DISCRIMINATING retained-window pin: measured worst 6 (over every profile x seed x
+/// length in this file, printed by the leg below; `no-conv` sets it), pinned at 50 --
+/// inside this repo's measured*10 convention, with the SUMMARY assert below holding the
+/// pin within 10x of the measured worst so it cannot drift into a ceiling nobody hits.
 /// A cut that stopped sliding would put the retained count in the hundreds and blow
-/// straight through this, where the derived structural bound (483 on tier2) would not
+/// straight through this, where the derived structural bound (184 on tier2) would not
 /// notice until the stream got very long indeed.
 const RETAINED_REGRESSION_PIN: usize = 50;
 
