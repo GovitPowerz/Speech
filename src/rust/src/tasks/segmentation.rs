@@ -78,6 +78,26 @@ impl Segmentation {
         }
     }
 
+    /// Build a container directly from an already-formed boundary list (PORT-ONLY --
+    /// no legacy counterpart; the legacy only ever grows a list through
+    /// [`label_segment`](Self::label_segment)).
+    ///
+    /// The sole caller is the streaming decision layer's incremental splice
+    /// (`fast::stream::StreamDecision::flush`), which concatenates a FROZEN prefix
+    /// (proven final) with the smoothed tail of its retained replay window; there is no
+    /// other way to hand this container a list it did not build itself. Additive: no
+    /// existing behaviour reads it, so every committed golden is byte-unchanged.
+    ///
+    /// NOT VALIDATED (by design, mirroring `new`'s trust in its caller): `segs` must be
+    /// a well-formed boundary list -- non-decreasing `begin`, ending with the
+    /// [`SegClass::End`] sentinel at `audio_duration`.
+    pub fn from_parts(segs: Vec<Segment>, audio_duration: f64) -> Self {
+        Self {
+            segs,
+            audio_duration,
+        }
+    }
+
     pub fn segments(&self) -> &[Segment] {
         &self.segs
     }

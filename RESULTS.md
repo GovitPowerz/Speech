@@ -2068,3 +2068,122 @@ stopped, with the reason and the shape of the work.
   where CfC's 6 at `[0.1229, 0.7759]` are not. Extending `GAIN_LADDER` BELOW 1 would let the
   sweep de-saturate such a row instead of accepting it. Nothing about the bit-equality claims
   changes either way; this is about how much the boundary comparison is worth.
+
+---
+
+## Interstitial -- the incremental resmooth (streaming decision layer, bounded per-push cost)
+
+Branch `feature/stream-incremental-resmooth`, off `main@afefbb4` (phase 10 merged). Not a
+phase: one gap, closed, with its proof. `fast::stream::StreamDecision::resmooth_and_emit`
+re-smooths on every push, and its input -- `raw_segments` -- is APPEND-ONLY, so the phase-8/9
+form replayed the whole list every time: `O(S)` `label_segment` calls each walking an `O(S)`
+list, i.e. `O(S^2)` per push and quadratic-in-`S` cumulative on an unbounded stream. Memory
+was never the issue (16 B/segment); COMPUTE was the online mode's scaling gap.
+
+### What landed
+
+A frozen prefix + a bounded retained window, spliced. `keep_from` freezes raw segments out of
+the replay; `frozen` carries the smoothed entries with `begin < cut_time` verbatim; the
+retained build supplies everything from `cut_time` rightward. `cut_time` advances to the SAME
+`threshold` the emission uses (`frontier - holdback`), so freezing and emitting are ONE act
+with one frontier -- there is no second latency-affecting quantity to keep honest, and the cut
+never gates an emission.
+
+The invariant is `raw_segments[keep_from].0 + CUT_MARGIN_HOLDBACKS * holdback <= cut_time`
+with `CUT_MARGIN_HOLDBACKS = 2.0` -- expressed in HOLDBACK UNITS, never a second per-term
+constant (the phase-9 T9 adjudication). The derivation (in `StreamDecision`'s docs) needs
+`1 * holdback + 2e-6`; the second holdback is the slack that dominates `add_padding`'s `1e-6`
+re-close epsilons and anything the eight-step induction under-counts.
+
+### The cut argument, in one line per direction
+
+- RIGHTWARD (nothing FUTURE changes the frozen prefix): verbatim the existing emission
+  argument -- future raw segments begin at `>= frontier` (three terms, `pending_begin` clamp
+  included) and the smoothing's leftward reach is `<= holdback`. Finality is ABSOLUTE (the
+  future set only shrinks), which is why `cut_time` is a running max and survives the
+  frontier retreating, as the `pending_begin` `min` can make it do.
+- LEFTWARD (truncating the replay's left context changes nothing at or right of the cut):
+  NEW. The full and retained pre-smoothing lists are identical at `>= X` (the first retained
+  raw begin) including the carried type; only the leading `Other`'s DURATION differs. Each of
+  the 8 steps is local in decision (`suppress_short` reads a 3-entry window plus `i == 0` and
+  `i+2 == len`, with `previous_type == segs[i-1].ty` an INVARIANT rather than a walk
+  accumulator) and in effect, and a difference outruns a step only by FLIPPING a straddling
+  entry -- which every branch conditions on `dur <= threshold`, bounding the flipped entry's
+  right end. Composing: reach `<= sum(min_speech) + sum(min_silence) + padding[1] +
+  padding[3] + 2e-6 <= holdback + 2e-6`. Only the two `after` paddings enter (a `before`
+  padding extends Speech LEFTWARD, away from the region at risk), so `holdback` -- which sums
+  `before` too -- already over-covers.
+
+### The oracle (`src/rust/tests/stream_incremental_resmooth.rs`, CI, 13 legs, 6.9 s)
+
+The committed streaming gates were BLIND to the phase-9 T9 bug (19+19 green with the fix
+reverted), so this change does not lean on them. The oracle runs the two paths SIDE BY SIDE
+and compares the emitted sequence (all four fields, `to_bits`) and `flush()`'s `Segmentation`
+(`to_bits` + types + duration). The reference is the phase-8 CODE, not a paraphrase:
+`set_full_replay(true)` merely stops the cut advancing, leaving `keep_from == 0`, `frozen`
+empty and the splice index 0.
+
+| profile | why it exists | holdback | true reach |
+|---|---|---|---|
+| `tier2` | the committed gate config, verbatim | 2.28957 | 1.68510 |
+| `silence-active` | tier2 clamps BOTH `min_silence` to ZERO, so steps 4/7 -- the derivation's LOAD-BEARING seam case -- are NO-OPS on it | 3.21953 | 1.96505 |
+| `suppress-heavy` | `padding[0] = padding[2] = 0`, so the true reach EQUALS the holdback and the margin's slack is at the design's minimum | 1.85000 | 0.75000 |
+| `no-conv` | no convolution: bursts map to raw segments directly, so tiny near-threshold segments and sub-reach gaps get dense | 2.68957 | 1.68510 |
+
+MEASURED coverage across 4 profiles x 6 seeded streams x 2-4 chunkings (chunk 1 through
+whole-stream): 2877 raw segments, max 296 per stream, **9382 emissions and 9454 final
+segmentation entries compared bit-for-bit**, 477 gaps in the reopen band, 720 sub-reach gaps
+(the merging regime that drives seam case 4), 249 near-`min_speech` segments, 85 long
+segments (the `pending_begin` stall regime), 27736 pushes whose retained window STARTS on a
+segment straddling the truncation limit. Every one of those is an ASSERTED floor, not a
+printed hope.
+
+### The mutation ladder -- what the oracle can and cannot see
+
+| mutation | result |
+|---|---|
+| `CUT_MARGIN_HOLDBACKS = -3.0` | FAILS, first case (emission count 300 vs 296) |
+| `-1.0` | FAILS on `tier2` |
+| `-0.5` | FAILS on `silence-active` |
+| `-0.25` | FAILS on `suppress-heavy` |
+| `0.0` | PASSES |
+| freeze at `threshold + 1.0*holdback` | FAILS on the SECOND emission of the first case (end 7.2322 vs 4.7921) |
+| freeze at `threshold + 0.25*holdback` | PASSES |
+
+Read honestly: the oracle's resolution is about a QUARTER of a holdback in both directions,
+so the shipped margin of 2.0 sits two holdbacks above the empirical failure point and one
+above what the derivation requires. The streams realize well under a holdback of actual
+reach; the extra margin is bought by the DERIVATION, not by the measurement, which is the
+correct division of labour -- the same one the holdback itself has had since phase 8.
+
+### Bounded cost -- derived, measured, and pinned
+
+`K_derived = 2 + floor(window/dt)` with `window = 3*holdback + max(conv_delay + dt,
+open_span)`, from the cut invariant plus "at most one raw segment is LABELED per convolved
+value". It is DELIBERATELY loose (it assumes the hysteresis can close a segment at every grid
+step, which the area gating forbids): 450-553 across the four profiles against a measured
+worst of **6**. So the derived bound is the SAFETY pin -- it is what makes bounded per-push
+cost a theorem, since it does not reference the stream at all -- and a measured*10 regression
+pin of 50 is the discriminating one. Tightening the derivation would mean bounding the
+posterior VALUES, which are a property of the net and the kernel, not of this layer.
+
+Measured retained window, every profile x seed x length: **3-7 segments**, flat as the raw
+list doubles (e.g. `no-conv` seed 11: raw 200 -> 399, retained 6 -> 6). The doubling leg
+asserts the raw list grows ~2x while `retained * 8 <= raw`.
+
+WALL CLOCK (M4 Pro, DEBUG build, informational -- printed by the oracle, never asserted; a
+wall-clock CI assert has no place here): a 42495-row stream (1699.8 s of audio, 267 raw
+segments, 664 pushes at chunk 64) takes **511.9 ms full-replay vs 12.2 ms incremental,
+41.9x**, per-push **770.9 us -> 18.4 us**. The ratio is not the point -- it GROWS with stream
+length, since the full path's per-push cost rises with `S` and the incremental path's does
+not.
+
+### Posture
+
+Behaviour-identical by construction and by oracle; INFERENCE-ONLY and MONO-first as before.
+The exact f64 tree is untouched except for ONE additive port-only constructor
+(`Segmentation::from_parts`, the splice's only way to hand the container a list it did not
+build itself -- no existing behaviour reads it, and the committed goldens are byte-green).
+The full replay stays reachable two ways: the `test-support` `set_full_replay` hook and the
+flush-time sentinel guard (a caller whose `audio_duration` lands within a holdback of the cut
+gets the whole-list rebuild rather than a wrong answer -- pinned, so it is not dead code).

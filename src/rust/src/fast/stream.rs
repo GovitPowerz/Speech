@@ -33,6 +33,21 @@
 //! is the exact path's no-op arm, causality-trivial because there is no whole-file
 //! statistic to freeze, and it is what the committed phase-9 causal fixtures carry.
 //!
+//! THE DECISION LAYER'S REPLAY IS CUT (the interstitial incremental-resmooth fix).
+//! [`StreamDecision`] re-smooths on every push, and its input -- the raw-segment list --
+//! is append-only, so the phase-8/9 form was `O(#segments)` per push (quadratic
+//! cumulative, and `O(S^2)` within one replay through `label_segment`'s walk). It now
+//! replays only a BOUNDED RETAINED WINDOW of raw segments and splices the result onto a
+//! FROZEN prefix, with the output BIT-IDENTICAL to the full replay at every push. The
+//! derivation lives on [`StreamDecision`] itself ("THE CUT"), where it EXTENDS the
+//! holdback/frontier argument it depends on rather than restating it: the emission
+//! frontier already proves nothing FUTURE can change the frozen prefix (rightward), and
+//! the new half proves that truncating the replay's left context cannot change a single
+//! bit at or right of the cut (leftward), with the margin expressed in holdback units.
+//! The equivalence oracle (`tests/stream_incremental_resmooth.rs`) runs the two paths side
+//! by side on randomized long streams -- the committed gates were BLIND to the phase-9 T9
+//! bug, so the cut does not lean on them.
+//!
 //! [`StreamFrontEnd`] turns a chunked f32 sample stream into the SAME assembled BLSTM
 //! feature rows the offline fast path ([`super::pipeline::FastPipeline::build_input_sequence`])
 //! produces on the whole (frozen-gain) audio -- BIT-IDENTICAL at any chunking. It owns the
@@ -95,7 +110,7 @@ use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::nn::blstm::BlstmConfig;
 use crate::tasks::sad::get_blstm_param;
-use crate::tasks::segmentation::{SegClass, Segmentation};
+use crate::tasks::segmentation::{SegClass, Segment, Segmentation};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
 
 use super::cells::{FastCausalNet, FastCellState};
@@ -1219,6 +1234,142 @@ impl ConvStream {
 /// construction: a config with different padding moves the
 /// holdback. If it were ever too small, the prefix-consistency gate catches it as a
 /// retraction (R2); too large only adds latency.
+///
+/// # THE CUT (the incremental resmooth): bounded per-push replay
+///
+/// The re-smooth above is a PURE function of the raw-segment list, which is append-only,
+/// so replaying ALL of it on EVERY push is `O(#segments)` per push -- quadratic
+/// cumulative on an unbounded stream, and `label_segment`'s walk-to-insertion-point makes
+/// one replay `O(S^2)` on its own. The fix keeps the arithmetic and shrinks the input:
+///
+/// * `keep_from` -- raw segments `[..keep_from]` are FROZEN OUT of the replay;
+///   [`build_from`](Self::build_from) replays only `raw_segments[keep_from..]` into a
+///   fresh `Segmentation::new(dur)` (so the retained replay's own left context is a
+///   leading `Other@0`, NOT the true prefix -- that difference is what the argument below
+///   bounds).
+/// * `frozen` -- the smoothed entries with `begin < cut_time`, carried verbatim from the
+///   build that first produced them. They are the head of the output list; the retained
+///   build supplies everything from `cut_time` rightward and the two are SPLICED
+///   ([`splice_index`](Self::splice_index)).
+/// * `cut_time` -- monotone non-decreasing, advanced to the emission `threshold`
+///   (`frontier - holdback`) on every push. Freezing what we EMIT is the same act, so
+///   there is no second frontier to keep honest.
+///
+/// THE INVARIANT (maintained by [`advance_cut`](Self::advance_cut), and the whole
+/// argument): `raw_segments[keep_from].0 + CUT_MARGIN_HOLDBACKS * holdback <= cut_time`.
+/// Two independent claims meet at `cut_time` and they must not be conflated:
+///
+/// 1. RIGHTWARD (nothing future can change the frozen prefix) -- ALREADY PROVEN, this is
+///    verbatim the emission argument above: every future raw segment begins at
+///    `>= frontier` (the three-term bound, `pending_begin` clamp included) and the
+///    smoothing's leftward reach is `<= holdback`, so every entry at
+///    `begin < frontier - holdback == threshold` is final. Finality is absolute -- the
+///    set of future segments only shrinks -- so a `cut_time` frozen at an earlier,
+///    LARGER threshold stays valid when the frontier later retreats (it can: the
+///    `pending_begin` clamp is a `min`). This is why `cut_time` is a running max.
+/// 2. LEFTWARD (truncating the replay cannot change the output right of the cut) -- NEW,
+///    derived below. This is the direction the phase-8/9 argument never needed.
+///
+/// ## The leftward (cut) derivation
+///
+/// Write `X` for `raw_segments[keep_from].0`, the first RETAINED raw begin. The raw
+/// segments are disjoint and ascending (a labeled `end` resets the hysteresis, and the
+/// same-step re-run-rising cannot fire on a falling crossing since it needs
+/// `t_r <= r <= t_f` and `t_f < r_prev < t_r` at once), so the pre-smoothing list is a
+/// plain concatenation and the FULL and RETAINED lists are IDENTICAL at `>= X`:
+///
+/// ```text
+///   full:      Other@0, S@b_0, O@e_0, ... , O@e_{k-1}, | S@X, O@e_k, ... , End@dur
+///   retained:                            Other@0,      | S@X, O@e_k, ... , End@dur
+/// ```
+///
+/// -- same entries, same types, and the carried type immediately LEFT of `X` is `Other`
+/// in both. Only the leading `Other`'s DURATION differs (`X` vs `X - e_{k-1}`). Define
+/// `D_j` = the rightmost time such that the two lists agree (entries + types + the
+/// carried type) on `[D_j, inf)` after pipeline step `j`; `D_0 = X`.
+///
+/// Every step is LOCAL IN BOTH SENSES, which is what makes the induction go through:
+/// * `sanitize` -- rounding is per-boundary; the merge test reads `(ty[i], ty[i+1])`.
+///   Reach 0.
+/// * `suppress_short(th, cls)` -- the decision at `i` reads only
+///   `(i == 0, i+2 == len, segs[i-1].ty, segs[i].ty, segs[i].begin, segs[i+1].begin,
+///   segs[i+1].ty)`. `previous_type == segs[i-1].ty` is an INVARIANT, not a walk
+///   accumulator: it is written only on the keep branch (`previous_type = segs[i].ty;
+///   i += 1`) and the removal branches neither advance `i` nor rewrite it, so it always
+///   names the last KEPT entry, i.e. `i-1`. Effects touch `i-1..i+1` only, and move a
+///   boundary by `<= th` (head branch: `segs[i+1].begin = segs[i].begin`, a `<= th`
+///   move; split branch: `-= dur/2 <= th/2`; merge branch: deletes the two entries of a
+///   `<= th` span).
+/// * `add_padding(before, after, cls)` -- the `before` sub-pass writes
+///   `[b - before, b + 1e-6]`, the `after` sub-pass `[e - 1e-6, e + after]`; the
+///   backward walk touches only indices `> ii`, so it never disturbs an unvisited one.
+///
+/// SO A DIFFERENCE CANNOT OUTRUN THE STEP'S OWN THRESHOLD. The only way a
+/// prefix-only difference reaches right of `D_j` is by changing the DURATION of the
+/// entry that STRADDLES `D_j` (its left end is in the differing region, its right end is
+/// not); a straddler's right end then moves only if the step FLIPS it, which every
+/// branch conditions on `dur <= th` -- so the flipped entry's right end sits at
+/// `< D_j + th`. Hence `D_{j+1} <= D_j + th_j` and, composing the eight steps,
+///
+/// ```text
+///   D_8 <= X + sum(min_speech) + sum(min_silence) + padding[1] + padding[3] + 2e-6
+///       <= X + holdback + 2e-6                                  (padding[0,2] >= 0)
+///       <  X + CUT_MARGIN_HOLDBACKS * holdback  =  the invariant's bound
+/// ```
+///
+/// Only the two `after` paddings enter the reach (`before` extends a Speech segment
+/// LEFTWARD, away from the region at risk; its sole rightward footprint is the `+1e-6`
+/// re-close), so `holdback` -- which sums `before` too -- already over-covers; the margin
+/// is the SECOND holdback. The `2e-6` slop is dominated whenever an active `before`
+/// padding is at least `2e-6 s`, which every real config satisfies by four orders of
+/// magnitude (`sanitize` quantizes boundaries to `1e-4 s`, so a smaller padding could not
+/// move a boundary at all). The margin is expressed in HOLDBACK UNITS, never as a second
+/// per-term constant (the Task-9 adjudication).
+///
+/// THE SEAM CASES, step by step (`D_j`'s advance, and why it cannot exceed it):
+/// 1. `sanitize` -- the entry at `X` is `Speech` preceded by `Other` in BOTH, so no merge
+///    crosses the seam. `D_1 = X`.
+/// 2. `suppress_short(min_speech[0], Speech)` -- the first retained Speech has the SAME
+///    duration in both and `previous_type == Other` in both (alternating list), so the
+///    branch is identical. A prefix-only flip moves entries by `<= min_speech[0]`.
+/// 3. `add_padding(padding[0], padding[1], Speech)` -- a Speech at `b >= D_2` pads left
+///    ACROSS the seam and may merge with a differing left neighbour: the merged BEGIN
+///    differs, but only left of `D_2`; the rightward footprint is `padding[1]` (+`1e-6`).
+/// 4. `suppress_short(min_silence[0], Other)` -- THE LOAD-BEARING CASE, and the exact
+///    shape of the phase-9 T9 lesson (a structure the naive argument does not see): the
+///    straddling `Other`'s duration is `X` in the retained list and `X - e_{k-1}` in the
+///    full one, so the full list can merge its two flanking Speech segments while the
+///    retained one keeps them apart -- DELETING the entry at `X` in one and not the
+///    other. It fires only at `dur <= min_silence[0]`, so the deleted entry sits at
+///    `< D_3 + min_silence[0]`.
+/// 5. `suppress_short(min_speech[1], Speech)` -- the straddling Speech's duration now
+///    differs (from 3/4); the flip needs `dur <= min_speech[1]`, bounding its right end.
+/// 6. `add_padding(padding[2], padding[3], Speech)` -- as 3.
+/// 7. `suppress_short(min_silence[1], Other)` -- as 4.
+/// 8. `suppress_short(min_speech[2], Speech)` -- as 5.
+///
+/// THE TAIL CASES, which no step index covers: the `End` sentinel and the two positional
+/// predicates (`suppress_short`'s `i+2 == len`, `add_padding`'s backward `len-3` start)
+/// address the LAST entries, shared verbatim by both lists; `i == 0` addresses the leading
+/// `Other`, which is index 0 in both. None of the three can name a DIFFERENT segment in
+/// the two lists, which is the only way a positional predicate could leak the prefix's
+/// length into the shared region.
+///
+/// WHAT THE CUT COSTS: nothing in output and nothing in latency (it never gates an
+/// emission -- it only stops re-deriving what is already frozen), and `O(K^2)` per push
+/// instead of `O(S^2)`, with `K` the retained count bounded by the window
+/// `[cut_time - CUT_MARGIN_HOLDBACKS*holdback, now]`. Its width is
+/// `(now - cut_time) + 2*holdback <= 3*holdback + (now - frontier)` (since `cut_time >=
+/// frontier - holdback`) -- config-derived plus the open-segment age, and no raw segment
+/// CLOSES while one is open, so a long open span adds at most that ONE segment.
+/// `tests/stream_incremental_resmooth.rs::derived_retained_bound` turns this into a number
+/// (450-553 on the four profiles it runs) against a measured worst of 6; the gap is the
+/// last step's assumption that the hysteresis could close a segment at every grid step,
+/// which the area gating forbids but this layer cannot see.
+/// The full replay stays reachable two ways: [`set_full_replay`](Self::set_full_replay)
+/// (the `test-support` equivalence oracle -- it simply never advances the cut, so the
+/// phase-8 code path is recovered EXACTLY, not re-implemented) and the flush-time
+/// sentinel guard in [`flush`](Self::flush).
 pub struct StreamDecision {
     seg_cfg: SegmenterConfig,
     class: SegClass, // SAD -> Speech (the offline driver's `SegClass::Speech`)
@@ -1235,9 +1386,36 @@ pub struct StreamDecision {
     raw_segments: Vec<(f64, f64)>,
     /// Count of smoothed-partition segments already emitted (a stable prefix index: the
     /// settled prefix is byte-stable across re-smooths, so this index is consistent).
+    /// Indexes the SPLICED list (`frozen` then the retained build's tail), which is the
+    /// same global partition the phase-8 full replay produced.
     emitted_count: usize,
+
+    /// THE CUT (see the type docs). Raw segments `[..keep_from]` are frozen out of the
+    /// replay; the retained window is `raw_segments[keep_from..]`. Monotone.
+    keep_from: usize,
+    /// The smoothed entries with `begin < cut_time`, PROVEN final (rightward claim) and
+    /// PROVEN correct when they were frozen (leftward claim). The head of the output list.
+    frozen: Vec<Segment>,
+    /// The freeze/cut time: `frozen` holds everything left of it, the retained build
+    /// reproduces everything at or right of it. Monotone non-decreasing; `NEG_INFINITY`
+    /// until the first freeze (so the splice index is 0 and the path is byte-identical to
+    /// the phase-8 full replay).
+    cut_time: f64,
+    /// TEST-ONLY (see [`set_full_replay`](Self::set_full_replay)): suppress the cut, so
+    /// every push replays the WHOLE raw list -- the phase-8 path, the equivalence oracle's
+    /// reference. Always `false` in production (nothing outside `test-support` can set it).
+    full_replay: bool,
+
     finished: bool,
 }
+
+/// The cut margin, in HOLDBACK UNITS -- the ONE constant family this design is allowed
+/// (the Task-9 adjudication: never a second per-term constant). The retained replay
+/// window must begin at least `CUT_MARGIN_HOLDBACKS * holdback` to the LEFT of the frozen
+/// prefix's right edge; the derivation (which needs `1 * holdback + 2e-6`) is in
+/// [`StreamDecision`]'s docs, and the second holdback is the slack that dominates the
+/// `add_padding` `1e-6` re-close epsilons.
+const CUT_MARGIN_HOLDBACKS: f64 = 2.0;
 
 impl StreamDecision {
     /// Build from the driver config (the convolution kernel), the segmenter config (the
@@ -1270,6 +1448,10 @@ impl StreamDecision {
             hyst,
             raw_segments: Vec::new(),
             emitted_count: 0,
+            keep_from: 0,
+            frozen: Vec::new(),
+            cut_time: f64::NEG_INFINITY,
+            full_replay: false,
             finished: false,
         }
     }
@@ -1278,6 +1460,34 @@ impl StreamDecision {
     /// latency accounting + the param-driven-derivation gate.
     pub fn holdback(&self) -> f64 {
         self.holdback
+    }
+
+    /// The number of raw segments the incremental replay currently re-runs -- the
+    /// RETAINED window `raw_segments[keep_from..]`. Bounded by the cut arithmetic (see
+    /// the type docs), NOT by the stream length; that is the whole point, and
+    /// `tests/stream_incremental_resmooth.rs` pins it measured-vs-derived.
+    pub fn retained_len(&self) -> usize {
+        self.raw_segments.len() - self.keep_from
+    }
+
+    /// The current freeze/cut time (`NEG_INFINITY` before the first freeze). Everything
+    /// left of it is in the frozen prefix; the retained replay reproduces the rest.
+    pub fn cut_time(&self) -> f64 {
+        self.cut_time
+    }
+
+    /// TEST-ONLY: suppress the cut, restoring the phase-8 FULL replay (every push replays
+    /// the WHOLE raw list) as the equivalence oracle's reference path.
+    ///
+    /// This is a SUPPRESSION, not a second implementation: with the cut never advancing,
+    /// `keep_from` stays 0, `frozen` stays empty and `cut_time` stays `NEG_INFINITY`, so
+    /// [`build_from`](Self::build_from) replays everything, the splice index is 0 and
+    /// [`collect_prefix`](Self::collect_prefix) walks exactly the entries the phase-8
+    /// code walked. The oracle therefore compares the incremental path against the
+    /// ORIGINAL code path, not against a paraphrase of it.
+    #[cfg(feature = "test-support")]
+    pub fn set_full_replay(&mut self, on: bool) {
+        self.full_replay = on;
     }
 
     /// The closed raw-segment list `(begin+off, end+off)` accumulated so far (the offline
@@ -1347,26 +1557,121 @@ impl StreamDecision {
             }
         }
 
-        // The complete segmentation: seed at the TRUE audio_duration, replay every raw
-        // segment, smooth once -- identical to `results_to_segmentation` + smoothing.
-        let final_seg = self.build_smoothed(audio_duration);
-
-        // Emit every remaining segment (no holdback at EOS -- everything is final).
+        // The complete segmentation: seed at the TRUE audio_duration, replay the RETAINED
+        // raw segments, smooth once, and splice the frozen prefix back on -- identical to
+        // `results_to_segmentation` + smoothing over the whole list (the cut derivation).
+        //
+        // SENTINEL SAFETY (the one place the frozen prefix's provenance is re-checked):
+        // every frozen entry was proven final against a mid-stream sentinel at `now`, and
+        // the argument needs the sentinel to stay at least one holdback RIGHT of the
+        // frozen region (else the tail special-casing -- suppress_short's `i+2 == len`
+        // branch and add_padding's backward `len-3` start -- could reach it). The caller's
+        // `audio_duration` is a DIFFERENT clock from the decision layer's row frontier, so
+        // this is checked rather than assumed; the streaming session always satisfies it
+        // (`audio_duration >= now >= cut_time + holdback`), and a caller that does not
+        // gets the full replay instead of a wrong answer.
         let now = self.current_audio_time();
-        let emitted = self.collect_prefix(&final_seg, f64::INFINITY, now);
+        let (emitted, final_seg) = if audio_duration <= self.cut_time + self.holdback {
+            let seg = self.build_from(audio_duration, 0);
+            let emitted = Self::collect_prefix(
+                &[],
+                seg.segments(),
+                &mut self.emitted_count,
+                f64::INFINITY,
+                now,
+            );
+            (emitted, seg)
+        } else {
+            let built = self.build_from(audio_duration, self.keep_from);
+            let q = self.splice_index(built.segments());
+            let tail = &built.segments()[q..];
+            let emitted = Self::collect_prefix(
+                &self.frozen,
+                tail,
+                &mut self.emitted_count,
+                f64::INFINITY,
+                now,
+            );
+            let mut all = Vec::with_capacity(self.frozen.len() + tail.len());
+            all.extend_from_slice(&self.frozen);
+            all.extend_from_slice(tail);
+            (emitted, Segmentation::from_parts(all, audio_duration))
+        };
         (emitted, final_seg)
     }
 
-    /// Build a smoothed [`Segmentation`] seeded at `audio_dur` from the current raw
-    /// segments -- the SHARED offline path (`Segmentation::new` -> `label_segment` replay
-    /// -> `smooth_segmentation`), run read-only on a clone.
-    fn build_smoothed(&self, audio_dur: f64) -> Segmentation {
+    /// Build a smoothed [`Segmentation`] seeded at `audio_dur` from the raw segments
+    /// `[from..]` -- the SHARED offline path (`Segmentation::new` -> `label_segment`
+    /// replay -> `smooth_segmentation`), run read-only on a clone. `from == 0` is the
+    /// phase-8 full replay verbatim; `from == keep_from` is the retained window whose
+    /// output is spliced onto [`frozen`](Self::frozen) (see the cut derivation).
+    fn build_from(&self, audio_dur: f64, from: usize) -> Segmentation {
         let mut seg = Segmentation::new(audio_dur);
-        for &(b, e) in &self.raw_segments {
+        for &(b, e) in &self.raw_segments[from..] {
             seg.label_segment(b, e, self.class);
         }
         smooth_segmentation(&mut seg, &self.seg_cfg);
         seg
+    }
+
+    /// The index in a retained build's entry list where the FROZEN prefix ends and the
+    /// spliced tail begins: the first entry at `begin >= cut_time`.
+    ///
+    /// The half-open rule (`frozen` = every entry with `begin < cut_time`) is what makes
+    /// this unambiguous even when the smoothed list carries a zero-duration segment (two
+    /// entries sharing a `begin`): both freezing and splicing partition on the SAME
+    /// predicate, so a tie lands wholly on one side. `cut_time == NEG_INFINITY` (nothing
+    /// frozen yet) yields 0, the phase-8 whole-list walk.
+    fn splice_index(&self, entries: &[Segment]) -> usize {
+        entries
+            .iter()
+            .position(|s| s.begin >= self.cut_time)
+            .unwrap_or(entries.len())
+    }
+
+    /// Advance the cut: freeze the entries this push's `threshold` proves final, then
+    /// slide the retained window up to the margin the leftward derivation allows.
+    ///
+    /// `entries` is the CURRENT build's tail (already spliced at the OLD `cut_time`), so
+    /// every entry it holds is at `>= cut_time_old >= X_old + CUT_MARGIN*holdback` and is
+    /// therefore inside the region that build reproduces correctly -- which is the
+    /// induction step that keeps `frozen` honest.
+    fn advance_cut(&mut self, threshold: f64, entries: &[Segment]) {
+        // `<=` rather than `!(>)`: a NaN threshold (unreachable -- every term is a finite
+        // time -- but the comparison must still be total) leaves the cut where it is.
+        if self.full_replay || threshold <= self.cut_time || threshold.is_nan() {
+            return;
+        }
+        for e in entries {
+            // The End sentinel travels with the stream (mid-stream it sits at `now`), so
+            // it is never frozen. Unreachable in practice -- the sentinel is at
+            // `>= now >= threshold` -- and cheap insurance if a caller's clocks disagree.
+            if e.begin >= threshold || e.ty == SegClass::End {
+                break;
+            }
+            self.frozen.push(*e);
+        }
+        self.cut_time = threshold;
+
+        // Slide the retained window: keep the LAST raw segment beginning at or before
+        // `cut_time - CUT_MARGIN_HOLDBACKS*holdback`, so the invariant
+        // `raw_segments[keep_from].0 + margin <= cut_time` holds by construction. At least
+        // one raw segment is always retained -- it anchors the seam structure the
+        // derivation reasons about (`S@X` preceded by `Other` in both lists).
+        let limit = self.cut_time - CUT_MARGIN_HOLDBACKS * self.holdback;
+        while self.keep_from + 1 < self.raw_segments.len()
+            && self.raw_segments[self.keep_from + 1].0 <= limit
+        {
+            self.keep_from += 1;
+        }
+        debug_assert!(
+            self.keep_from == 0
+                || self.raw_segments[self.keep_from].0 + CUT_MARGIN_HOLDBACKS * self.holdback
+                    <= self.cut_time,
+            "cut invariant broken: retained window starts at {} but cut_time is {}",
+            self.raw_segments[self.keep_from].0,
+            self.cut_time
+        );
     }
 
     /// Re-smooth the current raw segments (clone seeded at the posterior frontier) and emit
@@ -1382,7 +1687,11 @@ impl StreamDecision {
         // emission frontier -- `now >= frontier` since received >= finalized), so the emitted
         // region stays >= holdback to its left and the tail special-casing cannot reach it.
         let mid_dur = now.max(last_rb);
-        let seg = self.build_smoothed(mid_dur);
+        // THE CUT: only the RETAINED raw segments are replayed here (`keep_from`), which is
+        // what makes this push `O(K^2)` instead of `O(S^2)`. The frozen prefix supplies
+        // everything left of `cut_time`; see the type docs' cut derivation for why the
+        // truncated left context cannot change a single bit at or right of the cut.
+        let built = self.build_from(mid_dur, self.keep_from);
 
         // THE EMISSION FRONTIER (the time-advance trigger). A smoothed segment can still be
         // revised only by FUTURE raw structure -- raw segments not yet in `raw_segments`.
@@ -1427,32 +1736,59 @@ impl StreamDecision {
             frontier = frontier.min(pending);
         }
         let threshold = frontier - self.holdback;
-        self.collect_prefix(&seg, threshold, now)
+
+        // FREEZE WHAT WE EMIT: the cut advances to the SAME threshold the emission uses
+        // (one frontier, one holdback, one act), then the splice is recomputed against the
+        // new cut and the settled prefix is read off the spliced view.
+        let q_old = self.splice_index(built.segments());
+        self.advance_cut(threshold, &built.segments()[q_old..]);
+        let q = self.splice_index(built.segments());
+        Self::collect_prefix(
+            &self.frozen,
+            &built.segments()[q..],
+            &mut self.emitted_count,
+            threshold,
+            now,
+        )
     }
 
-    /// Emit the contiguous prefix of `seg`'s partition (from `emitted_count`) whose
-    /// segments END strictly before `threshold`, stamping `emitted_at`. Advances
-    /// `emitted_count`. Segment `i` is `[segs[i].begin, segs[i+1].begin)` of type
-    /// `segs[i].ty`; its end is `segs[i+1].begin`.
+    /// Emit the contiguous prefix of the SPLICED partition (`frozen` then `tail`, from
+    /// `emitted_count`) whose segments END strictly before `threshold`, stamping
+    /// `emitted_at`. Advances `emitted_count`. Segment `i` is
+    /// `[entry(i).begin, entry(i+1).begin)` of type `entry(i).ty`.
+    ///
+    /// An associated function over the two slices rather than a `&mut self` method: it
+    /// borrows `frozen` immutably and the cursor mutably, which are disjoint fields. With
+    /// `frozen` empty and `tail` the whole build (the `full_replay` path, and every push
+    /// before the first freeze) this walks exactly the entries the phase-8 version walked.
     fn collect_prefix(
-        &mut self,
-        seg: &Segmentation,
+        frozen: &[Segment],
+        tail: &[Segment],
+        emitted_count: &mut usize,
         threshold: f64,
         emitted_at: f64,
     ) -> Vec<EmittedSegment> {
-        let segs = seg.segments();
+        let n = frozen.len() + tail.len();
+        let at = |i: usize| -> Segment {
+            if i < frozen.len() {
+                frozen[i]
+            } else {
+                tail[i - frozen.len()]
+            }
+        };
         let mut out = Vec::new();
-        let mut i = self.emitted_count;
-        while i + 1 < segs.len() && segs[i + 1].begin < threshold {
+        let mut i = *emitted_count;
+        while i + 1 < n && at(i + 1).begin < threshold {
+            let cur = at(i);
             out.push(EmittedSegment {
-                begin_s: segs[i].begin,
-                end_s: segs[i + 1].begin,
-                class: segs[i].ty,
+                begin_s: cur.begin,
+                end_s: at(i + 1).begin,
+                class: cur.ty,
                 emitted_at_audio_s: emitted_at,
             });
             i += 1;
         }
-        self.emitted_count = i;
+        *emitted_count = i;
         out
     }
 }
