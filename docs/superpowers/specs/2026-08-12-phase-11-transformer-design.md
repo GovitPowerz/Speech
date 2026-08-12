@@ -242,6 +242,13 @@ retention arms stay no-op follow-ons (unchanged scope).
   phase-11 sibling): `transformer x {bidirectional, forward}` on `lre_sad_v2`, HARD
   beat-init at every collar, first-run, run-twice byte-identical, the zero-dead-columns
   inverse guard running unchanged. Corpus-gated, local-only, license hygiene absolute.
+  (Amended 2026-08-12 at T9 review, user-ratified: the hard leg passes per collar at
+  margin >= 0.2 OR trained DCF <= `COLLAPSE_FLOOR_DCF` (0.2501) -- the
+  transformer-forward init-quality anomaly made the shared absolute margin unreachable
+  at two collars while training itself reaches the identical operating point;
+  strengthened at review with the two-sided `NON_DEGENERATE_INIT_ROWS` membership
+  table. Full record: RESULTS.md's tenth-gate section + `test_phase10_gates.py`'s
+  module docstring.)
 
 ## S9 -- verification standards + battery + docs
 
@@ -283,6 +290,12 @@ standing rule). Memory + ledger per the house loop.
 3. Streaming: the fifth causal row bit-for-bit, chunk-invariant, >= 2 real interior
    boundaries, latency bound unchanged.
 4. The 10-gate matrix passes HARD beat-init, run-twice byte-identical.
+   (Amended 2026-08-12 at T9 review, user-ratified: "HARD beat-init" now means margin
+   >= 0.2 OR trained DCF <= `COLLAPSE_FLOOR_DCF` (0.2501) per collar -- the
+   transformer-forward init-quality anomaly made the plain margin unreachable at two
+   collars despite training reaching the identical operating point; strengthened at
+   review with the two-sided `NON_DEGENERATE_INIT_ROWS` table. Full record:
+   RESULTS.md's tenth-gate section + `test_phase10_gates.py`'s module docstring.)
 5. The dedupe proven by the UNEDITED suite at existing pins.
 6. Retention measured (exact-tree transformer RSS with/without backprop).
 7. Battery >= 8 named items; docs refreshed; suite counts recorded.
