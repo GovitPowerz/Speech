@@ -2430,10 +2430,17 @@ helps, hurts, or is neutral to full-corpus convergence remains for the launcher 
 
 Spec S9's `>= 8` items, run as apply -> run ONLY the named catcher's file (FOREGROUND,
 release, R6-capped) -> revert -> re-run green -> verify the tree byte-clean. **10 items, 15
-applied mutations** (three items carry two sub-variants, one carries a non-vacuity control).
-**9 of 10 items break the leg the SPEC NAMED**; the tenth breaks nothing at all and is the
-battery's headline finding. Nothing under `src/` was committed; the per-item evidence
-(diffs, commands, verbatim failure lines) is in the task ledger.
+applied mutations**: six items carry one mutation each (4, 5, 6, 7, 8, 9), items 1, 3 and 10
+carry two, and item 2 carries three -- `6 + 2 + 3 + 2 + 2 = 15`. Item 7's `+1e3` non-vacuity
+control is OUTSIDE that count (it exists to prove the mutated site live, not to be caught).
+
+**8 of 10 items break the leg the SPEC NAMED; items 3 and 7 are the two honest gaps.** That
+is the NON-GENEROUS reading and it is the right one: spec S9 names the f32 twin explicitly
+for item 3, so item 3's spec-named mutation (3a) is NOT caught even though its exact-cell
+variant (3b) is -- which makes that gap **f32-tier-specific**, not a hole in the convention
+itself. Item 7's closer is the Task-1 dedupe rather than any test. By MUTATION rather than
+by item: **12 named / 1 by-other / 2 not caught** = 15. Nothing under `src/` was committed;
+the per-item evidence (diffs, commands, verbatim failure lines) is in the task ledger.
 
 | # | mutation | named catcher | verdict |
 |---|---|---|---|
