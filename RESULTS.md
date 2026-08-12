@@ -2327,7 +2327,7 @@ criterion (section below):
 trained-vs-init margin (0.226/0.216/0.206) clears the original pinned `>= 0.2`, but at
 collars 1.0/2.0 it does not (0.194262 and 0.185836 -- both measured, run-twice
 bit-identical, not noise). At EVERY collar, though, the trained DCF is exactly 0.250000,
-reaching the KNOWN all-speech collapse point eight of the other nine rows' trained models
+reaching the KNOWN all-speech collapse point seven of the other nine rows' trained models
 also reach exactly (`slstm-forward` at 0.252430 and `mamba-forward` at 0.248770, both at
 collar 0.5, are the two genuinely-non-degenerate trained exceptions -- Phase 10's "The
 eight gates" section above -- and both clear their own margin comfortably regardless):
@@ -2342,7 +2342,7 @@ eight gates" section above -- and both clear their own margin comfortably regard
 
 **The headline finding is an INIT-QUALITY ANOMALY, not a training failure.** The TRAINED
 model reaches DCF 0.250000 at every collar (Pmiss 0, Pfa 1) -- the exact all-speech
-collapse point EIGHT of the other nine rows' trained models also reach. (The remaining two,
+collapse point SEVEN of the other nine rows' trained models also reach. (The remaining two,
 `slstm-forward` at 0.252430 and `mamba-forward` at 0.248770 (both at collar 0.5), are
 genuinely non-degenerate on the trained side too -- not a contradiction, since both still
 clear their own untrained-vs-trained margin comfortably, 0.494 and 0.489 respectively,

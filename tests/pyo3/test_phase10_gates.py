@@ -149,7 +149,7 @@ below are not noise):
 
 THE HEADLINE FINDING IS AN INIT-QUALITY ANOMALY, not a training failure: the TRAINED model
 reaches DCF 0.250000 at every collar (Pmiss 0.0, Pfa 1.0) -- the exact all-speech collapse
-point EIGHT of the other nine rows' trained models also reach (the remaining two, slstm-fwd
+point SEVEN of the other nine rows' trained models also reach (the remaining two, slstm-fwd
 0.252430 and mamba-fwd 0.248770 at collar 0.5, are genuinely non-degenerate on the trained
 side too but still clear their own margin comfortably, 0.494 and 0.489). Training is not in
 question for THIS row: its trained result is indistinguishable from the typical row's. The
@@ -297,7 +297,7 @@ _LOG_CLAMP = float(-np.log(1e-24))  # 55.26204...
 # evidence of a worse outcome). See "THE TRANSFORMER ROWS" below for why this was needed:
 # `transformer/forward`'s from-scratch init does not collapse degenerate the way every
 # other cell's does, thinning its margin below 0.2 at the two widest collars even though
-# its TRAINED model reaches DCF 0.250000 at every collar -- the SAME collapse point eight
+# its TRAINED model reaches DCF 0.250000 at every collar -- the SAME collapse point seven
 # of the other nine rows' trained models also reach exactly.
 COLLAPSE_FLOOR_DCF = 0.2501
 
@@ -717,7 +717,7 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
     quarter below every other row's init, reflecting a Pmiss of 0.581 (not >0.9) -- and this
     genuinely MISSES the original `- 0.2` per-collar margin at collars 1.0 and 2.0 (measured
     margins 0.194262 and 0.185836), an INIT-QUALITY ANOMALY rather than a training failure
-    (its trained side reaches DCF 0.250000 at every collar, the same collapse point EIGHT of
+    (its trained side reaches DCF 0.250000 at every collar, the same collapse point SEVEN of
     the other nine rows' trained sides also reach).
     It PASSES the user-ratified 2026-08-12 amendment at every collar via the collapse-floor
     disjunct instead (`COLLAPSE_FLOOR_DCF`; see "THE TRANSFORMER ROWS" in the module
