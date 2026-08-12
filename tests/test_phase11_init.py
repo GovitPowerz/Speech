@@ -65,12 +65,22 @@ pick it too.
 
 THE CONFLICT, recorded because it is exactly what the spec asked to be told about: unlike CfC
 -- where `B = 45` was the v2 argmin AND the smallest v1-tolerable integer at once -- the two
-CfC criteria DIVERGE here. The v2 argmin is 54 and it sits outside v1's band at -20.46%. The
-underlying finding, stated rather than hidden: windowed attention at width 24 is
+CfC criteria DIVERGE here. The v2 argmin is 54 and it sits outside v1's band at -20.46%.
+
+AND IT IS AN ARTEFACT OF COUNTING DEAD WEIGHT. Subtract v1's structurally-dead layer-0 `W_a`
+columns (`2*24*48 = 2304`) and each lineage's normalize tail, and both lineages have the SAME
+live closed form `13849 + 196*d_ff` against the SAME live LSTM target `24409`: at `d_ff = 64`
+both are IDENTICALLY 26393 live weights, +8.13%. The phase-10 live-count identity extends to
+the transformer intact, and under a live-count band there is no conflict at all -- one band
+[36, 72], one argmin 54. PACK LENGTH is the repo's stated convention, so it is what the default
+is sized against; the two conventions happen to agree at 64.
+
+The underlying finding, stated rather than hidden: windowed attention at width 24 is
 parameter-CHEAP next to a peephole LSTM (a whole cell layer costs `2496 + 49 d_ff` plus the
-fan-in term, against the LSTM's `4*H*(fin + H + 4)`), so `d_ff` has to land well above the
-textbook `4*H = 96`... in the other direction: at `d_ff = 96` v2 would be +51%, far out of
-band. Capacity comparability, not the heuristic, sets this number.
+fan-in term, against the LSTM's `4*H*(fin + H + 4)`). At the textbook `4*H = 96` the v2 pack is
+32687 (+33.79%, outside v2's band) while v1 is +3.99% and inside its own -- the textbook default
+fails exactly one lineage. 64 therefore lands well above the naive "small cell -> small FFN"
+instinct but comfortably BELOW the transformer-literature default.
 
 Forward-only runs move both packs the same way (one stack, and `cell_overlay` resizes the MLP
 input from 2H to H), so the verdict does not flip: v2 fwd LSTM 12239 vs TRANS 13231 (+8.11%),

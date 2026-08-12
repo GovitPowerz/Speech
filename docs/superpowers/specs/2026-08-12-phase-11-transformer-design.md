@@ -144,6 +144,16 @@ needs `d_ff >= ~64`, and `d_ff = 64` sits inside BOTH (v2 ~ +8%, v1 ~ -15%). If 
 re-derivation confirms, the default is 64; the finding to DOCUMENT either way: windowed
 attention at width 24 is parameter-cheap next to a peephole LSTM, so `d_ff` lands well
 above the textbook heuristic to hold capacity comparability -- state it, do not hide it.
+(Amended 2026-08-12 at T3 review: the re-derivation CONFIRMED the arithmetic exactly and
+`d_ff = 64` stands, but this last clause has the DIRECTION backwards -- 64 is BELOW the
+textbook `4*H = 96`, not above it. Corrected finding: at 96 the v2 pack is 32687
+(+33.79%, outside v2's band) while v1 is +3.99% and inside its own, so the textbook
+default fails exactly one lineage; 64 lands well above the naive "small cell -> small
+FFN" instinct but comfortably BELOW the transformer-literature default. Also recorded at
+T3: the v2-argmin-vs-v1-band conflict is an artefact of counting v1's structurally-dead
+`W_a` columns -- on LIVE weights both lineages share one closed form `13849 + 196 d_ff`
+against one target 24409, i.e. 26393 live and +8.13% at 64 for both, so a live-count band
+has no conflict at all. Pack length remains the sizing convention.)
 
 ## S4 -- the dedupe task (early, behavior-free; the phase-10 named follow-on)
 

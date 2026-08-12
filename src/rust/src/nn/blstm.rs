@@ -384,9 +384,24 @@ pub const TRANSFORMER_DEFAULT_HEADS: usize = 4;
 /// the v2 argmin AND the smallest v1-tolerable integer at once -- the v2 argmin here is
 /// `54` and it sits OUTSIDE v1's band (-20.46%). The spec's primary rule (an integer
 /// inside BOTH bands) is satisfiable, so it decides, and the v2 tiebreak applied WITHIN
-/// the feasible set agrees on the same 64. The finding worth stating: windowed attention
-/// at width 24 is parameter-CHEAP next to a peephole LSTM, so `d_ff` lands well above the
-/// textbook `4*H` heuristic purely to hold capacity comparability.
+/// the feasible set agrees on the same 64.
+///
+/// THE CONFLICT IS AN ARTEFACT OF COUNTING DEAD WEIGHT, which is worth knowing before
+/// anyone re-opens it: subtract v1's structurally-dead layer-0 `W_a` columns
+/// (`2*24*48 = 2304`, the 2015 dead-input-column defect this cell inherits like every
+/// other) and each lineage's normalize tail, and BOTH lineages have the SAME live closed
+/// form `13849 + 196*d_ff` against the SAME live LSTM target `24409` -- so at `d_ff = 64`
+/// both are IDENTICALLY 26393 live weights, `+8.13%`. The phase-10 live-count identity
+/// extends to the transformer intact. Under a live-count band there is no conflict at all
+/// (one band `[36, 72]`, one argmin 54); PACK LENGTH is the repo's stated convention, so
+/// it is what the default is sized against, and the two conventions agree at 64 anyway.
+///
+/// The finding worth stating, in the right direction: windowed attention at width 24 is
+/// parameter-CHEAP next to a peephole LSTM. At the textbook `4*H = 96` the v2 pack is
+/// 32687 (+33.79%, outside v2's band) while v1 is +3.99% and inside its own -- the
+/// textbook default fails exactly one lineage. 64 therefore lands well above the naive
+/// "small cell -> small FFN" instinct but comfortably BELOW the transformer-literature
+/// default.
 ///
 /// The full table is in `tests/test_phase11_init.py`'s docstring; the Python mirror is
 /// `config_bridge.TRANSFORMER_DEFAULT_D_FF` (pinned against THIS line by
