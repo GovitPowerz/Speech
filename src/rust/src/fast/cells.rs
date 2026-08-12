@@ -2206,6 +2206,14 @@ pub(crate) fn build_dense_tail(
 /// [`super::bicell::FastBiCell::feed_forward`]. The division loop runs BEFORE the
 /// degenerate check exactly as the copies did, so a zero ratio still panics there rather
 /// than being short-circuited away at `frames == 0`.
+///
+/// `input_width` (`lstm_neuron_nb[0]`) is read by the CALLER to build this argument, so it
+/// is evaluated before this function's own `frames == 0 || out_len == 0` early return can
+/// run -- one commit-boundary earlier than the pre-dedupe copies bound it (Task 1 dedupe
+/// minor). PROVEN unreachable as a divergence: both callers are constructible only through
+/// `from_flat`, which runs `check_net_spec` (`lstm_neuron_nb.len() >= 2`) before any
+/// `feed_forward` call exists to invoke this function, so the index is always in bounds by
+/// the time either ordering would matter.
 pub(crate) fn stack_input_cols(
     subs: &[usize],
     input_width: usize,
@@ -3852,9 +3860,11 @@ mod tests {
         let out_f = fast.feed_forward(&input);
 
         // MEASURED on this box (M4 Pro): max_abs 3.5506e-7, max_rel 1.4658e-5. The
-        // relative number is FLOOR-LIMITED and the ratio is the tell: `max_abs/max_rel`
-        // is 2.42e-2, i.e. the worst element's own magnitude sits just above [`max_rel`]'s
-        // `1e-2` scale floor while the outputs at large run ~1.8 (printed below). That is
+        // relative number is NEAR-ZERO-ELEMENT-LIMITED and the ratio is the tell:
+        // `max_abs/max_rel` is 2.42e-2 -- ABOVE [`max_rel`]'s `1e-2` scale floor, so the
+        // floor clamp itself is not what is binding here (a true floor-limited leg would
+        // read exactly `1e-2`); the worst element's own magnitude just happens to sit
+        // near that floor while the outputs at large run ~1.8 (printed below). That is
         // the [`CFC_CELL_F32_PIN`] / `lstm_matches_the_exact_cell_at_the_arm_geometry`
         // situation reproduced at a third shape, and the honest response is theirs: the
         // ABSOLUTE delta is the discriminating statement (3.55e-7, ~3 f32 ULP of an O(1)

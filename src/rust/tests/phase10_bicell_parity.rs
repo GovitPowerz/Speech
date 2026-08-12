@@ -415,6 +415,18 @@ fn overlap_and_plain_are_distinct_regimes() {
 /// the SMALLEST one that works, deterministically -- and the wide fallback below is tried
 /// only once the entire `GAINS x offsets()` grid is exhausted, so it never displaces a
 /// rung the grid above already found.
+///
+/// TWO CLARIFICATIONS, recorded rather than left implicit (phase-11 Task 6 minor). First,
+/// "smallest wins" holds PER STAGE, not as one globally-sorted search: `gain` is the OUTER
+/// loop, so EVERY offset at `gain 1` (all the way to `+-4.0`) is tried before `gain 2` is
+/// touched, and all of `gain 2` before `gain 3` -- meaning `gain 3, offset +0.25` is probed
+/// deep inside the primary grid, while `gain 1, offset +5.0` is not reachable there AT ALL
+/// (`offsets()` stops at `4.0`) and is only tried once the WHOLE primary grid (all three
+/// gains) has failed, as the very first rung of [`wide_offsets`]. So a nominally "larger"
+/// primary-grid perturbation can and does fire before a nominally "smaller" fallback one.
+/// Second, the half-open interval `(4.0, 5.0)` is UNPROBED by construction at every gain --
+/// `offsets()` tops out at `4.0` and [`wide_offsets`] starts at `5.0` -- a documented gap
+/// rather than an oversight, since no committed fixture needed anything in it.
 #[test]
 fn bicell_parity_crossing_is_exercised() {
     // gain 1 = bias-only. Ascending, so the least invasive perturbation wins.

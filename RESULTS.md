@@ -2251,6 +2251,366 @@ The full replay stays reachable two ways: the `test-support` `set_full_replay` h
 flush-time sentinel guard (a caller whose `audio_duration` lands within a holdback of the cut
 gets the whole-list rebuild rather than a wrong answer -- pinned, so it is not dead code).
 
+## Phase 11 -- the transformer cell (the fifth `CellLayer` variant)
+
+The user's named architecture list -- mamba, xLSTM/sLSTM, CfC, transformers -- closes. The
+cell is a PRE-NORM block over a CAUSAL SLIDING WINDOW of bounded width `W` with ALiBi
+relative positions and zero learned position parameters, landed end to end through the
+phase-9 seam (exact f64 cell, both gradient tiers, both f32 fast twins, a fifth streaming
+row, day-one retention gating, a 10-gate matrix, an 8-item-plus mutation battery). THE
+DESIGN TRAP -- whole-sequence f64 attention is gigabytes/layer at full-corpus lengths -- is
+answered by DEFINITION: the cell is windowed/bounded-KV from day one, so every backward
+cache is `T x O(W + d_ff)`, never `T^2`, and the streamed KV ring is bit-identical to the
+offline forward by construction. Full spec:
+`docs/superpowers/specs/2026-08-12-phase-11-transformer-design.md`.
+
+Four things distinguish this phase's record from its four predecessors', named up front so
+each section below can be read as evidence for a claim already stated rather than a fact
+discovered in place:
+
+1. **AN EARLY DEDUPE WENT FIRST** (Task 1, approach A from Phase 10's own follow-on list):
+   the `fast/cells.rs` / `fast/bicell.rs` scaffolding the four prior cells had begun to
+   duplicate was consolidated into shared helpers BEFORE a fifth cell could multiply it
+   further -- pure code motion, arbitrated by the existing phase-7/8/9/10 suites passing
+   UNEDITED at their EXISTING pins.
+2. **AN INIT-QUALITY ANOMALY, not a training failure.** `transformer/forward`'s from-scratch
+   Xavier init does not collapse toward all-non-speech the way every gated-recurrent cell's
+   does, which broke the ORIGINAL 10-gate hard-leg criterion at two collars even though the
+   TRAINED model reaches the identical operating point most other rows also reach. Resolved
+   by a user-ratified, two-sided criterion amendment -- see Task 9 below.
+3. **THE FIRST STREAMING-GATE FIXTURE TO EXERCISE THE `pending_begin`-BLOCKED REGIME.** Every
+   prior cell's streaming gate cleared the tight latency bound on every emission; the
+   transformer row's does not, on two of them, and the miss is legitimate (the hysteresis
+   correctly waiting out a cluster of failed rising attempts) rather than a bug -- see Task 7
+   below, and the `EXPECT_TIGHT_COHORT` membership table it produced.
+4. **TWO DOCTRINE SHARPENINGS from the battery** (Task 10, RESULTS-only, not re-narrated
+   here -- see that section): FD is blind to forward STRUCTURE four separate times over on
+   this cell alone (not just once, the way earlier phases found it), and the T4-flagged
+   `[q|k|v]` matrix-half coverage question is CONFIRMED and narrowed to a single owning test,
+   not left an open question.
+
+### The exact cell + FD tier (Task 2)
+
+`nn/cells/transformer.rs`, `TransformerLayer`. Forward per timestep `t` (`H = out`,
+`A = heads`, `d = H/A`): a width adapter `x' = W_a x + b_a` -> RMSNorm_1 (the in-tree Mamba
+transcription, reused not re-derived) -> ONE combined `3H x H` projection
+`[q|k|v] = W_qkv u + b_qkv` (the sLSTM/CfC combined-block precedent) -> per-head logits
+`(q_t . k_j)/sqrt(d) + m_h(j-t)` over the causal window `j in [max(0,t-W+1), t]`,
+`m_h = 2^(-8h/A)` the ALiBi geometric slopes (constants, zero gradient) -> softmax ALWAYS
+max-subtracting (a DECLARED divergence from the house F8 conditional guard -- no legacy
+bytes to match here, and the f32 twin needs the headroom) -> the weighted-v fold -> residual
+1 -> RMSNorm_2 -> an FFN (`silu`, reused from Mamba) -> residual 2. Flat order
+`[W_a|b_a|g_1|W_qkv|b_qkv|W_o|b_o|g_2|W_1|b_1|W_2|b_2]` walked once by `for_each_slot`.
+
+TWO dead-block classes, both derived and pinned: `b_k` (the k-third of `b_qkv`) is dead at
+EVERY `T` (a uniform per-row logit shift is annihilated by softmax shift-invariance), and the
+pin is TWO-CLASS -- bit-exact `== 0.0` at `T=1` (a one-element window's softmax is a literal
+`1`) and a MEASURED `~1e-17` f64-cancellation floor at `T>=2` (the sLSTM `b_i` convention,
+NOT the Mamba/CfC exact-zero one). A T2-review spec amendment corrected the brief's original
+premise: the brief had written the `T>=2` pin as unconditional `== 0.0` by analogy to the
+Mamba/CfC stored-exact-zero shape, but `b_k` at `T>=2` cancels in R without being bit-exact
+in f64 -- the mechanical test the amendment records: does the adjoint terminate in a
+multiplication by a stored exact zero, or in a sum that cancels? The q/k rows of `W_qkv` plus
+`b_q` are ADDITIONALLY dead at `T=1` only (the Mamba-`A_log`-at-`T=1` analogue), live from
+`T>=2`.
+
+Both tiers reuse the phase-9 harnesses UNCHANGED (cell-agnostic, the seam's claim cashed a
+third/fourth time).
+
+**FD tier** (`tests/phase9_cell_grad.rs::transformer_backward_matches_central_difference`):
+`eps = 1e-5` (MEASURED, an 8-point sweep bottoming there -- `max_rel_major` and the absolute
+error both bottom at `1e-5`, roundoff dominating to its left and truncation's `eps^2`
+signature dominating to its right), over 5 shapes (`t in {1,2,3,7,23}` at a deliberately
+TINY `W=4`/`heads=2`/`d_ff=8` fixture so `t<=W` and `t>W` both appear FD-tractable) x 3 seeds:
+
+| shape `(t, in, out)` | `max_rel` (worst of 3 seeds) | `rel_pin` | `max_rel_major` | `major_pin` | resolvable |
+|---|---|---|---|---|---|
+| `(1, 3, 2)` | 2.355e-8 | 2.4e-7 | 2.355e-8 | 2.4e-7 | 66 of 78 |
+| `(2, 3, 2)` | 3.826e-6 | 3.9e-5 | 3.403e-8 | 3.5e-7 | 76 of 78 |
+| `(3, 3, 4)` | 1.294e-5 | 1.3e-4 | 8.608e-8 | 8.7e-7 | 176 of 180 |
+| `(7, 5, 4)` | 7.333e-6 | 7.4e-5 | 1.450e-7 | 1.5e-6 | 184 of 188 |
+| `(23, 7, 6)` | 5.023e-6 | 5.1e-5 | **2.858e-7** | 2.9e-6 | 332 of 338 |
+
+The DISCRIMINATING bound is `max_rel_major`: MEASURED worst **2.858e-7** at `t=23`, ~350x
+under the `1e-4` STOP, pinned measured*10 per shape (worst pin `2.9e-6`, still ~34x under the
+STOP). THE ONE PIN ABOVE `1e-4`, declared not buried: `t=3`'s `rel_pin` is `1.3e-4`, set by
+one seed-1 weight whose analytic derivative is `2e-7` of the pack maximum -- the
+central-difference floor over a near-zero denominator, not a wrong adjoint (the whole
+`max_rel` column falls monotonically across five decades of eps, the roundoff signature; a
+wrong adjoint term would be eps-INVARIANT). THE RESOLVABLE COUNTS CARRY THE S1.4 STRUCTURAL
+CLAIMS with no slack: predicted (`transformer_total - transformer_dead`) == measured on
+EVERY shape and seed (66/76/176/184/332), so the two-sided count assert degenerates to an
+exact equality, matching sLSTM and CfC (unlike Mamba).
+
+**Seam tier** (`tests/pyo3/test_phase9_seam.py`): corpus-level `grad_check` through
+`speech_rs.Engine` on THREE committed synthetic fixtures (`transformer_bidirectional`,
+`transformer_forward`, `twin_mode7_lid_transformer`, geometry `Transformer_Window 4` /
+`Heads 2` / `D_Ff 6` -- reviewer-verified the effective cell depth is EXACTLY `T=50` by a
+`W`-sweep, so `W=4` truncates 46 of 50 rows plus the start edge; `heads=2` is forced, the
+only divisor of both 4 and 6):
+
+| fixture | eps | measured worst scaled error | pin |
+|---|---|---|---|
+| `transformer_bidirectional` (grad_check) | 1e-5 | 3.565e-9 | 3.6e-8 |
+| `transformer_forward` (grad_check) | 1e-5 | 3.193e-7 | 3.2e-6 |
+| `transformer_bidirectional` (block probe) | 1e-5 | 2.716e-8 | 2.8e-7 |
+| `transformer_forward` (block probe) | 1e-5 | 5.500e-8 | 5.5e-7 |
+| `twin_mode7_lid_transformer` (grad_check) | 1e-4 | 5.157e-10 | 5.2e-9 |
+
+All five measured epsilons are their OWN 5-point sweeps, not inherited defaults (the SAD
+rows' minima both fall AT or beside `sad_epsilon = 1e-5`, so no fixture-specific key was
+needed there; the Twin's own sweep bottoms at `1e-5` too, coincidentally matching
+`sad_epsilon` -- it still gets its own named manifest key on the CfC precedent). Every pin
+is measured*10 and under the `1e-4` STOP.
+`test_transformer_key_bias_block_is_output_inert` adds the structural leg the block probe
+alone cannot see (a `[q|k|v]` column-order swap inside the ONE named `b_qkv` block is
+invisible to a probe that reads the same, possibly-swapped, order on both the analytic and
+FD sides): `b_k` is bit-exact output-INVARIANT across four overwrite patterns (three
+constants plus a non-uniform ramp) on BOTH stacks when bidirectional, `b_q` is LIVE at every
+non-degenerate value tried. NARROWER THAN IT SOUNDS, recorded rather than hidden: this pins
+the BIAS half of the `[q|k|v]` order only -- the MATRIX half (`W_qkv`) has no comparable
+inertness handle (every row of `W_k` is live, since it feeds `k_j`, which varies with `j`),
+so a matrix-only q<->k row-family swap with the bias order intact would pass this leg. That
+gap was left KNOWINGLY OPEN for the Task-10 battery (see below) -- CONFIRMED there and
+narrowed to one sentence, not left dangling.
+
+### Python init + the dual-lineage sizing (Task 3)
+
+`init_weights.py::init_transformer_flat` + `transformer_geometry`, on the CfC pattern: the
+S1.2 flat order emitted DIRECTLY (no structured/nnet domain to build through), Xavier/He per
+block with fans from the block shapes, `b_k` seeded 0 (S1.4), RMSNorm gains seeded 1.0, other
+biases 0, NO magic constants (every block is plain dense/attention, no S4D-real analogue to
+copy). The MANDATORY whole-pack block-by-block reconstruction pin came with TWO shear
+companions (a q/k-family permutation, a deeper-FFN variant), all self-mutation-probed.
+
+**THE SIZING** (spec S3, the CfC dual-lineage procedure): `window` and `heads` are
+PARAMETER-FREE (ALiBi's slopes are constants; `heads` only reshapes `W_qkv`), so `d_ff` is
+the cell's ONE sized knob. Per-layer count at hidden `H = 24` (both lineages):
+`N(in) = 24*in + 2496 + 49*d_ff`. Both packs share the output MLP and normalize tail, so only
+the recurrent stacks move:
+
+| `d_ff` | v2 pack | v2 deviation | v1 pack | v1 deviation | verdict |
+|---|---|---|---|---|---|
+| 36 | 20927 | -14.34% | 23255 | -30.93% | v2 in / v1 OUT (v2 band floor) |
+| 54 | 24455 | +0.10% | 26783 | -20.46% | v2 in / v1 OUT (v2 argmin) |
+| 63 | 26219 | +7.32% | 28547 | -15.22% | v2 in / v1 OUT (v1 misses by 0.22pt) |
+| **64** | **26415** | **+8.12%** | **28743** | **-14.64%** | **BOTH -- THE DEFAULT** |
+| 72 | 27983 | +14.54% | 30311 | -9.98% | BOTH (v2 band ceiling) |
+| 89 | 31315 | +28.18% | 33643 | -0.08% | v2 OUT / v1 in (v1 argmin) |
+
+Bands: v2 `d_ff in [36,72]`, v1 `[64,114]`, intersection `[64,72]` -- NON-EMPTY, so the
+primary rule (an integer inside BOTH bands) decides with no tiebreak needed; `64` is
+simultaneously the smallest integer in the intersection AND the v2-best point of the
+feasible set. `TRANSFORMER_DEFAULT_D_FF = 64` CONFIRMED the spec's design-time estimate
+exactly.
+
+**THE ONE RECORDED CONFLICT**, unlike CfC (where `B=45` was the v2 argmin AND the smallest
+v1-tolerable integer at once): the v2 argmin here is `54`, and it sits OUTSIDE v1's band at
+-20.46%. AND IT IS AN ARTEFACT OF COUNTING DEAD WEIGHT -- subtract v1's structurally-dead
+layer-0 `W_a` columns (`2*24*48 = 2304`, the SAME 2015 dead-input-column defect every cell
+inherits) and each lineage's normalize tail, and both lineages reduce to ONE live closed
+form `13849 + 196*d_ff` against ONE live LSTM target `24409`: at `d_ff=64` both are
+IDENTICALLY **26393** live weights, `+8.13%` both ways. The phase-10 live-count identity
+extends to the transformer intact; under a live-count band there is no conflict at all (one
+band `[36,72]`, one argmin `54`). PACK LENGTH stays the repo's stated sizing convention, so
+it is what the default is sized against -- the two conventions happen to agree at 64 anyway.
+
+Forward-only runs move both packs the same way (one stack, `cell_overlay` resizes the MLP
+input from `2H` to `H`), so the verdict does not flip: v2 fwd LSTM 12239 vs TRANS 13231
+(+8.11%), v1 fwd LSTM 16871 vs TRANS 14407 (-14.60%).
+
+**THE FINDING, stated in the direction the T3 review corrected it to** (the spec's own
+design-time estimate had it backwards): windowed attention at width 24 is parameter-CHEAP
+next to a peephole LSTM (a whole cell layer costs `2496 + 49*d_ff` plus the fan-in term,
+against the LSTM's `4*H*(fin+H+4)`). At the transformer-literature default `4*H = 96` the v2
+pack is 32687 (+33.79%, OUTSIDE v2's band) while v1 sits +3.99% INSIDE its own -- the
+textbook default fails exactly one lineage. `d_ff = 64` therefore lands BELOW the literature
+default but comfortably ABOVE the naive "small cell -> small FFN" instinct.
+
+Cross-language pins: pack-length equality vs `speech_rs.Engine` round-trip (bit-identical on
+a tiny synthetic config, the phase-9/10 pattern); the three defaults
+(`TRANSFORMER_DEFAULT_WINDOW`/`_HEADS`/`_D_FF`) parse-pinned against the Rust source, the
+CfC `test_the_rust_and_python_defaults_agree` mechanism extended from one constant to three.
+`init_transformer_flat`'s `forget_bias_one` parameter was accepted-and-ignored at this task
+(call-site uniformity with the LSTM path) and REMOVED at Task 9 once that uniformity
+argument was found false (no sibling builder carries it at all) -- drawn weight VALUES were
+bit-unchanged either way, since the parameter was already dead. Tests: 60+4 new; pytest
+949/1 skipped; lint clean.
+
+### Seam fixtures + LID wiring (Task 4)
+
+See "Python init" above and the FD/seam tables there -- this task authored the three
+committed fixtures (`tests/reference_data/phase9/seam/`, the existing naming scheme) those
+tables measure against, and closed the LID mechanical-wiring proof: an lstm/slstm/cfc/mamba
+`BLSTM_LID_Cell_Type` swap against a transformer-sized LID pack is REFUSED at construction on
+pack length (cell-type LOAD-BEARING, not merely read-and-ignored). The extract script's
+`--check` mode confirmed 27/27 byte-identical against every PRE-EXISTING fixture (zero
+regenerated), and license hygiene held (synthetic listings, no corpus tokens). Suite: 83/83.
+The one coverage note this task recorded -- the `[q|k|v]` matrix-half gap -- is the item
+Task 10's battery measured directly; see that section, not re-narrated here.
+
+### The causal f32 twin (Task 5)
+
+`fast/cells.rs::FastTransformer`, the fifth cell's causal step kernel, landed post-dedupe
+(Task 1). STATE is a bounded per-head KV ring (capacity `W`, oldest-evicted,
+`TransformerState` -- the Mamba private-scratch precedent, construct via `state()` only);
+`step` runs adapter -> RMSNorm -> qkv row -> attend over the ring (a ring shorter than `W` at
+stream start IS the offline edge-truncation, which is what makes offline-vs-streamed
+bit-identity hold by construction) -> residual -> FFN -> push `(k_t, v_t)`. Op-for-op
+transcription verified line-by-line (buffer indices vs `for_each_slot` per block; softmax
+element-identical including division-not-reciprocal; the v-fold folds NORMALIZED
+probabilities matching the exact cell; ALiBi's `j - t == jj - (len-1)` is an exact integer
+identity making the ring state POSITION-FREE). Exactly TWO declared hoists, both pinned. Four
+mutations (two reviewer-own) all caught with margins to 6 decades. `classify_fast_shape`
+needed NO interim bail for either arm (the match is generic over `CellType`, so totality
+survived construction unassisted).
+
+Parity (`tests/phase9_fast_parity.rs`): plain `max_abs 5.536e-7` / `max_rel` **2.351e-6**,
+crossing (gain 1, offset -5) `max_abs 1.602e-6` / `max_rel` **7.813e-6**, `max_dt` EXACTLY
+0.0 on both with boundary count/types identical, against the UNCHANGED `1.0e-4` causal pin
+(12.8x headroom on the crossing leg, second-worst of the ten cell x leg runs behind the LSTM
+crossing row). THE CROSSING SEARCH, not the pin, is what widened to reach that headroom: the
+committed fixture SATURATES on its 2 s tier-2 excerpt, so the row first landed at
+`max_rel 1.312e-5` on the existing gain-ladder grid (which would have breached measured*10),
+and the fix was a NEW `wide_offsets` fallback stage (integer offsets to `+-16`, reached ONLY
+after the whole fine-grained grid is exhausted, chain order fine->wide so no sibling rung can
+be preempted, verified byte-unchanged three ways). RULING A: this wide-offsets stage is a
+LEGITIMATE fixture improvement, not a masked STOP -- the search is drift-blind (the rung is
+selected on the EXACT path only, `max_rel` computed after), and the reviewer independently
+reproduced the pre-fix `1.3120e-5` at `gain 2, offset -8` with the stage removed, confirming
+the STOP was real and the widened search (not a widened pin) is what closed it. RULING B: a
+BIDIRECTIONAL transformer BUILDS-BUT-UNPINNED at this task, one task wide and unreachable
+from any committed artifact -- no bail needed per spec S5.3, closed by Task 6. RULING C: the
+(92 -> 4) arm-geometry leg's own relative pin (`1.5e-4`) matches the phase-10 LSTM
+arm-geometry precedent's form -- its absolute pin (`3.6e-6`) is the discriminating one, since
+this leg's outputs sit near enough to zero that `max_rel`'s `1e-2` scale floor sits close to
+the worst element's own magnitude (a NEAR-ZERO-ELEMENT-LIMITED leg, corrected wording from a
+misleading "FLOOR-LIMITED" one-worder this task's review flagged and T11 fixed at the site);
+the R4 STOP stays gradient-scoped, unaffected by this presentation choice. Suite:
+`1269/0/2 (+10)`; zero `unimplemented!` left anywhere in `fast/`.
+
+### The bidirectional arm (Task 6)
+
+`fast/bicell.rs`, the `Transformer` enum arm -- `FastBiCell` is structurally `FastCausalNet`
+with a SECOND stack (forward + reversed, driven by `cell_stack_forward(.., reverse = true)`,
+the same causal kernel with ONE flag) -> hcat -> the shared `DenseRowChain`. No
+transformer-specific bicell code beyond the enum arm and the element-count row (Task 1's
+dedupe having already centralized the walk). `driver.rs` and `FastBlstm`/`overlap_window_step`
+stayed UNTOUCHED -- proven byte-identical below `#[cfg(test)]` / doc-only, since Task 5's
+threading had already totalized the build path.
+
+Parity (`tests/phase10_bicell_parity.rs`, 4 new legs -- 3 cells x 2 regimes x base/crossing
+grows to 4 with the fourth cell):
+
+| leg | max_abs | max_rel |
+|---|---|---|
+| transformer plain | 2.86e-6 | 6.59e-6 |
+| transformer overlap | 2.98e-6 | 6.84e-6 |
+| transformer crossing plain (gain 1, +11) | 2.42e-6 | 1.159e-5 |
+| transformer crossing overlap (gain 1, +10) | 1.57e-6 | **1.242e-5** |
+
+`max_dt` EXACTLY 0.0 on all four, boundary count + types identical (three interior
+boundaries on the plain crossing, two on overlap, both non-vacuous). Every transformer
+number sits BELOW mamba's still-worst `1.81e-5`, so BOTH pins (`2.0e-4` relative / `1.0e-4`
+absolute) stay UNCHANGED (transformer's worst measured*10 is `1.242e-4`, 1.6x of headroom
+inside `2.0e-4` on top of what mamba already used). The crossing sweep needed a THIRD lever
+transformer's two rows alone required -- not a bigger gain, a bigger OFFSET: the committed
+`transformer/plain` fixture spans `[0.0000, 0.9008]` (logit span 40.21) and sits at
+`interior=0` AS COMMITTED, unlike mamba's similarly wide span which happens to cross at
+offset 0 -- a near-saturated curve's crossing point does not move under a small shift (the
+OPPOSITE problem from `slstm/plain`'s too-flat curve), so the `+-4.0` grid that suffices for
+six of the eight prior rows finds nothing, and `+11`/`+10` (still gain 1) do. THE SECOND
+WIDE-OFFSET FALLBACK (bicell tier) was APPROVED on all three of Task 5's criteria: drift-blind
+selection (chosen on `run_path(cell, None, ..)`, the exact path, before any fast comparison
+runs), `chosen.is_none()` guarded AFTER the primary loop (sibling preemption structurally
+impossible), and the six sibling rungs verified BYTE-IDENTICAL to the pre-Task-6 commit.
+Reverse-stack liveness was EMPIRICALLY proven, not assumed: 488 of 518 reverse weights are
+nonzero, and a reverse-only perturbation moves both the exact and fast paths by `4.34e-1`.
+Suite: `1269/0/2` unchanged (no new `#[test]` functions -- the existing per-cell loops grew a
+fourth array entry).
+
+### The fifth streaming row (Task 7)
+
+`StreamCausal` drives `FastCell`/`FastCellState` generically, so the transformer row lands
+with ZERO `src/rust/src/` edits -- the S5.2 zero-new-surface claim cashed a THIRD time.
+MEASURED at the fixture's committed lever (`Lever::NEUTRAL`, no search needed): 4 interior
+boundaries plain / 11 type-1, `max_dt` EXACTLY 0.0, `to_bits`-equal posteriors,
+chunk-invariant at 20/100/1000/7 ms, zero prefix retractions, and the SAME `1.73400 s`
+derived latency bound bit-checked across all five cells now (a causal windowed-attention
+cell has no lookahead either, exactly like the other four).
+
+**THE HEADLINE FINDING**: this fixture is the FIRST streaming-gate one to exercise the
+`pending_begin`-blocked regime (the phase-9 Task-9 fix) end to end rather than synthetically.
+BOTH of the transformer row's mid-stream Speech emissions MISS the tight
+`bound + PUSH_CHUNK_S` = `1.73400 + 0.1` = **1.834 s** bound on their own measured lag. A raw
+posterior-crossing trace shows dozens of failed-area rising attempts clustering around the
+fixture's two Other gaps (both under the `1.4 s` holdback) before the hysteresis's
+`pending_begin` clamp finally releases the `begin` candidate -- exactly the "a segment
+inherits the OTHER class's commit-wait area term" mechanism the offline gate fixture already
+documented (phase 8/9's `phase8_gate.rs`), now exercised by a STREAMING fixture for the
+first time. MEASURED speech lag **18.89087 s**, comfortably inside the data-dependent
+`max_speech_dur + pipeline_forward + allowance` ceiling **26.22078 s** the OTHER class
+already used -- 7.3 s of headroom.
+
+This forced `latency_bounds` to check EVERY mid-stream Speech emission TIGHT-FIRST on its
+OWN lag (fix round 1, F2) rather than pre-routing by a blocking-witness proxy first: an
+earlier version classified emissions by a `windows(3)` proxy (is the very next entry a short
+Other run, `< holdback`?) BEFORE checking either bound, which measurably OVER-classifies --
+the proxy's `< holdback` threshold sums every smoothing term, over-shooting the true
+`add_padding`-shrunk gap by ~0.6 s, so on the committed slstm fixture ALL THREE of its
+proxy-flagged segments (`blocked_n = 3`) actually clear the tight bound on their own lag
+(`missed_n = 0`) -- pre-routing them would have silently stopped testing the tight claim on
+real, passing data. Tight-first makes the over-classification harmless BY CONSTRUCTION: the
+witness is consulted only for an emission that ALREADY failed tight on its own lag. MEASURED
+after the fix: mamba/cfc/lstm clear tight on EVERY emission (margins byte-unchanged:
+-0.00533/-0.01512/-0.07712 s), slstm ALSO clears tight on every emission despite its
+3-strong proxy set (margin unchanged: -0.03252 s), and `transformer` is the ONLY row with a
+non-empty missed set (both emissions, backed by the witness, checked against the 26.22078 s
+ceiling instead) -- a COMMITTED two-sided membership table, `EXPECT_TIGHT_COHORT`, pins this
+asymmetry so a future all-blocked cell fails LOUDLY rather than silently losing its tight
+claim.
+
+Reviewer rulings: NOT retuning the crossing lever to avoid the blocked regime was the RIGHT
+call -- lever-shopping to dodge an inconvenient finding would be an R1 evasion via another
+knob, and rider-9's earlier lever-widening bought non-vacuity, not a license to retune away
+an inconvenient result now that one showed up. The commit-wait ceiling reused here is
+`phase8_gate.rs`'s established form (the SAME derivation the offline OTHER-class latency
+uses), and its formal gap-term shortfall (see the follow-ons section) is INHERITED from
+phase 8/9, out of this phase's scope, and recorded not fixed.
+
+### Retention gating day one (Task 8, spec S7)
+
+The attention cache is the largest backward cache of any cell in the tree: `attn_weights`
+(`T x A*wcap`) is the widest SINGLE cached field at the default geometry (`A=4`,
+`Transformer_Window=64` -> 256 columns, next-widest is `qkv` at `3H=72`) and, more to the
+point, the ONLY cached field whose width is a PRODUCT of two independent config knobs
+(`A*W`) rather than a fixed function of the net's own architecture -- nothing bounds it as
+those knobs grow, unlike every other field here. `CellLayer::set_retain_cache`'s transformer
+arm therefore GATES FROM DAY ONE, applying the phase-10 T9 Mamba mechanism proactively
+rather than waiting to discover the cost later: every other cache field is computed in full
+regardless of `retain_cache` (there is no cheaper way to compute it without restructuring
+the projection itself) and simply left OUT of `self.cache` when not retaining; `attn_weights`
+gets Mamba's `h`-treatment, an even simpler version of it, collapsing from `T x A*wcap` to
+`1 x A*wcap` on a LOCAL, per-`(t, hh)` invariant (the WRITE loop and the READ loop a few
+lines later share the SAME `len` range every iteration, by construction, independent of what
+`window_begin` computes -- so it would survive a future non-monotone `window_begin`
+unmodified too). A backward after a non-retaining forward PANICS with a named message
+through the existing choke point (`Network::drive_backward`'s `Layer` funnel, which never
+inspects the concrete cell type, plus a new cell-level named assert) rather than folding an
+empty or stale buffer.
+
+MEASURED on a long-T bidirectional SAD net (2 stacked layers, `H=24`, default geometry, a
+60 s stereo excerpt forced through the PLAIN whole-sequence driver via `BLSTM_window 0` so
+the cache scales with the full sequence, not a bounded window): `BackPropagationActivated
+true` (retaining) peaks at **93.422 MB** vs `false` (this flag off) at **61.359 MB**,
+`speech bench --path=exact`, one run each -- **1.52x less peak RSS (-34.3%)**. REGIME-SPECIFIC,
+stated rather than hidden: the windowed-overlap driver already bounds the cache by the
+window width, so this whole-sequence PLAIN-driver measurement is the MAX-BENEFIT regime, not
+a universal one -- a windowed configuration would show a smaller win. The `T~6000`/`~1500`
+row-count figures behind the 60 s excerpt are CONFIG-DERIVED from the frame rate, not
+separately instrumented. Exact-tree touches: `nn/cells/` only (the phase-10 S7 sanctioned
+class, extended to a second cell).
+
 ## Phase 11 -- the `lre_sad_v2` gate matrix grows to ten (Task 9)
 
 `--cell-type transformer` joins `{lstm, slstm, mamba, cfc}` on the `sad`/`sad-v2` SAD arms
@@ -2522,3 +2882,52 @@ is genuinely blind to a pure rotation is `transformer_window_truncation_identity
 provably so: both sides of its comparison rotate identically, which is why it owns WHICH
 FRAMES are in the window (item 4, caught with a ~1e1 row delta) and never how they are
 weighted.
+
+## Phase 11 -- the NAMED follow-ons (nothing lost, nothing promised)
+
+Collected at the phase closeout so each one is a tracked sentence rather than a report
+paragraph nobody reads again. None is a defect; each is a place where this phase deliberately
+stopped, with the reason and the shape of the work. ONE ITEM DELIBERATELY NOT LISTED HERE:
+the T4-flagged `[q|k|v]` matrix-half coverage question (spec S1.4's inertness leg pins the
+bias half only) is NOT an open follow-on -- Task 10's battery MEASURED it directly (item 10a
+vs 10b) and CONFIRMED the exact tier's layout + forward value pins already own it, narrowing
+it to one sentence rather than leaving it a question; see that section, not repeated here.
+
+- **A `CellGeom` bundle for the side-by-side geometry params** (named at Task 5). `mamba`,
+  `cfc` and now `transformer` each hand `build_cell` (`fast/cells.rs`/`fast/bicell.rs`) their
+  own small geometry struct (`MambaParams`, `CfcParams`, `TransformerParams`) through
+  parallel, near-identical plumbing. Three structs threaded the same way is a pattern, not
+  yet a problem; a fourth new cell would be the natural trigger to fold them behind one
+  `CellGeom`-shaped enum or trait object, the same "wait for the next shape" discipline
+  Phase 10 applied to the `cells`/`bicell` scaffolding dedupe before landing it at Phase 11
+  Task 1.
+- **An f32 self-consistency pin for the max-subtract convention** (Task 10's named cheapest
+  closer). The exact cell's `the_max_subtraction_survives_huge_logits` pins that S1.3's
+  ALWAYS-subtract softmax convention survives a huge-logit input; `FastTransformer::step`
+  carries the identical argument in prose (`fast/cells.rs`'s module doc) but no analogous f32
+  pin exists, so the removal-of-the-subtraction mutation (item 3a) is caught by NOTHING --
+  not because the convention is unimportant, but because nothing currently watches it on the
+  f32 side. A same-shaped unit test (construct a `FastTransformer`, feed it a huge-logit
+  input, assert the output stays finite) would close it at the cost of one test function; it
+  was not added this phase because the battery's job is to MEASURE gaps, not close every one
+  it finds.
+- **Retention gating for the remaining three cells** (carried from Phase 10, extended not
+  closed). Mamba's cache gates since Phase 10 Task 9, transformer's since this phase's Task
+  8 -- two of five cells. `LstmLayer` (`gates`/`cells_in`/`cell_states`), `SlstmLayer`
+  (`gates`/`cell_states`/`norm_states`/`m_states`) and `CfcLayer`
+  (`z_cache`/`backbone_pre`/`backbone_post`/`heads`) still retain their `T x 6-7 O`
+  backward-only buffers unconditionally; `CellLayer::set_retain_cache`'s no-op arms for them
+  stay the SAFE direction (always retain), not an absence of work. Each of the two gated
+  cells was gated because a measurement (Phase 9's bench for Mamba, this phase's own
+  attention-cache-width argument for the transformer) named it the expensive one first --
+  the remaining three have not yet had that measurement taken.
+- **The `phase8_gate` commit-wait ceiling's formal gap-term shortfall** (inherited from
+  phase 8/9, exercised for the first time by Task 7's streaming row, out of this phase's
+  scope). The ceiling a blocked Speech emission is checked against
+  (`max_speech_dur + pipeline_forward + allowance`, `phase8_gate.rs:974-982`) is an
+  established form reused as-is, not re-derived for the causal/windowed-attention case; its
+  own formal gap-term (blocked-Speech lag ~ gap + next_speech_dur + pipeline_forward vs the
+  derived analogue max_speech_dur + holdback + pipeline_forward, ~1.4 s above the 1.0 s
+  `OTHER_ALLOWANCE`) stays unexercised on every committed fixture including this phase's
+  (7.3 s of headroom on the transformer row). A candidate for the streaming-endgame phase
+  named in the phase-11 spec's Deferred section, not for a docs task to tighten in passing.
