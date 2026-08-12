@@ -2257,7 +2257,8 @@ The user's named architecture list -- mamba, xLSTM/sLSTM, CfC, transformers -- c
 cell is a PRE-NORM block over a CAUSAL SLIDING WINDOW of bounded width `W` with ALiBi
 relative positions and zero learned position parameters, landed end to end through the
 phase-9 seam (exact f64 cell, both gradient tiers, both f32 fast twins, a fifth streaming
-row, day-one retention gating, a 10-gate matrix, an 8-item-plus mutation battery). THE
+row, day-one retention gating, a 10-gate matrix, a 10-item mutation battery -- 8 of 10
+breaking their spec-named leg). THE
 DESIGN TRAP -- whole-sequence f64 attention is gigabytes/layer at full-corpus lengths -- is
 answered by DEFINITION: the cell is windowed/bounded-KV from day one, so every backward
 cache is `T x O(W + d_ff)`, never `T^2`, and the streamed KV ring is bit-identical to the
