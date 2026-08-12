@@ -4176,7 +4176,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
 - **[phase11] `BlstmNetwork::set_weights` accepted an OVER-LONG pack head-first, so a
   wrong-architecture weight pack loaded and RAN in silence -- FIXED (phase 11
-  interstitial, commit `dfda2bf`)** -- PORT-INTRODUCED by MIS-PLACEMENT, latent since
+  interstitial, commit `c02509e`)** -- PORT-INTRODUCED by MIS-PLACEMENT, latent since
   Phase 2 Task 7; found by phase-11 T3 (`task-3-report.md` concern 2) while wiring the
   transformer's pyo3 length pin (`src/rust/src/nn/blstm.rs::set_weights`).
   **LEGACY behavior (the evidence, read before the fix was shaped):** `setWeights`
