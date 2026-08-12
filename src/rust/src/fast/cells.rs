@@ -1457,6 +1457,14 @@ pub(crate) fn cell_weight_count(
             mamba.dt_rank,
         ),
         CellType::Cfc => FastCfc::weight_count(i, o, cfc.backbone_units, cfc.backbone_layers),
+        // INTERIM ARM (phase-11 Task 2, replaced by Tasks 5/6). The `CellType` variant
+        // has to exist before its f32 kernel does, and this match is exhaustive by
+        // design, so the fifth cell arrives here as a LOUD panic rather than a silent
+        // mis-count. Unreachable from any committed config: nothing sets
+        // `Inference_Path fast` together with `Cell_Type transformer`. `rg -n
+        // "unimplemented" src/rust/src/fast` must come back CLEAN at branch end (Task 11
+        // verifies).
+        CellType::Transformer => unimplemented!("transformer fast twin lands in phase-11 T5/T6"),
     }
 }
 
@@ -1497,6 +1505,9 @@ pub(crate) fn build_cell(
             cfc.backbone_units,
             cfc.backbone_layers,
         )),
+        // INTERIM ARM -- see [`cell_weight_count`]'s twin for the full note. Replaced by
+        // phase-11 Tasks 5/6.
+        CellType::Transformer => unimplemented!("transformer fast twin lands in phase-11 T5/T6"),
     };
     (cell, used)
 }
@@ -3093,7 +3104,9 @@ mod tests {
                     FastCfc::weight_count(12, 5, c.backbone_units, c.backbone_layers)
                         + FastCfc::weight_count(5, 4, c.backbone_units, c.backbone_layers)
                 }
-                CellType::Lstm => unreachable!(),
+                // Neither is in the iterated set: the causal-LSTM row is covered by its own
+                // legs, and the transformer's f32 kernel lands in phase-11 T5/T6.
+                CellType::Lstm | CellType::Transformer => unreachable!(),
             };
             assert_eq!(
                 n,

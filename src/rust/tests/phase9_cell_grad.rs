@@ -896,3 +896,205 @@ fn cfc_backward_matches_central_difference() {
          multiply h_(-1) = 0 and cannot move the loss at all"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Transformer (Phase 11 Task 2)
+// ---------------------------------------------------------------------------
+
+/// `TransformerLayer::nb_of_weights` spelled out independently of the layer, so the
+/// resolvable-count arithmetic below is checked against a SECOND derivation of the
+/// phase-11 S1.2 layout rather than against the thing under test:
+/// `[W_a | b_a | g_1 | W_qkv | b_qkv | W_o | b_o | g_2 | W_1 | b_1 | W_2 | b_2]`.
+///
+/// Note what is NOT in it: the window, the head count and the ALiBi slopes. `W` only
+/// bounds the attention span, `A` only reshapes the same `W_qkv`, and the slopes are
+/// constants -- so neither can change the pack length, which is why this function takes
+/// only `(in, out, d_ff)`.
+fn transformer_total(i: usize, o: usize, d_ff: usize) -> usize {
+    o * (i + 1) + o + 3 * o * (o + 1) + o * (o + 1) + o + d_ff * (o + 1) + o * (d_ff + 1)
+}
+
+/// Structurally gradient-dead weights at `T` -- see `nn/cells/transformer.rs`'s module
+/// doc (S1.4) and its `the_key_bias_is_gradient_dead_at_every_length` /
+/// `query_and_key_blocks_are_gradient_dead_at_t1` for the direct pins.
+///
+/// - `b_k` (`H` weights) is dead at EVERY `T`: shifting it moves every logit in a window
+///   row by the same amount, which softmax annihilates. At `T = 1` that is bit-exact; at
+///   `T >= 2` it is an f64 cancellation landing at ~1e-17, well inside the harness's
+///   [`NEAR_ZERO`] bucket, so it counts as dead here either way.
+/// - at `T == 1` the q and k ROWS of `W_qkv` (`2 H^2`) and `b_q` (`H`) join it: a
+///   one-element window makes the softmax constantly 1, so `dl = p (dp - p dp)` is
+///   bit-exactly zero and nothing upstream of the logit can move.
+///
+/// Nothing else is dead: `b_q` is live for `T >= 2`, and the `v`/`W_o`/FFN/norm blocks
+/// are live at every length. MEASURED == PREDICTED on every shape and every seed below,
+/// so the two-sided count assert of [`Case`] degenerates to an exact equality (as it does
+/// for sLSTM and CfC, and unlike mamba).
+fn transformer_dead(t: usize, o: usize) -> usize {
+    if t == 1 { 2 * o * o + 2 * o } else { o }
+}
+
+/// One transformer grid row -- NAMED for the same reason [`MambaCase`] / [`CfcCase`] are.
+/// The geometry (`W`, heads, `d_ff`) is NOT here: it is fixture-wide (see
+/// [`transformer_backward_matches_central_difference`]), because a per-row geometry would
+/// need one `sweep` call per row for no coverage gain -- the axis this grid varies is `T`
+/// against the WINDOW EDGE, not the geometry.
+struct TransformerCase {
+    t: usize,
+    input_size: usize,
+    output_size: usize,
+    rel_pin: f64,
+    major_pin: f64,
+}
+
+/// [`transformer_backward_matches_central_difference`]'s step size: `1e-5`, the MEASURED
+/// valley (the same value CfC landed on, arrived at independently).
+///
+/// An 8-point sweep over the whole grid (every shape x every seed), worst point of each
+/// column:
+///
+/// ```text
+/// eps            1e-8      1e-7      1e-6      1e-5      1e-4      3e-4      1e-3      1e-2
+/// max_rel        1.00e0    2.95e-3   1.63e-4   1.29e-5   1.87e-6   7.82e-6   8.69e-5   8.68e-3
+/// max_rel_major  2.80e-4   3.46e-5   3.71e-6   2.86e-7   8.69e-7   7.82e-6   8.69e-5   8.68e-3
+/// max_abs_err    3.11e-7   3.19e-8   3.11e-9   8.00e-10  7.98e-8   7.19e-7   7.98e-6   7.96e-4
+/// ```
+///
+/// The DISCRIMINATING metric (`max_rel_major`) and the absolute error BOTH bottom at
+/// `1e-5`: to its left the roundoff floor `ulp(|L|)/(2 eps)` dominates (a clean one
+/// decade per decade in `max_abs_err`), to its right truncation does -- the `1e-4`
+/// column's `max_abs_err` is ~`100x` the `1e-5` one, the `eps^2` signature, a SYSTEMATIC
+/// bias rather than noise. `1e-4` is therefore NOT chosen even though it minimises the
+/// (uninformative) `max_rel` column: a systematic FD bias is a worse instrument for
+/// catching a small wrong adjoint than roundoff noise of the same size.
+const TRANSFORMER_EPS: f64 = 1e-5;
+
+/// THE backward pin (phase-11 spec S1.6 FD tier, the phase-9 S8.1 instrument reused
+/// verbatim for the THIRD time -- no harness change, which is the cell-agnostic contract
+/// still working): central differences vs the hand-derived analytic gradient over
+/// `(t, in, out)` in `{(1,3,2), (2,3,2), (3,3,4), (7,5,4), (23,7,6)}` x 3 seeds at the
+/// fixture geometry `W = 4`, `heads = 2`, `d_ff = 8`, eps [`TRANSFORMER_EPS`].
+///
+/// THE GRID'S AXIS IS THE WINDOW EDGE, which is this cell's new structural feature: `W`
+/// is deliberately TINY (4) so both regimes appear at FD-tractable lengths -- `t <= W`
+/// (rows 1/2/3, every window still growing, `t = 1` the degenerate one-element case) and
+/// `t > W` (rows 7 and 23, every interior row at full width and the edge truncation live
+/// only at the start). A large `W` with short sequences would have tested one regime
+/// three times over.
+///
+/// MEASURED (Apple M4 Pro, f64, this exact seed grid), re-printable with
+/// `cargo test --release --test phase9_cell_grad -- --nocapture transformer`:
+///
+/// ```text
+/// PER-SHAPE, worst of the 3 seeds:      max_rel    max_rel_major   resolvable
+///   t= 1 in=3 out=2                     2.355e-8   2.355e-8          66 of  78
+///   t= 2 in=3 out=2                     3.826e-6   3.403e-8          76 of  78
+///   t= 3 in=3 out=4                     1.294e-5   8.608e-8         176 of 180
+///   t= 7 in=5 out=4                     7.333e-6   1.450e-7         184 of 188
+///   t=23 in=7 out=6                     5.023e-6   2.858e-7         332 of 338
+/// max absolute error (near-zero weights) = 4.441e-11 at t=23, seed 2
+/// max absolute error (ALL weights)       = 7.996e-10 at t=2,  seed 3
+/// ```
+///
+/// Pinned at measured*10 PER SHAPE: `2.4e-7`/`3.9e-5`/`1.3e-4`/`7.4e-5`/`5.1e-5`
+/// relative and `2.4e-7`/`3.5e-7`/`8.7e-7`/`1.5e-6`/`2.9e-6` MAJOR, plus `4.5e-10`
+/// near-zero and `8.0e-9` all-weights absolute (both grid-wide, the house convention).
+///
+/// THE ONE PIN ABOVE 1e-4, declared rather than buried: `t=3`'s `rel_pin` is `1.3e-4`,
+/// exactly as two mamba rows and one CfC row are, and for the same reason -- it is set by
+/// ONE weight (seed 1, `w[32]`) whose analytic derivative is `3.011e-7`, i.e. `2e-7` OF
+/// THE PACK MAXIMUM (1.42): its relative error is the central-difference floor divided by
+/// a near-zero number and says nothing about the derivation. The sweep table above is the
+/// check rather than the assertion: the whole `max_rel` column falls MONOTONICALLY across
+/// five decades of eps (roundoff-dominated), where a WRONG adjoint term is multiplicative
+/// and would be eps-INVARIANT, i.e. a flat row. The STOP assert in the test body is
+/// therefore on `major_pin`, and every one of those is <= `2.9e-6`, ~34x under the R4
+/// threshold.
+///
+/// THE RESOLVABLE COUNTS CARRY THE S1.4 STRUCTURAL CLAIMS and carry NO slack: predicted
+/// (`transformer_total - transformer_dead`) == measured on every shape and every seed
+/// (66/76/176/184/332), so the two-sided count assert of [`Case`] degenerates to an exact
+/// equality. The `t = 1` row's near-zero bucket is EXACTLY 0.0 (printed as such): those
+/// 12 weights cannot move the loss by a single bit, so `L(w+eps)` and `L(w-eps)` are
+/// bit-identical and the central difference is a literal `0.0` against an analytic `0.0`.
+#[test]
+fn transformer_backward_matches_central_difference() {
+    use speech::nn::blstm::TransformerParams;
+    use speech::nn::cells::TransformerLayer;
+
+    // The FIXTURE geometry (spec S1.6): a tiny window so both `t <= W` and `t > W`
+    // appear at FD-tractable lengths. NOT the shipped defaults (64 / 4 / 64).
+    let p = TransformerParams {
+        window: 4,
+        heads: 2,
+        d_ff: 8,
+    };
+    let row = |t: usize, input_size: usize, output_size: usize, rel_pin: f64, major_pin: f64| {
+        TransformerCase {
+            t,
+            input_size,
+            output_size,
+            rel_pin,
+            major_pin,
+        }
+    };
+    let grid: &[TransformerCase] = &[
+        row(1, 3, 2, 2.4e-7, 2.4e-7),
+        row(2, 3, 2, 3.9e-5, 3.5e-7),
+        row(3, 3, 4, 1.3e-4, 8.7e-7),
+        row(7, 5, 4, 7.4e-5, 1.5e-6),
+        row(23, 7, 6, 5.1e-5, 2.9e-6),
+    ];
+    let (mut worst_rel, mut worst_abs, mut worst_err) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for c in grid {
+        // THE STOP ASSERT (spec R4): a pin above 1e-4 on the DISCRIMINATING bound is a
+        // STOP-and-adjudicate, never a widening. See the doc comment for why it is
+        // `major_pin` and not `rel_pin` that carries this.
+        assert!(
+            c.major_pin < 1e-4,
+            "transformer t={}: major_pin {:e} is at or above the 1e-4 STOP threshold -- \
+             adjudicate the adjoint, do NOT widen",
+            c.t,
+            c.major_pin
+        );
+        let total = transformer_total(c.input_size, c.output_size, p.d_ff);
+        let resolvable = total - transformer_dead(c.t, c.output_size);
+        let label = format!("transformer W={} A={} dff={}", p.window, p.heads, p.d_ff);
+        let cases: &[Case] = &[Case {
+            t: c.t,
+            input_size: c.input_size,
+            output_size: c.output_size,
+            // floor == structural: like sLSTM and CfC (and unlike mamba) nothing lands in
+            // the near-zero bucket by magnitude alone, so the count is seed-independent.
+            resolvable_floor: resolvable,
+            resolvable_structural: resolvable,
+            rel_pin: c.rel_pin,
+            major_pin: c.major_pin,
+            eps: TRANSFORMER_EPS,
+        }];
+        let (r, a, e) = sweep(
+            &label,
+            |i, o| Box::new(TransformerLayer::new(i, o, &p)),
+            cases,
+            4.5e-10,
+            8.0e-9,
+        );
+        worst_rel = worst_rel.max(r);
+        worst_abs = worst_abs.max(a);
+        worst_err = worst_err.max(e);
+    }
+    assert!(
+        worst_rel > 0.0 && worst_err > 0.0,
+        "a whole regime came back at exactly 0 error -- suspicious"
+    );
+    // The near-zero bucket is MIXED here, unlike either sibling convention: EXACTLY 0.0
+    // on the `t = 1` rows (the bit-invariant q/k/b_q block) and the `b_k` cancellation
+    // floor (~1e-11 through FD) everywhere else. The grid-wide worst is therefore
+    // positive, and asserting so is the non-vacuity witness that the `t >= 2` rows really
+    // did put `b_k` in that bucket rather than resolving it.
+    assert!(
+        worst_abs > 0.0,
+        "the near-zero regime came back at exactly 0 grid-wide -- b_k should be sitting \
+         in it at every t >= 2"
+    );
+}

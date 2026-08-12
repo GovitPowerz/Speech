@@ -555,7 +555,10 @@ mod tests {
                     FastCfc::weight_count(12, 5, c.backbone_units, c.backbone_layers)
                         + FastCfc::weight_count(5, 4, c.backbone_units, c.backbone_layers)
                 }
-                CellType::Lstm => unreachable!(),
+                // Neither is in the iterated set: the bidirectional LSTM's fast twin is
+                // `FastBlstm` (not a cell stack), and the transformer's f32 kernel lands in
+                // phase-11 T5/T6.
+                CellType::Lstm | CellType::Transformer => unreachable!(),
             };
             assert_eq!(
                 n,

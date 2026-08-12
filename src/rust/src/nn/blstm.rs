@@ -138,6 +138,9 @@ pub enum CellType {
     Mamba,
     /// The closed-form continuous-time cell (phase-10 spec S1; Phase 10 Task 1).
     Cfc,
+    /// The windowed causal attention block with ALiBi positions (phase-11 spec S1;
+    /// Phase 11 Task 2).
+    Transformer,
 }
 
 impl CellType {
@@ -147,9 +150,11 @@ impl CellType {
             "slstm" => Ok(CellType::Slstm),
             "mamba" => Ok(CellType::Mamba),
             "cfc" => Ok(CellType::Cfc),
-            other => {
-                bail!("unknown cell type '{other}' (expected 'lstm', 'slstm', 'mamba' or 'cfc')")
-            }
+            "transformer" => Ok(CellType::Transformer),
+            other => bail!(
+                "unknown cell type '{other}' (expected 'lstm', 'slstm', 'mamba', 'cfc' or \
+                 'transformer')"
+            ),
         }
     }
 
@@ -161,6 +166,7 @@ impl CellType {
             CellType::Slstm => "slstm",
             CellType::Mamba => "mamba",
             CellType::Cfc => "cfc",
+            CellType::Transformer => "transformer",
         }
     }
 }
@@ -333,6 +339,84 @@ impl CfcParams {
     }
 }
 
+/// Transformer geometry (port-only, NO legacy source; phase-11 spec S1/S2). Read from
+/// the UNPREFIXED flat keys `Transformer_Window` / `Transformer_Heads` /
+/// `Transformer_D_Ff` -- deliberately NOT `{prefix}_`-scoped, the [`MambaParams`] /
+/// [`CfcParams`] precedent verbatim: ONE transformer geometry per config, shared by
+/// whichever net(s) select `transformer` (a per-net override is an explicit non-goal).
+///
+/// `window` is `W` in CELL rows (post-subsampling), i.e. the number of frames the cell
+/// itself sees, not raw audio frames. All three must be `>= 1`; absent keys mean the
+/// defaults, so a config that never says `transformer` is untouched.
+///
+/// `H % heads == 0` is NOT checked here -- this struct never sees `H`. It is validated
+/// in [`BlstmConfig::from_legacy`] (which has the recurrent layer widths) as a typed
+/// error, and re-asserted as a last-resort panic in
+/// [`TransformerLayer::new`](super::cells::TransformerLayer::new) for direct
+/// construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformerParams {
+    pub window: usize,
+    pub heads: usize,
+    pub d_ff: usize,
+}
+
+/// The default attention window `W` in CELL rows (phase-11 spec S2).
+pub const TRANSFORMER_DEFAULT_WINDOW: usize = 64;
+
+/// The default head count `A` (phase-11 spec S2). PARAM-FREE: `A` only reshapes the
+/// same `W_qkv`, and ALiBi's slopes carry no weights, so changing it never moves the
+/// pack length -- only the per-head width `d = H/A` and the slope ladder.
+pub const TRANSFORMER_DEFAULT_HEADS: usize = 4;
+
+/// The default FFN width `d_ff` (phase-11 spec S2/S3) -- the ONE sized constant of this
+/// cell, since heads and window are parameter-free.
+///
+/// PROVISIONAL as of Task 2: `64` is the spec's design-time ESTIMATE (S3's provisional
+/// arithmetic put the v2-lineage argmin near 54 and v1's +-15% band at `>= ~64`, with 64
+/// inside both). Task 3 re-derives the closed form per lineage and CONFIRMS OR CORRECTS
+/// this one number in both languages; do not treat it as settled until then.
+pub const TRANSFORMER_DEFAULT_D_FF: usize = 64;
+
+impl Default for TransformerParams {
+    fn default() -> TransformerParams {
+        TransformerParams {
+            window: TRANSFORMER_DEFAULT_WINDOW,
+            heads: TRANSFORMER_DEFAULT_HEADS,
+            d_ff: TRANSFORMER_DEFAULT_D_FF,
+        }
+    }
+}
+
+impl TransformerParams {
+    /// Read the three keys. A present-but-unparseable or `< 1` value is a HARD error,
+    /// for exactly [`MambaParams::from_legacy`]'s reason: these keys have no legacy
+    /// source to stay bug-compatible with, and a silently-defaulted geometry would
+    /// change the weight-pack LENGTH (`d_ff`) or the attention span (`window`) without
+    /// telling anyone.
+    fn from_legacy(map: &IndexMap<String, String>) -> Result<TransformerParams> {
+        let d = TransformerParams::default();
+        let read = |key: &str, default: usize| -> Result<usize> {
+            let v = match map.get(key) {
+                Some(s) => s
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|e| anyhow::anyhow!("cannot read '{s}' as a size for '{key}': {e}"))?,
+                None => return Ok(default),
+            };
+            if v < 1 {
+                bail!("'{key}' must be >= 1 (got {v})");
+            }
+            Ok(v)
+        };
+        Ok(TransformerParams {
+            window: read("Transformer_Window", d.window)?,
+            heads: read("Transformer_Heads", d.heads)?,
+            d_ff: read("Transformer_D_Ff", d.d_ff)?,
+        })
+    }
+}
+
 /// Parsed BLSTM config (`BLSTMNeuralNetwork.cpp:26-122`): LSTM/output topology,
 /// per-direction peephole flags, and the scalar knobs read at construction.
 #[derive(Debug, Clone)]
@@ -369,6 +453,9 @@ pub struct BlstmConfig {
     /// The `Cfc_*` geometry (port-only, phase-10 spec S1.4/S2), read UNPREFIXED and
     /// inert unless [`Self::cell_type`] is [`CellType::Cfc`].
     pub cfc: CfcParams,
+    /// The `Transformer_*` geometry (port-only, phase-11 spec S1/S2), read UNPREFIXED
+    /// and inert unless [`Self::cell_type`] is [`CellType::Transformer`].
+    pub transformer: TransformerParams,
 }
 
 impl BlstmConfig {
@@ -393,6 +480,10 @@ impl BlstmConfig {
         // Same posture as `mamba` above: UNPREFIXED, read unconditionally so a
         // malformed value is caught even on a non-cfc config, inert otherwise.
         let cfc = CfcParams::from_legacy(map)?;
+        // Same posture again (phase-11 spec S2). The `H % heads` half of the validation
+        // cannot live in the reader (it never sees `H`) and is done below, once the
+        // recurrent widths are parsed.
+        let transformer = TransformerParams::from_legacy(map)?;
 
         let lstm_neuron_nb = get_list(map, &k("_LSTMNeuronNb"))?;
         if lstm_neuron_nb.len() < 2 {
@@ -435,6 +526,27 @@ impl BlstmConfig {
 
         let is_mlp = lstm_neuron_nb[0] == 0;
 
+        // Phase-11 spec S2: `H % A == 0`, checked HERE because this is the first place
+        // that knows both numbers. Every recurrent layer's OUTPUT width is a cell width
+        // (`Network::new` builds layer `jj` at `neuron_nb[jj+1]`), so all of them are
+        // checked, not just the last. A typed error beats the last-resort panic inside
+        // `TransformerLayer::new`, and a non-dividing head count is a configuration
+        // error rather than something to truncate. DEAD on every non-transformer config.
+        if cell_type == CellType::Transformer && !is_mlp {
+            for (jj, &width) in lstm_neuron_nb.iter().enumerate().skip(1) {
+                if !width.is_multiple_of(transformer.heads) {
+                    bail!(
+                        "recurrent layer {} has {width} cells, which is not divisible by \
+                         'Transformer_Heads' ({}) -- pick a head count that divides every \
+                         '{}_LSTMNeuronNb' entry",
+                        jj - 1,
+                        transformer.heads,
+                        prefix
+                    );
+                }
+            }
+        }
+
         // Peephole flags: read regardless of is_mlp (harmless when the forward/
         // backward nets are absent -- the legacy reads them via the LSTMLayer
         // ctor, which is simply never instantiated in MLP mode).
@@ -474,6 +586,7 @@ impl BlstmConfig {
             direction,
             mamba,
             cfc,
+            transformer,
         })
     }
 }
@@ -548,6 +661,7 @@ impl BlstmNetwork {
             let cell_type = cfg.cell_type;
             let mamba = cfg.mamba;
             let cfc = cfg.cfc;
+            let transformer = cfg.transformer;
             // One builder per direction; the cell dispatch is inside so both stacks
             // stay structurally identical. The `match cell_type` below is EXHAUSTIVE
             // and that is what forces a new `CellType` variant to be handled here --
@@ -583,6 +697,14 @@ impl BlstmNetwork {
                         cfc.backbone_units,
                         cfc.backbone_layers,
                     )),
+                    // `output` IS the block width H (phase-11 S1.1); the window, head
+                    // count and FFN width are the cell's own business.
+                    // `BlstmConfig::from_legacy` has already proved `output % heads == 0`
+                    // for every recurrent layer, so the cell's own assert is unreachable
+                    // from this path.
+                    CellType::Transformer => CellLayer::Transformer(
+                        super::cells::TransformerLayer::new(input, output, &transformer),
+                    ),
                 }
             };
             let forward = Network::new(
