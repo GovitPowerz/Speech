@@ -3022,6 +3022,13 @@ mod inference_only_tests {
         if cell != "lstm" {
             m.insert("X_Cell_Type".into(), cell.into());
         }
+        if cell == "transformer" {
+            // `Transformer_Heads` is UNPREFIXED (one geometry per config, the Mamba/CfC
+            // precedent) and the sized default (4) does not divide `HIDDEN = 2`, which
+            // would trip `TransformerLayer::new`'s head-count panic. `1` divides ANY
+            // `HIDDEN`, so this stays correct even if that constant changes later.
+            m.insert("Transformer_Heads".into(), "1".into());
+        }
         m
     }
 
@@ -3058,11 +3065,21 @@ mod inference_only_tests {
         }
     }
 
+    /// The transformer stack's layer-0 cell, same seam (phase-11 spec S7, Task 8's fix
+    /// round). `attn_weights` is the field the retention shrink targets, so its row count
+    /// is the direct memory-claim witness -- `0` inference-only, `T` retaining.
+    fn transformer_cache_rows(net: &mut BlstmNetwork) -> usize {
+        match &net.forward_network.as_mut().unwrap().layers_mut()[0] {
+            CellLayer::Transformer(l) => l.attn_weights().nrows(),
+            _ => panic!("expected a transformer cell, got a different CellLayer variant"),
+        }
+    }
+
     /// THE CONDITION, both ways: `BackPropagationActivated` alone decides, at
     /// construction, for every cell.
     #[test]
     fn backprop_off_constructs_inference_only_and_on_does_not() {
-        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+        for cell in ["lstm", "slstm", "mamba", "cfc", "transformer"] {
             assert!(
                 net_for(cell, false).is_inference_only(),
                 "{cell}: backprop off must construct inference-only"
@@ -3105,12 +3122,38 @@ mod inference_only_tests {
         }
     }
 
+    /// THE TRANSFORMER TWIN (phase-11 spec S7, Task 8's fix round): same claim, driven
+    /// through `net_for("transformer", ..)` instead of going straight to
+    /// `TransformerLayer::set_retain_cache` on a bare cell -- so a regression in
+    /// `CellLayer::set_retain_cache`'s transformer arm (the enum match this test actually
+    /// exercises) fails HERE, not just in `nn::cells::transformer`'s own suite, which never
+    /// touches the enum at all. Bidirectional by construction (`map_for` sets no
+    /// `X_Direction`), so this is also the first leg anywhere to run
+    /// `TransformerLayer::feed_forward_reverse` with retention off.
+    #[test]
+    fn the_flag_reaches_every_stack_and_the_cells_transformer() {
+        let mut net = net_for("transformer", false);
+        assert!(!net.output_network.retains_layers_output());
+        for stack in [net.forward_network.as_mut(), net.backward_network.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!stack.retains_layers_output());
+            for cell in stack.layers_mut() {
+                match cell {
+                    CellLayer::Transformer(l) => assert!(!l.retains_cache()),
+                    _ => panic!("expected a transformer cell, got a different CellLayer variant"),
+                }
+            }
+        }
+    }
+
     /// THE BEHAVIOUR-FREE CLAIM at net level: the scoring forward is bit-for-bit the same
     /// whichever way the flag sits. Driven per cell so a future cell that grows its own
     /// cache is covered the day it is wired.
     #[test]
     fn the_forward_is_bit_identical_either_way() {
-        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+        for cell in ["lstm", "slstm", "mamba", "cfc", "transformer"] {
             let mut lean = net_for(cell, false);
             let mut keeper = net_for(cell, false);
             keeper.set_inference_only(false);
@@ -3141,6 +3184,22 @@ mod inference_only_tests {
         assert_eq!(mamba_cache_rows(&mut keeper), T);
     }
 
+    /// THE TRANSFORMER TWIN (phase-11 spec S7, Task 8's fix round), through
+    /// `attn_weights` rather than `hidden_states` -- the field this task's shrink
+    /// targets, so its row count is the direct memory-claim witness through the enum.
+    #[test]
+    fn an_inference_only_net_leaves_the_transformer_cache_empty() {
+        let mut lean = net_for("transformer", false);
+        let mut out = Array2::<f64>::zeros((T, CLASSES));
+        lean.feed_forward(&input_seq(), &mut out);
+        assert_eq!(transformer_cache_rows(&mut lean), 0);
+
+        let mut keeper = net_for("transformer", true);
+        let mut out2 = Array2::<f64>::zeros((T, CLASSES));
+        keeper.feed_forward(&input_seq(), &mut out2);
+        assert_eq!(transformer_cache_rows(&mut keeper), T);
+    }
+
     /// THE R6 CLONE NOTE (spec S7) at net level: `corpus_processor`'s static-lane fold
     /// clones the whole bag -- and so this net -- at every epoch start. Under
     /// inference-only the clone carries no cache to copy, with the retaining twin as the
@@ -3164,7 +3223,7 @@ mod inference_only_tests {
     /// in `tests/pyo3/test_phase9_seam.py` is the same assertion one level up.
     #[test]
     fn a_backprop_on_net_still_folds_a_real_gradient() {
-        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+        for cell in ["lstm", "slstm", "mamba", "cfc", "transformer"] {
             let mut net = net_for(cell, true);
             let mut out = Array2::<f64>::zeros((T, CLASSES));
             net.feed_forward_backward(&mut input_seq(), 0, 0, &mut out, &one_hot());

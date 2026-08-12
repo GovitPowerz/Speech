@@ -163,13 +163,20 @@
 //!
 //! ## Retention (phase-11 S7, Task 8): GATED, day one
 //!
-//! The attention cache is the largest backward cache of any cell in the tree --
-//! `attn_weights` (`T x A*wcap`) is the one field with no fixed bound on its own column
-//! count (`A*W` grows with the config, unlike the `H`/`3H`/`d_ff`-bounded fields), and at
-//! the default geometry (`A = 4`, `W = 64`) it is already wider on its own (256 columns)
-//! than every other cached field combined. So `CellLayer::set_retain_cache`'s transformer
-//! arm gates it from day one, on the phase-10 T9 mechanism (`MambaLayer`), rather than as
-//! a discovered-later follow-on.
+//! The attention cache is the largest backward cache of any cell in the tree.
+//! `attn_weights` (`T x A*wcap`) is the widest SINGLE cached field at the default geometry
+//! (`A = 4`, `Transformer_Window = 64` -> 256 columns, next-widest is `qkv` at `3H = 72`)
+//! -- but NOT, in general, wider than every other field SUMMED: on this task's own bench
+//! geometry the rest add to 348 / 280 columns at layers 0 / 1 respectively, both above 256
+//! (layer 0's TRUE `x_in` width is `NNetInputSize * LSTMSubSampling[0]` -- the sub-sampling
+//! concatenation happens BEFORE the layer, so it is `92`, not the raw `23`; layer 1 has no
+//! such multiplier and its own sum is smaller but still above 256). What justifies
+//! targeting `attn_weights` specifically is STRUCTURAL, not a sum comparison: it is the
+//! ONLY cached field whose width is a PRODUCT of two independent config knobs (`A*W`)
+//! rather than a fixed function of the net's own architecture (`H`, `3H`, `d_ff`), so
+//! nothing bounds it as those knobs grow, unlike every other field here. So
+//! `CellLayer::set_retain_cache`'s transformer arm gates it from day one, on the phase-10
+//! T9 mechanism (`MambaLayer`), rather than as a discovered-later follow-on.
 //!
 //! The mechanism has Mamba's two parts, CLEAR and SHRINK. CLEAR: every other cache field
 //! is computed in full regardless of `retain_cache` -- each is produced by ONE
@@ -177,15 +184,21 @@
 //! restructuring the projection itself, out of scope here) -- and simply left OUT of
 //! `self.cache` when not retaining: `self.cache = TransformerCache::default()` drops the
 //! freshly-computed locals at the end of the call. SHRINK: `attn_weights` gets the
-//! Mamba-`h` treatment, and an even simpler version of it -- it is written at row `t` and
-//! read back ONLY within that SAME row's attention-output accumulation (no cross-row read
-//! at all during forward; only the backward's softmax-Jacobian pass reads a DIFFERENT
-//! row's weights). So under `retain_cache == false` it shrinks from `T x A*wcap` to `1 x
+//! Mamba-`h` treatment, and an even simpler version of it. THE SAFETY ARGUMENT IS A LOCAL,
+//! PER-`(t, hh)` INVARIANT, not a claim about how different rows relate to each other:
+//! within one `(t, hh)` iteration, the WRITE loop (`for jj in 0..len { attn_weights[[ta,
+//! hh*wcap+jj]] = ... }`) and the READ loop a few lines later (`for e in 0..d { for jj in
+//! 0..len { ... attn_weights[[ta, hh*wcap+jj]] ... } }`) share the SAME `len` range, so the
+//! read set EQUALS the write set every time, BY CONSTRUCTION -- this holds regardless of
+//! what `window_begin`/`lo` computes, and would survive a future NON-MONOTONE
+//! `window_begin` unmodified (a weaker "no cross-row read" framing would need re-checking
+//! against that). So under `retain_cache == false` it shrinks from `T x A*wcap` to `1 x
 //! A*wcap`, and every access uses `ta = if retain { t } else { 0 }` in place of a bare
 //! `t` -- ONE slot, no `t-1` alternation needed (unlike Mamba's rolling PAIR), because
-//! forward never looks backward through this buffer at all. The retaining path is
-//! untouched (`ta == t` always), so [`tests::forward_is_bit_identical_without_the_cache`]
-//! is the pin that says the two indexings agree.
+//! nothing outside the current `(t, hh)` iteration is ever read from this buffer. The
+//! retaining path is untouched (`ta == t` always), so
+//! [`tests::forward_is_bit_identical_without_the_cache`] is the pin that says the two
+//! indexings agree.
 //!
 //! A backward after a non-retaining forward PANICS with a named message
 //! ([`Self::feed_backward`]) rather than folding an empty or stale buffer.

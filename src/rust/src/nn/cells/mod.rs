@@ -103,11 +103,15 @@ impl CellLayer {
     /// axis covering the inter-layer buffers).
     ///
     /// SCOPE, stated exactly: TWO cells gate their cache -- MAMBA (`h`/`abar`, each
-    /// `T x (d_inner d_state)`) and TRANSFORMER (`attn_weights`, `T x A*wcap` and the
-    /// widest cached field at the default geometry) -- because those are the two a bench
-    /// measured as visibly expensive, Mamba in phase 10 and the transformer proactively on
-    /// day one (phase-11 spec S7). The other three cells are NOT cache-free -- every one of
-    /// them carries per-timestep forward caches the backward reads:
+    /// `T x (d_inner d_state)`) and TRANSFORMER (`attn_weights`, `T x A*wcap` -- the widest
+    /// SINGLE cached field at the default geometry, and the only one that scales as a
+    /// PRODUCT of two independent config knobs rather than a fixed function of the net's
+    /// own architecture, so nothing bounds it as those knobs grow; see
+    /// `nn::cells::transformer`'s module doc for the field-by-field accounting, incl. why
+    /// it is NOT in general wider than every other field summed) -- because those are the
+    /// two a bench measured as visibly expensive, Mamba in phase 10 and the transformer
+    /// proactively on day one (phase-11 spec S7). The other three cells are NOT cache-free
+    /// -- every one of them carries per-timestep forward caches the backward reads:
     /// [`LstmLayer`] `gates`/`cells_in`/`cell_states`, [`SlstmLayer`]
     /// `gates`/`cell_states`/`norm_states`/`m_states`, [`CfcLayer`]
     /// `z_cache`/`backbone_pre`/`backbone_post`/`heads`, each on the order of `T x 6-7 O`.
