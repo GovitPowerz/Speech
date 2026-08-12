@@ -33,13 +33,25 @@
 //! `_OutputNetwork.getInputSize()` in MLP mode. `getNbOfWeights` (`:227-238`) is
 //! the sum of the sub-network weight counts plus `2*inputSize`.
 //!
-//! DEVIATION from the legacy tolerance (documented per the task brief): the
-//! legacy accepts `flat.len() > nb_of_weights()` with a warning and still calls
-//! `setWeights` (consuming only the head); we reproduce that exact behavior
-//! (`set_weights` proceeds on a longer slice, ignoring the tail) but callers that
-//! want the legacy's console warning must check `flat.len()` themselves --
-//! `set_weights` does not print. `flat.len() < nb_of_weights()` is the legacy
-//! `exit(1)` error path, ported as `Err` (not a process exit).
+//! WHERE THE LENGTH TOLERANCE LIVES (interstitial, phase 11 -- this paragraph
+//! REPLACES the original port's, which had it in the wrong place). The legacy's
+//! `setWeights` (`:209-225`) carries NO length logic at all: it head-eats through
+//! the sub-networks and reads the normalize tail off whatever is left. The
+//! three-way length decision lives ONE level up, in the ctor's `_weightsFile`
+//! branch (`:141-149`): SHORT -> `exit(1)`; LONG -> a console WARNING and
+//! `setWeights` anyway (head-first); EXACT -> `setWeights`.
+//!
+//! The original port hoisted that branch's over-long tolerance INTO
+//! [`BlstmNetwork::set_weights`], which widened it to seams the legacy never had one
+//! on -- `speech_rs.Engine.set_weights`, `BagOfProcessors::set_weights`, and the
+//! `from_legacy(map, Some(flat))` driver ctors -- so a pack of the WRONG
+//! ARCHITECTURE loaded head-first and RAN, silently, with no console warning
+//! anywhere to notice it by. That is now closed by putting the check back where the
+//! legacy has it:
+//! - [`BlstmNetwork::set_weights`] demands the EXACT length in both directions.
+//! - [`BlstmNetwork::load_weights_file`] keeps the legacy's documented tolerance,
+//!   applies it EXPLICITLY (it slices the head itself), and restores the `:145`
+//!   warning the original port elided.
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -965,16 +977,34 @@ impl BlstmNetwork {
 
     /// `setWeights` (`:209-224`): Forward -> Backward -> Output -> mean -> std, in
     /// that order, MLP mode skipping the Forward/Backward step and
-    /// [`Direction::Forward`] skipping the Backward step alone (spec S1.2). Legacy
-    /// tolerance:
-    /// `flat.len() < nb_of_weights()` is an error (`exit(1)` there, `Err` here);
-    /// `flat.len() > nb_of_weights()` is accepted (warning-only there, silently
-    /// accepted here) and only the head is consumed.
+    /// [`Direction::Forward`] skipping the Backward step alone (spec S1.2).
+    ///
+    /// EXACT-LENGTH CONTRACT (interstitial, phase 11): `flat.len()` must EQUAL
+    /// [`Self::nb_of_weights`] -- net blocks PLUS the `2*input_size` normalize tail --
+    /// and any other length is a typed `Err` naming both numbers. The legacy
+    /// `setWeights` has no length check of its own (the three-way decision is the
+    /// ctor's `_weightsFile` branch, `:141-149`), and its own callers always satisfy
+    /// this: `updateWeights` (`:303-310`) hands back `getWeights()`. Accepting an
+    /// over-long pack HERE is what let a wrong-architecture `.bin` load head-first
+    /// through the seam and run silently (phase-11 T3 concern 2: 33671 elements into
+    /// a 28743-weight transformer net, 4928 dropped without a word). The file-load
+    /// path keeps the legacy tolerance -- see [`Self::load_weights_file`].
+    ///
+    /// The guard runs BEFORE any sub-network consumes its head, so a refusal leaves
+    /// the net untouched rather than half-written (pinned by
+    /// `tests/set_weights_length_guard.rs`).
     pub fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
         let needed = self.nb_of_weights();
-        if flat.len() < needed {
+        if flat.len() != needed {
+            // The short arm's wording is the original one, byte for byte; the long arm
+            // mirrors it, so both name both numbers and read the same way.
+            let (side, op) = if flat.len() < needed {
+                ("less", '<')
+            } else {
+                ("more", '>')
+            };
             bail!(
-                "The number of gains given is less than what's needed ({} < {needed}).",
+                "The number of gains given is {side} than what's needed ({} {op} {needed}).",
                 flat.len()
             );
         }
@@ -1227,8 +1257,18 @@ impl BlstmNetwork {
     /// against `getNbOfWeights()`: fewer than needed is the legacy `exit(1)` error
     /// (`:141-143`, ported as `Err`); more than needed prints a warning and STILL
     /// calls `setWeights` (which consumes only the head, `:144-146`); an exact match
-    /// calls `setWeights` (`:147-148`). The too-many warning is elided (no console
-    /// side-effect here); `set_weights` already tolerates the over-long slice.
+    /// calls `setWeights` (`:147-148`).
+    ///
+    /// THIS IS THE ONE SITE THAT TOLERATES AN OVER-LONG PACK, and it does so because
+    /// the legacy does (interstitial, phase 11 -- [`Self::set_weights`] no longer
+    /// does). Two things changed here, neither of them behaviour: the head is sliced
+    /// EXPLICITLY (`&flat[..needed]`), so the tolerance is stated at the site that
+    /// owns it instead of being inherited from a permissive callee; and the legacy's
+    /// `:145` warning, which the original port elided, is restored. It goes to
+    /// STDERR, not the legacy's `cout`, because this port's stdout carries
+    /// machine-parsed protocol lines (`BENCH`/`SEG`/`UTT`) -- the same
+    /// `eprintln!`-mirrors-a-legacy-`cout`-warning precedent as
+    /// `engine/corpus_processor.rs:214`.
     pub fn load_weights_file(
         &mut self,
         map: &IndexMap<String, String>,
@@ -1250,8 +1290,17 @@ impl BlstmNetwork {
                 flat.len()
             );
         }
-        // :144-148 too-many (warning + setWeights head) and exact both setWeights.
-        self.set_weights(&flat)
+        // :144-146 too-many: warn, then set from the HEAD only.
+        if flat.len() > needed {
+            eprintln!(
+                "Warning: The number of gains given in {weights_file} is more than what's needed \
+                 ({} > {needed}); the extra {} are ignored.",
+                flat.len(),
+                flat.len() - needed
+            );
+        }
+        // :144-148 too-many (head) and exact both setWeights.
+        self.set_weights(&flat[..needed])
     }
 
     /// `analyseInputSeq` (`BLSTMNeuralNetwork.cpp:385-417`): fold the input's per-dim

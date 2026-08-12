@@ -4174,6 +4174,80 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   is no future phase to hand this to; it is recorded here as a permanent, honest gap
   rather than folded into the "CLOSED" claim above.
 
+- **[phase11] `BlstmNetwork::set_weights` accepted an OVER-LONG pack head-first, so a
+  wrong-architecture weight pack loaded and RAN in silence -- FIXED (phase 11
+  interstitial, commit `dfda2bf`)** -- PORT-INTRODUCED by MIS-PLACEMENT, latent since
+  Phase 2 Task 7; found by phase-11 T3 (`task-3-report.md` concern 2) while wiring the
+  transformer's pyo3 length pin (`src/rust/src/nn/blstm.rs::set_weights`).
+  **LEGACY behavior (the evidence, read before the fix was shaped):** `setWeights`
+  (`legacy/src/BLSTMNeuralNetwork.cpp:209-225`) has NO length logic AT ALL -- it head-eats
+  through the sub-networks and reads the normalize tail off whatever is left. The
+  three-way length decision lives ONE LEVEL UP, in the ctor's `_weightsFile` branch
+  (`:141-149`): `NNWeights.size() < getNbOfWeights()` -> `cout << "Error: ..."` +
+  `exit(1)`; `> ` -> `cout << "Warning: The number of gains given in %s is more than
+  what's needed."` + `setWeights` anyway (head-first, `:144-146`); `==` -> `setWeights`
+  (`:147-148`). The legacy's only other `setWeights` caller, `updateWeights` (`:303-310`),
+  hands back `getWeights()`, i.e. always EXACTLY `getNbOfWeights()`. So the over-long case
+  was reachable in the legacy through the weights FILE only, and never without a warning.
+  **THE PORT'S DEFECT WAS PLACEMENT, NOT TOLERANCE:** Phase 2 Task 7 hoisted the ctor
+  branch's over-long tolerance INTO `set_weights` (and `load_weights_file` was then
+  written to lean on it -- "`set_weights` already tolerates the over-long slice"), which
+  widened a FILE-load tolerance into a general one covering seams the legacy never had a
+  tolerance on: `speech_rs.Engine.set_weights` (the Python optimizer's per-step weight
+  install), `BagOfProcessors::set_weights`, and the `from_legacy(map, Some(flat))` driver
+  ctors. The port ALSO elided the legacy's console warning, so the one signal the legacy
+  did emit was gone. Net effect, measured on the committed fixtures: the tier2 33671-element
+  `.bin` installs into a 28743-weight transformer net, 4928 values dropped, `Ok(())`
+  returned, no message anywhere -- one architecture's numbers under another's name. It
+  affects every cell type (an LSTM pack is longer than the sLSTM/mamba/cfc/transformer
+  packs at the shared v1 geometry, so the wrong-`.bin` direction that survives is exactly
+  the common one).
+  **FIX (phase 11 interstitial):** put the check back where the legacy has it.
+  `set_weights` now demands `flat.len() == nb_of_weights()` (net blocks PLUS the
+  `2*input_size` normalize tail) and returns a typed `Err` naming BOTH numbers in either
+  direction; the guard runs BEFORE any sub-network consumes its head, so a refusal leaves
+  the net untouched rather than half-written. `load_weights_file` KEEPS the legacy
+  tolerance -- it is the site the legacy specifies -- but now applies it EXPLICITLY
+  (`&flat[..needed]`) instead of inheriting it from a permissive callee, and RESTORES the
+  `:145` warning on stderr (not the legacy's `cout`: this port's stdout carries
+  machine-parsed protocol lines `BENCH`/`SEG`/`UTT`; the `eprintln!`-mirrors-a-legacy-`cout`
+  precedent is `engine/corpus_processor.rs:214`).
+  **DELIBERATELY NOT CHANGED (scope, stated so the asymmetry is not mistaken for an
+  oversight):** the f32 fast tree's `from_flat` family (`FastBlstm`/`FastCausalNet`/
+  `FastBiCell`) keeps head-first acceptance. It is committed-test load-bearing there --
+  `tests/phase7_parity_sad.rs::fast_dispatch_per_cell_type_and_direction` builds a causal
+  net off the head of a bidirectional pack ON PURPOSE, and `fast/cells.rs::
+  causal_net_length_check_is_typed` asserts `from_flat(n + 17).is_ok()` -- and those
+  drivers load weights only at construction, through their own `load_weights_file`, i.e.
+  the file-load path that legitimately tolerates. Tightening them is a separate
+  adjudication with its own re-pins, not a rider on this one.
+  **RED / re-pin:** NEW `src/rust/tests/set_weights_length_guard.rs` (4 tests) -- written
+  FIRST and confirmed RED (3 of 4 failed on the over-long legs; the 4th, the file-load
+  tolerance leg, passed before and after, which is the point). Per cell family
+  {lstm, slstm, mamba, cfc, transformer}: exact loads and round-trips bit-for-bit, one-too-many
+  refused with both numbers named, one-too-few refused likewise; plus a refused call leaves
+  the net bit-identical (no partial write); plus T3's scenario verbatim (the committed
+  33671 pack into the default-geometry 28743 transformer net); plus the boundary pin that
+  the FILE path still tolerates. RE-PINNED: `tests/phase2_blstm_golden.rs::
+  set_weights_tolerates_longer_vector_and_returns_head_on_get` asserted the OPPOSITE and is
+  now `::set_weights_refuses_a_longer_vector` (same fixture, same 33676-vs-33671 lengths,
+  inverted expectation, with the placement argument in its doc comment).
+  `phase4a_lifecycle.rs::weights_file_too_many_truncates` is UNCHANGED and still green --
+  it is the direct evidence that the legacy-specified tolerance survived, and it doubles as
+  the mutation detector for the explicit head slice.
+  **Mutation (revert-the-fix):** restoring `flat.len() < needed` fails all three over-long
+  legs of the new file plus the re-pinned phase-2 test. Independently, dropping the explicit
+  `[..needed]` slice in `load_weights_file` while KEEPING the strict `set_weights` fails
+  `phase4a_lifecycle::weights_file_too_many_truncates`, `set_weights_length_guard::
+  the_file_load_path_keeps_the_legacy_head_first_tolerance` and four pyo3 legs in
+  `tests/pyo3/test_phase11_init_pyo3.py` (whose Engine cannot even CONSTRUCT without the
+  tolerance) -- so both halves of the adjudicated contract are pinned in both directions,
+  not just the half that changed.
+  **Oracle divergence:** the C++ harness family is NOT regenerated and never will be for
+  this site -- it describes the LEGACY, which warns-and-continues at the file path and has
+  no `setWeights` length logic to describe. The divergence is confined to `set_weights`,
+  where the legacy has no behavior to diverge FROM.
+
 ### Mutation battery (Phase 4d)
 
 - **[phase4d] Mutation battery (Task 14): 7 of 8 mutations break their named golden as
