@@ -172,32 +172,46 @@ no such "fall back to averaging" degenerate mode at init -- its output is whatev
 untrained gates happen to produce, and empirically that collapses hard toward one class.
 `test_init_is_trainable[transformer-forward]` independently rules out a saturated-forward /
 dead-gradient pathology as the explanation (init cost 0.863% of the log-law clamp, grad L2
-2.24457, zero dead/weak columns): the net is trainable and training WORKS identically to
-every other row; the init baseline is simply less degenerate, for cell-architectural reasons
-distinct from anything remaining trainability-related.
+2.24457, zero dead/weak columns): the net is trainable and DOES train, non-pathologically,
+the same way every other row does; the init baseline is simply less degenerate, for
+cell-architectural reasons distinct from anything remaining trainability-related.
 
 THE RATIFICATION (2026-08-12, user-ratified via the coordinator, mirroring the phase-9
 Twin convergence-gate deferral precedent -- a hard target that could not be met exactly as
 originally stated was surfaced and resolved by explicit sign-off, not a unilateral agent
-relaxation): the hard leg's criterion is amended to an OR -- MARGIN >= 0.2 at the collar (the
-original criterion, UNCHANGED), OR the trained model reaches `COLLAPSE_FLOOR_DCF = 0.2501`
-at that collar (the known all-speech operating point every from-scratch SAD row on this
-subset converges to). Semantics, verbatim: "training moved the model a lot, or it reached
-the best-known subset operating point." THE SAME DISJUNCT IS ALSO APPLIED to the two
-init-degeneracy SANITY checks feeding the identical question (`ini.pmiss > 0.9`,
-`ini.dcf >= 0.6`, both of which independently fail for THIS row for the identical root
-cause) -- this is a NECESSARY EXTENSION beyond the originally-scoped single assert (found
-while implementing: pytest evaluates `ini.pmiss > 0.9` BEFORE the per-collar loop even
-runs, so leaving it untouched would still fail the row before the ratified margin-or-floor
-logic is ever reached), not a separate policy decision: both checks test facets of the same
-"did this row demonstrate real learning" question the ratified semantics already answer.
-MARGIN-FIRST ordering throughout: `or` short-circuits, so the nine already-passing rows
-(which satisfy every original criterion at every collar) never evaluate the floor disjunct
-at all, and their pass/fail evidence is UNCHANGED bit-for-bit from before this amendment.
+relaxation): THE HARD LEG's criterion is amended to an OR -- MARGIN >= 0.2 at the collar
+(the original criterion, UNCHANGED), OR the trained model reaches `COLLAPSE_FLOOR_DCF =
+0.2501` at that collar (the known all-speech operating point eight of the ten from-scratch
+SAD rows on this subset converge to exactly). Semantics, verbatim: "training moved the
+model a lot, or it reached the best-known subset operating point." THE NINE
+ALREADY-PASSING ROWS' EVIDENCE IS UNCHANGED bit-for-bit: `margin_ok` alone is True at every
+one of their collars, so `margin_ok or floor_ok` is True regardless of what `floor_ok`
+says -- NOT because evaluation is "skipped" (`floor_ok` is an eagerly-assigned local,
+computed unconditionally on every iteration; only the boolean `or` inside the `assert`
+short-circuits, and even that costs nothing observable since `floor_ok` is already a plain
+bool by the time it is read).
 
-No training parameter was tuned to chase a pass at any point (seed, epochs,
-steps_per_epoch, subset size are byte-identical to every other row's recipe); the ONLY
-change is the amended, user-ratified pass criterion itself.
+THE TWO INIT-DEGENERACY SANITY CHECKS (`ini.pmiss > 0.9`, `ini.dcf >= 0.6`) took a
+DIFFERENT path, and the honest trail is the live record here rather than a superseded
+mechanism: the FIRST committed form applied the IDENTICAL `or tr.dcf <= COLLAPSE_FLOOR_DCF`
+disjunct to both (a necessary extension beyond the originally-ratified single assert, found
+while implementing -- pytest evaluates `ini.pmiss > 0.9` BEFORE the per-collar loop even
+runs, so leaving it untouched would still fail the row before the margin-or-floor logic is
+ever reached). Review (fix round 1, F1) found that form UNFALSIFIABLE on nine of ten rows
+(every row's TRAINED side reaches the floor regardless of what its INIT looked like), with
+ZERO detection power against a future builder bug producing an accidentally non-degenerate
+init, or `transformer/forward` itself regressing back to degenerate. It was STRENGTHENED to
+a two-sided COMMITTED membership table instead -- `NON_DEGENERATE_INIT_ROWS` above,
+mirroring `EXPECT_TIGHT_COHORT` (`src/rust/tests/phase9_stream_causal.rs:1388`): listed rows
+MUST fail the degenerate characterization (`Pmiss > 0.9 AND DCF >= 0.6`), unlisted rows MUST
+pass it, and membership moving is an ADJUDICATION, never a silent widen. THIS is the
+CURRENT, committed form (see the assert in `test_subset_gate_beats_own_init` below the "THE
+INIT-DEGENERACY CHARACTERIZATION" comment) -- THE HARD LEG's own margin-or-floor loop is the
+ONLY site that still carries the original OR-disjunct design.
+
+No training parameter was tuned to chase a pass at any point, across either round (seed,
+epochs, steps_per_epoch, subset size are byte-identical to every other row's recipe); the
+only change is the pass CRITERION itself.
 
 Corpus-gated (`requires_corpus`) + pyo3 (`importorskip`): runs locally for implementers AND
 reviewers, skips in CI. Measured whole-file runtime on the dev box (2026-08-01, Apple M4
@@ -283,7 +297,8 @@ _LOG_CLAMP = float(-np.log(1e-24))  # 55.26204...
 # evidence of a worse outcome). See "THE TRANSFORMER ROWS" below for why this was needed:
 # `transformer/forward`'s from-scratch init does not collapse degenerate the way every
 # other cell's does, thinning its margin below 0.2 at the two widest collars even though
-# its TRAINED model reaches the identical floor every other row's trained model reaches.
+# its TRAINED model reaches DCF 0.250000 at every collar -- the SAME collapse point eight
+# of the other nine rows' trained models also reach exactly.
 COLLAPSE_FLOOR_DCF = 0.2501
 
 # THE INIT-DEGENERACY COMMITTED MEMBERSHIP TABLE (phase-11 T9 fix round 1, review F1 -- the
