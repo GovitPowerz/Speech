@@ -93,36 +93,37 @@ pub enum CellLayer {
 }
 
 impl CellLayer {
-    /// Phase 10 spec S7: propagate the inference-only retention flag to whichever cells
-    /// keep a backward-only cache of their own.
+    /// Phase 10 spec S7 (Mamba); phase-11 spec S7 / Task 8 (Transformer): propagate the
+    /// inference-only retention flag to whichever cells keep a backward-only cache of
+    /// their own.
     ///
     /// An INHERENT method on the concrete enum, NOT an eleventh `Layer` method: the trait
     /// stays exactly the ten the phase-9 seam defined, and `Network<L>` never learns that
     /// cell-level retention exists (it owns its own `retain_layers_output` flag, a separate
     /// axis covering the inter-layer buffers).
     ///
-    /// SCOPE, stated exactly: this phase gates MAMBA's cache only, because that is the one
-    /// the phase-9 bench measured as visibly expensive (`h` and `abar` are each
-    /// `T x (d_inner d_state)`). The other three cells are NOT cache-free -- every one of
+    /// SCOPE, stated exactly: TWO cells gate their cache -- MAMBA (`h`/`abar`, each
+    /// `T x (d_inner d_state)`) and TRANSFORMER (`attn_weights`, `T x A*wcap` and the
+    /// widest cached field at the default geometry) -- because those are the two a bench
+    /// measured as visibly expensive, Mamba in phase 10 and the transformer proactively on
+    /// day one (phase-11 spec S7). The other three cells are NOT cache-free -- every one of
     /// them carries per-timestep forward caches the backward reads:
     /// [`LstmLayer`] `gates`/`cells_in`/`cell_states`, [`SlstmLayer`]
     /// `gates`/`cell_states`/`norm_states`/`m_states`, [`CfcLayer`]
     /// `z_cache`/`backbone_pre`/`backbone_post`/`heads`, each on the order of `T x 6-7 O`.
     /// Gating those is a NAMED FOLLOW-ON with a real (if smaller) win, not a no-op because
-    /// there is nothing to do. Their arms here are no-ops only because this task did not
-    /// measure or pin them -- and a no-op is the SAFE direction, since it means "always
-    /// retain": a cell whose arm is never filled in loses memory, never correctness.
+    /// there is nothing to do. Their arms here are no-ops only because no task has
+    /// measured or pinned them yet -- and a no-op is the SAFE direction, since it means
+    /// "always retain": a cell whose arm is never filled in loses memory, never
+    /// correctness.
     pub fn set_retain_cache(&mut self, retain: bool) {
         match self {
-            // The TRANSFORMER arm is a no-op only until phase-11 Task 8, which turns it
-            // into a real gate (spec S7: its attention cache is the largest backward
-            // cache of any cell here). Until then it means "always retain" -- the safe
-            // direction, costing memory and never correctness.
-            CellLayer::Lstm(_)
-            | CellLayer::Slstm(_)
-            | CellLayer::Cfc(_)
-            | CellLayer::Transformer(_) => {}
+            // LSTM/sLSTM/CfC stay no-op follow-ons (unmeasured, not cache-free -- see
+            // above): "always retain" is the safe default, costing memory and never
+            // correctness.
+            CellLayer::Lstm(_) | CellLayer::Slstm(_) | CellLayer::Cfc(_) => {}
             CellLayer::Mamba(l) => l.set_retain_cache(retain),
+            CellLayer::Transformer(l) => l.set_retain_cache(retain),
         }
     }
 }

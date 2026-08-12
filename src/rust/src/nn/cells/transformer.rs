@@ -161,12 +161,40 @@
 //!   zero-pads. The propagated deltas are always `T x in`.
 //! - All summations are ASCENDING loops (or [`matmul_seq`], the same contract).
 //!
-//! ## Retention (phase-11 S7): NOT gated here, deliberately
+//! ## Retention (phase-11 S7, Task 8): GATED, day one
 //!
-//! The attention cache is the largest backward cache of any cell in the tree, and
-//! `CellLayer::set_retain_cache`'s transformer arm is a NO-OP as of this task -- Task 8
-//! turns it into a real gate on the phase-10 T9 mechanism. A no-op means "always
-//! retain", the SAFE direction: it costs memory, never correctness.
+//! The attention cache is the largest backward cache of any cell in the tree --
+//! `attn_weights` (`T x A*wcap`) is the one field with no fixed bound on its own column
+//! count (`A*W` grows with the config, unlike the `H`/`3H`/`d_ff`-bounded fields), and at
+//! the default geometry (`A = 4`, `W = 64`) it is already wider on its own (256 columns)
+//! than every other cached field combined. So `CellLayer::set_retain_cache`'s transformer
+//! arm gates it from day one, on the phase-10 T9 mechanism (`MambaLayer`), rather than as
+//! a discovered-later follow-on.
+//!
+//! The mechanism has Mamba's two parts, CLEAR and SHRINK. CLEAR: every other cache field
+//! is computed in full regardless of `retain_cache` -- each is produced by ONE
+//! whole-sequence [`matmul_seq`] call (there is no cheaper way to compute it without
+//! restructuring the projection itself, out of scope here) -- and simply left OUT of
+//! `self.cache` when not retaining: `self.cache = TransformerCache::default()` drops the
+//! freshly-computed locals at the end of the call. SHRINK: `attn_weights` gets the
+//! Mamba-`h` treatment, and an even simpler version of it -- it is written at row `t` and
+//! read back ONLY within that SAME row's attention-output accumulation (no cross-row read
+//! at all during forward; only the backward's softmax-Jacobian pass reads a DIFFERENT
+//! row's weights). So under `retain_cache == false` it shrinks from `T x A*wcap` to `1 x
+//! A*wcap`, and every access uses `ta = if retain { t } else { 0 }` in place of a bare
+//! `t` -- ONE slot, no `t-1` alternation needed (unlike Mamba's rolling PAIR), because
+//! forward never looks backward through this buffer at all. The retaining path is
+//! untouched (`ta == t` always), so [`tests::forward_is_bit_identical_without_the_cache`]
+//! is the pin that says the two indexings agree.
+//!
+//! A backward after a non-retaining forward PANICS with a named message
+//! ([`Self::feed_backward`]) rather than folding an empty or stale buffer.
+//! [`super::super::network::Network`]'s own `retain_layers_output` check
+//! (`drive_backward`) is a SECOND, cell-agnostic choke point on the same call path --
+//! unchanged by this task, and already sufficient on its own via the `Layer` trait funnel
+//! (it does not inspect which `CellLayer` variant it is driving). `true` (retain) is the
+//! default and the only behaviour of anything built outside `BlstmNetwork::from_config`,
+//! so a direct construction is unaffected unless it opts in.
 
 use ndarray::Array2;
 
@@ -481,6 +509,20 @@ pub struct TransformerLayer {
     weights: TransformerWeights,
     derivatives: TransformerWeights,
     cache: TransformerCache,
+    /// Phase 11 spec S7 (Task 8, the phase-10 T9 mechanism applied to this cell). `true`
+    /// (the default, and every pre-Task-8 behaviour) fills [`TransformerCache`] at the end
+    /// of every forward; `false` drops it (see the module doc's "Retention" section for
+    /// the clear+shrink mechanism). Flipped at CONSTRUCTION only
+    /// (`BlstmNetwork::set_inference_only`, driven by `BackPropagationActivated`), never
+    /// per call, so a net either retains for its whole life or never does.
+    ///
+    /// Measured on a long-T bidirectional SAD net (2 stacked layers, `H = 24`, default
+    /// geometry, a 60 s stereo excerpt forced through the PLAIN whole-sequence driver via
+    /// `BLSTM_window 0` so the cache scales with the full sequence): `BackPropagationActivated
+    /// true` (retaining) peaks at 93.422 MB vs `false` (this flag off) at 61.359 MB,
+    /// `speech bench --path=exact`, one run each -- 1.52x less peak RSS. See `RESULTS.md`'s
+    /// Task 8 row for the full recipe.
+    retain_cache: bool,
     nb_of_seq_fed_backward: i64,
 }
 
@@ -528,8 +570,28 @@ impl TransformerLayer {
             derivatives: weights.clone(),
             weights,
             cache: TransformerCache::default(),
+            retain_cache: true,
             nb_of_seq_fed_backward: 0,
         }
+    }
+
+    /// Phase 11 spec S7 (Task 8): turn the backward cache retention off (inference-only)
+    /// or back on. See the module doc's "Retention" section for the clear+shrink
+    /// mechanism this flips.
+    ///
+    /// Turning it OFF also drops whatever the last forward left behind, so a subsequent
+    /// [`Self::feed_backward`] hits the loud bail rather than silently folding a stale
+    /// cache from an earlier sequence into the derivative accumulators.
+    pub fn set_retain_cache(&mut self, retain: bool) {
+        self.retain_cache = retain;
+        if !retain {
+            self.cache = TransformerCache::default();
+        }
+    }
+
+    /// Whether this layer retains its backward cache (spec S7; `true` by default).
+    pub fn retains_cache(&self) -> bool {
+        self.retain_cache
     }
 
     pub fn input_size(&self) -> usize {
@@ -735,10 +797,18 @@ impl TransformerLayer {
         }
 
         // 4. Per-head windowed causal attention (ALiBi logits, max-subtracted softmax).
-        let mut attn_weights = Array2::<f64>::zeros((t_len, a * wcap));
+        //
+        // Spec S7 (Task 8): `attn_weights` is written at row `t` and read back ONLY
+        // within this SAME row's accumulation below -- forward never looks at another
+        // row's weights -- so under `retain_cache == false` it shrinks to a single slot
+        // (`ta` pinned at 0) instead of `t_len` rows; the retaining path keeps `ta == t`
+        // and is therefore byte-untouched. See the module doc's "Retention" section.
+        let retain = self.retain_cache;
+        let mut attn_weights = Array2::<f64>::zeros((if retain { t_len } else { 1 }, a * wcap));
         let mut attn_out = Array2::<f64>::zeros((t_len, h));
         let mut row = vec![0.0f64; wcap];
         for t in 0..t_len {
+            let ta = if retain { t } else { 0 };
             let lo = self.window_begin(t);
             let len = t - lo + 1;
             for hh in 0..a {
@@ -769,12 +839,12 @@ impl TransformerLayer {
                     sum += e;
                 }
                 for jj in 0..len {
-                    attn_weights[[t, hh * wcap + jj]] = row[jj] / sum;
+                    attn_weights[[ta, hh * wcap + jj]] = row[jj] / sum;
                 }
                 for e in 0..d {
                     let mut acc = 0.0;
                     for jj in 0..len {
-                        acc += attn_weights[[t, hh * wcap + jj]] * qkv[[lo + jj, vb + e]];
+                        acc += attn_weights[[ta, hh * wcap + jj]] * qkv[[lo + jj, vb + e]];
                     }
                     attn_out[[t, hh * d + e]] = acc;
                 }
@@ -823,20 +893,27 @@ impl TransformerLayer {
             }
         }
 
-        self.cache = TransformerCache {
-            x_in: recon,
-            x_adapted,
-            rms1_inv,
-            u,
-            qkv,
-            attn_weights,
-            wcap,
-            attn_out,
-            s,
-            rms2_inv,
-            v_norm,
-            ffn_pre,
-        };
+        // Spec S7 (Task 8): the retention, and the ONE place it is skipped. Everything
+        // above was needed by the forward itself; only this assignment keeps it alive
+        // past the call, and only the backward ever reads it back.
+        if retain {
+            self.cache = TransformerCache {
+                x_in: recon,
+                x_adapted,
+                rms1_inv,
+                u,
+                qkv,
+                attn_weights,
+                wcap,
+                attn_out,
+                s,
+                rms2_inv,
+                v_norm,
+                ffn_pre,
+            };
+        } else {
+            self.cache = TransformerCache::default();
+        }
     }
 
     /// Reverse-direction forward: flip the input rows, run [`Self::feed_forward`], flip
@@ -870,6 +947,19 @@ impl TransformerLayer {
         deltas: &Array2<f64>,
         inv_sub_sampling_ratio: usize,
     ) -> Array2<f64> {
+        // Spec S7 (Task 8): an inference-only layer never filled the cache (or shrank
+        // `attn_weights` to a single dead slot), so there is nothing correct to fold.
+        // Bail LOUDLY rather than accumulate garbage -- a silently wrong gradient is the
+        // one failure mode this whole class of change must never produce.
+        assert!(
+            self.retain_cache,
+            "TransformerLayer::feed_backward on a layer constructed inference-only \
+             (retain_cache = false, phase-11 spec S7): the forward never filled the \
+             backward cache, so no gradient can be folded here. This layer belongs to a \
+             net built with BackPropagationActivated off; turn backprop on for that net \
+             (or call set_retain_cache(true) before the forward) if a backward is really \
+             wanted."
+        );
         let (isz, h, a, d, dff) = (
             self.input_size,
             self.output_size,
@@ -2063,6 +2153,140 @@ mod tests {
         assert_eq!(
             forward(&mut a, &wide),
             forward(&mut b, &wide.slice(ndarray::s![.., ..I]).to_owned())
+        );
+    }
+
+    // ==== Phase 11 Task 8 / spec S7: inference-only cache gating ====
+
+    /// The DEFAULT is retain, so nothing built outside `BlstmNetwork::from_config` can
+    /// lose its gradient by accident.
+    #[test]
+    fn a_fresh_layer_retains_its_cache() {
+        let cell = loaded(I, O, &base_params());
+        assert!(cell.retains_cache());
+    }
+
+    /// THE BEHAVIOUR-FREE CLAIM, measured: with the cache off, the forward's OUTPUT is
+    /// bit-for-bit what the retaining forward produces -- which is also the pin on the
+    /// `attn_weights` shrink (`ta` pinned at slot 0), since a wrong slot would move every
+    /// downstream `attn_out`/`s`/`v_norm`/`ffn_pre` value. Run over three sequence lengths
+    /// incl. `T = 1` (a one-element window, the S1.4 dead-block edge) and `T = 2` (the
+    /// first row whose window covers more than itself).
+    #[test]
+    fn forward_is_bit_identical_without_the_cache() {
+        for t in [1usize, 2, T] {
+            let input = seq(t, I, 0.37);
+            let retained = forward(&mut loaded(I, O, &base_params()), &input);
+
+            let mut lean = loaded(I, O, &base_params());
+            lean.set_retain_cache(false);
+            let dropped = forward(&mut lean, &input);
+
+            assert_eq!(retained, dropped, "T={t}: the cache flag moved the forward");
+            assert!(dropped.iter().all(|v| v.is_finite()));
+        }
+    }
+
+    /// ... and the cache really is gone afterwards (the memory claim, not just the
+    /// numeric one). All five accessors, so a partially-cleared cache fails here.
+    #[test]
+    fn an_inference_only_forward_leaves_every_cache_field_empty() {
+        let mut cell = loaded(I, O, &base_params());
+        cell.set_retain_cache(false);
+        let _ = forward(&mut cell, &seq(T, I, 0.37));
+        assert_eq!(cell.attn_weights().dim(), (0, 0));
+        assert_eq!(cell.qkv().dim(), (0, 0));
+        assert_eq!(cell.s().dim(), (0, 0));
+        assert_eq!(cell.x_adapted().dim(), (0, 0));
+        assert_eq!(cell.window_capacity(), 0);
+    }
+
+    /// Turning retention OFF drops what an earlier forward left behind -- otherwise a
+    /// backward could fold a STALE cache from a different sequence and look plausible.
+    #[test]
+    fn turning_retention_off_drops_the_existing_cache() {
+        let mut cell = loaded(I, O, &base_params());
+        let _ = forward(&mut cell, &seq(T, I, 0.37));
+        assert_eq!(cell.x_adapted().dim(), (T, O));
+        cell.set_retain_cache(false);
+        assert_eq!(cell.x_adapted().dim(), (0, 0));
+    }
+
+    /// THE R6 CLONE NOTE (spec S7): `corpus_processor`'s static-lane fold clones the whole
+    /// bag per lane at every epoch start, and a clone is a DEEP copy of this cache. Under
+    /// inference-only there is nothing to copy -- asserted here rather than assumed, on
+    /// the structure the bag clone actually duplicates.
+    #[test]
+    fn a_clone_after_an_inference_only_forward_carries_no_cache() {
+        let mut cell = loaded(I, O, &base_params());
+        cell.set_retain_cache(false);
+        let _ = forward(&mut cell, &seq(T, I, 0.37));
+        let twin = cell.clone();
+        assert!(
+            !twin.retains_cache(),
+            "the flag itself must survive the clone"
+        );
+        assert_eq!(twin.x_adapted().dim(), (0, 0));
+        assert_eq!(twin.attn_weights().dim(), (0, 0));
+
+        // Non-vacuity: the SAME assertion on a retaining clone must fail, i.e. the clone
+        // does carry the cache when there is one.
+        let mut keeper = loaded(I, O, &base_params());
+        let _ = forward(&mut keeper, &seq(T, I, 0.37));
+        assert_eq!(keeper.clone().x_adapted().dim(), (T, O));
+    }
+
+    /// A backward after a non-retaining forward must PANIC, never fold garbage.
+    #[test]
+    #[should_panic(expected = "constructed inference-only")]
+    fn backward_after_an_inference_only_forward_panics() {
+        let input = seq(T, I, 0.37);
+        let mut cell = loaded(I, O, &base_params());
+        cell.set_retain_cache(false);
+        let _ = forward(&mut cell, &input);
+        let _ = cell.feed_backward(&seq(T, O, -0.21), 1);
+    }
+
+    /// The retaining path still folds a real gradient -- the contrast that makes the
+    /// panic above a GATE rather than a blanket refusal.
+    #[test]
+    fn backward_still_works_when_the_cache_is_retained() {
+        let input = seq(T, I, 0.37);
+        let mut cell = loaded(I, O, &base_params());
+        let _ = forward(&mut cell, &input);
+        let _ = cell.feed_backward(&seq(T, O, -0.21), 1);
+        let g = derivs(&cell);
+        assert!(g.iter().any(|v| *v != 0.0) && g.iter().all(|v| v.is_finite()));
+    }
+
+    /// THE EXPLICIT PIN the task asks for: retention ON is BYTE-IDENTICAL to a "never
+    /// gated" run. A cell that never once calls `set_retain_cache` takes the same
+    /// retaining branch as one that explicitly opts back into `true` (the default in both
+    /// cases), so this says adding the flag perturbed NEITHER the forward output NOR the
+    /// folded gradient on the path every pre-Task-8 test in this file already exercises.
+    #[test]
+    fn explicit_retain_true_is_bit_identical_to_never_touching_the_flag() {
+        let input = seq(T, I, 0.4);
+        let deltas = seq(T, O, -0.2);
+
+        let mut never_gated = loaded(I, O, &base_params());
+        let out_a = forward(&mut never_gated, &input);
+        let _ = never_gated.feed_backward(&deltas, 1);
+        let mut da = Vec::new();
+        never_gated.get_weights_derivatives(&mut da);
+
+        let mut explicitly_retained = loaded(I, O, &base_params());
+        explicitly_retained.set_retain_cache(true);
+        let out_b = forward(&mut explicitly_retained, &input);
+        let _ = explicitly_retained.feed_backward(&deltas, 1);
+        let mut db = Vec::new();
+        explicitly_retained.get_weights_derivatives(&mut db);
+
+        assert_eq!(out_a, out_b, "the forward output moved");
+        assert_eq!(da, db, "the flat [deriv | count] rows moved");
+        assert!(
+            da.iter().any(|r| r[0] != 0.0),
+            "vacuous: derivatives are all zero"
         );
     }
 }
