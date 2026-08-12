@@ -1517,6 +1517,281 @@ mod tests {
         assert!((out[[0, 0]] - s).abs() > 1e-3, "the FFN branch is inert");
     }
 
+    /// One fixture geometry for [`multi_window_forward_matches_the_hand_transcription`].
+    /// `head_dim` and `slopes` are stated as LITERALS rather than read back off the
+    /// layer -- that independence is the whole instrument.
+    struct Fixture {
+        input_size: usize,
+        h: usize,
+        heads: usize,
+        window: usize,
+        d_ff: usize,
+        t: usize,
+        /// `d = H / A`, written out by hand.
+        head_dim: usize,
+        /// `m_h = 2^(-8h/A)`, `h = 1..A`, written out as literals.
+        slopes: &'static [f64],
+        /// The self-witness floor: measured/10 of the SMALLER of this fixture's two
+        /// mutant sensitivities (see the test doc for both numbers). Per-fixture because
+        /// they differ by two decades -- fixture 1 is the strong instrument, fixture 0
+        /// the `d = 1` shape.
+        mutant_floor: f64,
+    }
+
+    /// An INDEPENDENT scalar transcription of the whole S1.1 forward, reading the flat
+    /// pack through the test module's own [`offsets`] table and NOTHING from the layer.
+    ///
+    /// `use_alibi` and `sqrt_d` are parameters so the SAME transcription can produce the
+    /// two named mutants (drop the ALiBi term; scale by `sqrt(H)` instead of `sqrt(d)`),
+    /// which is what makes the pin below self-witnessing: it does not merely assert
+    /// agreement, it asserts that agreement would BREAK under each mutation.
+    /// `needless_range_loop` is allowed for the same reason it is on the cell's own
+    /// methods: every accumulation is an explicit ASCENDING index loop by contract, and
+    /// an iterator rewrite would obscure which index runs innermost -- which is exactly
+    /// what this transcription exists to state independently.
+    #[allow(clippy::needless_range_loop)]
+    fn transcribe(
+        f: &Fixture,
+        flat: &[f64],
+        x: &Array2<f64>,
+        use_alibi: bool,
+        sqrt_d: f64,
+    ) -> Array2<f64> {
+        let (i, h, a, d, dff, win) = (f.input_size, f.h, f.heads, f.head_dim, f.d_ff, f.window);
+        assert_eq!(d * a, h, "fixture geometry: d*A must be H");
+        let b = offsets(i, h, dff);
+        let at = |name: &str| block(&b, name).0;
+        let (wa, ba, g1) = (at("W_a"), at("b_a"), at("g_1"));
+        let (wqkv, bqkv) = (at("W_qkv"), at("b_qkv"));
+        let (wo, bo, g2) = (at("W_o"), at("b_o"), at("g_2"));
+        let (w1, b1, w2, b2) = (at("W_1"), at("b_1"), at("W_2"), at("b_2"));
+        let sig = |v: f64| 1.0 / (1.0 + (-v).exp());
+
+        let t_len = f.t;
+        let mut out = Array2::<f64>::zeros((t_len, h));
+        let mut qkv = vec![0.0f64; t_len * 3 * h];
+        let mut xa = vec![0.0f64; t_len * h];
+        // Rows 1-3: adapter -> RMSNorm_1 -> [q|k|v]. Causal, so one forward sweep.
+        for t in 0..t_len {
+            for m in 0..h {
+                let mut acc = 0.0;
+                for k in 0..i {
+                    acc += x[[t, k]] * flat[wa + m * i + k];
+                }
+                acc += flat[ba + m];
+                xa[t * h + m] = acc;
+            }
+            let mut sq = 0.0;
+            for m in 0..h {
+                sq += xa[t * h + m] * xa[t * h + m];
+            }
+            let inv = 1.0 / (sq / h as f64 + 1e-5).sqrt();
+            let mut u = vec![0.0f64; h];
+            for m in 0..h {
+                u[m] = xa[t * h + m] * inv * flat[g1 + m];
+            }
+            for c in 0..3 * h {
+                let mut acc = 0.0;
+                for m in 0..h {
+                    acc += u[m] * flat[wqkv + c * h + m];
+                }
+                qkv[t * 3 * h + c] = acc + flat[bqkv + c];
+            }
+        }
+        // Rows 4-8: windowed attention -> residual 1 -> RMSNorm_2 -> FFN -> residual 2.
+        for t in 0..t_len {
+            let lo = (t + 1).saturating_sub(win);
+            let len = t - lo + 1;
+            let mut attn = vec![0.0f64; h];
+            for hh in 0..a {
+                let (qb, kb, vb) = (hh * d, h + hh * d, 2 * h + hh * d);
+                let mut row = vec![0.0f64; len];
+                for jj in 0..len {
+                    let j = lo + jj;
+                    let mut dot = 0.0;
+                    for e in 0..d {
+                        dot += qkv[t * 3 * h + qb + e] * qkv[j * 3 * h + kb + e];
+                    }
+                    row[jj] = dot / sqrt_d;
+                    if use_alibi {
+                        row[jj] += f.slopes[hh] * (j as f64 - t as f64);
+                    }
+                }
+                let mut mx = row[0];
+                for v in row.iter().skip(1) {
+                    if *v > mx {
+                        mx = *v;
+                    }
+                }
+                let mut sum = 0.0;
+                for v in row.iter_mut() {
+                    *v = (*v - mx).exp();
+                    sum += *v;
+                }
+                for e in 0..d {
+                    let mut acc = 0.0;
+                    for (jj, rv) in row.iter().enumerate() {
+                        acc += (*rv / sum) * qkv[(lo + jj) * 3 * h + vb + e];
+                    }
+                    attn[hh * d + e] = acc;
+                }
+            }
+            let mut s = vec![0.0f64; h];
+            for m in 0..h {
+                let mut acc = 0.0;
+                for k in 0..h {
+                    acc += attn[k] * flat[wo + m * h + k];
+                }
+                s[m] = xa[t * h + m] + acc + flat[bo + m];
+            }
+            let mut sq = 0.0;
+            for m in 0..h {
+                sq += s[m] * s[m];
+            }
+            let inv = 1.0 / (sq / h as f64 + 1e-5).sqrt();
+            let mut vn = vec![0.0f64; h];
+            for m in 0..h {
+                vn[m] = s[m] * inv * flat[g2 + m];
+            }
+            let mut act = vec![0.0f64; dff];
+            for r in 0..dff {
+                let mut acc = 0.0;
+                for m in 0..h {
+                    acc += vn[m] * flat[w1 + r * h + m];
+                }
+                let pre = acc + flat[b1 + r];
+                act[r] = pre * sig(pre);
+            }
+            for m in 0..h {
+                let mut acc = 0.0;
+                for r in 0..dff {
+                    acc += act[r] * flat[w2 + m * dff + r];
+                }
+                out[[t, m]] = s[m] + acc + flat[b2 + m];
+            }
+        }
+        out
+    }
+
+    /// THE MULTI-WINDOW VALUE PIN (T2 review, finding 1). The `T = 1` hand-computed leg
+    /// above runs `A = 1`, `d = 1` and a ONE-ELEMENT window, where two of S1.1's logit
+    /// terms are inert -- the ALiBi offset (`j - t == 0`) and the `1/sqrt(d)` scale
+    /// (`d == H == 1`). MUTATION-PROVEN: deleting the ALiBi term outright, and
+    /// substituting `sqrt(H)` for `sqrt(d)`, both used to pass the entire file.
+    ///
+    /// This leg closes that. Two fixtures, both with a sliding window that has a real
+    /// EDGE (`T > W`) and both with `A > 1`, checked against an INDEPENDENT scalar
+    /// [`transcribe`] that reads the pack through the test module's own layout table and
+    /// touches nothing on the layer -- `d` and the ALiBi slopes are literals HERE:
+    ///
+    /// - `in=1 H=2 A=2 d=1 W=2 d_ff=1 T=3`, slopes `[2^-4, 2^-8]`, `sqrt(d) = 1`;
+    /// - `in=3 H=8 A=4 d=2 W=3 d_ff=2 T=5`, slopes `[2^-2, 2^-4, 2^-6, 2^-8]`,
+    ///   `sqrt(d) = sqrt(2)` -- the `A = 4` fixture also covers
+    ///   [`TRANSFORMER_DEFAULT_HEADS`](super::super::blstm::TRANSFORMER_DEFAULT_HEADS),
+    ///   which no other forward exercised (T2 review, finding 2), and its `d = 2` makes
+    ///   the per-head SLICING observable (a head-stride bug mixes columns).
+    ///
+    /// The equality is EXACT (`assert_eq!`), not a tolerance: the transcription evaluates
+    /// the same expressions in the same ascending order, `silu`'s `1/(1+e^-x)` included
+    /// (both fixtures sit far inside the house `expLimit`, so no saturation branch
+    /// differs). And the pin is SELF-WITNESSING: the same transcription is re-run as each
+    /// mutant and asserted to DISAGREE, so this test cannot silently stop discriminating.
+    ///
+    /// MEASURED mutant sensitivities (max |dh| over the whole output):
+    ///
+    /// ```text
+    ///                       drop ALiBi     sqrt(H) for sqrt(d)     floor
+    ///   fixture 0 (A=2,d=1)  4.840e-5           3.690e-6           3.6e-7
+    ///   fixture 1 (A=4,d=2)  7.391e-3           6.037e-4           6.0e-5
+    /// ```
+    ///
+    /// Fixture 1 is the strong instrument by two decades; fixture 0 exists for the `d = 1`
+    /// / `sqrt(d) = 1` shape, where the scale term is at its LEAST observable and is
+    /// therefore worth owning explicitly. Both are ~10 decades above f64 noise, so the
+    /// `assert_eq!` above is what actually catches a mutation -- these floors only stop
+    /// the fixtures from silently drifting into a regime where it would not.
+    #[test]
+    fn multi_window_forward_matches_the_hand_transcription() {
+        let fixtures = [
+            Fixture {
+                input_size: 1,
+                h: 2,
+                heads: 2,
+                window: 2,
+                d_ff: 1,
+                t: 3,
+                head_dim: 1,
+                slopes: &[0.0625, 0.00390625],
+                mutant_floor: 3.6e-7,
+            },
+            Fixture {
+                input_size: 3,
+                h: 8,
+                heads: 4,
+                window: 3,
+                d_ff: 2,
+                t: 5,
+                head_dim: 2,
+                slopes: &[0.25, 0.0625, 0.015625, 0.00390625],
+                mutant_floor: 6.0e-5,
+            },
+        ];
+        for (fi, f) in fixtures.iter().enumerate() {
+            let p = params(f.window, f.heads, f.d_ff);
+            let mut cell = TransformerLayer::new(f.input_size, f.h, &p);
+            let flat = pseudo(cell.nb_of_weights(), 11 + fi as u64);
+            cell.set_weights(&flat);
+            let x = seq(f.t, f.input_size, 0.35);
+            let got = forward(&mut cell, &x);
+
+            let sqrt_d = (f.head_dim as f64).sqrt();
+            let want = transcribe(f, &flat, &x, true, sqrt_d);
+            assert_eq!(
+                got, want,
+                "fixture {fi}: forward disagrees with the transcription"
+            );
+
+            // NON-VACUITY 1: the window really slides and really truncates, so rows past
+            // it carry a genuine edge (`len` caps at W) -- otherwise the ALiBi offsets
+            // would all be 0 and the leg would be the T=1 case again.
+            assert!(f.t > f.window, "fixture {fi}: no window edge");
+            let wcap = cell.window_capacity();
+            assert_eq!(wcap, f.window);
+            for t in 0..f.t {
+                let len = (t + 1).min(f.window);
+                for hh in 0..f.heads {
+                    let sum: f64 = (0..len)
+                        .map(|jj| cell.attn_weights()[[t, hh * wcap + jj]])
+                        .sum();
+                    assert!((sum - 1.0).abs() < 1e-14, "fixture {fi}: row {t} head {hh}");
+                }
+            }
+
+            // THE TWO NAMED MUTATIONS, asserted to be CAUGHT rather than assumed to be.
+            let no_alibi = transcribe(f, &flat, &x, false, sqrt_d);
+            let moved = (0..f.t)
+                .flat_map(|r| (0..f.h).map(move |c| (r, c)))
+                .map(|(r, c)| (got[[r, c]] - no_alibi[[r, c]]).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                moved > f.mutant_floor,
+                "fixture {fi}: dropping the ALiBi term moves the output by only {moved:e} \
+                 -- this pin does not own the ALiBi term"
+            );
+
+            let wrong_scale = transcribe(f, &flat, &x, true, (f.h as f64).sqrt());
+            let moved = (0..f.t)
+                .flat_map(|r| (0..f.h).map(move |c| (r, c)))
+                .map(|(r, c)| (got[[r, c]] - wrong_scale[[r, c]]).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                moved > f.mutant_floor,
+                "fixture {fi}: scaling by sqrt(H) instead of sqrt(d) moves the output by \
+                 only {moved:e} -- this pin does not own the 1/sqrt(d) scale"
+            );
+        }
+    }
+
     /// The ALWAYS-max-subtract convention (S1.3) is what keeps a large-logit row finite:
     /// a deliberately huge `W_qkv` produces logits far past `exp`'s overflow point, and
     /// the output stays finite and normalized.
@@ -1695,9 +1970,11 @@ mod tests {
                 let overall = d.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
                 assert!(overall > 1e-3, "the whole gradient is ~0 at T=1 -- vacuous");
             } else {
-                // MEASURED worst |dL/dw| over the q/k slots at T=2 = 1.02e-2, against a
-                // whole-pack maximum of the same order; pinned at 1e-4, i.e. eight
-                // decades above the T=1 exact zero.
+                // MEASURED worst |dL/dw| over the q/k slots at T=2 = 7.604e-4; pinned at
+                // 1e-4, i.e. 7.6x under the measured contrast. (The T=1 side needs no
+                // margin at all -- it is an exact `== 0.0`, so any positive floor here
+                // separates the two regimes; the margin exists only to survive libm
+                // variance in the measured value.)
                 assert!(
                     worst > 1e-4,
                     "the q/k blocks are still dead at T=2 ({worst:e}) -- the T=1 claim is \

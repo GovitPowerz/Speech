@@ -71,11 +71,19 @@ legacy bytes to match (port-only cell), and the f32 twin requires the headroom
 ascending loops, max-then-exp-then-normalize, one convention in both trees so the f32
 twin is a precision-only divergence.
 
-S1.4 DERIVED DEAD BLOCKS, both pinned `== 0.0` in the cell's own unit tests:
+S1.4 DERIVED DEAD BLOCKS, both pinned in the cell's own unit tests:
 - `b_k` (the k rows of `b_qkv`) is gradient-dead ALWAYS: `q_t . b_k` is constant across
   the window row, annihilated by softmax shift-invariance. This cell's `b_i` analogue
   (sLSTM precedent): seeded 0, never moves, excluded from FD majors, pinned for every
-  `T` (no contrast needed -- dead unconditionally).
+  `T` (no contrast needed -- dead unconditionally). THE PIN IS TWO-CLASS: exact
+  `== 0.0` at `T = 1` (a one-element window gives `p = 1/1 = 1` bit-exactly, so `dl` is
+  a literal `0.0`), and a MEASURED ABSOLUTE FLOOR at `T >= 2` (`1e-14`, residue
+  `~1e-17`) -- a cancellation exact in R but not bit-exact in f64, i.e. the sLSTM `b_i`
+  convention (`slstm.rs:1025` is itself a `1e-14` floor).
+  (Amended 2026-08-12 at T2 review: the `== 0.0` wording was written by analogy to the
+  stored-exact-zero class -- mamba `A_log` at `T=1`, CfC `W_bb` -- and `b_k` at
+  `T >= 2` is the cancellation class; the mechanical test: does the adjoint terminate in
+  a multiplication by a stored exact zero, or in a sum that cancels?)
 - The q and k rows of `W_qkv` (and `b_q`) are dead at `T = 1`: every window has exactly
   one element and a one-element softmax is constantly 1, so `dq = dk = 0` exactly. The
   Mamba-`A_log`-at-`T=1` analogue, pinned with a `T = 2` contrast.
