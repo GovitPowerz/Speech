@@ -453,8 +453,10 @@ fn absent_transformer_keys_decode_to_the_defaults() {
     assert_eq!(cfg.transformer.window, TRANSFORMER_DEFAULT_WINDOW);
     assert_eq!(cfg.transformer.heads, TRANSFORMER_DEFAULT_HEADS);
     assert_eq!(cfg.transformer.d_ff, TRANSFORMER_DEFAULT_D_FF);
-    // `d_ff` is PROVISIONAL until phase-11 Task 3's sizing (which confirms or corrects
-    // this one number in both languages); the other two are settled.
+    // All three are SETTLED: Task 3's sizing re-derived both lineage closed forms and
+    // CONFIRMED `d_ff = 64` (the smallest integer inside both +-15% bands -- see
+    // `TRANSFORMER_DEFAULT_D_FF`'s doc). This literal is the Rust half of the
+    // cross-language pin; the Python half is `tests/test_phase11_init.py`.
     assert_eq!(
         (
             TRANSFORMER_DEFAULT_WINDOW,

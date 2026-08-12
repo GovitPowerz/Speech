@@ -372,10 +372,25 @@ pub const TRANSFORMER_DEFAULT_HEADS: usize = 4;
 /// The default FFN width `d_ff` (phase-11 spec S2/S3) -- the ONE sized constant of this
 /// cell, since heads and window are parameter-free.
 ///
-/// PROVISIONAL as of Task 2: `64` is the spec's design-time ESTIMATE (S3's provisional
-/// arithmetic put the v2-lineage argmin near 54 and v1's +-15% band at `>= ~64`, with 64
-/// inside both). Task 3 re-derives the closed form per lineage and CONFIRMS OR CORRECTS
-/// this one number in both languages; do not treat it as settled until then.
+/// SETTLED by Task 3's sizing (S3), which re-derived both closed forms from
+/// [`TransformerLayer::nb_of_weights`](super::cells::TransformerLayer) and CONFIRMED the
+/// spec's design-time estimate: full-net packs are `13871 + 196*d_ff` (v2 lineage,
+/// `LSTMNeuronNb 11,24,24`, LSTM pack 24431) and `16199 + 196*d_ff` (v1, `23,24,24`, LSTM
+/// pack 33671), bidirectional. The +-15% bands are `d_ff in [36, 72]` (v2) and
+/// `[64, 114]` (v1), so `64` is the SMALLEST integer inside BOTH (v2 +8.12%, v1 -14.64%;
+/// 63 is out at v1 -15.22%) and simultaneously the v2-best point of the intersection.
+///
+/// THE ONE CONFLICT, recorded rather than smoothed over: unlike CfC -- where `B = 45` was
+/// the v2 argmin AND the smallest v1-tolerable integer at once -- the v2 argmin here is
+/// `54` and it sits OUTSIDE v1's band (-20.46%). The spec's primary rule (an integer
+/// inside BOTH bands) is satisfiable, so it decides, and the v2 tiebreak applied WITHIN
+/// the feasible set agrees on the same 64. The finding worth stating: windowed attention
+/// at width 24 is parameter-CHEAP next to a peephole LSTM, so `d_ff` lands well above the
+/// textbook `4*H` heuristic purely to hold capacity comparability.
+///
+/// The full table is in `tests/test_phase11_init.py`'s docstring; the Python mirror is
+/// `config_bridge.TRANSFORMER_DEFAULT_D_FF` (pinned against THIS line by
+/// `test_the_rust_and_python_defaults_agree`).
 pub const TRANSFORMER_DEFAULT_D_FF: usize = 64;
 
 impl Default for TransformerParams {
