@@ -67,7 +67,9 @@ use ndarray::Array2;
 use crate::audio::Audio;
 use crate::config::NnetSpec;
 use crate::constants::random_gauss;
-use crate::nn::blstm::{BlstmConfig, CellType, CfcParams, Direction, MambaParams};
+use crate::nn::blstm::{
+    BlstmConfig, CellType, CfcParams, Direction, MambaParams, TransformerParams,
+};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
@@ -287,16 +289,27 @@ fn build_sad_net(
     shape: FastNetShape,
     mamba: &MambaParams,
     cfc: &CfcParams,
+    transformer: &TransformerParams,
     flat: &[f64],
 ) -> Result<FastSadNet> {
     Ok(match shape {
         FastNetShape::Blstm => FastSadNet::Blstm(FastBlstm::from_flat(spec, flat)?),
-        FastNetShape::Causal(cell) => {
-            FastSadNet::Causal(FastCausalNet::from_flat(spec, cell, mamba, cfc, flat)?)
-        }
-        FastNetShape::BiCell(cell) => {
-            FastSadNet::BiCell(FastBiCell::from_flat(spec, cell, mamba, cfc, flat)?)
-        }
+        FastNetShape::Causal(cell) => FastSadNet::Causal(FastCausalNet::from_flat(
+            spec,
+            cell,
+            mamba,
+            cfc,
+            transformer,
+            flat,
+        )?),
+        FastNetShape::BiCell(cell) => FastSadNet::BiCell(FastBiCell::from_flat(
+            spec,
+            cell,
+            mamba,
+            cfc,
+            transformer,
+            flat,
+        )?),
     })
 }
 
@@ -359,6 +372,11 @@ pub struct FastSpectralSegmenter {
     /// beside `mamba` for the same reason: the deferred `load_weights_file` rebuild
     /// must size the net exactly as `from_legacy` did.
     cfc: CfcParams,
+    /// The `Transformer_*` geometry, inert unless [`Self::shape`] names the transformer
+    /// cell. Carried for its two siblings' reason (the deferred rebuild must size the net
+    /// exactly as `from_legacy` did) -- and here `window`/`heads` matter to the KERNEL
+    /// even though only `d_ff` moves the pack LENGTH.
+    transformer: TransformerParams,
     net: Option<FastSadNet>,
 
     /// Sub-sampling factors + whole-BLSTM ratio, cached from the spec for
@@ -459,7 +477,14 @@ impl FastSpectralSegmenter {
             * output_sub_sampling.iter().product::<usize>();
 
         let net = match weights {
-            Some(flat) => Some(build_sad_net(&spec, shape, &bc.mamba, &bc.cfc, flat)?),
+            Some(flat) => Some(build_sad_net(
+                &spec,
+                shape,
+                &bc.mamba,
+                &bc.cfc,
+                &bc.transformer,
+                flat,
+            )?),
             None => None,
         };
 
@@ -475,6 +500,7 @@ impl FastSpectralSegmenter {
             shape,
             mamba: bc.mamba,
             cfc: bc.cfc,
+            transformer: bc.transformer,
             net,
             lstm_sub_sampling,
             output_sub_sampling,
@@ -512,6 +538,7 @@ impl FastSpectralSegmenter {
             self.shape,
             &self.mamba,
             &self.cfc,
+            &self.transformer,
             &flat,
         )?);
         Ok(())

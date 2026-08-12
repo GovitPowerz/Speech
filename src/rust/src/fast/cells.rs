@@ -22,6 +22,14 @@
 //!   `sigmoid(0.1z)` gate activations. It COMPLETES the causal set
 //!   `{lstm, slstm, mamba, cfc}`; the phase-7 `super::nn::FastBlstm` (bidirectional,
 //!   batched faer projection) is untouched and remains the offline bidirectional twin.
+//! - [`FastTransformer`] mirrors `nn::cells::transformer::TransformerLayer::feed_forward`
+//!   (phase-11 spec S1.1, layout S1.2): the width adapter, RMSNorm_1, the combined
+//!   `[q|k|v]` projection, per-head attention over the CAUSAL SLIDING WINDOW with ALiBi
+//!   logits and an always-max-subtracted softmax, the two residuals and the SiLU FFN. Its
+//!   carried state is a BOUNDED KV RING of capacity `W` (spec S5.1) -- see
+//!   [`TransformerState`] for the identity (`filled == min(t+1, W)` IS the exact forward's
+//!   own edge-truncated window length) that makes offline-vs-streamed bit-identity hold by
+//!   construction rather than by measurement.
 //! - [`FastCausalNet`] mirrors `nn::blstm::BlstmNetwork::feed_forward` under
 //!   [`crate::nn::blstm::Direction::Forward`]: ONE stack (no reverse half, no HCAT),
 //!   `Network::drive`'s per-layer sub-sampling chain, then the SAME f32 dense/softmax
@@ -50,7 +58,16 @@
 //!    the step loop". A batched projection would make the offline and streaming
 //!    numbers differ in the last f32 ULP, which is exactly the class of drift the
 //!    phase-8 gate exists to forbid. So every projection here is a per-step dot over
-//!    a contiguous weight row. The dense output MLP runs the shared
+//!    a contiguous weight row -- and since phase 11 that reads EVERY PROJECTION AND
+//!    EVERY ATTENTION REDUCTION (spec S5.2): [`FastTransformer::step`]'s `q.k` products
+//!    and its weighted-`v` fold are per-step ascending reductions too, never a batched
+//!    `W x W` score matrix. THIS RULE IS A DESIGN-TIME CONTROL AND NOTHING TESTS IT (the
+//!    phase-10 battery item 6 lesson, recorded in `CLAUDE.md`): a SYMMETRIC substitution
+//!    -- one applied inside the shared `step` that both the offline and streaming drivers
+//!    call -- is invisible to every self-consistency leg by construction AND sits under
+//!    the parity pins' measured*10 resolution. Review the rule; do not expect a leg to
+//!    catch its violation. The ASYMMETRIC version (batch one side only) IS caught, by the
+//!    streaming bit-identity legs. The dense output MLP runs the shared
 //!    `super::nn::DenseRowChain` -- still the faer kernel, but driven ONE ROW at a
 //!    time, NOT the batched `dense_net_forward` the phase-7 [`super::nn::FastBlstm`]
 //!    keeps. (An earlier revision of this line said the dense stage was "a per-row
@@ -79,7 +96,11 @@
 //!    ALL the `t-1` peephole cross-terms, the row-11 output-gate term AND the
 //!    `c_{t-1}*f_t` product at `t = 0`, and every one of them is inert against the
 //!    zero-seeded state (`dot(w, 0) == +0.0`, `0.0 * p == +-0.0`, and `x + (+-0.0) == x`
-//!    bar an unreachable `-0.0` accumulator). See [`FastLstm::step`].
+//!    bar an unreachable `-0.0` accumulator). See [`FastLstm::step`]. [`FastTransformer`]
+//!    (phase-11) needs no argument at all and is the strongest form of the point: it has
+//!    no recurrent `h`, and the exact cell's window `[max(0, t-W+1), t]` is EDGE-TRUNCATED
+//!    rather than special-cased, so the ring's own `filled` count reproduces the warm-up
+//!    exactly -- there is no `t == 0` branch to reproduce or to get wrong.
 //!
 //! SCOPE. Forward only, no MLP mode, no backward, no trainer. The NET here
 //! ([`FastCausalNet`]) is causal-only (`Direction::Forward`); the CELL kernels and the
@@ -93,7 +114,7 @@
 use anyhow::{Result, bail};
 
 use crate::config::NnetSpec;
-use crate::nn::blstm::{CellType, CfcParams, MambaParams};
+use crate::nn::blstm::{CellType, CfcParams, MambaParams, TransformerParams};
 
 use super::nn::{
     DenseRowChain, FastDenseLayer, FastMatrix, Scratch, asinh_f32, copy_view_into, ensure_len,
@@ -155,6 +176,19 @@ pub const LECUN_SLOPE_F32: f32 = 2.0 / 3.0;
 fn lecun_tanh_f32(x: f32) -> f32 {
     LECUN_SCALE_F32 * (LECUN_SLOPE_F32 * x).tanh()
 }
+
+/// `nn::cells::transformer::ALIBI_EXPONENT` -- the `-8` of the standard ALiBi ladder
+/// `m_h = 2^(-8h/A)`, `h = 1..A` (phase-11 spec S1.1). Part of the cell definition, not a
+/// tunable, and NOT a weight (the slopes never enter the flat pack).
+///
+/// RE-TYPED here rather than imported, for one reason: the exact cell's constant is
+/// private to its module and `nn/` is not this task's to widen. That leaves the value
+/// unpinned against its source, so the pin is placed one level UP instead, on the derived
+/// LADDER -- `transformer_constants_are_the_exact_ones_narrowed` asserts
+/// [`FastTransformer::slopes`] equals `TransformerLayer::slopes()` narrowed, element for
+/// element, which catches a wrong exponent, a wrong base and a wrong `h` range at once
+/// (strictly more than an equality between two `-8.0`s would).
+const TRANSFORMER_ALIBI_EXPONENT: f64 = -8.0;
 
 /// Ascending dot over two contiguous `n`-element slices -- the f32 stand-in for one
 /// `matmul_seq` output cell (`nn/layers.rs:25-40`: `acc = 0; for kk in 0..k { acc +=
@@ -1344,6 +1378,464 @@ impl FastLstm {
 }
 
 // ---------------------------------------------------------------------------
+// Transformer (phase-11 spec S1.1 forward, S1.2 layout; the twin is S5.1/S5.2).
+// ---------------------------------------------------------------------------
+
+/// `nn::cells::transformer::QKV_NB`: the three column blocks of the combined projection,
+/// in the order `[q | k | v]` (spec S1.1/S1.2). These index BLOCKS of `H`, not columns.
+const TRANSFORMER_QKV_NB: usize = 3;
+
+/// Per-step temporaries for [`FastTransformer::step`], living INSIDE
+/// [`TransformerState`] for exactly [`MambaScratch`]'s reason: `step` takes `&self`, this
+/// tree forbids per-frame allocation, so the scratch hangs off the only `&mut` the kernel
+/// gets. It carries NO information between steps (every element is written before it is
+/// read within a step), so it is private and absent from state equality.
+#[derive(Clone, Debug, Default)]
+struct TransformerScratch {
+    /// `H`: `x'_t`, the adapted input -- also the residual-1 addend.
+    xa: Vec<f32>,
+    /// `H`: `u_t`, the RMSNorm_1 output.
+    u: Vec<f32>,
+    /// `3H`: this step's `[q | k | v]` row, post-bias.
+    qkv: Vec<f32>,
+    /// `W`: ONE head's window row, reused across heads exactly as the exact forward
+    /// reuses its `row` buffer -- logits, then the stabilized exps, then the normalized
+    /// attention weights, each stage overwriting the last in place.
+    probs: Vec<f32>,
+    /// `H`: `attn_t`, heads concatenated.
+    attn: Vec<f32>,
+    /// `H`: `s_t`, the residual-1 output.
+    s: Vec<f32>,
+    /// `H`: `v_norm_t`, the RMSNorm_2 output. (The spec calls this `v_t`; the exact cell's
+    /// module doc carries the same name-collision note -- `v` is the attention VALUE.)
+    vn: Vec<f32>,
+    /// `d_ff`: the POST-SiLU FFN hidden row.
+    act: Vec<f32>,
+}
+
+/// The transformer carried state (spec S5.1): a bounded KV RING and nothing else.
+///
+/// `k_ring`/`v_ring` are `W * H` long, SLOT-MAJOR (`ring[slot*H + c]`), `ring_pos` is the
+/// slot the NEXT push writes, and `filled` is how many slots are live. ALiBi is RELATIVE,
+/// so the absolute stream position never enters the state -- which is what makes a session
+/// resumable at any point with no bookkeeping beyond these four fields.
+///
+/// THE IDENTITY THAT MAKES OFFLINE == STREAMED HOLD BY CONSTRUCTION: after `t+1` steps
+/// `filled == min(t+1, W)`, which is EXACTLY the exact forward's own window length
+/// `t - max(0, t-W+1) + 1 = min(t+1, W)`. A ring shorter than `W` at stream start IS the
+/// offline edge-truncation, not an approximation of it -- so the warm-up rows of a
+/// streamed run are the warm-up rows of the offline run, bit for bit, and no `t == 0`
+/// branch exists anywhere to disagree at a chunk boundary.
+///
+/// `PartialEq` compares the four carried fields only (the scratch is derived), so a state
+/// comparison in a test means what it says. Construct via [`FastTransformer::state`]
+/// ONLY -- the ring and the scratch are sized there, and a hand-built `TransformerState`
+/// would index empty buffers (the [`MambaState`] precedent).
+#[derive(Clone, Debug)]
+pub struct TransformerState {
+    pub k_ring: Vec<f32>,
+    pub v_ring: Vec<f32>,
+    pub ring_pos: usize,
+    pub filled: usize,
+    scratch: TransformerScratch,
+}
+
+impl PartialEq for TransformerState {
+    fn eq(&self, other: &TransformerState) -> bool {
+        self.k_ring == other.k_ring
+            && self.v_ring == other.v_ring
+            && self.ring_pos == other.ring_pos
+            && self.filled == other.filled
+    }
+}
+
+/// f32 forward-only windowed-causal attention cell, the twin of
+/// `nn::cells::transformer::TransformerLayer::feed_forward` transcribed op-for-op.
+///
+/// Every matrix is stored ROW-MAJOR BY ITS OUTPUT INDEX, which makes each output element
+/// one ascending [`dot_f32`] over a contiguous row -- and which is ALREADY the spec S1.2
+/// flat order (`for_each_slot` walks the output index outer, the source index inner), so
+/// `from_flat` is a sequence of contiguous narrowing copies and NOT a re-derivation of the
+/// layout:
+///
+/// | buffer | index | holds |
+/// |---|---|---|
+/// | `adapter_w` | `m*in + k` | `W_a[m, k]` |
+/// | `adapter_b` | `m` | `b_a[m]` |
+/// | `gain1` | `m` | `g_1[m]` |
+/// | `qkv_w` | `r*H + m` | `W_qkv[r, m]`, `r` blocked `[q \| k \| v]` |
+/// | `qkv_b` | `r` | `b_qkv[r]` |
+/// | `out_w` | `m*H + k` | `W_o[m, k]` |
+/// | `out_b` | `m` | `b_o[m]` |
+/// | `gain2` | `m` | `g_2[m]` |
+/// | `ff1_w` | `r*H + m` | `W_1[r, m]` |
+/// | `ff1_b` | `r` | `b_1[r]` |
+/// | `ff2_w` | `m*d_ff + r` | `W_2[m, r]` |
+/// | `ff2_b` | `m` | `b_2[m]` |
+///
+/// TWO CONSTRUCTION-TIME HOISTS, both DECLARED as value-identical in the
+/// [`FastMamba`] `A = -exp(A_log)` sense (a pure function of construction-time constants,
+/// computed once instead of per step -- no arithmetic is reordered):
+///
+/// 1. `slopes[hh]` is the exact cell's `2^(-8h/A)` ladder computed in f64 through `exp2`
+///    and narrowed ONCE, i.e. literally `TransformerLayer::slopes()[hh] as f32` -- NOT
+///    re-derived in f32 (`transformer_constants_are_the_exact_ones_narrowed` pins the
+///    equality).
+/// 2. `sqrt_d` is `(head_dim as f64).sqrt() as f32`, again the exact constant narrowed,
+///    and it is DIVIDED by rather than stored as a reciprocal and multiplied -- the exact
+///    cell's own choice, and the reason it made it: `acc / sqrt_d` is literally the spec's
+///    `(q.k)/sqrt(d)`, with no extra rounding for the twin to have to mirror.
+///
+/// THE `t == 0` NON-BRANCH (the module doc's divergence 4, in its cleanest form here):
+/// there is no recurrent `h` at all, and the first step's window is the ring's first
+/// slot -- so the warm-up needs no special case to skip, which is the whole reason the
+/// streamed and offline runs cannot disagree at a chunk boundary.
+#[derive(Clone)]
+pub struct FastTransformer {
+    input_size: usize,
+    output_size: usize,
+    window: usize,
+    heads: usize,
+    d_ff: usize,
+    head_dim: usize,
+    sqrt_d: f32,
+    slopes: Vec<f32>,
+
+    adapter_w: Vec<f32>, // H*in
+    adapter_b: Vec<f32>, // H
+    gain1: Vec<f32>,     // H
+    qkv_w: Vec<f32>,     // 3H*H
+    qkv_b: Vec<f32>,     // 3H
+    out_w: Vec<f32>,     // H*H
+    out_b: Vec<f32>,     // H
+    gain2: Vec<f32>,     // H
+    ff1_w: Vec<f32>,     // d_ff*H
+    ff1_b: Vec<f32>,     // d_ff
+    ff2_w: Vec<f32>,     // H*d_ff
+    ff2_b: Vec<f32>,     // H
+}
+
+impl FastTransformer {
+    /// `H(in+1) + H + 3H(H+1) + H(H+1) + H + d_ff(H+1) + H(d_ff+1)` (spec S1.2) -- the
+    /// arithmetic mirror of `TransformerLayer::nb_of_weights`'s `for_each_slot` walk,
+    /// pinned against it by `transformer_weight_count_matches_the_exact_cell`.
+    ///
+    /// `window` and `heads` are DELIBERATELY ABSENT from the signature rather than
+    /// accepted and ignored: ALiBi carries no weights and `A` only reshapes the same
+    /// `W_qkv`, so neither can move the pack length (spec S3, pinned on the exact side by
+    /// `phase9_cell_config.rs`). `d_ff` is the cell's ONE sized constant, floored at 1
+    /// exactly as `TransformerLayer::new` floors it.
+    pub fn weight_count(input_size: usize, output_size: usize, d_ff: usize) -> usize {
+        let (h, f) = (output_size, d_ff.max(1));
+        h * (input_size + 1)
+            + h
+            + TRANSFORMER_QKV_NB * h * (h + 1)
+            + h * (h + 1)
+            + h
+            + f * (h + 1)
+            + h * (f + 1)
+    }
+
+    /// Build from the head of the f64 flat pack, narrowing `f64 -> f32` ONCE, block by
+    /// block in the spec S1.2 order. PANICS on a short slice (see
+    /// [`FastSlstm::from_flat`] for why the length check lives at the net level) and on a
+    /// non-dividing head count, naming both numbers -- `TransformerLayer::new`'s
+    /// last-resort guard, mirrored, since the config path
+    /// (`BlstmConfig::from_legacy`) rejects that earlier and as a typed error.
+    pub fn from_flat(
+        flat: &[f64],
+        input_size: usize,
+        output_size: usize,
+        window: usize,
+        heads: usize,
+        d_ff: usize,
+    ) -> FastTransformer {
+        let h = output_size;
+        let (w, a, f) = (window.max(1), heads.max(1), d_ff.max(1));
+        assert!(
+            h.is_multiple_of(a),
+            "fast transformer: the cell width ({h}) must be divisible by the head count \
+             ({a}) -- a non-dividing head count is a configuration error, not something to \
+             truncate"
+        );
+        let head_dim = h / a;
+
+        let mut pos = 0usize;
+        let mut take = |k: usize| -> Vec<f32> {
+            let seg = &flat[pos..pos + k];
+            pos += k;
+            seg.iter().map(|&x| x as f32).collect()
+        };
+
+        let adapter_w = take(h * input_size);
+        let adapter_b = take(h);
+        let gain1 = take(h);
+        let qkv_w = take(TRANSFORMER_QKV_NB * h * h);
+        let qkv_b = take(TRANSFORMER_QKV_NB * h);
+        let out_w = take(h * h);
+        let out_b = take(h);
+        let gain2 = take(h);
+        let ff1_w = take(f * h);
+        let ff1_b = take(f);
+        let ff2_w = take(h * f);
+        let ff2_b = take(h);
+
+        // The two declared hoists (see the struct doc): both are the EXACT cell's own f64
+        // constants narrowed once, not f32 re-derivations.
+        let slopes: Vec<f32> = (1..=a)
+            .map(|hh| (TRANSFORMER_ALIBI_EXPONENT * hh as f64 / a as f64).exp2() as f32)
+            .collect();
+
+        FastTransformer {
+            input_size,
+            output_size: h,
+            window: w,
+            heads: a,
+            d_ff: f,
+            head_dim,
+            sqrt_d: (head_dim as f64).sqrt() as f32,
+            slopes,
+            adapter_w,
+            adapter_b,
+            gain1,
+            qkv_w,
+            qkv_b,
+            out_w,
+            out_b,
+            gain2,
+            ff1_w,
+            ff1_b,
+            ff2_w,
+            ff2_b,
+        }
+    }
+
+    pub fn input_size(&self) -> usize {
+        self.input_size
+    }
+
+    pub fn output_size(&self) -> usize {
+        self.output_size
+    }
+
+    /// The attention window `W` in CELL rows -- the KV ring's capacity.
+    pub fn window(&self) -> usize {
+        self.window
+    }
+
+    pub fn heads(&self) -> usize {
+        self.heads
+    }
+
+    pub fn d_ff(&self) -> usize {
+        self.d_ff
+    }
+
+    /// `d = H / A`, the per-head width.
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+    }
+
+    /// The narrowed ALiBi slopes (see the struct doc's hoist 1).
+    pub fn slopes(&self) -> &[f32] {
+        &self.slopes
+    }
+
+    /// The narrowed logit-scale DENOMINATOR `sqrt(d)` (hoist 2).
+    pub fn sqrt_d(&self) -> f32 {
+        self.sqrt_d
+    }
+
+    /// A fresh state: an EMPTY KV ring at slot 0, which is the exact forward's `t = 0`
+    /// one-element window reached with no branch (the first step pushes into it before
+    /// attending, so `filled` is 1 by the time the window is read).
+    pub fn state(&self) -> TransformerState {
+        let (h, w, f) = (self.output_size, self.window, self.d_ff);
+        TransformerState {
+            k_ring: vec![0.0; w * h],
+            v_ring: vec![0.0; w * h],
+            ring_pos: 0,
+            filled: 0,
+            scratch: TransformerScratch {
+                xa: vec![0.0; h],
+                u: vec![0.0; h],
+                qkv: vec![0.0; TRANSFORMER_QKV_NB * h],
+                probs: vec![0.0; w],
+                attn: vec![0.0; h],
+                s: vec![0.0; h],
+                vn: vec![0.0; h],
+                act: vec![0.0; f],
+            },
+        }
+    }
+
+    /// ONE timestep (spec S1.1), the streaming kernel. Stages, in the exact forward's
+    /// order: width adapter -> RMSNorm_1 -> the combined `[q|k|v]` projection -> PUSH
+    /// `(k_t, v_t)` into the ring -> per-head windowed attention over the ring OLDEST
+    /// FIRST (ALiBi logits, max-subtracted softmax, weighted `v` fold) -> residual 1 ->
+    /// RMSNorm_2 -> FFN + residual 2.
+    ///
+    /// THE PUSH HAPPENS BEFORE THE ATTENTION, deliberately: the exact forward's window is
+    /// the CLOSED interval `j in [max(0, t-W+1), t]`, so the current frame attends to
+    /// itself. Pushing first is what makes "the ring, oldest first" and "`j` ascending
+    /// over the window" the same sequence -- the [`FastMamba::step`] conv-ring precedent
+    /// ("write the current sample at `ring_pos` FIRST, then read").
+    ///
+    /// THE ALiBi OFFSET IS COMPUTED RELATIVELY: `j - t = jj - (len-1)` for the oldest-first
+    /// index `jj`, a difference of two converted small integers exactly as the exact cell's
+    /// `j as f64 - t as f64` is. No absolute timestep is carried, which is exactly why the
+    /// state does not need one.
+    ///
+    /// Width tolerance follows the sLSTM/Mamba-adapter convention (summing FEWER TERMS for
+    /// a narrow input) rather than the CfC's literal zero-pad: the exact cell's
+    /// `reconcile_input` zero-pads, and `acc += w * 0.0` on a `+0.0`-seeded accumulator is
+    /// that pad, term for term.
+    ///
+    /// `needless_range_loop` is allowed for the sibling cells' reason: the ascending index
+    /// order IS the numeric contract.
+    #[allow(clippy::needless_range_loop)]
+    pub fn step(&self, x: &[f32], s: &mut TransformerState, out: &mut [f32]) {
+        let (h, a, d, f, w) = (
+            self.output_size,
+            self.heads,
+            self.head_dim,
+            self.d_ff,
+            self.window,
+        );
+        let TransformerState {
+            k_ring,
+            v_ring,
+            ring_pos,
+            filled,
+            scratch: sc,
+        } = s;
+
+        // 1. Width adapter: x' = W_a x + b_a.
+        let k_in = x.len().min(self.input_size);
+        for m in 0..h {
+            let base = m * self.input_size;
+            sc.xa[m] = dot_f32(&self.adapter_w[base..base + k_in], &x[..k_in]) + self.adapter_b[m];
+        }
+
+        // 2. RMSNorm_1 with the learned gain (the Mamba op order, verbatim).
+        let mut acc = 0.0_f32;
+        for m in 0..h {
+            acc += sc.xa[m] * sc.xa[m];
+        }
+        let inv = 1.0_f32 / (acc / h as f32 + RMS_EPS_F32).sqrt();
+        for m in 0..h {
+            sc.u[m] = sc.xa[m] * inv * self.gain1[m];
+        }
+
+        // 3. Combined [q | k | v] projection + bias.
+        for r in 0..TRANSFORMER_QKV_NB * h {
+            let base = r * h;
+            sc.qkv[r] = dot_f32(&self.qkv_w[base..base + h], &sc.u[..h]) + self.qkv_b[r];
+        }
+
+        // 4. Push (k_t, v_t), evicting the OLDEST at capacity: `ring_pos` advances modulo
+        //    W, so the slot it wraps onto is by construction the least recently written.
+        let slot = *ring_pos;
+        k_ring[slot * h..slot * h + h].copy_from_slice(&sc.qkv[h..2 * h]);
+        v_ring[slot * h..slot * h + h].copy_from_slice(&sc.qkv[2 * h..3 * h]);
+        *ring_pos = (slot + 1) % w;
+        *filled = (*filled + 1).min(w);
+        // `len` IS the exact forward's `t - window_begin(t) + 1 = min(t+1, W)`, and
+        // `oldest` is the slot holding that window's first frame (`ring_pos` is now one
+        // PAST the newest, so stepping back `len` lands on the oldest live slot).
+        let len = *filled;
+        let oldest = (*ring_pos + w - len) % w;
+
+        // 5. Per-head windowed causal attention.
+        for hh in 0..a {
+            let qb = hh * d; // BLOCK_Q * H + hh*d, and BLOCK_Q == 0
+            let hb = hh * d; // the same per-head offset INSIDE a ring row
+            let slope = self.slopes[hh];
+            for jj in 0..len {
+                let ko = ((oldest + jj) % w) * h + hb;
+                let mut acc = 0.0_f32;
+                for e in 0..d {
+                    acc += sc.qkv[qb + e] * k_ring[ko + e];
+                }
+                sc.probs[jj] = acc / self.sqrt_d + slope * (jj as f32 - (len - 1) as f32);
+            }
+            // Softmax, ALWAYS max-subtracted (spec S1.3): max, then exp, then normalize,
+            // each an ascending loop. The subtraction is the exact cell's too, which is
+            // what keeps the twin PRECISION-only -- and it is also the guard: every
+            // exponent is `<= 0`, so `exp` cannot overflow even at f32's `~88.72` limit,
+            // and no separate saturation branch exists here to diverge from f64's.
+            let mut mx = sc.probs[0];
+            for jj in 1..len {
+                if sc.probs[jj] > mx {
+                    mx = sc.probs[jj];
+                }
+            }
+            let mut sum = 0.0_f32;
+            for jj in 0..len {
+                let e = (sc.probs[jj] - mx).exp();
+                sc.probs[jj] = e;
+                sum += e;
+            }
+            for jj in 0..len {
+                sc.probs[jj] /= sum;
+            }
+            // The weighted `v` fold. This one reduction is an EXPLICIT ascending loop
+            // rather than a [`dot_f32`] call -- not an exception to the no-faer rule but a
+            // consequence of it: for a fixed element `e` the operand walks ring SLOTS, and
+            // a circular window is not a contiguous slice in any layout. The accumulation
+            // order (ascending `jj`, i.e. oldest first) is the exact forward's, which is
+            // what the rule is actually about.
+            for e in 0..d {
+                let mut acc = 0.0_f32;
+                for jj in 0..len {
+                    acc += sc.probs[jj] * v_ring[((oldest + jj) % w) * h + hb + e];
+                }
+                sc.attn[hh * d + e] = acc;
+            }
+        }
+
+        // 6. Residual 1: s = x' + W_o attn + b_o.
+        for m in 0..h {
+            let base = m * h;
+            sc.s[m] =
+                sc.xa[m] + dot_f32(&self.out_w[base..base + h], &sc.attn[..h]) + self.out_b[m];
+        }
+
+        // 7. RMSNorm_2 (same op order as RMSNorm_1, on s).
+        let mut acc2 = 0.0_f32;
+        for m in 0..h {
+            acc2 += sc.s[m] * sc.s[m];
+        }
+        let inv2 = 1.0_f32 / (acc2 / h as f32 + RMS_EPS_F32).sqrt();
+        for m in 0..h {
+            sc.vn[m] = sc.s[m] * inv2 * self.gain2[m];
+        }
+
+        // 8. FFN + residual 2: h = s + W_2 silu(W_1 v_norm + b_1) + b_2.
+        for r in 0..f {
+            let base = r * h;
+            sc.act[r] = silu_f32(dot_f32(&self.ff1_w[base..base + h], &sc.vn[..h]) + self.ff1_b[r]);
+        }
+        for m in 0..h {
+            let base = m * f;
+            out[m] = sc.s[m] + dot_f32(&self.ff2_w[base..base + f], &sc.act[..f]) + self.ff2_b[m];
+        }
+    }
+
+    /// Whole-sequence forward: a fresh [`Self::state`] then [`Self::step`] per row.
+    pub fn feed_forward(&self, seq: &FastMatrix) -> FastMatrix {
+        let o = self.output_size;
+        let mut out = FastMatrix::zeros(seq.rows, o);
+        let mut st = self.state();
+        for t in 0..seq.rows {
+            let (lo, hi) = (t * o, t * o + o);
+            self.step(seq.row(t), &mut st, &mut out.data[lo..hi]);
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The cell enum (the fast twin of `nn::cells::CellLayer`).
 // ---------------------------------------------------------------------------
 
@@ -1370,6 +1862,7 @@ pub enum FastCell {
     Slstm(FastSlstm),
     Mamba(FastMamba),
     Cfc(FastCfc),
+    Transformer(FastTransformer),
 }
 
 /// The carried state of a [`FastCell`], variant-matched to its cell.
@@ -1379,6 +1872,7 @@ pub enum FastCellState {
     Slstm(SlstmState),
     Mamba(MambaState),
     Cfc(CfcState),
+    Transformer(TransformerState),
 }
 
 impl FastCell {
@@ -1388,6 +1882,7 @@ impl FastCell {
             FastCell::Slstm(c) => c.input_size(),
             FastCell::Mamba(c) => c.input_size(),
             FastCell::Cfc(c) => c.input_size(),
+            FastCell::Transformer(c) => c.input_size(),
         }
     }
 
@@ -1397,6 +1892,7 @@ impl FastCell {
             FastCell::Slstm(c) => c.output_size(),
             FastCell::Mamba(c) => c.output_size(),
             FastCell::Cfc(c) => c.output_size(),
+            FastCell::Transformer(c) => c.output_size(),
         }
     }
 
@@ -1407,6 +1903,7 @@ impl FastCell {
             FastCell::Slstm(c) => FastCellState::Slstm(c.state()),
             FastCell::Mamba(c) => FastCellState::Mamba(c.state()),
             FastCell::Cfc(c) => FastCellState::Cfc(c.state()),
+            FastCell::Transformer(c) => FastCellState::Transformer(c.state()),
         }
     }
 
@@ -1419,6 +1916,7 @@ impl FastCell {
             (FastCell::Slstm(c), FastCellState::Slstm(st)) => c.step(x, st, out),
             (FastCell::Mamba(c), FastCellState::Mamba(st)) => c.step(x, st, out),
             (FastCell::Cfc(c), FastCellState::Cfc(st)) => c.step(x, st, out),
+            (FastCell::Transformer(c), FastCellState::Transformer(st)) => c.step(x, st, out),
             _ => panic!("fast::cells: cell/state variant mismatch"),
         }
     }
@@ -1432,18 +1930,20 @@ impl FastCell {
 /// rather than two arms that can disagree.
 ///
 /// TOTAL since phase-10 Task 8 (it returned `Option`, `None` meaning "the LSTM has no
-/// f32 cell kernel", until [`FastLstm`] landed). The two callers' LSTM refusals did NOT
-/// simply disappear with the sentinel: [`FastCausalNet`]'s is GONE because the causal
-/// LSTM is exactly what this task implements, while [`super::bicell::FastBiCell`]'s
-/// survives as an EXPLICIT guard -- a bidirectional LSTM's fast twin is
-/// `super::nn::FastBlstm`, and routing it through a cell stack instead would silently
-/// swap the batched-faer kernel for the per-step one.
+/// f32 cell kernel", until [`FastLstm`] landed), and TOTAL AGAIN since phase-11 Task 5,
+/// which replaced the transformer's interim `unimplemented!` arm with [`FastTransformer`].
+/// The two callers' LSTM refusals did NOT simply disappear with the sentinel:
+/// [`FastCausalNet`]'s is GONE because the causal LSTM is exactly what phase-10 Task 8
+/// implemented, while [`super::bicell::FastBiCell`]'s survives as an EXPLICIT guard -- a
+/// bidirectional LSTM's fast twin is `super::nn::FastBlstm`, and routing it through a cell
+/// stack instead would silently swap the batched-faer kernel for the per-step one.
 pub(crate) fn cell_weight_count(
     cell_type: CellType,
     i: usize,
     o: usize,
     mamba: &MambaParams,
     cfc: &CfcParams,
+    transformer: &TransformerParams,
 ) -> usize {
     match cell_type {
         CellType::Lstm => FastLstm::weight_count(i, o),
@@ -1457,14 +1957,9 @@ pub(crate) fn cell_weight_count(
             mamba.dt_rank,
         ),
         CellType::Cfc => FastCfc::weight_count(i, o, cfc.backbone_units, cfc.backbone_layers),
-        // INTERIM ARM (phase-11 Task 2, replaced by Tasks 5/6). The `CellType` variant
-        // has to exist before its f32 kernel does, and this match is exhaustive by
-        // design, so the fifth cell arrives here as a LOUD panic rather than a silent
-        // mis-count. Unreachable from any committed config: nothing sets
-        // `Inference_Path fast` together with `Cell_Type transformer`. `rg -n
-        // "unimplemented" src/rust/src/fast` must come back CLEAN at branch end (Task 11
-        // verifies).
-        CellType::Transformer => unimplemented!("transformer fast twin lands in phase-11 T5/T6"),
+        // `window`/`heads` are absent by design, not forgotten -- see
+        // [`FastTransformer::weight_count`]: neither can move the pack length.
+        CellType::Transformer => FastTransformer::weight_count(i, o, transformer.d_ff),
     }
 }
 
@@ -1473,9 +1968,10 @@ pub(crate) fn cell_weight_count(
 ///
 /// `peep` is `[cells, gates, gates_recurrent]` for the stack being built (the
 /// `NnetSpec::peepholes` triple for THIS direction). It is read by the LSTM arm alone;
-/// the three port-only cells have no peepholes at all (spec S2.2/S3.2/S1.2), which is why
-/// they ignore it -- the same "parsed for every config, consumed by one arm" shape
-/// `BlstmNetwork::from_config` gives the `Mamba_*` geometry.
+/// the four port-only cells have no peepholes at all (spec S2.2/S3.2/S1.2, phase-11
+/// S1.2), which is why they ignore it -- the same "parsed for every config, consumed by
+/// one arm" shape `BlstmNetwork::from_config` gives the `Mamba_*` geometry.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_cell(
     cell_type: CellType,
     flat: &[f64],
@@ -1483,9 +1979,10 @@ pub(crate) fn build_cell(
     o: usize,
     mamba: &MambaParams,
     cfc: &CfcParams,
+    transformer: &TransformerParams,
     peep: [bool; 3],
 ) -> (FastCell, usize) {
-    let used = cell_weight_count(cell_type, i, o, mamba, cfc);
+    let used = cell_weight_count(cell_type, i, o, mamba, cfc, transformer);
     let cell = match cell_type {
         CellType::Lstm => FastCell::Lstm(FastLstm::from_flat(flat, i, o, peep)),
         CellType::Slstm => FastCell::Slstm(FastSlstm::from_flat(flat, i, o)),
@@ -1505,9 +2002,14 @@ pub(crate) fn build_cell(
             cfc.backbone_units,
             cfc.backbone_layers,
         )),
-        // INTERIM ARM -- see [`cell_weight_count`]'s twin for the full note. Replaced by
-        // phase-11 Tasks 5/6.
-        CellType::Transformer => unimplemented!("transformer fast twin lands in phase-11 T5/T6"),
+        CellType::Transformer => FastCell::Transformer(FastTransformer::from_flat(
+            flat,
+            i,
+            o,
+            transformer.window,
+            transformer.heads,
+            transformer.d_ff,
+        )),
     };
     (cell, used)
 }
@@ -1628,6 +2130,7 @@ pub(crate) fn stack_element_count(
     cell_type: CellType,
     mamba: &MambaParams,
     cfc: &CfcParams,
+    transformer: &TransformerParams,
     stacks: usize,
 ) -> usize {
     let lstm = &spec.lstm_neuron_nb;
@@ -1638,7 +2141,7 @@ pub(crate) fn stack_element_count(
     for jj in 0..lstm.len() - 1 {
         let i = lstm[jj] * lsub[jj];
         let o = lstm[jj + 1];
-        n += stacks * cell_weight_count(cell_type, i, o, mamba, cfc);
+        n += stacks * cell_weight_count(cell_type, i, o, mamba, cfc, transformer);
     }
     for jj in 0..outn.len() - 1 {
         n += outn[jj] * osub[jj] * outn[jj + 1] + outn[jj + 1];
@@ -1838,9 +2341,17 @@ impl FastCausalNet {
         cell_type: CellType,
         mamba: &MambaParams,
         cfc: &CfcParams,
+        transformer: &TransformerParams,
     ) -> Result<usize> {
         check_net_spec(spec, "fast::cells::FastCausalNet")?;
-        Ok(stack_element_count(spec, cell_type, mamba, cfc, 1))
+        Ok(stack_element_count(
+            spec,
+            cell_type,
+            mamba,
+            cfc,
+            transformer,
+            1,
+        ))
     }
 
     /// Build from a `NnetSpec` + the cell type/geometry + the flat f64 pack, narrowing
@@ -1854,6 +2365,7 @@ impl FastCausalNet {
         cell_type: CellType,
         mamba: &MambaParams,
         cfc: &CfcParams,
+        transformer: &TransformerParams,
         flat: &[f64],
     ) -> Result<FastCausalNet> {
         if spec.lstm_neuron_nb.is_empty() || spec.lstm_neuron_nb[0] == 0 {
@@ -1862,7 +2374,7 @@ impl FastCausalNet {
                  unsupported"
             );
         }
-        let needed = Self::element_count(spec, cell_type, mamba, cfc)?;
+        let needed = Self::element_count(spec, cell_type, mamba, cfc, transformer)?;
         if flat.len() < needed {
             bail!(
                 "flat weight vector too short for the fast causal net: {} < {needed}",
@@ -1886,7 +2398,8 @@ impl FastCausalNet {
         for jj in 0..lstm.len() - 1 {
             let i = lstm[jj] * lsub[jj];
             let o = lstm[jj + 1];
-            let (cell, used) = build_cell(cell_type, &flat[pos..], i, o, mamba, cfc, peep);
+            let (cell, used) =
+                build_cell(cell_type, &flat[pos..], i, o, mamba, cfc, transformer, peep);
             cells.push(cell);
             pos += used;
         }
@@ -2094,12 +2607,18 @@ mod tests {
     use ndarray::Array2;
 
     use super::*;
-    use crate::nn::cells::{CfcLayer, MambaLayer, SlstmLayer};
+    use crate::nn::cells::{CfcLayer, MambaLayer, SlstmLayer, TransformerLayer};
     use crate::nn::layers::LstmLayer;
 
     const I: usize = 5;
     const O: usize = 3;
     const T: usize = 11;
+
+    /// The TRANSFORMER legs' own width, and it is not a stylistic choice: `H` must be
+    /// divisible by the head count, and the shared `O = 3` is not divisible by the
+    /// fixture's `A = 2`. `TF_O = 4` mirrors the committed `transformer_forward` fixture's
+    /// cell width exactly, so the unit tier and the parity tier run the same geometry.
+    const TF_O: usize = 4;
 
     /// The exact-f64-vs-fast-f32 CELL tolerance, measure-then-pinned: the worst
     /// measured scale-floored relative delta across the three legs below is 3.96e-7
@@ -2244,6 +2763,47 @@ mod tests {
         cell
     }
 
+    /// The transformer geometry every inline leg uses -- the COMMITTED
+    /// `transformer_forward` fixture's, verbatim (`Transformer_Window 4`,
+    /// `Transformer_Heads 2`, `Transformer_D_Ff 6`). A TINY `W = 4` against `T = 11` is
+    /// the point: the ring wraps twice over a unit-test sequence, so both the
+    /// `t < W` warm-up and the `t > W` steady state are live everywhere below.
+    fn transformer_params() -> TransformerParams {
+        TransformerParams {
+            window: 4,
+            heads: 2,
+            d_ff: 6,
+        }
+    }
+
+    /// The transformer geometry the STACKED net legs use. `heads = 1` because those legs'
+    /// spec is `[6, 5, 4]` -- a 5-wide layer is not divisible by 2, and
+    /// `BlstmConfig::from_legacy` (rightly) refuses that config outright. The head SPLIT is
+    /// exercised at `A = 2` by every single-cell leg above; what the stacked legs own is
+    /// the layer chain, so trading `A` for a valid multi-width spec costs nothing and
+    /// leaves the sibling cells' committed geometry (and their measured numbers)
+    /// byte-unchanged.
+    fn transformer_params_stack() -> TransformerParams {
+        TransformerParams {
+            window: 3,
+            heads: 1,
+            d_ff: 5,
+        }
+    }
+
+    fn fast_transformer(i: usize, o: usize) -> FastTransformer {
+        let p = transformer_params();
+        let n = FastTransformer::weight_count(i, o, p.d_ff);
+        FastTransformer::from_flat(&weights(n), i, o, p.window, p.heads, p.d_ff)
+    }
+
+    fn exact_transformer(i: usize, o: usize) -> TransformerLayer {
+        let p = transformer_params();
+        let mut cell = TransformerLayer::new(i, o, &p);
+        cell.set_weights(&weights(cell.nb_of_weights()));
+        cell
+    }
+
     fn fast_mamba(i: usize, o: usize) -> FastMamba {
         let p = mamba_params();
         let n = FastMamba::weight_count(i, o, p.d_state, p.d_conv, p.expand, p.dt_rank);
@@ -2306,6 +2866,121 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn transformer_weight_count_matches_the_exact_cell() {
+        // Both the fixture geometry and the S2 DEFAULTS, and both `in != out` and
+        // `in == out` (this cell always has an adapter, unlike mamba, so the widths only
+        // change the `W_a` block -- asserted anyway, since "always" is a claim).
+        for (w, a, f) in [(4usize, 2usize, 6usize), (64, 4, 64), (1, 1, 1), (3, 4, 17)] {
+            for (i, o) in [(5usize, 4usize), (92, 4), (23, 24), (24, 24), (8, 8)] {
+                if !o.is_multiple_of(a) {
+                    continue;
+                }
+                let p = TransformerParams {
+                    window: w,
+                    heads: a,
+                    d_ff: f,
+                };
+                assert_eq!(
+                    FastTransformer::weight_count(i, o, f),
+                    TransformerLayer::new(i, o, &p).nb_of_weights(),
+                    "in={i} out={o} W={w} A={a} d_ff={f}"
+                );
+            }
+        }
+    }
+
+    /// `window` and `heads` are PACK-LENGTH-INERT (spec S3's parameter-free claim), which
+    /// is why [`FastTransformer::weight_count`] does not take them. Asserted here rather
+    /// than assumed, because the fast reader's argument list is where forgetting it would
+    /// hurt: a `weight_count` that silently ignored a length-moving parameter would
+    /// decode every pack shifted.
+    #[test]
+    fn transformer_window_and_heads_do_not_move_the_pack_length() {
+        let n = FastTransformer::weight_count(I, TF_O, 6);
+        for (w, a) in [(4usize, 2usize), (1, 1), (64, 4), (7, 4)] {
+            let p = TransformerParams {
+                window: w,
+                heads: a,
+                d_ff: 6,
+            };
+            assert_eq!(TransformerLayer::new(I, TF_O, &p).nb_of_weights(), n);
+        }
+        // ...and `d_ff` DOES move it (the contrast that makes the above non-vacuous).
+        assert_ne!(FastTransformer::weight_count(I, TF_O, 7), n);
+    }
+
+    /// The two construction-time HOISTS are the EXACT cell's own f64 constants narrowed,
+    /// not f32 re-derivations (the [`LECUN_SCALE_F32`] precedent, one level up: the pin is
+    /// on the derived ladder rather than on the private exponent, so it catches a wrong
+    /// base, a wrong exponent and a wrong `h` range together).
+    #[test]
+    fn transformer_constants_are_the_exact_ones_narrowed() {
+        for a in [1usize, 2, 4, 8] {
+            let p = TransformerParams {
+                window: 4,
+                heads: a,
+                d_ff: 6,
+            };
+            let exact = TransformerLayer::new(I, 8, &p);
+            let fast = FastTransformer::from_flat(
+                &weights(FastTransformer::weight_count(I, 8, p.d_ff)),
+                I,
+                8,
+                p.window,
+                p.heads,
+                p.d_ff,
+            );
+            let want: Vec<f32> = exact.slopes().iter().map(|&s| s as f32).collect();
+            assert_eq!(fast.slopes(), want.as_slice(), "A={a}: the ALiBi ladder");
+            assert_eq!(
+                fast.sqrt_d(),
+                (exact.head_dim() as f64).sqrt() as f32,
+                "A={a}: sqrt(d)"
+            );
+            assert_eq!(fast.head_dim(), exact.head_dim(), "A={a}: d = H/A");
+        }
+        // A = 4 lands on exact powers of two (the `exp2` route, not `powf`), so the
+        // narrowing is lossless there and the ladder is checkable by eye.
+        let p = transformer_params();
+        let fast = FastTransformer::from_flat(
+            &weights(FastTransformer::weight_count(I, TF_O, p.d_ff)),
+            I,
+            TF_O,
+            p.window,
+            p.heads,
+            p.d_ff,
+        );
+        assert_eq!(fast.slopes(), [0.0625_f32, 0.00390625].as_slice());
+    }
+
+    /// The transformer state is a KV ring and NOTHING ELSE -- no `h`, no stabilizer, no
+    /// SSM state. It starts EMPTY (`filled == 0`), which is not the same as "zeroed and
+    /// full": the first step pushes before it attends, so the window it reads has exactly
+    /// one entry, reproducing the exact forward's `t = 0` row with no branch.
+    #[test]
+    fn transformer_state_is_an_empty_kv_ring() {
+        let cell = fast_transformer(I, TF_O);
+        let st = cell.state();
+        let p = transformer_params();
+        assert_eq!(st.ring_pos, 0);
+        assert_eq!(st.filled, 0);
+        assert_eq!(st.k_ring.len(), p.window * TF_O);
+        assert_eq!(st.v_ring.len(), p.window * TF_O);
+        assert!(st.k_ring.iter().all(|&v| v == 0.0));
+        assert!(st.v_ring.iter().all(|&v| v == 0.0));
+        // The scratch is sized HERE and nowhere else, which is why `state()` is the only
+        // sanctioned constructor.
+        assert_eq!(st.scratch.xa.len(), TF_O);
+        assert_eq!(st.scratch.u.len(), TF_O);
+        assert_eq!(st.scratch.qkv.len(), 3 * TF_O);
+        assert_eq!(st.scratch.probs.len(), p.window);
+        assert_eq!(st.scratch.attn.len(), TF_O);
+        assert_eq!(st.scratch.s.len(), TF_O);
+        assert_eq!(st.scratch.vn.len(), TF_O);
+        assert_eq!(st.scratch.act.len(), p.d_ff);
     }
 
     /// THE LAYOUT PIN, block by block and element for element -- the phase-9 Task-4
@@ -2409,6 +3084,11 @@ mod tests {
         // `weight_bridge.nnet_to_flat` packer, so agreement here means the fast reader and
         // the golden-tested packer describe the same 13 blocks.
         assert_eq!(FastLstm::weight_count(i, o) + mlp + tail, 1651);
+        // ...and the phase-11 Task 4 transformer fixture (`transformer_forward.config`:
+        // `Transformer_Window 4` / `Transformer_Heads 2` / `Transformer_D_Ff 6`), whose
+        // manifest pack_length is 569 -- the same cross-check against the Python builder
+        // that wrote `transformer_forward_seed.bin`.
+        assert_eq!(FastTransformer::weight_count(i, o, 6) + mlp + tail, 569);
     }
 
     // --- construction + state -------------------------------------------------
@@ -2563,6 +3243,78 @@ mod tests {
         assert!(wrapped.data.iter().all(|v| v.is_finite()));
         assert!(wrapped.data.iter().any(|&v| v != wrapped.data[0]));
         assert_eq!(cell.feed_forward(&input), wrapped);
+    }
+
+    #[test]
+    fn transformer_wrapper_is_the_step_loop() {
+        let cell = fast_transformer(I, TF_O);
+        let input = seq(T, I, 0.4);
+        let wrapped = cell.feed_forward(&input);
+
+        let mut manual = FastMatrix::zeros(T, TF_O);
+        let mut st = cell.state();
+        for t in 0..T {
+            let (lo, hi) = (t * TF_O, t * TF_O + TF_O);
+            cell.step(input.row(t), &mut st, &mut manual.data[lo..hi]);
+        }
+        assert_eq!(wrapped, manual, "wrapper != step loop");
+        assert!(wrapped.data.iter().all(|v| v.is_finite()));
+        assert!(wrapped.data.iter().any(|&v| v != wrapped.data[0]));
+        // The ring genuinely wrapped: T = 11 steps at W = 4 saturates `filled` and lands
+        // `ring_pos` at `T % W`.
+        assert_eq!(st.filled, cell.window());
+        assert_eq!(st.ring_pos, T % cell.window());
+        // Run twice: bit-identical (a fresh state per call, no leak).
+        assert_eq!(cell.feed_forward(&input), wrapped);
+    }
+
+    /// THE RING-EVICTION PIN, and it is the strongest structural statement available for
+    /// this cell: a windowed-causal attention block with NO other recurrent state has
+    /// output row `t` depending on the last `min(t+1, W)` INPUT ROWS AND NOTHING ELSE
+    /// (each `k_j`/`v_j` is a pure function of `x_j`). So running the cell on the
+    /// TRUNCATED input `x[t-W+1 ..= t]` must reproduce row `t` of the long run BIT FOR
+    /// BIT.
+    ///
+    /// That identity is exactly what a WRONG EVICTION breaks. If the ring dropped the
+    /// NEWEST entry instead of the oldest (or kept a stale one past its window), the long
+    /// run's window at `t` would hold a different set of frames than the short run's, and
+    /// the two rows would disagree -- so this leg owns the ring bookkeeping (`ring_pos`
+    /// advance, `filled` saturation, the `oldest` index) rather than merely observing it.
+    /// MEASURED as non-vacuous by mutation (see the task report): gating the `ring_pos`
+    /// advance on `filled < W` -- i.e. evicting the newest once full -- fails this test
+    /// with a max row delta of order 1e-1, five decades above the f32 band.
+    ///
+    /// It is also the OFFLINE half of the phase-8 streaming contract, proved here before
+    /// any session exists: a resumed stream is a truncated window, and this says the
+    /// truncation is free.
+    #[test]
+    fn transformer_window_truncation_identity() {
+        let cell = fast_transformer(I, TF_O);
+        let w = cell.window();
+        let long = seq(T, I, 0.4);
+        let whole = cell.feed_forward(&long);
+        assert!(T > 2 * w, "the ring must wrap at least twice");
+
+        for t in w..T {
+            // The exact forward's window for row t is [t-W+1, t] once t >= W-1.
+            let lo = t + 1 - w;
+            let mut short = FastMatrix::zeros(w, I);
+            short.data.copy_from_slice(&long.data[lo * I..(t + 1) * I]);
+            let out = cell.feed_forward(&short);
+            let want = &whole.data[t * TF_O..t * TF_O + TF_O];
+            let got = &out.data[(w - 1) * TF_O..w * TF_O];
+            assert_eq!(
+                got, want,
+                "row {t}: the windowed run disagrees with the truncated one"
+            );
+        }
+
+        // Non-vacuity: the rows this compares are not all the same row.
+        let r0 = &whole.data[w * TF_O..(w + 1) * TF_O];
+        assert!(
+            (w + 1..T).any(|t| &whole.data[t * TF_O..t * TF_O + TF_O] != r0),
+            "the output is constant across the compared rows"
+        );
     }
 
     /// THE STREAMING PRECONDITION (Task 7 depends on it): a state carried across a
@@ -2726,6 +3478,62 @@ mod tests {
             cell.step(input.row(t), &mut st3, &mut reset.data[lo..hi]);
         }
         assert_ne!(reset, whole, "a reset at the cut was indistinguishable");
+    }
+
+    /// The transformer split-state leg. FIVE cut points rather than the siblings' one,
+    /// because this cell's state is the only one whose CONTENT depends on where the cut
+    /// lands: `1` and `3` cut inside the warm-up (a ring shorter than `W`), `4` cuts
+    /// exactly as it fills, and `6`/`7` cut MID-WINDOW with the ring already wrapped
+    /// (`ring_pos` non-zero and the oldest entry not at slot 0). A kernel that recomputed
+    /// the window from a fresh ring, or that mis-derived `oldest` from a wrapped
+    /// `ring_pos`, survives a single well-chosen cut and dies on this set.
+    #[test]
+    fn transformer_split_state_reproduces_the_unsplit_run() {
+        let cell = fast_transformer(I, TF_O);
+        let input = seq(T, I, 0.4);
+        let whole = cell.feed_forward(&input);
+
+        for split in [1usize, 3, 4, 6, 7] {
+            let mut spliced = FastMatrix::zeros(T, TF_O);
+            let mut st = cell.state();
+            for t in 0..split {
+                let (lo, hi) = (t * TF_O, t * TF_O + TF_O);
+                cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
+            }
+            // The carried state is genuinely non-trivial at the cut.
+            assert_eq!(st.filled, split.min(cell.window()), "split {split}: filled");
+            assert_eq!(
+                st.ring_pos,
+                split % cell.window(),
+                "split {split}: ring_pos"
+            );
+            assert!(
+                st.k_ring.iter().any(|&v| v != 0.0),
+                "split {split}: the carried k ring is all zero"
+            );
+            for t in split..T {
+                let (lo, hi) = (t * TF_O, t * TF_O + TF_O);
+                cell.step(input.row(t), &mut st, &mut spliced.data[lo..hi]);
+            }
+            assert_eq!(spliced, whole, "split {split}: split-state run diverged");
+
+            // Contrast (non-vacuity): a RESET state at the cut does NOT reproduce it.
+            let mut reset = FastMatrix::zeros(T, TF_O);
+            let mut st2 = cell.state();
+            for t in 0..split {
+                let (lo, hi) = (t * TF_O, t * TF_O + TF_O);
+                cell.step(input.row(t), &mut st2, &mut reset.data[lo..hi]);
+            }
+            let mut st3 = cell.state();
+            for t in split..T {
+                let (lo, hi) = (t * TF_O, t * TF_O + TF_O);
+                cell.step(input.row(t), &mut st3, &mut reset.data[lo..hi]);
+            }
+            assert_ne!(
+                reset, whole,
+                "split {split}: a reset at the cut was indistinguishable"
+            );
+        }
     }
 
     // --- the transcription itself: f32 fast vs f64 exact ----------------------
@@ -2977,6 +3785,94 @@ mod tests {
         }
     }
 
+    /// THE TASK-5 TRANSCRIPTION CHECK -- the exact f64
+    /// `TransformerLayer::feed_forward` (the ORACLE) against [`FastTransformer`], same
+    /// weights, same input, `T = 11` against `W = 4` so the sliding window is live rather
+    /// than degenerate. This is the leg the task rests on: it is the only place the ALiBi
+    /// slope ladder, the `1/sqrt(d)` scale, the per-head slicing, the max-subtracted
+    /// softmax and the two residuals are compared against the thing they were transcribed
+    /// from.
+    #[test]
+    fn transformer_matches_the_exact_cell_within_the_f32_band() {
+        let fast = fast_transformer(I, TF_O);
+        let mut exact = exact_transformer(I, TF_O);
+
+        let input = seq(T, I, 0.4);
+        let input_f64 = as_exact(&input);
+        let mut out_e = Array2::<f64>::zeros((T, TF_O));
+        exact.feed_forward(&input_f64, &mut out_e, false);
+        let out_f = fast.feed_forward(&input);
+
+        // MEASURED on this box (M4 Pro): max_rel 1.902e-7, max_abs 7.935e-6 -- and the
+        // RELATIVE number is the meaningful one here, the opposite of the CfC/LSTM
+        // situation: this fixture's outputs are LARGE (max |h| ~ 41, the residual carrying
+        // the ramp-filled adapter straight through), so [`max_rel`]'s `1e-2` scale floor
+        // never binds and 1.9e-7 is ~1.6 f32 ULP of the output's own scale. The absolute
+        // delta is 41x that by the same arithmetic, which is why it is printed rather than
+        // pinned. Pinned at [`CELL_F32_PIN`] (5e-6), the sibling cells' constant. A
+        // structural error (a dropped ALiBi term, `sqrt(H)` for `sqrt(d)`, a permuted
+        // `[q|k|v]` block, a window off by one) moves this by orders of magnitude.
+        let worst = max_rel(&out_e, &out_f);
+        let worst_abs = max_abs(&out_e, &out_f);
+        let scale = out_e.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        println!(
+            "MEASURE transformer cell exact-vs-fast max_rel = {worst:e} max_abs = {worst_abs:e} \
+             max|out| = {scale:e}"
+        );
+        assert!(
+            worst < CELL_F32_PIN,
+            "transformer f32 transcription drift: {worst:e}"
+        );
+        // Non-vacuity: an all-constant output would make any comparison pass.
+        assert!(out_f.data.iter().any(|&v| v != out_f.data[0]));
+    }
+
+    /// The SAME comparison at the COMMITTED FIXTURE's layer geometry (`23*4 -> 4`, the
+    /// `transformer_forward` net's only recurrent layer), where the 92-wide adapter fan-in
+    /// is long enough for accumulation order to matter. `I = 5` is a transcription check;
+    /// this is a scale check, and it is the shape the parity tier actually runs.
+    #[test]
+    fn transformer_matches_the_exact_cell_at_the_fixture_geometry() {
+        let (i, o) = (92usize, 4usize);
+        let p = transformer_params();
+        let n = FastTransformer::weight_count(i, o, p.d_ff);
+        // BOUNDED weights: the linear ramp runs to large negatives over a pack this size.
+        let fast = FastTransformer::from_flat(&bounded_weights(n), i, o, p.window, p.heads, p.d_ff);
+        let mut exact = TransformerLayer::new(i, o, &p);
+        exact.set_weights(&bounded_weights(n));
+
+        let input = seq(31, i, -0.2);
+        let input_f64 = as_exact(&input);
+        let mut out_e = Array2::<f64>::zeros((31, o));
+        exact.feed_forward(&input_f64, &mut out_e, false);
+        let out_f = fast.feed_forward(&input);
+
+        // MEASURED on this box (M4 Pro): max_abs 3.5506e-7, max_rel 1.4658e-5. The
+        // relative number is FLOOR-LIMITED and the ratio is the tell: `max_abs/max_rel`
+        // is 2.42e-2, i.e. the worst element's own magnitude sits just above [`max_rel`]'s
+        // `1e-2` scale floor while the outputs at large run ~1.8 (printed below). That is
+        // the [`CFC_CELL_F32_PIN`] / `lstm_matches_the_exact_cell_at_the_arm_geometry`
+        // situation reproduced at a third shape, and the honest response is theirs: the
+        // ABSOLUTE delta is the discriminating statement (3.55e-7, ~3 f32 ULP of an O(1)
+        // output, whose max is 1.77), and the relative pin is widened to `measured * 10` FOR THIS LEG ONLY
+        // rather than pretending 5e-6 means something against a 2e-2 denominator. The
+        // tight [`CELL_F32_PIN`] still governs the `I = 5` leg above, whose outputs do not
+        // land near zero.
+        let worst = max_rel(&out_e, &out_f);
+        let worst_abs = max_abs(&out_e, &out_f);
+        let scale = out_e.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        println!(
+            "MEASURE transformer cell (92x4) exact-vs-fast max_rel = {worst:e} \
+             max_abs = {worst_abs:e} max|out| = {scale:e}"
+        );
+        assert!(worst < 1.5e-4, "transformer 92x4 relative drift: {worst:e}");
+        assert!(
+            worst_abs < 3.6e-6,
+            "transformer 92x4 absolute drift: {worst_abs:e}"
+        );
+        assert!(out_f.data.iter().any(|&v| v != out_f.data[0]));
+    }
+
     /// Width tolerance, shared by both cells: a WIDER input is cropped to the left
     /// `input_size` columns (so it agrees with feeding those columns directly), and a
     /// NARROWER one is zero-padded rather than rejected.
@@ -2990,6 +3886,10 @@ mod tests {
         // correct by inspection, but "correct by inspection" is not a pin -- and the
         // task's own report cited this test for it. Cited and now true.
         let lstm = fast_lstm(I, O);
+        // Phase-11 Task 5: the transformer row. Its crop is the sLSTM/mamba-adapter
+        // `k_in = x.len().min(i)` contract, and it is worth a row here for the same
+        // reason the LSTM one was added -- correct by inspection is not a pin.
+        let transformer = fast_transformer(I, TF_O);
         let wide = seq(T, I + 2, 0.4);
         let mut cropped = FastMatrix::zeros(T, I);
         for r in 0..T {
@@ -3000,6 +3900,10 @@ mod tests {
         assert_eq!(mamba.feed_forward(&wide), mamba.feed_forward(&cropped));
         assert_eq!(cfc.feed_forward(&wide), cfc.feed_forward(&cropped));
         assert_eq!(lstm.feed_forward(&wide), lstm.feed_forward(&cropped));
+        assert_eq!(
+            transformer.feed_forward(&wide),
+            transformer.feed_forward(&cropped)
+        );
 
         let narrow = seq(T, 2, 0.4);
         assert_eq!(slstm.feed_forward(&narrow).cols, O);
@@ -3023,6 +3927,14 @@ mod tests {
         );
         assert!(
             mamba
+                .feed_forward(&narrow)
+                .data
+                .iter()
+                .all(|v| v.is_finite())
+        );
+        assert_eq!(transformer.feed_forward(&narrow).cols, TF_O);
+        assert!(
+            transformer
                 .feed_forward(&narrow)
                 .data
                 .iter()
@@ -3088,8 +4000,14 @@ mod tests {
         let sp = spec(&[6, 5, 4], &[2, 1], &[4, 3, 1], &[1, 1]);
         let p = mamba_params();
         let c = cfc_params();
-        for cell in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
-            let n = FastCausalNet::element_count(&sp, cell, &p, &c).unwrap();
+        let tf = transformer_params_stack();
+        for cell in [
+            CellType::Slstm,
+            CellType::Mamba,
+            CellType::Cfc,
+            CellType::Transformer,
+        ] {
+            let n = FastCausalNet::element_count(&sp, cell, &p, &c, &tf).unwrap();
             // Independent arithmetic: two cell layers (in = neuron*sub) + two dense
             // layers + the 2*input_size tail.
             let want_cells = match cell {
@@ -3104,9 +4022,13 @@ mod tests {
                     FastCfc::weight_count(12, 5, c.backbone_units, c.backbone_layers)
                         + FastCfc::weight_count(5, 4, c.backbone_units, c.backbone_layers)
                 }
-                // Neither is in the iterated set: the causal-LSTM row is covered by its own
-                // legs, and the transformer's f32 kernel lands in phase-11 T5/T6.
-                CellType::Lstm | CellType::Transformer => unreachable!(),
+                CellType::Transformer => {
+                    FastTransformer::weight_count(12, 5, tf.d_ff)
+                        + FastTransformer::weight_count(5, 4, tf.d_ff)
+                }
+                // Not in the iterated set: the causal-LSTM row is covered by its own legs
+                // (`lstm_is_classified_causal_and_now_builds` + the cell legs above).
+                CellType::Lstm => unreachable!(),
             };
             assert_eq!(
                 n,
@@ -3114,7 +4036,7 @@ mod tests {
                 "{cell:?}"
             );
 
-            let mut net = FastCausalNet::from_flat(&sp, cell, &p, &c, &weights(n)).unwrap();
+            let mut net = FastCausalNet::from_flat(&sp, cell, &p, &c, &tf, &weights(n)).unwrap();
             assert_eq!(net.sub_sampling_ratio(), 2);
             assert_eq!(net.cells().len(), 2);
 
@@ -3165,6 +4087,10 @@ mod tests {
         let c = cfc_params();
         m.insert("Cfc_Backbone_Units".into(), c.backbone_units.to_string());
         m.insert("Cfc_Backbone_Layers".into(), c.backbone_layers.to_string());
+        let tf = transformer_params_stack();
+        m.insert("Transformer_Window".into(), tf.window.to_string());
+        m.insert("Transformer_Heads".into(), tf.heads.to_string());
+        m.insert("Transformer_D_Ff".into(), tf.d_ff.to_string());
         m
     }
 
@@ -3193,8 +4119,14 @@ mod tests {
         let sp = spec(lstm, lsub, outn, osub);
         let p = mamba_params();
         let c = cfc_params();
+        let tf = transformer_params_stack();
 
-        for cell in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
+        for cell in [
+            CellType::Slstm,
+            CellType::Mamba,
+            CellType::Cfc,
+            CellType::Transformer,
+        ] {
             let cfg = crate::nn::blstm::BlstmConfig::from_legacy(
                 &exact_map(cell, lstm, lsub, outn, osub),
                 "X",
@@ -3202,7 +4134,7 @@ mod tests {
             .unwrap();
             let mut exact = crate::nn::blstm::BlstmNetwork::from_config(cfg).unwrap();
 
-            let n = FastCausalNet::element_count(&sp, cell, &p, &c).unwrap();
+            let n = FastCausalNet::element_count(&sp, cell, &p, &c, &tf).unwrap();
             assert_eq!(
                 n,
                 exact.nb_of_weights(),
@@ -3210,7 +4142,7 @@ mod tests {
             );
             let flat = bounded_weights(n);
             exact.set_weights(&flat).unwrap();
-            let mut fast = FastCausalNet::from_flat(&sp, cell, &p, &c, &flat).unwrap();
+            let mut fast = FastCausalNet::from_flat(&sp, cell, &p, &c, &tf, &flat).unwrap();
 
             // 13 rows -> layer-0 sub-sampling 2 drops the odd tail -> 6 output rows.
             let input = seq(13, 6, 0.2);
@@ -3228,9 +4160,9 @@ mod tests {
                 "{cell:?}: the exact stack output is constant -- the pin is vacuous"
             );
 
-            // MEASURED on this box: sLSTM 7.91e-8, mamba 6.14e-8, cfc 9.94e-8. Pinned at
-            // [`CELL_F32_PIN`] (5e-6), the same measure-then-pin band as the
-            // single-cell legs above.
+            // MEASURED on this box: sLSTM 7.91e-8, mamba 6.14e-8, cfc 9.94e-8,
+            // transformer 6.94e-8. Pinned at [`CELL_F32_PIN`] (5e-6), the same
+            // measure-then-pin band as the single-cell legs above.
             let worst = max_rel(&out_e, &out_f);
             println!("MEASURE causal STACK {cell:?} exact-vs-fast max_rel = {worst:e}");
             assert!(
@@ -3248,16 +4180,19 @@ mod tests {
         let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
         let p = mamba_params();
         let c = cfc_params();
-        let n = FastCausalNet::element_count(&sp, CellType::Slstm, &p, &c).unwrap();
+        let tf = transformer_params_stack();
+        let n = FastCausalNet::element_count(&sp, CellType::Slstm, &p, &c, &tf).unwrap();
         let short = weights(n - 1);
-        let err = FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &short)
+        let err = FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &tf, &short)
             .err()
             .expect("a short pack must be rejected");
         assert!(
             err.to_string().contains("too short"),
             "expected a length bail, got: {err}"
         );
-        assert!(FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &weights(n + 17)).is_ok());
+        assert!(
+            FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &tf, &weights(n + 17)).is_ok()
+        );
     }
 
     /// THE LSTM FAST-PATH BEHAVIOUR, FLIPPED by phase-10 Task 8 (this test was Task 6's
@@ -3293,7 +4228,8 @@ mod tests {
         let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
         let p = mamba_params();
         let c = cfc_params();
-        let n = FastCausalNet::element_count(&sp, CellType::Lstm, &p, &c).unwrap();
+        let tf = transformer_params_stack();
+        let n = FastCausalNet::element_count(&sp, CellType::Lstm, &p, &c, &tf).unwrap();
         assert_eq!(n, FastLstm::weight_count(4, 3) + (3 * 1 + 1) + 2 * 4);
         let exact = crate::nn::blstm::BlstmNetwork::from_config(bc.clone()).unwrap();
         assert_eq!(
@@ -3304,12 +4240,12 @@ mod tests {
         for other in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
             assert_ne!(
                 n,
-                FastCausalNet::element_count(&sp, other, &p, &c).unwrap(),
+                FastCausalNet::element_count(&sp, other, &p, &c, &tf).unwrap(),
                 "the LSTM count collided with {other:?}'s"
             );
         }
 
-        let net = FastCausalNet::from_flat(&sp, CellType::Lstm, &p, &c, &weights(n)).unwrap();
+        let net = FastCausalNet::from_flat(&sp, CellType::Lstm, &p, &c, &tf, &weights(n)).unwrap();
         assert!(matches!(net.cells()[0], FastCell::Lstm(_)));
         assert!(matches!(net.cells()[0].state(), FastCellState::Lstm(_)));
     }
@@ -3328,6 +4264,7 @@ mod tests {
             CellType::Lstm,
             &mamba_params(),
             &cfc_params(),
+            &transformer_params_stack(),
         )
         .unwrap_err();
         assert!(
@@ -3341,6 +4278,7 @@ mod tests {
                 cell,
                 &mamba_params(),
                 &cfc_params(),
+                &transformer_params_stack(),
             )
             .unwrap_or_else(|e| panic!("{cell:?} must size: {e}"));
         }
@@ -3387,7 +4325,14 @@ mod tests {
         );
 
         let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
-        let n = FastCausalNet::element_count(&sp, CellType::Cfc, &mamba_params(), &bc.cfc).unwrap();
+        let n = FastCausalNet::element_count(
+            &sp,
+            CellType::Cfc,
+            &mamba_params(),
+            &bc.cfc,
+            &bc.transformer,
+        )
+        .unwrap();
         // The count is the CfC's OWN: one `4 -> 3` cell layer at this geometry, the
         // `3 -> 1` dense layer, and the `2*4` normalize tail -- and it must equal what
         // the EXACT net built from the same config reports, which is the property that
@@ -3403,14 +4348,120 @@ mod tests {
         // protecting against (a pack read head-first by the wrong architecture).
         assert_ne!(
             n,
-            FastCausalNet::element_count(&sp, CellType::Slstm, &mamba_params(), &bc.cfc).unwrap()
+            FastCausalNet::element_count(
+                &sp,
+                CellType::Slstm,
+                &mamba_params(),
+                &bc.cfc,
+                &bc.transformer
+            )
+            .unwrap()
         );
 
-        let net =
-            FastCausalNet::from_flat(&sp, CellType::Cfc, &mamba_params(), &bc.cfc, &weights(n))
-                .unwrap();
+        let net = FastCausalNet::from_flat(
+            &sp,
+            CellType::Cfc,
+            &mamba_params(),
+            &bc.cfc,
+            &bc.transformer,
+            &weights(n),
+        )
+        .unwrap();
         assert!(matches!(net.cells()[0], FastCell::Cfc(_)));
         assert!(matches!(net.cells()[0].state(), FastCellState::Cfc(_)));
+    }
+
+    /// THE TRANSFORMER FAST-PATH BEHAVIOUR, FLIPPED by phase-11 Task 5. Task 2 landed the
+    /// `CellType` variant before its f32 kernel existed and parked an interim
+    /// `unimplemented!` in [`cell_weight_count`] / [`build_cell`]; both arms are now real,
+    /// and `rg -n 'unimplemented!\(' src/rust/src/fast` comes back CLEAN (the bare word
+    /// still appears in prose like this line, which is why the check names the MACRO).
+    ///
+    /// What the interim panic protected is unchanged and re-asserted here, the CfC/LSTM
+    /// pattern verbatim: the count must be the TRANSFORMER'S OWN, equal to what the EXACT
+    /// net built from the same config reports, and NOT any other cell's -- otherwise the
+    /// pack is consumed head-first by the wrong reader, with no tolerance to widen and no
+    /// gate to catch it. `classify_fast_shape` needed no arm at either end (its causal arm
+    /// binds the cell as a wildcard), which is exactly why the protection has to live at
+    /// the sizing choke point.
+    // `identity_op` allowed for the sibling legs' reason: `3 * 1 + 1` is the dense layer's
+    // LAYOUT FORMULA (`outn[j]*osub[j]*outn[j+1] + outn[j+1]`) written out.
+    #[test]
+    #[allow(clippy::identity_op)]
+    fn transformer_is_classified_causal_and_now_builds() {
+        let mut map = IndexMap::new();
+        map.insert("BLSTM_LSTMNeuronNb".to_string(), "4,4".to_string());
+        map.insert("BLSTM_LSTMSubSampling".to_string(), "1".to_string());
+        map.insert("BLSTM_OutputNeuronNb".to_string(), "4,1".to_string());
+        map.insert("BLSTM_OutputSubSampling".to_string(), "1".to_string());
+        map.insert("BLSTM_InputNormalizationType".to_string(), "0".to_string());
+        map.insert("BLSTM_TwoSweeps".to_string(), "false".to_string());
+        map.insert("BLSTM_Cell_Type".to_string(), "transformer".to_string());
+        map.insert("BLSTM_Direction".to_string(), "forward".to_string());
+        map.insert("Transformer_Window".to_string(), "4".to_string());
+        map.insert("Transformer_Heads".to_string(), "2".to_string());
+        map.insert("Transformer_D_Ff".to_string(), "6".to_string());
+        let bc = crate::nn::blstm::BlstmConfig::from_legacy(&map, "BLSTM").unwrap();
+
+        assert_eq!(
+            crate::fast::driver::classify_fast_shape(&bc),
+            crate::fast::driver::FastNetShape::Causal(CellType::Transformer),
+            "the causal arm is cell-open by design -- it must NOT special-case transformer"
+        );
+
+        let sp = spec(&[4, 4], &[1], &[4, 1], &[1]);
+        let (p, c) = (mamba_params(), cfc_params());
+        let n = FastCausalNet::element_count(&sp, CellType::Transformer, &p, &c, &bc.transformer)
+            .unwrap();
+        assert_eq!(
+            n,
+            FastTransformer::weight_count(4, 4, 6) + (4 * 1 + 1) + 2 * 4
+        );
+        let exact = crate::nn::blstm::BlstmNetwork::from_config(bc.clone()).unwrap();
+        assert_eq!(
+            n,
+            exact.nb_of_weights(),
+            "the fast count must equal the exact net's pack length"
+        );
+        for other in [
+            CellType::Slstm,
+            CellType::Mamba,
+            CellType::Cfc,
+            CellType::Lstm,
+        ] {
+            assert_ne!(
+                n,
+                FastCausalNet::element_count(&sp, other, &p, &c, &bc.transformer).unwrap(),
+                "the transformer count collided with {other:?}'s"
+            );
+        }
+
+        let net = FastCausalNet::from_flat(
+            &sp,
+            CellType::Transformer,
+            &p,
+            &c,
+            &bc.transformer,
+            &weights(n),
+        )
+        .unwrap();
+        assert!(matches!(net.cells()[0], FastCell::Transformer(_)));
+        assert!(matches!(
+            net.cells()[0].state(),
+            FastCellState::Transformer(_)
+        ));
+        // The GEOMETRY reached the kernel, not just the length: a config that said
+        // `Heads 2` must produce a two-slope ladder and `d = H/A = 2`, and a `Window 4`
+        // ring must be four slots deep. (`window`/`heads` are pack-length-inert, so the
+        // count assert above cannot see them at all -- this is what does.)
+        let FastCell::Transformer(cell) = &net.cells()[0] else {
+            unreachable!()
+        };
+        assert_eq!(cell.window(), 4);
+        assert_eq!(cell.heads(), 2);
+        assert_eq!(cell.head_dim(), 2);
+        assert_eq!(cell.slopes().len(), 2);
+        assert_eq!(cell.state().k_ring.len(), 4 * 4);
     }
 
     /// MLP mode (`LSTMNeuronNb[0] == 0`) is not a causal shape.
@@ -3422,6 +4473,7 @@ mod tests {
             CellType::Slstm,
             &mamba_params(),
             &cfc_params(),
+            &transformer_params_stack(),
             &weights(64),
         )
         .err()

@@ -2132,7 +2132,12 @@ impl StreamingSession {
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
         let causal_net = match shape {
             FastNetShape::Causal(cell) => Some(FastCausalNet::from_flat(
-                &spec, cell, &bc.mamba, &bc.cfc, &flat,
+                &spec,
+                cell,
+                &bc.mamba,
+                &bc.cfc,
+                &bc.transformer,
+                &flat,
             )?),
             FastNetShape::Blstm => None,
             // Unreachable: the bidirectional-cell shape bailed above.

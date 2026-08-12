@@ -972,6 +972,7 @@ fn causal_output_size_not_one_bails() {
         bc.cell_type,
         &speech::nn::blstm::MambaParams::default(),
         &bc.cfc,
+        &bc.transformer,
     )
     .unwrap();
     let pack = dir.path().join("causal_out2.bin");
@@ -1417,12 +1418,19 @@ fn synth_net(
         backbone_units: 6,
         backbone_layers: 1,
     };
-    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &p, &c).unwrap();
+    // The transformer geometry is the fixture's (`Transformer_Window 4` / `Heads 2` /
+    // `D_Ff 6`), inert for every other cell exactly as `c` is (phase-11 Task 5).
+    let tf = speech::nn::blstm::TransformerParams {
+        window: 4,
+        heads: 2,
+        d_ff: 6,
+    };
+    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &p, &c, &tf).unwrap();
     // Bounded, non-degenerate: a linear ramp would saturate the output layer to a constant.
     let flat: Vec<f64> = (0..n)
         .map(|k| 0.35 * (0.61 * (k as f64) + 0.3).sin())
         .collect();
-    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &p, &c, &flat).unwrap()
+    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &p, &c, &tf, &flat).unwrap()
 }
 
 /// A deterministic, bounded, non-constant input sequence.
