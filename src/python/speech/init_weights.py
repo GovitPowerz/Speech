@@ -381,7 +381,6 @@ def init_transformer_flat(
     input_size: int,
     d_ff: int,
     scheme: Scheme = "xavier",
-    forget_bias_one: bool = True,
 ) -> NDArray[np.float64]:
     """ONE transformer cell layer's flat block, in the S1.2 order -- the
     `nn/cells/transformer.rs::for_each_slot` walk, mirrored block for block:
@@ -403,12 +402,15 @@ def init_transformer_flat(
     in `config_bridge._transformer_geometry` (the `Mamba_*`/`Cfc_*` precedent: the reader is
     the gate).
 
-    `forget_bias_one` is ACCEPTED AND IGNORED, for call-site uniformity with the sLSTM/LSTM
-    builders `_init_cell_pack` dispatches beside this one. There is no forget gate here and no
-    analogue of one: attention has no memory valve to hold open, so there is no bias whose
-    non-zero seed would mean "start by remembering"."""
+    NO `forget_bias_one` PARAMETER (phase-11 T9, deferred F3): unlike the sLSTM/LSTM builders,
+    this cell has no forget gate and no analogue of one -- attention has no memory valve to
+    hold open, so there is no bias whose non-zero seed would mean "start by remembering". The
+    first landed signature accepted-and-ignored the flag for call-site uniformity with the
+    sLSTM/LSTM builders `_init_cell_pack` dispatches beside this one; `init_cfc_flat` (also
+    forget-gate-free) never carried the flag at all, so the earlier choice was the
+    inconsistent one, not this one -- a caller passing `forget_bias_one` now gets a loud
+    `TypeError` instead of a silently discarded flag."""
     _check_scheme(scheme)
-    del forget_bias_one  # no forget gate in this cell (see the docstring).
     h = output_size
     return np.concatenate(
         [
@@ -493,7 +495,7 @@ def _init_cell_pack(
             elif cell_type == "cfc":
                 parts.append(init_cfc_flat(rng, out, fin, units, layers, scheme))
             elif cell_type == "transformer":
-                parts.append(init_transformer_flat(rng, out, fin, d_ff, scheme, forget_bias_one))
+                parts.append(init_transformer_flat(rng, out, fin, d_ff, scheme))
             else:
                 raise ValueError(f"no init builder for cell type {cell_type!r}")
     for i in range(len(outn) - 1):

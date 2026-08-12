@@ -246,13 +246,17 @@ def test_xavier_and_he_scale_the_same_block_differently() -> None:
     assert np.std(he[lo:hi]) / np.std(xav[lo:hi]) == pytest.approx(want, rel=0.25)
 
 
-def test_forget_bias_one_is_accepted_and_ignored() -> None:
-    """The flag exists for call-site uniformity with the sLSTM/LSTM builders (`_init_cell_pack`
-    passes it positionally), and there is nothing here for it to do -- pinned, so a later
-    reader does not "fix" the unused parameter into a live one."""
-    a = init_transformer_flat(np.random.default_rng(5), 4, 5, 6, "xavier", True)
-    b = init_transformer_flat(np.random.default_rng(5), 4, 5, 6, "xavier", False)
-    assert np.array_equal(a, b)
+def test_forget_bias_one_is_not_a_parameter() -> None:
+    """Deferred F3 (phase-11 T9): the first landed signature accepted-and-ignored
+    `forget_bias_one` for call-site uniformity with the sLSTM/LSTM builders `_init_cell_pack`
+    dispatches beside this one -- but `init_cfc_flat` (also forget-gate-free) never carried the
+    flag at all, so the accept-and-ignore choice was the inconsistent one. The signature now
+    has no such parameter, matching the `init_cfc_flat` precedent exactly: a caller passing it
+    gets a loud `TypeError`, not a silently discarded flag."""
+    with pytest.raises(TypeError):
+        init_transformer_flat(np.random.default_rng(5), 4, 5, 6, "xavier", True)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        init_transformer_flat(np.random.default_rng(5), 4, 5, 6, forget_bias_one=True)  # type: ignore[call-arg]
 
 
 # ------------------------------------------------------------------------------------- #
