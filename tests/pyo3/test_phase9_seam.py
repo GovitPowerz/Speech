@@ -44,18 +44,27 @@ leg -- the `b_k`-inert claim (spec S1.4's transformer analogue of sLSTM's `b_i`)
 constant, annihilated by softmax shift-invariance. Unlike sLSTM's `b_i` (a hard structural
 skip) this is a claim ABOUT floating-point arithmetic, not just algebra, so it was EMPIRICALLY
 verified bit-exact on both committed packs before being pinned as `==`, not argued from the
-spec alone. It also closes a gap the block probe cannot: `b_qkv`/`W_qkv` are ONE named
-flat-layout block each (spec S1.2's own granularity, matching `for_each_slot`), so a q/k
-column-order swap inside them would move the analytic and FD legs together and neither would
-notice; this leg locates the `q`/`k` thirds independently (from S1.2's stated `[q|k|v]`
-order) and asserts a DECODED consequence, exactly the sLSTM/CfC precedent.
+spec alone; it runs on EVERY stack the fixture has (`fwd`, plus `bwd` when bidirectional, the
+CfC `stacks` precedent -- the block probe FDs `bwd.b_qkv` at the same index as the analytic,
+so a `bwd`-only swap was invisible until this leg covered that stack too). It closes the BIAS
+half of a gap the block probe cannot: `b_qkv` is ONE named flat-layout block (spec S1.2's own
+granularity, matching `for_each_slot`), so a q/k column-order swap inside it would move the
+analytic and FD legs together and neither would notice; this leg locates the `q`/`k` thirds
+independently (from S1.2's stated `[q|k|v]` order) and asserts a DECODED consequence, exactly
+the sLSTM/CfC precedent. The MATRIX half (`W_qkv`) stays OPEN: every row of `W_k` is live (it
+feeds `k_j`, which varies with `j`, unlike a bias), so a matrix-only q<->k row-family swap
+with the bias order intact would pass every leg in this file -- a candidate for T10's
+mutation battery, not this task.
 
 WHAT THE TIER PINS, and why each leg exists:
 
 - **`grad_check`** (S8.1 SEAM): the engine's own corpus-level central difference vs its
   analytic fold, per cell x direction, plus both Twins. This is the leg the spec names. Its
   one weakness is that `max_weights` caps a PREFIX of the flat pack, and at these geometries
-  the first 12 weights all live in ONE block (sLSTM `R_i`, mamba `P`, cfc `W_bb0`).
+  the first 12 weights all live in ONE block (sLSTM `R_i`, mamba `P`, cfc `W_bb0`, transformer
+  `W_a` -- the width ADAPTER, the LEAST architecture-specific of its twelve blocks, so this
+  leg barely touches the attention core at all; that coverage rests on the block probe below,
+  whose worst error lands on a `qkv` block on BOTH transformer fixtures).
 
 - **block probe** (this task's addition, covering that weakness): for EVERY named block of
   each cell's flat layout (spec S2.2 / S3.2) it finite-differences one representative index
@@ -585,6 +594,14 @@ def test_weights_derivatives_are_finite_and_block_wise_alive(name: str, tmp_path
     dead block at `T > 1` (its one structural zero, `W_bb`'s state columns, is a `T = 1`
     artefact and this corpus is ~50 timesteps deep), so all eight CfC blocks go through the
     `> 0.0` branch. MEASURED: only `norm.*` comes back zero on either CfC fixture.
+
+    The transformer rows ALSO take no exemption, for a DIFFERENT reason than CfC's: spec
+    S1.4's `b_k` (the k-third of the combined `b_qkv`, see
+    [`test_transformer_key_bias_block_is_output_inert`]) IS structurally near-dead, but it
+    has no block of its own to be exempted BY -- `b_qkv` sums `b_q | b_k | b_v` together, and
+    the live `b_q`/`b_v` thirds carry the block sum regardless of `b_k`'s near-zero
+    contribution. MEASURED: every named transformer block is nonzero except `norm.*`, same as
+    every other cell family here.
     """
     blocks = fixture_blocks(name)
     pack = load_pack(name)
@@ -782,32 +799,42 @@ def test_cfc_time_gate_saturation_selects_one_head(name: str, tmp_path: Path) ->
 @pytest.mark.parametrize("name", ("transformer_bidirectional", "transformer_forward"))
 def test_transformer_key_bias_block_is_output_inert(name: str, tmp_path: Path) -> None:
     """Transformer's `b_k` third of the combined `b_qkv` bias is output-INVARIANT and `b_q`
-    is not -- both located within the block map stated in this file (spec S1.2's own
-    `[q | k | v]` column-block order, not re-read from Rust).
+    is not -- on EVERY stack the fixture has (`fwd`, plus `bwd` when bidirectional, the CfC
+    `stacks` precedent), both located within the block map stated in this file (spec S1.2's
+    own `[q | k | v]` column-block order, not re-read from Rust).
 
     Why it discriminates (spec S1.4): shifting `b_k` shifts every key `k_j` in a window row
     by the SAME per-head vector, so `q_t . k_j` moves by a constant that does not depend on
     `j` -- annihilated by softmax shift-invariance (S1.3's unconditional max-subtract keeps
     this exact, not merely analytic). `b_q` has no such property (`b_q . k_j` genuinely
-    varies the attention pattern). `W_qkv`/`b_qkv` are ONE named flat-layout block each here
-    (spec S1.2's own granularity, matching `for_each_slot`), so the block probe -- one
-    representative index per NAMED block -- cannot see a `[q|k|v]` column-order swap: both
-    the analytic and FD legs would walk the SAME (possibly-swapped) order and agree with each
-    other regardless. This leg locates the `q`/`k` thirds independently and asserts a DECODED
-    consequence instead, the sLSTM/CfC precedent.
+    varies the attention pattern). `b_qkv` is ONE named flat-layout block (spec S1.2's own
+    granularity, matching `for_each_slot`), so the block probe -- one representative index
+    per NAMED block -- cannot see a `[q|k|v]` column-order swap inside it on EITHER stack:
+    both the analytic and FD legs would walk the SAME (possibly-swapped) order and agree with
+    each other regardless (`bwd.b_qkv` included -- a `bwd`-only swap was invisible until this
+    leg covered that stack too). This leg locates the `q`/`k` thirds independently and asserts
+    a DECODED consequence instead, the sLSTM/CfC precedent.
+
+    NARROWER THAN IT SOUNDS: this pins the BIAS half of the `[q|k|v]` order only. The MATRIX
+    half (`W_qkv`) has no comparable inertness handle -- every row of `W_k` is LIVE (it feeds
+    `k_j`, which varies with `j`, unlike a bias), so a matrix-only q<->k ROW-FAMILY swap with
+    the bias order left intact would pass every leg in this file, including this one. That gap
+    is KNOWINGLY OPEN, not closed here -- a candidate for T10's mutation battery.
 
     Bit-exact equality is EMPIRICALLY verified against both committed packs (not merely
     argued from softmax shift-invariance in the reals): the `k`-shift enters through the same
     bias-then-dot-product floating-point path for every window position, and this corpus's
     magnitudes never exercise a rounding step where that stops being bit-for-bit -- unlike
     sLSTM's `b_i` (a hard structural skip), this is a claim about floating-point arithmetic,
-    not only algebra.
+    not only algebra. Verified on `bwd` too (`transformer_bidirectional`): `b_k` inert across
+    four overwrite patterns (three constants + a non-uniform ramp), `b_q` live at every
+    non-degenerate value tried (a `0.0` overwrite is a no-op here -- every bias, `b_q`
+    included, is zero-seeded by `init_transformer_flat`, so that particular value proves
+    nothing either way).
     """
     h = GEOMETRY["sad_hidden"]
-    qkv_b_start, qkv_b_n = fixture_blocks(name)["fwd.b_qkv"]
-    assert qkv_b_n == 3 * h, f"{name}: fwd.b_qkv is not 3H wide -- the S1.2 [q|k|v] assumption below no longer holds"
-    b_q = (qkv_b_start, h)
-    b_k = (qkv_b_start + h, h)
+    blocks = fixture_blocks(name)
+    stacks = ("fwd", "bwd") if any(label.startswith("bwd.") for label in blocks) else ("fwd",)
     pack = load_pack(name)
     seed_sad(tmp_path, name)
     with chdir(tmp_path):
@@ -823,8 +850,13 @@ def test_transformer_key_bias_block_is_output_inert(name: str, tmp_path: Path) -
         eng.set_weights(0, [pack])
         base = corpus_cost(eng)
         assert math.isfinite(base)
-        assert cost_with(b_k, 3.5) == base, f"{name}: rewriting the b_qkv k-third moved the cost -- that slice is not b_k"
-        assert cost_with(b_q, 3.5) != base, f"{name}: rewriting the b_qkv q-third left the cost identical -- the probe is vacuous"
+        for stack in stacks:
+            qkv_b_start, qkv_b_n = blocks[f"{stack}.b_qkv"]
+            assert qkv_b_n == 3 * h, f"{name}: {stack}.b_qkv is not 3H wide -- the S1.2 [q|k|v] assumption below no longer holds"
+            b_q = (qkv_b_start, h)
+            b_k = (qkv_b_start + h, h)
+            assert cost_with(b_k, 3.5) == base, f"{name}: rewriting the {stack} b_qkv k-third moved the cost -- that slice is not b_k"
+            assert cost_with(b_q, 3.5) != base, f"{name}: rewriting the {stack} b_qkv q-third left the cost identical -- the probe is vacuous"
 
 
 # ==== S8.3: the Twin's LID mechanical wiring =================================
@@ -1229,14 +1261,29 @@ def test_fixture_configs_state_the_cfc_geometry() -> None:
 
 def test_fixture_configs_state_the_transformer_geometry() -> None:
     """[`transformer_blocks`] sizes every block off the manifest geometry, so a fixture that
-    dropped the `Transformer_*` keys would silently fall back to the SIZED phase-11 defaults
-    (`window`/`heads`/`d_ff` 64/4/64) on BOTH sides and shift the whole block map with
-    nothing else complaining -- and only PARTLY loudly: the default `heads=4` happens to also
-    divide this fixture's `sad_hidden=4`, so a dropped key on the two SAD-only configs would
-    NOT fail construction (`BlstmConfig::from_legacy`'s `H % heads` check would stay silent),
-    only the Twin's LID hidden width 6 would reject it. Pin that all three transformer
-    fixtures state the keys, and that they match the manifest -- the `Mamba_Dt_Rank` / CfC
-    precedent.
+    dropped a `Transformer_*` key would silently fall back to the SIZED phase-11 default on
+    BOTH sides and shift the block map -- except "silently" is not the whole story. The
+    MEASURED loudness inventory, per key:
+
+      * `Transformer_Window` dropped -> SILENT on all three fixtures. Window has no validity
+        constraint beyond `>= 1`; a wrong value only reshapes the attention span, which
+        nothing else here would notice.
+      * `Transformer_Heads` dropped -> silent on the two SAD-only fixtures (the default 4
+        happens to also divide `sad_hidden = 4`), but LOUD on the Twin: the default 4 does
+        NOT divide the LID net's hidden width 6, so `BlstmConfig::from_legacy`'s `H % heads`
+        check refuses construction.
+      * `Transformer_D_Ff` dropped -> LOUD on all three: the default (64) grows the pack past
+        what the committed `.bin` holds, so the engine refuses the length-mismatched load
+        (1091 < 2135 bidirectional SAD, 569 < 1091 forward SAD, 721 < 2229 the Twin's LID
+        net).
+
+    So this pin is the ONLY guard for `Transformer_Window` everywhere and for
+    `Transformer_Heads` on the two SAD-only fixtures; the other two cells (`Heads` on the
+    Twin, `D_Ff` everywhere) would already fail loudly without it -- still worth pinning
+    explicitly, so a silent config drift is caught by an assertion naming the drift rather
+    than by an incidental construction error naming neither. Pin that all three transformer
+    fixtures state all three keys, and that they match the manifest -- the `Mamba_Dt_Rank` /
+    CfC precedent.
     """
     for name in ("transformer_bidirectional", "transformer_forward", "twin_mode7_lid_transformer"):
         text = (PHASE9 / f"{name}.config").read_text()
