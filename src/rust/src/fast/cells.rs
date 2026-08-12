@@ -1553,6 +1553,227 @@ pub(crate) fn run_sequence(
 }
 
 // ---------------------------------------------------------------------------
+// Shared net-level scaffolding (Phase 11 Task 1).
+//
+// THE DEDUPE of `RESULTS.md`'s phase-10 named follow-on: [`FastCausalNet`] and
+// [`super::bicell::FastBiCell`] carried one copy each of three fragments -- the
+// `element_count` walk, the dense-tail construction inside `from_flat`, and the per-row
+// output drive -- plus the `feed_forward` prologue. They live here once, BEFORE a fifth
+// cell variant multiplies them. PURE CODE MOTION: no reduction was reordered, hoisted or
+// fused; the two callers' arithmetic is token-for-token what it was, and the committed
+// parity + streaming suites UNEDITED at their existing pins are the arbiter.
+// ---------------------------------------------------------------------------
+
+/// The `NnetSpec` shape guard both net builders run before anything else.
+///
+/// A spec with fewer than two entries in either neuron list describes no layer at all,
+/// and the `len() - 1` loop bounds in [`stack_element_count`] would underflow-panic on it.
+///
+/// `who` is the CALLER'S own type path, so each site's message text is unchanged by the
+/// dedupe -- the guard is shared, the attribution is not. Call sites:
+/// [`FastCausalNet::element_count`] and [`super::bicell::FastBiCell::element_count`],
+/// which run it FIRST, before their own (differing) cell-type refusals -- the order the
+/// duplicated copies had.
+pub(crate) fn check_net_spec(spec: &NnetSpec, who: &str) -> Result<()> {
+    let lstm = &spec.lstm_neuron_nb;
+    let lsub = &spec.lstm_subsampling;
+    let outn = &spec.output_neuron_nb;
+    let osub = &spec.output_subsampling;
+    if lstm.len() < 2
+        || outn.len() < 2
+        || lsub.len() < lstm.len() - 1
+        || osub.len() < outn.len() - 1
+    {
+        bail!(
+            "{who}: malformed NnetSpec (lstm {:?} / sub {:?}, output {:?} / sub {:?})",
+            lstm.len(),
+            lsub.len(),
+            outn.len(),
+            osub.len()
+        );
+    }
+    Ok(())
+}
+
+/// The whole-net element count for a `stacks`-stack cell net: `stacks` copies of the
+/// recurrent stack + the dense output MLP + the `2 * lstm_neuron_nb[0]` normalize tail.
+/// Mirrors `BlstmNetwork::nb_of_weights`.
+///
+/// Call sites: [`FastCausalNet::element_count`] passes `stacks = 1` (no backward stack),
+/// [`super::bicell::FastBiCell::element_count`] passes `2` -- the forward and backward
+/// stacks are separate weight blocks of IDENTICAL shape, since `BlstmNetwork::from_config`
+/// builds both from the same `lstm_neuron_nb`. All-integer arithmetic, so `stacks = 1` is
+/// exactly the causal walk it replaces, element for element.
+///
+/// The per-cell sizing routes through the shared [`cell_weight_count`] table (phase-10
+/// Task 7), which is TOTAL since Task 8 gave the LSTM a real f32 kernel. This is the
+/// choke point EVERY fast/streaming construction site funnels through (`from_flat` calls
+/// its net's `element_count` first), so getting the count right here is what keeps a pack
+/// from being consumed head-first by another architecture's reader.
+///
+/// [`check_net_spec`] must have passed -- the `len() - 1` bounds below assume it.
+pub(crate) fn stack_element_count(
+    spec: &NnetSpec,
+    cell_type: CellType,
+    mamba: &MambaParams,
+    cfc: &CfcParams,
+    stacks: usize,
+) -> usize {
+    let lstm = &spec.lstm_neuron_nb;
+    let lsub = &spec.lstm_subsampling;
+    let outn = &spec.output_neuron_nb;
+    let osub = &spec.output_subsampling;
+    let mut n = 0usize;
+    for jj in 0..lstm.len() - 1 {
+        let i = lstm[jj] * lsub[jj];
+        let o = lstm[jj + 1];
+        n += stacks * cell_weight_count(cell_type, i, o, mamba, cfc);
+    }
+    for jj in 0..outn.len() - 1 {
+        n += outn[jj] * osub[jj] * outn[jj + 1] + outn[jj + 1];
+    }
+    n += 2 * lstm[0];
+    n
+}
+
+/// Build the dense output MLP + the pack-carried normalize tail from `flat` at `*pos`,
+/// advancing the cursor past both. Returns `(output_layers, normalize_mean,
+/// normalize_std)`.
+///
+/// Call sites: [`FastCausalNet::from_flat`] and [`super::bicell::FastBiCell::from_flat`],
+/// which carried token-identical copies. They can share it because the pack TAIL is the
+/// same for both shapes -- `BlstmNetwork::set_weights` writes `[stack(s) | output MLP |
+/// mean | std]` and only the stack half differs -- so the cursor arrives here having
+/// consumed one stack or two, and the rest of the walk is one fact.
+///
+/// The `f64 -> f32` narrowing is the ONLY lossy step, per element and in pack order
+/// (the `FastBlstm::from_flat` contract).
+pub(crate) fn build_dense_tail(
+    flat: &[f64],
+    pos: &mut usize,
+    outn: &[usize],
+    osub: &[usize],
+    input_size: usize,
+) -> (Vec<FastDenseLayer>, Vec<f32>, Vec<f32>) {
+    let narrow = |s: &[f64]| -> Vec<f32> { s.iter().map(|&x| x as f32).collect() };
+    let mut output_layers = Vec::with_capacity(outn.len() - 1);
+    for jj in 0..outn.len() - 1 {
+        let i = outn[jj] * osub[jj];
+        let o = outn[jj + 1];
+        let weights = narrow(&flat[*pos..*pos + i * o]); // col-major (I x O)
+        *pos += i * o;
+        let biases = narrow(&flat[*pos..*pos + o]);
+        *pos += o;
+        output_layers.push(FastDenseLayer {
+            input_size: i,
+            output_size: o,
+            weights,
+            biases,
+        });
+    }
+    let normalize_mean = narrow(&flat[*pos..*pos + input_size]);
+    *pos += input_size;
+    let normalize_std = narrow(&flat[*pos..*pos + input_size]);
+    *pos += input_size;
+    (output_layers, normalize_mean, normalize_std)
+}
+
+/// The whole-sequence forward PROLOGUE both cell nets share (`BlstmNetwork::feed_forward`,
+/// `nn/blstm.rs:1123-1147`): the sequential output-length division, then the
+/// `LSTMRatios[0] > 1 && netInput < inputCols` crop gate.
+///
+/// `None` means "no output rows" (`frames == 0 || out_len == 0`); `Some(in_cols)` is the
+/// crop-gated width to feed the stack(s) -- BOTH of them in the bidirectional case, which
+/// is the exact tree's own behaviour (`:1142-1147` hands the same cropped input to
+/// `forward` and `backward`). The early return stays at the CALL SITE, which is why this
+/// hands back an `Option` rather than returning the empty matrix itself.
+///
+/// Call sites: [`FastCausalNet::feed_forward`] and
+/// [`super::bicell::FastBiCell::feed_forward`]. The division loop runs BEFORE the
+/// degenerate check exactly as the copies did, so a zero ratio still panics there rather
+/// than being short-circuited away at `frames == 0`.
+pub(crate) fn stack_input_cols(
+    subs: &[usize],
+    input_width: usize,
+    input: &FastMatrix,
+) -> Option<usize> {
+    let frames = input.rows;
+    let mut out_len = frames;
+    for &r in subs {
+        out_len /= r;
+    }
+    if frames == 0 || out_len == 0 {
+        return None;
+    }
+    Some(if subs[0] > 1 && input_width < input.cols {
+        input_width
+    } else {
+        input.cols
+    })
+}
+
+/// Drive `rows` hidden rows through the dense output MLP one row at a time, refilling
+/// `out` with the completed posterior rows.
+///
+/// Call sites: [`FastCausalNet::feed_forward`] passes `rev = None` and the chain gets a
+/// DIRECT borrow of the single stack's hidden rows; [`super::bicell::FastBiCell::
+/// feed_forward`] passes the reverse stack's rows as `rev`, and each row is staged into
+/// `row_buf` as the hcat `[fwd | rev]` -- FORWARD HALF ON THE LEFT
+/// (`Network::feed_forward_double`, `nn/network.rs:430-437`). `row_buf` is the caller's
+/// reused buffer (the bidirectional overlap driver calls `feed_forward` once per window,
+/// so a per-call allocation would be a per-window allocation); the causal caller hands in
+/// an empty local, which is never touched and never allocates.
+///
+/// The per-row `match` on `rev` is the [`run_sequence`] `reverse`-flag idiom: ONE driver
+/// with a flag rather than two copies of the body. It selects a row SOURCE and changes no
+/// arithmetic -- the chain sees the same values in the same order either way.
+///
+/// THE DENSE STAGE IS PER-ROW for both nets ([`DenseRowChain`], not the batched
+/// `super::nn::dense_net_forward`): `faer_project`'s result depends on the ROW COUNT once
+/// the weight matrix has more than one column, so per-row is what makes the causal
+/// streaming session bit-identical to offline and the bidirectional plain and overlap
+/// regimes agree with each other. See [`DenseRowChain`]'s docs for the measurement.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drive_output_rows(
+    chain: &mut DenseRowChain,
+    layers: &[FastDenseLayer],
+    osub: &[usize],
+    rows: usize,
+    fwd: (&[f32], usize),
+    rev: Option<(&[f32], usize)>,
+    row_buf: &mut Vec<f32>,
+    out: &mut FastMatrix,
+    output_size: usize,
+) {
+    let (fwd_data, fwd_cols) = fwd;
+    let width = fwd_cols + rev.map_or(0, |(_, c)| c);
+    if rev.is_some() {
+        ensure_len(row_buf, width);
+    }
+    chain.reset();
+    out.data.clear();
+    let mut o_rows = 0usize;
+    for r in 0..rows {
+        let row = match rev {
+            None => &fwd_data[r * fwd_cols..r * fwd_cols + fwd_cols],
+            Some((rev_data, rev_cols)) => {
+                row_buf[..fwd_cols]
+                    .copy_from_slice(&fwd_data[r * fwd_cols..r * fwd_cols + fwd_cols]);
+                row_buf[fwd_cols..width]
+                    .copy_from_slice(&rev_data[r * rev_cols..r * rev_cols + rev_cols]);
+                &row_buf[..width]
+            }
+        };
+        if chain.push_row(layers, osub, row) {
+            out.data.extend_from_slice(chain.output(layers));
+            o_rows += 1;
+        }
+    }
+    out.rows = o_rows;
+    out.cols = output_size;
+}
+
+// ---------------------------------------------------------------------------
 // FastCausalNet -- one causal stack + the shared f32 output MLP.
 // ---------------------------------------------------------------------------
 
@@ -1597,52 +1818,18 @@ pub struct FastCausalNet {
 
 impl FastCausalNet {
     /// The whole-net element count: cells + output MLP + the `2 * input_size`
-    /// normalize tail. Mirrors `BlstmNetwork::nb_of_weights` with no backward stack.
+    /// normalize tail. Mirrors `BlstmNetwork::nb_of_weights` with no backward stack --
+    /// ONE stack, hence [`stack_element_count`]'s `stacks = 1` (its docs carry the
+    /// choke-point argument this site used to state inline, and phase-10 Task 8's
+    /// dropped LSTM bail: the causal set is complete, so the table is total).
     pub fn element_count(
         spec: &NnetSpec,
         cell_type: CellType,
         mamba: &MambaParams,
         cfc: &CfcParams,
     ) -> Result<usize> {
-        let lstm = &spec.lstm_neuron_nb;
-        let lsub = &spec.lstm_subsampling;
-        let outn = &spec.output_neuron_nb;
-        let osub = &spec.output_subsampling;
-        // A spec with fewer than two entries in either list describes no layer at all;
-        // the `len() - 1` loop bounds below would underflow-panic on it.
-        if lstm.len() < 2
-            || outn.len() < 2
-            || lsub.len() < lstm.len() - 1
-            || osub.len() < outn.len() - 1
-        {
-            bail!(
-                "fast::cells::FastCausalNet: malformed NnetSpec (lstm {:?} / sub {:?}, output {:?} / sub {:?})",
-                lstm.len(),
-                lsub.len(),
-                outn.len(),
-                osub.len()
-            );
-        }
-        let mut n = 0usize;
-        for jj in 0..lstm.len() - 1 {
-            let i = lstm[jj] * lsub[jj];
-            let o = lstm[jj + 1];
-            // Phase 10 Task 7 routed the per-cell sizing through the shared
-            // [`cell_weight_count`] table (Task 6's inline match, verbatim, minus the
-            // duplication the bidirectional net would otherwise have added). This is
-            // the choke point BOTH causal construction sites (`fast::driver` and
-            // `fast::stream`) funnel through (`from_flat` calls `element_count` first),
-            // so getting the count right HERE is what keeps a pack from being consumed
-            // head-first by another architecture's reader. Phase 10 Task 8 DROPPED the
-            // LSTM bail that used to sit here (the causal set is complete), leaving the
-            // table total.
-            n += cell_weight_count(cell_type, i, o, mamba, cfc);
-        }
-        for jj in 0..outn.len() - 1 {
-            n += outn[jj] * osub[jj] * outn[jj + 1] + outn[jj + 1];
-        }
-        n += 2 * lstm[0];
-        Ok(n)
+        check_net_spec(spec, "fast::cells::FastCausalNet")?;
+        Ok(stack_element_count(spec, cell_type, mamba, cfc, 1))
     }
 
     /// Build from a `NnetSpec` + the cell type/geometry + the flat f64 pack, narrowing
@@ -1693,28 +1880,8 @@ impl FastCausalNet {
             pos += used;
         }
 
-        let narrow = |s: &[f64]| -> Vec<f32> { s.iter().map(|&x| x as f32).collect() };
-        let mut output_layers = Vec::with_capacity(outn.len() - 1);
-        for jj in 0..outn.len() - 1 {
-            let i = outn[jj] * osub[jj];
-            let o = outn[jj + 1];
-            let weights = narrow(&flat[pos..pos + i * o]); // col-major (I x O)
-            pos += i * o;
-            let biases = narrow(&flat[pos..pos + o]);
-            pos += o;
-            output_layers.push(FastDenseLayer {
-                input_size: i,
-                output_size: o,
-                weights,
-                biases,
-            });
-        }
-
-        let input_size = lstm[0];
-        let normalize_mean = narrow(&flat[pos..pos + input_size]);
-        pos += input_size;
-        let normalize_std = narrow(&flat[pos..pos + input_size]);
-        pos += input_size;
+        let (output_layers, normalize_mean, normalize_std) =
+            build_dense_tail(flat, &mut pos, outn, osub, lstm[0]);
         // Construction-time, once per net: a plain assert (not `debug_assert`), since
         // a layout/count disagreement here silently decodes the WHOLE pack wrong and
         // the release build is exactly where that must not pass quietly.
@@ -1803,20 +1970,10 @@ impl FastCausalNet {
     /// `CELL_F32_PIN` band the stacked legs pin.
     pub fn feed_forward(&mut self, input: &FastMatrix) -> &FastMatrix {
         let frames = input.rows;
-        let mut out_len = frames;
-        for &r in &self.lstm_subsampling {
-            out_len /= r;
-        }
-        if frames == 0 || out_len == 0 {
+        let Some(in_cols) = stack_input_cols(&self.lstm_subsampling, self.lstm_neuron_nb[0], input)
+        else {
             self.output = FastMatrix::zeros(0, self.output_size);
             return &self.output;
-        }
-
-        let fwd_in = self.lstm_neuron_nb[0];
-        let in_cols = if self.lstm_subsampling[0] > 1 && fwd_in < input.cols {
-            fwd_in
-        } else {
-            input.cols
         };
 
         let (rows, cols) = cell_stack_forward(
@@ -1832,23 +1989,21 @@ impl FastCausalNet {
         );
 
         // The dense output MLP, ONE hidden row at a time through the shared chain.
-        self.dense_chain.reset();
-        self.output.data.clear();
-        let mut o_rows = 0usize;
-        for r in 0..rows {
-            let row = &self.hidden[r * cols..r * cols + cols];
-            if self
-                .dense_chain
-                .push_row(&self.output_layers, &self.output_subsampling, row)
-            {
-                self.output
-                    .data
-                    .extend_from_slice(self.dense_chain.output(&self.output_layers));
-                o_rows += 1;
-            }
-        }
-        self.output.rows = o_rows;
-        self.output.cols = self.output_size;
+        // `row_buf` is the bidirectional caller's hcat staging buffer: with `rev = None`
+        // the chain gets a direct borrow of `hidden`, so this local is never touched and
+        // an empty `Vec` never allocates.
+        let mut row_buf = Vec::new();
+        drive_output_rows(
+            &mut self.dense_chain,
+            &self.output_layers,
+            &self.output_subsampling,
+            rows,
+            (&self.hidden, cols),
+            None,
+            &mut row_buf,
+            &mut self.output,
+            self.output_size,
+        );
         &self.output
     }
 }

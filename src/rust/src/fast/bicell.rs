@@ -66,11 +66,10 @@ use crate::config::NnetSpec;
 use crate::nn::blstm::{CellType, CfcParams, MambaParams};
 
 use super::cells::{
-    FastCell, backward_peep, build_cell, cell_stack_forward, cell_weight_count, forward_peep,
+    FastCell, backward_peep, build_cell, build_dense_tail, cell_stack_forward, check_net_spec,
+    drive_output_rows, forward_peep, stack_element_count, stack_input_cols,
 };
-use super::nn::{
-    DenseRowChain, FastDenseLayer, FastMatrix, Scratch, ensure_len, window_begin, window_end,
-};
+use super::nn::{DenseRowChain, FastDenseLayer, FastMatrix, Scratch, window_begin, window_end};
 
 /// The f32 bidirectional cell net: TWO cell stacks (forward + reversed) feeding the
 /// shared per-row dense output MLP.
@@ -129,26 +128,7 @@ impl FastBiCell {
         mamba: &MambaParams,
         cfc: &CfcParams,
     ) -> Result<usize> {
-        let lstm = &spec.lstm_neuron_nb;
-        let lsub = &spec.lstm_subsampling;
-        let outn = &spec.output_neuron_nb;
-        let osub = &spec.output_subsampling;
-        // A spec with fewer than two entries in either list describes no layer at all;
-        // the `len() - 1` loop bounds below would underflow-panic on it.
-        if lstm.len() < 2
-            || outn.len() < 2
-            || lsub.len() < lstm.len() - 1
-            || osub.len() < outn.len() - 1
-        {
-            bail!(
-                "fast::bicell::FastBiCell: malformed NnetSpec (lstm {:?} / sub {:?}, output {:?} \
-                 / sub {:?})",
-                lstm.len(),
-                lsub.len(),
-                outn.len(),
-                osub.len()
-            );
-        }
+        check_net_spec(spec, "fast::bicell::FastBiCell")?;
         // THE LSTM REFUSAL, now EXPLICIT (phase-10 Task 8). It used to fall out of
         // `cell_weight_count`'s `None` sentinel, which that task retired when it gave the
         // LSTM a real f32 cell kernel ([`super::cells::FastLstm`]). The refusal itself is
@@ -157,28 +137,18 @@ impl FastBiCell {
         // one through a cell stack would silently swap it for the per-step kernel. It is
         // also unreachable through the dispatch -- `classify_fast_shape` maps
         // `(lstm, bidirectional)` to `FastNetShape::Blstm` -- so this is the belt to that
-        // braces, pinned by `bicell_bails_on_the_lstm_cell`.
+        // braces, pinned by `bicell_bails_on_the_lstm_cell`. It stays HERE, after the
+        // shape guard and before the count, which is the order the pre-dedupe copy had.
         if cell_type == CellType::Lstm {
             bail!(
                 "fast::bicell::FastBiCell is for the phase-9/10 cells only; the legacy \
                  peephole LSTM's bidirectional fast twin is `super::nn::FastBlstm` (spec S5)"
             );
         }
-        let mut n = 0usize;
-        for jj in 0..lstm.len() - 1 {
-            let i = lstm[jj] * lsub[jj];
-            let o = lstm[jj + 1];
-            let per_layer = cell_weight_count(cell_type, i, o, mamba, cfc);
-            // TWICE: the forward stack and the backward stack are separate weight
-            // blocks of identical shape (`BlstmNetwork::from_config` builds both from
-            // the same `lstm_neuron_nb`).
-            n += 2 * per_layer;
-        }
-        for jj in 0..outn.len() - 1 {
-            n += outn[jj] * osub[jj] * outn[jj + 1] + outn[jj + 1];
-        }
-        n += 2 * lstm[0];
-        Ok(n)
+        // TWO stacks: the forward and backward blocks are separate weight blocks of
+        // identical shape (`BlstmNetwork::from_config` builds both from the same
+        // `lstm_neuron_nb`), which is the whole difference from the causal net's count.
+        Ok(stack_element_count(spec, cell_type, mamba, cfc, 2))
     }
 
     /// Build from a `NnetSpec` + the cell type/geometry + the flat f64 pack, narrowing
@@ -242,28 +212,8 @@ impl FastBiCell {
         let cells_fwd = stack(&mut pos, forward_peep(spec));
         let cells_rev = stack(&mut pos, backward_peep(spec));
 
-        let narrow = |s: &[f64]| -> Vec<f32> { s.iter().map(|&x| x as f32).collect() };
-        let mut output_layers = Vec::with_capacity(outn.len() - 1);
-        for jj in 0..outn.len() - 1 {
-            let i = outn[jj] * osub[jj];
-            let o = outn[jj + 1];
-            let weights = narrow(&flat[pos..pos + i * o]); // col-major (I x O)
-            pos += i * o;
-            let biases = narrow(&flat[pos..pos + o]);
-            pos += o;
-            output_layers.push(FastDenseLayer {
-                input_size: i,
-                output_size: o,
-                weights,
-                biases,
-            });
-        }
-
-        let input_size = lstm[0];
-        let normalize_mean = narrow(&flat[pos..pos + input_size]);
-        pos += input_size;
-        let normalize_std = narrow(&flat[pos..pos + input_size]);
-        pos += input_size;
+        let (output_layers, normalize_mean, normalize_std) =
+            build_dense_tail(flat, &mut pos, outn, osub, lstm[0]);
         // Construction-time, once per net: a plain assert (not `debug_assert`), since a
         // layout/count disagreement here silently decodes the WHOLE pack wrong and the
         // release build is exactly where that must not pass quietly.
@@ -330,20 +280,10 @@ impl FastBiCell {
     /// kernel at the same granularity.
     pub fn feed_forward(&mut self, input: &FastMatrix) -> &FastMatrix {
         let frames = input.rows;
-        let mut out_len = frames;
-        for &r in &self.lstm_subsampling {
-            out_len /= r;
-        }
-        if frames == 0 || out_len == 0 {
+        let Some(in_cols) = stack_input_cols(&self.lstm_subsampling, self.lstm_neuron_nb[0], input)
+        else {
             self.output = FastMatrix::zeros(0, self.output_size);
             return &self.output;
-        }
-
-        let fwd_in = self.lstm_neuron_nb[0];
-        let in_cols = if self.lstm_subsampling[0] > 1 && fwd_in < input.cols {
-            fwd_in
-        } else {
-            input.cols
         };
 
         let (rows_f, cols_f) = cell_stack_forward(
@@ -377,30 +317,19 @@ impl FastBiCell {
         );
 
         // hcat + dense, ONE row at a time. Column order: FORWARD HALF LEFT
-        // (`Network::feed_forward_double`, `nn/network.rs:430-437`).
-        let width = cols_f + cols_r;
-        ensure_len(&mut self.row_buf, width);
-        self.dense_chain.reset();
-        self.output.data.clear();
-        let mut o_rows = 0usize;
-        for r in 0..rows_f {
-            self.row_buf[..cols_f]
-                .copy_from_slice(&self.hidden_fwd[r * cols_f..r * cols_f + cols_f]);
-            self.row_buf[cols_f..width]
-                .copy_from_slice(&self.hidden_rev[r * cols_r..r * cols_r + cols_r]);
-            if self.dense_chain.push_row(
-                &self.output_layers,
-                &self.output_subsampling,
-                &self.row_buf[..width],
-            ) {
-                self.output
-                    .data
-                    .extend_from_slice(self.dense_chain.output(&self.output_layers));
-                o_rows += 1;
-            }
-        }
-        self.output.rows = o_rows;
-        self.output.cols = self.output_size;
+        // (`Network::feed_forward_double`, `nn/network.rs:430-437`) -- the shared drive
+        // stages `[fwd | rev]` into `row_buf` in exactly that order.
+        drive_output_rows(
+            &mut self.dense_chain,
+            &self.output_layers,
+            &self.output_subsampling,
+            rows_f,
+            (&self.hidden_fwd, cols_f),
+            Some((&self.hidden_rev, cols_r)),
+            &mut self.row_buf,
+            &mut self.output,
+            self.output_size,
+        );
         &self.output
     }
 
@@ -547,7 +476,10 @@ impl FastBiCell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fast::cells::{FastCfc, FastMamba, FastSlstm};
+    // `cell_weight_count` is a TEST-only import here since the phase-11 Task 1 dedupe:
+    // `element_count` now reaches it through `super::cells::stack_element_count`, while
+    // these legs still size a single stack directly to cross-check the count.
+    use crate::fast::cells::{FastCfc, FastMamba, FastSlstm, cell_weight_count};
 
     fn spec(lstm: &[usize], lsub: &[usize], outn: &[usize], osub: &[usize]) -> NnetSpec {
         NnetSpec {
