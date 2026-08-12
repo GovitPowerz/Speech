@@ -95,6 +95,7 @@ from typing import cast
 import numpy as np
 import pytest
 from speech import config_bridge
+from speech.drivers import baseline
 from speech.init_weights import init_transformer_flat, init_weights, transformer_geometry
 
 REF = Path("tests/reference_data/phase4d")
@@ -644,3 +645,63 @@ def test_other_cells_are_unchanged_by_the_transformer_geometry_entry() -> None:
         assert np.array_equal(a, b), cell
         if length is not None:
             assert a.shape == (length,)
+
+
+# ------------------------------------------------------------------------------------- #
+# Baseline arm knob (phase-11 T9 fix round 1, review F2 -- the phase-9/10 `cell_overlay`/
+# `--cell-type` CI-coverage precedent, `test_phase9_init.py::test_cell_type_knob_overlays_
+# the_s6_key_only` / `test_phase10_init.py::test_cfc_knob_overlays_the_cell_key_only` and
+# siblings, which this task's own production knob change had NONE of: the existing loops
+# there iterate hardcoded cell tuples and do not pick "transformer" up automatically)
+# ------------------------------------------------------------------------------------- #
+
+_SAD_FLAT: dict[str, str] = {
+    "Algo_choice": "3",
+    "BLSTM_LSTMNeuronNb": "23,24,24",
+    "BLSTM_LSTMSubSampling": "4,1",
+    "BLSTM_OutputNeuronNb": "48,12,1",
+    "BLSTM_OutputSubSampling": "1,1",
+    "fileslisting": "x.flst",
+}
+
+
+def test_transformer_knob_overlays_the_cell_key_only() -> None:
+    """Bidirectional writes ONLY `BLSTM_Cell_Type` -- no third derived key, per
+    `cell_overlay`'s own "THE FIFTH CELL NEEDS NO THIRD DERIVED KEY" docstring paragraph,
+    pinned here rather than left as prose."""
+    assert baseline.cell_overlay(_SAD_FLAT, "transformer", "bidirectional") == {"BLSTM_Cell_Type": "transformer"}
+
+
+def test_transformer_knob_composes_with_forward() -> None:
+    """`--direction forward` forces the SAME two derived keys every cell gets (the output
+    MLP resize + `BLSTM_window 0`), transformer included -- no cell-specific branch."""
+    assert baseline.cell_overlay(_SAD_FLAT, "transformer", "forward") == {
+        "BLSTM_Cell_Type": "transformer",
+        "BLSTM_Direction": "forward",
+        "BLSTM_OutputNeuronNb": "24,12,1",
+        "BLSTM_window": "0",
+    }
+
+
+def test_parser_exposes_transformer() -> None:
+    args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell-type", "transformer"])
+    assert args.cell_type == "transformer"
+
+
+def test_overlaid_config_seeds_through_the_matching_builder() -> None:
+    """End to end through the arm surface (the CfC precedent,
+    `test_phase10_init.py::test_overlaid_config_seeds_through_the_matching_builder`): the
+    overlay lands on the flat config, `nnet_spec` reads it back, and `init_weights` emits a
+    transformer-sized pack at the v1-lineage bidirectional length this file's own
+    `net_length` closed form independently predicts."""
+    cfg = {**_SAD_FLAT, **baseline.cell_overlay(_SAD_FLAT, "transformer", "bidirectional")}
+    cfg |= {
+        "BLSTM_NNetInputSize": "23",
+        "BLSTM_CostLawSpeech": "log",
+        "BLSTM_CostLawNoSpeech": "log",
+        **{f"BLSTM_{d}_Is{p}Active": "true" for d in ("Forward", "Backward") for p in ("CellsPeepholes", "GatesPeepholes", "GatesRecurrentPeepholes")},
+    }
+    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
+    flat = init_weights(spec, np.random.default_rng(0))[0]
+    assert flat.shape == (16199 + 196 * SIZED_D_FF,)
+    assert flat.shape == (net_length(spec, SIZED_D_FF),)

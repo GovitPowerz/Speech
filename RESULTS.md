@@ -2278,8 +2278,11 @@ steps, 20 s audio cap).
 ### Pack lengths, MEASURED (spec R4)
 
 `len(init_weights(...))` at the arm's own overlaid config, agreeing digit-for-digit with
-`tests/test_phase11_init.py`'s independent closed-form `13871 + 196*d_ff` (v2) /
-`16199 + 196*d_ff` (v1) at the sized `d_ff = 64`:
+`tests/test_phase11_init.py`'s independent closed-form derivation at the sized `d_ff = 64`:
+bidirectional `13871 + 196*d_ff` (v2) / `16199 + 196*d_ff` (v1), forward `6959 + 98*d_ff`
+(v2) / `8135 + 98*d_ff` (v1) -- the `d_ff`-dependent blocks (`W_1`/`b_1`/`W_2`/`b_2`) are
+purely per-stack, so the coefficient exactly halves with the stack count while the constant
+term does not:
 
 | cell | v2 bidirectional | v2 forward | vs v2 LSTM (bi) | v1 bidirectional | v1 forward |
 |---|---|---|---|---|---|
@@ -2324,7 +2327,10 @@ criterion (section below):
 trained-vs-init margin (0.226/0.216/0.206) clears the original pinned `>= 0.2`, but at
 collars 1.0/2.0 it does not (0.194262 and 0.185836 -- both measured, run-twice
 bit-identical, not noise). At EVERY collar, though, the trained DCF is exactly 0.250000,
-reaching the KNOWN all-speech collapse floor every other row's trained model also reaches:
+reaching the KNOWN all-speech collapse point eight of the other nine rows' trained models
+also reach exactly (`slstm-forward` at 0.252430 and `mamba-forward` at 0.248770, both at
+collar 0.5, are the two genuinely-non-degenerate trained exceptions -- Phase 10's "The
+eight gates" section above -- and both clear their own margin comfortably regardless):
 
 | collar | trained dcf | init dcf | margin | margin verdict | reaches floor (<= 0.2501)? |
 |---|---|---|---|---|---|
@@ -2335,9 +2341,14 @@ reaching the KNOWN all-speech collapse floor every other row's trained model als
 | 2.0 | 0.250000 | 0.435836 | 0.185836 | **FAIL** | yes -- **passes via the floor** |
 
 **The headline finding is an INIT-QUALITY ANOMALY, not a training failure.** The TRAINED
-model reaches the identical degenerate all-speech collapse every other row's trained model
-reaches on this subset (Pmiss 0, Pfa 1, DCF 0.25 at every collar) -- training is identical
-in outcome to all nine siblings. The INIT side is what diverges: every other row's
+model reaches DCF 0.250000 at every collar (Pmiss 0, Pfa 1) -- the exact all-speech
+collapse point EIGHT of the other nine rows' trained models also reach. (The remaining two,
+`slstm-forward` at 0.252430 and `mamba-forward` at 0.248770 (both at collar 0.5), are
+genuinely non-degenerate on the trained side too -- not a contradiction, since both still
+clear their own untrained-vs-trained margin comfortably, 0.494 and 0.489 respectively,
+without needing the collapse floor at all.) Training is not in question for
+`transformer/forward` specifically: its trained result is indistinguishable from the
+typical row's. The INIT side is what diverges: every other row's
 from-scratch Xavier init on a GATED RECURRENT cell collapses toward the all-non-speech
 baseline (Pmiss typically > 0.9, most rows exactly 1.0), which is WHY the original `-0.2`
 margin (sized against a ~0.50 measured gap on those rows) carried so much headroom
