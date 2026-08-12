@@ -2425,3 +2425,93 @@ The full-corpus run is where the init-quality anomaly's practical consequence --
 would actually surface: at subset scale it only affected which DISJUNCT a gate satisfied,
 never the trained outcome itself, so whether the near-uniform-attention-at-init mechanism
 helps, hurts, or is neutral to full-corpus convergence remains for the launcher to show.
+
+## Phase 11 -- the mutation battery (Task 10): the catcher map
+
+Spec S9's `>= 8` items, run as apply -> run ONLY the named catcher's file (FOREGROUND,
+release, R6-capped) -> revert -> re-run green -> verify the tree byte-clean. **10 items, 15
+applied mutations** (three items carry two sub-variants, one carries a non-vacuity control).
+**9 of 10 items break the leg the SPEC NAMED**; the tenth breaks nothing at all and is the
+battery's headline finding. Nothing under `src/` was committed; the per-item evidence
+(diffs, commands, verbatim failure lines) is in the task ledger.
+
+| # | mutation | named catcher | verdict |
+|---|---|---|---|
+| 1a | ALiBi slope sign flip, `FastTransformer::step` | `transformer_window_truncation_identity` + the (92->4) arm-geometry leg | CAUGHT (92->4, **2741x** its pin); truncation identity structurally blind |
+| 1b | ALiBi slope sign flip, exact `TransformerLayer` | `multi_window_forward_matches_the_hand_transcription` | CAUGHT; **FD tier blind** (measured) |
+| 2a | window off-by-one at the edge (`window_begin`) | same value pin | CAUGHT (widening variant = index panic; narrowing variant = 3 value legs); FD blind |
+| 2b | KV-ring -> window rotation (`oldest + 1`) | the two fast legs | CAUGHT (92->4, **6329x** rel / **60290x** abs); truncation identity blind to a pure ROTATION |
+| 3a | f32 softmax max-subtract removed | the f32 `exp` guard / parity | **NOT CAUGHT** -- 47/47 lib + 4/4 parity green |
+| 3b | same removal, exact cell | `the_max_subtraction_survives_huge_logits` | CAUGHT (`the softmax overflowed`) |
+| 4 | KV-ring eviction-order swap (evict the NEWEST) | `transformer_window_truncation_identity` | CAUGHT + 5 others |
+| 5 | `b_k` made live (drop `- sdot`) | `the_key_bias_is_gradient_dead_at_every_length` | CAUGHT + the `T=1` pin + the FD resolvable-count CONTRACT assert |
+| 6 | `init_transformer_flat` `W_1`/`W_2` emitted crosswise | `test_pack_is_reproducible_block_by_block` | CAUGHT on 10 of 10 parametrizations + both shear companions |
+| 7 | re-duplicated `build_dense_tail` copy, ONE-ULP flip | the bicell parity legs at existing pins | **NOT CAUGHT** -- every printed statistic bit-identical |
+| 8 | mis-scoped Jacobian `p*dp - sdot` (`T=1` zero SURVIVES) | the `T=2` contrast / FD counts | CAUGHT there; the `T=1` structural pin stays GREEN |
+| 9 | retention arm folded into the no-op arm | T8's two enum pins | CAUGHT -- exactly those two, 7 siblings green |
+| 10a | `W_qkv` q<->k family swap, MATRIX **and** BIAS | (the T4 open question) | CAUGHT at THREE tiers incl. the seam's `b_k` inertness leg, both stacks |
+| 10b | q<->k shear, MATRIX HALF ONLY (`b_qkv` untouched) | (same) | CAUGHT at the exact tier (`flat_layout_positions_are_the_spec_order` + 2 value pins); **seam structurally blind** |
+
+### The two honest gaps
+
+**(1) The f32 max-subtract removal is owned by nothing** (item 3a). Softmax is exactly
+shift-invariant in R, so removing the subtraction is PRECISION-ONLY at every logit magnitude
+the committed fixtures reach and becomes a CORRECTNESS defect only past f32's `exp` limit
+(~88.72), which none of them approach. It sits inside the ONE `step` kernel the offline and
+streaming paths share, so every self-consistency leg compares two runs of the mutated kernel;
+and the measured drift is **1.39x** on the `I = 5` leg (1.9019e-7 -> 2.6462e-7 against a
+5.0e-6 pin) and **exactly 1.000x, bit-identical**, on the 92->4 leg, so no pin at this repo's
+measured*10 convention could catch it either. This is phase-10 item 6's result reproduced on
+a different cell and a different kernel. THE CHEAP CLOSER, named: an f32 twin of the exact
+tier's `the_max_subtraction_survives_huge_logits` -- `fast/cells.rs`'s module doc already
+argues in prose that the max-subtract is what keeps the twin precision-only; the argument is
+written down, the pin is not.
+
+**(2) A one-ULP divergence between two duplicated copies is owned by nothing** (item 7). A
+re-added `build_dense_tail` copy inside `fast/bicell.rs` with `w[0]` flipped by one ULP
+leaves the bicell parity legs 7/7 green with EVERY printed statistic bit-identical at 17
+digits -- because the pinned quantity is a max over all elements and the perturbation is
+three decades below the f32-vs-f64 gap that attains it. A `+1e3` control at the same site
+flips a SEGMENT TYPE (`Other` -> `Speech`) and breaks 4 of 7, so the site is live and the
+result is real. This does not weaken the Task-1 dedupe -- it IS the dedupe's justification:
+only structure prevents that drift; no test tier watches for it.
+
+### Two doctrine facts the battery measured rather than assumed
+
+**FD is blind to forward structure, four times over.** The ALiBi sign flip (1b), the window
+off-by-one (2a-ii) and the full q/k block swap (10a) all leave
+`transformer_backward_matches_central_difference` GREEN, and 10b only brushes a
+roundoff-set `rel_pin` (`9.295e-5` vs `7.4e-5`) while `max_rel_major` never moves and every
+resolvable count stays exactly right. Central differences compare the analytic adjoint to
+the numeric derivative OF THE SAME (mutated) forward, so a self-consistent forward+backward
+pair is invisible by construction. **FD owns the ADJOINT; the value-pin instrument
+(`multi_window_forward_matches_the_hand_transcription`, `single_step_matches_the_hand_computed_value`,
+`flat_layout_positions_are_the_spec_order`) owns the FORWARD.** Conversely, the FD tier's
+RESOLVABLE-COUNT assert is the sharpest catcher in the battery for a wrong Jacobian: items 5
+and 8 both trip it as a CONTRACT failure ("more than the structural maximum"), no tolerance
+involved.
+
+**The T4 `[q|k|v]` matrix-half gap: CONFIRMED, and its scope narrowed to one sentence.** The
+matrix-half q<->k permutation (10b) is owned by the EXACT tier's layout and forward value
+pins -- three of them, all discriminating -- and has NO STRUCTURAL handle at the seam: the
+`b_k` inertness leg passes on both stacks, because `b_k`'s deadness is a property of which
+COLUMNS feed the key slot, not of which matrix rows were loaded there, and the shear leaves
+that untouched. The seam's only reaction is a 1.6x breach of one `grad_check` pin
+(`5.8205e-8` vs `3.6e-8`, measured `3.565e-9`) on one of three fixtures -- incidental, and
+not something to rely on. The practical consequence: `flat_layout_positions_are_the_spec_order`
+is the SOLE structural owner of the `[q | k | v]` row order, and must not be deleted as
+"redundant with the forward pins". With the FULL family swapped (10a, matrix AND bias) the
+seam DOES catch it, on both stacks, with a discriminating message -- so the bias half stays
+closed exactly as Task 4 reported.
+
+### One prior record that did not reproduce
+
+The Task-5 review's parenthetical that a "ring -> window rotation does not move" the
+`I = 5` -> 4 leg was NOT reproducible: the `oldest + 1` rotation moves that leg by five
+decades (max_rel `9.353e-1` against a `5.0e-6` pin). The naming requirement it motivated is
+unaffected and stands on the SIGN-FLIP axis, where the (92->4) leg is a measured **276x**
+better catcher than the (5->4) one (2741x vs 9.93x of their respective pins). The leg that
+is genuinely blind to a pure rotation is `transformer_window_truncation_identity`, and
+provably so: both sides of its comparison rotate identically, which is why it owns WHICH
+FRAMES are in the window (item 4, caught with a ~1e1 row delta) and never how they are
+weighted.
