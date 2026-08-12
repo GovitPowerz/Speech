@@ -27,7 +27,10 @@
 //! ([`super::cells`]), and `(any cell, bidirectional)` builds [`FastBiCell`]
 //! ([`super::bicell`]). NOTHING typed-bails on shape any more: phase-10 Task 8's
 //! `FastLstm` filled the last hole (`(lstm, forward)`), so the classifier is TOTAL and
-//! the cell set `{lstm, slstm, mamba, cfc}` is complete in both directions.
+//! the cell set `{lstm, slstm, mamba, cfc}` was complete in both directions -- and stayed
+//! total when phase-11 added a FIFTH cell, `transformer` (Task 5 causal, Task 6
+//! bidirectional): the match here is generic over `CellType`, so neither arm needed a
+//! transformer-specific line, only [`FastNetShape`]'s per-variant docs below did.
 //!
 //! THE WINDOWING REGIME FOLLOWS THE SHAPE. BLSTM runs the OVERLAP windowed driver only;
 //! causal runs the PLAIN whole-sequence forward only (a causal cell inside a window has
@@ -89,11 +92,13 @@ pub enum FastNetShape {
     /// [`FastBlstm`] -- LSTM + bidirectional, the phase-7 path (BYTE-UNTOUCHED).
     Blstm,
     /// [`FastCausalNet`] -- ANY cell + `Direction forward`: `slstm`/`mamba` (phase 9),
-    /// `cfc` (phase-10 Task 6), `lstm` (phase-10 Task 8, which completed the set).
+    /// `cfc` (phase-10 Task 6), `lstm` (phase-10 Task 8, which completed the phase-10
+    /// set), `transformer` (phase-11 Task 5).
     Causal(CellType),
-    /// [`FastBiCell`] -- `slstm`/`mamba`/`cfc` + `Direction bidirectional` (phase-10
-    /// Task 7, spec S5). OFFLINE ONLY: bidirectional inference is unstreamable by
-    /// construction, so `fast::stream` typed-bails this variant.
+    /// [`FastBiCell`] -- `slstm`/`mamba`/`cfc` (phase-10 Task 7, spec S5) /
+    /// `transformer` (phase-11 Task 6, spec S5.3) + `Direction bidirectional`. OFFLINE
+    /// ONLY: bidirectional inference is unstreamable by construction, so `fast::stream`
+    /// typed-bails this variant.
     BiCell(CellType),
 }
 

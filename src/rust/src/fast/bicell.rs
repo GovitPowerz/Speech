@@ -1,6 +1,11 @@
 //! `fast::bicell` -- the BIDIRECTIONAL f32 twins of the new recurrent cells
 //! (Phase 10 Task 7, spec S5): `Direction bidirectional` x `Cell_Type
-//! {slstm, mamba, cfc}`, the combination the phase-9 fast tree typed-bailed.
+//! {slstm, mamba, cfc}`, the combination the phase-9 fast tree typed-bailed. Phase 11
+//! Task 6 (spec S5.3) joined a FOURTH: `transformer`. NO bicell-specific code landed for
+//! it -- `cell_weight_count`/`build_cell` (phase-11 Task 5) already covered the enum arm,
+//! so [`FastBiCell`] sized and built a transformer stack the moment those two functions
+//! did; Task 6's diff is the parity legs (`tests/phase10_bicell_parity.rs`) plus the
+//! `CELLS` row in this module's own tests.
 //!
 //! [`FastBiCell`] is the f32 counterpart of `nn::blstm::BlstmNetwork` under
 //! `Direction::Bidirectional` with a `CellLayer` other than `Lstm`. Structurally it is
@@ -497,7 +502,7 @@ mod tests {
     // `cell_weight_count` is a TEST-only import here since the phase-11 Task 1 dedupe:
     // `element_count` now reaches it through `super::cells::stack_element_count`, while
     // these legs still size a single stack directly to cross-check the count.
-    use crate::fast::cells::{FastCfc, FastMamba, FastSlstm, cell_weight_count};
+    use crate::fast::cells::{FastCfc, FastMamba, FastSlstm, FastTransformer, cell_weight_count};
 
     fn spec(lstm: &[usize], lsub: &[usize], outn: &[usize], osub: &[usize]) -> NnetSpec {
         NnetSpec {
@@ -550,10 +555,11 @@ mod tests {
     }
 
     /// The transformer geometry the legs below thread through the shared sizing/build
-    /// functions. INERT for every cell in [`CELLS`] -- the transformer row itself is
-    /// phase-11 Task 6's, and this exists only so the shared signatures line up.
-    /// `heads = 1` keeps it valid at any cell width, which matters because these specs
-    /// carry 5-wide layers.
+    /// functions. LIVE for [`CellType::Transformer`] since phase-11 Task 6 joined
+    /// [`CELLS`]; still threaded (and still inert) for the other three, exactly as
+    /// `mamba_params`/`cfc_params` are threaded through a Transformer build. `heads = 1`
+    /// keeps it valid at any cell width, which matters because these specs carry 5-wide
+    /// layers.
     fn transformer_params() -> TransformerParams {
         TransformerParams {
             window: 3,
@@ -562,7 +568,16 @@ mod tests {
         }
     }
 
-    const CELLS: [CellType; 3] = [CellType::Slstm, CellType::Mamba, CellType::Cfc];
+    /// The four cells with a bidirectional f32 twin (spec S5, phase-11 Task 6 for
+    /// transformer). The LSTM cell is absent by construction: `(lstm, bidirectional)` IS
+    /// the phase-7 `FastBlstm`, which this module leaves BYTE-UNTOUCHED (see
+    /// [`lstm_cell_is_refused`]).
+    const CELLS: [CellType; 4] = [
+        CellType::Slstm,
+        CellType::Mamba,
+        CellType::Cfc,
+        CellType::Transformer,
+    ];
 
     /// The pack is TWO stacks + the head: `element_count` is the causal count plus one
     /// more stack, cross-checked against an independent per-cell arithmetic.
@@ -587,10 +602,13 @@ mod tests {
                     FastCfc::weight_count(12, 5, c.backbone_units, c.backbone_layers)
                         + FastCfc::weight_count(5, 4, c.backbone_units, c.backbone_layers)
                 }
-                // Neither is in the iterated set: the bidirectional LSTM's fast twin is
-                // `FastBlstm` (not a cell stack), and the transformer's f32 kernel lands in
-                // phase-11 T5/T6.
-                CellType::Lstm | CellType::Transformer => unreachable!(),
+                CellType::Transformer => {
+                    FastTransformer::weight_count(12, 5, tf.d_ff)
+                        + FastTransformer::weight_count(5, 4, tf.d_ff)
+                }
+                // Not in the iterated set: the bidirectional LSTM's fast twin is
+                // `FastBlstm` (not a cell stack).
+                CellType::Lstm => unreachable!(),
             };
             assert_eq!(
                 n,
