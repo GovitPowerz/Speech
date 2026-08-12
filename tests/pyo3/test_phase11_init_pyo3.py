@@ -6,9 +6,16 @@ proves it agrees with the ACTUAL Rust walk, by handing the pack to an Engine bui
 config that selects the cell and reading it back.
 
 Both failure directions are covered by the round trip, which is why it is worth its runtime:
-`BlstmNetwork::set_weights` BAILS on a pack SHORTER than `nb_of_weights()` (so a too-small
-Python length raises here), and silently ignores an over-long tail (so a too-large one is
-caught by the SHAPE of what `weights()` returns, which the Rust side sizes).
+since the phase-11 interstitial `BlstmNetwork::set_weights` demands the EXACT
+`nb_of_weights()`, so a Python length wrong in EITHER direction raises right here (it used to
+ignore an over-long tail, and a too-large pack was then caught one step later by the SHAPE of
+what `weights()` returns -- that second net is still in place, now redundant).
+
+NOTE the seed fixture leans on the OTHER half of that adjudication: `_seed_tier2_transformer`
+copies the 33671-element `NNweights_config1.bin` next to a config declaring a 28743-weight
+transformer net, so the Engine below constructs only because `load_weights_file` KEEPS the
+legacy's file-load head-first tolerance (`BLSTMNeuralNetwork.cpp:144-146`). It now prints the
+legacy's warning to stderr; that is expected output here, not a failure.
 
 Lives under `tests/pyo3/` for the phase-5 reason, unchanged: the dedicated `python-pyo3` CI job
 runs `pytest tests/pyo3`, so a `speech_rs`-touching test placed anywhere else import-skips in

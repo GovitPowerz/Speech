@@ -1155,8 +1155,9 @@ impl BlstmNetwork {
             norm[j] = weights_derivatives[[j, 0]] / weights_derivatives[[j, 1]]; // :306
         }
         self.trainer.update_weights(&norm, &mut weights, cost); // :307
-        // `set_weights` returns Err only when the vector is too short; `get_weights`
-        // produced exactly `nb_of_weights()` elements, so this cannot fail.
+        // `set_weights` demands the EXACT length; `get_weights` produced exactly
+        // `nb_of_weights()` elements and `Rprop::update_weights` mutates a slice in
+        // place (it cannot resize), so this cannot fail.
         self.set_weights(&weights).unwrap(); // :308
     }
 

@@ -367,7 +367,9 @@ impl FastBlstm {
     /// config-reader path). Narrows f64 -> f32 ONCE, per block, in the exact
     /// `BlstmNetwork::set_weights` order. Errors on MLP mode (unsupported: no
     /// committed config uses it) or a too-short pack (mirroring the exact `exit(1)`
-    /// path; an over-long pack consumes only the head, like the legacy).
+    /// path; an over-long pack consumes only the head, like the legacy's FILE-LOAD
+    /// tolerance at `BLSTMNeuralNetwork.cpp:144-146` -- not like the exact
+    /// `set_weights`, which demands the exact length since the phase-11 interstitial).
     pub fn from_flat(spec: &NnetSpec, flat: &[f64]) -> Result<FastBlstm> {
         if spec.lstm_neuron_nb.is_empty() || spec.lstm_neuron_nb[0] == 0 {
             bail!(

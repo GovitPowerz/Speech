@@ -173,7 +173,9 @@ impl FastBiCell {
     /// `FastBlstm`), and on a pack shorter than [`Self::element_count`] -- the length
     /// check that stops a FORWARD-sized pack (short by exactly one stack) or another
     /// architecture's pack from being consumed head-first. An OVER-long pack consumes
-    /// only the head, as the legacy does.
+    /// only the head, as the legacy's FILE-LOAD path does
+    /// (`BLSTMNeuralNetwork.cpp:144-146`) -- the exact `set_weights` demands the exact
+    /// length since the phase-11 interstitial.
     pub fn from_flat(
         spec: &NnetSpec,
         cell_type: CellType,

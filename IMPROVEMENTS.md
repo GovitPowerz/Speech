@@ -1520,16 +1520,30 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   is a two-call-site change with golden implications, not a bench-task edit).
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
-  the console warning** (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):
+  the console warning -- FIXED (phase 11 interstitial, commit `c02509e`)**
+  (`nn/blstm.rs::load_weights_file`, from `BLSTMNeuralNetwork.cpp:141-148`):
   a `.bin` with FEWER elements than `getNbOfWeights()` is a hard `exit(1)` (ported as `Err`); with
   MORE, the legacy prints `Warning: The number of gains given in %s is more than what's needed.` and
   STILL calls `setWeights`, which consumes only the head and ignores the tail. The port reproduces
   the truncation exactly (`set_weights` already tolerates an over-long slice) but does NOT emit the
-  console warning -- there is no logging seam here yet. *Why deferred:* the numeric behavior (load
-  the head, ignore the tail) is load-bearing and reproduced; the warning is a diagnostic side-effect
-  with no golden. *Fix candidate:* thread a log sink through the engine drivers and restore the
-  warning (or make the mismatch a hard error once configs are trusted). *Pinned by:*
-  `weights_file_too_many_truncates` + `weights_file_too_few_errors` (`tests/phase4a_lifecycle.rs`).
+  console warning -- there is no logging seam here yet. *Why deferred (at the time):* the numeric
+  behavior (load the head, ignore the tail) is load-bearing and reproduced; the warning is a
+  diagnostic side-effect with no golden. *Fix candidate (as written then):* thread a log sink
+  through the engine drivers and restore the warning (or make the mismatch a hard error once
+  configs are trusted). *Pinned by:* `weights_file_too_many_truncates` +
+  `weights_file_too_few_errors` (`tests/phase4a_lifecycle.rs`).
+  **FIX (phase 11 interstitial):** the warning is RESTORED -- `eprintln!` on stderr, not the
+  legacy's `cout`, because this port's stdout carries machine-parsed protocol lines
+  (`BENCH`/`SEG`/`UTT`); the "no logging seam yet" premise was resolved by the
+  `engine/corpus_processor.rs:214` precedent (an `eprintln!` mirroring a legacy `cout` warning),
+  so no log sink had to be threaded. The two fix candidates SPLIT rather than one winning: the
+  warning was restored HERE, and the "hard error" half landed at the OTHER site --
+  `BlstmNetwork::set_weights` -- because that is where the legacy has no tolerance to honor. The
+  head-truncation itself is UNCHANGED and still `weights_file_too_many_truncates`-pinned; it is
+  legacy-specified (`:144-146`) and three committed artifacts depend on it. See the
+  **[phase11]** entry at the end of this section ("`BlstmNetwork::set_weights` accepted an
+  OVER-LONG pack head-first") for the full adjudication, the caller audit and the mutation
+  evidence.
 
 - **[phase4a] `BagOfProcessors` ctor clears `files`/`refsegfiles`/`reflangfiles` to `""` in every
   config map but deliberately NOT `refdialfiles`** (`engine/bag_of_processors.rs::from_configs`,
@@ -2772,7 +2786,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   normalize-tail strip (`weights(1:end-2*length(normalize.mean))`, :29/:57) IS reproduced faithfully:
   SMORMS3 steps the tail-stripped head, and the mean/std tail is folded back before every
   `Engine.set_weights` because the Rust `BLSTMNeuralNetwork::setWeights` demands the FULL vector
-  (`flat.len() >= nb_of_weights()`, an `Err` below that).
+  (`flat.len() == nb_of_weights()`, an `Err` either side of it since the phase-11 interstitial;
+  `>=` when this entry was written).
 
 - **[phase4d] CLOSED: the 4c lifecycle drivers shipped ALGO-6-ONLY -- now generalized to single-net
   algo-3 configs** (`src/python/speech/drivers/{train.py,state.py,test.py}`; cross-ref the two
@@ -4211,7 +4226,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (`&flat[..needed]`) instead of inheriting it from a permissive callee, and RESTORES the
   `:145` warning on stderr (not the legacy's `cout`: this port's stdout carries
   machine-parsed protocol lines `BENCH`/`SEG`/`UTT`; the `eprintln!`-mirrors-a-legacy-`cout`
-  precedent is `engine/corpus_processor.rs:214`).
+  precedent is `engine/corpus_processor.rs:214`). That warning half CLOSES the earlier
+  **[phase4a]** entry in this section ("`<prefix>_weightsFile` too-many case: warning + silent
+  head-truncation; the port drops the console warning"), which is flipped to FIXED with the
+  same commit and cross-links back here; its head-truncation half is deliberately UNCHANGED.
   **DELIBERATELY NOT CHANGED (scope, stated so the asymmetry is not mistaken for an
   oversight):** the f32 fast tree's `from_flat` family (`FastBlstm`/`FastCausalNet`/
   `FastBiCell`) keeps head-first acceptance. It is committed-test load-bearing there --
@@ -4246,7 +4264,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   **Oracle divergence:** the C++ harness family is NOT regenerated and never will be for
   this site -- it describes the LEGACY, which warns-and-continues at the file path and has
   no `setWeights` length logic to describe. The divergence is confined to `set_weights`,
-  where the legacy has no behavior to diverge FROM.
+  where the legacy has no REACHABLE behavior to diverge from: `setWeights` (`:216-224`) does
+  head-eat, so a non-exact vector is not UNDEFINED there -- it is UNREACHABLE, since its only
+  two callers are the ctor branch (which decides the length question first) and
+  `updateWeights`, which passes `getWeights()`.
 
 ### Mutation battery (Phase 4d)
 

@@ -2357,9 +2357,13 @@ impl FastCausalNet {
     /// Build from a `NnetSpec` + the cell type/geometry + the flat f64 pack, narrowing
     /// once per block. Errors on MLP mode and on a pack shorter than
     /// [`Self::element_count`] -- it no longer errors on the LSTM cell, which phase-10
-    /// Task 8 implemented ([`FastLstm`]) -- (mirroring `FastBlstm::from_flat`
-    /// and the exact `set_weights`; an OVER-long pack consumes only the head, as the
-    /// legacy does).
+    /// Task 8 implemented ([`FastLstm`]) -- mirroring `FastBlstm::from_flat`. An OVER-long
+    /// pack consumes only the head, which is the legacy's FILE-LOAD tolerance
+    /// (`BLSTMNeuralNetwork.cpp:144-146`, ported at `BlstmNetwork::load_weights_file`) and
+    /// NOT what the exact `set_weights` does -- since the phase-11 interstitial that one
+    /// demands the exact length, the legacy having no length logic of its own at `:209-225`.
+    /// The fast twins keep head-first acceptance deliberately: they load weights only at
+    /// construction, through the file path that legitimately tolerates.
     pub fn from_flat(
         spec: &NnetSpec,
         cell_type: CellType,
@@ -4173,8 +4177,9 @@ mod tests {
     }
 
     /// A pack one element short must be a typed `Err`, not a panic or a silently
-    /// head-eaten wrong net; an over-long pack is accepted head-first (the legacy
-    /// tolerance `BlstmNetwork::set_weights` implements).
+    /// head-eaten wrong net; an over-long pack is accepted head-first (the legacy FILE-LOAD
+    /// tolerance, `BlstmNetwork::load_weights_file` -- NOT `set_weights`, which has demanded
+    /// the exact length since the phase-11 interstitial).
     #[test]
     fn causal_net_length_check_is_typed() {
         let sp = spec(&[4, 3], &[1], &[3, 1], &[1]);
