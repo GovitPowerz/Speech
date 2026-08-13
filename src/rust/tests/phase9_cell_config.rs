@@ -10,9 +10,12 @@
 //! - the two `Cfc_*` geometry rows (PHASE 10 Task 1, phase-10 spec S1.4/S2) round-trip
 //!   into `[nn_cfc]` -- the same file, because the vocabulary is one table and the
 //!   fourth cell is meant to be a row in it, not a new mechanism;
+//! - the three `Transformer_*` geometry rows (PHASE 11 Task 2, phase-11 spec S1/S2)
+//!   round-trip into `[nn_transformer]`, same file for the same reason;
 //! - a real committed fixture config (`phase4a/tier2_spectral.config`, the Algo-3
 //!   spectral SAD net) BUILDS a working driver under every cell type -- `lstm`
-//!   (default), `slstm` (Task 2), `mamba` (Task 3) and `cfc` (phase-10 Task 1).
+//!   (default), `slstm` (Task 2), `mamba` (Task 3), `cfc` (phase-10 Task 1) and
+//!   `transformer` (phase-11 Task 2).
 //!
 //! The Task-1 scaffolding test `unimplemented_cell_type_bails_on_the_tier2_fixture`
 //! is GONE: with Task 3 landed there is no unimplemented cell left to bail on, and
@@ -57,6 +60,10 @@ fn cell_and_direction_keys_round_trip_through_their_declared_sections() {
     // Phase 10 Task 1: the CfC geometry, UNPREFIXED for the same reason.
     map.insert("Cfc_Backbone_Units".into(), "24".into());
     map.insert("Cfc_Backbone_Layers".into(), "1".into());
+    // Phase 11 Task 2: the transformer geometry, UNPREFIXED for the same reason.
+    map.insert("Transformer_Window".into(), "64".into());
+    map.insert("Transformer_Heads".into(), "4".into());
+    map.insert("Transformer_D_Ff".into(), "64".into());
 
     let toml = map_to_toml(&map);
     assert!(
@@ -78,6 +85,10 @@ fn cell_and_direction_keys_round_trip_through_their_declared_sections() {
         "[nn_cfc]",
         "backbone_units = 24",
         "backbone_layers = 1",
+        "[nn_transformer]",
+        "window = 64",
+        "heads = 4",
+        "d_ff = 64",
     ] {
         assert!(toml.contains(want), "missing {want:?} in:\n{toml}");
     }
@@ -96,11 +107,13 @@ fn tier2_fixture_round_trips_with_the_new_keys_added() {
     assert!(!map.contains_key("BLSTM_Direction"));
     assert!(!map.contains_key("Mamba_D_State"));
     assert!(!map.contains_key("Cfc_Backbone_Units"));
+    assert!(!map.contains_key("Transformer_Window"));
     map.insert("BLSTM_Cell_Type".into(), "lstm".into());
     map.insert("BLSTM_Direction".into(), "bidirectional".into());
     map.insert("Mamba_D_State".into(), "16".into());
     map.insert("Mamba_Dt_Rank".into(), "0".into());
     map.insert("Cfc_Backbone_Units".into(), "24".into());
+    map.insert("Transformer_Window".into(), "32".into());
 
     let toml = map_to_toml(&map);
     assert_eq!(toml_to_map(&toml).unwrap(), map);
@@ -290,7 +303,7 @@ fn a_malformed_cfc_geometry_bails_on_the_tier2_fixture() {
 }
 
 /// An unknown cell-type spelling is rejected with a message NAMING every accepted
-/// value -- the four-cell vocabulary, so a typo cannot silently fall back to `lstm`.
+/// value -- the FIVE-cell vocabulary, so a typo cannot silently fall back to `lstm`.
 #[test]
 fn an_unknown_cell_type_names_the_whole_vocabulary() {
     let mut map = tier2_map();
@@ -299,9 +312,157 @@ fn an_unknown_cell_type_names_the_whole_vocabulary() {
         Ok(_) => panic!("an unknown cell type must not build"),
         Err(e) => {
             let text = format!("{e:#}");
-            for want in ["'lstm'", "'slstm'", "'mamba'", "'cfc'"] {
+            for want in ["'lstm'", "'slstm'", "'mamba'", "'cfc'", "'transformer'"] {
                 assert!(text.contains(want), "{want} missing from: {text}");
             }
         }
     }
+}
+
+/// PHASE 11 Task 2, the `cfc_cell_type_builds_on_the_tier2_fixture` twin: the same real
+/// fixture config with `BLSTM_Cell_Type transformer` BUILDS a working Algo-3 driver, and
+/// the geometry keys reach the cell -- but only ONE of the three can move the pack, which
+/// is itself the claim worth pinning.
+#[test]
+fn transformer_cell_type_builds_on_the_tier2_fixture() {
+    let tr_map = |window: usize, heads: usize, d_ff: usize| {
+        let mut map = tier2_map();
+        map.insert("BLSTM_Cell_Type".into(), "transformer".into());
+        map.insert("Transformer_Window".into(), window.to_string());
+        map.insert("Transformer_Heads".into(), heads.to_string());
+        map.insert("Transformer_D_Ff".into(), d_ff.to_string());
+        map
+    };
+
+    let lstm = BlstmSpectralSegmenter::from_legacy(&tier2_map(), None)
+        .expect("the untouched fixture must build");
+    let tr = BlstmSpectralSegmenter::from_legacy(&tr_map(8, 4, 16), None)
+        .expect("transformer must build on the fixture");
+    let (n_lstm, n_tr) = (lstm.get_weights().len(), tr.get_weights().len());
+    assert!(n_lstm > 0 && n_tr > 0);
+    assert_ne!(
+        n_tr, n_lstm,
+        "the transformer pack must differ from the LSTM one -- equal counts would mean \
+         the driver silently kept the LSTM stacks"
+    );
+
+    // `d_ff` is the ONE sized knob: it grows the pack. `window` and `heads` are
+    // PARAMETER-FREE by construction (ALiBi has no weights, and `A` only reshapes the
+    // same `W_qkv`), so they must leave the length untouched -- a pack that moved with
+    // either would mean the layout had picked up a dependency it must not have.
+    let wide_ff = BlstmSpectralSegmenter::from_legacy(&tr_map(8, 4, 32), None).unwrap();
+    assert!(
+        wide_ff.get_weights().len() > n_tr,
+        "Transformer_D_Ff did not reach the cell"
+    );
+    for (w, h) in [(64usize, 4usize), (8, 8), (2, 2)] {
+        let other = BlstmSpectralSegmenter::from_legacy(&tr_map(w, h, 16), None).unwrap();
+        assert_eq!(
+            other.get_weights().len(),
+            n_tr,
+            "window={w} heads={h} moved the pack length -- neither is a weight"
+        );
+    }
+
+    // Same seam contract as any other cell: a full-length pack round-trips.
+    let mut net = BlstmSpectralSegmenter::from_legacy(&tr_map(8, 4, 16), None).unwrap();
+    let w: Vec<f64> = (0..n_tr).map(|k| 0.11 - 0.0003 * (k as f64)).collect();
+    net.set_weights(&w).unwrap();
+    assert_eq!(net.get_weights(), w);
+}
+
+/// A malformed `Transformer_*` value fails LOUDLY at driver construction rather than
+/// silently defaulting (the mamba/cfc twins' reason exactly: a silent default would
+/// change the weight-pack LENGTH, or -- worse for this cell -- the attention SPAN, with
+/// nothing to catch it).
+#[test]
+fn a_malformed_transformer_geometry_bails_on_the_tier2_fixture() {
+    for (key, value, want) in [
+        (
+            "Transformer_Window",
+            "0",
+            "'Transformer_Window' must be >= 1 (got 0)",
+        ),
+        (
+            "Transformer_Heads",
+            "0",
+            "'Transformer_Heads' must be >= 1 (got 0)",
+        ),
+        (
+            "Transformer_D_Ff",
+            "0",
+            "'Transformer_D_Ff' must be >= 1 (got 0)",
+        ),
+        ("Transformer_Window", "wide", "cannot read 'wide' as a size"),
+    ] {
+        let mut map = tier2_map();
+        map.insert("BLSTM_Cell_Type".into(), "transformer".into());
+        map.insert(key.into(), value.into());
+        // `BlstmSpectralSegmenter` is not `Debug`, so match instead of `unwrap_err`.
+        match BlstmSpectralSegmenter::from_legacy(&map, None) {
+            Ok(_) => panic!("'{key} {value}' must not build"),
+            Err(e) => assert!(format!("{e:#}").contains(want), "{e:#}"),
+        }
+    }
+}
+
+/// A head count that does not divide the cell width is a TYPED config error naming both
+/// numbers (phase-11 spec S2), not a truncation and not a panic from inside the cell:
+/// the fixture's recurrent layers are 24 wide, so `heads = 5` is refused while `heads =
+/// 8` builds. The message must name the LAYER too, since only some layers may offend.
+#[test]
+fn a_non_dividing_head_count_bails_on_the_tier2_fixture() {
+    let with_heads = |heads: usize| {
+        let mut map = tier2_map();
+        map.insert("BLSTM_Cell_Type".into(), "transformer".into());
+        map.insert("Transformer_Heads".into(), heads.to_string());
+        map
+    };
+    match BlstmSpectralSegmenter::from_legacy(&with_heads(5), None) {
+        Ok(_) => panic!("24 cells with 5 heads must not build"),
+        Err(e) => {
+            let text = format!("{e:#}");
+            for want in ["24 cells", "Transformer_Heads", "(5)"] {
+                assert!(text.contains(want), "{want} missing from: {text}");
+            }
+        }
+    }
+    assert!(BlstmSpectralSegmenter::from_legacy(&with_heads(8), None).is_ok());
+    // The check is CELL-TYPE-GATED: the same offending head count on an LSTM config is
+    // inert, because nothing reads it.
+    let mut lstm = with_heads(5);
+    lstm.insert("BLSTM_Cell_Type".into(), "lstm".into());
+    assert!(BlstmSpectralSegmenter::from_legacy(&lstm, None).is_ok());
+}
+
+/// ABSENT KEYS MEAN THE DEFAULTS (the standing rule, phase-11 spec S2): a config that
+/// never mentions the transformer -- i.e. every pre-phase-11 config -- decodes to exactly
+/// `TransformerParams::default()`, so nothing about it changed. Pinned against the three
+/// exported constants rather than literals, and against literals ONCE so a silent
+/// re-tuning of a constant cannot pass unnoticed.
+#[test]
+fn absent_transformer_keys_decode_to_the_defaults() {
+    use speech::nn::blstm::{
+        BlstmConfig, TRANSFORMER_DEFAULT_D_FF, TRANSFORMER_DEFAULT_HEADS,
+        TRANSFORMER_DEFAULT_WINDOW, TransformerParams,
+    };
+    let map = tier2_map();
+    assert!(!map.contains_key("Transformer_Window"));
+    let cfg = BlstmConfig::from_legacy(&map, "BLSTM").unwrap();
+    assert_eq!(cfg.transformer, TransformerParams::default());
+    assert_eq!(cfg.transformer.window, TRANSFORMER_DEFAULT_WINDOW);
+    assert_eq!(cfg.transformer.heads, TRANSFORMER_DEFAULT_HEADS);
+    assert_eq!(cfg.transformer.d_ff, TRANSFORMER_DEFAULT_D_FF);
+    // All three are SETTLED: Task 3's sizing re-derived both lineage closed forms and
+    // CONFIRMED `d_ff = 64` (the smallest integer inside both +-15% bands -- see
+    // `TRANSFORMER_DEFAULT_D_FF`'s doc). This literal is the Rust half of the
+    // cross-language pin; the Python half is `tests/test_phase11_init.py`.
+    assert_eq!(
+        (
+            TRANSFORMER_DEFAULT_WINDOW,
+            TRANSFORMER_DEFAULT_HEADS,
+            TRANSFORMER_DEFAULT_D_FF
+        ),
+        (64, 4, 64)
+    );
 }

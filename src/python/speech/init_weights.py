@@ -99,6 +99,21 @@ separately-stored halves, here simply the matrix's own width; deeper backbone la
 `B -> B`; each of the three heads is `B -> h` and they do NOT share a combined fan (three
 separate pre-activations, one product each).
 
+Transformer init (phase-11 spec S8), the fifth cell: like CfC it has NO reference-lineage magic
+constants -- every weight block is a plain dense shape, so the repo Xavier/He convention applies
+as-is, with the fans read straight off each block (`W_a`: `in -> H`; `W_qkv`: `H -> 3H`, ONE
+combined matrix and therefore ONE fan pair, the sLSTM/CfC combined-block precedent; `W_o`:
+`H -> H`; `W_1`: `H -> d_ff`; `W_2`: `d_ff -> H`). The TWO non-Xavier blocks are structural, not
+tuned: the RMSNorm gains `g_1`/`g_2` seed 1.0 (the Mamba `g = 1` convention -- a gain is a
+scale, and 1 is its identity), and every bias seeds 0.0. `b_k` (the k third of `b_qkv`) is
+STRUCTURALLY NON-IDENTIFIABLE, the sLSTM-`b_i` analogue: shifting it shifts every key by the
+same vector, so every logit in a window ROW moves by the same amount and softmax
+shift-invariance annihilates it -- seeded 0, it will never move in training, whatever we put
+there (`nn/cells/transformer.rs`'s module doc proves it). `window` and `heads` never enter the
+pack at all: ALiBi's slopes are constants and `heads` only reshapes the same `W_qkv`, so `d_ff`
+is the cell's ONLY sized knob (spec S3; the dual-lineage arithmetic is in
+`tests/test_phase11_init.py`'s docstring).
+
 Draw ORDER for the new cells is the FLAT ORDER (block by block). There is no legacy trajectory
 to match -- only same-seed reproducibility matters -- so the least surprising order wins.
 """
@@ -110,7 +125,13 @@ from typing import Literal, cast
 import numpy as np
 from numpy.typing import NDArray
 
-from speech.config_bridge import CFC_DEFAULT_BACKBONE_LAYERS, CFC_DEFAULT_BACKBONE_UNITS
+from speech.config_bridge import (
+    CFC_DEFAULT_BACKBONE_LAYERS,
+    CFC_DEFAULT_BACKBONE_UNITS,
+    TRANSFORMER_DEFAULT_D_FF,
+    TRANSFORMER_DEFAULT_HEADS,
+    TRANSFORMER_DEFAULT_WINDOW,
+)
 from speech.weight_bridge import nnet_to_flat, spec_directions
 
 _PEEPHOLE_SCALE = 0.1
@@ -120,7 +141,7 @@ _DELTA_MIN = 1e-3
 _DELTA_MAX = 1e-1
 
 Scheme = Literal["xavier", "he"]
-CellType = Literal["lstm", "slstm", "mamba", "cfc"]
+CellType = Literal["lstm", "slstm", "mamba", "cfc", "transformer"]
 
 
 def _xavier_uniform(rng: np.random.Generator, shape: tuple[int, int], fan_in: int, fan_out: int) -> NDArray[np.float64]:
@@ -338,6 +359,77 @@ def init_cfc_flat(
     return np.concatenate(parts)
 
 
+def transformer_geometry(spec: dict[str, object]) -> tuple[int, int, int]:
+    """The spec's `Transformer` entry (`config_bridge.nnet_spec`) as `(window, heads, d_ff)`;
+    absent means the S2 defaults, matching a config that never states the keys.
+
+    All three are returned even though only `d_ff` reaches the pack: `window` and `heads` are
+    parameter-free (S3), and returning them keeps this reader the ONE place a caller has to
+    look to learn the cell's geometry -- the alternative, a `d_ff`-only reader, would silently
+    invite a second reader the day someone needs the window."""
+    raw = cast(dict[str, int], spec.get("Transformer", {}))
+    return (
+        int(raw.get("window", TRANSFORMER_DEFAULT_WINDOW)),
+        int(raw.get("heads", TRANSFORMER_DEFAULT_HEADS)),
+        int(raw.get("d_ff", TRANSFORMER_DEFAULT_D_FF)),
+    )
+
+
+def init_transformer_flat(
+    rng: np.random.Generator,
+    output_size: int,
+    input_size: int,
+    d_ff: int,
+    scheme: Scheme = "xavier",
+) -> NDArray[np.float64]:
+    """ONE transformer cell layer's flat block, in the S1.2 order -- the
+    `nn/cells/transformer.rs::for_each_slot` walk, mirrored block for block:
+
+        W_a (H x in) | b_a (H) | g_1 (H)                 the width adapter + RMSNorm_1 gain
+        W_qkv (3H x H) | b_qkv (3H)                      the COMBINED [q | k | v] projection
+        W_o (H x H) | b_o (H) | g_2 (H)                  the attention output + RMSNorm_2 gain
+        W_1 (d_ff x H) | b_1 (d_ff) | W_2 (H x d_ff) | b_2 (H)      the FFN
+
+    each matrix ROW-major at its MATH shape (output unit outer, source index inner); the Rust
+    stores `W_a`/`W_o`/the FFN matrices TRANSPOSED and the walk absorbs that, so the flat order
+    is the math order. Length
+    `H*(in+1) + H + 3H*(H+1) + H*(H+1) + H + d_ff*(H+1) + H*(d_ff+1)`.
+
+    `window` and `heads` are absent from this signature ON PURPOSE: neither contributes a
+    single weight (spec S3), so passing them would imply a length dependence that does not
+    exist. Fans and the two structural constants (RMSNorm gains 1.0, every bias 0.0 including
+    the non-identifiable `b_k`) are per the module docstring. The geometry is validated ONCE,
+    in `config_bridge._transformer_geometry` (the `Mamba_*`/`Cfc_*` precedent: the reader is
+    the gate).
+
+    NO `forget_bias_one` PARAMETER (phase-11 T9, deferred F3): unlike the sLSTM/LSTM builders,
+    this cell has no forget gate and no analogue of one -- attention has no memory valve to
+    hold open, so there is no bias whose non-zero seed would mean "start by remembering". The
+    first landed signature accepted-and-ignored the flag for call-site uniformity with the
+    sLSTM/LSTM builders `_init_cell_pack` dispatches beside this one; `init_cfc_flat` (also
+    forget-gate-free) never carried the flag at all, so the earlier choice was the
+    inconsistent one, not this one -- a caller passing `forget_bias_one` now gets a loud
+    `TypeError` instead of a silently discarded flag."""
+    _check_scheme(scheme)
+    h = output_size
+    return np.concatenate(
+        [
+            _draw(rng, (h, input_size), input_size, h, scheme).reshape(-1),  # W_a
+            np.zeros(h, dtype=np.float64),  # b_a
+            np.ones(h, dtype=np.float64),  # g_1 (RMSNorm gain) = 1
+            _draw(rng, (3 * h, h), h, 3 * h, scheme).reshape(-1),  # W_qkv, ONE combined matrix
+            np.zeros(3 * h, dtype=np.float64),  # b_qkv -- b_k (its middle third) is dead, seeded 0 like the rest
+            _draw(rng, (h, h), h, h, scheme).reshape(-1),  # W_o
+            np.zeros(h, dtype=np.float64),  # b_o
+            np.ones(h, dtype=np.float64),  # g_2
+            _draw(rng, (d_ff, h), h, d_ff, scheme).reshape(-1),  # W_1
+            np.zeros(d_ff, dtype=np.float64),  # b_1
+            _draw(rng, (h, d_ff), d_ff, h, scheme).reshape(-1),  # W_2
+            np.zeros(h, dtype=np.float64),  # b_2
+        ]
+    )
+
+
 def _init_lstm_pack(
     spec: dict[str, object],
     rng: np.random.Generator,
@@ -377,25 +469,35 @@ def _init_cell_pack(
     directions: tuple[str, ...],
     cell_type: CellType,
 ) -> NDArray[np.float64]:
-    """The sLSTM/Mamba/CfC path: emit the flat blocks directly (spec S1.3 -- these cells have
-    no structured domain), then the SAME output-MLP + normalize-tail blocks the LSTM pack
-    ends with, in `BlstmNetwork::set_weights`'s order."""
+    """The sLSTM/Mamba/CfC/transformer path: emit the flat blocks directly (spec S1.3 -- these
+    cells have no structured domain), then the SAME output-MLP + normalize-tail blocks the LSTM
+    pack ends with, in `BlstmNetwork::set_weights`'s order."""
     lstm = cast(list[int], spec["LSTMNeuronNb"])
     lsub = cast(list[int], spec["LSTMSubSampling"])
     outn = cast(list[int], spec["OutputNeuronNb"])
     geom = mamba_geometry(spec)
     units, layers = cfc_geometry(spec)
+    _, _, d_ff = transformer_geometry(spec)
 
     parts: list[NDArray[np.float64]] = []
     for _ in directions:
         for i in range(len(lstm) - 1):
             out, fin = lstm[i + 1], lstm[i] * lsub[i]
+            # Explicit per-cell arms, no catch-all: `init_weights` has already rejected an
+            # unknown cell type, so the final `raise` is unreachable TODAY -- it exists so that
+            # a SIXTH cell added without a builder fails loudly here instead of silently
+            # receiving the last arm's pack (the Rust side gets this from its exhaustive
+            # `match`; this is the closest Python equivalent).
             if cell_type == "slstm":
                 parts.append(init_slstm_flat(rng, out, fin, scheme, forget_bias_one))
             elif cell_type == "mamba":
                 parts.append(init_mamba_flat(rng, out, fin, geom, scheme))
-            else:
+            elif cell_type == "cfc":
                 parts.append(init_cfc_flat(rng, out, fin, units, layers, scheme))
+            elif cell_type == "transformer":
+                parts.append(init_transformer_flat(rng, out, fin, d_ff, scheme))
+            else:
+                raise ValueError(f"no init builder for cell type {cell_type!r}")
     for i in range(len(outn) - 1):
         mat = _init_output_layer(rng, outn[i + 1], outn[i], scheme)
         parts.append(mat[:, :-1].reshape(-1))
@@ -419,8 +521,8 @@ def init_weights(
     and this function is byte-for-byte what it was before phase 9."""
     _check_scheme(scheme)
     cell_type = cast(str, spec.get("CellType", "lstm"))
-    if cell_type not in ("lstm", "slstm", "mamba", "cfc"):
-        raise ValueError(f"unknown cell type: {cell_type!r} (expected 'lstm', 'slstm', 'mamba' or 'cfc')")
+    if cell_type not in ("lstm", "slstm", "mamba", "cfc", "transformer"):
+        raise ValueError(f"unknown cell type: {cell_type!r} (expected 'lstm', 'slstm', 'mamba', 'cfc' or 'transformer')")
     directions = spec_directions(spec)
 
     if cell_type == "lstm":

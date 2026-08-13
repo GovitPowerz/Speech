@@ -54,15 +54,27 @@
 //! in `phase7_parity_sad.rs`. The two LSTM kernels are separate code (batched faer vs
 //! per-step `dot_f32`) and have separate parity legs, deliberately.
 //!
+//! PHASE 11 TASK 5 adds the `transformer` row (`transformer_forward.config` +
+//! `transformer_forward_seed.bin`, the committed Task-4 fixture) whose f32 twin
+//! `fast::cells::FastTransformer` is the phase's causal kernel. Same parametric legs, one
+//! more cell -- and the same independent-implementation argument the CfC row carries: the
+//! exact `CellLayer::Transformer` arms and the f32 kernel are two separately-written
+//! transcriptions of the phase-11 spec S1.1/S1.2, so a same-direction mistake cannot
+//! cancel out. This row is ALSO the only place the KV RING is exercised against a
+//! multi-wrap sequence through the whole driver (50 cell rows at `Transformer_Window 4`,
+//! i.e. twelve wraps).
+//!
 //! [`causal_parity_crossing_is_exercised`] closes the gap uniformly: it sweeps a
 //! WEIGHT-SPACE offset on the output layer's single bias -- a pure post-recurrence
 //! level shift that leaves every cell weight, and therefore the whole SHAPE of the
 //! posterior curve, untouched -- until the segmentation has interior boundaries, then
 //! re-asserts exact-vs-fast identity there. It picks `+0.0` for mamba (no edit needed)
 //! and `-0.5` for sLSTM (which yields 3 interior boundaries across the two channels,
-//! including a full Other -> Speech -> Other on channel 1). The `lstm` row needs a
-//! SECOND lever -- an output-WEIGHT gain -- because no bias offset whatsoever crosses on
-//! that fixture; see [`GAIN_LADDER`] for the measurement and the reason.
+//! including a full Other -> Speech -> Other on channel 1). The `transformer` row needs a
+//! WIDER gain-1 grid, because its seed net saturates and a small level shift moves
+//! nothing ([`wide_offsets`]); the `lstm` row needs a SECOND lever -- an output-WEIGHT
+//! gain -- because no bias offset whatsoever crosses on that fixture; see [`GAIN_LADDER`]
+//! for the measurement and the reason.
 
 use std::path::PathBuf;
 
@@ -211,9 +223,10 @@ fn compare(
 // ---------------------------------------------------------------------------
 
 /// Every cell the CAUSAL shape now runs. `lstm` joined in phase-10 Task 8
-/// ([`speech::fast::cells::FastLstm`]), which completed the set -- the legs below are
-/// parametric, so that row is new DATA, not new machinery.
-const CAUSAL_CELLS: [&str; 4] = ["slstm", "mamba", "cfc", "lstm"];
+/// ([`speech::fast::cells::FastLstm`]), which completed the phase-9/10 set, and
+/// `transformer` in phase-11 Task 5 ([`speech::fast::cells::FastTransformer`]) -- the legs
+/// below are parametric, so both rows are new DATA, not new machinery.
+const CAUSAL_CELLS: [&str; 5] = ["slstm", "mamba", "cfc", "lstm", "transformer"];
 
 /// The COARSE output-bias offsets [`causal_parity_crossing_is_exercised`] tries first.
 /// Phase-9's list verbatim: sLSTM settles at `-0.5` and mamba at `0.0`, so both rows are
@@ -275,6 +288,18 @@ fn fine_offsets() -> impl Iterator<Item = f64> {
 /// the reason this row is the worst is structural rather than alarming: the gain lever
 /// SHARPENS the logit by 3x, so the same input-side f32 delta lands on a steeper part of
 /// the logistic.
+///
+/// PHASE 11 TASK 5 adds the `transformer` rows, MEASURED: plain `max_abs 5.536e-7 /
+/// max_rel 2.351e-6`, crossing (gain 1, bias -5 -- see [`wide_offsets`]) `max_abs
+/// 1.602e-6 / max_rel 7.813e-6`, `max_dt` EXACTLY 0.0 on both with boundary count/types
+/// identical. Second-worst of the ten (cell x leg) runs behind the LSTM crossing row, and
+/// INSIDE the `measured * 10` convention at 12.8x headroom, so the pins stay UNCHANGED
+/// here too. Worth recording HOW that headroom was obtained, because it is the general
+/// lesson: the row first landed on the gain ladder at `max_rel 1.3120e-5`, whose
+/// `measured * 10` would have exceeded this pin -- and the response was to widen the
+/// SEARCH (a gain-1 stage that reaches the offsets a saturated fixture needs), never the
+/// pin. A row that cannot be brought inside the convention that way is a STOP, not a
+/// widening (spec R1).
 const POST_REL_PIN: f64 = 1.0e-4;
 const POST_ABS_PIN: f64 = 1.0e-4;
 
@@ -284,11 +309,20 @@ fn causal_parity_exact_vs_fast() {
         let e = run_path(cell, None, None);
         let f = run_path(cell, Some("fast"), None);
         let (max_abs, max_rel, max_dt) = compare(cell, &e, &f);
+        // The posterior SPAN is printed (never asserted) because it is what decides
+        // whether the crossing leg below can use a pure level shift or has to reach for
+        // the gain ladder: the decision layer's 0.6/0.3 hysteresis needs a ~1.25 LOGIT
+        // swing to make a round trip, so a fixture whose span is narrower than that cannot
+        // be made to cross by any bias offset whatsoever. See [`GAIN_LADDER`].
+        let (lo, hi) = e.0[0]
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
         println!(
             "MEASURE {cell} causal exact-vs-fast: max_abs={max_abs:e} max_rel={max_rel:e} \
-             max_dt={max_dt} interior={} rows={}",
+             max_dt={max_dt} interior={} rows={} span=[{lo:.4}, {hi:.4}] logit_span={:.4}",
             interior_boundaries(&e.1),
-            e.0[0].len()
+            e.0[0].len(),
+            (hi / (1.0 - hi)).ln() - (lo / (1.0 - lo)).ln()
         );
         // Non-vacuity of the POSTERIOR comparison: a real sequence, not a constant.
         assert!(e.0[0].len() > 20, "{cell}: too few posterior rows");
@@ -307,8 +341,47 @@ fn causal_parity_exact_vs_fast() {
     }
 }
 
+/// THE WIDE gain-1 grid (integer offsets out to `+-16`, SMALLEST MAGNITUDE FIRST), tried
+/// after [`fine_offsets`] and before the [`GAIN_LADDER`]. THE TRANSFORMER ROW NEEDS IT
+/// (phase-11 Task 5), and the reason is the opposite of the CfC row's:
+///
+/// The committed transformer seed net SATURATES on the 2 s tier-2 excerpt -- its posterior
+/// spans the full `[0.0000, 1.0000]`, a LOGIT span of ~44 (the plain leg prints every
+/// cell's, for exactly this diagnosis). A saturated curve is not moved by a small level
+/// shift at all: almost every row sits at 0 or 1, so offsets inside `+-2` leave the
+/// crossing pattern -- and hence the segmentation -- untouched. What DOES relocate the
+/// threshold into the steep region is a LARGE offset, and `-5` is the smallest that does
+/// (MEASURED, in this grid's own ascending-magnitude order: `+-2`, `+-3`, `+-4` and `+5`
+/// all yield zero interior boundaries; `-5` yields TWO).
+///
+/// Without this stage the row escalated to the gain ladder (`gain 2, bias -8`) and paid
+/// for it twice over: the gain SHARPENS the logit, landing the same input-side f32 delta
+/// on a steeper part of the logistic, so the crossing row measured `max_rel 1.3120e-5`
+/// against the `1.0e-4` pin -- passing, but with the least headroom of any row -- while
+/// finding only ONE interior boundary. At gain 1 the same row measures `max_rel 7.813e-6`
+/// (1.68x tighter, back inside the house `measured * 10` convention) with TWO boundaries,
+/// AND it keeps phase-9's pure level-shift property: every cell weight untouched, the
+/// whole SHAPE of the posterior still produced by the causal stack. Better on all three
+/// counts, which is why the fix was to widen the SEARCH rather than the PIN.
+///
+/// SIBLING ROWS ARE BYTE-UNCHANGED, by construction and verified by their printed rungs:
+/// slstm (`-0.5`), mamba (`0.0`) and cfc (`-0.0625`) all break out in an EARLIER stage, and
+/// the LSTM row finds nothing here for the reason [`GAIN_LADDER`] documents and measures
+/// (a 129-point sweep over `[-16, +16]` at 0.25 -- which strictly contains this grid --
+/// yields ZERO interior boundaries at gain 1), so it still escalates to `gain 3, bias +3`.
+fn wide_offsets() -> impl Iterator<Item = f64> {
+    // Smallest magnitude first, alternating sign: the ladder's philosophy is "use the
+    // fixture as committed, every step is a fallback", so the least perturbation that
+    // works is the one to take. `-2.0` is already in [`COARSE_OFFSETS`] and is filtered.
+    (2i32..=16)
+        .flat_map(|m| [-f64::from(m), f64::from(m)])
+        .filter(|o| !COARSE_OFFSETS.contains(o))
+}
+
 /// THE OUTPUT-GAIN LADDER, reached only when NO bias offset crosses at gain 1 -- which
-/// on the committed fixtures means the LSTM row and nothing else (phase-10 Task 8).
+/// on the committed fixtures means the LSTM row and nothing else (phase-10 Task 8;
+/// phase-11's transformer row was ALSO here until [`wide_offsets`] pulled it back to
+/// gain 1).
 ///
 /// WHY THE BIAS ALONE CANNOT DO IT THERE, measured rather than assumed: a 129-point bias
 /// sweep over `[-16, +16]` at 0.25 yields ZERO interior boundaries at EVERY offset, even
@@ -375,13 +448,16 @@ fn causal_parity_crossing_is_exercised() {
         // GAIN 1 FIRST with `0.0` first within it, so a fixture that already crosses is
         // used AS COMMITTED and every sweep step is a fallback rather than a default
         // detour. COARSE steps first (slstm settles at -0.5 and mamba at 0.0, both inside
-        // the original list, so those rows are byte-unchanged by the phase-10
+        // the original list, so those rows are byte-unchanged by the phase-10/11
         // extensions), then a FINE 1/16 grid over `[-1, +1]` (the CfC row's, see
-        // [`fine_offsets`]), then the [`GAIN_LADDER`] (the LSTM row's).
+        // [`fine_offsets`]), then the WIDE integer grid out to `+-16` (the transformer
+        // row's, see [`wide_offsets`]), and only then the [`GAIN_LADDER`] (the LSTM row's,
+        // the one fixture no level shift can crack).
         let gain1 = COARSE_OFFSETS
             .iter()
             .copied()
             .chain(fine_offsets())
+            .chain(wide_offsets())
             .map(|o| (1.0_f64, o));
         let escalation = GAIN_LADDER
             .iter()

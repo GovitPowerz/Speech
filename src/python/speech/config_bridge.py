@@ -80,6 +80,42 @@ def _cfc_geometry(cfg: dict[str, str]) -> dict[str, int]:
     return out
 
 
+#: The transformer geometry defaults (phase-11 spec S2/S3), mirroring
+#: `blstm.rs::TRANSFORMER_DEFAULT_{WINDOW,HEADS,D_FF}`. MIRRORS, not independent choices --
+#: the engine builds the net from the Rust constants and Python seeds the pack from these, so
+#: a drift is a length mismatch at `set_weights` (pinned against the Rust source by
+#: `tests/test_phase11_init.py::test_the_rust_and_python_defaults_agree`).
+#:
+#: Only `d_ff` is SIZED: `window` and `heads` are parameter-FREE (ALiBi's slopes carry no
+#: weights and `heads` only reshapes the same `W_qkv`), so neither moves the pack length.
+#: `d_ff = 64` is the smallest integer inside BOTH lineage bands -- the full dual-lineage
+#: arithmetic is in that test module's docstring.
+TRANSFORMER_DEFAULT_WINDOW = 64
+TRANSFORMER_DEFAULT_HEADS = 4
+TRANSFORMER_DEFAULT_D_FF = 64
+
+
+def _transformer_geometry(cfg: dict[str, str]) -> dict[str, int]:
+    """The three `Transformer_*` keys (phase-11 spec S2), UNPREFIXED by design -- one
+    transformer geometry per config, shared by whichever net(s) select `transformer`, exactly
+    as `blstm.rs::TransformerParams` reads them (the `Mamba_*`/`Cfc_*` precedent verbatim).
+    Absent keys mean the Rust defaults; a present-but-unparseable or `< 1` value raises,
+    mirroring `TransformerParams::from_legacy`'s hard error.
+
+    `H % heads == 0` is NOT checked here, matching the Rust split: this reader never sees the
+    layer width. `BlstmConfig::from_legacy` owns that check engine-side (and `init_weights`
+    does not need it -- `heads` never enters the pack)."""
+    defaults = {"window": TRANSFORMER_DEFAULT_WINDOW, "heads": TRANSFORMER_DEFAULT_HEADS, "d_ff": TRANSFORMER_DEFAULT_D_FF}
+    keys = {"window": "Transformer_Window", "heads": "Transformer_Heads", "d_ff": "Transformer_D_Ff"}
+    out: dict[str, int] = {}
+    for name, key in keys.items():
+        value = int(cfg[key]) if key in cfg else defaults[name]
+        if value < 1:
+            raise ValueError(f"'{key}' must be >= 1 (got {value})")
+        out[name] = value
+    return out
+
+
 def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
     """Extract the NNType-0 network spec from a parsed legacy config.
 
@@ -93,6 +129,11 @@ def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
     Phase 10 (spec S1.4/S2) added a fourth, `Cfc`, on the same terms: the unprefixed
     `Cfc_Backbone_Units` / `Cfc_Backbone_Layers`, defaulting to the SIZED Rust values. It is
     emitted unconditionally like `Mamba` and is inert unless `CellType` is `cfc`.
+
+    Phase 11 (spec S2) added a fifth, `Transformer` (the unprefixed `Transformer_Window` /
+    `Transformer_Heads` / `Transformer_D_Ff`), identically: emitted unconditionally, inert
+    unless `CellType` is `transformer`. Every consumer reads these entries BY NAME, so an
+    additive slot cannot disturb a spec built for any other cell.
     """
     p = f"{prefix}_"
     peephole_keys = [
@@ -116,4 +157,5 @@ def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
         "Direction": cfg.get(f"{p}Direction", "bidirectional"),
         "Mamba": _mamba_geometry(cfg),
         "Cfc": _cfc_geometry(cfg),
+        "Transformer": _transformer_geometry(cfg),
     }

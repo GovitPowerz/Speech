@@ -1,6 +1,9 @@
-"""Phase 10 Task 4 (spec S3.2/S3.3): the EIGHT from-scratch subset gates of the
+"""Phase 10 Task 4 (spec S3.2/S3.3): the from-scratch subset gates of the
 `lre_sad_v2` lineage -- {LSTM, sLSTM, Mamba, CfC} x {bidirectional, forward} on the
-`sad-v2` arm, through the `--cell-type`/`--direction` knobs.
+`sad-v2` arm, through the `--cell-type`/`--direction` knobs. Phase 11 Task 9 (spec S8)
+grew the matrix EIGHT -> TEN, adding the fifth cell, Transformer -- see "THE TRANSFORMER
+ROWS" below for its own table, the init-quality anomaly it surfaced, and the user-ratified
+`COLLAPSE_FLOOR_DCF` amendment (2026-08-12) that resolves it.
 
 Same protocol as the phase-9 matrix (`test_phase9_gates.py`, itself the phase-6 SAD
 gate's): corpus-gated + local-only, seeded, < 10 min each, run-twice bit-identical, and
@@ -25,23 +28,32 @@ v1 declares a 23-wide input while its own DSP front-end emits 11 columns, so wit
 are structurally gradient-dead -- the 2015-inherited defect phase 9 measured. Here the
 declared width IS the produced width: layer-0 fan-in is exactly `11*4 = 44`, all live.
 
-MEASURED pack lengths (2026-08-01; every number below produced by the run this file
-performs, via `init_weights` at the arm's own overlaid config -- spec R4, no survey
-estimate survives). The phase-9 v1 column is carried for contrast, NOT re-measured here:
+MEASURED pack lengths (2026-08-01, LSTM/sLSTM/Mamba/CfC; 2026-08-12, Transformer --
+phase-11 T9; every number below produced by `len(init_weights(...))` at the arm's own
+overlaid config -- spec R4, no survey estimate survives, and BOTH Transformer rows agree
+digit-for-digit with `tests/test_phase11_init.py`'s independent closed-form derivation at
+the sized `d_ff = 64`: bidirectional `13871 + 196*d_ff`, forward `6959 + 98*d_ff` -- the
+`d_ff`-dependent blocks (`W_1`/`b_1`/`W_2`/`b_2`) are purely per-stack, so the coefficient
+exactly halves with the stack count while the constant term does not). The phase-9 v1
+column is carried for contrast, NOT re-measured here:
 
-| cell  | v2 bi | v2 fwd | v1 bi | v1 fwd | v2 bi vs v2 LSTM |
-|-------|-------|--------|-------|--------|------------------|
-| LSTM  | 24431 | 12239  | 33671 | 16871  | --               |
-| sLSTM | 23279 | 11663  | 32519 | 16295  | -4.72%           |
-| Mamba | 28031 | 14039  | 30359 | 15215  | +14.74%          |
-| CfC   | 24491 | 12269  | 28835 | 14453  | +0.25%           |
+| cell        | v2 bi | v2 fwd | v1 bi | v1 fwd | v2 bi vs v2 LSTM |
+|-------------|-------|--------|-------|--------|------------------|
+| LSTM        | 24431 | 12239  | 33671 | 16871  | --               |
+| sLSTM       | 23279 | 11663  | 32519 | 16295  | -4.72%           |
+| Mamba       | 28031 | 14039  | 30359 | 15215  | +14.74%          |
+| CfC         | 24491 | 12269  | 28835 | 14453  | +0.25%           |
+| Transformer | 26415 | 13231  | 28743 | 14407  | +8.12%           |
 
-All four land inside the S8.2-style +-15% band of the same lineage's LSTM pack -- Mamba
+All five land inside the S8.2-style +-15% band of the same lineage's LSTM pack -- Mamba
 only just (+14.74%), and that near-miss is the POINT: Mamba's layer-0 input projection is a
 single `out x fin` adapter while the gate cells carry `4 x out x fin` (and CfC `B x fin`),
 so halving `fin` shrinks the gate cells much harder than it shrinks Mamba. On v1 the same
 ordering inverts once the dead block is discounted (phase 9's LIVE table: LSTM 24409 /
 sLSTM 23257 / Mamba 28009). v2 makes NOMINAL == LIVE, which is the whole point of the fork.
+Transformer's `W_a` width adapter is UNCONDITIONAL (unlike Mamba's `P`, present only when
+`fin != out`), so it carries no v1-style dead-weight artefact of its own to discount --
+its v1/v2 pack lengths are already directly comparable, nominal == live on BOTH lineages.
 
 POSTURE (spec S3.4 / R5, stated so no reader infers more than was measured): v1 remains
 the ONLY 2015-capacity-comparable lineage (its 33671 LSTM pack IS the production tuple-A
@@ -113,12 +125,106 @@ architectural or lineage equivalence. This file gates the beat-init DIRECTION on
 records the rest in `RESULTS.md`. The full-corpus user-fired runs are the referee, for the
 cell comparison AND for the v1-vs-v2 lineage question.
 
+=====================================================================================
+THE TRANSFORMER ROWS (phase-11 T9, spec S8): ONE CLEAN, ONE RATIFIED VIA THE COLLAPSE FLOOR
+=====================================================================================
+`transformer/bidirectional` clears every leg cleanly, matching the pattern every other row
+in this file sets: preflight interior (0.728% of the log-law clamp), zero dead/weak layer-0
+columns, run-twice bit-identical, and THE HARD LEG passes at every collar with a healthy
+~0.50 margin (trained DCF@0.5 0.250000 vs init 0.747406 -- see `test_subset_gate_beats_own_
+init`'s table for the full five-collar breakdown).
+
+`transformer/forward` does NOT clear the ORIGINAL margin-only criterion at two collars, and
+this is recorded here in full rather than argued away or quietly widened (measured
+2026-08-12, seed 0, the phase-6 recipe VERBATIM, run-twice bit-identical so the numbers
+below are not noise):
+
+| collar | trained dcf | init dcf | margin  | required | margin verdict | reaches floor? |
+|--------|-------------|----------|---------|----------|-----------------|-----------------|
+| 0.0    | 0.250000    | 0.476457 | 0.226457| >= 0.2   | OK              | yes (0.25<=0.2501)|
+| 0.25   | 0.250000    | 0.465929 | 0.215929| >= 0.2   | OK              | yes             |
+| 0.5    | 0.250000    | 0.455959 | 0.205959| >= 0.2   | OK              | yes             |
+| 1.0    | 0.250000    | 0.444262 | 0.194262| >= 0.2   | FAIL            | yes -- PASSES via the floor |
+| 2.0    | 0.250000    | 0.435836 | 0.185836| >= 0.2   | FAIL            | yes -- PASSES via the floor |
+
+THE HEADLINE FINDING IS AN INIT-QUALITY ANOMALY, not a training failure: the TRAINED model
+reaches DCF 0.250000 at every collar (Pmiss 0.0, Pfa 1.0) -- the exact all-speech collapse
+point SEVEN of the other nine rows' trained models also reach (the remaining two, slstm-fwd
+0.252430 and mamba-fwd 0.248770 at collar 0.5, are genuinely non-degenerate on the trained
+side too but still clear their own margin comfortably, 0.494 and 0.489). Training is not in
+question for THIS row: its trained result is indistinguishable from the typical row's. The
+INIT side is where this row diverges from its nine siblings: every
+other row's from-scratch Xavier init on a GATED RECURRENT cell collapses toward the
+all-non-speech baseline (Pmiss > 0.9, most exactly 1.0, DCF ~0.75), which is WHY the
+original `- 0.2` margin (sized against a ~0.50 measured gap on those rows) carried so much
+headroom everywhere else. `transformer/forward`'s untrained init does NOT collapse that way
+(Pmiss 0.581, Pfa 0.080, DCF 0.4560 at collar 0.5 -- confirmed by BOTH the pytest run and an
+independent standalone `run_baseline` call, byte-identical to the printed precision). THE
+MECHANISM (offered as the best available explanation, not independently proven by a
+dedicated probe): an UNTRAINED windowed-attention layer at near-zero logits (Xavier draws
+everything near 0, and `W_qkv`'s query/key rows start uncorrelated with each other) computes
+attention scores `q . k / sqrt(d) + ALiBi bias` that are themselves near-zero and dominated
+by the ALiBi term alone, so the softmax over the window is close to UNIFORM regardless of
+the actual per-frame content -- i.e. the untrained cell behaves like a fixed windowed
+AVERAGE of its recent input/value projections, which still carries real signal VARIANCE
+through to the output. A fresh gated-recurrent cell (LSTM/sLSTM/Mamba/CfC), by contrast, has
+no such "fall back to averaging" degenerate mode at init -- its output is whatever the
+untrained gates happen to produce, and empirically that collapses hard toward one class.
+`test_init_is_trainable[transformer-forward]` independently rules out a saturated-forward /
+dead-gradient pathology as the explanation (init cost 0.863% of the log-law clamp, grad L2
+2.24457, zero dead/weak columns): the net is trainable and DOES train, non-pathologically,
+the same way every other row does; the init baseline is simply less degenerate, for
+cell-architectural reasons distinct from anything remaining trainability-related.
+
+THE RATIFICATION (2026-08-12, user-ratified via the coordinator, mirroring the phase-9
+Twin convergence-gate deferral precedent -- a hard target that could not be met exactly as
+originally stated was surfaced and resolved by explicit sign-off, not a unilateral agent
+relaxation): THE HARD LEG's criterion is amended to an OR -- MARGIN >= 0.2 at the collar
+(the original criterion, UNCHANGED), OR the trained model reaches `COLLAPSE_FLOOR_DCF =
+0.2501` at that collar (the known all-speech operating point eight of the ten from-scratch
+SAD rows on this subset converge to exactly). Semantics, verbatim: "training moved the
+model a lot, or it reached the best-known subset operating point." THE NINE
+ALREADY-PASSING ROWS' EVIDENCE IS UNCHANGED bit-for-bit: `margin_ok` alone is True at every
+one of their collars, so `margin_ok or floor_ok` is True regardless of what `floor_ok`
+says -- NOT because evaluation is "skipped" (`floor_ok` is an eagerly-assigned local,
+computed unconditionally on every iteration; only the boolean `or` inside the `assert`
+short-circuits, and even that costs nothing observable since `floor_ok` is already a plain
+bool by the time it is read).
+
+THE TWO INIT-DEGENERACY SANITY CHECKS (`ini.pmiss > 0.9`, `ini.dcf >= 0.6`) took a
+DIFFERENT path, and the honest trail is the live record here rather than a superseded
+mechanism: the FIRST committed form applied the IDENTICAL `or tr.dcf <= COLLAPSE_FLOOR_DCF`
+disjunct to both (a necessary extension beyond the originally-ratified single assert, found
+while implementing -- pytest evaluates `ini.pmiss > 0.9` BEFORE the per-collar loop even
+runs, so leaving it untouched would still fail the row before the margin-or-floor logic is
+ever reached). Review (fix round 1, F1) found that form UNFALSIFIABLE on nine of ten rows
+(every row's TRAINED side reaches the floor regardless of what its INIT looked like), with
+ZERO detection power against a future builder bug producing an accidentally non-degenerate
+init, or `transformer/forward` itself regressing back to degenerate. It was STRENGTHENED to
+a two-sided COMMITTED membership table instead -- `NON_DEGENERATE_INIT_ROWS` above,
+mirroring `EXPECT_TIGHT_COHORT` (`src/rust/tests/phase9_stream_causal.rs:1388`): listed rows
+MUST fail the degenerate characterization (`Pmiss > 0.9 AND DCF >= 0.6`), unlisted rows MUST
+pass it, and membership moving is an ADJUDICATION, never a silent widen. THIS is the
+CURRENT, committed form (see the assert in `test_subset_gate_beats_own_init` below the "THE
+INIT-DEGENERACY CHARACTERIZATION" comment) -- THE HARD LEG's own margin-or-floor loop is the
+ONLY site that still carries the original OR-disjunct design.
+
+No training parameter was tuned to chase a pass at any point, across either round (seed,
+epochs, steps_per_epoch, subset size are byte-identical to every other row's recipe); the
+only change is the pass CRITERION itself.
+
 Corpus-gated (`requires_corpus`) + pyo3 (`importorskip`): runs locally for implementers AND
 reviewers, skips in CI. Measured whole-file runtime on the dev box (2026-08-01, Apple M4
-Pro): 1.4 s for the ten preflight legs (eight v2 + two v1 CfC), 227 s for the eight hard
-gates, 76 s for the eight determinism legs -- ~5.1 min total. The slowest single gate is
-62 s (mamba/bidirectional), an order of magnitude inside the < 10 min per-gate budget the
-test asserts (spec R3).
+Pro, LSTM/sLSTM/Mamba/CfC): 1.4 s for the ten preflight legs (eight v2 + two v1 CfC), 227 s
+for the eight hard gates, 76 s for the eight determinism legs -- ~5.1 min total. The slowest
+single gate is 62 s (mamba/bidirectional), an order of magnitude inside the < 10 min
+per-gate budget the test asserts (spec R3). Phase-11 T9 (2026-08-12, same box) added the
+fifth cell: +0.31 s for the two new preflight legs (0.22 s bi + 0.09 s fwd), +71.9 s for the
+two new hard-gate legs (54.4 s bi + ~18.5 s fwd -- the training + scoring cost is identical
+before and after the collapse-floor amendment, since only the pass CRITERION changed, not
+the run itself), +24.6 s for the two new determinism legs (17.85 s bi + 6.32 s fwd) -- ~97 s
+additional across the pair, well inside the same per-gate budget individually. Post-amendment
+re-run (`-k transformer`, all six selected sub-legs): 96.43 s, exit 0, 6/6 PASSED.
 """
 
 from __future__ import annotations
@@ -144,10 +250,14 @@ from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch, _modern_config_text  # noqa: E402
 from speech.engine import forward_backward  # noqa: E402
 
-# (cell, direction, MEASURED pack length) -- the S3.3 matrix. Each length is
-# `init_weights`' own output at the arm's overlaid config, cross-checked against the
-# closed forms in `_layer_length` below (`test_init_is_trainable` asserts both, so the
-# literal and the arithmetic cannot drift apart silently).
+# (cell, direction, MEASURED pack length) -- the S3.3 matrix, phase-11 T9 grown 8 -> 10 with
+# the fifth cell. Each length is `init_weights`' own output at the arm's overlaid config,
+# cross-checked against the closed forms in `_layer_length` below (`test_init_is_trainable`
+# asserts both, so the literal and the arithmetic cannot drift apart silently). The two
+# transformer rows were MEASURED (not estimated) via `len(init_weights(...))` on the real
+# `sad-v2`-overlaid config -- see `tests/test_phase11_init.py`'s sizing docstring for the
+# closed-form derivation at the sized `d_ff = 64` (bidirectional `13871 + 196*d_ff`, forward
+# `6959 + 98*d_ff`); both rows agree exactly.
 _CONFIGS = [
     ("lstm", "bidirectional", 24431),
     ("lstm", "forward", 12239),
@@ -157,6 +267,8 @@ _CONFIGS = [
     ("mamba", "forward", 14039),
     ("cfc", "bidirectional", 24491),
     ("cfc", "forward", 12269),
+    ("transformer", "bidirectional", 26415),
+    ("transformer", "forward", 13231),
 ]
 _IDS = [f"{cell}-{direction}" for cell, direction, _ in _CONFIGS]
 
@@ -169,6 +281,43 @@ _DET = dict(subset=8, valid_size=6, test_size=8, epochs=1, steps_per_epoch=8, pa
 
 # `Law::Log`'s saturated-forward constant: `cost = b + a*ln(1e-24)` once the clamp bites.
 _LOG_CLAMP = float(-np.log(1e-24))  # 55.26204...
+
+# THE COLLAPSE FLOOR (phase-11 T9, user-ratified 2026-08-12 -- mirroring the phase-9 Twin
+# convergence-gate deferral precedent): the known all-speech operating point EIGHT of the
+# ten from-scratch SAD rows in this matrix converge to EXACTLY (Pmiss 0, Pfa 1, DCF 0.25 at
+# every collar); the remaining two (slstm-forward, mamba-forward) land near it without ever
+# NEEDING this floor, since they clear the ORIGINAL margin criterion comfortably regardless
+# -- see "THE TRANSFORMER ROWS" below for the full per-row table. The `+0.0001`
+# absorbs the VRCTS `%f.4s` 4-decimal write quantum (the engine's hyp/ref timestamps are
+# rounded to 4 decimals before scoring, so a DCF a hair above the mathematical 0.25 is the
+# SAME operating point, not a worse one). `test_subset_gate_beats_own_init`'s hard leg
+# passes a row either by the MARGIN (the original criterion: trained beats its own init by
+# >= 0.2 at the collar) OR by reaching this floor (the model already found the best-known
+# subset operating point, so a thin margin against an unusually non-degenerate init is not
+# evidence of a worse outcome). See "THE TRANSFORMER ROWS" below for why this was needed:
+# `transformer/forward`'s from-scratch init does not collapse degenerate the way every
+# other cell's does, thinning its margin below 0.2 at the two widest collars even though
+# its TRAINED model reaches DCF 0.250000 at every collar -- the SAME collapse point seven
+# of the other nine rows' trained models also reach exactly.
+COLLAPSE_FLOOR_DCF = 0.2501
+
+# THE INIT-DEGENERACY COMMITTED MEMBERSHIP TABLE (phase-11 T9 fix round 1, review F1 -- the
+# `EXPECT_TIGHT_COHORT` precedent, `src/rust/tests/phase9_stream_causal.rs:1388`). A row's
+# from-scratch init is either DEGENERATE (`Pmiss > 0.9 AND DCF >= 0.6` -- the all-non-speech
+# collapse every gated-recurrent cell's init reaches) or it is the ONE named exception,
+# `transformer/forward` (Pmiss 0.581, DCF 0.456 -- "THE TRANSFORMER ROWS" below).
+#
+# THE COLLAPSE-FLOOR DISJUNCT (`COLLAPSE_FLOOR_DCF` above) was the WRONG instrument for this
+# characterization, even though it is the RIGHT one for THE HARD LEG's own margin loop:
+# `tr.dcf <= COLLAPSE_FLOOR_DCF` is TRUE on nine of ten rows regardless of what their init
+# looked like (every row's TRAINED side reaches the floor), so an `or`-with-the-floor form on
+# an INIT-side check is UNFALSIFIABLE for those nine -- it has ZERO detection power against
+# (a) a future builder bug producing an accidentally non-degenerate init on any of them, or
+# (b) `transformer/forward` itself regressing BACK to degenerate. A two-sided COMMITTED list
+# is the right instrument: listed rows MUST fail the degenerate characterization, unlisted
+# rows MUST pass it, and MEMBERSHIP MOVING IS AN ADJUDICATION -- re-list only after deciding
+# the anomaly changed, never a silent widen to make a new number fit.
+NON_DEGENERATE_INIT_ROWS = ("transformer-forward",)
 
 # The inverse guard's magnitude floor (see the header). Rejects the ~1e-19 cancellation
 # class that an analytically-zero-but-computed weight lands in; ~2.9e4 below the smallest
@@ -237,6 +386,9 @@ def _layer_length(cell: str, fin: int, out: int, g: dict[str, int]) -> int:
     if cell == "cfc":  # S1.2 closed form
         b, layers = g["backbone_units"], g["backbone_layers"]
         return b * (fin + out + 1) + (layers - 1) * b * (b + 1) + 3 * out * (b + 1)
+    if cell == "transformer":  # phase-11 S1.2 closed form: [W_a|b_a|g_1|W_qkv|b_qkv|W_o|b_o|g_2|W_1|b_1|W_2|b_2]
+        d_ff = g["d_ff"]
+        return out * (fin + 1) + out + 3 * out * (out + 1) + out * (out + 1) + out + d_ff * (out + 1) + out * (d_ff + 1)
     raise AssertionError(f"unknown cell {cell!r}")
 
 
@@ -265,6 +417,14 @@ def _input_column_offsets(cell: str, fin: int, out: int, g: dict[str, int]) -> l
       different, already-pinned phenomenon: exactly dead at T=1, live beyond). Row-major
       `W_bb0[j, k] -> j*(fin + out) + k`, so input column `k` -> `{j*(fin+out) + k :
       j < B}` (B entries).
+    - `transformer`: `W_a (H x in)` is the width ADAPTER and is the layer's first block,
+      row-major -- UNLIKE Mamba's `P`, it is emitted UNCONDITIONALLY (`init_transformer_flat`
+      draws it regardless of `fin == out`; there is no shape-closure special case here), and
+      unlike CfC's `W_bb0` its fan-in is pure input with no state columns mixed in (the
+      recurrence enters only through attention over PAST OUTPUT ROWS, never through a
+      concatenated hidden vector). `W_a[j, k] -> j*fin + k`, so input column `k` ->
+      `{j*fin + k : j < out}` (out entries) -- the same formula as Mamba's `P`, minus the
+      `fin != out` precondition.
     """
     if cell == "lstm":
         return [[c * fin + k for c in range(4 * out)] for k in range(fin)]
@@ -277,6 +437,8 @@ def _input_column_offsets(cell: str, fin: int, out: int, g: dict[str, int]) -> l
     if cell == "cfc":
         b = g["backbone_units"]
         return [[j * (fin + out) + k for j in range(b)] for k in range(fin)]
+    if cell == "transformer":
+        return [[j * fin + k for j in range(out)] for k in range(fin)]
     raise AssertionError(f"unknown cell {cell!r}")
 
 
@@ -302,7 +464,7 @@ def _arch(arm: str, cell: str, direction: str) -> _Arch:
     lstm = cast(list[int], spec["LSTMNeuronNb"])
     sub = cast(list[int], spec["LSTMSubSampling"])
     outn = cast(list[int], spec["OutputNeuronNb"])
-    g = cast(dict[str, int], spec["Mamba"] if cell == "mamba" else spec["Cfc"])
+    g = cast(dict[str, int], spec["Mamba"] if cell == "mamba" else spec["Transformer"] if cell == "transformer" else spec["Cfc"])
 
     fin, out = lstm[0] * sub[0], lstm[1]
     len0 = _layer_length(cell, fin, out, g)
@@ -513,37 +675,61 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
     """THE HARD LEG (spec S3.3): train this cell x direction from scratch on the v2 lineage's
     10-file subset, then score a disjoint 24-file held-out slice END TO END through the DCF
     harness -- the trained pooled DCF must beat its own untrained init's, at every collar,
-    deterministically. Measured 2026-08-01, seed 0, at collar 0.5 with the min/max over all
-    five collars alongside (rounded where a row is exactly degenerate, printed in full where
-    it is not -- rows 4 and 6 are NOT, and rounding them into the collapse story would be a
-    lie the table is here to prevent):
+    deterministically. Measured 2026-08-01, seed 0 (LSTM/sLSTM/Mamba/CfC) and 2026-08-12,
+    seed 0 (Transformer, phase-11 T9), at collar 0.5 with the min/max over all five collars
+    alongside (rounded where a row is exactly degenerate, printed in full where it is not --
+    rounding a non-degenerate row into the collapse story would be a lie the table is here to
+    prevent):
 
-    | config     | trained DCF@0.5 | Pmiss / Pfa       | trained collar range  | init DCF@0.5 | init collar range     | wall   | best ep |
-    |------------|-----------------|-------------------|-----------------------|--------------|-----------------------|--------|---------|
-    | lstm-bi    | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~37 s  | 1       |
-    | lstm-fwd   | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~15 s  | 1       |
-    | slstm-bi   | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~34 s  | 0       |
-    | slstm-fwd  | 0.252430        | 0.026415/0.930474 | [0.248021, 0.255545]  | 0.750000     | 0.750000 (all)        | ~15 s  | 0       |
-    | mamba-bi   | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~62 s  | 1       |
-    | mamba-fwd  | 0.248770        | 0.000000/0.995078 | [0.248770, 0.250000]  | 0.737710     | [0.736969, 0.738062]  | ~19 s  | 1       |
-    | cfc-bi     | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~33 s  | 1       |
-    | cfc-fwd    | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~15 s  | 2       |
+    | config          | trained DCF@0.5 | Pmiss / Pfa       | trained collar range  | init DCF@0.5 | init collar range     | wall   | best ep |
+    |-----------------|-----------------|-------------------|-----------------------|--------------|-----------------------|--------|---------|
+    | lstm-bi         | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~37 s  | 1       |
+    | lstm-fwd        | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~15 s  | 1       |
+    | slstm-bi        | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~34 s  | 0       |
+    | slstm-fwd       | 0.252430        | 0.026415/0.930474 | [0.248021, 0.255545]  | 0.750000     | 0.750000 (all)        | ~15 s  | 0       |
+    | mamba-bi        | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~62 s  | 1       |
+    | mamba-fwd       | 0.248770        | 0.000000/0.995078 | [0.248770, 0.250000]  | 0.737710     | [0.736969, 0.738062]  | ~19 s  | 1       |
+    | cfc-bi          | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~33 s  | 1       |
+    | cfc-fwd         | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.750000     | 0.750000 (all)        | ~15 s  | 2       |
+    | transformer-bi  | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.747406     | [0.747045, 0.748523]  | ~54 s  | 2       |
+    | transformer-fwd | 0.250000        | 0.000000/1.000000 | 0.250000 (all)        | 0.455959     | [0.435836, 0.476457]  | ~19 s  | 1       |
 
-    SIX of the eight rows are degenerate at BOTH endpoints (all-one-class collapse), so their
+    SIX of the ten rows are degenerate at BOTH endpoints (all-one-class collapse), so their
     DCF is exactly 0.25/0.75 with no libm-sensitive boundary jitter, and the six-way TIE is
     what an identical collapse looks like on a 10-file subset -- RECORDED not gated (R5,
-    header). TWO rows are not, and they are the honest ones: `slstm-forward` genuinely rejects
-    ~7% of held-out non-speech at a 2.6% miss cost (its WORST collar, 0.255545, is still
-    0.494 below its init), and `mamba-forward`'s trained model rejects a 0.49% sliver while
-    its INIT is also not fully degenerate (Pmiss 0.982625, which is what the `> 0.9` init pin
-    below is sized for -- the margin there is real but thin, and it is the one row whose init
-    baseline is not exactly 0.75). The phase-9 v1 rows land at the same 0.2500 (bar
-    mamba-forward's 0.249625), so this run says nothing about v1 vs v2 either; the
-    full-corpus launchers are the referee.
+    header). EIGHT of the ten rows' TRAINED side reaches EXACTLY the collapse point at every
+    collar (DCF 0.250000, Pmiss 0, Pfa 1). The remaining two are genuinely non-degenerate on
+    the TRAINED side too (NOT a contradiction -- see below): `slstm-forward` (0.252430 at
+    collar 0.5, ranging [0.248021, 0.255545]) and `mamba-forward` (0.248770 at collar 0.5,
+    ranging [0.248770, 0.250000]) both still clear their own untrained-vs-trained MARGIN
+    comfortably (0.494 and 0.489 respectively), so training is never genuinely in doubt for
+    any of the ten rows; only the INIT side varies in a way that matters. FOUR rows' init is
+    not exactly degenerate, and they fall into two different categories. THREE are the
+    honest-but-still-clearing-the-original-margin rows: `slstm-forward` genuinely rejects
+    ~7% of held-out non-speech at a 2.6% miss cost
+    (its WORST collar, 0.255545, is still 0.494 below its init); `mamba-forward`'s trained
+    model rejects a 0.49% sliver while its init is also not fully degenerate (Pmiss 0.982625,
+    which is what the `> 0.9` init pin below is sized for); and `transformer-bidirectional`'s
+    init similarly sits just off the exact 0.75 baseline (Pmiss 0.996061, DCF range
+    [0.747045, 0.748523]) while still clearing every collar with a ~0.50 margin, the same
+    healthy margin the six exactly-degenerate rows carry. THE FOURTH, `transformer-forward`,
+    is DIFFERENT IN KIND, not degree: its init DCF sits at 0.435836-0.476457 -- a whole
+    quarter below every other row's init, reflecting a Pmiss of 0.581 (not >0.9) -- and this
+    genuinely MISSES the original `- 0.2` per-collar margin at collars 1.0 and 2.0 (measured
+    margins 0.194262 and 0.185836), an INIT-QUALITY ANOMALY rather than a training failure
+    (its trained side reaches DCF 0.250000 at every collar, the same collapse point SEVEN of
+    the other nine rows' trained sides also reach).
+    It PASSES the user-ratified 2026-08-12 amendment at every collar via the collapse-floor
+    disjunct instead (`COLLAPSE_FLOOR_DCF`; see "THE TRANSFORMER ROWS" in the module
+    docstring for the full breakdown, the likely mechanism, and the ratification). The
+    phase-9 v1 rows land at the same 0.2500 (bar mamba-forward's 0.249625), so this run says
+    nothing about v1 vs v2 either; the full-corpus launchers are the referee.
 
     REPRODUCIBILITY of the table itself: every DCF@0.5 above was produced twice, in two
     independent processes (this test, and a standalone driver run), identical to the printed
-    precision. `test_deterministic` carries the bit-level claim on the weight BYTES.
+    precision (the transformer pair additionally cross-checked against `test_deterministic`'s
+    own bit-identical-weights run). `test_deterministic` carries the bit-level claim on the
+    weight BYTES.
 
     The wall column is NOT a speed comparison: `--direction forward` also switches the
     windowing regime (`cell_overlay` forces `BLSTM_window 0`, the plain whole-sequence run,
@@ -561,17 +747,42 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
     ini = res.init_dcf.by_collar(0.5)
     assert np.isfinite(tr.dcf) and 0.0 <= tr.dcf <= 1.0 and 0.0 <= ini.dcf <= 1.0
 
-    # --- the net learned to FIRE: trained detects held-out speech, the untrained init misses ~all ---
+    # --- the net learned to FIRE: trained detects held-out speech ---
     assert tr.pmiss < 0.5, f"{cell}/{direction} trained must detect held-out speech (Pmiss {tr.pmiss:.3f})"
-    assert ini.pmiss > 0.9, f"{cell}/{direction} untrained init misses ~all speech (Pmiss {ini.pmiss:.3f})"
 
-    # --- THE HARD LEG: trained held-out DCF beats its OWN init by a margin, at EVERY collar ---
-    #     (measured gap 0.50 at all five collars; pin a conservative 0.2.)
+    # --- THE INIT-DEGENERACY CHARACTERIZATION (two-sided, COMMITTED -- fix round 1, review
+    #     F1; see NON_DEGENERATE_INIT_ROWS's doc above for why a collapse-floor disjunct was
+    #     the wrong instrument here, even though it is the right one for THE HARD LEG below).
+    #     Every row's from-scratch init is EITHER the all-non-speech collapse every
+    #     gated-recurrent cell's init reaches (Pmiss > 0.9 AND DCF >= 0.6) OR the one named
+    #     exception -- a row moving between the two is an ADJUDICATION, never a number to
+    #     silently widen.
+    row_id = f"{cell}-{direction}"
+    init_degenerate = ini.pmiss > 0.9 and ini.dcf >= 0.6
+    assert init_degenerate == (row_id not in NON_DEGENERATE_INIT_ROWS), (
+        f"{cell}/{direction} init-degeneracy characterization moved (Pmiss {ini.pmiss:.3f}, DCF {ini.dcf:.4f}) -- adjudicate, do not re-list"
+    )
+
+    # --- THE HARD LEG: trained held-out DCF beats its OWN init by a margin, at EVERY collar,
+    #     OR the trained model reached the collapse floor at that collar (user-ratified
+    #     2026-08-12, mirroring the phase-9 Twin convergence-gate deferral precedent -- see
+    #     COLLAPSE_FLOOR_DCF's doc above and "THE TRANSFORMER ROWS" in the module docstring).
+    #     THE NINE ALREADY-PASSING ROWS' EVIDENCE IS UNCHANGED bit-for-bit: `margin_ok` alone
+    #     is True at every one of their collars, so `margin_ok or floor_ok` is True regardless
+    #     of what `floor_ok` says -- NOT because evaluation is "skipped" (`floor_ok` is an
+    #     eagerly-assigned local, computed unconditionally on every iteration; only the
+    #     boolean `or` inside the `assert` short-circuits, and even that costs nothing
+    #     observable here since `floor_ok` is already a plain bool by the time it is read).
+    #     (measured gap 0.50 at all five collars on nine of ten rows; pin a conservative 0.2.)
     for collar in (0.0, 0.25, 0.5, 1.0, 2.0):
         a, b = res.dcf.by_collar(collar), res.init_dcf.by_collar(collar)
-        assert a.dcf < b.dcf - 0.2, f"{cell}/{direction} trained DCF {a.dcf:.4f} must beat init {b.dcf:.4f} at collar {collar}"
+        margin_ok = a.dcf < b.dcf - 0.2
+        floor_ok = a.dcf <= COLLAPSE_FLOOR_DCF
+        assert margin_ok or floor_ok, (
+            f"{cell}/{direction} trained DCF {a.dcf:.4f} must beat init {b.dcf:.4f} by >= 0.2 at collar "
+            f"{collar}, or reach the collapse floor {COLLAPSE_FLOOR_DCF} (trained {a.dcf:.4f})"
+        )
     assert tr.dcf <= 0.5, f"trained DCF {tr.dcf:.4f} must beat the all-non-speech baseline (0.75) with headroom"
-    assert ini.dcf >= 0.6, f"untrained init should sit near the all-non-speech baseline, got {ini.dcf:.4f}"
 
     # --- the lineage AND the architecture knobs really took effect (not a silently-defaulted
     #     v1/BLSTM run): the checkpoint is the v2-sized pack for THIS cell x direction ---

@@ -194,14 +194,20 @@ fn softplus(x: f64) -> f64 {
 /// `SiLU(x) = x sigmoid(x)` (a.k.a. swish), on the house [`logistic_fn`] (whose
 /// `expLimit` saturation guards apply). No overflow guard is needed: `sigmoid` is
 /// bounded and the product is finite wherever `x` is.
-fn silu(x: f64) -> f64 {
+///
+/// `pub(super)` since Phase 11 Task 2 so [`super::transformer`]'s FFN drives THIS
+/// transcription rather than a second copy of it -- a visibility-only change, no
+/// arithmetic touched.
+pub(super) fn silu(x: f64) -> f64 {
     x * logistic_fn(x)
 }
 
 /// `SiLU'(x) = sigmoid(x) (1 + x (1 - sigmoid(x)))`, taken on the PRE-activation `x`
 /// (unlike the house `gates_deriv`/`maxmin2_deriv`, which read post-activations) --
 /// which is why the forward caches `pc` and `res` rather than only their SiLU images.
-fn silu_deriv(x: f64) -> f64 {
+///
+/// `pub(super)` for [`silu`]'s reason: the transformer's FFN adjoint calls it.
+pub(super) fn silu_deriv(x: f64) -> f64 {
     let s = logistic_fn(x);
     s * (1.0 + x * (1.0 - s))
 }

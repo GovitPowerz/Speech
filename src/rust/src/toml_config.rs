@@ -33,7 +33,9 @@
 //! SAD net), `nn_lid`/`cost_lid` (the Twin's `BLSTM_LID_*` net), `nn_mamba` (the
 //! Phase 9 Mamba geometry), `nn_cfc` (the Phase 10 CfC geometry
 //! `Cfc_Backbone_Units` / `Cfc_Backbone_Layers`, the same
-//! UNPREFIXED-one-geometry-per-config posture), `ltsv`/`tdc` (the
+//! UNPREFIXED-one-geometry-per-config posture), `nn_transformer` (the Phase 11
+//! windowed-attention geometry `Transformer_Window` / `Transformer_Heads` /
+//! `Transformer_D_Ff`, that posture again), `ltsv`/`tdc` (the
 //! two NN-free standalone algorithms), and `cnn` (dead-per-`CLAUDE.md` but present
 //! in fixtures, kept for round-trip completeness).
 //!
@@ -211,6 +213,16 @@ static KEY_TABLE: &[KeyMapping] = &[
     // 2's +-15% pack match against the v2 lineage), `backbone_layers` = 1.
     ("Cfc_Backbone_Units",                       "nn_cfc", "backbone_units"),
     ("Cfc_Backbone_Layers",                      "nn_cfc", "backbone_layers"),
+
+    // --- nn_transformer: the windowed-attention geometry (Phase 11 S1/S2, port-only) --
+    // The `nn_mamba`/`nn_cfc` rows' reasoning verbatim: UNPREFIXED flat keys, ONE
+    // geometry per config, FLAT section spelling. Absent keys mean the defaults
+    // (`blstm.rs::TRANSFORMER_DEFAULT_{WINDOW,HEADS,D_FF}` = 64 / 4 / 64), so every
+    // pre-phase-11 config decodes byte-unchanged. `window` counts CELL rows
+    // (post-subsampling), not raw audio frames.
+    ("Transformer_Window",                       "nn_transformer", "window"),
+    ("Transformer_Heads",                        "nn_transformer", "heads"),
+    ("Transformer_D_Ff",                         "nn_transformer", "d_ff"),
 
     // --- cost: BLSTM (main SAD net) cost law ----------------------------------
     ("BLSTM_CostLawSpeech",                      "cost", "law_speech"),

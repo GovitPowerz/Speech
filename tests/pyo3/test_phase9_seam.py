@@ -31,12 +31,40 @@ EXACTLY 0.0 (measured posterior `max_rel` 6.90e-7 plain / 6.77e-7 crossing). Wha
 that is NOT a swap but a shared MISREADING of spec S1.1 -- both implementations wrong the
 same way -- which no parity leg between the two can ever close.
 
+PHASE 11 (Task 4) added three more rows on the same recipe -- `transformer_{bidirectional,
+forward}` (SAD) and `twin_mode7_lid_transformer` (the LID mechanical wiring) -- for the fifth
+`CellLayer` variant, windowed causal attention (spec S1.6). The SAME coverage argument as the
+CfC paragraph above applies verbatim: `TransformerLayer`'s own FD tier
+(`tests/phase9_cell_grad.rs`) drives the cell DIRECTLY, so the enum arm inside
+`BlstmNetwork`'s `Layer` dispatch (`CellLayer::Transformer(_) => ...`) is otherwise
+compiled-but-never-executed, and [`test_grad_check_seam`] is what actually runs a corpus fold
+THROUGH it. [`test_transformer_key_bias_block_is_output_inert`] adds the one new structural
+leg -- the `b_k`-inert claim (spec S1.4's transformer analogue of sLSTM's `b_i`): shifting the
+`k` third of the combined `b_qkv` bias moves every window-row logit by the SAME per-(t,h)
+constant, annihilated by softmax shift-invariance. Unlike sLSTM's `b_i` (a hard structural
+skip) this is a claim ABOUT floating-point arithmetic, not just algebra, so it was EMPIRICALLY
+verified bit-exact on both committed packs before being pinned as `==`, not argued from the
+spec alone; it runs on EVERY stack the fixture has (`fwd`, plus `bwd` when bidirectional, the
+CfC `stacks` precedent -- the block probe FDs `bwd.b_qkv` at the same index as the analytic,
+so a `bwd`-only swap was invisible until this leg covered that stack too). It closes the BIAS
+half of a gap the block probe cannot: `b_qkv` is ONE named flat-layout block (spec S1.2's own
+granularity, matching `for_each_slot`), so a q/k column-order swap inside it would move the
+analytic and FD legs together and neither would notice; this leg locates the `q`/`k` thirds
+independently (from S1.2's stated `[q|k|v]` order) and asserts a DECODED consequence, exactly
+the sLSTM/CfC precedent. The MATRIX half (`W_qkv`) stays OPEN: every row of `W_k` is live (it
+feeds `k_j`, which varies with `j`, unlike a bias), so a matrix-only q<->k row-family swap
+with the bias order intact would pass every leg in this file -- a candidate for T10's
+mutation battery, not this task.
+
 WHAT THE TIER PINS, and why each leg exists:
 
 - **`grad_check`** (S8.1 SEAM): the engine's own corpus-level central difference vs its
   analytic fold, per cell x direction, plus both Twins. This is the leg the spec names. Its
   one weakness is that `max_weights` caps a PREFIX of the flat pack, and at these geometries
-  the first 12 weights all live in ONE block (sLSTM `R_i`, mamba `P`, cfc `W_bb0`).
+  the first 12 weights all live in ONE block (sLSTM `R_i`, mamba `P`, cfc `W_bb0`, transformer
+  `W_a` -- the width ADAPTER, the LEAST architecture-specific of its twelve blocks, so this
+  leg barely touches the attention core at all; that coverage rests on the block probe below,
+  whose worst error lands on a `qkv` block on BOTH transformer fixtures).
 
 - **block probe** (this task's addition, covering that weakness): for EVERY named block of
   each cell's flat layout (spec S2.2 / S3.2) it finite-differences one representative index
@@ -121,7 +149,7 @@ GEOMETRY = cast(dict[str, int], MANIFEST["geometry"])
 # The manifest carries the epsilons + `max_weights` every pin below was measured at, and it
 # is the one committed file its own per-file digest table cannot cover. Pinned here instead
 # (T5 review I3) so a manifest edit cannot silently move a tolerance's operating point.
-MANIFEST_SHA256 = "0684c8a33cb3a70e5ba48c828c78bf155c70142ab7832f513a91de416faa915d"
+MANIFEST_SHA256 = "3638c65912e908ef6b1957fd8856b06aad289df4b5900e360b3101b319f486e7"
 
 # The port-only cells' SAD fixtures -- the ones this file's `grad_check` tier exists for.
 # `lstm_forward` (phase-10 Task 8) is IN the manifest but deliberately NOT here: the
@@ -129,12 +157,22 @@ MANIFEST_SHA256 = "0684c8a33cb3a70e5ba48c828c78bf155c70142ab7832f513a91de416faa9
 # the compiled `LSTMLayer`), and that row was generated for the RUST fast-parity/streaming
 # tiers. The whole-manifest legs below (digests, the gradcheck-reroute strip guard) still
 # cover it. See `scripts/extract_phase9_fixtures.py`'s PROVENANCE note.
-SAD_FIXTURES = ("slstm_bidirectional", "slstm_forward", "mamba_bidirectional", "mamba_forward", "cfc_bidirectional", "cfc_forward")
-MODE7_TWINS = ("twin_mode7_lid_slstm", "twin_mode7_lid_cfc")
+SAD_FIXTURES = (
+    "slstm_bidirectional",
+    "slstm_forward",
+    "mamba_bidirectional",
+    "mamba_forward",
+    "cfc_bidirectional",
+    "cfc_forward",
+    "transformer_bidirectional",
+    "transformer_forward",
+)
+MODE7_TWINS = ("twin_mode7_lid_slstm", "twin_mode7_lid_cfc", "twin_mode7_lid_transformer")
 SAD_EPSILON = float(cast(float, MANIFEST["measured"]["sad_epsilon"]))
 TWIN_EPSILON = float(cast(float, MANIFEST["measured"]["twin_epsilon"]))
 TWIN_MODE7_EPSILON = float(cast(float, MANIFEST["measured"]["twin_mode7_epsilon"]))
 TWIN_MODE7_CFC_EPSILON = float(cast(float, MANIFEST["measured"]["twin_mode7_cfc_epsilon"]))
+TWIN_MODE7_TRANSFORMER_EPSILON = float(cast(float, MANIFEST["measured"]["twin_mode7_transformer_epsilon"]))
 MAX_WEIGHTS = int(cast(int, MANIFEST["measured"]["grad_check_max_weights"]))
 
 # The scale floor, as a fraction of the largest gradient in the compared set (see the module
@@ -283,6 +321,39 @@ def cfc_blocks(out: int, backbone_units: int, backbone_layers: int, fin: int) ->
     return blocks
 
 
+def transformer_blocks(out: int, fin: int, d_ff: int) -> dict[str, tuple[int, int]]:
+    """One transformer layer, phase-11 spec S1.2 order:
+    `[W_a | b_a | g_1 | W_qkv | b_qkv | W_o | b_o | g_2 | W_1 | b_1 | W_2 | b_2]`, `H = out`.
+
+    Transcribed from the SPEC, not from Rust and not from `init_weights` -- the same
+    independence the two sibling maps above have. `W_qkv`/`b_qkv` stay ONE block each here
+    (matching `for_each_slot`'s own granularity): the `[q | k | v]` column-block order lives
+    only inside [`test_transformer_key_bias_block_is_output_inert`], which is the one place
+    that needs to see past this map's resolution.
+    """
+    h = out
+    sizes: list[tuple[str, int]] = [
+        ("W_a", h * fin),
+        ("b_a", h),
+        ("g_1", h),
+        ("W_qkv", h * 3 * h),
+        ("b_qkv", 3 * h),
+        ("W_o", h * h),
+        ("b_o", h),
+        ("g_2", h),
+        ("W_1", h * d_ff),
+        ("b_1", d_ff),
+        ("W_2", d_ff * h),
+        ("b_2", h),
+    ]
+    blocks: dict[str, tuple[int, int]] = {}
+    position = 0
+    for label, n in sizes:
+        blocks[label] = (position, n)
+        position += n
+    return blocks
+
+
 def fixture_blocks(name: str) -> dict[str, tuple[int, int]]:
     """The FULL flat pack of a SAD fixture as named blocks, in `Blstm::set_weights` order:
     `fwd stack | bwd stack (bidirectional only) | output MLP | mean | std`."""
@@ -293,6 +364,8 @@ def fixture_blocks(name: str) -> dict[str, tuple[int, int]]:
         layer = slstm_blocks(out, fin)
     elif info["cell_type"] == "cfc":
         layer = cfc_blocks(out, GEOMETRY["cfc_backbone_units"], GEOMETRY["cfc_backbone_layers"], fin)
+    elif info["cell_type"] == "transformer":
+        layer = transformer_blocks(out, fin, GEOMETRY["transformer_d_ff"])
     else:
         layer = mamba_blocks(out, fin, GEOMETRY["mamba_d_state"], GEOMETRY["mamba_d_conv"], GEOMETRY["mamba_expand"])
     layer_len = sum(n for _, n in layer.values())
@@ -386,6 +459,15 @@ GRAD_CHECK_PINS = {
     # `eps^2` truncation ramp. 1e-5 sits at or beside both minima, ~2 decades under the STOP.
     "cfc_bidirectional": (3.138e-7, 3.2e-6),
     "cfc_forward": (1.169e-8, 1.2e-7),
+    # The phase-11 transformer rows ALSO reuse `sad_epsilon` -- their own 5-point sweeps
+    # (1e-7 .. 1e-3) read
+    #   bi   3.58e-7 / 1.54e-8 / 3.56e-9 / 3.46e-7 / 3.46e-5
+    #   fwd  2.82e-5 / 5.30e-6 / 3.19e-7 / 5.92e-8 / 5.92e-6
+    # bidirectional bottoms AT 1e-5 exactly; forward's own minimum sits one decade higher
+    # (1e-4), but its value AT 1e-5 is still ~30x under the 1e-4 STOP, so there is no reason
+    # to give it a fixture-specific epsilon the way the mode-7 Twins need one below.
+    "transformer_bidirectional": (3.565e-9, 3.6e-8),
+    "transformer_forward": (3.193e-7, 3.2e-6),
 }
 
 
@@ -420,6 +502,8 @@ BLOCK_PROBE_PINS = {
     "mamba_forward": (7.110e-8, 7.2e-7),
     "cfc_bidirectional": (1.417e-8, 1.5e-7),
     "cfc_forward": (1.027e-8, 1.1e-7),
+    "transformer_bidirectional": (2.716e-8, 2.8e-7),
+    "transformer_forward": (5.500e-8, 5.5e-7),
 }
 
 
@@ -510,6 +594,14 @@ def test_weights_derivatives_are_finite_and_block_wise_alive(name: str, tmp_path
     dead block at `T > 1` (its one structural zero, `W_bb`'s state columns, is a `T = 1`
     artefact and this corpus is ~50 timesteps deep), so all eight CfC blocks go through the
     `> 0.0` branch. MEASURED: only `norm.*` comes back zero on either CfC fixture.
+
+    The transformer rows ALSO take no exemption, for a DIFFERENT reason than CfC's: spec
+    S1.4's `b_k` (the k-third of the combined `b_qkv`, see
+    [`test_transformer_key_bias_block_is_output_inert`]) IS structurally near-dead, but it
+    has no block of its own to be exempted BY -- `b_qkv` sums `b_q | b_k | b_v` together, and
+    the live `b_q`/`b_v` thirds carry the block sum regardless of `b_k`'s near-zero
+    contribution. MEASURED: every named transformer block is nonzero except `norm.*`, same as
+    every other cell family here.
     """
     blocks = fixture_blocks(name)
     pack = load_pack(name)
@@ -704,6 +796,69 @@ def test_cfc_time_gate_saturation_selects_one_head(name: str, tmp_path: Path) ->
         )
 
 
+@pytest.mark.parametrize("name", ("transformer_bidirectional", "transformer_forward"))
+def test_transformer_key_bias_block_is_output_inert(name: str, tmp_path: Path) -> None:
+    """Transformer's `b_k` third of the combined `b_qkv` bias is output-INVARIANT and `b_q`
+    is not -- on EVERY stack the fixture has (`fwd`, plus `bwd` when bidirectional, the CfC
+    `stacks` precedent), both located within the block map stated in this file (spec S1.2's
+    own `[q | k | v]` column-block order, not re-read from Rust).
+
+    Why it discriminates (spec S1.4): shifting `b_k` shifts every key `k_j` in a window row
+    by the SAME per-head vector, so `q_t . k_j` moves by a constant that does not depend on
+    `j` -- annihilated by softmax shift-invariance (S1.3's unconditional max-subtract keeps
+    this exact, not merely analytic). `b_q` has no such property (`b_q . k_j` genuinely
+    varies the attention pattern). `b_qkv` is ONE named flat-layout block (spec S1.2's own
+    granularity, matching `for_each_slot`), so the block probe -- one representative index
+    per NAMED block -- cannot see a `[q|k|v]` column-order swap inside it on EITHER stack:
+    both the analytic and FD legs would walk the SAME (possibly-swapped) order and agree with
+    each other regardless (`bwd.b_qkv` included -- a `bwd`-only swap was invisible until this
+    leg covered that stack too). This leg locates the `q`/`k` thirds independently and asserts
+    a DECODED consequence instead, the sLSTM/CfC precedent.
+
+    NARROWER THAN IT SOUNDS: this pins the BIAS half of the `[q|k|v]` order only. The MATRIX
+    half (`W_qkv`) has no comparable inertness handle -- every row of `W_k` is LIVE (it feeds
+    `k_j`, which varies with `j`, unlike a bias), so a matrix-only q<->k ROW-FAMILY swap with
+    the bias order left intact would pass every leg in this file, including this one. That gap
+    is KNOWINGLY OPEN, not closed here -- a candidate for T10's mutation battery.
+
+    Bit-exact equality is EMPIRICALLY verified against both committed packs (not merely
+    argued from softmax shift-invariance in the reals): the `k`-shift enters through the same
+    bias-then-dot-product floating-point path for every window position, and this corpus's
+    magnitudes never exercise a rounding step where that stops being bit-for-bit -- unlike
+    sLSTM's `b_i` (a hard structural skip), this is a claim about floating-point arithmetic,
+    not only algebra. Verified on `bwd` too (`transformer_bidirectional`): `b_k` inert across
+    four overwrite patterns (three constants + a non-uniform ramp), `b_q` live at every
+    non-degenerate value tried (a `0.0` overwrite is a no-op here -- every bias, `b_q`
+    included, is zero-seeded by `init_transformer_flat`, so that particular value proves
+    nothing either way).
+    """
+    h = GEOMETRY["sad_hidden"]
+    blocks = fixture_blocks(name)
+    stacks = ("fwd", "bwd") if any(label.startswith("bwd.") for label in blocks) else ("fwd",)
+    pack = load_pack(name)
+    seed_sad(tmp_path, name)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine([f"{name}.config"], "-m")
+
+        def cost_with(span: tuple[int, int], value: float) -> float:
+            start, n = span
+            candidate = pack.copy()
+            candidate[start : start + n] = value
+            eng.set_weights(0, [candidate])
+            return corpus_cost(eng)
+
+        eng.set_weights(0, [pack])
+        base = corpus_cost(eng)
+        assert math.isfinite(base)
+        for stack in stacks:
+            qkv_b_start, qkv_b_n = blocks[f"{stack}.b_qkv"]
+            assert qkv_b_n == 3 * h, f"{name}: {stack}.b_qkv is not 3H wide -- the S1.2 [q|k|v] assumption below no longer holds"
+            b_q = (qkv_b_start, h)
+            b_k = (qkv_b_start + h, h)
+            assert cost_with(b_k, 3.5) == base, f"{name}: rewriting the {stack} b_qkv k-third moved the cost -- that slice is not b_k"
+            assert cost_with(b_q, 3.5) != base, f"{name}: rewriting the {stack} b_qkv q-third left the cost identical -- the probe is vacuous"
+
+
 # ==== S8.3: the Twin's LID mechanical wiring =================================
 #
 # FINDING (brief step 3): `tasks/lid.rs` needed NO change. `TwinBlstmSpectralLid::from_legacy`
@@ -719,9 +874,10 @@ def test_cfc_time_gate_saturation_selects_one_head(name: str, tmp_path: Path) ->
 #     `external_features` instead of wav, and a FROZEN SAD net, so `grad_check` visits the
 #     LID net alone.
 #
-# The phase-10 CfC row (spec S9.2) takes MODE 7 ONLY -- the live regime, deliberately, not
-# for want of a mode-5 clone: what the LID leg pins is the CTOR DISPATCH plus the flat-pack
-# length agreement between `init_weights.py` and `CfcLayer::nb_of_weights`, and mode 5 would
+# The phase-10 CfC row (spec S9.2) and the phase-11 transformer row (spec S1.6) both take
+# MODE 7 ONLY -- the live regime, deliberately, not for want of a mode-5 clone: what the LID
+# leg pins is the CTOR DISPATCH plus the flat-pack length agreement between `init_weights.py`
+# and the cell's own `nb_of_weights` (`CfcLayer` / `TransformerLayer`), and mode 5 would
 # re-run the identical wiring against a second corpus. The two-nets-live gradient path is
 # already pinned cell-agnostically by the sLSTM mode-5 rows below.
 #
@@ -741,10 +897,15 @@ TWIN_GRAD_CHECK_PINS = {0: (5.390e-9, 5.4e-8), 1: (3.585e-6, 3.6e-5)}
 # minimum for THAT net -- the sLSTM Twin's LID gradient is ~9e-7 (three decades below the
 # mode-5 one, so its FD optimum is at a wide 1e-3), the phase-10 CfC Twin's is ~5.6e-5, ~60x
 # bigger, and its optimum accordingly sits one decade lower (sweep 1e-7 .. 1e-3:
-# 2.04e-6 / 6.67e-8 / 1.74e-8 / 2.63e-9 / 3.29e-7).
+# 2.04e-6 / 6.67e-8 / 1.74e-8 / 2.63e-9 / 3.29e-7). The phase-11 transformer Twin's own
+# 5-point sweep (1e-6 .. 1e-2) reads 9.18e-10 / 5.16e-10 / 5.39e-9 / 5.25e-7 / 5.21e-5 -- a
+# clean U bottoming AT 1e-5, which happens to coincide with `sad_epsilon` (see
+# `manifest.json`'s `twin_mode7_transformer_epsilon` comment: coincidence, not reuse -- this
+# Twin gets its own named key on the CfC precedent regardless).
 TWIN_MODE7_ROWS = {
     "twin_mode7_lid_slstm": (TWIN_MODE7_EPSILON, 9.197e-7, 9.2e-6),
     "twin_mode7_lid_cfc": (TWIN_MODE7_CFC_EPSILON, 2.630e-9, 2.7e-8),
+    "twin_mode7_lid_transformer": (TWIN_MODE7_TRANSFORMER_EPSILON, 5.157e-10, 5.2e-9),
 }
 
 
@@ -754,6 +915,8 @@ def mode7_lid_blocks(name: str) -> dict[str, tuple[int, int]]:
     fixture's `BLSTM_LID_Cell_Type` selects."""
     if FIXTURES[name]["lid_cell_type"] == "cfc":
         return cfc_blocks(6, GEOMETRY["cfc_backbone_units"], GEOMETRY["cfc_backbone_layers"], 12)
+    if FIXTURES[name]["lid_cell_type"] == "transformer":
+        return transformer_blocks(6, 12, GEOMETRY["transformer_d_ff"])
     return slstm_blocks(6, 12)
 
 
@@ -1092,6 +1255,42 @@ def test_fixture_configs_state_the_cfc_geometry() -> None:
         for key, value in (
             ("Cfc_Backbone_Units", GEOMETRY["cfc_backbone_units"]),
             ("Cfc_Backbone_Layers", GEOMETRY["cfc_backbone_layers"]),
+        ):
+            assert f"\n{key} {value}\n" in text, f"{name}.config: {key} does not match the manifest geometry ({value})"
+
+
+def test_fixture_configs_state_the_transformer_geometry() -> None:
+    """[`transformer_blocks`] sizes every block off the manifest geometry, so a fixture that
+    dropped a `Transformer_*` key would silently fall back to the SIZED phase-11 default on
+    BOTH sides and shift the block map -- except "silently" is not the whole story. The
+    MEASURED loudness inventory, per key:
+
+      * `Transformer_Window` dropped -> SILENT on all three fixtures. Window has no validity
+        constraint beyond `>= 1`; a wrong value only reshapes the attention span, which
+        nothing else here would notice.
+      * `Transformer_Heads` dropped -> silent on the two SAD-only fixtures (the default 4
+        happens to also divide `sad_hidden = 4`), but LOUD on the Twin: the default 4 does
+        NOT divide the LID net's hidden width 6, so `BlstmConfig::from_legacy`'s `H % heads`
+        check refuses construction.
+      * `Transformer_D_Ff` dropped -> LOUD on all three: the default (64) grows the pack past
+        what the committed `.bin` holds, so the engine refuses the length-mismatched load
+        (1091 < 2135 bidirectional SAD, 569 < 1091 forward SAD, 721 < 2229 the Twin's LID
+        net).
+
+    So this pin is the ONLY guard for `Transformer_Window` everywhere and for
+    `Transformer_Heads` on the two SAD-only fixtures; the other two cells (`Heads` on the
+    Twin, `D_Ff` everywhere) would already fail loudly without it -- still worth pinning
+    explicitly, so a silent config drift is caught by an assertion naming the drift rather
+    than by an incidental construction error naming neither. Pin that all three transformer
+    fixtures state all three keys, and that they match the manifest -- the `Mamba_Dt_Rank` /
+    CfC precedent.
+    """
+    for name in ("transformer_bidirectional", "transformer_forward", "twin_mode7_lid_transformer"):
+        text = (PHASE9 / f"{name}.config").read_text()
+        for key, value in (
+            ("Transformer_Window", GEOMETRY["transformer_window"]),
+            ("Transformer_Heads", GEOMETRY["transformer_heads"]),
+            ("Transformer_D_Ff", GEOMETRY["transformer_d_ff"]),
         ):
             assert f"\n{key} {value}\n" in text, f"{name}.config: {key} does not match the manifest geometry ({value})"
 

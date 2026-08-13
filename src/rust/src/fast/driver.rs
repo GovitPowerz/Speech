@@ -27,7 +27,10 @@
 //! ([`super::cells`]), and `(any cell, bidirectional)` builds [`FastBiCell`]
 //! ([`super::bicell`]). NOTHING typed-bails on shape any more: phase-10 Task 8's
 //! `FastLstm` filled the last hole (`(lstm, forward)`), so the classifier is TOTAL and
-//! the cell set `{lstm, slstm, mamba, cfc}` is complete in both directions.
+//! the cell set `{lstm, slstm, mamba, cfc}` was complete in both directions -- and stayed
+//! total when phase-11 added a FIFTH cell, `transformer` (Task 5 causal, Task 6
+//! bidirectional): the match here is generic over `CellType`, so neither arm needed a
+//! transformer-specific line, only [`FastNetShape`]'s per-variant docs below did.
 //!
 //! THE WINDOWING REGIME FOLLOWS THE SHAPE. BLSTM runs the OVERLAP windowed driver only;
 //! causal runs the PLAIN whole-sequence forward only (a causal cell inside a window has
@@ -67,7 +70,9 @@ use ndarray::Array2;
 use crate::audio::Audio;
 use crate::config::NnetSpec;
 use crate::constants::random_gauss;
-use crate::nn::blstm::{BlstmConfig, CellType, CfcParams, Direction, MambaParams};
+use crate::nn::blstm::{
+    BlstmConfig, CellType, CfcParams, Direction, MambaParams, TransformerParams,
+};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
@@ -87,11 +92,13 @@ pub enum FastNetShape {
     /// [`FastBlstm`] -- LSTM + bidirectional, the phase-7 path (BYTE-UNTOUCHED).
     Blstm,
     /// [`FastCausalNet`] -- ANY cell + `Direction forward`: `slstm`/`mamba` (phase 9),
-    /// `cfc` (phase-10 Task 6), `lstm` (phase-10 Task 8, which completed the set).
+    /// `cfc` (phase-10 Task 6), `lstm` (phase-10 Task 8, which completed the phase-10
+    /// set), `transformer` (phase-11 Task 5).
     Causal(CellType),
-    /// [`FastBiCell`] -- `slstm`/`mamba`/`cfc` + `Direction bidirectional` (phase-10
-    /// Task 7, spec S5). OFFLINE ONLY: bidirectional inference is unstreamable by
-    /// construction, so `fast::stream` typed-bails this variant.
+    /// [`FastBiCell`] -- `slstm`/`mamba`/`cfc` (phase-10 Task 7, spec S5) /
+    /// `transformer` (phase-11 Task 6, spec S5.3) + `Direction bidirectional`. OFFLINE
+    /// ONLY: bidirectional inference is unstreamable by construction, so `fast::stream`
+    /// typed-bails this variant.
     BiCell(CellType),
 }
 
@@ -287,16 +294,27 @@ fn build_sad_net(
     shape: FastNetShape,
     mamba: &MambaParams,
     cfc: &CfcParams,
+    transformer: &TransformerParams,
     flat: &[f64],
 ) -> Result<FastSadNet> {
     Ok(match shape {
         FastNetShape::Blstm => FastSadNet::Blstm(FastBlstm::from_flat(spec, flat)?),
-        FastNetShape::Causal(cell) => {
-            FastSadNet::Causal(FastCausalNet::from_flat(spec, cell, mamba, cfc, flat)?)
-        }
-        FastNetShape::BiCell(cell) => {
-            FastSadNet::BiCell(FastBiCell::from_flat(spec, cell, mamba, cfc, flat)?)
-        }
+        FastNetShape::Causal(cell) => FastSadNet::Causal(FastCausalNet::from_flat(
+            spec,
+            cell,
+            mamba,
+            cfc,
+            transformer,
+            flat,
+        )?),
+        FastNetShape::BiCell(cell) => FastSadNet::BiCell(FastBiCell::from_flat(
+            spec,
+            cell,
+            mamba,
+            cfc,
+            transformer,
+            flat,
+        )?),
     })
 }
 
@@ -359,6 +377,11 @@ pub struct FastSpectralSegmenter {
     /// beside `mamba` for the same reason: the deferred `load_weights_file` rebuild
     /// must size the net exactly as `from_legacy` did.
     cfc: CfcParams,
+    /// The `Transformer_*` geometry, inert unless [`Self::shape`] names the transformer
+    /// cell. Carried for its two siblings' reason (the deferred rebuild must size the net
+    /// exactly as `from_legacy` did) -- and here `window`/`heads` matter to the KERNEL
+    /// even though only `d_ff` moves the pack LENGTH.
+    transformer: TransformerParams,
     net: Option<FastSadNet>,
 
     /// Sub-sampling factors + whole-BLSTM ratio, cached from the spec for
@@ -459,7 +482,14 @@ impl FastSpectralSegmenter {
             * output_sub_sampling.iter().product::<usize>();
 
         let net = match weights {
-            Some(flat) => Some(build_sad_net(&spec, shape, &bc.mamba, &bc.cfc, flat)?),
+            Some(flat) => Some(build_sad_net(
+                &spec,
+                shape,
+                &bc.mamba,
+                &bc.cfc,
+                &bc.transformer,
+                flat,
+            )?),
             None => None,
         };
 
@@ -475,6 +505,7 @@ impl FastSpectralSegmenter {
             shape,
             mamba: bc.mamba,
             cfc: bc.cfc,
+            transformer: bc.transformer,
             net,
             lstm_sub_sampling,
             output_sub_sampling,
@@ -512,6 +543,7 @@ impl FastSpectralSegmenter {
             self.shape,
             &self.mamba,
             &self.cfc,
+            &self.transformer,
             &flat,
         )?);
         Ok(())

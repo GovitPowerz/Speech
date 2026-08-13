@@ -68,9 +68,9 @@ self-derives from the config (the normalize tail, the seed pack, the output MLP 
 `--direction forward`). v1 stays FROZEN and remains the only 2015-capacity-comparable
 lineage; v2 is a new lineage whose corrected Xavier fan-in scaling is a MEASURABLE
 difference for the launchers to adjudicate, not a promised win (R5). Gates:
-`tests/pyo3/test_phase10_gates.py` -- 8 rows, {lstm, slstm, mamba, cfc} x {bidirectional,
-forward}, with the INVERSE guard (zero dead layer-0 input columns) where v1's gates pin
-dead-count floors.
+`tests/pyo3/test_phase10_gates.py` -- 10 rows (phase 11 T9 added the fifth cell), {lstm,
+slstm, mamba, cfc, transformer} x {bidirectional, forward}, with the INVERSE guard (zero dead
+layer-0 input columns) where v1's gates pin dead-count floors.
 
 LICENSE HYGIENE: nothing corpus-derived is committed. The listing, mapping, reference, and
 seed weight packs are all synthesized at RUNTIME under `out_dir` from `corpus_root`; the
@@ -364,11 +364,32 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
 
     EMPTY at the defaults (`lstm` / `bidirectional`), so a default run's config text is
     byte-identical to today's -- the whole point of the knob being additive. The `Mamba_*`
-    (and, since phase 10, `Cfc_*`) geometry keys are deliberately NOT written: their defaults
-    live Rust-side (`blstm.rs::MambaParams::default` / `CFC_DEFAULT_BACKBONE_UNITS`) and
-    Python reads the same defaults (`init_weights.MambaGeometry` /
-    `config_bridge.CFC_DEFAULT_BACKBONE_UNITS`), so omitting them at default values keeps the
-    config text minimal and the two sides agreeing by construction.
+    (and, since phase 10, `Cfc_*`; since phase 11, `Transformer_*`) geometry keys are
+    deliberately NOT written: their defaults live Rust-side (`blstm.rs::MambaParams::default`
+    / `CFC_DEFAULT_BACKBONE_UNITS` / `TRANSFORMER_DEFAULT_{WINDOW,HEADS,D_FF}`) and Python
+    reads the same defaults (`init_weights.MambaGeometry` /
+    `config_bridge.CFC_DEFAULT_BACKBONE_UNITS` / `config_bridge.TRANSFORMER_DEFAULT_*`), so
+    omitting them at default values keeps the config text minimal and the two sides agreeing
+    by construction.
+
+    THE FIFTH CELL NEEDS NO THIRD DERIVED KEY (phase-11 T9, spec S8): a transformer layer is
+    just another `Layer` impl behind the same `CellLayer` enum (`nn/cells/mod.rs`'s dispatch,
+    the phase-9/10 precedent), so both regimes this overlay already knows about keep working
+    unmodified. Bidirectional: `feed_forward_backward_overlap` (the windowed driver
+    `lre_sad_v2.toml`'s `frame_window 3.25` selects) calls `feed_forward_backward_plain` once
+    per driver-level window with NO cell-type branch anywhere in that path -- it is exactly as
+    generic over `Network<CellLayer>` as it was for sLSTM/Mamba/CfC before it, so a
+    bidirectional transformer runs the windowed overlap regime like every other cell (verified
+    by reading `feed_forward_backward_overlap`: the per-window call is `self.
+    feed_forward_backward_plain(&block, ...)`, unconditional on cell type). This is a
+    DIFFERENT "window" than the cell's own bounded ALiBi attention span (`Transformer_Window`,
+    S1.1) -- the driver-level window bounds MEMORY over a long sequence by chunking it, the
+    cell-level window bounds ATTENTION cost within whatever chunk it is handed; the two never
+    interact because the cell always starts its own frame index at 0 for whatever span it is
+    given, exactly like every other cell's per-call state reset. Forward: DERIVED KEY 2 below
+    already forces the plain whole-sequence regime for every cell, transformer included, and
+    the default `Transformer_Heads 4` divides both v1's and v2's hidden width 24 (S2's `H % A
+    == 0` engine-side check), so no head-count override is needed either.
 
     DERIVED KEY 1 (the output MLP's width): `BlstmConfig::from_legacy` requires
     `OutputNeuronNb[0] == hidden_multiplier * lstm_neuron_nb[-1]` -- `2*hidden`
@@ -388,8 +409,8 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
 
     Everything else in the config (the DSP front-end, the cost law, the hidden widths) is
     untouched."""
-    if cell_type not in ("lstm", "slstm", "mamba", "cfc"):
-        raise ValueError(f"unknown cell type {cell_type!r} (expected lstm, slstm, mamba or cfc)")
+    if cell_type not in ("lstm", "slstm", "mamba", "cfc", "transformer"):
+        raise ValueError(f"unknown cell type {cell_type!r} (expected lstm, slstm, mamba, cfc or transformer)")
     if direction not in ("bidirectional", "forward"):
         raise ValueError(f"unknown direction {direction!r} (expected bidirectional or forward)")
     overlay: dict[str, str] = {}
@@ -977,9 +998,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
     parser.add_argument(
         "--cell-type",
-        choices=("lstm", "slstm", "mamba", "cfc"),
+        choices=("lstm", "slstm", "mamba", "cfc", "transformer"),
         default="lstm",
-        help="SAD arm: recurrent cell (spec S6 + phase-10 S1; default = today's peephole BLSTM)",
+        help="SAD arm: recurrent cell (spec S6 + phase-10 S1 + phase-11 S1/S2; default = today's peephole BLSTM)",
     )
     parser.add_argument(
         "--direction",

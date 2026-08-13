@@ -204,10 +204,19 @@ fn set_weights_err_when_too_short() {
     assert!(net.set_weights(&flat).is_err());
 }
 
+/// RE-PINNED by the phase-11 interstitial (this test was
+/// `set_weights_tolerates_longer_vector_and_returns_head_on_get`, asserting the OPPOSITE).
+///
+/// The legacy's over-long tolerance is real but it lives in the ctor's `_weightsFile`
+/// branch (`BLSTMNeuralNetwork.cpp:144-146`, warning + head), NOT in `setWeights`
+/// (`:209-225`), which has no length logic at all. The original port hoisted it into
+/// `set_weights` and thereby widened it to the seam, where a wrong-architecture pack
+/// loaded head-first and ran in silence. `set_weights` is now exact-length; the file-load
+/// path still tolerates (`phase4a_lifecycle::weights_file_too_many_truncates` and
+/// `set_weights_length_guard::the_file_load_path_keeps_the_legacy_head_first_tolerance`
+/// are where THAT half is pinned).
 #[test]
-fn set_weights_tolerates_longer_vector_and_returns_head_on_get() {
-    // Legacy: NNWeights.size() > getNbOfWeights() -> warning, but setWeights
-    // still proceeds (consuming only the head). Ported as silent Ok here.
+fn set_weights_refuses_a_longer_vector() {
     let m = real_map();
     let cfg = BlstmConfig::from_legacy(&m, "BLSTM").unwrap();
     let mut net = BlstmNetwork::from_config(cfg).unwrap();
@@ -216,16 +225,14 @@ fn set_weights_tolerates_longer_vector_and_returns_head_on_get() {
     flat.extend_from_slice(&[1.0, 2.0, 3.0, 4.0, 5.0]); // 5 junk tail values
     assert_eq!(flat.len(), 33676);
 
-    net.set_weights(&flat).unwrap();
-    let round = net.get_weights();
-    assert_eq!(
-        round.len(),
-        33671,
-        "get_weights returns only the 33671 head"
+    let err = match net.set_weights(&flat) {
+        Ok(()) => panic!("an over-long pack must be refused, not head-eaten"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("33676") && err.contains("33671"),
+        "the refusal must name both lengths, got: {err}"
     );
-    for (i, (&a, &b)) in flat[..33671].iter().zip(round.iter()).enumerate() {
-        assert_eq!(a.to_bits(), b.to_bits(), "mismatch at flat index {i}");
-    }
 }
 
 // === MLP-mode structural test ================================================

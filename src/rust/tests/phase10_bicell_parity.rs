@@ -6,6 +6,13 @@
 //! `BagOfProcessors` on the committed phase-9 bidirectional gate fixtures + the
 //! committed synthetic tier-2 corpus audio.
 //!
+//! PHASE 11 TASK 6 (spec S5.3/S5.4) joined a FOURTH cell, `transformer` --
+//! `nn::cells::transformer::TransformerLayer` on the exact side, `FastTransformer` (via
+//! `fast::bicell::FastBiCell`, Task 5's causal kernel driven with `reverse = true` for the
+//! backward stack) on the fast side. No transformer-specific `FastBiCell` code exists:
+//! [`CELLS`] growing by one row is the whole diff this task made to the ARITHMETIC tier,
+//! exactly as the spec predicted.
+//!
 //! THIS IS THE ARITHMETIC TIER for the bidirectional twins (the phase-9 battery lesson,
 //! CLAUDE.md's standing rule (2)): every self-consistent leg compares two runs of the
 //! SAME kernel and is structurally blind to a mutation inside it. Nothing here is
@@ -45,10 +52,12 @@ use speech::engine::bag_of_processors::{BagOfProcessors, Processor};
 use speech::io::binary::{read_weight_vector, write_matrix};
 use speech::tasks::segmentation::{SegClass, Segmentation};
 
-/// The three cells that now have a bidirectional f32 twin (spec S5). The LSTM cell is
-/// absent by construction: `(lstm, bidirectional)` IS the phase-7 `FastBlstm`, which
-/// this task leaves BYTE-UNTOUCHED.
-const CELLS: [&str; 3] = ["slstm", "mamba", "cfc"];
+/// The four cells that now have a bidirectional f32 twin (spec S5; `transformer` joined
+/// in phase-11 Task 6, spec S5.3 -- "no transformer-specific bicell code beyond the enum
+/// arm", so this row is the whole diff `FastBiCell` needed). The LSTM cell is absent by
+/// construction: `(lstm, bidirectional)` IS the phase-7 `FastBlstm`, which this task
+/// leaves BYTE-UNTOUCHED.
+const CELLS: [&str; 4] = ["slstm", "mamba", "cfc", "transformer"];
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
@@ -209,7 +218,7 @@ fn compare(
 // ---------------------------------------------------------------------------
 
 /// MEASURED on this box (M4 Pro / macOS 25.5 / Apple libm) -- see the per-leg `MEASURE`
-/// prints. Worst across all twelve (cell x regime x {base, crossing}) runs:
+/// prints. Worst across the original twelve (cell x regime x {base, crossing}) runs:
 ///
 /// | leg | max_abs | max_rel |
 /// |---|---|---|
@@ -229,6 +238,22 @@ fn compare(
 /// ordinary ~1.9e-6 absolute delta divided by a posterior of ~0.10, well ABOVE the
 /// comparator's 1e-2 scale floor, so it is a genuine relative number and not a
 /// small-denominator artifact.
+///
+/// PHASE 11 TASK 6 adds the `transformer` rows (four more runs: plain, overlap, and the
+/// two crossing legs at the wide-offset rungs `+11`/`+10` -- see
+/// [`bicell_parity_crossing_is_exercised`]), MEASURED:
+///
+/// | leg | max_abs | max_rel |
+/// |---|---|---|
+/// | transformer plain / overlap | 2.86e-6 / 2.98e-6 | 6.59e-6 / 6.84e-6 |
+/// | transformer crossing plain (gain 1, +11) / overlap (gain 1, +10) | 2.42e-6 / 1.57e-6 | 1.159e-5 / **1.242e-5** |
+///
+/// `max_dt` is EXACTLY 0.0 on all four, with boundary count + types identical (three
+/// interior boundaries on the plain crossing, two on overlap -- both non-vacuous). Every
+/// transformer number sits BELOW mamba's, so mamba stays the worst leg overall and
+/// **both pins are UNCHANGED** (transformer's worst `measured * 10` is 1.242e-4, inside
+/// `2.0e-4` at 1.6x headroom on top of what mamba already used) -- the `measured * 10`
+/// convention was checked and did not require adjudication (spec R1/R3).
 ///
 /// A FAILURE HERE MEANS RE-MEASURE AND ADJUDICATE, never widen. The HARD gates
 /// (boundary count/type identity, `max_dt == 0.0`) carry the decision-level claim; these
@@ -252,11 +277,18 @@ fn bicell_parity_exact_vs_fast_plain() {
         let e = run_path(cell, None, None, None);
         let f = run_path(cell, Some("fast"), None, None);
         let (max_abs, max_rel, max_dt) = compare(&format!("{cell}/plain"), &e, &f);
+        // The posterior SPAN is printed (never asserted), the `phase9_fast_parity.rs`
+        // causal-tier precedent: it is what explains whether the crossing leg below
+        // lands on a small offset or needs the wide fallback.
+        let (lo, hi) = e.0[0]
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
         println!(
             "MEASURE {cell} bicell PLAIN exact-vs-fast: max_abs={max_abs:e} max_rel={max_rel:e} \
-             max_dt={max_dt} interior={} rows={}",
+             max_dt={max_dt} interior={} rows={} span=[{lo:.4}, {hi:.4}] logit_span={:.4}",
             interior_boundaries(&e.1),
-            e.0[0].len()
+            e.0[0].len(),
+            (hi / (1.0 - hi)).ln() - (lo / (1.0 - lo)).ln()
         );
         // Non-vacuity of the POSTERIOR comparison: a real sequence, not a constant.
         assert!(e.0[0].len() > 20, "{cell}: too few posterior rows");
@@ -285,11 +317,16 @@ fn bicell_parity_exact_vs_fast_overlap() {
         let e = run_path(cell, None, None, Some(OVERLAP_WINDOW));
         let f = run_path(cell, Some("fast"), None, Some(OVERLAP_WINDOW));
         let (max_abs, max_rel, max_dt) = compare(&format!("{cell}/overlap"), &e, &f);
+        let (lo, hi) = e.0[0]
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
         println!(
             "MEASURE {cell} bicell OVERLAP exact-vs-fast: max_abs={max_abs:e} \
-             max_rel={max_rel:e} max_dt={max_dt} interior={} rows={}",
+             max_rel={max_rel:e} max_dt={max_dt} interior={} rows={} span=[{lo:.4}, {hi:.4}] \
+             logit_span={:.4}",
             interior_boundaries(&e.1),
-            e.0[0].len()
+            e.0[0].len(),
+            (hi / (1.0 - hi)).ln() - (lo / (1.0 - lo)).ln()
         );
         assert!(e.0[0].len() > 20, "{cell}: too few posterior rows");
         let first = e.0[0][0];
@@ -348,19 +385,48 @@ fn overlap_and_plain_are_distinct_regimes() {
 /// the logit, and every crossing compared below is a crossing of the REAL curve.
 ///
 /// WHY A GAIN AND NOT JUST THE BIAS (phase 9's knob). MEASURED on these fixtures: a
-/// bias-only sweep is enough for five of the six (cell x regime) rows, but NOT for
-/// `slstm/plain`, whose posterior spans only `[0.105, 0.516]` -- a logit swing of 2.20
-/// against the 1.25 the rising/falling pair (0.6 / 0.3) needs for a round trip, which
-/// leaves no offset whose crossings survive `min_speech`/`min_silence` 0.2 s (5 rows at
-/// this 0.04 s step). A 129-point bias-only sweep over `[-8, +8]` finds ZERO interior
-/// boundaries there. Scaling the weight rows widens the swing, and `gain 2` at offset
-/// `+2.0` produces one. The sweep therefore tries `gain 1` (the phase-9 knob, bias only)
-/// FIRST at every offset, and only then reaches for a gain -- so five rows are pinned on
-/// the weaker, more faithful perturbation and exactly one is not.
+/// bias-only sweep within `GAINS[0] x offsets()` (gain 1, `|offset| <= 4.0`) is enough for
+/// five of the eight (cell x regime) rows, but NOT for `slstm/plain`, whose posterior
+/// spans only `[0.105, 0.516]` -- a logit swing of 2.20 against the 1.25 the
+/// rising/falling pair (0.6 / 0.3) needs for a round trip, which leaves no offset whose
+/// crossings survive `min_speech`/`min_silence` 0.2 s (5 rows at this 0.04 s step). A
+/// 129-point bias-only sweep over `[-8, +8]` finds ZERO interior boundaries there. Scaling
+/// the weight rows widens the swing, and `gain 2` at offset `+2.0` produces one. The sweep
+/// therefore tries `gain 1` (the phase-9 knob, bias only) FIRST at every offset, and only
+/// then reaches for a gain -- so five rows are pinned on the weaker, more faithful
+/// perturbation and exactly one (of the original six) is not.
+///
+/// PHASE 11 TASK 6 adds `transformer`, and its two rows need a THIRD lever -- not a
+/// bigger gain, a bigger OFFSET (see [`wide_offsets`]). MEASURED: `transformer/plain`
+/// spans `[0.0000, 0.9008]` (logit span 40.21, printed by
+/// [`bicell_parity_exact_vs_fast_plain`]) and sits at `interior=0` AS COMMITTED -- unlike
+/// `mamba`'s similarly wide `[0.0000, 1.0000]` span (logit span ~41.97), which happens to
+/// cross at offset 0. A near-saturated curve's crossing point does not move at all under a
+/// small shift (almost every row is already pinned at 0 or the ceiling), so the `+-4.0`
+/// grid that suffices for six of the eight rows finds nothing; `+11` (plain) / `+10`
+/// (overlap), still at `gain 1`, do. Reaching for a WIDER offset rather than a gain keeps
+/// the weaker, more faithful perturbation (the phase-9 property: every cell weight
+/// untouched) instead of trading it for the sharper one -- the opposite fix from
+/// `slstm/plain`'s, because the two rows are opposite problems (a curve too FLAT to reach
+/// the decision band vs one too SATURATED to be moved by a small shift).
 ///
 /// The offsets are ordered `0.0` first (a fixture that already crosses is used AS
 /// COMMITTED -- mamba does) then ascending in `|offset|`, so the chosen perturbation is
-/// the SMALLEST one that works, deterministically.
+/// the SMALLEST one that works, deterministically -- and the wide fallback below is tried
+/// only once the entire `GAINS x offsets()` grid is exhausted, so it never displaces a
+/// rung the grid above already found.
+///
+/// TWO CLARIFICATIONS, recorded rather than left implicit (phase-11 Task 6 minor). First,
+/// "smallest wins" holds PER STAGE, not as one globally-sorted search: `gain` is the OUTER
+/// loop, so EVERY offset at `gain 1` (all the way to `+-4.0`) is tried before `gain 2` is
+/// touched, and all of `gain 2` before `gain 3` -- meaning `gain 3, offset +0.25` is probed
+/// deep inside the primary grid, while `gain 1, offset +5.0` is not reachable there AT ALL
+/// (`offsets()` stops at `4.0`) and is only tried once the WHOLE primary grid (all three
+/// gains) has failed, as the very first rung of [`wide_offsets`]. So a nominally "larger"
+/// primary-grid perturbation can and does fire before a nominally "smaller" fallback one.
+/// Second, the half-open interval `(4.0, 5.0)` is UNPROBED by construction at every gain --
+/// `offsets()` tops out at `4.0` and [`wide_offsets`] starts at `5.0` -- a documented gap
+/// rather than an oversight, since no committed fixture needed anything in it.
 #[test]
 fn bicell_parity_crossing_is_exercised() {
     // gain 1 = bias-only. Ascending, so the least invasive perturbation wins.
@@ -373,6 +439,16 @@ fn bicell_parity_crossing_is_exercised() {
                 .collect::<Vec<_>>(),
         )
     };
+    // WIDE FALLBACK (phase-11 Task 6, the `phase9_fast_parity.rs::wide_offsets`
+    // precedent): integer offsets out to +-32, smallest magnitude first -- headroom over
+    // the measured need (`transformer` settles at `+-10`/`+-11`, see the function doc
+    // above for why). Reached ONLY when nothing in `GAINS x offsets()` above crosses,
+    // which on the committed fixtures is the `transformer` row alone. Because the primary
+    // loop below runs to completion UNCHANGED before this is ever consulted, the three
+    // sibling cells' rungs are BYTE-UNCHANGED BY CONSTRUCTION -- not by re-measurement,
+    // since a loop that already broke on an earlier iteration never reaches code appended
+    // after it.
+    let wide_offsets = || (5i32..=32).flat_map(|k| [f64::from(k), -f64::from(k)]);
 
     let tmp = tempfile::tempdir().unwrap();
     for cell in CELLS {
@@ -417,6 +493,24 @@ fn bicell_parity_crossing_is_exercised() {
                         );
                         chosen = Some((gain, offset, interior));
                         break 'sweep;
+                    }
+                }
+            }
+            if chosen.is_none() {
+                'wide: for gain in GAINS {
+                    for offset in wide_offsets() {
+                        let probe = perturbed(gain, offset);
+                        write_matrix(&path, probe.len(), 1, &probe).unwrap();
+                        let interior =
+                            interior_boundaries(&run_path(cell, None, Some(&path), window).1);
+                        if interior > 0 {
+                            println!(
+                                "MEASURE crossing[{cell}/{tag}] (wide): dense gain {gain} + bias \
+                                 offset {offset:+} -> {interior} interior boundaries"
+                            );
+                            chosen = Some((gain, offset, interior));
+                            break 'wide;
+                        }
                     }
                 }
             }

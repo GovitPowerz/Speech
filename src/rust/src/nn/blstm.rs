@@ -33,13 +33,25 @@
 //! `_OutputNetwork.getInputSize()` in MLP mode. `getNbOfWeights` (`:227-238`) is
 //! the sum of the sub-network weight counts plus `2*inputSize`.
 //!
-//! DEVIATION from the legacy tolerance (documented per the task brief): the
-//! legacy accepts `flat.len() > nb_of_weights()` with a warning and still calls
-//! `setWeights` (consuming only the head); we reproduce that exact behavior
-//! (`set_weights` proceeds on a longer slice, ignoring the tail) but callers that
-//! want the legacy's console warning must check `flat.len()` themselves --
-//! `set_weights` does not print. `flat.len() < nb_of_weights()` is the legacy
-//! `exit(1)` error path, ported as `Err` (not a process exit).
+//! WHERE THE LENGTH TOLERANCE LIVES (interstitial, phase 11 -- this paragraph
+//! REPLACES the original port's, which had it in the wrong place). The legacy's
+//! `setWeights` (`:209-225`) carries NO length logic at all: it head-eats through
+//! the sub-networks and reads the normalize tail off whatever is left. The
+//! three-way length decision lives ONE level up, in the ctor's `_weightsFile`
+//! branch (`:141-149`): SHORT -> `exit(1)`; LONG -> a console WARNING and
+//! `setWeights` anyway (head-first); EXACT -> `setWeights`.
+//!
+//! The original port hoisted that branch's over-long tolerance INTO
+//! [`BlstmNetwork::set_weights`], which widened it to seams the legacy never had one
+//! on -- `speech_rs.Engine.set_weights`, `BagOfProcessors::set_weights`, and the
+//! `from_legacy(map, Some(flat))` driver ctors -- so a pack of the WRONG
+//! ARCHITECTURE loaded head-first and RAN, silently, with no console warning
+//! anywhere to notice it by. That is now closed by putting the check back where the
+//! legacy has it:
+//! - [`BlstmNetwork::set_weights`] demands the EXACT length in both directions.
+//! - [`BlstmNetwork::load_weights_file`] keeps the legacy's documented tolerance,
+//!   applies it EXPLICITLY (it slices the head itself), and restores the `:145`
+//!   warning the original port elided.
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -138,6 +150,9 @@ pub enum CellType {
     Mamba,
     /// The closed-form continuous-time cell (phase-10 spec S1; Phase 10 Task 1).
     Cfc,
+    /// The windowed causal attention block with ALiBi positions (phase-11 spec S1;
+    /// Phase 11 Task 2).
+    Transformer,
 }
 
 impl CellType {
@@ -147,9 +162,11 @@ impl CellType {
             "slstm" => Ok(CellType::Slstm),
             "mamba" => Ok(CellType::Mamba),
             "cfc" => Ok(CellType::Cfc),
-            other => {
-                bail!("unknown cell type '{other}' (expected 'lstm', 'slstm', 'mamba' or 'cfc')")
-            }
+            "transformer" => Ok(CellType::Transformer),
+            other => bail!(
+                "unknown cell type '{other}' (expected 'lstm', 'slstm', 'mamba', 'cfc' or \
+                 'transformer')"
+            ),
         }
     }
 
@@ -161,6 +178,7 @@ impl CellType {
             CellType::Slstm => "slstm",
             CellType::Mamba => "mamba",
             CellType::Cfc => "cfc",
+            CellType::Transformer => "transformer",
         }
     }
 }
@@ -333,6 +351,114 @@ impl CfcParams {
     }
 }
 
+/// Transformer geometry (port-only, NO legacy source; phase-11 spec S1/S2). Read from
+/// the UNPREFIXED flat keys `Transformer_Window` / `Transformer_Heads` /
+/// `Transformer_D_Ff` -- deliberately NOT `{prefix}_`-scoped, the [`MambaParams`] /
+/// [`CfcParams`] precedent verbatim: ONE transformer geometry per config, shared by
+/// whichever net(s) select `transformer` (a per-net override is an explicit non-goal).
+///
+/// `window` is `W` in CELL rows (post-subsampling), i.e. the number of frames the cell
+/// itself sees, not raw audio frames. All three must be `>= 1`; absent keys mean the
+/// defaults, so a config that never says `transformer` is untouched.
+///
+/// `H % heads == 0` is NOT checked here -- this struct never sees `H`. It is validated
+/// in [`BlstmConfig::from_legacy`] (which has the recurrent layer widths) as a typed
+/// error, and re-asserted as a last-resort panic in
+/// [`TransformerLayer::new`](super::cells::TransformerLayer::new) for direct
+/// construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformerParams {
+    pub window: usize,
+    pub heads: usize,
+    pub d_ff: usize,
+}
+
+/// The default attention window `W` in CELL rows (phase-11 spec S2).
+pub const TRANSFORMER_DEFAULT_WINDOW: usize = 64;
+
+/// The default head count `A` (phase-11 spec S2). PARAM-FREE: `A` only reshapes the
+/// same `W_qkv`, and ALiBi's slopes carry no weights, so changing it never moves the
+/// pack length -- only the per-head width `d = H/A` and the slope ladder.
+pub const TRANSFORMER_DEFAULT_HEADS: usize = 4;
+
+/// The default FFN width `d_ff` (phase-11 spec S2/S3) -- the ONE sized constant of this
+/// cell, since heads and window are parameter-free.
+///
+/// SETTLED by Task 3's sizing (S3), which re-derived both closed forms from
+/// [`TransformerLayer::nb_of_weights`](super::cells::TransformerLayer) and CONFIRMED the
+/// spec's design-time estimate: full-net packs are `13871 + 196*d_ff` (v2 lineage,
+/// `LSTMNeuronNb 11,24,24`, LSTM pack 24431) and `16199 + 196*d_ff` (v1, `23,24,24`, LSTM
+/// pack 33671), bidirectional. The +-15% bands are `d_ff in [36, 72]` (v2) and
+/// `[64, 114]` (v1), so `64` is the SMALLEST integer inside BOTH (v2 +8.12%, v1 -14.64%;
+/// 63 is out at v1 -15.22%) and simultaneously the v2-best point of the intersection.
+///
+/// THE ONE CONFLICT, recorded rather than smoothed over: unlike CfC -- where `B = 45` was
+/// the v2 argmin AND the smallest v1-tolerable integer at once -- the v2 argmin here is
+/// `54` and it sits OUTSIDE v1's band (-20.46%). The spec's primary rule (an integer
+/// inside BOTH bands) is satisfiable, so it decides, and the v2 tiebreak applied WITHIN
+/// the feasible set agrees on the same 64.
+///
+/// THE CONFLICT IS AN ARTEFACT OF COUNTING DEAD WEIGHT, which is worth knowing before
+/// anyone re-opens it: subtract v1's structurally-dead layer-0 `W_a` columns
+/// (`2*24*48 = 2304`, the 2015 dead-input-column defect this cell inherits like every
+/// other) and each lineage's normalize tail, and BOTH lineages have the SAME live closed
+/// form `13849 + 196*d_ff` against the SAME live LSTM target `24409` -- so at `d_ff = 64`
+/// both are IDENTICALLY 26393 live weights, `+8.13%`. The phase-10 live-count identity
+/// extends to the transformer intact. Under a live-count band there is no conflict at all
+/// (one band `[36, 72]`, one argmin 54); PACK LENGTH is the repo's stated convention, so
+/// it is what the default is sized against, and the two conventions agree at 64 anyway.
+///
+/// The finding worth stating, in the right direction: windowed attention at width 24 is
+/// parameter-CHEAP next to a peephole LSTM. At the textbook `4*H = 96` the v2 pack is
+/// 32687 (+33.79%, outside v2's band) while v1 is +3.99% and inside its own -- the
+/// textbook default fails exactly one lineage. 64 therefore lands well above the naive
+/// "small cell -> small FFN" instinct but comfortably BELOW the transformer-literature
+/// default.
+///
+/// The full table is in `tests/test_phase11_init.py`'s docstring; the Python mirror is
+/// `config_bridge.TRANSFORMER_DEFAULT_D_FF` (pinned against THIS line by
+/// `test_the_rust_and_python_defaults_agree`).
+pub const TRANSFORMER_DEFAULT_D_FF: usize = 64;
+
+impl Default for TransformerParams {
+    fn default() -> TransformerParams {
+        TransformerParams {
+            window: TRANSFORMER_DEFAULT_WINDOW,
+            heads: TRANSFORMER_DEFAULT_HEADS,
+            d_ff: TRANSFORMER_DEFAULT_D_FF,
+        }
+    }
+}
+
+impl TransformerParams {
+    /// Read the three keys. A present-but-unparseable or `< 1` value is a HARD error,
+    /// for exactly [`MambaParams::from_legacy`]'s reason: these keys have no legacy
+    /// source to stay bug-compatible with, and a silently-defaulted geometry would
+    /// change the weight-pack LENGTH (`d_ff`) or the attention span (`window`) without
+    /// telling anyone.
+    fn from_legacy(map: &IndexMap<String, String>) -> Result<TransformerParams> {
+        let d = TransformerParams::default();
+        let read = |key: &str, default: usize| -> Result<usize> {
+            let v = match map.get(key) {
+                Some(s) => s
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|e| anyhow::anyhow!("cannot read '{s}' as a size for '{key}': {e}"))?,
+                None => return Ok(default),
+            };
+            if v < 1 {
+                bail!("'{key}' must be >= 1 (got {v})");
+            }
+            Ok(v)
+        };
+        Ok(TransformerParams {
+            window: read("Transformer_Window", d.window)?,
+            heads: read("Transformer_Heads", d.heads)?,
+            d_ff: read("Transformer_D_Ff", d.d_ff)?,
+        })
+    }
+}
+
 /// Parsed BLSTM config (`BLSTMNeuralNetwork.cpp:26-122`): LSTM/output topology,
 /// per-direction peephole flags, and the scalar knobs read at construction.
 #[derive(Debug, Clone)]
@@ -369,6 +495,9 @@ pub struct BlstmConfig {
     /// The `Cfc_*` geometry (port-only, phase-10 spec S1.4/S2), read UNPREFIXED and
     /// inert unless [`Self::cell_type`] is [`CellType::Cfc`].
     pub cfc: CfcParams,
+    /// The `Transformer_*` geometry (port-only, phase-11 spec S1/S2), read UNPREFIXED
+    /// and inert unless [`Self::cell_type`] is [`CellType::Transformer`].
+    pub transformer: TransformerParams,
 }
 
 impl BlstmConfig {
@@ -393,6 +522,10 @@ impl BlstmConfig {
         // Same posture as `mamba` above: UNPREFIXED, read unconditionally so a
         // malformed value is caught even on a non-cfc config, inert otherwise.
         let cfc = CfcParams::from_legacy(map)?;
+        // Same posture again (phase-11 spec S2). The `H % heads` half of the validation
+        // cannot live in the reader (it never sees `H`) and is done below, once the
+        // recurrent widths are parsed.
+        let transformer = TransformerParams::from_legacy(map)?;
 
         let lstm_neuron_nb = get_list(map, &k("_LSTMNeuronNb"))?;
         if lstm_neuron_nb.len() < 2 {
@@ -435,6 +568,27 @@ impl BlstmConfig {
 
         let is_mlp = lstm_neuron_nb[0] == 0;
 
+        // Phase-11 spec S2: `H % A == 0`, checked HERE because this is the first place
+        // that knows both numbers. Every recurrent layer's OUTPUT width is a cell width
+        // (`Network::new` builds layer `jj` at `neuron_nb[jj+1]`), so all of them are
+        // checked, not just the last. A typed error beats the last-resort panic inside
+        // `TransformerLayer::new`, and a non-dividing head count is a configuration
+        // error rather than something to truncate. DEAD on every non-transformer config.
+        if cell_type == CellType::Transformer && !is_mlp {
+            for (jj, &width) in lstm_neuron_nb.iter().enumerate().skip(1) {
+                if !width.is_multiple_of(transformer.heads) {
+                    bail!(
+                        "recurrent layer {} has {width} cells, which is not divisible by \
+                         'Transformer_Heads' ({}) -- pick a head count that divides every \
+                         '{}_LSTMNeuronNb' entry",
+                        jj - 1,
+                        transformer.heads,
+                        prefix
+                    );
+                }
+            }
+        }
+
         // Peephole flags: read regardless of is_mlp (harmless when the forward/
         // backward nets are absent -- the legacy reads them via the LSTMLayer
         // ctor, which is simply never instantiated in MLP mode).
@@ -474,6 +628,7 @@ impl BlstmConfig {
             direction,
             mamba,
             cfc,
+            transformer,
         })
     }
 }
@@ -548,6 +703,7 @@ impl BlstmNetwork {
             let cell_type = cfg.cell_type;
             let mamba = cfg.mamba;
             let cfc = cfg.cfc;
+            let transformer = cfg.transformer;
             // One builder per direction; the cell dispatch is inside so both stacks
             // stay structurally identical. The `match cell_type` below is EXHAUSTIVE
             // and that is what forces a new `CellType` variant to be handled here --
@@ -583,6 +739,14 @@ impl BlstmNetwork {
                         cfc.backbone_units,
                         cfc.backbone_layers,
                     )),
+                    // `output` IS the block width H (phase-11 S1.1); the window, head
+                    // count and FFN width are the cell's own business.
+                    // `BlstmConfig::from_legacy` has already proved `output % heads == 0`
+                    // for every recurrent layer, so the cell's own assert is unreachable
+                    // from this path.
+                    CellType::Transformer => CellLayer::Transformer(
+                        super::cells::TransformerLayer::new(input, output, &transformer),
+                    ),
                 }
             };
             let forward = Network::new(
@@ -813,16 +977,34 @@ impl BlstmNetwork {
 
     /// `setWeights` (`:209-224`): Forward -> Backward -> Output -> mean -> std, in
     /// that order, MLP mode skipping the Forward/Backward step and
-    /// [`Direction::Forward`] skipping the Backward step alone (spec S1.2). Legacy
-    /// tolerance:
-    /// `flat.len() < nb_of_weights()` is an error (`exit(1)` there, `Err` here);
-    /// `flat.len() > nb_of_weights()` is accepted (warning-only there, silently
-    /// accepted here) and only the head is consumed.
+    /// [`Direction::Forward`] skipping the Backward step alone (spec S1.2).
+    ///
+    /// EXACT-LENGTH CONTRACT (interstitial, phase 11): `flat.len()` must EQUAL
+    /// [`Self::nb_of_weights`] -- net blocks PLUS the `2*input_size` normalize tail --
+    /// and any other length is a typed `Err` naming both numbers. The legacy
+    /// `setWeights` has no length check of its own (the three-way decision is the
+    /// ctor's `_weightsFile` branch, `:141-149`), and its own callers always satisfy
+    /// this: `updateWeights` (`:303-310`) hands back `getWeights()`. Accepting an
+    /// over-long pack HERE is what let a wrong-architecture `.bin` load head-first
+    /// through the seam and run silently (phase-11 T3 concern 2: 33671 elements into
+    /// a 28743-weight transformer net, 4928 dropped without a word). The file-load
+    /// path keeps the legacy tolerance -- see [`Self::load_weights_file`].
+    ///
+    /// The guard runs BEFORE any sub-network consumes its head, so a refusal leaves
+    /// the net untouched rather than half-written (pinned by
+    /// `tests/set_weights_length_guard.rs`).
     pub fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
         let needed = self.nb_of_weights();
-        if flat.len() < needed {
+        if flat.len() != needed {
+            // The short arm's wording is the original one, byte for byte; the long arm
+            // mirrors it, so both name both numbers and read the same way.
+            let (side, op) = if flat.len() < needed {
+                ("less", '<')
+            } else {
+                ("more", '>')
+            };
             bail!(
-                "The number of gains given is less than what's needed ({} < {needed}).",
+                "The number of gains given is {side} than what's needed ({} {op} {needed}).",
                 flat.len()
             );
         }
@@ -973,8 +1155,9 @@ impl BlstmNetwork {
             norm[j] = weights_derivatives[[j, 0]] / weights_derivatives[[j, 1]]; // :306
         }
         self.trainer.update_weights(&norm, &mut weights, cost); // :307
-        // `set_weights` returns Err only when the vector is too short; `get_weights`
-        // produced exactly `nb_of_weights()` elements, so this cannot fail.
+        // `set_weights` demands the EXACT length; `get_weights` produced exactly
+        // `nb_of_weights()` elements and `Rprop::update_weights` mutates a slice in
+        // place (it cannot resize), so this cannot fail.
         self.set_weights(&weights).unwrap(); // :308
     }
 
@@ -1075,8 +1258,18 @@ impl BlstmNetwork {
     /// against `getNbOfWeights()`: fewer than needed is the legacy `exit(1)` error
     /// (`:141-143`, ported as `Err`); more than needed prints a warning and STILL
     /// calls `setWeights` (which consumes only the head, `:144-146`); an exact match
-    /// calls `setWeights` (`:147-148`). The too-many warning is elided (no console
-    /// side-effect here); `set_weights` already tolerates the over-long slice.
+    /// calls `setWeights` (`:147-148`).
+    ///
+    /// THIS IS THE ONE SITE THAT TOLERATES AN OVER-LONG PACK, and it does so because
+    /// the legacy does (interstitial, phase 11 -- [`Self::set_weights`] no longer
+    /// does). Two things changed here, neither of them behaviour: the head is sliced
+    /// EXPLICITLY (`&flat[..needed]`), so the tolerance is stated at the site that
+    /// owns it instead of being inherited from a permissive callee; and the legacy's
+    /// `:145` warning, which the original port elided, is restored. It goes to
+    /// STDERR, not the legacy's `cout`, because this port's stdout carries
+    /// machine-parsed protocol lines (`BENCH`/`SEG`/`UTT`) -- the same
+    /// `eprintln!`-mirrors-a-legacy-`cout`-warning precedent as
+    /// `engine/corpus_processor.rs:214`.
     pub fn load_weights_file(
         &mut self,
         map: &IndexMap<String, String>,
@@ -1098,8 +1291,17 @@ impl BlstmNetwork {
                 flat.len()
             );
         }
-        // :144-148 too-many (warning + setWeights head) and exact both setWeights.
-        self.set_weights(&flat)
+        // :144-146 too-many: warn, then set from the HEAD only.
+        if flat.len() > needed {
+            eprintln!(
+                "Warning: The number of gains given in {weights_file} is more than what's needed \
+                 ({} > {needed}); the extra {} are ignored.",
+                flat.len(),
+                flat.len() - needed
+            );
+        }
+        // :144-148 too-many (head) and exact both setWeights.
+        self.set_weights(&flat[..needed])
     }
 
     /// `analyseInputSeq` (`BLSTMNeuralNetwork.cpp:385-417`): fold the input's per-dim
@@ -2820,6 +3022,13 @@ mod inference_only_tests {
         if cell != "lstm" {
             m.insert("X_Cell_Type".into(), cell.into());
         }
+        if cell == "transformer" {
+            // `Transformer_Heads` is UNPREFIXED (one geometry per config, the Mamba/CfC
+            // precedent) and the sized default (4) does not divide `HIDDEN = 2`, which
+            // would trip `TransformerLayer::new`'s head-count panic. `1` divides ANY
+            // `HIDDEN`, so this stays correct even if that constant changes later.
+            m.insert("Transformer_Heads".into(), "1".into());
+        }
         m
     }
 
@@ -2856,11 +3065,21 @@ mod inference_only_tests {
         }
     }
 
+    /// The transformer stack's layer-0 cell, same seam (phase-11 spec S7, Task 8's fix
+    /// round). `attn_weights` is the field the retention shrink targets, so its row count
+    /// is the direct memory-claim witness -- `0` inference-only, `T` retaining.
+    fn transformer_cache_rows(net: &mut BlstmNetwork) -> usize {
+        match &net.forward_network.as_mut().unwrap().layers_mut()[0] {
+            CellLayer::Transformer(l) => l.attn_weights().nrows(),
+            _ => panic!("expected a transformer cell, got a different CellLayer variant"),
+        }
+    }
+
     /// THE CONDITION, both ways: `BackPropagationActivated` alone decides, at
     /// construction, for every cell.
     #[test]
     fn backprop_off_constructs_inference_only_and_on_does_not() {
-        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+        for cell in ["lstm", "slstm", "mamba", "cfc", "transformer"] {
             assert!(
                 net_for(cell, false).is_inference_only(),
                 "{cell}: backprop off must construct inference-only"
@@ -2903,12 +3122,38 @@ mod inference_only_tests {
         }
     }
 
+    /// THE TRANSFORMER TWIN (phase-11 spec S7, Task 8's fix round): same claim, driven
+    /// through `net_for("transformer", ..)` instead of going straight to
+    /// `TransformerLayer::set_retain_cache` on a bare cell -- so a regression in
+    /// `CellLayer::set_retain_cache`'s transformer arm (the enum match this test actually
+    /// exercises) fails HERE, not just in `nn::cells::transformer`'s own suite, which never
+    /// touches the enum at all. Bidirectional by construction (`map_for` sets no
+    /// `X_Direction`), so this is also the first leg anywhere to run
+    /// `TransformerLayer::feed_forward_reverse` with retention off.
+    #[test]
+    fn the_flag_reaches_every_stack_and_the_cells_transformer() {
+        let mut net = net_for("transformer", false);
+        assert!(!net.output_network.retains_layers_output());
+        for stack in [net.forward_network.as_mut(), net.backward_network.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            assert!(!stack.retains_layers_output());
+            for cell in stack.layers_mut() {
+                match cell {
+                    CellLayer::Transformer(l) => assert!(!l.retains_cache()),
+                    _ => panic!("expected a transformer cell, got a different CellLayer variant"),
+                }
+            }
+        }
+    }
+
     /// THE BEHAVIOUR-FREE CLAIM at net level: the scoring forward is bit-for-bit the same
     /// whichever way the flag sits. Driven per cell so a future cell that grows its own
     /// cache is covered the day it is wired.
     #[test]
     fn the_forward_is_bit_identical_either_way() {
-        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+        for cell in ["lstm", "slstm", "mamba", "cfc", "transformer"] {
             let mut lean = net_for(cell, false);
             let mut keeper = net_for(cell, false);
             keeper.set_inference_only(false);
@@ -2939,6 +3184,22 @@ mod inference_only_tests {
         assert_eq!(mamba_cache_rows(&mut keeper), T);
     }
 
+    /// THE TRANSFORMER TWIN (phase-11 spec S7, Task 8's fix round), through
+    /// `attn_weights` rather than `hidden_states` -- the field this task's shrink
+    /// targets, so its row count is the direct memory-claim witness through the enum.
+    #[test]
+    fn an_inference_only_net_leaves_the_transformer_cache_empty() {
+        let mut lean = net_for("transformer", false);
+        let mut out = Array2::<f64>::zeros((T, CLASSES));
+        lean.feed_forward(&input_seq(), &mut out);
+        assert_eq!(transformer_cache_rows(&mut lean), 0);
+
+        let mut keeper = net_for("transformer", true);
+        let mut out2 = Array2::<f64>::zeros((T, CLASSES));
+        keeper.feed_forward(&input_seq(), &mut out2);
+        assert_eq!(transformer_cache_rows(&mut keeper), T);
+    }
+
     /// THE R6 CLONE NOTE (spec S7) at net level: `corpus_processor`'s static-lane fold
     /// clones the whole bag -- and so this net -- at every epoch start. Under
     /// inference-only the clone carries no cache to copy, with the retaining twin as the
@@ -2962,7 +3223,7 @@ mod inference_only_tests {
     /// in `tests/pyo3/test_phase9_seam.py` is the same assertion one level up.
     #[test]
     fn a_backprop_on_net_still_folds_a_real_gradient() {
-        for cell in ["lstm", "slstm", "mamba", "cfc"] {
+        for cell in ["lstm", "slstm", "mamba", "cfc", "transformer"] {
             let mut net = net_for(cell, true);
             let mut out = Array2::<f64>::zeros((T, CLASSES));
             net.feed_forward_backward(&mut input_seq(), 0, 0, &mut out, &one_hot());
