@@ -64,7 +64,7 @@ uv run maturin develop --release --manifest-path src/rust/speech-py/Cargo.toml
 uv sync --group dev
 
 # Train a SAD net from scratch (needs the local corpus; every size derives from the config)
-uv run speech baseline sad-v2 --cell-type cfc --direction forward --corpus-root <corpus> --out-dir runs/cfc_fwd
+uv run python -m speech.drivers.baseline sad-v2 --cell-type cfc --direction forward --corpus-root <corpus> --out-dir runs/cfc_fwd
 
 # Run tests
 cd src/rust && cargo test && cd ../..
