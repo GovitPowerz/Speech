@@ -45,7 +45,9 @@ output/*
 *~
 
 # === Claude Code ===
-.claude/
+# settings.json is the shared agent permission policy (DEVELOPMENT.md quotes its deny list); the rest is per-user.
+.claude/*
+!.claude/settings.json
 .superpowers/
 
 # Phase 6: local corpora + scoring toolkits (never committed - gigabytes of licensed LDC audio)
