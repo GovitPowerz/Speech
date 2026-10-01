@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Speech: a speech activity detection and spoken language identification engine, with its training loop"
+authors:
+  - family-names: Gelly
+    given-names: "Grégory"
+    email: gregory.gelly@gmail.com
+version: 0.1.0
+date-released: 2026-10-01
+repository-code: "https://github.com/GovitPowerz/Speech"
+license: Apache-2.0
+keywords:
+  - speech activity detection
+  - spoken language identification
+  - recurrent neural networks
+  - streaming inference
+  - numerical parity
+  - Rust
+  - PyO3

@@ -3,6 +3,8 @@ name = "speech-py"
 version = "0.1.0"
 edition = "2024"
 description = "PyO3 bindings for the speech engine"
+license = "Apache-2.0"
+repository = "https://github.com/GovitPowerz/Speech"
 
 [lib]
 name = "speech_rs"
