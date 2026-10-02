@@ -1,4 +1,4 @@
-# Canonical TOML training config for the Phase 10 SAD v2 lineage (`speech baseline sad-v2`).
+# Canonical TOML training config for the Phase 10 SAD v2 lineage (`python -m speech.drivers.baseline sad-v2`).
 #
 # THE LINEAGE RELATIONSHIP (design spec S3.1): this file is `lre_sad.toml` (v1)
 # BYTE-FOR-BYTE except for TWO values and these headers --

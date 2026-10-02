@@ -1,60 +1,53 @@
-"""The commands the live documents tell a reader to run exist and parse (issue #30).
+"""The commands the live documents tell a reader to run exist, parse and run (issue #30).
 
-RESULTS.md and the module READMEs named a `speech baseline` subcommand for three phases; the Rust
-binary `speech` has `bench`, `stream` and `stream-lid` only, and no Python console script is
-installed. The working entry is `python -m speech.drivers.baseline`. The first test keeps the stale
-spelling out of every live document; the second feeds each RESULTS.md launcher recipe through the
-real parser, so a recipe that names a flag the parser does not have fails here, not on the reader.
-The dated specs and plans under docs/superpowers/ are historical records and are not scanned.
+RESULTS.md and the module READMEs named a `speech` subcommand `baseline` for three phases; the
+Rust binary `speech` has `bench`, `stream` and `stream-lid` only, and no Python console script is
+installed. The working entries are `python -m speech.drivers.baseline` and `python -m speech.cli`.
+The first test keeps the stale spelling out of every tracked text file (the dated specs and plans
+under docs/superpowers/ are historical records and are not scanned); the second feeds each
+RESULTS.md and README.md launcher recipe through the real parser and checks its output directory
+is gitignored; the third runs both module entries, since a module without a `__main__` guard
+imports and exits 0 without doing anything.
 """
 
 import re
 import shlex
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 from speech.drivers import baseline as B
 
+from tests.test_license_hygiene import tracked_text_files
+
 REPO = Path(__file__).resolve().parents[1]
-LIVE_DOCS = (
-    "README.md",
-    "RESULTS.md",
-    "CLAUDE.md",
-    "DEVELOPMENT.md",
-    "CONTEXT.md",
-    "docs/ROADMAP.md",
-    "docs/ARCHITECTURE.md",
-    "docs/validation.md",
-    "src/rust/README.md",
-    "src/python/speech/README.md",
-)
 LAUNCHER = "uv run python -m speech.drivers.baseline "
+# The removed launcher, not the prose "all-non-speech baseline".
+STALE = re.compile(r"(?<![\w-])speech baseline\b")
 
 
-def results_md_recipes() -> list[list[str]]:
-    """Every fenced launcher command in RESULTS.md, backslash continuations joined, as argv."""
-    lines = (REPO / "RESULTS.md").read_text(encoding="utf-8").splitlines()
-    recipes: list[list[str]] = []
-    i = 0
-    while i < len(lines):
-        if lines[i].startswith(LAUNCHER):
-            cmd = lines[i]
-            while cmd.rstrip().endswith("\\"):
-                i += 1
-                cmd = cmd.rstrip()[:-1] + " " + lines[i].strip()
-            recipes.append(shlex.split(cmd[len(LAUNCHER) :]))
-        i += 1
-    return recipes
-
-
-def test_no_live_document_names_the_stale_launcher() -> None:
-    stale = re.compile(r"\bspeech baseline\b")
-    hits = [f"{doc}:{n}" for doc in LIVE_DOCS for n, line in enumerate((REPO / doc).read_text(encoding="utf-8").splitlines(), 1) if stale.search(line)]
+def test_no_tracked_file_names_the_stale_launcher() -> None:
+    historical, this_file = REPO / "docs" / "superpowers", Path(__file__).resolve()
+    scanned = [p for p in tracked_text_files(REPO) if not p.is_symlink() and not p.is_relative_to(historical) and p != this_file]
+    hits = [f"{p}:{n}" for p in scanned for n, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1) if STALE.search(line)]
     assert hits == []
 
 
-def test_results_md_launcher_recipes_parse() -> None:
-    recipes = results_md_recipes()
-    assert len(recipes) >= 5, recipes  # the three Phase 6 arms plus the per-cell recipes of later phases
+def test_launcher_recipes_parse_and_write_to_ignored_dirs() -> None:
+    recipes = [
+        shlex.split(line[len(LAUNCHER) :])
+        for doc in ("RESULTS.md", "README.md")
+        for line in (REPO / doc).read_text(encoding="utf-8").replace("\\\n", " ").splitlines()
+        if line.startswith(LAUNCHER)
+    ]
+    assert len(recipes) >= 7, recipes  # the six RESULTS.md recipes plus the README quick start
     for argv in recipes:
-        args = B.build_parser().parse_args(argv)
-        assert args.arm in B._ARM_CONFIGS
+        out_dir = B.build_parser().parse_args(argv).out_dir
+        assert subprocess.run(["git", "check-ignore", "-q", str(out_dir / "base.config")], cwd=REPO).returncode == 0, argv
+
+
+@pytest.mark.parametrize("module", ["speech.drivers.baseline", "speech.cli"])
+def test_module_entry_runs(module: str) -> None:
+    res = subprocess.run([sys.executable, "-m", module, "--help"], cwd=REPO, capture_output=True, text=True)
+    assert res.returncode == 0 and res.stdout.startswith("usage: ") and f"-m {module} " in res.stdout.splitlines()[0], res.stdout

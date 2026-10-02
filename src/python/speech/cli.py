@@ -2,7 +2,8 @@
 
 Ported from the legacy MATLAB run scripts (`Init_BLSTM.m` / `Train_BLSTM.m` /
 `ReTrain_BLSTM.m` / `Test_BLSTM.m`), which were separate top-level scripts; here they are
-`init`/`train`/`retrain`/`test` subcommands dispatching to `speech.drivers`.
+`init`/`train`/`retrain`/`test` subcommands dispatching to `speech.drivers`, plus the
+`baseline` arms (`uv run python -m speech.cli <subcommand> ...`).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from speech.drivers.train import train
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="speech", description="BLSTM SAD/LID optimizer orchestrator")
+    parser = argparse.ArgumentParser(description="BLSTM SAD/LID optimizer orchestrator")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="parse a config into a run state")
@@ -45,12 +46,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Dispatch to the init/train/retrain/test drivers. Returns a process exit code."""
+    """Dispatch to the init/train/retrain/test/baseline drivers. Returns a process exit code."""
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
-    except SystemExit:
-        return 2
+    except SystemExit as e:  # argparse's own code: 0 for --help, 2 for a usage error
+        return int(e.code or 0)
 
     if args.command == "init":
         init_run(args.config, args.out_dir)
@@ -73,3 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         evaluate(state, args.checkpoint)
         return 0
     return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

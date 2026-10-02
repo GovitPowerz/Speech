@@ -402,7 +402,7 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
     `window_size > 0` and dispatches the WINDOWED drivers -- and a window boundary RESETS the
     recurrent state, so a windowed causal run is defined-but-pointless (spec S1.2) and the
     streaming session refuses it outright (S5.3). Forcing window 0 here is what makes
-    `speech baseline sad --direction forward` train the regime the phase actually targets,
+    `python -m speech.drivers.baseline sad --direction forward` train the regime the phase actually targets,
     and it is also the regime the f32 fast twin implements (`fast::cells::FastCausalNet`) --
     so the exact and fast paths stay comparable arm-for-arm. Bidirectional runs are
     UNTOUCHED (they keep `frame_window`'s windowed overlap).
@@ -729,9 +729,9 @@ def run_baseline(
     subset: int | None = None,
     dry_run: bool = False,
     seed: int = 0,
-    epochs: int = 20,
+    epochs: int = 40,
     patience: int = 6,
-    steps_per_epoch: int = 25,
+    steps_per_epoch: int = 8,
     init_scheme: str = "xavier",
     lre_listing: Path | None = None,
     valid_size: int = 12,
@@ -839,6 +839,8 @@ def run_baseline(
         write_lre_mapping_12(out_dir / mapping_name)
         n_classes = len(_LANGS)
     console.log(f"split: train={len(train_rec)} valid={len(valid_rec)} test={len(test_rec)}")
+    if not train_rec:
+        raise ValueError(f"empty train split (valid={len(valid_rec)} test={len(test_rec)}): lower --valid-size/--test-size or raise --subset")
 
     # --- 2. training params + config assembly + seed packs -------------------------------
     # Built here (not down in step 4) so the seed-pack init is handed the SAME
@@ -851,7 +853,9 @@ def run_baseline(
         val_metric="nn_cost_seg",
         minibatch=minibatch,
         nb_classes=n_classes,
-        multilingual=minibatch > 0,
+        # NOT multilingual: that legacy layout reads class values 1..nb_classes-1 as targets and
+        # sends class nb_classes-1 to the aggregate slot's never-read `.index`, so the 0..11
+        # LID mapping would never draw class 11 into a batch.
         init_scheme=init_scheme,  # type: ignore[arg-type]
         init_seed=seed,
         resume_from=str(out_dir / "checkpoint") if resume else None,
@@ -890,6 +894,9 @@ def run_baseline(
             "patience": patience,
             "steps_per_epoch": steps_per_epoch,
             "minibatch": minibatch,
+            "valid_size": valid_size,
+            "test_size": test_size,
+            "score_init": score_init,
             "init_scheme": init_scheme,
             "val_metric": "nn_cost_seg",
             "audio_max_duration": audio_max_duration,
@@ -982,23 +989,37 @@ def run_baseline(
 # --------------------------------------------------------------------------------------- #
 
 
+def _count(text: str) -> int:
+    n = int(text)
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The `baseline <arm>` argument parser -- also mounted as the `baseline` subcommand in
     `speech.cli`. Unit-tested for arg wiring (no run)."""
-    parser = argparse.ArgumentParser(prog="baseline", description="Phase 6 from-scratch baseline training arms")
+    parser = argparse.ArgumentParser(description="Phase 6 from-scratch baseline training arms")
     parser.add_argument("arm", choices=sorted(_ARM_CONFIGS), help="the training arm")
     parser.add_argument("--corpus-root", type=Path, required=True, help="the LRE03/07 corpus root (data/LRE03-LRE07)")
     parser.add_argument("--out-dir", type=Path, required=True, help="run directory for listings/config/checkpoints/scores")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--lanes", type=int, default=1, help="engine numOuterThreads fold width (N=1 is the parity mode)")
-    parser.add_argument("--subset", type=int, default=None, help="stratified subset size (omit for the full corpus)")
+    parser.add_argument("--subset", type=_count, default=None, help="stratified subset size (omit for the full corpus)")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--patience", type=int, default=6)
     parser.add_argument("--steps-per-epoch", type=int, default=8)
     parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
-    parser.add_argument("--valid-size", type=int, default=12, help="held-out validation slice (files), disjoint from the train subset")
-    parser.add_argument("--test-size", type=int, default=48, help="held-out test slice (files) the final metric is scored on")
-    parser.add_argument("--minibatch", type=int, default=0, help="hard-example mini-batch size per evaluation (0 = the whole listing)")
+    parser.add_argument(
+        "--valid-size",
+        type=_count,
+        default=12,
+        help="held-out validation slice (files; LID allocates per language, min 1 each); a SAD 0 validates on the train listing",
+    )
+    parser.add_argument("--test-size", type=_count, default=48, help="held-out test slice (files; LID: min 1 per language) the final metric is scored on")
+    parser.add_argument(
+        "--minibatch", type=_count, default=0, help="training files drawn per SMORMS3 step, class-stratified round-robin (0 = the whole train listing)"
+    )
     parser.add_argument("--score-init", action="store_true", help="also score the from-scratch seed pack on the test slice (the init-baseline row)")
     parser.add_argument(
         "--cell-type",
@@ -1021,16 +1042,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_POSITIONAL_ARGS = frozenset({"arm", "corpus_root", "out_dir"})
-
-
 def run_baseline_from_args(args: argparse.Namespace) -> BaselineResult:
-    """Forward a `build_parser()` namespace to `run_baseline` by name. Every flag the parser
-    defines is a keyword, so an entry point cannot drop one silently (the `speech.cli` mount
-    dropped `--cell-type`/`--direction` for a phase, issue #28); a dest that is not a
-    `run_baseline` parameter fails here with a TypeError, and a unit test pins the alignment."""
-    kwargs = {name: value for name, value in vars(args).items() if name not in _POSITIONAL_ARGS}
-    return run_baseline(args.arm, args.corpus_root, args.out_dir, **kwargs)
+    """Forward a `build_parser()` namespace to `run_baseline`, every dest bound by name, so an
+    entry point cannot drop a flag silently (the `speech.cli` mount dropped `--cell-type`/
+    `--direction` for a phase, issue #28); a dest that is not a `run_baseline` parameter fails
+    here with a TypeError, and a unit test pins the alignment both ways."""
+    return run_baseline(**vars(args))
 
 
 def main(argv: list[str] | None = None) -> int:
