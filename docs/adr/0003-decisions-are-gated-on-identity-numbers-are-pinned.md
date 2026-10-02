@@ -19,7 +19,9 @@ exactly `0.0`): these are asserted equal. Any difference stops the work for adju
 test is never relaxed to a tolerance.
 
 **Numbers are measured, then pinned.** A posterior delta, a gradient-check residual, a benchmark
-budget: run the leg, record the measurement in the test and in `RESULTS.md`, and pin it at
+budget: run the leg, record the measurement in the test and in `RESULTS.md` (since
+[ADR-0009](0009-measurements-are-ledger-records.md), as a ledger record the table is rendered
+from), and pin it at
 **measured x 10** per shape. A pin is never widened to pass. When a legitimate change moves a
 measurement (one sanctioned re-measurement: the full-f32 mel in Phase 10), every affected pin is
 re-measured in one sweep and the old numbers are kept as superseded, not edited away. An

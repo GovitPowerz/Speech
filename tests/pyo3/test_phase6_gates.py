@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.conftest import CORPUS_ROOT, requires_corpus
+from tests.conftest import CORPUS_ROOT, GateRecorder, requires_corpus
 
 pytest.importorskip("speech_rs")
 
@@ -46,7 +46,7 @@ _CHANCE = 100.0 * (1.0 - 1.0 / 12.0)  # 12-way argmax chance error = 91.666...%
 
 @pytest.mark.slow
 @requires_corpus
-def test_lid_features_subset_trains_and_scores(tmp_path: Path) -> None:
+def test_lid_features_subset_trains_and_scores(tmp_path: Path, gate_record: GateRecorder) -> None:
     """Train the 12-class Twin from scratch on a stratified cep-features subset, then score a
     disjoint 48-file held-out slice end to end. Pins (measured 2026-07-18, seed 0):
     lid_error 72.92%, init 93.75%, cavg 0.46, train_cost 2.368 -> 2.216; ~282 s."""
@@ -84,6 +84,7 @@ def test_lid_features_subset_trains_and_scores(tmp_path: Path) -> None:
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_lid.bin").is_file() and (res.checkpoint_dir / "best_sad.bin").is_file()
     assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.scr"))) == res.n_test
+    gate_record(res)
 
 
 @pytest.mark.slow
@@ -139,7 +140,7 @@ def test_lid_features_dry_run_smoke(tmp_path: Path) -> None:
 
 @pytest.mark.slow
 @requires_corpus
-def test_sad_subset_trains_and_scores(tmp_path: Path) -> None:
+def test_sad_subset_trains_and_scores(tmp_path: Path, gate_record: GateRecorder) -> None:
     """Train algo-3 SAD from scratch on a 10-file subset (20 s cap), then score a disjoint
     24-file held-out slice END TO END via the T4 DCF harness. Pins (measured 2026-07-18, seed
     0, ~80 s): held-out DCF@0.5 trained 0.2500 (Pmiss 0.0 Pfa 1.0) vs init 0.7500 (Pmiss 1.0
@@ -181,6 +182,7 @@ def test_sad_subset_trains_and_scores(tmp_path: Path) -> None:
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_sad.bin").is_file() and (res.checkpoint_dir / "last_sad.bin").is_file()
     assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.xml"))) == res.n_test
+    gate_record(res)
 
 
 @pytest.mark.slow
@@ -256,7 +258,7 @@ def test_sad_dry_run_smoke(tmp_path: Path) -> None:
 
 @pytest.mark.slow
 @requires_corpus
-def test_lid_phseq_subset_trains_and_scores(tmp_path: Path) -> None:
+def test_lid_phseq_subset_trains_and_scores(tmp_path: Path, gate_record: GateRecorder) -> None:
     """Train the 12-class Twin (Mode 7, File_Type 1 phSeq) from scratch on a stratified subset,
     then score a disjoint held-out 45-file slice end to end. Pins (measured 2026-07-18, seed 0):
     lid_error 84.44%, init 91.11% (+6.67 pt), cavg 0.49, train_costs 2.41 -> 2.93 (ascending;
@@ -298,6 +300,7 @@ def test_lid_phseq_subset_trains_and_scores(tmp_path: Path) -> None:
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_lid.bin").is_file() and (res.checkpoint_dir / "best_sad.bin").is_file()
     assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.scr"))) == res.n_test
+    gate_record(res)
 
 
 @pytest.mark.slow

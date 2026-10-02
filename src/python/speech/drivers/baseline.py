@@ -89,6 +89,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from rich.console import Console
@@ -100,6 +101,8 @@ from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 from speech.init_weights import init_weights
+from speech.ledger.schema import BaselinePayload, BaselineRecipe, BaselineRecord, git_state, host_info, lineage_of, now_utc, seam_build_info, write_record
+from speech.ledger.schema import CollarScore as LedgerCollar
 from speech.weight_bridge import read_weight_vector, write_bin
 
 # The committed canonical TOML for each arm (relative to the repo root). Phase 6 Task 8
@@ -682,6 +685,64 @@ class BaselineResult:
     n_train: int = 0
     n_valid: int = 0
     n_test: int = 0
+    wall_s: float = 0.0
+
+    def to_record(self, source: Literal["launcher", "gate"], test: str | None = None) -> BaselineRecord:
+        """The run as a ledger record (issue #20): the recipe read back from `run_metadata.json`
+        (the values that actually ran, after any dry-run rewrite), the metrics from this result,
+        the provenance stamped now. `run_baseline` writes the `launcher` record into the run
+        directory; a subset gate overwrites it with `source="gate"` and its pytest node id."""
+        meta = json.loads(self.metadata_path.read_text())
+        recipe = BaselineRecipe(
+            arm=meta["arm"],
+            lineage=lineage_of(meta["config_toml"]),
+            cell=meta["cell_type"],
+            direction=meta["direction"],
+            subset=meta["subset"],
+            valid_size=meta["valid_size"],
+            test_size=meta["test_size"],
+            audio_max_duration=meta["audio_max_duration"],
+            epochs=meta["epochs"],
+            steps_per_epoch=meta["steps_per_epoch"],
+            patience=meta["patience"],
+            minibatch=meta["minibatch"],
+            init_scheme=meta["init_scheme"],
+            seed=meta["seed"],
+            lanes=meta["lanes"],
+        )
+        payload = BaselinePayload(
+            source=source,
+            test=test,
+            config_name=meta["config_toml"],
+            config_hash=meta["config_hash"],
+            n_train=self.n_train,
+            n_valid=self.n_valid,
+            n_test=self.n_test,
+            val_metric=meta["val_metric"],
+            epochs_run=self.epochs_run,
+            best_epoch=self.best_epoch,
+            wall_s=self.wall_s,
+            first_val_cost=_finite(self.first_val_cost),
+            best_val_cost=_finite(self.best_val_cost),
+            first_train_cost=_finite(self.train_costs[0]) if self.train_costs else None,
+            last_train_cost=_finite(self.train_costs[-1]) if self.train_costs else None,
+            dcf=_ledger_collars(self.dcf),
+            init_dcf=_ledger_collars(self.init_dcf),
+            lid_error=_finite(self.lid_error),
+            cavg=_finite(self.cavg),
+            init_lid_error=_finite(self.init_lid_error),
+            init_cavg=_finite(self.init_cavg),
+        )
+        sha, dirty = git_state()
+        return BaselineRecord(recorded_at=now_utc(), git_sha=sha, git_dirty=dirty, build=seam_build_info(), host=host_info(), recipe=recipe, payload=payload)
+
+
+def _finite(x: float | None) -> float | None:
+    return None if x is None or not np.isfinite(x) else float(x)
+
+
+def _ledger_collars(rep: DcfReport | None) -> list[LedgerCollar] | None:
+    return None if rep is None else [LedgerCollar(collar=s.collar, dcf=s.dcf, pmiss=s.pmiss, pfa=s.pfa) for s in rep.scores]
 
 
 def _prepare_sad_listings(
@@ -959,8 +1020,9 @@ def run_baseline(
             if init_err is not None and lid_err is not None:
                 console.log(f"init baseline: lid_error={init_err:.2f}% (improvement {init_err - lid_err:+.2f}pt)")
 
-    console.log(f"[green]done[/green] in {time.time() - t0:.1f}s")
-    return BaselineResult(
+    wall_s = time.time() - t0
+    console.log(f"[green]done[/green] in {wall_s:.1f}s")
+    result = BaselineResult(
         arm=arm,
         out_dir=out_dir,
         checkpoint_dir=ckpt,
@@ -981,7 +1043,11 @@ def run_baseline(
         n_train=len(train_rec),
         n_valid=len(valid_rec),
         n_test=len(test_rec),
+        wall_s=wall_s,
     )
+    # The promotable record (issue #20): `python -m speech.ledger add <out_dir>/record.json`.
+    write_record(result.to_record("launcher"), out_dir / "record.json")
+    return result
 
 
 # --------------------------------------------------------------------------------------- #

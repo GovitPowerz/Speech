@@ -154,16 +154,25 @@ pub struct BenchInvocation {
     pub config: String,
     pub repeat: usize,
     pub path: String,
+    /// `--json`: print one JSON document for the invocation (the ledger's
+    /// `bench` payload, issue #20) instead of the `BENCH` text lines.
+    pub json: bool,
+    /// `--label=NAME`: the measurement's name in the JSON document; defaults
+    /// to the config file's basename. A label is what identifies a bench
+    /// recipe in the ledger, where a config path (a tempdir) never may.
+    pub label: Option<String>,
 }
 
-/// Parse `speech bench [--repeat=N] [--path=exact|fast] <config>` (the `bench`
-/// literal itself already consumed by the caller). `--repeat` defaults to 1,
-/// `--path` defaults to `"exact"`; exactly one non-flag argument (the config
-/// path) is required.
+/// Parse `speech bench [--repeat=N] [--path=exact|fast] [--json] [--label=NAME]
+/// <config>` (the `bench` literal itself already consumed by the caller).
+/// `--repeat` defaults to 1, `--path` defaults to `"exact"`; exactly one
+/// non-flag argument (the config path) is required.
 pub fn parse_bench_args(args: &[String]) -> Result<BenchInvocation> {
     let mut repeat: usize = 1;
     let mut path = "exact".to_string();
     let mut config: Option<String> = None;
+    let mut json = false;
+    let mut label: Option<String> = None;
 
     for arg in args {
         if let Some(rest) = arg.strip_prefix("--repeat=") {
@@ -172,6 +181,13 @@ pub fn parse_bench_args(args: &[String]) -> Result<BenchInvocation> {
                 .map_err(|e| anyhow::anyhow!("invalid --repeat value '{rest}': {e}"))?;
         } else if let Some(rest) = arg.strip_prefix("--path=") {
             path = rest.to_string();
+        } else if arg == "--json" {
+            json = true;
+        } else if let Some(rest) = arg.strip_prefix("--label=") {
+            if rest.is_empty() {
+                bail!("--label requires a non-empty value");
+            }
+            label = Some(rest.to_string());
         } else if arg.starts_with("--") {
             bail!("unknown bench option: {arg}");
         } else if config.is_some() {
@@ -186,6 +202,8 @@ pub fn parse_bench_args(args: &[String]) -> Result<BenchInvocation> {
         config,
         repeat,
         path,
+        json,
+        label,
     })
 }
 

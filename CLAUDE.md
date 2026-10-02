@@ -16,9 +16,9 @@ The ultimate goal (user, 2026-07-10): a very efficient SAD + LID Rust binary in 
 |---|---|
 | How a run and a training step flow through the code | `docs/ARCHITECTURE.md` |
 | The vocabulary (and the synonyms to avoid) | `CONTEXT.md` |
-| The decisions that constrain new work | `docs/adr/` (8 ADRs) |
+| The decisions that constrain new work | `docs/adr/` (9 ADRs) |
 | What each phase delivered, proved, and left named | `docs/ROADMAP.md`; specs and plans indexed in `docs/superpowers/README.md` |
-| Every measured number, bench table, gate and mutation battery | `RESULTS.md` |
+| Every measured number, bench table, gate and mutation battery | `RESULTS.md`; its ledger-owned tables are rendered from `ledger/` (ADR-0009) |
 | Every reproduced legacy quirk, kept or fixed, and the fix protocol | `IMPROVEMENTS.md` |
 | The oracle tiers and the standing gates, in full | `docs/validation.md` |
 | Per-module responsibilities and legacy sources, row by row | `src/rust/README.md`, `src/python/speech/README.md` |
@@ -50,6 +50,12 @@ uv run pytest tests/test_smoke.py::test_package_imports -v
 ./lint_code.sh                     # ruff (imports, format, check) + mypy
 ./check_all.sh                     # Rust: test + fmt --check + clippy + release build
 ./upgrade_dependencies.sh          # uv sync --upgrade
+
+# -- Measurement ledger (ADR-0009) --
+uv run python -m speech.ledger add runs/<run>/record.json   # validate + promote a run's record, then render
+uv run python -m speech.ledger render --check               # RESULTS.md holds what ledger/ renders (CI)
+uv run pytest tests/pyo3/test_phase10_gates.py --ledger-stage /tmp/stage   # gates copy their records out of tmp_path
+./src/rust/target/release/speech bench --json --label=<name> --path=fast <config>   # the bench payload
 ```
 
 Suite sizes at the Phase 11 close: cargo 1283, pytest 896 non-slow (`uv run pytest tests -q -m "not slow"`), pyo3 203 (`uv run pytest tests/pyo3 -q`, corpus present, ~20 min).
@@ -109,6 +115,7 @@ Legacy bugs and oddities reproduced on purpose are tracked in **[IMPROVEMENTS.md
   - **Since Phase 8**: streaming is bit-equal to the offline run under the frozen norm, chunk-invariant, with zero retractions; the emission trigger is the CONSUMED frontier (never the received one) clamped by the last raw boundary and the hysteresis's `pending_begin`. Training and bidirectional streaming are out by construction (ADR-0004).
   - **Since Phase 9**: `CellLayer` is the extension seam -- a new cell is a variant, a `Layer` impl inside `cells/`, an `init_weights.py` builder, its `KEY_TABLE` rows and both f32 twins; a diff to `nn/` outside `cells/` must be justified against the touch classes. THE BATTERY LESSON: self-consistent legs (split-state, chunk-invariance, the streaming gate) compare two runs of ONE kernel and pin state threading only; parity legs own arithmetic only at their pin's resolution; a SYMMETRIC kernel substitution inside a shared step is owned by nothing but the design-time rule in that module's doc (per-step `dot_f32`, no batched projection inside a step), so review the rule (ADR-0005).
   - **Since Phase 10**: the (cell x direction) fast matrix is TOTAL (`classify_fast_shape` returns no `Result`; a kernel-less cell is a compile error at `cell_weight_count`). A new cell lands both twins, or a documented test-pinned bail, in the phase it lands its exact cell. Two SAD lineages, not interchangeable (ADR-0008).
+  - **Since the ledger (issue #20, ADR-0009)**: a measured number is a RECORD under `ledger/<kind>/<id>.json` (recipe = identity, SHA/build/host = provenance), promoted only through `python -m speech.ledger add` (schema + hygiene validator, no dirty tree without `--allow-dirty`, release builds only); the RESULTS.md tables between `<!-- ledger:table <name> -->` markers are RENDERED, never hand-edited (`render --check` in CI); a `TBD` row is filled by appending a record; supersession is append-only with a reason. The record is not the pin: pins stay in the tests. Historic numbers were re-run, not transcribed; a re-run metric that moves is a STOP.
 - **CI**: GitHub Actions (`.github/workflows/ci.yml`) -- Rust (fmt, clippy, test), Python (ruff lint, ruff format, mypy, pytest), and PyO3 (maturin build + targeted pytest) run on PRs to `main` and manual dispatch.
 
 ## Tone

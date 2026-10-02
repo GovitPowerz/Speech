@@ -289,3 +289,103 @@ fn bench_fast_not_slower_than_exact_ci_smoke() {
          (CI budget smoke -- a catastrophic fast-path regression, not a tight timing pin)"
     );
 }
+
+/// Issue #20: `--json --label=NAME` prints ONE document per invocation (the
+/// ledger's `bench` payload): the label, the path that ran, the repeat count,
+/// a config hash, the binary's build provenance and one entry per run, and
+/// NO `BENCH` text line. The label is what names a bench recipe in the
+/// ledger, so the staged tempdir path must appear nowhere in the document.
+#[test]
+fn bench_json_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = stage_bench_config(dir.path());
+    let cfg_name = cfg_path.file_name().unwrap().to_str().unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_speech"))
+        .current_dir(dir.path())
+        .args([
+            "bench",
+            "--repeat=2",
+            "--path=fast",
+            "--json",
+            "--label=phase7_60s",
+            cfg_name,
+        ])
+        .output()
+        .expect("failed to run speech binary");
+    assert!(
+        output.status.success(),
+        "speech bench --json exited non-zero: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        !stdout.contains("BENCH "),
+        "--json must replace the BENCH lines, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(dir.path().to_str().unwrap()),
+        "the staged directory must not leak into the document:\n{stdout}"
+    );
+
+    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("one JSON document");
+    assert_eq!(doc["label"], "phase7_60s");
+    assert_eq!(doc["path"], "fast");
+    assert_eq!(doc["repeat"], 2);
+    let hash = doc["config_hash"]
+        .as_str()
+        .expect("config_hash is a string");
+    assert_eq!(hash.len(), 16, "FNV-1a 64 as 16 hex chars, got {hash}");
+    assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(matches!(
+        doc["build"]["profile"].as_str(),
+        Some("debug" | "release")
+    ));
+    assert!(
+        doc["build"]["target"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty())
+    );
+    assert!(
+        doc["build"]["rustc"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("rustc "))
+    );
+
+    let runs = doc["runs"].as_array().expect("runs is an array");
+    assert_eq!(runs.len(), 2, "--repeat=2 gives two runs in one document");
+    for run in runs {
+        assert_eq!(run["path"], "fast");
+        assert!(run["wall_s"].as_f64().unwrap() > 0.0);
+        assert!((run["audio_s"].as_f64().unwrap() - 120.0).abs() < 1.2);
+        assert!(run["rtf"].as_f64().unwrap() > 0.0);
+        assert!(run["maxrss_mb"].as_f64().unwrap() > 1.0);
+        assert_eq!(run["files"], 1);
+    }
+}
+
+/// The bench arg grammar: `--json` is a bare flag, `--label=` needs a value,
+/// both default off, and the pre-existing flags still parse around them.
+#[test]
+fn bench_args_parse_json_and_label() {
+    use speech::cli::parse_bench_args;
+    let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+    let inv = parse_bench_args(&args(&["--repeat=3", "cfg.config"])).unwrap();
+    assert!(!inv.json && inv.label.is_none());
+
+    let inv = parse_bench_args(&args(&[
+        "--json",
+        "--label=phase7_60s",
+        "--path=fast",
+        "cfg.config",
+    ]))
+    .unwrap();
+    assert!(inv.json);
+    assert_eq!(inv.label.as_deref(), Some("phase7_60s"));
+    assert_eq!(inv.path, "fast");
+    assert_eq!(inv.repeat, 1);
+
+    assert!(parse_bench_args(&args(&["--label=", "cfg.config"])).is_err());
+    assert!(parse_bench_args(&args(&["--json=yes", "cfg.config"])).is_err());
+}

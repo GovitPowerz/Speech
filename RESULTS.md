@@ -88,11 +88,13 @@ machine); the `full run` rows are user-fired launcher outputs (post-phase).
 
 ### LID -- features regime (Algo 6, Mode 7, File_Type 2, 12-class, plain `plp8f0mvsdd`)
 
+<!-- ledger:table phase6_lid_features -->
 | split | files (train/valid/test) | LID error % | Cavg | chance % | config | seed |
 |---|---|---|---|---|---|---|
 | subset gate (2026-07-18, this box) | 35 / 15 / 48 | **72.92** | **0.46** | 91.67 | `lre03_lid_features.toml`, 2 ep x 25 steps | 0 |
 | subset gate -- untrained init baseline | (same test set) | 93.75 | 0.53 | 91.67 | (seed packs, no training) | 0 |
 | full run | TBD | TBD | TBD | 91.67 | `lre03_lid_features.toml` | TBD |
+<!-- ledger:end -->
 
 Subset-gate reading: the from-scratch 12-class LID net beats 12-way chance by 18.75 pt and
 its own untrained init by 20.83 pt on a disjoint 48-file held-out slice, deterministically,
@@ -121,11 +123,13 @@ duration-weighted, `_pool_dcf`); the 2015 `ComputeDCF.py` pooling convention is 
 no copy survives in the archive) -- confirming the port's micro-pooling matches it is a FULL-RUN-ERA
 verification item, deferred to when a launcher run produces numbers to compare.
 
+<!-- ledger:table phase6_sad_v1 -->
 | split | files (train/valid/test) | DCF@0 | DCF@0.25 | DCF@0.5 | DCF@1 | DCF@2 | Pmiss/Pfa @0.5 | config | seed |
 |---|---|---|---|---|---|---|---|---|---|
 | subset gate (2026-07-18, this box) | 10 / 8 / 24 | **0.2500** | **0.2500** | **0.2500** | **0.2500** | **0.2500** | 0.00 / 1.00 | `lre_sad.toml`, 3 ep x 10 steps, 20 s cap | 0 |
 | subset gate -- untrained init baseline | (same test set) | 0.7500 | 0.7500 | 0.7500 | 0.7500 | 0.7500 | 1.00 / 0.00 | (seed pack, no training) | 0 |
 | full run | TBD | TBD | TBD | TBD | TBD | TBD | TBD | `lre_sad.toml` | TBD |
+<!-- ledger:end -->
 
 Subset-gate reading (measured seed 0, ~80 s per run, run-twice bit-identical): the from-scratch
 SAD net moves the held-out DCF from the untrained init's **0.7500** to **0.2500** at every
@@ -160,11 +164,13 @@ listing's own language labels; they are usable for a fuller run via a RE-ANCHORE
 (pointing the `train`/`eval` anchor at `train/phSeq/`) instead of the 2-letter-prefix glob the
 subset gate uses -- a full-run-era option, unused by the committed glob arm.
 
+<!-- ledger:table phase6_lid_phseq -->
 | split | files (train/valid/test) | LID error % | Cavg | chance % | config | seed |
 |---|---|---|---|---|---|---|
 | subset gate (2026-07-18, this box) | 15 / 15 / 45 | **84.44** | **0.49** | 91.67 | `lre03_lid_phseq.toml`, 2 ep x 12 steps | 0 |
 | subset gate -- untrained init baseline | (same test set) | 91.11 | 0.48 | 91.67 | (seed packs, no training) | 0 |
 | full run | TBD | TBD | TBD | 91.67 | `lre03_lid_phseq.toml` | TBD |
+<!-- ledger:end -->
 
 Subset-gate reading (measured seed 0, ~193-232 s per run box-dependent -- the training portion
 is ~193 s, the full run_baseline call ~232 s; run-twice bit-identical): the from-scratch
@@ -800,6 +806,7 @@ baseline this section is measured against.
 
 #### The four gates -- HARD leg: trained held-out DCF beats own init
 
+<!-- ledger:table phase9_v1_cells -->
 | cell / direction | files (train/valid/test) | trained DCF (all 5 collars) | Pmiss / Pfa @0.5 | init DCF | gain | wall |
 |---|---|---|---|---|---|---|
 | sLSTM / bidirectional | 10 / 8 / 24 | **0.250000** | 0.000 / 1.000 | 0.750000 | **+0.500000** | 42 s |
@@ -808,6 +815,7 @@ baseline this section is measured against.
 | Mamba / forward (causal) | 10 / 8 / 24 | **0.249625** | 0.000 / 0.998498 | 0.750000 | **+0.500375** | 20 s |
 | *BLSTM / bidirectional (phase-6 Task 9, same recipe)* | *10 / 8 / 24* | *0.250000* | *0.000 / 1.000* | *0.750000* | *+0.500000* | *~80 s* |
 | full-corpus runs (all cells) | TBD | TBD | TBD | TBD | TBD | TBD |
+<!-- ledger:end -->
 
 All four HARD legs pass at every collar (0 / 0.25 / 0.5 / 1 / 2 s), deterministically:
 run-twice at a fixed seed gives bit-identical `best_sad.bin` / `last_sad.bin` bytes and an
@@ -1402,6 +1410,7 @@ Phase-6 SAD protocol VERBATIM (subset 10 / valid 8 / test 24, 3 epochs x 10 SMOR
 20 s audio cap, seed 0, `val_metric=nn_cost_seg`, end-to-end VRCTS-dump -> `evaluate.dcf`
 scoring). Only the cell, the direction and the LINEAGE differ from phase 9's four rows:
 
+<!-- ledger:table phase10_v2_cells -->
 | cell / direction | trained DCF@0.5 | Pmiss / Pfa @0.5 | trained collar range | init DCF@0.5 | init collar range | gain@0.5 | wall |
 |---|---|---|---|---|---|---|---|
 | LSTM / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 37 s |
@@ -1413,6 +1422,7 @@ scoring). Only the cell, the direction and the LINEAGE differ from phase 9's fou
 | CfC / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 33 s |
 | CfC / forward | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.750000 | 0.750000 (all 5) | **+0.500000** | 15 s |
 | full-corpus runs (any cell x direction) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+<!-- ledger:end -->
 
 8/8 HARD legs pass at every collar (0 / 0.25 / 0.5 / 1 / 2 s) on the FIRST run, and
 deterministically: run-twice at a fixed seed gives bit-identical `best_sad.bin` /
@@ -2679,10 +2689,12 @@ cleanly, and `test_init_is_trainable` confirms this cell is trainable at init.
 recorded in full below, not argued away -- but both rows now PASS under the ratified
 criterion (section below):
 
+<!-- ledger:table phase11_v2_cells -->
 | cell / direction | trained DCF@0.5 | Pmiss / Pfa @0.5 | trained collar range | init DCF@0.5 | init collar range | gain@0.5 | wall |
 |---|---|---|---|---|---|---|---|
 | Transformer / bidirectional | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.747406 | [0.747045, 0.748523] | **+0.497406** | 54 s |
 | Transformer / forward | **0.250000** | 0.000000 / 1.000000 | 0.250000 (all 5) | 0.455959 | [0.435836, 0.476457] | **+0.205959** | 19 s |
+<!-- ledger:end -->
 
 `transformer/forward`'s original-criterion breakdown: at collars 0.0/0.25/0.5 the
 trained-vs-init margin (0.226/0.216/0.206) clears the original pinned `>= 0.2`, but at

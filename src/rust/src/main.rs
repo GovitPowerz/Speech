@@ -45,7 +45,9 @@ fn main() {
             Ok(inv) => inv,
             Err(e) => {
                 eprintln!("Error: {e}\n");
-                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact|fast] config_file");
+                eprintln!(
+                    "Usage : {progname} bench [--repeat=N] [--path=exact|fast] [--json] [--label=NAME] config_file"
+                );
                 std::process::exit(2);
             }
         };
@@ -53,11 +55,17 @@ fn main() {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Error: {e}\n");
-                eprintln!("Usage : {progname} bench [--repeat=N] [--path=exact|fast] config_file");
+                eprintln!(
+                    "Usage : {progname} bench [--repeat=N] [--path=exact|fast] [--json] [--label=NAME] config_file"
+                );
                 std::process::exit(2);
             }
         };
-        let report = match speech::bench::run_bench(&[invocation.config], invocation.repeat, path) {
+        let report = match speech::bench::run_bench(
+            std::slice::from_ref(&invocation.config),
+            invocation.repeat,
+            path,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 // `{e:#}` (the full anyhow cause chain, the same convention
@@ -70,6 +78,22 @@ fn main() {
                 std::process::exit(1);
             }
         };
+        if invocation.json {
+            // One document per invocation: the ledger's `bench` payload
+            // (issue #20). The label defaults to the config's basename; a
+            // tempdir path must never leave the process (license hygiene).
+            let basename = std::path::Path::new(&invocation.config)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| invocation.config.clone());
+            let label = invocation.label.as_deref().unwrap_or(&basename);
+            let doc = report.document(label, path, invocation.repeat);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&doc).expect("bench document serializes")
+            );
+            return;
+        }
         for run in &report.runs {
             println!(
                 "BENCH path={} wall_s={:.6} audio_s={:.6} rtf={:.6} maxrss_mb={:.3} files={}",

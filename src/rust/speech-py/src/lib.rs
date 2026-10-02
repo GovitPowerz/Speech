@@ -38,6 +38,19 @@ fn version() -> String {
     speech::version().to_string()
 }
 
+/// Build provenance of this module (`profile`, `target`, `rustc`), baked in by
+/// the core crate's `build.rs`. The ledger (issue #20) stamps it on every
+/// record so a debug-profile number can be refused at promotion time.
+#[pyfunction]
+fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    let info = speech::build_info();
+    let d = PyDict::new(py);
+    d.set_item("profile", info.profile)?;
+    d.set_item("target", info.target)?;
+    d.set_item("rustc", info.rustc)?;
+    Ok(d)
+}
+
 /// Parse a legacy whitespace `.config` text into a `dict[str, str]` (last-wins,
 /// insertion order preserved). The Python mirror of the Rust
 /// `legacy_config::parse_legacy_config`.
@@ -400,6 +413,7 @@ impl StreamingLidSession {
 #[pymodule]
 fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(parse_legacy_config, m)?)?;
     m.add_function(wrap_pyfunction!(load_toml_config, m)?)?;
     m.add_class::<Engine>()?;

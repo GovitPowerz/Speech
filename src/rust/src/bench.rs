@@ -43,7 +43,8 @@ use crate::engine::corpus_processor::CorpusProcessor;
 /// (`as_str`) is exactly the `Inference_Path` config value `run_bench`
 /// overlays, so `BenchPath` and the engine's own dispatch key can never drift
 /// apart (one literal pair, `"exact"`/`"fast"`, used on both sides).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BenchPath {
     Exact,
     Fast,
@@ -69,7 +70,7 @@ impl BenchPath {
 }
 
 /// One measured run: one config, one repeat iteration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct BenchRun {
     pub path: BenchPath,
     pub wall_s: f64,
@@ -88,6 +89,46 @@ pub struct BenchRun {
 #[derive(Debug, Clone, Default)]
 pub struct BenchReport {
     pub runs: Vec<BenchRun>,
+    /// FNV-1a 64 over the raw bytes of every config file, in order: the
+    /// provenance of what ran (the ledger's `config_hash`), never its identity
+    /// (that is the label).
+    pub config_hash: String,
+}
+
+/// The `--json` document: one invocation, the ledger's `bench` payload (issue
+/// #20). `label` names the recipe; `build` is the binary's own provenance.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BenchDocument<'a> {
+    pub label: &'a str,
+    pub path: BenchPath,
+    pub repeat: usize,
+    pub config_hash: &'a str,
+    pub build: crate::BuildInfo,
+    pub runs: &'a [BenchRun],
+}
+
+impl BenchReport {
+    pub fn document<'a>(
+        &'a self,
+        label: &'a str,
+        path: BenchPath,
+        repeat: usize,
+    ) -> BenchDocument<'a> {
+        BenchDocument {
+            label,
+            path,
+            repeat: repeat.max(1),
+            config_hash: &self.config_hash,
+            build: crate::build_info(),
+            runs: &self.runs,
+        }
+    }
+}
+
+fn fnv1a64(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Sum of per-file processed audio duration (ALL channels) -- `min(file
@@ -176,8 +217,12 @@ fn maxrss_mb() -> f64 {
 pub fn run_bench(configs: &[String], repeat: usize, path: BenchPath) -> Result<BenchReport> {
     let repeat = repeat.max(1);
     let mut runs = Vec::with_capacity(configs.len() * repeat);
+    let mut config_hash: u64 = 0xcbf2_9ce4_8422_2325;
 
     for config_path in configs {
+        let bytes = std::fs::read(config_path)
+            .map_err(|e| anyhow::anyhow!("cannot read config '{config_path}': {e}"))?;
+        config_hash = fnv1a64(config_hash, &bytes);
         let mut map = load_config(config_path)?;
         map.insert("Inference_Path".to_string(), path.as_str().to_string());
         let (audio_s, files) = corpus_audio_seconds(&map)?;
@@ -205,5 +250,8 @@ pub fn run_bench(configs: &[String], repeat: usize, path: BenchPath) -> Result<B
         }
     }
 
-    Ok(BenchReport { runs })
+    Ok(BenchReport {
+        runs,
+        config_hash: format!("{config_hash:016x}"),
+    })
 }

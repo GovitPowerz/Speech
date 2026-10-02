@@ -192,7 +192,7 @@ The 2015 outer loop: QuantumPSO over a genome that carried the weights in-band. 
 The vec2struct parameter vector the outer search decodes into a config.
 
 **Arm**:
-A from-scratch baseline recipe behind `python -m speech.drivers.baseline <arm>`: `sad`, `sad-v2`, `lid-features`, `lid-phseq`.
+One of the four from-scratch baseline trainings behind `python -m speech.drivers.baseline <arm>`: `sad`, `sad-v2`, `lid-features`, `lid-phseq`.
 
 **Subset gate**:
 A corpus-gated test that trains an arm from scratch on a stratified subset and asserts beat-init (and, for LID, beat-chance), run-twice bit-identical.
@@ -255,3 +255,19 @@ A sanctioned category of edit to the exact tree outside `nn/cells/`, the only ki
 
 **Canary gating**:
 Committed libm canaries decide whether a transcendental-dependent golden compares bit-exact (the oracle machine) or within a derived bound (any other).
+
+**Ledger**:
+The committed directory `ledger/` of machine-readable measurement records; the `RESULTS.md` tables between `ledger:table` markers are rendered from it (ADR-0009).
+_Avoid_: ledger for the per-task review notes under `.superpowers/`, which are the task ledger
+
+**Record**:
+One ledger entry: an envelope (schema version, time, SHA, build, host) around a recipe and a payload. One JSON file, named by its content-derived id.
+
+**Recipe**:
+The identity of a measurement: what was run (arm, lineage, cell, direction, split spec, budget, seed, lanes for a baseline; label, path, lanes, lineage for a bench). Config hash, SHA, build and host are provenance, not recipe.
+
+**Promotion**:
+`python -m speech.ledger add`: validating a producer's `record.json` and copying it into the ledger, then rendering. The only way a record enters the committed tree.
+
+**Task ledger**:
+The per-task review notes under `.superpowers/`, gitignored. Not the ledger.
