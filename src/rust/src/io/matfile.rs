@@ -11,7 +11,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use byteorder::{LittleEndian, WriteBytesExt};
 
 const HEADER_TEXT: &[u8] = b"MATLAB 5.0 MAT-file, written by speech-rs";
@@ -36,7 +36,9 @@ pub struct MatWriter {
 impl MatWriter {
     /// Opens `path` and writes the fixed 128-byte MAT v5 header.
     pub fn create(path: &Path) -> anyhow::Result<MatWriter> {
-        let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+        let file = std::fs::File::create(path)
+            .with_context(|| format!("cannot create `{}`", path.display()))?;
+        let mut file = std::io::BufWriter::new(file);
 
         // 116-byte text header, space-padded.
         let mut header = [b' '; 116];

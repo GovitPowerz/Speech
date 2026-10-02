@@ -16,13 +16,13 @@ use speech::features::stats::InputStatistics;
 use speech::io::binary::{read_matrix, write_matrix};
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 
-/// `save_weights`'s `weights_`/`weightsDerivatives_` prefix glues onto the WHOLE
-/// filename string (`:319-321`), so its production shape is a BARE relative
-/// filename with cwd == the run/output dir -- the `.bin` siblings land next to it
-/// with no path-separator awareness. Exercising that verbatim needs a real chdir
-/// (an absolute tempdir path would materialize `weights_/<abs...>` trees under
-/// whatever the glued prefix resolves to, polluting the cargo CWD). `set_current_dir`
-/// is process-global; serialize against `cargo test`'s parallel threads.
+/// `save_weights`'s `weights_`/`weightsDerivatives_` prefix goes on the BASENAME
+/// (`io::prefix_basename`; the legacy glued it onto the whole string, `:319-321`,
+/// FIXED). The legacy's production shape is a BARE relative filename with cwd ==
+/// the run/output dir, the `.bin` siblings next to it; this file keeps that shape
+/// with a real chdir (`tests/phase7_bench.rs::bench_runs_with_absolute_output_keys`
+/// owns the directory case). `set_current_dir` is process-global; serialize
+/// against `cargo test`'s parallel threads.
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 struct CwdGuard {
@@ -139,13 +139,10 @@ fn save_weights_writes_three_artifacts() {
     let n = net.nb_of_weights();
     let derivs = Array2::from_shape_fn((n, 2), |(r, c)| if c == 1 { 1.0 } else { r as f64 * 0.01 });
 
-    // The legacy glues the `weights_`/`weightsDerivatives_` PREFIX to the WHOLE
-    // filename string (`:319-321`), NOT the basename. Its production shape is a bare
-    // relative filename with cwd == the run/output dir, so the `.bin` siblings land
-    // next to `<filename>` in that same dir. Reproduce that shape exactly: chdir into
-    // a tempdir and pass a bare filename, instead of routing an absolute tempdir path
-    // through the quirk (which glues the prefix ahead of the leading '/' and
-    // materializes a `weights_<abs...>` tree under the cargo CWD).
+    // The legacy's production shape: a bare relative filename with cwd == the
+    // run/output dir, the `.bin` siblings next to `<filename>` in that same dir.
+    // Reproduce that shape exactly: chdir into a tempdir and pass a bare filename
+    // (a bare name composes byte-identically to the legacy's whole-string glue).
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let _cwd = CwdGuard::enter(dir.path());

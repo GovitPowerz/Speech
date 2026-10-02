@@ -162,7 +162,7 @@ Speech/
       nn/cells/{slstm,mamba,cfc,transformer}.rs   # the CellLayer seam
       tasks/{segmenter,sad,lid,segmentation,segmentation_io,vrcts}.rs
       fast/{nn,mel32,pipeline,driver,cells,bicell,stream,stream_lid}.rs   # f32 fast + streaming
-      io/{binary,matfile}.rs
+      io/{mod,binary,matfile}.rs
     tests/                                 # cargo integration suites, one file per phase gate
     benches/kernels.rs                     # criterion micro-benches
     speech-py/src/lib.rs                   # the PyO3 module speech_rs
@@ -171,7 +171,7 @@ Speech/
     evaluate.py  optimizers.py  scoring.py  batching.py  nn_reference.py  features_oracle.py
     drivers/{state,init,train,retrain,test,baseline}.py
     dataprep/{augment,opensad15,stm_normalize,lre}.py
-    ledger/{schema,tables,render,cli}.py   # the record schema, the RESULTS.md renderers, `python -m speech.ledger`
+    ledger/{schema,tables,render,cli,stage,bench,prose}.py   # the record schema, the RESULTS.md renderers, the staged bench legs, `python -m speech.ledger`
   tests/                                   # pytest suites + tests/pyo3/ (the seam) + reference_data/ (goldens)
 ```
 

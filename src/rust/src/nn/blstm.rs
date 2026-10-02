@@ -1203,9 +1203,11 @@ impl BlstmNetwork {
     /// `weightsDerivatives_<filename>` (both via the custom `.bin` codec -- the
     /// commented-out `.mat` writes at `:324-325` are dead), then a MAT v5 file AT
     /// `<filename>` carrying `nbOfInputs` (scalar), `meanInputs`, `stdInputs`. The
-    /// `weights_`/`weightsDerivatives_` PREFIX is prepended to the WHOLE path string
-    /// (so `<filename>` typically ends in `.mat`, and the `.bin` siblings are named
-    /// `weights_<dir>/<base>.mat` -- reproduced verbatim, not "fixed"; IMPROVEMENTS'd).
+    /// `weights_`/`weightsDerivatives_` PREFIX goes onto the BASENAME (`<dir>/weights_<base>`,
+    /// so `<filename>` typically ends in `.mat` and the `.bin` siblings sit next to it);
+    /// the legacy glued it onto the WHOLE path string (`weights_<dir>/<base>.mat`, a
+    /// nonexistent directory for anything but a bare name) -- FIXED, see
+    /// `io::prefix_basename` and IMPROVEMENTS.md.
     /// The stats matrices are `1 x D` row vectors (`InputStatistics.cpp:11-12`
     /// `colwise().sum()`), whose column-major `.mat` payload is the mean/std `Vec`
     /// order directly.
@@ -1216,9 +1218,9 @@ impl BlstmNetwork {
         stats: &InputStatistics,
     ) -> Result<()> {
         // `buf << "weights_%s" << filename` / `buf2 << "weightsDerivatives_%s"`
-        // (:319-321): the prefix is glued to the raw filename string, not the basename.
-        let weights_name = format!("weights_{filename}");
-        let derivs_name = format!("weightsDerivatives_{filename}");
+        // (:319-321), the prefix on the basename rather than the raw string.
+        let weights_name = crate::io::prefix_basename("weights_", filename);
+        let derivs_name = crate::io::prefix_basename("weightsDerivatives_", filename);
 
         // getWeights() is N x 1; write as N rows, 1 col (:322).
         let flat = self.get_weights();

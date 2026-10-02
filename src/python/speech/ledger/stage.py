@@ -34,9 +34,8 @@ class Leg:
 
 def _sad_config(stage_dir: Path, audio: Path) -> Path:
     """`tier2_spectral.config` + the tuple-A pack over one unscored file, the cap lifted so the
-    whole file is processed. Input paths are absolute; the two OUTPUT keys (`Dump_Directory`,
-    `multiConfigResultsOutputFile`) stay relative, as in the Rust recipe, because the engine
-    fails on an absolute value there, so the binary runs with the staging directory as cwd."""
+    whole file is processed. Every path key is absolute, the two OUTPUT keys (`Dump_Directory`,
+    `multiConfigResultsOutputFile`) included, so the binary runs from any cwd."""
     pack = stage_dir / "NNweights_config1.bin"
     shutil.copyfile(FIXTURES / "phase0" / "NNweights_config1.bin", pack)
     listing = stage_dir / "bench_listing.csv"
@@ -51,8 +50,8 @@ def _sad_config(stage_dir: Path, audio: Path) -> Path:
         f"fileslisting {listing}\n"
         f"language2classmapping {mapping}\n"
         f"BLSTM_weightsFile {pack}\n"
-        "multiConfigResultsOutputFile bench_result.mat\n"
-        "Dump_Directory vrcts_bench\n"
+        f"multiConfigResultsOutputFile {stage_dir / 'bench_result.mat'}\n"
+        f"Dump_Directory {stage_dir / 'vrcts_bench'}\n"
         "Neural_Networks_BackPropagation_Epochs 0\n"
         "BLSTM_BackPropagationActivated false\n"
     )
@@ -63,8 +62,9 @@ def _sad_config(stage_dir: Path, audio: Path) -> Path:
 
 def _twin_config(stage_dir: Path, features: Path, file_type: int) -> Path:
     """`twin_mode7.config` over one precomputed-feature file (phSeq `File_Type 1`, cep
-    `File_Type 2`), the committed LID pack and mapping made absolute; the listing row names the
-    mapping's first language so the Twin has a class to score against."""
+    `File_Type 2`), every path key absolute (the committed LID pack and mapping, the two output
+    keys); the listing row names the mapping's first language so the Twin has a class to score
+    against."""
     mapping = FIXTURES / "phase4b" / "languagemapping_lid7.csv"
     lang, dial = mapping.read_text().splitlines()[0].split(";")[:2]
     listing = stage_dir / "bench_listing.csv"
@@ -78,8 +78,8 @@ def _twin_config(stage_dir: Path, features: Path, file_type: int) -> Path:
         f"language2classmapping {mapping}\n"
         f"fileslisting {listing}\n"
         f"File_Type {file_type}\n"
-        "multiConfigResultsOutputFile bench_result.mat\n"
-        "Dump_Directory vrcts_bench\n"
+        f"multiConfigResultsOutputFile {stage_dir / 'bench_result.mat'}\n"
+        f"Dump_Directory {stage_dir / 'vrcts_bench'}\n"
     )
     cfg = stage_dir / "bench_twin.config"
     cfg.write_text(base + tail)
