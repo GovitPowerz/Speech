@@ -144,9 +144,6 @@ class BenchRecipe(_Strict):
     lanes: int
     lineage: Lineage | None
 
-    def key(self) -> tuple[object, ...]:
-        return tuple(self.model_dump().values())
-
 
 class BenchRun(_Strict):
     wall_s: float

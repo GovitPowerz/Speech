@@ -387,6 +387,7 @@ fn bench_args_parse_json_and_label() {
     assert_eq!(inv.repeat, 1);
 
     assert!(parse_bench_args(&args(&["--label=", "cfg.config"])).is_err());
+    assert!(parse_bench_args(&args(&["--label=phase7_60s", "cfg.config"])).is_err());
     assert!(parse_bench_args(&args(&["--json=yes", "cfg.config"])).is_err());
 }
 

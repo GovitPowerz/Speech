@@ -298,6 +298,19 @@ def test_supersession_footnote_hides_the_old_row() -> None:
     assert lines[-1] == f"Superseded: `{old.id}` by `{new.id}` (re-run on main after the fixture change)."
 
 
+def test_supersession_footnote_names_each_link_of_a_chain() -> None:
+    a = sad_gate()
+    b = sad_gate(at=T0.replace(hour=13), wall_s=39.0, supersedes=a.id, reason="reason-b")
+    c = sad_gate(at=T0.replace(hour=14), wall_s=40.0, supersedes=b.id, reason="reason-c")
+    assert TABLES["phase6_sad_v1"]([a, b, c])[-2:] == [f"Superseded: `{b.id}` by `{c.id}` (reason-c).", f"Superseded: `{a.id}` by `{b.id}` (reason-b)."]
+
+
+def test_a_launcher_record_with_a_gates_recipe_keeps_the_gate_row() -> None:
+    gate = sad_gate()
+    launcher = sad_gate(at=T0.replace(hour=13), source="launcher", test=None)
+    assert TABLES["phase6_sad_v1"]([gate, launcher])[2].startswith("| subset gate (2026-10-02) |")
+
+
 def test_render_text_rewrites_between_markers_and_rejects_bad_markers() -> None:
     text = "intro\n<!-- ledger:table phase6_lid_features -->\n| stale |\n<!-- ledger:end -->\noutro\n"
     out = render_text(text, [lid_gate()])
@@ -499,6 +512,9 @@ def test_lanes_of_is_last_wins(tmp_path: Path) -> None:
     assert lanes_of(cfg) == 3
     cfg.write_text("foo 1\n")
     assert lanes_of(cfg) == 1
+    toml = tmp_path / "x.toml"
+    toml.write_text("[engine]\nnum_outer_threads = 4\n")
+    assert lanes_of(toml) == 4
 
 
 def test_wrap_reads_the_build_from_the_document_and_strips_the_run_path() -> None:

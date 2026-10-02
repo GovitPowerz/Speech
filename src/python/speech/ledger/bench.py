@@ -17,11 +17,13 @@ from pathlib import Path
 from speech.ledger.schema import REPO, BenchPayload, BenchRecipe, BenchRecord, BenchRun, Build, Lineage, git_state, host_info, now_utc
 
 BINARY = REPO / "src" / "rust" / "target" / "release" / "speech"
-_LANES = re.compile(r"^\s*numOuterThreads\s+(\d+)\s*$", re.MULTILINE)
+# The legacy `numOuterThreads N` line or the TOML `num_outer_threads = N` key.
+_LANES = re.compile(r"^\s*(?:numOuterThreads\s+|num_outer_threads\s*=\s*)(\d+)\s*$", re.MULTILINE)
 
 
 def lanes_of(config: Path) -> int:
-    """The config's `numOuterThreads`, last-wins like the legacy reader; 1 when unset."""
+    """The config's `numOuterThreads` (`.config`) or `num_outer_threads` (`.toml`), last-wins like
+    the legacy reader; 1 when unset."""
     found = _LANES.findall(config.read_text())
     return int(found[-1]) if found else 1
 

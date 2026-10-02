@@ -40,13 +40,14 @@ def table(name: str) -> Callable[[Renderer], Renderer]:
 
 
 def current_baselines(records: Iterable[Record]) -> list[BaselineRecord]:
-    """The latest non-superseded baseline record per recipe, in recorded order."""
+    """The latest non-superseded baseline record per (source, recipe), in recorded order: a
+    launcher run reproducing a gate's recipe must not evict the gate's row."""
     base = [r for r in records if isinstance(r, BaselineRecord)]
     dead = superseded_ids(base)
     latest: dict[tuple[object, ...], BaselineRecord] = {}
     for r in sorted(base, key=lambda r: (r.recorded_at, r.id)):
         if r.id not in dead:
-            latest[r.recipe.key()] = r
+            latest[(r.payload.source, *r.recipe.key())] = r
     return list(latest.values())
 
 
@@ -139,18 +140,18 @@ def host_key(r: Record) -> str:
 
 
 def _footer(rows: Sequence[Record], all_records: Iterable[Record]) -> list[str]:
-    """The hosts the rows came from, then one line per supersession chain touching them."""
+    """The hosts the rows came from, then one line per supersession link in the chains touching
+    them, each naming the record that did the superseding and its reason."""
     lines: list[str] = []
     hosts = sorted({host_key(r) for r in rows})
     if hosts:
         lines += ["", "Hosts: " + "; ".join(hosts) + "."]
     by_id = {r.id: r for r in all_records}
     for r in sorted(rows, key=lambda r: r.id):
-        old_id = r.supersedes
-        while old_id is not None:
-            lines.append(f"Superseded: `{old_id}` by `{r.id}` ({r.reason}).")
-            old = by_id.get(old_id)
-            old_id = old.supersedes if old is not None else None
+        cur: Record | None = r
+        while cur is not None and cur.supersedes is not None:
+            lines.append(f"Superseded: `{cur.supersedes}` by `{cur.id}` ({cur.reason}).")
+            cur = by_id.get(cur.supersedes)
     return lines
 
 

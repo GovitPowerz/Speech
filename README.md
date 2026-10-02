@@ -136,7 +136,7 @@ Both roadmaps are closed: the port (phases 0a to 4d, tag `legacy-parity-v1`) and
 Speech/
   README.md  CLAUDE.md  CONTEXT.md  DEVELOPMENT.md  CITATION.cff  LICENSE
   RESULTS.md  IMPROVEMENTS.md
-  ledger/baseline/*.json                   # the measurement ledger: one record per measured number (ADR-0009)
+  ledger/{baseline,bench}/*.json          # the measurement ledger: one record per measured number (ADR-0009)
   pyproject.toml  uv.lock
   setup_env.sh  build.sh  check_all.sh  lint_code.sh  upgrade_dependencies.sh
   .github/workflows/ci.yml

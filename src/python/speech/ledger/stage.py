@@ -28,7 +28,6 @@ class Leg:
     label: str
     display: str
     lineage: Lineage | None
-    corpus: bool
     stage: Callable[[Path, Path], Path]
 
 
@@ -118,9 +117,9 @@ def stage_corpus_cep(stage_dir: Path, corpus_root: Path) -> Path:
 LEGS: dict[str, Leg] = {
     leg.label: leg
     for leg in (
-        Leg("phase7_60s", "SAD 60 s fixture (stereo)", "v1", False, stage_fixture_60s),
-        Leg("phase7_sad_corpus", "SAD corpus-gated (mono)", "v1", True, stage_corpus_sad),
-        Leg("phase7_lid_phseq", "LID phSeq corpus-gated (Twin M7)", None, True, stage_corpus_phseq),
-        Leg("phase7_lid_cep", "LID cep corpus-gated (Twin M7)", None, True, stage_corpus_cep),
+        Leg("phase7_60s", "SAD 60 s fixture (stereo)", "v1", stage_fixture_60s),
+        Leg("phase7_sad_corpus", "SAD corpus-gated (mono)", "v1", stage_corpus_sad),
+        Leg("phase7_lid_phseq", "LID phSeq corpus-gated (Twin M7)", None, stage_corpus_phseq),
+        Leg("phase7_lid_cep", "LID cep corpus-gated (Twin M7)", None, stage_corpus_cep),
     )
 }

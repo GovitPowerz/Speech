@@ -20,12 +20,13 @@ from pathlib import Path
 
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
-from speech.ledger.schema import LEDGER_DIR, canonical_json, read_record, write_record
+from speech.ledger.schema import LEDGER_DIR, canonical_json, git_state, read_record, write_record
 from speech.ledger.stage import CORPUS_ROOT, LEGS
 
 
 def add(paths: list[Path], root: Path, *, allow_dirty: bool) -> list[Path]:
-    added: list[Path] = []
+    # Validate the whole batch before copying any of it, so a refusal leaves the ledger untouched.
+    pending = []
     for path in paths:
         rec = read_record(path)
         if rec.git_dirty and not allow_dirty:
@@ -37,6 +38,9 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool) -> list[Path]:
             if canonical_json(read_record(dest)) != canonical_json(rec):
                 raise SystemExit(f"{dest} exists with different content")
             continue
+        pending.append((rec, dest))
+    added: list[Path] = []
+    for rec, dest in pending:
         dest.parent.mkdir(parents=True, exist_ok=True)
         added.append(write_record(rec, dest))
     return added
@@ -45,6 +49,8 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool) -> list[Path]:
 def bench(args: argparse.Namespace) -> list[Path]:
     """Stage (a named leg, or the given config), run N fresh processes per path, wrap and write
     one record each into the stage directory; the caller promotes them."""
+    if not args.allow_dirty and git_state()[1]:
+        raise SystemExit("the tree is dirty, so `add` would refuse every record; commit first or pass --allow-dirty")
     stage_dir = Path(tempfile.mkdtemp(prefix="speech-bench-")) if args.stage_dir is None else args.stage_dir
     stage_dir.mkdir(parents=True, exist_ok=True)
     if args.leg is not None:

@@ -198,6 +198,9 @@ pub fn parse_bench_args(args: &[String]) -> Result<BenchInvocation> {
     }
 
     let config = config.ok_or_else(|| anyhow::anyhow!("bench requires a config path"))?;
+    if label.is_some() && !json {
+        bail!("--label only names the --json document; pass --json too");
+    }
     Ok(BenchInvocation {
         config,
         repeat,
