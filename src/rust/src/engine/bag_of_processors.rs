@@ -1054,8 +1054,11 @@ impl BagOfProcessors {
             cost_lid_row[ii] = cost_lid;
             bad_classif_lid_row[ii] = bad_lid_classif;
 
-            // legacy: :462-464 bestNNWeight_<pos+1>_<filename> compose.
-            let save_filename = format!("bestNNWeight_{}_{filename}", ii + 1);
+            // legacy: :462-464 bestNNWeight_<pos+1>_<filename> compose -- on the
+            // BASENAME (the legacy glued it onto the whole string; FIXED, see
+            // `io::prefix_basename`).
+            let save_filename =
+                crate::io::prefix_basename(&format!("bestNNWeight_{}_", ii + 1), filename);
             // legacy: :464 saveWeights call -- BEFORE the :465 costLID override.
             self.save_weights(
                 &save_filename,

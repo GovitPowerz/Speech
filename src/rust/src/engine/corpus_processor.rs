@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
@@ -140,7 +140,8 @@ impl CorpusProcessor {
         // so a subsequent read (or a run that never saves) sees a valid-but-empty
         // file rather than a stale prior run's .mat.
         if matches!(mode.kind, ModeKind::Multi | ModeKind::UnitTest) {
-            std::fs::write(&output_file_name, " ")?;
+            std::fs::write(&output_file_name, " ")
+                .with_context(|| format!("cannot create `{output_file_name}`"))?;
         }
 
         // legacy: :60-62 epochs clamp (< 0 -> 0). get<T>(name, default) exits(1) on

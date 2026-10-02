@@ -29,8 +29,7 @@ def lanes_of(config: Path) -> int:
 def bench_json(binary: Path, config: Path, path: str, label: str, *, repeat: int = 1) -> dict[str, object]:
     """One `speech bench --json` process; the parsed document."""
     cmd = [str(binary), "bench", f"--repeat={repeat}", f"--path={path}", "--json", f"--label={label}", str(config)]
-    # cwd = the staging directory: the staged config's output keys are relative (see `stage`).
-    out = subprocess.run(cmd, capture_output=True, text=True, cwd=config.parent)
+    out = subprocess.run(cmd, capture_output=True, text=True)
     if out.returncode != 0:
         raise RuntimeError(f"speech bench failed ({out.returncode}): {out.stderr.strip()}")
     doc: dict[str, object] = json.loads(out.stdout)

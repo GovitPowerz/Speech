@@ -30,7 +30,9 @@ pub fn write_matrix(path: &Path, rows: usize, cols: usize, data: &[f64]) -> anyh
     if data.len() != rows * cols {
         bail!("data length {} != rows*cols {}", data.len(), rows * cols);
     }
-    let mut fh = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("cannot create `{}`", path.display()))?;
+    let mut fh = std::io::BufWriter::new(file);
     fh.write_i64::<LittleEndian>(rows as i64)?;
     fh.write_i64::<LittleEndian>(cols as i64)?;
     for &x in data {

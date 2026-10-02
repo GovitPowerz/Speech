@@ -470,12 +470,13 @@ def test_seam_build_info_has_the_three_fields() -> None:
 # --------------------------------------------------------------------------------------- #
 
 
-def test_stage_fixture_60s_writes_a_relative_output_config(tmp_path: Path) -> None:
+def test_stage_fixture_60s_writes_an_absolute_path_config(tmp_path: Path) -> None:
     cfg = stage_fixture_60s(tmp_path, tmp_path / "no-corpus")
     text = cfg.read_text()
     assert (tmp_path / "prcts_excerpt.wav").is_file() and (tmp_path / "NNweights_config1.bin").is_file()
     assert (tmp_path / "bench_listing.csv").read_text() == f"{tmp_path / 'prcts_excerpt.wav'}\n"
-    assert "\nDump_Directory vrcts_bench\n" in text and "\nmultiConfigResultsOutputFile bench_result.mat\n" in text
+    assert f"\nDump_Directory {tmp_path / 'vrcts_bench'}\n" in text and (tmp_path / "vrcts_bench").is_dir()
+    assert f"\nmultiConfigResultsOutputFile {tmp_path / 'bench_result.mat'}\n" in text
     assert f"\nBLSTM_weightsFile {tmp_path / 'NNweights_config1.bin'}\n" in text
     assert lanes_of(cfg) == 1
 
