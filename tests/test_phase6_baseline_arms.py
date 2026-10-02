@@ -12,7 +12,9 @@ tree of empty `.plp8f0mvsdd` files) -- nothing from `data/LRE03-LRE07/` is read 
 
 from __future__ import annotations
 
+import inspect
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -219,9 +221,38 @@ def test_speech_cli_mounts_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     import speech.cli as cli
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    monkeypatch.setattr(B, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
     rc = cli.main(["baseline", "lid-features", "--corpus-root", "/c", "--out-dir", "/o", "--subset", "12"])
     assert rc == 0 and captured["arm"] == "lid-features" and captured["subset"] == 12
+
+
+def _forwarded(monkeypatch: pytest.MonkeyPatch, entry: Callable[[list[str]], int], argv: list[str]) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def fake_run(arm: str, corpus_root: Path, out_dir: Path, **kw: object) -> None:
+        captured.update(arm=arm, corpus_root=corpus_root, out_dir=out_dir, **kw)
+
+    monkeypatch.setattr(B, "run_baseline", fake_run)
+    assert entry(argv) == 0
+    return captured
+
+
+def test_both_entries_forward_every_parser_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #28: the `speech.cli` mount dropped --cell-type/--direction. Both entries must hand
+    `run_baseline` the parsed namespace whole, so the parser is the one place a flag is defined."""
+    import speech.cli as cli
+
+    argv = ["sad", "--corpus-root", "/c", "--out-dir", "/o", "--cell-type", "cfc", "--direction", "forward"]
+    argv += ["--score-init", "--valid-size", "5", "--test-size", "7", "--minibatch", "3", "--lanes", "2"]
+    expected = vars(B.build_parser().parse_args(argv))
+    assert expected["cell_type"] == "cfc" and expected["direction"] == "forward" and expected["score_init"] is True
+    assert _forwarded(monkeypatch, B.main, argv) == expected
+    assert _forwarded(monkeypatch, cli.main, ["baseline", *argv]) == expected
+
+
+def test_every_parser_dest_is_a_run_baseline_parameter() -> None:
+    dests = set(vars(B.build_parser().parse_args(["sad", "--corpus-root", "/c", "--out-dir", "/o"])))
+    assert dests <= set(inspect.signature(B.run_baseline).parameters)
 
 
 def test_unknown_arm_rejected(tmp_path: Path) -> None:
@@ -356,7 +387,7 @@ def test_speech_cli_mounts_baseline_lid_phseq(monkeypatch: pytest.MonkeyPatch) -
     import speech.cli as cli
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    monkeypatch.setattr(B, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
     rc = cli.main(["baseline", "lid-phseq", "--corpus-root", "/c", "--out-dir", "/o", "--subset", "24"])
     assert rc == 0 and captured["arm"] == "lid-phseq" and captured["subset"] == 24
 
@@ -508,6 +539,6 @@ def test_speech_cli_mounts_baseline_sad(monkeypatch: pytest.MonkeyPatch) -> None
     import speech.cli as cli
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    monkeypatch.setattr(B, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
     rc = cli.main(["baseline", "sad", "--corpus-root", "/c", "--out-dir", "/o", "--audio-max-duration", "25.0"])
     assert rc == 0 and captured["arm"] == "sad" and captured["audio_max_duration"] == 25.0

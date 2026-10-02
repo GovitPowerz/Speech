@@ -11,7 +11,7 @@ import argparse
 from pathlib import Path
 
 from speech.drivers.baseline import build_parser as _baseline_parser
-from speech.drivers.baseline import run_baseline
+from speech.drivers.baseline import run_baseline_from_args
 from speech.drivers.init import init_run
 from speech.drivers.retrain import retrain
 from speech.drivers.state import RunState
@@ -57,22 +57,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "baseline":
-        run_baseline(
-            args.arm,
-            args.corpus_root,
-            args.out_dir,
-            resume=args.resume,
-            lanes=args.lanes,
-            subset=args.subset,
-            dry_run=args.dry_run,
-            seed=args.seed,
-            epochs=args.epochs,
-            patience=args.patience,
-            steps_per_epoch=args.steps_per_epoch,
-            init_scheme=args.init_scheme,
-            lre_listing=args.lre_listing,
-            audio_max_duration=args.audio_max_duration,
-        )
+        # Drop this parser's own dest; what remains is `build_parser()`'s namespace, forwarded whole.
+        del args.command
+        run_baseline_from_args(args)
         return 0
 
     state = RunState.load(Path(args.out_dir) / "run_state.json")

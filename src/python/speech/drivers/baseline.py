@@ -996,6 +996,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=6)
     parser.add_argument("--steps-per-epoch", type=int, default=8)
     parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
+    parser.add_argument("--valid-size", type=int, default=12, help="held-out validation slice (files), disjoint from the train subset")
+    parser.add_argument("--test-size", type=int, default=48, help="held-out test slice (files) the final metric is scored on")
+    parser.add_argument("--minibatch", type=int, default=0, help="hard-example mini-batch size per evaluation (0 = the whole listing)")
+    parser.add_argument("--score-init", action="store_true", help="also score the from-scratch seed pack on the test slice (the init-baseline row)")
     parser.add_argument(
         "--cell-type",
         choices=("lstm", "slstm", "mamba", "cfc", "transformer"),
@@ -1017,27 +1021,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_POSITIONAL_ARGS = frozenset({"arm", "corpus_root", "out_dir"})
+
+
+def run_baseline_from_args(args: argparse.Namespace) -> BaselineResult:
+    """Forward a `build_parser()` namespace to `run_baseline` by name. Every flag the parser
+    defines is a keyword, so an entry point cannot drop one silently (the `speech.cli` mount
+    dropped `--cell-type`/`--direction` for a phase, issue #28); a dest that is not a
+    `run_baseline` parameter fails here with a TypeError, and a unit test pins the alignment."""
+    kwargs = {name: value for name, value in vars(args).items() if name not in _POSITIONAL_ARGS}
+    return run_baseline(args.arm, args.corpus_root, args.out_dir, **kwargs)
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry: parse args -> `run_baseline`. Returns a process exit code."""
-    args = build_parser().parse_args(argv)
-    run_baseline(
-        args.arm,
-        args.corpus_root,
-        args.out_dir,
-        resume=args.resume,
-        lanes=args.lanes,
-        subset=args.subset,
-        dry_run=args.dry_run,
-        seed=args.seed,
-        epochs=args.epochs,
-        patience=args.patience,
-        steps_per_epoch=args.steps_per_epoch,
-        init_scheme=args.init_scheme,
-        lre_listing=args.lre_listing,
-        audio_max_duration=args.audio_max_duration,
-        cell_type=args.cell_type,
-        direction=args.direction,
-    )
+    run_baseline_from_args(build_parser().parse_args(argv))
     return 0
 
 
