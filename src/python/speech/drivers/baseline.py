@@ -657,7 +657,7 @@ def _config_hash(text: str) -> str:
 def listing_hash(path: Path) -> str:
     """The recipe's `listing` (issue #38): the blake2b-8 of the source listing's bytes, the same
     digest family as the record id, so a localized 2015 listing is identified without its path."""
-    return hashlib.blake2b(Path(path).read_bytes(), digest_size=8).hexdigest()
+    return hashlib.blake2b(path.read_bytes(), digest_size=8).hexdigest()
 
 
 # --------------------------------------------------------------------------------------- #
@@ -860,13 +860,13 @@ def run_baseline(
     # net's own `BLSTM_LID_Cell_Type`/`_Direction` wiring is Task 5's.
     if arm in _LID_ARMS and (cell_type != "lstm" or direction != "bidirectional"):
         raise ValueError(f"--cell-type/--direction are SAD-arm knobs; arm {arm!r} trains only its LID net (Task 5 wires BLSTM_LID_*)")
+    if lre_listing is not None and arm in _SAD_ARMS:
+        raise ValueError(f"lre_listing is a LID-arm knob; the {arm} arm derives its split from the corpus tree and would ignore it")
 
     console = console or Console()
     # __file__ = <repo>/src/python/speech/drivers/baseline.py -> parents[4] = <repo>.
     repo_root = Path(__file__).resolve().parents[4]
     toml_path = repo_root / _ARM_CONFIGS[arm]
-    if lre_listing is not None and arm in _SAD_ARMS:
-        raise ValueError(f"lre_listing is a LID-arm knob; the {arm} arm derives its split from the corpus tree and would ignore it")
     # The record's provenance is the tree the run STARTS on (issue #40): stamped after training it
     # would name an edit or a commit made during the run, and a git failure would lose the run.
     # Read before `out_dir` exists, so a failed check leaves no half-started run directory.

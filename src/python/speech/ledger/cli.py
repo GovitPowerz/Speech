@@ -8,11 +8,12 @@
 record (schema and license hygiene), refuses a dirty-tree record unless told otherwise, a
 non-release build always and a resumed baseline run always, refuses a baseline record whose
 (source, recipe) already has a live record unless `--supersede REASON` names why the copy
-replaces it (the predecessor is looked up per record and stamped on the copy; a record with no
-predecessor is added plainly), copies the record to `ledger/<kind>/<id>.json`, then renders so
-the record and its table land in one commit. Bench records repeat a recipe by protocol (three
-processes per path) and are outside the one-live-record rule; their label rule is issue #39. `render --check` exits 1 with a diff when RESULTS.md
-does not hold what the ledger renders.
+replaces it (the predecessor is looked up per record, in argument order within one batch, and
+stamped on the copy, which therefore gets a new id and cannot be re-added plainly; a record with
+no predecessor is added plainly), copies the record to `ledger/<kind>/<id>.json`, then renders
+so the record and its table land in one commit. Bench records repeat a recipe by protocol
+(three processes per path) and are outside the one-live-record rule; their label rule is issue
+#39. `render --check` exits 1 with a diff when RESULTS.md does not hold what the ledger renders.
 """
 
 from __future__ import annotations
@@ -24,14 +25,16 @@ from pathlib import Path
 
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
-from speech.ledger.schema import LEDGER_DIR, BaselineRecord, canonical_json, git_state, load, read_record, write_record
+from speech.ledger.schema import LEDGER_DIR, BaselineRecord, git_state, load, read_record, write_record
 from speech.ledger.stage import CORPUS_ROOT, LEGS
-from speech.ledger.tables import baseline_key, current_baselines
+from speech.ledger.tables import current_baselines
 
 
 def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | None = None) -> list[Path]:
     # Validate the whole batch before copying any of it, so a refusal leaves the ledger untouched.
-    live = {baseline_key(r): r for r in current_baselines(load(root))} if root.is_dir() else {}
+    if supersede is not None and not supersede.strip():
+        raise SystemExit("--supersede needs a reason")
+    live = {r.key(): r for r in current_baselines(load(root))} if root.is_dir() else {}
     pending = []
     for path in paths:
         rec = read_record(path)
@@ -45,17 +48,16 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | No
             )
         dest = root / rec.kind / f"{rec.id}.json"
         if dest.exists():
-            if canonical_json(read_record(dest)) != canonical_json(rec):
-                raise SystemExit(f"{dest} exists with different content")
-            continue
+            continue  # the same content under the same id (`load` has already refused a file whose content is not its name)
         if isinstance(rec, BaselineRecord):
-            prev = live.get(baseline_key(rec))
+            prev = live.get(rec.key())
             if prev is not None:
                 if supersede is None:
                     raise SystemExit(f"{path}: its (source, recipe) already has a live record {prev.id}; pass --supersede REASON to replace it")
-                rec = rec.model_copy(update={"supersedes": prev.id, "reason": supersede})
+                # Through the validator, not `model_copy`: the reason is free text and the hygiene rule applies to it.
+                rec = BaselineRecord.model_validate({**rec.model_dump(mode="json"), "supersedes": prev.id, "reason": supersede})
                 dest = root / rec.kind / f"{rec.id}.json"
-            live[baseline_key(rec)] = rec
+            live[rec.key()] = rec
         pending.append((rec, dest))
     added: list[Path] = []
     for rec, dest in pending:

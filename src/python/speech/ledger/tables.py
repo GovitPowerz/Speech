@@ -1,9 +1,9 @@
 """The RESULTS.md tables rendered from the ledger (issue #20).
 
 Each renderer is a function over the loaded records, registered by the name a
-`<!-- ledger:table <name> -->` marker in RESULTS.md uses. Shared rules: a table takes the latest
-non-superseded record per recipe; a subset-gate row is the latest `gate` record of its
-(arm, lineage, cell, direction); a full-run row is one row per non-superseded full record (a
+`<!-- ledger:table <name> -->` marker in RESULTS.md uses. Shared rules: a table takes the one
+live (non-superseded) record per (source, recipe), two being an error, never a choice (issue
+#38); a subset-gate row is the latest `gate` record of its (arm, lineage, cell, direction); a full-run row is one row per non-superseded full record (a
 seed is part of the recipe, so seeds are rows, never averaged) and a single `TBD` row when none
 exists; every table ends with the hosts its rows came from and one footnote line per
 supersession chain. Prose around a table stays hand-written.
@@ -39,11 +39,6 @@ def table(name: str) -> Callable[[Renderer], Renderer]:
 # --------------------------------------------------------------------------------------- #
 
 
-def baseline_key(r: BaselineRecord) -> tuple[object, ...]:
-    """The row identity: a launcher run reproducing a gate's recipe must not evict the gate's row."""
-    return (r.payload.source, *r.recipe.key())
-
-
 def current_baselines(records: Iterable[Record]) -> list[BaselineRecord]:
     """The one non-superseded baseline record per (source, recipe), in recorded order. Two live
     records with one key is a ledger that bypassed `add` (issue #38): the renderer never
@@ -54,7 +49,7 @@ def current_baselines(records: Iterable[Record]) -> list[BaselineRecord]:
     for r in sorted(base, key=lambda r: (r.recorded_at, r.id)):
         if r.id in dead:
             continue
-        key = baseline_key(r)
+        key = r.key()
         if key in live:
             raise ValueError(f"two live records for one (source, recipe): {live[key].id} and {r.id}; the later one must supersede the earlier")
         live[key] = r

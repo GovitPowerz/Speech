@@ -485,12 +485,19 @@ def test_add_refuses_a_second_live_record_per_recipe_unless_superseding(tmp_path
     assert cli.main(["--root", str(root), "--results", str(results), "add", str(launcher), "--no-render"]) == 0
     # --supersede stamps the live predecessor and the reason on the copy; a record with no predecessor is added plainly.
     fresh = schema.write_record(lid_gate("lid-phseq"), tmp_path / "fresh.json")
-    assert cli.main(["--root", str(root), "--results", str(results), "add", str(src), str(fresh), "--supersede", "gates re-run on d" * 1]) == 0
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(src), str(fresh), "--supersede", "gates re-run on d"]) == 0
     stored = {r.recipe.arm: r for r in schema.load(root) if isinstance(r, BaselineRecord) and r.payload.source == "gate" and r.id != first.id}
     assert stored["lid-features"].supersedes == first.id and stored["lid-features"].reason == "gates re-run on d"
     assert stored["lid-features"].payload.wall_s == 40.0 and stored["lid-phseq"].supersedes is None
     assert "Superseded: `" + first.id + "`" in results.read_text()
     assert len(current_baselines(schema.load(root))) == 3
+    # The reason is free text: the hygiene validator applies to it, and an empty one is not a reason.
+    again = schema.write_record(lid_gate(at=T0.replace(hour=14), wall_s=41.0), tmp_path / "again.json")
+    with pytest.raises(ValidationError, match="absolute path"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(again), "--supersede", "/Users/x/notes.md"])
+    with pytest.raises(SystemExit, match="needs a reason"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(again), "--supersede", "  "])
+    assert len(schema.load(root)) == 4, "a refused batch leaves the ledger untouched"
 
 
 def test_render_check_fails_on_a_stale_table_and_passes_after_render(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -519,7 +526,7 @@ def test_every_committed_record_validates_and_is_a_release_build() -> None:
     records = schema.load(LEDGER_DIR)
     assert records, "the ledger must hold the re-run gate records (ADR-0009)"
     for r in records:
-        assert r.schema_version == schema.SCHEMA_VERSION == 2, r.id
+        assert r.schema_version == schema.SCHEMA_VERSION, r.id
         assert r.build.profile == "release", r.id
         assert len(r.git_sha) == 40, r.id
     ids = [r.id for r in records]

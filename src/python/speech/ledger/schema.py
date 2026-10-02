@@ -207,6 +207,11 @@ class BaselineRecord(RecordBase):
     recipe: BaselineRecipe
     payload: BaselinePayload
 
+    def key(self) -> tuple[object, ...]:
+        """The row identity: (source, recipe). A launcher run reproducing a gate's recipe is
+        another row, not a replacement; one live record per key (issue #38)."""
+        return (self.payload.source, *self.recipe.key())
+
 
 class BenchRecord(RecordBase):
     kind: Literal["bench"] = "bench"
