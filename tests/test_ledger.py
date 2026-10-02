@@ -226,6 +226,13 @@ def test_git_state_ignores_the_ledger_outputs_only() -> None:
         outside.unlink()
 
 
+def test_git_state_names_gits_reason_when_the_tree_is_not_a_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The run's front door (issue #40): a bare exit status would hide why git refused the tree.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    with pytest.raises(RuntimeError, match=r"git failed in .*not a git repository"):
+        schema.git_state(tmp_path)
+
+
 def test_lineage_of_config_names() -> None:
     assert schema.lineage_of("configs/training/lre_sad.toml") == "v1"
     assert schema.lineage_of("configs/training/lre_sad_v2.toml") == "v2"

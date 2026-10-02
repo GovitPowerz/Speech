@@ -422,7 +422,7 @@ def test_run_baseline_records_the_provenance_of_the_tree_it_started_on(tmp_path:
     trainer moves the tree's state mid-run; `record.json` and the manifest keep the start's."""
     root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
     tree = {"state": ("a" * 40, False)}
-    monkeypatch.setattr(B, "git_state", lambda: tree["state"])
+    monkeypatch.setattr(B, "git_state", lambda repo: tree["state"])
 
     def train_then_commit(state: object, seed: int, params: object) -> object:
         tree["state"] = ("b" * 40, True)
@@ -436,17 +436,19 @@ def test_run_baseline_records_the_provenance_of_the_tree_it_started_on(tmp_path:
 
 
 def test_run_baseline_fails_on_git_before_training(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #40: a tree whose provenance cannot be read stops the run before any training."""
-    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+    """Issue #40: a tree whose provenance cannot be read stops the run before any training, and
+    before the run directory exists (no half-started run on disk)."""
+    root, _, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
 
-    def no_git() -> tuple[str, bool]:
+    def no_git(repo: Path) -> tuple[str, bool]:
         raise RuntimeError("git unavailable")
 
     trained: list[int] = []
     monkeypatch.setattr(B, "git_state", no_git)
+    out = tmp_path / "never_created"
     with pytest.raises(RuntimeError, match="git unavailable"):
         B.run_baseline("lid-phseq", root, out, dry_run=True, _train_fn=lambda state, seed, params: trained.append(seed))
-    assert trained == []
+    assert trained == [] and not out.exists()
 
 
 def test_speech_cli_mounts_baseline_lid_phseq(monkeypatch: pytest.MonkeyPatch) -> None:

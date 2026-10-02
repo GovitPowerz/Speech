@@ -264,10 +264,14 @@ LEDGER_OUTPUTS = ("ledger", "RESULTS.md")
 
 def git_state(repo: Path = REPO) -> tuple[str, bool]:
     """`(HEAD sha, dirty)`, where dirty means any tracked change or untracked file outside the
-    ledger's own outputs (`LEDGER_OUTPUTS`)."""
-    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    ledger's own outputs (`LEDGER_OUTPUTS`). A failing git call raises `RuntimeError` carrying
+    git's own reason (the captured stderr would otherwise be lost behind the exit status)."""
     pathspec = [".", *(f":(exclude){p}" for p in LEDGER_OUTPUTS)]
-    status = subprocess.run(["git", "status", "--porcelain", "--", *pathspec], cwd=repo, check=True, capture_output=True, text=True).stdout
+    try:
+        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain", "--", *pathspec], cwd=repo, check=True, capture_output=True, text=True).stdout
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"git failed in {repo}: {e.stderr.strip() or e}") from e
     return sha, bool(status.strip())
 
 
