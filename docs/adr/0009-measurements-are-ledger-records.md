@@ -45,7 +45,8 @@ of its key. The renderer never chooses: two live records with one key
 fail `render`. Bench records repeat a recipe by protocol (three processes per path, pooled by
 the renderer) and are outside this rule; their rule is that a label names exactly one
 (lanes, lineage): `add` refuses a bench record whose label is already in the ledger with
-another recipe, the caller picks a new label, and a ledger holding two recipes under one label
+another recipe, the caller picks a new label or reruns with the recipe it names (usually the
+missing `--lineage`), and a ledger holding two recipes under one label
 fails `render` rather than pooling them (issue #39). A resumed baseline
 run is not a measurement (its wall covers one segment, its batch cursors restarted from the
 seed, its SHA names only the last tree) and is refused at `add` with no override; a per-segment

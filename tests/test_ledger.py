@@ -495,12 +495,14 @@ def test_add_refuses_a_bench_label_naming_another_recipe(tmp_path: Path) -> None
     assert cli.main(["--root", str(root), "--results", str(results), "add", str(again), "--no-render"]) == 0
     assert len(schema.load(root)) == 2
     # `bench --config --label` is refused before its first process, not at `add` after the last: the
-    # "binary" here is the interpreter, which would fail loudly if a process were ever launched.
+    # "binary" here is the interpreter, which would fail loudly if a process were ever launched. The
+    # lineage matches, so the lanes alone are refused.
     cfg = tmp_path / "four.config"
     cfg.write_text("numOuterThreads 4\n")
     with pytest.raises(SystemExit, match="pick a new label"):
         cli.main(
-            ["--root", str(root), "bench", "--config", str(cfg), "--label", "ad_hoc", "--binary", sys.executable, "--stage-dir", str(tmp_path), "--allow-dirty"]
+            ["--root", str(root), "bench", "--config", str(cfg), "--label", "ad_hoc", "--lineage", "v1"]
+            + ["--binary", sys.executable, "--stage-dir", str(tmp_path), "--allow-dirty"]
         )
     assert len(schema.load(root)) == 2
 
@@ -720,6 +722,9 @@ def test_bench_cells_refuse_a_label_naming_two_recipes() -> None:
     four_lanes = bench_record("ad_hoc", "exact", 0.1, at=T0.replace(hour=13), lanes=4)
     with pytest.raises(ValueError, match="names two recipes"):
         bench_cells([one_lane, four_lanes])
+    v2 = bench_record("ad_hoc", "exact", 0.4, at=T0.replace(hour=13), lineage="v2")
+    with pytest.raises(ValueError, match="names two recipes"):
+        bench_cells([one_lane, v2])
 
 
 def test_prose_registry_regexes_each_match_once_in_the_live_documents() -> None:

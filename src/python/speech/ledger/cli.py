@@ -16,8 +16,9 @@ its own `supersedes` must name the live record of its key), copies the record to
 so the record and its table land in one commit. Bench records repeat a recipe by protocol
 (three processes per path) and are outside the one-live-record rule; their rule is that a label
 names exactly one (lanes, lineage): a bench record whose label is already in the ledger, or
-earlier in the batch, with another recipe is refused and the caller picks a new label (issue
-#39). `render --check` exits 1 with a diff when RESULTS.md does not hold what the ledger renders.
+earlier in the batch, with another recipe is refused and the caller picks a new label or reruns
+with the recipe it names, usually the missing `--lineage` (issue #39). `render --check` exits 1
+with a diff when RESULTS.md does not hold what the ledger renders.
 """
 
 from __future__ import annotations
@@ -87,7 +88,10 @@ def _check_label(labels: dict[str, tuple[int, Lineage | None]], label: str, reci
     """A label names one (lanes, lineage) (issue #39): claim it in `labels` or refuse."""
     known = labels.setdefault(label, recipe)
     if known != recipe:
-        raise SystemExit(f"{where}: label {label!r} already names (lanes, lineage) = {known}, this one is {recipe}; a label is one recipe, pick a new label")
+        raise SystemExit(
+            f"{where}: label {label!r} already names (lanes, lineage) = {known}, this one is {recipe}; "
+            "a label is one recipe, pick a new label or rerun with the recipe it names (a missing --lineage is the usual cause)"
+        )
 
 
 def bench(args: argparse.Namespace) -> list[Path]:
