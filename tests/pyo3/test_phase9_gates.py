@@ -101,7 +101,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.conftest import CORPUS_ROOT, requires_corpus
+from tests.conftest import CORPUS_ROOT, GateRecorder, requires_corpus
 
 pytest.importorskip("speech_rs")
 
@@ -318,7 +318,7 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
 @pytest.mark.slow
 @requires_corpus
 @pytest.mark.parametrize(("cell", "direction", "pack_len", "dead_expected"), _CONFIGS, ids=_IDS)
-def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, pack_len: int, dead_expected: int) -> None:
+def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, pack_len: int, dead_expected: int, gate_record: GateRecorder) -> None:
     """THE HARD LEG (spec S8.2 / S9.2): train this cell x direction from scratch on the
     10-file subset, then score a disjoint 24-file held-out slice END TO END through the T4
     DCF harness -- the trained pooled DCF must beat its own untrained init's, deterministically.
@@ -376,6 +376,7 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
     assert res.metadata_path.is_file()
     assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.xml"))) == res.n_test
     assert wall < 600.0, f"{cell}/{direction} gate took {wall:.0f}s, over the 10 min budget"
+    gate_record(res)
 
 
 # ------------------------------------------------------------------------------------- #

@@ -47,7 +47,7 @@ def test_launcher_recipes_parse_and_write_to_ignored_dirs() -> None:
         assert subprocess.run(["git", "check-ignore", "-q", str(out_dir / "base.config")], cwd=REPO).returncode == 0, argv
 
 
-@pytest.mark.parametrize("module", ["speech.drivers.baseline", "speech.cli"])
+@pytest.mark.parametrize("module", ["speech.drivers.baseline", "speech.cli", "speech.ledger"])
 def test_module_entry_runs(module: str) -> None:
     res = subprocess.run([sys.executable, "-m", module, "--help"], cwd=REPO, capture_output=True, text=True)
     assert res.returncode == 0 and res.stdout.startswith("usage: ") and f"-m {module} " in res.stdout.splitlines()[0], res.stdout

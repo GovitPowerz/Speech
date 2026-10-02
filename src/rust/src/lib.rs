@@ -36,3 +36,22 @@ pub use engine::corpus_processor::GradCheckReport;
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+/// Build provenance baked in by `build.rs`: the Cargo profile (`release` /
+/// `debug`), the target triple and the `rustc --version` line. The ledger
+/// (issue #20) records it with every number so a debug-profile measurement can
+/// be refused and a cross-target one told apart.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BuildInfo {
+    pub profile: &'static str,
+    pub target: &'static str,
+    pub rustc: &'static str,
+}
+
+pub fn build_info() -> BuildInfo {
+    BuildInfo {
+        profile: env!("SPEECH_BUILD_PROFILE"),
+        target: env!("SPEECH_BUILD_TARGET"),
+        rustc: env!("SPEECH_BUILD_RUSTC"),
+    }
+}
