@@ -568,6 +568,10 @@ def test_prose_registry_regexes_each_match_once_in_the_live_documents() -> None:
 def test_prose_derived_values_follow_the_stated_rounding() -> None:
     want = prose.derived(_four_legs())  # type: ignore[arg-type]
     assert want == {"sad_1dp": "4.6", "sad_range": "4.58-4.60", "lid_1dp": "3.5", "lid_range": "3.53-3.57"}
+    same = prose.derived(
+        [*_pair("phase7_60s", 0.3, 0.1), *_pair("phase7_sad_corpus", 0.6, 0.2), *_pair("phase7_lid_phseq", 0.3, 0.1), *_pair("phase7_lid_cep", 0.3, 0.1)]
+    )  # type: ignore[arg-type]
+    assert same["sad_range"] == "3.00" and same["lid_range"] == "3.00"
     assert prose.derived([bench_record()]) == {}  # type: ignore[list-item]
 
 

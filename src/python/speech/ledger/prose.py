@@ -5,8 +5,8 @@ that quote the Phase 7 speedups are registered here: file, a regex with one capt
 quoted number, and the derived values they must equal. The values come from the latest bench
 pair per leg on the most recently recording host. A one-decimal claim ("SAD 4.6x") is the
 lower of that task's two legs at one decimal (the conservative reading of "runs 4.6x faster");
-a range ("4.58-4.60x") is min-max over the legs at two decimals. RESULTS.md's Phase 7 prose is
-history and is not asserted.
+a range ("4.58-4.60x") is min-max over the legs at two decimals, collapsing to one value when
+both legs round the same. RESULTS.md's Phase 7 prose is history and is not asserted.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class Quote:
 
 QUOTES: tuple[Quote, ...] = (
     Quote("README.md", r"runs SAD (\d+\.\d)x and LID (\d+\.\d)x faster end to end", ("sad_1dp", "lid_1dp")),
-    Quote("README.md", r"\| SAD (\d+\.\d\d-\d+\.\d\d)x, LID (\d+\.\d\d-\d+\.\d\d)x end to end", ("sad_range", "lid_range")),
+    Quote("README.md", r"\| SAD (\d+\.\d\d(?:-\d+\.\d\d)?)x, LID (\d+\.\d\d(?:-\d+\.\d\d)?)x end to end", ("sad_range", "lid_range")),
     Quote("docs/ARCHITECTURE.md", r"runs SAD (\d+\.\d)x and LID (\d+\.\d)x faster end to end", ("sad_1dp", "lid_1dp")),
 )
 
@@ -46,8 +46,9 @@ def derived(records: list[Record]) -> dict[str, str]:
         values = [ratio[(leg, host)] for leg in legs if host is not None and (leg, host) in ratio]
         if len(values) != len(legs):
             return {}
+        lo, hi = f"{min(values):.2f}", f"{max(values):.2f}"
         out[f"{task}_1dp"] = f"{min(values):.1f}"
-        out[f"{task}_range"] = f"{min(values):.2f}-{max(values):.2f}"
+        out[f"{task}_range"] = lo if lo == hi else f"{lo}-{hi}"
     return out
 
 
