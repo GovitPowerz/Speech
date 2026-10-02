@@ -37,7 +37,7 @@ The SAD pitch second pass (Algo 3, `TDCwindow > 0`) repeats steps 4-6 on a perio
 5. `optimizers.Smorms3` takes the step (Octave-pinned bit-for-bit); optionally `batching` rotates a hard-example mini-batch listing per evaluation and rebuilds the engine against it.
 6. Per epoch, a forward-only validation on the held-out split with the moving `NNCostSeg` signal; early stop on patience; `best_<net>.bin` / `last_<net>.bin` / `train_history.json`.
 7. Held-out scoring: for SAD the engine dumps one VRCTS hypothesis per file and `evaluate.dcf` pools them per collar (the NIST perl scorer, ported value-for-value); for LID the `.scr` score files feed `evaluate.lid_error` and `evaluate.cavg`.
-8. `run_metadata.json` records seed, lane count, subset spec and config hash; a second run at the same seed is byte-identical, which the subset gates assert.
+8. `run_metadata.json` records seed, lane count, subset spec, config hash, and the git SHA + dirty flag of the tree the run started on (stamped before any listing is written, so a mid-run edit or commit never becomes the record's provenance and a git failure stops the run before its directory exists); a second run at the same seed is byte-identical, which the subset gates assert.
 
 The legacy outer loop (`quantum_pso` over the vec2struct genome, with the inner SMORMS3 hook) is kept as a second driver; since Phase 5 the genome carries DSP hyperparameters only, weights masked out permanently.
 

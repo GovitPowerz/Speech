@@ -356,11 +356,9 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     assert drawn == set(range(len(B._LANGS)))
 
 
-def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The lid-phseq dispatch (phSeq tree glob, 12-class Twin, File_Type 1, LID input 38) +
-    dry_run overrides + metadata, with the engine boundary stubbed. Proves run_baseline routes
-    the phonotactic arm through the shared LID path (both nets seeded, `.scr` scorer) without
-    touching the engine/corpus, and that the config it assembles carries File_Type 1."""
+def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, type]:
+    """A synthetic phSeq tree plus the engine boundary stubbed (a fake `speech_rs`, no seed packs, no
+    RunState, no scorer): `(corpus root, out dir, a train-result class for a `_train_fn` stub)`."""
     import sys
     import types
 
@@ -396,6 +394,15 @@ def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, mo
 
     out = tmp_path / "out"
     (out / "checkpoint").mkdir(parents=True)
+    return root, out, _Res
+
+
+def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lid-phseq dispatch (phSeq tree glob, 12-class Twin, File_Type 1, LID input 38) +
+    dry_run overrides + metadata, with the engine boundary stubbed. Proves run_baseline routes
+    the phonotactic arm through the shared LID path (both nets seeded, `.scr` scorer) without
+    touching the engine/corpus, and that the config it assembles carries File_Type 1."""
+    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
     res = B.run_baseline("lid-phseq", root, out, dry_run=True, seed=5, lanes=2, _train_fn=lambda state, seed, params: _Res())
 
     meta = json.loads((out / "run_metadata.json").read_text())
@@ -408,6 +415,40 @@ def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, mo
     assert "File_Type 1" in cfg_text and "BLSTM_LID_weightsFile lid_seed.bin" in cfg_text
     # listings carry the phseq stem.
     assert (out / "lre03_lid_phseq_train.flst").is_file()
+
+
+def test_run_baseline_records_the_provenance_of_the_tree_it_started_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #40: a commit made while the run trains must not become the record's SHA. The stub
+    trainer moves the tree's state mid-run; `record.json` and the manifest keep the start's."""
+    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+    tree = {"state": ("a" * 40, False)}
+    monkeypatch.setattr(B, "git_state", lambda repo: tree["state"])
+
+    def train_then_commit(state: object, seed: int, params: object) -> object:
+        tree["state"] = ("b" * 40, True)
+        return _Res()
+
+    res = B.run_baseline("lid-phseq", root, out, dry_run=True, _train_fn=train_then_commit)
+    record = json.loads((out / "record.json").read_text())
+    meta = json.loads(res.metadata_path.read_text())
+    assert (record["git_sha"], record["git_dirty"]) == ("a" * 40, False)
+    assert (meta["git_sha"], meta["git_dirty"]) == ("a" * 40, False)
+
+
+def test_run_baseline_fails_on_git_before_training(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #40: a tree whose provenance cannot be read stops the run before any training, and
+    before the run directory exists (no half-started run on disk)."""
+    root, _, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+
+    def no_git(repo: Path) -> tuple[str, bool]:
+        raise RuntimeError("git unavailable")
+
+    trained: list[int] = []
+    monkeypatch.setattr(B, "git_state", no_git)
+    out = tmp_path / "never_created"
+    with pytest.raises(RuntimeError, match="git unavailable"):
+        B.run_baseline("lid-phseq", root, out, dry_run=True, _train_fn=lambda state, seed, params: trained.append(seed))
+    assert trained == [] and not out.exists()
 
 
 def test_speech_cli_mounts_baseline_lid_phseq(monkeypatch: pytest.MonkeyPatch) -> None:

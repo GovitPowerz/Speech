@@ -71,7 +71,8 @@ confirming the plain feature was the training feature) is consistent with this c
 ### Seeds, determinism, N-lane parallelism
 
 - A single fixed seed drives init + subset sampling + the split; the run metadata
-  (`run_metadata.json`) records seed, N lanes, subset spec, and the config hash.
+  (`run_metadata.json`) records seed, N lanes, subset spec, the config hash, and the git
+  SHA + dirty flag of the tree the run started on (issue #40).
 - N-lane engine parallelism (`numOuterThreads`, `--lanes`): N=1 is the DETERMINISTIC PARITY
   mode (byte-identical to a sequential fold). N>1 is deterministic-but-N-dependent (the R6-4a
   static-lane model -- file `j` -> lane `j % N`, per-lane state chains diverge from N=1). The
@@ -214,7 +215,7 @@ uv run python -m speech.drivers.baseline lid-phseq --corpus-root data/LRE03-LRE0
 Omit `--subset` to train on the whole split (SAD: the full 70% train split of the 2066 wav/xml
 pairs; LID: the whole localized corpus); `--lanes N` sets the fold width (record N here);
 `--resume` continues from `<out-dir>/checkpoint`. The run writes `run_metadata.json`
-(seed/lanes/subset/config-hash/audio cap), `checkpoint/` (best/last packs + `train_history.json`),
+(seed/lanes/subset/config-hash/audio cap/start-of-run git SHA + dirty flag), `checkpoint/` (best/last packs + `train_history.json`),
 and the held-out scores -- LID `scores/` (`.scr`) -> `lid_error`/`cavg`; SAD `score_trained/`
 (VRCTS hyp xml) -> pooled `dcf`. Paste the resulting numbers into the `full run` rows above.
 
