@@ -1,9 +1,9 @@
 """The RESULTS.md tables rendered from the ledger (issue #20).
 
 Each renderer is a function over the loaded records, registered by the name a
-`<!-- ledger:table <name> -->` marker in RESULTS.md uses. Shared rules: a table takes the latest
-non-superseded record per recipe; a subset-gate row is the latest `gate` record of its
-(arm, lineage, cell, direction); a full-run row is one row per non-superseded full record (a
+`<!-- ledger:table <name> -->` marker in RESULTS.md uses. Shared rules: a table takes the one
+live (non-superseded) record per (source, recipe), two being an error, never a choice (issue
+#38); a subset-gate row is the latest `gate` record of its (arm, lineage, cell, direction); a full-run row is one row per non-superseded full record (a
 seed is part of the recipe, so seeds are rows, never averaged) and a single `TBD` row when none
 exists; every table ends with the hosts its rows came from and one footnote line per
 supersession chain. Prose around a table stays hand-written.
@@ -40,15 +40,20 @@ def table(name: str) -> Callable[[Renderer], Renderer]:
 
 
 def current_baselines(records: Iterable[Record]) -> list[BaselineRecord]:
-    """The latest non-superseded baseline record per (source, recipe), in recorded order: a
-    launcher run reproducing a gate's recipe must not evict the gate's row."""
+    """The one non-superseded baseline record per (source, recipe), in recorded order. Two live
+    records with one key is a ledger that bypassed `add` (issue #38): the renderer never
+    chooses between them, it raises."""
     base = [r for r in records if isinstance(r, BaselineRecord)]
     dead = superseded_ids(base)
-    latest: dict[tuple[object, ...], BaselineRecord] = {}
+    live: dict[tuple[object, ...], BaselineRecord] = {}
     for r in sorted(base, key=lambda r: (r.recorded_at, r.id)):
-        if r.id not in dead:
-            latest[(r.payload.source, *r.recipe.key())] = r
-    return list(latest.values())
+        if r.id in dead:
+            continue
+        key = r.key()
+        if key in live:
+            raise ValueError(f"two live records for one (source, recipe): {live[key].id} and {r.id}; the later one must supersede the earlier")
+        live[key] = r
+    return list(live.values())
 
 
 def gate_row(current: list[BaselineRecord], arm: str, lineage: str | None, cell: str, direction: str) -> BaselineRecord | None:

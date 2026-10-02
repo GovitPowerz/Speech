@@ -1,6 +1,6 @@
 # ADR-0009: Measurements are ledger records; RESULTS.md tables are rendered from them
 
-**Status:** accepted | **Date:** 2026-10-02 (issue #20, grilling outcome recorded there)
+**Status:** accepted | **Date:** 2026-10-02 (issue #20, grilling outcome recorded there); the one-live-record rule and schema evolution added 2026-10-02 (issue #38, grilling outcome recorded there)
 
 ## Context
 
@@ -17,7 +17,8 @@ Every measured number is a **record** in the **ledger**, `ledger/<kind>/<id>.jso
 file per record. A record is an envelope (schema version, when, git SHA and dirty flag, the
 build's profile, target and rustc, the host's hardware class, never a hostname) around a
 **recipe** (what was run: for a baseline the arm, lineage, cell, direction, split spec,
-training budget, seed and lane count; for a bench the label, path, lanes and lineage) and a
+training budget, seed, lane count and the listing the split was drawn from; for a bench the
+label, path, lanes and lineage) and a
 **payload** (what it measured). The recipe is the identity of a measurement; the config hash,
 SHA, build and host are provenance. Two kinds exist, `baseline` and `bench`; mutation-battery
 rows wait for #33 to settle their shape.
@@ -35,8 +36,32 @@ no full-run record renders a `TBD` row, so filling one is appending a record, no
 Supersession is append-only: the new record names the old one and the reason; the renderer
 hides the old row and footnotes the chain. Python owns the schema; Rust emits payloads only.
 
+One live record per (source, recipe) (issue #38). `add` refuses a baseline record whose
+(source, recipe) already has a non-superseded record unless `--supersede REASON` says why the
+copy replaces it; the predecessor is looked up per record and stamped on the copy, a record
+with no predecessor is added plainly, a measurement already in the ledger (plainly or as a
+stamped copy) is skipped, and a record carrying its own `supersedes` must name the live record
+of its key. The renderer never chooses: two live records with one key
+fail `render`. Bench records repeat a recipe by protocol (three processes per path, pooled by
+the renderer) and are outside this rule; a label naming one recipe is #39. A resumed baseline
+run is not a measurement (its wall covers one segment, its batch cursors restarted from the
+seed, its SHA names only the last tree) and is refused at `add` with no override; a per-segment
+provenance chain in the envelope is the additive design if one is ever needed. A localized 2015
+listing enters the recipe as the blake2b-8 of its bytes (`listing`; `None` for a split derived
+from the corpus tree), never as a path, which the hygiene validator forbids.
+
+Schema evolution. `load` reads exactly one schema version. A bump migrates every committed
+record through a script in the same commit: a JSON-level transform, validated by the new model,
+written under the new content-derived id with `recorded_at` kept and `supersedes` targets
+remapped, the old files removed, the tables re-rendered. Ids change, numbers never, and the
+script is deleted in the next commit. Schema 2 (issue #38) added `recipe.listing` and
+`payload.resumed` to the baseline record and re-keyed the 41 records then committed.
+
 The record is not the pin. ADR-0003's pins stay in the tests at measured times ten; a record
 says what was measured, a test says what is asserted, and the gate's node id links them.
+
+A RESULTS.md row cannot flip silently between two measurements: a second record for a live
+(source, recipe) names what it replaces and why, or is refused.
 
 ## Consequences
 

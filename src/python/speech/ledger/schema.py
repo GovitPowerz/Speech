@@ -7,6 +7,11 @@ launcher or a subset gate) and `bench` (one `speech bench --json` invocation). T
 identity: two records with one recipe are the same measurement taken twice, which is what
 `supersedes` is for; the config hash, SHA, build and host say how it was run, never which.
 
+Schema evolution (issue #38): `load` reads exactly one `SCHEMA_VERSION`. A bump migrates the
+committed records through a script in the same commit (a JSON-level transform, validated by the
+new model, written under the new content-derived id with `recorded_at` kept and `supersedes`
+targets remapped); ids change, numbers never, and the script is deleted in the next commit.
+
 License hygiene is a validator, not a review item: a record whose string fields name a file
 under the corpus root, or carry any absolute path, is rejected at construction. The record is
 the promotable subset of a run; `run_metadata.json` (which may hold `corpus_root`) never is.
@@ -29,7 +34,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPO = Path(__file__).resolve().parents[4]
 LEDGER_DIR = REPO / "ledger"
 # The corpus root's directory name (`tests/conftest.CORPUS_ROOT.name`, asserted equal there) and
@@ -37,7 +42,8 @@ LEDGER_DIR = REPO / "ledger"
 # segment is a concrete filename.
 CORPUS_ROOT_NAME = "LRE03-LRE07"
 CORPUS_FILE = re.compile(re.escape(CORPUS_ROOT_NAME) + r"/(?:[\w.-]+/)*[\w-]*\w\.\w+")
-ABSOLUTE_PATH = re.compile(r"^(/|[A-Za-z]:\\)")
+# Anywhere in a string (a supersession reason is free text), but not inside a relative path or a URL.
+ABSOLUTE_PATH = re.compile(r"(?<![\w.:/-])/(?!\s)|(?<!\w)[A-Za-z]:\\")
 
 Lineage = Literal["v1", "v2"]
 Arm = Literal["sad", "sad-v2", "lid-features", "lid-phseq"]
@@ -66,7 +72,9 @@ class Host(_Strict):
 
 class BaselineRecipe(_Strict):
     """What a `run_baseline` measurement is: the arm, lineage, cell and direction, the split
-    spec, the training budget, the seed and the lane count. `subset=None` is the full run."""
+    spec, the training budget, the seed, the lane count and the listing the split was drawn
+    from (`listing`: the blake2b-8 of a localized 2015 listing's bytes, never its path; `None`
+    when the records were derived from the corpus tree). `subset=None` is the full run."""
 
     arm: Arm
     lineage: Lineage | None
@@ -83,6 +91,7 @@ class BaselineRecipe(_Strict):
     init_scheme: str
     seed: int
     lanes: int
+    listing: str | None
 
     def key(self) -> tuple[object, ...]:
         return tuple(self.model_dump().values())
@@ -101,10 +110,13 @@ class CollarScore(_Strict):
 
 class BaselinePayload(_Strict):
     """What a `run_baseline` run measured. `source` says who ran it (the launcher or a subset
-    gate, with the gate's pytest node id); the pin stays in the test (ADR-0003)."""
+    gate, with the gate's pytest node id); the pin stays in the test (ADR-0003). `resumed` says
+    the call continued from `out_dir/checkpoint`: its `wall_s` covers one segment, its batch
+    cursors restarted and its provenance names only the last tree, so `add` refuses it."""
 
     source: Literal["launcher", "gate"]
     test: str | None
+    resumed: bool
     config_name: str
     config_hash: str
     n_train: int
@@ -163,7 +175,7 @@ class BenchPayload(_Strict):
 
 
 class RecordBase(_Strict):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     recorded_at: datetime
     git_sha: str
     git_dirty: bool
@@ -174,7 +186,7 @@ class RecordBase(_Strict):
 
     @model_validator(mode="after")
     def _hygiene(self) -> RecordBase:
-        hits = [s for s in _strings(self.model_dump(mode="json")) if CORPUS_FILE.search(s) or ABSOLUTE_PATH.match(s)]
+        hits = [s for s in _strings(self.model_dump(mode="json")) if CORPUS_FILE.search(s) or ABSOLUTE_PATH.search(s)]
         if hits:
             raise ValueError(f"a record may not name a corpus file or carry an absolute path: {hits}")
         if self.recorded_at.tzinfo is None or self.recorded_at.utcoffset() != UTC.utcoffset(None):
@@ -195,6 +207,11 @@ class BaselineRecord(RecordBase):
     kind: Literal["baseline"] = "baseline"
     recipe: BaselineRecipe
     payload: BaselinePayload
+
+    def key(self) -> tuple[object, ...]:
+        """The row identity: (source, recipe). A launcher run reproducing a gate's recipe is
+        another row, not a replacement; one live record per key (issue #38)."""
+        return (self.payload.source, *self.recipe.key())
 
 
 class BenchRecord(RecordBase):

@@ -1,14 +1,21 @@
 """`python -m speech.ledger`: promote records into the ledger and render RESULTS.md (issue #20).
 
-    python -m speech.ledger add [--allow-dirty] <record.json>...
+    python -m speech.ledger add [--allow-dirty] [--supersede REASON] <record.json>...
     python -m speech.ledger render [--check]
     python -m speech.ledger bench (--leg NAME | --config PATH --label L) [--path exact|fast|both] [--processes N]
 
 `add` is the one choke point between a run directory and the committed tree: it validates each
-record (schema and license hygiene), refuses a dirty-tree record unless told otherwise and a
-non-release build always, copies the record to `ledger/<kind>/<id>.json`, then renders so the
-record and its table land in one commit. `render --check` exits 1 with a diff when RESULTS.md
-does not hold what the ledger renders.
+record (schema and license hygiene), refuses a dirty-tree record unless told otherwise, a
+non-release build always and a resumed baseline run always, refuses a baseline record whose
+(source, recipe) already has a live record unless `--supersede REASON` names why the copy
+replaces it (the predecessor is looked up per record, in argument order within one batch, and
+stamped on the copy, which therefore gets a new id; a record with no predecessor is added
+plainly, one already in the ledger, plainly or as a stamped copy, is skipped, and one carrying
+its own `supersedes` must name the live record of its key), copies the record to
+`ledger/<kind>/<id>.json`, then renders
+so the record and its table land in one commit. Bench records repeat a recipe by protocol
+(three processes per path) and are outside the one-live-record rule; their label rule is issue
+#39. `render --check` exits 1 with a diff when RESULTS.md does not hold what the ledger renders.
 """
 
 from __future__ import annotations
@@ -20,12 +27,20 @@ from pathlib import Path
 
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
-from speech.ledger.schema import LEDGER_DIR, canonical_json, git_state, read_record, write_record
+from speech.ledger.schema import LEDGER_DIR, BaselineRecord, RecordBase, git_state, load, read_record, write_record
 from speech.ledger.stage import CORPUS_ROOT, LEGS
+from speech.ledger.tables import current_baselines
 
 
-def add(paths: list[Path], root: Path, *, allow_dirty: bool) -> list[Path]:
+def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | None = None) -> list[Path]:
     # Validate the whole batch before copying any of it, so a refusal leaves the ledger untouched.
+    if supersede is not None and not supersede.strip():
+        raise SystemExit("--supersede needs a reason")
+    records = load(root) if root.is_dir() else []
+    live = {r.key(): r for r in current_baselines(records)}
+    # `load` has refused a file whose content is not its name, so a matching unstamped id is the
+    # same measurement, whether it went in plainly or as a `--supersede` copy.
+    promoted = {_unstamped_id(r) for r in records}
     pending = []
     for path in paths:
         rec = read_record(path)
@@ -33,17 +48,34 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool) -> list[Path]:
             raise SystemExit(f"{path}: recorded on a dirty tree ({rec.git_sha[:12]}); pass --allow-dirty to promote it anyway")
         if rec.build.profile != "release":
             raise SystemExit(f"{path}: a {rec.build.profile!r} build is not a measurement; only release-profile records are promoted")
-        dest = root / rec.kind / f"{rec.id}.json"
-        if dest.exists():
-            if canonical_json(read_record(dest)) != canonical_json(rec):
-                raise SystemExit(f"{dest} exists with different content")
+        if isinstance(rec, BaselineRecord) and rec.payload.resumed:
+            raise SystemExit(
+                f"{path}: a resumed run is not a measurement (one segment's wall, restarted batch cursors, the last tree's SHA); re-run from scratch"
+            )
+        if _unstamped_id(rec) in promoted:
             continue
-        pending.append((rec, dest))
+        if isinstance(rec, BaselineRecord):
+            prev = live.get(rec.key())
+            if rec.supersedes is not None:
+                if prev is None or rec.supersedes != prev.id:
+                    raise SystemExit(f"{path}: supersedes {rec.supersedes}, which is not the live record of its (source, recipe)")
+            elif prev is not None:
+                if supersede is None:
+                    raise SystemExit(f"{path}: its (source, recipe) already has a live record {prev.id}; pass --supersede REASON to replace it")
+                # Through the validator, not `model_copy`: the reason is free text and the hygiene rule applies to it.
+                rec = BaselineRecord.model_validate({**rec.model_dump(mode="json"), "supersedes": prev.id, "reason": supersede})
+            live[rec.key()] = rec
+        promoted.add(_unstamped_id(rec))
+        pending.append((rec, root / rec.kind / f"{rec.id}.json"))
     added: list[Path] = []
     for rec, dest in pending:
         dest.parent.mkdir(parents=True, exist_ok=True)
         added.append(write_record(rec, dest))
     return added
+
+
+def _unstamped_id(rec: RecordBase) -> str:
+    return rec.model_copy(update={"supersedes": None, "reason": None}).id
 
 
 def bench(args: argparse.Namespace) -> list[Path]:
@@ -80,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     p_add = sub.add_parser("add", help="validate record files and copy them into the ledger, then render")
     p_add.add_argument("records", type=Path, nargs="+")
     p_add.add_argument("--allow-dirty", action="store_true", help="promote a record taken on a dirty tree")
+    p_add.add_argument("--supersede", metavar="REASON", default=None, help="a baseline record whose (source, recipe) is live replaces it, for this reason")
     p_add.add_argument("--no-render", action="store_true")
     p_render = sub.add_parser("render", help="rewrite the ledger tables (or --check that they are current)")
     p_render.add_argument("--check", action="store_true")
@@ -110,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "add":
-        for dest in add(args.records, args.root, allow_dirty=args.allow_dirty):
+        for dest in add(args.records, args.root, allow_dirty=args.allow_dirty, supersede=args.supersede):
             print(f"added {dest.relative_to(args.root.parent) if dest.is_relative_to(args.root.parent) else dest}")
         if args.no_render:
             return 0

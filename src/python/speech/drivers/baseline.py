@@ -654,6 +654,12 @@ def _config_hash(text: str) -> str:
     return hashlib.blake2b(text.encode(), digest_size=8).hexdigest()
 
 
+def listing_hash(path: Path) -> str:
+    """The recipe's `listing` (issue #38): the blake2b-8 of the source listing's bytes, the same
+    digest family as the record id, so a localized 2015 listing is identified without its path."""
+    return hashlib.blake2b(path.read_bytes(), digest_size=8).hexdigest()
+
+
 # --------------------------------------------------------------------------------------- #
 # The arm launcher
 # --------------------------------------------------------------------------------------- #
@@ -711,10 +717,12 @@ class BaselineResult:
             init_scheme=meta["init_scheme"],
             seed=meta["seed"],
             lanes=meta["lanes"],
+            listing=meta["lre_listing_hash"],
         )
         payload = BaselinePayload(
             source=source,
             test=test,
+            resumed=meta["resume"],
             config_name=meta["config_toml"],
             config_hash=meta["config_hash"],
             n_train=self.n_train,
@@ -852,6 +860,8 @@ def run_baseline(
     # net's own `BLSTM_LID_Cell_Type`/`_Direction` wiring is Task 5's.
     if arm in _LID_ARMS and (cell_type != "lstm" or direction != "bidirectional"):
         raise ValueError(f"--cell-type/--direction are SAD-arm knobs; arm {arm!r} trains only its LID net (Task 5 wires BLSTM_LID_*)")
+    if lre_listing is not None and arm in _SAD_ARMS:
+        raise ValueError(f"lre_listing is a LID-arm knob; the {arm} arm derives its split from the corpus tree and would ignore it")
 
     console = console or Console()
     # __file__ = <repo>/src/python/speech/drivers/baseline.py -> parents[4] = <repo>.
@@ -876,6 +886,8 @@ def run_baseline(
 
     t0 = time.time()
     console.log(f"[bold]baseline {arm}[/bold]: corpus={corpus_root} out={out_dir} subset={subset} lanes={lanes} seed={seed} dry_run={dry_run}")
+    if resume:
+        console.log("[yellow]resume[/yellow]: this call's record is not promotable (`ledger add` refuses a resumed run, issue #38)")
 
     # --- 1. listings + mapping (+ reference) synthesized under out_dir --------------------
     if arm in _SAD_ARMS:
@@ -985,6 +997,9 @@ def run_baseline(
             "resume": resume,
             "git_sha": git_sha,
             "git_dirty": git_dirty,
+            # The path is local-only (like `corpus_root`); the hash is what the recipe records.
+            "lre_listing": None if lre_listing is None else str(lre_listing),
+            "lre_listing_hash": None if lre_listing is None else listing_hash(lre_listing),
         },
     )
 

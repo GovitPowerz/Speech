@@ -56,11 +56,13 @@ def sad_gate(cell: str = "lstm", direction: str = "bidirectional", *, lineage: s
         init_scheme="xavier",
         seed=0,
         lanes=1,
+        listing=None,
     )
     recipe.update({k: v for k, v in over.items() if k in recipe})
     payload = BaselinePayload(
         source="gate",
         test=f"tests/pyo3/test_gates.py::test_gate[{cell}-{direction}]",
+        resumed=False,
         config_name=f"configs/training/{'lre_sad' if lineage == 'v1' else 'lre_sad_v2'}.toml",
         config_hash="0123456789abcdef",
         n_train=10,
@@ -157,6 +159,12 @@ def test_record_rejects_an_absolute_path() -> None:
         sad_gate(config_name="/Users/someone/Speech/configs/training/lre_sad.toml")
     with pytest.raises(ValidationError, match="absolute path"):
         sad_gate(test=r"C:\\runs\\gate.py::test")
+    # Free text carries a path anywhere in it; a relative path, a ratio or a URL is not one.
+    with pytest.raises(ValidationError, match="absolute path"):
+        sad_gate(reason="notes in /Users/someone/scratch/run.md", supersedes="x")
+    with pytest.raises(ValidationError, match="absolute path"):
+        sad_gate(reason="staged under (`/tmp/stage`)", supersedes="x")
+    sad_gate(reason="re-run of configs/training/lre_sad.toml, 1 / 2 lanes, see https://github.com/o/r/issues/38", supersedes="x")
 
 
 def test_record_rejects_naive_time_and_half_supersession() -> None:
@@ -244,13 +252,23 @@ def test_lineage_of_config_names() -> None:
 # --------------------------------------------------------------------------------------- #
 
 
-def test_current_baselines_takes_latest_per_recipe_and_drops_superseded() -> None:
+def test_current_baselines_follows_the_supersession_chain_and_refuses_two_live_records_per_key() -> None:
     old = sad_gate(at=T0)
-    newer = sad_gate(at=T0.replace(hour=13), wall_s=40.0)
+    newer = sad_gate(at=T0.replace(hour=13), wall_s=40.0, supersedes=old.id, reason="re-run on a newer tree")
     replaced = sad_gate(at=T0.replace(hour=14), wall_s=41.0, supersedes=newer.id, reason="re-measured after the mel fix")
     other = sad_gate("slstm", "forward")
     current = current_baselines([old, newer, replaced, other])
     assert {r.id for r in current} == {replaced.id, other.id}
+    # Two live records with one (source, recipe) is a ledger that bypassed `add`: the renderer never chooses.
+    with pytest.raises(ValueError, match="two live records"):
+        current_baselines([old, sad_gate(at=T0.replace(hour=13), wall_s=40.0)])
+
+
+def test_listing_is_part_of_the_recipe() -> None:
+    derived = lid_gate()
+    localized = lid_gate(at=T0.replace(hour=13), listing="0123456789abcdef")
+    assert derived.recipe.key() != localized.recipe.key()
+    assert {r.id for r in current_baselines([derived, localized])} == {derived.id, localized.id}
 
 
 def test_phase6_lid_table_renders_gate_init_and_tbd_rows() -> None:
@@ -357,6 +375,9 @@ def test_to_record_reads_the_recipe_from_run_metadata(tmp_path: Path) -> None:
         "corpus_root": str(CORPUS_ROOT),  # the manifest may hold it; the record must not
         "git_sha": "c" * 40,
         "git_dirty": False,
+        "lre_listing": None,
+        "lre_listing_hash": None,
+        "resume": False,
     }
     path = B.write_run_metadata(tmp_path, meta)
     rep = DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=1.0, dcf=0.25) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
@@ -395,13 +416,20 @@ def test_to_record_reads_the_recipe_from_run_metadata(tmp_path: Path) -> None:
         init_scheme="xavier",
         seed=3,
         lanes=1,
+        listing=None,
     )
+    assert rec.payload.resumed is False
     assert rec.payload.source == "gate" and rec.payload.first_val_cost is None and rec.payload.best_val_cost == 0.1
     assert rec.payload.first_train_cost == 0.6 and rec.payload.last_train_cost == 0.1 and rec.payload.wall_s == 15.5
     assert rec.payload.collar(0.5) == CollarScore(collar=0.5, dcf=0.25, pmiss=0.0, pfa=1.0) and rec.payload.init_dcf is None
     assert rec.git_sha == "c" * 40 and not rec.git_dirty, "the provenance is the run's start, read from the manifest"
     assert rec.host.cores > 0 and rec.build.profile in ("release", "debug", "unavailable")
     assert str(CORPUS_ROOT) not in schema.canonical_json(rec)
+    # A localized listing is its content hash in the recipe (never its path); a resumed call is flagged in the payload.
+    B.write_run_metadata(tmp_path, {**meta, "lre_listing": str(tmp_path / "lre03_train.csv"), "lre_listing_hash": "feedfacefeedface", "resume": True})
+    rec2 = res.to_record("launcher")
+    assert rec2.recipe.listing == "feedfacefeedface" and rec2.payload.resumed is True
+    assert str(tmp_path) not in schema.canonical_json(rec2)
 
 
 # --------------------------------------------------------------------------------------- #
@@ -421,10 +449,10 @@ def test_add_validates_copies_and_renders(tmp_path: Path) -> None:
     assert cli.main(["--root", str(root), "--results", str(results), "add", str(src)]) == 0
     assert (root / "baseline" / f"{rec.id}.json").is_file()
     assert "| subset gate (2026-10-02) | 35 / 15 / 48 | 72.92 |" in results.read_text()
-    # Idempotent on the same record, loud on a different one with the same id.
+    # Idempotent on the same record; a ledger file whose content is not its name is loud before any copy.
     assert cli.main(["--root", str(root), "--results", str(results), "add", str(src), "--no-render"]) == 0
     (root / "baseline" / f"{rec.id}.json").write_text(schema.write_record(lid_gate(wall_s=1.0), tmp_path / "other.json").read_text())
-    with pytest.raises(SystemExit, match="different content"):
+    with pytest.raises(ValueError, match="does not match the record id"):
         cli.main(["--root", str(root), "--results", str(results), "add", str(src), "--no-render"])
 
 
@@ -437,6 +465,66 @@ def test_add_refuses_dirty_and_non_release_records(tmp_path: Path) -> None:
     debug = schema.write_record(lid_gate(build=Build(profile="debug", target="x", rustc="rustc 1.0")), tmp_path / "debug.json")
     with pytest.raises(SystemExit, match="not a measurement"):
         cli.main(["--root", str(root), "--results", str(results), "add", str(debug), "--allow-dirty"])
+
+
+def test_add_refuses_a_resumed_record(tmp_path: Path) -> None:
+    root, results = tmp_path / "ledger", _results_with_markers(tmp_path / "RESULTS.md")
+    resumed = schema.write_record(lid_gate(resumed=True), tmp_path / "resumed.json")
+    with pytest.raises(SystemExit, match="resumed run is not a measurement"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(resumed), "--allow-dirty"])
+    assert not root.exists()
+
+
+def test_add_refuses_a_second_live_record_per_recipe_unless_superseding(tmp_path: Path) -> None:
+    root, results = tmp_path / "ledger", _results_with_markers(tmp_path / "RESULTS.md")
+    first = lid_gate()
+    rerun = lid_gate(at=T0.replace(hour=13), wall_s=40.0, git_sha="d" * 40)
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(schema.write_record(first, tmp_path / "first.json"))]) == 0
+    src = schema.write_record(rerun, tmp_path / "rerun.json")
+    with pytest.raises(SystemExit, match="already has a live record"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(src)])
+    assert [p.stem for p in (root / "baseline").glob("*.json")] == [first.id]
+    # The same recipe from another source is another row, not a duplicate.
+    launcher = schema.write_record(
+        rerun.model_copy(update={"payload": rerun.payload.model_copy(update={"source": "launcher", "test": None})}), tmp_path / "launcher.json"
+    )
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(launcher), "--no-render"]) == 0
+    # --supersede stamps the live predecessor and the reason on the copy; a record with no predecessor is added plainly.
+    fresh = schema.write_record(lid_gate("lid-phseq"), tmp_path / "fresh.json")
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(src), str(fresh), "--supersede", "gates re-run on d"]) == 0
+    stored = {r.recipe.arm: r for r in schema.load(root) if isinstance(r, BaselineRecord) and r.payload.source == "gate" and r.id != first.id}
+    assert stored["lid-features"].supersedes == first.id and stored["lid-features"].reason == "gates re-run on d"
+    assert stored["lid-features"].payload.wall_s == 40.0 and stored["lid-phseq"].supersedes is None
+    assert "Superseded: `" + first.id + "`" in results.read_text()
+    assert len(current_baselines(schema.load(root))) == 3
+    # The reason is free text: the hygiene validator applies to it, and an empty one is not a reason.
+    again = schema.write_record(lid_gate(at=T0.replace(hour=14), wall_s=41.0), tmp_path / "again.json")
+    with pytest.raises(ValidationError, match="absolute path"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(again), "--supersede", "/Users/x/notes.md"])
+    with pytest.raises(SystemExit, match="needs a reason"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(again), "--supersede", "  "])
+    assert len(schema.load(root)) == 4, "a refused batch leaves the ledger untouched"
+
+
+def test_add_skips_a_promoted_measurement_and_checks_a_carried_stamp(tmp_path: Path) -> None:
+    root, results = tmp_path / "ledger", _results_with_markers(tmp_path / "RESULTS.md")
+    first = schema.write_record(lid_gate(), tmp_path / "first.json")
+    # The same record twice in one batch is one measurement.
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(first), str(first), "--no-render"]) == 0
+    rerun = schema.write_record(lid_gate(at=T0.replace(hour=13), wall_s=40.0), tmp_path / "rerun.json")
+    for _ in range(2):  # re-running the command (a failed render, a reused stage dir) stamps nothing twice
+        assert cli.main(["--root", str(root), "--results", str(results), "add", str(first), str(rerun), "--supersede", "re-run", "--no-render"]) == 0
+    assert len(schema.load(root)) == 2
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(rerun), "--no-render"]) == 0
+    assert len(schema.load(root)) == 2
+    # A carried stamp must name the live record of its own (source, recipe), never another row's.
+    live_lid = current_baselines(schema.load(root))[0]
+    stray = lid_gate("lid-phseq", at=T0.replace(hour=14), supersedes=live_lid.id, reason="hand-stamped")
+    with pytest.raises(SystemExit, match="not the live record"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(schema.write_record(stray, tmp_path / "stray.json"))])
+    stamped = lid_gate(at=T0.replace(hour=15), wall_s=41.0, supersedes=live_lid.id, reason="hand-stamped")
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(schema.write_record(stamped, tmp_path / "stamped.json"))]) == 0
+    assert [r.id for r in current_baselines(schema.load(root))] == [stamped.id]
 
 
 def test_render_check_fails_on_a_stale_table_and_passes_after_render(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -465,6 +553,7 @@ def test_every_committed_record_validates_and_is_a_release_build() -> None:
     records = schema.load(LEDGER_DIR)
     assert records, "the ledger must hold the re-run gate records (ADR-0009)"
     for r in records:
+        assert r.schema_version == schema.SCHEMA_VERSION, r.id
         assert r.build.profile == "release", r.id
         assert len(r.git_sha) == 40, r.id
     ids = [r.id for r in records]
