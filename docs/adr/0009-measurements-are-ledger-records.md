@@ -39,7 +39,9 @@ hides the old row and footnotes the chain. Python owns the schema; Rust emits pa
 One live record per (source, recipe) (issue #38). `add` refuses a baseline record whose
 (source, recipe) already has a non-superseded record unless `--supersede REASON` says why the
 copy replaces it; the predecessor is looked up per record and stamped on the copy, a record
-with no predecessor is added plainly. The renderer never chooses: two live records with one key
+with no predecessor is added plainly, a measurement already in the ledger (plainly or as a
+stamped copy) is skipped, and a record carrying its own `supersedes` must name the live record
+of its key. The renderer never chooses: two live records with one key
 fail `render`. Bench records repeat a recipe by protocol (three processes per path, pooled by
 the renderer) and are outside this rule; a label naming one recipe is #39. A resumed baseline
 run is not a measurement (its wall covers one segment, its batch cursors restarted from the

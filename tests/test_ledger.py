@@ -159,6 +159,12 @@ def test_record_rejects_an_absolute_path() -> None:
         sad_gate(config_name="/Users/someone/Speech/configs/training/lre_sad.toml")
     with pytest.raises(ValidationError, match="absolute path"):
         sad_gate(test=r"C:\\runs\\gate.py::test")
+    # Free text carries a path anywhere in it; a relative path, a ratio or a URL is not one.
+    with pytest.raises(ValidationError, match="absolute path"):
+        sad_gate(reason="notes in /Users/someone/scratch/run.md", supersedes="x")
+    with pytest.raises(ValidationError, match="absolute path"):
+        sad_gate(reason="staged under (`/tmp/stage`)", supersedes="x")
+    sad_gate(reason="re-run of configs/training/lre_sad.toml, 1 / 2 lanes, see https://github.com/o/r/issues/38", supersedes="x")
 
 
 def test_record_rejects_naive_time_and_half_supersession() -> None:
@@ -498,6 +504,27 @@ def test_add_refuses_a_second_live_record_per_recipe_unless_superseding(tmp_path
     with pytest.raises(SystemExit, match="needs a reason"):
         cli.main(["--root", str(root), "--results", str(results), "add", str(again), "--supersede", "  "])
     assert len(schema.load(root)) == 4, "a refused batch leaves the ledger untouched"
+
+
+def test_add_skips_a_promoted_measurement_and_checks_a_carried_stamp(tmp_path: Path) -> None:
+    root, results = tmp_path / "ledger", _results_with_markers(tmp_path / "RESULTS.md")
+    first = schema.write_record(lid_gate(), tmp_path / "first.json")
+    # The same record twice in one batch is one measurement.
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(first), str(first), "--no-render"]) == 0
+    rerun = schema.write_record(lid_gate(at=T0.replace(hour=13), wall_s=40.0), tmp_path / "rerun.json")
+    for _ in range(2):  # re-running the command (a failed render, a reused stage dir) stamps nothing twice
+        assert cli.main(["--root", str(root), "--results", str(results), "add", str(first), str(rerun), "--supersede", "re-run", "--no-render"]) == 0
+    assert len(schema.load(root)) == 2
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(rerun), "--no-render"]) == 0
+    assert len(schema.load(root)) == 2
+    # A carried stamp must name the live record of its own (source, recipe), never another row's.
+    live_lid = current_baselines(schema.load(root))[0]
+    stray = lid_gate("lid-phseq", at=T0.replace(hour=14), supersedes=live_lid.id, reason="hand-stamped")
+    with pytest.raises(SystemExit, match="not the live record"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(schema.write_record(stray, tmp_path / "stray.json"))])
+    stamped = lid_gate(at=T0.replace(hour=15), wall_s=41.0, supersedes=live_lid.id, reason="hand-stamped")
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(schema.write_record(stamped, tmp_path / "stamped.json"))]) == 0
+    assert [r.id for r in current_baselines(schema.load(root))] == [stamped.id]
 
 
 def test_render_check_fails_on_a_stale_table_and_passes_after_render(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

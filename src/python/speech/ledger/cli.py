@@ -9,8 +9,10 @@ record (schema and license hygiene), refuses a dirty-tree record unless told oth
 non-release build always and a resumed baseline run always, refuses a baseline record whose
 (source, recipe) already has a live record unless `--supersede REASON` names why the copy
 replaces it (the predecessor is looked up per record, in argument order within one batch, and
-stamped on the copy, which therefore gets a new id and cannot be re-added plainly; a record with
-no predecessor is added plainly), copies the record to `ledger/<kind>/<id>.json`, then renders
+stamped on the copy, which therefore gets a new id; a record with no predecessor is added
+plainly, one already in the ledger, plainly or as a stamped copy, is skipped, and one carrying
+its own `supersedes` must name the live record of its key), copies the record to
+`ledger/<kind>/<id>.json`, then renders
 so the record and its table land in one commit. Bench records repeat a recipe by protocol
 (three processes per path) and are outside the one-live-record rule; their label rule is issue
 #39. `render --check` exits 1 with a diff when RESULTS.md does not hold what the ledger renders.
@@ -25,7 +27,7 @@ from pathlib import Path
 
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
-from speech.ledger.schema import LEDGER_DIR, BaselineRecord, git_state, load, read_record, write_record
+from speech.ledger.schema import LEDGER_DIR, BaselineRecord, RecordBase, git_state, load, read_record, write_record
 from speech.ledger.stage import CORPUS_ROOT, LEGS
 from speech.ledger.tables import current_baselines
 
@@ -34,7 +36,11 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | No
     # Validate the whole batch before copying any of it, so a refusal leaves the ledger untouched.
     if supersede is not None and not supersede.strip():
         raise SystemExit("--supersede needs a reason")
-    live = {r.key(): r for r in current_baselines(load(root))} if root.is_dir() else {}
+    records = load(root) if root.is_dir() else []
+    live = {r.key(): r for r in current_baselines(records)}
+    # `load` has refused a file whose content is not its name, so a matching unstamped id is the
+    # same measurement, whether it went in plainly or as a `--supersede` copy.
+    promoted = {_unstamped_id(r) for r in records}
     pending = []
     for path in paths:
         rec = read_record(path)
@@ -46,24 +52,30 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | No
             raise SystemExit(
                 f"{path}: a resumed run is not a measurement (one segment's wall, restarted batch cursors, the last tree's SHA); re-run from scratch"
             )
-        dest = root / rec.kind / f"{rec.id}.json"
-        if dest.exists():
-            continue  # the same content under the same id (`load` has already refused a file whose content is not its name)
+        if _unstamped_id(rec) in promoted:
+            continue
         if isinstance(rec, BaselineRecord):
             prev = live.get(rec.key())
-            if prev is not None:
+            if rec.supersedes is not None:
+                if prev is None or rec.supersedes != prev.id:
+                    raise SystemExit(f"{path}: supersedes {rec.supersedes}, which is not the live record of its (source, recipe)")
+            elif prev is not None:
                 if supersede is None:
                     raise SystemExit(f"{path}: its (source, recipe) already has a live record {prev.id}; pass --supersede REASON to replace it")
                 # Through the validator, not `model_copy`: the reason is free text and the hygiene rule applies to it.
                 rec = BaselineRecord.model_validate({**rec.model_dump(mode="json"), "supersedes": prev.id, "reason": supersede})
-                dest = root / rec.kind / f"{rec.id}.json"
             live[rec.key()] = rec
-        pending.append((rec, dest))
+        promoted.add(_unstamped_id(rec))
+        pending.append((rec, root / rec.kind / f"{rec.id}.json"))
     added: list[Path] = []
     for rec, dest in pending:
         dest.parent.mkdir(parents=True, exist_ok=True)
         added.append(write_record(rec, dest))
     return added
+
+
+def _unstamped_id(rec: RecordBase) -> str:
+    return rec.model_copy(update={"supersedes": None, "reason": None}).id
 
 
 def bench(args: argparse.Namespace) -> list[Path]:

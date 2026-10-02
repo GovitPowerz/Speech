@@ -10,7 +10,7 @@ identity: two records with one recipe are the same measurement taken twice, whic
 Schema evolution (issue #38): `load` reads exactly one `SCHEMA_VERSION`. A bump migrates the
 committed records through a script in the same commit (a JSON-level transform, validated by the
 new model, written under the new content-derived id with `recorded_at` kept and `supersedes`
-targets remapped); ids change, numbers never, and the script does not outlive its commit.
+targets remapped); ids change, numbers never, and the script is deleted in the next commit.
 
 License hygiene is a validator, not a review item: a record whose string fields name a file
 under the corpus root, or carry any absolute path, is rejected at construction. The record is
@@ -42,7 +42,8 @@ LEDGER_DIR = REPO / "ledger"
 # segment is a concrete filename.
 CORPUS_ROOT_NAME = "LRE03-LRE07"
 CORPUS_FILE = re.compile(re.escape(CORPUS_ROOT_NAME) + r"/(?:[\w.-]+/)*[\w-]*\w\.\w+")
-ABSOLUTE_PATH = re.compile(r"^(/|[A-Za-z]:\\)")
+# Anywhere in a string (a supersession reason is free text), but not inside a relative path or a URL.
+ABSOLUTE_PATH = re.compile(r"(?<![\w.:/-])/(?!\s)|(?<!\w)[A-Za-z]:\\")
 
 Lineage = Literal["v1", "v2"]
 Arm = Literal["sad", "sad-v2", "lid-features", "lid-phseq"]
@@ -185,7 +186,7 @@ class RecordBase(_Strict):
 
     @model_validator(mode="after")
     def _hygiene(self) -> RecordBase:
-        hits = [s for s in _strings(self.model_dump(mode="json")) if CORPUS_FILE.search(s) or ABSOLUTE_PATH.match(s)]
+        hits = [s for s in _strings(self.model_dump(mode="json")) if CORPUS_FILE.search(s) or ABSOLUTE_PATH.search(s)]
         if hits:
             raise ValueError(f"a record may not name a corpus file or carry an absolute path: {hits}")
         if self.recorded_at.tzinfo is None or self.recorded_at.utcoffset() != UTC.utcoffset(None):
