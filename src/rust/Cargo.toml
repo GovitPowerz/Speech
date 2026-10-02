@@ -6,6 +6,8 @@ name = "speech"
 version = "0.1.0"
 edition = "2024"
 description = "SAD + spoken Language Identification engine (Rust port of FastSpeechProcessing)"
+license = "Apache-2.0"
+repository = "https://github.com/GovitPowerz/Speech"
 
 [[bin]]
 name = "speech"

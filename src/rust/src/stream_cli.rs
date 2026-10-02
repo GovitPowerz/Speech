@@ -96,8 +96,10 @@ pub fn read_wav_pcm16_raw(path: &Path) -> Result<(f64, usize, Vec<f32>)> {
     }
 
     let samples: Vec<f32> = data
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| i16::from_le_bytes(pair) as f32 / 32768.0)
         .collect();
     Ok((sample_rate as f64, channels as usize, samples))
 }

@@ -190,8 +190,10 @@ pub fn read_wav_pcm16(path: &Path) -> (u32, u16, Vec<i16>) {
     );
 
     let samples = data
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| i16::from_le_bytes(pair))
         .collect();
     (sample_rate, channels, samples)
 }
