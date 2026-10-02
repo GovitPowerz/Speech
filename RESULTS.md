@@ -2,7 +2,7 @@
 
 The living record of the from-scratch SAD + LID baselines on the LRE03/07 corpus. Phase 6
 delivers the baseline PROTOCOL + machinery, subset-proven; the full-corpus headline numbers
-land when the user fires the offline launchers (`speech baseline <arm> ...`), and this file
+land when the user fires the offline launchers (`python -m speech.drivers.baseline <arm> ...`), and this file
 receives them as they complete. Every number here is REPRODUCIBLE at a fixed seed under the
 protocol below; nothing corpus-derived (no real filenames, paths, or feature tables) is
 committed -- the arms synthesize listings/mappings/references at runtime from `corpus_root`.
@@ -186,16 +186,16 @@ the full-run launcher's job (more data, more epochs).
 
 ```
 # LID features (Algo 6, Mode 7, cep)
-speech baseline lid-features --corpus-root data/LRE03-LRE07 --out-dir runs/lid_features_full \
+uv run python -m speech.drivers.baseline lid-features --corpus-root data/LRE03-LRE07 --out-dir runs/lid_features_full \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25
 
 # SAD (Algo 3 spectral, wav) -- --audio-max-duration lifts the subset gate's short cap; omit
 # it to score full-length recordings (the corpus wavs are 576-1800 s CallFriend files, median ~600 s).
-speech baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_full \
+uv run python -m speech.drivers.baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_full \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 
 # LID phonotactic (Algo 6, Mode 7, File_Type 1 phSeq) -- the 2015 flagship regime.
-speech baseline lid-phseq --corpus-root data/LRE03-LRE07 --out-dir runs/lid_phseq_full \
+uv run python -m speech.drivers.baseline lid-phseq --corpus-root data/LRE03-LRE07 --out-dir runs/lid_phseq_full \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25
 ```
 
@@ -207,7 +207,7 @@ and the held-out scores -- LID `scores/` (`.scr`) -> `lid_error`/`cavg`; SAD `sc
 (VRCTS hyp xml) -> pooled `dcf`. Paste the resulting numbers into the `full run` rows above.
 
 Known limitation (machinery): `forget_bias_one` (the LSTM forget-gate 1.0 init, default on) is
-threaded correctly through `ModernTrainParams` end to end but has NO CLI flag on `speech baseline`
+threaded correctly through `ModernTrainParams` end to end but has NO CLI flag on `python -m speech.drivers.baseline`
 -- only its default (`True`) is exercised; a `False` sweep would need the flag added.
 
 ---
@@ -680,7 +680,7 @@ spectral, File_Type 0 wav), same recipe (subset 10 / valid 8 / test 24, 3 epochs
 SMORMS3 steps, 20 s audio cap, seed 0, `val_metric=nn_cost_seg`), same end-to-end scorer
 (engine VRCTS hyp dumps + the `.part.xml` refs -> pooled `evaluate.dcf`). ONLY the cell and
 the direction differ, driven by the T4 `--cell-type` / `--direction` knobs on
-`speech baseline sad`. Measured 2026-07-28, Apple M4 Pro (arm64), macOS 26.5.2, N=1 lane.
+`python -m speech.drivers.baseline sad`. Measured 2026-07-28, Apple M4 Pro (arm64), macOS 26.5.2, N=1 lane.
 
 ONE RIDER on "only the cell and the direction differ", so the wall-time column below is not
 misread as a speed result: `--direction forward` necessarily changes TWO things, because a
@@ -840,7 +840,7 @@ over the same epochs. Only the held-out TASK metric is gated.
 
 ```
 # Any {lstm,slstm,mamba} x {bidirectional,forward} combination, same launcher as phase 6.
-speech baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_slstm_full \
+uv run python -m speech.drivers.baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_slstm_full \
     --cell-type slstm --direction bidirectional \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 ```
@@ -1450,12 +1450,12 @@ held-out TASK metric is gated.
 
 ```
 # Any {lstm,slstm,mamba,cfc} x {bidirectional,forward} combination on the v2 lineage.
-speech baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_cfc_full \
+uv run python -m speech.drivers.baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_cfc_full \
     --cell-type cfc --direction forward \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 ```
 
-Identical in every knob to the phase-9 `speech baseline sad` recipe -- ONLY the arm name
+Identical in every knob to the phase-9 `python -m speech.drivers.baseline sad` recipe -- ONLY the arm name
 changes, since `sad-v2` shares the entire SAD skeleton (`_SAD_ARMS`) and every size derives
 from the config. To answer the lineage question, fire the SAME cell x direction on both arms
 and compare; the live-capacity table above says the comparison is about init scaling and
@@ -2777,7 +2777,7 @@ gates (2, both now PASS -- the training/scoring cost is unchanged, only the crit
 
 ```
 # Either direction -- both now clear the ratified hard-leg criterion.
-speech baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_transformer_full \
+uv run python -m speech.drivers.baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_transformer_full \
     --cell-type transformer --direction bidirectional \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 ```
