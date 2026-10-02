@@ -264,10 +264,10 @@ _Avoid_: ledger for the per-task review notes under `.superpowers/`, which are t
 One ledger entry: an envelope (schema version, time, SHA, build, host) around a recipe and a payload. One JSON file, named by its content-derived id.
 
 **Recipe**:
-The identity of a measurement: what was run (arm, lineage, cell, direction, split spec, budget, seed, lanes for a baseline; label, path, lanes, lineage for a bench). Config hash, SHA, build and host are provenance, not recipe.
+The identity of a measurement: what was run (arm, lineage, cell, direction, split spec, budget, seed, lanes and the listing hash for a baseline; label, path, lanes, lineage for a bench). Config hash, SHA, build and host are provenance, not recipe. One live (non-superseded) record per (source, recipe): a second one supersedes the first with a reason or is refused at promotion.
 
 **Promotion**:
-`python -m speech.ledger add`: validating a producer's `record.json` and copying it into the ledger, then rendering. The only way a record enters the committed tree.
+`python -m speech.ledger add`: validating a producer's `record.json` and copying it into the ledger, then rendering. The only way a record enters the committed tree. Refuses a dirty tree (unless `--allow-dirty`), a non-release build, a resumed run, and a second live record per (source, recipe) unless `--supersede REASON`.
 
 **Task ledger**:
 The per-task review notes under `.superpowers/`, gitignored. Not the ledger.

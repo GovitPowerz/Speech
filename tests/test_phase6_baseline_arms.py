@@ -12,6 +12,7 @@ tree of empty `.plp8f0mvsdd` files) -- nothing from `data/LRE03-LRE07/` is read 
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from collections.abc import Callable
@@ -264,6 +265,21 @@ def test_parser_and_run_baseline_agree_on_every_knob_and_default() -> None:
     assert {name: ns[name] for name in defaults if name in ns} == {name: v for name, v in defaults.items() if name in ns}
 
 
+def test_listing_hash_is_blake2b_8_of_the_bytes(tmp_path: Path) -> None:
+    p = tmp_path / "listing.csv"
+    p.write_bytes(b"x,y\n1,2\n")
+    assert B.listing_hash(p) == hashlib.blake2b(b"x,y\n1,2\n", digest_size=8).hexdigest()
+    assert len(B.listing_hash(p)) == 16
+
+
+def test_sad_arm_refuses_a_listing_it_would_ignore(tmp_path: Path) -> None:
+    listing = tmp_path / "listing.csv"
+    listing.write_text("")
+    with pytest.raises(ValueError, match="lre_listing"):
+        B.run_baseline("sad", tmp_path / "corpus", tmp_path / "out", lre_listing=listing)
+    assert not (tmp_path / "out").exists()
+
+
 def test_unknown_arm_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown arm"):
         B.run_baseline("nonsense", tmp_path, tmp_path)
@@ -342,7 +358,17 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["seed"] == 5 and meta["lanes"] == 2
     assert meta["minibatch"] == 4 and meta["valid_size"] == 12 and meta["test_size"] == 24 and meta["score_init"] is True
+    assert meta["lre_listing"] is None and meta["lre_listing_hash"] is None and meta["resume"] is False
     assert res.n_train > 0  # a tiny subset was drawn from the synthetic tree
+
+    # A localized listing: the manifest keeps its path (local only) and its content hash (the recipe's `listing`).
+    listing = tmp_path / "lre03_train.csv"
+    listing.write_text("a,b\n")
+    monkeypatch.setattr(B, "localize_listing", lambda src, corpus_root, out: types.SimpleNamespace(rows_found=1, rows_total=1, rows_missing=0))
+    monkeypatch.setattr(B, "_records_from_localized", lambda localized, ref_stm: B.derive_lid_features_records(root, ref_stm))
+    B.run_baseline("lid-features", root, tmp_path / "out2", dry_run=True, lre_listing=listing, _train_fn=stub_train)
+    meta2 = json.loads((tmp_path / "out2" / "run_metadata.json").read_text())
+    assert meta2["lre_listing"] == str(listing) and meta2["lre_listing_hash"] == B.listing_hash(listing)
 
     # The mini-batch rotation built from these params draws every one of the 12 classes (the
     # multilingual layout parked class 11 in a never-read aggregate slot: `vie` never trained).

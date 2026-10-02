@@ -7,6 +7,11 @@ launcher or a subset gate) and `bench` (one `speech bench --json` invocation). T
 identity: two records with one recipe are the same measurement taken twice, which is what
 `supersedes` is for; the config hash, SHA, build and host say how it was run, never which.
 
+Schema evolution (issue #38): `load` reads exactly one `SCHEMA_VERSION`. A bump migrates the
+committed records through a script in the same commit (a JSON-level transform, validated by the
+new model, written under the new content-derived id with `recorded_at` kept and `supersedes`
+targets remapped); ids change, numbers never, and the script does not outlive its commit.
+
 License hygiene is a validator, not a review item: a record whose string fields name a file
 under the corpus root, or carry any absolute path, is rejected at construction. The record is
 the promotable subset of a run; `run_metadata.json` (which may hold `corpus_root`) never is.
@@ -29,7 +34,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPO = Path(__file__).resolve().parents[4]
 LEDGER_DIR = REPO / "ledger"
 # The corpus root's directory name (`tests/conftest.CORPUS_ROOT.name`, asserted equal there) and
@@ -66,7 +71,9 @@ class Host(_Strict):
 
 class BaselineRecipe(_Strict):
     """What a `run_baseline` measurement is: the arm, lineage, cell and direction, the split
-    spec, the training budget, the seed and the lane count. `subset=None` is the full run."""
+    spec, the training budget, the seed, the lane count and the listing the split was drawn
+    from (`listing`: the blake2b-8 of a localized 2015 listing's bytes, never its path; `None`
+    when the records were derived from the corpus tree). `subset=None` is the full run."""
 
     arm: Arm
     lineage: Lineage | None
@@ -83,6 +90,7 @@ class BaselineRecipe(_Strict):
     init_scheme: str
     seed: int
     lanes: int
+    listing: str | None
 
     def key(self) -> tuple[object, ...]:
         return tuple(self.model_dump().values())
@@ -101,10 +109,13 @@ class CollarScore(_Strict):
 
 class BaselinePayload(_Strict):
     """What a `run_baseline` run measured. `source` says who ran it (the launcher or a subset
-    gate, with the gate's pytest node id); the pin stays in the test (ADR-0003)."""
+    gate, with the gate's pytest node id); the pin stays in the test (ADR-0003). `resumed` says
+    the call continued from `out_dir/checkpoint`: its `wall_s` covers one segment, its batch
+    cursors restarted and its provenance names only the last tree, so `add` refuses it."""
 
     source: Literal["launcher", "gate"]
     test: str | None
+    resumed: bool
     config_name: str
     config_hash: str
     n_train: int
@@ -163,7 +174,7 @@ class BenchPayload(_Strict):
 
 
 class RecordBase(_Strict):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     recorded_at: datetime
     git_sha: str
     git_dirty: bool
