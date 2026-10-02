@@ -689,8 +689,9 @@ class BaselineResult:
 
     def to_record(self, source: Literal["launcher", "gate"], test: str | None = None) -> BaselineRecord:
         """The run as a ledger record (issue #20): the recipe read back from `run_metadata.json`
-        (the values that actually ran, after any dry-run rewrite), the metrics from this result,
-        the provenance stamped now. `run_baseline` writes the `launcher` record into the run
+        (the values that actually ran, after any dry-run rewrite) together with the git SHA and
+        dirty flag of the tree the run started on, the metrics from this result, the build and host
+        stamped now. `run_baseline` writes the `launcher` record into the run
         directory; a subset gate overwrites it with `source="gate"` and its pytest node id."""
         meta = json.loads(self.metadata_path.read_text())
         recipe = BaselineRecipe(
@@ -733,8 +734,15 @@ class BaselineResult:
             init_lid_error=_finite(self.init_lid_error),
             init_cavg=_finite(self.init_cavg),
         )
-        sha, dirty = git_state()
-        return BaselineRecord(recorded_at=now_utc(), git_sha=sha, git_dirty=dirty, build=seam_build_info(), host=host_info(), recipe=recipe, payload=payload)
+        return BaselineRecord(
+            recorded_at=now_utc(),
+            git_sha=meta["git_sha"],
+            git_dirty=meta["git_dirty"],
+            build=seam_build_info(),
+            host=host_info(),
+            recipe=recipe,
+            payload=payload,
+        )
 
 
 def _finite(x: float | None) -> float | None:
@@ -850,6 +858,9 @@ def run_baseline(
     # __file__ = <repo>/src/python/speech/drivers/baseline.py -> parents[4] = <repo>.
     repo_root = Path(__file__).resolve().parents[4]
     toml_path = repo_root / _ARM_CONFIGS[arm]
+    # The record's provenance is the tree the run STARTS on (issue #40): stamped after training it
+    # would name an edit or a commit made during the run, and a git failure would lose the run.
+    git_sha, git_dirty = git_state()
 
     # dry_run overrides -- arm-aware: SAD wav ingestion is slower per file than cep, so the
     # SAD smoke draws a smaller subset AND caps the audio short (else a 1-step smoke over
@@ -970,6 +981,8 @@ def run_baseline(
             "n_valid": len(valid_rec),
             "n_test": len(test_rec),
             "resume": resume,
+            "git_sha": git_sha,
+            "git_dirty": git_dirty,
         },
     )
 

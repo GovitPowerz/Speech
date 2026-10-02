@@ -348,6 +348,8 @@ def test_to_record_reads_the_recipe_from_run_metadata(tmp_path: Path) -> None:
         "config_hash": "feedface01234567",
         "config_toml": "configs/training/lre_sad_v2.toml",
         "corpus_root": str(CORPUS_ROOT),  # the manifest may hold it; the record must not
+        "git_sha": "c" * 40,
+        "git_dirty": False,
     }
     path = B.write_run_metadata(tmp_path, meta)
     rep = DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=1.0, dcf=0.25) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
@@ -390,7 +392,8 @@ def test_to_record_reads_the_recipe_from_run_metadata(tmp_path: Path) -> None:
     assert rec.payload.source == "gate" and rec.payload.first_val_cost is None and rec.payload.best_val_cost == 0.1
     assert rec.payload.first_train_cost == 0.6 and rec.payload.last_train_cost == 0.1 and rec.payload.wall_s == 15.5
     assert rec.payload.collar(0.5) == CollarScore(collar=0.5, dcf=0.25, pmiss=0.0, pfa=1.0) and rec.payload.init_dcf is None
-    assert len(rec.git_sha) == 40 and rec.host.cores > 0 and rec.build.profile in ("release", "debug", "unavailable")
+    assert rec.git_sha == "c" * 40 and not rec.git_dirty, "the provenance is the run's start, read from the manifest"
+    assert rec.host.cores > 0 and rec.build.profile in ("release", "debug", "unavailable")
     assert str(CORPUS_ROOT) not in schema.canonical_json(rec)
 
 
