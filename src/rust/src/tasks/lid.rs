@@ -1071,7 +1071,8 @@ impl TwinBlstmSpectralLid {
         self.lid_net.update_weights(derivs, cost);
     }
     /// `saveWeightsLID` (`:83-85`): the LID net writes with the caller's filename
-    /// PREFIXED by `LID_` (`_LIDBLSTMNeuralNetwork.saveWeights("LID_"+filename, ...)`).
+    /// PREFIXED by `LID_` (`_LIDBLSTMNeuralNetwork.saveWeights("LID_"+filename, ...)`),
+    /// on the basename (`io::prefix_basename`; the legacy glued it onto the whole string).
     pub fn save_weights_lid(
         &self,
         filename: &str,
@@ -1079,7 +1080,7 @@ impl TwinBlstmSpectralLid {
         stats: &InputStatistics,
     ) -> Result<()> {
         self.lid_net
-            .save_weights(&format!("LID_{filename}"), derivs, stats)
+            .save_weights(&crate::io::prefix_basename("LID_", filename), derivs, stats)
     }
 
     /// `Segmentation::compute_errors`, one call per channel (single-channel-container

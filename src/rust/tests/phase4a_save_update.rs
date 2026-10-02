@@ -24,14 +24,15 @@ fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
 }
 
-/// `save_and_update`'s `bestNNWeight_<pos+1>_<filename>` compose glues the prefix
-/// onto the WHOLE filename string (`BagOfProcessors.cpp:462-464`, a legacy quirk:
-/// see the doc on `BagOfProcessors::save_and_update`), so an absolute `filename`
-/// composes into a garbage relative path. The legacy always runs with a bare
-/// relative `filename` (e.g. `multiConfigResultsOutputFile`, default
-/// `MultiConfigResults.mat`) and a cwd == the run directory. These tests do the
-/// same: chdir into a tempdir for the artifact-producing calls. `set_current_dir`
-/// is process-global, so serialize with this mutex against `cargo test`'s default
+/// `save_and_update`'s `bestNNWeight_<pos+1>_<filename>` compose
+/// (`BagOfProcessors.cpp:462-464`) puts the prefix on the BASENAME
+/// (`io::prefix_basename`; the legacy glued it onto the whole string, FIXED --
+/// `tests/phase7_bench.rs::bench_runs_with_absolute_output_keys` owns the
+/// directory case). The legacy's production shape is a bare relative `filename`
+/// (e.g. `multiConfigResultsOutputFile`, default `MultiConfigResults.mat`) with
+/// cwd == the run directory, and these tests keep that shape: chdir into a
+/// tempdir for the artifact-producing calls. `set_current_dir` is
+/// process-global, so serialize with this mutex against `cargo test`'s default
 /// parallel threads.
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 

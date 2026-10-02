@@ -17,12 +17,16 @@ from pydantic import ValidationError
 from speech.drivers import baseline as B
 from speech.evaluate import CollarScore as EvalCollar
 from speech.evaluate import DcfReport
-from speech.ledger import cli, schema
+from speech.ledger import cli, prose, schema
+from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file, render_text, table_names
 from speech.ledger.schema import LEDGER_DIR, BaselinePayload, BaselineRecipe, BaselineRecord, BenchPayload, BenchRecipe, BenchRecord, Build, CollarScore, Host
-from speech.ledger.tables import TABLES, current_baselines
+from speech.ledger.stage import LEGS, sorted_first, stage_fixture_60s
+from speech.ledger.tables import TABLES, bench_cells, current_baselines, speedups
 
-from tests.conftest import CORPUS_ROOT
+from tests.conftest import CORPUS_ROOT, requires_corpus
+
+requires_binary = pytest.mark.skipif(not BINARY.is_file(), reason=f"release binary absent at {BINARY}")
 
 REPO = Path(__file__).resolve().parents[1]
 T0 = datetime(2026, 10, 2, 12, 0, 0, tzinfo=UTC)
@@ -105,16 +109,31 @@ def lid_gate(arm: str = "lid-features", **over: object) -> BaselineRecord:
     return r.model_copy(update={"recipe": recipe, "payload": payload})
 
 
-def bench_record() -> BenchRecord:
-    return BenchRecord(
-        recorded_at=T0,
-        git_sha="b" * 40,
+def bench_record(label: str = "phase7_60s", path: str = "fast", wall: float = 0.06, *, at: datetime = T0, sha: str = "b" * 40, **over: object) -> BenchRecord:
+    audio = {"phase7_60s": 120.0, "phase7_sad_corpus": 75.0, "phase7_lid_phseq": 42.54, "phase7_lid_cep": 32.65}.get(label, 10.0)
+    rec = BenchRecord(
+        recorded_at=at,
+        git_sha=sha,
         git_dirty=False,
         build=BUILD,
         host=HOST,
-        recipe=BenchRecipe(label="phase7_60s", path="fast", lanes=1, lineage="v1"),
-        payload=BenchPayload(repeat=1, config_hash="00ff00ff00ff00ff", runs=[dict(wall_s=0.06, audio_s=120.0, rtf=0.0005, maxrss_mb=46.0, files=1)]),  # type: ignore[list-item]
+        recipe=BenchRecipe(label=label, path=path, lanes=1, lineage="v1"),  # type: ignore[arg-type]
+        payload=BenchPayload(repeat=1, config_hash="00ff00ff00ff00ff", runs=[dict(wall_s=wall, audio_s=audio, rtf=wall / audio, maxrss_mb=46.0, files=1)]),  # type: ignore[list-item]
     )
+    return rec.model_copy(update=over) if over else rec
+
+
+def _pair(label: str, exact: float, fast: float, **over: object) -> list[BenchRecord]:
+    return [bench_record(label, "exact", exact, **over), bench_record(label, "fast", fast, **over)]  # type: ignore[arg-type]
+
+
+def _four_legs(**over: object) -> list[BenchRecord]:
+    return [
+        *_pair("phase7_60s", 0.2638, 0.0573, **over),
+        *_pair("phase7_sad_corpus", 0.1679, 0.03667, **over),
+        *_pair("phase7_lid_phseq", 0.0445, 0.0126, **over),
+        *_pair("phase7_lid_cep", 0.0339, 0.0095, **over),
+    ]
 
 
 # --------------------------------------------------------------------------------------- #
@@ -188,6 +207,25 @@ def test_bench_record_round_trips(tmp_path: Path) -> None:
     assert json.loads(path.read_text())["kind"] == "bench"
 
 
+def test_git_state_ignores_the_ledger_outputs_only() -> None:
+    # Only meaningful on a clean tree (CI, or a developer who committed); a dirty tree stays dirty either way.
+    sha, dirty_before = schema.git_state(REPO)
+    assert len(sha) == 40
+    probe = schema.LEDGER_DIR / "bench" / "_probe_untracked.json"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text("{}")
+    try:
+        assert schema.git_state(REPO)[1] == dirty_before, "an untracked file under ledger/ must not flip the dirty flag"
+    finally:
+        probe.unlink()
+    outside = REPO / "_probe_untracked.txt"
+    outside.write_text("")
+    try:
+        assert schema.git_state(REPO)[1] is True, "an untracked file outside the ledger outputs is dirt"
+    finally:
+        outside.unlink()
+
+
 def test_lineage_of_config_names() -> None:
     assert schema.lineage_of("configs/training/lre_sad.toml") == "v1"
     assert schema.lineage_of("configs/training/lre_sad_v2.toml") == "v2"
@@ -258,6 +296,19 @@ def test_supersession_footnote_hides_the_old_row() -> None:
     lines = TABLES["phase6_sad_v1"]([old, new])
     assert sum(line.startswith("| subset gate (") for line in lines) == 1
     assert lines[-1] == f"Superseded: `{old.id}` by `{new.id}` (re-run on main after the fixture change)."
+
+
+def test_supersession_footnote_names_each_link_of_a_chain() -> None:
+    a = sad_gate()
+    b = sad_gate(at=T0.replace(hour=13), wall_s=39.0, supersedes=a.id, reason="reason-b")
+    c = sad_gate(at=T0.replace(hour=14), wall_s=40.0, supersedes=b.id, reason="reason-c")
+    assert TABLES["phase6_sad_v1"]([a, b, c])[-2:] == [f"Superseded: `{b.id}` by `{c.id}` (reason-c).", f"Superseded: `{a.id}` by `{b.id}` (reason-b)."]
+
+
+def test_a_launcher_record_with_a_gates_recipe_keeps_the_gate_row() -> None:
+    gate = sad_gate()
+    launcher = sad_gate(at=T0.replace(hour=13), source="launcher", test=None)
+    assert TABLES["phase6_sad_v1"]([gate, launcher])[2].startswith("| subset gate (2026-10-02) |")
 
 
 def test_render_text_rewrites_between_markers_and_rejects_bad_markers() -> None:
@@ -425,3 +476,121 @@ def test_seam_build_info_has_the_three_fields() -> None:
     assert set(info) == {"profile", "target", "rustc"}
     assert info["profile"] in ("release", "debug") and info["target"] and info["rustc"].startswith("rustc ")
     assert schema.seam_build_info() == Build(**info)
+
+
+# --------------------------------------------------------------------------------------- #
+# Bench: stagers, the wrapper, the matrix renderer, the prose registry
+# --------------------------------------------------------------------------------------- #
+
+
+def test_stage_fixture_60s_writes_an_absolute_path_config(tmp_path: Path) -> None:
+    cfg = stage_fixture_60s(tmp_path, tmp_path / "no-corpus")
+    text = cfg.read_text()
+    assert (tmp_path / "prcts_excerpt.wav").is_file() and (tmp_path / "NNweights_config1.bin").is_file()
+    assert (tmp_path / "bench_listing.csv").read_text() == f"{tmp_path / 'prcts_excerpt.wav'}\n"
+    assert f"\nDump_Directory {tmp_path / 'vrcts_bench'}\n" in text and (tmp_path / "vrcts_bench").is_dir()
+    assert f"\nmultiConfigResultsOutputFile {tmp_path / 'bench_result.mat'}\n" in text
+    assert f"\nBLSTM_weightsFile {tmp_path / 'NNweights_config1.bin'}\n" in text
+    assert lanes_of(cfg) == 1
+
+
+def test_sorted_first_is_lexicographic_and_loud_when_absent(tmp_path: Path) -> None:
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b" / "a.wav").write_bytes(b"")
+    (tmp_path / "a" / "z.wav").write_bytes(b"")
+    assert sorted_first(tmp_path, "*.wav") == tmp_path / "a" / "z.wav"
+    with pytest.raises(FileNotFoundError, match="no \\*.phSeqbis"):
+        sorted_first(tmp_path, "*.phSeqbis")
+    with pytest.raises(FileNotFoundError, match="absent"):
+        sorted_first(tmp_path / "missing", "*.wav")
+
+
+def test_lanes_of_is_last_wins(tmp_path: Path) -> None:
+    cfg = tmp_path / "x.config"
+    cfg.write_text("numOuterThreads 8\nfoo 1\nnumOuterThreads 3\n")
+    assert lanes_of(cfg) == 3
+    cfg.write_text("foo 1\n")
+    assert lanes_of(cfg) == 1
+    toml = tmp_path / "x.toml"
+    toml.write_text("[engine]\nnum_outer_threads = 4\n")
+    assert lanes_of(toml) == 4
+
+
+def test_wrap_reads_the_build_from_the_document_and_strips_the_run_path() -> None:
+    doc = {
+        "label": "phase7_60s",
+        "path": "fast",
+        "repeat": 2,
+        "config_hash": "0123456789abcdef",
+        "build": {"profile": "release", "target": "aarch64-apple-darwin", "rustc": "rustc 1.99.0"},
+        "runs": [
+            {"path": "fast", "wall_s": 0.05, "audio_s": 120.0, "rtf": 0.0004, "maxrss_mb": 42.0, "files": 1},
+            {"path": "fast", "wall_s": 0.06, "audio_s": 120.0, "rtf": 0.0005, "maxrss_mb": 43.0, "files": 1},
+        ],
+    }
+    rec = wrap(doc, lineage="v1", lanes=1)
+    assert rec.kind == "bench" and rec.build.profile == "release" and rec.recipe == BenchRecipe(label="phase7_60s", path="fast", lanes=1, lineage="v1")
+    assert rec.payload.repeat == 2 and [r.wall_s for r in rec.payload.runs] == [0.05, 0.06]
+    assert len(rec.git_sha) == 40 and rec.host.cores > 0
+
+
+@requires_binary
+def test_fixture_leg_runs_through_the_binary(tmp_path: Path) -> None:
+    cfg = stage_fixture_60s(tmp_path, tmp_path / "no-corpus")
+    doc = bench_json(BINARY, cfg, "fast", "phase7_60s")
+    rec = wrap(doc, lineage="v1", lanes=lanes_of(cfg))
+    run = rec.payload.runs[0]
+    assert rec.recipe.label == "phase7_60s" and rec.recipe.path == "fast" and run.files == 1
+    assert abs(run.audio_s - 120.0) < 1.2 and run.wall_s > 0 and run.maxrss_mb > 1
+    assert str(tmp_path) not in schema.canonical_json(rec)
+
+
+@requires_binary
+@requires_corpus
+@pytest.mark.parametrize("label", ["phase7_sad_corpus", "phase7_lid_phseq", "phase7_lid_cep"])
+def test_corpus_legs_stage_and_run(tmp_path: Path, label: str) -> None:
+    leg = LEGS[label]
+    cfg = leg.stage(tmp_path, CORPUS_ROOT)
+    doc = bench_json(BINARY, cfg, "exact", label)
+    rec = wrap(doc, lineage=leg.lineage, lanes=lanes_of(cfg))
+    assert rec.payload.runs[0].audio_s > 0 and rec.payload.runs[0].files == 1
+    assert CORPUS_ROOT.name not in schema.canonical_json(rec)
+
+
+def test_bench_matrix_pairs_speedup_and_renders_tbd_for_missing_cells() -> None:
+    records = [*_pair("phase7_60s", 0.2638, 0.0573), bench_record("phase7_lid_cep", "exact", 0.0339)]
+    lines = TABLES["phase7_bench_matrix"](records)  # type: ignore[arg-type]
+    assert lines[0].startswith("| leg | audio_s | path | wall_s (mean [range], n) |")
+    assert lines[2] == "| SAD 60 s fixture (stereo) | 120.00 | exact | 0.2638 [0.2638-0.2638] (n=1) | 0.002198 | 46.000 | 0.3833 | baseline |"
+    assert lines[3] == "| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0573 [0.0573-0.0573] (n=1) | 0.000477 | 46.000 | 0.3833 | 4.60x |"
+    assert lines[4] == "| SAD corpus-gated (mono) | TBD | exact | TBD | TBD | TBD | TBD | TBD |"
+    assert lines[8].startswith("| LID cep corpus-gated (Twin M7) | 32.65 | exact |")
+    assert lines[9] == "| LID cep corpus-gated (Twin M7) | TBD | fast | TBD | TBD | TBD | TBD | TBD |"
+    assert lines[-1] == "Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0)."
+
+
+def test_bench_cells_pool_the_processes_of_the_latest_sha_only() -> None:
+    old = [bench_record("phase7_60s", "exact", 0.9, sha="c" * 40, at=T0.replace(day=1))]
+    new = [bench_record("phase7_60s", "exact", w, at=T0.replace(minute=i)) for i, w in enumerate((0.26, 0.27, 0.28))]
+    [cell] = bench_cells([*old, *new])
+    assert cell.git_sha == "b" * 40 and cell.walls == (0.26, 0.27, 0.28) and len(cell.records) == 3
+    assert speedups([cell]) == {}
+
+
+def test_prose_registry_regexes_each_match_once_in_the_live_documents() -> None:
+    assert [(q.file, n) for q, _, n in prose.matches(REPO) if n != 1] == []
+
+
+def test_prose_derived_values_follow_the_stated_rounding() -> None:
+    want = prose.derived(_four_legs())  # type: ignore[arg-type]
+    assert want == {"sad_1dp": "4.6", "sad_range": "4.58-4.60", "lid_1dp": "3.5", "lid_range": "3.53-3.57"}
+    same = prose.derived(
+        [*_pair("phase7_60s", 0.3, 0.1), *_pair("phase7_sad_corpus", 0.6, 0.2), *_pair("phase7_lid_phseq", 0.3, 0.1), *_pair("phase7_lid_cep", 0.3, 0.1)]
+    )  # type: ignore[arg-type]
+    assert same["sad_range"] == "3.00" and same["lid_range"] == "3.00"
+    assert prose.derived([bench_record()]) == {}  # type: ignore[list-item]
+
+
+def test_prose_quotes_match_the_ledger() -> None:
+    assert prose.check(schema.load(LEDGER_DIR)) == []

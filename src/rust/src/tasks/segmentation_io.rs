@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::segmentation::{SegClass, Segmentation};
 
@@ -395,7 +395,8 @@ pub fn to_vrcts_string(seg: &Segmentation, name: &str, path_attr: &str) -> Strin
 
 /// Write `seg` as single-channel VRCTS XML to `out`. Wraps [`to_vrcts_string`].
 pub fn write_vrcts(seg: &Segmentation, name: &str, path_attr: &str, out: &Path) -> Result<()> {
-    std::fs::write(out, to_vrcts_string(seg, name, path_attr))?;
+    std::fs::write(out, to_vrcts_string(seg, name, path_attr))
+        .with_context(|| format!("cannot write `{}`", out.display()))?;
     Ok(())
 }
 
@@ -427,7 +428,8 @@ pub fn write_vrcts_multichannel(
             p.push(".xml");
             std::path::PathBuf::from(p)
         };
-        std::fs::write(&path, content)?;
+        std::fs::write(&path, content)
+            .with_context(|| format!("cannot write `{}`", path.display()))?;
     }
     Ok(())
 }
@@ -690,6 +692,7 @@ pub fn to_ascii_string(seg: &Segmentation) -> String {
 
 /// Write `seg` as legacy ASCII to `out`. Wraps [`to_ascii_string`].
 pub fn write_ascii(seg: &Segmentation, out: &Path) -> Result<()> {
-    std::fs::write(out, to_ascii_string(seg))?;
+    std::fs::write(out, to_ascii_string(seg))
+        .with_context(|| format!("cannot write `{}`", out.display()))?;
     Ok(())
 }

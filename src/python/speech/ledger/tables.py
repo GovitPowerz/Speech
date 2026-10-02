@@ -11,9 +11,11 @@ supersession chain. Prose around a table stays hand-written.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass
 
 from speech.ledger.schema import BaselineRecord, BenchRecord, superseded_ids
+from speech.ledger.stage import LEGS
 
 Record = BaselineRecord | BenchRecord
 Renderer = Callable[[list[Record]], list[str]]
@@ -38,13 +40,14 @@ def table(name: str) -> Callable[[Renderer], Renderer]:
 
 
 def current_baselines(records: Iterable[Record]) -> list[BaselineRecord]:
-    """The latest non-superseded baseline record per recipe, in recorded order."""
+    """The latest non-superseded baseline record per (source, recipe), in recorded order: a
+    launcher run reproducing a gate's recipe must not evict the gate's row."""
     base = [r for r in records if isinstance(r, BaselineRecord)]
     dead = superseded_ids(base)
     latest: dict[tuple[object, ...], BaselineRecord] = {}
     for r in sorted(base, key=lambda r: (r.recorded_at, r.id)):
         if r.id not in dead:
-            latest[r.recipe.key()] = r
+            latest[(r.payload.source, *r.recipe.key())] = r
     return list(latest.values())
 
 
@@ -132,19 +135,23 @@ def _tbd(label: str, n: int) -> str:
     return "| " + " | ".join([label, *(["TBD"] * n)]) + " |"
 
 
-def _footer(rows: list[BaselineRecord], all_records: Iterable[Record]) -> list[str]:
-    """The hosts the rows came from, then one line per supersession chain touching them."""
+def host_key(r: Record) -> str:
+    return f"{r.host.chip} ({r.host.arch}, {r.host.cores} cores, {r.host.os})"
+
+
+def _footer(rows: Sequence[Record], all_records: Iterable[Record]) -> list[str]:
+    """The hosts the rows came from, then one line per supersession link in the chains touching
+    them, each naming the record that did the superseding and its reason."""
     lines: list[str] = []
-    hosts = sorted({f"{r.host.chip} ({r.host.arch}, {r.host.cores} cores, {r.host.os})" for r in rows})
+    hosts = sorted({host_key(r) for r in rows})
     if hosts:
         lines += ["", "Hosts: " + "; ".join(hosts) + "."]
     by_id = {r.id: r for r in all_records}
     for r in sorted(rows, key=lambda r: r.id):
-        old_id = r.supersedes
-        while old_id is not None:
-            lines.append(f"Superseded: `{old_id}` by `{r.id}` ({r.reason}).")
-            old = by_id.get(old_id)
-            old_id = old.supersedes if old is not None else None
+        cur: Record | None = r
+        while cur is not None and cur.supersedes is not None:
+            lines.append(f"Superseded: `{cur.supersedes}` by `{cur.id}` ({cur.reason}).")
+            cur = by_id.get(cur.supersedes)
     return lines
 
 
@@ -281,3 +288,121 @@ def phase10_v2_cells(records: list[Record]) -> list[str]:
 @table("phase11_v2_cells")
 def phase11_v2_cells(records: list[Record]) -> list[str]:
     return _cell_matrix(records, "sad-v2", "v2", [("transformer", d) for d in _BOTH], "transformer")
+
+
+# --------------------------------------------------------------------------------------- #
+# Phase 7: the exact-vs-fast bench matrix
+# --------------------------------------------------------------------------------------- #
+
+LEG_ORDER = tuple(LEGS)
+
+
+def current_benches(records: Iterable[Record]) -> list[BenchRecord]:
+    bench = [r for r in records if isinstance(r, BenchRecord)]
+    dead = superseded_ids(bench)
+    return [r for r in bench if r.id not in dead]
+
+
+@dataclass(frozen=True)
+class BenchCell:
+    """One (label, path, host) cell: the runs of every record sharing the latest SHA and build."""
+
+    label: str
+    path: str
+    host: str
+    git_sha: str
+    audio_s: float
+    files: int
+    walls: tuple[float, ...]
+    maxrss: tuple[float, ...]
+    records: tuple[BenchRecord, ...]
+
+    @property
+    def wall_mean(self) -> float:
+        return sum(self.walls) / len(self.walls)
+
+    @property
+    def maxrss_mean(self) -> float:
+        return sum(self.maxrss) / len(self.maxrss)
+
+
+def bench_cells(records: Iterable[Record]) -> list[BenchCell]:
+    """Group the current bench records by (label, path, host), keep the (SHA, build) group a
+    cell's most recent record belongs to, and pool that group's runs."""
+    by_cell: dict[tuple[str, str, str], list[BenchRecord]] = {}
+    for r in current_benches(records):
+        by_cell.setdefault((r.recipe.label, r.recipe.path, host_key(r)), []).append(r)
+    cells: list[BenchCell] = []
+    for (label, path, host), recs in by_cell.items():
+        newest = max(recs, key=lambda r: (r.recorded_at, r.id))
+        group = [r for r in recs if (r.git_sha, r.build) == (newest.git_sha, newest.build)]
+        runs = [run for r in group for run in r.payload.runs]
+        cells.append(
+            BenchCell(
+                label=label,
+                path=path,
+                host=host,
+                git_sha=newest.git_sha,
+                audio_s=runs[0].audio_s,
+                files=runs[0].files,
+                walls=tuple(run.wall_s for run in runs),
+                maxrss=tuple(run.maxrss_mb for run in runs),
+                records=tuple(sorted(group, key=lambda r: (r.recorded_at, r.id))),
+            )
+        )
+    return cells
+
+
+def speedups(cells: Iterable[BenchCell]) -> dict[tuple[str, str], float]:
+    """`(label, host) -> exact mean wall / fast mean wall` where both paths exist."""
+    by_key: dict[tuple[str, str], dict[str, BenchCell]] = {}
+    for c in cells:
+        by_key.setdefault((c.label, c.host), {})[c.path] = c
+    return {k: v["exact"].wall_mean / v["fast"].wall_mean for k, v in by_key.items() if "exact" in v and "fast" in v}
+
+
+def latest_host(cells: Iterable[BenchCell]) -> str | None:
+    """The host of the most recently recorded bench cell: the machine the prose speaks for."""
+    cells = list(cells)
+    if not cells:
+        return None
+    return max(cells, key=lambda c: max((r.recorded_at, r.id) for r in c.records)).host
+
+
+def _leg_name(label: str) -> str:
+    return LEGS[label].display if label in LEGS else label
+
+
+@table("phase7_bench_matrix")
+def phase7_bench_matrix(records: list[Record]) -> list[str]:
+    cells = bench_cells(records)
+    ratio = speedups(cells)
+    labels = [*LEG_ORDER, *sorted({c.label for c in cells} - set(LEG_ORDER))]
+    hosts = sorted({c.host for c in cells})
+    header = [
+        "| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    lines: list[str] = []
+    rows: list[BenchRecord] = []
+    for host in hosts or [None]:  # type: ignore[list-item]
+        if host is not None and len(hosts) > 1:
+            lines += [f"Host: {host}.", ""]
+        lines += header
+        for label in labels:
+            for path in ("exact", "fast"):
+                cell = next((c for c in cells if c.label == label and c.path == path and c.host == host), None)
+                if cell is None:
+                    lines.append(f"| {_leg_name(label)} | TBD | {path} | TBD | TBD | TBD | TBD | TBD |")
+                    continue
+                rows.extend(cell.records)
+                speed = "baseline" if path == "exact" else (f"{ratio[(label, host)]:.2f}x" if (label, host) in ratio else "n/a")
+                wall = f"{cell.wall_mean:.4f} [{min(cell.walls):.4f}-{max(cell.walls):.4f}] (n={len(cell.walls)})"
+                lines.append(
+                    f"| {_leg_name(label)} | {cell.audio_s:.2f} | {path} | {wall} | {cell.wall_mean / cell.audio_s:.6f} "
+                    f"| {cell.maxrss_mean:.3f} | {cell.maxrss_mean / cell.audio_s:.4f} | {speed} |"
+                )
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines + _footer(rows, records)

@@ -2,6 +2,7 @@
 
     python -m speech.ledger add [--allow-dirty] <record.json>...
     python -m speech.ledger render [--check]
+    python -m speech.ledger bench (--leg NAME | --config PATH --label L) [--path exact|fast|both] [--processes N]
 
 `add` is the one choke point between a run directory and the committed tree: it validates each
 record (schema and license hygiene), refuses a dirty-tree record unless told otherwise and a
@@ -14,14 +15,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
+from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
-from speech.ledger.schema import LEDGER_DIR, canonical_json, read_record, write_record
+from speech.ledger.schema import LEDGER_DIR, canonical_json, git_state, read_record, write_record
+from speech.ledger.stage import CORPUS_ROOT, LEGS
 
 
 def add(paths: list[Path], root: Path, *, allow_dirty: bool) -> list[Path]:
-    added: list[Path] = []
+    # Validate the whole batch before copying any of it, so a refusal leaves the ledger untouched.
+    pending = []
     for path in paths:
         rec = read_record(path)
         if rec.git_dirty and not allow_dirty:
@@ -33,9 +38,38 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool) -> list[Path]:
             if canonical_json(read_record(dest)) != canonical_json(rec):
                 raise SystemExit(f"{dest} exists with different content")
             continue
+        pending.append((rec, dest))
+    added: list[Path] = []
+    for rec, dest in pending:
         dest.parent.mkdir(parents=True, exist_ok=True)
         added.append(write_record(rec, dest))
     return added
+
+
+def bench(args: argparse.Namespace) -> list[Path]:
+    """Stage (a named leg, or the given config), run N fresh processes per path, wrap and write
+    one record each into the stage directory; the caller promotes them."""
+    if not args.allow_dirty and git_state()[1]:
+        raise SystemExit("the tree is dirty, so `add` would refuse every record; commit first or pass --allow-dirty")
+    stage_dir = Path(tempfile.mkdtemp(prefix="speech-bench-")) if args.stage_dir is None else args.stage_dir
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    if args.leg is not None:
+        leg = LEGS[args.leg]
+        config, label, lineage = leg.stage(stage_dir, args.corpus_root), leg.label, leg.lineage
+    else:
+        config, label, lineage = args.config, args.label, args.lineage
+    if not args.binary.is_file():
+        raise SystemExit(f"{args.binary} is not built (cargo build --release)")
+    lanes = lanes_of(config)
+    paths = ("exact", "fast") if args.path == "both" else (args.path,)
+    written: list[Path] = []
+    for path in paths:
+        for _ in range(args.processes):
+            rec = wrap(bench_json(args.binary, config, path, label), lineage=lineage, lanes=lanes)
+            written.append(write_record(rec, stage_dir / f"{rec.id}.json"))
+            run = rec.payload.runs[0]
+            print(f"{label} {path}: wall_s={run.wall_s:.4f} audio_s={run.audio_s:.2f} rtf={run.rtf:.6f} maxrss_mb={run.maxrss_mb:.3f}")
+    return written
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,7 +83,31 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--no-render", action="store_true")
     p_render = sub.add_parser("render", help="rewrite the ledger tables (or --check that they are current)")
     p_render.add_argument("--check", action="store_true")
+    p_bench = sub.add_parser("bench", help="run the Phase 7 bench protocol (N fresh processes per path) and promote the records")
+    which = p_bench.add_mutually_exclusive_group(required=True)
+    which.add_argument("--leg", choices=sorted(LEGS), help="a staged leg (the Phase 7 recipes, written down once)")
+    which.add_argument("--config", type=Path, help="an arbitrary config (then --label is required)")
+    p_bench.add_argument("--label", help="the recipe's name in the ledger (never a config path)")
+    p_bench.add_argument("--lineage", choices=("v1", "v2"), default=None, help="the SAD lineage of an arbitrary config (ADR-0008)")
+    p_bench.add_argument("--path", choices=("exact", "fast", "both"), default="both")
+    p_bench.add_argument("--processes", type=int, default=3, help="fresh processes per path (the Phase 7 protocol: 3)")
+    p_bench.add_argument("--binary", type=Path, default=BINARY)
+    p_bench.add_argument("--corpus-root", type=Path, default=CORPUS_ROOT)
+    p_bench.add_argument("--stage-dir", type=Path, default=None, help="where the staged config and the records go (default: a fresh temp dir)")
+    p_bench.add_argument("--allow-dirty", action="store_true")
+    p_bench.add_argument("--no-render", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.command == "bench":
+        if args.config is not None and not args.label:
+            parser.error("--config requires --label")
+        if args.processes < 1:
+            parser.error("--processes must be >= 1")
+        for dest in add(bench(args), args.root, allow_dirty=args.allow_dirty):
+            print(f"added {dest.relative_to(args.root.parent) if dest.is_relative_to(args.root.parent) else dest}")
+        if not args.no_render:
+            render_file(args.results, args.root)
+        return 0
 
     if args.command == "add":
         for dest in add(args.records, args.root, allow_dirty=args.allow_dirty):

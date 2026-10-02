@@ -1466,7 +1466,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   captured from compiled `istringstream >>` probes on the oracle env).
 
 - **[phase4a] `saveWeights` glues the `weights_`/`weightsDerivatives_` prefix to the WHOLE filename
-  string, not the basename** (`nn/blstm.rs::save_weights`, from `BLSTMNeuralNetwork.cpp:319-323`):
+  string, not the basename -- FIXED (ledger interstitial, commit `7a827ca`, all three sites)**
+  (`nn/blstm.rs::save_weights`, from `BLSTMNeuralNetwork.cpp:319-323`):
   `buf << "weights_%s" << filename` (and `buf2 << "weightsDerivatives_%s"`) string-concatenates the
   prefix before the ENTIRE path, so a `<filename>` of `/out/epoch995.mat` yields the sibling `.bin`
   path `weights_/out/epoch995.mat` -- the prefix does NOT respect path separators. In production
@@ -1518,6 +1519,44 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   in its own working directory instead of putting the directory in the key.
   Still pre-existing legacy naming, still UNTOUCHED (the fix candidate above is unchanged, and it
   is a two-call-site change with golden implications, not a bench-task edit).
+  **FIX (ledger interstitial, commit `7a827ca`, branch `feature/absolute-dump-directory`):** the
+  prefix goes on the BASENAME at all three sites, through one helper, `io::prefix_basename(prefix,
+  path)` -> `<dir>/<prefix><base>`: `engine/bag_of_processors.rs::save_and_update` for
+  `bestNNWeight_<n>_`, `nn/blstm.rs::save_weights` for `weights_`/`weightsDerivatives_`,
+  `tasks/lid.rs::save_weights_lid` for `LID_`. A bare basename composes byte-identically to the
+  legacy glue, which is why nothing re-pinned: `save_weights_writes_three_artifacts`,
+  `tier2_train_epoch_weights_golden`, `phase4a_save_update.rs` and `phase4b_corpus_lid.rs` all pass
+  bare names and keep their artifact names (their comments updated, their assertions not).
+  **Found a THIRD time** by the evidence-ledger bench staging (`speech.ledger.stage`, PR #36),
+  which had worked around it by keeping the two output keys relative and running the binary with
+  the staging directory as cwd; that workaround is removed (the stager writes absolute output keys
+  like its inputs, `bench_json` no longer pins the cwd). The bisect that preceded the fix, on the
+  staged 60 s fixture: an absolute `Dump_Directory` alone already worked (the VRCTS compose is
+  `{dir}/{base}`, `bag_of_processors.rs`); an absolute `multiConfigResultsOutputFile` alone failed,
+  from any cwd. **RED:** `tests/phase7_bench.rs::bench_runs_with_absolute_output_keys` (every path
+  key absolute, the binary spawned from a third, empty tempdir; asserts the `.mat`, its three
+  `bestNNWeight_1_`-prefixed siblings and both VRCTS files under the results directory, and an
+  empty cwd) failed before the fix with `Error: No such file or directory (os error 2)`;
+  `bench_names_the_unwritable_output_path` failed because that bare message named no path.
+  **Re-pin:** none moved (bare-name identity, above); the new tests and the two `io::tests` unit
+  cases are the pins. **Mutation** (`prefix_basename` body -> `format!("{prefix}{path}")`, the
+  legacy glue, release-built pins re-run, then reverted): `bench_runs_with_absolute_output_keys`
+  FAILS with ``cannot create `weights_bestNNWeight_1_/<tmp>/bench_result.mat`: No such file or
+  directory`` (the composed garbage path, now named) and `a_directory_stays_ahead_of_the_prefix`
+  fails; `bench_names_the_unwritable_output_path` stays green under it, as it should -- it owns
+  the diagnostic half only. **Diagnostic half:** the four file writers `.with_context` the path
+  (`io::binary::write_matrix`, `io::matfile::MatWriter::create`,
+  `tasks/segmentation_io.rs::write_vrcts{,_multichannel}`/`write_ascii`, the `CorpusProcessor::new`
+  truncation), so a results key under a missing directory dies naming
+  `<dir>/weights_bestNNWeight_1_<base>`, the first write. **THE RULE above is RETIRED:** a
+  results key may carry a directory, and the artifacts land in it. **Touch-class note
+  (ADR-0002):** `nn/blstm.rs` is an exact-tree file; the diff is filename plumbing with no
+  arithmetic, and `cargo test --release` stayed byte-green (1158 passed, 0 failed, 2 ignored;
+  `--all-features` likewise) -- the proof the ADR asks for. **Oracle divergence:** the
+  `tools/oracle_harness/` train stage still glues (it describes the legacy forever); the two
+  naming rules coincide on every bare name, the only shape the harness ever emits, so its
+  committed artifacts (`weights_bestNNWeight_1_tier2_spectral.mat` and siblings) stay the goldens
+  they were.
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning -- FIXED (phase 11 interstitial, commit `c02509e`)**

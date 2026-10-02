@@ -144,9 +144,6 @@ class BenchRecipe(_Strict):
     lanes: int
     lineage: Lineage | None
 
-    def key(self) -> tuple[object, ...]:
-        return tuple(self.model_dump().values())
-
 
 class BenchRun(_Strict):
     wall_s: float
@@ -260,9 +257,17 @@ def now_utc() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
 
 
+# The ledger's own outputs: a record under `ledger/` or a rendered RESULTS.md changes no
+# measurement, so promoting one leg must not make the next leg's record "dirty".
+LEDGER_OUTPUTS = ("ledger", "RESULTS.md")
+
+
 def git_state(repo: Path = REPO) -> tuple[str, bool]:
+    """`(HEAD sha, dirty)`, where dirty means any tracked change or untracked file outside the
+    ledger's own outputs (`LEDGER_OUTPUTS`)."""
     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
-    status = subprocess.run(["git", "status", "--porcelain"], cwd=repo, check=True, capture_output=True, text=True).stdout
+    pathspec = [".", *(f":(exclude){p}" for p in LEDGER_OUTPUTS)]
+    status = subprocess.run(["git", "status", "--porcelain", "--", *pathspec], cwd=repo, check=True, capture_output=True, text=True).stdout
     return sha, bool(status.strip())
 
 

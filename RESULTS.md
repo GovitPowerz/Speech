@@ -367,16 +367,28 @@ build. This is an inference-vs-inference comparison exactly AS CONFIGURED (the s
 paths are actually invoked elsewhere in this repo -- Image mode, backprop off), not a claim that
 the exact path has no backward-shaped allocations at all.
 
-| leg | audio_s | path | wall_s (mean [range]) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |
+The table below is RENDERED from the ledger (ADR-0009): every row is the latest three-process
+measurement per (leg, path, host), re-taken 2026-10-02 on the same Apple M4 Pro under macOS
+26.7.1 / rustc 1.99 through `python -m speech.ledger bench --leg <name>`. The reading that
+follows it refers to the ORIGINAL 2026-07 measurement (SAD 4.58-4.60x, LID 3.53-3.57x, macOS
+26.5.2) and is kept as history; the re-measure moved both paths' absolute walls (exact ~10-20%
+slower, fast ~10% slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, which the README and
+ARCHITECTURE prose now quote and `speech.ledger.prose` asserts.
+
+<!-- ledger:table phase7_bench_matrix -->
+| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
-| SAD 60 s fixture (stereo) | 120.00 | exact | 0.2638 [0.2588-0.2693] | 0.002198 | 55.641 | 0.4637 | baseline |
-| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0573 [0.0569-0.0580] | 0.000477 | 67.693 | 0.5641 | **4.60x** |
-| SAD corpus-gated (mono) | 75.00 | exact | 0.1679 [0.1626-0.1775] | 0.002238 | 53.656 | 0.7154 | baseline |
-| SAD corpus-gated (mono) | 75.00 | fast | 0.0366 [0.0364-0.0370] | 0.000489 | 68.459 | 0.9128 | **4.58x** |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0445 [0.0441-0.0450] | 0.001045 | 29.964 | 0.7044 | baseline |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0126 [0.0125-0.0127] | 0.000296 | 19.786 | 0.4651 | **3.53x** |
-| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0339 [0.0338-0.0340] | 0.001037 | 20.255 | 0.6204 | baseline |
-| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0095 [0.0095-0.0095] | 0.000291 | 11.979 | 0.3669 | **3.57x** |
+| SAD 60 s fixture (stereo) | 120.00 | exact | 0.3177 [0.3146-0.3215] (n=3) | 0.002647 | 57.182 | 0.4765 | baseline |
+| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0645 [0.0642-0.0648] (n=3) | 0.000537 | 43.521 | 0.3627 | 4.93x |
+| SAD corpus-gated (mono) | 75.00 | exact | 0.1996 [0.1963-0.2015] (n=3) | 0.002661 | 54.062 | 0.7208 | baseline |
+| SAD corpus-gated (mono) | 75.00 | fast | 0.0405 [0.0402-0.0409] (n=3) | 0.000539 | 39.281 | 0.5238 | 4.93x |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0538 [0.0527-0.0550] (n=3) | 0.001265 | 31.010 | 0.7290 | baseline |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0157 [0.0151-0.0167] (n=3) | 0.000368 | 20.547 | 0.4830 | 3.43x |
+| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0415 [0.0415-0.0416] (n=3) | 0.001272 | 21.979 | 0.6732 | baseline |
+| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0114 [0.0114-0.0115] (n=3) | 0.000350 | 13.495 | 0.4133 | 3.63x |
+
+Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
+<!-- ledger:end -->
 
 Reading -- speedup lands ABOVE the T6 Python-level scoring range (2.6-3.6x, warm-cache `.scr`/DCF
 scoring incl. PyO3 crossing + file I/O): 3.5-4.6x here, exactly the T6 report's own prediction
