@@ -111,7 +111,17 @@ def lid_gate(arm: str = "lid-features", **over: object) -> BaselineRecord:
     return r.model_copy(update={"recipe": recipe, "payload": payload})
 
 
-def bench_record(label: str = "phase7_60s", path: str = "fast", wall: float = 0.06, *, at: datetime = T0, sha: str = "b" * 40, **over: object) -> BenchRecord:
+def bench_record(
+    label: str = "phase7_60s",
+    path: str = "fast",
+    wall: float = 0.06,
+    *,
+    at: datetime = T0,
+    sha: str = "b" * 40,
+    lanes: int = 1,
+    lineage: str | None = "v1",
+    **over: object,
+) -> BenchRecord:
     audio = {"phase7_60s": 120.0, "phase7_sad_corpus": 75.0, "phase7_lid_phseq": 42.54, "phase7_lid_cep": 32.65}.get(label, 10.0)
     rec = BenchRecord(
         recorded_at=at,
@@ -119,7 +129,7 @@ def bench_record(label: str = "phase7_60s", path: str = "fast", wall: float = 0.
         git_dirty=False,
         build=BUILD,
         host=HOST,
-        recipe=BenchRecipe(label=label, path=path, lanes=1, lineage="v1"),  # type: ignore[arg-type]
+        recipe=BenchRecipe(label=label, path=path, lanes=lanes, lineage=lineage),  # type: ignore[arg-type]
         payload=BenchPayload(repeat=1, config_hash="00ff00ff00ff00ff", runs=[dict(wall_s=wall, audio_s=audio, rtf=wall / audio, maxrss_mb=46.0, files=1)]),  # type: ignore[list-item]
     )
     return rec.model_copy(update=over) if over else rec
@@ -467,6 +477,34 @@ def test_add_refuses_dirty_and_non_release_records(tmp_path: Path) -> None:
         cli.main(["--root", str(root), "--results", str(results), "add", str(debug), "--allow-dirty"])
 
 
+def test_add_refuses_a_bench_label_naming_another_recipe(tmp_path: Path) -> None:
+    root, results = tmp_path / "ledger", _results_with_markers(tmp_path / "RESULTS.md")
+    one_lane = bench_record("ad_hoc", "exact", 0.4)
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(schema.write_record(one_lane, tmp_path / "one_lane.json")), "--no-render"]) == 0
+    four_lanes = bench_record("ad_hoc", "fast", 0.1, at=T0.replace(hour=13), lanes=4)
+    with pytest.raises(SystemExit, match="pick a new label"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(schema.write_record(four_lanes, tmp_path / "four_lanes.json")), "--no-render"])
+    # Within one batch too, on the lineage alone, and a refused batch leaves the ledger untouched.
+    v1 = schema.write_record(bench_record("other", "exact", 0.4), tmp_path / "v1.json")
+    v2 = bench_record("other", "exact", 0.4, at=T0.replace(hour=13), lineage="v2")
+    with pytest.raises(SystemExit, match="pick a new label"):
+        cli.main(["--root", str(root), "--results", str(results), "add", str(v1), str(schema.write_record(v2, tmp_path / "v2.json")), "--no-render"])
+    assert [p.stem for p in (root / "bench").glob("*.json")] == [one_lane.id]
+    # The same recipe again under the label, another path or process, is the protocol.
+    again = schema.write_record(bench_record("ad_hoc", "fast", 0.1, at=T0.replace(hour=14), sha="d" * 40), tmp_path / "again.json")
+    assert cli.main(["--root", str(root), "--results", str(results), "add", str(again), "--no-render"]) == 0
+    assert len(schema.load(root)) == 2
+    # `bench --config --label` is refused before its first process, not at `add` after the last: the
+    # "binary" here is the interpreter, which would fail loudly if a process were ever launched.
+    cfg = tmp_path / "four.config"
+    cfg.write_text("numOuterThreads 4\n")
+    with pytest.raises(SystemExit, match="pick a new label"):
+        cli.main(
+            ["--root", str(root), "bench", "--config", str(cfg), "--label", "ad_hoc", "--binary", sys.executable, "--stage-dir", str(tmp_path), "--allow-dirty"]
+        )
+    assert len(schema.load(root)) == 2
+
+
 def test_add_refuses_a_resumed_record(tmp_path: Path) -> None:
     root, results = tmp_path / "ledger", _results_with_markers(tmp_path / "RESULTS.md")
     resumed = schema.write_record(lid_gate(resumed=True), tmp_path / "resumed.json")
@@ -675,6 +713,13 @@ def test_bench_cells_pool_the_processes_of_the_latest_sha_only() -> None:
     [cell] = bench_cells([*old, *new])
     assert cell.git_sha == "b" * 40 and cell.walls == (0.26, 0.27, 0.28) and len(cell.records) == 3
     assert speedups([cell]) == {}
+
+
+def test_bench_cells_refuse_a_label_naming_two_recipes() -> None:
+    one_lane = bench_record("ad_hoc", "exact", 0.4)
+    four_lanes = bench_record("ad_hoc", "exact", 0.1, at=T0.replace(hour=13), lanes=4)
+    with pytest.raises(ValueError, match="names two recipes"):
+        bench_cells([one_lane, four_lanes])
 
 
 def test_prose_registry_regexes_each_match_once_in_the_live_documents() -> None:

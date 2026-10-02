@@ -1,6 +1,6 @@
 # ADR-0009: Measurements are ledger records; RESULTS.md tables are rendered from them
 
-**Status:** accepted | **Date:** 2026-10-02 (issue #20, grilling outcome recorded there); the one-live-record rule and schema evolution added 2026-10-02 (issue #38, grilling outcome recorded there)
+**Status:** accepted | **Date:** 2026-10-02 (issue #20, grilling outcome recorded there); the one-live-record rule and schema evolution added 2026-10-02 (issue #38, grilling outcome recorded there); the bench label rule added 2026-10-02 (issue #39)
 
 ## Context
 
@@ -43,7 +43,10 @@ with no predecessor is added plainly, a measurement already in the ledger (plain
 stamped copy) is skipped, and a record carrying its own `supersedes` must name the live record
 of its key. The renderer never chooses: two live records with one key
 fail `render`. Bench records repeat a recipe by protocol (three processes per path, pooled by
-the renderer) and are outside this rule; a label naming one recipe is #39. A resumed baseline
+the renderer) and are outside this rule; their rule is that a label names exactly one
+(lanes, lineage): `add` refuses a bench record whose label is already in the ledger with
+another recipe, the caller picks a new label, and a ledger holding two recipes under one label
+fails `render` rather than pooling them (issue #39). A resumed baseline
 run is not a measurement (its wall covers one segment, its batch cursors restarted from the
 seed, its SHA names only the last tree) and is refused at `add` with no override; a per-segment
 provenance chain in the envelope is the additive design if one is ever needed. A localized 2015
