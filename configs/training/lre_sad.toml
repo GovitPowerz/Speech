@@ -27,7 +27,7 @@
 # sLSTM) in `RESULTS.md`'s "DEAD INPUT COLUMNS" note (Phase 9 Task 8), guarded by
 # `tests/pyo3/test_phase9_gates.py::test_init_is_trainable`. The one-variable fork that
 # DOES correct it (11-wide, zero dead columns, a new non-2015-comparable lineage) is
-# `lre_sad_v2.toml` / `speech baseline sad-v2` (Phase 10 spec S3). CostLaw is `log`
+# `lre_sad_v2.toml` / `python -m speech.drivers.baseline sad-v2` (Phase 10 spec S3). CostLaw is `log`
 # (the T7-verified derivative-consistent live path).
 #
 # DIVERGENCES from 1_worker_1.config (the complete list -- all RUNTIME/orchestration

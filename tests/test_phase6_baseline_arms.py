@@ -12,11 +12,16 @@ tree of empty `.plp8f0mvsdd` files) -- nothing from `data/LRE03-LRE07/` is read 
 
 from __future__ import annotations
 
+import inspect
 import json
+from collections.abc import Callable
 from pathlib import Path
 
+import numpy as np
 import pytest
+from speech.batching import create_batches, get_new_batch
 from speech.drivers import baseline as B
+from speech.drivers.state import ModernTrainParams
 
 # --------------------------------------------------------------------------------------- #
 # synthetic records
@@ -219,9 +224,44 @@ def test_speech_cli_mounts_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
     import speech.cli as cli
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    monkeypatch.setattr(B, "run_baseline", lambda **kw: captured.update(kw))
     rc = cli.main(["baseline", "lid-features", "--corpus-root", "/c", "--out-dir", "/o", "--subset", "12"])
     assert rc == 0 and captured["arm"] == "lid-features" and captured["subset"] == 12
+
+
+def _forwarded(monkeypatch: pytest.MonkeyPatch, entry: Callable[[list[str]], int], argv: list[str]) -> dict[str, object]:
+    captured: dict[str, object] = {}
+
+    def fake_run(arm: str, corpus_root: Path, out_dir: Path, **kw: object) -> None:
+        captured.update(arm=arm, corpus_root=corpus_root, out_dir=out_dir, **kw)
+
+    monkeypatch.setattr(B, "run_baseline", fake_run)
+    assert entry(argv) == 0
+    return captured
+
+
+def test_both_entries_forward_every_parser_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #28: the `speech.cli` mount dropped --cell-type/--direction. Both entries must hand
+    `run_baseline` the parsed namespace whole, so the parser is the one place a flag is defined."""
+    import speech.cli as cli
+
+    argv = ["sad", "--corpus-root", "/c", "--out-dir", "/o", "--cell-type", "cfc", "--direction", "forward"]
+    argv += ["--score-init", "--valid-size", "5", "--test-size", "7", "--minibatch", "3", "--lanes", "2"]
+    expected = vars(B.build_parser().parse_args(argv))
+    assert expected["cell_type"] == "cfc" and expected["direction"] == "forward" and expected["score_init"] is True
+    assert _forwarded(monkeypatch, B.main, argv) == expected
+    assert _forwarded(monkeypatch, cli.main, ["baseline", *argv]) == expected
+
+
+def test_parser_and_run_baseline_agree_on_every_knob_and_default() -> None:
+    """Both ways, so neither a flag without a parameter nor a parameter without a flag (how
+    --valid-size/--test-size/--minibatch/--score-init went missing, issue #28) can land, and
+    the defaults live in agreement so the CLI and a direct call train the same run."""
+    ns = vars(B.build_parser().parse_args(["sad", "--corpus-root", "/c", "--out-dir", "/o"]))
+    params = inspect.signature(B.run_baseline).parameters
+    assert set(ns) == set(params) - {"console", "_train_fn"}
+    defaults = {name: p.default for name, p in params.items() if p.default is not inspect.Parameter.empty}
+    assert {name: ns[name] for name in defaults if name in ns} == {name: v for name, v in defaults.items() if name in ns}
 
 
 def test_unknown_arm_rejected(tmp_path: Path) -> None:
@@ -290,12 +330,30 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
 
     out = tmp_path / "out"
     (tmp_path / "out" / "checkpoint").mkdir(parents=True)
-    res = B.run_baseline("lid-features", root, out, dry_run=True, seed=5, lanes=2, _train_fn=lambda state, seed, params: _Res())
+    seen: list[ModernTrainParams] = []
+
+    def stub_train(state: object, seed: int, params: ModernTrainParams) -> _Res:
+        seen.append(params)
+        return _Res()
+
+    res = B.run_baseline("lid-features", root, out, dry_run=True, seed=5, lanes=2, minibatch=4, score_init=True, _train_fn=stub_train)
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["seed"] == 5 and meta["lanes"] == 2
+    assert meta["minibatch"] == 4 and meta["valid_size"] == 12 and meta["test_size"] == 24 and meta["score_init"] is True
     assert res.n_train > 0  # a tiny subset was drawn from the synthetic tree
+
+    # The mini-batch rotation built from these params draws every one of the 12 classes (the
+    # multilingual layout parked class 11 in a never-read aggregate slot: `vie` never trained).
+    params = seen[0]
+    fv = np.repeat(np.arange(len(B._LANGS), dtype=np.float64), 3).reshape(-1, 1)
+    batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, np.random.default_rng(0))
+    drawn: set[int] = set()
+    for _ in range(20):
+        idx, batches = get_new_batch(batches)
+        drawn.update(int(fv[i, 0]) for i in idx)
+    assert drawn == set(range(len(B._LANGS)))
 
 
 def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,7 +414,7 @@ def test_speech_cli_mounts_baseline_lid_phseq(monkeypatch: pytest.MonkeyPatch) -
     import speech.cli as cli
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    monkeypatch.setattr(B, "run_baseline", lambda **kw: captured.update(kw))
     rc = cli.main(["baseline", "lid-phseq", "--corpus-root", "/c", "--out-dir", "/o", "--subset", "24"])
     assert rc == 0 and captured["arm"] == "lid-phseq" and captured["subset"] == 24
 
@@ -508,6 +566,6 @@ def test_speech_cli_mounts_baseline_sad(monkeypatch: pytest.MonkeyPatch) -> None
     import speech.cli as cli
 
     captured: dict[str, object] = {}
-    monkeypatch.setattr(cli, "run_baseline", lambda arm, cr, od, **kw: captured.update({"arm": arm, **kw}) or None)
+    monkeypatch.setattr(B, "run_baseline", lambda **kw: captured.update(kw))
     rc = cli.main(["baseline", "sad", "--corpus-root", "/c", "--out-dir", "/o", "--audio-max-duration", "25.0"])
     assert rc == 0 and captured["arm"] == "sad" and captured["audio_max_duration"] == 25.0

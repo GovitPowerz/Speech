@@ -304,13 +304,13 @@ def twin_config(name: str) -> str:
 
 def twin_mode7_config(name: str, cell: str = "slstm") -> str:
     """The SECOND LID fixture: the same cell swap in the LIVE phase-6 regime (Mode 7 phSeq,
-    the one `speech baseline lid-phseq` trains), cloned from the committed phase-4b
+    the one `python -m speech.drivers.baseline lid-phseq` trains), cloned from the committed phase-4b
     `twin_train.config` with `Epochs 0` so `Engine.run()` is one forward+backward fold at
     theta rather than the engine-internal training loop (the F11 convention).
 
     It is kept on its own merits, NOT (as an earlier draft claimed) because mode 5 cannot
     reach the folded gradient -- that was the stripped-key artifact, see [`twin_config`].
-    Mode 7 is the regime `speech baseline lid-phseq` actually trains, and it exercises a
+    Mode 7 is the regime `python -m speech.drivers.baseline lid-phseq` actually trains, and it exercises a
     structurally different LID path: one-hot phSeq `external_features` instead of wav, and a
     FROZEN SAD net (`BLSTM_BackPropagationActivated false`), so `grad_check` visits the LID
     net alone. Mode 5 is the two-nets-live regime. Neither covers the other.

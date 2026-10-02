@@ -2,7 +2,8 @@
 
 Ported from the legacy MATLAB run scripts (`Init_BLSTM.m` / `Train_BLSTM.m` /
 `ReTrain_BLSTM.m` / `Test_BLSTM.m`), which were separate top-level scripts; here they are
-`init`/`train`/`retrain`/`test` subcommands dispatching to `speech.drivers`.
+`init`/`train`/`retrain`/`test` subcommands dispatching to `speech.drivers`, plus the
+`baseline` arms (`uv run python -m speech.cli <subcommand> ...`).
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import argparse
 from pathlib import Path
 
 from speech.drivers.baseline import build_parser as _baseline_parser
-from speech.drivers.baseline import run_baseline
+from speech.drivers.baseline import run_baseline_from_args
 from speech.drivers.init import init_run
 from speech.drivers.retrain import retrain
 from speech.drivers.state import RunState
@@ -20,7 +21,7 @@ from speech.drivers.train import train
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="speech", description="BLSTM SAD/LID optimizer orchestrator")
+    parser = argparse.ArgumentParser(description="BLSTM SAD/LID optimizer orchestrator")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="parse a config into a run state")
@@ -45,34 +46,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Dispatch to the init/train/retrain/test drivers. Returns a process exit code."""
+    """Dispatch to the init/train/retrain/test/baseline drivers. Returns a process exit code."""
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
-    except SystemExit:
-        return 2
+    except SystemExit as e:  # argparse's own code: 0 for --help, 2 for a usage error
+        return int(e.code or 0)
 
     if args.command == "init":
         init_run(args.config, args.out_dir)
         return 0
 
     if args.command == "baseline":
-        run_baseline(
-            args.arm,
-            args.corpus_root,
-            args.out_dir,
-            resume=args.resume,
-            lanes=args.lanes,
-            subset=args.subset,
-            dry_run=args.dry_run,
-            seed=args.seed,
-            epochs=args.epochs,
-            patience=args.patience,
-            steps_per_epoch=args.steps_per_epoch,
-            init_scheme=args.init_scheme,
-            lre_listing=args.lre_listing,
-            audio_max_duration=args.audio_max_duration,
-        )
+        # Drop this parser's own dest; what remains is `build_parser()`'s namespace, forwarded whole.
+        del args.command
+        run_baseline_from_args(args)
         return 0
 
     state = RunState.load(Path(args.out_dir) / "run_state.json")
@@ -86,3 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         evaluate(state, args.checkpoint)
         return 0
     return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

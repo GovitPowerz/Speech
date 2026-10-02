@@ -870,7 +870,7 @@ def test_transformer_key_bias_block_is_output_inert(name: str, tmp_path: Path) -
 #   * Mode 5 (wav) is the two-nets-live regime -- BOTH nets backprop-active, so `grad_check`
 #     visits the legacy-LSTM SAD net AND the swapped sLSTM LID net, and the block probe can
 #     finite-difference the LID net's own cost columns (`14 / len-2`).
-#   * Mode 7 (phSeq) is the LIVE regime `speech baseline lid-phseq` trains: one-hot
+#   * Mode 7 (phSeq) is the LIVE regime `python -m speech.drivers.baseline lid-phseq` trains: one-hot
 #     `external_features` instead of wav, and a FROZEN SAD net, so `grad_check` visits the
 #     LID net alone.
 #
@@ -1107,7 +1107,7 @@ def test_twin_mode7_lid_packs_load_and_roundtrip(name: str, tmp_path: Path) -> N
 @pytest.mark.parametrize("name", MODE7_TWINS)
 def test_twin_mode7_lid_grad_check(name: str, tmp_path: Path) -> None:
     """S8.3 in the LIVE regime: the same cell swap under Mode 7 phSeq (what
-    `speech baseline lid-phseq` trains). The Mode-7 contract freezes the SAD net, so
+    `python -m speech.drivers.baseline lid-phseq` trains). The Mode-7 contract freezes the SAD net, so
     `grad_check` visits the swapped LID net ALONE -- exactly one report, which is itself part
     of the pin (a second report would mean the frozen-SAD contract moved).
 
