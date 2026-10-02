@@ -59,3 +59,6 @@ data/phase7_parity_cache/
 
 # Phase 9: the causal-checkpoint cache + the local bench staging (same posture as phase 7)
 data/phase9_parity_cache/
+
+# Launcher output: the full-corpus run directories (listings, configs and metadata carry corpus paths - never committed)
+/runs/

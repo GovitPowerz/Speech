@@ -41,7 +41,7 @@ Merge authority and `main` are human-only. The agent's permission layer, [.claud
 - `Bash(git push *:main *)`
 - `Bash(git push *:refs/heads/main*)`
 
-`tests/test_development_md.py` fails if this list and the settings file drift apart. Branch, issue, PR and label conventions are the machine-facing contracts in [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md) and [docs/agents/triage-labels.md](docs/agents/triage-labels.md); every PR runs the CI described in [CLAUDE.md](CLAUDE.md) (Conventions, CI).
+`tests/test_development_md.py` fails if this list and the settings file drift apart. `tests/test_license_hygiene.py` does the same for the Phase 6 license rule: it fails if any tracked text file names a file under the corpus root. Branch, issue, PR and label conventions are the machine-facing contracts in [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md) and [docs/agents/triage-labels.md](docs/agents/triage-labels.md); every PR runs the CI described in [CLAUDE.md](CLAUDE.md) (Conventions, CI).
 
 ## Worked examples
 
