@@ -1,0 +1,122 @@
+{
+  "build": {
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "target": "aarch64-apple-darwin"
+  },
+  "git_dirty": false,
+  "git_sha": "6cbbb4cde327536a466e13b0d1d2ba5bd909b4dd",
+  "host": {
+    "arch": "arm64",
+    "chip": "Apple M4 Pro",
+    "cores": 14,
+    "os": "Darwin 25.6.0"
+  },
+  "kind": "baseline",
+  "payload": {
+    "best_epoch": 2,
+    "best_val_cost": 0.4288857806707094,
+    "cavg": null,
+    "config_hash": "df4e42f794261737",
+    "config_name": "configs/training/lre_sad.toml",
+    "dcf": [
+      {
+        "collar": 0.0,
+        "dcf": 0.25,
+        "pfa": 1.0,
+        "pmiss": 0.0
+      },
+      {
+        "collar": 0.25,
+        "dcf": 0.25,
+        "pfa": 1.0,
+        "pmiss": 0.0
+      },
+      {
+        "collar": 0.5,
+        "dcf": 0.25,
+        "pfa": 1.0,
+        "pmiss": 0.0
+      },
+      {
+        "collar": 1.0,
+        "dcf": 0.25,
+        "pfa": 1.0,
+        "pmiss": 0.0
+      },
+      {
+        "collar": 2.0,
+        "dcf": 0.25,
+        "pfa": 1.0,
+        "pmiss": 0.0
+      }
+    ],
+    "epochs_run": 3,
+    "first_train_cost": 1.09019119674427,
+    "first_val_cost": 4.675242544048797,
+    "init_cavg": null,
+    "init_dcf": [
+      {
+        "collar": 0.0,
+        "dcf": 0.75,
+        "pfa": 0.0,
+        "pmiss": 1.0
+      },
+      {
+        "collar": 0.25,
+        "dcf": 0.75,
+        "pfa": 0.0,
+        "pmiss": 1.0
+      },
+      {
+        "collar": 0.5,
+        "dcf": 0.75,
+        "pfa": 0.0,
+        "pmiss": 1.0
+      },
+      {
+        "collar": 1.0,
+        "dcf": 0.75,
+        "pfa": 0.0,
+        "pmiss": 1.0
+      },
+      {
+        "collar": 2.0,
+        "dcf": 0.75,
+        "pfa": 0.0,
+        "pmiss": 1.0
+      }
+    ],
+    "init_lid_error": null,
+    "last_train_cost": 2.0728001247990444,
+    "lid_error": null,
+    "n_test": 24,
+    "n_train": 10,
+    "n_valid": 8,
+    "source": "gate",
+    "test": "tests/pyo3/test_phase9_gates.py::test_subset_gate_beats_own_init[mamba-bidirectional]",
+    "val_metric": "nn_cost_seg",
+    "wall_s": 67.88357186317444
+  },
+  "reason": null,
+  "recipe": {
+    "arm": "sad",
+    "audio_max_duration": 20.0,
+    "cell": "mamba",
+    "direction": "bidirectional",
+    "epochs": 3,
+    "init_scheme": "xavier",
+    "lanes": 1,
+    "lineage": "v1",
+    "minibatch": 0,
+    "patience": 99,
+    "seed": 0,
+    "steps_per_epoch": 10,
+    "subset": 10,
+    "test_size": 24,
+    "valid_size": 8
+  },
+  "recorded_at": "2026-10-02T12:04:32Z",
+  "schema_version": 1,
+  "supersedes": null
+}
