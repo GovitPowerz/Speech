@@ -13,22 +13,22 @@ One dated design spec and one implementation plan per roadmap phase, in the orde
 | 1 | [Features](specs/2026-07-02-phase-1-features-design.md) | [plan](plans/2026-07-02-phase-1-features.md) | approved |
 | 2 | [NN forward](specs/2026-07-02-phase-2-nn-forward-design.md) | [plan](plans/2026-07-02-phase-2-nn-forward.md) | approved |
 | 2b | [Segmenter wiring](specs/2026-07-03-phase-2b-segmenter-wiring-design.md) | [plan](plans/2026-07-03-phase-2b-segmenter-wiring.md) | approved |
-| 3 | [Training: network-level BPTT + iRPROP-](specs/2026-07-06-phase-3-training-design.md) | [plan](plans/2026-07-06-phase-3-training.md) | — |
+| 3 | [Training: network-level BPTT + iRPROP-](specs/2026-07-06-phase-3-training-design.md) | [plan](plans/2026-07-06-phase-3-training.md) | - |
 | 4a | [Engine drivers: Corpus / BagOfProcessors / CorpusProcessor / CLI / .mat](specs/2026-07-06-phase-4a-engine-drivers-design.md) | [plan](plans/2026-07-06-phase-4a-engine-drivers.md) | approved |
 | 4b | [LID: Algo 5/6 + VRCTS adapter + LID corpus integration](specs/2026-07-07-phase-4b-lid-design.md) | [plan](plans/2026-07-07-phase-4b-lid.md) | approved |
 | 4c | [PyO3 seam + Python optimizer + TOML canonical config](specs/2026-07-08-phase-4c-pyo3-optimizer-design.md) | [plan](plans/2026-07-08-phase-4c-pyo3-optimizer.md) | approved |
-| 4d | [dataprep + end-to-end parity](specs/2026-07-09-phase-4d-dataprep-endtoend-design.md) | [plan](plans/2026-07-09-phase-4d-dataprep-endtoend.md) | — |
+| 4d | [dataprep + end-to-end parity](specs/2026-07-09-phase-4d-dataprep-endtoend-design.md) | [plan](plans/2026-07-09-phase-4d-dataprep-endtoend.md) | - |
 
 ## Roadmap 2: the post-port era (port-truth)
 
 | phase | spec | plan | status |
 |---|---|---|---|
-| 5 | [Un-quirk + training foundation](specs/2026-07-10-phase-5-unquirk-training-foundation-design.md) | [plan](plans/2026-07-10-phase-5-unquirk-training-foundation.md), [fix list](plans/2026-07-10-phase5-fixlist.md) | — |
-| 6 | [Baseline training on real data](specs/2026-07-17-phase-6-baseline-training-design.md) | [plan](plans/2026-07-17-phase-6-baseline-training.md) | — |
-| 7 | [The efficient binary (offline)](specs/2026-07-18-phase-7-efficient-binary-design.md) | [plan](plans/2026-07-18-phase-7-efficient-binary.md) | — |
-| 8 | [Online/streaming mode](specs/2026-07-19-phase-8-streaming-design.md) | [plan](plans/2026-07-19-phase-8-streaming.md) | — |
+| 5 | [Un-quirk + training foundation](specs/2026-07-10-phase-5-unquirk-training-foundation-design.md) | [plan](plans/2026-07-10-phase-5-unquirk-training-foundation.md), [fix list](plans/2026-07-10-phase5-fixlist.md) | - |
+| 6 | [Baseline training on real data](specs/2026-07-17-phase-6-baseline-training-design.md) | [plan](plans/2026-07-17-phase-6-baseline-training.md) | - |
+| 7 | [The efficient binary (offline)](specs/2026-07-18-phase-7-efficient-binary-design.md) | [plan](plans/2026-07-18-phase-7-efficient-binary.md) | - |
+| 8 | [Online/streaming mode](specs/2026-07-19-phase-8-streaming-design.md) | [plan](plans/2026-07-19-phase-8-streaming.md) | - |
 | 9 | [New architectures: Mamba + sLSTM behind a cell abstraction](specs/2026-07-27-phase-9-new-architectures-design.md) | [plan](plans/2026-07-27-phase-9-new-architectures.md) | approved |
 | 10 | [CfC + fast-tree completion + the v2 lineage](specs/2026-07-31-phase-10-cfc-fast-completion-design.md) | [plan](plans/2026-07-31-phase-10-cfc-fast-completion.md) | approved |
-| 11 | [The transformer encoder: windowed causal attention behind the CellLayer seam](specs/2026-08-12-phase-11-transformer-design.md) | [plan](plans/2026-08-12-phase-11-transformer.md) | — |
+| 11 | [The transformer encoder: windowed causal attention behind the CellLayer seam](specs/2026-08-12-phase-11-transformer-design.md) | [plan](plans/2026-08-12-phase-11-transformer.md) | - |
 
 The specs are the record of what was decided and why; where a spec's wording was later found wrong, the correction is dated in place (the Phase 11 spec carries three dated amendments) rather than rewritten, so the trail from premise to result stays readable.

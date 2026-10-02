@@ -1,8 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "Bash(for f:*)",
-      "Bash(do echo:*)",
       "Bash(git push:*)",
       "Bash(git fetch:*)",
       "Bash(gh issue:*)",
@@ -41,7 +39,10 @@
       "Bash(git push --set-upstream origin main:*)",
       "Bash(git push origin HEAD:main:*)",
       "Bash(git push * main:*)",
-      "Bash(git push * main)"
+      "Bash(git push * main)",
+      "Bash(git push *:main)",
+      "Bash(git push *:main *)",
+      "Bash(git push *:refs/heads/main*)"
     ]
   }
 }

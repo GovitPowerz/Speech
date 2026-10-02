@@ -1,6 +1,6 @@
 # ADR-0003: Decisions are gated on identity; numbers are measured, then pinned at ten times the measurement; a breach is a STOP
 
-**Status:** accepted · **Date:** 2026-07-19 (Phase 7 spec, rules R1/R2); applied to every parity and streaming gate since
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7 spec, rules R1/R2); applied to every parity and streaming gate since
 
 ## Context
 

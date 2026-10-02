@@ -76,7 +76,7 @@ uv run pytest tests/pyo3          # the seam suites; corpus-gated legs skip with
 
 Two tasks, built on a shared feature front-end and neural-net zoo.
 
-- **SAD (Speech Activity Detection).** A recurrent net emits a per-frame speech posterior; segmentation turns that posterior into speech/non-speech segments via a hysteresis-with-area double threshold plus a 7-step smoothing pass. Pure decision logic, golden-tested first.
+- **SAD (Speech Activity Detection).** A recurrent net emits a per-frame speech posterior; segmentation turns that posterior into speech/non-speech segments via a hysteresis-with-area double threshold plus an 8-step smoothing pass. Pure decision logic, golden-tested first.
 - **LID (spoken Language Identification).** A TwinBLSTM head consumes the SAD net's hidden states (the "twin" seam), accumulates per-segment evidence, and produces a per-file language posterior (argmax + confusion). LID is stacked on top of SAD, not run independently.
 
 Underneath both:
@@ -86,38 +86,40 @@ Underneath both:
 
 ## Configuration
 
-TOML is the canonical and only input format. A run config names the algorithm and its DSP/decision parameters; the engine is launched on a single `.toml` file (`speech -m <config.toml>`).
+TOML is the canonical input format. A run config names the algorithm and its DSP/decision parameters; the engine is launched on a single config file (`speech -m <config.toml>`).
 
 ```toml
 # configs/lid/lid_blstm.toml  (Twin-BLSTM LID, legacy Algo_choice 6)
 [engine]
-algo = "twin_blstm_lid"
+algo_choice = 6
 num_outer_threads = 1
 num_inner_threads = 1
 results_file = "MultiConfigResults.mat"
 
 [audio]
-offset = 0.0
-max_duration = 120.0
+offset = 0
+max_duration = 120
 
 [decision]
-thresh_rising = 0.6
-area_rising = 0.0
-thresh_falling = 0.3795068189162301
-area_falling = 0.0
+thresh_rising = "0.6"
+area_rising = "0.0"
+thresh_falling = "3.795068189162301e-01"
+area_falling = "0.0"
 
 [spectrum]
 order = 9
-shift = 0.025
+shift = "2.500000000000000e-02"
 temporal_convolution_type = "hamming"
 
 [preprocess]
-preemph_ratio = -0.97
+preemph_ratio = "-9.700000000000000e-01"
 noise_seed = 3
-noise_ratio = 0.02921428128844371
+noise_ratio = "2.921428128844371e-02"
 ```
 
-A legacy `.config` importer (`legacy_config.rs`, `configs/legacy/`) parses the original flat whitespace format (with its `_`-continuation, last-wins, and `val*count` repeat quirks) so validation runs can be driven from the exact goldens the legacy consumed. TOML is the format going forward; the importer exists only for parity.
+Integers and booleans are native TOML; every other value (floats, comma lists, words, paths) is a quoted string carrying the legacy decimal text verbatim, and a native TOML float is rejected so no value is silently re-rounded.
+
+A legacy `.config` importer (`legacy_config.rs`, `configs/legacy/`) parses the original flat whitespace format (with its `_`-continuation, last-wins, and `val*count` repeat quirks) so validation runs can be driven from the exact goldens the legacy consumed; a `.config` is accepted everywhere a `.toml` is ([ADR-0006](docs/adr/0006-config-keys-are-declared-once.md)). TOML is the format going forward; the importer exists for parity.
 
 ## Validation
 
@@ -174,16 +176,16 @@ Speech/
 
 ```bash
 ./check_all.sh          # Rust: cargo test + fmt --check + clippy + release build
-./lint_code.sh          # Python: ruff (imports, format, check) + mypy --strict
+./lint_code.sh          # Python: ruff (imports, format, check) + mypy
 uv run pytest tests     # Python test suite
 ```
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on PRs to `main` and manual dispatch (`workflow_dispatch`), with four jobs:
 
 - **rust** - `cargo fmt --check`, `cargo clippy`, `cargo test`.
-- **python-lint** - `ruff check`, `ruff format --check`, `mypy --strict`.
+- **python-lint** - `ruff check`, `ruff format --check`, `mypy`.
 - **python-test** - `pytest`.
-- **python-pyo3** - `maturin develop --release` for `speech-py`, an import check of `speech_rs`, then `pytest tests/pyo3` (the in-process seam-replay + exit-gate suites). The Phase 4d PyO3-seam parity gate against the committed 2015-binary fixtures was retired from HEAD in Phase 5 (see the Roadmap 2 note above); its proof lives at the `legacy-parity-v1` tag.
+- **python-pyo3** - `maturin develop --release` for `speech-py`, an import check of `speech_rs`, then `pytest tests/pyo3` (the in-process seam-replay + exit-gate suites). The Phase 4d PyO3-seam parity gate against the committed 2015-binary fixtures was retired from HEAD in Phase 5 ([ADR-0001](docs/adr/0001-port-truth-after-the-parity-tag.md), [docs/ROADMAP.md](docs/ROADMAP.md)); its proof lives at the `legacy-parity-v1` tag.
 
 ## Author
 

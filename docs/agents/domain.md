@@ -16,11 +16,11 @@ Single-context repo (this repo):
 
 ```
 /
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-port-truth-after-the-parity-tag.md
-│   └── 0002-the-exact-tree-is-frozen.md
-└── src/
+|-- CONTEXT.md
+|-- docs/adr/
+|   |-- 0001-port-truth-after-the-parity-tag.md
+|   `-- 0002-the-exact-tree-is-frozen.md
+`-- src/
 ```
 
 ## Use the glossary's vocabulary
@@ -33,4 +33,4 @@ If the concept you need isn't in the glossary yet, that's a signal: either you'r
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0002 (the exact tree is frozen), but worth reopening because…_
+> _Contradicts ADR-0002 (the exact tree is frozen), but worth reopening because..._

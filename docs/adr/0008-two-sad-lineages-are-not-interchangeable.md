@@ -1,6 +1,6 @@
 # ADR-0008: Two SAD config lineages coexist and are not interchangeable; v1 is the only 2015-capacity-comparable one
 
-**Status:** accepted · **Date:** 2026-08-01 (Phase 10 Task 4, commit `074e392`)
+**Status:** accepted | **Date:** 2026-08-01 (Phase 10 Task 4, commit `074e392`)
 
 ## Context
 

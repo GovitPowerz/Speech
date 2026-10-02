@@ -1,6 +1,6 @@
 # ADR-0004: Streaming changes timing, never arithmetic: the frozen-norm causality cut, shared step kernels, and emission with zero retractions
 
-**Status:** accepted · **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9)
+**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9)
 
 ## Context
 

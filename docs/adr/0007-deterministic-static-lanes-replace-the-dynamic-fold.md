@@ -1,6 +1,6 @@
 # ADR-0007: A deterministic static-lane fold replaces the legacy's dynamic OpenMP reduction; N=1 is the parity mode
 
-**Status:** accepted · **Date:** 2026-07-07 (Phase 4a, PR #7, spec rule R6)
+**Status:** accepted | **Date:** 2026-07-07 (Phase 4a, PR #7, spec rule R6)
 
 ## Context
 

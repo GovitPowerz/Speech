@@ -1,6 +1,6 @@
 # ADR-0005: The recurrent cell is the extension seam; a new architecture is one enum variant and nothing outside it
 
-**Status:** accepted · **Date:** 2026-07-31 (Phase 9, PR #15); totality of the fast matrix 2026-08-11 (Phase 10); fifth cell 2026-08-12 (Phase 11)
+**Status:** accepted | **Date:** 2026-07-31 (Phase 9, PR #15); totality of the fast matrix 2026-08-11 (Phase 10); fifth cell 2026-08-12 (Phase 11)
 
 ## Context
 

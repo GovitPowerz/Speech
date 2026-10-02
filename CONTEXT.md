@@ -11,7 +11,7 @@ The per-frame speech / non-speech task. Its output is a Segmentation.
 _Avoid_: VAD (the legacy cost-law names use it; the task name here is SAD)
 
 **LID** (spoken Language Identification):
-The per-file language task. Always stacked on a SAD net (the Twin); never run alone.
+The per-file language task. Always gated by a SAD stage, never run alone: the SAD net in the Twin (Algo 6), LTSV in Algo 5.
 
 **Posterior**:
 A net's per-frame output row before any decision: one speech probability (SAD), one score per language (LID).
@@ -39,7 +39,7 @@ The ground-truth segmentation attached to a file (STM, CSV or VRCTS). Its presen
 The XML segmentation format the legacy dumped and read back; times are written to four decimals, the VRCTS write quantum.
 
 **Frame**:
-One periodogram / feature row at the spectrum shift (10 ms on the committed configs).
+One periodogram / feature row at the spectrum shift (10 ms on the committed SAD configs, 25 ms on the LID ones).
 _Avoid_: window (a window is a span of frames or samples, see below)
 
 **Utterance**:
@@ -192,7 +192,7 @@ The 2015 outer loop: QuantumPSO over a genome that carried the weights in-band. 
 The vec2struct parameter vector the outer search decodes into a config.
 
 **Arm**:
-A from-scratch baseline recipe behind `speech baseline <arm>`: `sad`, `sad-v2`, `lid-features`, `lid-phseq`.
+A from-scratch baseline recipe behind `python -m speech.drivers.baseline <arm>`: `sad`, `sad-v2`, `lid-features`, `lid-phseq`.
 
 **Subset gate**:
 A corpus-gated test that trains an arm from scratch on a stratified subset and asserts beat-init (and, for LID, beat-chance), run-twice bit-identical.
@@ -251,7 +251,7 @@ The per-phase set of deliberate code mutations, each expected to break a named t
 The test a mutation breaks.
 
 **Touch class**:
-A sanctioned category of edit to the exact tree outside `nn/cells/`; anything else needs the golden suite byte-green as proof it is behaviour-free.
+A sanctioned category of edit to the exact tree outside `nn/cells/`, the only kind allowed there; each must keep the golden suite byte-green as proof it is behaviour-free (ADR-0002).
 
 **Canary gating**:
 Committed libm canaries decide whether a transcendental-dependent golden compares bit-exact (the oracle machine) or within a derived bound (any other).

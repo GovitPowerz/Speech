@@ -1,6 +1,6 @@
 # ADR-0001: Goldens assert port-truth after the parity tag; legacy-truth is frozen at `legacy-parity-v1`
 
-**Status:** accepted · **Date:** 2026-07-16 (commit `6c6acdf`, the Phase 5 opening)
+**Status:** accepted | **Date:** 2026-07-16 (commit `6c6acdf`, the Phase 5 opening)
 
 ## Context
 
