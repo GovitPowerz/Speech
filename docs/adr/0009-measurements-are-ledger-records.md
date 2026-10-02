@@ -47,5 +47,9 @@ says what was measured, a test says what is asserted, and the gate's node id lin
   ADR-0003, and wall differences are not metrics.
 - `run_metadata.json` stays the local run manifest (it may hold the corpus root; it never leaves
   the gitignored `runs/`); `record.json` is the promotable subset.
-- The bench stagers, the `bench --processes` ingestion, the Phase 7 bench table and the prose
-  assertion over the quoted speedups are the second half of #20.
+- The four Phase 7 bench legs are staged from the repository (`speech.ledger.stage`: the 60 s
+  fixture and the three sorted-first corpus files, no filename recorded) and run by
+  `python -m speech.ledger bench --leg <name>` as the Phase 7 protocol (N fresh processes per
+  path, one record each); the exact-vs-fast matrix is rendered per host, and the speedups the
+  README and ARCHITECTURE quote in prose are asserted against the latest bench pair per leg
+  (`speech.ledger.prose`), so the three independent "4.6x" copies cannot drift again.

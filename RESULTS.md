@@ -367,6 +367,7 @@ build. This is an inference-vs-inference comparison exactly AS CONFIGURED (the s
 paths are actually invoked elsewhere in this repo -- Image mode, backprop off), not a claim that
 the exact path has no backward-shaped allocations at all.
 
+<!-- ledger:table phase7_bench_matrix -->
 | leg | audio_s | path | wall_s (mean [range]) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
 | SAD 60 s fixture (stereo) | 120.00 | exact | 0.2638 [0.2588-0.2693] | 0.002198 | 55.641 | 0.4637 | baseline |
@@ -377,6 +378,7 @@ the exact path has no backward-shaped allocations at all.
 | LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0126 [0.0125-0.0127] | 0.000296 | 19.786 | 0.4651 | **3.53x** |
 | LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0339 [0.0338-0.0340] | 0.001037 | 20.255 | 0.6204 | baseline |
 | LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0095 [0.0095-0.0095] | 0.000291 | 11.979 | 0.3669 | **3.57x** |
+<!-- ledger:end -->
 
 Reading -- speedup lands ABOVE the T6 Python-level scoring range (2.6-3.6x, warm-cache `.scr`/DCF
 scoring incl. PyO3 crossing + file I/O): 3.5-4.6x here, exactly the T6 report's own prediction

@@ -56,6 +56,7 @@ uv run python -m speech.ledger add runs/<run>/record.json   # validate + promote
 uv run python -m speech.ledger render --check               # RESULTS.md holds what ledger/ renders (CI)
 uv run pytest tests/pyo3/test_phase10_gates.py --ledger-stage /tmp/stage   # gates copy their records out of tmp_path
 ./src/rust/target/release/speech bench --json --label=<name> --path=fast <config>   # the bench payload
+uv run python -m speech.ledger bench --leg phase7_60s                   # a staged Phase 7 leg: 3 fresh processes x {exact, fast}, promoted + rendered
 ```
 
 Suite sizes at the Phase 11 close: cargo 1283, pytest 896 non-slow (`uv run pytest tests -q -m "not slow"`), pyo3 203 (`uv run pytest tests/pyo3 -q`, corpus present, ~20 min).
