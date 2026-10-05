@@ -163,7 +163,8 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
     scores the injected TRAINED ones, a 100%-divergence artefact, NOT a real parity
     failure). `evaluate()`/`_score_packs_on_test`/`_score_sad_pack_on_test` all SKIP their
     `set_weights` call under `Inference_Path fast` (also T6b) specifically because this
-    repoint already did the injection at config time -- the two mechanisms are the same
+    repoint already did the injection at config time (`evaluate` since #29 also repoints
+    the keys itself, at copies of the same packs) -- the two mechanisms are the same
     injection, so skipping is semantics-preserving, not a workaround. Loading trained
     weights from the config is the fast path's only injection mechanism (and how a real
     fast deployment loads them), and it is identical for both paths -- so this is the

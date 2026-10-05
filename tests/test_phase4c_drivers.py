@@ -10,7 +10,10 @@ seeding, the `cli.main` dispatch, and (#29) `evaluate`'s checkpoint pack resolut
 from __future__ import annotations
 
 import math
+import sys
+import types
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -128,7 +131,7 @@ def test_cli_init_dispatch(tmp_path: Path) -> None:
 
 def test_resolve_checkpoint_packs_accepts_both_naming_schemes(tmp_path: Path) -> None:
     """`train` writes `<net>_weights.bin`; `train_modern` writes `best_<net>.bin`. Either
-    scheme resolves, per net, and the legacy name wins when both are present."""
+    complete scheme resolves, and the legacy scheme wins when both are complete."""
     legacy = tmp_path / "legacy"
     legacy.mkdir()
     (legacy / "sad_weights.bin").write_bytes(b"")
@@ -148,6 +151,14 @@ def test_resolve_checkpoint_packs_accepts_both_naming_schemes(tmp_path: Path) ->
     (both / "sad_weights.bin").write_bytes(b"")
     (both / "best_sad.bin").write_bytes(b"")
     assert resolve_checkpoint_packs(both, 3) == [both / "sad_weights.bin"]
+
+
+def test_resolve_checkpoint_packs_never_mixes_schemes(tmp_path: Path) -> None:
+    """A legacy SAD pack beside a `train_modern` LID pack is two runs, not one checkpoint."""
+    (tmp_path / "sad_weights.bin").write_bytes(b"")
+    (tmp_path / "best_lid.bin").write_bytes(b"")
+    with pytest.raises(FileNotFoundError, match="no complete weight-pack set"):
+        resolve_checkpoint_packs(tmp_path, 6)
 
 
 def test_resolve_checkpoint_packs_missing_net_raises(tmp_path: Path) -> None:
@@ -171,7 +182,69 @@ def test_evaluate_missing_pack_fails_loudly(tmp_path: Path) -> None:
     empty_ckpt = tmp_path / "ckpt"
     empty_ckpt.mkdir()
 
-    with pytest.raises(FileNotFoundError, match=r"sad_weights\.bin or best_sad\.bin"):
+    with pytest.raises(FileNotFoundError, match=r"sad_weights\.bin \+ lid_weights\.bin or best_sad\.bin \+ best_lid\.bin"):
         evaluate(state, empty_ckpt)
     assert not (tmp_path / "_eval.config").exists(), "must raise before the engine config is written"
     assert not (Path(state.out_dir) / "scores").exists(), "must raise before the scores dir is created"
+
+
+def _fake_speech_rs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Stand in for the pyo3 module: record the engine config `evaluate` wrote (read from the
+    cwd the engine is built in) and the weights handed to `set_weights`; score no files."""
+    seen: dict[str, Any] = {}
+
+    class Engine:
+        def __init__(self, configs: list[str], mode: str) -> None:
+            seen["config"] = Path(configs[0]).read_text()
+
+        def set_weights(self, conf: int, nets: list[list[float]]) -> None:
+            seen["weights"] = nets
+
+        def run(self) -> None:
+            pass
+
+        def results_matrix(self) -> list[list[float]]:
+            return []
+
+    monkeypatch.setitem(sys.modules, "speech_rs", types.SimpleNamespace(Engine=Engine))
+    return seen
+
+
+def _twin_state_and_ckpt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[RunState, Path]:
+    """A twin run state whose config dir differs from the cwd, plus a `best_*` checkpoint
+    passed RELATIVE to that cwd (the CLI shape)."""
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    state = init_run(_seed_init_inputs(cfg_dir), tmp_path / "run")
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    write_bin(2, 1, np.array([1.0, 2.0]), ckpt / "best_sad.bin")
+    write_bin(1, 1, np.array([3.0]), ckpt / "best_lid.bin")
+    monkeypatch.chdir(tmp_path)
+    return state, Path("ckpt")
+
+
+def test_evaluate_exact_injects_resolved_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exact path: the resolved packs, read against the caller's cwd (not the config dir the
+    engine runs in), go through `set_weights`; the eval config is inference-shaped."""
+    seen = _fake_speech_rs(monkeypatch)
+    state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
+
+    evaluate(state, ckpt)
+
+    assert seen["weights"] == [[1.0, 2.0], [3.0]]
+    assert "Neural_Networks_BackPropagation_Epochs 0\n" in seen["config"]
+
+
+def test_evaluate_fast_repoints_weight_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fast path: `set_weights` bails there (T6b), so the checkpoint packs are injected by
+    repointing the config's weight keys at their absolute paths -- not ignored."""
+    seen = _fake_speech_rs(monkeypatch)
+    state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
+    state.base_config["Inference_Path"] = "fast"
+
+    evaluate(state, ckpt)
+
+    assert "weights" not in seen
+    assert f"BLSTM_weightsFile {(tmp_path / 'ckpt' / 'best_sad.bin').resolve()}\n" in seen["config"]
+    assert f"BLSTM_LID_weightsFile {(tmp_path / 'ckpt' / 'best_lid.bin').resolve()}\n" in seen["config"]
