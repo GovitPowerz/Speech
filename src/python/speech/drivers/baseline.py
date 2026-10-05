@@ -483,10 +483,10 @@ def _score_packs_on_test(
 ) -> tuple[float | None, float | None, Path]:
     """Score one `[sad, lid]` weight-pack pair on the held-out test split end to end:
     `evaluate` -> per-file `.scr` -> `read_scr_scores` -> `lid_error` + `cavg`. `evaluate`
-    expects the legacy `sad_weights.bin`/`lid_weights.bin` pack names in a checkpoint dir, so
-    the two packs (a trained `best_<net>.bin` or the untrained `<net>_seed.bin`) are copied
-    in under those names first -- letting the SAME scorer measure both the trained model and
-    its own from-scratch init on the identical test set (the direction-safe improvement).
+    resolves `<net>_weights.bin` or `best_<net>.bin` in a checkpoint dir (#29), neither of
+    which names the untrained `<net>_seed.bin`, so both packs (trained or seed) are copied
+    in under the legacy names first -- letting the SAME scorer measure both the trained model
+    and its own from-scratch init on the identical test set (the direction-safe improvement).
 
     Returns `(lid_error_pct, cavg, scores_dir)`; the metrics are `None` only if the test
     split produced no `.scr` files (a structurally empty held-out set)."""

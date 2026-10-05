@@ -18,6 +18,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.drivers.state import RunState
+from speech.drivers.train import _net_names
 from speech.weight_bridge import read_weight_vector
 
 F64 = np.float64
@@ -76,6 +77,25 @@ def _class_keys(mapping_path: Path) -> list[str]:
     return sorted(keys)
 
 
+def resolve_checkpoint_packs(checkpoint: Path, algo: int) -> list[Path]:
+    """The weight packs `evaluate` injects, one per net (`[sad]`, or `[sad, lid]` for the
+    algo-6 Twin). Two writers, two naming schemes: the legacy `train` driver writes
+    `<net>_weights.bin`, `train_modern` writes `best_<net>.bin` (its `last_<net>.bin` is a
+    resume point, not a scoring checkpoint). The legacy name wins when both exist.
+    Raises `FileNotFoundError` naming the net and both accepted filenames when neither is
+    there (#29: the old `all(exists)` guard skipped `set_weights` and scored the config's
+    seed pack in silence)."""
+    packs = []
+    for net in _net_names(algo):
+        candidates = [checkpoint / f"{net}_weights.bin", checkpoint / f"best_{net}.bin"]
+        found = next((c for c in candidates if c.exists()), None)
+        if found is None:
+            names = " or ".join(c.name for c in candidates)
+            raise FileNotFoundError(f"checkpoint {checkpoint} has no {net} weight pack: expected {names}")
+        packs.append(found)
+    return packs
+
+
 def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) -> Path:
     """Score the corpus with the checkpoint weights and write per-file `.scr` outputs to
     `scores_dir` (default `<out_dir>/scores/`). Returns the scores directory.
@@ -92,37 +112,31 @@ def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) 
     18-wide non-LID result row, so `write_scores` gets an empty `scores_row` and writes a
     near-blank `.scr` file (zero score lines, just a trailing newline) per file. No gate
     stops `evaluate` from being pointed at a non-algo-6 checkpoint."""
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
-
     workdir = Path(state.config_path).parent
-    ckpt = Path(checkpoint)
-    scores_dir = Path(scores_dir) if scores_dir is not None else Path(state.out_dir) / "scores"
-    scores_dir.mkdir(parents=True, exist_ok=True)
-
     cfg = dict(state.base_config)
     cfg["BLSTM_BackPropagationActivated"] = "false"
     if state.algo == 6:
         cfg["BLSTM_LID_BackPropagationActivated"] = "false"
     config_text = "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
 
-    # The checkpoint packs the training driver actually wrote: `[sad]` for the single-net
-    # algos (3/4/5), `[sad, lid]` only for the algo-6 Twin -- so a single-net engine is
-    # never handed a 2-element weight list (`BackPropagation.m:11-13`).
-    pack_names = ["sad_weights.bin"] + (["lid_weights.bin"] if state.algo == 6 else [])
+    # Fast processors load weights only at construction from the config's weight keys and
+    # `set_weights` bails on them (T6b, see `_score_sad_pack_on_test`), so injection is
+    # exact-only; a missing pack raises here, before the engine (or anything on disk) exists.
+    inject = cfg.get("Inference_Path", "exact") != "fast"
+    packs = resolve_checkpoint_packs(Path(checkpoint), state.algo) if inject else []
+
+    import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+    scores_dir = Path(scores_dir) if scores_dir is not None else Path(state.out_dir) / "scores"
+    scores_dir.mkdir(parents=True, exist_ok=True)
 
     prev = Path.cwd()
     os.chdir(workdir)
     try:
         (workdir / "_eval.config").write_text(config_text)
         engine = speech_rs.Engine(["_eval.config"], "-m")
-        # `Inference_Path fast` processors load weights ONLY at construction, from the
-        # config's own BLSTM_weightsFile/BLSTM_LID_weightsFile keys; `set_weights` now bails
-        # loudly on them (bag_of_processors.rs T6b) instead of the old silent no-op, so this
-        # call is skipped on fast -- the config-time injection is that path's only mechanism,
-        # and callers that need a DIFFERENT pack than the config's must point those keys at it.
-        if cfg.get("Inference_Path", "exact") != "fast" and all((ckpt / name).exists() for name in pack_names):
-            nets = [list(read_weight_vector(ckpt / name)) for name in pack_names]
-            engine.set_weights(0, nets)
+        if inject:
+            engine.set_weights(0, [list(read_weight_vector(p)) for p in packs])
         engine.run()
         results = np.asarray(engine.results_matrix(), dtype=F64)
     finally:
