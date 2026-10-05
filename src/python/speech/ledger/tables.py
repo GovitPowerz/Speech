@@ -5,7 +5,8 @@ Each renderer is a function over the loaded records, registered by the name a
 live (non-superseded) record per (source, recipe), two being an error, never a choice (issue
 #38); a subset-gate row is the latest `gate` record of its (arm, lineage, cell, direction); a full-run row is one row per non-superseded full record (a
 seed is part of the recipe, so seeds are rows, never averaged) and a single `TBD` row when none
-exists; every table ends with the hosts its rows came from and one footnote line per
+exists; a bench label names one (lanes, lineage), two being an error, never a pooled cell
+(issue #39); every table ends with the hosts its rows came from and one footnote line per
 supersession chain. Prose around a table stays hand-written.
 """
 
@@ -14,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from speech.ledger.schema import BaselineRecord, BenchRecord, superseded_ids
+from speech.ledger.schema import BaselineRecord, BenchRecord, Lineage, superseded_ids
 from speech.ledger.stage import LEGS
 
 Record = BaselineRecord | BenchRecord
@@ -308,6 +309,19 @@ def current_benches(records: Iterable[Record]) -> list[BenchRecord]:
     return [r for r in bench if r.id not in dead]
 
 
+def bench_labels(records: Iterable[Record]) -> dict[str, tuple[int, Lineage | None]]:
+    """`label -> (lanes, lineage)` over every bench record. A label names exactly one recipe
+    (issue #39): `add` refuses the second, and a ledger holding two is an error here, never a
+    cell pooling two lane counts or a speedup dividing one recipe's wall by another's."""
+    labels: dict[str, tuple[int, Lineage | None]] = {}
+    for r in records:
+        if isinstance(r, BenchRecord):
+            recipe = (r.recipe.lanes, r.recipe.lineage)
+            if labels.setdefault(r.recipe.label, recipe) != recipe:
+                raise ValueError(f"bench label {r.recipe.label!r} names two recipes, {labels[r.recipe.label]} and {recipe}; a label is one recipe")
+    return labels
+
+
 @dataclass(frozen=True)
 class BenchCell:
     """One (label, path, host) cell: the runs of every record sharing the latest SHA and build."""
@@ -333,7 +347,10 @@ class BenchCell:
 
 def bench_cells(records: Iterable[Record]) -> list[BenchCell]:
     """Group the current bench records by (label, path, host), keep the (SHA, build) group a
-    cell's most recent record belongs to, and pool that group's runs."""
+    cell's most recent record belongs to, and pool that group's runs. A label is one recipe
+    (`bench_labels`), so the pool never mixes lane counts or lineages."""
+    records = list(records)
+    bench_labels(records)
     by_cell: dict[tuple[str, str, str], list[BenchRecord]] = {}
     for r in current_benches(records):
         by_cell.setdefault((r.recipe.label, r.recipe.path, host_key(r)), []).append(r)

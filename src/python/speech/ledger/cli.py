@@ -14,8 +14,11 @@ plainly, one already in the ledger, plainly or as a stamped copy, is skipped, an
 its own `supersedes` must name the live record of its key), copies the record to
 `ledger/<kind>/<id>.json`, then renders
 so the record and its table land in one commit. Bench records repeat a recipe by protocol
-(three processes per path) and are outside the one-live-record rule; their label rule is issue
-#39. `render --check` exits 1 with a diff when RESULTS.md does not hold what the ledger renders.
+(three processes per path) and are outside the one-live-record rule; their rule is that a label
+names exactly one (lanes, lineage): a bench record whose label is already in the ledger, or
+earlier in the batch, with another recipe is refused and the caller picks a new label or reruns
+with the recipe it names, usually the missing `--lineage` (issue #39). `render --check` exits 1
+with a diff when RESULTS.md does not hold what the ledger renders.
 """
 
 from __future__ import annotations
@@ -27,9 +30,9 @@ from pathlib import Path
 
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
-from speech.ledger.schema import LEDGER_DIR, BaselineRecord, RecordBase, git_state, load, read_record, write_record
+from speech.ledger.schema import LEDGER_DIR, BaselineRecord, BenchRecord, Lineage, RecordBase, git_state, load, read_record, write_record
 from speech.ledger.stage import CORPUS_ROOT, LEGS
-from speech.ledger.tables import current_baselines
+from speech.ledger.tables import bench_labels, current_baselines
 
 
 def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | None = None) -> list[Path]:
@@ -38,6 +41,7 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | No
         raise SystemExit("--supersede needs a reason")
     records = load(root) if root.is_dir() else []
     live = {r.key(): r for r in current_baselines(records)}
+    labels = bench_labels(records)
     # `load` has refused a file whose content is not its name, so a matching unstamped id is the
     # same measurement, whether it went in plainly or as a `--supersede` copy.
     promoted = {_unstamped_id(r) for r in records}
@@ -65,6 +69,8 @@ def add(paths: list[Path], root: Path, *, allow_dirty: bool, supersede: str | No
                 # Through the validator, not `model_copy`: the reason is free text and the hygiene rule applies to it.
                 rec = BaselineRecord.model_validate({**rec.model_dump(mode="json"), "supersedes": prev.id, "reason": supersede})
             live[rec.key()] = rec
+        elif isinstance(rec, BenchRecord):
+            _check_label(labels, rec.recipe.label, (rec.recipe.lanes, rec.recipe.lineage), str(path))
         promoted.add(_unstamped_id(rec))
         pending.append((rec, root / rec.kind / f"{rec.id}.json"))
     added: list[Path] = []
@@ -78,9 +84,20 @@ def _unstamped_id(rec: RecordBase) -> str:
     return rec.model_copy(update={"supersedes": None, "reason": None}).id
 
 
+def _check_label(labels: dict[str, tuple[int, Lineage | None]], label: str, recipe: tuple[int, Lineage | None], where: str) -> None:
+    """A label names one (lanes, lineage) (issue #39): claim it in `labels` or refuse."""
+    known = labels.setdefault(label, recipe)
+    if known != recipe:
+        raise SystemExit(
+            f"{where}: label {label!r} already names (lanes, lineage) = {known}, this one is {recipe}; "
+            "a label is one recipe, pick a new label or rerun with the recipe it names (a missing --lineage is the usual cause)"
+        )
+
+
 def bench(args: argparse.Namespace) -> list[Path]:
     """Stage (a named leg, or the given config), run N fresh processes per path, wrap and write
-    one record each into the stage directory; the caller promotes them."""
+    one record each into the stage directory; the caller promotes them. The two refusals `add`
+    would make of every record (a dirty tree, a label naming another recipe) come first."""
     if not args.allow_dirty and git_state()[1]:
         raise SystemExit("the tree is dirty, so `add` would refuse every record; commit first or pass --allow-dirty")
     stage_dir = Path(tempfile.mkdtemp(prefix="speech-bench-")) if args.stage_dir is None else args.stage_dir
@@ -93,6 +110,8 @@ def bench(args: argparse.Namespace) -> list[Path]:
     if not args.binary.is_file():
         raise SystemExit(f"{args.binary} is not built (cargo build --release)")
     lanes = lanes_of(config)
+    # The label rule, before the first process rather than at `add` after the last.
+    _check_label(bench_labels(load(args.root) if args.root.is_dir() else []), label, (lanes, lineage), str(config))
     paths = ("exact", "fast") if args.path == "both" else (args.path,)
     written: list[Path] = []
     for path in paths:
