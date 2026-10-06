@@ -59,6 +59,7 @@ use ndarray::Array2;
 
 use crate::cost::CostLaw;
 use crate::features::stats::InputStatistics;
+use crate::legacy_config::get_f64_default;
 
 use super::cells::CellLayer;
 use super::layers::NeuronLayer;
@@ -113,19 +114,6 @@ fn get_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> R
             .trim()
             .parse::<i32>()
             .map_err(|e| anyhow::anyhow!("cannot read '{s}' as i32 for '{key}': {e}")),
-    }
-}
-
-/// Missing key -> `default`; present but malformed -> error (issue #32). Non-finite
-/// is malformed: Rust parses `nan`/`inf`/`1e400`, the legacy `operator>>` rejects them.
-fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
-    let Some(s) = map.get(key) else {
-        return Ok(default);
-    };
-    match s.trim().parse::<f64>() {
-        Ok(v) if v.is_finite() => Ok(v),
-        Ok(v) => bail!("cannot read '{s}' as f64 for '{key}': non-finite ({v})"),
-        Err(e) => bail!("cannot read '{s}' as f64 for '{key}': {e}"),
     }
 }
 
@@ -621,7 +609,7 @@ impl BlstmConfig {
         let target_enforcement_step = get_i32_default(map, &k("_TargetEnforcementStep"), 0)?;
         // `_CostFunction = CostLaw(conf, prefix)` (:104). Built from the same prefix;
         // all cost-law keys have defaults, so a config lacking them is valid.
-        let cost_law = CostLaw::from_config(map, prefix);
+        let cost_law = CostLaw::from_config(map, prefix)?;
         // `_BackPropagationRpropInit` (:151), default 1e-2 (the live path -- the real
         // config has no such key).
         let rprop_init = get_f64_default(map, &k("_BackPropagationRpropInit"), 1e-2)?;

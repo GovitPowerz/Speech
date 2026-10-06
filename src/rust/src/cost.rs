@@ -11,7 +11,10 @@
 //! flipped `1 - output` to its laws, negates the derivative, and the logistic
 //! chain-rule factor multiplies the (mutated) output for both regimes.
 
+use anyhow::{Result, bail};
 use indexmap::IndexMap;
+
+use crate::legacy_config::{get_f64_default, parse_finite_f64};
 
 fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
     x.max(lo).min(hi)
@@ -207,54 +210,71 @@ pub struct CostLaw {
     no_speech_name: String,
 }
 
-fn getf(m: &IndexMap<String, String>, key: &str, default: f64) -> f64 {
-    m.get(key)
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .unwrap_or(default)
-}
-
-fn gets(m: &IndexMap<String, String>, key: &str, default: &str) -> String {
-    m.get(key).cloned().unwrap_or_else(|| default.to_string())
+/// `conf.get<string>(name, "log")` for a regime's law: an unknown name errors (the legacy
+/// ctor `exit(1)`s) instead of reaching the panic in `below_law`.
+fn get_law(m: &IndexMap<String, String>, key: &str) -> Result<String> {
+    let name = m.get(key).map_or("log", String::as_str);
+    match name {
+        "log" | "linear" | "square" | "cubic" | "sqrt" => Ok(name.to_string()),
+        _ => bail!("cost law '{name}' is not valid for '{key}'"),
+    }
 }
 
 impl CostLaw {
     /// Build from a parsed legacy config, using the algName prefix (e.g. "BLSTM").
-    pub fn from_config(m: &IndexMap<String, String>, prefix: &str) -> CostLaw {
+    ///
+    /// Every numeric key defaults when MISSING and errors when present but malformed or
+    /// non-finite; each `classes_ponderations` entry is parsed strictly, so a bad entry
+    /// errors instead of dropping out and shifting later weights onto the wrong class.
+    pub fn from_config(m: &IndexMap<String, String>, prefix: &str) -> Result<CostLaw> {
         let p = format!("{prefix}_");
-        let cp = clamp(getf(m, &format!("{p}CostPonderation"), 0.5), 0.01, 0.99);
-        let ps = clamp(getf(m, &format!("{p}CostLawParamSpeech"), 0.0), 0.0, 1.0);
-        let pn = clamp(getf(m, &format!("{p}CostLawParamNoSpeech"), 0.0), 0.0, 1.0);
+        let cp = clamp(
+            get_f64_default(m, &format!("{p}CostPonderation"), 0.5)?,
+            0.01,
+            0.99,
+        );
+        let ps = clamp(
+            get_f64_default(m, &format!("{p}CostLawParamSpeech"), 0.0)?,
+            0.0,
+            1.0,
+        );
+        let pn = clamp(
+            get_f64_default(m, &format!("{p}CostLawParamNoSpeech"), 0.0)?,
+            0.0,
+            1.0,
+        );
         let th_s = clamp(
-            getf(m, &format!("{p}CostLawThreshSpeech"), 1.0),
+            get_f64_default(m, &format!("{p}CostLawThreshSpeech"), 1.0)?,
             1e-6,
             1.0 - 1e-6,
         );
         let th_n_law = 1.0
             - clamp(
-                getf(m, &format!("{p}CostLawThreshNoSpeech"), 0.0),
+                get_f64_default(m, &format!("{p}CostLawThreshNoSpeech"), 0.0)?,
                 1e-6,
                 1.0 - 1e-6,
             );
-        let speech_name = gets(m, &format!("{p}CostLawSpeech"), "log");
-        let no_speech_name = gets(m, &format!("{p}CostLawNoSpeech"), "log");
+        let speech_name = get_law(m, &format!("{p}CostLawSpeech"))?;
+        let no_speech_name = get_law(m, &format!("{p}CostLawNoSpeech"))?;
         // DECISIVE DOUBLE-READ: branch selectors re-read raw/unclamped (defaults 10.0 / -1.0).
-        let switching_thresh_speech = getf(m, &format!("{p}CostLawThreshSpeech"), 10.0);
-        let switching_thresh_no_speech = getf(m, &format!("{p}CostLawThreshNoSpeech"), -1.0);
-        let back_prop_wer = getf(m, &format!("{p}BackPropWER"), -1.0) >= 0.0;
-        let cponds = m
-            .get(&format!("{p}classes_ponderations"))
-            .map(|v| {
-                v.split(',')
-                    .filter_map(|s| s.trim().parse::<f64>().ok())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let switching_thresh_speech = get_f64_default(m, &format!("{p}CostLawThreshSpeech"), 10.0)?;
+        let switching_thresh_no_speech =
+            get_f64_default(m, &format!("{p}CostLawThreshNoSpeech"), -1.0)?;
+        let back_prop_wer = get_f64_default(m, &format!("{p}BackPropWER"), -1.0)? >= 0.0;
+        let pond_key = format!("{p}classes_ponderations");
+        let cponds = match m.get(&pond_key) {
+            None => Vec::new(),
+            Some(v) => v
+                .split(',')
+                .map(|s| parse_finite_f64(s, &pond_key))
+                .collect::<Result<Vec<_>>>()?,
+        };
         let classes_ponderations = if !cponds.is_empty() && cponds[0] > 0.0 {
             cponds
         } else {
             Vec::new()
         };
-        CostLaw {
+        Ok(CostLaw {
             speech: RegimeLaws::build(&speech_name, cp, ps, th_s),
             no_speech: RegimeLaws::build(&no_speech_name, 1.0 - cp, pn, th_n_law),
             switching_thresh_speech,
@@ -264,7 +284,7 @@ impl CostLaw {
             cost_ponderation: cp,
             speech_name,
             no_speech_name,
-        }
+        })
     }
 
     /// Scalar VAD cost for one (output, target). target<0 => ignored (0).
@@ -460,5 +480,111 @@ impl CostLaw {
                 }
             }
         }
+    }
+}
+
+/// Issue #47: every numeric key distinguishes a MISSING key (default) from a PRESENT
+/// but malformed or non-finite one (error naming the key and the text), as #32 does for
+/// the `nn/blstm.rs` getters; `classes_ponderations` entries are parsed strictly.
+#[cfg(test)]
+mod config_read_tests {
+    use super::*;
+
+    const MALFORMED: [&str; 5] = ["1O", "O.5", "1e-x", "", "0.5,0.6"];
+    const NON_FINITE: [&str; 6] = ["nan", "NaN", "inf", "-inf", "-infinity", "1e400"];
+
+    fn map(key: &str, value: &str) -> IndexMap<String, String> {
+        let mut m = IndexMap::new();
+        m.insert(key.to_string(), value.to_string());
+        m
+    }
+
+    fn assert_strict(suffix: &str) {
+        let key = format!("BLSTM_{suffix}");
+        assert!(CostLaw::from_config(&map(&key, " 0.3 "), "BLSTM").is_ok());
+        for bad in MALFORMED.iter().chain(NON_FINITE.iter()) {
+            let err = CostLaw::from_config(&map(&key, bad), "BLSTM")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&key) && err.contains(&format!("'{bad}'")),
+                "{key}={bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cost_law_names_strict() {
+        for suffix in ["CostLawSpeech", "CostLawNoSpeech"] {
+            let key = format!("BLSTM_{suffix}");
+            for good in ["log", "linear", "square", "cubic", "sqrt"] {
+                assert!(CostLaw::from_config(&map(&key, good), "BLSTM").is_ok());
+            }
+            let err = CostLaw::from_config(&map(&key, "Log"), "BLSTM")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&key) && err.contains("'Log'"), "{err}");
+        }
+    }
+
+    #[test]
+    fn missing_keys_take_the_defaults() {
+        let law = CostLaw::from_config(&IndexMap::new(), "BLSTM").unwrap();
+        assert_eq!(law.cost_ponderation(), 0.5);
+        assert_eq!(law.switching_thresh_speech, 10.0);
+        assert_eq!(law.switching_thresh_no_speech, -1.0);
+        assert!(!law.is_cost_modified());
+        assert!(law.classes_ponderations().is_empty());
+    }
+
+    #[test]
+    fn cost_ponderation_strict() {
+        assert_strict("CostPonderation");
+    }
+
+    #[test]
+    fn cost_law_param_speech_strict() {
+        assert_strict("CostLawParamSpeech");
+    }
+
+    #[test]
+    fn cost_law_param_no_speech_strict() {
+        assert_strict("CostLawParamNoSpeech");
+    }
+
+    #[test]
+    fn cost_law_thresh_speech_strict() {
+        assert_strict("CostLawThreshSpeech");
+    }
+
+    #[test]
+    fn cost_law_thresh_no_speech_strict() {
+        assert_strict("CostLawThreshNoSpeech");
+    }
+
+    #[test]
+    fn back_prop_wer_strict() {
+        assert_strict("BackPropWER");
+    }
+
+    /// A malformed middle entry used to drop out (`1,O.5,2` -> `[1, 2]`), shifting
+    /// class 2's weight onto class 1.
+    #[test]
+    fn classes_ponderations_strict() {
+        let key = "BLSTM_classes_ponderations";
+        let law = CostLaw::from_config(&map(key, "2, 3 ,4"), "BLSTM").unwrap();
+        assert_eq!(law.classes_ponderations(), &[2.0, 3.0, 4.0]);
+        let law = CostLaw::from_config(&map(key, "0,3,4"), "BLSTM").unwrap();
+        assert!(law.classes_ponderations().is_empty(), "first <= 0 disables");
+        for bad in ["1,O.5,2", "1,,2", "1,2,", "1,nan,2", "1,inf"] {
+            let err = CostLaw::from_config(&map(key, bad), "BLSTM")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(key), "{bad:?}: {err}");
+        }
+        let err = CostLaw::from_config(&map(key, "1,O.5,2"), "BLSTM")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("O.5"), "{err}");
     }
 }

@@ -98,6 +98,19 @@ fn base_map() -> IndexMap<String, String> {
     m
 }
 
+/// Issue #47: a malformed cost-law key fails the net build instead of taking the default.
+#[test]
+fn from_legacy_err_malformed_cost_law_key() {
+    let mut m = base_map();
+    assert!(BlstmConfig::from_legacy(&m, "X").is_ok());
+    m.insert("X_CostLawThreshSpeech".into(), "O.5".into());
+    let err = BlstmConfig::from_legacy(&m, "X").unwrap_err().to_string();
+    assert!(
+        err.contains("X_CostLawThreshSpeech") && err.contains("O.5"),
+        "{err}"
+    );
+}
+
 #[test]
 fn from_legacy_err_lstm_neuron_nb_too_short() {
     let mut m = base_map();
