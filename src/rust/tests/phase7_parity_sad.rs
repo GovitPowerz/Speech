@@ -273,10 +273,10 @@ fn sad_parity_scored_columns() {
 
 #[test]
 fn peephole_default_aligns_with_exact() {
-    // NnetSpec::from_legacy defaults an ABSENT peephole key FALSE; the exact BlstmConfig
-    // defaults it TRUE. build_aligned_spec must produce the EXACT path's TRUE default so
-    // a key-omitting config does not silently give the fast net a different peephole
-    // configuration than the exact net.
+    // The exact BlstmConfig defaults an ABSENT peephole key TRUE. build_aligned_spec must
+    // produce the same so a key-omitting config does not silently give the fast net a
+    // different peephole configuration than the exact net. NnetSpec::from_legacy defaulted
+    // it FALSE until issue #32; it now applies the same rule.
     const KEYS: [&str; 6] = [
         "BLSTM_Forward_IsCellsPeepholesActive",
         "BLSTM_Backward_IsCellsPeepholesActive",
@@ -286,15 +286,15 @@ fn peephole_default_aligns_with_exact() {
         "BLSTM_Backward_IsGatesRecurrentPeepholesActive",
     ];
 
-    // Omitting config: NnetSpec -> FALSE, aligned -> TRUE.
+    // Omitting config: NnetSpec and aligned both -> TRUE.
     let mut omit = tier2_map(None);
     for k in KEYS {
         omit.shift_remove(k);
     }
     assert_eq!(
         NnetSpec::from_legacy(&omit, "BLSTM").unwrap().peepholes,
-        [false; 6],
-        "sanity: NnetSpec defaults absent peepholes FALSE"
+        [true; 6],
+        "NnetSpec defaults absent peepholes TRUE, as BlstmConfig does"
     );
     assert_eq!(
         build_aligned_spec(&omit, "BLSTM").unwrap().peepholes,
@@ -312,6 +312,29 @@ fn peephole_default_aligns_with_exact() {
         [false; 6],
         "aligned spec must READ explicit false flags, not hardcode TRUE"
     );
+
+    // Mixed config: both readers put each key in its own slot (a Forward/Backward or
+    // kind swap in either one passes the uniform legs above).
+    let mut mixed = tier2_map(None);
+    for (k, v) in KEYS.iter().zip([
+        Some("false"),
+        None,
+        Some("true"),
+        Some("false"),
+        None,
+        Some("false"),
+    ]) {
+        match v {
+            Some(v) => mixed.insert((*k).into(), v.into()),
+            None => mixed.shift_remove(*k),
+        };
+    }
+    let want = [false, true, true, false, true, false];
+    assert_eq!(
+        NnetSpec::from_legacy(&mixed, "BLSTM").unwrap().peepholes,
+        want
+    );
+    assert_eq!(build_aligned_spec(&mixed, "BLSTM").unwrap().peepholes, want);
 }
 
 // ---------------------------------------------------------------------------

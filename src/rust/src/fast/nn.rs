@@ -938,7 +938,7 @@ impl FastBlstm {
     /// `NnetSpec.peepholes` order `[fwd.cells, bwd.cells, fwd.gates, bwd.gates,
     /// fwd.gates_rec, bwd.gates_rec]`, read back from layer 0 of each direction.
     /// Pins the RIDER-1 peephole-default alignment (the fast driver builds its spec
-    /// with `BlstmConfig`-default-TRUE peepholes, not `NnetSpec`'s default-FALSE).
+    /// with `BlstmConfig`'s peepholes; `NnetSpec` defaulted absent keys FALSE until issue #32).
     #[cfg(feature = "test-support")]
     pub fn debug_peepholes(&self) -> [bool; 6] {
         let f = &self.forward_layers[0];

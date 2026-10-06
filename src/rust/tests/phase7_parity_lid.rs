@@ -302,7 +302,7 @@ fn lid_parity_cep_exact_vs_fast() {
 #[test]
 fn fast_lid_peepholes_aligned() {
     // twin_mode7 sets all six BLSTM_LID peephole keys true; the fast LID net must read
-    // them (via build_aligned_spec's BlstmConfig source), not the NnetSpec default FALSE.
+    // them (via build_aligned_spec's BlstmConfig source).
     let lidw = lid_weights();
     let drv = FastTwinLid::from_legacy(&map_of("twin_mode7"), None, Some(&lidw)).unwrap();
     assert_eq!(
@@ -311,8 +311,8 @@ fn fast_lid_peepholes_aligned() {
         "fast LID net must carry the config's TRUE peepholes"
     );
 
-    // Omitting config: NnetSpec would default FALSE, but the aligned spec (BlstmConfig
-    // default TRUE) must give TRUE -- proving the LID prefix is peephole-aligned too.
+    // Omitting config: the aligned spec must give the BlstmConfig default TRUE under the
+    // LID prefix too (NnetSpec defaulted FALSE until issue #32).
     const LID_KEYS: [&str; 6] = [
         "BLSTM_LID_Forward_IsCellsPeepholesActive",
         "BLSTM_LID_Backward_IsCellsPeepholesActive",

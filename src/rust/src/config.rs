@@ -32,7 +32,16 @@ impl NnetSpec {
     /// Extract the spec from a parsed legacy config using the given algName prefix (e.g. "BLSTM").
     pub fn from_legacy(m: &IndexMap<String, String>, prefix: &str) -> anyhow::Result<NnetSpec> {
         let p = format!("{prefix}_");
-        let flag = |k: &str| m.get(k).map(|v| v == "true").unwrap_or(false);
+        // `PeepholeFlags::from_legacy`'s rule (issue #32): absent -> true, malformed -> error.
+        let flag = |k: &str| -> anyhow::Result<bool> {
+            match m.get(k) {
+                None => Ok(true),
+                Some(v) => v
+                    .trim()
+                    .parse::<bool>()
+                    .with_context(|| format!("cannot read '{v}' as bool for '{k}'")),
+            }
+        };
         Ok(NnetSpec {
             lstm_neuron_nb: ints(m, &format!("{p}LSTMNeuronNb"))?,
             lstm_subsampling: ints(m, &format!("{p}LSTMSubSampling"))?,
@@ -44,12 +53,12 @@ impl NnetSpec {
                 .trim()
                 .parse()?,
             peepholes: [
-                flag(&format!("{p}Forward_IsCellsPeepholesActive")),
-                flag(&format!("{p}Backward_IsCellsPeepholesActive")),
-                flag(&format!("{p}Forward_IsGatesPeepholesActive")),
-                flag(&format!("{p}Backward_IsGatesPeepholesActive")),
-                flag(&format!("{p}Forward_IsGatesRecurrentPeepholesActive")),
-                flag(&format!("{p}Backward_IsGatesRecurrentPeepholesActive")),
+                flag(&format!("{p}Forward_IsCellsPeepholesActive"))?,
+                flag(&format!("{p}Backward_IsCellsPeepholesActive"))?,
+                flag(&format!("{p}Forward_IsGatesPeepholesActive"))?,
+                flag(&format!("{p}Backward_IsGatesPeepholesActive"))?,
+                flag(&format!("{p}Forward_IsGatesRecurrentPeepholesActive"))?,
+                flag(&format!("{p}Backward_IsGatesRecurrentPeepholesActive"))?,
             ],
         })
     }

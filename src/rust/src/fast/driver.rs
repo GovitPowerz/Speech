@@ -181,15 +181,15 @@ fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
 /// the SAD net or `"BLSTM_LID"` for the Twin's LID net) with peephole flags aligned to
 /// the EXACT path's defaults (Phase 7 Task 4 rider 1 -- the peephole default asymmetry).
 ///
-/// `NnetSpec::from_legacy` (`config.rs:35`) defaults an ABSENT peephole key to FALSE,
-/// but the exact `BlstmConfig`/`LSTMLayer` path (`PeepholeFlags::from_legacy`) defaults it TRUE. The
-/// fast net reads a `NnetSpec`; the exact net reads a `BlstmConfig`; so a key-omitting
-/// config would silently give the fast net a DIFFERENT peephole configuration than the
-/// exact path -- a divergence with no tolerance floor. We resolve it by overriding the
-/// spec's peepholes from `BlstmConfig` (default TRUE), so both paths read peepholes
-/// from the SAME source and defaults. Every committed SAD/LID config sets all six keys
-/// explicitly (so the override is value-preserving there), but the alignment is pinned
-/// against an omitting config in `tests/phase7_parity_sad.rs`.
+/// The fast net reads a `NnetSpec`; the exact net reads a `BlstmConfig`. A peephole
+/// mismatch between the two is a divergence with no tolerance floor, so the spec's
+/// peepholes are overridden from `BlstmConfig` and both paths read them from the SAME
+/// source. `NnetSpec::from_legacy` defaulted an ABSENT key to FALSE until issue #32 and
+/// now applies `PeepholeFlags::from_legacy`'s rule itself, so the override is
+/// value-preserving on every config; it stays so the agreement does not rest on two
+/// readers staying in sync. Being value-preserving, the override itself is unobservable;
+/// `tests/phase7_parity_sad.rs` pins the agreement instead, slot by slot, on an omitting,
+/// an all-false and a mixed config.
 pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Result<NnetSpec> {
     let bc = BlstmConfig::from_legacy(map, prefix)?;
     bail_unsupported_shape(&bc, prefix)?;
@@ -1161,7 +1161,7 @@ impl FastTwinLid {
     /// Test hook: the LID net's effective per-direction peephole flags (rider 2 -- wires
     /// the `FastBlstm::debug_peepholes` hook into a Task-5 pin, proving the LID net's
     /// spec was peephole-aligned under the `BLSTM_LID` prefix, not left at the
-    /// `NnetSpec`-default FALSE).
+    /// `NnetSpec` default, FALSE until issue #32).
     #[cfg(feature = "test-support")]
     pub fn debug_lid_peepholes(&self) -> Option<[bool; 6]> {
         self.lid_net.as_ref().map(|n| n.debug_peepholes())

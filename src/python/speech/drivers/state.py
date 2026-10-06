@@ -20,7 +20,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech.batching import read_listing
-from speech.config_bridge import parse_legacy_config
+from speech.config_bridge import parse_legacy_config, read_flag
 from speech.genome import LidNetSpec, RunConfig
 
 __all__ = [
@@ -39,8 +39,17 @@ def _ints(cfg: dict[str, str], key: str) -> list[int]:
     return [int(x) for x in cfg[key].split(",")]
 
 
-def _flag(cfg: dict[str, str], key: str, default: int = 0) -> int:
-    return 1 if cfg.get(key, "false") == "true" else default
+def _peephole(cfg: dict[str, str], prefix: str, kind: str) -> int:
+    """One PS peephole flag from BOTH direction keys: `vec2struct` writes the single PS value
+    back to Forward AND Backward, so a bidirectional net whose two keys differ cannot round-trip
+    and raises rather than having one direction flipped. Both keys are read strictly even on a
+    forward net, as `BlstmConfig::from_legacy` does."""
+    fwd_key, bwd_key = f"{prefix}_Forward_{kind}", f"{prefix}_Backward_{kind}"
+    fwd = read_flag(cfg, fwd_key, True)
+    bwd = read_flag(cfg, bwd_key, True)
+    if fwd != bwd and cfg.get(f"{prefix}_Direction", "bidirectional") != "forward":
+        raise ValueError(f"'{fwd_key}' and '{bwd_key}' differ; the PS struct holds one value for both directions")
+    return int(fwd)
 
 
 def _lid_from_config(cfg: dict[str, str]) -> LidNetSpec:
@@ -59,9 +68,9 @@ def _lid_from_config(cfg: dict[str, str]) -> LidNetSpec:
         BackPropWER=float(cfg.get("BLSTM_LID_BackPropWER", "-1.0")),
         classes_ponderations=[],
         InputNormalizationType=int(cfg.get("BLSTM_LID_InputNormalizationType", "0")),
-        IsCellsPeepholesActive=_flag(cfg, "BLSTM_LID_Forward_IsCellsPeepholesActive", 1),
-        IsGatesPeepholesActive=_flag(cfg, "BLSTM_LID_Forward_IsGatesPeepholesActive", 1),
-        IsGatesRecurrentPeepholesActive=_flag(cfg, "BLSTM_LID_Forward_IsGatesRecurrentPeepholesActive", 1),
+        IsCellsPeepholesActive=_peephole(cfg, "BLSTM_LID", "IsCellsPeepholesActive"),
+        IsGatesPeepholesActive=_peephole(cfg, "BLSTM_LID", "IsGatesPeepholesActive"),
+        IsGatesRecurrentPeepholesActive=_peephole(cfg, "BLSTM_LID", "IsGatesRecurrentPeepholesActive"),
         LSTM_MaxSat=float(cfg.get("BLSTM_LID_Forward_MaxSaturation", "-10.0")),
         nnmatfile=cfg.get("BLSTM_LID_weightsFile", "LIDNNweights.mat"),
     )
@@ -100,7 +109,7 @@ def ps_from_config(
         VRCTS_isFast=1,
         VRCTS_force=0,
         balance=balance,
-        exclude_nontrans=1 if cfg.get("exclude_nontrans", "false") == "true" else 0,
+        exclude_nontrans=int(read_flag(cfg, "exclude_nontrans", False)),
         useVRCTSFeatures=int(cfg.get("BLSTM_use_cep_files", "0")),
         nnmatfile=cfg.get("BLSTM_weightsFile", "NNweights.mat"),
         minSegmentLength=0.0,
@@ -117,9 +126,9 @@ def ps_from_config(
         BackPropWER=float(cfg.get("BLSTM_BackPropWER", "-1.0")),
         BalanceBackProp=0.5,
         InputNormalizationType=int(cfg.get("BLSTM_InputNormalizationType", "0")),
-        IsCellsPeepholesActive=_flag(cfg, "BLSTM_Forward_IsCellsPeepholesActive", 1),
-        IsGatesPeepholesActive=_flag(cfg, "BLSTM_Forward_IsGatesPeepholesActive", 1),
-        IsGatesRecurrentPeepholesActive=_flag(cfg, "BLSTM_Forward_IsGatesRecurrentPeepholesActive", 1),
+        IsCellsPeepholesActive=_peephole(cfg, "BLSTM", "IsCellsPeepholesActive"),
+        IsGatesPeepholesActive=_peephole(cfg, "BLSTM", "IsGatesPeepholesActive"),
+        IsGatesRecurrentPeepholesActive=_peephole(cfg, "BLSTM", "IsGatesRecurrentPeepholesActive"),
         lid=lid,
     )
 
