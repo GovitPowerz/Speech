@@ -9,6 +9,8 @@ use std::fs;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
+use crate::legacy_config::{expand_repeat, splitstr};
+
 /// One corpus entry (audio path + refs + language/dialect/class metadata).
 ///
 /// legacy: CorpusItem.h:7-28 (field set), Corpus.cpp:177 (construction order).
@@ -32,24 +34,6 @@ fn parse_string_default(m: &IndexMap<String, String>, key: &str, default: &str) 
 /// Legacy `splitstr(line, ';')` (String.hpp:110-114): repeated `getline(ss, item,
 /// delim)`. `getline` returns false (stopping the loop) exactly when it is
 /// called with NOTHING left to read (stream already at EOF) -- so a delimiter
-/// as the LAST character of the string is consumed to end the preceding
-/// field, but produces no further (empty) token, since after consuming it the
-/// stream is at EOF with no more delimiter/content to read. This drops AT
-/// MOST ONE trailing empty field, not a run of them: "a;b;" -> ["a","b"], but
-/// "a;b;;" -> ["a","b",""] (verified against a real `getline` harness). A
-/// line with no delimiter at all yields the whole line as one token; an empty
-/// line yields zero tokens.
-fn splitstr(line: &str, delim: char) -> Vec<String> {
-    if line.is_empty() {
-        return Vec::new();
-    }
-    let mut out: Vec<String> = line.split(delim).map(String::from).collect();
-    if line.ends_with(delim) {
-        out.pop();
-    }
-    out
-}
-
 /// Legacy `read<string>` (Helpers.hpp:1602-1608): `ss << data; ss >> val`
 /// extracts the FIRST whitespace-delimited token (leading whitespace skipped,
 /// content after the first token silently dropped); an empty or
@@ -67,34 +51,19 @@ fn read_string(data: &str) -> Result<String> {
 /// (String.hpp:86-98), which getline-splits (one-trailing-empty-drop, same
 /// rule as [`splitstr`]) AND pushes each piece through `read<T>` -- so an
 /// empty element ("a,,b" middle, or a piece of "*2") exits(1) in the legacy
-/// before any further parsing (bail here). After the outer comma split, each
-/// element splits on the `*` repeater: "x*3" pushes 3 copies of "x" ("x*"
-/// getline-drops the empty count and pushes one copy). The repeat count goes
-/// through `natural` = `boost::lexical_cast<size_t>` (whole-string strict),
-/// whose failure is an UNCAUGHT throw in the legacy (std::terminate): panic
-/// here. All verified against a compiled transcription of String.hpp:86-127.
+/// before any further parsing (bail here). The `*` repeater and its count are
+/// the crate's one list grammar (`legacy_config::expand_repeat`, issue #50);
+/// what stays here is the `read<string>` FIRST-TOKEN truncation of each comma
+/// piece BEFORE its `*` split (`"x*3 junk"` -> three `x`), which the numeric
+/// lists do not do. A bad repeat count is an `Err` naming the key where the
+/// legacy `boost::lexical_cast<size_t>` throws uncaught (std::terminate).
+/// Verified against a compiled transcription of String.hpp:86-127.
 fn get_list_string(m: &IndexMap<String, String>, key: &str, delim: char) -> Result<Vec<String>> {
     let mut vect = Vec::new();
     if let Some(v) = m.get(key) {
         for piece in splitstr(v, delim) {
             let s1 = read_string(&piece)?;
-            let mut parts = Vec::new();
-            for p in splitstr(&s1, '*') {
-                parts.push(read_string(&p)?);
-            }
-            let num_repeats = if parts.len() == 1 {
-                1
-            } else {
-                parts[1].parse::<usize>().unwrap_or_else(|_| {
-                    panic!(
-                        "bad repeat count '{}' (legacy: uncaught boost::bad_lexical_cast)",
-                        parts[1]
-                    )
-                })
-            };
-            for _ in 0..num_repeats {
-                vect.push(parts[0].clone());
-            }
+            vect.extend(expand_repeat(&s1, key, |s, _| read_string(s))?);
         }
     }
     Ok(vect)
@@ -711,6 +680,18 @@ mod tests {
         let m4: IndexMap<String, String> =
             IndexMap::from([("files".to_string(), "a,,b".to_string())]);
         assert!(get_list_string(&m4, "files", ',').is_err());
+        // first-token truncation runs BEFORE the `*` split (legacy `split<string>`)
+        let m5: IndexMap<String, String> =
+            IndexMap::from([("files".to_string(), "x.wav*3 junk,b.wav".to_string())]);
+        assert_eq!(
+            get_list_string(&m5, "files", ',').unwrap(),
+            vec!["x.wav", "x.wav", "x.wav", "b.wav"]
+        );
+        // issue #50: a bad repeat count is an Err naming the key, not a panic
+        let m6: IndexMap<String, String> =
+            IndexMap::from([("files".to_string(), "x.wav*three".to_string())]);
+        let err = get_list_string(&m6, "files", ',').unwrap_err().to_string();
+        assert!(err.contains("files") && err.contains("three"), "{err}");
     }
 
     #[test]

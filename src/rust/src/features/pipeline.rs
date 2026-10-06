@@ -49,6 +49,7 @@ use ndarray::Array2;
 use crate::audio::{Audio, compute_segment_periodogram_estimates, windowing_coefficients};
 use crate::features::ltsv_tdc::get_ltsv;
 use crate::features::mel::MelFilterBank;
+use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
 
 /// Time-domain-correlation window/lag/balance parameters.
 ///
@@ -119,12 +120,6 @@ fn get_str<'a>(map: &'a IndexMap<String, String>, key: &str) -> Result<&'a str> 
         .with_context(|| format!("param '{key}' not found in config"))
 }
 
-fn get_f64(map: &IndexMap<String, String>, key: &str) -> Result<f64> {
-    let s = get_str(map, key)?;
-    s.parse::<f64>()
-        .with_context(|| format!("cannot read '{s}' as f64 for '{key}'"))
-}
-
 fn get_i64(map: &IndexMap<String, String>, key: &str) -> Result<i64> {
     let s = get_str(map, key)?;
     s.parse::<i64>()
@@ -142,16 +137,6 @@ fn get_bool(map: &IndexMap<String, String>, key: &str) -> Result<bool> {
     let s = get_str(map, key)?;
     s.parse::<bool>()
         .with_context(|| format!("cannot read '{s}' as bool for '{key}'"))
-}
-
-/// `conf.get<double>(name, default)`: missing key -> default.
-fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .parse::<f64>()
-            .with_context(|| format!("cannot read '{s}' as f64 for '{key}'")),
-    }
 }
 
 impl FeatureConfig {
@@ -232,18 +217,7 @@ impl FeatureConfig {
             if shift < 0.0 {
                 shift = 0.0;
             }
-            let lags_str = get_str(map, &k("_TDC_lags"))?;
-            let mut lags: Vec<f64> = Vec::new();
-            for part in lags_str.split(',') {
-                let part = part.trim();
-                if part.is_empty() {
-                    continue;
-                }
-                lags.push(
-                    part.parse::<f64>()
-                        .with_context(|| format!("cannot read '{part}' as f64 in TDC_lags"))?,
-                );
-            }
+            let mut lags = get_f64_list(map, &k("_TDC_lags"))?;
             if lags.len() < 2 {
                 bail!("{}_TDC_lags must contain 2 values", prefix);
             }

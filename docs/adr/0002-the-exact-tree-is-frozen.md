@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50)
 
 ## Context
 
@@ -25,7 +25,13 @@ reads: a present-but-unparseable key errors instead of silently taking the defau
 with trailing junk (`1O`, `false # c`), which the legacy's `ss >> val` reads as `1` / `false`,
 issue #32; both refuse a non-finite value, and `cost.rs` also parses each `classes_ponderations`
 entry strictly instead of dropping a bad one and shifting the later classes, and errors on an
-unknown cost-law name instead of panicking, issue #47). Training is exact-f64 only and bails
+unknown cost-law name instead of panicking, issue #47; the same guard extended to every f64
+and list config read in the exact tree -- `features/pipeline.rs`, `tasks/sad.rs`,
+`tasks/segmenter.rs`, `tasks/lid.rs`, `config.rs` -- by routing them through the one
+`legacy_config.rs` reader family, so a non-finite value errors naming the key everywhere and
+every list takes the legacy `split_with_repeat` grammar (one trailing comma dropped, the `*`
+repeater) with three deliberate tightenings (an inner empty piece, a bad repeat count, a third
+`*` part), issue #50). Training is exact-f64 only and bails
 loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and

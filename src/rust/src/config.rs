@@ -6,6 +6,8 @@
 use std::path::Path;
 
 use anyhow::Context;
+
+use crate::legacy_config::get_usize_list;
 use indexmap::IndexMap;
 use serde::Deserialize;
 
@@ -18,14 +20,6 @@ pub struct NnetSpec {
     pub output_subsampling: Vec<usize>,
     pub input_size: usize,
     pub peepholes: [bool; 6],
-}
-
-fn ints(m: &IndexMap<String, String>, key: &str) -> anyhow::Result<Vec<usize>> {
-    m.get(key)
-        .with_context(|| format!("missing key {key}"))?
-        .split(',')
-        .map(|s| s.trim().parse::<usize>().map_err(Into::into))
-        .collect()
 }
 
 impl NnetSpec {
@@ -43,10 +37,10 @@ impl NnetSpec {
             }
         };
         Ok(NnetSpec {
-            lstm_neuron_nb: ints(m, &format!("{p}LSTMNeuronNb"))?,
-            lstm_subsampling: ints(m, &format!("{p}LSTMSubSampling"))?,
-            output_neuron_nb: ints(m, &format!("{p}OutputNeuronNb"))?,
-            output_subsampling: ints(m, &format!("{p}OutputSubSampling"))?,
+            lstm_neuron_nb: get_usize_list(m, &format!("{p}LSTMNeuronNb"))?,
+            lstm_subsampling: get_usize_list(m, &format!("{p}LSTMSubSampling"))?,
+            output_neuron_nb: get_usize_list(m, &format!("{p}OutputNeuronNb"))?,
+            output_subsampling: get_usize_list(m, &format!("{p}OutputSubSampling"))?,
             input_size: m
                 .get(&format!("{p}NNetInputSize"))
                 .context("missing NNetInputSize")?

@@ -14,7 +14,7 @@
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
-use crate::legacy_config::{get_f64_default, parse_finite_f64};
+use crate::legacy_config::{get_f64_default, parse_finite_f64, split_list};
 
 fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
     x.max(lo).min(hi)
@@ -264,10 +264,7 @@ impl CostLaw {
         let pond_key = format!("{p}classes_ponderations");
         let cponds = match m.get(&pond_key) {
             None => Vec::new(),
-            Some(v) => v
-                .split(',')
-                .map(|s| parse_finite_f64(s, &pond_key))
-                .collect::<Result<Vec<_>>>()?,
+            Some(v) => split_list(v, &pond_key, parse_finite_f64)?,
         };
         let classes_ponderations = if !cponds.is_empty() && cponds[0] > 0.0 {
             cponds
@@ -579,7 +576,11 @@ mod config_read_tests {
         assert_eq!(law.classes_ponderations(), &[2.0, 3.0, 4.0]);
         let law = CostLaw::from_config(&map(key, "0,3,4"), "BLSTM").unwrap();
         assert!(law.classes_ponderations().is_empty(), "first <= 0 disables");
-        for bad in ["1,O.5,2", "1,,2", "1,2,", "1,nan,2", "1,inf"] {
+        let law = CostLaw::from_config(&map(key, "1,2,"), "BLSTM").unwrap();
+        assert_eq!(law.classes_ponderations(), &[1.0, 2.0]);
+        let law = CostLaw::from_config(&map(key, "2*3"), "BLSTM").unwrap();
+        assert_eq!(law.classes_ponderations(), &[2.0; 3]);
+        for bad in ["1,O.5,2", "1,,2", "1,nan,2", "1,inf", "1*x"] {
             let err = CostLaw::from_config(&map(key, bad), "BLSTM")
                 .unwrap_err()
                 .to_string();
