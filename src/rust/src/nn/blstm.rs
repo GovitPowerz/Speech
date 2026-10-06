@@ -3247,9 +3247,9 @@ mod inference_only_tests {
 /// Issue #32: the defaulting i32/bool getters distinguish a MISSING key (default) from a
 /// PRESENT-but-malformed one (error naming the key and the text), matching the
 /// `engine/bag_of_processors.rs` family and ADR-0006's Python-side rule (the f64 getter
-/// and its test live in `legacy_config.rs`). Stricter
-/// than the legacy `read<T>` (`ss >> val`), which accepts a parseable prefix
-/// (`1O` -> 1, `false # c` -> false): the port rejects the trailing junk.
+/// and its test live in `legacy_config.rs`). Stricter than the legacy `read<T>`
+/// (`ss >> val`), which accepts a parseable prefix (`1O` -> 1, `false # c` -> false):
+/// the port rejects the trailing junk.
 #[cfg(test)]
 mod config_getter_tests {
     use super::*;
