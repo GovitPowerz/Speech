@@ -42,7 +42,10 @@ fn nnet_spec_peephole_flags_read_strictly() {
         speech::config::NnetSpec::from_legacy(&m, "BLSTM")
     };
     assert_eq!(spec_with(None).unwrap().peepholes, [true; 6]);
-    assert!(!spec_with(Some(" false ")).unwrap().peepholes[3]);
+    assert_eq!(
+        spec_with(Some(" false ")).unwrap().peepholes,
+        [true, true, true, false, true, true]
+    );
     for bad in ["True", "1", "ture", ""] {
         let err = format!("{:#}", spec_with(Some(bad)).unwrap_err());
         assert!(

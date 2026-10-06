@@ -187,8 +187,9 @@ fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
 /// source. `NnetSpec::from_legacy` defaulted an ABSENT key to FALSE until issue #32 and
 /// now applies `PeepholeFlags::from_legacy`'s rule itself, so the override is
 /// value-preserving on every config; it stays so the agreement does not rest on two
-/// readers staying in sync. Pinned against an omitting config in
-/// `tests/phase7_parity_sad.rs`.
+/// readers staying in sync. Being value-preserving, the override itself is unobservable;
+/// `tests/phase7_parity_sad.rs` pins the agreement instead, slot by slot, on an omitting,
+/// an all-false and a mixed config.
 pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Result<NnetSpec> {
     let bc = BlstmConfig::from_legacy(map, prefix)?;
     bail_unsupported_shape(&bc, prefix)?;

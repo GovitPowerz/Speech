@@ -312,6 +312,29 @@ fn peephole_default_aligns_with_exact() {
         [false; 6],
         "aligned spec must READ explicit false flags, not hardcode TRUE"
     );
+
+    // Mixed config: both readers put each key in its own slot (a Forward/Backward or
+    // kind swap in either one passes the uniform legs above).
+    let mut mixed = tier2_map(None);
+    for (k, v) in KEYS.iter().zip([
+        Some("false"),
+        None,
+        Some("true"),
+        Some("false"),
+        None,
+        Some("false"),
+    ]) {
+        match v {
+            Some(v) => mixed.insert((*k).into(), v.into()),
+            None => mixed.shift_remove(*k),
+        };
+    }
+    let want = [false, true, true, false, true, false];
+    assert_eq!(
+        NnetSpec::from_legacy(&mixed, "BLSTM").unwrap().peepholes,
+        want
+    );
+    assert_eq!(build_aligned_spec(&mixed, "BLSTM").unwrap().peepholes, want);
 }
 
 // ---------------------------------------------------------------------------

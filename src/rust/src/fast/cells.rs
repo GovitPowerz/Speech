@@ -1202,8 +1202,9 @@ impl FastLstm {
 
     /// The effective peephole flags `[cells, gates, gates_recurrent]`. Exposed because
     /// they are the one part of this cell's behaviour that comes from the CONFIG rather
-    /// than the pack, and the peephole-default asymmetry (`build_aligned_spec`'s rider 1)
-    /// makes "which flags did this net actually get" a question worth being able to ask.
+    /// than the pack, and the peephole-default asymmetry (`build_aligned_spec`'s rider 1,
+    /// closed by issue #32) made "which flags did this net actually get" a question worth
+    /// being able to ask.
     pub fn peep_flags(&self) -> [bool; 3] {
         [self.cells_peep, self.gates_peep, self.gates_rec_peep]
     }
