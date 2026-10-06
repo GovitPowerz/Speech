@@ -2029,7 +2029,7 @@ impl StreamingSession {
         // --- Validation bails (each pinned) ---
         let algo = map
             .get("Algo_choice")
-            .ok_or_else(|| anyhow!("streaming: missing Algo_choice"))?
+            .ok_or_else(|| anyhow!("param 'Algo_choice' not found in config"))?
             .trim()
             .parse::<i32>()
             .map_err(|e| anyhow!("streaming: Algo_choice parse: {e}"))?;

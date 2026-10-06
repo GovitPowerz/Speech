@@ -39,7 +39,7 @@ use crate::tasks::segmenter::{
 fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
     // legacy `conf.get<bool>` uses std::boolalpha: the strings "true"/"false".
     m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<bool>()
         .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}"))
@@ -47,7 +47,7 @@ fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
 
 fn parse_i32(m: &IndexMap<String, String>, key: &str) -> Result<i32> {
     m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<i32>()
         .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
@@ -56,7 +56,7 @@ fn parse_i32(m: &IndexMap<String, String>, key: &str) -> Result<i32> {
 fn parse_string(m: &IndexMap<String, String>, key: &str) -> Result<String> {
     m.get(key)
         .cloned()
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))
 }
 
 /// Time-domain correlation SAD segmenter (Algo 1; `TimeDomainCorrel.{h,cpp}`).

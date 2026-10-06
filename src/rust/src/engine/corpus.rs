@@ -31,9 +31,6 @@ fn parse_string_default(m: &IndexMap<String, String>, key: &str, default: &str) 
     m.get(key).cloned().unwrap_or_else(|| default.to_string())
 }
 
-/// Legacy `splitstr(line, ';')` (String.hpp:110-114): repeated `getline(ss, item,
-/// delim)`. `getline` returns false (stopping the loop) exactly when it is
-/// called with NOTHING left to read (stream already at EOF) -- so a delimiter
 /// Legacy `read<string>` (Helpers.hpp:1602-1608): `ss << data; ss >> val`
 /// extracts the FIRST whitespace-delimited token (leading whitespace skipped,
 /// content after the first token silently dropped); an empty or
@@ -692,6 +689,11 @@ mod tests {
             IndexMap::from([("files".to_string(), "x.wav*three".to_string())]);
         let err = get_list_string(&m6, "files", ',').unwrap_err().to_string();
         assert!(err.contains("files") && err.contains("three"), "{err}");
+        // issue #50: a third `*` part errors where the legacy silently ignored the `4`
+        let m7: IndexMap<String, String> =
+            IndexMap::from([("files".to_string(), "x.wav*3*4".to_string())]);
+        let err = get_list_string(&m7, "files", ',').unwrap_err().to_string();
+        assert!(err.contains("files") && err.contains("x.wav*3*4"), "{err}");
     }
 
     #[test]

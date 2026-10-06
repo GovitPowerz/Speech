@@ -115,7 +115,7 @@ impl SegmenterConfig {
 /// size_type>(name)`, no default).
 fn parse_usize(m: &IndexMap<String, String>, key: &str) -> Result<usize> {
     m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<usize>()
         .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
@@ -193,7 +193,9 @@ impl DriverConfig {
         let conv_type = if conv_window_size > 0 {
             let ty = m
                 .get(&format!("{prefix}_convolution_window_type"))
-                .ok_or_else(|| anyhow!("missing config key `{prefix}_convolution_window_type`"))?
+                .ok_or_else(|| {
+                    anyhow!("param '{prefix}_convolution_window_type' not found in config")
+                })?
                 .clone();
             // verifyWindowingType is called for its logging side effect only (the
             // by-value no-fix quirk): the stored type is used as-is either way.

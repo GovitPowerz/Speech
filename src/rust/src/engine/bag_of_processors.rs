@@ -32,7 +32,7 @@ use crate::tasks::vrcts::VrctsPart;
 /// `conf.get<int>(name)` (required, no default): missing key is an error.
 fn get_i32(map: &IndexMap<String, String>, key: &str) -> Result<i32> {
     map.get(key)
-        .ok_or_else(|| anyhow::anyhow!("missing required config key `{key}`"))?
+        .ok_or_else(|| anyhow::anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<i32>()
         .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as i32: {e}"))

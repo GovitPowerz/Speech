@@ -6,10 +6,10 @@
 use std::path::Path;
 
 use anyhow::Context;
-
-use crate::legacy_config::get_usize_list;
 use indexmap::IndexMap;
 use serde::Deserialize;
+
+use crate::legacy_config::get_usize_list;
 
 /// NNType-0 network spec parsed from a legacy config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl NnetSpec {
             output_subsampling: get_usize_list(m, &format!("{p}OutputSubSampling"))?,
             input_size: m
                 .get(&format!("{p}NNetInputSize"))
-                .context("missing NNetInputSize")?
+                .with_context(|| format!("param '{p}NNetInputSize' not found in config"))?
                 .trim()
                 .parse()?,
             peepholes: [

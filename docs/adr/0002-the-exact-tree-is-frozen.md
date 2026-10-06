@@ -27,11 +27,12 @@ issue #32; both refuse a non-finite value, and `cost.rs` also parses each `class
 entry strictly instead of dropping a bad one and shifting the later classes, and errors on an
 unknown cost-law name instead of panicking, issue #47; the same guard extended to every f64
 and list config read in the exact tree -- `features/pipeline.rs`, `tasks/sad.rs`,
-`tasks/segmenter.rs`, `tasks/lid.rs`, `config.rs` -- by routing them through the one
-`legacy_config.rs` reader family, so a non-finite value errors naming the key everywhere and
-every list takes the legacy `split_with_repeat` grammar (one trailing comma dropped, the `*`
-repeater) with three deliberate tightenings (an inner empty piece, a bad repeat count, a third
-`*` part), issue #50). Training is exact-f64 only and bails
+`tasks/segmenter.rs`, `tasks/lid.rs`, `config.rs`, `engine/bag_of_processors.rs`,
+`engine/corpus.rs` -- by routing them through the one `legacy_config.rs` reader family, so a
+non-finite value errors naming the key everywhere and every list takes the legacy
+`split_with_repeat` grammar (one trailing comma dropped, the `*` repeater) with two deliberate
+tightenings, a bad repeat count and a third `*` part, both errors where the legacy aborted or
+silently dropped, issue #50). Training is exact-f64 only and bails
 loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and

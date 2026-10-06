@@ -1,6 +1,7 @@
-//! Issue #50: every f64 config reader in the crate goes through the shared
+//! Issue #50: every f64 and list config reader in the crate goes through the shared
 //! `legacy_config` family, so a non-finite value (`nan`, `inf`, `1e400`) on any of its keys
-//! errors naming the key instead of flowing into the engine. One pin per migrated module,
+//! errors naming the key instead of flowing into the engine, and every list takes the one
+//! grammar (the trailing comma, the `*` repeater). One pin per migrated module,
 //! driven through that module's public constructor on a committed fixture; the shared
 //! grammar itself is unit-pinned in `legacy_config::f64_reader_tests`.
 
