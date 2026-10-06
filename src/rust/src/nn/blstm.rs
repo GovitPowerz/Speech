@@ -3244,9 +3244,10 @@ mod inference_only_tests {
     }
 }
 
-/// Issue #32: the defaulting getters distinguish a MISSING key (default) from a
+/// Issue #32: the defaulting i32/bool getters distinguish a MISSING key (default) from a
 /// PRESENT-but-malformed one (error naming the key and the text), matching the
-/// `engine/bag_of_processors.rs` family and ADR-0006's Python-side rule. Stricter
+/// `engine/bag_of_processors.rs` family and ADR-0006's Python-side rule (the f64 getter
+/// and its test live in `legacy_config.rs`). Stricter
 /// than the legacy `read<T>` (`ss >> val`), which accepts a parseable prefix
 /// (`1O` -> 1, `false # c` -> false): the port rejects the trailing junk.
 #[cfg(test)]
@@ -3267,21 +3268,6 @@ mod config_getter_tests {
         assert_eq!(get_i32_default(&map("K", " -1 "), "K", 7).unwrap(), -1);
         let err = get_i32_default(&m, "K", 7).unwrap_err().to_string();
         assert!(err.contains("K") && err.contains("1O"), "{err}");
-    }
-
-    #[test]
-    fn f64_default_missing_present_malformed() {
-        let m = map("K", "1e-x");
-        assert_eq!(get_f64_default(&m, "absent", 0.5).unwrap(), 0.5);
-        assert_eq!(get_f64_default(&map("K", "1e-4"), "K", 0.5).unwrap(), 1e-4);
-        let err = get_f64_default(&m, "K", 0.5).unwrap_err().to_string();
-        assert!(err.contains("K") && err.contains("1e-x"), "{err}");
-        for bad in ["nan", "NaN", "inf", "-infinity", "1e400"] {
-            let err = get_f64_default(&map("K", bad), "K", 0.5)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("K") && err.contains(bad), "{bad}: {err}");
-        }
     }
 
     #[test]

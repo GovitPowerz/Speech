@@ -142,7 +142,7 @@ fn below_law(name: &str, p: f64, q: f64, t: f64) -> Law {
             b: p * q,
             adim: t,
         },
-        other => panic!("cost law not valid: {other}"),
+        other => unreachable!("cost law {other:?} passed get_law"),
     }
 }
 
@@ -156,7 +156,7 @@ fn above_cubic(name: &str, p: f64, q: f64, t: f64) -> Law {
             p * ((1.0 - q) / t / (1.0 - t).powi(2) - 2.0 * q / (1.0 - t).powi(3)),
             p * (3.0 * q / (1.0 - t).powi(2) - (1.0 - q) / t / (1.0 - t)),
         ),
-        other => panic!("above-thresh cubic name not valid: {other}"),
+        other => unreachable!("cost law {other:?} passed get_law"),
     };
     Law::AboveCubic { a, b }
 }
@@ -213,7 +213,7 @@ pub struct CostLaw {
 /// `conf.get<string>(name, "log")` for a regime's law: an unknown name errors (the legacy
 /// ctor `exit(1)`s) instead of reaching the panic in `below_law`.
 fn get_law(m: &IndexMap<String, String>, key: &str) -> Result<String> {
-    let name = m.get(key).map_or("log", String::as_str);
+    let name = m.get(key).map_or("log", |s| s.trim());
     match name {
         "log" | "linear" | "square" | "cubic" | "sqrt" => Ok(name.to_string()),
         _ => bail!("cost law '{name}' is not valid for '{key}'"),
@@ -520,6 +520,7 @@ mod config_read_tests {
             for good in ["log", "linear", "square", "cubic", "sqrt"] {
                 assert!(CostLaw::from_config(&map(&key, good), "BLSTM").is_ok());
             }
+            assert!(CostLaw::from_config(&map(&key, " log "), "BLSTM").is_ok());
             let err = CostLaw::from_config(&map(&key, "Log"), "BLSTM")
                 .unwrap_err()
                 .to_string();
@@ -530,6 +531,8 @@ mod config_read_tests {
     #[test]
     fn missing_keys_take_the_defaults() {
         let law = CostLaw::from_config(&IndexMap::new(), "BLSTM").unwrap();
+        assert_eq!(law.speech_name, "log");
+        assert_eq!(law.no_speech_name, "log");
         assert_eq!(law.cost_ponderation(), 0.5);
         assert_eq!(law.switching_thresh_speech, 10.0);
         assert_eq!(law.switching_thresh_no_speech, -1.0);
