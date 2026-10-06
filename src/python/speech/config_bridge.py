@@ -25,6 +25,18 @@ def _ints(cfg: dict[str, str], key: str) -> list[int]:
     return [int(x) for x in cfg[key].split(",")]
 
 
+def read_flag(cfg: dict[str, str], key: str, default: bool) -> bool:
+    """A boolean config key: missing -> `default`; exactly `true`/`false` (trimmed) otherwise,
+    anything else raises -- the engine's rule (`bag_of_processors.rs::get_bool_default`, issue
+    #32), so a `True`/`1`/typo cannot read as one value here and fail or flip in the engine."""
+    if key not in cfg:
+        return default
+    value = cfg[key].strip()
+    if value not in ("true", "false"):
+        raise ValueError(f"'{key}' must be 'true' or 'false' (got {cfg[key]!r})")
+    return value == "true"
+
+
 def _mamba_geometry(cfg: dict[str, str]) -> dict[str, int]:
     """The four `Mamba_*` keys (spec S3.3/S6), UNPREFIXED by design -- one mamba geometry per
     config, shared by whichever net(s) select `mamba`, exactly as `blstm.rs::MambaParams`
@@ -134,6 +146,10 @@ def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
     `Transformer_Heads` / `Transformer_D_Ff`), identically: emitted unconditionally, inert
     unless `CellType` is `transformer`. Every consumer reads these entries BY NAME, so an
     additive slot cannot disturb a spec built for any other cell.
+
+    The six peephole flags read through `read_flag`; an ABSENT one is TRUE, the default both
+    engine paths build with (`BlstmConfig`, which `fast/driver.rs::build_spec_aligned_to`
+    aligns the fast spec to) and the rule `NnetSpec::from_legacy` applies.
     """
     p = f"{prefix}_"
     peephole_keys = [
@@ -150,7 +166,7 @@ def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
         "OutputNeuronNb": _ints(cfg, f"{p}OutputNeuronNb"),
         "OutputSubSampling": _ints(cfg, f"{p}OutputSubSampling"),
         "NNetInputSize": int(cfg[f"{p}NNetInputSize"]),
-        "peepholes": [cfg[k] == "true" for k in peephole_keys],
+        "peepholes": [read_flag(cfg, k, True) for k in peephole_keys],
         "CostLawSpeech": cfg[f"{p}CostLawSpeech"],
         "CostLawNoSpeech": cfg[f"{p}CostLawNoSpeech"],
         "CellType": cfg.get(f"{p}Cell_Type", "lstm"),

@@ -273,10 +273,10 @@ fn sad_parity_scored_columns() {
 
 #[test]
 fn peephole_default_aligns_with_exact() {
-    // NnetSpec::from_legacy defaults an ABSENT peephole key FALSE; the exact BlstmConfig
-    // defaults it TRUE. build_aligned_spec must produce the EXACT path's TRUE default so
-    // a key-omitting config does not silently give the fast net a different peephole
-    // configuration than the exact net.
+    // The exact BlstmConfig defaults an ABSENT peephole key TRUE. build_aligned_spec must
+    // produce the same so a key-omitting config does not silently give the fast net a
+    // different peephole configuration than the exact net. NnetSpec::from_legacy defaulted
+    // it FALSE until issue #32; it now applies the same rule.
     const KEYS: [&str; 6] = [
         "BLSTM_Forward_IsCellsPeepholesActive",
         "BLSTM_Backward_IsCellsPeepholesActive",
@@ -286,15 +286,15 @@ fn peephole_default_aligns_with_exact() {
         "BLSTM_Backward_IsGatesRecurrentPeepholesActive",
     ];
 
-    // Omitting config: NnetSpec -> FALSE, aligned -> TRUE.
+    // Omitting config: NnetSpec and aligned both -> TRUE.
     let mut omit = tier2_map(None);
     for k in KEYS {
         omit.shift_remove(k);
     }
     assert_eq!(
         NnetSpec::from_legacy(&omit, "BLSTM").unwrap().peepholes,
-        [false; 6],
-        "sanity: NnetSpec defaults absent peepholes FALSE"
+        [true; 6],
+        "NnetSpec defaults absent peepholes TRUE, as BlstmConfig does"
     );
     assert_eq!(
         build_aligned_spec(&omit, "BLSTM").unwrap().peepholes,
