@@ -182,7 +182,7 @@ fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
 /// the EXACT path's defaults (Phase 7 Task 4 rider 1 -- the peephole default asymmetry).
 ///
 /// `NnetSpec::from_legacy` (`config.rs:35`) defaults an ABSENT peephole key to FALSE,
-/// but the exact `BlstmConfig`/`LSTMLayer` path (`blstm.rs:112`) defaults it TRUE. The
+/// but the exact `BlstmConfig`/`LSTMLayer` path (`PeepholeFlags::from_legacy`) defaults it TRUE. The
 /// fast net reads a `NnetSpec`; the exact net reads a `BlstmConfig`; so a key-omitting
 /// config would silently give the fast net a DIFFERENT peephole configuration than the
 /// exact path -- a divergence with no tolerance floor. We resolve it by overriding the
