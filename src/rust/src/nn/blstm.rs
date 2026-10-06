@@ -86,8 +86,15 @@ fn get_bool(map: &IndexMap<String, String>, key: &str) -> Result<bool> {
         .map_err(|e| anyhow::anyhow!("cannot read '{s}' as bool for '{key}': {e}"))
 }
 
-fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -> bool {
-    map.get(key).map(|s| s == "true").unwrap_or(default)
+/// Missing key -> `default`; present but malformed -> error (issue #32).
+fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
+    match map.get(key) {
+        None => Ok(default),
+        Some(s) => s
+            .trim()
+            .parse::<bool>()
+            .map_err(|e| anyhow::anyhow!("cannot read '{s}' as bool for '{key}': {e}")),
+    }
 }
 
 fn get_i16(map: &IndexMap<String, String>, key: &str) -> Result<i16> {
@@ -98,16 +105,28 @@ fn get_i16(map: &IndexMap<String, String>, key: &str) -> Result<i16> {
         .map_err(|e| anyhow::anyhow!("cannot read '{s}' as i16 for '{key}': {e}"))
 }
 
-fn get_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> i32 {
-    map.get(key)
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(default)
+/// Missing key -> `default`; present but malformed -> error (issue #32).
+fn get_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
+    match map.get(key) {
+        None => Ok(default),
+        Some(s) => s
+            .trim()
+            .parse::<i32>()
+            .map_err(|e| anyhow::anyhow!("cannot read '{s}' as i32 for '{key}': {e}")),
+    }
 }
 
-fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> f64 {
-    map.get(key)
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default)
+/// Missing key -> `default`; present but malformed -> error (issue #32). Non-finite
+/// is malformed: Rust parses `nan`/`inf`/`1e400`, the legacy `operator>>` rejects them.
+fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
+    let Some(s) = map.get(key) else {
+        return Ok(default);
+    };
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() => Ok(v),
+        Ok(v) => bail!("cannot read '{s}' as f64 for '{key}': non-finite ({v})"),
+        Err(e) => bail!("cannot read '{s}' as f64 for '{key}': {e}"),
+    }
 }
 
 /// Per-direction peephole activation flags (`{prefix}_{Forward,Backward}_Is{...}
@@ -120,16 +139,16 @@ pub struct PeepholeFlags {
 }
 
 impl PeepholeFlags {
-    fn from_legacy(map: &IndexMap<String, String>, dir_prefix: &str) -> PeepholeFlags {
-        PeepholeFlags {
-            cells: get_bool_default(map, &format!("{dir_prefix}_IsCellsPeepholesActive"), true),
-            gates: get_bool_default(map, &format!("{dir_prefix}_IsGatesPeepholesActive"), true),
+    fn from_legacy(map: &IndexMap<String, String>, dir_prefix: &str) -> Result<PeepholeFlags> {
+        Ok(PeepholeFlags {
+            cells: get_bool_default(map, &format!("{dir_prefix}_IsCellsPeepholesActive"), true)?,
+            gates: get_bool_default(map, &format!("{dir_prefix}_IsGatesPeepholesActive"), true)?,
             gates_recurrent: get_bool_default(
                 map,
                 &format!("{dir_prefix}_IsGatesRecurrentPeepholesActive"),
                 true,
-            ),
-        }
+            )?,
+        })
     }
 }
 
@@ -257,11 +276,9 @@ impl Default for MambaParams {
 }
 
 impl MambaParams {
-    /// Read the four keys. A present-but-unparseable value is a HARD error (unlike
-    /// the legacy `get_*_default` helpers' silent fallback): these keys have no
-    /// legacy source, so there is no compatibility reason to swallow a typo, and a
-    /// silently-defaulted geometry would change the weight-pack LENGTH without
-    /// telling anyone. `d_state`/`d_conv`/`expand` must be `>= 1`; `dt_rank` may be
+    /// Read the four keys. A present-but-unparseable value is a HARD error, like the
+    /// module's `get_*_default` getters: a silently-defaulted geometry would change
+    /// the weight-pack LENGTH without telling anyone. `d_state`/`d_conv`/`expand` must be `>= 1`; `dt_rank` may be
     /// `0` (auto).
     fn from_legacy(map: &IndexMap<String, String>) -> Result<MambaParams> {
         let d = MambaParams::default();
@@ -592,22 +609,22 @@ impl BlstmConfig {
         // Peephole flags: read regardless of is_mlp (harmless when the forward/
         // backward nets are absent -- the legacy reads them via the LSTMLayer
         // ctor, which is simply never instantiated in MLP mode).
-        let forward_peep = PeepholeFlags::from_legacy(map, &k("_Forward"));
-        let backward_peep = PeepholeFlags::from_legacy(map, &k("_Backward"));
+        let forward_peep = PeepholeFlags::from_legacy(map, &k("_Forward"))?;
+        let backward_peep = PeepholeFlags::from_legacy(map, &k("_Backward"))?;
 
         let input_normalization_type = get_i16(map, &k("_InputNormalizationType"))?;
         let two_sweeps = get_bool(map, &k("_TwoSweeps"))?;
         let back_propagation_activated =
-            get_bool_default(map, &k("_BackPropagationActivated"), false);
+            get_bool_default(map, &k("_BackPropagationActivated"), false)?;
         let back_prop_output_network_only =
-            get_bool_default(map, &k("_BackPropOutputNetworkOnly"), false);
-        let target_enforcement_step = get_i32_default(map, &k("_TargetEnforcementStep"), 0);
+            get_bool_default(map, &k("_BackPropOutputNetworkOnly"), false)?;
+        let target_enforcement_step = get_i32_default(map, &k("_TargetEnforcementStep"), 0)?;
         // `_CostFunction = CostLaw(conf, prefix)` (:104). Built from the same prefix;
         // all cost-law keys have defaults, so a config lacking them is valid.
         let cost_law = CostLaw::from_config(map, prefix);
         // `_BackPropagationRpropInit` (:151), default 1e-2 (the live path -- the real
         // config has no such key).
-        let rprop_init = get_f64_default(map, &k("_BackPropagationRpropInit"), 1e-2);
+        let rprop_init = get_f64_default(map, &k("_BackPropagationRpropInit"), 1e-2)?;
 
         Ok(BlstmConfig {
             lstm_neuron_nb,
@@ -3235,6 +3252,91 @@ mod inference_only_tests {
                 g.column(0).iter().any(|v| *v != 0.0) && g.iter().all(|v| v.is_finite()),
                 "{cell}: the folded gradient is all-zero or non-finite"
             );
+        }
+    }
+}
+
+/// Issue #32: the defaulting getters distinguish a MISSING key (default) from a
+/// PRESENT-but-malformed one (error naming the key and the text), matching the
+/// `engine/bag_of_processors.rs` family and ADR-0006's Python-side rule. Stricter
+/// than the legacy `read<T>` (`ss >> val`), which accepts a parseable prefix
+/// (`1O` -> 1, `false # c` -> false): the port rejects the trailing junk.
+#[cfg(test)]
+mod config_getter_tests {
+    use super::*;
+
+    fn map(key: &str, value: &str) -> IndexMap<String, String> {
+        let mut m = IndexMap::new();
+        m.insert(key.to_string(), value.to_string());
+        m
+    }
+
+    #[test]
+    fn i32_default_missing_present_malformed() {
+        let m = map("K", "1O");
+        assert_eq!(get_i32_default(&m, "absent", 7).unwrap(), 7);
+        assert_eq!(get_i32_default(&map("K", "12"), "K", 7).unwrap(), 12);
+        assert_eq!(get_i32_default(&map("K", " -1 "), "K", 7).unwrap(), -1);
+        let err = get_i32_default(&m, "K", 7).unwrap_err().to_string();
+        assert!(err.contains("K") && err.contains("1O"), "{err}");
+    }
+
+    #[test]
+    fn f64_default_missing_present_malformed() {
+        let m = map("K", "1e-x");
+        assert_eq!(get_f64_default(&m, "absent", 0.5).unwrap(), 0.5);
+        assert_eq!(get_f64_default(&map("K", "1e-4"), "K", 0.5).unwrap(), 1e-4);
+        let err = get_f64_default(&m, "K", 0.5).unwrap_err().to_string();
+        assert!(err.contains("K") && err.contains("1e-x"), "{err}");
+        for bad in ["nan", "NaN", "inf", "-infinity", "1e400"] {
+            let err = get_f64_default(&map("K", bad), "K", 0.5)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("K") && err.contains(bad), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn bool_default_missing_present_malformed() {
+        assert!(get_bool_default(&map("K", "x"), "absent", true).unwrap());
+        assert!(get_bool_default(&map("K", "true"), "K", false).unwrap());
+        assert!(!get_bool_default(&map("K", "false"), "K", true).unwrap());
+        for bad in ["True", "1", "yes", "ture"] {
+            let err = get_bool_default(&map("K", bad), "K", true)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("K") && err.contains(bad), "{bad}: {err}");
+        }
+    }
+
+    /// End to end, every defaulted key: a malformed value errors naming the key, so no
+    /// call site can swallow it (e.g. a mistyped peephole flag disabling the peephole).
+    #[test]
+    fn from_legacy_rejects_every_malformed_defaulted_key() {
+        let mut base: IndexMap<String, String> = IndexMap::new();
+        base.insert("X_LSTMNeuronNb".into(), "0,3".into());
+        base.insert("X_LSTMSubSampling".into(), "1".into());
+        base.insert("X_OutputNeuronNb".into(), "5,4,1".into());
+        base.insert("X_OutputSubSampling".into(), "2,1".into());
+        base.insert("X_InputNormalizationType".into(), "0".into());
+        base.insert("X_TwoSweeps".into(), "false".into());
+        assert!(BlstmConfig::from_legacy(&base, "X").is_ok());
+        for key in [
+            "X_Forward_IsCellsPeepholesActive",
+            "X_Forward_IsGatesPeepholesActive",
+            "X_Forward_IsGatesRecurrentPeepholesActive",
+            "X_Backward_IsCellsPeepholesActive",
+            "X_Backward_IsGatesPeepholesActive",
+            "X_Backward_IsGatesRecurrentPeepholesActive",
+            "X_BackPropagationActivated",
+            "X_BackPropOutputNetworkOnly",
+            "X_TargetEnforcementStep",
+            "X_BackPropagationRpropInit",
+        ] {
+            let mut m = base.clone();
+            m.insert(key.into(), "True".into());
+            let err = BlstmConfig::from_legacy(&m, "X").unwrap_err().to_string();
+            assert!(err.contains(key), "{key}: {err}");
         }
     }
 }
