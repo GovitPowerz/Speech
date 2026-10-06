@@ -38,19 +38,19 @@ fn poly_law() -> CostLaw {
     let mut m = base_map();
     m.insert("BLSTM_CostLawSpeech".into(), "square".into());
     m.insert("BLSTM_CostLawNoSpeech".into(), "square".into());
-    CostLaw::from_config(&m, "BLSTM")
+    CostLaw::from_config(&m, "BLSTM").unwrap()
 }
 
 fn log_law() -> CostLaw {
     // The real config's own default (log/log) -- no override needed.
-    CostLaw::from_config(&base_map(), "BLSTM")
+    CostLaw::from_config(&base_map(), "BLSTM").unwrap()
 }
 
 fn sqrt_law() -> CostLaw {
     let mut m = base_map();
     m.insert("BLSTM_CostLawSpeech".into(), "sqrt".into());
     m.insert("BLSTM_CostLawNoSpeech".into(), "sqrt".into());
-    CostLaw::from_config(&m, "BLSTM")
+    CostLaw::from_config(&m, "BLSTM").unwrap()
 }
 
 /// Fix-wave 1 (review finding 1): the real config's CostLawThreshSpeech=1 /
@@ -71,7 +71,7 @@ fn mid_thresh_law(name: &str) -> CostLaw {
     m.insert("BLSTM_CostLawThreshNoSpeech".into(), "0.5".into());
     m.insert("BLSTM_CostLawParamSpeech".into(), "0.3".into());
     m.insert("BLSTM_CostLawParamNoSpeech".into(), "0.3".into());
-    CostLaw::from_config(&m, "BLSTM")
+    CostLaw::from_config(&m, "BLSTM").unwrap()
 }
 
 /// Replay 3 explicit above-thresh points through `compute_unitary_delta`,
@@ -262,7 +262,7 @@ fn deltas_to_array(flat: &[f64], n_frames: usize, n_classes: usize) -> ndarray::
 fn multiclass_deltas_fusion() {
     let outputs = multiclass_outputs();
     let targets = multiclass_targets();
-    let law = CostLaw::from_config(&base_map(), "BLSTM");
+    let law = CostLaw::from_config(&base_map(), "BLSTM").unwrap();
     let mut out = vec![0.0; outputs.len()];
     law.compute_deltas(&outputs, &targets, 3, &mut out);
     let got = deltas_to_array(&out, 4, 3);
@@ -277,7 +277,7 @@ fn multiclass_deltas_wer_and_pond() {
     let targets = multiclass_targets();
     let mut pond_map = base_map();
     pond_map.insert("BLSTM_classes_ponderations".into(), "2.0,3.0,4.0".into());
-    let pond_law = CostLaw::from_config(&pond_map, "BLSTM");
+    let pond_law = CostLaw::from_config(&pond_map, "BLSTM").unwrap();
     let mut pond_out = vec![0.0; outputs.len()];
     pond_law.compute_deltas(&outputs, &targets, 3, &mut pond_out);
     let got_pond = deltas_to_array(&pond_out, 4, 3);
@@ -305,7 +305,7 @@ fn multiclass_deltas_wer_and_pond() {
 
     let mut wer_map = base_map();
     wer_map.insert("BLSTM_BackPropWER".into(), "0.0".into());
-    let wer_law = CostLaw::from_config(&wer_map, "BLSTM");
+    let wer_law = CostLaw::from_config(&wer_map, "BLSTM").unwrap();
     let mut wer_out = vec![0.0; wer_outputs.len()];
     wer_law.compute_deltas(&wer_outputs, &wer_targets, 3, &mut wer_out);
     let got_wer = deltas_to_array(&wer_out, 3, 3);
@@ -315,7 +315,7 @@ fn multiclass_deltas_wer_and_pond() {
     let mut wer_pond_map = base_map();
     wer_pond_map.insert("BLSTM_BackPropWER".into(), "0.0".into());
     wer_pond_map.insert("BLSTM_classes_ponderations".into(), "2.0,3.0,4.0".into());
-    let wer_pond_law = CostLaw::from_config(&wer_pond_map, "BLSTM");
+    let wer_pond_law = CostLaw::from_config(&wer_pond_map, "BLSTM").unwrap();
     let mut wer_pond_out = vec![0.0; wer_outputs.len()];
     wer_pond_law.compute_deltas(&wer_outputs, &wer_targets, 3, &mut wer_pond_out);
     let got_wer_pond = deltas_to_array(&wer_pond_out, 3, 3);
@@ -334,7 +334,7 @@ fn multiclass_deltas_wer_and_pond() {
 fn ignore_mask_zeroes_row() {
     let outputs = multiclass_outputs();
     let targets = multiclass_targets();
-    let law = CostLaw::from_config(&base_map(), "BLSTM");
+    let law = CostLaw::from_config(&base_map(), "BLSTM").unwrap();
     let mut out = vec![0.0; outputs.len()];
     law.compute_deltas(&outputs, &targets, 3, &mut out);
     // Row 1 (0-indexed) is the fully-masked row (target < 0 everywhere).
@@ -359,7 +359,7 @@ fn ignore_mask_zeroes_row() {
     ].iter().flatten().copied().collect();
     let mut wer_map = base_map();
     wer_map.insert("BLSTM_BackPropWER".into(), "0.0".into());
-    let wer_law = CostLaw::from_config(&wer_map, "BLSTM");
+    let wer_law = CostLaw::from_config(&wer_map, "BLSTM").unwrap();
     let mut wer_out = vec![0.0; wer_outputs.len()];
     wer_law.compute_deltas(&wer_outputs, &wer_targets, 3, &mut wer_out);
     for k in 0..3 {
@@ -380,13 +380,13 @@ fn ponderation_plumbing() {
     let outputs = multiclass_outputs();
     let targets = multiclass_targets();
 
-    let plain_law = CostLaw::from_config(&base_map(), "BLSTM");
+    let plain_law = CostLaw::from_config(&base_map(), "BLSTM").unwrap();
     let mut plain_out = vec![0.0; outputs.len()];
     plain_law.compute_deltas(&outputs, &targets, 3, &mut plain_out);
 
     let mut pond_map = base_map();
     pond_map.insert("BLSTM_classes_ponderations".into(), "2.0,3.0,4.0".into());
-    let pond_law = CostLaw::from_config(&pond_map, "BLSTM");
+    let pond_law = CostLaw::from_config(&pond_map, "BLSTM").unwrap();
     let mut pond_out = vec![0.0; outputs.len()];
     pond_law.compute_deltas(&outputs, &targets, 3, &mut pond_out);
 

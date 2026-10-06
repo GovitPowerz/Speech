@@ -37,7 +37,7 @@ fn sweep_config() -> IndexMap<String, String> {
 
 #[test]
 fn cost_sweep_bit_exact() {
-    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM").unwrap();
     let output = read_sweep("sweep_output");
     let cost_speech = read_sweep("sweep_cost_speech");
     let cost_nospeech = read_sweep("sweep_cost_nospeech");
@@ -58,7 +58,7 @@ fn cost_sweep_bit_exact() {
 
 #[test]
 fn deriv_sweep_bit_exact() {
-    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM").unwrap();
     let output = read_sweep("sweep_output");
     let d_speech = read_sweep("sweep_deriv_speech");
     let d_nospeech = read_sweep("sweep_deriv_nospeech");
@@ -88,7 +88,7 @@ fn cfg(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
 
 #[test]
 fn target_negative_is_ignored() {
-    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM").unwrap();
     assert_eq!(law.compute_unitary_cost(0.3, -1.0), 0.0);
     assert_eq!(law.compute_unitary_delta(0.3, -1.0), 0.0);
 }
@@ -98,7 +98,7 @@ fn linear_speech_cost_and_deriv() {
     // Speech linear, P=cp=0.2, q=0, t=clamp(1)=1-1e-6, branch selector raw=1.0.
     // A = -0.2*(1-0)/(1-1e-6), B = 0.2. output=0.001 < 1.0 => below-thresh linear.
     // cost = 0.2 + A*0.001 ; deriv = A ; delta = A*0.001*(1-0.001).
-    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM").unwrap();
     let t = 1.0 - 1e-6;
     let a = -0.2 * (1.0 - 0.0) / t;
     let expected_cost = 0.2 + a * 0.001;
@@ -115,7 +115,7 @@ fn linear_nospeech_cost_and_deriv() {
     // output=0.4 > 0.0 => below-thresh, fed flipped y=1-0.4=0.6.
     // A = -0.8*(1-0)/(1-1e-6), B = 0.8. cost = 0.8 + A*0.6.
     // delta = -A ; then *output*(1-output) with output=1-0.4=0.6 => -A*0.6*0.4.
-    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&sweep_config(), "BLSTM").unwrap();
     let t = 1.0 - 1e-6;
     let a = -0.8 * (1.0 - 0.0) / t;
     let expected_cost = 0.8 + a * 0.6;
@@ -139,7 +139,8 @@ fn square_speech_cost_and_deriv() {
             ("BLSTM_CostLawThreshSpeech", "0.5"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     assert_eq!(law.compute_unitary_cost(0.25, 1.0), 0.125);
     assert_eq!(law.compute_unitary_delta(0.25, 1.0), -0.1875);
 }
@@ -159,7 +160,8 @@ fn cubic_speech_cost_and_deriv() {
             ("BLSTM_CostLawThreshSpeech", "0.5"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     assert_eq!(law.compute_unitary_cost(0.25, 1.0), 0.25);
     assert_eq!(law.compute_unitary_delta(0.25, 1.0), -1.5 * 0.25 * 0.75);
 }
@@ -183,7 +185,8 @@ fn log_speech_cost_and_deriv_asymmetry() {
             ("BLSTM_CostLawThreshSpeech", "0.5"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     let expected_cost = -0.5 * (0.5_f64).ln();
     assert_eq!(law.compute_unitary_cost(0.25, 1.0), expected_cost);
     // Interior true derivative A/output = -2.0 (NOT A/(y/Adim)=-1.0, which was never the
@@ -221,7 +224,8 @@ fn log_deriv_consistent_with_clamped_forward() {
             ("BLSTM_CostLawThreshSpeech", "0.5"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     let a = -0.5_f64;
 
     // (1) INTERIOR (z = output/Adim in (1e-24,1)): the fix preserves the true derivative
@@ -254,7 +258,8 @@ fn log_deriv_consistent_with_clamped_forward() {
             ("BLSTM_CostLawThreshSpeech", "10"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     let hi = 1.0 - 5e-7_f64; // > 1-1e-6 => clamped; < 10 => below-log branch
     assert_eq!(law_hi.compute_unitary_delta(hi, 1.0), 0.0);
     let legacy_hi = (a / hi) * hi * (1.0 - hi);
@@ -281,7 +286,8 @@ fn sqrt_speech_cost_and_deriv() {
             ("BLSTM_CostLawThreshSpeech", "0.5"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     let expected_cost = 0.5 * (0.5_f64).sqrt();
     let deriv = -0.5 / 2.0 / (0.5_f64).sqrt();
     assert_eq!(law.compute_unitary_cost(0.25, 1.0), expected_cost);
@@ -305,7 +311,8 @@ fn above_thresh_cubic_name_routing() {
             ("BLSTM_CostLawThreshSpeech", "0.5"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     assert_eq!(lin.compute_unitary_cost(0.75, 1.0), -0.0625);
     let sq = speech::cost::CostLaw::from_config(
         &cfg(&[
@@ -316,7 +323,8 @@ fn above_thresh_cubic_name_routing() {
             ("BLSTM_CostLawThreshSpeech", "0.5"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     assert_eq!(sq.compute_unitary_cost(0.75, 1.0), 0.0);
 }
 
@@ -326,7 +334,7 @@ fn double_read_diverges_when_key_absent() {
     // selector re-reads the RAW default 10.0. output 0.5 < 10.0 => below-thresh log
     // law is used (it would be above-thresh if the branch used the clamped 1-1e-6).
     let m = cfg(&[("BLSTM_CostLawSpeech", "log")]);
-    let law = speech::cost::CostLaw::from_config(&m, "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&m, "BLSTM").unwrap();
     let c = law.compute_unitary_cost(0.5, 1.0);
     assert!(c.is_finite());
     // Below-thresh log at output=0.5 with default cp=0.5, q=0, Adim=1-1e-6:

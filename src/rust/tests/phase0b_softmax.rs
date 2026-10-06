@@ -18,7 +18,7 @@ fn cfg(pairs: &[(&str, &str)]) -> IndexMap<String, String> {
 #[test]
 fn delta_is_output_minus_onehot() {
     // 2 frames x 3 classes; frame 0 target class 1, frame 1 ignored (all target < 0).
-    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM").unwrap();
     let outputs = vec![0.2, 0.5, 0.3, 0.1, 0.6, 0.3];
     let target = vec![0.0, 1.0, 0.0, -1.0, -1.0, -1.0];
     let mut deltas = vec![0.0; 6];
@@ -32,7 +32,7 @@ fn delta_is_output_minus_onehot() {
 #[test]
 fn cost_is_cross_entropy_over_on_class() {
     // Only the target>0.5 entry contributes: -ln(output) at that class.
-    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM").unwrap();
     let outputs = vec![0.2, 0.5, 0.3, 0.1, 0.6, 0.3];
     let target = vec![0.0, 1.0, 0.0, -1.0, -1.0, -1.0];
     let cost = law.compute_cost(&outputs, &target, 3);
@@ -46,7 +46,7 @@ fn cost_accumulates_column_major_bit_exact() {
     // matters: legacy CostLaw.cpp:219-231 sums column-by-column (outer kk, inner jj),
     // not row-by-row. These specific values were found to diverge in the last bit(s)
     // between row-major and column-major summation.
-    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM").unwrap();
     let outputs = vec![
         0.276841,
         0.759708,
@@ -81,7 +81,7 @@ fn cost_accumulates_column_major_bit_exact() {
 #[test]
 fn cost_clamps_tiny_output_to_1e_24() {
     // output below 1e-24 is clamped up before the log (legacy: value<1e-24 => 1e-24).
-    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM");
+    let law = speech::cost::CostLaw::from_config(&Default::default(), "BLSTM").unwrap();
     let outputs = vec![0.0, 1.0, 0.0];
     let target = vec![1.0, 0.0, 0.0];
     let cost = law.compute_cost(&outputs, &target, 3);
@@ -96,7 +96,8 @@ fn class_ponderation_scales_cost_and_deltas() {
     let law = speech::cost::CostLaw::from_config(
         &cfg(&[("BLSTM_classes_ponderations", "2,3,4")]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     let outputs = vec![0.2, 0.5, 0.3];
     let target = vec![0.0, 1.0, 0.0]; // on-class = 1 => pond 3.0
     let cost = law.compute_cost(&outputs, &target, 3);
@@ -112,7 +113,8 @@ fn class_ponderation_scales_cost_and_deltas() {
 fn back_prop_wer_scales_cost_and_deltas() {
     // BackPropWER on: cost += -ln(output)*10*(1-target) over target>0.5 entries.
     // deltas: on-class => 10*(1-target)*(output-1); off-class => 10*target*output.
-    let law = speech::cost::CostLaw::from_config(&cfg(&[("BLSTM_BackPropWER", "1")]), "BLSTM");
+    let law =
+        speech::cost::CostLaw::from_config(&cfg(&[("BLSTM_BackPropWER", "1")]), "BLSTM").unwrap();
     let outputs = vec![0.2, 0.5, 0.3];
     let target = vec![0.0, 0.8, 0.0]; // on-class target = 0.8
     let cost = law.compute_cost(&outputs, &target, 3);
@@ -133,7 +135,8 @@ fn back_prop_wer_with_class_ponderation() {
             ("BLSTM_classes_ponderations", "2,3,4"),
         ]),
         "BLSTM",
-    );
+    )
+    .unwrap();
     let outputs = vec![0.2, 0.5, 0.3];
     let target = vec![0.0, 0.8, 0.0]; // on-class = 1 => pond 3.0
     let cost = law.compute_cost(&outputs, &target, 3);

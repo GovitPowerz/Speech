@@ -59,6 +59,7 @@ use ndarray::Array2;
 
 use crate::cost::CostLaw;
 use crate::features::stats::InputStatistics;
+use crate::legacy_config::get_f64_default;
 
 use super::cells::CellLayer;
 use super::layers::NeuronLayer;
@@ -113,19 +114,6 @@ fn get_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> R
             .trim()
             .parse::<i32>()
             .map_err(|e| anyhow::anyhow!("cannot read '{s}' as i32 for '{key}': {e}")),
-    }
-}
-
-/// Missing key -> `default`; present but malformed -> error (issue #32). Non-finite
-/// is malformed: Rust parses `nan`/`inf`/`1e400`, the legacy `operator>>` rejects them.
-fn get_f64_default(map: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
-    let Some(s) = map.get(key) else {
-        return Ok(default);
-    };
-    match s.trim().parse::<f64>() {
-        Ok(v) if v.is_finite() => Ok(v),
-        Ok(v) => bail!("cannot read '{s}' as f64 for '{key}': non-finite ({v})"),
-        Err(e) => bail!("cannot read '{s}' as f64 for '{key}': {e}"),
     }
 }
 
@@ -621,7 +609,7 @@ impl BlstmConfig {
         let target_enforcement_step = get_i32_default(map, &k("_TargetEnforcementStep"), 0)?;
         // `_CostFunction = CostLaw(conf, prefix)` (:104). Built from the same prefix;
         // all cost-law keys have defaults, so a config lacking them is valid.
-        let cost_law = CostLaw::from_config(map, prefix);
+        let cost_law = CostLaw::from_config(map, prefix)?;
         // `_BackPropagationRpropInit` (:151), default 1e-2 (the live path -- the real
         // config has no such key).
         let rprop_init = get_f64_default(map, &k("_BackPropagationRpropInit"), 1e-2)?;
@@ -3256,9 +3244,10 @@ mod inference_only_tests {
     }
 }
 
-/// Issue #32: the defaulting getters distinguish a MISSING key (default) from a
+/// Issue #32: the defaulting i32/bool getters distinguish a MISSING key (default) from a
 /// PRESENT-but-malformed one (error naming the key and the text), matching the
-/// `engine/bag_of_processors.rs` family and ADR-0006's Python-side rule. Stricter
+/// `engine/bag_of_processors.rs` family and ADR-0006's Python-side rule (the f64 getter
+/// and its test live in `legacy_config.rs`). Stricter
 /// than the legacy `read<T>` (`ss >> val`), which accepts a parseable prefix
 /// (`1O` -> 1, `false # c` -> false): the port rejects the trailing junk.
 #[cfg(test)]
@@ -3279,21 +3268,6 @@ mod config_getter_tests {
         assert_eq!(get_i32_default(&map("K", " -1 "), "K", 7).unwrap(), -1);
         let err = get_i32_default(&m, "K", 7).unwrap_err().to_string();
         assert!(err.contains("K") && err.contains("1O"), "{err}");
-    }
-
-    #[test]
-    fn f64_default_missing_present_malformed() {
-        let m = map("K", "1e-x");
-        assert_eq!(get_f64_default(&m, "absent", 0.5).unwrap(), 0.5);
-        assert_eq!(get_f64_default(&map("K", "1e-4"), "K", 0.5).unwrap(), 1e-4);
-        let err = get_f64_default(&m, "K", 0.5).unwrap_err().to_string();
-        assert!(err.contains("K") && err.contains("1e-x"), "{err}");
-        for bad in ["nan", "NaN", "inf", "-infinity", "1e400"] {
-            let err = get_f64_default(&map("K", bad), "K", 0.5)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("K") && err.contains(bad), "{bad}: {err}");
-        }
     }
 
     #[test]
