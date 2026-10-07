@@ -29,13 +29,14 @@ Three things, each owned once.
   `BLSTM_weightsFile`, `BLSTM_LID_weightsFile`, `Dump_Directory`,
   `multiConfigResultsOutputFile`) against the run's working directory before the map crosses
   the seam; an absent `.mat` key defaults to the working directory's `MultiConfigResults.mat`,
-  an absent `Dump_Directory` stays absent. Production listings carry absolute rows
-  (`dataprep/lre.py`), so nothing under `src/python/speech/` changes directory or writes a
+  an absent or empty `Dump_Directory` stays as given (empty is the engine's no-dump
+  sentinel). Production listings carry absolute rows (`dataprep/lre.py`), so nothing under
+  `src/python/speech/` changes directory or writes a
   config file to run the engine. A committed fixture with relative listing rows keeps its cwd in
   the tests that use it.
 - **One module owns the fold run.** `FoldRun(cfg, workdir, *, backprop, listing=None)` is built
   once per listing and `run(weights=None) -> FoldResult` is one fold at the given weights (the
-  modern epoch reuses one engine across SMORMS3 steps). It owns the backprop flags (SAD, plus
+  modern loop reuses one engine across all its SMORMS3 steps). It owns the backprop flags (SAD, plus
   LID on the Twin), the F11 rule unconditionally, the listing override, the path resolution,
   the fast guard (on `Inference_Path fast` the arrays are written as workdir packs and the weight
   keys repointed; `set_weights` is never called there), and the rendering (`config`,

@@ -161,11 +161,11 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
     match arms; pre-T6b it was a SILENT NO-OP, which is the failure mode this repoint
     guards against -- the seam would otherwise score the config's SEED weights while exact
     scores the injected TRAINED ones, a 100%-divergence artefact, NOT a real parity
-    failure). `evaluate()`/`_score_packs_on_test`/`_score_sad_pack_on_test` all SKIP their
-    `set_weights` call under `Inference_Path fast` (also T6b) specifically because this
-    repoint already did the injection at config time (`evaluate` since #29 also repoints
-    the keys itself, at copies of the same packs) -- the two mechanisms are the same
-    injection, so skipping is semantics-preserving, not a workaround. Loading trained
+    failure). `evaluate()`/`_score_packs_on_test`/`_score_sad_pack_on_test` inject through
+    `fold_run.FoldRun` (issue #22), which on `Inference_Path fast` never calls `set_weights`
+    (also T6b) but writes the packs it is handed under the workdir and repoints these same
+    keys at them -- the same injection as this repoint, so the repoint is redundant with the
+    fold run on both paths and kept for the apples-to-apples config. Loading trained
     weights from the config is the fast path's only injection mechanism (and how a real
     fast deployment loads them), and it is identical for both paths -- so this is the
     apples-to-apples comparison. In Mode 7 the SAD net is frozen (`best_sad == sad_seed`),

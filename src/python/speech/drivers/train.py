@@ -291,7 +291,8 @@ class _BatchStep:
     config: dict[str, str]
 
     def next_fold(self) -> FoldRun:
-        return FoldRun(self.config, self.runner.workdir, backprop=True, listing=self.runner.next_listing())
+        # `next_listing` already carries the workdir; absolute so FoldRun does not prefix it again.
+        return FoldRun(self.config, self.runner.workdir, backprop=True, listing=self.runner.next_listing().absolute())
 
 
 def _backprop_inner(
@@ -613,11 +614,13 @@ def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdi
         batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, batch_rng)
         runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
 
+    # One gradient fold for the whole run, reused across every epoch's steps (each run injects
+    # its own weights); in batch mode each step builds its own fold on the rotated listing and
+    # this one is never built.
+    fold = FoldRun(base, workdir, backprop=True)
+    batch = _BatchStep(runner, base) if runner is not None else None
+
     def train_epoch(weights: list[NDArray[np.float64]], epoch: int) -> tuple[list[NDArray[np.float64]], float]:
-        # A fresh gradient fold per epoch, reused across the epoch's steps; in batch mode the
-        # step builds its own fold on the rotated listing and this one is never run.
-        fold = FoldRun(base, workdir, backprop=True)
-        batch = _BatchStep(runner, base) if runner is not None else None
         trained, hist = _backprop_inner(fold, params.steps_per_epoch, tails, batch=batch, seed_weights=weights)
         return trained, (float(hist[-1]) if hist else float("nan"))
 
@@ -653,9 +656,10 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
     bbp = state.ps.BalanceBackProp
     valid_listing = params.valid_listing if params.valid_listing is not None else base["fileslisting"]
     metric = params.val_metric
+    fold = FoldRun(base, workdir, backprop=False, listing=valid_listing)
 
     def validate(weights: list[NDArray[np.float64]], epoch: int) -> tuple[float, float | None]:
-        res = FoldRun(base, workdir, backprop=False, listing=valid_listing).run(weights)
+        res = fold.run(weights)
         if metric == "nn_cost_seg":
             val_cost = res.nn_cost  # NNCostSeg (+ NNCostLID on the Twin): forward_backward's f
         else:

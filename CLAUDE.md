@@ -59,7 +59,7 @@ uv run pytest tests/pyo3/test_phase10_gates.py --ledger-stage /tmp/stage   # gat
 uv run python -m speech.ledger bench --leg phase7_60s                   # a staged Phase 7 leg: 3 fresh processes x {exact, fast}, promoted + rendered
 ```
 
-Suite sizes at the issue #22 close (2026-10-07): cargo 1317, pytest 1034 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 907 without `tests/pyo3`), pyo3 210 (`uv run pytest tests/pyo3 -q`, corpus present, ~20 min).
+Suite sizes at the issue #22 close (2026-10-07): cargo 1317, pytest 1036 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 909 without `tests/pyo3`), pyo3 210 (`uv run pytest tests/pyo3 -q`, corpus present, ~20 min).
 
 ## Architecture
 

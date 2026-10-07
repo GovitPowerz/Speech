@@ -17,10 +17,12 @@ was repeated at every driver site. This module is that recipe, written once:
     contract; the engine still resolves a relative LISTING ROW against its cwd, as the binary
     does, so a production listing carries absolute rows). An absent
     `multiConfigResultsOutputFile` lands in the workdir (where the chdir'd flow put it); an
-    absent `Dump_Directory` stays absent. No config file is ever written.
-  * `run(weights=None) -> FoldResult` is one fold at `weights` (or at the config's own packs).
-    On the exact tree the engine is built once and `set_weights` injects per run (the modern
-    epoch reuses it across SMORMS3 steps); on `Inference_Path fast` the processor loads weights
+    absent or empty `Dump_Directory` stays as given (empty is the engine's "no dump", so it is
+    never resolved to the workdir). No config file is ever written.
+  * `run(weights=None) -> FoldResult` is one fold at `weights` (or at the config's own packs);
+    a pack count that does not match the config's nets is refused. On the exact tree the
+    engine is built once and `set_weights` injects per run (the modern loop reuses it across
+    every epoch's SMORMS3 steps); on `Inference_Path fast` the processor loads weights
     only at construction and `set_weights` bails (T6b), so the arrays are written as `.bin`
     packs under the workdir, the weight keys repointed, a fresh engine built on them, and the
     packs removed again (the engine holds the weights; nothing is left beside the run's own).
@@ -118,7 +120,7 @@ class FoldRun:
         """`config` with the path keys resolved against the workdir: the map the seam gets."""
         out = dict(self.config)
         for key in _PATH_KEYS:
-            if key in out:
+            if out.get(key):  # an empty value is a sentinel (`Dump_Directory ""` = no dump), not a path
                 out[key] = str(self.workdir / out[key])
         out.setdefault("multiConfigResultsOutputFile", str(self.workdir / "MultiConfigResults.mat"))
         return out
@@ -140,23 +142,23 @@ class FoldRun:
         then remove the packs (a fast processor reads them at construction, T6b)."""
         config = self._engine_map()
         packs: list[Path] = []
-        for key, name, w in zip(_WEIGHT_KEYS, ("sad", "lid"), nets, strict=False):
-            fd, tmp = tempfile.mkstemp(dir=self.workdir, prefix=f"_fold_{name}_", suffix=".bin")
-            os.close(fd)
-            path = Path(tmp)
-            write_bin(w.shape[0], 1, w, path)
-            config[key] = str(path)
-            packs.append(path)
         try:
+            for key, name, w in zip(_WEIGHT_KEYS, ("sad", "lid"), nets, strict=False):
+                fd, tmp = tempfile.mkstemp(dir=self.workdir, prefix=f"_fold_{name}_", suffix=".bin")
+                os.close(fd)
+                packs.append(Path(tmp))
+                write_bin(w.shape[0], 1, w, packs[-1])
+                config[key] = tmp
             return self._build(config)
         finally:
             for path in packs:
                 path.unlink()
 
     def weights(self) -> list[NDArray[np.float64]]:
-        """The per-net packs the engine holds now: the config's own on a fresh fold, the last
-        injected pack (one engine step past it after a gradient fold) once `run` has been
-        called with weights."""
+        """The per-net packs the shared engine holds now: the config's own on a fresh fold, the
+        last injected pack (one engine step past it after a gradient fold) once `run` has been
+        called with weights. Exact tree only: a fast `run(weights)` builds its own engine, and
+        a fast processor exposes no weights (an empty list)."""
         return [np.asarray(w, dtype=F64) for w in self._shared_engine().weights(0)]
 
     def run(self, weights: Sequence[NDArray[np.float64]] | None = None) -> FoldResult:
@@ -166,6 +168,9 @@ class FoldRun:
             engine = self._shared_engine()
         else:
             nets = [np.ascontiguousarray(np.asarray(w, dtype=F64)) for w in weights]
+            if len(nets) != (2 if self.twin else 1):
+                # A short list would score the config's own LID pack on fast in silence (#29).
+                raise ValueError(f"FoldRun.run: {len(nets)} weight pack(s) for a {'Twin' if self.twin else 'single-net'} config")
             if self.fast:
                 engine = self._fast_engine(nets)
             else:

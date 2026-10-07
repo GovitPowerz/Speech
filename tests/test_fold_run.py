@@ -166,6 +166,33 @@ def test_fold_run_hands_the_engine_absolute_paths(tmp_path: Path, monkeypatch: p
     assert "multiConfigResultsOutputFile" not in fold.config
 
 
+def test_fold_run_leaves_an_empty_path_value_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty value is the engine's sentinel, not a path: `Dump_Directory ""` (the training
+    TOMLs' "no dump") must reach the engine empty, not resolved to the workdir, or every fold
+    writes one VRCTS xml per scored file into the run dir."""
+    seen = _fake_seam(monkeypatch)
+    base = _base()
+    base["Dump_Directory"] = ""
+    FoldRun(base, tmp_path, backprop=True).run()
+    (handed,) = seen["maps"]
+    assert handed["Dump_Directory"] == ""
+
+
+def test_fold_run_rejects_a_pack_count_that_does_not_match_the_nets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A `[sad]`-only list on the Twin would, on fast, repoint only the SAD key and score the
+    config's own LID pack in silence (the #29 failure mode); it is refused before any engine."""
+    seen = _fake_seam(monkeypatch)
+    for fast in (False, True):
+        base = _base(6)
+        if fast:
+            base["Inference_Path"] = "fast"
+        with pytest.raises(ValueError, match="1 weight pack"):
+            FoldRun(base, tmp_path, backprop=False).run([np.array([1.0, 2.0, 3.0])])
+    with pytest.raises(ValueError, match="2 weight pack"):
+        FoldRun(_base(3), tmp_path, backprop=False).run([np.array([1.0]), np.array([2.0])])
+    assert seen["maps"] == [] and not list(tmp_path.glob("_fold_*"))
+
+
 def test_fold_run_makes_a_relative_workdir_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A relative workdir (a CLI `out_dir`) is anchored to the cwd at construction, so the map
     the engine gets is absolute whatever the cwd is by then."""
