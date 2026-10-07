@@ -6,34 +6,23 @@ Ported from legacy MATLAB `Optimizer_V6.2.2/functions/ComputeCost.m` (782 LOC) +
 
 Two layers:
 
-  * The PURE cost assembly (`compute_cost` + the `aggregate_workers` / `average_derivs` /
-    `pool_input_stats` / `l2_penalty` helpers): given a MultiConfigResults matrix (and, for
-    the worker/deriv/stats helpers, the per-worker pieces), reproduce ComputeCost.m's
-    `sortrows([1 2 3])` aggregation (:374), `MultiDeriv./max(1,count)` averaging (:357),
-    pooled input-stats recombination (:285-300), L2 penalties (:362/:554), and the balance
-    laws 0/3/4/5/10 (:428-652). Octave-pinned bit-for-bit (`tests/test_phase4c_engine_cost.py`).
+  * The PURE cost assembly (`compute_cost` + the `average_derivs` / `pool_input_stats` /
+    `l2_penalty` helpers): given the engine's channel results (and, for the deriv/stats
+    helpers, the per-worker pieces), reproduce ComputeCost.m's `MultiDeriv./max(1,count)`
+    averaging (:357), pooled input-stats recombination (:285-300), L2 penalties
+    (:362/:554), and the balance laws 0/3/4/5/10 (:428-652). Octave-pinned bit-for-bit
+    (`tests/test_phase4c_engine_cost.py`).
   * The SEAM (`forward_backward`): ComputeGradient's contract over `speech_rs.Engine` --
     set weights -> run -> read results+derivs -> `f = NNCostSeg (+ NNCostLID)` (:110/:114)
     with the count-normalized (`+ L2` for the LID net) gradient.
 
-MultiConfigResults column schema. The Rust `results_matrix()` row is
-`[file+1, conf+1, chan+1, res...]`, so the 3 leading id columns (0-based 0/1/2) are the
-legacy `MultiConfigResults(:,1:3)` and `Error_vad = MCR(MCR(:,2)==ii, 4:end)` becomes the
-0-based slice `results[results[:,1]==config_idx][:, 3:]`. Within Error_vad, the legacy
-1-based columns map to 0-based as:
-
-  legacy Error_vad(:,k)  0-based Error_vad[:, k-1]  meaning
-  --------------------------------------------------------------------------------
-  1                       0                          Pfa
-  2                       1                          Pmiss
-  3                       2                          100 - success
-  4                       3                          cpu (the wall-clock timing column)
-  5                       4                          seg-cost numerator
-  15                      14                         LID-cost numerator
-  16                      15                         LID flag (recomputed in balance 10)
-  17:end-2                16:-2                       per-class LID scores (>150 -> +200 in-band)
-  end-1                   -2                         LID-cost denominator
-  end                     -1                         seg-cost denominator
+The results are read by NAME: `speech_rs.Engine.channel_results()` returns one array per
+field, wrapped here as `ChannelResults` (issue #23). The legacy `Error_vad` column indices
+(`Error_vad(:,5)`, `(:,15)`, `(:,17:end-2)`, ...) that `ComputeCost.m` reads are the
+`seg_cost`, `lid_cost`, `lid_scores`, ... fields; the wire layout itself lives in Rust
+(`engine/channel_result.rs`) and, for the Octave goldens only, in `tests/_result_rows.py`.
+The in-band LID target (`> 150`, `- 200`) is decoded before it reaches Python:
+`lid_target` names the class, `lid_scores` holds the decoded score.
 
 Legacy quirks reproduced on purpose are tracked in IMPROVEMENTS.md; the load-bearing ones
 carry a `# legacy:` provenance comment at their site.
@@ -130,40 +119,17 @@ class ChannelResults:
 # ---- Pure results-derived pieces (shared by compute_cost + forward_backward) ------------
 
 
-def _error_vad(results: NDArray[np.float64], config_idx: int) -> NDArray[np.float64]:
-    """`Error_vad = MultiConfigResults(MultiConfigResults(:,2)==ii, 4:end)` (:429).
-
-    The conf column is 0-based index 1 (legacy col 2); the res block starts at 0-based
-    index 3 (legacy col 4)."""
-    sel = results[results[:, 1] == config_idx]
-    return np.asarray(sel[:, 3:], dtype=F64)
-
-
-def _nn_cost_seg(error_vad: NDArray[np.float64]) -> float:
+def _nn_cost_seg(r: ChannelResults) -> float:
     # legacy: ComputeCost.m:430 NNcost = sum(Error_vad(:,5))/max(1e-6,sum(Error_vad(:,end)));
-    return float(np.sum(error_vad[:, 4]) / max(1e-6, float(np.sum(error_vad[:, -1]))))
+    return float(np.sum(r.seg_cost) / max(1e-6, float(np.sum(r.seg_count))))
 
 
-def _nn_cost_lid(error_vad: NDArray[np.float64]) -> float:
+def _nn_cost_lid(r: ChannelResults) -> float:
     # legacy: ComputeCost.m:552 NNCostLID = sum(Error_vad(:,15))/max(1e-6,sum(Error_vad(:,end-1)));
-    return float(np.sum(error_vad[:, 14]) / max(1e-6, float(np.sum(error_vad[:, -2]))))
+    return float(np.sum(r.lid_cost) / max(1e-6, float(np.sum(r.lid_count))))
 
 
-# ---- Aggregation / averaging / pooling / L2 ---------------------------------------------
-
-
-def aggregate_workers(worker_results: list[NDArray[np.float64]]) -> NDArray[np.float64]:
-    """Concatenate the per-worker MultiConfigResults and `sortrows(...,[1 2 3])` (:219/:374).
-
-    MATLAB `sortrows` is a STABLE ascending lexicographic sort on the given key columns;
-    `np.lexsort` (also stable) with the keys in reverse priority order is the equivalent.
-    Empty workers contribute nothing (legacy `[X;[]] == X`)."""
-    non_empty = [np.atleast_2d(np.asarray(w, dtype=F64)) for w in worker_results if np.asarray(w).size > 0]
-    if not non_empty:
-        return np.zeros((0, 0), dtype=F64)
-    stacked = np.vstack(non_empty)
-    order = np.lexsort((stacked[:, 2], stacked[:, 1], stacked[:, 0]))
-    return np.ascontiguousarray(stacked[order])
+# ---- Averaging / pooling / L2 -----------------------------------------------------------
 
 
 def average_derivs(derivs: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -237,16 +203,16 @@ def _matlab_hist(y: NDArray[np.float64], centers: NDArray[np.float64]) -> NDArra
     return counts
 
 
-def _balance10_cutoff(error_vad: NDArray[np.float64]) -> float:
-    """The 2-class cutoff search (:561-576). `Error_vad(:,17)`/`(:,18)` are the two
-    per-class in-band score columns (0-based 16/17)."""
-    c1 = error_vad[:, 16]
-    c2 = error_vad[:, 17]
+def _balance10_cutoff(z: NDArray[np.float64], t: NDArray[np.int64]) -> float:
+    """The 2-class cutoff search (:561-576) on the decoded scores `z` (n x 2) and the
+    target index `t`. `Error_vad(:,17)`/`(:,18)` were the two in-band columns: the legacy
+    `c2(c2 > 150) - 200` is `z[:, 1][t == 1]`, and `300 - c1(c1 > 150)` is
+    `100 - z[:, 0][t == 0]` (both exact on the wire's [200, 300] range, so bit-identical)."""
     centers = np.arange(10000, dtype=F64) * 0.01 + 0.005  # (0:0.01:99.99)+0.005
-    tmp = c2[c2 > 150] - 200
+    tmp = z[:, 1][t == 1]
     n = _matlab_hist(tmp, centers)
     n = np.cumsum(100 * n / np.sum(n))
-    tmp2 = 300 - c1[c1 > 150]
+    tmp2 = 100 - z[:, 0][t == 0]
     n2 = _matlab_hist(tmp2, centers)
     n2 = np.cumsum(100 * n2[::-1] / np.sum(n2))[::-1]
     pos = int(np.argmin(np.abs(n - n2)))
@@ -259,36 +225,41 @@ def _balance10_cutoff(error_vad: NDArray[np.float64]) -> float:
     return float(max(0.1, min(99.9, cutoff)))
 
 
-def _balance10(error_vad: NDArray[np.float64]) -> tuple[NDArray[np.float64], float | None]:
+def _balance10(r: ChannelResults) -> tuple[NDArray[np.float64], float | None]:
     """The balance-10 LID calibration error vector (:560-616). Returns (error, cutoff);
-    `cutoff` is `None` for the >2-class else branch (there it is a per-file vector)."""
-    scores = error_vad[:, 16:-2]
-    n_classes = scores.shape[1]
+    `cutoff` is `None` for the >2-class else branch (there it is a per-file vector).
+
+    Written on the decoded scores: every legacy `(col > 150)` mask is `(t == k)`, every
+    `col - 200` is the decoded column, with the subtraction order kept left to right so
+    each expression is the legacy's bit for bit (the decode is exact on [200, 300])."""
+    z = r.lid_scores
+    t = r.lid_target
+    n_classes = z.shape[1]
     if n_classes == 2:
-        c1 = error_vad[:, 16]
-        c2 = error_vad[:, 17]
-        cutoff = _balance10_cutoff(error_vad)
+        z1 = z[:, 0]
+        z2 = z[:, 1]
+        cutoff = _balance10_cutoff(z, t)
         # legacy: ComputeCost.m:580-583
-        rel1 = (c1 > 150) * (c1 - 200 - 100 + cutoff)
+        rel1 = (t == 0) * (z1 - 100 + cutoff)
         rel1 = rel1 * ((rel1 >= 0) / cutoff + (rel1 < 0) / (100 - cutoff))
-        rel2 = (c2 > 150) * (c2 - 200 - cutoff)
+        rel2 = (t == 1) * (z2 - cutoff)
         rel2 = rel2 * ((rel2 >= 0) / (100 - cutoff) + (rel2 < 0) / cutoff)
         rel_error = rel1 + rel2
         lid_flag = 100 * (rel_error > 0)
         lid_score = (100 - lid_flag + 100 * np.exp(-rel_error)) / 100
-        # legacy: ComputeCost.m:590
-        stat_in = (c1 > 150) * (c1 - 200) + (c1 <= 150) * c1
-        std_term = np.std(stat_in, ddof=1)
+        # legacy: ComputeCost.m:590 -- `(c1 > 150)*(c1 - 200) + (c1 <= 150)*c1` is z1.
+        std_term = np.std(z1, ddof=1)
         error = lid_score - np.log(max(1e-24, 1 * min(1.0, float(std_term)))) + 10 * (cutoff <= 0.1) + 10 * (cutoff >= 99.9)
         return np.asarray(error, dtype=F64), cutoff
     # legacy: ComputeCost.m:598-612 (else branch; per-file cutoff vector)
-    rel_error = np.zeros(scores.shape[0], dtype=F64)
+    rel_error = np.zeros(z.shape[0], dtype=F64)
     for mm in range(n_classes):
-        col = error_vad[:, 16 + mm]
-        tmp = scores.copy()
+        col = z[:, mm]
+        is_target = t == mm
+        tmp = z.copy()
         tmp[:, mm] = 0.0
-        cutoff_vec = np.maximum(0.01, np.minimum(99.9, (col > 150) * np.max(tmp, axis=1)))
-        rel_tmp = (col > 150) * (col - 200 - cutoff_vec)
+        cutoff_vec = np.maximum(0.01, np.minimum(99.9, is_target * np.max(tmp, axis=1)))
+        rel_tmp = is_target * (col - cutoff_vec)
         rel_tmp = rel_tmp * ((rel_tmp >= 0) / (100 - cutoff_vec) + (rel_tmp < 0) / cutoff_vec)
         rel_error = rel_error + rel_tmp
     lid_flag = 100 * (rel_error > 0)
@@ -297,28 +268,28 @@ def _balance10(error_vad: NDArray[np.float64]) -> tuple[NDArray[np.float64], flo
 
 
 def compute_cost(
-    results: NDArray[np.float64],
-    config_idx: int,
+    results: ChannelResults,
+    pos: int,
     balance: int,
     params: CostParams,
 ) -> tuple[float, CostBreakdown]:
     """ComputeCost.m's PURE balance-law assembly for one config (:428-652).
 
-    `results` is a (post-`sortrows`) MultiConfigResults matrix; `config_idx` selects the
-    conf-column rows. Returns (balance cost, breakdown). Only balances 0/3/4/5/10 are
-    ported (6-9 are the WER shell-out laws, deferred to 4d)."""
-    error_vad = _error_vad(np.asarray(results, dtype=F64), config_idx)
-    nn_cost_seg = _nn_cost_seg(error_vad)
+    `results` is the engine's channel results; `pos` selects the config (0-based; the
+    legacy `Error_vad = MCR(MCR(:,2)==ii, 4:end)`). Returns (balance cost, breakdown).
+    Only balances 0/3/4/5/10 are ported (6-9 are the WER shell-out laws, deferred to 4d)."""
+    r = results.for_config(pos)
+    nn_cost_seg = _nn_cost_seg(r)
     nn_cost_lid = 0.0
     cutoff: float | None = None
 
     # legacy: ComputeCost.m:432-436
-    cpu_mean = float(np.median(error_vad[:, 3])) if params.mode >= 0 else 0.0
+    cpu_mean = float(np.median(r.time_per_hour)) if params.mode >= 0 else 0.0
     # legacy: ComputeCost.m:445/:453/:461
     coeff_rprop = 0.0 if params.mode == 4 else 1.0
 
-    pfa = error_vad[:, 0]
-    pmiss = error_vad[:, 1]
+    pfa = r.pfa
+    pmiss = r.pmiss
     bbp = params.balance_backprop
     is_algo1 = 1.0 if params.algo == 1 else 0.0
     cpu_term = is_algo1 * (1 * cpu_mean * (cpu_mean > 100) + 0.01 * cpu_mean * (cpu_mean <= 100))
@@ -340,12 +311,12 @@ def compute_cost(
         ) / 100
     elif balance == 5:
         # legacy: ComputeCost.m:466
-        error = 100 * (1 - coeff_rprop) * nn_cost_seg + coeff_rprop * (error_vad[:, 2] + 0.0 * cpu_mean)
+        error = 100 * (1 - coeff_rprop) * nn_cost_seg + coeff_rprop * (r.error_rate + 0.0 * cpu_mean)
     elif balance == 10:
         # legacy: ComputeCost.m:552 (raw NNCostLID; the weights-based L2 is applied in
         # forward_backward, which holds the LID weights + is_bias).
-        nn_cost_lid = _nn_cost_lid(error_vad)
-        error, cutoff = _balance10(error_vad)
+        nn_cost_lid = _nn_cost_lid(r)
+        error, cutoff = _balance10(r)
     else:
         raise ValueError(f"compute_cost ports balances 0/3/4/5/10, got {balance} (6-9 are deferred to 4d)")
 
@@ -373,7 +344,7 @@ def forward_backward(
     listing_override: Path | None = None,
     *,
     make_engine: Callable[[Path], speech_rs.Engine] | None = None,
-    config_idx: int = 1,
+    config_idx: int = 0,
     l2: float = 0.0,
     is_bias: list[NDArray[np.float64]] | None = None,
 ) -> tuple[float, list[NDArray[np.float64]]]:
@@ -417,14 +388,13 @@ def forward_backward(
     engine.set_weights(0, nets)
     engine.run()
 
-    results = np.asarray(engine.results_matrix(), dtype=F64)
+    r = ChannelResults.from_seam(engine.channel_results()).for_config(config_idx)
     derivs = engine.weights_derivatives(0)
-    error_vad = _error_vad(results, config_idx)
 
-    f = _nn_cost_seg(error_vad)
+    f = _nn_cost_seg(r)
     if len(nets) == 2:
         # legacy: ComputeGradient.m:114 f = f + NNCostLID (algo 6).
-        nn_lid = _nn_cost_lid(error_vad)
+        nn_lid = _nn_cost_lid(r)
         if l2 > 0.0 and is_bias is not None:
             lid_cost, _ = l2_penalty(nets[1], is_bias[1], l2)
             nn_lid += lid_cost

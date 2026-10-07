@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import sys
 import types
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ from speech.drivers.test import evaluate, resolve_checkpoint_packs, write_scores
 from speech.genome import genome_length
 from speech.scoring import masking_validation
 from speech.weight_bridge import write_bin
+
+from tests._result_rows import channel_results_from_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PHASE4B = REPO_ROOT / "tests" / "reference_data" / "phase4b"
@@ -203,8 +206,8 @@ def _fake_speech_rs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         def run(self) -> None:
             pass
 
-        def results_matrix(self) -> list[list[float]]:
-            return []
+        def channel_results(self) -> dict[str, np.ndarray]:
+            return asdict(channel_results_from_matrix(np.zeros((0, 0))))
 
     monkeypatch.setitem(sys.modules, "speech_rs", types.SimpleNamespace(Engine=Engine))
     return seen

@@ -41,7 +41,7 @@ from numpy.typing import NDArray
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
 from speech.config_bridge import nnet_spec
 from speech.drivers.state import EpochRecord, ModernTrainParams, ModernTrainResult, RunState, TrainResult
-from speech.engine import CostParams, _error_vad, _nn_cost_lid, _nn_cost_seg, compute_cost, forward_backward
+from speech.engine import ChannelResults, CostParams, _nn_cost_lid, _nn_cost_seg, compute_cost, forward_backward
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
 from speech.optimizers import QpsoParams, Smorms3, quantum_pso
@@ -404,8 +404,8 @@ def _score_engine(
         trained, inner_hist = _backprop_inner(engine, inner_steps, tails, batch)
         engine.set_weights(0, [list(w) for w in trained])
     engine.run()
-    results = np.asarray(engine.results_matrix(), dtype=F64)
-    cost, _ = compute_cost(results, 1, balance, CostParams(mode=0, balance_backprop=balance_backprop, algo=algo))
+    results = ChannelResults.from_seam(engine.channel_results())
+    cost, _ = compute_cost(results, 0, balance, CostParams(mode=0, balance_backprop=balance_backprop, algo=algo))
     return cost, [np.asarray(w, dtype=F64) for w in engine.weights(0)], inner_hist
 
 
@@ -672,23 +672,20 @@ class _ModernBatchStep:
         return speech_rs.Engine(["_train_modern_batch.config"], "-m")
 
 
-def _confusion_error(results: NDArray[np.float64], algo: int) -> float | None:
+def _confusion_error(results: ChannelResults, algo: int) -> float | None:
     """The FIXED (F5) confusion misclassification rate on the validation results, Twin-only
-    (single-net SAD algos carry no LID confusion -> None). Extracts the per-file LID score
-    block (`Error_vad[:, 16:-2]`, the `>150`/`-200` in-band columns) and derives
-    `1 - hits/trials` from `scoring.confusion_matrix`. Returns None on any degeneracy
-    (algo != 6, <2 classes, empty/ill-formed block) -- it is a recorded side-metric, never
-    the early-stop signal."""
-    if algo != 6:
+    (single-net SAD algos carry no LID confusion -> None). Reads config 0's decoded
+    `lid_target` / `lid_scores` and derives `1 - hits/trials` from
+    `scoring.confusion_matrix`. Returns None on any degeneracy (algo != 6, <2 classes,
+    no rows) -- it is a recorded side-metric, never the early-stop signal."""
+    if algo != 6 or len(results) == 0:
         return None
-    sel = results[results[:, 1] == 1]
-    if sel.shape[0] == 0 or sel.shape[1] <= 3:
-        return None
-    scores = np.asarray(sel[:, 3:][:, 16:-2], dtype=F64)
-    if scores.ndim != 2 or scores.shape[1] < 2:
+    r = results.for_config(0)
+    scores = r.lid_scores
+    if scores.shape[1] < 2:
         return None
     try:
-        conf = confusion_matrix(scores, 50.0)
+        conf = confusion_matrix(r.lid_target, scores, 50.0)
     except ValueError:
         return None
     class_nb = scores.shape[1]
@@ -771,14 +768,14 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
             engine = speech_rs.Engine(["_valid_modern.config"], "-m")
             engine.set_weights(0, [list(np.asarray(w, dtype=F64)) for w in weights])
             engine.run()
-            results = np.asarray(engine.results_matrix(), dtype=F64)
+            results = ChannelResults.from_seam(engine.channel_results())
         if metric == "nn_cost_seg":
-            error_vad = _error_vad(results, 1)
-            val_cost = _nn_cost_seg(error_vad)
+            r = results.for_config(0)
+            val_cost = _nn_cost_seg(r)
             if algo == 6:
-                val_cost += _nn_cost_lid(error_vad)  # mirror forward_backward's f = NNCostSeg + NNCostLID (Twin)
+                val_cost += _nn_cost_lid(r)  # mirror forward_backward's f = NNCostSeg + NNCostLID (Twin)
         else:
-            val_cost, _ = compute_cost(results, 1, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
+            val_cost, _ = compute_cost(results, 0, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
         return float(val_cost), _confusion_error(results, algo)
 
     return validate
@@ -951,8 +948,8 @@ def score_hyperparam_genome(
         (workdir / "_hyperparam_eval.config").write_text(text)
         engine = speech_rs.Engine(["_hyperparam_eval.config"], "-m")
         engine.run()
-        results = np.asarray(engine.results_matrix(), dtype=F64)
-    cost, _ = compute_cost(results, 1, state.balance, CostParams(mode=0, balance_backprop=state.ps.BalanceBackProp, algo=state.ps.algo))
+        results = ChannelResults.from_seam(engine.channel_results())
+    cost, _ = compute_cost(results, 0, state.balance, CostParams(mode=0, balance_backprop=state.ps.BalanceBackProp, algo=state.ps.algo))
     return float(cost), reduced_out, text
 
 

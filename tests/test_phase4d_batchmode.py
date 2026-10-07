@@ -25,6 +25,7 @@ No `speech_rs` needed here (the fresh-engine build is exercised through a fake i
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import cast
 
@@ -33,6 +34,8 @@ import pytest
 from speech.batching import create_batches
 from speech.drivers.train import _BatchRunner, class_balance_values
 from speech.engine import forward_backward
+
+from tests._result_rows import channel_results_from_matrix
 
 
 class _IdentityRng:
@@ -251,9 +254,11 @@ class _FakeEngine:
     def run(self) -> None:
         self.ran = True
 
-    def results_matrix(self) -> np.ndarray:
-        # one row: [file, conf=1, chan, res...] with error_vad col4=10, col-1=2 -> nn_cost_seg=5.
-        return np.array([[1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 10.0, 2.0]], dtype=np.float64)
+    def channel_results(self) -> dict[str, np.ndarray]:
+        # one row of config 0 with seg_cost=10, seg_count=2 -> nn_cost_seg=5.
+        res = [0.0] * 18
+        res[4], res[17] = 10.0, 2.0
+        return asdict(channel_results_from_matrix(np.array([[1.0, 1.0, 1.0, *res]], dtype=np.float64)))
 
     def weights_derivatives(self, pos: int) -> list[np.ndarray]:
         return [np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 1.0]], dtype=np.float64)]

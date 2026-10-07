@@ -217,8 +217,7 @@ def test_masking_validation_numeric_1e12_threshold() -> None:
 
 
 def test_confusion_matrix_labels_and_shape() -> None:
-    scores = np.array([[151.0, 10.0]])
-    cm = confusion_matrix(scores, thresh=10.0)
+    cm = confusion_matrix(np.array([0]), np.array([[-49.0, 10.0]]), thresh=10.0)
     assert cm.shape == (4, 4)
     assert cm[0, :3].tolist() == [0.0, 1.0, 2.0]
     assert cm[:3, 0].tolist() == [0.0, 1.0, 2.0]
@@ -228,15 +227,15 @@ def test_confusion_matrix_labels_and_shape() -> None:
 def test_confusion_matrix_hit_when_target_clears_threshold() -> None:
     """Target in slot 1 (0-based; legacy posTarget=2) with score > thresh -> a HIT on
     the diagonal, not charged to the best non-target class."""
-    scores = np.array([[10.0, 260.0]])  # class1 signaled target, score = 260-200 = 60
-    cm = confusion_matrix(scores, thresh=10.0)
+    # class1 is the target (wire 260 -> decoded 60)
+    cm = confusion_matrix(np.array([1]), np.array([[10.0, 60.0]]), thresh=10.0)
     assert cm[2, 2] == 1.0  # pos_target = kk(1)+1 = 2, diagonal hit
     assert cm[2, 3] == 1.0 and cm[3, 2] == 1.0
 
 
 def test_confusion_matrix_miss_charges_best_non_target() -> None:
-    scores = np.array([[151.0, 10.0]])  # target=class0 (score=-49), best-not-target=class1
-    cm = confusion_matrix(scores, thresh=10.0)
+    # target=class0 (wire 151 -> decoded -49), best-not-target=class1
+    cm = confusion_matrix(np.array([0]), np.array([[-49.0, 10.0]]), thresh=10.0)
     # pos_target = 0+1 = 1, pos_best_not_target = 1+1 = 2 (miss: -49 > 100-10=90 is false)
     assert cm[1, 2] == 1.0
     assert cm[1, 3] == 1.0 and cm[3, 2] == 1.0
@@ -245,7 +244,7 @@ def test_confusion_matrix_miss_charges_best_non_target() -> None:
 
 def test_confusion_matrix_no_target_row_skipped() -> None:
     """FIXED (phase 5, F5): `posTarget`/`posBestNotTarget` are declared PER ROW, so a file
-    with no score > 150 (no target signaled) no longer inherits the previous row's
+    with no target (legacy: no score > 150) no longer inherits the previous row's
     posTarget -- it is an out-of-set trial with no true class in the closed set, skipped
     entirely. Pre-fix (sticky) the 2nd row reused row0's posTarget=1/posBestNotTarget=2 and
     double-charged cm[1,2] to 2.0; post-fix only row0's miss counts, so cm[1,2]==1.0. The
@@ -253,11 +252,11 @@ def test_confusion_matrix_no_target_row_skipped() -> None:
     identically to the Rust engine/confusion.rs::confusion_from_results."""
     scores = np.array(
         [
-            [151.0, 10.0],  # row0: target=class0 (score -49), best-not-target=class1 -> miss
-            [20.0, 30.0],  # row1: no target signaled -> SKIPPED (not sticky-charged)
+            [-49.0, 10.0],  # row0: target=class0 (wire 151 -> -49), best-not-target=class1 -> miss
+            [20.0, 30.0],  # row1: no target -> SKIPPED (not sticky-charged)
         ]
     )
-    cm = confusion_matrix(scores, thresh=10.0)
+    cm = confusion_matrix(np.array([0, -1]), scores, thresh=10.0)
     assert cm[1, 2] == 1.0
     assert cm[1, 3] == 1.0
     assert cm[3, 2] == 1.0
@@ -273,8 +272,8 @@ def test_confusion_cross_language_identity_no_target_skip() -> None:
     max-competitor win, and row1 has no target so BOTH skip it. There is no PyO3 seam for
     confusion (it is not on the speech_rs.Engine surface), so the identity is pinned by
     this test plus its Rust twin hardcoding the SAME expected matrix."""
-    scores = np.array([[5.0, 260.0], [20.0, 30.0]])
-    cm = confusion_matrix(scores, thresh=10.0)
+    scores = np.array([[5.0, 60.0], [20.0, 30.0]])  # row0's target col 1 (wire 260 -> 60); row1 none
+    cm = confusion_matrix(np.array([1, -1]), scores, thresh=10.0)
     want = np.array(
         [
             [0.0, 1.0, 2.0, 0.0],  # labels clean (row1 no-target -> skipped)
@@ -288,4 +287,4 @@ def test_confusion_cross_language_identity_no_target_skip() -> None:
 
 def test_confusion_matrix_class_nb_le_1_raises() -> None:
     with pytest.raises(ValueError, match="class_nb"):
-        confusion_matrix(np.array([[1.0], [2.0]]), thresh=10.0)
+        confusion_matrix(np.array([0, 0]), np.array([[1.0], [2.0]]), thresh=10.0)

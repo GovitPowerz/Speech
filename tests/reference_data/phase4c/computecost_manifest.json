@@ -15,7 +15,6 @@
     "b10c_cutoff": 44.995
   },
   "strict": [
-    "computecost_agg_out.bin",
     "computecost_avg_out.bin",
     "computecost_l2_cost.bin",
     "computecost_l2_grad.bin",
@@ -65,18 +64,6 @@
     "computecost_b10a_cost.bin"
   ],
   "shapes": {
-    "computecost_agg_w1.bin": [
-      2,
-      4
-    ],
-    "computecost_agg_w2.bin": [
-      2,
-      4
-    ],
-    "computecost_agg_out.bin": [
-      4,
-      4
-    ],
     "computecost_avg_in.bin": [
       4,
       2
