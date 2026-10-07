@@ -31,4 +31,12 @@ One dated design spec and one implementation plan per roadmap phase, in the orde
 | 10 | [CfC + fast-tree completion + the v2 lineage](specs/2026-07-31-phase-10-cfc-fast-completion-design.md) | [plan](plans/2026-07-31-phase-10-cfc-fast-completion.md) | approved |
 | 11 | [The transformer encoder: windowed causal attention behind the CellLayer seam](specs/2026-08-12-phase-11-transformer-design.md) | [plan](plans/2026-08-12-phase-11-transformer.md) | - |
 
+## Issue-driven work
+
+Smaller changes start from a GitHub issue instead of a spec: the issue carries a grilling session whose outcome is recorded as a comment, and the plan cites that comment as its source of truth.
+
+| issue | plan | status |
+|---|---|---|
+| [#23 Typed result record: one owner for the 18+N result-row columns](https://github.com/GovitPowerz/Speech/issues/23) | [plan](plans/2026-10-07-issue-23-typed-channel-result.md) | in progress |
+
 The specs are the record of what was decided and why; where a spec's wording was later found wrong, the correction is dated in place (the Phase 11 spec carries three dated amendments) rather than rewritten, so the trail from premise to result stays readable.
