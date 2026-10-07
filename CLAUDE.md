@@ -59,7 +59,7 @@ uv run pytest tests/pyo3/test_phase10_gates.py --ledger-stage /tmp/stage   # gat
 uv run python -m speech.ledger bench --leg phase7_60s                   # a staged Phase 7 leg: 3 fresh processes x {exact, fast}, promoted + rendered
 ```
 
-Suite sizes at the Phase 11 close: cargo 1283, pytest 896 non-slow (`uv run pytest tests -q -m "not slow"`), pyo3 203 (`uv run pytest tests/pyo3 -q`, corpus present, ~20 min).
+Suite sizes at the issue #23 close (2026-10-07): cargo 1317, pytest 1016 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 894 without `tests/pyo3`), pyo3 205 (`uv run pytest tests/pyo3 -q`, corpus present, ~26 min).
 
 ## Architecture
 
@@ -91,7 +91,7 @@ The module maps (one row per file: legacy source, responsibility, what landed wh
 - **Fixed 100000-entry random tables**: `Constants.h` bakes in two 100000-entry random tables for determinism; reproduce them (and the modular indexing) faithfully.
 - **Little-endian assumption**: `.bin` and `.mat` are little-endian; the codec hard-assumes LE.
 - **Layer naming off-by-one**: MATLAB is 1-based, the config `Layer_%d` keys are 0-based. Mind the offset when bridging.
-- **In-band signaling offsets**: `score > 150` and `val - 200` encode signals in-band in the legacy numeric streams; these magic offsets are load-bearing, not noise.
+- **In-band signaling offsets**: `score > 150` and `val - 200` encode signals in-band in the legacy numeric streams; these magic offsets are load-bearing, not noise. The frozen tree still produces them; since issue #23 they are decoded ONCE, at the bag (`engine/channel_result.rs`, `LidResult::from_encoded`), re-encoded by `to_row()` for the `.mat`, and never read by index again: Rust readers take `ChannelResult` fields, Python reads `ChannelResults` names off `Engine.channel_results()`.
 - **The peephole bundle is mixed-kind**: rows 0-2 peep cell states, rows 3-11 peep gate values, several from the previous step. A streaming kernel that carries only `h`/`c` computes a correct whole-sequence output and a wrong streamed one.
 - **A declared input width is not a produced one**: `NNetInputSize` must equal `3*nb_dct - ignore_first_dct` (the delta keys are regression orders, not counts); v1 inherits a 23-vs-11 mismatch from 2015 and the dead columns are pinned, not fixed (ADR-0008).
 

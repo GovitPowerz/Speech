@@ -20,9 +20,9 @@ One page for a reader who has built the binary and wants to know how a run and a
 5. `nn::blstm::BlstmNetwork::feed_forward_backward` under one of the four windowed drivers (or the plain whole-sequence forward for a causal net): type-1 input normalization, the two `Network<CellLayer>` stacks (ADR-0005), the HCAT, the output MLP (asinh hidden, softmax out), the cost law and, when a reference is attached and backprop is on, the analytic BPTT.
 6. `tasks::segmenter::results_to_segmentation`: the temporal convolution gate, then the hysteresis-with-area double threshold (`update_segmentation`) producing raw segments, then the fixed 8-step smoothing.
 7. `tasks::segmentation_io`: the VRCTS XML dump, the reference load (STM / CSV / VRCTS), `compute_errors` (Pfa / Pmiss / error rate per class, coverage, delay).
-8. The per-file result row joins the lane's fold (ADR-0007); at epoch end the ascending-index fold assembles the result matrix, the best-weight save gate fires, and in training mode the in-engine iRPROP- update runs on the count-normalized gradient.
+8. The per-channel result (`engine::channel_result::ChannelResult`, the typed value the 18+N result row is rendered from) joins the lane's fold (ADR-0007); at epoch end the ascending-index fold sums its fields per config, the best-weight save gate fires, and in training mode the in-engine iRPROP- update runs on the count-normalized gradient.
 9. `io::matfile` writes the `MultiConfigResults.mat` (a hand-rolled v5 writer; there is no reader).
-10. The LID Twin (Algo 6) wraps steps 3-7 twice: the SAD net's hidden states feed the LID net per speech segment, or in Mode 7 the LID net scores precomputed phSeq/cep utterances with the SAD net frozen; the per-file language row carries its target in-band (the `>150` sentinel, the `-200` offset) for the confusion decode.
+10. The LID Twin (Algo 6) wraps steps 3-7 twice: the SAD net's hidden states feed the LID net per speech segment, or in Mode 7 the LID net scores precomputed phSeq/cep utterances with the SAD net frozen; the per-file language scores carry their target in-band (the `>150` sentinel, the `-200` offset), decoded once at the bag into `LidResult` and re-encoded only for the `.mat`.
 
 The SAD pitch second pass (Algo 3, `TDCwindow > 0`) repeats steps 4-6 on a periodogram warped by the pass-1 pitch estimate.
 
@@ -33,7 +33,7 @@ The SAD pitch second pass (Algo 3, `TDCwindow > 0`) repeats steps 4-6 on a perio
 1. `dataprep/lre.py` derives the listings, the 12-class mapping and the split from the local corpus; nothing corpus-derived is committed.
 2. `config_bridge.nnet_spec` reads the architecture (sizes, cell, direction, per-cell geometry) out of the same config the engine will read.
 3. `init_weights.py` seeds one flat pack per net (Xavier or He through the packer the goldens already test for the LSTM; the Rust flat order emitted directly for the four new cells, pinned block by block).
-4. `engine.forward_backward` is `ComputeGradient.m`'s contract over `speech_rs.Engine`: set weights, `run` one fold at `Epochs 0`, read the result rows and per-net derivatives, assemble `f = NNCostSeg (+ NNCostLID)` and the count-normalized gradient (plus the LID-only L2 term).
+4. `engine.forward_backward` is `ComputeGradient.m`'s contract over `speech_rs.Engine`: set weights, `run` one fold at `Epochs 0`, read the channel results by name (`Engine.channel_results()`) and the per-net derivatives, assemble `f = NNCostSeg (+ NNCostLID)` and the count-normalized gradient (plus the LID-only L2 term).
 5. `optimizers.Smorms3` takes the step (Octave-pinned bit-for-bit); optionally `batching` rotates a hard-example mini-batch listing per evaluation and rebuilds the engine against it.
 6. Per epoch, a forward-only validation on the held-out split with the moving `NNCostSeg` signal; early stop on patience; `best_<net>.bin` / `last_<net>.bin` / `train_history.json`.
 7. Held-out scoring: for SAD the engine dumps one VRCTS hypothesis per file and `evaluate.dcf` pools them per collar (the NIST perl scorer, ported value-for-value); for LID the `.scr` score files feed `evaluate.lid_error` and `evaluate.cavg`.
