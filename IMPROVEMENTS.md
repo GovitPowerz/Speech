@@ -2655,7 +2655,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   mismatch (assert/UB). A bag mixing a LID config with a non-LID config therefore aborts in the
   legacy; the port's `transform_results_impl` panics on the same shape (out-of-bounds write).
   No committed legacy config mixes them; same-width bags (all-LID or all-non-LID with equal
-  classNb) are fine. *Fix candidate:* per-conf row widths after parity. Not test-pinned
+  classNb) are fine. *Fix candidate:* per-conf row widths after parity. Since issue #23 the
+  fold (`save_and_update`) reads `ChannelResult` fields and no longer depends on the width; the
+  panic is only at the `MultiConfigResults` matrix edge (`results_e`). Not test-pinned
   (reaching it requires a deliberately malformed multi-config setup); documented here per the
   width-growth review in Task 9.
 

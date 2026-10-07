@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23)
 
 ## Context
 
@@ -32,7 +32,10 @@ and list config read in the exact tree -- `features/pipeline.rs`, `tasks/sad.rs`
 non-finite value errors naming the key everywhere and every list takes the legacy
 `split_with_repeat` grammar (one trailing comma dropped, the `*` repeater) with three deliberate
 tightenings, a bad repeat count, a third `*` part and whitespace inside a repeat form, all
-errors where the legacy aborted, silently dropped or truncated, issue #50). Training is
+errors where the legacy aborted, silently dropped or truncated, issue #50; the typed channel
+result: the result row's 18+N layout owned by one `engine/` type, `engine/channel_result.rs`,
+with `to_row()` the only writer and the in-band LID target decoded once at the bag, proven
+byte-identical by the `.mat` goldens and the seam cross-pin, issue #23). Training is
 exact-f64 only and bails loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and
