@@ -7,6 +7,7 @@ a release build, and RESULTS.md holds exactly what the ledger renders.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -752,12 +753,23 @@ def test_prose_derived_values_follow_the_stated_rounding() -> None:
 
 
 def test_prose_derives_the_sad_60s_peak_rss_from_the_maxrss_means() -> None:
-    legs = _four_legs()
-    legs[0] = bench_record("phase7_60s", "exact", 0.2638, maxrss=57.182)
-    legs[1] = bench_record("phase7_60s", "fast", 0.0573, maxrss=43.521)
+    older_host = Host(chip="Apple M1", arch="arm64", cores=8, os="Darwin 24.0.0")
+    legs = [
+        *_four_legs()[2:],
+        *(bench_record("phase7_60s", "exact", 0.2638, at=T0.replace(minute=i), maxrss=m) for i, m in enumerate((56.0, 58.364))),
+        *(bench_record("phase7_60s", "fast", 0.0573, at=T0.replace(minute=i), maxrss=m) for i, m in enumerate((43.0, 44.042))),
+        *_pair("phase7_60s", 0.2, 0.05, at=T0.replace(day=1), maxrss=99.0, host=older_host),
+    ]
     want = prose.derived(legs)  # type: ignore[arg-type]
     assert (want["sad_rss_fast_1dp"], want["sad_rss_exact_1dp"]) == ("43.5", "57.2")
     assert (want["sad_rss_fast_0dp"], want["sad_rss_exact_0dp"]) == ("44", "57")
+
+
+def test_prose_whole_mb_rss_quote_refuses_a_decimal_it_would_truncate() -> None:
+    [q] = [q for q in prose.QUOTES if q.values == ("sad_rss_fast_0dp", "sad_rss_exact_0dp")]
+    assert re.search(q.pattern, "the fast SAD path peaks at 44 MB of RSS against the exact tree's 57.4.") is None
+    m = re.search(q.pattern, "the fast SAD path peaks at 44 MB of RSS against the exact tree's 57. A streamed")
+    assert m is not None and m.groups() == ("44", "57")
 
 
 def test_prose_quotes_match_the_ledger() -> None:
