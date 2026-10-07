@@ -136,7 +136,7 @@ fn aggregation_bit_exact() {
 
     bag.save_and_update(
         "unused.mat",
-        &[m],
+        &[m.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,
@@ -180,7 +180,7 @@ fn aggregation_counter_zero_guard_skips_division() {
 
     bag.save_and_update(
         "unused.mat",
-        &[m],
+        &[m.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,
@@ -226,7 +226,7 @@ fn best_cost_gate_fires_and_skips() {
     // Col 4 (cost numerator) = 5.0, col 17 (denom) = 1.0 -> cost = 5.0.
     #[rustfmt::skip]
     let row_a: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
-    let m_a = vec![ChannelResult::from_row(&row_a)];
+    let m_a = [ChannelResult::from_row(&row_a)];
 
     let mut cost_mem = [0.0; 1];
     let mut bad_classif = [0.0; 1];
@@ -235,7 +235,7 @@ fn best_cost_gate_fires_and_skips() {
 
     bag.save_and_update(
         out_a,
-        &[m_a],
+        &[m_a.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,
@@ -267,11 +267,11 @@ fn best_cost_gate_fires_and_skips() {
     // Cost 7.0 - worse than the 5.0 best - must NOT save.
     #[rustfmt::skip]
     let row_b: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
-    let m_b = vec![ChannelResult::from_row(&row_b)];
+    let m_b = [ChannelResult::from_row(&row_b)];
 
     bag.save_and_update(
         out_b,
-        &[m_b],
+        &[m_b.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,
@@ -329,8 +329,8 @@ fn cost_mem_rows_written() {
     let row0: [f64; 18] = [0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 1.0];
     #[rustfmt::skip]
     let row1: [f64; 18] = [0.0, 0.0, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 0.0, 3.0, 1.0];
-    let m0 = vec![ChannelResult::from_row(&row0)];
-    let m1 = vec![ChannelResult::from_row(&row1)];
+    let m0 = [ChannelResult::from_row(&row0)];
+    let m1 = [ChannelResult::from_row(&row1)];
 
     let _lock = CWD_LOCK.lock().unwrap();
     let _cwd = CwdGuard::enter(tmp.path());
@@ -342,7 +342,7 @@ fn cost_mem_rows_written() {
 
     bag.save_and_update(
         out,
-        &[m0, m1],
+        &[m0.iter().collect(), m1.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,
@@ -394,7 +394,7 @@ fn update_called_with_neg_costlid() {
     // pre-gate (isolating the gate, not a division-by-zero coincidence).
     #[rustfmt::skip]
     let row: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0, 0.0, 3.0, 1.0];
-    let m = vec![ChannelResult::from_row(&row)];
+    let m = [ChannelResult::from_row(&row)];
 
     let _lock = CWD_LOCK.lock().unwrap();
     let _cwd = CwdGuard::enter(tmp.path());
@@ -406,7 +406,7 @@ fn update_called_with_neg_costlid() {
 
     bag.save_and_update(
         out,
-        &[m],
+        &[m.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,

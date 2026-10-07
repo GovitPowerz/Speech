@@ -139,7 +139,7 @@ fn best_cost_gate_skips_on_exact_tie() {
     // Col 4 (cost numerator) = 5.0, col 17 (denom) = 1.0 -> cost = 5.0.
     #[rustfmt::skip]
     let row_a: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
-    let m_a = vec![ChannelResult::from_row(&row_a)];
+    let m_a = [ChannelResult::from_row(&row_a)];
 
     let mut cost_mem = [0.0; 1];
     let mut bad_classif = [0.0; 1];
@@ -148,7 +148,7 @@ fn best_cost_gate_skips_on_exact_tie() {
 
     bag.save_and_update(
         out_a,
-        &[m_a],
+        &[m_a.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,
@@ -175,11 +175,11 @@ fn best_cost_gate_skips_on_exact_tie() {
     // reproduces the identical bit pattern).
     #[rustfmt::skip]
     let row_b: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
-    let m_b = vec![ChannelResult::from_row(&row_b)];
+    let m_b = [ChannelResult::from_row(&row_b)];
 
     bag.save_and_update(
         out_b,
-        &[m_b],
+        &[m_b.iter().collect()],
         &mut best_cost,
         &derivs,
         &stats,

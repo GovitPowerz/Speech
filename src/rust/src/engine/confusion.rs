@@ -47,8 +47,11 @@ use crate::engine::channel_result::LidResult;
 ///
 /// `classNb <= 1` reproduces the legacy's own gate (`:501`, `if (classNb >
 /// 1)`): no matrix is built, error stays `0.0`.
-pub fn confusion_from_results(rows: &[LidResult]) -> (Array2<f64>, f64) {
-    let class_nb = rows.first().map_or(0, |r| r.scores.len());
+pub fn confusion_from_results<'a>(
+    rows: impl IntoIterator<Item = &'a LidResult>,
+) -> (Array2<f64>, f64) {
+    let mut rows = rows.into_iter().peekable();
+    let class_nb = rows.peek().map_or(0, |r| r.scores.len());
     if class_nb <= 1 {
         return (Array2::zeros((0, 0)), 0.0);
     }

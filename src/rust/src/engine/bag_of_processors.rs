@@ -867,7 +867,11 @@ impl BagOfProcessors {
     /// is never executed); its `return error/classNb` (`Helpers.hpp:438`) is
     /// what `:597`'s `return error;` hands back unchanged (the commented-out
     /// `return error/classNb;` at `:596` would have double-divided).
-    fn print_confusion_matrix(&self, rows: &[LidResult], _config_nb: usize) -> (f64, Array2<f64>) {
+    fn print_confusion_matrix<'a>(
+        &self,
+        rows: impl IntoIterator<Item = &'a LidResult>,
+        _config_nb: usize,
+    ) -> (f64, Array2<f64>) {
         let (matrix, error) = confusion::confusion_from_results(rows);
         (error, matrix)
     }
@@ -920,7 +924,7 @@ impl BagOfProcessors {
     pub fn save_and_update(
         &mut self,
         filename: &str,
-        results_per_conf: &[Vec<ChannelResult>],
+        results_per_conf: &[Vec<&ChannelResult>],
         best_cost: &mut BTreeMap<usize, f64>,
         derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
         stats: &BTreeMap<usize, Vec<InputStatistics>>,
@@ -1010,8 +1014,8 @@ impl BagOfProcessors {
             // print_confusion_matrix's usage finding), so outside test-support the
             // pair is dropped after the call.
             if rows.first().is_some_and(|r| r.lid.is_some()) {
-                let lid_rows: Vec<LidResult> = rows.iter().filter_map(|r| r.lid.clone()).collect();
-                let confusion_pair = self.print_confusion_matrix(&lid_rows, ii + 1);
+                let lid_rows = rows.iter().filter_map(|r| r.lid.as_ref());
+                let confusion_pair = self.print_confusion_matrix(lid_rows, ii + 1);
                 #[cfg(feature = "test-support")]
                 self.last_confusion.push(confusion_pair);
                 #[cfg(not(feature = "test-support"))]

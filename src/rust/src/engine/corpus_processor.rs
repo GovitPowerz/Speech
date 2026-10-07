@@ -599,16 +599,17 @@ impl CorpusProcessor {
         );
     }
 
-    /// The legacy `_ResPerConf[conf]` (`:379-380`) as typed values: config `ii`'s
-    /// channel results in ascending (file, chan) order, the order the fold sums in.
+    /// The legacy `_ResPerConf[conf]` (`:379-380`) as typed values borrowed from
+    /// `results`: config `ii`'s channel results in ascending (file, chan) order,
+    /// the order the fold sums in.
     pub fn results_per_config(
         results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
-    ) -> Vec<Vec<ChannelResult>> {
-        let mut per_conf: Vec<Vec<ChannelResult>> = (0..nb_of_conf).map(|_| Vec::new()).collect();
+    ) -> Vec<Vec<&ChannelResult>> {
+        let mut per_conf: Vec<Vec<&ChannelResult>> = (0..nb_of_conf).map(|_| Vec::new()).collect();
         for confs in results.values() {
             for (&conf, chans) in confs {
-                per_conf[conf].extend(chans.values().cloned());
+                per_conf[conf].extend(chans.values());
             }
         }
         per_conf
