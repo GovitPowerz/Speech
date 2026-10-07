@@ -19,6 +19,7 @@ use indexmap::IndexMap;
 
 use common::{mat_var_dims, mat_var_matrix, mat_var_order};
 use speech::cli::{Mode, ModeKind};
+use speech::engine::channel_result::ChannelResult;
 use speech::engine::corpus_processor::CorpusProcessor;
 
 /// `set_current_dir` is process-global; the artifact-producing runs chdir into a
@@ -193,12 +194,20 @@ fn mode_dispatch_matrix() {
 #[test]
 fn transform_results_ordering() {
     // Two "files" (indices 0 and 2), one conf, one channel each. Crafted result
-    // rows so the ordering + id columns are directly checkable.
-    let mut results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>> = BTreeMap::new();
-    let mut r0: BTreeMap<usize, BTreeMap<usize, Vec<f64>>> = BTreeMap::new();
-    r0.insert(0, BTreeMap::from([(0, vec![11.0, 22.0])]));
-    let mut r2: BTreeMap<usize, BTreeMap<usize, Vec<f64>>> = BTreeMap::new();
-    r2.insert(0, BTreeMap::from([(0, vec![33.0, 44.0])]));
+    // rows (18 wide, cols 0/1 distinct) so the ordering + id columns are directly
+    // checkable; `from_row` is the test-support inverse of `to_row`.
+    fn crafted(a: f64, b: f64) -> ChannelResult {
+        let mut row = vec![0.0; 18];
+        row[0] = a;
+        row[1] = b;
+        ChannelResult::from_row(&row)
+    }
+    let mut results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>> =
+        BTreeMap::new();
+    let mut r0: BTreeMap<usize, BTreeMap<usize, ChannelResult>> = BTreeMap::new();
+    r0.insert(0, BTreeMap::from([(0, crafted(11.0, 22.0))]));
+    let mut r2: BTreeMap<usize, BTreeMap<usize, ChannelResult>> = BTreeMap::new();
+    r2.insert(0, BTreeMap::from([(0, crafted(33.0, 44.0))]));
     // Insert file 2 FIRST to prove the BTreeMap re-sorts ascending.
     results.insert(2, r2);
     results.insert(0, r0);
@@ -206,19 +215,25 @@ fn transform_results_ordering() {
     // nb_of_files is 2 (the corpus size), nb_of_conf 1.
     let (results_e, res_per_conf) = CorpusProcessor::transform_results_for_test(&results, 1, 2);
 
-    // ResultsE: 2 rows, 3 id cols + 2 result cols = 5 cols.
-    assert_eq!(results_e.dim(), (2, 5), "conservative resize to counter");
-    // Row 0 is file 0 (ascending): [file+1=1, conf+1=1, chan+1=1, 11, 22].
-    assert_eq!(results_e.row(0).to_vec(), vec![1.0, 1.0, 1.0, 11.0, 22.0]);
-    // Row 1 is file 2: [file+1=3, conf+1=1, chan+1=1, 33, 44].
-    assert_eq!(results_e.row(1).to_vec(), vec![3.0, 1.0, 1.0, 33.0, 44.0]);
+    // ResultsE: 2 rows, 3 id cols + 18 result cols = 21 cols.
+    assert_eq!(results_e.dim(), (2, 21), "conservative resize to counter");
+    // Row 0 is file 0 (ascending): [file+1=1, conf+1=1, chan+1=1, 11, 22, ...].
+    assert_eq!(
+        &results_e.row(0).to_vec()[..5],
+        &[1.0, 1.0, 1.0, 11.0, 22.0]
+    );
+    // Row 1 is file 2: [file+1=3, conf+1=1, chan+1=1, 33, 44, ...].
+    assert_eq!(
+        &results_e.row(1).to_vec()[..5],
+        &[3.0, 1.0, 1.0, 33.0, 44.0]
+    );
 
     // Per-conf matrix (conf 0): the raw result rows, ascending file order, truncated
-    // to the counter (2 rows, 2 cols).
+    // to the counter (2 rows, 18 cols).
     assert_eq!(res_per_conf.len(), 1);
-    assert_eq!(res_per_conf[0].dim(), (2, 2));
-    assert_eq!(res_per_conf[0].row(0).to_vec(), vec![11.0, 22.0]);
-    assert_eq!(res_per_conf[0].row(1).to_vec(), vec![33.0, 44.0]);
+    assert_eq!(res_per_conf[0].dim(), (2, 18));
+    assert_eq!(&res_per_conf[0].row(0).to_vec()[..2], &[11.0, 22.0]);
+    assert_eq!(&res_per_conf[0].row(1).to_vec()[..2], &[33.0, 44.0]);
 }
 
 // === lanes_n1_equals_sequential ==============================================

@@ -13,6 +13,7 @@ use ndarray::Array2;
 
 use crate::audio::{Audio, read_audio};
 use crate::cli::{Mode, ModeKind};
+use crate::engine::channel_result::{ChannelResult, LidResult};
 use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
 use crate::fast::driver::{FastSpectralSegmenter, FastTwinLid};
@@ -24,8 +25,7 @@ use crate::tasks::sad::{
 };
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{
-    ScoreReport, WerStats, compute_errors, load_ref_csv, load_ref_stm, load_ref_vrcts,
-    write_vrcts_multichannel,
+    compute_errors, load_ref_csv, load_ref_stm, load_ref_vrcts, write_vrcts_multichannel,
 };
 use crate::tasks::vrcts::VrctsPart;
 
@@ -88,7 +88,7 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// TRAINING arms (weights/derivatives/stats/save/update/isBackProp) group with the
 /// non-NN variants' inert defaults, since the fast path never trains (training stays
 /// exact f64 -- spec S1; the fast drivers expose no trainable f64 surface). `FastTwinLid`
-/// DOES surface `lid_row_data` (it writes the LID members), so the scored result row's
+/// DOES surface `lid_result` (it writes the LID members), so the scored result row's
 /// confusion columns flow exactly as the exact Twin's. Both are `Clone` (deep-copying
 /// the f32 net + workspace), so the bag's `#[derive(Clone)]` still holds; the clone
 /// sites (grad-check snapshot, per-lane training fan-out) are exact-path-only, so a
@@ -117,19 +117,6 @@ pub enum Processor {
     TwinLid(TwinBlstmSpectralLid),
     FastSpectral(FastSpectralSegmenter),
     FastTwinLid(FastTwinLid),
-}
-
-/// Per-channel LID result-row data (`seg._LID*` members): the `:338-349` scored
-/// (and `:380-389` unscored) branch reads them when `seg._IsLIDCorrect` is
-/// non-empty -- which in the port means the config's driver is a LID algo (5/6),
-/// since only those drivers ever write the members. One instance per channel.
-pub(crate) struct LidRowData {
-    pub cumulative_error: f64,
-    pub is_correct: f64,
-    /// `_LIDClassificationErrors[chan]` -- one column per class; its LENGTH grows
-    /// the result row (the confusion columns inserted after col 15).
-    pub classification_errors: Vec<f64>,
-    pub nb_of_classif: i64,
 }
 
 impl Processor {
@@ -210,34 +197,35 @@ impl Processor {
         }
     }
 
-    /// Per-channel LID result-row data. The legacy gate is
-    /// `!seg._IsLIDCorrect.empty()` (`:338`/`:380`): only the LID drivers
-    /// (algo 5/6) ever fill `_IsLIDCorrect`, so the port keys the branch off the
-    /// PROCESSOR variant -- `None` for algo 0-4 (the two 0.0 slots, no confusion
-    /// columns), `Some` for 5/6 (the row WIDTH grows by the class count).
-    fn lid_row_data(&self, chan: usize) -> Option<LidRowData> {
+    /// Per-channel LID block. The legacy gate is `!seg._IsLIDCorrect.empty()`
+    /// (`:338`/`:380`): only the LID drivers (algo 5/6) ever fill
+    /// `_IsLIDCorrect`, so the port keys the branch off the PROCESSOR variant --
+    /// `None` for algo 0-4 (the two 0.0 slots, no score columns), `Some` for 5/6
+    /// (the row WIDTH grows by the class count). The in-band target is decoded
+    /// here, once ([`LidResult::from_encoded`]).
+    fn lid_result(&self, chan: usize) -> Option<LidResult> {
         match self {
-            Processor::Lid(s) => Some(LidRowData {
-                cumulative_error: s.lid_cumulative_error()[chan],
-                is_correct: s.is_lid_correct()[chan] as f64,
-                classification_errors: s.lid_classification_errors()[chan].clone(),
-                nb_of_classif: s.lid_nb_of_classif()[chan],
-            }),
-            Processor::TwinLid(s) => Some(LidRowData {
-                cumulative_error: s.lid_cumulative_error()[chan],
-                is_correct: s.is_lid_correct()[chan] as f64,
-                classification_errors: s.lid_classification_errors()[chan].clone(),
-                nb_of_classif: s.lid_nb_of_classif()[chan],
-            }),
-            // Fast Mode-7 LID writes the same LID members (langID-derived); the confusion
+            Processor::Lid(s) => Some(LidResult::from_encoded(
+                s.lid_cumulative_error()[chan],
+                s.lid_nb_of_classif()[chan],
+                s.is_lid_correct()[chan] == 100,
+                &s.lid_classification_errors()[chan],
+            )),
+            Processor::TwinLid(s) => Some(LidResult::from_encoded(
+                s.lid_cumulative_error()[chan],
+                s.lid_nb_of_classif()[chan],
+                s.is_lid_correct()[chan] == 100,
+                &s.lid_classification_errors()[chan],
+            )),
+            // Fast Mode-7 LID writes the same LID members (langID-derived); the score
             // columns flow exactly as the exact Twin's. `lid_cumulative_error`/
             // `lid_nb_of_classif` are 0 (forward-only), a documented divergence.
-            Processor::FastTwinLid(s) => Some(LidRowData {
-                cumulative_error: s.lid_cumulative_error()[chan],
-                is_correct: s.is_lid_correct()[chan] as f64,
-                classification_errors: s.lid_classification_errors()[chan].clone(),
-                nb_of_classif: s.lid_nb_of_classif()[chan],
-            }),
+            Processor::FastTwinLid(s) => Some(LidResult::from_encoded(
+                s.lid_cumulative_error()[chan],
+                s.lid_nb_of_classif()[chan],
+                s.is_lid_correct()[chan] == 100,
+                &s.lid_classification_errors()[chan],
+            )),
             _ => None,
         }
     }
@@ -1093,8 +1081,8 @@ impl BagOfProcessors {
         &mut self,
         item: &CorpusItem,
         mode: Mode,
-    ) -> Result<BTreeMap<usize, BTreeMap<usize, Vec<f64>>>> {
-        let mut results: BTreeMap<usize, BTreeMap<usize, Vec<f64>>> = BTreeMap::new();
+    ) -> Result<BTreeMap<usize, BTreeMap<usize, ChannelResult>>> {
+        let mut results: BTreeMap<usize, BTreeMap<usize, ChannelResult>> = BTreeMap::new();
 
         // legacy: :254 AudioStruct audio(_OffsetBegin, _DurationMax, _FileType, corpusItem);
         // Phase 8 S1.1: `self.fixed_gain` threads `Audio_fixed_gain` here -- the ONE
@@ -1254,34 +1242,29 @@ impl BagOfProcessors {
             let cumulative_error = self.processors[ii].cumulative_error();
             let nb_of_classif = self.processors[ii].nb_of_classif();
 
-            let mut chan_map: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+            let mut chan_map: BTreeMap<usize, ChannelResult> = BTreeMap::new();
             for chan in 0..channel_count {
                 let refc = reference.as_ref().map(|r| &r[chan]);
                 let report = compute_errors(&mut seg_per_chan[chan], refc, nb_words);
                 let speech_duration = speech_duration_of(&seg_per_chan[chan]);
-                // legacy: :338/:380 `!seg._IsLIDCorrect.empty()` -- LID slots live for
+                // legacy: :338/:380 `!seg._IsLIDCorrect.empty()` -- LID block live for
                 // algo 5/6 (the row WIDTH grows by the class count), else two 0.0s.
-                let lid = self.processors[ii].lid_row_data(chan);
+                let lid = self.processors[ii].lid_result(chan);
 
-                let row = if scored {
-                    assemble_scored_row(
+                let result = if scored {
+                    ChannelResult::scored(
                         &report,
                         time_per_hour,
                         cumulative_error[chan],
                         audio_duration,
                         speech_duration,
                         nb_of_classif[chan],
-                        lid.as_ref(),
+                        lid,
                     )
                 } else {
-                    assemble_unscored_row(
-                        time_per_hour,
-                        audio_duration,
-                        speech_duration,
-                        lid.as_ref(),
-                    )
+                    ChannelResult::unscored(time_per_hour, audio_duration, speech_duration, lid)
                 };
-                chan_map.insert(chan, row);
+                chan_map.insert(chan, result);
             }
             results.insert(ii, chan_map);
 
@@ -1419,111 +1402,6 @@ fn strip_last_4(s: &str) -> String {
     }
 }
 
-/// The scored result row (`:313-350`): errors + timing + cost + duration +
-/// speech walk + WER (cols 7-13) + the LID block + lid_nb_of_classif +
-/// nb_of_classif. WIDTH: 18 columns for algo 0-4 (`lid == None`: the two 0.0
-/// LID slots, `:344-347`); `18 + classNb` for algo 5/6 (`lid == Some`:
-/// `[14]=_LIDCumulativeError`, `[15]=_IsLIDCorrect`, then one confusion column
-/// per class from `_LIDClassificationErrors`, `:338-343`). The final two
-/// columns are ALWAYS `[len-2]=_LIDNbOfClassif`, `[len-1]=_NbOfClassif`
-/// (`:348-349`, pushed OUTSIDE the LID gate).
-fn assemble_scored_row(
-    report: &ScoreReport,
-    time_per_hour: f64,
-    cumulative_error: f64,
-    audio_duration: f64,
-    speech_duration: f64,
-    nb_of_classif: i64,
-    lid: Option<&LidRowData>,
-) -> Vec<f64> {
-    let speech = report.per_class[SegClass::Speech as usize];
-    let mut global_error_rate = 0.0;
-    // legacy: :317-319 j from OTHER up to (exclusive) EXCLUDED.
-    for j in (SegClass::Other as usize)..(SegClass::Excluded as usize) {
-        global_error_rate += report.per_class[j].error_rate;
-    }
-    // No WER Pass 1 (STM/no reference) -> the legacy WordErrorRate CONSTRUCTOR
-    // default (`_NbWords = -1`, rest 0), NOT `WerStats::default()` (nb_words 0).
-    // The nb_words result column is -1 in that case (Phase 4a tier-1 golden).
-    let wer = report.wer.unwrap_or(WerStats::legacy_default());
-
-    let mut row = vec![
-        100.0 * speech.pfa,        // 0
-        100.0 * speech.pmiss,      // 1
-        100.0 * global_error_rate, // 2
-        time_per_hour,             // 3
-        cumulative_error,          // 4
-        audio_duration,            // 5
-        speech_duration,           // 6
-        wer.nb_words as f64,       // 7
-        wer.corrects as f64,       // 8
-        wer.subs as f64,           // 9
-        wer.ins as f64,            // 10
-        wer.dels as f64,           // 11
-        wer.coverage_penalty,      // 12
-        wer.delay_penalty,         // 13
-    ];
-    push_lid_block(&mut row, lid);
-    // legacy: :348-349 -- the two counters, outside the LID gate.
-    row.push(lid.map_or(0.0, |l| l.nb_of_classif as f64)); // len-2 _LIDNbOfClassif
-    row.push(nb_of_classif as f64); // len-1 _NbOfClassif
-    row
-}
-
-/// The unscored result row (`:358-392`): zeros for the error cols and the two
-/// counters, timing/duration/speech walk still real. The WER columns (7-13) push
-/// `seg._WordErrorRate[chan]` UNCHANGED (Pass 1 never ran), which is the legacy
-/// WordErrorRate constructor default: `_NbWords = -1`, everything else 0. So col 7
-/// (nb_words) is -1, NOT 0 (Phase 4a tier-1 golden). The LID block (`:380-389`)
-/// is IDENTICAL to the scored branch's (the members are real either way -- the
-/// `:383` `.size()` vs `:341` `.cols()` difference is vacuous for a row vector),
-/// but the two trailing counters are hard 0s (`:390-391`).
-fn assemble_unscored_row(
-    time_per_hour: f64,
-    audio_duration: f64,
-    speech_duration: f64,
-    lid: Option<&LidRowData>,
-) -> Vec<f64> {
-    let wer = WerStats::legacy_default();
-    let mut row = vec![
-        0.0,                  // 0
-        0.0,                  // 1
-        0.0,                  // 2
-        time_per_hour,        // 3
-        0.0,                  // 4
-        audio_duration,       // 5
-        speech_duration,      // 6
-        wer.nb_words as f64,  // 7 nb_words (legacy default -1)
-        wer.corrects as f64,  // 8 corrects
-        wer.subs as f64,      // 9 subs
-        wer.ins as f64,       // 10 ins
-        wer.dels as f64,      // 11 dels
-        wer.coverage_penalty, // 12 coverage
-        wer.delay_penalty,    // 13 delay
-    ];
-    push_lid_block(&mut row, lid);
-    row.push(0.0); // len-2 (:390 -- hard 0, unlike the scored branch)
-    row.push(0.0); // len-1 (:391)
-    row
-}
-
-/// The `:338-347` LID block shared by both branches: `Some` pushes
-/// `[_LIDCumulativeError, _IsLIDCorrect, confusion col per class]`; `None`
-/// pushes the two 0.0 slots (no confusion columns -- the width difference).
-fn push_lid_block(row: &mut Vec<f64>, lid: Option<&LidRowData>) {
-    match lid {
-        Some(l) => {
-            row.push(l.cumulative_error); // 14
-            row.push(l.is_correct); // 15
-            row.extend_from_slice(&l.classification_errors); // 16..16+classNb
-        }
-        None => {
-            row.push(0.0); // 14
-            row.push(0.0); // 15
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1651,48 +1529,6 @@ mod tests {
         let after = bag.get_weights(1);
         assert_eq!(after[0][0].to_bits(), new_w[0][0].to_bits());
         assert_eq!(after[1][0].to_bits(), new_w[1][0].to_bits());
-    }
-
-    /// The scored/unscored row WIDTH contract (`:338-349`/`:380-391`): algo 0-4
-    /// rows are 18 cols (two 0.0 LID slots); algo 5/6 rows grow to
-    /// `18 + classNb` (confusion columns inserted after col 15), with
-    /// `[len-2]=_LIDNbOfClassif`, `[len-1]=_NbOfClassif` in BOTH widths.
-    #[test]
-    fn lid_row_width_and_slots() {
-        let report = ScoreReport {
-            per_class: [Default::default(); 23],
-            label_counts: [0.0; 23],
-            wer: None,
-        };
-        let lid = LidRowData {
-            cumulative_error: 7.5,
-            is_correct: 100.0,
-            classification_errors: vec![210.0, 30.0, 60.0], // classNb = 3
-            nb_of_classif: 42,
-        };
-
-        let plain = assemble_scored_row(&report, 1.0, 2.0, 3.0, 4.0, 9, None);
-        assert_eq!(plain.len(), 18);
-        assert_eq!(plain[14], 0.0);
-        assert_eq!(plain[15], 0.0);
-        assert_eq!(plain[16], 0.0); // len-2 lid_nb_of_classif
-        assert_eq!(plain[17], 9.0); // len-1 nb_of_classif
-
-        let wide = assemble_scored_row(&report, 1.0, 2.0, 3.0, 4.0, 9, Some(&lid));
-        assert_eq!(wide.len(), 21, "18 + classNb(3)");
-        assert_eq!(wide[14], 7.5);
-        assert_eq!(wide[15], 100.0);
-        assert_eq!(&wide[16..19], &[210.0, 30.0, 60.0]);
-        assert_eq!(wide[19], 42.0); // len-2
-        assert_eq!(wide[20], 9.0); // len-1
-
-        // Unscored branch: same LID block, hard-0 trailing counters (:390-391).
-        let unscored = assemble_unscored_row(1.0, 3.0, 4.0, Some(&lid));
-        assert_eq!(unscored.len(), 21);
-        assert_eq!(unscored[14], 7.5);
-        assert_eq!(&unscored[16..19], &[210.0, 30.0, 60.0]);
-        assert_eq!(unscored[19], 0.0);
-        assert_eq!(unscored[20], 0.0);
     }
 
     #[test]

@@ -36,6 +36,7 @@ use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
 use crate::engine::bag_of_processors::{BagOfProcessors, Processor, get_i32_default};
+use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
 use crate::io::matfile::MatWriter;
@@ -70,7 +71,7 @@ pub struct CorpusProcessor {
     processors: BagOfProcessors,
     mode: Mode,
     output_file_name: String,
-    results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>>,
+    results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
     res_per_conf: Vec<Array2<f64>>,
     results_e: Array2<f64>,
     cost_mem: Array2<f64>,
@@ -375,10 +376,10 @@ impl CorpusProcessor {
         let nb_of_conf = self.processors.nb_of_conf();
 
         type LaneEntry = (
-            usize,                                      // file index j
-            BTreeMap<usize, BTreeMap<usize, Vec<f64>>>, // results_j (conf -> chan -> row)
-            BTreeMap<usize, Vec<Array2<f64>>>,          // derivs_j (all confs)
-            BTreeMap<usize, Vec<InputStatistics>>,      // stats_j (all confs)
+            usize,                                           // file index j
+            BTreeMap<usize, BTreeMap<usize, ChannelResult>>, // results_j (conf -> chan -> result)
+            BTreeMap<usize, Vec<Array2<f64>>>,               // derivs_j (all confs)
+            BTreeMap<usize, Vec<InputStatistics>>,           // stats_j (all confs)
         );
         type LaneOut = Result<Vec<LaneEntry>>;
 
@@ -598,7 +599,7 @@ impl CorpusProcessor {
 
     /// Pure core of [`Self::transform_results`], parameterized for the unit test.
     fn transform_results_impl(
-        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>>,
+        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
     ) -> (Array2<f64>, Vec<Array2<f64>>) {
@@ -632,7 +633,7 @@ impl CorpusProcessor {
                 res_width = mmap
                     .get(&0)
                     .and_then(|chan_map| chan_map.get(&0))
-                    .map(|v| v.len())
+                    .map(|r| r.to_row().len())
                     .unwrap_or(0);
                 results_e = Array2::zeros((nb_elements, 3 + res_width));
                 res_per_conf = (0..nb_of_conf)
@@ -643,8 +644,10 @@ impl CorpusProcessor {
             // legacy: :365-382 per conf (ascending) then per chan (ascending).
             for (conf_idx, chan_map) in mmap {
                 let config_nb = conf_idx + 1;
-                for (chan_idx, res) in chan_map {
+                for (chan_idx, result) in chan_map {
                     let chan_nb = chan_idx + 1;
+                    // The ONE place the result row is written (`ChannelResult::to_row`).
+                    let res = result.to_row();
                     // legacy: :375-377 line = [file+1, conf+1, chan+1, res...].
                     results_e[[counter, 0]] = (file_idx + 1) as f64;
                     results_e[[counter, 1]] = config_nb as f64;
@@ -842,10 +845,11 @@ impl CorpusProcessor {
 
     /// The cost accumulation over `self.results` for the gradCheck central
     /// difference (`:271-292`), switching on config-0's algo AND (for algo 6)
-    /// the network index `ii`: algo 3/4 -> `cost += row[4]`, `counter +=
-    /// row[len-1]` (`:275-277`); algo 5 -> `row[14]`/`row[len-2]` (`:278-280`);
-    /// algo 6 net `ii == 0` -> the SAD columns `row[4]`/`row[len-1]`, net
-    /// `ii == 1` -> the LID columns `row[14]`/`row[len-2]` (`:281-288`).
+    /// the network index `ii`: algo 3/4 -> the SAD pair `seg_cost`/`seg_count`
+    /// (`:275-277`); algo 5 -> the LID pair `lid.cost`/`lid.count` (`:278-280`);
+    /// algo 6 net `ii == 0` -> the SAD pair, net `ii == 1` -> the LID pair
+    /// (`:281-288`). Which pair a net owns is still decided by the algo
+    /// integer here; moving it onto the driver is issue #25's.
     ///
     /// The legacy `counter` is a `long` accumulating doubles (per-element
     /// truncation); every accumulated value is an exact integer count stored in
@@ -857,23 +861,25 @@ impl CorpusProcessor {
             let Some(conf0) = self.results.get(&jj).and_then(|f| f.get(&0)) else {
                 continue;
             };
-            for row in conf0.values() {
+            for r in conf0.values() {
+                let lid_cost = r.lid.as_ref().map_or(0.0, |l| l.cost);
+                let lid_count = r.lid.as_ref().map_or(0.0, |l| l.count as f64);
                 match algo0 {
                     3 | 4 => {
-                        cost += row[4];
-                        counter += row[row.len() - 1];
+                        cost += r.seg_cost;
+                        counter += r.seg_count as f64;
                     }
                     5 => {
-                        cost += row[14];
-                        counter += row[row.len() - 2];
+                        cost += lid_cost;
+                        counter += lid_count;
                     }
                     6 => {
                         if ii == 0 {
-                            cost += row[4];
-                            counter += row[row.len() - 1];
+                            cost += r.seg_cost;
+                            counter += r.seg_count as f64;
                         } else {
-                            cost += row[14];
-                            counter += row[row.len() - 2];
+                            cost += lid_cost;
+                            counter += lid_count;
                         }
                     }
                     _ => {
@@ -975,7 +981,7 @@ impl CorpusProcessor {
     /// Pure `transformResults` core (test hook for `transform_results_ordering`).
     #[doc(hidden)]
     pub fn transform_results_for_test(
-        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>>,
+        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
     ) -> (Array2<f64>, Vec<Array2<f64>>) {
@@ -1105,7 +1111,7 @@ impl CorpusProcessor {
     ) -> Result<Array2<f64>> {
         let corpus = Corpus::from_config(&configs[0])?;
         let mut bag = BagOfProcessors::from_configs(&mut configs, mode)?;
-        let mut results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>> =
+        let mut results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>> =
             BTreeMap::new();
         for j in 0..corpus.nb_of_files() {
             let item = corpus.item(j);

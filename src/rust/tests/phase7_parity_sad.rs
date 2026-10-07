@@ -219,7 +219,7 @@ fn scored_rows(inference: Option<&str>, dump: &Path, stm: &Path) -> BTreeMap<usi
         weight: 1.0,
     };
     let results = bag.segmentation_function(&item, image_mode()).unwrap();
-    results[&0].clone()
+    results[&0].iter().map(|(c, r)| (*c, r.to_row())).collect()
 }
 
 #[test]
