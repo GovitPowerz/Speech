@@ -88,6 +88,10 @@ One of N static parallel folds (file `j` goes to lane `j mod N`). N=1 is the det
 **Fold**:
 The ascending-file-index reduction of per-file results and gradients at the end of an epoch.
 
+**Fold run**:
+One engine construction over a listing and the single fold it runs at the given weights, either forward-only or a gradient fold (backprop on). The orchestrator's unit of engine work; never an engine-internal epoch loop.
+_Avoid_: evaluation, pass, scoring run
+
 **Weight pack**:
 The flat f64 vector of a net's weights in the legacy order (forward, backward, output MLP, normalize tail), post-adim. A `.bin` is its file form.
 _Avoid_: checkpoint (a checkpoint is a directory of packs plus a history)
