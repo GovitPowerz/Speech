@@ -18,6 +18,7 @@ use ndarray::Array2;
 
 use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::BagOfProcessors;
+use speech::engine::channel_result::ChannelResult;
 use speech::features::stats::InputStatistics;
 
 fn ref_dir() -> PathBuf {
@@ -100,13 +101,14 @@ fn empty_stats(nb_of_conf: usize) -> BTreeMap<usize, Vec<InputStatistics>> {
     (0..nb_of_conf).map(|ii| (ii, Vec::new())).collect()
 }
 
-/// Hand-computed sums/means on a crafted 4x18 matrix, algo-1 bag (aggregation
-/// isolated from save/update, which are no-ops for algo 1/2).
+/// Hand-computed sums/means on four crafted 18-wide rows, algo-1 bag
+/// (aggregation isolated from save/update, which are no-ops for algo 1/2).
 ///
 /// Columns used by `save_and_update` (`:409-471`): 2 (badClassif), 4 (cost
 /// numerator), 5/6 (signal/speech duration, display-only here), 7-13 (WER),
-/// 14 (costLID numerator), 15 (badLIDClassif), 16 (costLID denominator, col
-/// `cols-2`), 17 (cost denominator, col `cols-1`).
+/// 14 (costLID numerator), 15 (badLIDClassif; the drivers only ever write 100
+/// or 0, and `ChannelResult::from_row` reads it as the flag it is), 16 (costLID
+/// denominator, col `cols-2`), 17 (cost denominator, col `cols-1`).
 #[test]
 fn aggregation_bit_exact() {
     let mut bag = algo1_bag();
@@ -115,14 +117,14 @@ fn aggregation_bit_exact() {
     // chosen non-zero so both guarded divisions fire.
     #[rustfmt::skip]
     let rows: [[f64; 18]; 4] = [
-        [1.0, 2.0, 3.0,  4.0,  10.0, 100.0, 50.0,  2.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0,  6.0, 20.0, 3.0,  5.0],
-        [2.0, 3.0, 4.0,  5.0,  20.0, 100.0, 50.0,  2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0,  9.0, 25.0, 4.0,  5.0],
-        [0.0, 0.0, 5.0,  6.0,  30.0, 100.0, 50.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0, 30.0, 5.0,  5.0],
-        [4.0, 1.0, 8.0,  7.0,  40.0, 100.0, 50.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 15.0, 45.0, 8.0,  5.0],
+        [1.0, 2.0, 3.0,  4.0,  10.0, 100.0, 50.0,  2.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0,  6.0, 100.0, 3.0,  5.0],
+        [2.0, 3.0, 4.0,  5.0,  20.0, 100.0, 50.0,  2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0,  9.0,   0.0, 4.0,  5.0],
+        [0.0, 0.0, 5.0,  6.0,  30.0, 100.0, 50.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0, 100.0, 5.0,  5.0],
+        [4.0, 1.0, 8.0,  7.0,  40.0, 100.0, 50.0,  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 15.0,   0.0, 8.0,  5.0],
     ];
-    let m = Array2::from_shape_fn((4, 18), |(r, c)| rows[r][c]);
+    let m: Vec<ChannelResult> = rows.iter().map(|r| ChannelResult::from_row(r)).collect();
 
-    // sums: col2 = 20, col4 = 100, col15 = 120 -> mean 30, col16 = 20, col17 = 20.
+    // sums: col2 = 20, col4 = 100, col15 = 200 -> mean 50, col16 = 20, col17 = 20.
     // col7 (nbOfWords) = 4 -> WER normalization fires.
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
     let derivs = empty_derivs(1);
@@ -151,8 +153,8 @@ fn aggregation_bit_exact() {
     assert_eq!(bad_classif[0], 5.0);
     // costLID = sums(14)/sums(16) = (6+9+12+15)/20 = 42/20 = 2.1
     assert_eq!(cost_lid[0], 2.1);
-    // badLIDClassif = 100 - means(15) = 100 - 30 = 70
-    assert_eq!(bad_classif_lid[0], 70.0);
+    // badLIDClassif = 100 - means(15) = 100 - 50 = 50
+    assert_eq!(bad_classif_lid[0], 50.0);
 }
 
 /// Counter-0 guard: when the cost denominator column sums to 0, `cost` stays the
@@ -166,7 +168,7 @@ fn aggregation_counter_zero_guard_skips_division() {
         [0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0],
         [0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0],
     ];
-    let m = Array2::from_shape_fn((2, 18), |(r, c)| rows[r][c]);
+    let m: Vec<ChannelResult> = rows.iter().map(|r| ChannelResult::from_row(r)).collect();
 
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
     let derivs = empty_derivs(1);
@@ -224,7 +226,7 @@ fn best_cost_gate_fires_and_skips() {
     // Col 4 (cost numerator) = 5.0, col 17 (denom) = 1.0 -> cost = 5.0.
     #[rustfmt::skip]
     let row_a: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
-    let m_a = Array2::from_shape_fn((1, 18), |(_, c)| row_a[c]);
+    let m_a = vec![ChannelResult::from_row(&row_a)];
 
     let mut cost_mem = [0.0; 1];
     let mut bad_classif = [0.0; 1];
@@ -265,7 +267,7 @@ fn best_cost_gate_fires_and_skips() {
     // Cost 7.0 - worse than the 5.0 best - must NOT save.
     #[rustfmt::skip]
     let row_b: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
-    let m_b = Array2::from_shape_fn((1, 18), |(_, c)| row_b[c]);
+    let m_b = vec![ChannelResult::from_row(&row_b)];
 
     bag.save_and_update(
         out_b,
@@ -324,11 +326,11 @@ fn cost_mem_rows_written() {
         BTreeMap::from([(0, Vec::new()), (1, stats1)]);
 
     #[rustfmt::skip]
-    let row0: [f64; 18] = [0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 1.0];
+    let row0: [f64; 18] = [0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 1.0];
     #[rustfmt::skip]
-    let row1: [f64; 18] = [0.0, 0.0, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 20.0, 3.0, 1.0];
-    let m0 = Array2::from_shape_fn((1, 18), |(_, c)| row0[c]);
-    let m1 = Array2::from_shape_fn((1, 18), |(_, c)| row1[c]);
+    let row1: [f64; 18] = [0.0, 0.0, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 0.0, 3.0, 1.0];
+    let m0 = vec![ChannelResult::from_row(&row0)];
+    let m1 = vec![ChannelResult::from_row(&row1)];
 
     let _lock = CWD_LOCK.lock().unwrap();
     let _cwd = CwdGuard::enter(tmp.path());
@@ -353,18 +355,18 @@ fn cost_mem_rows_written() {
 
     // Row0: cost = sums(4)/sums(17) = 2/1 = 2.0; badClassif = means(2) = 1.0;
     // costLID: sums(16) == 0 -> NOT divided, stays sums(14) = 0.0;
-    // badLIDClassif = 100 - means(15) = 100 - 10 = 90.0.
+    // badLIDClassif = 100 - means(15) = 100 - 100 = 0.0.
     assert_eq!(cost_mem[0], 2.0);
     assert_eq!(bad_classif[0], 1.0);
     assert_eq!(cost_lid[0], 0.0);
-    assert_eq!(bad_classif_lid[0], 90.0);
+    assert_eq!(bad_classif_lid[0], 0.0);
 
     // Row1: cost = 4/1 = 4.0; badClassif = 3.0; costLID = 6/3 = 2.0;
-    // badLIDClassif = 100 - 20 = 80.0.
+    // badLIDClassif = 100 - 0 = 100.0.
     assert_eq!(cost_mem[1], 4.0);
     assert_eq!(bad_classif[1], 3.0);
     assert_eq!(cost_lid[1], 2.0);
-    assert_eq!(bad_classif_lid[1], 80.0);
+    assert_eq!(bad_classif_lid[1], 100.0);
 }
 
 /// `costLID = -1.0` when `totalSpeechDuration < 1e-3` (`:465`), applied AFTER
@@ -392,7 +394,7 @@ fn update_called_with_neg_costlid() {
     // pre-gate (isolating the gate, not a division-by-zero coincidence).
     #[rustfmt::skip]
     let row: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0, 0.0, 3.0, 1.0];
-    let m = Array2::from_shape_fn((1, 18), |(_, c)| row[c]);
+    let m = vec![ChannelResult::from_row(&row)];
 
     let _lock = CWD_LOCK.lock().unwrap();
     let _cwd = CwdGuard::enter(tmp.path());

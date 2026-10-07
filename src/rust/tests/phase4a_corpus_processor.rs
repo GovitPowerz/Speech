@@ -228,12 +228,11 @@ fn transform_results_ordering() {
         &[3.0, 1.0, 1.0, 33.0, 44.0]
     );
 
-    // Per-conf matrix (conf 0): the raw result rows, ascending file order, truncated
-    // to the counter (2 rows, 18 cols).
+    // Per-conf list (conf 0): the channel results, ascending file order.
     assert_eq!(res_per_conf.len(), 1);
-    assert_eq!(res_per_conf[0].dim(), (2, 18));
-    assert_eq!(&res_per_conf[0].row(0).to_vec()[..2], &[11.0, 22.0]);
-    assert_eq!(&res_per_conf[0].row(1).to_vec()[..2], &[33.0, 44.0]);
+    assert_eq!(res_per_conf[0].len(), 2);
+    assert_eq!(&res_per_conf[0][0].to_row()[..2], &[11.0, 22.0]);
+    assert_eq!(&res_per_conf[0][1].to_row()[..2], &[33.0, 44.0]);
 }
 
 // === lanes_n1_equals_sequential ==============================================

@@ -867,12 +867,8 @@ impl BagOfProcessors {
     /// is never executed); its `return error/classNb` (`Helpers.hpp:438`) is
     /// what `:597`'s `return error;` hands back unchanged (the commented-out
     /// `return error/classNb;` at `:596` would have double-divided).
-    fn print_confusion_matrix(
-        &self,
-        results_mat: &Array2<f64>,
-        _config_nb: usize,
-    ) -> (f64, Array2<f64>) {
-        let (matrix, error) = confusion::confusion_from_results(results_mat);
+    fn print_confusion_matrix(&self, rows: &[LidResult], _config_nb: usize) -> (f64, Array2<f64>) {
+        let (matrix, error) = confusion::confusion_from_results(rows);
         (error, matrix)
     }
 
@@ -894,7 +890,7 @@ impl BagOfProcessors {
     }
 
     /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
-    /// column-sum/mean aggregation over the file x channel result rows, cost/
+    /// column-sum/mean aggregation over the file x channel channel results, cost/
     /// badClassif/costLID/badLIDClassif derivation, WER percent scaling, the
     /// `costMem`/`badClassifMem`/`costLIDMem`/`badClassifLIDMem` row writes, the
     /// `bestNNWeight_<pos+1>_<filename>` save, and the `costLID = -1.0` gate
@@ -902,8 +898,10 @@ impl BagOfProcessors {
     /// is load-bearing (the save criterion sees the real costLID; the update
     /// criterion sees the gated one).
     ///
-    /// Column sums/means use explicit ascending row loops (the repo's
-    /// ascending-loop product contract), NOT `ndarray::sum_axis`/`mean_axis`.
+    /// The legacy summed the result-row COLUMNS (`:411-412`); here each field is
+    /// summed by its own explicit ascending-row loop (the repo's ascending-loop
+    /// product contract, NOT `ndarray::sum_axis`/`mean_axis`), which is the same
+    /// per-column addition sequence and therefore bit-identical.
     ///
     /// `totalSignalDuration`/`totalSpeechDuration` (`:445-446`) are computed
     /// (needed for the `:465` gate) but the h/min/s display prints (`:447-456`)
@@ -922,7 +920,7 @@ impl BagOfProcessors {
     pub fn save_and_update(
         &mut self,
         filename: &str,
-        results_per_conf: &[Array2<f64>],
+        results_per_conf: &[Vec<ChannelResult>],
         best_cost: &mut BTreeMap<usize, f64>,
         derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
         stats: &BTreeMap<usize, Vec<InputStatistics>>,
@@ -935,44 +933,68 @@ impl BagOfProcessors {
         self.last_confusion.clear();
 
         for ii in 0..self.nb_of_conf {
-            let m = &results_per_conf[ii];
-            let (rows, cols) = m.dim();
+            let rows = &results_per_conf[ii];
+            let n = rows.len() as f64;
 
-            // legacy: :411-412 colwise sum/mean, ascending row loop (product contract).
-            let mut sums = vec![0.0_f64; cols];
-            for r in 0..rows {
-                for c in 0..cols {
-                    sums[c] += m[[r, c]];
-                }
-            }
-            let mut means = vec![0.0_f64; cols];
-            for c in 0..cols {
-                means[c] = sums[c] / rows as f64;
+            // legacy: :411-412 colwise sum/mean, one ascending row loop per field
+            // (product contract). A missing LID block sums as the wire's 0.0 slots.
+            let mut sum_error_rate = 0.0_f64;
+            let mut sum_seg_cost = 0.0_f64;
+            let mut sum_seg_count = 0.0_f64;
+            let mut sum_speech_duration = 0.0_f64;
+            let mut sum_lid_cost = 0.0_f64;
+            let mut sum_lid_correct = 0.0_f64;
+            let mut sum_lid_count = 0.0_f64;
+            let mut sum_nb_words = 0.0_f64;
+            let mut sum_corrects = 0.0_f64;
+            let mut sum_subs = 0.0_f64;
+            let mut sum_ins = 0.0_f64;
+            let mut sum_dels = 0.0_f64;
+            let mut sum_coverage_penalty = 0.0_f64;
+            let mut sum_delay_penalty = 0.0_f64;
+            for r in rows {
+                sum_error_rate += r.error_rate;
+                sum_seg_cost += r.seg_cost;
+                sum_seg_count += r.seg_count as f64;
+                sum_speech_duration += r.speech_duration;
+                sum_lid_cost += r.lid.as_ref().map_or(0.0, |l| l.cost);
+                sum_lid_correct += r
+                    .lid
+                    .as_ref()
+                    .map_or(0.0, |l| if l.correct { 100.0 } else { 0.0 });
+                sum_lid_count += r.lid.as_ref().map_or(0.0, |l| l.count as f64);
+                sum_nb_words += r.wer.nb_words as f64;
+                sum_corrects += r.wer.corrects as f64;
+                sum_subs += r.wer.subs as f64;
+                sum_ins += r.wer.ins as f64;
+                sum_dels += r.wer.dels as f64;
+                sum_coverage_penalty += r.wer.coverage_penalty;
+                sum_delay_penalty += r.wer.delay_penalty;
             }
 
             // legacy: :413-414 cost = sums(4), guarded /= sums(last).
-            let mut cost = sums[4];
-            if sums[cols - 1] > 0.0 {
-                cost /= sums[cols - 1];
+            let mut cost = sum_seg_cost;
+            if sum_seg_count > 0.0 {
+                cost /= sum_seg_count;
             }
             // legacy: :415 badClassif = means(2).
-            let bad_classif = means[2];
+            let bad_classif = sum_error_rate / n;
             // legacy: :416-417 costLID = sums(14), guarded /= sums(cols-2).
-            let mut cost_lid = sums[14];
-            if sums[cols - 2] > 0.0 {
-                cost_lid /= sums[cols - 2];
+            let mut cost_lid = sum_lid_cost;
+            if sum_lid_count > 0.0 {
+                cost_lid /= sum_lid_count;
             }
             // legacy: :418 badLIDClassif = 100-means(15).
-            let bad_lid_classif = 100.0 - means[15];
+            let bad_lid_classif = 100.0 - sum_lid_correct / n;
 
             // legacy: :419-433 WER percent scaling, guarded by nbOfWords > 0.
-            let nb_of_words = sums[7];
-            let mut wer_correct = 100.0 * sums[8];
-            let mut wer_subs = 100.0 * sums[9];
-            let mut wer_ins = 100.0 * sums[10];
-            let mut wer_dels = 100.0 * sums[11];
-            let mut wer_coverage_penalty = 100.0 * sums[12];
-            let mut wer_delay_penalty = 100.0 * sums[13];
+            let nb_of_words = sum_nb_words;
+            let mut wer_correct = 100.0 * sum_corrects;
+            let mut wer_subs = 100.0 * sum_subs;
+            let mut wer_ins = 100.0 * sum_ins;
+            let mut wer_dels = 100.0 * sum_dels;
+            let mut wer_coverage_penalty = 100.0 * sum_coverage_penalty;
+            let mut wer_delay_penalty = 100.0 * sum_delay_penalty;
             if nb_of_words > 0.0 {
                 wer_correct /= nb_of_words;
                 wer_subs /= nb_of_words;
@@ -984,29 +1006,24 @@ impl BagOfProcessors {
             let _wer = wer_subs + wer_ins + wer_dels;
             let _ = (wer_correct, wer_coverage_penalty, wer_delay_penalty);
 
-            // legacy: :435-441 confusion block, algo 5/6 only: slice the confusion
-            // columns `block(0, 16, rows, cols-2-16)` and feed PrintConfusionMatrix.
+            // legacy: :435-441 confusion block, algo 5/6 only -- in the port, "this
+            // config's results carry a LID block" (only the LID drivers fill one).
             // errorPercLID + the confusion string are DISPLAY-ONLY in the legacy
             // (`:443` cout / `:468` cout) -- nothing parity-relevant is stored (see
             // print_confusion_matrix's usage finding), so outside test-support the
             // pair is dropped after the call.
-            if self.algo_types[ii] == 5 || self.algo_types[ii] == 6 {
-                let conf_cols = cols - 2 - 16;
-                let mut block = Array2::<f64>::zeros((rows, conf_cols));
-                for r in 0..rows {
-                    for c in 0..conf_cols {
-                        block[[r, c]] = m[[r, 16 + c]];
-                    }
-                }
-                let confusion_pair = self.print_confusion_matrix(&block, ii + 1);
+            if rows.first().is_some_and(|r| r.lid.is_some()) {
+                let lid_rows: Vec<LidResult> = rows.iter().filter_map(|r| r.lid.clone()).collect();
+                let confusion_pair = self.print_confusion_matrix(&lid_rows, ii + 1);
                 #[cfg(feature = "test-support")]
                 self.last_confusion.push(confusion_pair);
                 #[cfg(not(feature = "test-support"))]
                 let _ = confusion_pair;
             }
 
-            // legacy: :445-446 total durations, needed for the :465 gate.
-            let total_speech_duration = means[6] * rows as f64;
+            // legacy: :445-446 total durations, needed for the :465 gate -- the
+            // legacy's `means(6) * rows` round trip, kept as written.
+            let total_speech_duration = sum_speech_duration / n * n;
 
             // legacy: :457-460 row writes.
             cost_mem_row[ii] = cost;

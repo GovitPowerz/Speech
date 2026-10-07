@@ -72,7 +72,7 @@ pub struct CorpusProcessor {
     mode: Mode,
     output_file_name: String,
     results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
-    res_per_conf: Vec<Array2<f64>>,
+    res_per_conf: Vec<Vec<ChannelResult>>,
     results_e: Array2<f64>,
     cost_mem: Array2<f64>,
     bad_classif_mem: Array2<f64>,
@@ -602,16 +602,14 @@ impl CorpusProcessor {
         results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
-    ) -> (Array2<f64>, Vec<Array2<f64>>) {
-        // legacy: :343-344 pre-sizes.
+    ) -> (Array2<f64>, Vec<Vec<ChannelResult>>) {
+        // legacy: :343-344 pre-sizes (ResultsE only; the per-conf lists grow).
         let nb_elements = 2 * nb_of_conf * nb_of_files;
-        let nb_elements_per_conf = 2 * nb_of_files;
 
         let mut counter = 0usize;
-        let mut counters = vec![0usize; nb_of_conf];
         let mut initialized = false;
         let mut results_e: Array2<f64> = Array2::zeros((0, 0));
-        let mut res_per_conf: Vec<Array2<f64>> = Vec::new();
+        let mut res_per_conf: Vec<Vec<ChannelResult>> = Vec::new();
         let mut res_width = 0usize;
 
         // legacy: :352 BOOST_FOREACH over _Results (BTreeMap == ascending file key).
@@ -636,9 +634,7 @@ impl CorpusProcessor {
                     .map(|r| r.to_row().len())
                     .unwrap_or(0);
                 results_e = Array2::zeros((nb_elements, 3 + res_width));
-                res_per_conf = (0..nb_of_conf)
-                    .map(|_| Array2::zeros((nb_elements_per_conf, res_width)))
-                    .collect();
+                res_per_conf = (0..nb_of_conf).map(|_| Vec::new()).collect();
                 initialized = true;
             }
             // legacy: :365-382 per conf (ascending) then per chan (ascending).
@@ -656,13 +652,9 @@ impl CorpusProcessor {
                         results_e[[counter, 3 + c]] = v;
                     }
                     counter += 1;
-                    // legacy: :379-380 _ResPerConf[conf].row(counters[conf]) = res.
-                    let cc = config_nb - 1;
-                    let row = counters[cc];
-                    for (c, &v) in res.iter().enumerate() {
-                        res_per_conf[cc][[row, c]] = v;
-                    }
-                    counters[cc] += 1;
+                    // legacy: :379-380 _ResPerConf[conf].row(counters[conf]) = res --
+                    // the typed value, same ascending (file, chan) order.
+                    res_per_conf[config_nb - 1].push(result.clone());
                 }
             }
         }
@@ -673,11 +665,8 @@ impl CorpusProcessor {
             return (Array2::zeros((0, 0)), Vec::new());
         }
         let truncated_e = truncate_rows(&results_e, counter);
-        let truncated_per_conf = (0..nb_of_conf)
-            .map(|ii| truncate_rows(&res_per_conf[ii], counters[ii]))
-            .collect();
         let _ = res_width;
-        (truncated_e, truncated_per_conf)
+        (truncated_e, res_per_conf)
     }
 
     /// Port of `CorpusProcessor::saveResults(epoch)` (`:391-404`): the 5 named
@@ -984,7 +973,7 @@ impl CorpusProcessor {
         results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
-    ) -> (Array2<f64>, Vec<Array2<f64>>) {
+    ) -> (Array2<f64>, Vec<Vec<ChannelResult>>) {
         Self::transform_results_impl(results, nb_of_conf, nb_of_files)
     }
 
