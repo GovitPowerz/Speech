@@ -22,12 +22,20 @@ nonzero gradients + weight movement + determinism for BOTH nets; the Twin's
 CONVERGENCE gate is deferred to Phase 6, see IMPROVEMENTS.md), and
 `test_early_stop_triggers` (the real-path plateau early-stop).
 
+The committed fixtures' listing rows are relative to the fixture directory, so every driver
+call here keeps the process cwd there: the fold run (issue #22) resolves the config's path
+keys against the workdir, and the engine resolves a listing ROW against the cwd, as the
+binary does.
+
 Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-pyo3 job.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -40,9 +48,7 @@ from speech.drivers.state import ModernTrainParams
 from speech.drivers.train import (
     _HYPERPARAM_PENALTY,
     _backprop_inner,
-    _chdir,
-    _eval_config_text,
-    _modern_config_text,
+    _eval_overlay,
     _ponderations,
     _tail_lengths,
     score_hyperparam_genome,
@@ -51,6 +57,7 @@ from speech.drivers.train import (
     train_modern,
 )
 from speech.engine import forward_backward
+from speech.fold_run import FoldRun
 from speech.genome import genome_length, weight_block_mask
 from speech.init_weights import init_weights
 from speech.optimizers import Smorms3
@@ -61,6 +68,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PHASE0 = REPO_ROOT / "tests" / "reference_data" / "phase0"
 PHASE4A = REPO_ROOT / "tests" / "reference_data" / "phase4a"
 PHASE4B = REPO_ROOT / "tests" / "reference_data" / "phase4b"
+
+
+@contextmanager
+def chdir(path: Path) -> Iterator[None]:
+    prev = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev)
 
 
 def _seed_twin_train(dst: Path) -> Path:
@@ -78,7 +95,8 @@ def _seed_twin_train(dst: Path) -> Path:
 def _run_once(tmp: Path, seed: int) -> dict[str, bytes]:
     config = _seed_twin_train(tmp)
     state = init_run(config, tmp / "run")
-    result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=4)
+    with chdir(tmp):
+        result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=4)
     ckpt = Path(result.checkpoint_dir)
     artifacts = {name: (ckpt / name).read_bytes() for name in ("gbest.bin", "cost_history.bin", "inner_cost_history.bin", "sad_weights.bin", "lid_weights.bin")}
     artifacts["_gbestval"] = np.float64(result.gbestval).tobytes()
@@ -93,7 +111,8 @@ def _run_once_batch(tmp: Path, seed: int) -> dict[str, bytes]:
     per-step engine rebuilds + the seeded `create_batches` shuffle (batch RNG = seed + 2)."""
     config = _seed_twin_train(tmp)
     state = init_run(config, tmp / "run")
-    result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=3, minibatch=1, nb_worst=0, nb_classes=1, multilingual=False)
+    with chdir(tmp):
+        result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=3, minibatch=1, nb_worst=0, nb_classes=1, multilingual=False)
     ckpt = Path(result.checkpoint_dir)
     artifacts = {name: (ckpt / name).read_bytes() for name in ("gbest.bin", "cost_history.bin", "inner_cost_history.bin", "sad_weights.bin", "lid_weights.bin")}
     artifacts["_gbestval"] = np.float64(result.gbestval).tobytes()
@@ -102,8 +121,8 @@ def _run_once_batch(tmp: Path, seed: int) -> dict[str, bytes]:
 
 @pytest.mark.slow
 def test_batch_mode_deterministic(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """The batch-mode analogue of the twin exit gate: mini-batching ON (per-inner-step
-    weighted-listing engine rebuilds via `forward_backward`'s live `listing_override`), run
+    """The batch-mode analogue of the twin exit gate: mini-batching ON (a fresh gradient
+    fold per inner step on the rotated weighted listing, `_BatchStep.next_fold`), run
     twice at the same fixed seed, must produce bit-identical checkpoints. Pins that the
     fresh-engine-per-step batch path + the seeded `create_batches`/`get_new_batch` rotation
     are deterministic end to end. Also asserts the run actually mini-batched (a batch listing
@@ -144,7 +163,8 @@ def _run_once_algo3(tmp: Path, seed: int) -> dict[str, bytes]:
     config = _seed_tier2_spectral(tmp)
     state = init_run(config, tmp / "run")
     assert state.algo == 3 and state.ps.lid is None, "the smoke must exercise the single-net path"
-    result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=2)
+    with chdir(tmp):
+        result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=2)
     ckpt = Path(result.checkpoint_dir)
     assert not (ckpt / "lid_weights.bin").exists(), "a single-net algo-3 run must NOT write a LID weight pack"
     artifacts = {name: (ckpt / name).read_bytes() for name in ("gbest.bin", "cost_history.bin", "inner_cost_history.bin", "sad_weights.bin")}
@@ -198,7 +218,7 @@ def test_genome_ponderation_moves_gradient(tmp_path_factory: pytest.TempPathFact
     """The genome->engine non-vacuity pin, F11-corrected (was `test_genome_ponderation_moves_cost`).
 
     The exit gate's determinism claim is only meaningful if the genome's decoded
-    `CostPonderation` fields (`train.py`'s `_eval_config_text` injection) actually move the
+    `CostPonderation` fields (`train.py`'s `_eval_overlay` injection) actually move the
     engine. F11 (phase 5) makes the single-eval `Epochs 0` (run_solo, forward-only scoring at
     the fixed base weights), which exposes the true role of the CostPonderation: it is a
     BACKWARD / cost-law WEIGHTING knob, NOT a forward-scoring knob. It does NOT move the
@@ -224,11 +244,9 @@ def test_genome_ponderation_moves_gradient(tmp_path_factory: pytest.TempPathFact
 
     def _lid_gradient(genome: np.ndarray) -> np.ndarray:
         ponds, _ = _ponderations(genome, None, state)
-        with _chdir(workdir):
-            (workdir / "_pond_eval.config").write_text(_eval_config_text(state.base_config, ponds, state.ps.algo))
-            eng = speech_rs.Engine(["_pond_eval.config"], "-m")
-            theta = [np.asarray(w, dtype=np.float64) for w in eng.weights(0)]
-            _f, grads = forward_backward(eng, theta, None)
+        with chdir(workdir):
+            fold = FoldRun(_eval_overlay(state.base_config, ponds, state.ps.algo), workdir, backprop=True)
+            _f, grads = forward_backward(fold, fold.weights())
         assert len(grads) == 2, "twin -> [sad, lid] gradients"
         return np.asarray(grads[1], dtype=np.float64)
 
@@ -276,8 +294,9 @@ def test_hyperparam_search_narrowed_distinct_configs_and_costs(tmp_path_factory:
         g[:_SAFE_FRONT_MATTER_DIMS] = np.random.default_rng(seed).uniform(0.0, state.ps.adim, size=_SAFE_FRONT_MATTER_DIMS)
         return g
 
-    cost_a, _out_a, text_a = score_hyperparam_genome(state, _front_matter_genome(1), mask, searchable, workdir)
-    cost_b, _out_b, text_b = score_hyperparam_genome(state, _front_matter_genome(2), mask, searchable, workdir)
+    with chdir(workdir):
+        cost_a, _out_a, text_a = score_hyperparam_genome(state, _front_matter_genome(1), mask, searchable, workdir)
+        cost_b, _out_b, text_b = score_hyperparam_genome(state, _front_matter_genome(2), mask, searchable, workdir)
 
     assert np.isfinite(cost_a) and np.isfinite(cost_b), f"costs must be finite: {cost_a}, {cost_b}"
     assert text_a != text_b, "distinct hyperparameter genomes must inject DISTINCT engine configs"
@@ -301,7 +320,8 @@ def test_hyperparam_search_runs_and_is_deterministic(tmp_path_factory: pytest.Te
         config = _seed_tier2_spectral(tmp)
         state = init_run(config, tmp / "run")
         _mask, searchable = weight_block_mask(state.ps)
-        result = train_hyperparam_search(state, seed=20260716, qpso_particles=2, qpso_epochs=2)
+        with chdir(tmp):
+            result = train_hyperparam_search(state, seed=20260716, qpso_particles=2, qpso_epochs=2)
         ckpt = Path(result.checkpoint_dir)
         arts = {name: (ckpt / name).read_bytes() for name in ("gbest.bin", "cost_history.bin")}
         arts["_best_config"] = (ckpt / "best_hyperparam.config").read_bytes()
@@ -414,23 +434,21 @@ def _sad_from_scratch(tmp: Path, seed: int) -> _SadRun:
     workdir = Path(state.config_path).parent
     init_pack = init_weights(nnet_spec(base, "BLSTM"), np.random.default_rng(seed), "xavier", True)
 
-    with _chdir(workdir):
-        (workdir / "_sad_train.config").write_text(_modern_config_text(base, 3, backprop=True, fileslisting="train_f1.csv"))
-        eng = speech_rs.Engine(["_sad_train.config"], "-m")
+    with chdir(workdir):
+        fold = FoldRun(base, workdir, backprop=True, listing="train_f1.csv")
 
         def f_df(theta: list[np.ndarray], _ec: int) -> tuple[float, list[np.ndarray], list[np.ndarray]]:
-            cost, grads = forward_backward(eng, theta, None)
+            cost, grads = forward_backward(fold, theta)
             return cost, grads, theta
 
         opt = Smorms3(f_df, [init_pack[0].copy()])
         trained = opt.optimize(_SAD_STEPS)  # _SAD_STEPS evals at theta_0..theta_{S-1}, final = theta_S
-        best_cost, _g = forward_backward(eng, [trained[0]], None)  # forward readout at theta_S (NOT a step)
+        best_cost, _g = forward_backward(fold, [trained[0]])  # forward readout at theta_S (NOT a step)
         trace = np.array([*opt.hist_f_flat, best_cost], dtype=np.float64)  # f@theta_0 .. f@theta_S
 
-        (workdir / "_sad_heldout.config").write_text(_modern_config_text(base, 3, backprop=True, fileslisting="heldout_f2.csv"))
-        heng = speech_rs.Engine(["_sad_heldout.config"], "-m")
-        ho_init, _ = forward_backward(heng, [init_pack[0]], None)
-        ho_best, _ = forward_backward(heng, [trained[0]], None)
+        heldout = FoldRun(base, workdir, backprop=True, listing="heldout_f2.csv")
+        ho_init, _ = forward_backward(heldout, [init_pack[0]])
+        ho_best, _ = forward_backward(heldout, [trained[0]])
 
     return _SadRun(trace=trace, trained=trained[0], init=init_pack[0], ho_init=float(ho_init), ho_best=float(ho_best))
 
@@ -490,14 +508,11 @@ def _twin_mechanical(tmp: Path, seed: int, n_steps: int) -> _TwinRun:
     rng = np.random.default_rng(seed)
     init_pack = init_weights(nnet_spec(base, "BLSTM"), rng, "he", True) + init_weights(nnet_spec(base, "BLSTM_LID"), rng, "he", True)
 
-    with _chdir(workdir):
-        (workdir / "_twin_mech.config").write_text(_modern_config_text(base, 6, backprop=True))
-        eng = speech_rs.Engine(["_twin_mech.config"], "-m")
-        _f, grads = forward_backward(eng, [init_pack[0], init_pack[1]], None)
+    with chdir(workdir):
+        _f, grads = forward_backward(FoldRun(base, workdir, backprop=True), [init_pack[0], init_pack[1]])
         nonzero = [int(np.count_nonzero(g)) for g in grads]
 
-        eng2 = speech_rs.Engine(["_twin_mech.config"], "-m")
-        trained, _hist = _backprop_inner(eng2, n_steps, tails, batch=None, seed_weights=init_pack)
+        trained, _hist = _backprop_inner(FoldRun(base, workdir, backprop=True), n_steps, tails, batch=None, seed_weights=init_pack)
         move = [float(np.linalg.norm(np.asarray(trained[k]) - init_pack[k])) for k in range(2)]
 
     return _TwinRun(nonzero=nonzero, move=move, trained=[np.asarray(w, dtype=np.float64) for w in trained])
@@ -561,7 +576,8 @@ def test_early_stop_triggers(tmp_path: Path) -> None:
 
     state = init_run(tmp_path / "tier2_spectral.config", tmp_path / "run")
     params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", init_seed=7, val_metric="balance")
-    res = train_modern(state, seed=0, params=params)
+    with chdir(tmp_path):
+        res = train_modern(state, seed=0, params=params)
 
     assert res.stopped_early is True, "early-stop must fire on the stuck-validation plateau"
     assert res.epochs_run < params.epochs, f"early-stop must halt before the {params.epochs}-epoch budget, ran {res.epochs_run}"

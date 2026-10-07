@@ -4,8 +4,9 @@ Ported from `Train_BLSTM.m` (the outer driver: mask build, genome sizing via the
 vec2struct count, `MaskingValidation` gate, population init, the `QuantumPSO` call at
 :819, the post-QPSO `BackPropagation` at :973) + `BackPropagation.m` (the SMORMS3 inner
 loop contract). The legacy seam -- write a `.config` per candidate, shell out to `fsp`,
-read the `.mat`/`.bin` back -- becomes the in-process `speech_rs.Engine` (Phase 4c
-Task 3) driven through `engine.forward_backward` (ComputeGradient's contract).
+read the `.mat`/`.bin` back -- becomes the in-process `speech_rs.Engine` behind
+`fold_run.FoldRun` (one engine over one listing, one fold at the caller's weights; issue #22),
+driven through `engine.forward_backward` (ComputeGradient's contract).
 
 The genome<->engine binding (documented deviation, IMPROVEMENTS.md `phase4c-exit-gate`):
 the vec2struct genome sizes/validates the search (`genome_length` + `masking_validation`
@@ -28,10 +29,8 @@ the returned gradient, so SMORMS3 only ever steps the trainable head.
 
 from __future__ import annotations
 
-import os
 import warnings
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,7 +40,8 @@ from numpy.typing import NDArray
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
 from speech.config_bridge import nnet_spec
 from speech.drivers.state import EpochRecord, ModernTrainParams, ModernTrainResult, RunState, TrainResult
-from speech.engine import ChannelResults, CostParams, _nn_cost_lid, _nn_cost_seg, compute_cost, forward_backward
+from speech.engine import ChannelResults, CostParams, compute_cost, forward_backward
+from speech.fold_run import FoldRun
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
 from speech.optimizers import QpsoParams, Smorms3, quantum_pso
@@ -54,16 +54,6 @@ TrainEpochFn = Callable[[list[NDArray[np.float64]], int], tuple[list[NDArray[np.
 ValidateFn = Callable[[list[NDArray[np.float64]], int], tuple[float, float | None]]
 
 F64 = np.float64
-
-
-@contextmanager
-def _chdir(path: Path) -> Iterator[None]:
-    prev = Path.cwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(prev)
 
 
 def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
@@ -79,39 +69,21 @@ def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
     return tails
 
 
-def _eval_config_text(base: dict[str, str], ponds: list[str], algo: int, fileslisting: str | None = None) -> str:
-    """The committed base config with the genome's `CostPonderation` field(s) injected and
-    BackPropagation forced on for a single-eval gradient (`Epochs 0`) -- the F11 single-eval
-    semantics so `Engine.run()` is ONE forward/backward at the input theta that the Python
-    loop owns. Only the algo-6 Twin gets the `BLSTM_LID_*` injection; a single-net config's
-    LID side is never touched (`BackPropagation.m` never builds the LID cell for algo != 6).
+def _eval_overlay(base: dict[str, str], ponds: list[str], algo: int) -> dict[str, str]:
+    """The committed base config with the genome's `CostPonderation` field(s) injected -- the
+    legacy-regime candidate config. Only the algo-6 Twin gets the `BLSTM_LID_*` injection; a
+    single-net config's LID side is never touched (`BackPropagation.m` never builds the LID
+    cell for algo != 6). The key already exists in `base`, so `dict.__setitem__` preserves
+    its position (byte-stable ordering).
 
-    F11 (phase 5): `Epochs 0`, not `1`. `Epochs >= 1` routes `Engine.run()` through the
-    engine-internal `train()` (3 folds + 2 Rprop updates), so the seam's cost/gradient are
-    measured at engine-MOVED weights, not the input theta -- a 4c misroute. `Epochs 0` takes
-    the `run_solo` path (one fold at theta; backprop is gated on `BackPropagationActivated`,
-    not on Epochs, so the fold still harvests the gradient into the F10 seam stash). This
-    matches the LEGACY: `ComputeGradient.m -> CostFunction.m -> ComputeCost.m` shells `fsp`
-    with the base config's `Neural_Networks_BackPropagation_Epochs` UNCHANGED, and the real
-    production `1_worker_1.config` has NO such key (default 0), so the legacy `fsp` ran
-    `runSolo` per gradient call -- the inner Rprop loop lived in MATLAB
-    (`CostFunction.m:248-291`), re-shelling `fsp` per step, exactly as this port's
-    `_backprop_inner` owns the inner SMORMS3 loop. See IMPROVEMENTS.md `[phase5] F11`.
-
-    `fileslisting` (Phase 4d Task 10): when given, overrides the corpus listing key so the
-    engine folds over the per-step batch listing instead of the committed full corpus -- the
-    `PS.FS.listing` re-point `ComputeGradient.m` does per gradient eval. The key already
-    exists in `base`, so `dict.__setitem__` preserves its position (byte-stable ordering)."""
+    The backprop flags, the F11 `Epochs 0` rule and the listing override are the fold run's
+    (`fold_run.FoldRun`); the legacy regime runs every candidate as a GRADIENT fold
+    (`backprop=True`), with or without an inner SMORMS3 loop, as `_score_fold` does."""
     cfg = dict(base)
-    cfg["BLSTM_BackPropagationActivated"] = "true"
     cfg["BLSTM_CostPonderation"] = ponds[0]
     if algo == 6:
-        cfg["BLSTM_LID_BackPropagationActivated"] = "true"
         cfg["BLSTM_LID_CostPonderation"] = ponds[1]
-    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
-    if fileslisting is not None:
-        cfg["fileslisting"] = fileslisting
-    return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
+    return cfg
 
 
 # ---- Hard-example mini-batching (Phase 4d Task 10) ---------------------------------------
@@ -125,9 +97,8 @@ def _eval_config_text(base: dict[str, str], ponds: list[str], algo: int, filesli
 #     commented-out validation probe). ComputeGradient is one gradient eval = one inner
 #     SMORMS3 step, so a fresh batch + fresh engine is drawn PER INNER STEP.
 #   * The engine consumes the batch listing by reading `PS.FS.listing` (`CostFunction`
-#     :104); the in-process analogue is a fresh `speech_rs.Engine` on a config whose
-#     `fileslisting` points at the just-written batch listing (forward_backward's
-#     `listing_override`/`make_engine`).
+#     :104); the in-process analogue is a fresh `FoldRun` on the just-written batch listing
+#     per step (`_BatchStep.next_fold`, consumed by `_backprop_inner`).
 
 
 def _mapping_path(state: RunState) -> Path:
@@ -309,32 +280,25 @@ class _BatchRunner:
 
 @dataclass
 class _BatchStep:
-    """A per-candidate binding of the shared `_BatchRunner` to one genome's config: the
-    inner loop calls `next_listing` (mutating the shared cursors) then `make_engine` to
-    rebuild the corpus-scoped engine on that listing (the ponds/net structure fixed for the
-    candidate, only the fileslisting rotating)."""
+    """The per-step batch binding of the shared `_BatchRunner` to one candidate's config: each
+    SMORMS3 step calls `next_fold`, which rotates the shared cursors (`next_listing`) and
+    builds a fresh GRADIENT `FoldRun` on that listing -- the net structure (and, in the legacy
+    regime, the ponderations) fixed for the candidate, only the fileslisting rotating. One
+    class for both regimes: the legacy `train` hands it `_eval_overlay(...)`, the modern loop
+    the base config itself."""
 
     runner: _BatchRunner
-    base: dict[str, str]
-    ponds: list[str]
-    algo: int
+    config: dict[str, str]
 
-    def next_listing(self) -> Path:
-        return self.runner.next_listing()
-
-    def make_engine(self, listing_path: Path) -> object:
-        import speech_rs  # local: the pyo3 module is only needed on the engine path
-
-        text = _eval_config_text(self.base, self.ponds, self.algo, fileslisting=Path(listing_path).name)
-        (self.runner.workdir / "_batch_eval.config").write_text(text)
-        return speech_rs.Engine(["_batch_eval.config"], "-m")
+    def next_fold(self) -> FoldRun:
+        return FoldRun(self.config, self.runner.workdir, backprop=True, listing=self.runner.next_listing())
 
 
 def _backprop_inner(
-    engine: object,
+    fold: FoldRun,
     inner_steps: int,
     tails: list[int],
-    batch: _BatchStep | _ModernBatchStep | None = None,
+    batch: _BatchStep | None = None,
     seed_weights: list[NDArray[np.float64]] | None = None,
 ) -> tuple[list[NDArray[np.float64]], list[float]]:
     """`BackPropagation.m`'s inner SMORMS3 loop over the `[sad]` (algo 3/4/5) or `[sad, lid]`
@@ -342,20 +306,21 @@ def _backprop_inner(
 
     Reads the full config-seeded weights, strips each net's normalize mean/std tail
     (`weights(1:end-2*length(normalize.mean))`), runs `inner_steps` SMORMS3 steps over
-    `forward_backward` (folding the tail back for `set_weights`, dropping it from the
-    gradient), and returns the FULL trained weights + the inner cost trace. The net count
-    is `len(tails)` -- 1 or 2 -- so `engine.weights(0)[1]` is never indexed on a single-net
-    engine (the RED IndexError).
+    `forward_backward` (folding the tail back for the engine, dropping it from the gradient),
+    and returns the FULL trained weights + the inner cost trace. The net count is
+    `len(tails)` -- 1 or 2 -- so a single-net pack is never indexed at `[1]` (the RED
+    IndexError).
 
-    `batch` (Phase 4d): when set, each SMORMS3 step draws a fresh mini-batch listing and
-    rebuilds the engine on it (`ComputeGradient.m`'s per-gradient GetNewBatch + fresh-fsp);
-    when None, all steps run the passed engine's fixed full corpus (the 4c path).
+    `fold` is the full-corpus GRADIENT fold (`FoldRun(..., backprop=True)`), reused across
+    the steps. `batch` (Phase 4d): when set, each SMORMS3 step draws a fresh mini-batch
+    listing and runs a fresh fold on it (`ComputeGradient.m`'s per-gradient GetNewBatch +
+    fresh-fsp cadence) and `fold` is never run; when None, every step runs `fold`.
 
     `seed_weights` (Phase 5 Task 8): when set, SMORMS3 starts from THESE weights instead of
-    the engine's config-seeded pack -- the modern loop threads the current epoch's weights
-    in (init or the previous epoch's trained weights) so each epoch continues from where the
-    last left off. `None` preserves the 4c/4d behavior exactly (read the pack off `engine`)."""
-    full = seed_weights if seed_weights is not None else engine.weights(0)  # type: ignore[attr-defined]
+    the config's own pack -- the modern loop threads the current epoch's weights in (init or
+    the previous epoch's trained weights) so each epoch continues from where the last left
+    off. `None` preserves the 4c/4d behavior exactly (read the pack off `fold`)."""
+    full = seed_weights if seed_weights is not None else fold.weights()
     n = len(tails)
     fulls = [np.asarray(full[k], dtype=F64) for k in range(n)]
     net_tails = [fulls[k][len(fulls[k]) - tails[k] :].copy() for k in range(n)]
@@ -363,11 +328,7 @@ def _backprop_inner(
 
     def f_df(theta: list[NDArray[np.float64]], _ec: int) -> tuple[float, list[NDArray[np.float64]], list[NDArray[np.float64]]]:
         packed = [np.concatenate([theta[k], net_tails[k]]) for k in range(n)]
-        if batch is None:
-            cost, grads = forward_backward(engine, packed, None)  # type: ignore[arg-type]
-        else:
-            listing = batch.next_listing()
-            cost, grads = forward_backward(engine, packed, listing, make_engine=batch.make_engine)  # type: ignore[arg-type]
+        cost, grads = forward_backward(fold if batch is None else batch.next_fold(), packed)
         gs = [grads[k][: theta[k].shape[0]] for k in range(n)]
         return cost, gs, theta  # theta_out is a pass-through (SMORMS3 adds dtheta)
 
@@ -377,8 +338,8 @@ def _backprop_inner(
     return out, list(opt.hist_f_flat)
 
 
-def _score_engine(
-    config_text: str,
+def _score_fold(
+    cfg: dict[str, str],
     workdir: Path,
     balance: int,
     algo: int,
@@ -387,26 +348,23 @@ def _score_engine(
     tails: list[int],
     batch: _BatchStep | None = None,
 ) -> tuple[float, list[NDArray[np.float64]], list[float]]:
-    """Build a fresh engine from `config_text`, optionally run the SMORMS3 inner loop,
-    then score the corpus fold via the balance-law cost (`ComputeCost.m`). Returns
-    (outer cost, final `[sad]`/`[sad, lid]` weights, inner cost trace).
+    """Build a fresh gradient fold on `cfg`, optionally run the SMORMS3 inner loop, then score
+    the corpus fold via the balance-law cost (`ComputeCost.m`). Returns (outer cost, the
+    engine's post-run `[sad]`/`[sad, lid]` weights, inner cost trace).
 
     `batch` threads the hard-example scheduler into the inner loop (the gradient path); the
-    OUTER scoring (`engine.run()` below) always folds the FULL committed corpus, matching
-    the legacy -- GetNewBatch lives only in `ComputeGradient.m` (the gradient), never in the
+    OUTER scoring (`fold.run` below) always folds the FULL committed corpus, matching the
+    legacy -- GetNewBatch lives only in `ComputeGradient.m` (the gradient), never in the
     plain `CostFunction` scoring the post-backprop `feval(...,-5)` runs on the full listing."""
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
-
-    (workdir / "_eval.config").write_text(config_text)
-    engine = speech_rs.Engine(["_eval.config"], "-m")
+    fold = FoldRun(cfg, workdir, backprop=True)
     inner_hist: list[float] = []
     if inner_steps is not None:
-        trained, inner_hist = _backprop_inner(engine, inner_steps, tails, batch)
-        engine.set_weights(0, [list(w) for w in trained])
-    engine.run()
-    results = ChannelResults.from_seam(engine.channel_results())
-    cost, _ = compute_cost(results, 0, balance, CostParams(mode=0, balance_backprop=balance_backprop, algo=algo))
-    return cost, [np.asarray(w, dtype=F64) for w in engine.weights(0)], inner_hist
+        trained, inner_hist = _backprop_inner(fold, inner_steps, tails, batch)
+        res = fold.run(trained)
+    else:
+        res = fold.run()
+    cost, _ = compute_cost(res.results, 0, balance, CostParams(mode=0, balance_backprop=balance_backprop, algo=algo))
+    return cost, res.weights, inner_hist
 
 
 def _ponderations(genome: NDArray[np.float64], mask: dict[str, object] | None, state: RunState) -> tuple[list[str], NDArray[np.float64]]:
@@ -430,20 +388,11 @@ def score_genome(
     refinement): vec2struct-decode the genome's two `CostPonderation` fields, inject
     them onto the committed base config, and score the engine fold. Factored out of
     `train` so it is independently callable -- e.g. the genome->engine non-vacuity pin
-    in `tests/pyo3/test_exit_gate.py`. Self-contained (chdirs into `workdir` itself),
-    so it is safe to call from outside `train`'s own `_chdir(workdir)` block."""
+    in `tests/pyo3/test_exit_gate.py`."""
     ponds, out_param = _ponderations(genome, mask, state)
     tails = _tail_lengths(state.base_config, state.ps.algo)
-    with _chdir(workdir):
-        cost, _w, _h = _score_engine(
-            _eval_config_text(state.base_config, ponds, state.ps.algo),
-            workdir,
-            state.balance,
-            state.ps.algo,
-            state.ps.BalanceBackProp,
-            None,
-            tails,
-        )
+    cfg = _eval_overlay(state.base_config, ponds, state.ps.algo)
+    cost, _w, _h = _score_fold(cfg, workdir, state.balance, state.ps.algo, state.ps.BalanceBackProp, None, tails)
     return cost, out_param
 
 
@@ -522,8 +471,9 @@ def train(
         costs = np.empty(pos.shape[0], dtype=F64)
         for i in range(pos.shape[0]):
             ponds, _out = _ponderations(pos[i], mask, state)
-            batch = _BatchStep(runner, base, ponds, algo) if runner is not None else None
-            cost, _w, _h = _score_engine(_eval_config_text(base, ponds, algo), workdir, balance, algo, bbp, inner_steps, tails, batch)
+            cfg = _eval_overlay(base, ponds, algo)
+            batch = _BatchStep(runner, cfg) if runner is not None else None
+            cost, _w, _h = _score_fold(cfg, workdir, balance, algo, bbp, inner_steps, tails, batch)
             costs[i] = cost
         return costs, pos
 
@@ -547,13 +497,13 @@ def train(
         backprop_activated=1,
     )
 
-    with _chdir(workdir):
-        result = quantum_pso(cost_fn, params, d, np.random.default_rng(seed), backprop_refine=backprop_refine)
-        # legacy: Train_BLSTM.m:973 -- BackPropagation on the QPSO winner. This produces
-        # the final trained weights (and guarantees the inner loop runs at least once).
-        ponds, _out = _ponderations(result.gbest, mask, state)
-        final_batch = _BatchStep(runner, base, ponds, algo) if runner is not None else None
-        _final_cost, final_w, inner_hist = _score_engine(_eval_config_text(base, ponds, algo), workdir, balance, algo, bbp, inner_steps, tails, final_batch)
+    result = quantum_pso(cost_fn, params, d, np.random.default_rng(seed), backprop_refine=backprop_refine)
+    # legacy: Train_BLSTM.m:973 -- BackPropagation on the QPSO winner. This produces
+    # the final trained weights (and guarantees the inner loop runs at least once).
+    ponds, _out = _ponderations(result.gbest, mask, state)
+    final_cfg = _eval_overlay(base, ponds, algo)
+    final_batch = _BatchStep(runner, final_cfg) if runner is not None else None
+    _final_cost, final_w, inner_hist = _score_fold(final_cfg, workdir, balance, algo, bbp, inner_steps, tails, final_batch)
 
     gbest = np.asarray(result.gbest, dtype=F64)
     cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
@@ -624,54 +574,6 @@ def _init_weights_from_scratch(state: RunState, params: ModernTrainParams) -> li
     return weights
 
 
-def _modern_config_text(base: dict[str, str], algo: int, *, backprop: bool, fileslisting: str | None = None) -> str:
-    """The base config with backprop toggled (both nets) -- ALWAYS `Epochs 0`, whether
-    backprop is ON (one forward/backward at theta the Python SMORMS3 loop owns; the fold
-    harvests the gradient into the F10 seam stash) or OFF (a pure forward scoring pass for
-    validation). The `BackPropagationActivated` flag -- NOT Epochs -- gates whether the fold
-    computes a gradient, so `engine.run()` fills the MultiConfigResults cost columns either
-    way. UNLIKE `_eval_config_text`, this does NOT inject `CostPonderation` -- the modern
-    loop has no genome, so the config's own cost law stands (or the engine's default when the
-    key is absent).
-
-    F11 (phase 5): `Epochs 0`, not `1`, for the backprop-ON case. `Epochs >= 1` routes
-    `run()` through the engine-internal `train()` (3 folds + 2 Rprop), so `forward_backward`
-    reported cost/gradient at engine-moved weights, not the input theta -- the modern loop
-    then trained on a wrongly-anchored gradient (T10 discovery). See IMPROVEMENTS.md
-    `[phase5] F11`."""
-    cfg = dict(base)
-    flag = "true" if backprop else "false"
-    cfg["BLSTM_BackPropagationActivated"] = flag
-    if algo == 6:
-        cfg["BLSTM_LID_BackPropagationActivated"] = flag
-    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
-    if fileslisting is not None:
-        cfg["fileslisting"] = fileslisting
-    return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
-
-
-@dataclass
-class _ModernBatchStep:
-    """The modern loop's per-step batch binding: `next_listing` rotates the shared
-    `_BatchRunner`'s cursors, `make_engine` rebuilds a backprop-ON engine on that listing
-    WITHOUT the genome ponderation injection (unlike `_BatchStep`). Threaded into
-    `_backprop_inner` exactly like `_BatchStep` (`.next_listing()` + `.make_engine`)."""
-
-    runner: _BatchRunner
-    base: dict[str, str]
-    algo: int
-
-    def next_listing(self) -> Path:
-        return self.runner.next_listing()
-
-    def make_engine(self, listing_path: Path) -> object:
-        import speech_rs  # local: the pyo3 module is only needed on the engine path
-
-        text = _modern_config_text(self.base, self.algo, backprop=True, fileslisting=Path(listing_path).name)
-        (self.runner.workdir / "_train_modern_batch.config").write_text(text)
-        return speech_rs.Engine(["_train_modern_batch.config"], "-m")
-
-
 def _confusion_error(results: ChannelResults, algo: int) -> float | None:
     """The FIXED (F5) confusion misclassification rate on the validation results, Twin-only
     (single-net SAD algos carry no LID confusion -> None). Reads config 0's decoded
@@ -712,34 +614,27 @@ def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdi
         runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
 
     def train_epoch(weights: list[NDArray[np.float64]], epoch: int) -> tuple[list[NDArray[np.float64]], float]:
-        import speech_rs  # local: the pyo3 module is only needed on the engine path
-
-        # chdir into the workdir: the engine reads its config + corpus paths relative to CWD
-        # (the same seam `train`/`score_genome` use). Checkpoints are absolute, unaffected.
-        with _chdir(workdir):
-            batch = _ModernBatchStep(runner, base, algo) if runner is not None else None
-            engine: object | None = None
-            if batch is None:
-                (workdir / "_train_modern.config").write_text(_modern_config_text(base, algo, backprop=True))
-                engine = speech_rs.Engine(["_train_modern.config"], "-m")
-            trained, hist = _backprop_inner(engine, params.steps_per_epoch, tails, batch=batch, seed_weights=weights)
+        # A fresh gradient fold per epoch, reused across the epoch's steps; in batch mode the
+        # step builds its own fold on the rotated listing and this one is never run.
+        fold = FoldRun(base, workdir, backprop=True)
+        batch = _BatchStep(runner, base) if runner is not None else None
+        trained, hist = _backprop_inner(fold, params.steps_per_epoch, tails, batch=batch, seed_weights=weights)
         return trained, (float(hist[-1]) if hist else float("nan"))
 
     return train_epoch
 
 
 def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: Path) -> ValidateFn:
-    """The engine-backed forward-only validator: build a backprop-OFF engine on
-    `valid_listing` (defaults to the training listing when unset), set the current weights,
-    run ONE scoring pass, and read back the validation cost + the FIXED confusion metric.
+    """The engine-backed forward-only validator: a forward-only fold on `valid_listing`
+    (defaults to the training listing when unset) at the current weights, then the
+    validation cost + the FIXED confusion metric off its results.
 
     `params.val_metric` selects the early-stop cost (Phase 6 Task 6, a Phase-5 carry-forward):
 
-      * "nn_cost_seg" (DEFAULT): the forward-only NNCostSeg objective, assembled off the
-        results matrix EXACTLY as `engine.forward_backward` assembles its `f`
-        (`f = NNCostSeg (+ NNCostLID for the algo-6 Twin)`, engine.py:378-385) -- so the
-        validation signal is the held-out value of the SAME quantity SMORMS3 descends in
-        training. A CONTINUOUS signal that moves from scratch. No gradient is harvested
+      * "nn_cost_seg" (DEFAULT): the forward-only NNCostSeg objective, `FoldResult.nn_cost`
+        -- the SAME `f = NNCostSeg (+ NNCostLID for the algo-6 Twin)` `engine.forward_backward`
+        descends in training, read off the held-out fold. A CONTINUOUS signal that moves
+        from scratch. No gradient is harvested
         (`weights_derivatives` is never read): forward-only means the seg/LID-cost columns
         the cost reads suffice, and the engine's cost block accumulates them on ANY forward
         fold with references present (`BLSTMNeuralNetwork.cpp` gates the cost on
@@ -750,9 +645,8 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
         error rate, stuck at 30.0 (the seeded net's posteriors never cross the decision
         threshold), a useless early-stop plateau -- which is why nn_cost_seg is the default.
 
-    Reuses `_modern_config_text(..., backprop=False)` (the established forward-only builder) --
-    NO third config builder: both metrics run the identical backprop-OFF fold on
-    `valid_listing`; only the cost read off the results differs."""
+    Both metrics run the identical forward-only fold on `valid_listing`; only the cost read
+    off the results differs."""
     base = state.base_config
     algo = state.ps.algo
     balance = state.balance
@@ -761,22 +655,12 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
     metric = params.val_metric
 
     def validate(weights: list[NDArray[np.float64]], epoch: int) -> tuple[float, float | None]:
-        import speech_rs  # local: the pyo3 module is only needed on the engine path
-
-        with _chdir(workdir):
-            (workdir / "_valid_modern.config").write_text(_modern_config_text(base, algo, backprop=False, fileslisting=valid_listing))
-            engine = speech_rs.Engine(["_valid_modern.config"], "-m")
-            engine.set_weights(0, [list(np.asarray(w, dtype=F64)) for w in weights])
-            engine.run()
-            results = ChannelResults.from_seam(engine.channel_results())
+        res = FoldRun(base, workdir, backprop=False, listing=valid_listing).run(weights)
         if metric == "nn_cost_seg":
-            r = results.for_config(0)
-            val_cost = _nn_cost_seg(r)
-            if algo == 6:
-                val_cost += _nn_cost_lid(r)  # mirror forward_backward's f = NNCostSeg + NNCostLID (Twin)
+            val_cost = res.nn_cost  # NNCostSeg (+ NNCostLID on the Twin): forward_backward's f
         else:
-            val_cost, _ = compute_cost(results, 0, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
-        return float(val_cost), _confusion_error(results, algo)
+            val_cost, _ = compute_cost(res.results, 0, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
+        return float(val_cost), _confusion_error(res.results, algo)
 
     return validate
 
@@ -880,24 +764,19 @@ def build_hyperparam_mask(ps: RunConfig) -> dict[str, object]:
     return mask
 
 
-def _hyperparam_config_text(base: dict[str, str], config_struct: dict[str, str], algo: int) -> str:
+def _hyperparam_overlay(base: dict[str, str], config_struct: dict[str, str]) -> dict[str, str]:
     """Overlay the FULL vec2struct-decoded non-weight config (`config_struct` -- printConfig has
-    already stripped the weight/normalize matrices) onto the byte-known-good base config,
-    FORWARD-ONLY (backprop OFF, `Epochs 0`) so the search scores the FIXED base weights against
-    the genome's DSP hyperparameters (no engine-internal training). The generalized sibling of
-    `_eval_config_text` (which injects only the 2 `CostPonderation` fields): here EVERY searchable
-    DSP key -- freq bands, windows, LTSV/TDC, decision thresholds, calibration laws, ponderations
-    -- is injected. `dict(base)` preserves base key positions (byte-stable ordering, the same trick
-    `_eval_config_text` uses); decoded keys overwrite in place / append. The weights reach the
-    engine through the base config's committed `.bin` pack (`weightsFile`), untouched."""
+    already stripped the weight/normalize matrices) onto the byte-known-good base config. The
+    generalized sibling of `_eval_overlay` (which injects only the 2 `CostPonderation` fields):
+    here EVERY searchable DSP key -- freq bands, windows, LTSV/TDC, decision thresholds,
+    calibration laws, ponderations -- is injected. `dict(base)` preserves base key positions
+    (byte-stable ordering); decoded keys overwrite in place / append. The weights reach the
+    engine through the base config's committed `.bin` pack (`weightsFile`), untouched; the
+    search scores them FORWARD-ONLY (`FoldRun(..., backprop=False)` at the call site)."""
     cfg = dict(base)
     for k, v in config_struct.items():
         cfg[k] = v
-    cfg["BLSTM_BackPropagationActivated"] = "false"
-    if algo == 6:
-        cfg["BLSTM_LID_BackPropagationActivated"] = "false"
-    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
-    return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
+    return cfg
 
 
 # A candidate whose decoded DSP config drives the FIXED base net into an invalid region (a
@@ -913,18 +792,17 @@ def _decode_hyperparam(
     reduced: NDArray[np.float64],
     mask: dict[str, object],
     searchable: NDArray[np.bool_],
-) -> tuple[str, NDArray[np.float64]]:
+) -> tuple[dict[str, str], NDArray[np.float64]]:
     """The PURE (engine-free, never-crashing) half of a candidate eval: scatter the searchable-space
     genome `reduced` into the full vec2struct genome (masked weight dims filled with 0 -- the mask
     overrides them regardless), decode WITH the permanent weight mask, and inject the full non-weight
-    config onto the base. Returns `(injected_config_text, reduced_out_param)` -- the searchable-space
+    config onto the base. Returns `(injected_config, reduced_out_param)` -- the searchable-space
     out_param (the sortrows/clamp write-back at the searchable positions; the masked positions carry
     only the mask inverse-encode and are dropped)."""
     full = np.zeros(searchable.shape[0], dtype=F64)
     full[searchable] = np.asarray(reduced, dtype=F64)
     config_struct, out_param, _ = vec2struct(full, mask, state.ps, 0)
-    text = _hyperparam_config_text(state.base_config, config_struct, state.ps.algo)
-    return text, out_param[searchable].copy()
+    return _hyperparam_overlay(state.base_config, config_struct), out_param[searchable].copy()
 
 
 def score_hyperparam_genome(
@@ -935,22 +813,16 @@ def score_hyperparam_genome(
     workdir: Path,
 ) -> tuple[float, NDArray[np.float64], str]:
     """One narrowed-QPSO candidate's forward-only cost (the `cost_fn` per-particle body). Decode the
-    searchable-space genome (`_decode_hyperparam`), then score the engine fold with FIXED base weights
-    (no inner SMORMS3, no engine-internal training -- backprop OFF, `Epochs 0`). Returns
-    `(cost, reduced_out_param, injected_config_text)`; the config text is returned for the non-vacuity
-    pin (distinct hyperparameters -> distinct engine configs). Self-contained (chdirs into `workdir`
-    itself), like `score_genome`. Raises through any engine failure -- `train_hyperparam_search`'s
-    cost_fn is the layer that penalizes an invalid candidate."""
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
-
-    text, reduced_out = _decode_hyperparam(state, reduced, mask, searchable)
-    with _chdir(workdir):
-        (workdir / "_hyperparam_eval.config").write_text(text)
-        engine = speech_rs.Engine(["_hyperparam_eval.config"], "-m")
-        engine.run()
-        results = ChannelResults.from_seam(engine.channel_results())
-    cost, _ = compute_cost(results, 0, state.balance, CostParams(mode=0, balance_backprop=state.ps.BalanceBackProp, algo=state.ps.algo))
-    return float(cost), reduced_out, text
+    searchable-space genome (`_decode_hyperparam`), then score a forward-only fold with FIXED base
+    weights (no inner SMORMS3, no engine-internal training). Returns `(cost, reduced_out_param,
+    config_text)`; the fold's rendered config is returned for the non-vacuity pin (distinct
+    hyperparameters -> distinct engine configs) and for the checkpoint. Raises through any engine
+    failure -- `train_hyperparam_search`'s cost_fn is the layer that penalizes an invalid candidate."""
+    cfg, reduced_out = _decode_hyperparam(state, reduced, mask, searchable)
+    fold = FoldRun(cfg, workdir, backprop=False)
+    res = fold.run()
+    cost, _ = compute_cost(res.results, 0, state.balance, CostParams(mode=0, balance_backprop=state.ps.BalanceBackProp, algo=state.ps.algo))
+    return float(cost), reduced_out, fold.config_text
 
 
 def train_hyperparam_search(
@@ -1021,7 +893,7 @@ def train_hyperparam_search(
                 # invalid DSP config (feature-dim mismatch / a typed-bailed engine path): penalize so
                 # QPSO steers away. out_param is the PURE vec2struct write-back (decode never crashes).
                 cost = _HYPERPARAM_PENALTY
-                _text, reduced_out = _decode_hyperparam(state, pos[i], mask, searchable)
+                _cfg, reduced_out = _decode_hyperparam(state, pos[i], mask, searchable)
                 penalized_counts[type(exc).__name__] = penalized_counts.get(type(exc).__name__, 0) + 1
             costs[i] = cost
             out[i] = reduced_out
@@ -1047,18 +919,19 @@ def train_hyperparam_search(
         backprop_activated=0,  # no weight refinement in the narrowed search
     )
 
-    with _chdir(workdir):
-        result = quantum_pso(cost_fn, params, n_search, np.random.default_rng(seed))
-        gbest = np.asarray(result.gbest, dtype=F64)
-        if result.gbestval >= _HYPERPARAM_PENALTY:
-            # a fully-penalized run: gbest sits in the SAME invalid region every candidate did
-            # (gbestval can only reach the penalty if NO eval ever beat it), so re-scoring it
-            # through the engine would raise the identical way -- skip straight to the pure,
-            # never-crashing decode instead of crashing on the checkpoint step.
-            best_text, _out = _decode_hyperparam(state, gbest, mask, searchable)
-        else:
-            # the best decoded engine config (feed to train_modern for the weight training)
-            _cost, _out, best_text = score_hyperparam_genome(state, gbest, mask, searchable, workdir)
+    result = quantum_pso(cost_fn, params, n_search, np.random.default_rng(seed))
+    gbest = np.asarray(result.gbest, dtype=F64)
+    if result.gbestval >= _HYPERPARAM_PENALTY:
+        # a fully-penalized run: gbest sits in the SAME invalid region every candidate did
+        # (gbestval can only reach the penalty if NO eval ever beat it), so re-scoring it
+        # through the engine would raise the identical way -- skip straight to the pure,
+        # never-crashing decode (a FoldRun builds no engine until it runs) instead of
+        # crashing on the checkpoint step.
+        best_cfg, _out = _decode_hyperparam(state, gbest, mask, searchable)
+        best_text = FoldRun(best_cfg, workdir, backprop=False).config_text
+    else:
+        # the best decoded engine config (feed to train_modern for the weight training)
+        _cost, _out, best_text = score_hyperparam_genome(state, gbest, mask, searchable, workdir)
 
     penalized_evals = sum(penalized_counts.values())
     penalized_fraction = (penalized_evals / total_evals) if total_evals else 0.0

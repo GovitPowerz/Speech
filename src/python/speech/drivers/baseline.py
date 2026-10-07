@@ -82,8 +82,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
-import shutil
 import time
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -100,6 +98,7 @@ from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_l
 from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
+from speech.fold_run import FoldRun, _config_text
 from speech.init_weights import init_weights
 from speech.ledger.schema import BaselinePayload, BaselineRecipe, BaselineRecord, git_state, host_info, lineage_of, now_utc, seam_build_info, write_record
 from speech.ledger.schema import CollarScore as LedgerCollar
@@ -357,10 +356,6 @@ def assemble_flat_config(
     return cfg
 
 
-def _config_text(cfg: dict[str, str]) -> str:
-    return "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
-
-
 def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[str, str]:
     """The Phase 9 (spec S7.2) architecture overlay for the SAD arm: the port-only S6 keys
     `BLSTM_Cell_Type` / `BLSTM_Direction`, plus the TWO derived keys `forward` forces.
@@ -483,23 +478,19 @@ def _score_packs_on_test(
 ) -> tuple[float | None, float | None, Path]:
     """Score one `[sad, lid]` weight-pack pair on the held-out test split end to end:
     `evaluate` -> per-file `.scr` -> `read_scr_scores` -> `lid_error` + `cavg`. `evaluate`
-    resolves `<net>_weights.bin` or `best_<net>.bin` in a checkpoint dir (#29), neither of
-    which names the untrained `<net>_seed.bin`, so both packs (trained or seed) are copied
-    in under the legacy names first -- letting the SAME scorer measure both the trained model
-    and its own from-scratch init on the identical test set (the direction-safe improvement).
+    takes the packs themselves (a trained `best_<net>.bin` pair or the untrained
+    `<net>_seed.bin` pair alike), so the SAME scorer measures both the trained model and its
+    own from-scratch init on the identical test set (the direction-safe improvement).
 
     Returns `(lid_error_pct, cavg, scores_dir)`; the metrics are `None` only if the test
     split produced no `.scr` files (a structurally empty held-out set)."""
     from speech.drivers.test import _class_keys, evaluate
 
-    score_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(sad_pack, score_dir / "sad_weights.bin")
-    shutil.copy(lid_pack, score_dir / "lid_weights.bin")
     # Nested under score_dir (already distinct per pass -- "score_trained" vs "score_init")
     # so the trained and init `.scr` outputs never share one directory (Task 8 review fix:
     # `evaluate`'s default output dir is fixed per `eval_state`, so two calls against the
     # SAME eval_state used to clobber each other's `.scr` files on disk).
-    scores_dir = evaluate(eval_state, score_dir, scores_dir=score_dir / "scores")
+    scores_dir = evaluate(eval_state, [sad_pack, lid_pack], scores_dir=score_dir / "scores")
 
     mapping_path = Path(eval_state.config_path).parent / eval_state.base_config["language2classmapping"]
     class_keys = _class_keys(mapping_path)
@@ -577,47 +568,21 @@ def _score_sad_pack_on_test(
     test_records: Sequence[dict[str, str]],
     test_listing_name: str,
 ) -> tuple[DcfReport | None, Path]:
-    """Score one SAD weight pack on the held-out test split end to end: run the engine
-    (scored `-m`) over the test listing with `Dump_Directory` set so it writes one VRCTS
-    hypothesis xml per file, then pool `dcf` over (`.part.xml` ref windowed to the hyp span,
-    engine hyp). On `Inference_Path exact` (the default), the pack (a trained `best_sad.bin`
-    or the untrained `sad_seed.bin`) is loaded via `set_weights` -- the SAME scorer measures
-    both the trained model and its own from-scratch init on the identical test set (the
-    direction-safe DCF improvement). On `Inference_Path fast`, `set_weights` is SKIPPED
-    (bag_of_processors.rs T6b: it now bails loudly on a fast conf instead of the old silent
-    no-op) -- `base_cfg["BLSTM_weightsFile"]` must already point at `pack_path` for that case
-    (the caller's responsibility; see `tests/pyo3/test_phase7_parity.py::_score_sad`).
+    """Score one SAD weight pack on the held-out test split end to end: one forward-only
+    `FoldRun` (scored `-m`) over the test listing with `Dump_Directory` set so the engine
+    writes one VRCTS hypothesis xml per file, then pool `dcf` over (`.part.xml` ref windowed
+    to the hyp span, engine hyp). The pack (a trained `best_sad.bin` or the untrained
+    `sad_seed.bin`) goes in through the fold run -- `set_weights` on `Inference_Path exact`,
+    a workdir pack + repointed weight key on `fast` (where `set_weights` bails, T6b) -- so the
+    SAME scorer measures both the trained model and its own from-scratch init on the
+    identical test set (the direction-safe DCF improvement), on either path.
 
     Returns `(DcfReport | None, dump_dir)`; `None` only if no hyp xml was produced (a
-    structurally empty test set). Mirrors `drivers.test.evaluate`'s engine-driving shape
-    (chdir into `workdir`, backprop-OFF forward-only config, `set_weights` then `run`)."""
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
-
+    structurally empty test set)."""
     dump_dir.mkdir(parents=True, exist_ok=True)
     cfg = dict(base_cfg)
-    cfg["fileslisting"] = test_listing_name
     cfg["Dump_Directory"] = str(dump_dir.resolve())
-    cfg["BLSTM_BackPropagationActivated"] = "false"
-    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
-    eval_config = workdir / f"_sad_eval_{dump_dir.name}.config"
-    eval_config.write_text(_config_text(cfg))
-
-    prev = Path.cwd()
-    os.chdir(workdir)
-    try:
-        engine = speech_rs.Engine([eval_config.name], "-m")
-        # `Inference_Path fast` processors load weights ONLY at construction, from the
-        # config's own BLSTM_weightsFile key; `set_weights` now bails loudly on them
-        # (bag_of_processors.rs T6b) instead of the old silent no-op. Skip the call on
-        # fast: `pack_path` is already the config-time-injected pack there (callers point
-        # BLSTM_weightsFile at it before building this config), so the call is redundant
-        # on fast and load-bearing only on exact (whose BLSTM_weightsFile is the arm's seed
-        # pack, not `pack_path`).
-        if cfg.get("Inference_Path", "exact") != "fast":
-            engine.set_weights(0, [list(read_weight_vector(pack_path))])
-        engine.run()
-    finally:
-        os.chdir(prev)
+    FoldRun(cfg, workdir, backprop=False, listing=test_listing_name).run([read_weight_vector(pack_path)])
 
     pairs: list[tuple[list[Interval], list[Interval]]] = []
     for rec in test_records:
@@ -1034,11 +999,11 @@ def run_baseline(
                 gain = init_dcf_rep.by_collar(0.5).dcf - dcf_rep.by_collar(0.5).dcf
                 console.log(f"init baseline: DCF@0.5={init_dcf_rep.by_collar(0.5).dcf:.4f} (improvement {gain:+.4f})")
     elif test_rec:
-        eval_base = out_dir / "eval_base.config"
+        # The base state over the TEST listing (the `.scr` filenames come off the state's
+        # listing records); the same `base.config` stands for it, no second file is written.
         eval_cfg = dict(cfg)
         eval_cfg["fileslisting"] = test_name
-        eval_base.write_text(_config_text(eval_cfg))
-        eval_state = RunState.from_config(eval_base, out_dir)
+        eval_state = RunState.from_parsed(eval_cfg, base_config, out_dir)
         lid_err, cavg_val, scores_dir = _score_packs_on_test(eval_state, ckpt / "best_sad.bin", ckpt / "best_lid.bin", out_dir / "score_trained", test_rec)
         chance = 100.0 * (1.0 - 1.0 / len(_LANGS))
         if lid_err is not None and cavg_val is not None:

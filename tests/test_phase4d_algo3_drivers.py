@@ -118,55 +118,28 @@ def test_backpropagation_cell_count_contract() -> None:
     assert n_tail6 == n_pond6 == 2, "algo 6 -> the [sad, lid] pair"
 
 
-# ---- _eval_config_text: no spurious LID injection for algo != 6 --------------------------
+# ---- _eval_overlay: no spurious LID injection for algo != 6 ------------------------------
+#
+# The backprop flags and the F11 `Epochs 0` rule left these builders for `fold_run.FoldRun`
+# (issue #22); their pins are `tests/test_fold_run.py`. What stays here is the overlay itself.
 
 
-def test_eval_config_text_algo3_no_lid_keys() -> None:
+def test_eval_overlay_algo3_no_lid_keys() -> None:
     """algo 3 -> only `BLSTM_CostPonderation` injected; NO `BLSTM_LID_*` keys added to a
-    single-net base config (the legacy never touches the LID side for algo != 6)."""
+    single-net base config (the legacy never touches the LID side for algo != 6), and
+    nothing else moves (the flags are the fold run's)."""
     base = _cfg(ALGO3_CONFIG)
-    text = T._eval_config_text(base, ["0.5"], 3)
-    lines = dict(line.split(" ", 1) for line in text.strip().splitlines() if " " in line)
-    assert lines["BLSTM_CostPonderation"] == "0.5"
-    assert lines["BLSTM_BackPropagationActivated"] == "true"
-    # F11: a single-eval gradient is Epochs 0 (run_solo, one fold at theta), NOT the
-    # engine-internal train() that Epochs >= 1 routes to.
-    assert lines["Neural_Networks_BackPropagation_Epochs"] == "0"
-    assert "BLSTM_LID_CostPonderation" not in lines
-    assert "BLSTM_LID_BackPropagationActivated" not in lines
+    cfg = T._eval_overlay(base, ["0.5"], 3)
+    assert cfg["BLSTM_CostPonderation"] == "0.5"
+    assert "BLSTM_LID_CostPonderation" not in cfg
+    assert "BLSTM_LID_BackPropagationActivated" not in cfg
+    assert {k: v for k, v in cfg.items() if k != "BLSTM_CostPonderation"} == {k: v for k, v in base.items() if k != "BLSTM_CostPonderation"}
 
 
-def test_eval_config_text_algo6_injects_lid() -> None:
-    """The algo-6 foil: both SAD + LID ponderation/backprop keys injected -- unchanged."""
+def test_eval_overlay_algo6_injects_lid() -> None:
+    """The algo-6 foil: both SAD + LID ponderations injected, in place (byte-stable order)."""
     base = _cfg(ALGO6_CONFIG)
-    text = T._eval_config_text(base, ["0.5", "0.7"], 6)
-    lines = dict(line.split(" ", 1) for line in text.strip().splitlines() if " " in line)
-    assert lines["BLSTM_CostPonderation"] == "0.5"
-    assert lines["BLSTM_LID_CostPonderation"] == "0.7"
-    assert lines["BLSTM_LID_BackPropagationActivated"] == "true"
-    assert lines["Neural_Networks_BackPropagation_Epochs"] == "0"  # F11
-
-
-def test_config_texts_single_eval_are_epochs_zero_f11() -> None:
-    """F11 (phase 5): BOTH single-eval config builders emit `Epochs 0`, so `Engine.run()`
-    is one forward/backward at the input theta (run_solo), NOT the engine-internal `train()`
-    (3 folds + 2 Rprop) that `Epochs >= 1` routes to and that measured cost/gradient at
-    engine-moved weights (the T10 misroute). Covers `_eval_config_text` (legacy-regime,
-    backprop always on) AND `_modern_config_text` (both backprop ON and OFF)."""
-    base = _cfg(ALGO3_CONFIG)
-
-    def _epochs(text: str) -> str:
-        lines = dict(line.split(" ", 1) for line in text.strip().splitlines() if " " in line)
-        return lines["Neural_Networks_BackPropagation_Epochs"]
-
-    assert _epochs(T._eval_config_text(base, ["0.5"], 3)) == "0"
-    # modern loop: backprop ON (a gradient eval) and OFF (validation) are BOTH run_solo.
-    on = T._modern_config_text(base, 3, backprop=True)
-    off = T._modern_config_text(base, 3, backprop=False)
-    assert _epochs(on) == "0"
-    assert _epochs(off) == "0"
-    # non-vacuity: the backprop flag still differs (only Epochs is pinned to 0).
-    on_lines = dict(line.split(" ", 1) for line in on.strip().splitlines() if " " in line)
-    off_lines = dict(line.split(" ", 1) for line in off.strip().splitlines() if " " in line)
-    assert on_lines["BLSTM_BackPropagationActivated"] == "true"
-    assert off_lines["BLSTM_BackPropagationActivated"] == "false"
+    cfg = T._eval_overlay(base, ["0.5", "0.7"], 6)
+    assert cfg["BLSTM_CostPonderation"] == "0.5"
+    assert cfg["BLSTM_LID_CostPonderation"] == "0.7"
+    assert list(cfg) == list(base)

@@ -3296,7 +3296,12 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 - **[phase5] Single-eval gradient routed through the engine-internal `train()` -- Epochs=1
   was a 4c misroute -- FIXED (phase 5, commit `55bee98`, F11)** -- PORT-INTRODUCED, latent
   since Phase 4c
-  (`src/python/speech/drivers/train.py::_modern_config_text`, `::_eval_config_text`). LEGACY
+  (`src/python/speech/drivers/train.py::_modern_config_text`, `::_eval_config_text` at the
+  fix; since issue #22 the rule has ONE owner, `src/python/speech/fold_run.py::FoldRun`,
+  which forces `Epochs 0` on every fold unconditionally -- the two builders named below are
+  gone, and the pins moved to `tests/test_fold_run.py` (the rendered map) and
+  `tests/pyo3/test_fold_run.py` (the cost measured at theta on the engine, with the
+  `Epochs 3` foil)). LEGACY
   behavior: the optimizer computes the gradient at theta by shelling `fsp` once per gradient
   eval (`ComputeGradient.m -> CostFunction.m -> ComputeCost.m`), with the inner Rprop loop
   living in MATLAB (`CostFunction.m:248-291` re-shells `fsp` per Rprop step). `ComputeCost.m`

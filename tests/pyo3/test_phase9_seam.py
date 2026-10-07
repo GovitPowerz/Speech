@@ -1362,7 +1362,7 @@ def test_epochs_zero_with_backprop_on_still_returns_a_real_gradient(name: str, t
 
     `Epochs 0` + `BackPropagationActivated true` is the modern training loop's seam shape --
     one forward+backward fold at theta, backprop harvested, no engine-internal weight move
-    (phase-5 F11, `drivers/train.py::_modern_config_text`). It is EXACTLY the configuration a
+    (phase-5 F11, owned by `fold_run.FoldRun` since issue #22). It is EXACTLY the configuration a
     naive reading of "inference-only" would mistake for inference and gate the retention off,
     which would silently zero every gradient the Python SMORMS3 loop reads -- the same class
     of failure F10 and F11 already cost this repo twice.

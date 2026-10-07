@@ -6,7 +6,7 @@ fixed base net, a typed-bailed engine path) and assigns `_HYPERPARAM_PENALTY`. B
 genuine engine defect was indistinguishable from a legitimately-invalid region (both silently
 became `1e6`), and a fully-penalized run reported that `1e6` gbest with no diagnostic -- worse,
 the un-guarded gbest-refetch used to CRASH instead of reporting, since re-scoring a fully-penalized
-gbest hits the identical failure a second time (see `train_hyperparam_search`'s `_chdir` block).
+gbest hits the identical failure a second time (see `train_hyperparam_search`'s checkpoint step).
 
 These tests pin the fix WITHOUT any engine: `train_hyperparam_search` has no injectable scoring
 hook (unlike `train_modern`'s `train_epoch`/`validate`, Task 8's stub-testability convention), so

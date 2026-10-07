@@ -7,8 +7,8 @@ Verifies the three load-bearing pieces of hard-example mini-batching going live:
     rotation), pinned exactly on a crafted 5-file corpus;
   * the rotation cursor advancing across steps (each `next_listing` consumes one
     `get_new_batch`, cycling the pool -- pure, no RNG);
-  * `engine.forward_backward`'s now-live `listing_override`: when set it REBUILDS
-    the engine on that listing via `make_engine` (the fresh-`fsp`-per-eval
+  * `_backprop_inner`'s batch mode: every SMORMS3 step runs a FRESH gradient fold on the
+    listing `_BatchStep.next_fold` just rotated (the fresh-`fsp`-per-eval
     analogue), and when None it runs the passed engine unchanged (the full-corpus
     4c path -- the exit-gate-preserving default).
 
@@ -25,15 +25,16 @@ No `speech_rs` needed here (the fresh-engine build is exercised through a fake i
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
 from speech.batching import create_batches
-from speech.drivers.train import _BatchRunner, class_balance_values
+from speech.drivers import train as train_module
+from speech.drivers.train import _backprop_inner, _BatchRunner, _BatchStep, class_balance_values
 from speech.engine import forward_backward
+from speech.fold_run import FoldResult
 
 from tests._result_rows import channel_results_from_matrix
 
@@ -240,70 +241,63 @@ def test_batch_listing_gate_forces_flat_weight_when_nb_target_classes_exceeds_tw
     assert list(runner.last_index) == [0, 1, 2, 3]
 
 
-# ---- forward_backward: the now-live listing_override ------------------------------------
+# ---- the batch step: a fresh gradient fold per SMORMS3 step -------------------------------
 
 
-class _FakeEngine:
-    def __init__(self) -> None:
-        self.ran = False
-        self.set_weights_calls: list[tuple[int, list]] = []
+class _FakeFold:
+    """A `FoldRun` stand-in: one row of config 0 with seg_cost=10, seg_count=2 -> nn_cost_seg=5,
+    and a 3-row derivative matrix whose count-normalized gradient is [1, 1, 3]."""
 
-    def set_weights(self, pos: int, nets: list) -> None:
-        self.set_weights_calls.append((pos, nets))
+    def __init__(self, listing: object = None, *, backprop: bool = True) -> None:
+        self.listing = listing
+        self.backprop = backprop
+        self.runs: list[list[np.ndarray]] = []
 
-    def run(self) -> None:
-        self.ran = True
-
-    def channel_results(self) -> dict[str, np.ndarray]:
-        # one row of config 0 with seg_cost=10, seg_count=2 -> nn_cost_seg=5.
+    def run(self, weights: list[np.ndarray] | None = None) -> FoldResult:
+        self.runs.append([np.asarray(w, dtype=np.float64) for w in weights or []])
         res = [0.0] * 18
         res[4], res[17] = 10.0, 2.0
-        return asdict(channel_results_from_matrix(np.array([[1.0, 1.0, 1.0, *res]], dtype=np.float64)))
+        results = channel_results_from_matrix(np.array([[1.0, 1.0, 1.0, *res]], dtype=np.float64))
+        derivs = [np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 1.0]], dtype=np.float64)] if self.backprop else []
+        return FoldResult(results=results, derivs=derivs, weights=[w.copy() for w in self.runs[-1]], twin=False)
 
-    def weights_derivatives(self, pos: int) -> list[np.ndarray]:
-        return [np.array([[1.0, 1.0], [2.0, 2.0], [3.0, 1.0]], dtype=np.float64)]
 
-
-def test_forward_backward_listing_override_none_uses_passed_engine() -> None:
-    """listing_override=None (the 4c full-corpus default): the passed engine is run
-    as-is, make_engine is NEVER consulted -- this is the branch the twin/algo-3 exit
-    gates ride, so it must stay byte-identical to pre-Task-10."""
-    eng = _FakeEngine()
-    calls: list[Path] = []
-
-    def make_engine(p: Path) -> _FakeEngine:
-        calls.append(p)
-        return eng
-
-    f, grads = forward_backward(eng, [np.ones(3)], None, make_engine=make_engine)
-
-    assert eng.ran and calls == [], "the passed engine ran; make_engine was not called"
+def test_forward_backward_assembles_cost_and_gradient_off_the_fold() -> None:
+    """`forward_backward` is ComputeGradient's contract over ONE fold: `f = NNCostSeg`, the
+    gradient `col0 / max(1, col1)` truncated to the input length."""
+    fold = _FakeFold()
+    f, grads = forward_backward(cast(Any, fold), [np.ones(3)])
+    assert len(fold.runs) == 1 and np.array_equal(fold.runs[0][0], np.ones(3))
     assert f == pytest.approx(5.0)
     assert list(grads[0]) == pytest.approx([1.0, 1.0, 3.0])
+    assert list(forward_backward(cast(Any, _FakeFold()), [np.ones(2)])[1][0]) == pytest.approx([1.0, 1.0]), "truncated to the input length"
 
 
-def test_forward_backward_listing_override_rebuilds_via_make_engine(tmp_path: Path) -> None:
-    """listing_override set: forward_backward REBUILDS the engine on that listing via
-    make_engine (the fresh-fsp-per-eval contract) and runs the FRESH engine, not the
-    passed one."""
-    passed = _FakeEngine()
-    fresh = _FakeEngine()
-    got: list[Path] = []
-    lst = tmp_path / "_batch.lst"
-
-    def make_engine(p: Path) -> _FakeEngine:
-        got.append(p)
-        return fresh
-
-    f, grads = forward_backward(passed, [np.ones(3)], lst, make_engine=make_engine)
-
-    assert got == [lst], "make_engine called once with the batch listing path"
-    assert fresh.ran and not passed.ran, "the fresh (rebuilt) engine ran; the passed one did not"
-    assert f == pytest.approx(5.0)
+def test_forward_backward_refuses_a_forward_only_fold() -> None:
+    with pytest.raises(ValueError, match="gradient fold"):
+        forward_backward(cast(Any, _FakeFold(backprop=False)), [np.ones(3)])
 
 
-def test_forward_backward_listing_override_requires_make_engine(tmp_path: Path) -> None:
-    """A listing_override with no make_engine is a programming error (there is no way
-    to build the fresh engine) -- surfaced as ValueError, not a silent full-corpus run."""
-    with pytest.raises(ValueError, match="make_engine"):
-        forward_backward(_FakeEngine(), [np.ones(3)], tmp_path / "_batch.lst")
+def test_backprop_inner_batch_mode_runs_a_fresh_fold_per_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Batch mode: each SMORMS3 step rotates the shared runner (`next_listing`) and runs a FRESH
+    gradient fold on that listing -- the passed full-corpus fold is never run (the
+    fresh-fsp-per-eval contract, `ComputeGradient.m:53/:77`); the listing handed to each fold
+    is the runner's `_batch.lst` and the selection rotates step to step."""
+    built: list[_FakeFold] = []
+
+    def fake_fold_run(cfg: dict[str, str], workdir: Path, *, backprop: bool, listing: object = None) -> _FakeFold:
+        assert backprop is True and cfg["Algo_choice"] == "3" and workdir == tmp_path
+        fold = _FakeFold(listing, backprop=backprop)
+        built.append(fold)
+        return fold
+
+    monkeypatch.setattr(train_module, "FoldRun", fake_fold_run)
+    runner = _runner(tmp_path, minibatch=2, nb_worst=0)
+    full = _FakeFold()
+    trained, hist = _backprop_inner(cast(Any, full), 3, [0], batch=_BatchStep(runner, {"Algo_choice": "3"}), seed_weights=[np.ones(3)])
+
+    assert full.runs == [], "the full-corpus fold is never run in batch mode"
+    assert len(built) == 3 and all(len(f.runs) == 1 for f in built), "one fresh fold per step, run once"
+    assert all(f.listing == tmp_path / "_batch.lst" for f in built)
+    assert list(runner.last_index) == [0, 4], "three rotations of a 2-file batch over 5 files"
+    assert len(hist) == 3 and trained[0].shape == (3,)

@@ -305,6 +305,12 @@ def test_lid_phseq_dispatches_into_lid_path(tmp_path: Path) -> None:
         B.run_baseline("lid-phseq", tmp_path, tmp_path)
 
 
+def _stub_run_state() -> type:
+    """A `RunState` stand-in for the engine-free plumbing tests: both constructors return a bare
+    object (nothing downstream reads it once the trainer and the scorers are stubbed)."""
+    return type("RS", (), {"from_config": staticmethod(lambda *a, **k: object()), "from_parsed": staticmethod(lambda *a, **k: object())})
+
+
 def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The dry_run OVERRIDES (subset/epochs/steps/patience) + metadata recording, exercised
     with a synthetic corpus tree + stubbed engine boundary: `speech_rs.load_toml_config`,
@@ -335,7 +341,7 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
     monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
     monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one: None)
-    monkeypatch.setattr(B, "RunState", type("RS", (), {"from_config": staticmethod(lambda *a, **k: object())}))
+    monkeypatch.setattr(B, "RunState", _stub_run_state())
 
     class _Res:
         checkpoint_dir = str(tmp_path / "out" / "checkpoint")
@@ -410,7 +416,7 @@ def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple
     setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
     monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
     monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one: None)
-    monkeypatch.setattr(B, "RunState", type("RS", (), {"from_config": staticmethod(lambda *a, **k: object())}))
+    monkeypatch.setattr(B, "RunState", _stub_run_state())
     monkeypatch.setattr(B, "_score_packs_on_test", lambda *a, **k: (None, None, None))
 
     class _Res:
@@ -591,7 +597,7 @@ def test_run_baseline_sad_flag_plumbing_with_stub_train(tmp_path: Path, monkeypa
     setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
     monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
     monkeypatch.setattr(B, "_generate_sad_seed_pack", lambda flat, out, seed, scheme, forget: None)
-    monkeypatch.setattr(B, "RunState", type("RS", (), {"from_config": staticmethod(lambda *a, **k: object())}))
+    monkeypatch.setattr(B, "RunState", _stub_run_state())
     monkeypatch.setattr(B, "_score_sad_pack_on_test", lambda *a, **k: (None, None))
 
     class _Res:

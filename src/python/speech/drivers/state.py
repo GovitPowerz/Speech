@@ -156,8 +156,16 @@ class RunState(BaseModel):
 
     @classmethod
     def from_config(cls, config: Path, out_dir: Path) -> RunState:
+        return cls.from_parsed(parse_legacy_config(Path(config).read_text()), config, out_dir)
+
+    @classmethod
+    def from_parsed(cls, cfg: dict[str, str], config: Path, out_dir: Path) -> RunState:
+        """The state of an already-parsed config: `config` is the path the parsed map stands
+        for (its directory is the workdir every relative config path resolves against); the
+        listing is read from there when it exists. `from_config` is parse + this; a caller
+        holding a variant of a config on disk (another listing) builds its state here instead
+        of writing the variant out to parse it back."""
         config = Path(config).resolve()
-        cfg = parse_legacy_config(config.read_text())
         ps = ps_from_config(cfg)
         listing_path = config.parent / cfg["fileslisting"]
         listing = read_listing(listing_path) if listing_path.exists() else []

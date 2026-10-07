@@ -273,14 +273,13 @@ def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, Pat
     pooled `dcf` over the windowed `.part.xml` refs). Returns the pooled DcfReport + the dump
     dir (the per-file hyp xmls, for the boundary comparison)."""
     cfg = dict(parse_legacy_config(a.base_config.read_text()))
-    # Point the weight-file key at the TRAINED checkpoint: the fast SAD driver loads weights
-    # only at construction (`set_weights` now BAILS LOUDLY on `Processor::FastSpectral`,
-    # T6b -- see `_eval_config`'s note), so both paths must load the trained pack from the
-    # config to score the same net. `_score_sad_pack_on_test` also `set_weights`-injects the
-    # same pack on exact (redundant there -- config-time injection already did it -- but
-    # load-bearing for `run_baseline`'s OWN internal exact-only scoring calls, which do NOT
-    # repoint BLSTM_weightsFile this way); on fast it SKIPS the call entirely (T6b) since
-    # the config repoint above is that path's only, already-sufficient injection.
+    # Point the weight-file key at the TRAINED checkpoint so the base config itself names the
+    # net under test on both paths. `_score_sad_pack_on_test`'s fold run injects the same
+    # pack again -- `set_weights` on exact, a workdir copy of the pack + a repointed key on
+    # fast (where `set_weights` bails, T6b; the fold run writes the copy from the array it was
+    # handed, byte-identical to `best_sad.bin`) -- so this repoint is redundant with the fold
+    # run on both paths and kept so the config is the same apples-to-apples file `_eval_config`
+    # builds for the LID arms.
     cfg["BLSTM_weightsFile"] = str((a.ckpt / "best_sad.bin").resolve())
     cfg["Inference_Path"] = inference_path
     dump_dir = a.out_dir / f"parity_sad_{tag}"

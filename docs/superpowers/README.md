@@ -38,5 +38,6 @@ Smaller changes start from a GitHub issue instead of a spec: the issue carries a
 | issue | plan | status |
 |---|---|---|
 | [#23 Typed channel result: one owner for the 18+N result-row columns](https://github.com/GovitPowerz/Speech/issues/23) | [plan](plans/2026-10-07-issue-23-typed-channel-result.md) | implemented |
+| [#22 Fold run: one module for running the engine through the seam](https://github.com/GovitPowerz/Speech/issues/22) | none: implemented from the grilling comment, recorded in [ADR-0010](../adr/0010-the-seam-takes-a-config-map-and-one-module-owns-the-fold-run.md) | implemented |
 
 The specs are the record of what was decided and why; where a spec's wording was later found wrong, the correction is dated in place (the Phase 11 spec carries three dated amendments) rather than rewritten, so the trail from premise to result stays readable.
