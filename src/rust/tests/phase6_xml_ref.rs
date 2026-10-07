@@ -149,6 +149,7 @@ fn xml_reference_scored_run_through_dispatch() {
     bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
 
     for (chan, row) in cfg0 {
+        let row = row.to_row();
         let chan = *chan;
         let refc = load_ref_vrcts(&xml_text, chan, 0.0, audio_duration);
         // Non-vacuity: each channel's reference carries its own SPEECH span.

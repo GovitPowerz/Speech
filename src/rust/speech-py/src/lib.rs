@@ -140,6 +140,87 @@ impl Engine {
         self.inner.results_matrix().to_pyarray(py)
     }
 
+    /// The channel results by name (issue #23): one dict, one numpy array per
+    /// field, one entry per (file, config, channel) in ascending order -- the
+    /// typed view `results_matrix()` is rendered from, minus the WER tallies
+    /// (columns 7-13, dead surface, not exposed). Ids are 0-based like
+    /// every `pos` on this seam. `lid_target` is `-1` for a row with no in-band
+    /// target, `lid_scores` is `n x N` with the target column already decoded
+    /// (`N == 0` on a run without LID; a row without a LID block, impossible in
+    /// a well-formed bag, is zero-filled), `lid_correct` is a bool array.
+    /// EMPTY arrays before the first `run()`. COPY: every array is freshly
+    /// allocated; `speech.engine.ChannelResults.from_seam` is the Python wrapper.
+    fn channel_results<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let rows = self.inner.channel_results();
+        let n = rows.len();
+        let n_classes = rows
+            .iter()
+            .filter_map(|(_, _, _, r)| r.lid.as_ref().map(|l| l.scores.len()))
+            .max()
+            .unwrap_or(0);
+        let mut file = Vec::with_capacity(n);
+        let mut conf = Vec::with_capacity(n);
+        let mut chan = Vec::with_capacity(n);
+        let mut pfa = Vec::with_capacity(n);
+        let mut pmiss = Vec::with_capacity(n);
+        let mut error_rate = Vec::with_capacity(n);
+        let mut time_per_hour = Vec::with_capacity(n);
+        let mut seg_cost = Vec::with_capacity(n);
+        let mut audio_duration = Vec::with_capacity(n);
+        let mut speech_duration = Vec::with_capacity(n);
+        let mut lid_cost = Vec::with_capacity(n);
+        let mut lid_correct = Vec::with_capacity(n);
+        let mut lid_target = Vec::with_capacity(n);
+        let mut lid_scores = numpy::ndarray::Array2::<f64>::zeros((n, n_classes));
+        let mut lid_count = Vec::with_capacity(n);
+        let mut seg_count = Vec::with_capacity(n);
+        for (i, (f, c, ch, r)) in rows.into_iter().enumerate() {
+            file.push(f as i64);
+            conf.push(c as i64);
+            chan.push(ch as i64);
+            pfa.push(r.pfa);
+            pmiss.push(r.pmiss);
+            error_rate.push(r.error_rate);
+            time_per_hour.push(r.time_per_hour);
+            seg_cost.push(r.seg_cost);
+            audio_duration.push(r.audio_duration);
+            speech_duration.push(r.speech_duration);
+            seg_count.push(r.seg_count);
+            lid_cost.push(r.lid_cost());
+            lid_count.push(r.lid_count());
+            lid_correct.push(r.lid.as_ref().is_some_and(|l| l.correct));
+            lid_target.push(
+                r.lid
+                    .as_ref()
+                    .and_then(|l| l.target)
+                    .map_or(-1, |t| t as i64),
+            );
+            if let Some(l) = &r.lid {
+                for (k, &v) in l.scores.iter().enumerate() {
+                    lid_scores[[i, k]] = v;
+                }
+            }
+        }
+        let d = PyDict::new(py);
+        d.set_item("file", file.into_pyarray(py))?;
+        d.set_item("conf", conf.into_pyarray(py))?;
+        d.set_item("chan", chan.into_pyarray(py))?;
+        d.set_item("pfa", pfa.into_pyarray(py))?;
+        d.set_item("pmiss", pmiss.into_pyarray(py))?;
+        d.set_item("error_rate", error_rate.into_pyarray(py))?;
+        d.set_item("time_per_hour", time_per_hour.into_pyarray(py))?;
+        d.set_item("seg_cost", seg_cost.into_pyarray(py))?;
+        d.set_item("audio_duration", audio_duration.into_pyarray(py))?;
+        d.set_item("speech_duration", speech_duration.into_pyarray(py))?;
+        d.set_item("lid_cost", lid_cost.into_pyarray(py))?;
+        d.set_item("lid_correct", lid_correct.into_pyarray(py))?;
+        d.set_item("lid_target", lid_target.into_pyarray(py))?;
+        d.set_item("lid_scores", lid_scores.into_pyarray(py))?;
+        d.set_item("lid_count", lid_count.into_pyarray(py))?;
+        d.set_item("seg_count", seg_count.into_pyarray(py))?;
+        Ok(d)
+    }
+
     /// Config-`pos`'s per-network flat weight vectors, preserving the pairing:
     /// `[sad, lid]` for algo 6, `[flat]` for algo 3/4/5, `[]` for algo 0/1/2.
     /// COPY: each `Vec<f64>` is moved into its own numpy array.

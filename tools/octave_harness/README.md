@@ -28,7 +28,7 @@ here `addpath` the vendored sources and **call** them, never modify them.
 | `stage_rprop.m` | Drives the REAL `Rprop.m` function over a crafted derivative/cost sequence; dumps per-step `weights/delta/deltaweight/derivatives`. |
 | `smorms3_f_df.m` | The injected SMORMS3 objective (scripted gradient + `theta_out` round-trip offset). |
 | `stage_vec2struct.m` | Drives the REAL `vec2struct.m` (+ `printConfig.m`) over six algo/mask/PS cases; dumps the genome<->config bijection goldens. |
-| `stage_computecost.m` | **FALLBACK-TIER** transcription of the `ComputeCost.m` cost-assembly lines (`:285-652`); drives the balance-law 0/3/4/5/10 error + cost, sortrows aggregation, deriv averaging, pooled stats, and L2 over the committed 4a/4b MultiConfigResults fixtures + crafted variants. |
+| `stage_computecost.m` | **FALLBACK-TIER** transcription of the `ComputeCost.m` cost-assembly lines (`:285-652`); drives the balance-law 0/3/4/5/10 error + cost, deriv averaging, pooled stats, and L2 over the committed 4a/4b MultiConfigResults fixtures + crafted variants. |
 | `stage_qpso.m` + `qpso_modified/` | **SUBSTITUTION-COPY TIER** (Phase 4c Task 11): drives a MODIFIED-COPY of `QuantumPSO.m` (`qpso_modified/QuantumPSO.m`) whose rand/randperm/stblrnd are substituted by reads of a shared committed random table (`tbl_rand`/`tbl_randperm`/`tbl_stblrnd`, a stage-global cursor) and whose `CostFunction` is the quadratic `qpso_surrogate.m`; the wall-clock reseed (`:91`) is removed. Every substitution is a `% HARNESS-SUB` comment quoting the original line. Dumps the post-init state + per-epoch pos/pbest/gbest trajectory + a standalone Levy sample; the Python `speech.optimizers.quantum_pso` replays the SAME table (`tests/reference_data/phase4c/qpso_random_table.bin`). |
 | `stage_writelisting.m` (Phase 4d Task 8) | **TIER 1**: drives the REAL, unmodified `WriteListing.m`/`WriteWeightedListing.m` -- 7-file/3-worker `fliplr` shard interleave (plain) plus 8 crafted `%g`-boundary values (weighted). Both write plain text directly (no `.mat` conversion step, unlike every other stage). |
 | `stage_scr.m` (Phase 4d Task 11) | **HYBRID TIER**: `PS.Corpora.Train.langMapConf`/`.listing` come from a REAL Tier-1 call to `processListing.m` (so the alphabetical class-key order is never hand-simulated); `Test_BLSTM.m:251-269`'s `.scr`-writer loop body is FALLBACK-TIER transcription (`Test_BLSTM.m` is a top-level script wired to a `CostFunction.m` engine shell-out, no callable function boundary exists), with every builtin/vendored call inside the loop (`textscan`, `sortrows`, `keys`, `num2str`, `fprintf`) real and unmodified. |
@@ -60,7 +60,7 @@ worker `.mat`/`.bin` the shell-out wrote, and its `!`-escape cleaning (`:37`) de
 pre-injected worker files before the shell-out -- so there is no injection point that leaves
 the vendored `.m` unmodified. The stage transcribes only the PURE assembly lines
 (`:285-652`) line-for-line with `% legacy:` provenance and lets Octave execute the real
-MATLAB builtins (sortrows/median/hist/std/cumsum/exp/log). See `IMPROVEMENTS.md` (phase4c
+MATLAB builtins (median/hist/std/cumsum/exp/log). See `IMPROVEMENTS.md` (phase4c
 ComputeCost fallback-tier entry).
 
 `stage_qpso.m` is the **SUBSTITUTION-COPY TIER**: `QuantumPSO.m:91` reseeds `rand` from the

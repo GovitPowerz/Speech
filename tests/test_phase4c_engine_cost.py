@@ -6,9 +6,9 @@ the VENDORED `legacy/Optimizer_V6.2.2/functions/ComputeCost.m` pure ASSEMBLY lin
 (:285-652), since ComputeCost.m's top half shells out to the engine and cannot run in
 Octave (see the stage header + `scripts/extract_phase4c_computecost_fixtures.py`). Each
 group pins the Python port (`speech.engine`) against Octave's real MATLAB semantics
-(sortrows stable-ascending, median, hist center-binning, std ddof=1, cumsum, exp/log):
+(median, hist center-binning, std ddof=1, cumsum, exp/log):
 
-  * aggregate_workers (sortrows [1 2 3]), average_derivs (col0/max(1,count)), l2_penalty,
+  * average_derivs (col0/max(1,count)), l2_penalty,
     pooled mean/nb, the crafted-integer balance 0/3/4/5, and every cpu_mean (median) golden
     -> STRICT (bit-exact; median is a single sort + at-most-one /2, not a multi-term
     reduction, so it never picks up the `close` group's accumulation gap below).
@@ -38,9 +38,9 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.engine import (
+    ChannelResults,
     CostBreakdown,
     CostParams,
-    aggregate_workers,
     average_derivs,
     compute_cost,
     l2_penalty,
@@ -48,6 +48,7 @@ from speech.engine import (
 )
 
 from tests._libm_gate import assert_f64_close
+from tests._result_rows import channel_results_from_matrix
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PHASE4C = REPO_ROOT / "tests" / "reference_data" / "phase4c"
@@ -116,21 +117,22 @@ def _mcr(subdir: Path, name: str) -> NDArray[np.float64]:
     return _read_bin_2d(subdir / name)
 
 
+def _rows(name: str) -> ChannelResults:
+    """An Octave `MultiConfigResults` golden, decoded to names (`tests/_result_rows.py`).
+
+    The crafted `cb_mcr` carries only the columns balances 0/3/4/5 read (legacy
+    `Error_vad(:,1:5)` and `(:,end)`): a 6-wide result block. The decoder takes the full
+    18-column row, so the block is widened with zeros between column 4 and the trailing
+    counter, which keeps every column the Octave stage read where it read it."""
+    mcr = _cc(name)
+    width = mcr.shape[1] - 3
+    if width < 18:
+        pad = np.zeros((mcr.shape[0], 18 - width), dtype=np.float64)
+        mcr = np.hstack([mcr[:, :-1], pad, mcr[:, -1:]])
+    return channel_results_from_matrix(mcr)
+
+
 # ==== aggregation / averaging / pooling / L2 (STRICT) ========================
-
-
-def test_aggregate_workers_sortrows() -> None:
-    got = aggregate_workers([_cc("agg_w1"), _cc("agg_w2")])
-    _assert_against(got, "agg_out")
-    # Mutation guard: sortrows([1 2 3]) actually reordered (the concatenation order was
-    # 2,1,1,2 by file; sorted it is 1,1,2,2).
-    assert list(got[:, 0]) == [1.0, 1.0, 2.0, 2.0]
-
-
-def test_aggregate_workers_drops_empty() -> None:
-    """`[X; []] == X`: an empty worker contributes nothing (legacy :219)."""
-    got = aggregate_workers([_cc("agg_w1"), np.zeros((0, 0)), _cc("agg_w2")])
-    _assert_against(got, "agg_out")
 
 
 def test_average_derivs() -> None:
@@ -172,7 +174,7 @@ def test_balance_crafted(balance: int) -> None:
         balance_backprop=float(cast(float, MANIFEST["balance_backprop"])),
         algo=3,
     )
-    cost, bd = compute_cost(_cc("cb_mcr"), 1, balance, params)
+    cost, bd = compute_cost(_rows("cb_mcr"), 0, balance, params)
     _assert_against(bd.error, f"cb{balance}_error")
     _assert_against(cost, f"cb{balance}_cost")
     _assert_against(bd.nn_cost_seg, f"cb{balance}_nnseg")
@@ -183,8 +185,8 @@ def test_balance_3_vs_4_over90_saturation() -> None:
     """Mutation guard: the `0*` (balance 3) vs `1*` (balance 4) over-90 saturation
     coefficient MUST make the error vectors diverge on the Pfa/Pmiss>90 rows."""
     p = CostParams(mode=0, balance_backprop=0.5, algo=3)
-    _, b3 = compute_cost(_cc("cb_mcr"), 1, 3, p)
-    _, b4 = compute_cost(_cc("cb_mcr"), 1, 4, p)
+    _, b3 = compute_cost(_rows("cb_mcr"), 0, 3, p)
+    _, b4 = compute_cost(_rows("cb_mcr"), 0, 4, p)
     assert not np.array_equal(b3.error, b4.error), "over-90 saturation coefficient not exercised"
 
 
@@ -193,9 +195,9 @@ def test_balance_3_vs_4_over90_saturation() -> None:
 
 @pytest.mark.parametrize("balance", [0, 5])
 def test_balance_tier2_committed(balance: int) -> None:
-    mcr = _mcr(PHASE4A, "tier2_spectral_MultiConfigResults.bin")
+    results = channel_results_from_matrix(_mcr(PHASE4A, "tier2_spectral_MultiConfigResults.bin"))
     params = CostParams(mode=0, balance_backprop=0.5, algo=3)
-    cost, bd = compute_cost(mcr, 1, balance, params)
+    cost, bd = compute_cost(results, 0, balance, params)
     _assert_against(bd.error, f"tier2_b{balance}_error")
     _assert_against(cost, f"tier2_b{balance}_cost")
     _assert_against(bd.cpu_mean, f"tier2_b{balance}_cpumean")
@@ -205,7 +207,7 @@ def test_balance_tier2_committed(balance: int) -> None:
 
 
 def test_balance10_two_class_cutoff_search() -> None:
-    cost, bd = compute_cost(_cc("b10a_mcr"), 1, 10, CostParams(mode=0, algo=6))
+    cost, bd = compute_cost(_rows("b10a_mcr"), 0, 10, CostParams(mode=0, algo=6))
     assert bd.cutoff is not None
     _assert_against(bd.cutoff, "b10a_cutoff")
     _assert_against(bd.error, "b10a_error")
@@ -217,7 +219,7 @@ def test_balance10_two_class_cutoff_search() -> None:
 
 
 def test_balance10_three_class_else_branch() -> None:
-    cost, bd = compute_cost(_cc("b10b_mcr"), 1, 10, CostParams(mode=0, algo=6))
+    cost, bd = compute_cost(_rows("b10b_mcr"), 0, 10, CostParams(mode=0, algo=6))
     # >2 classes -> the per-file cutoff-vector branch (no scalar cutoff).
     assert bd.cutoff is None
     _assert_against(bd.error, "b10b_error")
@@ -231,7 +233,7 @@ def test_balance10_two_class_zero_zero_interior_cutoff() -> None:
     wide interior span of the hist grid where BOTH cumulative curves are identically zero,
     so argmin(|n-n2|) alone is not enough -- the branch instead takes the midpoint between
     the nearest edges of the two distributions."""
-    cost, bd = compute_cost(_cc("b10c_mcr"), 1, 10, CostParams(mode=0, algo=6))
+    cost, bd = compute_cost(_rows("b10c_mcr"), 0, 10, CostParams(mode=0, algo=6))
     assert bd.cutoff is not None
     _assert_against(bd.cutoff, "b10c_cutoff")
     _assert_against(bd.error, "b10c_error")
@@ -247,11 +249,11 @@ def test_balance10_two_class_zero_zero_interior_cutoff() -> None:
 
 def test_twin_committed_nn_costs() -> None:
     """NNCostSeg / NNCostLID raw pieces off the committed twin (algo 6) fixture."""
-    from speech.engine import _error_vad, _nn_cost_lid, _nn_cost_seg
+    from speech.engine import _nn_cost_lid, _nn_cost_seg
 
-    ev = _error_vad(_mcr(PHASE4B, "twin_train_MultiConfigResults.bin"), 1)
-    _assert_against(_nn_cost_seg(ev), "twin_nnseg")
-    _assert_against(_nn_cost_lid(ev), "twin_nnlid")
+    r = channel_results_from_matrix(_mcr(PHASE4B, "twin_train_MultiConfigResults.bin")).for_config(0)
+    _assert_against(_nn_cost_seg(r), "twin_nnseg")
+    _assert_against(_nn_cost_lid(r), "twin_nnlid")
 
 
 # ==== assembly-contract sanity ============================================================
@@ -260,10 +262,10 @@ def test_twin_committed_nn_costs() -> None:
 def test_compute_cost_rejects_deferred_balances() -> None:
     for balance in (6, 7, 8, 9):
         with pytest.raises(ValueError, match="deferred to 4d"):
-            compute_cost(_cc("cb_mcr"), 1, balance, CostParams())
+            compute_cost(_rows("cb_mcr"), 0, balance, CostParams())
 
 
 def test_breakdown_is_the_dataclass() -> None:
-    _, bd = compute_cost(_cc("cb_mcr"), 1, 0, CostParams())
+    _, bd = compute_cost(_rows("cb_mcr"), 0, 0, CostParams())
     assert isinstance(bd, CostBreakdown)
     assert bd.cutoff is None and bd.nn_cost_lid == 0.0

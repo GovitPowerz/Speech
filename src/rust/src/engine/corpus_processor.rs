@@ -36,6 +36,7 @@ use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
 use crate::engine::bag_of_processors::{BagOfProcessors, Processor, get_i32_default};
+use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
 use crate::io::matfile::MatWriter;
@@ -59,10 +60,12 @@ pub struct GradCheckReport {
 /// Port of `CorpusProcessor` (`CorpusProcessor.h`/`.cpp`): mode dispatch, the epoch
 /// loop, corpus-level gradient check, and `.mat` result reduction.
 ///
-/// `results` is `file -> conf -> chan -> 18-col row` (the legacy nested `map`
-/// keyed identically). `res_per_conf`/`results_e` are the transformed matrices
-/// (`transformResults`, `:342-389`). The four `*_mem` matrices accumulate per-epoch
-/// cost/badClassif/costLID/badLIDClassif rows.
+/// `results` is `file -> conf -> chan -> ChannelResult` (the legacy nested `map`
+/// keyed identically, its 18+N-col row rendered by `ChannelResult::to_row`).
+/// `results_e` is the rendered `MultiConfigResults` matrix (`transformResults`,
+/// `:342-389`); the per-config lists the fold reads are built from `results` at
+/// `saveAndUpdate` time ([`Self::results_per_config`]). The four `*_mem` matrices
+/// accumulate per-epoch cost/badClassif/costLID/badLIDClassif rows.
 pub struct CorpusProcessor {
     training_epochs: usize,
     epsilon: f64,
@@ -70,8 +73,7 @@ pub struct CorpusProcessor {
     processors: BagOfProcessors,
     mode: Mode,
     output_file_name: String,
-    results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>>,
-    res_per_conf: Vec<Array2<f64>>,
+    results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
     results_e: Array2<f64>,
     cost_mem: Array2<f64>,
     bad_classif_mem: Array2<f64>,
@@ -175,7 +177,6 @@ impl CorpusProcessor {
             mode,
             output_file_name,
             results: BTreeMap::new(),
-            res_per_conf: Vec::new(),
             results_e: Array2::zeros((0, 0)),
             cost_mem: Array2::zeros((1, nb_of_conf)),
             bad_classif_mem: Array2::zeros((1, nb_of_conf)),
@@ -355,7 +356,6 @@ impl CorpusProcessor {
         let n = n.max(1) as usize;
 
         // legacy: :147-148 clear per epoch.
-        self.res_per_conf.clear();
         self.results.clear();
         let mut input_statistics: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::new();
 
@@ -375,10 +375,10 @@ impl CorpusProcessor {
         let nb_of_conf = self.processors.nb_of_conf();
 
         type LaneEntry = (
-            usize,                                      // file index j
-            BTreeMap<usize, BTreeMap<usize, Vec<f64>>>, // results_j (conf -> chan -> row)
-            BTreeMap<usize, Vec<Array2<f64>>>,          // derivs_j (all confs)
-            BTreeMap<usize, Vec<InputStatistics>>,      // stats_j (all confs)
+            usize,                                           // file index j
+            BTreeMap<usize, BTreeMap<usize, ChannelResult>>, // results_j (conf -> chan -> result)
+            BTreeMap<usize, Vec<Array2<f64>>>,               // derivs_j (all confs)
+            BTreeMap<usize, Vec<InputStatistics>>,           // stats_j (all confs)
         );
         type LaneOut = Result<Vec<LaneEntry>>;
 
@@ -561,9 +561,12 @@ impl CorpusProcessor {
         let mut cost_lid_row = vec![0.0; nb];
         let mut bad_lid_row = vec![0.0; nb];
 
+        // legacy: :379-380 _ResPerConf -- the per-config channel results, in the same
+        // ascending (file, chan) order the matrix rows take.
+        let per_conf = Self::results_per_config(&self.results, nb);
         self.processors.save_and_update(
             &self.output_file_name,
-            &self.res_per_conf,
+            &per_conf,
             &mut self.best_cost,
             derivs,
             stats,
@@ -583,34 +586,47 @@ impl CorpusProcessor {
     }
 
     /// Port of `CorpusProcessor::transformResults()` (`:342-389`): ascending
-    /// file-key iteration (BTreeMap), rows `[file+1, conf+1, chan+1, res...]`,
-    /// per-conf matrices pre-sized `2*nb_files` rows then truncated to the counters
+    /// file-key iteration (BTreeMap), rows `[file+1, conf+1, chan+1, res...]`
+    /// pre-sized `2*nb_files*nb_conf` rows then truncated to the counter
     /// (`conservativeResize` == truncate; row width from the FIRST result's len).
+    /// The legacy's per-conf matrices (`_ResPerConf`) are not kept: the fold reads
+    /// [`Self::results_per_config`] instead.
     fn transform_results(&mut self) {
-        let (results_e, res_per_conf) = Self::transform_results_impl(
+        self.results_e = Self::transform_results_impl(
             &self.results,
             self.processors.nb_of_conf(),
             self.corpus.nb_of_files(),
         );
-        self.results_e = results_e;
-        self.res_per_conf = res_per_conf;
+    }
+
+    /// The legacy `_ResPerConf[conf]` (`:379-380`) as typed values borrowed from
+    /// `results`: config `ii`'s channel results in ascending (file, chan) order,
+    /// the order the fold sums in.
+    pub fn results_per_config(
+        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
+        nb_of_conf: usize,
+    ) -> Vec<Vec<&ChannelResult>> {
+        let mut per_conf: Vec<Vec<&ChannelResult>> = (0..nb_of_conf).map(|_| Vec::new()).collect();
+        for confs in results.values() {
+            for (&conf, chans) in confs {
+                per_conf[conf].extend(chans.values());
+            }
+        }
+        per_conf
     }
 
     /// Pure core of [`Self::transform_results`], parameterized for the unit test.
     fn transform_results_impl(
-        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>>,
+        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
-    ) -> (Array2<f64>, Vec<Array2<f64>>) {
-        // legacy: :343-344 pre-sizes.
+    ) -> Array2<f64> {
+        // legacy: :343-344 pre-size.
         let nb_elements = 2 * nb_of_conf * nb_of_files;
-        let nb_elements_per_conf = 2 * nb_of_files;
 
         let mut counter = 0usize;
-        let mut counters = vec![0usize; nb_of_conf];
         let mut initialized = false;
         let mut results_e: Array2<f64> = Array2::zeros((0, 0));
-        let mut res_per_conf: Vec<Array2<f64>> = Vec::new();
         let mut res_width = 0usize;
 
         // legacy: :352 BOOST_FOREACH over _Results (BTreeMap == ascending file key).
@@ -632,19 +648,18 @@ impl CorpusProcessor {
                 res_width = mmap
                     .get(&0)
                     .and_then(|chan_map| chan_map.get(&0))
-                    .map(|v| v.len())
+                    .map(|r| r.to_row().len())
                     .unwrap_or(0);
                 results_e = Array2::zeros((nb_elements, 3 + res_width));
-                res_per_conf = (0..nb_of_conf)
-                    .map(|_| Array2::zeros((nb_elements_per_conf, res_width)))
-                    .collect();
                 initialized = true;
             }
             // legacy: :365-382 per conf (ascending) then per chan (ascending).
             for (conf_idx, chan_map) in mmap {
                 let config_nb = conf_idx + 1;
-                for (chan_idx, res) in chan_map {
+                for (chan_idx, result) in chan_map {
                     let chan_nb = chan_idx + 1;
+                    // The ONE place the result row is written (`ChannelResult::to_row`).
+                    let res = result.to_row();
                     // legacy: :375-377 line = [file+1, conf+1, chan+1, res...].
                     results_e[[counter, 0]] = (file_idx + 1) as f64;
                     results_e[[counter, 1]] = config_nb as f64;
@@ -653,28 +668,17 @@ impl CorpusProcessor {
                         results_e[[counter, 3 + c]] = v;
                     }
                     counter += 1;
-                    // legacy: :379-380 _ResPerConf[conf].row(counters[conf]) = res.
-                    let cc = config_nb - 1;
-                    let row = counters[cc];
-                    for (c, &v) in res.iter().enumerate() {
-                        res_per_conf[cc][[row, c]] = v;
-                    }
-                    counters[cc] += 1;
                 }
             }
         }
 
-        // legacy: :385-388 conservativeResize (truncate) to the counters.
+        // legacy: :385-388 conservativeResize (truncate) to the counter.
         if !initialized {
-            // No results at all -> empty ResultsE, empty per-conf mats.
-            return (Array2::zeros((0, 0)), Vec::new());
+            // No results at all -> empty ResultsE.
+            return Array2::zeros((0, 0));
         }
-        let truncated_e = truncate_rows(&results_e, counter);
-        let truncated_per_conf = (0..nb_of_conf)
-            .map(|ii| truncate_rows(&res_per_conf[ii], counters[ii]))
-            .collect();
         let _ = res_width;
-        (truncated_e, truncated_per_conf)
+        truncate_rows(&results_e, counter)
     }
 
     /// Port of `CorpusProcessor::saveResults(epoch)` (`:391-404`): the 5 named
@@ -842,10 +846,11 @@ impl CorpusProcessor {
 
     /// The cost accumulation over `self.results` for the gradCheck central
     /// difference (`:271-292`), switching on config-0's algo AND (for algo 6)
-    /// the network index `ii`: algo 3/4 -> `cost += row[4]`, `counter +=
-    /// row[len-1]` (`:275-277`); algo 5 -> `row[14]`/`row[len-2]` (`:278-280`);
-    /// algo 6 net `ii == 0` -> the SAD columns `row[4]`/`row[len-1]`, net
-    /// `ii == 1` -> the LID columns `row[14]`/`row[len-2]` (`:281-288`).
+    /// the network index `ii`: algo 3/4 -> the SAD pair `seg_cost`/`seg_count`
+    /// (`:275-277`); algo 5 -> the LID pair `lid.cost`/`lid.count` (`:278-280`);
+    /// algo 6 net `ii == 0` -> the SAD pair, net `ii == 1` -> the LID pair
+    /// (`:281-288`). Which pair a net owns is still decided by the algo
+    /// integer here; moving it onto the driver is issue #25's.
     ///
     /// The legacy `counter` is a `long` accumulating doubles (per-element
     /// truncation); every accumulated value is an exact integer count stored in
@@ -857,23 +862,25 @@ impl CorpusProcessor {
             let Some(conf0) = self.results.get(&jj).and_then(|f| f.get(&0)) else {
                 continue;
             };
-            for row in conf0.values() {
+            for r in conf0.values() {
+                let lid_cost = r.lid_cost();
+                let lid_count = r.lid_count() as f64;
                 match algo0 {
                     3 | 4 => {
-                        cost += row[4];
-                        counter += row[row.len() - 1];
+                        cost += r.seg_cost;
+                        counter += r.seg_count as f64;
                     }
                     5 => {
-                        cost += row[14];
-                        counter += row[row.len() - 2];
+                        cost += lid_cost;
+                        counter += lid_count;
                     }
                     6 => {
                         if ii == 0 {
-                            cost += row[4];
-                            counter += row[row.len() - 1];
+                            cost += r.seg_cost;
+                            counter += r.seg_count as f64;
                         } else {
-                            cost += row[14];
-                            counter += row[row.len() - 2];
+                            cost += lid_cost;
+                            counter += lid_count;
                         }
                     }
                     _ => {
@@ -901,6 +908,22 @@ impl CorpusProcessor {
     /// before any run observes the ctor's `Array2::zeros((0, 0))` seed.
     pub fn results_matrix(&self) -> &Array2<f64> {
         &self.results_e
+    }
+
+    /// The channel results by name, one entry per (file, config, channel) in
+    /// ascending (file, conf, chan) order: the typed view the result matrix is
+    /// rendered from (issue #23). Same contract as [`Self::results_matrix`]:
+    /// EMPTY until the first completed `run()`.
+    pub fn channel_results(&self) -> Vec<(usize, usize, usize, &ChannelResult)> {
+        let mut out = Vec::new();
+        for (&file, confs) in &self.results {
+            for (&conf, chans) in confs {
+                for (&chan, result) in chans {
+                    out.push((file, conf, chan, result));
+                }
+            }
+        }
+        out
     }
 
     /// Config-`pos`'s full weight-vector set: one flat vec per network (algo 6
@@ -975,10 +998,10 @@ impl CorpusProcessor {
     /// Pure `transformResults` core (test hook for `transform_results_ordering`).
     #[doc(hidden)]
     pub fn transform_results_for_test(
-        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>>,
+        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
-    ) -> (Array2<f64>, Vec<Array2<f64>>) {
+    ) -> Array2<f64> {
         Self::transform_results_impl(results, nb_of_conf, nb_of_files)
     }
 
@@ -1105,7 +1128,7 @@ impl CorpusProcessor {
     ) -> Result<Array2<f64>> {
         let corpus = Corpus::from_config(&configs[0])?;
         let mut bag = BagOfProcessors::from_configs(&mut configs, mode)?;
-        let mut results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, Vec<f64>>>> =
+        let mut results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>> =
             BTreeMap::new();
         for j in 0..corpus.nb_of_files() {
             let item = corpus.item(j);
@@ -1114,7 +1137,7 @@ impl CorpusProcessor {
                 results.insert(j, tmp);
             }
         }
-        let (results_e, _) =
+        let results_e =
             Self::transform_results_impl(&results, bag.nb_of_conf(), corpus.nb_of_files());
         Ok(results_e)
     }

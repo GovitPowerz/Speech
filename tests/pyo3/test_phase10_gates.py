@@ -107,10 +107,9 @@ the pack length, a finite initial NNCostSeg in the log law's INTERIOR both in ag
 for every INDIVIDUAL file (the frame-weighted aggregate alone could hide a saturated
 minority), and a strictly positive analytic gradient L2 at epoch 0.
 
-Per-file costs are read by slicing `results_matrix()`'s PREFIX off first (`[:, 3:]`,
-exactly as `engine.py::_error_vad` does) and only then applying the per-res column
-convention -- a `mean <= max` self-check precedes the bound so the pair cannot silently be
-the wrong two quantities (the phase-9 file shipped that bug once).
+Per-file costs are read by name off `Engine.channel_results()` (`seg_cost` / `seg_count`,
+issue #23) -- a `mean <= max` self-check precedes the bound so the pair cannot silently be
+the wrong two quantities (the phase-9 file once read the wrong column off the matrix).
 
 =====================================================================================
 vs BLSTM, and vs v1 -- RECORDED, NOT GATED (spec R5, verbatim)
@@ -248,7 +247,7 @@ from speech.config_bridge import nnet_spec  # noqa: E402 -- after importorskip, 
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch, _modern_config_text  # noqa: E402
-from speech.engine import forward_backward  # noqa: E402
+from speech.engine import ChannelResults, forward_backward  # noqa: E402
 
 # (cell, direction, MEASURED pack length) -- the S3.3 matrix, phase-11 T9 grown 8 -> 10 with
 # the fifth cell. Each length is `init_weights`' own output at the arm's overlaid config,
@@ -533,7 +532,7 @@ def _probe(out: dict[str, Any]) -> Callable[[RunState, int, ModernTrainParams], 
             (workdir / "_preflight.config").write_text(_modern_config_text(state.base_config, algo, backprop=True))
             engine = speech_rs.Engine(["_preflight.config"], "-m")
             cost, grads = forward_backward(engine, weights)
-            results = np.asarray(engine.results_matrix(), dtype=np.float64)
+            results = ChannelResults.from_seam(engine.channel_results()).for_config(0)
         finally:
             os.chdir(prev)
 
@@ -544,15 +543,11 @@ def _probe(out: dict[str, Any]) -> Callable[[RunState, int, ModernTrainParams], 
         out["grad_l2"] = float(np.linalg.norm(grad))
         out["grad_linf"] = float(np.max(np.abs(grad)))
         out["dead"] = int(np.count_nonzero(grad == 0.0))
-        # PER-FILE normalized cost. `results_matrix()` rows are PREFIXED
-        # (`[file+1, conf+1, chan+1, res...]`, corpus_processor.rs), so the res block must be
-        # sliced off exactly as `engine.py::_error_vad` does (`[:, 3:]`) BEFORE applying the
-        # per-res column convention -- `res[4]` is the cumulative error and `res[-1]` the
-        # counter, the same pair `_nn_cost_seg` sums. Indexing the prefixed matrix directly
-        # would read `res[1]` (100*Pmiss) instead: the bug the phase-9 file shipped once, and
-        # the `mean <= max` invariant below is what catches it.
-        error_vad = results[results[:, 1] == 1][:, 3:]
-        out["per_file_cost_max"] = float(np.max(error_vad[:, 4] / np.maximum(1.0, error_vad[:, -1])))
+        # PER-FILE normalized cost: the `seg_cost` / `seg_count` pair `_nn_cost_seg` sums,
+        # read by name off the seam (issue #23). This file once read the wrong column off
+        # the prefixed matrix (100*Pmiss); the `mean <= max` invariant in the test below is
+        # what catches that class of slip.
+        out["per_file_cost_max"] = float(np.max(results.seg_cost / np.maximum(1.0, results.seg_count)))
         ckpt = Path(state.out_dir) / "checkpoint"
         ckpt.mkdir(parents=True, exist_ok=True)
         return _Shim(checkpoint_dir=str(ckpt), history=[_Rec(float(cost), float(cost))], best_val_cost=float(cost))
@@ -631,10 +626,10 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     assert out["init_cost"] < 0.05 * _LOG_CLAMP, f"init cost {out['init_cost']:.5f} sits near the log-law clamp {_LOG_CLAMP:.3f} (saturated init)"
     # SELF-CHECK FIRST: `init_cost` is a count-weighted MEAN of the per-file normalized
     # costs, so it can never exceed their max. If this fires, the two quantities are not the
-    # pair they claim to be (wrong `results_matrix` column -- see `_probe`).
+    # pair they claim to be (wrong `channel_results` field -- see `_probe`).
     assert out["per_file_cost_max"] >= out["init_cost"] - 1e-9, (
         f"{cell}/{direction} per-file max {out['per_file_cost_max']:.6f} < aggregate mean {out['init_cost']:.6f}: "
-        "the per-file quantity is not the cost (wrong results_matrix column?)"
+        "the per-file quantity is not the cost (wrong channel_results field?)"
     )
     # per-file worst case: measured <= 0.466 (0.84% of the clamp); same 5% pin -> 5.9x headroom.
     assert out["per_file_cost_max"] < 0.05 * _LOG_CLAMP, (

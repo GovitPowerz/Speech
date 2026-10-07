@@ -2973,3 +2973,36 @@ it to one sentence rather than leaving it a question; see that section, not repe
   `OTHER_ALLOWANCE`) stays unexercised on every committed fixture including this phase's
   (7.3 s of headroom on the transformer row). A candidate for the streaming-endgame phase
   named in the phase-11 spec's Deferred section, not for a docs task to tighten in passing.
+
+## Issue #23 -- the typed channel result: the mutation battery
+
+The plan (`docs/superpowers/plans/2026-10-07-issue-23-typed-channel-result.md`, Task 7) named
+four items; item 3 is run twice, once at the wire (`to_row`) and once at the fold's own
+scaling, because the leg the plan named for it sits on the fold, not the wire. **Five applied
+mutations**, each: apply -> run ONLY the named catcher's file(s) (FOREGROUND, R6-capped) ->
+record the verbatim failure line -> revert -> re-run green -> tree clean. Nothing under
+`src/` was committed; the module rebuilt through `maturin` for item 2 was rebuilt again from
+the reverted tree before any later pyo3 run.
+
+**5 of 5 caught; 3 of 5 by the leg the plan NAMED, 2 by other legs.** That is the
+non-generous reading and it is the right one. By mutation: **3 named / 2 by-other / 0 not
+caught**.
+
+| # | mutation | named catcher | verdict |
+|---|---|---|---|
+| 1 | `to_row()` swaps `seg_cost` (col 4) and `lid.cost` (col 14) | the phase-4a `.mat` golden (`phase4a_train_golden::tier2_train_epoch_weights_golden`) | CAUGHT: `MultiConfigResults[0,7]: a=0x0 (0) b=0x403bceabbb1bb38a (27.807307905447978)`; the two twin `.mat` goldens in `phase4b_corpus_lid` fail at the same cell (4.333 vs 0; 36.386 vs 0). `phase4a_tier1_e2e` is blind by construction (TDC has no net, so col 4 is 0 either way) |
+| 2 | `to_row()` drops the `+ 200` re-encode of the target column | `phase4b_confusion_golden` AND `tests/pyo3/test_channel_results.py` | `phase4b_confusion_golden` **NOT CAUGHT** (11/11 green): it feeds decoded `LidResult`s straight to `confusion_from_results`, so `to_row` is not on its path -- the plan named the wrong leg. CAUGHT by the cross-pin (`lid_target: seam array([0, 1]) != decoded wire array([-1, -1])`), by the module's three tests including the round-trip proptest, and by the twin `.mat` goldens (`MultiConfigResults[0,19]`: 65.287 vs 265.287) |
+| 3a | `to_row()` writes `lid.correct` as `1.0` | `phase4a_save_update::aggregation_bit_exact` | **NOT CAUGHT** by the named catcher (5/5 green): the fold reads the struct, `to_row` is not on its path. CAUGHT by the module's three tests (`row_width_and_slots`, `from_row_inverts_to_row`, the proptest) and the twin `.mat` goldens (`MultiConfigResults[0,18]`: 1 vs 100) |
+| 3b | `save_and_update` scales the flag by `1.0` instead of `100.0` | `phase4a_save_update::aggregation_bit_exact` | CAUGHT: `left: 99.5 right: 50.0`; `cost_mem_rows_written` (99.0 vs 0.0) and `update_called_with_neg_costlid` fail with it |
+| 4 | `tests/_result_rows.py` decodes the target as `v - 150` | the `confusion_matrix` tests (`test_phase4c_scoring.py`) and `test_balance10_*` | `test_phase4c_scoring.py` **NOT CAUGHT** (its inputs are inline decoded `(target, scores)` pairs since this issue, and `confusionThresh.m` never had an Octave golden -- the plan misnamed it). CAUGHT by the three `test_balance10_*` Octave goldens and by `test_result_rows.py::test_lid_row_decodes_the_target_column` |
+
+### The one fact the two by-others share
+
+A mutation at the WIRE edge (`to_row`, the Python decoder) is owned only by the legs that
+cross the wire: the `.mat` goldens, the round-trip proptest, the seam cross-pin. A leg that
+consumes the typed value directly (`phase4b_confusion_golden`, `phase4a_save_update`, the
+inline `confusion_matrix` unit tests) is blind to the layout BY CONSTRUCTION, which is the
+module's design restated as a test fact: the readers no longer touch the layout, so no
+reader can catch a layout bug. The battery therefore names the wire legs as the owners of
+`to_row` / `from_encoded` / `channel_results_from_matrix`, and the fold tests as the owners
+of the fold's arithmetic (3b), and nothing else should be read into a green reader test.

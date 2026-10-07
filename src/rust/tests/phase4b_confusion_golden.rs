@@ -28,7 +28,18 @@
 mod common;
 
 use common::{assert_bits_eq, load_bin_phase4b};
+use speech::engine::channel_result::LidResult;
 use speech::engine::confusion::{confusion_error, confusion_from_results};
+
+/// The fixture is the oracle's ENCODED matrix; each row goes through the
+/// production decode (`LidResult::from_encoded`), the one the bag applies.
+fn lid_rows(input: &ndarray::Array2<f64>) -> Vec<LidResult> {
+    input
+        .rows()
+        .into_iter()
+        .map(|r| LidResult::from_encoded(0.0, 0, false, &r.to_vec()))
+        .collect()
+}
 
 /// FIXED (phase 5, F5): `confusion_from_results` now decodes PER ROW and skips
 /// no-target rows, so it deliberately DIVERGES from the legacy sticky
@@ -46,7 +57,7 @@ fn confusion_matrix_matches_harness_transcription() {
     let input = load_bin_phase4b("confusion_input.bin");
     let want_matrix = load_bin_phase4b("confusion_matrix.bin");
 
-    let (got_matrix, _error) = confusion_from_results(&input);
+    let (got_matrix, _error) = confusion_from_results(&lid_rows(&input));
 
     assert_bits_eq(&got_matrix, &want_matrix, "confusion_matrix");
 }
@@ -69,7 +80,7 @@ fn error_matches_real_confusion2string_and_printconfusionmatrix() {
         "fixture precondition: the harness already asserted error1 == error2"
     );
 
-    let (matrix, error_from_results) = confusion_from_results(&input);
+    let (matrix, error_from_results) = confusion_from_results(&lid_rows(&input));
     let error_standalone = confusion_error(&matrix);
 
     assert_eq!(

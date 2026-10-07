@@ -72,6 +72,13 @@ _Avoid_: processor for the engine as a whole
 **Bag**:
 `BagOfProcessors`: the per-config set of drivers plus the result assembly and best-weight save gate.
 
+**Channel result**:
+The engine's outcome for one (file, config, channel): the scoring errors, the timing and durations, each net's cost and count, and for a LID driver the target class and per-class scores. Its wire form is the result row.
+_Avoid_: result record (a Record is a ledger entry), Error_vad row
+
+**Result row**:
+The flat legacy serialization of a Channel result: 18 columns, 18 plus the class count for a LID driver, the target class signalled in-band (`> 150`, `- 200`). `MultiConfigResults` is the matrix of result rows, each prefixed by its file, config and channel ids.
+
 **Corpus**:
 The `fileslisting` plus `language2classmapping` pair a run reads; a Corpus item is one listing row.
 

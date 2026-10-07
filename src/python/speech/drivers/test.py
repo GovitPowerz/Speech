@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 
 from speech.drivers.state import RunState
 from speech.drivers.train import _net_names
+from speech.engine import ChannelResults
 from speech.weight_bridge import read_weight_vector
 
 F64 = np.float64
@@ -38,19 +39,6 @@ def write_scores(scores_row: NDArray[np.float64], class_keys: list[str], filenam
         dial = key[-3:]
         lines.append(f"{filename} {lang}-{dial} {float(s[int(k)]):.15f}")
     return "\n".join(lines) + "\n"
-
-
-def _decode_lid_scores(error_vad_row: NDArray[np.float64]) -> NDArray[np.float64]:
-    """The per-class LID scores from an algo-6 result row: columns `16:-2`, in-band
-    decoded (`>150 -> value - 200` marks the target class; others are raw).
-
-    DEGRADES SILENTLY on a single-net result row (algo 3/4/5 -- no confusion columns
-    inserted, `engine/bag_of_processors.rs` fixed 18-column width): `[16:-2]` on an
-    18-wide row is `[16:16]`, an empty slice, not an `IndexError`. `.scr` scoring is a
-    Twin-only (algo 6) artifact of `Test_BLSTM.m`; nothing here guards against calling
-    it on a non-Twin checkpoint."""
-    scores = np.asarray(error_vad_row[16:-2], dtype=F64)
-    return np.where(scores > 150.0, scores - 200.0, scores)
 
 
 def _class_keys(mapping_path: Path) -> list[str]:
@@ -107,10 +95,10 @@ def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) 
 
     Only meaningful for the Twin (algo 6): `.scr` is a LID artifact, and a single-net
     checkpoint (algo 3/4/5, post-Task-9 generalized drivers) degrades SILENTLY, not with
-    an error -- `_decode_lid_scores` slices an empty LID-score column range out of the
-    18-wide non-LID result row, so `write_scores` gets an empty `scores_row` and writes a
-    near-blank `.scr` file (zero score lines, just a trailing newline) per file. No gate
-    stops `evaluate` from being pointed at a non-algo-6 checkpoint."""
+    an error -- a run without LID has an `n x 0` `lid_scores` block, so `write_scores`
+    gets an empty `scores_row` and writes a near-blank `.scr` file (zero score lines, just
+    a trailing newline) per file. No gate stops `evaluate` from being pointed at a
+    non-algo-6 checkpoint."""
     workdir = Path(state.config_path).parent
     cfg = dict(state.base_config)
     cfg["BLSTM_BackPropagationActivated"] = "false"
@@ -145,14 +133,13 @@ def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) 
         if not fast:
             engine.set_weights(0, nets)
         engine.run()
-        results = np.asarray(engine.results_matrix(), dtype=F64)
+        results = ChannelResults.from_seam(engine.channel_results())
     finally:
         os.chdir(prev)
 
     keys = _class_keys(workdir / state.base_config["language2classmapping"])
-    for row in results:
-        file_idx = int(row[0]) - 1
+    for i in range(len(results)):
+        file_idx = int(results.file[i])
         filename = Path(state.listing[file_idx]["filename"]).name if 0 <= file_idx < len(state.listing) else f"file{file_idx}"
-        scores = _decode_lid_scores(row[3:])
-        (scores_dir / f"{filename}.scr").write_text(write_scores(scores, keys, filename))
+        (scores_dir / f"{filename}.scr").write_text(write_scores(results.lid_scores[i], keys, filename))
     return scores_dir

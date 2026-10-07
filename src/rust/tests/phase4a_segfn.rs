@@ -128,6 +128,7 @@ fn scored_mode_result_columns() {
     bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
 
     for (chan, row) in cfg0 {
+        let row = row.to_row();
         let chan = *chan;
         let refc = load_ref_stm(&stm_text, chan, 0.0, 2.0, false);
         let report = compute_errors(&mut hyp[chan], Some(&refc), -1);
@@ -227,6 +228,7 @@ fn stereo_csv_reference_loads_per_channel() {
         "the CSV reference must carry a SPEECH span (non-vacuous)"
     );
     for (chan, row) in cfg0 {
+        let row = row.to_row();
         let chan = *chan;
         let mut h = hyp[chan].clone();
         let report = compute_errors(&mut h, Some(&refc), nb);
@@ -260,6 +262,7 @@ fn unscored_mode_zero_columns_and_vrcts() {
 
     let cfg0 = &results[&0];
     for (chan, row) in cfg0 {
+        let row = row.to_row();
         assert_eq!(row[0], 0.0, "col0 zero chan {chan}");
         assert_eq!(row[1], 0.0, "col1 zero chan {chan}");
         assert_eq!(row[2], 0.0, "col2 zero chan {chan}");
@@ -341,6 +344,7 @@ fn speech_duration_walk() {
     bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
 
     for (chan, row) in &results[&0] {
+        let row = row.to_row();
         // compute_errors sanitizes hyp in place; mirror that before the walk.
         let mut h = hyp[*chan].clone();
         let stm_text = std::fs::read_to_string(&stm).unwrap();
@@ -410,6 +414,7 @@ fn spectral_scored_cost_is_live() {
     let cfg0 = &results[&0];
     assert_eq!(cfg0.len(), 2, "two channels");
     for (chan, row) in cfg0 {
+        let row = row.to_row();
         assert!(
             row[17] > 0.0,
             "col17 nb_of_classif must be > 0 (live target) chan {chan}, got {}",
@@ -446,6 +451,7 @@ fn spectral_no_reference_zero_cost() {
     let cfg0 = &results[&0];
     assert_eq!(cfg0.len(), 2, "two channels");
     for (chan, row) in cfg0 {
+        let row = row.to_row();
         assert_eq!(
             row[4], 0.0,
             "col4 cumulative_error must be 0 with no reference chan {chan}"

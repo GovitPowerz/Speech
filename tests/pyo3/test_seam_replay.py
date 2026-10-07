@@ -339,7 +339,7 @@ def test_same_seed_determinism(tmp_path_factory: pytest.TempPathFactory) -> None
 
     `results_matrix()` IS the pre-`.mat`-write `ResultsE` (the same array
     `MultiConfigResults` is written from), so it carries the SAME wall-clock
-    timing column at index 6 (`assemble_scored_row`'s `time_per_hour`, offset
+    timing column at index 6 (`ChannelResult::to_row`'s `time_per_hour`, offset
     by the 3 leading id columns) -- genuinely non-deterministic (real elapsed
     time per run) and NOT part of the seam's own determinism contract. This
     was caught RED on the first run of this test (column 6 differed, every

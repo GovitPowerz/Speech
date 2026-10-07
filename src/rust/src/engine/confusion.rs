@@ -16,40 +16,42 @@
 
 use ndarray::Array2;
 
+use crate::engine::channel_result::LidResult;
+
 /// Port of `BagOfProcessors::PrintConfusionMatrix`'s matrix build
 /// (`BagOfProcessors.cpp:501-535`) plus the LIVE `Confusion2String` error call
 /// (`:540`, `confusion_error` below): returns the `(classNb+2) x (classNb+2)`
-/// confusion matrix (`classNb` = `results_lid.ncols()`) alongside the
-/// row-normalized error aggregate.
+/// confusion matrix (`classNb` = the class count of the first row) alongside
+/// the row-normalized error aggregate.
 ///
-/// Per row: any column value `> 150` marks the TARGET (correct) class,
-/// decoded to its real score via `score - 200`; every other column is a
-/// competing class's raw score, and the row's best (max) competitor is
-/// tracked. The target wins the row (diagonal + row/col totals incremented)
-/// iff its decoded score is STRICTLY greater than the best competitor's score
-/// (`:524`); a tie falls to the best-competitor branch (`:528-532`).
+/// Per row: the TARGET class is the row's in-band target, decoded once
+/// upstream ([`LidResult::from_encoded`]: the column `> 150`, its real score
+/// `v - 200`); every other column is a competing class's raw score, and the
+/// row's best (max) competitor is tracked by an ascending strict-`>` scan. The
+/// target wins the row (diagonal + row/col totals incremented) iff its decoded
+/// score is STRICTLY greater than the best competitor's score (`:524`); a tie
+/// falls to the best-competitor branch (`:528-532`).
 ///
 /// PER-ROW DECODE (FIXED in phase 5; the legacy sticky quirk is left behind):
-/// the four decode accumulators (`score_target`/`max_score_not_target`/
-/// `pos_target`/`pos_best_not_target`) are declared INSIDE the row loop, so a
-/// row can never inherit a prior row's target/competitor index. A row with NO
-/// in-band target (`pos_target` stays `0` -- no column `> 150`) is an
-/// out-of-set trial with no true class in the closed set, so it is SKIPPED
-/// entirely: credited to no cell, no total, and never to the index-header slot
-/// (row/col `0`). The matrix is therefore ORDER-INDEPENDENT.
-///
-/// The legacy `BagOfProcessors::PrintConfusionMatrix` instead declared
-/// `posTarget`/`posBestNotTarget` OUTSIDE the loop and reset only
-/// `scoreTarget`/`maxScoreNotTarget` per row (`:509-510,533-534`), so a
-/// no-target row inherited the LAST row's `posTarget` (or, on the very first
-/// row, the header slot `0`) -- a spurious, row-order-dependent attribution.
-/// The C++/Octave oracle harnesses still describe that sticky behavior; the
-/// port deliberately diverges here. See IMPROVEMENTS.md ([phase4b] STICKY).
+/// the legacy declared its decode accumulators (`scoreTarget`/
+/// `maxScoreNotTarget`/`posTarget`/`posBestNotTarget`) partly OUTSIDE the row
+/// loop (`:509-510,533-534`), so a row with NO in-band target inherited the
+/// LAST row's `posTarget` (or, on the very first row, the header slot `0`) --
+/// a spurious, row-order-dependent attribution. Here a row with no target
+/// (`target == None`) is an out-of-set trial with no true class in the closed
+/// set, so it is SKIPPED entirely: credited to no cell, no total, and never to
+/// the index-header slot (row/col `0`). The matrix is therefore
+/// ORDER-INDEPENDENT. The C++/Octave oracle harnesses still describe that
+/// sticky behavior; the port deliberately diverges here. See IMPROVEMENTS.md
+/// ([phase4b] STICKY).
 ///
 /// `classNb <= 1` reproduces the legacy's own gate (`:501`, `if (classNb >
 /// 1)`): no matrix is built, error stays `0.0`.
-pub fn confusion_from_results(results_lid: &Array2<f64>) -> (Array2<f64>, f64) {
-    let class_nb = results_lid.ncols();
+pub fn confusion_from_results<'a>(
+    rows: impl IntoIterator<Item = &'a LidResult>,
+) -> (Array2<f64>, f64) {
+    let mut rows = rows.into_iter().peekable();
+    let class_nb = rows.peek().map_or(0, |r| r.scores.len());
     if class_nb <= 1 {
         return (Array2::zeros((0, 0)), 0.0);
     }
@@ -62,26 +64,21 @@ pub fn confusion_from_results(results_lid: &Array2<f64>) -> (Array2<f64>, f64) {
     }
 
     // legacy: :512-535, ascending row loop (product/accumulation contract).
-    // FIXED (phase 5): the four decode accumulators are declared PER ROW (below),
-    // and a no-target row (`pos_target == 0`) is skipped -- see the fn doc.
-    for jj in 0..results_lid.nrows() {
+    // FIXED (phase 5): a no-target row is skipped -- see the fn doc.
+    for r in rows {
+        let Some(t) = r.target else {
+            // No in-band target this row: out-of-set trial, credited to no class.
+            continue;
+        };
+        let score_target = r.scores[t];
+        let pos_target = t + 1;
         let mut max_score_not_target = -1.0_f64;
         let mut pos_best_not_target = 0usize;
-        let mut pos_target = 0usize;
-        let mut score_target = -1.0_f64;
-        for kk in 0..class_nb {
-            let v = results_lid[[jj, kk]];
-            if v > 150.0 {
-                score_target = v - 200.0;
-                pos_target = kk + 1;
-            } else if v > max_score_not_target {
+        for (kk, &v) in r.scores.iter().enumerate() {
+            if kk != t && v > max_score_not_target {
                 max_score_not_target = v;
                 pos_best_not_target = kk + 1;
             }
-        }
-        if pos_target == 0 {
-            // No in-band target this row: out-of-set trial, credited to no class.
-            continue;
         }
         if score_target > max_score_not_target {
             confusion[[pos_target, pos_target]] += 1.0;
@@ -157,17 +154,16 @@ mod tests {
     /// (`tools/oracle_harness/main.cpp`'s `phase4b_confusion` block) and the
     /// golden test (`tests/phase4b_confusion_golden.rs`): a target-wins row, a
     /// target-loses row, a no-target row, and an ambiguous equal-scores row.
-    fn crafted_rows() -> Array2<f64> {
-        Array2::from_shape_vec(
-            (4, 3),
-            vec![
-                30.0, 280.0, 50.0, // A: target col1 wins (80 > max(30,50)=50)
-                220.0, 90.0, 10.0, // B: target col0 loses (20 <= max(90,10)=90)
-                10.0, 90.0, 40.0, // C: no target sentinel at all
-                50.0, 20.0, 250.0, // D: target col2 ties the best competitor (50 == 50)
-            ],
-        )
-        .unwrap()
+    fn crafted_rows() -> Vec<LidResult> {
+        [
+            [30.0, 280.0, 50.0], // A: target col1 wins (80 > max(30,50)=50)
+            [220.0, 90.0, 10.0], // B: target col0 loses (20 <= max(90,10)=90)
+            [10.0, 90.0, 40.0],  // C: no target sentinel at all
+            [50.0, 20.0, 250.0], // D: target col2 ties the best competitor (50 == 50)
+        ]
+        .iter()
+        .map(|r| LidResult::from_encoded(0.0, 0, false, r))
+        .collect()
     }
 
     /// Hand-computed expected confusion matrix for `crafted_rows` (row A
@@ -219,7 +215,7 @@ mod tests {
     /// Order-independence: identical whether this row is first, last, or alone.
     #[test]
     fn no_target_row_skipped_never_pollutes_header() {
-        let rows = Array2::from_shape_vec((1, 3), vec![10.0, 90.0, 40.0]).unwrap();
+        let rows = [LidResult::from_encoded(0.0, 0, false, &[10.0, 90.0, 40.0])];
         let (confusion, _error) = confusion_from_results(&rows);
         let want = Array2::from_shape_vec(
             (5, 5),
@@ -251,7 +247,10 @@ mod tests {
     /// matrix.
     #[test]
     fn cross_language_identity_no_target_skip() {
-        let input = Array2::from_shape_vec((2, 2), vec![5.0, 260.0, 20.0, 30.0]).unwrap();
+        let input = [
+            LidResult::from_encoded(0.0, 0, false, &[5.0, 260.0]),
+            LidResult::from_encoded(0.0, 0, false, &[20.0, 30.0]),
+        ];
         let (confusion, _error) = confusion_from_results(&input);
         let want = Array2::from_shape_vec(
             (4, 4),
@@ -325,7 +324,10 @@ mod tests {
     /// itself be fatal on a 0x0/1x1 matrix).
     #[test]
     fn single_class_gate_returns_empty() {
-        let single = Array2::from_shape_vec((3, 1), vec![10.0, 220.0, 5.0]).unwrap();
+        let single: Vec<LidResult> = [[10.0], [220.0], [5.0]]
+            .iter()
+            .map(|r| LidResult::from_encoded(0.0, 0, false, r))
+            .collect();
         let (confusion, error) = confusion_from_results(&single);
         assert_eq!(confusion.dim(), (0, 0));
         assert_eq!(error, 0.0);
@@ -344,7 +346,7 @@ mod tests {
     /// form to the classNb=3 case above.
     #[test]
     fn dead_binary_variant_not_ported() {
-        let rows = Array2::from_shape_vec((1, 2), vec![280.0, 30.0]).unwrap();
+        let rows = [LidResult::from_encoded(0.0, 0, false, &[280.0, 30.0])];
         let (confusion, _error) = confusion_from_results(&rows);
         // General-path shape: (classNb+2)x(classNb+2) = 4x4, NOT a 1x(2*maxIt+2)
         // histogram shape the dead ROC branch would have produced.
