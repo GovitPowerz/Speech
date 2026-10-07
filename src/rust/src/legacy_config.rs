@@ -75,11 +75,12 @@ pub(crate) fn splitstr(line: &str, delim: char) -> Vec<String> {
 /// [`splitstr`] (empty value -> `[]`, one trailing empty piece dropped), each piece
 /// splits on the `*` repeater (`2*3` -> three copies of `2`, `2*` -> one), and each
 /// element goes through `parse(element, key)`. An empty piece (`1,,2`, `*3`) reaches
-/// the element parser and errors as the legacy `read<T>` exits. The count is trimmed
-/// like the element (the legacy first-token read makes ` 2*2 ` read; `2* 3` is a
-/// leniency over its `lexical_cast`). Two deliberate tightenings: a bad repeat count
-/// (`2*x`, an uncaught throw in the legacy) and a third `*` part (`2*3*4`, the legacy
-/// ignores the `4`) are errors naming the key and the piece.
+/// the element parser and errors as the legacy `read<T>` exits. The piece is trimmed
+/// (the legacy first-token read makes ` 2*2 ` read). Three deliberate tightenings,
+/// each an error naming the key and the piece: a bad repeat count (`2*x`, an
+/// uncaught throw in the legacy), a third `*` part (`2*3*4`, the legacy ignores the
+/// `4`), and whitespace inside a repeat form (`2* 3`, `2 *3`, which that same
+/// first-token read truncates to one `2` where a per-part trim would read three).
 pub(crate) fn split_list<T: Clone>(
     value: &str,
     key: &str,
@@ -99,11 +100,14 @@ pub(crate) fn expand_repeat<T: Clone>(
     key: &str,
     parse: impl Fn(&str, &str) -> Result<T>,
 ) -> Result<Vec<T>> {
+    let piece = piece.trim();
     let parts = splitstr(piece, '*');
     let count = match parts.len() {
         0 | 1 => 1,
+        2 if piece.contains(char::is_whitespace) => {
+            bail!("bad repeat form '{piece}' for '{key}'")
+        }
         2 => parts[1]
-            .trim()
             .parse::<usize>()
             .map_err(|e| anyhow!("bad repeat count in '{piece}' for '{key}': {e}"))?,
         _ => bail!("bad repeat form '{piece}' for '{key}'"),
@@ -200,8 +204,8 @@ mod f64_reader_tests {
 
     /// Issue #50: the legacy `split_with_repeat` grammar -- one trailing empty piece
     /// dropped, the `*` repeater -- and the deliberate tightenings (an inner empty
-    /// piece, a bad or extra repeat part, a non-finite element) each error naming the
-    /// key.
+    /// piece, a bad or extra repeat part, whitespace inside a repeat form, a
+    /// non-finite element) each error naming the key.
     #[test]
     fn list_grammar() {
         let list = |v: &str| get_f64_list(&map("K", v), "K");
@@ -211,7 +215,9 @@ mod f64_reader_tests {
         assert_eq!(list("2*").unwrap(), vec![2.0]);
         assert_eq!(list("2*3*").unwrap(), vec![2.0; 3]);
         assert_eq!(list("").unwrap(), Vec::<f64>::new());
-        for bad in ["1,,2", "*3", "2*x", "2*3*4", "1,nan", "1,2,,", "2 3"] {
+        for bad in [
+            "1,,2", "*3", "2*x", "2*3*4", "1,nan", "1,2,,", "2 3", "2* 3", "2 *3",
+        ] {
             let err = list(bad).unwrap_err().to_string();
             assert!(err.contains("K"), "{bad:?}: {err}");
         }

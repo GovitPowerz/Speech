@@ -216,16 +216,8 @@ pub(crate) fn build_spec_aligned_to(
     let mut spec = if map.contains_key(&input_key) {
         NnetSpec::from_legacy(map, prefix)?
     } else {
-        let lstm0 = map
-            .get(&format!("{prefix}_LSTMNeuronNb"))
-            .ok_or_else(|| anyhow!("missing {prefix}_LSTMNeuronNb"))?
-            .split(',')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
         let mut m = map.clone();
-        m.insert(input_key, lstm0);
+        m.insert(input_key, bc.lstm_neuron_nb[0].to_string());
         NnetSpec::from_legacy(&m, prefix)?
     };
     spec.peepholes = [

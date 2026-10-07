@@ -9,7 +9,7 @@ use anyhow::Context;
 use indexmap::IndexMap;
 use serde::Deserialize;
 
-use crate::legacy_config::get_usize_list;
+use crate::legacy_config::{get_usize_list, parse_usize};
 
 /// NNType-0 network spec parsed from a legacy config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,7 @@ impl NnetSpec {
     /// Extract the spec from a parsed legacy config using the given algName prefix (e.g. "BLSTM").
     pub fn from_legacy(m: &IndexMap<String, String>, prefix: &str) -> anyhow::Result<NnetSpec> {
         let p = format!("{prefix}_");
+        let input_key = format!("{p}NNetInputSize");
         // `PeepholeFlags::from_legacy`'s rule (issue #32): absent -> true, malformed -> error.
         let flag = |k: &str| -> anyhow::Result<bool> {
             match m.get(k) {
@@ -41,11 +42,11 @@ impl NnetSpec {
             lstm_subsampling: get_usize_list(m, &format!("{p}LSTMSubSampling"))?,
             output_neuron_nb: get_usize_list(m, &format!("{p}OutputNeuronNb"))?,
             output_subsampling: get_usize_list(m, &format!("{p}OutputSubSampling"))?,
-            input_size: m
-                .get(&format!("{p}NNetInputSize"))
-                .with_context(|| format!("param '{p}NNetInputSize' not found in config"))?
-                .trim()
-                .parse()?,
+            input_size: parse_usize(
+                m.get(&input_key)
+                    .with_context(|| format!("param '{input_key}' not found in config"))?,
+                &input_key,
+            )?,
             peepholes: [
                 flag(&format!("{p}Forward_IsCellsPeepholesActive"))?,
                 flag(&format!("{p}Backward_IsCellsPeepholesActive"))?,

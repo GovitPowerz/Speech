@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use speech::cli::{Mode, ModeKind};
 use speech::config::NnetSpec;
 use speech::engine::bag_of_processors::BagOfProcessors;
-use speech::fast::driver::FastTwinLid;
+use speech::fast::driver::{FastTwinLid, build_aligned_spec};
 use speech::fast::stream::StreamingSession;
 use speech::features::pipeline::FeatureConfig;
 use speech::legacy_config::parse_legacy_config;
@@ -74,6 +74,13 @@ fn feature_config_rejects_non_finite_scalar_and_lag() {
     // list grammar: a trailing comma reads, a non-finite entry errors naming the key.
     let m = with(base, "BLSTM_TDCwindow", "0.02");
     let m = with(m, "BLSTM_TDCshift", "0.01");
+    let lags =
+        FeatureConfig::from_legacy(&with(m.clone(), "BLSTM_TDC_lags", "0.001,0.002,"), "BLSTM")
+            .unwrap()
+            .tdc
+            .unwrap()
+            .lags;
+    assert_eq!(lags, vec![0.001, 0.002]);
     let err = err_of(
         FeatureConfig::from_legacy(&with(m, "BLSTM_TDC_lags", "0.001,nan"), "BLSTM"),
         "BLSTM_TDC_lags nan",
@@ -189,11 +196,30 @@ fn nnet_spec_reads_the_list_grammar() {
             .lstm_neuron_nb,
         plain.lstm_neuron_nb
     );
-    let err = NnetSpec::from_legacy(&with(base, "BLSTM_OutputNeuronNb", "2*x"), "BLSTM")
+    let err = NnetSpec::from_legacy(&with(base.clone(), "BLSTM_OutputNeuronNb", "2*x"), "BLSTM")
         .unwrap_err()
         .to_string();
     assert!(
         err.contains("BLSTM_OutputNeuronNb") && err.contains("2*x"),
         "{err}"
     );
+    let err = NnetSpec::from_legacy(&with(base, "BLSTM_NNetInputSize", "23x"), "BLSTM")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("BLSTM_NNetInputSize") && err.contains("23x"),
+        "{err}"
+    );
+}
+
+/// The fast spec injects the absent `NNetInputSize` from the PARSED `LSTMNeuronNb[0]`,
+/// so a repeat form in the first element reads as the exact `BlstmConfig` reads it.
+#[test]
+fn fast_spec_injects_the_parsed_input_width() {
+    let m = with(
+        load("phase4b/twin_mode7.config"),
+        "BLSTM_LID_LSTMNeuronNb",
+        "36*1,24",
+    );
+    assert_eq!(build_aligned_spec(&m, "BLSTM_LID").unwrap().input_size, 36);
 }

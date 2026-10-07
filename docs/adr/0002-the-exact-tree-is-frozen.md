@@ -30,10 +30,10 @@ and list config read in the exact tree -- `features/pipeline.rs`, `tasks/sad.rs`
 `tasks/segmenter.rs`, `tasks/lid.rs`, `config.rs`, `engine/bag_of_processors.rs`,
 `engine/corpus.rs` -- by routing them through the one `legacy_config.rs` reader family, so a
 non-finite value errors naming the key everywhere and every list takes the legacy
-`split_with_repeat` grammar (one trailing comma dropped, the `*` repeater) with two deliberate
-tightenings, a bad repeat count and a third `*` part, both errors where the legacy aborted or
-silently dropped, issue #50). Training is exact-f64 only and bails
-loudly on the fast variants.
+`split_with_repeat` grammar (one trailing comma dropped, the `*` repeater) with three deliberate
+tightenings, a bad repeat count, a third `*` part and whitespace inside a repeat form, all
+errors where the legacy aborted, silently dropped or truncated, issue #50). Training is
+exact-f64 only and bails loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and
 `RESULTS.md`, never in `IMPROVEMENTS.md`, which tracks legacy-quirk debt only. Its only bound is

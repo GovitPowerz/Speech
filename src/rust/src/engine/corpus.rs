@@ -51,8 +51,9 @@ fn read_string(data: &str) -> Result<String> {
 /// before any further parsing (bail here). The `*` repeater and its count are
 /// the crate's one list grammar (`legacy_config::expand_repeat`, issue #50);
 /// what stays here is the `read<string>` FIRST-TOKEN truncation of each comma
-/// piece BEFORE its `*` split (`"x*3 junk"` -> three `x`), which the numeric
-/// lists do not do. A bad repeat count is an `Err` naming the key where the
+/// piece BEFORE its `*` split (`"x*3 junk"` -> three `x`); the legacy does the
+/// same for every `T`, where the port's numeric lists error on a trailing token
+/// instead (issue #32). A bad repeat count is an `Err` naming the key where the
 /// legacy `boost::lexical_cast<size_t>` throws uncaught (std::terminate).
 /// Verified against a compiled transcription of String.hpp:86-127.
 fn get_list_string(m: &IndexMap<String, String>, key: &str, delim: char) -> Result<Vec<String>> {
