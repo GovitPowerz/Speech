@@ -41,10 +41,10 @@ carry a `# legacy:` provenance comment at their site.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -79,6 +79,52 @@ class CostBreakdown:
     cpu_mean: float
     error: NDArray[np.float64]
     cutoff: float | None = None
+
+
+@dataclass(frozen=True)
+class ChannelResults:
+    """The engine's channel results by name, one entry per (file, config, channel) in
+    ascending order: the columnar view `speech_rs.Engine.channel_results()` returns.
+
+    Ids are 0-based, like every `pos` on the seam. `lid_target` is `-1` for a row with no
+    in-band target (an out-of-set trial), `lid_scores` is `n x N` with the target column
+    already decoded (`N == 0` on a run without LID). `lid_correct` is the `_IsLIDCorrect`
+    flag (100 / 0 on the wire). The wire layout itself lives in Rust
+    (`engine/channel_result.rs`) and, for the Octave goldens only, in `tests/_result_rows.py`.
+    """
+
+    file: NDArray[np.int64]
+    conf: NDArray[np.int64]
+    chan: NDArray[np.int64]
+    pfa: NDArray[np.float64]
+    pmiss: NDArray[np.float64]
+    error_rate: NDArray[np.float64]
+    time_per_hour: NDArray[np.float64]
+    seg_cost: NDArray[np.float64]
+    audio_duration: NDArray[np.float64]
+    speech_duration: NDArray[np.float64]
+    lid_cost: NDArray[np.float64]
+    lid_correct: NDArray[np.bool_]
+    lid_target: NDArray[np.int64]
+    lid_scores: NDArray[np.float64]
+    lid_count: NDArray[np.int64]
+    seg_count: NDArray[np.int64]
+
+    @classmethod
+    def from_seam(cls, d: Mapping[str, NDArray[Any]]) -> ChannelResults:
+        """Wrap the seam's dict (one array per field; every crossing is already a copy)."""
+        return cls(**{f.name: np.asarray(d[f.name]) for f in fields(cls)})
+
+    def __len__(self) -> int:
+        return int(self.file.shape[0])
+
+    def for_config(self, pos: int) -> ChannelResults:
+        """The rows of config `pos`. Raises on an empty selection: a silent empty
+        selection is a silent 0.0 cost, the failure mode a 1-vs-0-based slip produces."""
+        sel = self.conf == pos
+        if not np.any(sel):
+            raise ValueError(f"channel results: no row for config {pos} (configs present: {sorted(set(self.conf.tolist()))})")
+        return ChannelResults(**{f.name: getattr(self, f.name)[sel] for f in fields(self)})
 
 
 # ---- Pure results-derived pieces (shared by compute_cost + forward_backward) ------------
