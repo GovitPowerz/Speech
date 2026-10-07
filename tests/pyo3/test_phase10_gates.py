@@ -626,10 +626,10 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     assert out["init_cost"] < 0.05 * _LOG_CLAMP, f"init cost {out['init_cost']:.5f} sits near the log-law clamp {_LOG_CLAMP:.3f} (saturated init)"
     # SELF-CHECK FIRST: `init_cost` is a count-weighted MEAN of the per-file normalized
     # costs, so it can never exceed their max. If this fires, the two quantities are not the
-    # pair they claim to be (wrong `results_matrix` column -- see `_probe`).
+    # pair they claim to be (wrong `channel_results` field -- see `_probe`).
     assert out["per_file_cost_max"] >= out["init_cost"] - 1e-9, (
         f"{cell}/{direction} per-file max {out['per_file_cost_max']:.6f} < aggregate mean {out['init_cost']:.6f}: "
-        "the per-file quantity is not the cost (wrong results_matrix column?)"
+        "the per-file quantity is not the cost (wrong channel_results field?)"
     )
     # per-file worst case: measured <= 0.466 (0.84% of the clamp); same 5% pin -> 5.9x headroom.
     assert out["per_file_cost_max"] < 0.05 * _LOG_CLAMP, (

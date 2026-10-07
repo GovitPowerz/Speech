@@ -276,7 +276,7 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     # an assert bounded by 100/count that could not fail).
     assert out["per_file_cost_max"] >= out["init_cost"] - 1e-9, (
         f"{cell}/{direction} per-file max {out['per_file_cost_max']:.6f} < aggregate mean {out['init_cost']:.6f}: "
-        "the per-file quantity is not the cost (wrong results_matrix column?)"
+        "the per-file quantity is not the cost (wrong channel_results field?)"
     )
     # per-file normalized worst case: measured <= 0.442 (0.80% of the clamp); same 5% pin
     # -> 6.3x headroom on the worst config (mamba/forward).

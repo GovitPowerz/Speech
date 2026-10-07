@@ -13,8 +13,8 @@ top half shells out to the engine (`system('python RunFsp.py ...')`, :173-191) a
 run in Octave, and its `!`-escape cleaning (:37) deletes any pre-injected worker files, so
 there is no injection point that leaves the vendored .m unmodified. The stage transcribes
 the pure ASSEMBLY lines line-for-line (`% legacy:` provenance) and Octave executes them
-with real MATLAB semantics (sortrows stable-ascending, median, hist center-binning, std
-ddof=1, cumsum, exp/log). The port must match.
+with real MATLAB semantics (median, hist center-binning, std ddof=1, cumsum, exp/log).
+The port must match.
 
 STRICT (pure arithmetic, bit-exact everywhere): avg (col0/max(1,col1)),
 l2, pooled mean/nb, the crafted integer balance 0/3/4/5, and every cpu_mean (median) golden.
@@ -227,14 +227,14 @@ def main() -> None:
             "text": (
                 "Phase 4c Task 9: the ComputeCost/ComputeGradient cost-assembly bit-pins. GNU Octave runs "
                 "tools/octave_harness/stage_computecost.m -- a FALLBACK-TIER stage-local transcription of the "
-                "VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:285-652: sortrows "
+                "VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:285-652: "
                 "deriv averaging col0/max(1,col1), pooled input stats, L2, and the balance-law "
                 "0/3/4/5/10 error + cost) over the committed phase4a/4b MultiConfigResults fixtures + crafted "
                 "per-balance variants, including a b10c variant crafted so the balance-10 zero-zero interior-cutoff "
                 "midpoint branch (:571-572) fires. ComputeCost.m's top half shells out to the engine (system RunFsp) "
                 "and cannot run in Octave, and its !-escape cleaning (:37) deletes pre-injected worker files, so no "
                 "injection point leaves the vendored .m unmodified; the transcription is line-for-line with "
-                "`% legacy:` provenance and Octave executes the real MATLAB semantics (sortrows stable-ascending, "
+                "`% legacy:` provenance and Octave executes the real MATLAB semantics ("
                 "median, hist center-binning, std ddof=1, cumsum, exp/log). Column schema (Error_vad = MCR(:,4:end), "
                 "1-based): 1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 15 LID-num, 16 flag, 17:end-2 per-class "
                 "(>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: avg/l2/pooled-mean/crafted-integer "

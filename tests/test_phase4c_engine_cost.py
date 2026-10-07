@@ -6,7 +6,7 @@ the VENDORED `legacy/Optimizer_V6.2.2/functions/ComputeCost.m` pure ASSEMBLY lin
 (:285-652), since ComputeCost.m's top half shells out to the engine and cannot run in
 Octave (see the stage header + `scripts/extract_phase4c_computecost_fixtures.py`). Each
 group pins the Python port (`speech.engine`) against Octave's real MATLAB semantics
-(sortrows stable-ascending, median, hist center-binning, std ddof=1, cumsum, exp/log):
+(median, hist center-binning, std ddof=1, cumsum, exp/log):
 
   * average_derivs (col0/max(1,count)), l2_penalty,
     pooled mean/nb, the crafted-integer balance 0/3/4/5, and every cpu_mean (median) golden

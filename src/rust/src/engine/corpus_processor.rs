@@ -60,11 +60,12 @@ pub struct GradCheckReport {
 /// Port of `CorpusProcessor` (`CorpusProcessor.h`/`.cpp`): mode dispatch, the epoch
 /// loop, corpus-level gradient check, and `.mat` result reduction.
 ///
-/// `results` is `file -> conf -> chan -> 18-col row` (the legacy nested `map`
-/// keyed identically). `results_e` is the rendered `MultiConfigResults` matrix
-/// (`transformResults`, `:342-389`); the per-config lists the fold reads are built from
-/// `results` at `saveAndUpdate` time ([`Self::results_per_config`]). The four `*_mem` matrices accumulate per-epoch
-/// cost/badClassif/costLID/badLIDClassif rows.
+/// `results` is `file -> conf -> chan -> ChannelResult` (the legacy nested `map`
+/// keyed identically, its 18+N-col row rendered by `ChannelResult::to_row`).
+/// `results_e` is the rendered `MultiConfigResults` matrix (`transformResults`,
+/// `:342-389`); the per-config lists the fold reads are built from `results` at
+/// `saveAndUpdate` time ([`Self::results_per_config`]). The four `*_mem` matrices
+/// accumulate per-epoch cost/badClassif/costLID/badLIDClassif rows.
 pub struct CorpusProcessor {
     training_epochs: usize,
     epsilon: f64,

@@ -890,7 +890,7 @@ impl BagOfProcessors {
     }
 
     /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
-    /// column-sum/mean aggregation over the file x channel channel results, cost/
+    /// column-sum/mean aggregation over the file x channel results, cost/
     /// badClassif/costLID/badLIDClassif derivation, WER percent scaling, the
     /// `costMem`/`badClassifMem`/`costLIDMem`/`badClassifLIDMem` row writes, the
     /// `bestNNWeight_<pos+1>_<filename>` save, and the `costLID = -1.0` gate

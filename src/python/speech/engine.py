@@ -70,7 +70,7 @@ class CostBreakdown:
     cutoff: float | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class ChannelResults:
     """The engine's channel results by name, one entry per (file, config, channel) in
     ascending order: the columnar view `speech_rs.Engine.channel_results()` returns.
@@ -344,7 +344,6 @@ def forward_backward(
     listing_override: Path | None = None,
     *,
     make_engine: Callable[[Path], speech_rs.Engine] | None = None,
-    config_idx: int = 0,
     l2: float = 0.0,
     is_bias: list[NDArray[np.float64]] | None = None,
 ) -> tuple[float, list[NDArray[np.float64]]]:
@@ -388,7 +387,9 @@ def forward_backward(
     engine.set_weights(0, nets)
     engine.run()
 
-    r = ChannelResults.from_seam(engine.channel_results()).for_config(config_idx)
+    # Config 0 throughout: the cost is read off the same config the weights went into and
+    # the derivatives come out of.
+    r = ChannelResults.from_seam(engine.channel_results()).for_config(0)
     derivs = engine.weights_derivatives(0)
 
     f = _nn_cost_seg(r)

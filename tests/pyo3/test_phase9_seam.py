@@ -134,6 +134,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.config_bridge import nnet_spec, parse_legacy_config
+from speech.engine import ChannelResults
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_weight_vector, write_bin
 
@@ -395,12 +396,10 @@ def load_pack(name: str) -> NDArray[np.float64]:
 def corpus_cost(eng: Any, net: int = 0) -> float:
     """The scalar `grad_check` differentiates for network `net`, recomputed from the seam.
 
-    `CorpusProcessor::grad_check_cost` accumulates `row[cost] / row[counter]` over the
-    per-file result rows, with the column pair switching on the algo AND the network index:
-    algo 3/4 and algo-6 net 0 -> `row[4] / row[len-1]`; algo-6 net 1 (the LID net) ->
-    `row[14] / row[len-2]`. `results_matrix` is those rows with 3 leading id columns
-    (`[file+1, conf+1, chan+1, ...]`), so the cost column is `3 + 4` or `3 + 14` and the
-    counter is `-1` or `-2`.
+    `CorpusProcessor::grad_check_cost` accumulates `cost / count` over the channel results,
+    with the pair switching on the algo AND the network index: algo 3/4 and algo-6 net 0 ->
+    `seg_cost / seg_count`; algo-6 net 1 (the LID net) -> `lid_cost / lid_count`. Read by
+    name off `Engine.channel_results()` (issue #23).
 
     That identification is cross-checked directly by
     `test_corpus_cost_columns_match_the_engine_gradcheck` (this helper's FD against
@@ -408,9 +407,9 @@ def corpus_cost(eng: Any, net: int = 0) -> float:
     probe agreeing with the analytic fold to ~1e-7.
     """
     eng.run()
-    r = np.asarray(eng.results_matrix(), dtype=np.float64)
-    cost_col, counter_col = (3 + 4, -1) if net == 0 else (3 + 14, -2)
-    return float(r[:, cost_col].sum() / r[:, counter_col].sum())
+    r = ChannelResults.from_seam(eng.channel_results())
+    cost, count = (r.seg_cost, r.seg_count) if net == 0 else (r.lid_cost, r.lid_count)
+    return float(cost.sum() / count.sum())
 
 
 def analytic_gradient(eng: Any, net: int = 0) -> NDArray[np.float64]:

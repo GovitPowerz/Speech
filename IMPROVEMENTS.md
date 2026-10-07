@@ -2657,7 +2657,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   No committed legacy config mixes them; same-width bags (all-LID or all-non-LID with equal
   classNb) are fine. *Fix candidate:* per-conf row widths after parity. Since issue #23 the
   fold (`save_and_update`) reads `ChannelResult` fields and no longer depends on the width; the
-  panic is only at the `MultiConfigResults` matrix edge (`results_e`). Not test-pinned
+  hazard is only at the `MultiConfigResults` matrix edge (`results_e`): a WIDER row after conf
+  0's panics there, a NARROWER one (LID conf 0, non-LID conf 1) is written left-aligned with
+  zero padding, its two trailing counters landing mid-row, silently. Not test-pinned
   (reaching it requires a deliberately malformed multi-config setup); documented here per the
   width-growth review in Task 9.
 
@@ -2992,9 +2994,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   loop and then LOADS the worker `.mat`/`.bin` the shell-out wrote (`:216-282`), and the
   `!`-escape cleaning (`:37`) deletes any pre-injected worker files before the shell-out, so there
   is no injection point that leaves the vendored `.m` unmodified. The stage transcribes the PURE
-  assembly lines (`:285-652`: sortrows `[1 2 3]`, deriv averaging, pooled stats, L2, the balance
-  0/3/4/5/10 error + cost) line-for-line with `% legacy:` provenance and lets Octave execute the
-  real MATLAB builtins (sortrows/median/hist/std/cumsum/exp/log). The engine-shelling top half is
+  assembly lines (`:285-652`: deriv averaging, pooled stats, L2, the balance 0/3/4/5/10 error +
+  cost; the sortrows `[1 2 3]` aggregation left with `aggregate_workers` in issue #23)
+  line-for-line with `% legacy:` provenance and lets Octave execute the real MATLAB builtins
+  (median/hist/std/cumsum/exp/log). The engine-shelling top half is
   the seam -- covered separately by `tests/pyo3` against `speech_rs.Engine`, not by this stage.
   *Pinned by:* `tests/test_phase4c_engine_cost.py` (all groups). *Mutation:* the balance-3-vs-4
   over-90 saturation coefficient (`0*` vs `1*`, `:450`/`:458`) is checked to DIVERGE
