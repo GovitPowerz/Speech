@@ -10,6 +10,7 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::audio::{Audio, convolution_horiz_slice, windowing_coefficients};
+use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
 
 use super::segmentation::{SegClass, Segmentation};
 
@@ -62,51 +63,28 @@ pub struct SegmenterConfig {
     pub min_silence: [f64; 2],
 }
 
-/// Parse a comma-separated list of `f64` from a config value (legacy `n<double>`).
-fn parse_list(m: &IndexMap<String, String>, key: &str) -> Result<Vec<f64>> {
-    let raw = m
-        .get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?;
-    raw.split(',')
-        .map(|tok| {
-            tok.trim()
-                .parse::<f64>()
-                .map_err(|e| anyhow!("`{key}`: cannot parse `{tok}`: {e}"))
-        })
-        .collect()
-}
-
-/// Parse a scalar `f64` from a config value.
-fn parse_scalar(m: &IndexMap<String, String>, key: &str) -> Result<f64> {
-    m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
-}
-
 impl SegmenterConfig {
     /// Port of `Segmenter::buildFromConf` (:85-138): the `falling > rising` clamp,
     /// the length checks (`speech_padding` >= 4, `min_speech` >= 3, `min_silence`
     /// >= 2, else error), and the per-element negative -> 0 clamp.
     pub fn from_config(m: &IndexMap<String, String>, prefix: &str) -> Result<SegmenterConfig> {
-        let rising = parse_scalar(m, &format!("{prefix}_decision_thresh_rising"))?;
-        let area_rising = parse_scalar(m, &format!("{prefix}_decision_area_rising"))?;
-        let mut falling = parse_scalar(m, &format!("{prefix}_decision_thresh_falling"))?;
+        let rising = get_f64(m, &format!("{prefix}_decision_thresh_rising"))?;
+        let area_rising = get_f64(m, &format!("{prefix}_decision_area_rising"))?;
+        let mut falling = get_f64(m, &format!("{prefix}_decision_thresh_falling"))?;
         if falling > rising {
             falling = rising;
         }
-        let area_falling = parse_scalar(m, &format!("{prefix}_decision_area_falling"))?;
+        let area_falling = get_f64(m, &format!("{prefix}_decision_area_falling"))?;
 
-        let padding_raw = parse_list(m, &format!("{prefix}_speech_padding"))?;
+        let padding_raw = get_f64_list(m, &format!("{prefix}_speech_padding"))?;
         if padding_raw.len() < 4 {
             return Err(anyhow!("{prefix}_speech_padding must contain 4 values"));
         }
-        let min_speech_raw = parse_list(m, &format!("{prefix}_min_speech"))?;
+        let min_speech_raw = get_f64_list(m, &format!("{prefix}_min_speech"))?;
         if min_speech_raw.len() < 3 {
             return Err(anyhow!("{prefix}_min_speech must contain 3 values"));
         }
-        let min_silence_raw = parse_list(m, &format!("{prefix}_min_silence"))?;
+        let min_silence_raw = get_f64_list(m, &format!("{prefix}_min_silence"))?;
         if min_silence_raw.len() < 2 {
             return Err(anyhow!("{prefix}_min_silence must contain 2 values"));
         }
@@ -137,7 +115,7 @@ impl SegmenterConfig {
 /// size_type>(name)`, no default).
 fn parse_usize(m: &IndexMap<String, String>, key: &str) -> Result<usize> {
     m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<usize>()
         .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
@@ -202,11 +180,11 @@ impl DriverConfig {
     pub fn from_config(m: &IndexMap<String, String>, prefix: &str) -> Result<DriverConfig> {
         let dump_dir = parse_string_default(m, "Dump_Directory", "");
 
-        let mut window_size_sec = parse_scalar(m, &format!("{prefix}_window"))?;
+        let mut window_size_sec = get_f64(m, &format!("{prefix}_window"))?;
         if window_size_sec < 0.0 {
             window_size_sec = 0.0;
         }
-        let mut window_shift_sec = parse_scalar(m, &format!("{prefix}_shift"))?;
+        let mut window_shift_sec = get_f64(m, &format!("{prefix}_shift"))?;
         if window_shift_sec < 0.0 {
             window_shift_sec = 0.0;
         }
@@ -215,7 +193,9 @@ impl DriverConfig {
         let conv_type = if conv_window_size > 0 {
             let ty = m
                 .get(&format!("{prefix}_convolution_window_type"))
-                .ok_or_else(|| anyhow!("missing config key `{prefix}_convolution_window_type`"))?
+                .ok_or_else(|| {
+                    anyhow!("param '{prefix}_convolution_window_type' not found in config")
+                })?
                 .clone();
             // verifyWindowingType is called for its logging side effect only (the
             // by-value no-fix quirk): the stored type is used as-is either way.
@@ -227,13 +207,7 @@ impl DriverConfig {
         let conv_coeff =
             windowing_coefficients(&conv_type, true, 2 * conv_window_size + 1, 0.83333);
 
-        let back_prop_wer = match m.get(&format!("{prefix}_BackPropWER")) {
-            None => -1.0,
-            Some(s) => s
-                .trim()
-                .parse::<f64>()
-                .map_err(|e| anyhow!("`{prefix}_BackPropWER`: cannot parse: {e}"))?,
-        };
+        let back_prop_wer = get_f64_default(m, &format!("{prefix}_BackPropWER"), -1.0)?;
 
         Ok(DriverConfig {
             dump_dir,

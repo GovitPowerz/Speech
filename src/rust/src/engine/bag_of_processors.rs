@@ -17,6 +17,7 @@ use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
 use crate::fast::driver::{FastSpectralSegmenter, FastTwinLid};
 use crate::features::stats::InputStatistics;
+use crate::legacy_config::{get_f64_default, get_f64_opt};
 use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
     BlstmSignalSegmenter, BlstmSpectralSegmenter, LtsvSegmenter, TdcSegmenter,
@@ -31,40 +32,10 @@ use crate::tasks::vrcts::VrctsPart;
 /// `conf.get<int>(name)` (required, no default): missing key is an error.
 fn get_i32(map: &IndexMap<String, String>, key: &str) -> Result<i32> {
     map.get(key)
-        .ok_or_else(|| anyhow::anyhow!("missing required config key `{key}`"))?
+        .ok_or_else(|| anyhow::anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<i32>()
         .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as i32: {e}"))
-}
-
-/// `conf.get<double>(name, default)`: missing key -> default.
-pub(crate) fn get_f64_default(
-    map: &IndexMap<String, String>,
-    key: &str,
-    default: f64,
-) -> Result<f64> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<f64>()
-            .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as f64: {e}")),
-    }
-}
-
-/// `conf.get<double>(name)` as `Option`: missing key -> `None`, present -> `Some`.
-/// Phase 8 S1.1: the `Audio_fixed_gain` reader -- unlike every other config key here,
-/// absence is not a fallback VALUE but a fallback MODE (`read_audio`'s `None` selects
-/// the legacy `normalize_channels` path entirely, not merely a default gain).
-pub(crate) fn get_f64_opt(map: &IndexMap<String, String>, key: &str) -> Result<Option<f64>> {
-    match map.get(key) {
-        None => Ok(None),
-        Some(s) => s
-            .trim()
-            .parse::<f64>()
-            .map(Some)
-            .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as f64: {e}")),
-    }
 }
 
 /// `conf.get<int>(name, default)`: missing key -> default.
@@ -384,7 +355,8 @@ impl BagOfProcessors {
         let file_type = get_i32_default(&configs[0], "File_Type", 0)?;
         // Phase 8 S1.1: `Audio_fixed_gain`, config-0-only like its Audio_* siblings
         // above. Absent (every pre-phase-8 config) -> `None` -> read_audio's legacy
-        // normalize_channels path, byte-identical to before this key existed.
+        // normalize_channels path, byte-identical to before this key existed: absence
+        // is a fallback MODE, not a fallback value, hence `get_f64_opt`.
         let fixed_gain = get_f64_opt(&configs[0], "Audio_fixed_gain")?;
         let lock_files_dir = get_string_default(&configs[0], "LockFilesDir", "");
         let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");

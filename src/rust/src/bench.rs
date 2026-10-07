@@ -34,9 +34,10 @@ use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
 use crate::cli::{Mode, ModeKind, load_config};
-use crate::engine::bag_of_processors::{get_f64_default, get_i32_default};
+use crate::engine::bag_of_processors::get_i32_default;
 use crate::engine::corpus::Corpus;
 use crate::engine::corpus_processor::CorpusProcessor;
+use crate::legacy_config::get_f64_default;
 
 /// Compute path selector -- `Exact` (the byte-untouched f64 tree) or `Fast`
 /// (Phase 7's f32/faer/realfft counterpart, Tasks 2-5). The string form

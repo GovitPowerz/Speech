@@ -9,6 +9,8 @@ use anyhow::Context;
 use indexmap::IndexMap;
 use serde::Deserialize;
 
+use crate::legacy_config::{get_usize_list, parse_usize};
+
 /// NNType-0 network spec parsed from a legacy config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NnetSpec {
@@ -20,18 +22,11 @@ pub struct NnetSpec {
     pub peepholes: [bool; 6],
 }
 
-fn ints(m: &IndexMap<String, String>, key: &str) -> anyhow::Result<Vec<usize>> {
-    m.get(key)
-        .with_context(|| format!("missing key {key}"))?
-        .split(',')
-        .map(|s| s.trim().parse::<usize>().map_err(Into::into))
-        .collect()
-}
-
 impl NnetSpec {
     /// Extract the spec from a parsed legacy config using the given algName prefix (e.g. "BLSTM").
     pub fn from_legacy(m: &IndexMap<String, String>, prefix: &str) -> anyhow::Result<NnetSpec> {
         let p = format!("{prefix}_");
+        let input_key = format!("{p}NNetInputSize");
         // `PeepholeFlags::from_legacy`'s rule (issue #32): absent -> true, malformed -> error.
         let flag = |k: &str| -> anyhow::Result<bool> {
             match m.get(k) {
@@ -43,15 +38,15 @@ impl NnetSpec {
             }
         };
         Ok(NnetSpec {
-            lstm_neuron_nb: ints(m, &format!("{p}LSTMNeuronNb"))?,
-            lstm_subsampling: ints(m, &format!("{p}LSTMSubSampling"))?,
-            output_neuron_nb: ints(m, &format!("{p}OutputNeuronNb"))?,
-            output_subsampling: ints(m, &format!("{p}OutputSubSampling"))?,
-            input_size: m
-                .get(&format!("{p}NNetInputSize"))
-                .context("missing NNetInputSize")?
-                .trim()
-                .parse()?,
+            lstm_neuron_nb: get_usize_list(m, &format!("{p}LSTMNeuronNb"))?,
+            lstm_subsampling: get_usize_list(m, &format!("{p}LSTMSubSampling"))?,
+            output_neuron_nb: get_usize_list(m, &format!("{p}OutputNeuronNb"))?,
+            output_subsampling: get_usize_list(m, &format!("{p}OutputSubSampling"))?,
+            input_size: parse_usize(
+                m.get(&input_key)
+                    .with_context(|| format!("param '{input_key}' not found in config"))?,
+                &input_key,
+            )?,
             peepholes: [
                 flag(&format!("{p}Forward_IsCellsPeepholesActive"))?,
                 flag(&format!("{p}Backward_IsCellsPeepholesActive"))?,

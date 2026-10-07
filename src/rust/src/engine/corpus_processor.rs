@@ -35,12 +35,11 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
-use crate::engine::bag_of_processors::{
-    BagOfProcessors, Processor, get_f64_default, get_i32_default,
-};
+use crate::engine::bag_of_processors::{BagOfProcessors, Processor, get_i32_default};
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
 use crate::io::matfile::MatWriter;
+use crate::legacy_config::get_f64_default;
 
 /// Result of the corpus-level gradient check (`gradCheck`, `:237-340`). The legacy
 /// only prints per-weight lines + the two means; this struct RETURNS them so Task

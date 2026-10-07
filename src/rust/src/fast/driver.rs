@@ -70,6 +70,7 @@ use ndarray::Array2;
 use crate::audio::Audio;
 use crate::config::NnetSpec;
 use crate::constants::random_gauss;
+use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::blstm::{
     BlstmConfig, CellType, CfcParams, Direction, MambaParams, TransformerParams,
 };
@@ -215,16 +216,8 @@ pub(crate) fn build_spec_aligned_to(
     let mut spec = if map.contains_key(&input_key) {
         NnetSpec::from_legacy(map, prefix)?
     } else {
-        let lstm0 = map
-            .get(&format!("{prefix}_LSTMNeuronNb"))
-            .ok_or_else(|| anyhow!("missing {prefix}_LSTMNeuronNb"))?
-            .split(',')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
         let mut m = map.clone();
-        m.insert(input_key, lstm0);
+        m.insert(input_key, bc.lstm_neuron_nb[0].to_string());
         NnetSpec::from_legacy(&m, prefix)?
     };
     spec.peepholes = [
@@ -810,26 +803,6 @@ impl Segmenter for FastSpectralSegmenter {
 // FastTwinLid -- the f32 Mode-7 LID Twin (algo 6).
 // ===========================================================================
 
-/// Read one required `f64` config scalar (mirrors `tasks/lid.rs::twin_scalar`).
-fn twin_scalar(map: &IndexMap<String, String>, key: &str) -> Result<f64> {
-    map.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
-}
-
-/// Read one `f64` config scalar with a default (mirrors `twin_scalar_default`).
-fn twin_scalar_default(map: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<f64>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
-    }
-}
-
 /// Read one `i32` config scalar with a default (mirrors `twin_i32_default`).
 fn twin_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
     match map.get(key) {
@@ -1045,17 +1018,17 @@ impl FastTwinLid {
             None => None,
         };
 
-        let mut lid_window_size_sec = twin_scalar(map, "BLSTM_LID_window")?;
+        let mut lid_window_size_sec = get_f64(map, "BLSTM_LID_window")?;
         if lid_window_size_sec < 0.0 {
             lid_window_size_sec = 0.0;
         }
-        let mut lid_window_shift_sec = twin_scalar(map, "BLSTM_LID_shift")?;
+        let mut lid_window_shift_sec = get_f64(map, "BLSTM_LID_shift")?;
         if lid_window_shift_sec < 0.0 {
             lid_window_shift_sec = 0.0;
         }
         let post_process_mode = twin_i32_default(map, "BLSTM_LID_PostProcessMode", 0)?;
         let min_nb_of_frames = twin_i32_default(map, "BLSTM_LID_MinNbOfFrames", 0)?;
-        let noise_magnitude = twin_scalar_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
+        let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
 
         let spectrum_shift_sec = feature_cfg.shift_sec;
         let window_shift_sec = driver_cfg.window_shift_sec;

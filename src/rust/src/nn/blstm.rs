@@ -59,25 +59,12 @@ use ndarray::Array2;
 
 use crate::cost::CostLaw;
 use crate::features::stats::InputStatistics;
-use crate::legacy_config::get_f64_default;
+use crate::legacy_config::{get_f64_default, get_usize_list};
 
 use super::cells::CellLayer;
 use super::layers::NeuronLayer;
 use super::network::Network;
 use super::train::Rprop;
-
-fn get_list(map: &IndexMap<String, String>, key: &str) -> Result<Vec<usize>> {
-    let s = map
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("param '{key}' not found in config"))?;
-    s.split(',')
-        .map(|part| {
-            part.trim()
-                .parse::<usize>()
-                .map_err(|e| anyhow::anyhow!("cannot read '{part}' as usize for '{key}': {e}"))
-        })
-        .collect()
-}
 
 fn get_bool(map: &IndexMap<String, String>, key: &str) -> Result<bool> {
     let s = map
@@ -532,11 +519,11 @@ impl BlstmConfig {
         // recurrent widths are parsed.
         let transformer = TransformerParams::from_legacy(map)?;
 
-        let lstm_neuron_nb = get_list(map, &k("_LSTMNeuronNb"))?;
+        let lstm_neuron_nb = get_usize_list(map, &k("_LSTMNeuronNb"))?;
         if lstm_neuron_nb.len() < 2 {
             bail!("The number layers in the LSTM neural networks must be > 1.");
         }
-        let lstm_sub_sampling = get_list(map, &k("_LSTMSubSampling"))?;
+        let lstm_sub_sampling = get_usize_list(map, &k("_LSTMSubSampling"))?;
         if lstm_sub_sampling.len() != lstm_neuron_nb.len() - 1 {
             bail!(
                 "The number of values given for the sub-sampling in the LSTM neural networks must be {}.",
@@ -544,7 +531,7 @@ impl BlstmConfig {
             );
         }
 
-        let output_neuron_nb = get_list(map, &k("_OutputNeuronNb"))?;
+        let output_neuron_nb = get_usize_list(map, &k("_OutputNeuronNb"))?;
         if output_neuron_nb.len() < 2 {
             bail!("The number layers in the output neural network must be > 1.");
         }
@@ -563,7 +550,7 @@ impl BlstmConfig {
                 ),
             }
         }
-        let output_sub_sampling = get_list(map, &k("_OutputSubSampling"))?;
+        let output_sub_sampling = get_usize_list(map, &k("_OutputSubSampling"))?;
         if output_sub_sampling.len() != output_neuron_nb.len() - 1 {
             bail!(
                 "The number of values given for the sub-sampling in the output neural network must be {}.",
@@ -3312,5 +3299,16 @@ mod config_getter_tests {
             let err = BlstmConfig::from_legacy(&m, "X").unwrap_err().to_string();
             assert!(err.contains(key), "{key}: {err}");
         }
+        // Issue #50: the list keys go through the shared grammar (the `*` repeater
+        // reads, a bad repeat count errors naming the key).
+        let mut m = base.clone();
+        m.insert("X_OutputNeuronNb".into(), "5,4*1,1".into());
+        assert!(BlstmConfig::from_legacy(&m, "X").is_ok());
+        m.insert("X_LSTMNeuronNb".into(), "0,3*x".into());
+        let err = BlstmConfig::from_legacy(&m, "X").unwrap_err().to_string();
+        assert!(
+            err.contains("X_LSTMNeuronNb") && err.contains("3*x"),
+            "{err}"
+        );
     }
 }

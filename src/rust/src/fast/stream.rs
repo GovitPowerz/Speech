@@ -108,6 +108,7 @@ use indexmap::IndexMap;
 
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
+use crate::legacy_config::get_f64_opt;
 use crate::nn::blstm::BlstmConfig;
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segment, Segmentation};
@@ -2028,7 +2029,7 @@ impl StreamingSession {
         // --- Validation bails (each pinned) ---
         let algo = map
             .get("Algo_choice")
-            .ok_or_else(|| anyhow!("streaming: missing Algo_choice"))?
+            .ok_or_else(|| anyhow!("param 'Algo_choice' not found in config"))?
             .trim()
             .parse::<i32>()
             .map_err(|e| anyhow!("streaming: Algo_choice parse: {e}"))?;
@@ -2041,11 +2042,8 @@ impl StreamingSession {
                  cross-channel result_vec seeding) is deferred (spec S0/S1.2)"
             );
         }
-        let fixed_gain = match map.get("Audio_fixed_gain") {
-            Some(s) => s
-                .trim()
-                .parse::<f64>()
-                .map_err(|e| anyhow!("streaming: Audio_fixed_gain parse: {e}"))?,
+        let fixed_gain = match get_f64_opt(map, "Audio_fixed_gain")? {
+            Some(g) => g,
             None => bail!(
                 "streaming requires Audio_fixed_gain (frozen-norm mode; the whole-file \
                  (2*RMS+max)/2 audio normalization is not streamable)"

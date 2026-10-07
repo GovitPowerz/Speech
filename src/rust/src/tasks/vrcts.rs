@@ -20,7 +20,7 @@ const VRCTS_BINARY: &str = "/usr/local/vrcts/vrcts_1_5_9/bin/vrcts_part";
 fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
     // legacy `conf.get<bool>` uses std::boolalpha: the strings "true"/"false".
     m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<bool>()
         .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}"))

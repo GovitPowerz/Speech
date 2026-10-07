@@ -28,6 +28,7 @@ use crate::features::pipeline::{
     FeatureConfig, SpectralParams, build_input_sequence_parts, derive_freq_band_ltsv_variant,
 };
 use crate::features::stats::InputStatistics;
+use crate::legacy_config::{get_f64, get_f64_list};
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
@@ -35,31 +36,10 @@ use crate::tasks::segmenter::{
     DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
 };
 
-fn parse_scalar(m: &IndexMap<String, String>, key: &str) -> Result<f64> {
-    m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
-}
-
-fn parse_list(m: &IndexMap<String, String>, key: &str) -> Result<Vec<f64>> {
-    let raw = m
-        .get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?;
-    raw.split(',')
-        .map(|tok| {
-            tok.trim()
-                .parse::<f64>()
-                .map_err(|e| anyhow!("`{key}`: cannot parse `{tok}`: {e}"))
-        })
-        .collect()
-}
-
 fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
     // legacy `conf.get<bool>` uses std::boolalpha: the strings "true"/"false".
     m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<bool>()
         .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}"))
@@ -67,7 +47,7 @@ fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
 
 fn parse_i32(m: &IndexMap<String, String>, key: &str) -> Result<i32> {
     m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
         .trim()
         .parse::<i32>()
         .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
@@ -76,7 +56,7 @@ fn parse_i32(m: &IndexMap<String, String>, key: &str) -> Result<i32> {
 fn parse_string(m: &IndexMap<String, String>, key: &str) -> Result<String> {
     m.get(key)
         .cloned()
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))
 }
 
 /// Time-domain correlation SAD segmenter (Algo 1; `TimeDomainCorrel.{h,cpp}`).
@@ -113,7 +93,7 @@ impl TdcSegmenter {
         let seg_cfg = SegmenterConfig::from_config(map, "TDC")?;
         let driver_cfg = DriverConfig::from_config(map, "TDC")?;
 
-        let mut lags = parse_list(map, "TDC_lags")?;
+        let mut lags = get_f64_list(map, "TDC_lags")?;
         if lags.len() < 2 {
             return Err(anyhow!("TDC_lags must contain 2 values"));
         }
@@ -122,14 +102,14 @@ impl TdcSegmenter {
                 *v = 0.0;
             }
         }
-        let balance = parse_scalar(map, "TDC_balance")?;
+        let balance = get_f64(map, "TDC_balance")?;
 
         let flag_dc_offset = parse_bool(map, "TDC_flag_DCOffset")?;
-        let preemph_ratio = parse_scalar(map, "TDC_preemph_ratio")?;
+        let preemph_ratio = get_f64(map, "TDC_preemph_ratio")?;
         let noise_seed = parse_i32(map, "TDC_noise_seed")?;
-        let noise_ratio = parse_scalar(map, "TDC_noise_ratio")?;
+        let noise_ratio = get_f64(map, "TDC_noise_ratio")?;
         let windowing_type = parse_string(map, "TDC_windowing_type")?;
-        let windowing_param = parse_scalar(map, "TDC_windowing_param")?;
+        let windowing_param = get_f64(map, "TDC_windowing_param")?;
 
         let window_shift_sec = driver_cfg.window_shift_sec;
 
@@ -639,11 +619,11 @@ impl BlstmSignalSegmenter {
         let two_sweeps = parse_bool(map, "BLSTM_TwoSweeps")?;
 
         let flag_dc_offset = parse_bool(map, "BLSTM_flag_DCOffset")?;
-        let preemph_ratio = parse_scalar(map, "BLSTM_preemph_ratio")?;
+        let preemph_ratio = get_f64(map, "BLSTM_preemph_ratio")?;
         let noise_seed = parse_i32(map, "BLSTM_noise_seed")?;
-        let noise_ratio = parse_scalar(map, "BLSTM_noise_ratio")?;
+        let noise_ratio = get_f64(map, "BLSTM_noise_ratio")?;
         let windowing_type = parse_string(map, "BLSTM_windowing_type")?;
-        let windowing_param = parse_scalar(map, "BLSTM_windowing_param")?;
+        let windowing_param = get_f64(map, "BLSTM_windowing_param")?;
 
         let window_shift_sec = driver_cfg.window_shift_sec;
 

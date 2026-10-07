@@ -58,6 +58,7 @@ use crate::features::ltsv_tdc::ltsv_classify_sequence;
 use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{FeatureConfig, SpectralParams, build_input_sequence_parts};
 use crate::features::stats::InputStatistics;
+use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::sad::get_blstm_param;
@@ -681,24 +682,6 @@ impl Segmenter for BlstmSpectralLid {
 // Twin/Siamese LID driver (Algo 6; `TwinBLSTMSpectralLID.{h,cpp}`).
 // ===========================================================================
 
-fn twin_scalar(m: &IndexMap<String, String>, key: &str) -> Result<f64> {
-    m.get(key)
-        .ok_or_else(|| anyhow!("missing config key `{key}`"))?
-        .trim()
-        .parse::<f64>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
-}
-
-fn twin_scalar_default(m: &IndexMap<String, String>, key: &str, default: f64) -> Result<f64> {
-    match m.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<f64>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
-    }
-}
-
 fn twin_i32_default(m: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
     match m.get(key) {
         None => Ok(default),
@@ -880,25 +863,24 @@ impl TwinBlstmSpectralLid {
             lid_net.set_weights(flat)?;
         }
 
-        let mut lid_window_size_sec = twin_scalar(map, "BLSTM_LID_window")?;
+        let mut lid_window_size_sec = get_f64(map, "BLSTM_LID_window")?;
         if lid_window_size_sec < 0.0 {
             lid_window_size_sec = 0.0;
         }
-        let mut lid_window_shift_sec = twin_scalar(map, "BLSTM_LID_shift")?;
+        let mut lid_window_shift_sec = get_f64(map, "BLSTM_LID_shift")?;
         if lid_window_shift_sec < 0.0 {
             lid_window_shift_sec = 0.0;
         }
 
-        let lid_detection_threshold =
-            twin_scalar_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
+        let lid_detection_threshold = get_f64_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
         let lid_training_pruning_threshold =
-            twin_scalar_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
-        let lid_decision_thresh_rising = twin_scalar(map, "BLSTM_LID_decision_thresh_rising")?;
-        let lid_decision_thresh_falling = twin_scalar(map, "BLSTM_LID_decision_thresh_falling")?;
+            get_f64_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
+        let lid_decision_thresh_rising = get_f64(map, "BLSTM_LID_decision_thresh_rising")?;
+        let lid_decision_thresh_falling = get_f64(map, "BLSTM_LID_decision_thresh_falling")?;
         let mode = twin_i32_default(map, "BLSTM_LID_Mode", 0)?;
         let post_process_mode = twin_i32_default(map, "BLSTM_LID_PostProcessMode", 0)?;
         let min_nb_of_frames = twin_i32_default(map, "BLSTM_LID_MinNbOfFrames", 0)?;
-        let noise_magnitude = twin_scalar_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
+        let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
         let dump_lid_internals = twin_bool_default(map, "BLSTM_LID_DumpInternals", false)?;
 
         let spectrum_shift_sec = feature_cfg.shift_sec;
