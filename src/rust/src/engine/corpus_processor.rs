@@ -898,6 +898,22 @@ impl CorpusProcessor {
         &self.results_e
     }
 
+    /// The channel results by name, one entry per (file, config, channel) in
+    /// ascending (file, conf, chan) order: the typed view the result matrix is
+    /// rendered from (issue #23). Same contract as [`Self::results_matrix`]:
+    /// EMPTY until the first completed `run()`.
+    pub fn channel_results(&self) -> Vec<(usize, usize, usize, &ChannelResult)> {
+        let mut out = Vec::new();
+        for (&file, confs) in &self.results {
+            for (&conf, chans) in confs {
+                for (&chan, result) in chans {
+                    out.push((file, conf, chan, result));
+                }
+            }
+        }
+        out
+    }
+
     /// Config-`pos`'s full weight-vector set: one flat vec per network (algo 6
     /// -> `[sad, lid]`; algo 0/1/2, no NN -> empty `Vec`). The PyO3 seam
     /// surface (Phase 4c); promoted from `get_config0_all_weights_for_test`
