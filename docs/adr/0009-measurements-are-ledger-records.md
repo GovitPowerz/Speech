@@ -81,4 +81,6 @@ A RESULTS.md row cannot flip silently between two measurements: a second record 
   `python -m speech.ledger bench --leg <name>` as the Phase 7 protocol (N fresh processes per
   path, one record each); the exact-vs-fast matrix is rendered per host, and the speedups the
   README and ARCHITECTURE quote in prose are asserted against the latest bench pair per leg
-  (`speech.ledger.prose`), so the three independent "4.6x" copies cannot drift again.
+  (`speech.ledger.prose`), so the three independent "4.6x" copies cannot drift again; the SAD
+  peak RSS the same sentences quote is asserted against the 60 s leg's `maxrss_mean` (issue
+  #41), so a sentence never mixes two measurement dates.

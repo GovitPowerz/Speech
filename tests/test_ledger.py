@@ -120,6 +120,7 @@ def bench_record(
     sha: str = "b" * 40,
     lanes: int = 1,
     lineage: str | None = "v1",
+    maxrss: float = 46.0,
     **over: object,
 ) -> BenchRecord:
     audio = {"phase7_60s": 120.0, "phase7_sad_corpus": 75.0, "phase7_lid_phseq": 42.54, "phase7_lid_cep": 32.65}.get(label, 10.0)
@@ -130,7 +131,7 @@ def bench_record(
         build=BUILD,
         host=HOST,
         recipe=BenchRecipe(label=label, path=path, lanes=lanes, lineage=lineage),  # type: ignore[arg-type]
-        payload=BenchPayload(repeat=1, config_hash="00ff00ff00ff00ff", runs=[dict(wall_s=wall, audio_s=audio, rtf=wall / audio, maxrss_mb=46.0, files=1)]),  # type: ignore[list-item]
+        payload=BenchPayload(repeat=1, config_hash="00ff00ff00ff00ff", runs=[dict(wall_s=wall, audio_s=audio, rtf=wall / audio, maxrss_mb=maxrss, files=1)]),  # type: ignore[list-item]
     )
     return rec.model_copy(update=over) if over else rec
 
@@ -733,12 +734,30 @@ def test_prose_registry_regexes_each_match_once_in_the_live_documents() -> None:
 
 def test_prose_derived_values_follow_the_stated_rounding() -> None:
     want = prose.derived(_four_legs())  # type: ignore[arg-type]
-    assert want == {"sad_1dp": "4.6", "sad_range": "4.58-4.60", "lid_1dp": "3.5", "lid_range": "3.53-3.57"}
+    assert want == {
+        "sad_1dp": "4.6",
+        "sad_range": "4.58-4.60",
+        "lid_1dp": "3.5",
+        "lid_range": "3.53-3.57",
+        "sad_rss_fast_1dp": "46.0",
+        "sad_rss_exact_1dp": "46.0",
+        "sad_rss_fast_0dp": "46",
+        "sad_rss_exact_0dp": "46",
+    }
     same = prose.derived(
         [*_pair("phase7_60s", 0.3, 0.1), *_pair("phase7_sad_corpus", 0.6, 0.2), *_pair("phase7_lid_phseq", 0.3, 0.1), *_pair("phase7_lid_cep", 0.3, 0.1)]
     )  # type: ignore[arg-type]
     assert same["sad_range"] == "3.00" and same["lid_range"] == "3.00"
     assert prose.derived([bench_record()]) == {}  # type: ignore[list-item]
+
+
+def test_prose_derives_the_sad_60s_peak_rss_from_the_maxrss_means() -> None:
+    legs = _four_legs()
+    legs[0] = bench_record("phase7_60s", "exact", 0.2638, maxrss=57.182)
+    legs[1] = bench_record("phase7_60s", "fast", 0.0573, maxrss=43.521)
+    want = prose.derived(legs)  # type: ignore[arg-type]
+    assert (want["sad_rss_fast_1dp"], want["sad_rss_exact_1dp"]) == ("43.5", "57.2")
+    assert (want["sad_rss_fast_0dp"], want["sad_rss_exact_0dp"]) == ("44", "57")
 
 
 def test_prose_quotes_match_the_ledger() -> None:
