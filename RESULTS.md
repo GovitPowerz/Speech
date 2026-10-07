@@ -374,7 +374,10 @@ measurement per (leg, path, host), re-taken 2026-10-02 on the same Apple M4 Pro 
 follows it refers to the ORIGINAL 2026-07 measurement (SAD 4.58-4.60x, LID 3.53-3.57x, macOS
 26.5.2) and is kept as history; the re-measure moved both paths' absolute walls (exact ~10-20%
 slower, fast ~10% slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, which the README and
-ARCHITECTURE prose now quote and `speech.ledger.prose` asserts.
+ARCHITECTURE prose now quote and `speech.ledger.prose` asserts, together with the 60 s leg's
+peak RSS (the `maxrss_mb` column here, against 41.95 / 56.52 in the Phase 10 Task 5 table
+below, which stays as history; peak RSS is a cost figure like the walls, not a metric under
+the ADR-0003 STOP rule).
 
 <!-- ledger:table phase7_bench_matrix -->
 | leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |
