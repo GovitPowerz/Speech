@@ -3,7 +3,7 @@
 The MATLAB-side analog of the C++ oracle-harness extractors: GNU Octave runs the
 `tools/octave_harness/stage_computecost.m` transcription of the VENDORED
 `legacy/Optimizer_V6.2.2/functions/ComputeCost.m` cost-assembly block (the pure lines
-:285-652 -- sortrows aggregation, deriv averaging, pooled input stats, L2, and the
+:285-652 -- deriv averaging, pooled input stats, L2, and the
 balance-law 0/3/4/5/10 error + cost) over the COMMITTED phase4a/4b MultiConfigResults
 fixtures + crafted per-balance variants, dumping the goldens the Python port
 (`src/python/speech/engine.py`) is bit-pinned against.
@@ -16,7 +16,7 @@ the pure ASSEMBLY lines line-for-line (`% legacy:` provenance) and Octave execut
 with real MATLAB semantics (sortrows stable-ascending, median, hist center-binning, std
 ddof=1, cumsum, exp/log). The port must match.
 
-STRICT (pure arithmetic, bit-exact everywhere): agg (sortrows), avg (col0/max(1,col1)),
+STRICT (pure arithmetic, bit-exact everywhere): avg (col0/max(1,col1)),
 l2, pooled mean/nb, the crafted integer balance 0/3/4/5, and every cpu_mean (median) golden.
 CANARY-gated (libm-bearing, see tests/_libm_gate.py): pooled std (sqrt), the balance-10 LID
 calibration (hist/cumsum/std/exp/log) including the b10c zero-zero interior-cutoff variant
@@ -59,8 +59,6 @@ PRIOR_PHASES = ["phase0", "phase0b", "phase0bii", "phase1", "phase2", "phase2b",
 # matrices (crafted MCRs, deriv/pool/l2 inputs) let the port re-run the assembly; the
 # `_error`/`_cost`/`_nnseg`/... outputs are the goldens it is pinned against.
 VARS = [
-    # aggregate_workers (sortrows [1 2 3])
-    "agg_w1", "agg_w2", "agg_out",
     # average_derivs (col0/max(1,col1))
     "avg_in", "avg_out",
     # l2_penalty
@@ -91,7 +89,7 @@ VARS = [
 
 STAGE_LINE_RE = re.compile(
     r"^OCTAVE_STAGE computecost cb0=(?P<cb0>\S+) cb5=(?P<cb5>\S+) b10a=(?P<b10a>\S+) "
-    r"b10b=(?P<b10b>\S+) b10c=(?P<b10c>\S+) agg_rows=(?P<agg>\d+) pool_nb=(?P<pool>\d+)$",
+    r"b10b=(?P<b10b>\S+) b10c=(?P<b10c>\S+) pool_nb=(?P<pool>\d+)$",
     re.MULTILINE,
 )
 
@@ -175,8 +173,6 @@ def main() -> None:
         sm = STAGE_LINE_RE.search(stdout)
         if not sm:
             raise SystemExit("OCTAVE_STAGE computecost line missing from stdout")
-        if int(sm["agg"]) != 4:
-            raise SystemExit(f"agg rows {sm['agg']} != 4")
         if int(sm["pool"]) != 400:
             raise SystemExit(f"pool nb {sm['pool']} != 400")
 
@@ -196,10 +192,6 @@ def main() -> None:
         _, _, cb4 = _read_bin(tmp_dir / "computecost_cb4_error.bin")
         if np.array_equal(cb3, cb4):
             raise SystemExit("balance 3 == balance 4 error -- the over-90 saturation coefficient is not exercised")
-        # sortrows actually reordered the concatenated workers.
-        _, _, agg = _read_bin(tmp_dir / "computecost_agg_out.bin")
-        if list(agg[:, 0]) != [1.0, 1.0, 2.0, 2.0]:
-            raise SystemExit(f"agg_out not sorted ascending by col1: {list(agg[:, 0])}")
         # average_derivs exercised the count==0 -> max(1,0) divide (row 1: 10/1 = 10).
         _, _, avg = _read_bin(tmp_dir / "computecost_avg_out.bin")
         if avg[1, 0] != 10.0:
@@ -236,7 +228,7 @@ def main() -> None:
                 "Phase 4c Task 9: the ComputeCost/ComputeGradient cost-assembly bit-pins. GNU Octave runs "
                 "tools/octave_harness/stage_computecost.m -- a FALLBACK-TIER stage-local transcription of the "
                 "VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:285-652: sortrows "
-                "[1 2 3] aggregation, deriv averaging col0/max(1,col1), pooled input stats, L2, and the balance-law "
+                "deriv averaging col0/max(1,col1), pooled input stats, L2, and the balance-law "
                 "0/3/4/5/10 error + cost) over the committed phase4a/4b MultiConfigResults fixtures + crafted "
                 "per-balance variants, including a b10c variant crafted so the balance-10 zero-zero interior-cutoff "
                 "midpoint branch (:571-572) fires. ComputeCost.m's top half shells out to the engine (system RunFsp) "
@@ -245,7 +237,7 @@ def main() -> None:
                 "`% legacy:` provenance and Octave executes the real MATLAB semantics (sortrows stable-ascending, "
                 "median, hist center-binning, std ddof=1, cumsum, exp/log). Column schema (Error_vad = MCR(:,4:end), "
                 "1-based): 1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 15 LID-num, 16 flag, 17:end-2 per-class "
-                "(>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: agg/avg/l2/pooled-mean/crafted-integer "
+                "(>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: avg/l2/pooled-mean/crafted-integer "
                 "balance 0/3/4/5, and every cpu_mean (median) golden -- measured bit-exact numpy-vs-Octave in all 9 "
                 "cases, `median` being a single sort + at-most-one `/2`, not a multi-term reduction. CANARY "
                 "(tests/_libm_gate.py): pooled std (sqrt), balance-10 (hist/std/exp/log), committed-fixture "
@@ -286,7 +278,7 @@ def main() -> None:
             #             EXTENDED precision (x87/long-double internals), which no f64 loop order
             #             can reproduce; see the IMPROVEMENTS entry for the measured evidence table.
             "strict": [
-                "computecost_agg_out.bin", "computecost_avg_out.bin", "computecost_l2_cost.bin",
+                "computecost_avg_out.bin", "computecost_l2_cost.bin",
                 "computecost_l2_grad.bin", "computecost_pool_out_nb.bin", "computecost_pool_out_mean.bin",
                 "computecost_cb0_error.bin", "computecost_cb0_cost.bin", "computecost_cb0_nnseg.bin", "computecost_cb0_cpumean.bin",
                 "computecost_cb3_error.bin", "computecost_cb3_nnseg.bin", "computecost_cb3_cpumean.bin",

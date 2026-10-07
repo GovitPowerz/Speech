@@ -19,7 +19,7 @@ function stage_computecost(out_dir)
   % top half is out of scope for the pure cost assembly (it is the seam, tested via
   % speech_rs.Engine in tests/pyo3).
   %
-  % Dumps per group. STRICT (pure arithmetic, bit-exact everywhere): aggregate (sortrows),
+  % Dumps per group. STRICT (pure arithmetic, bit-exact everywhere):
   % average_derivs (col0/max(1,col1)), l2 (weights.^2 penalty), pooled mean, and the
   % crafted integer balance 0/3/4/5. CANARY-gated (libm-bearing): pooled std (sqrt), the
   % balance-10 LID calibration (hist/cumsum/std/exp/log), and the committed-fixture
@@ -36,16 +36,6 @@ function stage_computecost(out_dir)
                                  'twin_train_MultiConfigResults.bin'));
   R.tier2_mcr = tier2_mcr;
   R.twin_mcr = twin_mcr;
-
-  % ---- aggregate_workers: sortrows([1 2 3]) over concatenated worker matrices ----------
-  % legacy: ComputeCost.m:219 MultiConfigResultsRecomp = [MultiConfigResultsRecomp;MultiConfigResults];
-  % legacy: ComputeCost.m:374 MultiConfigResults = sortrows(MultiConfigResultsRecomp,[1 2 3]);
-  agg_w1 = [2 1 1 11; 1 1 2 22];
-  agg_w2 = [1 1 1 33; 2 1 2 44];
-  agg_out = sortrows([agg_w1; agg_w2], [1 2 3]);
-  R.agg_w1 = agg_w1;
-  R.agg_w2 = agg_w2;
-  R.agg_out = agg_out;
 
   % ---- average_derivs: col0/max(1,col1) ------------------------------------------------
   % legacy: ComputeCost.m:357 MultiDeriv(:,ii) = MultiDeriv(:,ii)./max(1,MultiDerivCount(:,ii));
@@ -168,8 +158,8 @@ function stage_computecost(out_dir)
 
   save('-v7', fullfile(out_dir, 'computecost.mat'), '-struct', 'R');
 
-  printf('OCTAVE_STAGE computecost cb0=%g cb5=%g b10a=%g b10b=%g b10c=%g agg_rows=%d pool_nb=%d\n', ...
-         R.cb0_cost, R.cb5_cost, R.b10a_cost, R.b10b_cost, R.b10c_cost, size(agg_out, 1), pnb);
+  printf('OCTAVE_STAGE computecost cb0=%g cb5=%g b10a=%g b10b=%g b10c=%g pool_nb=%d\n', ...
+         R.cb0_cost, R.cb5_cost, R.b10a_cost, R.b10b_cost, R.b10c_cost, pnb);
 end
 
 

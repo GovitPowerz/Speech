@@ -95,8 +95,11 @@ def test_tier2_spectral_names_match_the_wire(tmp_path: Path) -> None:
 def test_twin_train_names_match_the_wire(tmp_path: Path) -> None:
     named, decoded, mcr = _run(tmp_path, _seed_twin_train, "twin_train.config")
     _assert_same(named, decoded)
-    n_classes = mcr.shape[1] - 3 - 18  # the LID driver widens the row by the class count
-    assert n_classes >= 2 and named.lid_scores.shape[1] == n_classes
+    # N from an independent source: the class ids of the fixture's language mapping.
+    mapping = (PHASE4B / "languagemapping_lid7.csv").read_text().splitlines()
+    n_classes = len({line.split(";")[2] for line in mapping if line.strip()})
+    assert n_classes >= 2 and mcr.shape[1] == 3 + 18 + n_classes
+    assert named.lid_scores.shape[1] == n_classes
     assert np.all(named.lid_target >= 0), "every twin_train row carries an in-band target"
     assert np.all(named.lid_scores <= 150.0), "the target column is decoded, nothing is left in-band"
     # The decoded target re-encodes bit-exactly: the wire holds `score + 200` in the target

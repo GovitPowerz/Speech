@@ -123,7 +123,7 @@ MAT_VARS = [
 RUNS = ["solo_tdc", "train_ltsv", "multiconfig"]
 
 # MultiConfigResults masked column: col 6 (0-based) = data col 3 = time_per_hour
-# (assemble_scored_row / assemble_unscored_row col 3; wall-clock -> zeroed).
+# (`ChannelResult::to_row` col 3; wall-clock -> zeroed).
 MASKED_COLS = [6]
 
 # The multi-channel VRCTS dumps to commit (the carried-over multi-channel byte oracle):

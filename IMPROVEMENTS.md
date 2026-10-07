@@ -4181,8 +4181,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `CostFunction.m:409` assigns `PS.VP.BP.LIDscoreDet`, so `scores_test` reaches the writer
   already decoded and the writer block contains no sentinel handling of its own -- the
   stage injects a raw 250.0 (> 150) and the golden shows `exp(2.5)`, not `exp(0.5)`,
-  making the pass-through observable. The port mirrors this split: `_decode_lid_scores`
-  decodes, `write_scores` does not. Also pinned: MATLAB `sortrows(x',-1)` descending is
+  making the pass-through observable. The port mirrors this split: the seam decodes
+  (`ChannelResults.lid_scores`, issue #23), `write_scores` does not. Also pinned: MATLAB `sortrows(x',-1)` descending is
   STABLE (the 250/250 tie preserves original column order; numpy `argsort(-s,
   kind="stable")` agrees). *Pinned by:* `tests/test_phase4d_scr.py::
   test_write_scores_matches_octave_golden_bytes` + `test_tie_break_is_stable_original_column_order`

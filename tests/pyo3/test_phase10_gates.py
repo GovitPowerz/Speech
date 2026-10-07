@@ -107,10 +107,9 @@ the pack length, a finite initial NNCostSeg in the log law's INTERIOR both in ag
 for every INDIVIDUAL file (the frame-weighted aggregate alone could hide a saturated
 minority), and a strictly positive analytic gradient L2 at epoch 0.
 
-Per-file costs are read by slicing `results_matrix()`'s PREFIX off first (`[:, 3:]`,
-exactly as `engine.py::_error_vad` does) and only then applying the per-res column
-convention -- a `mean <= max` self-check precedes the bound so the pair cannot silently be
-the wrong two quantities (the phase-9 file shipped that bug once).
+Per-file costs are read by name off `Engine.channel_results()` (`seg_cost` / `seg_count`,
+issue #23) -- a `mean <= max` self-check precedes the bound so the pair cannot silently be
+the wrong two quantities (the phase-9 file once read the wrong column off the matrix).
 
 =====================================================================================
 vs BLSTM, and vs v1 -- RECORDED, NOT GATED (spec R5, verbatim)

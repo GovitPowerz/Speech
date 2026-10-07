@@ -40,7 +40,7 @@
 //! its raw `100 * langID` in `[0, 100]`. The readers decode "the column `> 150`
 //! is the target, its score is `v - 200`". That decode happens once, in
 //! [`LidResult::from_encoded`]; [`ChannelResult::to_row`] re-encodes with
-//! `+ 200`. On `[200, 300]` the subtraction is exact (Sterbenz: `200 <= v <=
+//! `+ 200`. On `[200, 300]` the subtraction is exact (Sterbenz: `100 <= v <=
 //! 400`), so `(v - 200) + 200 == v` bit for bit and the `.mat` goldens are
 //! unmoved. The frozen tree keeps producing the encoding (ADR-0002).
 //!
@@ -92,6 +92,12 @@ impl LidResult {
             target,
             scores,
         }
+    }
+
+    /// Column 15's wire form of `correct`: `100.0` / `0.0`, the value the fold
+    /// averages (`100 - mean`).
+    pub fn correct_wire(&self) -> f64 {
+        if self.correct { 100.0 } else { 0.0 }
     }
 
     /// The wire form of `scores`: the target column `+ 200`, exact on `[0, 100]`.
@@ -188,6 +194,16 @@ impl ChannelResult {
         }
     }
 
+    /// Column 14 as the readers sum it: the LID cost, `0.0` without a LID block.
+    pub fn lid_cost(&self) -> f64 {
+        self.lid.as_ref().map_or(0.0, |l| l.cost)
+    }
+
+    /// Column `len-2` as the readers sum it: the LID count, `0` without a LID block.
+    pub fn lid_count(&self) -> i64 {
+        self.lid.as_ref().map_or(0, |l| l.count)
+    }
+
     /// The result row. The ONLY writer of the layout (see the module doc).
     pub fn to_row(&self) -> Vec<f64> {
         let mut row = vec![
@@ -209,7 +225,7 @@ impl ChannelResult {
         match &self.lid {
             Some(l) => {
                 row.push(l.cost); // 14
-                row.push(if l.correct { 100.0 } else { 0.0 }); // 15
+                row.push(l.correct_wire()); // 15
                 row.extend(l.encoded_scores()); // 16..16+N
                 row.push(l.count as f64); // len-2
             }

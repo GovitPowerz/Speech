@@ -957,12 +957,9 @@ impl BagOfProcessors {
                 sum_seg_cost += r.seg_cost;
                 sum_seg_count += r.seg_count as f64;
                 sum_speech_duration += r.speech_duration;
-                sum_lid_cost += r.lid.as_ref().map_or(0.0, |l| l.cost);
-                sum_lid_correct += r
-                    .lid
-                    .as_ref()
-                    .map_or(0.0, |l| if l.correct { 100.0 } else { 0.0 });
-                sum_lid_count += r.lid.as_ref().map_or(0.0, |l| l.count as f64);
+                sum_lid_cost += r.lid_cost();
+                sum_lid_correct += r.lid.as_ref().map_or(0.0, LidResult::correct_wire);
+                sum_lid_count += r.lid_count() as f64;
                 sum_nb_words += r.wer.nb_words as f64;
                 sum_corrects += r.wer.corrects as f64;
                 sum_subs += r.wer.subs as f64;

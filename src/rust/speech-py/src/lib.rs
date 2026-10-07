@@ -142,7 +142,8 @@ impl Engine {
 
     /// The channel results by name (issue #23): one dict, one numpy array per
     /// field, one entry per (file, config, channel) in ascending order -- the
-    /// typed view `results_matrix()` is rendered from. Ids are 0-based like
+    /// typed view `results_matrix()` is rendered from, minus the WER tallies
+    /// (columns 7-13, dead surface, not exposed). Ids are 0-based like
     /// every `pos` on this seam. `lid_target` is `-1` for a row with no in-band
     /// target, `lid_scores` is `n x N` with the target column already decoded
     /// (`N == 0` on a run without LID; a row without a LID block, impossible in
@@ -185,21 +186,18 @@ impl Engine {
             audio_duration.push(r.audio_duration);
             speech_duration.push(r.speech_duration);
             seg_count.push(r.seg_count);
-            match &r.lid {
-                Some(l) => {
-                    lid_cost.push(l.cost);
-                    lid_correct.push(l.correct);
-                    lid_target.push(l.target.map_or(-1, |t| t as i64));
-                    for (k, &v) in l.scores.iter().enumerate() {
-                        lid_scores[[i, k]] = v;
-                    }
-                    lid_count.push(l.count);
-                }
-                None => {
-                    lid_cost.push(0.0);
-                    lid_correct.push(false);
-                    lid_target.push(-1);
-                    lid_count.push(0);
+            lid_cost.push(r.lid_cost());
+            lid_count.push(r.lid_count());
+            lid_correct.push(r.lid.as_ref().is_some_and(|l| l.correct));
+            lid_target.push(
+                r.lid
+                    .as_ref()
+                    .and_then(|l| l.target)
+                    .map_or(-1, |t| t as i64),
+            );
+            if let Some(l) = &r.lid {
+                for (k, &v) in l.scores.iter().enumerate() {
+                    lid_scores[[i, k]] = v;
                 }
             }
         }

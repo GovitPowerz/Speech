@@ -272,7 +272,7 @@ class _BatchRunner:
         `count_unique([new_batch;worstCases])`). ORDER is ascending file index
         (`np.unique`), a documented simplification of the legacy's `sortrows(filesValues,
         -3)` re-sort -- the aggregate corpus cost is order-independent (compute_cost sums
-        over the config's rows; `aggregate_workers` re-sorts by id).
+        over the config's rows, whichever order the seam hands them in).
 
         WEIGHT column (Phase 5, F3, IMPROVEMENTS.md -- FIXED, this commit):
         `ComputeGradient.m:74-76` gates the whole `:59-73` rescale block -- `algo < 5`

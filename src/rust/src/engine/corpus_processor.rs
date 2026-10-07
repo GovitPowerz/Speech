@@ -61,8 +61,9 @@ pub struct GradCheckReport {
 /// loop, corpus-level gradient check, and `.mat` result reduction.
 ///
 /// `results` is `file -> conf -> chan -> 18-col row` (the legacy nested `map`
-/// keyed identically). `res_per_conf`/`results_e` are the transformed matrices
-/// (`transformResults`, `:342-389`). The four `*_mem` matrices accumulate per-epoch
+/// keyed identically). `results_e` is the rendered `MultiConfigResults` matrix
+/// (`transformResults`, `:342-389`); the per-config lists the fold reads are built from
+/// `results` at `saveAndUpdate` time ([`Self::results_per_config`]). The four `*_mem` matrices accumulate per-epoch
 /// cost/badClassif/costLID/badLIDClassif rows.
 pub struct CorpusProcessor {
     training_epochs: usize,
@@ -72,7 +73,6 @@ pub struct CorpusProcessor {
     mode: Mode,
     output_file_name: String,
     results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
-    res_per_conf: Vec<Vec<ChannelResult>>,
     results_e: Array2<f64>,
     cost_mem: Array2<f64>,
     bad_classif_mem: Array2<f64>,
@@ -176,7 +176,6 @@ impl CorpusProcessor {
             mode,
             output_file_name,
             results: BTreeMap::new(),
-            res_per_conf: Vec::new(),
             results_e: Array2::zeros((0, 0)),
             cost_mem: Array2::zeros((1, nb_of_conf)),
             bad_classif_mem: Array2::zeros((1, nb_of_conf)),
@@ -356,7 +355,6 @@ impl CorpusProcessor {
         let n = n.max(1) as usize;
 
         // legacy: :147-148 clear per epoch.
-        self.res_per_conf.clear();
         self.results.clear();
         let mut input_statistics: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::new();
 
@@ -562,9 +560,12 @@ impl CorpusProcessor {
         let mut cost_lid_row = vec![0.0; nb];
         let mut bad_lid_row = vec![0.0; nb];
 
+        // legacy: :379-380 _ResPerConf -- the per-config channel results, in the same
+        // ascending (file, chan) order the matrix rows take.
+        let per_conf = Self::results_per_config(&self.results, nb);
         self.processors.save_and_update(
             &self.output_file_name,
-            &self.res_per_conf,
+            &per_conf,
             &mut self.best_cost,
             derivs,
             stats,
@@ -584,17 +585,32 @@ impl CorpusProcessor {
     }
 
     /// Port of `CorpusProcessor::transformResults()` (`:342-389`): ascending
-    /// file-key iteration (BTreeMap), rows `[file+1, conf+1, chan+1, res...]`,
-    /// per-conf matrices pre-sized `2*nb_files` rows then truncated to the counters
+    /// file-key iteration (BTreeMap), rows `[file+1, conf+1, chan+1, res...]`
+    /// pre-sized `2*nb_files*nb_conf` rows then truncated to the counter
     /// (`conservativeResize` == truncate; row width from the FIRST result's len).
+    /// The legacy's per-conf matrices (`_ResPerConf`) are not kept: the fold reads
+    /// [`Self::results_per_config`] instead.
     fn transform_results(&mut self) {
-        let (results_e, res_per_conf) = Self::transform_results_impl(
+        self.results_e = Self::transform_results_impl(
             &self.results,
             self.processors.nb_of_conf(),
             self.corpus.nb_of_files(),
         );
-        self.results_e = results_e;
-        self.res_per_conf = res_per_conf;
+    }
+
+    /// The legacy `_ResPerConf[conf]` (`:379-380`) as typed values: config `ii`'s
+    /// channel results in ascending (file, chan) order, the order the fold sums in.
+    pub fn results_per_config(
+        results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
+        nb_of_conf: usize,
+    ) -> Vec<Vec<ChannelResult>> {
+        let mut per_conf: Vec<Vec<ChannelResult>> = (0..nb_of_conf).map(|_| Vec::new()).collect();
+        for confs in results.values() {
+            for (&conf, chans) in confs {
+                per_conf[conf].extend(chans.values().cloned());
+            }
+        }
+        per_conf
     }
 
     /// Pure core of [`Self::transform_results`], parameterized for the unit test.
@@ -602,14 +618,13 @@ impl CorpusProcessor {
         results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
-    ) -> (Array2<f64>, Vec<Vec<ChannelResult>>) {
-        // legacy: :343-344 pre-sizes (ResultsE only; the per-conf lists grow).
+    ) -> Array2<f64> {
+        // legacy: :343-344 pre-size.
         let nb_elements = 2 * nb_of_conf * nb_of_files;
 
         let mut counter = 0usize;
         let mut initialized = false;
         let mut results_e: Array2<f64> = Array2::zeros((0, 0));
-        let mut res_per_conf: Vec<Vec<ChannelResult>> = Vec::new();
         let mut res_width = 0usize;
 
         // legacy: :352 BOOST_FOREACH over _Results (BTreeMap == ascending file key).
@@ -634,7 +649,6 @@ impl CorpusProcessor {
                     .map(|r| r.to_row().len())
                     .unwrap_or(0);
                 results_e = Array2::zeros((nb_elements, 3 + res_width));
-                res_per_conf = (0..nb_of_conf).map(|_| Vec::new()).collect();
                 initialized = true;
             }
             // legacy: :365-382 per conf (ascending) then per chan (ascending).
@@ -652,21 +666,17 @@ impl CorpusProcessor {
                         results_e[[counter, 3 + c]] = v;
                     }
                     counter += 1;
-                    // legacy: :379-380 _ResPerConf[conf].row(counters[conf]) = res --
-                    // the typed value, same ascending (file, chan) order.
-                    res_per_conf[config_nb - 1].push(result.clone());
                 }
             }
         }
 
-        // legacy: :385-388 conservativeResize (truncate) to the counters.
+        // legacy: :385-388 conservativeResize (truncate) to the counter.
         if !initialized {
-            // No results at all -> empty ResultsE, empty per-conf mats.
-            return (Array2::zeros((0, 0)), Vec::new());
+            // No results at all -> empty ResultsE.
+            return Array2::zeros((0, 0));
         }
-        let truncated_e = truncate_rows(&results_e, counter);
         let _ = res_width;
-        (truncated_e, res_per_conf)
+        truncate_rows(&results_e, counter)
     }
 
     /// Port of `CorpusProcessor::saveResults(epoch)` (`:391-404`): the 5 named
@@ -851,8 +861,8 @@ impl CorpusProcessor {
                 continue;
             };
             for r in conf0.values() {
-                let lid_cost = r.lid.as_ref().map_or(0.0, |l| l.cost);
-                let lid_count = r.lid.as_ref().map_or(0.0, |l| l.count as f64);
+                let lid_cost = r.lid_cost();
+                let lid_count = r.lid_count() as f64;
                 match algo0 {
                     3 | 4 => {
                         cost += r.seg_cost;
@@ -989,7 +999,7 @@ impl CorpusProcessor {
         results: &BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
         nb_of_conf: usize,
         nb_of_files: usize,
-    ) -> (Array2<f64>, Vec<Vec<ChannelResult>>) {
+    ) -> Array2<f64> {
         Self::transform_results_impl(results, nb_of_conf, nb_of_files)
     }
 
@@ -1125,7 +1135,7 @@ impl CorpusProcessor {
                 results.insert(j, tmp);
             }
         }
-        let (results_e, _) =
+        let results_e =
             Self::transform_results_impl(&results, bag.nb_of_conf(), corpus.nb_of_files());
         Ok(results_e)
     }

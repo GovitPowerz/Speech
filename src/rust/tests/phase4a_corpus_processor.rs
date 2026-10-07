@@ -213,7 +213,7 @@ fn transform_results_ordering() {
     results.insert(0, r0);
 
     // nb_of_files is 2 (the corpus size), nb_of_conf 1.
-    let (results_e, res_per_conf) = CorpusProcessor::transform_results_for_test(&results, 1, 2);
+    let results_e = CorpusProcessor::transform_results_for_test(&results, 1, 2);
 
     // ResultsE: 2 rows, 3 id cols + 18 result cols = 21 cols.
     assert_eq!(results_e.dim(), (2, 21), "conservative resize to counter");
@@ -228,11 +228,12 @@ fn transform_results_ordering() {
         &[3.0, 1.0, 1.0, 33.0, 44.0]
     );
 
-    // Per-conf list (conf 0): the channel results, ascending file order.
-    assert_eq!(res_per_conf.len(), 1);
-    assert_eq!(res_per_conf[0].len(), 2);
-    assert_eq!(&res_per_conf[0][0].to_row()[..2], &[11.0, 22.0]);
-    assert_eq!(&res_per_conf[0][1].to_row()[..2], &[33.0, 44.0]);
+    // The per-conf list the fold reads (conf 0): the channel results, ascending file order.
+    let per_conf = CorpusProcessor::results_per_config(&results, 1);
+    assert_eq!(per_conf.len(), 1);
+    assert_eq!(per_conf[0].len(), 2);
+    assert_eq!(&per_conf[0][0].to_row()[..2], &[11.0, 22.0]);
+    assert_eq!(&per_conf[0][1].to_row()[..2], &[33.0, 44.0]);
 }
 
 // === lanes_n1_equals_sequential ==============================================
