@@ -76,6 +76,10 @@ A RESULTS.md row cannot flip silently between two measurements: a second record 
   ADR-0003, and wall differences are not metrics.
 - `run_metadata.json` stays the local run manifest (it may hold the corpus root; it never leaves
   the gitignored `runs/`); `record.json` is the promotable subset.
+- A launcher run is declared by a `BaselineSpec` (`drivers/spec.py`, issue #21), whose
+  `recipe()` is the record's identity; the committed runners under `experiments/` fire a table's
+  full runs with that recipe hard-coded and promote each record, so a `TBD` row is filled by a
+  script a reader can run, not by a recipe retyped from prose.
 - The four Phase 7 bench legs are staged from the repository (`speech.ledger.stage`: the 60 s
   fixture and the three sorted-first corpus files, no filename recorded) and run by
   `python -m speech.ledger bench --leg <name>` as the Phase 7 protocol (N fresh processes per

@@ -28,7 +28,7 @@ The SAD pitch second pass (Algo 3, `TDCwindow > 0`) repeats steps 4-6 on a perio
 
 ## A training step in eight lines
 
-`uv run python -m speech.drivers.baseline sad --cell cfc --direction forward ...` (`drivers/baseline.py`) or the modern loop directly (`drivers/train.py::train_modern`):
+`uv run python -m speech.drivers.baseline sad --cell cfc --direction forward ...` (a `BaselineSpec`, `drivers/spec.py`, run by `drivers/baseline.py`; the runners under `experiments/` fire the full-corpus rows) or the modern loop directly (`drivers/train.py::train_modern`):
 
 1. `dataprep/lre.py` derives the listings, the 12-class mapping and the split from the local corpus; nothing corpus-derived is committed.
 2. `config_bridge.nnet_spec` reads the architecture (sizes, cell, direction, per-cell geometry) out of the same config the engine will read.

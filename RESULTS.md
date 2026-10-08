@@ -195,29 +195,103 @@ the full-run launcher's job (more data, more epochs).
 
 ---
 
-## Firing a full run (post-phase, user-fired)
+## LID cell matrix (issue #21)
+
+`--cell` / `--direction` on `lid-features` and `lid-phseq` target the LID net, the one that
+trains under the frozen-SAD contract; the SAD net stays the legacy LSTM at its seed, byte-identical
+across every LID row of a seed (unit-pinned), so the rows below compare to each other and to the
+Phase-6 LSTM row on the same split. A forward LID net carries the same two derived keys as a
+forward SAD net (`BLSTM_LID_OutputNeuronNb 24,12`, `BLSTM_LID_window 0`, the plain whole-utterance
+regime). EXACT TREE ONLY: the fast Twin LID is BLSTM-only by its own gate (`bail_unsupported_shape`,
+pinned by `phase7_parity_lid`), so no row here has a fast or streamed twin; lifting that gate to the
+matrix is #57. Evidence: `tests/pyo3/test_lid_cells_gates.py` -- a preflight probe over all 20
+(arm x cell x direction) legs (the LID pack length the engine accepts per cell, pinned; a finite
+interior init cost; a nonzero LID gradient and an exactly-zero SAD gradient), one trained
+`slstm / forward` leg per arm at the Phase-6 recipe, run-twice bit-identical on both arms.
+
+The phSeq `slstm / forward` row is recorded as measured: it beats its own init by 8.89 pt but sits
+at chance (91.11% against 91.67%), the thin from-scratch phSeq regime the Phase-6 LSTM row already
+documents (a 1-epoch cut went negative there). Its gate pins beat-init only; the features row pins
+beat-chance (+8.33 pt) and beat-init (+10.42 pt).
+
+### LID -- features regime, by cell
+
+<!-- ledger:table lid_features_cells -->
+| cell / direction | files (train/valid/test) | trained LID error % | init LID error % | gain (pt) | Cavg | chance % | wall |
+|---|---|---|---|---|---|---|---|
+| LSTM / bidirectional | 35 / 15 / 48 | 72.92 | 93.75 | +20.83 | 0.46 | 91.67 | 212 s |
+| LSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| sLSTM / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| sLSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Mamba / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Mamba / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| CfC / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| CfC / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Transformer / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Transformer / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| full-corpus runs (any cell x direction) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
+<!-- ledger:end -->
+
+### LID -- phonotactic regime, by cell
+
+<!-- ledger:table lid_phseq_cells -->
+| cell / direction | files (train/valid/test) | trained LID error % | init LID error % | gain (pt) | Cavg | chance % | wall |
+|---|---|---|---|---|---|---|---|
+| LSTM / bidirectional | 15 / 15 / 45 | 84.44 | 91.11 | +6.67 | 0.49 | 91.67 | 136 s |
+| LSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| sLSTM / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| sLSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Mamba / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Mamba / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| CfC / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| CfC / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Transformer / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Transformer / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| full-corpus runs (any cell x direction) | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
+<!-- ledger:end -->
+
+---
+
+## Full runs: the runners (post-phase, user-fired)
+
+A full-corpus row is fired by a committed runner under `experiments/`, one script per `TBD`
+table, each row's recipe hard-coded (seed 0, 40 epochs x 25 steps, patience 6, lanes from the
+host; the recipe is the ledger row's identity, so a different budget is a different study):
+
+| runner | rows | table |
+|---|---|---|
+| `experiments/00_prereqs.sh` | corpus root, release build, `runs/` ignored | -- |
+| `experiments/01_phase6_full_runs.sh` | the legacy BLSTM on `lid-features`, `sad`, `lid-phseq` | `phase6_*` |
+| `experiments/02_v1_cells.sh` | sLSTM, Mamba x both directions on `sad` | `phase9_v1_cells` |
+| `experiments/03_v2_cells.sh` | LSTM, sLSTM, Mamba, CfC x both directions on `sad-v2` | `phase10_v2_cells` |
+| `experiments/04_v2_transformer.sh` | Transformer x both directions on `sad-v2` | `phase11_v2_cells` |
+| `experiments/05_lid_cells.sh` | every cell x direction on both LID arms (bar `lstm / bidirectional`) | `lid_*_cells` |
+
+Host knobs: `SPEECH_CORPUS_ROOT` (default `data/LRE03-LRE07`) and `SPEECH_LANES` (default 1, the
+parity mode; ADR-0007 puts the lane count in the record). A runner takes optional row names
+(`experiments/05_lid_cells.sh lid-phseq/mamba/forward`), runs one launcher invocation per row into
+`runs/<study>/<arm>_<cell>_<direction>_<UTC>/`, logs beside it, continues past a failed row, and at
+the end of each row tries `python -m speech.ledger add <run>/record.json`; a refusal (dirty tree, a
+live record for the recipe) prints the manual command and the runner exits nonzero, so supersession
+stays a human decision. One row by hand, the same recipe:
 
 ```
-# LID features (Algo 6, Mode 7, cep)
-uv run python -m speech.drivers.baseline lid-features --corpus-root data/LRE03-LRE07 --out-dir runs/lid_features_full \
-    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25
-
-# SAD (Algo 3 spectral, wav) -- --audio-max-duration lifts the subset gate's short cap; omit
-# it to score full-length recordings (the corpus wavs are 576-1800 s CallFriend files, median ~600 s).
-uv run python -m speech.drivers.baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_full \
-    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
-
-# LID phonotactic (Algo 6, Mode 7, File_Type 1 phSeq) -- the 2015 flagship regime.
-uv run python -m speech.drivers.baseline lid-phseq --corpus-root data/LRE03-LRE07 --out-dir runs/lid_phseq_full \
-    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25
+uv run python -m speech.drivers.baseline lid-phseq --corpus-root data/LRE03-LRE07 --out-dir runs/lid_cells/by_hand \
+    --cell mamba --direction forward --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --patience 6
 ```
 
 Omit `--subset` to train on the whole split (SAD: the full 70% train split of the 2066 wav/xml
-pairs; LID: the whole localized corpus); `--lanes N` sets the fold width (record N here);
-`--resume` continues from `<out-dir>/checkpoint`. The run writes `run_metadata.json`
-(seed/lanes/subset/config-hash/audio cap/start-of-run git SHA + dirty flag), `checkpoint/` (best/last packs + `train_history.json`),
-and the held-out scores -- LID `scores/` (`.scr`) -> `lid_error`/`cavg`; SAD `score_trained/`
-(VRCTS hyp xml) -> pooled `dcf`. Paste the resulting numbers into the `full run` rows above.
+pairs; LID: the whole localized corpus); the SAD runners pass `--audio-max-duration 120` (the
+corpus wavs are 576-1800 s CallFriend files, median ~600 s). The run writes `run_metadata.json`
+(the spec as it ran plus the config hash and the start-of-run git SHA + dirty flag), `checkpoint/`
+(best/last packs + `train_history.json`), the held-out scores -- LID `scores/` (`.scr`) ->
+`lid_error`/`cavg`; SAD `score_trained/` (VRCTS hyp xml) -> pooled `dcf` -- and `record.json`,
+the promotable record (not on `--dry-run`). A run directory that already holds a manifest is
+refused unless `--resume` continues it.
 
 Known limitation (machinery): `forget_bias_one` (the LSTM forget-gate 1.0 init, default on) is
 threaded correctly through `ModernTrainParams` end to end but has NO CLI flag on `python -m speech.drivers.baseline`
@@ -870,17 +944,12 @@ over the same epochs. Only the held-out TASK metric is gated.
 
 #### Firing the new-cell arms (post-phase, user-fired)
 
-```
-# Any {lstm,slstm,mamba} x {bidirectional,forward} combination, same launcher as phase 6.
-uv run python -m speech.drivers.baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_slstm_full \
-    --cell slstm --direction bidirectional \
-    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
-```
+`experiments/02_v1_cells.sh` fires the four rows (any subset by name, e.g.
+`sad/slstm/bidirectional`); each record promotes into the `full-corpus runs` row above.
 
 `--direction forward` additionally forces `BLSTM_window 0` (the plain whole-sequence causal
 regime -- a window boundary would reset the recurrent state) and resizes the output MLP's
-input width; both are automatic (`drivers/baseline.py::cell_overlay`). Paste resulting
-numbers into the `full-corpus runs` row above.
+input width; both are automatic (`drivers/baseline.py::cell_overlay`).
 
 ### Task 9 -- the corpus tier (causal streaming, causality cost, fast-vs-exact) + the bench rows
 
@@ -1484,18 +1553,14 @@ held-out TASK metric is gated.
 
 ### Firing the v2 arm (post-phase, user-fired)
 
-```
-# Any {lstm,slstm,mamba,cfc} x {bidirectional,forward} combination on the v2 lineage.
-uv run python -m speech.drivers.baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_cfc_full \
-    --cell cfc --direction forward \
-    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
-```
+`experiments/03_v2_cells.sh` fires the eight rows (any subset by name, e.g.
+`sad-v2/cfc/forward`); each record promotes into the `full-corpus runs` row above.
 
 Identical in every knob to the phase-9 `python -m speech.drivers.baseline sad` recipe -- ONLY the arm name
-changes, since `sad-v2` shares the entire SAD skeleton (`_SAD_ARMS`) and every size derives
+changes, since `sad-v2` shares the entire SAD skeleton (`SadArm`) and every size derives
 from the config. To answer the lineage question, fire the SAME cell x direction on both arms
 and compare; the live-capacity table above says the comparison is about init scaling and
-pack size, not about capacity. Paste resulting numbers into the `full-corpus runs` row above.
+pack size, not about capacity.
 
 ## Phase 10 -- the full-f32 mel front-end (Task 5, spec S4)
 
@@ -1715,11 +1780,12 @@ decomposition and the Task-5 causal bench row found. What the table does establi
 ### The Twin's frozen-SAD gate: RE-EXAMINED, STAYS CONSERVATIVE
 
 Spec S5 says the Twin's `bail_unsupported_shape` is revisited ONLY if a covering gate exists.
-It does not, so it stays, and the doc comment now says so explicitly. Nothing in this task
-adds one: the bidirectional twins land behind the algo-3 SAD driver; in Mode 7 the Twin's SAD
-net is never run (the frozen-SAD contract); and `drivers/baseline.py` rejects
-`--cell`/`--direction` on the LID arms outright. The refusal costs nothing real and
-keeps the fast Twin's accepted surface exactly what phase 7 pinned.
+At this phase none did, so it stayed, and the doc comment says so explicitly: the bidirectional
+twins land behind the algo-3 SAD driver; in Mode 7 the Twin's SAD net is never run (the
+frozen-SAD contract); and `drivers/baseline.py` rejected `--cell`/`--direction` on the LID
+arms outright. Since issue #21 the knob targets the LID net on those arms and the exact-tree
+LID cell gates exist ("LID cell matrix" above); the fast Twin's gate still stands, and lifting
+it to the matrix is #57.
 
 ### No streaming leg, by construction
 
@@ -2816,12 +2882,8 @@ gates (2, both now PASS -- the training/scoring cost is unchanged, only the crit
 
 ### Firing the transformer arm (post-phase, user-fired)
 
-```
-# Either direction -- both now clear the ratified hard-leg criterion.
-uv run python -m speech.drivers.baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_transformer_full \
-    --cell transformer --direction bidirectional \
-    --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
-```
+`experiments/04_v2_transformer.sh` fires both rows; each record promotes into the
+`full-corpus runs` row above.
 
 The full-corpus run is where the init-quality anomaly's practical consequence -- if any --
 would actually surface: at subset scale it only affected which DISJUNCT a gate satisfied,

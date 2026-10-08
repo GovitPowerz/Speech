@@ -327,6 +327,29 @@ def test_cell_matrix_renders_tbd_for_missing_cells_and_a_collar_range() -> None:
     assert len(TABLES["phase11_v2_cells"]([slstm])) == 5  # header, rule, 2 TBD rows, 1 TBD full row
 
 
+def test_lid_cell_matrix_renders_per_arm_with_tbd_rows_and_full_runs() -> None:
+    """Issue #21: one (cell x direction) table per LID arm, the Phase-6 LSTM gate row included
+    since it is the same (arm, cell, direction); the other arm's records never leak in."""
+    slstm = lid_gate("lid-phseq", cell="slstm", direction="forward")
+    slstm = slstm.model_copy(update={"payload": slstm.payload.model_copy(update={"lid_error": 80.0, "cavg": 0.49, "init_lid_error": 91.11, "wall_s": 200.0})})
+    full = lid_gate("lid-phseq", at=T0.replace(day=3), cell="mamba", direction="bidirectional")
+    full = full.model_copy(
+        update={
+            "recipe": full.recipe.model_copy(update={"subset": None, "epochs": 40}),
+            "payload": full.payload.model_copy(update={"source": "launcher", "test": None}),
+        }
+    )
+    lines = TABLES["lid_phseq_cells"]([slstm, full])
+    assert lines[0] == "| cell / direction | files (train/valid/test) | trained LID error % | init LID error % | gain (pt) | Cavg | chance % | wall |"
+    assert lines[2] == "| LSTM / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |"
+    assert lines[5] == "| sLSTM / forward | 35 / 15 / 48 | 80.00 | 91.11 | +11.11 | 0.49 | 91.67 | 200 s |"
+    assert lines[12] == "| full run: Mamba / bidirectional (2026-10-03, seed 0) | 35 / 15 / 48 | 72.92 | 93.75 | +20.83 | 0.46 | 91.67 | 37 s |"
+    assert "TBD" in TABLES["lid_phseq_cells"]([slstm])[12] and "full-corpus runs" in TABLES["lid_phseq_cells"]([slstm])[12]
+    # the features table does not pick up a phseq record; its own LSTM gate lands in its first row.
+    assert all("TBD" in line for line in TABLES["lid_features_cells"]([slstm, full])[2:13])
+    assert TABLES["lid_features_cells"]([lid_gate()])[2].startswith("| LSTM / bidirectional | 35 / 15 / 48 | 72.92 | 93.75 | +20.83 | 0.46 | 91.67 |")
+
+
 def test_supersession_footnote_hides_the_old_row() -> None:
     old = sad_gate()
     new = sad_gate(at=T0.replace(hour=13), wall_s=39.0, supersedes=old.id, reason="re-run on main after the fixture change")

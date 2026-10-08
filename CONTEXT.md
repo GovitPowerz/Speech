@@ -203,7 +203,17 @@ The 2015 outer loop: QuantumPSO over a genome that carried the weights in-band. 
 The vec2struct parameter vector the outer search decodes into a config.
 
 **Arm**:
-One of the four from-scratch baseline trainings behind `python -m speech.drivers.baseline <arm>`: `sad`, `sad-v2`, `lid-features`, `lid-phseq`.
+The object behind one of the four from-scratch baseline trainings (`sad`, `sad-v2`, `lid-features`, `lid-phseq`): what varies per training (the listings, the nets it seeds, the net the cell knob targets, the held-out scoring) behind the launcher's shared skeleton.
+
+**Baseline spec**:
+The one typed declaration of a launcher run (`drivers/spec.py`): every CLI flag is a field, the defaults are its, an invalid run fails at construction, and its projection is the ledger recipe.
+
+**Launcher**:
+`python -m speech.drivers.baseline <arm>`, the CLI that builds a baseline spec and runs it.
+_Avoid_: experiment (as a synonym for a run)
+
+**Runner**:
+A committed script under `experiments/` that fires one table's full runs, one launcher invocation per row with the row's recipe hard-coded, and promotes each record.
 
 **Subset gate**:
 A corpus-gated test that trains an arm from scratch on a stratified subset and asserts beat-init (and, for LID, beat-chance), run-twice bit-identical.

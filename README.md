@@ -67,6 +67,9 @@ uv sync --group dev
 # Train a SAD net from scratch (needs the local corpus; every size derives from the config)
 uv run python -m speech.drivers.baseline sad-v2 --cell cfc --direction forward --corpus-root <corpus> --out-dir runs/cfc_fwd
 
+# Fire a full-corpus row of a RESULTS.md table and promote its record (the runners carry the recipes)
+experiments/05_lid_cells.sh lid-phseq/mamba/forward
+
 # Run tests
 cd src/rust && cargo test && cd ../..
 uv run pytest tests -m "not slow"

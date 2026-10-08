@@ -297,6 +297,57 @@ def phase11_v2_cells(records: list[Record]) -> list[str]:
 
 
 # --------------------------------------------------------------------------------------- #
+# Issue #21: the (cell x direction) LID matrices, one per LID arm (exact-tree numbers; the
+# fast Twin LID is BLSTM-only, #57). The LSTM / bidirectional row is the Phase-6 gate's.
+# --------------------------------------------------------------------------------------- #
+
+_ALL_CELLS = [(c, d) for c in ("lstm", "slstm", "mamba", "cfc", "transformer") for d in _BOTH]
+
+
+def _lid_gain(r: BaselineRecord) -> str:
+    p = r.payload
+    return "n/a" if p.lid_error is None or p.init_lid_error is None else f"{p.init_lid_error - p.lid_error:+.2f}"
+
+
+def _lid_cells(r: BaselineRecord) -> str:
+    p = r.payload
+    return f"{_files(r)} | {_opt(p.lid_error, '.2f')} | {_opt(p.init_lid_error, '.2f')} | {_lid_gain(r)} | {_opt(p.cavg, '.2f')} | {CHANCE} | {_wall(r)}"
+
+
+def _lid_cell_matrix(records: list[Record], arm: str) -> list[str]:
+    current = current_baselines(records)
+    lines = [
+        "| cell / direction | files (train/valid/test) | trained LID error % | init LID error % | gain (pt) | Cavg | chance % | wall |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    rows: list[BaselineRecord] = []
+    for cell, direction in _ALL_CELLS:
+        r = gate_row(current, arm, None, cell, direction)
+        if r is None:
+            lines.append(_tbd(f"{CELL_NAME[cell]} / {direction}", 7))
+            continue
+        lines.append(f"| {_cell(r)} | {_lid_cells(r)} |")
+        rows.append(r)
+    fulls = full_rows(current, arm, None, _ALL_CELLS)
+    for r in fulls:
+        lines.append(f"| full run: {_cell(r)} ({_date(r)}, seed {r.recipe.seed}) | {_lid_cells(r)} |")
+        rows.append(r)
+    if not fulls:
+        lines.append(_tbd("full-corpus runs (any cell x direction)", 7))
+    return lines + _footer(rows, records)
+
+
+@table("lid_features_cells")
+def lid_features_cells(records: list[Record]) -> list[str]:
+    return _lid_cell_matrix(records, "lid-features")
+
+
+@table("lid_phseq_cells")
+def lid_phseq_cells(records: list[Record]) -> list[str]:
+    return _lid_cell_matrix(records, "lid-phseq")
+
+
+# --------------------------------------------------------------------------------------- #
 # Phase 7: the exact-vs-fast bench matrix
 # --------------------------------------------------------------------------------------- #
 
