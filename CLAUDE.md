@@ -23,6 +23,7 @@ The ultimate goal (user, 2026-07-10): a very efficient SAD + LID Rust binary in 
 | The oracle tiers and the standing gates, in full | `docs/validation.md` |
 | Per-module responsibilities and legacy sources, row by row | `src/rust/README.md`, `src/python/speech/README.md` |
 | Who decides what, and what evidence a change needs | `DEVELOPMENT.md` |
+| How a full-corpus row is fired and its record promoted | `experiments/` (one runner per `TBD` table), `RESULTS.md` "Full runs: the runners" |
 
 ## Build & Development Commands
 
@@ -60,7 +61,7 @@ uv run python -m speech.ledger bench --leg phase7_60s                   # a stag
 experiments/05_lid_cells.sh [arm/cell/direction ...]                    # a TBD table's full runs: one launcher call per row, recipe hard-coded, record promoted (#21)
 ```
 
-Suite sizes at the issue #22 close (2026-10-07): cargo 1317, pytest 1036 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 909 without `tests/pyo3`), pyo3 210 (`uv run pytest tests/pyo3 -q`, corpus present, ~20 min).
+Suite sizes at the issue #21 close (2026-10-08): cargo 1317, pytest 1076 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 949 without `tests/pyo3`), pyo3 234 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min).
 
 ## Architecture
 

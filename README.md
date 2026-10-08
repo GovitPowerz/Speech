@@ -20,9 +20,9 @@ A Speech Activity Detection (SAD) and spoken Language Identification (LID) engin
 | Fast tree, cost (Apple M4 Pro) | SAD 4.93x, LID 3.43-3.63x end to end; `realfft` 23.4x per call, `faer` projection 12.4x; fast SAD peak RSS 43.5 MB vs 57.2 exact | [RESULTS.md](RESULTS.md), the Phase 7 bench matrix and micro-benches |
 | Streaming equivalence | streamed `finish()` bit-for-bit equal to the offline frozen run on every cell, chunk-invariant at 20 / 100 / 1000 / 7 ms, zero retractions; a real retraction found on corpus data and fixed | `src/rust/tests/phase8_gate.rs`, `phase9_stream_causal.rs`, `tests/pyo3/test_phase8_parity.py` |
 | Cell gradients | central differences vs the analytic backward per shape x 3 seeds, worst discriminating residual 7.4e-6 (Mamba), 2.9e-7 (transformer), 5.5e-8 (CfC), all pinned under a 1e-4 ceiling; dead blocks pinned exactly | `src/rust/tests/phase9_cell_grad.rs`, `tests/pyo3/test_phase9_seam.py` |
-| From-scratch training | 10 of 10 cell x direction rows on the v2 SAD lineage beat their untrained init at every collar, run-twice byte-identical; the 12-class LID arms beat chance and init on held-out subsets | `tests/pyo3/test_phase10_gates.py`, `test_phase6_gates.py` |
+| From-scratch training | 10 of 10 cell x direction rows on the v2 SAD lineage beat their untrained init at every collar, run-twice byte-identical; the 12-class LID arms beat chance and init on held-out subsets; the LID cell knob is probed over all 20 (arm x cell x direction) legs and trained on `slstm / forward` per arm | `tests/pyo3/test_phase10_gates.py`, `test_phase6_gates.py` |
 | Every test claims what it catches | a mutation battery per phase, scored catcher by catcher, gaps measured and recorded (Phase 11: 8 of 10 named catchers fire; the two misses are sub-pin symmetric substitutions) | [RESULTS.md](RESULTS.md), the battery sections |
-| Every gate number has a record | 17 ledger records (one per subset-gate row: SHA, build, host, recipe, metrics), each produced by re-running its gate, none transcribed; the six RESULTS.md gate tables are rendered from them and CI fails if the file and the ledger disagree | `ledger/`, `tests/test_ledger.py`, [ADR-0009](docs/adr/0009-measurements-are-ledger-records.md) |
+| Every gate number has a record | 19 ledger records (one per subset-gate row: SHA, build, host, recipe, metrics), each produced by re-running its gate, none transcribed; the eight RESULTS.md gate tables are rendered from them and CI fails if the file and the ledger disagree; a `TBD` full-run row is filled by a committed runner under `experiments/` | `ledger/`, `tests/test_ledger.py`, [ADR-0009](docs/adr/0009-measurements-are-ledger-records.md) |
 
 The from-scratch numbers are subset-scale and said so: on ten files a SAD net collapses from all-non-speech to all-speech (DCF exactly 0.75 to 0.25) with no partial-discrimination point between, and the 12-class LID arms reach 73% (acoustic) and 84% (phonotactic) held-out error against 92% chance. Genuine discrimination is the job of the full-corpus launcher runs, whose rows [RESULTS.md](RESULTS.md) holds open; nothing corpus-derived is committed.
 
@@ -140,6 +140,7 @@ Speech/
   README.md  CLAUDE.md  CONTEXT.md  DEVELOPMENT.md  CITATION.cff  LICENSE
   RESULTS.md  IMPROVEMENTS.md
   ledger/{baseline,bench}/*.json          # the measurement ledger: one record per measured number (ADR-0009)
+  experiments/{00..05}_*.sh  lib.sh        # the runners: one per RESULTS.md table with a TBD full-run row, recipe hard-coded, record promoted
   pyproject.toml  uv.lock
   setup_env.sh  build.sh  check_all.sh  lint_code.sh  upgrade_dependencies.sh
   .github/workflows/ci.yml
@@ -172,7 +173,7 @@ Speech/
   src/python/speech/                       # the optimizer / orchestrator (README.md: the module map)
     cli.py  config_bridge.py  weight_bridge.py  init_weights.py  engine.py  genome.py
     evaluate.py  optimizers.py  scoring.py  batching.py  nn_reference.py  features_oracle.py
-    drivers/{state,init,train,retrain,test,baseline}.py
+    drivers/{state,init,train,retrain,test,baseline,spec}.py
     dataprep/{augment,opensad15,stm_normalize,lre}.py
     ledger/{schema,tables,render,cli,stage,bench,prose}.py   # the record schema, the RESULTS.md renderers, the staged bench legs, `python -m speech.ledger`
   tests/                                   # pytest suites + tests/pyo3/ (the seam) + reference_data/ (goldens)
