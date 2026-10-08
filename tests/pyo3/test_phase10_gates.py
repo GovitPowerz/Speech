@@ -1,6 +1,6 @@
 """Phase 10 Task 4 (spec S3.2/S3.3): the from-scratch subset gates of the
 `lre_sad_v2` lineage -- {LSTM, sLSTM, Mamba, CfC} x {bidirectional, forward} on the
-`sad-v2` arm, through the `--cell-type`/`--direction` knobs. Phase 11 Task 9 (spec S8)
+`sad-v2` arm, through the `--cell`/`--direction` knobs. Phase 11 Task 9 (spec S8)
 grew the matrix EIGHT -> TEN, adding the fifth cell, Transformer -- see "THE TRANSFORMER
 ROWS" below for its own table, the init-quality anomaly it surfaced, and the user-ratified
 `COLLAPSE_FLOOR_DCF` amendment (2026-08-12) that resolves it.

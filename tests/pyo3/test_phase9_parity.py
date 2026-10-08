@@ -50,7 +50,7 @@ tail). This tier pins the streaming-vs-offline equivalence and the causality-cos
 real data with real trained weights.
 
 CHECKPOINTS: trained here via T8's EXACT gate recipe (`test_phase9_gates.py::_GATE`
-verbatim) through `run_baseline(... cell_type=<cell>, direction="forward")`, cached under
+verbatim) through `run_baseline(BaselineSpec(... cell=<cell>, direction="forward"))`, cached under
 the gitignored `data/phase9_parity_cache/` (holds corpus-path listings -- NEVER committed),
 the phase-7 cache recipe. `run_baseline` at a fixed seed is deterministic (the T8
 determinism legs), so a warm cache is bit-identical to a fresh run -- a pure speedup. Each

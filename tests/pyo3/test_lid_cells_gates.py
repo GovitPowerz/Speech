@@ -12,7 +12,8 @@ overlay the SAD arms use, under the `BLSTM_LID` prefix. Two legs, the Phase-9 pa
 * ONE TRAINED LEG per arm on `slstm / forward`: the two derived keys of a forward LID net
   (`BLSTM_LID_OutputNeuronNb 24,12`, `BLSTM_LID_window 0`) exercised end to end at the
   phase-6 LID gate recipe, the frozen-SAD contract asserted, the held-out argmax error
-  beating chance and the model's own init, run-twice bit-identical on a short recipe.
+  beating the model's own init (and chance where the margin exists, `_CHANCE_MARGIN`),
+  run-twice bit-identical on a short recipe.
   Records its gate row (`gate_record`) for the LID cell tables.
 
 Corpus-gated + pyo3, local-only. The fast Twin LID is BLSTM-only (#57), so every number here

@@ -1,5 +1,5 @@
 """Phase 9 Task 8 (spec S8.2): the FOUR from-scratch subset gates -- {sLSTM, Mamba} x
-{bidirectional, forward} on the SAD arm, through the T4 `--cell-type`/`--direction` knobs.
+{bidirectional, forward} on the SAD arm, through the T4 `--cell`/`--direction` knobs.
 
 Same protocol as the phase-6 SAD gate (`test_phase6_gates.py::test_sad_*`, the template):
 corpus-gated + local-only, seeded, < 10 min each, run-twice bit-identical, and the HARD leg

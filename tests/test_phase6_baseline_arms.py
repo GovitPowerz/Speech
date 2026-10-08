@@ -250,12 +250,18 @@ def test_parser_dests_and_defaults_are_the_specs() -> None:
     assert BaselineSpec.from_args(argparse.Namespace(**ns)) == BaselineSpec(arm="sad", corpus_root=Path("/c"), out_dir=Path("/o"))
 
 
-@pytest.mark.parametrize("argv", [["--epochs", "0"], ["--valid-size", "-1"], ["--lanes", "0"], ["--lre-listing", "/l.csv"]], ids=lambda a: a[0])
+@pytest.mark.parametrize(
+    "argv", [["--epochs", "0"], ["--valid-size", "-1"], ["--lanes", "0"], ["--seed", "-1"], ["--lre-listing", "/l.csv"]], ids=lambda a: a[0]
+)
 def test_an_invalid_run_is_a_usage_error_before_any_directory_exists(tmp_path: Path, argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    import speech.cli as cli
+
     out = tmp_path / "never"
     with pytest.raises(SystemExit) as e:
         B.main(["sad", "--corpus-root", "/c", "--out-dir", str(out), *argv])
     assert e.value.code == 2 and argv[0].lstrip("-").replace("-", "_") in capsys.readouterr().err
+    # the `speech.cli` mount returns the code, as it does for an argparse usage error
+    assert cli.main(["baseline", "sad", "--corpus-root", "/c", "--out-dir", str(out), *argv]) == 2
     assert not out.exists()
 
 
@@ -274,7 +280,6 @@ def test_all_four_arms_wired() -> None:
     # cannot be silently mis-classified (the partition guard of the old frozensets).
     assert set(B.ARMS) == set(ARM_CONFIG)
     assert {arm for arm, obj in B.ARMS.items() if isinstance(obj, B.SadArm)} == set(SAD_ARMS)
-    assert all(B.ARMS[arm].config == ARM_CONFIG[arm] for arm in ARM_CONFIG)
 
 
 def test_lid_phseq_dispatches_into_lid_path(tmp_path: Path) -> None:

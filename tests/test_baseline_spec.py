@@ -38,6 +38,7 @@ def test_spec_is_frozen_and_closed() -> None:
 @pytest.mark.parametrize(
     "bad",
     [
+        dict(seed=-1),
         dict(epochs=0),
         dict(steps_per_epoch=0),
         dict(patience=0),

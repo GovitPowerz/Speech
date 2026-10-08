@@ -53,7 +53,7 @@ class BaselineSpec(BaseModel):
     arm: Arm
     corpus_root: Path
     out_dir: Path
-    seed: int = 0
+    seed: NonNegativeInt = 0
     lanes: PositiveInt = 1
     subset: PositiveInt | None = None
     epochs: PositiveInt = 40

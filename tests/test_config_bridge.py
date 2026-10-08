@@ -32,9 +32,12 @@ def test_the_cell_matrix_is_declared_once() -> None:
     from typing import get_args
 
     from speech import init_weights
+    from speech.ledger.tables import CELL_NAME
 
     assert config_bridge.CELL_TYPES == ("lstm", "slstm", "mamba", "cfc", "transformer")
     assert config_bridge.DIRECTIONS == ("bidirectional", "forward")
     assert get_args(config_bridge.CellType) == config_bridge.CELL_TYPES
     assert get_args(config_bridge.Direction) == config_bridge.DIRECTIONS
     assert init_weights.CellType is config_bridge.CellType
+    # the LID cell tables iterate CELL_TYPES and label each row through CELL_NAME
+    assert set(CELL_NAME) == set(config_bridge.CELL_TYPES)

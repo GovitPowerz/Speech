@@ -757,10 +757,9 @@ class Scores:
 @dataclass(frozen=True)
 class SadArm:
     """A SAD arm (`sad`, `sad-v2`): one trainable algo-3 net over the corpus wav/xml pairs,
-    scored end to end with the T4 DCF harness. The two instances differ only in the lineage's
-    committed TOML (ADR-0008); everything downstream self-sizes off the config."""
+    scored end to end with the T4 DCF harness. The two arms differ only in the lineage's
+    committed TOML (`ARM_CONFIG`, ADR-0008); everything downstream self-sizes off the config."""
 
-    config: str
     prefix: ClassVar[str] = "BLSTM"  # the net the cell knob targets
 
     def dry_run_clamp(self, spec: BaselineSpec) -> BaselineSpec:
@@ -803,7 +802,6 @@ class LidArm:
     contract), scored `.scr` -> `lid_error` + `cavg`. The two instances differ only in the
     corpus tree they glob (`derive`) and the File_Type their TOML declares."""
 
-    config: str
     stem: str
     derive: Callable[[Path, Path], list[dict[str, str]]]
     hint: str
@@ -871,10 +869,10 @@ class LidArm:
 #: `drivers/spec.py` (`ARM_CONFIG` / `ARM_LINEAGE`, pinned against `lineage_of` there); the
 #: behaviour is the class, and a unit test pins that `SadArm` instances are exactly `SAD_ARMS`.
 ARMS: dict[Arm, SadArm | LidArm] = {
-    "sad": SadArm(ARM_CONFIG["sad"]),
-    "sad-v2": SadArm(ARM_CONFIG["sad-v2"]),
-    "lid-features": LidArm(ARM_CONFIG["lid-features"], "lre03_lid_features", derive_lid_features_records, "train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd"),
-    "lid-phseq": LidArm(ARM_CONFIG["lid-phseq"], "lre03_lid_phseq", derive_lid_phseq_records, "train/phSeq/*.file.phSeqbis"),
+    "sad": SadArm(),
+    "sad-v2": SadArm(),
+    "lid-features": LidArm("lre03_lid_features", derive_lid_features_records, "train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd"),
+    "lid-phseq": LidArm("lre03_lid_phseq", derive_lid_phseq_records, "train/phSeq/*.file.phSeqbis"),
 }
 
 
@@ -902,7 +900,7 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     arm = ARMS[spec.arm]
     # __file__ = <repo>/src/python/speech/drivers/baseline.py -> parents[4] = <repo>.
     repo_root = Path(__file__).resolve().parents[4]
-    toml_path = repo_root / arm.config
+    toml_path = repo_root / ARM_CONFIG[spec.arm]
     # The record's provenance is the tree the run STARTS on (issue #40): stamped after training it
     # would name an edit or a commit made during the run, and a git failure would lose the run.
     # Read before `out_dir` exists, so a failed check leaves no half-started run directory.
