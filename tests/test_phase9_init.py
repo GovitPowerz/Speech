@@ -23,7 +23,6 @@ import pytest
 from speech import config_bridge
 from speech import weight_bridge as wb
 from speech.drivers import baseline
-from speech.drivers.spec import BaselineSpec
 from speech.init_weights import MambaGeometry, init_mamba_flat, init_slstm_flat, init_weights
 
 REF = Path("tests/reference_data/phase4d")
@@ -640,13 +639,3 @@ def test_parser_exposes_the_knobs_with_legacy_defaults() -> None:
     args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell", "mamba", "--direction", "forward"])
     assert args.cell == "mamba"
     assert args.direction == "forward"
-
-
-def test_non_default_knobs_are_rejected_on_the_lid_arms(tmp_path: Path) -> None:
-    """The knobs target the `BLSTM_` (SAD) net. On a Twin arm that net is the FROZEN SAD
-    gate (Mode 7 never runs it), so swapping its cell would change nothing that trains --
-    a silent no-op is worse than a loud bail; the LID-net wiring is Task 5's job."""
-    with pytest.raises(ValueError, match="cell|direction"):
-        baseline.run_baseline(BaselineSpec(arm="lid-phseq", corpus_root=tmp_path, out_dir=tmp_path / "out", cell="slstm"))
-    with pytest.raises(ValueError, match="cell|direction"):
-        baseline.run_baseline(BaselineSpec(arm="lid-features", corpus_root=tmp_path, out_dir=tmp_path / "out", direction="forward"))

@@ -96,7 +96,7 @@ from rich.console import Console
 from speech.batching import read_listing
 from speech.config_bridge import CELL_TYPES, DIRECTIONS, nnet_spec
 from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
-from speech.drivers.spec import ARM_CONFIG, LID_ARMS, BaselineSpec, listing_hash
+from speech.drivers.spec import ARM_CONFIG, BaselineSpec, listing_hash
 from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
@@ -335,9 +335,15 @@ def assemble_flat_config(
     return cfg
 
 
-def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[str, str]:
-    """The Phase 9 (spec S7.2) architecture overlay for the SAD arm: the port-only S6 keys
-    `BLSTM_Cell_Type` / `BLSTM_Direction`, plus the TWO derived keys `forward` forces.
+def cell_overlay(flat: dict[str, str], cell_type: str, direction: str, *, prefix: str = "BLSTM") -> dict[str, str]:
+    """The Phase 9 (spec S7.2) architecture overlay for the net that trains: the port-only S6
+    keys `{prefix}_Cell_Type` / `{prefix}_Direction`, plus the TWO derived keys `forward`
+    forces. `prefix` is `BLSTM` on a SAD arm and `BLSTM_LID` on a LID arm (issue #21): in Mode
+    7 the Twin's SAD net never runs, so the knob targets the LID net there and the SAD net
+    stays the legacy LSTM at its seed, byte-identical across every LID row of a seed. The LID
+    net's own regime keys come under its prefix: the committed LID TOMLs run it windowed
+    (`window 0.25`, `two_sweeps`), so DERIVED KEY 2 below writes `BLSTM_LID_window 0` on a
+    forward LID net exactly as it writes `BLSTM_window 0` on a forward SAD net.
 
     EMPTY at the defaults (`lstm` / `bidirectional`), so a default run's config text is
     byte-identical to today's -- the whole point of the knob being additive. The `Mamba_*`
@@ -392,13 +398,13 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
         raise ValueError(f"unknown direction {direction!r} (expected one of {DIRECTIONS})")
     overlay: dict[str, str] = {}
     if cell_type != "lstm":
-        overlay["BLSTM_Cell_Type"] = cell_type
+        overlay[f"{prefix}_Cell_Type"] = cell_type
     if direction != "bidirectional":
-        overlay["BLSTM_Direction"] = direction
-        hidden = [int(x) for x in flat["BLSTM_LSTMNeuronNb"].split(",")][-1]
-        outn = [int(x) for x in flat["BLSTM_OutputNeuronNb"].split(",")]
-        overlay["BLSTM_OutputNeuronNb"] = ",".join(str(v) for v in [hidden, *outn[1:]])
-        overlay["BLSTM_window"] = "0"
+        overlay[f"{prefix}_Direction"] = direction
+        hidden = [int(x) for x in flat[f"{prefix}_LSTMNeuronNb"].split(",")][-1]
+        outn = [int(x) for x in flat[f"{prefix}_OutputNeuronNb"].split(",")]
+        overlay[f"{prefix}_OutputNeuronNb"] = ",".join(str(v) for v in [hidden, *outn[1:]])
+        overlay[f"{prefix}_window"] = "0"
     return overlay
 
 
@@ -757,6 +763,7 @@ class SadArm:
     name: Arm
     config: str
     lineage: Lineage
+    prefix: str = "BLSTM"  # the net the cell knob targets
 
     def dry_run_clamp(self, spec: BaselineSpec) -> BaselineSpec:
         # SAD wav ingestion is slower per file than cep, so the smoke draws a smaller subset
@@ -807,6 +814,7 @@ class LidArm:
     derive: Callable[[Path, Path], list[dict[str, str]]]
     hint: str
     lineage: Lineage | None = None
+    prefix: str = "BLSTM_LID"  # the net the cell knob targets: the one that trains under the frozen-SAD contract
 
     def dry_run_clamp(self, spec: BaselineSpec) -> BaselineSpec:
         sizes = dict(subset=spec.subset or 24, test_size=min(spec.test_size, 24), valid_size=min(spec.valid_size, 12))
@@ -891,17 +899,12 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     not a measurement); a non-empty `out_dir` is refused unless `resume` continues it.
     `_train_fn` injects a stub `train_modern` for tests.
 
-    `cell`/`direction` (Phase 9, spec S7.2): overlay the port-only S6 architecture keys onto
-    the arm config (`cell_overlay`) and, since seeding reads the architecture back out of
-    that config via `nnet_spec`, route the from-scratch init through the matching per-cell
-    builder automatically -- both the engine-construction seed pack here and `train_modern`'s
-    own re-init. Defaults are today's BLSTM arm, byte-identical."""
-    # The knobs target the `BLSTM_` net. On a Twin arm that net is the FROZEN SAD gate (Mode 7
-    # never runs it, so it stays byte-exactly at its seed), which makes a cell/direction swap
-    # there a silent no-op on everything that actually trains -- bail loudly instead. The LID
-    # net's own `BLSTM_LID_Cell_Type`/`_Direction` wiring is Task 5's.
-    if spec.arm in LID_ARMS and (spec.cell != "lstm" or spec.direction != "bidirectional"):
-        raise ValueError(f"--cell/--direction are SAD-arm knobs; arm {spec.arm!r} trains only its LID net (Task 5 wires BLSTM_LID_*)")
+    `cell`/`direction` (Phase 9, spec S7.2; the LID arms since issue #21): overlay the
+    port-only S6 architecture keys onto the arm config under the prefix of the net that
+    trains (`cell_overlay`, `arm.prefix`) and, since seeding reads the architecture back out
+    of that config via `nnet_spec`, route the from-scratch init through the matching
+    per-cell builder automatically -- both the engine-construction seed pack here and
+    `train_modern`'s own re-init. Defaults are today's BLSTM arm, byte-identical."""
     console = console or Console()
     arm = ARMS[spec.arm]
     # __file__ = <repo>/src/python/speech/drivers/baseline.py -> parents[4] = <repo>.
@@ -954,7 +957,7 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
     # EMPTY at the default lstm/bidirectional knobs, so `extra` -- and therefore the whole
     # config text -- is byte-identical to a pre-phase-9 run.
-    extra = dict(cell_overlay(flat, spec.cell, spec.direction))
+    extra = dict(cell_overlay(flat, spec.cell, spec.direction, prefix=arm.prefix))
     if spec.audio_max_duration is not None:
         extra["Audio_max_duration"] = str(spec.audio_max_duration)
     cfg = arm.assemble(flat, splits, spec, extra)

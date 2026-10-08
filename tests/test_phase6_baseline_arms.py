@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 from speech.batching import create_batches, get_new_batch
 from speech.drivers import baseline as B
+from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.drivers.spec import ARM_CONFIG, LID_ARMS, SAD_ARMS, BaselineSpec
 from speech.drivers.state import ModernTrainParams
 
@@ -384,6 +385,8 @@ def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple
         "File_Type": "1",
         "BLSTM_NNetInputSize": "11",
         "BLSTM_LID_NNetInputSize": "38",
+        "BLSTM_LID_LSTMNeuronNb": "38,24",
+        "BLSTM_LID_OutputNeuronNb": "48,12",
         "fileslisting": "x",
         "language2classmapping": "y",
         "BLSTM_weightsFile": "s",
@@ -483,6 +486,76 @@ def test_a_non_empty_out_dir_is_refused_unless_resuming(tmp_path: Path, monkeypa
         B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, seed, params: trained.append(seed))
     assert trained == []
     B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, resume=True), _train_fn=train)
+
+
+# --------------------------------------------------------------------------------------- #
+# The LID cell knob (issue #21): `--cell`/`--direction` on a LID arm target the net that
+# trains, through the same overlay under the `BLSTM_LID` prefix; the frozen SAD net stays
+# the legacy LSTM at its seed, byte-identical across every LID cell.
+# --------------------------------------------------------------------------------------- #
+
+_TWIN_FLAT: dict[str, str] = {
+    "BLSTM_LSTMNeuronNb": "23,24,24",
+    "BLSTM_LSTMSubSampling": "4,1",
+    "BLSTM_OutputNeuronNb": "48,12,1",
+    "BLSTM_OutputSubSampling": "1,1",
+    "BLSTM_NNetInputSize": "23",
+    "BLSTM_CostLawSpeech": "log",
+    "BLSTM_CostLawNoSpeech": "log",
+    "BLSTM_LID_LSTMNeuronNb": "38,24",
+    "BLSTM_LID_LSTMSubSampling": "1",
+    "BLSTM_LID_OutputNeuronNb": "48,12",
+    "BLSTM_LID_OutputSubSampling": "1",
+    "BLSTM_LID_NNetInputSize": "38",
+    "BLSTM_LID_CostLawSpeech": "log",
+    "BLSTM_LID_CostLawNoSpeech": "log",
+}
+
+
+def test_cell_overlay_targets_the_lid_net_under_its_prefix() -> None:
+    """The committed LID TOMLs declare `lstm_neuron_nb 38,24` (phSeq) and `output_neuron_nb
+    48,12`; a forward LID net needs the output MLP's first width at the last hidden width (24)
+    and the plain whole-utterance regime (`window 0`), the two derived keys the SAD overlay
+    already writes, under the LID prefix. Bidirectional keeps the TOML's 0.25 s window."""
+    assert B.cell_overlay(_TWIN_FLAT, "slstm", "bidirectional", prefix="BLSTM_LID") == {"BLSTM_LID_Cell_Type": "slstm"}
+    assert B.cell_overlay(_TWIN_FLAT, "mamba", "forward", prefix="BLSTM_LID") == {
+        "BLSTM_LID_Cell_Type": "mamba",
+        "BLSTM_LID_Direction": "forward",
+        "BLSTM_LID_OutputNeuronNb": "24,12",
+        "BLSTM_LID_window": "0",
+    }
+    assert B.cell_overlay(_TWIN_FLAT, "lstm", "bidirectional", prefix="BLSTM_LID") == {}
+    # the SAD overlay is untouched by the parameter's default.
+    assert B.cell_overlay(_TWIN_FLAT, "lstm", "forward") == {"BLSTM_Direction": "forward", "BLSTM_OutputNeuronNb": "24,12,1", "BLSTM_window": "0"}
+
+
+def test_lid_arm_knob_lands_on_the_lid_net_and_leaves_the_sad_net_lstm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, cell="mamba", direction="forward"), _train_fn=lambda state, seed, params: _Res())
+    cfg_text = (out / "base.config").read_text()
+    assert "BLSTM_LID_Cell_Type mamba" in cfg_text and "BLSTM_LID_Direction forward" in cfg_text
+    assert "BLSTM_LID_OutputNeuronNb 24,12" in cfg_text and "BLSTM_LID_window 0" in cfg_text
+    assert "BLSTM_Cell_Type" not in cfg_text and "BLSTM_Direction" not in cfg_text and "BLSTM_OutputNeuronNb 48,12,1" not in cfg_text
+    meta = json.loads(res.metadata_path.read_text())
+    assert meta["cell"] == "mamba" and meta["direction"] == "forward"
+
+
+def test_sad_seed_pack_is_byte_identical_across_lid_cells(tmp_path: Path) -> None:
+    """Both nets are drawn from one generator in `[sad, lid]` order, so the SAD seed never
+    sees the LID cell: every LID row of a given seed starts from the same SAD pack, which is
+    what makes the rows comparable. The LID pack itself changes with the cell."""
+    sad_packs: dict[tuple[str, str], bytes] = {}
+    lid_lengths: dict[tuple[str, str], int] = {}
+    for cell in CELL_TYPES:
+        for direction in DIRECTIONS:
+            cfg = {**_TWIN_FLAT, **B.cell_overlay(_TWIN_FLAT, cell, direction, prefix="BLSTM_LID")}
+            out = tmp_path / f"{cell}_{direction}"
+            out.mkdir()
+            B._generate_seed_packs(cfg, out, 0, "xavier", True)
+            sad_packs[cell, direction] = (out / "sad_seed.bin").read_bytes()
+            lid_lengths[cell, direction] = len((out / "lid_seed.bin").read_bytes())
+    assert len(set(sad_packs.values())) == 1
+    assert len(set(lid_lengths.values())) == len(lid_lengths), lid_lengths
 
 
 def test_speech_cli_mounts_baseline_lid_phseq(monkeypatch: pytest.MonkeyPatch) -> None:
