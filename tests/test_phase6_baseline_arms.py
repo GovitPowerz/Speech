@@ -437,7 +437,7 @@ def test_run_baseline_records_the_provenance_of_the_tree_it_started_on(tmp_path:
         tree["state"] = ("b" * 40, True)
         return _Res()
 
-    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=train_then_commit)
+    res = B.run_baseline(_spec("lid-phseq", root, out, subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1), _train_fn=train_then_commit)
     record = json.loads((out / "record.json").read_text())
     meta = json.loads(res.metadata_path.read_text())
     assert (record["git_sha"], record["git_dirty"]) == ("a" * 40, False)
@@ -458,6 +458,31 @@ def test_run_baseline_fails_on_git_before_training(tmp_path: Path, monkeypatch: 
     with pytest.raises(RuntimeError, match="git unavailable"):
         B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, seed, params: trained.append(seed))
     assert trained == [] and not out.exists()
+
+
+def test_a_dry_run_writes_its_manifest_but_no_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dry run is a smoke, not a measurement: the ledger has no dry-run field, so the only way
+    a 1-step run cannot be promoted as a launcher row is for it to leave no `record.json`."""
+    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+    train = lambda state, seed, params: _Res()  # noqa: E731
+    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=train)
+    assert (out / "run_metadata.json").is_file() and not (out / "record.json").exists()
+    out2 = tmp_path / "out2"
+    B.run_baseline(_spec("lid-phseq", root, out2, subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1), _train_fn=train)
+    assert (out2 / "record.json").is_file()
+
+
+def test_a_non_empty_out_dir_is_refused_unless_resuming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An overwritten full run is a lost record: the launcher refuses a run directory that
+    already holds a run's manifest unless the call resumes from it."""
+    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+    train = lambda state, seed, params: _Res()  # noqa: E731
+    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=train)
+    trained: list[int] = []
+    with pytest.raises(FileExistsError, match="out_dir|resume"):
+        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, seed, params: trained.append(seed))
+    assert trained == []
+    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, resume=True), _train_fn=train)
 
 
 def test_speech_cli_mounts_baseline_lid_phseq(monkeypatch: pytest.MonkeyPatch) -> None:

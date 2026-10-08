@@ -96,13 +96,13 @@ from rich.console import Console
 from speech.batching import read_listing
 from speech.config_bridge import CELL_TYPES, DIRECTIONS, nnet_spec
 from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
-from speech.drivers.spec import ARM_CONFIG, LID_ARMS, SAD_ARMS, BaselineSpec, listing_hash
+from speech.drivers.spec import ARM_CONFIG, LID_ARMS, BaselineSpec, listing_hash
 from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 from speech.fold_run import FoldRun, _config_text
 from speech.init_weights import init_weights
-from speech.ledger.schema import BaselinePayload, BaselineRecord, git_state, host_info, now_utc, seam_build_info, write_record
+from speech.ledger.schema import Arm, BaselinePayload, BaselineRecord, Lineage, git_state, host_info, now_utc, seam_build_info, write_record
 from speech.ledger.schema import CollarScore as LedgerCollar
 from speech.weight_bridge import read_weight_vector, write_bin
 
@@ -719,30 +719,177 @@ def _prepare_sad_listings(
     return train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name
 
 
+@dataclass(frozen=True)
+class Splits:
+    """What an arm's listing preparation leaves under `out_dir`: the three disjoint record
+    lists, the listing filenames the config points at, the mapping, and the class count."""
+
+    train: list[dict[str, str]]
+    valid: list[dict[str, str]]
+    test: list[dict[str, str]]
+    train_name: str
+    valid_name: str
+    test_name: str
+    mapping_name: str
+    n_classes: int
+
+
+@dataclass(frozen=True)
+class Scores:
+    """An arm's held-out scoring: the LID pair or the SAD DCF report, trained and (when
+    `score_init`) the untrained seed on the identical test set."""
+
+    lid_error: float | None = None
+    cavg: float | None = None
+    init_lid_error: float | None = None
+    init_cavg: float | None = None
+    dcf: DcfReport | None = None
+    init_dcf: DcfReport | None = None
+    scores_dir: Path | None = None
+
+
+@dataclass(frozen=True)
+class SadArm:
+    """A SAD arm (`sad`, `sad-v2`): one trainable algo-3 net over the corpus wav/xml pairs,
+    scored end to end with the T4 DCF harness. The two instances differ only in the lineage's
+    committed TOML (ADR-0008); everything downstream self-sizes off the config."""
+
+    name: Arm
+    config: str
+    lineage: Lineage
+
+    def dry_run_clamp(self, spec: BaselineSpec) -> BaselineSpec:
+        # SAD wav ingestion is slower per file than cep, so the smoke draws a smaller subset
+        # AND caps the audio short (else a 1-step smoke over long CallFriend recordings would
+        # blow the "fast" promise).
+        cap = spec.audio_max_duration if spec.audio_max_duration is not None else 10.0
+        sizes = dict(subset=spec.subset or 6, test_size=min(spec.test_size, 6), valid_size=min(spec.valid_size, 4), audio_max_duration=cap)
+        return spec.model_copy(update={**sizes, "epochs": 1, "steps_per_epoch": 1, "patience": 99})
+
+    def prepare(self, spec: BaselineSpec, out_dir: Path, console: Console) -> Splits:
+        train, valid, test, train_name, valid_name, test_name, mapping_name = _prepare_sad_listings(
+            spec.corpus_root, out_dir, spec.seed, spec.subset, spec.valid_size, spec.test_size, console
+        )
+        return Splits(train, valid, test, train_name, valid_name, test_name, mapping_name, n_classes=1)
+
+    def assemble(self, flat: dict[str, str], splits: Splits, spec: BaselineSpec, extra: dict[str, str]) -> dict[str, str]:
+        return assemble_flat_config(flat, fileslisting=splits.train_name, mapping=splits.mapping_name, sad_seed="sad_seed.bin", lanes=spec.lanes, extra=extra)
+
+    def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> None:
+        _generate_sad_seed_pack(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one)
+
+    def score(self, spec: BaselineSpec, cfg: dict[str, str], out_dir: Path, base_config: Path, ckpt: Path, splits: Splits, console: Console) -> Scores:
+        dcf_rep, scores_dir = _score_sad_pack_on_test(cfg, out_dir, ckpt / "best_sad.bin", out_dir / "score_trained", splits.test, splits.test_name)
+        if dcf_rep is not None:
+            c = dcf_rep.by_collar(0.5)
+            console.log(f"held-out DCF@0.5={c.dcf:.4f} (Pmiss={c.pmiss:.4f} Pfa={c.pfa:.4f})")
+        else:
+            console.log("held-out: no VRCTS hyps produced (empty test split)")
+        init_dcf_rep: DcfReport | None = None
+        if spec.score_init:
+            init_dcf_rep, _ = _score_sad_pack_on_test(cfg, out_dir, out_dir / "sad_seed.bin", out_dir / "score_init", splits.test, splits.test_name)
+            if init_dcf_rep is not None and dcf_rep is not None:
+                gain = init_dcf_rep.by_collar(0.5).dcf - dcf_rep.by_collar(0.5).dcf
+                console.log(f"init baseline: DCF@0.5={init_dcf_rep.by_collar(0.5).dcf:.4f} (improvement {gain:+.4f})")
+        return Scores(dcf=dcf_rep, init_dcf=init_dcf_rep, scores_dir=scores_dir)
+
+
+@dataclass(frozen=True)
+class LidArm:
+    """A LID arm (`lid-features`, `lid-phseq`): the 12-class Twin (Algo 6) in Mode 7 over
+    precomputed features, both nets seeded, only the LID net training (the frozen-SAD
+    contract), scored `.scr` -> `lid_error` + `cavg`. The two instances differ only in the
+    corpus tree they glob (`derive`) and the File_Type their TOML declares."""
+
+    name: Arm
+    config: str
+    stem: str
+    derive: Callable[[Path, Path], list[dict[str, str]]]
+    hint: str
+    lineage: Lineage | None = None
+
+    def dry_run_clamp(self, spec: BaselineSpec) -> BaselineSpec:
+        sizes = dict(subset=spec.subset or 24, test_size=min(spec.test_size, 24), valid_size=min(spec.valid_size, 12))
+        return spec.model_copy(update={**sizes, "epochs": 1, "steps_per_epoch": 1, "patience": 99})
+
+    def prepare(self, spec: BaselineSpec, out_dir: Path, console: Console) -> Splits:
+        ref_stm = out_dir / "ref_speech.stm"
+        ref_stm.write_text(_SPEECH_STM)
+        # The `lre_listing` override localizes a 2015 listing for either arm (unused on this
+        # archive for phSeq -- those listings resolve 0 rows -- but kept symmetric).
+        if spec.lre_listing is not None:
+            localized = out_dir / "localized_lre.csv"
+            rep = localize_listing(spec.lre_listing, spec.corpus_root, localized)
+            console.log(f"localized {rep.rows_found}/{rep.rows_total} rows ({rep.rows_missing} missing)")
+            records = _records_from_localized(localized, ref_stm)
+        else:
+            records = self.derive(spec.corpus_root, ref_stm)
+        if not records:
+            raise RuntimeError(f"no LID records found under {spec.corpus_root} (expected {self.hint})")
+        console.log(f"corpus records: {len(records)}")
+        train, valid, test = stratified_splits(records, spec.subset, spec.valid_size, spec.test_size, spec.seed)
+        names = (f"{self.stem}_train.flst", f"{self.stem}_valid.flst", f"{self.stem}_test.flst")
+        for name, rows in zip(names, (train, valid, test), strict=True):
+            _write_listing_rows(out_dir / name, rows)
+        mapping_name = "language2classmapping_lre12.csv"
+        write_lre_mapping_12(out_dir / mapping_name)
+        return Splits(train, valid, test, *names, mapping_name, n_classes=len(_LANGS))
+
+    def assemble(self, flat: dict[str, str], splits: Splits, spec: BaselineSpec, extra: dict[str, str]) -> dict[str, str]:
+        return assemble_flat_config(
+            flat, fileslisting=splits.train_name, mapping=splits.mapping_name, sad_seed="sad_seed.bin", lid_seed="lid_seed.bin", lanes=spec.lanes, extra=extra
+        )
+
+    def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> None:
+        _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one)
+
+    def score(self, spec: BaselineSpec, cfg: dict[str, str], out_dir: Path, base_config: Path, ckpt: Path, splits: Splits, console: Console) -> Scores:
+        # The base state over the TEST listing (the `.scr` filenames come off the state's
+        # listing records); the same `base.config` stands for it, no second file is written.
+        eval_cfg = dict(cfg)
+        eval_cfg["fileslisting"] = splits.test_name
+        eval_state = RunState.from_parsed(eval_cfg, base_config, out_dir)
+        lid_err, cavg_val, scores_dir = _score_packs_on_test(eval_state, ckpt / "best_sad.bin", ckpt / "best_lid.bin", out_dir / "score_trained", splits.test)
+        chance = 100.0 * (1.0 - 1.0 / len(_LANGS))
+        if lid_err is not None and cavg_val is not None:
+            console.log(f"held-out: lid_error={lid_err:.2f}% (chance {chance:.2f}%) cavg={cavg_val:.4f}")
+        else:
+            console.log("held-out: no .scr scores produced (empty test split)")
+        init_err: float | None = None
+        init_cavg_val: float | None = None
+        if spec.score_init:
+            init_err, init_cavg_val, _ = _score_packs_on_test(
+                eval_state, out_dir / "sad_seed.bin", out_dir / "lid_seed.bin", out_dir / "score_init", splits.test
+            )
+            if init_err is not None and lid_err is not None:
+                console.log(f"init baseline: lid_error={init_err:.2f}% (improvement {init_err - lid_err:+.2f}pt)")
+        return Scores(lid_error=lid_err, cavg=cavg_val, init_lid_error=init_err, init_cavg=init_cavg_val, scores_dir=scores_dir)
+
+
+#: The four arms, keyed by the spec's `arm`. The config and lineage are the declarations in
+#: `drivers/spec.py` (pinned against `lineage_of` there); the behaviour is the class.
+ARMS: dict[Arm, SadArm | LidArm] = {
+    "sad": SadArm("sad", ARM_CONFIG["sad"], "v1"),
+    "sad-v2": SadArm("sad-v2", ARM_CONFIG["sad-v2"], "v2"),
+    "lid-features": LidArm(
+        "lid-features", ARM_CONFIG["lid-features"], "lre03_lid_features", derive_lid_features_records, "train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd"
+    ),
+    "lid-phseq": LidArm("lid-phseq", ARM_CONFIG["lid-phseq"], "lre03_lid_phseq", derive_lid_phseq_records, "train/phSeq/*.file.phSeqbis"),
+}
+
+
 def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_fn: Callable[..., object] | None = None) -> BaselineResult:
     """Run one baseline training arm end to end: prepare the corpus listings, assemble the
     config, seeded from-scratch init (or resume), `train_modern` with the moving NNCostSeg
-    validation signal, then score a held-out slice (LID: `.scr` -> `lid_error` + `cavg`).
+    validation signal, then score a held-out slice.
 
     `spec` is the run (`drivers/spec.py`, issue #21): validated at construction, so no knob
-    check lives here. `subset`: the TRAIN sample size (per-language proportional for LID, a
-    seeded first-N of the SAD split for SAD) -- the CI-gate regime (< 10 min); `None` trains
-    on the whole corpus (the launcher). `valid_size`/`test_size` are SEPARATE, disjoint
-    held-out sizes -- decoupled from `subset` so a big, cheap-to-score test set gives a stable
-    held-out metric while training stays small. `dry_run`: a 1-step smoke (a tiny train
-    subset, 1 epoch, 1 step, and for SAD a short audio cap) still scored end to end. `resume`:
-    continue from `out_dir/checkpoint`'s `last_*.bin`. `lanes`: the engine's
-    `numOuterThreads` fold width (recorded in metadata; N=1 is the deterministic parity mode).
-    `lre_listing` (LID only): localize this 2015 listing instead of deriving from the corpus
-    tree. `audio_max_duration` (SAD only): override `Audio_max_duration` (the corpus wavs are
-    576-1800 s, median ~600 s; a cap bounds the run and the held-out DCF windows the reference
-    to the same span). `_train_fn` injects a stub `train_modern` for tests.
-
-    The arm dispatch differs in three places -- the listings (LID globs cep + a synthesized
-    speech STM; SAD derives wav/xml pairs with the corpus `.part.xml` refs), the seed packs
-    (LID a `[sad, lid]` Twin pair; SAD a single `[sad]` net), and the held-out scoring (LID
-    `.scr` -> `lid_error` + `cavg`; SAD VRCTS hyps -> pooled `dcf`); the split/params/train/
-    metadata skeleton is shared.
+    check lives here. The arm (`ARMS[spec.arm]`) owns what varies -- the dry-run clamp, the
+    listings, the seed packs (`[sad]` vs `[sad, lid]`), the config assembly and the held-out
+    scoring; this function is the shared skeleton: provenance, split, params, train,
+    metadata, record. `dry_run` derives a 1-step spec and writes NO `record.json` (a smoke is
+    not a measurement); a non-empty `out_dir` is refused unless `resume` continues it.
+    `_train_fn` injects a stub `train_modern` for tests.
 
     `cell`/`direction` (Phase 9, spec S7.2): overlay the port-only S6 architecture keys onto
     the arm config (`cell_overlay`) and, since seeding reads the architecture back out of
@@ -756,93 +903,50 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     if spec.arm in LID_ARMS and (spec.cell != "lstm" or spec.direction != "bidirectional"):
         raise ValueError(f"--cell/--direction are SAD-arm knobs; arm {spec.arm!r} trains only its LID net (Task 5 wires BLSTM_LID_*)")
     console = console or Console()
+    arm = ARMS[spec.arm]
     # __file__ = <repo>/src/python/speech/drivers/baseline.py -> parents[4] = <repo>.
     repo_root = Path(__file__).resolve().parents[4]
-    toml_path = repo_root / ARM_CONFIG[spec.arm]
+    toml_path = repo_root / arm.config
     # The record's provenance is the tree the run STARTS on (issue #40): stamped after training it
     # would name an edit or a commit made during the run, and a git failure would lose the run.
     # Read before `out_dir` exists, so a failed check leaves no half-started run directory.
     git_sha, git_dirty = git_state(repo_root)
     out_dir = spec.out_dir.resolve()
+    if not spec.resume and (out_dir / "run_metadata.json").is_file():
+        raise FileExistsError(f"out_dir {out_dir} already holds a run: pass resume to continue it, or choose a fresh directory (an overwritten run is lost)")
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # dry_run overrides -- arm-aware: SAD wav ingestion is slower per file than cep, so the
-    # SAD smoke draws a smaller subset AND caps the audio short (else a 1-step smoke over
-    # long CallFriend recordings would blow the "fast" promise). A derived spec, so the
-    # metadata and the record carry the values that actually ran.
     if spec.dry_run:
-        if spec.arm in SAD_ARMS:
-            clamp: dict[str, object] = dict(subset=spec.subset or 6, test_size=min(spec.test_size, 6), valid_size=min(spec.valid_size, 4))
-            clamp["audio_max_duration"] = spec.audio_max_duration if spec.audio_max_duration is not None else 10.0
-        else:
-            clamp = dict(subset=spec.subset or 24, test_size=min(spec.test_size, 24), valid_size=min(spec.valid_size, 12))
-        spec = spec.model_copy(update={**clamp, "epochs": 1, "steps_per_epoch": 1, "patience": 99})
-    arm, corpus_root, seed, lanes, subset, dry_run, resume = spec.arm, spec.corpus_root, spec.seed, spec.lanes, spec.subset, spec.dry_run, spec.resume
-    epochs, patience, steps_per_epoch, init_scheme, minibatch = spec.epochs, spec.patience, spec.steps_per_epoch, spec.init_scheme, spec.minibatch
-    valid_size, test_size, score_init, lre_listing = spec.valid_size, spec.test_size, spec.score_init, spec.lre_listing
-    audio_max_duration, cell_type, direction = spec.audio_max_duration, spec.cell, spec.direction
+        spec = arm.dry_run_clamp(spec)
 
     t0 = time.time()
-    console.log(f"[bold]baseline {arm}[/bold]: corpus={corpus_root} out={out_dir} subset={subset} lanes={lanes} seed={seed} dry_run={dry_run}")
-    if resume:
+    console.log(f"[bold]baseline {spec.arm}[/bold]: corpus={spec.corpus_root} out={out_dir} subset={spec.subset} lanes={spec.lanes}")
+    console.log(f"seed={spec.seed} dry_run={spec.dry_run}")
+    if spec.resume:
         console.log("[yellow]resume[/yellow]: this call's record is not promotable (`ledger add` refuses a resumed run, issue #38)")
 
     # --- 1. listings + mapping (+ reference) synthesized under out_dir --------------------
-    if arm in SAD_ARMS:
-        train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name = _prepare_sad_listings(
-            corpus_root, out_dir, seed, subset, valid_size, test_size, console
-        )
-        n_classes = 1
-    else:
-        ref_stm = out_dir / "ref_speech.stm"
-        ref_stm.write_text(_SPEECH_STM)
-        # Both LID arms share this block; only the corpus record derivation differs
-        # (lid-phseq globs the phSeq tree, lid-features the cep tree). The `lre_listing`
-        # override localizes a 2015 listing for either arm (unused on this archive for
-        # phSeq -- those listings resolve 0 rows -- but kept symmetric with lid-features).
-        if lre_listing is not None:
-            localized = out_dir / "localized_lre.csv"
-            rep = localize_listing(Path(lre_listing), corpus_root, localized)
-            console.log(f"localized {rep.rows_found}/{rep.rows_total} rows ({rep.rows_missing} missing)")
-            records = _records_from_localized(localized, ref_stm)
-        elif arm == "lid-phseq":
-            records = derive_lid_phseq_records(corpus_root, ref_stm)
-        else:
-            records = derive_lid_features_records(corpus_root, ref_stm)
-        if not records:
-            hint = "train/phSeq/*.file.phSeqbis" if arm == "lid-phseq" else "train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd"
-            raise RuntimeError(f"no LID records found under {corpus_root} (expected {hint})")
-        console.log(f"corpus records: {len(records)}")
-        train_rec, valid_rec, test_rec = stratified_splits(records, subset, valid_size, test_size, seed)
-        stem = "lre03_lid_phseq" if arm == "lid-phseq" else "lre03_lid_features"
-        train_name, valid_name, test_name = f"{stem}_train.flst", f"{stem}_valid.flst", f"{stem}_test.flst"
-        mapping_name = "language2classmapping_lre12.csv"
-        _write_listing_rows(out_dir / train_name, train_rec)
-        _write_listing_rows(out_dir / valid_name, valid_rec)
-        _write_listing_rows(out_dir / test_name, test_rec)
-        write_lre_mapping_12(out_dir / mapping_name)
-        n_classes = len(_LANGS)
-    console.log(f"split: train={len(train_rec)} valid={len(valid_rec)} test={len(test_rec)}")
-    if not train_rec:
-        raise ValueError(f"empty train split (valid={len(valid_rec)} test={len(test_rec)}): lower --valid-size/--test-size or raise --subset")
+    splits = arm.prepare(spec, out_dir, console)
+    console.log(f"split: train={len(splits.train)} valid={len(splits.valid)} test={len(splits.test)}")
+    if not splits.train:
+        raise ValueError(f"empty train split (valid={len(splits.valid)} test={len(splits.test)}): lower --valid-size/--test-size or raise --subset")
 
     # --- 2. training params + config assembly + seed packs -------------------------------
     # Built here (not down in step 4) so the seed-pack init is handed the SAME
     # init_scheme/forget_bias_one the training call below will use (Task 8 review fix).
     params = ModernTrainParams(
-        epochs=epochs,
-        patience=patience,
-        steps_per_epoch=steps_per_epoch,
-        valid_listing=valid_name if valid_rec else None,
+        epochs=spec.epochs,
+        patience=spec.patience,
+        steps_per_epoch=spec.steps_per_epoch,
+        valid_listing=splits.valid_name if splits.valid else None,
         val_metric="nn_cost_seg",
-        minibatch=minibatch,
-        nb_classes=n_classes,
+        minibatch=spec.minibatch,
+        nb_classes=splits.n_classes,
         # NOT multilingual: that legacy layout reads class values 1..nb_classes-1 as targets and
         # sends class nb_classes-1 to the aggregate slot's never-read `.index`, so the 0..11
         # LID mapping would never draw class 11 into a batch.
-        init_scheme=init_scheme,  # type: ignore[arg-type]
-        init_seed=seed,
-        resume_from=str(out_dir / "checkpoint") if resume else None,
+        init_scheme=spec.init_scheme,
+        init_seed=spec.seed,
+        resume_from=str(out_dir / "checkpoint") if spec.resume else None,
     )
 
     import speech_rs  # local: the pyo3 module is only needed on the engine path
@@ -850,17 +954,11 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
     # EMPTY at the default lstm/bidirectional knobs, so `extra` -- and therefore the whole
     # config text -- is byte-identical to a pre-phase-9 run.
-    extra = dict(cell_overlay(flat, cell_type, direction))
-    if audio_max_duration is not None:
-        extra["Audio_max_duration"] = str(audio_max_duration)
-    if arm in SAD_ARMS:
-        cfg = assemble_flat_config(flat, fileslisting=train_name, mapping=mapping_name, sad_seed="sad_seed.bin", lanes=lanes, extra=extra)
-        _generate_sad_seed_pack(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
-    else:
-        cfg = assemble_flat_config(
-            flat, fileslisting=train_name, mapping=mapping_name, sad_seed="sad_seed.bin", lid_seed="lid_seed.bin", lanes=lanes, extra=extra
-        )
-        _generate_seed_packs(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
+    extra = dict(cell_overlay(flat, spec.cell, spec.direction))
+    if spec.audio_max_duration is not None:
+        extra["Audio_max_duration"] = str(spec.audio_max_duration)
+    cfg = arm.assemble(flat, splits, spec, extra)
+    arm.seed_packs(cfg, out_dir, spec, params)
     cfg_text = _config_text(cfg)
     base_config = out_dir / "base.config"
     base_config.write_text(cfg_text)
@@ -875,66 +973,32 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
             "val_metric": "nn_cost_seg",
             "config_hash": _config_hash(cfg_text),
             "config_toml": str(toml_path.relative_to(repo_root)),
-            "n_train": len(train_rec),
-            "n_valid": len(valid_rec),
-            "n_test": len(test_rec),
+            "n_train": len(splits.train),
+            "n_valid": len(splits.valid),
+            "n_test": len(splits.test),
             "git_sha": git_sha,
             "git_dirty": git_dirty,
-            "lre_listing_hash": None if lre_listing is None else listing_hash(lre_listing),
+            "lre_listing_hash": None if spec.lre_listing is None else listing_hash(spec.lre_listing),
         },
     )
 
     # --- 4. train (from scratch or resume) -----------------------------------------------
     state = RunState.from_config(base_config, out_dir)
     train = _train_fn if _train_fn is not None else train_modern
-    console.log(f"training: {epochs} epochs x {steps_per_epoch} steps (patience {patience})")
-    res = train(state, seed, params)  # type: ignore[operator]
+    console.log(f"training: {spec.epochs} epochs x {spec.steps_per_epoch} steps (patience {spec.patience})")
+    res = train(state, spec.seed, params)  # type: ignore[operator]
     val_costs = [r.val_cost for r in res.history]  # type: ignore[attr-defined]
     train_costs = [r.train_cost for r in res.history]  # type: ignore[attr-defined]
     console.log(f"trained {res.epochs_run} epochs; best_epoch={res.best_epoch} best_val={res.best_val_cost:.5f}")  # type: ignore[attr-defined]
 
     # --- 5. score the held-out split (trained; optionally the untrained init too) ---------
-    lid_err: float | None = None
-    cavg_val: float | None = None
-    init_err: float | None = None
-    init_cavg_val: float | None = None
-    dcf_rep: DcfReport | None = None
-    init_dcf_rep: DcfReport | None = None
-    scores_dir: Path | None = None
     ckpt = Path(res.checkpoint_dir)  # type: ignore[attr-defined]
-    if test_rec and arm in SAD_ARMS:
-        dcf_rep, scores_dir = _score_sad_pack_on_test(cfg, out_dir, ckpt / "best_sad.bin", out_dir / "score_trained", test_rec, test_name)
-        if dcf_rep is not None:
-            c = dcf_rep.by_collar(0.5)
-            console.log(f"held-out DCF@0.5={c.dcf:.4f} (Pmiss={c.pmiss:.4f} Pfa={c.pfa:.4f})")
-        else:
-            console.log("held-out: no VRCTS hyps produced (empty test split)")
-        if score_init:
-            init_dcf_rep, _ = _score_sad_pack_on_test(cfg, out_dir, out_dir / "sad_seed.bin", out_dir / "score_init", test_rec, test_name)
-            if init_dcf_rep is not None and dcf_rep is not None:
-                gain = init_dcf_rep.by_collar(0.5).dcf - dcf_rep.by_collar(0.5).dcf
-                console.log(f"init baseline: DCF@0.5={init_dcf_rep.by_collar(0.5).dcf:.4f} (improvement {gain:+.4f})")
-    elif test_rec:
-        # The base state over the TEST listing (the `.scr` filenames come off the state's
-        # listing records); the same `base.config` stands for it, no second file is written.
-        eval_cfg = dict(cfg)
-        eval_cfg["fileslisting"] = test_name
-        eval_state = RunState.from_parsed(eval_cfg, base_config, out_dir)
-        lid_err, cavg_val, scores_dir = _score_packs_on_test(eval_state, ckpt / "best_sad.bin", ckpt / "best_lid.bin", out_dir / "score_trained", test_rec)
-        chance = 100.0 * (1.0 - 1.0 / len(_LANGS))
-        if lid_err is not None and cavg_val is not None:
-            console.log(f"held-out: lid_error={lid_err:.2f}% (chance {chance:.2f}%) cavg={cavg_val:.4f}")
-        else:
-            console.log("held-out: no .scr scores produced (empty test split)")
-        if score_init:
-            init_err, init_cavg_val, _ = _score_packs_on_test(eval_state, out_dir / "sad_seed.bin", out_dir / "lid_seed.bin", out_dir / "score_init", test_rec)
-            if init_err is not None and lid_err is not None:
-                console.log(f"init baseline: lid_error={init_err:.2f}% (improvement {init_err - lid_err:+.2f}pt)")
+    scores = arm.score(spec, cfg, out_dir, base_config, ckpt, splits, console) if splits.test else Scores()
 
     wall_s = time.time() - t0
     console.log(f"[green]done[/green] in {wall_s:.1f}s")
     result = BaselineResult(
-        arm=arm,
+        arm=spec.arm,
         out_dir=out_dir,
         checkpoint_dir=ckpt,
         metadata_path=metadata_path,
@@ -944,20 +1008,22 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
         first_val_cost=val_costs[0] if val_costs else float("nan"),
         val_costs=val_costs,
         train_costs=train_costs,
-        lid_error=lid_err,
-        cavg=cavg_val,
-        init_lid_error=init_err,
-        init_cavg=init_cavg_val,
-        dcf=dcf_rep,
-        init_dcf=init_dcf_rep,
-        scores_dir=scores_dir,
-        n_train=len(train_rec),
-        n_valid=len(valid_rec),
-        n_test=len(test_rec),
+        lid_error=scores.lid_error,
+        cavg=scores.cavg,
+        init_lid_error=scores.init_lid_error,
+        init_cavg=scores.init_cavg,
+        dcf=scores.dcf,
+        init_dcf=scores.init_dcf,
+        scores_dir=scores.scores_dir,
+        n_train=len(splits.train),
+        n_valid=len(splits.valid),
+        n_test=len(splits.test),
         wall_s=wall_s,
     )
     # The promotable record (issue #20): `python -m speech.ledger add <out_dir>/record.json`.
-    write_record(result.to_record("launcher"), out_dir / "record.json")
+    # A dry run is a smoke, not a measurement, and leaves none.
+    if not spec.dry_run:
+        write_record(result.to_record("launcher"), out_dir / "record.json")
     return result
 
 
