@@ -126,11 +126,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.config_bridge import (
+    CELL_TYPES,
     CFC_DEFAULT_BACKBONE_LAYERS,
     CFC_DEFAULT_BACKBONE_UNITS,
     TRANSFORMER_DEFAULT_D_FF,
     TRANSFORMER_DEFAULT_HEADS,
     TRANSFORMER_DEFAULT_WINDOW,
+    CellType,
 )
 from speech.weight_bridge import nnet_to_flat, spec_directions
 
@@ -141,7 +143,6 @@ _DELTA_MIN = 1e-3
 _DELTA_MAX = 1e-1
 
 Scheme = Literal["xavier", "he"]
-CellType = Literal["lstm", "slstm", "mamba", "cfc", "transformer"]
 
 
 def _xavier_uniform(rng: np.random.Generator, shape: tuple[int, int], fan_in: int, fan_out: int) -> NDArray[np.float64]:
@@ -521,8 +522,8 @@ def init_weights(
     and this function is byte-for-byte what it was before phase 9."""
     _check_scheme(scheme)
     cell_type = cast(str, spec.get("CellType", "lstm"))
-    if cell_type not in ("lstm", "slstm", "mamba", "cfc", "transformer"):
-        raise ValueError(f"unknown cell type: {cell_type!r} (expected 'lstm', 'slstm', 'mamba', 'cfc' or 'transformer')")
+    if cell_type not in CELL_TYPES:
+        raise ValueError(f"unknown cell type: {cell_type!r} (expected one of {CELL_TYPES})")
     directions = spec_directions(spec)
 
     if cell_type == "lstm":

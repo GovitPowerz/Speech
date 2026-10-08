@@ -684,8 +684,8 @@ def test_transformer_knob_composes_with_forward() -> None:
 
 
 def test_parser_exposes_transformer() -> None:
-    args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell-type", "transformer"])
-    assert args.cell_type == "transformer"
+    args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell", "transformer"])
+    assert args.cell == "transformer"
 
 
 def test_overlaid_config_seeds_through_the_matching_builder() -> None:

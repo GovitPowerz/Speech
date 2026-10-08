@@ -34,6 +34,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from speech.config_bridge import CellType, Direction
+
 SCHEMA_VERSION = 2
 REPO = Path(__file__).resolve().parents[4]
 LEDGER_DIR = REPO / "ledger"
@@ -74,12 +76,14 @@ class BaselineRecipe(_Strict):
     """What a `run_baseline` measurement is: the arm, lineage, cell and direction, the split
     spec, the training budget, the seed, the lane count and the listing the split was drawn
     from (`listing`: the blake2b-8 of a localized 2015 listing's bytes, never its path; `None`
-    when the records were derived from the corpus tree). `subset=None` is the full run."""
+    when the records were derived from the corpus tree). `subset=None` is the full run. `cell`
+    and `direction` are the cell of the net that trains: the SAD net on a SAD arm, the LID net
+    on a LID arm (whose SAD net stays the legacy LSTM at its seed, issue #21)."""
 
     arm: Arm
     lineage: Lineage | None
-    cell: str
-    direction: str
+    cell: CellType
+    direction: Direction
     subset: int | None
     valid_size: int
     test_size: int

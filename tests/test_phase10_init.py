@@ -506,8 +506,8 @@ def test_default_invocation_is_still_byte_identical() -> None:
 
 
 def test_parser_exposes_cfc() -> None:
-    args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell-type", "cfc"])
-    assert args.cell_type == "cfc"
+    args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell", "cfc"])
+    assert args.cell == "cfc"
 
 
 def test_overlaid_config_seeds_through_the_matching_builder() -> None:

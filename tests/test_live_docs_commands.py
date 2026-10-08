@@ -41,7 +41,7 @@ def test_launcher_recipes_parse_and_write_to_ignored_dirs() -> None:
         for line in (REPO / doc).read_text(encoding="utf-8").replace("\\\n", " ").splitlines()
         if line.startswith(LAUNCHER)
     ]
-    assert len(recipes) >= 7, recipes  # the six RESULTS.md recipes plus the README quick start
+    assert len(recipes) >= 2, recipes  # the RESULTS.md by-hand row plus the README quick start; the runners carry the rest
     for argv in recipes:
         out_dir = B.build_parser().parse_args(argv).out_dir
         assert subprocess.run(["git", "check-ignore", "-q", str(out_dir / "base.config")], cwd=REPO).returncode == 0, argv

@@ -60,7 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "baseline":
         # Drop this parser's own dest; what remains is `build_parser()`'s namespace, forwarded whole.
         del args.command
-        run_baseline_from_args(args)
+        try:
+            run_baseline_from_args(args)
+        except SystemExit as e:  # an invalid spec is a usage error, returned like argparse's own
+            return int(e.code or 0)
         return 0
 
     state = RunState.load(Path(args.out_dir) / "run_state.json")

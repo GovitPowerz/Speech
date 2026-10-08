@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
+from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.ledger.schema import BaselineRecord, BenchRecord, Lineage, superseded_ids
 from speech.ledger.stage import LEGS
 
@@ -244,36 +245,47 @@ def phase6_sad_v1(records: list[Record]) -> list[str]:
 # --------------------------------------------------------------------------------------- #
 
 
-def _cell_matrix(records: list[Record], arm: str, lineage: str, cells: list[tuple[str, str]], scope: str) -> list[str]:
+def _matrix(
+    records: list[Record], arm: str, lineage: str | None, cells: list[tuple[str, str]], scope: str, header: str, row: Callable[[BaselineRecord], str]
+) -> list[str]:
+    """One (cell x direction) table: a gate row per cell (TBD when none), then the full-run rows
+    (one per record, TBD when none), the metric columns coming from `row`."""
     current = current_baselines(records)
-    lines = [
-        "| cell / direction | files (train/valid/test) | trained DCF@0.5 | Pmiss / Pfa @0.5 | trained collar range "
-        "| init DCF@0.5 | init collar range | gain@0.5 | wall |",
-        "|---|---|---|---|---|---|---|---|---|",
-    ]
+    n = header.count("|") - 2
+    lines = [header, "|" + "---|" * (n + 1)]
     rows: list[BaselineRecord] = []
     for cell, direction in cells:
         r = gate_row(current, arm, lineage, cell, direction)
         if r is None:
-            lines.append(_tbd(f"{CELL_NAME[cell]} / {direction}", 8))
+            lines.append(_tbd(f"{CELL_NAME[cell]} / {direction}", n))
             continue
-        tr, ini = r.payload.collar(0.5), r.payload.collar(0.5, init=True)
-        lines.append(
-            f"| {_cell(r)} | {_files(r)} | {_opt(tr.dcf if tr else None, '.6f')} | {_pmiss_pfa(r, '.6f')} | {_collar_range(r)} "
-            f"| {_opt(ini.dcf if ini else None, '.6f')} | {_collar_range(r, init=True)} | {_gain(r)} | {_wall(r)} |"
-        )
+        lines.append(f"| {_cell(r)} | {row(r)} |")
         rows.append(r)
     fulls = full_rows(current, arm, lineage, cells)
     for r in fulls:
-        tr, ini = r.payload.collar(0.5), r.payload.collar(0.5, init=True)
-        lines.append(
-            f"| full run: {_cell(r)} ({_date(r)}, seed {r.recipe.seed}) | {_files(r)} | {_opt(tr.dcf if tr else None, '.6f')} | {_pmiss_pfa(r, '.6f')} "
-            f"| {_collar_range(r)} | {_opt(ini.dcf if ini else None, '.6f')} | {_collar_range(r, init=True)} | {_gain(r)} | {_wall(r)} |"
-        )
+        lines.append(f"| full run: {_cell(r)} ({_date(r)}, seed {r.recipe.seed}) | {row(r)} |")
         rows.append(r)
     if not fulls:
-        lines.append(_tbd(f"full-corpus runs ({scope})", 8))
+        lines.append(_tbd(f"full-corpus runs ({scope})", n))
     return lines + _footer(rows, records)
+
+
+_DCF_HEADER = (
+    "| cell / direction | files (train/valid/test) | trained DCF@0.5 | Pmiss / Pfa @0.5 | trained collar range "
+    "| init DCF@0.5 | init collar range | gain@0.5 | wall |"
+)
+
+
+def _dcf_row(r: BaselineRecord) -> str:
+    tr, ini = r.payload.collar(0.5), r.payload.collar(0.5, init=True)
+    return (
+        f"{_files(r)} | {_opt(tr.dcf if tr else None, '.6f')} | {_pmiss_pfa(r, '.6f')} | {_collar_range(r)} "
+        f"| {_opt(ini.dcf if ini else None, '.6f')} | {_collar_range(r, init=True)} | {_gain(r)} | {_wall(r)}"
+    )
+
+
+def _cell_matrix(records: list[Record], arm: str, lineage: str, cells: list[tuple[str, str]], scope: str) -> list[str]:
+    return _matrix(records, arm, lineage, cells, scope, _DCF_HEADER, _dcf_row)
 
 
 _BOTH = ("bidirectional", "forward")
@@ -294,6 +306,35 @@ def phase10_v2_cells(records: list[Record]) -> list[str]:
 @table("phase11_v2_cells")
 def phase11_v2_cells(records: list[Record]) -> list[str]:
     return _cell_matrix(records, "sad-v2", "v2", [("transformer", d) for d in _BOTH], "transformer")
+
+
+# --------------------------------------------------------------------------------------- #
+# Issue #21: the (cell x direction) LID matrices, one per LID arm (exact-tree numbers; the
+# fast Twin LID is BLSTM-only, #57). The LSTM / bidirectional row is the Phase-6 gate's.
+# --------------------------------------------------------------------------------------- #
+
+_ALL_CELLS = [(c, d) for c in CELL_TYPES for d in DIRECTIONS]
+_LID_HEADER = "| cell / direction | files (train/valid/test) | trained LID error % | init LID error % | gain (pt) | Cavg | chance % | wall |"
+
+
+def _lid_row(r: BaselineRecord) -> str:
+    p = r.payload
+    gain = "n/a" if p.lid_error is None or p.init_lid_error is None else f"{p.init_lid_error - p.lid_error:+.2f}"
+    return f"{_files(r)} | {_opt(p.lid_error, '.2f')} | {_opt(p.init_lid_error, '.2f')} | {gain} | {_opt(p.cavg, '.2f')} | {CHANCE} | {_wall(r)}"
+
+
+def _lid_cell_matrix(records: list[Record], arm: str) -> list[str]:
+    return _matrix(records, arm, None, _ALL_CELLS, "any cell x direction", _LID_HEADER, _lid_row)
+
+
+@table("lid_features_cells")
+def lid_features_cells(records: list[Record]) -> list[str]:
+    return _lid_cell_matrix(records, "lid-features")
+
+
+@table("lid_phseq_cells")
+def lid_phseq_cells(records: list[Record]) -> list[str]:
+    return _lid_cell_matrix(records, "lid-phseq")
 
 
 # --------------------------------------------------------------------------------------- #

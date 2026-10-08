@@ -634,18 +634,8 @@ def test_overlaid_config_seeds_through_the_matching_builder() -> None:
 
 def test_parser_exposes_the_knobs_with_legacy_defaults() -> None:
     args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o"])
-    assert args.cell_type == "lstm"
+    assert args.cell == "lstm"
     assert args.direction == "bidirectional"
-    args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell-type", "mamba", "--direction", "forward"])
-    assert args.cell_type == "mamba"
+    args = baseline.build_parser().parse_args(["sad", "--corpus-root", "/tmp/c", "--out-dir", "/tmp/o", "--cell", "mamba", "--direction", "forward"])
+    assert args.cell == "mamba"
     assert args.direction == "forward"
-
-
-def test_non_default_knobs_are_rejected_on_the_lid_arms(tmp_path: Path) -> None:
-    """The knobs target the `BLSTM_` (SAD) net. On a Twin arm that net is the FROZEN SAD
-    gate (Mode 7 never runs it), so swapping its cell would change nothing that trains --
-    a silent no-op is worse than a loud bail; the LID-net wiring is Task 5's job."""
-    with pytest.raises(ValueError, match="cell-type|direction"):
-        baseline.run_baseline("lid-phseq", tmp_path, tmp_path / "out", cell_type="slstm")
-    with pytest.raises(ValueError, match="cell-type|direction"):
-        baseline.run_baseline("lid-features", tmp_path, tmp_path / "out", direction="forward")
