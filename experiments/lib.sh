@@ -4,7 +4,8 @@
 # `python -m speech.ledger add`. A row's recipe is hard-coded here (the recipe is the ledger
 # row's identity; a SAD row adds the 120 s audio cap the full-run protocol fixes); only the host
 # varies:
-#   SPEECH_CORPUS_ROOT  the LRE03/07 corpus root (default data/LRE03-LRE07)
+#   SPEECH_CORPUS_ROOT  the LRE03/07 corpus root (default data/LRE03-LRE07 in the repo; a relative
+#                       path is the caller's, resolved here before any row changes directory)
 #   SPEECH_LANES        the engine's fold width (default 1, the parity mode; ADR-0007 records it)
 # A failed row never stops the others; a refused promotion prints the manual command. The
 # runner exits nonzero if any row failed or was not promoted. Written for the bash 3.2 macOS
@@ -12,6 +13,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+case ${SPEECH_CORPUS_ROOT:-} in "" | /*) ;; *) SPEECH_CORPUS_ROOT="$PWD/$SPEECH_CORPUS_ROOT" ;; esac
 CORPUS_ROOT="${SPEECH_CORPUS_ROOT:-data/LRE03-LRE07}"
 LANES="${SPEECH_LANES:-1}"
 BUDGET="--seed 0 --epochs 40 --steps-per-epoch 25 --patience 6"

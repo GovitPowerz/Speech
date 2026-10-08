@@ -50,9 +50,9 @@ def test_every_named_row_is_in_the_launchers_vocabulary(script: Path) -> None:
         assert set(cell.split()) <= set(CELL_TYPES), (script.name, cell)
 
 
-def _fired(tmp_path: Path, script: Path) -> list[list[str]]:
-    """Fire a runner from a copy of `experiments/` against a fake `uv` that logs each launcher
-    argv (and accepts every `ledger add`) instead of training."""
+def _fired(tmp_path: Path, script: Path, **env: str) -> list[list[str]]:
+    """Fire a runner from a copy of `experiments/`, in `tmp_path`, against a fake `uv` that logs
+    each launcher argv (and accepts every `ledger add`) instead of training."""
     exp = tmp_path / "experiments"
     shutil.copytree(REPO / "experiments", exp)
     log = tmp_path / "argv.log"
@@ -60,7 +60,10 @@ def _fired(tmp_path: Path, script: Path) -> list[list[str]]:
     uv.parent.mkdir()
     uv.write_text(f'#!/bin/sh\n[ "$4" = speech.drivers.baseline ] && echo "$@" >> {log}\nexit 0\n')
     uv.chmod(0o755)
-    res = subprocess.run(["bash", str(exp / script.name)], env={**os.environ, "PATH": f"{uv.parent}:{os.environ['PATH']}"}, capture_output=True, text=True)
+    host = {k: v for k, v in os.environ.items() if k not in ("SPEECH_CORPUS_ROOT", "SPEECH_LANES")}
+    res = subprocess.run(
+        ["bash", str(exp / script.name)], cwd=tmp_path, env={**host, **env, "PATH": f"{uv.parent}:{os.environ['PATH']}"}, capture_output=True, text=True
+    )
     assert res.returncode == 0, res.stdout + res.stderr
     return [line.split()[4:] for line in log.read_text().splitlines()]
 
@@ -75,3 +78,14 @@ def test_every_runner_row_is_a_valid_full_run(tmp_path: Path, script: Path) -> N
         spec = BaselineSpec.from_args(build_parser().parse_args(argv))
         assert spec.recipe(listing=None).full and (spec.epochs, spec.steps_per_epoch, spec.patience, spec.seed) == (40, 25, 6, 0), argv
         assert (spec.audio_max_duration == 120.0) == (spec.arm in ("sad", "sad-v2")), argv
+
+
+def test_a_relative_corpus_root_is_the_callers(tmp_path: Path) -> None:
+    """Each row runs from the repo root, so a relative `SPEECH_CORPUS_ROOT` is made absolute
+    against the caller's directory first; the default stays the repo's `data/LRE03-LRE07`."""
+    script = REPO / "experiments" / "04_v2_transformer.sh"
+    for argv in _fired(tmp_path / "rel", script, SPEECH_CORPUS_ROOT="corpus"):
+        root = Path(argv[argv.index("--corpus-root") + 1])
+        assert root.is_absolute() and root.resolve() == (tmp_path / "rel" / "corpus").resolve(), argv
+    for argv in _fired(tmp_path / "default", script):
+        assert argv[argv.index("--corpus-root") + 1] == "data/LRE03-LRE07", argv

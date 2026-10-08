@@ -271,7 +271,7 @@ host; the recipe is the ledger row's identity, so a different budget is a differ
 | `experiments/04_v2_transformer.sh` | Transformer x both directions on `sad-v2` | `phase11_v2_cells` |
 | `experiments/05_lid_cells.sh` | every cell x direction on both LID arms (bar `lstm / bidirectional`) | `lid_*_cells` |
 
-Host knobs: `SPEECH_CORPUS_ROOT` (default `data/LRE03-LRE07`) and `SPEECH_LANES` (default 1, the
+Host knobs: `SPEECH_CORPUS_ROOT` (default `data/LRE03-LRE07` in the repo; a relative path is resolved against the caller's directory) and `SPEECH_LANES` (default 1, the
 parity mode; ADR-0007 puts the lane count in the record). A runner takes optional row names
 (`experiments/05_lid_cells.sh lid-phseq/mamba/forward`), runs one launcher invocation per row into
 `runs/<study>/<arm>_<cell>_<direction>_<UTC>/`, logs beside it, continues past a failed row, and at
