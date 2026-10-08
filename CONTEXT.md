@@ -210,10 +210,13 @@ The one typed declaration of a launcher run (`drivers/spec.py`): every CLI flag 
 
 **Launcher**:
 `python -m speech.drivers.baseline <arm>`, the CLI that builds a baseline spec and runs it.
-_Avoid_: experiment (as a synonym for a run)
+_Avoid_: experiment (for a run; `experiments/` names the runners' directory only)
 
 **Runner**:
-A committed script under `experiments/` that fires one table's full runs, one launcher invocation per row with the row's recipe hard-coded, and promotes each record.
+A committed script under `experiments/` that fires one study, one launcher invocation per row with the row's recipe hard-coded, and promotes each record.
+
+**Study**:
+The rows one runner fires, usually one `RESULTS.md` table's full-run rows; its run directories sit under `runs/<study>/`.
 
 **Subset gate**:
 A corpus-gated test that trains an arm from scratch on a stratified subset and asserts beat-init (and, for LID, beat-chance), run-twice bit-identical.

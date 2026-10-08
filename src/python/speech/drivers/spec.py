@@ -88,8 +88,6 @@ class BaselineSpec(BaseModel):
         """The run's ledger identity. `listing` is the hash of `lre_listing`'s bytes as stamped
         when the run started (`listing_hash`), never recomputed here: a listing edited during
         a run must not rename the record of the bytes that trained."""
-        if (listing is None) != (self.lre_listing is None):
-            raise ValueError(f"listing hash {listing!r} disagrees with lre_listing {self.lre_listing!r}: a localized listing has a hash, a derived split none")
         return BaselineRecipe(
             arm=self.arm,
             lineage=ARM_LINEAGE[self.arm],

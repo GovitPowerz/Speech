@@ -21,8 +21,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from speech.batching import create_batches, get_new_batch
-from speech.drivers import baseline as B
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
+from speech.drivers import baseline as B
 from speech.drivers.spec import ARM_CONFIG, LID_ARMS, SAD_ARMS, BaselineSpec
 from speech.drivers.state import ModernTrainParams
 
@@ -270,6 +270,11 @@ def test_all_four_arms_wired() -> None:
     assert set(ARM_CONFIG) == {"lid-features", "sad", "sad-v2", "lid-phseq"}
     assert set(LID_ARMS) == {"lid-features", "lid-phseq"}
     assert set(SAD_ARMS) == {"sad", "sad-v2"}
+    # Every declared arm has an instance, and the SAD class is exactly the SAD set: a new arm
+    # cannot be silently mis-classified (the partition guard of the old frozensets).
+    assert set(B.ARMS) == set(ARM_CONFIG)
+    assert {arm for arm, obj in B.ARMS.items() if isinstance(obj, B.SadArm)} == set(SAD_ARMS)
+    assert all(B.ARMS[arm].config == ARM_CONFIG[arm] for arm in ARM_CONFIG)
 
 
 def test_lid_phseq_dispatches_into_lid_path(tmp_path: Path) -> None:
@@ -475,7 +480,7 @@ def test_a_dry_run_writes_its_manifest_but_no_record(tmp_path: Path, monkeypatch
     assert (out2 / "record.json").is_file()
 
 
-def test_a_non_empty_out_dir_is_refused_unless_resuming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_out_dir_holding_a_run_is_refused_unless_resuming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An overwritten full run is a lost record: the launcher refuses a run directory that
     already holds a run's manifest unless the call resumes from it."""
     root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
@@ -638,10 +643,16 @@ def test_prepare_sad_listings_split_plumbing(tmp_path: Path) -> None:
     _sad_corpus_tree(root, 40)  # derive_sad_listings 70/15/15 -> 28/6/6
     out = tmp_path / "out"
     out.mkdir()
-    tr, va, te, tn, vn, ten, mn = B._prepare_sad_listings(root, out, seed=0, subset=8, valid_size=3, test_size=4, console=Console())
+    sp = B._prepare_sad_listings(root, out, seed=0, subset=8, valid_size=3, test_size=4, console=Console())
+    tr, va, te = sp.train, sp.valid, sp.test
     assert len(tr) == 8 and len(va) == 3 and len(te) == 4  # first-N subsets of each split
-    assert (tn, vn, ten, mn) == ("sad_train_subset.flst", "sad_valid_subset.flst", "sad_test_subset.flst", "sad_mapping.csv")
-    assert (out / tn).is_file() and (out / mn).read_text() == "unk;unk;0\n"
+    assert (sp.train_name, sp.valid_name, sp.test_name, sp.mapping_name) == (
+        "sad_train_subset.flst",
+        "sad_valid_subset.flst",
+        "sad_test_subset.flst",
+        "sad_mapping.csv",
+    )
+    assert (out / sp.train_name).is_file() and (out / sp.mapping_name).read_text() == "unk;unk;0\n" and sp.n_classes == 1
     trf, vaf, tef = ({r["filename"] for r in s} for s in (tr, va, te))
     assert trf.isdisjoint(vaf) and trf.isdisjoint(tef) and vaf.isdisjoint(tef), "the subsets stay disjoint (the base split is)"
     assert all(r["refseg"].endswith(".part.xml") for r in tr), "SAD refs are the corpus VRCTS .part.xml files"

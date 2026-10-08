@@ -87,7 +87,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import numpy as np
 from pydantic import ValidationError
@@ -102,7 +102,7 @@ from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 from speech.fold_run import FoldRun, _config_text
 from speech.init_weights import init_weights
-from speech.ledger.schema import Arm, BaselinePayload, BaselineRecord, Lineage, git_state, host_info, now_utc, seam_build_info, write_record
+from speech.ledger.schema import Arm, BaselinePayload, BaselineRecord, git_state, host_info, now_utc, seam_build_info, write_record
 from speech.ledger.schema import CollarScore as LedgerCollar
 from speech.weight_bridge import read_weight_vector, write_bin
 
@@ -335,7 +335,7 @@ def assemble_flat_config(
     return cfg
 
 
-def cell_overlay(flat: dict[str, str], cell_type: str, direction: str, *, prefix: str = "BLSTM") -> dict[str, str]:
+def cell_overlay(flat: dict[str, str], cell: str, direction: str, *, prefix: str = "BLSTM") -> dict[str, str]:
     """The Phase 9 (spec S7.2) architecture overlay for the net that trains: the port-only S6
     keys `{prefix}_Cell_Type` / `{prefix}_Direction`, plus the TWO derived keys `forward`
     forces. `prefix` is `BLSTM` on a SAD arm and `BLSTM_LID` on a LID arm (issue #21): in Mode
@@ -392,13 +392,13 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str, *, prefix
 
     Everything else in the config (the DSP front-end, the cost law, the hidden widths) is
     untouched."""
-    if cell_type not in CELL_TYPES:
-        raise ValueError(f"unknown cell type {cell_type!r} (expected one of {CELL_TYPES})")
+    if cell not in CELL_TYPES:
+        raise ValueError(f"unknown cell type {cell!r} (expected one of {CELL_TYPES})")
     if direction not in DIRECTIONS:
         raise ValueError(f"unknown direction {direction!r} (expected one of {DIRECTIONS})")
     overlay: dict[str, str] = {}
-    if cell_type != "lstm":
-        overlay[f"{prefix}_Cell_Type"] = cell_type
+    if cell != "lstm":
+        overlay[f"{prefix}_Cell_Type"] = cell
     if direction != "bidirectional":
         overlay[f"{prefix}_Direction"] = direction
         hidden = [int(x) for x in flat[f"{prefix}_LSTMNeuronNb"].split(",")][-1]
@@ -698,13 +698,13 @@ def _prepare_sad_listings(
     valid_size: int,
     test_size: int,
     console: Console,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]], str, str, str, str]:
+) -> Splits:
     """SAD listing prep: `derive_sad_listings` (the seeded 70/15/15 split of the wav/xml
     pairs) then a deterministic first-N SUBSET of each split (the split is already a seeded
     permutation, so `[:subset]` is a reproducible sample). Writes the subset train/valid/test
-    `.flst` + a minimal `unk` mapping under out_dir; returns the records + the four listing
-    filenames. `subset=None` trains on the full train split (the launcher). The refs are the
-    corpus `.part.xml` paths the derived listings already carry (absolute)."""
+    `.flst` + a minimal `unk` mapping under out_dir. `subset=None` trains on the full train
+    split (the launcher). The refs are the corpus `.part.xml` paths the derived listings
+    already carry (absolute)."""
     split = derive_sad_listings(Path(corpus_root), out_dir, seed)
     console.log(
         f"SAD corpus: {split.n_total} wav/xml pairs ({split.n_orphan_wav} orphan wav, "
@@ -722,7 +722,7 @@ def _prepare_sad_listings(
     _write_listing_rows(out_dir / valid_name, valid_rec)
     _write_listing_rows(out_dir / test_name, test_rec)
     write_sad_mapping(out_dir / mapping_name)
-    return train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name
+    return Splits(train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name, n_classes=1)
 
 
 @dataclass(frozen=True)
@@ -760,10 +760,8 @@ class SadArm:
     scored end to end with the T4 DCF harness. The two instances differ only in the lineage's
     committed TOML (ADR-0008); everything downstream self-sizes off the config."""
 
-    name: Arm
     config: str
-    lineage: Lineage
-    prefix: str = "BLSTM"  # the net the cell knob targets
+    prefix: ClassVar[str] = "BLSTM"  # the net the cell knob targets
 
     def dry_run_clamp(self, spec: BaselineSpec) -> BaselineSpec:
         # SAD wav ingestion is slower per file than cep, so the smoke draws a smaller subset
@@ -774,10 +772,7 @@ class SadArm:
         return spec.model_copy(update={**sizes, "epochs": 1, "steps_per_epoch": 1, "patience": 99})
 
     def prepare(self, spec: BaselineSpec, out_dir: Path, console: Console) -> Splits:
-        train, valid, test, train_name, valid_name, test_name, mapping_name = _prepare_sad_listings(
-            spec.corpus_root, out_dir, spec.seed, spec.subset, spec.valid_size, spec.test_size, console
-        )
-        return Splits(train, valid, test, train_name, valid_name, test_name, mapping_name, n_classes=1)
+        return _prepare_sad_listings(spec.corpus_root, out_dir, spec.seed, spec.subset, spec.valid_size, spec.test_size, console)
 
     def assemble(self, flat: dict[str, str], splits: Splits, spec: BaselineSpec, extra: dict[str, str]) -> dict[str, str]:
         return assemble_flat_config(flat, fileslisting=splits.train_name, mapping=splits.mapping_name, sad_seed="sad_seed.bin", lanes=spec.lanes, extra=extra)
@@ -785,7 +780,7 @@ class SadArm:
     def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> None:
         _generate_sad_seed_pack(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one)
 
-    def score(self, spec: BaselineSpec, cfg: dict[str, str], out_dir: Path, base_config: Path, ckpt: Path, splits: Splits, console: Console) -> Scores:
+    def score(self, spec: BaselineSpec, cfg: dict[str, str], out_dir: Path, ckpt: Path, splits: Splits, console: Console) -> Scores:
         dcf_rep, scores_dir = _score_sad_pack_on_test(cfg, out_dir, ckpt / "best_sad.bin", out_dir / "score_trained", splits.test, splits.test_name)
         if dcf_rep is not None:
             c = dcf_rep.by_collar(0.5)
@@ -808,13 +803,11 @@ class LidArm:
     contract), scored `.scr` -> `lid_error` + `cavg`. The two instances differ only in the
     corpus tree they glob (`derive`) and the File_Type their TOML declares."""
 
-    name: Arm
     config: str
     stem: str
     derive: Callable[[Path, Path], list[dict[str, str]]]
     hint: str
-    lineage: Lineage | None = None
-    prefix: str = "BLSTM_LID"  # the net the cell knob targets: the one that trains under the frozen-SAD contract
+    prefix: ClassVar[str] = "BLSTM_LID"  # the net the cell knob targets: the one that trains under the frozen-SAD contract
 
     def dry_run_clamp(self, spec: BaselineSpec) -> BaselineSpec:
         sizes = dict(subset=spec.subset or 24, test_size=min(spec.test_size, 24), valid_size=min(spec.valid_size, 12))
@@ -851,12 +844,12 @@ class LidArm:
     def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> None:
         _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one)
 
-    def score(self, spec: BaselineSpec, cfg: dict[str, str], out_dir: Path, base_config: Path, ckpt: Path, splits: Splits, console: Console) -> Scores:
+    def score(self, spec: BaselineSpec, cfg: dict[str, str], out_dir: Path, ckpt: Path, splits: Splits, console: Console) -> Scores:
         # The base state over the TEST listing (the `.scr` filenames come off the state's
         # listing records); the same `base.config` stands for it, no second file is written.
         eval_cfg = dict(cfg)
         eval_cfg["fileslisting"] = splits.test_name
-        eval_state = RunState.from_parsed(eval_cfg, base_config, out_dir)
+        eval_state = RunState.from_parsed(eval_cfg, out_dir / "base.config", out_dir)
         lid_err, cavg_val, scores_dir = _score_packs_on_test(eval_state, ckpt / "best_sad.bin", ckpt / "best_lid.bin", out_dir / "score_trained", splits.test)
         chance = 100.0 * (1.0 - 1.0 / len(_LANGS))
         if lid_err is not None and cavg_val is not None:
@@ -875,14 +868,13 @@ class LidArm:
 
 
 #: The four arms, keyed by the spec's `arm`. The config and lineage are the declarations in
-#: `drivers/spec.py` (pinned against `lineage_of` there); the behaviour is the class.
+#: `drivers/spec.py` (`ARM_CONFIG` / `ARM_LINEAGE`, pinned against `lineage_of` there); the
+#: behaviour is the class, and a unit test pins that `SadArm` instances are exactly `SAD_ARMS`.
 ARMS: dict[Arm, SadArm | LidArm] = {
-    "sad": SadArm("sad", ARM_CONFIG["sad"], "v1"),
-    "sad-v2": SadArm("sad-v2", ARM_CONFIG["sad-v2"], "v2"),
-    "lid-features": LidArm(
-        "lid-features", ARM_CONFIG["lid-features"], "lre03_lid_features", derive_lid_features_records, "train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd"
-    ),
-    "lid-phseq": LidArm("lid-phseq", ARM_CONFIG["lid-phseq"], "lre03_lid_phseq", derive_lid_phseq_records, "train/phSeq/*.file.phSeqbis"),
+    "sad": SadArm(ARM_CONFIG["sad"]),
+    "sad-v2": SadArm(ARM_CONFIG["sad-v2"]),
+    "lid-features": LidArm(ARM_CONFIG["lid-features"], "lre03_lid_features", derive_lid_features_records, "train/LID_Features/plp8f0mvsdd/LRE03/*.plp8f0mvsdd"),
+    "lid-phseq": LidArm(ARM_CONFIG["lid-phseq"], "lre03_lid_phseq", derive_lid_phseq_records, "train/phSeq/*.file.phSeqbis"),
 }
 
 
@@ -896,7 +888,8 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     listings, the seed packs (`[sad]` vs `[sad, lid]`), the config assembly and the held-out
     scoring; this function is the shared skeleton: provenance, split, params, train,
     metadata, record. `dry_run` derives a 1-step spec and writes NO `record.json` (a smoke is
-    not a measurement); a non-empty `out_dir` is refused unless `resume` continues it.
+    not a measurement); an `out_dir` that already holds a run's manifest is refused unless
+    `resume` continues it.
     `_train_fn` injects a stub `train_modern` for tests.
 
     `cell`/`direction` (Phase 9, spec S7.2; the LID arms since issue #21): overlay the
@@ -996,7 +989,7 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
 
     # --- 5. score the held-out split (trained; optionally the untrained init too) ---------
     ckpt = Path(res.checkpoint_dir)  # type: ignore[attr-defined]
-    scores = arm.score(spec, cfg, out_dir, base_config, ckpt, splits, console) if splits.test else Scores()
+    scores = arm.score(spec, cfg, out_dir, ckpt, splits, console) if splits.test else Scores()
 
     wall_s = time.time() - t0
     console.log(f"[green]done[/green] in {wall_s:.1f}s")

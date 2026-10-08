@@ -11,7 +11,7 @@ from speech.drivers.spec import ARM_CONFIG
 
 REPO = Path(__file__).resolve().parents[1]
 RUNNERS = sorted((REPO / "experiments").glob("*.sh"))
-_ROW = re.compile(r"\b(sad(?:-v2)?|lid-features|lid-phseq)/([a-z]+)/([a-z]+)\b")
+_ROW = re.compile(r"\b(" + "|".join(re.escape(arm) for arm in ARM_CONFIG) + r")/([a-z]+)/([a-z]+)\b")
 
 
 @pytest.mark.parametrize("script", RUNNERS, ids=lambda p: p.name)

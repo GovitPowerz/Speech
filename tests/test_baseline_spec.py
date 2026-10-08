@@ -95,13 +95,6 @@ def test_recipe_projection() -> None:
     assert _spec(arm="lid-features").recipe(listing=None).full and not _spec(arm="lid-features", subset=5).recipe(listing=None).full
 
 
-def test_recipe_refuses_a_listing_hash_that_disagrees_with_the_spec(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="listing"):
-        _spec(arm="lid-features", lre_listing=tmp_path / "l.csv").recipe(listing=None)
-    with pytest.raises(ValueError, match="listing"):
-        _spec(arm="lid-features").recipe(listing="0123456789abcdef")
-
-
 def test_every_arm_declares_the_lineage_its_config_name_carries() -> None:
     assert set(ARM_CONFIG) == set(ARM_LINEAGE) == {"sad", "sad-v2", "lid-features", "lid-phseq"}
     for arm, config in ARM_CONFIG.items():

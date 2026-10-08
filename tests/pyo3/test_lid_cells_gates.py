@@ -47,8 +47,9 @@ _MATRIX = [(arm, cell, direction) for arm in _ARMS for cell in CELL_TYPES for di
 _IDS = [f"{arm}-{cell}-{direction}" for arm, cell, direction in _MATRIX]
 # `Law::Log`'s saturated-forward constant (the Phase-9 preflight hazard).
 _LOG_CLAMP = float(-np.log(1e-24))
-# Per arm, the SAD seed pack (length, leading bytes) of the first probe leg; every later leg must match.
-_SAD_SEEN: dict[str, tuple[float, float]] = {}
+# The Twin's SAD net on both LID arms: the legacy LSTM pack the committed TOMLs size (measured; the
+# seam-free unit test pins its bytes identical across LID cells).
+_SAD_LEN = 5807
 # The LID pack length per (arm, cell, direction): what `init_weights` seeds under the selected
 # cell AND what the engine's `set_weights` accepted inside the probe's fold (measured 2026-10-08).
 # lid-features: LID input 23 (cep), lid-phseq: 38 (phSeq one-hot); both `lstm_neuron_nb *,24`,
@@ -124,7 +125,6 @@ def _probe(out: dict[str, float]) -> Callable[[RunState, int, ModernTrainParams]
         out["init_cost"] = float(res.nn_cost)
         out["sad_grad_linf"] = float(np.max(np.abs(grads[0])))
         out["lid_grad_l2"] = float(np.linalg.norm(grads[1]))
-        out["sad_seed_digest"] = float(int.from_bytes((Path(state.out_dir) / "sad_seed.bin").read_bytes()[:8], "little"))
         ckpt = Path(state.out_dir) / "checkpoint"
         ckpt.mkdir(parents=True, exist_ok=True)
         for net in ("sad", "lid"):
@@ -179,11 +179,9 @@ def test_lid_init_is_trainable(tmp_path: Path, arm: str, cell: str, direction: s
     # The overlay landed under the LID prefix and nowhere else.
     assert (f"BLSTM_LID_Cell_Type {cell}" in base) == (cell != "lstm") and "BLSTM_Cell_Type" not in base
     assert (f"BLSTM_LID_Direction {direction}" in base) == (direction != "bidirectional") and "BLSTM_Direction" not in base
-    # The SAD pack is the same legacy LSTM pack whatever the LID cell (length and leading bytes
-    # equal to the first leg of this arm; the seam-free unit test pins the full bytes); the fold
-    # accepted both packs, so the LID pack is the length the engine builds for the selected cell.
-    sad = _SAD_SEEN.setdefault(arm, (out["sad_len"], out["sad_seed_digest"]))
-    assert (out["sad_len"], out["sad_seed_digest"]) == sad, f"{arm} {cell}/{direction}: the SAD seed pack moved with the LID cell"
+    # The SAD pack is the legacy LSTM's whatever the LID cell; the fold accepted both packs, so
+    # the LID pack is the length the engine builds for the selected cell.
+    assert out["sad_len"] == _SAD_LEN, f"{arm} {cell}/{direction}: SAD pack {out['sad_len']:.0f} != the legacy LSTM's {_SAD_LEN}"
     want = _LID_LEN[arm, cell, direction]
     assert out["lid_len"] == want, f"{arm} {cell}/{direction}: LID pack {out['lid_len']:.0f} != pinned {want}"
     # Finite, interior init cost; the LID net has a gradient, the frozen SAD net has none.
