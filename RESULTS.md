@@ -3006,3 +3006,40 @@ module's design restated as a test fact: the readers no longer touch the layout,
 reader can catch a layout bug. The battery therefore names the wire legs as the owners of
 `to_row` / `from_encoded` / `channel_results_from_matrix`, and the fold tests as the owners
 of the fold's arithmetic (3b), and nothing else should be read into a green reader test.
+
+## Issue #22 -- the fold run: the mutation battery
+
+The issue's acceptance named one mutation ("a mutation that removes the Epochs-0 forcing fails a
+committed test"). **One applied mutation**: delete the `Neural_Networks_BackPropagation_Epochs 0`
+line of `fold_run.FoldRun.__init__` (the base config's own epoch count then reaches the engine)
+-> run the two named catchers, then the files the eight production sites feed (FOREGROUND) ->
+record the verbatim failure line -> revert -> re-run green -> tree clean.
+
+**Caught by both named catchers, and by four other legs.**
+
+| # | mutation | named catcher | verdict |
+|---|---|---|---|
+| 1 | `FoldRun` no longer forces `Epochs 0` | `tests/test_fold_run.py::test_fold_run_forces_epochs_zero_on_every_fold` (the rendered map, no engine) and `tests/pyo3/test_fold_run.py::test_fold_run_is_one_fold_at_theta_f11` (the engine) | CAUGHT by both. At the map: `AssertionError: assert '3' == '0'`. On the engine: `a gradient fold measures the cost at theta (F11)` / `assert 0.1727108023717789 == 1.1179364603428454` -- the tier-2 fixture's `Epochs 3` routes `run()` through the engine-internal `train()` (3 folds + 2 iRPROP- steps) and the cost comes back from moved weights, the F11 misroute verbatim; the test's own foil (the same map run raw with `Epochs 3`) reports that moved cost, so the catcher cannot pass vacuously. Also caught, unasked: `tests/pyo3/test_fold_run.py::test_fold_run_fast_guard_on_the_engine` (`RuntimeError: Inference_Path fast is inference-only (training stays exact f64), but this Multi-mode run is training-shaped (Epochs 3, BackPropagationActivated SAD=false/LID=false)` -- the fast tree's training-shape bail fires on a forward-only fold once the epoch count leaks), `tests/test_phase4c_drivers.py::test_evaluate_exact_injects_resolved_packs` (`assert '6' == '0'`, the twin fixture's `Epochs 6` reaching the fake seam), and two exit-gate legs, `test_hyperparam_search_narrowed_distinct_configs_and_costs` (its `Epochs 0` text pin) and `test_from_scratch_sad_converges` (the SMORMS3 trajectory is no longer measured at theta). |
+
+### The final tree, green
+
+Run on the branch's final tree (2026-10-07, this box): cargo 1317 passed (`cargo test --release`,
+the exact-tree goldens byte-green under the one-line lockfile bump), the pure-Python suite 907
+passed + 1 skipped, `tests/pyo3` 210 passed in 19m36s with the corpus present -- the exit gates
+(`test_exit_gate.py`, 9 legs), the modern-loop smoke, and every subset gate of phases 6, 9 and 10
+with unchanged outcomes, the gate probes re-run on their final one-fold form.
+
+### What the battery measured
+
+- `tests/pyo3/test_seam_replay.py`'s four `forward_backward` legs are BLIND to this mutation by
+  construction, and were before #22 too (they appended `Epochs 0` to the fixture themselves):
+  determinism, finiteness, a nonzero gradient and weight movement all hold under `train()` as
+  well. The "at theta" property has exactly the owners above.
+- Measured in passing, then pinned rather than hidden (`test_fold_run_is_one_fold_at_theta_f11`):
+  `run_solo` with backprop on ends with the bag's iRPROP- step (`save_and_update_epoch`), so a
+  gradient fold's post-run pack is one engine step past theta while its cost and gradient are
+  at theta. The grilling had assumed "weights before equals after"; the engine says otherwise.
+  Consequence for the legacy-regime `train` driver, recorded not changed (it is byte-untouched
+  by rule): the `sad_weights.bin` / `lid_weights.bin` it checkpoints are `_score_fold`'s
+  post-run weights, i.e. the SMORMS3-trained pack plus one engine iRPROP- step, which the exit
+  gate's run-twice bit-identity never distinguished from the trained pack itself.

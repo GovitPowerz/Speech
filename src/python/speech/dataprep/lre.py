@@ -9,18 +9,20 @@ ABSOLUTE VS RELATIVE PATHS (decided here; applies to every path this module writ
 INTO a listing row -- not to the listing FILES themselves, see below): every row path
 is written ABSOLUTE, resolved against `corpus_root`. The rest of this codebase's
 convention -- `language2classmapping`/`fileslisting` config KEYS, and the small
-COMMITTED listing fixtures those keys point at, resolve relative to wherever the
-driver `_chdir`s (`drivers/train.py`'s `_mapping_path`: "relative to the config's own
-dir"; `tests/reference_data/phase4a/fileslisting.csv`'s `corpus/f1.wav` rows are a
-clean example of why -- the fixture and its config travel together in the repo). That
-convention exists to keep small, portable, COMMITTED fixtures working from any
-checkout. `data/LRE03-LRE07/` does not travel with anything: it is a 27 GB,
-gitignored, user-supplied tree with no fixed offset from wherever a future training
-config (`configs/training/*.toml`, Task 8/9/10) ends up living -- its own location is
-already an effectively-fixed local absolute fact (see `tests/conftest.py`'s
-`CORPUS_ROOT`). Writing corpus-referencing ROW paths as absolute makes every listing
-this module emits correct regardless of whatever directory a driver later `_chdir`s
-into -- Task 8/9/10 never need to compute a relative offset back to the corpus. (Where
+COMMITTED listing fixtures those keys point at, resolve relative to the config's own
+directory (`fold_run.FoldRun` resolves the config's path keys against the workdir;
+`tests/reference_data/phase4a/fileslisting.csv`'s `corpus/f1.wav` rows are a clean
+example of why -- the fixture and its config travel together in the repo, and the tests
+that use them keep the process cwd there, since a listing ROW is resolved by the engine
+against the cwd as for the binary). That convention exists to keep small, portable,
+COMMITTED fixtures working from any checkout. `data/LRE03-LRE07/` does not travel with
+anything: it is a 27 GB, gitignored, user-supplied tree with no fixed offset from
+wherever a future training config (`configs/training/*.toml`, Task 8/9/10) ends up
+living -- its own location is already an effectively-fixed local absolute fact (see
+`tests/conftest.py`'s `CORPUS_ROOT`). Writing corpus-referencing ROW paths as absolute
+makes every listing this module emits correct from whatever directory the process runs
+in -- Task 8/9/10 never need to compute a relative offset back to the corpus, and no
+driver changes directory (issue #22). (Where
 the listing FILE ITSELF lives, and what a future config's `fileslisting` key says to
 find it, is a separate, smaller decision left to whichever task writes that config.)
 """

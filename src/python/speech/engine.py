@@ -12,9 +12,10 @@ Two layers:
     averaging (:357), pooled input-stats recombination (:285-300), L2 penalties
     (:362/:554), and the balance laws 0/3/4/5/10 (:428-652). Octave-pinned bit-for-bit
     (`tests/test_phase4c_engine_cost.py`).
-  * The SEAM (`forward_backward`): ComputeGradient's contract over `speech_rs.Engine` --
-    set weights -> run -> read results+derivs -> `f = NNCostSeg (+ NNCostLID)` (:110/:114)
-    with the count-normalized (`+ L2` for the LID net) gradient.
+  * The SEAM (`forward_backward`): ComputeGradient's contract over a `fold_run.FoldRun` --
+    one gradient fold at the weights -> `f = NNCostSeg (+ NNCostLID)` (:110/:114) with the
+    count-normalized (`+ L2` for the LID net) gradient. The engine mechanics (the config
+    overlay, the F11 rule, the fast guard, the path resolution) are the fold run's (issue #22).
 
 The results are read by NAME: `speech_rs.Engine.channel_results()` returns one array per
 field, wrapped here as `ChannelResults` (issue #23). The legacy `Error_vad` column indices
@@ -30,16 +31,15 @@ carry a `# legacy:` provenance comment at their site.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    import speech_rs
+    from speech.fold_run import FoldRun
 
 F64 = np.float64
 
@@ -335,25 +335,29 @@ def compute_cost(
     return cost, breakdown
 
 
-# ---- The seam: ComputeGradient's contract over speech_rs.Engine -------------------------
+# ---- The seam: ComputeGradient's contract over a fold run ---------------------------------
 
 
 def forward_backward(
-    engine: speech_rs.Engine,
+    fold: FoldRun,
     weights: list[NDArray[np.float64]],
-    listing_override: Path | None = None,
     *,
-    make_engine: Callable[[Path], speech_rs.Engine] | None = None,
     l2: float = 0.0,
     is_bias: list[NDArray[np.float64]] | None = None,
 ) -> tuple[float, list[NDArray[np.float64]]]:
-    """ComputeGradient's contract (`ComputeGradient.m:104-115`) over the coarse
-    corpus-level `speech_rs.Engine`: seed the net(s), run the corpus fold, then read the
-    results + per-network derivatives back and assemble
+    """ComputeGradient's contract (`ComputeGradient.m:104-115`) over one gradient fold: seed
+    the net(s), run the corpus fold at those weights, then read the results + per-network
+    derivatives back and assemble
 
         f = NNCostSeg (+ NNCostLID for algo 6)           (:110 / :114)
         dfdtheta{net} = MultiDeriv ./ max(1,count)       (:357, count-normalized)
                         (+ L2 for the LID net)            (:362, LID only)
+
+    `fold` is a `FoldRun` built with `backprop=True`; it owns the engine, the config overlay
+    (the F11 `Epochs 0` rule) and the listing, so the hard-example mini-batch path is simply
+    a fresh `FoldRun` per step on the batch listing (`drivers/train.py::_backprop_inner`),
+    the in-process analogue of `ComputeGradient.m`'s per-gradient `WriteWeightedListing`
+    (:53/:77) + fresh-`fsp`-per-eval (`CostFunction` :104).
 
     `weights` is the `[sad]` (algo 3/4/5) or `[sad, lid]` (algo 6) numpy pairing that
     `Engine.set_weights`/`Engine.weights` round-trip. The returned gradient list mirrors
@@ -365,45 +369,28 @@ def forward_backward(
     (net index 1), never the SAD net -- ComputeCost.m applies L2 only inside the
     `algo == 6` LID block (:362/:554), leaving the seg side unregularized (IMPROVEMENTS).
     Defaults `l2 == 0` -> no L2 (the algo-3 seam path).
-
-    `listing_override` is the LIVE hard-example mini-batch seam (Phase 4d Task 10). When
-    set (a per-step batch listing path -- the `WriteWeightedListing` output), the corpus is
-    SWAPPED for that listing by REBUILDING the engine on it via `make_engine(listing_override)`:
-    the in-process analogue of `ComputeGradient.m`'s per-gradient `WriteWeightedListing`
-    (:53/:77) + fresh-`fsp`-per-eval (`CostFunction` :104), since a `speech_rs.Engine`'s
-    corpus is fixed at construction and cannot be re-pointed in place. `make_engine` is
-    then REQUIRED -- a `Callable[[Path], Engine]` the driver supplies, closing over the
-    candidate config so the fresh engine carries the same nets + seed weights, only the
-    fileslisting differing -- and the passed-in `engine` is ignored. `listing_override is
-    None` runs the passed engine on its fixed construction-time corpus (the full-corpus
-    path the twin/algo-3 exit gates ride).
     """
-    if listing_override is not None:
-        if make_engine is None:
-            raise ValueError("forward_backward: listing_override requires make_engine to rebuild the engine on the batch listing")
-        engine = make_engine(listing_override)
+    if not fold.backprop:
+        raise ValueError("forward_backward needs a gradient fold (FoldRun(..., backprop=True)); a forward-only fold harvests no derivatives")
 
     nets = [np.ascontiguousarray(np.asarray(w, dtype=F64)) for w in weights]
-    engine.set_weights(0, nets)
-    engine.run()
+    res = fold.run(nets)
 
     # Config 0 throughout: the cost is read off the same config the weights went into and
     # the derivatives come out of.
-    r = ChannelResults.from_seam(engine.channel_results()).for_config(0)
-    derivs = engine.weights_derivatives(0)
-
-    f = _nn_cost_seg(r)
-    if len(nets) == 2:
-        # legacy: ComputeGradient.m:114 f = f + NNCostLID (algo 6).
-        nn_lid = _nn_cost_lid(r)
+    f = res.nn_cost_seg
+    if res.twin:
+        # legacy: ComputeGradient.m:114 f = f + NNCostLID (algo 6). Kept as seg + (lid + L2),
+        # the legacy's own order, rather than `res.nn_cost + L2`: the rounding differs.
+        nn_lid = res.nn_cost_lid
         if l2 > 0.0 and is_bias is not None:
             lid_cost, _ = l2_penalty(nets[1], is_bias[1], l2)
             nn_lid += lid_cost
         f = f + nn_lid
 
     gradients: list[NDArray[np.float64]] = []
-    for k, dv in enumerate(derivs):
-        grad = average_derivs(np.asarray(dv, dtype=F64))[: nets[k].shape[0]]
+    for k, dv in enumerate(res.derivs):
+        grad = average_derivs(dv)[: nets[k].shape[0]]
         if k == 1 and l2 > 0.0 and is_bias is not None:
             # legacy: ComputeGradient.m:362 -- L2 gradient on the LID net only.
             _, lid_grad = l2_penalty(nets[k], is_bias[k], l2)

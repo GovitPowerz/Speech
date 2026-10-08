@@ -25,7 +25,7 @@ from speech.drivers.state import RunConfig, RunState
 from speech.drivers.test import evaluate, resolve_checkpoint_packs, write_scores
 from speech.genome import genome_length
 from speech.scoring import masking_validation
-from speech.weight_bridge import write_bin
+from speech.weight_bridge import read_weight_vector, write_bin
 
 from tests._result_rows import channel_results_from_matrix
 
@@ -176,38 +176,46 @@ def test_resolve_checkpoint_packs_missing_net_raises(tmp_path: Path) -> None:
     assert str(ckpt) in str(exc.value)
 
 
-def test_evaluate_missing_pack_fails_loudly(tmp_path: Path) -> None:
-    """The #29 regression: an exact-path `evaluate` on a checkpoint directory that lacks its
-    packs used to skip `set_weights` and score the config's seed pack silently. It must
-    raise before the engine is built (no `_eval.config`, no `scores/`)."""
+def test_cli_test_missing_pack_fails_loudly(tmp_path: Path) -> None:
+    """The #29 regression at the CLI: `test` on a checkpoint directory that lacks its packs
+    used to skip `set_weights` and score the config's seed pack silently. The resolution is
+    the subcommand's, before `evaluate` (which takes packs) touches anything on disk."""
     config = _seed_init_inputs(tmp_path)
-    state = init_run(config, tmp_path / "run")
+    out_dir = tmp_path / "run"
+    init_run(config, out_dir)
     empty_ckpt = tmp_path / "ckpt"
     empty_ckpt.mkdir()
 
     with pytest.raises(FileNotFoundError, match=r"sad_weights\.bin \+ lid_weights\.bin or best_sad\.bin \+ best_lid\.bin"):
-        evaluate(state, empty_ckpt)
-    assert not (tmp_path / "_eval.config").exists(), "must raise before the engine config is written"
-    assert not (Path(state.out_dir) / "scores").exists(), "must raise before the scores dir is created"
+        cli_main(["test", str(out_dir), str(empty_ckpt)])
+    assert not (out_dir / "scores").exists(), "must raise before the scores dir is created"
 
 
 def _fake_speech_rs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Stand in for the pyo3 module: record the engine config `evaluate` wrote (read from the
-    cwd the engine is built in) and the weights handed to `set_weights`; score no files."""
+    """Stand in for the pyo3 module: record the map `evaluate`'s fold run hands `from_map`
+    and the weights handed to `set_weights`; score no files."""
     seen: dict[str, Any] = {}
 
     class Engine:
-        def __init__(self, configs: list[str], mode: str) -> None:
-            seen["config"] = Path(configs[0]).read_text()
+        @staticmethod
+        def from_map(configs: list[dict[str, str]], mode: str) -> Engine:
+            seen["config"] = dict(configs[0])
+            # Like a fast processor, read the weight packs AT CONSTRUCTION (T6b).
+            present = [k for k in ("BLSTM_weightsFile", "BLSTM_LID_weightsFile") if Path(configs[0][k]).is_file()]
+            seen["loaded"] = {k: list(read_weight_vector(Path(configs[0][k]))) for k in present}
+            return Engine()
 
         def set_weights(self, conf: int, nets: list[list[float]]) -> None:
-            seen["weights"] = nets
+            seen["weights"] = [list(n) for n in nets]
 
         def run(self) -> None:
             pass
 
         def channel_results(self) -> dict[str, np.ndarray]:
             return asdict(channel_results_from_matrix(np.zeros((0, 0))))
+
+        def weights(self, conf: int) -> list[np.ndarray]:
+            return []
 
     monkeypatch.setitem(sys.modules, "speech_rs", types.SimpleNamespace(Engine=Engine))
     return seen
@@ -229,25 +237,32 @@ def _twin_state_and_ckpt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tup
 
 def test_evaluate_exact_injects_resolved_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Exact path: the resolved packs, read against the caller's cwd (not the config dir the
-    engine runs in), go through `set_weights`; the eval config is inference-shaped."""
+    fold resolves its paths against), go through `set_weights`; the map is inference-shaped
+    and its paths are the config dir's, not the cwd's."""
     seen = _fake_speech_rs(monkeypatch)
     state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
 
-    evaluate(state, ckpt)
+    evaluate(state, resolve_checkpoint_packs(ckpt, state.algo))
 
     assert seen["weights"] == [[1.0, 2.0], [3.0]]
-    assert "Neural_Networks_BackPropagation_Epochs 0\n" in seen["config"]
+    assert seen["config"]["Neural_Networks_BackPropagation_Epochs"] == "0"
+    assert seen["config"]["BLSTM_BackPropagationActivated"] == "false"
+    assert seen["config"]["BLSTM_LID_BackPropagationActivated"] == "false"
+    assert seen["config"]["fileslisting"] == str(tmp_path / "cfg" / "corpus_phseq" / "listing_train.csv")
 
 
-def test_evaluate_fast_repoints_weight_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_evaluate_fast_injects_through_workdir_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fast path: `set_weights` bails there (T6b), so the checkpoint packs are injected by
-    repointing the config's weight keys at their absolute paths -- not ignored."""
+    writing them under the config dir and repointing the config's weight keys at them for
+    the engine's construction -- not ignored."""
     seen = _fake_speech_rs(monkeypatch)
     state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
     state.base_config["Inference_Path"] = "fast"
 
-    evaluate(state, ckpt)
+    evaluate(state, resolve_checkpoint_packs(ckpt, state.algo))
 
     assert "weights" not in seen
-    assert f"BLSTM_weightsFile {(tmp_path / 'ckpt' / 'best_sad.bin').resolve()}\n" in seen["config"]
-    assert f"BLSTM_LID_weightsFile {(tmp_path / 'ckpt' / 'best_lid.bin').resolve()}\n" in seen["config"]
+    sad, lid = Path(seen["config"]["BLSTM_weightsFile"]), Path(seen["config"]["BLSTM_LID_weightsFile"])
+    assert sad.parent == lid.parent == tmp_path / "cfg"
+    assert seen["loaded"] == {"BLSTM_weightsFile": [1.0, 2.0], "BLSTM_LID_weightsFile": [3.0]}
+    assert not sad.exists() and not lid.exists(), "the packs are removed once the engine holds them"

@@ -3,7 +3,7 @@
 //! Phase 4c Task 3: the coarse corpus-level [`Engine`] -- a thin wrapper over
 //! `speech::engine::corpus_processor::CorpusProcessor` (the "PyO3 seam surface"
 //! landed in Task 1). This is the legacy file/subprocess contract driven
-//! in-process: build from config paths, `run()` the corpus fold, then read back
+//! in-process: build from config paths or maps, `run()` the corpus fold, then read back
 //! the result matrix / weights / derivatives / gradient check.
 //!
 //! numpy crossings COPY (spec R2): every ndarray/vec returned to Python is a
@@ -11,6 +11,7 @@
 //! The copy site is doc-commented on each method. Zero-copy is a later
 //! hot-loop concern.
 
+use indexmap::IndexMap;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -30,6 +31,32 @@ use speech::toml_config::toml_to_map as toml_to_map_rs;
 /// Generic over `Display` to avoid taking a direct `anyhow` dependency.
 fn to_pyerr<E: std::fmt::Display>(e: E) -> PyErr {
     PyRuntimeError::new_err(format!("{e:#}"))
+}
+
+/// Read a config FILE into the flat `IndexMap` the engine takes, dispatched by
+/// extension like `cli::parse_cli`: a `.toml` path goes through
+/// `toml_config::toml_to_map`, anything else through `parse_legacy_config`. The
+/// one loader behind `Engine::new` and both streaming sessions (issue #22).
+fn load_config_map(path: &str) -> PyResult<IndexMap<String, String>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| PyRuntimeError::new_err(format!("cannot read config file '{path}': {e}")))?;
+    if path.ends_with(".toml") {
+        toml_to_map_rs(&text)
+            .map_err(|e| PyRuntimeError::new_err(format!("invalid TOML config '{path}': {e:#}")))
+    } else {
+        Ok(parse_legacy_config_rs(&text))
+    }
+}
+
+/// A Python `dict[str, str]` as the flat config map, insertion order preserved
+/// into the `IndexMap` (the legacy last-wins rule has already been applied by
+/// whoever built the dict). A non-`str` key or value is a `TypeError`.
+fn dict_to_map(dict: &Bound<'_, PyDict>) -> PyResult<IndexMap<String, String>> {
+    let mut map = IndexMap::with_capacity(dict.len());
+    for (k, v) in dict.iter() {
+        map.insert(k.extract::<String>()?, v.extract::<String>()?);
+    }
+    Ok(map)
 }
 
 /// Version of the underlying `speech` engine crate.
@@ -83,44 +110,56 @@ fn load_toml_config<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyD
 }
 
 /// The coarse corpus-level engine: a `CorpusProcessor` behind the legacy
-/// corpus contract, driven in-process. Construct from config PATHS + a CLI mode
-/// flag, `run()`, then read the results.
+/// corpus contract, driven in-process. Construct from config PATHS (`Engine(...)`)
+/// or from already-flattened config MAPS (`Engine.from_map(...)`, issue #22) plus a
+/// CLI mode flag, `run()`, then read the results. Either way the process cwd is what
+/// relative paths in the config and the listing resolve against, as for the binary.
 #[pyclass]
 struct Engine {
     inner: CorpusProcessor,
 }
 
+impl Engine {
+    /// The shared tail of both constructors: parse the mode flag, build the
+    /// `CorpusProcessor`.
+    fn build(configs: Vec<IndexMap<String, String>>, mode: &str) -> PyResult<Self> {
+        let mode = Mode::from_flag(mode)
+            .ok_or_else(|| PyRuntimeError::new_err(format!("unknown mode flag '{mode}'")))?;
+        let inner = CorpusProcessor::new(configs, mode).map_err(to_pyerr)?;
+        Ok(Engine { inner })
+    }
+}
+
 #[pymethods]
 impl Engine {
     /// Build from config PATHS + a CLI mode flag (`"-m"`, `"-s"`, ...; parsed
-    /// via `cli::Mode::from_flag`). Dispatches by extension like `cli::parse_cli`:
-    /// a `.toml` path is read + `toml_config::toml_to_map`'d, anything else is
-    /// read + `parse_legacy_config`'d. An empty `config_paths` is NOT checked here
-    /// -- `CorpusProcessor::new` already bails with its own "at least one config
-    /// is required" message, so a redundant pre-check here would just duplicate
-    /// that error surface.
+    /// via `cli::Mode::from_flag`). Each path is read through `load_config_map`
+    /// (`.toml` / `.config` dispatched by extension). An empty `config_paths` is
+    /// NOT checked here -- `CorpusProcessor::new` already bails with its own "at
+    /// least one config is required" message, so a redundant pre-check here would
+    /// just duplicate that error surface.
     #[new]
     fn new(config_paths: Vec<String>, mode: String) -> PyResult<Self> {
-        let mode = Mode::from_flag(&mode)
-            .ok_or_else(|| PyRuntimeError::new_err(format!("unknown mode flag '{mode}'")))?;
+        let configs = config_paths
+            .iter()
+            .map(|p| load_config_map(p))
+            .collect::<PyResult<Vec<_>>>()?;
+        Self::build(configs, &mode)
+    }
 
-        let mut configs = Vec::with_capacity(config_paths.len());
-        for path in &config_paths {
-            let text = std::fs::read_to_string(path).map_err(|e| {
-                PyRuntimeError::new_err(format!("cannot read config file '{path}': {e}"))
-            })?;
-            let map = if path.ends_with(".toml") {
-                toml_to_map_rs(&text).map_err(|e| {
-                    PyRuntimeError::new_err(format!("invalid TOML config '{path}': {e:#}"))
-                })?
-            } else {
-                parse_legacy_config_rs(&text)
-            };
-            configs.push(map);
-        }
-
-        let inner = CorpusProcessor::new(configs, mode).map_err(to_pyerr)?;
-        Ok(Engine { inner })
+    /// Build from config MAPS (`list[dict[str, str]]`, the flat legacy key shape
+    /// the `KEY_TABLE` produces, ADR-0006) + a CLI mode flag: the path constructor
+    /// minus the file. Dict insertion order is preserved into the `IndexMap`. No
+    /// file is read and nothing is written; relative paths inside the map still
+    /// resolve against the process cwd. COPY: every key and value is read into an
+    /// owned `String`.
+    #[staticmethod]
+    fn from_map(configs: Vec<Bound<'_, PyDict>>, mode: String) -> PyResult<Self> {
+        let configs = configs
+            .iter()
+            .map(dict_to_map)
+            .collect::<PyResult<Vec<_>>>()?;
+        Self::build(configs, &mode)
     }
 
     /// Run the corpus fold / epoch loop. The engine can take minutes, so the
@@ -315,23 +354,14 @@ struct StreamingSession {
 
 #[pymethods]
 impl StreamingSession {
-    /// Build from a config PATH (dispatched by extension like `Engine::new`: `.toml`
-    /// -> `toml_config::toml_to_map`, else the legacy `.config` parser), the stream
+    /// Build from a config PATH (read through `load_config_map`, the same loader as
+    /// `Engine::new`), the stream
     /// `rate` (Hz) and source `channels` count -- both read from the wav header by the
     /// caller (the session is mono-first; `channels != 1` bails). COPY: the config is
     /// read from disk + parsed into an owned map.
     #[new]
     fn new(config_path: &str, rate: f64, channels: usize) -> PyResult<Self> {
-        let text = std::fs::read_to_string(config_path).map_err(|e| {
-            PyRuntimeError::new_err(format!("cannot read config file '{config_path}': {e}"))
-        })?;
-        let map = if config_path.ends_with(".toml") {
-            toml_to_map_rs(&text).map_err(|e| {
-                PyRuntimeError::new_err(format!("invalid TOML config '{config_path}': {e:#}"))
-            })?
-        } else {
-            parse_legacy_config_rs(&text)
-        };
+        let map = load_config_map(config_path)?;
         let inner = RsStreamingSession::new(&map, rate, channels).map_err(to_pyerr)?;
         Ok(StreamingSession { inner })
     }
@@ -430,25 +460,16 @@ struct StreamingLidSession {
 
 #[pymethods]
 impl StreamingLidSession {
-    /// Build from a config PATH (dispatched by extension like `Engine::new`/
-    /// `StreamingSession::new`: `.toml` -> `toml_config::toml_to_map`, else the legacy
-    /// `.config` parser), the stream `rate` (Hz), and the eval target `lang_index`
+    /// Build from a config PATH (read through `load_config_map`, the same loader as
+    /// `Engine::new`/`StreamingSession::new`), the stream `rate` (Hz), and the eval
+    /// target `lang_index`
     /// (clamped into `[0, class_nb)` by the Rust session -- a negative value targets
     /// class 0). COPY: the config is read from disk + parsed into an owned map. The LID
     /// weight pack is NOT passed explicitly here (mirrors `StreamingSession::new`'s
     /// config-driven load): `None` defers to the config's `BLSTM_LID_weightsFile`.
     #[new]
     fn new(config_path: &str, rate: f64, lang_index: i32) -> PyResult<Self> {
-        let text = std::fs::read_to_string(config_path).map_err(|e| {
-            PyRuntimeError::new_err(format!("cannot read config file '{config_path}': {e}"))
-        })?;
-        let map = if config_path.ends_with(".toml") {
-            toml_to_map_rs(&text).map_err(|e| {
-                PyRuntimeError::new_err(format!("invalid TOML config '{config_path}': {e:#}"))
-            })?
-        } else {
-            parse_legacy_config_rs(&text)
-        };
+        let map = load_config_map(config_path)?;
         let inner = RsStreamingLidSession::new(&map, rate, lang_index, None).map_err(to_pyerr)?;
         Ok(StreamingLidSession { inner })
     }

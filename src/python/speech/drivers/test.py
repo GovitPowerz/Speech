@@ -5,13 +5,14 @@ file emit a `.scr` file of per-language softmax scores. The score law (`:252-266
 `exp(score/100)`, normalize by `max(1e-3, sum)`, sort DESCENDING, and write one
 `filename lang-dial %15.15f` line per class (lang = key[:3], dial = key[-3:]).
 
-`write_scores` is the pure, golden-tested core; `evaluate` is the thin engine-driving
-orchestrator around it (not golden-pinned -- the exit gate does not exercise Test).
+`write_scores` is the pure, golden-tested core; `evaluate` is the thin orchestrator around
+it (not golden-pinned -- the exit gate does not exercise Test): one forward-only `FoldRun`
+at the checkpoint's packs, then one `.scr` per channel result.
 """
 
 from __future__ import annotations
 
-import os
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +20,7 @@ from numpy.typing import NDArray
 
 from speech.drivers.state import RunState
 from speech.drivers.train import _net_names
-from speech.engine import ChannelResults
+from speech.fold_run import FoldRun
 from speech.weight_bridge import read_weight_vector
 
 F64 = np.float64
@@ -66,14 +67,14 @@ def _class_keys(mapping_path: Path) -> list[str]:
 
 
 def resolve_checkpoint_packs(checkpoint: Path, algo: int) -> list[Path]:
-    """The weight packs `evaluate` injects, one per net (`[sad]`, or `[sad, lid]` for the
-    algo-6 Twin). Two writers, two naming schemes: the legacy `train` driver writes
-    `<net>_weights.bin`, `train_modern` writes `best_<net>.bin` (its `last_<net>.bin` is a
-    resume point, not a scoring checkpoint). A scheme resolves only when it holds EVERY net,
-    so a `[sad, lid]` pair is never assembled from two different runs; the legacy scheme
-    wins when both are complete. Raises `FileNotFoundError` naming both accepted pack sets
-    when neither is complete (#29: the old `all(exists)` guard skipped `set_weights` and
-    scored the config's seed pack in silence)."""
+    """A checkpoint directory's weight packs, one per net (`[sad]`, or `[sad, lid]` for the
+    algo-6 Twin) -- what the `test` subcommand hands `evaluate`. Two writers, two naming
+    schemes: the legacy `train` driver writes `<net>_weights.bin`, `train_modern` writes
+    `best_<net>.bin` (its `last_<net>.bin` is a resume point, not a scoring checkpoint). A
+    scheme resolves only when it holds EVERY net, so a `[sad, lid]` pair is never assembled
+    from two different runs; the legacy scheme wins when both are complete. Raises
+    `FileNotFoundError` naming both accepted pack sets when neither is complete (#29: the old
+    `all(exists)` guard skipped `set_weights` and scored the config's seed pack in silence)."""
     nets = _net_names(algo)
     schemes = [[checkpoint / f"{net}_weights.bin" for net in nets], [checkpoint / f"best_{net}.bin" for net in nets]]
     for packs in schemes:
@@ -83,12 +84,13 @@ def resolve_checkpoint_packs(checkpoint: Path, algo: int) -> list[Path]:
     raise FileNotFoundError(f"checkpoint {checkpoint} has no complete weight-pack set: expected {expected}")
 
 
-def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) -> Path:
-    """Score the corpus with the checkpoint weights and write per-file `.scr` outputs to
-    `scores_dir` (default `<out_dir>/scores/`). Returns the scores directory.
+def evaluate(state: RunState, packs: Sequence[Path], scores_dir: Path | None = None) -> Path:
+    """Score the corpus at `packs` (`[sad]`, or `[sad, lid]` for the Twin -- a checkpoint
+    directory resolves to them through `resolve_checkpoint_packs`) and write per-file `.scr`
+    outputs to `scores_dir` (default `<out_dir>/scores/`). Returns the scores directory.
 
     `scores_dir`: override the output directory (Task 8 review fix). Callers that
-    `evaluate` more than one checkpoint against the SAME `state` -- e.g. a trained pack and
+    `evaluate` more than one pack set against the SAME `state` -- e.g. a trained pack and
     its own untrained-init baseline -- must pass DISTINCT dirs, or the second call's `.scr`
     files silently overwrite the first's on disk (the default `<out_dir>/scores/` is fixed
     per `state`, not per call).
@@ -100,42 +102,14 @@ def evaluate(state: RunState, checkpoint: Path, scores_dir: Path | None = None) 
     a trailing newline) per file. No gate stops `evaluate` from being pointed at a
     non-algo-6 checkpoint."""
     workdir = Path(state.config_path).parent
-    cfg = dict(state.base_config)
-    cfg["BLSTM_BackPropagationActivated"] = "false"
-    # A training config's epoch count would route `run()` through `train()` (N+2 corpus
-    # passes instead of one) and trips the fast path's training-shaped-config bail.
-    cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
-    if state.algo == 6:
-        cfg["BLSTM_LID_BackPropagationActivated"] = "false"
-
-    # A missing pack raises here, before the engine (or anything on disk) exists. The packs
-    # are read now, against the caller's cwd, not after the chdir into the config dir. Fast
-    # processors load weights only at construction and `set_weights` bails on them (T6b),
-    # so the fast path injects by repointing the config's weight keys at the packs instead.
-    packs = resolve_checkpoint_packs(Path(checkpoint), state.algo)
-    fast = cfg.get("Inference_Path", "exact") == "fast"
-    if fast:
-        for key, pack in zip(("BLSTM_weightsFile", "BLSTM_LID_weightsFile"), packs, strict=False):
-            cfg[key] = str(pack.resolve())
-    nets = [] if fast else [list(read_weight_vector(p)) for p in packs]
-    config_text = "\n".join(f"{k} {v}" for k, v in cfg.items()) + "\n"
-
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
+    # The packs are read first, against the caller's cwd, so a missing one raises before the
+    # engine (or anything on disk) exists. The fold run owns the fast-path injection.
+    nets = [read_weight_vector(p) for p in packs]
+    fold = FoldRun(state.base_config, workdir, backprop=False)
 
     scores_dir = Path(scores_dir) if scores_dir is not None else Path(state.out_dir) / "scores"
     scores_dir.mkdir(parents=True, exist_ok=True)
-
-    prev = Path.cwd()
-    os.chdir(workdir)
-    try:
-        (workdir / "_eval.config").write_text(config_text)
-        engine = speech_rs.Engine(["_eval.config"], "-m")
-        if not fast:
-            engine.set_weights(0, nets)
-        engine.run()
-        results = ChannelResults.from_seam(engine.channel_results())
-    finally:
-        os.chdir(prev)
+    results = fold.run(nets).results
 
     keys = _class_keys(workdir / state.base_config["language2classmapping"])
     for i in range(len(results)):

@@ -228,7 +228,6 @@ re-run (`-k transformer`, all six selected sub-legs): 96.43 s, exit 0, 6/6 PASSE
 
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -246,8 +245,9 @@ pytest.importorskip("speech_rs")
 from speech.config_bridge import nnet_spec  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
-from speech.drivers.train import _init_weights_from_scratch, _modern_config_text  # noqa: E402
-from speech.engine import ChannelResults, forward_backward  # noqa: E402
+from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
+from speech.engine import average_derivs  # noqa: E402
+from speech.fold_run import FoldRun  # noqa: E402
 
 # (cell, direction, MEASURED pack length) -- the S3.3 matrix, phase-11 T9 grown 8 -> 10 with
 # the fifth cell. Each length is `init_weights`' own output at the arm's overlaid config,
@@ -515,26 +515,19 @@ class _Shim:
 def _probe(out: dict[str, Any]) -> Callable[[RunState, int, ModernTrainParams], _Shim]:
     """A `run_baseline(_train_fn=...)` stub that MEASURES the from-scratch init instead of
     training: it re-uses the training loop's OWN seeded-init and config builders
-    (`_init_weights_from_scratch`, `_modern_config_text(backprop=True)`), so what it probes
+    (`_init_weights_from_scratch`, a gradient `FoldRun` on the base config), so what it probes
     is exactly the theta and the fold epoch 0 would start from -- not a re-derivation that
     could silently drift from the real path. (Phase 9's `_probe`, plus the raw gradient so
     the inverse guard can slice it.)"""
 
     def probe(state: RunState, seed: int, params: ModernTrainParams) -> _Shim:
-        import speech_rs
-
-        algo = state.ps.algo
         weights = _init_weights_from_scratch(state, params)
-        workdir = Path(state.config_path).parent
-        prev = Path.cwd()
-        os.chdir(workdir)
-        try:
-            (workdir / "_preflight.config").write_text(_modern_config_text(state.base_config, algo, backprop=True))
-            engine = speech_rs.Engine(["_preflight.config"], "-m")
-            cost, grads = forward_backward(engine, weights)
-            results = ChannelResults.from_seam(engine.channel_results()).for_config(0)
-        finally:
-            os.chdir(prev)
+        # ONE gradient fold at the init: `nn_cost` is forward_backward's `f` on this single-net
+        # arm and `average_derivs` its count normalization; the channel results come with it.
+        res = FoldRun(state.base_config, Path(state.config_path).parent, backprop=True).run(weights)
+        cost = res.nn_cost
+        grads = [average_derivs(d) for d in res.derivs]
+        results = res.results.for_config(0)
 
         grad = np.asarray(grads[0], dtype=np.float64)
         out["grad"] = grad

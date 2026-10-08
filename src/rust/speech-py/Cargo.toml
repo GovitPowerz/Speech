@@ -17,3 +17,4 @@ extension-module = ["pyo3/extension-module"]
 speech = { path = ".." }
 pyo3 = { version = "0.28" }
 numpy = "0.28"
+indexmap = "2"

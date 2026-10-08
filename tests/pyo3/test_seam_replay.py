@@ -45,6 +45,7 @@ import scipy.io
 from numpy.typing import NDArray
 from speech.config_bridge import parse_legacy_config as parse_legacy_config_py
 from speech.engine import forward_backward
+from speech.fold_run import FoldRun
 from speech.optimizers import Smorms3
 from speech.weight_bridge import read_bin
 
@@ -370,37 +371,34 @@ def test_same_seed_determinism(tmp_path_factory: pytest.TempPathFactory) -> None
 
 
 # ==== Task 9: engine.forward_backward over the seam ==========================
+#
+# Every leg runs the tier-2 spectral fixture through a GRADIENT `FoldRun` (issue #22): the
+# fold run owns the F11 rule (the fixture's `Epochs 3` becomes `Epochs 0`, so `run()` is the
+# run_solo SINGLE forward-backward at theta, not the engine-internal 3-fold+2-Rprop `train()`)
+# and the backprop flag, so the fold harvests the gradient at theta. The cwd stays in the
+# fixture directory because its listing rows are relative (the fold run resolves only the
+# config's path keys).
 
 
-def _seed_tier2_single_epoch(dst: Path) -> None:
-    """`_seed_tier2_spectral` + override the config's `Epochs 3` down to 0 (last-wins),
-    so `Engine.run()` is the run_solo SINGLE forward-backward at theta -- the gradient eval
-    `forward_backward` needs, NOT the engine-internal 3-fold+2-Rprop `train()`.
-
-    F11 (phase 5): Epochs 0, not 1. `Epochs >= 1` routes `run()` through `train()`, so the
-    seam measured cost/gradient at engine-moved weights, not the input theta (the T10
-    misroute). `Epochs 0` -> run_solo (one fold at theta); backprop is gated on
-    `BackPropagationActivated`, still on here, so the fold harvests the gradient."""
+def _tier2_fold(dst: Path) -> FoldRun:
     _seed_tier2_spectral(dst)
-    with (dst / "tier2_spectral.config").open("a") as fh:
-        fh.write("\nNeural_Networks_BackPropagation_Epochs 0\n")
+    return FoldRun(parse_legacy_config_py((dst / "tier2_spectral.config").read_text()), dst, backprop=True)
 
 
 def test_forward_backward_tier2_determinism(tmp_path_factory: pytest.TempPathFactory) -> None:
     """`engine.forward_backward` (ComputeGradient's contract) on the tier-2 spectral fixture:
-    two evals of the SAME seed weights on FRESH engines (the coarse-seam rebuild-per-eval
+    two evals of the SAME seed weights on FRESH folds (the coarse-seam rebuild-per-eval
     pattern) must return a bit-identical finite cost + a single-net gradient paired and
     shaped to the input weights. The FULL epoch-0->1 equivalence lands in T12's exit gate."""
     results: list[tuple[float, NDArray[np.float64]]] = []
     seed: NDArray[np.float64] | None = None
     for i in range(2):
         dst = tmp_path_factory.mktemp(f"fb_tier2_{i}")
-        _seed_tier2_single_epoch(dst)
         with chdir(dst):
-            eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
+            fold = _tier2_fold(dst)
             if seed is None:
-                seed = np.array(eng.weights(0)[0], dtype=np.float64, copy=True)
-            f, grads = forward_backward(eng, [seed], None)
+                seed = fold.weights()[0].copy()
+            f, grads = forward_backward(fold, [seed])
             assert len(grads) == 1, "algo 3 -> a single [sad] gradient"
             assert grads[0].shape == seed.shape, "gradient must be paired + shaped to the input weights"
             assert math.isfinite(f), "cost must be finite"
@@ -414,13 +412,12 @@ def test_forward_backward_tier2_determinism(tmp_path_factory: pytest.TempPathFac
 def test_forward_backward_drives_smorms3(tmp_path: Path) -> None:
     """One `Smorms3` step wrapping `forward_backward` (the inner training move) stays finite
     and shape-stable -- the seam feeds the optimizer, not just the goldens."""
-    _seed_tier2_single_epoch(tmp_path)
     with chdir(tmp_path):
-        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
-        theta0 = [np.array(eng.weights(0)[0], dtype=np.float64, copy=True)]
+        fold = _tier2_fold(tmp_path)
+        theta0 = [fold.weights()[0].copy()]
 
         def f_df(theta: list[NDArray[np.float64]], _ec: int) -> tuple[float, list[NDArray[np.float64]], list[NDArray[np.float64]]]:
-            cost, grads = forward_backward(eng, theta, None)
+            cost, grads = forward_backward(fold, theta)
             return cost, grads, theta  # theta_out is a pass-through (SMORMS3 adds dtheta to it)
 
         opt = Smorms3(f_df, theta0)
@@ -435,11 +432,10 @@ def test_forward_backward_returns_nonzero_gradient(tmp_path: Path) -> None:
     reports a gradient with nonzero elements -- NOT the pre-F10 all-zero gradient (the main
     bag's never-folded accumulator) that made the modern SMORMS3 loop a silent no-op. Epochs
     0 -> run_solo (one fold at theta), backprop ON -> the fold harvests the real gradient."""
-    _seed_tier2_single_epoch(tmp_path)
     with chdir(tmp_path):
-        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
-        seed = np.array(eng.weights(0)[0], dtype=np.float64, copy=True)
-        f, grads = forward_backward(eng, [seed], None)
+        fold = _tier2_fold(tmp_path)
+        seed = fold.weights()[0].copy()
+        f, grads = forward_backward(fold, [seed])
         assert len(grads) == 1, "algo 3 -> a single [sad] gradient"
         assert math.isfinite(f), "cost must be finite"
         nonzero = int(np.count_nonzero(grads[0]))
@@ -451,13 +447,12 @@ def test_forward_backward_smorms3_moves_weights(tmp_path: Path) -> None:
     single-eval-at-theta) actually MOVE the weights. On HEAD the seam's zero gradient left
     `||trained - init|| == 0` (the modern loop trained nothing); with the folded gradient
     flowing, SMORMS3 steps the net."""
-    _seed_tier2_single_epoch(tmp_path)
     with chdir(tmp_path):
-        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
-        theta0 = np.array(eng.weights(0)[0], dtype=np.float64, copy=True)
+        fold = _tier2_fold(tmp_path)
+        theta0 = fold.weights()[0].copy()
 
         def f_df(theta: list[NDArray[np.float64]], _ec: int) -> tuple[float, list[NDArray[np.float64]], list[NDArray[np.float64]]]:
-            cost, grads = forward_backward(eng, theta, None)
+            cost, grads = forward_backward(fold, theta)
             return cost, grads, theta
 
         opt = Smorms3(f_df, [theta0.copy()])

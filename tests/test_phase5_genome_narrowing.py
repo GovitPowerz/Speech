@@ -10,7 +10,7 @@ engine (pure genome/mask logic):
     versa, cross-checked against the walk's own `_MaskTraceWalk` ranges AND an independent
     net-structure arithmetic count (NO magic dim numbers);
   * the narrowed genome_length shrinks by exactly the masked-dim count;
-  * the generalized injection (`_hyperparam_config_text`) covers exactly the decoded non-weight
+  * the generalized injection (`_hyperparam_overlay`) covers exactly the decoded non-weight
     keys (every searchable DSP key, no weight/normalize key), forward-only, base preserved;
   * `masking_validation` passes on the narrowed mask;
   * vec2struct's 4c goldens stay BYTE-GREEN (the regression sentinel -- vec2struct itself is
@@ -27,7 +27,7 @@ from typing import cast
 import numpy as np
 import pytest
 from speech.config_bridge import parse_legacy_config
-from speech.drivers.train import _hyperparam_config_text, build_hyperparam_mask
+from speech.drivers.train import _hyperparam_overlay, build_hyperparam_mask
 from speech.genome import (
     RunConfig,
     _MaskTraceWalk,
@@ -176,9 +176,10 @@ def test_masking_validation_passes_on_narrowed_mask(name: str) -> None:
 
 @pytest.mark.parametrize("name", list(_PS_CASES))
 def test_injection_covers_nonweight_keys_only(name: str) -> None:
-    """`_hyperparam_config_text` overlays EVERY decoded non-weight key onto the base and NO
-    weight/normalize key (printConfig already stripped them), forward-only (backprop OFF,
-    Epochs 0), with the base's own extra keys preserved (byte-stable overlay)."""
+    """`_hyperparam_overlay` overlays EVERY decoded non-weight key onto the base and NO
+    weight/normalize key (printConfig already stripped them), with the base's own extra keys
+    preserved (byte-stable overlay). The forward-only flags are the fold run's
+    (`tests/test_fold_run.py`), not the overlay's."""
     ps = _PS_CASES[name]
     mask, searchable = weight_block_mask(ps)
     rng = np.random.default_rng(7)
@@ -190,22 +191,16 @@ def test_injection_covers_nonweight_keys_only(name: str) -> None:
     assert not any(("_LSTMBlock_" in k or "_Output_Layer_" in k or "NormalizeInput" in k) for k in config_struct)
 
     base = {"BLSTM_decision_thresh_rising": "0.5", "Dump_Directory": "dump", "fileslisting": "x.csv", "language2classmapping": "m.csv"}
-    text = _hyperparam_config_text(base, config_struct, ps.algo)
-    lines = [ln for ln in text.strip().split("\n") if ln]
-    keys = {ln.split(" ", 1)[0] for ln in lines}
+    cfg = _hyperparam_overlay(base, config_struct)
 
-    # every decoded (non-weight) key is injected ...
-    for k in config_struct:
-        assert k in keys, f"{name}: decoded key {k!r} missing from the injected config"
+    # every decoded (non-weight) key is injected, with the decoded value ...
+    for k, v in config_struct.items():
+        assert cfg.get(k) == v, f"{name}: decoded key {k!r} missing from the injected config"
     # ... and no weight/normalize key appears in the emitted config ...
-    assert not any(("_LSTMBlock_" in k or "_Output_Layer_" in k or "NormalizeInput" in k) for k in keys)
-    # ... the base's own non-decoded keys survive (byte-stable overlay) ...
-    assert "Dump_Directory" in keys
-    # ... and the eval is forward-only (fixed base weights, no engine-internal training).
-    assert "BLSTM_BackPropagationActivated false" in text
-    assert "Neural_Networks_BackPropagation_Epochs 0" in text
-    if ps.algo == 6:
-        assert "BLSTM_LID_BackPropagationActivated false" in text
+    assert not any(("_LSTMBlock_" in k or "_Output_Layer_" in k or "NormalizeInput" in k) for k in cfg)
+    # ... the base's own non-decoded keys survive, in place (byte-stable overlay).
+    assert cfg["Dump_Directory"] == "dump"
+    assert list(cfg)[: len(base)] == list(base)
 
 
 def test_injection_is_far_stronger_than_the_2key_check() -> None:

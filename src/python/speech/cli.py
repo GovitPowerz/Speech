@@ -16,7 +16,7 @@ from speech.drivers.baseline import run_baseline_from_args
 from speech.drivers.init import init_run
 from speech.drivers.retrain import retrain
 from speech.drivers.state import RunState
-from speech.drivers.test import evaluate
+from speech.drivers.test import evaluate, resolve_checkpoint_packs
 from speech.drivers.train import train
 
 
@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         retrain(state, args.checkpoint, args.seed, qpso_particles=args.particles, qpso_epochs=args.epochs, inner_steps=args.inner_steps)
         return 0
     if args.command == "test":
-        evaluate(state, args.checkpoint)
+        evaluate(state, resolve_checkpoint_packs(args.checkpoint, state.algo))
         return 0
     return 1
 

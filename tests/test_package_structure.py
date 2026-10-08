@@ -9,6 +9,7 @@ MODULES = [
     "speech.config_bridge",
     "speech.weight_bridge",
     "speech.engine",
+    "speech.fold_run",
     "speech.optimizers",
     "speech.scoring",
     "speech.batching",
