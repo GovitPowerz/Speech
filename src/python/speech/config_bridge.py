@@ -5,6 +5,17 @@ The .config is plain-text KEY value, last-wins, comma-vectors, # comments,
 _-in-key rest-of-line continuation. See design spec section 4.
 """
 
+from typing import Literal, get_args
+
+#: The (cell x direction) matrix, declared ONCE (issue #21): the names `nn/blstm.rs` parses for
+#: `{prefix}_Cell_Type` / `{prefix}_Direction`. The seed builders (`init_weights`), the launcher
+#: overlay and the launcher spec (`drivers/spec.py`) all read the vocabulary from here; a
+#: sixth cell is one entry here plus its builder and its seam gate, nowhere else in Python.
+CellType = Literal["lstm", "slstm", "mamba", "cfc", "transformer"]
+Direction = Literal["bidirectional", "forward"]
+CELL_TYPES: tuple[str, ...] = get_args(CellType)
+DIRECTIONS: tuple[str, ...] = get_args(Direction)
+
 
 def parse_legacy_config(text: str) -> dict[str, str]:
     """Parse legacy KEY value config text; last duplicate key wins, # lines skipped."""

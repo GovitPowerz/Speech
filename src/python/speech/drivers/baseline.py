@@ -93,7 +93,7 @@ import numpy as np
 from rich.console import Console
 
 from speech.batching import read_listing
-from speech.config_bridge import nnet_spec
+from speech.config_bridge import CELL_TYPES, DIRECTIONS, nnet_spec
 from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
 from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
@@ -407,10 +407,10 @@ def cell_overlay(flat: dict[str, str], cell_type: str, direction: str) -> dict[s
 
     Everything else in the config (the DSP front-end, the cost law, the hidden widths) is
     untouched."""
-    if cell_type not in ("lstm", "slstm", "mamba", "cfc", "transformer"):
-        raise ValueError(f"unknown cell type {cell_type!r} (expected lstm, slstm, mamba, cfc or transformer)")
-    if direction not in ("bidirectional", "forward"):
-        raise ValueError(f"unknown direction {direction!r} (expected bidirectional or forward)")
+    if cell_type not in CELL_TYPES:
+        raise ValueError(f"unknown cell type {cell_type!r} (expected one of {CELL_TYPES})")
+    if direction not in DIRECTIONS:
+        raise ValueError(f"unknown direction {direction!r} (expected one of {DIRECTIONS})")
     overlay: dict[str, str] = {}
     if cell_type != "lstm":
         overlay["BLSTM_Cell_Type"] = cell_type
@@ -1084,13 +1084,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--score-init", action="store_true", help="also score the from-scratch seed pack on the test slice (the init-baseline row)")
     parser.add_argument(
         "--cell-type",
-        choices=("lstm", "slstm", "mamba", "cfc", "transformer"),
+        choices=CELL_TYPES,
         default="lstm",
         help="SAD arm: recurrent cell (spec S6 + phase-10 S1 + phase-11 S1/S2; default = today's peephole BLSTM)",
     )
     parser.add_argument(
         "--direction",
-        choices=("bidirectional", "forward"),
+        choices=DIRECTIONS,
         default="bidirectional",
         help="SAD arm: forward drops the backward stack (and halves the output MLP's input width)",
     )
