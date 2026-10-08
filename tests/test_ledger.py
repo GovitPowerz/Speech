@@ -380,11 +380,14 @@ def test_to_record_reads_the_recipe_from_run_metadata(tmp_path: Path) -> None:
         "init_scheme": "xavier",
         "val_metric": "nn_cost_seg",
         "audio_max_duration": 20.0,
-        "cell_type": "cfc",
+        "cell": "cfc",
         "direction": "forward",
         "config_hash": "feedface01234567",
         "config_toml": "configs/training/lre_sad_v2.toml",
         "corpus_root": str(CORPUS_ROOT),  # the manifest may hold it; the record must not
+        "out_dir": str(tmp_path),
+        "dry_run": False,
+        "score_init": True,
         "git_sha": "c" * 40,
         "git_dirty": False,
         "lre_listing": None,
@@ -438,7 +441,8 @@ def test_to_record_reads_the_recipe_from_run_metadata(tmp_path: Path) -> None:
     assert rec.host.cores > 0 and rec.build.profile in ("release", "debug", "unavailable")
     assert str(CORPUS_ROOT) not in schema.canonical_json(rec)
     # A localized listing is its content hash in the recipe (never its path); a resumed call is flagged in the payload.
-    B.write_run_metadata(tmp_path, {**meta, "lre_listing": str(tmp_path / "lre03_train.csv"), "lre_listing_hash": "feedfacefeedface", "resume": True})
+    localized = {**meta, "arm": "lid-phseq", "audio_max_duration": None, "config_toml": "configs/training/lre03_lid_phseq.toml", "resume": True}
+    B.write_run_metadata(tmp_path, {**localized, "lre_listing": str(tmp_path / "lre03_train.csv"), "lre_listing_hash": "feedfacefeedface"})
     rec2 = res.to_record("launcher")
     assert rec2.recipe.listing == "feedfacefeedface" and rec2.payload.resumed is True
     assert str(tmp_path) not in schema.canonical_json(rec2)

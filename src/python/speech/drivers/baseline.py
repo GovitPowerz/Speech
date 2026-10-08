@@ -35,7 +35,7 @@ asserted in the gate). Both nets are seeded; ONLY the LID net trains. The phSeq 
 sourced by globbing `train/phSeq/*.file.phSeqbis` (the whole-utterance-per-line variant, one
 sequence per file) with the language from the 2-letter filename prefix -- the 2015 phSeq
 listings localize to 0 rows on this archive (`derive_lid_phseq_records`). The two LID arms
-share the entire training/scoring skeleton (`_LID_ARMS`); they differ only in File_Type and
+share the entire training/scoring skeleton (`LID_ARMS`); they differ only in File_Type and
 the record derivation.
 
 THE SAD ARM (`arm="sad"`, Task 9): from-scratch algo-3 spectral SAD (Algo 3, File_Type 0)
@@ -63,7 +63,7 @@ config (`configs/training/lre_sad_v2.toml`) -- v1 byte-for-byte except `nnet_inp
 23 -> 11 and `lstm_neuron_nb` `23,24,24` -> `11,24,24`, which makes the declared layer-0
 fan-in (`11*4 = 44`) equal the width the DSP front-end actually produces and so RETIRES the
 2015-inherited dead-column block (v1 leaves 48 of its 92 fan-in columns structurally
-gradient-dead). NO code path of its own: `_SAD_ARMS` covers both, every size downstream
+gradient-dead). NO code path of its own: `SAD_ARMS` covers both, every size downstream
 self-derives from the config (the normalize tail, the seed pack, the output MLP width under
 `--direction forward`). v1 stays FROZEN and remains the only 2015-capacity-comparable
 lineage; v2 is a new lineage whose corrected Xavier fan-in scaling is a MEASURABLE
@@ -90,42 +90,21 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+from pydantic import ValidationError
 from rich.console import Console
 
 from speech.batching import read_listing
 from speech.config_bridge import CELL_TYPES, DIRECTIONS, nnet_spec
 from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
+from speech.drivers.spec import ARM_CONFIG, LID_ARMS, SAD_ARMS, BaselineSpec, listing_hash
 from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 from speech.fold_run import FoldRun, _config_text
 from speech.init_weights import init_weights
-from speech.ledger.schema import BaselinePayload, BaselineRecipe, BaselineRecord, git_state, host_info, lineage_of, now_utc, seam_build_info, write_record
+from speech.ledger.schema import BaselinePayload, BaselineRecord, git_state, host_info, now_utc, seam_build_info, write_record
 from speech.ledger.schema import CollarScore as LedgerCollar
 from speech.weight_bridge import read_weight_vector, write_bin
-
-# The committed canonical TOML for each arm (relative to the repo root). Phase 6 Task 8
-# ships lid-features; Task 9 adds sad; Task 10 adds lid-phseq. Phase 10 Task 4 adds
-# sad-v2 (spec S3.4).
-_ARM_CONFIGS: dict[str, str] = {
-    "lid-features": "configs/training/lre03_lid_features.toml",
-    "sad": "configs/training/lre_sad.toml",
-    "sad-v2": "configs/training/lre_sad_v2.toml",
-    "lid-phseq": "configs/training/lre03_lid_phseq.toml",
-}
-
-# The two LID arms share the whole Twin/Mode-7 skeleton (algo-6, `.scr` -> lid_error/cavg
-# scoring, both-nets-seeded/only-LID-trains); they differ ONLY in the File_Type and the
-# corpus record derivation. This set gates the shared LID dispatch below.
-_LID_ARMS: frozenset[str] = frozenset({"lid-features", "lid-phseq"})
-
-# The two SAD arms (Phase 10 spec S3.4) share the ENTIRE skeleton -- same algo 3, same
-# File_Type 0, same wav+xml listings, same DCF scoring path. They differ ONLY in which
-# committed TOML `_ARM_CONFIGS` hands them, and that TOML differs only in the declared
-# input width (v1's 2015-inherited 23 vs v2's honest 11; `lre_sad_v2.toml`'s header).
-# Everything downstream self-sizes off the config, so `sad-v2` needs no code path of its
-# own -- this set is what makes every `arm == "sad"` branch below cover both.
-_SAD_ARMS: frozenset[str] = frozenset({"sad", "sad-v2"})
 
 # The five DCF collar sizes (design spec S0): no-collar + 0.25/0.5/1.0/2.0 s. The 0.5 s
 # collar is the reported headline (the T4 scorer pins all five vs the NIST perl oracle).
@@ -619,12 +598,6 @@ def _config_hash(text: str) -> str:
     return hashlib.blake2b(text.encode(), digest_size=8).hexdigest()
 
 
-def listing_hash(path: Path) -> str:
-    """The recipe's `listing` (issue #38): the blake2b-8 of the source listing's bytes, the same
-    digest family as the record id, so a localized 2015 listing is identified without its path."""
-    return hashlib.blake2b(path.read_bytes(), digest_size=8).hexdigest()
-
-
 # --------------------------------------------------------------------------------------- #
 # The arm launcher
 # --------------------------------------------------------------------------------------- #
@@ -666,24 +639,8 @@ class BaselineResult:
         stamped now. `run_baseline` writes the `launcher` record into the run
         directory; a subset gate overwrites it with `source="gate"` and its pytest node id."""
         meta = json.loads(self.metadata_path.read_text())
-        recipe = BaselineRecipe(
-            arm=meta["arm"],
-            lineage=lineage_of(meta["config_toml"]),
-            cell=meta["cell_type"],
-            direction=meta["direction"],
-            subset=meta["subset"],
-            valid_size=meta["valid_size"],
-            test_size=meta["test_size"],
-            audio_max_duration=meta["audio_max_duration"],
-            epochs=meta["epochs"],
-            steps_per_epoch=meta["steps_per_epoch"],
-            patience=meta["patience"],
-            minibatch=meta["minibatch"],
-            init_scheme=meta["init_scheme"],
-            seed=meta["seed"],
-            lanes=meta["lanes"],
-            listing=meta["lre_listing_hash"],
-        )
+        spec = BaselineSpec.model_validate({name: meta[name] for name in BaselineSpec.model_fields})
+        recipe = spec.recipe(listing=meta["lre_listing_hash"])
         payload = BaselinePayload(
             source=source,
             test=test,
@@ -762,47 +719,24 @@ def _prepare_sad_listings(
     return train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name
 
 
-def run_baseline(
-    arm: str,
-    corpus_root: Path,
-    out_dir: Path,
-    *,
-    resume: bool = False,
-    lanes: int = 1,
-    subset: int | None = None,
-    dry_run: bool = False,
-    seed: int = 0,
-    epochs: int = 40,
-    patience: int = 6,
-    steps_per_epoch: int = 8,
-    init_scheme: str = "xavier",
-    lre_listing: Path | None = None,
-    valid_size: int = 12,
-    test_size: int = 48,
-    minibatch: int = 0,
-    score_init: bool = False,
-    audio_max_duration: float | None = None,
-    cell_type: str = "lstm",
-    direction: str = "bidirectional",
-    console: Console | None = None,
-    _train_fn: Callable[..., object] | None = None,
-) -> BaselineResult:
+def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_fn: Callable[..., object] | None = None) -> BaselineResult:
     """Run one baseline training arm end to end: prepare the corpus listings, assemble the
     config, seeded from-scratch init (or resume), `train_modern` with the moving NNCostSeg
     validation signal, then score a held-out slice (LID: `.scr` -> `lid_error` + `cavg`).
 
-    `subset`: the TRAIN sample size (per-language proportional for LID, a seeded first-N of
-    the SAD split for SAD) -- the CI-gate regime (< 10 min); `None` trains on the whole
-    corpus (the launcher). `valid_size`/`test_size` are SEPARATE, disjoint held-out sizes --
-    decoupled from `subset` so a big, cheap-to-score test set gives a stable held-out metric
-    while training stays small. `dry_run`: a 1-step smoke (a tiny train subset, 1 epoch, 1
-    step, and for SAD a short audio cap) still scored end to end. `resume`: continue from
-    `out_dir/checkpoint`'s `last_*.bin`. `lanes`: the engine's `numOuterThreads` fold width
-    (recorded in metadata; N=1 is the deterministic parity mode). `lre_listing` (LID only):
-    localize this 2015 listing instead of deriving from the corpus tree. `audio_max_duration`
-    (SAD only): override `Audio_max_duration` (the corpus wavs are 576-1800 s, median ~600 s; a cap
-    bounds the run and the held-out DCF windows the reference to the same span). `_train_fn` injects a
-    stub `train_modern` for tests.
+    `spec` is the run (`drivers/spec.py`, issue #21): validated at construction, so no knob
+    check lives here. `subset`: the TRAIN sample size (per-language proportional for LID, a
+    seeded first-N of the SAD split for SAD) -- the CI-gate regime (< 10 min); `None` trains
+    on the whole corpus (the launcher). `valid_size`/`test_size` are SEPARATE, disjoint
+    held-out sizes -- decoupled from `subset` so a big, cheap-to-score test set gives a stable
+    held-out metric while training stays small. `dry_run`: a 1-step smoke (a tiny train
+    subset, 1 epoch, 1 step, and for SAD a short audio cap) still scored end to end. `resume`:
+    continue from `out_dir/checkpoint`'s `last_*.bin`. `lanes`: the engine's
+    `numOuterThreads` fold width (recorded in metadata; N=1 is the deterministic parity mode).
+    `lre_listing` (LID only): localize this 2015 listing instead of deriving from the corpus
+    tree. `audio_max_duration` (SAD only): override `Audio_max_duration` (the corpus wavs are
+    576-1800 s, median ~600 s; a cap bounds the run and the held-out DCF windows the reference
+    to the same span). `_train_fn` injects a stub `train_modern` for tests.
 
     The arm dispatch differs in three places -- the listings (LID globs cep + a synthesized
     speech STM; SAD derives wav/xml pairs with the corpus `.part.xml` refs), the seed packs
@@ -810,44 +744,43 @@ def run_baseline(
     `.scr` -> `lid_error` + `cavg`; SAD VRCTS hyps -> pooled `dcf`); the split/params/train/
     metadata skeleton is shared.
 
-    `cell_type`/`direction` (Phase 9, spec S7.2): overlay the port-only S6 architecture keys
-    onto the arm config (`cell_overlay`) and, since seeding reads the architecture back out of
+    `cell`/`direction` (Phase 9, spec S7.2): overlay the port-only S6 architecture keys onto
+    the arm config (`cell_overlay`) and, since seeding reads the architecture back out of
     that config via `nnet_spec`, route the from-scratch init through the matching per-cell
     builder automatically -- both the engine-construction seed pack here and `train_modern`'s
     own re-init. Defaults are today's BLSTM arm, byte-identical."""
-    if arm not in _ARM_CONFIGS:
-        raise ValueError(f"unknown arm {arm!r}; known arms: {sorted(_ARM_CONFIGS)}")
-    if arm not in _LID_ARMS and arm not in _SAD_ARMS:
-        raise NotImplementedError(f"arm {arm!r} is not wired (known: {sorted(_ARM_CONFIGS)})")
     # The knobs target the `BLSTM_` net. On a Twin arm that net is the FROZEN SAD gate (Mode 7
     # never runs it, so it stays byte-exactly at its seed), which makes a cell/direction swap
     # there a silent no-op on everything that actually trains -- bail loudly instead. The LID
     # net's own `BLSTM_LID_Cell_Type`/`_Direction` wiring is Task 5's.
-    if arm in _LID_ARMS and (cell_type != "lstm" or direction != "bidirectional"):
-        raise ValueError(f"--cell-type/--direction are SAD-arm knobs; arm {arm!r} trains only its LID net (Task 5 wires BLSTM_LID_*)")
-    if lre_listing is not None and arm in _SAD_ARMS:
-        raise ValueError(f"lre_listing is a LID-arm knob; the {arm} arm derives its split from the corpus tree and would ignore it")
-
+    if spec.arm in LID_ARMS and (spec.cell != "lstm" or spec.direction != "bidirectional"):
+        raise ValueError(f"--cell/--direction are SAD-arm knobs; arm {spec.arm!r} trains only its LID net (Task 5 wires BLSTM_LID_*)")
     console = console or Console()
     # __file__ = <repo>/src/python/speech/drivers/baseline.py -> parents[4] = <repo>.
     repo_root = Path(__file__).resolve().parents[4]
-    toml_path = repo_root / _ARM_CONFIGS[arm]
+    toml_path = repo_root / ARM_CONFIG[spec.arm]
     # The record's provenance is the tree the run STARTS on (issue #40): stamped after training it
     # would name an edit or a commit made during the run, and a git failure would lose the run.
     # Read before `out_dir` exists, so a failed check leaves no half-started run directory.
     git_sha, git_dirty = git_state(repo_root)
-    out_dir = Path(out_dir).resolve()
+    out_dir = spec.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # dry_run overrides -- arm-aware: SAD wav ingestion is slower per file than cep, so the
     # SAD smoke draws a smaller subset AND caps the audio short (else a 1-step smoke over
-    # long CallFriend recordings would blow the "fast" promise).
-    if dry_run:
-        if arm in _SAD_ARMS:
-            subset, epochs, steps_per_epoch, patience, test_size, valid_size = (subset or 6), 1, 1, 99, min(test_size, 6), min(valid_size, 4)
-            audio_max_duration = audio_max_duration if audio_max_duration is not None else 10.0
+    # long CallFriend recordings would blow the "fast" promise). A derived spec, so the
+    # metadata and the record carry the values that actually ran.
+    if spec.dry_run:
+        if spec.arm in SAD_ARMS:
+            clamp: dict[str, object] = dict(subset=spec.subset or 6, test_size=min(spec.test_size, 6), valid_size=min(spec.valid_size, 4))
+            clamp["audio_max_duration"] = spec.audio_max_duration if spec.audio_max_duration is not None else 10.0
         else:
-            subset, epochs, steps_per_epoch, patience, test_size, valid_size = (subset or 24), 1, 1, 99, min(test_size, 24), min(valid_size, 12)
+            clamp = dict(subset=spec.subset or 24, test_size=min(spec.test_size, 24), valid_size=min(spec.valid_size, 12))
+        spec = spec.model_copy(update={**clamp, "epochs": 1, "steps_per_epoch": 1, "patience": 99})
+    arm, corpus_root, seed, lanes, subset, dry_run, resume = spec.arm, spec.corpus_root, spec.seed, spec.lanes, spec.subset, spec.dry_run, spec.resume
+    epochs, patience, steps_per_epoch, init_scheme, minibatch = spec.epochs, spec.patience, spec.steps_per_epoch, spec.init_scheme, spec.minibatch
+    valid_size, test_size, score_init, lre_listing = spec.valid_size, spec.test_size, spec.score_init, spec.lre_listing
+    audio_max_duration, cell_type, direction = spec.audio_max_duration, spec.cell, spec.direction
 
     t0 = time.time()
     console.log(f"[bold]baseline {arm}[/bold]: corpus={corpus_root} out={out_dir} subset={subset} lanes={lanes} seed={seed} dry_run={dry_run}")
@@ -855,7 +788,7 @@ def run_baseline(
         console.log("[yellow]resume[/yellow]: this call's record is not promotable (`ledger add` refuses a resumed run, issue #38)")
 
     # --- 1. listings + mapping (+ reference) synthesized under out_dir --------------------
-    if arm in _SAD_ARMS:
+    if arm in SAD_ARMS:
         train_rec, valid_rec, test_rec, train_name, valid_name, test_name, mapping_name = _prepare_sad_listings(
             corpus_root, out_dir, seed, subset, valid_size, test_size, console
         )
@@ -920,7 +853,7 @@ def run_baseline(
     extra = dict(cell_overlay(flat, cell_type, direction))
     if audio_max_duration is not None:
         extra["Audio_max_duration"] = str(audio_max_duration)
-    if arm in _SAD_ARMS:
+    if arm in SAD_ARMS:
         cfg = assemble_flat_config(flat, fileslisting=train_name, mapping=mapping_name, sad_seed="sad_seed.bin", lanes=lanes, extra=extra)
         _generate_sad_seed_pack(cfg, out_dir, seed, params.init_scheme, params.forget_bias_one)
     else:
@@ -933,37 +866,20 @@ def run_baseline(
     base_config.write_text(cfg_text)
 
     # --- 3. run metadata -----------------------------------------------------------------
+    # The spec as it ran (after the dry-run clamp; the paths are local-only, like `corpus_root`)
+    # plus what the run derived; the hash is what the recipe records.
     metadata_path = write_run_metadata(
         out_dir,
         {
-            "arm": arm,
-            "seed": seed,
-            "lanes": lanes,
-            "subset": subset,
-            "dry_run": dry_run,
-            "epochs": epochs,
-            "patience": patience,
-            "steps_per_epoch": steps_per_epoch,
-            "minibatch": minibatch,
-            "valid_size": valid_size,
-            "test_size": test_size,
-            "score_init": score_init,
-            "init_scheme": init_scheme,
+            **spec.model_dump(mode="json"),
             "val_metric": "nn_cost_seg",
-            "audio_max_duration": audio_max_duration,
-            "cell_type": cell_type,
-            "direction": direction,
             "config_hash": _config_hash(cfg_text),
             "config_toml": str(toml_path.relative_to(repo_root)),
-            "corpus_root": str(corpus_root),
             "n_train": len(train_rec),
             "n_valid": len(valid_rec),
             "n_test": len(test_rec),
-            "resume": resume,
             "git_sha": git_sha,
             "git_dirty": git_dirty,
-            # The path is local-only (like `corpus_root`); the hash is what the recipe records.
-            "lre_listing": None if lre_listing is None else str(lre_listing),
             "lre_listing_hash": None if lre_listing is None else listing_hash(lre_listing),
         },
     )
@@ -986,7 +902,7 @@ def run_baseline(
     init_dcf_rep: DcfReport | None = None
     scores_dir: Path | None = None
     ckpt = Path(res.checkpoint_dir)  # type: ignore[attr-defined]
-    if test_rec and arm in _SAD_ARMS:
+    if test_rec and arm in SAD_ARMS:
         dcf_rep, scores_dir = _score_sad_pack_on_test(cfg, out_dir, ckpt / "best_sad.bin", out_dir / "score_trained", test_rec, test_name)
         if dcf_rep is not None:
             c = dcf_rep.by_collar(0.5)
@@ -1050,49 +966,45 @@ def run_baseline(
 # --------------------------------------------------------------------------------------- #
 
 
-def _count(text: str) -> int:
-    n = int(text)
-    if n < 0:
-        raise argparse.ArgumentTypeError(f"must be >= 0, got {n}")
-    return n
+def _default(name: str) -> object:
+    return BaselineSpec.model_fields[name].default
 
 
 def build_parser() -> argparse.ArgumentParser:
     """The `baseline <arm>` argument parser -- also mounted as the `baseline` subcommand in
-    `speech.cli`. Unit-tested for arg wiring (no run)."""
-    parser = argparse.ArgumentParser(description="Phase 6 from-scratch baseline training arms")
-    parser.add_argument("arm", choices=sorted(_ARM_CONFIGS), help="the training arm")
+    `speech.cli`. Every dest is a `BaselineSpec` field and every default is the field's, so
+    the CLI and a direct call train the same run (pinned both ways by a unit test). Counts and
+    vocabulary are validated by the spec, not here."""
+    parser = argparse.ArgumentParser(description="from-scratch baseline training arms")
+    parser.add_argument("arm", choices=sorted(ARM_CONFIG), help="the training arm")
     parser.add_argument("--corpus-root", type=Path, required=True, help="the LRE03/07 corpus root (data/LRE03-LRE07)")
     parser.add_argument("--out-dir", type=Path, required=True, help="run directory for listings/config/checkpoints/scores")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--lanes", type=int, default=1, help="engine numOuterThreads fold width (N=1 is the parity mode)")
-    parser.add_argument("--subset", type=_count, default=None, help="stratified subset size (omit for the full corpus)")
-    parser.add_argument("--epochs", type=int, default=40)
-    parser.add_argument("--patience", type=int, default=6)
-    parser.add_argument("--steps-per-epoch", type=int, default=8)
-    parser.add_argument("--init-scheme", choices=("xavier", "he"), default="xavier")
+    parser.add_argument("--seed", type=int, default=_default("seed"))
+    parser.add_argument("--lanes", type=int, default=_default("lanes"), help="engine numOuterThreads fold width (N=1 is the parity mode)")
+    parser.add_argument("--subset", type=int, default=_default("subset"), help="stratified subset size (omit for the full corpus)")
+    parser.add_argument("--epochs", type=int, default=_default("epochs"))
+    parser.add_argument("--patience", type=int, default=_default("patience"))
+    parser.add_argument("--steps-per-epoch", type=int, default=_default("steps_per_epoch"))
+    parser.add_argument("--init-scheme", choices=("xavier", "he"), default=_default("init_scheme"))
     parser.add_argument(
         "--valid-size",
-        type=_count,
-        default=12,
+        type=int,
+        default=_default("valid_size"),
         help="held-out validation slice (files; LID allocates per language, min 1 each); a SAD 0 validates on the train listing",
     )
-    parser.add_argument("--test-size", type=_count, default=48, help="held-out test slice (files; LID: min 1 per language) the final metric is scored on")
     parser.add_argument(
-        "--minibatch", type=_count, default=0, help="training files drawn per SMORMS3 step, class-stratified round-robin (0 = the whole train listing)"
+        "--test-size", type=int, default=_default("test_size"), help="held-out test slice (files; LID: min 1 per language) the final metric is scored on"
+    )
+    parser.add_argument(
+        "--minibatch",
+        type=int,
+        default=_default("minibatch"),
+        help="training files drawn per SMORMS3 step, class-stratified round-robin (0 = the whole train listing)",
     )
     parser.add_argument("--score-init", action="store_true", help="also score the from-scratch seed pack on the test slice (the init-baseline row)")
+    parser.add_argument("--cell", choices=CELL_TYPES, default=_default("cell"), help="the recurrent cell of the net that trains (default = the peephole BLSTM)")
     parser.add_argument(
-        "--cell-type",
-        choices=CELL_TYPES,
-        default="lstm",
-        help="SAD arm: recurrent cell (spec S6 + phase-10 S1 + phase-11 S1/S2; default = today's peephole BLSTM)",
-    )
-    parser.add_argument(
-        "--direction",
-        choices=DIRECTIONS,
-        default="bidirectional",
-        help="SAD arm: forward drops the backward stack (and halves the output MLP's input width)",
+        "--direction", choices=DIRECTIONS, default=_default("direction"), help="forward drops the backward stack (and halves the output MLP's input width)"
     )
     parser.add_argument("--lre-listing", type=Path, default=None, help="LID arm: localize this 2015 listing instead of deriving from the corpus tree")
     parser.add_argument(
@@ -1104,11 +1016,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_baseline_from_args(args: argparse.Namespace) -> BaselineResult:
-    """Forward a `build_parser()` namespace to `run_baseline`, every dest bound by name, so an
-    entry point cannot drop a flag silently (the `speech.cli` mount dropped `--cell-type`/
-    `--direction` for a phase, issue #28); a dest that is not a `run_baseline` parameter fails
-    here with a TypeError, and a unit test pins the alignment both ways."""
-    return run_baseline(**vars(args))
+    """Both CLI entries end here: the namespace becomes a `BaselineSpec` (every dest a field, so
+    an entry point cannot drop a flag silently, issue #28) and an invalid run is a usage error
+    before any directory exists."""
+    try:
+        spec = BaselineSpec.from_args(args)
+    except ValidationError as e:
+        build_parser().error(str(e))
+    return run_baseline(spec)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -52,6 +52,7 @@ pytest.importorskip("speech_rs")
 from speech.batching import read_listing  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
 from speech.config_bridge import parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
+from speech.drivers.spec import BaselineSpec  # noqa: E402
 from speech.drivers.state import RunState  # noqa: E402
 from speech.drivers.test import _class_keys  # noqa: E402
 from speech.evaluate import load_vrcts_hyp, read_scr_scores  # noqa: E402
@@ -133,7 +134,7 @@ def _ensure_arm(arm: str) -> _Arm:
             shutil.rmtree(out_dir)  # clean any partial cache (specific cache subdir only)
         out_dir.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
-        B.run_baseline(arm, CORPUS_ROOT, out_dir, **_RECIPES[arm])  # type: ignore[arg-type]
+        B.run_baseline(BaselineSpec(arm=arm, corpus_root=CORPUS_ROOT, out_dir=out_dir, **_RECIPES[arm]))  # type: ignore[arg-type]
         train_s = time.time() - t0
         sentinel.write_text(json.dumps({"train_s": train_s, "recipe": {k: str(v) for k, v in _RECIPES[arm].items()}}))
         trained_now = True

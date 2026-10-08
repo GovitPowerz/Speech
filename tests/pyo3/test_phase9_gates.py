@@ -105,6 +105,7 @@ from tests.conftest import CORPUS_ROOT, GateRecorder, requires_corpus
 pytest.importorskip("speech_rs")
 
 from speech.drivers import baseline as B  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
+from speech.drivers.spec import BaselineSpec  # noqa: E402
 from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
 from speech.engine import average_derivs  # noqa: E402
@@ -235,10 +236,10 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     dead-column finding). Cheap (~0.2 s per config: no valid/test split, no training, one fold
     over 2 files; ~0.7 s for all four)."""
     out: dict[str, float] = {}
-    B.run_baseline(
-        "sad",
-        CORPUS_ROOT,
-        tmp_path / "probe",
+    spec = BaselineSpec(
+        arm="sad",
+        corpus_root=CORPUS_ROOT,
+        out_dir=tmp_path / "probe",
         subset=2,
         valid_size=0,
         test_size=0,  # no held-out scoring: this leg is about the init, not the task metric
@@ -247,10 +248,10 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
         patience=99,
         seed=0,
         audio_max_duration=10.0,
-        cell_type=cell,
-        direction=direction,
-        _train_fn=_probe(out),
+        cell=cell,  # type: ignore[arg-type]
+        direction=direction,  # type: ignore[arg-type]
     )
+    B.run_baseline(spec, _train_fn=_probe(out))
 
     # (0) param match: the pack the arm actually seeds is the S8.2-sized one.
     assert out["pack_len"] == pack_len, f"{cell}/{direction} pack length {out['pack_len']:.0f} != the pinned {pack_len}"
@@ -335,7 +336,7 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
     on Mamba: its train cost ASCENDS 1.09 -> 2.07 across the three bidirectional epochs while
     the held-out DCF still lands at 0.25). Only the held-out TASK metric is gated."""
     t0 = time.time()
-    res = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "run", cell_type=cell, direction=direction, score_init=True, **_GATE)  # type: ignore[arg-type]
+    res = B.run_baseline(BaselineSpec(arm="sad", corpus_root=CORPUS_ROOT, out_dir=tmp_path / "run", cell=cell, direction=direction, score_init=True, **_GATE))  # type: ignore[arg-type]
     wall = time.time() - t0
 
     # --- both DCF reports landed, valid ranges ---
@@ -382,8 +383,8 @@ def test_deterministic(tmp_path: Path, cell: str, direction: str, pack_len: int,
     determinism is a pipeline property, provable cheaply); the FULL-recipe run-twice
     bit-identity was measured separately (2026-07-28, mamba/bidirectional, identical
     `best_sad.bin` bytes and DCF)."""
-    a = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "a", cell_type=cell, direction=direction, **_DET)  # type: ignore[arg-type]
-    b = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "b", cell_type=cell, direction=direction, **_DET)  # type: ignore[arg-type]
+    a = B.run_baseline(BaselineSpec(arm="sad", corpus_root=CORPUS_ROOT, out_dir=tmp_path / "a", cell=cell, direction=direction, **_DET))  # type: ignore[arg-type]
+    b = B.run_baseline(BaselineSpec(arm="sad", corpus_root=CORPUS_ROOT, out_dir=tmp_path / "b", cell=cell, direction=direction, **_DET))  # type: ignore[arg-type]
 
     for name in ("last_sad.bin", "best_sad.bin"):
         pa, pb = (a.checkpoint_dir / name).read_bytes(), (b.checkpoint_dir / name).read_bytes()

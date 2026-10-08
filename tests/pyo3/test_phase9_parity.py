@@ -83,6 +83,7 @@ import speech_rs  # noqa: E402
 from speech.batching import read_listing  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
 from speech.config_bridge import parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
+from speech.drivers.spec import BaselineSpec  # noqa: E402
 from speech.evaluate import load_vrcts_hyp  # noqa: E402
 from speech.weight_bridge import read_weight_vector  # noqa: E402
 
@@ -173,7 +174,7 @@ def _ensure_causal_arm(cell: str) -> _CausalArm:
             shutil.rmtree(out_dir)  # clean any partial cache (this cell's subdir only)
         out_dir.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
-        B.run_baseline("sad", CORPUS_ROOT, out_dir, cell_type=cell, direction="forward", **_GATE)  # type: ignore[arg-type]
+        B.run_baseline(BaselineSpec(arm="sad", corpus_root=CORPUS_ROOT, out_dir=out_dir, cell=cell, direction="forward", **_GATE))  # type: ignore[arg-type]
         train_s = time.time() - t0
         sentinel.write_text(json.dumps({"train_s": train_s, "cell": cell, "direction": "forward", "recipe": {k: str(v) for k, v in _GATE.items()}}))
         trained_now = True

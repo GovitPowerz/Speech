@@ -40,6 +40,7 @@ from tests.conftest import CORPUS_ROOT, GateRecorder, requires_corpus
 pytest.importorskip("speech_rs")
 
 from speech.drivers import baseline as B  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
+from speech.drivers.spec import BaselineSpec  # noqa: E402
 
 _CHANCE = 100.0 * (1.0 - 1.0 / 12.0)  # 12-way argmax chance error = 91.666...%
 
@@ -50,10 +51,10 @@ def test_lid_features_subset_trains_and_scores(tmp_path: Path, gate_record: Gate
     """Train the 12-class Twin from scratch on a stratified cep-features subset, then score a
     disjoint 48-file held-out slice end to end. Pins (measured 2026-07-18, seed 0):
     lid_error 72.92%, init 93.75%, cavg 0.46, train_cost 2.368 -> 2.216; ~282 s."""
-    res = B.run_baseline(
-        "lid-features",
-        CORPUS_ROOT,
-        tmp_path / "run",
+    spec = BaselineSpec(
+        arm="lid-features",
+        corpus_root=CORPUS_ROOT,
+        out_dir=tmp_path / "run",
         subset=36,  # ~3 train files/language (per-language proportional, seeded)
         valid_size=12,
         test_size=48,  # ~4 held-out files/language -- a stable argmax-error denominator
@@ -63,6 +64,7 @@ def test_lid_features_subset_trains_and_scores(tmp_path: Path, gate_record: Gate
         seed=0,
         score_init=True,  # also score the untrained init on the SAME test set (the improvement baseline)
     )
+    res = B.run_baseline(spec)
 
     # --- the machinery works: the SMORMS3 train objective descends across epochs ---
     assert len(res.train_costs) == 2, f"expected 2 epochs of history, got {res.train_costs}"
@@ -93,9 +95,9 @@ def test_lid_features_deterministic(tmp_path: Path) -> None:
     """Run-twice determinism at a fixed seed: bit-identical trained weights + identical
     held-out error. A SHORT config (determinism is a pipeline property, provable cheaply);
     the full gate's determinism was measured separately (2026-07-18) and holds identically."""
-    kw = dict(subset=24, valid_size=12, test_size=12, epochs=1, steps_per_epoch=6, patience=99, seed=0)
-    a = B.run_baseline("lid-features", CORPUS_ROOT, tmp_path / "a", **kw)  # type: ignore[arg-type]
-    b = B.run_baseline("lid-features", CORPUS_ROOT, tmp_path / "b", **kw)  # type: ignore[arg-type]
+    kw = dict(arm="lid-features", corpus_root=CORPUS_ROOT, subset=24, valid_size=12, test_size=12, epochs=1, steps_per_epoch=6, patience=99, seed=0)
+    a = B.run_baseline(BaselineSpec(out_dir=tmp_path / "a", **kw))  # type: ignore[arg-type]
+    b = B.run_baseline(BaselineSpec(out_dir=tmp_path / "b", **kw))  # type: ignore[arg-type]
 
     for name in ("last_lid.bin", "best_lid.bin", "last_sad.bin", "best_sad.bin"):
         assert (a.checkpoint_dir / name).read_bytes() == (b.checkpoint_dir / name).read_bytes(), f"{name} not bit-identical across two fixed-seed runs"
@@ -107,7 +109,7 @@ def test_lid_features_deterministic(tmp_path: Path) -> None:
 def test_lid_features_dry_run_smoke(tmp_path: Path) -> None:
     """The `--dry-run` 1-step smoke: init + 1 epoch on a tiny slice + score, no long training.
     Proves the whole arm wiring (listings, config, seeded init, engine, scoring) runs fast."""
-    res = B.run_baseline("lid-features", CORPUS_ROOT, tmp_path / "dry", dry_run=True, seed=0)
+    res = B.run_baseline(BaselineSpec(arm="lid-features", corpus_root=CORPUS_ROOT, out_dir=tmp_path / "dry", dry_run=True, seed=0))
     assert res.epochs_run == 1, "dry-run must run exactly 1 epoch"
     assert res.n_train > 0 and res.n_test > 0
     assert res.metadata_path.is_file()
@@ -146,10 +148,10 @@ def test_sad_subset_trains_and_scores(tmp_path: Path, gate_record: GateRecorder)
     0, ~80 s): held-out DCF@0.5 trained 0.2500 (Pmiss 0.0 Pfa 1.0) vs init 0.7500 (Pmiss 1.0
     Pfa 0.0), +0.50 at every collar; the trained net fires (all-speech collapse), the init
     does not (all-non-speech)."""
-    res = B.run_baseline(
-        "sad",
-        CORPUS_ROOT,
-        tmp_path / "run",
+    spec = BaselineSpec(
+        arm="sad",
+        corpus_root=CORPUS_ROOT,
+        out_dir=tmp_path / "run",
         subset=10,  # 10 train wavs (seeded first-N of the 70/15/15 SAD split)
         valid_size=8,
         test_size=24,  # a stable pooled-DCF denominator, disjoint from train/valid
@@ -160,6 +162,7 @@ def test_sad_subset_trains_and_scores(tmp_path: Path, gate_record: GateRecorder)
         audio_max_duration=20.0,  # cap the 576-1800 s CallFriend recordings (median ~600 s); the ref windows to match
         score_init=True,  # also score the untrained init on the SAME test set (the DCF baseline)
     )
+    res = B.run_baseline(spec)
 
     # --- both DCF reports landed, valid ranges ---
     assert res.dcf is not None and res.init_dcf is not None
@@ -191,9 +194,10 @@ def test_sad_deterministic(tmp_path: Path) -> None:
     """Run-twice determinism at a fixed seed: bit-identical trained weights + identical pooled
     held-out DCF. A SHORT config (determinism is a pipeline property, provable cheaply); the
     full gate's determinism was measured separately (2026-07-18, bit-identical best_sad.bin)."""
-    kw = dict(subset=8, valid_size=6, test_size=8, epochs=1, steps_per_epoch=8, patience=99, seed=0, audio_max_duration=15.0)
-    a = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "a", **kw)  # type: ignore[arg-type]
-    b = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "b", **kw)  # type: ignore[arg-type]
+    kw = dict(arm="sad", corpus_root=CORPUS_ROOT, subset=8, valid_size=6, test_size=8, epochs=1, steps_per_epoch=8, patience=99, seed=0)
+    kw["audio_max_duration"] = 15.0
+    a = B.run_baseline(BaselineSpec(out_dir=tmp_path / "a", **kw))  # type: ignore[arg-type]
+    b = B.run_baseline(BaselineSpec(out_dir=tmp_path / "b", **kw))  # type: ignore[arg-type]
 
     for name in ("last_sad.bin", "best_sad.bin"):
         assert (a.checkpoint_dir / name).read_bytes() == (b.checkpoint_dir / name).read_bytes(), f"{name} not bit-identical across two fixed-seed runs"
@@ -207,7 +211,7 @@ def test_sad_dry_run_smoke(tmp_path: Path) -> None:
     """The `--dry-run` 1-step smoke for the SAD arm: init + 1 epoch on a tiny slice at a short
     audio cap + DCF scoring, no long training. Proves the whole arm wiring (derive_sad_listings,
     config, seeded init, engine VRCTS dump, dcf) runs fast end to end."""
-    res = B.run_baseline("sad", CORPUS_ROOT, tmp_path / "dry", dry_run=True, seed=0)
+    res = B.run_baseline(BaselineSpec(arm="sad", corpus_root=CORPUS_ROOT, out_dir=tmp_path / "dry", dry_run=True, seed=0))
     assert res.epochs_run == 1, "dry-run must run exactly 1 epoch"
     assert res.n_train > 0 and res.n_test > 0
     assert res.metadata_path.is_file()
@@ -264,10 +268,10 @@ def test_lid_phseq_subset_trains_and_scores(tmp_path: Path, gate_record: GateRec
     lid_error 84.44%, init 91.11% (+6.67 pt), cavg 0.49, train_costs 2.41 -> 2.93 (ascending;
     argmax still improves), ~232 s; the SAD net frozen (byte-identical to seed), only the LID
     net trains."""
-    res = B.run_baseline(
-        "lid-phseq",
-        CORPUS_ROOT,
-        tmp_path / "run",
+    spec = BaselineSpec(
+        arm="lid-phseq",
+        corpus_root=CORPUS_ROOT,
+        out_dir=tmp_path / "run",
         subset=16,  # ~1-2 train files/language (per-language proportional, seeded); n_train ~15
         valid_size=12,
         test_size=48,  # a stable argmax-error denominator, disjoint from train/valid
@@ -277,6 +281,7 @@ def test_lid_phseq_subset_trains_and_scores(tmp_path: Path, gate_record: GateRec
         seed=0,
         score_init=True,  # also score the untrained init on the SAME test set (the improvement baseline)
     )
+    res = B.run_baseline(spec)
 
     # --- THE FROZEN-SAD CONTRACT (the crux): the SAD net NEVER moves; only the LID net trains ---
     seed_sad = (res.out_dir / "sad_seed.bin").read_bytes()
@@ -309,9 +314,9 @@ def test_lid_phseq_deterministic(tmp_path: Path) -> None:
     """Run-twice determinism at a fixed seed: bit-identical trained weights (incl. the frozen SAD
     net) + identical held-out error. A SHORT config (determinism is a pipeline property, provable
     cheaply)."""
-    kw = dict(subset=12, valid_size=8, test_size=12, epochs=1, steps_per_epoch=6, patience=99, seed=0)
-    a = B.run_baseline("lid-phseq", CORPUS_ROOT, tmp_path / "a", **kw)  # type: ignore[arg-type]
-    b = B.run_baseline("lid-phseq", CORPUS_ROOT, tmp_path / "b", **kw)  # type: ignore[arg-type]
+    kw = dict(arm="lid-phseq", corpus_root=CORPUS_ROOT, subset=12, valid_size=8, test_size=12, epochs=1, steps_per_epoch=6, patience=99, seed=0)
+    a = B.run_baseline(BaselineSpec(out_dir=tmp_path / "a", **kw))  # type: ignore[arg-type]
+    b = B.run_baseline(BaselineSpec(out_dir=tmp_path / "b", **kw))  # type: ignore[arg-type]
 
     for name in ("last_lid.bin", "best_lid.bin", "last_sad.bin", "best_sad.bin"):
         assert (a.checkpoint_dir / name).read_bytes() == (b.checkpoint_dir / name).read_bytes(), f"{name} not bit-identical across two fixed-seed runs"
@@ -324,7 +329,7 @@ def test_lid_phseq_dry_run_smoke(tmp_path: Path) -> None:
     """The `--dry-run` 1-step smoke for the phonotactic arm: init + 1 epoch on a tiny slice +
     score, no long training. Proves the whole arm wiring (phSeq glob, config, seeded init, engine
     Mode-7 forward, scoring) runs fast -- and that the frozen-SAD contract holds even in 1 step."""
-    res = B.run_baseline("lid-phseq", CORPUS_ROOT, tmp_path / "dry", dry_run=True, seed=0)
+    res = B.run_baseline(BaselineSpec(arm="lid-phseq", corpus_root=CORPUS_ROOT, out_dir=tmp_path / "dry", dry_run=True, seed=0))
     assert res.epochs_run == 1, "dry-run must run exactly 1 epoch"
     assert res.n_train > 0 and res.n_test > 0
     assert res.metadata_path.is_file()

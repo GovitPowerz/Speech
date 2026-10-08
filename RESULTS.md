@@ -707,7 +707,7 @@ phase-6 SAD protocol VERBATIM -- same arm (`configs/training/lre_sad.toml`, Algo
 spectral, File_Type 0 wav), same recipe (subset 10 / valid 8 / test 24, 3 epochs x 10
 SMORMS3 steps, 20 s audio cap, seed 0, `val_metric=nn_cost_seg`), same end-to-end scorer
 (engine VRCTS hyp dumps + the `.part.xml` refs -> pooled `evaluate.dcf`). ONLY the cell and
-the direction differ, driven by the T4 `--cell-type` / `--direction` knobs on
+the direction differ, driven by the T4 `--cell` / `--direction` knobs on
 `python -m speech.drivers.baseline sad`. Measured 2026-07-28, Apple M4 Pro (arm64), macOS 26.5.2, N=1 lane.
 
 ONE RIDER on "only the cell and the direction differ", so the wall-time column below is not
@@ -873,7 +873,7 @@ over the same epochs. Only the held-out TASK metric is gated.
 ```
 # Any {lstm,slstm,mamba} x {bidirectional,forward} combination, same launcher as phase 6.
 uv run python -m speech.drivers.baseline sad --corpus-root data/LRE03-LRE07 --out-dir runs/sad_slstm_full \
-    --cell-type slstm --direction bidirectional \
+    --cell slstm --direction bidirectional \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 ```
 
@@ -1487,7 +1487,7 @@ held-out TASK metric is gated.
 ```
 # Any {lstm,slstm,mamba,cfc} x {bidirectional,forward} combination on the v2 lineage.
 uv run python -m speech.drivers.baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_cfc_full \
-    --cell-type cfc --direction forward \
+    --cell cfc --direction forward \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 ```
 
@@ -1718,7 +1718,7 @@ Spec S5 says the Twin's `bail_unsupported_shape` is revisited ONLY if a covering
 It does not, so it stays, and the doc comment now says so explicitly. Nothing in this task
 adds one: the bidirectional twins land behind the algo-3 SAD driver; in Mode 7 the Twin's SAD
 net is never run (the frozen-SAD contract); and `drivers/baseline.py` rejects
-`--cell-type`/`--direction` on the LID arms outright. The refusal costs nothing real and
+`--cell`/`--direction` on the LID arms outright. The refusal costs nothing real and
 keeps the fast Twin's accepted surface exactly what phase 7 pinned.
 
 ### No streaming leg, by construction
@@ -2650,7 +2650,7 @@ class, extended to a second cell).
 
 ## Phase 11 -- the `lre_sad_v2` gate matrix grows to ten (Task 9)
 
-`--cell-type transformer` joins `{lstm, slstm, mamba, cfc}` on the `sad`/`sad-v2` SAD arms
+`--cell transformer` joins `{lstm, slstm, mamba, cfc}` on the `sad`/`sad-v2` SAD arms
 (`cell_overlay`, `drivers/baseline.py`), needing NO third derived key beyond the two the
 knob already writes under `--direction forward` (`BLSTM_OutputNeuronNb` resize,
 `BLSTM_window 0`): a transformer layer is just another `Layer` impl behind `CellLayer`, so
@@ -2819,7 +2819,7 @@ gates (2, both now PASS -- the training/scoring cost is unchanged, only the crit
 ```
 # Either direction -- both now clear the ratified hard-leg criterion.
 uv run python -m speech.drivers.baseline sad-v2 --corpus-root data/LRE03-LRE07 --out-dir runs/sad_v2_transformer_full \
-    --cell-type transformer --direction bidirectional \
+    --cell transformer --direction bidirectional \
     --lanes 1 --seed 0 --epochs 40 --steps-per-epoch 25 --audio-max-duration 120
 ```
 
