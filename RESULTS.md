@@ -222,7 +222,7 @@ beat-chance (+8.33 pt) and beat-init (+10.42 pt).
 | LSTM / bidirectional | 35 / 15 / 48 | 72.92 | 93.75 | +20.83 | 0.46 | 91.67 | 212 s |
 | LSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | sLSTM / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| sLSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| sLSTM / forward | 35 / 15 / 48 | 83.33 | 93.75 | +10.42 | 0.49 | 91.67 | 43 s |
 | Mamba / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Mamba / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | CfC / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
@@ -242,7 +242,7 @@ Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 | LSTM / bidirectional | 15 / 15 / 45 | 84.44 | 91.11 | +6.67 | 0.49 | 91.67 | 136 s |
 | LSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | sLSTM / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| sLSTM / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| sLSTM / forward | 15 / 15 / 45 | 91.11 | 100.00 | +8.89 | 0.51 | 91.67 | 32 s |
 | Mamba / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Mamba / forward | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | CfC / bidirectional | TBD | TBD | TBD | TBD | TBD | TBD | TBD |

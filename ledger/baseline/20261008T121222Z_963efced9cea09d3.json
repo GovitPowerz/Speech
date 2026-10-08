@@ -1,0 +1,62 @@
+{
+  "build": {
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "target": "aarch64-apple-darwin"
+  },
+  "git_dirty": false,
+  "git_sha": "ddc414fb80c6a45f64eb4591c84e45bda7cf78bc",
+  "host": {
+    "arch": "arm64",
+    "chip": "Apple M4 Pro",
+    "cores": 14,
+    "os": "Darwin 25.6.0"
+  },
+  "kind": "baseline",
+  "payload": {
+    "best_epoch": 0,
+    "best_val_cost": 3.955230048627336,
+    "cavg": 0.49134199134199136,
+    "config_hash": "9b0fbba6984828b0",
+    "config_name": "configs/training/lre03_lid_features.toml",
+    "dcf": null,
+    "epochs_run": 2,
+    "first_train_cost": 1.0664764835861198,
+    "first_val_cost": 3.955230048627336,
+    "init_cavg": 0.49999999999999994,
+    "init_dcf": null,
+    "init_lid_error": 93.75,
+    "last_train_cost": 1.144618671524944,
+    "lid_error": 83.33333333333334,
+    "n_test": 48,
+    "n_train": 35,
+    "n_valid": 15,
+    "resumed": false,
+    "source": "gate",
+    "test": "tests/pyo3/test_lid_cells_gates.py::test_lid_slstm_forward_trains_and_scores[lid-features]",
+    "val_metric": "nn_cost_seg",
+    "wall_s": 43.14748167991638
+  },
+  "reason": null,
+  "recipe": {
+    "arm": "lid-features",
+    "audio_max_duration": null,
+    "cell": "slstm",
+    "direction": "forward",
+    "epochs": 2,
+    "init_scheme": "xavier",
+    "lanes": 1,
+    "lineage": null,
+    "listing": null,
+    "minibatch": 0,
+    "patience": 99,
+    "seed": 0,
+    "steps_per_epoch": 25,
+    "subset": 36,
+    "test_size": 48,
+    "valid_size": 12
+  },
+  "recorded_at": "2026-10-08T12:12:22Z",
+  "schema_version": 2,
+  "supersedes": null
+}
