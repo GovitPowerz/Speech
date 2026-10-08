@@ -17,11 +17,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveFloat, PositiveInt, model_validator
 
 from speech.config_bridge import CellType, Direction
+from speech.init_weights import Scheme
 from speech.ledger.schema import Arm, BaselineRecipe, Lineage
 
 #: The committed canonical TOML for each arm, relative to the repo root.
@@ -59,7 +59,7 @@ class BaselineSpec(BaseModel):
     epochs: PositiveInt = 40
     patience: PositiveInt = 6
     steps_per_epoch: PositiveInt = 8
-    init_scheme: Literal["xavier", "he"] = "xavier"
+    init_scheme: Scheme = "xavier"
     valid_size: NonNegativeInt = 12
     test_size: NonNegativeInt = 48
     minibatch: NonNegativeInt = 0

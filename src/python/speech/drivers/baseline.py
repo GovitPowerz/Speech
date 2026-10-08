@@ -87,7 +87,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, get_args
 
 import numpy as np
 from pydantic import ValidationError
@@ -101,7 +101,7 @@ from speech.drivers.state import ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 from speech.fold_run import FoldRun, _config_text
-from speech.init_weights import init_weights
+from speech.init_weights import Scheme, init_weights
 from speech.ledger.schema import Arm, BaselinePayload, BaselineRecord, git_state, host_info, now_utc, seam_build_info, write_record
 from speech.ledger.schema import CollarScore as LedgerCollar
 from speech.weight_bridge import read_weight_vector, write_bin
@@ -1045,7 +1045,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=_default("epochs"))
     parser.add_argument("--patience", type=int, default=_default("patience"))
     parser.add_argument("--steps-per-epoch", type=int, default=_default("steps_per_epoch"))
-    parser.add_argument("--init-scheme", choices=("xavier", "he"), default=_default("init_scheme"))
+    parser.add_argument("--init-scheme", choices=get_args(Scheme), default=_default("init_scheme"))
     parser.add_argument(
         "--valid-size",
         type=int,

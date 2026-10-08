@@ -158,9 +158,10 @@ pub(crate) fn classify_fast_shape(bc: &BlstmConfig) -> FastNetShape {
 /// SHAPE keys are read and relaxing the check would be harmless -- but "harmless" is a
 /// claim about a path no gate exercises, and nothing in Task 7 adds one: the
 /// bidirectional twins land behind the algo-3 SAD driver, the phase's LID arms train the
-/// LID net alone, and `drivers/baseline.py` rejects `--cell-type`/`--direction` on the
-/// LID arms outright. Keeping it conservative costs nothing real and keeps the fast
-/// Twin's accepted surface exactly what phase 7 pinned.
+/// LID net alone. Since issue #21 `drivers/baseline.py`'s `--cell`/`--direction` reach the
+/// LID net on the LID arms, with exact-tree gates only (`tests/pyo3/test_lid_cells_gates.py`);
+/// none covers the fast Twin, so the gate stays, and lifting it to the matrix is #57.
+/// Keeping it conservative keeps the fast Twin's accepted surface exactly what phase 7 pinned.
 ///
 /// The message body is UNCHANGED where `phase7_parity_lid.rs` pins it (the leading "cell
 /// type '<x>' is not supported on the fast inference path"); only the parenthetical now

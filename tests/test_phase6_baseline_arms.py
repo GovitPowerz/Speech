@@ -394,6 +394,9 @@ def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple
         "Algo_choice": "6",
         "File_Type": "1",
         "BLSTM_NNetInputSize": "11",
+        "BLSTM_LSTMNeuronNb": "11,12",
+        "BLSTM_OutputNeuronNb": "24,1",
+        "BLSTM_window": "5.0",
         "BLSTM_LID_NNetInputSize": "38",
         "BLSTM_LID_LSTMNeuronNb": "38,24",
         "BLSTM_LID_OutputNeuronNb": "48,12",
@@ -545,7 +548,8 @@ def test_lid_arm_knob_lands_on_the_lid_net_and_leaves_the_sad_net_lstm(tmp_path:
     cfg_text = (out / "base.config").read_text()
     assert "BLSTM_LID_Cell_Type mamba" in cfg_text and "BLSTM_LID_Direction forward" in cfg_text
     assert "BLSTM_LID_OutputNeuronNb 24,12" in cfg_text and "BLSTM_LID_window 0" in cfg_text
-    assert "BLSTM_Cell_Type" not in cfg_text and "BLSTM_Direction" not in cfg_text and "BLSTM_OutputNeuronNb 48,12,1" not in cfg_text
+    assert "BLSTM_Cell_Type" not in cfg_text and "BLSTM_Direction" not in cfg_text
+    assert "BLSTM_OutputNeuronNb 24,1\n" in cfg_text and "BLSTM_window 5.0\n" in cfg_text
     meta = json.loads(res.metadata_path.read_text())
     assert meta["cell"] == "mamba" and meta["direction"] == "forward"
 

@@ -34,6 +34,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
+from speech.config_bridge import CellType, Direction
+
 SCHEMA_VERSION = 2
 REPO = Path(__file__).resolve().parents[4]
 LEDGER_DIR = REPO / "ledger"
@@ -80,8 +82,8 @@ class BaselineRecipe(_Strict):
 
     arm: Arm
     lineage: Lineage | None
-    cell: str
-    direction: str
+    cell: CellType
+    direction: Direction
     subset: int | None
     valid_size: int
     test_size: int
