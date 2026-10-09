@@ -25,7 +25,8 @@
 //! IDENTICAL, boundary max_dt EXACTLY 0.0 (the design predicts exact agreement, R1 STOP on
 //! nonzero), the posterior histories BIT-IDENTICAL. Plus chunking bit-invariance (20/100/
 //! 1000/7 ms), prefix consistency (incl. a near-reach StreamDecision profile), the four
-//! validation bails, and the DERIVED latency pins.
+//! validation bails, and the DERIVED latency pins. Issue #24 added the windowed arm's
+//! `InputNormalizationType 0` equivalence leg, which widened that arm's accepted set.
 
 mod common;
 
@@ -285,6 +286,62 @@ fn stream_finish_equals_offline_calibrated() {
         run.seg.segments().len() > 2,
         "calibrated tail must produce a REAL boundary set (got {} rows -- the seed)",
         run.seg.segments().len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (a'') OFFLINE EQUIVALENCE -- the WINDOWED arm under InputNormalizationType 0 (issue #24).
+// ---------------------------------------------------------------------------
+
+/// The leg that widened the windowed arm's normalization set from phase 8's `{1}` to
+/// `{0, 1}` (`fast::plan::accepted_norm_types`): the SAME staged tier2 config and audio,
+/// `BLSTM_InputNormalizationType 0` -- no feature normalization at all, the exact path's
+/// `_ => {}` arm -- streamed through the windowed BLSTM vs the offline fast bag run.
+/// Type 0 differs from type 1 in exactly one bit of session state (`apply_norm`), so the
+/// equivalence is expected to hold as it does for type 1; it is MEASURED here rather than
+/// assumed, because "untested" was the one recorded reason the arm kept `{1}`. Had it
+/// failed, the arm would have kept `{1}` with the failure as the recorded reason.
+#[test]
+fn stream_finish_equals_offline_type0() {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = common::stage_frozen_tier2(dir.path());
+    let text = format!(
+        "{}\nBLSTM_InputNormalizationType 0\n",
+        std::fs::read_to_string(&stage.config_path).unwrap()
+    );
+    let (rate, samples) = mono_samples(&stage.wav_path);
+
+    let mut off_map = parse(&text);
+    assert_eq!(off_map["BLSTM_InputNormalizationType"].trim(), "0");
+    let (off_post, off_seg) =
+        run_offline_fast(&mut off_map, &stage.wav_path, Some(stage.fixed_gain));
+
+    let run = run_session(&text, rate, &samples, (0.1 * rate) as usize);
+
+    let max_dt = boundary_check(&run.seg, &off_seg, "type0");
+    let finite = off_post.iter().filter(|v| v.is_finite()).count();
+    println!(
+        "MEASURE gate_type0: seg_rows={} boundary_max_dt={max_dt:.3e} post_len={} finite={finite} emissions={}",
+        run.seg.segments().len(),
+        off_post.len(),
+        run.emission_count
+    );
+    assert_eq!(
+        max_dt, 0.0,
+        "type0: boundary max_dt must be EXACTLY 0.0 (R1 STOP on nonzero)"
+    );
+    assert_posteriors_bit_equal(&run.posteriors, &off_post, "type0 posterior history");
+    // Non-vacuity: the posteriors are real numbers that differ from the type-1 run's (the
+    // normalization is OFF, so the net sees raw features), not an all-NaN or empty history.
+    assert!(finite > 0, "type0: no finite posterior at all");
+    let mut t1_map = parse(&std::fs::read_to_string(&stage.config_path).unwrap());
+    let (t1_post, _) = run_offline_fast(&mut t1_map, &stage.wav_path, Some(stage.fixed_gain));
+    assert!(
+        off_post
+            .iter()
+            .zip(t1_post.iter())
+            .any(|(a, b)| a.is_finite() && b.is_finite() && a.to_bits() != b.to_bits()),
+        "type0: the posteriors must differ from the type-1 run's (the norm must be OFF)"
     );
 }
 
