@@ -1872,7 +1872,7 @@ impl StreamDecision {
 // ===========================================================================
 
 /// The session's NN stage, per the config's `Cell_Type` x `Direction` pair (spec S5.2).
-/// A CLOSED set with static dispatch, exactly like `fast::driver`'s `FastSadNet`: the
+/// A CLOSED set with static dispatch, exactly like `fast::driver`'s `FastNet`: the
 /// windowed-BLSTM arm is the phase-8 path, BEHAVIOUR-UNTOUCHED; the causal arm is Task 7.
 /// Both feed the SAME [`StreamDecision`], so `push`/`finish` keep one shape and the
 /// `speech stream` CLI + the PyO3 `StreamingSession` gain the causal mode with ZERO new

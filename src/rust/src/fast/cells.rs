@@ -4333,7 +4333,7 @@ mod tests {
     /// The bail it replaced lived at `element_count` rather than in
     /// `classify_fast_shape` precisely so this flip would be local: `element_count` is
     /// the single choke point both causal construction sites reach (`fast::driver`'s
-    /// `build_sad_net` and `fast::stream::StreamingSession::new` both call `from_flat`,
+    /// `build_net` and `fast::stream::StreamingSession::new` both call `from_flat`,
     /// which calls `element_count` first), so ONE arm swap admits the cell everywhere.
     /// What that arm still protects is unchanged and re-asserted here: the count must be
     /// the CfC's own, not another architecture's, or the pack is consumed head-first by

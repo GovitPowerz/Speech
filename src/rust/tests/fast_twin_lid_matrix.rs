@@ -1,5 +1,5 @@
 //! Issue #57: the fast Twin's LID net on the (cell x direction) matrix -- the f32
-//! `fast::driver::FastTwinLid` (now dispatching its LID net through `FastLidNet`) vs the
+//! `fast::driver::FastTwinLid` (now dispatching its LID net through `FastNet`) vs the
 //! exact f64 `TwinBlstmSpectralLid`, over the committed phase-9 Mode-7 LID fixtures
 //! (`tests/reference_data/phase9/twin_mode7_lid_*`: a tiny `12,6` LID net per cell in both
 //! directions, the SAD net frozen on the legacy LSTM) and the committed phSeq corpus
@@ -401,7 +401,7 @@ fn lid_parity_exact_vs_fast_per_pair() {
 
 /// D2 admits the PLAIN regime on the bidirectional shapes too (bailed before #57), but every
 /// committed bidirectional fixture resolves to truncate (`window 0.25`): this is the only leg
-/// that runs `FastLidNet::feed_forward_scoring`'s plain branch through a `BiCell` (the `Blstm`
+/// that runs `FastNet::feed_forward_scoring`'s plain branch through a `BiCell` (the `Blstm`
 /// arm's is `phase7_parity_lid::lid_parity_phseq_plain_regime_exact_vs_fast`). MEASURED
 /// 2026-10-09 (M4 Pro) at the ladder's rung (gain 1 / offset +0.5; offset 0 leaves 5 of 7
 /// utterances an exact 0.5 tie): max_err_abs 2.081e-6 on all four, min(margin/delta)

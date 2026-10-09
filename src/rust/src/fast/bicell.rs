@@ -64,7 +64,7 @@
 //! trainer), no MLP mode, and the two windowing regimes the exact tree's algo-3 SAD
 //! driver actually dispatches -- PLAIN (`window_size == 0`) and OVERLAP. The TRUNCATE
 //! (non-overlap) variant typed-bails in the algo-3 SAD driver, exactly as it does for
-//! `FastBlstm`; since issue #57 the Mode-7 LID Twin (`super::driver::FastLidNet`) runs it,
+//! `FastBlstm`; since issue #57 the Mode-7 LID Twin (`super::driver::FastNet`) runs it,
 //! one [`FastBiCell::feed_forward`] per window. f32 numeric divergence from the exact f64 tree is BY DESIGN (spec S4/S5),
 //! documented here + in `RESULTS.md`, NEVER `IMPROVEMENTS.md`.
 

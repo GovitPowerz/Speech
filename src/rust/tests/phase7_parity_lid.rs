@@ -245,7 +245,7 @@ fn lid_parity_phseq_exact_vs_fast() {
 
 /// Issue #57 D2 admits the PLAIN regime (`BLSTM_LID_window 0`) on the bidirectional shapes,
 /// bailed before #57; the committed `twin_mode7` resolves to truncate, so this is the only leg
-/// through `FastLidNet::feed_forward_scoring`'s plain branch on the `Blstm` arm.
+/// through `FastNet::feed_forward_scoring`'s plain branch on the `Blstm` arm.
 #[test]
 fn lid_parity_phseq_plain_regime_exact_vs_fast() {
     // MEASURED 2026-10-09 (M4 Pro): score max_abs=5.958e-7, min(margin/delta) 7.5e4 over the
