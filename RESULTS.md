@@ -3210,16 +3210,24 @@ Issue #54 relabelled the bench peak RSS as MiB everywhere a reader sees it; noth
 the divisor behind the label. The only checks on the value were the sanity ranges in
 `tests/phase7_bench.rs` (`1.0 < maxrss_mb < 4096.0`), which a decimal divisor (`/ 1e6` on
 macOS, `/ 1e3` on Linux) passes while moving every new record off the 24 committed ones
-(+4.9% on macOS, +2.4% on Linux, neither MiB nor MB). Option 1 of the issue: the conversion
-is hoisted into the pure `bench.rs::ru_maxrss_to_mib(raw)` (same `cfg` split, `maxrss_mb()`
-is now `getrusage` plus one call) and unit-tested inline: one platform unit per MiB maps to
-exactly `1.0` (exact in f64 on both arms, `x / x`). The pin is arithmetic only; the unit the
-OS reports in (bytes on macOS, KiB on Linux) stays a documented assumption.
+(+4.9% on macOS, where the value becomes decimal MB; +2.4% on Linux, where it is neither MiB
+nor MB). Option 1 of the issue: the conversion is hoisted into the pure, host-independent
+`bench.rs::ru_maxrss_to_mib(raw, unit_bytes)` (`raw * unit_bytes / 1024^2`; `maxrss_mb()` is
+now `getrusage` plus one call with the `cfg`-selected `RU_MAXRSS_UNIT_BYTES`, `1.0` on macOS,
+`1024.0` on Linux; bit-identical to the former per-platform divisions, every factor a power of
+two). The inline test drives BOTH platform arms on every host: all 24 committed records are
+macOS, and CI runs Linux only, so a test that pinned only the host's own arm would leave the
+records' arm unpinned in CI. One MiB maps to exactly `1.0` and one and a half to `1.5` per arm;
+a last line pins the host's unit constant. The pin is arithmetic plus the constant; that the OS
+reports in that unit (bytes on macOS, KiB on Linux) stays a documented assumption.
 
 Apply -> run ONLY the named catcher -> revert -> re-run green -> tree byte-clean. Run on
-macOS, so the verdict is the `/ 1e6` arm's; the Linux arm (`left: 1.024`) is exercised by
-the CI runner, not by this battery run.
+macOS. Items 1 and 2 sit in the host-independent arithmetic, so their failure does not depend
+on the host. Item 3's Linux twin (the constant set to a decimal `1000.0`) is
+compiled out on macOS and was not applied; its leg runs green on the Linux CI.
 
 | # | mutation | named catcher | verdict (verbatim failure) |
 |---|---|---|---|
-| 1 | decimal divisor in `ru_maxrss_to_mib` (`raw / 1e6` resp. `raw / 1e3`) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT (macOS arm): `left: 1.048576`, `right: 1.0` |
+| 1 | decimal divisor in `ru_maxrss_to_mib` (`raw * unit_bytes / 1e6`) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT: `left: 1.048576`, `right: 1.0` |
+| 2 | truncation in `ru_maxrss_to_mib` (`.floor()` on the quotient) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT: `left: 1.0`, `right: 1.5` |
+| 3 | swapped arms (macOS `RU_MAXRSS_UNIT_BYTES = 1024.0`) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT: `left: 1024.0`, `right: 1.0` |
