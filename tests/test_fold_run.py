@@ -2,7 +2,8 @@
 
 What the engine receives is pinned here without the engine: a fake `speech_rs` whose
 `Engine.from_map` records the map and whose `set_weights` records the packs. The real-engine
-half (from_map vs path identity, the F11 rule behaviourally, the fast guard on a real fold)
+half (from_map vs path identity, the F11 rule behaviourally, the fast tree's injection and
+refusals on a real fold)
 is `tests/pyo3/test_fold_run.py`.
 """
 
@@ -17,7 +18,6 @@ from typing import Any
 import numpy as np
 import pytest
 from speech.fold_run import FoldResult, FoldRun, _config_text
-from speech.weight_bridge import read_weight_vector
 
 from tests._result_rows import channel_results_from_matrix
 
@@ -45,9 +45,6 @@ def _fake_seam(monkeypatch: pytest.MonkeyPatch, rows: list[list[float]] | None =
         def from_map(configs: list[dict[str, str]], mode: str) -> Engine:
             seen["maps"].append(dict(configs[0]))
             seen["mode"] = mode
-            # Like a fast processor, read the weight packs AT CONSTRUCTION (T6b).
-            present = [k for k in ("BLSTM_weightsFile", "BLSTM_LID_weightsFile") if k in configs[0] and Path(configs[0][k]).is_file()]
-            seen["loaded"] = {k: read_weight_vector(Path(configs[0][k])) for k in present}
             return Engine()
 
         def set_weights(self, pos: int, nets: list[Any]) -> None:
@@ -179,8 +176,9 @@ def test_fold_run_leaves_an_empty_path_value_empty(tmp_path: Path, monkeypatch: 
 
 
 def test_fold_run_rejects_a_pack_count_that_does_not_match_the_nets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A `[sad]`-only list on the Twin would, on fast, repoint only the SAD key and score the
-    config's own LID pack in silence (the #29 failure mode); it is refused before any engine."""
+    """A `[sad]`-only list on the Twin would index past the packs in the bag (and before #62
+    scored the config's own LID pack on fast in silence, the #29 failure mode); it is refused
+    before any engine, on both trees."""
     seen = _fake_seam(monkeypatch)
     for fast in (False, True):
         base = _base(6)
@@ -190,7 +188,7 @@ def test_fold_run_rejects_a_pack_count_that_does_not_match_the_nets(tmp_path: Pa
             FoldRun(base, tmp_path, backprop=False).run([np.array([1.0, 2.0, 3.0])])
     with pytest.raises(ValueError, match="2 weight pack"):
         FoldRun(_base(3), tmp_path, backprop=False).run([np.array([1.0]), np.array([2.0])])
-    assert seen["maps"] == [] and not list(tmp_path.glob("_fold_*"))
+    assert seen["maps"] == []
 
 
 def test_fold_run_makes_a_relative_workdir_absolute(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,7 +211,7 @@ def test_fold_run_writes_no_config_file(tmp_path: Path, monkeypatch: pytest.Monk
     assert set(tmp_path.iterdir()) == before
 
 
-# ---- weights: set_weights on exact, a workdir pack on fast ------------------------------
+# ---- weights: set_weights on both trees -------------------------------------------------
 
 
 def test_fold_run_exact_injects_through_set_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -238,26 +236,23 @@ def test_fold_run_reuses_one_engine_across_runs(tmp_path: Path, monkeypatch: pyt
     assert seen["ran"] == 3
 
 
-def test_fold_run_fast_guard_writes_a_pack_and_repoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """On `Inference_Path fast` the processor loads weights only at construction and
-    `set_weights` bails (T6b): the arrays are written as `.bin` packs under the workdir, the
-    weight keys repointed on a fresh engine, and the packs removed once it holds them;
-    `set_weights` is never called."""
+def test_fold_run_fast_injects_through_set_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`Inference_Path fast` takes the exact tree's route since issue #62: one engine, built on
+    the config's own packs, and every run's packs through `set_weights` (a fast processor
+    rebuilds its net from them); nothing is written to the workdir."""
     seen = _fake_seam(monkeypatch)
     base = _base(6)
     base["Inference_Path"] = "fast"
     fold = FoldRun(base, tmp_path, backprop=False)
     sad, lid = np.array([0.5, -1.0, 2.0]), np.array([7.0])
     fold.run([sad, lid])
+    fold.run([sad * 2.0, lid])
 
-    assert seen["set_weights"] == []
     (handed,) = seen["maps"]
-    sad_path, lid_path = Path(handed["BLSTM_weightsFile"]), Path(handed["BLSTM_LID_weightsFile"])
-    assert sad_path.parent == tmp_path and lid_path.parent == tmp_path and sad_path != lid_path
-    assert np.array_equal(seen["loaded"]["BLSTM_weightsFile"], sad)
-    assert np.array_equal(seen["loaded"]["BLSTM_LID_weightsFile"], lid)
-    assert not sad_path.exists() and not lid_path.exists(), "the packs are gone once the engine holds them"
-    assert fold.config["BLSTM_weightsFile"] == "sad.bin", "the rendered map is not repointed"
+    assert handed["BLSTM_weightsFile"] == str(tmp_path / "sad.bin")
+    assert handed["BLSTM_LID_weightsFile"] == str(tmp_path / "lid.bin")
+    assert [[list(n) for n in call] for call in seen["set_weights"]] == [[list(sad), list(lid)], [list(sad * 2.0), list(lid)]]
+    assert not list(tmp_path.iterdir()), "nothing is written to the workdir"
 
 
 def test_fold_run_fast_without_weights_runs_the_config_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

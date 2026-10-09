@@ -285,11 +285,10 @@ def _base_cfg(arm: _CausalArm) -> dict[str, str]:
 
 def _inference_cfg(arm: _CausalArm, overlay: dict[str, str], *, fileslisting: str | None = None, dump_dir: Path | None = None) -> dict[str, str]:
     """The trained base config made inference-shaped and repointed at the trained pack, plus
-    `overlay`. THE WEIGHT KEY IS REPOINTED (not `set_weights`-injected): the fast drivers load
-    weights ONLY at construction and `BagOfProcessors::set_weights` BAILS LOUDLY on a fast
-    processor (T6b), so the config repoint is the fast path's only injection mechanism -- and
-    it is identical for both paths, which is what makes the fast-vs-exact comparison
-    apples-to-apples."""
+    `overlay`. THE WEIGHT KEY IS REPOINTED: the streaming session reads its weights from the
+    config file only, and the repoint is identical for both offline paths, which is what makes
+    the fast-vs-exact comparison apples-to-apples. (Offline, `set_weights` also reaches a fast
+    processor since issue #62; until then it bailed, T6b.)"""
     cfg = _base_cfg(arm)
     cfg["BLSTM_weightsFile"] = str((arm.ckpt / "best_sad.bin").resolve())
     cfg["BLSTM_BackPropagationActivated"] = "false"
@@ -632,8 +631,8 @@ def _score_causal(arm: _CausalArm, inference_path: str) -> tuple[B.DcfReport, Pa
     `_score_sad_pack_on_test` writes its VRCTS hyps into (a write TARGET, read by nothing in the
     compute path, and necessarily distinct or the two runs would clobber each other's output), so
     the comparison isolates the f32 causal kernels.
-    `_score_sad_pack_on_test` `set_weights`-injects on exact (redundant: the config
-    repoint already did it) and SKIPS on fast (T6b)."""
+    `_score_sad_pack_on_test` `set_weights`-injects the same pack on both paths (redundant:
+    the config repoint already did it; on fast since issue #62)."""
     cfg = _inference_cfg(arm, {"Inference_Path": inference_path})
     dump_dir = arm.out_dir / f"_t9_par_{inference_path}"
     if dump_dir.exists():

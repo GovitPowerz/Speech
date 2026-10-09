@@ -72,7 +72,8 @@ use crate::config::NnetSpec;
 use crate::constants::random_gauss;
 use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::blstm::{
-    BlstmConfig, CellType, CfcParams, Direction, MambaParams, TransformerParams,
+    BlstmConfig, BlstmNetwork, CellType, CfcParams, Direction, MambaParams, TransformerParams,
+    check_pack_len, file_pack_head,
 };
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
@@ -124,9 +125,9 @@ pub enum FastNetShape {
 /// head-first and RUN, producing one architecture's numbers under another's name, with no
 /// tolerance to widen and no gate to catch it. Each shape's `element_count`
 /// ([`FastBlstm::from_flat`], [`FastCausalNet::element_count`],
-/// [`FastBiCell::element_count`]) closes it for a SHORTER pack only; an over-long one is
-/// consumed head-first unless the caller demands the exact length (the Twin's in-memory
-/// LID seam does, [`FastTwinLid::from_legacy`]).
+/// [`FastBiCell::element_count`]) closes it for a SHORTER pack only; the drivers close the
+/// rest, checking every pack against the exact tree's count ([`exact_pack_len`]) before a
+/// `from_flat` sees it (issue #62).
 ///
 /// A refusal survives exactly where a shape genuinely cannot run, NOT here:
 /// `fast::stream::StreamingSession::new` refuses [`FastNetShape::BiCell`] (the FRAME
@@ -157,7 +158,9 @@ pub(crate) fn classify_fast_shape(bc: &BlstmConfig) -> FastNetShape {
 /// twin on BOTH of the Twin's prefixes). The Twin's LID net now classifies through
 /// [`classify_fast_shape`] like the SAD driver ([`FastLidNet`]), and its SAD net is never
 /// run in Mode 7 (only its sub-sampling ratios are read, which every cell carries), so no
-/// shape gate is left to apply here. One parse + one alignment, nothing else.
+/// shape gate is left to apply here. One parse + one alignment, nothing else. Since
+/// issue #62 its callers are the tests: the Twin parses its SAD `BlstmConfig` itself, for
+/// the pack count too, and calls [`build_spec_aligned_to`].
 ///
 /// The fast net reads a `NnetSpec`; the exact net reads a `BlstmConfig`. A peephole
 /// mismatch between the two is a divergence with no tolerance floor, so the spec's
@@ -252,6 +255,18 @@ impl FastSadNet {
             FastSadNet::BiCell(n) => n.normalize_std(),
         }
     }
+}
+
+/// The pack length the EXACT tree demands for `bc`'s net, `BlstmNetwork::nb_of_weights`
+/// on the same config: the one count every fast pack is checked against, so the two
+/// trees refuse the same in-memory packs by construction and cut a weight file at the same
+/// length (issue #62). One file stays outside it: the Twin's `BLSTM_weightsFile`, which
+/// the fast Twin never reads (Mode 7 never runs the SAD net). Not the shapes' own
+/// `element_count`s: they size what `from_flat` reads, so they are the exact count only
+/// while their arithmetic tracks the exact tree's (#61 was such a drift), and none has an
+/// MLP arm for the Twin's never-run SAD net.
+pub(crate) fn exact_pack_len(bc: &BlstmConfig) -> Result<usize> {
+    Ok(BlstmNetwork::from_config(bc.clone())?.nb_of_weights())
 }
 
 /// Build the algo-3 SAD net for a classified [`FastNetShape`] from the flat f64 pack.
@@ -351,6 +366,8 @@ pub struct FastSpectralSegmenter {
     /// even though only `d_ff` moves the pack LENGTH.
     transformer: TransformerParams,
     net: Option<FastSadNet>,
+    /// [`exact_pack_len`] for this config's net: what every pack is checked against.
+    pack_len: usize,
 
     /// Sub-sampling factors + whole-BLSTM ratio, cached from the spec for
     /// [`get_blstm_param`] (which needs them without a live net borrow).
@@ -388,9 +405,10 @@ impl FastSpectralSegmenter {
     /// Build from a legacy config map + optional f64 weight pack, mirroring
     /// [`crate::tasks::sad::BlstmSpectralSegmenter::from_legacy`]'s config surface.
     /// `weights: Some(flat)` builds the net SELECTED BY [`classify_fast_shape`]
-    /// immediately -- [`FastBlstm`] or [`FastCausalNet`], both narrowing f64 -> f32
-    /// once, after adim (new cells carry no adim by construction, spec S1.3); `None`
-    /// defers to [`Self::load_weights_file`] (the bag's two-step
+    /// immediately through [`Self::set_weights`] (EXACT-LENGTH, as the exact ctor's
+    /// in-memory arm is) -- [`FastBlstm`], [`FastCausalNet`] or [`FastBiCell`], each
+    /// narrowing f64 -> f32 once, after adim (new cells carry no adim by construction,
+    /// spec S1.3); `None` defers to [`Self::load_weights_file`] (the bag's two-step
     /// `from_legacy(map, None)` + `load_weights_file` pattern).
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast-mode surfaces: the
@@ -448,24 +466,13 @@ impl FastSpectralSegmenter {
         let output_sub_sampling = spec.output_subsampling.clone();
         let ssr = lstm_sub_sampling.iter().product::<usize>()
             * output_sub_sampling.iter().product::<usize>();
-
-        let net = match weights {
-            Some(flat) => Some(build_sad_net(
-                &spec,
-                shape,
-                &bc.mamba,
-                &bc.cfc,
-                &bc.transformer,
-                flat,
-            )?),
-            None => None,
-        };
+        let pack_len = exact_pack_len(&bc)?;
 
         let spectrum_shift_sec = feature_cfg.shift_sec;
         let window_shift_sec = driver_cfg.window_shift_sec;
         let ltsv_shift_sec = feature_cfg.ltsv_shift;
 
-        Ok(FastSpectralSegmenter {
+        let mut seg = FastSpectralSegmenter {
             driver_cfg,
             seg_cfg,
             feature_cfg,
@@ -474,7 +481,8 @@ impl FastSpectralSegmenter {
             mamba: bc.mamba,
             cfc: bc.cfc,
             transformer: bc.transformer,
-            net,
+            net: None,
+            pack_len,
             lstm_sub_sampling,
             output_sub_sampling,
             ssr,
@@ -487,16 +495,37 @@ impl FastSpectralSegmenter {
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
-        })
+        };
+        if let Some(flat) = weights {
+            seg.set_weights(flat)?;
+        }
+        Ok(seg)
+    }
+
+    /// An in-memory pack (`from_legacy`'s `Some(flat)`, `BagOfProcessors::set_weights`):
+    /// EXACT-LENGTH against [`exact_pack_len`], in the exact `set_weights`' words
+    /// ([`check_pack_len`]), then the net is rebuilt through the SAME [`build_sad_net`]
+    /// every load uses, so no load can pick a different arm than [`Self::from_legacy`]
+    /// classified. A refused pack leaves the current net in place.
+    pub fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
+        check_pack_len(flat.len(), self.pack_len)?;
+        self.net = Some(build_sad_net(
+            &self.spec,
+            self.shape,
+            &self.mamba,
+            &self.cfc,
+            &self.transformer,
+            flat,
+        )?);
+        Ok(())
     }
 
     /// `<prefix>_weightsFile` load (mirrors [`crate::nn::blstm::BlstmNetwork::
     /// load_weights_file`]): an EMPTY key leaves the net unloaded (a subsequent
-    /// `get_segmentation` errors); otherwise read the `.bin` and (re)build the net
-    /// from it -- through the SAME [`build_sad_net`] the ctor uses, so the deferred
-    /// load cannot pick a different arm than [`Self::from_legacy`] classified. Both
-    /// `FastBlstm::from_flat` and `FastCausalNet::from_flat` enforce the length check
-    /// (`< element_count` -> `Err`).
+    /// `get_segmentation` errors); otherwise read the `.bin` and hand its head to
+    /// [`Self::set_weights`] -- the legacy FILE-LOAD tolerance, explicit
+    /// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and loads
+    /// its head).
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         let weights_file = map
             .get("BLSTM_weightsFile")
@@ -506,15 +535,7 @@ impl FastSpectralSegmenter {
             return Ok(());
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.net = Some(build_sad_net(
-            &self.spec,
-            self.shape,
-            &self.mamba,
-            &self.cfc,
-            &self.transformer,
-            &flat,
-        )?);
-        Ok(())
+        self.set_weights(file_pack_head(&flat, self.pack_len, weights_file)?)
     }
 
     /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
@@ -1034,33 +1055,13 @@ impl FastLidNet {
     }
 }
 
-/// The flat element count the Twin's LID net needs for a classified [`FastNetShape`]:
-/// the same count each shape's `from_flat` sizes against.
-fn lid_element_count(
-    spec: &NnetSpec,
-    shape: FastNetShape,
-    mamba: &MambaParams,
-    cfc: &CfcParams,
-    transformer: &TransformerParams,
-) -> Result<usize> {
-    Ok(match shape {
-        FastNetShape::Blstm => crate::config::element_count(spec),
-        FastNetShape::Causal(cell) => {
-            FastCausalNet::element_count(spec, cell, mamba, cfc, transformer)?
-        }
-        FastNetShape::BiCell(cell) => {
-            FastBiCell::element_count(spec, cell, mamba, cfc, transformer)?
-        }
-    })
-}
-
 /// Build the Twin's LID net for a classified [`FastNetShape`] from the flat f64 pack.
 /// ONE place, so `from_legacy(map, _, Some(flat))` and the deferred `load_weights_file`
 /// cannot pick different arms (the [`build_sad_net`] rule). Each shape's `from_flat`
-/// refuses a SHORT pack only and consumes an over-long one head-first; the over-long
-/// refusal is the caller's, per seam (the phase-11 split): `from_legacy`'s in-memory arm
-/// demands the exact length, as the exact Twin's `set_weights` does, and
-/// `load_weights_file` keeps the legacy file-load tolerance with its warning.
+/// refuses a SHORT pack only and consumes an over-long one head-first; the length
+/// contract is the caller's, per seam (the phase-11 split): every in-memory pack is
+/// exact-length, as the exact Twin's `set_weights` is, and `load_weights_file` keeps the
+/// legacy file-load tolerance with its warning ([`FastTwinLid::set_weights`]).
 fn build_lid_net(
     spec: &NnetSpec,
     shape: FastNetShape,
@@ -1159,10 +1160,12 @@ pub struct FastTwinLid {
 
     /// SAD-net sub-sampling, cached from its spec for [`get_blstm_param`]'s SAD
     /// result-vec sizing / timeStep. The SAD net is never run, so only its shape is
-    /// needed (no weights, no `FastBlstm`).
+    /// needed (no weights, no `FastBlstm`) -- and its pack length, which an in-memory SAD
+    /// pack is still checked against, as the exact Twin's `set_weights` does (issue #62).
     sad_lstm_sub: Vec<usize>,
     sad_out_sub: Vec<usize>,
     sad_ssr: usize,
+    sad_pack_len: usize,
 
     /// The LID net (the only net actually run) + its spec (for the deferred
     /// `load_weights_file` rebuild). `lid_ssr`/`class_nb`/`lid_two_sweeps` are cached
@@ -1176,6 +1179,8 @@ pub struct FastTwinLid {
     lid_cfc: CfcParams,
     lid_transformer: TransformerParams,
     lid_net: Option<FastLidNet>,
+    /// [`exact_pack_len`] for the LID net: what every LID pack is checked against.
+    lid_pack_len: usize,
     lid_ssr: usize,
     class_nb: usize,
     lid_two_sweeps: bool,
@@ -1210,11 +1215,12 @@ pub struct FastTwinLid {
 
 impl FastTwinLid {
     /// Build from a legacy config map + optional SAD/LID weight packs, mirroring
-    /// [`crate::tasks::lid::TwinBlstmSpectralLid::from_legacy`]'s surface. `sad_weights`
-    /// is accepted for signature symmetry but UNUSED (the SAD net is never run in Mode
-    /// 7). `lid_weights: Some(flat)` builds the LID net ([`FastLidNet`], the shape
-    /// [`classify_fast_shape`] selects on the `BLSTM_LID` prefix) immediately; `None`
-    /// defers to [`Self::load_weights_file`].
+    /// [`crate::tasks::lid::TwinBlstmSpectralLid::from_legacy`]'s surface. `sad_weights:
+    /// Some(flat)` is checked against the SAD net's length and then discarded (the SAD net
+    /// is never run in Mode 7). `lid_weights: Some(flat)` builds the LID net
+    /// ([`FastLidNet`], the shape [`classify_fast_shape`] selects on the `BLSTM_LID`
+    /// prefix) immediately; `None` defers to [`Self::load_weights_file`]. Both packs are
+    /// EXACT-LENGTH, as the exact Twin's in-memory arms are ([`Self::set_weights`]).
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast surfaces: any mode but
     /// 7, the pitch second pass (`TDCwindow > 0`), a LID `InputNormalizationType != 0`,
@@ -1223,7 +1229,7 @@ impl FastTwinLid {
     /// (issue #57).
     pub fn from_legacy(
         map: &IndexMap<String, String>,
-        _sad_weights: Option<&[f64]>,
+        sad_weights: Option<&[f64]>,
         lid_weights: Option<&[f64]>,
     ) -> Result<FastTwinLid> {
         let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
@@ -1256,11 +1262,13 @@ impl FastTwinLid {
         // SAD net shape only (never run in Mode 7): its sub-sampling ratios size the SAD
         // result vector, and every cell carries those. Peephole-aligned spec, but no net
         // and no shape gate (issue #57 removed the BLSTM-only one).
-        let sad_spec = build_aligned_spec(map, "BLSTM")?;
+        let sad_bc = BlstmConfig::from_legacy(map, "BLSTM")?;
+        let sad_spec = build_spec_aligned_to(map, "BLSTM", &sad_bc)?;
         let sad_lstm_sub = sad_spec.lstm_subsampling.clone();
         let sad_out_sub = sad_spec.output_subsampling.clone();
         let sad_ssr =
             sad_lstm_sub.iter().product::<usize>() * sad_out_sub.iter().product::<usize>();
+        let sad_pack_len = exact_pack_len(&sad_bc)?;
 
         // LID net (the one that runs). Only InputNormalizationType 0 (the gate value) is
         // supported: the fast scoring applies no normalization.
@@ -1323,36 +1331,7 @@ impl FastTwinLid {
             * lid_spec.output_subsampling.iter().product::<usize>();
         // class_nb = LID output_size max 2 (the langID / confusion dimensionality).
         let class_nb = (*lid_spec.output_neuron_nb.last().unwrap()).max(2);
-
-        let lid_net = match lid_weights {
-            // EXACT-LENGTH, as the exact Twin's `set_weights` is since the phase-11
-            // interstitial: an over-long in-memory pack is another architecture's, not a
-            // file to tolerate. The short side stays `from_flat`'s "too short".
-            Some(flat) => {
-                let needed = lid_element_count(
-                    &lid_spec,
-                    lid_shape,
-                    &lid_bc.mamba,
-                    &lid_bc.cfc,
-                    &lid_bc.transformer,
-                )?;
-                if flat.len() > needed {
-                    bail!(
-                        "The number of gains given is more than what's needed ({} > {needed}).",
-                        flat.len()
-                    );
-                }
-                Some(build_lid_net(
-                    &lid_spec,
-                    lid_shape,
-                    &lid_bc.mamba,
-                    &lid_bc.cfc,
-                    &lid_bc.transformer,
-                    flat,
-                )?)
-            }
-            None => None,
-        };
+        let lid_pack_len = exact_pack_len(&lid_bc)?;
 
         let mut lid_window_size_sec = get_f64(map, "BLSTM_LID_window")?;
         if lid_window_size_sec < 0.0 {
@@ -1370,19 +1349,21 @@ impl FastTwinLid {
         let window_shift_sec = driver_cfg.window_shift_sec;
         let ltsv_shift_sec = feature_cfg.ltsv_shift;
 
-        Ok(FastTwinLid {
+        let mut twin = FastTwinLid {
             driver_cfg,
             seg_cfg,
             feature_cfg,
             sad_lstm_sub,
             sad_out_sub,
             sad_ssr,
+            sad_pack_len,
             lid_spec,
             lid_shape,
             lid_mamba: lid_bc.mamba,
             lid_cfc: lid_bc.cfc,
             lid_transformer: lid_bc.transformer,
-            lid_net,
+            lid_net: None,
+            lid_pack_len,
             lid_ssr,
             class_nb,
             lid_two_sweeps,
@@ -1406,14 +1387,46 @@ impl FastTwinLid {
             lid_classification_errors: Vec::new(),
             lid_segments_confusion: Vec::new(),
             is_lid_correct: Vec::new(),
-        })
+        };
+        if let Some(sad) = sad_weights {
+            check_pack_len(sad.len(), twin.sad_pack_len)?;
+        }
+        if let Some(lid) = lid_weights {
+            twin.set_lid_weights(lid)?;
+        }
+        Ok(twin)
+    }
+
+    /// The in-memory pair (`BagOfProcessors::set_weights`, `[sad, lid]`): both EXACT-LENGTH
+    /// in the exact `set_weights`' words ([`check_pack_len`]), SAD first as the exact bag
+    /// sets it first, and both checked before the LID net is replaced, so a refused pair
+    /// leaves the processor as it was. The SAD pack is then discarded: Mode 7 never runs
+    /// the SAD net.
+    pub fn set_weights(&mut self, sad: &[f64], lid: &[f64]) -> Result<()> {
+        check_pack_len(sad.len(), self.sad_pack_len)?;
+        self.set_lid_weights(lid)
+    }
+
+    /// One LID pack, EXACT-LENGTH, rebuilt through the SAME [`build_lid_net`] every load
+    /// uses, so no load can pick a different arm than `from_legacy` classified.
+    fn set_lid_weights(&mut self, lid: &[f64]) -> Result<()> {
+        check_pack_len(lid.len(), self.lid_pack_len)?;
+        self.lid_net = Some(build_lid_net(
+            &self.lid_spec,
+            self.lid_shape,
+            &self.lid_mamba,
+            &self.lid_cfc,
+            &self.lid_transformer,
+            lid,
+        )?);
+        Ok(())
     }
 
     /// `BLSTM_LID_weightsFile` load (mirrors the exact Twin's LID-net load): an EMPTY key
     /// leaves the net unloaded (a subsequent `get_segmentation` errors); otherwise read
-    /// the `.bin` and (re)build the LID net through the SAME [`build_lid_net`] the ctor
-    /// uses, so the deferred load cannot pick a different arm than `from_legacy`
-    /// classified.
+    /// the `.bin` and load its head -- the legacy FILE-LOAD tolerance, explicit
+    /// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and loads
+    /// its head).
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         let weights_file = map
             .get("BLSTM_LID_weightsFile")
@@ -1423,32 +1436,7 @@ impl FastTwinLid {
             return Ok(());
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        // The legacy file-load tolerance (`BLSTMNeuralNetwork.cpp:144-146`) with the warning
-        // the exact `BlstmNetwork::load_weights_file` prints; `from_flat` consumes the head.
-        let needed = lid_element_count(
-            &self.lid_spec,
-            self.lid_shape,
-            &self.lid_mamba,
-            &self.lid_cfc,
-            &self.lid_transformer,
-        )?;
-        if flat.len() > needed {
-            eprintln!(
-                "Warning: The number of gains given in {weights_file} is more than what's needed \
-                 ({} > {needed}); the extra {} are ignored.",
-                flat.len(),
-                flat.len() - needed
-            );
-        }
-        self.lid_net = Some(build_lid_net(
-            &self.lid_spec,
-            self.lid_shape,
-            &self.lid_mamba,
-            &self.lid_cfc,
-            &self.lid_transformer,
-            &flat,
-        )?);
-        Ok(())
+        self.set_lid_weights(file_pack_head(&flat, self.lid_pack_len, weights_file)?)
     }
 
     /// The LID net shape the config selected (the `BLSTM_LID` prefix through

@@ -103,7 +103,7 @@ def evaluate(state: RunState, packs: Sequence[Path], scores_dir: Path | None = N
     non-algo-6 checkpoint."""
     workdir = Path(state.config_path).parent
     # The packs are read first, against the caller's cwd, so a missing one raises before the
-    # engine (or anything on disk) exists. The fold run owns the fast-path injection.
+    # engine (or anything on disk) exists. The fold run injects them on either tree.
     nets = [read_weight_vector(p) for p in packs]
     fold = FoldRun(state.base_config, workdir, backprop=False)
 

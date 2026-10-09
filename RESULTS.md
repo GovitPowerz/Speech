@@ -623,7 +623,10 @@ NOT a real parity failure). **T6b (commit `2081212`, same branch) hardened this 
 weight-injection mechanism), but the two Python callers that used to rely on the silent no-op
 (`evaluate()`, `_score_sad_pack_on_test`) now SKIP their own redundant `set_weights` call under
 `Inference_Path fast` instead of hitting the new bail. See `.superpowers/sdd/task-6-report.md`'s
-"T6b" section for the full mechanism + the sibling-method audit.
+"T6b" section for the full mechanism + the sibling-method audit. (2026-10-09, issue #62: the bail
+is gone. The fast drivers take `set_weights` under the exact tree's exact-length contract, in the
+same words, and the fold run injects through it on both paths; the config repoint above stays
+valid and is now redundant with it.)
 
 Runtime: warm-cache (checkpoints present) scoring is seconds -- exact 1.7-5.0 s, fast 0.6-1.4 s per
 arm (the fast path is consistently ~2.5-3.5x faster to score, the RTF win these numbers exist to

@@ -991,7 +991,7 @@ fn validation_bails() {
     m.insert("BLSTM_Cell_Type".into(), "lstm".into());
     let msg = bail_msg(StreamingSession::new(&m, rate, 1));
     assert!(
-        msg.contains("too short"),
+        msg.contains("less than what's needed"),
         "an sLSTM-sized pack must not decode as an LSTM: {msg}"
     );
 

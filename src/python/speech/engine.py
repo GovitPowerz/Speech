@@ -15,7 +15,7 @@ Two layers:
   * The SEAM (`forward_backward`): ComputeGradient's contract over a `fold_run.FoldRun` --
     one gradient fold at the weights -> `f = NNCostSeg (+ NNCostLID)` (:110/:114) with the
     count-normalized (`+ L2` for the LID net) gradient. The engine mechanics (the config
-    overlay, the F11 rule, the fast guard, the path resolution) are the fold run's (issue #22).
+    overlay, the F11 rule, the path resolution, the injection) are the fold run's (issue #22).
 
 The results are read by NAME: `speech_rs.Engine.channel_results()` returns one array per
 field, wrapped here as `ChannelResults` (issue #23). The legacy `Error_vad` column indices

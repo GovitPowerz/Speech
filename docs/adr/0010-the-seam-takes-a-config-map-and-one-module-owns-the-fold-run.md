@@ -1,6 +1,6 @@
 # ADR-0010: The seam takes a config map, the process cwd is not part of the Python-side contract, and one module owns the fold run
 
-**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there)
+**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there); the fast guard retired 2026-10-09 (issue #62)
 
 ## Context
 
@@ -40,7 +40,13 @@ Three things, each owned once.
   LID on the Twin), the F11 rule unconditionally, the listing override, the path resolution,
   the fast guard (on `Inference_Path fast` the arrays are written as workdir packs and the weight
   keys repointed; `set_weights` is never called there), and the rendering (`config`,
-  `config_text` through the one `_config_text`, workdir-independent). `FoldResult` carries the
+  `config_text` through the one `_config_text`, workdir-independent).
+  **Amendment (2026-10-09, issue #62):** the fast guard is gone. It existed because a fast
+  processor had no settable weight surface (T6b made `set_weights` bail there), and the packs
+  it wrote entered through the drivers' FILE seam, which reads an over-long pack head-first:
+  a pack the exact tree refuses ran on fast. The fast drivers now take `set_weights` under the
+  exact tree's exact-length contract, in the same words, so `run(weights)` is `set_weights`
+  plus `run` on one engine on both trees and nothing is written to the workdir. `FoldResult` carries the
   channel results, the per-net derivatives (empty on a forward-only fold), the post-run weights,
   and over config 0 the costs `ComputeGradient.m` assembles (`nn_cost_seg`, `nn_cost_lid`,
   `nn_cost`). `engine.forward_backward` takes a `FoldRun`; the L2 term stays there. The

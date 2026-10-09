@@ -109,13 +109,13 @@ use indexmap::IndexMap;
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::legacy_config::get_f64_opt;
-use crate::nn::blstm::BlstmConfig;
+use crate::nn::blstm::{BlstmConfig, file_pack_head};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segment, Segmentation};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
 
 use super::cells::{FastCausalNet, FastCellState};
-use super::driver::{FastNetShape, build_spec_aligned_to, classify_fast_shape};
+use super::driver::{FastNetShape, build_spec_aligned_to, classify_fast_shape, exact_pack_len};
 use super::nn::{
     DenseRowChain, FastBlstm, FastMatrix, external_normalize_f32, window_begin, window_end,
 };
@@ -2127,7 +2127,10 @@ impl StreamingSession {
         if weights_file.is_empty() {
             bail!("streaming: BLSTM_weightsFile is empty (the frozen net must be loaded once)");
         }
-        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
+        // The FILE seam: the legacy head-first tolerance with its warning, a short file
+        // refused, both in the exact `load_weights_file`'s words (issue #62).
+        let pack = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
+        let flat = file_pack_head(&pack, exact_pack_len(&bc)?, weights_file)?;
         let causal_net = match shape {
             FastNetShape::Causal(cell) => Some(FastCausalNet::from_flat(
                 &spec,
@@ -2135,14 +2138,14 @@ impl StreamingSession {
                 &bc.mamba,
                 &bc.cfc,
                 &bc.transformer,
-                &flat,
+                flat,
             )?),
             FastNetShape::Blstm => None,
             // Unreachable: the bidirectional-cell shape bailed above.
             FastNetShape::BiCell(_) => unreachable!("bidirectional is unstreamable"),
         };
         let blstm_net = match shape {
-            FastNetShape::Blstm => Some(FastBlstm::from_flat(&spec, &flat)?),
+            FastNetShape::Blstm => Some(FastBlstm::from_flat(&spec, flat)?),
             FastNetShape::Causal(_) => None,
             FastNetShape::BiCell(_) => unreachable!("bidirectional is unstreamable"),
         };

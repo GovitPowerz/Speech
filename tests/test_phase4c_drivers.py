@@ -25,7 +25,7 @@ from speech.drivers.state import RunConfig, RunState
 from speech.drivers.test import evaluate, resolve_checkpoint_packs, write_scores
 from speech.genome import genome_length
 from speech.scoring import masking_validation
-from speech.weight_bridge import read_weight_vector, write_bin
+from speech.weight_bridge import write_bin
 
 from tests._result_rows import channel_results_from_matrix
 
@@ -200,9 +200,6 @@ def _fake_speech_rs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         @staticmethod
         def from_map(configs: list[dict[str, str]], mode: str) -> Engine:
             seen["config"] = dict(configs[0])
-            # Like a fast processor, read the weight packs AT CONSTRUCTION (T6b).
-            present = [k for k in ("BLSTM_weightsFile", "BLSTM_LID_weightsFile") if Path(configs[0][k]).is_file()]
-            seen["loaded"] = {k: list(read_weight_vector(Path(configs[0][k]))) for k in present}
             return Engine()
 
         def set_weights(self, conf: int, nets: list[list[float]]) -> None:
@@ -251,18 +248,17 @@ def test_evaluate_exact_injects_resolved_packs(tmp_path: Path, monkeypatch: pyte
     assert seen["config"]["fileslisting"] == str(tmp_path / "cfg" / "corpus_phseq" / "listing_train.csv")
 
 
-def test_evaluate_fast_injects_through_workdir_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fast path: `set_weights` bails there (T6b), so the checkpoint packs are injected by
-    writing them under the config dir and repointing the config's weight keys at them for
-    the engine's construction -- not ignored."""
+def test_evaluate_fast_injects_through_set_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fast path, the exact route since issue #62: the checkpoint packs go through
+    `set_weights` too (a fast processor rebuilds its net from them) -- not ignored, and no
+    pack is written beside the config."""
     seen = _fake_speech_rs(monkeypatch)
     state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
     state.base_config["Inference_Path"] = "fast"
+    before = set((tmp_path / "cfg").iterdir())
 
     evaluate(state, resolve_checkpoint_packs(ckpt, state.algo))
 
-    assert "weights" not in seen
-    sad, lid = Path(seen["config"]["BLSTM_weightsFile"]), Path(seen["config"]["BLSTM_LID_weightsFile"])
-    assert sad.parent == lid.parent == tmp_path / "cfg"
-    assert seen["loaded"] == {"BLSTM_weightsFile": [1.0, 2.0], "BLSTM_LID_weightsFile": [3.0]}
-    assert not sad.exists() and not lid.exists(), "the packs are removed once the engine holds them"
+    assert seen["weights"] == [[1.0, 2.0], [3.0]]
+    assert seen["config"]["Inference_Path"] == "fast"
+    assert set((tmp_path / "cfg").iterdir()) == before

@@ -606,7 +606,7 @@ fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
         .err()
         .unwrap_or_else(|| panic!("an sLSTM-sized pack must not decode as an LSTM"));
     assert!(
-        err.to_string().contains("too short"),
+        err.to_string().contains("less than what's needed"),
         "expected a pack-length bail, got: {err}"
     );
 

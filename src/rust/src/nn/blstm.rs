@@ -52,6 +52,10 @@
 //! - [`BlstmNetwork::load_weights_file`] keeps the legacy's documented tolerance,
 //!   applies it EXPLICITLY (it slices the head itself), and restores the `:145`
 //!   warning the original port elided.
+//!
+//! The two contracts are the free functions [`check_pack_len`] and [`file_pack_head`];
+//! the fast drivers call the same two (issue #62), so both trees refuse the same
+//! in-memory packs in the same words and cut a weight file at the same length.
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -625,6 +629,52 @@ impl BlstmConfig {
     }
 }
 
+/// The IN-MEMORY pack contract (interstitial, phase 11): a pack of `len` elements loads
+/// only if `len == needed`; any other length is an `Err` naming both numbers. The one
+/// copy of [`BlstmNetwork::set_weights`]' guard, shared with the fast drivers so the
+/// two trees refuse the same in-memory packs with the same words (issue #62).
+pub fn check_pack_len(len: usize, needed: usize) -> Result<()> {
+    if len != needed {
+        // The short arm's wording is the original one, byte for byte; the long arm
+        // mirrors it, so both name both numbers and read the same way.
+        let (side, op) = if len < needed {
+            ("less", '<')
+        } else {
+            ("more", '>')
+        };
+        bail!("The number of gains given is {side} than what's needed ({len} {op} {needed}).");
+    }
+    Ok(())
+}
+
+/// The FILE-LOAD pack contract (`BLSTMNeuralNetwork.cpp:141-148`), the one site that
+/// tolerates an over-long pack: fewer than `needed` is the legacy `exit(1)` (`:141-143`,
+/// ported as `Err`); more prints the `:145` warning and keeps the HEAD (`:144-146`);
+/// exact passes through. Returns the `needed`-long slice to hand to an exact-length
+/// setter. Shared with the fast drivers' file seams (issue #62).
+///
+/// The warning goes to STDERR, not the legacy's `cout`, because this port's stdout
+/// carries machine-parsed protocol lines (`BENCH`/`SEG`/`UTT`) -- the same
+/// `eprintln!`-mirrors-a-legacy-`cout`-warning precedent as
+/// `engine/corpus_processor.rs:214`.
+pub fn file_pack_head<'a>(flat: &'a [f64], needed: usize, weights_file: &str) -> Result<&'a [f64]> {
+    if flat.len() < needed {
+        bail!(
+            "The number of gains given in {weights_file} is less than what's needed ({} < {needed}).",
+            flat.len()
+        );
+    }
+    if flat.len() > needed {
+        eprintln!(
+            "Warning: The number of gains given in {weights_file} is more than what's needed \
+             ({} > {needed}); the extra {} are ignored.",
+            flat.len(),
+            flat.len() - needed
+        );
+    }
+    Ok(&flat[..needed])
+}
+
 /// `BLSTMNeuralNetwork<LSTMLayer>` (`BLSTMNeuralNetwork.cpp`): forward + backward
 /// recurrent `Network`s (absent in MLP mode) feeding a `NeuronLayer` output
 /// `Network`, plus the input-normalization mean/std tail and bookkeeping fields.
@@ -986,20 +1036,7 @@ impl BlstmNetwork {
     /// the net untouched rather than half-written (pinned by
     /// `tests/set_weights_length_guard.rs`).
     pub fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        let needed = self.nb_of_weights();
-        if flat.len() != needed {
-            // The short arm's wording is the original one, byte for byte; the long arm
-            // mirrors it, so both name both numbers and read the same way.
-            let (side, op) = if flat.len() < needed {
-                ("less", '<')
-            } else {
-                ("more", '>')
-            };
-            bail!(
-                "The number of gains given is {side} than what's needed ({} {op} {needed}).",
-                flat.len()
-            );
-        }
+        check_pack_len(flat.len(), self.nb_of_weights())?;
 
         let mut rest = flat;
         if !self.cfg.is_mlp {
@@ -1257,13 +1294,9 @@ impl BlstmNetwork {
     /// THIS IS THE ONE SITE THAT TOLERATES AN OVER-LONG PACK, and it does so because
     /// the legacy does (interstitial, phase 11 -- [`Self::set_weights`] no longer
     /// does). Two things changed here, neither of them behaviour: the head is sliced
-    /// EXPLICITLY (`&flat[..needed]`), so the tolerance is stated at the site that
+    /// EXPLICITLY ([`file_pack_head`]), so the tolerance is stated at the site that
     /// owns it instead of being inherited from a permissive callee; and the legacy's
-    /// `:145` warning, which the original port elided, is restored. It goes to
-    /// STDERR, not the legacy's `cout`, because this port's stdout carries
-    /// machine-parsed protocol lines (`BENCH`/`SEG`/`UTT`) -- the same
-    /// `eprintln!`-mirrors-a-legacy-`cout`-warning precedent as
-    /// `engine/corpus_processor.rs:214`.
+    /// `:145` warning, which the original port elided, is restored.
     pub fn load_weights_file(
         &mut self,
         map: &IndexMap<String, String>,
@@ -1277,25 +1310,8 @@ impl BlstmNetwork {
             return Ok(()); // :123 size() != 0 guard
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?; // :132
-        let needed = self.nb_of_weights();
-        if flat.len() < needed {
-            // :141-143 exit(1) -> Err.
-            bail!(
-                "The number of gains given in {weights_file} is less than what's needed ({} < {needed}).",
-                flat.len()
-            );
-        }
-        // :144-146 too-many: warn, then set from the HEAD only.
-        if flat.len() > needed {
-            eprintln!(
-                "Warning: The number of gains given in {weights_file} is more than what's needed \
-                 ({} > {needed}); the extra {} are ignored.",
-                flat.len(),
-                flat.len() - needed
-            );
-        }
         // :144-148 too-many (head) and exact both setWeights.
-        self.set_weights(&flat[..needed])
+        self.set_weights(file_pack_head(&flat, self.nb_of_weights(), weights_file)?)
     }
 
     /// `analyseInputSeq` (`BLSTMNeuralNetwork.cpp:385-417`): fold the input's per-dim

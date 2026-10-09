@@ -557,10 +557,10 @@ def _score_sad_pack_on_test(
     `FoldRun` (scored `-m`) over the test listing with `Dump_Directory` set so the engine
     writes one VRCTS hypothesis xml per file, then pool `dcf` over (`.part.xml` ref windowed
     to the hyp span, engine hyp). The pack (a trained `best_sad.bin` or the untrained
-    `sad_seed.bin`) goes in through the fold run -- `set_weights` on `Inference_Path exact`,
-    a workdir pack + repointed weight key on `fast` (where `set_weights` bails, T6b) -- so the
-    SAME scorer measures both the trained model and its own from-scratch init on the
-    identical test set (the direction-safe DCF improvement), on either path.
+    `sad_seed.bin`) goes in through the fold run's `set_weights` on either `Inference_Path`
+    (issue #62) -- so the SAME scorer measures both the trained model and its own
+    from-scratch init on the identical test set (the direction-safe DCF improvement), on
+    either path.
 
     Returns `(DcfReport | None, dump_dir)`; `None` only if no hyp xml was produced (a
     structurally empty test set)."""

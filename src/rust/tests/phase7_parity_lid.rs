@@ -419,36 +419,73 @@ fn fast_dispatch_routes_algo6_to_fast_twin() {
     );
 }
 
-/// T6b (bag_of_processors.rs): `set_weights` on a fast-dispatched Twin conf must bail
-/// loudly instead of the pre-fix silent `Ok(())` no-op -- the same closed hole as the
-/// FastSpectral case (`bag_of_processors.rs`'s own `fast_spectral_set_weights_bails_loudly`
-/// unit test), pinned here too since `FastTwinLid` is the OTHER fast arm sharing that match
-/// statement and needs its own construction fixture (`twin_map_fast`, Mode-7-shaped).
+/// Issue #62 (T6b's loud bail before it): `set_weights` on a fast-dispatched Twin conf
+/// answers exactly as on the exact one -- the FastSpectral sibling is
+/// `bag_of_processors.rs`'s `fast_spectral_set_weights_answers_as_the_exact_arm`; the Twin
+/// needs its own Mode-7 fixture (`twin_map_fast`). A SAD or LID pack one element off is
+/// refused in the exact bag's words (SAD first), and T6b's hazard is pinned the other way
+/// round: the injected pack is the one SCORED (a halved LID pack moves the LID members,
+/// the file's own pack injected back restores them bit for bit).
 #[test]
-fn fast_twin_set_weights_bails_loudly() {
-    let mut m = twin_map_fast();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
-    assert!(matches!(bag.processor(0), Processor::FastTwinLid(_)));
+fn fast_twin_set_weights_answers_as_the_exact_arm() {
+    let mut fast_map = twin_map_fast();
+    let mut exact_map = fast_map.clone();
+    exact_map.shift_remove("Inference_Path");
+    let mut fast =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut fast_map), image_mode()).unwrap();
+    let mut exact =
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut exact_map), image_mode()).unwrap();
+    assert!(matches!(fast.processor(0), Processor::FastTwinLid(_)));
+    assert!(matches!(exact.processor(0), Processor::TwinLid(_)));
 
-    let dummy_sad = vec![0.0; 4];
-    let lidw = lid_weights();
-    match bag.set_weights(0, &[dummy_sad, lidw]) {
-        Err(e) => {
-            let msg = e.to_string();
-            assert!(
-                msg.contains("Inference_Path"),
-                "error must name Inference_Path, got: {msg}"
-            );
-            assert!(
-                msg.contains("BLSTM_weightsFile"),
-                "error must name the config-time weight-file mechanism, got: {msg}"
-            );
-        }
-        Ok(()) => {
-            panic!("set_weights on a fast-dispatched Twin conf must bail, not silently no-op")
-        }
+    let sad = exact.get_weights(0)[0].clone();
+    let lid = lid_weights();
+    let off = |p: &[f64], by: isize| vec![0.5; (p.len() as isize + by) as usize];
+    for (s, l) in [
+        (off(&sad, 1), lid.clone()),
+        (off(&sad, -1), lid.clone()),
+        (sad.clone(), off(&lid, 1)),
+        (sad.clone(), off(&lid, -1)),
+        (off(&sad, 1), off(&lid, 1)),
+    ] {
+        let pack = [s, l];
+        let want = exact.set_weights(0, &pack).map_err(|e| e.to_string());
+        let got = fast.set_weights(0, &pack).map_err(|e| e.to_string());
+        assert!(
+            want.is_err(),
+            "the exact bag must refuse ({}, {})",
+            pack[0].len(),
+            pack[1].len()
+        );
+        assert_eq!(got, want, "a ({}, {}) pair", pack[0].len(), pack[1].len());
     }
+
+    let score = |bag: &mut BagOfProcessors| -> Vec<f64> {
+        let mut audio = phseq_audio("s1", 0);
+        let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+        let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
+            .map(|_| Segmentation::new(dur))
+            .collect();
+        bag.run_get_segmentation(0, &mut audio, &mut segs).unwrap();
+        match bag.processor(0) {
+            Processor::FastTwinLid(t) => t.lid_classification_errors()[0].clone(),
+            _ => unreachable!(),
+        }
+    };
+    let own = score(&mut fast);
+    let halved: Vec<f64> = lid.iter().map(|v| v * 0.5).collect();
+    fast.set_weights(0, &[sad.clone(), halved]).unwrap();
+    assert_ne!(
+        score(&mut fast),
+        own,
+        "the injected pack must be the one scored"
+    );
+    fast.set_weights(0, &[sad, lid]).unwrap();
+    assert_eq!(
+        score(&mut fast),
+        own,
+        "the file's own pack, injected, scores as loaded"
+    );
 }
 
 #[test]
@@ -622,16 +659,20 @@ fn fast_twin_refuses_the_overlap_lid_regime() {
 /// geometry (`36,24 / 48,1`, measured through `init_weights`) the bidirectional packs are
 /// lstm 12409, slstm 11833, mamba 14521, cfc 12235, transformer 13113: the in-memory
 /// 12409-weight LSTM pack is REFUSED under all four -- too short under `mamba` and
-/// `transformer`, too long under `slstm` and `cfc` (the exact Twin's `set_weights`
-/// contract, D11's "refuses a wrong-length pack"). The per-shape builds from their OWN
-/// packs live in `tests/fast_twin_lid_matrix.rs`.
+/// `transformer`, too long under `slstm` and `cfc`, in the exact Twin's `set_weights`
+/// words on both sides (D11's "refuses a wrong-length pack"; issue #62's one message).
+/// The per-shape builds from their OWN packs live in `tests/fast_twin_lid_matrix.rs`.
 #[test]
 fn fast_twin_pins_the_lid_pack_length_per_cell() {
     use speech::fast::driver::FastNetShape;
     use speech::nn::blstm::CellType;
     for (cell, ct, why) in [
-        ("mamba", CellType::Mamba, "too short"),
-        ("transformer", CellType::Transformer, "too short"),
+        ("mamba", CellType::Mamba, "less than what's needed"),
+        (
+            "transformer",
+            CellType::Transformer,
+            "less than what's needed",
+        ),
         ("slstm", CellType::Slstm, "more than what's needed"),
         ("cfc", CellType::Cfc, "more than what's needed"),
     ] {

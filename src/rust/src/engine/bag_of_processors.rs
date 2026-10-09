@@ -97,8 +97,9 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// T6b AUDIT (Phase 7): "inert defaults" above is NOT one blanket judgment -- each
 /// Vec-valued dispatch method was re-examined per its OWN call sites. `set_weights` was
 /// found unsafe (a real seam caller can plausibly expect it to inject trained weights,
-/// unlike the algo-0/1/2 case) and now bails loudly instead of silently discarding the
-/// caller's data -- see its doc comment. `get_weights`/`get_weights_derivatives` and the
+/// unlike the algo-0/1/2 case) and bailed loudly instead of silently discarding the
+/// caller's data, until issue #62 made the fast arms inject for real under the exact
+/// arms' length contract -- see its doc comment. `get_weights`/`get_weights_derivatives` and the
 /// `save_weights`/`update_weights` save-side arms stay inert defaults -- see their doc
 /// comments for why each is safe. `reset_weights_derivatives` has no dispatch here at
 /// all: it lives on `Network`/layer internals, invoked automatically from within a
@@ -616,8 +617,11 @@ impl BagOfProcessors {
     /// fixed after construction), so a seam caller injecting a freshly-trained
     /// pack via `set_weights` is a realistic mistake, not a misuse: the T6 SAD run
     /// silently scored 24/24 held-out files against stale seed weights this exact
-    /// way, and `Ok(())` gave no signal the injection had been dropped. Bail
-    /// loudly instead -- see the fast arm below for the supported mechanism.
+    /// way, and `Ok(())` gave no signal the injection had been dropped. T6b made the
+    /// fast arms bail loudly; issue #62 replaced the bail with the real thing: the fast
+    /// drivers REBUILD their f32 net from the in-memory pack under the exact arms'
+    /// exact-length contract, in the same words (`nn::blstm::check_pack_len`), so a
+    /// seam caller gets the same refusals on both trees and the same injection.
     pub fn set_weights(&mut self, pos: usize, new_weights: &[Vec<f64>]) -> Result<()> {
         use crate::tasks::segmenter::Segmenter;
         match &mut self.processors[pos] {
@@ -628,22 +632,15 @@ impl BagOfProcessors {
                 seg.set_weights(&new_weights[0])?;
                 seg.set_weights_lid(&new_weights[1])
             }
+            // Fast SAD/LID (`Inference_Path fast`): the same pairing as the exact arms
+            // above, the Twin's SAD pack checked first and then discarded (Mode 7
+            // never runs the SAD net).
+            Processor::FastSpectral(seg) => seg.set_weights(&new_weights[0]),
+            Processor::FastTwinLid(seg) => seg.set_weights(&new_weights[0], &new_weights[1]),
             // algo 0/1/2 have no weight concept at all (no legacy `else` branch) --
             // genuinely inert, matching the legacy exactly. See the T6b audit note
-            // above for why this convention does NOT extend to the fast arms below.
+            // above for why this convention does NOT extend to the fast arms.
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
-            // Fast SAD/LID (`Inference_Path fast`) load weights ONLY at construction,
-            // via the config-time `BLSTM_weightsFile` / `BLSTM_LID_weightsFile` keys
-            // (`load_weights_file`) -- there is no settable-after-construction f64
-            // weight surface. Bail loudly rather than silently discarding the
-            // caller's weights (T6b: closes the silent-seam-no-op hole).
-            Processor::FastSpectral(_) | Processor::FastTwinLid(_) => bail!(
-                "set_weights: config {pos} runs Inference_Path `fast`, which exposes no \
-                 settable-after-construction weight surface (fast drivers load weights \
-                 only at construction, via the config-time BLSTM_weightsFile / \
-                 BLSTM_LID_weightsFile keys). Point those keys at the trained pack and \
-                 reconstruct the Engine instead of calling set_weights on a fast config."
-            ),
         }
     }
 
@@ -1699,39 +1696,34 @@ mod tests {
         }
     }
 
-    /// T6b: `set_weights` on a fast-dispatched conf must bail loudly (the silent
-    /// `Ok(())` no-op used to let a seam caller believe an injected weight pack had
-    /// taken effect when it was discarded -- the T6 SAD-run failure mode). The error
-    /// text must name `Inference_Path` and the config-time weight-file mechanism, so
-    /// a caller hitting this in practice is pointed at the fix, not just told "no".
+    /// Issue #62 (T6b's loud bail before it): `set_weights` on a fast-dispatched conf
+    /// answers exactly as on the exact one -- the exact-length pack loads, one element
+    /// off is refused in the same words. That the loaded pack is the one SCORED (T6b's
+    /// silent-no-op hazard) is pinned through the seam, `tests/pyo3/test_fold_run.py`.
     #[test]
-    fn fast_spectral_set_weights_bails_loudly() {
-        let mut fast3 = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
-        fast3.insert("BLSTM_weightsFile".to_string(), String::new());
+    fn fast_spectral_set_weights_answers_as_the_exact_arm() {
+        let mut exact3 = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+        exact3.insert("BLSTM_weightsFile".to_string(), String::new());
+        let mut fast3 = exact3.clone();
         fast3.insert("Inference_Path".to_string(), "fast".to_string());
-        let mut bag =
+        let mut exact =
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3), solo_mode()).unwrap();
+        let mut fast =
             BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
-        assert!(matches!(bag.processor(0), Processor::FastSpectral(_)));
+        assert!(matches!(fast.processor(0), Processor::FastSpectral(_)));
 
-        match bag.set_weights(0, &[vec![1.0, 2.0, 3.0]]) {
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(
-                    msg.contains("Inference_Path"),
-                    "error must name Inference_Path, got: {msg}"
-                );
-                assert!(
-                    msg.contains("BLSTM_weightsFile"),
-                    "error must name the config-time weight-file mechanism, got: {msg}"
-                );
-            }
-            Ok(()) => panic!("set_weights on a fast-dispatched conf must bail, not silently no-op"),
+        let n = exact.get_weights(0)[0].len();
+        for len in [n, n - 1, n + 1] {
+            let pack = [vec![0.5; len]];
+            let want = exact.set_weights(0, &pack).map_err(|e| e.to_string());
+            let got = fast.set_weights(0, &pack).map_err(|e| e.to_string());
+            assert_eq!(got, want, "a {len}-element pack (the net needs {n})");
         }
     }
 
     /// T6b sibling-audit control: the SAME call on the algo-0/1/2 non-NN arms (which
     /// genuinely have no weight concept) must stay the legacy-matching `Ok(())` no-op --
-    /// the fast-arm bail must not have widened to cover them too.
+    /// no fast-arm rule (T6b's bail, issue #62's length check) widens to cover them.
     #[test]
     fn non_nn_set_weights_stays_inert_ok() {
         let tdc = with_bag_keys(load_config("phase2b/tdc.config"), 1);

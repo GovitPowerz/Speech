@@ -2371,8 +2371,8 @@ impl FastCausalNet {
     /// (`BLSTMNeuralNetwork.cpp:144-146`, ported at `BlstmNetwork::load_weights_file`) and
     /// NOT what the exact `set_weights` does -- since the phase-11 interstitial that one
     /// demands the exact length, the legacy having no length logic of its own at `:209-225`.
-    /// The fast twins keep head-first acceptance deliberately: they load weights only at
-    /// construction, through the file path that legitimately tolerates.
+    /// The length contract is the drivers' (issue #62): they check every in-memory pack
+    /// against the exact count and slice every file pack to it before calling this.
     pub fn from_flat(
         spec: &NnetSpec,
         cell_type: CellType,
