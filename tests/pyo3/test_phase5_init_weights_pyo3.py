@@ -75,3 +75,21 @@ def test_init_weights_round_trips_through_engine_set_weights(tmp_path: Path, sch
 
     assert len(got) == 1
     assert np.array_equal(got[0].view(np.uint64), packs[0].view(np.uint64)), "set_weights -> weights must be a bit-exact round trip"
+
+
+def test_init_weights_pack_is_the_engine_length_at_output_subsampling_2(tmp_path: Path) -> None:
+    """#61: at `BLSTM_OutputSubSampling 2,1` output layer 0 reads 48*2 inputs, so the net
+    takes 33671 + 12*48 = 34247 weights and `set_weights` accepts nothing else."""
+    _seed_tier2_spectral(tmp_path)
+    cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
+    cfg["BLSTM_OutputSubSampling"] = "2,1"
+    cfg["BLSTM_weightsFile"] = ""  # the committed 33671 pack is short for this net.
+    packs = init_weights(config_bridge.nnet_spec(cfg, prefix="BLSTM"), np.random.default_rng(123))
+    assert packs[0].shape == (34247,)
+
+    with chdir(tmp_path):
+        eng = speech_rs.Engine.from_map([cfg], "-m")
+        eng.set_weights(0, packs)
+        got = eng.weights(0)
+
+    assert np.array_equal(got[0].view(np.uint64), packs[0].view(np.uint64))
