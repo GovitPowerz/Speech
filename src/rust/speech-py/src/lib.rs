@@ -13,7 +13,7 @@
 
 use indexmap::IndexMap;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -127,6 +127,19 @@ impl Engine {
             .ok_or_else(|| PyRuntimeError::new_err(format!("unknown mode flag '{mode}'")))?;
         let inner = CorpusProcessor::new(configs, mode).map_err(to_pyerr)?;
         Ok(Engine { inner })
+    }
+
+    /// The seam's `pos` bound (issue #60): a config position at or past the config
+    /// count is an `IndexError` naming both, raised here where the caller's integer
+    /// first arrives, so the bag's indexing below never sees it.
+    fn check_pos(&self, pos: usize) -> PyResult<()> {
+        let n = self.inner.nb_configs();
+        if pos >= n {
+            return Err(PyIndexError::new_err(format!(
+                "config position {pos} is out of range: this engine holds {n} config(s)"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -262,35 +275,47 @@ impl Engine {
 
     /// Config-`pos`'s per-network flat weight vectors, preserving the pairing:
     /// `[sad, lid]` for algo 6, `[flat]` for algo 3/4/5, `[]` for algo 0/1/2.
-    /// COPY: each `Vec<f64>` is moved into its own numpy array.
-    fn weights<'py>(&self, py: Python<'py>, pos: usize) -> Vec<Bound<'py, PyArray1<f64>>> {
-        self.inner
+    /// COPY: each `Vec<f64>` is moved into its own numpy array. An out-of-range
+    /// `pos` is an `IndexError` (issue #60).
+    fn weights<'py>(
+        &self,
+        py: Python<'py>,
+        pos: usize,
+    ) -> PyResult<Vec<Bound<'py, PyArray1<f64>>>> {
+        self.check_pos(pos)?;
+        Ok(self
+            .inner
             .weights(pos)
             .into_iter()
             .map(|v| v.into_pyarray(py))
-            .collect()
+            .collect())
     }
 
     /// Seed config-`pos`'s network(s): `[sad, lid]` for algo 6, `[flat]` for
     /// algo 3/4/5; algo 0/1/2 (no NN) is a no-op. COPY: each numpy array (or
-    /// list) is read into an owned `Vec<f64>` on the way in.
+    /// list) is read into an owned `Vec<f64>` on the way in. An out-of-range
+    /// `pos` is an `IndexError`; a list whose length is not the config's net
+    /// count is a `RuntimeError` raised before any pack is applied (issue #60).
     fn set_weights(&mut self, pos: usize, nets: Vec<Vec<f64>>) -> PyResult<()> {
+        self.check_pos(pos)?;
         self.inner.set_weights(pos, &nets).map_err(to_pyerr)
     }
 
     /// Config-`pos`'s per-network `Nx2` derivative matrices (col 0 summed deriv,
     /// col 1 count; `[sad, lid]` for algo 6). COPY: each `Array2` moved into a
-    /// numpy array.
+    /// numpy array. An out-of-range `pos` is an `IndexError` (issue #60).
     fn weights_derivatives<'py>(
         &self,
         py: Python<'py>,
         pos: usize,
-    ) -> Vec<Bound<'py, PyArray2<f64>>> {
-        self.inner
+    ) -> PyResult<Vec<Bound<'py, PyArray2<f64>>>> {
+        self.check_pos(pos)?;
+        Ok(self
+            .inner
             .weights_derivatives(pos)
             .into_iter()
             .map(|m| m.into_pyarray(py))
-            .collect()
+            .collect())
     }
 
     /// Corpus-level gradient check, capped at `max_weights` per network: one
