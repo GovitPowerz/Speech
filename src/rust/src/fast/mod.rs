@@ -29,8 +29,9 @@
 //! chain, driven by a FRESH windowed-overlap loop over the already-shared span helpers).
 //! `FastBlstm` and its `overlap_window_step` are BYTE-UNTOUCHED by it (spec S5, approach
 //! A): they are the phase-8 streaming bit-identity kernels, and the phase-7/8 suites
-//! passing WITHOUT EDITS is the proof. Bidirectional inference has NO streaming twin --
-//! it is unstreamable by construction (the reverse pass reads the whole sequence).
+//! passing WITHOUT EDITS is the proof. A bidirectional new cell has NO frame-streaming
+//! twin (the reverse pass reads the whole sequence); the utterance-granular `stream_lid`
+//! session runs it whole per push (issue #57).
 //!
 //! Phase 10 Task 5 adds `mel32`: the f32 mel/DCT/deltas twin of `features/mel.rs`,
 //! which retires the phase-7 f64 widen bridge at BOTH `pipeline` sites (spec S4) --

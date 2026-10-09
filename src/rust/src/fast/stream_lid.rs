@@ -116,7 +116,7 @@ impl StreamingLidSession {
                  BLSTM_LID_weightsFile in the config"
             );
         }
-        let params = twin.lid_score_params(rate, lang_index)?;
+        let params = twin.lid_score_params("streaming LID", rate, lang_index)?;
         let acc = LidChannelAcc::new(params.class_nb);
         Ok(StreamingLidSession { twin, params, acc })
     }

@@ -82,8 +82,8 @@ use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_
 use super::bicell::FastBiCell;
 use super::cells::FastCausalNet;
 use super::nn::{
-    FastBlstm, FastMatrix, TruncateGeometry, external_normalize_f32, self_normalize_f32,
-    truncate_forward,
+    FastBlstm, FastMatrix, external_normalize_f32, pad_replicate_ends_f32, self_normalize_f32,
+    slice_rows_f32,
 };
 use super::pipeline::FastPipeline;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
@@ -100,9 +100,9 @@ pub enum FastNetShape {
     /// set), `transformer` (phase-11 Task 5).
     Causal(CellType),
     /// [`FastBiCell`] -- `slstm`/`mamba`/`cfc` (phase-10 Task 7, spec S5) /
-    /// `transformer` (phase-11 Task 6, spec S5.3) + `Direction bidirectional`. OFFLINE
-    /// ONLY: bidirectional inference is unstreamable by construction, so `fast::stream`
-    /// typed-bails this variant.
+    /// `transformer` (phase-11 Task 6, spec S5.3) + `Direction bidirectional`. NOT
+    /// FRAME-STREAMABLE: `fast::stream` typed-bails this variant; the utterance-granular
+    /// `fast::stream_lid` runs it whole per push (issue #57, ADR-0004's amendment).
     BiCell(CellType),
 }
 
@@ -124,11 +124,13 @@ pub enum FastNetShape {
 /// head-first and RUN, producing one architecture's numbers under another's name, with no
 /// tolerance to widen and no gate to catch it. Each shape's `element_count`
 /// ([`FastBlstm::from_flat`], [`FastCausalNet::element_count`],
-/// [`FastBiCell::element_count`]) is the check that closes it.
+/// [`FastBiCell::element_count`]) closes it for a SHORTER pack only; an over-long one is
+/// consumed head-first unless the caller demands the exact length (the Twin's in-memory
+/// LID seam does, [`FastTwinLid::from_legacy`]).
 ///
 /// A refusal survives exactly where a shape genuinely cannot run, NOT here:
 /// `fast::stream::StreamingSession::new` refuses [`FastNetShape::BiCell`] (the FRAME
-/// stream cannot run a bidirectional net), keeping the refusal's LEADING CLAUSE, which is
+/// stream runs no bidirectional new cell), keeping the refusal's LEADING CLAUSE, which is
 /// what `phase8_gate.rs` / `phase9_stream_causal.rs` assert (a PREFIX SUBSTRING, not the
 /// body). The Twin's LID net classifies through this same function since issue #57
 /// ([`FastLidNet`]); its two surviving refusals are REGIME rules (windowed causal,
@@ -778,7 +780,7 @@ impl Segmenter for FastSpectralSegmenter {
 
 /// The Twin's Mode-7 LID net actually built, per [`FastNetShape`] -- the LID-side
 /// sibling of [`FastSadNet`], one more consumer of the two cell twins. Merging the two
-/// enums is issue #24's job (the Twin's config parse dedupe), not this one's.
+/// enums belongs with issue #24's collapse of the fast-tree net enums, not this one.
 ///
 /// THE SCORING REGIME FOLLOWS THE SHAPE, as it does for the SAD net but with the LID
 /// regimes: a BIDIRECTIONAL shape (`Blstm`, `BiCell`) runs the TwoSweeps/single-sweep
@@ -799,6 +801,36 @@ pub(crate) enum FastLidNet {
     BiCell(FastBiCell),
 }
 
+/// The sub-sampling geometry the truncate sweep sizes its windows and output rows off.
+struct TruncateGeometry<'a> {
+    lstm_subsampling: &'a [usize],
+    output_subsampling: &'a [usize],
+    output_size: usize,
+}
+
+impl TruncateGeometry<'_> {
+    /// `getSubSamplingRatio`: the recurrent ratios times the output-net ones.
+    fn ssr(&self) -> usize {
+        self.lstm_subsampling.iter().product::<usize>()
+            * self.output_subsampling.iter().product::<usize>()
+    }
+
+    /// `len` divided SEQUENTIALLY by each recurrent ratio then each output ratio, the
+    /// exact tree's integer-floor chain, applied only when the whole ratio is > 1.
+    fn short_len(&self, len: usize) -> usize {
+        let mut l = len;
+        if self.ssr() > 1 {
+            for &r in self.lstm_subsampling {
+                l /= r;
+            }
+            for &r in self.output_subsampling {
+                l /= r;
+            }
+        }
+        l
+    }
+}
+
 impl FastLidNet {
     fn output_size(&self) -> usize {
         match self {
@@ -808,93 +840,70 @@ impl FastLidNet {
         }
     }
 
-    fn lstm_subsampling(&self) -> &[usize] {
+    /// ONE whole block through the shape's own forward; the posteriors stay in the net's
+    /// reused output buffer (valid until the next call), as the phase-7 sweep read them.
+    fn feed_forward(&mut self, block: &FastMatrix) -> &FastMatrix {
         match self {
-            FastLidNet::Blstm(n) => n.lstm_subsampling(),
-            FastLidNet::Causal(n) => n.lstm_subsampling(),
-            FastLidNet::BiCell(n) => n.lstm_subsampling(),
-        }
-    }
-
-    fn output_subsampling(&self) -> &[usize] {
-        match self {
-            FastLidNet::Blstm(n) => n.output_subsampling(),
-            FastLidNet::Causal(n) => n.output_subsampling(),
-            FastLidNet::BiCell(n) => n.output_subsampling(),
-        }
-    }
-
-    /// ONE whole block through the shape's own forward, copied into `out`. The block
-    /// forward every regime below drives: the plain regime calls it once over the whole
-    /// entry, the truncate sweep once per window.
-    fn forward_block(&mut self, block: &FastMatrix, out: &mut FastMatrix) {
-        match self {
-            FastLidNet::Blstm(n) => out.copy_from(n.feed_forward(block)),
-            FastLidNet::Causal(n) => out.copy_from(n.feed_forward(block)),
-            FastLidNet::BiCell(n) => out.copy_from(n.feed_forward(block)),
+            FastLidNet::Blstm(n) => n.feed_forward(block),
+            FastLidNet::Causal(n) => n.feed_forward(block),
+            FastLidNet::BiCell(n) => n.feed_forward(block),
         }
     }
 
     /// Scoring forward for the Mode-7 LID Twin, the f32 counterpart of the INFERENCE
-    /// slice of `BlstmNetwork::feed_forward_scoring` (`nn/blstm.rs:1671-1760`; the `:NNN`
+    /// slice of `BlstmNetwork::feed_forward_scoring` (`nn/blstm.rs:1671-1766`; the `:NNN`
     /// cites below are that function's lines) on every shape. Mode 7 always passes
-    /// `target_index >= 0`, so this mirrors: the `rows < ssr -> Zero(1, O)` guard
-    /// (`:1684-1686`), the sequential output-length division (`:1689-1697`), the windowed dispatch
-    /// (`set_processing_type(window_size > 0, overlaps)`: `window_size == 0` is the PLAIN
-    /// whole-sequence forward, `TwoSweeps` IGNORED exactly as the exact tree ignores it
-    /// there; `window_size > 0` is the TRUNCATE sweep, the caller having refused overlap),
-    /// and the BINARY expansion into `[1-p, p]` when `output_size == 1`. The exact's
+    /// `target_index >= 0`, so this mirrors: the sequential output-length division
+    /// (`:1686-1694`), the windowed dispatch (`set_processing_type(window_size > 0,
+    /// overlaps)`: `window_size == 0` is the PLAIN whole-sequence forward, `TwoSweeps`
+    /// IGNORED exactly as the exact tree ignores it there; `window_size > 0` is the
+    /// TRUNCATE sweep, the caller having refused overlap), and the BINARY expansion into
+    /// `[1-p, p]` when `output_size == 1`. The `rows < ssr -> Zero(1, O)` guard
+    /// (`:1681-1683`) is the caller's: `score_lid_entry` skips such an entry. The exact's
     /// target construction + cost/backward are SKIPPED: the fast path is forward-only, the
     /// forward is target-independent, and Mode 7's langID/confusion derive from the
     /// posteriors alone (the NN-cost columns are a documented divergence).
     ///
     /// Through phase 11 this body was `FastBlstm::feed_forward_scoring`; issue #57 moved
     /// it here unchanged for the BLSTM shape (the phase-7 LID legs at their pins are the
-    /// proof) and generalized the block forward.
+    /// proof) and generalized the block forward. The sub-sampling ratios come from the
+    /// caller's [`LidScoreParams`] (the `lid_spec` every shape's `from_flat` copies).
     pub(crate) fn feed_forward_scoring(
         &mut self,
         input: &FastMatrix,
+        lstm_subsampling: &[usize],
+        output_subsampling: &[usize],
         window_size: usize,
         two_sweeps: bool,
     ) -> FastMatrix {
         let output_size = self.output_size();
-        let lsub = self.lstm_subsampling().to_vec();
-        let osub = self.output_subsampling().to_vec();
         let geom = TruncateGeometry {
-            lstm_subsampling: &lsub,
-            output_subsampling: &osub,
+            lstm_subsampling,
+            output_subsampling,
             output_size,
         };
-        let rows = input.rows;
-        if rows < geom.ssr() {
-            return FastMatrix::zeros(1, output_size); // :1684-1686
-        }
-        // :1689-1697 output length (only re-divided when the whole ratio > 1).
-        let out_len = geom.short_len(rows);
+        // :1686-1694 output length (only re-divided when the whole ratio > 1).
+        let out_len = geom.short_len(input.rows);
         let output = if window_size == 0 {
             // The PLAIN regime (`feed_forward_backward_plain` -> `feed_forward` over the
             // whole entry, `nn/blstm.rs:1780`): the net's own output length is the same
             // sequential floor chain, so the rows agree by construction; a disagreement is
             // a geometry defect, not something to pad or truncate quietly.
-            let mut out = FastMatrix::zeros(0, 0);
-            self.forward_block(input, &mut out);
+            let out = self.feed_forward(input);
             assert_eq!(
                 (out.rows, out.cols),
                 (out_len, output_size),
                 "fast LID plain forward: net output shape vs the scoring length"
             );
-            out
+            FastMatrix {
+                data: out.data[..out_len * output_size].to_vec(),
+                rows: out_len,
+                cols: output_size,
+            }
         } else {
-            truncate_forward(
-                &geom,
-                input,
-                window_size,
-                out_len,
-                two_sweeps,
-                &mut |block, out| self.forward_block(block, out),
-            )
+            self.truncate_forward(&geom, input, window_size, out_len, two_sweeps)
         };
-        // :1752-1760 binary expansion into [1-p, p] (Mode 7 always has targets, so the
+        // :1755-1765 binary expansion into [1-p, p] (Mode 7 always has targets, so the
         // `target_index >= 0` half of the legacy gate is always true here).
         if output_size == 1 {
             let mut expanded = FastMatrix::zeros(out_len, 2);
@@ -908,13 +917,150 @@ impl FastLidNet {
             output
         }
     }
+
+    /// f32 TwoSweeps/single-sweep truncate forward (`feed_forward_backward_truncate`,
+    /// `nn/blstm.rs:2035`; the `:NNN` cites in the body are the legacy
+    /// `BLSTMNeuralNetwork.cpp:548-590` lines that function transcribes), OUTPUT-ONLY. The
+    /// exact stitches the fwd/bwd hidden states (`_OutputForward`/`_OutputBackward`) across
+    /// windows + sweeps; Mode 7 reads them ONLY for `DumpLIDInternals` (off on the gate
+    /// configs, the fast driver bails if it is on), so the fast path tracks only `output`.
+    /// `out_len` is the caller's posterior row count. NET-AGNOSTIC: every shape runs it
+    /// through [`Self::feed_forward`], one whole block per window. NOT one of the two
+    /// byte-frozen streaming kernels, so lifting it out of `FastBlstm` (issue #57) was a
+    /// pure code motion, the phase-7 LID parity legs at their pins the arbiter.
+    fn truncate_forward(
+        &mut self,
+        geom: &TruncateGeometry<'_>,
+        input: &FastMatrix,
+        window_size: usize,
+        out_len: usize,
+        two_sweeps: bool,
+    ) -> FastMatrix {
+        let output_size = geom.output_size;
+        if !two_sweeps {
+            // :588 single TruncateSweep.
+            let mut output = FastMatrix::zeros(out_len, output_size);
+            self.truncate_sweep(geom, input, window_size, &mut output);
+            return output;
+        }
+
+        // :550-552 shift/window sizing (INTEGER-division ORDER: /2 FIRST, then /ssr).
+        let ssr = geom.ssr();
+        let shift_short = (window_size / 2) / ssr;
+        let shift = shift_short * ssr;
+        let window_size_short = window_size / ssr;
+
+        // :553-554 input padding (first/last row replicated window_size times).
+        let input_padded = pad_replicate_ends_f32(input, window_size, window_size);
+
+        // :565-568 sweep 1: input drops the FRONT window_size padding, keeps the back;
+        // sweep1_out is the tail of the zero-padded output (out_len + window_size_short).
+        let sweep1_in = slice_rows_f32(&input_padded, window_size, input_padded.rows);
+        let mut sweep1_out = FastMatrix::zeros(out_len + window_size_short, output_size);
+        self.truncate_sweep(geom, &sweep1_in, window_size, &mut sweep1_out);
+
+        // :572-576 sweep 2: input from `shift`; output written into a fresh zero buffer
+        // (output_padded2) offset by shift_short (the exact re-stitches the shifted block
+        // back in place after the sweep, so we mirror that write).
+        let sweep2_in = slice_rows_f32(&input_padded, shift, input_padded.rows);
+        let mut sweep2_buf = FastMatrix::zeros(out_len + 2 * window_size_short, output_size);
+        let mut sweep2_out = FastMatrix::zeros(sweep2_buf.rows - shift_short, output_size);
+        self.truncate_sweep(geom, &sweep2_in, window_size, &mut sweep2_out);
+        for r in 0..sweep2_out.rows {
+            let dst = (shift_short + r) * output_size;
+            let src = r * output_size;
+            sweep2_buf.data[dst..dst + output_size]
+                .copy_from_slice(&sweep2_out.data[src..src + output_size]);
+        }
+
+        // :578-579 output[r] = (sweep1[r] + sweep2[r]) / 2 over the first out_len rows.
+        let mut output = FastMatrix::zeros(out_len, output_size);
+        for r in 0..out_len {
+            for c in 0..output_size {
+                let s1 = sweep1_out.data[r * output_size + c];
+                let s2 = sweep2_buf.data[(window_size_short + r) * output_size + c];
+                output.data[r * output_size + c] = (s1 + s2) / 2.0;
+            }
+        }
+        output
+    }
+
+    /// One truncate sweep (`feed_forward_backward_truncate_sweep`, `nn/blstm.rs:1912`; the
+    /// `:NNN` cites are the legacy `BLSTMNeuralNetwork.cpp:488-546` lines), OUTPUT-ONLY:
+    /// non-overlapping windows of `window_size`, each a whole-block forward over a
+    /// contiguous row-slice, written at `begin/ssr`. A `length_short == 0` window is
+    /// silently dropped (`:534`); a partial last window recomputes its length via the
+    /// sequential sub-sampling floors (`:518-532`).
+    fn truncate_sweep(
+        &mut self,
+        geom: &TruncateGeometry<'_>,
+        input: &FastMatrix,
+        window_size: usize,
+        output: &mut FastMatrix,
+    ) {
+        let ssr = geom.ssr();
+        let cols = output.cols;
+
+        // :500-512 nominal length (window /= each LSTM then Output ratio when sub on).
+        let nominal_len = geom.short_len(window_size);
+
+        let input_rows = input.rows;
+        let mut jj = 0;
+        while jj < input_rows {
+            let begin = jj;
+            let mut end = jj + window_size - 1;
+            if end >= input_rows {
+                end = input_rows - 1;
+            }
+            let length_seq = end - begin + 1;
+            let length_short = if length_seq != window_size {
+                geom.short_len(length_seq)
+            } else {
+                nominal_len
+            };
+            if length_short > 0 {
+                let block = slice_rows_f32(input, begin, begin + length_seq);
+                let out_short = self.feed_forward(&block);
+                debug_assert_eq!(out_short.rows, length_short, "truncate sweep row count");
+                let obeg = begin / ssr;
+                for r in 0..length_short {
+                    let dst = (obeg + r) * cols;
+                    let src = r * out_short.cols;
+                    output.data[dst..dst + cols].copy_from_slice(&out_short.data[src..src + cols]);
+                }
+            }
+            jj += window_size;
+        }
+    }
+}
+
+/// The flat element count the Twin's LID net needs for a classified [`FastNetShape`]:
+/// the same count each shape's `from_flat` sizes against.
+fn lid_element_count(
+    spec: &NnetSpec,
+    shape: FastNetShape,
+    mamba: &MambaParams,
+    cfc: &CfcParams,
+    transformer: &TransformerParams,
+) -> Result<usize> {
+    Ok(match shape {
+        FastNetShape::Blstm => crate::config::element_count(spec),
+        FastNetShape::Causal(cell) => {
+            FastCausalNet::element_count(spec, cell, mamba, cfc, transformer)?
+        }
+        FastNetShape::BiCell(cell) => {
+            FastBiCell::element_count(spec, cell, mamba, cfc, transformer)?
+        }
+    })
 }
 
 /// Build the Twin's LID net for a classified [`FastNetShape`] from the flat f64 pack.
 /// ONE place, so `from_legacy(map, _, Some(flat))` and the deferred `load_weights_file`
 /// cannot pick different arms (the [`build_sad_net`] rule). Each shape's `from_flat`
-/// enforces its own pack-length check, which is what stops another shape's pack from
-/// being consumed head-first under this one's name.
+/// refuses a SHORT pack only and consumes an over-long one head-first; the over-long
+/// refusal is the caller's, per seam (the phase-11 split): `from_legacy`'s in-memory arm
+/// demands the exact length, as the exact Twin's `set_weights` does, and
+/// `load_weights_file` keeps the legacy file-load tolerance with its warning.
 fn build_lid_net(
     spec: &NnetSpec,
     shape: FastNetShape,
@@ -1179,14 +1325,32 @@ impl FastTwinLid {
         let class_nb = (*lid_spec.output_neuron_nb.last().unwrap()).max(2);
 
         let lid_net = match lid_weights {
-            Some(flat) => Some(build_lid_net(
-                &lid_spec,
-                lid_shape,
-                &lid_bc.mamba,
-                &lid_bc.cfc,
-                &lid_bc.transformer,
-                flat,
-            )?),
+            // EXACT-LENGTH, as the exact Twin's `set_weights` is since the phase-11
+            // interstitial: an over-long in-memory pack is another architecture's, not a
+            // file to tolerate. The short side stays `from_flat`'s "too short".
+            Some(flat) => {
+                let needed = lid_element_count(
+                    &lid_spec,
+                    lid_shape,
+                    &lid_bc.mamba,
+                    &lid_bc.cfc,
+                    &lid_bc.transformer,
+                )?;
+                if flat.len() > needed {
+                    bail!(
+                        "The number of gains given is more than what's needed ({} > {needed}).",
+                        flat.len()
+                    );
+                }
+                Some(build_lid_net(
+                    &lid_spec,
+                    lid_shape,
+                    &lid_bc.mamba,
+                    &lid_bc.cfc,
+                    &lid_bc.transformer,
+                    flat,
+                )?)
+            }
             None => None,
         };
 
@@ -1259,6 +1423,23 @@ impl FastTwinLid {
             return Ok(());
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
+        // The legacy file-load tolerance (`BLSTMNeuralNetwork.cpp:144-146`) with the warning
+        // the exact `BlstmNetwork::load_weights_file` prints; `from_flat` consumes the head.
+        let needed = lid_element_count(
+            &self.lid_spec,
+            self.lid_shape,
+            &self.lid_mamba,
+            &self.lid_cfc,
+            &self.lid_transformer,
+        )?;
+        if flat.len() > needed {
+            eprintln!(
+                "Warning: The number of gains given in {weights_file} is more than what's needed \
+                 ({} > {needed}); the extra {} are ignored.",
+                flat.len(),
+                flat.len() - needed
+            );
+        }
         self.lid_net = Some(build_lid_net(
             &self.lid_spec,
             self.lid_shape,
@@ -1327,7 +1508,10 @@ impl FastTwinLid {
     /// the `FastBlstm::debug_peepholes` hook into a Task-5 pin, proving the LID net's
     /// spec was peephole-aligned under the `BLSTM_LID` prefix, not left at the
     /// `NnetSpec` default, FALSE until issue #32). `None` unless the LID net is the
-    /// peephole-LSTM twin (the other shapes carry no peepholes).
+    /// bidirectional peephole-LSTM twin (`FastLidNet::Blstm`). A causal `lstm` LID net
+    /// carries the forward peephole triple too (`FastLstm::peep_flags` through
+    /// `FastCausalNet::cells()`), but this hook does not report it, so its alignment is
+    /// unpinned here; the other cells carry no peepholes.
     #[cfg(feature = "test-support")]
     pub fn debug_lid_peepholes(&self) -> Option<[bool; 6]> {
         match self.lid_net.as_ref() {
@@ -1403,36 +1587,22 @@ impl Segmenter for FastTwinLid {
             audio.data.ncols(),
         );
 
-        // getLIDBLSTMParam: LID window/shift derivation (the exact `:1330-1353`), via the
-        // shared `derive_lid_window` so the offline + streaming (`lid_score_params`) window
-        // sizes cannot drift. `lid_window_shift` is still derived inline for the stateful
+        // getLIDBLSTMParam: LID window/shift derivation (the exact `:1330-1353`), the regime
+        // rule and the target clamp (the exact `:1396-1404`), all through the streaming
+        // session's own `lid_score_params`, so the offline and streaming params cannot drift.
+        // Called BEFORE the stateful shift re-quantization below: re-derived from a
+        // re-quantized shift (>= 1 frame), truncate would read as overlap.
+        // `lid_window_shift` is still derived inline for the stateful
         // `self.lid_window_shift_sec` bookkeeping (the epilogue reset at `:1160` reads it).
-        let lid_ssr = self.lid_ssr;
-        let ssifd = ssif as f64;
-        let (lid_window_size, lid_no_overlap) = derive_lid_window(
-            self.lid_window_size_sec,
-            self.lid_window_shift_sec,
-            lid_ssr,
-            ssif,
-            rate,
-        );
-        let mut lid_window_shift = f64::round(self.lid_window_shift_sec * rate / ssifd) as i64;
-        if lid_window_size == 0 || lid_window_shift < 1 {
+        let params = self.lid_score_params("fast TwinLid mode 7", rate, audio.lang_index)?;
+        // Overlap is refused, so a resolved window means truncate (`lid_no_overlap`).
+        let lid_no_overlap = params.lid_window_size > 0;
+        let mut lid_window_shift =
+            f64::round(self.lid_window_shift_sec * rate / ssif as f64) as i64;
+        if params.lid_window_size == 0 || lid_window_shift < 1 {
             lid_window_shift = 1;
         }
         self.lid_window_shift_sec = (lid_window_shift * ssif as i64) as f64 / rate;
-
-        // The regime rule (issue #57, D2/D10): `set_processing_type(lid_window_size > 0,
-        // !lid_no_overlap)` resolves PLAIN (`window 0`), TRUNCATE (`window > 0`, no
-        // overlap) or OVERLAP. The shape decides which of the first two it runs; overlap
-        // is refused everywhere. ONE check, shared with the streaming session's
-        // `lid_score_params`, so the two cannot drift.
-        check_lid_regime(
-            "fast TwinLid mode 7",
-            self.lid_shape,
-            lid_window_size,
-            lid_no_overlap,
-        )?;
 
         // SAD timeStep/offset (the exact `:1356-1366`).
         let mut time_step = self.window_shift_sec * sad_ssr as f64;
@@ -1447,15 +1617,8 @@ impl Segmenter for FastTwinLid {
             }
         }
 
-        let class_nb = self.class_nb;
-        let cost_modified = self.cost_modified;
-        let two_sweeps = self.lid_two_sweeps;
-        let post_process_mode = self.post_process_mode;
-        let min_nb_of_frames = self.min_nb_of_frames;
-        let noise_magnitude = self.noise_magnitude;
         let conv_coeff = self.driver_cfg.conv_coeff.clone();
         let external_features = audio.external_features.clone();
-        let lang_index = audio.lang_index;
 
         let channels = audio.data.nrows();
         self.channels = channels;
@@ -1467,28 +1630,6 @@ impl Segmenter for FastTwinLid {
         self.lid_classification_errors = vec![Vec::new(); channels];
         self.lid_segments_confusion = vec![Array2::<f64>::zeros((0, 0)); channels];
         self.is_lid_correct = vec![0; channels];
-
-        // Build the shared LID scoring params once. targetIndex = clamp(lang_index, [0,
-        // classNb)) (the exact `:1396-1404`) is loop-invariant (`lang_index` is the whole-file
-        // target; the offline derived it per channel, identically each time).
-        let mut ti = lang_index;
-        if ti >= class_nb as i32 {
-            ti = 0;
-        }
-        if ti < 0 {
-            ti = 0;
-        }
-        let params = LidScoreParams {
-            lid_ssr,
-            min_nb_of_frames,
-            noise_magnitude,
-            lid_window_size,
-            two_sweeps,
-            post_process_mode,
-            class_nb,
-            ti: ti as usize,
-            cost_modified,
-        };
 
         // Move the LID net out so self's result buffers are freely writable in the loop
         // (put back before returning; the loop body has no fallible op, so no early exit).
@@ -1518,7 +1659,7 @@ impl Segmenter for FastTwinLid {
             // via the SHARED kernel (`score_lid_entry` / `finalize_lid_channel`) -- the SAME
             // code the streaming session folds through, so streaming is bit-identical to this
             // offline path by construction (see the kernel section below `get_segmentation`).
-            let mut acc = LidChannelAcc::new(class_nb);
+            let mut acc = LidChannelAcc::new(params.class_nb);
             for feat in &external_features {
                 score_lid_entry(feat, &mut net, &params, &mut acc);
             }
@@ -1587,6 +1728,8 @@ pub struct LidAggregate {
 /// language), invariant across a channel's external-features entries.
 pub(super) struct LidScoreParams {
     pub(super) lid_ssr: usize,
+    pub(super) lid_lstm_sub: Vec<usize>,
+    pub(super) lid_out_sub: Vec<usize>,
     pub(super) min_nb_of_frames: i32,
     pub(super) noise_magnitude: f64,
     pub(super) lid_window_size: usize,
@@ -1747,7 +1890,13 @@ pub(super) fn score_lid_entry(
         rows: fr,
         cols: fc,
     };
-    let out_f32 = net.feed_forward_scoring(&fin, p.lid_window_size, p.two_sweeps);
+    let out_f32 = net.feed_forward_scoring(
+        &fin,
+        &p.lid_lstm_sub,
+        &p.lid_out_sub,
+        p.lid_window_size,
+        p.two_sweeps,
+    );
     let out_cols = out_f32.cols;
     let output_seq: Vec<f64> = out_f32.data.iter().map(|&x| x as f64).collect();
     let get = |r: usize, c: usize| output_seq[r * out_cols + c];
@@ -1886,13 +2035,19 @@ pub(super) fn finalize_lid_channel(acc: &LidChannelAcc, p: &LidScoreParams) -> L
 }
 
 impl FastTwinLid {
-    /// Derive the per-channel LID scoring params for streaming (the window resolution + skip/
-    /// scoring constants from `get_segmentation`, minus the SAD side). Mode 7 forces
+    /// Derive the per-channel LID scoring params (the window resolution + skip/scoring
+    /// constants, minus the SAD side) for BOTH the offline `get_segmentation` and the
+    /// streaming session; `who` prefixes a refusal. Mode 7 forces
     /// `_SpectrumShiftInFrames = 80` (`:1296-1301`: the phSeq/cep periodogram is always
-    /// present), so `ssif` is a constant here. Applies the SAME regime rule as
-    /// `get_segmentation` ([`check_lid_regime`]: plain or truncate per the shape, overlap
-    /// refused). `ti = clamp(lang_index, [0, class_nb))`.
-    pub(super) fn lid_score_params(&self, rate: f64, lang_index: i32) -> Result<LidScoreParams> {
+    /// present), so `ssif` is a constant here. Applies the regime rule
+    /// ([`check_lid_regime`]: plain or truncate per the shape, overlap refused).
+    /// `ti = clamp(lang_index, [0, class_nb))`.
+    pub(super) fn lid_score_params(
+        &self,
+        who: &str,
+        rate: f64,
+        lang_index: i32,
+    ) -> Result<LidScoreParams> {
         let ssif = 80usize; // mode-7 forced (:1296-1301)
         let (lid_window_size, lid_no_overlap) = derive_lid_window(
             self.lid_window_size_sec,
@@ -1901,12 +2056,7 @@ impl FastTwinLid {
             ssif,
             rate,
         );
-        check_lid_regime(
-            "streaming LID",
-            self.lid_shape,
-            lid_window_size,
-            lid_no_overlap,
-        )?;
+        check_lid_regime(who, self.lid_shape, lid_window_size, lid_no_overlap)?;
         let mut ti = lang_index;
         if ti >= self.class_nb as i32 {
             ti = 0;
@@ -1916,6 +2066,8 @@ impl FastTwinLid {
         }
         Ok(LidScoreParams {
             lid_ssr: self.lid_ssr,
+            lid_lstm_sub: self.lid_spec.lstm_subsampling.clone(),
+            lid_out_sub: self.lid_spec.output_subsampling.clone(),
             min_nb_of_frames: self.min_nb_of_frames,
             noise_magnitude: self.noise_magnitude,
             lid_window_size,

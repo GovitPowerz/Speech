@@ -221,7 +221,6 @@ def test_lid_slstm_forward_trains_and_scores(tmp_path: Path, arm: str, gate_reco
     assert res.lid_error < res.init_lid_error - 2.0, f"{arm} slstm/forward trained {res.lid_error:.2f}% must beat init {res.init_lid_error:.2f}%"
     assert res.cavg is not None and 0.0 <= res.cavg <= 1.0
     assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.scr"))) == res.n_test
-    gate_record(res)
 
     # #57: the SAME trained pair scored on the fast tree (the plain-regime causal LID twin,
     # `BLSTM_LID_window 0`) over the SAME held-out listing -- argmax identity per file and a
@@ -247,6 +246,9 @@ def test_lid_slstm_forward_trains_and_scores(tmp_path: Path, arm: str, gate_reco
     assert f_exact == f_fast and len(f_exact) == res.n_test
     flips = int(np.sum(np.argmax(s_exact, axis=1) != np.argmax(s_fast, axis=1)))
     assert flips == 0, f"{arm}: {flips} per-file argmax flips fast vs exact (R1 STOP)"
+    # Staged LAST: `gate_record` copies to `--ledger-stage` on call, so a fast-leg failure
+    # above must not leave a passed-gate record behind.
+    gate_record(res)
 
 
 @pytest.mark.slow

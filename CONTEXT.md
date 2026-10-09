@@ -168,7 +168,7 @@ A test comparing two runs of the same kernel (split state, chunk sizes, run-twic
 The chunked-input SAD path (`StreamingSession`) or the per-utterance LID path (`StreamingLidSession`). Two granularities, below.
 
 **Frame stream**:
-The SAD streaming session: one chunk of samples per push, the step kernel driven frame by frame, so a bidirectional net is refused.
+The SAD streaming session: one chunk of samples per push, so a bidirectional new cell is refused (the bidirectional LSTM streams only in the windowed overlap regime, bounded by the window).
 
 **Utterance stream**:
 The LID streaming session: one utterance per push, scored whole through the same block forward the offline Twin uses, so any direction streams.

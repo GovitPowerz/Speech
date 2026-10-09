@@ -38,7 +38,8 @@ the **consumed** frontier minus one step (never the received one), and the hyste
 - A causal cell removes the `nn_window` term (6.05 s to 2.82 s on the same config lineage); a
   bidirectional net is unstreamable by construction and is refused at session construction.
   **Amendment (2026-10-09, issue #57):** that refusal is a statement about the FRAME stream
-  (`fast/stream.rs`, one chunk of samples per push, the step kernel driven frame by frame).
+  (`fast/stream.rs`, one chunk of samples per push) and a bidirectional NEW cell; the
+  bidirectional LSTM streams there through `overlap_window_step`, bounded by `nn_window`.
   The UTTERANCE stream (`fast/stream_lid.rs`) is the exception: one utterance per push, scored
   whole through the same block forward the offline Twin uses, so any direction streams there,
   prefix-correct and bit-equal to the offline fast run on `finish`. A frame-granular LID

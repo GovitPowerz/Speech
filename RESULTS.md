@@ -3111,7 +3111,7 @@ with unchanged outcomes, the gate probes re-run on their final one-fold form.
 
 The Twin's LID net (`fast::driver::FastLidNet`) now runs every `(cell, direction)` pair the
 exact tree trains, through the same `classify_fast_shape` the SAD driver uses; the lifted
-truncate / TwoSweeps sweep (`fast::nn::truncate_forward`) is shared by the three shapes, and
+truncate / TwoSweeps sweep (`FastLidNet::truncate_forward`) is shared by the three shapes, and
 the plain regime is admitted (TwoSweeps ignored there, as the exact tree ignores it). The
 streaming LID session runs every shape too: it is utterance-granular, so ADR-0004's refusal is
 the frame stream's alone (its dated amendment names the exception). What survives as a
@@ -3153,10 +3153,19 @@ block 1, `s3` block 1) carry real margins (0.09 .. 0.47 in `seg_lid` units) at t
 The identical `2.081e-6` on eight pairs is not a copy: the dominant term is the bias-only
 blocks' f32 logistic at logit `0.5`, which every cell shares; transformer/forward's extra
 `2e-7` is its own. Zero flips anywhere. The dispatch leg builds each pair from its own pack
-(immediately and through the deferred `load_weights_file`) into its own arm and refuses the
-pack one element short; on the real net (`phase7_parity_lid.rs`) the LSTM pack is refused on
-length under `mamba` (14521 needed) and `transformer` (13113) and accepted head-first under
-`slstm` (11833) and `cfc` (12235), the documented file-load tolerance.
+(immediately and through the deferred `load_weights_file`, scored bit-identical on `s1`) into
+its own arm and refuses the pack one element short or one element long on the in-memory seam
+(the exact `set_weights` contract; the file seam keeps the legacy head-first tolerance with
+its warning); on the real net (`phase7_parity_lid.rs`) the LSTM pack is refused on length
+under all four cells: too short under `mamba` (14521 needed) and `transformer` (13113), too
+long under `slstm` (11833) and `cfc` (12235).
+
+The PLAIN regime (`BLSTM_LID_window 0`) on the bidirectional shapes, admitted by D2 but run
+by no committed fixture, has its own legs: the four `BiCell` pairs at the same rung
+(`bidirectional_plain_regime_parity_per_cell`: `2.081e-6` on all four, `min(margin/delta)`
+4.23e6 .. 5.65e6, pin 2.1e-5) and the real `Blstm` net
+(`phase7_parity_lid::lid_parity_phseq_plain_regime_exact_vs_fast`: score `max_abs` 5.958e-7,
+pin 6.0e-6). Measured 2026-10-09 (M4 Pro), zero flips.
 
 ### Streaming (`src/rust/tests/phase8_stream_lid.rs`, CI) and the surfaces
 

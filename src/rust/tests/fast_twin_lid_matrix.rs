@@ -13,8 +13,10 @@
 //!    `classification_errors` delta MEASURED then pinned at x10 (`ERR_PIN`). A flip is an R1
 //!    STOP, never a widening (ADR-0003: the LID tier owns argmax zero-flips).
 //!  - DISPATCH: the pair builds from its OWN committed pack into its OWN `FastNetShape` arm,
-//!    and refuses that pack one element short -- the length check is what stops another
-//!    shape's pack from being consumed head-first under this one's name.
+//!    immediately and through the deferred `load_weights_file` (scored bit-identical), and
+//!    refuses that pack one element short or one element long on the in-memory seam (the
+//!    exact `set_weights` contract) -- the two length checks are what stop another shape's
+//!    pack from being consumed head-first under this one's name.
 //!  - the two surviving REFUSALS (D2/D10), pinned where the window resolves: a windowed
 //!    CAUSAL LID net and the OVERLAP regime on any shape, both offline and streaming.
 //!
@@ -321,9 +323,13 @@ fn probe_rung(
     }
 }
 
-/// The ladder + the parity assertions for one pair.
-fn parity_pair(fixture: &str) {
-    let map = fixture_map(fixture);
+/// The ladder + the parity assertions for one pair, optionally under a `BLSTM_LID_window`
+/// override.
+fn parity_pair(fixture: &str, window: Option<&str>) {
+    let mut map = fixture_map(fixture);
+    if let Some(w) = window {
+        map.insert("BLSTM_LID_window".into(), w.into());
+    }
     let base = fixture_pack(fixture);
     let mut chosen: Option<((f64, f64), Vec<f64>)> = None;
     let mut last: Vec<f64> = Vec::new();
@@ -373,7 +379,23 @@ fn parity_pair(fixture: &str) {
 #[test]
 fn lid_parity_exact_vs_fast_per_pair() {
     for (fixture, _, _) in MATRIX {
-        parity_pair(fixture);
+        parity_pair(fixture, None);
+    }
+}
+
+/// D2 admits the PLAIN regime on the bidirectional shapes too (bailed before #57), but every
+/// committed bidirectional fixture resolves to truncate (`window 0.25`): this is the only leg
+/// that runs `FastLidNet::feed_forward_scoring`'s plain branch through a `BiCell` (the `Blstm`
+/// arm's is `phase7_parity_lid::lid_parity_phseq_plain_regime_exact_vs_fast`). MEASURED
+/// 2026-10-09 (M4 Pro) at the ladder's rung (gain 1 / offset +0.5; offset 0 leaves 5 of 7
+/// utterances an exact 0.5 tie): max_err_abs 2.081e-6 on all four, min(margin/delta)
+/// 4.23e6 .. 5.65e6, so `err_pin` holds as is.
+#[test]
+fn bidirectional_plain_regime_parity_per_cell() {
+    for (fixture, _, forward) in MATRIX {
+        if !forward {
+            parity_pair(fixture, Some("0"));
+        }
     }
 }
 
@@ -382,11 +404,11 @@ fn lid_parity_exact_vs_fast_per_pair() {
 /// names itself rather than aborting the eight-way loop.
 #[test]
 fn transformer_forward_is_the_ninth_pair() {
-    parity_pair(TRANSFORMER_FORWARD.0);
+    parity_pair(TRANSFORMER_FORWARD.0, None);
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch: each pair builds its own arm from its own pack; a short pack is refused.
+// Dispatch: each pair builds its own arm from its own pack; a wrong-length pack is refused.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -400,10 +422,12 @@ fn each_pair_builds_its_own_arm_and_refuses_a_short_pack() {
             (CellType::Lstm, false) => FastNetShape::Blstm,
             (_, false) => FastNetShape::BiCell(cell),
         };
-        let drv = FastTwinLid::from_legacy(&map, None, Some(&pack))
+        let mut drv = FastTwinLid::from_legacy(&map, None, Some(&pack))
             .unwrap_or_else(|e| panic!("{fixture}: must build from its own pack: {e}"));
         assert_eq!(drv.lid_shape(), want, "{fixture}: dispatched arm");
-        // The deferred load picks the same arm.
+        // The deferred load (the bag's path) builds the same net. `lid_shape()` is the
+        // ctor's field, blind to what `load_weights_file` built: score s1 (non-degenerate
+        // under every committed pack) through both and demand bit-identity.
         let mut deferred = FastTwinLid::from_legacy(&map, None, None).unwrap();
         let mut m = map.clone();
         m.insert(
@@ -414,7 +438,30 @@ fn each_pair_builds_its_own_arm_and_refuses_a_short_pack() {
                 .into_owned(),
         );
         deferred.load_weights_file(&m).unwrap();
-        assert_eq!(deferred.lid_shape(), want);
+        let score = |d: &mut FastTwinLid| {
+            let mut audio = phseq_audio("s1", 0);
+            let mut segs = segs_for(&audio);
+            d.get_segmentation(&mut audio, &mut segs, None).unwrap();
+            (
+                d.lid_classification_errors()[0].clone(),
+                d.lid_segments_confusion()[0].clone(),
+            )
+        };
+        assert_eq!(
+            score(&mut deferred),
+            score(&mut drv),
+            "{fixture}: the deferred load built another net"
+        );
+        // One element long: refused on length too, as the exact Twin's `set_weights` does.
+        let mut long = pack.clone();
+        long.push(0.0);
+        match FastTwinLid::from_legacy(&map, None, Some(&long)) {
+            Err(e) => assert!(
+                e.to_string().contains("more than what's needed"),
+                "{fixture}: a long pack must fail on LENGTH, got: {e}"
+            ),
+            Ok(_) => panic!("{fixture}: a pack one element long must not build"),
+        }
         // One element short: refused on length, whatever the shape.
         let short = &pack[..pack.len() - 1];
         match FastTwinLid::from_legacy(&map, None, Some(short)) {
@@ -501,14 +548,35 @@ fn overlap_lid_is_refused_on_every_shape() {
 
 #[test]
 fn plain_regime_ignores_two_sweeps_like_the_exact_tree() {
-    // A forward LID net with `TwoSweeps true` (the inherited twin_train value) and
-    // `TwoSweeps false` must score identically: the plain regime never reads the flag.
+    // `TwoSweeps true` (the inherited twin_train value) vs `false` must score identically on
+    // BOTH trees: the plain regime never reads the flag. s1/s3, not s2: every s2 block is
+    // all-zero after the 12-wide crop, so its posterior is exactly 0.5 under ANY regime.
     let fixture = "twin_mode7_lid_slstm_forward";
     let lid = fixture_pack(fixture);
-    let a = run_fast(&fixture_map(fixture), &lid, phseq_audio("s2", 1));
-    let mut m = fixture_map(fixture);
-    m.insert("BLSTM_LID_TwoSweeps".into(), "false".into());
-    let b = run_fast(&m, &lid, phseq_audio("s2", 1));
-    assert_eq!(a.errors, b.errors);
-    assert_eq!(a.confusion, b.confusion);
+    let on = fixture_map(fixture);
+    let mut off = fixture_map(fixture);
+    off.insert("BLSTM_LID_TwoSweeps".into(), "false".into());
+    for (f, lang) in [("s1", 0), ("s3", 1)] {
+        let fa = run_fast(&on, &lid, phseq_audio(f, lang));
+        let fb = run_fast(&off, &lid, phseq_audio(f, lang));
+        let ti = target_of(lang, fa.errors.len());
+        assert!(
+            margin(&langid_of(&fa.errors, ti)) > 0.0,
+            "{f}: an all-tie file makes this comparison vacuous"
+        );
+        assert_eq!(
+            fa.errors, fb.errors,
+            "{f}: the fast plain regime read TwoSweeps"
+        );
+        assert_eq!(
+            fa.confusion, fb.confusion,
+            "{f}: the fast plain regime read TwoSweeps"
+        );
+        let ea = run_exact(&on, &lid, phseq_audio(f, lang));
+        let eb = run_exact(&off, &lid, phseq_audio(f, lang));
+        assert_eq!(
+            ea.errors, eb.errors,
+            "{f}: the exact plain regime read TwoSweeps"
+        );
+    }
 }

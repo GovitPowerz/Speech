@@ -44,8 +44,8 @@
 //! place while the accumulation stays local. The phase-7/8 suites passing WITHOUT EDITS
 //! is the behavior-preservation proof.
 //!
-//! **NO STREAMING TWIN, AND NOT AS AN OMISSION.** A bidirectional net is UNSTREAMABLE BY
-//! CONSTRUCTION: the reverse stack's state at time `t` is a function of the samples
+//! **NO FRAME-STREAMING TWIN, AND NOT AS AN OMISSION.** A bidirectional new cell is
+//! UNSTREAMABLE FRAME BY FRAME: the reverse stack's state at time `t` is a function of the samples
 //! AFTER `t`, so its output at the first frame depends on the last one -- there is no
 //! bounded lookahead that makes it causal, unlike the phase-8 windowed BLSTM (bounded by
 //! the window) or the phase-9 causal cells (no lookahead at all). `fast::stream::
@@ -56,13 +56,16 @@
 //! BIDIRECTIONAL direction`), which is exactly what those legs assert -- a PREFIX
 //! SUBSTRING, not the whole body. The TAIL was rewritten, deliberately: the classifier's
 //! old advice ("run this config on the exact path") is now WRONG, because the offline
-//! fast path implements this shape.
+//! fast path implements this shape. The utterance-granular `fast::stream_lid` session is
+//! the exception (issue #57, ADR-0004's amendment): it scores one whole utterance per push
+//! through [`FastBiCell::feed_forward`], so a bidirectional LID net streams there.
 //!
 //! SCOPE, same posture as the rest of `fast/`: INFERENCE-ONLY (forward, no backward, no
 //! trainer), no MLP mode, and the two windowing regimes the exact tree's algo-3 SAD
 //! driver actually dispatches -- PLAIN (`window_size == 0`) and OVERLAP. The TRUNCATE
-//! (non-overlap) variant typed-bails in `super::driver`, exactly as it does for
-//! `FastBlstm`. f32 numeric divergence from the exact f64 tree is BY DESIGN (spec S4/S5),
+//! (non-overlap) variant typed-bails in the algo-3 SAD driver, exactly as it does for
+//! `FastBlstm`; since issue #57 the Mode-7 LID Twin (`super::driver::FastLidNet`) runs it,
+//! one [`FastBiCell::feed_forward`] per window. f32 numeric divergence from the exact f64 tree is BY DESIGN (spec S4/S5),
 //! documented here + in `RESULTS.md`, NEVER `IMPROVEMENTS.md`.
 
 use anyhow::{Result, bail};
@@ -283,18 +286,6 @@ impl FastBiCell {
     pub fn sub_sampling_ratio(&self) -> usize {
         self.lstm_subsampling.iter().product::<usize>()
             * self.output_subsampling.iter().product::<usize>()
-    }
-
-    /// The per-cell-layer sub-sampling ratios. `pub(crate)` with
-    /// [`Self::output_subsampling`] for the Twin's LID dispatch
-    /// (`fast::driver::FastLidNet`), which sizes the scoring forward off them.
-    pub(crate) fn lstm_subsampling(&self) -> &[usize] {
-        &self.lstm_subsampling
-    }
-
-    /// The per-output-layer sub-sampling ratios.
-    pub(crate) fn output_subsampling(&self) -> &[usize] {
-        &self.output_subsampling
     }
 
     /// Whole-sequence bidirectional forward, the f32 twin of `BlstmNetwork::feed_forward`
