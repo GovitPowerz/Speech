@@ -444,7 +444,7 @@ def phase7_bench_matrix(records: list[Record]) -> list[str]:
     labels = [*LEG_ORDER, *sorted({c.label for c in cells} - set(LEG_ORDER))]
     hosts = sorted({c.host for c in cells})
     header = [
-        "| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |",
+        "| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |",
         "|---|---|---|---|---|---|---|---|",
     ]
     lines: list[str] = []

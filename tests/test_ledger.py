@@ -729,7 +729,7 @@ def test_corpus_legs_stage_and_run(tmp_path: Path, label: str) -> None:
 def test_bench_matrix_pairs_speedup_and_renders_tbd_for_missing_cells() -> None:
     records = [*_pair("phase7_60s", 0.2638, 0.0573), bench_record("phase7_lid_cep", "exact", 0.0339)]
     lines = TABLES["phase7_bench_matrix"](records)  # type: ignore[arg-type]
-    assert lines[0].startswith("| leg | audio_s | path | wall_s (mean [range], n) |")
+    assert lines[0] == "| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |"
     assert lines[2] == "| SAD 60 s fixture (stereo) | 120.00 | exact | 0.2638 [0.2638-0.2638] (n=1) | 0.002198 | 46.000 | 0.3833 | baseline |"
     assert lines[3] == "| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0573 [0.0573-0.0573] (n=1) | 0.000477 | 46.000 | 0.3833 | 4.60x |"
     assert lines[4] == "| SAD corpus-gated (mono) | TBD | exact | TBD | TBD | TBD | TBD | TBD |"
@@ -792,11 +792,20 @@ def test_prose_derives_the_sad_60s_peak_rss_from_the_maxrss_means() -> None:
     assert (want["sad_rss_fast_0dp"], want["sad_rss_exact_0dp"]) == ("44", "57")
 
 
-def test_prose_whole_mb_rss_quote_refuses_a_decimal_it_would_truncate() -> None:
+def test_prose_whole_mib_rss_quote_refuses_a_decimal_it_would_truncate() -> None:
     [q] = [q for q in prose.QUOTES if q.values == ("sad_rss_fast_0dp", "sad_rss_exact_0dp")]
-    assert re.search(q.pattern, "the fast SAD path peaks at 44 MB of RSS against the exact tree's 57.4.") is None
-    m = re.search(q.pattern, "the fast SAD path peaks at 44 MB of RSS against the exact tree's 57. A streamed")
+    assert re.search(q.pattern, "the fast SAD path peaks at 44 MiB of RSS against the exact tree's 57.4.") is None
+    m = re.search(q.pattern, "the fast SAD path peaks at 44 MiB of RSS against the exact tree's 57. A streamed")
     assert m is not None and m.groups() == ("44", "57")
+
+
+def test_prose_rss_quotes_name_the_mib_unit_the_bench_reports() -> None:
+    # `maxrss_mb` is `ru_maxrss / 1024^2` (issue #54): the unit a reader sees is MiB, never MB.
+    rss = [q for q in prose.QUOTES if any(v.startswith("sad_rss_") for v in q.values)]
+    assert len(rss) == 2 and all("MiB" in q.pattern and " MB" not in q.pattern for q in rss)
+    [one_dp] = [q for q in rss if q.values == ("sad_rss_fast_1dp", "sad_rss_exact_1dp")]
+    assert re.search(one_dp.pattern, "fast SAD peak RSS 43.5 MB vs 57.2 exact") is None
+    assert re.search(one_dp.pattern, "fast SAD peak RSS 43.5 MiB vs 57.2 exact") is not None
 
 
 def test_prose_quotes_match_the_ledger() -> None:
