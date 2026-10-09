@@ -625,11 +625,11 @@ fn the_sad_file_seam_matches_the_exact_twin_row_by_row() {
         speech::io::binary::write_matrix(&p, data.len(), 1, data).unwrap();
         p.to_string_lossy().into_owned()
     };
-    let short_sad = write("short.bin", &sad[..sad.len() - 1]);
+    let sad_short = write("short.bin", &sad[..sad.len() - 1]);
     let mut long = sad.clone();
     long.push(0.0);
-    let long_sad = write("long.bin", &long);
-    let missing_sad = dir
+    let sad_long = write("long.bin", &long);
+    let sad_missing = dir
         .path()
         .join("missing.bin")
         .to_string_lossy()
@@ -645,10 +645,10 @@ fn the_sad_file_seam_matches_the_exact_twin_row_by_row() {
 
     // (leg, SAD file, LID file, must it build?)
     let legs: [(&str, &str, &str, bool); 5] = [
-        ("short SAD", &short_sad, &lid_ok, false),
-        ("missing SAD", &missing_sad, &lid_ok, false),
-        ("over-long SAD", &long_sad, &lid_ok, true),
-        ("short SAD and short LID", &short_sad, &lid_short, false),
+        ("short SAD", &sad_short, &lid_ok, false),
+        ("missing SAD", &sad_missing, &lid_ok, false),
+        ("over-long SAD", &sad_long, &lid_ok, true),
+        ("short SAD and short LID", &sad_short, &lid_short, false),
         ("empty SAD key", "", &lid_ok, true),
     ];
     for (leg, sad_file, lid_file, builds) in legs {
@@ -668,20 +668,15 @@ fn the_sad_file_seam_matches_the_exact_twin_row_by_row() {
             fast, exact,
             "{leg}: the fast outcome must equal the exact one"
         );
+        // The order: with both files short, the SAD error is the one raised.
+        if lid_file == lid_short.as_str() {
+            let err = fast.unwrap_err();
+            assert!(
+                err.contains(&sad_short),
+                "{leg}: the SAD file is read first, so its error is the one raised: {err}"
+            );
+        }
     }
-    // The order: with both files short, the SAD error is the one raised on both trees.
-    let mut m = fixture_map("twin_mode7_lid_slstm");
-    m.insert("BLSTM_weightsFile".into(), short_sad.clone());
-    m.insert("BLSTM_LID_weightsFile".into(), lid_short.clone());
-    let err = FastTwinLid::from_legacy(&m, None, None)
-        .unwrap()
-        .load_weights_file(&m)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains(&short_sad),
-        "the SAD file is read first, so its error is the one raised: {err}"
-    );
 }
 
 // ---------------------------------------------------------------------------
