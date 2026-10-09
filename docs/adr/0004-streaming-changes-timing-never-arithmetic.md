@@ -22,6 +22,10 @@ identical, chunk-invariant at 20 / 100 / 1000 / 7 ms.
 kernel (`overlap_window_step` for the windowed BLSTM; the per-cell `step` for every causal
 cell), so equality holds by construction rather than by tolerance. A performance edit that
 batches one side and not the other is caught by the bit-equality gate.
+**Amendment (2026-10-10, issue #24):** the two drivers also share their SETUP -- one
+`fast::plan::FastSadPlan` (rate-free) and one `SadTimeline` (at the rate) are the shared input, the
+step kernel the shared arithmetic; a divergence between the offline and streamed setups is now a
+single-site change, and the gates above are the proof that moving the setup moved no arithmetic.
 
 **Emission is settled-prefix only, with zero retractions.** The decision layer emits a segment
 only once nothing in the future can change it: the frontier is bounded by the last raw boundary,
