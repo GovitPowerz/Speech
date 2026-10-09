@@ -129,7 +129,7 @@ The LSTM's 12-row peephole matrix. Mixed-kind: some rows read cell states, other
 One of the four regimes a bidirectional net runs under (truncate, two-sweeps, overlap, MLP-overlap).
 
 **Plain regime**:
-The whole-sequence forward (`window 0`), the only regime a causal net runs and the only one streaming accepts for it.
+The whole-sequence forward (`window 0`), the only regime a causal net runs and the only one the frame stream accepts for it.
 
 **Sub-sampling**:
 Per-layer integer decimation of the time axis; the trailing `T mod R` frames are dropped, never restored.
@@ -165,7 +165,13 @@ A test comparing the fast tree against the exact tree on one fixture. Owns arith
 A test comparing two runs of the same kernel (split state, chunk sizes, run-twice). Owns state threading; blind to arithmetic.
 
 **Streaming session**:
-The chunked-input SAD path (`StreamingSession`) or the per-utterance LID path (`StreamingLidSession`).
+The chunked-input SAD path (`StreamingSession`) or the per-utterance LID path (`StreamingLidSession`). Two granularities, below.
+
+**Frame stream**:
+The SAD streaming session: one chunk of samples per push, the step kernel driven frame by frame, so a bidirectional net is refused.
+
+**Utterance stream**:
+The LID streaming session: one utterance per push, scored whole through the same block forward the offline Twin uses, so any direction streams.
 
 **Causality cut**:
 Freezing the two whole-file statistics (the audio gain via `Audio_fixed_gain`, the type-1 normalize tail) so that streaming changes timing only, never arithmetic (ADR-0004).
