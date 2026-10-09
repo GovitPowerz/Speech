@@ -262,8 +262,9 @@ impl FastSadNet {
 /// trees refuse the same in-memory packs by construction and cut a weight file at the same
 /// length (issue #62). One file stays outside it: the Twin's `BLSTM_weightsFile`, which
 /// the fast Twin never reads (Mode 7 never runs the SAD net). Not the shapes' own
-/// `element_count`s, which only size what `from_flat` reads (#61: the Blstm one drops
-/// `OutputSubSampling`; none has an MLP arm for the Twin's never-run SAD net).
+/// `element_count`s: they size what `from_flat` reads, so they are the exact count only
+/// while their arithmetic tracks the exact tree's (#61 was such a drift), and none has an
+/// MLP arm for the Twin's never-run SAD net.
 pub(crate) fn exact_pack_len(bc: &BlstmConfig) -> Result<usize> {
     Ok(BlstmNetwork::from_config(bc.clone())?.nb_of_weights())
 }
