@@ -15,9 +15,7 @@ with the backprop flags off (the fast bag refuses a training-shaped map).
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import chdir
 from pathlib import Path
 from typing import Any
 
@@ -32,16 +30,6 @@ from tests.pyo3.test_phase9_seam import seed_sad, seed_twin_mode7  # noqa: E402
 
 TWIN = "twin_mode7_lid_slstm"
 SINGLE = "slstm_forward"
-
-
-@contextmanager
-def chdir(path: Path) -> Iterator[None]:
-    prev = Path.cwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(prev)
 
 
 def _engine(tmp_path: Path, fixture: str, path: str) -> Any:
@@ -71,9 +59,8 @@ def test_out_of_range_pos_raises_index_error(tmp_path: Path, method: str, path: 
     _seed(tmp_path, TWIN)
     eng = _engine(tmp_path, TWIN, path)
     args = (1, _packs(tmp_path, TWIN)) if method == "set_weights" else (1,)
-    with pytest.raises(IndexError, match=r"\b1\b") as raised:
+    with pytest.raises(IndexError, match=r"config position 1 is out of range: this engine holds 1 config\(s\)"):
         getattr(eng, method)(*args)
-    assert "1 config" in str(raised.value), str(raised.value)
 
 
 # (fixture, the wrong list). The packs are the config's own HALVED, so a list applied head-first
@@ -100,7 +87,7 @@ def test_wrong_pack_count_raises_before_applying_on_both_trees(tmp_path: Path, l
         with pytest.raises(RuntimeError) as refused:
             eng.set_weights(0, nets)
         msg = str(refused.value)
-        assert str(len(nets)) in msg and str(expected) in msg, msg
+        assert f"given is {len(nets)} but config 0 holds {expected} network(s)" in msg, msg
         after = eng.weights(0)
         assert len(after) == len(before)
         for a, b in zip(after, before, strict=True):

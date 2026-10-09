@@ -475,7 +475,9 @@ fn agg_to_tuple(py: Python<'_>, a: LidAggregate) -> LidAggTuple<'_> {
 /// target `lang_index`, then drive it one `external_features` entry ("utterance") at a
 /// time via `push_utterance` / `finish`. The LID net loads from the config's
 /// `BLSTM_LID_weightsFile` (mirroring `StreamingSession`'s own config-driven weight
-/// load, the T4/T5/T7 precedent `fast/stream_lid.rs`'s module doc names) -- construction
+/// load, the T4/T5/T7 precedent `fast/stream_lid.rs`'s module doc names; since issue #65
+/// a non-empty `BLSTM_weightsFile` is read and length-checked too, as the offline Twin
+/// does) -- construction
 /// bails if `BLSTM_LID_Mode != 7`, the LID window resolves to a regime the net's shape
 /// refuses (overlap on any shape, a window on a causal net), or no net loads.
 #[pyclass]
@@ -491,7 +493,8 @@ impl StreamingLidSession {
     /// (clamped into `[0, class_nb)` by the Rust session -- a negative value targets
     /// class 0). COPY: the config is read from disk + parsed into an owned map. The LID
     /// weight pack is NOT passed explicitly here (mirrors `StreamingSession::new`'s
-    /// config-driven load): `None` defers to the config's `BLSTM_LID_weightsFile`.
+    /// config-driven load): `None` defers to the config's `BLSTM_LID_weightsFile` (and
+    /// checks a non-empty `BLSTM_weightsFile`, issue #65).
     #[new]
     fn new(config_path: &str, rate: f64, lang_index: i32) -> PyResult<Self> {
         let map = load_config_map(config_path)?;

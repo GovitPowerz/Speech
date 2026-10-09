@@ -269,6 +269,25 @@ pub(crate) fn exact_pack_len(bc: &BlstmConfig) -> Result<usize> {
     Ok(BlstmNetwork::from_config(bc.clone())?.nb_of_weights())
 }
 
+/// `key`'s weight file cut to `needed` under the legacy FILE-LOAD tolerance
+/// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and keeps its
+/// head); `None` for an absent or EMPTY key (the legacy `size() != 0` guard). The one read
+/// every fast `load_weights_file` goes through.
+fn read_file_pack(
+    map: &IndexMap<String, String>,
+    key: &str,
+    needed: usize,
+) -> Result<Option<Vec<f64>>> {
+    let file = map.get(key).map(String::as_str).unwrap_or("");
+    if file.is_empty() {
+        return Ok(None);
+    }
+    let mut flat = crate::io::binary::read_weight_vector(std::path::Path::new(file))?;
+    file_pack_head(&flat, needed, file)?;
+    flat.truncate(needed);
+    Ok(Some(flat))
+}
+
 /// Build the algo-3 SAD net for a classified [`FastNetShape`] from the flat f64 pack.
 /// ONE place, so `from_legacy(map, Some(flat))` and the deferred
 /// `load_weights_file` cannot pick different arms.
@@ -527,15 +546,10 @@ impl FastSpectralSegmenter {
     /// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and loads
     /// its head).
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
-        let weights_file = map
-            .get("BLSTM_weightsFile")
-            .map(String::as_str)
-            .unwrap_or("");
-        if weights_file.is_empty() {
-            return Ok(());
+        match read_file_pack(map, "BLSTM_weightsFile", self.pack_len)? {
+            Some(flat) => self.set_weights(&flat),
+            None => Ok(()),
         }
-        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.set_weights(file_pack_head(&flat, self.pack_len, weights_file)?)
     }
 
     /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
@@ -1433,23 +1447,11 @@ impl FastTwinLid {
     /// missing SAD file is refused here as the exact Twin refuses it, and with both files
     /// bad the SAD error is the one raised.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
-        let sad_file = map
-            .get("BLSTM_weightsFile")
-            .map(String::as_str)
-            .unwrap_or("");
-        if !sad_file.is_empty() {
-            let flat = crate::io::binary::read_weight_vector(std::path::Path::new(sad_file))?;
-            file_pack_head(&flat, self.sad_pack_len, sad_file)?;
+        read_file_pack(map, "BLSTM_weightsFile", self.sad_pack_len)?;
+        match read_file_pack(map, "BLSTM_LID_weightsFile", self.lid_pack_len)? {
+            Some(lid) => self.set_lid_weights(&lid),
+            None => Ok(()),
         }
-        let weights_file = map
-            .get("BLSTM_LID_weightsFile")
-            .map(String::as_str)
-            .unwrap_or("");
-        if weights_file.is_empty() {
-            return Ok(());
-        }
-        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.set_lid_weights(file_pack_head(&flat, self.lid_pack_len, weights_file)?)
     }
 
     /// The LID net shape the config selected (the `BLSTM_LID` prefix through

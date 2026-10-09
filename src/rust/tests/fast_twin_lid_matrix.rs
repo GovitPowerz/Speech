@@ -603,7 +603,8 @@ fn the_lid_file_seam_keeps_the_head_first_tolerance() {
 /// two trees ACCEPT does. Per row of the issue's table (short, missing, over-long), plus
 /// the order (a short SAD file AND a short LID file: the SAD error is the one raised) and
 /// the no-op (an empty key, what `phase4b/twin_mode7.config` relies on): the fast outcome
-/// equals the exact `TwinBlstmSpectralLid` outcome, error text compared as strings. The
+/// equals the exact `TwinBlstmSpectralLid` outcome, error text compared as strings, and so
+/// does a `StreamingLidSession` built with no in-memory pack (the same seam). The
 /// SAD files are written into a tempdir from the committed 537-element `tiny_sad_seed.bin`.
 /// Reverting the fast SAD read makes the short and missing legs fail (the mutation check).
 #[test]
@@ -667,6 +668,14 @@ fn the_sad_file_seam_matches_the_exact_twin_row_by_row() {
         assert_eq!(
             fast, exact,
             "{leg}: the fast outcome must equal the exact one"
+        );
+        // The streaming LID session defers to the same seam, so it refuses the same files.
+        let streamed = StreamingLidSession::new(&m, 8000.0, 0, None)
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        assert_eq!(
+            streamed, exact,
+            "{leg}: the streaming session must accept what the Twin accepts"
         );
         // The order: with both files short, the SAD error is the one raised.
         if lid_file == lid_short.as_str() {
