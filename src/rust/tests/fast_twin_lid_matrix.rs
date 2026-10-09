@@ -324,9 +324,11 @@ fn parity_pair(fixture: &str) {
     let map = fixture_map(fixture);
     let base = fixture_pack(fixture);
     let mut chosen: Option<((f64, f64), Vec<f64>)> = None;
+    let mut last: Vec<f64> = Vec::new();
     'ladder: for offset in [0.0, 0.5] {
         for gain in [1.0, 2.0, 4.0, 8.0] {
             let lid = perturbed_pack(&map, &base, gain, offset);
+            last.clone_from(&lid);
             let rep = probe_rung(fixture, &map, &lid, false);
             println!(
                 "MEASURE ladder[{fixture}] gain {gain} offset {offset:+}: interior={} \
@@ -339,8 +341,13 @@ fn parity_pair(fixture: &str) {
             }
         }
     }
-    let ((gain, offset), lid) =
-        chosen.unwrap_or_else(|| panic!("{fixture}: no ladder rung is interior"));
+    let ((gain, offset), lid) = chosen.unwrap_or_else(|| {
+        // No rung interior: the f32 delta swamped every margin. Assert identity at the last
+        // rung FIRST, so a broken fast kernel reports as the argmax FLIP it is (R1) rather
+        // than as a ladder exhaustion (the mutation battery's item 1 is the witness).
+        probe_rung(fixture, &map, &last, true);
+        panic!("{fixture}: no ladder rung is interior")
+    });
     let rep = probe_rung(fixture, &map, &lid, true);
     println!(
         "MEASURE parity[{fixture}] gain {gain} offset {offset:+}: max_err_abs={:.3e} \
