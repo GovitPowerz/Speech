@@ -114,7 +114,7 @@ use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segment, Segmentation};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
 
-use super::cells::{FastCausalNet, FastCellState};
+use super::cells::{CellGeometry, FastCausalNet, FastCellState};
 use super::driver::{FastNetShape, build_spec_aligned_to, classify_fast_shape, exact_pack_len};
 use super::nn::{
     DenseRowChain, FastBlstm, FastMatrix, external_normalize_f32, window_begin, window_end,
@@ -2135,9 +2135,7 @@ impl StreamingSession {
             FastNetShape::Causal(cell) => Some(FastCausalNet::from_flat(
                 &spec,
                 cell,
-                &bc.mamba,
-                &bc.cfc,
-                &bc.transformer,
+                &CellGeometry::from(&bc),
                 flat,
             )?),
             FastNetShape::Blstm => None,

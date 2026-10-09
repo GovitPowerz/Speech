@@ -72,8 +72,7 @@ use crate::config::NnetSpec;
 use crate::constants::random_gauss;
 use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::blstm::{
-    BlstmConfig, BlstmNetwork, CellType, CfcParams, Direction, MambaParams, TransformerParams,
-    check_pack_len, file_pack_head,
+    BlstmConfig, BlstmNetwork, CellType, Direction, check_pack_len, file_pack_head,
 };
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
@@ -81,7 +80,7 @@ use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
 
 use super::bicell::FastBiCell;
-use super::cells::FastCausalNet;
+use super::cells::{CellGeometry, FastCausalNet};
 use super::nn::{
     FastBlstm, FastMatrix, external_normalize_f32, pad_replicate_ends_f32, self_normalize_f32,
     slice_rows_f32,
@@ -294,29 +293,17 @@ fn read_file_pack(
 fn build_sad_net(
     spec: &NnetSpec,
     shape: FastNetShape,
-    mamba: &MambaParams,
-    cfc: &CfcParams,
-    transformer: &TransformerParams,
+    geometry: &CellGeometry,
     flat: &[f64],
 ) -> Result<FastSadNet> {
     Ok(match shape {
         FastNetShape::Blstm => FastSadNet::Blstm(FastBlstm::from_flat(spec, flat)?),
-        FastNetShape::Causal(cell) => FastSadNet::Causal(FastCausalNet::from_flat(
-            spec,
-            cell,
-            mamba,
-            cfc,
-            transformer,
-            flat,
-        )?),
-        FastNetShape::BiCell(cell) => FastSadNet::BiCell(FastBiCell::from_flat(
-            spec,
-            cell,
-            mamba,
-            cfc,
-            transformer,
-            flat,
-        )?),
+        FastNetShape::Causal(cell) => {
+            FastSadNet::Causal(FastCausalNet::from_flat(spec, cell, geometry, flat)?)
+        }
+        FastNetShape::BiCell(cell) => {
+            FastSadNet::BiCell(FastBiCell::from_flat(spec, cell, geometry, flat)?)
+        }
     })
 }
 
@@ -373,17 +360,11 @@ pub struct FastSpectralSegmenter {
     /// The net SHAPE the config selected (Phase 9 Task 6) -- kept so the deferred
     /// `load_weights_file` rebuild picks the same arm `from_legacy` did.
     shape: FastNetShape,
-    /// The `Mamba_*` geometry, inert unless [`Self::shape`] is `Causal(Mamba)`.
-    mamba: MambaParams,
-    /// The `Cfc_*` geometry, inert unless [`Self::shape`] is `Causal(Cfc)`. Carried
-    /// beside `mamba` for the same reason: the deferred `load_weights_file` rebuild
-    /// must size the net exactly as `from_legacy` did.
-    cfc: CfcParams,
-    /// The `Transformer_*` geometry, inert unless [`Self::shape`] names the transformer
-    /// cell. Carried for its two siblings' reason (the deferred rebuild must size the net
-    /// exactly as `from_legacy` did) -- and here `window`/`heads` matter to the KERNEL
-    /// even though only `d_ff` moves the pack LENGTH.
-    transformer: TransformerParams,
+    /// The three port-only cell geometries, inert unless [`Self::shape`] names their
+    /// cell. Carried so the deferred `load_weights_file` rebuild sizes the net exactly as
+    /// `from_legacy` did (the transformer's `window`/`heads` matter to the KERNEL even
+    /// though only `d_ff` moves the pack LENGTH).
+    geometry: CellGeometry,
     net: Option<FastSadNet>,
     /// [`exact_pack_len`] for this config's net: what every pack is checked against.
     pack_len: usize,
@@ -497,9 +478,7 @@ impl FastSpectralSegmenter {
             feature_cfg,
             spec,
             shape,
-            mamba: bc.mamba,
-            cfc: bc.cfc,
-            transformer: bc.transformer,
+            geometry: CellGeometry::from(&bc),
             net: None,
             pack_len,
             lstm_sub_sampling,
@@ -528,14 +507,7 @@ impl FastSpectralSegmenter {
     /// classified. A refused pack leaves the current net in place.
     pub fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
         check_pack_len(flat.len(), self.pack_len)?;
-        self.net = Some(build_sad_net(
-            &self.spec,
-            self.shape,
-            &self.mamba,
-            &self.cfc,
-            &self.transformer,
-            flat,
-        )?);
+        self.net = Some(build_sad_net(&self.spec, self.shape, &self.geometry, flat)?);
         Ok(())
     }
 
@@ -1079,29 +1051,17 @@ impl FastLidNet {
 fn build_lid_net(
     spec: &NnetSpec,
     shape: FastNetShape,
-    mamba: &MambaParams,
-    cfc: &CfcParams,
-    transformer: &TransformerParams,
+    geometry: &CellGeometry,
     flat: &[f64],
 ) -> Result<FastLidNet> {
     Ok(match shape {
         FastNetShape::Blstm => FastLidNet::Blstm(FastBlstm::from_flat(spec, flat)?),
-        FastNetShape::Causal(cell) => FastLidNet::Causal(FastCausalNet::from_flat(
-            spec,
-            cell,
-            mamba,
-            cfc,
-            transformer,
-            flat,
-        )?),
-        FastNetShape::BiCell(cell) => FastLidNet::BiCell(FastBiCell::from_flat(
-            spec,
-            cell,
-            mamba,
-            cfc,
-            transformer,
-            flat,
-        )?),
+        FastNetShape::Causal(cell) => {
+            FastLidNet::Causal(FastCausalNet::from_flat(spec, cell, geometry, flat)?)
+        }
+        FastNetShape::BiCell(cell) => {
+            FastLidNet::BiCell(FastBiCell::from_flat(spec, cell, geometry, flat)?)
+        }
     })
 }
 
@@ -1187,12 +1147,10 @@ pub struct FastTwinLid {
     /// off the spec/config so the window derivation needs no live net borrow.
     lid_spec: NnetSpec,
     /// The LID net SHAPE the config selected ([`classify_fast_shape`] on the `BLSTM_LID`
-    /// prefix) + the three cell geometries, carried so the deferred `load_weights_file`
-    /// rebuild sizes and picks exactly as `from_legacy` did (the SAD driver's rule).
+    /// prefix) + its cell geometry, carried so the deferred `load_weights_file` rebuild
+    /// sizes and picks exactly as `from_legacy` did (the SAD driver's rule).
     lid_shape: FastNetShape,
-    lid_mamba: MambaParams,
-    lid_cfc: CfcParams,
-    lid_transformer: TransformerParams,
+    lid_geometry: CellGeometry,
     lid_net: Option<FastLidNet>,
     /// [`exact_pack_len`] for the LID net: what every LID pack is checked against.
     lid_pack_len: usize,
@@ -1374,9 +1332,7 @@ impl FastTwinLid {
             sad_pack_len,
             lid_spec,
             lid_shape,
-            lid_mamba: lid_bc.mamba,
-            lid_cfc: lid_bc.cfc,
-            lid_transformer: lid_bc.transformer,
+            lid_geometry: CellGeometry::from(&lid_bc),
             lid_net: None,
             lid_pack_len,
             lid_ssr,
@@ -1429,9 +1385,7 @@ impl FastTwinLid {
         self.lid_net = Some(build_lid_net(
             &self.lid_spec,
             self.lid_shape,
-            &self.lid_mamba,
-            &self.lid_cfc,
-            &self.lid_transformer,
+            &self.lid_geometry,
             lid,
         )?);
         Ok(())

@@ -71,11 +71,11 @@
 use anyhow::{Result, bail};
 
 use crate::config::NnetSpec;
-use crate::nn::blstm::{CellType, CfcParams, MambaParams, TransformerParams};
+use crate::nn::blstm::CellType;
 
 use super::cells::{
-    FastCell, backward_peep, build_cell, build_dense_tail, cell_stack_forward, check_net_spec,
-    drive_output_rows, forward_peep, stack_element_count, stack_input_cols,
+    CellGeometry, FastCell, backward_peep, build_cell, build_dense_tail, cell_stack_forward,
+    check_net_spec, drive_output_rows, forward_peep, stack_element_count, stack_input_cols,
 };
 use super::nn::{DenseRowChain, FastDenseLayer, FastMatrix, Scratch, window_begin, window_end};
 
@@ -133,9 +133,7 @@ impl FastBiCell {
     pub fn element_count(
         spec: &NnetSpec,
         cell_type: CellType,
-        mamba: &MambaParams,
-        cfc: &CfcParams,
-        transformer: &TransformerParams,
+        geometry: &CellGeometry,
     ) -> Result<usize> {
         check_net_spec(spec, "fast::bicell::FastBiCell")?;
         // THE LSTM REFUSAL, now EXPLICIT (phase-10 Task 8). It used to fall out of
@@ -157,14 +155,7 @@ impl FastBiCell {
         // TWO stacks: the forward and backward blocks are separate weight blocks of
         // identical shape (`BlstmNetwork::from_config` builds both from the same
         // `lstm_neuron_nb`), which is the whole difference from the causal net's count.
-        Ok(stack_element_count(
-            spec,
-            cell_type,
-            mamba,
-            cfc,
-            transformer,
-            2,
-        ))
+        Ok(stack_element_count(spec, cell_type, geometry, 2))
     }
 
     /// Build from a `NnetSpec` + the cell type/geometry + the flat f64 pack, narrowing
@@ -182,9 +173,7 @@ impl FastBiCell {
     pub fn from_flat(
         spec: &NnetSpec,
         cell_type: CellType,
-        mamba: &MambaParams,
-        cfc: &CfcParams,
-        transformer: &TransformerParams,
+        geometry: &CellGeometry,
         flat: &[f64],
     ) -> Result<FastBiCell> {
         if spec.lstm_neuron_nb.is_empty() || spec.lstm_neuron_nb[0] == 0 {
@@ -193,7 +182,7 @@ impl FastBiCell {
                  unsupported"
             );
         }
-        let needed = Self::element_count(spec, cell_type, mamba, cfc, transformer)?;
+        let needed = Self::element_count(spec, cell_type, geometry)?;
         if flat.len() < needed {
             bail!(
                 "flat weight vector too short for the fast bidirectional net: {} < {needed}",
@@ -216,16 +205,7 @@ impl FastBiCell {
             for jj in 0..lstm.len() - 1 {
                 let i = lstm[jj] * lsub[jj];
                 let o = lstm[jj + 1];
-                let (cell, used) = build_cell(
-                    cell_type,
-                    &flat[*pos..],
-                    i,
-                    o,
-                    mamba,
-                    cfc,
-                    transformer,
-                    peep,
-                );
+                let (cell, used) = build_cell(cell_type, &flat[*pos..], i, o, geometry, peep);
                 cells.push(cell);
                 *pos += used;
             }
@@ -504,6 +484,7 @@ impl FastBiCell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::blstm::{CfcParams, MambaParams, TransformerParams};
     // `cell_weight_count` is a TEST-only import here since the phase-11 Task 1 dedupe:
     // `element_count` now reaches it through `super::cells::stack_element_count`, while
     // these legs still size a single stack directly to cross-check the count.
@@ -541,6 +522,15 @@ mod tests {
             }
         }
         m
+    }
+
+    /// The three geometries as one [`CellGeometry`] (the fast-tree value since issue #24).
+    fn geo(p: &MambaParams, c: &CfcParams, tf: &TransformerParams) -> CellGeometry {
+        CellGeometry {
+            mamba: *p,
+            cfc: *c,
+            transformer: *tf,
+        }
     }
 
     fn mamba_params() -> MambaParams {
@@ -594,7 +584,7 @@ mod tests {
         let c = cfc_params();
         let tf = transformer_params();
         for cell in CELLS {
-            let n = FastBiCell::element_count(&sp, cell, &p, &c, &tf).unwrap();
+            let n = FastBiCell::element_count(&sp, cell, &geo(&p, &c, &tf)).unwrap();
             let stack = match cell {
                 CellType::Slstm => {
                     FastSlstm::weight_count(6 * 2, 5) + FastSlstm::weight_count(5 * 1, 4)
@@ -622,8 +612,8 @@ mod tests {
             );
             // ...and `from_flat` consumes EXACTLY it (the ctor assert), while one
             // element less is refused.
-            FastBiCell::from_flat(&sp, cell, &p, &c, &tf, &weights(n)).unwrap();
-            let err = match FastBiCell::from_flat(&sp, cell, &p, &c, &tf, &weights(n - 1)) {
+            FastBiCell::from_flat(&sp, cell, &geo(&p, &c, &tf), &weights(n)).unwrap();
+            let err = match FastBiCell::from_flat(&sp, cell, &geo(&p, &c, &tf), &weights(n - 1)) {
                 Err(e) => e,
                 Ok(_) => panic!("{cell:?}: a one-element-short pack must be refused"),
             };
@@ -639,9 +629,7 @@ mod tests {
         let err = FastBiCell::element_count(
             &sp,
             CellType::Lstm,
-            &mamba_params(),
-            &cfc_params(),
-            &transformer_params(),
+            &geo(&mamba_params(), &cfc_params(), &transformer_params()),
         )
         .unwrap_err();
         assert!(
@@ -661,14 +649,14 @@ mod tests {
         let c = cfc_params();
         let tf = transformer_params();
         for cell in CELLS {
-            let stack = cell_weight_count(cell, 4, 3, &p, &c, &tf);
-            let n = FastBiCell::element_count(&sp, cell, &p, &c, &tf).unwrap();
+            let stack = cell_weight_count(cell, 4, 3, &geo(&p, &c, &tf));
+            let n = FastBiCell::element_count(&sp, cell, &geo(&p, &c, &tf)).unwrap();
             // Make the two stacks byte-IDENTICAL, so any difference in their outputs is
             // the time direction and nothing else.
             let mut flat = weights(n);
             let (head, tail) = flat.split_at_mut(stack);
             tail[..stack].copy_from_slice(head);
-            let mut net = FastBiCell::from_flat(&sp, cell, &p, &c, &tf, &flat).unwrap();
+            let mut net = FastBiCell::from_flat(&sp, cell, &geo(&p, &c, &tf), &flat).unwrap();
             let input = seq(9, 4, 0.3);
             net.feed_forward(&input);
             assert_eq!(net.hidden_fwd.len(), net.hidden_rev.len());
@@ -730,8 +718,8 @@ mod tests {
         let c = cfc_params();
         let tf = transformer_params();
         for cell in CELLS {
-            let stack = cell_weight_count(cell, 4, hidden, &p, &c, &tf);
-            let n = FastBiCell::element_count(&sp, cell, &p, &c, &tf).unwrap();
+            let stack = cell_weight_count(cell, 4, hidden, &geo(&p, &c, &tf));
+            let n = FastBiCell::element_count(&sp, cell, &geo(&p, &c, &tf)).unwrap();
             let base = weights(n);
             // The single dense layer sits after both stacks; col-major (I x O) with
             // I = 2*hidden, O = 1, so its weight rows are `base[2*stack .. 2*stack + I]`.
@@ -747,7 +735,7 @@ mod tests {
                 v
             };
             let run = |flat: &[f64]| -> Vec<f32> {
-                let mut net = FastBiCell::from_flat(&sp, cell, &p, &c, &tf, flat).unwrap();
+                let mut net = FastBiCell::from_flat(&sp, cell, &geo(&p, &c, &tf), flat).unwrap();
                 net.feed_forward(&input).data.clone()
             };
 
@@ -796,8 +784,8 @@ mod tests {
         let c = cfc_params();
         let tf = transformer_params();
         for cell in CELLS {
-            let n = FastBiCell::element_count(&sp, cell, &p, &c, &tf).unwrap();
-            let mut net = FastBiCell::from_flat(&sp, cell, &p, &c, &tf, &weights(n)).unwrap();
+            let n = FastBiCell::element_count(&sp, cell, &geo(&p, &c, &tf)).unwrap();
+            let mut net = FastBiCell::from_flat(&sp, cell, &geo(&p, &c, &tf), &weights(n)).unwrap();
             let input = seq(13, 6, 0.2);
             let a = net.feed_forward(&input).clone();
             let b = net.feed_forward(&input).clone();
@@ -825,9 +813,9 @@ mod tests {
         let p = mamba_params();
         let c = cfc_params();
         let tf = transformer_params();
-        let n = FastBiCell::element_count(&sp, CellType::Slstm, &p, &c, &tf).unwrap();
+        let n = FastBiCell::element_count(&sp, CellType::Slstm, &geo(&p, &c, &tf)).unwrap();
         let mut net =
-            FastBiCell::from_flat(&sp, CellType::Slstm, &p, &c, &tf, &weights(n)).unwrap();
+            FastBiCell::from_flat(&sp, CellType::Slstm, &geo(&p, &c, &tf), &weights(n)).unwrap();
         let input = seq(20, 4, 0.1);
         // ssr == 1, so output rows == input rows; size the buffer LONGER than that.
         let mut out = FastMatrix::zeros(26, 1);
@@ -853,8 +841,8 @@ mod tests {
         let c = cfc_params();
         let tf = transformer_params();
         for cell in CELLS {
-            let n = FastBiCell::element_count(&sp, cell, &p, &c, &tf).unwrap();
-            let mut net = FastBiCell::from_flat(&sp, cell, &p, &c, &tf, &weights(n)).unwrap();
+            let n = FastBiCell::element_count(&sp, cell, &geo(&p, &c, &tf)).unwrap();
+            let mut net = FastBiCell::from_flat(&sp, cell, &geo(&p, &c, &tf), &weights(n)).unwrap();
             let input = seq(21, 4, 0.45);
             // jj = 0, 7, 14 -> begins 0, 4, 11 with `window_begin`'s `jj - w`... so a
             // hand-built expectation would re-derive the whole grid. Instead assert the
