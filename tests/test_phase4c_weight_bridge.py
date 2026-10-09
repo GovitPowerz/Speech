@@ -97,6 +97,20 @@ def test_element_count_matches(spec_and_flat: tuple[dict[str, object], NDArray[n
     assert packed.shape[0] == wb.element_count(spec) == flat.shape[0]
 
 
+@given(_spec_and_flat())
+def test_output_layer_fan_in_is_neurons_times_subsampling(spec_and_flat: tuple[dict[str, object], NDArray[np.float64]]) -> None:
+    """Output layer `i` reads `OutputNeuronNb[i] * OutputSubSampling[i]` inputs, as the exact net
+    builds it (`Network::new`) and the legacy packs it (`vec2struct.m:908`). The round trips
+    above only check the packer against itself, so they cannot see a fan-in that ignores the
+    sub-sampling on both sides at once (#61)."""
+    spec, flat = spec_and_flat
+    outn = cast(list[int], spec["OutputNeuronNb"])
+    osub = cast(list[int], spec["OutputSubSampling"])
+    net = wb.unpack_weights(flat, spec)
+    shapes = [mat.shape for mat in cast(list[np.ndarray], net["output"])]
+    assert shapes == [(outn[i + 1], outn[i] * osub[i] + 1) for i in range(len(outn) - 1)]
+
+
 def test_pack_weights_matches_nnet_to_flat_on_real_fixture() -> None:
     """Cross-check vs the committed real artifacts (mirrors test_full_pipeline_matches_flat)."""
     structured, spec = wb.load_structured(REF / "best_config_manifest.json", REF / "best_config_domain.bin")

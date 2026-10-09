@@ -464,7 +464,10 @@ impl FastBlstm {
         let input_size = lstm[0];
         let normalize_mean = narrow(take(input_size));
         let normalize_std = narrow(take(input_size));
-        debug_assert_eq!(pos, needed, "from_flat consumed != element_count");
+        // Construction-time, once per net: a plain assert (not `debug_assert`), since a
+        // layout/count disagreement here silently decodes the WHOLE pack wrong and the
+        // release build is exactly where that must not pass quietly.
+        assert_eq!(pos, needed, "from_flat consumed != element_count");
 
         Ok(FastBlstm {
             lstm_neuron_nb: lstm.clone(),

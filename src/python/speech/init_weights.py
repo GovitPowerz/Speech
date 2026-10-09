@@ -7,8 +7,9 @@ position (recurrent block, fan-in block, the 12-column peephole bundle, the per-
 derived from the SAME packer code the rest of the port already golden-tests, never a
 re-hardcoded offset. `spec` is the `NnetSpec`-shaped dict `config_bridge.nnet_spec` produces
 (and `weight_bridge.element_count`/`unpack_weights`/`flat_to_nnet` already consume): only
-`LSTMNeuronNb`/`LSTMSubSampling`/`OutputNeuronNb` are read (matching what the packer itself
-reads for shapes -- `OutputSubSampling` only feeds `adim` scaling, irrelevant to init).
+`LSTMNeuronNb`/`LSTMSubSampling`/`OutputNeuronNb`/`OutputSubSampling` are read (matching what
+the packer itself reads for shapes -- output layer `i` reads `OutputNeuronNb[i] *
+OutputSubSampling[i]` inputs, which is also its Xavier/He fan-in).
 
 Sampling-variant choices ("xavier" and "he" both have more than one textbook variant; one
 picked per name, documented here rather than re-litigated at each call site):
@@ -445,6 +446,7 @@ def _init_lstm_pack(
     lstm = cast(list[int], spec["LSTMNeuronNb"])
     lsub = cast(list[int], spec["LSTMSubSampling"])
     outn = cast(list[int], spec["OutputNeuronNb"])
+    osub = cast(list[int], spec["OutputSubSampling"])
 
     nnet: dict[str, object] = {"forward": [], "backward": [], "output": []}
     for direction in directions:
@@ -455,7 +457,7 @@ def _init_lstm_pack(
 
     out_layers = cast(list[np.ndarray], nnet["output"])
     for i in range(len(outn) - 1):
-        out_layers.append(_init_output_layer(rng, outn[i + 1], outn[i], scheme))
+        out_layers.append(_init_output_layer(rng, outn[i + 1], outn[i] * osub[i], scheme))
 
     nnet["mean"] = np.zeros(lstm[0], dtype=np.float64)
     nnet["std"] = np.ones(lstm[0], dtype=np.float64)
@@ -476,6 +478,7 @@ def _init_cell_pack(
     lstm = cast(list[int], spec["LSTMNeuronNb"])
     lsub = cast(list[int], spec["LSTMSubSampling"])
     outn = cast(list[int], spec["OutputNeuronNb"])
+    osub = cast(list[int], spec["OutputSubSampling"])
     geom = mamba_geometry(spec)
     units, layers = cfc_geometry(spec)
     _, _, d_ff = transformer_geometry(spec)
@@ -500,7 +503,7 @@ def _init_cell_pack(
             else:
                 raise ValueError(f"no init builder for cell type {cell_type!r}")
     for i in range(len(outn) - 1):
-        mat = _init_output_layer(rng, outn[i + 1], outn[i], scheme)
+        mat = _init_output_layer(rng, outn[i + 1], outn[i] * osub[i], scheme)
         parts.append(mat[:, :-1].reshape(-1))
         parts.append(mat[:, -1].reshape(-1))
     parts.append(np.zeros(lstm[0], dtype=np.float64))

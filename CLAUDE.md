@@ -61,7 +61,7 @@ uv run python -m speech.ledger bench --leg phase7_60s                   # a stag
 experiments/05_lid_cells.sh [arm/cell/direction ...]                    # a TBD table's full runs: one launcher call per row, recipe hard-coded, record promoted (#21)
 ```
 
-Suite sizes at the issue #57 close (2026-10-09): cargo 1327, pytest 1084 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 956 without `tests/pyo3`), pyo3 235 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min).
+Suite sizes at the issue #61 close (2026-10-09): cargo 1330, pytest 1094 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 965 without `tests/pyo3`), pyo3 236 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min).
 
 ## Architecture
 
@@ -86,6 +86,7 @@ The module maps (one row per file: legacy source, responsibility, what landed wh
 - **Weight-vector flat layout ordering**: input/recurrent gate blocks, then the 12-row peephole bundle, then 4 biases, then the mean/std tail. Get the ordering wrong and every downstream number is garbage.
 - **`adim_coeff` scaling**: `adim_coeff = sqrt(fan_in*sub + fan_out)`, bias-excepted. In the legacy this scaling lives **only in the config reader**, NOT in the flat packer -- so a naive round-trip through the packer drops it. In this port it must live once in Rust.
 - **CellWeight-narrow layout**: unlike the Input/Forget/Output gate matrices, the Cell matrix carries no peepholes -- its rows are `out + in + 1` (recurrent + fan-in + bias only), one column-triplet shorter than the gate matrices. Easy to over-generalize and get wrong.
+- **The output MLP's fan-in is sub-sampled**: output layer `i` reads `OutputNeuronNb[i] * OutputSubSampling[i]` inputs (`Network::new`, legacy `vec2struct.m:908`). The count, both packers and `init_weights` dropped the factor until issue #61; every committed config has sub-sampling 1, so only `src/rust/tests/output_subsampling_pack.rs` and the Python osub legs pin it.
 - **Activations**: non-standard. `Maxmin2`/`Identity` are `asinh` (cell + output), `GatesFunction` is `sigmoid(0.1z)` (note the 0.1 pre-scale), output is softmax.
 - **iRPROP- inverted sign convention**: the legacy update uses an inverted sign; copy it exactly, do not "fix" it.
 - **FFT two-real packing + custom Welch normalization**: two real signals packed into one complex FFT, with a bespoke normalization -- not the textbook periodogram.

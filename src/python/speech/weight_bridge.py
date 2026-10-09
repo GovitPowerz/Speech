@@ -105,7 +105,7 @@ def read_weight_vector(path: Path) -> NDArray[np.float64]:
 # A "row" is a config-domain gate/neuron vector of length ncols.
 # Structured = {"forward": [layer -> {"input"/"forget"/"output"/"cell": 2D (out x ncols)}],
 #               "backward": [...same...],
-#               "output": [layer -> 2D (out x in+1)],
+#               "output": [layer -> 2D (out x in+1), in = OutputNeuronNb[i]*OutputSubSampling[i]],
 #               "mean": 1D, "std": 1D}
 # Nnet has the same shape but nnet-domain (adim applied) matrices.
 
@@ -135,6 +135,7 @@ def element_count(spec: dict) -> int:
     lstm = spec["LSTMNeuronNb"]
     lsub = spec["LSTMSubSampling"]
     outn = spec["OutputNeuronNb"]
+    osub = spec["OutputSubSampling"]
     stacks = len(spec_directions(spec))
     total = 0
     for i in range(len(lstm) - 1):
@@ -142,7 +143,7 @@ def element_count(spec: dict) -> int:
         fin = lstm[i] * lsub[i]
         total += stacks * (4 * out * fin + 4 * out * out + 12 * out + 4 * out)
     for i in range(len(outn) - 1):
-        total += outn[i + 1] * outn[i] + outn[i + 1]
+        total += outn[i + 1] * outn[i] * osub[i] + outn[i + 1]
     total += 2 * lstm[0]
     return int(total)
 
@@ -262,7 +263,7 @@ def flat_to_nnet(flat: np.ndarray, spec: dict) -> dict:
     stack to consume, so `nnet["backward"]` comes back EMPTY rather than eating the output
     MLP's bytes. `nnet_to_flat` needs no such branch -- it walks the lists it is given.
     """
-    lstm, lsub, outn = spec["LSTMNeuronNb"], spec["LSTMSubSampling"], spec["OutputNeuronNb"]
+    lstm, lsub, outn, osub = spec["LSTMNeuronNb"], spec["LSTMSubSampling"], spec["OutputNeuronNb"], spec["OutputSubSampling"]
     directions = spec_directions(spec)
     pos = 0
     nnet: dict = {"forward": [], "backward": [], "output": []}
@@ -295,7 +296,7 @@ def flat_to_nnet(flat: np.ndarray, spec: dict) -> dict:
             gates["cell"][:, cell_cols - 1] = take(out)
             nnet[direction].append(gates)
     for i in range(len(outn) - 1):
-        out, inp = outn[i + 1], outn[i]
+        out, inp = outn[i + 1], outn[i] * osub[i]
         mat = np.zeros((out, inp + 1))
         mat[:, :inp] = take(out * inp).reshape(out, inp)
         mat[:, inp] = take(out)

@@ -55,6 +55,35 @@ def test_pack_length_matches_spec_element_count(tag: str) -> None:
     assert packs[0].shape == (expected_count,)
 
 
+# The two `twin_mode7.config` nets at `OutputSubSampling 2`, with the pack lengths
+# `src/rust/tests/output_subsampling_pack.rs` pins against the exact net's `nb_of_weights` (#61).
+OSUB2_SPECS: dict[str, tuple[dict[str, object], int]] = {
+    "sad": ({"LSTMNeuronNb": [11, 12], "LSTMSubSampling": [4], "OutputNeuronNb": [24, 1], "OutputSubSampling": [2]}, 5831),
+    "lid": ({"LSTMNeuronNb": [36, 24], "LSTMSubSampling": [1], "OutputNeuronNb": [48, 1], "OutputSubSampling": [2]}, 12457),
+}
+
+
+@pytest.mark.parametrize("tag", ["sad", "lid"])
+def test_output_subsampling_widens_the_output_layer(tag: str) -> None:
+    spec, expected_count = OSUB2_SPECS[tag]
+    assert wb.element_count(spec) == expected_count
+
+    pack = init_weights(spec, np.random.default_rng(0))[0]
+    assert pack.shape == (expected_count,)
+    outn = cast(list[int], spec["OutputNeuronNb"])
+    assert _output_layers(wb.unpack_weights(pack, spec))[0].shape == (outn[1], outn[0] * 2 + 1)
+
+
+@pytest.mark.parametrize("cell", ["lstm", "slstm", "mamba", "cfc", "transformer"])
+def test_output_subsampling_widens_every_cell_pack_by_the_extra_fan_in(cell: str) -> None:
+    """Both pack builders: `OutputSubSampling 2` on output layer 0 adds `OutputNeuronNb[1] *
+    OutputNeuronNb[0]` weights, the second sub-sampled frame's block."""
+    spec: dict[str, object] = {"LSTMNeuronNb": [5, 4], "LSTMSubSampling": [1], "OutputNeuronNb": [8, 3, 1], "OutputSubSampling": [1, 1], "CellType": cell}
+    n1 = init_weights(spec, np.random.default_rng(0))[0].shape[0]
+    n2 = init_weights({**spec, "OutputSubSampling": [2, 1]}, np.random.default_rng(0))[0].shape[0]
+    assert n2 - n1 == 3 * 8
+
+
 @pytest.mark.parametrize("tag", ["A", "B"])
 def test_forget_bias_one_positions(tag: str) -> None:
     spec, _ = SPECS[tag]
