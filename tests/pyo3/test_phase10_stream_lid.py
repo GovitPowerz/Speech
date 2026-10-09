@@ -261,3 +261,61 @@ def test_new_bails_on_missing_lid_net(tmp_path: Path) -> None:
     staged = _staged_config(tmp_path, "BLSTM_LID_weightsFile ")
     with pytest.raises(RuntimeError, match=r"(?i)net"):
         speech_rs.StreamingLidSession(str(staged), 8000.0, 0)
+
+
+# --------------------------------------------------------------------------------------- #
+# Issue #57: the binding streams a FORWARD (causal) LID net too -- one row over the committed
+# phase-9 `twin_mode7_lid_slstm_forward` fixture (the plain regime the launcher writes on a
+# forward LID net). The arithmetic is pinned against the offline Twin in Rust
+# (`tests/phase8_stream_lid.rs::every_shape_streams_prefix_correct_and_finish_equals_offline`);
+# this row pins the Python surface on that shape: construction, prefix-correctness between an
+# incremental and a fresh session, finish == last push, and the predicted-language identity.
+# The utterances are synthetic phSeq-shaped one-hots (38 wide, the `letterMapping` width;
+# the 12-wide LID net crops them), drawn from a seeded rng so the row is deterministic.
+# --------------------------------------------------------------------------------------- #
+
+PHASE9 = REPO_ROOT / "tests" / "reference_data" / "phase9"
+FORWARD_FIXTURE = "twin_mode7_lid_slstm_forward"
+
+
+def _staged_forward_config(tmp_path: Path) -> Path:
+    base = (PHASE9 / f"{FORWARD_FIXTURE}.config").read_text()
+    staged = tmp_path / f"{FORWARD_FIXTURE}_staged.config"
+    staged.write_text(base + f"BLSTM_LID_weightsFile {PHASE9 / (FORWARD_FIXTURE + '_seed.bin')}\n")
+    return staged
+
+
+def _synthetic_phseq_utterances(n: int, seed: int = 57) -> list[np.ndarray]:
+    rng = np.random.default_rng(seed)
+    out: list[np.ndarray] = []
+    for _ in range(n):
+        frames = int(rng.integers(2, 10))
+        m = np.zeros((frames, 38), dtype=np.float64)
+        m[np.arange(frames), rng.integers(0, 38, size=frames)] = 1.0
+        out.append(m)
+    return out
+
+
+def test_forward_lid_net_streams_prefix_correct(tmp_path: Path) -> None:
+    feats = _synthetic_phseq_utterances(6)
+    staged = _staged_forward_config(tmp_path)
+    incremental = speech_rs.StreamingLidSession(str(staged), 8000.0, 1)
+    last_agg: tuple | None = None
+    for k in range(1, len(feats) + 1):
+        scores, argmax, correct, agg_k = incremental.push_utterance(feats[k - 1])
+        assert argmax is not None and scores and correct == (argmax == 1), f"k={k}: a scored utterance"
+        fresh = speech_rs.StreamingLidSession(str(staged), 8000.0, 1)
+        for feat in feats[:k]:
+            fresh.push_utterance(feat)
+        for field, (a, b) in enumerate(zip(agg_k, fresh.finish(), strict=True)):
+            eq = (a == b).all() if isinstance(a, np.ndarray) else a == b
+            assert eq, f"k={k} field {field}: incremental push vs fresh-session finish"
+        last_agg = agg_k
+    assert last_agg is not None
+    fin = incremental.finish()
+    for a, b in zip(last_agg, fin, strict=True):
+        eq = (a == b).all() if isinstance(a, np.ndarray) else a == b
+        assert eq, "finish() must equal the last push's running_aggregate"
+    errors, _confusion, _correct, predicted, count = fin
+    assert count == len(feats) == incremental.scored_count()
+    assert predicted == _recompute_predicted_language(errors, 1)

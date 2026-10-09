@@ -165,7 +165,7 @@ impl CellType {
     }
 
     /// The config-text spelling. `pub` so the fast/streaming trees can NAME the cell
-    /// in their unsupported-cell bails (`fast::driver::build_aligned_spec`).
+    /// in their refusals (`fast::stream::StreamingSession::new`, the Twin's regime rule).
     pub fn as_str(self) -> &'static str {
         match self {
             CellType::Lstm => "lstm",

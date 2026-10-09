@@ -1,6 +1,6 @@
 # ADR-0004: Streaming changes timing, never arithmetic: the frozen-norm causality cut, shared step kernels, and emission with zero retractions
 
-**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9)
+**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9); the bidirectional refusal scoped to the frame stream 2026-10-09 (issue #57)
 
 ## Context
 
@@ -37,5 +37,12 @@ the **consumed** frontier minus one step (never the received one), and the hyste
   corpus tier found this case; the claim was rescoped, not the gate loosened).
 - A causal cell removes the `nn_window` term (6.05 s to 2.82 s on the same config lineage); a
   bidirectional net is unstreamable by construction and is refused at session construction.
+  **Amendment (2026-10-09, issue #57):** that refusal is a statement about the FRAME stream
+  (`fast/stream.rs`, one chunk of samples per push) and a bidirectional NEW cell; the
+  bidirectional LSTM streams there through `overlap_window_step`, bounded by `nn_window`.
+  The UTTERANCE stream (`fast/stream_lid.rs`) is the exception: one utterance per push, scored
+  whole through the same block forward the offline Twin uses, so any direction streams there,
+  prefix-correct and bit-equal to the offline fast run on `finish`. A frame-granular LID
+  emission model would be its own issue.
 - The causality cost (frozen norm vs native self-norm) is reported per net in `RESULTS.md`,
   never gated: on the committed subset nets it is noise around a degenerate operating point.

@@ -79,7 +79,8 @@ fn opt_bool(v: Option<bool>) -> String {
 /// (`.toml`/`.config` by extension), read `File_Type` from it (bailing on anything but
 /// 1/2 -- the only types that carry `external_features`), read the utterances file,
 /// build the [`StreamingLidSession`] (which validates the streaming contract: Mode 7,
-/// `InputNormalizationType 0`, truncate windowing, a loaded LID net, ...), push every
+/// `InputNormalizationType 0`, plain or truncate windowing per the shape (overlap
+/// refused), a loaded LID net, ...), push every
 /// `external_features` entry printing one `UTT` line each, then print the `STREAM_LID`
 /// summary from `finish()`.
 pub fn run_stream_lid(config: &str, input: &str, lang: i32) -> Result<()> {

@@ -310,7 +310,8 @@ def phase11_v2_cells(records: list[Record]) -> list[str]:
 
 # --------------------------------------------------------------------------------------- #
 # Issue #21: the (cell x direction) LID matrices, one per LID arm (exact-tree numbers; the
-# fast Twin LID is BLSTM-only, #57). The LSTM / bidirectional row is the Phase-6 gate's.
+# fast Twin LID runs the same matrix since #57, parity-pinned, not re-measured here). The
+# LSTM / bidirectional row is the Phase-6 gate's.
 # --------------------------------------------------------------------------------------- #
 
 _ALL_CELLS = [(c, d) for c in CELL_TYPES for d in DIRECTIONS]

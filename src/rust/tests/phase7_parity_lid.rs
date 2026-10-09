@@ -102,9 +102,9 @@ struct LidMembers {
     confusion: Vec<ndarray::Array2<f64>>,
 }
 
-fn run_exact(variant: &str, mut audio: Audio) -> LidMembers {
+fn run_exact(map: &IndexMap<String, String>, mut audio: Audio) -> LidMembers {
     let lidw = lid_weights();
-    let mut drv = TwinBlstmSpectralLid::from_legacy(&map_of(variant), None, Some(&lidw)).unwrap();
+    let mut drv = TwinBlstmSpectralLid::from_legacy(map, None, Some(&lidw)).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
         .map(|_| Segmentation::new(dur))
@@ -117,9 +117,9 @@ fn run_exact(variant: &str, mut audio: Audio) -> LidMembers {
     }
 }
 
-fn run_fast(variant: &str, mut audio: Audio) -> LidMembers {
+fn run_fast(map: &IndexMap<String, String>, mut audio: Audio) -> LidMembers {
     let lidw = lid_weights();
-    let mut drv = FastTwinLid::from_legacy(&map_of(variant), None, Some(&lidw)).unwrap();
+    let mut drv = FastTwinLid::from_legacy(map, None, Some(&lidw)).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
         .map(|_| Segmentation::new(dur))
@@ -221,8 +221,8 @@ fn lid_parity_phseq_exact_vs_fast() {
     let mut max_abs = 0.0_f64;
     let mut max_rel = 0.0_f64;
     for (f, lang) in PHSEQ_FILES {
-        let e = run_exact("twin_mode7", phseq_audio(f, lang));
-        let fa = run_fast("twin_mode7", phseq_audio(f, lang));
+        let e = run_exact(&map_of("twin_mode7"), phseq_audio(f, lang));
+        let fa = run_fast(&map_of("twin_mode7"), phseq_audio(f, lang));
         compare(
             &format!("phseq {f}"),
             lang,
@@ -243,6 +243,36 @@ fn lid_parity_phseq_exact_vs_fast() {
     );
 }
 
+/// Issue #57 D2 admits the PLAIN regime (`BLSTM_LID_window 0`) on the bidirectional shapes,
+/// bailed before #57; the committed `twin_mode7` resolves to truncate, so this is the only leg
+/// through `FastLidNet::feed_forward_scoring`'s plain branch on the `Blstm` arm.
+#[test]
+fn lid_parity_phseq_plain_regime_exact_vs_fast() {
+    // MEASURED 2026-10-09 (M4 Pro): score max_abs=5.958e-7, min(margin/delta) 7.5e4 over the
+    // cumulative and per-utterance margins, no flip. Pinned x10 (D11).
+    const SCORE_ABS_PIN: f64 = 6.0e-6;
+    let mut map = map_of("twin_mode7");
+    map.insert("BLSTM_LID_window".into(), "0".into());
+    let (mut max_abs, mut max_rel) = (0.0_f64, 0.0_f64);
+    for (f, lang) in PHSEQ_FILES {
+        let e = run_exact(&map, phseq_audio(f, lang));
+        let fa = run_fast(&map, phseq_audio(f, lang));
+        compare(
+            &format!("plain phseq {f}"),
+            lang,
+            &e,
+            &fa,
+            &mut max_abs,
+            &mut max_rel,
+        );
+    }
+    println!("MEASURE lid_parity_phseq_plain: score max_abs={max_abs:.3e} max_rel={max_rel:.3e}");
+    assert!(
+        max_abs < SCORE_ABS_PIN,
+        "plain phseq score abs {max_abs:.3e} breached the pin (STOP: re-measure)"
+    );
+}
+
 /// The well-formed committed cep fixtures (the malformed ones error at `read_cep`, in
 /// BOTH paths -- a read-layer error, not a driver-parity case).
 const CEP_FIXTURES: [&str; 2] = ["tiny_ok.plp", "multi_ok.plp"];
@@ -259,8 +289,8 @@ fn lid_parity_cep_exact_vs_fast() {
     let mut max_abs = 0.0_f64;
     let mut max_rel = 0.0_f64;
     for name in CEP_FIXTURES {
-        let e = run_exact("twin_mode7", cep_audio(name, 0));
-        let fa = run_fast("twin_mode7", cep_audio(name, 0));
+        let e = run_exact(&map_of("twin_mode7"), cep_audio(name, 0));
+        let fa = run_fast(&map_of("twin_mode7"), cep_audio(name, 0));
         compare(
             &format!("cep {name}"),
             0,
@@ -556,72 +586,70 @@ fn fast_twin_bails_on_non_mode7() {
     }
 }
 
-/// PHASE 9 TASK 2 RIDER: the `BLSTM_LID_*` structural keys are bailed too -- the
-/// Twin's LID net is the one that actually RUNS on the fast path, so a new cell there
-/// would be a wrong-architecture inference. Pinned on BOTH prefixes because they are
-/// separate `build_aligned_spec` calls.
+/// ISSUE #57 replaced the blanket BLSTM-only gate (`fast_twin_bails_on_unsupported_cell_type_
+/// and_direction`, which pinned a refusal on BOTH prefixes) with the (cell x direction)
+/// matrix. What survives is a REGIME rule, pinned here on the real net: the overlap LID
+/// windowing is refused on every shape, and a windowed CAUSAL LID net is refused
+/// (`tests/fast_twin_lid_matrix.rs` pins the causal half on the committed forward fixtures
+/// and the build-per-shape half). Both bail where the window resolves against the rate
+/// (`get_segmentation`), NOT at construction -- the pair must BUILD first.
 #[test]
-fn fast_twin_bails_on_unsupported_cell_type_and_direction() {
-    for (key, value, want) in [
-        (
-            "BLSTM_LID_Cell_Type",
-            "slstm",
-            "cell type 'slstm' is not supported on the fast inference path",
-        ),
-        (
-            "BLSTM_Cell_Type",
-            "mamba",
-            "cell type 'mamba' is not supported on the fast inference path",
-        ),
-        // The MESSAGE for this row changed in phase-10 Task 8, the refusal did NOT.
-        // `classify_fast_shape` used to bail on `(lstm, forward)` and its wording is what
-        // this leg asserted; Task 8 implemented that shape (`fast::cells::FastLstm`), so
-        // the classifier now NAMES it and the Twin's OWN gate -- `bail_unsupported_shape`,
-        // deliberately BLSTM-only and re-affirmed conservative in Task 7 -- is what
-        // refuses it here. Asserting the gate's own leading clause plus its
-        // "bidirectional twin only" clause keeps the leg discriminating: it still fails
-        // if the Twin ever silently accepts a causal LID net.
-        (
-            "BLSTM_LID_Direction",
-            "forward",
-            "cell type 'lstm' is not supported on the fast inference path",
-        ),
+fn fast_twin_refuses_the_overlap_lid_regime() {
+    // `window 0.25 / shift 0.0` is the committed truncate pair; `shift 0.1` resolves 10
+    // periodogram frames (>= 1) -> overlap.
+    let mut m = map_of("twin_mode7");
+    m.insert("BLSTM_LID_shift".into(), "0.1".into());
+    let mut drv =
+        build_fast_twin(&m).expect("the overlap refusal is a regime rule, not a construction bail");
+    let mut audio = phseq_audio("s1", 0);
+    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
+        .map(|_| Segmentation::new(dur))
+        .collect();
+    let err = drv
+        .get_segmentation(&mut audio, &mut segs, None)
+        .expect_err("fast Twin + overlap LID windowing must bail");
+    assert!(
+        err.to_string()
+            .contains("overlap LID windowing is unsupported"),
+        "unexpected overlap-regime error: {err}"
+    );
+}
+
+/// The inverse of the old gate: a NON-LSTM bidirectional LID net now BUILDS on the fast
+/// Twin, so the build is pinned on pack LENGTH instead -- the hazard the shape bail was
+/// really protecting, re-aimed as phase 10 did for the SAD driver. At the real net's
+/// geometry (`36,24 / 48,1`, measured through `init_weights`) the bidirectional packs are
+/// lstm 12409, slstm 11833, mamba 14521, cfc 12235, transformer 13113: the in-memory
+/// 12409-weight LSTM pack is REFUSED under all four -- too short under `mamba` and
+/// `transformer`, too long under `slstm` and `cfc` (the exact Twin's `set_weights`
+/// contract, D11's "refuses a wrong-length pack"). The per-shape builds from their OWN
+/// packs live in `tests/fast_twin_lid_matrix.rs`.
+#[test]
+fn fast_twin_pins_the_lid_pack_length_per_cell() {
+    use speech::fast::driver::FastNetShape;
+    use speech::nn::blstm::CellType;
+    for (cell, ct, why) in [
+        ("mamba", CellType::Mamba, "too short"),
+        ("transformer", CellType::Transformer, "too short"),
+        ("slstm", CellType::Slstm, "more than what's needed"),
+        ("cfc", CellType::Cfc, "more than what's needed"),
     ] {
         let mut m = map_of("twin_mode7");
-        m.insert(key.into(), value.into());
-        if key == "BLSTM_LID_Direction" {
-            // A causal net declares a `hidden`-wide output MLP head (see
-            // `BlstmConfig::from_legacy`), else the width check fires first.
-            let hidden: usize = m["BLSTM_LID_LSTMNeuronNb"]
-                .split(',')
-                .next_back()
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            let mut out: Vec<String> = m["BLSTM_LID_OutputNeuronNb"]
-                .split(',')
-                .map(|v| v.trim().to_string())
-                .collect();
-            out[0] = hidden.to_string();
-            m.insert("BLSTM_LID_OutputNeuronNb".into(), out.join(","));
-        }
+        m.insert("BLSTM_LID_Cell_Type".into(), cell.into());
         match build_fast_twin(&m) {
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(
-                    msg.contains(want),
-                    "expected {want:?} for {key}={value}, got: {e}"
-                );
-                if key == "BLSTM_LID_Direction" {
-                    assert!(
-                        msg.contains("bidirectional twin only"),
-                        "the causal-LID refusal must still name the direction it accepts, got: {e}"
-                    );
-                }
-            }
-            Ok(_) => panic!("fast Twin + {key}={value} must bail"),
+            Err(e) => assert!(
+                e.to_string().contains(why),
+                "the LSTM pack under Cell_Type {cell} must fail on LENGTH ({why}), got: {e}"
+            ),
+            Ok(_) => panic!("{cell}: another architecture's pack must not build"),
         }
+        let drv = FastTwinLid::from_legacy(&m, None, None).unwrap();
+        assert_eq!(
+            drv.lid_shape(),
+            FastNetShape::BiCell(ct),
+            "{cell}: dispatched arm"
+        );
     }
 }
 
@@ -685,8 +713,9 @@ fn fast_twin_bails_on_negative_target_enforcement_step() {
 #[test]
 fn fast_twin_bails_on_mlp_mode() {
     // T5 finding 3 (review, minor): contract symmetry with the exact dispatch's is_mlp
-    // route to the MLP drivers (nn/blstm.rs:1032-1043) -- the fast LID scoring always
-    // runs the truncate BLSTM forward, never MLP, so an is_mlp LID config must bail.
+    // route to the MLP drivers (nn/blstm.rs:1032-1043) -- the fast LID scoring runs a
+    // recurrent forward (plain or truncate, any cell x direction since #57), never MLP, so
+    // an is_mlp LID config must bail.
     let mut m = map_of("twin_mode7");
     m.insert("BLSTM_LID_LSTMNeuronNb".into(), "0,48".into());
     match build_fast_twin(&m) {

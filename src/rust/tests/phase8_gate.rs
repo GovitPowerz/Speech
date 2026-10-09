@@ -578,11 +578,12 @@ fn validation_bails() {
         "empty-weightsFile bail message: {msg}"
     );
 
-    // (8) PHASE 9 TASK 2 RIDER: the port-only structural keys. The streaming session
-    // runs the phase-7 `FastBlstm` (peephole LSTM, bidirectional), so a config asking
-    // for a new cell or the causal direction must bail rather than stream an LSTM
-    // under another architecture's name -- the bail reaches here through the shared
-    // `build_aligned_spec` choke point, not a stream-local check.
+    // (8) PHASE 9 TASK 2 RIDER: the port-only structural keys. The FRAME stream runs no
+    // bidirectional NEW cell (only this config's windowed LSTM), so a config asking for a
+    // new cell in the bidirectional direction must bail rather than stream an LSTM under
+    // another architecture's name -- `StreamingSession::new`'s own shape refusal (since
+    // phase-10 Task 7; the session stopped reaching the `build_aligned_spec` gate in
+    // phase-9 Task 7, and issue #57 removed that gate).
     let mut m = parse(&text);
     m.insert("BLSTM_Cell_Type".into(), "slstm".into());
     let msg = bail_msg(StreamingSession::new(&m, rate, 1));

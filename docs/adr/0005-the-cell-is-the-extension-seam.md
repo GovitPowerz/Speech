@@ -1,6 +1,6 @@
 # ADR-0005: The recurrent cell is the extension seam; a new architecture is one enum variant and nothing outside it
 
-**Status:** accepted | **Date:** 2026-07-31 (Phase 9, PR #15); totality of the fast matrix 2026-08-11 (Phase 10); fifth cell 2026-08-12 (Phase 11)
+**Status:** accepted | **Date:** 2026-07-31 (Phase 9, PR #15); totality of the fast matrix 2026-08-11 (Phase 10); fifth cell 2026-08-12 (Phase 11); totality extended to the Twin's LID net 2026-10-09 (issue #57)
 
 ## Context
 
@@ -19,6 +19,8 @@ order, its `KEY_TABLE` rows, and both f32 twins (`fast/cells.rs` causal, `fast/b
 bidirectional). The exhaustive `match` in `from_config` and in `cell_weight_count` makes a
 missing arm a **compile error**, so the fast (cell x direction) matrix is total by construction.
 `Direction` (`bidirectional` / `forward`) is the one companion axis, read at the same seam.
+Since 2026-10-09 (issue #57) totality covers the Twin's LID net too: `FastLidNet` classifies
+the `BLSTM_LID` prefix through the same function and reuses the same two cell twins.
 
 Every cell lands with the same evidence: a hand-derived backward checked by central differences
 per shape and seed (pinned at measured x 10, under a `1e-4` STOP), a corpus-level gradient check

@@ -451,8 +451,8 @@ fn agg_to_tuple(py: Python<'_>, a: LidAggregate) -> LidAggTuple<'_> {
 /// time via `push_utterance` / `finish`. The LID net loads from the config's
 /// `BLSTM_LID_weightsFile` (mirroring `StreamingSession`'s own config-driven weight
 /// load, the T4/T5/T7 precedent `fast/stream_lid.rs`'s module doc names) -- construction
-/// bails if `BLSTM_LID_Mode != 7`, the LID window does not resolve to TRUNCATE, or no
-/// net loads.
+/// bails if `BLSTM_LID_Mode != 7`, the LID window resolves to a regime the net's shape
+/// refuses (overlap on any shape, a window on a causal net), or no net loads.
 #[pyclass]
 struct StreamingLidSession {
     inner: RsStreamingLidSession,

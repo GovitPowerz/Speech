@@ -290,3 +290,82 @@ fn new_bails_on_missing_lid_net() {
         Ok(_) => panic!("streaming LID with no LID net must bail"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #57: EVERY shape streams. The session is utterance-granular, so a bidirectional
+// LID net streams as well as a causal one (ADR-0004's refusal is the FRAME stream's). Per
+// (cell, direction) pair of the committed phase-9 Mode-7 LID fixtures: the running
+// aggregate after every push == the offline fast Twin on the first k entries, and
+// `finish` == the offline full run, bit-identical. The `(lstm, bidirectional)` pair is the
+// real-net legs above.
+// ---------------------------------------------------------------------------
+
+const MATRIX_FIXTURES: [&str; 9] = [
+    "twin_mode7_lid_slstm",
+    "twin_mode7_lid_mamba",
+    "twin_mode7_lid_cfc",
+    "twin_mode7_lid_transformer",
+    "twin_mode7_lid_lstm_forward",
+    "twin_mode7_lid_slstm_forward",
+    "twin_mode7_lid_mamba_forward",
+    "twin_mode7_lid_cfc_forward",
+    "twin_mode7_lid_transformer_forward",
+];
+
+fn fixture_map(name: &str) -> IndexMap<String, String> {
+    let text = std::fs::read_to_string(ref_dir().join(format!("phase9/{name}.config"))).unwrap();
+    speech::legacy_config::parse_legacy_config(&text)
+}
+
+fn fixture_pack(name: &str) -> Vec<f64> {
+    read_weight_vector(&ref_dir().join(format!("phase9/{name}_seed.bin"))).unwrap()
+}
+
+/// The offline fast members on `audio` for an arbitrary (map, pack) pair (channel 0).
+fn run_offline_on(map: &IndexMap<String, String>, lid: &[f64], mut audio: Audio) -> OfflineMembers {
+    let mut drv = FastTwinLid::from_legacy(map, None, Some(lid)).unwrap();
+    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
+        .map(|_| Segmentation::new(dur))
+        .collect();
+    drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
+    OfflineMembers {
+        errors: drv.lid_classification_errors()[0].clone(),
+        correct: drv.is_lid_correct()[0],
+        confusion: drv.lid_segments_confusion()[0].clone(),
+    }
+}
+
+#[test]
+fn every_shape_streams_prefix_correct_and_finish_equals_offline() {
+    for fixture in MATRIX_FIXTURES {
+        let map = fixture_map(fixture);
+        let lid = fixture_pack(fixture);
+        for (f, lang) in PHSEQ_FILES {
+            let tag = format!("{fixture}/{f}");
+            let feats = phseq_audio(f, lang).external_features;
+            let mut sess = StreamingLidSession::new(&map, 8000.0, lang, Some(&lid))
+                .unwrap_or_else(|e| panic!("{tag}: every shape streams: {e}"));
+            for (i, feat) in feats.iter().enumerate() {
+                let k = i + 1;
+                let sc = sess.push_utterance(feat);
+                let mut prefix = phseq_audio(f, lang);
+                prefix.external_features.truncate(k);
+                let oracle = run_offline_on(&map, &lid, prefix);
+                assert_members_eq(
+                    &format!("{tag} prefix k={k}"),
+                    &sc.running_aggregate,
+                    &oracle,
+                );
+            }
+            let fin = sess.finish();
+            let offline = run_offline_on(&map, &lid, phseq_audio(f, lang));
+            assert_members_eq(&format!("{tag} finish"), &fin, &offline);
+            assert_eq!(
+                fin.segments_count,
+                sess.scored_count(),
+                "{tag}: scored count"
+            );
+        }
+    }
+}
