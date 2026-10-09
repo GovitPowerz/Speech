@@ -97,8 +97,9 @@ fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) ->
 /// T6b AUDIT (Phase 7): "inert defaults" above is NOT one blanket judgment -- each
 /// Vec-valued dispatch method was re-examined per its OWN call sites. `set_weights` was
 /// found unsafe (a real seam caller can plausibly expect it to inject trained weights,
-/// unlike the algo-0/1/2 case) and now bails loudly instead of silently discarding the
-/// caller's data -- see its doc comment. `get_weights`/`get_weights_derivatives` and the
+/// unlike the algo-0/1/2 case) and bailed loudly instead of silently discarding the
+/// caller's data, until issue #62 made the fast arms inject for real under the exact
+/// arms' length contract -- see its doc comment. `get_weights`/`get_weights_derivatives` and the
 /// `save_weights`/`update_weights` save-side arms stay inert defaults -- see their doc
 /// comments for why each is safe. `reset_weights_derivatives` has no dispatch here at
 /// all: it lives on `Network`/layer internals, invoked automatically from within a
