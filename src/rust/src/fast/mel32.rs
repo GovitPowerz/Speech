@@ -4,7 +4,7 @@
 //! It replaces the phase-7 "widen the f32 periodogram to f64, reuse the golden f64
 //! mel/DCT, narrow back" bridge at BOTH fast sites (`FastPipeline::build_input_sequence`
 //! and `FastPipeline::assemble_perio_window`), so the fast front-end is f32 END TO END
-//! and the per-call `T x bins` f64 widen buffer (the ~23.5 MB peak-RSS term the phase-7
+//! and the per-call `T x bins` f64 widen buffer (the ~23.5 MiB peak-RSS term the phase-7
 //! SAD bench measured) is GONE.
 //!
 //! THE EXACT `features/mel.rs` STAYS BYTE-UNTOUCHED -- it is the transcription ORACLE for

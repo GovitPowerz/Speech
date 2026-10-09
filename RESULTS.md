@@ -306,11 +306,14 @@ The measure-then-pin exact-path baseline (Task 1): `speech bench [--repeat=N] [-
 unscored forward pass -- `Neural_Networks_BackPropagation_Epochs 0` and, per config,
 `*_BackPropagationActivated false`) and prints one `BENCH path=exact wall_s=<f> audio_s=<f>
 rtf=<f> maxrss_mb=<f> files=<n>` line per run. `rtf = wall_s / audio_s`; `maxrss_mb` is the
-process-lifetime peak RSS (`getrusage(RUSAGE_SELF)`, bytes on macOS / KB on Linux, normalized to
-MB). Every number below is `--repeat=1` (a single fresh process per measurement, so `maxrss_mb`
-is a clean per-run peak, not inflated by repeated in-process construction -- `--repeat>1` in one
-process accumulates allocator high-water-mark across runs by design, see `bench.rs`'s doc). At
-Task 1 time no fast path existed yet (`--path` accepted only `exact`); these numbers were the
+process-lifetime peak RSS (`getrusage(RUSAGE_SELF)`, bytes on macOS / KiB on Linux, normalized to
+MiB). UNIT NOTE (issue #54): `maxrss_mb` holds MiB; every `maxrss` figure measured in this file
+(and quoted from it in `docs/ROADMAP.md`) and written as "MB" is that MiB value (43.52 MiB is
+45.6 decimal MB), the ratios and bounds are unit-free. Every number below is `--repeat=1` (a
+single fresh process per measurement, so `maxrss_mb` is a clean per-run peak, not inflated by
+repeated in-process construction -- `--repeat>1` in one process accumulates allocator
+high-water-mark across runs by design, see `bench.rs`'s doc). At Task 1 time no fast path
+existed yet (`--path` accepted only `exact`); these numbers were the
 baseline every later fast-path task's RTF/memory claim is measured against. **Since Task 7**,
 `--path=fast` is wired (`Inference_Path` overlaid onto the config by `run_bench`, see `bench.rs`'s
 doc) -- see "Exact vs fast: the measured matrix + pinned budgets" below for the comparison this
@@ -454,7 +457,7 @@ below, which stays as history; peak RSS is a cost figure like the walls, not a m
 the ADR-0003 STOP rule).
 
 <!-- ledger:table phase7_bench_matrix -->
-| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mb | MB/audio-s | speedup (wall, fast vs exact) |
+| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
 | SAD 60 s fixture (stereo) | 120.00 | exact | 0.3177 [0.3146-0.3215] (n=3) | 0.002647 | 57.182 | 0.4765 | baseline |
 | SAD 60 s fixture (stereo) | 120.00 | fast | 0.0645 [0.0642-0.0648] (n=3) | 0.000537 | 43.521 | 0.3627 | 4.93x |

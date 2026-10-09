@@ -81,6 +81,8 @@ pub struct BenchRun {
     /// `corpus_audio_seconds` for the exact per-file formula.
     pub audio_s: f64,
     pub rtf: f64,
+    /// Process-lifetime peak RSS in MiB (`maxrss_mb()` below); the `_mb` name is the
+    /// `BENCH` line's and the `--json` payload's key, not the unit (issue #54).
     pub maxrss_mb: f64,
     pub files: usize,
 }
@@ -168,11 +170,13 @@ fn corpus_audio_seconds(map: &IndexMap<String, String>) -> Result<(f64, usize)> 
     Ok((audio_s, corpus.nb_of_files()))
 }
 
-/// Peak resident set size in MB, process-lifetime peak (`getrusage(RUSAGE_SELF)
+/// Peak resident set size in MiB, process-lifetime peak (`getrusage(RUSAGE_SELF)
 /// .ru_maxrss`), NOT a delta since the call before it -- `getrusage` only ever
 /// reports the running high-water mark. Documented unit divergence: macOS
-/// reports `ru_maxrss` in BYTES, Linux in KILOBYTES; normalized to MB here by
-/// platform `cfg` so the printed `maxrss_mb` is comparable across the two.
+/// reports `ru_maxrss` in BYTES, Linux in KIBIBYTES; normalized to MiB (binary,
+/// `/ 1024^2` resp. `/ 1024`) here by platform `cfg` so the printed `maxrss_mb` is
+/// comparable across the two. The `_mb` suffix is the payload key, not the unit
+/// (issue #54): 43.52 MiB is 45.6 decimal MB.
 fn maxrss_mb() -> f64 {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };

@@ -532,7 +532,7 @@ pub struct TransformerLayer {
     /// Measured on a long-T bidirectional SAD net (2 stacked layers, `H = 24`, default
     /// geometry, a 60 s stereo excerpt forced through the PLAIN whole-sequence driver via
     /// `BLSTM_window 0` so the cache scales with the full sequence): `BackPropagationActivated
-    /// true` (retaining) peaks at 93.422 MB vs `false` (this flag off) at 61.359 MB,
+    /// true` (retaining) peaks at 93.422 MiB vs `false` (this flag off) at 61.359 MiB,
     /// `speech bench --path=exact`, one run each -- 1.52x less peak RSS. See `RESULTS.md`'s
     /// Task 8 row for the full recipe.
     retain_cache: bool,
