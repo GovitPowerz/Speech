@@ -34,6 +34,8 @@ from speech.weight_bridge import read_weight_vector
 
 speech_rs = pytest.importorskip("speech_rs")
 
+from tests.pyo3.test_phase9_seam import seed_sad, seed_twin_mode7  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PHASE0 = REPO_ROOT / "tests" / "reference_data" / "phase0"
 PHASE4A = REPO_ROOT / "tests" / "reference_data" / "phase4a"
@@ -64,33 +66,6 @@ def _seed_tier2_spectral(dst: Path) -> dict[str, str]:
     shutil.copy(PHASE0 / "NNweights_config1.bin", dst / "NNweights_config1.bin")
     (dst / "vrcts_tier2").mkdir(exist_ok=True)
     return parse_legacy_config((dst / "tier2_spectral.config").read_text())
-
-
-def _seed_phase9_sad(dst: Path, name: str) -> dict[str, str]:
-    """A phase-9 SAD config + its seed pack over the synthetic tier-2 corpus (one file)."""
-    corpus = dst / "corpus"
-    corpus.mkdir(parents=True, exist_ok=True)
-    for ext in ("wav", "stm"):
-        shutil.copy(PHASE4A / "corpus" / f"f1.{ext}", corpus / f"f1.{ext}")
-    for f in ("language2classmapping.csv", "tier2_gc_fileslisting.csv"):
-        shutil.copy(PHASE4A / f, dst / f)
-    for f in (f"{name}.config", f"{name}_seed.bin"):
-        shutil.copy(PHASE9 / f, dst / f)
-    return parse_legacy_config((dst / f"{name}.config").read_text())
-
-
-def _seed_phase9_twin(dst: Path, name: str) -> dict[str, str]:
-    """A phase-9 Mode-7 Twin config + its LID seed over the phase-4b phSeq corpus and the
-    unchanged phase-4b `tiny_sad_seed.bin`."""
-    for f in ("languagemapping_lid7.csv", "tiny_sad_seed.bin"):
-        shutil.copy(PHASE4B / f, dst / f)
-    phseq = dst / "corpus_phseq"
-    phseq.mkdir(parents=True, exist_ok=True)
-    for f in ("s1.phSeq", "s2.phSeq", "s1.stm", "s2.stm", "listing_train.csv"):
-        shutil.copy(PHASE4B / "corpus_phseq" / f, phseq / f)
-    for f in (f"{name}.config", f"{name}_seed.bin"):
-        shutil.copy(PHASE9 / f, dst / f)
-    return parse_legacy_config((dst / f"{name}.config").read_text())
 
 
 def _assert_same_results(a: ChannelResults, b: ChannelResults) -> None:
@@ -247,8 +222,8 @@ def test_fold_run_refuses_a_wrong_length_pack_on_both_trees(tmp_path: Path, leg:
     seam ran the head of an over-long pack, ignored a Twin's SAD pack, and worded a short one
     differently."""
     fixture, packs = _WRONG_LENGTH[leg]
-    seed = _seed_phase9_twin if fixture.startswith("twin") else _seed_phase9_sad
-    cfg = seed(tmp_path, fixture)
+    (seed_twin_mode7 if fixture.startswith("twin") else seed_sad)(tmp_path, fixture)
+    cfg = parse_legacy_config((tmp_path / f"{fixture}.config").read_text())
     nets = packs(tmp_path)
     messages = []
     with chdir(tmp_path):

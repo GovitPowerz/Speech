@@ -158,7 +158,9 @@ pub(crate) fn classify_fast_shape(bc: &BlstmConfig) -> FastNetShape {
 /// twin on BOTH of the Twin's prefixes). The Twin's LID net now classifies through
 /// [`classify_fast_shape`] like the SAD driver ([`FastLidNet`]), and its SAD net is never
 /// run in Mode 7 (only its sub-sampling ratios are read, which every cell carries), so no
-/// shape gate is left to apply here. One parse + one alignment, nothing else.
+/// shape gate is left to apply here. One parse + one alignment, nothing else. Since
+/// issue #62 its callers are the tests: the Twin parses its SAD `BlstmConfig` itself, for
+/// the pack count too, and calls [`build_spec_aligned_to`].
 ///
 /// The fast net reads a `NnetSpec`; the exact net reads a `BlstmConfig`. A peephole
 /// mismatch between the two is a divergence with no tolerance floor, so the spec's
@@ -257,7 +259,9 @@ impl FastSadNet {
 
 /// The pack length the EXACT tree demands for `bc`'s net, `BlstmNetwork::nb_of_weights`
 /// on the same config: the one count every fast pack is checked against, so the two
-/// trees refuse the same packs by construction (issue #62). Not the shapes' own
+/// trees refuse the same in-memory packs by construction and cut a weight file at the same
+/// length (issue #62). One file stays outside it: the Twin's `BLSTM_weightsFile`, which
+/// the fast Twin never reads (Mode 7 never runs the SAD net). Not the shapes' own
 /// `element_count`s, which only size what `from_flat` reads (#61: the Blstm one drops
 /// `OutputSubSampling`; none has an MLP arm for the Twin's never-run SAD net).
 pub(crate) fn exact_pack_len(bc: &BlstmConfig) -> Result<usize> {

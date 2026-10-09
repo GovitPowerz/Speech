@@ -4287,7 +4287,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   causal_net_length_check_is_typed` asserts `from_flat(n + 17).is_ok()` -- and those
   drivers load weights only at construction, through their own `load_weights_file`, i.e.
   the file-load path that legitimately tolerates. Tightening them is a separate
-  adjudication with its own re-pins, not a rider on this one.
+  adjudication with its own re-pins, not a rider on this one. (Made 2026-10-09, issue #62:
+  the fast DRIVERS now check every in-memory pack against the exact count and cut every
+  weight file to it with this warning; the `from_flat` family keeps the head-first
+  acceptance pinned above.)
   **RED / re-pin:** NEW `src/rust/tests/set_weights_length_guard.rs` (4 tests) -- written
   FIRST and confirmed RED (3 of 4 failed on the over-long legs; the 4th, the file-load
   tolerance leg, passed before and after, which is the point). Per cell family

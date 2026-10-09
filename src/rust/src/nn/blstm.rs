@@ -54,8 +54,8 @@
 //!   warning the original port elided.
 //!
 //! The two contracts are the free functions [`check_pack_len`] and [`file_pack_head`];
-//! the fast drivers call the same two (issue #62), so both trees refuse the same packs
-//! in the same words.
+//! the fast drivers call the same two (issue #62), so both trees refuse the same
+//! in-memory packs in the same words and cut a weight file at the same length.
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -632,7 +632,7 @@ impl BlstmConfig {
 /// The IN-MEMORY pack contract (interstitial, phase 11): a pack of `len` elements loads
 /// only if `len == needed`; any other length is an `Err` naming both numbers. The one
 /// copy of [`BlstmNetwork::set_weights`]' guard, shared with the fast drivers so the
-/// two trees refuse the same packs with the same words (issue #62).
+/// two trees refuse the same in-memory packs with the same words (issue #62).
 pub fn check_pack_len(len: usize, needed: usize) -> Result<()> {
     if len != needed {
         // The short arm's wording is the original one, byte for byte; the long arm
