@@ -74,7 +74,7 @@
 //!    carrying their load-bearing quirks (see that module's doc for the per-quirk source
 //!    lines). SUPERSEDES the phase-7 arrangement, which reused the golden f64 mel on the
 //!    f32 periodogram WIDENED to f64 and narrowed the assembled sequence back: that
-//!    bridge allocated a `T x bins` f64 buffer PER CALL (~23.5 MB on the 60 s SAD bench
+//!    bridge allocated a `T x bins` f64 buffer PER CALL (~23.5 MiB on the 60 s SAD bench
 //!    -- the measured mechanism behind phase 7's fast-path RSS being HIGHER than exact),
 //!    and it is DELETED here, not kept as a mode. Both sites (`build_input_sequence_parts`
 //!    and the streaming `assemble_perio_window`) drive ONE shared kernel
