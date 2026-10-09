@@ -598,7 +598,7 @@ fn fast_bicell_refuses_a_forward_sized_pack() {
                 panic!("{cell}: a forward-sized pack must not build a bidirectional fast net")
             });
         assert!(
-            err.to_string().contains("too short"),
+            err.to_string().contains("less than what's needed"),
             "{cell}: expected a pack-length bail, got: {err}"
         );
     }

@@ -622,16 +622,20 @@ fn fast_twin_refuses_the_overlap_lid_regime() {
 /// geometry (`36,24 / 48,1`, measured through `init_weights`) the bidirectional packs are
 /// lstm 12409, slstm 11833, mamba 14521, cfc 12235, transformer 13113: the in-memory
 /// 12409-weight LSTM pack is REFUSED under all four -- too short under `mamba` and
-/// `transformer`, too long under `slstm` and `cfc` (the exact Twin's `set_weights`
-/// contract, D11's "refuses a wrong-length pack"). The per-shape builds from their OWN
-/// packs live in `tests/fast_twin_lid_matrix.rs`.
+/// `transformer`, too long under `slstm` and `cfc`, in the exact Twin's `set_weights`
+/// words on both sides (D11's "refuses a wrong-length pack"; issue #62's one message).
+/// The per-shape builds from their OWN packs live in `tests/fast_twin_lid_matrix.rs`.
 #[test]
 fn fast_twin_pins_the_lid_pack_length_per_cell() {
     use speech::fast::driver::FastNetShape;
     use speech::nn::blstm::CellType;
     for (cell, ct, why) in [
-        ("mamba", CellType::Mamba, "too short"),
-        ("transformer", CellType::Transformer, "too short"),
+        ("mamba", CellType::Mamba, "less than what's needed"),
+        (
+            "transformer",
+            CellType::Transformer,
+            "less than what's needed",
+        ),
         ("slstm", CellType::Slstm, "more than what's needed"),
         ("cfc", CellType::Cfc, "more than what's needed"),
     ] {

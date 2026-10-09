@@ -178,7 +178,8 @@ impl FastBiCell {
     /// architecture's pack from being consumed head-first. An OVER-long pack consumes
     /// only the head, as the legacy's FILE-LOAD path does
     /// (`BLSTMNeuralNetwork.cpp:144-146`) -- the exact `set_weights` demands the exact
-    /// length since the phase-11 interstitial.
+    /// length since the phase-11 interstitial, and so do the fast drivers before calling
+    /// this (issue #62).
     pub fn from_flat(
         spec: &NnetSpec,
         cell_type: CellType,

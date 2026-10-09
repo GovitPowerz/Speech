@@ -50,7 +50,7 @@ use speech::audio::{Audio, read_audio};
 use speech::fast::driver::{FastNetShape, FastTwinLid};
 use speech::fast::stream_lid::StreamingLidSession;
 use speech::io::binary::read_weight_vector;
-use speech::nn::blstm::CellType;
+use speech::nn::blstm::{BlstmConfig, BlstmNetwork, CellType};
 use speech::tasks::lid::TwinBlstmSpectralLid;
 use speech::tasks::segmentation::Segmentation;
 use speech::tasks::segmenter::Segmenter;
@@ -438,40 +438,148 @@ fn each_pair_builds_its_own_arm_and_refuses_a_short_pack() {
                 .into_owned(),
         );
         deferred.load_weights_file(&m).unwrap();
-        let score = |d: &mut FastTwinLid| {
-            let mut audio = phseq_audio("s1", 0);
-            let mut segs = segs_for(&audio);
-            d.get_segmentation(&mut audio, &mut segs, None).unwrap();
-            (
-                d.lid_classification_errors()[0].clone(),
-                d.lid_segments_confusion()[0].clone(),
-            )
-        };
         assert_eq!(
-            score(&mut deferred),
-            score(&mut drv),
+            score_s1(&mut deferred),
+            score_s1(&mut drv),
             "{fixture}: the deferred load built another net"
         );
-        // One element long: refused on length too, as the exact Twin's `set_weights` does.
+        // One element long, one element short: refused on length in the exact Twin's
+        // `set_weights` words (issue #62), whatever the shape.
         let mut long = pack.clone();
         long.push(0.0);
-        match FastTwinLid::from_legacy(&map, None, Some(&long)) {
-            Err(e) => assert!(
-                e.to_string().contains("more than what's needed"),
-                "{fixture}: a long pack must fail on LENGTH, got: {e}"
-            ),
-            Ok(_) => panic!("{fixture}: a pack one element long must not build"),
-        }
-        // One element short: refused on length, whatever the shape.
-        let short = &pack[..pack.len() - 1];
-        match FastTwinLid::from_legacy(&map, None, Some(short)) {
-            Err(e) => assert!(
-                e.to_string().contains("too short"),
-                "{fixture}: a short pack must fail on LENGTH, got: {e}"
-            ),
-            Ok(_) => panic!("{fixture}: a pack one element short must not build"),
+        for bad in [&long[..], &pack[..pack.len() - 1]] {
+            match FastTwinLid::from_legacy(&map, None, Some(bad)) {
+                Err(e) => assert_eq!(
+                    e.to_string(),
+                    exact_refusal(&map, "BLSTM_LID", bad.len()),
+                    "{fixture}: a {}-element pack must fail on LENGTH",
+                    bad.len()
+                ),
+                Ok(_) => panic!("{fixture}: a {}-element pack must not build", bad.len()),
+            }
         }
     }
+}
+
+/// What the EXACT net under `prefix` says to an in-memory pack of `len` elements: the
+/// words every fast refusal repeats (issue #62).
+fn exact_refusal(map: &IndexMap<String, String>, prefix: &str, len: usize) -> String {
+    let mut net =
+        BlstmNetwork::from_config(BlstmConfig::from_legacy(map, prefix).unwrap()).unwrap();
+    net.set_weights(&vec![0.0; len]).unwrap_err().to_string()
+}
+
+/// Channel 0's LID members after scoring `s1` (non-degenerate under every committed pack).
+fn score_s1(d: &mut FastTwinLid) -> (Vec<f64>, Array2<f64>) {
+    let mut audio = phseq_audio("s1", 0);
+    let mut segs = segs_for(&audio);
+    d.get_segmentation(&mut audio, &mut segs, None).unwrap();
+    (
+        d.lid_classification_errors()[0].clone(),
+        d.lid_segments_confusion()[0].clone(),
+    )
+}
+
+/// Issue #62: `set_weights` is the seam `BagOfProcessors::set_weights` drives from Python.
+/// It builds the LID net the ctor's in-memory arm builds (scored bit-identical); it refuses
+/// a SAD or a LID pack one element off in the exact Twin's words, SAD first (the exact bag
+/// sets the SAD net first), although Mode 7 never runs the SAD net; and a refused pair --
+/// carrying DIFFERENT values, so a write before the check would show -- leaves the net
+/// scoring as before.
+#[test]
+fn set_weights_builds_the_ctor_net_and_refuses_what_the_exact_twin_refuses() {
+    let all = MATRIX.iter().chain(std::iter::once(&TRANSFORMER_FORWARD));
+    for &(fixture, _, _) in all {
+        let map = fixture_map(fixture);
+        let (sad, lid) = (sad_pack(), fixture_pack(fixture));
+        let mut built = FastTwinLid::from_legacy(&map, Some(&sad), Some(&lid))
+            .unwrap_or_else(|e| panic!("{fixture}: must build from its own packs: {e}"));
+        let mut set = FastTwinLid::from_legacy(&map, None, None).unwrap();
+        set.set_weights(&sad, &lid)
+            .unwrap_or_else(|e| panic!("{fixture}: its own packs must load: {e}"));
+        let before = score_s1(&mut set);
+        assert_eq!(
+            before,
+            score_s1(&mut built),
+            "{fixture}: set_weights built another net"
+        );
+
+        let negated = |p: &[f64], extra: isize| -> Vec<f64> {
+            let n = (p.len() as isize + extra) as usize;
+            (0..n).map(|i| -p.get(i).copied().unwrap_or(1.0)).collect()
+        };
+        let cases = [
+            (negated(&sad, 1), negated(&lid, 0), "BLSTM", sad.len() + 1),
+            (negated(&sad, -1), negated(&lid, 0), "BLSTM", sad.len() - 1),
+            (sad.clone(), negated(&lid, 1), "BLSTM_LID", lid.len() + 1),
+            (sad.clone(), negated(&lid, -1), "BLSTM_LID", lid.len() - 1),
+            // Both wrong: the SAD words, as the exact bag's order gives.
+            (negated(&sad, 1), negated(&lid, 1), "BLSTM", sad.len() + 1),
+        ];
+        for (s, l, prefix, len) in cases {
+            let err = set
+                .set_weights(&s, &l)
+                .err()
+                .unwrap_or_else(|| panic!("{fixture}: a {prefix} pack of {len} must be refused"))
+                .to_string();
+            assert_eq!(
+                err,
+                exact_refusal(&map, prefix, len),
+                "{fixture}: {prefix} at {len}"
+            );
+        }
+        assert_eq!(
+            score_s1(&mut set),
+            before,
+            "{fixture}: a refused pair touched the net"
+        );
+    }
+}
+
+/// Issue #62, the other half: the FILE seam keeps the legacy head-first tolerance. The
+/// sLSTM LID net (949) loads the head of its LSTM ancestor's 1093-element file and scores
+/// exactly as that head handed over in memory; a SHORT file is refused in the exact
+/// `load_weights_file`'s words. With the in-memory seam strict, a file load that stopped
+/// slicing its head would fail the first leg.
+#[test]
+fn the_lid_file_seam_keeps_the_head_first_tolerance() {
+    let map = fixture_map("twin_mode7_lid_slstm");
+    let lstm = ref_dir().join("phase4b/tiny_lid_seed.bin");
+    let mut m = map.clone();
+    m.insert(
+        "BLSTM_LID_weightsFile".into(),
+        lstm.to_string_lossy().into_owned(),
+    );
+    let mut from_file = FastTwinLid::from_legacy(&m, None, None).unwrap();
+    from_file
+        .load_weights_file(&m)
+        .expect("the legacy tolerance: an over-long weightsFile loads its head");
+    let head = read_weight_vector(&lstm).unwrap();
+    let needed = fixture_pack("twin_mode7_lid_slstm").len();
+    assert!(head.len() > needed, "the fixture must be over-long");
+    let mut in_memory = FastTwinLid::from_legacy(&map, None, Some(&head[..needed])).unwrap();
+    assert_eq!(
+        score_s1(&mut from_file),
+        score_s1(&mut in_memory),
+        "the file seam must load the HEAD"
+    );
+
+    let short = ref_dir().join("phase9/twin_mode7_lid_lstm_forward_seed.bin");
+    m.insert(
+        "BLSTM_LID_weightsFile".into(),
+        short.to_string_lossy().into_owned(),
+    );
+    let fast = FastTwinLid::from_legacy(&m, None, None)
+        .unwrap()
+        .load_weights_file(&m)
+        .expect_err("a short weightsFile must be refused")
+        .to_string();
+    let exact = BlstmNetwork::from_config(BlstmConfig::from_legacy(&m, "BLSTM_LID").unwrap())
+        .unwrap()
+        .load_weights_file(&m, "BLSTM_LID")
+        .expect_err("the exact net refuses it too")
+        .to_string();
+    assert_eq!(fast, exact);
 }
 
 // ---------------------------------------------------------------------------
