@@ -79,7 +79,8 @@ def test_init_weights_round_trips_through_engine_set_weights(tmp_path: Path, sch
 
 def test_init_weights_pack_is_the_engine_length_at_output_subsampling_2(tmp_path: Path) -> None:
     """#61: at `BLSTM_OutputSubSampling 2,1` output layer 0 reads 48*2 inputs, so the net
-    takes 33671 + 12*48 = 34247 weights and `set_weights` accepts nothing else."""
+    takes 33671 + 12*48 = 34247 weights: the `init_weights` pack round-trips through
+    `set_weights`, and the same pack one element short is refused naming both lengths."""
     _seed_tier2_spectral(tmp_path)
     cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
     cfg["BLSTM_OutputSubSampling"] = "2,1"
@@ -91,5 +92,7 @@ def test_init_weights_pack_is_the_engine_length_at_output_subsampling_2(tmp_path
         eng = speech_rs.Engine.from_map([cfg], "-m")
         eng.set_weights(0, packs)
         got = eng.weights(0)
+        with pytest.raises(RuntimeError, match=r"34246 < 34247"):
+            eng.set_weights(0, [packs[0][:-1]])
 
     assert np.array_equal(got[0].view(np.uint64), packs[0].view(np.uint64))
