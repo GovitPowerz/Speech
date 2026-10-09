@@ -607,19 +607,14 @@ fn fast_bicell_refuses_a_forward_sized_pack() {
 /// The TRUNCATE (non-overlap) windowing stays unsupported on the fast path, for the
 /// bidirectional cells exactly as for the phase-7 `FastBlstm`: `FastBiCell` implements
 /// the plain and OVERLAP regimes only. `BLSTM_shift 0.0` resolves `window_shift < 1`
-/// -> `no_overlap`.
+/// -> `no_overlap` at EVERY rate, so since issue #24 the plan's rate-free pre-check
+/// refuses it at bag construction (`FastSadPlan::from_map`), no longer at the first
+/// `get_segmentation`; the refusal itself is unchanged.
 #[test]
 fn fast_bicell_bails_on_truncate_windowing() {
     let mut m = bicell_map("slstm", Some("fast"), None, Some(OVERLAP_WINDOW));
     m.insert("BLSTM_shift".into(), "0.0".into());
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
-    let mut audio = read_audio(&fixture("phase4a/corpus/f1.wav"), 0.0, 2.0, 0, None).unwrap();
-    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
-    let n_chan = audio.data.nrows();
-    let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();
-    let err = bag
-        .run_get_segmentation(0, &mut audio, &mut seg)
+    let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
         .err()
         .unwrap_or_else(|| panic!("fast bicell + truncate windowing must bail"));
     assert!(

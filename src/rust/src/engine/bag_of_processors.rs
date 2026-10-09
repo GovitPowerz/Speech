@@ -417,7 +417,7 @@ impl BagOfProcessors {
                 let processor = match algo {
                     3 => {
                         let mut seg = FastSpectralSegmenter::from_legacy(map, None)?;
-                        seg.load_weights_file(map)?;
+                        seg.load_weights_file()?;
                         Processor::FastSpectral(seg)
                     }
                     6 => {

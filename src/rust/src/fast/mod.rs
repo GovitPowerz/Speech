@@ -46,5 +46,6 @@ pub mod driver;
 pub mod mel32;
 pub mod nn;
 pub mod pipeline;
+pub mod plan;
 pub mod stream;
 pub mod stream_lid;

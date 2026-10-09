@@ -7,13 +7,18 @@
 //! (`results_to_segmentation` + smoothing + `compute_errors`), so segments, cols,
 //! and scoring flow exactly as the exact path's -- only the numeric heart (feature
 //! FFT/mel + the BLSTM forward) runs in f32 (see [`super`] for the by-design
-//! divergence). The exact source it mirrors line-for-line (cite when auditing drift,
-//! per the plan's R2):
+//! divergence). Since issue #24 its SETUP is [`super::plan::FastSadPlan`] (rate-free,
+//! shared with the streaming session) + [`super::plan::SadTimeline`] (per file, at the
+//! audio's rate); this module keeps the net, the per-channel loop and the result
+//! columns. The exact source the pair mirrors (cite when auditing drift, per the plan's
+//! R2):
 //!
 //! - `tasks/sad.rs::BlstmSpectralSegmenter::get_segmentation` (`:1376-1629`): the
-//!   per-file spectrum-shift quantization, preemph/noise gates, `getBLSTMParam`
-//!   sizing, the OVERLAP time-step/offset (`_SpectrumShift`-based), the cross-channel
-//!   `result_vec` reuse, and the `results_to_segmentation` + `compute_errors` handoff.
+//!   per-file spectrum-shift quantization (in `fast::plan`, derived from the config at
+//!   each rate rather than carried -- the one documented fast divergence of the setup),
+//!   preemph/noise gates, `getBLSTMParam` sizing, the OVERLAP time-step/offset
+//!   (`_SpectrumShift`-based), the cross-channel `result_vec` reuse, and the
+//!   `results_to_segmentation` + `compute_errors` handoff.
 //! - `nn/blstm.rs::feed_forward_backward` (`:997-1059`): the input-normalization
 //!   dispatch (type -1 self-normalization applied ONCE before the windowed dispatch)
 //!   + the overlap driver selection (`window_size > 0 && overlaps`).
@@ -40,7 +45,9 @@
 //! shape.
 //!
 //! SCOPE (spec S1.2/S1.3, the house typed-bail pattern -- what the gate configs
-//! exercise, everything else typed-bails loudly so scope creep is loud):
+//! exercise, everything else typed-bails loudly so scope creep is loud). Every bail
+//! below is the PLAN's (`fast::plan`), raised at construction where the config alone
+//! decides it and at the first `get_segmentation` (the timeline) where the rate does:
 //! - The PITCH second pass (`BLSTM_TDCwindow > 0`, spec R4) typed-bails at
 //!   construction.
 //! - `InputNormalizationType` outside {-1, 0, 1} typed-bails at construction (the
@@ -50,10 +57,12 @@
 //!   at all -- the exact path's `_ => {}` arm and therefore a no-op on both sides --
 //!   joined in Phase 9 Task 6, which is what the committed causal gate fixtures use).
 //! - BLSTM shape: the PLAIN (window 0) and TRUNCATE (non-overlap) windowed variants
-//!   typed-bail at `get_segmentation` (both phase-7/8 gate configs resolve to OVERLAP:
-//!   `BLSTM_window 3.25 / BLSTM_shift 0.8` -> `window_size > 0`, `no_overlap false`).
-//! - CAUSAL shape: any WINDOWED dispatch (`window_size != 0`) typed-bails there
-//!   instead (the phase-9 causal configs use `BLSTM_window 0`).
+//!   typed-bail -- at construction when `BLSTM_window` / `BLSTM_shift` is 0 (a rate-free
+//!   certainty), otherwise at `get_segmentation` on the resolved values (both phase-7/8
+//!   gate configs resolve to OVERLAP: `BLSTM_window 3.25 / BLSTM_shift 0.8` ->
+//!   `window_size > 0`, `no_overlap false`).
+//! - CAUSAL shape: any WINDOWED config (`BLSTM_window > 0`) typed-bails at construction
+//!   (the phase-9 causal configs use `BLSTM_window 0`).
 //! - BiCELL shape: only TRUNCATE typed-bails; plain and overlap both run (spec S5).
 //!
 //! FORWARD-ONLY: the fast path is inference-only (spec: training stays exact f64), so
@@ -86,6 +95,7 @@ use super::nn::{
     slice_rows_f32,
 };
 use super::pipeline::FastPipeline;
+use super::plan::{FastSadArm, FastSadPlan};
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 
 /// Which fast net shape a config's `Cell_Type` x `Direction` pair selects
@@ -309,16 +319,13 @@ pub(crate) fn exact_pack_len(bc: &BlstmConfig) -> Result<usize> {
     Ok(BlstmNetwork::from_config(bc.clone())?.nb_of_weights())
 }
 
-/// `key`'s weight file cut to `needed` under the legacy FILE-LOAD tolerance
+/// The weight file `file` cut to `needed` under the legacy FILE-LOAD tolerance
 /// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and keeps its
-/// head); `None` for an absent or EMPTY key (the legacy `size() != 0` guard). The one read
-/// every fast `load_weights_file` goes through.
-fn read_file_pack(
-    map: &IndexMap<String, String>,
-    key: &str,
-    needed: usize,
-) -> Result<Option<Vec<f64>>> {
-    let file = map.get(key).map(String::as_str).unwrap_or("");
+/// head); `None` for an EMPTY name (the legacy `size() != 0` guard). THE one file seam of
+/// the fast tree (issue #62 / #65, stated once): every fast `load_weights_file` and the
+/// streaming session's construction read through here; an in-memory pack never does (it
+/// is exact-length, `check_pack_len`).
+pub(crate) fn read_file_pack(file: &str, needed: usize) -> Result<Option<Vec<f64>>> {
     if file.is_empty() {
         return Ok(None);
     }
@@ -368,48 +375,17 @@ fn copy_plain_output(label: &str, out: &FastMatrix, result_buf: &mut FastMatrix)
 
 /// f32 spectral SAD segmenter (algo 3), the fast counterpart of
 /// [`crate::tasks::sad::BlstmSpectralSegmenter`]. See the module docs for the mirrored
-/// sources + scope.
+/// sources + scope. Since issue #24 it is a CONSUMER of [`FastSadPlan`]: the setup lives
+/// there (shared with the streaming session), the per-file [`SadTimeline`] is derived
+/// here from the audio's rate, and this driver owns only the net, the per-channel loop
+/// and the result columns.
 ///
 /// `Clone` (deep-copying the fast net) so `Processor::FastSpectral` satisfies the bag's
 /// `#[derive(Clone)]`; the fast path is inference-only, so a clone is off any hot path.
 #[derive(Clone)]
 pub struct FastSpectralSegmenter {
-    driver_cfg: DriverConfig,
-    seg_cfg: SegmenterConfig,
-    feature_cfg: FeatureConfig,
-    spec: NnetSpec,
-    /// The net SHAPE the config selected (Phase 9 Task 6) -- kept so the deferred
-    /// `load_weights_file` rebuild picks the same arm `from_legacy` did.
-    shape: FastNetShape,
-    /// The three port-only cell geometries, inert unless [`Self::shape`] names their
-    /// cell. Carried so the deferred `load_weights_file` rebuild sizes the net exactly as
-    /// `from_legacy` did (the transformer's `window`/`heads` matter to the KERNEL even
-    /// though only `d_ff` moves the pack LENGTH).
-    geometry: CellGeometry,
+    plan: FastSadPlan,
     net: Option<FastNet>,
-    /// [`exact_pack_len`] for this config's net: what every pack is checked against.
-    pack_len: usize,
-
-    /// Sub-sampling factors + whole-BLSTM ratio, cached from the spec for
-    /// [`get_blstm_param`] (which needs them without a live net borrow).
-    lstm_sub_sampling: Vec<usize>,
-    output_sub_sampling: Vec<usize>,
-    ssr: usize,
-
-    /// `BLSTM_InputNormalizationType`: -1 (whole-sequence self-normalization, the
-    /// phase-7 gate configs) or 1 (pack-carried external mean/std -- the Phase 8
-    /// frozen-stats reference mode, S1.1); every other value typed-bails at
-    /// construction. Dispatched per channel in `get_segmentation`, mirroring the
-    /// exact `feed_forward_backward` top (`nn/blstm.rs:1008-1030`).
-    input_normalization_type: i16,
-
-    /// Stateful `_SpectrumShift`/`_SpectrumShiftInFrames`/`_WindowShift`/
-    /// `_LTSVWindowShift` members, re-quantized per `get_segmentation` call exactly
-    /// as the exact driver does (mirrors `tasks/sad.rs` for state faithfulness).
-    spectrum_shift_sec: f64,
-    spectrum_shift_in_frames: usize,
-    window_shift_sec: f64,
-    ltsv_shift_sec: f64,
 
     channels: usize,
     cumulative_error: Vec<f64>,
@@ -424,92 +400,28 @@ pub struct FastSpectralSegmenter {
 
 impl FastSpectralSegmenter {
     /// Build from a legacy config map + optional f64 weight pack, mirroring
-    /// [`crate::tasks::sad::BlstmSpectralSegmenter::from_legacy`]'s config surface.
-    /// `weights: Some(flat)` builds the net SELECTED BY [`classify_fast_shape`]
-    /// immediately through [`Self::set_weights`] (EXACT-LENGTH, as the exact ctor's
-    /// in-memory arm is) -- [`FastBlstm`], [`FastCausalNet`] or [`FastBiCell`], each
-    /// narrowing f64 -> f32 once, after adim (new cells carry no adim by construction,
-    /// spec S1.3); `None` defers to [`Self::load_weights_file`] (the bag's two-step
-    /// `from_legacy(map, None)` + `load_weights_file` pattern).
-    ///
-    /// Typed-bails (loudly, at construction) the unsupported fast-mode surfaces: the
-    /// pitch second pass (`TDCwindow > 0`) and any `InputNormalizationType` outside
-    /// {-1, 0, 1} (1 joined in Phase 8 Task 1 -- the frozen-stats reference mode;
-    /// 0 in Phase 9 Task 6 -- the exact path's no-op arm). The `Cell_Type` x `Direction`
-    /// pair is NO LONGER among them: [`classify_fast_shape`] became total in phase-10
-    /// Task 8.
+    /// [`crate::tasks::sad::BlstmSpectralSegmenter::from_legacy`]'s config surface:
+    /// [`FastSadPlan::from_map`] then [`Self::from_plan`]. Every construction refusal
+    /// (algo, the pitch second pass, the normalization type, the rate-free windowing
+    /// pre-check) is the plan's.
     pub fn from_legacy(
         map: &IndexMap<String, String>,
         weights: Option<&[f64]>,
     ) -> Result<FastSpectralSegmenter> {
-        let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
-        let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
-        let feature_cfg = FeatureConfig::from_legacy(map, "BLSTM")?;
+        Self::from_plan(FastSadPlan::from_map(map)?, weights)
+    }
 
-        // Pitch second pass unsupported on the fast path (spec R4). tier2 + the
-        // phase-6 SAD config use TDCwindow 0.
-        if feature_cfg.tdc_window > 0.0 {
-            bail!(
-                "fast SAD: the pitch second pass (BLSTM_TDCwindow > 0) is not supported on the \
-                 fast inference path (spec R4); the gate configs use TDCwindow 0"
-            );
-        }
-
-        // Cell x direction dispatch (Phase 9 Task 6, spec S4.2) + peephole-default
-        // alignment (rider 1). Every pair maps to a shape since phase-10 Task 8; the
-        // remaining refusals are per-shape (pack length, windowing regime, streaming).
-        let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
-        let shape = classify_fast_shape(&bc);
-        let spec = build_spec_aligned_to(map, "BLSTM", &bc)?;
-
-        // Normalization types on the fast SAD path: -1 (self-normalization, the
-        // phase-7 gate configs), 1 (pack-carried external mean/std -- Phase 8 S1.1,
-        // the frozen-stats reference mode) and 0 (NO normalization, joined in Phase 9
-        // Task 6). Everything else typed-bails.
-        //
-        // Type 0 is the exact path's `_ => {}` arm (`nn/blstm.rs:1271`, the
-        // `feed_forward_backward` normalization match): a genuine no-op on BOTH sides,
-        // so admitting it cannot introduce a divergence -- it only stops a config that
-        // asks for nothing from being rejected for asking for something unsupported.
-        // The phase-9 committed gate fixtures use it, and the previously-bailing
-        // configs it un-bails are exactly the ones on which the two paths agree by
-        // construction. -2 (the plain-FFB self-normalized COPY) is still out.
-        if ![-1, 0, 1].contains(&bc.input_normalization_type) {
-            bail!(
-                "fast SAD: only InputNormalizationType -1 (self-normalization), 1 (external \
-                 pack-carried mean/std, the phase-8 frozen mode) or 0 (none) are supported on \
-                 the fast path (got {})",
-                bc.input_normalization_type
-            );
-        }
-
-        let lstm_sub_sampling = spec.lstm_subsampling.clone();
-        let output_sub_sampling = spec.output_subsampling.clone();
-        let ssr = lstm_sub_sampling.iter().product::<usize>()
-            * output_sub_sampling.iter().product::<usize>();
-        let pack_len = exact_pack_len(&bc)?;
-
-        let spectrum_shift_sec = feature_cfg.shift_sec;
-        let window_shift_sec = driver_cfg.window_shift_sec;
-        let ltsv_shift_sec = feature_cfg.ltsv_shift;
-
+    /// Build on an already-parsed plan. `weights: Some(flat)` builds the net SELECTED BY
+    /// the plan's shape immediately through [`Self::set_weights`] (EXACT-LENGTH, as the
+    /// exact ctor's in-memory arm is) -- [`FastBlstm`], [`FastCausalNet`] or
+    /// [`FastBiCell`], each narrowing f64 -> f32 once, after adim (new cells carry no adim
+    /// by construction, spec S1.3); `None` defers to [`Self::load_weights_file`] (the bag's
+    /// two-step `from_legacy(map, None)` + `load_weights_file` pattern).
+    pub fn from_plan(plan: FastSadPlan, weights: Option<&[f64]>) -> Result<FastSpectralSegmenter> {
+        plan.check_norm(FastSadArm::Offline)?;
         let mut seg = FastSpectralSegmenter {
-            driver_cfg,
-            seg_cfg,
-            feature_cfg,
-            spec,
-            shape,
-            geometry: CellGeometry::from(&bc),
+            plan,
             net: None,
-            pack_len,
-            lstm_sub_sampling,
-            output_sub_sampling,
-            ssr,
-            input_normalization_type: bc.input_normalization_type,
-            spectrum_shift_sec,
-            spectrum_shift_in_frames: 0,
-            window_shift_sec,
-            ltsv_shift_sec,
             channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
@@ -522,33 +434,37 @@ impl FastSpectralSegmenter {
     }
 
     /// An in-memory pack (`from_legacy`'s `Some(flat)`, `BagOfProcessors::set_weights`):
-    /// EXACT-LENGTH against [`exact_pack_len`], in the exact `set_weights`' words
-    /// ([`check_pack_len`]), then the net is rebuilt through the SAME [`build_net`]
-    /// every load uses, so no load can pick a different arm than [`Self::from_legacy`]
-    /// classified. A refused pack leaves the current net in place.
+    /// EXACT-LENGTH against the plan's `pack_len`, in the exact `set_weights`' words
+    /// ([`check_pack_len`]), then the net is rebuilt through the SAME [`build_net`] every
+    /// load uses, so no load can pick a different arm than the plan classified. A refused
+    /// pack leaves the current net in place.
     pub fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        check_pack_len(flat.len(), self.pack_len)?;
-        self.net = Some(build_net(&self.spec, self.shape, &self.geometry, flat)?);
+        self.net = Some(self.plan.build_net(flat)?);
         Ok(())
     }
 
-    /// `<prefix>_weightsFile` load (mirrors [`crate::nn::blstm::BlstmNetwork::
+    /// The plan's `BLSTM_weightsFile` load (mirrors [`crate::nn::blstm::BlstmNetwork::
     /// load_weights_file`]): an EMPTY key leaves the net unloaded (a subsequent
     /// `get_segmentation` errors); otherwise read the `.bin` and hand its head to
     /// [`Self::set_weights`] -- the legacy FILE-LOAD tolerance, explicit
-    /// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and loads
-    /// its head).
-    pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
-        match read_file_pack(map, "BLSTM_weightsFile", self.pack_len)? {
+    /// ([`FastSadPlan::read_weights_file`]: a short file is refused, a long one warns on
+    /// stderr and loads its head).
+    pub fn load_weights_file(&mut self) -> Result<()> {
+        match self.plan.read_weights_file()? {
             Some(flat) => self.set_weights(&flat),
             None => Ok(()),
         }
     }
 
+    /// The plan this driver consumes (the tests read the shape and the pack length).
+    pub fn plan(&self) -> &FastSadPlan {
+        &self.plan
+    }
+
     /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
     /// dump_dir`]): gates the scored-branch VRCTS write.
     pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
+        &self.plan.driver_cfg.dump_dir
     }
 
     /// Per-channel NN cost (result col 4). ALWAYS zero on the fast path (forward-only,
@@ -579,117 +495,31 @@ impl Segmenter for FastSpectralSegmenter {
         _refs: Option<&[Segmentation]>,
     ) -> Result<()> {
         let rate = audio.sample_rate as f64;
+        let plan = &self.plan;
 
-        // SpectralParams derived at `rate` -- the SAME binding fed to FastPipeline::new
-        // below (rider 2: one sample_rate feeds both, structurally). Shared config
-        // arithmetic with the exact path (not duplicated).
-        let s = SpectralParams::derive(&self.feature_cfg, rate);
-
-        // Stateful spectrum-shift quantization (tasks/sad.rs:1397-1399).
-        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
-        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
-        let ssif = self.spectrum_shift_in_frames;
+        // The rate-dependent setup, per file: SpectralParams + the quantized shift +
+        // getBLSTMParam + the regime check + the time axis, derived from the config at
+        // THIS rate (the stateful carry the exact driver keeps across calls is dropped on
+        // the fast tree -- a fixed point at one rate, see `fast::plan`).
+        let tl = plan.timeline(rate)?;
 
         // preemph -> noise, same gates as the exact driver (both no-ops for tier2:
         // preemph_ratio -0.97 <= 0, noise_seed -3 <= 0).
-        if self.feature_cfg.preemph_ratio > 0.0 {
-            audio.apply_preemph(self.feature_cfg.preemph_ratio);
+        if plan.feature_cfg.preemph_ratio > 0.0 {
+            audio.apply_preemph(plan.feature_cfg.preemph_ratio);
         }
-        if self.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(self.feature_cfg.noise_ratio);
-        }
-
-        // getLTSVParam stateful re-quantization (tasks/sad.rs:1411-1414); dead for the
-        // gate configs (LTSVwindow 0), kept for state faithfulness.
-        let ltsv_ws = f64::round(self.feature_cfg.ltsv_shift * rate / ssif as f64) as i64;
-        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
-        self.ltsv_shift_sec = (ltsv_ws * ssif as i64) as f64 / rate;
-
-        // getBLSTMParam (tasks/sad.rs:1419-1428): window/shift + result-vec sizing;
-        // mutates self.window_shift_sec (the stateful _WindowShift).
-        let window_size_sec = self.driver_cfg.window_size_sec;
-        let lstm_sub = self.lstm_sub_sampling.clone();
-        let out_sub = self.output_sub_sampling.clone();
-        let ssr = self.ssr;
-        let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
-            window_size_sec,
-            &mut self.window_shift_sec,
-            rate,
-            ssif,
-            ssr,
-            &lstm_sub,
-            &out_sub,
-            audio.data.ncols(),
-        );
-
-        // Dispatch (setProcessingType(window > 0, !noOverlap), tasks/sad.rs:1447). The
-        // supported windowing regime is TIED TO THE NET SHAPE:
-        //
-        // - BLSTM (phase 7): the OVERLAP windowed driver ONLY -- what both phase-7/8
-        //   gate configs (tier2 + phase-6 SAD, window 3.25 / shift 0.8) exercise.
-        //   Plain and truncate typed-bail as unexercised in fast mode.
-        // - CAUSAL (Task 6): the PLAIN whole-sequence forward ONLY (`window_size == 0`).
-        //   Windowing a causal cell resets its state at every window boundary -- the
-        //   "pointless-but-defined" regime of spec S1.2, which S5.3 forbids outright
-        //   for the streaming session. The phase's causal configs use window 0.
-        // - BiCELL (phase-10 Task 7, spec S5): BOTH the plain forward and the OVERLAP
-        //   windowed driver, "exactly as the exact tree does" -- a bidirectional cell
-        //   inside a window is the same well-defined regime a bidirectional LSTM is
-        //   (each window is an independent whole-sequence run over its own rows), so
-        //   there is nothing to refuse. TRUNCATE stays refused, as for `FastBlstm`.
-        match self.shape {
-            FastNetShape::Causal(_) => {
-                if window_size != 0 {
-                    bail!(
-                        "fast causal SAD: windowed inference is unsupported (BLSTM_window \
-                         resolves window_size {window_size}); a causal cell's state is reset at \
-                         every window boundary (spec S1.2) -- the phase-9 causal configs use \
-                         BLSTM_window 0"
-                    );
-                }
-            }
-            FastNetShape::Blstm => {
-                if window_size == 0 {
-                    bail!(
-                        "fast SAD: the plain (non-windowed) forward is unsupported (BLSTM_window \
-                         resolves window_size 0); the gate configs use windowed overlap"
-                    );
-                }
-                if no_overlap {
-                    bail!(
-                        "fast SAD: the truncate (non-overlap) windowing is unsupported \
-                         (window_shift resolves < 1); the gate configs use overlap"
-                    );
-                }
-            }
-            FastNetShape::BiCell(_) => {
-                if no_overlap {
-                    bail!(
-                        "fast bidirectional SAD: the truncate (non-overlap) windowing is \
-                         unsupported (window_shift resolves < 1); FastBiCell implements the \
-                         plain and OVERLAP regimes (spec S5)"
-                    );
-                }
-            }
+        if plan.feature_cfg.noise_seed > 0 {
+            audio.apply_noise(plan.feature_cfg.noise_ratio);
         }
 
-        // timeStep/timeOffset (tasks/sad.rs:1451-1461). The BASE pair is
-        // `_WindowShift`-derived; the OVERLAP branch OVERRIDES it with `_SpectrumShift`
-        // (the asymmetry vs the signal driver). `window_size == 0` -- the causal
-        // regime -- keeps the base pair, exactly as the exact driver does.
-        // `self.window_shift_sec` here is the post-`get_blstm_param` value.
-        let (time_step, time_offset) = if window_size > 0 {
-            let ts = self.spectrum_shift_sec * ssr as f64;
-            (ts, ts / 2.0 - self.spectrum_shift_sec / 2.0)
-        } else {
-            let ts = self.window_shift_sec * ssr as f64;
-            (ts, ts / 2.0 - self.window_shift_sec / 2.0)
-        };
+        let real_vec_size = tl.rows_for(audio.data.ncols());
+        let (window_size, window_shift) = (tl.window_size, tl.window_shift);
+        let (time_step, time_offset) = (tl.time_step, tl.time_offset);
 
         // Build the fast pipeline ONCE (banks + FFT plan), with the SAME `rate` that
-        // derived `s` (rider 2). FastPipeline::new typed-bails an active LTSV column or
-        // temporal convolution -- both off in the gate configs.
-        let mut pipeline = FastPipeline::new(&s, &self.feature_cfg, rate)?;
+        // derived `tl.params` (rider 2). FastPipeline::new typed-bails an active LTSV
+        // column or temporal convolution -- both off in the gate configs.
+        let mut pipeline = FastPipeline::new(&tl.params, &plan.feature_cfg, rate)?;
 
         let channels = audio.data.nrows();
         self.channels = channels;
@@ -704,7 +534,8 @@ impl Segmenter for FastSpectralSegmenter {
         // Type-1 external normalization needs the pack-carried mean/std tail; copied
         // out (tiny: input_size floats each) so the loop below can keep the single
         // `&mut net` borrow for feed_forward_overlap.
-        let (norm_mean, norm_std) = if self.input_normalization_type == 1 {
+        let norm_type = plan.input_normalization_type;
+        let (norm_mean, norm_std) = if norm_type == 1 {
             (net.normalize_mean().to_vec(), net.normalize_std().to_vec())
         } else {
             (Vec::new(), Vec::new())
@@ -730,11 +561,10 @@ impl Segmenter for FastSpectralSegmenter {
             // feed_forward_backward top, blstm.rs:1251-1272, before the windowed
             // dispatch): type -1 self-normalization, type 1 external pack-carried
             // mean/std (Phase 8 S1.1, the frozen-stats mode), or type 0 NOTHING (the
-            // exact `_ => {}` arm). The construction bail guarantees no other value
-            // reaches here; the `0` arm is spelled out rather than folded into the
-            // catch-all, because "do nothing" and "self-normalize" are not
-            // interchangeable defaults.
-            match self.input_normalization_type {
+            // exact `_ => {}` arm). The plan's gate guarantees no other value reaches
+            // here; the `0` arm is spelled out rather than folded into the catch-all,
+            // because "do nothing" and "self-normalize" are not interchangeable defaults.
+            match norm_type {
                 1 => external_normalize_f32(&mut input, &norm_mean, &norm_std),
                 -1 => self_normalize_f32(&mut input),
                 _ => {}
@@ -759,7 +589,7 @@ impl Segmenter for FastSpectralSegmenter {
                 // Phase-10 Task 7: the bidirectional cells run EITHER regime, selected
                 // by the config exactly as the exact tree selects it
                 // (`feed_forward_backward`'s `truncates_sequence && overlaps` dispatch,
-                // `nn/blstm.rs:1373-1387`). `no_overlap` is refused above, so
+                // `nn/blstm.rs:1373-1387`). The timeline refuses `no_overlap`, so
                 // `window_size > 0` here means OVERLAP and nothing else.
                 FastNet::BiCell(n) => {
                     if window_size > 0 {
@@ -777,7 +607,8 @@ impl Segmenter for FastSpectralSegmenter {
             last_rows.push(result_vec2.clone());
 
             // Shared, UNCHANGED f64 decision layer (results_to_segmentation + smoothing),
-            // so boundaries + scoring flow exactly as the exact path's.
+            // so boundaries + scoring flow exactly as the exact path's; the time axis is
+            // the timeline's.
             let mut rv = result_vec2;
             results_to_segmentation(
                 seg,
@@ -785,8 +616,8 @@ impl Segmenter for FastSpectralSegmenter {
                 time_offset,
                 &mut rv,
                 SegClass::Speech,
-                self.driver_cfg.conv_coeff.as_deref(),
-                &self.seg_cfg,
+                plan.driver_cfg.conv_coeff.as_deref(),
+                &plan.seg_cfg,
             );
         }
         self.last_result_rows = last_rows;
@@ -1357,8 +1188,9 @@ impl FastTwinLid {
     /// missing SAD file is refused here as the exact Twin refuses it, and with both files
     /// bad the SAD error is the one raised.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
-        read_file_pack(map, "BLSTM_weightsFile", self.sad_pack_len)?;
-        match read_file_pack(map, "BLSTM_LID_weightsFile", self.lid_pack_len)? {
+        let file = |key: &str| map.get(key).map(String::as_str).unwrap_or("");
+        read_file_pack(file("BLSTM_weightsFile"), self.sad_pack_len)?;
+        match read_file_pack(file("BLSTM_LID_weightsFile"), self.lid_pack_len)? {
             Some(lid) => self.set_lid_weights(&lid),
             None => Ok(()),
         }
