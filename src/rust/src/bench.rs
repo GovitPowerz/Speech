@@ -172,26 +172,32 @@ fn corpus_audio_seconds(map: &IndexMap<String, String>) -> Result<(f64, usize)> 
 
 /// Peak resident set size in MiB, process-lifetime peak (`getrusage(RUSAGE_SELF)
 /// .ru_maxrss`), NOT a delta since the call before it -- `getrusage` only ever
-/// reports the running high-water mark. Documented unit divergence: macOS
-/// reports `ru_maxrss` in BYTES, Linux in KIBIBYTES; normalized to MiB (binary,
-/// `/ 1024^2` resp. `/ 1024`) here by platform `cfg` so the printed `maxrss_mb` is
-/// comparable across the two. The `_mb` suffix is the payload key, not the unit
-/// (issue #54): 43.52 MiB is 45.6 decimal MB.
+/// reports the running high-water mark. The unit conversion is
+/// [`ru_maxrss_to_mib`]; a failed `getrusage` reports `0.0`.
 fn maxrss_mb() -> f64 {
     let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     if rc != 0 {
         return 0.0;
     }
-    let raw = usage.ru_maxrss as f64;
-    #[cfg(target_os = "macos")]
-    {
-        raw / (1024.0 * 1024.0)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        raw / 1024.0
-    }
+    ru_maxrss_to_mib(usage.ru_maxrss as f64, RU_MAXRSS_UNIT_BYTES)
+}
+
+/// Bytes per `ru_maxrss` unit. Documented unit divergence: macOS reports
+/// `ru_maxrss` in BYTES, Linux in KIBIBYTES; selected by platform `cfg` so the
+/// printed `maxrss_mb` is comparable across the two. The value is pinned per
+/// host; that the OS reports in this unit is an assumption no test pins.
+#[cfg(target_os = "macos")]
+const RU_MAXRSS_UNIT_BYTES: f64 = 1.0;
+#[cfg(not(target_os = "macos"))]
+const RU_MAXRSS_UNIT_BYTES: f64 = 1024.0;
+
+/// `raw` units of `unit_bytes` bytes in MiB (binary, `/ 1024^2`). The `_mb`
+/// suffix is the payload key, not the unit (issue #54): 43.52 MiB is 45.6
+/// decimal MB. Pure and host-independent so BOTH platform arms are unit-pinned
+/// on every host, the Linux CI included (issue #68).
+fn ru_maxrss_to_mib(raw: f64, unit_bytes: f64) -> f64 {
+    raw * unit_bytes / (1024.0 * 1024.0)
 }
 
 /// Run `configs`, each `repeat` times, over `path`. Each iteration builds a
@@ -259,4 +265,30 @@ pub fn run_bench(configs: &[String], repeat: usize, path: BenchPath) -> Result<B
         runs,
         config_hash: format!("{config_hash:016x}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RU_MAXRSS_UNIT_BYTES, ru_maxrss_to_mib};
+
+    /// Pins the BINARY divisor (issue #68) for both platform arms on every host:
+    /// one MiB of bytes (macOS) and of KiB (Linux) maps to exactly `1.0`, one and
+    /// a half to `1.5` (no rounding). A decimal divisor (`/ 1e6`) yields 1.048576
+    /// (+4.9%) here while staying inside every sanity range in
+    /// `tests/phase7_bench.rs`, so this is the only test that catches it. The
+    /// last line pins this host's unit constant (it catches a decimal `1000.0`
+    /// on Linux).
+    #[test]
+    fn ru_maxrss_to_mib_is_binary() {
+        for (one_mib, unit_bytes) in [(1024.0 * 1024.0, 1.0), (1024.0, 1024.0)] {
+            assert_eq!(ru_maxrss_to_mib(one_mib, unit_bytes), 1.0);
+            assert_eq!(ru_maxrss_to_mib(1.5 * one_mib, unit_bytes), 1.5);
+        }
+        let want = if cfg!(target_os = "macos") {
+            1.0
+        } else {
+            1024.0
+        };
+        assert_eq!(RU_MAXRSS_UNIT_BYTES, want);
+    }
 }

@@ -61,7 +61,7 @@ uv run python -m speech.ledger bench --leg phase7_60s                   # a stag
 experiments/05_lid_cells.sh [arm/cell/direction ...]                    # a TBD table's full runs: one launcher call per row, recipe hard-coded, record promoted (#21)
 ```
 
-Suite sizes at the issue #54 close (2026-10-09): cargo 1338, pytest 1113 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 966 without `tests/pyo3`), pyo3 254 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min).
+Suite sizes at the issue #68 close (2026-10-09): cargo 1339, pytest 1113 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built; 966 without `tests/pyo3`), pyo3 254 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min).
 
 ## Architecture
 
