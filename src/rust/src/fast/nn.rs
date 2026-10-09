@@ -767,70 +767,16 @@ impl FastBlstm {
         length_short
     }
 
-    /// Scoring windowed forward for the Mode-7 LID Twin (Task 5), the f32 counterpart
-    /// of the INFERENCE slice of `BlstmNetwork::feed_forward_scoring`
-    /// (`nn/blstm.rs:1091-1186`). Mode 7 always passes `target_index >= 0`, so this
-    /// mirrors: the `rows < ssr -> Zero(1, O)` guard (`:1101-1103`), the sequential
-    /// output-length division (`:1106-1114`), the windowed forward, and the BINARY
-    /// expansion into `[1-p, p]` when `output_size == 1` (`:1175-1185`). The exact's
-    /// target construction + cost/backward are SKIPPED: the fast path is forward-only
-    /// (spec S1), the forward is target-independent, and Mode 7's langID/confusion
-    /// derive from the posteriors alone (the NN-cost columns are a documented
-    /// divergence, like the SAD driver's). `two_sweeps` selects the TwoSweeps truncate;
-    /// the driver guarantees the truncate dispatch (bails overlap/plain), so only the
-    /// truncate windowing is implemented here.
-    ///
-    /// Issue #57: a THIN CALLER of the lifted [`truncate_forward`] (the sweep is
-    /// net-agnostic and now shared with the cell twins); the arithmetic is unchanged.
-    pub fn feed_forward_scoring(
-        &mut self,
-        input: &FastMatrix,
-        window_size: usize,
-        two_sweeps: bool,
-    ) -> FastMatrix {
-        let output_size = self.output_size;
-        let rows = input.rows;
-        if rows < self.sub_sampling_ratio() {
-            return FastMatrix::zeros(1, output_size); // :1101-1103
-        }
-        // :1106-1114 output length (only re-divided when the whole-BLSTM ratio > 1).
-        let mut out_len = rows;
-        if self.sub_sampling_ratio() > 1 {
-            for &r in &self.lstm_subsampling {
-                out_len /= r;
-            }
-            for &r in &self.output_subsampling {
-                out_len /= r;
-            }
-        }
-        let lsub = self.lstm_subsampling.clone();
-        let osub = self.output_subsampling.clone();
-        let geom = TruncateGeometry {
-            lstm_subsampling: &lsub,
-            output_subsampling: &osub,
-            output_size,
-        };
-        let output = truncate_forward(
-            &geom,
-            input,
-            window_size,
-            out_len,
-            two_sweeps,
-            &mut |block, out| out.copy_from(self.feed_forward(block)),
-        );
-        // :1175-1185 binary expansion into [1-p, p] (Mode 7 always has targets, so the
-        // `target_index >= 0` half of the legacy gate is always true here).
-        if output_size == 1 {
-            let mut expanded = FastMatrix::zeros(out_len, 2);
-            for ii in 0..out_len {
-                let p = output.data[ii];
-                expanded.data[ii * 2] = 1.0 - p;
-                expanded.data[ii * 2 + 1] = p;
-            }
-            expanded
-        } else {
-            output
-        }
+    /// The per-layer recurrent sub-sampling ratios (`LSTMSubSampling`). `pub(crate)` for
+    /// the Twin's LID dispatch (`fast::driver::FastLidNet`), which sizes the scoring
+    /// forward off them.
+    pub(crate) fn lstm_subsampling(&self) -> &[usize] {
+        &self.lstm_subsampling
+    }
+
+    /// The per-output-layer sub-sampling ratios (`OutputSubSampling`).
+    pub(crate) fn output_subsampling(&self) -> &[usize] {
+        &self.output_subsampling
     }
 
     /// Test hook: the effective per-direction peephole flags in the
@@ -860,7 +806,8 @@ impl FastBlstm {
 // whole-block forward per window, and stitches the rows at `begin / ssr`. Phase 7 wrote it
 // as `FastBlstm` methods because the Twin's LID net was BLSTM-only; the fast Twin LID now
 // dispatches on the (cell x direction) matrix, so the ONE copy lives here and every shape
-// (`FastBlstm`, `FastCausalNet`, `FastBiCell`) drives it through a block-forward closure.
+// (`FastBlstm`, `FastCausalNet`, `FastBiCell`) drives it through a block-forward closure
+// from `fast::driver::FastLidNet::feed_forward_scoring`.
 // NOT one of the two byte-frozen streaming kernels (`FastBlstm::feed_forward` proper and
 // `overlap_window_step`), so lifting it is a pure code motion: the phase-7 LID parity legs
 // at their existing pins are the arbiter.

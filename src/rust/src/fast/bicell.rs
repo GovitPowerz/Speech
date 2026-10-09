@@ -285,6 +285,18 @@ impl FastBiCell {
             * self.output_subsampling.iter().product::<usize>()
     }
 
+    /// The per-cell-layer sub-sampling ratios. `pub(crate)` with
+    /// [`Self::output_subsampling`] for the Twin's LID dispatch
+    /// (`fast::driver::FastLidNet`), which sizes the scoring forward off them.
+    pub(crate) fn lstm_subsampling(&self) -> &[usize] {
+        &self.lstm_subsampling
+    }
+
+    /// The per-output-layer sub-sampling ratios.
+    pub(crate) fn output_subsampling(&self) -> &[usize] {
+        &self.output_subsampling
+    }
+
     /// Whole-sequence bidirectional forward, the f32 twin of `BlstmNetwork::feed_forward`
     /// (`nn/blstm.rs:1123-1159`) under `Direction::Bidirectional`:
     ///

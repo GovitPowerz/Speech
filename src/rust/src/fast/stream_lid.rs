@@ -20,6 +20,16 @@
 //! Nothing is re-implemented; the phase-7 LID parity legs (`phase7_parity_lid.rs`) prove the
 //! kernel refactor left the offline path unchanged.
 //!
+//! EVERY SHAPE STREAMS (issue #57, D3). The session is UTTERANCE-granular: one push scores one
+//! whole `external_features` block through the SAME block forward the offline Twin uses, so
+//! a bidirectional LID net is as streamable here as a causal one -- ADR-0004's "a bidirectional
+//! net is refused at session construction" is a statement about the FRAME stream
+//! (`fast::stream`), and its dated amendment names this session as the exception. Whatever
+//! (cell x direction) shape the offline `FastTwinLid` builds (`fast::driver::FastLidNet`),
+//! this session runs, prefix-correct after every push and bit-equal to the offline run on
+//! `finish` (`tests/phase8_stream_lid.rs`'s matrix legs). A frame-granular LID emission model
+//! would be its own issue.
+//!
 //! NOISE (entry-order-independent). Mode-7 Gaussian noise (`_NoiseMagnitude > 0`, off in the
 //! gate configs) uses a `randinit` fixed at 0 PER ENTRY (`fast/driver.rs`'s `score_lid_entry`,
 //! the exact `:989`), so each utterance's noise indexing restarts at 0 -- a per-utterance push
@@ -86,8 +96,9 @@ impl StreamingLidSession {
     /// and the LID weight pack (`Some(flat)` builds the net immediately; `None` defers to the
     /// config's `BLSTM_LID_weightsFile`). Reuses [`FastTwinLid::from_legacy`]'s construction
     /// validation (Mode 7 only, InputNormalizationType 0, no pitch pass / DumpInternals /
-    /// negative TargetEnforcementStep / MLP, ...) and additionally bails if the LID window does
-    /// not resolve to TRUNCATE or if no LID net is loaded.
+    /// negative TargetEnforcementStep / MLP, ...) and additionally bails if the LID window
+    /// resolves to a regime the shape refuses (windowed causal, overlap -- the offline Twin's
+    /// own rule, issue #57) or if no LID net is loaded.
     pub fn new(
         map: &IndexMap<String, String>,
         rate: f64,

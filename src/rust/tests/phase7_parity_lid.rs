@@ -556,71 +556,68 @@ fn fast_twin_bails_on_non_mode7() {
     }
 }
 
-/// PHASE 9 TASK 2 RIDER: the `BLSTM_LID_*` structural keys are bailed too -- the
-/// Twin's LID net is the one that actually RUNS on the fast path, so a new cell there
-/// would be a wrong-architecture inference. Pinned on BOTH prefixes because they are
-/// separate `build_aligned_spec` calls.
+/// ISSUE #57 replaced the blanket BLSTM-only gate (`fast_twin_bails_on_unsupported_cell_type_
+/// and_direction`, which pinned a refusal on BOTH prefixes) with the (cell x direction)
+/// matrix. What survives is a REGIME rule, pinned here on the real net: the overlap LID
+/// windowing is refused on every shape, and a windowed CAUSAL LID net is refused
+/// (`tests/fast_twin_lid_matrix.rs` pins the causal half on the committed forward fixtures
+/// and the build-per-shape half). Both bail where the window resolves against the rate
+/// (`get_segmentation`), NOT at construction -- the pair must BUILD first.
 #[test]
-fn fast_twin_bails_on_unsupported_cell_type_and_direction() {
-    for (key, value, want) in [
-        (
-            "BLSTM_LID_Cell_Type",
-            "slstm",
-            "cell type 'slstm' is not supported on the fast inference path",
-        ),
-        (
-            "BLSTM_Cell_Type",
-            "mamba",
-            "cell type 'mamba' is not supported on the fast inference path",
-        ),
-        // The MESSAGE for this row changed in phase-10 Task 8, the refusal did NOT.
-        // `classify_fast_shape` used to bail on `(lstm, forward)` and its wording is what
-        // this leg asserted; Task 8 implemented that shape (`fast::cells::FastLstm`), so
-        // the classifier now NAMES it and the Twin's OWN gate -- `bail_unsupported_shape`,
-        // deliberately BLSTM-only and re-affirmed conservative in Task 7 -- is what
-        // refuses it here. Asserting the gate's own leading clause plus its
-        // "bidirectional twin only" clause keeps the leg discriminating: it still fails
-        // if the Twin ever silently accepts a causal LID net.
-        (
-            "BLSTM_LID_Direction",
-            "forward",
-            "cell type 'lstm' is not supported on the fast inference path",
-        ),
+fn fast_twin_refuses_the_overlap_lid_regime() {
+    // `window 0.25 / shift 0.0` is the committed truncate pair; `shift 0.1` resolves 10
+    // periodogram frames (>= 1) -> overlap.
+    let mut m = map_of("twin_mode7");
+    m.insert("BLSTM_LID_shift".into(), "0.1".into());
+    let mut drv =
+        build_fast_twin(&m).expect("the overlap refusal is a regime rule, not a construction bail");
+    let mut audio = phseq_audio("s1", 0);
+    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
+        .map(|_| Segmentation::new(dur))
+        .collect();
+    let err = drv
+        .get_segmentation(&mut audio, &mut segs, None)
+        .expect_err("fast Twin + overlap LID windowing must bail");
+    assert!(
+        err.to_string()
+            .contains("overlap LID windowing is unsupported"),
+        "unexpected overlap-regime error: {err}"
+    );
+}
+
+/// The inverse of the old gate: a NON-LSTM bidirectional LID net now BUILDS on the fast
+/// Twin, so the build is pinned on pack LENGTH instead -- the hazard the shape bail was
+/// really protecting, re-aimed as phase 10 did for the SAD driver. At the real net's
+/// geometry (`36,24 / 48,1`, measured through `init_weights`) the bidirectional packs are
+/// lstm 12409, slstm 11833, mamba 14521, cfc 12235, transformer 13113: the 12409-weight
+/// LSTM pack is REFUSED under `mamba` and `transformer` (too short) and ACCEPTED head-first
+/// under `slstm` and `cfc` (the documented file-load tolerance every fast twin keeps). The
+/// per-shape builds from their OWN packs live in `tests/fast_twin_lid_matrix.rs`.
+#[test]
+fn fast_twin_pins_the_lid_pack_length_per_cell() {
+    use speech::fast::driver::FastNetShape;
+    use speech::nn::blstm::CellType;
+    for (cell, ct, refused) in [
+        ("mamba", CellType::Mamba, true),
+        ("transformer", CellType::Transformer, true),
+        ("slstm", CellType::Slstm, false),
+        ("cfc", CellType::Cfc, false),
     ] {
         let mut m = map_of("twin_mode7");
-        m.insert(key.into(), value.into());
-        if key == "BLSTM_LID_Direction" {
-            // A causal net declares a `hidden`-wide output MLP head (see
-            // `BlstmConfig::from_legacy`), else the width check fires first.
-            let hidden: usize = m["BLSTM_LID_LSTMNeuronNb"]
-                .split(',')
-                .next_back()
-                .unwrap()
-                .trim()
-                .parse()
-                .unwrap();
-            let mut out: Vec<String> = m["BLSTM_LID_OutputNeuronNb"]
-                .split(',')
-                .map(|v| v.trim().to_string())
-                .collect();
-            out[0] = hidden.to_string();
-            m.insert("BLSTM_LID_OutputNeuronNb".into(), out.join(","));
-        }
-        match build_fast_twin(&m) {
-            Err(e) => {
-                let msg = e.to_string();
-                assert!(
-                    msg.contains(want),
-                    "expected {want:?} for {key}={value}, got: {e}"
-                );
-                if key == "BLSTM_LID_Direction" {
-                    assert!(
-                        msg.contains("bidirectional twin only"),
-                        "the causal-LID refusal must still name the direction it accepts, got: {e}"
-                    );
-                }
-            }
-            Ok(_) => panic!("fast Twin + {key}={value} must bail"),
+        m.insert("BLSTM_LID_Cell_Type".into(), cell.into());
+        match (build_fast_twin(&m), refused) {
+            (Err(e), true) => assert!(
+                e.to_string().contains("too short"),
+                "the LSTM pack under Cell_Type {cell} must fail on LENGTH, got: {e}"
+            ),
+            (Ok(drv), false) => assert_eq!(
+                drv.lid_shape(),
+                FastNetShape::BiCell(ct),
+                "{cell}: the fast Twin must build the bidirectional cell twin"
+            ),
+            (Err(e), false) => panic!("{cell}: a head-first-accepted pack must build, got: {e}"),
+            (Ok(_), true) => panic!("{cell}: a too-short pack must not build"),
         }
     }
 }

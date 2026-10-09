@@ -81,7 +81,10 @@ use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_
 
 use super::bicell::FastBiCell;
 use super::cells::FastCausalNet;
-use super::nn::{FastBlstm, FastMatrix, external_normalize_f32, self_normalize_f32};
+use super::nn::{
+    FastBlstm, FastMatrix, TruncateGeometry, external_normalize_f32, self_normalize_f32,
+    truncate_forward,
+};
 use super::pipeline::FastPipeline;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 
@@ -124,11 +127,12 @@ pub enum FastNetShape {
 /// [`FastBiCell::element_count`]) is the check that closes it.
 ///
 /// A refusal survives exactly where a shape genuinely cannot run, NOT here:
-/// `fast::stream::StreamingSession::new` refuses [`FastNetShape::BiCell`] (bidirectional
-/// is unstreamable by construction) and [`bail_unsupported_shape`] refuses anything but
-/// [`FastNetShape::Blstm`] for the Twin's frozen SAD net. Both keep the refusal's LEADING
-/// CLAUSE, which is what `phase8_gate.rs` / `phase9_stream_causal.rs` /
-/// `phase7_parity_lid.rs` assert (a PREFIX SUBSTRING, not the body).
+/// `fast::stream::StreamingSession::new` refuses [`FastNetShape::BiCell`] (the FRAME
+/// stream cannot run a bidirectional net), keeping the refusal's LEADING CLAUSE, which is
+/// what `phase8_gate.rs` / `phase9_stream_causal.rs` assert (a PREFIX SUBSTRING, not the
+/// body). The Twin's LID net classifies through this same function since issue #57
+/// ([`FastLidNet`]); its two surviving refusals are REGIME rules (windowed causal,
+/// overlap), raised where the window resolves against the rate.
 ///
 /// TOTALITY IS NOT A LOOSENING. A future `CellType` variant added without a fast kernel
 /// does not silently fall through here: it reaches `super::cells::cell_weight_count`,
@@ -142,46 +146,16 @@ pub(crate) fn classify_fast_shape(bc: &BlstmConfig) -> FastNetShape {
     }
 }
 
-/// Typed bail for the port-only STRUCTURAL keys a fast/streaming CALLER parses but
-/// cannot honour: everything that is not the phase-7 bidirectional peephole-LSTM twin
-/// (Phase 9 Task 2 rider, tightened by Task 6's [`classify_fast_shape`]).
-///
-/// This is the BLSTM-ONLY gate, reached through [`build_aligned_spec`] from
-/// `FastTwinLid::from_legacy` (BOTH nets) and `stream::StreamingSession::new`. The
-/// algo-3 SAD driver no longer routes through it -- it classifies instead, and builds
-/// a causal net when the config asks for one.
-///
-/// THE TWIN KEEPS THIS GATE ON ITS SAD NET, deliberately (Task 6 decision, RE-EXAMINED
-/// AND RE-AFFIRMED in phase-10 Task 7 under spec S5's "revisited ONLY if a covering gate
-/// exists" condition -- it does not, so it stays). In Mode 7 the SAD net is never run
-/// (the frozen-SAD contract: its `result_vec` is a synthesized constant), so only its
-/// SHAPE keys are read and relaxing the check would be harmless -- but "harmless" is a
-/// claim about a path no gate exercises, and nothing in Task 7 adds one: the
-/// bidirectional twins land behind the algo-3 SAD driver, the phase's LID arms train the
-/// LID net alone. Since issue #21 `drivers/baseline.py`'s `--cell`/`--direction` reach the
-/// LID net on the LID arms, with exact-tree gates only (`tests/pyo3/test_lid_cells_gates.py`);
-/// none covers the fast Twin, so the gate stays, and lifting it to the matrix is #57.
-/// Keeping it conservative keeps the fast Twin's accepted surface exactly what phase 7 pinned.
-///
-/// The message body is UNCHANGED where `phase7_parity_lid.rs` pins it (the leading "cell
-/// type '<x>' is not supported on the fast inference path"); only the parenthetical now
-/// names both sibling shapes.
-fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
-    if classify_fast_shape(bc) != FastNetShape::Blstm {
-        bail!(
-            "cell type '{}' is not supported on the fast inference path (net '{prefix}'); this \
-             net runs the f32 peephole-LSTM bidirectional twin only (the causal and \
-             bidirectional new-cell fast twins are the algo-3 SAD driver's) -- run this config \
-             on the exact path (Inference_Path exact)",
-            bc.cell_type.as_str()
-        );
-    }
-    Ok(())
-}
-
 /// Build the `NnetSpec` for the fast net (under config `prefix`, e.g. `"BLSTM"` for
 /// the SAD net or `"BLSTM_LID"` for the Twin's LID net) with peephole flags aligned to
 /// the EXACT path's defaults (Phase 7 Task 4 rider 1 -- the peephole default asymmetry).
+///
+/// SHAPE-FREE since issue #57. Through phase 11 this was ALSO the Twin's BLSTM-only gate
+/// (`bail_unsupported_shape`, refusing any `Cell_Type`/`Direction` pair but the phase-7
+/// twin on BOTH of the Twin's prefixes). The Twin's LID net now classifies through
+/// [`classify_fast_shape`] like the SAD driver ([`FastLidNet`]), and its SAD net is never
+/// run in Mode 7 (only its sub-sampling ratios are read, which every cell carries), so no
+/// shape gate is left to apply here. One parse + one alignment, nothing else.
 ///
 /// The fast net reads a `NnetSpec`; the exact net reads a `BlstmConfig`. A peephole
 /// mismatch between the two is a divergence with no tolerance floor, so the spec's
@@ -194,14 +168,12 @@ fn bail_unsupported_shape(bc: &BlstmConfig, prefix: &str) -> Result<()> {
 /// an all-false and a mixed config.
 pub fn build_aligned_spec(map: &IndexMap<String, String>, prefix: &str) -> Result<NnetSpec> {
     let bc = BlstmConfig::from_legacy(map, prefix)?;
-    bail_unsupported_shape(&bc, prefix)?;
     build_spec_aligned_to(map, prefix, &bc)
 }
 
-/// [`build_aligned_spec`] WITHOUT the BLSTM-only shape gate: the spec assembly alone,
-/// aligned to an already-parsed [`BlstmConfig`]. Split out by Task 6 so the algo-3 SAD
-/// driver can classify the shape itself (and build a causal net) off the same
-/// peephole-aligned spec, with no second config parse.
+/// [`build_aligned_spec`] on an already-parsed [`BlstmConfig`]: the spec assembly alone.
+/// Split out by Task 6 so a driver that classifies the shape itself builds its net off
+/// the same peephole-aligned spec, with no second config parse.
 pub(crate) fn build_spec_aligned_to(
     map: &IndexMap<String, String>,
     prefix: &str,
@@ -801,6 +773,190 @@ impl Segmenter for FastSpectralSegmenter {
 }
 
 // ===========================================================================
+// FastLidNet -- the Twin's LID net on the (cell x direction) matrix (issue #57).
+// ===========================================================================
+
+/// The Twin's Mode-7 LID net actually built, per [`FastNetShape`] -- the LID-side
+/// sibling of [`FastSadNet`], one more consumer of the two cell twins. Merging the two
+/// enums is issue #24's job (the Twin's config parse dedupe), not this one's.
+///
+/// THE SCORING REGIME FOLLOWS THE SHAPE, as it does for the SAD net but with the LID
+/// regimes: a BIDIRECTIONAL shape (`Blstm`, `BiCell`) runs the TwoSweeps/single-sweep
+/// TRUNCATE windowing the committed LID configs resolve to (`BLSTM_LID_window 0.25`), or
+/// the PLAIN whole-sequence forward (`window 0`); a CAUSAL shape runs PLAIN only (the
+/// launcher writes `BLSTM_LID_window 0` on a forward LID net; a causal cell inside a
+/// window has its state reset at every boundary, the SAD driver's rule). OVERLAP is
+/// refused on every shape. Both refusals are raised where the window resolves against
+/// the rate (`FastTwinLid::get_segmentation` / `lid_score_params`), not at construction.
+///
+/// `large_enum_variant` allowed on the `FastSadNet` precedent: one per Twin, borrowed
+/// thereafter.
+#[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum FastLidNet {
+    Blstm(FastBlstm),
+    Causal(FastCausalNet),
+    BiCell(FastBiCell),
+}
+
+impl FastLidNet {
+    fn output_size(&self) -> usize {
+        match self {
+            FastLidNet::Blstm(n) => n.output_size(),
+            FastLidNet::Causal(n) => n.output_size(),
+            FastLidNet::BiCell(n) => n.output_size(),
+        }
+    }
+
+    fn lstm_subsampling(&self) -> &[usize] {
+        match self {
+            FastLidNet::Blstm(n) => n.lstm_subsampling(),
+            FastLidNet::Causal(n) => n.lstm_subsampling(),
+            FastLidNet::BiCell(n) => n.lstm_subsampling(),
+        }
+    }
+
+    fn output_subsampling(&self) -> &[usize] {
+        match self {
+            FastLidNet::Blstm(n) => n.output_subsampling(),
+            FastLidNet::Causal(n) => n.output_subsampling(),
+            FastLidNet::BiCell(n) => n.output_subsampling(),
+        }
+    }
+
+    fn sub_sampling_ratio(&self) -> usize {
+        self.lstm_subsampling().iter().product::<usize>()
+            * self.output_subsampling().iter().product::<usize>()
+    }
+
+    /// ONE whole block through the shape's own forward, copied into `out`. The block
+    /// forward every regime below drives: the plain regime calls it once over the whole
+    /// entry, the truncate sweep once per window.
+    fn forward_block(&mut self, block: &FastMatrix, out: &mut FastMatrix) {
+        match self {
+            FastLidNet::Blstm(n) => out.copy_from(n.feed_forward(block)),
+            FastLidNet::Causal(n) => out.copy_from(n.feed_forward(block)),
+            FastLidNet::BiCell(n) => out.copy_from(n.feed_forward(block)),
+        }
+    }
+
+    /// Scoring forward for the Mode-7 LID Twin, the f32 counterpart of the INFERENCE
+    /// slice of `BlstmNetwork::feed_forward_scoring` (`nn/blstm.rs:1671-1760`) on every
+    /// shape. Mode 7 always passes `target_index >= 0`, so this mirrors: the `rows < ssr
+    /// -> Zero(1, O)` guard, the sequential output-length division, the windowed dispatch
+    /// (`set_processing_type(window_size > 0, overlaps)`: `window_size == 0` is the PLAIN
+    /// whole-sequence forward, `TwoSweeps` IGNORED exactly as the exact tree ignores it
+    /// there; `window_size > 0` is the TRUNCATE sweep, the caller having refused overlap),
+    /// and the BINARY expansion into `[1-p, p]` when `output_size == 1`. The exact's
+    /// target construction + cost/backward are SKIPPED: the fast path is forward-only, the
+    /// forward is target-independent, and Mode 7's langID/confusion derive from the
+    /// posteriors alone (the NN-cost columns are a documented divergence).
+    ///
+    /// Through phase 11 this body was `FastBlstm::feed_forward_scoring`; issue #57 moved
+    /// it here unchanged for the BLSTM shape (the phase-7 LID legs at their pins are the
+    /// proof) and generalized the block forward.
+    pub(crate) fn feed_forward_scoring(
+        &mut self,
+        input: &FastMatrix,
+        window_size: usize,
+        two_sweeps: bool,
+    ) -> FastMatrix {
+        let output_size = self.output_size();
+        let rows = input.rows;
+        if rows < self.sub_sampling_ratio() {
+            return FastMatrix::zeros(1, output_size); // :1101-1103
+        }
+        // :1106-1114 output length (only re-divided when the whole ratio > 1).
+        let mut out_len = rows;
+        if self.sub_sampling_ratio() > 1 {
+            for &r in self.lstm_subsampling() {
+                out_len /= r;
+            }
+            for &r in self.output_subsampling() {
+                out_len /= r;
+            }
+        }
+        let output = if window_size == 0 {
+            // The PLAIN regime (`feed_forward_backward_plain` -> `feed_forward` over the
+            // whole entry, `nn/blstm.rs:1780`): the net's own output length is the same
+            // sequential floor chain, so the rows agree by construction; a disagreement is
+            // a geometry defect, not something to pad or truncate quietly.
+            let mut out = FastMatrix::zeros(0, 0);
+            self.forward_block(input, &mut out);
+            assert_eq!(
+                (out.rows, out.cols),
+                (out_len, output_size),
+                "fast LID plain forward: net output shape vs the scoring length"
+            );
+            out
+        } else {
+            let lsub = self.lstm_subsampling().to_vec();
+            let osub = self.output_subsampling().to_vec();
+            let geom = TruncateGeometry {
+                lstm_subsampling: &lsub,
+                output_subsampling: &osub,
+                output_size,
+            };
+            truncate_forward(
+                &geom,
+                input,
+                window_size,
+                out_len,
+                two_sweeps,
+                &mut |block, out| self.forward_block(block, out),
+            )
+        };
+        // :1175-1185 binary expansion into [1-p, p] (Mode 7 always has targets, so the
+        // `target_index >= 0` half of the legacy gate is always true here).
+        if output_size == 1 {
+            let mut expanded = FastMatrix::zeros(out_len, 2);
+            for ii in 0..out_len {
+                let p = output.data[ii];
+                expanded.data[ii * 2] = 1.0 - p;
+                expanded.data[ii * 2 + 1] = p;
+            }
+            expanded
+        } else {
+            output
+        }
+    }
+}
+
+/// Build the Twin's LID net for a classified [`FastNetShape`] from the flat f64 pack.
+/// ONE place, so `from_legacy(map, _, Some(flat))` and the deferred `load_weights_file`
+/// cannot pick different arms (the [`build_sad_net`] rule). Each shape's `from_flat`
+/// enforces its own pack-length check, which is what stops another shape's pack from
+/// being consumed head-first under this one's name.
+fn build_lid_net(
+    spec: &NnetSpec,
+    shape: FastNetShape,
+    mamba: &MambaParams,
+    cfc: &CfcParams,
+    transformer: &TransformerParams,
+    flat: &[f64],
+) -> Result<FastLidNet> {
+    Ok(match shape {
+        FastNetShape::Blstm => FastLidNet::Blstm(FastBlstm::from_flat(spec, flat)?),
+        FastNetShape::Causal(cell) => FastLidNet::Causal(FastCausalNet::from_flat(
+            spec,
+            cell,
+            mamba,
+            cfc,
+            transformer,
+            flat,
+        )?),
+        FastNetShape::BiCell(cell) => FastLidNet::BiCell(FastBiCell::from_flat(
+            spec,
+            cell,
+            mamba,
+            cfc,
+            transformer,
+            flat,
+        )?),
+    })
+}
+
+// ===========================================================================
 // FastTwinLid -- the f32 Mode-7 LID Twin (algo 6).
 // ===========================================================================
 
@@ -833,6 +989,8 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 /// net scores each `audio.external_features[i]` block, in f32. The langID / confusion /
 /// `is_lid_correct` decisions derive from the LID posteriors alone -- widened back to
 /// f64 at the member seam so the shared `.scr` writer + confusion columns flow unchanged.
+/// Since issue #57 the LID net is any shape of the (cell x direction) matrix
+/// ([`FastLidNet`]), not the phase-7 BLSTM twin alone.
 ///
 /// SCOPE (the house typed-bail pattern -- Mode 7 phSeq/cep is what the gate configs
 /// exercise, everything else typed-bails loudly):
@@ -846,9 +1004,14 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 ///   forward-only scoring never reproduces; the gate configs use a non-negative step.
 /// - MLP mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`) typed-bails at construction (T5 finding 3,
 ///   review, contract symmetry with the exact dispatch's is_mlp route to the MLP drivers).
-/// - The LID windowed dispatch must resolve to TRUNCATE (`lid_window_size > 0`,
-///   `lid_no_overlap true`, what the gate configs give); plain/overlap bail at
-///   `get_segmentation`.
+/// - The LID windowed dispatch (issue #57, D2): TRUNCATE (`lid_window_size > 0`,
+///   `lid_no_overlap true`, what the committed bidirectional LID configs give) or PLAIN
+///   (`lid_window_size == 0`, what the launcher writes on a forward LID net) on a
+///   bidirectional shape; PLAIN only on a causal one; OVERLAP bails on every shape --
+///   both refusals at `get_segmentation` / `lid_score_params`, where the window resolves.
+/// - The LID net's `Cell_Type` x `Direction` pair is NOT a bail any more: [`FastLidNet`]
+///   runs the whole (cell x direction) matrix. The SAD net's pair is never read for a
+///   kernel (frozen-SAD: only its sub-sampling ratios size the SAD result vector).
 ///
 /// FORWARD-ONLY: `cumulative_error`/`nb_of_classif` (SAD, always 0 in Mode 7 anyway) and
 /// `lid_cumulative_error`/`lid_nb_of_classif` (the LID NN-cost/count columns) stay ZERO
@@ -871,7 +1034,14 @@ pub struct FastTwinLid {
     /// `load_weights_file` rebuild). `lid_ssr`/`class_nb`/`lid_two_sweeps` are cached
     /// off the spec/config so the window derivation needs no live net borrow.
     lid_spec: NnetSpec,
-    lid_net: Option<FastBlstm>,
+    /// The LID net SHAPE the config selected ([`classify_fast_shape`] on the `BLSTM_LID`
+    /// prefix) + the three cell geometries, carried so the deferred `load_weights_file`
+    /// rebuild sizes and picks exactly as `from_legacy` did (the SAD driver's rule).
+    lid_shape: FastNetShape,
+    lid_mamba: MambaParams,
+    lid_cfc: CfcParams,
+    lid_transformer: TransformerParams,
+    lid_net: Option<FastLidNet>,
     lid_ssr: usize,
     class_nb: usize,
     lid_two_sweeps: bool,
@@ -908,13 +1078,15 @@ impl FastTwinLid {
     /// Build from a legacy config map + optional SAD/LID weight packs, mirroring
     /// [`crate::tasks::lid::TwinBlstmSpectralLid::from_legacy`]'s surface. `sad_weights`
     /// is accepted for signature symmetry but UNUSED (the SAD net is never run in Mode
-    /// 7). `lid_weights: Some(flat)` builds the LID [`FastBlstm`] immediately; `None`
+    /// 7). `lid_weights: Some(flat)` builds the LID net ([`FastLidNet`], the shape
+    /// [`classify_fast_shape`] selects on the `BLSTM_LID` prefix) immediately; `None`
     /// defers to [`Self::load_weights_file`].
     ///
     /// Typed-bails (loudly, at construction) the unsupported fast surfaces: any mode but
     /// 7, the pitch second pass (`TDCwindow > 0`), a LID `InputNormalizationType != 0`,
     /// and `DumpLIDInternals` (the fast path does not track the LID hidden states the
-    /// dump emits).
+    /// dump emits). The LID net's `Cell_Type` x `Direction` pair is no longer among them
+    /// (issue #57).
     pub fn from_legacy(
         map: &IndexMap<String, String>,
         _sad_weights: Option<&[f64]>,
@@ -947,7 +1119,9 @@ impl FastTwinLid {
             );
         }
 
-        // SAD net shape only (never run in Mode 7). Peephole-aligned spec, but no net.
+        // SAD net shape only (never run in Mode 7): its sub-sampling ratios size the SAD
+        // result vector, and every cell carries those. Peephole-aligned spec, but no net
+        // and no shape gate (issue #57 removed the BLSTM-only one).
         let sad_spec = build_aligned_spec(map, "BLSTM")?;
         let sad_lstm_sub = sad_spec.lstm_subsampling.clone();
         let sad_out_sub = sad_spec.output_subsampling.clone();
@@ -989,33 +1163,42 @@ impl FastTwinLid {
 
         // T5 finding 3 (review, minor): contract symmetry with the exact dispatch, which
         // routes is_mlp configs (LSTMNeuronNb[0]==0) to the MLP drivers
-        // (nn/blstm.rs:1032-1043) instead of the truncate BLSTM path the fast LID scoring
-        // always runs. `FastBlstm::from_flat` (fast/nn.rs:340-342) independently bails on
-        // this shape, but only once weights are actually loaded -- when `lid_weights` is
-        // `None` here (the deferred `load_weights_file` path), `from_legacy` would
-        // otherwise return `Ok` for an is_mlp config, so `from_flat`'s bail does NOT
-        // provably fire first on every such config. Bail on the SAME derived flag the
-        // exact dispatch gates on so construction fails loudly regardless of when weights
-        // arrive.
+        // (nn/blstm.rs:1032-1043) instead of the recurrent forwards the fast LID scoring
+        // runs. Every shape's `from_flat` independently bails on this shape, but only once
+        // weights are actually loaded -- when `lid_weights` is `None` here (the deferred
+        // `load_weights_file` path), `from_legacy` would otherwise return `Ok` for an
+        // is_mlp config, so `from_flat`'s bail does NOT provably fire first on every such
+        // config. Bail on the SAME derived flag the exact dispatch gates on so
+        // construction fails loudly regardless of when weights arrive.
         if lid_bc.is_mlp {
             bail!(
                 "fast TwinLid: MLP mode (BLSTM_LID_LSTMNeuronNb[0] == 0) is not supported on \
-                 the fast path (the fast LID scoring always runs the truncate BLSTM forward, \
-                 never the MLP drivers); the gate configs use a non-zero LSTM width"
+                 the fast path (the fast LID scoring runs the recurrent forwards only, never \
+                 the MLP drivers); the gate configs use a non-zero LSTM width"
             );
         }
 
         let cost_modified = lid_bc.cost_law.is_cost_modified();
         let lid_two_sweeps = lid_bc.two_sweeps;
 
-        let lid_spec = build_aligned_spec(map, "BLSTM_LID")?;
+        // Cell x direction dispatch on the LID prefix (issue #57): the same TOTAL
+        // classifier the SAD driver uses, off the same peephole-aligned spec.
+        let lid_shape = classify_fast_shape(&lid_bc);
+        let lid_spec = build_spec_aligned_to(map, "BLSTM_LID", &lid_bc)?;
         let lid_ssr = lid_spec.lstm_subsampling.iter().product::<usize>()
             * lid_spec.output_subsampling.iter().product::<usize>();
         // class_nb = LID output_size max 2 (the langID / confusion dimensionality).
         let class_nb = (*lid_spec.output_neuron_nb.last().unwrap()).max(2);
 
         let lid_net = match lid_weights {
-            Some(flat) => Some(FastBlstm::from_flat(&lid_spec, flat)?),
+            Some(flat) => Some(build_lid_net(
+                &lid_spec,
+                lid_shape,
+                &lid_bc.mamba,
+                &lid_bc.cfc,
+                &lid_bc.transformer,
+                flat,
+            )?),
             None => None,
         };
 
@@ -1043,6 +1226,10 @@ impl FastTwinLid {
             sad_out_sub,
             sad_ssr,
             lid_spec,
+            lid_shape,
+            lid_mamba: lid_bc.mamba,
+            lid_cfc: lid_bc.cfc,
+            lid_transformer: lid_bc.transformer,
             lid_net,
             lid_ssr,
             class_nb,
@@ -1072,7 +1259,9 @@ impl FastTwinLid {
 
     /// `BLSTM_LID_weightsFile` load (mirrors the exact Twin's LID-net load): an EMPTY key
     /// leaves the net unloaded (a subsequent `get_segmentation` errors); otherwise read
-    /// the `.bin` and (re)build the LID [`FastBlstm`].
+    /// the `.bin` and (re)build the LID net through the SAME [`build_lid_net`] the ctor
+    /// uses, so the deferred load cannot pick a different arm than `from_legacy`
+    /// classified.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         let weights_file = map
             .get("BLSTM_LID_weightsFile")
@@ -1082,8 +1271,22 @@ impl FastTwinLid {
             return Ok(());
         }
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.lid_net = Some(FastBlstm::from_flat(&self.lid_spec, &flat)?);
+        self.lid_net = Some(build_lid_net(
+            &self.lid_spec,
+            self.lid_shape,
+            &self.lid_mamba,
+            &self.lid_cfc,
+            &self.lid_transformer,
+            &flat,
+        )?);
         Ok(())
+    }
+
+    /// The LID net shape the config selected (the `BLSTM_LID` prefix through
+    /// [`classify_fast_shape`]). The dispatch legs pin that each (cell, direction) pair
+    /// builds its own arm.
+    pub fn lid_shape(&self) -> FastNetShape {
+        self.lid_shape
     }
 
     /// The configured dump directory (gates the scored-branch VRCTS write in the bag).
@@ -1135,10 +1338,14 @@ impl FastTwinLid {
     /// Test hook: the LID net's effective per-direction peephole flags (rider 2 -- wires
     /// the `FastBlstm::debug_peepholes` hook into a Task-5 pin, proving the LID net's
     /// spec was peephole-aligned under the `BLSTM_LID` prefix, not left at the
-    /// `NnetSpec` default, FALSE until issue #32).
+    /// `NnetSpec` default, FALSE until issue #32). `None` unless the LID net is the
+    /// peephole-LSTM twin (the other shapes carry no peepholes).
     #[cfg(feature = "test-support")]
     pub fn debug_lid_peepholes(&self) -> Option<[bool; 6]> {
-        self.lid_net.as_ref().map(|n| n.debug_peepholes())
+        match self.lid_net.as_ref() {
+            Some(FastLidNet::Blstm(n)) => Some(n.debug_peepholes()),
+            _ => None,
+        }
     }
 }
 
@@ -1146,7 +1353,8 @@ impl Segmenter for FastTwinLid {
     /// Port of the `abs(_Mode) == 7` external-features LID loop
     /// (`tasks/lid.rs::get_segmentation_mode7`), f32. The SAD net is synthesized (constant
     /// 10.0 -> the SHARED f64 decision layer, so the SAD side is bit-identical to the
-    /// exact path); the LID net runs the fast windowed forward per external-features block.
+    /// exact path); the LID net runs the fast scoring forward (plain or truncate, per the
+    /// config and the shape) per external-features block.
     fn get_segmentation(
         &mut self,
         audio: &mut Audio,
@@ -1226,22 +1434,17 @@ impl Segmenter for FastTwinLid {
         }
         self.lid_window_shift_sec = (lid_window_shift * ssif as i64) as f64 / rate;
 
-        // The fast LID scoring implements ONLY the TRUNCATE windowed forward (what the
-        // gate configs resolve to: `set_processing_type(lid_window_size > 0,
-        // !lid_no_overlap)` -> truncate iff `lid_window_size > 0 && lid_no_overlap`).
-        // Plain / overlap bail (the house pattern, mirroring the SAD driver's).
-        if lid_window_size == 0 {
-            bail!(
-                "fast TwinLid mode 7: the plain (non-windowed) LID forward is unsupported; the \
-                 gate configs resolve to windowed truncate"
-            );
-        }
-        if !lid_no_overlap {
-            bail!(
-                "fast TwinLid mode 7: the overlap LID windowing is unsupported; the gate configs \
-                 resolve to truncate"
-            );
-        }
+        // The regime rule (issue #57, D2/D10): `set_processing_type(lid_window_size > 0,
+        // !lid_no_overlap)` resolves PLAIN (`window 0`), TRUNCATE (`window > 0`, no
+        // overlap) or OVERLAP. The shape decides which of the first two it runs; overlap
+        // is refused everywhere. ONE check, shared with the streaming session's
+        // `lid_score_params`, so the two cannot drift.
+        check_lid_regime(
+            "fast TwinLid mode 7",
+            self.lid_shape,
+            lid_window_size,
+            lid_no_overlap,
+        )?;
 
         // SAD timeStep/offset (the exact `:1356-1366`).
         let mut time_step = self.window_shift_sec * sad_ssr as f64;
@@ -1481,6 +1684,41 @@ fn derive_lid_window(
     (lid_window_size, lid_no_overlap)
 }
 
+/// The LID regime rule (issue #57, D2), applied where the window has resolved against the
+/// rate -- the offline `get_segmentation` and the streaming `lid_score_params` both call
+/// it, so the two refusals cannot drift. A CAUSAL shape runs the PLAIN regime only (a
+/// causal cell inside a window has its state reset at every window boundary, the SAD
+/// driver's rule; the launcher writes `BLSTM_LID_window 0` on a forward LID net); every
+/// shape refuses OVERLAP (the fast LID scoring implements the truncate sweep and the plain
+/// forward, nothing accumulates across overlapping windows). A bidirectional shape runs
+/// either plain or truncate, exactly as the exact tree dispatches them.
+fn check_lid_regime(
+    who: &str,
+    shape: FastNetShape,
+    lid_window_size: usize,
+    lid_no_overlap: bool,
+) -> Result<()> {
+    if let FastNetShape::Causal(cell) = shape
+        && lid_window_size != 0
+    {
+        bail!(
+            "{who}: windowed LID inference is unsupported for a causal LID net (cell '{}', \
+             BLSTM_LID_window resolves window_size {lid_window_size}); a causal cell's state is \
+             reset at every window boundary -- a forward LID net runs the plain regime \
+             (BLSTM_LID_window 0, what the launcher writes)",
+            cell.as_str()
+        );
+    }
+    if lid_window_size > 0 && !lid_no_overlap {
+        bail!(
+            "{who}: the overlap LID windowing is unsupported on the fast path (BLSTM_LID_shift \
+             resolves >= 1 frame); the fast LID scoring runs the truncate sweep or the plain \
+             forward -- the committed LID configs resolve to truncate (shift 0)"
+        );
+    }
+    Ok(())
+}
+
 /// Fold ONE external-features entry into `acc` -- the exact body of the Mode-7 `:1448-1591`
 /// inner loop. Returns `None` if the entry is skipped (`nrows < lid_ssr` or `< MinNbOfFrames`,
 /// `:1450`), else the per-entry observables. The noise `randinit` is fixed 0 PER ENTRY
@@ -1488,7 +1726,7 @@ fn derive_lid_window(
 /// sequential call's noise indexing exactly.
 pub(super) fn score_lid_entry(
     feat: &Array2<f64>,
-    net: &mut FastBlstm,
+    net: &mut FastLidNet,
     p: &LidScoreParams,
     acc: &mut LidChannelAcc,
 ) -> Option<LidEntryOutcome> {
@@ -1663,9 +1901,9 @@ impl FastTwinLid {
     /// Derive the per-channel LID scoring params for streaming (the window resolution + skip/
     /// scoring constants from `get_segmentation`, minus the SAD side). Mode 7 forces
     /// `_SpectrumShiftInFrames = 80` (`:1296-1301`: the phSeq/cep periodogram is always
-    /// present), so `ssif` is a constant here. Bails if the window does not resolve to
-    /// TRUNCATE (the only windowing the fast LID scoring implements, mirroring
-    /// `get_segmentation`'s plain/overlap bails). `ti = clamp(lang_index, [0, class_nb))`.
+    /// present), so `ssif` is a constant here. Applies the SAME regime rule as
+    /// `get_segmentation` ([`check_lid_regime`]: plain or truncate per the shape, overlap
+    /// refused). `ti = clamp(lang_index, [0, class_nb))`.
     pub(super) fn lid_score_params(&self, rate: f64, lang_index: i32) -> Result<LidScoreParams> {
         let ssif = 80usize; // mode-7 forced (:1296-1301)
         let (lid_window_size, lid_no_overlap) = derive_lid_window(
@@ -1675,18 +1913,12 @@ impl FastTwinLid {
             ssif,
             rate,
         );
-        if lid_window_size == 0 {
-            bail!(
-                "streaming LID: the plain (non-windowed) LID forward is unsupported; the gate \
-                 configs resolve to windowed truncate"
-            );
-        }
-        if !lid_no_overlap {
-            bail!(
-                "streaming LID: the overlap LID windowing is unsupported; the gate configs \
-                 resolve to truncate"
-            );
-        }
+        check_lid_regime(
+            "streaming LID",
+            self.lid_shape,
+            lid_window_size,
+            lid_no_overlap,
+        )?;
         let mut ti = lang_index;
         if ti >= self.class_nb as i32 {
             ti = 0;
