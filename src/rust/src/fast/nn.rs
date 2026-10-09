@@ -229,6 +229,17 @@ pub struct FastMatrix {
 }
 
 impl FastMatrix {
+    /// Overwrite `self` with `src`'s shape and contents, reusing the allocation (the
+    /// per-window posterior staging in the truncate sweep).
+    pub(crate) fn copy_from(&mut self, src: &FastMatrix) {
+        self.rows = src.rows;
+        self.cols = src.cols;
+        self.data.clear();
+        self.data.extend_from_slice(&src.data);
+    }
+}
+
+impl FastMatrix {
     pub fn zeros(rows: usize, cols: usize) -> Self {
         FastMatrix {
             data: vec![0.0; rows * cols],
@@ -768,6 +779,9 @@ impl FastBlstm {
     /// divergence, like the SAD driver's). `two_sweeps` selects the TwoSweeps truncate;
     /// the driver guarantees the truncate dispatch (bails overlap/plain), so only the
     /// truncate windowing is implemented here.
+    ///
+    /// Issue #57: a THIN CALLER of the lifted [`truncate_forward`] (the sweep is
+    /// net-agnostic and now shared with the cell twins); the arithmetic is unchanged.
     pub fn feed_forward_scoring(
         &mut self,
         input: &FastMatrix,
@@ -789,7 +803,21 @@ impl FastBlstm {
                 out_len /= r;
             }
         }
-        let output = self.feed_forward_truncate(input, window_size, out_len, two_sweeps);
+        let lsub = self.lstm_subsampling.clone();
+        let osub = self.output_subsampling.clone();
+        let geom = TruncateGeometry {
+            lstm_subsampling: &lsub,
+            output_subsampling: &osub,
+            output_size,
+        };
+        let output = truncate_forward(
+            &geom,
+            input,
+            window_size,
+            out_len,
+            two_sweeps,
+            &mut |block, out| out.copy_from(self.feed_forward(block)),
+        );
         // :1175-1185 binary expansion into [1-p, p] (Mode 7 always has targets, so the
         // `target_index >= 0` half of the legacy gate is always true here).
         if output_size == 1 {
@@ -802,135 +830,6 @@ impl FastBlstm {
             expanded
         } else {
             output
-        }
-    }
-
-    /// f32 TwoSweeps/single-sweep truncate forward (`feed_forward_backward_truncate`,
-    /// `nn/blstm.rs:1450-1577`), OUTPUT-ONLY. The exact stitches the fwd/bwd hidden
-    /// states (`_OutputForward`/`_OutputBackward`) across windows + sweeps; Mode 7 reads
-    /// them ONLY for `DumpLIDInternals` (off on the gate configs, the fast driver bails
-    /// if it is on), so the fast path tracks only `output`. `out_len` is the caller's
-    /// posterior row count (from `feed_forward_scoring`).
-    fn feed_forward_truncate(
-        &mut self,
-        input: &FastMatrix,
-        window_size: usize,
-        out_len: usize,
-        two_sweeps: bool,
-    ) -> FastMatrix {
-        let output_size = self.output_size;
-        if !two_sweeps {
-            // :1457-1459 single TruncateSweep.
-            let mut output = FastMatrix::zeros(out_len, output_size);
-            self.feed_forward_truncate_sweep(input, window_size, &mut output);
-            return output;
-        }
-
-        // :1462-1467 shift/window sizing (INTEGER-division ORDER: /2 FIRST, then /ssr).
-        let ssr = self.sub_sampling_ratio();
-        let shift_short = (window_size / 2) / ssr;
-        let shift = shift_short * ssr;
-        let window_size_short = window_size / ssr;
-
-        // :1471 input padding (first/last row replicated window_size times).
-        let input_padded = pad_replicate_ends_f32(input, window_size, window_size);
-
-        // :1490-1506 sweep 1: input drops the FRONT window_size padding, keeps the back;
-        // sweep1_out is the tail of the zero-padded output (out_len + window_size_short).
-        let sweep1_in = slice_rows_f32(&input_padded, window_size, input_padded.rows);
-        let mut sweep1_out = FastMatrix::zeros(out_len + window_size_short, output_size);
-        self.feed_forward_truncate_sweep(&sweep1_in, window_size, &mut sweep1_out);
-
-        // :1518-1546 sweep 2: input from `shift`; output written into a fresh zero buffer
-        // (output_padded2) offset by shift_short (the exact re-stitches the shifted block
-        // back in place after the sweep, so we mirror that write).
-        let sweep2_in = slice_rows_f32(&input_padded, shift, input_padded.rows);
-        let mut sweep2_buf = FastMatrix::zeros(out_len + 2 * window_size_short, output_size);
-        let mut sweep2_out = FastMatrix::zeros(sweep2_buf.rows - shift_short, output_size);
-        self.feed_forward_truncate_sweep(&sweep2_in, window_size, &mut sweep2_out);
-        for r in 0..sweep2_out.rows {
-            let dst = (shift_short + r) * output_size;
-            let src = r * output_size;
-            sweep2_buf.data[dst..dst + output_size]
-                .copy_from_slice(&sweep2_out.data[src..src + output_size]);
-        }
-
-        // :1548-1559 output[r] = (sweep1[r] + sweep2[r]) / 2 over the first out_len rows.
-        let mut output = FastMatrix::zeros(out_len, output_size);
-        for r in 0..out_len {
-            for c in 0..output_size {
-                let s1 = sweep1_out.data[r * output_size + c];
-                let s2 = sweep2_buf.data[(window_size_short + r) * output_size + c];
-                output.data[r * output_size + c] = (s1 + s2) / 2.0;
-            }
-        }
-        output
-    }
-
-    /// One truncate sweep (`feed_forward_backward_truncate_sweep`, `:1332-1442`),
-    /// OUTPUT-ONLY: non-overlapping windows of `window_size`, each a `feed_forward` over
-    /// a contiguous row-slice, written at `begin/ssr`. A `length_short == 0` window is
-    /// silently dropped (`:1399-1400`); a partial last window recomputes its length via
-    /// the sequential sub-sampling floors (`:1382-1397`).
-    fn feed_forward_truncate_sweep(
-        &mut self,
-        input: &FastMatrix,
-        window_size: usize,
-        output: &mut FastMatrix,
-    ) {
-        let ssr = self.sub_sampling_ratio();
-        let lstm_ratios = self.lstm_subsampling.clone();
-        let out_ratios = self.output_subsampling.clone();
-        let is_sub = ssr > 1;
-        let cols = output.cols;
-
-        // :1354-1368 nominal length (window /= each LSTM then Output ratio when sub on).
-        let mut length = window_size;
-        if is_sub {
-            for &r in &lstm_ratios {
-                length /= r;
-            }
-            for &r in &out_ratios {
-                length /= r;
-            }
-        }
-        let nominal_len = length;
-
-        let input_rows = input.rows;
-        let mut jj = 0;
-        while jj < input_rows {
-            let begin = jj;
-            let mut end = jj + window_size - 1;
-            if end >= input_rows {
-                end = input_rows - 1;
-            }
-            let length_seq = end - begin + 1;
-            let length_short = if length_seq != window_size {
-                let mut ls = length_seq;
-                if is_sub {
-                    for &r in &lstm_ratios {
-                        ls /= r;
-                    }
-                    for &r in &out_ratios {
-                        ls /= r;
-                    }
-                }
-                ls
-            } else {
-                nominal_len
-            };
-            if length_short > 0 {
-                let block = slice_rows_f32(input, begin, begin + length_seq);
-                let out_short = self.feed_forward(&block);
-                debug_assert_eq!(out_short.rows, length_short, "truncate sweep row count");
-                let obeg = begin / ssr;
-                for r in 0..length_short {
-                    let dst = (obeg + r) * cols;
-                    let src = r * out_short.cols;
-                    output.data[dst..dst + cols].copy_from_slice(&out_short.data[src..src + cols]);
-                }
-            }
-            jj += window_size;
         }
     }
 
@@ -951,6 +850,184 @@ impl FastBlstm {
             f.gates_rec_peep,
             b.gates_rec_peep,
         ]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The truncate / TwoSweeps scoring sweep (issue #57: lifted out of `FastBlstm`).
+//
+// The sweep is NET-AGNOSTIC: it slices the input into non-overlapping windows, calls a
+// whole-block forward per window, and stitches the rows at `begin / ssr`. Phase 7 wrote it
+// as `FastBlstm` methods because the Twin's LID net was BLSTM-only; the fast Twin LID now
+// dispatches on the (cell x direction) matrix, so the ONE copy lives here and every shape
+// (`FastBlstm`, `FastCausalNet`, `FastBiCell`) drives it through a block-forward closure.
+// NOT one of the two byte-frozen streaming kernels (`FastBlstm::feed_forward` proper and
+// `overlap_window_step`), so lifting it is a pure code motion: the phase-7 LID parity legs
+// at their existing pins are the arbiter.
+// ---------------------------------------------------------------------------
+
+/// The sub-sampling geometry the truncate sweep sizes its windows and output rows off.
+pub(crate) struct TruncateGeometry<'a> {
+    pub(crate) lstm_subsampling: &'a [usize],
+    pub(crate) output_subsampling: &'a [usize],
+    pub(crate) output_size: usize,
+}
+
+impl TruncateGeometry<'_> {
+    /// `getSubSamplingRatio`: the recurrent ratios times the output-net ones.
+    fn ssr(&self) -> usize {
+        self.lstm_subsampling.iter().product::<usize>()
+            * self.output_subsampling.iter().product::<usize>()
+    }
+
+    /// `len` divided SEQUENTIALLY by each recurrent ratio then each output ratio, the
+    /// exact tree's integer-floor chain, applied only when the whole ratio is > 1.
+    fn short_len(&self, len: usize) -> usize {
+        let mut l = len;
+        if self.ssr() > 1 {
+            for &r in self.lstm_subsampling {
+                l /= r;
+            }
+            for &r in self.output_subsampling {
+                l /= r;
+            }
+        }
+        l
+    }
+}
+
+/// f32 TwoSweeps/single-sweep truncate forward (`feed_forward_backward_truncate`,
+/// `nn/blstm.rs:1450-1577`), OUTPUT-ONLY. The exact stitches the fwd/bwd hidden
+/// states (`_OutputForward`/`_OutputBackward`) across windows + sweeps; Mode 7 reads
+/// them ONLY for `DumpLIDInternals` (off on the gate configs, the fast driver bails
+/// if it is on), so the fast path tracks only `output`. `out_len` is the caller's
+/// posterior row count. `forward` runs ONE whole block through the net and overwrites
+/// its second argument with that block's posteriors (`rows x output_size`).
+pub(crate) fn truncate_forward(
+    geom: &TruncateGeometry<'_>,
+    input: &FastMatrix,
+    window_size: usize,
+    out_len: usize,
+    two_sweeps: bool,
+    forward: &mut dyn FnMut(&FastMatrix, &mut FastMatrix),
+) -> FastMatrix {
+    let output_size = geom.output_size;
+    let mut block_out = FastMatrix::zeros(0, 0);
+    if !two_sweeps {
+        // :1457-1459 single TruncateSweep.
+        let mut output = FastMatrix::zeros(out_len, output_size);
+        truncate_sweep(
+            geom,
+            input,
+            window_size,
+            &mut output,
+            &mut block_out,
+            forward,
+        );
+        return output;
+    }
+
+    // :1462-1467 shift/window sizing (INTEGER-division ORDER: /2 FIRST, then /ssr).
+    let ssr = geom.ssr();
+    let shift_short = (window_size / 2) / ssr;
+    let shift = shift_short * ssr;
+    let window_size_short = window_size / ssr;
+
+    // :1471 input padding (first/last row replicated window_size times).
+    let input_padded = pad_replicate_ends_f32(input, window_size, window_size);
+
+    // :1490-1506 sweep 1: input drops the FRONT window_size padding, keeps the back;
+    // sweep1_out is the tail of the zero-padded output (out_len + window_size_short).
+    let sweep1_in = slice_rows_f32(&input_padded, window_size, input_padded.rows);
+    let mut sweep1_out = FastMatrix::zeros(out_len + window_size_short, output_size);
+    truncate_sweep(
+        geom,
+        &sweep1_in,
+        window_size,
+        &mut sweep1_out,
+        &mut block_out,
+        forward,
+    );
+
+    // :1518-1546 sweep 2: input from `shift`; output written into a fresh zero buffer
+    // (output_padded2) offset by shift_short (the exact re-stitches the shifted block
+    // back in place after the sweep, so we mirror that write).
+    let sweep2_in = slice_rows_f32(&input_padded, shift, input_padded.rows);
+    let mut sweep2_buf = FastMatrix::zeros(out_len + 2 * window_size_short, output_size);
+    let mut sweep2_out = FastMatrix::zeros(sweep2_buf.rows - shift_short, output_size);
+    truncate_sweep(
+        geom,
+        &sweep2_in,
+        window_size,
+        &mut sweep2_out,
+        &mut block_out,
+        forward,
+    );
+    for r in 0..sweep2_out.rows {
+        let dst = (shift_short + r) * output_size;
+        let src = r * output_size;
+        sweep2_buf.data[dst..dst + output_size]
+            .copy_from_slice(&sweep2_out.data[src..src + output_size]);
+    }
+
+    // :1548-1559 output[r] = (sweep1[r] + sweep2[r]) / 2 over the first out_len rows.
+    let mut output = FastMatrix::zeros(out_len, output_size);
+    for r in 0..out_len {
+        for c in 0..output_size {
+            let s1 = sweep1_out.data[r * output_size + c];
+            let s2 = sweep2_buf.data[(window_size_short + r) * output_size + c];
+            output.data[r * output_size + c] = (s1 + s2) / 2.0;
+        }
+    }
+    output
+}
+
+/// One truncate sweep (`feed_forward_backward_truncate_sweep`, `:1332-1442`),
+/// OUTPUT-ONLY: non-overlapping windows of `window_size`, each a whole-block forward
+/// over a contiguous row-slice, written at `begin/ssr`. A `length_short == 0` window is
+/// silently dropped (`:1399-1400`); a partial last window recomputes its length via
+/// the sequential sub-sampling floors (`:1382-1397`). `block_out` is the reused
+/// per-window posterior buffer `forward` fills.
+fn truncate_sweep(
+    geom: &TruncateGeometry<'_>,
+    input: &FastMatrix,
+    window_size: usize,
+    output: &mut FastMatrix,
+    block_out: &mut FastMatrix,
+    forward: &mut dyn FnMut(&FastMatrix, &mut FastMatrix),
+) {
+    let ssr = geom.ssr();
+    let cols = output.cols;
+
+    // :1354-1368 nominal length (window /= each LSTM then Output ratio when sub on).
+    let nominal_len = geom.short_len(window_size);
+
+    let input_rows = input.rows;
+    let mut jj = 0;
+    while jj < input_rows {
+        let begin = jj;
+        let mut end = jj + window_size - 1;
+        if end >= input_rows {
+            end = input_rows - 1;
+        }
+        let length_seq = end - begin + 1;
+        let length_short = if length_seq != window_size {
+            geom.short_len(length_seq)
+        } else {
+            nominal_len
+        };
+        if length_short > 0 {
+            let block = slice_rows_f32(input, begin, begin + length_seq);
+            forward(&block, block_out);
+            debug_assert_eq!(block_out.rows, length_short, "truncate sweep row count");
+            let obeg = begin / ssr;
+            for r in 0..length_short {
+                let dst = (obeg + r) * cols;
+                let src = r * block_out.cols;
+                output.data[dst..dst + cols].copy_from_slice(&block_out.data[src..src + cols]);
+            }
+        }
+        jj += window_size;
     }
 }
 
