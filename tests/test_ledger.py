@@ -800,7 +800,7 @@ def test_prose_whole_mib_rss_quote_refuses_a_decimal_it_would_truncate() -> None
 
 
 def test_prose_rss_quotes_name_the_mib_unit_the_bench_reports() -> None:
-    # `maxrss_mb` is `ru_maxrss / 1024^2` (issue #54): the unit a reader sees is MiB, never MB.
+    # `maxrss_mb` holds MiB (`bench.rs::maxrss_mb`, issue #54): a reader sees MiB, never MB.
     rss = [q for q in prose.QUOTES if any(v.startswith("sad_rss_") for v in q.values)]
     assert len(rss) == 2 and all("MiB" in q.pattern and " MB" not in q.pattern for q in rss)
     [one_dp] = [q for q in rss if q.values == ("sad_rss_fast_1dp", "sad_rss_exact_1dp")]

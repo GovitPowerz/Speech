@@ -165,8 +165,8 @@ class BenchRun(_Strict):
     wall_s: float
     audio_s: float
     rtf: float
-    # Process-lifetime peak RSS in MiB (`ru_maxrss / 1024^2`); the name predates the unit
-    # audit (issue #54) and is the `BENCH` line's and the `--json` payload's key.
+    # Process-lifetime peak RSS in MiB (`bench.rs::maxrss_mb`); the `_mb` name is the `BENCH`
+    # line's and the `--json` payload's key, not the unit (issue #54).
     maxrss_mb: float
     files: int
 

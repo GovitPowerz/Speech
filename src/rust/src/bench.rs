@@ -81,8 +81,8 @@ pub struct BenchRun {
     /// `corpus_audio_seconds` for the exact per-file formula.
     pub audio_s: f64,
     pub rtf: f64,
-    /// Process-lifetime peak RSS in MiB (see `maxrss_mb`); the field name is the
-    /// `BENCH` line's and the `--json` payload's key, kept as-is (issue #54).
+    /// Process-lifetime peak RSS in MiB (`maxrss_mb()` below); the `_mb` name is the
+    /// `BENCH` line's and the `--json` payload's key, not the unit (issue #54).
     pub maxrss_mb: f64,
     pub files: usize,
 }
