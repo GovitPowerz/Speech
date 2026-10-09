@@ -149,8 +149,8 @@ class FoldRun:
         pack (the config's own on a fresh fold)."""
         nets = None if weights is None else [np.ascontiguousarray(np.asarray(w, dtype=F64)) for w in weights]
         if nets is not None and len(nets) != (2 if self.twin else 1):
-            # The bag indexes the list unchecked: a short one panics, a long one's extra is
-            # ignored (#29).
+            # The engine refuses a wrong count too (RuntimeError, #60); this names the fold's
+            # own contract (`[sad]` or `[sad, lid]`) before the arrays cross the seam.
             raise ValueError(f"FoldRun.run: {len(nets)} weight pack(s) for a {'Twin' if self.twin else 'single-net'} config")
         engine = self._shared_engine()
         if nets is not None:

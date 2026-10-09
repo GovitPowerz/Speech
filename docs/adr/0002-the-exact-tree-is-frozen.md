@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60)
 
 ## Context
 
@@ -35,7 +35,7 @@ tightenings, a bad repeat count, a third `*` part and whitespace inside a repeat
 errors where the legacy aborted, silently dropped or truncated, issue #50; the typed channel
 result: the result row's 18+N layout owned by one `engine/` type, `engine/channel_result.rs`,
 with `to_row()` the only writer and the in-band LID target decoded once at the bag, proven
-byte-identical by the `.mat` goldens and the seam cross-pin, issue #23). Training is
+byte-identical by the `.mat` goldens and the seam cross-pin, issue #23; the pack-count guard: `engine/bag_of_processors.rs::set_weights` sizes the list against the arm's `net_count` before indexing it, so a short list is a refusal naming both counts instead of a panic and a long one is no longer truncated in silence, algo 0/1/2 inert at any length, issue #60). Training is
 exact-f64 only and bails loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and

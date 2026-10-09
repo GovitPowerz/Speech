@@ -76,13 +76,14 @@ def test_out_of_range_pos_raises_index_error(tmp_path: Path, method: str, path: 
     assert "1 config" in str(raised.value), str(raised.value)
 
 
-# (fixture, the wrong list built from the config's own packs)
+# (fixture, the wrong list). The packs are the config's own HALVED, so a list applied head-first
+# (the pre-fix long-list behaviour) would move `weights(0)` and fail the before/after pin.
 _WRONG_COUNT = {
     "twin_empty": (TWIN, lambda p: []),
-    "twin_one": (TWIN, lambda p: [p[0]]),
-    "twin_three": (TWIN, lambda p: [p[0], p[1], p[1]]),
+    "twin_one": (TWIN, lambda p: [p[0] * 0.5]),
+    "twin_three": (TWIN, lambda p: [p[0] * 0.5, p[1] * 0.5, p[1]]),
     "single_empty": (SINGLE, lambda p: []),
-    "single_two": (SINGLE, lambda p: [p[0], p[0]]),
+    "single_two": (SINGLE, lambda p: [p[0] * 0.5, p[0]]),
 }
 
 

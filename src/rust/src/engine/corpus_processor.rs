@@ -931,7 +931,7 @@ impl CorpusProcessor {
     /// arrives; the bag's read-shaped methods stay infallible (see
     /// `BagOfProcessors::get_weights`).
     pub fn nb_configs(&self) -> usize {
-        self.processors.nb_configs()
+        self.processors.nb_of_conf()
     }
 
     /// Config-`pos`'s full weight-vector set: one flat vec per network (algo 6

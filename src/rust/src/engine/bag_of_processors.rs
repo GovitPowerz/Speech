@@ -655,12 +655,6 @@ impl BagOfProcessors {
         }
     }
 
-    /// The number of configs this bag holds (one processor per config): what a
-    /// caller-supplied position is checked against at the binding (issue #60).
-    pub fn nb_configs(&self) -> usize {
-        self.processors.len()
-    }
-
     /// How many weight packs config `pos` exchanges through [`Self::get_weights`] /
     /// [`Self::set_weights`]: 2 for the Twin (`[sad, lid]`, exact or fast), 1 for the
     /// single-net algos 3/4/5 (exact or fast SAD), 0 for algo 0/1/2 (no NN). The one
