@@ -20,12 +20,11 @@ was repeated at every driver site. This module is that recipe, written once:
     absent or empty `Dump_Directory` stays as given (empty is the engine's "no dump", so it is
     never resolved to the workdir). No config file is ever written.
   * `run(weights=None) -> FoldResult` is one fold at `weights` (or at the config's own packs);
-    a pack count that does not match the config's nets is refused. On the exact tree the
-    engine is built once and `set_weights` injects per run (the modern loop reuses it across
-    every epoch's SMORMS3 steps); on `Inference_Path fast` the processor loads weights
-    only at construction and `set_weights` bails (T6b), so the arrays are written as `.bin`
-    packs under the workdir, the weight keys repointed, a fresh engine built on them, and the
-    packs removed again (the engine holds the weights; nothing is left beside the run's own).
+    a pack count that does not match the config's nets is refused. The engine is built once,
+    on the config's own packs, and `set_weights` injects per run (the modern loop reuses it
+    across every epoch's SMORMS3 steps), on both trees: since issue #62 a fast processor
+    rebuilds its f32 net from the pack, and both trees refuse a pack of the wrong length in
+    the same words (the exact-length contract; only a weight FILE is read head-first).
   * `FoldResult` carries the channel results of every config, the per-net derivatives (empty
     on a forward-only fold), the post-run weights, and over config 0 the costs
     `ComputeGradient.m:110/:114` assemble: `nn_cost_seg`, `nn_cost_lid`, and `nn_cost` (seg,
@@ -37,8 +36,6 @@ packs (CONTEXT.md) resolved by `drivers/test.py::resolve_checkpoint_packs`.
 
 from __future__ import annotations
 
-import os
-import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,7 +45,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.engine import ChannelResults, _nn_cost_lid, _nn_cost_seg
-from speech.weight_bridge import write_bin
 
 if TYPE_CHECKING:
     import speech_rs
@@ -56,10 +52,15 @@ if TYPE_CHECKING:
 F64 = np.float64
 
 # The config keys that name a file or directory the engine opens, resolved against the
-# workdir before the map crosses the seam. The two weight keys are also the fast guard's
-# repoint targets, in net order (`[sad]`, or `[sad, lid]` on the Twin).
-_WEIGHT_KEYS = ("BLSTM_weightsFile", "BLSTM_LID_weightsFile")
-_PATH_KEYS = ("fileslisting", "language2classmapping", *_WEIGHT_KEYS, "Dump_Directory", "multiConfigResultsOutputFile")
+# workdir before the map crosses the seam.
+_PATH_KEYS = (
+    "fileslisting",
+    "language2classmapping",
+    "BLSTM_weightsFile",
+    "BLSTM_LID_weightsFile",
+    "Dump_Directory",
+    "multiConfigResultsOutputFile",
+)
 
 
 def _config_text(cfg: Mapping[str, str]) -> str:
@@ -98,7 +99,6 @@ class FoldRun:
         self.workdir = Path(workdir).absolute()  # a relative workdir would hand the cwd back to the engine
         self.backprop = backprop
         self.twin = int(cfg.get("Algo_choice", "0")) == 6
-        self.fast = cfg.get("Inference_Path", "exact") == "fast"
         config = dict(cfg)
         flag = "true" if backprop else "false"
         config["BLSTM_BackPropagationActivated"] = flag
@@ -137,45 +137,24 @@ class FoldRun:
             self._engine = self._build(self._engine_map())
         return self._engine
 
-    def _fast_engine(self, nets: list[NDArray[np.float64]]) -> speech_rs.Engine:
-        """The fast guard: write each pack under the workdir, repoint the weight keys, build,
-        then remove the packs (a fast processor reads them at construction, T6b)."""
-        config = self._engine_map()
-        packs: list[Path] = []
-        try:
-            for key, name, w in zip(_WEIGHT_KEYS, ("sad", "lid"), nets, strict=False):
-                fd, tmp = tempfile.mkstemp(dir=self.workdir, prefix=f"_fold_{name}_", suffix=".bin")
-                os.close(fd)
-                packs.append(Path(tmp))
-                write_bin(w.shape[0], 1, w, packs[-1])
-                config[key] = tmp
-            return self._build(config)
-        finally:
-            for path in packs:
-                path.unlink()
-
     def weights(self) -> list[NDArray[np.float64]]:
-        """The per-net packs the shared engine holds now: the config's own on a fresh fold, the
-        last injected pack (one engine step past it after a gradient fold) once `run` has been
-        called with weights. Exact tree only: a fast `run(weights)` builds its own engine, and
-        a fast processor exposes no weights (an empty list)."""
+        """The per-net packs the engine holds now: the config's own on a fresh fold, the last
+        injected pack (one engine step past it after a gradient fold) once `run` has been
+        called with weights. Exact tree only: a fast processor exposes no weights (an empty
+        list)."""
         return [np.asarray(w, dtype=F64) for w in self._shared_engine().weights(0)]
 
     def run(self, weights: Sequence[NDArray[np.float64]] | None = None) -> FoldResult:
         """One fold at `weights` (`[sad]` or `[sad, lid]`); `None` runs the engine's current
         pack (the config's own on a fresh fold)."""
-        if weights is None:
-            engine = self._shared_engine()
-        else:
-            nets = [np.ascontiguousarray(np.asarray(w, dtype=F64)) for w in weights]
-            if len(nets) != (2 if self.twin else 1):
-                # A short list would score the config's own LID pack on fast in silence (#29).
-                raise ValueError(f"FoldRun.run: {len(nets)} weight pack(s) for a {'Twin' if self.twin else 'single-net'} config")
-            if self.fast:
-                engine = self._fast_engine(nets)
-            else:
-                engine = self._shared_engine()
-                engine.set_weights(0, nets)
+        nets = None if weights is None else [np.ascontiguousarray(np.asarray(w, dtype=F64)) for w in weights]
+        if nets is not None and len(nets) != (2 if self.twin else 1):
+            # The bag indexes the list unchecked: a short one panics, a long one's extra is
+            # ignored (#29).
+            raise ValueError(f"FoldRun.run: {len(nets)} weight pack(s) for a {'Twin' if self.twin else 'single-net'} config")
+        engine = self._shared_engine()
+        if nets is not None:
+            engine.set_weights(0, nets)
         engine.run()
         results = ChannelResults.from_seam(engine.channel_results())
         derivs = [np.asarray(d, dtype=F64) for d in engine.weights_derivatives(0)] if self.backprop else []

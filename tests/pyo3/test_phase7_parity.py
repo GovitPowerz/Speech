@@ -155,22 +155,17 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
     key, so the comparison isolates the f32 path.
 
     THE WEIGHT KEYS ARE REPOINTED AT THE TRAINED CHECKPOINT (not the base config's seed
-    pack): the fast drivers load weights ONLY at construction via `load_weights_file`
-    (`BLSTM_weightsFile`/`BLSTM_LID_weightsFile`) -- there is no settable-after-construction
-    f64 weight surface, so `BagOfProcessors::set_weights` now BAILS LOUDLY on
-    `Processor::FastSpectral`/`FastTwinLid` (T6b, `bag_of_processors.rs`'s `set_weights`
-    match arms; pre-T6b it was a SILENT NO-OP, which is the failure mode this repoint
-    guards against -- the seam would otherwise score the config's SEED weights while exact
-    scores the injected TRAINED ones, a 100%-divergence artefact, NOT a real parity
-    failure). `evaluate()`/`_score_packs_on_test`/`_score_sad_pack_on_test` inject through
-    `fold_run.FoldRun` (issue #22), which on `Inference_Path fast` never calls `set_weights`
-    (also T6b) but writes the packs it is handed under the workdir and repoints these same
-    keys at them -- the same injection as this repoint, so the repoint is redundant with the
-    fold run on both paths and kept for the apples-to-apples config. Loading trained
-    weights from the config is the fast path's only injection mechanism (and how a real
-    fast deployment loads them), and it is identical for both paths -- so this is the
-    apples-to-apples comparison. In Mode 7 the SAD net is frozen (`best_sad == sad_seed`),
-    so `BLSTM_weightsFile` is weight-neutral there; `BLSTM_LID_weightsFile` carries the
+    pack), so the config itself names the net under test on both paths. When this was
+    written the fast drivers loaded weights ONLY at construction (`load_weights_file`) and
+    `BagOfProcessors::set_weights` was a SILENT NO-OP on them, then a loud bail (T6b) -- the
+    seam would otherwise have scored the config's SEED weights while exact scored the
+    injected TRAINED ones, a 100%-divergence artefact, NOT a real parity failure. Since
+    issue #62 `evaluate()`/`_score_packs_on_test`/`_score_sad_pack_on_test` inject through
+    `fold_run.FoldRun`'s `set_weights` on both paths (a fast processor rebuilds its net from
+    the pack), so the repoint is redundant with the fold run and kept for the
+    apples-to-apples config: loading trained weights from the config is how a real fast
+    deployment loads them. In Mode 7 the SAD net is frozen (`best_sad == sad_seed`), so
+    `BLSTM_weightsFile` is weight-neutral there; `BLSTM_LID_weightsFile` carries the
     trained LID net."""
     cfg = dict(parse_legacy_config(a.base_config.read_text()))
     cfg["fileslisting"] = a.test_listing.name
@@ -276,11 +271,9 @@ def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, Pat
     cfg = dict(parse_legacy_config(a.base_config.read_text()))
     # Point the weight-file key at the TRAINED checkpoint so the base config itself names the
     # net under test on both paths. `_score_sad_pack_on_test`'s fold run injects the same
-    # pack again -- `set_weights` on exact, a workdir copy of the pack + a repointed key on
-    # fast (where `set_weights` bails, T6b; the fold run writes the copy from the array it was
-    # handed, byte-identical to `best_sad.bin`) -- so this repoint is redundant with the fold
-    # run on both paths and kept so the config is the same apples-to-apples file `_eval_config`
-    # builds for the LID arms.
+    # pack again through `set_weights` on both paths (issue #62), so this repoint is redundant
+    # with the fold run and kept so the config is the same apples-to-apples file
+    # `_eval_config` builds for the LID arms.
     cfg["BLSTM_weightsFile"] = str((a.ckpt / "best_sad.bin").resolve())
     cfg["Inference_Path"] = inference_path
     dump_dir = a.out_dir / f"parity_sad_{tag}"

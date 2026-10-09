@@ -164,3 +164,17 @@ def test_streaming_session_causal_rejects_stereo(tmp_path: Path) -> None:
     cfg = _stage_causal(tmp_path, _measure_gain(chan0), 0.0, "stereo")
     with pytest.raises(RuntimeError, match="mono only"):
         speech_rs.StreamingSession(str(cfg), float(rate), 2)
+
+
+def test_streaming_session_warns_on_an_over_long_pack_file(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
+    """Issue #62: the session's weight file is a FILE seam. It keeps the legacy head-first
+    tolerance and, like the exact `load_weights_file`, says so on stderr (it used to load
+    the head in silence): the sLSTM net (1603) given the LSTM fixture's 1651-element pack."""
+    rate, chan0 = _read_stereo_chan0(PHASE4D / "prcts_excerpt.wav")
+    cfg = _stage_causal(tmp_path, _measure_gain(chan0), 0.0, "overlong")
+    lstm = PHASE9 / "lstm_forward_seed.bin"
+    cfg.write_text(cfg.read_text() + f"BLSTM_weightsFile {lstm}\n")
+    capfd.readouterr()
+    speech_rs.StreamingSession(str(cfg), float(rate), 1)
+    want = f"Warning: The number of gains given in {lstm} is more than what's needed (1651 > 1603); the extra 48 are ignored."
+    assert want in capfd.readouterr().err

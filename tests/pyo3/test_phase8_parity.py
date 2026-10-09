@@ -151,8 +151,8 @@ def _base_cfg(arm: _Arm) -> dict[str, str]:
 def _frozen_cfg(arm: _Arm, gain: float, *, fileslisting: str, dump_dir: Path | None) -> dict[str, str]:
     """The FROZEN inference config: the phase-6 SAD base config repointed at the trained
     checkpoint, with `Inference_Path fast` + `Audio_fixed_gain` + `BLSTM_InputNormalizationType 1`
-    (the streaming contract) + backprop off. The weight key MUST point at the trained pack (the
-    fast SAD driver loads weights only at construction; `set_weights` bails on it, T6b)."""
+    (the streaming contract) + backprop off. The weight key MUST point at the trained pack: the
+    streaming session reads its weights from the config file, it has no `set_weights`."""
     cfg = _base_cfg(arm)
     cfg["fileslisting"] = fileslisting
     cfg["BLSTM_weightsFile"] = str((arm.ckpt / "best_sad.bin").resolve())
