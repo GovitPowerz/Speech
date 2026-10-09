@@ -16,8 +16,11 @@ overlay the SAD arms use, under the `BLSTM_LID` prefix. Two legs, the Phase-9 pa
   run-twice bit-identical on a short recipe.
   Records its gate row (`gate_record`) for the LID cell tables.
 
-Corpus-gated + pyo3, local-only. The fast Twin LID is BLSTM-only (#57), so every number here
-is an exact-tree number, like every SAD cell row before it.
+Corpus-gated + pyo3, local-only. Every recorded number is an exact-tree number, like every SAD
+cell row before it; since #57 the trained slstm/forward leg ALSO scores its held-out slice on
+the fast tree (`Inference_Path fast`, the plain-regime causal LID twin) and asserts argmax
+identity per file and a LID error delta of exactly 0.0 -- the real-data companion of
+`src/rust/tests/fast_twin_lid_matrix.rs`.
 """
 
 from __future__ import annotations
@@ -34,12 +37,15 @@ from tests.conftest import CORPUS_ROOT, GateRecorder, requires_corpus
 
 pytest.importorskip("speech_rs")
 
-from speech.config_bridge import CELL_TYPES, DIRECTIONS  # noqa: E402
+from speech.batching import read_listing  # noqa: E402
+from speech.config_bridge import CELL_TYPES, DIRECTIONS, parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import BaselineSpec  # noqa: E402
 from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
+from speech.drivers.test import _class_keys  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
 from speech.engine import average_derivs  # noqa: E402
+from speech.evaluate import read_scr_scores  # noqa: E402
 from speech.fold_run import FoldRun  # noqa: E402
 
 _CHANCE = 100.0 * (1.0 - 1.0 / 12.0)
@@ -215,6 +221,31 @@ def test_lid_slstm_forward_trains_and_scores(tmp_path: Path, arm: str, gate_reco
     assert res.cavg is not None and 0.0 <= res.cavg <= 1.0
     assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.scr"))) == res.n_test
     gate_record(res)
+
+    # #57: the SAME trained pair scored on the fast tree (the plain-regime causal LID twin,
+    # `BLSTM_LID_window 0`) over the SAME held-out listing -- argmax identity per file and a
+    # LID error delta of exactly 0.0 (ADR-0003: the LID tier owns argmax zero-flips).
+    arm_obj = B.ARMS[arm]  # type: ignore[index]
+    assert isinstance(arm_obj, B.LidArm)
+    test_name = f"{arm_obj.stem}_test.flst"
+    test_records = read_listing(res.out_dir / test_name)
+    cfg = parse_legacy_config((res.out_dir / "base.config").read_text())
+    scored: dict[str, tuple[float | None, Path]] = {}
+    for path, extra in (("score_exact", {}), ("score_fast", {"Inference_Path": "fast"})):
+        eval_cfg = {**cfg, "fileslisting": test_name, **extra}
+        state = RunState.from_parsed(eval_cfg, res.out_dir / "base.config", res.out_dir)
+        packs = (res.checkpoint_dir / "best_sad.bin", res.checkpoint_dir / "best_lid.bin")
+        err, _cavg, sdir = B._score_packs_on_test(state, *packs, tmp_path / path, test_records)
+        scored[path] = (err, sdir)
+    (err_exact, dir_exact), (err_fast, dir_fast) = scored["score_exact"], scored["score_fast"]
+    assert err_exact == res.lid_error, f"{arm}: the re-scored exact error must reproduce the run's"
+    assert err_fast is not None and err_exact is not None and err_fast - err_exact == 0.0, f"{arm}: fast LID error {err_fast} vs exact {err_exact}"
+    class_keys = _class_keys(res.out_dir / cfg["language2classmapping"])
+    s_exact, f_exact = read_scr_scores(dir_exact, class_keys)
+    s_fast, f_fast = read_scr_scores(dir_fast, class_keys)
+    assert f_exact == f_fast and len(f_exact) == res.n_test
+    flips = int(np.sum(np.argmax(s_exact, axis=1) != np.argmax(s_fast, axis=1)))
+    assert flips == 0, f"{arm}: {flips} per-file argmax flips fast vs exact (R1 STOP)"
 
 
 @pytest.mark.slow
