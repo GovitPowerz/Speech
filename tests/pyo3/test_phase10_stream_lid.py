@@ -279,9 +279,11 @@ FORWARD_FIXTURE = "twin_mode7_lid_slstm_forward"
 
 
 def _staged_forward_config(tmp_path: Path) -> Path:
+    # Last-wins overrides for both weight files: the fixture names them bare, and since
+    # issue #65 the fast Twin reads the SAD file too (phase4b holds it), not only the LID one.
     base = (PHASE9 / f"{FORWARD_FIXTURE}.config").read_text()
     staged = tmp_path / f"{FORWARD_FIXTURE}_staged.config"
-    staged.write_text(base + f"BLSTM_LID_weightsFile {PHASE9 / (FORWARD_FIXTURE + '_seed.bin')}\n")
+    staged.write_text(base + f"BLSTM_weightsFile {PHASE4B / 'tiny_sad_seed.bin'}\n" + f"BLSTM_LID_weightsFile {PHASE9 / (FORWARD_FIXTURE + '_seed.bin')}\n")
     return staged
 
 
