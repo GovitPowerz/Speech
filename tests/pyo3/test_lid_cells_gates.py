@@ -29,6 +29,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -40,7 +41,7 @@ pytest.importorskip("speech_rs")
 from speech.batching import read_listing  # noqa: E402
 from speech.config_bridge import CELL_TYPES, DIRECTIONS, parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
-from speech.drivers.spec import BaselineSpec  # noqa: E402
+from speech.drivers.spec import Arm, BaselineSpec  # noqa: E402
 from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
 from speech.drivers.test import _class_keys  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
@@ -225,7 +226,7 @@ def test_lid_slstm_forward_trains_and_scores(tmp_path: Path, arm: str, gate_reco
     # #57: the SAME trained pair scored on the fast tree (the plain-regime causal LID twin,
     # `BLSTM_LID_window 0`) over the SAME held-out listing -- argmax identity per file and a
     # LID error delta of exactly 0.0 (ADR-0003: the LID tier owns argmax zero-flips).
-    arm_obj = B.ARMS[arm]  # type: ignore[index]
+    arm_obj = B.ARMS[cast(Arm, arm)]
     assert isinstance(arm_obj, B.LidArm)
     test_name = f"{arm_obj.stem}_test.flst"
     test_records = read_listing(res.out_dir / test_name)

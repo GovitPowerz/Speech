@@ -202,9 +202,9 @@ trains under the frozen-SAD contract; the SAD net stays the legacy LSTM at its s
 across every LID row of a seed (unit-pinned), so the rows below compare to each other and to the
 Phase-6 LSTM row on the same split. A forward LID net carries the same two derived keys as a
 forward SAD net (`BLSTM_LID_OutputNeuronNb 24,12`, `BLSTM_LID_window 0`, the plain whole-utterance
-regime). EXACT TREE ONLY: the fast Twin LID is BLSTM-only by its own gate (`bail_unsupported_shape`,
-pinned by `phase7_parity_lid`), so no row here has a fast or streamed twin; lifting that gate to the
-matrix is #57. Evidence: `tests/pyo3/test_lid_cells_gates.py` -- a preflight probe over all 20
+regime). EXACT-TREE NUMBERS: every row is scored on the exact tree; since #57 the fast Twin LID runs
+the same matrix (parity-pinned per pair, "Issue #57 -- the fast Twin LID matrix" below), so these
+rows have fast and streamed twins but are not re-measured there. Evidence: `tests/pyo3/test_lid_cells_gates.py` -- a preflight probe over all 20
 (arm x cell x direction) legs (the LID pack length the engine accepts per cell, pinned; a finite
 interior init cost; a nonzero LID gradient and an exactly-zero SAD gradient), one trained
 `slstm / forward` leg per arm at the Phase-6 recipe, run-twice bit-identical on both arms.

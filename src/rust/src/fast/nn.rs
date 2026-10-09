@@ -237,9 +237,7 @@ impl FastMatrix {
         self.data.clear();
         self.data.extend_from_slice(&src.data);
     }
-}
 
-impl FastMatrix {
     pub fn zeros(rows: usize, cols: usize) -> Self {
         FastMatrix {
             data: vec![0.0; rows * cols],
@@ -822,14 +820,14 @@ pub(crate) struct TruncateGeometry<'a> {
 
 impl TruncateGeometry<'_> {
     /// `getSubSamplingRatio`: the recurrent ratios times the output-net ones.
-    fn ssr(&self) -> usize {
+    pub(crate) fn ssr(&self) -> usize {
         self.lstm_subsampling.iter().product::<usize>()
             * self.output_subsampling.iter().product::<usize>()
     }
 
     /// `len` divided SEQUENTIALLY by each recurrent ratio then each output ratio, the
     /// exact tree's integer-floor chain, applied only when the whole ratio is > 1.
-    fn short_len(&self, len: usize) -> usize {
+    pub(crate) fn short_len(&self, len: usize) -> usize {
         let mut l = len;
         if self.ssr() > 1 {
             for &r in self.lstm_subsampling {
@@ -844,7 +842,8 @@ impl TruncateGeometry<'_> {
 }
 
 /// f32 TwoSweeps/single-sweep truncate forward (`feed_forward_backward_truncate`,
-/// `nn/blstm.rs:1450-1577`), OUTPUT-ONLY. The exact stitches the fwd/bwd hidden
+/// `nn/blstm.rs:2035`; the `:NNN` cites in the body are the legacy
+/// `BLSTMNeuralNetwork.cpp` lines that function transcribes), OUTPUT-ONLY. The exact stitches the fwd/bwd hidden
 /// states (`_OutputForward`/`_OutputBackward`) across windows + sweeps; Mode 7 reads
 /// them ONLY for `DumpLIDInternals` (off on the gate configs, the fast driver bails
 /// if it is on), so the fast path tracks only `output`. `out_len` is the caller's
@@ -929,8 +928,8 @@ pub(crate) fn truncate_forward(
     output
 }
 
-/// One truncate sweep (`feed_forward_backward_truncate_sweep`, `:1332-1442`),
-/// OUTPUT-ONLY: non-overlapping windows of `window_size`, each a whole-block forward
+/// One truncate sweep (`feed_forward_backward_truncate_sweep`, `nn/blstm.rs:1912`; the
+/// `:NNN` cites in the body are the legacy `BLSTMNeuralNetwork.cpp` lines), OUTPUT-ONLY: non-overlapping windows of `window_size`, each a whole-block forward
 /// over a contiguous row-slice, written at `begin/ssr`. A `length_short == 0` window is
 /// silently dropped (`:1399-1400`); a partial last window recomputes its length via
 /// the sequential sub-sampling floors (`:1382-1397`). `block_out` is the reused

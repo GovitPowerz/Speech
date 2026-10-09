@@ -824,11 +824,6 @@ impl FastLidNet {
         }
     }
 
-    fn sub_sampling_ratio(&self) -> usize {
-        self.lstm_subsampling().iter().product::<usize>()
-            * self.output_subsampling().iter().product::<usize>()
-    }
-
     /// ONE whole block through the shape's own forward, copied into `out`. The block
     /// forward every regime below drives: the plain regime calls it once over the whole
     /// entry, the truncate sweep once per window.
@@ -841,9 +836,10 @@ impl FastLidNet {
     }
 
     /// Scoring forward for the Mode-7 LID Twin, the f32 counterpart of the INFERENCE
-    /// slice of `BlstmNetwork::feed_forward_scoring` (`nn/blstm.rs:1671-1760`) on every
-    /// shape. Mode 7 always passes `target_index >= 0`, so this mirrors: the `rows < ssr
-    /// -> Zero(1, O)` guard, the sequential output-length division, the windowed dispatch
+    /// slice of `BlstmNetwork::feed_forward_scoring` (`nn/blstm.rs:1671-1760`; the `:NNN`
+    /// cites below are that function's lines) on every shape. Mode 7 always passes
+    /// `target_index >= 0`, so this mirrors: the `rows < ssr -> Zero(1, O)` guard
+    /// (`:1684-1686`), the sequential output-length division (`:1689-1697`), the windowed dispatch
     /// (`set_processing_type(window_size > 0, overlaps)`: `window_size == 0` is the PLAIN
     /// whole-sequence forward, `TwoSweeps` IGNORED exactly as the exact tree ignores it
     /// there; `window_size > 0` is the TRUNCATE sweep, the caller having refused overlap),
@@ -862,20 +858,19 @@ impl FastLidNet {
         two_sweeps: bool,
     ) -> FastMatrix {
         let output_size = self.output_size();
+        let lsub = self.lstm_subsampling().to_vec();
+        let osub = self.output_subsampling().to_vec();
+        let geom = TruncateGeometry {
+            lstm_subsampling: &lsub,
+            output_subsampling: &osub,
+            output_size,
+        };
         let rows = input.rows;
-        if rows < self.sub_sampling_ratio() {
-            return FastMatrix::zeros(1, output_size); // :1101-1103
+        if rows < geom.ssr() {
+            return FastMatrix::zeros(1, output_size); // :1684-1686
         }
-        // :1106-1114 output length (only re-divided when the whole ratio > 1).
-        let mut out_len = rows;
-        if self.sub_sampling_ratio() > 1 {
-            for &r in self.lstm_subsampling() {
-                out_len /= r;
-            }
-            for &r in self.output_subsampling() {
-                out_len /= r;
-            }
-        }
+        // :1689-1697 output length (only re-divided when the whole ratio > 1).
+        let out_len = geom.short_len(rows);
         let output = if window_size == 0 {
             // The PLAIN regime (`feed_forward_backward_plain` -> `feed_forward` over the
             // whole entry, `nn/blstm.rs:1780`): the net's own output length is the same
@@ -890,13 +885,6 @@ impl FastLidNet {
             );
             out
         } else {
-            let lsub = self.lstm_subsampling().to_vec();
-            let osub = self.output_subsampling().to_vec();
-            let geom = TruncateGeometry {
-                lstm_subsampling: &lsub,
-                output_subsampling: &osub,
-                output_size,
-            };
             truncate_forward(
                 &geom,
                 input,
@@ -906,7 +894,7 @@ impl FastLidNet {
                 &mut |block, out| self.forward_block(block, out),
             )
         };
-        // :1175-1185 binary expansion into [1-p, p] (Mode 7 always has targets, so the
+        // :1752-1760 binary expansion into [1-p, p] (Mode 7 always has targets, so the
         // `target_index >= 0` half of the legacy gate is always true here).
         if output_size == 1 {
             let mut expanded = FastMatrix::zeros(out_len, 2);

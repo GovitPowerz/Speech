@@ -198,9 +198,11 @@ fn target_of(lang: i32, class_nb: usize) -> usize {
 
 /// The committed pack with the output MLP's LAST layer (weights + bias) scaled by `gain`,
 /// then its bias shifted by `offset`. Pack tail layout on every shape: `[... | last dense
-/// layer (I*O + O) | mean | std]` with the mean/std tail `2 * LSTMNeuronNb[0]` long;
-/// `I`/`O` are the config's own `OutputNeuronNb` last two entries, so a regenerated
-/// fixture relocates the block.
+/// layer (I*O + O) | mean | std]` with the mean/std tail `2 * LSTMNeuronNb[0]` long -- the
+/// layer-0 input width, which is what BOTH trees size the tail by (`BlstmNetwork::
+/// input_size` = the forward stack's layer-0 width; the fast nets take `lstm[0]`); the
+/// declared `NNetInputSize` is never consulted. `I`/`O` are the config's own
+/// `OutputNeuronNb` last two entries, so a regenerated fixture relocates the block.
 fn perturbed_pack(
     map: &IndexMap<String, String>,
     base: &[f64],
@@ -481,9 +483,9 @@ fn overlap_lid_is_refused_on_every_shape() {
     ] {
         let mut m = fixture_map(fixture);
         // `window 0.25 / shift 0.1`: shift resolves 10 frames (>= 1) -> overlap. On the
-        // forward fixture the window is set too, so the overlap rule (not the windowed-
-        // causal one) must be what fires first is NOT asserted -- either refusal is a
-        // refusal; the causal fixture pins that overlap is refused on a causal shape too.
+        // forward fixture the window is set too, so EITHER rule may fire first (the
+        // windowed-causal one does); which one is not asserted -- the row pins that a
+        // causal shape refuses the pair as well, not the order of the two checks.
         m.insert("BLSTM_LID_window".into(), "0.25".into());
         m.insert("BLSTM_LID_shift".into(), "0.1".into());
         let lid = fixture_pack(fixture);
