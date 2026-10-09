@@ -70,7 +70,8 @@ impl NnetSpec {
 //   - Input/Forget/Output gate rows are `out x (fin+out+5)`
 //     laid out `[recurrent(out) | fan-in(fin) | gate-peephole(3) | recurrent-peephole(1) | bias(1)]`.
 //   - The Cell matrix has NO peepholes: rows are `out x (fin+out+1)`, `[recurrent | fan-in | bias]`.
-// Output layers are `out x (in+1)` (`[weights(in) | bias(1)]`). mean/std are 1D of length LSTMNeuronNb[0].
+// Output layers are `out x (in+1)` (`[weights(in) | bias(1)]`), with `out = OutputNeuronNb[i+1]` and
+// `in = OutputNeuronNb[i]*OutputSubSampling[i]`. mean/std are 1D of length LSTMNeuronNb[0].
 
 /// One LSTM layer's four gate matrices (row-major; cell is narrower).
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +121,7 @@ pub fn element_count(spec: &NnetSpec) -> usize {
     let lstm = &spec.lstm_neuron_nb;
     let lsub = &spec.lstm_subsampling;
     let outn = &spec.output_neuron_nb;
+    let osub = &spec.output_subsampling;
     let mut total = 0usize;
     for i in 0..lstm.len() - 1 {
         let out = lstm[i + 1];
@@ -127,7 +129,7 @@ pub fn element_count(spec: &NnetSpec) -> usize {
         total += 2 * (4 * out * fin + 4 * out * out + 12 * out + 4 * out);
     }
     for i in 0..outn.len() - 1 {
-        total += outn[i + 1] * outn[i] + outn[i + 1];
+        total += outn[i + 1] * outn[i] * osub[i] + outn[i + 1];
     }
     total += 2 * lstm[0];
     total
@@ -185,7 +187,7 @@ pub fn config_to_nnet(structured: &Structured, spec: &NnetSpec) -> Nnet {
         .iter()
         .enumerate()
         .map(|(i, mat)| {
-            let ncols = spec.output_neuron_nb[i] + 1;
+            let ncols = spec.output_neuron_nb[i] * spec.output_subsampling[i] + 1;
             apply_adim(mat, ncols, out_adim(spec, i))
         })
         .collect();
@@ -269,7 +271,7 @@ pub fn nnet_to_flat(nnet: &Nnet, spec: &NnetSpec) -> Vec<f64> {
     }
     for (i, mat) in nnet.output.iter().enumerate() {
         let out = spec.output_neuron_nb[i + 1];
-        let inp = spec.output_neuron_nb[i];
+        let inp = spec.output_neuron_nb[i] * spec.output_subsampling[i];
         let ncols = inp + 1;
         for r in 0..out {
             flat.extend_from_slice(&mat[r * ncols..r * ncols + inp]); // weights
@@ -287,6 +289,7 @@ pub fn nnet_to_flat(nnet: &Nnet, spec: &NnetSpec) -> Vec<f64> {
 pub fn flat_to_nnet(flat: &[f64], spec: &NnetSpec) -> Nnet {
     let lstm = &spec.lstm_neuron_nb;
     let outn = &spec.output_neuron_nb;
+    let osub = &spec.output_subsampling;
     let mut pos = 0usize;
     let mut take = |k: usize| -> &[f64] {
         let seg = &flat[pos..pos + k];
@@ -373,7 +376,7 @@ pub fn flat_to_nnet(flat: &[f64], spec: &NnetSpec) -> Nnet {
     let output = (0..outn.len() - 1)
         .map(|i| {
             let out = outn[i + 1];
-            let inp = outn[i];
+            let inp = outn[i] * osub[i];
             let ncols = inp + 1;
             let mut mat = vec![0.0; out * ncols];
             let seg = take(out * inp);
