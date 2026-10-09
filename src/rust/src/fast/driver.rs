@@ -260,13 +260,32 @@ impl FastSadNet {
 /// The pack length the EXACT tree demands for `bc`'s net, `BlstmNetwork::nb_of_weights`
 /// on the same config: the one count every fast pack is checked against, so the two
 /// trees refuse the same in-memory packs by construction and cut a weight file at the same
-/// length (issue #62). One file stays outside it: the Twin's `BLSTM_weightsFile`, which
-/// the fast Twin never reads (Mode 7 never runs the SAD net). Not the shapes' own
+/// length (issue #62; since #65 the Twin's `BLSTM_weightsFile` too, read against the SAD
+/// net's count and discarded, Mode 7 never running that net). Not the shapes' own
 /// `element_count`s: they size what `from_flat` reads, so they are the exact count only
 /// while their arithmetic tracks the exact tree's (#61 was such a drift), and none has an
 /// MLP arm for the Twin's never-run SAD net.
 pub(crate) fn exact_pack_len(bc: &BlstmConfig) -> Result<usize> {
     Ok(BlstmNetwork::from_config(bc.clone())?.nb_of_weights())
+}
+
+/// `key`'s weight file cut to `needed` under the legacy FILE-LOAD tolerance
+/// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and keeps its
+/// head); `None` for an absent or EMPTY key (the legacy `size() != 0` guard). The one read
+/// every fast `load_weights_file` goes through.
+fn read_file_pack(
+    map: &IndexMap<String, String>,
+    key: &str,
+    needed: usize,
+) -> Result<Option<Vec<f64>>> {
+    let file = map.get(key).map(String::as_str).unwrap_or("");
+    if file.is_empty() {
+        return Ok(None);
+    }
+    let mut flat = crate::io::binary::read_weight_vector(std::path::Path::new(file))?;
+    file_pack_head(&flat, needed, file)?;
+    flat.truncate(needed);
+    Ok(Some(flat))
 }
 
 /// Build the algo-3 SAD net for a classified [`FastNetShape`] from the flat f64 pack.
@@ -527,15 +546,10 @@ impl FastSpectralSegmenter {
     /// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and loads
     /// its head).
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
-        let weights_file = map
-            .get("BLSTM_weightsFile")
-            .map(String::as_str)
-            .unwrap_or("");
-        if weights_file.is_empty() {
-            return Ok(());
+        match read_file_pack(map, "BLSTM_weightsFile", self.pack_len)? {
+            Some(flat) => self.set_weights(&flat),
+            None => Ok(()),
         }
-        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.set_weights(file_pack_head(&flat, self.pack_len, weights_file)?)
     }
 
     /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
@@ -1161,7 +1175,8 @@ pub struct FastTwinLid {
     /// SAD-net sub-sampling, cached from its spec for [`get_blstm_param`]'s SAD
     /// result-vec sizing / timeStep. The SAD net is never run, so only its shape is
     /// needed (no weights, no `FastBlstm`) -- and its pack length, which an in-memory SAD
-    /// pack is still checked against, as the exact Twin's `set_weights` does (issue #62).
+    /// pack (issue #62) and the `BLSTM_weightsFile` (issue #65) are still checked
+    /// against, as the exact Twin's `set_weights` / `load_weights_file` do.
     sad_lstm_sub: Vec<usize>,
     sad_out_sub: Vec<usize>,
     sad_ssr: usize,
@@ -1422,21 +1437,21 @@ impl FastTwinLid {
         Ok(())
     }
 
-    /// `BLSTM_LID_weightsFile` load (mirrors the exact Twin's LID-net load): an EMPTY key
-    /// leaves the net unloaded (a subsequent `get_segmentation` errors); otherwise read
-    /// the `.bin` and load its head -- the legacy FILE-LOAD tolerance, explicit
-    /// ([`file_pack_head`]: a short file is refused, a long one warns on stderr and loads
-    /// its head).
+    /// The two `weightsFile` loads, in the exact Twin's order (`BLSTM` then `BLSTM_LID`,
+    /// the legacy in-ctor loads): each key EMPTY is a no-op (the LID net stays unloaded and
+    /// a subsequent `get_segmentation` errors); otherwise the `.bin` is read and cut to its
+    /// head under the legacy FILE-LOAD tolerance ([`file_pack_head`]: a short file is
+    /// refused, a long one warns on stderr and loads its head). The SAD file is read and
+    /// checked against the SAD net's exact length, then DISCARDED: Mode 7 never runs the
+    /// SAD net, but the two trees must accept the same files (issue #65), so a short or
+    /// missing SAD file is refused here as the exact Twin refuses it, and with both files
+    /// bad the SAD error is the one raised.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
-        let weights_file = map
-            .get("BLSTM_LID_weightsFile")
-            .map(String::as_str)
-            .unwrap_or("");
-        if weights_file.is_empty() {
-            return Ok(());
+        read_file_pack(map, "BLSTM_weightsFile", self.sad_pack_len)?;
+        match read_file_pack(map, "BLSTM_LID_weightsFile", self.lid_pack_len)? {
+            Some(lid) => self.set_lid_weights(&lid),
+            None => Ok(()),
         }
-        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        self.set_lid_weights(file_pack_head(&flat, self.lid_pack_len, weights_file)?)
     }
 
     /// The LID net shape the config selected (the `BLSTM_LID` prefix through

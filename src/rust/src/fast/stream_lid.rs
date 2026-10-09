@@ -45,7 +45,8 @@
 //! pyclass) without touching a byte of this module, and each resolves those three arguments
 //! exactly as predicted: the rate off the loaded input (`read_audio`'s `sample_rate`), the
 //! target from `--lang` / the caller, and the weights from `BLSTM_LID_weightsFile` (`None`
-//! defers to the config).
+//! defers to the config, which since issue #65 also reads and length-checks a non-empty
+//! `BLSTM_weightsFile` as the offline Twin does, then discards it).
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
@@ -94,7 +95,8 @@ impl StreamingLidSession {
     /// Build the session from the SAME legacy config `map` the offline Twin consumes, the
     /// stream `rate`, the target `lang_index` (the eval target -- the offline `audio.lang_index`),
     /// and the LID weight pack (`Some(flat)` builds the net immediately; `None` defers to the
-    /// config's `BLSTM_LID_weightsFile`). Reuses [`FastTwinLid::from_legacy`]'s construction
+    /// config's `BLSTM_LID_weightsFile` through [`FastTwinLid::load_weights_file`], so a
+    /// non-empty `BLSTM_weightsFile` must also resolve and be long enough, issue #65). Reuses [`FastTwinLid::from_legacy`]'s construction
     /// validation (Mode 7 only, InputNormalizationType 0, no pitch pass / DumpInternals /
     /// negative TargetEnforcementStep / MLP, ...) and additionally bails if the LID window
     /// resolves to a regime the shape refuses (windowed causal, overlap -- the offline Twin's

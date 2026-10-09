@@ -624,6 +624,17 @@ impl BagOfProcessors {
     /// seam caller gets the same refusals on both trees and the same injection.
     pub fn set_weights(&mut self, pos: usize, new_weights: &[Vec<f64>]) -> Result<()> {
         use crate::tasks::segmenter::Segmenter;
+        // Issue #60: the list is sized BEFORE any arm indexes it, so a short list is a
+        // refusal rather than a panic and a long one is not silently truncated. Algo
+        // 0/1/2 (`net_count` 0) stay the legacy inert no-op whatever the length.
+        let needed = self.net_count(pos);
+        if needed > 0 && new_weights.len() != needed {
+            bail!(
+                "The number of weight packs given is {} but config {pos} holds {needed} \
+                 network(s).",
+                new_weights.len()
+            );
+        }
         match &mut self.processors[pos] {
             Processor::Spectral(seg) => seg.set_weights(&new_weights[0]),
             Processor::Signal(seg) => seg.set_weights(&new_weights[0]),
@@ -641,6 +652,22 @@ impl BagOfProcessors {
             // genuinely inert, matching the legacy exactly. See the T6b audit note
             // above for why this convention does NOT extend to the fast arms.
             Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => Ok(()),
+        }
+    }
+
+    /// How many weight packs config `pos` exchanges through [`Self::get_weights`] /
+    /// [`Self::set_weights`]: 2 for the Twin (`[sad, lid]`, exact or fast), 1 for the
+    /// single-net algos 3/4/5 (exact or fast SAD), 0 for algo 0/1/2 (no NN). The one
+    /// place that knows the arms (issue #60); a fast `get_weights` is empty, so the
+    /// count cannot be read off it.
+    pub fn net_count(&self, pos: usize) -> usize {
+        match &self.processors[pos] {
+            Processor::TwinLid(_) | Processor::FastTwinLid(_) => 2,
+            Processor::Spectral(_)
+            | Processor::Signal(_)
+            | Processor::Lid(_)
+            | Processor::FastSpectral(_) => 1,
+            Processor::Vrcts(_) | Processor::Tdc(_) | Processor::Ltsv(_) => 0,
         }
     }
 
@@ -1730,6 +1757,14 @@ mod tests {
         let mut cfgs = vec![tdc];
         let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
         assert!(matches!(bag.processor(0), Processor::Tdc(_)));
-        assert!(bag.set_weights(0, &[vec![1.0, 2.0, 3.0]]).is_ok());
+        assert_eq!(bag.net_count(0), 0);
+        // Issue #60: the pack-count check does not widen to them either, whatever the length.
+        for packs in [
+            &[][..],
+            &[vec![1.0, 2.0, 3.0]][..],
+            &[vec![1.0], vec![2.0]][..],
+        ] {
+            assert!(bag.set_weights(0, packs).is_ok(), "{} pack(s)", packs.len());
+        }
     }
 }

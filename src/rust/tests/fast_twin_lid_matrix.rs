@@ -115,6 +115,22 @@ fn sad_pack() -> Vec<f64> {
     read_weight_vector(&ref_dir().join("phase4b/tiny_sad_seed.bin")).unwrap()
 }
 
+/// The phase-9 fixtures name `BLSTM_weightsFile tiny_sad_seed.bin`, a bare name whose
+/// file lives in phase4b. Since issue #65 the fast file seam reads it, so a leg that loads
+/// from a fixture map under cargo's cwd gives it the absolute path (as it already does for
+/// the LID key).
+fn with_sad_file(map: &IndexMap<String, String>) -> IndexMap<String, String> {
+    let mut m = map.clone();
+    m.insert(
+        "BLSTM_weightsFile".into(),
+        ref_dir()
+            .join("phase4b/tiny_sad_seed.bin")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    m
+}
+
 fn phseq_audio(f: &str, lang: i32) -> Audio {
     let path = ref_dir()
         .join("phase4b/corpus_phseq")
@@ -429,7 +445,7 @@ fn each_pair_builds_its_own_arm_and_refuses_a_short_pack() {
         // ctor's field, blind to what `load_weights_file` built: score s1 (non-degenerate
         // under every committed pack) through both and demand bit-identity.
         let mut deferred = FastTwinLid::from_legacy(&map, None, None).unwrap();
-        let mut m = map.clone();
+        let mut m = with_sad_file(&map);
         m.insert(
             "BLSTM_LID_weightsFile".into(),
             ref_dir()
@@ -545,7 +561,7 @@ fn set_weights_builds_the_ctor_net_and_refuses_what_the_exact_twin_refuses() {
 fn the_lid_file_seam_keeps_the_head_first_tolerance() {
     let map = fixture_map("twin_mode7_lid_slstm");
     let lstm = ref_dir().join("phase4b/tiny_lid_seed.bin");
-    let mut m = map.clone();
+    let mut m = with_sad_file(&map);
     m.insert(
         "BLSTM_LID_weightsFile".into(),
         lstm.to_string_lossy().into_owned(),
@@ -580,6 +596,96 @@ fn the_lid_file_seam_keeps_the_head_first_tolerance() {
         .expect_err("the exact net refuses it too")
         .to_string();
     assert_eq!(fast, exact);
+}
+
+/// Issue #65: the fast Twin reads `BLSTM_weightsFile` under the exact Twin's contract, in
+/// the exact Twin's order. Mode 7 never runs the SAD net, so no number differs; what the
+/// two trees ACCEPT does. Per row of the issue's table (short, missing, over-long), plus
+/// the order (a short SAD file AND a short LID file: the SAD error is the one raised) and
+/// the no-op (an empty key, what `phase4b/twin_mode7.config` relies on): the fast outcome
+/// equals the exact `TwinBlstmSpectralLid` outcome, error text compared as strings, and so
+/// does a `StreamingLidSession` built with no in-memory pack (the same seam). The
+/// SAD files are written into a tempdir from the committed 537-element `tiny_sad_seed.bin`.
+/// Reverting the fast SAD read makes the short and missing legs fail (the mutation check).
+#[test]
+fn the_sad_file_seam_matches_the_exact_twin_row_by_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let sad = sad_pack();
+    let needed = BlstmNetwork::from_config(
+        BlstmConfig::from_legacy(&fixture_map("twin_mode7_lid_slstm"), "BLSTM").unwrap(),
+    )
+    .unwrap()
+    .nb_of_weights();
+    assert_eq!(
+        sad.len(),
+        needed,
+        "the committed SAD seed must be exact-length"
+    );
+    let write = |name: &str, data: &[f64]| -> String {
+        let p = dir.path().join(name);
+        speech::io::binary::write_matrix(&p, data.len(), 1, data).unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let sad_short = write("short.bin", &sad[..sad.len() - 1]);
+    let mut long = sad.clone();
+    long.push(0.0);
+    let sad_long = write("long.bin", &long);
+    let sad_missing = dir
+        .path()
+        .join("missing.bin")
+        .to_string_lossy()
+        .into_owned();
+    let lid_ok = ref_dir()
+        .join("phase9/twin_mode7_lid_slstm_seed.bin")
+        .to_string_lossy()
+        .into_owned();
+    let lid_short = ref_dir()
+        .join("phase9/twin_mode7_lid_lstm_forward_seed.bin")
+        .to_string_lossy()
+        .into_owned();
+
+    // (leg, SAD file, LID file, must it build?)
+    let legs: [(&str, &str, &str, bool); 5] = [
+        ("short SAD", &sad_short, &lid_ok, false),
+        ("missing SAD", &sad_missing, &lid_ok, false),
+        ("over-long SAD", &sad_long, &lid_ok, true),
+        ("short SAD and short LID", &sad_short, &lid_short, false),
+        ("empty SAD key", "", &lid_ok, true),
+    ];
+    for (leg, sad_file, lid_file, builds) in legs {
+        let mut m = fixture_map("twin_mode7_lid_slstm");
+        m.insert("BLSTM_weightsFile".into(), sad_file.to_owned());
+        m.insert("BLSTM_LID_weightsFile".into(), lid_file.to_owned());
+        let fast = FastTwinLid::from_legacy(&m, None, None)
+            .unwrap()
+            .load_weights_file(&m)
+            .map_err(|e| e.to_string());
+        let exact = TwinBlstmSpectralLid::from_legacy(&m, None, None)
+            .unwrap()
+            .load_weights_file(&m)
+            .map_err(|e| e.to_string());
+        assert_eq!(exact.is_ok(), builds, "{leg}: the exact tree sets the row");
+        assert_eq!(
+            fast, exact,
+            "{leg}: the fast outcome must equal the exact one"
+        );
+        // The streaming LID session defers to the same seam, so it refuses the same files.
+        let streamed = StreamingLidSession::new(&m, 8000.0, 0, None)
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        assert_eq!(
+            streamed, exact,
+            "{leg}: the streaming session must accept what the Twin accepts"
+        );
+        // The order: with both files short, the SAD error is the one raised.
+        if lid_file == lid_short.as_str() {
+            let err = fast.unwrap_err();
+            assert!(
+                err.contains(&sad_short),
+                "{leg}: the SAD file is read first, so its error is the one raised: {err}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -926,6 +926,14 @@ impl CorpusProcessor {
         out
     }
 
+    /// The number of configs this run holds: the bound every `pos` on the seam is
+    /// checked against at the binding (issue #60), where a caller's integer first
+    /// arrives; the bag's read-shaped methods stay infallible (see
+    /// `BagOfProcessors::get_weights`).
+    pub fn nb_configs(&self) -> usize {
+        self.processors.nb_of_conf()
+    }
+
     /// Config-`pos`'s full weight-vector set: one flat vec per network (algo 6
     /// -> `[sad, lid]`; algo 0/1/2, no NN -> empty `Vec`). The PyO3 seam
     /// surface (Phase 4c); promoted from `get_config0_all_weights_for_test`
