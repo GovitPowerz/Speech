@@ -1146,7 +1146,7 @@ fn latency_bounds() {
         );
         assert_eq!(bc.direction.as_str(), "forward", "{cell}: causal fixture");
         // The causal (window 0) time base: `_WindowShift * ssr` (tasks/sad.rs:1451-1452,
-        // fast/driver.rs:530-534), with `ws` the POST-`get_blstm_param` value.
+        // `fast::plan::FastSadPlan::timeline`), with `ws` the POST-`get_blstm_param` value.
         let re_time_step = ws * ssr as f64;
         let re_nn = 0.0;
         let re_sub = (ssr - 1) as f64 * params.shift_sec;

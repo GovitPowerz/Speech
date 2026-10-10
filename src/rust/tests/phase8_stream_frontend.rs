@@ -201,7 +201,8 @@ fn offline_ref_preemph_noise(
         ref_seg_file_name: String::new(),
         audio_offset: 0.0,
     };
-    // Offline order: preemph then noise (fast/driver.rs:296-301), on the whole channel.
+    // Offline order: preemph then noise (`FastSpectralSegmenter::get_segmentation`'s
+    // gates), on the whole channel.
     if preemph > 0.0 {
         audio.apply_preemph(preemph);
     }

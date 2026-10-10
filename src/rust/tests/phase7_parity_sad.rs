@@ -429,6 +429,10 @@ fn fast_dispatch_per_cell_type_and_direction() {
         .collect();
     out_layers[0] = hidden.to_string();
     m.insert("BLSTM_OutputNeuronNb".into(), out_layers.join(","));
+    // ...and the plain regime: a causal cell under the tier2 window (3.25 s) is refused
+    // at bag construction since issue #24's rate-free pre-check (it used to be refused at
+    // the first `get_segmentation`, which this dispatch test never reaches).
+    m.insert("BLSTM_window".into(), "0".into());
     let bag = build_fast_bag(&mut m)
         .unwrap_or_else(|e| panic!("fast + Direction forward must build (Task 8): {e}"));
     assert!(

@@ -618,7 +618,9 @@ fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
 
 /// A causal fast net runs WINDOW 0 and nothing else: windowing resets a causal cell's
 /// state at every boundary (spec S1.2), and the streaming session forbids it outright
-/// (S5.3). Pinned at `get_segmentation`, where the window is resolved.
+/// (S5.3). Pinned at bag construction since issue #24 (the plan's rate-free pre-check
+/// refuses a causal `BLSTM_window > 0` on the config's intent); it used to be pinned at
+/// `get_segmentation`, where the window resolves. The refusal itself is unchanged.
 ///
 /// NOTE (Task 6 finding, reported not fixed -- it is exact-tree code and out of this
 /// task's scope): the EXACT tree does not merely find this regime pointless, it PANICS
@@ -636,14 +638,7 @@ fn fast_causal_bails_on_windowed_inference() {
     // 0.5 s window at 8 kHz with spectrum_shift 0.01 -> window_size 25: a genuinely
     // windowed dispatch, not a degenerate one.
     m.insert("BLSTM_window".into(), "0.5".into());
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
-    let mut audio = read_audio(&fixture("phase4a/corpus/f1.wav"), 0.0, 2.0, 0, None).unwrap();
-    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
-    let n_chan = audio.data.nrows();
-    let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();
-    let err = bag
-        .run_get_segmentation(0, &mut audio, &mut seg)
+    let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
         .err()
         .unwrap_or_else(|| panic!("fast causal + windowed inference must bail"));
     assert!(

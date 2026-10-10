@@ -798,8 +798,10 @@ always derived from the config (one rate per session), so the plan made the offl
 with the stream, not the reverse.
 
 Two construction-time consequences, both deliberate: a config the pre-#24 fast driver refused at
-its first `get_segmentation` (a causal cell with `BLSTM_window > 0`, a BLSTM with `BLSTM_window
-0`, any shape with `BLSTM_shift 0`) is now refused at `BagOfProcessors::from_configs`, rate-free
+its first `get_segmentation` (a causal cell with `BLSTM_window > 0` -- on the config's intent,
+so a sub-frame window the exact tree would quantize to 0 and run plain is refused too -- a BLSTM
+with `BLSTM_window 0`, any shape with `BLSTM_shift 0`) is now refused at
+`BagOfProcessors::from_configs`, rate-free
 (`fast_sad_plan.rs::rate_free_precheck_refuses_what_no_rate_can_rescue`; a sub-frame shift that
 only resolves to truncate at the actual rate is still caught by the timeline at the first
 `get_segmentation`, `timeline_catches_a_sub_frame_shift_the_precheck_cannot`); and the fast SAD

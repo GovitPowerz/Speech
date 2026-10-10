@@ -148,14 +148,8 @@ fn plan_agrees_with_the_exact_tree_on_every_committed_config() {
             map.contains_key("Audio_fixed_gain"),
             "{rel}: Audio_fixed_gain presence"
         );
-        // The offline driver exposes the plan it consumes.
-        let drv = FastSpectralSegmenter::from_legacy(&map, None).unwrap();
-        assert_eq!(drv.plan().shape, want_shape, "{rel}: the driver's plan");
-        assert_eq!(
-            drv.plan().pack_len,
-            plan.pack_len,
-            "{rel}: the driver's pack length"
-        );
+        // ...and the offline driver builds on it.
+        FastSpectralSegmenter::from_legacy(&map, None).unwrap_or_else(|e| panic!("{rel}: {e}"));
     }
 }
 
@@ -209,10 +203,11 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
                 0,
             );
             assert_eq!(
-                (tl.window_size, tl.window_shift, tl.no_overlap),
-                (w, sh, no),
-                "{rel}@{rate}: window/shift/overlap"
+                (tl.window_size, tl.window_shift),
+                (w, sh),
+                "{rel}@{rate}: window/shift"
             );
+            assert!(!no, "{rel}@{rate}: a built timeline is never truncate");
             assert_eq!(
                 tl.window_shift_sec.to_bits(),
                 ws.to_bits(),
@@ -252,7 +247,7 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
                     &plan.spec.output_subsampling,
                     n,
                 );
-                assert_eq!(tl.rows_for(n), rows, "{rel}@{rate}: rows_for({n})");
+                assert_eq!(plan.rows_for(&tl, n), rows, "{rel}@{rate}: rows_for({n})");
             }
         }
     }
@@ -431,7 +426,7 @@ fn rate_free_precheck_refuses_what_no_rate_can_rescue() {
     m.insert("BLSTM_shift".into(), "0.1".into());
     let plan = FastSadPlan::from_map(&m).expect("a bidirectional cell runs overlap");
     let tl = plan.timeline(8000.0).unwrap();
-    assert!(tl.window_size > 0 && !tl.no_overlap);
+    assert!(tl.window_size > 0);
 }
 
 #[test]

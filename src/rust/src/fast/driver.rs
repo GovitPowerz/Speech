@@ -95,7 +95,7 @@ use super::nn::{
     slice_rows_f32,
 };
 use super::pipeline::FastPipeline;
-use super::plan::{FastSadArm, FastSadPlan};
+use super::plan::FastSadPlan;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 
 /// Which fast net shape a config's `Cell_Type` x `Direction` pair selects
@@ -418,7 +418,8 @@ impl FastSpectralSegmenter {
     /// by construction, spec S1.3); `None` defers to [`Self::load_weights_file`] (the bag's
     /// two-step `from_legacy(map, None)` + `load_weights_file` pattern).
     pub fn from_plan(plan: FastSadPlan, weights: Option<&[f64]>) -> Result<FastSpectralSegmenter> {
-        plan.check_norm(FastSadArm::Offline)?;
+        // The offline normalization set is the fast-tree-wide one `from_map` enforced
+        // (`fast::plan::accepted_norm_types`), so there is nothing arm-specific to check.
         let mut seg = FastSpectralSegmenter {
             plan,
             net: None,
@@ -454,11 +455,6 @@ impl FastSpectralSegmenter {
             Some(flat) => self.set_weights(&flat),
             None => Ok(()),
         }
-    }
-
-    /// The plan this driver consumes (the tests read the shape and the pack length).
-    pub fn plan(&self) -> &FastSadPlan {
-        &self.plan
     }
 
     /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
@@ -512,7 +508,7 @@ impl Segmenter for FastSpectralSegmenter {
             audio.apply_noise(plan.feature_cfg.noise_ratio);
         }
 
-        let real_vec_size = tl.rows_for(audio.data.ncols());
+        let real_vec_size = plan.rows_for(&tl, audio.data.ncols());
         let (window_size, window_shift) = (tl.window_size, tl.window_shift);
         let (time_step, time_offset) = (tl.time_step, tl.time_offset);
 
@@ -589,7 +585,7 @@ impl Segmenter for FastSpectralSegmenter {
                 // Phase-10 Task 7: the bidirectional cells run EITHER regime, selected
                 // by the config exactly as the exact tree selects it
                 // (`feed_forward_backward`'s `truncates_sequence && overlaps` dispatch,
-                // `nn/blstm.rs:1373-1387`). The timeline refuses `no_overlap`, so
+                // `nn/blstm.rs::feed_forward_backward`). The timeline refuses `no_overlap`, so
                 // `window_size > 0` here means OVERLAP and nothing else.
                 FastNet::BiCell(n) => {
                     if window_size > 0 {
