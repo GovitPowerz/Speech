@@ -126,10 +126,13 @@ The dense layers after the recurrent stacks: asinh hidden units, softmax output.
 The LSTM's 12-row peephole matrix. Mixed-kind: some rows read cell states, others the previous step's gate values.
 
 **Windowed driver**:
-One of the four regimes a bidirectional net runs under (truncate, two-sweeps, overlap, MLP-overlap).
+One of the four regimes a bidirectional net runs under (truncate, two-sweeps, overlap, MLP-overlap). On the fast tree the choice is the Windowing regime.
 
 **Plain regime**:
-The whole-sequence forward (`window 0`), the only regime a causal net runs and the only one the frame stream accepts for it.
+The whole-sequence forward (`window 0`), the only regime a causal net runs and the only one the frame stream accepts for it. One value of the Windowing regime.
+
+**Windowing regime**:
+Which of plain, overlap or truncate a fast net runs, resolved from `window` / `shift` against the rate by `get_blstm_param` and tied to the Fast shape: BLSTM overlap only, a causal cell plain only, a bidirectional cell plain or overlap, truncate refused everywhere. Decided once, by the Fast SAD plan's rate-free pre-check and the Timeline's authoritative check.
 
 **Sub-sampling**:
 Per-layer integer decimation of the time axis; the trailing `T mod R` frames are dropped, never restored.
@@ -157,6 +160,16 @@ A fast-tree cell's f32 counterpart of an exact cell (`FastLstm`, `FastSlstm`, `F
 
 **Step kernel**:
 The explicit per-timestep `step(x_t, &mut State)` every fast cell exposes. The offline forward loops it; the streaming session drives it; offline and streamed are therefore the same arithmetic.
+
+**Fast SAD plan**:
+The one rate-free algo-3 setup of the fast tree (`fast::plan::FastSadPlan::from_map`): config structs, Fast shape, spec, Cell geometry, normalization type, pack length, fixed gain, weight-file key, and every refusal the config alone decides. The offline fast driver and the frame stream both consume it; the plan is the shared input, the Step kernel the shared arithmetic.
+_Avoid_: setup, config, session for the value itself
+
+**Timeline**:
+The rate-dependent half of the Fast SAD plan (`plan.timeline(rate)`): framing, the quantized shifts, the resolved window and the decision layer's `(time_step, time_offset)`. The offline driver derives one per file, the stream one at construction. Derived from the config every time; the legacy's stateful carry is not reproduced on the fast tree.
+
+**Cell geometry**:
+The `Mamba_*` / `Cfc_*` / `Transformer_*` geometry a config carries, as one fast-tree value (`CellGeometry`), parsed for every config and consumed by one arm. A value, not a seam: the cell set stays the closed `CellType` enum.
 
 **Parity leg**:
 A test comparing the fast tree against the exact tree on one fixture. Owns arithmetic, at its pin's resolution.

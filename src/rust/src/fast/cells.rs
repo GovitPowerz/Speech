@@ -114,7 +114,7 @@
 use anyhow::{Result, bail};
 
 use crate::config::NnetSpec;
-use crate::nn::blstm::{CellType, CfcParams, MambaParams, TransformerParams};
+use crate::nn::blstm::{BlstmConfig, CellType, CfcParams, MambaParams, TransformerParams};
 
 use super::nn::{
     DenseRowChain, FastDenseLayer, FastMatrix, Scratch, asinh_f32, copy_view_into, ensure_len,
@@ -1923,6 +1923,30 @@ impl FastCell {
     }
 }
 
+/// The three port-only cell geometries a config carries, as ONE value: `Mamba_*`,
+/// `Cfc_*` and `Transformer_*`. Parsed for every config, consumed by one arm (the
+/// `BlstmNetwork::from_config` shape), and threaded through the fast tree as a single
+/// `&CellGeometry` instead of the positional `(mamba, cfc, transformer)` triple that used
+/// to sit in eight signatures (issue #24). `fast/`-only: `BlstmConfig` keeps its three
+/// fields and the exact tree sees no diff. A VALUE, not a seam (ADR-0005): the cell set
+/// stays the closed `CellType` enum; this only carries what sizes and builds a cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellGeometry {
+    pub mamba: MambaParams,
+    pub cfc: CfcParams,
+    pub transformer: TransformerParams,
+}
+
+impl From<&BlstmConfig> for CellGeometry {
+    fn from(bc: &BlstmConfig) -> CellGeometry {
+        CellGeometry {
+            mamba: bc.mamba,
+            cfc: bc.cfc,
+            transformer: bc.transformer,
+        }
+    }
+}
+
 /// The flat-pack element count ONE cell layer of `cell_type` consumes at
 /// `(input_size, output_size)`.
 ///
@@ -1942,10 +1966,13 @@ pub(crate) fn cell_weight_count(
     cell_type: CellType,
     i: usize,
     o: usize,
-    mamba: &MambaParams,
-    cfc: &CfcParams,
-    transformer: &TransformerParams,
+    geometry: &CellGeometry,
 ) -> usize {
+    let CellGeometry {
+        mamba,
+        cfc,
+        transformer,
+    } = geometry;
     match cell_type {
         CellType::Lstm => FastLstm::weight_count(i, o),
         CellType::Slstm => FastSlstm::weight_count(i, o),
@@ -1972,18 +1999,20 @@ pub(crate) fn cell_weight_count(
 /// the four port-only cells have no peepholes at all (spec S2.2/S3.2/S1.2, phase-11
 /// S1.2), which is why they ignore it -- the same "parsed for every config, consumed by
 /// one arm" shape `BlstmNetwork::from_config` gives the `Mamba_*` geometry.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_cell(
     cell_type: CellType,
     flat: &[f64],
     i: usize,
     o: usize,
-    mamba: &MambaParams,
-    cfc: &CfcParams,
-    transformer: &TransformerParams,
+    geometry: &CellGeometry,
     peep: [bool; 3],
 ) -> (FastCell, usize) {
-    let used = cell_weight_count(cell_type, i, o, mamba, cfc, transformer);
+    let used = cell_weight_count(cell_type, i, o, geometry);
+    let CellGeometry {
+        mamba,
+        cfc,
+        transformer,
+    } = geometry;
     let cell = match cell_type {
         CellType::Lstm => FastCell::Lstm(FastLstm::from_flat(flat, i, o, peep)),
         CellType::Slstm => FastCell::Slstm(FastSlstm::from_flat(flat, i, o)),
@@ -2129,9 +2158,7 @@ pub(crate) fn check_net_spec(spec: &NnetSpec, who: &str) -> Result<()> {
 pub(crate) fn stack_element_count(
     spec: &NnetSpec,
     cell_type: CellType,
-    mamba: &MambaParams,
-    cfc: &CfcParams,
-    transformer: &TransformerParams,
+    geometry: &CellGeometry,
     stacks: usize,
 ) -> usize {
     let lstm = &spec.lstm_neuron_nb;
@@ -2142,7 +2169,7 @@ pub(crate) fn stack_element_count(
     for jj in 0..lstm.len() - 1 {
         let i = lstm[jj] * lsub[jj];
         let o = lstm[jj + 1];
-        n += stacks * cell_weight_count(cell_type, i, o, mamba, cfc, transformer);
+        n += stacks * cell_weight_count(cell_type, i, o, geometry);
     }
     for jj in 0..outn.len() - 1 {
         n += outn[jj] * osub[jj] * outn[jj + 1] + outn[jj + 1];
@@ -2348,19 +2375,10 @@ impl FastCausalNet {
     pub fn element_count(
         spec: &NnetSpec,
         cell_type: CellType,
-        mamba: &MambaParams,
-        cfc: &CfcParams,
-        transformer: &TransformerParams,
+        geometry: &CellGeometry,
     ) -> Result<usize> {
         check_net_spec(spec, "fast::cells::FastCausalNet")?;
-        Ok(stack_element_count(
-            spec,
-            cell_type,
-            mamba,
-            cfc,
-            transformer,
-            1,
-        ))
+        Ok(stack_element_count(spec, cell_type, geometry, 1))
     }
 
     /// Build from a `NnetSpec` + the cell type/geometry + the flat f64 pack, narrowing
@@ -2376,9 +2394,7 @@ impl FastCausalNet {
     pub fn from_flat(
         spec: &NnetSpec,
         cell_type: CellType,
-        mamba: &MambaParams,
-        cfc: &CfcParams,
-        transformer: &TransformerParams,
+        geometry: &CellGeometry,
         flat: &[f64],
     ) -> Result<FastCausalNet> {
         if spec.lstm_neuron_nb.is_empty() || spec.lstm_neuron_nb[0] == 0 {
@@ -2387,7 +2403,7 @@ impl FastCausalNet {
                  unsupported"
             );
         }
-        let needed = Self::element_count(spec, cell_type, mamba, cfc, transformer)?;
+        let needed = Self::element_count(spec, cell_type, geometry)?;
         if flat.len() < needed {
             bail!(
                 "flat weight vector too short for the fast causal net: {} < {needed}",
@@ -2411,8 +2427,7 @@ impl FastCausalNet {
         for jj in 0..lstm.len() - 1 {
             let i = lstm[jj] * lsub[jj];
             let o = lstm[jj + 1];
-            let (cell, used) =
-                build_cell(cell_type, &flat[pos..], i, o, mamba, cfc, transformer, peep);
+            let (cell, used) = build_cell(cell_type, &flat[pos..], i, o, geometry, peep);
             cells.push(cell);
             pos += used;
         }
@@ -2726,6 +2741,15 @@ mod tests {
             }
         }
         worst
+    }
+
+    /// The three geometries as one [`CellGeometry`] (the fast-tree value since issue #24).
+    fn geo(p: &MambaParams, c: &CfcParams, tf: &TransformerParams) -> CellGeometry {
+        CellGeometry {
+            mamba: *p,
+            cfc: *c,
+            transformer: *tf,
+        }
     }
 
     fn mamba_params() -> MambaParams {
@@ -4022,7 +4046,7 @@ mod tests {
             CellType::Cfc,
             CellType::Transformer,
         ] {
-            let n = FastCausalNet::element_count(&sp, cell, &p, &c, &tf).unwrap();
+            let n = FastCausalNet::element_count(&sp, cell, &geo(&p, &c, &tf)).unwrap();
             // Independent arithmetic: two cell layers (in = neuron*sub) + two dense
             // layers + the 2*input_size tail.
             let want_cells = match cell {
@@ -4051,7 +4075,8 @@ mod tests {
                 "{cell:?}"
             );
 
-            let mut net = FastCausalNet::from_flat(&sp, cell, &p, &c, &tf, &weights(n)).unwrap();
+            let mut net =
+                FastCausalNet::from_flat(&sp, cell, &geo(&p, &c, &tf), &weights(n)).unwrap();
             assert_eq!(net.sub_sampling_ratio(), 2);
             assert_eq!(net.cells().len(), 2);
 
@@ -4149,7 +4174,7 @@ mod tests {
             .unwrap();
             let mut exact = crate::nn::blstm::BlstmNetwork::from_config(cfg).unwrap();
 
-            let n = FastCausalNet::element_count(&sp, cell, &p, &c, &tf).unwrap();
+            let n = FastCausalNet::element_count(&sp, cell, &geo(&p, &c, &tf)).unwrap();
             assert_eq!(
                 n,
                 exact.nb_of_weights(),
@@ -4157,7 +4182,7 @@ mod tests {
             );
             let flat = bounded_weights(n);
             exact.set_weights(&flat).unwrap();
-            let mut fast = FastCausalNet::from_flat(&sp, cell, &p, &c, &tf, &flat).unwrap();
+            let mut fast = FastCausalNet::from_flat(&sp, cell, &geo(&p, &c, &tf), &flat).unwrap();
 
             // 13 rows -> layer-0 sub-sampling 2 drops the odd tail -> 6 output rows.
             let input = seq(13, 6, 0.2);
@@ -4197,9 +4222,9 @@ mod tests {
         let p = mamba_params();
         let c = cfc_params();
         let tf = transformer_params_stack();
-        let n = FastCausalNet::element_count(&sp, CellType::Slstm, &p, &c, &tf).unwrap();
+        let n = FastCausalNet::element_count(&sp, CellType::Slstm, &geo(&p, &c, &tf)).unwrap();
         let short = weights(n - 1);
-        let err = FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &tf, &short)
+        let err = FastCausalNet::from_flat(&sp, CellType::Slstm, &geo(&p, &c, &tf), &short)
             .err()
             .expect("a short pack must be rejected");
         assert!(
@@ -4207,7 +4232,8 @@ mod tests {
             "expected a length bail, got: {err}"
         );
         assert!(
-            FastCausalNet::from_flat(&sp, CellType::Slstm, &p, &c, &tf, &weights(n + 17)).is_ok()
+            FastCausalNet::from_flat(&sp, CellType::Slstm, &geo(&p, &c, &tf), &weights(n + 17))
+                .is_ok()
         );
     }
 
@@ -4245,7 +4271,7 @@ mod tests {
         let p = mamba_params();
         let c = cfc_params();
         let tf = transformer_params_stack();
-        let n = FastCausalNet::element_count(&sp, CellType::Lstm, &p, &c, &tf).unwrap();
+        let n = FastCausalNet::element_count(&sp, CellType::Lstm, &geo(&p, &c, &tf)).unwrap();
         assert_eq!(n, FastLstm::weight_count(4, 3) + (3 * 1 + 1) + 2 * 4);
         let exact = crate::nn::blstm::BlstmNetwork::from_config(bc.clone()).unwrap();
         assert_eq!(
@@ -4256,12 +4282,13 @@ mod tests {
         for other in [CellType::Slstm, CellType::Mamba, CellType::Cfc] {
             assert_ne!(
                 n,
-                FastCausalNet::element_count(&sp, other, &p, &c, &tf).unwrap(),
+                FastCausalNet::element_count(&sp, other, &geo(&p, &c, &tf)).unwrap(),
                 "the LSTM count collided with {other:?}'s"
             );
         }
 
-        let net = FastCausalNet::from_flat(&sp, CellType::Lstm, &p, &c, &tf, &weights(n)).unwrap();
+        let net =
+            FastCausalNet::from_flat(&sp, CellType::Lstm, &geo(&p, &c, &tf), &weights(n)).unwrap();
         assert!(matches!(net.cells()[0], FastCell::Lstm(_)));
         assert!(matches!(net.cells()[0].state(), FastCellState::Lstm(_)));
     }
@@ -4278,9 +4305,7 @@ mod tests {
         let err = super::super::bicell::FastBiCell::element_count(
             &sp,
             CellType::Lstm,
-            &mamba_params(),
-            &cfc_params(),
-            &transformer_params_stack(),
+            &geo(&mamba_params(), &cfc_params(), &transformer_params_stack()),
         )
         .unwrap_err();
         assert!(
@@ -4292,9 +4317,7 @@ mod tests {
             super::super::bicell::FastBiCell::element_count(
                 &sp,
                 cell,
-                &mamba_params(),
-                &cfc_params(),
-                &transformer_params_stack(),
+                &geo(&mamba_params(), &cfc_params(), &transformer_params_stack()),
             )
             .unwrap_or_else(|e| panic!("{cell:?} must size: {e}"));
         }
@@ -4310,7 +4333,7 @@ mod tests {
     /// The bail it replaced lived at `element_count` rather than in
     /// `classify_fast_shape` precisely so this flip would be local: `element_count` is
     /// the single choke point both causal construction sites reach (`fast::driver`'s
-    /// `build_sad_net` and `fast::stream::StreamingSession::new` both call `from_flat`,
+    /// `build_net` and `fast::stream::StreamingSession::new` both call `from_flat`,
     /// which calls `element_count` first), so ONE arm swap admits the cell everywhere.
     /// What that arm still protects is unchanged and re-asserted here: the count must be
     /// the CfC's own, not another architecture's, or the pack is consumed head-first by
@@ -4344,9 +4367,7 @@ mod tests {
         let n = FastCausalNet::element_count(
             &sp,
             CellType::Cfc,
-            &mamba_params(),
-            &bc.cfc,
-            &bc.transformer,
+            &geo(&mamba_params(), &bc.cfc, &bc.transformer),
         )
         .unwrap();
         // The count is the CfC's OWN: one `4 -> 3` cell layer at this geometry, the
@@ -4367,9 +4388,7 @@ mod tests {
             FastCausalNet::element_count(
                 &sp,
                 CellType::Slstm,
-                &mamba_params(),
-                &bc.cfc,
-                &bc.transformer
+                &geo(&mamba_params(), &bc.cfc, &bc.transformer),
             )
             .unwrap()
         );
@@ -4377,9 +4396,7 @@ mod tests {
         let net = FastCausalNet::from_flat(
             &sp,
             CellType::Cfc,
-            &mamba_params(),
-            &bc.cfc,
-            &bc.transformer,
+            &geo(&mamba_params(), &bc.cfc, &bc.transformer),
             &weights(n),
         )
         .unwrap();
@@ -4427,8 +4444,9 @@ mod tests {
 
         let sp = spec(&[4, 4], &[1], &[4, 1], &[1]);
         let (p, c) = (mamba_params(), cfc_params());
-        let n = FastCausalNet::element_count(&sp, CellType::Transformer, &p, &c, &bc.transformer)
-            .unwrap();
+        let n =
+            FastCausalNet::element_count(&sp, CellType::Transformer, &geo(&p, &c, &bc.transformer))
+                .unwrap();
         assert_eq!(
             n,
             FastTransformer::weight_count(4, 4, 6) + (4 * 1 + 1) + 2 * 4
@@ -4447,7 +4465,7 @@ mod tests {
         ] {
             assert_ne!(
                 n,
-                FastCausalNet::element_count(&sp, other, &p, &c, &bc.transformer).unwrap(),
+                FastCausalNet::element_count(&sp, other, &geo(&p, &c, &bc.transformer)).unwrap(),
                 "the transformer count collided with {other:?}'s"
             );
         }
@@ -4455,9 +4473,7 @@ mod tests {
         let net = FastCausalNet::from_flat(
             &sp,
             CellType::Transformer,
-            &p,
-            &c,
-            &bc.transformer,
+            &geo(&p, &c, &bc.transformer),
             &weights(n),
         )
         .unwrap();
@@ -4487,9 +4503,7 @@ mod tests {
         let err = FastCausalNet::from_flat(
             &sp,
             CellType::Slstm,
-            &mamba_params(),
-            &cfc_params(),
-            &transformer_params_stack(),
+            &geo(&mamba_params(), &cfc_params(), &transformer_params_stack()),
             &weights(64),
         )
         .err()

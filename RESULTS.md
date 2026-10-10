@@ -767,6 +767,46 @@ segment `[41.35350, 43.95530]`), not to the blocked one. Nothing else in this se
 the equivalence, prefix, chunk-invariance, and causality-cost results are all unaffected (they
 concern `finish`, which the fix never touches).
 
+### Issue #24 -- one algo-3 SAD setup for the fast tree (`fast/plan.rs`), and the adjudications it carried
+
+The offline fast driver and the streaming session each repeated the algo-3 setup and had already
+drifted in two places. Both now consume `FastSadPlan::from_map` (rate-free) + `plan.timeline(rate)`
+(`src/rust/tests/fast_sad_plan.rs` pins the plan against the exact tree on every committed SAD
+config and both lineages' TOML, and the timeline against the frozen `get_blstm_param` derivation).
+Every bit-equal gate of this section and of phase 9 passes UNCHANGED, which is the ADR-0004 proof
+that the plan moved setup and nothing arithmetic. The three adjudications, each with its test:
+
+| question | ruling | evidence |
+|---|---|---|
+| `InputNormalizationType` sets, offline fast driver | `{-1, 0, 1}`, unchanged (type -1 needs the whole sequence, which the offline driver has) | `fast_sad_plan.rs::offline_arm_accepts_minus_one_zero_and_one_and_refuses_minus_two` |
+| ... stream, causal arm | `{0, 1}`, unchanged (type -1 is acausal; type 0 has nothing whole-file to freeze) | `fast_sad_plan.rs::stream_causal_arm_accepts_zero_and_one_and_refuses_minus_one` |
+| ... stream, windowed arm | WIDENED `{1}` -> `{0, 1}`. Phase 8's `{1}` was an unextended gate, not a design: type 0 is `apply_norm = false` and nothing else differs between the arms. Measured 2026-10-10 on the staged tier2 fixture (60 s mono, tuple-A pack, `InputNormalizationType 0`): boundary max_dt EXACTLY 0.0, 1500/1500 posteriors finite and bit-equal to the offline fast run, and distinct from the type-1 run's (the norm is off). Had the leg failed, the arm would have kept `{1}` with the failure as the reason. | `phase8_gate.rs::stream_finish_equals_offline_type0`, `fast_sad_plan.rs::stream_windowed_arm_accepts_zero_and_one_and_refuses_minus_one` |
+| type -2 | refused fast-tree-wide at `from_map` (the plain-FFB self-normalized COPY; no fast kernel implements it) | `fast_sad_plan.rs::offline_arm_accepts_minus_one_zero_and_one_and_refuses_minus_two` |
+| the pitch gate (`BLSTM_TDCwindow > 0`) | the stream INHERITS the offline driver's refusal. It used to stream a pitch config silently without its second pass -- not bit-equal to the offline run it claims to mirror. | `fast_sad_plan.rs::the_stream_refuses_a_pitch_config_in_the_offline_drivers_words` |
+
+ONE BY-DESIGN FAST DIVERGENCE OF THE SETUP (recorded here, never IMPROVEMENTS.md: a legacy carry
+dropped on purpose, not a quirk reproduced wrongly). The frozen exact driver re-quantizes
+`_SpectrumShift` / `_WindowShift` / `_LTSVWindowShift` IN PLACE on every `get_segmentation`, from
+the previous call's value; the fast tree used to mirror that state. The timeline derives from the
+config value at each rate instead. At one rate the carry is a fixed point --
+`round(round(x*r)/r*r) == round(x*r)` and likewise for the window shift, measured bit for bit over
+a 6 rates x 6 spectrum shifts x 6 window shifts grid
+(`fast_sad_plan.rs::shift_requantization_is_a_fixed_point_at_one_rate`) -- so a run whose files
+share a rate sees no difference; the carry is observable only across files of DIFFERENT rates in
+one run, where the second file's shift would be quantized off the first's. The streaming session
+always derived from the config (one rate per session), so the plan made the offline driver agree
+with the stream, not the reverse.
+
+Two construction-time consequences, both deliberate: a config the pre-#24 fast driver refused at
+its first `get_segmentation` (a causal cell with `BLSTM_window > 0` -- on the config's intent,
+so a sub-frame window the exact tree would quantize to 0 and run plain is refused too -- a BLSTM
+with `BLSTM_window 0`, any shape with `BLSTM_shift 0`) is now refused at
+`BagOfProcessors::from_configs`, rate-free
+(`fast_sad_plan.rs::rate_free_precheck_refuses_what_no_rate_can_rescue`; a sub-frame shift that
+only resolves to truncate at the actual rate is still caught by the timeline at the first
+`get_segmentation`, `timeline_catches_a_sub_frame_shift_the_precheck_cannot`); and the fast SAD
+driver is an algo-3 plan, so a Twin (algo 6) config no longer builds one.
+
 ---
 
 ## Phase 9 -- new architectures

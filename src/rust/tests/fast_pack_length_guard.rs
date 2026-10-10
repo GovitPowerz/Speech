@@ -123,7 +123,7 @@ fn the_file_seam_keeps_the_legacy_head_first_tolerance() {
     );
     FastSpectralSegmenter::from_legacy(&over, None)
         .unwrap()
-        .load_weights_file(&over)
+        .load_weights_file()
         .expect("the legacy tolerance: an over-long weightsFile loads its head");
 
     let mut short = map_at("phase9/lstm_forward.config");
@@ -133,7 +133,7 @@ fn the_file_seam_keeps_the_legacy_head_first_tolerance() {
     );
     let got = FastSpectralSegmenter::from_legacy(&short, None)
         .unwrap()
-        .load_weights_file(&short)
+        .load_weights_file()
         .expect_err("a short weightsFile must be refused")
         .to_string();
     let want = exact_net(&short)
@@ -172,7 +172,7 @@ fn an_in_memory_pack_scores_as_its_file_and_a_refusal_changes_nothing() {
             file.to_string_lossy().into_owned(),
         );
         let mut from_file = FastSpectralSegmenter::from_legacy(&map, None).unwrap();
-        from_file.load_weights_file(&map).unwrap();
+        from_file.load_weights_file().unwrap();
         let pack = read_weight_vector(&file).unwrap();
         let mut set = FastSpectralSegmenter::from_legacy(&map, None).unwrap();
         set.set_weights(&pack)

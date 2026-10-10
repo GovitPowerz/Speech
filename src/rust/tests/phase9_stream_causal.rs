@@ -1018,14 +1018,13 @@ fn causal_output_size_not_one_bails() {
 
     let bc = speech::nn::blstm::BlstmConfig::from_legacy(&m, "BLSTM").unwrap();
     let spec = speech::config::NnetSpec::from_legacy(&m, "BLSTM").unwrap();
-    let needed = speech::fast::cells::FastCausalNet::element_count(
-        &spec,
-        bc.cell_type,
-        &speech::nn::blstm::MambaParams::default(),
-        &bc.cfc,
-        &bc.transformer,
-    )
-    .unwrap();
+    let geometry = speech::fast::cells::CellGeometry {
+        mamba: speech::nn::blstm::MambaParams::default(),
+        cfc: bc.cfc,
+        transformer: bc.transformer,
+    };
+    let needed =
+        speech::fast::cells::FastCausalNet::element_count(&spec, bc.cell_type, &geometry).unwrap();
     let pack = dir.path().join("causal_out2.bin");
     write_matrix(&pack, needed, 1, &vec![0.0; needed]).unwrap();
     m.insert("BLSTM_weightsFile".into(), pack.to_str().unwrap().into());
@@ -1147,7 +1146,7 @@ fn latency_bounds() {
         );
         assert_eq!(bc.direction.as_str(), "forward", "{cell}: causal fixture");
         // The causal (window 0) time base: `_WindowShift * ssr` (tasks/sad.rs:1451-1452,
-        // fast/driver.rs:530-534), with `ws` the POST-`get_blstm_param` value.
+        // `fast::plan::FastSadPlan::timeline`), with `ws` the POST-`get_blstm_param` value.
         let re_time_step = ws * ssr as f64;
         let re_nn = 0.0;
         let re_sub = (ssr - 1) as f64 * params.shift_sec;
@@ -1561,12 +1560,17 @@ fn synth_net(
         heads: 2,
         d_ff: 6,
     };
-    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &p, &c, &tf).unwrap();
+    let geometry = speech::fast::cells::CellGeometry {
+        mamba: p,
+        cfc: c,
+        transformer: tf,
+    };
+    let n = speech::fast::cells::FastCausalNet::element_count(&sp, cell, &geometry).unwrap();
     // Bounded, non-degenerate: a linear ramp would saturate the output layer to a constant.
     let flat: Vec<f64> = (0..n)
         .map(|k| 0.35 * (0.61 * (k as f64) + 0.3).sin())
         .collect();
-    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &p, &c, &tf, &flat).unwrap()
+    speech::fast::cells::FastCausalNet::from_flat(&sp, cell, &geometry, &flat).unwrap()
 }
 
 /// A deterministic, bounded, non-constant input sequence.

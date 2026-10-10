@@ -31,7 +31,13 @@
 //! row drop. The three remaining S5.3 requirements (window 0, MONO, `Audio_fixed_gain`)
 //! are enforced, and the normalization set is `{0, 1}` rather than phase 8's `{1}`: type 0
 //! is the exact path's no-op arm, causality-trivial because there is no whole-file
-//! statistic to freeze, and it is what the committed phase-9 causal fixtures carry.
+//! statistic to freeze, and it is what the committed phase-9 causal fixtures carry. Since
+//! issue #24 the WINDOWED arm runs the same `{0, 1}` (the one per-arm table is
+//! `fast::plan::accepted_norm_types`; the leg that widened it is
+//! `phase8_gate.rs::stream_finish_equals_offline_type0`), and the whole rate-free setup
+//! -- config structs, shape, spec, pack length, pitch gate, regime pre-check -- is the
+//! offline driver's `fast::plan::FastSadPlan`, with the rate-dependent half
+//! (`SadTimeline`) derived once at `new`.
 //!
 //! THE DECISION LAYER'S REPLAY IS CUT (the interstitial incremental-resmooth fix).
 //! [`StreamDecision`] re-smooths on every push, and its input -- the raw-segment list --
@@ -57,7 +63,7 @@
 //!
 //! OFFLINE ORDER REPRODUCED (the bit-equal contract, spec S1.2). The offline fast SAD
 //! path is: `read_audio` applies the gain (f64) -> the driver applies pre-emphasis then
-//! noise on the whole f64 channel (`fast/driver.rs:296-301`, gated `preemph_ratio > 0` /
+//! noise on the whole f64 channel (`FastSpectralSegmenter::get_segmentation`'s gates, `preemph_ratio > 0` /
 //! `noise_seed > 0`) -> the channel is narrowed to f32 -> `build_input_sequence`. This
 //! front-end applies, PER SAMPLE and in f64 (narrowing to f32 only when buffering, exactly
 //! like the driver's `.map(|x| x as f32)` seam):
@@ -103,23 +109,21 @@
 //! the end rows clamp at the true last frame, resolved at `flush`. SDC (`ComputeDeltasNb <
 //! 0`) has a different, un-gate-exercised reach and typed-bails at construction.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
-use crate::legacy_config::get_f64_opt;
-use crate::nn::blstm::{BlstmConfig, file_pack_head};
-use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segment, Segmentation};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
 
 use super::cells::{FastCausalNet, FastCellState};
-use super::driver::{FastNetShape, build_spec_aligned_to, classify_fast_shape, exact_pack_len};
+use super::driver::{FastNet, FastNetShape};
 use super::nn::{
     DenseRowChain, FastBlstm, FastMatrix, external_normalize_f32, window_begin, window_end,
 };
 use super::pipeline::FastPipeline;
+use super::plan::{FastSadArm, FastSadPlan};
 
 /// The chunked-input SAD feature front-end. See the module docs for the bit-equal
 /// contract, the offline order, and the frame/feature finalization arithmetic.
@@ -1187,11 +1191,11 @@ impl ConvStream {
 
 /// The incremental SAD decision layer (Phase 8 Task 4): the streaming twin of the offline
 /// [`crate::tasks::segmenter::results_to_segmentation`] + [`smooth_segmentation`] the fast
-/// driver hands off to (`fast/driver.rs:405-419`). Consumes the FINALIZED posterior rows
+/// driver hands off to (`FastSpectralSegmenter::get_segmentation`'s per-channel tail). Consumes the FINALIZED posterior rows
 /// [`StreamOverlap`] emits (f32, `k x 1` for the binary SAD net) and produces stable
 /// [`EmittedSegment`]s as they settle, plus the complete [`Segmentation`] at EOS.
 ///
-/// PIPELINE. Each posterior scalar is widened f32 -> f64 (the exact `fast/driver.rs:405`
+/// PIPELINE. Each posterior scalar is widened f32 -> f64 (the offline driver's `result_vec2`
 /// seam), fed to the streaming [`ConvStream`] (the 19-tap edge-truncating convolution,
 /// finalizing with a `half`-value lookahead), then the finalized convolved values drive
 /// the persistent [`HystState`] (the latched hysteresis, boundaries never revised). Each
@@ -1489,7 +1493,7 @@ impl StreamDecision {
     /// Build from the driver config (the convolution kernel), the segmenter config (the
     /// decision thresholds + the smoothing params the holdback derives from), and the
     /// per-file `time_step`/`time_offset` the offline overlap branch computes
-    /// (`fast/driver.rs:346-347`).
+    /// (`fast::plan::SadTimeline`, shared with the offline driver since issue #24).
     ///
     /// NOTE ON THE SIGNATURE: the Task-4 brief sketches `new(driver_cfg, seg_cfg,
     /// time_step)`, but the hysteresis is defined against `time_offset` too (the offline
@@ -1872,7 +1876,7 @@ impl StreamDecision {
 // ===========================================================================
 
 /// The session's NN stage, per the config's `Cell_Type` x `Direction` pair (spec S5.2).
-/// A CLOSED set with static dispatch, exactly like `fast::driver`'s `FastSadNet`: the
+/// A CLOSED set with static dispatch, exactly like `fast::driver`'s `FastNet`: the
 /// windowed-BLSTM arm is the phase-8 path, BEHAVIOUR-UNTOUCHED; the causal arm is Task 7.
 /// Both feed the SAME [`StreamDecision`], so `push`/`finish` keep one shape and the
 /// `speech stream` CLI + the PyO3 `StreamingSession` gain the causal mode with ZERO new
@@ -1928,11 +1932,10 @@ enum StreamNn {
 /// [`FastCausalNet`]; everything else here -- the front-end, the decision layer, the
 /// frozen-gain contract, `push`/`finish`, the latency accounting -- is shared verbatim.
 /// The bit-equal oracle on the causal arm is the offline fast CAUSAL bag run
-/// (`tests/phase9_stream_causal.rs`). The input-normalization contract widens to `{0, 1}`
-/// ON THE CAUSAL ARM ONLY (type 0 is causality-trivial -- nothing whole-file to freeze --
-/// and it is what the committed phase-9 causal fixtures carry); the WINDOWED arm keeps
-/// phase 8's `{1}` byte-identically, so no config phase 8 accepted or refused changed
-/// status.
+/// (`tests/phase9_stream_causal.rs`). The input-normalization contract is `{0, 1}` on BOTH
+/// arms (type 0 is causality-trivial -- nothing whole-file to freeze -- and it is what the
+/// committed phase-9 causal fixtures carry; phase 8's windowed arm accepted `{1}` alone
+/// until issue #24 widened it behind a bit-equal leg).
 ///
 /// LATENCY (spec S1.8, S5.5). Every emission is stamped with the session's audio-time-pushed
 /// clock (`(total_pushed-1)/rate`) and its per-emission lag (`emitted_at - end_s`) is
@@ -1991,12 +1994,29 @@ pub struct StreamingSession {
 
 impl StreamingSession {
     /// Build the session from the SAME legacy config `map` the bag consumes, the stream
-    /// `rate`, and the source `channels` count. Loads the frozen net ONCE, builds the
-    /// phase-7 [`FastPipeline`], and wires the front-end + NN stage + decision layer.
+    /// `rate`, and the source `channels` count: [`FastSadPlan::from_map`] then
+    /// [`Self::from_plan`] with the frozen net read from the plan's `BLSTM_weightsFile`.
+    /// Kept as the one-call entry the `speech stream` CLI, the PyO3 `StreamingSession`
+    /// and every streaming gate use.
+    pub fn new(
+        map: &IndexMap<String, String>,
+        rate: f64,
+        channels: usize,
+    ) -> Result<StreamingSession> {
+        Self::from_plan(&FastSadPlan::from_map(map)?, None, rate, channels)
+    }
+
+    /// Build the session on an already-parsed [`FastSadPlan`] (issue #24: the SAME setup
+    /// the offline fast driver consumes, so the two cannot disagree on a config), at
+    /// `rate`, with `pack` the frozen net as an IN-MEMORY pack (EXACT-LENGTH, the
+    /// `set_weights` contract) or `None` to read the plan's `BLSTM_weightsFile` under the
+    /// legacy file tolerance ([`FastSadPlan::read_weights_file`]). Loads the net ONCE,
+    /// derives the plan's [`SadTimeline`] at `rate`, builds the phase-7 [`FastPipeline`],
+    /// and wires the front-end + NN stage + decision layer.
     ///
-    /// THE NN STAGE IS DISPATCHED (spec S5.2) on `Cell_Type` x `Direction`, through
-    /// `fast::driver`'s own `classify_fast_shape` choke point -- ONE classifier, so the
-    /// session and the offline driver cannot drift apart on which shape a config selects:
+    /// THE NN STAGE IS DISPATCHED (spec S5.2) on the plan's shape -- `fast::driver`'s own
+    /// `classify_fast_shape`, ONE classifier, so the session and the offline driver
+    /// cannot drift apart on which shape a config selects:
     ///  - `lstm` + bidirectional -> [`StreamNn::Windowed`] ([`StreamOverlap`] + [`FastBlstm`]),
     ///    the phase-8 path;
     ///  - ANY cell + forward -> [`StreamNn::Causal`] ([`StreamCausal`] over a
@@ -2005,7 +2025,7 @@ impl StreamingSession {
     ///    gone rather than moved: the shape is implemented.
     ///
     /// ONE SHAPE IS REFUSED HERE THAT THE OFFLINE TREE ACCEPTS (phase-10 Task 7): a
-    /// BIDIRECTIONAL new cell. `classify_fast_shape` now names it (`FastNetShape::BiCell`,
+    /// BIDIRECTIONAL new cell. `classify_fast_shape` names it (`FastNetShape::BiCell`,
     /// built offline by `fast::bicell::FastBiCell`), but it is unstreamable BY
     /// CONSTRUCTION -- the reverse stack reads the whole sequence -- so the session bails
     /// on it, keeping the LEADING CLAUSE of the refusal that used to live in the
@@ -2013,50 +2033,40 @@ impl StreamingSession {
     ///
     /// Validated contract, each bail pinned (`tests/phase8_gate.rs::validation_bails` for the
     /// windowed arm, `tests/phase9_stream_causal.rs::validation_bails` +
-    /// `causal_output_size_not_one_bails` for the causal one): algo 3, MONO,
-    /// `Audio_fixed_gain` present, `output_size 1`, plus the two ARM-DEPENDENT rules --
-    ///  - INPUT NORMALIZATION: `1` (the pack-carried frozen tail) on either arm, and `0`
-    ///    (no normalization) on the CAUSAL arm only; `-1` (per-sequence self-normalization)
-    ///    always bails, since it needs the whole sequence before the first frame;
-    ///  - WINDOWING: the windowed arm requires OVERLAP (plain and truncate bail); the causal
-    ///    arm requires the PLAIN regime (`window_size` 0), because a causal cell's state
-    ///    would be reset at every window boundary.
-    pub fn new(
-        map: &IndexMap<String, String>,
+    /// `causal_output_size_not_one_bails` for the causal one, `tests/fast_sad_plan.rs` for
+    /// the plan's own). The PLAN's, shared with the offline driver: algo 3, the pitch
+    /// second pass (`BLSTM_TDCwindow > 0` -- the stream used to lack this gate and streamed
+    /// a pitch config without its second pass), the windowing regime (the windowed arm
+    /// requires OVERLAP, plain and truncate bail; the causal arm requires PLAIN, because a
+    /// causal cell's state would be reset at every window boundary). The SESSION's: MONO,
+    /// `Audio_fixed_gain` present, `output_size 1`, no bidirectional new cell, and the
+    /// arm's INPUT NORMALIZATION set (`fast::plan::accepted_norm_types`): `1` (the
+    /// pack-carried frozen tail) or `0` (no normalization) on EITHER arm since issue #24
+    /// (phase 8's windowed arm accepted `{1}` alone; `phase8_gate.rs::
+    /// stream_finish_equals_offline_type0` is the leg that widened it); `-1` (per-sequence
+    /// self-normalization) always bails, since it needs the whole sequence before the
+    /// first frame.
+    pub fn from_plan(
+        plan: &FastSadPlan,
+        pack: Option<&[f64]>,
         rate: f64,
         channels: usize,
     ) -> Result<StreamingSession> {
         // --- Validation bails (each pinned) ---
-        let algo = map
-            .get("Algo_choice")
-            .ok_or_else(|| anyhow!("param 'Algo_choice' not found in config"))?
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow!("streaming: Algo_choice parse: {e}"))?;
-        if algo != 3 {
-            bail!("streaming: only algo 3 (spectral SAD) is supported (got {algo})");
-        }
         if channels != 1 {
             bail!(
                 "streaming: mono only (got {channels} channels); multi-channel streaming (the \
                  cross-channel result_vec seeding) is deferred (spec S0/S1.2)"
             );
         }
-        let fixed_gain = match get_f64_opt(map, "Audio_fixed_gain")? {
+        let fixed_gain = match plan.fixed_gain {
             Some(g) => g,
             None => bail!(
                 "streaming requires Audio_fixed_gain (frozen-norm mode; the whole-file \
                  (2*RMS+max)/2 audio normalization is not streamable)"
             ),
         };
-        let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
 
-        // Cell x direction dispatch (spec S5.2), through the SAME `classify_fast_shape`
-        // choke point the offline fast SAD driver uses, so both sides agree on the shape
-        // by construction. The classifier is TOTAL since phase-10 Task 8; the ONE shape
-        // refused here but NOT offline (a bidirectional cell) is handled immediately
-        // below.
-        let shape = classify_fast_shape(&bc);
         // BIDIRECTIONAL IS UNSTREAMABLE BY CONSTRUCTION (phase-10 Task 7, spec S5): the
         // reverse stack's state at time `t` is a function of the samples AFTER `t`, so
         // its output at the first frame depends on the last one. There is no bounded
@@ -2069,168 +2079,59 @@ impl StreamingSession {
         // stay green UNMODIFIED -- and its TAIL REWRITTEN, because the classifier's old
         // advice ("run this config on the exact path") is now wrong here: the offline fast
         // path DOES implement this shape, it is streaming that cannot.
-        if let FastNetShape::BiCell(cell) = shape {
-            bail!(
+        let arm = match plan.shape {
+            FastNetShape::BiCell(cell) => bail!(
                 "cell type '{}' is not supported on the fast inference path (net 'BLSTM') in the \
                  BIDIRECTIONAL direction when STREAMING; a bidirectional net is unstreamable by \
                  construction (the reverse pass reads the whole sequence) -- the OFFLINE fast \
                  path implements it (Inference_Path fast), streaming does not",
                 cell.as_str()
-            );
-        }
-        let causal = matches!(shape, FastNetShape::Causal(_));
-
-        // Input normalization, ARM-DEPENDENT and deliberately CONSERVATIVE:
-        //  - type 1 (the pack-carried frozen tail -- the phase-8 causality cut) on EITHER
-        //    arm;
-        //  - type 0 (NOTHING, the exact path's `_ => {}` arm) on the CAUSAL arm only. It is
-        //    causality-trivial (no whole-file statistic exists, so there is nothing to
-        //    freeze) and it is what the committed phase-9 causal fixtures carry -- but the
-        //    WINDOWED arm keeps phase 8's `{1}` set BYTE-IDENTICALLY, message included, so
-        //    no config phase 8 accepted or refused changes status here. Widening it there
-        //    too would be defensible and untested; untested is the part that matters.
-        //  - type -1 (per-sequence self-normalization) ALWAYS bails: it needs the whole
-        //    sequence before the first frame can be normalized.
-        let norm_ok = if causal {
-            matches!(bc.input_normalization_type, 0 | 1)
-        } else {
-            bc.input_normalization_type == 1
+            ),
+            FastNetShape::Causal(_) => FastSadArm::StreamCausal,
+            FastNetShape::Blstm => FastSadArm::StreamWindowed,
         };
-        if !norm_ok {
-            if causal {
-                bail!(
-                    "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen \
-                     stats) or 0 (no input normalization); got {} (type -1 self-normalization \
-                     needs whole-sequence lookahead)",
-                    bc.input_normalization_type
-                );
-            }
-            bail!(
-                "streaming requires BLSTM_InputNormalizationType 1 (pack-carried frozen stats); \
-                 got {} (type -1 self-normalization needs whole-sequence lookahead)",
-                bc.input_normalization_type
-            );
-        }
-        let apply_norm = bc.input_normalization_type == 1;
+        let causal = arm == FastSadArm::StreamCausal;
 
-        // --- Config surfaces (shared with the offline fast driver) ---
-        let feature_cfg = FeatureConfig::from_legacy(map, "BLSTM")?;
-        let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
-        let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
-        let spec = build_spec_aligned_to(map, "BLSTM", &bc)?;
+        // Input normalization, per arm, off the plan's one table. Type 1 is the
+        // pack-carried frozen tail (the phase-8 causality cut); type 0 is NOTHING, the
+        // exact path's `_ => {}` arm, causality-trivial (no whole-file statistic exists,
+        // so there is nothing to freeze) -- `apply_norm` is the only thing that differs
+        // between the two, on either arm; type -1 needs the whole sequence.
+        plan.check_norm(arm)?;
+        let apply_norm = plan.input_normalization_type == 1;
 
-        // --- Frozen net (loaded once) ---
-        let weights_file = map
-            .get("BLSTM_weightsFile")
-            .map(String::as_str)
-            .unwrap_or("");
-        if weights_file.is_empty() {
-            bail!("streaming: BLSTM_weightsFile is empty (the frozen net must be loaded once)");
-        }
-        // The FILE seam: the legacy head-first tolerance with its warning, a short file
-        // refused, both in the exact `load_weights_file`'s words (issue #62).
-        let pack = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?;
-        let flat = file_pack_head(&pack, exact_pack_len(&bc)?, weights_file)?;
-        let causal_net = match shape {
-            FastNetShape::Causal(cell) => Some(FastCausalNet::from_flat(
-                &spec,
-                cell,
-                &bc.mamba,
-                &bc.cfc,
-                &bc.transformer,
-                flat,
-            )?),
-            FastNetShape::Blstm => None,
-            // Unreachable: the bidirectional-cell shape bailed above.
-            FastNetShape::BiCell(_) => unreachable!("bidirectional is unstreamable"),
-        };
-        let blstm_net = match shape {
-            FastNetShape::Blstm => Some(FastBlstm::from_flat(&spec, flat)?),
-            FastNetShape::Causal(_) => None,
-            FastNetShape::BiCell(_) => unreachable!("bidirectional is unstreamable"),
+        // --- Frozen net (loaded once), through the plan's one file seam or the exact
+        // in-memory contract ---
+        let net = match pack {
+            Some(flat) => plan.build_net(flat)?,
+            None => match plan.read_weights_file()? {
+                Some(flat) => plan.build_net(&flat)?,
+                None => bail!(
+                    "streaming: BLSTM_weightsFile is empty (the frozen net must be loaded once)"
+                ),
+            },
         };
 
-        // --- Framing + pipeline (built once, at `rate`) ---
-        let params = SpectralParams::derive(&feature_cfg, rate);
-        let pipeline = FastPipeline::new(&params, &feature_cfg, rate)?;
+        // --- The rate-dependent setup: framing, the quantized shift, getBLSTMParam, the
+        // regime check and the time axis, SHARED with the offline driver ---
+        let tl = plan.timeline(rate)?;
+        let feature_cfg = &plan.feature_cfg;
+        let params = &tl.params;
+        let pipeline = FastPipeline::new(params, feature_cfg, rate)?;
+        let ssr = plan.ssr;
+        let ssif = tl.ssif;
+        let spectrum_shift_sec = tl.spectrum_shift_sec;
+        let (window_size, window_shift) = (tl.window_size, tl.window_shift);
+        let (time_step, time_offset) = (tl.time_step, tl.time_offset);
 
-        let ssr = spec.lstm_subsampling.iter().product::<usize>()
-            * spec.output_subsampling.iter().product::<usize>();
-        // `params.shift_frames` == round(shift_sec*rate) == the quantized spectrum shift in
-        // frames (`ssif`); `params.shift_sec` == ssif/rate (the offline driver's
-        // `spectrum_shift_sec` after its own re-quantization, tasks/sad.rs:290-291).
-        let ssif = params.shift_frames;
-        let spectrum_shift_sec = params.shift_sec;
-
-        // getBLSTMParam window/shift. `frame_count` is passed 0: only `real_vec_size`
-        // depends on it, and StreamOverlap derives its OWN output-row count (`total/ssr`)
-        // at flush -- the session never needs `real_vec_size`. window_size/window_shift/
-        // no_overlap are frame_count-independent.
-        let mut window_shift_sec = driver_cfg.window_shift_sec;
-        let (window_size, window_shift, no_overlap, _real_vec_size) = get_blstm_param(
-            driver_cfg.window_size_sec,
-            &mut window_shift_sec,
-            rate,
-            ssif,
-            ssr,
-            &spec.lstm_subsampling,
-            &spec.output_subsampling,
-            0,
-        );
-        // The windowing regime is TIED TO THE ARM, exactly as it is in the offline fast
-        // driver (`fast/driver.rs`'s `causal` dispatch):
-        //  - WINDOWED (phase 8): overlap only -- plain (window_size 0) and truncate
-        //    (window_shift < 1) typed-bail.
-        //  - CAUSAL (Task 7, spec S5.3): the PLAIN regime only. A causal cell inside a
-        //    window has its state RESET at every window boundary, and the streaming
-        //    session's whole premise is one unbroken carried state -- so a causal config
-        //    that resolves a nonzero window is refused STREAMING-side even though the
-        //    offline fast driver merely bails it too.
-        if causal {
-            if window_size != 0 {
-                bail!(
-                    "streaming: causal streaming requires the plain regime (BLSTM_window \
-                     resolves window_size {window_size}); a causal cell's state is reset at \
-                     every window boundary -- the phase-9 causal configs use BLSTM_window 0"
-                );
-            }
-        } else {
-            if window_size == 0 {
-                bail!(
-                    "streaming: the plain (non-windowed) forward is unsupported (BLSTM_window \
-                     resolves window_size 0); the gate config uses windowed overlap"
-                );
-            }
-            if no_overlap {
-                bail!(
-                    "streaming: the truncate (non-overlap) windowing is unsupported (window_shift \
-                     resolves < 1); the gate config uses overlap"
-                );
-            }
-        }
-
-        // timeStep/timeOffset (`tasks/sad.rs:1451-1461`, mirrored at
-        // `fast/driver.rs:530-534`): the BASE pair is `_WindowShift`-derived and the
-        // OVERLAP branch OVERRIDES it with `_SpectrumShift`. `window_size == 0` -- the
-        // causal regime -- keeps the base pair, where `window_shift_sec` is the value
-        // `get_blstm_param` just MUTATED (`window_shift * ssif / rate`, and `window_shift`
-        // is floored to 1 whenever `window_size == 0`).
-        let (time_step, time_offset) = if window_size > 0 {
-            let ts = spectrum_shift_sec * ssr as f64;
-            (ts, ts / 2.0 - spectrum_shift_sec / 2.0)
-        } else {
-            let ts = window_shift_sec * ssr as f64;
-            (ts, ts / 2.0 - window_shift_sec / 2.0)
-        };
-
-        // preemph/noise gates (the offline driver's, fast/driver.rs:296-301). Both no-ops on
-        // tier2 (preemph -0.97 <= 0, noise_seed -3 <= 0). The front-end gates preemph on
-        // `> 0.0` internally (passed the raw ratio); noise maps `noise_seed > 0 ?
-        // noise_ratio : 0.0`. THE TYPED BAIL (T2-review rider; T5-review promoted it from an
-        // assert! to a bail! for consistency with the four sibling construction bails): a
-        // seeding config (`noise_seed > 0`) with a NEGATIVE `noise_ratio` would make the
-        // offline `apply_noise(ratio)` (unconditional on the seed) and the front-end's
-        // `noise_magnitude > 0.0` gate DISAGREE in shape -- refused loudly here.
+        // preemph/noise gates (the offline driver's). Both no-ops on tier2 (preemph -0.97
+        // <= 0, noise_seed -3 <= 0). The front-end gates preemph on `> 0.0` internally
+        // (passed the raw ratio); noise maps `noise_seed > 0 ? noise_ratio : 0.0`. THE
+        // TYPED BAIL (T2-review rider; T5-review promoted it from an assert! to a bail! for
+        // consistency with the sibling construction bails): a seeding config (`noise_seed >
+        // 0`) with a NEGATIVE `noise_ratio` would make the offline `apply_noise(ratio)`
+        // (unconditional on the seed) and the front-end's `noise_magnitude > 0.0` gate
+        // DISAGREE in shape -- refused loudly here.
         let preemph = feature_cfg.preemph_ratio;
         let noise_magnitude = if feature_cfg.noise_seed > 0 {
             if feature_cfg.noise_ratio < 0.0 {
@@ -2246,27 +2147,16 @@ impl StreamingSession {
         };
 
         let front = StreamFrontEnd::new(
-            &params,
-            &feature_cfg,
+            params,
+            feature_cfg,
             rate,
             fixed_gain,
             noise_magnitude,
             preemph,
         )?;
-        let (output_size, norm_mean, norm_std) = match (&causal_net, &blstm_net) {
-            (Some(n), _) => (
-                n.output_size(),
-                n.normalize_mean().to_vec(),
-                n.normalize_std().to_vec(),
-            ),
-            (_, Some(n)) => (
-                n.output_size(),
-                n.normalize_mean().to_vec(),
-                n.normalize_std().to_vec(),
-            ),
-            // Unreachable: `shape` is a closed two-arm enum and each arm builds its net.
-            _ => unreachable!("one net arm is always built"),
-        };
+        let output_size = net.output_size();
+        let norm_mean = net.normalize_mean().to_vec();
+        let norm_std = net.normalize_std().to_vec();
         // Binary-SAD only: the decision layer reads posterior column 0 and the offline
         // `results.len()` == rows*cols tail quirk would differ for a wider posterior. Refuse
         // loudly at construction (the sibling of `StreamDecision::push_rows`' cols==1
@@ -2277,13 +2167,15 @@ impl StreamingSession {
                  {output_size} (the decision layer reads column 0 only)"
             );
         }
-        let nn = match (causal_net, blstm_net) {
-            (Some(n), _) => StreamNn::Causal(StreamCausal::new(n)),
-            (_, Some(net)) => StreamNn::Windowed {
+        // The plan's one `FastNet` unwrapped into the session's step-state arms; the
+        // bidirectional-cell arm bailed above.
+        let nn = match net {
+            FastNet::Causal(n) => StreamNn::Causal(StreamCausal::new(n)),
+            FastNet::Blstm(net) => StreamNn::Windowed {
                 overlap: StreamOverlap::new(window_size, window_shift, ssr, output_size),
                 net,
             },
-            _ => unreachable!("one net arm is always built"),
+            FastNet::BiCell(_) => unreachable!("bidirectional is unstreamable"),
         };
 
         // Derived latency components (config-derived; `derived_latency_bound_s` sums these +
@@ -2316,13 +2208,19 @@ impl StreamingSession {
         } else {
             0.0
         };
-        let conv_half = driver_cfg
+        let conv_half = plan
+            .driver_cfg
             .conv_coeff
             .as_deref()
             .map_or(0, |c| if c.len() > 1 { (c.len() - 1) / 2 } else { 0 });
         let conv_delay_s = conv_half as f64 * time_step;
 
-        let decision = StreamDecision::new(driver_cfg, seg_cfg, time_step, time_offset);
+        let decision = StreamDecision::new(
+            plan.driver_cfg.clone(),
+            plan.seg_cfg.clone(),
+            time_step,
+            time_offset,
+        );
 
         Ok(StreamingSession {
             front,

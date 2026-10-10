@@ -30,6 +30,16 @@ fn osub2_map(prefix: &str) -> IndexMap<String, String> {
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
     let mut map = speech::legacy_config::parse_legacy_config(&text);
     map.insert(format!("{prefix}_OutputSubSampling"), "2".into());
+    // The fast SAD driver is an algo-3 plan since issue #24 (`FastSadPlan::from_map`
+    // refuses any other `Algo_choice` and, rate-free, the truncate regime the Twin's
+    // `BLSTM_shift 0` resolves to -- refusals the pre-#24 driver raised only at the first
+    // `get_segmentation`, which this test never reaches). The exact SAD driver reads
+    // neither at construction, so the BLSTM row runs both trees on one map under algo 3
+    // and an overlap shift; the pack length depends on neither key.
+    if prefix == "BLSTM" {
+        map.insert("Algo_choice".into(), "3".into());
+        map.insert("BLSTM_shift".into(), "0.8".into());
+    }
     map
 }
 

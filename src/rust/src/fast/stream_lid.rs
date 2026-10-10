@@ -25,7 +25,7 @@
 //! a bidirectional LID net is as streamable here as a causal one -- ADR-0004's "a bidirectional
 //! net is refused at session construction" is a statement about the FRAME stream
 //! (`fast::stream`), and its dated amendment names this session as the exception. Whatever
-//! (cell x direction) shape the offline `FastTwinLid` builds (`fast::driver::FastLidNet`),
+//! (cell x direction) shape the offline `FastTwinLid` builds (`fast::driver::FastNet`),
 //! this session runs, prefix-correct after every push and bit-equal to the offline run on
 //! `finish` (`tests/phase8_stream_lid.rs`'s matrix legs). A frame-granular LID emission model
 //! would be its own issue.

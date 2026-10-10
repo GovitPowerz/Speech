@@ -838,7 +838,7 @@ pub(crate) fn sub_sample_into(
 
 /// Extract rows `[start, end)` of a row-major FastMatrix as an owned copy (the
 /// Task-5 truncate windows + sweep input slices; `pub(super)` for the Twin's LID sweep,
-/// `fast::driver::FastLidNet::truncate_forward`).
+/// `fast::driver::FastNet::truncate_forward`).
 pub(super) fn slice_rows_f32(m: &FastMatrix, start: usize, end: usize) -> FastMatrix {
     let c = m.cols;
     FastMatrix {
