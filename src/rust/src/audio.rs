@@ -237,7 +237,7 @@ pub(crate) fn conv_at(src: &[f64], src_base: usize, ii: usize, len: usize, coeff
 /// a plain slice. Edge positions truncate the kernel without renormalizing (missing
 /// taps are simply dropped, not redistributed) -- a load-bearing legacy quirk. The
 /// natural fit for `results_to_segmentation`/spectral/LTSV/TDC, which hold `Vec`
-/// results rather than an `Array2` row. The per-output arithmetic is [`conv_at`].
+/// results rather than an `Array2` row. The per-output arithmetic is `conv_at`.
 pub fn convolution_horiz_slice(row: &mut [f64], coeffs: &[f64]) {
     let cols = row.len();
     let copy: Vec<f64> = row.to_vec();

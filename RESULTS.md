@@ -3282,7 +3282,7 @@ batch function a fold over `push` + `flush_tail`; `audio::conv_at` (commit `582b
 `convolution_horiz_slice` on its snapshot and by `ConvStream` on its ring -- and the stream drives
 the same struct and the same function. The move is an ADR-0002 touch class, the stepwise hoist;
 ADR-0004's "one kernel, two drivers" now covers the decision layer. Proof of the move: cargo
-1360 passed, 0 failed at the branch head (1359 before the pin below was added) (`cargo test --release --workspace --no-fail-fast`;
+1361 passed, 0 failed at the branch head (1359 before the two pins below were added) (`cargo test --release --workspace --no-fail-fast`;
 the `speech-py --lib` target aborts at dyld on this box before any test runs, a pre-existing
 host linkage issue reproduced on `main`, not a test), the goldens byte-green and the one
 batch-vs-stream leg, `phase8_stream_decision.rs::raw_hysteresis_matches_offline`, passing
@@ -3321,4 +3321,8 @@ batch fold never reads `pending_begin`, so no golden pinned its value; before #2
 rising crossing at `off = 0.015` and asserts, to the bit, that the pending begin equals
 `dt / 2 + off` and then equals the labeled segment's own `begin` on the closing push. Re-run under
 both item-4 mutations: CAUGHT (`left: 4581421828931458171`, `right: 4585204852618449388` for the
-dropped `off`; `left: 4587366580439587226` for the doubled one).
+dropped `off`; `left: 4587366580439587226` for the doubled one). A second pin,
+`hyst_step_pending_begin_init_seed_and_tail_flush`, owns the two candidate sites the first does not
+reach: the INIT seed at `begin == 0.0` exactly (CAUGHT under `pending_begin`'s `>=` mutated to `>`)
+and the tail flush, which now clears the candidate so `pending_begin` is `None` after EOS (CAUGHT
+with the clear reverted).

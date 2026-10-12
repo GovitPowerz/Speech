@@ -35,8 +35,11 @@ one per-output body, `audio::conv_at`, which `convolution_horiz_slice` calls on 
 both, held equal by one test; now the self-consistent leg
 (`phase8_stream_decision.rs::raw_hysteresis_matches_offline`) pins state threading only, per
 ADR-0005's battery lesson, and the arithmetic has exactly the owners the exact tree always had (the
-Phase 0b-ii golden, the numpy oracle, the Phase 1 audio goldens). The move is an ADR-0002 touch
-class, the stepwise hoist.
+Phase 0b-ii golden, the numpy oracle, the Phase 1 audio goldens), except the two terms only the
+stream reads: `pending_begin`'s `+ off` (pinned by
+`phase0bii_segmenter.rs::hyst_step_pending_begin_is_the_labeled_begin_in_audio_time`) and
+`conv_at`'s `src_base` (the batch passes 0; the trimming stream legs own it). The move is an
+ADR-0002 touch class, the stepwise hoist.
 
 **Emission is settled-prefix only, with zero retractions.** The decision layer emits a segment
 only once nothing in the future can change it: the frontier is bounded by the last raw boundary,

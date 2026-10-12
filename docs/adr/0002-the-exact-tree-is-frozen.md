@@ -36,7 +36,7 @@ errors where the legacy aborted, silently dropped or truncated, issue #50; the t
 result: the result row's 18+N layout owned by one `engine/` type, `engine/channel_result.rs`,
 with `to_row()` the only writer and the in-band LID target decoded once at the bag, proven
 byte-identical by the `.mat` goldens and the seam cross-pin, issue #23; the pack-count guard: `engine/bag_of_processors.rs::set_weights` sizes the list against the arm's `net_count` before indexing it, so a short list is a refusal naming both counts instead of a panic and a long one is no longer truncated in silence, algo 0/1/2 inert at any length, issue #60; the stepwise hoist: a per-step loop body moved into a
-state struct in the same module, the batch function becoming the fold over it, proven by the
+state struct (or a stateless per-output function) in the same module, the batch function becoming the fold over it, proven by the
 committed goldens byte-green AND the pre-existing bit-equality leg passing UNMODIFIED through the
 move -- `tasks/segmenter.rs::HystStep` under `update_segmentation_raw` (commit `476ffec`) and
 `audio.rs::conv_at` under `convolution_horiz_slice` (commit `582b8a7`), the streaming session

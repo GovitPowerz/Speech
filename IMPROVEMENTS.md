@@ -5571,7 +5571,7 @@ it is now a real reader; the other three remain blocked. See its flipped entry b
   above (the chosen Rust strategy: file `j` -> lane `j % N`, ascending-lane fold; N=1 is the
   golden-pinned legacy-sequential parity mode).
 - **[phase8 -> phase9] Provisional-begin peek: bound the SILENCE-class streaming latency to the
-  structural floor** (`fast/stream.rs`, `StreamDecision`/`HystState`). The Task-5 consumed-frontier
+  structural floor** (`fast/stream.rs`, `StreamDecision`; the hysteresis is `tasks/segmenter.rs::HystStep` since issue #26). The Task-5 consumed-frontier
   trigger delivers the SPEECH class within the derived structural bound (~6.05 s), but an OTHER
   (silence) segment still commits only at its FOLLOWING speech's falling edge -- its right boundary
   IS that speech's onset -- so its latency is the following speech's DURATION + the forward pipeline
@@ -5582,7 +5582,7 @@ it is now a real reader; the other three remain blocked. See its flipped entry b
   truly causal): emit a PROVISIONAL silence-close as soon as the hysteresis has LATCHED a pending
   open Speech segment (`has_begun == true`), reading its recorded `begin` as the silence's
   provisional right boundary. The T5 re-review's finding: `HystState.begin`/`begin_area` are
-  UNTOUCHED once `has_begun` latches (`fast/stream.rs:685-697`), so the peeked value is STABLE
+  UNTOUCHED once `has_begun` latches (now `HystStep::push`), so the peeked value is STABLE
   (lower-risk than an in-flight read presumed), and the silence-class lag would drop to ~the
   structural bound. Deferred, not implemented: it introduces PROVISIONAL (revisable-until-committed)
   emission semantics the current bit-exact-FINAL contract does not have, so it is a phase-9 design

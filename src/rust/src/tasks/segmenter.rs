@@ -440,13 +440,19 @@ impl HystStep {
 
     /// The tail force-emit: if a segment is still open at EOS, close it at
     /// `dt * results.len()` (== `dt * idx`, since every convolved value has been fed).
+    /// EOS closes the open segment or drops a tentative one, so no candidate survives it:
+    /// [`pending_begin`](Self::pending_begin) is `None` afterwards.
     pub fn flush_tail(&mut self) -> Option<(f64, f64)> {
-        if self.has_begun {
+        let tail = if self.has_begun {
             let end = self.dt * self.idx as f64;
-            self.has_begun = false;
-            return Some((self.begin + self.off, end + self.off));
-        }
-        None
+            Some((self.begin + self.off, end + self.off))
+        } else {
+            None
+        };
+        self.begin = -1.0;
+        self.begin_area = -1.0;
+        self.has_begun = false;
+        tail
     }
 }
 

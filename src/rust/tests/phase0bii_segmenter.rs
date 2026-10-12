@@ -230,3 +230,19 @@ fn hyst_step_pending_begin_is_the_labeled_begin_in_audio_time() {
     assert_eq!(begin.to_bits(), pending.to_bits());
     assert_eq!(step.pending_begin(), None, "closed: no candidate");
 }
+
+/// The INIT seed is the one candidate at `begin == 0.0` exactly (the `>=` edge of
+/// `pending_begin`), and the tail flush is the one close outside `push`'s label site.
+#[test]
+fn hyst_step_pending_begin_init_seed_and_tail_flush() {
+    let cfg = cfg_no_smooth();
+    let (off, dt) = (0.015, 0.04);
+    let mut step = HystStep::new(&cfg, off, dt);
+    assert_eq!(step.push(1.0), None);
+    assert_eq!(step.pending_begin().map(f64::to_bits), Some(off.to_bits()));
+    assert_eq!(step.push(1.0), None);
+    let (begin, end) = step.flush_tail().expect("open at EOS: the tail closes it");
+    assert_eq!(begin.to_bits(), off.to_bits());
+    assert_eq!(end.to_bits(), (dt * 2.0 + off).to_bits());
+    assert_eq!(step.pending_begin(), None, "flushed: no candidate");
+}
