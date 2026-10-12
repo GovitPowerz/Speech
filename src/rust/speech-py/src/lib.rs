@@ -13,7 +13,7 @@
 
 use indexmap::IndexMap;
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, ToPyArray};
-use pyo3::exceptions::{PyIndexError, PyRuntimeError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -22,6 +22,7 @@ use speech::engine::corpus_processor::CorpusProcessor;
 use speech::fast::stream::{EmittedSegment, StreamingSession as RsStreamingSession};
 use speech::fast::stream_lid::{LidAggregate, StreamingLidSession as RsStreamingLidSession};
 use speech::legacy_config::parse_legacy_config as parse_legacy_config_rs;
+use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 use speech::stream_cli::class_str;
 use speech::toml_config::toml_to_map as toml_to_map_rs;
 
@@ -107,6 +108,48 @@ fn load_toml_config<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyD
         dict.set_item(k, v)?;
     }
     Ok(dict)
+}
+
+/// The weight layout of the `prefix` net a config map describes (issue #27): one dict per
+/// block, in `BlstmNetwork::set_weights` order, with `stack` (`forward` / `backward` /
+/// `output` / `tail`), `layer`, `name`, `kind` (`weight` / `bias` / `gain` / `peephole` /
+/// `stat`), `shape` (the row-major storage shape), `fan_in`, `fan_out` (the structural fans
+/// of the block's linear map), `offset`, `len`, and `columns` (the 12 names) on the LSTM
+/// peephole bundle only. Computed by building the net from the map, so the resolved
+/// geometry (`dt_rank` auto, the Mamba adapter, the sub-sampled fan-ins) is the engine's
+/// own; no corpus or file is touched. A config the engine refuses (an unknown cell, an
+/// invalid geometry, a mismatched output width) raises `ValueError` with the engine's
+/// message -- never a default (ADR-0006). `init_weights.py` draws per record off this;
+/// the Twin's caller calls it once per prefix.
+#[pyfunction]
+fn weight_layout<'py>(
+    py: Python<'py>,
+    config: &Bound<'_, PyDict>,
+    prefix: &str,
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    let map = dict_to_map(config)?;
+    let cfg = BlstmConfig::from_legacy(&map, prefix)
+        .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
+    let layout = BlstmNetwork::weight_layout_of(&cfg)
+        .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
+    let mut out = Vec::with_capacity(layout.len());
+    for b in layout {
+        let d = PyDict::new(py);
+        d.set_item("stack", b.stack.as_str())?;
+        d.set_item("layer", b.layer)?;
+        d.set_item("name", &b.block.name)?;
+        d.set_item("kind", b.block.kind.as_str())?;
+        d.set_item("shape", &b.block.shape)?;
+        d.set_item("fan_in", b.block.fan_in)?;
+        d.set_item("fan_out", b.block.fan_out)?;
+        d.set_item("offset", b.offset)?;
+        d.set_item("len", b.len())?;
+        if let Some(cols) = &b.block.columns {
+            d.set_item("columns", cols)?;
+        }
+        out.push(d);
+    }
+    Ok(out)
 }
 
 /// The coarse corpus-level engine: a `CorpusProcessor` behind the legacy
@@ -546,6 +589,7 @@ fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(parse_legacy_config, m)?)?;
     m.add_function(wrap_pyfunction!(load_toml_config, m)?)?;
+    m.add_function(wrap_pyfunction!(weight_layout, m)?)?;
     m.add_class::<Engine>()?;
     m.add_class::<StreamingSession>()?;
     m.add_class::<StreamingLidSession>()?;
