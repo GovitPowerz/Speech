@@ -1,6 +1,6 @@
 # ADR-0005: The recurrent cell is the extension seam; a new architecture is one enum variant and nothing outside it
 
-**Status:** accepted | **Date:** 2026-07-31 (Phase 9, PR #15); totality of the fast matrix 2026-08-11 (Phase 10); fifth cell 2026-08-12 (Phase 11); totality extended to the Twin's LID net 2026-10-09 (issue #57)
+**Status:** accepted | **Date:** 2026-07-31 (Phase 9, PR #15); totality of the fast matrix 2026-08-11 (Phase 10); fifth cell 2026-08-12 (Phase 11); totality extended to the Twin's LID net 2026-10-09 (issue #57); the layout moved across the seam 2026-10-12 (issue #27)
 
 ## Context
 
@@ -14,8 +14,9 @@ seam, scoring and the training loop, all golden-pinned.
 
 **The cut is at the layer.** `nn/cells/` holds a **closed enum** `CellLayer` implementing
 `Layer` by match delegation; `BlstmNetwork`'s two stacks are `Network<CellLayer>`. A new cell is:
-a variant, a `Layer` impl inside `cells/`, an `init_weights.py` builder emitting the same flat
-order, its `KEY_TABLE` rows, and both f32 twins (`fast/cells.rs` causal, `fast/bicell.rs`
+a variant, a `Layer` impl inside `cells/` carrying its `weight_layout()` (the blocks its
+`set_weights` consumes, at their shapes and fans), an `init_weights.py` draw rule per block kind
+with exceptions by name, its `KEY_TABLE` rows, and both f32 twins (`fast/cells.rs` causal, `fast/bicell.rs`
 bidirectional). The exhaustive `match` in `from_config` and in `cell_weight_count` makes a
 missing arm a **compile error**, so the fast (cell x direction) matrix is total by construction.
 `Direction` (`bidirectional` / `forward`) is the one companion axis, read at the same seam.
@@ -32,6 +33,10 @@ identity, a streaming row at bit-equality, and a from-scratch subset gate.
 - `train_modern`, batching, the windowed drivers and the flat-weight seam never learn the cell
   type; Phase 9 needed zero changes to the training loop, and the fifth cell's streaming row
   needed zero `src/` edits.
+- Since issue #27 the LAYOUT facts (block order, shapes, fans, offsets) live in Rust alone:
+  Python reads them through `speech_rs.weight_layout` and keeps the distributions; a new cell
+  adds no Python geometry, and the committed seed packs regenerate byte-identical through the
+  seam (`tests/test_seed_pack_regeneration.py`).
 - Per-cell numeric conventions are declared, not hidden: the softmax in the transformer always
   max-subtracts (the f32 twin needs the headroom), CfC runs under a constant-step reduction, the
   sLSTM running-max stabilizer is held constant in the backward because the output is invariant
