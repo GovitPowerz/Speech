@@ -126,6 +126,7 @@ use ndarray::Array2;
 
 use super::super::activations::logistic_fn;
 use super::super::layers::matmul_seq;
+use super::super::layout::{BlockKind, LayerBlock};
 use super::super::network::Layer;
 
 /// `m_{-1}` (spec S2.4): a documented finite constant standing in for `-inf`. Chosen
@@ -294,6 +295,42 @@ impl SlstmLayer {
             };
             out.push(m[[r, c]]);
         });
+    }
+
+    /// The 12 blocks [`for_each_slot`] visits, in order (issue #27): per gate `a` in
+    /// `[i, f, o, z]`, `R_a (out, out)`, `W_a (out, in)`, `b_a (out)`. `R` and `W` feed
+    /// ONE summed pre-activation, so every block carries `fan_in = in + out`,
+    /// `fan_out = out` (the legacy LSTM convention). Introspection only (ADR-0002).
+    pub fn weight_layout(&self) -> Vec<LayerBlock> {
+        let (i, o) = (self.input_size, self.output_size);
+        let (fi, fo) = (i + o, o);
+        let mut v = Vec::with_capacity(3 * GATE_NB);
+        for a in ["i", "f", "o", "z"] {
+            v.push(LayerBlock::matrix(
+                format!("R_{a}"),
+                BlockKind::Weight,
+                o,
+                o,
+                fi,
+                fo,
+            ));
+            v.push(LayerBlock::matrix(
+                format!("W_{a}"),
+                BlockKind::Weight,
+                o,
+                i,
+                fi,
+                fo,
+            ));
+            v.push(LayerBlock::vector(
+                format!("b_{a}"),
+                BlockKind::Bias,
+                o,
+                fi,
+                fo,
+            ));
+        }
+        v
     }
 
     /// Nx2 `[summed deriv | frame count]` harvest in the SAME S2.2 order, so row `k`
@@ -683,6 +720,7 @@ impl Layer for SlstmLayer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::layout::block_ranges;
     use super::*;
 
     const I: usize = 3;
@@ -727,24 +765,35 @@ mod tests {
         }
     }
 
+    /// `(lo, hi)` of a named block of the PRODUCTION layout (issue #27).
+    fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
+        let (_, r) = blocks
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no block {name}"));
+        (r.start, r.end)
+    }
+
     /// The flat layout is `[i|f|o|z]` gate blocks, each `[R | W | b]` ROW-major --
-    /// checked positionally, not just by round trip (a round trip alone would pass
-    /// on any self-consistent permutation).
+    /// checked positionally with a one-hot probe per element, placed where the
+    /// PRODUCTION `weight_layout` says (issue #27), not just by round trip (a round trip
+    /// alone would pass on any self-consistent permutation).
     #[test]
     fn flat_layout_positions_are_the_spec_order() {
         let (i, o) = (3usize, 2usize);
         let mut cell = SlstmLayer::new(i, o);
         let n = cell.nb_of_weights();
-        // A one-hot probe per position tells us exactly which matrix cell it lands in.
-        let block = o * o + o * i + o; // per-gate stride
-        assert_eq!(n, 4 * block);
+        let layout = cell.weight_layout();
+        assert_eq!(layout.iter().map(LayerBlock::len).sum::<usize>(), n);
+        let blocks = block_ranges(&layout);
         for (gate, name) in [(0usize, "i"), (1, "f"), (2, "o"), (3, "z")] {
-            let base = gate * block;
-            // R_a row-major: element (j, k) at base + j*o + k -> feedback[[k, a*o+j]].
+            // R_a row-major: element (j, k) at lo + j*o + k -> feedback[[k, a*o+j]].
+            let (lo, hi) = block(&blocks, &format!("R_{name}"));
+            assert_eq!(hi - lo, o * o);
             for j in 0..o {
                 for k in 0..o {
                     let mut flat = vec![0.0; n];
-                    flat[base + j * o + k] = 1.0;
+                    flat[lo + j * o + k] = 1.0;
                     cell.set_weights(&flat);
                     assert_eq!(
                         cell.feedback_weights[[k, gate * o + j]],
@@ -753,11 +802,13 @@ mod tests {
                     );
                 }
             }
-            // W_a row-major: element (j, k) at base + o*o + j*i + k -> input[[k, a*o+j]].
+            // W_a row-major: element (j, k) at lo + j*i + k -> input[[k, a*o+j]].
+            let (lo, hi) = block(&blocks, &format!("W_{name}"));
+            assert_eq!(hi - lo, o * i);
             for j in 0..o {
                 for k in 0..i {
                     let mut flat = vec![0.0; n];
-                    flat[base + o * o + j * i + k] = 1.0;
+                    flat[lo + j * i + k] = 1.0;
                     cell.set_weights(&flat);
                     assert_eq!(
                         cell.input_weights[[k, gate * o + j]],
@@ -766,10 +817,12 @@ mod tests {
                     );
                 }
             }
-            // b_a: element j at base + o*o + o*i + j.
+            // b_a: element j at lo + j.
+            let (lo, hi) = block(&blocks, &format!("b_{name}"));
+            assert_eq!(hi - lo, o);
             for j in 0..o {
                 let mut flat = vec![0.0; n];
-                flat[base + o * o + o * i + j] = 1.0;
+                flat[lo + j] = 1.0;
                 cell.set_weights(&flat);
                 assert_eq!(
                     cell.biases[[0, gate * o + j]],
@@ -778,6 +831,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The layout record itself (issue #27): `R_a | W_a | b_a` per gate in `[i|f|o|z]`
+    /// order, every block on the combined `in + out` fan-in.
+    #[test]
+    fn weight_layout_names_shapes_and_fans() {
+        let (i, o) = (3usize, 2usize);
+        let got: Vec<(String, BlockKind, Vec<usize>, usize, usize)> = SlstmLayer::new(i, o)
+            .weight_layout()
+            .into_iter()
+            .map(|x| (x.name, x.kind, x.shape, x.fan_in, x.fan_out))
+            .collect();
+        let mut want = Vec::new();
+        for a in ["i", "f", "o", "z"] {
+            want.push((format!("R_{a}"), BlockKind::Weight, vec![o, o], i + o, o));
+            want.push((format!("W_{a}"), BlockKind::Weight, vec![o, i], i + o, o));
+            want.push((format!("b_{a}"), BlockKind::Bias, vec![o], i + o, o));
+        }
+        assert_eq!(got, want);
     }
 
     #[test]

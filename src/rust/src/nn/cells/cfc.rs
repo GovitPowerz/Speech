@@ -118,6 +118,7 @@ use ndarray::Array2;
 
 use super::super::activations::logistic_fn;
 use super::super::layers::matmul_seq;
+use super::super::layout::{BlockKind, LayerBlock};
 use super::super::network::Layer;
 
 /// LeCun-tanh amplitude (spec S1.1). The literal `1.7159` of the classic
@@ -377,6 +378,58 @@ impl CfcLayer {
                 });
             },
         );
+    }
+
+    /// The blocks [`for_each_slot`] visits, in order (issue #27), at their MATH shapes:
+    /// per backbone layer `l`, `W_bb{l}` (`(B, in + H)` at `l = 0`, `(B, B)` deeper) and
+    /// `b_bb{l}`; then the three heads `W_ff1 | b_ff1 | W_ff2 | b_ff2 | W_g | b_g`, each
+    /// `(H, B)` plus `H`. Layer 0 reads the CONCATENATED `[x | h_{t-1}]`, so its fan-in is
+    /// the matrix's own width `in + H`; the heads do not share a fan. Introspection only
+    /// (ADR-0002).
+    pub fn weight_layout(&self) -> Vec<LayerBlock> {
+        let (i, h, b, l) = (
+            self.input_size,
+            self.output_size,
+            self.backbone_units,
+            self.backbone_layers,
+        );
+        let mut v = Vec::with_capacity(2 * l + 2 * HEAD_NB);
+        for li in 0..l {
+            let fan_in = if li == 0 { i + h } else { b };
+            v.push(LayerBlock::matrix(
+                format!("W_bb{li}"),
+                BlockKind::Weight,
+                b,
+                fan_in,
+                fan_in,
+                b,
+            ));
+            v.push(LayerBlock::vector(
+                format!("b_bb{li}"),
+                BlockKind::Bias,
+                b,
+                fan_in,
+                b,
+            ));
+        }
+        for head in ["ff1", "ff2", "g"] {
+            v.push(LayerBlock::matrix(
+                format!("W_{head}"),
+                BlockKind::Weight,
+                h,
+                b,
+                b,
+                h,
+            ));
+            v.push(LayerBlock::vector(
+                format!("b_{head}"),
+                BlockKind::Bias,
+                h,
+                b,
+                h,
+            ));
+        }
+        v
     }
 
     /// Nx2 `[summed deriv | frame count]` harvest in the SAME S1.2 order, so row `k`
@@ -769,6 +822,7 @@ impl Layer for CfcLayer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::layout::block_ranges;
     use super::*;
 
     const I: usize = 3;
@@ -802,30 +856,24 @@ mod tests {
         out
     }
 
-    /// An INDEPENDENT transcription of the S1.2 block order: `(name, start offset)`
-    /// pairs plus a terminal `END`, so a block's `[lo, hi)` range comes from this
-    /// table and not from the walk under test.
-    fn offsets(i: usize, o: usize, b: usize, l: usize) -> Vec<(String, usize)> {
-        let mut v = Vec::new();
-        let mut p = 0usize;
-        for li in 0..l {
-            let fan_in = if li == 0 { i + o } else { b };
-            v.push((format!("W_bb{li}"), p));
-            p += b * fan_in;
-            v.push((format!("b_bb{li}"), p));
-            p += b;
-        }
-        for name in ["W_1", "b_1", "W_2", "b_2", "W_t", "b_t"] {
-            v.push((name.to_string(), p));
-            p += if name.starts_with('W') { o * b } else { o };
-        }
-        v.push(("END".to_string(), p));
-        v
+    /// `(lo, hi)` of a named block of the PRODUCTION layout (issue #27): the one-hot
+    /// probes below assert `set_weights` lands every element where the layout says.
+    fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
+        let (_, r) = blocks
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no block {name}"));
+        (r.start, r.end)
     }
 
-    fn block(blocks: &[(String, usize)], name: &str) -> (usize, usize) {
-        let k = blocks.iter().position(|(n, _)| n == name).unwrap();
-        (blocks[k].1, blocks[k + 1].1)
+    fn layout_len(cell: &CfcLayer) -> usize {
+        cell.weight_layout().iter().map(LayerBlock::len).sum()
+    }
+
+    /// The production layout's block ranges at a geometry (the legs below slice packs by
+    /// block name through it).
+    fn offsets(i: usize, o: usize, b: usize, l: usize) -> Vec<(String, std::ops::Range<usize>)> {
+        block_ranges(&CfcLayer::new(i, o, b, l).weight_layout())
     }
 
     fn derivs(cell: &CfcLayer) -> Vec<f64> {
@@ -849,10 +897,9 @@ mod tests {
                 b * (i + o + 1) + (l - 1) * b * (b + 1) + 3 * o * (b + 1),
                 "in={i} out={o} B={b} L={l}"
             );
-            // The independent offset table must agree with the formula.
-            let blocks = offsets(i, o, b, l);
+            // The layout tiles the pack: `sum(len) == nb_of_weights`.
             assert_eq!(
-                blocks.last().unwrap().1,
+                layout_len(&CfcLayer::new(i, o, b, l)),
                 CfcLayer::new(i, o, b, l).nb_of_weights()
             );
         }
@@ -866,7 +913,7 @@ mod tests {
         let (i, o, b, l) = (3usize, 2usize, 4usize, 2usize);
         let mut cell = CfcLayer::new(i, o, b, l);
         let n = cell.nb_of_weights();
-        let blocks = offsets(i, o, b, l);
+        let blocks = block_ranges(&cell.weight_layout());
 
         for li in 0..l {
             let fan_in = if li == 0 { i + o } else { b };
@@ -896,7 +943,7 @@ mod tests {
             }
         }
 
-        for (blk, (wn, bn)) in [("W_1", "b_1"), ("W_2", "b_2"), ("W_t", "b_t")]
+        for (blk, (wn, bn)) in [("W_ff1", "b_ff1"), ("W_ff2", "b_ff2"), ("W_g", "b_g")]
             .into_iter()
             .enumerate()
         {
@@ -925,6 +972,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The layout record itself (issue #27): names in S1.2 order, math shapes, the
+    /// concatenated layer-0 fan-in, the unshared head fans, biases carrying their map's.
+    #[test]
+    fn weight_layout_names_shapes_and_fans() {
+        let (i, o, b, l) = (3usize, 2usize, 4usize, 2usize);
+        let got: Vec<(String, BlockKind, Vec<usize>, usize, usize)> = CfcLayer::new(i, o, b, l)
+            .weight_layout()
+            .into_iter()
+            .map(|x| (x.name, x.kind, x.shape, x.fan_in, x.fan_out))
+            .collect();
+        let m = |n: &str, r, c, fi, fo| (n.to_string(), BlockKind::Weight, vec![r, c], fi, fo);
+        let v = |n: &str, k, fi, fo| (n.to_string(), BlockKind::Bias, vec![k], fi, fo);
+        assert_eq!(
+            got,
+            vec![
+                m("W_bb0", b, i + o, i + o, b),
+                v("b_bb0", b, i + o, b),
+                m("W_bb1", b, b, b, b),
+                v("b_bb1", b, b, b),
+                m("W_ff1", o, b, b, o),
+                v("b_ff1", o, b, o),
+                m("W_ff2", o, b, b, o),
+                v("b_ff2", o, b, o),
+                m("W_g", o, b, b, o),
+                v("b_g", o, b, o),
+            ]
+        );
     }
 
     #[test]
@@ -1061,7 +1137,7 @@ mod tests {
     fn the_gate_interpolates_between_the_two_heads() {
         let (i, o, b, l) = (2usize, 2usize, 3usize, 1usize);
         let blocks = offsets(i, o, b, l);
-        let (gate_bias_lo, _) = block(&blocks, "b_t");
+        let (gate_bias_lo, _) = block(&blocks, "b_g");
         let base = weights(CfcLayer::new(i, o, b, l).nb_of_weights());
         let input = seq(5, i, 0.3);
 

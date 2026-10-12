@@ -61,6 +61,7 @@ pub use slstm::SlstmLayer;
 pub use transformer::TransformerLayer;
 
 use super::layers::LstmLayer;
+use super::layout::LayerBlock;
 use super::network::Layer;
 
 /// The recurrent cell a `Network<CellLayer>` stacks. One variant per architecture;
@@ -128,6 +129,20 @@ impl CellLayer {
             CellLayer::Lstm(_) | CellLayer::Slstm(_) | CellLayer::Cfc(_) => {}
             CellLayer::Mamba(l) => l.set_retain_cache(retain),
             CellLayer::Transformer(l) => l.set_retain_cache(retain),
+        }
+    }
+
+    /// The cell's weight-layout blocks (issue #27), in the order its `set_weights`
+    /// consumes them -- an INHERENT method like `set_retain_cache`, not a `Layer` method:
+    /// the trait stays the ten the seam defined, and the exhaustive match here is what
+    /// makes a sixth cell declare its layout the day it declares its arms.
+    pub fn weight_layout(&self) -> Vec<LayerBlock> {
+        match self {
+            CellLayer::Lstm(l) => l.weight_layout(),
+            CellLayer::Slstm(l) => l.weight_layout(),
+            CellLayer::Mamba(l) => l.weight_layout(),
+            CellLayer::Cfc(l) => l.weight_layout(),
+            CellLayer::Transformer(l) => l.weight_layout(),
         }
     }
 }
