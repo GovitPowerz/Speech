@@ -449,6 +449,7 @@ impl HystStep {
         None
     }
 }
+
 /// The RAW hysteresis-with-area decision over the ROW vector `results`, WITHOUT
 /// smoothing. Returns the pre-smoothing, pre-sanitize labeled segments as
 /// `(begin + off, end + off, class as i32)`, one entry per legacy
