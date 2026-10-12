@@ -150,7 +150,7 @@ GEOMETRY = cast(dict[str, int], MANIFEST["geometry"])
 # The manifest carries the epsilons + `max_weights` every pin below was measured at, and it
 # is the one committed file its own per-file digest table cannot cover. Pinned here instead
 # (T5 review I3) so a manifest edit cannot silently move a tolerance's operating point.
-MANIFEST_SHA256 = "e1b3c47829ec83d57384f31540b1311ade7ff93c847262bcc9e2b7e337efbe25"
+MANIFEST_SHA256 = "d404102907fa4b889b01de319ffb7c0ee794f8f3e37703f19dba81108b29bd8f"
 
 # The port-only cells' SAD fixtures -- the ones this file's `grad_check` tier exists for.
 # `lstm_forward` (phase-10 Task 8) is IN the manifest but deliberately NOT here: the
