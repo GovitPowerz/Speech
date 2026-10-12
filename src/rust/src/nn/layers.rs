@@ -1224,16 +1224,8 @@ impl NeuronLayer {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::super::layout::block_ranges;
+    use super::super::layout::test_support::{block, block_ranges};
     use super::*;
-
-    fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
-        let (_, r) = blocks
-            .iter()
-            .find(|(n, _)| n == name)
-            .unwrap_or_else(|| panic!("no block {name}"));
-        (r.start, r.end)
-    }
 
     /// The 13 LSTM blocks sit where `set_weights`' column-major fills put them (issue
     /// #27): `w.g[j, k]` at `input_weights[[k, g*O + j]]`, `r.g[j, k]` at
@@ -1328,10 +1320,18 @@ mod layout_tests {
         }
         let peep = &layout[8];
         assert_eq!(peep.columns.as_deref(), Some(&PEEPHOLE_COLUMNS[..]));
-        assert_eq!(PEEPHOLE_COLUMNS.len(), 12);
-        // Rows 0-2 peek the cell state, one per gate; the rest peek gate values.
-        assert_eq!(&PEEPHOLE_COLUMNS[..3], &["i.cell", "f.cell", "o.cell"]);
-        assert!(PEEPHOLE_COLUMNS[3..].iter().all(|c| !c.ends_with(".cell")));
+        // The 12 names in `peep_weight` ROW order, the forward's reads (`feed_forward`,
+        // rows 0-2 the cell state, 3-11 gate values): pinned as a list because the init
+        // scatters each gate's three gate-peephole draws by the gate PREFIX alone, so a
+        // permutation of two names inside one gate changes no byte anywhere (the #27
+        // battery's item 2b) -- this list is the one place the row semantics are recorded.
+        assert_eq!(
+            PEEPHOLE_COLUMNS,
+            [
+                "i.cell", "f.cell", "o.cell", "i.i_prev", "i.f_prev", "i.o_prev", "f.i_prev",
+                "f.f_prev", "f.o_prev", "o.i", "o.f", "o.o_prev"
+            ]
+        );
     }
 
     /// The output layer: `W (out, in)` filled column-major is `weights[[k, j]]` at

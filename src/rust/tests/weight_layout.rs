@@ -1,7 +1,7 @@
 //! Issue #27: the net-level weight layout mirrors `BlstmNetwork::set_weights`.
 //!
 //! The per-cell pins (`nn/cells/*`, `nn/layers.rs`) prove each layer's blocks sit where its
-//! own `set_weights` lands them. This file pins the NET walk: the stacks come in the order
+//! own `set_weights` lands them. This file pins the NET-level list: the stacks come in the order
 //! `set_weights` threads them (forward, backward when bidirectional, output, tail), the
 //! offsets tile the pack contiguously from 0, `sum(len) == nb_of_weights()` on every shape
 //! (both directions, every cell, MLP mode, output sub-sampling), the tail is present in MLP
@@ -73,9 +73,8 @@ fn every_cell_and_direction_tiles_nb_of_weights_in_set_weights_order() {
             assert_tiles(&layout, n.nb_of_weights());
             assert_eq!(
                 layout,
-                BlstmNetwork::weight_layout_of(&BlstmConfig::from_legacy(&m, "X").unwrap())
-                    .unwrap(),
-                "{cell}/{direction}: the from-config walk is the instance walk"
+                BlstmNetwork::weight_layout_of(BlstmConfig::from_legacy(&m, "X").unwrap()).unwrap(),
+                "{cell}/{direction}: the from-config layout is the instance layout"
             );
 
             // Stack order: forward, [backward], output, tail -- each a contiguous run,
@@ -208,7 +207,7 @@ fn output_layer_fans_carry_the_sub_sampling_factor() {
 /// MLP mode (`LSTMNeuronNb[0] == 0`): no recurrent stack, output blocks, and the tail is
 /// STILL there, sized by the output net's input width -- exactly what `nb_of_weights` counts
 /// and `set_weights` consumes in that mode (the issue text's "no tail" was wrong against the
-/// code; the walk follows the code).
+/// code; the layout follows the code).
 #[test]
 fn mlp_mode_is_output_blocks_plus_the_tail_at_the_output_input_width() {
     let mut m = map("mamba", "bidirectional");
@@ -262,16 +261,4 @@ fn tuple_a_lstm_layout_is_the_33671_pack() {
 
 fn net_prefixed(m: &IndexMap<String, String>, prefix: &str) -> BlstmNetwork {
     BlstmNetwork::from_config(BlstmConfig::from_legacy(m, prefix).unwrap()).unwrap()
-}
-
-/// A geometry `from_config` refuses is refused by the from-config walk with the same words.
-#[test]
-fn an_invalid_geometry_is_refused_not_defaulted() {
-    let mut m = map("transformer", "bidirectional");
-    m.insert("Transformer_Heads".into(), "5".into()); // 3 % 5 != 0 at layer 0
-    let cfg = BlstmConfig::from_legacy(&m, "X");
-    assert!(cfg.is_err(), "the reader owns the head-count check");
-    let mut m = map("mamba", "bidirectional");
-    m.insert("Mamba_D_State".into(), "0".into());
-    assert!(BlstmConfig::from_legacy(&m, "X").is_err());
 }

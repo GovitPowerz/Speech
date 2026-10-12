@@ -1262,7 +1262,7 @@ impl Layer for TransformerLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::layout::block_ranges;
+    use super::super::super::layout::test_support::{block, block_ranges, total_len};
     use super::*;
 
     const I: usize = 3;
@@ -1339,20 +1339,6 @@ mod tests {
         rows.iter().map(|r| r[0]).collect()
     }
 
-    /// `(lo, hi)` of a named block of the PRODUCTION layout (issue #27): the one-hot
-    /// probes below assert `set_weights` lands every element where the layout says.
-    fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
-        let (_, r) = blocks
-            .iter()
-            .find(|(n, _)| n == name)
-            .unwrap_or_else(|| panic!("no block {name}"));
-        (r.start, r.end)
-    }
-
-    fn layout_len(cell: &TransformerLayer) -> usize {
-        cell.weight_layout().iter().map(LayerBlock::len).sum()
-    }
-
     /// The production layout's block ranges at a geometry (the legs below slice packs by
     /// block name through it); one head, which divides any width and moves no block.
     fn offsets(i: usize, o: usize, dff: usize) -> Vec<(String, std::ops::Range<usize>)> {
@@ -1374,7 +1360,7 @@ mod tests {
                 o * (i + 1) + o + 3 * o * (o + 1) + o * (o + 1) + o + dff * (o + 1) + o * (dff + 1);
             assert_eq!(cell.nb_of_weights(), want, "in={i} out={o} d_ff={dff}");
             // The layout tiles the counted walk.
-            assert_eq!(layout_len(&cell), want);
+            assert_eq!(total_len(&cell.weight_layout()), want);
         }
     }
 

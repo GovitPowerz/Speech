@@ -1108,9 +1108,9 @@ impl BlstmNetwork {
     /// [`Self::weight_layout`] straight from a parsed config: builds the net (the one
     /// place the per-cell geometry is resolved -- `dt_rank` auto, the Mamba adapter, the
     /// sub-sampled fan-ins) and reads its layout. The `speech_rs.weight_layout` seam
-    /// calls this; a geometry `from_config` refuses is refused here.
-    pub fn weight_layout_of(cfg: &BlstmConfig) -> Result<Vec<WeightBlock>> {
-        Ok(BlstmNetwork::from_config(cfg.clone())?.weight_layout())
+    /// calls this.
+    pub fn weight_layout_of(cfg: BlstmConfig) -> Result<Vec<WeightBlock>> {
+        Ok(BlstmNetwork::from_config(cfg)?.weight_layout())
     }
 
     /// `getWeights` (`:240-253`): mirror of `set_weights`, same block order.

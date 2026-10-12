@@ -1374,7 +1374,7 @@ impl Layer for MambaLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::layout::block_ranges;
+    use super::super::super::layout::test_support::{block, block_ranges, total_len};
     use super::*;
 
     const I: usize = 4;
@@ -1417,20 +1417,6 @@ mod tests {
         let mut rows = Vec::new();
         c.get_weights_derivatives(&mut rows);
         rows.iter().map(|r| r[0]).collect()
-    }
-
-    /// `(lo, hi)` of a named block of the PRODUCTION layout (issue #27): the one-hot
-    /// probes below assert `set_weights` lands every element where the layout says.
-    fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
-        let (_, r) = blocks
-            .iter()
-            .find(|(n, _)| n == name)
-            .unwrap_or_else(|| panic!("no block {name}"));
-        (r.start, r.end)
-    }
-
-    fn layout_len(c: &MambaLayer) -> usize {
-        c.weight_layout().iter().map(LayerBlock::len).sum()
     }
 
     /// The production layout's block ranges at a geometry (the legs below slice packs by
@@ -1572,7 +1558,11 @@ mod tests {
             let di = ex * o;
             let dr = o.div_ceil(16).max(1);
             let blocks = block_ranges(&c.weight_layout());
-            assert_eq!(layout_len(&c), n, "the layout does not tile the pack");
+            assert_eq!(
+                total_len(&c.weight_layout()),
+                n,
+                "the layout does not tile the pack"
+            );
 
             let mut probe = |base: usize,
                              row: usize,

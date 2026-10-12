@@ -130,8 +130,8 @@ fn weight_layout<'py>(
     let map = dict_to_map(config)?;
     let cfg = BlstmConfig::from_legacy(&map, prefix)
         .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
-    let layout = BlstmNetwork::weight_layout_of(&cfg)
-        .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
+    let layout =
+        BlstmNetwork::weight_layout_of(cfg).map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
     let mut out = Vec::with_capacity(layout.len());
     for b in layout {
         let d = PyDict::new(py);

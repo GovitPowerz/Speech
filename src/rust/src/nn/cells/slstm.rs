@@ -720,7 +720,7 @@ impl Layer for SlstmLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::layout::block_ranges;
+    use super::super::super::layout::test_support::{block, block_ranges};
     use super::*;
 
     const I: usize = 3;
@@ -763,15 +763,6 @@ mod tests {
                 "in={i} out={o}"
             );
         }
-    }
-
-    /// `(lo, hi)` of a named block of the PRODUCTION layout (issue #27).
-    fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
-        let (_, r) = blocks
-            .iter()
-            .find(|(n, _)| n == name)
-            .unwrap_or_else(|| panic!("no block {name}"));
-        (r.start, r.end)
     }
 
     /// The flat layout is `[i|f|o|z]` gate blocks, each `[R | W | b]` ROW-major --

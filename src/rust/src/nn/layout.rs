@@ -3,8 +3,8 @@
 //! Port-only, NO legacy source. A pack is the flat f64 vector [`super::blstm::BlstmNetwork::set_weights`]
 //! consumes; a BLOCK is one named matrix or vector inside it, at an offset, with the shape
 //! the flat run stores it in (ROW-major: output unit outer, source index inner -- what every
-//! `for_each_slot` walk and `fill_col_major` call amounts to once the stored transposition is
-//! absorbed) and the structural fans of the linear map it belongs to.
+//! `for_each_slot` visit order and `fill_col_major` call amounts to once the stored transposition
+//! is absorbed) and the structural fans of the linear map it belongs to.
 //!
 //! The layout is COMPUTED FROM THE LAYERS, never transcribed: each layer type exposes a
 //! `weight_layout()` that lists its blocks in the order its own `set_weights` consumes them,
@@ -71,7 +71,7 @@ impl Stack {
     }
 }
 
-/// One block of ONE layer, before the net-level walk assigns its stack, layer and offset.
+/// One block of ONE layer, before the net-level list assigns its stack, layer and offset.
 ///
 /// `shape` is the row-major STORAGE shape of the flat run (`[rows, cols]` for a matrix,
 /// `[n]` for a vector); `fan_in` / `fan_out` are the structural fans of the linear map the
@@ -156,25 +156,6 @@ impl WeightBlock {
     pub fn is_empty(&self) -> bool {
         self.block.is_empty()
     }
-
-    /// The half-open flat range `[offset, offset + len)`.
-    pub fn range(&self) -> std::ops::Range<usize> {
-        self.offset..self.offset + self.len()
-    }
-}
-
-/// The `(name, [lo, hi))` ranges of one layer's blocks, offsets accumulated from 0 in
-/// list order -- what a per-cell pin reads to place its one-hot probes.
-pub fn block_ranges(blocks: &[LayerBlock]) -> Vec<(String, std::ops::Range<usize>)> {
-    let mut offset = 0usize;
-    blocks
-        .iter()
-        .map(|b| {
-            let r = offset..offset + b.len();
-            offset += b.len();
-            (b.name.clone(), r)
-        })
-        .collect()
 }
 
 /// Place `layers`' blocks (one `Vec<LayerBlock>` per layer, in `set_weights` order) into
@@ -199,6 +180,39 @@ pub(crate) fn place(
     }
 }
 
+/// Test support shared by the per-layer pins in `layers.rs` and `cells/*`: a layer's blocks
+/// as named `[lo, hi)` ranges (offsets accumulated from 0 in list order), one range by name,
+/// and the summed length. Nothing production-reachable.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::LayerBlock;
+
+    pub(crate) fn block_ranges(blocks: &[LayerBlock]) -> Vec<(String, std::ops::Range<usize>)> {
+        let mut offset = 0usize;
+        blocks
+            .iter()
+            .map(|b| {
+                let r = offset..offset + b.len();
+                offset += b.len();
+                (b.name.clone(), r)
+            })
+            .collect()
+    }
+
+    /// `(lo, hi)` of the block called `name`; panics on an unknown name.
+    pub(crate) fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
+        let (_, r) = blocks
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("no block {name}"));
+        (r.start, r.end)
+    }
+
+    pub(crate) fn total_len(blocks: &[LayerBlock]) -> usize {
+        blocks.iter().map(LayerBlock::len).sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,7 +233,6 @@ mod tests {
             .collect();
         assert_eq!(got, vec![(0, "a", 5, 6), (0, "b", 11, 2), (1, "c", 13, 4)]);
         assert_eq!(off, 17);
-        assert_eq!(out[2].range(), 13..17);
         assert!(out.iter().all(|b| b.stack == Stack::Output));
     }
 

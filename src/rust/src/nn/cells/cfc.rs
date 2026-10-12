@@ -822,7 +822,7 @@ impl Layer for CfcLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::layout::block_ranges;
+    use super::super::super::layout::test_support::{block, block_ranges, total_len};
     use super::*;
 
     const I: usize = 3;
@@ -856,20 +856,6 @@ mod tests {
         out
     }
 
-    /// `(lo, hi)` of a named block of the PRODUCTION layout (issue #27): the one-hot
-    /// probes below assert `set_weights` lands every element where the layout says.
-    fn block(blocks: &[(String, std::ops::Range<usize>)], name: &str) -> (usize, usize) {
-        let (_, r) = blocks
-            .iter()
-            .find(|(n, _)| n == name)
-            .unwrap_or_else(|| panic!("no block {name}"));
-        (r.start, r.end)
-    }
-
-    fn layout_len(cell: &CfcLayer) -> usize {
-        cell.weight_layout().iter().map(LayerBlock::len).sum()
-    }
-
     /// The production layout's block ranges at a geometry (the legs below slice packs by
     /// block name through it).
     fn offsets(i: usize, o: usize, b: usize, l: usize) -> Vec<(String, std::ops::Range<usize>)> {
@@ -899,7 +885,7 @@ mod tests {
             );
             // The layout tiles the pack: `sum(len) == nb_of_weights`.
             assert_eq!(
-                layout_len(&CfcLayer::new(i, o, b, l)),
+                total_len(&CfcLayer::new(i, o, b, l).weight_layout()),
                 CfcLayer::new(i, o, b, l).nb_of_weights()
             );
         }
