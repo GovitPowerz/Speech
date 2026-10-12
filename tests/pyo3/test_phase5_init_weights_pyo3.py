@@ -62,9 +62,8 @@ def test_init_weights_round_trips_through_engine_set_weights(tmp_path: Path, sch
     pattern version, but exercising a real `init_weights` pack for both schemes)."""
     _seed_tier2_spectral(tmp_path)
     cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
 
-    packs = init_weights(spec, np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
     assert len(packs) == 1
     assert packs[0].shape == (33671,)
 
@@ -85,7 +84,7 @@ def test_init_weights_pack_is_the_engine_length_at_output_subsampling_2(tmp_path
     cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
     cfg["BLSTM_OutputSubSampling"] = "2,1"
     cfg["BLSTM_weightsFile"] = ""  # the committed 33671 pack is short for this net.
-    packs = init_weights(config_bridge.nnet_spec(cfg, prefix="BLSTM"), np.random.default_rng(123))
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(123))
     assert packs[0].shape == (34247,)
 
     with chdir(tmp_path):

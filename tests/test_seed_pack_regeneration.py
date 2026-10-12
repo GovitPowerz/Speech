@@ -24,7 +24,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
-from speech.config_bridge import nnet_spec, parse_legacy_config
+from speech.config_bridge import parse_legacy_config
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_bin
 
@@ -40,7 +40,7 @@ def test_committed_seed_pack_regenerates_byte_identical(name: str) -> None:
     info = FIXTURES[name]
     flat = parse_legacy_config((PHASE9 / info["config"]).read_text())
     rng = np.random.default_rng(info["seed"])
-    packs = init_weights(nnet_spec(flat, info["prefix"]), rng, info["init_scheme"], info["forget_bias_one"])
+    packs = init_weights(flat, info["prefix"], rng, info["init_scheme"], info["forget_bias_one"])
     assert len(packs) == 1
 
     rows, cols, committed = read_bin(PHASE9 / info["weights"])

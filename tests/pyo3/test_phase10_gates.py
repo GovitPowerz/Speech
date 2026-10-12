@@ -74,7 +74,7 @@ are NOT input columns (sLSTM's non-identifiable `b_i`; Mamba's `A_log` at `T = 1
 `W_bb` state columns at `T = 1` -- all three inert at this leg's `T`) are a separate,
 already-pinned phenomenon and are excluded by never being addressed, not by a tolerance.
 
-The per-cell offset arithmetic is derived in [`_input_column_offsets`] and its non-vacuity
+The input-column addresses are read off the engine's layout in [`_arch`] and their non-vacuity
 is proven by [`test_v1_cfc_mechanical`], which runs the SAME machinery on the v1 arm and
 finds exactly the 48 dead columns `[44, 92)` it must.
 
@@ -242,7 +242,6 @@ from tests.conftest import CORPUS_ROOT, GateRecorder, requires_corpus
 
 pytest.importorskip("speech_rs")
 
-from speech.config_bridge import nnet_spec  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import ARM_CONFIG, BaselineSpec  # noqa: E402
 from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
@@ -252,8 +251,8 @@ from speech.fold_run import FoldRun  # noqa: E402
 
 # (cell, direction, MEASURED pack length) -- the S3.3 matrix, phase-11 T9 grown 8 -> 10 with
 # the fifth cell. Each length is `init_weights`' own output at the arm's overlaid config,
-# cross-checked against the closed forms in `_layer_length` below (`test_init_is_trainable`
-# asserts both, so the literal and the arithmetic cannot drift apart silently). The two
+# cross-checked against the engine's layout in `_arch` (`test_init_is_trainable` asserts
+# both, so the literal and the layout cannot drift apart silently). The two
 # transformer rows were MEASURED (not estimated) via `len(init_weights(...))` on the real
 # `sad-v2`-overlaid config -- see `tests/test_phase11_init.py`'s sizing docstring for the
 # closed-form derivation at the sized `d_ff = 64` (bidirectional `13871 + 196*d_ff`, forward
@@ -341,12 +340,16 @@ _V2_FROZEN_TAIL = 22
 
 
 # ------------------------------------------------------------------------------------- #
-# Flat-layout arithmetic: where layer 0's input columns live, per cell.
+# Flat layout: where layer 0's input columns live, per cell -- read off the ENGINE.
 #
-# Transcribed from the SPECS (phase-9 S2.2 sLSTM / S3.2 Mamba, phase-10 S1.2 CfC) and from
-# `nn/layers.rs::LstmLayer::set_weights` for the legacy cell -- NOT imported from
-# `init_weights` or read back from Rust, the same independence `test_phase9_seam.py`'s
-# block maps have. If either side drifts, these legs fail.
+# Issue #27: `speech_rs.weight_layout` lists every block of the pack the overlaid config
+# describes (stack, layer, name, row-major shape, offset), so the guard addresses its input
+# columns on the engine's own layout instead of a per-cell transcription. The rule is one line:
+# a layer-0 WEIGHT block whose row-major inner extent is `fin` (the LSTM `w.*`, the sLSTM `W_*`,
+# the Mamba adapter `P`, the transformer `W_a`) or `fin + out` (the CfC backbone `W_bb0`, whose
+# fan-in is the CONCATENATION `[x | h]`, so only its first `fin` columns are input columns) is
+# an input projection; column `k` of such a block of `rows` rows sits at `j*cols + k` for
+# `j < rows`. Recurrent / state columns, biases and every downstream block are not addressed.
 #
 # WHOLE-PACK ORDER (`BlstmNetwork::set_weights`): `fwd stack | bwd stack (bidirectional
 # only) | output MLP | mean | std`, each stack being `layer 0 | layer 1`. Only LAYER 0 has
@@ -354,97 +357,9 @@ _V2_FROZEN_TAIL = 22
 # ------------------------------------------------------------------------------------- #
 
 
-def _mamba_layer_length(fin: int, out: int, g: dict[str, int]) -> int:
-    """One Mamba layer, spec S3.2: `[P | p] (iff fin != out), g, W_in, conv | b_conv, W_x,
-    W_dt | b_dt, A_log, D, W_out`."""
-    d_inner = g["expand"] * out
-    dt_rank = g["dt_rank"] or max(1, -(-out // 16))  # `Mamba_Dt_Rank 0` -> auto `ceil(d_model / 16)`
-    adapter = out * fin + out if fin != out else 0
-    return (
-        adapter
-        + out  # g
-        + 2 * d_inner * out  # W_in
-        + d_inner * g["d_conv"]  # conv
-        + d_inner  # b_conv
-        + (dt_rank + 2 * g["d_state"]) * d_inner  # W_x
-        + d_inner * dt_rank  # W_dt
-        + d_inner  # b_dt
-        + d_inner * g["d_state"]  # A_log
-        + d_inner  # D
-        + out * d_inner  # W_out
-    )
-
-
-def _layer_length(cell: str, fin: int, out: int, g: dict[str, int]) -> int:
-    """One recurrent layer's flat length, per cell."""
-    if cell == "lstm":  # 4 gate matrices (input + recurrent), the 12-row peephole bundle, 4 biases
-        return 4 * out * (fin + out) + 12 * out + 4 * out
-    if cell == "slstm":  # S2.2: `[R_a | W_a | b_a]` per gate a in i,f,o,z
-        return 4 * out * (out + fin + 1)
-    if cell == "mamba":
-        return _mamba_layer_length(fin, out, g)
-    if cell == "cfc":  # S1.2 closed form
-        b, layers = g["backbone_units"], g["backbone_layers"]
-        return b * (fin + out + 1) + (layers - 1) * b * (b + 1) + 3 * out * (b + 1)
-    if cell == "transformer":  # phase-11 S1.2 closed form: [W_a|b_a|g_1|W_qkv|b_qkv|W_o|b_o|g_2|W_1|b_1|W_2|b_2]
-        d_ff = g["d_ff"]
-        return out * (fin + 1) + out + 3 * out * (out + 1) + out * (out + 1) + out + d_ff * (out + 1) + out * (d_ff + 1)
-    raise AssertionError(f"unknown cell {cell!r}")
-
-
-def _input_column_offsets(cell: str, fin: int, out: int, g: dict[str, int]) -> list[list[int]]:
-    """`offsets[k]` = every flat position, RELATIVE TO THE LAYER-0 BASE, holding a weight
-    that multiplies layer-0 input column `k`. One entry per input column.
-
-    THE ARITHMETIC, per cell (each derived from that cell's own `for_each_slot` walk /
-    `set_weights` order, and each restricted to the INPUT projection -- recurrent/state
-    columns, biases and every downstream block are deliberately not addressed):
-
-    - `lstm`: `input_weights` is `(fin x 4*out)` and is the layer's FIRST block, filled
-      COLUMN-major (`LSTMLayer::setWeights`, `fill_col_major`), so `[k, c] -> c*fin + k`.
-      Input column `k` is the k-th ROW of that matrix -> `{c*fin + k : c < 4*out}`.
-    - `slstm`: per gate `a` the layer holds `[R_a (out x out) | W_a (out x fin) | b_a]`,
-      each ROW-major, so gate `a`'s block starts at `a*out*(out+fin+1)` and `W_a[j, k]` is
-      at `+ out*out + j*fin + k`. Column `k` -> `{a-block + out*out + j*fin + k : a < 4,
-      j < out}` (4*out entries).
-    - `mamba`: the ONLY place raw input enters is the width adapter `P (out x fin)`,
-      row-major, the layer's first block when `fin != out` (it is, at layer 0: 44 != 24) --
-      everything downstream sees `out`-wide. `P[j, k] -> j*fin + k`, so column `k` ->
-      `{j*fin + k : j < out}` (out entries).
-    - `cfc`: `W_bb0` is `(B x (fin + out))` row-major and is the layer's first block, but
-      its fan-in is the CONCATENATION `z_t = [x_t | h_{t-1}]` -- so its columns are MIXED,
-      and only `k < fin` are input columns (`k >= fin` are STATE columns, which are a
-      different, already-pinned phenomenon: exactly dead at T=1, live beyond). Row-major
-      `W_bb0[j, k] -> j*(fin + out) + k`, so input column `k` -> `{j*(fin+out) + k :
-      j < B}` (B entries).
-    - `transformer`: `W_a (H x in)` is the width ADAPTER and is the layer's first block,
-      row-major -- UNLIKE Mamba's `P`, it is emitted UNCONDITIONALLY (`init_transformer_flat`
-      draws it regardless of `fin == out`; there is no shape-closure special case here), and
-      unlike CfC's `W_bb0` its fan-in is pure input with no state columns mixed in (the
-      recurrence enters only through attention over PAST OUTPUT ROWS, never through a
-      concatenated hidden vector). `W_a[j, k] -> j*fin + k`, so input column `k` ->
-      `{j*fin + k : j < out}` (out entries) -- the same formula as Mamba's `P`, minus the
-      `fin != out` precondition.
-    """
-    if cell == "lstm":
-        return [[c * fin + k for c in range(4 * out)] for k in range(fin)]
-    if cell == "slstm":
-        block = out * (out + fin + 1)
-        return [[a * block + out * out + j * fin + k for a in range(4) for j in range(out)] for k in range(fin)]
-    if cell == "mamba":
-        assert fin != out, "the Mamba width adapter is absent when fin == out, so there is no input-projection block to guard"
-        return [[j * fin + k for j in range(out)] for k in range(fin)]
-    if cell == "cfc":
-        b = g["backbone_units"]
-        return [[j * (fin + out) + k for j in range(b)] for k in range(fin)]
-    if cell == "transformer":
-        return [[j * fin + k for j in range(out)] for k in range(fin)]
-    raise AssertionError(f"unknown cell {cell!r}")
-
-
 @dataclass(frozen=True)
 class _Arch:
-    """The layer-0 geometry + stack bases a row's guard needs, read back out of the SAME
+    """The layer-0 geometry + stack bases a row's guard needs, read off the layout of the SAME
     overlaid config the run builds (never re-hardcoded)."""
 
     fin: int
@@ -461,20 +376,18 @@ def _arch(arm: str, cell: str, direction: str) -> _Arch:
     toml_path = repo_root / ARM_CONFIG[arm]  # type: ignore[index]
     flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
     flat.update(B.cell_overlay(dict(flat), cell, direction))
-    spec = nnet_spec(flat, "BLSTM")
-    lstm = cast(list[int], spec["LSTMNeuronNb"])
-    sub = cast(list[int], spec["LSTMSubSampling"])
-    outn = cast(list[int], spec["OutputNeuronNb"])
-    g = cast(dict[str, int], spec["Mamba"] if cell == "mamba" else spec["Transformer"] if cell == "transformer" else spec["Cfc"])
-
+    layout = cast(list[dict[str, Any]], speech_rs.weight_layout(flat, "BLSTM"))
+    lstm = [int(x) for x in flat["BLSTM_LSTMNeuronNb"].split(",")]
+    sub = [int(x) for x in flat["BLSTM_LSTMSubSampling"].split(",")]
     fin, out = lstm[0] * sub[0], lstm[1]
-    len0 = _layer_length(cell, fin, out, g)
-    len1 = _layer_length(cell, lstm[1] * sub[1], lstm[2], g)
-    stacks = 1 if direction == "forward" else 2
-    stack_len = len0 + len1
-    mlp = sum(outn[i + 1] * outn[i] + outn[i + 1] for i in range(len(outn) - 1))
-    pack = stacks * stack_len + mlp + 2 * lstm[0]
-    return _Arch(fin, out, pack, tuple(s * stack_len for s in range(stacks)), _input_column_offsets(cell, fin, out, g))
+
+    stacks = ["forward"] + (["backward"] if direction == "bidirectional" else [])
+    stack_bases = tuple(min(b["offset"] for b in layout if b["stack"] == s) for s in stacks)
+    layer0 = [b for b in layout if (b["stack"], b["layer"]) == ("forward", 0)]
+    inputs = [b for b in layer0 if b["kind"] == "weight" and len(b["shape"]) == 2 and b["shape"][1] in (fin, fin + out)]
+    assert inputs, f"{cell}/{direction}: no layer-0 input projection block found in the layout"
+    offsets = [[b["offset"] - stack_bases[0] + j * b["shape"][1] + k for b in inputs for j in range(b["shape"][0])] for k in range(fin)]
+    return _Arch(fin, out, sum(b["len"] for b in layout), stack_bases, offsets)
 
 
 def _dead_columns(grad: NDArray[np.float64], arch: _Arch) -> dict[int, list[int]]:
@@ -606,10 +519,9 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len: 
     out = _run_probe(tmp_path, "sad-v2", cell, direction)
     arch = _arch("sad-v2", cell, direction)
 
-    # (0) param match, asserted TWICE against independent derivations: the literal in
-    #     `_CONFIGS` (what the phase pins) and the closed-form block arithmetic in
-    #     `_layer_length` (what the guard's offsets are derived from). A drift in either
-    #     invalidates the offsets, so both must agree with what `init_weights` produced.
+    # (0) param match, asserted TWICE: the literal in `_CONFIGS` (what the phase pins) and
+    #     the engine's layout in `_arch` (what the guard's offsets are read from). A drift in
+    #     either invalidates the offsets, so both must agree with what `init_weights` produced.
     assert out["pack_len"] == pack_len, f"{cell}/{direction} pack length {out['pack_len']} != the pinned {pack_len}"
     assert arch.pack_len == pack_len, f"{cell}/{direction} block arithmetic gives {arch.pack_len}, the pinned length is {pack_len}"
     assert arch.fin == 44, f"v2's layer-0 fan-in must be 11*4 = 44 live columns, got {arch.fin}"
@@ -853,8 +765,8 @@ def test_v1_cfc_mechanical(tmp_path: Path, direction: str, pack_len: int, dead_e
     dead block the `_V1_CFC` arithmetic above predicts. No convergence gate here (CfC's
     convergence gate IS its v2 rows) and no param-match requirement.
 
-    This leg is ALSO the inverse guard's non-vacuity proof: it runs the SAME
-    `_input_column_offsets` machinery `test_init_is_trainable` runs, on the same cell, and
+    This leg is ALSO the inverse guard's non-vacuity proof: it runs the SAME `_arch`
+    machinery `test_init_is_trainable` runs, on the same cell, and
     must find exactly the 48 dead columns `[44, 92)`. If the offset arithmetic were wrong --
     addressing biases, a recurrent block, or nothing at all -- it would find 0 dead columns
     here and the v2 guard would be silently vacuous. Measured 2026-08-01, seed 0:

@@ -85,10 +85,9 @@ def test_transformer_pack_round_trips_through_engine_set_weights(tmp_path: Path,
     the crossing untouched (a pure copy in, a pure copy out -- no arithmetic on the PyO3
     boundary)."""
     cfg = _seed_tier2_transformer(tmp_path, {})
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
-    assert spec["CellType"] == "transformer"
+    assert config_bridge.nnet_spec(cfg, prefix="BLSTM")["CellType"] == "transformer"
 
-    packs = init_weights(spec, np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
     assert len(packs) == 1
     assert packs[0].shape == (V1_DEFAULT_PACK,)  # the v1 closed form at d_ff = 64.
 
@@ -109,8 +108,7 @@ def test_the_geometry_keys_resize_both_sides_together(tmp_path: Path, keys: dict
     ignores. `Transformer_Heads 8` rides along on the second row: it changes the attention
     arithmetic and must NOT change any length (24 % 8 == 0, so the engine accepts it)."""
     cfg = _seed_tier2_transformer(tmp_path, keys)
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
-    packs = init_weights(spec, np.random.default_rng(7))
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(7))
     assert packs[0].shape == (16199 + 196 * d_ff,)
 
     with chdir(tmp_path):

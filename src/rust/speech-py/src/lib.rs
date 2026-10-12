@@ -34,6 +34,13 @@ fn to_pyerr<E: std::fmt::Display>(e: E) -> PyErr {
     PyRuntimeError::new_err(format!("{e:#}"))
 }
 
+/// The `ValueError` twin of [`to_pyerr`]: a config the engine REFUSES (an unknown cell, an
+/// invalid geometry, a mismatched width) is a value error on the two config-reading
+/// functions, never a default (ADR-0006).
+fn to_value_err<E: std::fmt::Display>(e: E) -> PyErr {
+    PyValueError::new_err(format!("{e:#}"))
+}
+
 /// Read a config FILE into the flat `IndexMap` the engine takes, dispatched by
 /// extension like `cli::parse_cli`: a `.toml` path goes through
 /// `toml_config::toml_to_map`, anything else through `parse_legacy_config`. The
@@ -128,10 +135,8 @@ fn weight_layout<'py>(
     prefix: &str,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
     let map = dict_to_map(config)?;
-    let cfg = BlstmConfig::from_legacy(&map, prefix)
-        .map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
-    let layout =
-        BlstmNetwork::weight_layout_of(cfg).map_err(|e| PyValueError::new_err(format!("{e:#}")))?;
+    let cfg = BlstmConfig::from_legacy(&map, prefix).map_err(to_value_err)?;
+    let layout = BlstmNetwork::weight_layout_of(cfg).map_err(to_value_err)?;
     let mut out = Vec::with_capacity(layout.len());
     for b in layout {
         let d = PyDict::new(py);
@@ -150,6 +155,65 @@ fn weight_layout<'py>(
         out.push(d);
     }
     Ok(out)
+}
+
+/// The resolved `BlstmConfig` of the `prefix` net a config map describes, under the keys
+/// `config_bridge.nnet_spec` has always returned (issue #27): `LSTMNeuronNb`,
+/// `LSTMSubSampling`, `OutputNeuronNb`, `OutputSubSampling`, `NNetInputSize`, `peepholes`
+/// (the six flags, forward/backward interleaved per family), `CostLawSpeech`,
+/// `CostLawNoSpeech`, `CellType`, `Direction`, and the three geometry dicts `Mamba`, `Cfc`,
+/// `Transformer` with their RUST defaults filled in -- so Python mirrors no numeric default
+/// (ADR-0006). A config the engine refuses raises `ValueError` with the engine's message.
+#[pyfunction]
+fn blstm_config<'py>(
+    py: Python<'py>,
+    config: &Bound<'_, PyDict>,
+    prefix: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let map = dict_to_map(config)?;
+    let cfg = BlstmConfig::from_legacy(&map, prefix).map_err(to_value_err)?;
+    let input_size = speech::config::NnetSpec::from_legacy(&map, prefix)
+        .map_err(to_value_err)?
+        .input_size;
+    let (speech_law, no_speech_law) = cfg.cost_law.law_names();
+    let d = PyDict::new(py);
+    d.set_item("LSTMNeuronNb", &cfg.lstm_neuron_nb)?;
+    d.set_item("LSTMSubSampling", &cfg.lstm_sub_sampling)?;
+    d.set_item("OutputNeuronNb", &cfg.output_neuron_nb)?;
+    d.set_item("OutputSubSampling", &cfg.output_sub_sampling)?;
+    d.set_item("NNetInputSize", input_size)?;
+    let (f, b) = (&cfg.forward_peep, &cfg.backward_peep);
+    d.set_item(
+        "peepholes",
+        vec![
+            f.cells,
+            b.cells,
+            f.gates,
+            b.gates,
+            f.gates_recurrent,
+            b.gates_recurrent,
+        ],
+    )?;
+    d.set_item("CostLawSpeech", speech_law)?;
+    d.set_item("CostLawNoSpeech", no_speech_law)?;
+    d.set_item("CellType", cfg.cell_type.as_str())?;
+    d.set_item("Direction", cfg.direction.as_str())?;
+    let mamba = PyDict::new(py);
+    mamba.set_item("d_state", cfg.mamba.d_state)?;
+    mamba.set_item("d_conv", cfg.mamba.d_conv)?;
+    mamba.set_item("expand", cfg.mamba.expand)?;
+    mamba.set_item("dt_rank", cfg.mamba.dt_rank)?;
+    d.set_item("Mamba", mamba)?;
+    let cfc = PyDict::new(py);
+    cfc.set_item("backbone_units", cfg.cfc.backbone_units)?;
+    cfc.set_item("backbone_layers", cfg.cfc.backbone_layers)?;
+    d.set_item("Cfc", cfc)?;
+    let tr = PyDict::new(py);
+    tr.set_item("window", cfg.transformer.window)?;
+    tr.set_item("heads", cfg.transformer.heads)?;
+    tr.set_item("d_ff", cfg.transformer.d_ff)?;
+    d.set_item("Transformer", tr)?;
+    Ok(d)
 }
 
 /// The coarse corpus-level engine: a `CorpusProcessor` behind the legacy
@@ -590,6 +654,7 @@ fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_legacy_config, m)?)?;
     m.add_function(wrap_pyfunction!(load_toml_config, m)?)?;
     m.add_function(wrap_pyfunction!(weight_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(blstm_config, m)?)?;
     m.add_class::<Engine>()?;
     m.add_class::<StreamingSession>()?;
     m.add_class::<StreamingLidSession>()?;

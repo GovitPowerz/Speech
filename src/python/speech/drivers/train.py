@@ -38,7 +38,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
-from speech.config_bridge import nnet_spec
 from speech.drivers.state import EpochRecord, ModernTrainParams, ModernTrainResult, RunState, TrainResult
 from speech.engine import ChannelResults, CostParams, compute_cost, forward_backward
 from speech.fold_run import FoldRun
@@ -571,7 +570,7 @@ def _init_weights_from_scratch(state: RunState, params: ModernTrainParams) -> li
     prefixes = ["BLSTM"] + (["BLSTM_LID"] if state.ps.algo == 6 else [])
     weights: list[NDArray[np.float64]] = []
     for prefix in prefixes:
-        weights += init_weights(nnet_spec(state.base_config, prefix), rng, params.init_scheme, params.forget_bias_one)
+        weights += init_weights(state.base_config, prefix, rng, params.init_scheme, params.forget_bias_one)
     return weights
 
 

@@ -252,106 +252,26 @@ def seed_twin_mode7(dst: Path, name: str = "twin_mode7_lid_slstm") -> None:
         shutil.copy(PHASE9 / f, dst / f)
 
 
-# ==== Flat-layout block maps (spec S2.2 / S3.2, stated INDEPENDENTLY here) ====
+# ==== Flat-layout block maps (issue #27: the engine's own layout) ====
 #
-# Transcribed from the SPEC, not read back from Rust or from `init_weights`. That
-# independence is the point: the block probe and the two structural legs assert that the
-# engine agrees with this table, so a layout drift on either side fails loudly.
+# Read through `speech_rs.weight_layout` -- the block list `BlstmNetwork::set_weights` consumes,
+# computed from the layers themselves. The independence that used to live in a hand-transcribed
+# table lives Rust-side now: every cell's `flat_layout_positions_are_the_spec_order` one-hot
+# probes `set_weights` against the production layout, and `tests/weight_layout.rs` pins the net
+# walk. What the block probe and the structural legs below assert is therefore the engine's
+# ARITHMETIC per named block, on the engine's own addresses.
 
 
-def slstm_blocks(out: int, fin: int) -> dict[str, tuple[int, int]]:
-    """One sLSTM layer: gates `[i | f | o | z]`, each `[R (out x out) | W (out x fin) | b]`."""
-    block = out * (out + fin + 1)
+def layout_blocks(config: Path, prefix: str) -> dict[str, tuple[int, int]]:
+    """A pack's blocks as `label -> (start, n)`: `fwd.<name>` / `bwd.<name>` for the (single)
+    recurrent layer of each stack, `out.W` / `out.b` for the (single) output layer, `norm.mean`
+    / `norm.std` for the tail -- every fixture here has one layer per stack."""
+    layout = cast(list[dict[str, Any]], speech_rs.weight_layout(parse_legacy_config(config.read_text()), prefix))
+    tag = {"forward": "fwd", "backward": "bwd", "output": "out", "tail": "norm"}
     blocks: dict[str, tuple[int, int]] = {}
-    for g, gate in enumerate(("i", "f", "o", "z")):
-        base = g * block
-        blocks[f"R_{gate}"] = (base, out * out)
-        blocks[f"W_{gate}"] = (base + out * out, out * fin)
-        blocks[f"b_{gate}"] = (base + out * out + out * fin, out)
-    return blocks
-
-
-def mamba_blocks(out: int, fin: int, d_state: int, d_conv: int, expand: int) -> dict[str, tuple[int, int]]:
-    """One Mamba layer, spec S3.2 order:
-    `[P | p] (iff fin != out), g, W_in, conv | b_conv, W_x, W_dt | b_dt, A_log, D, W_out`."""
-    d_inner = expand * out
-    dt_rank = max(1, -(-out // 16))  # `Mamba_Dt_Rank 0` -> auto `ceil(d_model / 16)`
-    sizes: list[tuple[str, int]] = []
-    if fin != out:
-        sizes += [("P", out * fin), ("p", out)]
-    sizes += [
-        ("g", out),
-        ("W_in", 2 * d_inner * out),
-        ("conv", d_inner * d_conv),
-        ("b_conv", d_inner),
-        ("W_x", (dt_rank + 2 * d_state) * d_inner),
-        ("W_dt", d_inner * dt_rank),
-        ("b_dt", d_inner),
-        ("A_log", d_inner * d_state),
-        ("D", d_inner),
-        ("W_out", out * d_inner),
-    ]
-    blocks: dict[str, tuple[int, int]] = {}
-    position = 0
-    for label, n in sizes:
-        blocks[label] = (position, n)
-        position += n
-    return blocks
-
-
-def cfc_blocks(out: int, backbone_units: int, backbone_layers: int, fin: int) -> dict[str, tuple[int, int]]:
-    """One CfC layer, phase-10 spec S1.2 order: the backbone stack `W_bb{l} | b_bb{l}`
-    (`l = 0` is `B x (in+H)`, the deeper ones `B x B`), then the three heads
-    `W_ff1 | b_ff1 | W_ff2 | b_ff2 | W_g | b_g`, each `H x B` plus `H`.
-
-    Transcribed from the spec, not from Rust and not from `init_weights` -- the same
-    independence the two sibling maps above have, and what makes the block probe and
-    [`test_cfc_time_gate_saturation_selects_one_head`] able to disagree with the engine."""
-    b, h = backbone_units, out
-    sizes: list[tuple[str, int]] = []
-    for layer in range(backbone_layers):
-        fan_in = fin + h if layer == 0 else b
-        sizes += [(f"W_bb{layer}", b * fan_in), (f"b_bb{layer}", b)]
-    for head in ("ff1", "ff2", "g"):
-        sizes += [(f"W_{head}", h * b), (f"b_{head}", h)]
-    blocks: dict[str, tuple[int, int]] = {}
-    position = 0
-    for label, n in sizes:
-        blocks[label] = (position, n)
-        position += n
-    return blocks
-
-
-def transformer_blocks(out: int, fin: int, d_ff: int) -> dict[str, tuple[int, int]]:
-    """One transformer layer, phase-11 spec S1.2 order:
-    `[W_a | b_a | g_1 | W_qkv | b_qkv | W_o | b_o | g_2 | W_1 | b_1 | W_2 | b_2]`, `H = out`.
-
-    Transcribed from the SPEC, not from Rust and not from `init_weights` -- the same
-    independence the two sibling maps above have. `W_qkv`/`b_qkv` stay ONE block each here
-    (matching `for_each_slot`'s own granularity): the `[q | k | v]` column-block order lives
-    only inside [`test_transformer_key_bias_block_is_output_inert`], which is the one place
-    that needs to see past this map's resolution.
-    """
-    h = out
-    sizes: list[tuple[str, int]] = [
-        ("W_a", h * fin),
-        ("b_a", h),
-        ("g_1", h),
-        ("W_qkv", h * 3 * h),
-        ("b_qkv", 3 * h),
-        ("W_o", h * h),
-        ("b_o", h),
-        ("g_2", h),
-        ("W_1", h * d_ff),
-        ("b_1", d_ff),
-        ("W_2", d_ff * h),
-        ("b_2", h),
-    ]
-    blocks: dict[str, tuple[int, int]] = {}
-    position = 0
-    for label, n in sizes:
-        blocks[label] = (position, n)
-        position += n
+    for b in layout:
+        assert b["layer"] == 0, f"{config.name}: a multi-layer stack needs layer-qualified labels"
+        blocks[f"{tag[b['stack']]}.{b['name']}"] = (b["offset"], b["len"])
     return blocks
 
 
@@ -359,31 +279,15 @@ def fixture_blocks(name: str) -> dict[str, tuple[int, int]]:
     """The FULL flat pack of a SAD fixture as named blocks, in `Blstm::set_weights` order:
     `fwd stack | bwd stack (bidirectional only) | output MLP | mean | std`."""
     info = cast(dict[str, Any], FIXTURES[name])
-    out = GEOMETRY["sad_hidden"]
-    fin = GEOMETRY["sad_input"] * GEOMETRY["sad_sub_sampling"]
-    if info["cell_type"] == "slstm":
-        layer = slstm_blocks(out, fin)
-    elif info["cell_type"] == "cfc":
-        layer = cfc_blocks(out, GEOMETRY["cfc_backbone_units"], GEOMETRY["cfc_backbone_layers"], fin)
-    elif info["cell_type"] == "transformer":
-        layer = transformer_blocks(out, fin, GEOMETRY["transformer_d_ff"])
-    else:
-        layer = mamba_blocks(out, fin, GEOMETRY["mamba_d_state"], GEOMETRY["mamba_d_conv"], GEOMETRY["mamba_expand"])
-    layer_len = sum(n for _, n in layer.values())
-
-    blocks: dict[str, tuple[int, int]] = {}
-    directions = ("fwd", "bwd") if info["direction"] == "bidirectional" else ("fwd",)
-    for d, tag in enumerate(directions):
-        for label, (start, n) in layer.items():
-            blocks[f"{tag}.{label}"] = (d * layer_len + start, n)
-    base = len(directions) * layer_len
-    out_in = out * len(directions)
-    blocks["out.W"] = (base, out_in)  # the single output layer: 1 neuron x out_in inputs
-    blocks["out.b"] = (base + out_in, 1)
-    blocks["norm.mean"] = (base + out_in + 1, GEOMETRY["sad_input"])
-    blocks["norm.std"] = (base + out_in + 1 + GEOMETRY["sad_input"], GEOMETRY["sad_input"])
+    blocks = layout_blocks(PHASE9 / info["config"], "BLSTM")
     assert blocks["norm.std"][0] + blocks["norm.std"][1] == info["pack_length"], f"{name}: the block map does not tile the pack"
     return blocks
+
+
+def lid_layer_blocks(name: str) -> dict[str, tuple[int, int]]:
+    """A Twin's LID-net pack as PER-LAYER block names (`R_i`, `W_bb0`, ...): the forward
+    stack's single layer, offsets inside the LID pack."""
+    return {label.removeprefix("fwd."): v for label, v in layout_blocks(PHASE9 / FIXTURES[name]["config"], "BLSTM_LID").items() if label.startswith("fwd.")}
 
 
 # ==== Engine helpers =========================================================
@@ -911,12 +815,8 @@ TWIN_MODE7_ROWS = {
 def mode7_lid_blocks(name: str) -> dict[str, tuple[int, int]]:
     """The Mode-7 Twin's LID-net block map: `BLSTM_LID_LSTMNeuronNb 12,6` with
     `BLSTM_LID_LSTMSubSampling 1` -> out 6, fan-in 12, in whichever cell's layout the
-    fixture's `BLSTM_LID_Cell_Type` selects."""
-    if FIXTURES[name]["lid_cell_type"] == "cfc":
-        return cfc_blocks(6, GEOMETRY["cfc_backbone_units"], GEOMETRY["cfc_backbone_layers"], 12)
-    if FIXTURES[name]["lid_cell_type"] == "transformer":
-        return transformer_blocks(6, 12, GEOMETRY["transformer_d_ff"])
-    return slstm_blocks(6, 12)
+    fixture's `BLSTM_LID_Cell_Type` selects -- read off the engine."""
+    return lid_layer_blocks(name)
 
 
 def test_twin_lid_cell_swap_constructs_and_roundtrips(tmp_path: Path) -> None:
@@ -1020,7 +920,7 @@ def test_twin_lid_gradient_is_finite_and_block_wise_alive(tmp_path: Path) -> Non
     """
     lid_pack = load_pack("twin_lid_slstm")
     # `BLSTM_LID_LSTMNeuronNb 12,6` with `BLSTM_LID_LSTMSubSampling 1` -> out 6, fan-in 12.
-    blocks = slstm_blocks(6, 12)
+    blocks = lid_layer_blocks("twin_lid_slstm")
     seed_twin(tmp_path)
     with chdir(tmp_path):
         eng = speech_rs.Engine(["twin_lid_slstm.config"], "-m")
@@ -1053,7 +953,7 @@ def test_twin_lid_block_probe_matches_finite_difference(tmp_path: Path) -> None:
     which `grad_check`'s 12-weight prefix (all inside `R_i`) cannot reach."""
     measured, pin = TWIN_LID_BLOCK_PROBE_PIN
     assert pin < 1e-4, "spec R4: a pin above 1e-4 is a STOP"
-    blocks = slstm_blocks(6, 12)
+    blocks = lid_layer_blocks("twin_lid_slstm")
     lid_pack = load_pack("twin_lid_slstm")
     sad_pack = read_weight_vector(PHASE4B / "tiny_sad_seed.bin")
     packs = [sad_pack, lid_pack]
@@ -1180,7 +1080,7 @@ def test_real_lre_sad_config_defaults_to_lstm_bidirectional(tmp_path: Path) -> N
     spec = nnet_spec(flat)
     assert spec["CellType"] == "lstm"
     assert spec["Direction"] == "bidirectional"
-    pack = init_weights(spec, np.random.default_rng(920507), "xavier", True)[0]
+    pack = init_weights(flat, "BLSTM", np.random.default_rng(920507), "xavier", True)[0]
 
     corpus = tmp_path / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
