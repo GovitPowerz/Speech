@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issue #26)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27)
 
 ## Context
 
@@ -40,7 +40,11 @@ state struct (or a stateless per-output function) in the same module, the batch 
 committed goldens byte-green AND the pre-existing bit-equality leg passing UNMODIFIED through the
 move -- `tasks/segmenter.rs::HystStep` under `update_segmentation_raw` (commit `476ffec`) and
 `audio.rs::conv_at` under `convolution_horiz_slice` (commit `582b8a7`), the streaming session
-then driving the same struct and the same function, issue #26). Training is
+then driving the same struct and the same function, issue #26; introspection: a method that
+reads layer state and writes nothing -- the `weight_layout()` of every layer type in
+`nn/layers.rs` and `nn/cells/`, `Network::layers()`, and `BlstmNetwork::weight_layout`, the
+block list the `speech_rs.weight_layout` seam exports, proven behaviour-free by the goldens
+byte-green and pinned to `set_weights` by one-hot probes per cell, issue #27). Training is
 exact-f64 only and bails loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and
