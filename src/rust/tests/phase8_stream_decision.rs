@@ -485,7 +485,11 @@ fn holdback_derived_not_hardcoded() {
 }
 
 // ---------------------------------------------------------------------------
-// (4) the streamed raw-segment list == update_segmentation_raw (insurance).
+// (4) the streamed raw-segment list == update_segmentation_raw: the STATE-THREADING leg.
+//     Since issue #26 both sides fold over ONE `HystStep`, so this leg no longer compares
+//     two transcriptions of the hysteresis arithmetic; it pins that `ConvStream` + chunked
+//     pushes hand the step the same values in the same order as the batch convolution
+//     (ADR-0005: a self-consistent leg owns state threading only).
 // ---------------------------------------------------------------------------
 
 #[test]

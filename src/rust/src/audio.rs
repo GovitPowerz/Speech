@@ -216,22 +216,33 @@ fn conv_taps(ii: usize, len: usize, half_window: isize) -> (isize, usize, usize)
     (begin1, begin2 as usize, end as usize)
 }
 
+/// ONE horizontal convolution output: position `ii` of a `len`-long signal, reading its
+/// taps from `src`, where `src[k]` holds signal index `k + src_base`. The edge-truncating
+/// tap range is [`conv_taps`] and the accumulation is the legacy ascending-`jj` `+=`, so
+/// the result is bit-identical wherever the signal lives: the batch
+/// [`convolution_horiz_slice`] calls it on its snapshot copy (`src_base == 0`), the
+/// streaming `fast::stream::ConvStream` on its trimmed ring (`src_base` = the ring's first
+/// absolute index). The ONE body of the horizontal convolution (issue #26).
+pub(crate) fn conv_at(src: &[f64], src_base: usize, ii: usize, len: usize, coeffs: &[f64]) -> f64 {
+    let half_window = ((coeffs.len() - 1) / 2) as isize;
+    let (begin1, begin2, end) = conv_taps(ii, len, half_window);
+    let mut acc = 0.0;
+    for jj in begin2..=end {
+        acc += src[(begin1 + jj as isize) as usize - src_base] * coeffs[jj];
+    }
+    acc
+}
+
 /// `Convolution` (`Helpers.hpp:164-191`): in-place 1xN horizontal convolution over
 /// a plain slice. Edge positions truncate the kernel without renormalizing (missing
 /// taps are simply dropped, not redistributed) -- a load-bearing legacy quirk. The
 /// natural fit for `results_to_segmentation`/spectral/LTSV/TDC, which hold `Vec`
-/// results rather than an `Array2` row.
+/// results rather than an `Array2` row. The per-output arithmetic is `conv_at`.
 pub fn convolution_horiz_slice(row: &mut [f64], coeffs: &[f64]) {
-    let half_window = ((coeffs.len() - 1) / 2) as isize;
     let cols = row.len();
     let copy: Vec<f64> = row.to_vec();
     for (ii, out) in row.iter_mut().enumerate() {
-        let (begin1, begin2, end) = conv_taps(ii, cols, half_window);
-        let mut acc = 0.0;
-        for jj in begin2..=end {
-            acc += copy[(begin1 + jj as isize) as usize] * coeffs[jj];
-        }
-        *out = acc;
+        *out = conv_at(&copy, 0, ii, cols, coeffs);
     }
 }
 

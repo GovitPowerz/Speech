@@ -3271,3 +3271,58 @@ compiled out on macOS and was not applied; its leg runs green on the Linux CI.
 | 1 | decimal divisor in `ru_maxrss_to_mib` (`raw * unit_bytes / 1e6`) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT: `left: 1.048576`, `right: 1.0` |
 | 2 | truncation in `ru_maxrss_to_mib` (`.floor()` on the quotient) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT: `left: 1.0`, `right: 1.5` |
 | 3 | swapped arms (macOS `RU_MAXRSS_UNIT_BYTES = 1024.0`) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT: `left: 1024.0`, `right: 1.0` |
+
+## Issue #26 -- the stepwise decision kernel: the mutation battery
+
+Branch `feature/decision-step-kernel`, off `main@b30612a` (#24 merged). The frame stream carried
+loop-state-for-loop-state transcriptions of two exact-tree bodies: `HystState` of
+`update_segmentation_raw`'s hysteresis loop and `ConvStream::conv_at` of `conv_taps` plus the
+tap accumulation. Each body now lives once -- `tasks::segmenter::HystStep` (commit `476ffec`), the
+batch function a fold over `push` + `flush_tail`; `audio::conv_at` (commit `582b8a7`), called by
+`convolution_horiz_slice` on its snapshot and by `ConvStream` on its ring -- and the stream drives
+the same struct and the same function. The move is an ADR-0002 touch class, the stepwise hoist;
+ADR-0004's "one kernel, two drivers" now covers the decision layer. Proof of the move: cargo
+1361 passed, 0 failed at the branch head (1359 before the two pins below were added) (`cargo test --release --workspace --no-fail-fast`;
+the `speech-py --lib` target aborts at dyld on this box before any test runs, a pre-existing
+host linkage issue reproduced on `main`, not a test), the goldens byte-green and the one
+batch-vs-stream leg, `phase8_stream_decision.rs::raw_hysteresis_matches_offline`, passing
+UNMODIFIED through both hoists. That leg is re-labelled: with one body it compares one kernel
+under two drivers and pins state threading only (ADR-0005).
+
+One correction to the issue: `stream_incremental_resmooth.rs` never held the two hysteresis
+copies equal (its 13 legs compare the incremental cut to the full replay, both through the same
+hysteresis state); none of them became redundant and none was touched.
+
+Apply -> run the named catchers (`--no-fail-fast`, so every leg of a target reports) -> revert
+-> re-run green -> tree clean. Items 1, 2 and 4 mutate the shared `HystStep`, visible to both
+drivers by construction; item 3 mutates the stream's own feed into it; item 5 mutates the shared
+`conv_at` on its `src_base` term, which only the stream's ring exercises (the batch passes 0), so
+it is visible to the stream alone.
+
+| # | mutation | named catcher | verdict (verbatim failure) |
+|---|---|---|---|
+| 1 | the fold drops `flush_tail` (the `results.size()` tail quirk vanishes) | `phase0bii_segmenter::oracle_cross_check_bit_exact` (the Rust == numpy-oracle fixture) | CAUGHT: `case 3: segment count mismatch (rust 4 vs python 5)` |
+| 2 | `push` skips the `idx` increment on the INIT branch (every value re-runs INIT) | the same leg, and `clean_rising_falling_crossing`; the promised streaming echo `decision_final_equals_offline` | CAUGHT by the 0b-ii legs: `case 0: segment count mismatch (rust 0 vs python 6)`; `left: (5.0, End)`, `right: (1.5, Speech)`. The streaming echo is BLIND: `decision_final_equals_offline` compares the streamed finish to an offline run through the SAME mutated kernel and stays green (ADR-0005, the battery lesson, measured again); the two `phase8_stream_decision` legs that did fire are non-vacuity floors (`pending_open_segment_blocks_emission`: `left: 0`, `right: 2` speech spans; `prefix_consistency_holds`) |
+| 3 | `ConvStream::take_ready` drops one finalized value per call (the stream's feed desynchronized, the step untouched) | `raw_hysteresis_matches_offline` (the state-threading leg); `phase8_gate.rs` | CAUGHT: `raw-seg count clean chunk=1: 0 != 3`; also `decision_final_equals_offline`, `chunk_invariance`, and six `phase8_gate` legs (`primary: segment count`, `left: 3`, `right: 2`) |
+| 4 | `pending_begin` returns `begin` without `off` | `pending_open_segment_blocks_emission` | **MISSED** by the named catcher and by every streaming leg: `phase8_stream_decision` 14, `phase8_gate` 20, `phase9_stream_causal` 19, `stream_incremental_resmooth` 13, all green. Same for the UNSAFE direction, `begin + 2*off`: 66 legs green. See below. |
+| 5 | `conv_at` ignores `src_base` (reads the ring as if never trimmed) | `stream_incremental_resmooth::cut_engages_on_a_long_stream` / `chunk_invariance` | CAUGHT by both named legs and by every leg that trims: `cut_engages_on_a_long_stream` panics `index out of bounds: the len is 82 but the index is 82` (`audio.rs:231`), four more resmooth legs likewise; five `phase8_stream_decision` legs (`chunk_invariance` among them) at `the len is 19 but the index is 19` |
+
+### Item 4, read honestly, and the pin it produced
+
+`pending_begin` is the third term of the emission frontier
+(`frontier = min(max(last_raw_boundary, consumed_frontier - dt), pending_begin)`), and the
+retraction legs own only the DIRECTION of a frontier error: an earlier frontier (the dropped
+`off`, 15 ms on the gate fixture) can only delay an emission, which no leg bounds at that
+resolution; a later one (the doubled `off`, +15 ms) sits inside the holdback slack the resmooth
+section measured at about a quarter of a holdback, so no retraction materializes either. The
+batch fold never reads `pending_begin`, so no golden pinned its value; before #26 that was true of
+`HystState` as well -- the hoist moved the gap, it did not create it. The pin is new:
+`phase0bii_segmenter::hyst_step_pending_begin_is_the_labeled_begin_in_audio_time` drives one
+rising crossing at `off = 0.015` and asserts, to the bit, that the pending begin equals
+`dt / 2 + off` and then equals the labeled segment's own `begin` on the closing push. Re-run under
+both item-4 mutations: CAUGHT (`left: 4581421828931458171`, `right: 4585204852618449388` for the
+dropped `off`; `left: 4587366580439587226` for the doubled one). A second pin,
+`hyst_step_pending_begin_init_seed_and_tail_flush`, owns the two candidate sites the first does not
+reach: the INIT seed at `begin == 0.0` exactly (CAUGHT under `pending_begin`'s `>=` mutated to `>`)
+and the tail flush, which now clears the candidate so `pending_begin` is `None` after EOS (CAUGHT
+with the clear reverted).

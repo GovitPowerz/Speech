@@ -4,7 +4,8 @@
 use serde::Deserialize;
 use speech::tasks::segmentation::{SegClass, Segmentation};
 use speech::tasks::segmenter::{
-    SegmenterConfig, get_targets, lid_to_segmentation, update_segmentation, update_segmentation_raw,
+    HystStep, SegmenterConfig, get_targets, lid_to_segmentation, update_segmentation,
+    update_segmentation_raw,
 };
 
 fn cfg_no_smooth() -> SegmenterConfig {
@@ -201,4 +202,47 @@ fn oracle_cross_check_bit_exact() {
             );
         }
     }
+}
+
+/// Issue #26: `pending_begin` is the stream's third emission-frontier term and the batch
+/// fold never reads it, so no golden pins its VALUE. The #26 battery found that both a
+/// dropped and a doubled `off` pass every streaming gate (a 15 ms frontier move sits inside
+/// the holdback slack and the retraction legs cannot see it). This pins it in audio time:
+/// the same `begin + off` the labeled segment carries.
+#[test]
+fn hyst_step_pending_begin_is_the_labeled_begin_in_audio_time() {
+    let cfg = cfg_no_smooth();
+    let (off, dt) = (0.015, 0.04);
+    let mut step = HystStep::new(&cfg, off, dt);
+    assert_eq!(step.pending_begin(), None, "no value fed: no candidate");
+    assert_eq!(step.push(0.0), None);
+    assert_eq!(step.pending_begin(), None, "below rising: no candidate");
+    // Rising crossing at ii = 1: begin = dt * (1 - (1.0 - 0.5) / (1.0 - 0.0)) = dt / 2.
+    assert_eq!(step.push(1.0), None);
+    let pending = step
+        .pending_begin()
+        .expect("an open candidate after the rising crossing");
+    assert_eq!(pending.to_bits(), (dt * 0.5 + off).to_bits());
+    // The falling crossing closes it; the labeled tuple's begin is the pending begin verbatim.
+    let (begin, _end) = step
+        .push(0.0)
+        .expect("area 0: a single falling crossing labels");
+    assert_eq!(begin.to_bits(), pending.to_bits());
+    assert_eq!(step.pending_begin(), None, "closed: no candidate");
+}
+
+/// The INIT seed is the one candidate at `begin == 0.0` exactly (the `>=` edge of
+/// `pending_begin`), and the tail flush is the one close outside `push`'s label site.
+#[test]
+fn hyst_step_pending_begin_init_seed_and_tail_flush() {
+    let cfg = cfg_no_smooth();
+    let (off, dt) = (0.015, 0.04);
+    let mut step = HystStep::new(&cfg, off, dt);
+    assert_eq!(step.push(1.0), None);
+    assert_eq!(step.pending_begin().map(f64::to_bits), Some(off.to_bits()));
+    assert_eq!(step.push(1.0), None);
+    let (begin, end) = step.flush_tail().expect("open at EOS: the tail closes it");
+    assert_eq!(begin.to_bits(), off.to_bits());
+    assert_eq!(end.to_bits(), (dt * 2.0 + off).to_bits());
+    assert_eq!(step.pending_begin(), None, "flushed: no candidate");
 }

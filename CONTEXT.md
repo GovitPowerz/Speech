@@ -24,7 +24,7 @@ _Avoid_: mask, labels
 One entry of a Segmentation: a class (`Speech`, `Other`, `End`) and a begin time.
 
 **Hysteresis**:
-The rising / falling double threshold with an area condition that turns posteriors into raw segments.
+The rising / falling double threshold with an area condition that turns posteriors into raw segments. A step kernel since issue #26 (`HystStep`, one push per convolved value), folded over by the offline decision and driven value by value by the stream.
 
 **Raw segment**:
 A hysteresis output, final once closed. The smoothing pipeline reads raw segments and never revises them.
@@ -159,7 +159,7 @@ _Avoid_: fast for anything merely quick
 A fast-tree cell's f32 counterpart of an exact cell (`FastLstm`, `FastSlstm`, `FastMamba`, `FastCfc`, `FastTransformer`).
 
 **Step kernel**:
-The explicit per-timestep `step(x_t, &mut State)` every fast cell exposes. The offline forward loops it; the streaming session drives it; offline and streamed are therefore the same arithmetic.
+The explicit per-timestep `step(x_t, &mut State)` every fast cell exposes, and since issue #26 the decision layer's `HystStep::push` (one convolved value) and `audio::conv_at` (one convolution output) as well. The offline run loops it; the streaming session drives it; offline and streamed are therefore the same arithmetic.
 
 **Fast SAD plan**:
 The one rate-free algo-3 setup of the fast tree (`fast::plan::FastSadPlan::from_map`): config structs, Fast shape, spec, Cell geometry, normalization type, pack length, fixed gain, weight-file key, and every refusal the config alone decides. The offline fast driver and the frame stream both consume it; the plan is the shared input, the Step kernel the shared arithmetic.

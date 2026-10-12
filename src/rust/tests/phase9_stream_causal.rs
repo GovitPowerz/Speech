@@ -1216,7 +1216,7 @@ fn latency_bounds() {
         // BLOCKED" errs BOTH ways against the TRUE criterion (a raw rising crossing at
         // `p <= end_i + holdback` still un-retracted/un-closed when the unclamped
         // emission frontier passes it -- see `fast::stream::resmooth_and_emit` /
-        // `HystState::advance`, read-only): it UNDER-classifies crossings the area test
+        // `HystStep::push`, read-only): it UNDER-classifies crossings the area test
         // RETRACTS (safe -- an under-classified emission has no witness and fails tight
         // loudly, never silently passes on a wrong bound) and OVER-classifies crossings
         // that DO close, because `add_padding` shrinks the true gap while this proxy's
