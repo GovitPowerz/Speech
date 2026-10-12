@@ -24,7 +24,7 @@ _Avoid_: mask, labels
 One entry of a Segmentation: a class (`Speech`, `Other`, `End`) and a begin time.
 
 **Hysteresis**:
-The rising / falling double threshold with an area condition that turns posteriors into raw segments.
+The rising / falling double threshold with an area condition that turns posteriors into raw segments. One step kernel (`HystStep`, one push per convolved value), folded over by the offline decision and driven value by value by the stream.
 
 **Raw segment**:
 A hysteresis output, final once closed. The smoothing pipeline reads raw segments and never revises them.

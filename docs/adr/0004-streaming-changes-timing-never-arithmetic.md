@@ -1,6 +1,6 @@
 # ADR-0004: Streaming changes timing, never arithmetic: the frozen-norm causality cut, shared step kernels, and emission with zero retractions
 
-**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9); the bidirectional refusal scoped to the frame stream 2026-10-09 (issue #57)
+**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9); the bidirectional refusal scoped to the frame stream 2026-10-09 (issue #57); the decision layer brought under the kernel rule 2026-10-12 (issue #26)
 
 ## Context
 
@@ -26,6 +26,17 @@ batches one side and not the other is caught by the bit-equality gate.
 `fast::plan::FastSadPlan` (rate-free) and one `SadTimeline` (at the rate) are the shared input, the
 step kernel the shared arithmetic; a divergence between the offline and streamed setups is now a
 single-site change, and the gates above are the proof that moving the setup moved no arithmetic.
+**Amendment (2026-10-12, issue #26):** the rule now covers the DECISION layer too. The hysteresis
+is one step kernel, `tasks::segmenter::HystStep` (`push` per convolved value, `flush_tail` at the
+end, `pending_begin` read by the stream alone), which the offline `update_segmentation_raw` folds
+over and `fast::stream::StreamDecision` drives value by value; the edge-truncating convolution is
+one per-output body, `audio::conv_at`, which `convolution_horiz_slice` calls on its snapshot and
+`ConvStream` on its ring. Before #26 the stream carried loop-state-for-loop-state transcriptions of
+both, held equal by one test; now the self-consistent leg
+(`phase8_stream_decision.rs::raw_hysteresis_matches_offline`) pins state threading only, per
+ADR-0005's battery lesson, and the arithmetic has exactly the owners the exact tree always had (the
+Phase 0b-ii golden, the numpy oracle, the Phase 1 audio goldens). The move is an ADR-0002 touch
+class, the stepwise hoist.
 
 **Emission is settled-prefix only, with zero retractions.** The decision layer emits a segment
 only once nothing in the future can change it: the frontier is bounded by the last raw boundary,
