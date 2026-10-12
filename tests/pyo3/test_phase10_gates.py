@@ -384,6 +384,10 @@ def _arch(arm: str, cell: str, direction: str) -> _Arch:
     stacks = ["forward"] + (["backward"] if direction == "bidirectional" else [])
     stack_bases = tuple(min(b["offset"] for b in layout if b["stack"] == s) for s in stacks)
     layer0 = [b for b in layout if (b["stack"], b["layer"]) == ("forward", 0)]
+    # The inner-extent rule below reads a block of `fin` columns as an input projection, so it
+    # needs `fin != out` (true on both arms: 44 or 92 against 24) -- at `fin == out` the Mamba
+    # adapter is absent and `W_in (2 d_inner, out)` would be picked instead.
+    assert fin != out, f"{cell}/{direction}: the input-column rule needs fin != out (got {fin})"
     inputs = [b for b in layer0 if b["kind"] == "weight" and len(b["shape"]) == 2 and b["shape"][1] in (fin, fin + out)]
     assert inputs, f"{cell}/{direction}: no layer-0 input projection block found in the layout"
     offsets = [[b["offset"] - stack_bases[0] + j * b["shape"][1] + k for b in inputs for j in range(b["shape"][0])] for k in range(fin)]

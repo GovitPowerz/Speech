@@ -55,6 +55,6 @@ def nnet_spec(cfg: dict[str, str], prefix: str = "BLSTM") -> dict[str, object]:
     mirrored here (ADR-0006). A present-but-invalid key raises `ValueError` with the engine's
     message, never a default: a silently defaulted geometry would change a pack's length with
     nothing to catch it."""
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
+    import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
 
     return cast(dict[str, object], speech_rs.blstm_config(cfg, prefix))

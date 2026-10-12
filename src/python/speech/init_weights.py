@@ -172,7 +172,7 @@ def init_weights(
     the engine itself through `speech_rs.weight_layout`, so a config the engine refuses
     raises `ValueError` here too, never a default."""
     _check_scheme(scheme)
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
+    import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
 
     layout = cast(list[Block], speech_rs.weight_layout(config, prefix))
     pack = np.zeros(sum(b["len"] for b in layout), dtype=np.float64)

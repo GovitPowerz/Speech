@@ -17,18 +17,16 @@ Byte identity with the pre-#27 builder is pinned by `tests/test_seed_pack_regene
 
 import math
 from pathlib import Path
-from typing import Any, cast
 
 import numpy as np
 import pytest
-import speech_rs
-from numpy.typing import NDArray
 from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
 
+from tests.layout_helpers import block_of, block_slice, draw, layer0, layout_of, pack_length
+
 REF = Path("tests/reference_data/phase4d")
-Block = dict[str, Any]
 
 #: The finalized geometry (spec S2/S3): the RUST constants `TRANSFORMER_DEFAULT_*`, read back
 #: through the seam by `test_the_defaults_are_the_rust_defaults` -- no Python mirror exists.
@@ -39,22 +37,6 @@ DEFAULT_HEADS = 4
 # (out, fin, d_ff): the degenerate 1x1x1, a square-ish shape, a wide fan-in, and a d_ff SMALLER
 # than H (so `W_1` and `W_2` are non-square in opposite directions). `heads = 1` throughout.
 SHAPES: tuple[tuple[int, int, int], ...] = ((1, 1, 1), (4, 5, 4), (2, 3, 7), (3, 7, 2), (6, 11, 5))
-
-
-def _layout(cfg: dict[str, str]) -> list[Block]:
-    return cast(list[Block], speech_rs.weight_layout(cfg, "BLSTM"))
-
-
-def _block(layout: list[Block], stack: str, layer: int, name: str) -> Block:
-    return next(b for b in layout if (b["stack"], b["layer"], b["name"]) == (stack, layer, name))
-
-
-def _slice(pack: NDArray[np.float64], b: Block) -> NDArray[np.float64]:
-    return pack[b["offset"] : b["offset"] + b["len"]]
-
-
-def _length(cfg: dict[str, str]) -> int:
-    return sum(b["len"] for b in _layout(cfg))
 
 
 def cell_cfg(
@@ -95,11 +77,6 @@ def layer_cfg(out: int, fin: int, d_ff: int) -> dict[str, str]:
     }
 
 
-def _layer0(cfg: dict[str, str], pack: NDArray[np.float64]) -> NDArray[np.float64]:
-    blocks = [x for x in _layout(cfg) if (x["stack"], x["layer"]) == ("forward", 0)]
-    return pack[blocks[0]["offset"] : blocks[-1]["offset"] + blocks[-1]["len"]]
-
-
 NAMES = ["W_a", "b_a", "g_1", "W_qkv", "b_qkv", "W_o", "b_o", "g_2", "W_1", "b_1", "W_2", "b_2"]
 
 
@@ -111,7 +88,7 @@ NAMES = ["W_a", "b_a", "g_1", "W_qkv", "b_qkv", "W_o", "b_o", "g_2", "W_1", "b_1
 @pytest.mark.parametrize(("out", "fin", "d_ff"), SHAPES)
 def test_layer_length_is_the_closed_form(out: int, fin: int, d_ff: int) -> None:
     cfg = layer_cfg(out, fin, d_ff)
-    blocks = [x for x in _layout(cfg) if (x["stack"], x["layer"]) == ("forward", 0)]
+    blocks = [x for x in layout_of(cfg) if (x["stack"], x["layer"]) == ("forward", 0)]
     assert [x["name"] for x in blocks] == NAMES
     assert sum(x["len"] for x in blocks) == out * (fin + 1) + out + 3 * out * (out + 1) + out * (out + 1) + out + d_ff * (out + 1) + out * (d_ff + 1)
 
@@ -122,29 +99,29 @@ def test_every_bias_block_is_exactly_zero(out: int, fin: int, d_ff: int) -> None
     shift-invariance), pinned Rust-side on the gradient, and seeded like the rest."""
     cfg = layer_cfg(out, fin, d_ff)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(1))[0]
-    layout = _layout(cfg)
+    layout = layout_of(cfg)
     for name in ("b_a", "b_qkv", "b_o", "b_1", "b_2"):
-        assert np.all(_slice(flat, _block(layout, "forward", 0, name)) == 0.0), name
+        assert np.all(block_slice(flat, block_of(layout, "forward", 0, name)) == 0.0), name
 
 
 @pytest.mark.parametrize(("out", "fin", "d_ff"), SHAPES)
 def test_the_two_rmsnorm_gains_are_exactly_one(out: int, fin: int, d_ff: int) -> None:
     cfg = layer_cfg(out, fin, d_ff)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(1))[0]
-    layout = _layout(cfg)
+    layout = layout_of(cfg)
     for name in ("g_1", "g_2"):
-        g = _block(layout, "forward", 0, name)
+        g = block_of(layout, "forward", 0, name)
         assert g["kind"] == "gain"
-        assert np.all(_slice(flat, g) == 1.0), name
+        assert np.all(block_slice(flat, g) == 1.0), name
 
 
 @pytest.mark.parametrize(("out", "fin", "d_ff"), SHAPES)
 def test_every_weight_block_is_drawn_and_finite(out: int, fin: int, d_ff: int) -> None:
     cfg = layer_cfg(out, fin, d_ff)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(2))[0]
-    layout = _layout(cfg)
+    layout = layout_of(cfg)
     for name in ("W_a", "W_qkv", "W_o", "W_1", "W_2"):
-        block = _slice(flat, _block(layout, "forward", 0, name))
+        block = block_slice(flat, block_of(layout, "forward", 0, name))
         assert np.all(np.isfinite(block)) and np.all(block != 0.0), name
 
 
@@ -154,11 +131,11 @@ def test_xavier_and_he_scale_the_same_block_differently() -> None:
     cfg = layer_cfg(16, 24, 32)
     xav = init_weights(cfg, "BLSTM", np.random.default_rng(4), "xavier")[0]
     he = init_weights(cfg, "BLSTM", np.random.default_rng(4), "he")[0]
-    w = _block(_layout(cfg), "forward", 0, "W_qkv")
+    w = block_of(layout_of(cfg), "forward", 0, "W_qkv")
     fan_in, fan_out = 16, 48
     assert (w["fan_in"], w["fan_out"]) == (fan_in, fan_out)
     want = math.sqrt(2.0 / fan_in) / (math.sqrt(6.0 / (fan_in + fan_out)) / math.sqrt(3.0))
-    assert np.std(_slice(he, w)) / np.std(_slice(xav, w)) == pytest.approx(want, rel=0.25)
+    assert np.std(block_slice(he, w)) / np.std(block_slice(xav, w)) == pytest.approx(want, rel=0.25)
 
 
 # ------------------------------------------------------------------------------------- #
@@ -169,41 +146,28 @@ def test_xavier_and_he_scale_the_same_block_differently() -> None:
 # ------------------------------------------------------------------------------------- #
 
 
-def _xavier(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
-    limit = math.sqrt(6.0 / (fan_in + fan_out))
-    return np.asarray(rng.uniform(-limit, limit, size=shape), dtype=np.float64).reshape(-1)
-
-
-def _he(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int) -> np.ndarray:
-    return np.asarray(rng.normal(0.0, math.sqrt(2.0 / fan_in), size=shape), dtype=np.float64).reshape(-1)
-
-
-def _blk(rng: np.random.Generator, scheme: str, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
-    return _xavier(rng, shape, fan_in, fan_out) if scheme == "xavier" else _he(rng, shape, fan_in)
-
-
 def _reconstruct(out: int, fin: int, d_ff: int, scheme: str, seed: int, swap_ffn: bool = False) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    parts: list[np.ndarray] = [_blk(rng, scheme, (out, fin), fin, out), np.zeros(out), np.ones(out)]
-    parts += [_blk(rng, scheme, (3 * out, out), out, 3 * out), np.zeros(3 * out)]
-    parts += [_blk(rng, scheme, (out, out), out, out), np.zeros(out), np.ones(out)]
+    parts: list[np.ndarray] = [draw(rng, scheme, (out, fin), fin, out), np.zeros(out), np.ones(out)]
+    parts += [draw(rng, scheme, (3 * out, out), out, 3 * out), np.zeros(3 * out)]
+    parts += [draw(rng, scheme, (out, out), out, out), np.zeros(out), np.ones(out)]
     if swap_ffn:  # the two FFN draws REVERSED, each result left in the slot its own line occupies
-        parts += [_blk(rng, scheme, (out, d_ff), d_ff, out), np.zeros(d_ff), _blk(rng, scheme, (d_ff, out), out, d_ff), np.zeros(out)]
+        parts += [draw(rng, scheme, (out, d_ff), d_ff, out), np.zeros(d_ff), draw(rng, scheme, (d_ff, out), out, d_ff), np.zeros(out)]
     else:
-        parts += [_blk(rng, scheme, (d_ff, out), out, d_ff), np.zeros(d_ff), _blk(rng, scheme, (out, d_ff), d_ff, out), np.zeros(out)]
+        parts += [draw(rng, scheme, (d_ff, out), out, d_ff), np.zeros(d_ff), draw(rng, scheme, (out, d_ff), d_ff, out), np.zeros(out)]
     return np.concatenate(parts)
 
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
 @pytest.mark.parametrize(("out", "fin", "d_ff"), SHAPES)
-def test_layer_is_reproducible_block_by_block(out: int, fin: int, d_ff: int, scheme: str) -> None:
+def test_layer_is_reproducible_block_byblock(out: int, fin: int, d_ff: int, scheme: str) -> None:
     cfg = layer_cfg(out, fin, d_ff)
     got = init_weights(cfg, "BLSTM", np.random.default_rng(41), scheme)[0]  # type: ignore[arg-type]
-    assert np.array_equal(_layer0(cfg, got), _reconstruct(out, fin, d_ff, scheme, 41))
+    assert np.array_equal(layer0(cfg, got), _reconstruct(out, fin, d_ff, scheme, 41))
 
 
 @pytest.mark.parametrize(("scheme", "same_bytes"), [("xavier", True), ("he", False)])
-def test_the_ffn_draw_order_is_only_visible_under_he(scheme: str, same_bytes: bool) -> None:
+def test_the_ffn_draw_order_is_only_visible_underhe(scheme: str, same_bytes: bool) -> None:
     """The measured LIMIT of the pin above, recorded rather than left as a surprise: reversing
     the two FFN draws is a BIT-LEVEL NO-OP under Xavier (same limit over the same count) and
     IS visible under He (`sqrt(2/fan_in)` distinguishes `H` from `d_ff`). The two schemes miss
@@ -211,7 +175,7 @@ def test_the_ffn_draw_order_is_only_visible_under_he(scheme: str, same_bytes: bo
     out, fin, d_ff = 3, 7, 5  # out != d_ff, so He's fan_in genuinely differs between the two.
     cfg = layer_cfg(out, fin, d_ff)
     got = init_weights(cfg, "BLSTM", np.random.default_rng(41), scheme)[0]  # type: ignore[arg-type]
-    assert np.array_equal(_layer0(cfg, got), _reconstruct(out, fin, d_ff, scheme, 41, swap_ffn=True)) is same_bytes
+    assert np.array_equal(layer0(cfg, got), _reconstruct(out, fin, d_ff, scheme, 41, swap_ffn=True)) is same_bytes
 
 
 # ------------------------------------------------------------------------------------- #
@@ -221,11 +185,11 @@ def test_the_ffn_draw_order_is_only_visible_under_he(scheme: str, same_bytes: bo
 
 @pytest.mark.parametrize("direction", ["bidirectional", "forward"])
 @pytest.mark.parametrize("d_ff", [1, 5])
-def test_net_pack_length(direction: str, d_ff: int) -> None:
+def test_net_packpack_length(direction: str, d_ff: int) -> None:
     cfg = cell_cfg(direction, d_ff)
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(0))
     assert len(packs) == 1
-    assert packs[0].shape == (_length(cfg),)
+    assert packs[0].shape == (pack_length(cfg),)
 
 
 def test_window_and_heads_never_move_the_pack() -> None:
@@ -236,13 +200,13 @@ def test_window_and_heads_never_move_the_pack() -> None:
     for window in (1, 8, 4096):
         cfg = cell_cfg() | {"Transformer_Window": str(window)}
         assert np.array_equal(init_weights(cfg, "BLSTM", np.random.default_rng(8))[0], base), window
-        assert _layout(cfg) == _layout(cell_cfg())
+        assert layout_of(cfg) == layout_of(cell_cfg())
     wide = cell_cfg(lstm="5,4,4", heads=1)
     base = init_weights(wide, "BLSTM", np.random.default_rng(8))[0]
     for heads in (2, 4):
         cfg = cell_cfg(lstm="5,4,4", heads=heads)
         assert np.array_equal(init_weights(cfg, "BLSTM", np.random.default_rng(8))[0], base), heads
-        assert _layout(cfg) == _layout(wide)
+        assert layout_of(cfg) == layout_of(wide)
 
 
 def test_determinism_same_seed_is_bit_identical() -> None:
@@ -303,7 +267,7 @@ def test_the_defaults_are_the_rust_defaults() -> None:
     size the net the engine builds AND the pack Python seeds, both through the seam. These
     literals are the documented values, pinned against what the engine says."""
     cfg = {**_tuple_a_cfg(), "BLSTM_Cell_Type": "transformer"}
-    w1 = _block(_layout(cfg), "forward", 0, "W_1")
+    w1 = block_of(layout_of(cfg), "forward", 0, "W_1")
     assert w1["shape"] == [SIZED_D_FF, 24]
     assert config_bridge.nnet_spec(cfg)["Transformer"] == {"window": DEFAULT_WINDOW, "heads": DEFAULT_HEADS, "d_ff": SIZED_D_FF}
 
@@ -322,18 +286,18 @@ def _lineage(lstm: str, cell: str, d_ff: int = SIZED_D_FF, direction: str = "bid
 
 
 def _dev(lstm: str, d_ff: int, direction: str = "bidirectional") -> float:
-    ref = _length(_lineage(lstm, "lstm", direction=direction))
-    return (_length(_lineage(lstm, "transformer", d_ff, direction)) - ref) / ref
+    ref = pack_length(_lineage(lstm, "lstm", direction=direction))
+    return (pack_length(_lineage(lstm, "transformer", d_ff, direction)) - ref) / ref
 
 
 def test_lineage_pack_lengths_are_the_documented_arithmetic() -> None:
     """The two closed forms quoted in the module docstring, MEASURED off the engine. `16199 +
     196*d` (v1) and `13871 + 196*d` (v2) are what the sizing decision rests on."""
-    assert _length(_lineage(_V1, "lstm")) == 33671  # the committed tuple-A pack length.
-    assert _length(_lineage(_V2, "lstm")) == 24431
+    assert pack_length(_lineage(_V1, "lstm")) == 33671  # the committed tuple-A pack length.
+    assert pack_length(_lineage(_V2, "lstm")) == 24431
     for d in (1, 54, 64, 89):
-        assert _length(_lineage(_V1, "transformer", d)) == 16199 + 196 * d
-        assert _length(_lineage(_V2, "transformer", d)) == 13871 + 196 * d
+        assert pack_length(_lineage(_V1, "transformer", d)) == 16199 + 196 * d
+        assert pack_length(_lineage(_V2, "transformer", d)) == 13871 + 196 * d
 
 
 def test_the_default_is_inside_both_lineage_bands() -> None:
@@ -341,8 +305,8 @@ def test_the_default_is_inside_both_lineage_bands() -> None:
     SMALLEST such integer -- 63 misses v1 by 0.22 percentage points."""
     assert abs(_dev(_V2, SIZED_D_FF)) < _BAND
     assert abs(_dev(_V1, SIZED_D_FF)) < _BAND
-    assert _length(_lineage(_V2, "transformer")) == 26415
-    assert _length(_lineage(_V1, "transformer")) == 28743
+    assert pack_length(_lineage(_V2, "transformer")) == 26415
+    assert pack_length(_lineage(_V1, "transformer")) == 28743
     assert abs(_dev(_V1, SIZED_D_FF - 1)) > _BAND  # 63 -> v1 at -15.22%, OUT.
     assert _dev(_V2, SIZED_D_FF) == pytest.approx(0.0812, abs=5e-5)
     assert _dev(_V1, SIZED_D_FF) == pytest.approx(-0.1464, abs=5e-5)
@@ -353,7 +317,7 @@ def test_the_two_bands_and_their_intersection() -> None:
     [36, 72], v1 tolerates [64, 114], so the intersection is [64, 72], NON-EMPTY -- which is why
     the spec's v2-wins tiebreak never had to fire. v2's own argmin (54) sits OUTSIDE v1's band
     (-20.46%): the "inside both" rule decides, and v2's pick inside the feasible set is 64."""
-    lstm_v1, lstm_v2 = _length(_lineage(_V1, "lstm")), _length(_lineage(_V2, "lstm"))
+    lstm_v1, lstm_v2 = pack_length(_lineage(_V1, "lstm")), pack_length(_lineage(_V2, "lstm"))
     dev_v1 = {d: (16199 + 196 * d - lstm_v1) / lstm_v1 for d in range(1, 200)}
     dev_v2 = {d: (13871 + 196 * d - lstm_v2) / lstm_v2 for d in range(1, 200)}
     v2_band = [d for d in range(1, 200) if abs(dev_v2[d]) <= _BAND]
@@ -363,7 +327,7 @@ def test_the_two_bands_and_their_intersection() -> None:
     both = sorted(set(v2_band) & set(v1_band))
     assert both == list(range(64, 73)) and both[0] == SIZED_D_FF
     argmin_v2 = min(dev_v2, key=lambda d: abs(dev_v2[d]))
-    assert argmin_v2 == 54 and _length(_lineage(_V2, "transformer", 54)) == 24455
+    assert argmin_v2 == 54 and pack_length(_lineage(_V2, "transformer", 54)) == 24455
     assert dev_v1[argmin_v2] == pytest.approx(-0.2046, abs=5e-5)  # THE CONFLICT
     assert min(both, key=lambda d: abs(dev_v2[d])) == SIZED_D_FF
     assert min(dev_v1, key=lambda d: abs(dev_v1[d])) == 89  # v1's own argmin, for the record.
@@ -373,8 +337,8 @@ def test_forward_lineages_keep_the_same_verdict() -> None:
     """`cell_overlay` resizes the MLP input from 2H to H under `forward`, so both packs shed the
     same MLP rows and one stack -- the band verdict must not flip with the direction."""
     for lstm, lstm_want, trans_want in ((_V2, 12239, 13231), (_V1, 16871, 14407)):
-        assert _length(_lineage(lstm, "lstm", direction="forward")) == lstm_want
-        assert _length(_lineage(lstm, "transformer", direction="forward")) == trans_want
+        assert pack_length(_lineage(lstm, "lstm", direction="forward")) == lstm_want
+        assert pack_length(_lineage(lstm, "transformer", direction="forward")) == trans_want
         assert abs(_dev(lstm, SIZED_D_FF, "forward")) < _BAND
 
 
@@ -442,4 +406,4 @@ def test_overlaid_config_seeds_through_the_matching_builder() -> None:
         **{f"BLSTM_{d}_Is{p}Active": "true" for d in ("Forward", "Backward") for p in ("CellsPeepholes", "GatesPeepholes", "GatesRecurrentPeepholes")},
     }
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(0))[0]
-    assert flat.shape == (16199 + 196 * SIZED_D_FF,) == (_length(cfg),)
+    assert flat.shape == (16199 + 196 * SIZED_D_FF,) == (pack_length(cfg),)

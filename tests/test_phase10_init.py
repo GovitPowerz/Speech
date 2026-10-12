@@ -18,18 +18,17 @@ Byte identity with the pre-#27 builder is pinned by `tests/test_seed_pack_regene
 
 import math
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import pytest
-import speech_rs
-from numpy.typing import NDArray
 from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
 
+from tests.layout_helpers import block_of, block_slice, draw, layer0, layout_of, pack_length
+
 REF = Path("tests/reference_data/phase4d")
-Block = dict[str, Any]
 
 #: The finalized default (spec S1.4): the RUST constant `CFC_DEFAULT_BACKBONE_UNITS`, read back
 #: through the seam by `test_the_default_is_the_rust_default` -- no Python mirror exists.
@@ -37,22 +36,6 @@ SIZED_BACKBONE_UNITS = 45
 
 # (out, fin, B, L): the degenerate 1x1x1x1, a deep backbone, and three single-layer shapes.
 SHAPES: tuple[tuple[int, int, int, int], ...] = ((1, 1, 1, 1), (4, 5, 8, 2), (2, 3, 4, 1), (3, 7, 8, 1), (3, 5, 4, 3))
-
-
-def _layout(cfg: dict[str, str]) -> list[Block]:
-    return cast(list[Block], speech_rs.weight_layout(cfg, "BLSTM"))
-
-
-def _block(layout: list[Block], stack: str, layer: int, name: str) -> Block:
-    return next(b for b in layout if (b["stack"], b["layer"], b["name"]) == (stack, layer, name))
-
-
-def _slice(pack: NDArray[np.float64], b: Block) -> NDArray[np.float64]:
-    return pack[b["offset"] : b["offset"] + b["len"]]
-
-
-def _length(cfg: dict[str, str]) -> int:
-    return sum(b["len"] for b in _layout(cfg))
 
 
 def cell_cfg(direction: str = "bidirectional", b: int = 4, layers: int = 1, lstm: str = "5,3,4", lsub: str = "2,1", cell: str = "cfc") -> dict[str, str]:
@@ -91,11 +74,6 @@ def layer_cfg(out: int, fin: int, b: int, layers: int) -> dict[str, str]:
     }
 
 
-def _layer0(cfg: dict[str, str], pack: NDArray[np.float64]) -> NDArray[np.float64]:
-    blocks = [x for x in _layout(cfg) if (x["stack"], x["layer"]) == ("forward", 0)]
-    return pack[blocks[0]["offset"] : blocks[-1]["offset"] + blocks[-1]["len"]]
-
-
 # ------------------------------------------------------------------------------------- #
 # Layer-level: the S1.5 rules, block by block
 # ------------------------------------------------------------------------------------- #
@@ -104,7 +82,7 @@ def _layer0(cfg: dict[str, str], pack: NDArray[np.float64]) -> NDArray[np.float6
 @pytest.mark.parametrize(("out", "fin", "b", "layers"), SHAPES)
 def test_layer_length_is_the_closed_form(out: int, fin: int, b: int, layers: int) -> None:
     cfg = layer_cfg(out, fin, b, layers)
-    blocks = [x for x in _layout(cfg) if (x["stack"], x["layer"]) == ("forward", 0)]
+    blocks = [x for x in layout_of(cfg) if (x["stack"], x["layer"]) == ("forward", 0)]
     assert sum(x["len"] for x in blocks) == b * (fin + out + 1) + (layers - 1) * b * (b + 1) + 3 * out * (b + 1)
     assert [x["name"] for x in blocks] == [f"{k}_bb{li}" for li in range(layers) for k in ("W", "b")] + ["W_ff1", "b_ff1", "W_ff2", "b_ff2", "W_g", "b_g"]
 
@@ -116,10 +94,10 @@ def test_every_bias_block_is_exactly_zero(out: int, fin: int, b: int, layers: in
     no reference-lineage constants at all -- unlike Mamba's S3.4 block."""
     cfg = layer_cfg(out, fin, b, layers)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(1))[0]
-    biases = [x for x in _layout(cfg) if x["kind"] == "bias" and x["stack"] == "forward"]
+    biases = [x for x in layout_of(cfg) if x["kind"] == "bias" and x["stack"] == "forward"]
     assert len(biases) == layers + 3
     for x in biases:
-        assert np.all(_slice(flat, x) == 0.0), x["name"]
+        assert np.all(block_slice(flat, x) == 0.0), x["name"]
 
 
 @pytest.mark.parametrize(("out", "fin", "b", "layers"), SHAPES)
@@ -128,10 +106,10 @@ def test_every_weight_block_is_drawn_and_finite(out: int, fin: int, b: int, laye
     pass trivially."""
     cfg = layer_cfg(out, fin, b, layers)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(2))[0]
-    weights = [x for x in _layout(cfg) if x["kind"] == "weight" and x["stack"] == "forward"]
+    weights = [x for x in layout_of(cfg) if x["kind"] == "weight" and x["stack"] == "forward"]
     assert len(weights) == layers + 3
     for x in weights:
-        block = _slice(flat, x)
+        block = block_slice(flat, x)
         assert np.all(np.isfinite(block)) and np.all(block != 0.0), x["name"]
 
 
@@ -142,11 +120,11 @@ def test_xavier_and_he_scale_the_same_block_differently() -> None:
     cfg = layer_cfg(8, 8, 32, 1)
     xav = init_weights(cfg, "BLSTM", np.random.default_rng(3), "xavier")[0]
     he = init_weights(cfg, "BLSTM", np.random.default_rng(3), "he")[0]
-    w = _block(_layout(cfg), "forward", 0, "W_bb0")
+    w = block_of(layout_of(cfg), "forward", 0, "W_bb0")
     fan_in, fan_out = 8 + 8, 32
     assert (w["fan_in"], w["fan_out"]) == (fan_in, fan_out)
     want = math.sqrt(2.0 / fan_in) / (math.sqrt(6.0 / (fan_in + fan_out)) / math.sqrt(3.0))
-    assert np.std(_slice(he, w)) / np.std(_slice(xav, w)) == pytest.approx(want, rel=0.25)
+    assert np.std(block_slice(he, w)) / np.std(block_slice(xav, w)) == pytest.approx(want, rel=0.25)
 
 
 # ------------------------------------------------------------------------------------- #
@@ -156,29 +134,16 @@ def test_xavier_and_he_scale_the_same_block_differently() -> None:
 # ------------------------------------------------------------------------------------- #
 
 
-def _xavier(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
-    limit = math.sqrt(6.0 / (fan_in + fan_out))
-    return np.asarray(rng.uniform(-limit, limit, size=shape), dtype=np.float64).reshape(-1)
-
-
-def _he(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int) -> np.ndarray:
-    return np.asarray(rng.normal(0.0, math.sqrt(2.0 / fan_in), size=shape), dtype=np.float64).reshape(-1)
-
-
-def _blk(rng: np.random.Generator, scheme: str, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
-    return _xavier(rng, shape, fan_in, fan_out) if scheme == "xavier" else _he(rng, shape, fan_in)
-
-
 def _reconstruct(out: int, fin: int, b: int, layers: int, scheme: str, seed: int, head_order: tuple[int, ...] = (0, 1, 2)) -> np.ndarray:
     rng = np.random.default_rng(seed)
     want: list[np.ndarray] = []
     for li in range(layers):
         fan_in = fin + out if li == 0 else b
-        want.append(_blk(rng, scheme, (b, fan_in), fan_in, b))
+        want.append(draw(rng, scheme, (b, fan_in), fan_in, b))
         want.append(np.zeros(b))
     heads = []
     for _ in range(3):  # [ff1 | ff2 | gate]
-        heads.append(_blk(rng, scheme, (out, b), b, out))
+        heads.append(draw(rng, scheme, (out, b), b, out))
     for k in head_order:
         want.append(heads[k])
         want.append(np.zeros(out))
@@ -187,17 +152,17 @@ def _reconstruct(out: int, fin: int, b: int, layers: int, scheme: str, seed: int
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
 @pytest.mark.parametrize(("out", "fin", "b", "layers"), SHAPES)
-def test_layer_is_reproducible_block_by_block(out: int, fin: int, b: int, layers: int, scheme: str) -> None:
+def test_layer_is_reproducible_block_byblock(out: int, fin: int, b: int, layers: int, scheme: str) -> None:
     cfg = layer_cfg(out, fin, b, layers)
     got = init_weights(cfg, "BLSTM", np.random.default_rng(31), scheme)[0]  # type: ignore[arg-type]
-    assert np.array_equal(_layer0(cfg, got), _reconstruct(out, fin, b, layers, scheme, 31))
+    assert np.array_equal(layer0(cfg, got), _reconstruct(out, fin, b, layers, scheme, 31))
 
 
 def test_reconstruction_rejects_a_head_swap() -> None:
     """Non-vacuity for the pin above: `W_ff1` and `W_ff2` are same-shape, same-fan,
     same-scheme draws; only the stream position tells them apart."""
     cfg = layer_cfg(3, 5, 4, 1)
-    got = _layer0(cfg, init_weights(cfg, "BLSTM", np.random.default_rng(31))[0])
+    got = layer0(cfg, init_weights(cfg, "BLSTM", np.random.default_rng(31))[0])
     swapped = _reconstruct(3, 5, 4, 1, "xavier", 31, head_order=(1, 0, 2))
     assert got.shape == swapped.shape
     assert not np.array_equal(got, swapped)
@@ -210,11 +175,11 @@ def test_reconstruction_rejects_a_head_swap() -> None:
 
 @pytest.mark.parametrize("direction", ["bidirectional", "forward"])
 @pytest.mark.parametrize("layers", [1, 2])
-def test_net_pack_length(direction: str, layers: int) -> None:
+def test_net_packpack_length(direction: str, layers: int) -> None:
     cfg = cell_cfg(direction, b=6, layers=layers)
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(0))
     assert len(packs) == 1
-    assert packs[0].shape == (_length(cfg),)
+    assert packs[0].shape == (pack_length(cfg),)
 
 
 def test_determinism_same_seed_is_bit_identical() -> None:
@@ -269,7 +234,7 @@ def test_the_default_is_the_rust_default() -> None:
     sizes the net the engine builds AND the pack Python seeds, because both read it through
     the seam. This literal is the documented value, pinned against what the engine says."""
     cfg = {**_tuple_a_cfg(), "BLSTM_Cell_Type": "cfc"}
-    w = _block(_layout(cfg), "forward", 0, "W_bb0")
+    w = block_of(layout_of(cfg), "forward", 0, "W_bb0")
     assert w["shape"] == [SIZED_BACKBONE_UNITS, 92 + 24]
     assert cast(dict[str, int], config_bridge.nnet_spec(cfg)["Cfc"])["backbone_units"] == SIZED_BACKBONE_UNITS
 
@@ -290,19 +255,19 @@ _V1, _V2 = "23,24,24", "11,24,24"
 def test_lineage_pack_lengths_are_the_documented_arithmetic() -> None:
     """The two closed forms quoted in the module docstring, MEASURED off the engine. `620*B +
     935` (v1) and `524*B + 911` (v2) are what the sizing decision rests on."""
-    assert _length(_lineage(_V1, "lstm")) == 33671  # the committed tuple-A pack length.
-    assert _length(_lineage(_V2, "lstm")) == 24431
+    assert pack_length(_lineage(_V1, "lstm")) == 33671  # the committed tuple-A pack length.
+    assert pack_length(_lineage(_V2, "lstm")) == 24431
     for b in (1, 24, 45, 53):
-        assert _length(_lineage(_V1, "cfc", b)) == 620 * b + 935
-        assert _length(_lineage(_V2, "cfc", b)) == 524 * b + 911
+        assert pack_length(_lineage(_V1, "cfc", b)) == 620 * b + 935
+        assert pack_length(_lineage(_V2, "cfc", b)) == 524 * b + 911
 
 
 def test_the_default_matches_the_v2_lstm_pack_within_15_percent() -> None:
     """THE SIZING RULE (spec S1.4/S8.2). The default is sized against the v2 lineage: at
     B = 45 the CfC pack is +0.25% of v2's LSTM pack, and the neighbouring integers are
     strictly worse, so this is the optimum and not merely an in-band value."""
-    lstm = _length(_lineage(_V2, "lstm"))
-    at = {b: _length(_lineage(_V2, "cfc", b)) for b in (44, 45, 46)}
+    lstm = pack_length(_lineage(_V2, "lstm"))
+    at = {b: pack_length(_lineage(_V2, "cfc", b)) for b in (44, 45, 46)}
     rel = {b: abs(v - lstm) / lstm for b, v in at.items()}
     assert at[SIZED_BACKBONE_UNITS] == 24491
     assert rel[SIZED_BACKBONE_UNITS] < 0.01
@@ -313,19 +278,19 @@ def test_the_default_also_leaves_the_v1_lineage_in_band() -> None:
     """v1 CfC is a MECHANICAL leg with no param-match requirement, so this is a bonus, not a
     gate -- but it is the reason no per-config override of the default is needed anywhere:
     B = 45 is simultaneously v2's optimum and the SMALLEST integer inside v1's band."""
-    lstm = _length(_lineage(_V1, "lstm"))
-    assert abs(_length(_lineage(_V1, "cfc", SIZED_BACKBONE_UNITS)) - lstm) / lstm < 0.15
-    assert abs(_length(_lineage(_V1, "cfc", SIZED_BACKBONE_UNITS - 1)) - lstm) / lstm > 0.15
+    lstm = pack_length(_lineage(_V1, "lstm"))
+    assert abs(pack_length(_lineage(_V1, "cfc", SIZED_BACKBONE_UNITS)) - lstm) / lstm < 0.15
+    assert abs(pack_length(_lineage(_V1, "cfc", SIZED_BACKBONE_UNITS - 1)) - lstm) / lstm > 0.15
     # v1's own optimum, quoted in the docstring, for the record.
-    assert _length(_lineage(_V1, "cfc", 53)) == 33795
+    assert pack_length(_lineage(_V1, "cfc", 53)) == 33795
 
 
 def test_forward_lineages_keep_the_same_ratios() -> None:
     """`cell_overlay` resizes the MLP input from 2h to h under `forward`, so both packs shed
     the same MLP rows and one stack -- the band verdict must not flip with the direction."""
     for lstm, want_ratio in ((_V2, 0.01), (_V1, 0.15)):
-        ref = _length(_lineage(lstm, "lstm", direction="forward"))
-        assert abs(_length(_lineage(lstm, "cfc", direction="forward")) - ref) / ref < want_ratio
+        ref = pack_length(_lineage(lstm, "lstm", direction="forward"))
+        assert abs(pack_length(_lineage(lstm, "cfc", direction="forward")) - ref) / ref < want_ratio
 
 
 # ------------------------------------------------------------------------------------- #
@@ -383,7 +348,7 @@ def test_overlaid_config_seeds_through_the_matching_builder() -> None:
         **{f"BLSTM_{d}_Is{p}Active": "true" for d in ("Forward", "Backward") for p in ("CellsPeepholes", "GatesPeepholes", "GatesRecurrentPeepholes")},
     }
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(0))[0]
-    assert flat.shape == (620 * SIZED_BACKBONE_UNITS + 935,) == (_length(cfg),)
+    assert flat.shape == (620 * SIZED_BACKBONE_UNITS + 935,) == (pack_length(cfg),)
 
 
 # ------------------------------------------------------------------------------------- #

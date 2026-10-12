@@ -257,8 +257,8 @@ def seed_twin_mode7(dst: Path, name: str = "twin_mode7_lid_slstm") -> None:
 # Read through `speech_rs.weight_layout` -- the block list `BlstmNetwork::set_weights` consumes,
 # computed from the layers themselves. The independence that used to live in a hand-transcribed
 # table lives Rust-side now: every cell's `flat_layout_positions_are_the_spec_order` one-hot
-# probes `set_weights` against the production layout, and `tests/weight_layout.rs` pins the net
-# walk. What the block probe and the structural legs below assert is therefore the engine's
+# probes `set_weights` against the production layout, and `tests/weight_layout.rs` pins the
+# net-level list. What the block probe and the structural legs below assert is therefore the engine's
 # ARITHMETIC per named block, on the engine's own addresses.
 
 

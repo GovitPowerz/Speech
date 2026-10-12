@@ -3332,9 +3332,9 @@ with the clear reverted).
 Branches `feature/weight-layout-seam` (PR1, off `main@c6d9417`) and `feature/weight-layout-draws`
 (PR2, stacked). Before #27 the flat-pack layout lived three times: once in Rust (each cell's
 `for_each_slot`, the LSTM's column-major fills), once in `init_weights.py` (per-cell builders
-emitting the walk) and once in `weight_bridge.py` (the Phase 0a packer, with a second `adim`),
-plus offset tables in the gate and seam tests. Now every layer type lists its own blocks
-(`weight_layout()`, an ADR-0002 introspection touch class), `BlstmNetwork::weight_layout` walks
+emitting the same order) and once in `weight_bridge.py` (the Phase 0a packer, with a second `adim`),
+plus block maps re-derived in the gate and seam tests. Now every layer type lists its own blocks
+(`weight_layout()`, an ADR-0002 introspection touch class), `BlstmNetwork::weight_layout` lists
 them in `set_weights` order, `speech_rs.weight_layout(config, prefix)` exports the list, and
 Python draws per block kind with a name-keyed exception table and an explicit RNG order for the
 legacy LSTM layer. Proof of the move: every Phase 9 seed pack regenerates byte-identical through
@@ -3345,7 +3345,7 @@ goldens byte-green; pytest 1110 passed / 1 skipped non-slow.
 
 One correction to the issue's decision 1: MLP mode (`LSTMNeuronNb[0] == 0`) is NOT "output
 blocks only, no tail" -- `nb_of_weights` counts and `set_weights` consumes a `2 * input_size`
-tail there too, `input_size` being the output net's input width. The walk follows the code and
+tail there too, `input_size` being the output net's input width. The layout follows the code and
 `tests/weight_layout.rs::mlp_mode_is_output_blocks_plus_the_tail_at_the_output_input_width`
 pins it.
 

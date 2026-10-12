@@ -1,7 +1,7 @@
 """Phase 9 Task 4 (re-based on the seam, issue #27): the sLSTM / Mamba draw rules, the
 net-level assembly for every cell, and the baseline arm cell/direction knobs.
 
-THE LAYOUT CONTRACT IS THE RUST WALK, read through `speech_rs.weight_layout`: every block is
+THE LAYOUT CONTRACT IS THE RUST LAYOUT, read through `speech_rs.weight_layout`: every block is
 located by (stack, layer, name) off the engine's own list, and the per-cell pins here are about
 the VALUES a block receives (the S2.4 / S3.4 rules), not about where it sits -- offsets are
 pinned Rust-side by one-hot probes against `set_weights`. The ONE independent transcription
@@ -15,36 +15,19 @@ byte identity with the pre-#27 builders to `tests/test_seed_pack_regeneration.py
 
 import math
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import pytest
-import speech_rs
-from numpy.typing import NDArray
 from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
 
+from tests.layout_helpers import block_of, block_slice, draw, layer0, layout_of, pack_length
+
 REF = Path("tests/reference_data/phase4d")
-Block = dict[str, Any]
 
 TUPLE_A = config_bridge.parse_legacy_config((REF / "tupleA_1_worker_1.config").read_text())
-
-
-def _layout(cfg: dict[str, str]) -> list[Block]:
-    return cast(list[Block], speech_rs.weight_layout(cfg, "BLSTM"))
-
-
-def _block(layout: list[Block], stack: str, layer: int, name: str) -> Block:
-    return next(b for b in layout if (b["stack"], b["layer"], b["name"]) == (stack, layer, name))
-
-
-def _slice(pack: NDArray[np.float64], b: Block) -> NDArray[np.float64]:
-    return pack[b["offset"] : b["offset"] + b["len"]]
-
-
-def _length(cfg: dict[str, str]) -> int:
-    return sum(b["len"] for b in _layout(cfg))
 
 
 def cell_cfg(cell: str, direction: str = "bidirectional", lstm: str = "5,3,4", **geometry: str) -> dict[str, str]:
@@ -71,26 +54,6 @@ def cell_cfg(cell: str, direction: str = "bidirectional", lstm: str = "5,3,4", *
 # ------------------------------------------------------------------------------------- #
 
 
-def _xavier(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
-    limit = math.sqrt(6.0 / (fan_in + fan_out))
-    return np.asarray(rng.uniform(-limit, limit, size=shape), dtype=np.float64).reshape(-1)
-
-
-def _he(rng: np.random.Generator, shape: tuple[int, ...], fan_in: int) -> np.ndarray:
-    return np.asarray(rng.normal(0.0, math.sqrt(2.0 / fan_in), size=shape), dtype=np.float64).reshape(-1)
-
-
-def _blk(rng: np.random.Generator, scheme: str, shape: tuple[int, ...], fan_in: int, fan_out: int) -> np.ndarray:
-    return _xavier(rng, shape, fan_in, fan_out) if scheme == "xavier" else _he(rng, shape, fan_in)
-
-
-def _layer0(cfg: dict[str, str], pack: NDArray[np.float64]) -> NDArray[np.float64]:
-    """The forward stack's layer-0 run -- the FIRST thing drawn, so a fresh `default_rng(seed)`
-    reconstruction lines up with it from the first draw."""
-    blocks = [b for b in _layout(cfg) if (b["stack"], b["layer"]) == ("forward", 0)]
-    return pack[blocks[0]["offset"] : blocks[-1]["offset"] + blocks[-1]["len"]]
-
-
 # ------------------------------------------------------------------------------------- #
 # sLSTM (spec S2.4 init)
 # ------------------------------------------------------------------------------------- #
@@ -100,43 +63,43 @@ def _layer0(cfg: dict[str, str], pack: NDArray[np.float64]) -> NDArray[np.float6
 def test_slstm_biases_follow_the_forget_rule(forget_bias_one: bool) -> None:
     cfg = cell_cfg("slstm")
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(1), forget_bias_one=forget_bias_one)[0]
-    biases = [b for b in _layout(cfg) if b["kind"] == "bias" and b["stack"] in ("forward", "backward")]
+    biases = [b for b in layout_of(cfg) if b["kind"] == "bias" and b["stack"] in ("forward", "backward")]
     assert {b["name"] for b in biases} == {"b_i", "b_f", "b_o", "b_z"}
     for b in biases:
         want = 1.0 if (b["name"] == "b_f" and forget_bias_one) else 0.0
-        assert np.all(_slice(flat, b) == want), (b["stack"], b["layer"], b["name"])
+        assert np.all(block_slice(flat, b) == want), (b["stack"], b["layer"], b["name"])
 
 
 def test_slstm_weight_blocks_are_drawn_on_the_combined_fan() -> None:
     """`R` and `W` share one `fan_in = in + out` (one summed pre-activation), the layout says
     so, and the scheme reaches the values: He / Xavier std ratio at those fans."""
     cfg = cell_cfg("slstm", lstm="24,16,16")
-    layout = _layout(cfg)
+    layout = layout_of(cfg)
     xav = init_weights(cfg, "BLSTM", np.random.default_rng(2), "xavier")[0]
     he = init_weights(cfg, "BLSTM", np.random.default_rng(2), "he")[0]
-    r_i, w_i = _block(layout, "forward", 0, "R_i"), _block(layout, "forward", 0, "W_i")
+    r_i, w_i = block_of(layout, "forward", 0, "R_i"), block_of(layout, "forward", 0, "W_i")
     fan_in, fan_out = 24 * 2 + 16, 16
     assert (r_i["fan_in"], r_i["fan_out"]) == (fan_in, fan_out) == (w_i["fan_in"], w_i["fan_out"])
     for b in (r_i, w_i):
-        assert np.all(_slice(xav, b) != 0.0) and np.all(np.isfinite(_slice(xav, b)))
+        assert np.all(block_slice(xav, b) != 0.0) and np.all(np.isfinite(block_slice(xav, b)))
     want = math.sqrt(2.0 / fan_in) / (math.sqrt(6.0 / (fan_in + fan_out)) / math.sqrt(3.0))
     block = slice(w_i["offset"], w_i["offset"] + w_i["len"])
     assert np.std(he[block]) / np.std(xav[block]) == pytest.approx(want, rel=0.25)
 
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
-def test_slstm_layer_is_reproducible_block_by_block(scheme: str) -> None:
+def test_slstm_layer_is_reproducible_block_byblock(scheme: str) -> None:
     """Per gate `[i | f | o | z]`: `R (out, out)`, `W (out, in)`, `b` -- drawn in that order."""
     cfg = cell_cfg("slstm")
     out, fin = 3, 10
     rng = np.random.default_rng(21)
     want: list[np.ndarray] = []
     for gate in range(4):
-        want.append(_blk(rng, scheme, (out, out), fin + out, out))
-        want.append(_blk(rng, scheme, (out, fin), fin + out, out))
+        want.append(draw(rng, scheme, (out, out), fin + out, out))
+        want.append(draw(rng, scheme, (out, fin), fin + out, out))
         want.append(np.full(out, 1.0 if gate == 1 else 0.0))
     got = init_weights(cfg, "BLSTM", np.random.default_rng(21), scheme)[0]  # type: ignore[arg-type]
-    assert np.array_equal(_layer0(cfg, got), np.concatenate(want))
+    assert np.array_equal(layer0(cfg, got), np.concatenate(want))
 
 
 # ------------------------------------------------------------------------------------- #
@@ -154,42 +117,42 @@ MAMBA_GEOMS: tuple[dict[str, str], ...] = (
 def test_mamba_spec_pinned_constants(geom: dict[str, str]) -> None:
     cfg = cell_cfg("mamba", **geom)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(3))[0]
-    layout = _layout(cfg)
+    layout = layout_of(cfg)
     spec = cast(dict[str, int], config_bridge.nnet_spec(cfg)["Mamba"])
     for layer in (0, 1):
-        d_inner, d_state = _block(layout, "forward", layer, "A_log")["shape"]
+        d_inner, d_state = block_of(layout, "forward", layer, "A_log")["shape"]
         assert d_inner == spec["expand"] * int(cfg["BLSTM_LSTMNeuronNb"].split(",")[layer + 1])
         assert d_state == spec["d_state"]
-        a_log = _slice(flat, _block(layout, "forward", layer, "A_log")).reshape(d_inner, d_state)
+        a_log = block_slice(flat, block_of(layout, "forward", layer, "A_log")).reshape(d_inner, d_state)
         assert np.array_equal(a_log, np.tile(np.log(np.arange(1, d_state + 1, dtype=np.float64)), (d_inner, 1)))
-        assert np.all(_slice(flat, _block(layout, "forward", layer, "D")) == 1.0)
-        assert np.all(_slice(flat, _block(layout, "forward", layer, "g")) == 1.0)
-        assert np.all(_slice(flat, _block(layout, "forward", layer, "b_conv")) == 0.0)
-        b_dt = _slice(flat, _block(layout, "forward", layer, "b_dt"))
+        assert np.all(block_slice(flat, block_of(layout, "forward", layer, "D")) == 1.0)
+        assert np.all(block_slice(flat, block_of(layout, "forward", layer, "g")) == 1.0)
+        assert np.all(block_slice(flat, block_of(layout, "forward", layer, "b_conv")) == 0.0)
+        b_dt = block_slice(flat, block_of(layout, "forward", layer, "b_dt"))
         lo, hi = math.log(math.expm1(1e-3)), math.log(math.expm1(1e-1))
         assert np.all((b_dt >= lo - 1e-12) & (b_dt <= hi + 1e-12))
         assert np.unique(b_dt).size == d_inner  # per channel, not one shared draw
-        w_dt = _block(layout, "forward", layer, "W_dt")
+        w_dt = block_of(layout, "forward", layer, "W_dt")
         dt_rank = w_dt["shape"][1]
         assert dt_rank == (spec["dt_rank"] or max(1, -(-int(cfg["BLSTM_LSTMNeuronNb"].split(",")[layer + 1]) // 16)))
-        assert np.all(np.abs(_slice(flat, w_dt)) <= dt_rank**-0.5)
-        conv = _block(layout, "forward", layer, "conv")
+        assert np.all(np.abs(block_slice(flat, w_dt)) <= dt_rank**-0.5)
+        conv = block_of(layout, "forward", layer, "conv")
         assert (conv["fan_in"], conv["fan_out"]) == (spec["d_conv"], spec["d_conv"])
 
 
 def test_mamba_adapter_block_exists_only_when_widths_differ() -> None:
     cfg = cell_cfg("mamba", lstm="5,4,4", Mamba_D_State="2", Mamba_D_Conv="2", Mamba_Expand="1")
-    layout = _layout(cfg)
+    layout = layout_of(cfg)
     names0 = [b["name"] for b in layout if (b["stack"], b["layer"]) == ("forward", 0)]  # in 10 != out 4
     names1 = [b["name"] for b in layout if (b["stack"], b["layer"]) == ("forward", 1)]  # in 4 == out 4
     assert names0[:3] == ["P", "p", "g"] and names1[0] == "g"
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(0))[0]
-    assert np.all(_slice(flat, _block(layout, "forward", 0, "p")) == 0.0)
-    assert np.all(_slice(flat, _block(layout, "forward", 0, "P")) != 0.0)
+    assert np.all(block_slice(flat, block_of(layout, "forward", 0, "p")) == 0.0)
+    assert np.all(block_slice(flat, block_of(layout, "forward", 0, "P")) != 0.0)
 
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
-def test_mamba_layer_is_reproducible_block_by_block(scheme: str) -> None:
+def test_mamba_layer_is_reproducible_block_byblock(scheme: str) -> None:
     """S3.2 order at the S3.4 fans, drawn from a fresh generator -- position, scale, shape and
     draw order pinned at once (the shear lesson: `W_x` and `W_dt` are drawn from different
     distributions, so a swap moves draws across the stream)."""
@@ -198,28 +161,28 @@ def test_mamba_layer_is_reproducible_block_by_block(scheme: str) -> None:
     d_inner, dt_rank = 2 * out, 1
     rng = np.random.default_rng(22)
     want: list[np.ndarray] = [
-        _blk(rng, scheme, (out, fin), fin, out),  # P
+        draw(rng, scheme, (out, fin), fin, out),  # P
         np.zeros(out),  # p
         np.ones(out),  # g
-        _blk(rng, scheme, (2 * d_inner, out), out, 2 * d_inner),  # W_in
-        _blk(rng, scheme, (d_inner, d_conv), d_conv, d_conv),  # conv
+        draw(rng, scheme, (2 * d_inner, out), out, 2 * d_inner),  # W_in
+        draw(rng, scheme, (d_inner, d_conv), d_conv, d_conv),  # conv
         np.zeros(d_inner),  # b_conv
-        _blk(rng, scheme, (dt_rank + 2 * d_state, d_inner), d_inner, dt_rank + 2 * d_state),  # W_x
+        draw(rng, scheme, (dt_rank + 2 * d_state, d_inner), d_inner, dt_rank + 2 * d_state),  # W_x
         np.asarray(rng.uniform(-(dt_rank**-0.5), dt_rank**-0.5, size=(d_inner, dt_rank))).reshape(-1),  # W_dt
     ]
     delta0 = np.exp(rng.uniform(math.log(1e-3), math.log(1e-1), size=d_inner))
     want.append(np.log(np.expm1(delta0)))  # b_dt = softplus^-1(Delta_0)
     want.append(np.tile(np.log(np.arange(1, d_state + 1, dtype=np.float64)), (d_inner, 1)).reshape(-1))  # A_log
     want.append(np.ones(d_inner))  # D
-    want.append(_blk(rng, scheme, (out, d_inner), d_inner, out))  # W_out
+    want.append(draw(rng, scheme, (out, d_inner), d_inner, out))  # W_out
     got = init_weights(cfg, "BLSTM", np.random.default_rng(22), scheme)[0]  # type: ignore[arg-type]
-    assert np.allclose(_layer0(cfg, got), np.concatenate(want), rtol=0, atol=1e-13)
+    assert np.allclose(layer0(cfg, got), np.concatenate(want), rtol=0, atol=1e-13)
     # Bit-exact everywhere except `b_dt`, whose two softplus-inverse spellings agree to ~1e-13.
-    layout = _layout(cfg)
-    b_dt = _block(layout, "forward", 0, "b_dt")
-    mask = np.ones(_layer0(cfg, got).shape[0], dtype=bool)
+    layout = layout_of(cfg)
+    b_dt = block_of(layout, "forward", 0, "b_dt")
+    mask = np.ones(layer0(cfg, got).shape[0], dtype=bool)
     mask[b_dt["offset"] : b_dt["offset"] + b_dt["len"]] = False
-    assert np.array_equal(_layer0(cfg, got)[mask], np.concatenate(want)[mask])
+    assert np.array_equal(layer0(cfg, got)[mask], np.concatenate(want)[mask])
 
 
 # ------------------------------------------------------------------------------------- #
@@ -232,11 +195,11 @@ SMALL_GEOMETRY = {"Mamba_D_State": "2", "Mamba_D_Conv": "2", "Mamba_Expand": "1"
 
 @pytest.mark.parametrize("cell", ALL_CELLS)
 @pytest.mark.parametrize("direction", ["bidirectional", "forward"])
-def test_net_pack_is_the_layout_length(cell: str, direction: str) -> None:
+def test_net_pack_is_the_layoutpack_length(cell: str, direction: str) -> None:
     cfg = cell_cfg(cell, direction, **SMALL_GEOMETRY)
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(0))
     assert len(packs) == 1
-    assert packs[0].shape == (_length(cfg),)
+    assert packs[0].shape == (pack_length(cfg),)
     assert np.all(np.isfinite(packs[0]))
 
 
@@ -247,7 +210,7 @@ def test_forward_direction_drops_exactly_one_stack(cell: str) -> None:
     bi_cfg, fw_cfg = cell_cfg(cell, "bidirectional", **SMALL_GEOMETRY), cell_cfg(cell, "forward", **SMALL_GEOMETRY)
     bi = init_weights(bi_cfg, "BLSTM", np.random.default_rng(0))[0]
     fw = init_weights(fw_cfg, "BLSTM", np.random.default_rng(0))[0]
-    stack = sum(b["len"] for b in _layout(bi_cfg) if b["stack"] == "backward")
+    stack = sum(b["len"] for b in layout_of(bi_cfg) if b["stack"] == "backward")
     assert stack > 0
     assert bi.shape[0] - fw.shape[0] == stack + 3 * 4
 
@@ -256,12 +219,12 @@ def test_forward_direction_drops_exactly_one_stack(cell: str) -> None:
 def test_normalize_tail_and_output_biases_for_every_cell(cell: str) -> None:
     cfg = cell_cfg(cell, **SMALL_GEOMETRY)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(5))[0]
-    layout = _layout(cfg)
-    assert np.all(_slice(flat, _block(layout, "tail", 0, "mean")) == 0.0)
-    assert np.all(_slice(flat, _block(layout, "tail", 0, "std")) == 1.0)
+    layout = layout_of(cfg)
+    assert np.all(block_slice(flat, block_of(layout, "tail", 0, "mean")) == 0.0)
+    assert np.all(block_slice(flat, block_of(layout, "tail", 0, "std")) == 1.0)
     for layer in (0, 1):
-        assert np.all(_slice(flat, _block(layout, "output", layer, "b")) == 0.0), layer
-        assert np.all(_slice(flat, _block(layout, "output", layer, "W")) != 0.0), layer
+        assert np.all(block_slice(flat, block_of(layout, "output", layer, "b")) == 0.0), layer
+        assert np.all(block_slice(flat, block_of(layout, "output", layer, "W")) != 0.0), layer
 
 
 @pytest.mark.parametrize("cell", ALL_CELLS)
@@ -429,9 +392,9 @@ def test_overlaid_config_seeds_through_the_matching_builder() -> None:
         **{f"BLSTM_{d}_Is{p}Active": "true" for d in ("Forward", "Backward") for p in ("CellsPeepholes", "GatesPeepholes", "GatesRecurrentPeepholes")},
     }
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(0))[0]
-    layout = _layout(cfg)
+    layout = layout_of(cfg)
     assert {b["stack"] for b in layout} == {"forward", "output", "tail"}
-    assert flat.shape == (_length(cfg),) == (4 * 24 * (24 + 92 + 1) + 4 * 24 * (24 + 24 + 1) + (24 * 12 + 12) + (12 + 1) + 46,)
+    assert flat.shape == (pack_length(cfg),) == (4 * 24 * (24 + 92 + 1) + 4 * 24 * (24 + 24 + 1) + (24 * 12 + 12) + (12 + 1) + 46,)
 
 
 def test_parser_exposes_the_knobs_with_legacy_defaults() -> None:
