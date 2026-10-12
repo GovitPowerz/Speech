@@ -22,8 +22,18 @@ const LSTM_GATES: [&str; 4] = ["i", "f", "o", "c"];
 /// families: `cells_peep` owns 0-2, `gates_rec_peep` the same-gate rows 3/7/11,
 /// `gates_peep` the rest (`feed_forward`, `LSTMLayer.cpp:338-363`).
 pub const PEEPHOLE_COLUMNS: [&str; 12] = [
-    "i.cell", "f.cell", "o.cell", "i.i_prev", "i.f_prev", "i.o_prev", "f.i_prev", "f.f_prev",
-    "f.o_prev", "o.i", "o.f", "o.o_prev",
+    "i.cell_prev",
+    "f.cell_prev",
+    "o.cell",
+    "i.i_prev",
+    "i.f_prev",
+    "i.o_prev",
+    "f.i_prev",
+    "f.f_prev",
+    "f.o_prev",
+    "o.i",
+    "o.f",
+    "o.o_prev",
 ];
 
 /// Ascending-loop matrix product `a (m x k) * b (k x n)`, accumulating the `k`
@@ -209,7 +219,7 @@ impl LstmLayer {
             ));
         }
         let mut peep = LayerBlock::matrix("peep", BlockKind::Peephole, o, 12, fi, fo);
-        peep.columns = Some(PEEPHOLE_COLUMNS.to_vec());
+        peep.columns = Some(&PEEPHOLE_COLUMNS);
         v.push(peep);
         for g in LSTM_GATES {
             v.push(LayerBlock::vector(
@@ -1224,7 +1234,7 @@ impl NeuronLayer {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::super::layout::test_support::{block, block_ranges};
+    use super::super::layout::test_support::{block, block_ranges, total_len};
     use super::*;
 
     /// The 13 LSTM blocks sit where `set_weights`' column-major fills put them (issue
@@ -1237,7 +1247,7 @@ mod layout_tests {
         let mut cell = LstmLayer::new(i, o, true, true, true);
         let n = cell.nb_of_weights();
         let layout = cell.weight_layout();
-        assert_eq!(layout.iter().map(LayerBlock::len).sum::<usize>(), n);
+        assert_eq!(total_len(&layout), n);
         assert_eq!(layout.len(), 13);
         let blocks = block_ranges(&layout);
         for (g, name) in LSTM_GATES.iter().enumerate() {
@@ -1319,7 +1329,7 @@ mod layout_tests {
             assert_eq!(b.columns.is_some(), b.name == "peep", "{}", b.name);
         }
         let peep = &layout[8];
-        assert_eq!(peep.columns.as_deref(), Some(&PEEPHOLE_COLUMNS[..]));
+        assert_eq!(peep.columns, Some(&PEEPHOLE_COLUMNS[..]));
         // The 12 names in `peep_weight` ROW order, the forward's reads (`feed_forward`,
         // rows 0-2 the cell state, 3-11 gate values): pinned as a list because the init
         // scatters each gate's three gate-peephole draws by the gate PREFIX alone, so a
@@ -1328,8 +1338,18 @@ mod layout_tests {
         assert_eq!(
             PEEPHOLE_COLUMNS,
             [
-                "i.cell", "f.cell", "o.cell", "i.i_prev", "i.f_prev", "i.o_prev", "f.i_prev",
-                "f.f_prev", "f.o_prev", "o.i", "o.f", "o.o_prev"
+                "i.cell_prev",
+                "f.cell_prev",
+                "o.cell",
+                "i.i_prev",
+                "i.f_prev",
+                "i.o_prev",
+                "f.i_prev",
+                "f.f_prev",
+                "f.o_prev",
+                "o.i",
+                "o.f",
+                "o.o_prev"
             ]
         );
     }
@@ -1342,7 +1362,7 @@ mod layout_tests {
         let mut layer = NeuronLayer::new(i, o);
         let n = layer.nb_of_weights();
         let layout = layer.weight_layout();
-        assert_eq!(layout.iter().map(LayerBlock::len).sum::<usize>(), n);
+        assert_eq!(total_len(&layout), n);
         assert_eq!(
             layout
                 .iter()

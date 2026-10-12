@@ -144,7 +144,7 @@ fn weight_layout<'py>(
         d.set_item("fan_out", b.block.fan_out)?;
         d.set_item("offset", b.offset)?;
         d.set_item("len", b.len())?;
-        if let Some(cols) = &b.block.columns {
+        if let Some(cols) = b.block.columns {
             d.set_item("columns", cols)?;
         }
         out.push(d);

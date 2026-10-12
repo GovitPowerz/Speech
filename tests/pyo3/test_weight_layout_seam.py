@@ -72,7 +72,7 @@ def test_the_real_2015_shapes_tile_their_packs(config: str, pack_length: int) ->
         assert p["name"] == "peep"
         assert p["shape"] == [24, 12]
         assert len(p["columns"]) == 12 and len(set(p["columns"])) == 12
-        assert p["columns"][:3] == ["i.cell", "f.cell", "o.cell"]
+        assert p["columns"][:3] == ["i.cell_prev", "f.cell_prev", "o.cell"]
     layer0 = [b for b in layout if b["stack"] == "forward" and b["layer"] == 0]
     assert [b["name"] for b in layer0] == ["w.i", "w.f", "w.o", "w.c", "r.i", "r.f", "r.o", "r.c", "peep", "b.i", "b.f", "b.o", "b.c"]
     # The gate map's combined fan: in + out, with layer 0's fan-in sub-sampled (x4).

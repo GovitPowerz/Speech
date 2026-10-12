@@ -249,7 +249,7 @@ fn tuple_a_lstm_layout_is_the_33671_pack() {
     assert_eq!(peeps.len(), 4);
     for p in peeps {
         assert_eq!(p.block.shape, vec![24, 12]);
-        assert_eq!(p.block.columns.as_ref().map(Vec::len), Some(12));
+        assert_eq!(p.block.columns.map(<[_]>::len), Some(12));
     }
     assert!(
         layout

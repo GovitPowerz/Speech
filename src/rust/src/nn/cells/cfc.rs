@@ -382,7 +382,8 @@ impl CfcLayer {
 
     /// The blocks [`for_each_slot`] visits, in order (issue #27), at their MATH shapes:
     /// per backbone layer `l`, `W_bb{l}` (`(B, in + H)` at `l = 0`, `(B, B)` deeper) and
-    /// `b_bb{l}`; then the three heads `W_ff1 | b_ff1 | W_ff2 | b_ff2 | W_g | b_g`, each
+    /// `b_bb{l}`; then the three heads `W_ff1 | b_ff1 | W_ff2 | b_ff2 | W_g | b_g` (the
+    /// module doc's `W_1 | b_1 | W_2 | b_2 | W_t | b_t`, named here by what they compute), each
     /// `(H, B)` plus `H`. Layer 0 reads the CONCATENATED `[x | h_{t-1}]`, so its fan-in is
     /// the matrix's own width `in + H`; the heads do not share a fan. Introspection only
     /// (ADR-0002).
@@ -878,16 +879,14 @@ mod tests {
             (1, 1, 1, 1),
             (11, 24, 24, 3),
         ] {
+            let cell = CfcLayer::new(i, o, b, l);
             assert_eq!(
-                CfcLayer::new(i, o, b, l).nb_of_weights(),
+                cell.nb_of_weights(),
                 b * (i + o + 1) + (l - 1) * b * (b + 1) + 3 * o * (b + 1),
                 "in={i} out={o} B={b} L={l}"
             );
             // The layout tiles the pack: `sum(len) == nb_of_weights`.
-            assert_eq!(
-                total_len(&CfcLayer::new(i, o, b, l).weight_layout()),
-                CfcLayer::new(i, o, b, l).nb_of_weights()
-            );
+            assert_eq!(total_len(&cell.weight_layout()), cell.nb_of_weights());
         }
     }
 

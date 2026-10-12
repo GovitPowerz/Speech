@@ -84,7 +84,7 @@ pub struct LayerBlock {
     pub shape: Vec<usize>,
     pub fan_in: usize,
     pub fan_out: usize,
-    pub columns: Option<Vec<&'static str>>,
+    pub columns: Option<&'static [&'static str]>,
 }
 
 impl LayerBlock {
@@ -130,7 +130,8 @@ impl LayerBlock {
         self.shape.iter().product()
     }
 
-    /// `true` for a zero-element block (an empty Mamba adapter, a 0-wide layer).
+    /// `true` for a zero-element block (a 0-wide layer; an absent Mamba adapter is no
+    /// block at all, not an empty one).
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

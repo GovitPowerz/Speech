@@ -1557,12 +1557,9 @@ mod tests {
             let n = c.nb_of_weights();
             let di = ex * o;
             let dr = o.div_ceil(16).max(1);
-            let blocks = block_ranges(&c.weight_layout());
-            assert_eq!(
-                total_len(&c.weight_layout()),
-                n,
-                "the layout does not tile the pack"
-            );
+            let layout = c.weight_layout();
+            assert_eq!(total_len(&layout), n, "the layout does not tile the pack");
+            let blocks = block_ranges(&layout);
 
             let mut probe = |base: usize,
                              row: usize,

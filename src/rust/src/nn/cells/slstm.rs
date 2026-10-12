@@ -720,7 +720,7 @@ impl Layer for SlstmLayer {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::layout::test_support::{block, block_ranges};
+    use super::super::super::layout::test_support::{block, block_ranges, total_len};
     use super::*;
 
     const I: usize = 3;
@@ -775,7 +775,7 @@ mod tests {
         let mut cell = SlstmLayer::new(i, o);
         let n = cell.nb_of_weights();
         let layout = cell.weight_layout();
-        assert_eq!(layout.iter().map(LayerBlock::len).sum::<usize>(), n);
+        assert_eq!(total_len(&layout), n);
         let blocks = block_ranges(&layout);
         for (gate, name) in [(0usize, "i"), (1, "f"), (2, "o"), (3, "z")] {
             // R_a row-major: element (j, k) at lo + j*o + k -> feedback[[k, a*o+j]].
