@@ -112,6 +112,7 @@
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
+use crate::audio::conv_at;
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::tasks::segmentation::{SegClass, Segment, Segmentation};
@@ -879,7 +880,8 @@ pub struct EmittedSegment {
 /// The streaming edge-truncating convolution -- the online twin of the in-place
 /// [`crate::audio::convolution_horiz_slice`] the offline
 /// [`crate::tasks::segmenter::results_to_segmentation`] runs before the hysteresis
-/// (`segmenter.rs:268-272`, gated `conv.len() > 1`).
+/// (gated `conv.len() > 1`). Since issue #26 the two share the per-output body,
+/// [`crate::audio::conv_at`]; this struct owns only WHEN an output is final and the ring.
 ///
 /// The offline convolution snapshots the WHOLE result vector first, so each output
 /// depends ONLY on inputs (no output feedback) -- streamable. Output `ii` reads
@@ -927,32 +929,14 @@ impl ConvStream {
         self.received += 1;
     }
 
-    /// The convolved value at absolute index `ii`, computed against total length `n`
-    /// exactly as `audio.rs::conv_taps` + `convolution_horiz_slice` do (same tap range,
-    /// same ascending accumulation order -> bit-identical to offline).
+    /// The convolved value at absolute index `ii`, computed against total length `n` by
+    /// the SAME body the offline `convolution_horiz_slice` runs per output
+    /// (`audio::conv_at`, issue #26), reading the ring at its base offset.
     fn conv_at(&self, ii: usize, n: usize) -> f64 {
         if self.coeffs.is_empty() {
             return self.ring[ii - self.base];
         }
-        let hw = self.half as isize;
-        let iis = ii as isize;
-        let len = n as isize;
-        let (begin1, begin2) = if iis < hw {
-            (-(hw - iis), (hw - iis) as usize)
-        } else {
-            (iis - hw, 0usize)
-        };
-        let end = if iis + hw < len {
-            (2 * hw) as usize
-        } else {
-            (len - 1 - begin1) as usize
-        };
-        let mut acc = 0.0;
-        for jj in begin2..=end {
-            let src = (begin1 + jj as isize) as usize;
-            acc += self.ring[src - self.base] * self.coeffs[jj];
-        }
-        acc
+        conv_at(&self.ring, self.base, ii, n, &self.coeffs)
     }
 
     /// Finalize the newly-final (non-right-edge) convolved values `[finalized, received -
