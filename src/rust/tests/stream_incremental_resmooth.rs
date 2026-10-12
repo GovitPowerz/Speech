@@ -785,7 +785,7 @@ fn incremental_equals_full_replay() {
 /// `frontier == pending_begin`, so that width is `<= 3*holdback`. Otherwise
 /// `now - frontier <= conv_delay + dt` and the width is `<= 3*holdback + conv_delay + dt`.
 /// Either way the CLOSED segments occupy a window of at most the latter. At most one raw
-/// segment is LABELED per convolved value (`HystState::advance` returns at most one) and a
+/// segment is LABELED per convolved value (`HystStep::push` returns at most one) and a
 /// retained segment's label time lies in that window, so at most `floor(width/dt) + 1` are
 /// retained -- plus the anchor the cut always keeps, plus at most one just-closed segment
 /// from a stall.

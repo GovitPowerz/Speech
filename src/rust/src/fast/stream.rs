@@ -115,7 +115,7 @@ use indexmap::IndexMap;
 use crate::constants::random_uniform;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::tasks::segmentation::{SegClass, Segment, Segmentation};
-use crate::tasks::segmenter::{DriverConfig, SegmenterConfig, smooth_segmentation};
+use crate::tasks::segmenter::{DriverConfig, HystStep, SegmenterConfig, smooth_segmentation};
 
 use super::cells::{FastCausalNet, FastCellState};
 use super::driver::{FastNet, FastNetShape};
@@ -876,200 +876,6 @@ pub struct EmittedSegment {
     pub emitted_at_audio_s: f64,
 }
 
-/// The persistent hysteresis-with-area state machine -- the streaming twin of
-/// [`crate::tasks::segmenter::update_segmentation_raw`] (`segmenter.rs:290-415`),
-/// transcribed LOOP-STATE-for-LOOP-STATE and advanced one posterior value at a time.
-///
-/// The batch loop keeps `begin/end/begin_area/end_area/has_begun/has_ended` plus the
-/// running index `ii` and `results[ii-1]`; the only work is to persist all of them
-/// across calls. `advance` runs one iteration of the batch body (the INIT check for the
-/// first value, `:312-315`; the loop body for the rest, `:317-407`), returning a raw
-/// segment `(begin+off, end+off)` on the iteration that labels one. `flush_tail` is the
-/// tail force-emit (`:409-412`), where the legacy `dt * results.len()` end time uses
-/// `results.len()` == the total convolved-value count == `idx` at EOS.
-struct HystState {
-    t_r: f64,
-    a_r: f64,
-    t_f: f64,
-    a_f: f64,
-    off: f64,
-    dt: f64,
-    begin: f64,
-    end: f64,
-    begin_area: f64,
-    end_area: f64,
-    has_begun: bool,
-    has_ended: bool,
-    idx: usize, // number of values processed so far (== the batch loop's `ii`)
-    prev: f64,  // the previous value (the batch `results[ii-1]`)
-}
-
-impl HystState {
-    fn new(cfg: &SegmenterConfig, off: f64, dt: f64) -> HystState {
-        HystState {
-            t_r: cfg.rising,
-            a_r: cfg.area_rising,
-            t_f: cfg.falling,
-            a_f: cfg.area_falling,
-            off,
-            dt,
-            begin: -1.0,
-            end: -1.0,
-            begin_area: -1.0,
-            end_area: -1.0,
-            has_begun: false,
-            has_ended: false,
-            idx: 0,
-            prev: 0.0,
-        }
-    }
-
-    /// Advance one convolved posterior value. Returns the raw segment labeled on this
-    /// step, if any (at most one per value, exactly as the batch loop labels at most once
-    /// per `ii`). Direct transcription of `update_segmentation_raw`.
-    fn advance(&mut self, r: f64) -> Option<(f64, f64)> {
-        if self.idx == 0 {
-            // INIT (:312-315): begin/begin_area seed, WITHOUT has_begun; the ii>=1 body's
-            // rising branch then keys off `begin < 0` being false.
-            if r >= self.t_r {
-                self.begin = 0.0;
-                self.begin_area = 0.0;
-            }
-            self.prev = r;
-            self.idx = 1;
-            return None;
-        }
-
-        let ii = self.idx as f64;
-        let r_prev = self.prev;
-        let (t_r, a_r, t_f, a_f, dt) = (self.t_r, self.a_r, self.t_f, self.a_f, self.dt);
-        let mut out = None;
-
-        if !self.has_begun {
-            if self.begin < 0.0 {
-                if r >= t_r && r_prev < t_r {
-                    self.begin = dt * (ii - (r - t_r) / (r - r_prev));
-                    self.begin_area = (ii - self.begin / dt) * (r - t_r) / 2.0;
-                    if self.begin_area >= a_r {
-                        self.has_begun = true;
-                    }
-                }
-            } else if r >= t_r {
-                self.begin_area += (r + r_prev - t_r * 2.0) / 2.0;
-                if self.begin_area >= a_r {
-                    self.has_begun = true;
-                }
-            } else if r < t_r && r_prev >= t_r {
-                self.begin_area += (r_prev - t_r) * (t_r - r_prev) / (r - r_prev) / 2.0;
-                if self.begin_area >= a_r {
-                    self.has_begun = true;
-                } else {
-                    self.begin = -1.0;
-                    self.begin_area = -1.0;
-                    self.has_begun = false;
-                }
-            } else {
-                self.begin = -1.0;
-                self.begin_area = -1.0;
-                self.has_begun = false;
-            }
-        }
-
-        if self.has_begun {
-            if self.end < 0.0 {
-                if r <= t_f && r_prev > t_f {
-                    self.end = dt * (ii - (r - t_f) / (r - r_prev));
-                    self.end_area = (ii - self.end / dt) * (t_f - r) / 2.0;
-                    if self.end_area >= a_f {
-                        self.has_ended = true;
-                    }
-                }
-            } else if r <= t_f {
-                self.end_area += (2.0 * t_f - r - r_prev) / 2.0;
-                if self.end_area >= a_f {
-                    self.has_ended = true;
-                }
-            } else if r > t_f && r_prev <= t_f {
-                self.end_area += (t_f - r_prev) * (t_f - r_prev) / (r - r_prev) / 2.0;
-                if self.end_area >= a_f {
-                    self.has_ended = true;
-                } else {
-                    self.end = -1.0;
-                    self.end_area = -1.0;
-                    self.has_ended = false;
-                }
-            } else {
-                self.end = -1.0;
-                self.end_area = -1.0;
-                self.has_ended = false;
-            }
-
-            if self.has_ended {
-                if self.begin < self.end {
-                    out = Some((self.begin + self.off, self.end + self.off));
-                    self.begin = -1.0;
-                    self.begin_area = -1.0;
-                    self.has_begun = false;
-                    self.end = -1.0;
-                    self.end_area = -1.0;
-                    self.has_ended = false;
-
-                    // Re-run rising after label (:390-396) at the SAME ii.
-                    if r >= t_r && r_prev < t_r {
-                        self.begin = dt * (ii - (r - t_r) / (r - r_prev));
-                        self.begin_area = (ii - self.begin / dt) * (r - t_r) / 2.0;
-                        if self.begin_area >= a_r {
-                            self.has_begun = true;
-                        }
-                    }
-                } else {
-                    self.begin = -1.0;
-                    self.begin_area = -1.0;
-                    self.has_begun = false;
-                    self.end = -1.0;
-                    self.end_area = -1.0;
-                    self.has_ended = false;
-                }
-            }
-        }
-
-        self.prev = r;
-        self.idx += 1;
-        out
-    }
-
-    /// The audio-time BEGIN of a raw segment that is currently OPEN or TENTATIVELY open --
-    /// i.e. a rising crossing has been recorded (`begin >= 0`) and not yet either closed
-    /// into `raw_segments` or retracted by a failed area test. `None` when the hysteresis
-    /// carries no candidate begin at all.
-    ///
-    /// THIS IS THE THIRD SOURCE OF FUTURE RAW STRUCTURE (Phase 9 Task 9 fix, found by the
-    /// corpus streaming tier `tests/pyo3/test_phase9_parity.py`). A pending begin lies
-    /// BEHIND the consumed frontier -- the hysteresis passed it and is still inside the
-    /// segment -- so [`StreamDecision::resmooth_and_emit`]'s emission frontier must clamp to
-    /// it; `max(last_raw_boundary, consumed_frontier - dt)` alone does NOT bound where the
-    /// next raw segment begins. Both audio-time offsets match the closed-segment tuple
-    /// (`begin + off`, `advance`'s label site).
-    fn pending_begin(&self) -> Option<f64> {
-        if self.begin >= 0.0 {
-            Some(self.begin + self.off)
-        } else {
-            None
-        }
-    }
-
-    /// The tail force-emit (`:409-412`): if a segment is still open at EOS, close it at
-    /// `dt * results.len()` (== `dt * idx`, since every convolved value has been fed).
-    fn flush_tail(&mut self) -> Option<(f64, f64)> {
-        if self.has_begun {
-            let end = self.dt * self.idx as f64;
-            self.has_begun = false;
-            return Some((self.begin + self.off, end + self.off));
-        }
-        None
-    }
-}
-
 /// The streaming edge-truncating convolution -- the online twin of the in-place
 /// [`crate::audio::convolution_horiz_slice`] the offline
 /// [`crate::tasks::segmenter::results_to_segmentation`] runs before the hysteresis
@@ -1198,7 +1004,8 @@ impl ConvStream {
 /// PIPELINE. Each posterior scalar is widened f32 -> f64 (the offline driver's `result_vec2`
 /// seam), fed to the streaming [`ConvStream`] (the 19-tap edge-truncating convolution,
 /// finalizing with a `half`-value lookahead), then the finalized convolved values drive
-/// the persistent [`HystState`] (the latched hysteresis, boundaries never revised). Each
+/// the persistent [`HystStep`] (the SHARED latched hysteresis kernel the offline
+/// `update_segmentation_raw` folds over, issue #26; boundaries never revised). Each
 /// raw segment the hysteresis labels is FINAL (causal + latched), appended to
 /// `raw_segments`.
 ///
@@ -1450,7 +1257,7 @@ pub struct StreamDecision {
     holdback: f64,   // derived from seg_cfg at construction
 
     conv: ConvStream,
-    hyst: HystState,
+    hyst: HystStep,
 
     /// Closed raw segments `(begin+off, end+off)`, append-only + final (the latched
     /// hysteresis never revises them). The offline `update_segmentation`'s `label_segment`
@@ -1509,7 +1316,7 @@ impl StreamDecision {
             + seg_cfg.min_silence.iter().sum::<f64>()
             + seg_cfg.padding.iter().sum::<f64>();
         let conv = ConvStream::new(driver_cfg.conv_coeff.as_deref());
-        let hyst = HystState::new(&seg_cfg, time_offset, time_step);
+        let hyst = HystStep::new(&seg_cfg, time_offset, time_step);
         StreamDecision {
             seg_cfg,
             class: SegClass::Speech,
@@ -1595,7 +1402,7 @@ impl StreamDecision {
         }
         let ready = self.conv.take_ready();
         for v in ready {
-            if let Some(seg) = self.hyst.advance(v) {
+            if let Some(seg) = self.hyst.push(v) {
                 self.raw_segments.push(seg);
             }
         }
@@ -1620,7 +1427,7 @@ impl StreamDecision {
         if !self.finished {
             self.finished = true;
             for v in self.conv.flush() {
-                if let Some(seg) = self.hyst.advance(v) {
+                if let Some(seg) = self.hyst.push(v) {
                     self.raw_segments.push(seg);
                 }
             }

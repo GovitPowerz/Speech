@@ -247,6 +247,208 @@ pub fn results_to_segmentation(
     update_segmentation(seg, results, class, time_offset, time_step, cfg);
 }
 
+/// The hysteresis-with-area decision as ONE STEP KERNEL (issue #26): the loop body of
+/// the legacy `Segmenter::updateSegmentation` (:725-845) with every loop variable
+/// (`begin/end/begin_area/end_area/has_begun/has_ended`, the running index `ii` and
+/// `results[ii-1]`) persisted on the struct, fed one convolved posterior value at a
+/// time.
+///
+/// Two drivers fold over it (ADR-0004, "one kernel, two drivers", extended to the decision
+/// layer): the batch [`update_segmentation_raw`] feeds a whole row vector then
+/// [`flush_tail`](Self::flush_tail); the streaming `fast::stream::StreamDecision` feeds the
+/// convolved values as they finalize. Equality between the two holds by construction, so
+/// the state-threading leg (`phase8_stream_decision.rs::raw_hysteresis_matches_offline`)
+/// pins only that the stream hands the step the same values in the same order (ADR-0005).
+///
+/// [`push`](Self::push) runs one iteration: the INIT check for the first value (`begin`
+/// and `begin_area` seeded WITHOUT `has_begun`, so the next value's rising branch keys off
+/// `begin < 0` being false), the loop body for the rest, returning the raw segment
+/// `(begin + off, end + off)` on the iteration that labels one (at most one per value).
+/// [`flush_tail`](Self::flush_tail) is the tail force-emit: the legacy `dt *
+/// results.size()`, which on a row vector is the count of values fed, `idx` (the
+/// `results.size()` quirk, IMPROVEMENTS.md 0b-ii, is the same number here).
+pub struct HystStep {
+    t_r: f64,
+    a_r: f64,
+    t_f: f64,
+    a_f: f64,
+    off: f64,
+    dt: f64,
+    begin: f64,
+    end: f64,
+    begin_area: f64,
+    end_area: f64,
+    has_begun: bool,
+    has_ended: bool,
+    idx: usize, // number of values processed so far (== the batch loop's `ii`)
+    prev: f64,  // the previous value (the batch `results[ii-1]`)
+}
+
+impl HystStep {
+    pub fn new(cfg: &SegmenterConfig, off: f64, dt: f64) -> HystStep {
+        HystStep {
+            t_r: cfg.rising,
+            a_r: cfg.area_rising,
+            t_f: cfg.falling,
+            a_f: cfg.area_falling,
+            off,
+            dt,
+            begin: -1.0,
+            end: -1.0,
+            begin_area: -1.0,
+            end_area: -1.0,
+            has_begun: false,
+            has_ended: false,
+            idx: 0,
+            prev: 0.0,
+        }
+    }
+
+    /// Feed one convolved posterior value. Returns the raw segment labeled on this
+    /// step, if any (at most one per value, exactly as the legacy loop labels at most once
+    /// per `ii`).
+    pub fn push(&mut self, r: f64) -> Option<(f64, f64)> {
+        if self.idx == 0 {
+            // INIT: begin/begin_area seed, WITHOUT has_begun; the ii>=1 body's rising
+            // branch then keys off `begin < 0` being false.
+            if r >= self.t_r {
+                self.begin = 0.0;
+                self.begin_area = 0.0;
+            }
+            self.prev = r;
+            self.idx = 1;
+            return None;
+        }
+
+        let ii = self.idx as f64;
+        let r_prev = self.prev;
+        let (t_r, a_r, t_f, a_f, dt) = (self.t_r, self.a_r, self.t_f, self.a_f, self.dt);
+        let mut out = None;
+
+        if !self.has_begun {
+            if self.begin < 0.0 {
+                if r >= t_r && r_prev < t_r {
+                    self.begin = dt * (ii - (r - t_r) / (r - r_prev));
+                    self.begin_area = (ii - self.begin / dt) * (r - t_r) / 2.0;
+                    if self.begin_area >= a_r {
+                        self.has_begun = true;
+                    }
+                }
+            } else if r >= t_r {
+                self.begin_area += (r + r_prev - t_r * 2.0) / 2.0;
+                if self.begin_area >= a_r {
+                    self.has_begun = true;
+                }
+            } else if r < t_r && r_prev >= t_r {
+                self.begin_area += (r_prev - t_r) * (t_r - r_prev) / (r - r_prev) / 2.0;
+                if self.begin_area >= a_r {
+                    self.has_begun = true;
+                } else {
+                    self.begin = -1.0;
+                    self.begin_area = -1.0;
+                    self.has_begun = false;
+                }
+            } else {
+                self.begin = -1.0;
+                self.begin_area = -1.0;
+                self.has_begun = false;
+            }
+        }
+
+        if self.has_begun {
+            if self.end < 0.0 {
+                if r <= t_f && r_prev > t_f {
+                    self.end = dt * (ii - (r - t_f) / (r - r_prev));
+                    self.end_area = (ii - self.end / dt) * (t_f - r) / 2.0;
+                    if self.end_area >= a_f {
+                        self.has_ended = true;
+                    }
+                }
+            } else if r <= t_f {
+                self.end_area += (2.0 * t_f - r - r_prev) / 2.0;
+                if self.end_area >= a_f {
+                    self.has_ended = true;
+                }
+            } else if r > t_f && r_prev <= t_f {
+                self.end_area += (t_f - r_prev) * (t_f - r_prev) / (r - r_prev) / 2.0;
+                if self.end_area >= a_f {
+                    self.has_ended = true;
+                } else {
+                    self.end = -1.0;
+                    self.end_area = -1.0;
+                    self.has_ended = false;
+                }
+            } else {
+                self.end = -1.0;
+                self.end_area = -1.0;
+                self.has_ended = false;
+            }
+
+            if self.has_ended {
+                if self.begin < self.end {
+                    out = Some((self.begin + self.off, self.end + self.off));
+                    self.begin = -1.0;
+                    self.begin_area = -1.0;
+                    self.has_begun = false;
+                    self.end = -1.0;
+                    self.end_area = -1.0;
+                    self.has_ended = false;
+
+                    // Re-run rising after label at the SAME ii.
+                    if r >= t_r && r_prev < t_r {
+                        self.begin = dt * (ii - (r - t_r) / (r - r_prev));
+                        self.begin_area = (ii - self.begin / dt) * (r - t_r) / 2.0;
+                        if self.begin_area >= a_r {
+                            self.has_begun = true;
+                        }
+                    }
+                } else {
+                    self.begin = -1.0;
+                    self.begin_area = -1.0;
+                    self.has_begun = false;
+                    self.end = -1.0;
+                    self.end_area = -1.0;
+                    self.has_ended = false;
+                }
+            }
+        }
+
+        self.prev = r;
+        self.idx += 1;
+        out
+    }
+
+    /// The audio-time BEGIN of a raw segment that is currently OPEN or TENTATIVELY open --
+    /// i.e. a rising crossing has been recorded (`begin >= 0`) and not yet either closed
+    /// into `raw_segments` or retracted by a failed area test. `None` when the hysteresis
+    /// carries no candidate begin at all.
+    ///
+    /// THIS IS THE THIRD SOURCE OF FUTURE RAW STRUCTURE (Phase 9 Task 9 fix, found by the
+    /// corpus streaming tier `tests/pyo3/test_phase9_parity.py`). A pending begin lies
+    /// BEHIND the consumed frontier -- the hysteresis passed it and is still inside the
+    /// segment -- so the streaming `StreamDecision::resmooth_and_emit`'s emission frontier
+    /// must clamp to it; `max(last_raw_boundary, consumed_frontier - dt)` alone does NOT bound where the
+    /// next raw segment begins. Both audio-time offsets match the closed-segment tuple
+    /// (`begin + off`, `push`'s label site). The batch fold never reads it.
+    pub fn pending_begin(&self) -> Option<f64> {
+        if self.begin >= 0.0 {
+            Some(self.begin + self.off)
+        } else {
+            None
+        }
+    }
+
+    /// The tail force-emit: if a segment is still open at EOS, close it at
+    /// `dt * results.len()` (== `dt * idx`, since every convolved value has been fed).
+    pub fn flush_tail(&mut self) -> Option<(f64, f64)> {
+        if self.has_begun {
+            let end = self.dt * self.idx as f64;
+            self.has_begun = false;
+            return Some((self.begin + self.off, end + self.off));
+        }
+        None
+    }
+}
 /// The RAW hysteresis-with-area decision over the ROW vector `results`, WITHOUT
 /// smoothing. Returns the pre-smoothing, pre-sanitize labeled segments as
 /// `(begin + off, end + off, class as i32)`, one entry per legacy
@@ -254,9 +456,11 @@ pub fn results_to_segmentation(
 ///
 /// Direct port of the decision body of `Segmenter::updateSegmentation`
 /// (:725-845): the INIT check, the rising/falling hysteresis with area gating,
-/// the re-run-rising-after-label, and the `results.size()` tail. This isolates
-/// the decision math so it can be cross-checked bit-for-bit against the numpy
-/// oracle (`speech.scoring.update_segmentation_oracle`). `results[k]` is the
+/// the re-run-rising-after-label, and the `results.size()` tail. Since issue #26
+/// it is the FOLD over [`HystStep`] (one `push` per value, then `flush_tail`),
+/// the same kernel the streaming session drives. This isolates the decision math
+/// so it can be cross-checked bit-for-bit against the numpy oracle
+/// (`speech.scoring.update_segmentation_oracle`). `results[k]` is the
 /// legacy `results(0, k)`; `dt` is `timeStep`, `off` is `timeOffset`. The TAIL
 /// uses `results.len()` (the legacy `results.size()` = rows*cols, equal to
 /// `length` only for a pure row vector - reproduced quirk, logged in
@@ -268,123 +472,15 @@ pub fn update_segmentation_raw(
     dt: f64,
     cfg: &SegmenterConfig,
 ) -> Vec<(f64, f64, i32)> {
-    let t_r = cfg.rising;
-    let a_r = cfg.area_rising;
-    let t_f = cfg.falling;
-    let a_f = cfg.area_falling;
-
-    let mut segments: Vec<(f64, f64, i32)> = Vec::new();
-
-    let mut begin = -1.0f64;
-    let mut end = -1.0f64;
-    let mut begin_area = -1.0f64;
-    let mut end_area = -1.0f64;
-    let mut has_begun = false;
-    let mut has_ended = false;
-    let length = results.len();
-
-    if length > 0 && results[0] >= t_r {
-        begin = 0.0;
-        begin_area = 0.0;
+    let mut step = HystStep::new(cfg, off, dt);
+    let mut segments: Vec<(f64, f64, i32)> = results
+        .iter()
+        .filter_map(|&r| step.push(r))
+        .map(|(b, e)| (b, e, class as i32))
+        .collect();
+    if let Some((b, e)) = step.flush_tail() {
+        segments.push((b, e, class as i32));
     }
-
-    for ii in 1..length {
-        let r = results[ii];
-        let r_prev = results[ii - 1];
-
-        if !has_begun {
-            if begin < 0.0 {
-                if r >= t_r && r_prev < t_r {
-                    begin = dt * (ii as f64 - (r - t_r) / (r - r_prev));
-                    begin_area = (ii as f64 - begin / dt) * (r - t_r) / 2.0;
-                    if begin_area >= a_r {
-                        has_begun = true;
-                    }
-                }
-            } else if r >= t_r {
-                begin_area += (r + r_prev - t_r * 2.0) / 2.0;
-                if begin_area >= a_r {
-                    has_begun = true;
-                }
-            } else if r < t_r && r_prev >= t_r {
-                begin_area += (r_prev - t_r) * (t_r - r_prev) / (r - r_prev) / 2.0;
-                if begin_area >= a_r {
-                    has_begun = true;
-                } else {
-                    begin = -1.0;
-                    begin_area = -1.0;
-                    has_begun = false;
-                }
-            } else {
-                begin = -1.0;
-                begin_area = -1.0;
-                has_begun = false;
-            }
-        }
-
-        if has_begun {
-            if end < 0.0 {
-                if r <= t_f && r_prev > t_f {
-                    end = dt * (ii as f64 - (r - t_f) / (r - r_prev));
-                    end_area = (ii as f64 - end / dt) * (t_f - r) / 2.0;
-                    if end_area >= a_f {
-                        has_ended = true;
-                    }
-                }
-            } else if r <= t_f {
-                end_area += (2.0 * t_f - r - r_prev) / 2.0;
-                if end_area >= a_f {
-                    has_ended = true;
-                }
-            } else if r > t_f && r_prev <= t_f {
-                end_area += (t_f - r_prev) * (t_f - r_prev) / (r - r_prev) / 2.0;
-                if end_area >= a_f {
-                    has_ended = true;
-                } else {
-                    end = -1.0;
-                    end_area = -1.0;
-                    has_ended = false;
-                }
-            } else {
-                end = -1.0;
-                end_area = -1.0;
-                has_ended = false;
-            }
-
-            if has_ended {
-                if begin < end {
-                    segments.push((begin + off, end + off, class as i32));
-                    begin = -1.0;
-                    begin_area = -1.0;
-                    has_begun = false;
-                    end = -1.0;
-                    end_area = -1.0;
-                    has_ended = false;
-
-                    if r >= t_r && r_prev < t_r {
-                        begin = dt * (ii as f64 - (r - t_r) / (r - r_prev));
-                        begin_area = (ii as f64 - begin / dt) * (r - t_r) / 2.0;
-                        if begin_area >= a_r {
-                            has_begun = true;
-                        }
-                    }
-                } else {
-                    begin = -1.0;
-                    begin_area = -1.0;
-                    has_begun = false;
-                    end = -1.0;
-                    end_area = -1.0;
-                    has_ended = false;
-                }
-            }
-        }
-    }
-
-    if has_begun {
-        end = dt * results.len() as f64;
-        segments.push((begin + off, end + off, class as i32));
-    }
-
     segments
 }
 
