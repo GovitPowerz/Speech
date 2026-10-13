@@ -163,6 +163,7 @@ use ndarray::Array2;
 
 use super::super::activations::logistic_fn;
 use super::super::layers::matmul_seq;
+use super::super::layout::{BlockKind, LayerBlock};
 use super::super::network::Layer;
 
 /// RMSNorm's variance floor (spec S3.1). Not tunable: it is part of the block
@@ -703,6 +704,76 @@ impl MambaLayer {
     pub fn get_weights(&self, out: &mut Vec<f64>) {
         let w = &self.weights;
         self.walk(|kind, r, c| out.push(w.slot(kind)[[r, c]]));
+    }
+
+    /// The blocks [`for_each_slot`] visits, in order (issue #27), at their MATH shapes
+    /// (the stored transposition absorbed): `[P (out, in) | p]` only with the adapter,
+    /// `g`, `W_in (2 d_inner, d_model)`, `conv (d_inner, d_conv) | b_conv`,
+    /// `W_x (dt_rank + 2 d_state, d_inner)`, `W_dt (d_inner, dt_rank) | b_dt`,
+    /// `A_log (d_inner, d_state)`, `D`, `W_out (d_model, d_inner)`. The depthwise conv's
+    /// fans are `(d_conv, d_conv)` (each output channel sees `d_conv` taps of one input
+    /// channel); `g` and `D` are per-channel gains, `A_log` a `(d_state -> d_inner)`
+    /// table by shape. Introspection only (ADR-0002).
+    pub fn weight_layout(&self) -> Vec<LayerBlock> {
+        let (i, m, di, ds, dc, dr) = (
+            self.input_size,
+            self.output_size,
+            self.d_inner,
+            self.d_state,
+            self.d_conv,
+            self.dt_rank,
+        );
+        let mut v = Vec::with_capacity(12);
+        if self.has_adapter {
+            v.push(LayerBlock::matrix("P", BlockKind::Weight, m, i, i, m));
+            v.push(LayerBlock::vector("p", BlockKind::Bias, m, i, m));
+        }
+        v.push(LayerBlock::vector("g", BlockKind::Gain, m, m, m));
+        v.push(LayerBlock::matrix(
+            "W_in",
+            BlockKind::Weight,
+            2 * di,
+            m,
+            m,
+            2 * di,
+        ));
+        v.push(LayerBlock::matrix(
+            "conv",
+            BlockKind::Weight,
+            di,
+            dc,
+            dc,
+            dc,
+        ));
+        v.push(LayerBlock::vector("b_conv", BlockKind::Bias, di, dc, dc));
+        v.push(LayerBlock::matrix(
+            "W_x",
+            BlockKind::Weight,
+            dr + 2 * ds,
+            di,
+            di,
+            dr + 2 * ds,
+        ));
+        v.push(LayerBlock::matrix(
+            "W_dt",
+            BlockKind::Weight,
+            di,
+            dr,
+            dr,
+            di,
+        ));
+        v.push(LayerBlock::vector("b_dt", BlockKind::Bias, di, dr, di));
+        v.push(LayerBlock::matrix(
+            "A_log",
+            BlockKind::Weight,
+            di,
+            ds,
+            ds,
+            di,
+        ));
+        v.push(LayerBlock::vector("D", BlockKind::Gain, di, di, di));
+        v.push(LayerBlock::matrix("W_out", BlockKind::Weight, m, di, di, m));
+        v
     }
 
     /// Nx2 `[summed deriv | frame count]` harvest in the SAME S3.2 order, so row `k`
@@ -1303,6 +1374,7 @@ impl Layer for MambaLayer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::layout::test_support::{block, block_ranges, total_len};
     use super::*;
 
     const I: usize = 4;
@@ -1347,40 +1419,16 @@ mod tests {
         rows.iter().map(|r| r[0]).collect()
     }
 
-    /// Flat offset of each S3.2 block, computed independently of [`for_each_slot`].
-    fn offsets(i: usize, o: usize, ds: usize, dc: usize, ex: usize) -> Vec<(&'static str, usize)> {
-        let di = ex * o;
-        let dr = o.div_ceil(16).max(1);
-        let mut v = Vec::new();
-        let mut p = 0usize;
-        if i != o {
-            for (n, len) in [("P", o * i), ("p", o)] {
-                v.push((n, p));
-                p += len;
-            }
-        }
-        for (n, len) in [
-            ("g", o),
-            ("W_in", 2 * di * o),
-            ("conv", di * dc),
-            ("b_conv", di),
-            ("W_x", (dr + 2 * ds) * di),
-            ("W_dt", di * dr),
-            ("b_dt", di),
-            ("A_log", di * ds),
-            ("D", di),
-            ("W_out", o * di),
-        ] {
-            v.push((n, p));
-            p += len;
-        }
-        v.push(("END", p));
-        v
-    }
-
-    fn block(blocks: &[(&'static str, usize)], name: &str) -> (usize, usize) {
-        let k = blocks.iter().position(|(n, _)| *n == name).unwrap();
-        (blocks[k].1, blocks[k + 1].1)
+    /// The production layout's block ranges at a geometry (the legs below slice packs by
+    /// block name through it).
+    fn offsets(
+        i: usize,
+        o: usize,
+        ds: usize,
+        dc: usize,
+        ex: usize,
+    ) -> Vec<(String, std::ops::Range<usize>)> {
+        block_ranges(&cell(i, o, ds, dc, ex).weight_layout())
     }
 
     // --- Hyperparameters (spec S3.3) ---------------------------------------
@@ -1448,6 +1496,48 @@ mod tests {
         }
     }
 
+    /// The layout record itself (issue #27): names in S3.2 order, MATH shapes, the
+    /// depthwise conv's `(d_conv, d_conv)` fans, `g`/`D` as gains, the adapter only when
+    /// the widths differ.
+    #[test]
+    fn weight_layout_names_shapes_and_fans() {
+        let (i, o, ds, dc, ex) = (4usize, 3usize, 2usize, 3usize, 2usize);
+        let (di, dr) = (ex * o, 1usize);
+        let got: Vec<(String, BlockKind, Vec<usize>, usize, usize)> = cell(i, o, ds, dc, ex)
+            .weight_layout()
+            .into_iter()
+            .map(|x| (x.name, x.kind, x.shape, x.fan_in, x.fan_out))
+            .collect();
+        let b =
+            |n: &str, k: BlockKind, shape: Vec<usize>, fi, fo| (n.to_string(), k, shape, fi, fo);
+        assert_eq!(
+            got,
+            vec![
+                b("P", BlockKind::Weight, vec![o, i], i, o),
+                b("p", BlockKind::Bias, vec![o], i, o),
+                b("g", BlockKind::Gain, vec![o], o, o),
+                b("W_in", BlockKind::Weight, vec![2 * di, o], o, 2 * di),
+                b("conv", BlockKind::Weight, vec![di, dc], dc, dc),
+                b("b_conv", BlockKind::Bias, vec![di], dc, dc),
+                b(
+                    "W_x",
+                    BlockKind::Weight,
+                    vec![dr + 2 * ds, di],
+                    di,
+                    dr + 2 * ds
+                ),
+                b("W_dt", BlockKind::Weight, vec![di, dr], dr, di),
+                b("b_dt", BlockKind::Bias, vec![di], dr, di),
+                b("A_log", BlockKind::Weight, vec![di, ds], ds, di),
+                b("D", BlockKind::Gain, vec![di], di, di),
+                b("W_out", BlockKind::Weight, vec![o, di], di, o),
+            ]
+        );
+        let square = cell(o, o, ds, dc, ex).weight_layout();
+        assert_eq!(square[0].name, "g");
+        assert_eq!(square.len(), 10);
+    }
+
     /// The `[P | p]` block exists ONLY when `in != out`, and its absence is exactly
     /// `out*in + out` fewer weights (spec S3.2).
     #[test]
@@ -1467,12 +1557,9 @@ mod tests {
             let n = c.nb_of_weights();
             let di = ex * o;
             let dr = o.div_ceil(16).max(1);
-            let blocks = offsets(i, o, ds, dc, ex);
-            assert_eq!(
-                blocks.last().unwrap().1,
-                n,
-                "block offsets disagree with nb"
-            );
+            let layout = c.weight_layout();
+            assert_eq!(total_len(&layout), n, "the layout does not tile the pack");
+            let blocks = block_ranges(&layout);
 
             let mut probe = |base: usize,
                              row: usize,

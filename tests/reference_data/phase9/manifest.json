@@ -55,6 +55,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 1387,
+      "prefix": "BLSTM",
       "seed": 1003001,
       "weights": "cfc_bidirectional_seed.bin"
     },
@@ -67,6 +68,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 717,
+      "prefix": "BLSTM",
       "seed": 1003002,
       "weights": "cfc_forward_seed.bin"
     },
@@ -79,6 +81,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 1651,
+      "prefix": "BLSTM",
       "seed": 1008001,
       "weights": "lstm_forward_seed.bin"
     },
@@ -91,6 +94,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 1319,
+      "prefix": "BLSTM",
       "seed": 920503,
       "weights": "mamba_bidirectional_seed.bin"
     },
@@ -103,6 +107,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 683,
+      "prefix": "BLSTM",
       "seed": 920504,
       "weights": "mamba_forward_seed.bin"
     },
@@ -115,6 +120,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 3159,
+      "prefix": "BLSTM",
       "seed": 920501,
       "weights": "slstm_bidirectional_seed.bin"
     },
@@ -127,6 +133,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 1603,
+      "prefix": "BLSTM",
       "seed": 920502,
       "weights": "slstm_forward_seed.bin"
     },
@@ -139,6 +146,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 1091,
+      "prefix": "BLSTM",
       "seed": 1104001,
       "weights": "transformer_bidirectional_seed.bin"
     },
@@ -151,6 +159,7 @@
       "init_scheme": "xavier",
       "nets": 1,
       "pack_length": 569,
+      "prefix": "BLSTM",
       "seed": 1104002,
       "weights": "transformer_forward_seed.bin"
     },
@@ -166,6 +175,7 @@
       "lid_mode": 5,
       "lid_pack_length": 949,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 920505,
       "weights": "twin_lid_slstm_seed.bin"
@@ -182,6 +192,7 @@
       "lid_mode": 7,
       "lid_pack_length": 517,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 1003003,
       "weights": "twin_mode7_lid_cfc_seed.bin"
@@ -198,6 +209,7 @@
       "lid_mode": 7,
       "lid_pack_length": 271,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 5700005,
       "weights": "twin_mode7_lid_cfc_forward_seed.bin"
@@ -214,6 +226,7 @@
       "lid_mode": 7,
       "lid_pack_length": 559,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 5700002,
       "weights": "twin_mode7_lid_lstm_forward_seed.bin"
@@ -230,6 +243,7 @@
       "lid_mode": 7,
       "lid_pack_length": 1117,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 5700001,
       "weights": "twin_mode7_lid_mamba_seed.bin"
@@ -246,6 +260,7 @@
       "lid_mode": 7,
       "lid_pack_length": 571,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 5700004,
       "weights": "twin_mode7_lid_mamba_forward_seed.bin"
@@ -262,6 +277,7 @@
       "lid_mode": 7,
       "lid_pack_length": 949,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 920506,
       "weights": "twin_mode7_lid_slstm_seed.bin"
@@ -278,6 +294,7 @@
       "lid_mode": 7,
       "lid_pack_length": 487,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 5700003,
       "weights": "twin_mode7_lid_slstm_forward_seed.bin"
@@ -294,6 +311,7 @@
       "lid_mode": 7,
       "lid_pack_length": 721,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 1104003,
       "weights": "twin_mode7_lid_transformer_seed.bin"
@@ -310,6 +328,7 @@
       "lid_mode": 7,
       "lid_pack_length": 373,
       "nets": 2,
+      "prefix": "BLSTM_LID",
       "sad_pack_length": 537,
       "seed": 5700006,
       "weights": "twin_mode7_lid_transformer_forward_seed.bin"

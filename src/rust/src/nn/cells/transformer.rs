@@ -212,6 +212,7 @@
 use ndarray::Array2;
 
 use super::super::layers::matmul_seq;
+use super::super::layout::{BlockKind, LayerBlock};
 use super::super::network::Layer;
 use super::mamba::{RMS_EPS, silu, silu_deriv};
 use crate::nn::blstm::TransformerParams;
@@ -678,6 +679,29 @@ impl TransformerLayer {
                 out.push(w.slot(kind)[[r, c]]);
             },
         );
+    }
+
+    /// The 12 blocks [`for_each_slot`] visits, in order (issue #27), at their MATH shapes:
+    /// `W_a (H, in) | b_a | g_1`, `W_qkv (3H, H) | b_qkv` (ONE combined matrix, one fan
+    /// pair), `W_o (H, H) | b_o | g_2`, `W_1 (d_ff, H) | b_1`, `W_2 (H, d_ff) | b_2`.
+    /// `window` and `heads` carry no weight and do not appear. Introspection only
+    /// (ADR-0002).
+    pub fn weight_layout(&self) -> Vec<LayerBlock> {
+        let (i, h, f) = (self.input_size, self.output_size, self.d_ff);
+        vec![
+            LayerBlock::matrix("W_a", BlockKind::Weight, h, i, i, h),
+            LayerBlock::vector("b_a", BlockKind::Bias, h, i, h),
+            LayerBlock::vector("g_1", BlockKind::Gain, h, h, h),
+            LayerBlock::matrix("W_qkv", BlockKind::Weight, QKV_NB * h, h, h, QKV_NB * h),
+            LayerBlock::vector("b_qkv", BlockKind::Bias, QKV_NB * h, h, QKV_NB * h),
+            LayerBlock::matrix("W_o", BlockKind::Weight, h, h, h, h),
+            LayerBlock::vector("b_o", BlockKind::Bias, h, h, h),
+            LayerBlock::vector("g_2", BlockKind::Gain, h, h, h),
+            LayerBlock::matrix("W_1", BlockKind::Weight, f, h, h, f),
+            LayerBlock::vector("b_1", BlockKind::Bias, f, h, f),
+            LayerBlock::matrix("W_2", BlockKind::Weight, h, f, f, h),
+            LayerBlock::vector("b_2", BlockKind::Bias, h, f, h),
+        ]
     }
 
     /// Nx2 `[summed deriv | frame count]` harvest in the SAME S1.2 order, so row `k` is
@@ -1238,6 +1262,7 @@ impl Layer for TransformerLayer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::layout::test_support::{block, block_ranges, total_len};
     use super::*;
 
     const I: usize = 3;
@@ -1314,36 +1339,10 @@ mod tests {
         rows.iter().map(|r| r[0]).collect()
     }
 
-    /// An INDEPENDENT transcription of the S1.2 block order: `(name, start offset)`
-    /// pairs plus a terminal `END`, so a block's `[lo, hi)` range comes from this table
-    /// and not from the walk under test.
-    fn offsets(i: usize, o: usize, dff: usize) -> Vec<(String, usize)> {
-        let mut v = Vec::new();
-        let mut p = 0usize;
-        for (name, len) in [
-            ("W_a", o * i),
-            ("b_a", o),
-            ("g_1", o),
-            ("W_qkv", 3 * o * o),
-            ("b_qkv", 3 * o),
-            ("W_o", o * o),
-            ("b_o", o),
-            ("g_2", o),
-            ("W_1", dff * o),
-            ("b_1", dff),
-            ("W_2", o * dff),
-            ("b_2", o),
-        ] {
-            v.push((name.to_string(), p));
-            p += len;
-        }
-        v.push(("END".to_string(), p));
-        v
-    }
-
-    fn block(blocks: &[(String, usize)], name: &str) -> (usize, usize) {
-        let k = blocks.iter().position(|(n, _)| n == name).unwrap();
-        (blocks[k].1, blocks[k + 1].1)
+    /// The production layout's block ranges at a geometry (the legs below slice packs by
+    /// block name through it); one head, which divides any width and moves no block.
+    fn offsets(i: usize, o: usize, dff: usize) -> Vec<(String, std::ops::Range<usize>)> {
+        block_ranges(&TransformerLayer::new(i, o, &params(W, 1, dff)).weight_layout())
     }
 
     // --- Weight seam (spec S1.2) -------------------------------------------
@@ -1360,8 +1359,8 @@ mod tests {
             let want =
                 o * (i + 1) + o + 3 * o * (o + 1) + o * (o + 1) + o + dff * (o + 1) + o * (dff + 1);
             assert_eq!(cell.nb_of_weights(), want, "in={i} out={o} d_ff={dff}");
-            // The independent offset table must agree with the counted walk.
-            assert_eq!(offsets(i, o, dff).last().unwrap().1, want);
+            // The layout tiles the counted walk.
+            assert_eq!(total_len(&cell.weight_layout()), want);
         }
     }
 
@@ -1373,7 +1372,7 @@ mod tests {
         let (i, o, dff) = (3usize, 4usize, 5usize);
         let mut cell = TransformerLayer::new(i, o, &params(W, A, dff));
         let n = cell.nb_of_weights();
-        let blocks = offsets(i, o, dff);
+        let blocks = block_ranges(&cell.weight_layout());
 
         // (block name, rows, cols, stored-index accessor). `rows` is the ROW-major outer
         // extent, `cols` the inner one.
@@ -1423,6 +1422,44 @@ mod tests {
                 assert_eq!(get(&cell.weights, j), 1.0, "{name}: [{j}] misplaced");
             }
         }
+    }
+
+    /// The layout record itself (issue #27): names in S1.2 order, math shapes, the one
+    /// combined `W_qkv` fan pair, the two gains, biases carrying their map's fans; and
+    /// `window` / `heads` absent from it.
+    #[test]
+    fn weight_layout_names_shapes_and_fans() {
+        let (i, h, f) = (3usize, 4usize, 5usize);
+        let got: Vec<(String, BlockKind, Vec<usize>, usize, usize)> =
+            TransformerLayer::new(i, h, &params(W, 2, f))
+                .weight_layout()
+                .into_iter()
+                .map(|x| (x.name, x.kind, x.shape, x.fan_in, x.fan_out))
+                .collect();
+        let b =
+            |n: &str, k: BlockKind, shape: Vec<usize>, fi, fo| (n.to_string(), k, shape, fi, fo);
+        assert_eq!(
+            got,
+            vec![
+                b("W_a", BlockKind::Weight, vec![h, i], i, h),
+                b("b_a", BlockKind::Bias, vec![h], i, h),
+                b("g_1", BlockKind::Gain, vec![h], h, h),
+                b("W_qkv", BlockKind::Weight, vec![3 * h, h], h, 3 * h),
+                b("b_qkv", BlockKind::Bias, vec![3 * h], h, 3 * h),
+                b("W_o", BlockKind::Weight, vec![h, h], h, h),
+                b("b_o", BlockKind::Bias, vec![h], h, h),
+                b("g_2", BlockKind::Gain, vec![h], h, h),
+                b("W_1", BlockKind::Weight, vec![f, h], h, f),
+                b("b_1", BlockKind::Bias, vec![f], h, f),
+                b("W_2", BlockKind::Weight, vec![h, f], f, h),
+                b("b_2", BlockKind::Bias, vec![h], f, h),
+            ]
+        );
+        let other = TransformerLayer::new(i, h, &params(W + 7, 4, f)).weight_layout();
+        assert_eq!(
+            other,
+            TransformerLayer::new(i, h, &params(W, 2, f)).weight_layout()
+        );
     }
 
     #[test]

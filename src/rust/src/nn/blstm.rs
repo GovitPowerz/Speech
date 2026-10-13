@@ -67,6 +67,7 @@ use crate::legacy_config::{get_f64_default, get_usize_list};
 
 use super::cells::CellLayer;
 use super::layers::NeuronLayer;
+use super::layout::{BlockKind, LayerBlock, Stack, WeightBlock, place};
 use super::network::Network;
 use super::train::Rprop;
 
@@ -1054,6 +1055,62 @@ impl BlstmNetwork {
         self.normalize_input_std = rest[input_size..2 * input_size].to_vec();
 
         Ok(())
+    }
+
+    /// The weight layout of this net's pack (issue #27): every block [`Self::set_weights`]
+    /// consumes, in its order -- the forward stack's layers, the backward stack's
+    /// (bidirectional only), the output MLP's, then the normalize tail (`mean`, `std`,
+    /// each `input_size` wide: the output net's input width in MLP mode, exactly as
+    /// `nb_of_weights` and `set_weights` size it there). Offsets are contiguous from 0 and
+    /// `sum(len) == nb_of_weights()`. Introspection only (ADR-0002).
+    pub fn weight_layout(&self) -> Vec<WeightBlock> {
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        if !self.cfg.is_mlp {
+            let forward = self.forward_network.as_ref().unwrap();
+            place(
+                &mut out,
+                Stack::Forward,
+                forward.layers().iter().map(CellLayer::weight_layout),
+                &mut offset,
+            );
+            if let Some(backward) = self.backward_network.as_ref() {
+                place(
+                    &mut out,
+                    Stack::Backward,
+                    backward.layers().iter().map(CellLayer::weight_layout),
+                    &mut offset,
+                );
+            }
+        }
+        place(
+            &mut out,
+            Stack::Output,
+            self.output_network
+                .layers()
+                .iter()
+                .map(NeuronLayer::weight_layout),
+            &mut offset,
+        );
+        let n = self.input_size();
+        place(
+            &mut out,
+            Stack::Tail,
+            [vec![
+                LayerBlock::vector("mean", BlockKind::Stat, n, n, n),
+                LayerBlock::vector("std", BlockKind::Stat, n, n, n),
+            ]],
+            &mut offset,
+        );
+        out
+    }
+
+    /// [`Self::weight_layout`] straight from a parsed config: builds the net (the one
+    /// place the per-cell geometry is resolved -- `dt_rank` auto, the Mamba adapter, the
+    /// sub-sampled fan-ins) and reads its layout. The `speech_rs.weight_layout` seam
+    /// calls this.
+    pub fn weight_layout_of(cfg: BlstmConfig) -> Result<Vec<WeightBlock>> {
+        Ok(BlstmNetwork::from_config(cfg)?.weight_layout())
     }
 
     /// `getWeights` (`:240-253`): mirror of `set_weights`, same block order.

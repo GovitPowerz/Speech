@@ -8,6 +8,33 @@ use ndarray::Array2;
 use super::activations::{
     gates_deriv, gates_fn, identity_fn, logistic_fn, maxmin2_deriv, maxmin2_fn,
 };
+use super::layout::{BlockKind, LayerBlock};
+
+/// The legacy gate order inside every combined `4O` block (`[i|f|o|g]`, the cell input
+/// being the fourth), spelled as the weight-layout block suffixes `w.i` .. `b.c`.
+const LSTM_GATES: [&str; 4] = ["i", "f", "o", "c"];
+
+/// The 12 peephole rows of `peep_weight` (`12 x O`), named by what each one feeds and
+/// reads, in row order -- the `columns` of the `peep` layout block (one row of 12 per
+/// unit in the flat run). Rows 0-2 peek the CELL STATE (`c_{t-1}` into `i`/`f`, `c_t`
+/// into `o`), rows 3-11 peek GATE VALUES: `i` reads `i/f/o_{t-1}` (3-5), `f` reads
+/// `i/f/o_{t-1}` (6-8), `o` reads `i_t`, `f_t` (9-10) and `o_{t-1}` (11). The flag
+/// families: `cells_peep` owns 0-2, `gates_rec_peep` the same-gate rows 3/7/11,
+/// `gates_peep` the rest (`feed_forward`, `LSTMLayer.cpp:338-363`).
+pub const PEEPHOLE_COLUMNS: [&str; 12] = [
+    "i.cell_prev",
+    "f.cell_prev",
+    "o.cell",
+    "i.i_prev",
+    "i.f_prev",
+    "i.o_prev",
+    "f.i_prev",
+    "f.f_prev",
+    "f.o_prev",
+    "o.i",
+    "o.f",
+    "o.o_prev",
+];
 
 /// Ascending-loop matrix product `a (m x k) * b (k x n)`, accumulating the `k`
 /// index in strictly ascending order (`i`/`j` outer, `k` inner). This is the
@@ -156,6 +183,54 @@ impl LstmLayer {
         drain_col_major(&self.feedback_weights, out);
         drain_col_major(&self.peep_weight, out);
         drain_col_major(&self.biases, out);
+    }
+
+    /// The 13 blocks [`Self::set_weights`] consumes, in order (issue #27): the four
+    /// `w.{i,f,o,c}` input blocks, the four `r.{i,f,o,c}` recurrent blocks, the `peep`
+    /// bundle, the four `b.{i,f,o,c}` biases. A column-major `in x 4O` fill is, read per
+    /// gate, a row-major `(O, in)` block (`needed[c*in + k]` with `c = g*O + j` is
+    /// `w_g[j, k]` at `j*in + k`), which is why the shapes below are `(out, in)` /
+    /// `(out, out)` and the bundle is `(out, 12)` (one row of 12 peephole rows per unit).
+    /// Every block carries the gate map's fans: the input and recurrent halves feed ONE
+    /// summed pre-activation, so `fan_in = in + out`, `fan_out = out`. Introspection
+    /// only (ADR-0002).
+    pub fn weight_layout(&self) -> Vec<LayerBlock> {
+        let (i, o) = (self.input_size, self.output_size);
+        let (fi, fo) = (i + o, o);
+        let mut v = Vec::with_capacity(13);
+        for g in LSTM_GATES {
+            v.push(LayerBlock::matrix(
+                format!("w.{g}"),
+                BlockKind::Weight,
+                o,
+                i,
+                fi,
+                fo,
+            ));
+        }
+        for g in LSTM_GATES {
+            v.push(LayerBlock::matrix(
+                format!("r.{g}"),
+                BlockKind::Weight,
+                o,
+                o,
+                fi,
+                fo,
+            ));
+        }
+        let mut peep = LayerBlock::matrix("peep", BlockKind::Peephole, o, 12, fi, fo);
+        peep.columns = Some(&PEEPHOLE_COLUMNS);
+        v.push(peep);
+        for g in LSTM_GATES {
+            v.push(LayerBlock::vector(
+                format!("b.{g}"),
+                BlockKind::Bias,
+                o,
+                fi,
+                fo,
+            ));
+        }
+        v
     }
 
     /// `feedForward` (`LSTMLayer.cpp:312-413`): whole-sequence peephole-LSTM forward
@@ -894,6 +969,19 @@ impl NeuronLayer {
         drain_col_major(&self.biases, out);
     }
 
+    /// The two blocks [`Self::set_weights`] consumes, in order (issue #27): `W`, the
+    /// `in x out` matrix filled column-major -- which read per output unit is a row-major
+    /// `(out, in)` block -- then the `b` row. `input_size` is the SUB-SAMPLED fan-in
+    /// (`Network::new` builds layer `i` at `OutputNeuronNb[i] * OutputSubSampling[i]`), so
+    /// the fans carry the factor. Introspection only (ADR-0002).
+    pub fn weight_layout(&self) -> Vec<LayerBlock> {
+        let (i, o) = (self.input_size, self.output_size);
+        vec![
+            LayerBlock::matrix("W", BlockKind::Weight, o, i, i, o),
+            LayerBlock::vector("b", BlockKind::Bias, o, i, o),
+        ]
+    }
+
     /// `feedForward` (`NeuronLayer.cpp:127-149`): whole-sequence dense forward
     /// pass. Fills `output` (T x O).
     ///
@@ -1141,5 +1229,172 @@ impl NeuronLayer {
     pub fn ponderate_weights_derivatives(&mut self, factor: f64) {
         self.weights_derivatives *= factor;
         self.biases_derivatives *= factor;
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::super::layout::test_support::{block, block_ranges, total_len};
+    use super::*;
+
+    /// The 13 LSTM blocks sit where `set_weights`' column-major fills put them (issue
+    /// #27): `w.g[j, k]` at `input_weights[[k, g*O + j]]`, `r.g[j, k]` at
+    /// `feedback_weights[[k, g*O + j]]`, `peep[j, r]` at `peep_weight[[r, j]]`, `b.g[j]`
+    /// at `biases[[0, g*O + j]]` -- one-hot probed per element, offsets from the layout.
+    #[test]
+    fn lstm_layout_positions_match_set_weights() {
+        let (i, o) = (3usize, 2usize);
+        let mut cell = LstmLayer::new(i, o, true, true, true);
+        let n = cell.nb_of_weights();
+        let layout = cell.weight_layout();
+        assert_eq!(total_len(&layout), n);
+        assert_eq!(layout.len(), 13);
+        let blocks = block_ranges(&layout);
+        for (g, name) in LSTM_GATES.iter().enumerate() {
+            let (lo, hi) = block(&blocks, &format!("w.{name}"));
+            assert_eq!(hi - lo, o * i);
+            for j in 0..o {
+                for k in 0..i {
+                    let mut flat = vec![0.0; n];
+                    flat[lo + j * i + k] = 1.0;
+                    cell.set_weights(&flat);
+                    assert_eq!(cell.input_weights[[k, g * o + j]], 1.0, "w.{name}[{j},{k}]");
+                }
+            }
+            let (lo, hi) = block(&blocks, &format!("r.{name}"));
+            assert_eq!(hi - lo, o * o);
+            for j in 0..o {
+                for k in 0..o {
+                    let mut flat = vec![0.0; n];
+                    flat[lo + j * o + k] = 1.0;
+                    cell.set_weights(&flat);
+                    assert_eq!(
+                        cell.feedback_weights[[k, g * o + j]],
+                        1.0,
+                        "r.{name}[{j},{k}]"
+                    );
+                }
+            }
+            let (lo, hi) = block(&blocks, &format!("b.{name}"));
+            assert_eq!(hi - lo, o);
+            for j in 0..o {
+                let mut flat = vec![0.0; n];
+                flat[lo + j] = 1.0;
+                cell.set_weights(&flat);
+                assert_eq!(cell.biases[[0, g * o + j]], 1.0, "b.{name}[{j}]");
+            }
+        }
+        let (lo, hi) = block(&blocks, "peep");
+        assert_eq!(hi - lo, 12 * o);
+        for j in 0..o {
+            for r in 0..12 {
+                let mut flat = vec![0.0; n];
+                flat[lo + j * 12 + r] = 1.0;
+                cell.set_weights(&flat);
+                assert_eq!(cell.peep_weight[[r, j]], 1.0, "peep[{j},{r}]");
+            }
+        }
+    }
+
+    /// The record: `w.*` `(out, in)` then `r.*` `(out, out)` then the `(out, 12)` bundle
+    /// carrying the 12 column names in `peep_weight` row order, then the biases -- all on
+    /// the gate map's `(in + out, out)` fans.
+    #[test]
+    fn lstm_layout_names_shapes_fans_and_peephole_columns() {
+        let (i, o) = (3usize, 2usize);
+        let layout = LstmLayer::new(i, o, true, true, true).weight_layout();
+        let names: Vec<&str> = layout.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "w.i", "w.f", "w.o", "w.c", "r.i", "r.f", "r.o", "r.c", "peep", "b.i", "b.f",
+                "b.o", "b.c"
+            ]
+        );
+        for b in &layout {
+            assert_eq!((b.fan_in, b.fan_out), (i + o, o), "{}", b.name);
+            let want_kind = match b.name.as_bytes()[0] {
+                b'w' | b'r' => BlockKind::Weight,
+                b'p' => BlockKind::Peephole,
+                _ => BlockKind::Bias,
+            };
+            assert_eq!(b.kind, want_kind, "{}", b.name);
+            let want_shape: Vec<usize> = match b.name.as_bytes()[0] {
+                b'w' => vec![o, i],
+                b'r' => vec![o, o],
+                b'p' => vec![o, 12],
+                _ => vec![o],
+            };
+            assert_eq!(b.shape, want_shape, "{}", b.name);
+            assert_eq!(b.columns.is_some(), b.name == "peep", "{}", b.name);
+        }
+        let peep = &layout[8];
+        assert_eq!(peep.columns, Some(&PEEPHOLE_COLUMNS[..]));
+        // The 12 names in `peep_weight` ROW order, the forward's reads (`feed_forward`,
+        // rows 0-2 the cell state, 3-11 gate values): pinned as a list because the init
+        // scatters each gate's three gate-peephole draws by the gate PREFIX alone, so a
+        // permutation of two names inside one gate changes no byte anywhere (the #27
+        // battery's item 2b) -- this list is the one place the row semantics are recorded.
+        assert_eq!(
+            PEEPHOLE_COLUMNS,
+            [
+                "i.cell_prev",
+                "f.cell_prev",
+                "o.cell",
+                "i.i_prev",
+                "i.f_prev",
+                "i.o_prev",
+                "f.i_prev",
+                "f.f_prev",
+                "f.o_prev",
+                "o.i",
+                "o.f",
+                "o.o_prev"
+            ]
+        );
+    }
+
+    /// The output layer: `W (out, in)` filled column-major is `weights[[k, j]]` at
+    /// `j*in + k`, then `b`; the fans are the SUB-SAMPLED input width and the output.
+    #[test]
+    fn neuron_layout_positions_match_set_weights() {
+        let (i, o) = (4usize, 3usize);
+        let mut layer = NeuronLayer::new(i, o);
+        let n = layer.nb_of_weights();
+        let layout = layer.weight_layout();
+        assert_eq!(total_len(&layout), n);
+        assert_eq!(
+            layout
+                .iter()
+                .map(|b| (
+                    b.name.as_str(),
+                    b.kind,
+                    b.shape.clone(),
+                    b.fan_in,
+                    b.fan_out
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("W", BlockKind::Weight, vec![o, i], i, o),
+                ("b", BlockKind::Bias, vec![o], i, o)
+            ]
+        );
+        let blocks = block_ranges(&layout);
+        let (lo, _) = block(&blocks, "W");
+        for j in 0..o {
+            for k in 0..i {
+                let mut flat = vec![0.0; n];
+                flat[lo + j * i + k] = 1.0;
+                layer.set_weights(&flat);
+                assert_eq!(layer.weights[[k, j]], 1.0, "W[{j},{k}]");
+            }
+        }
+        let (lo, _) = block(&blocks, "b");
+        for j in 0..o {
+            let mut flat = vec![0.0; n];
+            flat[lo + j] = 1.0;
+            layer.set_weights(&flat);
+            assert_eq!(layer.biases[[0, j]], 1.0, "b[{j}]");
+        }
     }
 }

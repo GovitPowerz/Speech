@@ -96,8 +96,12 @@ _Avoid_: evaluation, pass, scoring run
 The flat f64 vector of a net's weights in the legacy order (forward, backward, output MLP, normalize tail), post-adim. A `.bin` is its file form.
 _Avoid_: checkpoint (a checkpoint is a directory of packs plus a history)
 
+**Weight layout**:
+The ordered block list of a pack, computed by Rust from a config map through `speech_rs.weight_layout`; a block is (stack, layer, name, kind, shape, fan_in, fan_out, offset, len), shapes in row-major storage order, the LSTM peephole bundle alone carrying its 12 column names. Python draws per block kind off it and holds no offset arithmetic (issue #27).
+_Avoid_: offsets table, walk
+
 **adim coefficient**:
-`sqrt(fan_in*sub + fan_out)`, the per-block scaling applied once in Rust at the config seam, bias excepted.
+`sqrt(fan_in*sub + fan_out)`, the per-block scaling applied once in Rust at the config seam, bias excepted. Not a layout field: it lives where it is applied (`config.rs`), and a weight layout block carries structural fans only.
 
 **Normalize tail**:
 The trailing mean / std block of a pack, the type-1 input-normalization statistics.

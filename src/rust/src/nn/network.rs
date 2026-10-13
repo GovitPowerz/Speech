@@ -314,6 +314,13 @@ impl<L: Layer> Network<L> {
         &mut self.layers
     }
 
+    /// Shared access to the layer stack, layer 0 first -- the order `set_weights` threads
+    /// the pack through. Introspection only (issue #27, ADR-0002): the weight layout reads
+    /// each layer's blocks through it.
+    pub fn layers(&self) -> &[L] {
+        &self.layers
+    }
+
     fn clear_layers_output(&mut self) {
         for lo in &mut self.layers_output {
             *lo = Array2::zeros((0, 0));
