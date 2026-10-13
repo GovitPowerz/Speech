@@ -295,6 +295,13 @@ pub struct BagOfProcessors {
     /// [`Self::print_confusion_matrix`]). Cleared at each `save_and_update`.
     #[cfg(feature = "test-support")]
     last_confusion: Vec<(f64, Array2<f64>)>,
+    /// Test-support capture (no legacy counterpart): the `costLID` each conf's
+    /// [`Self::update_weights`] last received. The `:465` `costLID = -1.0` gate sits
+    /// between the save and the update in [`Self::save_and_update`]; an algo-3/4 update
+    /// ignores `costLID` (its criterion is `cost` alone), so this is the only place the
+    /// gate order is observable on a SAD conf.
+    #[cfg(feature = "test-support")]
+    last_update_cost_lid: BTreeMap<usize, f64>,
     /// T1-review hardening (Phase 8 Task 1, finding 1; no legacy counterpart):
     /// sum-of-`|x|` over `data_raw` from the LAST [`Self::segmentation_function`]
     /// internal [`read_audio`] call. `segmentation_function`'s dispatch surface
@@ -515,6 +522,8 @@ impl BagOfProcessors {
             exclude_nontrans,
             #[cfg(feature = "test-support")]
             last_confusion: Vec::new(),
+            #[cfg(feature = "test-support")]
+            last_update_cost_lid: BTreeMap::new(),
             #[cfg(feature = "test-support")]
             last_audio_abs_sum: None,
         })
@@ -858,13 +867,13 @@ impl BagOfProcessors {
         _bad_classif_lid: f64,
         derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
     ) {
+        #[cfg(feature = "test-support")]
+        self.last_update_cost_lid.insert(pos, cost_lid);
         match &mut self.processors[pos] {
             Processor::Spectral(seg) => {
                 // legacy: :184-188 saveCriterion = cost.
                 let save_criterion = cost;
                 seg.update_weights(&derivs[&pos][0], save_criterion);
-                #[cfg(feature = "test-support")]
-                seg.record_update_cost_lid_for_test(cost_lid);
             }
             Processor::Signal(seg) => {
                 // legacy: :189-193, identical criterion to algo 3.
@@ -935,6 +944,12 @@ impl BagOfProcessors {
     #[cfg(feature = "test-support")]
     pub fn last_confusion_for_test(&self) -> &[(f64, Array2<f64>)] {
         &self.last_confusion
+    }
+
+    /// Test-observation hook: see [`Self::last_update_cost_lid`]'s field doc.
+    #[cfg(feature = "test-support")]
+    pub fn last_update_cost_lid_for_test(&self, pos: usize) -> Option<f64> {
+        self.last_update_cost_lid.get(&pos).copied()
     }
 
     /// Test-observation hook (Phase 8 Task 1, T1-review hardening finding 1, no
