@@ -390,7 +390,6 @@ pub struct FastSpectralSegmenter {
     plan: FastSadPlan,
     net: Option<FastNet>,
 
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// Post-overlap-division, PRE-`results_to_segmentation` posterior rows, one per
@@ -426,7 +425,6 @@ impl FastSpectralSegmenter {
         let mut seg = FastSpectralSegmenter {
             plan,
             net: None,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -496,7 +494,6 @@ impl Segmenter for FastSpectralSegmenter {
         let mut pipeline = FastPipeline::new(&tl.params, &plan.feature_cfg, rate)?;
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         // Forward-only: no NN cost harvested (documented divergence).
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
@@ -965,7 +962,6 @@ pub struct FastTwinLid {
     window_shift_sec: f64,
     ltsv_shift_sec: f64,
 
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     last_result_rows: Vec<Vec<f64>>,
@@ -1136,7 +1132,6 @@ impl FastTwinLid {
             spectrum_shift_in_frames: 0,
             window_shift_sec,
             ltsv_shift_sec,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -1331,7 +1326,6 @@ impl Segmenter for FastTwinLid {
         let external_features = audio.external_features.clone();
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
@@ -1421,7 +1415,7 @@ impl Segmenter for FastTwinLid {
         ChannelMembers {
             cumulative_error: self.cumulative_error[chan],
             nb_of_classif: self.nb_of_classif[chan],
-            lid: Some(&self.lid),
+            lid: Some(self.lid.channel(chan)),
         }
     }
 }

@@ -49,8 +49,12 @@ interface: `tasks/segmenter.rs::Segmenter` as the one surface the bag reaches ev
 through -- methods returning state a driver already holds (its trainable nets, its pack count,
 one channel's result members, its posteriors) plus `set_packs`, the pass-through it replaces --
 the three LID drivers' five member vectors regrouped into one `LidMembers` with every write site
-renamed, and the drivers' pass-through delegators and `score` copies deleted; nothing
-recomputed, proven by the goldens byte-green, issue #25). Training is
+renamed, the drivers' pass-through delegators, `score` copies and write-only `channels`
+fields deleted, and `engine/bag_of_processors.rs` reading every driver through the trait:
+the weight, statistics, derivative and back-prop reads iterate the trainable nets, save and
+update take one `training_policy` keyed on the algo number as the legacy is (the same
+criteria, update costs, `LID_` prefix and order); nothing recomputed, proven by the goldens
+byte-green, issue #25). Training is
 exact-f64 only and bails loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and

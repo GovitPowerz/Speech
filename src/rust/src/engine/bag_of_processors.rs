@@ -215,10 +215,10 @@ pub struct BagOfProcessors {
     /// T1-review hardening (Phase 8 Task 1, finding 1; no legacy counterpart):
     /// sum-of-`|x|` over `data_raw` from the LAST [`Self::segmentation_function`]
     /// internal [`read_audio`] call. `segmentation_function`'s dispatch surface
-    /// (the `Processor` enum) is NN-output-shaped, not audio-shaped, so the
-    /// internally-decoded audio is otherwise unobservable from outside the
+    /// (the driver interface, [`Segmenter`]) is NN-output-shaped, not audio-shaped, so
+    /// the internally-decoded audio is otherwise unobservable from outside the
     /// function. This exists because the posterior/segmentation observable
-    /// (`Processor::FastSpectral`/`Spectral::last_result_rows`) turns out to be
+    /// (the driver's [`Segmenter::last_result_rows`]) turns out to be
     /// PROVABLY INVARIANT to `Audio_fixed_gain`'s value for a DCT-based config
     /// with `IgnoreFirstDCT true` (e.g. `tier2_spectral.config`): a global
     /// per-file amplitude gain shifts every frame's log-mel value by the SAME
@@ -636,9 +636,6 @@ impl BagOfProcessors {
             return;
         };
         let nets = self.processors[pos].driver_mut().nets_mut();
-        if nets.is_empty() {
-            return;
-        }
         for (i, (net, (update_cost, _))) in nets.into_iter().zip(&per_net).enumerate() {
             net.update_weights(&derivs[&pos][i], *update_cost);
         }
@@ -1080,10 +1077,10 @@ impl BagOfProcessors {
                 // in-band target is decoded here, once ([`LidResult::from_encoded`]).
                 let lid = members.lid.map(|l| {
                     LidResult::from_encoded(
-                        l.cumulative_error[chan],
-                        l.nb_of_classif[chan],
-                        l.is_correct[chan] == 100,
-                        &l.classification_errors[chan],
+                        l.cumulative_error,
+                        l.nb_of_classif,
+                        l.is_correct == 100,
+                        l.classification_errors,
                     )
                 });
 

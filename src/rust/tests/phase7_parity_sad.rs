@@ -77,6 +77,13 @@ fn run_path(inference: Option<&str>) -> (Vec<Vec<f64>>, Vec<Segmentation>) {
     let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();
     bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
 
+    assert!(
+        matches!(
+            bag.processor(0),
+            Processor::Spectral(_) | Processor::FastSpectral(_)
+        ),
+        "unexpected processor variant for inference={inference:?}"
+    );
     let posteriors = bag.processor(0).driver().last_result_rows().to_vec();
     (posteriors, seg)
 }

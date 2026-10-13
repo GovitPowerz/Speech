@@ -70,24 +70,37 @@ use crate::tasks::segmenter::{
 
 /// The per-channel LID members a LID driver (algo 5, the Twin, the fast Twin) writes on
 /// each `get_segmentation` call, one entry per channel. The legacy writes them onto
-/// `seg._LID*[chan]`; the Rust `Segmentation` is single-channel (S6 restructure), so
-/// they live on the driver like the SAD driver's `cumulative_error`/`nb_of_classif`.
+/// `seg._LID*[chan]` (algo 5 `BLSTMSpectralLID.cpp:414-425`, the Twin
+/// `TwinBLSTMSpectralLID.cpp:1320-1331`); the Rust `Segmentation` is single-channel (S6
+/// restructure), so they live on the driver like the SAD driver's
+/// `cumulative_error`/`nb_of_classif`.
 #[derive(Clone, Debug, Default)]
 pub struct LidMembers {
-    /// `seg._LIDCumulativeError[chan]`: the LID NN cost summed over speech segments.
+    /// `seg._LIDCumulativeError[chan]` (algo 5 `:414`, Twin `:1320`): the LID NN cost
+    /// summed over speech segments; the Twin then scales it `*= audio._Weight` (`:1336`).
     pub cumulative_error: Vec<f64>,
-    /// `seg._LIDNbOfClassif[chan]`.
+    /// `seg._LIDNbOfClassif[chan]` (algo 5 `:415`, Twin `:1321`).
     pub nb_of_classif: Vec<i64>,
-    /// `seg._LIDClassificationErrors[chan]`: the `1 x classNb` row
+    /// `seg._LIDClassificationErrors[chan]` (algo 5 `:416`, Twin `:1322`): the `1 x classNb` row
     /// `100 * (langID - targetLID)`, with `targetLID[targetIndex] = -2.0` -- so the
     /// target entry carries the `>150` in-band sentinel (`100*langID + 200 >= 200`).
     pub classification_errors: Vec<Vec<f64>>,
-    /// `seg._LIDSegmentsConfusion[chan]`: the `(classNb+2) x (classNb+2)` per-file
+    /// `seg._LIDSegmentsConfusion[chan]` (algo 5 `:418`, Twin `:1324`): the `(classNb+2) x (classNb+2)` per-file
     /// confusion matrix (label header row/col 0, per-class 1..classNb, totals classNb+1).
     pub segments_confusion: Vec<Array2<f64>>,
-    /// `seg._IsLIDCorrect[chan]`: 100 (target is argmax) / 0 (not) / -1 (dead:
+    /// `seg._IsLIDCorrect[chan]` (algo 5 `:420-425`, Twin `:1325-1331`): 100 (target is argmax) / 0 (not) / -1 (dead:
     /// `targetIndex` is clamped `>= 0`, so the -1 branch never fires).
     pub is_correct: Vec<i32>,
+}
+
+/// One channel's LID members, still in-band encoded: the bag's input to
+/// `LidResult::from_encoded`.
+#[derive(Debug, Clone, Copy)]
+pub struct LidChannel<'a> {
+    pub cumulative_error: f64,
+    pub nb_of_classif: i64,
+    pub is_correct: i32,
+    pub classification_errors: &'a [f64],
 }
 
 impl LidMembers {
@@ -100,6 +113,16 @@ impl LidMembers {
             classification_errors: vec![Vec::new(); channels],
             segments_confusion: vec![Array2::<f64>::zeros((0, 0)); channels],
             is_correct: vec![0; channels],
+        }
+    }
+
+    /// Channel `chan`'s members.
+    pub fn channel(&self, chan: usize) -> LidChannel<'_> {
+        LidChannel {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            is_correct: self.is_correct[chan],
+            classification_errors: &self.classification_errors[chan],
         }
     }
 }
@@ -121,7 +144,6 @@ pub struct BlstmSpectralLid {
     /// Stateful `_WindowShift` (`:187/:458`), mutated by [`get_blstm_param`] and reset
     /// to `0.0` when the noOverlap branch fired.
     window_shift_sec: f64,
-    channels: usize,
     /// Port-side observation point (NO legacy counterpart, same rationale as
     /// `BlstmSpectralSegmenter::last_result_rows`): the PRE-convolution LTSV-SAD
     /// result_vec per channel, captured before `results_to_segmentation` mutates it.
@@ -161,7 +183,6 @@ impl BlstmSpectralLid {
             net,
             spectrum_shift_sec,
             window_shift_sec,
-            channels: 0,
             last_result_rows: Vec::new(),
             lid: LidMembers::default(),
         })
@@ -188,14 +209,6 @@ impl BlstmSpectralLid {
     pub fn lid_members(&self) -> &LidMembers {
         &self.lid
     }
-
-    // -- NN weight family (BASE-CLASS delegates, Task 9) ----------------------
-    // `BLSTMSpectralLID` adds no overrides of its own: the bag's algo-5 arms
-    // (`BagOfProcessors.cpp:79,94,109,122,138,168,194`) resolve to the INHERITED
-    // `BLSTMSpectralSegmenter` methods, which delegate to `_BLSTMNeuralNetwork`
-    // -- and in `BLSTMSpectralLID` that base-class member IS the LID net (the
-    // ctor builds it from the same `BLSTM_*` namespace). So every delegate here
-    // targets `self.net`, mirroring `BlstmSpectralSegmenter`'s family.
 }
 
 impl Segmenter for BlstmSpectralLid {
@@ -350,7 +363,6 @@ impl Segmenter for BlstmSpectralLid {
         self.net.set_processing_type(window_size > 0, !no_overlap);
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.last_result_rows = Vec::with_capacity(channels);
         self.lid = LidMembers::zeroed(channels);
 
@@ -603,6 +615,10 @@ impl Segmenter for BlstmSpectralLid {
         self.net.set_weights(&packs[0])
     }
 
+    /// The bag's algo-5 arms (`BagOfProcessors.cpp:79,94,109,122,138,168,194`) resolve
+    /// to the INHERITED `BLSTMSpectralSegmenter` methods on `_BLSTMNeuralNetwork`, and in
+    /// `BLSTMSpectralLID` that base-class member IS the LID net (the ctor builds it from
+    /// the same `BLSTM_*` namespace).
     fn nets(&self) -> Vec<&BlstmNetwork> {
         vec![&self.net]
     }
@@ -611,12 +627,12 @@ impl Segmenter for BlstmSpectralLid {
         vec![&mut self.net]
     }
 
-    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
         // The SAD is LTSV (NN-free): no SAD cost or count, only the LID members.
         ChannelMembers {
             cumulative_error: 0.0,
             nb_of_classif: 0,
-            lid: Some(&self.lid),
+            lid: Some(self.lid.channel(chan)),
         }
     }
 }
@@ -750,7 +766,6 @@ pub struct TwinBlstmSpectralLid {
     window_shift_sec: f64,
     /// Stateful `_LTSVWindowShift` (`:306`); dead for the ported configs (LTSVwindow 0).
     ltsv_shift_sec: f64,
-    channels: usize,
     /// `seg._CumulativeError[chan]` (`:774`, then `*= LIDCostPonderation` `:1337`).
     cumulative_error: Vec<f64>,
     /// `seg._NbOfClassif[chan]` (`:775`).
@@ -843,7 +858,6 @@ impl TwinBlstmSpectralLid {
             spectrum_shift_in_frames: 0,
             window_shift_sec,
             ltsv_shift_sec,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -915,10 +929,6 @@ impl TwinBlstmSpectralLid {
     pub fn concat_branch(&self) -> &[i32] {
         &self.concat_branch
     }
-
-    // -- SAD net weight family (`BLSTMSpectralSegmenter` delegates) -----------
-
-    // -- LID net weight family (`:59-85` delegates) --------------------------
 
     /// Port of `getBLSTMLIDInputSequence` (`:139-168`): when the SAD net's
     /// `_OutputForward` is populated, hcat its z-normalized `[fwd | bwd]` hidden states
@@ -1191,7 +1201,6 @@ impl TwinBlstmSpectralLid {
         let cost_modified = self.lid_net.is_cost_modified();
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
@@ -1618,7 +1627,6 @@ impl TwinBlstmSpectralLid {
         );
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
@@ -2151,7 +2159,6 @@ impl Segmenter for TwinBlstmSpectralLid {
         );
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
@@ -2506,7 +2513,7 @@ impl Segmenter for TwinBlstmSpectralLid {
         ChannelMembers {
             cumulative_error: self.cumulative_error[chan],
             nb_of_classif: self.nb_of_classif[chan],
-            lid: Some(&self.lid),
+            lid: Some(self.lid.channel(chan)),
         }
     }
 }

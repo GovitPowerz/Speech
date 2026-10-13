@@ -56,7 +56,6 @@ pub struct VrctsPart {
     driver_cfg: DriverConfig,
     is_fast: bool,
     force: bool,
-    channels: usize,
 }
 
 impl VrctsPart {
@@ -76,7 +75,6 @@ impl VrctsPart {
             driver_cfg,
             is_fast,
             force,
-            channels: 0,
         })
     }
 }
@@ -124,8 +122,6 @@ impl Segmenter for VrctsPart {
         seg_per_chan: &mut [Segmentation],
         _refs: Option<&[Segmentation]>,
     ) -> Result<()> {
-        self.channels = seg_per_chan.len();
-
         for (chan, seg) in seg_per_chan.iter_mut().enumerate() {
             let suffix = if self.is_fast { "Fast" } else { "Long" };
             let xml_path = format!("{}_VRCTS_{suffix}.xml", audio.ref_seg_file_name);

@@ -12,7 +12,7 @@ use crate::audio::{Audio, convolution_horiz_slice, windowing_coefficients};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
 use crate::nn::blstm::BlstmNetwork;
 
-use super::lid::LidMembers;
+use super::lid::LidChannel;
 use super::segmentation::{SegClass, Segmentation};
 
 /// Produces a [`Segmentation`](super::segmentation_io) from features/audio.
@@ -90,9 +90,9 @@ pub struct ChannelMembers<'a> {
     pub cumulative_error: f64,
     /// `seg._NbOfClassif[chan]` (result col `len-1`).
     pub nb_of_classif: i64,
-    /// The LID members (all channels, still in-band encoded) on a LID driver, `None`
-    /// on algo 0-4: the legacy `!seg._IsLIDCorrect.empty()` gate (`:338`/`:380`).
-    pub lid: Option<&'a LidMembers>,
+    /// The channel's LID members (still in-band encoded) on a LID driver, `None` on
+    /// algo 0-4: the legacy `!seg._IsLIDCorrect.empty()` gate (`:338`/`:380`).
+    pub lid: Option<LidChannel<'a>>,
 }
 
 /// Segmenter decision parameters, parsed from the legacy config (`buildFromConf`).

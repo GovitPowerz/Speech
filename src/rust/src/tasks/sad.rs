@@ -79,7 +79,6 @@ pub struct TdcSegmenter {
     noise_seed: i32,
     noise_ratio: f64,
     window_shift_sec: f64,
-    channels: usize,
 }
 
 impl TdcSegmenter {
@@ -124,7 +123,6 @@ impl TdcSegmenter {
             noise_seed,
             noise_ratio,
             window_shift_sec,
-            channels: 0,
         })
     }
 }
@@ -191,7 +189,6 @@ impl Segmenter for TdcSegmenter {
         };
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             let mut buf = ndarray::Array2::<f64>::zeros((1, full_window));
             let mut results = vec![0.0f64; vec_size];
@@ -271,7 +268,6 @@ pub struct LtsvSegmenter {
     feature_cfg: FeatureConfig,
     spectrum_shift_sec: f64,
     window_shift_sec: f64,
-    channels: usize,
 }
 
 impl LtsvSegmenter {
@@ -296,7 +292,6 @@ impl LtsvSegmenter {
             feature_cfg,
             spectrum_shift_sec,
             window_shift_sec,
-            channels: 0,
         })
     }
 }
@@ -423,7 +418,6 @@ impl Segmenter for LtsvSegmenter {
         };
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             let perio: Array2<f64> = compute_segment_periodogram_estimates(
                 audio,
@@ -537,7 +531,6 @@ pub struct BlstmSignalSegmenter {
     noise_ratio: f64,
     /// The stateful legacy `_WindowShift` member (`:108/:376`).
     window_shift_sec: f64,
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// Port-side observation point, NO legacy counterpart: the PRE-convolution
@@ -598,7 +591,6 @@ impl BlstmSignalSegmenter {
             noise_seed,
             noise_ratio,
             window_shift_sec,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -707,7 +699,6 @@ impl Segmenter for BlstmSignalSegmenter {
         let window_shift_usize = window_shift as usize;
         let channels = audio.data.nrows();
         let frame_count = audio.data.ncols();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
@@ -1026,7 +1017,6 @@ pub struct BlstmSpectralSegmenter {
     window_shift_sec: f64,
     /// Stateful `_LTSVWindowShift` (`:306`); dead for Task-7 configs.
     ltsv_shift_sec: f64,
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// The ONE `result_vec` buffer reused across the channel loop (the cross-channel
@@ -1087,7 +1077,6 @@ impl BlstmSpectralSegmenter {
             spectrum_shift_in_frames: 0,
             window_shift_sec,
             ltsv_shift_sec,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             result_buf: None,
@@ -1232,7 +1221,6 @@ impl Segmenter for BlstmSpectralSegmenter {
         self.result_buf = Some(Array2::<f64>::zeros((real_vec_size, 1)));
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);

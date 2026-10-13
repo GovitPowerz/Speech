@@ -467,10 +467,8 @@ fn fast_twin_set_weights_answers_as_the_exact_arm() {
             .map(|_| Segmentation::new(dur))
             .collect();
         bag.run_get_segmentation(0, &mut audio, &mut segs).unwrap();
-        match bag.processor(0) {
-            Processor::FastTwinLid(t) => t.lid_members().classification_errors[0].clone(),
-            _ => unreachable!(),
-        }
+        let members = bag.processor(0).driver().channel_members(0);
+        members.lid.unwrap().classification_errors.to_vec()
     };
     let own = score(&mut fast);
     let halved: Vec<f64> = lid.iter().map(|v| v * 0.5).collect();
