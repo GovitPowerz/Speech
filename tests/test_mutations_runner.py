@@ -124,6 +124,7 @@ def test_cargo_passing_catcher_is_missed() -> None:
         "2 passed; 0 failed; 0 ignored",
         "1 passed; 1 failed; 0 ignored",
     ],
+    ids=["zero-match", "ignored", "two-passed", "one-each"],
 )
 def test_cargo_catcher_that_is_not_exactly_one_run_test_is_stale(counts: str) -> None:
     out = f"test result: ok. {counts}; 0 measured; 9 filtered out; finished in 0.00s\n"
@@ -147,6 +148,7 @@ def test_cargo_output_with_no_result_line_is_stale() -> None:
         (2, "E   SyntaxError: invalid syntax\nInterrupted: 1 error during collection\n1 error in 0.1s\n", "INVALID"),
         (4, "ERROR: found no collectors for t.py::x\n___ ERROR collecting t.py ___\nE   SyntaxError: x\n1 error in 0.3s\n", "INVALID"),
     ],
+    ids=["failed", "error", "passed", "skipped", "not-found", "no-tests", "two-passed", "collection-interrupted", "collection-node-id"],
 )
 def test_pytest_verdict(code: int, out: str, verdict: str) -> None:
     assert runner.pytest_verdict(code, out)[0] == verdict

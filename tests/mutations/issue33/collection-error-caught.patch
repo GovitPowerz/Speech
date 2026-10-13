@@ -1,0 +1,15 @@
+mutation: a mutated module that no longer imports reads as CAUGHT, not INVALID
+catcher: CAUGHT pytest tests/test_mutations_runner.py::test_a_mutation_that_does_not_build_is_invalid_not_caught
+diff --git a/tests/mutations/run.py b/tests/mutations/run.py
+index 409f031..a56fbd2 100644
+--- a/tests/mutations/run.py
++++ b/tests/mutations/run.py
+@@ -127,7 +127,7 @@ def pytest_verdict(code: int, out: str) -> tuple[str, str]:
+     # A module that no longer imports fails collection; with a node id pytest then exits 4,
+     # the code it also uses for a test that does not exist.
+     if "ERROR collecting" in out or re.search(r"errors? during collection", out):
+-        return "INVALID", next((line[1:].strip() for line in reversed(out.splitlines()) if line.startswith("E ")), "collection error")
++        return "CAUGHT", next((line[1:].strip() for line in reversed(out.splitlines()) if line.startswith("E ")), "collection error")
+     if code in (4, 5):
+         return "STALE", "no such test"
+     last = next((line for line in reversed(out.splitlines()) if line.strip()), "")

@@ -1,0 +1,15 @@
+mutation: --changed-since ignores the catcher files
+catcher: CAUGHT pytest tests/test_mutations_runner.py::test_changed_since_selects_by_patched_file_catcher_file_or_new_patch
+diff --git a/tests/mutations/run.py b/tests/mutations/run.py
+index 409f031..d315136 100644
+--- a/tests/mutations/run.py
++++ b/tests/mutations/run.py
+@@ -265,7 +265,7 @@ def changed_since(root: Path, mutations: list[Mutation], ref: str) -> list[Mutat
+     [base] = git("merge-base", ref, "HEAD")
+     changed = set(git("diff", "--name-only", base)) | set(git("ls-files", "--others", "--exclude-standard"))
+     return [
+-        m for m in mutations if f"tests/mutations/{m.name}.patch" in changed or changed & set(m.files) or changed & {catcher_file(root, c) for c in m.catchers}
++        m for m in mutations if f"tests/mutations/{m.name}.patch" in changed or changed & set(m.files)
+     ]
+ 
+ 
