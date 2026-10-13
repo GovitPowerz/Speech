@@ -3255,6 +3255,8 @@ battery is what found the gap.
 
 ## Issue #68 -- the MiB divisor pin: the mutation check
 
+**Live since issue #33:** `tests/mutations/issue68/` (3 patches). Item 3 swaps both platform arms, so it is caught on either host; the Linux twin that was never applied has no patch.
+
 Issue #54 relabelled the bench peak RSS as MiB everywhere a reader sees it; nothing pinned
 the divisor behind the label. The only checks on the value were the sanity ranges in
 `tests/phase7_bench.rs` (`1.0 < maxrss_mb < 4096.0`), which a decimal divisor (`/ 1e6` on

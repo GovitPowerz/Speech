@@ -1,0 +1,16 @@
+mutation: ru_maxrss_to_mib truncates the quotient with floor()
+catcher: CAUGHT cargo --lib bench::tests::ru_maxrss_to_mib_is_binary
+
+diff --git a/src/rust/src/bench.rs b/src/rust/src/bench.rs
+index 2975b5c..f4745a5 100644
+--- a/src/rust/src/bench.rs
++++ b/src/rust/src/bench.rs
+@@ -197,7 +197,7 @@ const RU_MAXRSS_UNIT_BYTES: f64 = 1024.0;
+ /// decimal MB. Pure and host-independent so BOTH platform arms are unit-pinned
+ /// on every host, the Linux CI included (issue #68).
+ fn ru_maxrss_to_mib(raw: f64, unit_bytes: f64) -> f64 {
+-    raw * unit_bytes / (1024.0 * 1024.0)
++    (raw * unit_bytes / (1024.0 * 1024.0)).floor()
+ }
+ 
+ /// Run `configs`, each `repeat` times, over `path`. Each iteration builds a
