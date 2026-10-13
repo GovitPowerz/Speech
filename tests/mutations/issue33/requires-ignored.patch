@@ -1,10 +1,9 @@
 mutation: requires: corpus is ignored, so an absent corpus runs the catcher
 catcher: CAUGHT pytest tests/test_mutations_runner.py::test_requires_corpus_skips_when_the_corpus_is_absent
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
-index 409f031..1cde6b5 100644
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -214,7 +214,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Result]:
+@@ -220,7 +220,7 @@
  
      if _git_apply(root, mutation, "--check").returncode:
          return every("STALE", "patch does not apply")

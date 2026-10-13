@@ -13,13 +13,15 @@ A mutation is `tests/mutations/<battery>/<id>.patch`: a header, then a git diff.
 A run applies one mutation, builds what its catchers need, runs each catcher, restores the
 tree, and compares each observed verdict with the expected one.
 
-Stdlib only, Python >= 3.12: the Rust CI job runs `--check --kind cargo` on the runner image's
-`python3`.
+Run it with `uv run python`: pytest catchers and `maturin` run under the interpreter that runs
+this script. Stdlib only, so the Rust CI job's `python3` (>= 3.10) runs `--check --kind cargo`.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -32,7 +34,7 @@ REQUIRES = ("corpus",)
 # `tests/conftest.py` and `src/rust/tests/common/mod.rs` both resolve the corpus here.
 CORPUS = Path("data/LRE03-LRE07")
 CARGO_DIR = Path("src/rust")
-MATURIN = ["uv", "run", "maturin", "develop", "--release", "--manifest-path", "src/rust/speech-py/Cargo.toml"]
+MATURIN = [sys.executable, "-m", "maturin", "develop", "--release", "--manifest-path", "src/rust/speech-py/Cargo.toml"]
 
 
 class PatchError(ValueError):
@@ -131,7 +133,7 @@ def pytest_verdict(code: int, out: str) -> tuple[str, str]:
     if code in (4, 5):
         return "STALE", "no such test"
     last = next((line for line in reversed(out.splitlines()) if line.strip()), "")
-    counts = {word.rstrip("s") if word != "passed" else word: int(n) for n, word in re.findall(r"(\d+) (passed|failed|skipped|errors?)", last)}
+    counts = {word.rstrip("s"): int(n) for n, word in re.findall(r"(\d+) (passed|failed|skipped|errors?)", last)}
     failed = counts.get("failed", 0) + counts.get("error", 0)
     passed, skipped = counts.get("passed", 0), counts.get("skipped", 0)
     if failed + passed + skipped != 1:
@@ -139,6 +141,12 @@ def pytest_verdict(code: int, out: str) -> tuple[str, str]:
     if failed:
         return "CAUGHT", next((line[1:].strip() for line in out.splitlines() if line.startswith("E ")), "")
     return ("SKIPPED", "") if skipped else ("MISSED", "")
+
+
+def build_verdict(out: str) -> tuple[str, str]:
+    """The verdict of every catcher when the mutated tree's catcher targets do not build."""
+    first = next((line for line in out.splitlines() if line.startswith("error")), "build failed")
+    return ("STALE" if "no test target named" in out else "INVALID"), first
 
 
 def catcher_file(root: Path, catcher: Catcher) -> str:
@@ -158,11 +166,11 @@ def catcher_file(root: Path, catcher: Catcher) -> str:
 
 
 @dataclass(frozen=True)
-class Result:
+class Verdict:
     mutation: Mutation
     catcher: Catcher
     observed: str
-    line: str
+    failure: str  # the first failure line, captured, never asserted
 
 
 def _natural(text: str) -> list[int | str]:
@@ -172,37 +180,32 @@ def _natural(text: str) -> list[int | str]:
 def load(root: Path, selectors: list[str]) -> list[Mutation]:
     paths = sorted(root.glob("tests/mutations/*/*.patch"), key=lambda p: (p.parent.name, _natural(p.stem)))
     names = [f"{p.parent.name}/{p.stem}" for p in paths]
+
+    def matches(name: str, sel: str) -> bool:
+        return name == sel or name.partition("/")[0] == sel
+
     for sel in selectors:
-        if not any(n == sel or n.partition("/")[0] == sel for n in names):
+        if not any(matches(n, sel) for n in names):
             raise PatchError(f"no mutation matches {sel!r}")
-    return [
-        parse_patch(n, p.read_text())
-        for n, p in zip(names, paths, strict=True)
-        if not selectors or any(n == sel or n.partition("/")[0] == sel for sel in selectors)
-    ]
+    return [parse_patch(n, p.read_text()) for n, p in zip(names, paths, strict=True) if not selectors or any(matches(n, sel) for sel in selectors)]
 
 
-def _run(cmd: list[str], cwd: Path, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, input=stdin, capture_output=True, text=True)
+def _run(cmd: list[str], cwd: Path, stdin: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, cwd=cwd, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
 
 
 def _git_apply(root: Path, mutation: Mutation, *flags: str) -> subprocess.CompletedProcess[str]:
     return _run(["git", "apply", *flags, "-"], root, mutation.text)
 
 
-def _untracked(root: Path) -> set[str]:
-    return set(_run(["git", "ls-files", "--others", "--exclude-standard"], root).stdout.splitlines())
-
-
 def _cargo(root: Path, targets: list[str], extra: list[str]) -> subprocess.CompletedProcess[str]:
     cmd = ["cargo", "test", "--release", "-p", "speech", *(tok for t in targets for tok in t.split()), *extra]
-    res = _run(cmd, root / CARGO_DIR)
-    return subprocess.CompletedProcess(res.args, res.returncode, res.stdout + res.stderr, "")
+    # A proptest failing under a mutation would otherwise write its regression seed into the tree.
+    return _run(cmd, root / CARGO_DIR, env={**os.environ, "PROPTEST_DISABLE_FAILURE_PERSISTENCE": "1"})
 
 
 def _pytest(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    res = _run([sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args], root)
-    return subprocess.CompletedProcess(res.args, res.returncode, res.stdout + res.stderr, "")
+    return _run([sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args], root)
 
 
 def _run_catcher(root: Path, catcher: Catcher) -> tuple[str, str]:
@@ -212,9 +215,9 @@ def _run_catcher(root: Path, catcher: Catcher) -> tuple[str, str]:
     return pytest_verdict(res.returncode, res.stdout)
 
 
-def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Result]:
-    def every(observed: str, line: str) -> list[Result]:
-        return [Result(mutation, c, observed, line) for c in mutation.catchers]
+def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Verdict]:
+    def every(observed: str, failure: str) -> list[Verdict]:
+        return [Verdict(mutation, c, observed, failure) for c in mutation.catchers]
 
     if _git_apply(root, mutation, "--check").returncode:
         return every("STALE", "patch does not apply")
@@ -223,30 +226,20 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Result]:
     if _git_apply(root, mutation).returncode:
         raise RuntimeError(f"{mutation.name}: git apply failed after --check passed")
     rebuilt = False
-    # A failing catcher can leave files behind (a proptest regression seed under the mutation).
-    before = _untracked(root)
     try:
         targets = sorted({c.target for c in mutation.catchers if c.kind == "cargo"})
         if targets:
             build = _cargo(root, targets, ["--no-run"])
             if build.returncode:
-                first = next((line for line in build.stdout.splitlines() if line.startswith("error")), "build failed")
-                return every("STALE" if "no test target named" in build.stdout else "INVALID", first)
+                return every(*build_verdict(build.stdout))
         if any(c.kind == "pytest" for c in mutation.catchers) and any(f.startswith(f"{CARGO_DIR}/") for f in mutation.files):
             rebuilt = True
             if _run(MATURIN, root).returncode:
                 return every("INVALID", "maturin develop failed")
-        return [Result(mutation, c, *_run_catcher(root, c)) for c in mutation.catchers]
+        return [Verdict(mutation, c, *_run_catcher(root, c)) for c in mutation.catchers]
     finally:
         if _git_apply(root, mutation, "-R").returncode:
             raise RuntimeError(f"{mutation.name}: restore failed, revert the patch by hand")
-        for left in sorted(_untracked(root) - before):
-            path = root / left
-            path.unlink()
-            for parent in path.parents:
-                if parent == root or any(parent.iterdir()):
-                    break
-                parent.rmdir()
         if rebuilt and _run(MATURIN, root).returncode:
             raise RuntimeError(f"{mutation.name}: the restored speech_rs did not build, run maturin develop by hand")
 
@@ -306,20 +299,24 @@ def main(argv: list[str], root: Path = ROOT) -> int:
         return 2
     if args.changed_since:
         mutations = changed_since(root, mutations, args.changed_since)
+    kinds = tuple(args.kind or ("cargo", "pytest")) if args.check else ("cargo", "pytest")
+    if "pytest" in kinds and any(c.kind == "pytest" for m in mutations for c in m.catchers) and importlib.util.find_spec("pytest") is None:
+        print(f"pytest is not importable by {sys.executable}: run with `uv run python`, or `--check --kind cargo`", file=sys.stderr)
+        return 2
     if args.check:
-        problems = check(root, mutations, tuple(args.kind or ("cargo", "pytest")))
+        problems = check(root, mutations, kinds)
         print("\n".join([*problems, f"{len(mutations)} mutations checked, {len(problems)} problems"]))
         return 1 if problems else 0
     corpus = (root / CORPUS).is_dir()
     print("| battery | # | mutation | catcher | expected | observed |\n|---|---|---|---|---|---|", flush=True)
-    results: list[Result] = []
+    results: list[Verdict] = []
     for m in mutations:
         battery, _, ident = m.name.partition("/")
         for r in run_mutation(root, m, corpus):
             print(f"| {battery} | {ident} | {m.description} | {r.catcher.label()} | {r.catcher.expected} | {r.observed} |", flush=True)
             results.append(r)
-    if any(r.line for r in results):
-        print("\nfirst failure lines:\n" + "\n".join(f"- {r.mutation.name} {r.catcher.label()}: {r.line}" for r in results if r.line))
+    if any(r.failure for r in results):
+        print("\nfirst failure lines:\n" + "\n".join(f"- {r.mutation.name} {r.catcher.label()}: {r.failure}" for r in results if r.failure))
     differ = [r for r in results if r.observed != r.catcher.expected]
     print(f"\n{len(results)} verdicts, {len(differ)} differ from expected")
     return 1 if differ else 0

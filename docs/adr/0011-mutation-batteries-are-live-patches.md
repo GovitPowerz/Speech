@@ -27,14 +27,15 @@ alternative, each patch pinned to its base SHA and replayed in a worktree, needs
 proves only history and cannot see a catcher rot.
 
 **Named catchers only.** A run executes the catchers the header names, one verdict per
-(mutation, catcher): `CAUGHT` (the catcher fails), `MISSED` (it passes), `SKIPPED` (a declared
-precondition is absent; a Rust corpus gate passes silently, so the runner cannot see the skip
-without it), `INVALID` (the mutated tree does not build, which is not a catch), `STALE` (the
-patch does not apply, or a catcher no longer names exactly one test; a test filter matching
-nothing exits 0 and would read as `MISSED`). Gaps are committed as expected `MISSED`. An
-observed verdict that differs from the expected one is a STOP (ADR-0003). A whole-suite sweep
-per mutation was rejected: it answers "what catches this" at suite cost per item, not the
-scorecard's claim.
+(mutation, catcher): `CAUGHT` (the catcher fails), `MISSED` (it passes), `SKIPPED` (the catcher
+did not run: the test skipped itself, or a declared precondition is absent, since a Rust corpus
+gate passes silently and the runner cannot see that skip without the declaration), `INVALID`
+(the mutated tree does not build, which is not a catch), `STALE` (the patch does not apply, or a
+catcher no longer names exactly one test; a test filter matching nothing exits 0 and would read
+as `MISSED`). Gaps are committed as expected `MISSED`. An observed verdict that differs from the
+expected one is a STOP (ADR-0003), a skip included: a claim the run could not verify is not
+green, so a full run needs the corpus. A whole-suite sweep per mutation was rejected: it answers
+"what catches this" at suite cost per item, not the scorecard's claim.
 
 **Not ledger records.** ADR-0009 deferred battery rows to this issue. A verdict is an
 expectation committed beside its mutation and re-checked by the runner; a record of it could
@@ -42,11 +43,10 @@ only equal its source, or differ and be a STOP that is never promoted.
 
 **Cheap half in CI, costly half at close.** CI checks both staleness halves on every pull
 request (`git apply --check`; each catcher resolved against `cargo test --release -- --list` or
-pytest collection), with no rebuild. A run costs a release rebuild per mutation (101 s wall
-measured for the whole test tree after one touched file, before any catcher runs, plus
-`maturin develop` when a pytest catcher is named), so an issue close runs its new battery plus
-the mutations whose patched or catcher files the branch touched (`--changed-since`), and the
-full battery runs before a tag or on demand.
+pytest collection), with no rebuild. A run costs a release (LTO) rebuild per mutation before any
+catcher runs, plus two `maturin develop` builds when a pytest catcher reads a Rust mutation, so
+an issue close runs its new battery plus the mutations whose patched or catcher files the branch
+touched (`--changed-since`), and the full battery runs before a tag or on demand.
 
 ## Consequences
 

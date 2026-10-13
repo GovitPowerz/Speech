@@ -1,10 +1,9 @@
 mutation: a catcher filter matching no test reads as MISSED, not STALE
 catcher: CAUGHT pytest tests/test_mutations_runner.py::test_cargo_catcher_that_is_not_exactly_one_run_test_is_stale[zero-match]
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
-index 409f031..358d0e3 100644
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -114,7 +114,7 @@ def cargo_verdict(out: str) -> tuple[str, str]:
+@@ -115,7 +115,7 @@
      if m is None:
          return "STALE", "no test result line"
      passed, failed = int(m.group(1)), int(m.group(2))

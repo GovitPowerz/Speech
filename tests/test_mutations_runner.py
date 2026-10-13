@@ -131,6 +131,15 @@ def test_cargo_catcher_that_is_not_exactly_one_run_test_is_stale(counts: str) ->
     assert runner.cargo_verdict(out)[0] == "STALE"
 
 
+def test_a_tree_that_does_not_build_is_invalid_with_its_first_error() -> None:
+    out = "   Compiling speech v0.1.0\nerror[E0308]: mismatched types\n --> src/x.rs:3:5\nerror: could not compile `speech`\n"
+    assert runner.build_verdict(out) == ("INVALID", "error[E0308]: mismatched types")
+
+
+def test_a_build_naming_a_missing_test_target_is_stale() -> None:
+    assert runner.build_verdict("error: no test target named `nope` in `speech` package\n")[0] == "STALE"
+
+
 def test_cargo_output_with_no_result_line_is_stale() -> None:
     assert runner.cargo_verdict("error: no test target named `nope` in `speech` package\n")[0] == "STALE"
 
@@ -185,9 +194,7 @@ def test_catcher_file_of_an_integration_test_and_a_node_id(tmp_path: Path) -> No
 
 # -- the tree half, on a throwaway repository ----------------------------------------------------
 
-_TEST_MOD = """from pathlib import Path
-
-import pytest
+_TEST_MOD = """import pytest
 
 from pkg.mod import VALUE
 
@@ -204,11 +211,6 @@ def test_other():
 def test_skipped():
     pass
 
-
-def test_writes_an_artifact():
-    Path("out/artifact.txt").parent.mkdir(exist_ok=True)
-    Path("out/artifact.txt").write_text("x")
-    assert VALUE == 1
 """
 
 
@@ -252,16 +254,8 @@ def test_run_reads_caught_and_missed_and_restores_the_tree(tmp_path: Path) -> No
     [mutation] = runner.load(root, ["b/1"])
     results = runner.run_mutation(root, mutation, False)
     assert [(r.observed, r.catcher.expected) for r in results] == [("CAUGHT", "CAUGHT"), ("MISSED", "MISSED")]
-    assert "assert 2 == 1" in results[0].line
+    assert "assert 2 == 1" in results[0].failure
     assert _clean(root)
-
-
-def test_run_removes_the_files_a_catcher_created(tmp_path: Path) -> None:
-    root = _repo(tmp_path, {"b/1": _patch("mutation: m\ncatcher: CAUGHT pytest t/test_mod.py::test_writes_an_artifact\n")})
-    (root / "mine.txt").write_text("untracked before the run")
-    assert _verdicts(root, "b/1") == ["CAUGHT"]
-    assert not (root / "out").exists()
-    assert (root / "mine.txt").exists()
 
 
 def test_a_patch_that_does_not_apply_is_stale_and_touches_nothing(tmp_path: Path) -> None:
