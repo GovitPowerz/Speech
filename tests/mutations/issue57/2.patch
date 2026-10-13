@@ -1,0 +1,18 @@
+mutation: FastNet::truncate_forward outputs sweep 1 alone, the second TwoSweeps sweep dropped from the average
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_cep_exact_vs_fast
+catcher: CAUGHT cargo --test fast_twin_lid_matrix lid_parity_exact_vs_fast_per_pair
+
+diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
+index 4007a71..2b20f32 100644
+--- a/src/rust/src/fast/driver.rs
++++ b/src/rust/src/fast/driver.rs
+@@ -797,7 +797,7 @@ impl FastNet {
+             for c in 0..output_size {
+                 let s1 = sweep1_out.data[r * output_size + c];
+                 let s2 = sweep2_buf.data[(window_size_short + r) * output_size + c];
+-                output.data[r * output_size + c] = (s1 + s2) / 2.0;
++                output.data[r * output_size + c] = s1;
+             }
+         }
+         output

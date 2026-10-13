@@ -1,0 +1,18 @@
+mutation: FastBiCell::feed_forward stages the reversed stack left of the forward stack in the hcat (the BiCell LID arm)
+catcher: CAUGHT cargo --test fast_twin_lid_matrix lid_parity_exact_vs_fast_per_pair
+
+diff --git a/src/rust/src/fast/bicell.rs b/src/rust/src/fast/bicell.rs
+index ea8a62f..583d206 100644
+--- a/src/rust/src/fast/bicell.rs
++++ b/src/rust/src/fast/bicell.rs
+@@ -332,8 +332,8 @@ impl FastBiCell {
+             &self.output_layers,
+             &self.output_subsampling,
+             rows_f,
+-            (&self.hidden_fwd, cols_f),
+-            Some((&self.hidden_rev, cols_r)),
++            (&self.hidden_rev, cols_r),
++            Some((&self.hidden_fwd, cols_f)),
+             &mut self.row_buf,
+             &mut self.output,
+             self.output_size,

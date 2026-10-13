@@ -3237,6 +3237,8 @@ argmax identity (zero flips) and a LID error delta of EXACTLY `0.0` on both arms
 
 ### The mutation battery (the grilling's D13)
 
+**Live since issue #33:** `tests/mutations/issue57/` (3 patches). Item 2's "LID parity pins" are the three legs whose failures were recorded: `phase7_parity_lid`'s phSeq and cep legs and `fast_twin_lid_matrix::lid_parity_exact_vs_fast_per_pair`.
+
 Apply -> run ONLY the named catcher (release) -> revert -> re-run green -> tree byte-clean.
 Three items, three mutations, three catches, all by the leg the decision named.
 
