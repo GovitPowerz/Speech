@@ -2939,6 +2939,8 @@ helps, hurts, or is neutral to full-corpus convergence remains for the launcher 
 
 ## Phase 11 -- the mutation battery (Task 10): the catcher map
 
+**Live since issue #33:** `tests/mutations/phase11/` (14 patches, ADR-0011; `uv run python tests/mutations/run.py phase11`). Item 6 is retired: its site `init_transformer_flat` and its catcher `test_pack_is_reproducible_block_by_block` were removed in bea8ea4 (#27), where the init became a draw per block of the Rust weight layout. The expected verdicts follow this table and its prose: the FD leg is MISSED where the doctrine paragraph below measures it blind (1b, 2a-ii, 10a), and item 7's re-duplicated `build_dense_tail` copy is rebuilt from the prose.
+
 Spec S9's `>= 8` items, run as apply -> run ONLY the named catcher's file (FOREGROUND,
 release, R6-capped) -> revert -> re-run green -> verify the tree byte-clean. **10 items, 15
 applied mutations**: six items carry one mutation each (4, 5, 6, 7, 8, 9), items 1, 3 and 10
@@ -2951,7 +2953,8 @@ for item 3, so item 3's spec-named mutation (3a) is NOT caught even though its e
 variant (3b) is -- which makes that gap **f32-tier-specific**, not a hole in the convention
 itself. Item 7's closer is the Task-1 dedupe rather than any test. By MUTATION rather than
 by item: **12 named / 1 by-other / 2 not caught** = 15. Nothing under `src/` was committed;
-the per-item evidence (diffs, commands, verbatim failure lines) is in the task ledger.
+the per-item evidence (diffs, commands, verbatim failure lines) was kept only in the gitignored task
+ledger (the live patches above replace it).
 
 | # | mutation | named catcher | verdict |
 |---|---|---|---|

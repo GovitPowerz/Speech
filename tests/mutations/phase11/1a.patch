@@ -1,0 +1,17 @@
+mutation: ALiBi slope sign flipped in the f32 twin FastTransformer::step
+catcher: CAUGHT cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_at_the_fixture_geometry
+catcher: CAUGHT cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_within_the_f32_band
+catcher: MISSED cargo --lib fast::cells::tests::transformer_window_truncation_identity
+diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
+index 3d749fa..dc379a7 100644
+--- a/src/rust/src/fast/cells.rs
++++ b/src/rust/src/fast/cells.rs
+@@ -1758,7 +1758,7 @@ impl FastTransformer {
+                 for e in 0..d {
+                     acc += sc.qkv[qb + e] * k_ring[ko + e];
+                 }
+-                sc.probs[jj] = acc / self.sqrt_d + slope * (jj as f32 - (len - 1) as f32);
++                sc.probs[jj] = acc / self.sqrt_d + slope * ((len - 1) as f32 - jj as f32);
+             }
+             // Softmax, ALWAYS max-subtracted (spec S1.3): max, then exp, then normalize,
+             // each an ascending loop. The subtraction is the exact cell's too, which is

@@ -1,0 +1,17 @@
+mutation: softmax Jacobian drops the - sdot term, p * (dp - sdot) -> p * dp, making b_k live
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::the_key_bias_is_gradient_dead_at_every_length
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::query_and_key_blocks_are_gradient_dead_at_t1
+catcher: CAUGHT cargo --test phase9_cell_grad transformer_backward_matches_central_difference
+diff --git a/src/rust/src/nn/cells/transformer.rs b/src/rust/src/nn/cells/transformer.rs
+index df99672..3f518db 100644
+--- a/src/rust/src/nn/cells/transformer.rs
++++ b/src/rust/src/nn/cells/transformer.rs
+@@ -1112,7 +1112,7 @@ impl TransformerLayer {
+                     sdot += ca.attn_weights[[t, hh * wcap + jj]] * dp[jj];
+                 }
+                 for jj in 0..len {
+-                    dl[jj] = ca.attn_weights[[t, hh * wcap + jj]] * (dp[jj] - sdot);
++                    dl[jj] = ca.attn_weights[[t, hh * wcap + jj]] * dp[jj];
+                 }
+                 // The 1/sqrt(d) scale is applied ONCE per (t, j) and shared by the two
+                 // adjoints -- ALiBi adds nothing here, its slopes being constants.

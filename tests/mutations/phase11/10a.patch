@@ -1,0 +1,22 @@
+mutation: BLOCK_Q and BLOCK_K swapped, moving the q and k families in both W_qkv and b_qkv
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::multi_window_forward_matches_the_hand_transcription
+catcher: CAUGHT cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_within_the_f32_band
+catcher: CAUGHT cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_at_the_fixture_geometry
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_transformer_key_bias_block_is_output_inert[transformer_bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_transformer_key_bias_block_is_output_inert[transformer_forward]
+catcher: MISSED cargo --test phase9_cell_grad transformer_backward_matches_central_difference
+diff --git a/src/rust/src/nn/cells/transformer.rs b/src/rust/src/nn/cells/transformer.rs
+index df99672..aae276e 100644
+--- a/src/rust/src/nn/cells/transformer.rs
++++ b/src/rust/src/nn/cells/transformer.rs
+@@ -225,8 +225,8 @@ const ALIBI_EXPONENT: f64 = -8.0;
+ /// Column-block order inside the combined `W_qkv`/`b_qkv` and the S1.2 flat layout:
+ /// `[q | k | v]`. These index BLOCKS of `H` columns, not single columns.
+ const QKV_NB: usize = 3;
+-const BLOCK_Q: usize = 0;
+-const BLOCK_K: usize = 1;
++const BLOCK_Q: usize = 1;
++const BLOCK_K: usize = 0;
+ const BLOCK_V: usize = 2;
+ 
+ /// Which weight block a flat-layout slot addresses (see [`for_each_slot`]).

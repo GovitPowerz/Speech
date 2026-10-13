@@ -1,0 +1,18 @@
+mutation: CellLayer::set_retain_cache transformer arm folded into the no-op arm
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::the_flag_reaches_every_stack_and_the_cells_transformer
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::an_inference_only_net_leaves_the_transformer_cache_empty
+diff --git a/src/rust/src/nn/cells/mod.rs b/src/rust/src/nn/cells/mod.rs
+index d476797..d91332d 100644
+--- a/src/rust/src/nn/cells/mod.rs
++++ b/src/rust/src/nn/cells/mod.rs
+@@ -126,9 +126,8 @@ impl CellLayer {
+             // LSTM/sLSTM/CfC stay no-op follow-ons (unmeasured, not cache-free -- see
+             // above): "always retain" is the safe default, costing memory and never
+             // correctness.
+-            CellLayer::Lstm(_) | CellLayer::Slstm(_) | CellLayer::Cfc(_) => {}
++            CellLayer::Lstm(_) | CellLayer::Slstm(_) | CellLayer::Cfc(_) | CellLayer::Transformer(_) => {}
+             CellLayer::Mamba(l) => l.set_retain_cache(retain),
+-            CellLayer::Transformer(l) => l.set_retain_cache(retain),
+         }
+     }
+ 
