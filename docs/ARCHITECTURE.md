@@ -14,7 +14,7 @@ One page for a reader who has built the binary and wants to know how a run and a
 `speech -m config.toml` builds a `CorpusProcessor` and calls `run()`:
 
 1. `toml_config` flattens the TOML through the one `KEY_TABLE` into the legacy key shape (ADR-0006); `engine::corpus` parses the listing and the class mapping into corpus items.
-2. `engine::bag_of_processors` builds one driver per config (the `Processor` enum: seven exact drivers, two fast ones), dispatching on `Algo` and on `Inference_Path` at one site (ADR-0002).
+2. `engine::bag_of_processors` builds one driver per config (the `Processor` enum: seven exact drivers, two fast ones), dispatching on `Algo` and on `Inference_Path` at one site (ADR-0002). Every bag method then reaches a driver through the `Segmenter` trait (`Processor::driver()`): its segmentation, its weight packs, its trainable nets and its per-channel result members.
 3. Per file, per channel: `audio::read_audio` decodes and normalizes (`(2*RMS+max)/2`, or the frozen `Audio_fixed_gain`), applies pre-emphasis, dither and windowing coefficients.
 4. `features::pipeline::build_input_sequence_parts`: framing, the exact two-real-packed FFT periodogram (`features::fft`), the Mel bank, DCT-II MFCCs and regression deltas (`features::mel`), optionally the LTSV column; the fast path runs the same stages in f32 on `realfft` and `faer` (`fast::pipeline`, `fast::mel32`).
 5. `nn::blstm::BlstmNetwork::feed_forward_backward` under one of the four windowed drivers (or the plain whole-sequence forward for a causal net): type-1 input normalization, the two `Network<CellLayer>` stacks (ADR-0005), the HCAT, the output MLP (asinh hidden, softmax out), the cost law and, when a reference is attached and backprop is on, the analytic BPTT.
