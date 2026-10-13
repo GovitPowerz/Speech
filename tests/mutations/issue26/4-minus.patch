@@ -1,0 +1,17 @@
+mutation: HystStep::pending_begin returns begin without off (an earlier emission frontier)
+catcher: MISSED cargo --test phase8_stream_decision pending_open_segment_blocks_emission
+catcher: CAUGHT cargo --test phase0bii_segmenter hyst_step_pending_begin_is_the_labeled_begin_in_audio_time
+
+diff --git a/src/rust/src/tasks/segmenter.rs b/src/rust/src/tasks/segmenter.rs
+index f010591..2e2b634 100644
+--- a/src/rust/src/tasks/segmenter.rs
++++ b/src/rust/src/tasks/segmenter.rs
+@@ -486,7 +486,7 @@ impl HystStep {
+     /// (`begin + off`, `push`'s label site). The batch fold never reads it.
+     pub fn pending_begin(&self) -> Option<f64> {
+         if self.begin >= 0.0 {
+-            Some(self.begin + self.off)
++            Some(self.begin)
+         } else {
+             None
+         }

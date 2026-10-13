@@ -3281,6 +3281,8 @@ compiled out on macOS and was not applied; its leg runs green on the Linux CI.
 
 ## Issue #26 -- the stepwise decision kernel: the mutation battery
 
+**Live since issue #33:** `tests/mutations/issue26/` (8 patches: the table's mutations with item 4 as `4-minus` and `4-plus`, and the two post-pin mutations below as `post-1` and `post-2`). Every edit is the literal one, recovered from the battery's run logs, item 3's `.skip(1)` included.
+
 Branch `feature/decision-step-kernel`, off `main@b30612a` (#24 merged). The frame stream carried
 loop-state-for-loop-state transcriptions of two exact-tree bodies: `HystState` of
 `update_segmentation_raw`'s hysteresis loop and `ConvStream::conv_at` of `conv_taps` plus the

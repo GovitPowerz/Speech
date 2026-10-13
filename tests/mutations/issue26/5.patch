@@ -1,0 +1,17 @@
+mutation: audio::conv_at ignores src_base (reads the stream ring as if never trimmed)
+catcher: CAUGHT cargo --test stream_incremental_resmooth cut_engages_on_a_long_stream
+catcher: CAUGHT cargo --test phase8_stream_decision chunk_invariance
+
+diff --git a/src/rust/src/audio.rs b/src/rust/src/audio.rs
+index ee86e26..c091903 100644
+--- a/src/rust/src/audio.rs
++++ b/src/rust/src/audio.rs
+@@ -228,7 +228,7 @@ pub(crate) fn conv_at(src: &[f64], src_base: usize, ii: usize, len: usize, coeff
+     let (begin1, begin2, end) = conv_taps(ii, len, half_window);
+     let mut acc = 0.0;
+     for jj in begin2..=end {
+-        acc += src[(begin1 + jj as isize) as usize - src_base] * coeffs[jj];
++        acc += src[(begin1 + jj as isize) as usize] * coeffs[jj];
+     }
+     acc
+ }

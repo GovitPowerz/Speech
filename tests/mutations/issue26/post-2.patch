@@ -1,0 +1,16 @@
+mutation: HystStep::flush_tail no longer clears begin and begin_area (pending_begin survives EOS)
+catcher: CAUGHT cargo --test phase0bii_segmenter hyst_step_pending_begin_init_seed_and_tail_flush
+
+diff --git a/src/rust/src/tasks/segmenter.rs b/src/rust/src/tasks/segmenter.rs
+index f010591..bb11581 100644
+--- a/src/rust/src/tasks/segmenter.rs
++++ b/src/rust/src/tasks/segmenter.rs
+@@ -503,8 +503,6 @@ impl HystStep {
+         } else {
+             None
+         };
+-        self.begin = -1.0;
+-        self.begin_area = -1.0;
+         self.has_begun = false;
+         tail
+     }

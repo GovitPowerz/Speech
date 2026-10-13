@@ -1,0 +1,17 @@
+mutation: update_segmentation_raw drops the flush_tail step of the fold (the results.size() tail quirk vanishes)
+catcher: CAUGHT cargo --test phase0bii_segmenter oracle_cross_check_bit_exact
+
+diff --git a/src/rust/src/tasks/segmenter.rs b/src/rust/src/tasks/segmenter.rs
+index f010591..30ca6ac 100644
+--- a/src/rust/src/tasks/segmenter.rs
++++ b/src/rust/src/tasks/segmenter.rs
+@@ -539,9 +539,6 @@ pub fn update_segmentation_raw(
+         .filter_map(|&r| step.push(r))
+         .map(|(b, e)| (b, e, class as i32))
+         .collect();
+-    if let Some((b, e)) = step.flush_tail() {
+-        segments.push((b, e, class as i32));
+-    }
+     segments
+ }
+ 
