@@ -1,0 +1,23 @@
+mutation: LidResult::correct_wire writes the LID flag as 1.0 instead of 100.0 (to_row col 15 and the save_and_update fold)
+catcher: CAUGHT cargo --lib engine::channel_result::tests::row_width_and_slots
+catcher: CAUGHT cargo --lib engine::channel_result::tests::from_row_inverts_to_row
+catcher: CAUGHT cargo --lib engine::channel_result::tests::wire_row_round_trips_bit_exact
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid binary_e2e_mode7
+catcher: CAUGHT cargo --test phase4a_save_update aggregation_bit_exact
+catcher: CAUGHT cargo --test phase4a_save_update cost_mem_rows_written
+catcher: CAUGHT cargo --test phase4a_save_update update_called_with_neg_costlid
+
+diff --git a/src/rust/src/engine/channel_result.rs b/src/rust/src/engine/channel_result.rs
+index 6a29b22..1a93edc 100644
+--- a/src/rust/src/engine/channel_result.rs
++++ b/src/rust/src/engine/channel_result.rs
+@@ -97,7 +97,7 @@ impl LidResult {
+     /// Column 15's wire form of `correct`: `100.0` / `0.0`, the value the fold
+     /// averages (`100 - mean`).
+     pub fn correct_wire(&self) -> f64 {
+-        if self.correct { 100.0 } else { 0.0 }
++        if self.correct { 1.0 } else { 0.0 }
+     }
+ 
+     /// The wire form of `scores`: the target column `+ 200`, exact on `[0, 100]`.

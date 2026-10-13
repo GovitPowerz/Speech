@@ -1,0 +1,24 @@
+mutation: LidResult::encoded_scores drops the + 200 re-encode of the target column in to_row
+catcher: MISSED cargo --test phase4b_confusion_golden confusion_matrix_matches_harness_transcription
+catcher: MISSED cargo --test phase4b_confusion_golden error_matches_real_confusion2string_and_printconfusionmatrix
+catcher: MISSED cargo --test phase4b_confusion_golden crafted_input_is_non_vacuous
+catcher: CAUGHT pytest tests/pyo3/test_channel_results.py::test_twin_train_names_match_the_wire
+catcher: CAUGHT cargo --lib engine::channel_result::tests::row_width_and_slots
+catcher: CAUGHT cargo --lib engine::channel_result::tests::from_row_inverts_to_row
+catcher: CAUGHT cargo --lib engine::channel_result::tests::wire_row_round_trips_bit_exact
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid binary_e2e_mode7
+
+diff --git a/src/rust/src/engine/channel_result.rs b/src/rust/src/engine/channel_result.rs
+index 6a29b22..1d3ce3f 100644
+--- a/src/rust/src/engine/channel_result.rs
++++ b/src/rust/src/engine/channel_result.rs
+@@ -104,7 +104,7 @@ impl LidResult {
+     fn encoded_scores(&self) -> Vec<f64> {
+         let mut out = self.scores.clone();
+         if let Some(t) = self.target {
+-            out[t] = self.scores[t] + 200.0;
++            out[t] = self.scores[t];
+         }
+         out
+     }

@@ -1,0 +1,35 @@
+mutation: ChannelResult::to_row swaps seg_cost (col 4) and the LID cost (col 14)
+catcher: CAUGHT cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid binary_e2e_mode7
+catcher: MISSED cargo --test phase4a_tier1_e2e solo_tdc_matches
+
+diff --git a/src/rust/src/engine/channel_result.rs b/src/rust/src/engine/channel_result.rs
+index 6a29b22..d5b4180 100644
+--- a/src/rust/src/engine/channel_result.rs
++++ b/src/rust/src/engine/channel_result.rs
+@@ -211,7 +211,7 @@ impl ChannelResult {
+             self.pmiss,                // 1
+             self.error_rate,           // 2
+             self.time_per_hour,        // 3
+-            self.seg_cost,             // 4
++            self.lid_cost(),           // 4
+             self.audio_duration,       // 5
+             self.speech_duration,      // 6
+             self.wer.nb_words as f64,  // 7
+@@ -224,13 +224,13 @@ impl ChannelResult {
+         ];
+         match &self.lid {
+             Some(l) => {
+-                row.push(l.cost); // 14
++                row.push(self.seg_cost); // 14
+                 row.push(l.correct_wire()); // 15
+                 row.extend(l.encoded_scores()); // 16..16+N
+                 row.push(l.count as f64); // len-2
+             }
+             None => {
+-                row.push(0.0); // 14
++                row.push(self.seg_cost); // 14
+                 row.push(0.0); // 15
+                 row.push(0.0); // len-2
+             }
