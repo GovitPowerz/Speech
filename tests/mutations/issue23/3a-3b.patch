@@ -6,7 +6,7 @@ catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
 catcher: CAUGHT cargo --test phase4b_corpus_lid binary_e2e_mode7
 catcher: CAUGHT cargo --test phase4a_save_update aggregation_bit_exact
 catcher: CAUGHT cargo --test phase4a_save_update cost_mem_rows_written
-catcher: CAUGHT cargo --test phase4a_save_update update_called_with_neg_costlid
+catcher: MISSED cargo --test phase4a_save_update update_called_with_neg_costlid
 
 diff --git a/src/rust/src/engine/channel_result.rs b/src/rust/src/engine/channel_result.rs
 index 6a29b22..1a93edc 100644

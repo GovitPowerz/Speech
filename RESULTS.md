@@ -3088,7 +3088,7 @@ it to one sentence rather than leaving it a question; see that section, not repe
 
 ## Issue #23 -- the typed channel result: the mutation battery
 
-**Live since issue #33:** `tests/mutations/issue23/` (4 patches). Items 3a and 3b now land on one site, `LidResult::correct_wire` (extracted in afe5d18, after this battery), so they are one patch, `3a-3b`, carrying both items' catchers with `aggregation_bit_exact` CAUGHT as 3b recorded it. Item 1's blind tier-1 leg is `phase4a_tier1_e2e::solo_tdc_matches`.
+**Live since issue #33:** `tests/mutations/issue23/` (4 patches). Items 3a and 3b now land on one site, `LidResult::correct_wire` (extracted in afe5d18, after this battery), so they are one patch, `3a-3b`, carrying both items' catchers with `aggregation_bit_exact` CAUGHT as 3b recorded it. The live run read one verdict differently: `update_called_with_neg_costlid` is MISSED, because its row carries no LID flag, and the 3b run's failure of it was the whole-file run's poisoned `CWD_LOCK` (`aggregation_bit_exact` panicked holding it), which a one-test-per-process catcher cannot reproduce. Item 1's blind tier-1 leg is `phase4a_tier1_e2e::solo_tdc_matches`.
 
 The plan (`docs/superpowers/plans/2026-10-07-issue-23-typed-channel-result.md`, Task 7) named
 four items; item 3 is run twice, once at the wire (`to_row`) and once at the fold's own
