@@ -3121,6 +3121,8 @@ of the fold's arithmetic (3b), and nothing else should be read into a green read
 
 ## Issue #22 -- the fold run: the mutation battery
 
+**Live since issue #33:** `tests/mutations/issue22/1.patch`. Its second catcher, `test_fold_run_fast_guard_on_the_engine`, was removed in a38c599 (#62); five catchers remain, the slow `test_from_scratch_sad_converges` among them.
+
 The issue's acceptance named one mutation ("a mutation that removes the Epochs-0 forcing fails a
 committed test"). **One applied mutation**: delete the `Neural_Networks_BackPropagation_Epochs 0`
 line of `fold_run.FoldRun.__init__` (the base config's own epoch count then reaches the engine)
