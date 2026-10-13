@@ -35,6 +35,12 @@ jobs:
           workspaces: src/rust
       - name: ${{ matrix.check }}
         run: ${{ matrix.command }}
+      # ADR-0011: every mutation patch applies and every Rust catcher names exactly one test,
+      # listed from the binaries the step above built. The pytest catchers resolve in the
+      # Python test job (`tests/test_mutations_runner.py`).
+      - name: mutation batteries (check)
+        if: matrix.check == 'test'
+        run: python3 ../../tests/mutations/run.py --check --kind cargo
 
   python-lint:
     name: Python (${{ matrix.check }})
