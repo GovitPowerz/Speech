@@ -220,13 +220,13 @@ fn lid_classification_errors_match_dump() {
     for v in &VARIANTS {
         for (file, lang, w) in FILES {
             let (drv, _) = run_file(v, file, lang, w);
-            for chan in 0..drv.lid_classification_errors().len() {
+            for chan in 0..drv.lid_members().classification_errors.len() {
                 let want = common::load_bin_phase4b(&format!(
                     "twin_{}_{file}_liderr_chan{}.bin",
                     v.name,
                     chan + 1
                 ));
-                let got = row(&drv.lid_classification_errors()[chan]);
+                let got = row(&drv.lid_members().classification_errors[chan]);
                 common::assert_oracle_eq(
                     &got,
                     &want,
@@ -242,13 +242,13 @@ fn lid_confusion_matches_dump() {
     for v in &VARIANTS {
         for (file, lang, w) in FILES {
             let (drv, _) = run_file(v, file, lang, w);
-            for chan in 0..drv.lid_segments_confusion().len() {
+            for chan in 0..drv.lid_members().segments_confusion.len() {
                 let want = common::load_bin_phase4b(&format!(
                     "twin_{}_{file}_confusion_chan{}.bin",
                     v.name,
                     chan + 1
                 ));
-                let got = &drv.lid_segments_confusion()[chan];
+                let got = &drv.lid_members().segments_confusion[chan];
                 common::assert_bits_eq(
                     got,
                     &want,
@@ -266,26 +266,26 @@ fn members_match_dump() {
     for v in &VARIANTS {
         for (file, lang, w) in FILES {
             let (drv, _) = run_file(v, file, lang, w);
-            for chan in 0..drv.lid_cumulative_error().len() {
+            for chan in 0..drv.lid_members().cumulative_error.len() {
                 let m = common::load_bin_phase4b(&format!(
                     "twin_{}_{file}_members_chan{}.bin",
                     v.name,
                     chan + 1
                 ));
                 common::assert_oracle_eq_f64(
-                    drv.lid_cumulative_error()[chan],
+                    drv.lid_members().cumulative_error[chan],
                     m[[0, 0]],
                     &format!("{} {file} lid_cumulative_error chan{}", v.name, chan + 1),
                 );
                 assert_eq!(
-                    drv.lid_nb_of_classif()[chan],
+                    drv.lid_members().nb_of_classif[chan],
                     m[[0, 1]] as i64,
                     "{} {file} lid_nb_of_classif chan{}",
                     v.name,
                     chan + 1
                 );
                 assert_eq!(
-                    drv.is_lid_correct()[chan],
+                    drv.lid_members().is_correct[chan],
                     m[[0, 2]] as i32,
                     "{} {file} is_lid_correct chan{}",
                     v.name,
@@ -375,8 +375,8 @@ fn sentinel_gt150_present_every_file() {
     for v in &VARIANTS {
         for (file, lang, w) in FILES {
             let (drv, _) = run_file(v, file, lang, w);
-            for chan in 0..drv.lid_classification_errors().len() {
-                let err = &drv.lid_classification_errors()[chan];
+            for chan in 0..drv.lid_members().classification_errors.len() {
+                let err = &drv.lid_members().classification_errors[chan];
                 assert!(
                     err.iter().any(|&x| x > 150.0),
                     "{} {file} chan{}: no >150 sentinel in {err:?}",
@@ -397,8 +397,8 @@ fn confusion_off_diagonal_and_diagonal_mass() {
     for v in &VARIANTS {
         for (file, lang, w) in FILES {
             let (drv, _) = run_file(v, file, lang, w);
-            for chan in 0..drv.lid_segments_confusion().len() {
-                let c = &drv.lid_segments_confusion()[chan];
+            for chan in 0..drv.lid_members().segments_confusion.len() {
+                let c = &drv.lid_members().segments_confusion[chan];
                 let cn = c.nrows() - 2;
                 for k in 1..=cn {
                     for l in 1..=cn {
@@ -433,7 +433,8 @@ fn mode2_and_mode3_differ_from_mode0() {
                 if segs0[chan].segments() != segso[chan].segments() {
                     any_diff = true;
                 }
-                if drv0.lid_classification_errors()[chan] != drvo.lid_classification_errors()[chan]
+                if drv0.lid_members().classification_errors[chan]
+                    != drvo.lid_members().classification_errors[chan]
                 {
                     any_diff = true;
                 }

@@ -83,10 +83,13 @@ use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::blstm::{
     BlstmConfig, BlstmNetwork, CellType, Direction, check_pack_len, file_pack_head,
 };
+use crate::tasks::lid::LidMembers;
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
-use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
+use crate::tasks::segmenter::{
+    ChannelMembers, DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation,
+};
 
 use super::bicell::FastBiCell;
 use super::cells::{CellGeometry, FastCausalNet};
@@ -387,7 +390,6 @@ pub struct FastSpectralSegmenter {
     plan: FastSadPlan,
     net: Option<FastNet>,
 
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// Post-overlap-division, PRE-`results_to_segmentation` posterior rows, one per
@@ -423,7 +425,6 @@ impl FastSpectralSegmenter {
         let mut seg = FastSpectralSegmenter {
             plan,
             net: None,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -455,31 +456,6 @@ impl FastSpectralSegmenter {
             Some(flat) => self.set_weights(&flat),
             None => Ok(()),
         }
-    }
-
-    /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
-    /// dump_dir`]): gates the scored-branch VRCTS write.
-    pub fn dump_dir(&self) -> &str {
-        &self.plan.driver_cfg.dump_dir
-    }
-
-    /// Per-channel NN cost (result col 4). ALWAYS zero on the fast path (forward-only,
-    /// inference: no cost harvested), a documented divergence from the exact driver.
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-
-    /// Per-channel `_NbOfClassif` (result col `len-1`). ALWAYS zero on the fast path
-    /// (forward-only), a documented divergence from the exact driver.
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
-    }
-
-    /// Post-overlap-division, pre-`results_to_segmentation` posterior rows (one per
-    /// channel) from the last `get_segmentation` -- the port-side observation point
-    /// for the CI parity leg (mirrors `BlstmSpectralSegmenter::last_result_rows`).
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
     }
 }
 
@@ -518,7 +494,6 @@ impl Segmenter for FastSpectralSegmenter {
         let mut pipeline = FastPipeline::new(&tl.params, &plan.feature_cfg, rate)?;
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         // Forward-only: no NN cost harvested (documented divergence).
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
@@ -626,6 +601,35 @@ impl Segmenter for FastSpectralSegmenter {
         }
 
         Ok(())
+    }
+
+    /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
+    /// dump_dir`]): gates the scored-branch VRCTS write.
+    fn dump_dir(&self) -> &str {
+        &self.plan.driver_cfg.dump_dir
+    }
+
+    /// Post-overlap-division, pre-`results_to_segmentation` posterior rows (one per
+    /// channel) from the last `get_segmentation` -- the port-side observation point
+    /// for the CI parity leg (mirrors `BlstmSpectralSegmenter::last_result_rows`).
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    fn pack_count(&self) -> usize {
+        1
+    }
+
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.set_weights(&packs[0])
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: None,
+        }
     }
 }
 
@@ -906,7 +910,7 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 ///   kernel (frozen-SAD: only its sub-sampling ratios size the SAD result vector).
 ///
 /// FORWARD-ONLY: `cumulative_error`/`nb_of_classif` (SAD, always 0 in Mode 7 anyway) and
-/// `lid_cumulative_error`/`lid_nb_of_classif` (the LID NN-cost/count columns) stay ZERO
+/// the LID members' `cumulative_error`/`nb_of_classif` (the LID NN-cost/count columns) stay ZERO
 /// -- a documented divergence from the exact driver (the fast path never harvests cost),
 /// matching the algo-3 fast SAD driver. The langID-derived members are the parity target.
 #[derive(Clone)]
@@ -958,15 +962,11 @@ pub struct FastTwinLid {
     window_shift_sec: f64,
     ltsv_shift_sec: f64,
 
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     last_result_rows: Vec<Vec<f64>>,
-    lid_cumulative_error: Vec<f64>,
-    lid_nb_of_classif: Vec<i64>,
-    lid_classification_errors: Vec<Vec<f64>>,
-    lid_segments_confusion: Vec<Array2<f64>>,
-    is_lid_correct: Vec<i32>,
+    /// The per-channel LID members (`seg._LID*[chan]`, `seg._IsLIDCorrect[chan]`).
+    lid: LidMembers,
 }
 
 impl FastTwinLid {
@@ -1132,15 +1132,10 @@ impl FastTwinLid {
             spectrum_shift_in_frames: 0,
             window_shift_sec,
             ltsv_shift_sec,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
-            lid_cumulative_error: Vec::new(),
-            lid_nb_of_classif: Vec::new(),
-            lid_classification_errors: Vec::new(),
-            lid_segments_confusion: Vec::new(),
-            is_lid_correct: Vec::new(),
+            lid: LidMembers::default(),
         };
         if let Some(sad) = sad_weights {
             check_pack_len(sad.len(), twin.sad_pack_len)?;
@@ -1199,11 +1194,6 @@ impl FastTwinLid {
         self.lid_shape
     }
 
-    /// The configured dump directory (gates the scored-branch VRCTS write in the bag).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
     pub fn mode(&self) -> i32 {
         self.mode
     }
@@ -1211,38 +1201,12 @@ impl FastTwinLid {
         self.post_process_mode
     }
 
-    /// Per-channel SAD NN cost (result col 4). ALWAYS zero in Mode 7 (the SAD net is
-    /// never run), matching the exact driver's `:1421`.
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
-    }
-    /// SAD `result_vec2` per channel (the synthesized constant-10.0 row, PRE-convolution)
-    /// -- the port-side observation point, mirroring the exact driver's `last_result_rows`.
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
-    }
-    /// Per-channel LID NN cost. ALWAYS zero on the fast path (forward-only), a documented
-    /// divergence from the exact driver.
-    pub fn lid_cumulative_error(&self) -> &[f64] {
-        &self.lid_cumulative_error
-    }
-    /// Per-channel LID `_NbOfClassif`. ALWAYS zero on the fast path (forward-only).
-    pub fn lid_nb_of_classif(&self) -> &[i64] {
-        &self.lid_nb_of_classif
-    }
-    /// Per-channel `100 * (langID - targetLID)` in-band LID scores (the `.scr`/confusion
-    /// column source). The f32-divergent parity target.
-    pub fn lid_classification_errors(&self) -> &[Vec<f64>] {
-        &self.lid_classification_errors
-    }
-    pub fn lid_segments_confusion(&self) -> &[Array2<f64>] {
-        &self.lid_segments_confusion
-    }
-    pub fn is_lid_correct(&self) -> &[i32] {
-        &self.is_lid_correct
+    /// The per-channel LID members written by the last `get_segmentation` call.
+    /// `cumulative_error`/`nb_of_classif` are ALWAYS zero on the fast path (forward-only,
+    /// a documented divergence from the exact driver); `classification_errors` (the
+    /// `.scr`/confusion column source) is the f32-divergent parity target.
+    pub fn lid_members(&self) -> &LidMembers {
+        &self.lid
     }
 
     /// Test hook: the LID net's effective per-direction peephole flags (rider 2 -- wires
@@ -1362,15 +1326,10 @@ impl Segmenter for FastTwinLid {
         let external_features = audio.external_features.clone();
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
-        self.lid_cumulative_error = vec![0.0; channels];
-        self.lid_nb_of_classif = vec![0; channels];
-        self.lid_classification_errors = vec![Vec::new(); channels];
-        self.lid_segments_confusion = vec![Array2::<f64>::zeros((0, 0)); channels];
-        self.is_lid_correct = vec![0; channels];
+        self.lid = LidMembers::zeroed(channels);
 
         // Move the LID net out so self's result buffers are freely writable in the loop
         // (put back before returning; the loop body has no fallible op, so no early exit).
@@ -1406,14 +1365,14 @@ impl Segmenter for FastTwinLid {
             }
             let agg = finalize_lid_channel(&acc, &params);
 
-            // Member writes (`:1622-1634`). Forward-only: lid_cumulative_error /
-            // lid_nb_of_classif stay 0 (documented divergence, the fast path never harvests
+            // Member writes (`:1622-1634`). Forward-only: the LID cumulative_error /
+            // nb_of_classif stay 0 (documented divergence, the fast path never harvests
             // the LID NN cost/classif count).
-            self.lid_cumulative_error[chan] = 0.0;
-            self.lid_nb_of_classif[chan] = 0;
-            self.lid_classification_errors[chan] = agg.classification_errors;
-            self.lid_segments_confusion[chan] = agg.confusion;
-            self.is_lid_correct[chan] = agg.is_lid_correct;
+            self.lid.cumulative_error[chan] = 0.0;
+            self.lid.nb_of_classif[chan] = 0;
+            self.lid.classification_errors[chan] = agg.classification_errors;
+            self.lid.segments_confusion[chan] = agg.confusion;
+            self.lid.is_correct[chan] = agg.is_lid_correct;
         }
         self.lid_net = Some(net);
 
@@ -1430,6 +1389,35 @@ impl Segmenter for FastTwinLid {
         }
         Ok(())
     }
+
+    /// The configured dump directory (gates the scored-branch VRCTS write in the bag).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    /// SAD `result_vec2` per channel (the synthesized constant-10.0 row, PRE-convolution)
+    /// -- the port-side observation point, mirroring the exact driver's `last_result_rows`.
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    fn pack_count(&self) -> usize {
+        2
+    }
+
+    /// The SAD pack checked against its net's count, then discarded (Mode 7 never runs
+    /// the SAD net); the LID net rebuilt from its pack.
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.set_weights(&packs[0], &packs[1])
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: Some(self.lid.channel(chan)),
+        }
+    }
 }
 
 // ===========================================================================
@@ -1445,19 +1433,19 @@ impl Segmenter for FastTwinLid {
 /// The finalized per-channel LID members -- the offline `get_segmentation` writes these into
 /// its per-channel member vectors, and the streaming session returns this as its
 /// utterance-granular result. `classification_errors`/`confusion`/`is_lid_correct` are
-/// bit-identical to the offline `lid_classification_errors`/`lid_segments_confusion`/
-/// `is_lid_correct`; `predicted_language`/`segments_count` are the streaming-useful extras
+/// bit-identical to the offline [`LidMembers`] `classification_errors`/`segments_confusion`/
+/// `is_correct`; `predicted_language`/`segments_count` are the streaming-useful extras
 /// (the argmax of the normalized langID + the scored-utterance count so far).
 #[derive(Debug, Clone, PartialEq)]
 pub struct LidAggregate {
     /// In-band `100*(langID - targetLID)` per class (the `.scr`/confusion column source) --
-    /// normalized langID, the offline `lid_classification_errors` row.
+    /// normalized langID, the offline `LidMembers::classification_errors` row.
     pub classification_errors: Vec<f64>,
     /// The per-block argmax-count confusion matrix accumulated so far (the offline
-    /// `lid_segments_confusion`; NOT normalized by the epilogue).
+    /// `LidMembers::segments_confusion`; NOT normalized by the epilogue).
     pub confusion: Array2<f64>,
     /// `100` iff the normalized langID argmax is the target, else `0` (offline
-    /// `is_lid_correct`).
+    /// `LidMembers::is_correct`).
     pub is_lid_correct: i32,
     /// The predicted language: argmax of the normalized langID (first-max).
     pub predicted_language: usize,

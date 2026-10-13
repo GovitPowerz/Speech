@@ -422,10 +422,5 @@ fn update_called_with_neg_costlid() {
     assert_eq!(cost_lid[0], 3.0);
 
     // But update_weights, called AFTER the :465 override, must have received -1.0.
-    match bag.processor(0) {
-        speech::engine::bag_of_processors::Processor::Spectral(seg) => {
-            assert_eq!(seg.last_update_cost_lid_for_test(), Some(-1.0));
-        }
-        _ => panic!("expected algo 3 (Spectral)"),
-    }
+    assert_eq!(bag.last_update_cost_lid_for_test(0), Some(-1.0));
 }

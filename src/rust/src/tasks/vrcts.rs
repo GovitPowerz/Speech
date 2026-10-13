@@ -10,8 +10,8 @@ use indexmap::IndexMap;
 
 use crate::audio::Audio;
 use crate::tasks::segmentation::Segmentation;
-use crate::tasks::segmentation_io::{ScoreReport, compute_errors, load_vrcts};
-use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig};
+use crate::tasks::segmentation_io::{compute_errors, load_vrcts};
+use crate::tasks::segmenter::{ChannelMembers, DriverConfig, Segmenter, SegmenterConfig};
 
 /// legacy: hard-coded absolute path (`VRCTSpart.cpp:44,46`), not read from config.
 /// IMPROVEMENTS [phase4b]: hard-coded VRCTS binary path.
@@ -56,7 +56,6 @@ pub struct VrctsPart {
     driver_cfg: DriverConfig,
     is_fast: bool,
     force: bool,
-    channels: usize,
 }
 
 impl VrctsPart {
@@ -76,43 +75,7 @@ impl VrctsPart {
             driver_cfg,
             is_fast,
             force,
-            channels: 0,
         })
-    }
-
-    /// The configured dump directory (`Segmenter::_DumpDir`, read via
-    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
-    /// VRCTS write (`BagOfProcessors.cpp:268,273,...`).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
-    /// Zero cost accumulators: VRCTS has no NN/cost path (`cumulative_error`/
-    /// `nb_of_classif` stay at their legacy `Segmentation` ctor-seeded 0.0/0
-    /// defaults for every channel -- `getSegmentation` never writes them). Sized
-    /// by the channel count of the last `get_segmentation` call.
-    pub fn cumulative_error(&self) -> Vec<f64> {
-        vec![0.0; self.channels]
-    }
-
-    pub fn nb_of_classif(&self) -> Vec<i64> {
-        vec![0; self.channels]
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (same pattern as
-    /// `TdcSegmenter::score`/`LtsvSegmenter::score`).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
@@ -159,8 +122,6 @@ impl Segmenter for VrctsPart {
         seg_per_chan: &mut [Segmentation],
         _refs: Option<&[Segmentation]>,
     ) -> Result<()> {
-        self.channels = seg_per_chan.len();
-
         for (chan, seg) in seg_per_chan.iter_mut().enumerate() {
             let suffix = if self.is_fast { "Fast" } else { "Long" };
             let xml_path = format!("{}_VRCTS_{suffix}.xml", audio.ref_seg_file_name);
@@ -198,5 +159,20 @@ impl Segmenter for VrctsPart {
         }
 
         Ok(())
+    }
+
+    /// The configured dump directory (`Segmenter::_DumpDir`, read via
+    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
+    /// VRCTS write (`BagOfProcessors.cpp:268,273,...`).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: 0.0,
+            nb_of_classif: 0,
+            lid: None,
+        }
     }
 }

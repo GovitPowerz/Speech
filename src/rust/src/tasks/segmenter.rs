@@ -7,10 +7,10 @@
 
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
-use ndarray::Array2;
 
 use crate::audio::{Audio, convolution_horiz_slice, windowing_coefficients};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
+use crate::nn::blstm::BlstmNetwork;
 
 use super::segmentation::{SegClass, Segmentation};
 
@@ -18,10 +18,15 @@ use super::segmentation::{SegClass, Segmentation};
 ///
 /// `get_segmentation` mirrors the legacy pure-virtual `Segmenter::getSegmentation`
 /// (`Segmenter.h:25`): `seg_per_chan` is pre-sized by the caller, one entry per
-/// audio channel. The weight-facing methods default to the legacy base-class
-/// no-op bodies (`Segmenter::setWeights`/`getWeights`/`getWeightsDerivatives`,
-/// `Segmenter.cpp:107-115`): a plain (non-BLSTM) segmenter has no trainable
-/// weights, so the defaults are the correct behaviour, not a stub.
+/// audio channel.
+///
+/// The trait is the driver interface (issue #25): the bag reaches every driver
+/// through it. Two weight surfaces: the PACK surface ([`Self::pack_count`],
+/// [`Self::set_packs`]) spans both trees, the TRAINING surface ([`Self::nets`],
+/// [`Self::nets_mut`]) is the exact tree's f64 nets only. Their defaults are the
+/// legacy base-class no-op bodies (`Segmenter::setWeights`/`getWeights`/
+/// `getWeightsDerivatives`, `Segmenter.cpp:107-115`): a plain (non-BLSTM) segmenter
+/// has no trainable weights, so the defaults are the correct behaviour, not a stub.
 ///
 /// `refs` is the per-channel REFERENCE segmentation (the legacy `seg._Reference`,
 /// which the Rust [`Segmentation`] does NOT carry internally): `Some(&[Segmentation])`
@@ -38,17 +43,66 @@ pub trait Segmenter {
         refs: Option<&[Segmentation]>,
     ) -> Result<()>;
 
-    fn set_weights(&mut self, _flat: &[f64]) -> Result<()> {
+    /// The driver's `_DumpDir`: gates the bag's scored-branch VRCTS write.
+    fn dump_dir(&self) -> &str;
+
+    /// How many weight packs the driver exchanges through [`Self::set_packs`]: 2 for
+    /// the Twin (`[sad, lid]`, exact or fast), 1 for a single-net driver (exact or
+    /// fast), 0 for a driver with no NN (algo 0/1/2).
+    fn pack_count(&self) -> usize {
+        0
+    }
+
+    /// Inject one pack per net, in [`Self::pack_count`] order. The bag sizes the list
+    /// first (issue #60), so a driver indexes it freely. Algo 0/1/2 keep the legacy
+    /// no-op (no `else` branch in `BagOfProcessors::setWeights`).
+    fn set_packs(&mut self, _packs: &[Vec<f64>]) -> Result<()> {
         Ok(())
     }
 
-    fn get_weights(&self) -> Vec<f64> {
+    /// The trainable f64 nets, in pack order (`[sad, lid]` for the Twin). Empty on the
+    /// fast drivers (inference-only, training stays exact f64) and on algo 0/1/2.
+    fn nets(&self) -> Vec<&BlstmNetwork> {
         Vec::new()
     }
 
-    fn get_weights_derivatives(&self) -> Array2<f64> {
-        Array2::zeros((0, 0))
+    /// [`Self::nets`], mutably.
+    fn nets_mut(&mut self) -> Vec<&mut BlstmNetwork> {
+        Vec::new()
     }
+
+    /// Channel `chan`'s result members from the last `get_segmentation` call.
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_>;
+
+    /// Port-side observation point (no legacy counterpart): the per-channel
+    /// PRE-convolution result rows of the last call. Empty for a driver with no posterior.
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &[]
+    }
+}
+
+/// One channel's LID members, still in-band encoded: the bag's input to
+/// `LidResult::from_encoded`. Filled from a LID driver's `LidMembers`
+/// (`tasks/lid.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct LidChannel<'a> {
+    pub cumulative_error: f64,
+    pub nb_of_classif: i64,
+    pub is_correct: i32,
+    pub classification_errors: &'a [f64],
+}
+
+/// One channel's driver-side result members, the bag's input to the channel result.
+#[derive(Debug, Clone, Copy)]
+pub struct ChannelMembers<'a> {
+    /// `seg._CumulativeError[chan]` (result col 4): 0 on a driver with no SAD net
+    /// harvest (algo 0/1/2/5, the fast drivers).
+    pub cumulative_error: f64,
+    /// `seg._NbOfClassif[chan]` (result col `len-1`).
+    pub nb_of_classif: i64,
+    /// The channel's LID members (still in-band encoded) on a LID driver, `None` on
+    /// algo 0-4: the legacy `!seg._IsLIDCorrect.empty()` gate (`:338`/`:380`).
+    pub lid: Option<LidChannel<'a>>,
 }
 
 /// Segmenter decision parameters, parsed from the legacy config (`buildFromConf`).

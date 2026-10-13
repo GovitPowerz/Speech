@@ -27,13 +27,12 @@ use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{
     FeatureConfig, SpectralParams, build_input_sequence_parts, derive_freq_band_ltsv_variant,
 };
-use crate::features::stats::InputStatistics;
 use crate::legacy_config::{get_f64, get_f64_list};
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
-use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
+use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{
-    DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
+    ChannelMembers, DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
 };
 
 fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
@@ -80,7 +79,6 @@ pub struct TdcSegmenter {
     noise_seed: i32,
     noise_ratio: f64,
     window_shift_sec: f64,
-    channels: usize,
 }
 
 impl TdcSegmenter {
@@ -125,45 +123,7 @@ impl TdcSegmenter {
             noise_seed,
             noise_ratio,
             window_shift_sec,
-            channels: 0,
         })
-    }
-
-    /// The configured dump directory (`Segmenter::_DumpDir`, read via
-    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
-    /// VRCTS write (`BagOfProcessors.cpp:268,273,278,...`).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
-    /// Zero cost accumulators: TDC has no NN/cost path (`cumulative_error`/
-    /// `nb_of_classif` stay at their legacy `Segmentation` ctor-seeded 0.0/0
-    /// defaults for every channel -- `getSegmentation` never writes them). Sized
-    /// by the channel count of the last `get_segmentation` call.
-    pub fn cumulative_error(&self) -> Vec<f64> {
-        vec![0.0; self.channels]
-    }
-
-    pub fn nb_of_classif(&self) -> Vec<i64> {
-        vec![0; self.channels]
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (the Rust container
-    /// is single-channel; the legacy loops channels internally -- see
-    /// `tasks/segmentation.rs`'s module doc for the S6 restructure rationale).
-    /// `hyp` is the caller's post-`get_segmentation` `seg_per_chan` slice.
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
@@ -229,7 +189,6 @@ impl Segmenter for TdcSegmenter {
         };
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             let mut buf = ndarray::Array2::<f64>::zeros((1, full_window));
             let mut results = vec![0.0f64; vec_size];
@@ -264,13 +223,28 @@ impl Segmenter for TdcSegmenter {
         // `seg.compute_errors()` after the FULL channel loop (`:238`); the legacy
         // no-reference branch (Branch A) is a pure `sanitize` + `update_count`
         // side effect on each hypothesis -- discard the (unused, no-reference)
-        // ScoreReport here. Callers wanting scored output call `TdcSegmenter::score`
-        // explicitly afterward.
+        // ScoreReport here. Callers wanting scored output call `compute_errors` per
+        // channel afterward.
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1);
         }
 
         Ok(())
+    }
+
+    /// The configured dump directory (`Segmenter::_DumpDir`, read via
+    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
+    /// VRCTS write (`BagOfProcessors.cpp:268,273,278,...`).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: 0.0,
+            nb_of_classif: 0,
+            lid: None,
+        }
     }
 }
 
@@ -294,7 +268,6 @@ pub struct LtsvSegmenter {
     feature_cfg: FeatureConfig,
     spectrum_shift_sec: f64,
     window_shift_sec: f64,
-    channels: usize,
 }
 
 impl LtsvSegmenter {
@@ -319,39 +292,7 @@ impl LtsvSegmenter {
             feature_cfg,
             spectrum_shift_sec,
             window_shift_sec,
-            channels: 0,
         })
-    }
-
-    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
-    /// Zero cost accumulators: LTSV has no NN/cost path (same rationale as
-    /// [`TdcSegmenter::cumulative_error`]).
-    pub fn cumulative_error(&self) -> Vec<f64> {
-        vec![0.0; self.channels]
-    }
-
-    pub fn nb_of_classif(&self) -> Vec<i64> {
-        vec![0; self.channels]
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (see
-    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
@@ -477,7 +418,6 @@ impl Segmenter for LtsvSegmenter {
         };
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             let perio: Array2<f64> = compute_segment_periodogram_estimates(
                 audio,
@@ -529,6 +469,19 @@ impl Segmenter for LtsvSegmenter {
 
         Ok(())
     }
+
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: 0.0,
+            nb_of_classif: 0,
+            lid: None,
+        }
+    }
 }
 
 /// BLSTM signal-domain SAD segmenter (Algo 4; `BLSTMSignalSegmenter.{h,cpp}`).
@@ -578,7 +531,6 @@ pub struct BlstmSignalSegmenter {
     noise_ratio: f64,
     /// The stateful legacy `_WindowShift` member (`:108/:376`).
     window_shift_sec: f64,
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// Port-side observation point, NO legacy counterpart: the PRE-convolution
@@ -639,7 +591,6 @@ impl BlstmSignalSegmenter {
             noise_seed,
             noise_ratio,
             window_shift_sec,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -660,21 +611,6 @@ impl BlstmSignalSegmenter {
         self.window_shift_sec
     }
 
-    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
-    /// `get_segmentation` call -- the whole NN chain's raw output, before
-    /// `results_to_segmentation` convolves it in place. Port-side observation
-    /// point with NO legacy counterpart; see the field doc for why (the legacy's
-    /// only externalization is the `_IsUnitTest`-gated `.mat` dump, which this
-    /// port does not carry).
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
-    }
-
-    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:346`): the NN cost from
     /// the last `get_segmentation`, one entry per channel.
     pub fn cumulative_error(&self) -> &[f64] {
@@ -686,71 +622,12 @@ impl BlstmSignalSegmenter {
         &self.nb_of_classif
     }
 
-    /// `isBackPropActivated` (`BLSTMSignalSegmenter.cpp` delegate, mirroring
-    /// `BLSTMSpectralSegmenter.cpp:103-105`): forwards to the net's
-    /// `isBackPropagationActivated`.
-    pub fn is_back_prop_activated(&self) -> bool {
-        self.net.config().back_propagation_activated
-    }
-
-    /// `updateWeights` delegate (`:107-109`): hand the Nx2 gradient object + cost to
-    /// the net's long-lived iRPROP- trainer.
-    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
-        self.net.update_weights(derivs, cost);
-    }
-
-    /// `saveWeights` delegate (`:111-113`): the net writes the three artifacts.
-    pub fn save_weights(
-        &self,
-        filename: &str,
-        derivs: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        self.net.save_weights(filename, derivs, stats)
-    }
-
-    /// `getInputStatistics` delegate (`:99-101`): the net's accumulated per-dim stats.
-    pub fn input_statistics(&self) -> &InputStatistics {
-        self.net.input_statistics()
-    }
-
-    /// `getWeightsDerivatives` delegate (`BLSTMSignalSegmenter.cpp:46-48`): the net's
-    /// Nx2 flat derivative matrix (col0 summed deriv, col1 frame count). The
-    /// `Segmenter` trait's default returns an empty matrix; this inherent method (and
-    /// the `Segmenter` override below) surface the real net derivs so the corpus
-    /// gradient harvest reads them.
-    pub fn get_weights_derivatives(&self) -> Array2<f64> {
-        self.net.get_weights_derivatives()
-    }
-
-    /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators
-    /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
-    pub fn reset_weights_derivatives(&mut self) {
-        self.net.reset_weights_derivatives();
-    }
-
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
     /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
     /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
     /// None)`, matching the legacy's in-ctor load without duplicating its semantics.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         self.net.load_weights_file(map, "BLSTM")
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (see
-    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
@@ -822,7 +699,6 @@ impl Segmenter for BlstmSignalSegmenter {
         let window_shift_usize = window_shift as usize;
         let channels = audio.data.nrows();
         let frame_count = audio.data.ncols();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
@@ -948,14 +824,43 @@ impl Segmenter for BlstmSignalSegmenter {
         Ok(())
     }
 
-    /// `setWeights` delegates to the NN (`BLSTMSignalSegmenter.cpp:38-40`).
-    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        self.net.set_weights(flat)
+    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
+    /// `get_segmentation` call -- the whole NN chain's raw output, before
+    /// `results_to_segmentation` convolves it in place. Port-side observation
+    /// point with NO legacy counterpart; see the field doc for why (the legacy's
+    /// only externalization is the `_IsUnitTest`-gated `.mat` dump, which this
+    /// port does not carry).
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
     }
 
-    /// `getWeights` delegates to the NN (`:42-44`).
-    fn get_weights(&self) -> Vec<f64> {
-        self.net.get_weights()
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn pack_count(&self) -> usize {
+        1
+    }
+
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.net.set_weights(&packs[0])
+    }
+
+    fn nets(&self) -> Vec<&BlstmNetwork> {
+        vec![&self.net]
+    }
+
+    fn nets_mut(&mut self) -> Vec<&mut BlstmNetwork> {
+        vec![&mut self.net]
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: None,
+        }
     }
 }
 
@@ -1112,7 +1017,6 @@ pub struct BlstmSpectralSegmenter {
     window_shift_sec: f64,
     /// Stateful `_LTSVWindowShift` (`:306`); dead for Task-7 configs.
     ltsv_shift_sec: f64,
-    channels: usize,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// The ONE `result_vec` buffer reused across the channel loop (the cross-channel
@@ -1133,16 +1037,6 @@ pub struct BlstmSpectralSegmenter {
     /// forward bit-exactly (the legacy never externalizes this row -- see the dump
     /// quirk -- so this is a pure test-capture accessor, like `last_result_rows`).
     last_result_rows_pass2: Vec<Vec<f64>>,
-    /// Test-only observation hook (`test-support` feature, no legacy counterpart,
-    /// no production cost -- absent from plain `cargo build`/release): records the
-    /// `costLID` value `BagOfProcessors::update_weights` last passed in
-    /// (`BagOfProcessors.cpp:194`, algo 3 -- ignored by the actual criterion, which
-    /// is `cost` alone, but the `:465` `costLID = -1.0` gate order is only
-    /// observable this way in Phase 4a since algo 3/4 never consume `costLID` for
-    /// real; Phase 4b's algo 5/6 make it live). See
-    /// [`Self::last_update_cost_lid_for_test`].
-    #[cfg(feature = "test-support")]
-    last_update_cost_lid: Option<f64>,
 }
 
 impl BlstmSpectralSegmenter {
@@ -1183,30 +1077,12 @@ impl BlstmSpectralSegmenter {
             spectrum_shift_in_frames: 0,
             window_shift_sec,
             ltsv_shift_sec,
-            channels: 0,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             result_buf: None,
             last_result_rows: Vec::new(),
             last_result_rows_pass2: Vec::new(),
-            #[cfg(feature = "test-support")]
-            last_update_cost_lid: None,
         })
-    }
-
-    /// Test-only hook: record the `costLID` value the bag's `update_weights`
-    /// received for this config (see the field doc). Not part of the legacy
-    /// `updateWeights` signature -- called separately by
-    /// `BagOfProcessors::update_weights`.
-    #[cfg(feature = "test-support")]
-    pub fn record_update_cost_lid_for_test(&mut self, cost_lid: f64) {
-        self.last_update_cost_lid = Some(cost_lid);
-    }
-
-    /// Test-only accessor for [`Self::record_update_cost_lid_for_test`].
-    #[cfg(feature = "test-support")]
-    pub fn last_update_cost_lid_for_test(&self) -> Option<f64> {
-        self.last_update_cost_lid
     }
 
     /// The stateful legacy `_WindowShift` member (`:453/:885`), POST the last
@@ -1233,26 +1109,12 @@ impl BlstmSpectralSegmenter {
         self.result_buf.as_ref().map(|b| b.nrows()).unwrap_or(0)
     }
 
-    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
-    /// `get_segmentation` call -- the whole NN chain's raw output, before
-    /// `results_to_segmentation` convolves it in place. Port-side observation point
-    /// with NO legacy counterpart (see the field doc + [`BlstmSignalSegmenter::
-    /// last_result_rows`]).
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
-    }
-
     /// PRE-convolution PASS-2 result rows (Task 8), one per channel where the pitch
     /// pass fired with `pitch > 0`. Empty when the pitch gate is off (TDCwindow 0) or
     /// every channel measured `pitch == 0`. Test-only observation point (no legacy
     /// counterpart -- the legacy dump quirk keeps the externalized result at pass 1).
     pub fn last_result_rows_pass2(&self) -> &[Vec<f64>] {
         &self.last_result_rows_pass2
-    }
-
-    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
     }
 
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:752`).
@@ -1281,69 +1143,12 @@ impl BlstmSpectralSegmenter {
         self.spectrum_shift_sec = 80.0 / rate;
     }
 
-    /// `isBackPropActivated` (`BLSTMSpectralSegmenter.cpp:103-105`): forwards to the
-    /// net's `isBackPropagationActivated`.
-    pub fn is_back_prop_activated(&self) -> bool {
-        self.net.config().back_propagation_activated
-    }
-
-    /// `updateWeights` (`:107-109`): hand the Nx2 gradient object + cost to the net's
-    /// long-lived iRPROP- trainer.
-    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
-        self.net.update_weights(derivs, cost);
-    }
-
-    /// `saveWeights` (`:111-113`): the net writes the three artifacts.
-    pub fn save_weights(
-        &self,
-        filename: &str,
-        derivs: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        self.net.save_weights(filename, derivs, stats)
-    }
-
-    /// `getInputStatistics` (`:99-101`): the net's accumulated per-dim stats.
-    pub fn input_statistics(&self) -> &InputStatistics {
-        self.net.input_statistics()
-    }
-
-    /// `getWeightsDerivatives` delegate (`BLSTMSpectralSegmenter.cpp:95-97`): the
-    /// net's Nx2 flat derivative matrix. See the [`BlstmSignalSegmenter`] twin's doc:
-    /// the `Segmenter` trait default returns empty; this inherent method surfaces the
-    /// real net derivs for the corpus gradient harvest.
-    pub fn get_weights_derivatives(&self) -> Array2<f64> {
-        self.net.get_weights_derivatives()
-    }
-
-    /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators
-    /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
-    pub fn reset_weights_derivatives(&mut self) {
-        self.net.reset_weights_derivatives();
-    }
-
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
     /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
     /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
     /// None)`, matching the legacy's in-ctor load without duplicating its semantics.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         self.net.load_weights_file(map, "BLSTM")
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (see
-    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
@@ -1416,7 +1221,6 @@ impl Segmenter for BlstmSpectralSegmenter {
         self.result_buf = Some(Array2::<f64>::zeros((real_vec_size, 1)));
 
         let channels = audio.data.nrows();
-        self.channels = channels;
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
         self.last_result_rows = Vec::with_capacity(channels);
@@ -1608,13 +1412,41 @@ impl Segmenter for BlstmSpectralSegmenter {
         Ok(())
     }
 
-    /// `setWeights` delegates to the NN (`BLSTMSpectralSegmenter.cpp:87-89`).
-    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        self.net.set_weights(flat)
+    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
+    /// `get_segmentation` call -- the whole NN chain's raw output, before
+    /// `results_to_segmentation` convolves it in place. Port-side observation point
+    /// with NO legacy counterpart (see the field doc + [`BlstmSignalSegmenter::
+    /// last_result_rows`]).
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
     }
 
-    /// `getWeights` delegates to the NN (`:91-93`).
-    fn get_weights(&self) -> Vec<f64> {
-        self.net.get_weights()
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn pack_count(&self) -> usize {
+        1
+    }
+
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.net.set_weights(&packs[0])
+    }
+
+    fn nets(&self) -> Vec<&BlstmNetwork> {
+        vec![&self.net]
+    }
+
+    fn nets_mut(&mut self) -> Vec<&mut BlstmNetwork> {
+        vec![&mut self.net]
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: None,
+        }
     }
 }

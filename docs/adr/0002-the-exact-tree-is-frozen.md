@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25)
 
 ## Context
 
@@ -35,7 +35,7 @@ tightenings, a bad repeat count, a third `*` part and whitespace inside a repeat
 errors where the legacy aborted, silently dropped or truncated, issue #50; the typed channel
 result: the result row's 18+N layout owned by one `engine/` type, `engine/channel_result.rs`,
 with `to_row()` the only writer and the in-band LID target decoded once at the bag, proven
-byte-identical by the `.mat` goldens and the seam cross-pin, issue #23; the pack-count guard: `engine/bag_of_processors.rs::set_weights` sizes the list against the arm's `net_count` before indexing it, so a short list is a refusal naming both counts instead of a panic and a long one is no longer truncated in silence, algo 0/1/2 inert at any length, issue #60; the stepwise hoist: a per-step loop body moved into a
+byte-identical by the `.mat` goldens and the seam cross-pin, issue #23; the pack-count guard: `engine/bag_of_processors.rs::set_weights` sizes the list against the arm's pack count (the driver's `pack_count` since issue #25) before indexing it, so a short list is a refusal naming both counts instead of a panic and a long one is no longer truncated in silence, algo 0/1/2 inert at any length, issue #60; the stepwise hoist: a per-step loop body moved into a
 state struct (or a stateless per-output function) in the same module, the batch function becoming the fold over it, proven by the
 committed goldens byte-green AND the pre-existing bit-equality leg passing UNMODIFIED through the
 move -- `tasks/segmenter.rs::HystStep` under `update_segmentation_raw` (commit `476ffec`) and
@@ -44,7 +44,17 @@ then driving the same struct and the same function, issue #26; introspection: a 
 reads layer state and writes nothing -- the `weight_layout()` of every layer type in
 `nn/layers.rs` and `nn/cells/`, `Network::layers()`, and `BlstmNetwork::weight_layout`, the
 block list the `speech_rs.weight_layout` seam exports, proven behaviour-free by the goldens
-byte-green and pinned to `set_weights` by one-hot probes per cell, issue #27). Training is
+byte-green and pinned to `set_weights` by one-hot probes per cell, issue #27; the driver
+interface: `tasks/segmenter.rs::Segmenter` as the one surface the bag reaches every driver
+through -- methods returning state a driver already holds (its trainable nets, its pack count,
+one channel's result members, its posteriors) plus `set_packs`, the pass-through it replaces --
+the three LID drivers' five member vectors regrouped into one `LidMembers` with every write site
+renamed, the drivers' pass-through delegators, `score` copies and write-only `channels`
+fields deleted, and `engine/bag_of_processors.rs` reading every driver through the trait:
+the weight, statistics, derivative and back-prop reads iterate the trainable nets, save and
+update take one `training_policy` keyed on the algo number as the legacy is (the same
+criteria, update costs, `LID_` prefix and order); nothing recomputed, proven by the goldens
+byte-green, issue #25). Training is
 exact-f64 only and bails loudly on the fast variants.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and

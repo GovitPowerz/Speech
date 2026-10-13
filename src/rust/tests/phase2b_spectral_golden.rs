@@ -622,7 +622,7 @@ fn score_matches_dump_real_variant() {
         sig.get_segmentation(&mut audio, &mut hyp, None).unwrap();
 
         let want = common::load_bin_phase2b(&format!("spectral_{tag}_scores.bin"));
-        let reports = BlstmSpectralSegmenter::score(&mut hyp, Some(&reference), -1);
+        let reports = common::score_channels(&mut hyp, &reference, -1);
         for (chan, report) in reports.iter().enumerate() {
             let speech = report.per_class[SegClass::Speech as usize];
             let got = ndarray::Array2::from_shape_vec(

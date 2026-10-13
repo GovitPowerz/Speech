@@ -12,8 +12,8 @@
 //! and [`finish`](StreamingLidSession::finish) / the per-push running aggregate run the SAME
 //! epilogue ([`super::driver::finalize_lid_channel`]). So:
 //!  - [`finish`](StreamingLidSession::finish) == the offline `FastTwinLid` members on the same
-//!    entries, BIT-IDENTICAL (`lid_classification_errors`/`lid_segments_confusion`/
-//!    `is_lid_correct`), and
+//!    entries, BIT-IDENTICAL (the `LidMembers` `classification_errors`/`segments_confusion`/
+//!    `is_correct`), and
 //!  - the running aggregate after k pushes == the offline run on the FIRST k entries
 //!    (prefix-correctness), the strong pin against the REAL offline driver (`phase8_stream_lid.rs`).
 //!
@@ -67,7 +67,7 @@ pub struct UtteranceScore {
     pub argmax: Option<usize>,
     /// Whether THIS utterance's argmax hit the target language (`j == ti`); `None` iff skipped.
     /// NOTE: distinct from `running_aggregate.is_lid_correct` -- that is the CUMULATIVE decision
-    /// (the offline `is_lid_correct`: `100` iff the argmax of the langID accumulated over ALL
+    /// (the offline `LidMembers::is_correct`: `100` iff the argmax of the langID accumulated over ALL
     /// utterances so far is the target), whereas this is the per-utterance hit/miss.
     pub is_correct: Option<bool>,
     /// The running aggregate AFTER folding this utterance -- the finalized snapshot, bit-

@@ -236,7 +236,7 @@ fn score_matches_dump() {
     ltsv2.get_segmentation(&mut audio2, &mut hyp, None).unwrap();
 
     let want = common::load_bin_phase2b("ltsv_scores.bin");
-    let reports = LtsvSegmenter::score(&mut hyp, Some(&reference), -1);
+    let reports = common::score_channels(&mut hyp, &reference, -1);
     for (chan, report) in reports.iter().enumerate() {
         let speech = report.per_class[SegClass::Speech as usize];
         let got = ndarray::Array2::from_shape_vec(

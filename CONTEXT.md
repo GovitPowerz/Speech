@@ -66,7 +66,7 @@ The Rust crate `speech` and its binary.
 The PyO3 crate `speech-py`, module `speech_rs`: `Engine`, `StreamingSession`, `StreamingLidSession`. Every numpy crossing is a copy.
 
 **Driver**:
-A per-file `Segmenter` implementation for one Algo. The nine drivers live in a closed `Processor` enum.
+A per-file `Segmenter` implementation for one Algo. The nine drivers live in a closed `Processor` enum; the bag reaches each through the trait: its per-file segmentation, its weight packs, its trainable nets (exact tree only) and its per-channel result members.
 _Avoid_: processor for the engine as a whole
 
 **Bag**:
