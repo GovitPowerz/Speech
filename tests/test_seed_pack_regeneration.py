@@ -1,4 +1,4 @@
-"""Issue #27: every committed Phase 9 seed pack regenerates BYTE-IDENTICAL from `init_weights`.
+"""Issue #27: every committed Phase 9 seed pack regenerates from `init_weights`, BYTE-IDENTICAL on the oracle env.
 
 Manifest-driven: `tests/reference_data/phase9/manifest.json` records, per fixture, the config
 text, the init prefix (`BLSTM` for a SAD net, `BLSTM_LID` for the Twin's LID net), the RNG seed,
@@ -6,6 +6,13 @@ the scheme and the forget-bias rule the pack was drawn with. The test replays ex
 compares the bytes to the committed `.bin`, so the RNG CONSUMPTION ORDER per block is pinned
 through any rewrite of the builders (the issue's constraint: same-seed packs and the run-twice
 byte-identity gates must reproduce bit-for-bit).
+
+Byte identity holds on the environment the packs were drawn on (macOS arm64, the oracle env);
+elsewhere the comparison is `tests/_libm_gate.py`'s canary-gated hybrid bound. Measured: the
+arm64 numpy wheel computes `Generator.uniform` as ONE fused `fma(high - low, u, low)` (100000 of
+100000 draws match the fused form, 48% match the unfused `low + (high - low) * u`), so an x86_64
+host lands 1 ULP off on about half the elements; the Mamba `exp`/`log` draws add libm rounding.
+A changed consumption order or draw count moves values by O(limit), far outside the bound.
 
 Written first and green before the migration; it must stay green through every step. The
 Phase 4a/4b seed packs have no recorded provenance and stay length-pinned by their own tests.
@@ -20,6 +27,8 @@ import pytest
 from speech.config_bridge import nnet_spec, parse_legacy_config
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_bin
+
+from tests._libm_gate import assert_f64_matrix_close
 
 PHASE9 = Path("tests/reference_data/phase9")
 MANIFEST = cast(dict[str, Any], json.loads((PHASE9 / "manifest.json").read_text()))
@@ -38,7 +47,7 @@ def test_committed_seed_pack_regenerates_byte_identical(name: str) -> None:
     assert (rows, cols) == (len(committed), 1)
     assert packs[0].dtype == np.float64
     assert packs[0].shape == committed.shape, f"{name}: regenerated {packs[0].shape[0]} elements, the committed pack holds {committed.shape[0]}"
-    assert packs[0].tobytes() == committed.tobytes(), f"{name}: the regenerated pack differs from the committed bytes"
+    assert_f64_matrix_close(packs[0], committed, f"{name}: the regenerated pack vs the committed bytes")
 
 
 def test_every_fixture_records_its_provenance() -> None:
