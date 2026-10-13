@@ -308,8 +308,8 @@ pub struct CfcParams {
 /// (`23,24,24`, LSTM 33671, CfC `620*B + 935` -> 28835) at -14.36%, inside the band,
 /// so ONE default serves both lineages and no config overrides it. The full arithmetic
 /// for both lineages is recorded in `tests/test_phase10_init.py`'s module docstring;
-/// the Python mirror is `config_bridge.CFC_DEFAULT_BACKBONE_UNITS` (pinned against
-/// THIS line by `test_the_rust_and_python_defaults_agree`).
+/// Python holds no mirror since issue #27 (it reads the value through the seam,
+/// pinned by `test_the_default_is_the_rust_default`).
 pub const CFC_DEFAULT_BACKBONE_UNITS: usize = 45;
 
 impl Default for CfcParams {
@@ -412,9 +412,9 @@ pub const TRANSFORMER_DEFAULT_HEADS: usize = 4;
 /// "small cell -> small FFN" instinct but comfortably BELOW the transformer-literature
 /// default.
 ///
-/// The full table is in `tests/test_phase11_init.py`'s docstring; the Python mirror is
-/// `config_bridge.TRANSFORMER_DEFAULT_D_FF` (pinned against THIS line by
-/// `test_the_rust_and_python_defaults_agree`).
+/// The full table is in `tests/test_phase11_init.py`'s docstring; Python holds no mirror
+/// since issue #27 (it reads the value through the seam, pinned by
+/// `test_the_defaults_are_the_rust_defaults`).
 pub const TRANSFORMER_DEFAULT_D_FF: usize = 64;
 
 impl Default for TransformerParams {

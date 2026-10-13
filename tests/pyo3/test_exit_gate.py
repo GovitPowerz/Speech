@@ -27,7 +27,7 @@ call here keeps the process cwd there: the fold run (issue #22) resolves the con
 keys against the workdir, and the engine resolves a listing ROW against the cwd, as the
 binary does.
 
-Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-pyo3 job.
+Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-test job.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from speech.config_bridge import nnet_spec
 from speech.drivers.init import init_run
 from speech.drivers.state import ModernTrainParams
 from speech.drivers.train import (
@@ -432,7 +431,7 @@ def _sad_from_scratch(tmp: Path, seed: int) -> _SadRun:
     assert state.algo == 3 and state.ps.lid is None, "the SAD gate must exercise the single-net path"
     base = state.base_config
     workdir = Path(state.config_path).parent
-    init_pack = init_weights(nnet_spec(base, "BLSTM"), np.random.default_rng(seed), "xavier", True)
+    init_pack = init_weights(base, "BLSTM", np.random.default_rng(seed), "xavier", True)
 
     with chdir(workdir):
         fold = FoldRun(base, workdir, backprop=True, listing="train_f1.csv")
@@ -506,7 +505,7 @@ def _twin_mechanical(tmp: Path, seed: int, n_steps: int) -> _TwinRun:
     workdir = Path(state.config_path).parent
     tails = _tail_lengths(base, 6)
     rng = np.random.default_rng(seed)
-    init_pack = init_weights(nnet_spec(base, "BLSTM"), rng, "he", True) + init_weights(nnet_spec(base, "BLSTM_LID"), rng, "he", True)
+    init_pack = init_weights(base, "BLSTM", rng, "he", True) + init_weights(base, "BLSTM_LID", rng, "he", True)
 
     with chdir(workdir):
         _f, grads = forward_backward(FoldRun(base, workdir, backprop=True), [init_pack[0], init_pack[1]])

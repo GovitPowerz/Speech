@@ -3506,6 +3506,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `.superpowers/sdd/task-5-report.md` for the verification trace. RED/mutation do not apply
   (spec S2 step 1: nothing to fail, since the port never reproduced the bug in the first
   place -- a doc-only flip per the sweep's own adjudication, not a code fix).
+  (Issue #27: the Python packer and those three test files are gone; the tail-inclusive pack is
+  now proven by the Rust goldens `src/rust/tests/phase0_packer.rs` / `phase4d_packer_golden.rs`
+  and by every committed seed pack regenerating byte-identical through `speech_rs.weight_layout`,
+  whose `tail` stack carries `mean` and `std` -- `tests/test_seed_pack_regeneration.py`.)
 
 - **[phase5] The QPSO genome no longer carries network weights -- a DELIBERATE DESIGN BREAK
   from the legacy genome (Task 9), NOT a fix flip** (`genome.weight_block_mask`/`_MaskTraceWalk`,

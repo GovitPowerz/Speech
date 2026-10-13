@@ -513,6 +513,8 @@ _TWIN_FLAT: dict[str, str] = {
     "BLSTM_OutputNeuronNb": "48,12,1",
     "BLSTM_OutputSubSampling": "1,1",
     "BLSTM_NNetInputSize": "23",
+    "BLSTM_InputNormalizationType": "1",
+    "BLSTM_TwoSweeps": "false",
     "BLSTM_CostLawSpeech": "log",
     "BLSTM_CostLawNoSpeech": "log",
     "BLSTM_LID_LSTMNeuronNb": "38,24",
@@ -520,6 +522,8 @@ _TWIN_FLAT: dict[str, str] = {
     "BLSTM_LID_OutputNeuronNb": "48,12",
     "BLSTM_LID_OutputSubSampling": "1",
     "BLSTM_LID_NNetInputSize": "38",
+    "BLSTM_LID_InputNormalizationType": "1",
+    "BLSTM_LID_TwoSweeps": "false",
     "BLSTM_LID_CostLawSpeech": "log",
     "BLSTM_LID_CostLawNoSpeech": "log",
 }

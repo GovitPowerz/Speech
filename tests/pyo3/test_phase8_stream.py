@@ -1,8 +1,7 @@
 """Phase 8 Task 6: `speech_rs.StreamingSession` binding replay + chunk-invariance.
 
-`importorskip` guards the whole module: the plain `python-test` CI job never builds
-`speech_rs`, so it SKIPS these; only the `python-pyo3` job (which runs `maturin develop`)
-exercises them.
+`importorskip` guards the whole module: a tree without `speech_rs` built SKIPS these; CI's
+`python-test` job runs `maturin develop` first (issue #27) and exercises them.
 
 The binding is a THIN wrapper over `speech::fast::stream::StreamingSession` (the Rust
 streaming session), so replaying the SAME staged config + samples through it reproduces the

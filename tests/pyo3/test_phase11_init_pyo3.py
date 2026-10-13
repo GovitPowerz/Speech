@@ -1,9 +1,8 @@
-"""Phase 11 Task 3: `init_transformer_flat` -> `Engine.set_weights` -> `Engine.weights()`.
+"""Phase 11 Task 3: `init_weights` (transformer) -> `Engine.set_weights` -> `Engine.weights()`.
 
-THE ONLY CROSS-LANGUAGE LENGTH PIN there is. `tests/test_phase11_init.py` proves the Python
-builder agrees with an independent transcription of `transformer.rs::for_each_slot`; this file
-proves it agrees with the ACTUAL Rust walk, by handing the pack to an Engine built from a
-config that selects the cell and reading it back.
+Since issue #27 `init_weights` draws per block of `speech_rs.weight_layout`, so the pack length
+is the engine's by construction; this file proves the pack crosses the REAL `set_weights` and
+comes back untouched, by handing it to an Engine built from a config that selects the cell.
 
 Both failure directions are covered by the round trip, which is why it is worth its runtime:
 since the phase-11 interstitial `BlstmNetwork::set_weights` demands the EXACT
@@ -17,9 +16,7 @@ transformer net, so the Engine below constructs only because `load_weights_file`
 legacy's file-load head-first tolerance (`BLSTMNeuralNetwork.cpp:144-146`). It now prints the
 legacy's warning to stderr; that is expected output here, not a failure.
 
-Lives under `tests/pyo3/` for the phase-5 reason, unchanged: the dedicated `python-pyo3` CI job
-runs `pytest tests/pyo3`, so a `speech_rs`-touching test placed anywhere else import-skips in
-both jobs forever.
+Lives under `tests/pyo3/` beside the other `speech_rs.Engine` round trips.
 """
 
 from __future__ import annotations
@@ -85,10 +82,9 @@ def test_transformer_pack_round_trips_through_engine_set_weights(tmp_path: Path,
     the crossing untouched (a pure copy in, a pure copy out -- no arithmetic on the PyO3
     boundary)."""
     cfg = _seed_tier2_transformer(tmp_path, {})
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
-    assert spec["CellType"] == "transformer"
+    assert config_bridge.nnet_spec(cfg, prefix="BLSTM")["CellType"] == "transformer"
 
-    packs = init_weights(spec, np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
     assert len(packs) == 1
     assert packs[0].shape == (V1_DEFAULT_PACK,)  # the v1 closed form at d_ff = 64.
 
@@ -109,8 +105,7 @@ def test_the_geometry_keys_resize_both_sides_together(tmp_path: Path, keys: dict
     ignores. `Transformer_Heads 8` rides along on the second row: it changes the attention
     arithmetic and must NOT change any length (24 % 8 == 0, so the engine accepts it)."""
     cfg = _seed_tier2_transformer(tmp_path, keys)
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
-    packs = init_weights(spec, np.random.default_rng(7))
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(7))
     assert packs[0].shape == (16199 + 196 * d_ff,)
 
     with chdir(tmp_path):

@@ -94,7 +94,7 @@ from pydantic import ValidationError
 from rich.console import Console
 
 from speech.batching import read_listing
-from speech.config_bridge import CELL_TYPES, DIRECTIONS, nnet_spec
+from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
 from speech.drivers.spec import ARM_CONFIG, BaselineSpec, listing_hash
 from speech.drivers.state import ModernTrainParams, RunState
@@ -350,10 +350,9 @@ def cell_overlay(flat: dict[str, str], cell: str, direction: str, *, prefix: str
     (and, since phase 10, `Cfc_*`; since phase 11, `Transformer_*`) geometry keys are
     deliberately NOT written: their defaults live Rust-side (`blstm.rs::MambaParams::default`
     / `CFC_DEFAULT_BACKBONE_UNITS` / `TRANSFORMER_DEFAULT_{WINDOW,HEADS,D_FF}`) and Python
-    reads the same defaults (`init_weights.MambaGeometry` /
-    `config_bridge.CFC_DEFAULT_BACKBONE_UNITS` / `config_bridge.TRANSFORMER_DEFAULT_*`), so
-    omitting them at default values keeps the config text minimal and the two sides agreeing
-    by construction.
+    reads the resolved values through the seam (`speech_rs.weight_layout` /
+    `speech_rs.blstm_config`, issue #27), so omitting them at default values keeps the config
+    text minimal and the two sides agreeing by construction.
 
     THE FIFTH CELL NEEDS NO THIRD DERIVED KEY (phase-11 T9, spec S8): a transformer layer is
     just another `Layer` impl behind the same `CellLayer` enum (`nn/cells/mod.rs`'s dispatch,
@@ -423,7 +422,7 @@ def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_sc
     drawn under a different scheme than the one training actually started from."""
     rng = np.random.default_rng(seed)
     for prefix, name in (("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")):
-        pack = init_weights(nnet_spec(flat, prefix), rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
+        pack = init_weights(flat, prefix, rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
         write_bin(pack.shape[0], 1, pack, out_dir / name)
 
 
@@ -436,7 +435,7 @@ def _generate_sad_seed_pack(flat: dict[str, str], out_dir: Path, seed: int, init
     lesson) -- otherwise the held-out DCF would compare the trained net against an init drawn
     under a different scheme than training actually started from. One draw, deterministic."""
     rng = np.random.default_rng(seed)
-    pack = init_weights(nnet_spec(flat, "BLSTM"), rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
+    pack = init_weights(flat, "BLSTM", rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
     write_bin(pack.shape[0], 1, pack, out_dir / "sad_seed.bin")
 
 
@@ -893,8 +892,8 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     `cell`/`direction` (Phase 9, spec S7.2; the LID arms since issue #21): overlay the
     port-only S6 architecture keys onto the arm config under the prefix of the net that
     trains (`cell_overlay`, `arm.prefix`) and, since seeding reads the architecture back out
-    of that config via `nnet_spec`, route the from-scratch init through the matching
-    per-cell builder automatically -- both the engine-construction seed pack here and
+    of that config through the engine's weight layout, route the from-scratch init through
+    the matching draw rules automatically -- both the engine-construction seed pack here and
     `train_modern`'s own re-init. Defaults are today's BLSTM arm, byte-identical."""
     console = console or Console()
     arm = ARMS[spec.arm]

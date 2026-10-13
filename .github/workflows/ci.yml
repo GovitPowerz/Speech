@@ -57,22 +57,14 @@ jobs:
       - name: ${{ matrix.check }}
         run: ${{ matrix.command }}
 
+  # One Python test job since issue #27: the seed init and the config spec read the engine
+  # through `speech_rs` (`weight_layout`, `blstm_config`), so the whole `tests` tree needs the
+  # module built; the former `tests/pyo3`-only job is folded in.
   python-test:
     name: Python (test)
     runs-on: ubuntu-latest
     env:
       HYPOTHESIS_PROFILE: ci
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - name: Install dependencies
-        run: uv sync --group dev
-      - name: Run tests
-        run: uv run pytest tests -v
-
-  python-pyo3:
-    name: Python (pyo3)
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -86,5 +78,5 @@ jobs:
         run: uv run maturin develop --release --manifest-path src/rust/speech-py/Cargo.toml
       - name: Import check
         run: uv run python -c "import speech_rs; print(speech_rs.version())"
-      - name: Run pyo3 tests
-        run: uv run pytest tests/pyo3 -v
+      - name: Run tests
+        run: uv run pytest tests -v

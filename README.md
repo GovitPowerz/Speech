@@ -187,12 +187,11 @@ Speech/
 uv run pytest tests     # Python test suite
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs on PRs to `main` and manual dispatch (`workflow_dispatch`), with four jobs:
+GitHub Actions (`.github/workflows/ci.yml`) runs on PRs to `main` and manual dispatch (`workflow_dispatch`), with three jobs:
 
 - **rust** - `cargo fmt --check`, `cargo clippy`, `cargo test`.
 - **python-lint** - `ruff check`, `ruff format --check`, `mypy`.
-- **python-test** - `pytest`, including the ledger gates: every record under `ledger/` validates and RESULTS.md holds exactly what the ledger renders (`python -m speech.ledger render --check`).
-- **python-pyo3** - `maturin develop --release` for `speech-py`, an import check of `speech_rs`, then `pytest tests/pyo3` (the in-process seam-replay + exit-gate suites). The Phase 4d PyO3-seam parity gate against the committed 2015-binary fixtures was retired from HEAD in Phase 5 ([ADR-0001](docs/adr/0001-port-truth-after-the-parity-tag.md), [docs/ROADMAP.md](docs/ROADMAP.md)); its proof lives at the `legacy-parity-v1` tag.
+- **python-test** - `maturin develop --release` for `speech-py`, an import check of `speech_rs`, then `pytest tests` over the whole tree (since issue #27 the seed init and the config spec read the engine through `speech_rs.weight_layout` / `speech_rs.blstm_config`, so the former `tests/pyo3`-only job is folded in), including the ledger gates: every record under `ledger/` validates and RESULTS.md holds exactly what the ledger renders (`python -m speech.ledger render --check`). The Phase 4d PyO3-seam parity gate against the committed 2015-binary fixtures was retired from HEAD in Phase 5 ([ADR-0001](docs/adr/0001-port-truth-after-the-parity-tag.md), [docs/ROADMAP.md](docs/ROADMAP.md)); its proof lives at the `legacy-parity-v1` tag.
 
 ## Author
 

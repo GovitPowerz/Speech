@@ -1,11 +1,8 @@
 """Phase 5 Task 3: `init_weights` -> `Engine.set_weights` -> `Engine.weights()` round trip.
 
-Lives under `tests/pyo3/` (not alongside the rest of the Task 3 suite in
-`tests/test_phase5_init_weights.py`) because the dedicated `python-pyo3` CI job runs only
-`pytest tests/pyo3`: every existing `importorskip("speech_rs")` test in this repo already
-lives here (`test_engine_smoke.py` / `test_seam_replay.py` / `test_exit_gate.py`), so
-putting a `speech_rs`-touching test here is what makes it actually execute in CI instead
-of import-skipping in both jobs forever.
+Lives under `tests/pyo3/` beside the other `speech_rs.Engine` round trips; the placement
+rule it was written under (a dedicated CI job running only `pytest tests/pyo3`) retired in
+issue #27, when the whole tree started needing `speech_rs`.
 """
 
 from __future__ import annotations
@@ -62,9 +59,8 @@ def test_init_weights_round_trips_through_engine_set_weights(tmp_path: Path, sch
     pattern version, but exercising a real `init_weights` pack for both schemes)."""
     _seed_tier2_spectral(tmp_path)
     cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
 
-    packs = init_weights(spec, np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
     assert len(packs) == 1
     assert packs[0].shape == (33671,)
 
@@ -85,7 +81,7 @@ def test_init_weights_pack_is_the_engine_length_at_output_subsampling_2(tmp_path
     cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
     cfg["BLSTM_OutputSubSampling"] = "2,1"
     cfg["BLSTM_weightsFile"] = ""  # the committed 33671 pack is short for this net.
-    packs = init_weights(config_bridge.nnet_spec(cfg, prefix="BLSTM"), np.random.default_rng(123))
+    packs = init_weights(cfg, "BLSTM", np.random.default_rng(123))
     assert packs[0].shape == (34247,)
 
     with chdir(tmp_path):

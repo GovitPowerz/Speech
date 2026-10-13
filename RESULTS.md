@@ -3326,3 +3326,43 @@ dropped `off`; `left: 4587366580439587226` for the doubled one). A second pin,
 reach: the INIT seed at `begin == 0.0` exactly (CAUGHT under `pending_begin`'s `>=` mutated to `>`)
 and the tail flush, which now clears the candidate so `pending_begin` is `None` after EOS (CAUGHT
 with the clear reverted).
+
+## Issue #27 -- the weight layout through the seam: the mutation battery
+
+Branches `feature/weight-layout-seam` (PR1, off `main@c6d9417`) and `feature/weight-layout-draws`
+(PR2, stacked). Before #27 the flat-pack layout lived three times: once in Rust (each cell's
+`for_each_slot`, the LSTM's column-major fills), once in `init_weights.py` (per-cell builders
+emitting the same order) and once in `weight_bridge.py` (the Phase 0a packer, with a second `adim`),
+plus block maps re-derived in the gate and seam tests. Now every layer type lists its own blocks
+(`weight_layout()`, an ADR-0002 introspection touch class), `BlstmNetwork::weight_layout` lists
+them in `set_weights` order, `speech_rs.weight_layout(config, prefix)` exports the list, and
+Python draws per block kind with a name-keyed exception table and an explicit RNG order for the
+legacy LSTM layer. Proof of the move: every Phase 9 seed pack regenerates byte-identical through
+the seam (`tests/test_seed_pack_regeneration.py`, 19 fixtures, manifest-driven, green before and
+after the migration); the Python packer, the mirrored defaults and the per-cell builders are
+deleted; cargo 1375 passed, 0 failed at the PR2 head (`cargo test --no-fail-fast`, debug), the
+goldens byte-green; pytest 1110 passed / 1 skipped non-slow.
+
+One correction to the issue's decision 1: MLP mode (`LSTMNeuronNb[0] == 0`) is NOT "output
+blocks only, no tail" -- `nb_of_weights` counts and `set_weights` consumes a `2 * input_size`
+tail there too, `input_size` being the output net's input width. The layout follows the code and
+`tests/weight_layout.rs::mlp_mode_is_output_blocks_plus_the_tail_at_the_output_input_width`
+pins it.
+
+Apply -> run the named catchers on both sides (the Rust pins; `maturin develop`; the Python legs)
+-> revert -> tree clean. Each Python-side verdict is read against the regeneration leg, which is
+the byte pin the issue asked for, and the Rust side against the one-hot probes and the record pins.
+
+| # | mutation | Rust catchers | Python catchers | verdict |
+|---|---|---|---|---|
+| 1 | sLSTM `weight_layout` emits `W_a` before `R_a` (an adjacent-block swap) | `slstm::flat_layout_positions_are_the_spec_order`, `weight_layout_names_shapes_and_fans` | regeneration + `test_phase9_init -k slstm` | CAUGHT Rust-side (2/2 FAILED). Python BLIND by construction: both blocks draw from ONE identical uniform stream (same `(in + out, out)` fans), so moving the boundary between them changes no byte; the swap is a layout fact and the one-hot probe owns it. |
+| 2a | peephole column names permuted ACROSS gates (`i.o_prev` <-> `f.i_prev`) | the column pins (`[:3]` and the `.cell` suffix) | regeneration | MISSED Rust-side, CAUGHT by the regeneration leg on the two LSTM fixtures (`lstm_forward`, `twin_mode7_lid_lstm_forward`): the gate PREFIX drives the scatter, so a cross-gate swap moves draws. |
+| 2b | the same, WITHIN one gate (`i.i_prev` <-> `i.f_prev`) | the same | regeneration + `test_phase5_init_weights` | MISSED everywhere, by design: a gate's three gate-peephole columns are ONE draw block and the forward reads rows by index, so the names are documentation. Pin added: `layers::layout_tests::lstm_layout_names_shapes_fans_and_peephole_columns` now asserts the full 12-name list, so an edit of the record fails there. |
+| 3 | sLSTM `b_a` reported as kind `weight` | `weight_layout_names_shapes_and_fans` | regeneration + the sLSTM reconstruction pin | CAUGHT both sides (Rust 1 FAILED; Python 9 FAILED: the bias block now consumes Xavier draws, every later block shifts). |
+| 4 | `NeuronLayer::weight_layout` reports `fan_in = out` (the sub-sampling factor and the input width dropped from the output fan) | `neuron_layout_positions_match_set_weights`, `weight_layout::output_layer_fans_carry_the_sub_sampling_factor` | regeneration, `test_output_subsampling_widens_the_output_layer`, the seam's `real_2015` pins | CAUGHT both sides (Python 21 FAILED: the Xavier limit of every output `W` moves). |
+| 5 | LSTM `w.*` reported as `(fin, out)` instead of `(out, fin)` | `lstm_layout_names_shapes_fans_and_peephole_columns` | the seam's `test_the_real_2015_shapes_tile_their_packs`; regeneration | CAUGHT by the Rust shape pin and the seam test (2 FAILED). The regeneration leg is orientation-BLIND by construction (an iid draw of the same count is the same bytes either way), as the issue's own prediction ("offset pin passes; RED catches") had it only half right: the RED is the shape record, not the bytes. |
+
+What the battery measured, stated once: the byte pin owns the DISTRIBUTIONS and the RNG order
+(items 2a, 3, 4), the Rust pins own the LAYOUT (items 1, 5), and a fact owned by neither (2b)
+is a documentation fact with a literal pin. The Python side holding no geometry is what makes
+this split clean: there is no second transcription left for a mutation to hide between.
