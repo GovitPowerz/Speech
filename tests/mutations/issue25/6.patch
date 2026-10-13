@@ -1,0 +1,19 @@
+mutation: the bag reads channel 0's members for every channel
+catcher: CAUGHT cargo --test phase4a_corpus_processor grad_check_synthetic
+catcher: CAUGHT cargo --test phase4b_corpus_lid lid5_gradcheck_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_gradcheck_golden
+catcher: MISSED cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 706d4bd..3335d5c 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -1071,7 +1071,7 @@ impl BagOfProcessors {
+                 let refc = reference.as_ref().map(|r| &r[chan]);
+                 let report = compute_errors(&mut seg_per_chan[chan], refc, nb_words);
+                 let speech_duration = speech_duration_of(&seg_per_chan[chan]);
+-                let members = driver.channel_members(chan);
++                let members = driver.channel_members(0);
+                 // legacy: :338/:380 `!seg._IsLIDCorrect.empty()` -- LID block live for
+                 // algo 5/6 (the row WIDTH grows by the class count), else two 0.0s. The
+                 // in-band target is decoded here, once ([`LidResult::from_encoded`]).

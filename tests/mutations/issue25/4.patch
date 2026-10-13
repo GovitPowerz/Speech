@@ -1,0 +1,16 @@
+mutation: is_back_prop_activated answers an empty vec instead of the legacy [false] for a driver with no trainable net
+catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::dispatch_vec_shapes
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 706d4bd..97309be 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -502,7 +502,7 @@ impl BagOfProcessors {
+     pub fn is_back_prop_activated(&self, pos: usize) -> Vec<bool> {
+         let nets = self.processors[pos].driver().nets();
+         if nets.is_empty() {
+-            return vec![false];
++            return Vec::new();
+         }
+         nets.iter()
+             .map(|net| net.config().back_propagation_activated)

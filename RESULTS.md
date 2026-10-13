@@ -3376,6 +3376,8 @@ this split clean: there is no second transcription left for a mutation to hide b
 
 ## Issue #25 -- the driver interface: the mutation battery
 
+**Live since issue #33:** `tests/mutations/issue25/` (6 patches). Item 3's "both training files green" is the MISSED line on `twin_train_epoch_weights_golden`, the only training golden in them.
+
 Branch `feature/driver-interface` (off `main@a252fd4`). Before #25 the bag dispatched on the
 `Processor` variant thirteen times (nine-arm matches whose arms differed by field name, the LID
 quartet copied three times inside one of them), seven drivers carried an identical `score`, and

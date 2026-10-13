@@ -1,0 +1,16 @@
+mutation: training_policy algo 6 saves the Twin's LID net without the LID_ prefix
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 706d4bd..0786f41 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -169,7 +169,7 @@ fn training_policy(
+         // :172-179 saveCriterion = cost + costLID, BOTH nets saved under ONE gate,
+         // `saveWeightsLID` adding its own `LID_` prefix; :195-200 updateWeights(cost)
+         // THEN updateWeightsLID(costLID).
+-        6 => Some((cost + cost_lid, vec![(cost, ""), (cost_lid, "LID_")])),
++        6 => Some((cost + cost_lid, vec![(cost, ""), (cost_lid, "")])),
+         _ => None,
+     }
+ }
