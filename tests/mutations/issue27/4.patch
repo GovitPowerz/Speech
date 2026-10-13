@@ -1,0 +1,41 @@
+mutation: NeuronLayer weight_layout reports fan_in = out on W and b (the input width and the sub-sampling factor dropped from the output fan)
+catcher: CAUGHT cargo --lib nn::layers::layout_tests::neuron_layout_positions_match_set_weights
+catcher: CAUGHT cargo --test weight_layout output_layer_fans_carry_the_sub_sampling_factor
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[cfc_bidirectional]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[cfc_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[lstm_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[mamba_bidirectional]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[mamba_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[slstm_bidirectional]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[slstm_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[transformer_bidirectional]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[transformer_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_lid_slstm]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_cfc]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_cfc_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_lstm_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_mamba]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_mamba_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_slstm]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_slstm_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_transformer]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_transformer_forward]
+catcher: CAUGHT pytest tests/test_phase5_init_weights.py::test_output_subsampling_widens_the_output_layer[sad]
+catcher: CAUGHT pytest tests/test_phase5_init_weights.py::test_output_subsampling_widens_the_output_layer[lid]
+catcher: MISSED pytest tests/pyo3/test_weight_layout_seam.py::test_the_real_2015_shapes_tile_their_packs[tupleA_1_worker_1.config-33671]
+catcher: MISSED pytest tests/pyo3/test_weight_layout_seam.py::test_the_real_2015_shapes_tile_their_packs[tupleB_1_worker_1.config-42911]
+diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
+index bca5144..1066b22 100644
+--- a/src/rust/src/nn/layers.rs
++++ b/src/rust/src/nn/layers.rs
+@@ -977,8 +977,8 @@ impl NeuronLayer {
+     pub fn weight_layout(&self) -> Vec<LayerBlock> {
+         let (i, o) = (self.input_size, self.output_size);
+         vec![
+-            LayerBlock::matrix("W", BlockKind::Weight, o, i, i, o),
+-            LayerBlock::vector("b", BlockKind::Bias, o, i, o),
++            LayerBlock::matrix("W", BlockKind::Weight, o, i, o, o),
++            LayerBlock::vector("b", BlockKind::Bias, o, o, o),
+         ]
+     }
+ 

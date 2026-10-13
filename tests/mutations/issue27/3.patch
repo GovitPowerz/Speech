@@ -1,0 +1,22 @@
+mutation: sLSTM weight_layout reports b_a as kind weight instead of bias
+catcher: CAUGHT cargo --lib nn::cells::slstm::tests::weight_layout_names_shapes_and_fans
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[slstm_bidirectional]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[slstm_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_lid_slstm]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_slstm]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_slstm_forward]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_slstm_layer_is_reproducible_block_by_block[xavier]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_slstm_layer_is_reproducible_block_by_block[he]
+diff --git a/src/rust/src/nn/cells/slstm.rs b/src/rust/src/nn/cells/slstm.rs
+index ec4e9be..6c438a5 100644
+--- a/src/rust/src/nn/cells/slstm.rs
++++ b/src/rust/src/nn/cells/slstm.rs
+@@ -324,7 +324,7 @@ impl SlstmLayer {
+             ));
+             v.push(LayerBlock::vector(
+                 format!("b_{a}"),
+-                BlockKind::Bias,
++                BlockKind::Weight,
+                 o,
+                 fi,
+                 fo,

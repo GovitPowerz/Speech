@@ -3338,6 +3338,8 @@ with the clear reverted).
 
 ## Issue #27 -- the weight layout through the seam: the mutation battery
 
+**Live since issue #33:** `tests/mutations/issue27/` (6 patches). Three readings of this table: item 2a's Rust catcher is CAUGHT, because the pin added under 2b (the full 12-name list in `lstm_layout_names_shapes_fans_and_peephole_columns`, 8d12cdc) replaced the column asserts that missed it; item 4's seam `real_2015` legs are MISSED, since its 21 recorded failures are exactly the 19 regeneration fixtures and the 2 sub-sampling legs; "regeneration" names the fixtures whose net carries the mutated layer. `test_net_pack_is_the_layout_length` is now `test_net_pack_is_the_layout_pack_length` (79f69ab).
+
 Branches `feature/weight-layout-seam` (PR1, off `main@c6d9417`) and `feature/weight-layout-draws`
 (PR2, stacked). Before #27 the flat-pack layout lived three times: once in Rust (each cell's
 `for_each_slot`, the LSTM's column-major fills), once in `init_weights.py` (per-cell builders

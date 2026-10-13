@@ -1,0 +1,45 @@
+mutation: sLSTM weight_layout lists W_a before R_a in every gate (an adjacent-block swap)
+catcher: CAUGHT cargo --lib nn::cells::slstm::tests::flat_layout_positions_are_the_spec_order
+catcher: CAUGHT cargo --lib nn::cells::slstm::tests::weight_layout_names_shapes_and_fans
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[slstm_bidirectional]
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[slstm_forward]
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_lid_slstm]
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_slstm]
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_slstm_forward]
+catcher: MISSED pytest tests/test_phase9_init.py::test_slstm_biases_follow_the_forget_rule[True]
+catcher: MISSED pytest tests/test_phase9_init.py::test_slstm_biases_follow_the_forget_rule[False]
+catcher: MISSED pytest tests/test_phase9_init.py::test_slstm_weight_blocks_are_drawn_on_the_combined_fan
+catcher: MISSED pytest tests/test_phase9_init.py::test_slstm_layer_is_reproducible_block_by_block[xavier]
+catcher: MISSED pytest tests/test_phase9_init.py::test_slstm_layer_is_reproducible_block_by_block[he]
+catcher: MISSED pytest tests/test_phase9_init.py::test_net_pack_is_the_layout_pack_length[bidirectional-slstm]
+catcher: MISSED pytest tests/test_phase9_init.py::test_net_pack_is_the_layout_pack_length[forward-slstm]
+catcher: MISSED pytest tests/test_phase9_init.py::test_forward_direction_drops_exactly_one_stack[slstm]
+catcher: MISSED pytest tests/test_phase9_init.py::test_normalize_tail_and_output_biases_for_every_cell[slstm]
+catcher: MISSED pytest tests/test_phase9_init.py::test_determinism_same_seed_is_bit_identical[slstm]
+diff --git a/src/rust/src/nn/cells/slstm.rs b/src/rust/src/nn/cells/slstm.rs
+index ec4e9be..68b1ce9 100644
+--- a/src/rust/src/nn/cells/slstm.rs
++++ b/src/rust/src/nn/cells/slstm.rs
+@@ -307,18 +307,18 @@ impl SlstmLayer {
+         let mut v = Vec::with_capacity(3 * GATE_NB);
+         for a in ["i", "f", "o", "z"] {
+             v.push(LayerBlock::matrix(
+-                format!("R_{a}"),
++                format!("W_{a}"),
+                 BlockKind::Weight,
+                 o,
+-                o,
++                i,
+                 fi,
+                 fo,
+             ));
+             v.push(LayerBlock::matrix(
+-                format!("W_{a}"),
++                format!("R_{a}"),
+                 BlockKind::Weight,
+                 o,
+-                i,
++                o,
+                 fi,
+                 fo,
+             ));

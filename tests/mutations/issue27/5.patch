@@ -1,0 +1,20 @@
+mutation: LstmLayer weight_layout reports the w.* blocks as (fin, out) instead of (out, fin)
+catcher: CAUGHT cargo --lib nn::layers::layout_tests::lstm_layout_names_shapes_fans_and_peephole_columns
+catcher: CAUGHT pytest tests/pyo3/test_weight_layout_seam.py::test_the_real_2015_shapes_tile_their_packs[tupleA_1_worker_1.config-33671]
+catcher: CAUGHT pytest tests/pyo3/test_weight_layout_seam.py::test_the_real_2015_shapes_tile_their_packs[tupleB_1_worker_1.config-42911]
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[lstm_forward]
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_lstm_forward]
+diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
+index bca5144..b63539f 100644
+--- a/src/rust/src/nn/layers.rs
++++ b/src/rust/src/nn/layers.rs
+@@ -202,8 +202,8 @@ impl LstmLayer {
+             v.push(LayerBlock::matrix(
+                 format!("w.{g}"),
+                 BlockKind::Weight,
+-                o,
+                 i,
++                o,
+                 fi,
+                 fo,
+             ));
