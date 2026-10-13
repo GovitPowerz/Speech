@@ -79,9 +79,9 @@ fn run_offline(mut audio: Audio) -> OfflineMembers {
         .collect();
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
     OfflineMembers {
-        errors: drv.lid_classification_errors()[0].clone(),
-        correct: drv.is_lid_correct()[0],
-        confusion: drv.lid_segments_confusion()[0].clone(),
+        errors: drv.lid_members().classification_errors[0].clone(),
+        correct: drv.lid_members().is_correct[0],
+        confusion: drv.lid_members().segments_confusion[0].clone(),
     }
 }
 
@@ -330,9 +330,9 @@ fn run_offline_on(map: &IndexMap<String, String>, lid: &[f64], mut audio: Audio)
         .collect();
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
     OfflineMembers {
-        errors: drv.lid_classification_errors()[0].clone(),
-        correct: drv.is_lid_correct()[0],
-        confusion: drv.lid_segments_confusion()[0].clone(),
+        errors: drv.lid_members().classification_errors[0].clone(),
+        correct: drv.lid_members().is_correct[0],
+        confusion: drv.lid_members().segments_confusion[0].clone(),
     }
 }
 

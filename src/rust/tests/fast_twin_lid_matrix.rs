@@ -162,9 +162,9 @@ fn run_exact(map: &IndexMap<String, String>, lid: &[f64], mut audio: Audio) -> M
     let mut segs = segs_for(&audio);
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
     Members {
-        errors: drv.lid_classification_errors()[0].clone(),
-        correct: drv.is_lid_correct()[0],
-        confusion: drv.lid_segments_confusion()[0].clone(),
+        errors: drv.lid_members().classification_errors[0].clone(),
+        correct: drv.lid_members().is_correct[0],
+        confusion: drv.lid_members().segments_confusion[0].clone(),
     }
 }
 
@@ -173,9 +173,9 @@ fn run_fast(map: &IndexMap<String, String>, lid: &[f64], mut audio: Audio) -> Me
     let mut segs = segs_for(&audio);
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
     Members {
-        errors: drv.lid_classification_errors()[0].clone(),
-        correct: drv.is_lid_correct()[0],
-        confusion: drv.lid_segments_confusion()[0].clone(),
+        errors: drv.lid_members().classification_errors[0].clone(),
+        correct: drv.lid_members().is_correct[0],
+        confusion: drv.lid_members().segments_confusion[0].clone(),
     }
 }
 
@@ -491,8 +491,8 @@ fn score_s1(d: &mut FastTwinLid) -> (Vec<f64>, Array2<f64>) {
     let mut segs = segs_for(&audio);
     d.get_segmentation(&mut audio, &mut segs, None).unwrap();
     (
-        d.lid_classification_errors()[0].clone(),
-        d.lid_segments_confusion()[0].clone(),
+        d.lid_members().classification_errors[0].clone(),
+        d.lid_members().segments_confusion[0].clone(),
     )
 }
 

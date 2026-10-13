@@ -207,25 +207,25 @@ impl Processor {
     fn lid_result(&self, chan: usize) -> Option<LidResult> {
         match self {
             Processor::Lid(s) => Some(LidResult::from_encoded(
-                s.lid_cumulative_error()[chan],
-                s.lid_nb_of_classif()[chan],
-                s.is_lid_correct()[chan] == 100,
-                &s.lid_classification_errors()[chan],
+                s.lid_members().cumulative_error[chan],
+                s.lid_members().nb_of_classif[chan],
+                s.lid_members().is_correct[chan] == 100,
+                &s.lid_members().classification_errors[chan],
             )),
             Processor::TwinLid(s) => Some(LidResult::from_encoded(
-                s.lid_cumulative_error()[chan],
-                s.lid_nb_of_classif()[chan],
-                s.is_lid_correct()[chan] == 100,
-                &s.lid_classification_errors()[chan],
+                s.lid_members().cumulative_error[chan],
+                s.lid_members().nb_of_classif[chan],
+                s.lid_members().is_correct[chan] == 100,
+                &s.lid_members().classification_errors[chan],
             )),
             // Fast Mode-7 LID writes the same LID members (langID-derived); the score
             // columns flow exactly as the exact Twin's. `lid_cumulative_error`/
             // `lid_nb_of_classif` are 0 (forward-only), a documented divergence.
             Processor::FastTwinLid(s) => Some(LidResult::from_encoded(
-                s.lid_cumulative_error()[chan],
-                s.lid_nb_of_classif()[chan],
-                s.is_lid_correct()[chan] == 100,
-                &s.lid_classification_errors()[chan],
+                s.lid_members().cumulative_error[chan],
+                s.lid_members().nb_of_classif[chan],
+                s.lid_members().is_correct[chan] == 100,
+                &s.lid_members().classification_errors[chan],
             )),
             _ => None,
         }

@@ -7,7 +7,7 @@
 //! TwoSweeps-truncate windowing, spec S4); the LID score deltas (`lid_classification_
 //! errors`, i.e. the in-band `100*(langID - targetLID)` `.scr` column source) are
 //! MEASURED first, then pinned with headroom. The ARGMAX DECISIONS are the HARD gate
-//! (spec S1.6b): `is_lid_correct`, the per-block `lid_segments_confusion` counts, and the
+//! (spec S1.6b): `is_correct`, the per-block `segments_confusion` counts, and the
 //! reconstructed predicted-language argmax must all be IDENTICAL fast-vs-exact per file.
 //! A flip is R1 STOP-and-adjudicate -- it would mean f32 moved a decision on committed
 //! fixtures, not a silent widen.
@@ -111,9 +111,9 @@ fn run_exact(map: &IndexMap<String, String>, mut audio: Audio) -> LidMembers {
         .collect();
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
     LidMembers {
-        errors: drv.lid_classification_errors().to_vec(),
-        correct: drv.is_lid_correct().to_vec(),
-        confusion: drv.lid_segments_confusion().to_vec(),
+        errors: drv.lid_members().classification_errors.to_vec(),
+        correct: drv.lid_members().is_correct.to_vec(),
+        confusion: drv.lid_members().segments_confusion.to_vec(),
     }
 }
 
@@ -126,13 +126,13 @@ fn run_fast(map: &IndexMap<String, String>, mut audio: Audio) -> LidMembers {
         .collect();
     drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
     LidMembers {
-        errors: drv.lid_classification_errors().to_vec(),
-        correct: drv.is_lid_correct().to_vec(),
-        confusion: drv.lid_segments_confusion().to_vec(),
+        errors: drv.lid_members().classification_errors.to_vec(),
+        correct: drv.lid_members().is_correct.to_vec(),
+        confusion: drv.lid_members().segments_confusion.to_vec(),
     }
 }
 
-/// Reconstruct langID from the in-band `lid_classification_errors` row and return its
+/// Reconstruct langID from the in-band `classification_errors` row and return its
 /// argmax (the predicted language / `.scr` decision). `err[c] = 100*(langID[c] -
 /// targetLID[c])`, `targetLID[ti] = -2`, else 0 -> `langID[c] = err[c]/100 (+2 at ti)`.
 fn predicted_language(err: &[f64], ti: usize) -> usize {
@@ -468,7 +468,7 @@ fn fast_twin_set_weights_answers_as_the_exact_arm() {
             .collect();
         bag.run_get_segmentation(0, &mut audio, &mut segs).unwrap();
         match bag.processor(0) {
-            Processor::FastTwinLid(t) => t.lid_classification_errors()[0].clone(),
+            Processor::FastTwinLid(t) => t.lid_members().classification_errors[0].clone(),
             _ => unreachable!(),
         }
     };

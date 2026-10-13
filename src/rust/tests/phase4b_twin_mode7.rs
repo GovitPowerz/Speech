@@ -92,7 +92,7 @@ fn confusion_off_and_on_diagonal_mass() {
     let mut saw_diag = false;
     for (f, lang) in FILES {
         let (drv, _) = run("twin_mode7", f, lang);
-        let c = &drv.lid_segments_confusion()[0];
+        let c = &drv.lid_members().segments_confusion[0];
         let cn = c.nrows() - 2;
         for k in 1..=cn {
             for l in 1..=cn {
@@ -114,7 +114,7 @@ fn confusion_off_and_on_diagonal_mass() {
 fn sentinel_gt150_present_every_file() {
     for (f, lang) in FILES {
         let (drv, _) = run("twin_mode7", f, lang);
-        let err = &drv.lid_classification_errors()[0];
+        let err = &drv.lid_members().classification_errors[0];
         assert!(
             err.iter().any(|&x| x > 150.0),
             "mode7 {f}: no >150 sentinel in {err:?}"
@@ -129,7 +129,7 @@ fn is_lid_correct_hit_and_miss() {
     let mut saw_miss = false;
     for (f, lang) in FILES {
         let (drv, _) = run("twin_mode7", f, lang);
-        match drv.is_lid_correct()[0] {
+        match drv.lid_members().is_correct[0] {
             100 => saw_hit = true,
             0 => saw_miss = true,
             other => panic!("mode7 {f}: unexpected is_lid_correct {other}"),
@@ -149,10 +149,10 @@ fn min_nb_of_frames_guard_exercised() {
         let (d0, _) = run("twin_mode7", f, lang);
         let (d2, _) = run("twin_mode7_ppm2", f, lang);
         assert!(
-            d2.lid_nb_of_classif()[0] < d0.lid_nb_of_classif()[0],
+            d2.lid_members().nb_of_classif[0] < d0.lid_members().nb_of_classif[0],
             "{f}: MinNbOfFrames guard did not reduce nb_of_classif ({} !< {})",
-            d2.lid_nb_of_classif()[0],
-            d0.lid_nb_of_classif()[0]
+            d2.lid_members().nb_of_classif[0],
+            d0.lid_members().nb_of_classif[0]
         );
     }
 }
@@ -172,17 +172,17 @@ fn post_process_mode_all_three_covered() {
     let (d0, _) = run("twin_mode7", "s1", 0);
     let (d2, _) = run("twin_mode7_ppm2", "s1", 0);
     assert_ne!(
-        d0.lid_classification_errors()[0],
-        d2.lid_classification_errors()[0],
+        d0.lid_members().classification_errors[0],
+        d2.lid_members().classification_errors[0],
         "ppm2 (vote) must differ from ppm0 (sum-log)"
     );
     // ppm1 (entropy) NEAR-COINCIDES with ppm0 in the normalized observables: the per-row
     // entropy offset is column-constant so it cancels in the softmax normalization EXACTLY
     // in exact arithmetic, and to ~1 ULP in floating point (exp/normalize rounding).
     let (d1, _) = run("twin_mode7_ppm1", "s1", 0);
-    for (a, b) in d0.lid_classification_errors()[0]
+    for (a, b) in d0.lid_members().classification_errors[0]
         .iter()
-        .zip(d1.lid_classification_errors()[0].iter())
+        .zip(d1.lid_members().classification_errors[0].iter())
     {
         assert!(
             (a - b).abs() <= 1e-10 * a.abs().max(1.0),
@@ -309,18 +309,18 @@ fn mode7_integer_members_match_real_bitexact() {
             let (drv, _) = run(v, f, lang);
             let conf_want = common::load_bin_phase4b(&format!("mode7_{v}_{f}_confusion.bin"));
             common::assert_bits_eq(
-                &drv.lid_segments_confusion()[0],
+                &drv.lid_members().segments_confusion[0],
                 &conf_want,
                 &format!("mode7 {v} {f} confusion"),
             );
             let m = common::load_bin_phase4b(&format!("mode7_{v}_{f}_members.bin"));
             assert_eq!(
-                drv.lid_nb_of_classif()[0],
+                drv.lid_members().nb_of_classif[0],
                 m[[0, 1]] as i64,
                 "mode7 {v} {f} nb_of_classif"
             );
             assert_eq!(
-                drv.is_lid_correct()[0],
+                drv.lid_members().is_correct[0],
                 m[[0, 2]] as i32,
                 "mode7 {v} {f} is_lid_correct"
             );
@@ -337,12 +337,12 @@ fn mode7_continuous_members_match_real() {
             let (drv, _) = run(v, f, lang);
             let m = common::load_bin_phase4b(&format!("mode7_{v}_{f}_members.bin"));
             common::assert_oracle_eq_f64(
-                drv.lid_cumulative_error()[0],
+                drv.lid_members().cumulative_error[0],
                 m[[0, 0]],
                 &format!("mode7 {v} {f} lid_cumulative_error"),
             );
             let liderr = common::load_bin_phase4b(&format!("mode7_{v}_{f}_liderr.bin"));
-            let got = row(&drv.lid_classification_errors()[0]);
+            let got = row(&drv.lid_members().classification_errors[0]);
             common::assert_oracle_eq(&got, &liderr, &format!("mode7 {v} {f} liderr"));
         }
     }

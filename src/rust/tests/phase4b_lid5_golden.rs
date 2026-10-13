@@ -110,10 +110,10 @@ fn lid_classification_errors_match_dump() {
     // target sentinel. Canary-gated (softmax chain).
     for (name, lang) in FILES {
         let (drv, _) = run_file(name, lang);
-        for chan in 0..drv.lid_classification_errors().len() {
+        for chan in 0..drv.lid_members().classification_errors.len() {
             let want =
                 common::load_bin_phase4b(&format!("lid5_{name}_liderr_chan{}.bin", chan + 1));
-            let got = row(&drv.lid_classification_errors()[chan]);
+            let got = row(&drv.lid_members().classification_errors[chan]);
             common::assert_oracle_eq(&got, &want, &format!("{name} liderr chan{}", chan + 1));
         }
     }
@@ -125,10 +125,10 @@ fn lid_confusion_matches_dump() {
     // platform (the argmax that fills it is robust; the counts are exact integers).
     for (name, lang) in FILES {
         let (drv, _) = run_file(name, lang);
-        for chan in 0..drv.lid_segments_confusion().len() {
+        for chan in 0..drv.lid_members().segments_confusion.len() {
             let want =
                 common::load_bin_phase4b(&format!("lid5_{name}_confusion_chan{}.bin", chan + 1));
-            let got = &drv.lid_segments_confusion()[chan];
+            let got = &drv.lid_members().segments_confusion[chan];
             common::assert_bits_eq(got, &want, &format!("{name} confusion chan{}", chan + 1));
         }
     }
@@ -140,22 +140,22 @@ fn lid_members_match_dump() {
     // LogLaw chain (canary-gated); the other two are exact integers.
     for (name, lang) in FILES {
         let (drv, _) = run_file(name, lang);
-        for chan in 0..drv.lid_cumulative_error().len() {
+        for chan in 0..drv.lid_members().cumulative_error.len() {
             let mem =
                 common::load_bin_phase4b(&format!("lid5_{name}_members_chan{}.bin", chan + 1));
             common::assert_oracle_eq_f64(
-                drv.lid_cumulative_error()[chan],
+                drv.lid_members().cumulative_error[chan],
                 mem[[0, 0]],
                 &format!("{name} cumulative_error chan{}", chan + 1),
             );
             assert_eq!(
-                drv.lid_nb_of_classif()[chan],
+                drv.lid_members().nb_of_classif[chan],
                 mem[[0, 1]] as i64,
                 "{name} nb_of_classif chan{}",
                 chan + 1
             );
             assert_eq!(
-                drv.is_lid_correct()[chan],
+                drv.lid_members().is_correct[chan],
                 mem[[0, 2]] as i32,
                 "{name} is_lid_correct chan{}",
                 chan + 1
@@ -204,8 +204,8 @@ fn sentinel_gt150_present_every_file() {
     // [target] = 100*langID[target] + 200 >= 200 > 150`. Present at every file's target index.
     for (name, lang) in FILES {
         let (drv, _) = run_file(name, lang);
-        for chan in 0..drv.lid_classification_errors().len() {
-            let err = &drv.lid_classification_errors()[chan];
+        for chan in 0..drv.lid_members().classification_errors.len() {
+            let err = &drv.lid_members().classification_errors[chan];
             assert!(
                 err.iter().any(|&v| v > 150.0),
                 "{name} chan{}: no >150 sentinel in {err:?}",
@@ -224,8 +224,8 @@ fn confusion_off_diagonal_nonzero_and_targets_differ() {
     let mut saw_diag = false;
     for (name, lang) in FILES {
         let (drv, _) = run_file(name, lang);
-        for chan in 0..drv.lid_segments_confusion().len() {
-            let c = &drv.lid_segments_confusion()[chan];
+        for chan in 0..drv.lid_members().segments_confusion.len() {
+            let c = &drv.lid_members().segments_confusion[chan];
             let class_nb = c.nrows() - 2;
             // Per-class rows/cols are 1..=class_nb; diagonal is (k,k), off-diagonal (k,l) k!=l.
             for k in 1..=class_nb {
