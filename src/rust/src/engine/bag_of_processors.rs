@@ -1559,6 +1559,36 @@ mod tests {
         }
     }
 
+    /// Issue #25: the per-algo save/update policy, pinned literally against the legacy
+    /// branches (`:148-205`). No training golden runs algo 5 to a second save, so the
+    /// algo-5 criterion's `badClassifLID` term is owned by this pin alone (the battery
+    /// measured it missed everywhere else).
+    #[test]
+    fn training_policy_is_the_legacy_branch_per_algo() {
+        let (cost, cost_lid, bad_lid) = (1.0, 10.0, 100.0);
+        for algo in [0, 1, 2] {
+            assert!(
+                training_policy(algo, cost, cost_lid, bad_lid).is_none(),
+                "algo {algo}"
+            );
+        }
+        for algo in [3, 4] {
+            assert_eq!(
+                training_policy(algo, cost, cost_lid, bad_lid),
+                Some((1.0, vec![(1.0, "")])),
+                "algo {algo}"
+            );
+        }
+        assert_eq!(
+            training_policy(5, cost, cost_lid, bad_lid),
+            Some((110.0, vec![(10.0, "")]))
+        );
+        assert_eq!(
+            training_policy(6, cost, cost_lid, bad_lid),
+            Some((11.0, vec![(1.0, ""), (10.0, "LID_")]))
+        );
+    }
+
     /// Issue #25: the driver interface per variant, every one built through the bag.
     /// The pack surface spans both trees (the fast Twin takes `[sad, lid]` like the
     /// exact one); the training surface is the exact tree's f64 nets only.
