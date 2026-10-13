@@ -3366,3 +3366,36 @@ What the battery measured, stated once: the byte pin owns the DISTRIBUTIONS and 
 (items 2a, 3, 4), the Rust pins own the LAYOUT (items 1, 5), and a fact owned by neither (2b)
 is a documentation fact with a literal pin. The Python side holding no geometry is what makes
 this split clean: there is no second transcription left for a mutation to hide between.
+
+## Issue #25 -- the driver interface: the mutation battery
+
+Branch `feature/driver-interface` (off `main@a252fd4`). Before #25 the bag dispatched on the
+`Processor` variant thirteen times (nine-arm matches whose arms differed by field name, the LID
+quartet copied three times inside one of them), seven drivers carried an identical `score`, and
+every exact driver repeated its net's weight methods as pass-throughs. Now `Segmenter` is the
+driver interface (ADR-0002 touch class "driver interface"): the pack surface (`pack_count`,
+`set_packs`) on both trees, the training surface (`nets()`/`nets_mut()`) on the exact tree only,
+`channel_members(chan)` and `last_result_rows`. `Processor::driver()`/`driver_mut()` are the only
+matches on the variant, the per-algo save/update rule is one `training_policy` keyed on the algo
+number as the legacy is, and the three LID drivers share one `LidMembers`. Proof of the move: the
+goldens byte-green on every commit; cargo 1376 passed, 0 failed at the head
+(`cargo test --no-fail-fast`, debug; `main`'s 1374 plus the two pins below); pytest 1111
+passed / 1 skipped non-slow; pyo3 281 passed with the corpus gates.
+
+Apply -> run the named catchers (a separate target dir) -> record the failure line -> revert ->
+tree clean.
+
+| # | mutation | catchers run | verdict |
+|---|---|---|---|
+| 1 | algo 6 updates the SAD net with `costLID` and the LID net with `cost` | `phase4b_corpus_lid`, `phase4b_backlog` | CAUGHT: `twin_train_epoch_weights_golden`, `twin_train_lid epoch 5 weight 167: a=0x3ff662997e932910 (1.3990721649484534) b=0x3ff32f664b5ff5dd (1.1990721649484535)` |
+| 2 | the Twin's LID net saved without the `LID_` prefix | the same | CAUGHT: `twin_train_epoch_weights_golden`, `weights_bestNNWeight_1_twin_train.mat dims left: (1093, 1) right: (537, 1)` (the LID save overwrites the SAD one) |
+| 3 | the algo-5 save criterion drops `badClassifLID` | the same, then `--lib` | MISSED by both training files (25/25 green): no golden runs algo 5 to a second save, so the criterion never decides. Pin added, `training_policy_is_the_legacy_branch_per_algo` (literal, per algo); re-run CAUGHT: `left: Some((10.0, [(10.0, "")]))` |
+| 4 | a driver with no trainable net answers back-prop `[]` instead of the legacy `[false]` | `--lib`, `phase4a_corpus_processor` | CAUGHT: `dispatch_vec_shapes`, `left: [] right: [false]` |
+| 5 | `FastTwinLid::pack_count` returns 1 | `--lib`, `phase7_parity_lid`, `fast_pack_length_guard` | CAUGHT twice: `driver_surface_per_variant` (`FastTwinLid pack_count left: 1 right: 2`) and `fast_twin_set_weights_answers_as_the_exact_arm` (the fast bag refuses the two-pack list by count where the exact bag refuses it by length) |
+| 6 | the bag reads channel 0's members for every channel | `phase4a_segfn`, `phase4b_corpus_lid`, `phase4a_corpus_processor` | CAUGHT by the three gradient checks: `grad_check_synthetic` (`< 5e-4, got 1.6904763912481766`), `lid5_gradcheck_golden`, `twin_gradcheck_golden`. The `phase4a_segfn` legs and the twin training golden stayed green |
+
+What the battery measured: the corpus training goldens own the training policy where a fixture
+runs it (the Twin, items 1 and 2) and the literal pin owns it where none does (algo 5, item 3);
+the per-variant surface pin and the seam's pack-count leg own the interface's counts (items 4
+and 5); the gradient checks own the per-channel selection (item 6): their central difference
+sums every channel's row cost and count (`CorpusProcessor::grad_check_cost`).

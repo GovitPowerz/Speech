@@ -849,8 +849,9 @@ impl CorpusProcessor {
     /// the network index `ii`: algo 3/4 -> the SAD pair `seg_cost`/`seg_count`
     /// (`:275-277`); algo 5 -> the LID pair `lid.cost`/`lid.count` (`:278-280`);
     /// algo 6 net `ii == 0` -> the SAD pair, net `ii == 1` -> the LID pair
-    /// (`:281-288`). Which pair a net owns is still decided by the algo
-    /// integer here; moving it onto the driver is issue #25's.
+    /// (`:281-288`). Which pair a net owns is decided by the algo integer, as the
+    /// bag's `training_policy` decides each net's update cost: issue #25 kept both
+    /// keyed on the algo number, as the legacy is.
     ///
     /// The legacy `counter` is a `long` accumulating doubles (per-element
     /// truncation); every accumulated value is an exact integer count stored in
