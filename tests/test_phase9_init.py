@@ -50,11 +50,6 @@ def cell_cfg(cell: str, direction: str = "bidirectional", lstm: str = "5,3,4", *
 
 
 # ------------------------------------------------------------------------------------- #
-# Independent draw helpers for the RNG-order reconstruction pins
-# ------------------------------------------------------------------------------------- #
-
-
-# ------------------------------------------------------------------------------------- #
 # sLSTM (spec S2.4 init)
 # ------------------------------------------------------------------------------------- #
 
@@ -88,7 +83,7 @@ def test_slstm_weight_blocks_are_drawn_on_the_combined_fan() -> None:
 
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
-def test_slstm_layer_is_reproducible_block_byblock(scheme: str) -> None:
+def test_slstm_layer_is_reproducible_block_by_block(scheme: str) -> None:
     """Per gate `[i | f | o | z]`: `R (out, out)`, `W (out, in)`, `b` -- drawn in that order."""
     cfg = cell_cfg("slstm")
     out, fin = 3, 10
@@ -152,7 +147,7 @@ def test_mamba_adapter_block_exists_only_when_widths_differ() -> None:
 
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
-def test_mamba_layer_is_reproducible_block_byblock(scheme: str) -> None:
+def test_mamba_layer_is_reproducible_block_by_block(scheme: str) -> None:
     """S3.2 order at the S3.4 fans, drawn from a fresh generator -- position, scale, shape and
     draw order pinned at once (the shear lesson: `W_x` and `W_dt` are drawn from different
     distributions, so a swap moves draws across the stream)."""
@@ -175,14 +170,14 @@ def test_mamba_layer_is_reproducible_block_byblock(scheme: str) -> None:
     want.append(np.tile(np.log(np.arange(1, d_state + 1, dtype=np.float64)), (d_inner, 1)).reshape(-1))  # A_log
     want.append(np.ones(d_inner))  # D
     want.append(draw(rng, scheme, (out, d_inner), d_inner, out))  # W_out
-    got = init_weights(cfg, "BLSTM", np.random.default_rng(22), scheme)[0]  # type: ignore[arg-type]
-    assert np.allclose(layer0(cfg, got), np.concatenate(want), rtol=0, atol=1e-13)
+    got = layer0(cfg, init_weights(cfg, "BLSTM", np.random.default_rng(22), scheme)[0])  # type: ignore[arg-type]
+    expected = np.concatenate(want)
+    assert np.allclose(got, expected, rtol=0, atol=1e-13)
     # Bit-exact everywhere except `b_dt`, whose two softplus-inverse spellings agree to ~1e-13.
-    layout = layout_of(cfg)
-    b_dt = block_of(layout, "forward", 0, "b_dt")
-    mask = np.ones(layer0(cfg, got).shape[0], dtype=bool)
+    b_dt = block_of(layout_of(cfg), "forward", 0, "b_dt")
+    mask = np.ones(got.shape[0], dtype=bool)
     mask[b_dt["offset"] : b_dt["offset"] + b_dt["len"]] = False
-    assert np.array_equal(layer0(cfg, got)[mask], np.concatenate(want)[mask])
+    assert np.array_equal(got[mask], expected[mask])
 
 
 # ------------------------------------------------------------------------------------- #
@@ -195,7 +190,7 @@ SMALL_GEOMETRY = {"Mamba_D_State": "2", "Mamba_D_Conv": "2", "Mamba_Expand": "1"
 
 @pytest.mark.parametrize("cell", ALL_CELLS)
 @pytest.mark.parametrize("direction", ["bidirectional", "forward"])
-def test_net_pack_is_the_layoutpack_length(cell: str, direction: str) -> None:
+def test_net_pack_is_the_layout_pack_length(cell: str, direction: str) -> None:
     cfg = cell_cfg(cell, direction, **SMALL_GEOMETRY)
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(0))
     assert len(packs) == 1

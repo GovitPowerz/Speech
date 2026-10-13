@@ -4,7 +4,7 @@ S8.1 SEAM / S8.3 / S1.3; phase-10 spec S9.2 for the CfC rows).
 The phase-9 counterpart of `test_seam_replay.py`: everything here drives the committed
 SYNTHETIC gate fixtures (`tests/reference_data/phase9/`, written by
 `scripts/extract_phase9_fixtures.py`) through `speech_rs.Engine` in-process. No corpus, no
-oracle, no gating -- CI's `python-pyo3` job runs the whole file.
+oracle, no gating -- CI's `python-test` job runs the whole file.
 
 PHASE 10 added three rows on exactly the phase-9 recipe -- `cfc_{bidirectional,forward}`
 (SAD) and `twin_mode7_lid_cfc` (the LID mechanical wiring) -- plus one new structural leg
@@ -732,7 +732,7 @@ def test_transformer_key_bias_block_is_output_inert(name: str, tmp_path: Path) -
     not only algebra. Verified on `bwd` too (`transformer_bidirectional`): `b_k` inert across
     four overwrite patterns (three constants + a non-uniform ramp), `b_q` live at every
     non-degenerate value tried (a `0.0` overwrite is a no-op here -- every bias, `b_q`
-    included, is zero-seeded by `init_transformer_flat`, so that particular value proves
+    included, is zero-seeded by `init_weights`' bias rule, so that particular value proves
     nothing either way).
     """
     h = GEOMETRY["sad_hidden"]
@@ -810,13 +810,6 @@ TWIN_MODE7_ROWS = {
     "twin_mode7_lid_cfc": (TWIN_MODE7_CFC_EPSILON, 2.630e-9, 2.7e-8),
     "twin_mode7_lid_transformer": (TWIN_MODE7_TRANSFORMER_EPSILON, 5.157e-10, 5.2e-9),
 }
-
-
-def mode7_lid_blocks(name: str) -> dict[str, tuple[int, int]]:
-    """The Mode-7 Twin's LID-net block map: `BLSTM_LID_LSTMNeuronNb 12,6` with
-    `BLSTM_LID_LSTMSubSampling 1` -> out 6, fan-in 12, in whichever cell's layout the
-    fixture's `BLSTM_LID_Cell_Type` selects -- read off the engine."""
-    return lid_layer_blocks(name)
 
 
 def test_twin_lid_cell_swap_constructs_and_roundtrips(tmp_path: Path) -> None:
@@ -980,8 +973,8 @@ def test_twin_mode7_lid_packs_load_and_roundtrip(name: str, tmp_path: Path) -> N
     The length check is the load-bearing half for a NEW cell: `BlstmNetwork::set_weights`
     consumes `nb_of_weights()` per layer head-first, so a Python builder that emitted the
     wrong CfC block sizes would either fail construction here or (worse) silently eat the
-    output MLP's bytes -- which is exactly what `spec_directions`/`init_cfc_flat` agreeing
-    with `CfcLayer::nb_of_weights` prevents."""
+    output MLP's bytes -- which is exactly what `init_weights` drawing off
+    `speech_rs.weight_layout` (the layers' own blocks) prevents."""
     info = cast(dict[str, Any], FIXTURES[name])
     lid_pack = load_pack(name)
     sad_pack = read_weight_vector(PHASE4B / "tiny_sad_seed.bin")
@@ -1035,7 +1028,7 @@ def test_twin_mode7_lid_gradient_is_finite_and_block_wise_alive(name: str, tmp_p
     `b_i` is output-invariant for the same reason as on the SAD side, and the CfC row takes
     no exemption at all (no dead block at `T > 1`)."""
     lid_pack = load_pack(name)
-    blocks = mode7_lid_blocks(name)
+    blocks = lid_layer_blocks(name)
     seed_twin_mode7(tmp_path, name)
     with chdir(tmp_path):
         eng = speech_rs.Engine([f"{name}.config"], "-m")

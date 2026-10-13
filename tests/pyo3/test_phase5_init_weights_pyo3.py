@@ -1,11 +1,8 @@
 """Phase 5 Task 3: `init_weights` -> `Engine.set_weights` -> `Engine.weights()` round trip.
 
-Lives under `tests/pyo3/` (not alongside the rest of the Task 3 suite in
-`tests/test_phase5_init_weights.py`) because the dedicated `python-pyo3` CI job runs only
-`pytest tests/pyo3`: every existing `importorskip("speech_rs")` test in this repo already
-lives here (`test_engine_smoke.py` / `test_seam_replay.py` / `test_exit_gate.py`), so
-putting a `speech_rs`-touching test here is what makes it actually execute in CI instead
-of import-skipping in both jobs forever.
+Lives under `tests/pyo3/` beside the other `speech_rs.Engine` round trips; the placement
+rule it was written under (a dedicated CI job running only `pytest tests/pyo3`) retired in
+issue #27, when the whole tree started needing `speech_rs`.
 """
 
 from __future__ import annotations

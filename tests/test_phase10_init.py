@@ -152,7 +152,7 @@ def _reconstruct(out: int, fin: int, b: int, layers: int, scheme: str, seed: int
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
 @pytest.mark.parametrize(("out", "fin", "b", "layers"), SHAPES)
-def test_layer_is_reproducible_block_byblock(out: int, fin: int, b: int, layers: int, scheme: str) -> None:
+def test_layer_is_reproducible_block_by_block(out: int, fin: int, b: int, layers: int, scheme: str) -> None:
     cfg = layer_cfg(out, fin, b, layers)
     got = init_weights(cfg, "BLSTM", np.random.default_rng(31), scheme)[0]  # type: ignore[arg-type]
     assert np.array_equal(layer0(cfg, got), _reconstruct(out, fin, b, layers, scheme, 31))
@@ -175,7 +175,7 @@ def test_reconstruction_rejects_a_head_swap() -> None:
 
 @pytest.mark.parametrize("direction", ["bidirectional", "forward"])
 @pytest.mark.parametrize("layers", [1, 2])
-def test_net_packpack_length(direction: str, layers: int) -> None:
+def test_net_pack_length(direction: str, layers: int) -> None:
     cfg = cell_cfg(direction, b=6, layers=layers)
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(0))
     assert len(packs) == 1

@@ -344,17 +344,28 @@ _V2_FROZEN_TAIL = 22
 #
 # Issue #27: `speech_rs.weight_layout` lists every block of the pack the overlaid config
 # describes (stack, layer, name, row-major shape, offset), so the guard addresses its input
-# columns on the engine's own layout instead of a per-cell transcription. The rule is one line:
-# a layer-0 WEIGHT block whose row-major inner extent is `fin` (the LSTM `w.*`, the sLSTM `W_*`,
-# the Mamba adapter `P`, the transformer `W_a`) or `fin + out` (the CfC backbone `W_bb0`, whose
-# fan-in is the CONCATENATION `[x | h]`, so only its first `fin` columns are input columns) is
-# an input projection; column `k` of such a block of `rows` rows sits at `j*cols + k` for
-# `j < rows`. Recurrent / state columns, biases and every downstream block are not addressed.
+# columns on the engine's own layout instead of a per-cell transcription. The input projections
+# are named per cell (`_INPUT_BLOCKS`: the LSTM `w.*`, the sLSTM `W_*`, the Mamba adapter `P`,
+# the transformer `W_a`, the CfC backbone `W_bb0`, whose fan-in is the CONCATENATION `[x | h]`,
+# so only its first `fin` columns are input columns); column `k` of such a block of `rows` rows
+# sits at `j*cols + k` for `j < rows`. Selected by NAME, not by an inner extent equal to `fin`:
+# a downstream block whose width happens to equal `fin` (`W_2`'s `d_ff`, the CfC heads' `B`)
+# must not be read as an input projection. Recurrent / state columns, biases and every
+# downstream block are not addressed.
 #
 # WHOLE-PACK ORDER (`BlstmNetwork::set_weights`): `fwd stack | bwd stack (bidirectional
 # only) | output MLP | mean | std`, each stack being `layer 0 | layer 1`. Only LAYER 0 has
 # input columns worth guarding -- layer 1's fan-in is layer 0's output, live by construction.
 # ------------------------------------------------------------------------------------- #
+
+
+_INPUT_BLOCKS: dict[str, tuple[str, ...]] = {
+    "lstm": ("w.i", "w.f", "w.o", "w.c"),
+    "slstm": ("W_i", "W_f", "W_o", "W_z"),
+    "mamba": ("P",),
+    "cfc": ("W_bb0",),
+    "transformer": ("W_a",),
+}
 
 
 @dataclass(frozen=True)
@@ -384,12 +395,9 @@ def _arch(arm: str, cell: str, direction: str) -> _Arch:
     stacks = ["forward"] + (["backward"] if direction == "bidirectional" else [])
     stack_bases = tuple(min(b["offset"] for b in layout if b["stack"] == s) for s in stacks)
     layer0 = [b for b in layout if (b["stack"], b["layer"]) == ("forward", 0)]
-    # The inner-extent rule below reads a block of `fin` columns as an input projection, so it
-    # needs `fin != out` (true on both arms: 44 or 92 against 24) -- at `fin == out` the Mamba
-    # adapter is absent and `W_in (2 d_inner, out)` would be picked instead.
-    assert fin != out, f"{cell}/{direction}: the input-column rule needs fin != out (got {fin})"
-    inputs = [b for b in layer0 if b["kind"] == "weight" and len(b["shape"]) == 2 and b["shape"][1] in (fin, fin + out)]
-    assert inputs, f"{cell}/{direction}: no layer-0 input projection block found in the layout"
+    # At `fin == out` the Mamba adapter `P` is absent and the count check fails loudly.
+    inputs = [b for b in layer0 if b["name"] in _INPUT_BLOCKS[cell]]
+    assert len(inputs) == len(_INPUT_BLOCKS[cell]), f"{cell}/{direction}: layer 0 lacks an input projection of {_INPUT_BLOCKS[cell]}"
     offsets = [[b["offset"] - stack_bases[0] + j * b["shape"][1] + k for b in inputs for j in range(b["shape"][0])] for k in range(fin)]
     return _Arch(fin, out, sum(b["len"] for b in layout), stack_bases, offsets)
 

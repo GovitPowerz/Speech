@@ -1,8 +1,7 @@
 """Phase 10 Task 10: `speech_rs.StreamingLidSession` binding smoke.
 
-`importorskip` guards the whole module: the plain `python-test` CI job never builds
-`speech_rs`, so it SKIPS these; only the `python-pyo3` job (which runs `maturin develop`)
-exercises them.
+`importorskip` guards the whole module: a tree without `speech_rs` built SKIPS these; CI's
+`python-test` job runs `maturin develop` first (issue #27) and exercises them.
 
 The binding is a THIN wrapper over `speech::fast::stream_lid::StreamingLidSession` (the
 online twin of the offline fast Mode-7 LID Twin), bit-identical to the offline driver BY

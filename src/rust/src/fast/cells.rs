@@ -3117,9 +3117,9 @@ mod tests {
         assert_eq!(FastCfc::weight_count(i, o, 6, 1) + mlp + tail, 717);
         // ...and the phase-10 Task 8 forward-LSTM fixture (`lstm_forward.config`), whose
         // manifest pack_length is 1651. Same cross-check, and the one that matters most
-        // for this cell: `init_weights.py` builds the LSTM pack through the SHARED
-        // `weight_bridge.nnet_to_flat` packer, so agreement here means the fast reader and
-        // the golden-tested packer describe the same 13 blocks.
+        // for this cell: `init_weights.py` draws the LSTM pack per block of the exact
+        // layer's `weight_layout` (issue #27), so agreement here means the fast reader and
+        // the exact layer describe the same 13 blocks.
         assert_eq!(FastLstm::weight_count(i, o) + mlp + tail, 1651);
         // ...and the phase-11 Task 4 transformer fixture (`transformer_forward.config`:
         // `Transformer_Window 4` / `Transformer_Heads 2` / `Transformer_D_Ff 6`), whose

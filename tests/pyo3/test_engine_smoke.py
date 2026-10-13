@@ -1,8 +1,8 @@
 """Phase 4c Task 3: `speech_rs.Engine` coarse corpus-level binding smoke tests.
 
-`importorskip` guards the whole module: the plain `python-test` CI job never
-builds `speech_rs`, so it SKIPS these; only the `python-pyo3` job (which runs
-`maturin develop`) exercises them.
+`importorskip` guards the whole module: a tree without `speech_rs` built SKIPS
+these; CI's `python-test` job runs `maturin develop` first (issue #27) and
+exercises them.
 
 Each Engine construction resolves RELATIVE corpus/weight paths from the CWD, so
 every test seeds a tempdir with a byte-copy of the committed fixtures and chdirs

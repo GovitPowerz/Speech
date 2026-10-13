@@ -160,14 +160,14 @@ def _reconstruct(out: int, fin: int, d_ff: int, scheme: str, seed: int, swap_ffn
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])
 @pytest.mark.parametrize(("out", "fin", "d_ff"), SHAPES)
-def test_layer_is_reproducible_block_byblock(out: int, fin: int, d_ff: int, scheme: str) -> None:
+def test_layer_is_reproducible_block_by_block(out: int, fin: int, d_ff: int, scheme: str) -> None:
     cfg = layer_cfg(out, fin, d_ff)
     got = init_weights(cfg, "BLSTM", np.random.default_rng(41), scheme)[0]  # type: ignore[arg-type]
     assert np.array_equal(layer0(cfg, got), _reconstruct(out, fin, d_ff, scheme, 41))
 
 
 @pytest.mark.parametrize(("scheme", "same_bytes"), [("xavier", True), ("he", False)])
-def test_the_ffn_draw_order_is_only_visible_underhe(scheme: str, same_bytes: bool) -> None:
+def test_the_ffn_draw_order_is_only_visible_under_he(scheme: str, same_bytes: bool) -> None:
     """The measured LIMIT of the pin above, recorded rather than left as a surprise: reversing
     the two FFN draws is a BIT-LEVEL NO-OP under Xavier (same limit over the same count) and
     IS visible under He (`sqrt(2/fan_in)` distinguishes `H` from `d_ff`). The two schemes miss
@@ -185,7 +185,7 @@ def test_the_ffn_draw_order_is_only_visible_underhe(scheme: str, same_bytes: boo
 
 @pytest.mark.parametrize("direction", ["bidirectional", "forward"])
 @pytest.mark.parametrize("d_ff", [1, 5])
-def test_net_packpack_length(direction: str, d_ff: int) -> None:
+def test_net_pack_length(direction: str, d_ff: int) -> None:
     cfg = cell_cfg(direction, d_ff)
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(0))
     assert len(packs) == 1

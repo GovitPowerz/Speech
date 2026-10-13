@@ -1,8 +1,9 @@
-//! adim + packer byte-parity tests (Rust), against the same fixtures as Python.
+//! adim + packer byte-parity tests (Rust) against the committed Phase 0a fixtures.
 //!
-//! Rust-pack == Python-pack == committed fixture is the cross-language agreement
-//! that substitutes for an independent legacy golden (nnet_best is the CMA-ES
-//! genome, not a weight-pack - see scripts/extract_phase0_fixtures.py).
+//! Rust-pack == committed fixture substitutes for an independent legacy golden
+//! (nnet_best is the CMA-ES genome, not a weight-pack). `best_net_flat.bin` was
+//! written by the Phase 0a Python packer, retired with its extraction script in
+//! issue #27; the fixture stays frozen.
 
 use std::path::PathBuf;
 

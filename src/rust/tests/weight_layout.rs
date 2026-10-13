@@ -44,8 +44,8 @@ fn map(cell: &str, direction: &str) -> IndexMap<String, String> {
     m
 }
 
-fn net(m: &IndexMap<String, String>) -> BlstmNetwork {
-    BlstmNetwork::from_config(BlstmConfig::from_legacy(m, "X").unwrap()).unwrap()
+fn net(m: &IndexMap<String, String>, prefix: &str) -> BlstmNetwork {
+    BlstmNetwork::from_config(BlstmConfig::from_legacy(m, prefix).unwrap()).unwrap()
 }
 
 fn assert_tiles(layout: &[WeightBlock], nb: usize) {
@@ -68,7 +68,7 @@ fn every_cell_and_direction_tiles_nb_of_weights_in_set_weights_order() {
     for cell in CELLS {
         for direction in ["bidirectional", "forward"] {
             let m = map(cell, direction);
-            let n = net(&m);
+            let n = net(&m, "X");
             let layout = n.weight_layout();
             assert_tiles(&layout, n.nb_of_weights());
             assert_eq!(
@@ -177,7 +177,7 @@ fn output_layer_fans_carry_the_sub_sampling_factor() {
         format!("{},6,{CLASSES}", 2 * HIDDEN),
     );
     m.insert("X_OutputSubSampling".into(), "2,1".into());
-    let n = net(&m);
+    let n = net(&m, "X");
     let layout = n.weight_layout();
     assert_tiles(&layout, n.nb_of_weights());
     let out: Vec<&WeightBlock> = layout.iter().filter(|b| b.stack == Stack::Output).collect();
@@ -214,7 +214,7 @@ fn mlp_mode_is_output_blocks_plus_the_tail_at_the_output_input_width() {
     m.insert("X_LSTMNeuronNb".into(), format!("0,{HIDDEN}"));
     m.insert("X_LSTMSubSampling".into(), "1".into());
     m.insert("X_OutputNeuronNb".into(), format!("7,{CLASSES}"));
-    let n = net(&m);
+    let n = net(&m, "X");
     assert!(n.is_mlp());
     let layout = n.weight_layout();
     assert_tiles(&layout, n.nb_of_weights());
@@ -238,7 +238,7 @@ fn tuple_a_lstm_layout_is_the_33671_pack() {
         .join("../../tests/reference_data/phase4d/tupleA_1_worker_1.config");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
     let m = speech::legacy_config::parse_legacy_config(&text);
-    let n = net_prefixed(&m, "BLSTM");
+    let n = net(&m, "BLSTM");
     let layout = n.weight_layout();
     assert_tiles(&layout, 33671);
     assert_eq!(layout.len(), 2 * 2 * 13 + 2 * 2 + 2);
@@ -257,8 +257,4 @@ fn tuple_a_lstm_layout_is_the_33671_pack() {
             .filter(|b| b.block.kind != BlockKind::Peephole)
             .all(|b| b.block.columns.is_none())
     );
-}
-
-fn net_prefixed(m: &IndexMap<String, String>, prefix: &str) -> BlstmNetwork {
-    BlstmNetwork::from_config(BlstmConfig::from_legacy(m, prefix).unwrap()).unwrap()
 }

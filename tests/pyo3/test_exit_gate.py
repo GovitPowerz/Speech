@@ -27,7 +27,7 @@ call here keeps the process cwd there: the fold run (issue #22) resolves the con
 keys against the workdir, and the engine resolves a listing ROW against the cwd, as the
 binary does.
 
-Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-pyo3 job.
+Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-test job.
 """
 
 from __future__ import annotations

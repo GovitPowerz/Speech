@@ -11,7 +11,7 @@ validation fold yields a finite cost, both checkpoints land).
 The fixtures' listing rows are relative to the fixture directory, so every run keeps the
 process cwd there (the fold run resolves the config's path keys, not the listing's rows).
 
-Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-pyo3 job.
+Marked `slow` + pyo3 (module-level importorskip); runs in the CI python-test job.
 """
 
 from __future__ import annotations

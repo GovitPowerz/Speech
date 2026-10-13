@@ -149,7 +149,7 @@ def test_a_config_the_engine_refuses_raises_before_any_draw() -> None:
         init_weights(cfg, "BLSTM", np.random.default_rng(0))
 
 
-def test_xavier_vs_he_variance_ratio_sanity_on_a_largeblock() -> None:
+def test_xavier_vs_he_variance_ratio_sanity_on_a_large_block() -> None:
     # A synthetic, deliberately large net so the measured block has a big sample size
     # (low variance-estimate noise) -- loose bounds below, not a flaky tight assert.
     cfg = _synthetic("64,128,128", "1,1", "256,10", "1")
