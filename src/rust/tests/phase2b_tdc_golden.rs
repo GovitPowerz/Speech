@@ -27,7 +27,7 @@ use indexmap::IndexMap;
 use speech::audio::{Audio, read_audio};
 use speech::tasks::sad::TdcSegmenter;
 use speech::tasks::segmentation::{SegClass, Segmentation};
-use speech::tasks::segmentation_io::{compute_errors, parse_audiodoc_attrs, to_vrcts_string};
+use speech::tasks::segmentation_io::{parse_audiodoc_attrs, to_vrcts_string};
 use speech::tasks::segmenter::Segmenter;
 
 fn tdc_config_text() -> String {
@@ -261,11 +261,7 @@ fn score_matches_dump() {
     tdc2.get_segmentation(&mut audio2, &mut hyp, None).unwrap();
 
     let want = common::load_bin_phase2b("tdc_scores.bin");
-    let reports = hyp
-        .iter_mut()
-        .enumerate()
-        .map(|(chan, seg)| compute_errors(seg, Some(&reference[chan]), -1))
-        .collect::<Vec<_>>();
+    let reports = common::score_channels(&mut hyp, &reference, -1);
     for (chan, report) in reports.iter().enumerate() {
         let speech = report.per_class[SegClass::Speech as usize];
         let got = ndarray::Array2::from_shape_vec(

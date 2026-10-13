@@ -12,7 +12,6 @@ use crate::audio::{Audio, convolution_horiz_slice, windowing_coefficients};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
 use crate::nn::blstm::BlstmNetwork;
 
-use super::lid::LidChannel;
 use super::segmentation::{SegClass, Segmentation};
 
 /// Produces a [`Segmentation`](super::segmentation_io) from features/audio.
@@ -80,6 +79,17 @@ pub trait Segmenter {
     fn last_result_rows(&self) -> &[Vec<f64>] {
         &[]
     }
+}
+
+/// One channel's LID members, still in-band encoded: the bag's input to
+/// `LidResult::from_encoded`. Filled from a LID driver's `LidMembers`
+/// (`tasks/lid.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct LidChannel<'a> {
+    pub cumulative_error: f64,
+    pub nb_of_classif: i64,
+    pub is_correct: i32,
+    pub classification_errors: &'a [f64],
 }
 
 /// One channel's driver-side result members, the bag's input to the channel result.

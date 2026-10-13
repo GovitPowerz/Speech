@@ -52,7 +52,7 @@ use speech::audio::{Audio, read_audio};
 use speech::io::binary::read_matrix;
 use speech::tasks::sad::BlstmSignalSegmenter;
 use speech::tasks::segmentation::{SegClass, Segmentation};
-use speech::tasks::segmentation_io::{compute_errors, parse_audiodoc_attrs, to_vrcts_string};
+use speech::tasks::segmentation_io::{parse_audiodoc_attrs, to_vrcts_string};
 use speech::tasks::segmenter::Segmenter;
 
 fn config_text(name: &str) -> String {
@@ -494,11 +494,7 @@ fn score_matches_dump_cheap_variants() {
         sig.get_segmentation(&mut audio, &mut hyp, None).unwrap();
 
         let want = common::load_bin_phase2b(&format!("signal_{tag}_scores.bin"));
-        let reports = hyp
-            .iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| compute_errors(seg, Some(&reference[chan]), -1))
-            .collect::<Vec<_>>();
+        let reports = common::score_channels(&mut hyp, &reference, -1);
         for (chan, report) in reports.iter().enumerate() {
             let speech = report.per_class[SegClass::Speech as usize];
             let got = ndarray::Array2::from_shape_vec(

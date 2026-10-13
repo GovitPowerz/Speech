@@ -13,6 +13,8 @@ use speech::audio::read_audio;
 use speech::fast::driver::build_aligned_spec;
 use speech::fast::pipeline::FastPipeline;
 use speech::features::pipeline::{FeatureConfig, SpectralParams};
+use speech::tasks::segmentation::Segmentation;
+use speech::tasks::segmentation_io::{ScoreReport, compute_errors};
 
 /// Absolute path to a file under `tests/reference_data/phase1/`.
 pub fn fixture(name: &str) -> PathBuf {
@@ -113,6 +115,19 @@ pub fn fixture_phase4d(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/reference_data/phase4d")
         .join(name)
+}
+
+/// `compute_errors` per channel: each hypothesis scored against its reference, in
+/// channel order (the drivers' `get_segmentation` sanitizes `hyp` in place first).
+pub fn score_channels(
+    hyp: &mut [Segmentation],
+    reference: &[Segmentation],
+    nb_words: i64,
+) -> Vec<ScoreReport> {
+    hyp.iter_mut()
+        .enumerate()
+        .map(|(chan, seg)| compute_errors(seg, Some(&reference[chan]), nb_words))
+        .collect()
 }
 
 /// Absolute path to the licensed LRE03/07 corpus root (`data/LRE03-LRE07` at the repo

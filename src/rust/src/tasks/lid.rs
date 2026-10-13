@@ -64,8 +64,8 @@ use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{
-    ChannelMembers, DriverConfig, Segmenter, SegmenterConfig, get_targets, lid_to_segmentation,
-    results_to_segmentation, smooth_segmentation,
+    ChannelMembers, DriverConfig, LidChannel, Segmenter, SegmenterConfig, get_targets,
+    lid_to_segmentation, results_to_segmentation, smooth_segmentation,
 };
 
 /// The per-channel LID members a LID driver (algo 5, the Twin, the fast Twin) writes on
@@ -91,16 +91,6 @@ pub struct LidMembers {
     /// `seg._IsLIDCorrect[chan]` (algo 5 `:420-425`, Twin `:1325-1331`): 100 (target is argmax) / 0 (not) / -1 (dead:
     /// `targetIndex` is clamped `>= 0`, so the -1 branch never fires).
     pub is_correct: Vec<i32>,
-}
-
-/// One channel's LID members, still in-band encoded: the bag's input to
-/// `LidResult::from_encoded`.
-#[derive(Debug, Clone, Copy)]
-pub struct LidChannel<'a> {
-    pub cumulative_error: f64,
-    pub nb_of_classif: i64,
-    pub is_correct: i32,
-    pub classification_errors: &'a [f64],
 }
 
 impl LidMembers {
