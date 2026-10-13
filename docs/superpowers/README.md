@@ -37,6 +37,7 @@ Smaller changes start from a GitHub issue instead of a spec: the issue carries a
 
 | issue | plan | status |
 |---|---|---|
+| [#33 Mutation batteries as live patches](https://github.com/GovitPowerz/Speech/issues/33) | none: implemented from the grilling comment, recorded in [ADR-0011](../adr/0011-mutation-batteries-are-live-patches.md); the `IMPROVEMENTS.md` batteries follow in [#76](https://github.com/GovitPowerz/Speech/issues/76) | implemented |
 | [#23 Typed channel result: one owner for the 18+N result-row columns](https://github.com/GovitPowerz/Speech/issues/23) | [plan](plans/2026-10-07-issue-23-typed-channel-result.md) | implemented |
 | [#22 Fold run: one module for running the engine through the seam](https://github.com/GovitPowerz/Speech/issues/22) | none: implemented from the grilling comment, recorded in [ADR-0010](../adr/0010-the-seam-takes-a-config-map-and-one-module-owns-the-fold-run.md) | implemented |
 

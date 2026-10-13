@@ -67,7 +67,7 @@ uv run python tests/mutations/run.py issue26 phase11/2b          # apply, build,
 uv run python tests/mutations/run.py --changed-since origin/main # the mutations a branch can have moved
 ```
 
-Suite sizes at the issue #25 close (2026-10-13): cargo 1376, pytest 1112 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built -- since #27 the whole tree needs it, `init_weights` and `nnet_spec` read the engine), pyo3 281 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min).
+Suite sizes at the issue #33 close (2026-10-14): cargo 1376, pytest 1160 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built -- since #27 the whole tree needs it, `init_weights` and `nnet_spec` read the engine), pyo3 281 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min). Mutation batteries: 51 patches under `tests/mutations/` (45 battery, 6 runner), a full run 187 verdicts, ~25 min.
 
 ## Architecture
 
