@@ -190,6 +190,10 @@ def _git_apply(root: Path, mutation: Mutation, *flags: str) -> subprocess.Comple
     return _run(["git", "apply", *flags, "-"], root, mutation.text)
 
 
+def _untracked(root: Path) -> set[str]:
+    return set(_run(["git", "ls-files", "--others", "--exclude-standard"], root).stdout.splitlines())
+
+
 def _cargo(root: Path, targets: list[str], extra: list[str]) -> subprocess.CompletedProcess[str]:
     cmd = ["cargo", "test", "--release", "-p", "speech", *(tok for t in targets for tok in t.split()), *extra]
     res = _run(cmd, root / CARGO_DIR)
@@ -219,6 +223,8 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Result]:
     if _git_apply(root, mutation).returncode:
         raise RuntimeError(f"{mutation.name}: git apply failed after --check passed")
     rebuilt = False
+    # A failing catcher can leave files behind (a proptest regression seed under the mutation).
+    before = _untracked(root)
     try:
         targets = sorted({c.target for c in mutation.catchers if c.kind == "cargo"})
         if targets:
@@ -234,12 +240,30 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Result]:
     finally:
         if _git_apply(root, mutation, "-R").returncode:
             raise RuntimeError(f"{mutation.name}: restore failed, revert the patch by hand")
+        for left in sorted(_untracked(root) - before):
+            path = root / left
+            path.unlink()
+            for parent in path.parents:
+                if parent == root or any(parent.iterdir()):
+                    break
+                parent.rmdir()
         if rebuilt and _run(MATURIN, root).returncode:
             raise RuntimeError(f"{mutation.name}: the restored speech_rs did not build, run maturin develop by hand")
 
 
+def _collected(root: Path, ids: list[str]) -> set[str]:
+    res = _pytest(root, "--collect-only", "-q", *ids)
+    return {line for line in res.stdout.splitlines() if "::" in line} if res.returncode == 0 else set()
+
+
 def check(root: Path, mutations: list[Mutation], kinds: tuple[str, ...]) -> list[str]:
     problems = [f"{m.name}: STALE: patch does not apply" for m in mutations if _git_apply(root, m, "--check").returncode]
+    # One collection for every node id; per id only when a missing one fails the batch. An exact
+    # node id names one test, so a parametrized base name is absent from the collected set.
+    ids = sorted({c.name for m in mutations for c in m.catchers if c.kind == "pytest"}) if "pytest" in kinds else []
+    collected = _collected(root, ids) if ids else set()
+    if ids and not collected:
+        collected = set().union(*(_collected(root, [i]) for i in ids))
     listed: dict[str, set[str]] = {}
     for m in mutations:
         for c in m.catchers:
@@ -251,8 +275,7 @@ def check(root: Path, mutations: list[Mutation], kinds: tuple[str, ...]) -> list
                     listed[c.target] = set() if res.returncode else set(re.findall(r"^(\S.*): test$", res.stdout, re.M))
                 ok = c.name in listed[c.target]
             else:
-                res = _pytest(root, "--collect-only", "-q", c.name)
-                ok = res.returncode == 0 and [line for line in res.stdout.splitlines() if "::" in line] == [c.name]
+                ok = c.name in collected
             if not ok:
                 problems.append(f"{m.name}: STALE: {c.label()} does not name exactly one test")
     return problems

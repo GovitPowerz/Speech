@@ -185,7 +185,9 @@ def test_catcher_file_of_an_integration_test_and_a_node_id(tmp_path: Path) -> No
 
 # -- the tree half, on a throwaway repository ----------------------------------------------------
 
-_TEST_MOD = """import pytest
+_TEST_MOD = """from pathlib import Path
+
+import pytest
 
 from pkg.mod import VALUE
 
@@ -201,6 +203,12 @@ def test_other():
 @pytest.mark.skip(reason="precondition")
 def test_skipped():
     pass
+
+
+def test_writes_an_artifact():
+    Path("out/artifact.txt").parent.mkdir(exist_ok=True)
+    Path("out/artifact.txt").write_text("x")
+    assert VALUE == 1
 """
 
 
@@ -246,6 +254,14 @@ def test_run_reads_caught_and_missed_and_restores_the_tree(tmp_path: Path) -> No
     assert [(r.observed, r.catcher.expected) for r in results] == [("CAUGHT", "CAUGHT"), ("MISSED", "MISSED")]
     assert "assert 2 == 1" in results[0].line
     assert _clean(root)
+
+
+def test_run_removes_the_files_a_catcher_created(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {"b/1": _patch("mutation: m\ncatcher: CAUGHT pytest t/test_mod.py::test_writes_an_artifact\n")})
+    (root / "mine.txt").write_text("untracked before the run")
+    assert _verdicts(root, "b/1") == ["CAUGHT"]
+    assert not (root / "out").exists()
+    assert (root / "mine.txt").exists()
 
 
 def test_a_patch_that_does_not_apply_is_stale_and_touches_nothing(tmp_path: Path) -> None:

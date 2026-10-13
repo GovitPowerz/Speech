@@ -1,0 +1,14 @@
+mutation: files a failing catcher created are left in the tree
+catcher: CAUGHT pytest tests/test_mutations_runner.py::test_run_removes_the_files_a_catcher_created
+diff --git a/tests/mutations/run.py b/tests/mutations/run.py
+--- a/tests/mutations/run.py
++++ b/tests/mutations/run.py
+@@ -240,7 +240,7 @@
+     finally:
+         if _git_apply(root, mutation, "-R").returncode:
+             raise RuntimeError(f"{mutation.name}: restore failed, revert the patch by hand")
+-        for left in sorted(_untracked(root) - before):
++        for left in []:
+             path = root / left
+             path.unlink()
+             for parent in path.parents:
