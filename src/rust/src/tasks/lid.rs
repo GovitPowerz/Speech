@@ -65,7 +65,7 @@ use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{
-    DriverConfig, Segmenter, SegmenterConfig, get_targets, lid_to_segmentation,
+    ChannelMembers, DriverConfig, Segmenter, SegmenterConfig, get_targets, lid_to_segmentation,
     results_to_segmentation, smooth_segmentation,
 };
 
@@ -185,11 +185,6 @@ impl BlstmSpectralLid {
         self.spectrum_shift_sec
     }
 
-    /// The configured dump directory (see `TdcSegmenter::dump_dir`).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
     /// SAD-side `seg._CumulativeError[chan]`: the LID driver NEVER writes it (the SAD is
     /// LTSV, NN-free), so it stays at the `Segmentation` ctor default 0.0 for every
     /// channel -- like `TdcSegmenter`/`LtsvSegmenter`.
@@ -200,11 +195,6 @@ impl BlstmSpectralLid {
     /// SAD-side `seg._NbOfClassif[chan]`: never written (see [`Self::cumulative_error`]).
     pub fn nb_of_classif(&self) -> Vec<i64> {
         vec![0; self.channels]
-    }
-
-    /// PRE-convolution LTSV-SAD result rows (one per channel) from the last call.
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
     }
 
     /// The per-channel LID members written by the last `get_segmentation` call.
@@ -649,6 +639,41 @@ impl Segmenter for BlstmSpectralLid {
     fn get_weights(&self) -> Vec<f64> {
         self.net.get_weights()
     }
+
+    /// The configured dump directory (see `TdcSegmenter::dump_dir`).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    /// PRE-convolution LTSV-SAD result rows (one per channel) from the last call.
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    fn pack_count(&self) -> usize {
+        1
+    }
+
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.net.set_weights(&packs[0])
+    }
+
+    fn nets(&self) -> Vec<&BlstmNetwork> {
+        vec![&self.net]
+    }
+
+    fn nets_mut(&mut self) -> Vec<&mut BlstmNetwork> {
+        vec![&mut self.net]
+    }
+
+    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+        // The SAD is LTSV (NN-free): no SAD cost or count, only the LID members.
+        ChannelMembers {
+            cumulative_error: 0.0,
+            nb_of_classif: 0,
+            lid: Some(&self.lid),
+        }
+    }
 }
 
 // ===========================================================================
@@ -926,10 +951,6 @@ impl TwinBlstmSpectralLid {
     pub fn lid_window_shift_sec(&self) -> f64 {
         self.lid_window_shift_sec
     }
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
     // -- SAD-side outputs ----------------------------------------------------
     /// `seg._CumulativeError[chan] = NNCost` (`:774`) `*= LIDCostPonderation` (`:1337`).
     pub fn cumulative_error(&self) -> &[f64] {
@@ -939,11 +960,6 @@ impl TwinBlstmSpectralLid {
     pub fn nb_of_classif(&self) -> &[i64] {
         &self.nb_of_classif
     }
-    /// PRE-convolution SAD `result_vec2` rows (one per channel) from the last call.
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
-    }
-
     // -- LID-side outputs (mirror Algo 5) ------------------------------------
     /// The per-channel LID members written by the last `get_segmentation` call.
     pub fn lid_members(&self) -> &LidMembers {
@@ -2578,6 +2594,41 @@ impl Segmenter for TwinBlstmSpectralLid {
     /// `getWeights` delegates to the SAD NN.
     fn get_weights(&self) -> Vec<f64> {
         self.sad_net.get_weights()
+    }
+
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    /// PRE-convolution SAD `result_vec2` rows (one per channel) from the last call.
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    fn pack_count(&self) -> usize {
+        2
+    }
+
+    /// `setWeights` then `setWeightsLID` (`BagOfProcessors.cpp:110-113`).
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.sad_net.set_weights(&packs[0])?;
+        self.lid_net.set_weights(&packs[1])
+    }
+
+    fn nets(&self) -> Vec<&BlstmNetwork> {
+        vec![&self.sad_net, &self.lid_net]
+    }
+
+    fn nets_mut(&mut self) -> Vec<&mut BlstmNetwork> {
+        vec![&mut self.sad_net, &mut self.lid_net]
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: Some(&self.lid),
+        }
     }
 }
 

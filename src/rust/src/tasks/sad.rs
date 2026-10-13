@@ -33,7 +33,7 @@ use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{
-    DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
+    ChannelMembers, DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
 };
 
 fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
@@ -127,13 +127,6 @@ impl TdcSegmenter {
             window_shift_sec,
             channels: 0,
         })
-    }
-
-    /// The configured dump directory (`Segmenter::_DumpDir`, read via
-    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
-    /// VRCTS write (`BagOfProcessors.cpp:268,273,278,...`).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
     }
 
     /// Zero cost accumulators: TDC has no NN/cost path (`cumulative_error`/
@@ -254,6 +247,21 @@ impl Segmenter for TdcSegmenter {
 
         Ok(())
     }
+
+    /// The configured dump directory (`Segmenter::_DumpDir`, read via
+    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
+    /// VRCTS write (`BagOfProcessors.cpp:268,273,278,...`).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: 0.0,
+            nb_of_classif: 0,
+            lid: None,
+        }
+    }
 }
 
 /// Long-Term Spectral Variation SAD segmenter (Algo 2;
@@ -303,11 +311,6 @@ impl LtsvSegmenter {
             window_shift_sec,
             channels: 0,
         })
-    }
-
-    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
     }
 
     /// Zero cost accumulators: LTSV has no NN/cost path (same rationale as
@@ -495,6 +498,19 @@ impl Segmenter for LtsvSegmenter {
 
         Ok(())
     }
+
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: 0.0,
+            nb_of_classif: 0,
+            lid: None,
+        }
+    }
 }
 
 /// BLSTM signal-domain SAD segmenter (Algo 4; `BLSTMSignalSegmenter.{h,cpp}`).
@@ -624,21 +640,6 @@ impl BlstmSignalSegmenter {
     /// cross-file lifecycle observably instead of only via boundary structure.
     pub fn window_shift_sec(&self) -> f64 {
         self.window_shift_sec
-    }
-
-    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
-    /// `get_segmentation` call -- the whole NN chain's raw output, before
-    /// `results_to_segmentation` convolves it in place. Port-side observation
-    /// point with NO legacy counterpart; see the field doc for why (the legacy's
-    /// only externalization is the `_IsUnitTest`-gated `.mat` dump, which this
-    /// port does not carry).
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
-    }
-
-    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
     }
 
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:346`): the NN cost from
@@ -898,6 +899,45 @@ impl Segmenter for BlstmSignalSegmenter {
     /// `getWeights` delegates to the NN (`:42-44`).
     fn get_weights(&self) -> Vec<f64> {
         self.net.get_weights()
+    }
+
+    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
+    /// `get_segmentation` call -- the whole NN chain's raw output, before
+    /// `results_to_segmentation` convolves it in place. Port-side observation
+    /// point with NO legacy counterpart; see the field doc for why (the legacy's
+    /// only externalization is the `_IsUnitTest`-gated `.mat` dump, which this
+    /// port does not carry).
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn pack_count(&self) -> usize {
+        1
+    }
+
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.net.set_weights(&packs[0])
+    }
+
+    fn nets(&self) -> Vec<&BlstmNetwork> {
+        vec![&self.net]
+    }
+
+    fn nets_mut(&mut self) -> Vec<&mut BlstmNetwork> {
+        vec![&mut self.net]
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: None,
+        }
     }
 }
 
@@ -1175,26 +1215,12 @@ impl BlstmSpectralSegmenter {
         self.result_buf.as_ref().map(|b| b.nrows()).unwrap_or(0)
     }
 
-    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
-    /// `get_segmentation` call -- the whole NN chain's raw output, before
-    /// `results_to_segmentation` convolves it in place. Port-side observation point
-    /// with NO legacy counterpart (see the field doc + [`BlstmSignalSegmenter::
-    /// last_result_rows`]).
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
-    }
-
     /// PRE-convolution PASS-2 result rows (Task 8), one per channel where the pitch
     /// pass fired with `pitch > 0`. Empty when the pitch gate is off (TDCwindow 0) or
     /// every channel measured `pitch == 0`. Test-only observation point (no legacy
     /// counterpart -- the legacy dump quirk keeps the externalized result at pass 1).
     pub fn last_result_rows_pass2(&self) -> &[Vec<f64>] {
         &self.last_result_rows_pass2
-    }
-
-    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
     }
 
     /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:752`).
@@ -1536,5 +1562,43 @@ impl Segmenter for BlstmSpectralSegmenter {
     /// `getWeights` delegates to the NN (`:91-93`).
     fn get_weights(&self) -> Vec<f64> {
         self.net.get_weights()
+    }
+
+    /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
+    /// `get_segmentation` call -- the whole NN chain's raw output, before
+    /// `results_to_segmentation` convolves it in place. Port-side observation point
+    /// with NO legacy counterpart (see the field doc + [`BlstmSignalSegmenter::
+    /// last_result_rows`]).
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    /// The configured dump directory (see [`TdcSegmenter::dump_dir`]).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn pack_count(&self) -> usize {
+        1
+    }
+
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.net.set_weights(&packs[0])
+    }
+
+    fn nets(&self) -> Vec<&BlstmNetwork> {
+        vec![&self.net]
+    }
+
+    fn nets_mut(&mut self) -> Vec<&mut BlstmNetwork> {
+        vec![&mut self.net]
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: None,
+        }
     }
 }

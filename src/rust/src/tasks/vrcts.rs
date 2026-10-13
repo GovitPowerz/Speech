@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use crate::audio::Audio;
 use crate::tasks::segmentation::Segmentation;
 use crate::tasks::segmentation_io::{compute_errors, load_vrcts};
-use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig};
+use crate::tasks::segmenter::{ChannelMembers, DriverConfig, Segmenter, SegmenterConfig};
 
 /// legacy: hard-coded absolute path (`VRCTSpart.cpp:44,46`), not read from config.
 /// IMPROVEMENTS [phase4b]: hard-coded VRCTS binary path.
@@ -78,13 +78,6 @@ impl VrctsPart {
             force,
             channels: 0,
         })
-    }
-
-    /// The configured dump directory (`Segmenter::_DumpDir`, read via
-    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
-    /// VRCTS write (`BagOfProcessors.cpp:268,273,...`).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
     }
 
     /// Zero cost accumulators: VRCTS has no NN/cost path (`cumulative_error`/
@@ -182,5 +175,20 @@ impl Segmenter for VrctsPart {
         }
 
         Ok(())
+    }
+
+    /// The configured dump directory (`Segmenter::_DumpDir`, read via
+    /// [`DriverConfig`]): `SegmentationFunction` reads it per config to gate the
+    /// VRCTS write (`BagOfProcessors.cpp:268,273,...`).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    fn channel_members(&self, _chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: 0.0,
+            nb_of_classif: 0,
+            lid: None,
+        }
     }
 }

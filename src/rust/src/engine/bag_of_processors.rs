@@ -27,6 +27,7 @@ use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{
     compute_errors, load_ref_csv, load_ref_stm, load_ref_vrcts, write_vrcts_multichannel,
 };
+use crate::tasks::segmenter::Segmenter;
 use crate::tasks::vrcts::VrctsPart;
 
 /// `conf.get<int>(name)` (required, no default): missing key is an error.
@@ -121,6 +122,37 @@ pub enum Processor {
 }
 
 impl Processor {
+    /// The config's driver behind the [`Segmenter`] interface: with
+    /// [`Self::driver_mut`], the only dispatch on the variant (issue #25).
+    pub fn driver(&self) -> &dyn Segmenter {
+        match self {
+            Processor::Vrcts(s) => s,
+            Processor::Tdc(s) => s,
+            Processor::Ltsv(s) => s,
+            Processor::Spectral(s) => s,
+            Processor::Signal(s) => s,
+            Processor::Lid(s) => s,
+            Processor::TwinLid(s) => s,
+            Processor::FastSpectral(s) => s,
+            Processor::FastTwinLid(s) => s,
+        }
+    }
+
+    /// [`Self::driver`], mutably.
+    pub fn driver_mut(&mut self) -> &mut dyn Segmenter {
+        match self {
+            Processor::Vrcts(s) => s,
+            Processor::Tdc(s) => s,
+            Processor::Ltsv(s) => s,
+            Processor::Spectral(s) => s,
+            Processor::Signal(s) => s,
+            Processor::Lid(s) => s,
+            Processor::TwinLid(s) => s,
+            Processor::FastSpectral(s) => s,
+            Processor::FastTwinLid(s) => s,
+        }
+    }
+
     /// Dispatch `Segmenter::getSegmentation` (`BagOfProcessors.cpp:267,272,...`):
     /// the enum tag replaces the legacy `_AlgoTypes[ii]` if/else ladder.
     fn get_segmentation(
@@ -1762,5 +1794,96 @@ mod tests {
         ] {
             assert!(bag.set_weights(0, packs).is_ok(), "{} pack(s)", packs.len());
         }
+    }
+
+    /// Issue #25: the driver interface per variant, every one built through the bag.
+    /// The pack surface spans both trees (the fast Twin takes `[sad, lid]` like the
+    /// exact one); the training surface is the exact tree's f64 nets only.
+    #[test]
+    fn driver_surface_per_variant() {
+        let mut vrcts = IndexMap::new();
+        for (k, v) in [
+            ("VRCTS_decision_thresh_rising", "0.6"),
+            ("VRCTS_decision_area_rising", "0.05"),
+            ("VRCTS_decision_thresh_falling", "0.3"),
+            ("VRCTS_decision_area_falling", "0.1"),
+            ("VRCTS_window", "0.032"),
+            ("VRCTS_shift", "0.01"),
+            ("VRCTS_convolution_window_size", "0"),
+            ("VRCTS_speech_padding", "0.1,0.1,0.1,0.1"),
+            ("VRCTS_min_speech", "0.2,0.2,0.2"),
+            ("VRCTS_min_silence", "0.2,0.2"),
+            ("VRCTS_isFast", "false"),
+            ("VRCTS_force", "false"),
+        ] {
+            vrcts.insert(k.to_string(), v.to_string());
+        }
+        let vrcts = with_bag_keys(vrcts, 0);
+        let mut spectral = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+        spectral.insert("BLSTM_weightsFile".to_string(), String::new());
+        let mut lid5 = with_bag_keys(load_config("phase4b/lid5.config"), 5);
+        lid5.insert("BLSTM_weightsFile".to_string(), String::new());
+        let mut twin = with_bag_keys(load_config("phase4b/twin_mode7.config"), 6);
+        twin.insert(
+            "BLSTM_LID_weightsFile".to_string(),
+            ref_dir()
+                .join("phase4b/LID_bestNNWeight_1.bin")
+                .to_str()
+                .unwrap()
+                .to_string(),
+        );
+        let mut exact_cfgs = vec![
+            vrcts,
+            with_bag_keys(load_config("phase2b/tdc.config"), 1),
+            with_bag_keys(load_config("phase2b/ltsv.config"), 2),
+            spectral.clone(),
+            with_bag_keys(load_config("phase2b/signal.config"), 4),
+            lid5,
+            twin.clone(),
+        ];
+        // `Inference_Path` is a config-0 key: the fast variants get their own bag.
+        spectral.insert("Inference_Path".to_string(), "fast".to_string());
+        let mut fast_cfgs = vec![spectral, twin];
+        let mut exact = BagOfProcessors::from_configs(&mut exact_cfgs, solo_mode()).unwrap();
+        let mut fast = BagOfProcessors::from_configs(&mut fast_cfgs, solo_mode()).unwrap();
+
+        let exact_kinds = [
+            matches!(exact.processor(0), Processor::Vrcts(_)),
+            matches!(exact.processor(1), Processor::Tdc(_)),
+            matches!(exact.processor(2), Processor::Ltsv(_)),
+            matches!(exact.processor(3), Processor::Spectral(_)),
+            matches!(exact.processor(4), Processor::Signal(_)),
+            matches!(exact.processor(5), Processor::Lid(_)),
+            matches!(exact.processor(6), Processor::TwinLid(_)),
+        ];
+        assert_eq!(exact_kinds, [true; 7]);
+        assert!(matches!(fast.processor(0), Processor::FastSpectral(_)));
+        assert!(matches!(fast.processor(1), Processor::FastTwinLid(_)));
+
+        fn check(bag: &mut BagOfProcessors, pos: usize, name: &str, packs: usize, nets: usize) {
+            let driver = bag.processor(pos).driver();
+            assert_eq!(driver.pack_count(), packs, "{name} pack_count");
+            assert_eq!(driver.nets().len(), nets, "{name} nets");
+            assert!(
+                driver.last_result_rows().is_empty(),
+                "{name} before any run"
+            );
+            let driver = bag.processors[pos].driver_mut();
+            assert_eq!(driver.nets_mut().len(), nets, "{name} nets_mut");
+        }
+        // (pos, name, pack_count, trainable nets)
+        for (pos, name, packs, nets) in [
+            (0, "Vrcts", 0, 0),
+            (1, "Tdc", 0, 0),
+            (2, "Ltsv", 0, 0),
+            (3, "Spectral", 1, 1),
+            (4, "Signal", 1, 1),
+            (5, "Lid", 1, 1),
+            (6, "TwinLid", 2, 2),
+        ] {
+            check(&mut exact, pos, name, packs, nets);
+        }
+        check(&mut fast, 0, "FastSpectral", 1, 0);
+        check(&mut fast, 1, "FastTwinLid", 2, 0);
     }
 }

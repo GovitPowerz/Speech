@@ -87,7 +87,9 @@ use crate::tasks::lid::LidMembers;
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
-use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation};
+use crate::tasks::segmenter::{
+    ChannelMembers, DriverConfig, Segmenter, SegmenterConfig, results_to_segmentation,
+};
 
 use super::bicell::FastBiCell;
 use super::cells::{CellGeometry, FastCausalNet};
@@ -458,12 +460,6 @@ impl FastSpectralSegmenter {
         }
     }
 
-    /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
-    /// dump_dir`]): gates the scored-branch VRCTS write.
-    pub fn dump_dir(&self) -> &str {
-        &self.plan.driver_cfg.dump_dir
-    }
-
     /// Per-channel NN cost (result col 4). ALWAYS zero on the fast path (forward-only,
     /// inference: no cost harvested), a documented divergence from the exact driver.
     pub fn cumulative_error(&self) -> &[f64] {
@@ -474,13 +470,6 @@ impl FastSpectralSegmenter {
     /// (forward-only), a documented divergence from the exact driver.
     pub fn nb_of_classif(&self) -> &[i64] {
         &self.nb_of_classif
-    }
-
-    /// Post-overlap-division, pre-`results_to_segmentation` posterior rows (one per
-    /// channel) from the last `get_segmentation` -- the port-side observation point
-    /// for the CI parity leg (mirrors `BlstmSpectralSegmenter::last_result_rows`).
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
     }
 }
 
@@ -627,6 +616,35 @@ impl Segmenter for FastSpectralSegmenter {
         }
 
         Ok(())
+    }
+
+    /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
+    /// dump_dir`]): gates the scored-branch VRCTS write.
+    fn dump_dir(&self) -> &str {
+        &self.plan.driver_cfg.dump_dir
+    }
+
+    /// Post-overlap-division, pre-`results_to_segmentation` posterior rows (one per
+    /// channel) from the last `get_segmentation` -- the port-side observation point
+    /// for the CI parity leg (mirrors `BlstmSpectralSegmenter::last_result_rows`).
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    fn pack_count(&self) -> usize {
+        1
+    }
+
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.set_weights(&packs[0])
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: None,
+        }
     }
 }
 
@@ -1193,11 +1211,6 @@ impl FastTwinLid {
         self.lid_shape
     }
 
-    /// The configured dump directory (gates the scored-branch VRCTS write in the bag).
-    pub fn dump_dir(&self) -> &str {
-        &self.driver_cfg.dump_dir
-    }
-
     pub fn mode(&self) -> i32 {
         self.mode
     }
@@ -1212,11 +1225,6 @@ impl FastTwinLid {
     }
     pub fn nb_of_classif(&self) -> &[i64] {
         &self.nb_of_classif
-    }
-    /// SAD `result_vec2` per channel (the synthesized constant-10.0 row, PRE-convolution)
-    /// -- the port-side observation point, mirroring the exact driver's `last_result_rows`.
-    pub fn last_result_rows(&self) -> &[Vec<f64>] {
-        &self.last_result_rows
     }
     /// The per-channel LID members written by the last `get_segmentation` call.
     /// `cumulative_error`/`nb_of_classif` are ALWAYS zero on the fast path (forward-only,
@@ -1406,6 +1414,35 @@ impl Segmenter for FastTwinLid {
             self.lid_window_shift_sec = 0.0;
         }
         Ok(())
+    }
+
+    /// The configured dump directory (gates the scored-branch VRCTS write in the bag).
+    fn dump_dir(&self) -> &str {
+        &self.driver_cfg.dump_dir
+    }
+
+    /// SAD `result_vec2` per channel (the synthesized constant-10.0 row, PRE-convolution)
+    /// -- the port-side observation point, mirroring the exact driver's `last_result_rows`.
+    fn last_result_rows(&self) -> &[Vec<f64>] {
+        &self.last_result_rows
+    }
+
+    fn pack_count(&self) -> usize {
+        2
+    }
+
+    /// The SAD pack checked against its net's count, then discarded (Mode 7 never runs
+    /// the SAD net); the LID net rebuilt from its pack.
+    fn set_packs(&mut self, packs: &[Vec<f64>]) -> Result<()> {
+        self.set_weights(&packs[0], &packs[1])
+    }
+
+    fn channel_members(&self, chan: usize) -> ChannelMembers<'_> {
+        ChannelMembers {
+            cumulative_error: self.cumulative_error[chan],
+            nb_of_classif: self.nb_of_classif[chan],
+            lid: Some(&self.lid),
+        }
     }
 }
 

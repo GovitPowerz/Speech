@@ -161,10 +161,11 @@ fn bag_threads_fixed_gain_to_internal_read_audio() {
         weight: 1.0,
     };
     bag_a.segmentation_function(&item, image_mode()).unwrap();
-    let rows_a = match bag_a.processor(0) {
-        Processor::FastSpectral(s) => s.last_result_rows().to_vec(),
-        _ => panic!("expected FastSpectral for the frozen staged config"),
-    };
+    assert!(
+        matches!(bag_a.processor(0), Processor::FastSpectral(_)),
+        "expected FastSpectral for the frozen staged config"
+    );
+    let rows_a = bag_a.processor(0).driver().last_result_rows().to_vec();
 
     // (b) directly-supplied path: read_audio called HERE with the SAME explicit
     // fixed_gain, fed through run_get_segmentation.
@@ -175,10 +176,11 @@ fn bag_threads_fixed_gain_to_internal_read_audio() {
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];
     bag_b.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
-    let rows_b = match bag_b.processor(0) {
-        Processor::FastSpectral(s) => s.last_result_rows().to_vec(),
-        _ => panic!("expected FastSpectral for the frozen staged config"),
-    };
+    assert!(
+        matches!(bag_b.processor(0), Processor::FastSpectral(_)),
+        "expected FastSpectral for the frozen staged config"
+    );
+    let rows_b = bag_b.processor(0).driver().last_result_rows().to_vec();
 
     // Bit-exact per-element compare (not assert_eq! on the Vec<Vec<f64>> directly
     // -- an uncovered overlap row is a NaN in both paths, and NaN != NaN under
@@ -432,10 +434,11 @@ fn run_fast(
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];
     bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
-    let row = match bag.processor(0) {
-        Processor::FastSpectral(s) => s.last_result_rows()[0].clone(),
-        _ => panic!("expected FastSpectral"),
-    };
+    assert!(
+        matches!(bag.processor(0), Processor::FastSpectral(_)),
+        "expected FastSpectral"
+    );
+    let row = bag.processor(0).driver().last_result_rows()[0].clone();
     (row, seg.remove(0))
 }
 
@@ -591,10 +594,11 @@ fn frozen_norm_exact_matches_fast_adjudication_pin() {
     bag_exact
         .run_get_segmentation(0, &mut audio_exact, &mut seg_exact_vec)
         .unwrap();
-    let post_exact = match bag_exact.processor(0) {
-        Processor::Spectral(s) => s.last_result_rows()[0].clone(),
-        _ => panic!("expected Spectral (exact) for the frozen staged config"),
-    };
+    assert!(
+        matches!(bag_exact.processor(0), Processor::Spectral(_)),
+        "expected Spectral (exact) for the frozen staged config"
+    );
+    let post_exact = bag_exact.processor(0).driver().last_result_rows()[0].clone();
     let seg_exact = seg_exact_vec.remove(0);
 
     assert_eq!(
