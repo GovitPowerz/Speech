@@ -292,10 +292,16 @@ A numeric test threshold set at measured times ten. Never widened to pass.
 The rule that a decision-changing divergence (a boundary, an argmax, a count) halts the work for adjudication instead of widening a pin (ADR-0003).
 
 **Mutation battery**:
-The per-phase set of deliberate code mutations, each expected to break a named test. Scored in `RESULTS.md`, gaps included.
+The per-phase (later per-issue) set of deliberate code mutations, each expected to break a named catcher. Its scorecard is dated history, gaps included (`IMPROVEMENTS.md` through Phase 10, `RESULTS.md` since). The live claim is the committed mutation itself: it applies to the current tree and holds its expected verdict there.
 
 **Catcher**:
 The test a mutation breaks.
+
+**Verdict**:
+The outcome of one mutation against one named catcher: `CAUGHT`, `MISSED`, `SKIPPED` (the catcher did not run), `INVALID` (the mutated tree does not build), `STALE` (the mutation no longer applies, or its catcher no longer names exactly one test). Each mutation carries its expected verdict, gaps included; an observed verdict that differs is a STOP.
+
+**Retired mutation**:
+A mutation whose site no longer exists, removed by the change that removed the site. Git history is its archive.
 
 **Touch class**:
 A sanctioned category of edit to the exact tree outside `nn/cells/`, the only kind allowed there; each must keep the golden suite byte-green as proof it is behaviour-free (ADR-0002).

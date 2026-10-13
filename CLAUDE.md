@@ -16,7 +16,7 @@ The ultimate goal (user, 2026-07-10): a very efficient SAD + LID Rust binary in 
 |---|---|
 | How a run and a training step flow through the code | `docs/ARCHITECTURE.md` |
 | The vocabulary (and the synonyms to avoid) | `CONTEXT.md` |
-| The decisions that constrain new work | `docs/adr/` (10 ADRs) |
+| The decisions that constrain new work | `docs/adr/` (11 ADRs) |
 | What each phase delivered, proved, and left named | `docs/ROADMAP.md`; specs and plans indexed in `docs/superpowers/README.md` |
 | Every measured number, bench table, gate and mutation battery | `RESULTS.md`; its ledger-owned tables are rendered from `ledger/` (ADR-0009) |
 | Every reproduced legacy quirk, kept or fixed, and the fix protocol | `IMPROVEMENTS.md` |
