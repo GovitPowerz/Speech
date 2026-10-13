@@ -57,7 +57,6 @@ use crate::constants::random_gauss;
 use crate::features::ltsv_tdc::ltsv_classify_sequence;
 use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{FeatureConfig, SpectralParams, build_input_sequence_parts};
-use crate::features::stats::InputStatistics;
 use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
@@ -185,18 +184,6 @@ impl BlstmSpectralLid {
         self.spectrum_shift_sec
     }
 
-    /// SAD-side `seg._CumulativeError[chan]`: the LID driver NEVER writes it (the SAD is
-    /// LTSV, NN-free), so it stays at the `Segmentation` ctor default 0.0 for every
-    /// channel -- like `TdcSegmenter`/`LtsvSegmenter`.
-    pub fn cumulative_error(&self) -> Vec<f64> {
-        vec![0.0; self.channels]
-    }
-
-    /// SAD-side `seg._NbOfClassif[chan]`: never written (see [`Self::cumulative_error`]).
-    pub fn nb_of_classif(&self) -> Vec<i64> {
-        vec![0; self.channels]
-    }
-
     /// The per-channel LID members written by the last `get_segmentation` call.
     pub fn lid_members(&self) -> &LidMembers {
         &self.lid
@@ -209,38 +196,6 @@ impl BlstmSpectralLid {
     // -- and in `BLSTMSpectralLID` that base-class member IS the LID net (the
     // ctor builds it from the same `BLSTM_*` namespace). So every delegate here
     // targets `self.net`, mirroring `BlstmSpectralSegmenter`'s family.
-
-    /// `isBackPropActivated` (inherited, `BLSTMSpectralSegmenter.h`).
-    pub fn is_back_prop_activated(&self) -> bool {
-        self.net.config().back_propagation_activated
-    }
-
-    /// `getWeightsDerivatives` (inherited): the net's `Nx2` flat derivative matrix.
-    pub fn get_weights_derivatives(&self) -> Array2<f64> {
-        self.net.get_weights_derivatives()
-    }
-
-    /// `updateWeights` (inherited): iRPROP- on the flat vector. The algo-5 bag arm
-    /// passes `costLID` as the criterion (`BagOfProcessors.cpp:192-194`).
-    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
-        self.net.update_weights(derivs, cost);
-    }
-
-    /// `saveWeights` (inherited): the three-artifact split (weights/derivs `.bin` +
-    /// stats `.mat`).
-    pub fn save_weights(
-        &self,
-        filename: &str,
-        derivs: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        self.net.save_weights(filename, derivs, stats)
-    }
-
-    /// `getInputStatistics` (inherited): the net's accumulated input statistics.
-    pub fn input_statistics(&self) -> &InputStatistics {
-        self.net.input_statistics()
-    }
 }
 
 impl Segmenter for BlstmSpectralLid {
@@ -630,16 +585,6 @@ impl Segmenter for BlstmSpectralLid {
         Ok(())
     }
 
-    /// `setWeights` delegates to the NN (base `BLSTMSpectralSegmenter::setWeights`).
-    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        self.net.set_weights(flat)
-    }
-
-    /// `getWeights` delegates to the NN.
-    fn get_weights(&self) -> Vec<f64> {
-        self.net.get_weights()
-    }
-
     /// The configured dump directory (see `TdcSegmenter::dump_dir`).
     fn dump_dir(&self) -> &str {
         &self.driver_cfg.dump_dir
@@ -972,64 +917,8 @@ impl TwinBlstmSpectralLid {
     }
 
     // -- SAD net weight family (`BLSTMSpectralSegmenter` delegates) -----------
-    pub fn is_back_prop_activated(&self) -> bool {
-        self.sad_net.config().back_propagation_activated
-    }
-    pub fn get_weights_derivatives(&self) -> Array2<f64> {
-        self.sad_net.get_weights_derivatives()
-    }
-    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
-        self.sad_net.update_weights(derivs, cost);
-    }
-    pub fn save_weights(
-        &self,
-        filename: &str,
-        derivs: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        self.sad_net.save_weights(filename, derivs, stats)
-    }
-    pub fn input_statistics(&self) -> &InputStatistics {
-        self.sad_net.input_statistics()
-    }
 
     // -- LID net weight family (`:59-85` delegates) --------------------------
-    /// `isBackPropActivatedLID` (`:59-61`).
-    pub fn is_back_prop_activated_lid(&self) -> bool {
-        self.lid_net.config().back_propagation_activated
-    }
-    /// `setWeightsLID` (`:63-65`).
-    pub fn set_weights_lid(&mut self, flat: &[f64]) -> Result<()> {
-        self.lid_net.set_weights(flat)
-    }
-    /// `getWeightsLID` (`:67-69`).
-    pub fn get_weights_lid(&self) -> Vec<f64> {
-        self.lid_net.get_weights()
-    }
-    /// `getWeightsDerivativesLID` (`:71-73`).
-    pub fn get_weights_derivatives_lid(&self) -> Array2<f64> {
-        self.lid_net.get_weights_derivatives()
-    }
-    /// `getInputStatisticsLID` (`:75-77`).
-    pub fn get_input_statistics_lid(&self) -> &InputStatistics {
-        self.lid_net.input_statistics()
-    }
-    /// `updateWeightsLID` (`:79-81`).
-    pub fn update_weights_lid(&mut self, derivs: &Array2<f64>, cost: f64) {
-        self.lid_net.update_weights(derivs, cost);
-    }
-    /// `saveWeightsLID` (`:83-85`): the LID net writes with the caller's filename
-    /// PREFIXED by `LID_` (`_LIDBLSTMNeuralNetwork.saveWeights("LID_"+filename, ...)`),
-    /// on the basename (`io::prefix_basename`; the legacy glued it onto the whole string).
-    pub fn save_weights_lid(
-        &self,
-        filename: &str,
-        derivs: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        self.lid_net
-            .save_weights(&crate::io::prefix_basename("LID_", filename), derivs, stats)
-    }
 
     /// Port of `getBLSTMLIDInputSequence` (`:139-168`): when the SAD net's
     /// `_OutputForward` is populated, hcat its z-normalized `[fwd | bwd]` hidden states
@@ -2584,16 +2473,6 @@ impl Segmenter for TwinBlstmSpectralLid {
         }
 
         Ok(())
-    }
-
-    /// `setWeights` delegates to the SAD NN (base `BLSTMSpectralSegmenter::setWeights`).
-    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        self.sad_net.set_weights(flat)
-    }
-
-    /// `getWeights` delegates to the SAD NN.
-    fn get_weights(&self) -> Vec<f64> {
-        self.sad_net.get_weights()
     }
 
     fn dump_dir(&self) -> &str {

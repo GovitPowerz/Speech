@@ -7,7 +7,6 @@
 
 use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
-use ndarray::Array2;
 
 use crate::audio::{Audio, convolution_horiz_slice, windowing_coefficients};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
@@ -20,10 +19,15 @@ use super::segmentation::{SegClass, Segmentation};
 ///
 /// `get_segmentation` mirrors the legacy pure-virtual `Segmenter::getSegmentation`
 /// (`Segmenter.h:25`): `seg_per_chan` is pre-sized by the caller, one entry per
-/// audio channel. The weight-facing methods default to the legacy base-class
-/// no-op bodies (`Segmenter::setWeights`/`getWeights`/`getWeightsDerivatives`,
-/// `Segmenter.cpp:107-115`): a plain (non-BLSTM) segmenter has no trainable
-/// weights, so the defaults are the correct behaviour, not a stub.
+/// audio channel.
+///
+/// The trait is the driver interface (issue #25): the bag reaches every driver
+/// through it. Two weight surfaces: the PACK surface ([`Self::pack_count`],
+/// [`Self::set_packs`]) spans both trees, the TRAINING surface ([`Self::nets`],
+/// [`Self::nets_mut`]) is the exact tree's f64 nets only. Their defaults are the
+/// legacy base-class no-op bodies (`Segmenter::setWeights`/`getWeights`/
+/// `getWeightsDerivatives`, `Segmenter.cpp:107-115`): a plain (non-BLSTM) segmenter
+/// has no trainable weights, so the defaults are the correct behaviour, not a stub.
 ///
 /// `refs` is the per-channel REFERENCE segmentation (the legacy `seg._Reference`,
 /// which the Rust [`Segmentation`] does NOT carry internally): `Some(&[Segmentation])`
@@ -39,18 +43,6 @@ pub trait Segmenter {
         seg_per_chan: &mut [Segmentation],
         refs: Option<&[Segmentation]>,
     ) -> Result<()>;
-
-    fn set_weights(&mut self, _flat: &[f64]) -> Result<()> {
-        Ok(())
-    }
-
-    fn get_weights(&self) -> Vec<f64> {
-        Vec::new()
-    }
-
-    fn get_weights_derivatives(&self) -> Array2<f64> {
-        Array2::zeros((0, 0))
-    }
 
     /// The driver's `_DumpDir`: gates the bag's scored-branch VRCTS write.
     fn dump_dir(&self) -> &str;

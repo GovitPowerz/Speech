@@ -79,18 +79,6 @@ impl VrctsPart {
             channels: 0,
         })
     }
-
-    /// Zero cost accumulators: VRCTS has no NN/cost path (`cumulative_error`/
-    /// `nb_of_classif` stay at their legacy `Segmentation` ctor-seeded 0.0/0
-    /// defaults for every channel -- `getSegmentation` never writes them). Sized
-    /// by the channel count of the last `get_segmentation` call.
-    pub fn cumulative_error(&self) -> Vec<f64> {
-        vec![0.0; self.channels]
-    }
-
-    pub fn nb_of_classif(&self) -> Vec<i64> {
-        vec![0; self.channels]
-    }
 }
 
 impl Segmenter for VrctsPart {

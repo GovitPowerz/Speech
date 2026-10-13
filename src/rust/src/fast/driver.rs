@@ -459,18 +459,6 @@ impl FastSpectralSegmenter {
             None => Ok(()),
         }
     }
-
-    /// Per-channel NN cost (result col 4). ALWAYS zero on the fast path (forward-only,
-    /// inference: no cost harvested), a documented divergence from the exact driver.
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-
-    /// Per-channel `_NbOfClassif` (result col `len-1`). ALWAYS zero on the fast path
-    /// (forward-only), a documented divergence from the exact driver.
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
-    }
 }
 
 impl Segmenter for FastSpectralSegmenter {
@@ -1218,14 +1206,6 @@ impl FastTwinLid {
         self.post_process_mode
     }
 
-    /// Per-channel SAD NN cost (result col 4). ALWAYS zero in Mode 7 (the SAD net is
-    /// never run), matching the exact driver's `:1421`.
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
-    }
     /// The per-channel LID members written by the last `get_segmentation` call.
     /// `cumulative_error`/`nb_of_classif` are ALWAYS zero on the fast path (forward-only,
     /// a documented divergence from the exact driver); `classification_errors` (the

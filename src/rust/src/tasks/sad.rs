@@ -27,7 +27,6 @@ use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{
     FeatureConfig, SpectralParams, build_input_sequence_parts, derive_freq_band_ltsv_variant,
 };
-use crate::features::stats::InputStatistics;
 use crate::legacy_config::{get_f64, get_f64_list};
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
@@ -127,18 +126,6 @@ impl TdcSegmenter {
             window_shift_sec,
             channels: 0,
         })
-    }
-
-    /// Zero cost accumulators: TDC has no NN/cost path (`cumulative_error`/
-    /// `nb_of_classif` stay at their legacy `Segmentation` ctor-seeded 0.0/0
-    /// defaults for every channel -- `getSegmentation` never writes them). Sized
-    /// by the channel count of the last `get_segmentation` call.
-    pub fn cumulative_error(&self) -> Vec<f64> {
-        vec![0.0; self.channels]
-    }
-
-    pub fn nb_of_classif(&self) -> Vec<i64> {
-        vec![0; self.channels]
     }
 }
 
@@ -311,16 +298,6 @@ impl LtsvSegmenter {
             window_shift_sec,
             channels: 0,
         })
-    }
-
-    /// Zero cost accumulators: LTSV has no NN/cost path (same rationale as
-    /// [`TdcSegmenter::cumulative_error`]).
-    pub fn cumulative_error(&self) -> Vec<f64> {
-        vec![0.0; self.channels]
-    }
-
-    pub fn nb_of_classif(&self) -> Vec<i64> {
-        vec![0; self.channels]
     }
 }
 
@@ -653,41 +630,6 @@ impl BlstmSignalSegmenter {
         &self.nb_of_classif
     }
 
-    /// `isBackPropActivated` (`BLSTMSignalSegmenter.cpp` delegate, mirroring
-    /// `BLSTMSpectralSegmenter.cpp:103-105`): forwards to the net's
-    /// `isBackPropagationActivated`.
-    pub fn is_back_prop_activated(&self) -> bool {
-        self.net.config().back_propagation_activated
-    }
-
-    /// `updateWeights` delegate (`:107-109`): hand the Nx2 gradient object + cost to
-    /// the net's long-lived iRPROP- trainer.
-    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
-        self.net.update_weights(derivs, cost);
-    }
-
-    /// `saveWeights` delegate (`:111-113`): the net writes the three artifacts.
-    pub fn save_weights(
-        &self,
-        filename: &str,
-        derivs: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        self.net.save_weights(filename, derivs, stats)
-    }
-
-    /// `getInputStatistics` delegate (`:99-101`): the net's accumulated per-dim stats.
-    pub fn input_statistics(&self) -> &InputStatistics {
-        self.net.input_statistics()
-    }
-
-    /// `getWeightsDerivatives` delegate (`BLSTMSignalSegmenter.cpp:46-48`): the net's
-    /// Nx2 flat derivative matrix (col0 summed deriv, col1 frame count), which the
-    /// corpus gradient harvest reads.
-    pub fn get_weights_derivatives(&self) -> Array2<f64> {
-        self.net.get_weights_derivatives()
-    }
-
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
     /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
     /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
@@ -889,16 +831,6 @@ impl Segmenter for BlstmSignalSegmenter {
         }
 
         Ok(())
-    }
-
-    /// `setWeights` delegates to the NN (`BLSTMSignalSegmenter.cpp:38-40`).
-    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        self.net.set_weights(flat)
-    }
-
-    /// `getWeights` delegates to the NN (`:42-44`).
-    fn get_weights(&self) -> Vec<f64> {
-        self.net.get_weights()
     }
 
     /// PRE-convolution `result_vec2` rows (one per channel) captured on the last
@@ -1222,41 +1154,6 @@ impl BlstmSpectralSegmenter {
         self.spectrum_shift_sec = 80.0 / rate;
     }
 
-    /// `isBackPropActivated` (`BLSTMSpectralSegmenter.cpp:103-105`): forwards to the
-    /// net's `isBackPropagationActivated`.
-    pub fn is_back_prop_activated(&self) -> bool {
-        self.net.config().back_propagation_activated
-    }
-
-    /// `updateWeights` (`:107-109`): hand the Nx2 gradient object + cost to the net's
-    /// long-lived iRPROP- trainer.
-    pub fn update_weights(&mut self, derivs: &Array2<f64>, cost: f64) {
-        self.net.update_weights(derivs, cost);
-    }
-
-    /// `saveWeights` (`:111-113`): the net writes the three artifacts.
-    pub fn save_weights(
-        &self,
-        filename: &str,
-        derivs: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        self.net.save_weights(filename, derivs, stats)
-    }
-
-    /// `getInputStatistics` (`:99-101`): the net's accumulated per-dim stats.
-    pub fn input_statistics(&self) -> &InputStatistics {
-        self.net.input_statistics()
-    }
-
-    /// `getWeightsDerivatives` delegate (`BLSTMSpectralSegmenter.cpp:95-97`): the
-    /// net's Nx2 flat derivative matrix. See the [`BlstmSignalSegmenter`] twin's doc:
-    /// the `Segmenter` trait default returns empty; this inherent method surfaces the
-    /// real net derivs for the corpus gradient harvest.
-    pub fn get_weights_derivatives(&self) -> Array2<f64> {
-        self.net.get_weights_derivatives()
-    }
-
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
     /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
     /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
@@ -1525,16 +1422,6 @@ impl Segmenter for BlstmSpectralSegmenter {
         }
 
         Ok(())
-    }
-
-    /// `setWeights` delegates to the NN (`BLSTMSpectralSegmenter.cpp:87-89`).
-    fn set_weights(&mut self, flat: &[f64]) -> Result<()> {
-        self.net.set_weights(flat)
-    }
-
-    /// `getWeights` delegates to the NN (`:91-93`).
-    fn get_weights(&self) -> Vec<f64> {
-        self.net.get_weights()
     }
 
     /// PRE-convolution `result_vec2` rows (one per channel) captured on the last

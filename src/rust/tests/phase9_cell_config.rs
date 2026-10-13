@@ -140,7 +140,10 @@ fn mamba_cell_type_builds_on_the_tier2_fixture() {
         .expect("the untouched fixture must build");
     let mamba = BlstmSpectralSegmenter::from_legacy(&mamba_map(4), None)
         .expect("mamba must build on the fixture");
-    let (n_lstm, n_mamba) = (lstm.get_weights().len(), mamba.get_weights().len());
+    let (n_lstm, n_mamba) = (
+        lstm.nets()[0].get_weights().len(),
+        mamba.nets()[0].get_weights().len(),
+    );
     assert!(n_lstm > 0 && n_mamba > 0);
     assert_ne!(
         n_mamba, n_lstm,
@@ -152,15 +155,15 @@ fn mamba_cell_type_builds_on_the_tier2_fixture() {
     // A_log entries and 2*4*d_inner more W_x entries.
     let wider = BlstmSpectralSegmenter::from_legacy(&mamba_map(8), None).unwrap();
     assert!(
-        wider.get_weights().len() > n_mamba,
+        wider.nets()[0].get_weights().len() > n_mamba,
         "Mamba_D_State did not reach the cell"
     );
 
     // Same seam contract as any other cell: a full-length pack round-trips.
     let mut net = BlstmSpectralSegmenter::from_legacy(&mamba_map(4), None).unwrap();
     let w: Vec<f64> = (0..n_mamba).map(|k| 0.11 - 0.0003 * (k as f64)).collect();
-    net.set_weights(&w).unwrap();
-    assert_eq!(net.get_weights(), w);
+    net.set_packs(std::slice::from_ref(&w)).unwrap();
+    assert_eq!(net.nets()[0].get_weights(), w);
 }
 
 /// A malformed `Mamba_*` value fails LOUDLY at driver construction rather than
@@ -195,7 +198,10 @@ fn slstm_cell_type_builds_on_the_tier2_fixture() {
     let slstm =
         BlstmSpectralSegmenter::from_legacy(&map, None).expect("slstm must build on the fixture");
 
-    let (n_lstm, n_slstm) = (lstm.get_weights().len(), slstm.get_weights().len());
+    let (n_lstm, n_slstm) = (
+        lstm.nets()[0].get_weights().len(),
+        slstm.nets()[0].get_weights().len(),
+    );
     assert!(n_lstm > 0 && n_slstm > 0);
     assert_ne!(
         n_slstm, n_lstm,
@@ -205,8 +211,8 @@ fn slstm_cell_type_builds_on_the_tier2_fixture() {
     // Same seam contract as any other cell: a full-length pack round-trips.
     let mut net = BlstmSpectralSegmenter::from_legacy(&map, None).unwrap();
     let w: Vec<f64> = (0..n_slstm).map(|k| 0.11 - 0.0003 * (k as f64)).collect();
-    net.set_weights(&w).unwrap();
-    assert_eq!(net.get_weights(), w);
+    net.set_packs(std::slice::from_ref(&w)).unwrap();
+    assert_eq!(net.nets()[0].get_weights(), w);
 }
 
 /// The same fixture with the key ABSENT (or explicitly `lstm`) builds -- the bail is
@@ -240,7 +246,10 @@ fn cfc_cell_type_builds_on_the_tier2_fixture() {
         .expect("the untouched fixture must build");
     let cfc = BlstmSpectralSegmenter::from_legacy(&cfc_map(6, 1), None)
         .expect("cfc must build on the fixture");
-    let (n_lstm, n_cfc) = (lstm.get_weights().len(), cfc.get_weights().len());
+    let (n_lstm, n_cfc) = (
+        lstm.nets()[0].get_weights().len(),
+        cfc.nets()[0].get_weights().len(),
+    );
     assert!(n_lstm > 0 && n_cfc > 0);
     assert_ne!(
         n_cfc, n_lstm,
@@ -253,24 +262,24 @@ fn cfc_cell_type_builds_on_the_tier2_fixture() {
     let wider = BlstmSpectralSegmenter::from_legacy(&cfc_map(12, 1), None).unwrap();
     let deeper = BlstmSpectralSegmenter::from_legacy(&cfc_map(6, 2), None).unwrap();
     assert!(
-        wider.get_weights().len() > n_cfc,
+        wider.nets()[0].get_weights().len() > n_cfc,
         "Cfc_Backbone_Units did not reach the cell"
     );
     assert!(
-        deeper.get_weights().len() > n_cfc,
+        deeper.nets()[0].get_weights().len() > n_cfc,
         "Cfc_Backbone_Layers did not reach the cell"
     );
     assert_ne!(
-        wider.get_weights().len(),
-        deeper.get_weights().len(),
+        wider.nets()[0].get_weights().len(),
+        deeper.nets()[0].get_weights().len(),
         "widening and deepening must not be the same knob"
     );
 
     // Same seam contract as any other cell: a full-length pack round-trips.
     let mut net = BlstmSpectralSegmenter::from_legacy(&cfc_map(6, 1), None).unwrap();
     let w: Vec<f64> = (0..n_cfc).map(|k| 0.11 - 0.0003 * (k as f64)).collect();
-    net.set_weights(&w).unwrap();
-    assert_eq!(net.get_weights(), w);
+    net.set_packs(std::slice::from_ref(&w)).unwrap();
+    assert_eq!(net.nets()[0].get_weights(), w);
 }
 
 /// A malformed `Cfc_*` value fails LOUDLY at driver construction rather than silently
@@ -338,7 +347,10 @@ fn transformer_cell_type_builds_on_the_tier2_fixture() {
         .expect("the untouched fixture must build");
     let tr = BlstmSpectralSegmenter::from_legacy(&tr_map(8, 4, 16), None)
         .expect("transformer must build on the fixture");
-    let (n_lstm, n_tr) = (lstm.get_weights().len(), tr.get_weights().len());
+    let (n_lstm, n_tr) = (
+        lstm.nets()[0].get_weights().len(),
+        tr.nets()[0].get_weights().len(),
+    );
     assert!(n_lstm > 0 && n_tr > 0);
     assert_ne!(
         n_tr, n_lstm,
@@ -352,13 +364,13 @@ fn transformer_cell_type_builds_on_the_tier2_fixture() {
     // either would mean the layout had picked up a dependency it must not have.
     let wide_ff = BlstmSpectralSegmenter::from_legacy(&tr_map(8, 4, 32), None).unwrap();
     assert!(
-        wide_ff.get_weights().len() > n_tr,
+        wide_ff.nets()[0].get_weights().len() > n_tr,
         "Transformer_D_Ff did not reach the cell"
     );
     for (w, h) in [(64usize, 4usize), (8, 8), (2, 2)] {
         let other = BlstmSpectralSegmenter::from_legacy(&tr_map(w, h, 16), None).unwrap();
         assert_eq!(
-            other.get_weights().len(),
+            other.nets()[0].get_weights().len(),
             n_tr,
             "window={w} heads={h} moved the pack length -- neither is a weight"
         );
@@ -367,8 +379,8 @@ fn transformer_cell_type_builds_on_the_tier2_fixture() {
     // Same seam contract as any other cell: a full-length pack round-trips.
     let mut net = BlstmSpectralSegmenter::from_legacy(&tr_map(8, 4, 16), None).unwrap();
     let w: Vec<f64> = (0..n_tr).map(|k| 0.11 - 0.0003 * (k as f64)).collect();
-    net.set_weights(&w).unwrap();
-    assert_eq!(net.get_weights(), w);
+    net.set_packs(std::slice::from_ref(&w)).unwrap();
+    assert_eq!(net.nets()[0].get_weights(), w);
 }
 
 /// A malformed `Transformer_*` value fails LOUDLY at driver construction rather than
