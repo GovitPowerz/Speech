@@ -544,10 +544,6 @@ impl BagOfProcessors {
         &self.processors[pos]
     }
 
-    pub fn processor_mut(&mut self, pos: usize) -> &mut Processor {
-        &mut self.processors[pos]
-    }
-
     /// Port of `BagOfProcessors::isBackPropActivated` (`:73-86`): algo 3/4/5
     /// return a single-element vec from the net's `isBackPropagationActivated`;
     /// algo 6 the 2-element `[sad, lid]` pair (`:80-84`); everything else (here:

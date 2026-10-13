@@ -31,7 +31,7 @@ use crate::features::stats::InputStatistics;
 use crate::legacy_config::{get_f64, get_f64_list};
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
-use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
+use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{
     DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
 };
@@ -147,24 +147,6 @@ impl TdcSegmenter {
     pub fn nb_of_classif(&self) -> Vec<i64> {
         vec![0; self.channels]
     }
-
-    /// `Segmentation::compute_errors`, one call per channel (the Rust container
-    /// is single-channel; the legacy loops channels internally -- see
-    /// `tasks/segmentation.rs`'s module doc for the S6 restructure rationale).
-    /// `hyp` is the caller's post-`get_segmentation` `seg_per_chan` slice.
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
-    }
 }
 
 impl Segmenter for TdcSegmenter {
@@ -264,8 +246,8 @@ impl Segmenter for TdcSegmenter {
         // `seg.compute_errors()` after the FULL channel loop (`:238`); the legacy
         // no-reference branch (Branch A) is a pure `sanitize` + `update_count`
         // side effect on each hypothesis -- discard the (unused, no-reference)
-        // ScoreReport here. Callers wanting scored output call `TdcSegmenter::score`
-        // explicitly afterward.
+        // ScoreReport here. Callers wanting scored output call `compute_errors` per
+        // channel afterward.
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1);
         }
@@ -336,22 +318,6 @@ impl LtsvSegmenter {
 
     pub fn nb_of_classif(&self) -> Vec<i64> {
         vec![0; self.channels]
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (see
-    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
@@ -715,18 +681,10 @@ impl BlstmSignalSegmenter {
     }
 
     /// `getWeightsDerivatives` delegate (`BLSTMSignalSegmenter.cpp:46-48`): the net's
-    /// Nx2 flat derivative matrix (col0 summed deriv, col1 frame count). The
-    /// `Segmenter` trait's default returns an empty matrix; this inherent method (and
-    /// the `Segmenter` override below) surface the real net derivs so the corpus
-    /// gradient harvest reads them.
+    /// Nx2 flat derivative matrix (col0 summed deriv, col1 frame count), which the
+    /// corpus gradient harvest reads.
     pub fn get_weights_derivatives(&self) -> Array2<f64> {
         self.net.get_weights_derivatives()
-    }
-
-    /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators
-    /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
-    pub fn reset_weights_derivatives(&mut self) {
-        self.net.reset_weights_derivatives();
     }
 
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
@@ -735,22 +693,6 @@ impl BlstmSignalSegmenter {
     /// None)`, matching the legacy's in-ctor load without duplicating its semantics.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         self.net.load_weights_file(map, "BLSTM")
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (see
-    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
@@ -1316,34 +1258,12 @@ impl BlstmSpectralSegmenter {
         self.net.get_weights_derivatives()
     }
 
-    /// `resetWeightsDerivatives` delegate: the net resets per-layer grad accumulators
-    /// AND the input-statistics accumulator (`BLSTMNeuralNetwork.cpp:278-287`).
-    pub fn reset_weights_derivatives(&mut self) {
-        self.net.reset_weights_derivatives();
-    }
-
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
     /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
     /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
     /// None)`, matching the legacy's in-ctor load without duplicating its semantics.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         self.net.load_weights_file(map, "BLSTM")
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (see
-    /// [`TdcSegmenter::score`]'s doc for the single-channel-container rationale).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 

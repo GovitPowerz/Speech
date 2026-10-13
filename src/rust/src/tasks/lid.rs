@@ -63,7 +63,7 @@ use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
-use crate::tasks::segmentation_io::{ScoreReport, compute_errors};
+use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{
     DriverConfig, Segmenter, SegmenterConfig, get_targets, lid_to_segmentation,
     results_to_segmentation, smooth_segmentation,
@@ -217,22 +217,6 @@ impl BlstmSpectralLid {
     /// `seg._IsLIDCorrect[chan]` (`:420-425`): 100/0/-1 per channel.
     pub fn is_lid_correct(&self) -> &[i32] {
         &self.is_lid_correct
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (single-channel-container
-    /// rationale, see `TdcSegmenter::score`).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 
     // -- NN weight family (BASE-CLASS delegates, Task 9) ----------------------
@@ -1063,22 +1047,6 @@ impl TwinBlstmSpectralLid {
     ) -> Result<()> {
         self.lid_net
             .save_weights(&crate::io::prefix_basename("LID_", filename), derivs, stats)
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (single-channel-container
-    /// rationale, see [`BlstmSpectralLid::score`]).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 
     /// Port of `getBLSTMLIDInputSequence` (`:139-168`): when the SAD net's

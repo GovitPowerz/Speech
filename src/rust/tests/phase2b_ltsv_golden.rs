@@ -49,7 +49,7 @@ use speech::audio::{Audio, read_audio};
 use speech::features::pipeline::{FeatureConfig, derive_freq_band_ltsv_variant};
 use speech::tasks::sad::LtsvSegmenter;
 use speech::tasks::segmentation::{SegClass, Segmentation};
-use speech::tasks::segmentation_io::{parse_audiodoc_attrs, to_vrcts_string};
+use speech::tasks::segmentation_io::{compute_errors, parse_audiodoc_attrs, to_vrcts_string};
 use speech::tasks::segmenter::Segmenter;
 
 fn config_text(name: &str) -> String {
@@ -236,7 +236,11 @@ fn score_matches_dump() {
     ltsv2.get_segmentation(&mut audio2, &mut hyp, None).unwrap();
 
     let want = common::load_bin_phase2b("ltsv_scores.bin");
-    let reports = LtsvSegmenter::score(&mut hyp, Some(&reference), -1);
+    let reports = hyp
+        .iter_mut()
+        .enumerate()
+        .map(|(chan, seg)| compute_errors(seg, Some(&reference[chan]), -1))
+        .collect::<Vec<_>>();
     for (chan, report) in reports.iter().enumerate() {
         let speech = report.per_class[SegClass::Speech as usize];
         let got = ndarray::Array2::from_shape_vec(

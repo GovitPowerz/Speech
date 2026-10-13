@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 
 use crate::audio::Audio;
 use crate::tasks::segmentation::Segmentation;
-use crate::tasks::segmentation_io::{ScoreReport, compute_errors, load_vrcts};
+use crate::tasks::segmentation_io::{compute_errors, load_vrcts};
 use crate::tasks::segmenter::{DriverConfig, Segmenter, SegmenterConfig};
 
 /// legacy: hard-coded absolute path (`VRCTSpart.cpp:44,46`), not read from config.
@@ -97,22 +97,6 @@ impl VrctsPart {
 
     pub fn nb_of_classif(&self) -> Vec<i64> {
         vec![0; self.channels]
-    }
-
-    /// `Segmentation::compute_errors`, one call per channel (same pattern as
-    /// `TdcSegmenter::score`/`LtsvSegmenter::score`).
-    pub fn score(
-        hyp: &mut [Segmentation],
-        reference: Option<&[Segmentation]>,
-        nb_words: i64,
-    ) -> Vec<ScoreReport> {
-        hyp.iter_mut()
-            .enumerate()
-            .map(|(chan, seg)| {
-                let refc = reference.map(|r| &r[chan]);
-                compute_errors(seg, refc, nb_words)
-            })
-            .collect()
     }
 }
 
