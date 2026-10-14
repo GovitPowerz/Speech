@@ -4681,6 +4681,19 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   binary green); `./lint_code.sh` clean (ruff imports/format/lint + mypy, 81 files). Working tree at
   completion contains ONLY this IMPROVEMENTS.md entry.
 
+  **Live since issue #76:** `tests/mutations/phase6/` (8 patches;
+  `uv run python tests/mutations/run.py phase6`). Items 1 to 7 are the literal edits from the
+  battery's session transcript (the ledger's `task-11-report.md` now holds Phase 10's report).
+  Item 8's edit is rebuilt from this prose: the transcript holds no apply or run of it, so the
+  #76 run is its first observation (CAUGHT and MISSED as stated). Item 7's site `_backprop_inner`
+  takes a `FoldRun` since 42e23f3 (#22) and its catcher builds its run through `BaselineSpec`
+  since cf6c3d0 (#21); the mutated line and the test name are unchanged. Item 1's catcher is the
+  one golden that broke, `test_dcf_matches_perl_oracle[11_hyp_longer_truncate]`. The recorded gaps
+  are MISSED lines: item 3's `test_lid_error_known_confusion_is_a_percentage`, item 4's
+  `phase6_cep.rs::corpus_first_file_consistency` and item 8's
+  `test_cavg_ptarget_constant_is_load_bearing`. Items 4 and 7 carry `requires: corpus`, so without
+  the corpus item 4's synthetic-fixture catch reads SKIPPED too.
+
 ### Mutation battery (Phase 7)
 
 - **[phase7] Mutation battery (Task 10): 6 of 8 battery items break their named catcher exactly

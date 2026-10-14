@@ -1,0 +1,17 @@
+mutation: _backprop_inner runs zero SMORMS3 steps (opt.optimize(inner_steps) -> opt.optimize(0)), the trainer no-ops
+catcher: CAUGHT pytest tests/pyo3/test_phase6_gates.py::test_sad_subset_trains_and_scores
+requires: corpus
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 637c28d..d4c032f 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -333,7 +333,7 @@ def _backprop_inner(
+         return cost, gs, theta  # theta_out is a pass-through (SMORMS3 adds dtheta)
+ 
+     opt = Smorms3(f_df, theta0)
+-    trained = opt.optimize(inner_steps)
++    trained = opt.optimize(0)
+     out = [np.concatenate([trained[k], net_tails[k]]) for k in range(n)]
+     return out, list(opt.hist_f_flat)
+ 

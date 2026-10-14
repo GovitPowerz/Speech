@@ -1,0 +1,18 @@
+mutation: read_cep reads vectorSize as i32 over buf[4..8] (the magic bytes leak in) instead of i16 over buf[4..6]
+catcher: CAUGHT cargo --test phase6_cep multi_record_magic_ignored_empty_skipped
+catcher: MISSED cargo --test phase6_cep corpus_first_file_consistency
+requires: corpus
+
+diff --git a/src/rust/src/audio.rs b/src/rust/src/audio.rs
+index ee86e26..e3abc68 100644
+--- a/src/rust/src/audio.rs
++++ b/src/rust/src/audio.rs
+@@ -715,7 +715,7 @@ fn read_cep(path: &Path) -> anyhow::Result<Audio> {
+         );
+     }
+     let nb_records = nb_records as usize;
+-    let vector_size = i16::from_le_bytes(buf[4..6].try_into().unwrap());
++    let vector_size = i32::from_le_bytes(buf[4..8].try_into().unwrap());
+     // magic = buf[6..8]: read but ignored (legacy only logs it, :223).
+     if vector_size <= 0 {
+         bail!(

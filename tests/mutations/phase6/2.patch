@@ -1,0 +1,19 @@
+mutation: the _REF_SPEECH/_REF_NONSPEECH partition moves RI from speech to non-speech
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_dcf_matches_perl_oracle[02_ri_counts_as_speech]
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_dcf_ri_counts_as_speech_not_nonspeech
+
+diff --git a/src/python/speech/evaluate.py b/src/python/speech/evaluate.py
+index 40937bd..f7b9769 100644
+--- a/src/python/speech/evaluate.py
++++ b/src/python/speech/evaluate.py
+@@ -45,8 +45,8 @@ Interval = tuple[float, float, str]
+ _EPS = 0.00001
+ 
+ # Ref-side kind partitions (:99 non-speech; :107 speech, RI folded into S per :108).
+-_REF_NONSPEECH = frozenset({"NS", "NT", "RX", "RS"})
+-_REF_SPEECH = frozenset({"S", "RI"})
++_REF_NONSPEECH = frozenset({"NS", "NT", "RX", "RS", "RI"})
++_REF_SPEECH = frozenset({"S"})
+ 
+ # Hyp-side kind spellings (:326 accepts both non-speech spellings; :334 speech).
+ _HYP_NONSPEECH = frozenset({"non-speech", "nonspeech"})
