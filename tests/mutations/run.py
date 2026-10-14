@@ -8,10 +8,15 @@ A mutation is `tests/mutations/<battery>/<id>.patch`: a header, then a git diff.
     catcher: <CAUGHT|MISSED> cargo --test <target> <test name>
     catcher: <CAUGHT|MISSED> pytest <node id>
     requires: corpus
+    requires: oracle-libm
 
 `--check` is the cheap half CI runs: every patch applies, every catcher names exactly one test.
 A run applies one mutation, builds what its catchers need, runs each catcher, restores the
-tree, and compares each observed verdict with the expected one.
+tree, and compares each observed verdict with the expected one. A declared precondition the
+host lacks reads every catcher of the mutation as SKIPPED: `corpus` when the corpus directory
+is absent, `oracle-libm` when this host's libm does not reproduce the oracle canaries, the
+verdict the canary-gated comparators (`common::oracle_mode`, `tests/_libm_gate.oracle_strict`)
+relax on, so a one-ULP catch that holds only under a strict comparator is declared, not missed.
 
 Run it with `uv run python`: pytest catchers and `maturin` run under the interpreter that runs
 this script. Stdlib only, so the Rust CI job's `python3` (>= 3.10) runs `--check --kind cargo`.
@@ -21,8 +26,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import math
 import os
 import re
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -30,9 +37,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = ("CAUGHT", "MISSED")
-REQUIRES = ("corpus",)
+REQUIRES = ("corpus", "oracle-libm")
 # `tests/conftest.py` and `src/rust/tests/common/mod.rs` both resolve the corpus here.
 CORPUS = Path("data/LRE03-LRE07")
+# The fixture both canary gates recompute: 2 x 18 column-major, [0,10) cos, [10,15) log, [15,18) exp.
+CANARIES = Path("tests/reference_data/phase1/libm_canaries.bin")
 CARGO_DIR = Path("src/rust")
 MATURIN = [sys.executable, "-m", "maturin", "develop", "--release", "--manifest-path", "src/rust/speech-py/Cargo.toml"]
 
@@ -109,6 +118,27 @@ def parse_patch(name: str, text: str) -> Mutation:
         raise PatchError(f"{name}: no catcher: line")
     files = tuple(m.group(1) for line in lines[diff_at:] if (m := re.match(r"diff --git a/\S+ b/(\S+)", line)))
     return Mutation(name, descriptions[0], tuple(catchers), tuple(requires), files, text)
+
+
+def oracle_libm(root: Path) -> bool:
+    """True when this host's libm reproduces the oracle canaries bit for bit.
+
+    The same fixture, the same per-column functions and the same `SPEECH_ORACLE_LIBM` override
+    as `common::oracle_mode` and `tests/_libm_gate.oracle_strict`, so the runner and the
+    catchers read one verdict about the host.
+    """
+    forced = os.environ.get("SPEECH_ORACLE_LIBM")
+    if forced in ("strict", "ulp"):
+        return forced == "strict"
+    raw = (root / CANARIES).read_bytes()
+    rows, cols = struct.unpack("<qq", raw[:16])
+    values = struct.unpack(f"<{rows * cols}d", raw[16 : 16 + 8 * rows * cols])
+    for k in range(cols):
+        x, want = values[k * rows], values[k * rows + 1]
+        got = math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x)
+        if got.hex() != want.hex():
+            return False
+    return True
 
 
 def cargo_verdict(out: str) -> tuple[str, str]:
@@ -215,7 +245,7 @@ def _run_catcher(root: Path, catcher: Catcher) -> tuple[str, str]:
     return pytest_verdict(res.returncode, res.stdout)
 
 
-def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Verdict]:
+def run_mutation(root: Path, mutation: Mutation, corpus: bool, oracle_libm: bool) -> list[Verdict]:
     def every(observed: str, failure: str) -> list[Verdict]:
         return [Verdict(mutation, c, observed, failure) for c in mutation.catchers]
 
@@ -223,6 +253,8 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool) -> list[Verdict]:
         return every("STALE", "patch does not apply")
     if "corpus" in mutation.requires and not corpus:
         return every("SKIPPED", f"{CORPUS} absent")
+    if "oracle-libm" in mutation.requires and not oracle_libm:
+        return every("SKIPPED", "this host's libm differs from the oracle canaries")
     if _git_apply(root, mutation).returncode:
         raise RuntimeError(f"{mutation.name}: git apply failed after --check passed")
     rebuilt = False
@@ -308,11 +340,12 @@ def main(argv: list[str], root: Path = ROOT) -> int:
         print("\n".join([*problems, f"{len(mutations)} mutations checked, {len(problems)} problems"]))
         return 1 if problems else 0
     corpus = (root / CORPUS).is_dir()
+    strict = any("oracle-libm" in m.requires for m in mutations) and oracle_libm(root)
     print("| battery | # | mutation | catcher | expected | observed |\n|---|---|---|---|---|---|", flush=True)
     results: list[Verdict] = []
     for m in mutations:
         battery, _, ident = m.name.partition("/")
-        for r in run_mutation(root, m, corpus):
+        for r in run_mutation(root, m, corpus, strict):
             print(f"| {battery} | {ident} | {m.description} | {r.catcher.label()} | {r.catcher.expected} | {r.observed} |", flush=True)
             results.append(r)
     if any(r.failure for r in results):

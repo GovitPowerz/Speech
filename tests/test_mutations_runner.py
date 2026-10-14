@@ -7,11 +7,14 @@ repository whose catchers are pytest node ids, so no cargo build runs here.
 
 from __future__ import annotations
 
+import math
+import struct
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests._libm_gate import oracle_strict
 from tests.mutations import run as runner
 
 _DIFF = """diff --git a/pkg/mod.py b/pkg/mod.py
@@ -39,11 +42,12 @@ def test_header_parses_every_key() -> None:
             "catcher: MISSED cargo --test phase7_parity_sad sad_parity_exact_vs_fast\n"
             "catcher: MISSED pytest tests/test_mod.py::test_value\n"
             "requires: corpus\n"
+            "requires: oracle-libm\n"
         ),
     )
     assert m.name == "b/1a"
     assert m.description == "VALUE off by one"
-    assert m.requires == ("corpus",)
+    assert m.requires == ("corpus", "oracle-libm")
     assert m.files == ("pkg/mod.py",)
     assert [(c.expected, c.kind, c.target, c.name) for c in m.catchers] == [
         ("CAUGHT", "cargo", "--lib", "tasks::segmenter::tests::hyst_step"),
@@ -239,9 +243,9 @@ def _repo(tmp_path: Path, patches: dict[str, str]) -> Path:
     return root
 
 
-def _verdicts(root: Path, name: str, corpus: bool = False) -> list[str]:
+def _verdicts(root: Path, name: str, corpus: bool = False, oracle_libm: bool = False) -> list[str]:
     [mutation] = runner.load(root, [name])
-    return [r.observed for r in runner.run_mutation(root, mutation, corpus)]
+    return [r.observed for r in runner.run_mutation(root, mutation, corpus, oracle_libm)]
 
 
 def _clean(root: Path) -> bool:
@@ -254,7 +258,7 @@ _OFF_BY_ONE = _patch("mutation: off by one\ncatcher: CAUGHT pytest t/test_mod.py
 def test_run_reads_caught_and_missed_and_restores_the_tree(tmp_path: Path) -> None:
     root = _repo(tmp_path, {"b/1": _OFF_BY_ONE})
     [mutation] = runner.load(root, ["b/1"])
-    results = runner.run_mutation(root, mutation, False)
+    results = runner.run_mutation(root, mutation, False, False)
     assert [(r.observed, r.catcher.expected) for r in results] == [("CAUGHT", "CAUGHT"), ("MISSED", "MISSED")]
     assert "assert 2 == 1" in results[0].failure
     assert _clean(root)
@@ -283,6 +287,44 @@ def test_requires_corpus_skips_when_the_corpus_is_absent(tmp_path: Path) -> None
     assert _verdicts(root, "b/1", corpus=False) == ["SKIPPED"]
     assert _verdicts(root, "b/1", corpus=True) == ["CAUGHT"]
     assert _clean(root)
+
+
+def test_requires_oracle_libm_skips_off_the_oracle_host(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {"b/1": _patch("mutation: m\ncatcher: CAUGHT pytest t/test_mod.py::test_value\nrequires: oracle-libm\n")})
+    assert _verdicts(root, "b/1", oracle_libm=False) == ["SKIPPED"]
+    assert _verdicts(root, "b/1", oracle_libm=True) == ["CAUGHT"]
+    assert _clean(root)
+
+
+def _canaries(root: Path, outputs: list[float]) -> None:
+    # The fixture's layout: 2 x 18 column-major, [0,10) cos, [10,15) log, [15,18) exp.
+    inputs = [0.1 * k + 0.3 for k in range(18)]
+    path = root / runner.CANARIES
+    path.parent.mkdir(parents=True)
+    path.write_bytes(struct.pack("<qq", 2, 18) + struct.pack("<36d", *(v for x, y in zip(inputs, outputs, strict=True) for v in (x, y))))
+
+
+def test_oracle_libm_recomputes_the_canary_fixture_with_this_libm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SPEECH_ORACLE_LIBM", raising=False)
+    inputs = [0.1 * k + 0.3 for k in range(18)]
+    outputs = [math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x) for k, x in enumerate(inputs)]
+    _canaries(tmp_path, outputs)
+    assert runner.oracle_libm(tmp_path)
+    outputs[17] = math.nextafter(outputs[17], math.inf)
+    _canaries(tmp_path / "off", outputs)
+    assert not runner.oracle_libm(tmp_path / "off")
+
+
+def test_oracle_libm_honours_the_forced_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPEECH_ORACLE_LIBM", "strict")
+    assert runner.oracle_libm(tmp_path)
+    monkeypatch.setenv("SPEECH_ORACLE_LIBM", "ulp")
+    assert not runner.oracle_libm(tmp_path)
+
+
+def test_oracle_libm_agrees_with_the_catchers_gate() -> None:
+    # One fixture, one override, one verdict: the runner cannot skip what a catcher runs strict.
+    assert runner.oracle_libm(runner.ROOT) == oracle_strict()
 
 
 def test_a_skipped_catcher_is_skipped(tmp_path: Path) -> None:
