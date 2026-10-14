@@ -3,7 +3,7 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_requires_corpus_skip
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -248,7 +248,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) ->
+@@ -246,7 +246,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) ->
  
      if _git_apply(root, mutation, "--check").returncode:
          return every("STALE", "patch does not apply")

@@ -318,14 +318,35 @@ def test_oracle_libm_honours_the_forced_mode(tmp_path: Path, monkeypatch: pytest
     assert runner.oracle_libm(tmp_path)
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "ulp")
     assert not runner.oracle_libm(tmp_path)
+
+
+def test_oracle_libm_agrees_with_the_catchers_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One fixture, one verdict: the runner cannot skip what a catcher runs strict. Unforced and
+    # uncached, or both sides read a set override and agree by construction.
+    monkeypatch.delenv("SPEECH_ORACLE_LIBM", raising=False)
+    assert runner.oracle_libm(runner.ROOT) == oracle_strict.__wrapped__()
+
+
+def test_main_skips_by_the_oracle_libm_and_refuses_a_mistyped_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _repo(tmp_path, {"b/1": _patch("mutation: m\ncatcher: CAUGHT pytest t/test_mod.py::test_value\nrequires: oracle-libm\n"), "b/2": _OFF_BY_ONE})
+    monkeypatch.setenv("SPEECH_ORACLE_LIBM", "strict")
+    assert runner.main(["b/1"], root) == 0
+    monkeypatch.setenv("SPEECH_ORACLE_LIBM", "ulp")
+    assert runner.main(["b/1"], root) == 1
+    assert "| b | 1 | m | pytest t/test_mod.py::test_value | CAUGHT | SKIPPED |" in capsys.readouterr().out
+    # Refused even when no selected mutation declares the precondition.
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "Strict")
-    with pytest.raises(SystemExit, match="strict|ulp"):
-        runner.oracle_libm(tmp_path)
+    assert runner.main(["b/2"], root) == 2
+    assert "strict|ulp" in capsys.readouterr().err
+    assert _clean(root)
 
 
-def test_oracle_libm_agrees_with_the_catchers_gate() -> None:
-    # One fixture, one override, one verdict: the runner cannot skip what a catcher runs strict.
-    assert runner.oracle_libm(runner.ROOT) == oracle_strict()
+def test_oracle_strict_refuses_a_mistyped_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPEECH_ORACLE_LIBM", "Strict")
+    with pytest.raises(ValueError, match="strict|ulp"):
+        oracle_strict.__wrapped__()
 
 
 def test_a_skipped_catcher_is_skipped(tmp_path: Path) -> None:

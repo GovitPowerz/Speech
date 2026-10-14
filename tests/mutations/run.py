@@ -124,8 +124,6 @@ def oracle_libm(root: Path) -> bool:
     """True when this host's libm reproduces the oracle canaries bit for bit (the comparators' gate)."""
     forced = os.environ.get("SPEECH_ORACLE_LIBM")
     if forced is not None:
-        if forced not in ("strict", "ulp"):
-            sys.exit(f"SPEECH_ORACLE_LIBM must be strict|ulp, got {forced!r}")  # as common::oracle_mode
         return forced == "strict"
     raw = (root / CANARIES).read_bytes()
     rows, cols = struct.unpack_from("<qq", raw)
@@ -336,6 +334,11 @@ def main(argv: list[str], root: Path = ROOT) -> int:
         problems = check(root, mutations, kinds)
         print("\n".join([*problems, f"{len(mutations)} mutations checked, {len(problems)} problems"]))
         return 1 if problems else 0
+    forced = os.environ.get("SPEECH_ORACLE_LIBM")
+    if forced not in (None, "strict", "ulp"):
+        # `common::oracle_mode` panics on it: every Rust catcher reaching a comparator would read CAUGHT.
+        print(f"SPEECH_ORACLE_LIBM must be strict|ulp, got {forced!r}", file=sys.stderr)
+        return 2
     corpus = (root / CORPUS).is_dir()
     # Read only when a selected mutation declares it: a tree without the fixture runs the rest.
     strict = any("oracle-libm" in m.requires for m in mutations) and oracle_libm(root)

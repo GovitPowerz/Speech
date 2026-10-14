@@ -3,7 +3,7 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_a_tree_that_does_not
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -145,7 +145,7 @@
+@@ -171,7 +171,7 @@
  def build_verdict(out: str) -> tuple[str, str]:
      """The verdict of every catcher when the mutated tree's catcher targets do not build."""
      first = next((line for line in out.splitlines() if line.startswith("error")), "build failed")

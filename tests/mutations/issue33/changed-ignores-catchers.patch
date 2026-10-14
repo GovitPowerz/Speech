@@ -3,7 +3,7 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_changed_since_select
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -280,7 +280,7 @@
+@@ -308,7 +308,7 @@
      [base] = git("merge-base", ref, "HEAD")
      changed = set(git("diff", "--name-only", base)) | set(git("ls-files", "--others", "--exclude-standard"))
      return [
