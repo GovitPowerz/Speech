@@ -513,6 +513,9 @@ path), not to track the real number. Verified non-vacuous by manual mutation (te
 budget to `0.001x`, confirmed the assertion fails, reverted -- see the task report; the same
 mutation is Task 10's mutation-battery item 7).
 
+**Live since issue #76:** `tests/mutations/phase7/7.patch`, the battery's `exact_wall * 10.0`
+operand: the same catcher and verdict, so the `0.001x` budget edit has no patch of its own.
+
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5).** SUPERSEDED for the memory half -- see Phase 10's f32-mel section (the widen is deleted; the
 SAD memory bound is now <= 0.85x of exact, measured 0.743x). Future local runs of this exact recipe
@@ -1031,6 +1034,9 @@ boundary had moved. Adjudicated (never widened, spec R1/R2) to a genuine PHASE-8
   profile (burst A, a 1.6 s merging gap, an 8 s burst B that stays open past A's emission point).
   MUTATION-VERIFIED: reverting the clamp fails three legs (`pending_open_segment_blocks_emission`,
   `prefix_consistency_holds`, `chunk_invariance`).
+- LIVE SINCE ISSUE #76: `tests/mutations/phase9/stream-pending-clamp.patch`. Since 723656b (the
+  incremental resmooth) the revert fails `chunk_invariance` only; the other two legs pass, bisected
+  (all three fail at cba4b96 and at 723656b~1).
 - COVERAGE LESSON, recorded honestly: with the clamp reverted the ENTIRE phase-8 gate stays GREEN
   (19/19) and so does the phase-9 causal gate (19/19). Neither synthetic fixture nor the crafted
   60 s tuple-A fixture ever produced the retraction -- only real data with a real trained causal
@@ -1328,6 +1334,11 @@ executed; the Engine path runs a real corpus forward AND backward THROUGH the en
 by mutation: each single-arm swap fails 5 legs. The consistent DOUBLE swap that stays
 self-consistent here is closed by Task 6's independent `FastCfc` implementation instead (see
 the fast-parity rows), which is the note now carried in the seam file's own docstring.
+
+**Live since issue #76:** `tests/mutations/phase10/cfc-forward-arm.patch` and
+`cfc-backward-arm.patch`, each naming the five legs. The Task 3 probes swapped the forward and
+backward arms only; the derivative-harvest arm has no reverse twin, was never swapped, and has no
+patch.
 
 ### Sizing (spec S1.4) -- both closed forms, PINNED not prose
 
@@ -2067,6 +2078,9 @@ same numbers, in the same order, from the same reads. The retain path's indexing
 untouched. `nn::cells::mamba::tests::forward_is_bit_identical_without_the_cache` is the pin
 (3 sequence lengths incl. `T = 1` and `T = 2`); a mutation collapsing `tp` to `th` fails it.
 
+**Live since issue #76:** `tests/mutations/phase10/mamba-rolling-tp.patch`, rider R10's mutation,
+with its two seam legs.
+
 ### The measurement (spec S10.4)
 
 `speech bench --repeat=1 --path=exact`, 3 INDEPENDENT fresh processes per row (the phase-7/9
@@ -2157,6 +2171,9 @@ Both are pinned by `#[should_panic]` legs with a retaining contrast beside them,
 R6 clone legs (a per-lane bag clone under the flag carries EMPTY caches, asserted at the cell,
 the network and the `BlstmNetwork` level). Inverting the gating (S9.4 mutation 7) fails 7 Rust
 legs and all 4 phase-10 seam legs.
+
+**Live since issue #76:** `tests/mutations/phase10/7.patch`, its 20 catchers the battery's full
+list (the 7 `inference_only_tests` legs and the 4 seam legs among them).
 
 ## Phase 10 -- the NAMED follow-ons (nothing lost, nothing promised)
 
