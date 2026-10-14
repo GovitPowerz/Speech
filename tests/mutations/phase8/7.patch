@@ -1,0 +1,18 @@
+mutation: audio::apply_fixed_gain divides by gain * gain instead of gain (the offline fixed gain applied twice)
+catcher: CAUGHT cargo --test phase8_frozen_norm fixed_gain_replaces_normalization
+catcher: CAUGHT cargo --test phase8_gate stream_finish_equals_offline_frozen
+catcher: CAUGHT cargo --test phase8_gate stream_finish_equals_offline_calibrated
+
+diff --git a/src/rust/src/audio.rs b/src/rust/src/audio.rs
+index ee86e26..b436b28 100644
+--- a/src/rust/src/audio.rs
++++ b/src/rust/src/audio.rs
+@@ -504,7 +504,7 @@ fn apply_fixed_gain(data: &mut Array2<f64>, gain: f64) {
+     let (channels, frames) = data.dim();
+     for c in 0..channels {
+         for k in 0..frames {
+-            data[[c, k]] /= gain;
++            data[[c, k]] /= gain * gain;
+         }
+     }
+ }

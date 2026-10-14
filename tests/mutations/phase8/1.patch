@@ -1,0 +1,18 @@
+mutation: StreamFrontEnd::push resets prev_gained to 0.0 on every call (the cross-chunk pre-emphasis carry becomes chunk-local)
+catcher: CAUGHT cargo --test phase8_stream_frontend preemph_carry_across_chunks
+catcher: CAUGHT cargo --test phase8_stream_frontend frontend_preemph_noise_bit_equal_offline
+catcher: MISSED cargo --test phase8_stream_frontend frontend_rows_bit_equal_offline
+catcher: MISSED cargo --test phase8_stream_frontend frontend_chunk_invariance
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..c0d47f6 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -227,6 +227,7 @@ impl StreamFrontEnd {
+     /// narrow to f32). Buffers only -- framing/FFT/assembly happen in
+     /// [`take_ready_rows`](Self::take_ready_rows) (which has the pipeline).
+     pub fn push(&mut self, samples: &[f32]) {
++        self.prev_gained = 0.0;
+         self.samples.reserve(samples.len());
+         for &x in samples {
+             // 1. fixed gain in f64 (the raw i16/32768 values widen losslessly).

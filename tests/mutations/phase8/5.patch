@@ -1,0 +1,18 @@
+mutation: StreamDecision::resmooth_and_emit threshold frontier - holdback -> frontier - holdback / 2.0 (the smoothing holdback halved)
+catcher: MISSED cargo --test phase8_gate prefix_consistency_e2e
+catcher: CAUGHT cargo --test phase8_stream_decision prefix_consistency_holds
+catcher: CAUGHT cargo --test phase8_gate prefix_consistency_near_reach_profile
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..08c5170 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -1604,7 +1604,7 @@ impl StreamDecision {
+         if let Some(pending) = self.hyst.pending_begin() {
+             frontier = frontier.min(pending);
+         }
+-        let threshold = frontier - self.holdback;
++        let threshold = frontier - self.holdback / 2.0;
+ 
+         // FREEZE WHAT WE EMIT: the cut advances to the SAME threshold the emission uses
+         // (one frontier, one holdback, one act), then the splice is recomputed against the

@@ -1,0 +1,27 @@
+mutation: StreamingLidSession::push_utterance finalizes the running aggregate before fold_entry (one entry behind)
+catcher: CAUGHT cargo --test phase8_stream_lid running_aggregate_is_prefix_correct_phseq
+catcher: CAUGHT cargo --test phase8_stream_lid running_aggregate_is_prefix_correct_cep
+catcher: CAUGHT cargo --test phase8_stream_lid per_utterance_equals_offline_phseq
+catcher: CAUGHT cargo --test phase8_stream_lid per_utterance_equals_offline_cep
+catcher: CAUGHT pytest tests/pyo3/test_phase10_stream_lid.py::test_running_aggregate_is_prefix_correct[tiny_ok.plp-0]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_stream_lid.py::test_running_aggregate_is_prefix_correct[multi_ok.plp-0]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_self_consistent[tiny_ok.plp-0]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_self_consistent[multi_ok.plp-0]
+catcher: MISSED pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_literal_oracle_values[tiny_ok.plp-0]
+catcher: MISSED pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_literal_oracle_values[multi_ok.plp-0]
+catcher: MISSED pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_literal_oracle_values[tiny_ok.plp-1]
+
+diff --git a/src/rust/src/fast/stream_lid.rs b/src/rust/src/fast/stream_lid.rs
+index 811f5d2..82eb708 100644
+--- a/src/rust/src/fast/stream_lid.rs
++++ b/src/rust/src/fast/stream_lid.rs
+@@ -128,8 +128,8 @@ impl StreamingLidSession {
+     /// the finalized running aggregate. A too-short / below-`MinNbOfFrames` entry is SKIPPED
+     /// (empty `scores`, `None` argmax), exactly as the offline loop's `:1450` guard.
+     pub fn push_utterance(&mut self, feat: &Array2<f64>) -> UtteranceScore {
+-        let outcome = self.twin.fold_entry(feat, &self.params, &mut self.acc);
+         let running_aggregate = finalize_lid_channel(&self.acc, &self.params);
++        let outcome = self.twin.fold_entry(feat, &self.params, &mut self.acc);
+         match outcome {
+             Some(o) => UtteranceScore {
+                 is_correct: Some(o.argmax == self.params.ti),

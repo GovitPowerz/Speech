@@ -1,0 +1,16 @@
+mutation: StreamFrontEnd::assemble_range window_lo from.saturating_sub(reach) -> from.saturating_sub(reach - 1) (the delta-context window drops its leftmost periodogram row)
+catcher: CAUGHT cargo --test phase8_stream_frontend frontend_rows_bit_equal_offline
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..a712203 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -345,7 +345,7 @@ impl StreamFrontEnd {
+         to: usize,
+         window_hi: usize,
+     ) -> FastMatrix {
+-        let window_lo = from.saturating_sub(self.reach);
++        let window_lo = from.saturating_sub(self.reach - 1);
+         debug_assert!(
+             window_lo >= self.pgram_base,
+             "assemble window underruns the ring"

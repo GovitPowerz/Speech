@@ -1,0 +1,16 @@
+mutation: StreamFrontEnd::pgram_ready (n - 1 - hw) / shift + 1 -> (n - hw) / shift + 1 (a frame marked ready one sample before its right edge arrives)
+catcher: CAUGHT cargo --test phase8_stream_frontend frontend_chunk_invariance
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..d85dd1d 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -266,7 +266,7 @@ impl StreamFrontEnd {
+         if n < hw + 1 {
+             0
+         } else {
+-            (n - 1 - hw) / self.shift_frames + 1
++            (n - hw) / self.shift_frames + 1
+         }
+     }
+ 

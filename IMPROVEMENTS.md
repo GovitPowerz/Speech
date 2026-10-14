@@ -4969,6 +4969,21 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   errors row. Runs on all five fixtures (phSeq s1/s2/s3, cep tiny_ok/multi_ok). Added GREEN on the
   first run (no port fix needed); committed WITH this battery record and disclosed in the commit body.
 
+  **Live since issue #76:** `tests/mutations/phase8/` (9 patches: items 1 to 8 and item 7's floor
+  half as `7-floor`; `uv run python tests/mutations/run.py phase8`). Every edit is the literal one,
+  recovered from the battery's session transcript, except `7-floor`, the gap recorded above (both
+  `1e-3` floors dropped), never applied by the battery and MISSED on item 7's three catchers. Item 9
+  is a test addition and has no patch. Items 4 and 7's frozen and calibrated equivalence legs are
+  `phase8_gate.rs::stream_finish_equals_offline_frozen` and `_calibrated`. Item 1's two MISSED
+  gain-only legs restate the inertness reasoning above; the battery's `preemph` filter never ran
+  them. Item 5's line is unchanged but its verdicts moved, bisected: this table reproduces at
+  e9c6d67; cba4b96 (the Phase 9 `pending_begin` clamp) turned `prefix_consistency_e2e` green, and
+  723656b (the incremental resmooth, whose freeze cut takes the same threshold) made
+  `phase8_stream_decision.rs::prefix_consistency_holds` and
+  `phase8_gate.rs::prefix_consistency_near_reach_profile` catch the retraction, so the patch
+  expects e2e MISSED and those two CAUGHT. Item 8's patch also carries the Phase 10 battery's item
+  8a catchers, the same edit.
+
 ### Mutation battery (Phase 9)
 
 - **[phase9] Mutation battery (Task 10): 8/8 battery items break A named catcher via an
