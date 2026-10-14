@@ -1,4 +1,4 @@
-mutation: save_and_update drops the costLID = -1.0 no-speech gate (legacy :465) before update_weights
+mutation: save_and_update drops the costLID = -1.0 no-speech gate (legacy :465) before update_weights (phase4b item 6 too)
 catcher: CAUGHT cargo --test phase4a_save_update update_called_with_neg_costlid
 catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_ns_costlid_gate_live
 

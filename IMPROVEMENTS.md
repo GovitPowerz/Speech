@@ -2003,7 +2003,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 
   **Live since issue #76:** `tests/mutations/phase4a/` (6 patches, one per item;
   `uv run python tests/mutations/run.py phase4a`). Every edit is the literal one from the task
-  ledger. Items 1 and 2 carry the Task 10 catchers (`phase4b_backlog.rs::fold_order_ascending_golden`,
+  ledger, re-targeted where noted. Items 1 and 2 carry the Task 10 catchers (`phase4b_backlog.rs::fold_order_ascending_golden`,
   `best_cost_gate_skips_on_exact_tie`) beside their original MISSED ones; the backlog entry below
   restates the same two mutations and has no patch of its own. Item 2's gate is the one 46dd6d2
   (#25) merged across the four per-algo arms, so `>=` now reaches every trainable algo. Items 3 and
@@ -2014,7 +2014,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   MISSED (the same reading as `issue23/3a-3b`). Item 6's patch also carries the Phase 4b battery's
   item 6 catcher, `phase4b_corpus_lid.rs::twin_train_ns_costlid_gate_live`: one site, one edit.
   Item 1's catch is about one ULP through `assert_oracle_eq`, so it holds only where the
-  comparator runs strict (the Apple-libm oracle host).
+  comparator runs strict (the Apple-libm oracle host; a declared precondition is #78).
 
 - **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
   (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely
@@ -2741,9 +2741,11 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   break their golden as designed; 1 genuine gap (item 7) reported honestly rather than papered
   over. Full transcript (diffs, commands, exact output) in
   `.superpowers/sdd/task-11-report.md`.
+
   **Live since issue #76:** `tests/mutations/phase4b/` (5 patches, items 1, 2, 3, 5 and 7;
   `uv run python tests/mutations/run.py phase4b`). Every edit is the literal one, recovered from
-  the battery's session transcript (the ledger's `task-11-report.md` now holds Phase 10's report).
+  the battery's session transcript (the ledger's `task-11-report.md` now holds Phase 10's report),
+  re-targeted where noted.
   Two items share a site with an older or newer live patch and have none of their own: item 4's
   `save_weights_lid` prefix moved into `training_policy`'s algo 6 arm in 46dd6d2 (#25), where
   `issue25/2` applies the same edit against the same catcher; item 6's gate is `phase4a/6`, which
@@ -2751,9 +2753,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `LidResult::from_encoded` (e767121, b489687, #23) and is mutated there; its error leg now reads
   MISSED: the two rows that lose their target are skipped since the F5 fix (53de2ca), their
   classes then hold no row, and `confusion_error` scores an empty class at 100% error exactly as
-  it scored their single miss, so the error stays 200/3 (the matrix leg still fails). Item 5's `TwinLid` arm
-  in `get_weights_derivatives` became one walk over `Segmenter::nets()` in 46dd6d2; the patch
-  reverses that walk, which reorders only the Twin's two nets. Item 7's gap is MISSED on
+  it scored their single miss, so the error stays 200/3 (the matrix leg still fails). Item 5's
+  `TwinLid` arm in `get_weights_derivatives` became one walk over `Segmenter::nets()` in 46dd6d2;
+  the patch reverses that walk, which reorders only the Twin's two nets. Item 7's gap is MISSED on
   `phase4b_twin_golden.rs::boundaries_match_dump`, the leg the battery's diagnostic ran.
 
 - **[phase4c] SMORMS3.m header mislabeled "Sum of Functions Optimizer (SFO)"**
@@ -3681,7 +3683,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   "cascade" catchers are the four the run log named; item 2 carries the plan's
   `test_smorms3_trajectory_bit_exact` as MISSED and item 8 `test_create_batches_sub_and_rotation`
   as MISSED. Item 2's catch is one ULP of theta read through `assert_f64_close`, so it is
-  bit-exact only where `oracle_strict()` holds.
+  bit-exact only where `oracle_strict()` holds (a declared precondition is #78).
 
 - **[phase4c/4d->phase5] `get_new_batch`'s two `while len(batch) < nbOfCasesPerBatch` loops
   had NO iteration cap -- a fully worst-excluded rotation state spins forever -- FIXED
@@ -4603,7 +4605,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (505 passed) + `cd src/rust && cargo test` ran once at the end, both green; working
   tree at completion contains ONLY this IMPROVEMENTS.md entry.
 
-  **Live since issue #76:** `tests/mutations/phase5/` (12 patches: item 7 is `7-rust` and
+  **Live since issue #76:** `tests/mutations/phase5/` (11 patches: item 7 is `7-rust` and
   `7-python`, applied one at a time as the battery ran them;
   `uv run python tests/mutations/run.py phase5`). Every edit starts from the literal one in the
   battery's session transcript. Three sites moved and were re-targeted: item 1's
@@ -4612,13 +4614,12 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   loops read the decoded target since #23 (b489687 in Rust, ed47ea9 in Python), and the sticky
   hoist is rebuilt on that form; item 11's `_modern_config_text` and its catcher
   `test_config_texts_single_eval_are_epochs_zero_f11` were removed in 42e23f3 (#22), where
-  `FoldRun` became the rule's one owner, so the patch sets `Epochs 1` there (every fold, not only
-  the modern one) against that commit's `test_fold_run_forces_epochs_zero_on_every_fold`; the two
-  `_eval_config_text` scope legs went in the same commit. Item 5's throwaway test went with its
+  `FoldRun` became the rule's one owner, and the two `_eval_config_text` scope legs went in the
+  same commit: item 11 is now `issue22/1`, the same `FoldRun` line, whose catchers include that
+  commit's `test_fold_run_forces_epochs_zero_on_every_fold`. Item 5's throwaway test went with its
   builder in 42e23f3; its claim is rebuilt on the committed gate, whose own trainer is made
   stagnant (`opt.optimize(0)`) and must fail `test_from_scratch_sad_converges`; the zero-margin
-  half of the demonstration has no patch. Item 11 and `issue22/1` mutate the same `FoldRun` line
-  with different edits and stay two mutations.
+  half of the demonstration has no patch.
 
 ### Mutation battery (Phase 6)
 
@@ -4842,7 +4843,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   the battery's session transcript. Item 6 is two patches: `6-literal`, the named `result_vec2`
   edit, MISSED on both `phase7_parity_lid` legs as recorded, and `6-faithful`, the
   `self_normalize_f32` variant, CAUGHT; the variant's site, the inline Mode-7 scoring body of
-  `FastTwinLid::get_segmentation`, moved into `score_lid_entry` in c8444da (Phase 8). Item 5's
+  `FastTwinLid::get_segmentation`, moved into `score_lid_entry` in c8444da (Phase 8). Item 1's
+  literal edit sits in the per-layer `build_lstm_layer` closure, so it scales every LSTM layer's
+  input block, not only the forward layer 0 this entry names. Item 5's
   unnamed fourth failure is `pipeline_parity_dc_offset_branch`. Item 7 is the battery's
   `exact_wall * 10.0` operand; RESULTS.md's Task 7 `0.001x` budget check names the same catcher
   and verdict and has no patch of its own. Item 8 is the designed no-op: the run named four test
@@ -5181,7 +5184,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `test_slstm_pack_is_reproducible_block_by_block` were removed in bea8ea4 (#27), where the pack
   order became the Rust `weight_layout` (the Rust-side block swap is `issue27/1`). Items 6c and 8
   are re-targeted from the deleted builders to the name-keyed `_EXCEPTIONS` table in
-  `init_weights.py` (6c moves the `b_f` key to `b_o`, 8 deletes the `A_log` entry so the block takes
+  `init_weights.py` (6c moves the `b_f` key to `b_o`, a key the transformer's attention-output
+  bias shares, so under `forget_bias_one` that block seeds 1.0 too, read by no catcher; 8 deletes the `A_log` entry so the block takes
   the weight-kind draw), against the bea8ea4 successors of their catchers; item 8 needs the corpus
   for its two `test_phase9_gates.py` MISSED legs. Item 3's
   `mamba_without_the_adapter_matches_the_exact_cell` is CAUGHT as this entry states, though the
@@ -5494,6 +5498,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   rolling index, which is rider R10's mutation too and carries its two seam legs, and the CfC seam
   tier's `cfc-forward-arm` and `cfc-backward-arm`, each naming the five legs the Task 3 probes
   failed. The derivative-harvest arm that prose lists has no patch: no swap of it was ever run.
+  Rider R9 is a measurement, not a mutation, and has no patch.
 
 ## Complete-as-portable closures (Phase 4d)
 

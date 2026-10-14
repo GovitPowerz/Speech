@@ -1,4 +1,4 @@
-mutation: _LIGHT_SUBS loses the (euh|hm+|mm+|eh|huhum|hum) filler entry (the legacy :29 rule)
+mutation: _LIGHT_SUBS loses the euh/hm+/mm+/eh/huhum/hum filler entry (the legacy :29 rule)
 catcher: CAUGHT pytest tests/test_phase4d_stm.py::test_light_filler_class1_adjacent_tokens_alternate
 catcher: CAUGHT pytest tests/test_phase4d_stm.py::test_normalize_stm_light_matches_perl_oracle[case2]
 

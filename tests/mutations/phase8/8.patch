@@ -1,4 +1,4 @@
-mutation: StreamingLidSession::push_utterance finalizes the running aggregate before fold_entry (one entry behind)
+mutation: StreamingLidSession::push_utterance finalizes the running aggregate before fold_entry (one entry behind) (phase10 item 8a too)
 catcher: CAUGHT cargo --test phase8_stream_lid running_aggregate_is_prefix_correct_phseq
 catcher: CAUGHT cargo --test phase8_stream_lid running_aggregate_is_prefix_correct_cep
 catcher: CAUGHT cargo --test phase8_stream_lid per_utterance_equals_offline_phseq
