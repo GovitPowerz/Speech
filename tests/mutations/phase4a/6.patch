@@ -1,0 +1,18 @@
+mutation: save_and_update drops the costLID = -1.0 no-speech gate (legacy :465) before update_weights
+catcher: CAUGHT cargo --test phase4a_save_update update_called_with_neg_costlid
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_ns_costlid_gate_live
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 706d4bd..10a0a28 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -860,9 +860,6 @@ impl BagOfProcessors {
+ 
+             // legacy: :465 costLID = -1.0 when totalSpeechDuration < 1e-3. ORDER:
+             // after save_weights, before update_weights.
+-            if total_speech_duration < 1e-3 {
+-                cost_lid = -1.0;
+-            }
+             // legacy: :466 updateWeights call -- AFTER the override.
+             self.update_weights(ii, cost, bad_classif, cost_lid, bad_lid_classif, derivs);
+         }

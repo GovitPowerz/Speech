@@ -1,0 +1,17 @@
+mutation: run_epoch folds the per-file contributions in descending file order (per_file.sort_by_key *j -> std::cmp::Reverse(*j))
+catcher: MISSED cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_backlog fold_order_ascending_golden
+
+diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
+index f52058f..4e7decc 100644
+--- a/src/rust/src/engine/corpus_processor.rs
++++ b/src/rust/src/engine/corpus_processor.rs
+@@ -438,7 +438,7 @@ impl CorpusProcessor {
+         for lane_result in lane_outputs {
+             per_file.extend(lane_result?);
+         }
+-        per_file.sort_by_key(|(j, _, _, _)| *j);
++        per_file.sort_by_key(|(j, _, _, _)| std::cmp::Reverse(*j));
+ 
+         for (j, tmp, derivs_j, stats_j) in per_file {
+             // legacy: :181 if (tmp.size() > 0).

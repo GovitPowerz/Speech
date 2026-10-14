@@ -2001,6 +2001,21 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   item pins a different observable entirely (the save-gate's weights-artifact existence, via
   `!weights_artifact_b.exists()`), not the derivative matrix.
 
+  **Live since issue #76:** `tests/mutations/phase4a/` (6 patches, one per item;
+  `uv run python tests/mutations/run.py phase4a`). Every edit is the literal one from the task
+  ledger. Items 1 and 2 carry the Task 10 catchers (`phase4b_backlog.rs::fold_order_ascending_golden`,
+  `best_cost_gate_skips_on_exact_tie`) beside their original MISSED ones; the backlog entry below
+  restates the same two mutations and has no patch of its own. Item 2's gate is the one 46dd6d2
+  (#25) merged across the four per-algo arms, so `>=` now reaches every trainable algo. Items 3 and
+  4 land on the per-field sums of b489687 (#23): column 5 is `audio_duration`, and the guards
+  divide by `sum_seg_count` / `sum_lid_count`. Item 4's two downstream legs are
+  `cost_mem_rows_written` (CAUGHT) and `update_called_with_neg_costlid`, which the ledger records as
+  the whole-file run's poisoned `CWD_LOCK`: its row has nonzero counters, so run alone it is
+  MISSED (the same reading as `issue23/3a-3b`). Item 6's patch also carries the Phase 4b battery's
+  item 6 catcher, `phase4b_corpus_lid.rs::twin_train_ns_costlid_gate_live`: one site, one edit.
+  Item 1's catch is about one ULP through `assert_oracle_eq`, so it holds only where the
+  comparator runs strict (the Apple-libm oracle host).
+
 - **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
   (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely
   worse) closing the `>` vs `>=` gate coverage hole. *Pinned by:*
@@ -2726,6 +2741,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   break their golden as designed; 1 genuine gap (item 7) reported honestly rather than papered
   over. Full transcript (diffs, commands, exact output) in
   `.superpowers/sdd/task-11-report.md`.
+
 
 - **[phase4c] SMORMS3.m header mislabeled "Sum of Functions Optimizer (SFO)"**
   (`legacy/Optimizer_V6.2.2/functions/SMORMS3.m:1-47`; ported in `src/python/speech/optimizers.py`

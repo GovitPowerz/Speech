@@ -1,0 +1,16 @@
+mutation: grad_check_capped perturbs the first point by -eps instead of +eps (the -2*eps step unchanged, so the pair is asymmetric)
+catcher: CAUGHT cargo --test phase4a_gradcheck_golden tier2_gradcheck_golden
+
+diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
+index f52058f..777abaf 100644
+--- a/src/rust/src/engine/corpus_processor.rs
++++ b/src/rust/src/engine/corpus_processor.rs
+@@ -787,7 +787,7 @@ impl CorpusProcessor {
+             for kk in 0..sweep_len {
+                 // legacy: :264-267 +eps: restore bag, perturb, setWeights.
+                 new_nn_weights[ii] = nn_weight[ii].clone();
+-                new_nn_weights[ii][kk] += epsilon;
++                new_nn_weights[ii][kk] -= epsilon;
+                 self.processors = proc_mem.clone();
+                 self.processors.set_weights(0, &new_nn_weights)?;
+                 let mut tmp_derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();

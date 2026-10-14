@@ -1,0 +1,28 @@
+mutation: save_and_update drops both counter-zero guards (cost /= seg count and costLID /= LID count unconditionally)
+catcher: CAUGHT cargo --test phase4a_save_update aggregation_counter_zero_guard_skips_division
+catcher: CAUGHT cargo --test phase4a_save_update cost_mem_rows_written
+catcher: MISSED cargo --test phase4a_save_update update_called_with_neg_costlid
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 706d4bd..3bfe31e 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -783,16 +783,12 @@ impl BagOfProcessors {
+ 
+             // legacy: :413-414 cost = sums(4), guarded /= sums(last).
+             let mut cost = sum_seg_cost;
+-            if sum_seg_count > 0.0 {
+-                cost /= sum_seg_count;
+-            }
++            cost /= sum_seg_count;
+             // legacy: :415 badClassif = means(2).
+             let bad_classif = sum_error_rate / n;
+             // legacy: :416-417 costLID = sums(14), guarded /= sums(cols-2).
+             let mut cost_lid = sum_lid_cost;
+-            if sum_lid_count > 0.0 {
+-                cost_lid /= sum_lid_count;
+-            }
++            cost_lid /= sum_lid_count;
+             // legacy: :418 badLIDClassif = 100-means(15).
+             let bad_lid_classif = 100.0 - sum_lid_correct / n;
+ 
