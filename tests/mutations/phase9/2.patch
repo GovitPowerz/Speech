@@ -1,0 +1,17 @@
+mutation: MambaLayer::feed_forward A = -exp(A_log) -> +exp(A_log), the selective recurrence's decay becomes growth
+catcher: CAUGHT cargo --lib nn::cells::mamba::tests::abar_stays_strictly_inside_the_unit_interval
+catcher: CAUGHT cargo --test phase9_cell_grad mamba_backward_matches_central_difference
+
+diff --git a/src/rust/src/nn/cells/mamba.rs b/src/rust/src/nn/cells/mamba.rs
+index 527701c..427ba18 100644
+--- a/src/rust/src/nn/cells/mamba.rs
++++ b/src/rust/src/nn/cells/mamba.rs
+@@ -936,7 +936,7 @@ impl MambaLayer {
+         let mut a_mat = Array2::<f64>::zeros((di, ds));
+         for c in 0..di {
+             for s in 0..ds {
+-                a_mat[[c, s]] = -w.a_log[[c, s]].exp();
++                a_mat[[c, s]] = w.a_log[[c, s]].exp();
+             }
+         }
+         // Spec S7, and the reason "skip the fill" alone would NOT have moved peak RSS:

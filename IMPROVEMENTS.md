@@ -5174,6 +5174,23 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   The other two deferrals (`sigma'` in `do~`, the R-block pairing) were NOT executed and remain
   review-judgement, not measurement. Reverted, 2/2 PASS.
 
+  **Live since issue #76:** `tests/mutations/phase9/` (11 patches: items 1, 2, 3, 4a, 4b, 5, 6c, 7,
+  8, 9, and `stream-pending-clamp`, the clamp revert RESULTS.md records under "Task 9 -- the corpus
+  tier"; `uv run python tests/mutations/run.py phase9`). Item 6's literal relabel, its append-swap
+  twin and 6b are retired: their site `init_slstm_flat` and their catcher
+  `test_slstm_pack_is_reproducible_block_by_block` were removed in bea8ea4 (#27), where the pack
+  order became the Rust `weight_layout` (the Rust-side block swap is `issue27/1`). Items 6c and 8
+  are re-targeted from the deleted builders to the name-keyed `_EXCEPTIONS` table in
+  `init_weights.py` (6c moves the `b_f` key to `b_o`, 8 deletes the `A_log` entry so the block takes
+  the weight-kind draw), against the bea8ea4 successors of their catchers; item 8 needs the corpus
+  for its two `test_phase9_gates.py` MISSED legs. Item 3's
+  `mamba_without_the_adapter_matches_the_exact_cell` is CAUGHT as this entry states, though the
+  battery never ran it under item 3. Item 5's green legs are named from the battery's test
+  selection. `stream-pending-clamp` now fails only `chunk_invariance`: a bisect has all three
+  RESULTS.md legs failing at cba4b96 and at 723656b~1, and `pending_open_segment_blocks_emission`
+  and `prefix_consistency_holds` passing from 723656b (the incremental resmooth, whose freeze cut
+  takes the same frontier) through HEAD, so the patch expects those two MISSED.
+
 ### Mutation battery (Phase 10)
 
 - **[phase10] Mutation battery (Task 11): all 8 spec-S9.4 items were applied as

@@ -1,0 +1,33 @@
+mutation: BlstmNetwork::feed_forward sizes a forward-only net's reverse accumulator at forward.output_size() instead of 0 (2*hidden hcat into a hidden-wide output MLP)
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::forward_direction_feeds_hidden_wide_rows_into_the_output_net
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::forward_direction_survives_the_overlap_windowed_driver
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::forward_direction_backward_routes_deltas_to_the_forward_stack_only
+catcher: MISSED cargo --lib nn::blstm::direction_tests::forward_direction_drops_the_backward_stack_from_the_pack
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_grad_check_seam[slstm_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_grad_check_seam[mamba_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_block_probe_matches_finite_difference[slstm_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_block_probe_matches_finite_difference[mamba_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_weights_derivatives_are_finite_and_block_wise_alive[slstm_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_weights_derivatives_are_finite_and_block_wise_alive[mamba_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_run_twice_is_bit_identical[slstm_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_run_twice_is_bit_identical[mamba_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_slstm_input_gate_bias_block_is_output_inert[slstm_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_mamba_output_projection_gates_the_recurrent_blocks[mamba_forward]
+catcher: MISSED pytest tests/pyo3/test_phase9_seam.py::test_engine_loads_the_committed_pack_bit_exactly[slstm_forward]
+catcher: MISSED pytest tests/pyo3/test_phase9_seam.py::test_engine_loads_the_committed_pack_bit_exactly[mamba_forward]
+catcher: MISSED pytest tests/pyo3/test_phase9_seam.py::test_set_weights_roundtrip_is_bit_exact[slstm_forward]
+catcher: MISSED pytest tests/pyo3/test_phase9_seam.py::test_set_weights_roundtrip_is_bit_exact[mamba_forward]
+
+diff --git a/src/rust/src/nn/blstm.rs b/src/rust/src/nn/blstm.rs
+index 62070dc..9e0ae16 100644
+--- a/src/rust/src/nn/blstm.rs
++++ b/src/rust/src/nn/blstm.rs
+@@ -1460,7 +1460,7 @@ impl BlstmNetwork {
+             output_length,
+             self.backward_network
+                 .as_ref()
+-                .map_or(0, |b| b.output_size()),
++                .map_or(forward.output_size(), |b| b.output_size()),
+         ));
+ 
+         if ratios[0] > 1 && fwd_in < input.ncols() {

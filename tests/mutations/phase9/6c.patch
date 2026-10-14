@@ -1,0 +1,18 @@
+mutation: the sLSTM forget-bias exception moved one block, _EXCEPTIONS "b_f" -> "b_o" (b_f seeds 0 and b_o seeds 1 under forget_bias_one)
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_slstm_layer_is_reproducible_block_by_block[xavier]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_slstm_layer_is_reproducible_block_by_block[he]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_slstm_biases_follow_the_forget_rule[True]
+
+diff --git a/src/python/speech/init_weights.py b/src/python/speech/init_weights.py
+index cdff411..0745957 100644
+--- a/src/python/speech/init_weights.py
++++ b/src/python/speech/init_weights.py
+@@ -105,7 +105,7 @@ def _mamba_a_log(block: Block, rng: np.random.Generator, forget_bias_one: bool)
+ 
+ _EXCEPTIONS = {
+     "b.f": _forget_bias,
+-    "b_f": _forget_bias,
++    "b_o": _forget_bias,
+     "W_dt": _mamba_w_dt,
+     "b_dt": _mamba_b_dt,
+     "A_log": _mamba_a_log,

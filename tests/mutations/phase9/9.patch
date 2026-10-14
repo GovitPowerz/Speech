@@ -1,0 +1,16 @@
+mutation: SlstmLayer::feed_backward drops the dn * n_prev half of df~, (dc * c_prev + dn * n_prev) * fp -> (dc * c_prev) * fp
+catcher: CAUGHT cargo --test phase9_cell_grad slstm_backward_matches_central_difference
+
+diff --git a/src/rust/src/nn/cells/slstm.rs b/src/rust/src/nn/cells/slstm.rs
+index ec4e9be..4f5bcab 100644
+--- a/src/rust/src/nn/cells/slstm.rs
++++ b/src/rust/src/nn/cells/slstm.rs
+@@ -564,7 +564,7 @@ impl SlstmLayer {
+                 let dn = -dy * y_t / n_t + carried_dn[j];
+                 // c = f' c_prev + i' z ; n = f' n_prev + i'  (m frozen: di'/di~ = i',
+                 // df'/df~ = f').
+-                let d_f_pre = (dc * c_prev + dn * n_prev) * fp;
++                let d_f_pre = (dc * c_prev) * fp;
+                 let d_i_pre = (dc * z + dn) * ip;
+                 let d_z_pre = dc * ip * (1.0 - z * z);
+                 // Carries for the next (earlier) row.

@@ -1,0 +1,21 @@
+mutation: FastMamba::step conv-ring tap slot rotated one slot, (slot + dc - off) % dc -> (slot + dc - off + 1) % dc
+catcher: MISSED cargo --lib fast::cells::tests::mamba_split_state_reproduces_the_unsplit_run
+catcher: MISSED cargo --test phase9_stream_causal chunking_bit_invariance
+catcher: CAUGHT cargo --lib fast::cells::tests::mamba_matches_the_exact_cell_within_the_f32_band
+catcher: CAUGHT cargo --lib fast::cells::tests::mamba_without_the_adapter_matches_the_exact_cell
+catcher: CAUGHT cargo --test phase9_fast_parity causal_parity_exact_vs_fast
+catcher: CAUGHT cargo --test phase9_fast_parity causal_parity_crossing_is_exercised
+
+diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
+index 3d749fa..c8826a9 100644
+--- a/src/rust/src/fast/cells.rs
++++ b/src/rust/src/fast/cells.rs
+@@ -710,7 +710,7 @@ impl FastMamba {
+             let mut a = 0.0_f32;
+             for k in 0..dc {
+                 let off = dc - 1 - k;
+-                let sl = (slot + dc - off) % dc;
++                let sl = (slot + dc - off + 1) % dc;
+                 a += self.conv_w[c * dc + k] * s.conv_ring[sl * di + c];
+             }
+             sc.uc[c] = silu_f32(a + self.conv_b[c]);

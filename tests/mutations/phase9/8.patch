@@ -1,0 +1,24 @@
+mutation: the Mamba A_log exception dropped from _EXCEPTIONS, so A_log takes the weight-kind Xavier/He draw instead of the S4D-real log(s + 1)
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_mamba_spec_pinned_constants[geom0]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_mamba_spec_pinned_constants[geom1]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_mamba_spec_pinned_constants[geom2]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_mamba_layer_is_reproducible_block_by_block[xavier]
+catcher: CAUGHT pytest tests/test_phase9_init.py::test_mamba_layer_is_reproducible_block_by_block[he]
+catcher: MISSED pytest tests/pyo3/test_phase9_gates.py::test_init_is_trainable[mamba-bidirectional]
+catcher: MISSED pytest tests/pyo3/test_phase9_gates.py::test_init_is_trainable[mamba-forward]
+catcher: MISSED pytest tests/pyo3/test_phase9_gates.py::test_deterministic[mamba-bidirectional]
+catcher: MISSED pytest tests/pyo3/test_phase9_gates.py::test_deterministic[mamba-forward]
+requires: corpus
+
+diff --git a/src/python/speech/init_weights.py b/src/python/speech/init_weights.py
+index cdff411..03397db 100644
+--- a/src/python/speech/init_weights.py
++++ b/src/python/speech/init_weights.py
+@@ -108,7 +108,6 @@ _EXCEPTIONS = {
+     "b_f": _forget_bias,
+     "W_dt": _mamba_w_dt,
+     "b_dt": _mamba_b_dt,
+-    "A_log": _mamba_a_log,
+ }
+ 
+ 
