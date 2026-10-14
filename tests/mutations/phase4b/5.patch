@@ -1,0 +1,17 @@
+mutation: BagOfProcessors::get_weights_derivatives emits the nets reversed, the Twin's [sad, lid] as [lid, sad]
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_gradcheck_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 706d4bd..210dcef 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -568,7 +568,7 @@ impl BagOfProcessors {
+     /// iterate the same empty `nets()`), so it cannot corrupt a gradient sum.
+     pub fn get_weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
+         let nets = self.processors[pos].driver().nets();
+-        nets.iter()
++        nets.iter().rev()
+             .map(|net| net.get_weights_derivatives())
+             .collect()
+     }

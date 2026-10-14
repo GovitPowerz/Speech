@@ -1,0 +1,28 @@
+mutation: in-band target encode target_lid[ti] = -2.0 -> -1.0 (BlstmSpectralLid::get_segmentation and the TwinBlstmSpectralLid::get_segmentation modes 0-3 site)
+catcher: CAUGHT cargo --test phase4b_lid5_golden sentinel_gt150_present_every_file
+catcher: CAUGHT cargo --test phase4b_lid5_golden lid_classification_errors_match_dump
+catcher: CAUGHT cargo --test phase4b_twin_golden sentinel_gt150_present_every_file
+catcher: CAUGHT cargo --test phase4b_twin_golden lid_classification_errors_match_dump
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+index 639d828..364e2f0 100644
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -561,7 +561,7 @@ impl Segmenter for BlstmSpectralLid {
+ 
+             // targetLID (`:412-413`) + the member writes (`:414-426`).
+             let mut target_lid = vec![0.0f64; class_nb];
+-            target_lid[ti] = -2.0;
++            target_lid[ti] = -1.0;
+             self.lid.cumulative_error[chan] = nn_cost;
+             self.lid.nb_of_classif[chan] = nb_of_classif;
+             let mut lid_errors = vec![0.0f64; class_nb];
+@@ -2438,7 +2438,7 @@ impl Segmenter for TwinBlstmSpectralLid {
+ 
+             // Member writes (`:1318-1337`).
+             let mut target_lid = vec![0.0f64; class_nb];
+-            target_lid[ti] = -2.0; // :1319 (targetIndex >= 0 always)
++            target_lid[ti] = -1.0; // :1319 (targetIndex >= 0 always)
+             self.lid.cumulative_error[chan] = lid_nn_cost; // :1320
+             self.lid.nb_of_classif[chan] = lid_nb_classif; // :1321
+             let mut lid_errors = vec![0.0f64; class_nb];

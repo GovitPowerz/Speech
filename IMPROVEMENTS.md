@@ -2741,7 +2741,20 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   break their golden as designed; 1 genuine gap (item 7) reported honestly rather than papered
   over. Full transcript (diffs, commands, exact output) in
   `.superpowers/sdd/task-11-report.md`.
-
+  **Live since issue #76:** `tests/mutations/phase4b/` (5 patches, items 1, 2, 3, 5 and 7;
+  `uv run python tests/mutations/run.py phase4b`). Every edit is the literal one, recovered from
+  the battery's session transcript (the ledger's `task-11-report.md` now holds Phase 10's report).
+  Two items share a site with an older or newer live patch and have none of their own: item 4's
+  `save_weights_lid` prefix moved into `training_policy`'s algo 6 arm in 46dd6d2 (#25), where
+  `issue25/2` applies the same edit against the same catcher; item 6's gate is `phase4a/6`, which
+  carries this item's catcher too. Item 2's `> 150` decode moved from `confusion_from_results` to
+  `LidResult::from_encoded` (e767121, b489687, #23) and is mutated there; its error leg now reads
+  MISSED: the two rows that lose their target are skipped since the F5 fix (53de2ca), their
+  classes then hold no row, and `confusion_error` scores an empty class at 100% error exactly as
+  it scored their single miss, so the error stays 200/3 (the matrix leg still fails). Item 5's `TwinLid` arm
+  in `get_weights_derivatives` became one walk over `Segmenter::nets()` in 46dd6d2; the patch
+  reverses that walk, which reorders only the Twin's two nets. Item 7's gap is MISSED on
+  `phase4b_twin_golden.rs::boundaries_match_dump`, the leg the battery's diagnostic ran.
 
 - **[phase4c] SMORMS3.m header mislabeled "Sum of Functions Optimizer (SFO)"**
   (`legacy/Optimizer_V6.2.2/functions/SMORMS3.m:1-47`; ported in `src/python/speech/optimizers.py`
