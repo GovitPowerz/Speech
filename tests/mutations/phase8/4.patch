@@ -1,0 +1,25 @@
+mutation: StreamOverlap::flush drops the clamped tail-window loop (the EOS-snapped tail windows never fire)
+catcher: CAUGHT cargo --test phase8_stream_overlap eos_tail_matches_offline
+catcher: CAUGHT cargo --test phase8_gate stream_finish_equals_offline_frozen
+catcher: CAUGHT cargo --test phase8_gate stream_finish_equals_offline_calibrated
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..6fcc842 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -538,15 +538,6 @@ impl StreamOverlap {
+         self.finished = true;
+ 
+         let total = self.rows_so_far;
+-        while self.next_jj < total {
+-            let begin = window_begin(self.next_jj, self.window_size, self.ssr);
+-            let end = window_end(begin, self.window_size, self.ssr, total);
+-            let length_seq = end + 1 - begin;
+-            if length_seq / self.ssr > 0 {
+-                self.fire(net, begin, length_seq);
+-            }
+-            self.next_jj += self.window_shift;
+-        }
+ 
+         // The offline output has `input_rows / ssr` rows (== the driver's real_vec_size,
+         // and == the max covered row for every overlap config); emit all remaining.

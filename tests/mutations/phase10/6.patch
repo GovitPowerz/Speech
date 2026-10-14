@@ -1,0 +1,37 @@
+mutation: FastLstm::step input projection batched through one faer_project call over all 4O gates instead of the per-gate dot_f32 (shared step, both sides)
+catcher: MISSED cargo --lib fast::cells::tests::lstm_matches_the_exact_cell_within_the_f32_band
+catcher: MISSED cargo --lib fast::cells::tests::lstm_matches_the_exact_cell_at_the_arm_geometry
+catcher: MISSED cargo --test phase9_fast_parity causal_parity_exact_vs_fast
+catcher: MISSED cargo --test phase9_fast_parity causal_parity_crossing_is_exercised
+catcher: MISSED cargo --test phase9_stream_causal stream_finish_equals_offline_causal
+catcher: MISSED cargo --test phase9_stream_causal chunking_bit_invariance
+catcher: MISSED cargo --test phase9_stream_causal stream_causal_matches_offline_on_the_real_arm_geometry
+
+diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
+index 3d749fa..d34a52b 100644
+--- a/src/rust/src/fast/cells.rs
++++ b/src/rust/src/fast/cells.rs
+@@ -118,7 +118,7 @@ use crate::nn::blstm::{BlstmConfig, CellType, CfcParams, MambaParams, Transforme
+ 
+ use super::nn::{
+     DenseRowChain, FastDenseLayer, FastMatrix, Scratch, asinh_f32, copy_view_into, ensure_len,
+-    gates_fn_f32, logistic_f32, sub_sample_into,
++    faer_project, gates_fn_f32, logistic_f32, sub_sample_into,
+ };
+ 
+ // ---------------------------------------------------------------------------
+@@ -1277,9 +1277,12 @@ impl FastLstm {
+         let xs = &x[..k_in];
+ 
+         // 1. proj + bias + recurrence, per gate element (`:206-210` + `:258-263`).
++        // M6 MUTATION: the input projection is BATCHED through the faer kernel (all 4O
++        // gates in one call) instead of the per-gate ascending `dot_f32`.
++        let mut batched = vec![0.0_f32; four_o];
++        faer_project(xs, 1, k_in, k_in, &self.inp, i, four_o, &mut batched);
+         for jj in 0..four_o {
+-            let bi = jj * i;
+-            let mut acc = dot_f32(&self.inp[bi..bi + k_in], xs);
++            let mut acc = batched[jj];
+             acc += self.bias[jj];
+             let br = jj * o;
+             acc += dot_f32(&self.rec[br..br + o], &h[..o]);

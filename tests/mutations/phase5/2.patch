@@ -1,0 +1,17 @@
+mutation: train_modern early-stop cadence bypassed (if False and best_epoch >= 0 and ...)
+catcher: CAUGHT pytest tests/test_phase5_train_modern.py::test_early_stop_patience_triggers_at_crafted_epoch
+catcher: CAUGHT pytest tests/pyo3/test_exit_gate.py::test_early_stop_triggers
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 637c28d..5a40a99 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -739,7 +739,7 @@ def train_modern(
+         _write_history(stopped=False)  # per-epoch, so a resume sees the latest bookkeeping
+ 
+         # Early-stop: `patience` epochs since the best (best_epoch < 0 only if val never finite).
+-        if best_epoch >= 0 and epoch - best_epoch >= params.patience:
++        if False and best_epoch >= 0 and epoch - best_epoch >= params.patience:
+             stopped_early = True
+             break
+ 

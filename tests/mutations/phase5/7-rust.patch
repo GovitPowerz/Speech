@@ -1,0 +1,38 @@
+mutation: confusion_from_results declares pos_target / pos_best_not_target once outside the row loop (sticky: a no-target row inherits the last target, F5 revert)
+catcher: CAUGHT cargo --lib engine::confusion::tests::sentinel_decode_and_argmax
+catcher: CAUGHT cargo --lib engine::confusion::tests::cross_language_identity_no_target_skip
+catcher: MISSED cargo --lib engine::confusion::tests::no_target_row_skipped_never_pollutes_header
+catcher: CAUGHT cargo --test phase4b_confusion_golden confusion_matrix_matches_harness_transcription
+
+diff --git a/src/rust/src/engine/confusion.rs b/src/rust/src/engine/confusion.rs
+index 06223ec..4917961 100644
+--- a/src/rust/src/engine/confusion.rs
++++ b/src/rust/src/engine/confusion.rs
+@@ -65,17 +65,20 @@ pub fn confusion_from_results<'a>(
+ 
+     // legacy: :512-535, ascending row loop (product/accumulation contract).
+     // FIXED (phase 5): a no-target row is skipped -- see the fn doc.
++    let mut pos_target = 0usize;
++    let mut pos_best_not_target = 0usize;
+     for r in rows {
+-        let Some(t) = r.target else {
+-            // No in-band target this row: out-of-set trial, credited to no class.
++        let mut score_target = -1.0_f64;
++        if let Some(t) = r.target {
++            score_target = r.scores[t];
++            pos_target = t + 1;
++        }
++        if pos_target == 0 {
+             continue;
+-        };
+-        let score_target = r.scores[t];
+-        let pos_target = t + 1;
++        }
+         let mut max_score_not_target = -1.0_f64;
+-        let mut pos_best_not_target = 0usize;
+         for (kk, &v) in r.scores.iter().enumerate() {
+-            if kk != t && v > max_score_not_target {
++            if Some(kk) != r.target && v > max_score_not_target {
+                 max_score_not_target = v;
+                 pos_best_not_target = kk + 1;
+             }

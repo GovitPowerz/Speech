@@ -1,0 +1,16 @@
+mutation: bench_fast_not_slower_than_exact_ci_smoke asserts exact_wall * 10.0 in place of fast_wall against the 1.5x budget
+catcher: CAUGHT cargo --test phase7_bench bench_fast_not_slower_than_exact_ci_smoke
+
+diff --git a/src/rust/tests/phase7_bench.rs b/src/rust/tests/phase7_bench.rs
+index 5ccf0e2..f31b6fe 100644
+--- a/src/rust/tests/phase7_bench.rs
++++ b/src/rust/tests/phase7_bench.rs
+@@ -284,7 +284,7 @@ fn bench_fast_not_slower_than_exact_ci_smoke() {
+         fast_wall / exact_wall
+     );
+     assert!(
+-        fast_wall <= exact_wall * CI_SLOWDOWN_BUDGET,
++        exact_wall * 10.0 <= exact_wall * CI_SLOWDOWN_BUDGET,
+         "fast wall {fast_wall}s exceeds {CI_SLOWDOWN_BUDGET}x the exact wall {exact_wall}s \
+          (CI budget smoke -- a catastrophic fast-path regression, not a tight timing pin)"
+     );

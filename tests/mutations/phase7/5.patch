@@ -1,0 +1,20 @@
+mutation: FastPipeline::fill_frame skips the per-frame frame_buf zero-reset
+catcher: CAUGHT cargo --test phase7_fast_pipeline build_input_sequence_twice_bit_identical
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_excerpt_3s
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_prcts_60s
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_dc_offset_branch
+
+diff --git a/src/rust/src/fast/pipeline.rs b/src/rust/src/fast/pipeline.rs
+index 3d8f280..d4b8fa5 100644
+--- a/src/rust/src/fast/pipeline.rs
++++ b/src/rust/src/fast/pipeline.rs
+@@ -378,9 +378,6 @@ impl FastPipeline {
+         let cols = self.buffer_size;
+         let dc = self.flag_dc_offset;
+ 
+-        for v in self.frame_buf.iter_mut() {
+-            *v = 0.0;
+-        }
+         // index < frames always here (begin=0/end=frames-1), so no get_sequence no-op.
+         let (beg_win, nb_elem, beg_data) = if index < hw {
+             (hw - index, hw + index + 1, 0usize)

@@ -1,0 +1,17 @@
+mutation: localize_listing drops the primary-file existence check (primary_ok = local_filename.is_file() -> True)
+catcher: CAUGHT pytest tests/test_phase6_lre_listings.py::test_localize_listing_found_and_missing_rows
+catcher: CAUGHT pytest tests/test_phase6_lre_listings.py::test_localize_listing_missing_both_columns_reported_combined
+
+diff --git a/src/python/speech/dataprep/lre.py b/src/python/speech/dataprep/lre.py
+index 4137c9c..8adbd15 100644
+--- a/src/python/speech/dataprep/lre.py
++++ b/src/python/speech/dataprep/lre.py
+@@ -112,7 +112,7 @@ def localize_listing(src: Path, corpus_root: Path, out: Path) -> LocalizeReport:
+ 
+     for rec in records:
+         local_filename = _localize_path(rec["filename"], corpus_root)
+-        primary_ok = local_filename.is_file()
++        primary_ok = True
+ 
+         has_refseg = rec["refseg"] != ""
+         refseg_str = rec["refseg"]

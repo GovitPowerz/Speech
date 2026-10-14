@@ -1,0 +1,22 @@
+mutation: build_input_sequence_parts builds a second identical mel bank for assemble_with_bank (the Task 8 hoist undone)
+catcher: MISSED cargo --test phase1_pipeline_golden e2e_mfcc_deltas
+catcher: MISSED cargo --test phase1_pipeline_golden e2e_logmel
+catcher: MISSED cargo --test phase2b_spectral_golden pitch_pass2_inputseq_matches_dump
+catcher: MISSED cargo --test phase7_fast_pipeline pipeline_parity_excerpt_3s
+
+diff --git a/src/rust/src/features/pipeline.rs b/src/rust/src/features/pipeline.rs
+index b455c3b..1cd7e2a 100644
+--- a/src/rust/src/features/pipeline.rs
++++ b/src/rust/src/features/pipeline.rs
+@@ -675,9 +675,10 @@ pub fn build_input_sequence_parts(
+         None
+     };
+ 
++    let bank2 = build_mel_bank(cfg, s, audio.sample_rate as f64);
+     let input_seq = assemble_with_bank(
+         &perio,
+-        bank.as_ref(),
++        bank2.as_ref(),
+         ltsv.as_deref(),
+         s.freq_beg,
+         s.freq_end,

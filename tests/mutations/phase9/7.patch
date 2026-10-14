@@ -1,0 +1,19 @@
+mutation: FastSlstm::state seeds m = 0.0 instead of the M_INIT_F32 sentinel
+catcher: CAUGHT cargo --lib fast::cells::tests::slstm_state_is_zeroed_with_the_m_sentinel
+catcher: MISSED cargo --test phase9_fast_parity causal_parity_exact_vs_fast
+catcher: MISSED cargo --test phase9_fast_parity causal_parity_crossing_is_exercised
+catcher: MISSED cargo --lib fast::cells::tests::slstm_matches_the_exact_cell_within_the_f32_band
+
+diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
+index 3d749fa..643f592 100644
+--- a/src/rust/src/fast/cells.rs
++++ b/src/rust/src/fast/cells.rs
+@@ -300,7 +300,7 @@ impl FastSlstm {
+             h: vec![0.0; o],
+             c: vec![0.0; o],
+             n: vec![0.0; o],
+-            m: vec![M_INIT_F32; o],
++            m: vec![0.0; o],
+         }
+     }
+ 

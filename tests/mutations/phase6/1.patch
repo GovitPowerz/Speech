@@ -1,0 +1,18 @@
+mutation: _build_collar_segs interior-nonspeech carve boundary end - c -> end - c - 0.05 (the NonSpeech end and the Collar start)
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_dcf_matches_perl_oracle[11_hyp_longer_truncate]
+
+diff --git a/src/python/speech/evaluate.py b/src/python/speech/evaluate.py
+index 40937bd..d014cab 100644
+--- a/src/python/speech/evaluate.py
++++ b/src/python/speech/evaluate.py
+@@ -217,8 +217,8 @@ def _build_collar_segs(no_collar: list[Interval], c: float) -> list[Interval]:
+             out.append((start, end, "Speech"))
+         elif end - start >= 2.0 * c + 0.1:
+             out.append((start, start + c, "Collar"))
+-            out.append((start + c, end - c, "NonSpeech"))
+-            out.append((end - c, end, "Collar"))
++            out.append((start + c, end - c - 0.05, "NonSpeech"))
++            out.append((end - c - 0.05, end, "Collar"))
+         else:
+             out.append((start, end, "Collar"))
+     return out

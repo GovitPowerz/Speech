@@ -1,0 +1,17 @@
+mutation: cavg p_target default 0.5 -> 0.4
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_cavg_hand_derived_three_language_case
+catcher: MISSED pytest tests/test_phase6_evaluate.py::test_cavg_ptarget_constant_is_load_bearing
+
+diff --git a/src/python/speech/evaluate.py b/src/python/speech/evaluate.py
+index 40937bd..63b8666 100644
+--- a/src/python/speech/evaluate.py
++++ b/src/python/speech/evaluate.py
+@@ -420,7 +420,7 @@ def read_scr_scores(scores_dir: Path, class_keys: list[str]) -> tuple[NDArray[np
+     return scores, files
+ 
+ 
+-def cavg(scores: NDArray[np.float64], refs: NDArray[np.int_], p_target: float = 0.5) -> float:
++def cavg(scores: NDArray[np.float64], refs: NDArray[np.int_], p_target: float = 0.4) -> float:
+     """The NIST LRE closed-set identification Cavg, per the 2015 `ComputeCavgNIST.py`
+     (`data/Scoring_LRE15/Scripts/ComputeCavgNIST.py:167-192`, the "Cavg max all dialects"
+     path):

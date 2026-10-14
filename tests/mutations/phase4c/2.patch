@@ -1,0 +1,17 @@
+mutation: Smorms3.optimization_step dtheta denominator (sqrt(mms) + eps) -> sqrt(mms) (eps kept only at mms + eps)
+catcher: CAUGHT pytest tests/test_phase4c_optimizers.py::test_smorms3_eps_guard_active
+catcher: MISSED pytest tests/test_phase4c_optimizers.py::test_smorms3_trajectory_bit_exact
+
+diff --git a/src/python/speech/optimizers.py b/src/python/speech/optimizers.py
+index 862e621..2797c73 100644
+--- a/src/python/speech/optimizers.py
++++ b/src/python/speech/optimizers.py
+@@ -90,7 +90,7 @@ class Smorms3:
+         r = 1.0 / (self.delta + 1.0)
+         self.step_rate = (1 - r) * self.step_rate + r * grad
+         self.mms = (1 - r) * self.mms + r * grad * grad
+-        dtheta = -grad * np.minimum(self.lrate, self.step_rate * self.step_rate / (self.mms + self.eps)) / (np.sqrt(self.mms) + self.eps)
++        dtheta = -grad * np.minimum(self.lrate, self.step_rate * self.step_rate / (self.mms + self.eps)) / np.sqrt(self.mms)
+         self.delta = 1 + self.delta * (1 - self.step_rate * self.step_rate / (self.mms + self.eps))
+         self.lrate = min(self.lrate * 10, self.lrate_max)  # legacy: SMORMS3.m:347
+         self.theta_prior_step = self.theta

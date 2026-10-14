@@ -1,4 +1,4 @@
-mutation: training_policy algo 6 saves the Twin's LID net without the LID_ prefix
+mutation: training_policy algo 6 saves the Twin's LID net without the LID_ prefix (phase4b item 4 too)
 catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs

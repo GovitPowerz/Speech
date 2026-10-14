@@ -1,0 +1,17 @@
+mutation: ModernTrainParams.val_metric default nn_cost_seg -> balance
+catcher: CAUGHT pytest tests/test_phase5_train_modern.py::test_val_metric_field_default_and_literal
+catcher: CAUGHT pytest tests/pyo3/test_phase5_train_modern_smoke.py::test_val_metric_nn_cost_seg_moves_where_balance_plateaus
+
+diff --git a/src/python/speech/drivers/state.py b/src/python/speech/drivers/state.py
+index 4f74e85..4907d73 100644
+--- a/src/python/speech/drivers/state.py
++++ b/src/python/speech/drivers/state.py
+@@ -221,7 +221,7 @@ class ModernTrainParams(BaseModel):
+     # early-stop plateau (why nn_cost_seg is now the default; see IMPROVEMENTS.md / the pyo3 smoke).
+     # NB for the algo-6 Twin, "nn_cost_seg" SILENTLY adds +NNCostLID (mirroring forward_backward's
+     # f = NNCostSeg + NNCostLID, train.py:775-779) -- the metric name names only the SAD half.
+-    val_metric: Literal["nn_cost_seg", "balance"] = "nn_cost_seg"
++    val_metric: Literal["nn_cost_seg", "balance"] = "balance"
+     # hard-example mini-batching (Task 4/5 fixed batching); minibatch == 0 -> full-corpus training per epoch.
+     minibatch: int = 0
+     nb_worst: int = 0

@@ -1,0 +1,23 @@
+mutation: lre_sad_v2.toml back to the v1 layer-0 width, nnet_input_size 11 -> 23 and lstm_neuron_nb "11,24,24" -> "23,24,24" (the dead-column defect re-introduced)
+catcher: CAUGHT pytest tests/pyo3/test_phase10_gates.py::test_init_is_trainable[lstm-bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_gates.py::test_init_is_trainable[slstm-bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_gates.py::test_init_is_trainable[cfc-bidirectional]
+requires: corpus
+
+diff --git a/configs/training/lre_sad_v2.toml b/configs/training/lre_sad_v2.toml
+index a47f20a..7d7538c 100644
+--- a/configs/training/lre_sad_v2.toml
++++ b/configs/training/lre_sad_v2.toml
+@@ -163,10 +163,10 @@ tdc_windowing_param = "5.534716888700572e-01"
+ # ---------------------------------------------------------------------------------------
+ 
+ [nn]
+-lstm_neuron_nb = "11,24,24"
++lstm_neuron_nb = "23,24,24"
+ lstm_sub_sampling = "4,1"
+ nn_type = 0
+-nnet_input_size = 11
++nnet_input_size = 23
+ output_neuron_nb = "48,12,1"
+ output_subsampling = "1,1"
+ two_sweeps = false

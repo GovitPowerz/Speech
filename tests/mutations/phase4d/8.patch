@@ -1,0 +1,16 @@
+mutation: _BatchRunner.next_listing reuses the prior step's last_index after the first call instead of rotating get_new_batch
+catcher: CAUGHT pytest tests/test_phase4d_batchmode.py::test_batch_listing_bytes_rotates_across_steps
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 637c28d..efb735b 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -258,7 +258,7 @@ class _BatchRunner:
+         there but `Corpus::from_config` reads field 6 as file_id (a legacy field-role
+         mismatch, IMPROVEMENTS), so the port round-trips file_id and the engine sees the
+         same file_id the full corpus would."""
+-        batch, _ = get_new_batch(self.batches)
++        batch = list(self.last_index) if self.last_index.size else get_new_batch(self.batches)[0]
+         parts = [np.asarray(batch, dtype=np.int64)]
+         parts += [w.index for w in self.batches.worst_cases if w.index.size]
+         idx = np.unique(np.concatenate(parts)) if any(p.size for p in parts) else np.zeros(0, dtype=np.int64)

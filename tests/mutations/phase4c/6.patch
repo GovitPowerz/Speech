@@ -1,0 +1,16 @@
+mutation: engine.l2_penalty bias exclusion flipped: keep = 1.0 - is_bias -> keep = is_bias
+catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_l2_penalty
+
+diff --git a/src/python/speech/engine.py b/src/python/speech/engine.py
+index 1f526eb..7f3bb63 100644
+--- a/src/python/speech/engine.py
++++ b/src/python/speech/engine.py
+@@ -176,7 +176,7 @@ def l2_penalty(
+     legacy: ComputeCost.m:554 `+= L2_regul*sum((w.*(1-isBias)).^2)/2`
+     legacy: ComputeCost.m:362 `+= L2_regul*(w.*(1-isBias))`"""
+     w = np.asarray(weights, dtype=F64)
+-    keep = 1.0 - np.asarray(is_bias, dtype=F64)
++    keep = np.asarray(is_bias, dtype=F64)
+     masked = w * keep
+     cost = float(l2 * np.sum(masked**2) / 2.0)
+     grad = np.asarray(l2 * masked, dtype=F64)

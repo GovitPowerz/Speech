@@ -1,0 +1,16 @@
+mutation: TwinBlstmSpectralLid::get_segmentation modes 0-3 segmentationLID /= 56.0 -> /= 55.0
+catcher: MISSED cargo --test phase4b_twin_golden boundaries_match_dump
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+index 639d828..ddd5c12 100644
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -2406,7 +2406,7 @@ impl Segmenter for TwinBlstmSpectralLid {
+ 
+             // segmentationLID /= 56 (`:1292`).
+             for v in segmentation_lid.iter_mut() {
+-                *v /= 56.0;
++                *v /= 55.0;
+             }
+ 
+             if segments_count > 0 {

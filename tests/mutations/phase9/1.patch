@@ -1,0 +1,18 @@
+mutation: SlstmLayer::feed_forward stabilizer dropped, m_t = max(f~ + m_prev, i~) -> 0.0
+catcher: CAUGHT cargo --lib nn::cells::slstm::tests::stabilizer_survives_huge_pre_activations
+catcher: MISSED cargo --test phase9_cell_grad slstm_backward_matches_central_difference
+catcher: MISSED cargo --lib fast::cells::tests::slstm_matches_the_exact_cell_within_the_f32_band
+
+diff --git a/src/rust/src/nn/cells/slstm.rs b/src/rust/src/nn/cells/slstm.rs
+index ec4e9be..b0955d0 100644
+--- a/src/rust/src/nn/cells/slstm.rs
++++ b/src/rust/src/nn/cells/slstm.rs
+@@ -458,7 +458,7 @@ impl SlstmLayer {
+                 let fm = pre[[t, BLOCK_F * o + j]] + m_prev;
+                 // max(fm, i~) written as an explicit comparison (NOT `f64::max`,
+                 // whose NaN handling differs from a plain ternary).
+-                let m_t = if fm > i_pre { fm } else { i_pre };
++                let m_t = 0.0;
+                 let ip = (i_pre - m_t).exp();
+                 let fp = (fm - m_t).exp();
+                 let z = pre[[t, BLOCK_Z * o + j]].tanh();

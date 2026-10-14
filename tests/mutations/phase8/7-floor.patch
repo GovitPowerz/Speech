@@ -1,0 +1,30 @@
+mutation: the 1e-3 fixed-gain floor dropped in both audio::apply_fixed_gain and StreamFrontEnd::new (no committed fixture has a gain at or below 1e-3)
+catcher: MISSED cargo --test phase8_frozen_norm fixed_gain_replaces_normalization
+catcher: MISSED cargo --test phase8_gate stream_finish_equals_offline_frozen
+catcher: MISSED cargo --test phase8_gate stream_finish_equals_offline_calibrated
+
+diff --git a/src/rust/src/audio.rs b/src/rust/src/audio.rs
+index ee86e26..a47d53e 100644
+--- a/src/rust/src/audio.rs
++++ b/src/rust/src/audio.rs
+@@ -500,7 +500,6 @@ pub fn normalize_channels(data: &mut Array2<f64>) {
+ /// caller-supplied gain cannot blow up the signal. Port-only: no legacy source
+ /// (`Audio_fixed_gain` does not exist in the C++ engine).
+ fn apply_fixed_gain(data: &mut Array2<f64>, gain: f64) {
+-    let gain = gain.max(1e-3);
+     let (channels, frames) = data.dim();
+     for c in 0..channels {
+         for k in 0..frames {
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..b6ce337 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -206,7 +206,7 @@ impl StreamFrontEnd {
+             shift_frames: params.shift_frames,
+             bins: params.bins,
+             reach,
+-            fixed_gain: fixed_gain.max(1e-3),
++            fixed_gain,
+             preemph_ratio: preemph,
+             noise_magnitude,
+             prev_gained: 0.0,

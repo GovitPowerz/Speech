@@ -1,0 +1,16 @@
+mutation: StreamOverlap::push_rows emit_upto(frontier) -> emit_upto(frontier + 1) (a row emitted before its last covering window fires)
+catcher: CAUGHT cargo --test phase8_stream_overlap overlap_rows_bit_equal_offline
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..d2c4a86 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -524,7 +524,7 @@ impl StreamOverlap {
+ 
+         // Rows below the next (unfired) window's obeg can never be covered again -> final.
+         let frontier = window_begin(self.next_jj, self.window_size, self.ssr) / self.ssr;
+-        self.emit_upto(frontier)
++        self.emit_upto(frontier + 1)
+     }
+ 
+     /// EOS: fire the remaining CLAMPED tail windows (partial windows snapped to the true

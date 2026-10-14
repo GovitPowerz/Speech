@@ -1,0 +1,18 @@
+mutation: MambaLayer non-retaining forward rolling index tp collapsed to th, (0, t % 2, (t + 1) % 2) -> (0, t % 2, t % 2), so h_prev reads h_{t-2} (rider R10)
+catcher: CAUGHT cargo --lib nn::cells::mamba::tests::forward_is_bit_identical_without_the_cache
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_turning_backprop_off_does_not_move_the_forward[mamba_bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_turning_backprop_off_does_not_move_the_forward[mamba_forward]
+
+diff --git a/src/rust/src/nn/cells/mamba.rs b/src/rust/src/nn/cells/mamba.rs
+index 527701c..2114a6c 100644
+--- a/src/rust/src/nn/cells/mamba.rs
++++ b/src/rust/src/nn/cells/mamba.rs
+@@ -959,7 +959,7 @@ impl MambaLayer {
+             let (ta, th, tp) = if retain {
+                 (t, t, t.wrapping_sub(1))
+             } else {
+-                (0, t % 2, (t + 1) % 2)
++                (0, t % 2, t % 2)
+             };
+             for c in 0..di {
+                 let dl = delta[[t, c]];

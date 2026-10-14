@@ -1,0 +1,45 @@
+mutation: get_segmentation_mode7 swaps the segLID accumulator bodies of the PostProcessMode 2 and _ (0) arms
+catcher: CAUGHT cargo --test phase4b_twin_mode7 post_process_mode_all_three_covered
+catcher: CAUGHT cargo --test phase4b_twin_mode7 mode7_continuous_members_match_real
+catcher: CAUGHT cargo --test phase4b_twin_mode7 mode7_integer_members_match_real_bitexact
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+index 639d828..146591a 100644
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -1325,15 +1325,9 @@ impl TwinBlstmSpectralLid {
+                     2 => {
+                         for kk in 0..output_seq.nrows() {
+                             if output_seq[[kk, 1]] >= 0.0 {
+-                                let mut j = 0usize;
+-                                let mut best = output_seq[[kk, 0]];
+-                                for c in 1..out_cols {
+-                                    if output_seq[[kk, c]] > best {
+-                                        best = output_seq[[kk, c]];
+-                                        j = c;
+-                                    }
++                                for ll in 0..out_cols {
++                                    seg_lid[ll] += f64::max(1e-24, output_seq[[kk, ll]]).ln();
+                                 }
+-                                seg_lid[j] += 1.0;
+                                 number_of_frames += 1;
+                             }
+                         }
+@@ -1341,9 +1335,15 @@ impl TwinBlstmSpectralLid {
+                     _ => {
+                         for kk in 0..output_seq.nrows() {
+                             if output_seq[[kk, 1]] >= 0.0 {
+-                                for ll in 0..out_cols {
+-                                    seg_lid[ll] += f64::max(1e-24, output_seq[[kk, ll]]).ln();
++                                let mut j = 0usize;
++                                let mut best = output_seq[[kk, 0]];
++                                for c in 1..out_cols {
++                                    if output_seq[[kk, c]] > best {
++                                        best = output_seq[[kk, c]];
++                                        j = c;
++                                    }
+                                 }
++                                seg_lid[j] += 1.0;
+                                 number_of_frames += 1;
+                             }
+                         }

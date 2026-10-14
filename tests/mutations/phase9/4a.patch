@@ -1,0 +1,20 @@
+mutation: StreamCausal::push_rows re-seeds every cell state at the top of each push (the carried state reset at every chunk boundary)
+catcher: CAUGHT cargo --test phase9_stream_causal stream_finish_equals_offline_causal
+catcher: CAUGHT cargo --test phase9_stream_causal chunking_bit_invariance
+catcher: CAUGHT cargo --test phase9_stream_causal stream_finish_equals_offline_causal_frozen_type1
+catcher: CAUGHT cargo --test phase9_stream_causal latency_bounds
+catcher: CAUGHT cargo --test phase9_stream_causal stream_causal_matches_offline_on_the_real_arm_geometry
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..d853606 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -765,6 +765,8 @@ impl StreamCausal {
+         if rows.rows == 0 {
+             return FastMatrix::zeros(0, self.output_size);
+         }
++        let fresh: Vec<FastCellState> = self.net.cells().iter().map(|c| c.state()).collect();
++        self.states = fresh;
+         if self.in_cols_seen == 0 {
+             // The `feed_forward` crop gate, resolved once (the feature width is a
+             // stream-wide constant). `in_cols_seen` is the RAW arriving width, kept

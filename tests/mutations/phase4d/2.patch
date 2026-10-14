@@ -1,0 +1,17 @@
+mutation: convert_tab_file S/RI label filter widened with an `or (len(label) == 2 and label.startswith("S"))` arm
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_case4_filter_excludes_non_s_non_ri_labels
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_convert_tab_file_matches_hand_computed_fixture[case4]
+
+diff --git a/src/python/speech/dataprep/opensad15.py b/src/python/speech/dataprep/opensad15.py
+index 7d59626..23dfecc 100644
+--- a/src/python/speech/dataprep/opensad15.py
++++ b/src/python/speech/dataprep/opensad15.py
+@@ -110,7 +110,7 @@ def convert_tab_file(audio_path: str, tab_path: str, tab_lines: list[str]) -> tu
+         # Legacy quirk: duration/lang are overwritten on EVERY row, unconditional on
+         # the S/RI filter below -- both end up as the LAST physical row's values.
+         duration = end_s
+-        if (len(label) == 1 and label.startswith("S")) or (len(label) == 2 and label.startswith("RI")):
++        if (len(label) == 1 and label.startswith("S")) or (len(label) == 2 and label.startswith("RI")) or (len(label) == 2 and label.startswith("S")):
+             segs.append((beg, end_s))
+             spdur += float(end_s) - float(beg)
+ 

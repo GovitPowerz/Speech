@@ -1,0 +1,16 @@
+mutation: draw_variant noisetype ladder pink/tpdf boundary noisetype < 2 -> noisetype < 2.5
+catcher: CAUGHT pytest tests/test_phase4d_augment.py::test_draw_variant_noisetype_ladder[4-tpdfnoise]
+
+diff --git a/src/python/speech/dataprep/augment.py b/src/python/speech/dataprep/augment.py
+index 3f57528..b35de68 100644
+--- a/src/python/speech/dataprep/augment.py
++++ b/src/python/speech/dataprep/augment.py
+@@ -101,7 +101,7 @@ def draw_variant(rng: np.random.Generator) -> Variant:
+     noisetype = 4 * rng.random()
+     if noisetype < 1:
+         noisetype_str = "whitenoise"
+-    elif noisetype < 2:
++    elif noisetype < 2.5:
+         noisetype_str = "pinknoise"
+     elif noisetype < 3:
+         noisetype_str = "tpdfnoise"

@@ -1,0 +1,17 @@
+mutation: quantum_pso position update attractor + coef_exp_contr * signs * ... -> attractor - coef_exp_contr * signs * ...
+catcher: CAUGHT pytest tests/test_phase4c_qpso.py::test_qpso_trajectory_bit_exact_given_table
+catcher: CAUGHT pytest tests/test_phase4c_qpso.py::test_dead_banks_consume_stream
+
+diff --git a/src/python/speech/optimizers.py b/src/python/speech/optimizers.py
+index 862e621..b1ede9e 100644
+--- a/src/python/speech/optimizers.py
++++ b/src/python/speech/optimizers.py
+@@ -488,7 +488,7 @@ def quantum_pso(
+ 
+         attractor = phi * pbest + (1 - phi) * local_attractor  # legacy: :441
+         signs = np.sign(np.asarray(src.rand(ps, dd), dtype=np.float64) - 0.5)  # legacy: :442
+-        pos = attractor + coef_exp_contr * signs * np.maximum(1e-5, np.abs(attractor - pos)) * np.log(1.0 / u)  # legacy: :443
++        pos = attractor - coef_exp_contr * signs * np.maximum(1e-5, np.abs(attractor - pos)) * np.log(1.0 / u)  # legacy: :443
+ 
+         # ---- position update (:447) is DEAD: `i > 20*me/2` (== i > 10*me) is never true; no draws ----
+ 

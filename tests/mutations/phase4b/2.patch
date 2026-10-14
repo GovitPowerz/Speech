@@ -1,0 +1,17 @@
+mutation: LidResult::from_encoded sentinel decode v > 150.0 -> v > 250.0
+catcher: CAUGHT cargo --test phase4b_confusion_golden confusion_matrix_matches_harness_transcription
+catcher: MISSED cargo --test phase4b_confusion_golden error_matches_real_confusion2string_and_printconfusionmatrix
+
+diff --git a/src/rust/src/engine/channel_result.rs b/src/rust/src/engine/channel_result.rs
+index 6a29b22..7e50ae0 100644
+--- a/src/rust/src/engine/channel_result.rs
++++ b/src/rust/src/engine/channel_result.rs
+@@ -81,7 +81,7 @@ impl LidResult {
+     /// column `> 150` cannot occur (a non-target carries `100 * langID <= 100`).
+     pub fn from_encoded(cost: f64, count: i64, correct: bool, encoded: &[f64]) -> Self {
+         let mut scores = encoded.to_vec();
+-        let target = encoded.iter().rposition(|&v| v > 150.0);
++        let target = encoded.iter().rposition(|&v| v > 250.0);
+         if let Some(t) = target {
+             scores[t] = encoded[t] - 200.0;
+         }

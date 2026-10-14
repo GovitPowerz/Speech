@@ -1,0 +1,20 @@
+mutation: CellLayer::Cfc feed_forward arm delegates to CfcLayer::feed_forward_reverse
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_grad_check_seam[cfc_bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_grad_check_seam[cfc_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_block_probe_matches_finite_difference[cfc_bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_block_probe_matches_finite_difference[cfc_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_twin_mode7_lid_grad_check[twin_mode7_lid_cfc]
+
+diff --git a/src/rust/src/nn/cells/mod.rs b/src/rust/src/nn/cells/mod.rs
+index d476797..0656311 100644
+--- a/src/rust/src/nn/cells/mod.rs
++++ b/src/rust/src/nn/cells/mod.rs
+@@ -153,7 +153,7 @@ impl Layer for CellLayer {
+             CellLayer::Lstm(l) => LstmLayer::feed_forward(l, input, output, last_layer),
+             CellLayer::Slstm(l) => SlstmLayer::feed_forward(l, input, output, last_layer),
+             CellLayer::Mamba(l) => MambaLayer::feed_forward(l, input, output, last_layer),
+-            CellLayer::Cfc(l) => CfcLayer::feed_forward(l, input, output, last_layer),
++            CellLayer::Cfc(l) => CfcLayer::feed_forward_reverse(l, input, output, last_layer),
+             CellLayer::Transformer(l) => {
+                 TransformerLayer::feed_forward(l, input, output, last_layer)
+             }

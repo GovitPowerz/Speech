@@ -1,0 +1,16 @@
+mutation: BagOfProcessors::from_configs Inference_Path default flipped from exact to fast
+catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::inference_path_dispatch
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 706d4bd..d56af18 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -304,7 +304,7 @@ impl BagOfProcessors {
+         // f64 drivers; `fast` selects the f32 fast-inference counterparts. A global
+         // key (read from configs[0], like File_Type/Audio_offset); any other value is
+         // a construction error (loud, not a silent fallback).
+-        let inference_path = get_string_default(&configs[0], "Inference_Path", "exact");
++        let inference_path = get_string_default(&configs[0], "Inference_Path", "fast");
+         let use_fast = match inference_path.as_str() {
+             "exact" => false,
+             "fast" => true,

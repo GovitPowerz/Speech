@@ -1,4 +1,4 @@
-mutation: FoldRun.__init__ no longer forces Neural_Networks_BackPropagation_Epochs 0 on the fold config
+mutation: FoldRun.__init__ no longer forces Neural_Networks_BackPropagation_Epochs 0 on the fold config (phase5 item 11 too)
 catcher: CAUGHT pytest tests/test_fold_run.py::test_fold_run_forces_epochs_zero_on_every_fold
 catcher: CAUGHT pytest tests/pyo3/test_fold_run.py::test_fold_run_is_one_fold_at_theta_f11
 catcher: CAUGHT pytest tests/test_phase4c_drivers.py::test_evaluate_exact_injects_resolved_packs

@@ -1,0 +1,38 @@
+mutation: the 3a config regression with test_init_is_trainable's three pack-length pins relaxed to out == arch, so the zero-dead-columns guard is what fires
+catcher: CAUGHT pytest tests/pyo3/test_phase10_gates.py::test_init_is_trainable[lstm-bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_gates.py::test_init_is_trainable[slstm-bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_gates.py::test_init_is_trainable[cfc-bidirectional]
+requires: corpus
+
+diff --git a/configs/training/lre_sad_v2.toml b/configs/training/lre_sad_v2.toml
+index a47f20a..7d7538c 100644
+--- a/configs/training/lre_sad_v2.toml
++++ b/configs/training/lre_sad_v2.toml
+@@ -163,10 +163,10 @@ tdc_windowing_param = "5.534716888700572e-01"
+ # ---------------------------------------------------------------------------------------
+ 
+ [nn]
+-lstm_neuron_nb = "11,24,24"
++lstm_neuron_nb = "23,24,24"
+ lstm_sub_sampling = "4,1"
+ nn_type = 0
+-nnet_input_size = 11
++nnet_input_size = 23
+ output_neuron_nb = "48,12,1"
+ output_subsampling = "1,1"
+ two_sweeps = false
+diff --git a/tests/pyo3/test_phase10_gates.py b/tests/pyo3/test_phase10_gates.py
+index 64f8949..7d67e68 100644
+--- a/tests/pyo3/test_phase10_gates.py
++++ b/tests/pyo3/test_phase10_gates.py
+@@ -534,9 +534,7 @@ def test_init_is_trainable(tmp_path: Path, cell: str, direction: str, pack_len:
+     # (0) param match, asserted TWICE: the literal in `_CONFIGS` (what the phase pins) and
+     #     the engine's layout in `_arch` (what the guard's offsets are read from). A drift in
+     #     either invalidates the offsets, so both must agree with what `init_weights` produced.
+-    assert out["pack_len"] == pack_len, f"{cell}/{direction} pack length {out['pack_len']} != the pinned {pack_len}"
+-    assert arch.pack_len == pack_len, f"{cell}/{direction} block arithmetic gives {arch.pack_len}, the pinned length is {pack_len}"
+-    assert arch.fin == 44, f"v2's layer-0 fan-in must be 11*4 = 44 live columns, got {arch.fin}"
++    assert out["pack_len"] == arch.pack_len  # M3b PROBE: literal pins relaxed to reach the guard
+ 
+     # (a) the initial cost is finite AND in the log law's interior, in AGGREGATE and for
+     #     EVERY file (the frame-weighted aggregate could hide a saturated minority).

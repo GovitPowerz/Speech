@@ -1,0 +1,19 @@
+mutation: FastMamba::state seeds the conv ring with 0.1 instead of 0.0 (a leaked left pad)
+catcher: CAUGHT cargo --lib fast::cells::tests::mamba_state_ring_starts_zeroed_at_slot_zero
+catcher: CAUGHT cargo --lib fast::cells::tests::mamba_matches_the_exact_cell_within_the_f32_band
+catcher: CAUGHT cargo --lib fast::cells::tests::mamba_without_the_adapter_matches_the_exact_cell
+catcher: MISSED cargo --lib fast::cells::tests::mamba_split_state_reproduces_the_unsplit_run
+
+diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
+index 3d749fa..fb07558 100644
+--- a/src/rust/src/fast/cells.rs
++++ b/src/rust/src/fast/cells.rs
+@@ -633,7 +633,7 @@ impl FastMamba {
+             self.dt_rank,
+         );
+         MambaState {
+-            conv_ring: vec![0.0; dc * di],
++            conv_ring: vec![0.1; dc * di],
+             ring_pos: 0,
+             h: vec![0.0; di * ds],
+             scratch: MambaScratch {

@@ -1,0 +1,18 @@
+mutation: CfcLayer::feed_forward blend inverted, ff1 * (1 - g) + ff2 * g -> ff1 * g + ff2 * (1 - g), the backward left as committed
+catcher: CAUGHT cargo --test phase9_cell_grad cfc_backward_matches_central_difference
+catcher: CAUGHT cargo --lib nn::cells::cfc::tests::single_step_matches_the_hand_computed_value
+catcher: CAUGHT cargo --lib nn::cells::cfc::tests::the_gate_interpolates_between_the_two_heads
+
+diff --git a/src/rust/src/nn/cells/cfc.rs b/src/rust/src/nn/cells/cfc.rs
+index fff9216..2ac4097 100644
+--- a/src/rust/src/nn/cells/cfc.rs
++++ b/src/rust/src/nn/cells/cfc.rs
+@@ -583,7 +583,7 @@ impl CfcLayer {
+                 heads[[t, c1]] = ff1;
+                 heads[[t, c2]] = ff2;
+                 heads[[t, cg]] = g;
+-                output[[t, j]] = ff1 * (1.0 - g) + ff2 * g;
++                output[[t, j]] = ff1 * g + ff2 * (1.0 - g);
+             }
+         }
+ 

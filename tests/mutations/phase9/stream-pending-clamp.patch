@@ -1,0 +1,18 @@
+mutation: StreamDecision::resmooth_and_emit drops the hyst.pending_begin() clamp from the emission frontier (frontier.min(pending) discarded)
+catcher: MISSED cargo --test phase8_stream_decision pending_open_segment_blocks_emission
+catcher: MISSED cargo --test phase8_stream_decision prefix_consistency_holds
+catcher: CAUGHT cargo --test phase8_stream_decision chunk_invariance
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..71cc154 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -1602,7 +1602,7 @@ impl StreamDecision {
+         let hyst_frontier = self.conv.finalized as f64 * self.dt + self.off;
+         let mut frontier = last_rb.max(hyst_frontier - self.dt);
+         if let Some(pending) = self.hyst.pending_begin() {
+-            frontier = frontier.min(pending);
++            let _ = pending;
+         }
+         let threshold = frontier - self.holdback;
+ 

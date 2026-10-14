@@ -1,0 +1,17 @@
+mutation: lid_error resolves an argmax tie to the LAST maximum (a reversed-column argmax) instead of the first
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_lid_error_tie_takes_first_maximum_matching_matlab_max
+catcher: MISSED pytest tests/test_phase6_evaluate.py::test_lid_error_known_confusion_is_a_percentage
+
+diff --git a/src/python/speech/evaluate.py b/src/python/speech/evaluate.py
+index 40937bd..f8a61d6 100644
+--- a/src/python/speech/evaluate.py
++++ b/src/python/speech/evaluate.py
+@@ -378,7 +378,7 @@ def lid_error(scores: NDArray[np.float64], refs: NDArray[np.int_]) -> float:
+     upstream before passing the score matrix here."""
+     scores_a = np.asarray(scores, dtype=F64)
+     refs_a = np.asarray(refs)
+-    preds = scores_a.argmax(axis=1)
++    preds = scores_a.shape[1] - 1 - scores_a[:, ::-1].argmax(axis=1)
+     return float(np.sum(refs_a != preds)) / len(refs_a) * 100.0
+ 
+ 
