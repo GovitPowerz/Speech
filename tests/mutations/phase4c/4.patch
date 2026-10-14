@@ -1,0 +1,16 @@
+mutation: genome _Walk._front_matter drops the AlgName_decision_thresh_rising mask write-back self._set(0, fv * adim)
+catcher: CAUGHT pytest tests/test_phase4c_genome.py::test_out_param_inverse_matches[masked]
+catcher: CAUGHT pytest tests/test_phase4c_genome.py::test_mask_fixes_field_and_writes_back
+
+diff --git a/src/python/speech/genome.py b/src/python/speech/genome.py
+index e672e1f..fb7c914 100644
+--- a/src/python/speech/genome.py
++++ b/src/python/speech/genome.py
+@@ -235,7 +235,6 @@ class _Walk:
+         fv = abs(self._p1()) / adim
+         if self._mhas("AlgName_decision_thresh_rising"):
+             fv = self._mget_f("AlgName_decision_thresh_rising")
+-            self._set(0, fv * adim)
+         cfg["AlgName_decision_thresh_rising"] = fv
+         self.count += 1
+ 

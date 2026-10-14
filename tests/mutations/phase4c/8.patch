@@ -1,0 +1,18 @@
+mutation: get_new_batch non-multilingual loop bound while len(batch) < nb_cases_per_batch -> <= (one extra element per batch)
+catcher: CAUGHT pytest tests/test_phase4c_batching.py::test_create_batches_single_and_rotation
+catcher: CAUGHT pytest tests/test_phase4c_batching.py::test_create_batches_multi_nb_clean_aggregate_and_rotation
+catcher: MISSED pytest tests/test_phase4c_batching.py::test_create_batches_sub_and_rotation
+
+diff --git a/src/python/speech/batching.py b/src/python/speech/batching.py
+index 12bb84f..a7bbb42 100644
+--- a/src/python/speech/batching.py
++++ b/src/python/speech/batching.py
+@@ -507,7 +507,7 @@ def get_new_batch(batches: Batches) -> tuple[list[int], Batches]:
+                             "the corpus -- see get_new_batch's docstring)"
+                         )
+         else:
+-            while len(batch) < batches.nb_cases_per_batch:
++            while len(batch) <= batches.nb_cases_per_batch:
+                 cc = batches.current_class
+                 has_changed = False
+                 case = batches.cases[cc]

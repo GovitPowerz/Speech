@@ -3644,6 +3644,16 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   in the same suite, both true positives) -- no gap this round. Full transcript (diffs,
   commands, exact output) in `.superpowers/sdd/task-13-report.md`.
 
+  **Live since issue #76:** `tests/mutations/phase4c/` (8 patches;
+  `uv run python tests/mutations/run.py phase4c`). Every edit is the literal one, recovered from
+  the battery's session transcript (the ledger's `task-13-report.md` was overwritten by Phase 4d's
+  Task 13). Every site is in the function this entry names, at shifted lines; item 8's loop is
+  the one the Phase 5 iteration cap reshaped (1a18d18), and its patch flips the same `<`. Item 1's
+  "cascade" catchers are the four the run log named; item 2 carries the plan's
+  `test_smorms3_trajectory_bit_exact` as MISSED and item 8 `test_create_batches_sub_and_rotation`
+  as MISSED. Item 2's catch is one ULP of theta read through `assert_f64_close`, so it is
+  bit-exact only where `oracle_strict()` holds.
+
 - **[phase4c/4d->phase5] `get_new_batch`'s two `while len(batch) < nbOfCasesPerBatch` loops
   had NO iteration cap -- a fully worst-excluded rotation state spins forever -- FIXED
   (phase 5, commit `1a18d18`)** (`GetNewBatch.m` has no cap anywhere; `src/python/speech/
