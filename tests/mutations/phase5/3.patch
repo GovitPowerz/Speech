@@ -1,0 +1,20 @@
+mutation: _BatchRunner.next_listing writes a flat 1.0 weight unconditionally (the algo >= 5 class-balance rescale skipped)
+catcher: CAUGHT pytest tests/test_phase4d_batchmode.py::test_batch_listing_bytes_class_balance_rescale
+catcher: MISSED pytest tests/test_phase4d_batchmode.py::test_batch_listing_gate_forces_flat_weight_when_nb_target_classes_exceeds_two
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 637c28d..66b8999 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -264,10 +264,7 @@ class _BatchRunner:
+         idx = np.unique(np.concatenate(parts)) if any(p.size for p in parts) else np.zeros(0, dtype=np.int64)
+ 
+         items = [self.listing[int(i)] for i in idx]
+-        if self.algo < 5 or self.batches.nb_target_classes > 2:
+-            weight_col = np.ones(idx.size, dtype=np.float64)
+-        else:
+-            weight_col = class_balance_values(items, self.mapping_path)
++        weight_col = np.ones(idx.size, dtype=np.float64)
+         file_id_col = np.array([float(self.listing[int(i)]["file_id"]) for i in idx], dtype=np.float64)
+         values = np.column_stack([weight_col, file_id_col]) if idx.size else np.zeros((0, 2), dtype=np.float64)
+ 

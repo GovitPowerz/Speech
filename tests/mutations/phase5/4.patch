@@ -1,0 +1,22 @@
+mutation: weight_block_mask clears searchable[start:stop - 1] (the last dim of every masked weight/normalize range stays searchable)
+catcher: CAUGHT pytest tests/test_phase5_genome_narrowing.py::test_masked_dims_match_derived_net_structure[twin]
+catcher: CAUGHT pytest tests/test_phase5_genome_narrowing.py::test_masked_dims_match_derived_net_structure[spectral]
+catcher: CAUGHT pytest tests/test_phase5_genome_narrowing.py::test_masked_dims_match_derived_net_structure[signal]
+catcher: CAUGHT pytest tests/test_phase5_genome_narrowing.py::test_every_masked_dim_is_a_weight_normalize_key[twin]
+catcher: CAUGHT pytest tests/test_phase5_genome_narrowing.py::test_every_masked_dim_is_a_weight_normalize_key[spectral]
+catcher: CAUGHT pytest tests/test_phase5_genome_narrowing.py::test_every_masked_dim_is_a_weight_normalize_key[signal]
+catcher: MISSED pytest tests/test_phase5_genome_narrowing.py::test_mask_dict_keys_are_exactly_the_printconfig_dropped_keys[twin]
+catcher: MISSED pytest tests/test_phase5_genome_narrowing.py::test_mask_dict_keys_are_exactly_the_printconfig_dropped_keys[spectral]
+catcher: MISSED pytest tests/test_phase5_genome_narrowing.py::test_mask_dict_keys_are_exactly_the_printconfig_dropped_keys[signal]
+
+diff --git a/src/python/speech/genome.py b/src/python/speech/genome.py
+index e672e1f..e7a74b9 100644
+--- a/src/python/speech/genome.py
++++ b/src/python/speech/genome.py
+@@ -1030,5 +1030,5 @@ def weight_block_mask(ps: RunConfig) -> tuple[dict[str, object], NDArray[np.bool
+     tw.run()
+     searchable = np.ones(total, dtype=bool)
+     for start, stop, _key in tw.masked_ranges:
+-        searchable[start:stop] = False
++        searchable[start : stop - 1] = False
+     return mask, searchable

@@ -1,0 +1,20 @@
+mutation: create_batches non-multilingual branch indexes the case slot by loop position (slot = ii) instead of class value (F1 revert)
+catcher: CAUGHT pytest tests/test_phase4c_batching.py::test_create_batches_class_value_indexing
+
+diff --git a/src/python/speech/batching.py b/src/python/speech/batching.py
+index 12bb84f..5e6a791 100644
+--- a/src/python/speech/batching.py
++++ b/src/python/speech/batching.py
+@@ -356,10 +356,10 @@ def create_batches(
+     worst = [WorstCaseGroup(index=np.array([], dtype=np.int64), score=np.array([])) for _ in range(nb_classes)]
+ 
+     if not multilingual:
+-        for v in possible:
++        for ii, v in enumerate(possible):
+             if 0 < v < nb_classes:
+                 idx = shuffled(files_values[:, 0] == v)
+-                slot = int(v) - 1  # class VALUE, not loop position -- see IMPROVEMENTS.md (F1)
++                slot = ii
+                 cases[slot] = CaseGroup(current_pos=0, index=idx)
+                 k = min(nb_worst, idx.size)
+                 worst[slot] = WorstCaseGroup(index=idx[:k].copy(), score=np.zeros(k))

@@ -1,0 +1,31 @@
+mutation: scoring.confusion_matrix declares pos_target / pos_best_not_target once outside the row loop (sticky: a no-target row inherits the last target, F5 revert)
+catcher: CAUGHT pytest tests/test_phase4c_scoring.py::test_confusion_matrix_no_target_row_skipped
+catcher: CAUGHT pytest tests/test_phase4c_scoring.py::test_confusion_cross_language_identity_no_target_skip
+
+diff --git a/src/python/speech/scoring.py b/src/python/speech/scoring.py
+index 607c453..7307d7f 100644
+--- a/src/python/speech/scoring.py
++++ b/src/python/speech/scoring.py
+@@ -70,15 +70,17 @@ def confusion_matrix(lid_target: NDArray[np.int64], lid_scores: NDArray[np.float
+         confusion[0, kk] = kk
+         confusion[kk, 0] = kk
+ 
++    pos_target = 0
++    pos_best_not_target = 0
+     for jj in range(lid_scores.shape[0]):
+         t = int(lid_target[jj])
+-        if t < 0:
+-            # No target this row: out-of-set trial, credited to no class.
++        score_target = -1.0
++        if t >= 0:
++            pos_target = t + 1
++            score_target = float(lid_scores[jj, t])
++        if pos_target == 0:
+             continue
+-        pos_target = t + 1
+-        score_target = float(lid_scores[jj, t])
+         max_score_not_target = -1.0
+-        pos_best_not_target = 0
+         for kk in range(class_nb):
+             v = float(lid_scores[jj, kk])
+             if kk != t and v > max_score_not_target:

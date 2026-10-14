@@ -1,0 +1,32 @@
+mutation: NeuronLayer::feed_forward softmax drops the per-row EXP_OVERFLOW_GUARD shift (unconditional exp, F8 revert)
+catcher: CAUGHT cargo --test phase2_layers_golden dense_softmax_overflow_guarded
+
+diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
+index bca5144..3b47e02 100644
+--- a/src/rust/src/nn/layers.rs
++++ b/src/rust/src/nn/layers.rs
+@@ -1047,23 +1047,10 @@ impl NeuronLayer {
+             // byte-identical to the legacy path -- so every committed golden (none
+             // overflow) stays bit-exact; above it the shift makes the row finite and
+             // correct (softmax is shift-invariant). Pinned by `dense_softmax_overflow_guarded`.
+-            const EXP_OVERFLOW_GUARD: f64 = 700.0;
+             let mut exp_out = Array2::<f64>::zeros((t_len, o));
+             for t in 0..t_len {
+-                let mut row_max = f64::NEG_INFINITY;
+                 for j in 0..o {
+-                    if pre_act[[t, j]] > row_max {
+-                        row_max = pre_act[[t, j]];
+-                    }
+-                }
+-                if row_max > EXP_OVERFLOW_GUARD {
+-                    for j in 0..o {
+-                        exp_out[[t, j]] = (pre_act[[t, j]] - row_max).exp();
+-                    }
+-                } else {
+-                    for j in 0..o {
+-                        exp_out[[t, j]] = pre_act[[t, j]].exp();
+-                    }
++                    exp_out[[t, j]] = pre_act[[t, j]].exp();
+                 }
+             }
+             let mut row_sum = vec![0.0f64; t_len];

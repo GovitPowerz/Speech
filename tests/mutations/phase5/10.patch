@@ -1,0 +1,19 @@
+mutation: CorpusProcessor::weights_derivatives ignores the seam_derivs stash and reads the bare bag (F10 revert)
+catcher: CAUGHT cargo --test phase4c_api weights_derivatives_nonzero_through_seam
+catcher: CAUGHT pytest tests/pyo3/test_seam_replay.py::test_forward_backward_returns_nonzero_gradient
+catcher: CAUGHT pytest tests/pyo3/test_seam_replay.py::test_forward_backward_smorms3_moves_weights
+
+diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
+index f52058f..5563d65 100644
+--- a/src/rust/src/engine/corpus_processor.rs
++++ b/src/rust/src/engine/corpus_processor.rs
+@@ -973,9 +973,6 @@ impl CorpusProcessor {
+     /// or the last `set_weights` (the bag's reset state, col0 = 0), which is the
+     /// pre-F10 behavior and the reason the seam returned an all-zero gradient.
+     pub fn weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
+-        if let Some(d) = self.seam_derivs.get(&pos) {
+-            return d.clone();
+-        }
+         self.processors.get_weights_derivatives(pos)
+     }
+ 

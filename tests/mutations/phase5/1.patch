@@ -1,0 +1,16 @@
+mutation: init_weights _EXCEPTIONS drops the LSTM b.f forget-bias rule (b.f falls to the bias default 0.0 under forget_bias_one)
+catcher: CAUGHT pytest tests/test_phase5_init_weights.py::test_forget_bias_one_positions[A]
+catcher: CAUGHT pytest tests/test_phase5_init_weights.py::test_forget_bias_one_positions[B]
+
+diff --git a/src/python/speech/init_weights.py b/src/python/speech/init_weights.py
+index cdff411..a45a87d 100644
+--- a/src/python/speech/init_weights.py
++++ b/src/python/speech/init_weights.py
+@@ -104,7 +104,6 @@ def _mamba_a_log(block: Block, rng: np.random.Generator, forget_bias_one: bool)
+ 
+ 
+ _EXCEPTIONS = {
+-    "b.f": _forget_bias,
+     "b_f": _forget_bias,
+     "W_dt": _mamba_w_dt,
+     "b_dt": _mamba_b_dt,

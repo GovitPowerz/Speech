@@ -4590,6 +4590,23 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (505 passed) + `cd src/rust && cargo test` ran once at the end, both green; working
   tree at completion contains ONLY this IMPROVEMENTS.md entry.
 
+  **Live since issue #76:** `tests/mutations/phase5/` (12 patches: item 7 is `7-rust` and
+  `7-python`, applied one at a time as the battery ran them;
+  `uv run python tests/mutations/run.py phase5`). Every edit starts from the literal one in the
+  battery's session transcript. Three sites moved and were re-targeted: item 1's
+  `if forget_bias_one:` write went with the per-cell builders in bea8ea4 (#27), so the patch
+  drops the `b.f` entry of `init_weights._EXCEPTIONS` (the sLSTM `b_f` rule untouched); item 7's
+  loops read the decoded target since #23 (b489687 in Rust, ed47ea9 in Python), and the sticky
+  hoist is rebuilt on that form; item 11's `_modern_config_text` and its catcher
+  `test_config_texts_single_eval_are_epochs_zero_f11` were removed in 42e23f3 (#22), where
+  `FoldRun` became the rule's one owner, so the patch sets `Epochs 1` there (every fold, not only
+  the modern one) against that commit's `test_fold_run_forces_epochs_zero_on_every_fold`; the two
+  `_eval_config_text` scope legs went in the same commit. Item 5's throwaway test went with its
+  builder in 42e23f3; its claim is rebuilt on the committed gate, whose own trainer is made
+  stagnant (`opt.optimize(0)`) and must fail `test_from_scratch_sad_converges`; the zero-margin
+  half of the demonstration has no patch. Item 11 and `issue22/1` mutate the same `FoldRun` line
+  with different edits and stay two mutations.
+
 ### Mutation battery (Phase 6)
 
 - **[phase6] Mutation battery (Task 11): 8/8 battery items break their named catcher exactly

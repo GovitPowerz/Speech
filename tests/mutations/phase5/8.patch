@@ -1,0 +1,18 @@
+mutation: Law::deriv Log arm returns a / y unconditionally (the clamp-consistency zero dropped, F7 revert)
+catcher: CAUGHT cargo --test phase0b_costlaw log_deriv_consistent_with_clamped_forward
+
+diff --git a/src/rust/src/cost.rs b/src/rust/src/cost.rs
+index 98ff3e6..c9f716f 100644
+--- a/src/rust/src/cost.rs
++++ b/src/rust/src/cost.rs
+@@ -99,8 +99,8 @@ impl Law {
+                 // `compute_unitary_delta` zeros the contribution, so no existing golden
+                 // moves; the divergence is pinned off-grid by
+                 // `log_deriv_consistent_with_clamped_forward`. See IMPROVEMENTS.md.
+-                let z = y / adim;
+-                if z < 1e-24 || z > 1.0 { 0.0 } else { a / y }
++                let _ = adim;
++                a / y
+             }
+             Law::BelowSqrt { a, adim, .. } => {
+                 let mut y = 1.0 - y / adim;

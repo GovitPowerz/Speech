@@ -1,0 +1,16 @@
+mutation: the SAD exit gate's own trainer made stagnant (_sad_from_scratch runs opt.optimize(0): zero SMORMS3 steps, improvement exactly 0.0)
+catcher: CAUGHT pytest tests/pyo3/test_exit_gate.py::test_from_scratch_sad_converges
+
+diff --git a/tests/pyo3/test_exit_gate.py b/tests/pyo3/test_exit_gate.py
+index d4a5514..5806ffa 100644
+--- a/tests/pyo3/test_exit_gate.py
++++ b/tests/pyo3/test_exit_gate.py
+@@ -441,7 +441,7 @@ def _sad_from_scratch(tmp: Path, seed: int) -> _SadRun:
+             return cost, grads, theta
+ 
+         opt = Smorms3(f_df, [init_pack[0].copy()])
+-        trained = opt.optimize(_SAD_STEPS)  # _SAD_STEPS evals at theta_0..theta_{S-1}, final = theta_S
++        trained = opt.optimize(0)  # _SAD_STEPS evals at theta_0..theta_{S-1}, final = theta_S
+         best_cost, _g = forward_backward(fold, [trained[0]])  # forward readout at theta_S (NOT a step)
+         trace = np.array([*opt.hist_f_flat, best_cost], dtype=np.float64)  # f@theta_0 .. f@theta_S
+ 
