@@ -1,0 +1,17 @@
+mutation: FastTwinLid::pack_count returns 1 instead of 2
+catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::driver_surface_per_variant
+catcher: CAUGHT cargo --test phase7_parity_lid fast_twin_set_weights_answers_as_the_exact_arm
+
+diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
+index 4007a71..400abb5 100644
+--- a/src/rust/src/fast/driver.rs
++++ b/src/rust/src/fast/driver.rs
+@@ -1402,7 +1402,7 @@ impl Segmenter for FastTwinLid {
+     }
+ 
+     fn pack_count(&self) -> usize {
+-        2
++        1
+     }
+ 
+     /// The SAD pack checked against its net's count, then discarded (Mode 7 never runs

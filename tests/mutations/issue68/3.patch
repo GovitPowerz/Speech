@@ -1,0 +1,19 @@
+mutation: RU_MAXRSS_UNIT_BYTES platform arms swapped (macOS 1024.0, other hosts 1.0)
+catcher: CAUGHT cargo --lib bench::tests::ru_maxrss_to_mib_is_binary
+
+diff --git a/src/rust/src/bench.rs b/src/rust/src/bench.rs
+index 2975b5c..5bd3660 100644
+--- a/src/rust/src/bench.rs
++++ b/src/rust/src/bench.rs
+@@ -188,9 +188,9 @@ fn maxrss_mb() -> f64 {
+ /// printed `maxrss_mb` is comparable across the two. The value is pinned per
+ /// host; that the OS reports in this unit is an assumption no test pins.
+ #[cfg(target_os = "macos")]
+-const RU_MAXRSS_UNIT_BYTES: f64 = 1.0;
+-#[cfg(not(target_os = "macos"))]
+ const RU_MAXRSS_UNIT_BYTES: f64 = 1024.0;
++#[cfg(not(target_os = "macos"))]
++const RU_MAXRSS_UNIT_BYTES: f64 = 1.0;
+ 
+ /// `raw` units of `unit_bytes` bytes in MiB (binary, `/ 1024^2`). The `_mb`
+ /// suffix is the payload key, not the unit (issue #54): 43.52 MiB is 45.6

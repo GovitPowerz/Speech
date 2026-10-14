@@ -1,0 +1,18 @@
+mutation: PEEPHOLE_COLUMNS swaps i.o_prev and f.i_prev (a cross-gate permutation of the bundle names)
+catcher: CAUGHT cargo --lib nn::layers::layout_tests::lstm_layout_names_shapes_fans_and_peephole_columns
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[lstm_forward]
+catcher: CAUGHT pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_lstm_forward]
+diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
+index bca5144..52119ef 100644
+--- a/src/rust/src/nn/layers.rs
++++ b/src/rust/src/nn/layers.rs
+@@ -27,8 +27,8 @@ pub const PEEPHOLE_COLUMNS: [&str; 12] = [
+     "o.cell",
+     "i.i_prev",
+     "i.f_prev",
+-    "i.o_prev",
+     "f.i_prev",
++    "i.o_prev",
+     "f.f_prev",
+     "f.o_prev",
+     "o.i",

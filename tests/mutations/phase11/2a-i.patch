@@ -1,0 +1,15 @@
+mutation: exact window_begin widened by one, (t + 1) -> t, the literal t-W (an index panic)
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::multi_window_forward_matches_the_hand_transcription
+diff --git a/src/rust/src/nn/cells/transformer.rs b/src/rust/src/nn/cells/transformer.rs
+index df99672..d46ba10 100644
+--- a/src/rust/src/nn/cells/transformer.rs
++++ b/src/rust/src/nn/cells/transformer.rs
+@@ -761,7 +761,7 @@ impl TransformerLayer {
+     /// the forward, the backward and the tests -- an off-by-one here is precisely the
+     /// mutation the phase's battery aims at, so it does not get written twice.
+     fn window_begin(&self, t: usize) -> usize {
+-        (t + 1).saturating_sub(self.window)
++        t.saturating_sub(self.window)
+     }
+ 
+     /// The input at the layer's own width: crop (`cols > in`) or zero-pad (`cols < in`).

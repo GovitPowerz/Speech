@@ -1,0 +1,23 @@
+mutation: ConvStream::take_ready drops one finalized value per call (the stream's feed desynchronized, the step untouched)
+catcher: CAUGHT cargo --test phase8_stream_decision raw_hysteresis_matches_offline
+catcher: CAUGHT cargo --test phase8_stream_decision decision_final_equals_offline
+catcher: CAUGHT cargo --test phase8_stream_decision chunk_invariance
+catcher: CAUGHT cargo --test phase8_gate stream_finish_equals_offline_frozen
+catcher: CAUGHT cargo --test phase8_gate stream_finish_equals_offline_type0
+catcher: CAUGHT cargo --test phase8_gate stream_finish_equals_offline_calibrated
+catcher: CAUGHT cargo --test phase8_gate chunking_bit_invariance
+catcher: CAUGHT cargo --test phase8_gate prefix_consistency_near_reach_profile
+catcher: CAUGHT cargo --test phase8_gate latency_bounds
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index a734440..3485436 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -948,6 +948,7 @@ impl ConvStream {
+             return Vec::new();
+         }
+         let out: Vec<f64> = (self.finalized..target)
++            .skip(1)
+             .map(|ii| self.conv_at(ii, self.received))
+             .collect();
+         self.finalized = target;

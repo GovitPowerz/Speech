@@ -21,7 +21,7 @@ training budget, seed, lane count and the listing the split was drawn from; for 
 label, path, lanes and lineage) and a
 **payload** (what it measured). The recipe is the identity of a measurement; the config hash,
 SHA, build and host are provenance. Two kinds exist, `baseline` and `bench`; mutation-battery
-rows wait for #33 to settle their shape.
+verdicts are not records ([ADR-0011](0011-mutation-batteries-are-live-patches.md), issue #33).
 
 Two tiers. A producer (`run_baseline`, a subset gate through the `gate_record` fixture,
 `speech bench --json`) writes its record where it runs; `python -m speech.ledger add` is the

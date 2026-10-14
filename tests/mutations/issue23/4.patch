@@ -1,0 +1,25 @@
+mutation: tests/_result_rows.py decodes the in-band LID target as v - 150 instead of v - 200
+catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_labels_and_shape
+catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_hit_when_target_clears_threshold
+catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_miss_charges_best_non_target
+catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_no_target_row_skipped
+catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_cross_language_identity_no_target_skip
+catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_class_nb_le_1_raises
+catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_balance10_two_class_cutoff_search
+catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_balance10_three_class_else_branch
+catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_balance10_two_class_zero_zero_interior_cutoff
+catcher: CAUGHT pytest tests/test_result_rows.py::test_lid_row_decodes_the_target_column
+
+diff --git a/tests/_result_rows.py b/tests/_result_rows.py
+index c3d6f22..fcbf4c8 100644
+--- a/tests/_result_rows.py
++++ b/tests/_result_rows.py
+@@ -53,7 +53,7 @@ def channel_results_from_matrix(mcr: NDArray[np.float64]) -> ChannelResults:
+         if above.size:
+             t = int(above[-1])  # the LAST column > 150 is the target (the legacy loop)
+             lid_target[i] = t
+-            scores[i, t] = scores[i, t] - 200.0
++            scores[i, t] = scores[i, t] - 150.0
+     return ChannelResults(
+         file=(m[:, 0] - 1).astype(np.int64),
+         conf=(m[:, 1] - 1).astype(np.int64),

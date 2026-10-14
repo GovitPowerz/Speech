@@ -1,0 +1,19 @@
+mutation: PEEPHOLE_COLUMNS swaps i.i_prev and i.f_prev (a within-gate permutation of the bundle names)
+catcher: CAUGHT cargo --lib nn::layers::layout_tests::lstm_layout_names_shapes_fans_and_peephole_columns
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[lstm_forward]
+catcher: MISSED pytest tests/test_seed_pack_regeneration.py::test_committed_seed_pack_regenerates_byte_identical[twin_mode7_lid_lstm_forward]
+catcher: MISSED pytest tests/test_phase5_init_weights.py::test_peepholes_are_small_and_nonconstant
+diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
+index bca5144..dc630e8 100644
+--- a/src/rust/src/nn/layers.rs
++++ b/src/rust/src/nn/layers.rs
+@@ -25,8 +25,8 @@ pub const PEEPHOLE_COLUMNS: [&str; 12] = [
+     "i.cell_prev",
+     "f.cell_prev",
+     "o.cell",
+-    "i.i_prev",
+     "i.f_prev",
++    "i.i_prev",
+     "i.o_prev",
+     "f.i_prev",
+     "f.f_prev",

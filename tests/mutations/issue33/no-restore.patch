@@ -1,0 +1,14 @@
+mutation: the tree is not restored after the catchers ran
+catcher: CAUGHT pytest tests/test_mutations_runner.py::test_run_reads_caught_and_missed_and_restores_the_tree
+diff --git a/tests/mutations/run.py b/tests/mutations/run.py
+--- a/tests/mutations/run.py
++++ b/tests/mutations/run.py
+@@ -237,7 +237,7 @@
+                 return every("INVALID", "maturin develop failed")
+         return [Verdict(mutation, c, *_run_catcher(root, c)) for c in mutation.catchers]
+     finally:
+-        if _git_apply(root, mutation, "-R").returncode:
++        if False:
+             raise RuntimeError(f"{mutation.name}: restore failed, revert the patch by hand")
+         if rebuilt and _run(MATURIN, root).returncode:
+             raise RuntimeError(f"{mutation.name}: the restored speech_rs did not build, run maturin develop by hand")

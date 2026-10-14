@@ -1,0 +1,16 @@
+mutation: HystStep::pending_begin tests begin > 0.0 instead of >= 0.0 (the INIT seed at begin == 0.0 is lost)
+catcher: CAUGHT cargo --test phase0bii_segmenter hyst_step_pending_begin_init_seed_and_tail_flush
+
+diff --git a/src/rust/src/tasks/segmenter.rs b/src/rust/src/tasks/segmenter.rs
+index f010591..1386b7a 100644
+--- a/src/rust/src/tasks/segmenter.rs
++++ b/src/rust/src/tasks/segmenter.rs
+@@ -485,7 +485,7 @@ impl HystStep {
+     /// next raw segment begins. Both audio-time offsets match the closed-segment tuple
+     /// (`begin + off`, `push`'s label site). The batch fold never reads it.
+     pub fn pending_begin(&self) -> Option<f64> {
+-        if self.begin >= 0.0 {
++        if self.begin > 0.0 {
+             Some(self.begin + self.off)
+         } else {
+             None

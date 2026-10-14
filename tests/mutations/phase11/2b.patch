@@ -1,0 +1,17 @@
+mutation: KV-ring read start rotated one slot (oldest + 1) in FastTransformer::step
+catcher: CAUGHT cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_at_the_fixture_geometry
+catcher: CAUGHT cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_within_the_f32_band
+catcher: MISSED cargo --lib fast::cells::tests::transformer_window_truncation_identity
+diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
+index 3d749fa..c01a2c7 100644
+--- a/src/rust/src/fast/cells.rs
++++ b/src/rust/src/fast/cells.rs
+@@ -1745,7 +1745,7 @@ impl FastTransformer {
+         // `oldest` is the slot holding that window's first frame (`ring_pos` is now one
+         // PAST the newest, so stepping back `len` lands on the oldest live slot).
+         let len = *filled;
+-        let oldest = (*ring_pos + w - len) % w;
++        let oldest = (*ring_pos + w - len + 1) % w;
+ 
+         // 5. Per-head windowed causal attention.
+         for hh in 0..a {

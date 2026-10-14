@@ -1,0 +1,19 @@
+mutation: FoldRun.__init__ no longer forces Neural_Networks_BackPropagation_Epochs 0 on the fold config
+catcher: CAUGHT pytest tests/test_fold_run.py::test_fold_run_forces_epochs_zero_on_every_fold
+catcher: CAUGHT pytest tests/pyo3/test_fold_run.py::test_fold_run_is_one_fold_at_theta_f11
+catcher: CAUGHT pytest tests/test_phase4c_drivers.py::test_evaluate_exact_injects_resolved_packs
+catcher: CAUGHT pytest tests/pyo3/test_exit_gate.py::test_hyperparam_search_narrowed_distinct_configs_and_costs
+catcher: CAUGHT pytest tests/pyo3/test_exit_gate.py::test_from_scratch_sad_converges
+
+diff --git a/src/python/speech/fold_run.py b/src/python/speech/fold_run.py
+index 2b67c50..687e2bb 100644
+--- a/src/python/speech/fold_run.py
++++ b/src/python/speech/fold_run.py
+@@ -106,7 +106,6 @@ class FoldRun:
+             config["BLSTM_LID_BackPropagationActivated"] = flag
+         # legacy: F11 (IMPROVEMENTS.md) -- `Epochs 0` takes `run_solo`, one fold at theta; the
+         # gradient is gated on `BackPropagationActivated`, not on Epochs.
+-        config["Neural_Networks_BackPropagation_Epochs"] = "0"
+         if listing is not None:
+             config["fileslisting"] = str(listing)
+         self.config: dict[str, str] = config

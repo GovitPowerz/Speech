@@ -2939,6 +2939,8 @@ helps, hurts, or is neutral to full-corpus convergence remains for the launcher 
 
 ## Phase 11 -- the mutation battery (Task 10): the catcher map
 
+**Live since issue #33:** `tests/mutations/phase11/` (14 patches, ADR-0011; `uv run python tests/mutations/run.py phase11`). Item 6 is retired: its site `init_transformer_flat` and its catcher `test_pack_is_reproducible_block_by_block` were removed in bea8ea4 (#27), where the init became a draw per block of the Rust weight layout. The expected verdicts follow this table and its prose: the FD leg is MISSED where the doctrine paragraph below measures it blind (1b, 2a-ii, 10a), and item 7's re-duplicated `build_dense_tail` copy is rebuilt from the prose.
+
 Spec S9's `>= 8` items, run as apply -> run ONLY the named catcher's file (FOREGROUND,
 release, R6-capped) -> revert -> re-run green -> verify the tree byte-clean. **10 items, 15
 applied mutations**: six items carry one mutation each (4, 5, 6, 7, 8, 9), items 1, 3 and 10
@@ -2951,7 +2953,8 @@ for item 3, so item 3's spec-named mutation (3a) is NOT caught even though its e
 variant (3b) is -- which makes that gap **f32-tier-specific**, not a hole in the convention
 itself. Item 7's closer is the Task-1 dedupe rather than any test. By MUTATION rather than
 by item: **12 named / 1 by-other / 2 not caught** = 15. Nothing under `src/` was committed;
-the per-item evidence (diffs, commands, verbatim failure lines) is in the task ledger.
+the per-item evidence (diffs, commands, verbatim failure lines) was kept only in the gitignored task
+ledger (the live patches above replace it).
 
 | # | mutation | named catcher | verdict |
 |---|---|---|---|
@@ -3085,6 +3088,8 @@ it to one sentence rather than leaving it a question; see that section, not repe
 
 ## Issue #23 -- the typed channel result: the mutation battery
 
+**Live since issue #33:** `tests/mutations/issue23/` (4 patches). Items 3a and 3b now land on one site, `LidResult::correct_wire` (extracted in afe5d18, after this battery), so they are one patch, `3a-3b`, carrying both items' catchers with `aggregation_bit_exact` CAUGHT as 3b recorded it. The live run read one verdict differently: `update_called_with_neg_costlid` is MISSED, because its row carries no LID flag, and the 3b run's failure of it was the whole-file run's poisoned `CWD_LOCK` (`aggregation_bit_exact` panicked holding it), which a one-test-per-process catcher cannot reproduce. Item 1's blind tier-1 leg is `phase4a_tier1_e2e::solo_tdc_matches`.
+
 The plan (`docs/superpowers/plans/2026-10-07-issue-23-typed-channel-result.md`, Task 7) named
 four items; item 3 is run twice, once at the wire (`to_row`) and once at the fold's own
 scaling, because the leg the plan named for it sits on the fold, not the wire. **Five applied
@@ -3117,6 +3122,8 @@ reader can catch a layout bug. The battery therefore names the wire legs as the 
 of the fold's arithmetic (3b), and nothing else should be read into a green reader test.
 
 ## Issue #22 -- the fold run: the mutation battery
+
+**Live since issue #33:** `tests/mutations/issue22/1.patch`. Its second catcher, `test_fold_run_fast_guard_on_the_engine`, was removed in a38c599 (#62); five catchers remain, the slow `test_from_scratch_sad_converges` among them.
 
 The issue's acceptance named one mutation ("a mutation that removes the Epochs-0 forcing fails a
 committed test"). **One applied mutation**: delete the `Neural_Networks_BackPropagation_Epochs 0`
@@ -3230,6 +3237,8 @@ argmax identity (zero flips) and a LID error delta of EXACTLY `0.0` on both arms
 
 ### The mutation battery (the grilling's D13)
 
+**Live since issue #33:** `tests/mutations/issue57/` (3 patches). Item 2's "LID parity pins" are the three legs whose failures were recorded: `phase7_parity_lid`'s phSeq and cep legs and `fast_twin_lid_matrix::lid_parity_exact_vs_fast_per_pair`.
+
 Apply -> run ONLY the named catcher (release) -> revert -> re-run green -> tree byte-clean.
 Three items, three mutations, three catches, all by the leg the decision named.
 
@@ -3245,6 +3254,8 @@ so a broken kernel reports as the flip it is. The strengthening is recorded here
 battery is what found the gap.
 
 ## Issue #68 -- the MiB divisor pin: the mutation check
+
+**Live since issue #33:** `tests/mutations/issue68/` (3 patches). Item 3 swaps both platform arms, so it is caught on either host; the Linux twin that was never applied has no patch.
 
 Issue #54 relabelled the bench peak RSS as MiB everywhere a reader sees it; nothing pinned
 the divisor behind the label. The only checks on the value were the sanity ranges in
@@ -3273,6 +3284,8 @@ compiled out on macOS and was not applied; its leg runs green on the Linux CI.
 | 3 | swapped arms (macOS `RU_MAXRSS_UNIT_BYTES = 1024.0`) | `bench::tests::ru_maxrss_to_mib_is_binary` | CAUGHT: `left: 1024.0`, `right: 1.0` |
 
 ## Issue #26 -- the stepwise decision kernel: the mutation battery
+
+**Live since issue #33:** `tests/mutations/issue26/` (8 patches: the table's mutations with item 4 as `4-minus` and `4-plus`, and the two post-pin mutations below as `post-1` and `post-2`). Every edit is the literal one, recovered from the battery's run logs, item 3's `.skip(1)` included.
 
 Branch `feature/decision-step-kernel`, off `main@b30612a` (#24 merged). The frame stream carried
 loop-state-for-loop-state transcriptions of two exact-tree bodies: `HystState` of
@@ -3329,6 +3342,8 @@ with the clear reverted).
 
 ## Issue #27 -- the weight layout through the seam: the mutation battery
 
+**Live since issue #33:** `tests/mutations/issue27/` (6 patches). Three readings of this table: item 2a's Rust catcher is CAUGHT, because the pin added under 2b (the full 12-name list in `lstm_layout_names_shapes_fans_and_peephole_columns`, 8d12cdc) replaced the column asserts that missed it; item 4's seam `real_2015` legs are MISSED, since its 21 recorded failures are exactly the 19 regeneration fixtures and the 2 sub-sampling legs; "regeneration" names the fixtures whose net carries the mutated layer. `test_net_pack_is_the_layout_length` is now `test_net_pack_is_the_layout_pack_length` (79f69ab).
+
 Branches `feature/weight-layout-seam` (PR1, off `main@c6d9417`) and `feature/weight-layout-draws`
 (PR2, stacked). Before #27 the flat-pack layout lived three times: once in Rust (each cell's
 `for_each_slot`, the LSTM's column-major fills), once in `init_weights.py` (per-cell builders
@@ -3368,6 +3383,8 @@ is a documentation fact with a literal pin. The Python side holding no geometry 
 this split clean: there is no second transcription left for a mutation to hide between.
 
 ## Issue #25 -- the driver interface: the mutation battery
+
+**Live since issue #33:** `tests/mutations/issue25/` (6 patches). Item 3's "both training files green" is the MISSED line on `twin_train_epoch_weights_golden`, the only training golden in them.
 
 Branch `feature/driver-interface` (off `main@a252fd4`). Before #25 the bag dispatched on the
 `Processor` variant thirteen times (nine-arm matches whose arms differed by field name, the LID

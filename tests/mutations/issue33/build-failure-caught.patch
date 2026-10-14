@@ -1,0 +1,14 @@
+mutation: a mutated tree whose catcher targets do not build reads as CAUGHT, not INVALID
+catcher: CAUGHT pytest tests/test_mutations_runner.py::test_a_tree_that_does_not_build_is_invalid_with_its_first_error
+diff --git a/tests/mutations/run.py b/tests/mutations/run.py
+--- a/tests/mutations/run.py
++++ b/tests/mutations/run.py
+@@ -145,7 +145,7 @@
+ def build_verdict(out: str) -> tuple[str, str]:
+     """The verdict of every catcher when the mutated tree's catcher targets do not build."""
+     first = next((line for line in out.splitlines() if line.startswith("error")), "build failed")
+-    return ("STALE" if "no test target named" in out else "INVALID"), first
++    return ("STALE" if "no test target named" in out else "CAUGHT"), first
+ 
+ 
+ def catcher_file(root: Path, catcher: Catcher) -> str:

@@ -1,0 +1,15 @@
+mutation: softmax max-subtract removed in the exact TransformerLayer forward
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::the_max_subtraction_survives_huge_logits
+diff --git a/src/rust/src/nn/cells/transformer.rs b/src/rust/src/nn/cells/transformer.rs
+index df99672..4b3b954 100644
+--- a/src/rust/src/nn/cells/transformer.rs
++++ b/src/rust/src/nn/cells/transformer.rs
+@@ -871,7 +871,7 @@ impl TransformerLayer {
+                 }
+                 let mut sum = 0.0;
+                 for jj in 0..len {
+-                    let e = (row[jj] - mx).exp();
++                    let e = row[jj].exp();
+                     row[jj] = e;
+                     sum += e;
+                 }

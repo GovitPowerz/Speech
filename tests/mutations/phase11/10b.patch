@@ -1,0 +1,18 @@
+mutation: for_each_slot shears the W_qkv q and k row families, b_qkv untouched
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::flat_layout_positions_are_the_spec_order
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::multi_window_forward_matches_the_hand_transcription
+catcher: CAUGHT cargo --lib nn::cells::transformer::tests::single_step_matches_the_hand_computed_value
+catcher: MISSED pytest tests/pyo3/test_phase9_seam.py::test_transformer_key_bias_block_is_output_inert[transformer_bidirectional]
+catcher: MISSED pytest tests/pyo3/test_phase9_seam.py::test_transformer_key_bias_block_is_output_inert[transformer_forward]
+diff --git a/src/rust/src/nn/cells/transformer.rs b/src/rust/src/nn/cells/transformer.rs
+index df99672..d259753 100644
+--- a/src/rust/src/nn/cells/transformer.rs
++++ b/src/rust/src/nn/cells/transformer.rs
+@@ -417,6 +417,7 @@ fn for_each_slot(
+     }
+     // W_qkv (3H x H) row-major, then b_qkv.
+     for r in 0..QKV_NB * h {
++        let r = if r < 2 * h { (r + h) % (2 * h) } else { r };
+         for m in 0..h {
+             f(SlotKind::Qkv, m, r);
+         }

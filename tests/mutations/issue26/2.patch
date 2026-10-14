@@ -1,0 +1,19 @@
+mutation: HystStep::push skips the idx increment on the INIT branch (every value re-runs INIT)
+catcher: CAUGHT cargo --test phase0bii_segmenter oracle_cross_check_bit_exact
+catcher: CAUGHT cargo --test phase0bii_segmenter clean_rising_falling_crossing
+catcher: MISSED cargo --test phase8_stream_decision decision_final_equals_offline
+catcher: CAUGHT cargo --test phase8_stream_decision pending_open_segment_blocks_emission
+catcher: CAUGHT cargo --test phase8_stream_decision prefix_consistency_holds
+
+diff --git a/src/rust/src/tasks/segmenter.rs b/src/rust/src/tasks/segmenter.rs
+index f010591..7fff6c6 100644
+--- a/src/rust/src/tasks/segmenter.rs
++++ b/src/rust/src/tasks/segmenter.rs
+@@ -370,7 +370,6 @@ impl HystStep {
+                 self.begin_area = 0.0;
+             }
+             self.prev = r;
+-            self.idx = 1;
+             return None;
+         }
+ 

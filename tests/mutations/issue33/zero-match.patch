@@ -1,0 +1,14 @@
+mutation: a catcher filter matching no test reads as MISSED, not STALE
+catcher: CAUGHT pytest tests/test_mutations_runner.py::test_cargo_catcher_that_is_not_exactly_one_run_test_is_stale[zero-match]
+diff --git a/tests/mutations/run.py b/tests/mutations/run.py
+--- a/tests/mutations/run.py
++++ b/tests/mutations/run.py
+@@ -115,7 +115,7 @@
+     if m is None:
+         return "STALE", "no test result line"
+     passed, failed = int(m.group(1)), int(m.group(2))
+-    if passed + failed != 1:
++    if passed + failed > 1:
+         return "STALE", f"{passed} passed, {failed} failed, {m.group(3)} ignored: not exactly one test"
+     if failed:
+         lines = out.splitlines()

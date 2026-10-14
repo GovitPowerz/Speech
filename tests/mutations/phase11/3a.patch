@@ -1,0 +1,18 @@
+mutation: softmax max-subtract removed in the f32 twin FastTransformer::step
+catcher: MISSED cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_within_the_f32_band
+catcher: MISSED cargo --lib fast::cells::tests::transformer_matches_the_exact_cell_at_the_fixture_geometry
+catcher: MISSED cargo --test phase9_fast_parity causal_parity_exact_vs_fast
+catcher: MISSED cargo --test phase9_fast_parity causal_parity_crossing_is_exercised
+diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
+index 3d749fa..c29da7b 100644
+--- a/src/rust/src/fast/cells.rs
++++ b/src/rust/src/fast/cells.rs
+@@ -1773,7 +1773,7 @@ impl FastTransformer {
+             }
+             let mut sum = 0.0_f32;
+             for jj in 0..len {
+-                let e = (sc.probs[jj] - mx).exp();
++                let e = sc.probs[jj].exp();
+                 sc.probs[jj] = e;
+                 sum += e;
+             }

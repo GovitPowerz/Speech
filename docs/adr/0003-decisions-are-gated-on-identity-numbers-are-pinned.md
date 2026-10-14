@@ -36,4 +36,6 @@ a pin above it is a defect, not a widening).
   arithmetic only down to the pin's resolution. Below that resolution a symmetric kernel edit is
   invisible by construction, so the control is a design-time rule in the module doc, not a test.
 - Every phase ends with a mutation battery that applies the edits the gates claim to catch and
-  records which test actually fired, gaps included (`RESULTS.md`).
+  records which test actually fired, gaps included (`IMPROVEMENTS.md` through Phase 10,
+  `RESULTS.md` since). Since issue #33 each mutation is a committed live patch carrying its
+  expected verdicts ([ADR-0011](0011-mutation-batteries-are-live-patches.md)).

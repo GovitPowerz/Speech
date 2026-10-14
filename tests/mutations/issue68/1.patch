@@ -1,0 +1,16 @@
+mutation: ru_maxrss_to_mib divides by the decimal 1e6 instead of 1024^2
+catcher: CAUGHT cargo --lib bench::tests::ru_maxrss_to_mib_is_binary
+
+diff --git a/src/rust/src/bench.rs b/src/rust/src/bench.rs
+index 2975b5c..98d8268 100644
+--- a/src/rust/src/bench.rs
++++ b/src/rust/src/bench.rs
+@@ -197,7 +197,7 @@ const RU_MAXRSS_UNIT_BYTES: f64 = 1024.0;
+ /// decimal MB. Pure and host-independent so BOTH platform arms are unit-pinned
+ /// on every host, the Linux CI included (issue #68).
+ fn ru_maxrss_to_mib(raw: f64, unit_bytes: f64) -> f64 {
+-    raw * unit_bytes / (1024.0 * 1024.0)
++    raw * unit_bytes / 1e6
+ }
+ 
+ /// Run `configs`, each `repeat` times, over `path`. Each iteration builds a
