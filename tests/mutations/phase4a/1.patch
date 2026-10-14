@@ -1,6 +1,7 @@
 mutation: run_epoch folds the per-file contributions in descending file order (per_file.sort_by_key *j -> std::cmp::Reverse(*j))
 catcher: MISSED cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
 catcher: CAUGHT cargo --test phase4b_backlog fold_order_ascending_golden
+requires: oracle-libm
 
 diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
 index f52058f..4e7decc 100644

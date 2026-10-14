@@ -17,7 +17,7 @@ nothing failing anywhere.
 
 A mutation is a committed patch, `tests/mutations/<battery>/<id>.patch`, whose header (text
 `git apply` ignores before the first `diff --git`) names the mutation, each catcher with its
-expected verdict, and any precondition (`requires: corpus`). One script,
+expected verdict, and any precondition (`requires: corpus`, `requires: oracle-libm`). One script,
 `tests/mutations/run.py`, checks and runs them.
 
 **Live, not archival.** Every committed mutation applies to the current tree and holds its
@@ -57,3 +57,19 @@ touched (`--changed-since`), and the full battery runs before a tag or on demand
   the historic scorecard.
 - What the scheme still cannot see between full runs: a verdict flip caused from outside both
   the patched file and the catcher file (a caller that stops reaching the site).
+
+## Amendment (issue #78): the second precondition is the host's libm
+
+Two catches hold only where the canary-gated comparators run strict: `phase4a/1` (one ULP on
+the raw derivative through `common::assert_oracle_eq`) and `phase4c/2` (one ULP on theta
+through `tests/_libm_gate.assert_f64_close`). Off the oracle libm the comparators accept the
+hybrid bound (`docs/validation.md`), both read `MISSED`, and a full run reports a STOP for a
+host, not a regression. A second precondition, `requires: oracle-libm`, is read exactly as
+`requires: corpus` is: per mutation, every catcher `SKIPPED` when the host lacks it. The runner
+recomputes the same fixture the comparators recompute (`tests/reference_data/phase1/libm_canaries.bin`,
+10 cos / 5 log / 3 exp columns) under the same `SPEECH_ORACLE_LIBM` override, in stdlib (the
+`--check --kind cargo` CI job runs on a bare `python3`), so the runner and the catchers cannot
+disagree about the host; a test pins the runner's verdict against `oracle_strict()`. A full run
+therefore needs the corpus AND the oracle libm; `SPEECH_ORACLE_LIBM=ulp` runs the whole
+battery as an off-oracle host would, which is how the sweep for further host-dependent catches
+was made (the #78 outcome: none beyond the two).

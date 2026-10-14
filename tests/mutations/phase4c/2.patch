@@ -1,6 +1,7 @@
 mutation: Smorms3.optimization_step dtheta denominator (sqrt(mms) + eps) -> sqrt(mms) (eps kept only at mms + eps)
 catcher: CAUGHT pytest tests/test_phase4c_optimizers.py::test_smorms3_eps_guard_active
 catcher: MISSED pytest tests/test_phase4c_optimizers.py::test_smorms3_trajectory_bit_exact
+requires: oracle-libm
 
 diff --git a/src/python/speech/optimizers.py b/src/python/speech/optimizers.py
 index 862e621..2797c73 100644
