@@ -1,0 +1,35 @@
+mutation: BlstmNetwork::from_config retention gating inverted, inference_only = !back_propagation_activated -> = back_propagation_activated
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::backprop_off_constructs_inference_only_and_on_does_not
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::an_epochs_key_cannot_flip_the_decision
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::the_flag_reaches_every_stack_and_the_cells
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::the_forward_is_bit_identical_either_way
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::an_inference_only_net_leaves_the_mamba_cache_empty
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::a_clone_of_an_inference_only_net_carries_no_cache
+catcher: CAUGHT cargo --lib nn::blstm::inference_only_tests::a_backprop_on_net_still_folds_a_real_gradient
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::forward_direction_backward_routes_deltas_to_the_forward_stack_only
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::forward_direction_feeds_hidden_wide_rows_into_the_output_net
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::forward_direction_survives_the_overlap_windowed_driver
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::mamba_stack_receives_gradient_through_the_wrapper
+catcher: CAUGHT cargo --lib nn::blstm::direction_tests::slstm_stack_receives_gradient_through_the_wrapper
+catcher: CAUGHT cargo --test phase3_e2e_grad_gate real_net_gradient_bit_exact
+catcher: CAUGHT cargo --test phase3_e2e_grad_gate gradient_non_trivial_real
+catcher: CAUGHT cargo --test phase3_e2e_grad_gate real_net_backtrack_fires
+catcher: CAUGHT cargo --test phase3_e2e_grad_gate real_net_one_irprop_step
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_epochs_zero_with_backprop_on_still_returns_a_real_gradient[mamba_bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_epochs_zero_with_backprop_on_still_returns_a_real_gradient[mamba_forward]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_turning_backprop_off_does_not_move_the_forward[mamba_bidirectional]
+catcher: CAUGHT pytest tests/pyo3/test_phase9_seam.py::test_turning_backprop_off_does_not_move_the_forward[mamba_forward]
+
+diff --git a/src/rust/src/nn/blstm.rs b/src/rust/src/nn/blstm.rs
+index 62070dc..245a4db 100644
+--- a/src/rust/src/nn/blstm.rs
++++ b/src/rust/src/nn/blstm.rs
+@@ -824,7 +824,7 @@ impl BlstmNetwork {
+ 
+         let trainer = Rprop::new(cfg.rprop_init);
+ 
+-        let inference_only = !cfg.back_propagation_activated;
++        let inference_only = cfg.back_propagation_activated;
+ 
+         let mut net = BlstmNetwork {
+             cfg,

@@ -1,0 +1,32 @@
+mutation: fast lstm_layer_forward drops the step > 0 recurrence guard (step 0 folds the previous call's prev_out/prev_cell/prev_gates)
+catcher: MISSED cargo --test phase8_stream_lid running_aggregate_is_prefix_correct_phseq
+catcher: MISSED cargo --test phase8_stream_lid running_aggregate_is_prefix_correct_cep
+catcher: MISSED cargo --test phase8_stream_lid per_utterance_equals_offline_phseq
+catcher: MISSED cargo --test phase8_stream_lid per_utterance_equals_offline_cep
+catcher: MISSED pytest tests/pyo3/test_phase10_stream_lid.py::test_running_aggregate_is_prefix_correct[tiny_ok.plp-0]
+catcher: MISSED pytest tests/pyo3/test_phase10_stream_lid.py::test_running_aggregate_is_prefix_correct[multi_ok.plp-0]
+catcher: MISSED pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_self_consistent[tiny_ok.plp-0]
+catcher: MISSED pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_self_consistent[multi_ok.plp-0]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_literal_oracle_values[tiny_ok.plp-0]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_literal_oracle_values[multi_ok.plp-0]
+catcher: CAUGHT pytest tests/pyo3/test_phase10_stream_lid.py::test_push_utterance_literal_oracle_values[tiny_ok.plp-1]
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_cep_exact_vs_fast
+catcher: CAUGHT cargo --test phase7_parity_sad sad_parity_exact_vs_fast
+
+diff --git a/src/rust/src/fast/nn.rs b/src/rust/src/fast/nn.rs
+index 816379d..71be62b 100644
+--- a/src/rust/src/fast/nn.rs
++++ b/src/rust/src/fast/nn.rs
+@@ -967,7 +967,10 @@ fn lstm_layer_forward(
+             proj[g0 + j] += bias[j];
+         }
+ 
+-        if step > 0 {
++        // M8b MUTATION: the `step > 0` guard is DROPPED, so step 0 folds whatever the
++        // PREVIOUS call (previous window / previous utterance) left in the rolling
++        // prev_out/prev_cell/prev_gates buffers -- a session state leak across utterances.
++        if true {
+             // Recurrence: += y_{t-1} * FeedbackWeights (all 4O columns). Feedback is
+             // column-major, so gate column j's O weights are contiguous.
+             for j in 0..four_o {

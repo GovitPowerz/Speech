@@ -5462,6 +5462,22 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   remain review-judgement for the reverse-INDEXING class of defect rather than measured
   here.
 
+  **Live since issue #76:** `tests/mutations/phase10/` (11 patches;
+  `uv run python tests/mutations/run.py phase10`). Every edit is the literal one, recovered from
+  the battery's session transcript. Items 2a and 2b are retired: their site `init_cfc_flat` and 2b's
+  only catcher `test_reconstruction_rejects_a_backbone_layer_swap` were removed in bea8ea4 (#27),
+  where the init became a draw per block of the Rust weight layout, so a draw-versus-emit
+  permutation can only be written as a layout that misdescribes the pack (the `issue27` mutations).
+  Item 8a is `phase8/8`, the same edit, which carries this item's catchers. Items 3a and 3b need
+  the corpus and name only the three bidirectional rows the battery ran; 3b also carries the
+  probe's relaxation of the three pack-length pins. Item 6 is committed with every named leg
+  MISSED, as measured; its legs are a selection from the green files the battery ran. Item 7's 20
+  catchers include the RESULTS.md "7 Rust legs and all 4 phase-10 seam legs". Three single checks
+  from the Phase 10 RESULTS.md prose sit beside the battery: `mamba-rolling-tp`, the collapsed
+  rolling index, which is rider R10's mutation too and carries its two seam legs, and the CfC seam
+  tier's `cfc-forward-arm` and `cfc-backward-arm`, each naming the five legs the Task 3 probes
+  failed. The derivative-harvest arm that prose lists has no patch: no swap of it was ever run.
+
 ## Complete-as-portable closures (Phase 4d)
 
 Task 13's declaration: these four items are PERMANENTLY blocked or deferred, not stub

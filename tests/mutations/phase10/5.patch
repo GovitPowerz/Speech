@@ -1,0 +1,19 @@
+mutation: FastBiCell::feed_forward runs the second stack with reverse = false (both halves forward in time)
+catcher: CAUGHT cargo --test phase10_bicell_parity bicell_parity_exact_vs_fast_plain
+catcher: CAUGHT cargo --test phase10_bicell_parity bicell_parity_exact_vs_fast_overlap
+catcher: CAUGHT cargo --test phase10_bicell_parity bicell_parity_crossing_is_exercised
+catcher: CAUGHT cargo --lib fast::bicell::tests::the_reverse_stack_is_not_the_forward_stack
+
+diff --git a/src/rust/src/fast/bicell.rs b/src/rust/src/fast/bicell.rs
+index ea8a62f..31649a6 100644
+--- a/src/rust/src/fast/bicell.rs
++++ b/src/rust/src/fast/bicell.rs
+@@ -314,7 +314,7 @@ impl FastBiCell {
+             input.cols,
+             &mut self.scratch_rev,
+             &mut self.hidden_rev,
+-            true,
++            false,
+         );
+         // Both stacks are built from the same `lstm_neuron_nb`/`lstm_subsampling`, so
+         // this is a construction invariant, not input-dependent -- hence `debug_assert`.

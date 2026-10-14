@@ -1,0 +1,20 @@
+mutation: FastMelBank ignoreFirst branch B copies tmp[r * tw + c] instead of tmp[r * tw + 1 + c] (keeps c0, drops the last column)
+catcher: CAUGHT cargo --lib fast::mel32::tests::ignore_first_branch_b_drops_the_first_column_not_the_last
+catcher: CAUGHT cargo --lib fast::mel32::tests::filter_bank_and_dct_match_the_exact_path_at_tolerance
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_prcts_60s
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_excerpt_3s
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_dc_offset_branch
+
+diff --git a/src/rust/src/fast/mel32.rs b/src/rust/src/fast/mel32.rs
+index 3224fe7..8f8a989 100644
+--- a/src/rust/src/fast/mel32.rs
++++ b/src/rust/src/fast/mel32.rs
+@@ -462,7 +462,7 @@ impl FastMelBank {
+             // rightCols(width): drop column 0.
+             for r in 0..t {
+                 for c in 0..width {
+-                    mfcc.data[r * width + c] = tmp.data[r * tw + 1 + c];
++                    mfcc.data[r * width + c] = tmp.data[r * tw + c];
+                 }
+             }
+         } else {
