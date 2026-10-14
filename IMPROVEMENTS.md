@@ -4415,6 +4415,15 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   ran once at the end, all green (see the Task 14 report,
   `.superpowers/sdd/task-14-report.md`, for exact commands/logs).
 
+  **Live since issue #76:** `tests/mutations/phase4d/` (7 patches, ids `1` to `6` and `8`;
+  `uv run python tests/mutations/run.py phase4d`). Item 7 is retired: it weakened the test-side
+  comparator of `tests/test_phase4d_parity.py::test_vrcts_structural_and_boundaries`, removed in
+  6c6acdf with the 2015-parity gates. Every edit is the literal one, recovered from the Task 14
+  session transcript; item 1 changes all six collar sites, the output-inert `:157` one included.
+  Item 2's "case4 fixture golden" is `test_convert_tab_file_matches_hand_computed_fixture[case4]`;
+  item 5's two unnamed legs are the two `test_write_listing_worker_shards_*` tests the Task 14
+  report names.
+
 ### Mutation battery (Phase 5)
 
 - **[phase5] Mutation battery (Task 11): 11/11 battery items (11 apply-fail-revert-pass

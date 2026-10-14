@@ -1,0 +1,38 @@
+mutation: convert_tab_file SegsExcl guard-band collar 2.0 -> 1.0 at all six sites (two leading, three trailing, the re-open threshold)
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_convert_tab_file_matches_hand_computed_fixture[case1]
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_convert_tab_file_matches_hand_computed_fixture[case2]
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_convert_tab_file_matches_hand_computed_fixture[case3]
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_convert_tab_file_matches_hand_computed_fixture[case4]
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_convert_tab_file_matches_hand_computed_fixture[case5]
+catcher: CAUGHT pytest tests/test_phase4d_opensad15.py::test_process_opensad15_writes_xml_stm_and_listing
+
+diff --git a/src/python/speech/dataprep/opensad15.py b/src/python/speech/dataprep/opensad15.py
+index 7d59626..eabb50b 100644
+--- a/src/python/speech/dataprep/opensad15.py
++++ b/src/python/speech/dataprep/opensad15.py
+@@ -146,19 +146,19 @@ def convert_tab_file(audio_path: str, tab_path: str, tab_lines: list[str]) -> tu
+         end_f = float(end_s)
+         if len(segs_excl) == 0:
+             min_val = 0.0
+-            segs_excl.append(_ExclSeg(max(min_val, beg_f - 2.0), beg_f, 0))
++            segs_excl.append(_ExclSeg(max(min_val, beg_f - 1.0), beg_f, 0))
+             segs_excl.append(_ExclSeg(beg_f, end_f, 1))
+-            segs_excl.append(_ExclSeg(end_f, min(end_f + 2.0, duration_f), 0))
++            segs_excl.append(_ExclSeg(end_f, min(end_f + 1.0, duration_f), 0))
+         else:
+             min_val = segs_excl[-2].end
+-            if segs_excl[-1].end > beg_f or segs_excl[-1].end > max(min_val, beg_f - 2.0 - 0.1):
++            if segs_excl[-1].end > beg_f or segs_excl[-1].end > max(min_val, beg_f - 1.0 - 0.1):
+                 segs_excl[-1].end = beg_f
+                 segs_excl.append(_ExclSeg(beg_f, end_f, 1))
+-                segs_excl.append(_ExclSeg(end_f, min(end_f + 2.0, duration_f), 0))
++                segs_excl.append(_ExclSeg(end_f, min(end_f + 1.0, duration_f), 0))
+             else:
+-                segs_excl.append(_ExclSeg(max(min_val, beg_f - 2.0), beg_f, 0))
++                segs_excl.append(_ExclSeg(max(min_val, beg_f - 1.0), beg_f, 0))
+                 segs_excl.append(_ExclSeg(beg_f, end_f, 1))
+-                segs_excl.append(_ExclSeg(end_f, min(end_f + 2.0, duration_f), 0))
++                segs_excl.append(_ExclSeg(end_f, min(end_f + 1.0, duration_f), 0))
+     if len(segs_excl) > 0:
+         if segs_excl[0].beg < 0.1:
+             segs_excl[0].beg = 0.0

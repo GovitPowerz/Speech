@@ -1,0 +1,16 @@
+mutation: _LIGHT_SUBS loses the (euh|hm+|mm+|eh|huhum|hum) filler entry (the legacy :29 rule)
+catcher: CAUGHT pytest tests/test_phase4d_stm.py::test_light_filler_class1_adjacent_tokens_alternate
+catcher: CAUGHT pytest tests/test_phase4d_stm.py::test_normalize_stm_light_matches_perl_oracle[case2]
+
+diff --git a/src/python/speech/dataprep/stm_normalize.py b/src/python/speech/dataprep/stm_normalize.py
+index e847d74..6921469 100644
+--- a/src/python/speech/dataprep/stm_normalize.py
++++ b/src/python/speech/dataprep/stm_normalize.py
+@@ -89,7 +89,6 @@ _APOSTROPHE_RE = re.compile(r"'")
+ _LIGHT_SUBS: list[tuple[str, str]] = [
+     (r"\[-?respiro-?\]", " {breath} "),  # :26
+     (r"\[-?noise=breath-?\]", " {breath} "),  # :27
+-    (r"(^|\s)(euh|hm+|mm+|eh|huhum|hum)(\s|$)", " {fw} "),  # :29
+     (r"(^|\s)(ee|oo|ii|aa|m|em|d)(\s|$)", " {fw} "),  # :31
+     (r"%(e|o|i|a|m|em)(\s|$)", " {fw} "),  # :33
+     (r"%[emoa]+( |$)", " {fw} "),  # :34
