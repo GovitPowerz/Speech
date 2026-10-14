@@ -221,6 +221,8 @@ def _git(root: Path, *args: str) -> str:
 def _repo(tmp_path: Path, patches: dict[str, str]) -> Path:
     root = tmp_path / "repo"
     (root / "pkg").mkdir(parents=True)
+    # As the repository's own .gitignore: a catcher's bytecode is not a tree change.
+    (root / ".gitignore").write_text("__pycache__/\n")
     (root / "pkg/__init__.py").touch()
     (root / "pkg/mod.py").write_text("VALUE = 1\n")
     (root / "conftest.py").touch()
