@@ -3,12 +3,12 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_requires_corpus_skip
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -251,7 +251,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, oracle_libm: bool
+@@ -248,7 +248,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) ->
  
      if _git_apply(root, mutation, "--check").returncode:
          return every("STALE", "patch does not apply")
 -    if "corpus" in mutation.requires and not corpus:
 +    if False:
          return every("SKIPPED", f"{CORPUS} absent")
-     if "oracle-libm" in mutation.requires and not oracle_libm:
+     if "oracle-libm" in mutation.requires and not strict:
          return every("SKIPPED", "this host's libm differs from the oracle canaries")

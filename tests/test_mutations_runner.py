@@ -243,9 +243,9 @@ def _repo(tmp_path: Path, patches: dict[str, str]) -> Path:
     return root
 
 
-def _verdicts(root: Path, name: str, corpus: bool = False, oracle_libm: bool = False) -> list[str]:
+def _verdicts(root: Path, name: str, corpus: bool = False, strict: bool = False) -> list[str]:
     [mutation] = runner.load(root, [name])
-    return [r.observed for r in runner.run_mutation(root, mutation, corpus, oracle_libm)]
+    return [r.observed for r in runner.run_mutation(root, mutation, corpus, strict)]
 
 
 def _clean(root: Path) -> bool:
@@ -291,14 +291,12 @@ def test_requires_corpus_skips_when_the_corpus_is_absent(tmp_path: Path) -> None
 
 def test_requires_oracle_libm_skips_off_the_oracle_host(tmp_path: Path) -> None:
     root = _repo(tmp_path, {"b/1": _patch("mutation: m\ncatcher: CAUGHT pytest t/test_mod.py::test_value\nrequires: oracle-libm\n")})
-    assert _verdicts(root, "b/1", oracle_libm=False) == ["SKIPPED"]
-    assert _verdicts(root, "b/1", oracle_libm=True) == ["CAUGHT"]
+    assert _verdicts(root, "b/1", strict=False) == ["SKIPPED"]
+    assert _verdicts(root, "b/1", strict=True) == ["CAUGHT"]
     assert _clean(root)
 
 
-def _canaries(root: Path, outputs: list[float]) -> None:
-    # The fixture's layout: 2 x 18 column-major, [0,10) cos, [10,15) log, [15,18) exp.
-    inputs = [0.1 * k + 0.3 for k in range(18)]
+def _canaries(root: Path, inputs: list[float], outputs: list[float]) -> None:
     path = root / runner.CANARIES
     path.parent.mkdir(parents=True)
     path.write_bytes(struct.pack("<qq", 2, 18) + struct.pack("<36d", *(v for x, y in zip(inputs, outputs, strict=True) for v in (x, y))))
@@ -308,10 +306,10 @@ def test_oracle_libm_recomputes_the_canary_fixture_with_this_libm(tmp_path: Path
     monkeypatch.delenv("SPEECH_ORACLE_LIBM", raising=False)
     inputs = [0.1 * k + 0.3 for k in range(18)]
     outputs = [math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x) for k, x in enumerate(inputs)]
-    _canaries(tmp_path, outputs)
+    _canaries(tmp_path, inputs, outputs)
     assert runner.oracle_libm(tmp_path)
     outputs[17] = math.nextafter(outputs[17], math.inf)
-    _canaries(tmp_path / "off", outputs)
+    _canaries(tmp_path / "off", inputs, outputs)
     assert not runner.oracle_libm(tmp_path / "off")
 
 
@@ -320,6 +318,9 @@ def test_oracle_libm_honours_the_forced_mode(tmp_path: Path, monkeypatch: pytest
     assert runner.oracle_libm(tmp_path)
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "ulp")
     assert not runner.oracle_libm(tmp_path)
+    monkeypatch.setenv("SPEECH_ORACLE_LIBM", "Strict")
+    with pytest.raises(SystemExit, match="strict|ulp"):
+        runner.oracle_libm(tmp_path)
 
 
 def test_oracle_libm_agrees_with_the_catchers_gate() -> None:

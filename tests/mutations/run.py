@@ -121,18 +121,15 @@ def parse_patch(name: str, text: str) -> Mutation:
 
 
 def oracle_libm(root: Path) -> bool:
-    """True when this host's libm reproduces the oracle canaries bit for bit.
-
-    The same fixture, the same per-column functions and the same `SPEECH_ORACLE_LIBM` override
-    as `common::oracle_mode` and `tests/_libm_gate.oracle_strict`, so the runner and the
-    catchers read one verdict about the host.
-    """
+    """True when this host's libm reproduces the oracle canaries bit for bit (the comparators' gate)."""
     forced = os.environ.get("SPEECH_ORACLE_LIBM")
-    if forced in ("strict", "ulp"):
+    if forced is not None:
+        if forced not in ("strict", "ulp"):
+            sys.exit(f"SPEECH_ORACLE_LIBM must be strict|ulp, got {forced!r}")  # as common::oracle_mode
         return forced == "strict"
     raw = (root / CANARIES).read_bytes()
-    rows, cols = struct.unpack("<qq", raw[:16])
-    values = struct.unpack(f"<{rows * cols}d", raw[16 : 16 + 8 * rows * cols])
+    rows, cols = struct.unpack_from("<qq", raw)
+    values = struct.unpack_from(f"<{rows * cols}d", raw, 16)
     for k in range(cols):
         x, want = values[k * rows], values[k * rows + 1]
         got = math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x)
@@ -245,7 +242,7 @@ def _run_catcher(root: Path, catcher: Catcher) -> tuple[str, str]:
     return pytest_verdict(res.returncode, res.stdout)
 
 
-def run_mutation(root: Path, mutation: Mutation, corpus: bool, oracle_libm: bool) -> list[Verdict]:
+def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) -> list[Verdict]:
     def every(observed: str, failure: str) -> list[Verdict]:
         return [Verdict(mutation, c, observed, failure) for c in mutation.catchers]
 
@@ -253,7 +250,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, oracle_libm: bool
         return every("STALE", "patch does not apply")
     if "corpus" in mutation.requires and not corpus:
         return every("SKIPPED", f"{CORPUS} absent")
-    if "oracle-libm" in mutation.requires and not oracle_libm:
+    if "oracle-libm" in mutation.requires and not strict:
         return every("SKIPPED", "this host's libm differs from the oracle canaries")
     if _git_apply(root, mutation).returncode:
         raise RuntimeError(f"{mutation.name}: git apply failed after --check passed")
@@ -340,6 +337,7 @@ def main(argv: list[str], root: Path = ROOT) -> int:
         print("\n".join([*problems, f"{len(mutations)} mutations checked, {len(problems)} problems"]))
         return 1 if problems else 0
     corpus = (root / CORPUS).is_dir()
+    # Read only when a selected mutation declares it: a tree without the fixture runs the rest.
     strict = any("oracle-libm" in m.requires for m in mutations) and oracle_libm(root)
     print("| battery | # | mutation | catcher | expected | observed |\n|---|---|---|---|---|---|", flush=True)
     results: list[Verdict] = []

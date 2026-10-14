@@ -69,7 +69,8 @@ host, not a regression. A second precondition, `requires: oracle-libm`, is read 
 recomputes the same fixture the comparators recompute (`tests/reference_data/phase1/libm_canaries.bin`,
 10 cos / 5 log / 3 exp columns) under the same `SPEECH_ORACLE_LIBM` override, in stdlib (the
 `--check --kind cargo` CI job runs on a bare `python3`), so the runner and the catchers cannot
-disagree about the host; a test pins the runner's verdict against `oracle_strict()`. A full run
-therefore needs the corpus AND the oracle libm; `SPEECH_ORACLE_LIBM=ulp` runs the whole
-battery as an off-oracle host would, which is how the sweep for further host-dependent catches
-was made (the #78 outcome: none beyond the two).
+disagree about the host; a test pins the runner's verdict against `oracle_strict()`. A skip is
+still a STOP, as it is for an absent corpus: an off-oracle full run exits non-zero on these two,
+since a claim it could not verify is not green, so a full run needs the corpus AND the oracle
+libm. `SPEECH_ORACLE_LIBM=ulp` runs the whole battery as an off-oracle host would, which is how
+the sweep for further host-dependent catches was made (the #78 outcome: none beyond the two).
