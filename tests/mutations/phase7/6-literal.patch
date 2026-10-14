@@ -1,0 +1,17 @@
+mutation: FastTwinLid::get_segmentation (Mode 7) replaces the synthesized constant 10.0 SAD result_vec2 with a (i % 5) ramp
+catcher: MISSED cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: MISSED cargo --test phase7_parity_lid lid_parity_cep_exact_vs_fast
+
+diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
+index 4007a71..a449839 100644
+--- a/src/rust/src/fast/driver.rs
++++ b/src/rust/src/fast/driver.rs
+@@ -1341,7 +1341,7 @@ impl Segmenter for FastTwinLid {
+         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
+             // SAD else branch (`:1407`): result_vec = constant 10.0 -> the SHARED f64
+             // decision layer (bit-identical to the exact path -- no NN, pure f64).
+-            let mut result_vec2 = vec![10.0f64; real_vec_size];
++            let mut result_vec2: Vec<f64> = (0..real_vec_size).map(|i| (i % 5) as f64).collect();
+             self.last_result_rows.push(result_vec2.clone());
+             results_to_segmentation(
+                 seg,

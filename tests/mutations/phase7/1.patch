@@ -1,0 +1,20 @@
+mutation: FastBlstm::from_flat build_lstm_layer multiplies each LSTM layer's narrowed input-weight block by the adim sqrt(i+o)
+catcher: CAUGHT cargo --test phase7_fast_nn from_flat_narrows_first_block_bit_exact
+catcher: CAUGHT cargo --test phase7_fast_nn synthetic_multiclass_posterior_parity
+catcher: CAUGHT cargo --test phase7_fast_nn synthetic_binary_posterior_parity
+catcher: CAUGHT cargo --test phase7_fast_nn real_tuple_a_forward_parity
+catcher: MISSED cargo --test phase7_fast_nn from_flat_output_depends_only_on_f32_narrowing
+
+diff --git a/src/rust/src/fast/nn.rs b/src/rust/src/fast/nn.rs
+index 816379d..6f8acc4 100644
+--- a/src/rust/src/fast/nn.rs
++++ b/src/rust/src/fast/nn.rs
+@@ -406,6 +406,8 @@ impl FastBlstm {
+         let mut build_lstm_layer =
+             |i: usize, o: usize, cells: bool, gates: bool, gates_rec: bool| -> FastLstmLayer {
+                 let input_weights = narrow(take(i * 4 * o));
++                let adim = ((i + o) as f64).sqrt() as f32;
++                let input_weights: Vec<f32> = input_weights.iter().map(|&x| x * adim).collect();
+                 let feedback_weights = narrow(take(4 * o * o));
+                 // PeepWeight arrives column-major (12 x O): seg[jj*12 + ii]. Store
+                 // row-major peep[ii*O + jj] for contiguous per-unit reads.

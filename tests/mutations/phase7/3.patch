@@ -1,0 +1,17 @@
+mutation: FastPipeline::compute_periodogram drops the / n_f periodogram normalization
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_prcts_60s
+catcher: MISSED cargo --test phase7_fast_pipeline pipeline_parity_excerpt_3s
+
+diff --git a/src/rust/src/fast/pipeline.rs b/src/rust/src/fast/pipeline.rs
+index 3d8f280..165a888 100644
+--- a/src/rust/src/fast/pipeline.rs
++++ b/src/rust/src/fast/pipeline.rs
+@@ -363,7 +363,7 @@ impl FastPipeline {
+             let base = cf * self.bins;
+             for m in 0..self.bins {
+                 let z = self.fft_out[m];
+-                self.perio.data[base + m] = (z.re * z.re + z.im * z.im) / n_f;
++                self.perio.data[base + m] = z.re * z.re + z.im * z.im;
+             }
+         }
+     }

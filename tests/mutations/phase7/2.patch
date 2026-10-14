@@ -1,0 +1,20 @@
+mutation: faer_project swaps the lhs/rhs operands of its faer matmul
+catcher: CAUGHT cargo --test phase7_fast_nn synthetic_multiclass_posterior_parity
+catcher: CAUGHT cargo --test phase7_fast_nn synthetic_binary_posterior_parity
+catcher: CAUGHT cargo --test phase7_fast_nn real_tuple_a_forward_parity
+catcher: MISSED cargo --test phase7_fast_nn activations_match_f64_twin_at_grid
+catcher: MISSED cargo --test phase7_fast_nn from_flat_narrows_first_block_bit_exact
+
+diff --git a/src/rust/src/fast/nn.rs b/src/rust/src/fast/nn.rs
+index 816379d..9a055c3 100644
+--- a/src/rust/src/fast/nn.rs
++++ b/src/rust/src/fast/nn.rs
+@@ -913,7 +913,7 @@ pub fn faer_project(
+     let lhs = MatRef::from_row_major_slice_with_stride(&in_data[..t * in_stride], t, k, in_stride);
+     let rhs = MatRef::from_column_major_slice_with_stride(w, k, w_cols, w_rows);
+     let dmut = MatMut::from_row_major_slice_mut(dst, t, w_cols);
+-    matmul(dmut, Accum::Replace, lhs, rhs, 1.0_f32, Par::Seq);
++    matmul(dmut, Accum::Replace, rhs, lhs, 1.0_f32, Par::Seq);
+ }
+ 
+ /// One peephole-LSTM layer forward (`LstmLayer::feed_forward`, f32). `in_data` is the

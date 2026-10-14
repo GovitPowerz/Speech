@@ -1,0 +1,22 @@
+mutation: score_lid_entry self-normalizes (self_normalize_f32) the f32 LID input block before the fast LID scoring forward
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_cep_exact_vs_fast
+
+diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
+index 4007a71..276b7dc 100644
+--- a/src/rust/src/fast/driver.rs
++++ b/src/rust/src/fast/driver.rs
+@@ -1614,11 +1614,12 @@ pub(super) fn score_lid_entry(
+             fdata.push(feat_noised[[r, c]] as f32);
+         }
+     }
+-    let fin = FastMatrix {
++    let mut fin = FastMatrix {
+         data: fdata,
+         rows: fr,
+         cols: fc,
+     };
++    self_normalize_f32(&mut fin);
+     let out_f32 = net.feed_forward_scoring(
+         &fin,
+         &p.lid_lstm_sub,

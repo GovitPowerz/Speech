@@ -4807,6 +4807,19 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   sad 3/64 s, lid-features 3/257 s, lid-phseq 3/222 s); `./lint_code.sh` clean (ruff imports/format/
   lint + mypy, 82 files). Working tree at completion contains ONLY this IMPROVEMENTS.md entry.
 
+  **Live since issue #76:** `tests/mutations/phase7/` (9 patches;
+  `uv run python tests/mutations/run.py phase7`). Every edit is the literal one, recovered from
+  the battery's session transcript. Item 6 is two patches: `6-literal`, the named `result_vec2`
+  edit, MISSED on both `phase7_parity_lid` legs as recorded, and `6-faithful`, the
+  `self_normalize_f32` variant, CAUGHT; the variant's site, the inline Mode-7 scoring body of
+  `FastTwinLid::get_segmentation`, moved into `score_lid_entry` in c8444da (Phase 8). Item 5's
+  unnamed fourth failure is `pipeline_parity_dc_offset_branch`. Item 7 is the battery's
+  `exact_wall * 10.0` operand; RESULTS.md's Task 7 `0.001x` budget check names the same catcher
+  and verdict and has no patch of its own. Item 8 is the designed no-op: the run named four test
+  binaries, so its four MISSED catchers are the tests in them that reach
+  `build_input_sequence_parts` with a mel bank (a judgment rebuild). Items 3 and 5 rest on the
+  `phase7_fast_pipeline` pins the Phase 10 f32-mel sweep re-pinned; their verdicts held.
+
 ### Mutation battery (Phase 8)
 
 - **[phase8] Mutation battery (Task 9): 8/8 battery items break their named catcher, each via an
