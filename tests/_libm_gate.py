@@ -36,6 +36,8 @@ def oracle_strict() -> bool:
         return True
     if forced == "ulp":
         return False
+    if forced is not None:
+        raise ValueError(f"SPEECH_ORACLE_LIBM must be strict|ulp, got {forced!r}")
     rows, _, flat = read_bin(_CANARY_PATH)  # 2 x N column-major
     n = flat.size // rows
     for k in range(n):

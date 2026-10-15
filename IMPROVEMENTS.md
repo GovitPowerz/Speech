@@ -2014,7 +2014,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   MISSED (the same reading as `issue23/3a-3b`). Item 6's patch also carries the Phase 4b battery's
   item 6 catcher, `phase4b_corpus_lid.rs::twin_train_ns_costlid_gate_live`: one site, one edit.
   Item 1's catch is about one ULP through `assert_oracle_eq`, so it holds only where the
-  comparator runs strict (the Apple-libm oracle host; a declared precondition is #78).
+  comparator runs strict (the Apple-libm oracle host; the patch declares `requires: oracle-libm`, #78).
 
 - **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
   (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely
@@ -3683,7 +3683,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   "cascade" catchers are the four the run log named; item 2 carries the plan's
   `test_smorms3_trajectory_bit_exact` as MISSED and item 8 `test_create_batches_sub_and_rotation`
   as MISSED. Item 2's catch is one ULP of theta read through `assert_f64_close`, so it is
-  bit-exact only where `oracle_strict()` holds (a declared precondition is #78).
+  bit-exact only where `oracle_strict()` holds (the patch declares `requires: oracle-libm`, #78).
 
 - **[phase4c/4d->phase5] `get_new_batch`'s two `while len(batch) < nbOfCasesPerBatch` loops
   had NO iteration cap -- a fully worst-excluded rotation state spins forever -- FIXED

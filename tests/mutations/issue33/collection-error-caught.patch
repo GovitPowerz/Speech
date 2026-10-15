@@ -3,7 +3,7 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_a_mutation_that_does
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -128,7 +128,7 @@
+@@ -154,7 +154,7 @@
      # A module that no longer imports fails collection; with a node id pytest then exits 4,
      # the code it also uses for a test that does not exist.
      if "ERROR collecting" in out or re.search(r"errors? during collection", out):
