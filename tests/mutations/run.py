@@ -120,9 +120,17 @@ def parse_patch(name: str, text: str) -> Mutation:
     return Mutation(name, descriptions[0], tuple(catchers), tuple(requires), files, text)
 
 
+def libm_override() -> str | None:
+    """`SPEECH_ORACLE_LIBM`, refused as `common::oracle_mode` and `tests/_libm_gate.oracle_strict` refuse it."""
+    forced = os.environ.get("SPEECH_ORACLE_LIBM")
+    if forced not in (None, "strict", "ulp"):
+        raise ValueError(f"SPEECH_ORACLE_LIBM must be strict|ulp, got {forced!r}")
+    return forced
+
+
 def oracle_libm(root: Path) -> bool:
     """True when this host's libm reproduces the oracle canaries bit for bit (the comparators' gate)."""
-    forced = os.environ.get("SPEECH_ORACLE_LIBM")
+    forced = libm_override()
     if forced is not None:
         return forced == "strict"
     raw = (root / CANARIES).read_bytes()
@@ -249,7 +257,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) -> 
     if "corpus" in mutation.requires and not corpus:
         return every("SKIPPED", f"{CORPUS} absent")
     if "oracle-libm" in mutation.requires and not strict:
-        return every("SKIPPED", "this host's libm differs from the oracle canaries")
+        return every("SKIPPED", "the comparators run hybrid here (the canaries, or SPEECH_ORACLE_LIBM=ulp)")
     if _git_apply(root, mutation).returncode:
         raise RuntimeError(f"{mutation.name}: git apply failed after --check passed")
     rebuilt = False
@@ -320,8 +328,10 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     parser.add_argument("--changed-since", metavar="REF", help="only mutations whose patch, patched file or catcher file differs from REF")
     args = parser.parse_args(argv)
     try:
+        # Whatever runs: `common::oracle_mode` panics on it, so every Rust catcher reaching a comparator would read CAUGHT.
+        libm_override()
         mutations = load(root, args.select)
-    except PatchError as e:
+    except ValueError as e:  # a PatchError, or the refused override
         print(e, file=sys.stderr)
         return 2
     if args.changed_since:
@@ -334,11 +344,6 @@ def main(argv: list[str], root: Path = ROOT) -> int:
         problems = check(root, mutations, kinds)
         print("\n".join([*problems, f"{len(mutations)} mutations checked, {len(problems)} problems"]))
         return 1 if problems else 0
-    forced = os.environ.get("SPEECH_ORACLE_LIBM")
-    if forced not in (None, "strict", "ulp"):
-        # `common::oracle_mode` panics on it: every Rust catcher reaching a comparator would read CAUGHT.
-        print(f"SPEECH_ORACLE_LIBM must be strict|ulp, got {forced!r}", file=sys.stderr)
-        return 2
     corpus = (root / CORPUS).is_dir()
     # Read only when a selected mutation declares it: a tree without the fixture runs the rest.
     strict = any("oracle-libm" in m.requires for m in mutations) and oracle_libm(root)

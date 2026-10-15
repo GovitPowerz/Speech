@@ -3,7 +3,7 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_cargo_catcher_that_i
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -141,7 +141,7 @@
+@@ -149,7 +149,7 @@ def cargo_verdict(out: str) -> tuple[str, str]:
      if m is None:
          return "STALE", "no test result line"
      passed, failed = int(m.group(1)), int(m.group(2))
