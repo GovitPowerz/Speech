@@ -318,6 +318,9 @@ def test_oracle_libm_honours_the_forced_mode(tmp_path: Path, monkeypatch: pytest
     assert runner.oracle_libm(tmp_path)
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "ulp")
     assert not runner.oracle_libm(tmp_path)
+    monkeypatch.setenv("SPEECH_ORACLE_LIBM", "Strict")
+    with pytest.raises(ValueError, match=r"strict\|ulp"):
+        runner.oracle_libm(tmp_path)
 
 
 def test_oracle_libm_agrees_with_the_catchers_gate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -336,16 +339,18 @@ def test_main_skips_by_the_oracle_libm_and_refuses_a_mistyped_override(
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "ulp")
     assert runner.main(["b/1"], root) == 1
     assert "| b | 1 | m | pytest t/test_mod.py::test_value | CAUGHT | SKIPPED |" in capsys.readouterr().out
-    # Refused even when no selected mutation declares the precondition.
+    # Refused before anything runs: a selection that declares nothing, and --check.
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "Strict")
     assert runner.main(["b/2"], root) == 2
+    assert "strict|ulp" in capsys.readouterr().err
+    assert runner.main(["--check", "b/2"], root) == 2
     assert "strict|ulp" in capsys.readouterr().err
     assert _clean(root)
 
 
 def test_oracle_strict_refuses_a_mistyped_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "Strict")
-    with pytest.raises(ValueError, match="strict|ulp"):
+    with pytest.raises(ValueError, match=r"strict\|ulp"):
         oracle_strict.__wrapped__()
 
 

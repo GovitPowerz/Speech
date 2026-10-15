@@ -70,7 +70,7 @@ recomputes the same fixture the comparators recompute (`tests/reference_data/pha
 10 cos / 5 log / 3 exp columns) under the same `SPEECH_ORACLE_LIBM` override, in stdlib (the
 `--check --kind cargo` CI job runs on a bare `python3`), so the runner and the catchers cannot
 disagree about the host; a test pins the runner's verdict against `oracle_strict()`. Any other
-override value is refused before a catcher runs (exit 2), whatever the selection declares:
+override value is refused up front (exit 2), whatever the selection declares and `--check` included:
 `common::oracle_mode` panics on it, so every Rust catcher reaching a comparator would read
 `CAUGHT`, and `oracle_strict()` raises on it too. A skip is
 still a STOP, as it is for an absent corpus: an off-oracle full run exits non-zero on these two,

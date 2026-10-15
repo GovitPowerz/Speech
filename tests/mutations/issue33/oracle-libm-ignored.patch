@@ -3,12 +3,12 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_requires_oracle_libm
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -248,7 +248,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) ->
+@@ -256,7 +256,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) ->
          return every("STALE", "patch does not apply")
      if "corpus" in mutation.requires and not corpus:
          return every("SKIPPED", f"{CORPUS} absent")
 -    if "oracle-libm" in mutation.requires and not strict:
 +    if False:
-         return every("SKIPPED", "this host's libm differs from the oracle canaries")
+         return every("SKIPPED", "the comparators run hybrid here (the canaries, or SPEECH_ORACLE_LIBM=ulp)")
      if _git_apply(root, mutation).returncode:
          raise RuntimeError(f"{mutation.name}: git apply failed after --check passed")

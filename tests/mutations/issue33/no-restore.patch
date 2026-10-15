@@ -3,7 +3,7 @@ catcher: CAUGHT pytest tests/test_mutations_runner.py::test_run_reads_caught_and
 diff --git a/tests/mutations/run.py b/tests/mutations/run.py
 --- a/tests/mutations/run.py
 +++ b/tests/mutations/run.py
-@@ -265,7 +265,7 @@
+@@ -273,7 +273,7 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) ->
                  return every("INVALID", "maturin develop failed")
          return [Verdict(mutation, c, *_run_catcher(root, c)) for c in mutation.catchers]
      finally:
