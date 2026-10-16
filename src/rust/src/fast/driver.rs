@@ -99,7 +99,7 @@ use super::nn::{
 };
 use super::pipeline::FastPipeline;
 use super::plan::FastSadPlan;
-use crate::features::pipeline::{FeatureConfig, SpectralParams};
+use crate::features::pipeline::FeatureConfig;
 
 /// Which fast net shape a config's `Cell_Type` x `Direction` pair selects
 /// (Phase 9 Task 6, spec S4.2). A CLOSED set: the phase-7 bidirectional peephole-LSTM
@@ -891,7 +891,8 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 /// SCOPE (the house typed-bail pattern -- Mode 7 phSeq/cep is what the gate configs
 /// exercise, everything else typed-bails loudly):
 /// - Only `_Mode == 7` (`from_legacy`); the wav CNN arm (`periodogram.is_none()`), the
-///   pitch second pass (`TDCwindow > 0`), and `DumpLIDInternals` typed-bail.
+///   pitch second pass (`TDCwindow > 0`, at construction only -- the per-file re-gate
+///   went with issue #89), and `DumpLIDInternals` typed-bail.
 /// - The LID net's InputNormalizationType must be 0 (the gate configs' value; a non-0
 ///   type would need the normalization the fast scoring skips) -- bail at construction.
 /// - A negative `BLSTM_LID_TargetEnforcementStep` typed-bails at construction (T5 finding
@@ -1247,12 +1248,13 @@ impl Segmenter for FastTwinLid {
             );
         }
         let rate = audio.sample_rate as f64;
-        let s = SpectralParams::derive(&self.feature_cfg, rate);
-        if let Some(tdc) = s.tdc.as_ref()
-            && tdc.half_window > 0
-        {
-            bail!("fast TwinLid mode 7: the pitch pass (TDCwindow > 0) is not supported");
-        }
+        // No per-file pitch re-gate (issue #89): `from_legacy` refuses `BLSTM_TDCwindow > 0`
+        // and `FeatureConfig` carries a `tdc` only for a nonzero window, so construction
+        // guarantees what this states.
+        debug_assert!(
+            self.feature_cfg.tdc.is_none(),
+            "fast TwinLid: construction refuses BLSTM_TDCwindow > 0"
+        );
 
         // Stateful spectrum-shift quantization + the `!hasReadWavFile` -> 80 override
         // (the exact `:1296-1301`): `periodogram.is_some()` is the port's `!hasReadWavFile`.
