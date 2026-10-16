@@ -222,6 +222,21 @@ impl StreamFrontEnd {
         })
     }
 
+    /// The delta reach in periodogram rows: feature row `r` reads rows `[r-reach, r+reach]`
+    /// (`ComputeDeltasNb + ComputeDeltaDeltasNb`, each term only when positive). Derived
+    /// ONCE, in [`new`](Self::new); the session's latency bound reads it here rather than
+    /// re-deriving it (issue #93).
+    pub fn reach(&self) -> usize {
+        self.reach
+    }
+
+    /// The framing half-window in samples (`window_size / 2`, the `fill_frame` half-window
+    /// -- DISTINCT from the NN half-window, a count of feature rows). Read by the session's
+    /// latency bound with [`reach`](Self::reach).
+    pub fn half_window(&self) -> usize {
+        self.half_window
+    }
+
     /// Buffer a chunk of raw f32 samples, applying the frozen per-sample transforms in the
     /// offline order (gain -> preemph-with-carry -> noise-with-index-carry, all f64, then
     /// narrow to f32). Buffers only -- framing/FFT/assembly happen in
@@ -924,6 +939,13 @@ impl ConvStream {
         }
     }
 
+    /// The half-width `(coeffs.len()-1)/2` (0 when no convolution): the lookahead an
+    /// output waits for before it is final. Derived ONCE, in [`new`](Self::new); the
+    /// session's `conv_delay_s` reads it through [`StreamDecision::conv_half`] (issue #93).
+    fn half(&self) -> usize {
+        self.half
+    }
+
     fn push(&mut self, v: f64) {
         self.ring.push(v);
         self.received += 1;
@@ -1323,6 +1345,14 @@ impl StreamDecision {
     /// latency accounting + the param-driven-derivation gate.
     pub fn holdback(&self) -> f64 {
         self.holdback
+    }
+
+    /// The convolution half-width in posterior rows ([`ConvStream`]'s `half`, 0 when the
+    /// offline gate `conv.len() > 1` is off). Exposed for the latency accounting: the
+    /// session's `conv_delay_s` is `conv_half * time_step`, read from here rather than
+    /// re-derived from `conv_coeff` (issue #93).
+    pub fn conv_half(&self) -> usize {
+        self.conv.half()
     }
 
     /// The number of raw segments the incremental replay currently re-runs -- the
@@ -1969,20 +1999,19 @@ impl StreamingSession {
             FastNet::BiCell(_) => unreachable!("bidirectional is unstreamable"),
         };
 
+        let decision = StreamDecision::new(
+            plan.driver_cfg.clone(),
+            plan.seg_cfg.clone(),
+            time_step,
+            time_offset,
+        );
+
         // Derived latency components (config-derived; `derived_latency_bound_s` sums these +
-        // holdback). See that method + the module-level LATENCY note.
-        let reach = if feature_cfg.deltas_nb > 0 {
-            feature_cfg.deltas_nb as usize
-                + if feature_cfg.dd_nb > 0 {
-                    feature_cfg.dd_nb as usize
-                } else {
-                    0
-                }
-        } else {
-            0
-        };
-        let half_window = params.window_size / 2;
-        let feature_reach_s = (reach * ssif + half_window) as f64 / rate;
+        // holdback). See that method + the module-level LATENCY note. The delta reach, the
+        // framing half-window and the convolution half-width are READ off the layers that
+        // derive them (`StreamFrontEnd::new`, `ConvStream::new`), never re-derived here: a
+        // second copy of either rule could leave this bound stale (issue #93).
+        let feature_reach_s = (front.reach() * ssif + front.half_window()) as f64 / rate;
         // WINDOWED: the full-window lookahead an output row waits for. CAUSAL: 0.0 --
         // there is no window and no lookahead (spec S5.5: "the nn_window term DIES").
         let nn_window_s = 2.0 * window_size as f64 * spectrum_shift_sec;
@@ -1999,19 +2028,7 @@ impl StreamingSession {
         } else {
             0.0
         };
-        let conv_half = plan
-            .driver_cfg
-            .conv_coeff
-            .as_deref()
-            .map_or(0, |c| if c.len() > 1 { (c.len() - 1) / 2 } else { 0 });
-        let conv_delay_s = conv_half as f64 * time_step;
-
-        let decision = StreamDecision::new(
-            plan.driver_cfg.clone(),
-            plan.seg_cfg.clone(),
-            time_step,
-            time_offset,
-        );
+        let conv_delay_s = decision.conv_half() as f64 * time_step;
 
         Ok(StreamingSession {
             front,
