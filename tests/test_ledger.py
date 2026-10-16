@@ -23,7 +23,7 @@ from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file, render_text, table_names
 from speech.ledger.schema import LEDGER_DIR, BaselinePayload, BaselineRecipe, BaselineRecord, BenchPayload, BenchRecipe, BenchRecord, Build, CollarScore, Host
 from speech.ledger.stage import LEGS, sorted_first, stage_fixture_60s
-from speech.ledger.tables import TABLES, bench_cells, current_baselines, speedups
+from speech.ledger.tables import TABLES, _matrix, _tbd, bench_cells, current_baselines, speedups
 
 from tests.conftest import CORPUS_ROOT, requires_corpus
 
@@ -348,6 +348,28 @@ def test_lid_cell_matrix_renders_per_arm_with_tbd_rows_and_full_runs() -> None:
     # the features table does not pick up a phseq record; its own LSTM gate lands in its first row.
     assert all("TBD" in line for line in TABLES["lid_features_cells"]([slstm, full])[2:13])
     assert TABLES["lid_features_cells"]([lid_gate()])[2].startswith("| LSTM / bidirectional | 35 / 15 / 48 | 72.92 | 93.75 | +20.83 | 0.46 | 91.67 |")
+
+
+def test_table_width_comes_from_the_column_list_not_the_header_text() -> None:
+    """Issue #101: an escaped `\\|` inside a header cell is text, never a column; the rule and
+    every TBD row are sized from the column list, so the renderer never parses its own header."""
+    columns = ["cell / direction", "files (train/valid/test)", r"wall (exact \| fast)"]
+    gate = sad_gate("lstm", "forward", lineage="v2")
+    lines = _matrix(
+        [gate],
+        "sad-v2",
+        "v2",
+        [("lstm", "bidirectional"), ("lstm", "forward")],
+        "any cell",
+        columns,
+        lambda r: f"{r.payload.n_test} | {r.payload.wall_s:.0f} s",
+    )
+    assert lines[0] == r"| cell / direction | files (train/valid/test) | wall (exact \| fast) |"
+    assert lines[1] == "|---|---|---|"
+    assert lines[2] == "| LSTM / bidirectional | TBD | TBD |"
+    assert lines[3] == "| LSTM / forward | 24 | 37 s |"
+    assert lines[4] == "| full-corpus runs (any cell) | TBD | TBD |"
+    assert _tbd("full run", len(columns)) == "| full run | TBD | TBD |"
 
 
 def test_supersession_footnote_hides_the_old_row() -> None:
