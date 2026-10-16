@@ -7,7 +7,9 @@ live (non-superseded) record per (source, recipe), two being an error, never a c
 seed is part of the recipe, so seeds are rows, never averaged) and a single `TBD` row when none
 exists; a bench label names one (lanes, lineage), two being an error, never a pooled cell
 (issue #39); every table ends with the hosts its rows came from and one footnote line per
-supersession chain. Prose around a table stays hand-written.
+supersession link; a table declares its columns as a list and sizes its rule and its `TBD`
+rows from that list, never from its own rendered header (issue #101). Prose around a table
+stays hand-written.
 """
 
 from __future__ import annotations
@@ -138,8 +140,17 @@ def _wall(r: BaselineRecord) -> str:
     return f"{r.payload.wall_s:.0f} s"
 
 
-def _tbd(label: str, n: int) -> str:
-    return "| " + " | ".join([label, *(["TBD"] * n)]) + " |"
+def _row(cells: Iterable[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _head(columns: list[str]) -> list[str]:
+    """The header and its rule; `len(columns)` is the width every `TBD` row of the table takes."""
+    return [_row(columns), "|" + "---|" * len(columns)]
+
+
+def _tbd(label: str, width: int) -> str:
+    return _row([label, *["TBD"] * (width - 1)])
 
 
 def host_key(r: Record) -> str:
@@ -167,17 +178,18 @@ def _footer(rows: Sequence[Record], all_records: Iterable[Record]) -> list[str]:
 # --------------------------------------------------------------------------------------- #
 
 
+_PHASE6_LID_COLUMNS = ["split", "files (train/valid/test)", "LID error %", "Cavg", "chance %", "config", "seed"]
+_PHASE6_SAD_COLUMNS = ["split", "files (train/valid/test)", "DCF@0", "DCF@0.25", "DCF@0.5", "DCF@1", "DCF@2", "Pmiss/Pfa @0.5", "config", "seed"]
+
+
 def _lid_table(records: list[Record], arm: str) -> list[str]:
     current = current_baselines(records)
     gate = gate_row(current, arm, None, "lstm", "bidirectional")
     fulls = full_rows(current, arm, None, [("lstm", "bidirectional")])
-    lines = [
-        "| split | files (train/valid/test) | LID error % | Cavg | chance % | config | seed |",
-        "|---|---|---|---|---|---|---|",
-    ]
+    lines = _head(_PHASE6_LID_COLUMNS)
     rows: list[BaselineRecord] = []
     if gate is None:
-        lines.append(_tbd("subset gate", 6))
+        lines.append(_tbd("subset gate", len(_PHASE6_LID_COLUMNS)))
     else:
         p = gate.payload
         lines.append(
@@ -196,7 +208,7 @@ def _lid_table(records: list[Record], arm: str) -> list[str]:
         )
         rows.append(r)
     if not fulls:
-        lines.append(_tbd("full run", 6))
+        lines.append(_tbd("full run", len(_PHASE6_LID_COLUMNS)))
     return lines + _footer(rows, records)
 
 
@@ -215,13 +227,10 @@ def phase6_sad_v1(records: list[Record]) -> list[str]:
     current = current_baselines(records)
     gate = gate_row(current, "sad", "v1", "lstm", "bidirectional")
     fulls = full_rows(current, "sad", "v1", [("lstm", "bidirectional")])
-    lines = [
-        "| split | files (train/valid/test) | DCF@0 | DCF@0.25 | DCF@0.5 | DCF@1 | DCF@2 | Pmiss/Pfa @0.5 | config | seed |",
-        "|---|---|---|---|---|---|---|---|---|---|",
-    ]
+    lines = _head(_PHASE6_SAD_COLUMNS)
     rows: list[BaselineRecord] = []
     if gate is None:
-        lines.append(_tbd("subset gate", 9))
+        lines.append(_tbd("subset gate", len(_PHASE6_SAD_COLUMNS)))
     else:
         lines.append(
             f"| subset gate ({_date(gate)}) | {_files(gate)} | {' | '.join(_dcf_cells(gate))} | {_pmiss_pfa(gate, '.2f')} "
@@ -236,7 +245,7 @@ def phase6_sad_v1(records: list[Record]) -> list[str]:
         lines.append(f"| full run ({_date(r)}) | {_files(r)} | {' | '.join(_dcf_cells(r))} | {_pmiss_pfa(r, '.2f')} | {_config(r)} | {r.recipe.seed} |")
         rows.append(r)
     if not fulls:
-        lines.append(_tbd("full run", 9))
+        lines.append(_tbd("full run", len(_PHASE6_SAD_COLUMNS)))
     return lines + _footer(rows, records)
 
 
@@ -246,18 +255,18 @@ def phase6_sad_v1(records: list[Record]) -> list[str]:
 
 
 def _matrix(
-    records: list[Record], arm: str, lineage: str | None, cells: list[tuple[str, str]], scope: str, header: str, row: Callable[[BaselineRecord], str]
+    records: list[Record], arm: str, lineage: str | None, cells: list[tuple[str, str]], scope: str, columns: list[str], row: Callable[[BaselineRecord], str]
 ) -> list[str]:
     """One (cell x direction) table: a gate row per cell (TBD when none), then the full-run rows
-    (one per record, TBD when none), the metric columns coming from `row`."""
+    (one per record, TBD when none), the metric columns coming from `row`, one per column after
+    the first."""
     current = current_baselines(records)
-    n = header.count("|") - 2
-    lines = [header, "|" + "---|" * (n + 1)]
+    lines = _head(columns)
     rows: list[BaselineRecord] = []
     for cell, direction in cells:
         r = gate_row(current, arm, lineage, cell, direction)
         if r is None:
-            lines.append(_tbd(f"{CELL_NAME[cell]} / {direction}", n))
+            lines.append(_tbd(f"{CELL_NAME[cell]} / {direction}", len(columns)))
             continue
         lines.append(f"| {_cell(r)} | {row(r)} |")
         rows.append(r)
@@ -266,14 +275,21 @@ def _matrix(
         lines.append(f"| full run: {_cell(r)} ({_date(r)}, seed {r.recipe.seed}) | {row(r)} |")
         rows.append(r)
     if not fulls:
-        lines.append(_tbd(f"full-corpus runs ({scope})", n))
+        lines.append(_tbd(f"full-corpus runs ({scope})", len(columns)))
     return lines + _footer(rows, records)
 
 
-_DCF_HEADER = (
-    "| cell / direction | files (train/valid/test) | trained DCF@0.5 | Pmiss / Pfa @0.5 | trained collar range "
-    "| init DCF@0.5 | init collar range | gain@0.5 | wall |"
-)
+_DCF_COLUMNS = [
+    "cell / direction",
+    "files (train/valid/test)",
+    "trained DCF@0.5",
+    "Pmiss / Pfa @0.5",
+    "trained collar range",
+    "init DCF@0.5",
+    "init collar range",
+    "gain@0.5",
+    "wall",
+]
 
 
 def _dcf_row(r: BaselineRecord) -> str:
@@ -285,7 +301,7 @@ def _dcf_row(r: BaselineRecord) -> str:
 
 
 def _cell_matrix(records: list[Record], arm: str, lineage: str, cells: list[tuple[str, str]], scope: str) -> list[str]:
-    return _matrix(records, arm, lineage, cells, scope, _DCF_HEADER, _dcf_row)
+    return _matrix(records, arm, lineage, cells, scope, _DCF_COLUMNS, _dcf_row)
 
 
 _BOTH = ("bidirectional", "forward")
@@ -315,7 +331,7 @@ def phase11_v2_cells(records: list[Record]) -> list[str]:
 # --------------------------------------------------------------------------------------- #
 
 _ALL_CELLS = [(c, d) for c in CELL_TYPES for d in DIRECTIONS]
-_LID_HEADER = "| cell / direction | files (train/valid/test) | trained LID error % | init LID error % | gain (pt) | Cavg | chance % | wall |"
+_LID_COLUMNS = ["cell / direction", "files (train/valid/test)", "trained LID error %", "init LID error %", "gain (pt)", "Cavg", "chance %", "wall"]
 
 
 def _lid_row(r: BaselineRecord) -> str:
@@ -325,7 +341,7 @@ def _lid_row(r: BaselineRecord) -> str:
 
 
 def _lid_cell_matrix(records: list[Record], arm: str) -> list[str]:
-    return _matrix(records, arm, None, _ALL_CELLS, "any cell x direction", _LID_HEADER, _lid_row)
+    return _matrix(records, arm, None, _ALL_CELLS, "any cell x direction", _LID_COLUMNS, _lid_row)
 
 
 @table("lid_features_cells")
@@ -433,6 +449,9 @@ def latest_host(cells: Iterable[BenchCell]) -> str | None:
     return max(cells, key=lambda c: max((r.recorded_at, r.id) for r in c.records)).host
 
 
+_BENCH_COLUMNS = ["leg", "audio_s", "path", "wall_s (mean [range], n)", "rtf", "maxrss_mib", "MiB/audio-s", "speedup (wall, fast vs exact)"]
+
+
 def _leg_name(label: str) -> str:
     return LEGS[label].display if label in LEGS else label
 
@@ -443,10 +462,7 @@ def phase7_bench_matrix(records: list[Record]) -> list[str]:
     ratio = speedups(cells)
     labels = [*LEG_ORDER, *sorted({c.label for c in cells} - set(LEG_ORDER))]
     hosts = sorted({c.host for c in cells})
-    header = [
-        "| leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |",
-        "|---|---|---|---|---|---|---|---|",
-    ]
+    header = _head(_BENCH_COLUMNS)
     lines: list[str] = []
     rows: list[BenchRecord] = []
     for host in hosts or [None]:  # type: ignore[list-item]
@@ -457,7 +473,7 @@ def phase7_bench_matrix(records: list[Record]) -> list[str]:
             for path in ("exact", "fast"):
                 cell = next((c for c in cells if c.label == label and c.path == path and c.host == host), None)
                 if cell is None:
-                    lines.append(f"| {_leg_name(label)} | TBD | {path} | TBD | TBD | TBD | TBD | TBD |")
+                    lines.append(_row([_leg_name(label), "TBD", path, *["TBD"] * (len(_BENCH_COLUMNS) - 3)]))
                     continue
                 rows.extend(cell.records)
                 speed = "baseline" if path == "exact" else (f"{ratio[(label, host)]:.2f}x" if (label, host) in ratio else "n/a")
