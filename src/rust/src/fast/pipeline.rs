@@ -98,8 +98,9 @@
 //! `FastBlstm::from_flat`): an active LTSV column (`LTSVwindow > 0`) and an active
 //! periodogram temporal convolution (`spectrum_temporal_convolution_size > 0`). Both
 //! are OFF in every committed gate config; both would need NEW fast-path wiring with no
-//! golden coverage. The pitch second pass (`TDCwindow > 0`) is the Task-4 DRIVER's bail,
-//! not the pipeline's (the pipeline only exposes the periodogram for a would-be warp).
+//! golden coverage. The pitch second pass (`TDCwindow > 0`) is the PLAN's bail
+//! (`fast::plan::FastSadPlan::from_map`), not the pipeline's (the pipeline only exposes
+//! the periodogram for a would-be warp).
 
 use std::sync::Arc;
 

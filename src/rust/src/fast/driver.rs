@@ -1279,16 +1279,14 @@ impl Segmenter for FastTwinLid {
 
         // getBLSTMParam: SAD result_vec sizing + timeStep (mutates self.window_shift_sec).
         let sad_ssr = self.sad_ssr;
-        let sad_lstm_sub = self.sad_lstm_sub.clone();
-        let sad_out_sub = self.sad_out_sub.clone();
         let (window_size, _sad_window_shift, no_overlap, real_vec_size) = get_blstm_param(
             self.driver_cfg.window_size_sec,
             &mut self.window_shift_sec,
             rate,
             ssif,
             sad_ssr,
-            &sad_lstm_sub,
-            &sad_out_sub,
+            &self.sad_lstm_sub,
+            &self.sad_out_sub,
             audio.data.ncols(),
         );
 
@@ -1322,9 +1320,6 @@ impl Segmenter for FastTwinLid {
             }
         }
 
-        let conv_coeff = self.driver_cfg.conv_coeff.clone();
-        let external_features = audio.external_features.clone();
-
         let channels = audio.data.nrows();
         self.cumulative_error = vec![0.0; channels];
         self.nb_of_classif = vec![0; channels];
@@ -1349,7 +1344,7 @@ impl Segmenter for FastTwinLid {
                 time_offset,
                 &mut result_vec2,
                 SegClass::Speech,
-                conv_coeff.as_deref(),
+                self.driver_cfg.conv_coeff.as_deref(),
                 &self.seg_cfg,
             );
             self.cumulative_error[chan] = 0.0;
@@ -1360,7 +1355,7 @@ impl Segmenter for FastTwinLid {
             // code the streaming session folds through, so streaming is bit-identical to this
             // offline path by construction (see the kernel section below `get_segmentation`).
             let mut acc = LidChannelAcc::new(params.class_nb);
-            for feat in &external_features {
+            for feat in &audio.external_features {
                 score_lid_entry(feat, &mut net, &params, &mut acc);
             }
             let agg = finalize_lid_channel(&acc, &params);
