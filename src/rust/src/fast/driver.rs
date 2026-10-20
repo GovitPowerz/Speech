@@ -99,7 +99,7 @@ use super::nn::{
 };
 use super::pipeline::FastPipeline;
 use super::plan::FastSadPlan;
-use crate::features::pipeline::{FeatureConfig, SpectralParams};
+use crate::features::pipeline::FeatureConfig;
 
 /// Which fast net shape a config's `Cell_Type` x `Direction` pair selects
 /// (Phase 9 Task 6, spec S4.2). A CLOSED set: the phase-7 bidirectional peephole-LSTM
@@ -1247,12 +1247,12 @@ impl Segmenter for FastTwinLid {
             );
         }
         let rate = audio.sample_rate as f64;
-        let s = SpectralParams::derive(&self.feature_cfg, rate);
-        if let Some(tdc) = s.tdc.as_ref()
-            && tdc.half_window > 0
-        {
-            bail!("fast TwinLid mode 7: the pitch pass (TDCwindow > 0) is not supported");
-        }
+        // The pitch second pass is refused at construction (`from_legacy`, TDCwindow > 0);
+        // `FeatureConfig` sets `tdc` only for a nonzero window, so none reaches here.
+        debug_assert!(
+            self.feature_cfg.tdc.is_none(),
+            "fast TwinLid: a TDC config survived the construction-time pitch-pass bail"
+        );
 
         // Stateful spectrum-shift quantization + the `!hasReadWavFile` -> 80 override
         // (the exact `:1296-1301`): `periodogram.is_some()` is the port's `!hasReadWavFile`.
