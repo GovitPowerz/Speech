@@ -825,8 +825,10 @@ fn latency_bounds() {
     let ssr = spec.lstm_subsampling.iter().product::<usize>()
         * spec.output_subsampling.iter().product::<usize>();
     let ssif = params.shift_frames;
-    // NOTE (cross-check coincidence): the session GUARDS this (`deltas_nb > 0 ? .. : 0`,
-    // `dd_nb > 0 ? .. : 0`); the unguarded sum here is tier2-coincident (both counts > 0). A
+    // NOTE (cross-check coincidence): the front-end GUARDS this (`StreamFrontEnd::new`:
+    // `deltas_nb > 0 ? .. : 0`, `dd_nb > 0 ? .. : 0`; the guards are pinned by
+    // `phase8_stream_frontend::lookahead_nests_delta_deltas_under_deltas`); the unguarded sum
+    // here is tier2-coincident (both counts > 0). A
     // valid future config with a non-positive delta count would fail the to_bits cross-check
     // below without the session being wrong.
     let reach = feature_cfg.deltas_nb as usize + feature_cfg.dd_nb as usize;

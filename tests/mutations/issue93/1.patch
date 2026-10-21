@@ -1,0 +1,20 @@
+mutation: StreamFrontEnd::new reach += 1 (the front-end waits one extra periodogram row; its rows stay bit-identical, only the latency bound reads the change)
+catcher: CAUGHT cargo --test phase8_gate latency_bounds
+catcher: CAUGHT cargo --test phase9_stream_causal latency_bounds
+catcher: CAUGHT cargo --test phase8_stream_frontend lookahead_nests_delta_deltas_under_deltas
+catcher: MISSED cargo --test phase8_stream_frontend frontend_rows_bit_equal_offline
+catcher: MISSED cargo --test phase8_gate stream_finish_equals_offline_frozen
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index 1d3ffed..f6cca49 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -185,7 +185,7 @@ impl StreamFrontEnd {
+             );
+         }
+         let reach = if cfg.deltas_nb > 0 {
+-            cfg.deltas_nb as usize + if cfg.dd_nb > 0 { cfg.dd_nb as usize } else { 0 }
++            cfg.deltas_nb as usize + 1 + if cfg.dd_nb > 0 { cfg.dd_nb as usize } else { 0 }
+         } else {
+             0
+         };

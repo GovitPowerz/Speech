@@ -222,19 +222,15 @@ impl StreamFrontEnd {
         })
     }
 
-    /// The delta reach in periodogram rows: feature row `r` reads rows `[r-reach, r+reach]`
-    /// (`ComputeDeltasNb + ComputeDeltaDeltasNb`, each term only when positive). Derived
-    /// ONCE, in [`new`](Self::new); the session's latency bound reads it here rather than
-    /// re-deriving it (issue #93).
-    pub fn reach(&self) -> usize {
-        self.reach
-    }
-
-    /// The framing half-window in samples (`window_size / 2`, the `fill_frame` half-window
-    /// -- DISTINCT from the NN half-window, a count of feature rows). Read by the session's
-    /// latency bound with [`reach`](Self::reach).
-    pub fn half_window(&self) -> usize {
-        self.half_window
+    /// The front-end's lookahead in samples, `reach * shift_frames + half_window`: feature
+    /// row `r` is final once periodogram frame `r + reach` is, and that frame's window
+    /// reaches `half_window` samples past its centre. `reach` is `ComputeDeltasNb`, plus
+    /// `ComputeDeltaDeltasNb` when both are positive (0 when `ComputeDeltasNb == 0`);
+    /// `half_window` is the framing `window_size / 2`, DISTINCT from the NN half-window (a
+    /// count of feature rows). Both are derived ONCE, in [`new`](Self::new); the session's
+    /// latency bound reads this rather than re-deriving either (issue #93).
+    pub fn lookahead_samples(&self) -> usize {
+        self.reach * self.shift_frames + self.half_window
     }
 
     /// Buffer a chunk of raw f32 samples, applying the frozen per-sample transforms in the
@@ -939,13 +935,6 @@ impl ConvStream {
         }
     }
 
-    /// The half-width `(coeffs.len()-1)/2` (0 when no convolution): the lookahead an
-    /// output waits for before it is final. Derived ONCE, in [`new`](Self::new); the
-    /// session's `conv_delay_s` reads it through [`StreamDecision::conv_half`] (issue #93).
-    fn half(&self) -> usize {
-        self.half
-    }
-
     fn push(&mut self, v: f64) {
         self.ring.push(v);
         self.received += 1;
@@ -1347,12 +1336,13 @@ impl StreamDecision {
         self.holdback
     }
 
-    /// The convolution half-width in posterior rows ([`ConvStream`]'s `half`, 0 when the
-    /// offline gate `conv.len() > 1` is off). Exposed for the latency accounting: the
-    /// session's `conv_delay_s` is `conv_half * time_step`, read from here rather than
-    /// re-derived from `conv_coeff` (issue #93).
+    /// The convolution half-width in posterior rows ([`ConvStream`]'s `half`, derived once
+    /// in its `new`; 0 when the offline gate `conv.len() > 1` is off): the lookahead a
+    /// convolved value waits for. Exposed for the latency accounting: the session's
+    /// `conv_delay_s` is `conv_half * time_step`, read from here rather than re-derived from
+    /// `conv_coeff` (issue #93).
     pub fn conv_half(&self) -> usize {
-        self.conv.half()
+        self.conv.half
     }
 
     /// The number of raw segments the incremental replay currently re-runs -- the
@@ -1940,7 +1930,6 @@ impl StreamingSession {
         let params = &tl.params;
         let pipeline = FastPipeline::new(params, feature_cfg, rate)?;
         let ssr = plan.ssr;
-        let ssif = tl.ssif;
         let spectrum_shift_sec = tl.spectrum_shift_sec;
         let (window_size, window_shift) = (tl.window_size, tl.window_shift);
         let (time_step, time_offset) = (tl.time_step, tl.time_offset);
@@ -2007,11 +1996,11 @@ impl StreamingSession {
         );
 
         // Derived latency components (config-derived; `derived_latency_bound_s` sums these +
-        // holdback). See that method + the module-level LATENCY note. The delta reach, the
-        // framing half-window and the convolution half-width are READ off the layers that
-        // derive them (`StreamFrontEnd::new`, `ConvStream::new`), never re-derived here: a
-        // second copy of either rule could leave this bound stale (issue #93).
-        let feature_reach_s = (front.reach() * ssif + front.half_window()) as f64 / rate;
+        // holdback). See that method + the module-level LATENCY note. The front-end lookahead
+        // and the convolution half-width are READ off the layers that derive them
+        // (`StreamFrontEnd::new`, `ConvStream::new`), never re-derived here: a second copy of
+        // either rule could leave this bound stale (issue #93).
+        let feature_reach_s = front.lookahead_samples() as f64 / rate;
         // WINDOWED: the full-window lookahead an output row waits for. CAUSAL: 0.0 --
         // there is no window and no lookahead (spec S5.5: "the nn_window term DIES").
         let nn_window_s = 2.0 * window_size as f64 * spectrum_shift_sec;

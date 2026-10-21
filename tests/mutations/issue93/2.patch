@@ -1,0 +1,19 @@
+mutation: ConvStream::new half += 1 (each convolved value waits one extra posterior row; values stay bit-identical, only the latency bound reads the change)
+catcher: CAUGHT cargo --test phase8_gate latency_bounds
+catcher: CAUGHT cargo --test phase9_stream_causal latency_bounds
+catcher: MISSED cargo --test phase8_stream_decision decision_final_equals_offline
+catcher: MISSED cargo --test phase8_gate stream_finish_equals_offline_frozen
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index 1d3ffed..03ae9f7 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -923,7 +923,7 @@ impl ConvStream {
+         let half = if coeffs.is_empty() {
+             0
+         } else {
+-            (coeffs.len() - 1) / 2
++            (coeffs.len() - 1) / 2 + 1
+         };
+         ConvStream {
+             coeffs,

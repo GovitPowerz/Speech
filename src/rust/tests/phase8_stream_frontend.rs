@@ -3,7 +3,7 @@
 //! chunking.
 //!
 //! The oracle is the offline fast path under frozen stats (spec S2: same kernels, only
-//! chunking differs). Four legs:
+//! chunking differs). Four legs, plus the lookahead's reach rule:
 //! - `frontend_rows_bit_equal_offline`: the staged frozen mono fixture pushed at 100 ms
 //!   chunks -> concatenated feature rows vs `FastPipeline::build_input_sequence` on the
 //!   same gained audio, bit-for-bit (the gain-only gate config).
@@ -16,6 +16,9 @@
 //! - `preemph_carry_across_chunks`: a crafted 2-chunk signal where the boundary sample
 //!   matters -- streaming (carry) == offline, and a no-carry concat != offline
 //!   (non-vacuity: the carry is load-bearing).
+//! - `lookahead_nests_delta_deltas_under_deltas`: `lookahead_samples` counts
+//!   `ComputeDeltaDeltasNb` only when `ComputeDeltasNb > 0` (over-reach is bit-invisible,
+//!   so only the latency bound would carry it).
 
 mod common;
 
@@ -320,4 +323,30 @@ fn preemph_carry_across_chunks() {
         differs,
         "the no-carry concat must DIFFER from the carry-correct reference (else the test is vacuous)"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (5) the lookahead's delta reach nests delta-deltas under deltas (issue #93).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lookahead_nests_delta_deltas_under_deltas() {
+    let rate = 8000.0;
+    let tier2 = std::fs::read_to_string(common::fixture_phase4a("tier2_spectral.config")).unwrap();
+    let (mut cfg, s) = cfg_params(&tier2, rate);
+    let hw = s.window_size / 2;
+    let lookahead = |cfg: &FeatureConfig| {
+        StreamFrontEnd::new(&s, cfg, rate, 1.0, 0.0, 0.0)
+            .unwrap()
+            .lookahead_samples()
+    };
+
+    assert_eq!((cfg.deltas_nb, cfg.dd_nb), (5, 3), "tier2 delta orders");
+    assert_eq!(lookahead(&cfg), 8 * s.shift_frames + hw, "deltas + dd");
+    cfg.dd_nb = 0;
+    assert_eq!(lookahead(&cfg), 5 * s.shift_frames + hw, "dd off");
+    // `apply_dct` computes delta-deltas only off the deltas: no deltas, no reach.
+    cfg.deltas_nb = 0;
+    cfg.dd_nb = 3;
+    assert_eq!(lookahead(&cfg), hw, "deltas off, dd ignored");
 }
