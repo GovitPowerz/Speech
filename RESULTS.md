@@ -3433,3 +3433,28 @@ runs it (the Twin, items 1 and 2) and the literal pin owns it where none does (a
 the per-variant surface pin and the seam's pack-count leg own the interface's counts (items 4
 and 5); the gradient checks own the per-channel selection (item 6): their central difference
 sums every channel's row cost and count (`CorpusProcessor::grad_check_cost`).
+
+## Issue #93 -- the stream latency terms read off their owners: the mutation battery
+
+**Live:** `tests/mutations/issue93/` (3 patches).
+
+`StreamingSession::from_plan` re-derived the delta reach, the framing half-window and the
+convolution half-width for `feature_reach_s` and `conv_delay_s`, a second copy of
+`StreamFrontEnd::new`'s and `ConvStream::new`'s rules. It now reads
+`StreamFrontEnd::lookahead_samples()` (`reach * shift_frames + half_window`) and
+`StreamDecision::conv_half()`, and does no arithmetic of its own on `deltas_nb` / `dd_nb` /
+`conv_coeff`. A one-row over-reach in either owner changes timing, not arithmetic, so every
+bit-equality leg is blind to it; the bound's to_bits cross-check is the catcher (before
+e72b87a items 1 and 2 left `phase8_gate::latency_bounds` green, the session reading its own
+copy). Both `latency_bounds` legs run tier2's delta orders (5, 3), so the reach guard's
+nesting (`ComputeDeltaDeltasNb` counts only when `ComputeDeltasNb > 0`) got its own pin,
+`phase8_stream_frontend::lookahead_nests_delta_deltas_under_deltas`.
+
+`uv run python tests/mutations/run.py issue93` on macOS: 11 verdicts, 0 differ from expected;
+`--changed-since origin/main` 47 verdicts, 0 differ.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `StreamFrontEnd::new` reach `+ 1` | `phase8_gate::latency_bounds`, `phase9_stream_causal::latency_bounds`, `lookahead_nests_delta_deltas_under_deltas`; `frontend_rows_bit_equal_offline`, `stream_finish_equals_offline_frozen` | CAUGHT by the three: `feature reach derivation`, `slstm: feature reach`, `deltas + dd`. MISSED by the two bit-equality legs |
+| 2 | `ConvStream::new` half `+ 1` | both `latency_bounds`; `decision_final_equals_offline`, `stream_finish_equals_offline_frozen` | CAUGHT by both: `conv delay derivation`, `slstm: conv delay`. MISSED by the two bit-equality legs |
+| 3 | the reach counts `dd_nb` when `deltas_nb == 0` | `lookahead_nests_delta_deltas_under_deltas`; `phase8_gate::latency_bounds` | CAUGHT: `deltas off, dd ignored`. MISSED by `latency_bounds` (tier2 has both orders positive) |

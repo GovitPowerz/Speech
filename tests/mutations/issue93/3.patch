@@ -1,0 +1,21 @@
+mutation: StreamFrontEnd::new counts ComputeDeltaDeltasNb when ComputeDeltasNb == 0 (the reach guard un-nested; tier2 has both orders positive, so only the guard leg sees it)
+catcher: CAUGHT cargo --test phase8_stream_frontend lookahead_nests_delta_deltas_under_deltas
+catcher: MISSED cargo --test phase8_gate latency_bounds
+
+diff --git a/src/rust/src/fast/stream.rs b/src/rust/src/fast/stream.rs
+index 1d3ffed..508a9c1 100644
+--- a/src/rust/src/fast/stream.rs
++++ b/src/rust/src/fast/stream.rs
+@@ -184,11 +184,7 @@ impl StreamFrontEnd {
+                 cfg.deltas_nb
+             );
+         }
+-        let reach = if cfg.deltas_nb > 0 {
+-            cfg.deltas_nb as usize + if cfg.dd_nb > 0 { cfg.dd_nb as usize } else { 0 }
+-        } else {
+-            0
+-        };
++        let reach = cfg.deltas_nb as usize + if cfg.dd_nb > 0 { cfg.dd_nb as usize } else { 0 };
+ 
+         // Rate-consistency guard (mirrors FastPipeline::new's belt-and-suspenders): the
+         // params must have been derived at THIS rate, or the frame stride the front-end
