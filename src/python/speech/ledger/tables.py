@@ -145,8 +145,9 @@ def _row(cells: Iterable[str]) -> str:
 
 
 def _head(columns: list[str]) -> list[str]:
-    """The header and its rule; `len(columns)` is the width every `TBD` row of the table takes."""
-    return [_row(columns), "|" + "---|" * len(columns)]
+    """The header and its rule; `len(columns)` is the width every `TBD` row of the table takes. A
+    column label is text: a `|` in it is escaped, never a cell boundary."""
+    return [_row(c.replace("|", r"\|") for c in columns), "|" + "---|" * len(columns)]
 
 
 def _tbd(label: str, width: int) -> str:
