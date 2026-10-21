@@ -6,8 +6,8 @@ diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
 index 4007a71..276b7dc 100644
 --- a/src/rust/src/fast/driver.rs
 +++ b/src/rust/src/fast/driver.rs
-@@ -1614,11 +1614,12 @@ pub(super) fn score_lid_entry(
-             fdata.push(feat_noised[[r, c]] as f32);
+@@ -1582,11 +1582,12 @@ pub(super) fn score_lid_entry(
+             fdata.push(v as f32);
          }
      }
 -    let fin = FastMatrix {

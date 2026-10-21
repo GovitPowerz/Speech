@@ -955,12 +955,9 @@ pub struct FastTwinLid {
     /// `CostLaw::isCostModified` (`_BackPropWER >= 0`), gating the langID normalization.
     cost_modified: bool,
 
-    /// Stateful spectrum-shift/window members, re-quantized per `get_segmentation`
-    /// exactly as the exact driver does.
-    spectrum_shift_sec: f64,
-    spectrum_shift_in_frames: usize,
+    /// The stateful SAD window shift, re-quantized per `get_segmentation` exactly as the
+    /// exact driver does. The spectrum shift is not state here: Mode 7 forces 80 frames.
     window_shift_sec: f64,
-    ltsv_shift_sec: f64,
 
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
@@ -1101,9 +1098,7 @@ impl FastTwinLid {
         let min_nb_of_frames = twin_i32_default(map, "BLSTM_LID_MinNbOfFrames", 0)?;
         let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
 
-        let spectrum_shift_sec = feature_cfg.shift_sec;
         let window_shift_sec = driver_cfg.window_shift_sec;
-        let ltsv_shift_sec = feature_cfg.ltsv_shift;
 
         let mut twin = FastTwinLid {
             driver_cfg,
@@ -1128,10 +1123,7 @@ impl FastTwinLid {
             min_nb_of_frames,
             noise_magnitude,
             cost_modified,
-            spectrum_shift_sec,
-            spectrum_shift_in_frames: 0,
             window_shift_sec,
-            ltsv_shift_sec,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -1254,15 +1246,10 @@ impl Segmenter for FastTwinLid {
             "fast TwinLid: a TDC config survived the construction-time pitch-pass bail"
         );
 
-        // Stateful spectrum-shift quantization + the `!hasReadWavFile` -> 80 override
-        // (the exact `:1296-1301`): `periodogram.is_some()` is the port's `!hasReadWavFile`.
-        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
-        if audio.periodogram.is_some() {
-            self.spectrum_shift_in_frames = 80;
-        }
-        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
-        let ssif = self.spectrum_shift_in_frames;
-        let spectrum_shift_sec = self.spectrum_shift_sec;
+        // The exact `:1296-1301` `!hasReadWavFile` -> 80 override is always taken here (the
+        // wav arm bailed above), so the stateful round(shift * rate) it overrides is moot.
+        let ssif = 80usize;
+        let spectrum_shift_sec = ssif as f64 / rate;
 
         // preemph/noise (harmless on the zeroed phSeq/cep waveform).
         if self.feature_cfg.preemph_ratio > 0.0 {
@@ -1271,11 +1258,6 @@ impl Segmenter for FastTwinLid {
         if self.feature_cfg.noise_seed > 0 {
             audio.apply_noise(self.feature_cfg.noise_ratio);
         }
-
-        // getLTSVParam re-quantize (dead for LTSVwindow 0).
-        let ltsv_ws = f64::round(self.feature_cfg.ltsv_shift * rate / ssif as f64) as i64;
-        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
-        self.ltsv_shift_sec = (ltsv_ws * ssif as i64) as f64 / rate;
 
         // getBLSTMParam: SAD result_vec sizing + timeStep (mutates self.window_shift_sec).
         let sad_ssr = self.sad_ssr;
@@ -1326,11 +1308,9 @@ impl Segmenter for FastTwinLid {
         self.last_result_rows = Vec::with_capacity(channels);
         self.lid = LidMembers::zeroed(channels);
 
-        // Move the LID net out so self's result buffers are freely writable in the loop
-        // (put back before returning; the loop body has no fallible op, so no early exit).
-        let mut net = self
+        let net = self
             .lid_net
-            .take()
+            .as_mut()
             .ok_or_else(|| anyhow!("fast TwinLid: LID net has no weights loaded"))?;
 
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
@@ -1356,7 +1336,7 @@ impl Segmenter for FastTwinLid {
             // offline path by construction (see the kernel section below `get_segmentation`).
             let mut acc = LidChannelAcc::new(params.class_nb);
             for feat in &audio.external_features {
-                score_lid_entry(feat, &mut net, &params, &mut acc);
+                score_lid_entry(feat, net, &params, &mut acc);
             }
             let agg = finalize_lid_channel(&acc, &params);
 
@@ -1369,7 +1349,6 @@ impl Segmenter for FastTwinLid {
             self.lid.segments_confusion[chan] = agg.confusion;
             self.lid.is_correct[chan] = agg.is_lid_correct;
         }
-        self.lid_net = Some(net);
 
         // Epilogue (`:1642-1653`). The deriv ponderation (`:1643-1644`) is training-only
         // (forward-only fast path -> skipped). The stateful shift resets are mirrored.
@@ -1589,24 +1568,18 @@ pub(super) fn score_lid_entry(
     if feat.nrows() < p.lid_ssr || (feat.nrows() as i32) < p.min_nb_of_frames {
         return None;
     }
-    // :1456-1466 Gaussian noise (randinit fixed 0), applied in f64 on the block.
-    let mut feat_noised = feat.clone();
-    if p.noise_magnitude > 0.0 {
-        let cols = feat.ncols();
-        let randinit = 0usize;
-        for r in 0..feat.nrows() {
-            for c in 0..cols {
-                let m = random_gauss(r * cols + c + randinit) - 0.5;
-                feat_noised[[r, c]] += p.noise_magnitude * m;
-            }
-        }
-    }
-    // Narrow the block to f32 at the driver seam, then score.
-    let (fr, fc) = feat_noised.dim();
+    // :1456-1466 Gaussian noise (randinit fixed 0), added in f64 per element, then the
+    // block narrows to f32 at the driver seam and is scored.
+    let (fr, fc) = feat.dim();
+    let randinit = 0usize;
     let mut fdata = Vec::with_capacity(fr * fc);
     for r in 0..fr {
         for c in 0..fc {
-            fdata.push(feat_noised[[r, c]] as f32);
+            let mut v = feat[[r, c]];
+            if p.noise_magnitude > 0.0 {
+                v += p.noise_magnitude * (random_gauss(r * fc + c + randinit) - 0.5);
+            }
+            fdata.push(v as f32);
         }
     }
     let fin = FastMatrix {
