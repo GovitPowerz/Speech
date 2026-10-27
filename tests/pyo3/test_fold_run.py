@@ -28,13 +28,16 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.config_bridge import parse_legacy_config
+from speech.drivers.train import _tail_lengths
 from speech.engine import ChannelResults
 from speech.fold_run import FoldRun, _config_text
-from speech.weight_bridge import read_weight_vector
+from speech.init_weights import init_weights
+from speech.weight_bridge import read_weight_vector, write_bin
 
 speech_rs = pytest.importorskip("speech_rs")
 
 from tests.pyo3.test_phase9_seam import seed_sad, seed_twin_mode7  # noqa: E402
+from tests.pyo3.test_seam_replay import _seed_twin_gradcheck  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PHASE0 = REPO_ROOT / "tests" / "reference_data" / "phase0"
@@ -232,3 +235,49 @@ def test_fold_run_refuses_a_wrong_length_pack_on_both_trees(tmp_path: Path, leg:
                 FoldRun(dict(cfg, Inference_Path=path), tmp_path, backprop=False).run(nets)
             messages.append(str(refused.value))
     assert messages[0] == messages[1]
+
+
+CONFIGS = REPO_ROOT / "configs"
+
+
+def _seed_sad_lineage(dst: Path, config: str) -> dict[str, str]:
+    """A SAD lineage config (ADR-0008) made runnable on the phase-4a fixture corpus: the seed
+    pack the config names is drawn through `init_weights` (the engine's own layout), the
+    mapping is the fixture's. Returns the parsed config; the listing is overridden at the fold."""
+    cfg = dict(speech_rs.load_toml_config(str(CONFIGS / "training" / config)))
+    corpus = dst / "corpus"
+    corpus.mkdir(parents=True, exist_ok=True)
+    for f in ("f1.wav", "f1.stm"):
+        shutil.copy(PHASE4A / "corpus" / f, corpus / f)
+    shutil.copy(PHASE4A / "language2classmapping.csv", dst / cfg["language2classmapping"])
+    (dst / "listing.csv").write_text((PHASE4A / "tier2_fileslisting.csv").read_text().splitlines()[0] + "\n")
+    pack = np.asarray(init_weights(cfg, "BLSTM", np.random.default_rng(0), "xavier", True)[0], dtype=np.float64)
+    write_bin(pack.shape[0], 1, pack, dst / cfg["BLSTM_weightsFile"])
+    return cfg
+
+
+@pytest.mark.parametrize("leg", ["spectral_algo3", "twin_algo6", "lre_sad_v1", "lre_sad_v2"])
+def test_tail_lengths_strip_the_engine_packs_normalize_tail(tmp_path: Path, leg: str) -> None:
+    """Issue #99: `_tail_lengths` reads the normalize tail off the engine's weight layout, so on
+    the engine's OWN packs each net's tail is exactly the pack's last `tail` blocks and
+    `_backprop_inner`'s strip point (`len(pack) - tail`) is the layout's first tail offset.
+    Both SAD lineages (ADR-0008) and the Twin fixture."""
+    listing = None
+    if leg == "spectral_algo3":
+        cfg, algo, prefixes = _seed_tier2_spectral(tmp_path), 3, ["BLSTM"]
+    elif leg == "twin_algo6":
+        _seed_twin_gradcheck(tmp_path)
+        cfg, algo, prefixes = parse_legacy_config((tmp_path / "twin_gradcheck.config").read_text()), 6, ["BLSTM", "BLSTM_LID"]
+    else:
+        cfg, algo, prefixes = _seed_sad_lineage(tmp_path, "lre_sad.toml" if leg == "lre_sad_v1" else "lre_sad_v2.toml"), 3, ["BLSTM"]
+        listing = tmp_path / "listing.csv"
+    with chdir(tmp_path):
+        packs = FoldRun(cfg, tmp_path, backprop=False, listing=listing).weights()
+    tails = _tail_lengths(cfg, algo)
+    assert len(packs) == len(tails) == len(prefixes)
+    for pack, tail, prefix in zip(packs, tails, prefixes, strict=True):
+        layout = speech_rs.weight_layout(cfg, prefix)
+        tail_blocks = [b for b in layout if b["stack"] == "tail"]
+        assert len(pack) == layout[-1]["offset"] + layout[-1]["len"], "the engine's pack is the layout's length"
+        assert len(pack) - tail == tail_blocks[0]["offset"], "the strip point is the first tail block"
+        assert tail == sum(b["len"] for b in tail_blocks)

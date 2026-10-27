@@ -22,7 +22,8 @@ THE LINEAGE, AND WHAT THE ONE VARIABLE BUYS (spec S3.1)
 =====================================================================================
 `lre_sad_v2.toml` is `lre_sad.toml` byte-for-byte except `nnet_input_size` 23 -> 11 and
 `lstm_neuron_nb` `23,24,24` -> `11,24,24` (and the normalize tail those entail: 2*23 = 46
--> 2*11 = 22, written nowhere -- it self-sizes off the config on BOTH sides of the seam).
+-> 2*11 = 22, written nowhere -- the engine sizes it off the config and Python reads it
+off the engine's layout, issue #99).
 v1 declares a 23-wide input while its own DSP front-end emits 11 columns, so with
 `lstm_sub_sampling 4` only 44 of layer 0's 92 fan-in columns carry data and the trailing 48
 are structurally gradient-dead -- the 2015-inherited defect phase 9 measured. Here the

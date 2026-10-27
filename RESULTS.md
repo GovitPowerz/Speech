@@ -3458,3 +3458,29 @@ nesting (`ComputeDeltaDeltasNb` counts only when `ComputeDeltasNb > 0`) got its 
 | 1 | `StreamFrontEnd::new` reach `+ 1` | `phase8_gate::latency_bounds`, `phase9_stream_causal::latency_bounds`, `lookahead_nests_delta_deltas_under_deltas`; `frontend_rows_bit_equal_offline`, `stream_finish_equals_offline_frozen` | CAUGHT by the three: `feature reach derivation`, `slstm: feature reach`, `deltas + dd`. MISSED by the two bit-equality legs |
 | 2 | `ConvStream::new` half `+ 1` | both `latency_bounds`; `decision_final_equals_offline`, `stream_finish_equals_offline_frozen` | CAUGHT by both: `conv delay derivation`, `slstm: conv delay`. MISSED by the two bit-equality legs |
 | 3 | the reach counts `dd_nb` when `deltas_nb == 0` | `lookahead_nests_delta_deltas_under_deltas`; `phase8_gate::latency_bounds` | CAUGHT: `deltas off, dd ignored`. MISSED by `latency_bounds` (tier2 has both orders positive) |
+
+## Issue #99 -- the normalize tail read off the engine's layout: the mutation battery
+
+**Live:** `tests/mutations/issue99/` (2 patches).
+
+`train.py::_tail_lengths` sized each net's normalize mean/std tail as `2 * <prefix>_NNetInputSize`
+read off the config map, the one weight-layout fact left in Python after #27. It now sums the
+`tail` stack of `speech_rs.weight_layout(config, prefix)`, the blocks `BlstmNetwork::set_weights`
+consumes last, and holds no arithmetic on the key (`test_drivers_hold_no_input_size_arithmetic`
+scans the drivers' source for it). The defect was live, not latent: the committed LID configs
+(`configs/lid/lid_blstm.toml`, `configs/legacy/LID_BLSTM.config`) declare no `NNetInputSize` on
+either net, the engine derives 11 and 36, and the old helper raised `KeyError` on them. On every
+config that declares the key the two numbers agree, so the layout pins on `lre_sad.toml`,
+`lre_sad_v2.toml` and the phase-4b/4d fixtures are blind to the revert (the battery lesson again:
+a value pin owns the value, not its provenance); the no-key leg and the source scan own it. The
+`v2` header comment naming `_tail_lengths` as a second sizing site is reworded (comment-only,
+the parsed map is byte-identical).
+
+`uv run python tests/mutations/run.py issue99` on macOS: 11 verdicts, 0 differ from expected;
+`--changed-since origin/main` 30 verdicts, 0 differ (the seven corpus-gated catchers of
+`phase10/3a`, `phase10/3b` and `phase6/7` read SKIPPED off-corpus and CAUGHT re-run on it).
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | the pre-#99 `2 * <prefix>_NNetInputSize` arithmetic | `test_tail_lengths_need_no_input_size_key`, `test_tail_lengths_are_the_engine_tail_stack[lid_blstm]`, `test_drivers_hold_no_input_size_arithmetic`; `[lre_sad_v1]`, `[lre_sad_v2]`, `test_fold_run::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo6_two_elements` | CAUGHT by the three: `KeyError: 'BLSTM_NNetInputSize'` (twice), `assert ['train.py'] == []`. MISSED by the four key-declaring configs |
+| 2 | the tail sums the `mean` block only | `[lre_sad_v2]`, `test_fold_run::...[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo3_single_element`; `test_drivers_hold_no_input_size_arithmetic` | CAUGHT: `assert [11] == [22]`, `the strip point is the first tail block`, `assert [23] == [46]`. MISSED by the source scan (no key arithmetic to find) |

@@ -1,0 +1,24 @@
+mutation: _tail_lengths sizes the tail as 2 * <prefix>_NNetInputSize read off the config map (the pre-#99 Python geometry) instead of the engine's tail stack
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_need_no_input_size_key
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[lid_blstm]
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_drivers_hold_no_input_size_arithmetic
+catcher: MISSED pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[lre_sad_v2]
+catcher: MISSED pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[lre_sad_v1]
+catcher: MISSED pytest tests/pyo3/test_fold_run.py::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]
+catcher: MISSED pytest tests/test_phase4d_algo3_drivers.py::test_tail_lengths_algo6_two_elements
+catcher: MISSED pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[twin_train]
+catcher: MISSED pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[parity_tupleA]
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 113924e..0fd0a56 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -66,7 +66,7 @@ def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
+     `[sad, lid]` only for the algo-6 Twin -- the `BackPropagation.m:11-13` cell contract
+     (`weightsIni{2}` populated iff `algo == 6`)."""
+     prefixes = ["BLSTM", "BLSTM_LID"] if algo == 6 else ["BLSTM"]
+-    return [sum(int(b["len"]) for b in speech_rs.weight_layout(cfg, p) if b["stack"] == "tail") for p in prefixes]
++    return [2 * int(cfg[f"{p}_NNetInputSize"]) for p in prefixes]
+ 
+ 
+ def _eval_overlay(base: dict[str, str], ponds: list[str], algo: int) -> dict[str, str]:
