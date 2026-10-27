@@ -13,6 +13,8 @@ committed tier-2 spectral (algo 3) and twin (algo 6) fixtures:
     same words (one leg per row of the issue's table, over the phase-9 fixtures).
   * No process cwd: a fold run from an unrelated cwd on absolute listing rows matches the
     chdir'd path-constructor run.
+  * The normalize tail strip (issue #99): on the engine's own packs, `_tail_lengths` is each
+    pack's trailing `tail` blocks, on both fixtures and both SAD lineages (ADR-0008).
 """
 
 from __future__ import annotations

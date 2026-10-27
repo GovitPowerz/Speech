@@ -324,7 +324,7 @@ NON_DEGENERATE_INIT_ROWS = ("transformer-forward",)
 # per-column magnitude measured across all eight rows (2.854e-04).
 _LIVE_FLOOR = 1e-8
 
-# v2's frozen normalize mean/std tail: `2 * NNetInputSize` = 22 elements, seeded identity
+# v2's frozen normalize mean/std tail: mean + std, 11 each = 22 elements, seeded identity
 # and never updated, so it is the ONLY structurally dead block a v2 pack has. Asserted as an
 # EXACT total (not a floor plus slack, as v1's guards use) -- the inverse of v1's floors and
 # the sharpest statement of the zero-dead-columns claim: 22 dead weights and not one more.

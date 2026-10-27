@@ -5,7 +5,8 @@ config key read in Python.
 every layout fact to Rust (`speech_rs.weight_layout`); this one stayed as `2 * NNetInputSize`
 arithmetic on the config map, which under ADR-0008 is exactly the number that can disagree with
 the width the engine builds, and which the committed LID configs do not even carry. Pinned on
-both SAD lineages, the committed LID config and the two legacy-format fixtures.
+both SAD lineages, the committed LID config and a declared width the engine does not build (the
+two legacy-format fixtures are pinned in `test_phase4d_algo3_drivers.py`).
 """
 
 from __future__ import annotations
@@ -20,15 +21,12 @@ from speech.drivers.train import _tail_lengths
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = REPO_ROOT / "configs"
-PHASE4B = REPO_ROOT / "tests" / "reference_data" / "phase4b"
 PHASE4D = REPO_ROOT / "tests" / "reference_data" / "phase4d"
 
-CASES: dict[str, tuple[Path, int]] = {
-    "lre_sad_v1": (CONFIGS / "training" / "lre_sad.toml", 3),
-    "lre_sad_v2": (CONFIGS / "training" / "lre_sad_v2.toml", 3),
-    "lid_blstm": (CONFIGS / "lid" / "lid_blstm.toml", 6),
-    "twin_train": (PHASE4B / "twin_train.config", 6),
-    "parity_tupleA": (PHASE4D / "parity_tupleA.config", 3),
+CASES: dict[str, tuple[Path, int, list[int]]] = {
+    "lre_sad_v1": (CONFIGS / "training" / "lre_sad.toml", 3, [46]),
+    "lre_sad_v2": (CONFIGS / "training" / "lre_sad_v2.toml", 3, [22]),
+    "lid_blstm": (CONFIGS / "lid" / "lid_blstm.toml", 6, [22, 72]),
 }
 
 
@@ -48,10 +46,10 @@ def _engine_tail(cfg: dict[str, str], prefix: str) -> int:
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_tail_lengths_are_the_engine_tail_stack(name: str) -> None:
-    path, algo = CASES[name]
+    path, algo, expected = CASES[name]
     cfg = _cfg(path)
     prefixes = ["BLSTM", "BLSTM_LID"] if algo == 6 else ["BLSTM"]
-    assert _tail_lengths(cfg, algo) == [_engine_tail(cfg, p) for p in prefixes]
+    assert _tail_lengths(cfg, algo) == [_engine_tail(cfg, p) for p in prefixes] == expected
 
 
 def test_tail_lengths_need_no_input_size_key() -> None:
@@ -60,6 +58,14 @@ def test_tail_lengths_need_no_input_size_key() -> None:
     cfg = _cfg(CONFIGS / "lid" / "lid_blstm.toml")
     assert "BLSTM_NNetInputSize" not in cfg and "BLSTM_LID_NNetInputSize" not in cfg
     assert _tail_lengths(cfg, 6) == [22, 72]
+
+
+def test_tail_lengths_follow_the_built_width_not_the_declared_key() -> None:
+    """A declared `NNetInputSize` the engine does not build: the exact net reads its input width
+    off `LSTMNeuronNb[0]` (23 here) and accepts the disagreeing key, so the tail is 46, not
+    `2 * 11`."""
+    cfg = dict(_cfg(PHASE4D / "parity_tupleA.config"), BLSTM_NNetInputSize="11")
+    assert _tail_lengths(cfg, 3) == [46]
 
 
 def test_drivers_hold_no_input_size_arithmetic() -> None:

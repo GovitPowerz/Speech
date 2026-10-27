@@ -35,7 +35,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import speech_rs
 from numpy.typing import NDArray
 
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
@@ -65,6 +64,8 @@ def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
     Returns one entry per BackPropagation net: `[sad]` for the single-net algos (3/4/5),
     `[sad, lid]` only for the algo-6 Twin -- the `BackPropagation.m:11-13` cell contract
     (`weightsIni{2}` populated iff `algo == 6`)."""
+    import speech_rs  # local: the pyo3 module is only needed on the engine path
+
     prefixes = ["BLSTM", "BLSTM_LID"] if algo == 6 else ["BLSTM"]
     return [sum(int(b["len"]) for b in speech_rs.weight_layout(cfg, p) if b["stack"] == "tail") for p in prefixes]
 
