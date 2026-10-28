@@ -35,7 +35,9 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
-use crate::engine::bag_of_processors::{BagOfProcessors, Processor, get_i32_default};
+use crate::engine::bag_of_processors::{
+    BagOfProcessors, CostPair, get_i32_default, refuse_fast_training, training_policy,
+};
 use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
@@ -267,30 +269,17 @@ impl CorpusProcessor {
     /// display-only (dropped).
     fn train(&mut self) -> Result<()> {
         // T5 finding 2 (review, an exact-tree touch sanctioned as selection-plumbing):
-        // `Inference_Path fast` is inference-only (spec S1) -- the fast processors'
-        // training arms are inert no-ops. `BagOfProcessors::from_configs` already bails on
-        // a training-shaped fast config, but ONLY when `mode.kind == Multi`; that gate
-        // never fires for Image/UnitTest, so a fast processor reaching `train()` via those
-        // modes would otherwise silently no-op-train instead of failing loudly. `train()`
-        // is only ever called from `run()`, and only inside a `self.training_epochs > 0`
-        // guard (both call sites), so that half of the condition is already a structural
-        // invariant here -- this loop only needs to check for a fast variant. DEAD CODE on
-        // every exact-path run: no config ever builds `Processor::FastSpectral`/
-        // `Processor::FastTwinLid` outside `Inference_Path fast`, so the match below never
-        // fires there.
+        // `BagOfProcessors::from_configs` refuses a training-shaped fast config ONLY when
+        // `mode.kind == Multi`; that gate never fires for Image/UnitTest, so a fast driver
+        // reaching `train()` via those modes would otherwise silently no-op-train. `train()`
+        // is only ever called from `run()` inside a `self.training_epochs > 0` guard (both
+        // call sites), so the epoch count is the training shape here; the two
+        // `BackPropagationActivated` keys are not read at this site (`None`). One body for
+        // both moments (issue #92): `refuse_fast_training`, asked through the driver
+        // interface, never a variant match.
         for ii in 0..self.processors.nb_of_conf() {
-            if matches!(
-                self.processors.processor(ii),
-                Processor::FastSpectral(_) | Processor::FastTwinLid(_)
-            ) {
-                bail!(
-                    "Inference_Path fast is inference-only (training stays exact f64), but \
-                     this {:?}-mode run has Neural_Networks_BackPropagation_Epochs {} > 0 \
-                     (the fast processors' training arms are inert, so this would silently \
-                     no-op-train); train on the exact path",
-                    self.mode.kind,
-                    self.training_epochs
-                );
+            if self.processors.processor(ii).driver().is_fast_tree() {
+                refuse_fast_training(self.mode.kind, self.training_epochs as i64, None)?;
             }
         }
 
@@ -845,18 +834,19 @@ impl CorpusProcessor {
     }
 
     /// The cost accumulation over `self.results` for the gradCheck central
-    /// difference (`:271-292`), switching on config-0's algo AND (for algo 6)
-    /// the network index `ii`: algo 3/4 -> the SAD pair `seg_cost`/`seg_count`
-    /// (`:275-277`); algo 5 -> the LID pair `lid.cost`/`lid.count` (`:278-280`);
-    /// algo 6 net `ii == 0` -> the SAD pair, net `ii == 1` -> the LID pair
-    /// (`:281-288`). Which pair a net owns is decided by the algo integer, as the
-    /// bag's `training_policy` decides each net's update cost: issue #25 kept both
-    /// keyed on the algo number, as the legacy is.
+    /// difference (`:271-292`): the pair net `ii` of config 0's algo owns, read off the
+    /// bag's [`training_policy`] (issue #92; the legacy switches on the algo AND, for
+    /// algo 6, the network index: algo 3/4 -> the SAD pair `seg_cost`/`seg_count`
+    /// (`:275-277`), algo 5 -> the LID pair `lid.cost`/`lid.count` (`:278-280`), algo 6
+    /// net 0 -> the SAD pair, net 1 -> the LID pair (`:281-288`)). No policy (algo
+    /// 0/1/2) is the legacy's no matching arm: cost/counter stay untouched and the
+    /// `:292` division yields 0/0 = NaN.
     ///
     /// The legacy `counter` is a `long` accumulating doubles (per-element
     /// truncation); every accumulated value is an exact integer count stored in
     /// a double, so an f64 accumulator is value-identical.
     fn grad_check_cost(&self, algo0: i32, ii: usize) -> f64 {
+        let pair = training_policy(algo0).and_then(|(_, nets)| nets.get(ii).map(|(pair, _)| *pair));
         let mut cost = 0.0;
         let mut counter = 0.0;
         for jj in 0..self.corpus.nb_of_files() {
@@ -864,30 +854,16 @@ impl CorpusProcessor {
                 continue;
             };
             for r in conf0.values() {
-                let lid_cost = r.lid_cost();
-                let lid_count = r.lid_count() as f64;
-                match algo0 {
-                    3 | 4 => {
+                match pair {
+                    Some(CostPair::Seg) => {
                         cost += r.seg_cost;
                         counter += r.seg_count as f64;
                     }
-                    5 => {
-                        cost += lid_cost;
-                        counter += lid_count;
+                    Some(CostPair::Lid) => {
+                        cost += r.lid_cost();
+                        counter += r.lid_count() as f64;
                     }
-                    6 => {
-                        if ii == 0 {
-                            cost += r.seg_cost;
-                            counter += r.seg_count as f64;
-                        } else {
-                            cost += lid_cost;
-                            counter += lid_count;
-                        }
-                    }
-                    _ => {
-                        // legacy: no matching arm (:275-289) -- cost/counter stay
-                        // untouched; the :292 division then yields 0/0 = NaN.
-                    }
+                    None => {}
                 }
             }
         }

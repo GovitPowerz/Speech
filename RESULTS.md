@@ -3486,3 +3486,37 @@ the parsed map is byte-identical).
 |---|---|---|---|
 | 1 | the pre-#99 `2 * <prefix>_NNetInputSize` arithmetic | `test_tail_lengths_need_no_input_size_key`, `test_tail_lengths_are_the_engine_tail_stack[lid_blstm]`, `test_drivers_hold_no_input_size_arithmetic`, `test_tail_lengths_follow_the_built_width_not_the_declared_key`; `[lre_sad_v1]`, `[lre_sad_v2]`, `test_fold_run::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo6_two_elements` | CAUGHT by the four: `KeyError: 'BLSTM_NNetInputSize'` (twice), `assert ['train.py'] == []`, `assert [22] == [46]`. MISSED by the four key-declaring configs |
 | 2 | the tail sums the `mean` block only | `[lre_sad_v2]`, `test_fold_run::...[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo3_single_element`; `test_drivers_hold_no_input_size_arithmetic` | CAUGHT: `assert [11] == [22]`, `the strip point is the first tail block`, `assert [23] == [46]`. MISSED by the source scan (no key arithmetic to find) |
+
+## Issue #92 -- the two decisions back inside driver() and training_policy: the mutation battery
+
+**Live:** `tests/mutations/issue92/` (2 patches); the three `training_policy` patches of
+`tests/mutations/issue25/` re-targeted to the table (item 1 gaining the gradient-check catcher). `phase4a/2` (the save gate) re-targeted past the criterion's `value` call, verdicts unchanged.
+
+Issue #25 left two decisions outside `Processor::driver()` and the bag's `training_policy`:
+the "fast is inference-only" refusal written twice (the bag at construction in Multi mode, the
+corpus processor's `train()` in Image / UnitTest mode through a `matches!` on the fast variants,
+the one variant match left outside `driver()` and construction) and `grad_check_cost`'s own
+`match algo0` choosing which cost pair net `i` differentiates, the fact `training_policy`
+already encoded for the update. Now `training_policy(algo)` is a table (the `SaveCriterion`
+and, per net in pack order, its `CostPair` and prefix) read by the save, the update and the
+gradient check, and `refuse_fast_training` is the one refusal body, called at both moments
+with one wording naming the facts each moment read (the Image / UnitTest moment reads the epoch count only, so its message carries no `BackPropagationActivated` claim); `train()` asks `Segmenter::is_fast_tree` (`true` on the two fast
+drivers) and `rg "Processor::" corpus_processor.rs` matches no variant. Goldens byte-green
+(`phase4a_corpus_processor`, `phase4b_corpus_lid`, `phase7_parity_lid`), the ADR-0002 #25
+touch class.
+
+`uv run python tests/mutations/run.py issue25 issue92` on macOS: 18 verdicts, 0 differ from
+expected.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `refuse_fast_training` never refuses on the epoch count (`epochs < 0`) | `phase7_parity_lid::fast_bails_on_training_shaped_config`, `::fast_training_guard_blocks_image_mode_epochs`, `refuse_fast_training_is_one_body_naming_the_mode` | CAUGHT by all three: `fast + Multi + Neural_Networks_BackPropagation_Epochs=5 must bail`, `error must name Inference_Path, got: No .phSeq file given` (the run went on past the guard to the audio decode), `unwrap_err() on an Ok value` |
+| 2 | `FastTwinLid::is_fast_tree` answers `false` | `fast_training_guard_blocks_image_mode_epochs`, `driver_surface_per_variant` | CAUGHT by both: the same decode error past the guard; `FastTwinLid is_fast_tree` |
+| 25/1 | algo 6's pairs swapped (`[Lid, Seg]`) | `twin_train_epoch_weights_golden`, `twin_gradcheck_golden` (new), the policy pin | CAUGHT by all three: `twin_train_lid epoch 5 weight 167`, `twin net 0 weight 0 numerical: got 0e0 want -1.08e-3` (net 0's central difference now reads the LID pair, which net 0's weights do not move), the pin's `left == right` |
+
+What the battery measured: the pair is one fact now -- swapping it moves the update AND the
+gradient check (25/1's new catcher, blind before #92 because `grad_check_cost` had its own
+copy of the table); the refusal is one body -- a flipped predicate or a driver answering
+`false` lets a fast Image-mode run past the guard into the audio decode, where the fixture's
+relative listing fails for an unrelated reason (the catchers assert the message names
+`Inference_Path`, so the escape is caught, not the decode).

@@ -1,16 +1,18 @@
-mutation: training_policy algo 6 updates the SAD net with costLID and the LID net with cost
+mutation: training_policy algo 6 updates the SAD net with costLID and the LID net with cost (the pair swapped, so the gradient check differentiates the wrong cost too since #92)
 catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_gradcheck_golden
+catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::training_policy_is_the_legacy_branch_per_algo
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index 706d4bd..ee3d32c 100644
+index f5eb220..e80b25a 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -169,7 +169,7 @@ fn training_policy(
-         // :172-179 saveCriterion = cost + costLID, BOTH nets saved under ONE gate,
-         // `saveWeightsLID` adding its own `LID_` prefix; :195-200 updateWeights(cost)
-         // THEN updateWeightsLID(costLID).
--        6 => Some((cost + cost_lid, vec![(cost, ""), (cost_lid, "LID_")])),
-+        6 => Some((cost + cost_lid, vec![(cost_lid, ""), (cost, "LID_")])),
+@@ -214,7 +214,7 @@ pub(crate) fn training_policy(algo: i32) -> Option<(SaveCriterion, Vec<(CostPair
+         // the LID pair.
+         6 => Some((
+             SaveCriterion::CostPlusCostLid,
+-            vec![(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
++            vec![(CostPair::Lid, ""), (CostPair::Seg, "LID_")],
+         )),
          _ => None,
      }
- }

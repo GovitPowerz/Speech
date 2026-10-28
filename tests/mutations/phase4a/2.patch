@@ -4,13 +4,13 @@ catcher: MISSED cargo --test phase4a_save_update best_cost_gate_fires_and_skips
 catcher: CAUGHT cargo --test phase4b_backlog best_cost_gate_skips_on_exact_tie
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index 706d4bd..b0edc45 100644
+index f5eb220..d099c55 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -602,7 +602,7 @@ impl BagOfProcessors {
-         if nets.is_empty() {
+@@ -666,7 +666,7 @@ impl BagOfProcessors {
              return Ok(());
          }
+         let save_criterion = save_criterion.value(cost, cost_lid, bad_classif_lid);
 -        if best_cost[&pos] > save_criterion {
 +        if best_cost[&pos] >= save_criterion {
              for (i, (net, (_, prefix))) in nets.iter().zip(&per_net).enumerate() {
