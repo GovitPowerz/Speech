@@ -226,9 +226,10 @@ pub(crate) fn training_policy(
 /// issue #110's one site). The fast drivers' training arms are inert (`nets()` empty,
 /// training stays exact f64), so a config that would train or gradient-check them is a
 /// config error, decided where fast or exact is decided, [`BagOfProcessors::from_configs`],
-/// for every mode: `CorpusProcessor::train` and the gradient check are never reached on a
-/// fast bag. The four facts are read as written, before the work-distributed kill zeroes
-/// the epoch count and the epsilon: the config-0 `Neural_Networks_BackPropagation_Epochs`
+/// for every mode: `CorpusProcessor::train` and `run()`'s gradient check are never reached
+/// on a fast bag (the seam's explicit `grad_check` answers `[]`: no net is active). The
+/// four facts are read as written, before the work-distributed kill zeroes the epoch count
+/// and the epsilon: the config-0 `Neural_Networks_BackPropagation_Epochs`
 /// and `Neural_Networks_Gradient_Check_Epsilon` (what `CorpusProcessor::run` reads) and
 /// every config's two `BackPropagationActivated` flags (per net per config). Outside Multi
 /// mode a flag at `Epochs 0` is still gradient-shaped (F11: `run_solo` computes the

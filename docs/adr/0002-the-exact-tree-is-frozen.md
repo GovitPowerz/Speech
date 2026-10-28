@@ -59,7 +59,8 @@ its default and both overrides, fast or exact being the bag's one stored fact, i
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),
-so neither `CorpusProcessor::train` nor the gradient check is reachable on a fast bag.
+so neither `CorpusProcessor::train` nor `run()`'s gradient check is reachable on a fast bag
+(the seam's explicit `grad_check` there answers `[]`: no net is active).
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and
 `RESULTS.md`, never in `IMPROVEMENTS.md`, which tracks legacy-quirk debt only. Its only bound is

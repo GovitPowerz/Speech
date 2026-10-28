@@ -1,7 +1,8 @@
 """Issue #110: the fast tree's training refusal through the seam, one site and mode-free.
 
-  * `Engine.from_map` under `Inference_Path fast` refuses a training-shaped map at
-    construction in Image mode as in Multi mode, with one wording naming the four facts
+  * `Engine.from_map` under `Inference_Path fast` refuses a training-shaped map (the
+    fixture's own `BackPropagationActivated true` at Epochs 0) at construction in Image mode
+    as in Multi mode, with one wording naming the four facts
     (epochs, gradient-check epsilon, both `BackPropagationActivated` flags); the exact tree
     builds the same map.
   * A gradient check is training-shaped: `Neural_Networks_Gradient_Check_Epsilon > 0` on a
@@ -50,12 +51,13 @@ def _build(tmp_path: Path, cfg: dict[str, str], mode: str) -> Any:
 
 @pytest.mark.parametrize("mode", ["-i", "-m"])
 def test_fast_refuses_training_shaped_map_at_construction(tmp_path: Path, mode: str) -> None:
-    cfg = _cfg(tmp_path, "fast", Neural_Networks_BackPropagation_Epochs="2")
-    assert cfg["BLSTM_BackPropagationActivated"] == "true", "the fixture must carry the flag on"
+    # The fixture's own tail, Epochs 0 with the flag on: the flag alone refuses (F11, still gradient-shaped).
+    cfg = _cfg(tmp_path, "fast")
+    assert cfg["Neural_Networks_BackPropagation_Epochs"] == "0" and cfg["BLSTM_BackPropagationActivated"] == "true", "the fixture must carry Epochs 0, flag on"
     with pytest.raises(RuntimeError, match=REFUSAL) as refused:
         _build(tmp_path, cfg, mode)
     msg = str(refused.value)
-    for fact in ("Neural_Networks_BackPropagation_Epochs 2", "Neural_Networks_Gradient_Check_Epsilon 0", "BackPropagationActivated SAD=true/LID=false"):
+    for fact in ("Neural_Networks_BackPropagation_Epochs 0", "Neural_Networks_Gradient_Check_Epsilon 0", "BackPropagationActivated SAD=true/LID=false"):
         assert fact in msg, msg
     assert "mode" not in msg.lower(), f"the wording names the facts, not the mode: {msg}"
     # The exact tree builds the same map (training stays exact f64).
@@ -72,6 +74,7 @@ def test_fast_refuses_gradient_check_epsilon_in_unit_test_mode(tmp_path: Path) -
 
 
 def test_fast_grad_check_is_the_exact_backprop_off_answer(tmp_path: Path) -> None:
-    fast = _build(tmp_path, _inference_only(_cfg(tmp_path, "fast")), "-m")
-    exact = _build(tmp_path, _inference_only(_cfg(tmp_path, "exact")), "-m")
+    cfg = _inference_only(_cfg(tmp_path, "fast"))
+    fast = _build(tmp_path, cfg, "-m")
+    exact = _build(tmp_path, {**cfg, "Inference_Path": "exact"}, "-m")
     assert fast.grad_check(1e-4, 1) == [] == exact.grad_check(1e-4, 1)

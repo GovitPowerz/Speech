@@ -534,7 +534,7 @@ fn fast_bails_on_training_shaped_config() {
     }
 
     // Algo 3 (SAD) too: the rider hardens the Task-4 surface. tier2 + fast + backprop
-    // -> bail.
+    // -> bail. tier2 carries `Epochs 3`, zeroed so the flag alone refuses.
     let text = std::fs::read_to_string(ref_dir().join("phase4a/tier2_spectral.config")).unwrap();
     let mut m = speech::legacy_config::parse_legacy_config(&text);
     m.insert("numOuterThreads".into(), "1".into());
@@ -547,10 +547,12 @@ fn fast_bails_on_training_shaped_config() {
             .into(),
     );
     m.insert("Inference_Path".into(), "fast".into());
+    m.insert("Neural_Networks_BackPropagation_Epochs".into(), "0".into());
     m.insert("BLSTM_BackPropagationActivated".into(), "true".into());
     match BagOfProcessors::from_configs(std::slice::from_mut(&mut m)) {
         Err(e) => assert!(
-            e.to_string().contains("training-shaped"),
+            e.to_string()
+                .contains("BackPropagationActivated SAD=true/LID=false"),
             "expected a training-shaped bail for algo 3, got: {e}"
         ),
         Ok(_) => panic!("fast algo 3 + BackPropagationActivated must bail"),

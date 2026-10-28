@@ -268,7 +268,7 @@ impl CorpusProcessor {
     /// (`isLog = false`); a final eval at epoch `N+1` with `_Mode`. Timer prints are
     /// display-only (dropped).
     fn train(&mut self) -> Result<()> {
-        // A fast bag never reaches here (nor the gradient check): a training-shaped config
+        // A fast bag never reaches here (nor `run()`'s gradient check): a training-shaped config
         // under `Inference_Path fast` is refused at `BagOfProcessors::from_configs`, the one
         // site (issue #110), so `self.processors` trains exact f64 nets by construction.
         let nb = self.processors.nb_of_conf();
