@@ -3487,6 +3487,43 @@ the parsed map is byte-identical).
 | 1 | the pre-#99 `2 * <prefix>_NNetInputSize` arithmetic | `test_tail_lengths_need_no_input_size_key`, `test_tail_lengths_are_the_engine_tail_stack[lid_blstm]`, `test_drivers_hold_no_input_size_arithmetic`, `test_tail_lengths_follow_the_built_width_not_the_declared_key`; `[lre_sad_v1]`, `[lre_sad_v2]`, `test_fold_run::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo6_two_elements` | CAUGHT by the four: `KeyError: 'BLSTM_NNetInputSize'` (twice), `assert ['train.py'] == []`, `assert [22] == [46]`. MISSED by the four key-declaring configs |
 | 2 | the tail sums the `mean` block only | `[lre_sad_v2]`, `test_fold_run::...[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo3_single_element`; `test_drivers_hold_no_input_size_arithmetic` | CAUGHT: `assert [11] == [22]`, `the strip point is the first tail block`, `assert [23] == [46]`. MISSED by the source scan (no key arithmetic to find) |
 
+## Issue #110 -- the fast-tree training refusal at one site, mode-free: the mutation battery
+
+**Live:** `tests/mutations/issue92/` (3 patches: `1` re-targeted to the one site, `2` retired
+with its site, `3` and `4` new).
+
+Issue #92 left `refuse_fast_training` one body at two sites: `BagOfProcessors::from_configs`
+in Multi mode, and `CorpusProcessor::train` in Image / UnitTest mode through
+`Segmenter::is_fast_tree`, a trait method whose default answered `false`, so a third fast
+driver that forgot the override would have run its epochs as no-ops; and a gradient check
+(`Neural_Networks_Gradient_Check_Epsilon > 0`, Epochs 0) passed both sites to fail inside
+`grad_check_full` with "no backprop-activated network in config 0", contradicting a config
+that set the flag. Now the refusal is decided once, at `from_configs`, the `Inference_Path`
+dispatch, for every mode, on four facts read as written before the work-distributed kill: the
+config-0 epoch count and epsilon (what `CorpusProcessor::run` reads) and every config's two
+`BackPropagationActivated` flags; `from_configs` takes no mode; the `train()` loop and the trait
+method are deleted, fast or exact being the bag's stored `use_fast` (`is_fast_tree()`); and
+`Engine.grad_check` on a fast engine keeps answering `[]`, pinned equal to an exact engine with
+backprop off. The "tier2 still constructs fast in Image mode" exemption is retired: the cargo
+helpers that build a fast bag off a training-tailed fixture strip the tail on both legs, so a
+parity pair differs in `Inference_Path` alone. Goldens byte-green (`phase4a_corpus_processor`,
+`phase4b_corpus_lid`, `phase7_parity_lid`, `phase7_parity_sad`, the phase-8/9/10 parity legs);
+the ADR-0002 #25 touch class for the trait deletion.
+
+`uv run python tests/mutations/run.py issue92` on macOS: 9 verdicts, 0 differ from expected;
+`--changed-since origin/main` 147 verdicts, 0 differ (the branch moved `bag_of_processors.rs`, `corpus_processor.rs`, `fast/driver.rs`, `tasks/segmenter.rs` and every fast test helper that strips a training tail, so the phase-4a/4b/5/7/8/9/10 and #93 batteries on those files re-ran, corpus linked).
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `refuse_fast_training` never refuses on the epoch count (`epochs < 0`) | `phase7_parity_lid::fast_bails_on_training_shaped_config`, `::fast_training_guard_blocks_image_mode_epochs`, `refuse_fast_training_is_one_body_naming_the_four_facts` | CAUGHT by all three: `fast + Neural_Networks_BackPropagation_Epochs=5 must bail (training-shaped)`, `fast + Image + Epochs>0 must refuse at construction, not silently no-op-train`, `unwrap_err() on an Ok value` |
+| 3 | the body ignores the gradient-check epsilon (`epsilon < 0.0`) | `phase7_parity_lid::fast_refuses_gradient_check_at_construction`, the four-facts pin, `test_fast_refusal::test_fast_refuses_gradient_check_epsilon_in_unit_test_mode` | CAUGHT by all three: `fast + UnitTest + epsilon>0 must refuse at construction`, `unwrap_err() on an Ok value`, `DID NOT RAISE RuntimeError` |
+| 4 | `from_configs` stops reading the two flags (`(false, false)`, the pre-#110 shape outside Multi mode) | `phase7_parity_lid::fast_bails_on_training_shaped_config`, `::fast_refusal_reads_epochs_off_config_0_and_the_flags_off_every_map`, `test_fast_refusal::test_fast_refuses_training_shaped_map_at_construction[-i]` | CAUGHT by all three: `fast + BLSTM_BackPropagationActivated=true must bail (training-shaped)`, `a config-1 BackPropagationActivated refuses`, the seam's message reading `SAD=false/LID=false` against a map whose flag is on |
+
+What the battery measured: the refusal is one site -- a flipped predicate on any of the four
+facts, or a dropped read, lets a fast construction through in every mode at once, and every
+catcher is a construction pin (no run goes on to the audio decode as the #92 catchers did,
+so the first failure line names the missing refusal, not an unrelated listing error).
+
 ## Issue #92 -- the two decisions back inside driver() and training_policy: the mutation battery
 
 **Live:** `tests/mutations/issue92/` (2 patches); the three `training_policy` patches of
