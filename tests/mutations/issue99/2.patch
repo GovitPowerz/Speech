@@ -1,0 +1,19 @@
+mutation: _tail_lengths sums the tail stack's mean block only (the std block stays inside the trained theta)
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[lre_sad_v2]
+catcher: CAUGHT pytest tests/pyo3/test_fold_run.py::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]
+catcher: CAUGHT pytest tests/test_phase4d_algo3_drivers.py::test_tail_lengths_algo3_single_element
+catcher: MISSED pytest tests/test_issue99_tail_lengths.py::test_drivers_hold_no_input_size_arithmetic
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 34629d2..c664af1 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -67,7 +67,7 @@ def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
+     import speech_rs  # local: the pyo3 module is only needed on the engine path
+ 
+     prefixes = ["BLSTM", "BLSTM_LID"] if algo == 6 else ["BLSTM"]
+-    return [sum(int(b["len"]) for b in speech_rs.weight_layout(cfg, p) if b["stack"] == "tail") for p in prefixes]
++    return [sum(int(b["len"]) for b in speech_rs.weight_layout(cfg, p) if b["stack"] == "tail" and b["name"] == "mean") for p in prefixes]
+ 
+ 
+ def _eval_overlay(base: dict[str, str], ponds: list[str], algo: int) -> dict[str, str]:

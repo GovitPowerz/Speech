@@ -7,8 +7,8 @@
 #     lstm_neuron_nb    23,24,24  -> 11,24,24
 #
 # and the normalize mean/std tail that entails (2*23 = 46 -> 2*11 = 22), which is
-# NOT written anywhere: it self-sizes off `nnet_input_size` on both sides of the
-# seam (`train.py::_tail_lengths`, `BLSTMNeuralNetwork::setWeights`). ONE VARIABLE
+# NOT written anywhere: the engine sizes it (`BLSTMNeuralNetwork::setWeights`) and
+# Python reads it off the engine's layout (`train.py::_tail_lengths`, #99). ONE VARIABLE
 # CHANGES, so any v1-vs-v2 difference is cleanly attributable to it. Everything else
 # -- the DSP front-end, the hidden widths, the output MLP, the cost law, the decision
 # thresholds, every runtime/orchestration key -- is v1's, untouched.

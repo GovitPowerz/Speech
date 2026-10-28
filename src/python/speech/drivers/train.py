@@ -56,16 +56,18 @@ F64 = np.float64
 
 
 def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
-    """The normalize mean/std tail length per net = `2 * NNetInputSize`
-    (`BLSTMNeuralNetwork::setWeights` :225-227 consumes mean then std, each inputSize).
+    """The normalize mean/std tail length per net, read off the engine's weight layout
+    (`speech_rs.weight_layout`'s `tail` stack: the blocks `BlstmNetwork::set_weights`
+    consumes last, mean then std). Python holds no geometry (issue #27, ADR-0005): a config
+    declaring no input width, as the committed LID configs do, sizes its tail as the engine does.
 
     Returns one entry per BackPropagation net: `[sad]` for the single-net algos (3/4/5),
     `[sad, lid]` only for the algo-6 Twin -- the `BackPropagation.m:11-13` cell contract
     (`weightsIni{2}` populated iff `algo == 6`)."""
-    tails = [2 * int(cfg["BLSTM_NNetInputSize"])]
-    if algo == 6:
-        tails.append(2 * int(cfg["BLSTM_LID_NNetInputSize"]))
-    return tails
+    import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+    prefixes = ["BLSTM", "BLSTM_LID"] if algo == 6 else ["BLSTM"]
+    return [sum(int(b["len"]) for b in speech_rs.weight_layout(cfg, p) if b["stack"] == "tail") for p in prefixes]
 
 
 def _eval_overlay(base: dict[str, str], ponds: list[str], algo: int) -> dict[str, str]:

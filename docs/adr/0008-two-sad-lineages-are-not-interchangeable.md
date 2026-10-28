@@ -1,6 +1,6 @@
 # ADR-0008: Two SAD config lineages coexist and are not interchangeable; v1 is the only 2015-capacity-comparable one
 
-**Status:** accepted | **Date:** 2026-08-01 (Phase 10 Task 4, commit `074e392`)
+**Status:** accepted | **Date:** 2026-08-01 (Phase 10 Task 4, commit `074e392`); the tail-sizing sentence amended 2026-10-27 (issue #99)
 
 ## Context
 
@@ -15,7 +15,8 @@ place would resize every committed pack and invalidate the Phase 6 baseline numb
 
 Fork, do not fix. `lre_sad_v2.toml` is `lre_sad.toml` byte-for-byte except two value lines
 (`nnet_input_size 23 -> 11`, `lstm_neuron_nb "23,24,24" -> "11,24,24"`); the normalize tail
-self-sizes on both sides of the seam. v1 stays unchanged, guarded by committed dead-column
+self-sizes on both sides of the seam (since issue #99, on ONE side: the engine sizes it and
+`train.py::_tail_lengths` reads it off `speech_rs.weight_layout`). v1 stays unchanged, guarded by committed dead-column
 floors; v2 is guarded by the inverse (zero dead layer-0 columns per cell, proven non-vacuous
 by running the same check on v1 and finding exactly `[44, 92)`).
 

@@ -59,15 +59,15 @@ def test_ps_from_config_algo6_still_builds_lid() -> None:
 
 
 def test_tail_lengths_algo3_single_element() -> None:
-    """algo 3 -> a 1-element tail list `[2*BLSTM_NNetInputSize]`, NOT a `(sad, 0)` 2-tuple.
-    `BLSTM_NNetInputSize 23` -> tail 46."""
+    """algo 3 -> a 1-element tail list (the SAD net's engine tail), NOT a `(sad, 0)` 2-tuple.
+    A 23-wide input -> tail 46 (mean + std, read off the engine's layout since issue #99)."""
     tails = T._tail_lengths(_cfg(ALGO3_CONFIG), 3)
     assert tails == [46]
 
 
 def test_tail_lengths_algo6_two_elements() -> None:
-    """algo 6 -> `[2*BLSTM_NNetInputSize, 2*BLSTM_LID_NNetInputSize]`. The twin config's
-    `BLSTM_NNetInputSize 8` / `BLSTM_LID_NNetInputSize 12` -> `[16, 24]`."""
+    """algo 6 -> `[sad tail, lid tail]`. The twin config's 8-wide SAD input / 12-wide LID
+    input -> `[16, 24]`."""
     tails = T._tail_lengths(_cfg(ALGO6_CONFIG), 6)
     assert tails == [16, 24]
 

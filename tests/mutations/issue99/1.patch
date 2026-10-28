@@ -1,0 +1,23 @@
+mutation: _tail_lengths sizes the tail as 2 * <prefix>_NNetInputSize read off the config map (the pre-#99 Python geometry) instead of the engine's tail stack
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_need_no_input_size_key
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[lid_blstm]
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_drivers_hold_no_input_size_arithmetic
+catcher: CAUGHT pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_follow_the_built_width_not_the_declared_key
+catcher: MISSED pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[lre_sad_v2]
+catcher: MISSED pytest tests/test_issue99_tail_lengths.py::test_tail_lengths_are_the_engine_tail_stack[lre_sad_v1]
+catcher: MISSED pytest tests/pyo3/test_fold_run.py::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]
+catcher: MISSED pytest tests/test_phase4d_algo3_drivers.py::test_tail_lengths_algo6_two_elements
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 34629d2..fbc0c57 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -67,7 +67,7 @@ def _tail_lengths(cfg: dict[str, str], algo: int) -> list[int]:
+     import speech_rs  # local: the pyo3 module is only needed on the engine path
+ 
+     prefixes = ["BLSTM", "BLSTM_LID"] if algo == 6 else ["BLSTM"]
+-    return [sum(int(b["len"]) for b in speech_rs.weight_layout(cfg, p) if b["stack"] == "tail") for p in prefixes]
++    return [2 * int(cfg[f"{p}_NNetInputSize"]) for p in prefixes]
+ 
+ 
+ def _eval_overlay(base: dict[str, str], ponds: list[str], algo: int) -> dict[str, str]:
