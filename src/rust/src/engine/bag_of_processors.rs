@@ -198,15 +198,17 @@ impl SaveCriterion {
 /// for algo 0/1/2 (no legacy branch; the gradient check's `:275-289` has no arm either,
 /// so its cost stays untouched and the `:292` division yields 0/0 = NaN). A fast conf
 /// (algo 3 or 6) gets a policy too but has no trainable net to apply it to.
-pub(crate) fn training_policy(algo: i32) -> Option<(SaveCriterion, Vec<(CostPair, &'static str)>)> {
+pub(crate) fn training_policy(
+    algo: i32,
+) -> Option<(SaveCriterion, &'static [(CostPair, &'static str)])> {
     match algo {
         // :149-162 saveCriterion = cost; :184-193 update with cost; gradCheck :275-277.
-        3 | 4 => Some((SaveCriterion::Cost, vec![(CostPair::Seg, "")])),
+        3 | 4 => Some((SaveCriterion::Cost, &[(CostPair::Seg, "")])),
         // :165-171 saveCriterion = badClassifLID + costLID; :192-194 update with costLID;
         // gradCheck :278-280.
         5 => Some((
             SaveCriterion::BadClassifLidPlusCostLid,
-            vec![(CostPair::Lid, "")],
+            &[(CostPair::Lid, "")],
         )),
         // :172-179 saveCriterion = cost + costLID, BOTH nets saved under ONE gate,
         // `saveWeightsLID` adding its own `LID_` prefix; :195-200 updateWeights(cost)
@@ -214,7 +216,7 @@ pub(crate) fn training_policy(algo: i32) -> Option<(SaveCriterion, Vec<(CostPair
         // the LID pair.
         6 => Some((
             SaveCriterion::CostPlusCostLid,
-            vec![(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
+            &[(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
         )),
         _ => None,
     }
@@ -228,7 +230,8 @@ pub(crate) fn training_policy(algo: i32) -> Option<(SaveCriterion, Vec<(CostPair
 /// Multi mode (the config's epoch count and both `BackPropagationActivated` keys) and
 /// `CorpusProcessor::train` in Image / UnitTest mode (the epoch count alone, `None` for
 /// the keys it did not read: `train()` is reached only under `training_epochs > 0`).
-/// Inference / Image / Solo runs over the same training-tailed configs are untouched.
+/// Solo runs are untouched, and so are Image / UnitTest runs whose tail is only a
+/// `BackPropagationActivated` key (outside Multi mode only the epoch count trains).
 pub(crate) fn refuse_fast_training(
     mode: ModeKind,
     epochs: i64,
@@ -350,11 +353,11 @@ impl BagOfProcessors {
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
     ) -> Result<BagOfProcessors> {
-        // Task 5: the fast+training rider consults the mode. Training runs only in Multi
-        // mode (the `-m`/`-M` epoch loop); Image/Solo/UnitTest drive inference via
-        // `get_segmentation`, so the training-shaped-config bail is Multi-gated (the brief's
-        // "inference/image/solo modes unaffected"). tier2/the SAD configs carry a training
-        // tail (Epochs/backprop) but run fast INFERENCE in Image mode -- must not bail.
+        // Task 5: the fast+training rider consults the mode. Construction refuses in Multi
+        // mode only; an Image/UnitTest run trains only through `CorpusProcessor::run`'s
+        // epoch loop, refused there (`refuse_fast_training`, issue #92), and Solo never
+        // trains. tier2/the SAD configs carry a training tail (Epochs/backprop) and must
+        // still construct fast in Image mode.
         let is_multi_mode = mode.kind == ModeKind::Multi;
 
         if configs.is_empty() {
@@ -419,9 +422,9 @@ impl BagOfProcessors {
             // (`Neural_Networks_BackPropagation_Epochs > 0` OR a `BackPropagationActivated`-on
             // net) is a config error under `Inference_Path fast` -- caught loudly here so the
             // seam can't silently drop to a no-op fast "training" run ([`refuse_fast_training`],
-            // the one body; `CorpusProcessor::train` calls it for the other modes). Guards
-            // both algo 3 and 6; inference/image/solo modes are unaffected (they carry the
-            // same training-tail configs but drive inference).
+            // the one body; `CorpusProcessor::train` calls it for Image/UnitTest runs with
+            // Epochs > 0). Guards both algo 3 and 6; Solo, and Image/UnitTest runs at
+            // Epochs 0, drive inference over the same training-tail configs.
             if use_fast {
                 if is_multi_mode {
                     let epochs = get_i32_default(map, "Neural_Networks_BackPropagation_Epochs", 0)?;
@@ -669,7 +672,7 @@ impl BagOfProcessors {
         }
         let save_criterion = save_criterion.value(cost, cost_lid, bad_classif_lid);
         if best_cost[&pos] > save_criterion {
-            for (i, (net, (_, prefix))) in nets.iter().zip(&per_net).enumerate() {
+            for (i, (net, (_, prefix))) in nets.iter().zip(per_net).enumerate() {
                 let file = crate::io::prefix_basename(prefix, filename);
                 net.save_weights(&file, &derivs[&pos][i], &stats[&pos][i])?;
             }
@@ -700,7 +703,7 @@ impl BagOfProcessors {
             return;
         };
         let nets = self.processors[pos].driver_mut().nets_mut();
-        for (i, (net, (pair, _))) in nets.into_iter().zip(&per_net).enumerate() {
+        for (i, (net, (pair, _))) in nets.into_iter().zip(per_net).enumerate() {
             net.update_weights(&derivs[&pos][i], pair.pick(cost, cost_lid));
         }
     }

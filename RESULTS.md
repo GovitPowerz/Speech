@@ -3490,7 +3490,7 @@ the parsed map is byte-identical).
 ## Issue #92 -- the two decisions back inside driver() and training_policy: the mutation battery
 
 **Live:** `tests/mutations/issue92/` (2 patches); the three `training_policy` patches of
-`tests/mutations/issue25/` re-targeted to the table (item 1 gaining the gradient-check catcher). `phase4a/2` (the save gate) re-targeted past the criterion's `value` call, verdicts unchanged.
+`tests/mutations/issue25/` re-targeted to the table (item 1 gaining two catchers, the gradient check and the policy pin). `phase4a/2` (the save gate) re-targeted past the criterion's `value` call, verdicts unchanged.
 
 Issue #25 left two decisions outside `Processor::driver()` and the bag's `training_policy`:
 the "fast is inference-only" refusal written twice (the bag at construction in Multi mode, the
@@ -3512,7 +3512,7 @@ expected.
 |---|---|---|---|
 | 1 | `refuse_fast_training` never refuses on the epoch count (`epochs < 0`) | `phase7_parity_lid::fast_bails_on_training_shaped_config`, `::fast_training_guard_blocks_image_mode_epochs`, `refuse_fast_training_is_one_body_naming_the_mode` | CAUGHT by all three: `fast + Multi + Neural_Networks_BackPropagation_Epochs=5 must bail`, `error must name Inference_Path, got: No .phSeq file given` (the run went on past the guard to the audio decode), `unwrap_err() on an Ok value` |
 | 2 | `FastTwinLid::is_fast_tree` answers `false` | `fast_training_guard_blocks_image_mode_epochs`, `driver_surface_per_variant` | CAUGHT by both: the same decode error past the guard; `FastTwinLid is_fast_tree` |
-| 25/1 | algo 6's pairs swapped (`[Lid, Seg]`) | `twin_train_epoch_weights_golden`, `twin_gradcheck_golden` (new), the policy pin | CAUGHT by all three: `twin_train_lid epoch 5 weight 167`, `twin net 0 weight 0 numerical: got 0e0 want -1.08e-3` (net 0's central difference now reads the LID pair, which net 0's weights do not move), the pin's `left == right` |
+| 25/1 | algo 6's pairs swapped (`[Lid, Seg]`) | `twin_train_epoch_weights_golden`, `twin_gradcheck_golden` (new), the policy pin (new) | CAUGHT by all three: `twin_train_lid epoch 5 weight 167`, `twin net 0 weight 0 numerical: got 0e0 want -1.08e-3` (net 0's central difference now reads the LID pair, which net 0's weights do not move), the pin's `left == right` |
 
 What the battery measured: the pair is one fact now -- swapping it moves the update AND the
 gradient check (25/1's new catcher, blind before #92 because `grad_check_cost` had its own

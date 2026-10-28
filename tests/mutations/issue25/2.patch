@@ -2,15 +2,15 @@ mutation: training_policy algo 6 saves the Twin's LID net without the LID_ prefi
 catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index f5eb220..7034f22 100644
+index a83e263..9e11f9a 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -214,7 +214,7 @@ pub(crate) fn training_policy(algo: i32) -> Option<(SaveCriterion, Vec<(CostPair
+@@ -216,7 +216,7 @@ pub(crate) fn training_policy(
          // the LID pair.
          6 => Some((
              SaveCriterion::CostPlusCostLid,
--            vec![(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
-+            vec![(CostPair::Seg, ""), (CostPair::Lid, "")],
+-            &[(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
++            &[(CostPair::Seg, ""), (CostPair::Lid, "")],
          )),
          _ => None,
      }
