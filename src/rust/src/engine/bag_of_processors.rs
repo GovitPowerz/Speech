@@ -149,29 +149,106 @@ impl Processor {
     }
 }
 
+/// Which of the two accumulated cost pairs a trainable net owns (issue #92): the
+/// segmentation pair (`cost` / `seg_cost`+`seg_count`) or the LID pair (`costLID` /
+/// `lid.cost`+`lid.count`). Read by the bag's update ([`CostPair::pick`]) and by the
+/// corpus-level gradient check (`CorpusProcessor::grad_check_cost`), so the choice is
+/// written once, in [`training_policy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CostPair {
+    Seg,
+    Lid,
+}
+
+impl CostPair {
+    /// The pair's cost among the two the epoch fold accumulated.
+    pub(crate) fn pick(self, cost: f64, cost_lid: f64) -> f64 {
+        match self {
+            CostPair::Seg => cost,
+            CostPair::Lid => cost_lid,
+        }
+    }
+}
+
+/// The save criterion of `BagOfProcessors::saveWeights` (`:148-181`), per algo.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SaveCriterion {
+    /// :149-162 `cost` (`badClassif + cost` is commented out).
+    Cost,
+    /// :165-171 `badClassifLID + costLID`.
+    BadClassifLidPlusCostLid,
+    /// :172-179 `cost + costLID`.
+    CostPlusCostLid,
+}
+
+impl SaveCriterion {
+    pub(crate) fn value(self, cost: f64, cost_lid: f64, bad_classif_lid: f64) -> f64 {
+        match self {
+            SaveCriterion::Cost => cost,
+            SaveCriterion::BadClassifLidPlusCostLid => bad_classif_lid + cost_lid,
+            SaveCriterion::CostPlusCostLid => cost + cost_lid,
+        }
+    }
+}
+
 /// The per-algo training policy of `BagOfProcessors::saveWeights`/`updateWeights`
 /// (`:148-205`), keyed on the algo number as the legacy is: the save criterion and, per
-/// trainable net in pack order, its update cost and save-file basename prefix. `None`
-/// for algo 0/1/2 (no legacy branch). A fast conf (algo 3 or 6) gets a policy too but
-/// has no trainable net to apply it to.
-fn training_policy(
+/// trainable net in pack order, the cost pair it owns (its update cost, and the cost the
+/// gradient check differentiates, issue #92) and its save-file basename prefix. `None`
+/// for algo 0/1/2 (no legacy branch; the gradient check's `:275-289` has no arm either,
+/// so its cost stays untouched and the `:292` division yields 0/0 = NaN). A fast conf
+/// (algo 3 or 6) gets a policy too but has no trainable net to apply it to.
+pub(crate) fn training_policy(
     algo: i32,
-    cost: f64,
-    cost_lid: f64,
-    bad_classif_lid: f64,
-) -> Option<(f64, Vec<(f64, &'static str)>)> {
+) -> Option<(SaveCriterion, &'static [(CostPair, &'static str)])> {
     match algo {
-        // :149-162 saveCriterion = cost (badClassif+cost is commented out);
-        // :184-193 update with cost.
-        3 | 4 => Some((cost, vec![(cost, "")])),
-        // :165-171 saveCriterion = badClassifLID + costLID; :192-194 update with costLID.
-        5 => Some((bad_classif_lid + cost_lid, vec![(cost_lid, "")])),
+        // :149-162 saveCriterion = cost; :184-193 update with cost; gradCheck :275-277.
+        3 | 4 => Some((SaveCriterion::Cost, &[(CostPair::Seg, "")])),
+        // :165-171 saveCriterion = badClassifLID + costLID; :192-194 update with costLID;
+        // gradCheck :278-280.
+        5 => Some((
+            SaveCriterion::BadClassifLidPlusCostLid,
+            &[(CostPair::Lid, "")],
+        )),
         // :172-179 saveCriterion = cost + costLID, BOTH nets saved under ONE gate,
         // `saveWeightsLID` adding its own `LID_` prefix; :195-200 updateWeights(cost)
-        // THEN updateWeightsLID(costLID).
-        6 => Some((cost + cost_lid, vec![(cost, ""), (cost_lid, "LID_")])),
+        // THEN updateWeightsLID(costLID); gradCheck :281-288 net 0 the SAD pair, net 1
+        // the LID pair.
+        6 => Some((
+            SaveCriterion::CostPlusCostLid,
+            &[(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
+        )),
         _ => None,
     }
+}
+
+/// The ONE refusal of a training-shaped run on the fast tree (issue #92; the Phase 7
+/// Task 5 rider and its T5-finding-2 twin, once). The fast drivers' training arms are
+/// inert (`Segmenter::is_fast_tree`, `nets()` empty), so a run that would train them is
+/// a config error, caught at the two moments a training run is decided, with this one
+/// wording naming the facts that moment read: [`BagOfProcessors::from_configs`] in
+/// Multi mode (the config's epoch count and both `BackPropagationActivated` keys) and
+/// `CorpusProcessor::train` in Image / UnitTest mode (the epoch count alone, `None` for
+/// the keys it did not read: `train()` is reached only under `training_epochs > 0`).
+/// Solo runs are untouched, and so are Image / UnitTest runs whose tail is only a
+/// `BackPropagationActivated` key (outside Multi mode only the epoch count trains).
+pub(crate) fn refuse_fast_training(
+    mode: ModeKind,
+    epochs: i64,
+    back_prop: Option<(bool, bool)>,
+) -> Result<()> {
+    if epochs > 0 || back_prop.is_some_and(|(sad, lid)| sad || lid) {
+        let keys = match back_prop {
+            Some((sad, lid)) => format!(", BackPropagationActivated SAD={sad}/LID={lid}"),
+            None => String::new(),
+        };
+        bail!(
+            "Inference_Path fast is inference-only (training stays exact f64), but this \
+             {mode:?}-mode run is training-shaped (Neural_Networks_BackPropagation_Epochs \
+             {epochs}{keys}); train on the exact path"
+        );
+    }
+    Ok(())
 }
 
 /// Port of `BagOfProcessors` (`BagOfProcessors.h`/`.cpp`): per-config driver
@@ -276,11 +353,11 @@ impl BagOfProcessors {
         configs: &mut [IndexMap<String, String>],
         mode: Mode,
     ) -> Result<BagOfProcessors> {
-        // Task 5: the fast+training rider consults the mode. Training runs only in Multi
-        // mode (the `-m`/`-M` epoch loop); Image/Solo/UnitTest drive inference via
-        // `get_segmentation`, so the training-shaped-config bail is Multi-gated (the brief's
-        // "inference/image/solo modes unaffected"). tier2/the SAD configs carry a training
-        // tail (Epochs/backprop) but run fast INFERENCE in Image mode -- must not bail.
+        // Task 5: the fast+training rider consults the mode. Construction refuses in Multi
+        // mode only; an Image/UnitTest run trains only through `CorpusProcessor::run`'s
+        // epoch loop, refused there (`refuse_fast_training`, issue #92), and Solo never
+        // trains. tier2/the SAD configs carry a training tail (Epochs/backprop) and must
+        // still construct fast in Image mode.
         let is_multi_mode = mode.kind == ModeKind::Multi;
 
         if configs.is_empty() {
@@ -341,27 +418,20 @@ impl BagOfProcessors {
             // Task 5); everything else stays exact-only -> typed-bail. Load-weights
             // mirrors the exact arms (`from_legacy(.., None)` then `load_weights_file`).
             //
-            // RIDER: the fast path is inference-only (training stays exact f64), so a
-            // Multi-mode (training) run with a TRAINING-shaped config
+            // RIDER: a Multi-mode (training) run with a TRAINING-shaped config
             // (`Neural_Networks_BackPropagation_Epochs > 0` OR a `BackPropagationActivated`-on
             // net) is a config error under `Inference_Path fast` -- caught loudly here so the
-            // seam can't silently drop to a no-op fast "training" run. Guards both algo 3 and
-            // 6 (hardening the Task-4 surface too); inference/image/solo modes are unaffected
-            // (they carry the same training-tail configs but drive inference).
+            // seam can't silently drop to a no-op fast "training" run ([`refuse_fast_training`],
+            // the one body; `CorpusProcessor::train` calls it for Image/UnitTest runs with
+            // Epochs > 0). Guards both algo 3 and 6; Solo, and Image/UnitTest runs at
+            // Epochs 0, drive inference over the same training-tail configs.
             if use_fast {
                 if is_multi_mode {
                     let epochs = get_i32_default(map, "Neural_Networks_BackPropagation_Epochs", 0)?;
                     let bp_sad = get_bool_default(map, "BLSTM_BackPropagationActivated", false)?;
                     let bp_lid =
                         get_bool_default(map, "BLSTM_LID_BackPropagationActivated", false)?;
-                    if epochs > 0 || bp_sad || bp_lid {
-                        bail!(
-                            "Inference_Path fast is inference-only (training stays exact f64), but \
-                             this Multi-mode run is training-shaped (Epochs {epochs}, \
-                             BackPropagationActivated SAD={bp_sad}/LID={bp_lid}); train on the \
-                             exact path"
-                        );
-                    }
+                    refuse_fast_training(mode.kind, i64::from(epochs), Some((bp_sad, bp_lid)))?;
                 }
                 let processor = match algo {
                     3 => {
@@ -594,16 +664,15 @@ impl BagOfProcessors {
         stats: &BTreeMap<usize, Vec<InputStatistics>>,
     ) -> Result<()> {
         let nets = self.processors[pos].driver().nets();
-        let Some((save_criterion, per_net)) =
-            training_policy(self.algo_types[pos], cost, cost_lid, bad_classif_lid)
-        else {
+        let Some((save_criterion, per_net)) = training_policy(self.algo_types[pos]) else {
             return Ok(());
         };
         if nets.is_empty() {
             return Ok(());
         }
+        let save_criterion = save_criterion.value(cost, cost_lid, bad_classif_lid);
         if best_cost[&pos] > save_criterion {
-            for (i, (net, (_, prefix))) in nets.iter().zip(&per_net).enumerate() {
+            for (i, (net, (_, prefix))) in nets.iter().zip(per_net).enumerate() {
                 let file = crate::io::prefix_basename(prefix, filename);
                 net.save_weights(&file, &derivs[&pos][i], &stats[&pos][i])?;
             }
@@ -625,19 +694,17 @@ impl BagOfProcessors {
         cost: f64,
         _bad_classif: f64,
         cost_lid: f64,
-        bad_classif_lid: f64,
+        _bad_classif_lid: f64,
         derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
     ) {
         #[cfg(feature = "test-support")]
         self.last_update_cost_lid.insert(pos, cost_lid);
-        let Some((_, per_net)) =
-            training_policy(self.algo_types[pos], cost, cost_lid, bad_classif_lid)
-        else {
+        let Some((_, per_net)) = training_policy(self.algo_types[pos]) else {
             return;
         };
         let nets = self.processors[pos].driver_mut().nets_mut();
-        for (i, (net, (update_cost, _))) in nets.into_iter().zip(&per_net).enumerate() {
-            net.update_weights(&derivs[&pos][i], *update_cost);
+        for (i, (net, (pair, _))) in nets.into_iter().zip(per_net).enumerate() {
+            net.update_weights(&derivs[&pos][i], pair.pick(cost, cost_lid));
         }
     }
 
@@ -1562,31 +1629,57 @@ mod tests {
     /// Issue #25: the per-algo save/update policy, pinned literally against the legacy
     /// branches (`:148-205`). No training golden runs algo 5 to a second save, so the
     /// algo-5 criterion's `badClassifLID` term is owned by this pin alone (the battery
-    /// measured it missed everywhere else).
+    /// measured it missed everywhere else). Issue #92: the per-net cost PAIR is the
+    /// table's entry (the update cost and the gradient check's cost read it), so the pin
+    /// holds the pair, the prefix and the criterion's value.
     #[test]
     fn training_policy_is_the_legacy_branch_per_algo() {
         let (cost, cost_lid, bad_lid) = (1.0, 10.0, 100.0);
         for algo in [0, 1, 2] {
-            assert!(
-                training_policy(algo, cost, cost_lid, bad_lid).is_none(),
-                "algo {algo}"
-            );
+            assert!(training_policy(algo).is_none(), "algo {algo}");
         }
         for algo in [3, 4] {
+            let (save, nets) = training_policy(algo).unwrap();
+            assert_eq!(save.value(cost, cost_lid, bad_lid), 1.0, "algo {algo}");
+            assert_eq!(nets, vec![(CostPair::Seg, "")], "algo {algo}");
+        }
+        let (save, nets) = training_policy(5).unwrap();
+        assert_eq!(save.value(cost, cost_lid, bad_lid), 110.0);
+        assert_eq!(nets, vec![(CostPair::Lid, "")]);
+        let (save, nets) = training_policy(6).unwrap();
+        assert_eq!(save.value(cost, cost_lid, bad_lid), 11.0);
+        assert_eq!(nets, vec![(CostPair::Seg, ""), (CostPair::Lid, "LID_")]);
+        assert_eq!(CostPair::Seg.pick(cost, cost_lid), 1.0);
+        assert_eq!(CostPair::Lid.pick(cost, cost_lid), 10.0);
+    }
+
+    /// Issue #92: the one refusal body. Shape-blind when nothing is training-shaped,
+    /// refusing on any of the three facts with one wording that names the mode.
+    #[test]
+    fn refuse_fast_training_is_one_body_naming_the_mode() {
+        assert!(refuse_fast_training(ModeKind::Multi, 0, Some((false, false))).is_ok());
+        assert!(refuse_fast_training(ModeKind::Image, 0, None).is_ok());
+        for (epochs, back_prop) in [
+            (1, Some((false, false))),
+            (0, Some((true, false))),
+            (0, Some((false, true))),
+            (1, None),
+        ] {
+            let msg = refuse_fast_training(ModeKind::Image, epochs, back_prop)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains("Inference_Path fast is inference-only"),
+                "{msg}"
+            );
+            assert!(msg.contains("Image-mode run is training-shaped"), "{msg}");
+            // The wording names only the facts the moment read.
             assert_eq!(
-                training_policy(algo, cost, cost_lid, bad_lid),
-                Some((1.0, vec![(1.0, "")])),
-                "algo {algo}"
+                msg.contains("BackPropagationActivated"),
+                back_prop.is_some(),
+                "{msg}"
             );
         }
-        assert_eq!(
-            training_policy(5, cost, cost_lid, bad_lid),
-            Some((110.0, vec![(10.0, "")]))
-        );
-        assert_eq!(
-            training_policy(6, cost, cost_lid, bad_lid),
-            Some((11.0, vec![(1.0, ""), (10.0, "LID_")]))
-        );
     }
 
     /// Issue #25: the driver interface per variant, every one built through the bag.
@@ -1657,6 +1750,12 @@ mod tests {
             let driver = bag.processor(pos).driver();
             assert_eq!(driver.pack_count(), packs, "{name} pack_count");
             assert_eq!(driver.nets().len(), nets, "{name} nets");
+            // Issue #92: a fast driver exchanges packs but trains none of them.
+            assert_eq!(
+                driver.is_fast_tree(),
+                packs > 0 && nets == 0,
+                "{name} is_fast_tree"
+            );
             assert!(
                 driver.last_result_rows().is_empty(),
                 "{name} before any run"

@@ -3,15 +3,15 @@ catcher: MISSED cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
 catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::training_policy_is_the_legacy_branch_per_algo
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index 706d4bd..4c36576 100644
+index f5eb220..3cca683 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -165,7 +165,7 @@ fn training_policy(
-         // :184-193 update with cost.
-         3 | 4 => Some((cost, vec![(cost, "")])),
-         // :165-171 saveCriterion = badClassifLID + costLID; :192-194 update with costLID.
--        5 => Some((bad_classif_lid + cost_lid, vec![(cost_lid, "")])),
-+        5 => Some((cost_lid, vec![(cost_lid, "")])),
-         // :172-179 saveCriterion = cost + costLID, BOTH nets saved under ONE gate,
-         // `saveWeightsLID` adding its own `LID_` prefix; :195-200 updateWeights(cost)
-         // THEN updateWeightsLID(costLID).
+@@ -185,7 +185,7 @@ impl SaveCriterion {
+     pub(crate) fn value(self, cost: f64, cost_lid: f64, bad_classif_lid: f64) -> f64 {
+         match self {
+             SaveCriterion::Cost => cost,
+-            SaveCriterion::BadClassifLidPlusCostLid => bad_classif_lid + cost_lid,
++            SaveCriterion::BadClassifLidPlusCostLid => cost_lid,
+             SaveCriterion::CostPlusCostLid => cost + cost_lid,
+         }
+     }
