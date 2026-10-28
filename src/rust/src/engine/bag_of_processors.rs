@@ -1305,14 +1305,6 @@ fn strip_last_4(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ModeKind;
-
-    fn solo_mode() -> Mode {
-        Mode {
-            kind: ModeKind::Solo,
-            verbose: false,
-        }
-    }
 
     fn ref_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
@@ -1381,7 +1373,7 @@ mod tests {
         let signal = with_bag_keys(load_config("phase2b/signal.config"), 4);
 
         for mut cfgs in [vec![tdc], vec![ltsv], vec![spectral], vec![signal]] {
-            let bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+            let bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
             assert_eq!(bag.nb_of_conf(), 1);
         }
     }
@@ -1400,7 +1392,7 @@ mod tests {
         twin.insert("BLSTM_LID_weightsFile".to_string(), String::new());
 
         let mut cfgs = vec![lid5, twin];
-        let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let mut bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
         assert_eq!(bag.nb_of_conf(), 2);
         assert_eq!(bag.algo_type(0), 5);
         assert_eq!(bag.algo_type(1), 6);
@@ -1439,7 +1431,7 @@ mod tests {
         // must succeed.
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "2".to_string());
-        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode())
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg))
             .expect("File_Type 2 (cep) must be accepted by the gate");
         assert_eq!(bag.file_type(), 2);
     }
@@ -1449,7 +1441,7 @@ mod tests {
         // File_Type 3/4 (phSeq-N variant, mat) stay unported -- the gate still bails.
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "3".to_string());
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()) {
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)) {
             Err(e) => assert!(e.to_string().contains("File_Type")),
             Ok(_) => panic!("expected File_Type 3 (unported) to bail"),
         }
@@ -1462,7 +1454,7 @@ mod tests {
         // flipped must succeed (the gate check runs before the per-config driver loop).
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "1".to_string());
-        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode())
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg))
             .expect("File_Type 1 (phSeq) must be accepted by the gate");
         assert_eq!(bag.file_type(), 1);
     }
@@ -1476,7 +1468,7 @@ mod tests {
         cfg.insert("refdialfiles".to_string(), "us".to_string());
 
         let mut cfgs = vec![cfg];
-        let _bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let _bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
 
         assert_eq!(cfgs[0].get("files").map(String::as_str), Some(""));
         assert_eq!(cfgs[0].get("refsegfiles").map(String::as_str), Some(""));
@@ -1501,7 +1493,7 @@ mod tests {
         let signal = with_bag_keys(load_config("phase2b/signal.config"), 4);
 
         let mut cfgs = vec![tdc, ltsv, spectral_cfg, signal];
-        let bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
 
         // algo 1 (pos 0), algo 2 (pos 1): non-NN defaults.
         assert_eq!(bag.get_weights(0).len(), 0);
@@ -1542,8 +1534,7 @@ mod tests {
         // fast + algo 3 -> FastSpectral.
         let mut fast3 = base3();
         fast3.insert("Inference_Path".to_string(), "fast".to_string());
-        let bag =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3)).unwrap();
         assert!(
             matches!(bag.processor(0), Processor::FastSpectral(_)),
             "fast + algo 3 must dispatch to FastSpectral"
@@ -1551,8 +1542,7 @@ mod tests {
 
         // absent -> exact Spectral.
         let mut exact3 = base3();
-        let bag =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3), solo_mode()).unwrap();
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3)).unwrap();
         assert!(
             matches!(bag.processor(0), Processor::Spectral(_)),
             "absent Inference_Path must dispatch to the exact Spectral"
@@ -1561,7 +1551,7 @@ mod tests {
         // junk value -> error.
         let mut junk = base3();
         junk.insert("Inference_Path".to_string(), "turbo".to_string());
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut junk), solo_mode()) {
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut junk)) {
             Err(e) => assert!(
                 e.to_string().contains("Inference_Path"),
                 "junk value error must name Inference_Path, got: {e}"
@@ -1572,7 +1562,7 @@ mod tests {
         // fast + algo 4 -> bail (only algo 3 supported in Task 4).
         let mut fast4 = with_bag_keys(load_config("phase2b/signal.config"), 4);
         fast4.insert("Inference_Path".to_string(), "fast".to_string());
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut fast4), solo_mode()) {
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut fast4)) {
             Err(e) => assert!(
                 e.to_string().to_lowercase().contains("fast"),
                 "fast + algo 4 bail must mention fast, got: {e}"
@@ -1591,10 +1581,8 @@ mod tests {
         exact3.insert("BLSTM_weightsFile".to_string(), String::new());
         let mut fast3 = exact3.clone();
         fast3.insert("Inference_Path".to_string(), "fast".to_string());
-        let mut exact =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3), solo_mode()).unwrap();
-        let mut fast =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        let mut exact = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3)).unwrap();
+        let mut fast = BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3)).unwrap();
         assert!(matches!(fast.processor(0), Processor::FastSpectral(_)));
 
         let n = exact.get_weights(0)[0].len();
@@ -1613,7 +1601,7 @@ mod tests {
     fn non_nn_set_weights_stays_inert_ok() {
         let tdc = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         let mut cfgs = vec![tdc];
-        let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let mut bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
         assert!(matches!(bag.processor(0), Processor::Tdc(_)));
         assert_eq!(bag.processor(0).driver().pack_count(), 0);
         // Issue #60: the pack-count check does not widen to them either, whatever the length.
@@ -1653,31 +1641,39 @@ mod tests {
         assert_eq!(CostPair::Lid.pick(cost, cost_lid), 10.0);
     }
 
-    /// Issue #92: the one refusal body. Shape-blind when nothing is training-shaped,
-    /// refusing on any of the three facts with one wording that names the mode.
+    /// Issues #92 / #110: the one refusal body. Shape-blind when nothing is
+    /// training-shaped, refusing on any of the four facts with one wording that names all
+    /// four and no mode.
     #[test]
-    fn refuse_fast_training_is_one_body_naming_the_mode() {
-        assert!(refuse_fast_training(ModeKind::Multi, 0, Some((false, false))).is_ok());
-        assert!(refuse_fast_training(ModeKind::Image, 0, None).is_ok());
-        for (epochs, back_prop) in [
-            (1, Some((false, false))),
-            (0, Some((true, false))),
-            (0, Some((false, true))),
-            (1, None),
+    fn refuse_fast_training_is_one_body_naming_the_four_facts() {
+        assert!(refuse_fast_training(0, 0.0, (false, false)).is_ok());
+        for (epochs, epsilon, back_prop) in [
+            (1, 0.0, (false, false)),
+            (0, 1e-4, (false, false)),
+            (0, 0.0, (true, false)),
+            (0, 0.0, (false, true)),
         ] {
-            let msg = refuse_fast_training(ModeKind::Image, epochs, back_prop)
+            let msg = refuse_fast_training(epochs, epsilon, back_prop)
                 .unwrap_err()
                 .to_string();
             assert!(
                 msg.contains("Inference_Path fast is inference-only"),
                 "{msg}"
             );
-            assert!(msg.contains("Image-mode run is training-shaped"), "{msg}");
-            // The wording names only the facts the moment read.
-            assert_eq!(
-                msg.contains("BackPropagationActivated"),
-                back_prop.is_some(),
-                "{msg}"
+            assert!(msg.contains("this config is training-shaped"), "{msg}");
+            for fact in [
+                format!("Neural_Networks_BackPropagation_Epochs {epochs}"),
+                format!("Neural_Networks_Gradient_Check_Epsilon {epsilon}"),
+                format!(
+                    "BackPropagationActivated SAD={}/LID={}",
+                    back_prop.0, back_prop.1
+                ),
+            ] {
+                assert!(msg.contains(&fact), "{msg} lacks {fact}");
+            }
+            assert!(
+                !msg.contains("mode"),
+                "the wording names facts, not a mode: {msg}"
             );
         }
     }
@@ -1730,8 +1726,8 @@ mod tests {
         // `Inference_Path` is a config-0 key: the fast variants get their own bag.
         spectral.insert("Inference_Path".to_string(), "fast".to_string());
         let mut fast_cfgs = vec![spectral, twin];
-        let mut exact = BagOfProcessors::from_configs(&mut exact_cfgs, solo_mode()).unwrap();
-        let mut fast = BagOfProcessors::from_configs(&mut fast_cfgs, solo_mode()).unwrap();
+        let mut exact = BagOfProcessors::from_configs(&mut exact_cfgs).unwrap();
+        let mut fast = BagOfProcessors::from_configs(&mut fast_cfgs).unwrap();
 
         let exact_kinds = [
             matches!(exact.processor(0), Processor::Vrcts(_)),
@@ -1750,12 +1746,6 @@ mod tests {
             let driver = bag.processor(pos).driver();
             assert_eq!(driver.pack_count(), packs, "{name} pack_count");
             assert_eq!(driver.nets().len(), nets, "{name} nets");
-            // Issue #92: a fast driver exchanges packs but trains none of them.
-            assert_eq!(
-                driver.is_fast_tree(),
-                packs > 0 && nets == 0,
-                "{name} is_fast_tree"
-            );
             assert!(
                 driver.last_result_rows().is_empty(),
                 "{name} before any run"
@@ -1777,5 +1767,10 @@ mod tests {
         }
         check(&mut fast, 0, "FastSpectral", 1, 0);
         check(&mut fast, 1, "FastTwinLid", 2, 0);
+        // Issue #110: fast or exact is a per-bag fact, answered by the bag (a fast driver
+        // exchanges packs but trains none of them; the refusal of a training-shaped
+        // config sits at construction, so no driver is asked).
+        assert!(!exact.is_fast_tree());
+        assert!(fast.is_fast_tree());
     }
 }

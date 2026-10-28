@@ -64,6 +64,13 @@ fn multi_mode() -> Mode {
     }
 }
 
+fn unit_test_mode() -> Mode {
+    Mode {
+        kind: ModeKind::UnitTest,
+        verbose: false,
+    }
+}
+
 fn lid_weights() -> Vec<f64> {
     let w = read_weight_vector(&phase4b("LID_bestNNWeight_1.bin")).unwrap();
     assert_eq!(w.len(), 12409, "real LID net weight count");
@@ -398,7 +405,7 @@ fn twin_map_fast() -> IndexMap<String, String> {
 #[test]
 fn fast_dispatch_routes_algo6_to_fast_twin() {
     let mut m = twin_map_fast();
-    let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
+    let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m)).unwrap();
     assert!(
         matches!(bag.processor(0), Processor::FastTwinLid(_)),
         "fast + algo 6 must dispatch to FastTwinLid"
@@ -411,8 +418,7 @@ fn fast_dispatch_routes_algo6_to_fast_twin() {
         "BLSTM_LID_weightsFile".into(),
         phase4b("LID_bestNNWeight_1.bin").to_str().unwrap().into(),
     );
-    let bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut exact), image_mode()).unwrap();
+    let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact)).unwrap();
     assert!(
         matches!(bag.processor(0), Processor::TwinLid(_)),
         "absent Inference_Path must dispatch to the exact TwinLid"
@@ -431,10 +437,8 @@ fn fast_twin_set_weights_answers_as_the_exact_arm() {
     let mut fast_map = twin_map_fast();
     let mut exact_map = fast_map.clone();
     exact_map.shift_remove("Inference_Path");
-    let mut fast =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut fast_map), image_mode()).unwrap();
-    let mut exact =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut exact_map), image_mode()).unwrap();
+    let mut fast = BagOfProcessors::from_configs(std::slice::from_mut(&mut fast_map)).unwrap();
+    let mut exact = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact_map)).unwrap();
     assert!(matches!(fast.processor(0), Processor::FastTwinLid(_)));
     assert!(matches!(exact.processor(0), Processor::TwinLid(_)));
 
@@ -488,36 +492,49 @@ fn fast_twin_set_weights_answers_as_the_exact_arm() {
 
 #[test]
 fn fast_bails_on_training_shaped_config() {
-    // Rider: Inference_Path fast + a MULTI-mode (training) run with a training-shaped
-    // config (Epochs > 0 OR any net's BackPropagationActivated on) is a construction error
-    // (both algo 3 and 6). Multi-gated: Image/Solo drive inference, unaffected.
+    // Issue #110 (the Phase 7 rider, mode-free): `Inference_Path fast` + a training-shaped
+    // config (Epochs > 0, a gradient-check epsilon > 0, OR any net's
+    // BackPropagationActivated on) is a construction error of the Bag, whatever mode the
+    // run is built for: the Bag takes no mode, and `CorpusProcessor::new` refuses in Multi
+    // AND Image mode alike. The pre-#110 "Image still constructs" exemption is retired:
+    // outside Multi mode `BackPropagationActivated true` still asks for a gradient the fast
+    // tree cannot give. Both algo 3 and 6.
     for (key, val) in [
         ("Neural_Networks_BackPropagation_Epochs", "5"),
+        ("Neural_Networks_Gradient_Check_Epsilon", "1e-4"),
         ("BLSTM_BackPropagationActivated", "true"),
         ("BLSTM_LID_BackPropagationActivated", "true"),
     ] {
         let mut m = twin_map_fast();
         m.insert(key.into(), val.into());
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut m), multi_mode()) {
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut m)) {
             Err(e) => assert!(
-                e.to_string().to_lowercase().contains("training"),
+                e.to_string().contains("training-shaped"),
                 "expected a training-shaped bail for {key}, got: {e}"
             ),
-            Ok(_) => panic!("fast + Multi + {key}={val} must bail (training-shaped)"),
+            Ok(_) => panic!("fast + {key}={val} must bail (training-shaped)"),
         }
-
-        // The SAME training-shaped config in IMAGE mode must NOT bail (inference; the
-        // "image mode unaffected" half of the rider).
-        let mut mi = twin_map_fast();
-        mi.insert(key.into(), val.into());
-        assert!(
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut mi), image_mode()).is_ok(),
-            "fast + Image + {key}={val} must NOT bail (inference, mode-exempt)"
-        );
+        for mode in [multi_mode(), image_mode()] {
+            let mut mm = twin_map_fast();
+            mm.insert(key.into(), val.into());
+            let err = CorpusProcessor::new(vec![mm], mode)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "fast + {:?} + {key}={val} must bail at construction",
+                        mode.kind
+                    )
+                });
+            assert!(
+                err.to_string()
+                    .contains("Inference_Path fast is inference-only"),
+                "{err}"
+            );
+        }
     }
 
-    // Algo 3 (SAD) too: the rider hardens the Task-4 surface. tier2 + fast + backprop,
-    // Multi mode -> bail.
+    // Algo 3 (SAD) too: the rider hardens the Task-4 surface. tier2 + fast + backprop
+    // -> bail.
     let text = std::fs::read_to_string(ref_dir().join("phase4a/tier2_spectral.config")).unwrap();
     let mut m = speech::legacy_config::parse_legacy_config(&text);
     m.insert("numOuterThreads".into(), "1".into());
@@ -531,36 +548,89 @@ fn fast_bails_on_training_shaped_config() {
     );
     m.insert("Inference_Path".into(), "fast".into());
     m.insert("BLSTM_BackPropagationActivated".into(), "true".into());
-    match BagOfProcessors::from_configs(std::slice::from_mut(&mut m), multi_mode()) {
+    match BagOfProcessors::from_configs(std::slice::from_mut(&mut m)) {
         Err(e) => assert!(
-            e.to_string().to_lowercase().contains("training"),
+            e.to_string().contains("training-shaped"),
             "expected a training-shaped bail for algo 3, got: {e}"
         ),
-        Ok(_) => panic!("fast algo 3 + Multi + BackPropagationActivated must bail"),
+        Ok(_) => panic!("fast algo 3 + BackPropagationActivated must bail"),
     }
 }
 
 #[test]
 fn fast_training_guard_blocks_image_mode_epochs() {
-    // T5 finding 2 (review): the from_configs training-shaped bail above is Multi-gated
-    // (`is_multi_mode`), so it does NOT fire for Image -- without the run()->train() guard
-    // in CorpusProcessor::train(), a fast + Image + Epochs>0 config would construct fine
-    // and then silently no-op-train (the fast processors' training arms are inert).
+    // Issue #110: the Image-mode refusal moved from `CorpusProcessor::train` (reached only
+    // through `run()`, past a trait default that answered "exact") to construction, where
+    // the fast/exact fact is decided once. The wording names the config facts, not the mode.
     let mut m = twin_map_fast();
     m.insert("Neural_Networks_BackPropagation_Epochs".into(), "2".into());
-    let mut cp = CorpusProcessor::new(vec![m], image_mode()).unwrap();
-    let err = cp
-        .run()
-        .expect_err("fast + Image + Epochs>0 must error, not silently no-op-train");
+    let err = CorpusProcessor::new(vec![m], image_mode())
+        .err()
+        .expect("fast + Image + Epochs>0 must refuse at construction, not silently no-op-train");
     let msg = err.to_string();
     assert!(
         msg.contains("Inference_Path"),
         "error must name Inference_Path, got: {msg}"
     );
     assert!(
-        msg.to_lowercase().contains("image"),
-        "error must name the training mode (Image), got: {msg}"
+        msg.contains("Neural_Networks_BackPropagation_Epochs 2"),
+        "error must name the epoch count, got: {msg}"
     );
+}
+
+#[test]
+fn fast_refuses_gradient_check_at_construction() {
+    // Issue #110 decision 3: a gradient check (`epsilon > 0`, Epochs 0, every flag off) is
+    // training-shaped. Before #110 a UnitTest-mode fast run reached `grad_check_full` past
+    // both refusal sites and failed with "no backprop-activated network in config 0". Now
+    // construction refuses, naming the epsilon, before the UnitTest-mode output-file
+    // truncation runs: nothing is written.
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("MultiConfigResults.mat");
+    let mut m = twin_map_fast();
+    m.insert(
+        "Neural_Networks_Gradient_Check_Epsilon".into(),
+        "1e-4".into(),
+    );
+    m.insert(
+        "multiConfigResultsOutputFile".into(),
+        out.to_str().unwrap().into(),
+    );
+    let err = CorpusProcessor::new(vec![m], unit_test_mode())
+        .err()
+        .expect("fast + UnitTest + epsilon>0 must refuse at construction");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Neural_Networks_Gradient_Check_Epsilon 0.0001"),
+        "error must name the epsilon, got: {msg}"
+    );
+    assert!(
+        !out.exists(),
+        "the refusal precedes the output-file truncation"
+    );
+}
+
+#[test]
+fn fast_refusal_reads_epochs_off_config_0_and_the_flags_off_every_map() {
+    // Issue #110 decision 7: the epoch count and the epsilon are config-0 facts (what
+    // `CorpusProcessor::run` reads); the two BackPropagationActivated flags are per net
+    // per config, so a config-1 flag refuses where a config-1 epoch count does not.
+    let mut cfgs = vec![twin_map_fast(), twin_map_fast()];
+    cfgs[1].insert("Neural_Networks_BackPropagation_Epochs".into(), "5".into());
+    cfgs[1].insert(
+        "Neural_Networks_Gradient_Check_Epsilon".into(),
+        "1e-4".into(),
+    );
+    assert!(
+        BagOfProcessors::from_configs(&mut cfgs).is_ok(),
+        "a config-1 epoch count / epsilon under a config-0 Epochs 0 is not read"
+    );
+    let mut cfgs = vec![twin_map_fast(), twin_map_fast()];
+    cfgs[1].insert("BLSTM_LID_BackPropagationActivated".into(), "true".into());
+    let err = BagOfProcessors::from_configs(&mut cfgs)
+        .err()
+        .expect("a config-1 BackPropagationActivated refuses");
+    assert!(err.to_string().contains("SAD=false/LID=true"), "{err}");
 }
 
 /// `listing_lid7.csv`'s committed rows point at `corpus_phseq/sN.phSeq`, relative to
