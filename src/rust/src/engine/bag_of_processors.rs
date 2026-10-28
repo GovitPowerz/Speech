@@ -382,8 +382,15 @@ impl BagOfProcessors {
         // (`CorpusProcessor::new` reads the same two keys off configs[0], then zeroes both
         // when work is distributed; a distributed fast run with `Epochs 5` is still a
         // config error). The per-config half (the two flags) is read in the loop below.
-        let epochs = get_i32_default(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?;
-        let epsilon = get_f64_default(&configs[0], "Neural_Networks_Gradient_Check_Epsilon", 0.0)?;
+        // Read on a fast bag only: an exact run's config reads keep their order (a malformed
+        // value still errors where it did, after the mode's output-file truncation, ADR-0002).
+        let (epochs, epsilon) = match use_fast {
+            true => (
+                get_i32_default(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?,
+                get_f64_default(&configs[0], "Neural_Networks_Gradient_Check_Epsilon", 0.0)?,
+            ),
+            false => (0, 0.0),
+        };
 
         if file_type != 0 && file_type != 1 && file_type != 2 {
             // legacy: AudioStruct phSeq-N/mat read paths (file_type 3/4) -- unported.

@@ -17,7 +17,7 @@ selected by the `Inference_Path` config key (default `exact`) at **one** bag-con
 The exact tree stays frozen: its only sanctioned edits are named **touch classes**, each
 behaviour-free on every exact-path run and proven so by the committed golden suite staying
 byte-green (the bench plumbing, the dispatch site and its key row, the training and seam guards
-on fast variants, golden-re-verified hoists; later the `CellLayer` enum wrap, the forward-only
+on fast variants (one site, every mode, since issue #110, 2026-10-28), golden-re-verified hoists; later the `CellLayer` enum wrap, the forward-only
 branches, inference-only retention gating, the exact-length pack guard, the malformed-value
 guard on `nn/blstm.rs`'s defaulting config getters and on `cost.rs`'s `CostLaw::from_config`
 reads: a present-but-unparseable key errors instead of silently taking the default, as the legacy

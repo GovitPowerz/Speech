@@ -74,5 +74,4 @@ def test_fast_refuses_gradient_check_epsilon_in_unit_test_mode(tmp_path: Path) -
 def test_fast_grad_check_is_the_exact_backprop_off_answer(tmp_path: Path) -> None:
     fast = _build(tmp_path, _inference_only(_cfg(tmp_path, "fast")), "-m")
     exact = _build(tmp_path, _inference_only(_cfg(tmp_path, "exact")), "-m")
-    assert fast.grad_check(1e-4, 1) == []
-    assert fast.grad_check(1e-4, 1) == exact.grad_check(1e-4, 1)
+    assert fast.grad_check(1e-4, 1) == [] == exact.grad_check(1e-4, 1)

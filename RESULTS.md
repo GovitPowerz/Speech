@@ -3501,8 +3501,8 @@ driver that forgot the override would have run its epochs as no-ops; and a gradi
 that set the flag. Now the refusal is decided once, at `from_configs`, the `Inference_Path`
 dispatch, for every mode, on four facts read as written before the work-distributed kill: the
 config-0 epoch count and epsilon (what `CorpusProcessor::run` reads) and every config's two
-`BackPropagationActivated` flags; `from_configs` takes no mode; the `train()` loop and the trait
-method are deleted, fast or exact being the bag's stored `use_fast` (`is_fast_tree()`); and
+`BackPropagationActivated` flags; `from_configs` takes no mode; the per-conf refusal loop inside
+`train()` and the trait method are deleted, fast or exact being the bag's stored `use_fast` (`is_fast_tree()`); and
 `Engine.grad_check` on a fast engine keeps answering `[]`, pinned equal to an exact engine with
 backprop off. The "tier2 still constructs fast in Image mode" exemption is retired: the cargo
 helpers that build a fast bag off a training-tailed fixture strip the tail on both legs, so a
@@ -3526,7 +3526,7 @@ so the first failure line names the missing refusal, not an unrelated listing er
 
 ## Issue #92 -- the two decisions back inside driver() and training_policy: the mutation battery
 
-**Live:** `tests/mutations/issue92/` (2 patches); the three `training_policy` patches of
+**Live:** `tests/mutations/issue92/` (2 patches at the #92 close; re-targeted and extended by issue #110, whose section above owns the directory now); the three `training_policy` patches of
 `tests/mutations/issue25/` re-targeted to the table (item 1 gaining two catchers, the gradient check and the policy pin). `phase4a/2` (the save gate) re-targeted past the criterion's `value` call, verdicts unchanged.
 
 Issue #25 left two decisions outside `Processor::driver()` and the bag's `training_policy`:

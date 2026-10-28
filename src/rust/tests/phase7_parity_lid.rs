@@ -633,6 +633,25 @@ fn fast_refusal_reads_epochs_off_config_0_and_the_flags_off_every_map() {
     assert!(err.to_string().contains("SAD=false/LID=true"), "{err}");
 }
 
+#[test]
+fn fast_refusal_reads_the_epoch_count_before_the_work_distributed_kill() {
+    // Issue #110 decision 6: the facts are read as written. `CorpusProcessor::new` zeroes
+    // the epoch count and the epsilon when work is distributed (a `LockFilesDir`), after the
+    // bag is built; a distributed fast run with `Epochs 5` is still a config error.
+    let dir = tempfile::tempdir().unwrap();
+    let mut m = twin_map_fast();
+    m.insert("Neural_Networks_BackPropagation_Epochs".into(), "5".into());
+    m.insert("LockFilesDir".into(), dir.path().to_str().unwrap().into());
+    let err = CorpusProcessor::new(vec![m], image_mode())
+        .err()
+        .expect("a work-distributed fast run with Epochs 5 must refuse at construction");
+    assert!(
+        err.to_string()
+            .contains("Neural_Networks_BackPropagation_Epochs 5"),
+        "{err}"
+    );
+}
+
 /// `listing_lid7.csv`'s committed rows point at `corpus_phseq/sN.phSeq`, relative to
 /// `tests/reference_data/phase4b/` (where the fixture was authored) -- not `cargo test`'s
 /// CWD (the crate dir). An unscored run (this listing's refseg column is empty, and
