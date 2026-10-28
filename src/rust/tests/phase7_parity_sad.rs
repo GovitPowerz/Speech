@@ -55,6 +55,10 @@ fn tier2_map(inference: Option<&str>) -> IndexMap<String, String> {
             .unwrap()
             .into(),
     );
+    // Issue #110: a fast bag refuses tier2's training tail in every mode; stripped on
+    // both legs so the two maps differ in `Inference_Path` alone.
+    m.insert("Neural_Networks_BackPropagation_Epochs".into(), "0".into());
+    m.insert("BLSTM_BackPropagationActivated".into(), "false".into());
     if let Some(p) = inference {
         m.insert("Inference_Path".into(), p.into());
     }
@@ -67,8 +71,7 @@ fn tier2_map(inference: Option<&str>) -> IndexMap<String, String> {
 /// segmentations.
 fn run_path(inference: Option<&str>) -> (Vec<Vec<f64>>, Vec<Segmentation>) {
     let mut m = tier2_map(inference);
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m)).unwrap();
 
     let mut audio =
         read_audio(&fixture("phase4d/prcts_excerpt.wav"), 0.0, 3600.0, 0, None).unwrap();
@@ -206,8 +209,7 @@ fn scored_rows(inference: Option<&str>, dump: &Path, stm: &Path) -> BTreeMap<usi
     let mut m = tier2_map(inference);
     m.insert("Audio_max_duration".into(), SCORED_DUR.to_string());
     m.insert("Dump_Directory".into(), dump.to_str().unwrap().into());
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m)).unwrap();
 
     let item = CorpusItem {
         file_name: fixture("phase4d/prcts_excerpt.wav")
@@ -345,7 +347,7 @@ fn peephole_default_aligns_with_exact() {
 // ---------------------------------------------------------------------------
 
 fn build_fast_bag(map: &mut IndexMap<String, String>) -> anyhow::Result<BagOfProcessors> {
-    BagOfProcessors::from_configs(std::slice::from_mut(map), image_mode())
+    BagOfProcessors::from_configs(std::slice::from_mut(map))
 }
 
 #[test]
@@ -485,7 +487,7 @@ fn fast_bails_on_non_self_normalization() {
 /// Drive the fast driver's `get_segmentation` on the small 3 s excerpt with a forced
 /// window/shift so the dispatch reaches an unsupported windowed variant.
 fn run_fast_small(map: &mut IndexMap<String, String>) -> anyhow::Result<()> {
-    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map), image_mode())?;
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map))?;
     let mut audio = read_audio(&fixture("phase1/excerpt_2ch_8k.wav"), 0.0, 3.0, 0, None).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let n_chan = audio.data.nrows();

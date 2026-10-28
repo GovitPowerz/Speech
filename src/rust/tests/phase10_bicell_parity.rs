@@ -47,7 +47,6 @@ use std::path::PathBuf;
 
 use indexmap::IndexMap;
 use speech::audio::read_audio;
-use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::{BagOfProcessors, Processor};
 use speech::io::binary::{read_weight_vector, write_matrix};
 use speech::tasks::segmentation::{SegClass, Segmentation};
@@ -65,13 +64,6 @@ fn ref_dir() -> PathBuf {
 
 fn fixture(rel: &str) -> PathBuf {
     ref_dir().join(rel)
-}
-
-fn image_mode() -> Mode {
-    Mode {
-        kind: ModeKind::Image,
-        verbose: false,
-    }
 }
 
 /// One committed phase-9 BIDIRECTIONAL fixture config as a map, pointed at its seed
@@ -93,6 +85,9 @@ fn bicell_map(
         "BLSTM_weightsFile".into(),
         pack.to_str().unwrap().to_string(),
     );
+    // Issue #110: a fast bag refuses the fixture's `BackPropagationActivated true` in
+    // every mode; stripped on both legs so the maps differ in `Inference_Path` alone.
+    m.insert("BLSTM_BackPropagationActivated".into(), "false".into());
     if let Some(p) = inference {
         m.insert("Inference_Path".into(), p.into());
     }
@@ -112,8 +107,7 @@ fn run_path(
     window: Option<&str>,
 ) -> (Vec<Vec<f64>>, Vec<Segmentation>) {
     let mut m = bicell_map(cell, inference, weights_override, window);
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m)).unwrap();
 
     let mut audio = read_audio(&fixture("phase4a/corpus/f1.wav"), 0.0, 2.0, 0, None).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
@@ -563,7 +557,7 @@ fn bicell_parity_crossing_is_exercised() {
 fn fast_dispatch_builds_bidirectional_cells() {
     for cell in CELLS {
         let mut m = bicell_map(cell, Some("fast"), None, None);
-        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m))
             .unwrap_or_else(|e| panic!("fast + bidirectional {cell} must build: {e}"));
         assert!(
             matches!(bag.processor(0), Processor::FastSpectral(_)),
@@ -579,7 +573,7 @@ fn fast_dispatch_builds_bidirectional_cells() {
     m.insert("BLSTM_Cell_Type".into(), "lstm".into());
     m.insert("BLSTM_Direction".into(), "forward".into());
     m.insert("BLSTM_OutputNeuronNb".into(), "4,1".into());
-    let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
+    let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m))
         .unwrap_or_else(|e| panic!("fast + causal LSTM must build now: {e}"));
     assert!(
         matches!(bag.processor(0), Processor::FastSpectral(_)),
@@ -595,7 +589,7 @@ fn fast_bicell_refuses_a_forward_sized_pack() {
     for cell in CELLS {
         let fwd_pack = fixture(&format!("phase9/{cell}_forward_seed.bin"));
         let mut m = bicell_map(cell, Some("fast"), Some(&fwd_pack), None);
-        let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
+        let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m))
             .err()
             .unwrap_or_else(|| {
                 panic!("{cell}: a forward-sized pack must not build a bidirectional fast net")
@@ -617,7 +611,7 @@ fn fast_bicell_refuses_a_forward_sized_pack() {
 fn fast_bicell_bails_on_truncate_windowing() {
     let mut m = bicell_map("slstm", Some("fast"), None, Some(OVERLAP_WINDOW));
     m.insert("BLSTM_shift".into(), "0.0".into());
-    let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
+    let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m))
         .err()
         .unwrap_or_else(|| panic!("fast bicell + truncate windowing must bail"));
     assert!(

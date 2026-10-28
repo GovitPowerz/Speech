@@ -616,10 +616,6 @@ impl Segmenter for FastSpectralSegmenter {
         &self.last_result_rows
     }
 
-    fn is_fast_tree(&self) -> bool {
-        true
-    }
-
     fn pack_count(&self) -> usize {
         1
     }
@@ -1377,10 +1373,6 @@ impl Segmenter for FastTwinLid {
     /// -- the port-side observation point, mirroring the exact driver's `last_result_rows`.
     fn last_result_rows(&self) -> &[Vec<f64>] {
         &self.last_result_rows
-    }
-
-    fn is_fast_tree(&self) -> bool {
-        true
     }
 
     fn pack_count(&self) -> usize {

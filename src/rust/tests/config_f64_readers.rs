@@ -6,7 +6,6 @@
 //! grammar itself is unit-pinned in `legacy_config::f64_reader_tests`.
 
 use indexmap::IndexMap;
-use speech::cli::{Mode, ModeKind};
 use speech::config::NnetSpec;
 use speech::engine::bag_of_processors::BagOfProcessors;
 use speech::fast::driver::{FastTwinLid, build_aligned_spec};
@@ -48,12 +47,8 @@ fn tdc_bag_config() -> IndexMap<String, String> {
 #[test]
 fn bag_of_processors_rejects_non_finite_audio_offset() {
     let mut cfg = with(tdc_bag_config(), "Audio_offset", "nan");
-    let mode = Mode {
-        kind: ModeKind::Solo,
-        verbose: false,
-    };
     let err = err_of(
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), mode),
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)),
         "Audio_offset nan",
     );
     assert!(err.contains("Audio_offset") && err.contains("nan"), "{err}");

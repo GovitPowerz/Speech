@@ -60,17 +60,10 @@ pub trait Segmenter {
         Ok(())
     }
 
-    /// Whether the driver is a fast-tree one (issue #92): its training arms are inert
-    /// (`nets()` empty by design, training stays exact f64), so a training-shaped run
-    /// reaching it is refused through `engine::bag_of_processors::refuse_fast_training`,
-    /// never no-op'ed. `false` on every exact driver, algo 0/1/2 included (those have no
-    /// net either, but the legacy trains nothing there and says nothing).
-    fn is_fast_tree(&self) -> bool {
-        false
-    }
-
     /// The trainable f64 nets, in pack order (`[sad, lid]` for the Twin). Empty on the
-    /// fast drivers ([`Self::is_fast_tree`]) and on algo 0/1/2.
+    /// fast drivers (training stays exact f64: a training-shaped config under
+    /// `Inference_Path fast` is refused at `BagOfProcessors::from_configs`, issue #110,
+    /// so a fast driver is never asked to train) and on algo 0/1/2.
     fn nets(&self) -> Vec<&BlstmNetwork> {
         Vec::new()
     }

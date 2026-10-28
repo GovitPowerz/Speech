@@ -99,14 +99,7 @@ fn algo3_bag(weights_path: &std::path::Path) -> BagOfProcessors {
         "BLSTM_weightsFile".to_string(),
         weights_path.to_str().unwrap().to_string(),
     );
-    BagOfProcessors::from_configs(
-        std::slice::from_mut(&mut cfg),
-        Mode {
-            kind: ModeKind::Solo,
-            verbose: false,
-        },
-    )
-    .unwrap()
+    BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap()
 }
 
 /// Epoch A fires (beats the 1e20 seed); epoch B's cost is BYTE-EQUAL to

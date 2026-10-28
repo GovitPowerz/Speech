@@ -144,8 +144,7 @@ fn bag_threads_fixed_gain_to_internal_read_audio() {
 
     // (a) bag-internal path.
     let mut map_a = speech::legacy_config::parse_legacy_config(&frozen_text);
-    let mut bag_a =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_a), image_mode()).unwrap();
+    let mut bag_a = BagOfProcessors::from_configs(std::slice::from_mut(&mut map_a)).unwrap();
     assert_eq!(
         bag_a.fixed_gain(),
         Some(stage.fixed_gain),
@@ -170,8 +169,7 @@ fn bag_threads_fixed_gain_to_internal_read_audio() {
     // (b) directly-supplied path: read_audio called HERE with the SAME explicit
     // fixed_gain, fed through run_get_segmentation.
     let mut map_b = speech::legacy_config::parse_legacy_config(&frozen_text);
-    let mut bag_b =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_b), image_mode()).unwrap();
+    let mut bag_b = BagOfProcessors::from_configs(std::slice::from_mut(&mut map_b)).unwrap();
     let mut audio = read_audio(&stage.wav_path, 0.0, 3600.0, 0, Some(stage.fixed_gain)).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];
@@ -261,8 +259,7 @@ fn bag_threads_fixed_gain_discriminates_dropped_gain() {
     let frozen_text = std::fs::read_to_string(&stage.config_path).unwrap();
 
     let mut map_a = speech::legacy_config::parse_legacy_config(&frozen_text);
-    let mut bag_a =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_a), image_mode()).unwrap();
+    let mut bag_a = BagOfProcessors::from_configs(std::slice::from_mut(&mut map_a)).unwrap();
     assert_eq!(
         bag_a.fixed_gain(),
         Some(stage.fixed_gain),
@@ -418,6 +415,9 @@ fn self_norm_sibling_map() -> IndexMap<String, String> {
             .unwrap()
             .into(),
     );
+    // Issue #110: a fast bag refuses tier2's training tail in every mode.
+    m.insert("Neural_Networks_BackPropagation_Epochs".into(), "0".into());
+    m.insert("BLSTM_BackPropagationActivated".into(), "false".into());
     m.insert("Inference_Path".into(), "fast".into());
     m
 }
@@ -429,7 +429,7 @@ fn run_fast(
     wav: &Path,
     gain: Option<f64>,
 ) -> (Vec<f64>, Segmentation) {
-    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map), image_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map)).unwrap();
     let mut audio = read_audio(wav, 0.0, 3600.0, 0, gain).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];
@@ -586,7 +586,7 @@ fn frozen_norm_exact_matches_fast_adjudication_pin() {
     let mut map_exact = speech::legacy_config::parse_legacy_config(&frozen_text);
     map_exact.insert("Inference_Path".into(), "exact".into());
     let mut bag_exact =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_exact), image_mode()).unwrap();
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_exact)).unwrap();
     let mut audio_exact =
         read_audio(&stage.wav_path, 0.0, 3600.0, 0, Some(stage.fixed_gain)).unwrap();
     let dur = (audio_exact.data.ncols() as f64 - 1.0) / audio_exact.sample_rate as f64;
