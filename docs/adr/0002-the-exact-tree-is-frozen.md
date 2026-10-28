@@ -54,8 +54,12 @@ fields deleted, and `engine/bag_of_processors.rs` reading every driver through t
 the weight, statistics, derivative and back-prop reads iterate the trainable nets, save and
 update take one `training_policy` keyed on the algo number as the legacy is (the same
 criteria, update costs, `LID_` prefix and order); nothing recomputed, proven by the goldens
-byte-green, issue #25). Training is
-exact-f64 only and bails loudly on the fast variants.
+byte-green, issue #25; the same class, 2026-10-28: `Segmenter::is_fast_tree` deleted with
+its default and both overrides, fast or exact being the bag's one stored fact, issue #110).
+Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
+at the one bag-construction site, for every mode, on any of four config facts (the config-0
+epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),
+so neither `CorpusProcessor::train` nor the gradient check is reachable on a fast bag.
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and
 `RESULTS.md`, never in `IMPROVEMENTS.md`, which tracks legacy-quirk debt only. Its only bound is

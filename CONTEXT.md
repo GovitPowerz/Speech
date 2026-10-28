@@ -156,7 +156,7 @@ A weight block whose gradient is structurally zero (sLSTM `b_i`, transformer `b_
 The f64 reference implementation (`nn/`, `features/`, `tasks/`, `engine/`). Behaviour-frozen since Phase 7 (ADR-0002); the only path that trains.
 
 **Fast tree**:
-The f32 inference path (`fast/`), selected by `Inference_Path = "fast"` at one dispatch site.
+The f32 inference path (`fast/`), selected by `Inference_Path = "fast"` at one dispatch site. Inference-only: a training-shaped config (an epoch count, a gradient-check epsilon, or a `BackPropagationActivated` flag on) refuses at construction, in every mode (issue #110).
 _Avoid_: fast for anything merely quick
 
 **Twin kernel**:
