@@ -1,6 +1,6 @@
 # ADR-0006: TOML is the canonical config and every key is declared once in a bidirectional table; the legacy `.config` importer is retained for validation
 
-**Status:** accepted | **Date:** 2026-07-09 (Phase 4c, PR #9); the table has grown from 175 to 190 rows since, one block per phase; the Python mirror of the sized defaults retired 2026-10-12 (issue #27)
+**Status:** accepted | **Date:** 2026-07-09 (Phase 4c, PR #9); the table has grown from 175 to 190 rows since, one block per phase; the Python mirror of the sized defaults retired 2026-10-12 (issue #27); the `config_bridge.nnet_spec` wrapper deleted 2026-10-29 (issue #90)
 
 ## Context
 

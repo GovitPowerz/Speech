@@ -629,12 +629,14 @@ impl BlstmConfig {
         })
     }
 
-    /// The width the net is built at -- the legacy `getInputSize` (`:177-183`) read off the
-    /// config lists before any net exists: `OutputNeuronNb[0]` in MLP mode, else
-    /// `LSTMNeuronNb[0]` (`Network::new` builds layer 0 at `neuron_nb[0]`). No
+    /// The width the net will be built at -- the legacy `getInputSize` (`:177-183`) rule
+    /// stated on the parsed config, before any net exists: `OutputNeuronNb[0]` in MLP mode,
+    /// else `LSTMNeuronNb[0]` (`Network::new` builds layer 0 at `neuron_nb[0]`), pinned
+    /// equal to the built net's [`BlstmNetwork::input_size`] in `config_getter_tests`. No
     /// `{prefix}_NNetInputSize` key is read: the exact net never consults one, and the
     /// committed LID Twin config declares none, so the `speech_rs.blstm_config` seam
-    /// reports this width where the key is absent (issue #90; ADR-0002 introspection).
+    /// reports this width where the key is absent (issue #90). An additive read-only
+    /// method: the ADR-0002 introspection class, the net's own body untouched.
     pub fn input_size(&self) -> usize {
         if self.is_mlp {
             self.output_neuron_nb[0]
@@ -830,7 +832,11 @@ impl BlstmNetwork {
             |_layer_id, input, output| NeuronLayer::new(input, output),
         );
 
-        let input_size = cfg.input_size();
+        let input_size = if cfg.is_mlp {
+            output_network.input_size()
+        } else {
+            forward_network.as_ref().unwrap().input_size()
+        };
 
         let trainer = Rprop::new(cfg.rprop_init);
 
@@ -908,10 +914,13 @@ impl BlstmNetwork {
     }
 
     /// `getInputSize` (`:177-183`): `_OutputNetwork.getInputSize()` in MLP mode,
-    /// else `_ForwardNetwork.getInputSize()` -- each `neuron_nb[0]` of the config list it
-    /// was built from, so the one derivation is [`BlstmConfig::input_size`] (issue #90).
+    /// else `_ForwardNetwork.getInputSize()`.
     pub fn input_size(&self) -> usize {
-        self.cfg.input_size()
+        if self.cfg.is_mlp {
+            self.output_network.input_size()
+        } else {
+            self.forward_network.as_ref().unwrap().input_size()
+        }
     }
 
     /// `getOutputSize` (`:185-187`): `_OutputNetwork.getOutputSize()`.
@@ -3352,7 +3361,8 @@ mod config_getter_tests {
 
     /// Issue #90: the width the net is built at, off the parsed config alone -- the legacy
     /// `getInputSize` (`:177-183`) rule, `OutputNeuronNb[0]` in MLP mode, else
-    /// `LSTMNeuronNb[0]`; no `NNetInputSize` key is read (the exact net never reads one).
+    /// `LSTMNeuronNb[0]`, equal to what the built net answers; no `NNetInputSize` key is in
+    /// the map (the exact net never reads one).
     #[test]
     fn input_size_is_the_legacy_get_input_size_rule_without_the_key() {
         let mut m: IndexMap<String, String> = IndexMap::new();
@@ -3362,7 +3372,6 @@ mod config_getter_tests {
         m.insert("X_OutputSubSampling".into(), "2,1".into());
         m.insert("X_InputNormalizationType".into(), "0".into());
         m.insert("X_TwoSweeps".into(), "false".into());
-        assert!(!m.keys().any(|k| k.contains("NNetInputSize")));
         let mlp = BlstmConfig::from_legacy(&m, "X").unwrap();
         assert!(mlp.is_mlp);
         assert_eq!(mlp.input_size(), 5);

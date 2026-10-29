@@ -20,15 +20,15 @@ LID_TWIN = REPO_ROOT / "configs" / "legacy" / "LID_BLSTM.config"
 WORKER = REPO_ROOT / "tests" / "reference_data" / "phase0" / "1_worker_1.config"
 
 
-def _config(path: Path, prefix: str) -> dict[str, Any]:
-    return cast(dict[str, Any], speech_rs.blstm_config(parse_legacy_config(path.read_text()), prefix))
+def _config(flat: dict[str, str], prefix: str) -> dict[str, Any]:
+    return cast(dict[str, Any], speech_rs.blstm_config(flat, prefix))
 
 
 @pytest.mark.parametrize(("prefix", "width"), [("BLSTM_LID", 36), ("BLSTM", 11)])
 def test_the_committed_lid_twin_declares_no_input_size_and_both_nets_report_the_engines_width(prefix: str, width: int) -> None:
     flat = parse_legacy_config(LID_TWIN.read_text())
     assert f"{prefix}_NNetInputSize" not in flat
-    spec = _config(LID_TWIN, prefix)
+    spec = _config(flat, prefix)
     assert spec["NNetInputSize"] == width
     assert spec["LSTMNeuronNb"][0] == width
 
@@ -36,7 +36,7 @@ def test_the_committed_lid_twin_declares_no_input_size_and_both_nets_report_the_
 def test_a_declared_input_size_is_returned_as_declared() -> None:
     flat = parse_legacy_config(WORKER.read_text())
     assert flat["BLSTM_NNetInputSize"] == "23"
-    assert _config(WORKER, "BLSTM")["NNetInputSize"] == 23
+    assert _config(flat, "BLSTM")["NNetInputSize"] == 23
 
 
 def test_a_malformed_declared_input_size_raises_naming_the_key() -> None:
