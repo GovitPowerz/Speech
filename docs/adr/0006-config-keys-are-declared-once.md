@@ -1,6 +1,6 @@
 # ADR-0006: TOML is the canonical config and every key is declared once in a bidirectional table; the legacy `.config` importer is retained for validation
 
-**Status:** accepted | **Date:** 2026-07-09 (Phase 4c, PR #9); the table has grown from 175 to 190 rows since, one block per phase; the Python mirror of the sized defaults retired 2026-10-12 (issue #27)
+**Status:** accepted | **Date:** 2026-07-09 (Phase 4c, PR #9); the table has grown from 175 to 190 rows since, one block per phase; the Python mirror of the sized defaults retired 2026-10-12 (issue #27); the `config_bridge.nnet_spec` wrapper deleted 2026-10-29 (issue #90)
 
 ## Context
 
@@ -21,9 +21,10 @@ everywhere `.toml` is.
 Port-only keys (the fast-path selector, the streaming gain, the cell and direction, the per-cell
 geometry) are added as rows with the legacy shape as their default, so every pre-existing config
 decodes byte-unchanged; a geometry block is unprefixed (one geometry per config) by precedent.
-The Python side reads the same keys through `config_bridge.nnet_spec`, which since issue #27 is
-the seam call `speech_rs.blstm_config` (the engine's own `BlstmConfig::from_legacy`, its defaults
-filled in), so a present-but-invalid geometry raises on both sides rather than defaulting,
+The Python side reads the same keys through the seam call `speech_rs.blstm_config` (the engine's
+own `BlstmConfig::from_legacy`, its defaults filled in; the `config_bridge.nnet_spec` wrapper over
+it, test-only since issue #27, was deleted in issue #90), so a present-but-invalid geometry raises
+on both sides rather than defaulting,
 because a silently defaulted geometry changes a weight pack's length with nothing to catch it.
 
 ## Consequences

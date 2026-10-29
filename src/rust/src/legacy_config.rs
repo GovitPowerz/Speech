@@ -21,8 +21,9 @@ pub(crate) fn parse_finite_f64(s: &str, key: &str) -> Result<f64> {
 }
 
 /// `read<size_type>` on one config token: a whole-string (trimmed) `usize`, or an error
-/// naming the key and the text.
-pub(crate) fn parse_usize(s: &str, key: &str) -> Result<usize> {
+/// naming the key and the text. `pub` for the `speech_rs.blstm_config` seam's optional
+/// `NNetInputSize` read (issue #90), so the seam parses the key with the engine's grammar.
+pub fn parse_usize(s: &str, key: &str) -> Result<usize> {
     s.trim()
         .parse::<usize>()
         .map_err(|e| anyhow!("cannot read '{s}' as usize for '{key}': {e}"))

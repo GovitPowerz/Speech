@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import speech_rs
 from speech import config_bridge
 
 FIX = Path("tests/reference_data/phase0/1_worker_1.config")
@@ -13,9 +14,9 @@ def test_parse_last_wins() -> None:
     assert "c" not in cfg
 
 
-def test_nnet_spec_from_real_config() -> None:
+def test_blstm_config_from_real_config() -> None:
     cfg = config_bridge.parse_legacy_config(FIX.read_text())
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
+    spec = speech_rs.blstm_config(cfg, "BLSTM")
     assert spec["LSTMNeuronNb"] == [23, 24, 24]
     assert spec["LSTMSubSampling"] == [4, 1]
     assert spec["OutputNeuronNb"] == [48, 12, 1]

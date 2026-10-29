@@ -58,7 +58,7 @@ def chdir(path: Path) -> Iterator[None]:
 def _seed_tier2_transformer(dst: Path, extra: dict[str, str]) -> dict[str, str]:
     """Mirrors `test_phase5_init_weights_pyo3.py::_seed_tier2_spectral`, then APPENDS the cell
     keys (last-wins parsing, so appending is the documented way to overlay). Returns the parsed
-    flat config, which is what `nnet_spec` reads -- so Python and the engine are seeded from
+    flat config, which is what `speech_rs.blstm_config` reads -- so Python and the engine are seeded from
     the SAME text, not from two hand-kept copies."""
     corpus = dst / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
@@ -82,7 +82,7 @@ def test_transformer_pack_round_trips_through_engine_set_weights(tmp_path: Path,
     the crossing untouched (a pure copy in, a pure copy out -- no arithmetic on the PyO3
     boundary)."""
     cfg = _seed_tier2_transformer(tmp_path, {})
-    assert config_bridge.nnet_spec(cfg, prefix="BLSTM")["CellType"] == "transformer"
+    assert speech_rs.blstm_config(cfg, "BLSTM")["CellType"] == "transformer"
 
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
     assert len(packs) == 1

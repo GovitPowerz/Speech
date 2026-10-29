@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import speech_rs
 from speech import config_bridge
 from speech.drivers.state import ps_from_config
 from speech.genome import genome_length, vec2struct
@@ -115,12 +116,12 @@ def test_ps_from_config_malformed_exclude_nontrans_raises() -> None:
 
 @pytest.mark.parametrize(("value", "expected"), [("false", False), ("true", True), (None, True)])
 @pytest.mark.parametrize("prefix", ["BLSTM", "BLSTM_LID"])
-def test_nnet_spec_peepholes(prefix: str, value: str | None, expected: bool) -> None:
-    assert config_bridge.nnet_spec(_with_peepholes(prefix, value), prefix)["peepholes"] == [expected] * 6
+def test_blstm_config_peepholes(prefix: str, value: str | None, expected: bool) -> None:
+    assert speech_rs.blstm_config(_with_peepholes(prefix, value), prefix)["peepholes"] == [expected] * 6
 
 
-def test_nnet_spec_malformed_peephole_raises() -> None:
+def test_blstm_config_malformed_peephole_raises() -> None:
     cfg = _twin()
     cfg["BLSTM_Backward_IsCellsPeepholesActive"] = "1"
     with pytest.raises(ValueError, match="'BLSTM_Backward_IsCellsPeepholesActive'"):
-        config_bridge.nnet_spec(cfg, "BLSTM")
+        speech_rs.blstm_config(cfg, "BLSTM")

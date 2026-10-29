@@ -350,8 +350,8 @@ def cell_overlay(flat: dict[str, str], cell: str, direction: str, *, prefix: str
     (and, since phase 10, `Cfc_*`; since phase 11, `Transformer_*`) geometry keys are
     deliberately NOT written: their defaults live Rust-side (`blstm.rs::MambaParams::default`
     / `CFC_DEFAULT_BACKBONE_UNITS` / `TRANSFORMER_DEFAULT_{WINDOW,HEADS,D_FF}`) and Python
-    reads the resolved values through the seam (`speech_rs.weight_layout` /
-    `speech_rs.blstm_config`, issue #27), so omitting them at default values keeps the config
+    reads the resolved values through the seam (`speech_rs.weight_layout`, issue #27), so
+    omitting them at default values keeps the config
     text minimal and the two sides agreeing by construction.
 
     THE FIFTH CELL NEEDS NO THIRD DERIVED KEY (phase-11 T9, spec S8): a transformer layer is

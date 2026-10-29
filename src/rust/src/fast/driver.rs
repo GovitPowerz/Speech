@@ -197,17 +197,18 @@ pub(crate) fn build_spec_aligned_to(
     bc: &BlstmConfig,
 ) -> Result<NnetSpec> {
     // `NnetSpec::from_legacy` REQUIRES `<prefix>_NNetInputSize`, but the Twin config omits
-    // it (the exact `BlstmConfig` derives `input_size = LSTMNeuronNb[0]` instead). The fast
-    // net also reads `LSTMNeuronNb[0]` for its input width and NEVER consults
-    // `spec.input_size`, so when the key is absent we inject `LSTMNeuronNb[0]` (the same
-    // value the exact path uses) purely to satisfy the parser -- value-preserving where
-    // the key IS present (every SAD config sets it == LSTMNeuronNb[0]).
+    // it (the exact net derives its width, `BlstmConfig::input_size`, instead). The fast
+    // net reads `LSTMNeuronNb[0]` for its input width and NOTHING consults
+    // `spec.input_size` (`element_count` sizes the tail off `lstm_neuron_nb[0]`), so when
+    // the key is absent we inject `BlstmConfig::input_size()` (the width the exact path
+    // builds, issue #90) purely to satisfy the parser -- value-preserving where the key IS
+    // present (every SAD config sets it == LSTMNeuronNb[0]).
     let input_key = format!("{prefix}_NNetInputSize");
     let mut spec = if map.contains_key(&input_key) {
         NnetSpec::from_legacy(map, prefix)?
     } else {
         let mut m = map.clone();
-        m.insert(input_key, bc.lstm_neuron_nb[0].to_string());
+        m.insert(input_key, bc.input_size().to_string());
         NnetSpec::from_legacy(&m, prefix)?
     };
     spec.peepholes = [

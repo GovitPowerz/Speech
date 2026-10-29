@@ -628,6 +628,22 @@ impl BlstmConfig {
             transformer,
         })
     }
+
+    /// The width the net will be built at -- the legacy `getInputSize` (`:177-183`) rule
+    /// stated on the parsed config, before any net exists: `OutputNeuronNb[0]` in MLP mode,
+    /// else `LSTMNeuronNb[0]` (`Network::new` builds layer 0 at `neuron_nb[0]`), pinned
+    /// equal to the built net's [`BlstmNetwork::input_size`] in `config_getter_tests`. No
+    /// `{prefix}_NNetInputSize` key is read: the exact net never consults one, and the
+    /// committed LID Twin config declares none, so the `speech_rs.blstm_config` seam
+    /// reports this width where the key is absent (issue #90). An additive read-only
+    /// method: the ADR-0002 introspection class, the net's own body untouched.
+    pub fn input_size(&self) -> usize {
+        if self.is_mlp {
+            self.output_neuron_nb[0]
+        } else {
+            self.lstm_neuron_nb[0]
+        }
+    }
 }
 
 /// The IN-MEMORY pack contract (interstitial, phase 11): a pack of `len` elements loads
@@ -3341,6 +3357,35 @@ mod config_getter_tests {
                 .to_string();
             assert!(err.contains("K") && err.contains(bad), "{bad}: {err}");
         }
+    }
+
+    /// Issue #90: the width the net is built at, off the parsed config alone -- the legacy
+    /// `getInputSize` (`:177-183`) rule, `OutputNeuronNb[0]` in MLP mode, else
+    /// `LSTMNeuronNb[0]`, equal to what the built net answers; no `NNetInputSize` key is in
+    /// the map (the exact net never reads one).
+    #[test]
+    fn input_size_is_the_legacy_get_input_size_rule_without_the_key() {
+        let mut m: IndexMap<String, String> = IndexMap::new();
+        m.insert("X_LSTMNeuronNb".into(), "0,3".into());
+        m.insert("X_LSTMSubSampling".into(), "1".into());
+        m.insert("X_OutputNeuronNb".into(), "5,4,1".into());
+        m.insert("X_OutputSubSampling".into(), "2,1".into());
+        m.insert("X_InputNormalizationType".into(), "0".into());
+        m.insert("X_TwoSweeps".into(), "false".into());
+        let mlp = BlstmConfig::from_legacy(&m, "X").unwrap();
+        assert!(mlp.is_mlp);
+        assert_eq!(mlp.input_size(), 5);
+        assert_eq!(BlstmNetwork::from_config(mlp).unwrap().input_size(), 5);
+
+        m.insert("X_LSTMNeuronNb".into(), "7,3".into());
+        m.insert("X_OutputNeuronNb".into(), "6,4,1".into());
+        let recurrent = BlstmConfig::from_legacy(&m, "X").unwrap();
+        assert!(!recurrent.is_mlp);
+        assert_eq!(recurrent.input_size(), 7);
+        assert_eq!(
+            BlstmNetwork::from_config(recurrent).unwrap().input_size(),
+            7
+        );
     }
 
     /// End to end, every defaulted key: a malformed value errors naming the key, so no
