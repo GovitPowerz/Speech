@@ -62,7 +62,7 @@ use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
-use crate::tasks::segmentation_io::compute_errors;
+use crate::tasks::segmentation_io::{compute_errors, speech_duration};
 use crate::tasks::segmenter::{
     ChannelMembers, DriverConfig, LidChannel, Segmenter, SegmenterConfig, get_targets,
     lid_to_segmentation, results_to_segmentation, smooth_segmentation,
@@ -183,16 +183,6 @@ impl BlstmSpectralLid {
     /// `from_legacy(map, None)`, matching the legacy in-ctor load.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         self.net.load_weights_file(map, "BLSTM")
-    }
-
-    /// The stateful `_WindowShift` member, POST the last `get_segmentation` call.
-    pub fn window_shift_sec(&self) -> f64 {
-        self.window_shift_sec
-    }
-
-    /// The stateful `_SpectrumShift` member, POST the last call.
-    pub fn spectrum_shift_sec(&self) -> f64 {
-        self.spectrum_shift_sec
     }
 
     /// The per-channel LID members written by the last `get_segmentation` call.
@@ -726,10 +716,6 @@ pub struct TwinBlstmSpectralLid {
     /// `_LIDWindowShift` (`:17-18` seed, mutated by `getLIDBLSTMParam` `:102`, reset to
     /// `0.0` on LIDnoOverlap `:1420`); stateful.
     lid_window_shift_sec: f64,
-    /// `_LIDDetectionThreshold` (`:25`, default -1.0). Unused on the 0/2/3 path.
-    lid_detection_threshold: f64,
-    /// `_LIDTrainingPruningThreshold` (`:26`, default -1.0). Gates `:1286` pruning.
-    lid_training_pruning_threshold: f64,
     /// `_LIDDecisionThreshRising` (`:28`). Used by `LID2Segmentation` (`:1296`) + the
     /// `segmentationLID` midpoint seed (`:1242`).
     lid_decision_thresh_rising: f64,
@@ -812,9 +798,14 @@ impl TwinBlstmSpectralLid {
             lid_window_shift_sec = 0.0;
         }
 
-        let lid_detection_threshold = get_f64_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
-        let lid_training_pruning_threshold =
-            get_f64_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
+        // `_LIDDetectionThreshold` (`:25`) and `_LIDTrainingPruningThreshold` (`:26`),
+        // both default -1.0: read by nothing in the port. The legacy `:1286` pruning
+        // gate is NOT reproduced (it feeds only the skipped VRCTS dump, see the
+        // `interestSegs` note in `get_segmentation_mode456` and IMPROVEMENTS.md).
+        // Parsed for validation only (a malformed value still errors), the values
+        // discarded (issue #94).
+        get_f64_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
+        get_f64_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
         let lid_decision_thresh_rising = get_f64(map, "BLSTM_LID_decision_thresh_rising")?;
         let lid_decision_thresh_falling = get_f64(map, "BLSTM_LID_decision_thresh_falling")?;
         let mode = twin_i32_default(map, "BLSTM_LID_Mode", 0)?;
@@ -835,8 +826,6 @@ impl TwinBlstmSpectralLid {
             lid_net,
             lid_window_size_sec,
             lid_window_shift_sec,
-            lid_detection_threshold,
-            lid_training_pruning_threshold,
             lid_decision_thresh_rising,
             lid_decision_thresh_falling,
             mode,
@@ -864,50 +853,8 @@ impl TwinBlstmSpectralLid {
     }
 
     // -- scalar/config accessors --------------------------------------------
-    pub fn mode(&self) -> i32 {
-        self.mode
-    }
     pub fn post_process_mode(&self) -> i32 {
         self.post_process_mode
-    }
-    pub fn min_nb_of_frames(&self) -> i32 {
-        self.min_nb_of_frames
-    }
-    pub fn noise_magnitude(&self) -> f64 {
-        self.noise_magnitude
-    }
-    pub fn dump_lid_internals(&self) -> bool {
-        self.dump_lid_internals
-    }
-    pub fn lid_detection_threshold(&self) -> f64 {
-        self.lid_detection_threshold
-    }
-    pub fn lid_training_pruning_threshold(&self) -> f64 {
-        self.lid_training_pruning_threshold
-    }
-    pub fn lid_decision_thresh_rising(&self) -> f64 {
-        self.lid_decision_thresh_rising
-    }
-    pub fn lid_decision_thresh_falling(&self) -> f64 {
-        self.lid_decision_thresh_falling
-    }
-    pub fn window_shift_sec(&self) -> f64 {
-        self.window_shift_sec
-    }
-    pub fn spectrum_shift_sec(&self) -> f64 {
-        self.spectrum_shift_sec
-    }
-    pub fn lid_window_shift_sec(&self) -> f64 {
-        self.lid_window_shift_sec
-    }
-    // -- SAD-side outputs ----------------------------------------------------
-    /// `seg._CumulativeError[chan] = NNCost` (`:774`) `*= LIDCostPonderation` (`:1337`).
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-    /// `seg._NbOfClassif[chan] = nbOfClassif` (`:775`).
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
     }
     // -- LID-side outputs (mirror Algo 5) ------------------------------------
     /// The per-channel LID members written by the last `get_segmentation` call.
@@ -2267,20 +2214,15 @@ impl Segmenter for TwinBlstmSpectralLid {
             };
 
             // Scoring iterator: REFERENCE for modes 2/3, CLASSIFICATION for 0/1 (`:1223-1239`).
-            let scoring_segs: Vec<crate::tasks::segmentation::Segment> =
-                if (self.mode == 2 || self.mode == 3) && has_ref {
-                    refs.unwrap()[chan].segments().to_vec()
-                } else {
-                    seg.segments().to_vec()
-                };
+            let scoring_seg: &Segmentation = if (self.mode == 2 || self.mode == 3) && has_ref {
+                &refs.unwrap()[chan]
+            } else {
+                seg
+            };
+            let scoring_segs = scoring_seg.segments().to_vec();
 
             // totalSpeechDuration over the scoring iterator (`:1229-1234`).
-            let mut total_speech_duration = 0.0f64;
-            for i in 0..scoring_segs.len().saturating_sub(1) {
-                if scoring_segs[i].ty == SegClass::Speech {
-                    total_speech_duration += scoring_segs[i + 1].begin - scoring_segs[i].begin;
-                }
-            }
+            let total_speech_duration = speech_duration(scoring_seg);
 
             // interestSegs (`:1240`) + the TrainingPruning gate (`:1286`, mutating
             // `itInterest->_Type`) are NOT reproduced: `interestSegs` is consumed ONLY by

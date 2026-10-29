@@ -611,17 +611,6 @@ impl BlstmSignalSegmenter {
         self.window_shift_sec
     }
 
-    /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:346`): the NN cost from
-    /// the last `get_segmentation`, one entry per channel.
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-
-    /// Per-channel `seg._NbOfClassif[chan] = nbOfClassif` (`:347`).
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
-    }
-
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
     /// [`BlstmNetwork::load_weights_file`] (`BLSTMNeuralNetwork.cpp:122-150`), so the
     /// bag ctor can apply a `weightsFile` key AFTER building via `from_legacy(map,
@@ -1115,16 +1104,6 @@ impl BlstmSpectralSegmenter {
     /// counterpart -- the legacy dump quirk keeps the externalized result at pass 1).
     pub fn last_result_rows_pass2(&self) -> &[Vec<f64>] {
         &self.last_result_rows_pass2
-    }
-
-    /// Per-channel `seg._CumulativeError[chan] = NNCost` (`:752`).
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-
-    /// Per-channel `seg._NbOfClassif[chan] = nbOfClassif` (`:753`).
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
     }
 
     /// Directly set the non-wav `_SpectrumShiftInFrames = 80` fallback state (`:209`),

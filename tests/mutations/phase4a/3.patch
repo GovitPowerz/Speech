@@ -2,11 +2,10 @@ mutation: save_and_update sums the cost numerator from column 5 (audio_duration)
 catcher: CAUGHT cargo --test phase4a_tier1_e2e train_ltsv_two_epochs_matches
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index 706d4bd..a0db06d 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -766,7 +766,7 @@ impl BagOfProcessors {
-             let mut sum_delay_penalty = 0.0_f64;
+@@ -808,7 +808,7 @@ impl BagOfProcessors {
+             let mut sum_lid_count = 0.0_f64;
              for r in rows {
                  sum_error_rate += r.error_rate;
 -                sum_seg_cost += r.seg_cost;
