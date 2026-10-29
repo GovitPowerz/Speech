@@ -546,10 +546,12 @@ impl BagOfProcessors {
     }
 
     /// Observation hook (issue #95): the driver at `pos` as its `Processor` variant.
-    /// Production reaches a driver only through [`Processor::driver`] (issue #25).
-    /// The integration tests use this for two things: the dispatch pins, whose fact
+    /// Production reaches a driver only through [`Processor::driver`] /
+    /// [`Processor::driver_mut`] (issue #25).
+    /// The integration tests use this for two things: the variant asserts, whose fact
     /// is the variant itself (`Inference_Path fast` built a `FastSpectral`, algo 6 a
-    /// `FastTwinLid`), which `Segmenter` cannot name; and, as `processor(pos).driver()`,
+    /// `FastTwinLid`), which `Segmenter` cannot name -- the dispatch pins, and the
+    /// dispatch guards on legs that must run on one tree; and, as `processor(pos).driver()`,
     /// their route to a driver's `Segmenter` surface (`last_result_rows`,
     /// `channel_members`).
     #[cfg(feature = "test-support")]

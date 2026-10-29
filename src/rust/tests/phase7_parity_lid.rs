@@ -441,7 +441,7 @@ fn fast_twin_set_weights_answers_as_the_exact_arm() {
     exact_map.shift_remove("Inference_Path");
     let mut fast = BagOfProcessors::from_configs(std::slice::from_mut(&mut fast_map)).unwrap();
     let mut exact = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact_map)).unwrap();
-    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
+    // Dispatch guard (#95): the leg ran on this variant, read off the `processor` test-support hook.
     assert!(matches!(fast.processor(0), Processor::FastTwinLid(_)));
     assert!(matches!(exact.processor(0), Processor::TwinLid(_)));
 

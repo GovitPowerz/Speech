@@ -139,8 +139,8 @@ fn run_path(
     // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(
-            bag.processor(0),
-            Processor::Spectral(_) | Processor::FastSpectral(_)
+            (inference, bag.processor(0)),
+            (None, Processor::Spectral(_)) | (Some("fast"), Processor::FastSpectral(_))
         ),
         "unexpected processor variant for cell={cell} inference={inference:?}"
     );
