@@ -1166,9 +1166,10 @@ impl CorpusProcessor {
     }
 }
 
-/// Truncate an `Array2` to its first `n` rows (`conservativeResize(n, cols)`), a
-/// plain row-slice copy. Live call sites shrink or keep, except the pathological
-/// gradcheck empty-results path, where `truncate_rows` (legacy `topRows(n)`, the first `n` rows) can be asked for more rows than
+/// Truncate an `Array2` to its first `n` rows (`conservativeResize(n, cols)`, and
+/// the legacy `topRows(n)`: the same first `n` rows), a plain row-slice copy. Live
+/// call sites shrink or keep, except the pathological gradcheck empty-results
+/// path, where `truncate_rows` can be asked for more rows than
 /// `m` has (e.g. a 1-row `cost_mem` with `epoch+1 == 2`) -- that indexes out of
 /// bounds here, mirroring legacy `topRows(2)`-on-1-row UB. Faithful to legacy UB,
 /// unreachable under non-empty corpora, panics by design if hit.

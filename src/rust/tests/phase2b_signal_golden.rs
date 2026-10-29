@@ -408,18 +408,19 @@ fn overlap_result_and_boundaries_match_dump() {
         &format!("{tag} e2e"),
     );
 
-    // Both channels carry their own cost / classif count through the seam.
+    // The driver sized its per-channel cost / classif vectors to the two channels:
+    // both are readable through the seam and a third is not.
     for chan in 0..2 {
         let m = sig.channel_members(chan);
         assert!(
             m.cumulative_error.is_finite(),
             "overlap: per-channel cost chan{chan}"
         );
-        assert!(
-            m.nb_of_classif >= 0,
-            "overlap: per-channel nb_of_classif chan{chan}"
-        );
     }
+    let third = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sig.channel_members(2).nb_of_classif
+    }));
+    assert!(third.is_err(), "overlap: exactly two per-channel members");
 }
 
 /// Run 2/2 (zero offset, matching `signal_overlap_vrcts_chan1.xml`): the VRCTS byte

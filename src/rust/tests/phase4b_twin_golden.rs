@@ -495,7 +495,8 @@ fn mode5_runs_sad_net_modes_4_6_do_not() {
         let (d4, _) = run_file(variant_by_name("mode4"), file, lang, w);
         let (d5, _) = run_file(variant_by_name("mode5"), file, lang, w);
         let (d6, _) = run_file(variant_by_name("mode6"), file, lang, w);
-        for chan in 0..d5.lid_members().is_correct.len() {
+        let channels = d5.lid_members().is_correct.len();
+        for chan in 0..channels {
             assert!(
                 d5.channel_members(chan).nb_of_classif > 0,
                 "mode5 {file} chan{chan}: SAD net not run"

@@ -322,8 +322,8 @@ impl BagOfProcessors {
     ///
     /// Config-0-only keys (`:10-15`): `numOuterThreads` (REQUIRED, no default --
     /// missing is an error, unlike every other key here), `Audio_offset` 0.0,
-    /// `Audio_max_duration` 3.6e6, `File_Type` 0, `LockFilesDir`/`LockFilesPrefix`
-    /// "". `exclude_nontrans` (NOT a legacy `BagOfProcessors` member -- read from
+    /// `Audio_max_duration` 3.6e6, `File_Type` 0, `LockFilesDir` "" (`LockFilesPrefix`
+    /// is no longer read: nothing in the port consumed it, issue #94). `exclude_nontrans` (NOT a legacy `BagOfProcessors` member -- read from
     /// configs[0] here so it's available alongside the bag for Task 5's reference
     /// loading, default false). `Audio_fixed_gain` (Phase 8 S1.1, port-only, no
     /// legacy source): absent -> `None`, threaded to every `read_audio` call in

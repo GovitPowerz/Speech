@@ -809,9 +809,11 @@ impl TwinBlstmSpectralLid {
         }
 
         // `_LIDDetectionThreshold` (`:25`) and `_LIDTrainingPruningThreshold` (`:26`),
-        // both default -1.0: read by nothing on any path (the legacy `:1286` pruning
-        // gate does not exist). Parsed for validation only (a malformed value still
-        // errors), the values discarded (issue #94).
+        // both default -1.0: read by nothing in the port. The legacy `:1286` pruning
+        // gate is NOT reproduced (it feeds only the skipped VRCTS dump, see the
+        // `interestSegs` note in `get_segmentation_mode456` and IMPROVEMENTS.md).
+        // Parsed for validation only (a malformed value still errors), the values
+        // discarded (issue #94).
         get_f64_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
         get_f64_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
         let lid_decision_thresh_rising = get_f64(map, "BLSTM_LID_decision_thresh_rising")?;
