@@ -4,7 +4,8 @@
 `LSTMNeuronNb[0]` wide (`OutputNeuronNb[0]` in MLP mode) and never reads the key, and the
 committed LID Twin config declares it on neither net. The seam reports the declared value when
 the key is present (malformed -> `ValueError` naming the key, ADR-0006) and the engine's width
-when it is absent, so the call succeeds whenever `BlstmConfig::from_legacy` does.
+when it is absent, so the call succeeds whenever `BlstmConfig::from_legacy` does. The engine's
+width is read back off the built net's normalize tail (`speech_rs.weight_layout`, mean then std).
 """
 
 from pathlib import Path
@@ -24,19 +25,34 @@ def _config(flat: dict[str, str], prefix: str) -> dict[str, Any]:
     return cast(dict[str, Any], speech_rs.blstm_config(flat, prefix))
 
 
+def _built_width(flat: dict[str, str], prefix: str) -> int:
+    return sum(int(b["len"]) for b in speech_rs.weight_layout(flat, prefix) if b["stack"] == "tail") // 2
+
+
 @pytest.mark.parametrize(("prefix", "width"), [("BLSTM_LID", 36), ("BLSTM", 11)])
 def test_the_committed_lid_twin_declares_no_input_size_and_both_nets_report_the_engines_width(prefix: str, width: int) -> None:
     flat = parse_legacy_config(LID_TWIN.read_text())
     assert f"{prefix}_NNetInputSize" not in flat
-    spec = _config(flat, prefix)
-    assert spec["NNetInputSize"] == width
-    assert spec["LSTMNeuronNb"][0] == width
+    assert _config(flat, prefix)["NNetInputSize"] == _built_width(flat, prefix) == width
+
+
+def test_an_mlp_net_without_the_key_reports_its_output_net_width() -> None:
+    flat = parse_legacy_config(WORKER.read_text())
+    del flat["BLSTM_NNetInputSize"]
+    flat["BLSTM_LSTMNeuronNb"] = "0,24"
+    flat["BLSTM_LSTMSubSampling"] = "1"
+    spec = _config(flat, "BLSTM")
+    assert spec["NNetInputSize"] == _built_width(flat, "BLSTM") == spec["OutputNeuronNb"][0] == 48
 
 
 def test_a_declared_input_size_is_returned_as_declared() -> None:
+    """Even one the engine does not build: the exact net ignores the key (issue #99)."""
     flat = parse_legacy_config(WORKER.read_text())
     assert flat["BLSTM_NNetInputSize"] == "23"
     assert _config(flat, "BLSTM")["NNetInputSize"] == 23
+    flat["BLSTM_NNetInputSize"] = "11"
+    assert _config(flat, "BLSTM")["NNetInputSize"] == 11
+    assert _built_width(flat, "BLSTM") == 23
 
 
 def test_a_malformed_declared_input_size_raises_naming_the_key() -> None:
