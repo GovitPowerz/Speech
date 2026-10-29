@@ -408,12 +408,18 @@ fn overlap_result_and_boundaries_match_dump() {
         &format!("{tag} e2e"),
     );
 
-    assert_eq!(sig.cumulative_error().len(), 2, "overlap: per-channel cost");
-    assert_eq!(
-        sig.nb_of_classif().len(),
-        2,
-        "overlap: per-channel nb_of_classif"
-    );
+    // Both channels carry their own cost / classif count through the seam.
+    for chan in 0..2 {
+        let m = sig.channel_members(chan);
+        assert!(
+            m.cumulative_error.is_finite(),
+            "overlap: per-channel cost chan{chan}"
+        );
+        assert!(
+            m.nb_of_classif >= 0,
+            "overlap: per-channel nb_of_classif chan{chan}"
+        );
+    }
 }
 
 /// Run 2/2 (zero offset, matching `signal_overlap_vrcts_chan1.xml`): the VRCTS byte

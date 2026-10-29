@@ -873,15 +873,6 @@ impl TwinBlstmSpectralLid {
     pub fn spectrum_shift_sec(&self) -> f64 {
         self.spectrum_shift_sec
     }
-    // -- SAD-side outputs ----------------------------------------------------
-    /// `seg._CumulativeError[chan] = NNCost` (`:774`) `*= LIDCostPonderation` (`:1337`).
-    pub fn cumulative_error(&self) -> &[f64] {
-        &self.cumulative_error
-    }
-    /// `seg._NbOfClassif[chan] = nbOfClassif` (`:775`).
-    pub fn nb_of_classif(&self) -> &[i64] {
-        &self.nb_of_classif
-    }
     // -- LID-side outputs (mirror Algo 5) ------------------------------------
     /// The per-channel LID members written by the last `get_segmentation` call.
     pub fn lid_members(&self) -> &LidMembers {

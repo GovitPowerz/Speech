@@ -572,12 +572,13 @@ fn pitch_pass_target_reuse_under_live_reference() {
     // Live-cost non-vacuity: with a reference present, feed_forward_backward's
     // cost/counter accumulation is gated on a non-empty target (Task 7b), so
     // BOTH passes must report a live (nonzero) cumulative error/classif count.
+    let members = sig.channel_members(0);
     assert!(
-        sig.cumulative_error()[0].is_finite() && sig.cumulative_error()[0] != 0.0,
+        members.cumulative_error.is_finite() && members.cumulative_error != 0.0,
         "chan-0 cumulative_error must be finite nonzero under a live reference"
     );
     assert!(
-        sig.nb_of_classif()[0] > 0,
+        members.nb_of_classif > 0,
         "chan-0 nb_of_classif must be > 0 under a live reference"
     );
 
