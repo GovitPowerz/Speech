@@ -36,7 +36,7 @@ use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
 use crate::engine::bag_of_processors::{
-    BagOfProcessors, CostPair, get_i32_default, refuse_fast_training, training_policy,
+    BagOfProcessors, CostPair, get_i32_default, training_policy,
 };
 use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
@@ -137,7 +137,7 @@ impl CorpusProcessor {
             .unwrap_or_else(|| "MultiConfigResults.mat".to_string());
         // legacy: :51 _Processors = BagOfProcessors(configs, _Mode). The bag ctor
         // mutates each config map (key clears :21-23).
-        let processors = BagOfProcessors::from_configs(&mut configs, mode)?;
+        let processors = BagOfProcessors::from_configs(&mut configs)?;
 
         // legacy: :53-59 output-file TRUNCATION for m/M/t/T -- write a single space,
         // so a subsequent read (or a run that never saves) sees a valid-but-empty
@@ -268,21 +268,9 @@ impl CorpusProcessor {
     /// (`isLog = false`); a final eval at epoch `N+1` with `_Mode`. Timer prints are
     /// display-only (dropped).
     fn train(&mut self) -> Result<()> {
-        // T5 finding 2 (review, an exact-tree touch sanctioned as selection-plumbing):
-        // `BagOfProcessors::from_configs` refuses a training-shaped fast config ONLY when
-        // `mode.kind == Multi`; that gate never fires for Image/UnitTest, so a fast driver
-        // reaching `train()` via those modes would otherwise silently no-op-train. `train()`
-        // is only ever called from `run()` inside a `self.training_epochs > 0` guard (both
-        // call sites), so the epoch count is the training shape here; the two
-        // `BackPropagationActivated` keys are not read at this site (`None`). One body for
-        // both moments (issue #92): `refuse_fast_training`, asked through the driver
-        // interface, never a variant match.
-        for ii in 0..self.processors.nb_of_conf() {
-            if self.processors.processor(ii).driver().is_fast_tree() {
-                refuse_fast_training(self.mode.kind, self.training_epochs as i64, None)?;
-            }
-        }
-
+        // A fast bag never reaches here (nor `run()`'s gradient check): a training-shaped config
+        // under `Inference_Path fast` is refused at `BagOfProcessors::from_configs`, the one
+        // site (issue #110), so `self.processors` trains exact f64 nets by construction.
         let nb = self.processors.nb_of_conf();
         let rows = self.training_epochs + 2;
         self.cost_mem = Array2::zeros((rows, nb));
@@ -1112,7 +1100,7 @@ impl CorpusProcessor {
         mode: Mode,
     ) -> Result<Array2<f64>> {
         let corpus = Corpus::from_config(&configs[0])?;
-        let mut bag = BagOfProcessors::from_configs(&mut configs, mode)?;
+        let mut bag = BagOfProcessors::from_configs(&mut configs)?;
         let mut results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>> =
             BTreeMap::new();
         for j in 0..corpus.nb_of_files() {
@@ -1145,7 +1133,7 @@ impl CorpusProcessor {
         reverse: bool,
     ) -> Result<BTreeMap<usize, Vec<Array2<f64>>>> {
         let corpus = Corpus::from_config(&configs[0])?;
-        let mut bag = BagOfProcessors::from_configs(&mut configs, mode)?;
+        let mut bag = BagOfProcessors::from_configs(&mut configs)?;
         let nb_of_conf = bag.nb_of_conf();
         let mut order: Vec<usize> = (0..corpus.nb_of_files()).collect();
         if reverse {

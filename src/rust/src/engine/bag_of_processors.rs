@@ -222,30 +222,29 @@ pub(crate) fn training_policy(
     }
 }
 
-/// The ONE refusal of a training-shaped run on the fast tree (issue #92; the Phase 7
-/// Task 5 rider and its T5-finding-2 twin, once). The fast drivers' training arms are
-/// inert (`Segmenter::is_fast_tree`, `nets()` empty), so a run that would train them is
-/// a config error, caught at the two moments a training run is decided, with this one
-/// wording naming the facts that moment read: [`BagOfProcessors::from_configs`] in
-/// Multi mode (the config's epoch count and both `BackPropagationActivated` keys) and
-/// `CorpusProcessor::train` in Image / UnitTest mode (the epoch count alone, `None` for
-/// the keys it did not read: `train()` is reached only under `training_epochs > 0`).
-/// Solo runs are untouched, and so are Image / UnitTest runs whose tail is only a
-/// `BackPropagationActivated` key (outside Multi mode only the epoch count trains).
+/// The ONE refusal of a training-shaped config on the fast tree (issue #92's one body,
+/// issue #110's one site). The fast drivers' training arms are inert (`nets()` empty,
+/// training stays exact f64), so a config that would train or gradient-check them is a
+/// config error, decided where fast or exact is decided, [`BagOfProcessors::from_configs`],
+/// for every mode: `CorpusProcessor::train` and `run()`'s gradient check are never reached
+/// on a fast bag (the seam's explicit `grad_check` answers `[]`: no net is active). The
+/// four facts are read as written, before the work-distributed kill zeroes the epoch count
+/// and the epsilon: the config-0 `Neural_Networks_BackPropagation_Epochs`
+/// and `Neural_Networks_Gradient_Check_Epsilon` (what `CorpusProcessor::run` reads) and
+/// every config's two `BackPropagationActivated` flags (per net per config). Outside Multi
+/// mode a flag at `Epochs 0` is still gradient-shaped (F11: `run_solo` computes the
+/// gradient the flag asks for), so no mode is exempt and the wording names no mode.
 pub(crate) fn refuse_fast_training(
-    mode: ModeKind,
     epochs: i64,
-    back_prop: Option<(bool, bool)>,
+    epsilon: f64,
+    (bp_sad, bp_lid): (bool, bool),
 ) -> Result<()> {
-    if epochs > 0 || back_prop.is_some_and(|(sad, lid)| sad || lid) {
-        let keys = match back_prop {
-            Some((sad, lid)) => format!(", BackPropagationActivated SAD={sad}/LID={lid}"),
-            None => String::new(),
-        };
+    if epochs > 0 || epsilon > 0.0 || bp_sad || bp_lid {
         bail!(
             "Inference_Path fast is inference-only (training stays exact f64), but this \
-             {mode:?}-mode run is training-shaped (Neural_Networks_BackPropagation_Epochs \
-             {epochs}{keys}); train on the exact path"
+             config is training-shaped (Neural_Networks_BackPropagation_Epochs {epochs}, \
+             Neural_Networks_Gradient_Check_Epsilon {epsilon}, BackPropagationActivated \
+             SAD={bp_sad}/LID={bp_lid}); train on the exact path"
         );
     }
     Ok(())
@@ -277,6 +276,9 @@ pub struct BagOfProcessors {
     pruning_thresholds: Vec<f64>,
     processors: Vec<Processor>,
     exclude_nontrans: bool,
+    /// `Inference_Path fast` (issue #110): the one per-bag fact, decided in
+    /// [`Self::from_configs`] and answered by [`Self::is_fast_tree`].
+    use_fast: bool,
     /// Test-support capture of `save_and_update`'s per-conf algo-5/6
     /// `(errorPercLID, confusion)` (display-only in the legacy; see
     /// [`Self::print_confusion_matrix`]). Cleared at each `save_and_update`.
@@ -339,9 +341,9 @@ impl BagOfProcessors {
     /// solely for `.mat`/PNG dump gating in `getSegmentation`'s dropped
     /// diagnostic branches) -- the Rust `from_legacy(map)`/`from_legacy(map,
     /// weights)` signatures landed in Phase 2b/3 without them, so they are
-    /// intentionally NOT threaded through here; `mode` is accepted (matching the
-    /// legacy signature and needed for a future Task 5 wire-up of the log
-    /// branches) but only currently consulted for algo dispatch validity.
+    /// intentionally NOT threaded through here, and since issue #110 neither is the
+    /// mode: a bag is built from its configs alone (the legacy `mode` argument fed
+    /// only those two display flags).
     ///
     /// Algo 0 (`VRCTSPart`) is wired here since Phase 4b Task 8
     /// (`Processor::Vrcts`); Algo 5/6 (`BLSTMSpectralLID`/`TwinBLSTMSpectralLID`)
@@ -349,17 +351,7 @@ impl BagOfProcessors {
     /// `File_Type` 3/4 (phSeq-N variant, mat input) remain unported -- `bail!`,
     /// IMPROVEMENTS entry; `File_Type` 0 (wav), 1 (phSeq, Task 5), and 2 (cep,
     /// Phase 6 Task 1) are all supported.
-    pub fn from_configs(
-        configs: &mut [IndexMap<String, String>],
-        mode: Mode,
-    ) -> Result<BagOfProcessors> {
-        // Task 5: the fast+training rider consults the mode. Construction refuses in Multi
-        // mode only; an Image/UnitTest run trains only through `CorpusProcessor::run`'s
-        // epoch loop, refused there (`refuse_fast_training`, issue #92), and Solo never
-        // trains. tier2/the SAD configs carry a training tail (Epochs/backprop) and must
-        // still construct fast in Image mode.
-        let is_multi_mode = mode.kind == ModeKind::Multi;
-
+    pub fn from_configs(configs: &mut [IndexMap<String, String>]) -> Result<BagOfProcessors> {
         if configs.is_empty() {
             bail!("BagOfProcessors::from_configs: at least one config is required");
         }
@@ -386,6 +378,19 @@ impl BagOfProcessors {
             "exact" => false,
             "fast" => true,
             other => bail!("Inference_Path `{other}` not recognized (expected `exact` or `fast`)"),
+        };
+        // Issue #110: the config-0 half of the fast-tree training refusal, read as written
+        // (`CorpusProcessor::new` reads the same two keys off configs[0], then zeroes both
+        // when work is distributed; a distributed fast run with `Epochs 5` is still a
+        // config error). The per-config half (the two flags) is read in the loop below.
+        // Read on a fast bag only: an exact run's config reads keep their order (a malformed
+        // value still errors where it did, after the mode's output-file truncation, ADR-0002).
+        let (epochs, epsilon) = match use_fast {
+            true => (
+                get_i32_default(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?,
+                get_f64_default(&configs[0], "Neural_Networks_Gradient_Check_Epsilon", 0.0)?,
+            ),
+            false => (0, 0.0),
         };
 
         if file_type != 0 && file_type != 1 && file_type != 2 {
@@ -418,21 +423,18 @@ impl BagOfProcessors {
             // Task 5); everything else stays exact-only -> typed-bail. Load-weights
             // mirrors the exact arms (`from_legacy(.., None)` then `load_weights_file`).
             //
-            // RIDER: a Multi-mode (training) run with a TRAINING-shaped config
-            // (`Neural_Networks_BackPropagation_Epochs > 0` OR a `BackPropagationActivated`-on
-            // net) is a config error under `Inference_Path fast` -- caught loudly here so the
-            // seam can't silently drop to a no-op fast "training" run ([`refuse_fast_training`],
-            // the one body; `CorpusProcessor::train` calls it for Image/UnitTest runs with
-            // Epochs > 0). Guards both algo 3 and 6; Solo, and Image/UnitTest runs at
-            // Epochs 0, drive inference over the same training-tail configs.
+            // RIDER (Phase 7 Task 5; one body since #92, one site and mode-free since
+            // #110): a TRAINING-shaped config (`Neural_Networks_BackPropagation_Epochs > 0`,
+            // `Neural_Networks_Gradient_Check_Epsilon > 0`, or a `BackPropagationActivated`-on
+            // net) is a config error under `Inference_Path fast`, caught here so neither the
+            // binary nor the seam can drop to a no-op fast "training" run or a gradient the
+            // fast tree does not compute ([`refuse_fast_training`]). Guards both algo 3 and
+            // 6; a run whose tail is Epochs 0, epsilon 0 and every flag off drives inference
+            // over the same configs in every mode.
             if use_fast {
-                if is_multi_mode {
-                    let epochs = get_i32_default(map, "Neural_Networks_BackPropagation_Epochs", 0)?;
-                    let bp_sad = get_bool_default(map, "BLSTM_BackPropagationActivated", false)?;
-                    let bp_lid =
-                        get_bool_default(map, "BLSTM_LID_BackPropagationActivated", false)?;
-                    refuse_fast_training(mode.kind, i64::from(epochs), Some((bp_sad, bp_lid)))?;
-                }
+                let bp_sad = get_bool_default(map, "BLSTM_BackPropagationActivated", false)?;
+                let bp_lid = get_bool_default(map, "BLSTM_LID_BackPropagationActivated", false)?;
+                refuse_fast_training(i64::from(epochs), epsilon, (bp_sad, bp_lid))?;
                 let processor = match algo {
                     3 => {
                         let mut seg = FastSpectralSegmenter::from_legacy(map, None)?;
@@ -500,6 +502,7 @@ impl BagOfProcessors {
             pruning_thresholds,
             processors,
             exclude_nontrans,
+            use_fast,
             #[cfg(feature = "test-support")]
             last_confusion: Vec::new(),
             #[cfg(feature = "test-support")]
@@ -511,6 +514,14 @@ impl BagOfProcessors {
 
     pub fn nb_of_conf(&self) -> usize {
         self.nb_of_conf
+    }
+
+    /// Whether this bag runs the fast tree (`Inference_Path fast`, issue #110): one
+    /// per-bag fact, decided once at construction, where a training-shaped config was
+    /// already refused ([`refuse_fast_training`]). A fast bag trains nothing by
+    /// construction; no driver is asked.
+    pub fn is_fast_tree(&self) -> bool {
+        self.use_fast
     }
 
     pub fn nb_of_threads(&self) -> i32 {
@@ -1305,14 +1316,6 @@ fn strip_last_4(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ModeKind;
-
-    fn solo_mode() -> Mode {
-        Mode {
-            kind: ModeKind::Solo,
-            verbose: false,
-        }
-    }
 
     fn ref_dir() -> std::path::PathBuf {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
@@ -1330,6 +1333,20 @@ mod tests {
     fn with_bag_keys(mut m: IndexMap<String, String>, algo: i32) -> IndexMap<String, String> {
         m.insert("numOuterThreads".to_string(), "1".to_string());
         m.insert("Algo_choice".to_string(), algo.to_string());
+        m
+    }
+
+    /// Strip a fixture's training tail (tier2 carries `Epochs 3` + backprop on): since
+    /// issue #110 a fast bag refuses a training-shaped config in every mode.
+    fn inference_only(mut m: IndexMap<String, String>) -> IndexMap<String, String> {
+        m.insert(
+            "Neural_Networks_BackPropagation_Epochs".to_string(),
+            "0".to_string(),
+        );
+        m.insert(
+            "BLSTM_BackPropagationActivated".to_string(),
+            "false".to_string(),
+        );
         m
     }
 
@@ -1381,7 +1398,7 @@ mod tests {
         let signal = with_bag_keys(load_config("phase2b/signal.config"), 4);
 
         for mut cfgs in [vec![tdc], vec![ltsv], vec![spectral], vec![signal]] {
-            let bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+            let bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
             assert_eq!(bag.nb_of_conf(), 1);
         }
     }
@@ -1400,7 +1417,7 @@ mod tests {
         twin.insert("BLSTM_LID_weightsFile".to_string(), String::new());
 
         let mut cfgs = vec![lid5, twin];
-        let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let mut bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
         assert_eq!(bag.nb_of_conf(), 2);
         assert_eq!(bag.algo_type(0), 5);
         assert_eq!(bag.algo_type(1), 6);
@@ -1439,7 +1456,7 @@ mod tests {
         // must succeed.
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "2".to_string());
-        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode())
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg))
             .expect("File_Type 2 (cep) must be accepted by the gate");
         assert_eq!(bag.file_type(), 2);
     }
@@ -1449,7 +1466,7 @@ mod tests {
         // File_Type 3/4 (phSeq-N variant, mat) stay unported -- the gate still bails.
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "3".to_string());
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()) {
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)) {
             Err(e) => assert!(e.to_string().contains("File_Type")),
             Ok(_) => panic!("expected File_Type 3 (unported) to bail"),
         }
@@ -1462,7 +1479,7 @@ mod tests {
         // flipped must succeed (the gate check runs before the per-config driver loop).
         let mut cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         cfg.insert("File_Type".to_string(), "1".to_string());
-        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode())
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg))
             .expect("File_Type 1 (phSeq) must be accepted by the gate");
         assert_eq!(bag.file_type(), 1);
     }
@@ -1476,7 +1493,7 @@ mod tests {
         cfg.insert("refdialfiles".to_string(), "us".to_string());
 
         let mut cfgs = vec![cfg];
-        let _bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let _bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
 
         assert_eq!(cfgs[0].get("files").map(String::as_str), Some(""));
         assert_eq!(cfgs[0].get("refsegfiles").map(String::as_str), Some(""));
@@ -1501,7 +1518,7 @@ mod tests {
         let signal = with_bag_keys(load_config("phase2b/signal.config"), 4);
 
         let mut cfgs = vec![tdc, ltsv, spectral_cfg, signal];
-        let bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
 
         // algo 1 (pos 0), algo 2 (pos 1): non-NN defaults.
         assert_eq!(bag.get_weights(0).len(), 0);
@@ -1534,7 +1551,10 @@ mod tests {
     #[test]
     fn inference_path_dispatch() {
         let base3 = || {
-            let mut m = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+            let mut m = inference_only(with_bag_keys(
+                load_config("phase4a/tier2_spectral.config"),
+                3,
+            ));
             m.insert("BLSTM_weightsFile".to_string(), String::new());
             m
         };
@@ -1542,8 +1562,7 @@ mod tests {
         // fast + algo 3 -> FastSpectral.
         let mut fast3 = base3();
         fast3.insert("Inference_Path".to_string(), "fast".to_string());
-        let bag =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3)).unwrap();
         assert!(
             matches!(bag.processor(0), Processor::FastSpectral(_)),
             "fast + algo 3 must dispatch to FastSpectral"
@@ -1551,8 +1570,7 @@ mod tests {
 
         // absent -> exact Spectral.
         let mut exact3 = base3();
-        let bag =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3), solo_mode()).unwrap();
+        let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3)).unwrap();
         assert!(
             matches!(bag.processor(0), Processor::Spectral(_)),
             "absent Inference_Path must dispatch to the exact Spectral"
@@ -1561,7 +1579,7 @@ mod tests {
         // junk value -> error.
         let mut junk = base3();
         junk.insert("Inference_Path".to_string(), "turbo".to_string());
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut junk), solo_mode()) {
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut junk)) {
             Err(e) => assert!(
                 e.to_string().contains("Inference_Path"),
                 "junk value error must name Inference_Path, got: {e}"
@@ -1572,7 +1590,7 @@ mod tests {
         // fast + algo 4 -> bail (only algo 3 supported in Task 4).
         let mut fast4 = with_bag_keys(load_config("phase2b/signal.config"), 4);
         fast4.insert("Inference_Path".to_string(), "fast".to_string());
-        match BagOfProcessors::from_configs(std::slice::from_mut(&mut fast4), solo_mode()) {
+        match BagOfProcessors::from_configs(std::slice::from_mut(&mut fast4)) {
             Err(e) => assert!(
                 e.to_string().to_lowercase().contains("fast"),
                 "fast + algo 4 bail must mention fast, got: {e}"
@@ -1587,14 +1605,15 @@ mod tests {
     /// silent-no-op hazard) is pinned through the seam, `tests/pyo3/test_fold_run.py`.
     #[test]
     fn fast_spectral_set_weights_answers_as_the_exact_arm() {
-        let mut exact3 = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+        let mut exact3 = inference_only(with_bag_keys(
+            load_config("phase4a/tier2_spectral.config"),
+            3,
+        ));
         exact3.insert("BLSTM_weightsFile".to_string(), String::new());
         let mut fast3 = exact3.clone();
         fast3.insert("Inference_Path".to_string(), "fast".to_string());
-        let mut exact =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3), solo_mode()).unwrap();
-        let mut fast =
-            BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3), solo_mode()).unwrap();
+        let mut exact = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact3)).unwrap();
+        let mut fast = BagOfProcessors::from_configs(std::slice::from_mut(&mut fast3)).unwrap();
         assert!(matches!(fast.processor(0), Processor::FastSpectral(_)));
 
         let n = exact.get_weights(0)[0].len();
@@ -1613,7 +1632,7 @@ mod tests {
     fn non_nn_set_weights_stays_inert_ok() {
         let tdc = with_bag_keys(load_config("phase2b/tdc.config"), 1);
         let mut cfgs = vec![tdc];
-        let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+        let mut bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
         assert!(matches!(bag.processor(0), Processor::Tdc(_)));
         assert_eq!(bag.processor(0).driver().pack_count(), 0);
         // Issue #60: the pack-count check does not widen to them either, whatever the length.
@@ -1653,31 +1672,39 @@ mod tests {
         assert_eq!(CostPair::Lid.pick(cost, cost_lid), 10.0);
     }
 
-    /// Issue #92: the one refusal body. Shape-blind when nothing is training-shaped,
-    /// refusing on any of the three facts with one wording that names the mode.
+    /// Issues #92 / #110: the one refusal body. Shape-blind when nothing is
+    /// training-shaped, refusing on any of the four facts with one wording that names all
+    /// four and no mode.
     #[test]
-    fn refuse_fast_training_is_one_body_naming_the_mode() {
-        assert!(refuse_fast_training(ModeKind::Multi, 0, Some((false, false))).is_ok());
-        assert!(refuse_fast_training(ModeKind::Image, 0, None).is_ok());
-        for (epochs, back_prop) in [
-            (1, Some((false, false))),
-            (0, Some((true, false))),
-            (0, Some((false, true))),
-            (1, None),
+    fn refuse_fast_training_is_one_body_naming_the_four_facts() {
+        assert!(refuse_fast_training(0, 0.0, (false, false)).is_ok());
+        for (epochs, epsilon, back_prop) in [
+            (1, 0.0, (false, false)),
+            (0, 1e-4, (false, false)),
+            (0, 0.0, (true, false)),
+            (0, 0.0, (false, true)),
         ] {
-            let msg = refuse_fast_training(ModeKind::Image, epochs, back_prop)
+            let msg = refuse_fast_training(epochs, epsilon, back_prop)
                 .unwrap_err()
                 .to_string();
             assert!(
                 msg.contains("Inference_Path fast is inference-only"),
                 "{msg}"
             );
-            assert!(msg.contains("Image-mode run is training-shaped"), "{msg}");
-            // The wording names only the facts the moment read.
-            assert_eq!(
-                msg.contains("BackPropagationActivated"),
-                back_prop.is_some(),
-                "{msg}"
+            assert!(msg.contains("this config is training-shaped"), "{msg}");
+            for fact in [
+                format!("Neural_Networks_BackPropagation_Epochs {epochs}"),
+                format!("Neural_Networks_Gradient_Check_Epsilon {epsilon}"),
+                format!(
+                    "BackPropagationActivated SAD={}/LID={}",
+                    back_prop.0, back_prop.1
+                ),
+            ] {
+                assert!(msg.contains(&fact), "{msg} lacks {fact}");
+            }
+            assert!(
+                !msg.contains("mode"),
+                "the wording names facts, not a mode: {msg}"
             );
         }
     }
@@ -1705,7 +1732,10 @@ mod tests {
             vrcts.insert(k.to_string(), v.to_string());
         }
         let vrcts = with_bag_keys(vrcts, 0);
-        let mut spectral = with_bag_keys(load_config("phase4a/tier2_spectral.config"), 3);
+        let mut spectral = inference_only(with_bag_keys(
+            load_config("phase4a/tier2_spectral.config"),
+            3,
+        ));
         spectral.insert("BLSTM_weightsFile".to_string(), String::new());
         let mut lid5 = with_bag_keys(load_config("phase4b/lid5.config"), 5);
         lid5.insert("BLSTM_weightsFile".to_string(), String::new());
@@ -1730,8 +1760,8 @@ mod tests {
         // `Inference_Path` is a config-0 key: the fast variants get their own bag.
         spectral.insert("Inference_Path".to_string(), "fast".to_string());
         let mut fast_cfgs = vec![spectral, twin];
-        let mut exact = BagOfProcessors::from_configs(&mut exact_cfgs, solo_mode()).unwrap();
-        let mut fast = BagOfProcessors::from_configs(&mut fast_cfgs, solo_mode()).unwrap();
+        let mut exact = BagOfProcessors::from_configs(&mut exact_cfgs).unwrap();
+        let mut fast = BagOfProcessors::from_configs(&mut fast_cfgs).unwrap();
 
         let exact_kinds = [
             matches!(exact.processor(0), Processor::Vrcts(_)),
@@ -1750,12 +1780,6 @@ mod tests {
             let driver = bag.processor(pos).driver();
             assert_eq!(driver.pack_count(), packs, "{name} pack_count");
             assert_eq!(driver.nets().len(), nets, "{name} nets");
-            // Issue #92: a fast driver exchanges packs but trains none of them.
-            assert_eq!(
-                driver.is_fast_tree(),
-                packs > 0 && nets == 0,
-                "{name} is_fast_tree"
-            );
             assert!(
                 driver.last_result_rows().is_empty(),
                 "{name} before any run"
@@ -1777,5 +1801,10 @@ mod tests {
         }
         check(&mut fast, 0, "FastSpectral", 1, 0);
         check(&mut fast, 1, "FastTwinLid", 2, 0);
+        // Issue #110: fast or exact is a per-bag fact, answered by the bag (a fast driver
+        // exchanges packs but trains none of them; the refusal of a training-shaped
+        // config sits at construction, so no driver is asked).
+        assert!(!exact.is_fast_tree());
+        assert!(fast.is_fast_tree());
     }
 }

@@ -80,7 +80,6 @@ use std::path::PathBuf;
 
 use indexmap::IndexMap;
 use speech::audio::read_audio;
-use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::{BagOfProcessors, Processor};
 use speech::io::binary::{read_weight_vector, write_matrix};
 use speech::tasks::segmentation::{SegClass, Segmentation};
@@ -91,13 +90,6 @@ fn ref_dir() -> PathBuf {
 
 fn fixture(rel: &str) -> PathBuf {
     ref_dir().join(rel)
-}
-
-fn image_mode() -> Mode {
-    Mode {
-        kind: ModeKind::Image,
-        verbose: false,
-    }
 }
 
 /// One phase-9 causal fixture config as a map, pointed at the committed seed pack and
@@ -118,6 +110,9 @@ fn causal_map(
         "BLSTM_weightsFile".into(),
         pack.to_str().unwrap().to_string(),
     );
+    // Issue #110: a fast bag refuses the fixture's `BackPropagationActivated true` in
+    // every mode; stripped on both legs so the maps differ in `Inference_Path` alone.
+    m.insert("BLSTM_BackPropagationActivated".into(), "false".into());
     if let Some(p) = inference {
         m.insert("Inference_Path".into(), p.into());
     }
@@ -133,8 +128,7 @@ fn run_path(
     weights_override: Option<&PathBuf>,
 ) -> (Vec<Vec<f64>>, Vec<Segmentation>) {
     let mut m = causal_map(cell, inference, weights_override);
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m)).unwrap();
 
     let mut audio = read_audio(&fixture("phase4a/corpus/f1.wav"), 0.0, 2.0, 0, None).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
@@ -521,7 +515,7 @@ fn causal_parity_crossing_is_exercised() {
 #[test]
 fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
     let build = |m: &mut IndexMap<String, String>| -> anyhow::Result<BagOfProcessors> {
-        BagOfProcessors::from_configs(std::slice::from_mut(m), image_mode())
+        BagOfProcessors::from_configs(std::slice::from_mut(m))
     };
 
     // ACCEPTED: all FOUR causal cells build a fast net, from their committed packs
@@ -641,7 +635,7 @@ fn fast_causal_bails_on_windowed_inference() {
     // 0.5 s window at 8 kHz with spectrum_shift 0.01 -> window_size 25: a genuinely
     // windowed dispatch, not a degenerate one.
     m.insert("BLSTM_window".into(), "0.5".into());
-    let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m), image_mode())
+    let err = BagOfProcessors::from_configs(std::slice::from_mut(&mut m))
         .err()
         .unwrap_or_else(|| panic!("fast causal + windowed inference must bail"));
     assert!(

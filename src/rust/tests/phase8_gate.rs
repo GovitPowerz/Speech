@@ -35,7 +35,6 @@ use std::path::Path;
 use indexmap::IndexMap;
 
 use speech::audio::read_audio;
-use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::{BagOfProcessors, Processor};
 use speech::fast::driver::build_aligned_spec;
 use speech::fast::nn::FastMatrix;
@@ -43,13 +42,6 @@ use speech::fast::stream::{EmittedSegment, StreamDecision, StreamingSession};
 use speech::features::pipeline::{FeatureConfig, SpectralParams};
 use speech::tasks::segmentation::{SegClass, Segmentation};
 use speech::tasks::segmenter::{DriverConfig, SegmenterConfig};
-
-fn image_mode() -> Mode {
-    Mode {
-        kind: ModeKind::Image,
-        verbose: false,
-    }
-}
 
 fn parse(text: &str) -> IndexMap<String, String> {
     speech::legacy_config::parse_legacy_config(text)
@@ -67,7 +59,7 @@ fn run_offline_fast(
     wav: &Path,
     gain: Option<f64>,
 ) -> (Vec<f64>, Segmentation) {
-    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map), image_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map)).unwrap();
     let mut audio = read_audio(wav, 0.0, 3600.0, 0, gain).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];

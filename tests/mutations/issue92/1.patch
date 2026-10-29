@@ -1,18 +1,18 @@
-mutation: refuse_fast_training never refuses on the epoch count (the one guard body, both moments)
+mutation: refuse_fast_training never refuses on the epoch count (the one body, the one site)
 catcher: CAUGHT cargo --test phase7_parity_lid fast_bails_on_training_shaped_config
 catcher: CAUGHT cargo --test phase7_parity_lid fast_training_guard_blocks_image_mode_epochs
-catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::refuse_fast_training_is_one_body_naming_the_mode
+catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::refuse_fast_training_is_one_body_naming_the_four_facts
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index 5c4cb8c..a8f8e61 100644
+index 5ed88ed..383594b 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -234,7 +234,7 @@ pub(crate) fn refuse_fast_training(
-     epochs: i64,
-     back_prop: Option<(bool, bool)>,
+@@ -238,7 +238,7 @@ pub(crate) fn refuse_fast_training(
+     epsilon: f64,
+     (bp_sad, bp_lid): (bool, bool),
  ) -> Result<()> {
--    if epochs > 0 || back_prop.is_some_and(|(sad, lid)| sad || lid) {
-+    if epochs < 0 || back_prop.is_some_and(|(sad, lid)| sad || lid) {
-         let keys = match back_prop {
-             Some((sad, lid)) => format!(", BackPropagationActivated SAD={sad}/LID={lid}"),
-             None => String::new(),
+-    if epochs > 0 || epsilon > 0.0 || bp_sad || bp_lid {
++    if epochs < 0 || epsilon > 0.0 || bp_sad || bp_lid {
+         bail!(
+             "Inference_Path fast is inference-only (training stays exact f64), but this \
+              config is training-shaped (Neural_Networks_BackPropagation_Epochs {epochs}, \

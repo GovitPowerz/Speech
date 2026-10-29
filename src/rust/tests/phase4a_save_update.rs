@@ -16,7 +16,6 @@ use std::sync::Mutex;
 use indexmap::IndexMap;
 use ndarray::Array2;
 
-use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::BagOfProcessors;
 use speech::engine::channel_result::ChannelResult;
 use speech::features::stats::InputStatistics;
@@ -57,13 +56,6 @@ impl Drop for CwdGuard {
     }
 }
 
-fn solo_mode() -> Mode {
-    Mode {
-        kind: ModeKind::Solo,
-        verbose: false,
-    }
-}
-
 fn load_config(rel: &str) -> IndexMap<String, String> {
     let text = std::fs::read_to_string(ref_dir().join(rel)).unwrap();
     speech::legacy_config::parse_legacy_config(&text)
@@ -84,13 +76,13 @@ fn algo3_bag(weights_path: &std::path::Path) -> BagOfProcessors {
         "BLSTM_weightsFile".to_string(),
         weights_path.to_str().unwrap().to_string(),
     );
-    BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()).unwrap()
+    BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap()
 }
 
 fn algo1_bag() -> BagOfProcessors {
     let cfg = with_bag_keys(load_config("phase2b/tdc.config"), 1);
     let mut cfgs = vec![cfg];
-    BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap()
+    BagOfProcessors::from_configs(&mut cfgs).unwrap()
 }
 
 fn empty_derivs(nb_of_conf: usize) -> BTreeMap<usize, Vec<Array2<f64>>> {
@@ -313,7 +305,7 @@ fn cost_mem_rows_written() {
         weights_path.to_str().unwrap().to_string(),
     );
     let mut cfgs = vec![cfg_tdc.clone(), cfg_spectral];
-    let mut bag = BagOfProcessors::from_configs(&mut cfgs, solo_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(&mut cfgs).unwrap();
     let _ = &mut cfg_tdc;
 
     let derivs_mat = bag.get_weights_derivatives(1)[0].clone();

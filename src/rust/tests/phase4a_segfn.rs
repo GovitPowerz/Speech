@@ -104,8 +104,7 @@ fn scored_mode_result_columns() {
     let stm = write_stm(dir.path());
 
     let mut cfg = tdc_bag_config();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), stm.to_str().unwrap());
     let results = bag.segmentation_function(&it, multi_mode()).unwrap();
@@ -123,8 +122,7 @@ fn scored_mode_result_columns() {
         .map(|_| Segmentation::new(audio_duration))
         .collect();
     let mut cfg2 = tdc_bag_config();
-    let mut bag2 =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2), multi_mode()).unwrap();
+    let mut bag2 = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2)).unwrap();
     bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
 
     for (chan, row) in cfg0 {
@@ -160,8 +158,7 @@ fn missing_reference_in_scored_mode_errors() {
     let wav = wav_in(dir.path());
 
     let mut cfg = tdc_bag_config();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), "");
     match bag.segmentation_function(&it, multi_mode()) {
@@ -189,8 +186,7 @@ fn stereo_csv_reference_loads_per_channel() {
     let csv = write_csv(dir.path());
 
     let mut cfg = tdc_bag_config();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), csv.to_str().unwrap());
     // No longer bails: the CSV reference loads for both channels of the stereo file.
@@ -214,8 +210,7 @@ fn stereo_csv_reference_loads_per_channel() {
         .map(|_| Segmentation::new(audio_duration))
         .collect();
     let mut cfg2 = tdc_bag_config();
-    let mut bag2 =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2), multi_mode()).unwrap();
+    let mut bag2 = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2)).unwrap();
     bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
 
     // Pruning_Threshold is absent from tdc_bag_config -> default 0.0.
@@ -254,8 +249,7 @@ fn unscored_mode_zero_columns_and_vrcts() {
     let wav = wav_in(dir.path());
 
     let mut cfg = tdc_bag_config();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), "");
     let results = bag.segmentation_function(&it, solo_mode()).unwrap();
@@ -298,8 +292,7 @@ fn dump_dir_vrcts() {
         "Dump_Directory".to_string(),
         dump.to_str().unwrap().to_string(),
     );
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), stm.to_str().unwrap());
     bag.segmentation_function(&it, multi_mode()).unwrap();
@@ -325,8 +318,7 @@ fn speech_duration_walk() {
     let stm = write_stm(dir.path());
 
     let mut cfg = tdc_bag_config();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), stm.to_str().unwrap());
     let results = bag.segmentation_function(&it, multi_mode()).unwrap();
@@ -339,8 +331,7 @@ fn speech_duration_walk() {
         .map(|_| Segmentation::new(audio_duration))
         .collect();
     let mut cfg2 = tdc_bag_config();
-    let mut bag2 =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2), multi_mode()).unwrap();
+    let mut bag2 = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2)).unwrap();
     bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
 
     for (chan, row) in &results[&0] {
@@ -405,8 +396,7 @@ fn spectral_scored_cost_is_live() {
     let stm = write_stm(dir.path());
 
     let mut cfg = spectral_bag_config();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), stm.to_str().unwrap());
     let results = bag.segmentation_function(&it, multi_mode()).unwrap();
@@ -440,8 +430,7 @@ fn spectral_no_reference_zero_cost() {
     let wav = wav_in(dir.path());
 
     let mut cfg = spectral_bag_config();
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), solo_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     // Empty ref_seg -> no reference loaded -> the no-target path (unscored solo mode
     // does not require a reference, unlike -m/-t).

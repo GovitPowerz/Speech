@@ -1,0 +1,18 @@
+mutation: refuse_fast_training ignores the gradient-check epsilon (a fast UnitTest-mode gradient check reaches grad_check_full again)
+catcher: CAUGHT cargo --test phase7_parity_lid fast_refuses_gradient_check_at_construction
+catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::refuse_fast_training_is_one_body_naming_the_four_facts
+catcher: CAUGHT pytest tests/pyo3/test_fast_refusal.py::test_fast_refuses_gradient_check_epsilon_in_unit_test_mode
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index 5ed88ed..18ea7a6 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -238,7 +238,7 @@ pub(crate) fn refuse_fast_training(
+     epsilon: f64,
+     (bp_sad, bp_lid): (bool, bool),
+ ) -> Result<()> {
+-    if epochs > 0 || epsilon > 0.0 || bp_sad || bp_lid {
++    if epochs > 0 || epsilon < 0.0 || bp_sad || bp_lid {
+         bail!(
+             "Inference_Path fast is inference-only (training stays exact f64), but this \
+              config is training-shaped (Neural_Networks_BackPropagation_Epochs {epochs}, \

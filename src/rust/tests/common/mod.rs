@@ -323,6 +323,8 @@ Audio_max_duration 3600\n\
 BLSTM_weightsFile {}\n\
 Dump_Directory {}\n\
 Inference_Path fast\n\
+Neural_Networks_BackPropagation_Epochs 0\n\
+BLSTM_BackPropagationActivated false\n\
 Audio_fixed_gain {fixed_gain}\n\
 BLSTM_InputNormalizationType 1\n",
         fixture_phase0("NNweights_config1.bin").display(),

@@ -128,20 +128,12 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 
 use speech::audio::read_audio;
-use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::{BagOfProcessors, Processor};
 use speech::fast::stream::{EmittedSegment, StreamingSession};
 use speech::features::pipeline::{FeatureConfig, SpectralParams};
 use speech::io::binary::{read_weight_vector, write_matrix};
 use speech::tasks::segmentation::{SegClass, Segmentation};
 use speech::tasks::segmenter::{DriverConfig, SegmenterConfig};
-
-fn image_mode() -> Mode {
-    Mode {
-        kind: ModeKind::Image,
-        verbose: false,
-    }
-}
 
 fn parse(text: &str) -> IndexMap<String, String> {
     speech::legacy_config::parse_legacy_config(text)
@@ -250,6 +242,7 @@ Audio_max_duration 3600\n\
 BLSTM_weightsFile {}\n\
 Dump_Directory {}\n\
 Inference_Path fast\n\
+BLSTM_BackPropagationActivated false\n\
 Audio_fixed_gain {}\n",
         pack.display(),
         dump_dir.display(),
@@ -350,8 +343,7 @@ BLSTM_InputNormalizationType 1\n",
 /// channel-0 posterior row + the final Segmentation.
 fn run_offline(stage: &CausalStage) -> (Vec<f64>, Segmentation) {
     let mut map = parse(&stage.config_text);
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut map), image_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut map)).unwrap();
     let mut audio = read_audio(&stage.wav, 0.0, 3600.0, 0, Some(stage.gain)).unwrap();
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];

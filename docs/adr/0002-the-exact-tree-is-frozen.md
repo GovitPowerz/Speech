@@ -17,7 +17,7 @@ selected by the `Inference_Path` config key (default `exact`) at **one** bag-con
 The exact tree stays frozen: its only sanctioned edits are named **touch classes**, each
 behaviour-free on every exact-path run and proven so by the committed golden suite staying
 byte-green (the bench plumbing, the dispatch site and its key row, the training and seam guards
-on fast variants, golden-re-verified hoists; later the `CellLayer` enum wrap, the forward-only
+on fast variants (one site, every mode, since issue #110, 2026-10-28), golden-re-verified hoists; later the `CellLayer` enum wrap, the forward-only
 branches, inference-only retention gating, the exact-length pack guard, the malformed-value
 guard on `nn/blstm.rs`'s defaulting config getters and on `cost.rs`'s `CostLaw::from_config`
 reads: a present-but-unparseable key errors instead of silently taking the default, as the legacy
@@ -54,8 +54,13 @@ fields deleted, and `engine/bag_of_processors.rs` reading every driver through t
 the weight, statistics, derivative and back-prop reads iterate the trainable nets, save and
 update take one `training_policy` keyed on the algo number as the legacy is (the same
 criteria, update costs, `LID_` prefix and order); nothing recomputed, proven by the goldens
-byte-green, issue #25). Training is
-exact-f64 only and bails loudly on the fast variants.
+byte-green, issue #25; the same class, 2026-10-28: `Segmenter::is_fast_tree` deleted with
+its default and both overrides, fast or exact being the bag's one stored fact, issue #110).
+Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
+at the one bag-construction site, for every mode, on any of four config facts (the config-0
+epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),
+so neither `CorpusProcessor::train` nor `run()`'s gradient check is reachable on a fast bag
+(the seam's explicit `grad_check` there answers `[]`: no net is active).
 
 Fast-path numeric divergence is **by design**: it is documented in the `fast/` module docs and
 `RESULTS.md`, never in `IMPROVEMENTS.md`, which tracks legacy-quirk debt only. Its only bound is

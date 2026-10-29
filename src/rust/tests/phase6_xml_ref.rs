@@ -120,8 +120,7 @@ fn xml_reference_scored_run_through_dispatch() {
     std::fs::write(&xml, two_channel_vrcts()).unwrap();
 
     let mut cfg = tdc_bag_config(2.0);
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), xml.to_str().unwrap());
     // RED here pre-fix: the dispatch bails on the `.xml` reference (TRS branch).
@@ -144,8 +143,7 @@ fn xml_reference_scored_run_through_dispatch() {
         .map(|_| Segmentation::new(audio_duration))
         .collect();
     let mut cfg2 = tdc_bag_config(2.0);
-    let mut bag2 =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2), multi_mode()).unwrap();
+    let mut bag2 = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg2)).unwrap();
     bag2.run_get_segmentation(0, &mut audio, &mut hyp).unwrap();
 
     for (chan, row) in cfg0 {
@@ -315,8 +313,7 @@ fn xml_reference_real_corpus_part_xml() {
 
     // End to end through the dispatch on the real mono wav (capped to dur_cap).
     let mut cfg = tdc_bag_config(dur_cap);
-    let mut bag =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg), multi_mode()).unwrap();
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
     let it = item(wav.to_str().unwrap(), part_xml.to_str().unwrap());
     let results = bag.segmentation_function(&it, multi_mode()).unwrap();
     assert_eq!(
