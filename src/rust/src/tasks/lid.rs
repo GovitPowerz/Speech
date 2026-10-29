@@ -726,10 +726,6 @@ pub struct TwinBlstmSpectralLid {
     /// `_LIDWindowShift` (`:17-18` seed, mutated by `getLIDBLSTMParam` `:102`, reset to
     /// `0.0` on LIDnoOverlap `:1420`); stateful.
     lid_window_shift_sec: f64,
-    /// `_LIDDetectionThreshold` (`:25`, default -1.0). Unused on the 0/2/3 path.
-    lid_detection_threshold: f64,
-    /// `_LIDTrainingPruningThreshold` (`:26`, default -1.0). Gates `:1286` pruning.
-    lid_training_pruning_threshold: f64,
     /// `_LIDDecisionThreshRising` (`:28`). Used by `LID2Segmentation` (`:1296`) + the
     /// `segmentationLID` midpoint seed (`:1242`).
     lid_decision_thresh_rising: f64,
@@ -812,9 +808,12 @@ impl TwinBlstmSpectralLid {
             lid_window_shift_sec = 0.0;
         }
 
-        let lid_detection_threshold = get_f64_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
-        let lid_training_pruning_threshold =
-            get_f64_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
+        // `_LIDDetectionThreshold` (`:25`) and `_LIDTrainingPruningThreshold` (`:26`),
+        // both default -1.0: read by nothing on any path (the legacy `:1286` pruning
+        // gate does not exist). Parsed for validation only (a malformed value still
+        // errors), the values discarded (issue #94).
+        get_f64_default(map, "BLSTM_LID_DetectionThreshold", -1.0)?;
+        get_f64_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
         let lid_decision_thresh_rising = get_f64(map, "BLSTM_LID_decision_thresh_rising")?;
         let lid_decision_thresh_falling = get_f64(map, "BLSTM_LID_decision_thresh_falling")?;
         let mode = twin_i32_default(map, "BLSTM_LID_Mode", 0)?;
@@ -835,8 +834,6 @@ impl TwinBlstmSpectralLid {
             lid_net,
             lid_window_size_sec,
             lid_window_shift_sec,
-            lid_detection_threshold,
-            lid_training_pruning_threshold,
             lid_decision_thresh_rising,
             lid_decision_thresh_falling,
             mode,
@@ -870,35 +867,11 @@ impl TwinBlstmSpectralLid {
     pub fn post_process_mode(&self) -> i32 {
         self.post_process_mode
     }
-    pub fn min_nb_of_frames(&self) -> i32 {
-        self.min_nb_of_frames
-    }
-    pub fn noise_magnitude(&self) -> f64 {
-        self.noise_magnitude
-    }
-    pub fn dump_lid_internals(&self) -> bool {
-        self.dump_lid_internals
-    }
-    pub fn lid_detection_threshold(&self) -> f64 {
-        self.lid_detection_threshold
-    }
-    pub fn lid_training_pruning_threshold(&self) -> f64 {
-        self.lid_training_pruning_threshold
-    }
-    pub fn lid_decision_thresh_rising(&self) -> f64 {
-        self.lid_decision_thresh_rising
-    }
-    pub fn lid_decision_thresh_falling(&self) -> f64 {
-        self.lid_decision_thresh_falling
-    }
     pub fn window_shift_sec(&self) -> f64 {
         self.window_shift_sec
     }
     pub fn spectrum_shift_sec(&self) -> f64 {
         self.spectrum_shift_sec
-    }
-    pub fn lid_window_shift_sec(&self) -> f64 {
-        self.lid_window_shift_sec
     }
     // -- SAD-side outputs ----------------------------------------------------
     /// `seg._CumulativeError[chan] = NNCost` (`:774`) `*= LIDCostPonderation` (`:1337`).
