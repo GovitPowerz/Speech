@@ -323,8 +323,9 @@ fn compute_label_errors(refc: &Segmentation, hyp: &Segmentation, per_class: &mut
 
 /// Sum of `(next.begin - it.begin)` over SPEECH segments.
 /// Direct port of the `speechDuration` accumulator in `Segmentation::toFile_VRCTS`
-/// (`Segmentation.cpp:546-551`).
-fn speech_duration(seg: &Segmentation) -> f64 {
+/// (`Segmentation.cpp:546-551`); the bag's per-channel result walk
+/// (`BagOfProcessors.cpp:324-330`) is the same loop, so it reads this one (issue #94).
+pub(crate) fn speech_duration(seg: &Segmentation) -> f64 {
     let segs = seg.segments();
     let mut total = 0.0f64;
     for i in 0..segs.len().saturating_sub(1) {

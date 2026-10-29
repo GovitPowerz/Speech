@@ -23,9 +23,10 @@ use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
     BlstmSignalSegmenter, BlstmSpectralSegmenter, LtsvSegmenter, TdcSegmenter,
 };
-use crate::tasks::segmentation::{SegClass, Segmentation};
+use crate::tasks::segmentation::Segmentation;
 use crate::tasks::segmentation_io::{
-    compute_errors, load_ref_csv, load_ref_stm, load_ref_vrcts, write_vrcts_multichannel,
+    compute_errors, load_ref_csv, load_ref_stm, load_ref_vrcts, speech_duration,
+    write_vrcts_multichannel,
 };
 use crate::tasks::segmenter::Segmenter;
 use crate::tasks::vrcts::VrctsPart;
@@ -271,7 +272,6 @@ pub struct BagOfProcessors {
     /// inert-by-default guard.
     fixed_gain: Option<f64>,
     lock_files_dir: String,
-    lock_files_prefix: String,
     algo_types: Vec<i32>,
     pruning_thresholds: Vec<f64>,
     processors: Vec<Processor>,
@@ -366,7 +366,6 @@ impl BagOfProcessors {
         // is a fallback MODE, not a fallback value, hence `get_f64_opt`.
         let fixed_gain = get_f64_opt(&configs[0], "Audio_fixed_gain")?;
         let lock_files_dir = get_string_default(&configs[0], "LockFilesDir", "");
-        let lock_files_prefix = get_string_default(&configs[0], "LockFilesPrefix", "");
         let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
 
         // Inference_Path (Phase 7 Task 4): `exact` (default, absent) selects the exact
@@ -497,7 +496,6 @@ impl BagOfProcessors {
             file_type,
             fixed_gain,
             lock_files_dir,
-            lock_files_prefix,
             algo_types,
             pruning_thresholds,
             processors,
@@ -539,37 +537,11 @@ impl BagOfProcessors {
         !self.lock_files_dir.is_empty()
     }
 
-    pub fn offset_begin(&self) -> f64 {
-        self.offset_begin
-    }
-
-    pub fn duration_max(&self) -> f64 {
-        self.duration_max
-    }
-
-    pub fn file_type(&self) -> i32 {
-        self.file_type
-    }
-
     /// Phase 8 S1.1: the parsed `Audio_fixed_gain` value, if the config carried one.
+    /// Observation hook (issue #94): read by `phase8_frozen_norm.rs` only.
+    #[cfg(feature = "test-support")]
     pub fn fixed_gain(&self) -> Option<f64> {
         self.fixed_gain
-    }
-
-    pub fn lock_files_dir(&self) -> &str {
-        &self.lock_files_dir
-    }
-
-    pub fn lock_files_prefix(&self) -> &str {
-        &self.lock_files_prefix
-    }
-
-    pub fn pruning_threshold(&self, pos: usize) -> f64 {
-        self.pruning_thresholds[pos]
-    }
-
-    pub fn exclude_nontrans(&self) -> bool {
-        self.exclude_nontrans
     }
 
     pub fn processor(&self, pos: usize) -> &Processor {
@@ -750,7 +722,6 @@ impl BagOfProcessors {
     fn print_confusion_matrix<'a>(
         &self,
         rows: impl IntoIterator<Item = &'a LidResult>,
-        _config_nb: usize,
     ) -> (f64, Array2<f64>) {
         let (matrix, error) = confusion::confusion_from_results(rows);
         (error, matrix)
@@ -835,13 +806,6 @@ impl BagOfProcessors {
             let mut sum_lid_cost = 0.0_f64;
             let mut sum_lid_correct = 0.0_f64;
             let mut sum_lid_count = 0.0_f64;
-            let mut sum_nb_words = 0.0_f64;
-            let mut sum_corrects = 0.0_f64;
-            let mut sum_subs = 0.0_f64;
-            let mut sum_ins = 0.0_f64;
-            let mut sum_dels = 0.0_f64;
-            let mut sum_coverage_penalty = 0.0_f64;
-            let mut sum_delay_penalty = 0.0_f64;
             for r in rows {
                 sum_error_rate += r.error_rate;
                 sum_seg_cost += r.seg_cost;
@@ -850,13 +814,6 @@ impl BagOfProcessors {
                 sum_lid_cost += r.lid_cost();
                 sum_lid_correct += r.lid.as_ref().map_or(0.0, LidResult::correct_wire);
                 sum_lid_count += r.lid_count() as f64;
-                sum_nb_words += r.wer.nb_words as f64;
-                sum_corrects += r.wer.corrects as f64;
-                sum_subs += r.wer.subs as f64;
-                sum_ins += r.wer.ins as f64;
-                sum_dels += r.wer.dels as f64;
-                sum_coverage_penalty += r.wer.coverage_penalty;
-                sum_delay_penalty += r.wer.delay_penalty;
             }
 
             // legacy: :413-414 cost = sums(4), guarded /= sums(last).
@@ -874,24 +831,9 @@ impl BagOfProcessors {
             // legacy: :418 badLIDClassif = 100-means(15).
             let bad_lid_classif = 100.0 - sum_lid_correct / n;
 
-            // legacy: :419-433 WER percent scaling, guarded by nbOfWords > 0.
-            let nb_of_words = sum_nb_words;
-            let mut wer_correct = 100.0 * sum_corrects;
-            let mut wer_subs = 100.0 * sum_subs;
-            let mut wer_ins = 100.0 * sum_ins;
-            let mut wer_dels = 100.0 * sum_dels;
-            let mut wer_coverage_penalty = 100.0 * sum_coverage_penalty;
-            let mut wer_delay_penalty = 100.0 * sum_delay_penalty;
-            if nb_of_words > 0.0 {
-                wer_correct /= nb_of_words;
-                wer_subs /= nb_of_words;
-                wer_ins /= nb_of_words;
-                wer_dels /= nb_of_words;
-                wer_coverage_penalty /= nb_of_words;
-                wer_delay_penalty /= nb_of_words;
-            }
-            let _wer = wer_subs + wer_ins + wer_dels;
-            let _ = (wer_correct, wer_coverage_penalty, wer_delay_penalty);
+            // legacy: :419-433 WER percent scaling (display-only there, nothing
+            // stored): not computed in the port (issue #94). The per-file `wer`
+            // members still reach the `.mat` through `ChannelResult::to_row`.
 
             // legacy: :435-441 confusion block, algo 5/6 only -- in the port, "this
             // config's results carry a LID block" (only the LID drivers fill one).
@@ -901,7 +843,7 @@ impl BagOfProcessors {
             // pair is dropped after the call.
             if rows.first().is_some_and(|r| r.lid.is_some()) {
                 let lid_rows = rows.iter().filter_map(|r| r.lid.as_ref());
-                let confusion_pair = self.print_confusion_matrix(lid_rows, ii + 1);
+                let confusion_pair = self.print_confusion_matrix(lid_rows);
                 #[cfg(feature = "test-support")]
                 self.last_confusion.push(confusion_pair);
                 #[cfg(not(feature = "test-support"))]
@@ -1148,7 +1090,7 @@ impl BagOfProcessors {
             for chan in 0..channel_count {
                 let refc = reference.as_ref().map(|r| &r[chan]);
                 let report = compute_errors(&mut seg_per_chan[chan], refc, nb_words);
-                let speech_duration = speech_duration_of(&seg_per_chan[chan]);
+                let speech_duration = speech_duration(&seg_per_chan[chan]);
                 let members = driver.channel_members(chan);
                 // legacy: :338/:380 `!seg._IsLIDCorrect.empty()` -- LID block live for
                 // algo 5/6 (the row WIDTH grows by the class count), else two 0.0s. The
@@ -1278,19 +1220,6 @@ fn extension_of(ref_seg: &str) -> RefExt {
         ".xml" => RefExt::Xml,
         _ => RefExt::Trs,
     }
-}
-
-/// Speech-duration walk over the hyp segments (`:324-330`): sum
-/// `next.begin - cur.begin` over SPEECH intervals (all but the `End` sentinel).
-fn speech_duration_of(seg: &Segmentation) -> f64 {
-    let segs = seg.segments();
-    let mut total = 0.0;
-    for i in 0..segs.len().saturating_sub(1) {
-        if segs[i].ty == SegClass::Speech {
-            total += segs[i + 1].begin - segs[i].begin;
-        }
-    }
-    total
 }
 
 /// Basename after the last `/`, minus the last 4 chars (`:353`, `:396`): the
@@ -1458,7 +1387,7 @@ mod tests {
         cfg.insert("File_Type".to_string(), "2".to_string());
         let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg))
             .expect("File_Type 2 (cep) must be accepted by the gate");
-        assert_eq!(bag.file_type(), 2);
+        assert_eq!(bag.file_type, 2);
     }
 
     #[test]
@@ -1481,7 +1410,7 @@ mod tests {
         cfg.insert("File_Type".to_string(), "1".to_string());
         let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg))
             .expect("File_Type 1 (phSeq) must be accepted by the gate");
-        assert_eq!(bag.file_type(), 1);
+        assert_eq!(bag.file_type, 1);
     }
 
     #[test]
