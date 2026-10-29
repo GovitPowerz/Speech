@@ -604,7 +604,6 @@ impl CorpusProcessor {
         let mut counter = 0usize;
         let mut initialized = false;
         let mut results_e: Array2<f64> = Array2::zeros((0, 0));
-        let mut res_width = 0usize;
 
         // legacy: :352 BOOST_FOREACH over _Results (BTreeMap == ascending file key).
         for (file_idx, mmap) in results {
@@ -622,7 +621,7 @@ impl CorpusProcessor {
                 // AND `mmap` is iterated again afterward, which is unreachable here (`mmap`
                 // is read-only past this point); the port's `.get()` does not reproduce that
                 // phantom insert.
-                res_width = mmap
+                let res_width = mmap
                     .get(&0)
                     .and_then(|chan_map| chan_map.get(&0))
                     .map(|r| r.to_row().len())
@@ -654,7 +653,6 @@ impl CorpusProcessor {
             // No results at all -> empty ResultsE.
             return Array2::zeros((0, 0));
         }
-        let _ = res_width;
         truncate_rows(&results_e, counter)
     }
 
@@ -667,17 +665,21 @@ impl CorpusProcessor {
         write_row_major(&mut w, "MultiConfigResults", &self.results_e)?;
         // legacy: :398-401 each mem topRows(epoch+1).
         let top = epoch + 1;
-        write_row_major(&mut w, "CostMem", &top_rows(&self.cost_mem, top))?;
+        write_row_major(&mut w, "CostMem", &truncate_rows(&self.cost_mem, top))?;
         write_row_major(
             &mut w,
             "BadClassifMem",
-            &top_rows(&self.bad_classif_mem, top),
+            &truncate_rows(&self.bad_classif_mem, top),
         )?;
-        write_row_major(&mut w, "CostLIDMem", &top_rows(&self.cost_lid_mem, top))?;
+        write_row_major(
+            &mut w,
+            "CostLIDMem",
+            &truncate_rows(&self.cost_lid_mem, top),
+        )?;
         write_row_major(
             &mut w,
             "BadClassifLIDMem",
-            &top_rows(&self.bad_classif_lid_mem, top),
+            &truncate_rows(&self.bad_classif_lid_mem, top),
         )?;
         w.finish()?;
         Ok(())
@@ -1166,18 +1168,13 @@ impl CorpusProcessor {
 
 /// Truncate an `Array2` to its first `n` rows (`conservativeResize(n, cols)`), a
 /// plain row-slice copy. Live call sites shrink or keep, except the pathological
-/// gradcheck empty-results path, where `top_rows` can be asked for more rows than
+/// gradcheck empty-results path, where `truncate_rows` (legacy `topRows(n)`, the first `n` rows) can be asked for more rows than
 /// `m` has (e.g. a 1-row `cost_mem` with `epoch+1 == 2`) -- that indexes out of
 /// bounds here, mirroring legacy `topRows(2)`-on-1-row UB. Faithful to legacy UB,
 /// unreachable under non-empty corpora, panics by design if hit.
 fn truncate_rows(m: &Array2<f64>, n: usize) -> Array2<f64> {
     let cols = m.dim().1;
     Array2::from_shape_fn((n, cols), |(i, j)| m[[i, j]])
-}
-
-/// `topRows(n)` == the first `n` rows.
-fn top_rows(m: &Array2<f64>, n: usize) -> Array2<f64> {
-    truncate_rows(m, n)
 }
 
 /// Write a row-major `Array2` to the (column-major) `MatWriter`, converting the
