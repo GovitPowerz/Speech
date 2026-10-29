@@ -115,6 +115,7 @@ fn run_path(
     let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();
     bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
 
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(
             bag.processor(0),
@@ -559,6 +560,7 @@ fn fast_dispatch_builds_bidirectional_cells() {
         let mut m = bicell_map(cell, Some("fast"), None, None);
         let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m))
             .unwrap_or_else(|e| panic!("fast + bidirectional {cell} must build: {e}"));
+        // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
         assert!(
             matches!(bag.processor(0), Processor::FastSpectral(_)),
             "{cell}: expected the fast SAD driver"
@@ -575,6 +577,7 @@ fn fast_dispatch_builds_bidirectional_cells() {
     m.insert("BLSTM_OutputNeuronNb".into(), "4,1".into());
     let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m))
         .unwrap_or_else(|e| panic!("fast + causal LSTM must build now: {e}"));
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag.processor(0), Processor::FastSpectral(_)),
         "causal LSTM: expected the fast SAD driver"

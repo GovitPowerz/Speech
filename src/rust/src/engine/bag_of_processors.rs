@@ -545,6 +545,12 @@ impl BagOfProcessors {
         self.fixed_gain
     }
 
+    /// Observation hook (issue #95): the driver at `pos` as its `Processor` variant.
+    /// Production reaches a driver only through [`Processor::driver`] (issue #25);
+    /// this is for the dispatch pins, whose fact is the variant itself (`Inference_Path
+    /// fast` built a `FastSpectral`, algo 6 a `FastTwinLid`), which `Segmenter` cannot
+    /// name.
+    #[cfg(feature = "test-support")]
     pub fn processor(&self, pos: usize) -> &Processor {
         &self.processors[pos]
     }

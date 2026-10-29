@@ -160,6 +160,7 @@ fn bag_threads_fixed_gain_to_internal_read_audio() {
         weight: 1.0,
     };
     bag_a.segmentation_function(&item, image_mode()).unwrap();
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag_a.processor(0), Processor::FastSpectral(_)),
         "expected FastSpectral for the frozen staged config"
@@ -174,6 +175,7 @@ fn bag_threads_fixed_gain_to_internal_read_audio() {
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];
     bag_b.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag_b.processor(0), Processor::FastSpectral(_)),
         "expected FastSpectral for the frozen staged config"
@@ -434,6 +436,7 @@ fn run_fast(
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];
     bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag.processor(0), Processor::FastSpectral(_)),
         "expected FastSpectral"
@@ -594,6 +597,7 @@ fn frozen_norm_exact_matches_fast_adjudication_pin() {
     bag_exact
         .run_get_segmentation(0, &mut audio_exact, &mut seg_exact_vec)
         .unwrap();
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag_exact.processor(0), Processor::Spectral(_)),
         "expected Spectral (exact) for the frozen staged config"

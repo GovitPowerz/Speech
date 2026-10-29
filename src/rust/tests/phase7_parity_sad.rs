@@ -80,6 +80,7 @@ fn run_path(inference: Option<&str>) -> (Vec<Vec<f64>>, Vec<Segmentation>) {
     let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();
     bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
 
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(
             bag.processor(0),
@@ -407,6 +408,7 @@ fn fast_dispatch_per_cell_type_and_direction() {
         m.insert("BLSTM_Cell_Type".into(), cell.into());
         let bag = build_fast_bag(&mut m)
             .unwrap_or_else(|e| panic!("fast + bidirectional {cell} must build: {e}"));
+        // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
         assert!(
             matches!(bag.processor(0), Processor::FastSpectral(_)),
             "{cell}: expected the fast SAD driver"
@@ -440,6 +442,7 @@ fn fast_dispatch_per_cell_type_and_direction() {
     m.insert("BLSTM_window".into(), "0".into());
     let bag = build_fast_bag(&mut m)
         .unwrap_or_else(|e| panic!("fast + Direction forward must build (Task 8): {e}"));
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag.processor(0), Processor::FastSpectral(_)),
         "causal LSTM: expected the fast SAD driver"
