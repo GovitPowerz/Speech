@@ -136,10 +136,11 @@ fn run_path(
     let mut seg: Vec<Segmentation> = (0..n_chan).map(|_| Segmentation::new(dur)).collect();
     bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
 
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(
-            bag.processor(0),
-            Processor::Spectral(_) | Processor::FastSpectral(_)
+            (inference, bag.processor(0)),
+            (None, Processor::Spectral(_)) | (Some("fast"), Processor::FastSpectral(_))
         ),
         "unexpected processor variant for cell={cell} inference={inference:?}"
     );
@@ -525,6 +526,7 @@ fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
     for cell in CAUSAL_CELLS {
         let mut m = causal_map(cell, Some("fast"), None);
         let bag = build(&mut m).unwrap_or_else(|e| panic!("fast + causal {cell} must build: {e}"));
+        // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
         assert!(
             matches!(bag.processor(0), Processor::FastSpectral(_)),
             "{cell}: expected the fast SAD driver"
@@ -555,6 +557,7 @@ fn fast_dispatch_bails_and_builds_per_cell_and_direction() {
         );
         let bag =
             build(&mut m).unwrap_or_else(|e| panic!("fast + bidirectional {cell} must build: {e}"));
+        // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
         assert!(
             matches!(bag.processor(0), Processor::FastSpectral(_)),
             "{cell}: expected the fast SAD driver"

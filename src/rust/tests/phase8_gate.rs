@@ -64,6 +64,7 @@ fn run_offline_fast(
     let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
     let mut seg = vec![Segmentation::new(dur)];
     bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
+    // Dispatch guard (#95): the leg ran on this variant, read off the `processor` test-support hook.
     assert!(
         matches!(bag.processor(0), Processor::FastSpectral(_)),
         "expected FastSpectral for the frozen staged config"

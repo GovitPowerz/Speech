@@ -406,6 +406,7 @@ fn twin_map_fast() -> IndexMap<String, String> {
 fn fast_dispatch_routes_algo6_to_fast_twin() {
     let mut m = twin_map_fast();
     let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut m)).unwrap();
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag.processor(0), Processor::FastTwinLid(_)),
         "fast + algo 6 must dispatch to FastTwinLid"
@@ -419,6 +420,7 @@ fn fast_dispatch_routes_algo6_to_fast_twin() {
         phase4b("LID_bestNNWeight_1.bin").to_str().unwrap().into(),
     );
     let bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact)).unwrap();
+    // Dispatch pin (#95): the variant is the fact under test, read off the `processor` test-support hook.
     assert!(
         matches!(bag.processor(0), Processor::TwinLid(_)),
         "absent Inference_Path must dispatch to the exact TwinLid"
@@ -439,6 +441,7 @@ fn fast_twin_set_weights_answers_as_the_exact_arm() {
     exact_map.shift_remove("Inference_Path");
     let mut fast = BagOfProcessors::from_configs(std::slice::from_mut(&mut fast_map)).unwrap();
     let mut exact = BagOfProcessors::from_configs(std::slice::from_mut(&mut exact_map)).unwrap();
+    // Dispatch guard (#95): the leg ran on this variant, read off the `processor` test-support hook.
     assert!(matches!(fast.processor(0), Processor::FastTwinLid(_)));
     assert!(matches!(exact.processor(0), Processor::TwinLid(_)));
 
