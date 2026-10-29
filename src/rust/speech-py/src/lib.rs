@@ -21,7 +21,7 @@ use speech::cli::Mode;
 use speech::engine::corpus_processor::CorpusProcessor;
 use speech::fast::stream::{EmittedSegment, StreamingSession as RsStreamingSession};
 use speech::fast::stream_lid::{LidAggregate, StreamingLidSession as RsStreamingLidSession};
-use speech::legacy_config::parse_legacy_config as parse_legacy_config_rs;
+use speech::legacy_config::{parse_legacy_config as parse_legacy_config_rs, parse_usize};
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 use speech::stream_cli::class_str;
 use speech::toml_config::toml_to_map as toml_to_map_rs;
@@ -157,13 +157,19 @@ fn weight_layout<'py>(
     Ok(out)
 }
 
-/// The resolved `BlstmConfig` of the `prefix` net a config map describes, under the keys
-/// `config_bridge.nnet_spec` has always returned (issue #27): `LSTMNeuronNb`,
-/// `LSTMSubSampling`, `OutputNeuronNb`, `OutputSubSampling`, `NNetInputSize`, `peepholes`
-/// (the six flags, forward/backward interleaved per family), `CostLawSpeech`,
-/// `CostLawNoSpeech`, `CellType`, `Direction`, and the three geometry dicts `Mamba`, `Cfc`,
-/// `Transformer` with their RUST defaults filled in -- so Python mirrors no numeric default
-/// (ADR-0006). A config the engine refuses raises `ValueError` with the engine's message.
+/// The resolved `BlstmConfig` of the `prefix` net a config map describes, the one reader
+/// Python has for the architecture (issue #27): `LSTMNeuronNb`, `LSTMSubSampling`,
+/// `OutputNeuronNb`, `OutputSubSampling`, `NNetInputSize`, `peepholes` (the six flags,
+/// forward/backward interleaved per family), `CostLawSpeech`, `CostLawNoSpeech`,
+/// `CellType`, `Direction`, and the three geometry dicts `Mamba`, `Cfc`, `Transformer`
+/// with their RUST defaults filled in -- so Python mirrors no numeric default (ADR-0006).
+/// A config the engine refuses raises `ValueError` with the engine's message.
+///
+/// `NNetInputSize` is the one entry the engine does not parse for itself (issue #90): the
+/// declared `{prefix}_NNetInputSize` when the key is present (malformed -> `ValueError`
+/// naming the key), else the width the net is built at, `BlstmConfig::input_size` -- so
+/// the call succeeds on every config `BlstmConfig::from_legacy` accepts, the committed LID
+/// Twin config (which declares the key on neither net) included. One parse, no `NnetSpec`.
 #[pyfunction]
 fn blstm_config<'py>(
     py: Python<'py>,
@@ -172,9 +178,11 @@ fn blstm_config<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let map = dict_to_map(config)?;
     let cfg = BlstmConfig::from_legacy(&map, prefix).map_err(to_value_err)?;
-    let input_size = speech::config::NnetSpec::from_legacy(&map, prefix)
-        .map_err(to_value_err)?
-        .input_size;
+    let input_key = format!("{prefix}_NNetInputSize");
+    let input_size = match map.get(&input_key) {
+        Some(v) => parse_usize(v, &input_key).map_err(to_value_err)?,
+        None => cfg.input_size(),
+    };
     let (speech_law, no_speech_law) = cfg.cost_law.law_names();
     let d = PyDict::new(py);
     d.set_item("LSTMNeuronNb", &cfg.lstm_neuron_nb)?;
