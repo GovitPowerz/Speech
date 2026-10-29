@@ -133,7 +133,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from speech.config_bridge import nnet_spec, parse_legacy_config
+from speech.config_bridge import parse_legacy_config
 from speech.engine import ChannelResults
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_weight_vector, write_bin
@@ -1058,7 +1058,7 @@ def test_real_lre_sad_config_defaults_to_lstm_bidirectional(tmp_path: Path) -> N
 
     This closes T4's default-identity pin, which used a synthetic stand-in. Asserted at
     THREE levels on the real file: the flattened key map carries no phase-9 key at all;
-    `nnet_spec` reports `lstm`/`bidirectional`; and the engine BUILDS against the pack
+    `speech_rs.blstm_config` reports `lstm`/`bidirectional`; and the engine BUILDS against the pack
     `init_weights` produces from that spec -- i.e. the default Python init still fits the
     default Rust architecture, byte for byte.
 
@@ -1070,7 +1070,7 @@ def test_real_lre_sad_config_defaults_to_lstm_bidirectional(tmp_path: Path) -> N
     assert "BLSTM_Cell_Type" not in flat, "lre_sad.toml gained a cell-type key -- this default-identity pin needs revisiting"
     assert "BLSTM_Direction" not in flat, "lre_sad.toml gained a direction key -- this default-identity pin needs revisiting"
 
-    spec = nnet_spec(flat)
+    spec = speech_rs.blstm_config(flat, "BLSTM")
     assert spec["CellType"] == "lstm"
     assert spec["Direction"] == "bidirectional"
     pack = init_weights(flat, "BLSTM", np.random.default_rng(920507), "xavier", True)[0]

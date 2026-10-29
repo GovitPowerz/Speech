@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import speech_rs
 from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
@@ -233,19 +234,19 @@ def _tuple_a_cfg() -> dict[str, str]:
     return config_bridge.parse_legacy_config((REF / "tupleA_1_worker_1.config").read_text())
 
 
-def test_nnet_spec_defaults_to_the_sized_geometry() -> None:
-    spec = config_bridge.nnet_spec(_tuple_a_cfg(), prefix="BLSTM")
+def test_blstm_config_defaults_to_the_sized_geometry() -> None:
+    spec = speech_rs.blstm_config(_tuple_a_cfg(), "BLSTM")
     assert spec["Transformer"] == {"window": DEFAULT_WINDOW, "heads": DEFAULT_HEADS, "d_ff": SIZED_D_FF}
     assert spec["CellType"] == "lstm"  # the geometry is inert unless the cell is selected.
 
 
-def test_nnet_spec_reads_the_port_only_keys() -> None:
+def test_blstm_config_reads_the_port_only_keys() -> None:
     cfg = _tuple_a_cfg()
     cfg["BLSTM_Cell_Type"] = "transformer"
     cfg["Transformer_Window"] = "16"
     cfg["Transformer_Heads"] = "8"
     cfg["Transformer_D_Ff"] = "40"
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
+    spec = speech_rs.blstm_config(cfg, "BLSTM")
     assert spec["CellType"] == "transformer"
     assert spec["Transformer"] == {"window": 16, "heads": 8, "d_ff": 40}
 
@@ -257,7 +258,7 @@ def test_degenerate_transformer_geometry_is_rejected(key: str) -> None:
     cfg = _tuple_a_cfg()
     cfg[key] = "0"
     with pytest.raises(ValueError, match=key):
-        config_bridge.nnet_spec(cfg, prefix="BLSTM")
+        speech_rs.blstm_config(cfg, "BLSTM")
     with pytest.raises(ValueError, match=key):
         init_weights({**cfg, "BLSTM_Cell_Type": "transformer"}, "BLSTM", np.random.default_rng(0))
 
@@ -269,7 +270,7 @@ def test_the_defaults_are_the_rust_defaults() -> None:
     cfg = {**_tuple_a_cfg(), "BLSTM_Cell_Type": "transformer"}
     w1 = block_of(layout_of(cfg), "forward", 0, "W_1")
     assert w1["shape"] == [SIZED_D_FF, 24]
-    assert config_bridge.nnet_spec(cfg)["Transformer"] == {"window": DEFAULT_WINDOW, "heads": DEFAULT_HEADS, "d_ff": SIZED_D_FF}
+    assert speech_rs.blstm_config(cfg, "BLSTM")["Transformer"] == {"window": DEFAULT_WINDOW, "heads": DEFAULT_HEADS, "d_ff": SIZED_D_FF}
 
 
 # ------------------------------------------------------------------------------------- #

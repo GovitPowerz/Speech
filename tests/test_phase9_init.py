@@ -19,6 +19,7 @@ from typing import cast
 
 import numpy as np
 import pytest
+import speech_rs
 from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
@@ -113,7 +114,7 @@ def test_mamba_spec_pinned_constants(geom: dict[str, str]) -> None:
     cfg = cell_cfg("mamba", **geom)
     flat = init_weights(cfg, "BLSTM", np.random.default_rng(3))[0]
     layout = layout_of(cfg)
-    spec = cast(dict[str, int], config_bridge.nnet_spec(cfg)["Mamba"])
+    spec = cast(dict[str, int], speech_rs.blstm_config(cfg, "BLSTM")["Mamba"])
     for layer in (0, 1):
         d_inner, d_state = block_of(layout, "forward", layer, "A_log")["shape"]
         assert d_inner == spec["expand"] * int(cfg["BLSTM_LSTMNeuronNb"].split(",")[layer + 1])
@@ -240,14 +241,14 @@ def test_unknown_scheme_raises_before_the_seam() -> None:
 @pytest.mark.parametrize(("key", "value"), [("Mamba_D_State", "0"), ("Mamba_D_Conv", "0"), ("Mamba_Expand", "0")])
 def test_degenerate_mamba_geometry_is_rejected(key: str, value: str) -> None:
     """`MambaParams::from_legacy` (blstm.rs) hard-bails below 1; the seam carries that
-    refusal to both `nnet_spec` and `init_weights` as a `ValueError` naming the key."""
+    refusal to both `speech_rs.blstm_config` and `init_weights` as a `ValueError` naming the key."""
     cfg = cell_cfg("mamba", **{key: value})
     with pytest.raises(ValueError, match=key):
-        config_bridge.nnet_spec(cfg, prefix="BLSTM")
+        speech_rs.blstm_config(cfg, "BLSTM")
     with pytest.raises(ValueError, match=key):
         init_weights(cfg, "BLSTM", np.random.default_rng(0))
     # `dt_rank` may be 0 (= auto).
-    assert cast(dict[str, int], config_bridge.nnet_spec(cell_cfg("mamba", Mamba_Dt_Rank="0"))["Mamba"])["dt_rank"] == 0
+    assert cast(dict[str, int], speech_rs.blstm_config(cell_cfg("mamba", Mamba_Dt_Rank="0"), "BLSTM")["Mamba"])["dt_rank"] == 0
 
 
 def test_unknown_cell_type_raises() -> None:
@@ -287,21 +288,21 @@ def test_lstm_path_is_byte_identical_with_and_without_the_new_keys() -> None:
 # ------------------------------------------------------------------------------------- #
 
 
-def test_nnet_spec_defaults_to_the_legacy_shape() -> None:
-    spec = config_bridge.nnet_spec(TUPLE_A, prefix="BLSTM")
+def test_blstm_config_defaults_to_the_legacy_shape() -> None:
+    spec = speech_rs.blstm_config(TUPLE_A, "BLSTM")
     assert spec["CellType"] == "lstm"
     assert spec["Direction"] == "bidirectional"
     assert spec["Mamba"] == {"d_state": 16, "d_conv": 4, "expand": 2, "dt_rank": 0}
 
 
-def test_nnet_spec_reads_the_port_only_keys() -> None:
+def test_blstm_config_reads_the_port_only_keys() -> None:
     cfg = dict(TUPLE_A)
     cfg["BLSTM_Cell_Type"] = "mamba"
     cfg["BLSTM_Direction"] = "forward"
     cfg["BLSTM_OutputNeuronNb"] = "24,12,1"
     cfg["Mamba_D_State"] = "8"
     cfg["Mamba_Expand"] = "1"
-    spec = config_bridge.nnet_spec(cfg, prefix="BLSTM")
+    spec = speech_rs.blstm_config(cfg, "BLSTM")
     assert spec["CellType"] == "mamba"
     assert spec["Direction"] == "forward"
     # Mamba_* is UNPREFIXED by design (one geometry per config, spec S6/S3.3).

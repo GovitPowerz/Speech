@@ -21,9 +21,10 @@ everywhere `.toml` is.
 Port-only keys (the fast-path selector, the streaming gain, the cell and direction, the per-cell
 geometry) are added as rows with the legacy shape as their default, so every pre-existing config
 decodes byte-unchanged; a geometry block is unprefixed (one geometry per config) by precedent.
-The Python side reads the same keys through `config_bridge.nnet_spec`, which since issue #27 is
-the seam call `speech_rs.blstm_config` (the engine's own `BlstmConfig::from_legacy`, its defaults
-filled in), so a present-but-invalid geometry raises on both sides rather than defaulting,
+The Python side reads the same keys through the seam call `speech_rs.blstm_config` (the engine's
+own `BlstmConfig::from_legacy`, its defaults filled in; the `config_bridge.nnet_spec` wrapper over
+it, test-only since issue #27, was deleted in issue #90), so a present-but-invalid geometry raises
+on both sides rather than defaulting,
 because a silently defaulted geometry changes a weight pack's length with nothing to catch it.
 
 ## Consequences
