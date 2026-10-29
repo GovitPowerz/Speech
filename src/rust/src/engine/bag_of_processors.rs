@@ -322,8 +322,9 @@ impl BagOfProcessors {
     ///
     /// Config-0-only keys (`:10-15`): `numOuterThreads` (REQUIRED, no default --
     /// missing is an error, unlike every other key here), `Audio_offset` 0.0,
-    /// `Audio_max_duration` 3.6e6, `File_Type` 0, `LockFilesDir` "" (`LockFilesPrefix`
-    /// is no longer read: nothing in the port consumed it, issue #94). `exclude_nontrans` (NOT a legacy `BagOfProcessors` member -- read from
+    /// `Audio_max_duration` 3.6e6, `File_Type` 0, `LockFilesDir` ""
+    /// (`LockFilesPrefix` is no longer read: nothing in the port consumed it, issue
+    /// #94). `exclude_nontrans` (NOT a legacy `BagOfProcessors` member -- read from
     /// configs[0] here so it's available alongside the bag for Task 5's reference
     /// loading, default false). `Audio_fixed_gain` (Phase 8 S1.1, port-only, no
     /// legacy source): absent -> `None`, threaded to every `read_audio` call in
@@ -720,7 +721,6 @@ impl BagOfProcessors {
     /// what `:597`'s `return error;` hands back unchanged (the commented-out
     /// `return error/classNb;` at `:596` would have double-divided).
     fn print_confusion_matrix<'a>(
-        &self,
         rows: impl IntoIterator<Item = &'a LidResult>,
     ) -> (f64, Array2<f64>) {
         let (matrix, error) = confusion::confusion_from_results(rows);
@@ -752,7 +752,8 @@ impl BagOfProcessors {
 
     /// Port of `BagOfProcessors::saveAndUpdate` (`:409-471`): per-config
     /// column-sum/mean aggregation over the file x channel results, cost/
-    /// badClassif/costLID/badLIDClassif derivation, WER percent scaling, the
+    /// badClassif/costLID/badLIDClassif derivation (the WER percent scaling is
+    /// display-only and not computed, issue #94), the
     /// `costMem`/`badClassifMem`/`costLIDMem`/`badClassifLIDMem` row writes, the
     /// `bestNNWeight_<pos+1>_<filename>` save, and the `costLID = -1.0` gate
     /// (`:465`) applied AFTER `save_weights` and BEFORE `update_weights` -- order
@@ -843,7 +844,7 @@ impl BagOfProcessors {
             // pair is dropped after the call.
             if rows.first().is_some_and(|r| r.lid.is_some()) {
                 let lid_rows = rows.iter().filter_map(|r| r.lid.as_ref());
-                let confusion_pair = self.print_confusion_matrix(lid_rows);
+                let confusion_pair = Self::print_confusion_matrix(lid_rows);
                 #[cfg(feature = "test-support")]
                 self.last_confusion.push(confusion_pair);
                 #[cfg(not(feature = "test-support"))]
@@ -1090,7 +1091,7 @@ impl BagOfProcessors {
             for chan in 0..channel_count {
                 let refc = reference.as_ref().map(|r| &r[chan]);
                 let report = compute_errors(&mut seg_per_chan[chan], refc, nb_words);
-                let speech_duration = speech_duration(&seg_per_chan[chan]);
+                let speech_dur = speech_duration(&seg_per_chan[chan]);
                 let members = driver.channel_members(chan);
                 // legacy: :338/:380 `!seg._IsLIDCorrect.empty()` -- LID block live for
                 // algo 5/6 (the row WIDTH grows by the class count), else two 0.0s. The
@@ -1110,12 +1111,12 @@ impl BagOfProcessors {
                         time_per_hour,
                         members.cumulative_error,
                         audio_duration,
-                        speech_duration,
+                        speech_dur,
                         members.nb_of_classif,
                         lid,
                     )
                 } else {
-                    ChannelResult::unscored(time_per_hour, audio_duration, speech_duration, lid)
+                    ChannelResult::unscored(time_per_hour, audio_duration, speech_dur, lid)
                 };
                 chan_map.insert(chan, result);
             }

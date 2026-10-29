@@ -56,9 +56,11 @@ update take one `training_policy` keyed on the algo number as the legacy is (the
 criteria, update costs, `LID_` prefix and order); nothing recomputed, proven by the goldens
 byte-green, issue #25; the same class, 2026-10-28: `Segmenter::is_fast_tree` deleted with
 its default and both overrides, fast or exact being the bag's one stored fact, issue #110;
-the same class, 2026-10-29: the Bag's and the drivers' caller-less getters, the Bag's
-discarded WER percent block, a duplicate `speech_duration` and the corpus processor's
-`top_rows` alias deleted, nothing recomputed, the `.mat` goldens byte-identical, issue #94).
+the same class, 2026-10-29: the Bag's and the drivers' caller-less getters, four
+never-read fields (the Bag's `lock_files_prefix` with its `LockFilesPrefix` read, the Twin's
+two threshold fields and the fast Twin's `mode`, whose keys stay parsed), the Bag's discarded WER percent block, two
+copies of the speech-duration walk and the corpus processor's `top_rows` alias deleted,
+nothing recomputed, the `.mat` goldens byte-identical, issue #94).
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

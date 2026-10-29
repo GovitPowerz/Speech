@@ -62,7 +62,7 @@ use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmentation::{SegClass, Segmentation};
-use crate::tasks::segmentation_io::compute_errors;
+use crate::tasks::segmentation_io::{compute_errors, speech_duration};
 use crate::tasks::segmenter::{
     ChannelMembers, DriverConfig, LidChannel, Segmenter, SegmenterConfig, get_targets,
     lid_to_segmentation, results_to_segmentation, smooth_segmentation,
@@ -183,16 +183,6 @@ impl BlstmSpectralLid {
     /// `from_legacy(map, None)`, matching the legacy in-ctor load.
     pub fn load_weights_file(&mut self, map: &IndexMap<String, String>) -> Result<()> {
         self.net.load_weights_file(map, "BLSTM")
-    }
-
-    /// The stateful `_WindowShift` member, POST the last `get_segmentation` call.
-    pub fn window_shift_sec(&self) -> f64 {
-        self.window_shift_sec
-    }
-
-    /// The stateful `_SpectrumShift` member, POST the last call.
-    pub fn spectrum_shift_sec(&self) -> f64 {
-        self.spectrum_shift_sec
     }
 
     /// The per-channel LID members written by the last `get_segmentation` call.
@@ -863,17 +853,8 @@ impl TwinBlstmSpectralLid {
     }
 
     // -- scalar/config accessors --------------------------------------------
-    pub fn mode(&self) -> i32 {
-        self.mode
-    }
     pub fn post_process_mode(&self) -> i32 {
         self.post_process_mode
-    }
-    pub fn window_shift_sec(&self) -> f64 {
-        self.window_shift_sec
-    }
-    pub fn spectrum_shift_sec(&self) -> f64 {
-        self.spectrum_shift_sec
     }
     // -- LID-side outputs (mirror Algo 5) ------------------------------------
     /// The per-channel LID members written by the last `get_segmentation` call.
@@ -2233,20 +2214,15 @@ impl Segmenter for TwinBlstmSpectralLid {
             };
 
             // Scoring iterator: REFERENCE for modes 2/3, CLASSIFICATION for 0/1 (`:1223-1239`).
-            let scoring_segs: Vec<crate::tasks::segmentation::Segment> =
-                if (self.mode == 2 || self.mode == 3) && has_ref {
-                    refs.unwrap()[chan].segments().to_vec()
-                } else {
-                    seg.segments().to_vec()
-                };
+            let scoring_seg: &Segmentation = if (self.mode == 2 || self.mode == 3) && has_ref {
+                &refs.unwrap()[chan]
+            } else {
+                seg
+            };
+            let scoring_segs = scoring_seg.segments().to_vec();
 
             // totalSpeechDuration over the scoring iterator (`:1229-1234`).
-            let mut total_speech_duration = 0.0f64;
-            for i in 0..scoring_segs.len().saturating_sub(1) {
-                if scoring_segs[i].ty == SegClass::Speech {
-                    total_speech_duration += scoring_segs[i + 1].begin - scoring_segs[i].begin;
-                }
-            }
+            let total_speech_duration = speech_duration(scoring_seg);
 
             // interestSegs (`:1240`) + the TrainingPruning gate (`:1286`, mutating
             // `itInterest->_Type`) are NOT reproduced: `interestSegs` is consumed ONLY by

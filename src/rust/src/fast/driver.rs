@@ -948,7 +948,6 @@ pub struct FastTwinLid {
     /// Mode-7 LID scalars (`BLSTM_LID_*`).
     lid_window_size_sec: f64,
     lid_window_shift_sec: f64,
-    mode: i32,
     post_process_mode: i32,
     min_nb_of_frames: i32,
     noise_magnitude: f64,
@@ -1118,7 +1117,6 @@ impl FastTwinLid {
             lid_two_sweeps,
             lid_window_size_sec,
             lid_window_shift_sec,
-            mode,
             post_process_mode,
             min_nb_of_frames,
             noise_magnitude,
@@ -1184,13 +1182,6 @@ impl FastTwinLid {
     /// builds its own arm.
     pub fn lid_shape(&self) -> FastNetShape {
         self.lid_shape
-    }
-
-    pub fn mode(&self) -> i32 {
-        self.mode
-    }
-    pub fn post_process_mode(&self) -> i32 {
-        self.post_process_mode
     }
 
     /// The per-channel LID members written by the last `get_segmentation` call.

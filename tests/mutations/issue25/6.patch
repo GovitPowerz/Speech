@@ -11,7 +11,7 @@ index 706d4bd..3335d5c 100644
 @@ -1071,7 +1071,7 @@ impl BagOfProcessors {
                  let refc = reference.as_ref().map(|r| &r[chan]);
                  let report = compute_errors(&mut seg_per_chan[chan], refc, nb_words);
-                 let speech_duration = speech_duration(&seg_per_chan[chan]);
+                 let speech_dur = speech_duration(&seg_per_chan[chan]);
 -                let members = driver.channel_members(chan);
 +                let members = driver.channel_members(0);
                  // legacy: :338/:380 `!seg._IsLIDCorrect.empty()` -- LID block live for

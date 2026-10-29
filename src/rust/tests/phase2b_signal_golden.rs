@@ -408,8 +408,10 @@ fn overlap_result_and_boundaries_match_dump() {
         &format!("{tag} e2e"),
     );
 
-    // The driver sized its per-channel cost / classif vectors to the two channels:
-    // both are readable through the seam and a third is not.
+    // The driver sized its per-channel members to the two channels: both channels
+    // are readable through the seam and a third is not. `channel_members` indexes
+    // `cumulative_error` first, so the out-of-range probe pins that vector's length;
+    // `nb_of_classif` is pinned to at least two by the in-range reads.
     for chan in 0..2 {
         let m = sig.channel_members(chan);
         assert!(
@@ -418,9 +420,9 @@ fn overlap_result_and_boundaries_match_dump() {
         );
     }
     let third = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        sig.channel_members(2).nb_of_classif
+        sig.channel_members(2).cumulative_error
     }));
-    assert!(third.is_err(), "overlap: exactly two per-channel members");
+    assert!(third.is_err(), "overlap: no third per-channel cost");
 }
 
 /// Run 2/2 (zero offset, matching `signal_overlap_vrcts_chan1.xml`): the VRCTS byte
