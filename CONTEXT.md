@@ -220,7 +220,7 @@ The data-dependent bound an Other segment inherits: its right edge is the next s
 `train_modern`: seeded init, SMORMS3 epochs through the seam, per-epoch validation, early stop, best / last checkpoints. Gradient-only.
 
 **Legacy regime**:
-The 2015 outer loop: QuantumPSO over a genome that carried the weights in-band. Kept byte-untouched as a driver; weights are now masked out of the genome.
+The 2015 outer loop: QuantumPSO over a genome that carried the weights in-band. Kept as a driver with its arithmetic byte-untouched (issue #102 deduplicated the plumbing around it: the knob defaults, the `QpsoParams` build, the checkpoint write); weights are now masked out of the genome.
 
 **Genome**:
 The vec2struct parameter vector the outer search decodes into a config.
