@@ -350,40 +350,32 @@ impl FastSadPlan {
         let ssif = params.shift_frames;
         let spectrum_shift_sec = params.shift_sec;
 
-        // getBLSTMParam (tasks/sad.rs): window/shift derivation, mutating the window shift
-        // (the stateful `_WindowShift`, here a local). `frame_count` 0: only
-        // `real_vec_size` depends on it ([`Self::rows_for`]).
-        let mut window_shift_sec = self.driver_cfg.window_shift_sec;
-        let (window_size, window_shift, no_overlap, _rows) = get_blstm_param(
-            self.driver_cfg.window_size_sec,
-            &mut window_shift_sec,
+        // The one SAD-axis body ([`sad_axis`]): `get_blstm_param` off the config values,
+        // then the authoritative regime check on the RESOLVED values (the pre-check's,
+        // re-run), then the time axis. `frame_count` 0: only `rows` depends on it
+        // ([`Self::rows_for`]).
+        let axis = sad_axis(
+            &self.driver_cfg,
+            &self.spec,
+            self.ssr,
             rate,
             ssif,
-            self.ssr,
-            &self.spec.lstm_subsampling,
-            &self.spec.output_subsampling,
+            spectrum_shift_sec,
             0,
         );
-
-        // The regime rule on the RESOLVED values (the pre-check's, re-run authoritatively).
-        self.check_regime(window_size != 0, no_overlap, &format!(" at {rate} Hz"))?;
-
-        // timeStep/timeOffset (`tasks::sad::BlstmSpectralSegmenter::get_segmentation`, the
-        // block the exact driver cites as legacy `BLSTMSpectralSegmenter.cpp:724-734`): the
-        // BASE pair is `_WindowShift`-derived; the OVERLAP branch OVERRIDES it with
-        // `_SpectrumShift` (the asymmetry vs the signal driver). `window_size == 0` -- the
-        // causal regime -- keeps the base pair, where `window_shift_sec` is the value
-        // `get_blstm_param` just mutated (`window_shift * ssif / rate`, `window_shift`
-        // floored to 1 at window 0).
-        // `no_overlap` is refused above, so `window_size > 0` here means OVERLAP.
-        let ssr = self.ssr as f64;
-        let (time_step, time_offset) = if window_size > 0 {
-            let ts = spectrum_shift_sec * ssr;
-            (ts, ts / 2.0 - spectrum_shift_sec / 2.0)
-        } else {
-            let ts = window_shift_sec * ssr;
-            (ts, ts / 2.0 - window_shift_sec / 2.0)
-        };
+        self.check_regime(
+            axis.window_size != 0,
+            axis.no_overlap,
+            &format!(" at {rate} Hz"),
+        )?;
+        let SadAxis {
+            window_shift_sec,
+            window_size,
+            window_shift,
+            time_step,
+            time_offset,
+            ..
+        } = axis;
 
         Ok(SadTimeline {
             rate,
@@ -400,21 +392,19 @@ impl FastSadPlan {
 
     /// `real_vec_size` for a file of `frame_count` samples on timeline `tl`:
     /// `get_blstm_param`'s `ceil(frame_count / ssif)` divided sequentially by every
-    /// sub-sampling ratio -- the ONE frame-count-dependent output, re-run on the frozen
-    /// function rather than re-derived here (the window/shift it also returns are `tl`'s).
+    /// sub-sampling ratio -- the ONE frame-count-dependent output, re-run through
+    /// [`sad_axis`] rather than re-derived here (the window/shift it also returns are `tl`'s).
     pub fn rows_for(&self, tl: &SadTimeline, frame_count: usize) -> usize {
-        let mut window_shift_sec = self.driver_cfg.window_shift_sec;
-        get_blstm_param(
-            self.driver_cfg.window_size_sec,
-            &mut window_shift_sec,
+        sad_axis(
+            &self.driver_cfg,
+            &self.spec,
+            self.ssr,
             tl.rate,
             tl.ssif,
-            self.ssr,
-            &self.spec.lstm_subsampling,
-            &self.spec.output_subsampling,
+            tl.spectrum_shift_sec,
             frame_count,
         )
-        .3
+        .rows
     }
 
     /// `BLSTM_weightsFile` read under the legacy FILE-LOAD tolerance ([`read_file_pack`]:
@@ -433,6 +423,78 @@ impl FastSadPlan {
         check_pack_len(flat.len(), self.pack_len)?;
         build_net(&self.spec, self.shape, &self.geometry, flat)
     }
+}
+
+/// The SAD window resolution and the decision layer's time axis at one rate, ONE body for
+/// both plans (issue #84): the exact spectral driver's per-file derivation
+/// (`tasks::sad::BlstmSpectralSegmenter::get_segmentation`, the block it cites as legacy
+/// `BLSTMSpectralSegmenter.cpp:724-734`), PURE and from the config values (the window
+/// shift a local, never the carried `_WindowShift`: the dropped carry of the module docs).
+/// `ssif` / `spectrum_shift_sec` are the caller's: `SpectralParams::derive`'s for the SAD
+/// plan, the Mode-7 constant 80 for the LID plan. The BASE `(time_step, time_offset)` pair
+/// is `window_shift_sec`-derived; the OVERLAP branch OVERRIDES it with the spectrum shift
+/// (the asymmetry vs the signal driver); truncate keeps the base pair, where
+/// `window_shift_sec` is the value `get_blstm_param` just quantized (floored to 1 at
+/// window 0). `rows` is the only frame-count-dependent output.
+pub fn sad_axis(
+    driver_cfg: &DriverConfig,
+    spec: &NnetSpec,
+    ssr: usize,
+    rate: f64,
+    ssif: usize,
+    spectrum_shift_sec: f64,
+    frame_count: usize,
+) -> SadAxis {
+    let mut window_shift_sec = driver_cfg.window_shift_sec;
+    let (window_size, window_shift, no_overlap, rows) = get_blstm_param(
+        driver_cfg.window_size_sec,
+        &mut window_shift_sec,
+        rate,
+        ssif,
+        ssr,
+        &spec.lstm_subsampling,
+        &spec.output_subsampling,
+        frame_count,
+    );
+    let ssr = ssr as f64;
+    let (time_step, time_offset) = if window_size > 0 && !no_overlap {
+        let ts = spectrum_shift_sec * ssr;
+        (ts, ts / 2.0 - spectrum_shift_sec / 2.0)
+    } else {
+        let ts = window_shift_sec * ssr;
+        (ts, ts / 2.0 - window_shift_sec / 2.0)
+    };
+    SadAxis {
+        window_shift_sec,
+        window_size,
+        window_shift,
+        no_overlap,
+        rows,
+        time_step,
+        time_offset,
+    }
+}
+
+/// What [`sad_axis`] resolves at one rate: `get_blstm_param`'s outputs and the decision
+/// layer's time axis. [`SadTimeline`] flattens one into its fields (with the periodogram
+/// params beside it); the LID plan's SAD half IS one.
+#[derive(Clone, Debug)]
+pub struct SadAxis {
+    /// The window shift in seconds AFTER `get_blstm_param`'s quantization
+    /// (`window_shift * ssif / rate`): the exact driver's post-call `_WindowShift`.
+    pub window_shift_sec: f64,
+    /// `get_blstm_param`'s window half-size in periodogram frames (0 = plain regime).
+    pub window_size: usize,
+    /// `get_blstm_param`'s window shift in periodogram frames (floored to 1).
+    pub window_shift: usize,
+    /// `get_blstm_param`'s truncate flag (a resolved shift below one frame under a window).
+    pub no_overlap: bool,
+    /// `real_vec_size` for `frame_count` samples: `ceil(frame_count / ssif)` divided
+    /// sequentially by every sub-sampling ratio; 0 for `frame_count` 0.
+    pub rows: usize,
+    /// The decision layer's time axis (`results_to_segmentation`'s pair).
+    pub time_step: f64,
+    pub time_offset: f64,
 }
 
 /// The rate-dependent setup of an algo-3 fast SAD run ([`FastSadPlan::timeline`]): the
