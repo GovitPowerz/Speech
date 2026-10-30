@@ -4,25 +4,24 @@
 //! The exact sources this mirrors line-for-line (cite them when auditing drift, per
 //! the plan's R2):
 //!
-//! - `nn/blstm.rs::BlstmNetwork::feed_forward` (`:810-840`, legacy
+//! - `nn::blstm::BlstmNetwork::feed_forward` (legacy
 //!   `BLSTMNeuralNetwork.cpp:419-437`): output-length division, the
 //!   `LSTMRatios[0] > 1 && netInput < inputCols` crop gate, forward
 //!   `feed_forward` + backward `feed_forward_reverse`, then the output MLP's
 //!   `feed_forward_double` (HCAT forward-LEFT).
-//! - `nn/blstm.rs::BlstmNetwork::set_weights` (`:459-480`): the flat-pack block
+//! - `nn::blstm::BlstmNetwork::set_weights`: the flat-pack block
 //!   order Forward -> Backward -> Output -> mean -> std, adim ALREADY APPLIED by the
 //!   config-reader path (`config.rs::apply_adim`); `from_flat` consumes exactly that
 //!   layout and narrows once.
-//! - `nn/layers.rs::LstmLayer::feed_forward` (`:174-337`, `LSTMLayer.cpp:312-413`):
+//! - `nn::layers::LstmLayer::feed_forward` (`LSTMLayer.cpp:312-413`):
 //!   the `[i|f|o|g]` gate blocks, the two-matmul summed pre-activation (input
 //!   projection + recurrence), the 12-row peephole bundle with its gate ordering,
 //!   the CellWeight-narrow layout (cell rows carry NO peepholes -- the parity
-//!   hazard), the `t=0` no-forget/no-P11 special case, and the width-tolerance crop
-//!   (`:186-198`).
-//! - `nn/layers.rs::NeuronLayer::feed_forward` (`:914-1006`): asinh hidden, the
-//!   700-guarded softmax (`:946-990`, F8), Logistic for `output_size == 1`.
-//! - `nn/network.rs::sub_sample` (`:695-708`) integer-floor decimation +
-//!   `Network::drive` (`:328-394`) per-layer subsampling chaining.
+//!   hazard), the `t=0` no-forget/no-P11 special case, and the width-tolerance crop.
+//! - `nn::layers::NeuronLayer::feed_forward`: asinh hidden, the 700-guarded softmax
+//!   (F8), Logistic for `output_size == 1`.
+//! - `nn::network::sub_sample` integer-floor decimation + `nn::network::Network::drive`
+//!   per-layer subsampling chaining.
 //! - `nn/activations.rs`: `gates_fn` (sigmoid(0.1z) + expLimit guards), `maxmin2_fn`/
 //!   `identity_fn` (asinh), `logistic_fn`.
 //!
@@ -104,14 +103,14 @@ pub fn logistic_f32(x: f32) -> f32 {
     }
 }
 
-/// f32 whole-sequence self-normalization (`BLSTMNeuralNetwork::self_normalize`,
-/// `nn/blstm.rs:769-801`, the input-normalization type -1 branch): all per-column
+/// f32 whole-sequence self-normalization (`nn::blstm::BlstmNetwork::self_normalize`,
+/// the input-normalization type -1 branch): all per-column
 /// means, then center all; all per-column stds `sqrt((sum(centered^2) + 1e-32)/rows)`,
 /// then `asinh(x/std)` all. In-place, mirroring the exact 4-pass structure.
 ///
 /// The algo-3 fast SAD driver applies this to the whole input sequence ONCE per
 /// channel BEFORE the overlap windowing, exactly as the exact scoring path applies
-/// it at the top of `feed_forward_backward` (`nn/blstm.rs:1025-1028`) before it
+/// it at the top of `nn::blstm::BlstmNetwork::feed_forward_backward` before it
 /// dispatches to `feed_forward_backward_overlap`. f32 divergence from the exact f64
 /// normalization is by design (spec S4).
 pub fn self_normalize_f32(m: &mut FastMatrix) {
@@ -151,7 +150,8 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
 }
 
 /// f32 external (type 1) input normalization (`BLSTMNeuralNetwork::
-/// feedForwardBackward` `:720-723`, exact port `nn/blstm.rs:1008-1021`, the
+/// feedForwardBackward` `:720-723`, exact port
+/// `nn::blstm::BlstmNetwork::feed_forward_backward`, the
 /// `input_normalization_type == 1` branch): per column `jj < min(cols,
 /// mean.len())`, `(x - mean_jj) / max(1e-12, std_jj)`; columns beyond the
 /// mean/std tail are UNTOUCHED. `mean`/`std` are the pack-carried normalize
@@ -162,9 +162,9 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
 /// Phase 8 Task 1 (spec S1.1): the frozen-stats input normalization the
 /// streaming reference mode requires -- the fast SAD driver applies this ONCE
 /// per channel before the overlap windowing, at the SAME pipeline position
-/// where the -1 self-norm runs (the exact path's pre-dispatch application at
-/// `nn/blstm.rs:1008`). The exact type-1 branch also feeds the normalized
-/// snapshot to `analyse_input_seq` (`:1022-1023`, InputStatistics accumulation
+/// where the -1 self-norm runs (the exact path's pre-dispatch application in
+/// `feed_forward_backward`). The exact type-1 branch also feeds the normalized
+/// snapshot to `nn::blstm::BlstmNetwork::analyse_input_seq` (InputStatistics accumulation
 /// -- a training-side bookkeeping read); the fast path is FORWARD-ONLY and
 /// carries no InputStatistics (the phase-7 T6b audit: `get_input_statistics`
 /// is an inert-empty read on fast), so that call is deliberately absent here.
@@ -182,13 +182,15 @@ pub fn external_normalize_f32(m: &mut FastMatrix, mean: &[f32], std: &[f32]) {
     }
 }
 
-/// f32 softmax overflow guard (exact path `nn/layers.rs:959` uses f64 `700.0`).
+/// f32 softmax overflow guard (the exact `nn::layers::NeuronLayer::feed_forward` uses
+/// f64 `700.0`, its `EXP_OVERFLOW_GUARD`).
 /// f32's `exp` is finite iff arg `<= ln(f32::MAX) ~ 88.72`; `80.0` leaves headroom
 /// for the per-row class-count sum. Below this the path is literally
 /// `exp(x)/sum(exp(x))` -- the unguarded legacy softmax in f32.
 const EXP_OVERFLOW_GUARD_F32: f32 = 80.0;
 
-/// One row of the 700-guarded softmax (`nn/layers.rs:946-990`, f32). Sequential
+/// One row of the 700-guarded softmax (`nn::layers::NeuronLayer::feed_forward`, f32).
+/// Sequential
 /// ascending-column exp+sum (fused, same order as the exact two-pass), then a
 /// per-column quotient. `out.len() == pre.len()`.
 pub fn softmax_row_f32(pre: &[f32], out: &mut [f32]) {
@@ -507,7 +509,7 @@ impl FastBlstm {
         &self.forward_layers[0].input_weights
     }
 
-    /// Core bidirectional forward (`BlstmNetwork::feed_forward`, `:810-840`). `input`
+    /// Core bidirectional forward (`nn::blstm::BlstmNetwork::feed_forward`). `input`
     /// is `frames x cols` (cols may exceed the net input via the crop gate). Returns
     /// the posteriors `output_length x output_size`, held in the reused `output`
     /// buffer (valid until the next `feed_forward`).
@@ -523,7 +525,7 @@ impl FastBlstm {
             return &self.output;
         }
 
-        // Crop gate (`:827`): LSTMRatios[0] > 1 && netInput < inputCols -> use the
+        // Crop gate: LSTMRatios[0] > 1 && netInput < inputCols -> use the
         // left `fwd_in` columns. Otherwise the full width (the LSTM layer's own
         // width tolerance then handles a mismatch).
         let fwd_in = self.lstm_neuron_nb[0];
@@ -592,7 +594,8 @@ impl FastBlstm {
         &self.output
     }
 
-    /// `getSubSamplingRatio` (`nn/blstm.rs:403-410`): the whole-BLSTM decimation
+    /// `getSubSamplingRatio` (`nn::blstm::BlstmNetwork::sub_sampling_ratio`): the whole-BLSTM
+    /// decimation
     /// ratio -- product of the forward LSTM sub-samplings times the output-net
     /// sub-samplings (non-MLP; every committed SAD config is non-MLP).
     pub fn sub_sampling_ratio(&self) -> usize {
@@ -607,21 +610,22 @@ impl FastBlstm {
     }
 
     /// Overlapping-window forward accumulation (`BLSTMNeuralNetwork::
-    /// feedForwardBackwardOverLap`, `nn/blstm.rs:1594-1726`; forward + OUTPUT-only).
+    /// feedForwardBackwardOverLap`, `nn::blstm::BlstmNetwork::feed_forward_backward_overlap`;
+    /// forward + OUTPUT-only).
     /// Mirrors the windowed driver the algo-3 SAD path dispatches to when
     /// `window_size > 0 && overlaps` (tier2 / the phase-6 SAD config): each window
     /// is a `feed_forward` over a contiguous row-slice of `input`, its posteriors
     /// accumulated into `output` at `begin/ssr` with a per-row count, then the whole
     /// `output` divided by the counts (rows covered by NO window -> `0/0 = NaN`,
-    /// reproduced with no guard, per `:1710`).
+    /// reproduced with no guard, as the exact count quotient has none).
     ///
     /// `output` is the CALLER'S buffer and is NOT zeroed here: the exact driver
     /// reuses ONE `result_vec` across channels and the `+=` accumulation seeds
     /// channel N from channel N-1's post-division contents (the load-bearing
-    /// cross-channel reuse quirk, `tasks/sad.rs:1433-1436` + `:1594-1726`) -- the
+    /// cross-channel reuse quirk, `tasks/sad.rs:1433-1436`) -- the
     /// caller reproduces it by passing the same `output` for every channel and NOT
     /// re-zeroing between channels. The LSTM hidden-state accumulators
-    /// (`_OutputForward`/`_OutputBackward`, `:1612-1613`) are NOT tracked: the SAD
+    /// (`_OutputForward`/`_OutputBackward`) are NOT tracked: the SAD
     /// result path never reads them (only the LID Twin's hidden-state concat does,
     /// out of scope for the algo-3 driver).
     ///
@@ -638,9 +642,9 @@ impl FastBlstm {
         let lstm_ratios = self.lstm_subsampling.clone();
         let out_ratios = self.output_subsampling.clone();
         let ssr = self.sub_sampling_ratio();
-        let is_sub = ssr > 1; // :1604 isSubSamplingUsed
+        let is_sub = ssr > 1; // isSubSamplingUsed
 
-        // :1620-1630 nominal window output length: (2*window_size+1) divided
+        // Nominal window output length: (2*window_size+1) divided
         // sequentially by each LSTM then Output ratio (only when subsampling is on).
         let mut length = 2 * window_size + 1;
         if is_sub {
@@ -651,24 +655,24 @@ impl FastBlstm {
                 length /= r;
             }
         }
-        let nominal_len = length; // :1630
+        let nominal_len = length;
 
         let cols = output.cols;
         let in_cols = input.cols;
         let input_rows = input.rows;
-        let mut output_count = vec![0.0_f32; output.rows]; // :1614
+        let mut output_count = vec![0.0_f32; output.rows];
 
         let mut jj = 0usize;
         while jj < input_rows {
-            // :1638-1645 begin snapped DOWN to the ssr grid, end snapped UP -- the
+            // Begin snapped DOWN to the ssr grid, end snapped UP -- the
             // window-span arithmetic is now the shared `window_begin`/`window_end`
             // helpers, so the streaming overlap engine (`fast::stream::StreamOverlap`)
             // fires BYTE-IDENTICAL window spans off the same code.
             let begin = window_begin(jj, window_size, ssr);
             let end = window_end(begin, window_size, ssr, input_rows);
-            let length_seq = end - begin + 1; // :1646
+            let length_seq = end - begin + 1;
 
-            // :1649-1664 partial-window length recompute (sequential floors).
+            // Partial-window length recompute (sequential floors).
             let length_short = if length_seq != 2 * window_size + 1 {
                 let mut ls = length_seq;
                 if is_sub {
@@ -684,20 +688,20 @@ impl FastBlstm {
                 nominal_len
             };
 
-            // :1667-1705 process the window; accumulate sums + counts via the shared
+            // Process the window; accumulate sums + counts via the shared
             // per-window step ([`overlap_window_step`]) -- `fast::stream::StreamOverlap`
             // runs the SAME step, so the forward + `+=` accumulate are bit-identical
             // across the offline and streaming overlap paths.
             if length_short > 0 {
                 // block = input rows [begin, begin+length_seq), all cols. Rows are
                 // contiguous in row-major, so the slice is one copy (mirrors the
-                // exact `input.slice(begin..).to_owned()`, `:1668-1670`).
+                // exact `input.slice(begin..).to_owned()`).
                 let block = FastMatrix {
                     data: input.data[begin * in_cols..(begin + length_seq) * in_cols].to_vec(),
                     rows: length_seq,
                     cols: in_cols,
                 };
-                // :1687-1693 output sum + count at begin/ssr; `+=` seeds from the
+                // Output sum + count at begin/ssr; `+=` seeds from the
                 // caller's prior contents (cross-channel quirk).
                 let obeg = begin / ssr;
                 let got = self.overlap_window_step(
@@ -712,7 +716,7 @@ impl FastBlstm {
             jj += window_shift;
         }
 
-        // :1712-1716 divide by the per-row counts (0/0 -> NaN on uncovered rows).
+        // Divide by the per-row counts (0/0 -> NaN on uncovered rows).
         // `r` indexes both `output.data` (2D `r*cols+c`) and `output_count`, so a plain
         // range loop is clearest here.
         #[allow(clippy::needless_range_loop)]
@@ -783,7 +787,7 @@ impl FastBlstm {
 // Overlap window-span arithmetic (shared offline / streaming, Phase 8 Task 3).
 // ---------------------------------------------------------------------------
 
-/// The window-`jj` begin (`feed_forward_overlap` `:1638-1640`, legacy `:1638-1640`):
+/// The window-`jj` begin (the exact `nn::blstm::BlstmNetwork::feed_forward_backward_overlap`'s):
 /// `max(0, jj - window_size)` snapped DOWN to the `ssr` grid. INPUT-ROWS-INDEPENDENT --
 /// the streaming engine computes it without knowing the total length.
 #[inline]
@@ -792,7 +796,7 @@ pub(crate) fn window_begin(jj: usize, window_size: usize, ssr: usize) -> usize {
     (begin / ssr) * ssr
 }
 
-/// The window end for a given `begin` (`feed_forward_overlap` `:1641-1645`): `begin +
+/// The window end for a given `begin` (the same exact driver's): `begin +
 /// 2*window_size`, CLAMPED to `input_rows - 1`, then snapped UP to the `ssr` grid
 /// (`((end+1)/ssr)*ssr - 1`). The clamp is the ONLY `input_rows`-dependent part: the
 /// streaming engine only fires a window mid-stream once `begin + 2*window_size <
@@ -811,7 +815,7 @@ pub(crate) fn window_end(begin: usize, window_size: usize, ssr: usize, input_row
 // Forward kernels.
 // ---------------------------------------------------------------------------
 
-/// `sub_sample` (`network.rs:695-708`): `T x C -> floor(T/R) x C*R`, row `jj*R+kk`
+/// `nn::network::sub_sample`: `T x C -> floor(T/R) x C*R`, row `jj*R+kk`
 /// into output columns `[kk*C, (kk+1)*C)` of row `jj`; trailing `T mod R` dropped.
 /// Reads `in_data[r*in_stride + c]` for `c in 0..in_cols`.
 pub(crate) fn sub_sample_into(
@@ -848,7 +852,7 @@ pub(super) fn slice_rows_f32(m: &FastMatrix, start: usize, end: usize) -> FastMa
     }
 }
 
-/// f32 `pad_replicate_ends` (`nn/blstm.rs:1791-1810`): row 0 replicated `front` times,
+/// f32 `nn::blstm::pad_replicate_ends`: row 0 replicated `front` times,
 /// the matrix, row `r-1` replicated `back` times. Requires `m.rows >= 1` (the Mode-7
 /// per-block guard ensures every scored block has at least `ssr >= 1` rows).
 pub(super) fn pad_replicate_ends_f32(m: &FastMatrix, front: usize, back: usize) -> FastMatrix {

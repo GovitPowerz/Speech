@@ -191,7 +191,7 @@ fn lecun_tanh_f32(x: f32) -> f32 {
 const TRANSFORMER_ALIBI_EXPONENT: f64 = -8.0;
 
 /// Ascending dot over two contiguous `n`-element slices -- the f32 stand-in for one
-/// `matmul_seq` output cell (`nn/layers.rs:25-40`: `acc = 0; for kk in 0..k { acc +=
+/// `nn::layers::matmul_seq` output cell (`acc = 0; for kk in 0..k { acc +=
 /// a*b }`). Every projection in this module routes through it, so the accumulation
 /// order is one fact rather than a dozen hand-written loops.
 #[inline]
@@ -1090,8 +1090,8 @@ impl PartialEq for LstmState {
 /// [`FastMamba`] and [`FastCfc`].
 ///
 /// Weight buffers, all narrowed `f64 -> f32` ONCE at [`Self::from_flat`] and laid out so
-/// that "one output element" is "one contiguous slice". `LstmLayer::set_weights`
-/// (`nn/layers.rs:139-150`) reads `input_weights` (`I x 4O`) and `feedback_weights`
+/// that "one output element" is "one contiguous slice".
+/// `nn::layers::LstmLayer::set_weights` reads `input_weights` (`I x 4O`) and `feedback_weights`
 /// (`O x 4O`) in COLUMN-major element order, and a gate COLUMN is `(a*O + j)` for gate
 /// block `a` and unit `j` -- so the flat pack ALREADY delivers each output element's
 /// weights contiguously and `from_flat` is a straight narrowing copy, not a transpose:
@@ -1132,7 +1132,7 @@ pub struct FastLstm {
 
 impl FastLstm {
     /// `4*I*O + 4*O*O + 12*O + 4*O` -- the arithmetic mirror of
-    /// `LstmLayer::nb_of_weights` (`nn/layers.rs:126-131`), pinned against it by
+    /// `nn::layers::LstmLayer::nb_of_weights`, pinned against it by
     /// `lstm_weight_count_matches_the_exact_cell`. The `12*O` term is the peephole
     /// bundle and is present whether or not the flags are on: the exact ctor resizes
     /// `_PeepWeight` to `12 x _OutputSize` unconditionally, so a flags-off net still
@@ -1222,8 +1222,10 @@ impl FastLstm {
         }
     }
 
-    /// ONE timestep, the streaming kernel: `LstmLayer::feed_forward`'s per-timestep body
-    /// (`nn/layers.rs:257-334`, legacy `LSTMLayer.cpp:350-412`) transcribed op for op.
+    /// ONE timestep, the streaming kernel: the per-timestep body of
+    /// `nn::layers::LstmLayer::feed_forward` (legacy `LSTMLayer.cpp:350-412`; the `:NNN`
+    /// cites in this doc and the body are that legacy function's lines, the same anchors
+    /// the exact body carries) transcribed op for op.
     ///
     /// Stage order, which IS the numeric contract (do NOT reorder -- the exact forward's
     /// combined expressions at `:362-363` and `:387` are single fused elementwise passes,
@@ -1246,7 +1248,7 @@ impl FastLstm {
     ///
     /// THE `t == 0` SPECIAL CASE IS NOT REPRODUCED AS A BRANCH -- the module doc's
     /// divergence 4, which this cell extends to three more terms. The exact forward's
-    /// `t = 0` block (`:218-254`) omits the recurrence, ALL the `t-1` peephole
+    /// `t = 0` block (`:325-348`) omits the recurrence, ALL the `t-1` peephole
     /// cross-terms, the row-11 output-gate term, and the `c_{t-1}*f_t` product. Here every
     /// one of them is applied unconditionally against the ZERO-seeded state, which is
     /// numerically identical: `dot(w, 0) == +0.0` and `0.0 * p == +-0.0`, and `x + (+-0.0)
@@ -1276,7 +1278,7 @@ impl FastLstm {
         let k_in = x.len().min(i);
         let xs = &x[..k_in];
 
-        // 1. proj + bias + recurrence, per gate element (`:206-210` + `:258-263`).
+        // 1. proj + bias + recurrence, per gate element (`:313-319` + `:351`).
         for jj in 0..four_o {
             let bi = jj * i;
             let mut acc = dot_f32(&self.inp[bi..bi + k_in], xs);
@@ -1287,7 +1289,7 @@ impl FastLstm {
         }
 
         let p = &self.peep;
-        // 2a. cells peep into i, f (rows 0, 1) -- `:264-272`.
+        // 2a. cells peep into i, f (rows 0, 1) -- `:353-356`.
         if self.cells_peep {
             for j in 0..o {
                 pre[j] += c[j] * p[j];
@@ -1296,7 +1298,7 @@ impl FastLstm {
                 pre[o + j] += c[j] * p[o + j];
             }
         }
-        // 2b. gates-recurrent peep into i, f (rows 3, 7) -- `:273-281`.
+        // 2b. gates-recurrent peep into i, f (rows 3, 7) -- `:357-360`.
         if self.gates_rec_peep {
             for j in 0..o {
                 pre[j] += gates[j] * p[3 * o + j];
@@ -1306,7 +1308,7 @@ impl FastLstm {
             }
         }
         // 2c. gates peep into i, f (rows 4, 5 / 6, 8), each ONE combined expression --
-        // `:282-293`.
+        // `:362-363`.
         if self.gates_peep {
             for j in 0..o {
                 pre[j] += gates[o + j] * p[4 * o + j] + gates[2 * o + j] * p[5 * o + j];
@@ -1316,7 +1318,7 @@ impl FastLstm {
             }
         }
 
-        // 3. activate i, f then g (`:294-300`).
+        // 3. activate i, f (`:370`) then g (`:385`).
         for j in 0..2 * o {
             pre[j] = gates_fn_f32(pre[j]);
         }
@@ -1324,14 +1326,14 @@ impl FastLstm {
             pre[3 * o + j] = asinh_f32(pre[3 * o + j]);
         }
 
-        // 4. c_t = i_t*g_t + c_{t-1}*f_t, one combined expression (`:301-305`). In place:
+        // 4. c_t = i_t*g_t + c_{t-1}*f_t, one combined expression (`:387`). In place:
         // the RHS reads `c[j]` (still `c_{t-1}`) before the assignment, and units are
         // independent.
         for j in 0..o {
             c[j] = pre[j] * pre[3 * o + j] + c[j] * pre[o + j];
         }
 
-        // 5. o-gate extras IN ORDER (`:306-324`).
+        // 5. o-gate extras IN ORDER (`:389-394`).
         if self.cells_peep {
             for j in 0..o {
                 pre[2 * o + j] += c[j] * p[2 * o + j];
@@ -1351,7 +1353,7 @@ impl FastLstm {
             }
         }
 
-        // 6. activate o; y_t = o_t * asinh(c_t) (`:325-334`).
+        // 6. activate o; y_t = o_t * asinh(c_t) (`:398-400`).
         for j in 0..o {
             pre[2 * o + j] = gates_fn_f32(pre[2 * o + j]);
         }
@@ -2052,8 +2054,8 @@ pub(crate) fn build_cell(
 /// to its `backward` twin, so both net builders read the same two functions rather than
 /// open-coding `[0], [2], [4]`.
 ///
-/// A `Direction::Forward` net uses THIS triple and only this one: `BlstmNetwork::
-/// from_config` (`nn/blstm.rs:588-602`) builds its single stack with `cfg.forward_peep`.
+/// A `Direction::Forward` net uses THIS triple and only this one:
+/// `nn::blstm::BlstmNetwork::from_config` builds its single stack with `cfg.forward_peep`.
 pub(crate) fn forward_peep(spec: &NnetSpec) -> [bool; 3] {
     [spec.peepholes[0], spec.peepholes[2], spec.peepholes[4]]
 }
@@ -2071,7 +2073,7 @@ pub(crate) fn backward_peep(spec: &NnetSpec) -> [bool; 3] {
 ///
 /// `reverse` (Phase 10 Task 7) walks time DESCENDING, writing each output at its own
 /// natural-order row index. That is EXACTLY the exact tree's
-/// `Layer::feed_forward_reverse` (`nn/cells/slstm.rs:453-463` and its siblings:
+/// `nn::cells::slstm::SlstmLayer::feed_forward_reverse` (and its siblings:
 /// flip the input rows -> plain forward -> flip the output rows back), with the two
 /// flip buffers algebraically removed rather than materialized: the flipped run's
 /// output row `k` is `f(in[T-1-k])` conditioned on `in[T-1..T-k]`, and flipping it back
@@ -2220,13 +2222,13 @@ pub(crate) fn build_dense_tail(
     (output_layers, normalize_mean, normalize_std)
 }
 
-/// The whole-sequence forward PROLOGUE both cell nets share (`BlstmNetwork::feed_forward`,
-/// `nn/blstm.rs:1123-1147`): the sequential output-length division, then the
+/// The whole-sequence forward PROLOGUE both cell nets share
+/// (`nn::blstm::BlstmNetwork::feed_forward`): the sequential output-length division, then the
 /// `LSTMRatios[0] > 1 && netInput < inputCols` crop gate.
 ///
 /// `None` means "no output rows" (`frames == 0 || out_len == 0`); `Some(in_cols)` is the
 /// crop-gated width to feed the stack(s) -- BOTH of them in the bidirectional case, which
-/// is the exact tree's own behaviour (`:1142-1147` hands the same cropped input to
+/// is the exact tree's own behaviour (`feed_forward` hands the same cropped input to
 /// `forward` and `backward`). The early return stays at the CALL SITE, which is why this
 /// hands back an `Option` rather than returning the empty matrix itself.
 ///
@@ -2269,7 +2271,7 @@ pub(crate) fn stack_input_cols(
 /// DIRECT borrow of the single stack's hidden rows; [`super::bicell::FastBiCell::
 /// feed_forward`] passes the reverse stack's rows as `rev`, and each row is staged into
 /// `row_buf` as the hcat `[fwd | rev]` -- FORWARD HALF ON THE LEFT
-/// (`Network::feed_forward_double`, `nn/network.rs:430-437`). `row_buf` is the caller's
+/// (`nn::network::Network::feed_forward_double`). `row_buf` is the caller's
 /// reused buffer (the bidirectional overlap driver calls `feed_forward` once per window,
 /// so a per-call allocation would be a per-window allocation); the causal caller hands in
 /// an empty local, which is never touched and never allocates.
@@ -2330,7 +2332,7 @@ pub(crate) fn drive_output_rows(
 /// The f32 causal net: ONE cell stack feeding the dense output MLP, the fast twin of
 /// `BlstmNetwork` under `Direction::Forward`.
 ///
-/// Flat pack layout (`BlstmNetwork::set_weights`, `nn/blstm.rs:774-800`, with the
+/// Flat pack layout (`nn::blstm::BlstmNetwork::set_weights`, with the
 /// backward block ABSENT in causal mode): `[stack | output MLP | mean | std]`. The
 /// mean/std tail is `2 * lstm_neuron_nb[0]` long and is carried, not applied -- the
 /// driver normalizes upstream, exactly as it does for `FastBlstm`.
@@ -2419,8 +2421,8 @@ impl FastCausalNet {
         let mut pos = 0usize;
         let mut cells = Vec::with_capacity(lstm.len() - 1);
         // A causal net has ONE stack and it is the FORWARD one, so it takes the forward
-        // peephole triple -- `BlstmNetwork::from_config` builds its single
-        // `Direction::Forward` stack with `cfg.forward_peep` (`nn/blstm.rs:588-602`).
+        // peephole triple -- `nn::blstm::BlstmNetwork::from_config` builds its single
+        // `Direction::Forward` stack with `cfg.forward_peep`.
         // Read by the LSTM cell alone (phase-10 Task 8); the other three have no
         // peepholes.
         let peep = forward_peep(spec);
@@ -2469,8 +2471,8 @@ impl FastCausalNet {
         self.output_size
     }
 
-    /// `getSubSamplingRatio` (`nn/blstm.rs:403-410`): the recurrent sub-samplings times
-    /// the output-net ones.
+    /// `getSubSamplingRatio` (`nn::blstm::BlstmNetwork::sub_sampling_ratio`): the recurrent
+    /// sub-samplings times the output-net ones.
     pub fn sub_sampling_ratio(&self) -> usize {
         self.lstm_subsampling.iter().product::<usize>()
             * self.output_subsampling.iter().product::<usize>()
@@ -2565,7 +2567,7 @@ impl FastCausalNet {
 /// layers with per-layer sub-sampling, each layer a fresh-state [`run_sequence`].
 ///
 /// `reverse` selects the per-layer temporal direction, EXACTLY as `Network::drive`'s own
-/// `reverse` flag does (`nn/network.rs:328-394`: one driver, the layer call is the only
+/// `reverse` flag does (`nn::network::Network::drive`: one driver, the layer call is the only
 /// thing that differs, and the ASCENDING layer order is unchanged either way). The
 /// sub-sampling happens on NATURAL-ORDER rows in both directions, because in the exact
 /// tree the flip lives INSIDE the layer (`Layer::feed_forward_reverse`) and `drive`
@@ -3024,7 +3026,7 @@ mod tests {
     /// technique (whole-pack reconstruction), which closes a hole a value comparison alone
     /// leaves open: a PERMUTATION that happens to be self-consistent under a smooth weight
     /// fill. `from_flat` is inverted here from an INDEPENDENT transcription of the four
-    /// `LstmLayer::set_weights` blocks (`nn/layers.rs:139-150`), and the reconstruction must
+    /// `nn::layers::LstmLayer::set_weights` blocks, and the reconstruction must
     /// equal the original pack narrowed to f32, exactly.
     ///
     /// Note the ONE transposed block: `peep` arrives COLUMN-major (12 contiguous values per
