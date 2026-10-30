@@ -3,8 +3,8 @@
 The MATLAB-side analog of the C++ oracle-harness extractors: GNU Octave runs the
 `tools/octave_harness/stage_computecost.m` transcription of the VENDORED
 `legacy/Optimizer_V6.2.2/functions/ComputeCost.m` cost-assembly block (the pure lines
-:354-652 -- deriv averaging, L2, and the
-balance-law 0/3/4/5/10 error + cost) over the COMMITTED phase4a/4b MultiConfigResults
+:354-652 -- deriv averaging, L2, and the balance-law 0/3/4/5/10 error + cost) over the
+COMMITTED phase4a/4b MultiConfigResults
 fixtures + crafted per-balance variants, dumping the goldens the Python port
 (`src/python/speech/engine.py`) is bit-pinned against.
 

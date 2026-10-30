@@ -18,15 +18,16 @@ Two layers:
 Who reaches what (issue #100). Both regimes reach `ChannelResults` and the two private
 cost readers (`_nn_cost_seg` / `_nn_cost_lid`) through `fold_run.FoldResult`, and
 `forward_backward` (hence `average_derivs`) through `drivers/train.py::_backprop_inner`:
-the Modern loop (`train_modern`) directly, the Legacy regime (`_score_fold`) whenever its
-`inner_steps` is set, the CLI default. Only the Legacy regime reaches `compute_cost` and
-the balance laws (`_score_fold`); the other two `compute_cost` callers,
-`_make_default_validate` with `val_metric="balance"` and `score_hyperparam_genome`, have
-no production entry. No
-production caller passes `forward_backward`'s `l2` (the LID L2 term is test-reachable
-only) and every production `CostParams` is `mode=0` (the `mode == 4` / `mode < 0`
-branches run only in tests). The pooled input-stats merge (:285-300) has no Python twin
-since #100: its production form is Rust's `features/stats.rs::InputStatistics::update`.
+the Modern loop (`train_modern`) every epoch, the Legacy regime (`train`) through
+`_score_fold` in its `backprop_refine` hook and post-QPSO BackPropagation step
+(`inner_steps > 0`, the CLI default 20; `score_genome` scores without it). Only the
+Legacy regime reaches `compute_cost` and the balance laws (`_score_fold`); the other two
+`compute_cost` callers, `_make_default_validate` with `val_metric="balance"` and
+`score_hyperparam_genome`, have no production entry. No production caller passes
+`forward_backward`'s `l2` (the LID L2 term is test-reachable only) and every production
+`CostParams` is `mode=0` (the `mode == 4` / `mode < 0` branches run only in tests). The
+pooled input-stats merge (:285-300) has no Python twin since #100: its production form
+is Rust's `features/stats.rs::InputStatistics::update`.
 
 The results are read by NAME: `speech_rs.Engine.channel_results()` returns one array per
 field, wrapped here as `ChannelResults` (issue #23). The legacy `Error_vad` column indices

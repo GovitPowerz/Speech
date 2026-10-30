@@ -8,12 +8,12 @@ Octave (see the stage header + `scripts/extract_phase4c_computecost_fixtures.py`
 group pins the Python port (`speech.engine`) against Octave's real MATLAB semantics
 (median, hist center-binning, std ddof=1, cumsum, exp/log):
 
-  * average_derivs (col0/max(1,count)), l2_penalty,
-    the crafted-integer balance 0/3/4/5, and every cpu_mean (median) golden
+  * average_derivs (col0/max(1,count)), l2_penalty, the crafted-integer balance 0/3/4/5,
+    and every cpu_mean (median) golden
     -> STRICT (bit-exact; median is a single sort + at-most-one /2, not a multi-term
     reduction, so it never picks up the `close` group's accumulation gap below).
-  * the balance-10 LID calibration (incl. the b10c zero-zero
-    interior-cutoff variant, :571-572), the committed-fixture realistic cases, and the
+  * the balance-10 LID calibration (incl. the b10c zero-zero interior-cutoff variant,
+    :571-572), the committed-fixture realistic cases, and the
     fractional-`mean` cost scalars measured 0-ULP-exact on the oracle env
     (tier2_b0/tier2_b5/b10b/b10c) -> CANARY (the hybrid ULP-or-scaled-abs comparator,
     `tests/_libm_gate.py`; the manifest's `canary` list).

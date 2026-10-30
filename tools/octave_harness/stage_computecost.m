@@ -13,18 +13,16 @@ function stage_computecost(out_dir)
   % that leaves the vendored .m unmodified. Instead this stage transcribes the pure
   % ASSEMBLY lines (:428-652 the balance-law error + cost, plus the :354-364
   % deriv-averaging/L2 block; the :374 sortrows aggregation left with `aggregate_workers`
-  % in issue #23, the :285-300 pooled-stats block with `pool_input_stats` in issue #100)
-  % line-for-line with `% legacy:` provenance, and drives them on injected result matrices.
-  % Real MATLAB semantics (median, hist center-binning, std ddof=1, cumsum,
-  % exp/log) are exercised by Octave; the Python port must match. The engine-shelling
-  % top half is out of scope for the pure cost assembly (it is the seam, tested via
-  % speech_rs.Engine in tests/pyo3).
+  % in issue #23, the :285-300 pooled-stats block in issue #100) line-for-line with
+  % `% legacy:` provenance, and drives them on injected result matrices. Real MATLAB
+  % semantics (median, hist center-binning, std ddof=1, cumsum, exp/log) are exercised by
+  % Octave; the Python port must match. The engine-shelling top half is out of scope for
+  % the pure cost assembly (it is the seam, tested via speech_rs.Engine in tests/pyo3).
   %
-  % Dumps per group. STRICT (pure arithmetic, bit-exact everywhere):
-  % average_derivs (col0/max(1,col1)), l2 (weights.^2 penalty), and the crafted integer
-  % balance 0/3/4/5. CANARY-gated (libm-bearing): the
-  % balance-10 LID calibration (hist/cumsum/std/exp/log), and the committed-fixture
-  % realistic cases.
+  % Dumps per group. STRICT (pure arithmetic, bit-exact everywhere): average_derivs
+  % (col0/max(1,col1)), l2 (weights.^2 penalty), and the crafted integer balance 0/3/4/5.
+  % CANARY-gated (libm-bearing): the balance-10 LID calibration (hist/cumsum/std/exp/log),
+  % and the committed-fixture realistic cases.
 
   R = struct();
 

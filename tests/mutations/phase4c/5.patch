@@ -2,10 +2,10 @@ mutation: engine.average_derivs zero-count guard dropped: d[:, 0] / np.maximum(1
 catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_average_derivs
 
 diff --git a/src/python/speech/engine.py b/src/python/speech/engine.py
-index d7e5cf6..d330b8e 100644
+index 00a6ab0..e9e90fa 100644
 --- a/src/python/speech/engine.py
 +++ b/src/python/speech/engine.py
-@@ -147,7 +147,7 @@ def average_derivs(derivs: NDArray[np.float64]) -> NDArray[np.float64]:
+@@ -150,7 +150,7 @@ def average_derivs(derivs: NDArray[np.float64]) -> NDArray[np.float64]:
      `derivs` is the engine's per-network `Nx2` matrix (col 0 summed deriv, col 1 count);
      a zero count divides by 1 (never by 0)."""
      d = np.asarray(derivs, dtype=F64)
