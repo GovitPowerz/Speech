@@ -12,7 +12,7 @@ function stage_computecost(out_dir)
   % pre-injected worker files before the shell-out, so there is no clean injection point
   % that leaves the vendored .m unmodified. Instead this stage transcribes the pure
   % ASSEMBLY lines (:374 sortrows, :428-652 the balance-law error + cost, plus the
-  % :285-300 pooled-stats and :354-364 deriv-averaging/L2 blocks) line-for-line with
+  % :354-364 deriv-averaging/L2 block) line-for-line with
   % `% legacy:` provenance, and drives them on injected result matrices. Real MATLAB
   % semantics (sortrows stable-ascending, median, hist center-binning, std ddof=1, cumsum,
   % exp/log) are exercised by Octave; the Python port must match. The engine-shelling
@@ -20,8 +20,8 @@ function stage_computecost(out_dir)
   % speech_rs.Engine in tests/pyo3).
   %
   % Dumps per group. STRICT (pure arithmetic, bit-exact everywhere):
-  % average_derivs (col0/max(1,col1)), l2 (weights.^2 penalty), pooled mean, and the
-  % crafted integer balance 0/3/4/5. CANARY-gated (libm-bearing): pooled std (sqrt), the
+  % average_derivs (col0/max(1,col1)), l2 (weights.^2 penalty), and the crafted integer
+  % balance 0/3/4/5. CANARY-gated (libm-bearing): the
   % balance-10 LID calibration (hist/cumsum/std/exp/log), and the committed-fixture
   % realistic cases.
 
@@ -57,18 +57,6 @@ function stage_computecost(out_dir)
   R.l2_regul = l2_regul;
   R.l2_cost = l2_cost;
   R.l2_grad = l2_grad;
-
-  % ---- pool_input_stats: :285-300 pooled mean/var over per-worker (nb,mean,std) ---------
-  pool_nb = [100, 300];
-  pool_mean = [1 3; 2 4];   % dim x worker
-  pool_std = [0.5 1.5; 1.0 2.0];
-  [pnb, pmean, pstd] = pool_stats(pool_nb, pool_mean, pool_std);
-  R.pool_nb = pool_nb;
-  R.pool_mean = pool_mean;
-  R.pool_std = pool_std;
-  R.pool_out_nb = pnb;
-  R.pool_out_mean = pmean;
-  R.pool_out_std = pstd;
 
   % ---- Crafted integer MultiConfigResults for the STRICT balance 0/3/4/5 pins ----------
   % Error_vad columns (1-based): 1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 6 seg-denom.
@@ -158,8 +146,8 @@ function stage_computecost(out_dir)
 
   save('-v7', fullfile(out_dir, 'computecost.mat'), '-struct', 'R');
 
-  printf('OCTAVE_STAGE computecost cb0=%g cb5=%g b10a=%g b10b=%g b10c=%g pool_nb=%d\n', ...
-         R.cb0_cost, R.cb5_cost, R.b10a_cost, R.b10b_cost, R.b10c_cost, pnb);
+  printf('OCTAVE_STAGE computecost cb0=%g cb5=%g b10a=%g b10b=%g b10c=%g\n', ...
+         R.cb0_cost, R.cb5_cost, R.b10a_cost, R.b10b_cost, R.b10c_cost);
 end
 
 
@@ -174,24 +162,6 @@ function M = read_iobin(path)
   data = fread(fid, rows * cols, 'double');
   fclose(fid);
   M = reshape(data, rows, cols);
-end
-
-
-function [nb, meanOut, stdOut] = pool_stats(nbIn, meanIn, stdIn)
-  % legacy: ComputeCost.m:285-300 (single-config slice; nbIn/meanIn/stdIn indexed by worker jj).
-  dim = size(meanIn, 1);
-  nb = 0;
-  meanOut = zeros(dim, 1);
-  for jj = 1:numel(nbIn)
-    nb = nb + nbIn(jj);                                   % legacy: :289
-    meanOut = meanOut + nbIn(jj) * meanIn(:, jj);         % legacy: :290
-  end
-  meanOut = meanOut / nb;                                 % legacy: :292
-  stdOut = zeros(dim, 1);
-  for jj = 1:numel(nbIn)
-    stdOut = stdOut + nbIn(jj) * (stdIn(:, jj) .^ 2 + (meanOut - meanIn(:, jj)) .^ 2); % legacy: :297
-  end
-  stdOut = sqrt(stdOut / nb);                             % legacy: :299
 end
 
 

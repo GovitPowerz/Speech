@@ -3025,8 +3025,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   loop and then LOADS the worker `.mat`/`.bin` the shell-out wrote (`:216-282`), and the
   `!`-escape cleaning (`:37`) deletes any pre-injected worker files before the shell-out, so there
   is no injection point that leaves the vendored `.m` unmodified. The stage transcribes the PURE
-  assembly lines (`:285-652`: deriv averaging, pooled stats, L2, the balance 0/3/4/5/10 error +
-  cost; the sortrows `[1 2 3]` aggregation left with `aggregate_workers` in issue #23)
+  assembly lines (`:354-652`: deriv averaging, L2, the balance 0/3/4/5/10 error +
+  cost; the sortrows `[1 2 3]` aggregation left with `aggregate_workers` in issue #23, the
+  `:285-300` pooled-stats block with `pool_input_stats` in issue #100)
   line-for-line with `% legacy:` provenance and lets Octave execute the real MATLAB builtins
   (median/hist/std/cumsum/exp/log). The engine-shelling top half is
   the seam -- covered separately by `tests/pyo3` against `speech_rs.Engine`, not by this stage.

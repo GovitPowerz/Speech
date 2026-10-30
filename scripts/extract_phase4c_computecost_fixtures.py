@@ -3,7 +3,7 @@
 The MATLAB-side analog of the C++ oracle-harness extractors: GNU Octave runs the
 `tools/octave_harness/stage_computecost.m` transcription of the VENDORED
 `legacy/Optimizer_V6.2.2/functions/ComputeCost.m` cost-assembly block (the pure lines
-:285-652 -- deriv averaging, pooled input stats, L2, and the
+:354-652 -- deriv averaging, L2, and the
 balance-law 0/3/4/5/10 error + cost) over the COMMITTED phase4a/4b MultiConfigResults
 fixtures + crafted per-balance variants, dumping the goldens the Python port
 (`src/python/speech/engine.py`) is bit-pinned against.
@@ -17,8 +17,8 @@ with real MATLAB semantics (median, hist center-binning, std ddof=1, cumsum, exp
 The port must match.
 
 STRICT (pure arithmetic, bit-exact everywhere): avg (col0/max(1,col1)),
-l2, pooled mean/nb, the crafted integer balance 0/3/4/5, and every cpu_mean (median) golden.
-CANARY-gated (libm-bearing, see tests/_libm_gate.py): pooled std (sqrt), the balance-10 LID
+l2, the crafted integer balance 0/3/4/5, and every cpu_mean (median) golden.
+CANARY-gated (libm-bearing, see tests/_libm_gate.py): the balance-10 LID
 calibration (hist/cumsum/std/exp/log) including the b10c zero-zero interior-cutoff variant
 (:571-572), the committed-fixture realistic cases, and the 4 fractional-mean cost scalars
 measured 0-ULP-exact on the oracle env. ALWAYS-TOLERANT `close` (not libm-gated -- see
@@ -56,15 +56,13 @@ PHASE4C_DIR = REF_DIR / "phase4c"
 PRIOR_PHASES = ["phase0", "phase0b", "phase0bii", "phase1", "phase2", "phase2b", "phase3", "phase4a", "phase4b"]
 
 # Every octave var the stage dumps -> the `computecost_<var>.bin` fixture. The input
-# matrices (crafted MCRs, deriv/pool/l2 inputs) let the port re-run the assembly; the
+# matrices (crafted MCRs, deriv/l2 inputs) let the port re-run the assembly; the
 # `_error`/`_cost`/`_nnseg`/... outputs are the goldens it is pinned against.
 VARS = [
     # average_derivs (col0/max(1,col1))
     "avg_in", "avg_out",
     # l2_penalty
     "l2_w", "l2_isBias", "l2_cost", "l2_grad",
-    # pool_input_stats
-    "pool_nb", "pool_mean", "pool_std", "pool_out_nb", "pool_out_mean", "pool_out_std",
     # crafted integer balance 0/3/4/5 (STRICT)
     "cb_mcr",
     "cb0_error", "cb0_cost", "cb0_nnseg", "cb0_cpumean",
@@ -89,7 +87,7 @@ VARS = [
 
 STAGE_LINE_RE = re.compile(
     r"^OCTAVE_STAGE computecost cb0=(?P<cb0>\S+) cb5=(?P<cb5>\S+) b10a=(?P<b10a>\S+) "
-    r"b10b=(?P<b10b>\S+) b10c=(?P<b10c>\S+) pool_nb=(?P<pool>\d+)$",
+    r"b10b=(?P<b10b>\S+) b10c=(?P<b10c>\S+)$",
     re.MULTILINE,
 )
 
@@ -173,8 +171,6 @@ def main() -> None:
         sm = STAGE_LINE_RE.search(stdout)
         if not sm:
             raise SystemExit("OCTAVE_STAGE computecost line missing from stdout")
-        if int(sm["pool"]) != 400:
-            raise SystemExit(f"pool nb {sm['pool']} != 400")
 
         mat = scipy.io.loadmat(tmp_dir / "computecost.mat")
         shapes: dict[str, list[int]] = {}
@@ -227,8 +223,8 @@ def main() -> None:
             "text": (
                 "Phase 4c Task 9: the ComputeCost/ComputeGradient cost-assembly bit-pins. GNU Octave runs "
                 "tools/octave_harness/stage_computecost.m -- a FALLBACK-TIER stage-local transcription of the "
-                "VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:285-652: "
-                "deriv averaging col0/max(1,col1), pooled input stats, L2, and the balance-law "
+                "VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:354-652: "
+                "deriv averaging col0/max(1,col1), L2, and the balance-law "
                 "0/3/4/5/10 error + cost) over the committed phase4a/4b MultiConfigResults fixtures + crafted "
                 "per-balance variants, including a b10c variant crafted so the balance-10 zero-zero interior-cutoff "
                 "midpoint branch (:571-572) fires. ComputeCost.m's top half shells out to the engine (system RunFsp) "
@@ -237,16 +233,16 @@ def main() -> None:
                 "`% legacy:` provenance and Octave executes the real MATLAB semantics ("
                 "median, hist center-binning, std ddof=1, cumsum, exp/log). Column schema (Error_vad = MCR(:,4:end), "
                 "1-based): 1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 15 LID-num, 16 flag, 17:end-2 per-class "
-                "(>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: avg/l2/pooled-mean/crafted-integer "
+                "(>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: avg/l2/crafted-integer "
                 "balance 0/3/4/5, and every cpu_mean (median) golden -- measured bit-exact numpy-vs-Octave in all 9 "
                 "cases, `median` being a single sort + at-most-one `/2`, not a multi-term reduction. CANARY "
-                "(tests/_libm_gate.py): pooled std (sqrt), balance-10 (hist/std/exp/log), committed-fixture "
+                "(tests/_libm_gate.py): balance-10 (hist/std/exp/log), committed-fixture "
                 "realistic cases, plus the 4 `mean`/`mean(.^2)` cost scalars measured 0-ULP-exact on the oracle env "
                 "(tier2_b0/tier2_b5/b10b/b10c). CLOSE (always-tolerant, not libm-gated): the `mean`/`mean(.^2)` cost "
                 "scalars measured genuinely 1-ULP-off Octave even on the oracle env (cb3/cb4/b10a) -- Octave "
                 "accumulates mean/sum in extended precision, not a libm or summation-order split; see IMPROVEMENTS."
             ),
-            "tier": "fallback (stage-local transcription of ComputeCost.m:285-652)",
+            "tier": "fallback (stage-local transcription of ComputeCost.m:354-652)",
             "octave_version": octave_version,
             "l2_regul": 0.1,
             "balance_backprop": 0.5,
@@ -266,7 +262,7 @@ def main() -> None:
             #             every cpu_mean median -- a single sort + at-most-one /2, no multi-term
             #             reduction for numpy/Octave to disagree over).
             #   canary -- bit-exact on the oracle libm, hybrid ULP/abs elsewhere (a libm
-            #             transcendental or sqrt in the chain: pooled std, balance-10 exp/log
+            #             transcendental in the chain: balance-10 exp/log
             #             error vectors, the realistic committed-fixture element-wise errors, and
             #             the 4 fractional-mean cost scalars measured 0-ULP-exact on the oracle
             #             env: tier2_b0/tier2_b5/b10b/b10c).
@@ -279,7 +275,7 @@ def main() -> None:
             #             can reproduce; see the IMPROVEMENTS entry for the measured evidence table.
             "strict": [
                 "computecost_avg_out.bin", "computecost_l2_cost.bin",
-                "computecost_l2_grad.bin", "computecost_pool_out_nb.bin", "computecost_pool_out_mean.bin",
+                "computecost_l2_grad.bin",
                 "computecost_cb0_error.bin", "computecost_cb0_cost.bin", "computecost_cb0_nnseg.bin", "computecost_cb0_cpumean.bin",
                 "computecost_cb3_error.bin", "computecost_cb3_nnseg.bin", "computecost_cb3_cpumean.bin",
                 "computecost_cb4_error.bin", "computecost_cb4_nnseg.bin", "computecost_cb4_cpumean.bin",
@@ -288,7 +284,6 @@ def main() -> None:
                 "computecost_b10a_cpumean.bin", "computecost_b10b_cpumean.bin", "computecost_b10c_cpumean.bin",
             ],
             "canary": [
-                "computecost_pool_out_std.bin",
                 "computecost_tier2_b0_error.bin", "computecost_tier2_b0_cost.bin",
                 "computecost_tier2_b5_error.bin", "computecost_tier2_b5_cost.bin",
                 "computecost_twin_nnseg.bin", "computecost_twin_nnlid.bin",
