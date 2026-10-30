@@ -15,8 +15,8 @@
 //!    the `_LIDWindowShift`, each re-quantized in place and reset to 0.0 after a truncate
 //!    file) are a fixed point at one rate, reset included (the by-design divergence's
 //!    justification, measured over a rate x shift x sub-sampling grid);
-//!  - every construction refusal, in the words the Twin legs pin, and the two regime
-//!    refusals where the window resolves;
+//!  - every construction refusal, in the words the Twin legs pin, and the rate-free
+//!    regime pre-check (each refusal, on the config's intent, and the two shapes that run);
 //!  - `FastTwinLid::from_plan` with an in-memory pair scores bit-identically to
 //!    `from_legacy`.
 
@@ -476,36 +476,55 @@ fn plan_refuses_what_the_twin_refused_at_construction() {
 }
 
 #[test]
-fn timeline_refuses_the_two_regimes_where_the_window_resolves() {
-    // A windowed CAUSAL LID net: the committed bidirectional window on a forward fixture.
+fn rate_free_precheck_refuses_what_no_rate_can_rescue() {
+    // A windowed CAUSAL LID net: the committed bidirectional window on a forward fixture,
+    // refused on the config's intent before any rate is known.
     let m = with(
         map_for("phase9/twin_mode7_lid_slstm_forward.config"),
         "BLSTM_LID_window",
         "0.25",
     );
-    let plan = FastLidPlan::from_map(&m).unwrap();
-    let msg = err_of(plan.timeline("who", 8000.0, 0), "windowed causal");
+    let msg = err_of(FastLidPlan::from_map(&m), "windowed causal");
     assert!(
-        msg.starts_with("who: windowed LID inference is unsupported for a causal LID net"),
+        msg.starts_with(
+            "fast LID plan: windowed LID inference is unsupported for a causal LID net"
+        ) && msg.contains("at every rate"),
         "{msg}"
     );
-    // OVERLAP on a bidirectional shape: `shift 0.1` resolves 10 frames (>= 1).
+    // OVERLAP on a bidirectional shape: `shift 0.1` (10 frames at 8 kHz), and the one
+    // tightening, a sub-frame positive shift (`0.001`: 0.1 frame at 8 kHz, which the exact
+    // tree would quantize to truncate) -- both refused as overlap on intent.
+    for shift in ["0.1", "0.001"] {
+        let m = with(
+            map_for("phase4b/twin_mode7.config"),
+            "BLSTM_LID_shift",
+            shift,
+        );
+        let msg = err_of(FastLidPlan::from_map(&m), "overlap");
+        assert!(
+            msg.starts_with(
+                "fast LID plan: the overlap LID windowing is unsupported on the fast path"
+            ) && msg.contains("at every rate"),
+            "shift {shift}: {msg}"
+        );
+    }
+    // A causal shape with `window 0` and a shift (plain: the shift is inert) RUNS, as does
+    // the committed truncate pair (`window 0.25 / shift 0.0`), at both rates.
     let m = with(
-        map_for("phase4b/twin_mode7.config"),
+        map_for("phase9/twin_mode7_lid_slstm_forward.config"),
         "BLSTM_LID_shift",
         "0.1",
     );
     let plan = FastLidPlan::from_map(&m).unwrap();
-    let msg = err_of(plan.timeline("who", 8000.0, 0), "overlap");
-    assert!(
-        msg.starts_with("who: the overlap LID windowing is unsupported on the fast path"),
-        "{msg}"
-    );
-    // And the committed pair (`window 0.25 / shift 0.0`, truncate) runs.
-    FastLidPlan::from_map(&map_for("phase4b/twin_mode7.config"))
-        .unwrap()
-        .timeline("who", 8000.0, 0)
-        .unwrap();
+    for rate in [8000.0, 16000.0] {
+        let tl = plan.timeline("who", rate, 0).unwrap();
+        assert_eq!(tl.lid_window_size, 0);
+    }
+    let plan = FastLidPlan::from_map(&map_for("phase4b/twin_mode7.config")).unwrap();
+    for rate in [8000.0, 16000.0] {
+        let tl = plan.timeline("who", rate, 0).unwrap();
+        assert!(tl.lid_no_overlap && tl.lid_window_size > 0, "{rate}");
+    }
 }
 
 // ---------------------------------------------------------------------------

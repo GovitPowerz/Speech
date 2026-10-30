@@ -17,8 +17,9 @@
 //!    refuses that pack one element short or one element long on the in-memory seam (the
 //!    exact `set_weights` contract) -- the two length checks are what stop another shape's
 //!    pack from being consumed head-first under this one's name.
-//!  - the two surviving REFUSALS (D2/D10), pinned where the window resolves: a windowed
-//!    CAUSAL LID net and the OVERLAP regime on any shape, both offline and streaming.
+//!  - the two surviving REFUSALS (D2/D10), pinned at construction (the LID plan's rate-free
+//!    pre-check since issue #84): a windowed CAUSAL LID net and the OVERLAP regime on any
+//!    shape, both offline and streaming.
 //!
 //! THE DEGENERATE-ARGMAX LADDER (D5, the phase-10 crossing lesson in LID clothes). A seed net
 //! can sit so close to `p == 0.5` that an argmax agreement says nothing. Interior means: the
@@ -691,15 +692,14 @@ fn the_sad_file_seam_matches_the_exact_twin_row_by_row() {
 
 // ---------------------------------------------------------------------------
 // The two surviving refusals (D2/D10): windowed causal, overlap. Offline AND streaming.
+// Since issue #84 both are the LID plan's rate-free pre-check, so the offline Twin
+// refuses at construction as the streaming session always did.
 // ---------------------------------------------------------------------------
 
 fn offline_err(map: &IndexMap<String, String>, lid: &[f64]) -> String {
-    let mut drv = FastTwinLid::from_legacy(map, None, Some(lid))
-        .expect("a regime refusal is raised where the window resolves, not at construction");
-    let mut audio = phseq_audio("s1", 0);
-    let mut segs = segs_for(&audio);
-    drv.get_segmentation(&mut audio, &mut segs, None)
-        .expect_err("the regime must be refused")
+    FastTwinLid::from_legacy(map, None, Some(lid))
+        .err()
+        .expect("the offline Twin must refuse the regime at construction")
         .to_string()
 }
 
