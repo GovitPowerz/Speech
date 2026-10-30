@@ -127,6 +127,34 @@ def test_cli_init_dispatch(tmp_path: Path) -> None:
     assert cli_main([]) != 0
 
 
+def test_legacy_cli_defaults_are_the_qpso_defaults(capsys: pytest.CaptureFixture[str]) -> None:
+    """Issue #102: the QPSO knobs have ONE default set. An all-default `train` / `retrain` parse
+    carries `QpsoParams.ps` / `.me` and `DEFAULT_INNER_STEPS`, the three driver signatures default
+    to the same values, and the legacy `--epochs` help says which epochs it counts (the `baseline`
+    arms' `--epochs` is SMORMS3's)."""
+    import inspect
+
+    from speech.cli import _build_parser
+    from speech.drivers.retrain import retrain
+    from speech.drivers.train import DEFAULT_INNER_STEPS, train, train_hyperparam_search
+    from speech.optimizers import QpsoParams
+
+    expected = (QpsoParams.ps, QpsoParams.me, DEFAULT_INNER_STEPS)
+    assert expected == (24, 100, 20)
+    for argv in (["train", "/o"], ["retrain", "/o", "/c"]):
+        ns = _build_parser().parse_args(argv)
+        assert (ns.particles, ns.epochs, ns.inner_steps) == expected
+    for fn in (train, retrain):
+        sig = inspect.signature(fn).parameters
+        assert (sig["qpso_particles"].default, sig["qpso_epochs"].default, sig["inner_steps"].default) == expected
+    sig = inspect.signature(train_hyperparam_search).parameters
+    assert (sig["qpso_particles"].default, sig["qpso_epochs"].default) == expected[:2]
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["train", "--help"])
+    assert "QPSO epochs" in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------------------- #
 # #29: evaluate must not fall through to the config's seed pack
 # --------------------------------------------------------------------------------------- #

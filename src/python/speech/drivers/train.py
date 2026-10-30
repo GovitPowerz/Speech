@@ -398,13 +398,19 @@ def score_genome(
     return cost, out_param
 
 
+DEFAULT_INNER_STEPS = 20
+"""The Legacy regime's SMORMS3 inner-loop step count (a `BackPropagation.m` knob, not a QPSO
+one, so it does not live on `QpsoParams`): the one default `cli.py`, `train` and `retrain` read
+(issue #102)."""
+
+
 def train(
     state: RunState,
     seed: int,
     *,
-    qpso_particles: int = 24,
-    qpso_epochs: int = 100,
-    inner_steps: int = 20,
+    qpso_particles: int = QpsoParams.ps,
+    qpso_epochs: int = QpsoParams.me,
+    inner_steps: int = DEFAULT_INNER_STEPS,
     seed_value: NDArray[np.float64] | None = None,
     minibatch: int = 0,
     nb_worst: int = 0,
@@ -833,8 +839,8 @@ def train_hyperparam_search(
     state: RunState,
     seed: int,
     *,
-    qpso_particles: int = 24,
-    qpso_epochs: int = 100,
+    qpso_particles: int = QpsoParams.ps,
+    qpso_epochs: int = QpsoParams.me,
     seed_value: NDArray[np.float64] | None = None,
 ) -> TrainResult:
     """The NARROWED outer search (Phase 5 Task 9): QuantumPSO over the DSP/config hyperparameter

@@ -14,7 +14,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.drivers.state import RunState, TrainResult
-from speech.drivers.train import train
+from speech.drivers.train import DEFAULT_INNER_STEPS, train
+from speech.optimizers import QpsoParams
 from speech.weight_bridge import read_weight_vector
 
 
@@ -29,9 +30,9 @@ def retrain(
     checkpoint: Path,
     seed: int,
     *,
-    qpso_particles: int = 24,
-    qpso_epochs: int = 100,
-    inner_steps: int = 20,
+    qpso_particles: int = QpsoParams.ps,
+    qpso_epochs: int = QpsoParams.me,
+    inner_steps: int = DEFAULT_INNER_STEPS,
 ) -> TrainResult:
     """Resume training, seeding the QPSO population's first rows with the checkpoint's
     gbest genome (`ReTrain_BLSTM.m`'s `nnet_best` reuse).
