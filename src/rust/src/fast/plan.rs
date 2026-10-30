@@ -56,20 +56,20 @@
 //! silently without its second pass and was NOT bit-equal to the offline run it claims to
 //! mirror. One gate, in `from_map`, both consumers.
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use indexmap::IndexMap;
 
 use crate::config::NnetSpec;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
-use crate::legacy_config::get_f64_opt;
+use crate::legacy_config::{get_f64, get_f64_default, get_f64_opt};
 use crate::nn::blstm::{BlstmConfig, check_pack_len};
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig};
 
 use super::cells::CellGeometry;
 use super::driver::{
-    FastNet, FastNetShape, build_net, build_spec_aligned_to, classify_fast_shape, exact_pack_len,
-    read_file_pack,
+    FastNet, FastNetShape, LidScoreParams, build_net, build_spec_aligned_to, classify_fast_shape,
+    exact_pack_len, read_file_pack,
 };
 
 /// The consumer a [`FastSadPlan`] is checked for, where the arms differ: the input
@@ -156,6 +156,23 @@ impl FastNetPlan {
             ssr,
             weights_file,
         })
+    }
+
+    /// Build the fast net from an in-memory pack: EXACT-LENGTH against [`Self::pack_len`]
+    /// in the exact `set_weights`' words (`check_pack_len`), then `build_net` for
+    /// [`Self::shape`].
+    // Consumed by the fast Twin from the next commit on.
+    #[allow(dead_code)]
+    pub(crate) fn build_net(&self, flat: &[f64]) -> Result<FastNet> {
+        check_pack_len(flat.len(), self.pack_len)?;
+        build_net(&self.spec, self.shape, &self.geometry, flat)
+    }
+
+    /// `<prefix>_weightsFile` read under the legacy FILE-LOAD tolerance ([`read_file_pack`]:
+    /// a short file is refused, a long one warns on stderr and keeps its head, cut to
+    /// [`Self::pack_len`]); `None` for an empty key.
+    pub fn read_weights_file(&self) -> Result<Option<Vec<f64>>> {
+        read_file_pack(&self.weights_file, self.pack_len)
     }
 }
 
@@ -521,4 +538,380 @@ pub struct SadTimeline {
     /// The decision layer's time axis (`results_to_segmentation`'s pair).
     pub time_step: f64,
     pub time_offset: f64,
+}
+
+// ===========================================================================
+// The LID plan (issue #84): the ONE algo-6 Mode-7 setup of the fast tree, consumed by
+// the offline fast Twin (`fast::driver::FastTwinLid`) and the Utterance stream
+// (`fast::stream_lid::StreamingLidSession`).
+// ===========================================================================
+
+/// Read one `i32` config scalar with a default (the Twin's reader; #87 retires it).
+pub(super) fn twin_i32_default(
+    map: &IndexMap<String, String>,
+    key: &str,
+    default: i32,
+) -> Result<i32> {
+    match map.get(key) {
+        None => Ok(default),
+        Some(s) => s
+            .trim()
+            .parse::<i32>()
+            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
+    }
+}
+
+/// Read one `bool` config scalar with a default (the Twin's reader; #87 retires it).
+pub(super) fn twin_bool_default(
+    map: &IndexMap<String, String>,
+    key: &str,
+    default: bool,
+) -> Result<bool> {
+    match map.get(key) {
+        None => Ok(default),
+        Some(s) => s
+            .trim()
+            .parse::<bool>()
+            .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}")),
+    }
+}
+
+/// The Mode-7 `_SpectrumShiftInFrames` (`BLSTMSpectralSegmenter.cpp:209`): the
+/// `!hasReadWavFile` override, always taken on the phSeq/cep arm the fast Twin runs, so the
+/// LID plan's `ssif` is this constant at every rate.
+pub const MODE7_SSIF: usize = 80;
+
+/// Everything an algo-6 Mode-7 fast LID run needs that does not depend on the sample
+/// rate, the target language or the audio: the rate-free half of the Twin's setup, parsed
+/// ONCE from the config map by [`Self::from_map`] and consumed by the offline Twin and the
+/// Utterance stream alike. The rate-dependent half is [`Self::timeline`].
+///
+/// The SAD side is the FROZEN-SAD one (CONTEXT.md): the SAD net is never run, so its plan
+/// is read for its sub-sampling (the SAD result-vector sizing and time axis) and its pack
+/// length (an in-memory SAD pack and the `BLSTM_weightsFile` are checked against it, as
+/// the exact Twin checks them, issue #65) and nothing of it is gated -- no shape rule, no
+/// normalization set, no windowing regime (every committed Twin config carries
+/// `BLSTM_shift 0`, the truncate the SAD plan refuses).
+#[derive(Clone, Debug)]
+pub struct FastLidPlan {
+    pub feature_cfg: FeatureConfig,
+    pub seg_cfg: SegmenterConfig,
+    pub driver_cfg: DriverConfig,
+    /// The never-run SAD net (`BLSTM`): sub-sampling and pack length only.
+    pub sad: FastNetPlan,
+    /// The LID net (`BLSTM_LID`), the one that runs.
+    pub lid: FastNetPlan,
+    /// `max(2, the LID output width)`: the langID / confusion dimensionality.
+    pub class_nb: usize,
+    /// `BLSTM_LID_TwoSweeps`, read by the truncate sweep.
+    pub two_sweeps: bool,
+    /// `CostLaw::isCostModified` (`_BackPropWER >= 0`), gating the langID normalization.
+    pub cost_modified: bool,
+    /// `BLSTM_LID_window` (`_LIDWindowSize`, clamped `< 0 -> 0`).
+    pub lid_window_size_sec: f64,
+    /// `BLSTM_LID_shift` (`_LIDWindowShift`'s seed, clamped `< 0 -> 0`); the exact
+    /// Twin's stateful re-quantization of it is NOT carried (the module docs).
+    pub lid_window_shift_sec: f64,
+    /// `BLSTM_LID_PostProcessMode`, `BLSTM_LID_MinNbOfFrames`, `BLSTM_LID_NoiseMagnitude`.
+    pub post_process_mode: i32,
+    pub min_nb_of_frames: i32,
+    pub noise_magnitude: f64,
+}
+
+impl FastLidPlan {
+    /// Parse the rate-free setup from the SAME legacy config `map` the bag consumes. Pure
+    /// and I/O-free: the two weight files are only NAMED here
+    /// ([`Self::read_weights_files`]).
+    ///
+    /// Typed-bails, in the words the legs pin: `Algo_choice != 6`; any `BLSTM_LID_Mode`
+    /// but 7; the pitch second pass (`BLSTM_TDCwindow > 0`); `BLSTM_LID_DumpInternals`;
+    /// a LID `InputNormalizationType != 0` (the fast scoring applies no normalization);
+    /// a negative `BLSTM_LID_TargetEnforcementStep` (the exact cost block overwrites
+    /// interior output rows with -0.5 for it, risk R7, which forward-only scoring never
+    /// reproduces); MLP mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`, the exact dispatch's
+    /// `is_mlp` route to the MLP drivers, refused on the same derived flag so construction
+    /// fails whether or not weights arrive).
+    pub fn from_map(map: &IndexMap<String, String>) -> Result<FastLidPlan> {
+        let algo = map
+            .get("Algo_choice")
+            .ok_or_else(|| anyhow!("param 'Algo_choice' not found in config"))?
+            .trim()
+            .parse::<i32>()
+            .map_err(|e| anyhow!("fast LID plan: Algo_choice parse: {e}"))?;
+        if algo != 6 {
+            bail!("fast LID plan: only algo 6 (Twin LID) is supported (got {algo})");
+        }
+
+        let (seg_cfg, driver_cfg, feature_cfg) = blstm_configs(map)?;
+
+        let mode = twin_i32_default(map, "BLSTM_LID_Mode", 0)?;
+        if mode != 7 {
+            bail!(
+                "fast TwinLid: only Mode 7 (phSeq/cep external-features LID) is supported on the \
+                 fast path (got {mode}); the gate configs use Mode 7"
+            );
+        }
+
+        // Pitch second pass unsupported (spec R4); the gate configs use TDCwindow 0.
+        if feature_cfg.tdc_window > 0.0 {
+            bail!(
+                "fast TwinLid: the pitch second pass (BLSTM_TDCwindow > 0) is not supported on the \
+                 fast inference path; the gate configs use TDCwindow 0"
+            );
+        }
+
+        if twin_bool_default(map, "BLSTM_LID_DumpInternals", false)? {
+            bail!(
+                "fast TwinLid: BLSTM_LID_DumpInternals is unsupported on the fast path (the LID \
+                 hidden states the dump emits are not tracked); the gate configs use false"
+            );
+        }
+
+        // SAD net shape only (never run in Mode 7): its sub-sampling ratios size the SAD
+        // result vector, and every cell carries those. Peephole-aligned spec, no gate.
+        let sad_bc = BlstmConfig::from_legacy(map, "BLSTM")?;
+        let sad = FastNetPlan::from_map(map, "BLSTM", &sad_bc)?;
+
+        // LID net (the one that runs). Only InputNormalizationType 0 (the gate value) is
+        // supported: the fast scoring applies no normalization.
+        let lid_bc = BlstmConfig::from_legacy(map, "BLSTM_LID")?;
+        if lid_bc.input_normalization_type != 0 {
+            bail!(
+                "fast TwinLid: only LID InputNormalizationType 0 is supported on the fast path \
+                 (got {}); the gate configs use 0",
+                lid_bc.input_normalization_type
+            );
+        }
+        if lid_bc.target_enforcement_step < 0 {
+            bail!(
+                "fast TwinLid: a negative BLSTM_LID_TargetEnforcementStep is not supported on \
+                 the fast path (got {}); the exact path's cost block overwrites interior \
+                 output rows with -0.5 for a negative step (risk R7), \
+                 which the fast path's forward-only scoring never reproduces; the gate configs \
+                 use a non-negative step",
+                lid_bc.target_enforcement_step
+            );
+        }
+        if lid_bc.is_mlp {
+            bail!(
+                "fast TwinLid: MLP mode (BLSTM_LID_LSTMNeuronNb[0] == 0) is not supported on \
+                 the fast path (the fast LID scoring runs the recurrent forwards only, never \
+                 the MLP drivers); the gate configs use a non-zero LSTM width"
+            );
+        }
+        let lid = FastNetPlan::from_map(map, "BLSTM_LID", &lid_bc)?;
+        let class_nb = (*lid.spec.output_neuron_nb.last().unwrap()).max(2);
+
+        let mut lid_window_size_sec = get_f64(map, "BLSTM_LID_window")?;
+        if lid_window_size_sec < 0.0 {
+            lid_window_size_sec = 0.0;
+        }
+        let mut lid_window_shift_sec = get_f64(map, "BLSTM_LID_shift")?;
+        if lid_window_shift_sec < 0.0 {
+            lid_window_shift_sec = 0.0;
+        }
+        let post_process_mode = twin_i32_default(map, "BLSTM_LID_PostProcessMode", 0)?;
+        let min_nb_of_frames = twin_i32_default(map, "BLSTM_LID_MinNbOfFrames", 0)?;
+        let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
+
+        Ok(FastLidPlan {
+            feature_cfg,
+            seg_cfg,
+            driver_cfg,
+            sad,
+            lid,
+            class_nb,
+            two_sweeps: lid_bc.two_sweeps,
+            cost_modified: lid_bc.cost_law.is_cost_modified(),
+            lid_window_size_sec,
+            lid_window_shift_sec,
+            post_process_mode,
+            min_nb_of_frames,
+            noise_magnitude,
+        })
+    }
+
+    /// The rate-dependent half of the setup, at `rate` for the target `lang_index`: what
+    /// the exact Twin derives per file (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`),
+    /// PURE and from the config values (the dropped carries: the SAD `_WindowShift` and the
+    /// `_LIDWindowShift`, both re-quantized in place by the exact driver, are locals here;
+    /// at one rate that is a fixed point, `tests/fast_lid_plan.rs`). `ssif` is the Mode-7
+    /// constant [`MODE7_SSIF`]. Runs the regime rule on the RESOLVED LID window; `who`
+    /// prefixes a refusal.
+    pub fn timeline(&self, who: &str, rate: f64, lang_index: i32) -> Result<LidTimeline> {
+        let ssif = MODE7_SSIF;
+        let spectrum_shift_sec = ssif as f64 / rate;
+        let sad = sad_axis(
+            &self.driver_cfg,
+            &self.sad.spec,
+            self.sad.ssr,
+            rate,
+            ssif,
+            spectrum_shift_sec,
+            0,
+        );
+        let (lid_window_size, lid_window_shift, lid_no_overlap) = derive_lid_window(
+            self.lid_window_size_sec,
+            self.lid_window_shift_sec,
+            self.lid.ssr,
+            ssif,
+            rate,
+        );
+        check_lid_regime(who, self.lid.shape, lid_window_size, lid_no_overlap)?;
+        // targetIndex = clamp(lang_index, [0, classNb)) (`TwinBLSTMSpectralLID.cpp:626-628`).
+        let mut ti = lang_index;
+        if ti >= self.class_nb as i32 {
+            ti = 0;
+        }
+        if ti < 0 {
+            ti = 0;
+        }
+        let params = LidScoreParams {
+            lid_ssr: self.lid.ssr,
+            lid_lstm_sub: self.lid.spec.lstm_subsampling.clone(),
+            lid_out_sub: self.lid.spec.output_subsampling.clone(),
+            min_nb_of_frames: self.min_nb_of_frames,
+            noise_magnitude: self.noise_magnitude,
+            lid_window_size,
+            two_sweeps: self.two_sweeps,
+            post_process_mode: self.post_process_mode,
+            class_nb: self.class_nb,
+            ti: ti as usize,
+            cost_modified: self.cost_modified,
+        };
+        Ok(LidTimeline {
+            rate,
+            ssif,
+            spectrum_shift_sec,
+            sad,
+            lid_window_size,
+            lid_window_shift,
+            lid_no_overlap,
+            ti: ti as usize,
+            params,
+        })
+    }
+
+    /// The SAD `real_vec_size` for a file of `frame_count` samples at `rate`: the frozen
+    /// `get_blstm_param` sizing on the never-run SAD net, through [`sad_axis`].
+    pub fn rows_for(&self, rate: f64, frame_count: usize) -> usize {
+        let ssif = MODE7_SSIF;
+        sad_axis(
+            &self.driver_cfg,
+            &self.sad.spec,
+            self.sad.ssr,
+            rate,
+            ssif,
+            ssif as f64 / rate,
+            frame_count,
+        )
+        .rows
+    }
+
+    /// The two `weightsFile` loads, in the exact Twin's order (`BLSTM` then `BLSTM_LID`,
+    /// the legacy in-ctor loads), each under the legacy FILE-LOAD tolerance
+    /// ([`read_file_pack`]). The SAD file is read and checked against the SAD net's exact
+    /// length, then DISCARDED: Mode 7 never runs the SAD net, but the two trees must accept
+    /// the same files (issue #65), so a short or missing SAD file is refused here as the
+    /// exact Twin refuses it, and with both files bad the SAD error is the one raised.
+    /// Returns the LID pack, `None` for an empty `BLSTM_LID_weightsFile`.
+    pub fn read_weights_files(&self) -> Result<Option<Vec<f64>>> {
+        self.sad.read_weights_file()?;
+        self.lid.read_weights_file()
+    }
+}
+
+/// The rate-dependent setup of an algo-6 Mode-7 fast LID run ([`FastLidPlan::timeline`]):
+/// the SAD half (the time axis the synthesized constant-10 SAD result is laid on) and the
+/// LID half (the resolved LID window and the per-channel scoring constants). The offline
+/// Twin derives one per file; the Utterance stream one at construction.
+#[derive(Clone, Debug)]
+pub struct LidTimeline {
+    pub rate: f64,
+    /// [`MODE7_SSIF`].
+    pub ssif: usize,
+    /// `ssif / rate`.
+    pub spectrum_shift_sec: f64,
+    /// The SAD window resolution and time axis on the never-run SAD net.
+    pub sad: SadAxis,
+    /// `getLIDBLSTMParam`'s window half-size in periodogram frames (0 = plain regime).
+    pub lid_window_size: usize,
+    /// `getLIDBLSTMParam`'s window shift in periodogram frames, floored to 1 (the value the
+    /// exact driver writes back as `_LIDWindowShift * ssif / rate`).
+    pub lid_window_shift: usize,
+    /// The truncate flag (a resolved LID shift below one frame under a window).
+    pub lid_no_overlap: bool,
+    /// The target language, `clamp(lang_index, [0, class_nb))`.
+    pub ti: usize,
+    /// The per-channel scoring constants the shared kernel reads.
+    // Consumed by the fast Twin from the next commit on.
+    #[allow(dead_code)]
+    pub(super) params: LidScoreParams,
+}
+
+/// LID window derivation (`getLIDBLSTMParam`, `TwinBLSTMSpectralLID.cpp:89-102`):
+/// `(lid_window_size, lid_window_shift, lid_no_overlap)`, the shift floored to 1 as the
+/// exact driver floors it before writing it back. `ssif` is the (mode-7 forced) spectrum
+/// shift in frames.
+pub fn derive_lid_window(
+    size_sec: f64,
+    shift_sec: f64,
+    lid_ssr: usize,
+    ssif: usize,
+    rate: f64,
+) -> (usize, usize, bool) {
+    let ssifd = ssif as f64;
+    let mut lid_window_size = f64::round(size_sec * rate / 2.0 / ssifd) as usize;
+    if lid_window_size != 0 && lid_window_size < lid_ssr {
+        lid_window_size = lid_ssr;
+    }
+    let mut lid_window_shift = f64::round(shift_sec * rate / ssifd) as i64;
+    let mut lid_no_overlap = false;
+    if lid_window_size != 0 && lid_window_shift < 1 {
+        lid_no_overlap = true;
+        let raw = f64::round(size_sec * rate / ssifd) as usize;
+        lid_window_size = (raw / lid_ssr) * lid_ssr;
+        if lid_window_size < 10 * lid_ssr {
+            lid_window_size = 10 * lid_ssr;
+        }
+    }
+    if lid_window_size == 0 || lid_window_shift < 1 {
+        lid_window_shift = 1;
+    }
+    (lid_window_size, lid_window_shift as usize, lid_no_overlap)
+}
+
+/// The LID regime rule (issue #57, D2), ONE body for the offline Twin and the Utterance
+/// stream, applied by [`FastLidPlan::timeline`] where the window has resolved against the
+/// rate. A CAUSAL shape runs the PLAIN regime only (a causal cell inside a window has its
+/// state reset at every window boundary, the SAD driver's rule; the launcher writes
+/// `BLSTM_LID_window 0` on a forward LID net); every shape refuses OVERLAP (the fast LID
+/// scoring implements the truncate sweep and the plain forward, nothing accumulates across
+/// overlapping windows). A bidirectional shape runs either plain or truncate, exactly as
+/// the exact tree dispatches them. `who` prefixes the refusal.
+pub(super) fn check_lid_regime(
+    who: &str,
+    shape: FastNetShape,
+    lid_window_size: usize,
+    lid_no_overlap: bool,
+) -> Result<()> {
+    if let FastNetShape::Causal(cell) = shape
+        && lid_window_size != 0
+    {
+        bail!(
+            "{who}: windowed LID inference is unsupported for a causal LID net (cell '{}', \
+             BLSTM_LID_window resolves window_size {lid_window_size}); a causal cell's state is \
+             reset at every window boundary -- a forward LID net runs the plain regime \
+             (BLSTM_LID_window 0, what the launcher writes)",
+            cell.as_str()
+        );
+    }
+    if lid_window_size > 0 && !lid_no_overlap {
+        bail!(
+            "{who}: the overlap LID windowing is unsupported on the fast path (BLSTM_LID_shift \
+             resolves >= 1 frame); the fast LID scoring runs the truncate sweep or the plain \
+             forward -- the committed LID configs resolve to truncate (shift 0)"
+        );
+    }
+    Ok(())
 }

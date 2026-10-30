@@ -98,7 +98,9 @@ use super::nn::{
     slice_rows_f32,
 };
 use super::pipeline::FastPipeline;
-use super::plan::FastSadPlan;
+use super::plan::{
+    FastSadPlan, check_lid_regime, derive_lid_window, twin_bool_default, twin_i32_default,
+};
 use crate::features::pipeline::FeatureConfig;
 
 /// Which fast net shape a config's `Cell_Type` x `Direction` pair selects
@@ -859,28 +861,6 @@ impl FastNet {
 // FastTwinLid -- the f32 Mode-7 LID Twin (algo 6).
 // ===========================================================================
 
-/// Read one `i32` config scalar with a default (mirrors `twin_i32_default`).
-fn twin_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
-    }
-}
-
-/// Read one `bool` config scalar with a default (mirrors `twin_bool_default`).
-fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<bool>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}")),
-    }
-}
-
 /// f32 Mode-7 LID Twin (algo 6), the fast counterpart of
 /// [`crate::tasks::lid::TwinBlstmSpectralLid`] restricted to its `abs(_Mode) == 7`
 /// phSeq/cep arm (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`). The SAD net
@@ -1432,6 +1412,7 @@ pub struct LidAggregate {
 
 /// The per-channel LID scoring constants (derived once from config + rate + target
 /// language), invariant across a channel's external-features entries.
+#[derive(Clone, Debug)]
 pub(super) struct LidScoreParams {
     pub(super) lid_ssr: usize,
     pub(super) lid_lstm_sub: Vec<usize>,
@@ -1491,70 +1472,6 @@ fn argmax_f64(v: &[f64]) -> usize {
         }
     }
     j
-}
-
-/// LID window derivation (`getLIDBLSTMParam`, `TwinBLSTMSpectralLID.cpp:89-102`): returns
-/// `(lid_window_size, lid_no_overlap)`. `ssif` is the (mode-7 forced) spectrum shift in
-/// frames. Shared by `get_segmentation` and [`FastTwinLid::lid_score_params`] so the offline
-/// and streaming window sizes cannot drift.
-fn derive_lid_window(
-    size_sec: f64,
-    shift_sec: f64,
-    lid_ssr: usize,
-    ssif: usize,
-    rate: f64,
-) -> (usize, bool) {
-    let ssifd = ssif as f64;
-    let mut lid_window_size = f64::round(size_sec * rate / 2.0 / ssifd) as usize;
-    if lid_window_size != 0 && lid_window_size < lid_ssr {
-        lid_window_size = lid_ssr;
-    }
-    let lid_window_shift = f64::round(shift_sec * rate / ssifd) as i64;
-    let mut lid_no_overlap = false;
-    if lid_window_size != 0 && lid_window_shift < 1 {
-        lid_no_overlap = true;
-        let raw = f64::round(size_sec * rate / ssifd) as usize;
-        lid_window_size = (raw / lid_ssr) * lid_ssr;
-        if lid_window_size < 10 * lid_ssr {
-            lid_window_size = 10 * lid_ssr;
-        }
-    }
-    (lid_window_size, lid_no_overlap)
-}
-
-/// The LID regime rule (issue #57, D2), applied where the window has resolved against the
-/// rate -- the offline `get_segmentation` and the streaming `lid_score_params` both call
-/// it, so the two refusals cannot drift. A CAUSAL shape runs the PLAIN regime only (a
-/// causal cell inside a window has its state reset at every window boundary, the SAD
-/// driver's rule; the launcher writes `BLSTM_LID_window 0` on a forward LID net); every
-/// shape refuses OVERLAP (the fast LID scoring implements the truncate sweep and the plain
-/// forward, nothing accumulates across overlapping windows). A bidirectional shape runs
-/// either plain or truncate, exactly as the exact tree dispatches them.
-fn check_lid_regime(
-    who: &str,
-    shape: FastNetShape,
-    lid_window_size: usize,
-    lid_no_overlap: bool,
-) -> Result<()> {
-    if let FastNetShape::Causal(cell) = shape
-        && lid_window_size != 0
-    {
-        bail!(
-            "{who}: windowed LID inference is unsupported for a causal LID net (cell '{}', \
-             BLSTM_LID_window resolves window_size {lid_window_size}); a causal cell's state is \
-             reset at every window boundary -- a forward LID net runs the plain regime \
-             (BLSTM_LID_window 0, what the launcher writes)",
-            cell.as_str()
-        );
-    }
-    if lid_window_size > 0 && !lid_no_overlap {
-        bail!(
-            "{who}: the overlap LID windowing is unsupported on the fast path (BLSTM_LID_shift \
-             resolves >= 1 frame); the fast LID scoring runs the truncate sweep or the plain \
-             forward -- the committed LID configs resolve to truncate (shift 0)"
-        );
-    }
-    Ok(())
 }
 
 /// Fold ONE external-features entry into `acc` -- the exact body of the Mode-7 loop
@@ -1752,7 +1669,7 @@ impl FastTwinLid {
         lang_index: i32,
     ) -> Result<LidScoreParams> {
         let ssif = 80usize; // mode-7 forced (`BLSTMSpectralSegmenter.cpp:209`)
-        let (lid_window_size, lid_no_overlap) = derive_lid_window(
+        let (lid_window_size, _lid_window_shift, lid_no_overlap) = derive_lid_window(
             self.lid_window_size_sec,
             self.lid_window_shift_sec,
             self.lid_ssr,
