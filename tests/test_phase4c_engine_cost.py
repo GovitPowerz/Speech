@@ -3,17 +3,17 @@
 The goldens (`tests/reference_data/phase4c/computecost_*`) are dumped by GNU Octave running
 `tools/octave_harness/stage_computecost.m` -- a FALLBACK-TIER stage-local transcription of
 the VENDORED `legacy/Optimizer_V6.2.2/functions/ComputeCost.m` pure ASSEMBLY lines
-(:285-652), since ComputeCost.m's top half shells out to the engine and cannot run in
+(:354-652), since ComputeCost.m's top half shells out to the engine and cannot run in
 Octave (see the stage header + `scripts/extract_phase4c_computecost_fixtures.py`). Each
 group pins the Python port (`speech.engine`) against Octave's real MATLAB semantics
 (median, hist center-binning, std ddof=1, cumsum, exp/log):
 
-  * average_derivs (col0/max(1,count)), l2_penalty,
-    pooled mean/nb, the crafted-integer balance 0/3/4/5, and every cpu_mean (median) golden
+  * average_derivs (col0/max(1,count)), l2_penalty, the crafted-integer balance 0/3/4/5,
+    and every cpu_mean (median) golden
     -> STRICT (bit-exact; median is a single sort + at-most-one /2, not a multi-term
     reduction, so it never picks up the `close` group's accumulation gap below).
-  * pooled std (sqrt), the balance-10 LID calibration (incl. the b10c zero-zero
-    interior-cutoff variant, :571-572), the committed-fixture realistic cases, and the
+  * the balance-10 LID calibration (incl. the b10c zero-zero interior-cutoff variant,
+    :571-572), the committed-fixture realistic cases, and the
     fractional-`mean` cost scalars measured 0-ULP-exact on the oracle env
     (tier2_b0/tier2_b5/b10b/b10c) -> CANARY (the hybrid ULP-or-scaled-abs comparator,
     `tests/_libm_gate.py`; the manifest's `canary` list).
@@ -44,7 +44,6 @@ from speech.engine import (
     average_derivs,
     compute_cost,
     l2_penalty,
-    pool_input_stats,
 )
 
 from tests._libm_gate import assert_f64_close
@@ -132,7 +131,7 @@ def _rows(name: str) -> ChannelResults:
     return channel_results_from_matrix(mcr)
 
 
-# ==== aggregation / averaging / pooling / L2 (STRICT) ========================
+# ==== averaging / L2 (STRICT) ========================
 
 
 def test_average_derivs() -> None:
@@ -151,17 +150,6 @@ def test_l2_penalty() -> None:
     _assert_against(grad, "l2_grad")
     # Mutation guard: the bias positions (is_bias==1) are zeroed in the gradient.
     assert grad[1] == 0.0 and grad[3] == 0.0
-
-
-def test_pool_input_stats() -> None:
-    nb = _cc("pool_nb").reshape(-1)
-    mean = _cc("pool_mean")  # dim x worker
-    std = _cc("pool_std")
-    stats = [(int(nb[j]), mean[:, j], std[:, j]) for j in range(nb.shape[0])]
-    total_nb, pooled_mean, pooled_std = pool_input_stats(stats)
-    _assert_against(float(total_nb), "pool_out_nb")
-    _assert_against(pooled_mean, "pool_out_mean")
-    _assert_against(pooled_std, "pool_out_std")  # sqrt -> canary
 
 
 # ==== balance laws 0/3/4/5 on crafted integer MCRs (STRICT error + cb0/cb5 cost) ==========

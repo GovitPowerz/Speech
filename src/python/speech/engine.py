@@ -6,16 +6,28 @@ Ported from legacy MATLAB `Optimizer_V6.2.2/functions/ComputeCost.m` (782 LOC) +
 
 Two layers:
 
-  * The PURE cost assembly (`compute_cost` + the `average_derivs` / `pool_input_stats` /
-    `l2_penalty` helpers): given the engine's channel results (and, for the deriv/stats
-    helpers, the per-worker pieces), reproduce ComputeCost.m's `MultiDeriv./max(1,count)`
-    averaging (:357), pooled input-stats recombination (:285-300), L2 penalties
-    (:362/:554), and the balance laws 0/3/4/5/10 (:428-652). Octave-pinned bit-for-bit
+  * The PURE cost assembly: `compute_cost` (the balance laws 0/3/4/5/10, :428-652) over the
+    engine's channel results, with the `average_derivs` (`MultiDeriv./max(1,count)`, :357)
+    and `l2_penalty` (:362/:554) helpers beside it. Octave-pinned bit-for-bit
     (`tests/test_phase4c_engine_cost.py`).
   * The SEAM (`forward_backward`): ComputeGradient's contract over a `fold_run.FoldRun` --
     one gradient fold at the weights -> `f = NNCostSeg (+ NNCostLID)` (:110/:114) with the
     count-normalized (`+ L2` for the LID net) gradient. The engine mechanics (the config
     overlay, the F11 rule, the path resolution, the injection) are the fold run's (issue #22).
+
+Who reaches what (issue #100). Both regimes reach `ChannelResults` and the two private
+cost readers (`_nn_cost_seg` / `_nn_cost_lid`) through `fold_run.FoldResult`, and
+`forward_backward` (hence `average_derivs`) through `drivers/train.py::_backprop_inner`:
+the Modern loop (`train_modern`) every epoch, the Legacy regime (`train`) through
+`_score_fold` in its `backprop_refine` hook and post-QPSO BackPropagation step
+(`inner_steps > 0`, the CLI default 20; `score_genome` scores without it). Only the
+Legacy regime reaches `compute_cost` and the balance laws (`_score_fold`); the other two
+`compute_cost` callers, `_make_default_validate` with `val_metric="balance"` and
+`score_hyperparam_genome`, have no production entry. No production caller passes
+`forward_backward`'s `l2` (the LID L2 term is test-reachable only) and every production
+`CostParams` is `mode=0` (the `mode == 4` / `mode < 0` branches run only in tests). The
+pooled input-stats merge (:285-300) has no Python twin since #100: its production form
+is Rust's `features/stats.rs::InputStatistics::update`.
 
 The results are read by NAME: `speech_rs.Engine.channel_results()` returns one array per
 field, wrapped here as `ChannelResults` (issue #23). The legacy `Error_vad` column indices
@@ -129,7 +141,7 @@ def _nn_cost_lid(r: ChannelResults) -> float:
     return float(np.sum(r.lid_cost) / max(1e-6, float(np.sum(r.lid_count))))
 
 
-# ---- Averaging / pooling / L2 -----------------------------------------------------------
+# ---- Averaging / L2 -----------------------------------------------------------------------
 
 
 def average_derivs(derivs: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -139,30 +151,6 @@ def average_derivs(derivs: NDArray[np.float64]) -> NDArray[np.float64]:
     a zero count divides by 1 (never by 0)."""
     d = np.asarray(derivs, dtype=F64)
     return np.asarray(d[:, 0] / np.maximum(1.0, d[:, 1]), dtype=F64)
-
-
-def pool_input_stats(
-    stats: list[tuple[int, NDArray[np.float64], NDArray[np.float64]]],
-) -> tuple[int, NDArray[np.float64], NDArray[np.float64]]:
-    """Pooled per-dim mean/std across workers (:285-300), same math as the Rust
-    `io/stats.rs::InputStatistics::update` (the streaming pooled merge, re-squaring the
-    stored std). `stats` is a per-worker list of `(nb, mean_vec, std_vec)` for one config.
-
-    Transcribes the exact ascending-worker accumulation order so the STRICT pieces (nb,
-    mean) are bit-exact; the std carries a `sqrt` (canary-gated off the oracle env)."""
-    dim = int(np.asarray(stats[0][1]).shape[0])
-    total_nb = 0
-    mean = np.zeros(dim, dtype=F64)
-    for nb, mean_w, _ in stats:
-        total_nb += int(nb)  # legacy: :289
-        mean += int(nb) * np.asarray(mean_w, dtype=F64)  # legacy: :290
-    mean = mean / total_nb  # legacy: :292
-    var_acc = np.zeros(dim, dtype=F64)
-    for nb, mean_w, std_w in stats:
-        # legacy: :297 nb*(std^2 + (pooled_mean - mean_w)^2)
-        var_acc += int(nb) * (np.asarray(std_w, dtype=F64) ** 2 + (mean - np.asarray(mean_w, dtype=F64)) ** 2)
-    std = np.sqrt(var_acc / total_nb)  # legacy: :299
-    return total_nb, mean, std
 
 
 def l2_penalty(

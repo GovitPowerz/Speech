@@ -67,7 +67,7 @@ uv run python tests/mutations/run.py issue26 phase11/2b          # apply, build,
 uv run python tests/mutations/run.py --changed-since origin/main # the mutations a branch can have moved
 ```
 
-Suite sizes at the issue #90 close (2026-10-29): cargo 1382 (`--features test-support`), pytest 1195 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built -- since #27 the whole tree needs it, `init_weights` reads the engine and the config tests call `speech_rs.blstm_config`), pyo3 294 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min). Mutation batteries: 145 patches under `tests/mutations/` (138 battery, 7 runner), 511 verdicts (the #33 run's 187 plus the #76 run's 291 plus #78's one, #93's 11, #99's 12 and #110's 9 in `issue92/`, ~25 + ~29 min), corpus present and on the oracle libm host (`requires: oracle-libm`, #78; `SPEECH_ORACLE_LIBM=ulp` runs it as an off-oracle host would).
+Suite sizes at the issue #100 close (2026-10-30): cargo 1382 (`--features test-support`), pytest 1194 non-slow (`uv run pytest tests -q -m "not slow"`, `speech_rs` built -- since #27 the whole tree needs it, `init_weights` reads the engine and the config tests call `speech_rs.blstm_config`), pyo3 294 (`uv run pytest tests/pyo3 -q`, corpus present, ~25 min). Mutation batteries: 145 patches under `tests/mutations/` (138 battery, 7 runner), 511 verdicts (the #33 run's 187 plus the #76 run's 291 plus #78's one, #93's 11, #99's 12 and #110's 9 in `issue92/`, ~25 + ~29 min), corpus present and on the oracle libm host (`requires: oracle-libm`, #78; `SPEECH_ORACLE_LIBM=ulp` runs it as an off-oracle host would).
 
 ## Architecture
 

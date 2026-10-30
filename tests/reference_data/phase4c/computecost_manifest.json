@@ -1,6 +1,6 @@
 {
-  "text": "Phase 4c Task 9: the ComputeCost/ComputeGradient cost-assembly bit-pins. GNU Octave runs tools/octave_harness/stage_computecost.m -- a FALLBACK-TIER stage-local transcription of the VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:285-652: deriv averaging col0/max(1,col1), pooled input stats, L2, and the balance-law 0/3/4/5/10 error + cost) over the committed phase4a/4b MultiConfigResults fixtures + crafted per-balance variants, including a b10c variant crafted so the balance-10 zero-zero interior-cutoff midpoint branch (:571-572) fires. ComputeCost.m's top half shells out to the engine (system RunFsp) and cannot run in Octave, and its !-escape cleaning (:37) deletes pre-injected worker files, so no injection point leaves the vendored .m unmodified; the transcription is line-for-line with `% legacy:` provenance and Octave executes the real MATLAB semantics (median, hist center-binning, std ddof=1, cumsum, exp/log). Column schema (Error_vad = MCR(:,4:end), 1-based): 1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 15 LID-num, 16 flag, 17:end-2 per-class (>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: avg/l2/pooled-mean/crafted-integer balance 0/3/4/5, and every cpu_mean (median) golden -- measured bit-exact numpy-vs-Octave in all 9 cases, `median` being a single sort + at-most-one `/2`, not a multi-term reduction. CANARY (tests/_libm_gate.py): pooled std (sqrt), balance-10 (hist/std/exp/log), committed-fixture realistic cases, plus the 4 `mean`/`mean(.^2)` cost scalars measured 0-ULP-exact on the oracle env (tier2_b0/tier2_b5/b10b/b10c). CLOSE (always-tolerant, not libm-gated): the `mean`/`mean(.^2)` cost scalars measured genuinely 1-ULP-off Octave even on the oracle env (cb3/cb4/b10a) -- Octave accumulates mean/sum in extended precision, not a libm or summation-order split; see IMPROVEMENTS.",
-  "tier": "fallback (stage-local transcription of ComputeCost.m:285-652)",
+  "text": "Phase 4c Task 9: the ComputeCost/ComputeGradient cost-assembly bit-pins. GNU Octave runs tools/octave_harness/stage_computecost.m -- a FALLBACK-TIER stage-local transcription of the VENDORED legacy/Optimizer_V6.2.2/functions/ComputeCost.m pure ASSEMBLY lines (:354-652: deriv averaging col0/max(1,col1), L2, and the balance-law 0/3/4/5/10 error + cost) over the committed phase4a/4b MultiConfigResults fixtures + crafted per-balance variants, including a b10c variant crafted so the balance-10 zero-zero interior-cutoff midpoint branch (:571-572) fires. ComputeCost.m's top half shells out to the engine (system RunFsp) and cannot run in Octave, and its !-escape cleaning (:37) deletes pre-injected worker files, so no injection point leaves the vendored .m unmodified; the transcription is line-for-line with `% legacy:` provenance and Octave executes the real MATLAB semantics (median, hist center-binning, std ddof=1, cumsum, exp/log). Column schema (Error_vad = MCR(:,4:end), 1-based): 1 Pfa, 2 Pmiss, 3 (100-success), 4 cpu, 5 seg-num, 15 LID-num, 16 flag, 17:end-2 per-class (>150/+200 in-band), end-1 LID-denom, end seg-denom. STRICT: avg/l2/crafted-integer balance 0/3/4/5, and every cpu_mean (median) golden -- measured bit-exact numpy-vs-Octave in all 9 cases, `median` being a single sort + at-most-one `/2`, not a multi-term reduction. CANARY (tests/_libm_gate.py): balance-10 (hist/std/exp/log), committed-fixture realistic cases, plus the 4 `mean`/`mean(.^2)` cost scalars measured 0-ULP-exact on the oracle env (tier2_b0/tier2_b5/b10b/b10c). CLOSE (always-tolerant, not libm-gated): the `mean`/`mean(.^2)` cost scalars measured genuinely 1-ULP-off Octave even on the oracle env (cb3/cb4/b10a) -- Octave accumulates mean/sum in extended precision, not a libm or summation-order split; see IMPROVEMENTS.",
+  "tier": "fallback (stage-local transcription of ComputeCost.m:354-652)",
   "octave_version": "11.3.0",
   "l2_regul": 0.1,
   "balance_backprop": 0.5,
@@ -18,8 +18,6 @@
     "computecost_avg_out.bin",
     "computecost_l2_cost.bin",
     "computecost_l2_grad.bin",
-    "computecost_pool_out_nb.bin",
-    "computecost_pool_out_mean.bin",
     "computecost_cb0_error.bin",
     "computecost_cb0_cost.bin",
     "computecost_cb0_nnseg.bin",
@@ -41,7 +39,6 @@
     "computecost_b10c_cpumean.bin"
   ],
   "canary": [
-    "computecost_pool_out_std.bin",
     "computecost_tier2_b0_error.bin",
     "computecost_tier2_b0_cost.bin",
     "computecost_tier2_b5_error.bin",
@@ -86,30 +83,6 @@
     ],
     "computecost_l2_grad.bin": [
       5,
-      1
-    ],
-    "computecost_pool_nb.bin": [
-      2,
-      1
-    ],
-    "computecost_pool_mean.bin": [
-      2,
-      2
-    ],
-    "computecost_pool_std.bin": [
-      2,
-      2
-    ],
-    "computecost_pool_out_nb.bin": [
-      1,
-      1
-    ],
-    "computecost_pool_out_mean.bin": [
-      2,
-      1
-    ],
-    "computecost_pool_out_std.bin": [
-      2,
       1
     ],
     "computecost_cb_mcr.bin": [
