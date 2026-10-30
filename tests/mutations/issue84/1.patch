@@ -1,0 +1,19 @@
+mutation: FastLidPlan::timeline derives ssif from SpectralParams instead of forcing the Mode-7 80
+catcher: CAUGHT cargo --test fast_lid_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: CAUGHT cargo --test fast_twin_lid_matrix lid_parity_exact_vs_fast_per_pair
+catcher: MISSED cargo --test phase8_stream_lid every_shape_streams_prefix_correct_and_finish_equals_offline
+
+diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
+index 5202548..583afce 100644
+--- a/src/rust/src/fast/plan.rs
++++ b/src/rust/src/fast/plan.rs
+@@ -762,7 +762,7 @@ impl FastLidPlan {
+     /// constant [`MODE7_SSIF`]. Runs the regime rule on the RESOLVED LID window; `who`
+     /// prefixes a refusal.
+     pub fn timeline(&self, who: &str, rate: f64, lang_index: i32) -> Result<LidTimeline> {
+-        let ssif = MODE7_SSIF;
++        let ssif = SpectralParams::derive(&self.feature_cfg, rate).shift_frames;
+         let spectrum_shift_sec = ssif as f64 / rate;
+         let sad = sad_axis(
+             &self.driver_cfg,

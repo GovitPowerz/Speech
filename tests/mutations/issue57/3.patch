@@ -1,25 +1,26 @@
 mutation: check_lid_regime no longer refuses a windowed causal LID net
 catcher: CAUGHT cargo --test fast_twin_lid_matrix windowed_causal_lid_is_refused_offline_and_streaming
+catcher: CAUGHT cargo --test fast_lid_plan rate_free_precheck_refuses_what_no_rate_can_rescue
 
-diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
-index 4007a71..e06e482 100644
---- a/src/rust/src/fast/driver.rs
-+++ b/src/rust/src/fast/driver.rs
-@@ -1558,17 +1558,6 @@ fn check_lid_regime(
-     lid_window_size: usize,
-     lid_no_overlap: bool,
+diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
+index 5202548..ad9f5e7 100644
+--- a/src/rust/src/fast/plan.rs
++++ b/src/rust/src/fast/plan.rs
+@@ -929,17 +929,6 @@ fn check_lid_regime(
+     no_overlap: bool,
+     at: &str,
  ) -> Result<()> {
 -    if let FastNetShape::Causal(cell) = shape
--        && lid_window_size != 0
+-        && windowed
 -    {
 -        bail!(
 -            "{who}: windowed LID inference is unsupported for a causal LID net (cell '{}', \
--             BLSTM_LID_window resolves window_size {lid_window_size}); a causal cell's state is \
--             reset at every window boundary -- a forward LID net runs the plain regime \
--             (BLSTM_LID_window 0, what the launcher writes)",
+-             BLSTM_LID_window {window_sec} resolves a nonzero window{at}); a causal cell's \
+-             state is reset at every window boundary -- a forward LID net runs the plain \
+-             regime (BLSTM_LID_window 0, what the launcher writes)",
 -            cell.as_str()
 -        );
 -    }
-     if lid_window_size > 0 && !lid_no_overlap {
+     if windowed && !no_overlap {
          bail!(
              "{who}: the overlap LID windowing is unsupported on the fast path (BLSTM_LID_shift \

@@ -1,0 +1,15 @@
+mutation: FastLidPlan::read_weights_files skips the BLSTM_weightsFile read (the #65 SAD-file check the exact Twin performs)
+catcher: CAUGHT cargo --test fast_twin_lid_matrix the_sad_file_seam_matches_the_exact_twin_row_by_row
+
+diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
+index 5202548..625425d 100644
+--- a/src/rust/src/fast/plan.rs
++++ b/src/rust/src/fast/plan.rs
+@@ -847,7 +847,6 @@ impl FastLidPlan {
+     /// exact Twin refuses it, and with both files bad the SAD error is the one raised.
+     /// Returns the LID pack, `None` for an empty `BLSTM_LID_weightsFile`.
+     pub fn read_weights_files(&self) -> Result<Option<Vec<f64>>> {
+-        self.sad.read_weights_file()?;
+         self.lid.read_weights_file()
+     }
+ }

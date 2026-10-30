@@ -9,8 +9,9 @@
 //!  - the timeline reproduces the frozen per-file derivation of the exact Twin
 //!    (`get_segmentation_mode7`: `ssif` forced to 80, `get_blstm_param` on the never-run
 //!    SAD net, the spectral time axis, `getLIDBLSTMParam`, the target clamp) at two rates
-//!    -- the ONLY place a "derive `ssif` instead of forcing 80" mutation is visible, the
-//!    Twin fixtures being phSeq at the one rate where `round(0.01 * rate) == 80`;
+//!    -- the plan-level pin of the forced 80 (every committed Twin config carries
+//!    `BLSTM_spectrum_shift 0.025`, so a derived shift would read 200 at 8 kHz; the parity
+//!    legs see that too, as the battery measured, through a LID window of 10 instead of 25);
 //!  - the two stateful shift carries the fast Twin DROPPED (the SAD `_WindowShift` and
 //!    the `_LIDWindowShift`, each re-quantized in place and reset to 0.0 after a truncate
 //!    file) are a fixed point at one rate, reset included (the by-design divergence's
@@ -234,7 +235,8 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
                 .timeline("fast_lid_plan", rate, 1)
                 .unwrap_or_else(|e| panic!("{rel}@{rate}: {e}"));
             // Mode 7 forces `_SpectrumShiftInFrames = 80` at EVERY rate (the phSeq/cep
-            // periodogram is always present): at 16 kHz a derived shift would read 160.
+            // periodogram is always present): the committed `BLSTM_spectrum_shift 0.025`
+            // would derive 200 at 8 kHz and 400 at 16 kHz.
             assert_eq!(tl.ssif, MODE7_SSIF, "{rel}@{rate}: ssif");
             assert_eq!(tl.ssif, 80);
             assert_eq!(
