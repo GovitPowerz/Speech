@@ -103,6 +103,75 @@ pub fn accepted_norm_types(arm: FastSadArm) -> &'static [i16] {
 /// [`FastSadPlan::from_map`], so a `-2` config fails at bag construction on every arm.
 const FAST_TREE_NORM_TYPES: [i16; 3] = [-1, 0, 1];
 
+/// The per-prefix NET reading both plans share (issue #84): one `BLSTM`/`BLSTM_LID`
+/// prefix read into the peephole-aligned spec, the fast shape, the three cell
+/// geometries, the normalization type, the exact pack length, the whole-net
+/// sub-sampling ratio and the weight-file key. [`FastSadPlan`] reads one (`BLSTM`) and
+/// flattens it into its own fields; the LID plan holds two. The `BlstmConfig` is the
+/// caller's because each plan reads its own gates off it.
+#[derive(Clone, Debug)]
+pub struct FastNetPlan {
+    /// The peephole-aligned `NnetSpec` the fast net is built from
+    /// (`build_spec_aligned_to`).
+    pub spec: NnetSpec,
+    /// `classify_fast_shape`: which fast kernel runs it.
+    pub shape: FastNetShape,
+    /// The three port-only cell geometries, inert unless `shape` names their cell.
+    pub geometry: CellGeometry,
+    /// `<prefix>_InputNormalizationType`, unchecked here (each plan owns its set).
+    pub input_normalization_type: i16,
+    /// `exact_pack_len`: what every pack, in-memory or file, is checked against.
+    pub pack_len: usize,
+    /// The whole-net sub-sampling ratio (`getSubSamplingRatio`): the product of every
+    /// recurrent and output-layer ratio.
+    pub ssr: usize,
+    /// `<prefix>_weightsFile`, `""` when absent or empty (the legacy `size() != 0` guard).
+    pub weights_file: String,
+}
+
+impl FastNetPlan {
+    /// Read the `prefix` net off `map` and its already-parsed `bc`
+    /// (`BlstmConfig::from_legacy(map, prefix)`). Pure, I/O-free, no gate.
+    pub fn from_map(
+        map: &IndexMap<String, String>,
+        prefix: &str,
+        bc: &BlstmConfig,
+    ) -> Result<FastNetPlan> {
+        let shape = classify_fast_shape(bc);
+        let spec = build_spec_aligned_to(map, prefix, bc)?;
+        let ssr = spec.lstm_subsampling.iter().product::<usize>()
+            * spec.output_subsampling.iter().product::<usize>();
+        let pack_len = exact_pack_len(bc)?;
+        let weights_file = map
+            .get(&format!("{prefix}_weightsFile"))
+            .map(String::as_str)
+            .unwrap_or("")
+            .to_string();
+        Ok(FastNetPlan {
+            spec,
+            shape,
+            geometry: CellGeometry::from(bc),
+            input_normalization_type: bc.input_normalization_type,
+            pack_len,
+            ssr,
+            weights_file,
+        })
+    }
+}
+
+/// The three `BLSTM` config structs every fast plan reads (the SAD net's segmenter,
+/// driver and feature config; on the Twin the SAD side is never run but its decision
+/// layer, time axis and pre-emphasis gates read the same three).
+fn blstm_configs(
+    map: &IndexMap<String, String>,
+) -> Result<(SegmenterConfig, DriverConfig, FeatureConfig)> {
+    Ok((
+        SegmenterConfig::from_config(map, "BLSTM")?,
+        DriverConfig::from_config(map, "BLSTM")?,
+        FeatureConfig::from_legacy(map, "BLSTM")?,
+    ))
+}
+
 /// Everything an algo-3 fast SAD run needs that does not depend on the sample rate or on
 /// the audio: the rate-free half of the setup, parsed ONCE from the config map by
 /// [`Self::from_map`] and consumed by the offline driver and the streaming session alike.
@@ -152,9 +221,7 @@ impl FastSadPlan {
             bail!("fast SAD plan: only algo 3 (spectral SAD) is supported (got {algo})");
         }
 
-        let seg_cfg = SegmenterConfig::from_config(map, "BLSTM")?;
-        let driver_cfg = DriverConfig::from_config(map, "BLSTM")?;
-        let feature_cfg = FeatureConfig::from_legacy(map, "BLSTM")?;
+        let (seg_cfg, driver_cfg, feature_cfg) = blstm_configs(map)?;
 
         // Pitch second pass unsupported on the fast path (spec R4). tier2 + the phase-6
         // SAD config use TDCwindow 0. One gate for both consumers: the stream used to
@@ -169,8 +236,7 @@ impl FastSadPlan {
         // Cell x direction dispatch (Phase 9 Task 6, spec S4.2) + peephole-default
         // alignment (rider 1). Every pair maps to a shape since phase-10 Task 8.
         let bc = BlstmConfig::from_legacy(map, "BLSTM")?;
-        let shape = classify_fast_shape(&bc);
-        let spec = build_spec_aligned_to(map, "BLSTM", &bc)?;
+        let net = FastNetPlan::from_map(map, "BLSTM", &bc)?;
 
         // The fast-tree-wide set. Type 0 is the exact path's `_ => {}` arm (the
         // `nn::blstm::BlstmNetwork::feed_forward_backward` normalization match): a
@@ -184,24 +250,25 @@ impl FastSadPlan {
             );
         }
 
-        let ssr = spec.lstm_subsampling.iter().product::<usize>()
-            * spec.output_subsampling.iter().product::<usize>();
-        let pack_len = exact_pack_len(&bc)?;
         let fixed_gain = get_f64_opt(map, "Audio_fixed_gain")?;
-        let weights_file = map
-            .get("BLSTM_weightsFile")
-            .map(String::as_str)
-            .unwrap_or("")
-            .to_string();
 
+        let FastNetPlan {
+            spec,
+            shape,
+            geometry,
+            input_normalization_type,
+            pack_len,
+            ssr,
+            weights_file,
+        } = net;
         let plan = FastSadPlan {
             feature_cfg,
             seg_cfg,
             driver_cfg,
             spec,
             shape,
-            geometry: CellGeometry::from(&bc),
-            input_normalization_type: bc.input_normalization_type,
+            geometry,
+            input_normalization_type,
             pack_len,
             fixed_gain,
             weights_file,
