@@ -11,10 +11,11 @@ function stage_computecost(out_dir)
   % (:216-282). Octave cannot run the engine, and the `!`-escape cleaning (:37) deletes any
   % pre-injected worker files before the shell-out, so there is no clean injection point
   % that leaves the vendored .m unmodified. Instead this stage transcribes the pure
-  % ASSEMBLY lines (:374 sortrows, :428-652 the balance-law error + cost, plus the
-  % :354-364 deriv-averaging/L2 block) line-for-line with
-  % `% legacy:` provenance, and drives them on injected result matrices. Real MATLAB
-  % semantics (sortrows stable-ascending, median, hist center-binning, std ddof=1, cumsum,
+  % ASSEMBLY lines (:428-652 the balance-law error + cost, plus the :354-364
+  % deriv-averaging/L2 block; the :374 sortrows aggregation left with `aggregate_workers`
+  % in issue #23, the :285-300 pooled-stats block with `pool_input_stats` in issue #100)
+  % line-for-line with `% legacy:` provenance, and drives them on injected result matrices.
+  % Real MATLAB semantics (median, hist center-binning, std ddof=1, cumsum,
   % exp/log) are exercised by Octave; the Python port must match. The engine-shelling
   % top half is out of scope for the pure cost assembly (it is the seam, tested via
   % speech_rs.Engine in tests/pyo3).

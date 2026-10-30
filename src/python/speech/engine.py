@@ -15,12 +15,14 @@ Two layers:
     count-normalized (`+ L2` for the LID net) gradient. The engine mechanics (the config
     overlay, the F11 rule, the path resolution, the injection) are the fold run's (issue #22).
 
-Who reaches what (issue #100). The Modern loop (`drivers/train.py::train_modern`) reaches
-`ChannelResults` and the two private cost readers (`_nn_cost_seg` / `_nn_cost_lid`) through
-`fold_run.FoldResult`, and `forward_backward` (hence `average_derivs`) through
-`_backprop_inner`. The Legacy regime (`drivers/train.py::_score_fold`) reaches
-`compute_cost` and the balance laws; its other two callers, `_make_default_validate` with
-`val_metric="balance"` and `score_hyperparam_genome`, have no production entry. No
+Who reaches what (issue #100). Both regimes reach `ChannelResults` and the two private
+cost readers (`_nn_cost_seg` / `_nn_cost_lid`) through `fold_run.FoldResult`, and
+`forward_backward` (hence `average_derivs`) through `drivers/train.py::_backprop_inner`:
+the Modern loop (`train_modern`) directly, the Legacy regime (`_score_fold`) whenever its
+`inner_steps` is set, the CLI default. Only the Legacy regime reaches `compute_cost` and
+the balance laws (`_score_fold`); the other two `compute_cost` callers,
+`_make_default_validate` with `val_metric="balance"` and `score_hyperparam_genome`, have
+no production entry. No
 production caller passes `forward_backward`'s `l2` (the LID L2 term is test-reachable
 only) and every production `CostParams` is `mode=0` (the `mode == 4` / `mode < 0`
 branches run only in tests). The pooled input-stats merge (:285-300) has no Python twin
@@ -138,7 +140,7 @@ def _nn_cost_lid(r: ChannelResults) -> float:
     return float(np.sum(r.lid_cost) / max(1e-6, float(np.sum(r.lid_count))))
 
 
-# ---- Averaging / L2 -----------------------------------------------------------
+# ---- Averaging / L2 -----------------------------------------------------------------------
 
 
 def average_derivs(derivs: NDArray[np.float64]) -> NDArray[np.float64]:
