@@ -1111,7 +1111,7 @@ impl PartialEq for LstmState {
 /// THE CELLWEIGHT-NARROW ASYMMETRY IS UPSTREAM OF THIS TYPE, and that is worth stating
 /// because the hazard list flags it as easy to over-generalize: the `g`/cell gate carries
 /// NO peepholes, so in the CONFIG-domain structured model its rows are `out+in+1` against
-/// the `i`/`f`/`o` rows' `out+in+5` (`config::LstmLayer`'s layout note). `config::pack_lstm_layer`
+/// the `i`/`f`/`o` rows' `out+in+5` (the layout note above `config::LstmLayer`). `config::pack_lstm_layer`
 /// resolves that asymmetry when it BUILDS the flat pack -- it emits four
 /// equal `out x in` fan-in blocks, four equal `out x out` recurrent blocks, ONE `out x 12`
 /// peephole bundle gathered from the i/f/o rows alone, and four `out`-long bias blocks --

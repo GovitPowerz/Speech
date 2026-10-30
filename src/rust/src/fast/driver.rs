@@ -607,7 +607,7 @@ impl Segmenter for FastSpectralSegmenter {
         Ok(())
     }
 
-    /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::dump_dir`]):
+    /// The configured dump directory (see `tasks::sad::BlstmSpectralSegmenter::dump_dir`):
     /// gates the scored-branch VRCTS write.
     fn dump_dir(&self) -> &str {
         &self.plan.driver_cfg.dump_dir
@@ -885,8 +885,8 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 /// f32 Mode-7 LID Twin (algo 6), the fast counterpart of
 /// [`crate::tasks::lid::TwinBlstmSpectralLid`] restricted to its `abs(_Mode) == 7`
 /// phSeq/cep arm (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`). The SAD net is
-/// NEVER RUN (its `result_vec` is the constant 10.0 of `TwinBLSTMSpectralLID.cpp:725`); only
-/// the LID
+/// NEVER RUN (its `result_vec` is the constant 10.0 of `TwinBLSTMSpectralLID.cpp:725-726`);
+/// only the LID
 /// net scores each `audio.external_features[i]` block, in f32. The langID / confusion /
 /// `is_lid_correct` decisions derive from the LID posteriors alone -- widened back to
 /// f64 at the member seam so the shared `.scr` writer + confusion columns flow unchanged.
@@ -1332,7 +1332,7 @@ impl Segmenter for FastTwinLid {
             self.cumulative_error[chan] = 0.0;
             self.nb_of_classif[chan] = 0;
 
-            // abs(_Mode)==7 external-features loop (`:965-1179`) + member writes (`:1318-1337`),
+            // abs(_Mode)==7 external-features loop (`:980-1155`) + member writes (`:1318-1337`),
             // via the SHARED kernel (`score_lid_entry` / `finalize_lid_channel`) -- the SAME
             // code the streaming session folds through, so streaming is bit-identical to this
             // offline path by construction (see the kernel section below `get_segmentation`).
@@ -1557,7 +1557,7 @@ fn check_lid_regime(
 }
 
 /// Fold ONE external-features entry into `acc` -- the exact body of the Mode-7 loop
-/// (`TwinBLSTMSpectralLID.cpp:965-1179`; the `:NNN` here and in the body are its lines).
+/// (`TwinBLSTMSpectralLID.cpp:980-1155`; the `:NNN` here and in the body are its lines).
 /// Returns `None` if the entry is skipped (`nrows < lid_ssr` or `< MinNbOfFrames`,
 /// `:981`), else the per-entry observables. The noise `randinit` is fixed 0 PER ENTRY
 /// (the port's choice where `:1022-1032` seeds from the clock), NOT entry-order-dependent, so a

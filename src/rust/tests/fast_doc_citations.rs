@@ -13,7 +13,8 @@
 //! 1. No `<file>.rs:<line>` citation in `src/fast/` names a file under `src/` outside
 //!    `fast/` (the basenames are read off the tree, `mod.rs` by its directory). The
 //!    `audio.rs::get_sequence` (`:NNN`) form is refused by the same scan, since the
-//!    resolver never sees it.
+//!    resolver never sees it; so is a basename `fast/` shares with the exact tree
+//!    (`pipeline.rs:NNN`), a line into a fast file being the same rot.
 //! 2. Every `root::a::B::c` path in `src/fast/` whose root is a top-level module of
 //!    `src/lib.rs` other than `fast` resolves. Resolution is FILE-granular, a text scan
 //!    rather than a parse: a module segment picks the file, every later segment must be
@@ -28,7 +29,10 @@
 //!    either that comment's own block or the doc block of the enclosing item (the nearest
 //!    `fn` / `struct` / `impl` / ... line above) must name a `.cpp` / `.h` / `.m` file.
 //!    `fast/cells.rs`'s LSTM step kernel set the convention under #96 ("the `:NNN` cites in
-//!    this doc and the body are that legacy loop's lines"); this is it made executable.
+//!    this doc and the body are that legacy loop's lines"); this is it made executable. The
+//!    check is coarse on purpose: any `<ident>.cpp` / `.h` / `.m` word declares (the legacy
+//!    tree is git-ignored, so the name cannot be resolved here), and one name covers every
+//!    bare cite in its block. It catches the undeclared number, not the wrong one.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -168,33 +172,49 @@ fn symbol_paths_in(text: &str, roots: &[String]) -> Vec<(usize, Vec<String>)> {
     out
 }
 
+/// `line` without its visibility (`pub `, `pub(crate) `, `pub(super) `).
+fn after_visibility(line: &str) -> &str {
+    let mut rest = line;
+    for vis in ["pub(crate) ", "pub(super) ", "pub "] {
+        rest = rest.strip_prefix(vis).unwrap_or(rest);
+    }
+    rest
+}
+
 /// `name` is defined in `text`: an item (`fn`/`struct`/`enum`/`trait`/`type`/`const`/`static`/
-/// `mod name`), a re-export (`pub use ...name`), or an enum variant / struct field line. A
-/// line that merely STARTS with `name` (`LstmLayer::feed_forward(..)`, `matmul_seq(`) is a
-/// use, not a definition, so a moved symbol's old path does not resolve on its call sites.
+/// `mod name`, a `const fn` / `unsafe fn` included), a re-export (`pub use ...name`), a
+/// struct field line (`name: `) or an enum variant line (a CAPITALISED `Name,` / `Name {` /
+/// `Name(..),`). A line that merely STARTS with `name` (`LstmLayer::feed_forward(..)`,
+/// `matmul_seq(`, a `name,` call argument) is a use, not a definition, so a moved
+/// snake_case symbol's old path does not resolve on its call sites.
 fn defines(text: &str, name: &str) -> bool {
     let item = [
         "fn ", "struct ", "enum ", "trait ", "type ", "const ", "static ", "mod ",
     ];
+    let capitalised = name.starts_with(|c: char| c.is_ascii_uppercase());
     text.lines().any(|line| {
         let t = line.trim_start();
+        let rest = after_visibility(t);
+        let rest = ["const ", "unsafe "]
+            .iter()
+            .find_map(|q| rest.strip_prefix(q).filter(|r| r.starts_with("fn ")))
+            .unwrap_or(rest);
         let is_item = item.iter().any(|kw| {
-            let mut rest = t;
-            for vis in ["pub(crate) ", "pub(super) ", "pub "] {
-                rest = rest.strip_prefix(vis).unwrap_or(rest);
-            }
             rest.strip_prefix(kw)
                 .is_some_and(|rest| starts_with_word(rest, name))
         });
         let reexport =
             t.starts_with("pub use ") && t.split(|c: char| !is_ident(c)).any(|w| w == name);
-        let variant = t.strip_prefix(name).is_some_and(|tail| {
-            tail.is_empty()
-                || tail.starts_with([',', '{'])
-                || tail.starts_with(": ")
-                || (tail.starts_with('(') && t.ends_with(','))
-        });
-        is_item || reexport || variant
+        let field = t
+            .strip_prefix(name)
+            .is_some_and(|tail| tail.starts_with(": "));
+        let variant = capitalised
+            && t.strip_prefix(name).is_some_and(|tail| {
+                tail.is_empty()
+                    || tail.starts_with([',', '{'])
+                    || (tail.starts_with('(') && t.ends_with(','))
+            });
+        is_item || reexport || field || variant
     })
 }
 
@@ -235,6 +255,10 @@ fn resolve(segs: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The scan found 195 crate paths in `src/fast/` at the #118 close (doc, comment and code
+/// paths alike); fewer than half of that is a broken tokenizer, not a doc trim.
+const SEEN_FLOOR: usize = 95;
+
 #[test]
 fn every_exact_symbol_cited_in_fast_resolves() {
     let roots = crate_roots();
@@ -254,8 +278,6 @@ fn every_exact_symbol_cited_in_fast_resolves() {
             }
         }
     }
-    // The scan found 195 paths at the #118 close; half of that is a broken
-    // tokenizer, not a doc trim.
     assert!(
         seen > SEEN_FLOOR,
         "the scan found only {seen} crate paths in src/fast/; the tokenizer is broken"
@@ -266,8 +288,6 @@ fn every_exact_symbol_cited_in_fast_resolves() {
         bad.join("\n")
     );
 }
-
-const SEEN_FLOOR: usize = 95;
 
 /// `text` names a legacy source: `<name>.cpp`, `<name>.h` or `<name>.m` as a whole word.
 fn names_legacy_file(text: &str) -> bool {
@@ -309,31 +329,27 @@ enum CommentKind {
     Body,
 }
 
-/// `line` as (kind, comment text) if it carries a comment: a `//!` / `///` / `//` line, or
-/// code with a trailing `//`.
-fn comment_of(line: &str) -> Option<(CommentKind, &str)> {
+/// `line` as (kind, comment text) if it is a full-line comment: `//!`, `///` or `//`.
+fn full_line_comment(line: &str) -> Option<(CommentKind, &str)> {
     let t = line.trim_start();
     if let Some(c) = t.strip_prefix("//!") {
         Some((CommentKind::Module, c))
     } else if let Some(c) = t.strip_prefix("///") {
         Some((CommentKind::Doc, c))
     } else {
-        line.find("//").map(|i| (CommentKind::Body, &line[i + 2..]))
+        t.strip_prefix("//").map(|c| (CommentKind::Body, c))
     }
 }
 
-/// The contiguous run of lines of `kind` around `n` (full-line comments only), joined.
+/// `line` as (kind, comment text) if it carries a comment: a full-line one, or code with a
+/// trailing `//` (a body comment).
+fn comment_of(line: &str) -> Option<(CommentKind, &str)> {
+    full_line_comment(line).or_else(|| line.find("//").map(|i| (CommentKind::Body, &line[i + 2..])))
+}
+
+/// The contiguous run of full-line comments of `kind` around `n`, joined.
 fn block_around(lines: &[&str], n: usize, kind: CommentKind) -> String {
-    let is_kind = |i: usize| {
-        let t = lines[i].trim_start();
-        match kind {
-            CommentKind::Module => t.starts_with("//!"),
-            CommentKind::Doc => t.starts_with("///"),
-            CommentKind::Body => {
-                t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")
-            }
-        }
-    };
+    let is_kind = |i: usize| full_line_comment(lines[i]).is_some_and(|(k, _)| k == kind);
     let mut lo = n;
     while lo > 0 && is_kind(lo - 1) {
         lo -= 1;
@@ -352,10 +368,7 @@ fn is_item_line(line: &str) -> bool {
     if t.starts_with("//") {
         return false;
     }
-    let mut rest = t;
-    for vis in ["pub(crate) ", "pub(super) ", "pub "] {
-        rest = rest.strip_prefix(vis).unwrap_or(rest);
-    }
+    let rest = after_visibility(t);
     [
         "fn ", "struct ", "enum ", "impl ", "impl<", "trait ", "const ", "static ", "type ", "mod ",
     ]
@@ -538,4 +551,16 @@ fn the_bare_cite_rule_reads_the_declaring_block() {
     // Not cites: a file citation (rule 1), a path, a time, a one-digit ascription.
     assert!(bare_cites_in("`sad.rs:1436`, `a::b`, 12:30, `x: 1`, `mel.rs:362`").is_empty());
     assert_eq!(bare_cites_in("(`:362`/`:383`)"), vec![":362", ":383"]);
+}
+
+#[test]
+fn defines_reads_items_fields_and_capitalised_variants() {
+    let text = "pub struct Foo {\n    peepholes: [bool; 6],\n}\nenum Kind {\n    Plain,\n    Truncate(u8),\n}\n\
+                pub const fn width() -> usize { 1 }\nunsafe fn raw() {}\nfn call() {\n    other(\n        feed_forward,\n    );\n}\n";
+    assert!(defines(text, "Foo") && defines(text, "peepholes"));
+    assert!(defines(text, "Plain") && defines(text, "Truncate"));
+    assert!(defines(text, "width") && defines(text, "raw") && defines(text, "call"));
+    // A snake_case `name,` argument line is a use, not a variant.
+    assert!(!defines(text, "feed_forward"));
+    assert!(!defines(text, "other"));
 }
