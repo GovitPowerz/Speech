@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 
 from speech.drivers.state import RunState, TrainResult
 from speech.drivers.train import DEFAULT_INNER_STEPS, train
+from speech.genome import genome_length
 from speech.optimizers import QpsoParams
 from speech.weight_bridge import read_weight_vector
 
@@ -40,8 +41,15 @@ def retrain(
     Deviation: legacy `ReTrain_BLSTM.m:803` seeds `nnet_best` PLUS half the prior
     population (`nnet_in(:,1:ceil(N/2))`); this port seeds `nnet_best` ONLY, since the
     JSON checkpoint stores the gbest genome, not the full population (see IMPROVEMENTS.md).
+
+    A `gbest.bin` whose length is not `genome_length(state.ps)` is refused: `quantum_pso`
+    writes the seed row into `pos[:rows, :cols]`, so a shorter vector (a narrowed-search
+    checkpoint, which holds the searchable genome) would silently seed a prefix of the genome.
     """
     nnet_best = seed_from_checkpoint(checkpoint)
+    d = genome_length(state.ps)
+    if nnet_best.shape[0] != d:
+        raise ValueError(f"{checkpoint}/gbest.bin holds {nnet_best.shape[0]} genes, this run's genome has {d}: not a `train` checkpoint of this config")
     return train(
         state,
         seed,

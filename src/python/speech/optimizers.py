@@ -275,13 +275,13 @@ class QpsoParams:
     PSO model (3 = Clerc, required for the dead vel3 bank's `chi`), pso_seed (1 = seed the
     first rows), minmax (0 = minimize).
 
-    The defaults are the ONE home of the QPSO knobs (issue #102): the script constants of
-    `Train_BLSTM.m:831-861` (`minmax`, `ac`, `Iwt`, `errgrad`, `errgraditer`, `errgoal`) and
-    the port's own `ps` / `me` / `trelea` / `pso_seed` (the legacy reads `ps` off
-    `PS.VP.nbindiv` and `modl` off `PS.VP.PSOType`, hard-codes `epoch = 300` and `PSOseed = 1`;
-    here `24` / `100` are the CLI defaults read by `cli.py`, `drivers.train` and
-    `drivers.retrain`, and a seed vector is what turns `pso_seed` on). `iwe`, `vr` and `mv`
-    depend on the run (the epoch count, the genome length), so they stay required."""
+    The defaults are the ONE home of the QPSO knobs (issue #102): the legacy script constants
+    (`ps = PS.VP.nbindiv = 24` and `modl = PS.VP.PSOType = 3`, `Train_BLSTM.m:171-172`;
+    `minmax`, `ac`, `Iwt`, `errgrad`, `errgraditer`, `errgoal`, `:831-861`) and the port's own
+    `me` / `pso_seed` (the legacy hard-codes `epoch = 300` and `PSOseed = 1`; here `me = 100`,
+    and a seed vector is what turns `pso_seed` on). `ps` / `me` are the CLI defaults read by
+    `cli.py`, `drivers.train` and `drivers.retrain`. `iwe`, `vr` and `mv` depend on the run
+    (the epoch count, the genome length), so they stay required."""
 
     ps: int = 24
     me: int = 100

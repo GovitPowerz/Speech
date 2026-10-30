@@ -118,6 +118,19 @@ def test_retrain_seed_from_checkpoint(tmp_path: Path) -> None:
     assert np.array_equal(got.view(np.uint64), gbest.view(np.uint64)), "seed must be the saved gbest bit-for-bit"
 
 
+def test_retrain_refuses_a_gbest_of_another_genome_length(tmp_path: Path) -> None:
+    """A narrowed-search checkpoint holds the searchable genome, shorter than `train`'s; seeded
+    into the full genome it would overwrite a prefix only (`quantum_pso`'s `pos[:rows, :cols] =
+    sv`). `retrain` refuses any `gbest.bin` that is not `genome_length` long, before any engine work."""
+    state = init_run(_seed_init_inputs(tmp_path), tmp_path / "run")
+    ckpt = tmp_path / "checkpoint"
+    ckpt.mkdir()
+    short = np.zeros(genome_length(state.ps) - 1, dtype=np.float64)
+    write_bin(short.shape[0], 1, short, ckpt / "gbest.bin")
+    with pytest.raises(ValueError, match="not a `train` checkpoint"):
+        retrain(state, ckpt, seed=0)
+
+
 def test_cli_init_dispatch(tmp_path: Path) -> None:
     """`cli.main(["init", config, out_dir])` runs `init_run` and persists the state;
     an unknown subcommand returns nonzero without raising."""

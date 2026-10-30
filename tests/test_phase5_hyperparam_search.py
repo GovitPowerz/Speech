@@ -16,26 +16,29 @@ hook (unlike `train_modern`'s `train_epoch`/`validate`, Task 8's stub-testabilit
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.drivers import train as train_module
-from speech.drivers.state import RunState
-from speech.drivers.train import _HYPERPARAM_PENALTY, train_hyperparam_search
+from speech.drivers.state import RunState, TrainResult
+from speech.drivers.train import _HYPERPARAM_PENALTY, train, train_hyperparam_search
 from speech.genome import weight_block_mask
 
 from tests.test_phase5_train_modern import _algo3_state
 
 
-def test_qpso_epochs_below_two_raises(tmp_path: Path) -> None:
+@pytest.mark.parametrize("driver", [train, train_hyperparam_search], ids=["train", "narrowed"])
+def test_qpso_epochs_below_two_raises(tmp_path: Path, driver: Callable[..., TrainResult]) -> None:
     """The QDPSO exploration/contraction schedule divides by `me - 1`
     (`coef_exp_contr = 0.75 - 0.5*(i-1)/(me-1)`); `qpso_epochs < 2` must be rejected before
-    ever reaching `quantum_pso`, not surface as a bare `ZeroDivisionError`."""
+    ever reaching `quantum_pso`, not surface as a bare `ZeroDivisionError`, on both QPSO drivers
+    (the guard lives in their shared `_qpso_params`)."""
     state = _algo3_state(tmp_path)
     with pytest.raises(ValueError, match="qpso_epochs must be >= 2"):
-        train_hyperparam_search(state, seed=1, qpso_particles=2, qpso_epochs=1)
+        driver(state, seed=1, qpso_particles=2, qpso_epochs=1)
 
 
 def test_penalized_eval_recorded_with_exception_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,6 +68,9 @@ def test_penalized_eval_recorded_with_exception_type(tmp_path: Path, monkeypatch
     assert result.penalized_types.get("RuntimeError", 0) >= 1
     assert result.penalized_evals == sum(result.penalized_types.values())
     assert result.gbestval < _HYPERPARAM_PENALTY, "only one candidate was penalized -- gbest must be a real (non-penalty) cost"
+    ckpt = Path(result.checkpoint_dir)
+    assert (ckpt / "gbest.bin").exists() and (ckpt / "cost_history.bin").exists()
+    assert not (ckpt / "inner_cost_history.bin").exists(), "the narrowed search runs no inner SMORMS3 loop"
 
 
 def test_fully_penalized_run_warns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

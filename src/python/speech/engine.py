@@ -20,8 +20,8 @@ cost readers (`_nn_cost_seg` / `_nn_cost_lid`) through `fold_run.FoldResult`, an
 `forward_backward` (hence `average_derivs`) through `drivers/train.py::_backprop_inner`:
 the Modern loop (`train_modern`) every epoch, the Legacy regime (`train`) through
 `_score_fold` in its `backprop_refine` hook and post-QPSO BackPropagation step
-(`inner_steps > 0`, the CLI default 20; `score_genome` scores without it). Only the
-Legacy regime reaches `compute_cost` and the balance laws (`_score_fold`); the other two
+(`inner_steps > 0`, default `drivers/train.py::DEFAULT_INNER_STEPS`; `score_genome`
+scores without it). Only the Legacy regime reaches `compute_cost` and the balance laws (`_score_fold`); the other two
 `compute_cost` callers, `_make_default_validate` with `val_metric="balance"` and
 `score_hyperparam_genome`, have no production entry. No production caller passes
 `forward_backward`'s `l2` (the LID L2 term is test-reachable only) and every production
