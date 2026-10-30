@@ -265,7 +265,7 @@ pub fn parse_stream_args(args: &[String]) -> Result<StreamInvocation> {
 /// before `parse_cli` ever runs. `config`/`input` are the two required positional
 /// paths (config then the phSeq/cep utterances file, in that order); `lang` is the
 /// eval target language index (the offline `audio.lang_index`, clamped into
-/// `[0, class_nb)` by `fast::driver::FastTwinLid::lid_score_params` -- a negative
+/// `[0, class_nb)` by `fast::plan::FastLidPlan::timeline` -- a negative
 /// value, the default, targets class 0).
 #[derive(Debug, Clone)]
 pub struct StreamLidInvocation {

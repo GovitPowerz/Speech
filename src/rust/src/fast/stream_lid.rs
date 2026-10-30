@@ -48,13 +48,26 @@
 //! target from `--lang` / the caller, and the weights from `BLSTM_LID_weightsFile` (`None`
 //! defers to the config, which since issue #65 also reads and length-checks a non-empty
 //! `BLSTM_weightsFile` as the offline Twin does, then discards it).
+//!
+//! SINCE ISSUE #84 THE SETUP IS THE PLAN'S. The session used to build a whole offline
+//! [`FastTwinLid`](super::driver::FastTwinLid) (the SAD-side configs, the SAD spec, the exact
+//! SAD pack length) only to borrow its LID net and its params derivation; now it holds a
+//! [`FastLidPlan`] (rate-free: every construction refusal), the LID net built through the
+//! plan's one [`FastNetPlan::build_net`](super::plan::FastNetPlan::build_net) or read through
+//! its one [`read_weights_files`](FastLidPlan::read_weights_files), and the
+//! [`LidTimeline`](super::plan::LidTimeline)'s params at the session's rate and target (the
+//! regime rule). The offline Twin reads the SAME plan and the SAME timeline per file, so the
+//! two setups cannot drift (ADR-0004's #24 amendment, extended to the Twin).
 
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
 pub use super::driver::LidAggregate;
-use super::driver::{FastTwinLid, LidChannelAcc, LidScoreParams, finalize_lid_channel};
+use super::driver::{
+    FastNet, LidChannelAcc, LidScoreParams, finalize_lid_channel, score_lid_entry,
+};
+use super::plan::FastLidPlan;
 
 /// One utterance's streaming LID score: the per-entry observables (the offline `seg_lid` +
 /// its argmax) plus the running aggregate AFTER folding this utterance.
@@ -77,14 +90,16 @@ pub struct UtteranceScore {
 }
 
 /// The per-utterance streaming LID session: the online twin of the offline fast Mode-7 LID
-/// Twin ([`FastTwinLid`]), restricted to its phSeq/cep external-features arm. Owns the
-/// validated LID net + the derived scoring params + the running per-channel accumulator; folds
-/// one utterance per [`push_utterance`](Self::push_utterance) and finalizes on demand.
+/// Twin ([`FastTwinLid`](super::driver::FastTwinLid)), restricted to its phSeq/cep
+/// external-features arm. Owns the plan, the LID net, the derived scoring params and the
+/// running per-channel accumulator; folds one utterance per
+/// [`push_utterance`](Self::push_utterance) and finalizes on demand.
 pub struct StreamingLidSession {
-    /// The validated Twin (holds the LID net + the config-derived scoring surface). Its
-    /// `get_segmentation` is NEVER called -- the session drives the shared kernel directly, so
-    /// it reuses all of `from_legacy`'s construction validation without the offline SAD side.
-    twin: FastTwinLid,
+    /// The validated rate-free setup (the same value the offline Twin builds on).
+    plan: FastLidPlan,
+    /// The LID net, the one net that runs.
+    net: FastNet,
+    /// The per-channel scoring constants at the session's rate and target.
     params: LidScoreParams,
     /// The single-channel running accumulator (streaming LID is inherently one utterance
     /// stream; the offline's per-channel loop reuses the same external_features for every
@@ -95,33 +110,54 @@ pub struct StreamingLidSession {
 impl StreamingLidSession {
     /// Build the session from the SAME legacy config `map` the offline Twin consumes, the
     /// stream `rate`, the target `lang_index` (the eval target -- the offline `audio.lang_index`),
-    /// and the LID weight pack (`Some(flat)` builds the net immediately; `None` defers to the
-    /// config's `BLSTM_LID_weightsFile` through [`FastTwinLid::load_weights_file`], so a
-    /// non-empty `BLSTM_weightsFile` must also resolve and be long enough, issue #65). Reuses [`FastTwinLid::from_legacy`]'s construction
-    /// validation (Mode 7 only, InputNormalizationType 0, no pitch pass / DumpInternals /
-    /// negative TargetEnforcementStep / MLP, ...) and additionally bails if the LID window
-    /// resolves to a regime the shape refuses (windowed causal, overlap -- the offline Twin's
-    /// own rule, issue #57) or if no LID net is loaded.
+    /// and the LID weight pack: [`FastLidPlan::from_map`] then [`Self::from_plan`]. Every
+    /// construction refusal (Mode 7 only, InputNormalizationType 0, no pitch pass /
+    /// DumpInternals / negative TargetEnforcementStep / MLP, ...) is the plan's.
     pub fn new(
         map: &IndexMap<String, String>,
         rate: f64,
         lang_index: i32,
         lid_weights: Option<&[f64]>,
     ) -> Result<StreamingLidSession> {
-        let mut twin = FastTwinLid::from_legacy(map, None, lid_weights)?;
-        // `from_legacy` with `lid_weights: None` defers the net to the config's weightsFile.
-        if lid_weights.is_none() {
-            twin.load_weights_file()?;
-        }
-        if !twin.lid_net_loaded() {
-            bail!(
-                "streaming LID: no LID net loaded -- pass lid_weights to new(), or set \
-                 BLSTM_LID_weightsFile in the config"
-            );
-        }
-        let params = twin.lid_score_params("streaming LID", rate, lang_index)?;
+        Self::from_plan(FastLidPlan::from_map(map)?, rate, lang_index, lid_weights)
+    }
+
+    /// Build on an already-parsed plan. `lid_weights: Some(flat)` builds the net immediately
+    /// (EXACT-LENGTH, the in-memory seam); `None` defers to the plan's two weight files
+    /// ([`FastLidPlan::read_weights_files`]: a non-empty `BLSTM_weightsFile` must also
+    /// resolve and be long enough, issue #65), and bails if no LID net results. Then the
+    /// timeline at `rate` for `lang_index`, which bails if the LID window resolves to a
+    /// regime the shape refuses (windowed causal, overlap -- the offline Twin's own rule,
+    /// issue #57). The net before the regime, as the offline Twin orders them.
+    pub fn from_plan(
+        plan: FastLidPlan,
+        rate: f64,
+        lang_index: i32,
+        lid_weights: Option<&[f64]>,
+    ) -> Result<StreamingLidSession> {
+        let net = match lid_weights {
+            Some(flat) => plan.lid.build_net(flat)?,
+            None => match plan.read_weights_files()? {
+                Some(flat) => plan.lid.build_net(&flat)?,
+                None => bail!(
+                    "streaming LID: no LID net loaded -- pass lid_weights to new(), or set \
+                     BLSTM_LID_weightsFile in the config"
+                ),
+            },
+        };
+        let params = plan.timeline("streaming LID", rate, lang_index)?.params;
         let acc = LidChannelAcc::new(params.class_nb);
-        Ok(StreamingLidSession { twin, params, acc })
+        Ok(StreamingLidSession {
+            plan,
+            net,
+            params,
+            acc,
+        })
+    }
+
+    /// The rate-free setup the session was built on.
+    pub fn plan(&self) -> &FastLidPlan {
+        &self.plan
     }
 
     /// Fold ONE utterance (`external_features` entry -- the `(frames x feat_dim)` matrix the
@@ -130,7 +166,7 @@ impl StreamingLidSession {
     /// (empty `scores`, `None` argmax), exactly as the offline loop's guard
     /// (`TwinBLSTMSpectralLID.cpp:981`).
     pub fn push_utterance(&mut self, feat: &Array2<f64>) -> UtteranceScore {
-        let outcome = self.twin.fold_entry(feat, &self.params, &mut self.acc);
+        let outcome = score_lid_entry(feat, &mut self.net, &self.params, &mut self.acc);
         let running_aggregate = finalize_lid_channel(&self.acc, &self.params);
         match outcome {
             Some(o) => UtteranceScore {

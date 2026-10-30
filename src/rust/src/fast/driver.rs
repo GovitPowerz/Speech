@@ -234,7 +234,8 @@ pub(crate) fn build_spec_aligned_to(
 /// TwoSweeps/single-sweep TRUNCATE windowing the committed LID configs resolve to
 /// (`BLSTM_LID_window 0.25`) or the PLAIN forward (`window 0`); a CAUSAL shape runs PLAIN
 /// only; OVERLAP is refused on every shape, where the window resolves against the rate
-/// (`FastTwinLid::get_segmentation` / `lid_score_params`), not at construction.
+/// (`fast::plan::FastLidPlan::timeline`, read per file by `FastTwinLid::get_segmentation`
+/// and at construction by the Utterance stream).
 ///
 /// `large_enum_variant` allowed on the house precedent (`Processor`, `CellLayer`,
 /// `FastCell`): a `FastNet` is built ONCE per driver and then only borrowed -- never a
@@ -1402,41 +1403,5 @@ pub(super) fn finalize_lid_channel(acc: &LidChannelAcc, p: &LidScoreParams) -> L
         is_lid_correct,
         predicted_language,
         segments_count: acc.segments_count,
-    }
-}
-
-impl FastTwinLid {
-    /// The per-channel LID scoring params for the streaming session, through the plan's
-    /// timeline (the session moves onto the plan itself in the next commit).
-    pub(super) fn lid_score_params(
-        &self,
-        who: &str,
-        rate: f64,
-        lang_index: i32,
-    ) -> Result<LidScoreParams> {
-        Ok(self.plan.timeline(who, rate, lang_index)?.params)
-    }
-
-    /// Whether the LID net is loaded -- so the streaming session bails at construction rather
-    /// than deferring the failure to the first push.
-    pub(super) fn lid_net_loaded(&self) -> bool {
-        self.lid_net.is_some()
-    }
-
-    /// Fold one external-features entry through the LID net into `acc` (the streaming seam --
-    /// delegates to the shared [`score_lid_entry`] with the internal net). Panics only if the
-    /// net is unloaded, which the session forbids at construction ([`lid_net_loaded`](Self::
-    /// lid_net_loaded)).
-    pub(super) fn fold_entry(
-        &mut self,
-        feat: &Array2<f64>,
-        p: &LidScoreParams,
-        acc: &mut LidChannelAcc,
-    ) -> Option<LidEntryOutcome> {
-        let net = self
-            .lid_net
-            .as_mut()
-            .expect("LID net loaded (checked at session construction)");
-        score_lid_entry(feat, net, p, acc)
     }
 }
