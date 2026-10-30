@@ -33,8 +33,8 @@
 //! NOISE (entry-order-independent). Mode-7 Gaussian noise (`_NoiseMagnitude > 0`, off in the
 //! gate configs) uses a `randinit` fixed at 0 PER ENTRY (`fast/driver.rs`'s `score_lid_entry`,
 //! not the clock seed of the exact `TwinBLSTMSpectralLID.cpp:1022-1032`), so each utterance's
-//! noise indexing restarts at 0 -- a per-utterance push
-//! reproduces the offline sequential call's noise exactly, at any push granularity.
+//! noise indexing restarts at 0 -- a per-utterance push reproduces the offline sequential
+//! call's noise exactly, at any push granularity.
 //!
 //! SIGNATURE NOTE (the same T4/T5-precedent deviation the SAD session took). The Task-7 brief
 //! sketches `new(map)`, but the offline path threads `audio.sample_rate` into the LID window

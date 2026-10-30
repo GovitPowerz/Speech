@@ -33,35 +33,37 @@
 //! THE LOAD-BEARING QUIRKS CARRIED (each named against its `features::mel` symbol, the
 //! list `features::mel`'s own module doc enumerates):
 //!
-//! - WHOLE-BANK FALLBACK (`MelFilterBank::new`): if ANY triangle collects zero bins the
-//!   entire bank collapses to raw-band pass-through (`nb_filters = end - beg + 1`).
+//! - WHOLE-BANK FALLBACK (`features::mel::MelFilterBank::new`): if ANY triangle collects
+//!   zero bins the entire bank collapses to raw-band pass-through
+//!   (`nb_filters = end - beg + 1`).
 //! - INCLUSIVE triangle edges with the center bin taking the FALLING branch
-//!   (`MelFilterBank::new`); unit peak, no normalization.
-//! - `ln(dot + 1e-24)` -- the additive floor INSIDE the log (`MelFilterBank::apply_filter_bank`).
-//! - THE DELTAS-NO-DCT STATIC-BLOCK OVERWRITE (`MelFilterBank::apply_deltas_overwrite`, legacy
+//!   (`features::mel::MelFilterBank::new`); unit peak, no normalization.
+//! - `ln(dot + 1e-24)` -- the additive floor INSIDE the log
+//!   (`features::mel::MelFilterBank::apply_filter_bank`).
+//! - THE DELTAS-NO-DCT STATIC-BLOCK OVERWRITE
+//!   (`features::mel::MelFilterBank::apply_deltas_overwrite`, legacy
 //!   `MelFilterBank.cpp:192-193`): with deltas active and DCT off, the output layout is
 //!   `[delta | delta | delta-delta]` -- the static log-mel block is CLOBBERED by the
 //!   delta block after the delta/dd blocks are written.
-//! - SDC's UNCONDITIONAL n=3 REGRESSION KERNEL (`MelFilterBank::apply_dct`, branch A): branch A
-//!   fires on
-//!   `deltas_nb < 0`, but the delta it stacks uses `n = 3` REGARDLESS of that trigger
-//!   value; blocks stack at vertical offset `3*kk` in a `(T + 21) x 7*nb_dct` scratch and
-//!   are extracted at row `(k*P-1)/2 = 10`.
-//! - SDC + `ignoreFirst` CLOBBERS THE LAST STATIC (`MelFilterBank::apply_dct`): the extracted block
-//!   is written at `col0 = width - k*nb`, which with `ignoreFirst` starts at `nb-1` and
-//!   overwrites `c_{N-1}` (c0 kept, the last static lost).
-//! - THE `ignoreFirst` BRANCH-B FIRST-COLUMN DROP (`MelFilterBank::apply_dct`, branch B): with
-//!   `ignoreFirst && deltas_nb >= 0` the statics/deltas are built into a `T x (width+1)`
-//!   temp and then column 0 is dropped (static c0 only; the DELTA of c0 is kept).
-//! - `regression_deltas`' clamp semantics (`features::mel::regression_deltas`): when `j > T`
-//!   the shifted
-//!   copy is SKIPPED but `j*j` still contributes to the denominator.
+//! - SDC's UNCONDITIONAL n=3 REGRESSION KERNEL (`features::mel::MelFilterBank::apply_dct`,
+//!   branch A): branch A fires on `deltas_nb < 0`, but the delta it stacks uses `n = 3`
+//!   REGARDLESS of that trigger value; blocks stack at vertical offset `3*kk` in a
+//!   `(T + 21) x 7*nb_dct` scratch and are extracted at row `(k*P-1)/2 = 10`.
+//! - SDC + `ignoreFirst` CLOBBERS THE LAST STATIC (`features::mel::MelFilterBank::apply_dct`):
+//!   the extracted block is written at `col0 = width - k*nb`, which with `ignoreFirst`
+//!   starts at `nb-1` and overwrites `c_{N-1}` (c0 kept, the last static lost).
+//! - THE `ignoreFirst` BRANCH-B FIRST-COLUMN DROP (`features::mel::MelFilterBank::apply_dct`,
+//!   branch B): with `ignoreFirst && deltas_nb >= 0` the statics/deltas are built into a
+//!   `T x (width+1)` temp and then column 0 is dropped (static c0 only; the DELTA of c0 is
+//!   kept).
+//! - `regression_deltas`' clamp semantics (`features::mel::regression_deltas`): when
+//!   `j > T` the shifted copy is SKIPPED but `j*j` still contributes to the denominator.
 //!
-//! OMITTED BY CONSTRUCTION: `features::pipeline::assemble_input_sequence`'s
-//! LTSV hcat. `FastPipeline::new` typed-bails an active LTSV
-//! column, so an LTSV argument here would be unreachable code with no gate coverage;
-//! [`assemble_input_sequence_f32`] therefore takes no `ltsv` parameter and the DCT / mel
-//! / raw-band priority (the rest of that function) is transcribed alone.
+//! OMITTED BY CONSTRUCTION: `features::pipeline::assemble_input_sequence`'s LTSV hcat.
+//! `FastPipeline::new` typed-bails an active LTSV column, so an LTSV argument here would be
+//! unreachable code with no gate coverage; [`assemble_input_sequence_f32`] therefore takes
+//! no `ltsv` parameter and the DCT / mel / raw-band priority (the rest of that function)
+//! is transcribed alone.
 
 use super::nn::FastMatrix;
 // The two mel-scale conversions are `pub` on the exact bank and are PURE f64 scalar
@@ -272,9 +274,9 @@ impl FastMelBank {
         }
     }
 
-    /// f32 `features::mel::MelFilterBank::apply_filter_bank`. `p` is the row-major `t x bins`
-    /// periodogram. Four branches on (`is_log`, `is_mel`); the log+mel branch folds in
-    /// the deltas-no-DCT `[delta|delta|dd]` OVERWRITE when active.
+    /// f32 `features::mel::MelFilterBank::apply_filter_bank`. `p` is the row-major
+    /// `t x bins` periodogram. Four branches on (`is_log`, `is_mel`); the log+mel branch
+    /// folds in the deltas-no-DCT `[delta|delta|dd]` OVERWRITE when active.
     // `ind_coeff` walks absolute periodogram columns alongside the coeff run -- the
     // explicit counter is the legacy iteration, not a zip candidate.
     #[allow(clippy::explicit_counter_loop)]
@@ -333,8 +335,8 @@ impl FastMelBank {
         out
     }
 
-    /// The log+mel deltas-no-DCT tail (`features::mel::MelFilterBank::apply_deltas_overwrite`).
-    /// `out` enters as
+    /// The log+mel deltas-no-DCT tail
+    /// (`features::mel::MelFilterBank::apply_deltas_overwrite`). `out` enters as
     /// `T x (2 or 3)*F` with the static log-mel in the FIRST `F` columns; the delta / dd
     /// blocks are filled, then the STATIC BLOCK IS CLOBBERED by the delta block
     /// (legacy `MelFilterBank.cpp:192-193`).
@@ -394,8 +396,8 @@ impl FastMelBank {
         out
     }
 
-    /// f32 `features::mel::MelFilterBank::apply_dct`. Branch A (`deltas < 0`) = SDC; Branch B
-    /// (`ignoreFirst`, deltas >= 0) = drop c0; Branch C = statics + `[c|dc|(ddc)]`.
+    /// f32 `features::mel::MelFilterBank::apply_dct`. Branch A (`deltas < 0`) = SDC;
+    /// Branch B (`ignoreFirst`, deltas >= 0) = drop c0; Branch C = statics + `[c|dc|(ddc)]`.
     pub fn apply_dct(&self, mel: &FastMatrix) -> FastMatrix {
         let t = mel.rows;
         let nb = self.nb_dct as usize;
@@ -545,8 +547,8 @@ pub fn regression_deltas_f32(base: &FastMatrix, n: i32) -> FastMatrix {
     acc
 }
 
-/// f32 `features::pipeline::assemble_input_sequence`, spectral-path
-/// priority only: `dct` verbatim if present, else `mel` verbatim, else the raw path
+/// f32 `features::pipeline::assemble_input_sequence`, spectral-path priority only: `dct`
+/// verbatim if present, else `mel` verbatim, else the raw path
 /// `ln(p.block(:, freq_beg..=freq_end) + 1e-24)` (the band limit applies ONLY here).
 /// The LTSV hcat is omitted by construction -- `FastPipeline::new` typed-bails an active
 /// LTSV column (see the module doc).
@@ -629,9 +631,9 @@ mod tests {
 
     /// [`banks`] with an explicit `(min_freq, max_freq)` band. The default band starts at
     /// 0 Hz, which makes `beg_freq == 0` and leaves the raw-band branches' `beg_freq + ii`
-    /// column offset (both raw-band branches of `MelFilterBank::apply_filter_bank`)
-    /// structurally unexercised -- a NONZERO band is
-    /// the only way to put a value pin on it.
+    /// column offset (both raw-band branches of
+    /// `features::mel::MelFilterBank::apply_filter_bank`) structurally unexercised -- a
+    /// NONZERO band is the only way to put a value pin on it.
     #[allow(clippy::too_many_arguments)]
     fn banks_band(
         nb_bins: i32,
@@ -748,8 +750,8 @@ mod tests {
         // cover the remaining three `apply_filter_bank` branches, which the exact oracle
         // pins bit-exactly and which would otherwise have ZERO value coverage here --
         // including the whole-bank FALLBACK's raw-band apply and its `beg_freq + ii`
-        // column offset (`MelFilterBank::apply_filter_bank`'s log raw-band branch), an
-        // offset no mel-branch row can exercise.
+        // column offset (`features::mel::MelFilterBank::apply_filter_bank`'s log raw-band
+        // branch), an offset no mel-branch row can exercise.
         // The `(min_freq, max_freq)` band is 0..4000 everywhere except the two raw-band
         // FALLBACK rows: those carry a NONZERO `min_freq` so `beg_freq > 0` and the
         // pass-through branches' `p[.., beg_freq + ii]` column offset is actually pinned
@@ -823,12 +825,11 @@ mod tests {
 
     #[test]
     fn deltas_no_dct_static_block_is_overwritten_by_the_delta_block() {
-        // THE QUIRK (`MelFilterBank::apply_deltas_overwrite`): with deltas active and DCT OFF the
-        // layout is
-        // `[delta | delta | delta-delta]` -- the static log-mel block is CLOBBERED. A
-        // "sane" implementation would leave `[static | delta | dd]`, so this pin
-        // discriminates: cols [0,F) must EQUAL cols [F,2F) bit-for-bit, and must NOT
-        // equal the plain log-mel statics (non-vacuity).
+        // THE QUIRK (`features::mel::MelFilterBank::apply_deltas_overwrite`): with deltas
+        // active and DCT OFF the layout is `[delta | delta | delta-delta]` -- the static
+        // log-mel block is CLOBBERED. A "sane" implementation would leave
+        // `[static | delta | dd]`, so this pin discriminates: cols [0,F) must EQUAL cols
+        // [F,2F) bit-for-bit, and must NOT equal the plain log-mel statics (non-vacuity).
         let (t, bins) = (19usize, 65usize);
         let p = synth_perio(t, bins);
         let (_, f) = banks(20, bins - 1, true, 0, false, 5, 3);
@@ -864,11 +865,10 @@ mod tests {
 
     #[test]
     fn ignore_first_branch_b_drops_the_first_column_not_the_last() {
-        // THE QUIRK (`MelFilterBank::apply_dct`, branch B): branch B builds `T x (width+1)`
-        // then drops
-        // column 0 -- so the ignoreFirst output is the NON-ignoreFirst output with its
-        // FIRST column removed (static c0 gone, the DELTA of c0 KEPT). A drop-the-last
-        // implementation would fail the equality below.
+        // THE QUIRK (`features::mel::MelFilterBank::apply_dct`, branch B): branch B builds
+        // `T x (width+1)` then drops column 0 -- so the ignoreFirst output is the
+        // NON-ignoreFirst output with its FIRST column removed (static c0 gone, the DELTA of
+        // c0 KEPT). A drop-the-last implementation would fail the equality below.
         let (t, bins) = (17usize, 65usize);
         let p = synth_perio(t, bins);
         let (_, keep) = banks(20, bins - 1, true, 4, false, 5, 3);
@@ -890,12 +890,12 @@ mod tests {
 
     #[test]
     fn sdc_uses_the_n3_kernel_and_clobbers_the_last_static() {
-        // TWO quirks in one shape. (1) `MelFilterBank::apply_dct` branch A: branch A's stacked
-        // delta uses
-        // n=3 REGARDLESS of the (negative) trigger value -- so `deltas_nb = -3` and
-        // `deltas_nb = -9` must produce IDENTICAL output. (2) its `ignoreFirst` write order: with
-        // ignoreFirst the 7*nb block starts at col nb-1, so the LAST static is clobbered
-        // -- col nb-1 must equal the first SDC column, not the last static.
+        // TWO quirks in one shape. (1) `features::mel::MelFilterBank::apply_dct` branch A:
+        // branch A's stacked delta uses n=3 REGARDLESS of the (negative) trigger value -- so
+        // `deltas_nb = -3` and `deltas_nb = -9` must produce IDENTICAL output. (2) its
+        // `ignoreFirst` write order: with ignoreFirst the 7*nb block starts at col nb-1, so
+        // the LAST static is clobbered -- col nb-1 must equal the first SDC column, not the
+        // last static.
         let (t, bins) = (29usize, 65usize);
         let p = synth_perio(t, bins);
         let (_, a3) = banks(20, bins - 1, true, 4, true, -3, 0);
@@ -957,9 +957,8 @@ mod tests {
     #[test]
     fn regression_deltas_denominator_keeps_the_saturated_terms() {
         // `features::mel::regression_deltas`: when `j > T` the shifted copy is SKIPPED but
-        // `j*j` still
-        // contributes to the denominator. A T=2 base with n=5 therefore divides by
-        // 2*(1+4+9+16+25) = 110, not by the sum over the non-skipped j only.
+        // `j*j` still contributes to the denominator. A T=2 base with n=5 therefore divides
+        // by 2*(1+4+9+16+25) = 110, not by the sum over the non-skipped j only.
         let base = FastMatrix {
             data: vec![1.0, 0.0, 3.0, 0.0],
             rows: 2,
@@ -983,8 +982,8 @@ mod tests {
 
     #[test]
     fn assemble_priority_is_dct_then_mel_then_raw_band() {
-        // `features::pipeline::assemble_input_sequence`: dct wins, else mel, else the band-limited
-        // `ln(p + 1e-24)` -- and the band limit applies ONLY on the raw path.
+        // `features::pipeline::assemble_input_sequence`: dct wins, else mel, else the
+        // band-limited `ln(p + 1e-24)` -- and the band limit applies ONLY on the raw path.
         let (t, bins) = (5usize, 9usize);
         let p = synth_perio(t, bins);
         let mel = FastMatrix::zeros(t, 3);

@@ -105,14 +105,14 @@ fn crate_roots() -> Vec<String> {
 fn fast_cites_no_exact_file_by_line_number() {
     let names = exact_file_names();
     assert!(names.iter().any(|n| n == "blstm.rs") && names.iter().any(|n| n == "sad.rs"));
+    let needles: Vec<String> = names.iter().map(|name| format!("{name}:")).collect();
     let mut hits = Vec::new();
     for file in rust_files(&src_dir("fast")) {
         let text = fs::read_to_string(&file).unwrap();
         for (n, line) in text.lines().enumerate() {
-            for name in &names {
-                let needle = format!("{name}:");
+            for needle in &needles {
                 let mut from = 0;
-                while let Some(i) = line[from..].find(&needle) {
+                while let Some(i) = line[from..].find(needle) {
                     let at = from + i + needle.len();
                     if line[at..].starts_with(|c: char| c.is_ascii_digit() || c == ':') {
                         hits.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
@@ -181,41 +181,65 @@ fn after_visibility(line: &str) -> &str {
     rest
 }
 
+/// `line` without the `const ` / `unsafe ` of a `const fn` / `unsafe fn`.
+fn after_fn_qualifiers(line: &str) -> &str {
+    ["const ", "unsafe "]
+        .iter()
+        .find_map(|q| line.strip_prefix(q).filter(|r| r.starts_with("fn ")))
+        .unwrap_or(line)
+}
+
 /// `name` is defined in `text`: an item (`fn`/`struct`/`enum`/`trait`/`type`/`const`/`static`/
-/// `mod name`, a `const fn` / `unsafe fn` included), a re-export (`pub use ...name`), a
-/// struct field line (`name: `) or an enum variant line (a CAPITALISED `Name,` / `Name {` /
-/// `Name(..),`). A line that merely STARTS with `name` (`LstmLayer::feed_forward(..)`,
-/// `matmul_seq(`, a `name,` call argument) is a use, not a definition, so a moved
-/// snake_case symbol's old path does not resolve on its call sites.
+/// `mod name`, a `const fn` / `unsafe fn` included), a re-export (`pub use ...name`, a
+/// multi-line `pub use a::{..}` list included), a struct field line (`name: `, after any
+/// visibility) or an enum variant line (a CAPITALISED `Name,` / `Name(..),`; a struct-like
+/// `Name { .. }` variant is not recognised). A line that merely STARTS with `name`
+/// (`LstmLayer::feed_forward(..)`, `matmul_seq(`, a `name,` call argument) is a use, not a
+/// definition, and so is every item of a private multi-line `use a::{..}` list, so a moved
+/// symbol's old path does not resolve on its call sites or its imports.
 fn defines(text: &str, name: &str) -> bool {
     let item = [
         "fn ", "struct ", "enum ", "trait ", "type ", "const ", "static ", "mod ",
     ];
     let capitalised = name.starts_with(|c: char| c.is_ascii_uppercase());
-    text.lines().any(|line| {
+    let names_it = |t: &str| t.split(|c: char| !is_ident(c)).any(|w| w == name);
+    let brace_depth = |t: &str| t.matches('{').count() as i64 - t.matches('}').count() as i64;
+    // Inside a multi-line `use a::{`: (open brace depth, the list is a `pub use`).
+    let mut use_list: Option<(i64, bool)> = None;
+    for line in text.lines() {
         let t = line.trim_start();
+        if let Some((depth, is_pub)) = use_list {
+            if is_pub && names_it(t) {
+                return true;
+            }
+            let depth = depth + brace_depth(t);
+            use_list = (depth > 0).then_some((depth, is_pub));
+            continue;
+        }
         let rest = after_visibility(t);
-        let rest = ["const ", "unsafe "]
-            .iter()
-            .find_map(|q| rest.strip_prefix(q).filter(|r| r.starts_with("fn ")))
-            .unwrap_or(rest);
+        if rest.starts_with("use ") && t.ends_with('{') {
+            use_list = Some((brace_depth(t), t.starts_with("pub use ")));
+        }
+        let rest = after_fn_qualifiers(rest);
         let is_item = item.iter().any(|kw| {
             rest.strip_prefix(kw)
                 .is_some_and(|rest| starts_with_word(rest, name))
         });
-        let reexport =
-            t.starts_with("pub use ") && t.split(|c: char| !is_ident(c)).any(|w| w == name);
-        let field = t
+        let reexport = t.starts_with("pub use ") && names_it(t);
+        let field = rest
             .strip_prefix(name)
             .is_some_and(|tail| tail.starts_with(": "));
         let variant = capitalised
             && t.strip_prefix(name).is_some_and(|tail| {
                 tail.is_empty()
-                    || tail.starts_with([',', '{'])
+                    || tail.starts_with(',')
                     || (tail.starts_with('(') && t.ends_with(','))
             });
-        is_item || reexport || field || variant
-    })
+        if is_item || reexport || field || variant {
+            return true;
+        }
+    }
+    false
 }
 
 /// Walk `segs` from `src/`: the root and every module segment descend (`nn` -> `nn/`,
@@ -255,9 +279,9 @@ fn resolve(segs: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// The scan found 195 crate paths in `src/fast/` at the #118 close (doc, comment and code
+/// The scan found 208 crate paths in `src/fast/` at the #118 close (doc, comment and code
 /// paths alike); fewer than half of that is a broken tokenizer, not a doc trim.
-const SEEN_FLOOR: usize = 95;
+const SEEN_FLOOR: usize = 103;
 
 #[test]
 fn every_exact_symbol_cited_in_fast_resolves() {
@@ -347,7 +371,9 @@ fn comment_of(line: &str) -> Option<(CommentKind, &str)> {
     full_line_comment(line).or_else(|| line.find("//").map(|i| (CommentKind::Body, &line[i + 2..])))
 }
 
-/// The contiguous run of full-line comments of `kind` around `n`, joined.
+/// The comment text of the contiguous run of full-line comments of `kind` around `n`,
+/// joined. Comment text only: the code before a trailing `//` on line `n` is not read, so
+/// a `s.h` field access does not name a legacy `.h`.
 fn block_around(lines: &[&str], n: usize, kind: CommentKind) -> String {
     let is_kind = |i: usize| full_line_comment(lines[i]).is_some_and(|(k, _)| k == kind);
     let mut lo = n;
@@ -358,32 +384,42 @@ fn block_around(lines: &[&str], n: usize, kind: CommentKind) -> String {
     while hi + 1 < lines.len() && is_kind(hi + 1) {
         hi += 1;
     }
-    lines[lo..=hi].join("\n")
+    lines[lo..=hi]
+        .iter()
+        .filter_map(|l| comment_of(l).map(|(_, c)| c))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// `line` opens an item: `fn` / `struct` / `enum` / `impl` / `trait` / `const` / `static` /
-/// `type` / `mod`, after any visibility.
+/// `line` opens an item that can enclose a body: `fn` (`const fn` / `unsafe fn` included) /
+/// `struct` / `enum` / `impl` / `trait` / `mod`, after any visibility. A `const` / `static` /
+/// `type` item encloses no body comment, and an in-body `const N: usize = 4;` is not the
+/// enclosing item of the comments below it.
 fn is_item_line(line: &str) -> bool {
     let t = line.trim_start();
     if t.starts_with("//") {
         return false;
     }
-    let rest = after_visibility(t);
+    let rest = after_fn_qualifiers(after_visibility(t));
     [
-        "fn ", "struct ", "enum ", "impl ", "impl<", "trait ", "const ", "static ", "type ", "mod ",
+        "fn ", "struct ", "enum ", "impl ", "impl<", "trait ", "mod ",
     ]
     .iter()
     .any(|kw| rest.starts_with(kw))
 }
 
 /// The `///` block documenting the item that encloses line `n`: walk up to the nearest item
-/// line, then over its attributes to the doc block above it. Empty when there is none.
+/// line, then over its attributes and plain `//` comments to the doc block above it. Empty
+/// when there is none.
 fn enclosing_item_doc(lines: &[&str], n: usize) -> String {
     let Some(item) = (0..n).rev().find(|&i| is_item_line(lines[i])) else {
         return String::new();
     };
     let mut i = item;
-    while i > 0 && lines[i - 1].trim_start().starts_with("#[") {
+    while i > 0
+        && (lines[i - 1].trim_start().starts_with("#[")
+            || full_line_comment(lines[i - 1]).is_some_and(|(k, _)| k == CommentKind::Body))
+    {
         i -= 1;
     }
     if i > 0 && lines[i - 1].trim_start().starts_with("///") {
@@ -423,15 +459,29 @@ fn undeclared_bare_cites(text: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// The scan found 54 bare `:NNN` cites in `src/fast/` comments at the #118 close;
+/// fewer than half of that is a broken comment scan, not a doc trim.
+const BARE_SEEN_FLOOR: usize = 26;
+
 #[test]
 fn every_bare_line_cite_in_fast_names_its_legacy_source() {
     let mut hits = Vec::new();
+    let mut seen = 0usize;
     for file in rust_files(&src_dir("fast")) {
         let text = fs::read_to_string(&file).unwrap();
+        seen += text
+            .lines()
+            .filter_map(comment_of)
+            .map(|(_, c)| bare_cites_in(c).len())
+            .sum::<usize>();
         for (line, cite) in undeclared_bare_cites(&text) {
             hits.push(format!("{}:{line}: `{cite}`", file.display()));
         }
     }
+    assert!(
+        seen > BARE_SEEN_FLOOR,
+        "the scan found only {seen} bare `:NNN` cites in src/fast/; the comment scan is broken"
+    );
     assert!(
         hits.is_empty(),
         "bare `:NNN` cites with no legacy source named (a `.cpp` / `.h` / `.m` in the \
@@ -480,6 +530,10 @@ fn the_resolver_rejects_a_renamed_symbol() {
     assert!(resolve(&path("nowhere::Thing")).is_err());
     // `network.rs` calls `LstmLayer::feed_forward(..)` but defines neither.
     assert!(resolve(&path("nn::network::LstmLayer::feed_forward")).is_err());
+    // `tasks/sad.rs` imports `Audio` in a multi-line `use` list; it is defined in audio.rs.
+    assert!(resolve(&path("tasks::sad::Audio")).is_err());
+    // A `pub` field (`pub peepholes: [bool; 6]`, cited from fast/cells.rs and fast/nn.rs).
+    assert!(resolve(&path("config::NnetSpec::peepholes")).is_ok());
 }
 
 #[test]
@@ -542,6 +596,15 @@ fn the_bare_cite_rule_reads_the_declaring_block() {
     // A body comment's own block may declare the file.
     let ok_block = "fn f() {\n    // The exact `Bar.m` lines:\n    // :14-16 the loop\n}\n";
     assert!(undeclared_bare_cites(ok_block).is_empty());
+    // The code before a trailing comment declares nothing (`s.h` is a field, not a file).
+    let code_h = "fn f() {\n    let y = s.h[0]; // :35 the recurrent term\n}\n";
+    assert_eq!(undeclared_bare_cites(code_h), vec![(2, ":35".to_owned())]);
+    // The item doc is found across `//` comments, and past an in-body `const`.
+    let through = concat!(
+        "/// Port of `Foo.cpp:10-40`.\n// a lint note\n#[inline]\nfn f() {\n",
+        "    const N: usize = 4;\n    // :14-16 the loop\n}\n"
+    );
+    assert!(undeclared_bare_cites(through).is_empty());
     // A module doc must name the file in the same `//!` block.
     assert!(undeclared_bare_cites("//! `A.h` ctor `:3-9`.\n").is_empty());
     assert_eq!(
@@ -555,12 +618,17 @@ fn the_bare_cite_rule_reads_the_declaring_block() {
 
 #[test]
 fn defines_reads_items_fields_and_capitalised_variants() {
-    let text = "pub struct Foo {\n    peepholes: [bool; 6],\n}\nenum Kind {\n    Plain,\n    Truncate(u8),\n}\n\
+    let text = "pub struct Foo {\n    peepholes: [bool; 6],\n    pub(crate) width_hint: usize,\n}\nenum Kind {\n    Plain,\n    Truncate(u8),\n}\n\
                 pub const fn width() -> usize { 1 }\nunsafe fn raw() {}\nfn call() {\n    other(\n        feed_forward,\n    );\n}\n";
-    assert!(defines(text, "Foo") && defines(text, "peepholes"));
+    assert!(defines(text, "Foo") && defines(text, "peepholes") && defines(text, "width_hint"));
     assert!(defines(text, "Plain") && defines(text, "Truncate"));
     assert!(defines(text, "width") && defines(text, "raw") && defines(text, "call"));
     // A snake_case `name,` argument line is a use, not a variant.
     assert!(!defines(text, "feed_forward"));
     assert!(!defines(text, "other"));
+    // A multi-line `use` list imports, a multi-line `pub use` list re-exports.
+    let imports = "use crate::audio::{\n    Audio, get_sequence,\n    inner::{\n        Deep,\n    },\n    Last,\n};\n\
+                   pub use crate::nn::{\n    Exported,\n};\n";
+    assert!(!defines(imports, "Audio") && !defines(imports, "Deep") && !defines(imports, "Last"));
+    assert!(defines(imports, "Exported"));
 }

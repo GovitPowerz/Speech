@@ -516,12 +516,12 @@ impl Segmenter for FastSpectralSegmenter {
 
         // result_buf: ONE buffer reused across channels (the cross-channel reuse quirk,
         // `tasks::sad::BlstmSpectralSegmenter::get_segmentation`'s `result_vec`). Zeros once;
-        // NOT re-zeroed between channels --
-        // feed_forward_overlap accumulates in place, so channel N seeds from channel
-        // N-1's post-division contents. Rider 3: the exact driver hardcodes `ncols = 1`
-        // (the exact driver's `resultVec2 = Zero(realVecSize, 1)`) because the SAD net is
-        // binary; sizing by `output_size` here is IDENTICAL for a 1-output net (the only
-        // shape the SAD gate configs use) and generalizes cleanly to a wider posterior.
+        // NOT re-zeroed between channels -- feed_forward_overlap accumulates in place, so
+        // channel N seeds from channel N-1's post-division contents. Rider 3: the exact
+        // driver hardcodes `ncols = 1` (its `resultVec2 = Zero(realVecSize, 1)`) because the
+        // SAD net is binary; sizing by `output_size` here is IDENTICAL for a 1-output net
+        // (the only shape the SAD gate configs use) and generalizes cleanly to a wider
+        // posterior.
         let mut result_buf = FastMatrix::zeros(real_vec_size, output_size);
         let mut last_rows: Vec<Vec<f64>> = Vec::with_capacity(channels);
 
@@ -597,9 +597,8 @@ impl Segmenter for FastSpectralSegmenter {
         self.last_result_rows = last_rows;
 
         // compute_errors after the full channel loop (as the exact `get_segmentation` does):
-        // sanitize +
-        // update_count each hypothesis (the no-reference side effect the exact driver
-        // also runs).
+        // sanitize + update_count each hypothesis (the no-reference side effect the exact
+        // driver also runs).
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1);
         }
@@ -884,12 +883,12 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 
 /// f32 Mode-7 LID Twin (algo 6), the fast counterpart of
 /// [`crate::tasks::lid::TwinBlstmSpectralLid`] restricted to its `abs(_Mode) == 7`
-/// phSeq/cep arm (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`). The SAD net is
-/// NEVER RUN (its `result_vec` is the constant 10.0 of `TwinBLSTMSpectralLID.cpp:725-726`);
-/// only the LID
-/// net scores each `audio.external_features[i]` block, in f32. The langID / confusion /
-/// `is_lid_correct` decisions derive from the LID posteriors alone -- widened back to
-/// f64 at the member seam so the shared `.scr` writer + confusion columns flow unchanged.
+/// phSeq/cep arm (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`). The SAD net
+/// is NEVER RUN (its `result_vec` is the constant 10.0 of `TwinBLSTMSpectralLID.cpp:725-726`);
+/// only the LID net scores each `audio.external_features[i]` block, in f32. The langID /
+/// confusion / `is_lid_correct` decisions derive from the LID posteriors alone -- widened
+/// back to f64 at the member seam so the shared `.scr` writer + confusion columns flow
+/// unchanged.
 /// Since issue #57 the LID net is any shape of the (cell x direction) matrix
 /// ([`FastNet`]), not the phase-7 BLSTM twin alone.
 ///
@@ -1220,11 +1219,11 @@ impl FastTwinLid {
 impl Segmenter for FastTwinLid {
     /// Port of the `abs(_Mode) == 7` external-features LID loop
     /// (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`), f32. The SAD net is
-    /// synthesized (constant
-    /// 10.0 -> the SHARED f64 decision layer, so the SAD side is bit-identical to the
-    /// exact path); the LID net runs the fast scoring forward (plain or truncate, per the
-    /// config and the shape) per external-features block. The `:NNN` cites in this body are
-    /// `TwinBLSTMSpectralLID.cpp` lines, the anchors the exact body carries.
+    /// synthesized (constant 10.0 -> the SHARED f64 decision layer, so the SAD side is
+    /// bit-identical to the exact path); the LID net runs the fast scoring forward (plain or
+    /// truncate, per the config and the shape) per external-features block. The `:NNN`
+    /// cites in this body are `TwinBLSTMSpectralLID.cpp` lines, the anchors the exact body
+    /// carries.
     fn get_segmentation(
         &mut self,
         audio: &mut Audio,
@@ -1247,9 +1246,9 @@ impl Segmenter for FastTwinLid {
             "fast TwinLid: a TDC config survived the construction-time pitch-pass bail"
         );
 
-        // The exact `!hasReadWavFile` -> 80 override (`BLSTMSpectralSegmenter.cpp:209`) is always
-        // taken here (the
-        // wav arm bailed above), so the stateful round(shift * rate) it overrides is moot.
+        // The exact `!hasReadWavFile` -> 80 override (`BLSTMSpectralSegmenter.cpp:209`) is
+        // always taken here (the wav arm bailed above), so the stateful round(shift * rate)
+        // it overrides is moot.
         let ssif = 80usize;
         let spectrum_shift_sec = ssif as f64 / rate;
 
@@ -1275,8 +1274,9 @@ impl Segmenter for FastTwinLid {
         );
 
         // getLIDBLSTMParam: LID window/shift derivation (the exact `:89-102`), the regime
-        // rule (the port's) and the target clamp (the exact `:626-628`), all through the streaming
-        // session's own `lid_score_params`, so the offline and streaming params cannot drift.
+        // rule (the port's) and the target clamp (the exact `:626-628`), all through the
+        // streaming session's own `lid_score_params`, so the offline and streaming params
+        // cannot drift.
         // Called BEFORE the stateful shift re-quantization below: re-derived from a
         // re-quantized shift (>= 1 frame), truncate would read as overlap.
         // `lid_window_shift` is still derived inline for the stateful
@@ -1332,10 +1332,11 @@ impl Segmenter for FastTwinLid {
             self.cumulative_error[chan] = 0.0;
             self.nb_of_classif[chan] = 0;
 
-            // abs(_Mode)==7 external-features loop (`:980-1155`) + member writes (`:1318-1337`),
-            // via the SHARED kernel (`score_lid_entry` / `finalize_lid_channel`) -- the SAME
-            // code the streaming session folds through, so streaming is bit-identical to this
-            // offline path by construction (see the kernel section below `get_segmentation`).
+            // abs(_Mode)==7 external-features loop (`:980-1155`) + langID normalization
+            // (`:1163-1179`) + member writes (`:1318-1337`), via the SHARED kernel
+            // (`score_lid_entry` / `finalize_lid_channel`) -- the SAME code the streaming
+            // session folds through, so streaming is bit-identical to this offline path by
+            // construction (see the kernel section below `get_segmentation`).
             let mut acc = LidChannelAcc::new(params.class_nb);
             for feat in &audio.external_features {
                 score_lid_entry(feat, net, &params, &mut acc);
@@ -1560,9 +1561,8 @@ fn check_lid_regime(
 /// (`TwinBLSTMSpectralLID.cpp:980-1155`; the `:NNN` here and in the body are its lines).
 /// Returns `None` if the entry is skipped (`nrows < lid_ssr` or `< MinNbOfFrames`,
 /// `:981`), else the per-entry observables. The noise `randinit` is fixed 0 PER ENTRY
-/// (the port's choice where `:1022-1032` seeds from the clock), NOT entry-order-dependent, so a
-/// per-utterance call reproduces the offline
-/// sequential call's noise indexing exactly.
+/// (the port's choice where `:1022-1032` seeds from the clock), NOT entry-order-dependent,
+/// so a per-utterance call reproduces the offline sequential call's noise indexing exactly.
 pub(super) fn score_lid_entry(
     feat: &Array2<f64>,
     net: &mut FastNet,
@@ -1686,10 +1686,10 @@ pub(super) fn score_lid_entry(
 }
 
 /// The finalized per-channel members (`TwinBLSTMSpectralLID.cpp:1163-1179` + `:1318-1337`
-/// applied to `acc`): normalize a
-/// CLONE of langID (so a mid-stream snapshot never consumes the accumulator), then derive
-/// the in-band classification errors + is_lid_correct + predicted language. Read-only in
-/// `acc`, so the offline (once) and the streaming session (per push) both call it.
+/// applied to `acc`): normalize a CLONE of langID (so a mid-stream snapshot never consumes
+/// the accumulator), then derive the in-band classification errors + is_lid_correct +
+/// predicted language. Read-only in `acc`, so the offline (once) and the streaming session
+/// (per push) both call it.
 pub(super) fn finalize_lid_channel(acc: &LidChannelAcc, p: &LidScoreParams) -> LidAggregate {
     // :1163-1179 langID normalization (on a clone -- the offline mutated in place then read
     // it; the values are identical, and the offline never reads langID after the epilogue).
