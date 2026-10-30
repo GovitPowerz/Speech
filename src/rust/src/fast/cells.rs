@@ -1111,8 +1111,8 @@ impl PartialEq for LstmState {
 /// THE CELLWEIGHT-NARROW ASYMMETRY IS UPSTREAM OF THIS TYPE, and that is worth stating
 /// because the hazard list flags it as easy to over-generalize: the `g`/cell gate carries
 /// NO peepholes, so in the CONFIG-domain structured model its rows are `out+in+1` against
-/// the `i`/`f`/`o` rows' `out+in+5` (`config.rs:66-68`). `config::pack_lstm_layer`
-/// (`:198-253`) resolves that asymmetry when it BUILDS the flat pack -- it emits four
+/// the `i`/`f`/`o` rows' `out+in+5` (`config::LstmLayer`'s layout note). `config::pack_lstm_layer`
+/// resolves that asymmetry when it BUILDS the flat pack -- it emits four
 /// equal `out x in` fan-in blocks, four equal `out x out` recurrent blocks, ONE `out x 12`
 /// peephole bundle gathered from the i/f/o rows alone, and four `out`-long bias blocks --
 /// so by the time a flat vector reaches this reader every block is rectangular and the
@@ -2049,7 +2049,8 @@ pub(crate) fn build_cell(
 /// The FORWARD stack's peephole triple `[cells, gates, gates_recurrent]` from a spec.
 ///
 /// `NnetSpec::peepholes` is the six-element `[fwd.cells, bwd.cells, fwd.gates, bwd.gates,
-/// fwd.gates_rec, bwd.gates_rec]` layout (`config.rs:46-53`), i.e. direction-INTERLEAVED,
+/// fwd.gates_rec, bwd.gates_rec]` layout (`config::NnetSpec::peepholes`), i.e.
+/// direction-INTERLEAVED,
 /// which is exactly the sort of indexing that gets copied wrong. It lives here once, next
 /// to its `backward` twin, so both net builders read the same two functions rather than
 /// open-coding `[0], [2], [4]`.

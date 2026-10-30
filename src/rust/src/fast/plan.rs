@@ -272,7 +272,7 @@ impl FastSadPlan {
     }
 
     /// The rate-dependent half of the setup, at `rate`: what the exact driver derives per
-    /// file (`tasks/sad.rs::BlstmSpectralSegmenter::get_segmentation`), PURE and from the
+    /// file (`tasks::sad::BlstmSpectralSegmenter::get_segmentation`), PURE and from the
     /// config values (see the module docs on the dropped stateful carry). Runs the
     /// authoritative regime check on the RESOLVED window/shift.
     pub fn timeline(&self, rate: f64) -> Result<SadTimeline> {

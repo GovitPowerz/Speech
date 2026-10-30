@@ -13,7 +13,7 @@
 //! columns. The exact source the pair mirrors (cite when auditing drift, per the plan's
 //! R2):
 //!
-//! - `tasks/sad.rs::BlstmSpectralSegmenter::get_segmentation` (`:1376-1629`): the
+//! - `tasks::sad::BlstmSpectralSegmenter::get_segmentation`: the
 //!   per-file spectrum-shift quantization (in `fast::plan`, derived from the config at
 //!   each rate rather than carried -- the one documented fast divergence of the setup),
 //!   preemph/noise gates, `getBLSTMParam` sizing, the OVERLAP time-step/offset
@@ -515,10 +515,11 @@ impl Segmenter for FastSpectralSegmenter {
         };
 
         // result_buf: ONE buffer reused across channels (the cross-channel reuse quirk,
-        // tasks/sad.rs:1436). Zeros once; NOT re-zeroed between channels --
+        // `tasks::sad::BlstmSpectralSegmenter::get_segmentation`'s `result_vec`). Zeros once;
+        // NOT re-zeroed between channels --
         // feed_forward_overlap accumulates in place, so channel N seeds from channel
         // N-1's post-division contents. Rider 3: the exact driver hardcodes `ncols = 1`
-        // (`tasks/sad.rs:1436`, `resultVec2 = Zero(realVecSize, 1)`) because the SAD net is
+        // (the exact driver's `resultVec2 = Zero(realVecSize, 1)`) because the SAD net is
         // binary; sizing by `output_size` here is IDENTICAL for a 1-output net (the only
         // shape the SAD gate configs use) and generalizes cleanly to a wider posterior.
         let mut result_buf = FastMatrix::zeros(real_vec_size, output_size);
@@ -595,7 +596,8 @@ impl Segmenter for FastSpectralSegmenter {
         }
         self.last_result_rows = last_rows;
 
-        // compute_errors after the full channel loop (tasks/sad.rs:1616): sanitize +
+        // compute_errors after the full channel loop (as the exact `get_segmentation` does):
+        // sanitize +
         // update_count each hypothesis (the no-reference side effect the exact driver
         // also runs).
         for seg in seg_per_chan.iter_mut() {
@@ -605,8 +607,8 @@ impl Segmenter for FastSpectralSegmenter {
         Ok(())
     }
 
-    /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::
-    /// dump_dir`]): gates the scored-branch VRCTS write.
+    /// The configured dump directory (see [`crate::tasks::sad::BlstmSpectralSegmenter::dump_dir`]):
+    /// gates the scored-branch VRCTS write.
     fn dump_dir(&self) -> &str {
         &self.plan.driver_cfg.dump_dir
     }
@@ -882,7 +884,7 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 
 /// f32 Mode-7 LID Twin (algo 6), the fast counterpart of
 /// [`crate::tasks::lid::TwinBlstmSpectralLid`] restricted to its `abs(_Mode) == 7`
-/// phSeq/cep arm (`tasks/lid.rs::get_segmentation_mode7`, `:1270-1655`). The SAD net is
+/// phSeq/cep arm (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`). The SAD net is
 /// NEVER RUN (its `result_vec` is the synthesized constant 10.0, `:1407`); only the LID
 /// net scores each `audio.external_features[i]` block, in f32. The langID / confusion /
 /// `is_lid_correct` decisions derive from the LID posteriors alone -- widened back to
@@ -1216,7 +1218,8 @@ impl FastTwinLid {
 
 impl Segmenter for FastTwinLid {
     /// Port of the `abs(_Mode) == 7` external-features LID loop
-    /// (`tasks/lid.rs::get_segmentation_mode7`), f32. The SAD net is synthesized (constant
+    /// (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`), f32. The SAD net is
+    /// synthesized (constant
     /// 10.0 -> the SHARED f64 decision layer, so the SAD side is bit-identical to the
     /// exact path); the LID net runs the fast scoring forward (plain or truncate, per the
     /// config and the shape) per external-features block.

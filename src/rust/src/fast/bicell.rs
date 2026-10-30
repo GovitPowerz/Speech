@@ -383,7 +383,7 @@ impl FastBiCell {
     /// `output` is the CALLER'S buffer and is NOT zeroed here: the exact driver reuses
     /// ONE `result_vec` across channels and the `+=` seeds channel N from channel N-1's
     /// post-division contents (the load-bearing cross-channel reuse quirk,
-    /// `tasks/sad.rs:1433-1436`).
+    /// `tasks::sad::BlstmSpectralSegmenter::get_segmentation`).
     pub fn feed_forward_overlap(
         &mut self,
         input: &FastMatrix,

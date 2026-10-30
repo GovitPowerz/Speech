@@ -6,23 +6,23 @@
 //! The exact sources this mirrors line-for-line (cite them when auditing drift, per the plan's
 //! R2):
 //!
-//! - `audio.rs::get_sequence` (`:269-314`, `AudioStruct::getSequence`
+//! - `audio::get_sequence` (`AudioStruct::getSequence`
 //!   `AudioStruct.cpp:456-485`): the per-frame windowed extraction -- left-edge /
 //!   right-edge / interior branch order, the DC-offset mean over the full `2w+1`
 //!   buffer, the window multiply LAST. See the STALE-BUFFER note below.
-//! - `audio.rs::compute_segment_periodogram_estimates` (`:340-449`,
-//!   `AudioStruct.cpp:512-584`): the framing walk -- `window_size = 1<<order`,
+//! - `audio::compute_segment_periodogram_estimates`
+//!   (`AudioStruct.cpp:512-584`): the framing walk -- `window_size = 1<<order`,
 //!   `signal_window_size = window_size/2` (the half-window), `buffer_size =
 //!   window_size+1`, `periodogram_length = window_size/2+1`, and `frame_nb` as the
 //!   inclusive-count ceil-divide of `span = end-begin+1` over `shift`.
-//! - `features/fft.rs::compute_two_real_periodogram` (`:76-111`,
-//!   `AudioStruct.cpp:487-510`): the periodogram VALUE -- see the NO-TWO-REAL-PACKING
+//! - `features::fft::compute_two_real_periodogram`
+//!   (`AudioStruct.cpp:487-510`): the periodogram VALUE -- see the NO-TWO-REAL-PACKING
 //!   divergence + equivalence proof below.
-//! - `features/mel.rs::MelFilterBank` (`apply_filter_bank` `:337`, `apply_dct`
-//!   `:264`) + `features/pipeline.rs::assemble_input_sequence` (`:497`): the mel/DCT
+//! - `features::mel::MelFilterBank` (`apply_filter_bank`, `apply_dct`) and
+//!   `features::pipeline::assemble_input_sequence`: the mel/DCT
 //!   apply + the DCT/mel/raw-band priority. TRANSCRIBED to f32 in `fast::mel32` since
 //!   Phase 10 Task 5 (see the FULL-f32 MEL note); no longer called from here.
-//! - `features/pipeline.rs::SpectralParams::derive` / `FeatureConfig::from_legacy`:
+//! - `features::pipeline::SpectralParams::derive` / `FeatureConfig::from_legacy`:
 //!   CONSUMED, not re-derived (the brief's mandate -- derivation is shared config
 //!   arithmetic).
 //!
@@ -185,7 +185,7 @@ impl FastPipeline {
         // mel bank (built below from `rate`) is placed on a frequency grid
         // inconsistent with the `params.freq_beg/freq_end` band. `derive` sets
         // `max_freq = freq_end * freqStep` with `freqStep = rate/2/(bins-1)`
-        // (`features/pipeline.rs:351,367`); recomputing `freqStep` from THIS `rate`
+        // (`features::pipeline::SpectralParams::derive`); recomputing `freqStep` from THIS `rate`
         // and checking the identity is exact when the rates match (same inputs, same
         // f64 op) and fails by the rate ratio when they differ. `bins >= 2` for every
         // order >= 1, so `bins-1 >= 1`. Debug-only: the driver binds ONE
@@ -211,7 +211,7 @@ impl FastPipeline {
 
         // Mel filterbank + DCT table, built ONCE (f32 -- `FastMelBank::new` runs the
         // exact ctor's f64 geometry walk and narrows only the coefficient values). Args
-        // match build_mel_bank (`features/pipeline.rs:544-563`, the exact path's
+        // match `features::pipeline::build_mel_bank` (the exact path's
         // canonical MelFilterBank::new site since the Task 8 hoist) exactly.
         let bank = if cfg.nb_bins > 0 {
             Some(FastMelBank::new(
@@ -266,7 +266,7 @@ impl FastPipeline {
     }
 
     /// Build the full BLSTM input sequence for one channel of f32 samples
-    /// (`build_input_sequence`, `features/pipeline.rs:637-645`, f32). Returns the
+    /// (`features::pipeline::build_input_sequence`, f32). Returns the
     /// `T x cols` assembled MFCC/mel/raw sequence.
     pub fn build_input_sequence(&mut self, samples: &[f32]) -> &FastMatrix {
         self.build_input_sequence_parts(samples).0
@@ -370,7 +370,7 @@ impl FastPipeline {
     }
 
     /// Fill `self.frame_buf` (buffer_size) with the windowed frame centred on sample
-    /// `index` (`get_sequence`, `audio.rs:269-314`, f32). Fresh-zeroed per frame (the
+    /// `index` (`audio::get_sequence`, f32). Fresh-zeroed per frame (the
     /// stale-buffer quirk is a proven no-op, see module docs); branch order left-edge ->
     /// right-edge -> interior; DC offset over the full buffer; window multiply last.
     fn fill_frame(&mut self, samples: &[f32], index: usize) {
