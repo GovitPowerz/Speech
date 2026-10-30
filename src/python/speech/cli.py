@@ -36,7 +36,6 @@ def _build_parser() -> argparse.ArgumentParser:
             p.add_argument("checkpoint", type=Path)
         if name in ("train", "retrain"):
             p.add_argument("--seed", type=int, default=0)
-            # The legacy regime's knobs: one default set, `QpsoParams` + `DEFAULT_INNER_STEPS` (#102).
             p.add_argument("--particles", type=int, default=QpsoParams.ps, help="QPSO particles")
             p.add_argument("--epochs", type=int, default=QpsoParams.me, help="QPSO epochs (the outer search; `baseline --epochs` counts SMORMS3 epochs)")
             p.add_argument("--inner-steps", type=int, default=DEFAULT_INNER_STEPS, help="SMORMS3 steps per inner refinement")

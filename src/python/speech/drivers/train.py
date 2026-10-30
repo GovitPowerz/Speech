@@ -399,12 +399,12 @@ def score_genome(
 
 
 def _qpso_params(
+    *,
     particles: int,
     epochs: int,
     dim: int,
     adim: float,
     seed_value: NDArray[np.float64] | None,
-    *,
     backprop_activated: int,
 ) -> QpsoParams:
     """The one `QpsoParams` build of both `quantum_pso` sites (`train` over the full genome,
@@ -526,7 +526,7 @@ def train(
             costs[i] = cost
         return costs, pos
 
-    params = _qpso_params(qpso_particles, qpso_epochs, d, ps.adim, seed_value, backprop_activated=1)
+    params = _qpso_params(particles=qpso_particles, epochs=qpso_epochs, dim=d, adim=ps.adim, seed_value=seed_value, backprop_activated=1)
     result = quantum_pso(cost_fn, params, d, np.random.default_rng(seed), backprop_refine=backprop_refine)
     # legacy: Train_BLSTM.m:973 -- BackPropagation on the QPSO winner. This produces
     # the final trained weights (and guarantees the inner loop runs at least once).
@@ -926,8 +926,7 @@ def train_hyperparam_search(
             out[i] = reduced_out
         return costs, out
 
-    # no weight refinement in the narrowed search: backprop off
-    params = _qpso_params(qpso_particles, qpso_epochs, n_search, ps.adim, seed_value, backprop_activated=0)
+    params = _qpso_params(particles=qpso_particles, epochs=qpso_epochs, dim=n_search, adim=ps.adim, seed_value=seed_value, backprop_activated=0)
     result = quantum_pso(cost_fn, params, n_search, np.random.default_rng(seed))
     gbest = np.asarray(result.gbest, dtype=F64)
     if result.gbestval >= _HYPERPARAM_PENALTY:
@@ -960,7 +959,7 @@ def train_hyperparam_search(
             stacklevel=2,
         )
 
-    gbest, cost_hist = _write_qpso_checkpoint(ckpt_dir, result)
+    _gbest, cost_hist = _write_qpso_checkpoint(ckpt_dir, result)
     (ckpt_dir / "best_hyperparam.config").write_text(best_text)
 
     tr = TrainResult(

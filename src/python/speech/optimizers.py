@@ -276,11 +276,12 @@ class QpsoParams:
     first rows), minmax (0 = minimize).
 
     The defaults are the ONE home of the QPSO knobs (issue #102): the script constants of
-    `Train_BLSTM.m:831-862` (`ac`, `Iwt`, `errgrad`, `errgraditer`, `errgoal`, `minmax`,
-    `PSOType`) and the port's own `ps` / `me` (the legacy reads `ps` off `PS.VP.nbindiv` and
-    hard-codes `epoch = 300`; `24` / `100` are this port's CLI defaults, read by `cli.py`,
-    `drivers.train` and `drivers.retrain`). `iwe`, `vr` and `mv` depend on the run (the epoch
-    count, the genome length), so they stay required."""
+    `Train_BLSTM.m:831-861` (`minmax`, `ac`, `Iwt`, `errgrad`, `errgraditer`, `errgoal`) and
+    the port's own `ps` / `me` / `trelea` / `pso_seed` (the legacy reads `ps` off
+    `PS.VP.nbindiv` and `modl` off `PS.VP.PSOType`, hard-codes `epoch = 300` and `PSOseed = 1`;
+    here `24` / `100` are the CLI defaults read by `cli.py`, `drivers.train` and
+    `drivers.retrain`, and a seed vector is what turns `pso_seed` on). `iwe`, `vr` and `mv`
+    depend on the run (the epoch count, the genome length), so they stay required."""
 
     ps: int = 24
     me: int = 100

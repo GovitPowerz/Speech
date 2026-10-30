@@ -9,6 +9,7 @@ seeding, the `cli.main` dispatch, and (#29) `evaluate`'s checkpoint pack resolut
 
 from __future__ import annotations
 
+import inspect
 import math
 import sys
 import types
@@ -18,12 +19,15 @@ from typing import Any
 
 import numpy as np
 import pytest
+from speech.cli import _build_parser
 from speech.cli import main as cli_main
 from speech.drivers.init import init_run
-from speech.drivers.retrain import seed_from_checkpoint
+from speech.drivers.retrain import retrain, seed_from_checkpoint
 from speech.drivers.state import RunConfig, RunState
 from speech.drivers.test import evaluate, resolve_checkpoint_packs, write_scores
+from speech.drivers.train import DEFAULT_INNER_STEPS, train, train_hyperparam_search
 from speech.genome import genome_length
+from speech.optimizers import QpsoParams
 from speech.scoring import masking_validation
 from speech.weight_bridge import write_bin
 
@@ -132,13 +136,6 @@ def test_legacy_cli_defaults_are_the_qpso_defaults(capsys: pytest.CaptureFixture
     carries `QpsoParams.ps` / `.me` and `DEFAULT_INNER_STEPS`, the three driver signatures default
     to the same values, and the legacy `--epochs` help says which epochs it counts (the `baseline`
     arms' `--epochs` is SMORMS3's)."""
-    import inspect
-
-    from speech.cli import _build_parser
-    from speech.drivers.retrain import retrain
-    from speech.drivers.train import DEFAULT_INNER_STEPS, train, train_hyperparam_search
-    from speech.optimizers import QpsoParams
-
     expected = (QpsoParams.ps, QpsoParams.me, DEFAULT_INNER_STEPS)
     assert expected == (24, 100, 20)
     for argv in (["train", "/o"], ["retrain", "/o", "/c"]):
