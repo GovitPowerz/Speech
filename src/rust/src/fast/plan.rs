@@ -172,9 +172,9 @@ impl FastSadPlan {
         let shape = classify_fast_shape(&bc);
         let spec = build_spec_aligned_to(map, "BLSTM", &bc)?;
 
-        // The fast-tree-wide set. Type 0 is the exact path's `_ => {}` arm
-        // (`nn/blstm.rs`, the `feed_forward_backward` normalization match): a genuine
-        // no-op on BOTH sides. -2 (the plain-FFB self-normalized COPY) is out.
+        // The fast-tree-wide set. Type 0 is the exact path's `_ => {}` arm (the
+        // `nn::blstm::BlstmNetwork::feed_forward_backward` normalization match): a
+        // genuine no-op on BOTH sides. -2 (the plain-FFB self-normalized COPY) is out.
         if !FAST_TREE_NORM_TYPES.contains(&bc.input_normalization_type) {
             bail!(
                 "fast SAD: only InputNormalizationType -1 (self-normalization), 1 (external \

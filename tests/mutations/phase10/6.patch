@@ -23,7 +23,7 @@ index 3d749fa..d34a52b 100644
 @@ -1277,9 +1277,12 @@ impl FastLstm {
          let xs = &x[..k_in];
  
-         // 1. proj + bias + recurrence, per gate element (`:206-210` + `:258-263`).
+         // 1. proj + bias + recurrence, per gate element (`:313-319` + `:351`).
 +        // M6 MUTATION: the input projection is BATCHED through the faer kernel (all 4O
 +        // gates in one call) instead of the per-gate ascending `dot_f32`.
 +        let mut batched = vec![0.0_f32; four_o];

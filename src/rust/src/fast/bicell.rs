@@ -13,22 +13,21 @@
 //! the shared per-row `DenseRowChain` output MLP. The exact sources it mirrors (cite
 //! when auditing drift):
 //!
-//! - `nn/blstm.rs::feed_forward` (`:1123-1159`): the sequential output-length division,
+//! - `nn::blstm::BlstmNetwork::feed_forward`: the sequential output-length division,
 //!   the `LSTMRatios[0] > 1 && netInput < inputCols` crop gate feeding BOTH stacks the
 //!   SAME (cropped) input, `forward.feed_forward` + `backward.feed_forward_reverse`,
 //!   then `output_network.feed_forward_double(out_forward, out_backward, output)`.
-//! - `nn/network.rs::feed_forward_double` (`:408-439`): the hcat, FORWARD HALF ON THE
+//! - `nn::network::Network::feed_forward_double`: the hcat, FORWARD HALF ON THE
 //!   LEFT (`hcat[t][0..fc] = first`, `hcat[t][fc..] = second`, and `feed_forward`
 //!   passes `first = out_forward`). [`FastBiCell::feed_forward`] writes exactly that
 //!   column order into its per-row buffer, and
 //!   `output_mlp_reads_the_forward_half_from_the_left_columns` pins it directly.
-//! - `nn/network.rs::drive` (`:328-394`) + `nn/cells/mod.rs`'s
-//!   `Layer::feed_forward_reverse`: the reverse stack is the SAME ascending layer chain
+//! - `nn::network::Network::drive` + `nn::network::Layer::feed_forward_reverse` as
+//!   `nn::cells::CellLayer` implements it: the reverse stack is the SAME ascending layer chain
 //!   with each layer's TIME direction flipped, and the per-layer sub-sampling still runs
 //!   on natural-order rows. Reproduced by `super::cells::cell_stack_forward(.., reverse
 //!   = true)`, which is the causal driver with one flag -- not a second copy.
-//! - `nn/blstm.rs::feed_forward_backward_overlap` (`:1928-2083`, and see the CITATION
-//!   OFFSET note on [`FastBiCell::feed_forward_overlap`]'s table): the windowed OVERLAP
+//! - `nn::blstm::BlstmNetwork::feed_forward_backward_overlap`: the windowed OVERLAP
 //!   driver, reproduced FRESH in [`FastBiCell::feed_forward_overlap`] (see its docs for
 //!   the term-by-term correspondence and why it is a fresh loop rather than a call into
 //!   `FastBlstm::overlap_window_step`).
@@ -82,9 +81,9 @@ use super::nn::{DenseRowChain, FastDenseLayer, FastMatrix, Scratch, window_begin
 /// The f32 bidirectional cell net: TWO cell stacks (forward + reversed) feeding the
 /// shared per-row dense output MLP.
 ///
-/// Flat pack layout, `BlstmNetwork::set_weights` (`nn/blstm.rs:766-791`) element for
+/// Flat pack layout, `nn::blstm::BlstmNetwork::set_weights` element for
 /// element: `[forward stack | backward stack | output MLP | mean | std]`. Both stacks
-/// walk their layers layer-0-first (`Network::set_weights`, `nn/network.rs:291-297`),
+/// walk their layers layer-0-first (`nn::network::Network::set_weights`),
 /// and the `2 * lstm_neuron_nb[0]` mean/std tail is CARRIED, not applied -- the driver
 /// normalizes upstream, exactly as it does for `FastBlstm` and `FastCausalNet`.
 ///
@@ -211,8 +210,9 @@ impl FastBiCell {
             }
             cells
         };
-        // Each stack takes ITS OWN peephole triple, mirroring `BlstmNetwork::from_config`
-        // (`nn/blstm.rs:588-602`: `make(cfg.forward_peep)` then `make(cfg.backward_peep)`).
+        // Each stack takes ITS OWN peephole triple, mirroring
+        // `nn::blstm::BlstmNetwork::from_config` (`make(cfg.forward_peep)` then
+        // `make(cfg.backward_peep)`).
         // Read by the LSTM cell alone, which `element_count` above refuses here -- so this
         // threading is correctness-by-construction for a cell this net cannot currently
         // build, not live behaviour. Passing one triple to both stacks would be the
@@ -261,20 +261,19 @@ impl FastBiCell {
         self.output_size
     }
 
-    /// `getSubSamplingRatio` (`nn/blstm.rs:403-410`): the recurrent sub-samplings times
-    /// the output-net ones.
+    /// `getSubSamplingRatio` (`nn::blstm::BlstmNetwork::sub_sampling_ratio`): the recurrent
+    /// sub-samplings times the output-net ones.
     pub fn sub_sampling_ratio(&self) -> usize {
         self.lstm_subsampling.iter().product::<usize>()
             * self.output_subsampling.iter().product::<usize>()
     }
 
-    /// Whole-sequence bidirectional forward, the f32 twin of `BlstmNetwork::feed_forward`
-    /// (`nn/blstm.rs:1123-1159`) under `Direction::Bidirectional`:
+    /// Whole-sequence bidirectional forward, the f32 twin of
+    /// `nn::blstm::BlstmNetwork::feed_forward` under `Direction::Bidirectional`:
     ///
     /// 1. output length = rows divided SEQUENTIALLY by each recurrent sub-sampling ratio;
     /// 2. the `LSTMRatios[0] > 1 && netInput < inputCols` crop gate, applied ONCE and fed
-    ///    to BOTH stacks (`:1142-1147` passes the same `cropped` to `forward` and
-    ///    `backward`);
+    ///    to BOTH stacks (it passes the same `cropped` to `forward` and `backward`);
     /// 3. the forward stack, then the REVERSED stack (`feed_forward_reverse`);
     /// 4. the hcat `[fwd | rev]` (forward LEFT, `feed_forward_double`) driving the dense
     ///    output MLP one row at a time.
@@ -325,7 +324,7 @@ impl FastBiCell {
         );
 
         // hcat + dense, ONE row at a time. Column order: FORWARD HALF LEFT
-        // (`Network::feed_forward_double`, `nn/network.rs:430-437`) -- the shared drive
+        // (`nn::network::Network::feed_forward_double`) -- the shared drive
         // stages `[fwd | rev]` into `row_buf` in exactly that order.
         drive_output_rows(
             &mut self.dense_chain,
@@ -343,17 +342,7 @@ impl FastBiCell {
 
     /// Overlapping-window forward accumulation, the f32 twin of the FORWARD half of
     /// `BLSTMNeuralNetwork::feedForwardBackwardOverLap`
-    /// (`nn/blstm.rs::feed_forward_backward_overlap`, `:1928-2083`).
-    ///
-    /// CITATION OFFSET, stated once for every `nn/blstm.rs` line number in this doc and the
-    /// table below (including the `:1928-2083` span above and the one in this module's own
-    /// header): they are AS OF TASK 7 (`c19bfac`). Task 9's retention work (`471c0be`)
-    /// inserted 55 lines above `:1963`, so ADD +55 to read them at HEAD -- e.g. the nominal
-    /// length block cited as `:1964-1973` lives at `:2019-2028` today. The numbers were left
-    /// as-authored rather than renumbered because they will drift again; the SYMBOL names
-    /// (`feed_forward_backward_overlap`, `window_begin`, `window_end`) are the stable handles,
-    /// and replacing line citations with symbol/anchor references tree-wide is a named
-    /// follow-on in `RESULTS.md`.
+    /// (`nn::blstm::BlstmNetwork::feed_forward_backward_overlap`).
     ///
     /// A FRESH loop, deliberately (spec S5, approach A): it does NOT call
     /// `FastBlstm::overlap_window_step`, because that kernel is shared with
@@ -363,24 +352,25 @@ impl FastBiCell {
     /// `pub(crate)` span helpers the offline and streaming overlap engines use, so the
     /// three cannot disagree about WHICH rows a window spans.
     ///
-    /// TERM FOR TERM against the exact driver (line numbers are `nn/blstm.rs`):
+    /// TERM FOR TERM against the exact driver, `feed_forward_backward_overlap`'s blocks in
+    /// their order:
     ///
     /// | exact | here |
     /// |---|---|
-    /// | `:1964-1973` nominal length `(2w+1)` / each LSTM then output ratio, gated on `is_sub` | identical |
-    /// | `:1981-1982` begin = `max(0, jj-w)` snapped DOWN to the ssr grid | [`window_begin`] |
-    /// | `:1984-1988` end = `begin + 2w`, clamped to `rows-1`, snapped UP | [`window_end`] |
-    /// | `:1992-2007` partial-window `length_short` recompute (sequential floors) | identical |
-    /// | `:2011-2013` block = input rows `[begin, begin+length_seq)` | identical (one row-major copy) |
-    /// | `:2026` `feed_forward_backward_plain` over the block | [`Self::feed_forward`] |
-    /// | `:2030-2036` `output[obeg+r] += short[r]`, `count[obeg+r] += 1` at `obeg = begin/ssr` | identical |
-    /// | `:2049` `jj += window_shift` | identical |
-    /// | `:2055-2059` divide by the counts, `0/0 -> NaN` on uncovered rows, NO guard | identical |
+    /// | nominal length `(2w+1)` / each LSTM then output ratio, gated on `is_sub` | identical |
+    /// | begin = `max(0, jj-w)` snapped DOWN to the ssr grid | [`window_begin`] |
+    /// | end = `begin + 2w`, clamped to `rows-1`, snapped UP | [`window_end`] |
+    /// | partial-window `length_short` recompute (sequential floors) | identical |
+    /// | block = input rows `[begin, begin+length_seq)` | identical (one row-major copy) |
+    /// | `feed_forward_backward_plain` over the block | [`Self::feed_forward`] |
+    /// | `output[obeg+r] += short[r]`, `count[obeg+r] += 1` at `obeg = begin/ssr` | identical |
+    /// | `jj += window_shift` | identical |
+    /// | divide by the counts, `0/0 -> NaN` on uncovered rows, NO guard | identical |
     ///
     /// NOT reproduced, because the SAD result path never reads them: the
     /// `_OutputForward`/`_OutputBackward` hidden-state accumulators and their own count
-    /// quotient (`:1955-1958`, `:2038-2047`, `:2073-2082`) -- only the LID Twin's
-    /// hidden-state concat consumes those, and it is out of the algo-3 driver's scope
+    /// quotient -- only the LID Twin's hidden-state concat consumes those, and it is out of
+    /// the algo-3 driver's scope
     /// (the same omission `FastBlstm::feed_forward_overlap` documents).
     ///
     /// THE ACCUMULATION ORDER IS `jj`-ASCENDING, and that is the arithmetic contract, not
@@ -405,9 +395,9 @@ impl FastBiCell {
         let lstm_ratios = self.lstm_subsampling.clone();
         let out_ratios = self.output_subsampling.clone();
         let ssr = self.sub_sampling_ratio();
-        let is_sub = ssr > 1; // :1938
+        let is_sub = ssr > 1;
 
-        // :1964-1973 nominal window output length.
+        // Nominal window output length.
         let mut length = 2 * window_size + 1;
         if is_sub {
             for &r in &lstm_ratios {
@@ -417,20 +407,20 @@ impl FastBiCell {
                 length /= r;
             }
         }
-        let nominal_len = length; // :1973
+        let nominal_len = length;
 
         let cols = output.cols;
         let in_cols = input.cols;
         let input_rows = input.rows;
-        let mut output_count = vec![0.0_f32; output.rows]; // :1957
+        let mut output_count = vec![0.0_f32; output.rows];
 
         let mut jj = 0usize;
         while jj < input_rows {
-            let begin = window_begin(jj, window_size, ssr); // :1981-1982
-            let end = window_end(begin, window_size, ssr, input_rows); // :1984-1988
-            let length_seq = end - begin + 1; // :1989
+            let begin = window_begin(jj, window_size, ssr);
+            let end = window_end(begin, window_size, ssr, input_rows);
+            let length_seq = end - begin + 1;
 
-            // :1992-2007 partial-window length recompute (sequential floors).
+            // Partial-window length recompute (sequential floors).
             let length_short = if length_seq != 2 * window_size + 1 {
                 let mut ls = length_seq;
                 if is_sub {
@@ -447,7 +437,7 @@ impl FastBiCell {
             };
 
             if length_short > 0 {
-                // :2011-2013 block = input rows [begin, begin+length_seq), all cols.
+                // Block = input rows [begin, begin+length_seq), all cols.
                 // Rows are contiguous in row-major, so the slice is one copy.
                 let block = FastMatrix {
                     data: input.data[begin * in_cols..(begin + length_seq) * in_cols].to_vec(),
@@ -457,7 +447,7 @@ impl FastBiCell {
                 let obeg = begin / ssr;
                 let out = self.feed_forward(&block);
                 debug_assert_eq!(out.rows, length_short, "overlap window output-row count");
-                // :2030-2036 output sum + count; `+=` seeds from the caller's prior
+                // Output sum + count; `+=` seeds from the caller's prior
                 // contents (cross-channel quirk).
                 for r in 0..length_short {
                     for c in 0..cols {
@@ -466,10 +456,10 @@ impl FastBiCell {
                     output_count[obeg + r] += 1.0;
                 }
             }
-            jj += window_shift; // :2049
+            jj += window_shift;
         }
 
-        // :2055-2059 divide by the per-row counts (0/0 -> NaN on uncovered rows).
+        // Divide by the per-row counts (0/0 -> NaN on uncovered rows).
         // `r` indexes both `output.data` (2D `r*cols+c`) and `output_count`, so a plain
         // range loop is clearest here.
         #[allow(clippy::needless_range_loop)]
@@ -805,7 +795,7 @@ mod tests {
     }
 
     /// The overlap loop's UNCOVERED-ROW quirk survives the port: a result buffer longer
-    /// than any window reaches keeps `0/0 = NaN` (the exact driver's `:2055-2059`, no
+    /// than any window reaches keeps `0/0 = NaN` (the exact driver's count quotient, no
     /// guard), and the covered prefix is finite.
     #[test]
     fn overlap_leaves_uncovered_rows_nan() {

@@ -19,10 +19,10 @@
 //!   preemph/noise gates, `getBLSTMParam` sizing, the OVERLAP time-step/offset
 //!   (`_SpectrumShift`-based), the cross-channel `result_vec` reuse, and the
 //!   `results_to_segmentation` + `compute_errors` handoff.
-//! - `nn/blstm.rs::feed_forward_backward` (`:997-1059`): the input-normalization
+//! - `nn::blstm::BlstmNetwork::feed_forward_backward`: the input-normalization
 //!   dispatch (type -1 self-normalization applied ONCE before the windowed dispatch)
 //!   + the overlap driver selection (`window_size > 0 && overlaps`).
-//! - `nn/blstm.rs::feed_forward_backward_overlap` (`:1594-1726`): reproduced in
+//! - `nn::blstm::BlstmNetwork::feed_forward_backward_overlap`: reproduced in
 //!   [`super::nn::FastBlstm::feed_forward_overlap`] (output-only).
 //!
 //! THREE NET SHAPES (Phase 9 Task 6 + phase-10 Tasks 7/8, spec S4.2/S5/S6).
@@ -351,7 +351,7 @@ pub(crate) fn read_file_pack(file: &str, needed: usize) -> Result<Option<Vec<f64
 ///
 /// ONE DEGENERATE-CASE DIVERGENCE, documented not fixed: on a sequence so short that the
 /// net emits ZERO rows, the exact plain path never reaches `NeuronLayer::feed_forward`
-/// (`Network::drive` returns early on an empty input, `network.rs:329`) and leaves
+/// (`nn::network::Network::drive` returns early on an empty input) and leaves
 /// `result_vec` UNTOUCHED -- i.e. holding the previous channel's contents -- while this
 /// zeroes it. Unreachable on any real file (it needs fewer feature rows than the
 /// sub-sampling ratio) and the fast behaviour is the saner of the two; recorded so a
@@ -446,9 +446,10 @@ impl FastSpectralSegmenter {
         Ok(())
     }
 
-    /// The plan's `BLSTM_weightsFile` load (mirrors [`crate::nn::blstm::BlstmNetwork::
-    /// load_weights_file`]): an EMPTY key leaves the net unloaded (a subsequent
-    /// `get_segmentation` errors); otherwise read the `.bin` and hand its head to
+    /// The plan's `BLSTM_weightsFile` load (mirrors
+    /// [`crate::nn::blstm::BlstmNetwork::load_weights_file`]): an EMPTY key leaves the net
+    /// unloaded (a subsequent `get_segmentation` errors); otherwise read the `.bin` and hand
+    /// its head to
     /// [`Self::set_weights`] -- the legacy FILE-LOAD tolerance, explicit
     /// ([`FastSadPlan::read_weights_file`]: a short file is refused, a long one warns on
     /// stderr and loads its head).
@@ -530,7 +531,7 @@ impl Segmenter for FastSpectralSegmenter {
             let mut input = pipeline.build_input_sequence(&samples).clone();
 
             // Input normalization over the whole sequence, ONCE (matching the exact
-            // feed_forward_backward top, blstm.rs:1251-1272, before the windowed
+            // `nn::blstm::BlstmNetwork::feed_forward_backward` top, before the windowed
             // dispatch): type -1 self-normalization, type 1 external pack-carried
             // mean/std (Phase 8 S1.1, the frozen-stats mode), or type 0 NOTHING (the
             // exact `_ => {}` arm). The plan's gate guarantees no other value reaches
@@ -546,8 +547,8 @@ impl Segmenter for FastSpectralSegmenter {
             // SHARED result_buf (seeded from the prior channel; NOT zeroed here -- the
             // cross-channel reuse quirk). CAUSAL: the plain whole-sequence forward,
             // whose posteriors are COPIED into a result_buf that is zeroed first --
-            // mirroring the exact plain path, where `NeuronLayer::feed_forward` does
-            // its own `output.fill(0.0)` (`nn/layers.rs:948`) and then writes exactly
+            // mirroring the exact plain path, where `nn::layers::NeuronLayer::feed_forward`
+            // does its own `output.fill(0.0)` and then writes exactly
             // `output_length` rows, so any tail beyond the net's own output length
             // stays zero and NOTHING seeds from the previous channel.
             match net {
@@ -559,10 +560,10 @@ impl Segmenter for FastSpectralSegmenter {
                     copy_plain_output("fast causal SAD", out, &mut result_buf)?;
                 }
                 // Phase-10 Task 7: the bidirectional cells run EITHER regime, selected
-                // by the config exactly as the exact tree selects it
-                // (`feed_forward_backward`'s `truncates_sequence && overlaps` dispatch,
-                // `nn/blstm.rs::feed_forward_backward`). The timeline refuses `no_overlap`, so
-                // `window_size > 0` here means OVERLAP and nothing else.
+                // by the config exactly as the exact tree selects it (the
+                // `truncates_sequence && overlaps` dispatch of
+                // `nn::blstm::BlstmNetwork::feed_forward_backward`). The timeline refuses
+                // `no_overlap`, so `window_size > 0` here means OVERLAP and nothing else.
                 FastNet::BiCell(n) => {
                     if window_size > 0 {
                         n.feed_forward_overlap(&input, window_size, window_shift, &mut result_buf);
@@ -670,15 +671,14 @@ impl TruncateGeometry<'_> {
 
 impl FastNet {
     /// Scoring forward for the Mode-7 LID Twin, the f32 counterpart of the INFERENCE
-    /// slice of `BlstmNetwork::feed_forward_scoring` (`nn/blstm.rs:1671-1766`; the `:NNN`
-    /// cites below are that function's lines) on every shape. Mode 7 always passes
-    /// `target_index >= 0`, so this mirrors: the sequential output-length division
-    /// (`:1686-1694`), the windowed dispatch (`set_processing_type(window_size > 0,
+    /// slice of `nn::blstm::BlstmNetwork::feed_forward_scoring` on every shape. Mode 7
+    /// always passes `target_index >= 0`, so this mirrors: the sequential output-length
+    /// division, the windowed dispatch (`set_processing_type(window_size > 0,
     /// overlaps)`: `window_size == 0` is the PLAIN whole-sequence forward, `TwoSweeps`
     /// IGNORED exactly as the exact tree ignores it there; `window_size > 0` is the
     /// TRUNCATE sweep, the caller having refused overlap), and the BINARY expansion into
     /// `[1-p, p]` when `output_size == 1`. The `rows < ssr -> Zero(1, O)` guard
-    /// (`:1681-1683`) is the caller's: `score_lid_entry` skips such an entry. The exact's
+    /// is the caller's: `score_lid_entry` skips such an entry. The exact's
     /// target construction + cost/backward are SKIPPED: the fast path is forward-only, the
     /// forward is target-independent, and Mode 7's langID/confusion derive from the
     /// posteriors alone (the NN-cost columns are a documented divergence).
@@ -701,11 +701,11 @@ impl FastNet {
             output_subsampling,
             output_size,
         };
-        // :1686-1694 output length (only re-divided when the whole ratio > 1).
+        // Output length (only re-divided when the whole ratio > 1).
         let out_len = geom.short_len(input.rows);
         let output = if window_size == 0 {
-            // The PLAIN regime (`feed_forward_backward_plain` -> `feed_forward` over the
-            // whole entry, `nn/blstm.rs:1780`): the net's own output length is the same
+            // The PLAIN regime (`nn::blstm::BlstmNetwork::feed_forward_backward_plain` ->
+            // `feed_forward` over the whole entry): the net's own output length is the same
             // sequential floor chain, so the rows agree by construction; a disagreement is
             // a geometry defect, not something to pad or truncate quietly.
             let out = self.feed_forward(input);
@@ -722,7 +722,7 @@ impl FastNet {
         } else {
             self.truncate_forward(&geom, input, window_size, out_len, two_sweeps)
         };
-        // :1755-1765 binary expansion into [1-p, p] (Mode 7 always has targets, so the
+        // Binary expansion into [1-p, p] (Mode 7 always has targets, so the
         // `target_index >= 0` half of the legacy gate is always true here).
         if output_size == 1 {
             let mut expanded = FastMatrix::zeros(out_len, 2);
@@ -737,9 +737,10 @@ impl FastNet {
         }
     }
 
-    /// f32 TwoSweeps/single-sweep truncate forward (`feed_forward_backward_truncate`,
-    /// `nn/blstm.rs:2035`; the `:NNN` cites in the body are the legacy
-    /// `BLSTMNeuralNetwork.cpp:548-590` lines that function transcribes), OUTPUT-ONLY. The
+    /// f32 TwoSweeps/single-sweep truncate forward
+    /// (`nn::blstm::BlstmNetwork::feed_forward_backward_truncate`; the `:NNN` cites in the
+    /// body are the legacy `BLSTMNeuralNetwork.cpp:548-590` lines that function
+    /// transcribes), OUTPUT-ONLY. The
     /// exact stitches the fwd/bwd hidden states (`_OutputForward`/`_OutputBackward`) across
     /// windows + sweeps; Mode 7 reads them ONLY for `DumpLIDInternals` (off on the gate
     /// configs, the fast driver bails if it is on), so the fast path tracks only `output`.
@@ -804,8 +805,8 @@ impl FastNet {
         output
     }
 
-    /// One truncate sweep (`feed_forward_backward_truncate_sweep`, `nn/blstm.rs:1912`; the
-    /// `:NNN` cites are the legacy `BLSTMNeuralNetwork.cpp:488-546` lines), OUTPUT-ONLY:
+    /// One truncate sweep (`nn::blstm::BlstmNetwork::feed_forward_backward_truncate_sweep`;
+    /// the `:NNN` cites are the legacy `BLSTMNeuralNetwork.cpp:488-546` lines), OUTPUT-ONLY:
     /// non-overlapping windows of `window_size`, each a whole-block forward over a
     /// contiguous row-slice, written at `begin/ssr`. A `length_short == 0` window is
     /// silently dropped (`:534`); a partial last window recomputes its length via the
@@ -897,7 +898,8 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 ///   type would need the normalization the fast scoring skips) -- bail at construction.
 /// - A negative `BLSTM_LID_TargetEnforcementStep` typed-bails at construction (T5 finding
 ///   1, review): it makes the exact path's truncate-windowed cost block overwrite interior
-///   OUTPUT rows with -0.5 (risk R7, `nn/blstm.rs:1244-1265`), which the fast path's
+///   OUTPUT rows with -0.5 (risk R7, the cost block of
+///   `nn::blstm::BlstmNetwork::feed_forward_backward_plain`), which the fast path's
 ///   forward-only scoring never reproduces; the gate configs use a non-negative step.
 /// - MLP mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`) typed-bails at construction (T5 finding 3,
 ///   review, contract symmetry with the exact dispatch's is_mlp route to the MLP drivers).
@@ -1041,15 +1043,16 @@ impl FastTwinLid {
         // to, that target sequence is fed through `feed_forward_backward_truncate` ->
         // `feed_forward_backward_truncate_sweep`, which runs `feed_forward_backward_plain`
         // per window block. `_TargetEnforcementStep < 0` there makes the COST block
-        // (nn/blstm.rs:1244-1265) overwrite interior rows of the caller-visible OUTPUT
-        // with -0.5 before `computeCost` -- not just the target. The fast path never
+        // (`nn::blstm::BlstmNetwork::feed_forward_backward_plain`) overwrite interior rows
+        // of the caller-visible OUTPUT with -0.5 before `computeCost` -- not just the
+        // target. The fast path never
         // builds targets, so it always returns true posteriors: a silent structural
         // divergence for a negative step. Bail loudly instead.
         if lid_bc.target_enforcement_step < 0 {
             bail!(
                 "fast TwinLid: a negative BLSTM_LID_TargetEnforcementStep is not supported on \
                  the fast path (got {}); the exact path's cost block overwrites interior \
-                 output rows with -0.5 for a negative step (risk R7, nn/blstm.rs:1244-1265), \
+                 output rows with -0.5 for a negative step (risk R7), \
                  which the fast path's forward-only scoring never reproduces; the gate configs \
                  use a non-negative step",
                 lid_bc.target_enforcement_step
@@ -1058,8 +1061,9 @@ impl FastTwinLid {
 
         // T5 finding 3 (review, minor): contract symmetry with the exact dispatch, which
         // routes is_mlp configs (LSTMNeuronNb[0]==0) to the MLP drivers
-        // (nn/blstm.rs:1032-1043) instead of the recurrent forwards the fast LID scoring
-        // runs. Every shape's `from_flat` independently bails on this shape, but only once
+        // (`nn::blstm::BlstmNetwork::feed_forward_backward`'s `is_mlp` arm) instead of the
+        // recurrent forwards the fast LID scoring runs. Every shape's `from_flat`
+        // independently bails on this shape, but only once
         // weights are actually loaded -- when `lid_weights` is `None` here (the deferred
         // `load_weights_file` path), `from_legacy` would otherwise return `Ok` for an
         // is_mlp config, so `from_flat`'s bail does NOT provably fire first on every such
