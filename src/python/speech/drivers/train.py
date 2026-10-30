@@ -398,6 +398,32 @@ def score_genome(
     return cost, out_param
 
 
+def _qpso_params(
+    particles: int,
+    epochs: int,
+    dim: int,
+    adim: float,
+    seed_value: NDArray[np.float64] | None,
+    *,
+    backprop_activated: int,
+) -> QpsoParams:
+    """The one `QpsoParams` build of both `quantum_pso` sites (`train` over the full genome,
+    `train_hyperparam_search` over the narrowed one; issue #102): the inertia schedule runs the
+    whole search (`wt_end = epoch`, Train_BLSTM.m:859), the position range is `[0, adim]` per
+    dimension with `mv = range / mvden`, `mvden = 2` (`:833`, `:853-854`), and a seed vector turns
+    `PSOseed` on. What varies per site is the genome length and the refinement flag."""
+    return QpsoParams(
+        ps=particles,
+        me=epochs,
+        iwe=epochs,
+        pso_seed=1 if seed_value is not None else 0,
+        vr=np.column_stack([np.zeros(dim), np.full(dim, adim)]),
+        mv=np.full(dim, adim / 2.0),
+        seed_value=seed_value,
+        backprop_activated=backprop_activated,
+    )
+
+
 DEFAULT_INNER_STEPS = 20
 """The Legacy regime's SMORMS3 inner-loop step count (a `BackPropagation.m` knob, not a QPSO
 one, so it does not live on `QpsoParams`): the one default `cli.py`, `train` and `retrain` read
@@ -485,26 +511,7 @@ def train(
             costs[i] = cost
         return costs, pos
 
-    params = QpsoParams(
-        ps=qpso_particles,
-        me=qpso_epochs,
-        ac1=2.1,
-        ac2=2.1,
-        iw1=0.9,
-        iw2=0.6,
-        iwe=qpso_epochs,
-        ergrd=1e-99,
-        ergrdep=500,
-        errgoal=float("nan"),
-        trelea=3,
-        pso_seed=1 if seed_value is not None else 0,
-        minmax=0,
-        vr=np.column_stack([np.zeros(d), np.full(d, ps.adim)]),
-        mv=np.full(d, ps.adim / 2.0),
-        seed_value=seed_value,
-        backprop_activated=1,
-    )
-
+    params = _qpso_params(qpso_particles, qpso_epochs, d, ps.adim, seed_value, backprop_activated=1)
     result = quantum_pso(cost_fn, params, d, np.random.default_rng(seed), backprop_refine=backprop_refine)
     # legacy: Train_BLSTM.m:973 -- BackPropagation on the QPSO winner. This produces
     # the final trained weights (and guarantees the inner loop runs at least once).
@@ -909,26 +916,8 @@ def train_hyperparam_search(
             out[i] = reduced_out
         return costs, out
 
-    params = QpsoParams(
-        ps=qpso_particles,
-        me=qpso_epochs,
-        ac1=2.1,
-        ac2=2.1,
-        iw1=0.9,
-        iw2=0.6,
-        iwe=qpso_epochs,
-        ergrd=1e-99,
-        ergrdep=500,
-        errgoal=float("nan"),
-        trelea=3,
-        pso_seed=1 if seed_value is not None else 0,
-        minmax=0,
-        vr=np.column_stack([np.zeros(n_search), np.full(n_search, ps.adim)]),
-        mv=np.full(n_search, ps.adim / 2.0),
-        seed_value=seed_value,
-        backprop_activated=0,  # no weight refinement in the narrowed search
-    )
-
+    # no weight refinement in the narrowed search: backprop off
+    params = _qpso_params(qpso_particles, qpso_epochs, n_search, ps.adim, seed_value, backprop_activated=0)
     result = quantum_pso(cost_fn, params, n_search, np.random.default_rng(seed))
     gbest = np.asarray(result.gbest, dtype=F64)
     if result.gbestval >= _HYPERPARAM_PENALTY:
