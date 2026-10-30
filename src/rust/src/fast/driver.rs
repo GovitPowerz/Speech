@@ -885,7 +885,8 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 /// f32 Mode-7 LID Twin (algo 6), the fast counterpart of
 /// [`crate::tasks::lid::TwinBlstmSpectralLid`] restricted to its `abs(_Mode) == 7`
 /// phSeq/cep arm (`tasks::lid::TwinBlstmSpectralLid::get_segmentation_mode7`). The SAD net is
-/// NEVER RUN (its `result_vec` is the synthesized constant 10.0, `:1407`); only the LID
+/// NEVER RUN (its `result_vec` is the constant 10.0 of `TwinBLSTMSpectralLID.cpp:725`); only
+/// the LID
 /// net scores each `audio.external_features[i]` block, in f32. The langID / confusion /
 /// `is_lid_correct` decisions derive from the LID posteriors alone -- widened back to
 /// f64 at the member seam so the shared `.scr` writer + confusion columns flow unchanged.
@@ -1222,14 +1223,15 @@ impl Segmenter for FastTwinLid {
     /// synthesized (constant
     /// 10.0 -> the SHARED f64 decision layer, so the SAD side is bit-identical to the
     /// exact path); the LID net runs the fast scoring forward (plain or truncate, per the
-    /// config and the shape) per external-features block.
+    /// config and the shape) per external-features block. The `:NNN` cites in this body are
+    /// `TwinBLSTMSpectralLID.cpp` lines, the anchors the exact body carries.
     fn get_segmentation(
         &mut self,
         audio: &mut Audio,
         seg_per_chan: &mut [Segmentation],
         _refs: Option<&[Segmentation]>,
     ) -> Result<()> {
-        // Wav CNN arm bail (the exact `:1276-1280` gate): only the phSeq/cep external-
+        // Wav CNN arm bail (the exact `:922` gate): only the phSeq/cep external-
         // features arm is ported; a real wav decode leaves `periodogram` unset.
         if audio.periodogram.is_none() {
             bail!(
@@ -1245,7 +1247,8 @@ impl Segmenter for FastTwinLid {
             "fast TwinLid: a TDC config survived the construction-time pitch-pass bail"
         );
 
-        // The exact `:1296-1301` `!hasReadWavFile` -> 80 override is always taken here (the
+        // The exact `!hasReadWavFile` -> 80 override (`BLSTMSpectralSegmenter.cpp:209`) is always
+        // taken here (the
         // wav arm bailed above), so the stateful round(shift * rate) it overrides is moot.
         let ssif = 80usize;
         let spectrum_shift_sec = ssif as f64 / rate;
@@ -1271,13 +1274,13 @@ impl Segmenter for FastTwinLid {
             audio.data.ncols(),
         );
 
-        // getLIDBLSTMParam: LID window/shift derivation (the exact `:1330-1353`), the regime
-        // rule and the target clamp (the exact `:1396-1404`), all through the streaming
+        // getLIDBLSTMParam: LID window/shift derivation (the exact `:89-102`), the regime
+        // rule (the port's) and the target clamp (the exact `:626-628`), all through the streaming
         // session's own `lid_score_params`, so the offline and streaming params cannot drift.
         // Called BEFORE the stateful shift re-quantization below: re-derived from a
         // re-quantized shift (>= 1 frame), truncate would read as overlap.
         // `lid_window_shift` is still derived inline for the stateful
-        // `self.lid_window_shift_sec` bookkeeping (the epilogue reset at `:1160` reads it).
+        // `self.lid_window_shift_sec` bookkeeping (the epilogue reset at `:1420` reads it).
         let params = self.lid_score_params("fast TwinLid mode 7", rate, audio.lang_index)?;
         // Overlap is refused, so a resolved window means truncate (`lid_no_overlap`).
         let lid_no_overlap = params.lid_window_size > 0;
@@ -1288,7 +1291,7 @@ impl Segmenter for FastTwinLid {
         }
         self.lid_window_shift_sec = (lid_window_shift * ssif as i64) as f64 / rate;
 
-        // SAD timeStep/offset (the exact `:1356-1366`).
+        // SAD timeStep/offset (the exact `:696-706`).
         let mut time_step = self.window_shift_sec * sad_ssr as f64;
         let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
         if window_size > 0 {
@@ -1313,7 +1316,7 @@ impl Segmenter for FastTwinLid {
             .ok_or_else(|| anyhow!("fast TwinLid: LID net has no weights loaded"))?;
 
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
-            // SAD else branch (`:1407`): result_vec = constant 10.0 -> the SHARED f64
+            // SAD else branch (`:725`): result_vec = constant 10.0 -> the SHARED f64
             // decision layer (bit-identical to the exact path -- no NN, pure f64).
             let mut result_vec2 = vec![10.0f64; real_vec_size];
             self.last_result_rows.push(result_vec2.clone());
@@ -1329,7 +1332,7 @@ impl Segmenter for FastTwinLid {
             self.cumulative_error[chan] = 0.0;
             self.nb_of_classif[chan] = 0;
 
-            // abs(_Mode)==7 external-features loop (`:1448-1591`) + epilogue (`:1599-1634`),
+            // abs(_Mode)==7 external-features loop (`:965-1179`) + member writes (`:1318-1337`),
             // via the SHARED kernel (`score_lid_entry` / `finalize_lid_channel`) -- the SAME
             // code the streaming session folds through, so streaming is bit-identical to this
             // offline path by construction (see the kernel section below `get_segmentation`).
@@ -1339,7 +1342,7 @@ impl Segmenter for FastTwinLid {
             }
             let agg = finalize_lid_channel(&acc, &params);
 
-            // Member writes (`:1622-1634`). Forward-only: the LID cumulative_error /
+            // Member writes (`:1318-1337`). Forward-only: the LID cumulative_error /
             // nb_of_classif stay 0 (documented divergence, the fast path never harvests
             // the LID NN cost/classif count).
             self.lid.cumulative_error[chan] = 0.0;
@@ -1349,7 +1352,7 @@ impl Segmenter for FastTwinLid {
             self.lid.is_correct[chan] = agg.is_lid_correct;
         }
 
-        // Epilogue (`:1642-1653`). The deriv ponderation (`:1643-1644`) is training-only
+        // Epilogue (`:1393-1420`). The deriv ponderation (`:1335`, `:1393`) is training-only
         // (forward-only fast path -> skipped). The stateful shift resets are mirrored.
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1);
@@ -1443,7 +1446,8 @@ pub(super) struct LidScoreParams {
 }
 
 /// The per-channel LID accumulator the Mode-7 external-features loop folds each entry into.
-/// [`new`](Self::new) seeds the confusion index header exactly as the offline `:970-975`.
+/// [`new`](Self::new) seeds the confusion index header exactly as the offline
+/// `TwinBLSTMSpectralLID.cpp:787-790`.
 pub(super) struct LidChannelAcc {
     pub(super) langid: Vec<f64>,
     pub(super) confusion: Array2<f64>,
@@ -1474,8 +1478,8 @@ pub(super) struct LidEntryOutcome {
     pub(super) argmax: usize,
 }
 
-/// First-max argmax (strict `>`), matching the offline inline argmax (`:1075-1082`,
-/// `:1147-1148`-adjacent langID pick).
+/// First-max argmax (strict `>`), matching the offline inline argmax
+/// (`TwinBLSTMSpectralLID.cpp:1113-1114`) and the `langID.maxCoeff()` pick (`:1325`).
 fn argmax_f64(v: &[f64]) -> usize {
     let mut j = 0usize;
     let mut best = v[0];
@@ -1488,7 +1492,7 @@ fn argmax_f64(v: &[f64]) -> usize {
     j
 }
 
-/// LID window derivation (`get_segmentation_mode7` `:1330-1353`): returns
+/// LID window derivation (`getLIDBLSTMParam`, `TwinBLSTMSpectralLID.cpp:89-102`): returns
 /// `(lid_window_size, lid_no_overlap)`. `ssif` is the (mode-7 forced) spectrum shift in
 /// frames. Shared by `get_segmentation` and [`FastTwinLid::lid_score_params`] so the offline
 /// and streaming window sizes cannot drift.
@@ -1552,10 +1556,12 @@ fn check_lid_regime(
     Ok(())
 }
 
-/// Fold ONE external-features entry into `acc` -- the exact body of the Mode-7 `:1448-1591`
-/// inner loop. Returns `None` if the entry is skipped (`nrows < lid_ssr` or `< MinNbOfFrames`,
-/// `:1450`), else the per-entry observables. The noise `randinit` is fixed 0 PER ENTRY
-/// (`:989`), NOT entry-order-dependent, so a per-utterance call reproduces the offline
+/// Fold ONE external-features entry into `acc` -- the exact body of the Mode-7 loop
+/// (`TwinBLSTMSpectralLID.cpp:965-1179`; the `:NNN` here and in the body are its lines).
+/// Returns `None` if the entry is skipped (`nrows < lid_ssr` or `< MinNbOfFrames`,
+/// `:981`), else the per-entry observables. The noise `randinit` is fixed 0 PER ENTRY
+/// (the port's choice where `:1022-1032` seeds from the clock), NOT entry-order-dependent, so a
+/// per-utterance call reproduces the offline
 /// sequential call's noise indexing exactly.
 pub(super) fn score_lid_entry(
     feat: &Array2<f64>,
@@ -1563,11 +1569,11 @@ pub(super) fn score_lid_entry(
     p: &LidScoreParams,
     acc: &mut LidChannelAcc,
 ) -> Option<LidEntryOutcome> {
-    // :1450 _MinNbOfFrames + ssr guard.
+    // :981 _MinNbOfFrames + ssr guard.
     if feat.nrows() < p.lid_ssr || (feat.nrows() as i32) < p.min_nb_of_frames {
         return None;
     }
-    // :1456-1466 Gaussian noise (randinit fixed 0), added in f64 per element, then the
+    // :1022-1032 Gaussian noise (randinit fixed 0), added in f64 per element, then the
     // block narrows to f32 at the driver seam and is scored.
     let (fr, fc) = feat.dim();
     let randinit = 0usize;
@@ -1597,7 +1603,7 @@ pub(super) fn score_lid_entry(
     let output_seq: Vec<f64> = out_f32.data.iter().map(|&x| x as f64).collect();
     let get = |r: usize, c: usize| output_seq[r * out_cols + c];
 
-    // :1486-1534 segLID accumulation per _PostProcessMode. Modes 1/2 stay transcribed-but-
+    // :1073-1108 segLID accumulation per _PostProcessMode. Modes 1/2 stay transcribed-but-
     // unpinned (the gate configs use mode 0), mirroring the offline driver.
     let mut seg_lid = vec![0.0f64; out_cols];
     match p.post_process_mode {
@@ -1649,7 +1655,7 @@ pub(super) fn score_lid_entry(
         }
     }
 
-    // :1537-1544 argmax j, :1545-1555 confusion.
+    // :1113-1114 argmax j, :1121-1130 confusion.
     let j = argmax_f64(&seg_lid);
     let pos_target = p.ti + 1;
     if j == p.ti {
@@ -1663,7 +1669,7 @@ pub(super) fn score_lid_entry(
         acc.confusion[[p.class_nb + 1, pos_best]] += 1.0;
     }
 
-    // :1558-1567 langID.
+    // :1131-1135 langID.
     let rows = out_f32.rows as f64;
     if p.cost_modified {
         for (c, &v) in seg_lid.iter().enumerate() {
@@ -1679,12 +1685,13 @@ pub(super) fn score_lid_entry(
     Some(LidEntryOutcome { seg_lid, argmax: j })
 }
 
-/// The finalized per-channel members (`:1599-1634` epilogue applied to `acc`): normalize a
+/// The finalized per-channel members (`TwinBLSTMSpectralLID.cpp:1163-1179` + `:1318-1337`
+/// applied to `acc`): normalize a
 /// CLONE of langID (so a mid-stream snapshot never consumes the accumulator), then derive
 /// the in-band classification errors + is_lid_correct + predicted language. Read-only in
 /// `acc`, so the offline (once) and the streaming session (per push) both call it.
 pub(super) fn finalize_lid_channel(acc: &LidChannelAcc, p: &LidScoreParams) -> LidAggregate {
-    // :1599-1620 langID normalization (on a clone -- the offline mutated in place then read
+    // :1163-1179 langID normalization (on a clone -- the offline mutated in place then read
     // it; the values are identical, and the offline never reads langID after the epilogue).
     let mut langid = acc.langid.clone();
     if acc.segments_count > 0 && langid.iter().sum::<f64>() != 0.0 {
@@ -1710,7 +1717,7 @@ pub(super) fn finalize_lid_channel(acc: &LidChannelAcc, p: &LidScoreParams) -> L
         langid[0] = 1.0;
     }
 
-    // :1622-1634 member writes.
+    // :1318-1337 member writes.
     let mut target_lid = vec![0.0f64; p.class_nb];
     target_lid[p.ti] = -2.0;
     let mut errors = vec![0.0f64; p.class_nb];
@@ -1734,8 +1741,8 @@ impl FastTwinLid {
     /// Derive the per-channel LID scoring params (the window resolution + skip/scoring
     /// constants, minus the SAD side) for BOTH the offline `get_segmentation` and the
     /// streaming session; `who` prefixes a refusal. Mode 7 forces
-    /// `_SpectrumShiftInFrames = 80` (`:1296-1301`: the phSeq/cep periodogram is always
-    /// present), so `ssif` is a constant here. Applies the regime rule
+    /// `_SpectrumShiftInFrames = 80` (`BLSTMSpectralSegmenter.cpp:209`: the phSeq/cep
+    /// periodogram is always present), so `ssif` is a constant here. Applies the regime rule
     /// ([`check_lid_regime`]: plain or truncate per the shape, overlap refused).
     /// `ti = clamp(lang_index, [0, class_nb))`.
     pub(super) fn lid_score_params(
@@ -1744,7 +1751,7 @@ impl FastTwinLid {
         rate: f64,
         lang_index: i32,
     ) -> Result<LidScoreParams> {
-        let ssif = 80usize; // mode-7 forced (:1296-1301)
+        let ssif = 80usize; // mode-7 forced (`BLSTMSpectralSegmenter.cpp:209`)
         let (lid_window_size, lid_no_overlap) = derive_lid_window(
             self.lid_window_size_sec,
             self.lid_window_shift_sec,

@@ -32,7 +32,8 @@
 //!
 //! NOISE (entry-order-independent). Mode-7 Gaussian noise (`_NoiseMagnitude > 0`, off in the
 //! gate configs) uses a `randinit` fixed at 0 PER ENTRY (`fast/driver.rs`'s `score_lid_entry`,
-//! the exact `:989`), so each utterance's noise indexing restarts at 0 -- a per-utterance push
+//! not the clock seed of the exact `TwinBLSTMSpectralLID.cpp:1022-1032`), so each utterance's
+//! noise indexing restarts at 0 -- a per-utterance push
 //! reproduces the offline sequential call's noise exactly, at any push granularity.
 //!
 //! SIGNATURE NOTE (the same T4/T5-precedent deviation the SAD session took). The Task-7 brief
@@ -126,7 +127,8 @@ impl StreamingLidSession {
     /// Fold ONE utterance (`external_features` entry -- the `(frames x feat_dim)` matrix the
     /// phSeq/cep readers push) into the running accumulator and return its per-entry score plus
     /// the finalized running aggregate. A too-short / below-`MinNbOfFrames` entry is SKIPPED
-    /// (empty `scores`, `None` argmax), exactly as the offline loop's `:1450` guard.
+    /// (empty `scores`, `None` argmax), exactly as the offline loop's guard
+    /// (`TwinBLSTMSpectralLID.cpp:981`).
     pub fn push_utterance(&mut self, feat: &Array2<f64>) -> UtteranceScore {
         let outcome = self.twin.fold_entry(feat, &self.params, &mut self.acc);
         let running_aggregate = finalize_lid_channel(&self.acc, &self.params);

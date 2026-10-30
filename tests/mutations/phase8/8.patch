@@ -15,9 +15,10 @@ diff --git a/src/rust/src/fast/stream_lid.rs b/src/rust/src/fast/stream_lid.rs
 index 811f5d2..82eb708 100644
 --- a/src/rust/src/fast/stream_lid.rs
 +++ b/src/rust/src/fast/stream_lid.rs
-@@ -128,8 +128,8 @@ impl StreamingLidSession {
+@@ -128,9 +128,9 @@ impl StreamingLidSession {
      /// the finalized running aggregate. A too-short / below-`MinNbOfFrames` entry is SKIPPED
-     /// (empty `scores`, `None` argmax), exactly as the offline loop's `:1450` guard.
+     /// (empty `scores`, `None` argmax), exactly as the offline loop's guard
+     /// (`TwinBLSTMSpectralLID.cpp:981`).
      pub fn push_utterance(&mut self, feat: &Array2<f64>) -> UtteranceScore {
 -        let outcome = self.twin.fold_entry(feat, &self.params, &mut self.acc);
          let running_aggregate = finalize_lid_channel(&self.acc, &self.params);

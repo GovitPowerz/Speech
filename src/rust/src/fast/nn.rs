@@ -149,8 +149,8 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
     }
 }
 
-/// f32 external (type 1) input normalization (`BLSTMNeuralNetwork::
-/// feedForwardBackward` `:720-723`, exact port `nn::blstm::BlstmNetwork::feed_forward_backward`,
+/// f32 external (type 1) input normalization (`BLSTMNeuralNetwork.cpp:720-723`,
+/// `feedForwardBackward`; exact port `nn::blstm::BlstmNetwork::feed_forward_backward`,
 /// the `input_normalization_type == 1` branch): per column `jj < min(cols,
 /// mean.len())`, `(x - mean_jj) / max(1e-12, std_jj)`; columns beyond the
 /// mean/std tail are UNTOUCHED. `mean`/`std` are the pack-carried normalize

@@ -8,7 +8,7 @@
 //! must lead to a definition under `src/`, so a renamed exact symbol fails the suite
 //! instead of rotting the doc.
 //!
-//! Two rules, one test each:
+//! Three rules, one test each:
 //!
 //! 1. No `<file>.rs:<line>` citation in `src/fast/` names a file under `src/` outside
 //!    `fast/` (the basenames are read off the tree, `mod.rs` by its directory). The
@@ -22,6 +22,13 @@
 //!    `fn feed_forward` in `layers.rs`, and a path wrapped across two doc lines is refused
 //!    outright (its tail would go unchecked). A path with a prefix other than `crate::`
 //!    (`std::io::`, `super::nn::`) is not a citation and is skipped.
+//! 3. A bare `:NNN` in a `src/fast/` comment is a LEGACY line, into a source under
+//!    `legacy/` that never moves, and the comment must say which: the module doc block for
+//!    a `//!` cite, the `///` block itself for a doc cite, and for a `//` body comment
+//!    either that comment's own block or the doc block of the enclosing item (the nearest
+//!    `fn` / `struct` / `impl` / ... line above) must name a `.cpp` / `.h` / `.m` file.
+//!    `fast/cells.rs`'s LSTM step kernel set the convention under #96 ("the `:NNN` cites in
+//!    this doc and the body are that legacy loop's lines"); this is it made executable.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -262,6 +269,165 @@ fn every_exact_symbol_cited_in_fast_resolves() {
 
 const SEEN_FLOOR: usize = 95;
 
+/// `text` names a legacy source: `<name>.cpp`, `<name>.h` or `<name>.m` as a whole word.
+fn names_legacy_file(text: &str) -> bool {
+    text.split(|c: char| !(is_ident(c) || c == '.')).any(|w| {
+        let Some((stem, ext)) = w.rsplit_once('.') else {
+            return false;
+        };
+        !stem.is_empty() && stem.chars().all(is_ident) && matches!(ext, "cpp" | "h" | "m")
+    })
+}
+
+/// The bare line citations in one comment's text: each `:NNN` (two or more digits, so a
+/// `:1` type ascription or a `1:1` ratio is not one) whose colon is not glued to an
+/// identifier, a number, a `.` or another `:` on its left -- a `sad.rs:1436` is a FILE
+/// citation (rule 1), a `12:30` a time, a `a::b` a path.
+fn bare_cites_in(comment: &str) -> Vec<String> {
+    let chars: Vec<char> = comment.chars().collect();
+    let mut out = Vec::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c != ':' {
+            continue;
+        }
+        let glued = i > 0 && (is_ident(chars[i - 1]) || chars[i - 1] == '.' || chars[i - 1] == ':');
+        let digits = chars[i + 1..]
+            .iter()
+            .take_while(|d| d.is_ascii_digit())
+            .count();
+        if !glued && digits >= 2 {
+            out.push(chars[i..=i + digits].iter().collect());
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CommentKind {
+    Module,
+    Doc,
+    Body,
+}
+
+/// `line` as (kind, comment text) if it carries a comment: a `//!` / `///` / `//` line, or
+/// code with a trailing `//`.
+fn comment_of(line: &str) -> Option<(CommentKind, &str)> {
+    let t = line.trim_start();
+    if let Some(c) = t.strip_prefix("//!") {
+        Some((CommentKind::Module, c))
+    } else if let Some(c) = t.strip_prefix("///") {
+        Some((CommentKind::Doc, c))
+    } else {
+        line.find("//").map(|i| (CommentKind::Body, &line[i + 2..]))
+    }
+}
+
+/// The contiguous run of lines of `kind` around `n` (full-line comments only), joined.
+fn block_around(lines: &[&str], n: usize, kind: CommentKind) -> String {
+    let is_kind = |i: usize| {
+        let t = lines[i].trim_start();
+        match kind {
+            CommentKind::Module => t.starts_with("//!"),
+            CommentKind::Doc => t.starts_with("///"),
+            CommentKind::Body => {
+                t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")
+            }
+        }
+    };
+    let mut lo = n;
+    while lo > 0 && is_kind(lo - 1) {
+        lo -= 1;
+    }
+    let mut hi = n;
+    while hi + 1 < lines.len() && is_kind(hi + 1) {
+        hi += 1;
+    }
+    lines[lo..=hi].join("\n")
+}
+
+/// `line` opens an item: `fn` / `struct` / `enum` / `impl` / `trait` / `const` / `static` /
+/// `type` / `mod`, after any visibility.
+fn is_item_line(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.starts_with("//") {
+        return false;
+    }
+    let mut rest = t;
+    for vis in ["pub(crate) ", "pub(super) ", "pub "] {
+        rest = rest.strip_prefix(vis).unwrap_or(rest);
+    }
+    [
+        "fn ", "struct ", "enum ", "impl ", "impl<", "trait ", "const ", "static ", "type ", "mod ",
+    ]
+    .iter()
+    .any(|kw| rest.starts_with(kw))
+}
+
+/// The `///` block documenting the item that encloses line `n`: walk up to the nearest item
+/// line, then over its attributes to the doc block above it. Empty when there is none.
+fn enclosing_item_doc(lines: &[&str], n: usize) -> String {
+    let Some(item) = (0..n).rev().find(|&i| is_item_line(lines[i])) else {
+        return String::new();
+    };
+    let mut i = item;
+    while i > 0 && lines[i - 1].trim_start().starts_with("#[") {
+        i -= 1;
+    }
+    if i > 0 && lines[i - 1].trim_start().starts_with("///") {
+        block_around(lines, i - 1, CommentKind::Doc)
+    } else {
+        String::new()
+    }
+}
+
+/// The bare `:NNN` cites in `text` that no legacy file name covers (rule 3), as
+/// `(line, cite)`.
+fn undeclared_bare_cites(text: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        let Some((kind, comment)) = comment_of(line) else {
+            continue;
+        };
+        let cites = bare_cites_in(comment);
+        if cites.is_empty() {
+            continue;
+        }
+        let declared = match kind {
+            CommentKind::Module | CommentKind::Doc => {
+                names_legacy_file(&block_around(&lines, n, kind))
+            }
+            CommentKind::Body => {
+                names_legacy_file(comment)
+                    || names_legacy_file(&block_around(&lines, n, CommentKind::Body))
+                    || names_legacy_file(&enclosing_item_doc(&lines, n))
+            }
+        };
+        if !declared {
+            out.extend(cites.into_iter().map(|c| (n + 1, c)));
+        }
+    }
+    out
+}
+
+#[test]
+fn every_bare_line_cite_in_fast_names_its_legacy_source() {
+    let mut hits = Vec::new();
+    for file in rust_files(&src_dir("fast")) {
+        let text = fs::read_to_string(&file).unwrap();
+        for (line, cite) in undeclared_bare_cites(&text) {
+            hits.push(format!("{}:{line}: `{cite}`", file.display()));
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "bare `:NNN` cites with no legacy source named (a `.cpp` / `.h` / `.m` in the \
+         module doc, the doc block, the comment's block or the enclosing item's doc); \
+         a line into a live file is cited by symbol instead:\n{}",
+        hits.join("\n")
+    );
+}
+
 #[test]
 fn the_resolver_rejects_a_renamed_symbol() {
     let path = |s: &str| s.split("::").map(str::to_owned).collect::<Vec<_>>();
@@ -340,4 +506,36 @@ fn a_path_wrapped_across_lines_is_refused() {
     let braces = symbol_paths_in("use crate::nn::blstm::{BlstmConfig, CellType};", &roots);
     assert_eq!(braces.len(), 1);
     assert!(resolve(&braces[0].1).is_ok());
+}
+
+#[test]
+fn the_bare_cite_rule_reads_the_declaring_block() {
+    // A `///` block naming its legacy file covers its own cites.
+    let ok_doc = "/// Port of `Foo.cpp:10-40`; the gate at `:12`.\nfn f() {}\n";
+    assert!(undeclared_bare_cites(ok_doc).is_empty());
+    // An undeclared doc cite is a hit.
+    let bad_doc = "/// The gate at `:12`.\nfn f() {}\n";
+    assert_eq!(undeclared_bare_cites(bad_doc), vec![(1, ":12".to_owned())]);
+    // A body comment is covered by the enclosing item's doc, through attributes.
+    let ok_body = concat!(
+        "/// Port of `Foo.cpp:10-40`.\n#[inline]\nfn f() {\n",
+        "    let x = 1; // :12 the gate\n    // :14-16 the loop\n}\n"
+    );
+    assert!(undeclared_bare_cites(ok_body).is_empty());
+    // ... but not by another item's doc.
+    let bad_body =
+        "/// Port of `Foo.cpp:10-40`.\nfn g() {}\n\nfn f() {\n    // :14-16 the loop\n}\n";
+    assert_eq!(undeclared_bare_cites(bad_body), vec![(5, ":14".to_owned())]);
+    // A body comment's own block may declare the file.
+    let ok_block = "fn f() {\n    // The exact `Bar.m` lines:\n    // :14-16 the loop\n}\n";
+    assert!(undeclared_bare_cites(ok_block).is_empty());
+    // A module doc must name the file in the same `//!` block.
+    assert!(undeclared_bare_cites("//! `A.h` ctor `:3-9`.\n").is_empty());
+    assert_eq!(
+        undeclared_bare_cites("//! ctor `:30-90`.\n"),
+        vec![(1, ":30".to_owned())]
+    );
+    // Not cites: a file citation (rule 1), a path, a time, a one-digit ascription.
+    assert!(bare_cites_in("`sad.rs:1436`, `a::b`, 12:30, `x: 1`, `mel.rs:362`").is_empty());
+    assert_eq!(bare_cites_in("(`:362`/`:383`)"), vec![":362", ":383"]);
 }

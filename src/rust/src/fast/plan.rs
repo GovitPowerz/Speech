@@ -302,7 +302,7 @@ impl FastSadPlan {
         self.check_regime(window_size != 0, no_overlap, &format!(" at {rate} Hz"))?;
 
         // timeStep/timeOffset (`BlstmSpectralSegmenter::get_segmentation`, the block the
-        // exact driver cites as legacy `:724-734`): the BASE pair is
+        // exact driver cites as legacy `BLSTMSpectralSegmenter.cpp:724-734`): the BASE pair is
         // `_WindowShift`-derived; the OVERLAP branch OVERRIDES it with `_SpectrumShift`
         // (the asymmetry vs the signal driver). `window_size == 0` -- the causal regime --
         // keeps the base pair, where `window_shift_sec` is the value `get_blstm_param` just

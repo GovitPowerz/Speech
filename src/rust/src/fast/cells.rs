@@ -1043,13 +1043,13 @@ struct LstmScratch {
     /// `4O`: this step's gate row, in the `[i|f|o|g]` block order -- the exact cell's
     /// `gates.row(t)`. It CANNOT be [`LstmState::gates`] itself: the peephole
     /// cross-terms read the PREVIOUS step's activated gates while this row is being
-    /// built (`f_t` reads `i_{t-1}`, `:362-363`), so writing in place would feed a
+    /// built (`f_t` reads `i_{t-1}`, `LSTMLayer.cpp:362-363`), so writing in place would feed a
     /// half-updated row back into its own recurrence.
     pre: Vec<f32>,
 }
 
 /// The peephole-LSTM carried state (spec S4.1's shape, one entry per thing the exact
-/// forward reads at `t-1`):
+/// forward reads at `t-1`; the `:NNN` are `LSTMLayer.cpp` lines):
 ///
 /// - `h` -- `y_{t-1}`, the layer output that drives the recurrent projection (`:351`);
 /// - `c` -- `c_{t-1}`, read by the cell-peephole terms (`:353-356`) AND by the cell
