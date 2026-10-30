@@ -443,7 +443,7 @@ impl BagOfProcessors {
                     }
                     6 => {
                         let mut seg = FastTwinLid::from_legacy(map, None, None)?;
-                        seg.load_weights_file(map)?;
+                        seg.load_weights_file()?;
                         Processor::FastTwinLid(seg)
                     }
                     other => bail!(

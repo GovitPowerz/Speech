@@ -111,7 +111,7 @@ impl StreamingLidSession {
         let mut twin = FastTwinLid::from_legacy(map, None, lid_weights)?;
         // `from_legacy` with `lid_weights: None` defers the net to the config's weightsFile.
         if lid_weights.is_none() {
-            twin.load_weights_file(map)?;
+            twin.load_weights_file()?;
         }
         if !twin.lid_net_loaded() {
             bail!(

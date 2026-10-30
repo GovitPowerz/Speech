@@ -24,10 +24,15 @@ use std::path::PathBuf;
 
 use indexmap::IndexMap;
 
-use speech::fast::driver::FastNetShape;
+use ndarray::Array2;
+use speech::audio::{Audio, read_audio};
+use speech::fast::driver::{FastNetShape, FastTwinLid};
 use speech::fast::plan::{FastLidPlan, MODE7_SSIF, derive_lid_window};
+use speech::io::binary::read_weight_vector;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork, CellType};
 use speech::tasks::sad::get_blstm_param;
+use speech::tasks::segmentation::Segmentation;
+use speech::tasks::segmenter::Segmenter;
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
@@ -501,4 +506,76 @@ fn timeline_refuses_the_two_regimes_where_the_window_resolves() {
         .unwrap()
         .timeline("who", 8000.0, 0)
         .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// `from_plan` with an in-memory pair scores as `from_legacy` does.
+// ---------------------------------------------------------------------------
+
+fn phseq_audio(f: &str, lang: i32) -> Audio {
+    let path = ref_dir()
+        .join("phase4b/corpus_phseq")
+        .join(format!("{f}.phSeq"));
+    let mut a = read_audio(&path, 0.0, 120.0, 1, None).unwrap();
+    a.lang_index = lang;
+    a.weight = 1.0;
+    a.audio_file_name = path.to_string_lossy().into_owned();
+    a
+}
+
+/// Channel 0's LID members after scoring `s1`: `(classification_errors, confusion, is_correct)`.
+fn score_s1(d: &mut FastTwinLid) -> (Vec<f64>, Array2<f64>, i32) {
+    let mut audio = phseq_audio("s1", 0);
+    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
+        .map(|_| Segmentation::new(dur))
+        .collect();
+    d.get_segmentation(&mut audio, &mut segs, None).unwrap();
+    let m = d.lid_members();
+    (
+        m.classification_errors[0].clone(),
+        m.segments_confusion[0].clone(),
+        m.is_correct[0],
+    )
+}
+
+#[test]
+fn from_plan_with_an_in_memory_pair_scores_as_from_legacy_does() {
+    for fixture in ["twin_mode7_lid_slstm", "twin_mode7_lid_cfc_forward"] {
+        let map = map_for(&format!("phase9/{fixture}.config"));
+        let lid =
+            read_weight_vector(&ref_dir().join(format!("phase9/{fixture}_seed.bin"))).unwrap();
+        let sad = read_weight_vector(&ref_dir().join("phase4b/tiny_sad_seed.bin")).unwrap();
+        let plan = FastLidPlan::from_map(&map).unwrap();
+        let mut from_plan = FastTwinLid::from_plan(plan.clone(), Some(&sad), Some(&lid)).unwrap();
+        let mut from_legacy = FastTwinLid::from_legacy(&map, Some(&sad), Some(&lid)).unwrap();
+        assert_eq!(
+            score_s1(&mut from_plan),
+            score_s1(&mut from_legacy),
+            "{fixture}"
+        );
+        // A wrong-length pack on either seat is refused in the exact `set_weights`' words.
+        let msg = err_of(
+            FastTwinLid::from_plan(plan.clone(), Some(&sad[..sad.len() - 1]), Some(&lid)),
+            "short SAD pack",
+        );
+        assert!(
+            msg.contains(&format!("{}", plan.sad.pack_len)),
+            "{fixture}: {msg}"
+        );
+        let msg = err_of(
+            FastTwinLid::from_plan(plan.clone(), Some(&sad), Some(&lid[..lid.len() - 1])),
+            "short LID pack",
+        );
+        assert!(
+            msg.contains(&format!("{}", plan.lid.pack_len)),
+            "{fixture}: {msg}"
+        );
+        // Scoring twice is scoring once: nothing is carried between files.
+        assert_eq!(
+            score_s1(&mut from_plan),
+            score_s1(&mut from_legacy),
+            "{fixture}: second file"
+        );
+    }
 }

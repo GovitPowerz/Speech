@@ -161,8 +161,6 @@ impl FastNetPlan {
     /// Build the fast net from an in-memory pack: EXACT-LENGTH against [`Self::pack_len`]
     /// in the exact `set_weights`' words (`check_pack_len`), then `build_net` for
     /// [`Self::shape`].
-    // Consumed by the fast Twin from the next commit on.
-    #[allow(dead_code)]
     pub(crate) fn build_net(&self, flat: &[f64]) -> Result<FastNet> {
         check_pack_len(flat.len(), self.pack_len)?;
         build_net(&self.spec, self.shape, &self.geometry, flat)
@@ -844,8 +842,6 @@ pub struct LidTimeline {
     /// The target language, `clamp(lang_index, [0, class_nb))`.
     pub ti: usize,
     /// The per-channel scoring constants the shared kernel reads.
-    // Consumed by the fast Twin from the next commit on.
-    #[allow(dead_code)]
     pub(super) params: LidScoreParams,
 }
 

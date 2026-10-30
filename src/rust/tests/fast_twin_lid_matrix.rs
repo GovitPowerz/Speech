@@ -442,9 +442,9 @@ fn each_pair_builds_its_own_arm_and_refuses_a_short_pack() {
             .unwrap_or_else(|e| panic!("{fixture}: must build from its own pack: {e}"));
         assert_eq!(drv.lid_shape(), want, "{fixture}: dispatched arm");
         // The deferred load (the bag's path) builds the same net. `lid_shape()` is the
-        // ctor's field, blind to what `load_weights_file` built: score s1 (non-degenerate
-        // under every committed pack) through both and demand bit-identity.
-        let mut deferred = FastTwinLid::from_legacy(&map, None, None).unwrap();
+        // plan's field, blind to what `load_weights_file` built: score s1 (non-degenerate
+        // under every committed pack) through both and demand bit-identity. Since #84 the
+        // plan NAMES the files, so the map carries them before construction.
         let mut m = with_sad_file(&map);
         m.insert(
             "BLSTM_LID_weightsFile".into(),
@@ -453,7 +453,8 @@ fn each_pair_builds_its_own_arm_and_refuses_a_short_pack() {
                 .to_string_lossy()
                 .into_owned(),
         );
-        deferred.load_weights_file(&m).unwrap();
+        let mut deferred = FastTwinLid::from_legacy(&m, None, None).unwrap();
+        deferred.load_weights_file().unwrap();
         assert_eq!(
             score_s1(&mut deferred),
             score_s1(&mut drv),
@@ -568,7 +569,7 @@ fn the_lid_file_seam_keeps_the_head_first_tolerance() {
     );
     let mut from_file = FastTwinLid::from_legacy(&m, None, None).unwrap();
     from_file
-        .load_weights_file(&m)
+        .load_weights_file()
         .expect("the legacy tolerance: an over-long weightsFile loads its head");
     let head = read_weight_vector(&lstm).unwrap();
     let needed = fixture_pack("twin_mode7_lid_slstm").len();
@@ -587,7 +588,7 @@ fn the_lid_file_seam_keeps_the_head_first_tolerance() {
     );
     let fast = FastTwinLid::from_legacy(&m, None, None)
         .unwrap()
-        .load_weights_file(&m)
+        .load_weights_file()
         .expect_err("a short weightsFile must be refused")
         .to_string();
     let exact = BlstmNetwork::from_config(BlstmConfig::from_legacy(&m, "BLSTM_LID").unwrap())
@@ -658,7 +659,7 @@ fn the_sad_file_seam_matches_the_exact_twin_row_by_row() {
         m.insert("BLSTM_LID_weightsFile".into(), lid_file.to_owned());
         let fast = FastTwinLid::from_legacy(&m, None, None)
             .unwrap()
-            .load_weights_file(&m)
+            .load_weights_file()
             .map_err(|e| e.to_string());
         let exact = TwinBlstmSpectralLid::from_legacy(&m, None, None)
             .unwrap()
