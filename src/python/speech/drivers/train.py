@@ -417,9 +417,14 @@ def _qpso_params(
     (`QuantumPSO.m:415`, `coef_exp_contr = 0.75 - 0.5*(i-1)/(me-1)`, transcribed in
     `optimizers.quantum_pso`) divides by `me - 1`, so `epochs == 1` would raise a bare
     `ZeroDivisionError` at the first epoch, after the init has scored `8 * particles`
-    candidates; both sites build their params before any engine work."""
+    candidates. A `seed_value` must be a `rows x dim` matrix: `quantum_pso` writes it into
+    `pos[:rows, :cols]` (`QuantumPSO.m:259-262`), so a narrower one (a narrowed-search
+    `gbest.bin` handed to `retrain`) would silently seed a prefix of the genome and a wider
+    one would die in numpy's broadcast. Both sites build their params before any engine work."""
     if epochs < 2:
         raise ValueError("qpso_epochs must be >= 2 (the legacy (i-1)/(me-1) schedule)")
+    if seed_value is not None and (seed_value.ndim != 2 or seed_value.shape[1] != dim):
+        raise ValueError(f"seed_value has shape {seed_value.shape}, this genome has {dim} genes: not a seed for this search")
     return QpsoParams(
         ps=particles,
         me=epochs,
@@ -446,9 +451,11 @@ def _write_qpso_checkpoint(ckpt_dir: Path, result: QpsoResult, inner_hist: list[
 
 
 DEFAULT_INNER_STEPS = 20
-"""The Legacy regime's SMORMS3 inner-loop step count (a `BackPropagation.m` knob, not a QPSO
-one, so it does not live on `QpsoParams`): the one default `cli.py`, `train` and `retrain` read
-(issue #102)."""
+"""The Legacy regime's SMORMS3 inner-loop step count, the one default `cli.py`, `train` and
+`retrain` read (issue #102). Not a QPSO knob, so it does not live on `QpsoParams`: the legacy
+passes `PS.NS.Rprop` (`Train_BLSTM.m:342`, 4000, its sign flipped as a mode flag around the
+final call) to `optimizer.optimize` (`BackPropagation.m:81`); `20` is the port's own default
+(the legacy has it only in a commented-out `optimize(20)`, `:133`)."""
 
 
 def train(
@@ -483,11 +490,11 @@ def train(
     balance = state.balance
     algo = ps.algo
     bbp = ps.BalanceBackProp
-    tails = _tail_lengths(base, algo)
 
     mask: dict[str, object] | None = None  # full-DSP-free: the genome drives every field
     d = genome_length(ps)
     params = _qpso_params(particles=qpso_particles, epochs=qpso_epochs, dim=d, adim=ps.adim, seed_value=seed_value, backprop_activated=1)
+    tails = _tail_lengths(base, algo)
 
     # MaskingValidation gate (Train_BLSTM.m:621-626): a representative genome must
     # round-trip through the mask. Uses its OWN generator so it never perturbs the QPSO

@@ -25,7 +25,7 @@ from speech.drivers.init import init_run
 from speech.drivers.retrain import retrain, seed_from_checkpoint
 from speech.drivers.state import RunConfig, RunState
 from speech.drivers.test import evaluate, resolve_checkpoint_packs, write_scores
-from speech.drivers.train import DEFAULT_INNER_STEPS, train, train_hyperparam_search
+from speech.drivers.train import DEFAULT_INNER_STEPS, _qpso_params, train, train_hyperparam_search
 from speech.genome import genome_length
 from speech.optimizers import QpsoParams
 from speech.scoring import masking_validation
@@ -121,14 +121,38 @@ def test_retrain_seed_from_checkpoint(tmp_path: Path) -> None:
 def test_retrain_refuses_a_gbest_of_another_genome_length(tmp_path: Path) -> None:
     """A narrowed-search checkpoint holds the searchable genome, shorter than `train`'s; seeded
     into the full genome it would overwrite a prefix only (`quantum_pso`'s `pos[:rows, :cols] =
-    sv`). `retrain` refuses any `gbest.bin` that is not `genome_length` long, before any engine work."""
+    sv`). `retrain` hands it to `train`, whose `_qpso_params` refuses any seed that is not
+    `genome_length` wide, before any engine work."""
     state = init_run(_seed_init_inputs(tmp_path), tmp_path / "run")
     ckpt = tmp_path / "checkpoint"
     ckpt.mkdir()
-    short = np.zeros(genome_length(state.ps) - 1, dtype=np.float64)
+    d = genome_length(state.ps)
+    short = np.zeros(d - 1, dtype=np.float64)
     write_bin(short.shape[0], 1, short, ckpt / "gbest.bin")
-    with pytest.raises(ValueError, match="not a `train` checkpoint"):
+    with pytest.raises(ValueError, match=f"this genome has {d} genes"):
         retrain(state, ckpt, seed=0)
+
+
+def test_qpso_params_is_the_legacy_psoparams_vector() -> None:
+    """Issue #102 moved the QPSO constants off two inline blocks onto `QpsoParams`' defaults and
+    `_qpso_params`. The goldens cannot see them (`test_phase4c_qpso` builds its params from the
+    manifest, the exit gate compares two runs of one build), so this pins the build to the legacy
+    `psoparams` vector (`Train_BLSTM.m:831-862`, `:902`): `ac = [2.1, 2.1]`, `Iwt = [0.9, 0.6]`,
+    `wt_end = epoch`, `errgrad = 1e-99`, `errgraditer = 500`, `errgoal = NaN`, `modl = 3`,
+    `minmax = 0`, `varrange = [0, adim]` per gene, `mv = range / mvden` with `mvden = 2`, and
+    `PSOseed` on iff a seed matrix is given; a seed of another width is refused."""
+    seed = np.zeros((1, 5))
+    p = _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=seed, backprop_activated=1)
+    assert (p.ps, p.me, p.ac1, p.ac2, p.iw1, p.iw2, p.iwe) == (3, 7, 2.1, 2.1, 0.9, 0.6, 7)
+    assert (p.ergrd, p.ergrdep, p.trelea, p.minmax, p.pso_seed, p.backprop_activated) == (1e-99, 500, 3, 0, 1, 1)
+    assert math.isnan(p.errgoal)
+    assert p.vr.shape == (5, 2) and np.array_equal(p.vr[:, 0], np.zeros(5)) and np.array_equal(p.vr[:, 1], np.full(5, 10.0))
+    assert np.array_equal(p.mv, np.full(5, 5.0))
+    assert p.seed_value is seed
+    assert _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=None, backprop_activated=0).pso_seed == 0
+    for bad in (np.zeros((1, 4)), np.zeros((1, 6)), np.zeros(5)):
+        with pytest.raises(ValueError, match="this genome has 5 genes"):
+            _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=bad, backprop_activated=1)
 
 
 def test_cli_init_dispatch(tmp_path: Path) -> None:
