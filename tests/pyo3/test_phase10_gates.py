@@ -440,7 +440,7 @@ class _Shim:
     best_val_cost: float = float("nan")
 
 
-def _probe(out: dict[str, Any]) -> Callable[[RunState, int, ModernTrainParams], _Shim]:
+def _probe(out: dict[str, Any]) -> Callable[[RunState, ModernTrainParams], _Shim]:
     """A `run_baseline(_train_fn=...)` stub that MEASURES the from-scratch init instead of
     training: it re-uses the training loop's OWN seeded-init and config builders
     (`_init_weights_from_scratch`, a gradient `FoldRun` on the base config), so what it probes
@@ -448,7 +448,7 @@ def _probe(out: dict[str, Any]) -> Callable[[RunState, int, ModernTrainParams], 
     could silently drift from the real path. (Phase 9's `_probe`, plus the raw gradient so
     the inverse guard can slice it.)"""
 
-    def probe(state: RunState, seed: int, params: ModernTrainParams) -> _Shim:
+    def probe(state: RunState, params: ModernTrainParams) -> _Shim:
         weights = _init_weights_from_scratch(state, params)
         # ONE gradient fold at the init: `nn_cost` is forward_backward's `f` on this single-net
         # arm and `average_derivs` its count normalization; the channel results come with it.

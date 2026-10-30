@@ -342,7 +342,7 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     (tmp_path / "out" / "checkpoint").mkdir(parents=True)
     seen: list[ModernTrainParams] = []
 
-    def stub_train(state: object, seed: int, params: ModernTrainParams) -> _Res:
+    def stub_train(state: object, params: ModernTrainParams) -> _Res:
         seen.append(params)
         return _Res()
 
@@ -428,7 +428,7 @@ def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, mo
     the phonotactic arm through the shared LID path (both nets seeded, `.scr` scorer) without
     touching the engine/corpus, and that the config it assembles carries File_Type 1."""
     root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, seed=5, lanes=2), _train_fn=lambda state, seed, params: _Res())
+    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, seed=5, lanes=2), _train_fn=lambda state, params: _Res())
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["arm"] == "lid-phseq" and meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
@@ -449,7 +449,7 @@ def test_run_baseline_records_the_provenance_of_the_tree_it_started_on(tmp_path:
     tree = {"state": ("a" * 40, False)}
     monkeypatch.setattr(B, "git_state", lambda repo: tree["state"])
 
-    def train_then_commit(state: object, seed: int, params: object) -> object:
+    def train_then_commit(state: object, params: object) -> object:
         tree["state"] = ("b" * 40, True)
         return _Res()
 
@@ -472,7 +472,7 @@ def test_run_baseline_fails_on_git_before_training(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(B, "git_state", no_git)
     out = tmp_path / "never_created"
     with pytest.raises(RuntimeError, match="git unavailable"):
-        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, seed, params: trained.append(seed))
+        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, params: trained.append(params.seed))
     assert trained == [] and not out.exists()
 
 
@@ -480,7 +480,7 @@ def test_a_dry_run_writes_its_manifest_but_no_record(tmp_path: Path, monkeypatch
     """A dry run is a smoke, not a measurement: the ledger has no dry-run field, so the only way
     a 1-step run cannot be promoted as a launcher row is for it to leave no `record.json`."""
     root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    train = lambda state, seed, params: _Res()  # noqa: E731
+    train = lambda state, params: _Res()  # noqa: E731
     B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=train)
     assert (out / "run_metadata.json").is_file() and not (out / "record.json").exists()
     out2 = tmp_path / "out2"
@@ -492,11 +492,11 @@ def test_an_out_dir_holding_a_run_is_refused_unless_resuming(tmp_path: Path, mon
     """An overwritten full run is a lost record: the launcher refuses a run directory that
     already holds a run's manifest unless the call resumes from it."""
     root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    train = lambda state, seed, params: _Res()  # noqa: E731
+    train = lambda state, params: _Res()  # noqa: E731
     B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=train)
     trained: list[int] = []
     with pytest.raises(FileExistsError, match="out_dir|resume"):
-        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, seed, params: trained.append(seed))
+        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, params: trained.append(params.seed))
     assert trained == []
     B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, resume=True), _train_fn=train)
 
@@ -548,7 +548,7 @@ def test_cell_overlay_targets_the_lid_net_under_its_prefix() -> None:
 
 def test_lid_arm_knob_lands_on_the_lid_net_and_leaves_the_sad_net_lstm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, cell="mamba", direction="forward"), _train_fn=lambda state, seed, params: _Res())
+    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, cell="mamba", direction="forward"), _train_fn=lambda state, params: _Res())
     cfg_text = (out / "base.config").read_text()
     assert "BLSTM_LID_Cell_Type mamba" in cfg_text and "BLSTM_LID_Direction forward" in cfg_text
     assert "BLSTM_LID_OutputNeuronNb 24,12" in cfg_text and "BLSTM_LID_window 0" in cfg_text
@@ -704,7 +704,7 @@ def test_run_baseline_sad_flag_plumbing_with_stub_train(tmp_path: Path, monkeypa
 
     out = tmp_path / "out"
     (out / "checkpoint").mkdir(parents=True)
-    res = B.run_baseline(_spec("sad", root, out, dry_run=True, seed=5, lanes=2, audio_max_duration=15.0), _train_fn=lambda state, seed, params: _Res())
+    res = B.run_baseline(_spec("sad", root, out, dry_run=True, seed=5, lanes=2, audio_max_duration=15.0), _train_fn=lambda state, params: _Res())
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["arm"] == "sad" and meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1

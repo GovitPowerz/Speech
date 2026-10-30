@@ -566,9 +566,9 @@ def _resume(resume_from: Path, algo: int) -> tuple[list[NDArray[np.float64]], li
 
 def _init_weights_from_scratch(state: RunState, params: ModernTrainParams) -> list[NDArray[np.float64]]:
     """Seeded Xavier/He init (Task 3) for each net's flat pack -- `[sad]` for single-net
-    algos, `[sad, lid]` for the Twin. One shared `Generator(init_seed)` draws both nets in
+    algos, `[sad, lid]` for the Twin. One shared `Generator(params.seed)` draws both nets in
     order (deterministic)."""
-    rng = np.random.default_rng(params.init_seed)
+    rng = np.random.default_rng(params.seed)
     prefixes = ["BLSTM"] + (["BLSTM_LID"] if state.ps.algo == 6 else [])
     weights: list[NDArray[np.float64]] = []
     for prefix in prefixes:
@@ -598,20 +598,20 @@ def _confusion_error(results: ChannelResults, algo: int) -> float | None:
     return None if trials <= 0.0 else 1.0 - hits / trials
 
 
-def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdir: Path, tails: list[int], seed: int) -> TrainEpochFn:
+def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdir: Path, tails: list[int]) -> TrainEpochFn:
     """The engine-backed per-epoch trainer: `steps_per_epoch` SMORMS3 steps over
     `forward_backward` (backprop ON), seeded from the CURRENT weights. When `minibatch > 0`
     a persistent `_BatchRunner` (built ONCE here, cursors rotating across epochs) drives the
     per-step hard-example batch listing; else every step folds the full training corpus.
-    The `create_batches` shuffle uses the master `seed + 2` (matching `train`); weight init
-    uses `params.init_seed` -- two independent streams."""
+    The `create_batches` shuffle uses `params.seed + 2` (matching `train`'s derivation off
+    its master seed); the weight init draws from `params.seed` itself -- one seed, two streams."""
     base = state.base_config
     algo = state.ps.algo
 
     runner: _BatchRunner | None = None
     if params.minibatch > 0:
         fv = _files_values(state)
-        batch_rng = np.random.default_rng(seed + 2)
+        batch_rng = np.random.default_rng(params.seed + 2)
         batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, batch_rng)
         runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
 
@@ -672,7 +672,6 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
 
 def train_modern(
     state: RunState,
-    seed: int,
     params: ModernTrainParams,
     *,
     train_epoch: TrainEpochFn | None = None,
@@ -710,7 +709,7 @@ def train_modern(
         history, best_val, best_epoch, start_epoch = [], float("inf"), -1, 0
 
     if train_epoch is None:
-        train_epoch = _make_default_train_epoch(state, params, workdir, _tail_lengths(state.base_config, algo), seed)
+        train_epoch = _make_default_train_epoch(state, params, workdir, _tail_lengths(state.base_config, algo))
     if validate is None:
         validate = _make_default_validate(state, params, workdir)
 
