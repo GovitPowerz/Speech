@@ -43,7 +43,7 @@ from speech.engine import ChannelResults, CostParams, compute_cost, forward_back
 from speech.fold_run import FoldRun
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
-from speech.optimizers import QpsoParams, Smorms3, quantum_pso
+from speech.optimizers import QpsoParams, QpsoResult, Smorms3, quantum_pso
 from speech.scoring import confusion_matrix, masking_validation
 from speech.weight_bridge import read_bin, write_bin
 
@@ -398,13 +398,79 @@ def score_genome(
     return cost, out_param
 
 
+def _qpso_params(
+    *,
+    particles: int,
+    epochs: int,
+    dim: int,
+    adim: float,
+    seed_value: NDArray[np.float64] | None,
+    backprop_activated: int,
+) -> QpsoParams:
+    """The one `QpsoParams` build of both `quantum_pso` sites (`train` over the full genome,
+    `train_hyperparam_search` over the narrowed one; issue #102): the inertia schedule runs the
+    whole search (`wt_end = epoch`, Train_BLSTM.m:859), the position range is `[0, adim]` per
+    dimension with `mv = range / mvden`, `mvden = 2` (`:833`, `:853-854`), and a seed vector turns
+    `PSOseed` on. What varies per site is the genome length and the refinement flag.
+
+    `particles` must be >= 1 (`quantum_pso` draws a `2 * particles x dim` initial population
+    and `_normmat_flag1` reduces over its rows) and `epochs` >= 2: the QDPSO exploration/
+    contraction coefficient schedule (`QuantumPSO.m:415`, `coef_exp_contr = 0.75 -
+    0.5*(i-1)/(me-1)`, transcribed in `optimizers.quantum_pso`) divides by `me - 1`, so
+    `epochs == 1` would raise a bare `ZeroDivisionError` at the first epoch, after the init has
+    scored `8 * particles` candidates. A `seed_value` must be a `rows x dim` matrix with
+    `rows <= 2 * particles`: `quantum_pso` writes it into `pos[:rows, :cols]`
+    (`QuantumPSO.m:259-262`), so a narrower one (a narrowed-search `gbest.bin` handed to
+    `retrain`) would silently seed a prefix of the genome and a wider or taller one would die in
+    numpy's broadcast. Both sites build their params before any engine work."""
+    if particles < 1:
+        raise ValueError("qpso_particles must be >= 1")
+    if epochs < 2:
+        raise ValueError("qpso_epochs must be >= 2 (the legacy (i-1)/(me-1) schedule)")
+    if seed_value is not None and (seed_value.ndim != 2 or seed_value.shape[1] != dim or seed_value.shape[0] > 2 * particles):
+        raise ValueError(
+            f"seed_value has shape {seed_value.shape}, this genome has {dim} genes and the initial population {2 * particles} rows: not a seed for this search"
+        )
+    return QpsoParams(
+        ps=particles,
+        me=epochs,
+        iwe=epochs,
+        pso_seed=1 if seed_value is not None else 0,
+        vr=np.column_stack([np.zeros(dim), np.full(dim, adim)]),
+        mv=np.full(dim, adim / 2.0),
+        seed_value=seed_value,
+        backprop_activated=backprop_activated,
+    )
+
+
+def _write_qpso_checkpoint(ckpt_dir: Path, result: QpsoResult, inner_hist: list[float] | None = None) -> None:
+    """The one QPSO checkpoint write of both sites (issue #102): `gbest.bin` and
+    `cost_history.bin` (the per-epoch gbestval trajectory) always, `inner_cost_history.bin`
+    when the site ran an inner SMORMS3 loop (`train`; the narrowed search has none)."""
+    gbest = np.asarray(result.gbest, dtype=F64)
+    cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
+    write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
+    write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
+    if inner_hist is not None:
+        inner_arr = np.asarray(inner_hist, dtype=F64)
+        write_bin(inner_arr.shape[0], 1, inner_arr, ckpt_dir / "inner_cost_history.bin")
+
+
+DEFAULT_INNER_STEPS = 20
+"""The Legacy regime's SMORMS3 inner-loop step count, the one default `cli.py`, `train` and
+`retrain` read (issue #102). Not a QPSO knob, so it does not live on `QpsoParams`: the legacy
+passes `PS.NS.Rprop` (`Train_BLSTM.m:342`, 4000, its sign flipped as a mode flag around the
+final call) to `optimizer.optimize` (`BackPropagation.m:81`); `20` is the port's own default
+(the legacy has it only in a commented-out `optimize(20)`, `:133`)."""
+
+
 def train(
     state: RunState,
     seed: int,
     *,
-    qpso_particles: int = 24,
-    qpso_epochs: int = 100,
-    inner_steps: int = 20,
+    qpso_particles: int = QpsoParams.ps,
+    qpso_epochs: int = QpsoParams.me,
+    inner_steps: int = DEFAULT_INNER_STEPS,
     seed_value: NDArray[np.float64] | None = None,
     minibatch: int = 0,
     nb_worst: int = 0,
@@ -430,10 +496,11 @@ def train(
     balance = state.balance
     algo = ps.algo
     bbp = ps.BalanceBackProp
-    tails = _tail_lengths(base, algo)
 
     mask: dict[str, object] | None = None  # full-DSP-free: the genome drives every field
     d = genome_length(ps)
+    params = _qpso_params(particles=qpso_particles, epochs=qpso_epochs, dim=d, adim=ps.adim, seed_value=seed_value, backprop_activated=1)
+    tails = _tail_lengths(base, algo)
 
     # MaskingValidation gate (Train_BLSTM.m:621-626): a representative genome must
     # round-trip through the mask. Uses its OWN generator so it never perturbs the QPSO
@@ -479,26 +546,6 @@ def train(
             costs[i] = cost
         return costs, pos
 
-    params = QpsoParams(
-        ps=qpso_particles,
-        me=qpso_epochs,
-        ac1=2.1,
-        ac2=2.1,
-        iw1=0.9,
-        iw2=0.6,
-        iwe=qpso_epochs,
-        ergrd=1e-99,
-        ergrdep=500,
-        errgoal=float("nan"),
-        trelea=3,
-        pso_seed=1 if seed_value is not None else 0,
-        minmax=0,
-        vr=np.column_stack([np.zeros(d), np.full(d, ps.adim)]),
-        mv=np.full(d, ps.adim / 2.0),
-        seed_value=seed_value,
-        backprop_activated=1,
-    )
-
     result = quantum_pso(cost_fn, params, d, np.random.default_rng(seed), backprop_refine=backprop_refine)
     # legacy: Train_BLSTM.m:973 -- BackPropagation on the QPSO winner. This produces
     # the final trained weights (and guarantees the inner loop runs at least once).
@@ -507,21 +554,16 @@ def train(
     final_batch = _BatchStep(runner, final_cfg) if runner is not None else None
     _final_cost, final_w, inner_hist = _score_fold(final_cfg, workdir, balance, algo, bbp, inner_steps, tails, final_batch)
 
-    gbest = np.asarray(result.gbest, dtype=F64)
-    cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
-    inner_arr = np.asarray(inner_hist, dtype=F64)
-    write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
-    write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
-    write_bin(inner_arr.shape[0], 1, inner_arr, ckpt_dir / "inner_cost_history.bin")
+    _write_qpso_checkpoint(ckpt_dir, result, inner_hist)
     write_bin(final_w[0].shape[0], 1, final_w[0], ckpt_dir / "sad_weights.bin")
     if len(final_w) >= 2:
         # legacy: only the algo-6 Twin trains a second (LID) net -- BackPropagation.m:11-13.
         write_bin(final_w[1].shape[0], 1, final_w[1], ckpt_dir / "lid_weights.bin")
 
     tr = TrainResult(
-        gbest=[float(x) for x in gbest],
+        gbest=[float(x) for x in result.gbest],
         gbestval=float(result.gbestval),
-        cost_history=[float(x) for x in cost_hist],
+        cost_history=[float(x) for x in result.gbestval_traj],
         inner_cost_history=[float(x) for x in inner_hist],
         checkpoint_dir=str(ckpt_dir),
     )
@@ -833,8 +875,8 @@ def train_hyperparam_search(
     state: RunState,
     seed: int,
     *,
-    qpso_particles: int = 24,
-    qpso_epochs: int = 100,
+    qpso_particles: int = QpsoParams.ps,
+    qpso_epochs: int = QpsoParams.me,
     seed_value: NDArray[np.float64] | None = None,
 ) -> TrainResult:
     """The NARROWED outer search (Phase 5 Task 9): QuantumPSO over the DSP/config hyperparameter
@@ -848,10 +890,8 @@ def train_hyperparam_search(
     Distinct from the legacy `train` (byte-untouched, `mask=None` -> the full weight-carrying genome
     + 2-key `CostPonderation` injection): this searches the PERMANENTLY narrowed genome.
 
-    `qpso_epochs` must be >= 2: the QDPSO exploration/contraction coefficient schedule
-    (`QuantumPSO.m:415`, `coef_exp_contr = 0.75 - 0.5*(i-1)/(me-1)`, transcribed in
-    `optimizers.quantum_pso`) divides by `me - 1`, so `qpso_epochs == 1` would raise a bare
-    `ZeroDivisionError` deep inside the QPSO loop; guarded here with a clear message instead.
+    `qpso_epochs` must be >= 2 (`_qpso_params` refuses it before any engine work, for `train`
+    too).
 
     Penalized-eval observability (Phase 5 Task 9 fix wave): a per-candidate eval that hits an
     invalid DSP subregion (feature-dim mismatch against the fixed base net, a typed-bailed engine
@@ -860,11 +900,10 @@ def train_hyperparam_search(
     `penalized_types` (a `type(exc).__name__` breakdown) let a caller tell the two apart. A run
     that ends with `gbestval >= _HYPERPARAM_PENALTY` (every eval penalized) or with over half its
     evals penalized emits a `warnings.warn`."""
-    if qpso_epochs < 2:
-        raise ValueError("qpso_epochs must be >= 2 (the legacy (i-1)/(me-1) schedule)")
     ps = state.ps
     mask, searchable = weight_block_mask(ps)
     n_search = int(searchable.sum())
+    params = _qpso_params(particles=qpso_particles, epochs=qpso_epochs, dim=n_search, adim=ps.adim, seed_value=seed_value, backprop_activated=0)
 
     # MaskingValidation gate on the narrowed mask (Train_BLSTM.m:621-626 analogue): the mask must
     # round-trip. Full-length param (matching `train`'s size=genome_length convention), its own rng.
@@ -903,39 +942,18 @@ def train_hyperparam_search(
             out[i] = reduced_out
         return costs, out
 
-    params = QpsoParams(
-        ps=qpso_particles,
-        me=qpso_epochs,
-        ac1=2.1,
-        ac2=2.1,
-        iw1=0.9,
-        iw2=0.6,
-        iwe=qpso_epochs,
-        ergrd=1e-99,
-        ergrdep=500,
-        errgoal=float("nan"),
-        trelea=3,
-        pso_seed=1 if seed_value is not None else 0,
-        minmax=0,
-        vr=np.column_stack([np.zeros(n_search), np.full(n_search, ps.adim)]),
-        mv=np.full(n_search, ps.adim / 2.0),
-        seed_value=seed_value,
-        backprop_activated=0,  # no weight refinement in the narrowed search
-    )
-
     result = quantum_pso(cost_fn, params, n_search, np.random.default_rng(seed))
-    gbest = np.asarray(result.gbest, dtype=F64)
     if result.gbestval >= _HYPERPARAM_PENALTY:
         # a fully-penalized run: gbest sits in the SAME invalid region every candidate did
         # (gbestval can only reach the penalty if NO eval ever beat it), so re-scoring it
         # through the engine would raise the identical way -- skip straight to the pure,
         # never-crashing decode (a FoldRun builds no engine until it runs) instead of
         # crashing on the checkpoint step.
-        best_cfg, _out = _decode_hyperparam(state, gbest, mask, searchable)
+        best_cfg, _out = _decode_hyperparam(state, result.gbest, mask, searchable)
         best_text = FoldRun(best_cfg, workdir, backprop=False).config_text
     else:
         # the best decoded engine config (feed to train_modern for the weight training)
-        _cost, _out, best_text = score_hyperparam_genome(state, gbest, mask, searchable, workdir)
+        _cost, _out, best_text = score_hyperparam_genome(state, result.gbest, mask, searchable, workdir)
 
     penalized_evals = sum(penalized_counts.values())
     penalized_fraction = (penalized_evals / total_evals) if total_evals else 0.0
@@ -955,15 +973,13 @@ def train_hyperparam_search(
             stacklevel=2,
         )
 
-    cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
-    write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
-    write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
+    _write_qpso_checkpoint(ckpt_dir, result)
     (ckpt_dir / "best_hyperparam.config").write_text(best_text)
 
     tr = TrainResult(
-        gbest=[float(x) for x in gbest],
+        gbest=[float(x) for x in result.gbest],
         gbestval=float(result.gbestval),
-        cost_history=[float(x) for x in cost_hist],
+        cost_history=[float(x) for x in result.gbestval_traj],
         inner_cost_history=[],
         checkpoint_dir=str(ckpt_dir),
         penalized_evals=penalized_evals,

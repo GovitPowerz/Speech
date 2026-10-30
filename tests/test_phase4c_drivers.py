@@ -9,6 +9,7 @@ seeding, the `cli.main` dispatch, and (#29) `evaluate`'s checkpoint pack resolut
 
 from __future__ import annotations
 
+import inspect
 import math
 import sys
 import types
@@ -18,12 +19,15 @@ from typing import Any
 
 import numpy as np
 import pytest
+from speech.cli import _build_parser
 from speech.cli import main as cli_main
 from speech.drivers.init import init_run
-from speech.drivers.retrain import seed_from_checkpoint
+from speech.drivers.retrain import retrain, seed_from_checkpoint
 from speech.drivers.state import RunConfig, RunState
 from speech.drivers.test import evaluate, resolve_checkpoint_packs, write_scores
+from speech.drivers.train import DEFAULT_INNER_STEPS, _qpso_params, train, train_hyperparam_search
 from speech.genome import genome_length
+from speech.optimizers import QpsoParams
 from speech.scoring import masking_validation
 from speech.weight_bridge import write_bin
 
@@ -114,6 +118,46 @@ def test_retrain_seed_from_checkpoint(tmp_path: Path) -> None:
     assert np.array_equal(got.view(np.uint64), gbest.view(np.uint64)), "seed must be the saved gbest bit-for-bit"
 
 
+def test_retrain_refuses_a_gbest_of_another_genome_length(tmp_path: Path) -> None:
+    """A narrowed-search checkpoint holds the searchable genome, shorter than `train`'s; seeded
+    into the full genome it would overwrite a prefix only (`quantum_pso`'s `pos[:rows, :cols] =
+    sv`). `retrain` hands it to `train`, whose `_qpso_params` refuses any seed that is not
+    `genome_length` wide, before any engine work."""
+    state = init_run(_seed_init_inputs(tmp_path), tmp_path / "run")
+    ckpt = tmp_path / "checkpoint"
+    ckpt.mkdir()
+    d = genome_length(state.ps)
+    short = np.zeros(d - 1, dtype=np.float64)
+    write_bin(short.shape[0], 1, short, ckpt / "gbest.bin")
+    with pytest.raises(ValueError, match=f"this genome has {d} genes"):
+        retrain(state, ckpt, seed=0)
+
+
+def test_qpso_params_is_the_legacy_psoparams_vector() -> None:
+    """Issue #102 moved the QPSO constants off two inline blocks onto `QpsoParams`' defaults and
+    `_qpso_params`. The goldens cannot see them (`test_phase4c_qpso` builds its params from the
+    manifest, the exit gate compares two runs of one build), so this pins the build to the legacy
+    `psoparams` vector (`Train_BLSTM.m:831-862`, `:902`): `ac = [2.1, 2.1]`, `Iwt = [0.9, 0.6]`,
+    `wt_end = epoch`, `errgrad = 1e-99`, `errgraditer = 500`, `errgoal = NaN`, `modl = 3`,
+    `minmax = 0`, `varrange = [0, adim]` per gene, `mv = range / mvden` with `mvden = 2`, and
+    `PSOseed` on iff a seed matrix is given; a seed of another width, or taller than the `2 * ps`
+    initial population, is refused, as is `ps = 0`."""
+    seed = np.zeros((1, 5))
+    p = _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=seed, backprop_activated=1)
+    assert (p.ps, p.me, p.ac1, p.ac2, p.iw1, p.iw2, p.iwe) == (3, 7, 2.1, 2.1, 0.9, 0.6, 7)
+    assert (p.ergrd, p.ergrdep, p.trelea, p.minmax, p.pso_seed, p.backprop_activated) == (1e-99, 500, 3, 0, 1, 1)
+    assert math.isnan(p.errgoal)
+    assert p.vr.shape == (5, 2) and np.array_equal(p.vr[:, 0], np.zeros(5)) and np.array_equal(p.vr[:, 1], np.full(5, 10.0))
+    assert np.array_equal(p.mv, np.full(5, 5.0))
+    assert p.seed_value is seed
+    assert _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=None, backprop_activated=0).pso_seed == 0
+    for bad in (np.zeros((1, 4)), np.zeros((1, 6)), np.zeros(5), np.zeros((7, 5))):
+        with pytest.raises(ValueError, match="this genome has 5 genes"):
+            _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=bad, backprop_activated=1)
+    with pytest.raises(ValueError, match="qpso_particles must be >= 1"):
+        _qpso_params(particles=0, epochs=7, dim=5, adim=10.0, seed_value=None, backprop_activated=1)
+
+
 def test_cli_init_dispatch(tmp_path: Path) -> None:
     """`cli.main(["init", config, out_dir])` runs `init_run` and persists the state;
     an unknown subcommand returns nonzero without raising."""
@@ -125,6 +169,27 @@ def test_cli_init_dispatch(tmp_path: Path) -> None:
 
     assert cli_main(["bogus-command"]) != 0
     assert cli_main([]) != 0
+
+
+def test_legacy_cli_defaults_are_the_qpso_defaults(capsys: pytest.CaptureFixture[str]) -> None:
+    """Issue #102: the QPSO knobs have ONE default set. An all-default `train` / `retrain` parse
+    carries `QpsoParams.ps` / `.me` and `DEFAULT_INNER_STEPS`, the three driver signatures default
+    to the same values, and the legacy `--epochs` help says which epochs it counts (the `baseline`
+    arms' `--epochs` is SMORMS3's)."""
+    expected = (QpsoParams.ps, QpsoParams.me, DEFAULT_INNER_STEPS)
+    assert expected == (24, 100, 20)
+    for argv in (["train", "/o"], ["retrain", "/o", "/c"]):
+        ns = _build_parser().parse_args(argv)
+        assert (ns.particles, ns.epochs, ns.inner_steps) == expected
+    for fn in (train, retrain):
+        sig = inspect.signature(fn).parameters
+        assert (sig["qpso_particles"].default, sig["qpso_epochs"].default, sig["inner_steps"].default) == expected
+    sig = inspect.signature(train_hyperparam_search).parameters
+    assert (sig["qpso_particles"].default, sig["qpso_epochs"].default) == expected[:2]
+
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["train", "--help"])
+    assert "QPSO epochs" in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------------------- #

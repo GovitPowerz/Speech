@@ -267,30 +267,39 @@ def _as_rand_source(rng: np.random.Generator | TableRng) -> _RandSource:
 QpsoObjective = Callable[[NDArray[np.float64], int], tuple[NDArray[np.float64], NDArray[np.float64]]]
 
 
-@dataclass
+@dataclass(kw_only=True)
 class QpsoParams:
     """QuantumPSO parameters (the `psoparams` vector of Train_BLSTM.m:902 plus the VR/mv/seed
     args). Names mirror the legacy locals: ps particles, me epochs, ac1/ac2 accel consts,
     iw1/iw2/iwe inertia schedule, ergrd/ergrdep stall gate, errgoal (NaN disables), trelea
     PSO model (3 = Clerc, required for the dead vel3 bank's `chi`), pso_seed (1 = seed the
-    first rows), minmax (0 = minimize)."""
+    first rows), minmax (0 = minimize).
 
-    ps: int
-    me: int
-    ac1: float
-    ac2: float
-    iw1: float
-    iw2: float
+    The defaults are the ONE home of the QPSO knobs (issue #102): the legacy script constants
+    (`ps = PS.VP.nbindiv = 24` and `modl = PS.VP.PSOType = 3`, `Train_BLSTM.m:171-172`;
+    `minmax`, `ac`, `Iwt`, `errgrad`, `errgraditer`, `errgoal`, `:831-861`) and the port's own
+    `me` (the legacy hard-codes `epoch = 300`; here `me = 100`). `ps` / `me` are the CLI defaults
+    read by `cli.py`, `drivers.train` and `drivers.retrain`. `iwe`, `vr`, `mv` and `pso_seed`
+    depend on the run (the epoch count, the genome length, whether a seed matrix is given: the
+    legacy hard-codes `PSOseed = 1`, `quantum_pso` reads `seed_value` iff `pso_seed == 1`), so
+    they stay required."""
+
+    ps: int = 24
+    me: int = 100
+    ac1: float = 2.1
+    ac2: float = 2.1
+    iw1: float = 0.9
+    iw2: float = 0.6
     iwe: int
-    ergrd: float
-    ergrdep: int
-    errgoal: float
-    trelea: int
+    ergrd: float = 1e-99
+    ergrdep: int = 500
+    errgoal: float = float("nan")
+    trelea: int = 3
     pso_seed: int
-    minmax: int
+    minmax: int = 0
     vr: NDArray[np.float64]  # D x 2 [min, max] per dim
     mv: NDArray[np.float64]  # D-vector max velocity (dead: vels are never applied)
-    seed_value: NDArray[np.float64] | None  # PSOseedValue (rows x cols), used iff pso_seed == 1
+    seed_value: NDArray[np.float64] | None = None  # PSOseedValue (rows x cols), used iff pso_seed == 1
     backprop_activated: int = 0  # PS.NS.BackPropagationActivated (0 -> the :481 gate short-circuits)
 
 

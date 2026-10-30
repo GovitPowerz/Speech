@@ -14,7 +14,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.drivers.state import RunState, TrainResult
-from speech.drivers.train import train
+from speech.drivers.train import DEFAULT_INNER_STEPS, train
+from speech.optimizers import QpsoParams
 from speech.weight_bridge import read_weight_vector
 
 
@@ -29,9 +30,9 @@ def retrain(
     checkpoint: Path,
     seed: int,
     *,
-    qpso_particles: int = 24,
-    qpso_epochs: int = 100,
-    inner_steps: int = 20,
+    qpso_particles: int = QpsoParams.ps,
+    qpso_epochs: int = QpsoParams.me,
+    inner_steps: int = DEFAULT_INNER_STEPS,
 ) -> TrainResult:
     """Resume training, seeding the QPSO population's first rows with the checkpoint's
     gbest genome (`ReTrain_BLSTM.m`'s `nnet_best` reuse).
@@ -39,6 +40,10 @@ def retrain(
     Deviation: legacy `ReTrain_BLSTM.m:803` seeds `nnet_best` PLUS half the prior
     population (`nnet_in(:,1:ceil(N/2))`); this port seeds `nnet_best` ONLY, since the
     JSON checkpoint stores the gbest genome, not the full population (see IMPROVEMENTS.md).
+
+    A `gbest.bin` whose length is not this run's `genome_length` (a narrowed-search checkpoint
+    holds the searchable genome) is refused by `train`'s `_qpso_params`, the one seed check of
+    both QPSO drivers, before any engine work.
     """
     nnet_best = seed_from_checkpoint(checkpoint)
     return train(
