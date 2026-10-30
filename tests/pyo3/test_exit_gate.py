@@ -574,9 +574,9 @@ def test_early_stop_triggers(tmp_path: Path) -> None:
     (tmp_path / "vrcts_tier2").mkdir()
 
     state = init_run(tmp_path / "tier2_spectral.config", tmp_path / "run")
-    params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", init_seed=7, val_metric="balance")
+    params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", seed=7, val_metric="balance")
     with chdir(tmp_path):
-        res = train_modern(state, seed=0, params=params)
+        res = train_modern(state, params=params)
 
     assert res.stopped_early is True, "early-stop must fire on the stuck-validation plateau"
     assert res.epochs_run < params.epochs, f"early-stop must halt before the {params.epochs}-epoch budget, ran {res.epochs_run}"

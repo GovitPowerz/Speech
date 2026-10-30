@@ -119,13 +119,13 @@ class _Shim:
     best_val_cost: float = float("nan")
 
 
-def _probe(out: dict[str, float]) -> Callable[[RunState, int, ModernTrainParams], _Shim]:
+def _probe(out: dict[str, float]) -> Callable[[RunState, ModernTrainParams], _Shim]:
     """A `run_baseline(_train_fn=...)` stub measuring the from-scratch init instead of
     training, through the loop's OWN seeded init and a gradient `FoldRun` on the base config
     (the Phase-9 probe). The seed packs stand in as the checkpoint so the held-out scoring
     that follows runs on the init (LID allocates at least one test file per language)."""
 
-    def probe(state: RunState, seed: int, params: ModernTrainParams) -> _Shim:
+    def probe(state: RunState, params: ModernTrainParams) -> _Shim:
         weights = _init_weights_from_scratch(state, params)
         res = FoldRun(state.base_config, Path(state.config_path).parent, backprop=True).run(weights)
         grads = [average_derivs(d) for d in res.derivs]

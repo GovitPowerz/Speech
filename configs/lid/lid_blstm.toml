@@ -159,7 +159,7 @@ ponderation = "0.93311"
 # nb_classes = 1
 # multilingual = false
 # init_scheme = "xavier"    # "xavier" (Glorot uniform) or "he" (He normal)
-# init_seed = 0
+# seed = 0                 # the loop's one seed: the init draw, and the mini-batch stream as seed + 2
 # forget_bias_one = true    # seed the LSTM forget-gate bias at 1.0
 # resume_from = ""          # a checkpoint dir to resume from (loads last_*.bin + train_history.json)
 

@@ -68,7 +68,6 @@ def test_early_stop_patience_triggers_at_crafted_epoch(tmp_path: Path) -> None:
     val_seq = [5.0, 4.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     res = train_modern(
         state,
-        seed=0,
         params=ModernTrainParams(epochs=7, patience=2),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
@@ -95,7 +94,6 @@ def test_no_early_stop_runs_every_epoch(tmp_path: Path) -> None:
     val_seq = [5.0, 4.0, 3.0, 2.0]  # monotonically improving -> best updates every epoch
     res = train_modern(
         state,
-        seed=0,
         params=ModernTrainParams(epochs=4, patience=2),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
@@ -115,7 +113,6 @@ def test_best_checkpoint_is_argmin_not_last(tmp_path: Path) -> None:
     val_seq = [5.0, 2.0, 3.0, 4.0]
     res = train_modern(
         state,
-        seed=0,
         params=ModernTrainParams(epochs=4, patience=10),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
@@ -145,17 +142,13 @@ def test_resume_from_last_equivalence(tmp_path: Path) -> None:
 
     # continuous 5 epochs (patience high -> no early stop)
     cont_state = _algo3_state(tmp_path / "cont")
-    cont = train_modern(
-        cont_state, seed=0, params=ModernTrainParams(epochs=5, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init
-    )
+    cont = train_modern(cont_state, params=ModernTrainParams(epochs=5, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
 
     # split: 3 epochs, then resume IN PLACE (same out_dir) toward the total of 5
     split_state = _algo3_state(tmp_path / "split")
-    train_modern(split_state, seed=0, params=ModernTrainParams(epochs=3, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
+    train_modern(split_state, params=ModernTrainParams(epochs=3, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
     resume_ckpt = str(Path(split_state.out_dir) / "checkpoint")
-    split = train_modern(
-        split_state, seed=0, params=ModernTrainParams(epochs=5, patience=99, resume_from=resume_ckpt), train_epoch=train_epoch, validate=validate
-    )
+    split = train_modern(split_state, params=ModernTrainParams(epochs=5, patience=99, resume_from=resume_ckpt), train_epoch=train_epoch, validate=validate)
 
     # same total, same trajectory, same checkpoints -- resuming is transparent.
     assert split.epochs_run == cont.epochs_run == 5
@@ -172,7 +165,6 @@ def test_resume_toward_already_reached_total_is_a_noop(tmp_path: Path) -> None:
     state = _algo3_state(tmp_path)
     train_modern(
         state,
-        seed=0,
         params=ModernTrainParams(epochs=3, patience=99),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([3.0, 2.0, 1.0]),
@@ -181,7 +173,6 @@ def test_resume_toward_already_reached_total_is_a_noop(tmp_path: Path) -> None:
     ckpt = str(Path(state.out_dir) / "checkpoint")
     res = train_modern(
         state,
-        seed=0,
         params=ModernTrainParams(epochs=3, patience=99, resume_from=ckpt),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([3.0, 2.0, 1.0]),
@@ -198,7 +189,6 @@ def test_missing_hook_without_engine_is_the_only_engine_dependency(tmp_path: Pat
     state = _algo3_state(tmp_path)
     res = train_modern(
         state,
-        seed=0,
         params=ModernTrainParams(epochs=2, patience=99),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([1.0, 0.5]),
@@ -221,3 +211,25 @@ def test_val_metric_field_default_and_literal() -> None:
     assert ModernTrainParams(val_metric="nn_cost_seg").val_metric == "nn_cost_seg"
     with pytest.raises(ValidationError):  # the Literal + extra="forbid" rejects an out-of-set value
         ModernTrainParams(val_metric="bogus")  # type: ignore[arg-type]
+
+
+def test_batch_stream_is_derived_from_the_one_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #97: `ModernTrainParams.seed` is the loop's ONE seed. The init draws from it
+    directly (`_init_weights_from_scratch`); the mini-batch shuffle stream is derived as
+    `seed + 2`, the same derivation `train_modern` used off its former positional seed, so
+    every run at `init_seed = s` before the change is bit-identical at `seed = s` after it.
+    Engine-free: `create_batches` is replaced to capture the Generator it is handed, and the
+    gradient `FoldRun` the builder constructs unconditionally is replaced by a no-op."""
+    import speech.drivers.train as T
+
+    captured: list[np.random.Generator] = []
+    monkeypatch.setattr(T, "create_batches", lambda *a: captured.append(a[-1]))
+    monkeypatch.setattr(T, "FoldRun", lambda *a, **k: None)
+    state = _algo3_state(tmp_path)
+    for s in (0, 7, 123):
+        T._make_default_train_epoch(state, ModernTrainParams(seed=s, minibatch=2), tmp_path, tails=[0])
+        assert captured[-1].bit_generator.state == np.random.default_rng(s + 2).bit_generator.state
+    assert len(captured) == 3
+    # `seed` is the only seed the model accepts: the old field name is refused.
+    with pytest.raises(ValidationError):
+        ModernTrainParams(init_seed=7)  # type: ignore[call-arg]

@@ -203,5 +203,5 @@ ponderation = "1.0"
 # val_metric = "nn_cost_seg"
 # minibatch = 0             # hard-example mini-batch size (0 = full-corpus training per epoch)
 # init_scheme = "xavier"    # "xavier" (Glorot uniform) or "he" (He normal)
-# init_seed = 0
+# seed = 0                 # the loop's one seed: the init draw, and the mini-batch stream as seed + 2
 # forget_bias_one = true    # seed the LSTM forget-gate bias at 1.0

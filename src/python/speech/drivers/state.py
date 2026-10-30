@@ -229,7 +229,7 @@ class ModernTrainParams(BaseModel):
     multilingual: bool = False
     # from-scratch seeded init (Task 3 `init_weights`); ignored when `resume_from` is set.
     init_scheme: Literal["xavier", "he"] = "xavier"
-    init_seed: int = 0
+    seed: int = 0  # the loop's ONE seed: the init draw, and the mini-batch stream as `seed + 2`
     forget_bias_one: bool = True
     resume_from: str | None = None  # checkpoint dir to resume from (loads last_*.bin + train_history.json); None -> from-scratch
 

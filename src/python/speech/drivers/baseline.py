@@ -938,7 +938,7 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
         # sends class nb_classes-1 to the aggregate slot's never-read `.index`, so the 0..11
         # LID mapping would never draw class 11 into a batch.
         init_scheme=spec.init_scheme,
-        init_seed=spec.seed,
+        seed=spec.seed,
         resume_from=str(out_dir / "checkpoint") if spec.resume else None,
     )
 
@@ -979,7 +979,7 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
     state = RunState.from_config(base_config, out_dir)
     train = _train_fn if _train_fn is not None else train_modern
     console.log(f"training: {spec.epochs} epochs x {spec.steps_per_epoch} steps (patience {spec.patience})")
-    res = train(state, spec.seed, params)  # type: ignore[operator]
+    res = train(state, params)  # type: ignore[operator]
     val_costs = [r.val_cost for r in res.history]  # type: ignore[attr-defined]
     train_costs = [r.train_cost for r in res.history]  # type: ignore[attr-defined]
     console.log(f"trained {res.epochs_run} epochs; best_epoch={res.best_epoch} best_val={res.best_val_cost:.5f}")  # type: ignore[attr-defined]

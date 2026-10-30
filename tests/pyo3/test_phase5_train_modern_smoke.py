@@ -80,9 +80,9 @@ def test_train_modern_algo3_smoke(tmp_path: Path) -> None:
     state = init_run(config, tmp_path / "run")
     assert state.algo == 3 and state.ps.lid is None
 
-    params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="xavier", init_seed=7)
+    params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="xavier", seed=7)
     with chdir(tmp_path):
-        res = train_modern(state, seed=0, params=params)
+        res = train_modern(state, params=params)
 
     assert res.epochs_run == 2
     assert len(res.history) == 2
@@ -103,9 +103,9 @@ def test_train_modern_twin_smoke_writes_both_nets(tmp_path: Path) -> None:
     state = init_run(config, tmp_path / "run")
     assert state.algo == 6 and state.ps.lid is not None
 
-    params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="he", init_seed=3)
+    params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="he", seed=3)
     with chdir(tmp_path):
-        res = train_modern(state, seed=0, params=params)
+        res = train_modern(state, params=params)
 
     assert res.epochs_run == 2
     for r in res.history:
@@ -123,9 +123,9 @@ def test_train_modern_resume_smoke(tmp_path: Path) -> None:
     config = _seed_tier2_spectral(tmp_path)
     state = init_run(config, tmp_path / "run")
     with chdir(tmp_path):
-        train_modern(state, seed=0, params=ModernTrainParams(epochs=1, patience=99, steps_per_epoch=2, init_seed=7))
+        train_modern(state, params=ModernTrainParams(epochs=1, patience=99, steps_per_epoch=2, seed=7))
         ckpt = str(Path(state.out_dir) / "checkpoint")
-        res = train_modern(state, seed=0, params=ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, resume_from=ckpt))
+        res = train_modern(state, params=ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, resume_from=ckpt))
     assert res.epochs_run == 2
     assert [r.epoch for r in res.history] == [0, 1]
 
@@ -153,7 +153,7 @@ def _train_sad(dst: Path, params: ModernTrainParams) -> ModernTrainResult:
     """`train_modern` on a fresh tier2 state in `dst`, with the cwd there (relative rows)."""
     state = _sad_state(dst)
     with chdir(dst):
-        return train_modern(state, seed=0, params=params)
+        return train_modern(state, params=params)
 
 
 @pytest.mark.slow
@@ -169,11 +169,11 @@ def test_val_metric_nn_cost_seg_moves_where_balance_plateaus(tmp_path: Path) -> 
     default back to `balance` and the default arm freezes -> `len(set(default_costs)) > 1` fails."""
     default_res = _train_sad(  # no val_metric -> the new nn_cost_seg default
         tmp_path / "default",
-        ModernTrainParams(epochs=4, patience=99, steps_per_epoch=2, init_scheme="xavier", init_seed=7),
+        ModernTrainParams(epochs=4, patience=99, steps_per_epoch=2, init_scheme="xavier", seed=7),
     )
     balance_res = _train_sad(
         tmp_path / "balance",
-        ModernTrainParams(epochs=4, patience=99, steps_per_epoch=2, init_scheme="xavier", init_seed=7, val_metric="balance"),
+        ModernTrainParams(epochs=4, patience=99, steps_per_epoch=2, init_scheme="xavier", seed=7, val_metric="balance"),
     )
 
     bal_costs = [r.val_cost for r in balance_res.history]
@@ -198,7 +198,7 @@ def test_val_metric_both_deterministic(tmp_path: Path) -> None:
     validation paths are deterministic (the property the modern loop's resume/checkpoint story
     relies on)."""
     for metric in ("nn_cost_seg", "balance"):
-        params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="xavier", init_seed=7, val_metric=metric)  # type: ignore[arg-type]
+        params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="xavier", seed=7, val_metric=metric)  # type: ignore[arg-type]
         a = _train_sad(tmp_path / f"{metric}_a", params)
         b = _train_sad(tmp_path / f"{metric}_b", params)
         assert [r.val_cost for r in a.history] == [r.val_cost for r in b.history], f"{metric}: validation trajectory not deterministic"
@@ -221,7 +221,7 @@ def test_early_stop_triggers_on_moving_nn_cost_seg(tmp_path: Path) -> None:
     Assertions are qualitative (stopped_early, best_epoch > 0, ran under budget), not an exact
     overshoot epoch, so they survive cross-libm jitter -- the overshoot span here is ~0.2, far
     above any libm noise floor."""
-    res = _train_sad(tmp_path, ModernTrainParams(epochs=16, patience=2, steps_per_epoch=8, init_scheme="xavier", init_seed=7, val_metric="nn_cost_seg"))
+    res = _train_sad(tmp_path, ModernTrainParams(epochs=16, patience=2, steps_per_epoch=8, init_scheme="xavier", seed=7, val_metric="nn_cost_seg"))
     assert res.stopped_early is True, "early-stop must fire on the moving nn_cost_seg signal's post-improvement overshoot"
     assert res.best_epoch > 0, f"the moving signal must reach its best at a genuine epoch > 0 (not the frozen-plateau epoch 0), got {res.best_epoch}"
     assert res.epochs_run < 16, f"early-stop must halt before the 16-epoch budget, ran {res.epochs_run}"

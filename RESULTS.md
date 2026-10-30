@@ -3557,3 +3557,30 @@ copy of the table); the refusal is one body -- a flipped predicate or a driver a
 `false` lets a fast Image-mode run past the guard into the audio decode, where the fixture's
 relative listing fails for an unrelated reason (the catchers assert the message names
 `Inference_Path`, so the escape is caught, not the decode).
+
+## Issue #97 -- the Modern loop's one seed: the mutation battery
+
+**Live:** `tests/mutations/issue97/` (1 patch).
+
+`train_modern(state, seed, params)` read its positional `seed` at one site, the mini-batch
+rotation stream `default_rng(seed + 2)` under `params.minibatch > 0`, while the init draw read
+`params.init_seed`; the Launcher passed `spec.seed` to both and `init_seed` had no CLI knob, so
+the two were equal on every production run and nothing failed, but a caller handing two seeds
+got the init of the second and the signature did not say so. `ModernTrainParams.init_seed` is
+now `seed`, the loop's one seed: the init draws from it and the batch stream is derived as
+`seed + 2` inside `_make_default_train_epoch`, so a run at `init_seed = s` before is
+bit-identical at `seed = s` after (the four run-twice gates, the exit gate and the Modern smoke
+re-run at their recorded values, no re-pin). `train_modern(state, params)`; the Launcher's
+`_train_fn` hook follows, `(state, params)`. The derivation has its own pin,
+`test_batch_stream_is_derived_from_the_one_seed`: `create_batches` replaced to capture the
+Generator it is handed, `FoldRun` replaced by a no-op, the captured `bit_generator.state`
+compared to `default_rng(s + 2)`'s at three seeds. The battery lesson holds here too: the
+run-twice gates compare two runs of one kernel and are blind to a moved derivation, which is
+why the pin exists.
+
+`uv run python tests/mutations/run.py issue97` on macOS: 1 verdicts, 0 differ from expected;
+`--changed-since origin/main` 42 verdicts, 0 differ.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | the batch stream derived as `seed + 3` | `test_batch_stream_is_derived_from_the_one_seed` | CAUGHT: `AssertionError: assert {'bit_generat...'uinteger': 0} == {'bit_generat...'uinteger': 0}` (the two PCG64 states differ in their seeded state words; pytest elides them) |

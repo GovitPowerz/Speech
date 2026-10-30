@@ -1,0 +1,16 @@
+mutation: the mini-batch stream derived as seed + 3 instead of seed + 2 (issue #97: the one seed, the former positional seed's derivation kept)
+catcher: CAUGHT pytest tests/test_phase5_train_modern.py::test_batch_stream_is_derived_from_the_one_seed
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index fa28983..deb133b 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -611,7 +611,7 @@ def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdi
+     runner: _BatchRunner | None = None
+     if params.minibatch > 0:
+         fv = _files_values(state)
+-        batch_rng = np.random.default_rng(params.seed + 2)
++        batch_rng = np.random.default_rng(params.seed + 3)
+         batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, batch_rng)
+         runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
+ 
