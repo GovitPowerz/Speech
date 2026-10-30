@@ -787,7 +787,8 @@ impl FastBlstm {
 // Overlap window-span arithmetic (shared offline / streaming, Phase 8 Task 3).
 // ---------------------------------------------------------------------------
 
-/// The window-`jj` begin (the exact `nn::blstm::BlstmNetwork::feed_forward_backward_overlap`'s):
+/// The window-`jj` begin, the rule of the exact
+/// `nn::blstm::BlstmNetwork::feed_forward_backward_overlap`:
 /// `max(0, jj - window_size)` snapped DOWN to the `ssr` grid. INPUT-ROWS-INDEPENDENT --
 /// the streaming engine computes it without knowing the total length.
 #[inline]
@@ -796,7 +797,7 @@ pub(crate) fn window_begin(jj: usize, window_size: usize, ssr: usize) -> usize {
     (begin / ssr) * ssr
 }
 
-/// The window end for a given `begin` (the same exact driver's): `begin +
+/// The window end for a given `begin`, the same exact driver's rule: `begin +
 /// 2*window_size`, CLAMPED to `input_rows - 1`, then snapped UP to the `ssr` grid
 /// (`((end+1)/ssr)*ssr - 1`). The clamp is the ONLY `input_rows`-dependent part: the
 /// streaming engine only fires a window mid-stream once `begin + 2*window_size <

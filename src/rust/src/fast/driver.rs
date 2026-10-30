@@ -446,8 +446,9 @@ impl FastSpectralSegmenter {
         Ok(())
     }
 
-    /// The plan's `BLSTM_weightsFile` load (mirrors [`crate::nn::blstm::BlstmNetwork::
-    /// load_weights_file`]): an EMPTY key leaves the net unloaded (a subsequent
+    /// The plan's `BLSTM_weightsFile` load (mirrors
+    /// [`crate::nn::blstm::BlstmNetwork::load_weights_file`]): an EMPTY key leaves the net
+    /// unloaded (a subsequent
     /// `get_segmentation` errors); otherwise read the `.bin` and hand its head to
     /// [`Self::set_weights`] -- the legacy FILE-LOAD tolerance, explicit
     /// ([`FastSadPlan::read_weights_file`]: a short file is refused, a long one warns on
@@ -1051,8 +1052,7 @@ impl FastTwinLid {
             bail!(
                 "fast TwinLid: a negative BLSTM_LID_TargetEnforcementStep is not supported on \
                  the fast path (got {}); the exact path's cost block overwrites interior \
-                 output rows with -0.5 for a negative step (risk R7, the cost block of \
-                 nn::blstm::BlstmNetwork::feed_forward_backward_plain), \
+                 output rows with -0.5 for a negative step (risk R7), \
                  which the fast path's forward-only scoring never reproduces; the gate configs \
                  use a non-negative step",
                 lid_bc.target_enforcement_step
