@@ -448,8 +448,8 @@ impl FastSpectralSegmenter {
 
     /// The plan's `BLSTM_weightsFile` load (mirrors
     /// [`crate::nn::blstm::BlstmNetwork::load_weights_file`]): an EMPTY key leaves the net
-    /// unloaded (a subsequent
-    /// `get_segmentation` errors); otherwise read the `.bin` and hand its head to
+    /// unloaded (a subsequent `get_segmentation` errors); otherwise read the `.bin` and hand
+    /// its head to
     /// [`Self::set_weights`] -- the legacy FILE-LOAD tolerance, explicit
     /// ([`FastSadPlan::read_weights_file`]: a short file is refused, a long one warns on
     /// stderr and loads its head).
@@ -560,10 +560,10 @@ impl Segmenter for FastSpectralSegmenter {
                     copy_plain_output("fast causal SAD", out, &mut result_buf)?;
                 }
                 // Phase-10 Task 7: the bidirectional cells run EITHER regime, selected
-                // by the config exactly as the exact tree selects it
-                // (`feed_forward_backward`'s `truncates_sequence && overlaps` dispatch,
-                // `nn/blstm.rs::feed_forward_backward`). The timeline refuses `no_overlap`, so
-                // `window_size > 0` here means OVERLAP and nothing else.
+                // by the config exactly as the exact tree selects it (the
+                // `truncates_sequence && overlaps` dispatch of
+                // `nn::blstm::BlstmNetwork::feed_forward_backward`). The timeline refuses
+                // `no_overlap`, so `window_size > 0` here means OVERLAP and nothing else.
                 FastNet::BiCell(n) => {
                     if window_size > 0 {
                         n.feed_forward_overlap(&input, window_size, window_shift, &mut result_buf);
@@ -739,8 +739,8 @@ impl FastNet {
 
     /// f32 TwoSweeps/single-sweep truncate forward
     /// (`nn::blstm::BlstmNetwork::feed_forward_backward_truncate`; the `:NNN` cites in the
-    /// body are the legacy
-    /// `BLSTMNeuralNetwork.cpp:548-590` lines that function transcribes), OUTPUT-ONLY. The
+    /// body are the legacy `BLSTMNeuralNetwork.cpp:548-590` lines that function
+    /// transcribes), OUTPUT-ONLY. The
     /// exact stitches the fwd/bwd hidden states (`_OutputForward`/`_OutputBackward`) across
     /// windows + sweeps; Mode 7 reads them ONLY for `DumpLIDInternals` (off on the gate
     /// configs, the fast driver bails if it is on), so the fast path tracks only `output`.
@@ -1044,8 +1044,8 @@ impl FastTwinLid {
         // `feed_forward_backward_truncate_sweep`, which runs `feed_forward_backward_plain`
         // per window block. `_TargetEnforcementStep < 0` there makes the COST block
         // (`nn::blstm::BlstmNetwork::feed_forward_backward_plain`) overwrite interior rows
-        // of the caller-visible OUTPUT
-        // with -0.5 before `computeCost` -- not just the target. The fast path never
+        // of the caller-visible OUTPUT with -0.5 before `computeCost` -- not just the
+        // target. The fast path never
         // builds targets, so it always returns true posteriors: a silent structural
         // divergence for a negative step. Bail loudly instead.
         if lid_bc.target_enforcement_step < 0 {
@@ -1062,8 +1062,8 @@ impl FastTwinLid {
         // T5 finding 3 (review, minor): contract symmetry with the exact dispatch, which
         // routes is_mlp configs (LSTMNeuronNb[0]==0) to the MLP drivers
         // (`nn::blstm::BlstmNetwork::feed_forward_backward`'s `is_mlp` arm) instead of the
-        // recurrent forwards the fast LID scoring
-        // runs. Every shape's `from_flat` independently bails on this shape, but only once
+        // recurrent forwards the fast LID scoring runs. Every shape's `from_flat`
+        // independently bails on this shape, but only once
         // weights are actually loaded -- when `lid_weights` is `None` here (the deferred
         // `load_weights_file` path), `from_legacy` would otherwise return `Ok` for an
         // is_mlp config, so `from_flat`'s bail does NOT provably fire first on every such

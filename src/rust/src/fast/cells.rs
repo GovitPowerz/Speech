@@ -1055,7 +1055,7 @@ struct LstmScratch {
 /// - `c` -- `c_{t-1}`, read by the cell-peephole terms (`:353-356`) AND by the cell
 ///   recurrence itself (`:387`);
 /// - `gates` -- the `4O` POST-activation `[i|f|o|g]` of `t-1`, read by the
-///   gates/gates-recurrent peephole cross-terms (`:357-363`, `:395`).
+///   gates/gates-recurrent peephole cross-terms (`:357-363`, `:394`).
 ///
 /// A fresh state is ALL ZEROS, which is exactly the exact cell's `t == 0` special case
 /// (see the module doc's divergence 4, extended to this cell in [`FastLstm::step`]).
@@ -1223,9 +1223,9 @@ impl FastLstm {
     }
 
     /// ONE timestep, the streaming kernel: the per-timestep body of
-    /// `nn::layers::LstmLayer::feed_forward` (legacy `LSTMLayer.cpp:350-412`; the `:NNN`
-    /// cites in this doc and the body are that legacy function's lines, the same anchors
-    /// the exact body carries) transcribed op for op.
+    /// `nn::layers::LstmLayer::feed_forward` (legacy `LSTMLayer.cpp:312-413`, its `t >= 1`
+    /// loop `:350-412`; the `:NNN` cites in this doc and the body are that legacy
+    /// function's lines, the same anchors the exact body carries) transcribed op for op.
     ///
     /// Stage order, which IS the numeric contract (do NOT reorder -- the exact forward's
     /// combined expressions at `:362-363` and `:387` are single fused elementwise passes,

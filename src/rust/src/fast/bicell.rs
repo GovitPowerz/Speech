@@ -273,8 +273,7 @@ impl FastBiCell {
     ///
     /// 1. output length = rows divided SEQUENTIALLY by each recurrent sub-sampling ratio;
     /// 2. the `LSTMRatios[0] > 1 && netInput < inputCols` crop gate, applied ONCE and fed
-    ///    to BOTH stacks (it passes the same `cropped` to `forward` and
-    ///    `backward`);
+    ///    to BOTH stacks (it passes the same `cropped` to `forward` and `backward`);
     /// 3. the forward stack, then the REVERSED stack (`feed_forward_reverse`);
     /// 4. the hcat `[fwd | rev]` (forward LEFT, `feed_forward_double`) driving the dense
     ///    output MLP one row at a time.
@@ -370,8 +369,8 @@ impl FastBiCell {
     ///
     /// NOT reproduced, because the SAD result path never reads them: the
     /// `_OutputForward`/`_OutputBackward` hidden-state accumulators and their own count
-    /// quotient -- only the LID Twin's
-    /// hidden-state concat consumes those, and it is out of the algo-3 driver's scope
+    /// quotient -- only the LID Twin's hidden-state concat consumes those, and it is out of
+    /// the algo-3 driver's scope
     /// (the same omission `FastBlstm::feed_forward_overlap` documents).
     ///
     /// THE ACCUMULATION ORDER IS `jj`-ASCENDING, and that is the arithmetic contract, not

@@ -9,7 +9,7 @@
 //! NUMERIC DIVERGENCE FROM THE EXACT PATH IS BY DESIGN (spec S4/R3). The fast path
 //! narrows `f64 -> f32` once (after adim, at weight-load) and uses faer's blocked/
 //! SIMD reduction order, which differs from the exact path's ascending-loop f64
-//! accumulation (`nn/layers.rs::matmul_seq`). The resulting per-posterior deltas are
+//! accumulation (`nn::layers::matmul_seq`). The resulting per-posterior deltas are
 //! MEASURED and pinned with headroom in the phase-7 tests, and documented in
 //! RESULTS.md -- NEVER IMPROVEMENTS.md (which tracks legacy-quirk debt, not this
 //! deliberate f32/f64 split). No contorting the fast path toward bit-parity.

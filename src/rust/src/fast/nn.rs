@@ -72,7 +72,7 @@ pub fn asinh_f32(x: f32) -> f32 {
     x.asinh()
 }
 
-/// `GatesFunction::fn` (ActivationFunctions.h:230-237, `nn/activations.rs::gates_fn`):
+/// `GatesFunction::fn` (ActivationFunctions.h:230-237, `nn::activations::gates_fn`):
 /// sigmoid on `0.1*x`, saturation guards on the SCALED value, f32.
 #[inline]
 pub fn gates_fn_f32(x: f32) -> f32 {
@@ -88,7 +88,7 @@ pub fn gates_fn_f32(x: f32) -> f32 {
     }
 }
 
-/// `Logistic::fn` (ActivationFunctions.h:41-48, `nn/activations.rs::logistic_fn`):
+/// `Logistic::fn` (ActivationFunctions.h:41-48, `nn::activations::logistic_fn`):
 /// plain sigmoid, saturation guards, f32.
 #[inline]
 pub fn logistic_f32(x: f32) -> f32 {
@@ -150,9 +150,8 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
 }
 
 /// f32 external (type 1) input normalization (`BLSTMNeuralNetwork::
-/// feedForwardBackward` `:720-723`, exact port
-/// `nn::blstm::BlstmNetwork::feed_forward_backward`, the
-/// `input_normalization_type == 1` branch): per column `jj < min(cols,
+/// feedForwardBackward` `:720-723`, exact port `nn::blstm::BlstmNetwork::feed_forward_backward`,
+/// the `input_normalization_type == 1` branch): per column `jj < min(cols,
 /// mean.len())`, `(x - mean_jj) / max(1e-12, std_jj)`; columns beyond the
 /// mean/std tail are UNTOUCHED. `mean`/`std` are the pack-carried normalize
 /// tail ([`FastBlstm::normalize_mean`]/[`FastBlstm::normalize_std`], narrowed
@@ -190,8 +189,7 @@ pub fn external_normalize_f32(m: &mut FastMatrix, mean: &[f32], std: &[f32]) {
 const EXP_OVERFLOW_GUARD_F32: f32 = 80.0;
 
 /// One row of the 700-guarded softmax (`nn::layers::NeuronLayer::feed_forward`, f32).
-/// Sequential
-/// ascending-column exp+sum (fused, same order as the exact two-pass), then a
+/// Sequential ascending-column exp+sum (fused, same order as the exact two-pass), then a
 /// per-column quotient. `out.len() == pre.len()`.
 pub fn softmax_row_f32(pre: &[f32], out: &mut [f32]) {
     let mut row_max = f32::NEG_INFINITY;
@@ -595,8 +593,7 @@ impl FastBlstm {
     }
 
     /// `getSubSamplingRatio` (`nn::blstm::BlstmNetwork::sub_sampling_ratio`): the whole-BLSTM
-    /// decimation
-    /// ratio -- product of the forward LSTM sub-samplings times the output-net
+    /// decimation ratio -- product of the forward LSTM sub-samplings times the output-net
     /// sub-samplings (non-MLP; every committed SAD config is non-MLP).
     pub fn sub_sampling_ratio(&self) -> usize {
         let mut r = 1usize;
@@ -902,7 +899,7 @@ pub(crate) fn copy_view_into(
 /// EXACT function (not a bench-local reimplementation) at the `matmul_seq_92x96`
 /// shape, so the criterion twin measures the real kernel every LSTM gate/dense
 /// projection in this module actually dispatches through, mirroring how
-/// `nn/layers.rs::matmul_seq` was widened `pub` in Task 1 for the same reason.
+/// `nn::layers::matmul_seq` was widened `pub` in Task 1 for the same reason.
 #[allow(clippy::too_many_arguments)]
 pub fn faer_project(
     in_data: &[f32],

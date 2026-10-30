@@ -11,13 +11,14 @@
 //! file, every later segment must be defined somewhere in that file (an item, a `pub use`
 //! re-export, an enum variant or struct field line). `nn::layers::NeuronLayer::feed_forward`
 //! therefore resolves on any `fn feed_forward` in `layers.rs`, and a path wrapped across two
-//! doc lines is refused outright (its tail would go unchecked). `mod.rs` is left out of the
-//! line-number scan (the basename names every directory) and is reached by the resolver as a
-//! module's own file.
+//! doc lines is refused outright (its tail would go unchecked). The file scan names a
+//! `mod.rs` by its directory (`cells/mod.rs`; the bare basename names every directory) and
+//! also refuses the `nn/blstm.rs::feed_forward` (`:NNN`) form, which the resolver never sees.
 //!
 //! Scope: the `nn/` citations only. Citations into `legacy/` C++ sources (`:NNN` after a
-//! `.cpp` name) never move and are not scanned; `tasks/`, `audio.rs` and `features/`
-//! line citations in `fast/` are a named follow-on (RESULTS.md, "Symbol/anchor citations").
+//! `.cpp` name) never move and are not scanned; `tasks/`, `audio.rs`, `config.rs` and
+//! `features/` line citations in `fast/` are a named follow-on (RESULTS.md, "Symbol/anchor
+//! citations").
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,19 +51,27 @@ fn starts_with_word(text: &str, word: &str) -> bool {
         .is_some_and(|tail| !tail.starts_with(is_ident))
 }
 
-/// The basenames of every file under `src/nn/` (`blstm.rs`, `slstm.rs`, ...): a `<basename>:<digit>`
-/// anywhere in `fast/` is a line citation into the exact tree.
-fn nn_basenames() -> Vec<String> {
+/// The name of every file under `src/nn/` (`blstm.rs`, `slstm.rs`, ..., a `mod.rs` as
+/// `cells/mod.rs`): a `<name>:<digit>` (a line) or `<name>::` (a file-path symbol, cited with
+/// a separate `:NNN`) anywhere in `fast/` is a file citation into the exact tree.
+fn nn_file_names() -> Vec<String> {
     rust_files(&src_dir("nn"))
         .iter()
-        .map(|p| p.file_name().unwrap().to_str().unwrap().to_owned())
-        .filter(|n| n != "mod.rs")
+        .map(|p| {
+            let name = p.file_name().unwrap().to_str().unwrap();
+            if name == "mod.rs" {
+                let dir = p.parent().unwrap().file_name().unwrap().to_str().unwrap();
+                format!("{dir}/{name}")
+            } else {
+                name.to_owned()
+            }
+        })
         .collect()
 }
 
 #[test]
 fn fast_cites_no_nn_file_by_line_number() {
-    let names = nn_basenames();
+    let names = nn_file_names();
     let mut hits = Vec::new();
     for file in rust_files(&src_dir("fast")) {
         let text = fs::read_to_string(&file).unwrap();
@@ -72,7 +81,7 @@ fn fast_cites_no_nn_file_by_line_number() {
                 let mut from = 0;
                 while let Some(i) = line[from..].find(&needle) {
                     let at = from + i + needle.len();
-                    if line[at..].starts_with(|c: char| c.is_ascii_digit()) {
+                    if line[at..].starts_with(|c: char| c.is_ascii_digit() || c == ':') {
                         hits.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
                         break;
                     }
@@ -83,7 +92,7 @@ fn fast_cites_no_nn_file_by_line_number() {
     }
     assert!(
         hits.is_empty(),
-        "line citations into src/nn/ (cite the symbol):\n{}",
+        "file citations into src/nn/ (cite the `nn::` symbol path):\n{}",
         hits.join("\n")
     );
 }
@@ -127,7 +136,9 @@ fn nn_paths_in(text: &str) -> Vec<(usize, Vec<String>)> {
 }
 
 /// `name` is defined in `text`: an item (`fn`/`struct`/`enum`/`trait`/`type`/`const`/`static`/
-/// `mod name`), a re-export (`pub use ...name`), or an enum variant / struct field line.
+/// `mod name`), a re-export (`pub use ...name`), or an enum variant / struct field line. A
+/// line that merely STARTS with `name` (`LstmLayer::feed_forward(..)`, `matmul_seq(`) is a
+/// use, not a definition, so a moved symbol's old path does not resolve on its call sites.
 fn defines(text: &str, name: &str) -> bool {
     let item = [
         "fn ", "struct ", "enum ", "trait ", "type ", "const ", "static ", "mod ",
@@ -142,13 +153,14 @@ fn defines(text: &str, name: &str) -> bool {
             rest.strip_prefix(kw)
                 .is_some_and(|rest| starts_with_word(rest, name))
         });
-        let reexport = t.starts_with("pub use ")
-            && (t.contains(&format!("::{name};"))
-                || t.contains(&format!("{name},"))
-                || t.contains(&format!(" {name}}}")));
-        let variant = t
-            .strip_prefix(name)
-            .is_some_and(|tail| tail.is_empty() || tail.starts_with([',', '(', '{', ':']));
+        let reexport =
+            t.starts_with("pub use ") && t.split(|c: char| !is_ident(c)).any(|w| w == name);
+        let variant = t.strip_prefix(name).is_some_and(|tail| {
+            tail.is_empty()
+                || tail.starts_with([',', '{'])
+                || tail.starts_with(": ")
+                || (tail.starts_with('(') && t.ends_with(','))
+        });
         is_item || reexport || variant
     })
 }
@@ -227,6 +239,8 @@ fn the_resolver_rejects_a_renamed_symbol() {
     assert!(resolve(&path("cells::slstm::SlstmLayer::feed_forward_reverse")).is_ok());
     assert!(resolve(&path("blstm::Direction::Forward")).is_ok());
     assert!(resolve(&path("nowhere::Thing")).is_err());
+    // `network.rs` calls `LstmLayer::feed_forward(..)` but defines neither.
+    assert!(resolve(&path("network::LstmLayer::feed_forward")).is_err());
 }
 
 #[test]
