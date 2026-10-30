@@ -223,18 +223,13 @@ def test_batch_stream_is_derived_from_the_one_seed(tmp_path: Path, monkeypatch: 
     import speech.drivers.train as T
 
     captured: list[np.random.Generator] = []
-
-    def fake_create_batches(fv: object, minibatch: int, nb_worst: int, multilingual: bool, nb_classes: int, rng: np.random.Generator) -> None:
-        captured.append(rng)
-
-    monkeypatch.setattr(T, "create_batches", fake_create_batches)
+    monkeypatch.setattr(T, "create_batches", lambda *a: captured.append(a[-1]))
     monkeypatch.setattr(T, "FoldRun", lambda *a, **k: None)
     state = _algo3_state(tmp_path)
     for s in (0, 7, 123):
         T._make_default_train_epoch(state, ModernTrainParams(seed=s, minibatch=2), tmp_path, tails=[0])
         assert captured[-1].bit_generator.state == np.random.default_rng(s + 2).bit_generator.state
     assert len(captured) == 3
-    # `seed` is also the init draw's seed, and the only seed the model accepts.
-    assert ModernTrainParams(seed=7).seed == 7
+    # `seed` is the only seed the model accepts: the old field name is refused.
     with pytest.raises(ValidationError):
         ModernTrainParams(init_seed=7)  # type: ignore[call-arg]
