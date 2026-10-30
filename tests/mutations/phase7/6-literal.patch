@@ -8,7 +8,7 @@ index 4007a71..a449839 100644
 +++ b/src/rust/src/fast/driver.rs
 @@ -1341,7 +1341,7 @@ impl Segmenter for FastTwinLid {
          for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
-             // SAD else branch (`:1407`): result_vec = constant 10.0 -> the SHARED f64
+             // SAD else branch (`:725`): result_vec = constant 10.0 -> the SHARED f64
              // decision layer (bit-identical to the exact path -- no NN, pure f64).
 -            let mut result_vec2 = vec![10.0f64; real_vec_size];
 +            let mut result_vec2: Vec<f64> = (0..real_vec_size).map(|i| (i % 5) as f64).collect();

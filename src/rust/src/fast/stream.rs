@@ -67,13 +67,13 @@
 //! `noise_seed > 0`) -> the channel is narrowed to f32 -> `build_input_sequence`. This
 //! front-end applies, PER SAMPLE and in f64 (narrowing to f32 only when buffering, exactly
 //! like the driver's `.map(|x| x as f32)` seam):
-//!   1. fixed gain: `x / gain.max(1e-3)` (`audio.rs::apply_fixed_gain`).
-//!   2. pre-emphasis with a 1-sample CARRY (`audio.rs::apply_preemph`, `:99-108`). The
+//!   1. fixed gain: `x / gain.max(1e-3)` (`audio::apply_fixed_gain`).
+//!   2. pre-emphasis with a 1-sample CARRY (`audio::Audio::apply_preemph`). The
 //!      offline reverse loop `data[k] -= r*data[k-1]` leaves `out[0]=in[0]` and gives
 //!      `out[k]=in[k]-r*in[k-1]` for `k>=1` (the subtracted `in[k-1]` is the pre-emphasis
 //!      INPUT = the gained value, since the reverse order reads it before it is rewritten);
 //!      the carry is that gained value, persisted ACROSS chunk boundaries.
-//!   3. dither noise with a table-INDEX carry (`audio.rs::apply_noise`, `:112-121`):
+//!   3. dither noise with a table-INDEX carry (`audio::Audio::apply_noise`):
 //!      `+ 2*mag*random_uniform(k) - mag`, where `k` is the ABSOLUTE sample index (the
 //!      running push count) into the fixed [`crate::constants::random_uniform`] table.
 //!
@@ -163,7 +163,7 @@ impl StreamFrontEnd {
     /// Build the front-end from the derived `params` + parsed `cfg` (the SAME pair the
     /// caller feeds [`FastPipeline::new`]), the sample `rate`, and the frozen per-sample
     /// transform scalars. `fixed_gain` is floored at `1e-3` here (once), mirroring
-    /// `audio.rs::apply_fixed_gain`. `preemph`/`noise_magnitude` follow the driver gates:
+    /// `audio::apply_fixed_gain`. `preemph`/`noise_magnitude` follow the driver gates:
     /// `preemph > 0.0` activates pre-emphasis (the session passes `feature_cfg.preemph_ratio`),
     /// `noise_magnitude > 0.0` activates the dither (the session passes `noise_ratio` iff
     /// `noise_seed > 0`, else `0.0`). Typed-bails SDC deltas (`ComputeDeltasNb < 0`), whose
@@ -896,7 +896,7 @@ pub struct EmittedSegment {
 ///
 /// The offline convolution snapshots the WHOLE result vector first, so each output
 /// depends ONLY on inputs (no output feedback) -- streamable. Output `ii` reads
-/// `[ii-half, ii+half]` edge-truncated at the TRUE stream ends (`audio.rs::conv_taps`):
+/// `[ii-half, ii+half]` edge-truncated at the TRUE stream ends (`audio::conv_taps`):
 /// a left-edge output (`ii < half`) drops the missing left taps (known from the first
 /// value -- the true start), a right-edge output (`ii + half >= N`) drops the missing
 /// right taps (known only at [`flush`](ConvStream::flush), with the true `N`). An
@@ -1714,7 +1714,7 @@ enum StreamNn {
 ///
 /// MONO-FIRST, FROZEN-STATS (spec S1.2). The session processes ONE channel via
 /// [`push`](Self::push), under FROZEN normalization: a config-fixed `Audio_fixed_gain`
-/// (front-end-side, per sample, `audio.rs::apply_fixed_gain`) + the pack-carried type-1
+/// (front-end-side, per sample, `audio::apply_fixed_gain`) + the pack-carried type-1
 /// input statistics (a per-column affine, applied per feature-row front-end-side --
 /// [`super::nn::external_normalize_f32`]). Both whole-file statistics that block causality
 /// (the `(2*RMS+max)/2` audio normalization + the type -1 per-sequence self-normalization,

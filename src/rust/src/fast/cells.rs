@@ -1043,13 +1043,13 @@ struct LstmScratch {
     /// `4O`: this step's gate row, in the `[i|f|o|g]` block order -- the exact cell's
     /// `gates.row(t)`. It CANNOT be [`LstmState::gates`] itself: the peephole
     /// cross-terms read the PREVIOUS step's activated gates while this row is being
-    /// built (`f_t` reads `i_{t-1}`, `:362-363`), so writing in place would feed a
-    /// half-updated row back into its own recurrence.
+    /// built (`f_t` reads `i_{t-1}`, `LSTMLayer.cpp:362-363`), so writing in place would
+    /// feed a half-updated row back into its own recurrence.
     pre: Vec<f32>,
 }
 
 /// The peephole-LSTM carried state (spec S4.1's shape, one entry per thing the exact
-/// forward reads at `t-1`):
+/// forward reads at `t-1`; the `:NNN` are `LSTMLayer.cpp` lines):
 ///
 /// - `h` -- `y_{t-1}`, the layer output that drives the recurrent projection (`:351`);
 /// - `c` -- `c_{t-1}`, read by the cell-peephole terms (`:353-356`) AND by the cell
@@ -1111,12 +1111,12 @@ impl PartialEq for LstmState {
 /// THE CELLWEIGHT-NARROW ASYMMETRY IS UPSTREAM OF THIS TYPE, and that is worth stating
 /// because the hazard list flags it as easy to over-generalize: the `g`/cell gate carries
 /// NO peepholes, so in the CONFIG-domain structured model its rows are `out+in+1` against
-/// the `i`/`f`/`o` rows' `out+in+5` (`config.rs:66-68`). `config::pack_lstm_layer`
-/// (`:198-253`) resolves that asymmetry when it BUILDS the flat pack -- it emits four
-/// equal `out x in` fan-in blocks, four equal `out x out` recurrent blocks, ONE `out x 12`
-/// peephole bundle gathered from the i/f/o rows alone, and four `out`-long bias blocks --
-/// so by the time a flat vector reaches this reader every block is rectangular and the
-/// narrow row never appears. Reproducing the asymmetry here would be the bug.
+/// the `i`/`f`/`o` rows' `out+in+5` (the layout note above `config::LstmLayer`).
+/// `config::pack_lstm_layer` resolves that asymmetry when it BUILDS the flat pack -- it
+/// emits four equal `out x in` fan-in blocks, four equal `out x out` recurrent blocks, ONE
+/// `out x 12` peephole bundle gathered from the i/f/o rows alone, and four `out`-long bias
+/// blocks -- so by the time a flat vector reaches this reader every block is rectangular
+/// and the narrow row never appears. Reproducing the asymmetry here would be the bug.
 #[derive(Clone)]
 pub struct FastLstm {
     input_size: usize,
@@ -2049,10 +2049,10 @@ pub(crate) fn build_cell(
 /// The FORWARD stack's peephole triple `[cells, gates, gates_recurrent]` from a spec.
 ///
 /// `NnetSpec::peepholes` is the six-element `[fwd.cells, bwd.cells, fwd.gates, bwd.gates,
-/// fwd.gates_rec, bwd.gates_rec]` layout (`config.rs:46-53`), i.e. direction-INTERLEAVED,
-/// which is exactly the sort of indexing that gets copied wrong. It lives here once, next
-/// to its `backward` twin, so both net builders read the same two functions rather than
-/// open-coding `[0], [2], [4]`.
+/// fwd.gates_rec, bwd.gates_rec]` layout (`config::NnetSpec::peepholes`), i.e.
+/// direction-INTERLEAVED, which is exactly the sort of indexing that gets copied wrong. It
+/// lives here once, next to its `backward` twin, so both net builders read the same two
+/// functions rather than open-coding `[0], [2], [4]`.
 ///
 /// A `Direction::Forward` net uses THIS triple and only this one:
 /// `nn::blstm::BlstmNetwork::from_config` builds its single stack with `cfg.forward_peep`.

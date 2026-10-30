@@ -11,7 +11,7 @@
 //!   `feed_forward_double` (HCAT forward-LEFT).
 //! - `nn::blstm::BlstmNetwork::set_weights`: the flat-pack block
 //!   order Forward -> Backward -> Output -> mean -> std, adim ALREADY APPLIED by the
-//!   config-reader path (`config.rs::apply_adim`); `from_flat` consumes exactly that
+//!   config-reader path (`config::apply_adim`); `from_flat` consumes exactly that
 //!   layout and narrows once.
 //! - `nn::layers::LstmLayer::feed_forward` (`LSTMLayer.cpp:312-413`):
 //!   the `[i|f|o|g]` gate blocks, the two-matmul summed pre-activation (input
@@ -149,8 +149,8 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
     }
 }
 
-/// f32 external (type 1) input normalization (`BLSTMNeuralNetwork::
-/// feedForwardBackward` `:720-723`, exact port `nn::blstm::BlstmNetwork::feed_forward_backward`,
+/// f32 external (type 1) input normalization (`BLSTMNeuralNetwork.cpp:720-723`,
+/// `feedForwardBackward`; exact port `nn::blstm::BlstmNetwork::feed_forward_backward`,
 /// the `input_normalization_type == 1` branch): per column `jj < min(cols,
 /// mean.len())`, `(x - mean_jj) / max(1e-12, std_jj)`; columns beyond the
 /// mean/std tail are UNTOUCHED. `mean`/`std` are the pack-carried normalize
@@ -430,7 +430,7 @@ impl FastBlstm {
                 }
             };
 
-        // Per-direction peephole flags (NnetSpec.peepholes layout, config.rs:46-53).
+        // Per-direction peephole flags (the `config::NnetSpec::peepholes` layout).
         let (fc, fg, fr) = (spec.peepholes[0], spec.peepholes[2], spec.peepholes[4]);
         let (bc, bg, br) = (spec.peepholes[1], spec.peepholes[3], spec.peepholes[5]);
 
@@ -619,7 +619,7 @@ impl FastBlstm {
     /// `output` is the CALLER'S buffer and is NOT zeroed here: the exact driver
     /// reuses ONE `result_vec` across channels and the `+=` accumulation seeds
     /// channel N from channel N-1's post-division contents (the load-bearing
-    /// cross-channel reuse quirk, `tasks/sad.rs:1433-1436`) -- the
+    /// cross-channel reuse quirk, `tasks::sad::BlstmSpectralSegmenter::get_segmentation`) -- the
     /// caller reproduces it by passing the same `output` for every channel and NOT
     /// re-zeroing between channels. The LSTM hidden-state accumulators
     /// (`_OutputForward`/`_OutputBackward`) are NOT tracked: the SAD

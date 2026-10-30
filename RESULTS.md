@@ -2231,8 +2231,14 @@ stopped, with the reason and the shape of the work.
   `nn::module::Type::method` path, the `fast/bicell.rs` offset paragraph is gone, and
   `src/rust/tests/fast_doc_citations.rs` keeps them live -- a cited exact symbol that no
   longer resolves fails the suite, and so does a new `nn/<file>.rs:NNN` or
-  `nn/<file>.rs::symbol`. The `tasks/`, `audio.rs`, `config.rs` and `features/` line
-  citations in `fast/`, and every citation outside `fast/`, remain as named here.
+  `nn/<file>.rs::symbol`. Done for the rest of `fast/` (issue #118): the `tasks/`,
+  `features/`, `audio.rs` and `config.rs` citations name their symbol too, the same test's
+  line-number scan covers every `.rs` under `src/` outside `fast/` and its resolver every
+  top-level crate module, and a bare `:NNN` in a `fast/` comment is a LEGACY line whose
+  `.cpp` / `.h` / `.m` the enclosing doc must name (the Mode-7 body comments in
+  `fast/driver.rs` were `tasks/lid.rs` lines of an earlier HEAD, re-anchored to the
+  `TwinBLSTMSpectralLID.cpp` lines the exact body carries). Citations outside `fast/` remain
+  as named here.
 - **A sub-unit gain rung for the streaming crossing sweep** (Task 11, recorded as a new
   observation). The `mamba` plain leg measures its 16 interior boundaries over a posterior
   span of `[0.0000, 1.0000]` at the NEUTRAL lever -- nothing swept it there, the committed

@@ -272,7 +272,7 @@ impl FastSadPlan {
     }
 
     /// The rate-dependent half of the setup, at `rate`: what the exact driver derives per
-    /// file (`tasks/sad.rs::BlstmSpectralSegmenter::get_segmentation`), PURE and from the
+    /// file (`tasks::sad::BlstmSpectralSegmenter::get_segmentation`), PURE and from the
     /// config values (see the module docs on the dropped stateful carry). Runs the
     /// authoritative regime check on the RESOLVED window/shift.
     pub fn timeline(&self, rate: f64) -> Result<SadTimeline> {
@@ -301,12 +301,13 @@ impl FastSadPlan {
         // The regime rule on the RESOLVED values (the pre-check's, re-run authoritatively).
         self.check_regime(window_size != 0, no_overlap, &format!(" at {rate} Hz"))?;
 
-        // timeStep/timeOffset (`BlstmSpectralSegmenter::get_segmentation`, the block the
-        // exact driver cites as legacy `:724-734`): the BASE pair is
-        // `_WindowShift`-derived; the OVERLAP branch OVERRIDES it with `_SpectrumShift`
-        // (the asymmetry vs the signal driver). `window_size == 0` -- the causal regime --
-        // keeps the base pair, where `window_shift_sec` is the value `get_blstm_param` just
-        // mutated (`window_shift * ssif / rate`, `window_shift` floored to 1 at window 0).
+        // timeStep/timeOffset (`tasks::sad::BlstmSpectralSegmenter::get_segmentation`, the
+        // block the exact driver cites as legacy `BLSTMSpectralSegmenter.cpp:724-734`): the
+        // BASE pair is `_WindowShift`-derived; the OVERLAP branch OVERRIDES it with
+        // `_SpectrumShift` (the asymmetry vs the signal driver). `window_size == 0` -- the
+        // causal regime -- keeps the base pair, where `window_shift_sec` is the value
+        // `get_blstm_param` just mutated (`window_shift * ssif / rate`, `window_shift`
+        // floored to 1 at window 0).
         // `no_overlap` is refused above, so `window_size > 0` here means OVERLAP.
         let ssr = self.ssr as f64;
         let (time_step, time_offset) = if window_size > 0 {
