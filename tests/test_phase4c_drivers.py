@@ -140,7 +140,8 @@ def test_qpso_params_is_the_legacy_psoparams_vector() -> None:
     `psoparams` vector (`Train_BLSTM.m:831-862`, `:902`): `ac = [2.1, 2.1]`, `Iwt = [0.9, 0.6]`,
     `wt_end = epoch`, `errgrad = 1e-99`, `errgraditer = 500`, `errgoal = NaN`, `modl = 3`,
     `minmax = 0`, `varrange = [0, adim]` per gene, `mv = range / mvden` with `mvden = 2`, and
-    `PSOseed` on iff a seed matrix is given; a seed of another width is refused."""
+    `PSOseed` on iff a seed matrix is given; a seed of another width, or taller than the `2 * ps`
+    initial population, is refused, as is `ps = 0`."""
     seed = np.zeros((1, 5))
     p = _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=seed, backprop_activated=1)
     assert (p.ps, p.me, p.ac1, p.ac2, p.iw1, p.iw2, p.iwe) == (3, 7, 2.1, 2.1, 0.9, 0.6, 7)
@@ -150,9 +151,11 @@ def test_qpso_params_is_the_legacy_psoparams_vector() -> None:
     assert np.array_equal(p.mv, np.full(5, 5.0))
     assert p.seed_value is seed
     assert _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=None, backprop_activated=0).pso_seed == 0
-    for bad in (np.zeros((1, 4)), np.zeros((1, 6)), np.zeros(5)):
+    for bad in (np.zeros((1, 4)), np.zeros((1, 6)), np.zeros(5), np.zeros((7, 5))):
         with pytest.raises(ValueError, match="this genome has 5 genes"):
             _qpso_params(particles=3, epochs=7, dim=5, adim=10.0, seed_value=bad, backprop_activated=1)
+    with pytest.raises(ValueError, match="qpso_particles must be >= 1"):
+        _qpso_params(particles=0, epochs=7, dim=5, adim=10.0, seed_value=None, backprop_activated=1)
 
 
 def test_cli_init_dispatch(tmp_path: Path) -> None:

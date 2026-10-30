@@ -278,10 +278,11 @@ class QpsoParams:
     The defaults are the ONE home of the QPSO knobs (issue #102): the legacy script constants
     (`ps = PS.VP.nbindiv = 24` and `modl = PS.VP.PSOType = 3`, `Train_BLSTM.m:171-172`;
     `minmax`, `ac`, `Iwt`, `errgrad`, `errgraditer`, `errgoal`, `:831-861`) and the port's own
-    `me` / `pso_seed` (the legacy hard-codes `epoch = 300` and `PSOseed = 1`; here `me = 100`,
-    and a seed vector is what turns `pso_seed` on). `ps` / `me` are the CLI defaults read by
-    `cli.py`, `drivers.train` and `drivers.retrain`. `iwe`, `vr` and `mv` depend on the run
-    (the epoch count, the genome length), so they stay required."""
+    `me` (the legacy hard-codes `epoch = 300`; here `me = 100`). `ps` / `me` are the CLI defaults
+    read by `cli.py`, `drivers.train` and `drivers.retrain`. `iwe`, `vr`, `mv` and `pso_seed`
+    depend on the run (the epoch count, the genome length, whether a seed matrix is given: the
+    legacy hard-codes `PSOseed = 1`, `quantum_pso` reads `seed_value` iff `pso_seed == 1`), so
+    they stay required."""
 
     ps: int = 24
     me: int = 100
@@ -294,7 +295,7 @@ class QpsoParams:
     ergrdep: int = 500
     errgoal: float = float("nan")
     trelea: int = 3
-    pso_seed: int = 0
+    pso_seed: int
     minmax: int = 0
     vr: NDArray[np.float64]  # D x 2 [min, max] per dim
     mv: NDArray[np.float64]  # D-vector max velocity (dead: vels are never applied)
