@@ -43,7 +43,7 @@ from speech.engine import ChannelResults, CostParams, compute_cost, forward_back
 from speech.fold_run import FoldRun
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
-from speech.optimizers import QpsoParams, Smorms3, quantum_pso
+from speech.optimizers import QpsoParams, QpsoResult, Smorms3, quantum_pso
 from speech.scoring import confusion_matrix, masking_validation
 from speech.weight_bridge import read_bin, write_bin
 
@@ -424,6 +424,21 @@ def _qpso_params(
     )
 
 
+def _write_qpso_checkpoint(ckpt_dir: Path, result: QpsoResult, inner_hist: list[float] | None = None) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """The one QPSO checkpoint write of both sites (issue #102): `gbest.bin` and
+    `cost_history.bin` (the per-epoch gbestval trajectory) always, `inner_cost_history.bin`
+    when the site ran an inner SMORMS3 loop (`train`; the narrowed search has none). Returns
+    the `(gbest, cost_hist)` arrays as written, for the `TrainResult`."""
+    gbest = np.asarray(result.gbest, dtype=F64)
+    cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
+    write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
+    write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
+    if inner_hist is not None:
+        inner_arr = np.asarray(inner_hist, dtype=F64)
+        write_bin(inner_arr.shape[0], 1, inner_arr, ckpt_dir / "inner_cost_history.bin")
+    return gbest, cost_hist
+
+
 DEFAULT_INNER_STEPS = 20
 """The Legacy regime's SMORMS3 inner-loop step count (a `BackPropagation.m` knob, not a QPSO
 one, so it does not live on `QpsoParams`): the one default `cli.py`, `train` and `retrain` read
@@ -520,12 +535,7 @@ def train(
     final_batch = _BatchStep(runner, final_cfg) if runner is not None else None
     _final_cost, final_w, inner_hist = _score_fold(final_cfg, workdir, balance, algo, bbp, inner_steps, tails, final_batch)
 
-    gbest = np.asarray(result.gbest, dtype=F64)
-    cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
-    inner_arr = np.asarray(inner_hist, dtype=F64)
-    write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
-    write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
-    write_bin(inner_arr.shape[0], 1, inner_arr, ckpt_dir / "inner_cost_history.bin")
+    gbest, cost_hist = _write_qpso_checkpoint(ckpt_dir, result, inner_hist)
     write_bin(final_w[0].shape[0], 1, final_w[0], ckpt_dir / "sad_weights.bin")
     if len(final_w) >= 2:
         # legacy: only the algo-6 Twin trains a second (LID) net -- BackPropagation.m:11-13.
@@ -950,9 +960,7 @@ def train_hyperparam_search(
             stacklevel=2,
         )
 
-    cost_hist = np.asarray(result.gbestval_traj, dtype=F64)
-    write_bin(gbest.shape[0], 1, gbest, ckpt_dir / "gbest.bin")
-    write_bin(cost_hist.shape[0], 1, cost_hist, ckpt_dir / "cost_history.bin")
+    gbest, cost_hist = _write_qpso_checkpoint(ckpt_dir, result)
     (ckpt_dir / "best_hyperparam.config").write_text(best_text)
 
     tr = TrainResult(
