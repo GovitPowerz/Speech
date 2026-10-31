@@ -142,7 +142,8 @@ pub enum FastNetShape {
 /// what `phase8_gate.rs` / `phase9_stream_causal.rs` assert (a PREFIX SUBSTRING, not the
 /// body). The Twin's LID net classifies through this same function since issue #57
 /// ([`FastNet`]); its two surviving refusals are REGIME rules (windowed causal,
-/// overlap), raised where the window resolves against the rate.
+/// overlap), raised at construction on the config's intent
+/// (`fast::plan::FastLidPlan::from_map`, issue #84).
 ///
 /// TOTALITY IS NOT A LOOSENING. A future `CellType` variant added without a fast kernel
 /// does not silently fall through here: it reaches `super::cells::cell_weight_count`,
@@ -866,12 +867,13 @@ impl FastNet {
 /// ([`FastNet`]), not the phase-7 BLSTM twin alone.
 ///
 /// SINCE ISSUE #84 ITS SETUP IS [`FastLidPlan`] (rate-free, shared with the Utterance
-/// stream) + [`LidTimeline`] (per file, at the audio's rate and target): every
-/// construction refusal (Mode 7 only, the pitch second pass, `DumpInternals`, a LID
-/// `InputNormalizationType != 0`, a negative `TargetEnforcementStep`, MLP mode) is the
-/// plan's, the two regime refusals (a windowed CAUSAL LID net, OVERLAP on every shape)
-/// included, rate-free on the config's intent, and the two stateful shifts the exact driver re-quantizes per file are
-/// NOT carried (the plan's module docs: a fixed point at one rate). This struct keeps the
+/// stream) + [`LidTimeline`](super::plan::LidTimeline) (per file, at the audio's rate and
+/// target): every construction refusal (Mode 7 only, the pitch second pass,
+/// `DumpInternals`, a LID `InputNormalizationType != 0`, a negative
+/// `TargetEnforcementStep`, MLP mode) is the plan's, the two regime refusals (a windowed
+/// CAUSAL LID net, OVERLAP on every shape) included, rate-free on the config's intent, and
+/// the two stateful shifts the exact driver re-quantizes per file are NOT carried (the
+/// plan's module docs: a fixed point at one rate). This struct keeps the
 /// LID net, the per-channel loop and the result members. The wav CNN arm
 /// (`periodogram.is_none()`) still bails per file: it is the audio's, not the config's.
 ///

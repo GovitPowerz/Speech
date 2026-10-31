@@ -593,8 +593,9 @@ fn agg_to_tuple(py: Python<'_>, a: LidAggregate) -> LidAggTuple<'_> {
 /// load, the T4/T5/T7 precedent `fast/stream_lid.rs`'s module doc names; since issue #65
 /// a non-empty `BLSTM_weightsFile` is read and length-checked too, as the offline Twin
 /// does) -- construction
-/// bails if `BLSTM_LID_Mode != 7`, the LID window resolves to a regime the net's shape
-/// refuses (overlap on any shape, a window on a causal net), or no net loads.
+/// bails if `Algo_choice != 6`, `BLSTM_LID_Mode != 7`, the LID window and shift name a
+/// regime the net's shape refuses (overlap on any shape, a window on a causal net, decided
+/// on the config's intent, issue #84), or no net loads.
 #[pyclass]
 struct StreamingLidSession {
     inner: RsStreamingLidSession,

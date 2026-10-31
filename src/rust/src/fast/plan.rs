@@ -870,8 +870,8 @@ pub struct LidTimeline {
     pub sad: SadAxis,
     /// `getLIDBLSTMParam`'s window half-size in periodogram frames (0 = plain regime).
     pub lid_window_size: usize,
-    /// `getLIDBLSTMParam`'s window shift in periodogram frames, floored to 1 (the value the
-    /// exact driver writes back as `_LIDWindowShift * ssif / rate`).
+    /// `getLIDBLSTMParam`'s window shift in periodogram frames, floored to 1 (the exact
+    /// driver writes it back as `_LIDWindowShift = lid_window_shift * ssif / rate`).
     pub lid_window_shift: usize,
     /// The truncate flag (a resolved LID shift below one frame under a window).
     pub lid_no_overlap: bool,

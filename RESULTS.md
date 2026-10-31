@@ -815,20 +815,21 @@ fast Twin and the Utterance stream now consume one `FastLidPlan::from_map` (rate
 `plan.timeline(rate, lang_index)` (`src/rust/tests/fast_lid_plan.rs` pins the plan against
 the exact nets on 15 committed Twin configs and the timeline against the frozen Mode-7
 derivation at 8 and 16 kHz); the two plans share the per-prefix net reading (`FastNetPlan`) and
-the SAD-axis body (`sad_axis`), and the stream no longer builds a whole offline Twin (two exact
-nets built per session instead of four, two per Twin). Every Twin and stream leg
-(`phase7_parity_lid.rs`, `fast_twin_lid_matrix.rs`, `phase8_stream_lid.rs`,
-`phase10_stream_lid_cli.rs`, the pyo3 stream rows) passes UNCHANGED, the ADR-0004 proof that the
-plan moved setup and nothing arithmetic. THE SAME BY-DESIGN DIVERGENCE, TWO MORE SHIFTS: the exact
+the SAD-axis body (`sad_axis`), and the stream no longer builds a whole offline Twin to borrow
+its net and its params. Every Twin and stream parity leg (`phase7_parity_lid.rs`,
+`fast_twin_lid_matrix.rs`, `phase8_stream_lid.rs`, `phase10_stream_lid_cli.rs`, the pyo3 stream
+rows) passes UNCHANGED, the ADR-0004 proof that the plan moved setup and nothing arithmetic; the
+two regime legs now expect their refusal at construction, and the deferred-load leg builds from a
+map that already names its files. THE SAME BY-DESIGN DIVERGENCE, TWO MORE SHIFTS: the exact
 Twin re-quantizes the SAD `_WindowShift` AND the `_LIDWindowShift` in place per file and RESETS
 each to 0.0 after a truncate file (`TwinBLSTMSpectralLID.cpp:1419-1420`; without the reset the
 floored shift, >= 1 frame, would read as overlap on the next file). The fast Twin used to mirror
 both; the LID plan derives both from the config at each call. At one rate the carry WITH its
 reset is a fixed point, measured bit for bit over a 6 rates x 6 window sizes x 6 shifts x 3
 sub-sampling grid on both derivations
-(`fast_lid_plan.rs::shift_requantization_is_a_fixed_point_at_one_rate_reset_included`), and the
-fast Twin's scoring never read the LID carry (its params were derived from the config value
-before the re-quantization since issue #57). Observable only across files of different rates in
+(`fast_lid_plan.rs::shift_requantization_is_a_fixed_point_at_one_rate_reset_included`), which is
+also what the fast Twin's scoring read of the LID carry (since issue #57 its params took the
+previous file's re-quantized or reset shift). Observable only across files of different rates in
 one run, as for the SAD plan. Two construction-time consequences: the LID regime rule is
 decided rate-free on the config's intent (a causal LID shape with a nonzero
 `BLSTM_LID_window`; a nonzero window with a nonzero `BLSTM_LID_shift`, overlap on intent), so
@@ -3530,7 +3531,7 @@ the parsed map is byte-identical).
 | 1 | the pre-#99 `2 * <prefix>_NNetInputSize` arithmetic | `test_tail_lengths_need_no_input_size_key`, `test_tail_lengths_are_the_engine_tail_stack[lid_blstm]`, `test_drivers_hold_no_input_size_arithmetic`, `test_tail_lengths_follow_the_built_width_not_the_declared_key`; `[lre_sad_v1]`, `[lre_sad_v2]`, `test_fold_run::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo6_two_elements` | CAUGHT by the four: `KeyError: 'BLSTM_NNetInputSize'` (twice), `assert ['train.py'] == []`, `assert [22] == [46]`. MISSED by the four key-declaring configs |
 | 2 | the tail sums the `mean` block only | `[lre_sad_v2]`, `test_fold_run::...[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo3_single_element`; `test_drivers_hold_no_input_size_arithmetic` | CAUGHT: `assert [11] == [22]`, `the strip point is the first tail block`, `assert [23] == [46]`. MISSED by the source scan (no key arithmetic to find) |
 
-## Issue #84 -- the Twin's plan: one setup for the fast Twin and the Utterance stream: the mutation battery
+## Issue #84 -- the fast LID plan: one setup for the fast Twin and the Utterance stream: the mutation battery
 
 **Live:** `tests/mutations/issue84/` (6 patches); of the six live patches on the moved files,
 `issue57/3` re-targeted to `plan.rs`'s `precheck_regime` (the plan's own leg added as a second
@@ -3538,13 +3539,13 @@ catcher) and `phase8/8` to `score_lid_entry` on the session's own net, verdicts 
 `issue25/5`, `issue57/2`, `phase7/6-faithful` and `phase7/6-literal` apply unchanged.
 
 Issue #24 gave the fast SAD driver and the frame stream one setup; the Twin had none: 160 lines
-of inline setup into 30 fields, re-read by `StreamingLidSession::new` through a whole offline
+of inline setup into 21 fields, re-read by `StreamingLidSession::new` through a whole offline
 Twin it never ran, and two stateful shifts re-quantized and reset per file. Now `FastLidPlan`
 (rate-free) + `LidTimeline` (at the rate and target) are the shared input of both consumers,
 the two plans share the per-prefix net reading (`FastNetPlan`) and the SAD-axis body
 (`sad_axis`), both carries are dropped under the #24 adjudication (the record is in issue #24's
-section above), and the LID regime rule is pre-checked rate-free. Every Twin and stream leg
-passes unchanged; the exact tree is untouched (the exact half of the proposal is #121).
+section above), and the LID regime rule is pre-checked rate-free. Every Twin and stream parity
+leg passes unchanged; the exact tree is untouched (the exact half of the proposal is #121).
 
 `uv run python tests/mutations/run.py issue84 issue57/3 phase8/8` on macOS: 32 verdicts, 3
 differed from the expectations written before the run, each re-recorded as measured (below);

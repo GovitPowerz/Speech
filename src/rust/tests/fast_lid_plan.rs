@@ -614,11 +614,8 @@ fn from_plan_with_an_in_memory_pair_scores_as_from_legacy_does() {
         let plan = FastLidPlan::from_map(&map).unwrap();
         let mut from_plan = FastTwinLid::from_plan(plan.clone(), Some(&sad), Some(&lid)).unwrap();
         let mut from_legacy = FastTwinLid::from_legacy(&map, Some(&sad), Some(&lid)).unwrap();
-        assert_eq!(
-            score_s1(&mut from_plan),
-            score_s1(&mut from_legacy),
-            "{fixture}"
-        );
+        let first = score_s1(&mut from_plan);
+        assert_eq!(first, score_s1(&mut from_legacy), "{fixture}");
         // A wrong-length pack on either seat is refused in the exact `set_weights`' words.
         let msg = err_of(
             FastTwinLid::from_plan(plan.clone(), Some(&sad[..sad.len() - 1]), Some(&lid)),
@@ -637,10 +634,6 @@ fn from_plan_with_an_in_memory_pair_scores_as_from_legacy_does() {
             "{fixture}: {msg}"
         );
         // Scoring twice is scoring once: nothing is carried between files.
-        assert_eq!(
-            score_s1(&mut from_plan),
-            score_s1(&mut from_legacy),
-            "{fixture}: second file"
-        );
+        assert_eq!(score_s1(&mut from_plan), first, "{fixture}: second file");
     }
 }

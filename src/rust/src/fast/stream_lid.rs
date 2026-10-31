@@ -2,7 +2,8 @@
 //!
 //! LID is UTTERANCE-GRANULAR by design (unlike the frame-granular SAD stream in
 //! [`super::stream`]): one `external_features` entry (one phSeq line / one cep record) is
-//! one "utterance". The offline Mode-7 Twin ([`FastTwinLid::get_segmentation`]) folds ALL of
+//! one "utterance". The offline Mode-7 Twin ([`FastTwinLid`](super::driver::FastTwinLid)'s
+//! `get_segmentation`) folds ALL of
 //! a channel's entries into a per-channel accumulator (`langid`/`confusion`/counts) then runs
 //! one epilogue; this session does the SAME fold ONE utterance at a time, exposing the
 //! running aggregate after each push.
