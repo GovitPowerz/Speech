@@ -1,0 +1,19 @@
+mutation: sad_axis drops the base pair's offset (time_offset = 0.0 on the plain and truncate branches) -- the branch every committed Twin config takes on its SAD side
+catcher: CAUGHT cargo --test fast_lid_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: CAUGHT cargo --test fast_sad_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: MISSED cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: MISSED cargo --test fast_twin_lid_matrix lid_parity_exact_vs_fast_per_pair
+
+diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
+index 5202548..07135b5 100644
+--- a/src/rust/src/fast/plan.rs
++++ b/src/rust/src/fast/plan.rs
+@@ -477,7 +477,7 @@ pub fn sad_axis(
+         (ts, ts / 2.0 - spectrum_shift_sec / 2.0)
+     } else {
+         let ts = window_shift_sec * ssr;
+-        (ts, ts / 2.0 - window_shift_sec / 2.0)
++        (ts, 0.0)
+     };
+     SadAxis {
+         window_shift_sec,

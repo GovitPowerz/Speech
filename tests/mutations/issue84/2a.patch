@@ -1,0 +1,20 @@
+mutation: sad_axis takes the signal driver's overlap branch (time_step = window_shift_sec, time_offset = 0.0) -- the branch the Twin's truncate SAD side never takes
+catcher: CAUGHT cargo --test fast_sad_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: CAUGHT cargo --test phase7_parity_sad sad_parity_exact_vs_fast
+catcher: MISSED cargo --test fast_lid_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: MISSED cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+
+diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
+index 5202548..8410998 100644
+--- a/src/rust/src/fast/plan.rs
++++ b/src/rust/src/fast/plan.rs
+@@ -473,8 +473,7 @@ pub fn sad_axis(
+     );
+     let ssr = ssr as f64;
+     let (time_step, time_offset) = if window_size > 0 && !no_overlap {
+-        let ts = spectrum_shift_sec * ssr;
+-        (ts, ts / 2.0 - spectrum_shift_sec / 2.0)
++        (window_shift_sec, 0.0)
+     } else {
+         let ts = window_shift_sec * ssr;
+         (ts, ts / 2.0 - window_shift_sec / 2.0)

@@ -1,0 +1,18 @@
+mutation: FastLidPlan::from_map skips the regime rule (precheck_regime; nothing else refuses it, the timeline being infallible)
+catcher: CAUGHT cargo --test fast_lid_plan rate_free_precheck_refuses_what_no_rate_can_rescue
+catcher: CAUGHT cargo --test fast_twin_lid_matrix windowed_causal_lid_is_refused_offline_and_streaming
+catcher: CAUGHT cargo --test fast_twin_lid_matrix overlap_lid_is_refused_on_every_shape
+catcher: CAUGHT cargo --test phase7_parity_lid fast_twin_refuses_the_overlap_lid_regime
+
+diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
+index 5202548..0b36a39 100644
+--- a/src/rust/src/fast/plan.rs
++++ b/src/rust/src/fast/plan.rs
+@@ -727,7 +727,6 @@ impl FastLidPlan {
+             min_nb_of_frames,
+             noise_magnitude,
+         };
+-        plan.precheck_regime()?;
+         Ok(plan)
+     }
+ 

@@ -720,24 +720,18 @@ fn fast_twin_bails_on_non_mode7() {
 /// matrix. What survives is a REGIME rule, pinned here on the real net: the overlap LID
 /// windowing is refused on every shape, and a windowed CAUSAL LID net is refused
 /// (`tests/fast_twin_lid_matrix.rs` pins the causal half on the committed forward fixtures
-/// and the build-per-shape half). Both bail where the window resolves against the rate
-/// (`get_segmentation`), NOT at construction -- the pair must BUILD first.
+/// and the build-per-shape half). Since issue #84 both are the LID plan's rate-free
+/// pre-check, raised at construction on the config's intent (a nonzero `BLSTM_LID_shift`
+/// under a nonzero window is overlap at every rate).
 #[test]
 fn fast_twin_refuses_the_overlap_lid_regime() {
     // `window 0.25 / shift 0.0` is the committed truncate pair; `shift 0.1` resolves 10
     // periodogram frames (>= 1) -> overlap.
     let mut m = map_of("twin_mode7");
     m.insert("BLSTM_LID_shift".into(), "0.1".into());
-    let mut drv =
-        build_fast_twin(&m).expect("the overlap refusal is a regime rule, not a construction bail");
-    let mut audio = phseq_audio("s1", 0);
-    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
-    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
-        .map(|_| Segmentation::new(dur))
-        .collect();
-    let err = drv
-        .get_segmentation(&mut audio, &mut segs, None)
-        .expect_err("fast Twin + overlap LID windowing must bail");
+    let err = build_fast_twin(&m)
+        .err()
+        .expect("fast Twin + overlap LID windowing must bail");
     assert!(
         err.to_string()
             .contains("overlap LID windowing is unsupported"),

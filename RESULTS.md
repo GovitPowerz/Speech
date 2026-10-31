@@ -810,6 +810,38 @@ only resolves to truncate at the actual rate is still caught by the timeline at 
 `get_segmentation`, `timeline_catches_a_sub_frame_shift_the_precheck_cannot`); and the fast SAD
 driver is an algo-3 plan, so a Twin (algo 6) config no longer builds one.
 
+**Issue #84 (2026-10-31) extends the setup rule and the dropped carry to the Twin.** The offline
+fast Twin and the Utterance stream now consume one `FastLidPlan::from_map` (rate-free) +
+`plan.timeline(rate, lang_index)` (`src/rust/tests/fast_lid_plan.rs` pins the plan against
+the exact nets on 15 committed Twin configs and the timeline against the frozen Mode-7
+derivation at 8 and 16 kHz); the two plans share the per-prefix net reading (`FastNetPlan`) and
+the SAD-axis body (`sad_axis`), and the stream no longer builds a whole offline Twin to borrow
+its net and its params. Every Twin and stream parity leg (`phase7_parity_lid.rs`,
+`fast_twin_lid_matrix.rs`, `phase8_stream_lid.rs`, `phase10_stream_lid_cli.rs`, the pyo3 stream
+rows) passes UNCHANGED, the ADR-0004 proof that the plan moved setup and nothing arithmetic; the
+two regime legs now expect their refusal at construction, and the deferred-load leg builds from a
+map that already names its files. THE SAME BY-DESIGN DIVERGENCE, TWO MORE SHIFTS: the exact
+Twin re-quantizes the SAD `_WindowShift` AND the `_LIDWindowShift` in place per file and RESETS
+each to 0.0 after a truncate file (`TwinBLSTMSpectralLID.cpp:1419-1420`; without the reset the
+floored shift, >= 1 frame, would read as overlap on the next file). The fast Twin used to mirror
+both; the LID plan derives both from the config at each call. At one rate the carry WITH its
+reset is a fixed point, measured bit for bit over a 6 rates x 6 window sizes x 6 shifts x 3
+sub-sampling grid on both derivations
+(`fast_lid_plan.rs::shift_requantization_is_a_fixed_point_at_one_rate_reset_included`), which is
+also what the fast Twin's scoring read of the LID carry (since issue #57 its params took the
+previous file's re-quantized or reset shift). Observable only across files of different rates in
+one run, as for the SAD plan. Two construction-time consequences: the LID regime rule is
+decided rate-free on the config's intent (a causal LID shape with a nonzero
+`BLSTM_LID_window`; a nonzero window with a nonzero `BLSTM_LID_shift`, overlap on intent), so
+the two refusals the Twin raised at its first `get_segmentation` are raised at
+`BagOfProcessors::from_configs` as the session always raised them, and a sub-frame positive LID
+shift the exact tree would quantize to truncate is refused too, as is a sub-frame positive window
+it would quantize to plain, on a causal shape or under a shift (the two tightenings; every
+committed LID config carries `window 0.25` or `0` and `shift 0.0`) -- stricter than the resolved regime, so the LID
+timeline, unlike the SAD one, has nothing left to refuse and is infallible; and
+`Algo_choice != 6` is refused by the plan as `!= 3` is by the SAD one. The Twin's SAD side is gated by nothing (frozen SAD: every committed
+Twin config carries `BLSTM_shift 0`, the truncate the SAD plan refuses).
+
 ---
 
 ## Phase 9 -- new architectures
@@ -3498,6 +3530,41 @@ the parsed map is byte-identical).
 |---|---|---|---|
 | 1 | the pre-#99 `2 * <prefix>_NNetInputSize` arithmetic | `test_tail_lengths_need_no_input_size_key`, `test_tail_lengths_are_the_engine_tail_stack[lid_blstm]`, `test_drivers_hold_no_input_size_arithmetic`, `test_tail_lengths_follow_the_built_width_not_the_declared_key`; `[lre_sad_v1]`, `[lre_sad_v2]`, `test_fold_run::test_tail_lengths_strip_the_engine_packs_normalize_tail[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo6_two_elements` | CAUGHT by the four: `KeyError: 'BLSTM_NNetInputSize'` (twice), `assert ['train.py'] == []`, `assert [22] == [46]`. MISSED by the four key-declaring configs |
 | 2 | the tail sums the `mean` block only | `[lre_sad_v2]`, `test_fold_run::...[twin_algo6]`, `test_phase4d_algo3_drivers::test_tail_lengths_algo3_single_element`; `test_drivers_hold_no_input_size_arithmetic` | CAUGHT: `assert [11] == [22]`, `the strip point is the first tail block`, `assert [23] == [46]`. MISSED by the source scan (no key arithmetic to find) |
+
+## Issue #84 -- the fast LID plan: one setup for the fast Twin and the Utterance stream: the mutation battery
+
+**Live:** `tests/mutations/issue84/` (6 patches); of the six live patches on the moved files,
+`issue57/3` re-targeted to `plan.rs`'s `precheck_regime` (the plan's own leg added as a second
+catcher) and `phase8/8` to `score_lid_entry` on the session's own net, verdicts unchanged;
+`issue25/5`, `issue57/2`, `phase7/6-faithful` and `phase7/6-literal` apply unchanged.
+
+Issue #24 gave the fast SAD driver and the frame stream one setup; the Twin had none: 160 lines
+of inline setup into 21 fields, re-read by `StreamingLidSession::new` through a whole offline
+Twin it never ran, and two stateful shifts re-quantized and reset per file. Now `FastLidPlan`
+(rate-free) + `LidTimeline` (at the rate and target) are the shared input of both consumers,
+the two plans share the per-prefix net reading (`FastNetPlan`) and the SAD-axis body
+(`sad_axis`), both carries are dropped under the #24 adjudication (the record is in issue #24's
+section above), and the LID regime rule is pre-checked rate-free. Every Twin and stream parity
+leg passes unchanged; the exact tree is untouched (the exact half of the proposal is #121).
+
+`uv run python tests/mutations/run.py issue84 issue57/3 phase8/8` on macOS: 32 verdicts, 3
+differed from the expectations written before the run, each re-recorded as measured (below);
+`--changed-since origin/main`: 88 verdicts, 0 differ (the branch moved `fast/plan.rs`, `fast/driver.rs`, `fast/stream_lid.rs` and the Twin test files, so the phase-4a/4b/7/8/10 and #25/#57/#92 batteries on those files re-ran, corpus linked).
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `FastLidPlan::timeline` derives `ssif` from `SpectralParams` instead of forcing the Mode-7 80 | `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation`, `phase7_parity_lid::lid_parity_phseq_exact_vs_fast`, `fast_twin_lid_matrix::lid_parity_exact_vs_fast_per_pair`, `phase8_stream_lid::every_shape_streams_prefix_correct_and_finish_equals_offline` | CAUGHT by the plan pin (`twin_mode7.config@8000: ssif`) AND by both parity legs (`confusion matrix FLIP`, `classification_errors delta 3.199e-3 breached the pin 2.1e-5`): the expectation said the parity legs were blind, but every committed Twin config carries `BLSTM_spectrum_shift 0.025`, so the derived shift is 200, the LID window 10 instead of 25. MISSED by the stream leg (self-consistent: both sides read the same plan). |
+| 2a | `sad_axis` takes the signal driver's overlap branch (`time_step = window_shift_sec`, `time_offset = 0.0`) | `fast_sad_plan::timeline_reproduces_the_frozen_per_file_derivation`, `phase7_parity_sad::sad_parity_exact_vs_fast`, `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation`, `phase7_parity_lid::lid_parity_phseq_exact_vs_fast` (the grilling named the `phase4b_twin_mode7` SAD segmentation legs; those drive the exact Twin, so the SAD plan's legs stand in for 2a and 2b) | CAUGHT by the two SAD legs (`tier2_spectral.config@8000: time_step`, `segment COUNT differs chan 0`); MISSED by both LID legs, as expected: the Twin's SAD side is truncate on every committed config and never takes the branch. |
+| 2b | `sad_axis` drops the base pair's offset (`time_offset = 0.0` on the plain and truncate branches) | `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation`, `fast_sad_plan::timeline_reproduces_the_frozen_per_file_derivation`, `phase7_parity_lid::lid_parity_phseq_exact_vs_fast`, `fast_twin_lid_matrix::lid_parity_exact_vs_fast_per_pair` | CAUGHT by both plan pins (`twin_mode7.config@8000: time_offset`, `slstm_forward.config@8000: time_offset`); MISSED by both LID parity legs, as expected: no fast LID leg compares the SAD segmentation, which is one whole-file Speech segment on the constant-10 result. |
+| 3 | `FastLidPlan::from_map` skips the regime rule (nothing else refuses it: the timeline is infallible) | `fast_lid_plan::rate_free_precheck_refuses_what_no_rate_can_rescue`, `fast_twin_lid_matrix::windowed_causal_lid_is_refused_offline_and_streaming`, `::overlap_lid_is_refused_on_every_shape`, `phase7_parity_lid::fast_twin_refuses_the_overlap_lid_regime` | CAUGHT by all four (`must be refused`, `the offline Twin must refuse the regime at construction` x2, `fast Twin + overlap LID windowing must bail`), every catcher a construction pin. |
+| 4 | `derive_lid_window` returns the raw LID shift, the floor to one frame dropped | `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation`, `::shift_requantization_is_a_fixed_point_at_one_rate_reset_included` | CAUGHT by the derivation pin (`twin_mode7.config@8000: LID shift`); MISSED by the fixed-point leg, re-recorded: a floor-less carry (0 frames written back as 0.0) is a fixed point too, so that leg pins the carry's idempotence, never the floor. |
+| 5 | `FastLidPlan::read_weights_files` skips the `BLSTM_weightsFile` read | `fast_twin_lid_matrix::the_sad_file_seam_matches_the_exact_twin_row_by_row` | CAUGHT (`short SAD: the fast outcome must equal the exact one`). |
+
+What the battery measured: the plan pins own the setup facts the parity legs cannot see (a
+time-axis term on the truncate SAD side, the LID shift floor), the parity legs own what reaches
+the LID posteriors (the forced 80, through the window it sizes), and the self-consistent stream
+leg is blind to every one of them by construction (ADR-0005's battery lesson: both sides read
+one plan).
 
 ## Issue #110 -- the fast-tree training refusal at one site, mode-free: the mutation battery
 
