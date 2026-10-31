@@ -174,7 +174,7 @@ The one rate-free algo-6 Mode-7 setup of the fast tree (`fast::plan::FastLidPlan
 _Avoid_: Twin plan, LID setup
 
 **Timeline**:
-The rate-dependent half of either plan (`FastSadPlan::timeline(rate)`, `FastLidPlan::timeline(who, rate, lang_index)`): framing, the quantized shifts, the resolved window and the decision layer's `(time_step, time_offset)`; on the LID plan also the resolved LID window and the target clamp, with the spectrum shift the Mode-7 constant 80 (the regime rule is the plan's, at construction). The offline driver derives one per file, the stream one at construction. Derived from the config every time; the legacy's stateful carry (the SAD `_WindowShift`, the Twin's `_LIDWindowShift` too) is not reproduced on the fast tree.
+The rate-dependent half of either plan (`FastSadPlan::timeline(rate)`, `FastLidPlan::timeline(rate, lang_index)`): framing, the quantized shifts, the resolved window and the decision layer's `(time_step, time_offset)`; on the LID plan also the resolved LID window and the target clamp, with the spectrum shift the Mode-7 constant 80 (the regime rule is the plan's, at construction). The offline driver derives one per file, the stream one at construction. Derived from the config every time; the legacy's stateful carry (the SAD `_WindowShift`, the Twin's `_LIDWindowShift` too) is not reproduced on the fast tree.
 
 **Cell geometry**:
 The `Mamba_*` / `Cfc_*` / `Transformer_*` geometry a config carries, as one fast-tree value (`CellGeometry`), parsed for every config and consumed by one arm. A value, not a seam: the cell set stays the closed `CellType` enum.

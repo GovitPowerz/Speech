@@ -812,7 +812,7 @@ driver is an algo-3 plan, so a Twin (algo 6) config no longer builds one.
 
 **Issue #84 (2026-10-31) extends the setup rule and the dropped carry to the Twin.** The offline
 fast Twin and the Utterance stream now consume one `FastLidPlan::from_map` (rate-free) +
-`plan.timeline(who, rate, lang_index)` (`src/rust/tests/fast_lid_plan.rs` pins the plan against
+`plan.timeline(rate, lang_index)` (`src/rust/tests/fast_lid_plan.rs` pins the plan against
 the exact nets on 15 committed Twin configs and the timeline against the frozen Mode-7
 derivation at 8 and 16 kHz); the two plans share the per-prefix net reading (`FastNetPlan`) and
 the SAD-axis body (`sad_axis`), and the stream no longer builds a whole offline Twin (two exact
@@ -834,8 +834,9 @@ decided rate-free on the config's intent (a causal LID shape with a nonzero
 `BLSTM_LID_window`; a nonzero window with a nonzero `BLSTM_LID_shift`, overlap on intent), so
 the two refusals the Twin raised at its first `get_segmentation` are raised at
 `BagOfProcessors::from_configs` as the session always raised them, and a sub-frame positive LID
-shift the exact tree would quantize to truncate is refused too (the one tightening; every
-committed LID config carries `shift 0.0`) -- stricter than the resolved regime, so the LID
+shift the exact tree would quantize to truncate is refused too, as is a sub-frame positive window
+it would quantize to plain, on a causal shape or under a shift (the two tightenings; every
+committed LID config carries `window 0.25` or `0` and `shift 0.0`) -- stricter than the resolved regime, so the LID
 timeline, unlike the SAD one, has nothing left to refuse and is infallible; and
 `Algo_choice != 6` is refused by the plan as `!= 3` is by the SAD one. The Twin's SAD side is gated by nothing (frozen SAD: every committed
 Twin config carries `BLSTM_shift 0`, the truncate the SAD plan refuses).

@@ -548,12 +548,8 @@ pub struct SadTimeline {
 // (`fast::stream_lid::StreamingLidSession`).
 // ===========================================================================
 
-/// Read one `i32` config scalar with a default (the Twin's reader; #87 retires it).
-pub(super) fn twin_i32_default(
-    map: &IndexMap<String, String>,
-    key: &str,
-    default: i32,
-) -> Result<i32> {
+/// Read one `i32` config scalar with a default (the Twin's reader, a copy of `tasks/lid.rs`'s; #87 retires both).
+fn twin_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
     match map.get(key) {
         None => Ok(default),
         Some(s) => s
@@ -563,12 +559,8 @@ pub(super) fn twin_i32_default(
     }
 }
 
-/// Read one `bool` config scalar with a default (the Twin's reader; #87 retires it).
-pub(super) fn twin_bool_default(
-    map: &IndexMap<String, String>,
-    key: &str,
-    default: bool,
-) -> Result<bool> {
+/// Read one `bool` config scalar with a default (the Twin's reader, a copy of `tasks/lid.rs`'s; #87 retires both).
+fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
     match map.get(key) {
         None => Ok(default),
         Some(s) => s
@@ -742,9 +734,11 @@ impl FastLidPlan {
     /// plain forward, nothing accumulates across overlapping windows); a bidirectional shape
     /// runs either plain or truncate, exactly as the exact tree dispatches them. Raised at
     /// `BagOfProcessors::from_configs` / the session's construction. Stricter than the
-    /// resolved regime in one case: a sub-frame positive shift the exact tree would quantize
-    /// to truncate is refused as overlap here, so [`Self::timeline`] has nothing left to
-    /// refuse and is infallible (the pinned clauses are the fixed text).
+    /// resolved regime where a sub-frame value quantizes to zero: a sub-frame positive shift
+    /// the exact tree would quantize to truncate is refused as overlap here, and a sub-frame
+    /// positive window it would quantize to plain is refused as windowed (causal) or as
+    /// overlap (under a shift), so [`Self::timeline`] has nothing left to refuse and is
+    /// infallible (the pinned clauses are the fixed text).
     fn precheck_regime(&self) -> Result<()> {
         let w = self.lid_window_size_sec;
         let s = self.lid_window_shift_sec;
@@ -753,9 +747,10 @@ impl FastLidPlan {
         {
             bail!(
                 "fast LID plan: windowed LID inference is unsupported for a causal LID net (cell \
-                 '{}', BLSTM_LID_window {w} resolves a nonzero window at every rate); a causal \
-                 cell's state is reset at every window boundary -- a forward LID net runs the \
-                 plain regime (BLSTM_LID_window 0, what the launcher writes)",
+                 '{}', BLSTM_LID_window {w} > 0: windowed on the config's intent, refused at \
+                 every rate whatever the rate quantizes it to); a causal cell's state is reset \
+                 at every window boundary -- a forward LID net runs the plain regime \
+                 (BLSTM_LID_window 0, what the launcher writes)",
                 cell.as_str()
             );
         }
@@ -831,17 +826,17 @@ impl FastLidPlan {
         }
     }
 
-    /// The SAD `real_vec_size` for a file of `frame_count` samples at `rate`: the frozen
-    /// `get_blstm_param` sizing on the never-run SAD net, through [`sad_axis`].
-    pub fn rows_for(&self, rate: f64, frame_count: usize) -> usize {
-        let ssif = MODE7_SSIF;
+    /// The SAD `real_vec_size` for a file of `frame_count` samples on timeline `tl`: the
+    /// frozen `get_blstm_param` sizing on the never-run SAD net, through [`sad_axis`] (the
+    /// SAD plan's shape: the rows are laid on the time axis `tl` carries).
+    pub fn rows_for(&self, tl: &LidTimeline, frame_count: usize) -> usize {
         sad_axis(
             &self.driver_cfg,
             &self.sad.spec,
             self.sad.ssr,
-            rate,
-            ssif,
-            ssif as f64 / rate,
+            tl.rate,
+            tl.ssif,
+            tl.spectrum_shift_sec,
             frame_count,
         )
         .rows

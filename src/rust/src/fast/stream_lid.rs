@@ -116,7 +116,7 @@ impl StreamingLidSession {
         lang_index: i32,
         lid_weights: Option<&[f64]>,
     ) -> Result<StreamingLidSession> {
-        Self::from_plan(FastLidPlan::from_map(map)?, rate, lang_index, lid_weights)
+        Self::from_plan(&FastLidPlan::from_map(map)?, rate, lang_index, lid_weights)
     }
 
     /// Build on an already-parsed plan. `lid_weights: Some(flat)` builds the net immediately
@@ -126,7 +126,7 @@ impl StreamingLidSession {
     /// timeline at `rate` for `lang_index` (the regime rule -- windowed causal, overlap --
     /// was the plan's, at its construction).
     pub fn from_plan(
-        plan: FastLidPlan,
+        plan: &FastLidPlan,
         rate: f64,
         lang_index: i32,
         lid_weights: Option<&[f64]>,

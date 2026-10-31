@@ -299,7 +299,7 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
                 )
                 .3;
                 assert_eq!(
-                    plan.rows_for(rate, frames),
+                    plan.rows_for(&tl, frames),
                     rows,
                     "{rel}@{rate}: rows for {frames}"
                 );
@@ -492,7 +492,7 @@ fn rate_free_precheck_refuses_what_no_rate_can_rescue() {
         ) && msg.contains("at every rate"),
         "{msg}"
     );
-    // OVERLAP on a bidirectional shape: `shift 0.1` (10 frames at 8 kHz), and the one
+    // OVERLAP on a bidirectional shape: `shift 0.1` (10 frames at 8 kHz), and the first
     // tightening, a sub-frame positive shift (`0.001`: 0.1 frame at 8 kHz, which the exact
     // tree would quantize to truncate) -- both refused as overlap on intent, the message
     // naming the intent rule, not a resolution.
@@ -512,6 +512,48 @@ fn rate_free_precheck_refuses_what_no_rate_can_rescue() {
             "shift {shift}: {msg}"
         );
     }
+    // The other tightening, a sub-frame positive WINDOW (`0.009`: 0.45 frame at 8 kHz, which
+    // the exact tree would quantize to the plain regime there, 0.9 -> 1 frame at 16 kHz):
+    // refused on a causal shape, and as overlap under a shift, on intent.
+    let m = with(
+        map_for("phase9/twin_mode7_lid_slstm_forward.config"),
+        "BLSTM_LID_window",
+        "0.009",
+    );
+    let msg = err_of(FastLidPlan::from_map(&m), "sub-frame windowed causal");
+    assert!(
+        msg.contains("windowed LID inference is unsupported for a causal LID net"),
+        "{msg}"
+    );
+    let m = with(
+        with(
+            map_for("phase4b/twin_mode7.config"),
+            "BLSTM_LID_window",
+            "0.009",
+        ),
+        "BLSTM_LID_shift",
+        "0.1",
+    );
+    let msg = err_of(FastLidPlan::from_map(&m), "sub-frame window under a shift");
+    assert!(
+        msg.contains("the overlap LID windowing is unsupported on the fast path"),
+        "{msg}"
+    );
+    // The same window with `shift 0.0` on a bidirectional shape RUNS: plain at 8 kHz,
+    // truncate at 16 kHz -- the rate dependence the intent rule refuses to track.
+    let plan = FastLidPlan::from_map(&with(
+        map_for("phase4b/twin_mode7.config"),
+        "BLSTM_LID_window",
+        "0.009",
+    ))
+    .unwrap();
+    assert_eq!(plan.timeline(8000.0, 0).lid_window_size, 0);
+    let tl = plan.timeline(16000.0, 0);
+    assert!(
+        tl.lid_no_overlap && tl.lid_window_size > 0,
+        "{}",
+        tl.lid_window_size
+    );
     // A causal shape with `window 0` and a shift (plain: the shift is inert) RUNS, as does
     // the committed truncate pair (`window 0.25 / shift 0.0`), at both rates.
     let m = with(

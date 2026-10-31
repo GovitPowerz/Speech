@@ -233,9 +233,9 @@ pub(crate) fn build_spec_aligned_to(
 /// bidirectional LSTM is. LID (issue #57): a BIDIRECTIONAL shape runs the
 /// TwoSweeps/single-sweep TRUNCATE windowing the committed LID configs resolve to
 /// (`BLSTM_LID_window 0.25`) or the PLAIN forward (`window 0`); a CAUSAL shape runs PLAIN
-/// only; OVERLAP is refused on every shape, where the window resolves against the rate
-/// rate-free on the config's intent (`fast::plan::FastLidPlan::from_map`, issue #84), at
-/// construction for the offline Twin and the Utterance stream alike.
+/// only; OVERLAP is refused on every shape. Both refusals are rate-free, on the config's
+/// intent (`fast::plan::FastLidPlan::from_map`, issue #84), at construction for the offline
+/// Twin and the Utterance stream alike.
 ///
 /// `large_enum_variant` allowed on the house precedent (`Processor`, `CellLayer`,
 /// `FastCell`): a `FastNet` is built ONCE per driver and then only borrowed -- never a
@@ -1036,7 +1036,7 @@ impl Segmenter for FastTwinLid {
         // at construction, so the two cannot drift. The regime rule was the plan's, at
         // construction.
         let tl = self.plan.timeline(rate, audio.lang_index);
-        let real_vec_size = self.plan.rows_for(rate, audio.data.ncols());
+        let real_vec_size = self.plan.rows_for(&tl, audio.data.ncols());
         let (time_step, time_offset) = (tl.sad.time_step, tl.sad.time_offset);
         let params = &tl.params;
 
