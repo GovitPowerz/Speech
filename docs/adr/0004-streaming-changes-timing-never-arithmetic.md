@@ -1,6 +1,6 @@
 # ADR-0004: Streaming changes timing, never arithmetic: the frozen-norm causality cut, shared step kernels, and emission with zero retractions
 
-**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9); the bidirectional refusal scoped to the frame stream 2026-10-09 (issue #57); the decision layer brought under the kernel rule 2026-10-12 (issue #26)
+**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9); the bidirectional refusal scoped to the frame stream 2026-10-09 (issue #57); the decision layer brought under the kernel rule 2026-10-12 (issue #26); the setup rule extended to the Twin 2026-10-31 (issue #84)
 
 ## Context
 
@@ -41,6 +41,12 @@ stream reads: `pending_begin`'s `+ off` (pinned by
 `conv_at`'s `src_base` (the batch passes 0; the trimming stream legs own it). The move is an
 ADR-0002 touch class, the stepwise hoist.
 
+**Amendment (2026-10-31, issue #84):** the SETUP rule covers the Twin too -- one
+`fast::plan::FastLidPlan` (rate-free) and one `LidTimeline` (at the rate and target) are the
+shared input of the offline fast Twin and the Utterance stream, which used to build a whole
+offline Twin to borrow its net and its params; the per-prefix net reading and the SAD-axis body
+are shared with the SAD plan, and the Twin's two stateful shifts are dropped as the SAD plan's
+was (a fixed point at one rate, reset included; `RESULTS.md`, issue #24's section).
 **Emission is settled-prefix only, with zero retractions.** The decision layer emits a segment
 only once nothing in the future can change it: the frontier is bounded by the last raw boundary,
 the **consumed** frontier minus one step (never the received one), and the hysteresis's

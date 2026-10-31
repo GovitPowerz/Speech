@@ -169,8 +169,12 @@ The explicit per-timestep `step(x_t, &mut State)` every fast cell exposes, and s
 The one rate-free algo-3 setup of the fast tree (`fast::plan::FastSadPlan::from_map`): config structs, Fast shape, spec, Cell geometry, normalization type, pack length, fixed gain, weight-file key, and every refusal the config alone decides. The offline fast driver and the frame stream both consume it; the plan is the shared input, the Step kernel the shared arithmetic.
 _Avoid_: setup, config, session for the value itself
 
+**Fast LID plan**:
+The one rate-free algo-6 Mode-7 setup of the fast tree (`fast::plan::FastLidPlan::from_map`): the three `BLSTM` config structs, the never-run SAD net's plan (sub-sampling and pack length, nothing gated), the LID net's plan, the Mode-7 scalars, and every refusal the config alone decides, the LID regime pre-check included. The offline Twin and the Utterance stream both consume it. Shares the per-prefix net reading (`FastNetPlan`) and the SAD-axis body (`sad_axis`) with the Fast SAD plan.
+_Avoid_: Twin plan, LID setup
+
 **Timeline**:
-The rate-dependent half of the Fast SAD plan (`plan.timeline(rate)`): framing, the quantized shifts, the resolved window and the decision layer's `(time_step, time_offset)`. The offline driver derives one per file, the stream one at construction. Derived from the config every time; the legacy's stateful carry is not reproduced on the fast tree.
+The rate-dependent half of either plan (`FastSadPlan::timeline(rate)`, `FastLidPlan::timeline(who, rate, lang_index)`): framing, the quantized shifts, the resolved window and the decision layer's `(time_step, time_offset)`; on the LID plan also the resolved LID window and the target clamp, with the spectrum shift the Mode-7 constant 80 (the regime rule is the plan's, at construction). The offline driver derives one per file, the stream one at construction. Derived from the config every time; the legacy's stateful carry (the SAD `_WindowShift`, the Twin's `_LIDWindowShift` too) is not reproduced on the fast tree.
 
 **Cell geometry**:
 The `Mamba_*` / `Cfc_*` / `Transformer_*` geometry a config carries, as one fast-tree value (`CellGeometry`), parsed for every config and consumed by one arm. A value, not a seam: the cell set stays the closed `CellType` enum.
