@@ -3,10 +3,10 @@ catcher: CAUGHT cargo --test fast_lid_plan timeline_reproduces_the_frozen_per_fi
 catcher: MISSED cargo --test fast_lid_plan shift_requantization_is_a_fixed_point_at_one_rate_reset_included
 
 diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
-index 5202548..518cd89 100644
+index 148f5bc..f671c5e 100644
 --- a/src/rust/src/fast/plan.rs
 +++ b/src/rust/src/fast/plan.rs
-@@ -904,10 +904,7 @@ pub fn derive_lid_window(
+@@ -912,8 +912,5 @@ pub fn derive_lid_window(
              lid_window_size = 10 * lid_ssr;
          }
      }
@@ -16,5 +16,3 @@ index 5202548..518cd89 100644
 -    (lid_window_size, lid_window_shift as usize, lid_no_overlap)
 +    (lid_window_size, lid_window_shift.max(0) as usize, lid_no_overlap)
  }
- 
- /// The LID regime rule (issue #57, D2), ONE body for the rate-free pre-check

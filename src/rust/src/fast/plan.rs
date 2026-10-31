@@ -174,6 +174,15 @@ impl FastNetPlan {
     }
 }
 
+/// `Algo_choice`, the one key both plans dispatch on; `who` prefixes a parse error.
+fn read_algo(map: &IndexMap<String, String>, who: &str) -> Result<i32> {
+    map.get("Algo_choice")
+        .ok_or_else(|| anyhow!("param 'Algo_choice' not found in config"))?
+        .trim()
+        .parse::<i32>()
+        .map_err(|e| anyhow!("{who}: Algo_choice parse: {e}"))
+}
+
 /// The three `BLSTM` config structs every fast plan reads (the SAD net's segmenter,
 /// driver and feature config; on the Twin the SAD side is never run but its decision
 /// layer, time axis and pre-emphasis gates read the same three).
@@ -226,12 +235,7 @@ impl FastSadPlan {
     /// (`BLSTM_TDCwindow > 0`, spec R4); a normalization type outside the fast tree's
     /// `{-1, 0, 1}`; and the rate-free windowing pre-check ([`Self::precheck_regime`]).
     pub fn from_map(map: &IndexMap<String, String>) -> Result<FastSadPlan> {
-        let algo = map
-            .get("Algo_choice")
-            .ok_or_else(|| anyhow::anyhow!("param 'Algo_choice' not found in config"))?
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow::anyhow!("fast SAD plan: Algo_choice parse: {e}"))?;
+        let algo = read_algo(map, "fast SAD plan")?;
         if algo != 3 {
             bail!("fast SAD plan: only algo 3 (spectral SAD) is supported (got {algo})");
         }
@@ -451,7 +455,7 @@ impl FastSadPlan {
 /// (the asymmetry vs the signal driver); truncate keeps the base pair, where
 /// `window_shift_sec` is the value `get_blstm_param` just quantized (floored to 1 at
 /// window 0). `rows` is the only frame-count-dependent output.
-pub fn sad_axis(
+pub(crate) fn sad_axis(
     driver_cfg: &DriverConfig,
     spec: &NnetSpec,
     ssr: usize,
@@ -628,14 +632,10 @@ impl FastLidPlan {
     /// interior output rows with -0.5 for it, risk R7, which forward-only scoring never
     /// reproduces); MLP mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`, the exact dispatch's
     /// `is_mlp` route to the MLP drivers, refused on the same derived flag so construction
-    /// fails whether or not weights arrive).
+    /// fails whether or not weights arrive); and the LID regime rule, rate-free
+    /// ([`Self::precheck_regime`]).
     pub fn from_map(map: &IndexMap<String, String>) -> Result<FastLidPlan> {
-        let algo = map
-            .get("Algo_choice")
-            .ok_or_else(|| anyhow!("param 'Algo_choice' not found in config"))?
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow!("fast LID plan: Algo_choice parse: {e}"))?;
+        let algo = read_algo(map, "fast LID plan")?;
         if algo != 6 {
             bail!("fast LID plan: only algo 6 (Twin LID) is supported (got {algo})");
         }
@@ -731,27 +731,44 @@ impl FastLidPlan {
         Ok(plan)
     }
 
-    /// The RATE-FREE pre-check, on the config's intent as the SAD plan's is: a ZERO
-    /// `BLSTM_LID_window` is the plain regime at every rate, a nonzero one under a ZERO
-    /// `BLSTM_LID_shift` is truncate at every rate (what every committed LID config
-    /// carries), and a nonzero shift under a nonzero window is OVERLAP. So a causal LID
-    /// shape with a nonzero window and any shape with both nonzero are refused here, at
-    /// `BagOfProcessors::from_configs` / the session's construction, even where a tiny
-    /// value would quantize differently at some rate (a sub-frame positive shift the exact
-    /// tree would run as truncate is refused too, the one tightening). [`Self::timeline`]
-    /// re-checks on the resolved values.
+    /// The LID regime rule (issue #57, D2), ONE body for the offline Twin and the Utterance
+    /// stream, decided RATE-FREE on the config's intent (issue #84): a ZERO `BLSTM_LID_window`
+    /// is the plain regime at every rate, a nonzero one under a ZERO `BLSTM_LID_shift` is
+    /// truncate at every rate (what every committed LID config carries), and a nonzero shift
+    /// under a nonzero window is OVERLAP on intent. A CAUSAL shape runs the PLAIN regime only
+    /// (a causal cell inside a window has its state reset at every window boundary, the SAD
+    /// driver's rule; the launcher writes `BLSTM_LID_window 0` on a forward LID net); every
+    /// shape refuses OVERLAP (the fast LID scoring implements the truncate sweep and the
+    /// plain forward, nothing accumulates across overlapping windows); a bidirectional shape
+    /// runs either plain or truncate, exactly as the exact tree dispatches them. Raised at
+    /// `BagOfProcessors::from_configs` / the session's construction. Stricter than the
+    /// resolved regime in one case: a sub-frame positive shift the exact tree would quantize
+    /// to truncate is refused as overlap here, so [`Self::timeline`] has nothing left to
+    /// refuse and is infallible (the pinned clauses are the fixed text).
     fn precheck_regime(&self) -> Result<()> {
-        let windowed = self.lid_window_size_sec > 0.0;
-        let no_overlap = windowed && self.lid_window_shift_sec == 0.0;
-        check_lid_regime(
-            "fast LID plan",
-            self.lid.shape,
-            self.lid_window_size_sec,
-            self.lid_window_shift_sec,
-            windowed,
-            no_overlap,
-            " at every rate",
-        )
+        let w = self.lid_window_size_sec;
+        let s = self.lid_window_shift_sec;
+        if let FastNetShape::Causal(cell) = self.lid.shape
+            && w > 0.0
+        {
+            bail!(
+                "fast LID plan: windowed LID inference is unsupported for a causal LID net (cell \
+                 '{}', BLSTM_LID_window {w} resolves a nonzero window at every rate); a causal \
+                 cell's state is reset at every window boundary -- a forward LID net runs the \
+                 plain regime (BLSTM_LID_window 0, what the launcher writes)",
+                cell.as_str()
+            );
+        }
+        if w > 0.0 && s > 0.0 {
+            bail!(
+                "fast LID plan: the overlap LID windowing is unsupported on the fast path \
+                 (BLSTM_LID_shift {s} > 0 under BLSTM_LID_window {w}: overlap on the config's \
+                 intent, whatever the rate quantizes it to); the fast LID scoring runs the \
+                 truncate sweep or the plain forward -- the committed LID configs resolve to \
+                 truncate (shift 0)"
+            );
+        }
+        Ok(())
     }
 
     /// The rate-dependent half of the setup, at `rate` for the target `lang_index`: what
@@ -759,9 +776,9 @@ impl FastLidPlan {
     /// PURE and from the config values (the dropped carries: the SAD `_WindowShift` and the
     /// `_LIDWindowShift`, both re-quantized in place by the exact driver, are locals here;
     /// at one rate that is a fixed point, `tests/fast_lid_plan.rs`). `ssif` is the Mode-7
-    /// constant [`MODE7_SSIF`]. Runs the regime rule on the RESOLVED LID window; `who`
-    /// prefixes a refusal.
-    pub fn timeline(&self, who: &str, rate: f64, lang_index: i32) -> Result<LidTimeline> {
+    /// constant [`MODE7_SSIF`]. Infallible: the regime rule is [`Self::precheck_regime`]'s,
+    /// decided at construction.
+    pub fn timeline(&self, rate: f64, lang_index: i32) -> LidTimeline {
         let ssif = MODE7_SSIF;
         let spectrum_shift_sec = ssif as f64 / rate;
         let sad = sad_axis(
@@ -780,15 +797,6 @@ impl FastLidPlan {
             ssif,
             rate,
         );
-        check_lid_regime(
-            who,
-            self.lid.shape,
-            self.lid_window_size_sec,
-            self.lid_window_shift_sec,
-            lid_window_size != 0,
-            lid_no_overlap,
-            &format!(" at {rate} Hz"),
-        )?;
         // targetIndex = clamp(lang_index, [0, classNb)) (`TwinBLSTMSpectralLID.cpp:626-628`).
         let mut ti = lang_index;
         if ti >= self.class_nb as i32 {
@@ -810,7 +818,7 @@ impl FastLidPlan {
             ti: ti as usize,
             cost_modified: self.cost_modified,
         };
-        Ok(LidTimeline {
+        LidTimeline {
             rate,
             ssif,
             spectrum_shift_sec,
@@ -820,7 +828,7 @@ impl FastLidPlan {
             lid_no_overlap,
             ti: ti as usize,
             params,
-        })
+        }
     }
 
     /// The SAD `real_vec_size` for a file of `frame_count` samples at `rate`: the frozen
@@ -908,44 +916,4 @@ pub fn derive_lid_window(
         lid_window_shift = 1;
     }
     (lid_window_size, lid_window_shift as usize, lid_no_overlap)
-}
-
-/// The LID regime rule (issue #57, D2), ONE body for the rate-free pre-check
-/// ([`FastLidPlan::precheck_regime`]) and the timeline's authoritative check, for the
-/// offline Twin and the Utterance stream alike. A CAUSAL shape runs the PLAIN regime only
-/// (a causal cell inside a window has its state reset at every window boundary, the SAD
-/// driver's rule; the launcher writes `BLSTM_LID_window 0` on a forward LID net); every
-/// shape refuses OVERLAP (the fast LID scoring implements the truncate sweep and the
-/// plain forward, nothing accumulates across overlapping windows). A bidirectional shape
-/// runs either plain or truncate, exactly as the exact tree dispatches them. `windowed` /
-/// `no_overlap` are the caller's resolution, `at` says how it was resolved; `who` prefixes
-/// the refusal (the pinned clauses are the fixed text).
-fn check_lid_regime(
-    who: &str,
-    shape: FastNetShape,
-    window_sec: f64,
-    shift_sec: f64,
-    windowed: bool,
-    no_overlap: bool,
-    at: &str,
-) -> Result<()> {
-    if let FastNetShape::Causal(cell) = shape
-        && windowed
-    {
-        bail!(
-            "{who}: windowed LID inference is unsupported for a causal LID net (cell '{}', \
-             BLSTM_LID_window {window_sec} resolves a nonzero window{at}); a causal cell's \
-             state is reset at every window boundary -- a forward LID net runs the plain \
-             regime (BLSTM_LID_window 0, what the launcher writes)",
-            cell.as_str()
-        );
-    }
-    if windowed && !no_overlap {
-        bail!(
-            "{who}: the overlap LID windowing is unsupported on the fast path (BLSTM_LID_shift \
-             {shift_sec} resolves >= 1 frame{at}); the fast LID scoring runs the truncate sweep \
-             or the plain forward -- the committed LID configs resolve to truncate (shift 0)"
-        );
-    }
-    Ok(())
 }

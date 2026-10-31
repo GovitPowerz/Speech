@@ -1,4 +1,4 @@
-mutation: FastLidPlan::from_map skips the rate-free regime pre-check (the timeline's authoritative check still refuses at the first file / the session's construction)
+mutation: FastLidPlan::from_map skips the regime rule (precheck_regime; nothing else refuses it, the timeline being infallible)
 catcher: CAUGHT cargo --test fast_lid_plan rate_free_precheck_refuses_what_no_rate_can_rescue
 catcher: CAUGHT cargo --test fast_twin_lid_matrix windowed_causal_lid_is_refused_offline_and_streaming
 catcher: CAUGHT cargo --test fast_twin_lid_matrix overlap_lid_is_refused_on_every_shape

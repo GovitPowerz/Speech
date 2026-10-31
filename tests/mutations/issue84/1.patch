@@ -5,13 +5,13 @@ catcher: CAUGHT cargo --test fast_twin_lid_matrix lid_parity_exact_vs_fast_per_p
 catcher: MISSED cargo --test phase8_stream_lid every_shape_streams_prefix_correct_and_finish_equals_offline
 
 diff --git a/src/rust/src/fast/plan.rs b/src/rust/src/fast/plan.rs
-index 5202548..583afce 100644
+index 148f5bc..ca0e66d 100644
 --- a/src/rust/src/fast/plan.rs
 +++ b/src/rust/src/fast/plan.rs
-@@ -762,7 +762,7 @@ impl FastLidPlan {
-     /// constant [`MODE7_SSIF`]. Runs the regime rule on the RESOLVED LID window; `who`
-     /// prefixes a refusal.
-     pub fn timeline(&self, who: &str, rate: f64, lang_index: i32) -> Result<LidTimeline> {
+@@ -779,7 +779,7 @@ impl FastLidPlan {
+     /// constant [`MODE7_SSIF`]. Infallible: the regime rule is [`Self::precheck_regime`]'s,
+     /// decided at construction.
+     pub fn timeline(&self, rate: f64, lang_index: i32) -> LidTimeline {
 -        let ssif = MODE7_SSIF;
 +        let ssif = SpectralParams::derive(&self.feature_cfg, rate).shift_frames;
          let spectrum_shift_sec = ssif as f64 / rate;

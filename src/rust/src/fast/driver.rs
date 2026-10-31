@@ -234,8 +234,8 @@ pub(crate) fn build_spec_aligned_to(
 /// TwoSweeps/single-sweep TRUNCATE windowing the committed LID configs resolve to
 /// (`BLSTM_LID_window 0.25`) or the PLAIN forward (`window 0`); a CAUSAL shape runs PLAIN
 /// only; OVERLAP is refused on every shape, where the window resolves against the rate
-/// (`fast::plan::FastLidPlan::timeline`, read per file by `FastTwinLid::get_segmentation`
-/// and at construction by the Utterance stream).
+/// rate-free on the config's intent (`fast::plan::FastLidPlan::from_map`, issue #84), at
+/// construction for the offline Twin and the Utterance stream alike.
 ///
 /// `large_enum_variant` allowed on the house precedent (`Processor`, `CellLayer`,
 /// `FastCell`): a `FastNet` is built ONCE per driver and then only borrowed -- never a
@@ -870,7 +870,7 @@ impl FastNet {
 /// construction refusal (Mode 7 only, the pitch second pass, `DumpInternals`, a LID
 /// `InputNormalizationType != 0`, a negative `TargetEnforcementStep`, MLP mode) is the
 /// plan's, the two regime refusals (a windowed CAUSAL LID net, OVERLAP on every shape)
-/// the timeline's, and the two stateful shifts the exact driver re-quantizes per file are
+/// included, rate-free on the config's intent, and the two stateful shifts the exact driver re-quantizes per file are
 /// NOT carried (the plan's module docs: a fixed point at one rate). This struct keeps the
 /// LID net, the per-channel loop and the result members. The wav CNN arm
 /// (`periodogram.is_none()`) still bails per file: it is the audio's, not the config's.
@@ -1031,12 +1031,11 @@ impl Segmenter for FastTwinLid {
         }
 
         // The per-file derivation, at the audio's rate and target (`getBLSTMParam` on the
-        // never-run SAD net + the SAD time axis, `getLIDBLSTMParam` + the regime rule +
-        // the target clamp), through the plan's one timeline -- the Utterance stream
-        // derives the same value at construction, so the two cannot drift.
-        let tl = self
-            .plan
-            .timeline("fast TwinLid mode 7", rate, audio.lang_index)?;
+        // never-run SAD net + the SAD time axis, `getLIDBLSTMParam`, the target clamp),
+        // through the plan's one timeline -- the Utterance stream derives the same value
+        // at construction, so the two cannot drift. The regime rule was the plan's, at
+        // construction.
+        let tl = self.plan.timeline(rate, audio.lang_index);
         let real_vec_size = self.plan.rows_for(rate, audio.data.ncols());
         let (time_step, time_offset) = (tl.sad.time_step, tl.sad.time_offset);
         let params = &tl.params;

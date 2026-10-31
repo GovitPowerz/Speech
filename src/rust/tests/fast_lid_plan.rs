@@ -17,7 +17,8 @@
 //!    file) are a fixed point at one rate, reset included (the by-design divergence's
 //!    justification, measured over a rate x shift x sub-sampling grid);
 //!  - every construction refusal, in the words the Twin legs pin, and the rate-free
-//!    regime pre-check (each refusal, on the config's intent, and the two shapes that run);
+//!    regime rule (each refusal, on the config's intent, and the two shapes that run; the
+//!    timeline has nothing left to refuse and is infallible);
 //!  - `FastTwinLid::from_plan` with an in-memory pair scores bit-identically to
 //!    `from_legacy`.
 
@@ -231,9 +232,7 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
         let map = map_for(rel);
         let plan = FastLidPlan::from_map(&map).unwrap();
         for rate in [8000.0, 16000.0] {
-            let tl = plan
-                .timeline("fast_lid_plan", rate, 1)
-                .unwrap_or_else(|e| panic!("{rel}@{rate}: {e}"));
+            let tl = plan.timeline(rate, 1);
             // Mode 7 forces `_SpectrumShiftInFrames = 80` at EVERY rate (the phSeq/cep
             // periodogram is always present): the committed `BLSTM_spectrum_shift 0.025`
             // would derive 200 at 8 kHz and 400 at 16 kHz.
@@ -339,7 +338,7 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
             (nb, 0),
             (99, 0),
         ] {
-            let tl = plan.timeline("fast_lid_plan", 8000.0, lang).unwrap();
+            let tl = plan.timeline(8000.0, lang);
             assert_eq!(tl.ti, ti, "{rel}: lang {lang}");
         }
     }
@@ -495,7 +494,8 @@ fn rate_free_precheck_refuses_what_no_rate_can_rescue() {
     );
     // OVERLAP on a bidirectional shape: `shift 0.1` (10 frames at 8 kHz), and the one
     // tightening, a sub-frame positive shift (`0.001`: 0.1 frame at 8 kHz, which the exact
-    // tree would quantize to truncate) -- both refused as overlap on intent.
+    // tree would quantize to truncate) -- both refused as overlap on intent, the message
+    // naming the intent rule, not a resolution.
     for shift in ["0.1", "0.001"] {
         let m = with(
             map_for("phase4b/twin_mode7.config"),
@@ -506,7 +506,9 @@ fn rate_free_precheck_refuses_what_no_rate_can_rescue() {
         assert!(
             msg.starts_with(
                 "fast LID plan: the overlap LID windowing is unsupported on the fast path"
-            ) && msg.contains("at every rate"),
+            ) && msg.contains(&format!(
+                "BLSTM_LID_shift {shift} > 0 under BLSTM_LID_window 0.25"
+            )),
             "shift {shift}: {msg}"
         );
     }
@@ -519,12 +521,12 @@ fn rate_free_precheck_refuses_what_no_rate_can_rescue() {
     );
     let plan = FastLidPlan::from_map(&m).unwrap();
     for rate in [8000.0, 16000.0] {
-        let tl = plan.timeline("who", rate, 0).unwrap();
+        let tl = plan.timeline(rate, 0);
         assert_eq!(tl.lid_window_size, 0);
     }
     let plan = FastLidPlan::from_map(&map_for("phase4b/twin_mode7.config")).unwrap();
     for rate in [8000.0, 16000.0] {
-        let tl = plan.timeline("who", rate, 0).unwrap();
+        let tl = plan.timeline(rate, 0);
         assert!(tl.lid_no_overlap && tl.lid_window_size > 0, "{rate}");
     }
 }
