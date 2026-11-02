@@ -970,7 +970,7 @@ pub struct SpectralCarry {
 
 /// What [`SpectralCarry::advance`] derives for one file: the quantized spectrum shift,
 /// the `getBLSTMParam` outputs and the SAD decision layer's `(time_step, time_offset)`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct SpectralAxis {
     /// `_SpectrumShiftInFrames` for this file.
     pub ssif: usize,
@@ -1302,10 +1302,11 @@ impl Segmenter for BlstmSpectralSegmenter {
         // consistent (the non-wav 80 fallback is handled below + in the unit test).
         let s = SpectralParams::derive(&self.feature_cfg, rate);
 
-        // The carry's preamble (#121): the stateful spectrum-shift quantization (:208-210;
-        // the driver always reads a wav, so the :209 override never fires here, it is
-        // exercised only via force_non_wav_spectrum_shift for the unit test), the input
-        // gates (:216-227), getBLSTMParam (:439-500) and the time axis (:724-734).
+        // The input gates (:216-227) first -- they mutate the audio in place and read nothing
+        // the carry writes -- then the carry's preamble (#121): the stateful spectrum-shift
+        // quantization (:208-210; the driver always reads a wav, so the :209 override never
+        // fires here, it is exercised only via force_non_wav_spectrum_shift for the unit
+        // test), getBLSTMParam (:439-500) and the time axis (:724-734).
         apply_input_gates(audio, &self.feature_cfg);
         let axis = self
             .carry

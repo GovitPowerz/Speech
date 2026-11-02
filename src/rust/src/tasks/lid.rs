@@ -209,9 +209,10 @@ impl Segmenter for BlstmSpectralLid {
         // spectrum_shift below), but the band/order/bins are.
         let s = SpectralParams::derive(&self.feature_cfg, rate);
 
-        // The carry's preamble (#121): spectrum_shift, a LOCAL in the legacy (`:51`) whose
-        // re-quantized seconds `_SpectrumShift` (`:53`) persists; the input gates
-        // (`:78-89`); getBLSTMParam (`:175-190`), which mutates the stateful `_WindowShift`.
+        // The input gates (`:78-89`) first -- they mutate the audio in place and read nothing
+        // the carry writes -- then the carry's preamble (#121): spectrum_shift, a LOCAL in the
+        // legacy (`:51`) whose re-quantized seconds `_SpectrumShift` (`:53`) persists, and
+        // getBLSTMParam (`:175-190`), which mutates the stateful `_WindowShift`.
         // The carry's spectral time axis is NOT this driver's: the scoring axis below
         // follows the SIGNAL pattern (`:333-343`), and the returned real_vec_size (the
         // ssr-division) is IGNORED -- the LID sizes result_vec by LTSV_window_shift below
@@ -1041,14 +1042,10 @@ impl TwinBlstmSpectralLid {
         // forcing `_SpectrumShiftInFrames = 80` for phSeq (File_Type 1) -- LOAD-BEARING: it
         // drives every downstream window/shift derivation (getLIDBLSTMParam window 25, not
         // the 10 the raw `round(0.025*8000) = 200` would give); `audio.periodogram.is_some()`
-        // is the port's `!hasReadWavFile()`, always true past the wav bail above. The input
-        // gates (harmless on the zeroed phSeq waveform), getBLSTMParam (the SAD result_vec
-        // sizing) and the SAD time axis (`:696-706`) follow.
-        let ssif_override = if audio.periodogram.is_some() {
-            Some(80)
-        } else {
-            None
-        };
+        // is the port's `!hasReadWavFile()`, always true past the wav bail above, so the
+        // override is passed unconditionally. The input gates (harmless on the zeroed phSeq
+        // waveform) run first; getBLSTMParam (the SAD result_vec sizing) and the SAD time
+        // axis (`:696-706`) follow inside `advance`.
         apply_input_gates(audio, &self.feature_cfg);
         let SpectralAxis {
             ssif,
@@ -1062,7 +1059,7 @@ impl TwinBlstmSpectralLid {
             &self.driver_cfg,
             &self.sad_net,
             audio.data.ncols(),
-            ssif_override,
+            Some(80),
         );
 
         // getLIDBLSTMParam; mutates lid_window_shift_sec.
@@ -1391,9 +1388,10 @@ impl TwinBlstmSpectralLid {
             ));
         }
 
-        // The carry's preamble (#121): the stateful spectrum-shift quantization (`:208-210`),
-        // the input gates, getBLSTMParam (SAD window/shift + result-vec sizing) and the SAD
-        // time axis (`:696-706`, overlap OVERRIDES with _SpectrumShift).
+        // The input gates first (they mutate the audio in place and read nothing the carry
+        // writes), then the carry's preamble (#121): the stateful spectrum-shift quantization
+        // (`:208-210`), getBLSTMParam (SAD window/shift + result-vec sizing) and the SAD time
+        // axis (`:696-706`, overlap OVERRIDES with _SpectrumShift).
         apply_input_gates(audio, &self.feature_cfg);
         let SpectralAxis {
             ssif: spectrum_shift_in_frames,
@@ -1930,8 +1928,9 @@ impl Segmenter for TwinBlstmSpectralLid {
             ));
         }
 
-        // The carry's preamble (#121): the stateful spectrum-shift quantization (`:208-210`),
-        // the input gates (`initSpectralAnalysis` :216-227), getBLSTMParam (`:300` ->
+        // The input gates (`initSpectralAnalysis` :216-227) first -- they mutate the audio in
+        // place and read nothing the carry writes -- then the carry's preamble (#121): the
+        // stateful spectrum-shift quantization (`:208-210`), getBLSTMParam (`:300` ->
         // `:439-500`, SAD window/shift + result-vec sizing) and the SAD time axis
         // (`:696-706`, overlap OVERRIDES with _SpectrumShift).
         apply_input_gates(audio, &self.feature_cfg);

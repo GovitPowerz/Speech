@@ -3666,9 +3666,10 @@ why the pin exists.
 
 ## Issue #121 -- the exact spectral preamble as one carry: the mutation battery
 
-**Live:** `tests/mutations/issue121/` (5 patches, all on `tasks/sad.rs::SpectralCarry`); the LID
+**Live:** `tests/mutations/issue121/` (6 patches, all on `tasks/sad.rs::SpectralCarry`); the LID
 window floor is `issue84/4`, re-targeted to the moved `tasks/lid.rs::derive_lid_window` with the
-two Twin goldens added as catchers (two items on one site are one patch).
+two Twin goldens added as catchers (two items on one site are one patch; the grilling's decision
+10 said that patch stays on `fast/plan.rs`, which its decision 6 made impossible -- the site moved).
 
 #84 gave the fast Twin and the Utterance stream one setup and left the exact half here: the
 per-file preamble (`SpectralParams::derive`, the stateful `_SpectrumShift` /
@@ -3687,9 +3688,21 @@ byte-green and the four phase2b lifecycle pins pass unmodified through the spect
 delegating getters, the ADR-0002 proof. The write-only `ltsv_shift_sec` went with it (#94
 class); its legacy carry was never reproduced (IMPROVEMENTS.md).
 
-`uv run python tests/mutations/run.py issue121 issue84/4` on macOS: 23 verdicts, 4 differed
-from the expectations written before the run, each re-recorded as measured (below), then
-re-run: 23 verdicts, 0 differ.
+THE SET IS NOT THE PRE-REGISTERED ONE. The grilling's table named five mutations; two were
+replaced and two added before the first run, for reasons the code gave: "ssif re-quantization
+skipped, `advance` reads the config shift" cannot be written as stated (the carry holds no config
+value) and its nearest form, re-quantizing from the config every file, is a one-rate fixed point
+no catcher can see -- so the leak it meant to pin is patch 5, the carry never WRITTEN, which is
+the same drift in its observable form; and two mutations the grilling itself produced were added,
+the override applied AFTER the axis (patch 1, the grilling's own first draft of decision 4,
+corrected in its round 2) and the dropped epilogue reset (patch 4, the cross-file state nothing
+else pins). The pre-registered "`ssif_override` ignored" was dropped by mistake from the first
+run and is patch 6, added after the Spec review of the branch caught the gap.
+
+`uv run python tests/mutations/run.py issue121 issue84/4` on macOS, first run (patches 1-5 and
+84/4): 23 verdicts, 4 differed from the expectations written before the run, each re-recorded as
+measured (below), then re-run: 23 verdicts, 0 differ. Patch 6 ran after the review: 4 verdicts,
+0 differ from the expectations written before it.
 
 | # | mutation | named catchers | verdict (first failure line) |
 |---|---|---|---|
@@ -3697,7 +3710,8 @@ re-run: 23 verdicts, 0 differ.
 | 2 | `advance` takes the signal driver's overlap pair (`time_step = window_shift_sec`, `time_offset = 0.0`) | `phase2b_spectral_golden::overlap_variant_and_cross_channel_reuse`, `fast_sad_plan::timeline_reproduces_the_frozen_per_file_derivation`, `phase4b_twin_golden::boundaries_match_dump`, `phase4b_lid5_golden::sad_boundaries_match_dump` | CAUGHT by the overlap golden (`boundary[1].begin` 0.7446 vs 1.1799) and the SAD plan pin (`tier2_spectral.config@8000: time_step`). MISSED by the Twin (truncate on every committed config) and by Algo 5 (its scoring axis is its own, the signal pattern), as expected. |
 | 3 | `advance` drops the base pair's offset (`time_offset = 0.0` on the plain and truncate branches) | `phase2b_spectral_golden::no_overlap_variant_matches_dump`, `phase4b_twin_golden::boundaries_match_dump`, `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation`, `phase4b_lid5_golden::sad_boundaries_match_dump` | CAUGHT by the truncate golden (`boundary[1].begin` 1.1681 vs 1.1831), the Twin golden (`mode0 f1 boundary count chan1`) and the LID plan pin (`time_offset`). MISSED by Algo 5 (own axis), as expected. |
 | 4 | `reset_after` never resets `_WindowShift` | `phase2b_spectral_golden::two_files_in_sequence_no_overlap_lifecycle`, `phase4b_twin_golden::boundaries_match_dump`, `phase4b_lid5_golden::sad_boundaries_match_dump` | CAUGHT by the lifecycle pin (`file1: the :885 reset must fire post-call`). MISSED by both LID goldens, as expected: each builds a fresh driver per file, so no LID golden sees a second file's carry. The cross-file state is pinned by the spectral driver's getters alone. |
-| 5 | `advance` hands `get_blstm_param` a copy of the window shift, the carry never written (the fast tree's derive-from-config rule leaking into the exact tree) | `phase2b_spectral_golden::two_files_in_sequence_no_overlap_lifecycle`, `::real_variant_matches_dump`, `phase4b_twin_golden::boundaries_match_dump`, `phase4b_lid5_golden::sad_boundaries_match_dump` | CAUGHT by the lifecycle pin (`file1: boundary count mismatch`) AND, re-recorded, by both LID goldens (`mode0 f1 boundary count chan1`, `f1 boundary count chan1`): the expectation assumed a one-rate fixed point, but on a truncate config (`BLSTM_shift 0`, every committed Twin and Algo 5 config) the floored shift is written back as `1 * ssif / rate` and the SAME file's time axis reads it, so an unwritten carry gives `time_step = 0`. MISSED by the overlap golden (shift > 0: a fixed point at one rate), as expected. |
+| 5 | `advance` hands `get_blstm_param` a copy of the window shift, the carry never written (the fast tree's derive-from-config rule leaking into the exact tree) | `phase2b_spectral_golden::two_files_in_sequence_no_overlap_lifecycle`, `::real_variant_matches_dump`, `phase4b_twin_golden::boundaries_match_dump`, `phase4b_lid5_golden::sad_boundaries_match_dump` | CAUGHT by the lifecycle pin (`file1: boundary count mismatch`) AND, re-recorded, by both LID goldens (`mode0 f1 boundary count chan1`, `f1 boundary count chan1`): the expectation assumed a one-rate fixed point, but on a truncate config (`BLSTM_shift 0`, every committed Twin and Algo 5 config) the floored shift is written back as `1 * ssif / rate` and the SAME file's time axis reads it, so an unwritten carry gives `time_step = 0`. MISSED by `real_variant_matches_dump` (the real config, overlap with `BLSTM_shift 0.8`: the write-back is a fixed point at one rate), as expected. |
+| 6 | `advance` ignores `ssif_override` (Mode 7 runs on the derived 200, not the forced 80) | `phase4b_twin_mode7::mode7_integer_members_match_real_bitexact`, `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation`, `phase2b_spectral_golden::non_wav_spectrum_shift_80_fallback_persists`, `phase4b_twin_golden::boundaries_match_dump` | CAUGHT by the Mode-7 golden (`s1 confusion: mismatch at (1, 1): 2 vs 1`: the LID window is 10, not 25) and the plan pin (`ssif vs the carry`); MISSED by the fallback pin (the poke, not the override) and the modes 0-6 golden (no override), as expected. |
 | 84/4 | `derive_lid_window` drops the floor to one frame (the site moved here) | `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation`, `::shift_requantization_is_a_fixed_point_at_one_rate_reset_included`, `phase4b_twin_mode7::mode7_integer_members_match_real_bitexact`, `phase4b_twin_golden::lid_classification_errors_match_dump` | CAUGHT by the plan pin (`LID shift`) and the Twin golden (`mode4 f1 liderr chan1` 242.94 vs 243.60); MISSED by the fixed-point leg (as before, #84) and, re-recorded, by the Mode-7 golden: Mode 7 scores per external-features block under the truncate sweep and never consumes the LID shift. |
 
 The lesson, the third time measured (#84 rows 1 and 2b, #26's shared-kernel pin): a shared

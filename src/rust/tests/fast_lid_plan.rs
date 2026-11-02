@@ -173,7 +173,9 @@ fn plan_agrees_with_the_exact_twin_on_every_committed_config() {
 /// The exact Twin's `getLIDBLSTMParam` block as the three modes inlined it before issue #121
 /// moved it to `tasks::lid::derive_lid_window`, transcribed: `(lid_window_size,
 /// lid_window_shift, lid_no_overlap)`. Kept as the body-independent pin of the moved function
-/// (the `issue84/4` catcher).
+/// (the `issue84/4` catcher), where the SAD-axis transcription this file used to carry was
+/// deleted: the SAD axis has an independent body on the fast tree (`sad_axis`) for the plan
+/// pin to disagree with, the LID window has none (both trees call `derive_lid_window`).
 fn exact_lid_window(
     size_sec: f64,
     shift_sec: f64,
