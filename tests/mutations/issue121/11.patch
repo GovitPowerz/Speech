@@ -1,0 +1,15 @@
+mutation: FastSpectralSegmenter runs a non-wav read through the wav arm instead of refusing it as the exact driver does
+catcher: CAUGHT cargo --test non_wav_spectral_input fast_spectral_sad_refuses_a_non_wav_read
+
+diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
+--- a/src/rust/src/fast/driver.rs
++++ b/src/rust/src/fast/driver.rs
+@@ -468,7 +468,7 @@
+     ) -> Result<()> {
+         // The exact driver's refusal (issue #121): a phSeq / cep read feeds the precomputed
+         // features to the net in the legacy, an arm neither tree ports.
+-        if audio.periodogram.is_some() {
++        if audio.periodogram.is_some() && false {
+             bail!(
+                 "fast spectral SAD: non-wav input (File_Type 1/2) not ported, as on the exact \
+                  driver (BLSTMSpectralSegmenter.cpp:564-567, :672)"

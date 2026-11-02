@@ -3666,7 +3666,8 @@ why the pin exists.
 
 ## Issue #121 -- the exact spectral preamble as one carry: the mutation battery
 
-**Live:** `tests/mutations/issue121/` (6 patches, all on `tasks/sad.rs::SpectralCarry`); the LID
+**Live:** `tests/mutations/issue121/` (11 patches: 1-6 on `tasks/sad.rs::SpectralCarry`, 7-11 the
+non-wav read, below); the LID
 window floor is `issue84/4`, re-targeted to the moved `tasks/lid.rs::derive_lid_window` with the
 two Twin goldens added as catchers (two items on one site are one patch; the grilling's decision
 10 said that patch stays on `fast/plan.rs`, which its decision 6 made impossible -- the site moved).
@@ -3720,3 +3721,22 @@ mutated output. The Mode-7 goldens are blind to the SAD axis and to the LID shif
 Frozen-SAD contract and the truncate regime, the LID goldens are blind to the cross-file carry
 because they build a driver per file, and only the spectral driver's lifecycle pin owns the
 carry's statefulness, which is why the getters delegate rather than move.
+
+### The non-wav read (patches 7-11)
+
+The branch review found the `!hasReadWavFile -> 80` override passed per call site: `Some(80)` in
+Mode 7, `None` elsewhere, although the bag accepts `File_Type 1/2` for any algo. It is now keyed
+on the audio at every spectral driver (`tasks::sad::non_wav_ssif`); Algo 5, whose only non-wav
+branch is the override (`BLSTMSpectralLID.cpp:52`), reproduces the legacy's 80, and the spectral
+SAD driver, the Twin's modes 0-6 and the fast SAD driver refuse a non-wav read, their
+precomputed-features arm not ported (IMPROVEMENTS.md). Pinned by `tests/non_wav_spectral_input.rs`,
+RED first. `uv run python tests/mutations/run.py issue121/7 issue121/8 issue121/9 issue121/10
+issue121/11` on macOS: 10 verdicts, 0 differ from the expectations written before the run.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 7 | Algo 5 passes no override | `non_wav_spectral_input::algo5_non_wav_read_takes_the_legacy_80`, `phase4b_lid5_golden::ltsv_sad_row_matches_dump` | CAUGHT by the pin (`non-wav read: the forced 80`); MISSED by the wav golden, as expected. |
+| 8 | `non_wav_ssif` answers `None` for every read | `non_wav_spectral_input::algo5_non_wav_read_takes_the_legacy_80`, `phase4b_twin_mode7::mode7_integer_members_match_real_bitexact`, `fast_lid_plan::timeline_reproduces_the_frozen_per_file_derivation` | CAUGHT by the pin and the Mode-7 golden (`s1 confusion: mismatch at (1, 1)`, patch 6's catch through the predicate); MISSED by the plan pin, which hands `advance` its `Some(80)` directly, as expected. |
+| 9 | the spectral SAD driver runs a non-wav read | `non_wav_spectral_input::spectral_sad_refuses_a_non_wav_read_before_the_carry`, `phase2b_spectral_golden::real_variant_matches_dump` | CAUGHT by the pin (`algo 3: a non-wav read must be refused`); MISSED by the wav golden, as expected. |
+| 10 | the Twin's modes 0-6 run a non-wav read | `non_wav_spectral_input::twin_modes_0_to_6_refuse_a_non_wav_read`, `phase4b_twin_golden::boundaries_match_dump` | CAUGHT by the pin (`twin mode 0: a non-wav read must be refused`); MISSED by the wav golden, as expected. |
+| 11 | the fast SAD driver runs a non-wav read | `non_wav_spectral_input::fast_spectral_sad_refuses_a_non_wav_read` | CAUGHT (`fast SAD net has no weights loaded`: the unrefused read falls through to the next check). |

@@ -64,7 +64,7 @@ use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_opt};
 use crate::nn::blstm::{BlstmConfig, check_pack_len};
 use crate::tasks::lid::derive_lid_window;
-use crate::tasks::sad::get_blstm_param;
+use crate::tasks::sad::{NON_WAV_SSIF, get_blstm_param};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig};
 
 use super::cells::CellGeometry;
@@ -573,8 +573,8 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 
 /// The Mode-7 `_SpectrumShiftInFrames` (`BLSTMSpectralSegmenter.cpp:209`): the
 /// `!hasReadWavFile` override, always taken on the phSeq/cep arm the fast Twin runs, so the
-/// LID plan's `ssif` is this constant at every rate.
-pub const MODE7_SSIF: usize = 80;
+/// LID plan's `ssif` is this constant at every rate: the exact tree's [`NON_WAV_SSIF`].
+pub const MODE7_SSIF: usize = NON_WAV_SSIF;
 
 /// Everything an algo-6 Mode-7 fast LID run needs that does not depend on the sample
 /// rate, the target language or the audio: the rate-free half of the Twin's setup, parsed

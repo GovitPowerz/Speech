@@ -83,6 +83,7 @@ use crate::nn::blstm::{
     BlstmConfig, BlstmNetwork, CellType, Direction, check_pack_len, file_pack_head,
 };
 use crate::tasks::lid::LidMembers;
+use crate::tasks::sad::apply_input_gates;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{ChannelMembers, Segmenter, results_to_segmentation};
@@ -465,6 +466,14 @@ impl Segmenter for FastSpectralSegmenter {
         seg_per_chan: &mut [Segmentation],
         _refs: Option<&[Segmentation]>,
     ) -> Result<()> {
+        // The exact driver's refusal (issue #121): a phSeq / cep read feeds the precomputed
+        // features to the net in the legacy, an arm neither tree ports.
+        if audio.periodogram.is_some() {
+            bail!(
+                "fast spectral SAD: non-wav input (File_Type 1/2) not ported, as on the exact \
+                 driver (BLSTMSpectralSegmenter.cpp:564-567, :672)"
+            );
+        }
         let rate = audio.sample_rate as f64;
         let plan = &self.plan;
 
@@ -474,14 +483,9 @@ impl Segmenter for FastSpectralSegmenter {
         // the fast tree -- a fixed point at one rate, see `fast::plan`).
         let tl = plan.timeline(rate)?;
 
-        // preemph -> noise, same gates as the exact driver (both no-ops for tier2:
+        // preemph -> noise, the exact driver's gates (both no-ops for tier2:
         // preemph_ratio -0.97 <= 0, noise_seed -3 <= 0).
-        if plan.feature_cfg.preemph_ratio > 0.0 {
-            audio.apply_preemph(plan.feature_cfg.preemph_ratio);
-        }
-        if plan.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(plan.feature_cfg.noise_ratio);
-        }
+        apply_input_gates(audio, &plan.feature_cfg);
 
         let real_vec_size = plan.rows_for(&tl, audio.data.ncols());
         let (window_size, window_shift) = (tl.window_size, tl.window_shift);
@@ -1025,12 +1029,7 @@ impl Segmenter for FastTwinLid {
         );
 
         // preemph/noise (harmless on the zeroed phSeq/cep waveform).
-        if self.plan.feature_cfg.preemph_ratio > 0.0 {
-            audio.apply_preemph(self.plan.feature_cfg.preemph_ratio);
-        }
-        if self.plan.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(self.plan.feature_cfg.noise_ratio);
-        }
+        apply_input_gates(audio, &self.plan.feature_cfg);
 
         // The per-file derivation, at the audio's rate and target (`getBLSTMParam` on the
         // never-run SAD net + the SAD time axis, `getLIDBLSTMParam`, the target clamp),

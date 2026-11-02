@@ -177,6 +177,8 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
     ] {
         let map = map_at(rel);
         let plan = FastSadPlan::from_map(&map).unwrap();
+        let net =
+            BlstmNetwork::from_config(BlstmConfig::from_legacy(&map, "BLSTM").unwrap()).unwrap();
         for rate in [8000.0, 16000.0] {
             let tl = plan
                 .timeline(rate)
@@ -196,8 +198,6 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
             // one rate -- on the exact net. The fast timeline is pinned to the exact body
             // itself (the shift re-quantization, get_blstm_param, the time axis), not to a
             // transcription of it.
-            let net = BlstmNetwork::from_config(BlstmConfig::from_legacy(&map, "BLSTM").unwrap())
-                .unwrap();
             let mut carry =
                 SpectralCarry::new(plan.feature_cfg.shift_sec, plan.driver_cfg.window_shift_sec);
             let axis = carry.advance(rate, &plan.driver_cfg, &net, 0, None);

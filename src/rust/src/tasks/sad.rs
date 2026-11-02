@@ -332,10 +332,7 @@ impl Segmenter for LtsvSegmenter {
         self.spectrum_shift_sec = spectrum_shift as f64 / rate;
 
         // preemph -> noise (`:180-191`).
-        audio.apply_preemph(self.feature_cfg.preemph_ratio);
-        if self.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(self.feature_cfg.noise_ratio);
-        }
+        apply_input_gates(audio, &self.feature_cfg);
         let windowing_coeff = windowing_coefficients(
             &self.feature_cfg.win_type,
             false,
@@ -968,6 +965,18 @@ pub struct SpectralCarry {
     window_shift_sec: f64,
 }
 
+/// The `!hasReadWavFile()` `_SpectrumShiftInFrames` (`BLSTMSpectralSegmenter.cpp:209`), the
+/// legacy's hard-coded non-wav spectrum shift, in audio frames.
+pub const NON_WAV_SSIF: usize = 80;
+
+/// The `!hasReadWavFile()` predicate (`:209`) as [`SpectralCarry::advance`]'s override:
+/// `Some(NON_WAV_SSIF)` for a phSeq / cep read (only those readers fill `periodogram`),
+/// `None` for a wav. Every spectral driver passes it, so the override is keyed on the audio
+/// as the legacy keys it (Algo 5's inline copy, `BLSTMSpectralLID.cpp:52`, included).
+pub fn non_wav_ssif(audio: &Audio) -> Option<usize> {
+    audio.periodogram.as_ref().map(|_| NON_WAV_SSIF)
+}
+
 /// What [`SpectralCarry::advance`] derives for one file: the quantized spectrum shift,
 /// the `getBLSTMParam` outputs and the SAD decision layer's `(time_step, time_offset)`.
 #[derive(Clone, Copy, Debug)]
@@ -1003,8 +1012,9 @@ impl SpectralCarry {
 
     /// The per-file preamble over the carry (`initSpectralAnalysis` `:208-210`,
     /// `getBLSTMParam` `:439-500`, the time axis `:724-734`), in the legacy order.
-    /// `ssif_override` is the `!hasReadWavFile() -> 80` branch (`:209`): `Some(80)` from
-    /// the Twin's Mode 7, whose wav arm has already bailed, `None` everywhere else.
+    /// `ssif_override` is the `!hasReadWavFile() -> 80` branch (`:209`), [`non_wav_ssif`] at
+    /// every caller: `Some(80)` on a phSeq / cep read, which only the Twin's Mode 7 and the
+    /// Algo 5 driver take (the spectral SAD driver and the Twin's modes 0-6 refuse it first).
     /// `net` is the SAD net (its sub-sampling drives the sizing and the axis).
     pub fn advance(
         &mut self,
@@ -1093,12 +1103,11 @@ impl SpectralCarry {
 }
 
 /// The preamble's input gates (`BLSTMSpectralSegmenter.cpp:216-227`): pre-emphasis when
-/// the ratio is positive, noise when the seed is. Shared by the spectral drivers; the
-/// signal driver reads its own fields.
+/// the ratio is positive ([`Audio::apply_preemph`] carries that gate), noise when the seed
+/// is. Shared by every `FeatureConfig` driver on both trees; the signal driver reads its
+/// own fields.
 pub fn apply_input_gates(audio: &mut Audio, cfg: &FeatureConfig) {
-    if cfg.preemph_ratio > 0.0 {
-        audio.apply_preemph(cfg.preemph_ratio);
-    }
+    audio.apply_preemph(cfg.preemph_ratio);
     if cfg.noise_seed > 0 {
         audio.apply_noise(cfg.noise_ratio);
     }
@@ -1122,15 +1131,17 @@ pub fn apply_input_gates(audio: &mut Audio, cfg: &FeatureConfig) {
 /// cross-channel golden pins it (`phase2b_spectral_golden.rs`: a fresh-buffer chan-2
 /// run DIFFERS from the dump).
 ///
-/// STATEFUL MEMBERS (S3.4), re-quantized per `get_segmentation` call:
+/// STATEFUL MEMBERS (S3.4), re-quantized per `get_segmentation` call, held on the
+/// [`SpectralCarry`] (`carry`) since issue #121:
 /// - `spectrum_shift_sec` (`_SpectrumShift`) + `spectrum_shift_in_frames`
 ///   (`_SpectrumShiftInFrames`): ALWAYS recomputed as `ssif = round(spectrum_shift_sec *
 ///   rate)` (`initSpectralAnalysis` `:208`), then the non-wav fallback OVERRIDES `ssif =
 ///   80` when `!hasReadWavFile()` (`:209`), then `spectrum_shift_sec = ssif/rate`
 ///   PERSISTS the (possibly-overridden) value back into the member (`:210`). The driver
-///   always reads a wav, so the override never fires in production; it is exercised by a
-///   unit test via [`BlstmSpectralSegmenter::force_non_wav_spectrum_shift`] (no non-wav
-///   fixture exists). There is no "sticky 80" special case: a later call at a DIFFERENT
+///   refuses a non-wav read (the precomputed-features arm, `:564-567` / `:672`, is not
+///   ported; issue #121), so the override never fires in production; it is exercised by a
+///   unit test via [`BlstmSpectralSegmenter::force_non_wav_spectrum_shift`]. There is no
+///   "sticky 80" special case: a later call at a DIFFERENT
 ///   rate always re-derives from `spectrum_shift_sec`, e.g. force at 8000 Hz then
 ///   re-derive at 16000 Hz gives `round(0.01*16000) = 160`, not 80.
 /// - `window_shift_sec` (`_WindowShift`): re-quantized in [`get_blstm_param`] (`:445-453`
@@ -1268,7 +1279,7 @@ impl BlstmSpectralSegmenter {
     /// a rate change after this call changes the observed value (e.g. force at 8000 then
     /// re-derive at 16000 gives `round((80/8000)*16000) = round(160.0) = 160`, not 80).
     pub fn force_non_wav_spectrum_shift(&mut self, rate: f64) {
-        self.carry.set_ssif(80, rate);
+        self.carry.set_ssif(NON_WAV_SSIF, rate);
     }
 
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
@@ -1292,25 +1303,29 @@ impl Segmenter for BlstmSpectralSegmenter {
         seg_per_chan: &mut [Segmentation],
         refs: Option<&[Segmentation]>,
     ) -> Result<()> {
+        // A phSeq / cep read feeds the precomputed features to the net (`:564-567`, `:672`),
+        // an arm not ported: refused before the carry moves (issue #121).
+        if audio.periodogram.is_some() {
+            return Err(anyhow!(
+                "BlstmSpectralSegmenter: non-wav input (File_Type 1/2) not ported: the legacy \
+                 feeds the precomputed features to the net (BLSTMSpectralSegmenter.cpp:564-567, \
+                 :672)"
+            ));
+        }
         let rate = audio.sample_rate as f64;
 
         // initSpectralAnalysis (:194-276) via SpectralParams::derive: order clamp,
         // spectrum-shift quantization, freq band (BLSTM variant), mel-bank sizing, LTSV
         // params. `derive` reads cfg.shift_sec (0.01) and re-quantizes to
-        // spectrum_shift_in_frames = round(0.01*rate); on a real wav at fixed rate this
-        // equals the stateful member's self-quantization, so building `s` per call is
-        // consistent (the non-wav 80 fallback is handled below + in the unit test).
+        // spectrum_shift_in_frames = round(0.01*rate); on a wav at fixed rate this equals the
+        // stateful member's self-quantization, so building `s` per call is consistent.
         let s = SpectralParams::derive(&self.feature_cfg, rate);
 
         // The input gates (:216-227) first -- they mutate the audio in place and read nothing
         // the carry writes -- then the carry's preamble (#121): the stateful spectrum-shift
-        // quantization (:208-210; the driver always reads a wav, so the :209 override never
-        // fires here, it is exercised only via force_non_wav_spectrum_shift for the unit
-        // test), getBLSTMParam (:439-500) and the time axis (:724-734).
+        // quantization (:208-210, the :209 override keyed on the audio, `None` past the
+        // refusal above), getBLSTMParam (:439-500) and the time axis (:724-734).
         apply_input_gates(audio, &self.feature_cfg);
-        let axis = self
-            .carry
-            .advance(rate, &self.driver_cfg, &self.net, audio.data.ncols(), None);
         let SpectralAxis {
             window_size,
             window_shift,
@@ -1319,7 +1334,13 @@ impl Segmenter for BlstmSpectralSegmenter {
             time_step,
             time_offset,
             ..
-        } = axis;
+        } = self.carry.advance(
+            rate,
+            &self.driver_cfg,
+            &self.net,
+            audio.data.ncols(),
+            non_wav_ssif(audio),
+        );
 
         // resetWeightsDerivatives ONCE per file (:473).
         self.net.reset_weights_derivatives();

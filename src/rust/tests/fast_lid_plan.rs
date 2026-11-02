@@ -213,6 +213,8 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
     ] {
         let map = map_for(rel);
         let plan = FastLidPlan::from_map(&map).unwrap();
+        let sad_net =
+            BlstmNetwork::from_config(BlstmConfig::from_legacy(&map, "BLSTM").unwrap()).unwrap();
         for rate in [8000.0, 16000.0] {
             let tl = plan.timeline(rate, 1);
             // Mode 7 forces `_SpectrumShiftInFrames = 80` at EVERY rate (the phSeq/cep
@@ -232,9 +234,6 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
             // carry per file -- the first-file state, which is what the dropped carry equals
             // at one rate -- with the Mode-7 override, on the never-run SAD net. The fast
             // timeline is pinned to the exact body itself, not to a transcription of it.
-            let sad_net =
-                BlstmNetwork::from_config(BlstmConfig::from_legacy(&map, "BLSTM").unwrap())
-                    .unwrap();
             let mut carry =
                 SpectralCarry::new(plan.feature_cfg.shift_sec, plan.driver_cfg.window_shift_sec);
             let axis = carry.advance(rate, &plan.driver_cfg, &sad_net, 0, Some(80));

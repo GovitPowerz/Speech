@@ -1,0 +1,16 @@
+mutation: TwinBlstmSpectralLid modes 0-6 run a non-wav read through the wav arms instead of refusing it
+catcher: CAUGHT cargo --test non_wav_spectral_input twin_modes_0_to_6_refuse_a_non_wav_read
+catcher: MISSED cargo --test phase4b_twin_golden boundaries_match_dump
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -1908,7 +1908,7 @@
+         }
+         // Modes 0-6 on a phSeq / cep read feed the precomputed features to the nets (`:354`,
+         // `:642`), an arm not ported: refused before the carry moves (issue #121).
+-        if audio.periodogram.is_some() {
++        if audio.periodogram.is_some() && false {
+             return Err(anyhow!(
+                 "TwinBlstmSpectralLid mode {}: non-wav input (File_Type 1/2) not ported: the \
+                  legacy feeds the precomputed features to the nets (legacy :354, :642); only \

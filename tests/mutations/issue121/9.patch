@@ -1,0 +1,16 @@
+mutation: BlstmSpectralSegmenter runs a non-wav read through the wav arm instead of refusing it
+catcher: CAUGHT cargo --test non_wav_spectral_input spectral_sad_refuses_a_non_wav_read_before_the_carry
+catcher: MISSED cargo --test phase2b_spectral_golden real_variant_matches_dump
+
+diff --git a/src/rust/src/tasks/sad.rs b/src/rust/src/tasks/sad.rs
+--- a/src/rust/src/tasks/sad.rs
++++ b/src/rust/src/tasks/sad.rs
+@@ -1305,7 +1305,7 @@
+     ) -> Result<()> {
+         // A phSeq / cep read feeds the precomputed features to the net (`:564-567`, `:672`),
+         // an arm not ported: refused before the carry moves (issue #121).
+-        if audio.periodogram.is_some() {
++        if audio.periodogram.is_some() && false {
+             return Err(anyhow!(
+                 "BlstmSpectralSegmenter: non-wav input (File_Type 1/2) not ported: the legacy \
+                  feeds the precomputed features to the net (BLSTMSpectralSegmenter.cpp:564-567, \

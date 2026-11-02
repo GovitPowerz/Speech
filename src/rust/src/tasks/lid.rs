@@ -60,7 +60,7 @@ use crate::features::pipeline::{FeatureConfig, SpectralParams, build_input_seque
 use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
-use crate::tasks::sad::{SpectralAxis, SpectralCarry, apply_input_gates};
+use crate::tasks::sad::{SpectralAxis, SpectralCarry, apply_input_gates, non_wav_ssif};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{compute_errors, speech_duration};
 use crate::tasks::segmenter::{
@@ -211,8 +211,10 @@ impl Segmenter for BlstmSpectralLid {
 
         // The input gates (`:78-89`) first -- they mutate the audio in place and read nothing
         // the carry writes -- then the carry's preamble (#121): spectrum_shift, a LOCAL in the
-        // legacy (`:51`) whose re-quantized seconds `_SpectrumShift` (`:53`) persists, and
-        // getBLSTMParam (`:175-190`), which mutates the stateful `_WindowShift`.
+        // legacy (`:51`) forced to 80 on a non-wav read (`:52`, this driver's only non-wav
+        // branch: the periodogram is computed off the waveform either way) and whose
+        // re-quantized seconds `_SpectrumShift` (`:53`) persists, and getBLSTMParam
+        // (`:175-190`), which mutates the stateful `_WindowShift`.
         // The carry's spectral time axis is NOT this driver's: the scoring axis below
         // follows the SIGNAL pattern (`:333-343`), and the returned real_vec_size (the
         // ssr-division) is IGNORED -- the LID sizes result_vec by LTSV_window_shift below
@@ -223,13 +225,18 @@ impl Segmenter for BlstmSpectralLid {
         let ssr = self.net.sub_sampling_ratio();
         let SpectralAxis {
             ssif: spectrum_shift,
+            spectrum_shift_sec,
             window_size,
             window_shift,
             no_overlap,
             ..
-        } = self
-            .carry
-            .advance(rate, &self.driver_cfg, &self.net, audio.data.ncols(), None);
+        } = self.carry.advance(
+            rate,
+            &self.driver_cfg,
+            &self.net,
+            audio.data.ncols(),
+            non_wav_ssif(audio),
+        );
 
         // Signal windowing coeffs (`:90`).
         let windowing_coeff = windowing_coefficients(
@@ -341,7 +348,6 @@ impl Segmenter for BlstmSpectralLid {
 
         // Stable per-file locals for the borrow checker (self.net is borrowed mut in the
         // scoring loop; everything else must be a local read).
-        let spectrum_shift_sec = self.carry.spectrum_shift_sec();
         let conv_coeff = self.driver_cfg.conv_coeff.clone();
 
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
@@ -1041,11 +1047,11 @@ impl TwinBlstmSpectralLid {
         // (`initSpectralAnalysis` `:208-210`) with the `!hasReadWavFile()` override (`:209`)
         // forcing `_SpectrumShiftInFrames = 80` for phSeq (File_Type 1) -- LOAD-BEARING: it
         // drives every downstream window/shift derivation (getLIDBLSTMParam window 25, not
-        // the 10 the raw `round(0.025*8000) = 200` would give); `audio.periodogram.is_some()`
-        // is the port's `!hasReadWavFile()`, always true past the wav bail above, so the
-        // override is passed unconditionally. The input gates (harmless on the zeroed phSeq
-        // waveform) run first; getBLSTMParam (the SAD result_vec sizing) and the SAD time
-        // axis (`:696-706`) follow inside `advance`.
+        // the 10 the raw `round(0.025*8000) = 200` would give); keyed on the audio by
+        // `non_wav_ssif` as on every spectral driver, always `Some` past the wav bail above.
+        // The input gates (harmless on the zeroed phSeq waveform) run first; getBLSTMParam
+        // (the SAD result_vec sizing) and the SAD time axis (`:696-706`) follow inside
+        // `advance`.
         apply_input_gates(audio, &self.feature_cfg);
         let SpectralAxis {
             ssif,
@@ -1059,7 +1065,7 @@ impl TwinBlstmSpectralLid {
             &self.driver_cfg,
             &self.sad_net,
             audio.data.ncols(),
-            Some(80),
+            non_wav_ssif(audio),
         );
 
         // getLIDBLSTMParam; mutates lid_window_shift_sec.
@@ -1407,7 +1413,7 @@ impl TwinBlstmSpectralLid {
             &self.driver_cfg,
             &self.sad_net,
             audio.data.ncols(),
-            None,
+            non_wav_ssif(audio),
         );
 
         // getLIDBLSTMParam (LID window/shift + LID_result_vec sizing); mutates
@@ -1900,6 +1906,16 @@ impl Segmenter for TwinBlstmSpectralLid {
         if self.mode == 7 {
             return self.get_segmentation_mode7(audio, seg_per_chan, refs);
         }
+        // Modes 0-6 on a phSeq / cep read feed the precomputed features to the nets (`:354`,
+        // `:642`), an arm not ported: refused before the carry moves (issue #121).
+        if audio.periodogram.is_some() {
+            return Err(anyhow!(
+                "TwinBlstmSpectralLid mode {}: non-wav input (File_Type 1/2) not ported: the \
+                 legacy feeds the precomputed features to the nets (legacy :354, :642); only \
+                 Mode 7 runs a phSeq / cep read",
+                self.mode
+            ));
+        }
         // Modes 4/5/6 (the LID-train branch `:640-692` + the `:798-902` scoring branch):
         // the LID net trains on the WHOLE inputSeq (`feedForwardBackward`, :664) and the
         // scoring slices LID_result_vec per speech segment (NOT a per-segment forward).
@@ -1948,7 +1964,7 @@ impl Segmenter for TwinBlstmSpectralLid {
             &self.driver_cfg,
             &self.sad_net,
             audio.data.ncols(),
-            None,
+            non_wav_ssif(audio),
         );
 
         // getLIDBLSTMParam (`:306` -> `:87-137`): LID window/shift + LID_result_vec
