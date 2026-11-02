@@ -912,6 +912,24 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   candidate:* none -- documented legacy per-file mutable-state contract (spec S3.4),
   reproduced deliberately.
 
+- **[phase2b, recorded 2026-11-02 at issue #121] The `_LTSVWindowShift` cross-file carry is NOT
+  reproduced on the spectral drivers** (`BLSTMSpectralSegmenter.cpp:302-306`, the same
+  `getLTSVParam` on the Algo 5 and Twin paths): the legacy re-quantizes the member per file
+  (`LTSV_window_shift = round(_LTSVWindowShift*rate/_SpectrumShiftInFrames)`, floored at 1,
+  then `_LTSVWindowShift = LTSV_window_shift*ssif/rate`) and the next file's LTSV shift derives
+  from that carried value. The port's LTSV shift derives from the CONFIG value on every file
+  (`features/pipeline.rs::SpectralParams::derive`, since Phase 2b); the drivers' `ltsv_shift_sec`
+  field mirrored the legacy write and was read by nothing, so issue #121 deleted it (ADR-0002,
+  the #94 class). Like the `_SpectrumShift` / `_WindowShift` carries the fast tree dropped
+  (RESULTS.md issue #24), the LTSV carry is a fixed point at one rate (`round(round(x*r)/r*r)
+  == round(x*r)` on the `ssif/rate` grid), so it is observable only across files of DIFFERENT
+  rates in one run, where the second file's LTSV window shift would be quantized off the
+  first's. Every committed config has `LTSVwindow 0` (no LTSV column on the SAD drivers) and the
+  Algo 5 driver floors its half-window at 1 off the config value, so no golden can see it.
+  *Fix candidate:* none -- keep the port's stateless derivation; a mixed-rate corpus run that
+  needs the legacy's second-file LTSV shift would carry it on `SpectralCarry` beside the two
+  shifts it already holds.
+
 - **[phase2b] `ltsv_classify_sequence` over log-mel-scaled input can produce astronomically
   large scores, driving the decision to "always speech" on short excerpts** (observed while
   regenerating the `ltsv.config` golden, `LTSV_is_log_mel true`): the per-bin mean floor

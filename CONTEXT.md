@@ -176,6 +176,10 @@ _Avoid_: Twin plan, LID setup
 **Timeline**:
 The rate-dependent half of either plan (`FastSadPlan::timeline(rate)`, `FastLidPlan::timeline(rate, lang_index)`): framing, the quantized shifts, the resolved window and the decision layer's `(time_step, time_offset)`; on the LID plan also the resolved LID window and the target clamp, with the spectrum shift the Mode-7 constant 80 (the regime rule is the plan's, at construction). The offline driver derives one per file, the stream one at construction. Derived from the config every time; the legacy's stateful carry (the SAD `_WindowShift`, the Twin's `_LIDWindowShift` too) is not reproduced on the fast tree.
 
+**Spectral carry**:
+The exact tree's stateful per-file shift state (`tasks::sad::SpectralCarry`): `_SpectrumShift` / `_SpectrumShiftInFrames` and the SAD `_WindowShift`, re-quantized on each file from the previous file's value by `advance`, which also runs `getBLSTMParam` and derives the SAD time axis (`SpectralAxis`), and reset after a truncate file by `reset_after`. Held by the spectral SAD driver, the Algo 5 driver and the Twin (the Twin's `_LIDWindowShift` stays its own field, written back by `derive_lid_window`); the signal driver has none. Observable only across files of different rates in one run (RESULTS.md issue #24).
+_Avoid_: timeline, plan (the fast tree's derive-from-config terms); preamble for the struct
+
 **Cell geometry**:
 The `Mamba_*` / `Cfc_*` / `Transformer_*` geometry a config carries, as one fast-tree value (`CellGeometry`), parsed for every config and consumed by one arm. A value, not a seam: the cell set stays the closed `CellType` enum.
 
