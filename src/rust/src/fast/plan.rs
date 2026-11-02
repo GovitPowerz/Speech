@@ -63,6 +63,7 @@ use crate::config::NnetSpec;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_opt};
 use crate::nn::blstm::{BlstmConfig, check_pack_len};
+use crate::tasks::lid::derive_lid_window;
 use crate::tasks::sad::get_blstm_param;
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig};
 
@@ -785,9 +786,12 @@ impl FastLidPlan {
             spectrum_shift_sec,
             0,
         );
+        // The exact Twin's `getLIDBLSTMParam` body (`tasks::lid::derive_lid_window`); the
+        // `_LIDWindowShift` it writes back is the dropped carry, a local here.
+        let mut lid_window_shift_sec = self.lid_window_shift_sec;
         let (lid_window_size, lid_window_shift, lid_no_overlap) = derive_lid_window(
             self.lid_window_size_sec,
-            self.lid_window_shift_sec,
+            &mut lid_window_shift_sec,
             self.lid.ssr,
             ssif,
             rate,
@@ -879,36 +883,4 @@ pub struct LidTimeline {
     pub ti: usize,
     /// The per-channel scoring constants the shared kernel reads.
     pub(super) params: LidScoreParams,
-}
-
-/// LID window derivation (`getLIDBLSTMParam`, `TwinBLSTMSpectralLID.cpp:89-102`):
-/// `(lid_window_size, lid_window_shift, lid_no_overlap)`, the shift floored to 1 as the
-/// exact driver floors it before writing it back. `ssif` is the (mode-7 forced) spectrum
-/// shift in frames.
-pub fn derive_lid_window(
-    size_sec: f64,
-    shift_sec: f64,
-    lid_ssr: usize,
-    ssif: usize,
-    rate: f64,
-) -> (usize, usize, bool) {
-    let ssifd = ssif as f64;
-    let mut lid_window_size = f64::round(size_sec * rate / 2.0 / ssifd) as usize;
-    if lid_window_size != 0 && lid_window_size < lid_ssr {
-        lid_window_size = lid_ssr;
-    }
-    let mut lid_window_shift = f64::round(shift_sec * rate / ssifd) as i64;
-    let mut lid_no_overlap = false;
-    if lid_window_size != 0 && lid_window_shift < 1 {
-        lid_no_overlap = true;
-        let raw = f64::round(size_sec * rate / ssifd) as usize;
-        lid_window_size = (raw / lid_ssr) * lid_ssr;
-        if lid_window_size < 10 * lid_ssr {
-            lid_window_size = 10 * lid_ssr;
-        }
-    }
-    if lid_window_size == 0 || lid_window_shift < 1 {
-        lid_window_shift = 1;
-    }
-    (lid_window_size, lid_window_shift as usize, lid_no_overlap)
 }

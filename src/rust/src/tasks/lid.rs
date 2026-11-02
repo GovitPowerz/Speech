@@ -60,7 +60,7 @@ use crate::features::pipeline::{FeatureConfig, SpectralParams, build_input_seque
 use crate::legacy_config::{get_f64, get_f64_default};
 use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
-use crate::tasks::sad::get_blstm_param;
+use crate::tasks::sad::{SpectralAxis, SpectralCarry, apply_input_gates, get_blstm_param};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{compute_errors, speech_duration};
 use crate::tasks::segmenter::{
@@ -734,12 +734,9 @@ pub struct TwinBlstmSpectralLid {
     noise_magnitude: f64,
     /// `_DumpLIDInternals` (`:38`, default false). Mode 7-only; stored for the next task.
     dump_lid_internals: bool,
-    /// Stateful `_SpectrumShift` (`:210`), self-quantizing per call.
-    spectrum_shift_sec: f64,
-    /// Stateful `_SpectrumShiftInFrames` (`:208-210`).
-    spectrum_shift_in_frames: usize,
-    /// Stateful SAD `_WindowShift` (`:453/:1419`).
-    window_shift_sec: f64,
+    /// The stateful `_SpectrumShift` / `_SpectrumShiftInFrames` / SAD `_WindowShift`
+    /// (`:208-210`, `:453/:1419`), issue #121.
+    carry: SpectralCarry,
     /// `seg._CumulativeError[chan]` (`:774`, then `*= LIDCostPonderation` `:1337`).
     cumulative_error: Vec<f64>,
     /// `seg._NbOfClassif[chan]` (`:775`).
@@ -812,8 +809,7 @@ impl TwinBlstmSpectralLid {
         let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
         let dump_lid_internals = twin_bool_default(map, "BLSTM_LID_DumpInternals", false)?;
 
-        let spectrum_shift_sec = feature_cfg.shift_sec;
-        let window_shift_sec = driver_cfg.window_shift_sec;
+        let carry = SpectralCarry::new(feature_cfg.shift_sec, driver_cfg.window_shift_sec);
 
         Ok(TwinBlstmSpectralLid {
             driver_cfg,
@@ -830,9 +826,7 @@ impl TwinBlstmSpectralLid {
             min_nb_of_frames,
             noise_magnitude,
             dump_lid_internals,
-            spectrum_shift_sec,
-            spectrum_shift_in_frames: 0,
-            window_shift_sec,
+            carry,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -1053,77 +1047,46 @@ impl TwinBlstmSpectralLid {
             ));
         }
 
-        // Stateful spectrum-shift quantization (`initSpectralAnalysis` `:208-210`). The
-        // `!hasReadWavFile()` override (`:209`) forces `_SpectrumShiftInFrames = 80` for
-        // phSeq (File_Type 1) -- LOAD-BEARING: it drives every downstream window/shift
-        // derivation (getLIDBLSTMParam window 25, not the 10 the raw `round(0.025*8000)=
-        // 200` would give). `audio.periodogram.is_some()` is the port's `!hasReadWavFile()`.
-        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
-        if audio.periodogram.is_some() {
-            self.spectrum_shift_in_frames = 80;
-        }
-        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
-        let ssif = self.spectrum_shift_in_frames;
-        let spectrum_shift_sec = self.spectrum_shift_sec;
-
-        // initSpectralAnalysis preemph/noise (harmless on the zeroed phSeq waveform).
-        if self.feature_cfg.preemph_ratio > 0.0 {
-            audio.apply_preemph(self.feature_cfg.preemph_ratio);
-        }
-        if self.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(self.feature_cfg.noise_ratio);
-        }
-
-        // getBLSTMParam (SAD result_vec sizing) + getLIDBLSTMParam.
-        let sad_ssr = self.sad_net.sub_sampling_ratio();
-        let (window_size, _sad_window_shift, no_overlap, real_vec_size) = get_blstm_param(
-            self.driver_cfg.window_size_sec,
-            &mut self.window_shift_sec,
-            rate,
+        // The carry's preamble (#121): the stateful spectrum-shift quantization
+        // (`initSpectralAnalysis` `:208-210`) with the `!hasReadWavFile()` override (`:209`)
+        // forcing `_SpectrumShiftInFrames = 80` for phSeq (File_Type 1) -- LOAD-BEARING: it
+        // drives every downstream window/shift derivation (getLIDBLSTMParam window 25, not
+        // the 10 the raw `round(0.025*8000) = 200` would give); `audio.periodogram.is_some()`
+        // is the port's `!hasReadWavFile()`, always true past the wav bail above. The input
+        // gates (harmless on the zeroed phSeq waveform), getBLSTMParam (the SAD result_vec
+        // sizing) and the SAD time axis (`:696-706`) follow.
+        let ssif_override = if audio.periodogram.is_some() {
+            Some(80)
+        } else {
+            None
+        };
+        apply_input_gates(audio, &self.feature_cfg);
+        let SpectralAxis {
             ssif,
-            sad_ssr,
-            &self.sad_net.lstm_sub_sampling(),
-            &self.sad_net.output_sub_sampling(),
+            no_overlap,
+            real_vec_size,
+            time_step,
+            time_offset,
+            ..
+        } = self.carry.advance(
+            rate,
+            &self.driver_cfg,
+            &self.sad_net,
             audio.data.ncols(),
+            ssif_override,
         );
 
+        // getLIDBLSTMParam; mutates lid_window_shift_sec.
         let lid_ssr = self.lid_net.sub_sampling_ratio();
-        let ssifd = ssif as f64;
-        let mut lid_window_size =
-            f64::round(self.lid_window_size_sec * rate / 2.0 / ssifd) as usize;
-        if lid_window_size != 0 && lid_window_size < lid_ssr {
-            lid_window_size = lid_ssr;
-        }
-        let mut lid_window_shift = f64::round(self.lid_window_shift_sec * rate / ssifd) as i64;
-        let mut lid_no_overlap = false;
-        if lid_window_size != 0 && lid_window_shift < 1 {
-            lid_no_overlap = true;
-            let raw = f64::round(self.lid_window_size_sec * rate / ssifd) as usize;
-            lid_window_size = (raw / lid_ssr) * lid_ssr;
-            if lid_window_size < 10 * lid_ssr {
-                lid_window_size = 10 * lid_ssr;
-            }
-        }
-        if lid_window_size == 0 || lid_window_shift < 1 {
-            lid_window_shift = 1;
-        }
-        self.lid_window_shift_sec = (lid_window_shift * ssif as i64) as f64 / rate;
+        let (lid_window_size, lid_window_shift, lid_no_overlap) = derive_lid_window(
+            self.lid_window_size_sec,
+            &mut self.lid_window_shift_sec,
+            lid_ssr,
+            ssif,
+            rate,
+        );
         self.lid_net.reset_weights_derivatives();
         self.sad_net.reset_weights_derivatives();
-        let lid_window_shift = lid_window_shift as usize;
-
-        // SAD timeStep/offset (`:696-706`).
-        let mut time_step = self.window_shift_sec * sad_ssr as f64;
-        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-        if window_size > 0 {
-            if no_overlap {
-                time_step = self.window_shift_sec * sad_ssr as f64;
-                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-            } else {
-                time_step = spectrum_shift_sec * sad_ssr as f64;
-                time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
-            }
-        }
 
         let class_nb = self.lid_net.output_size().max(2);
         let cost_modified = self.lid_net.is_cost_modified();
@@ -1400,9 +1363,7 @@ impl TwinBlstmSpectralLid {
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1);
         }
-        if no_overlap {
-            self.window_shift_sec = 0.0;
-        }
+        self.carry.reset_after(no_overlap);
         if lid_no_overlap {
             self.lid_window_shift_sec = 0.0;
         }
@@ -1441,55 +1402,37 @@ impl TwinBlstmSpectralLid {
             ));
         }
 
-        // Stateful spectrum-shift quantization (`:208-210`).
-        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
-        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
-        let spectrum_shift_in_frames = self.spectrum_shift_in_frames;
-        let spectrum_shift_sec = self.spectrum_shift_sec;
-
-        if self.feature_cfg.preemph_ratio > 0.0 {
-            audio.apply_preemph(self.feature_cfg.preemph_ratio);
-        }
-        if self.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(self.feature_cfg.noise_ratio);
-        }
-
-        // getBLSTMParam (SAD window/shift + result-vec sizing); mutates window_shift_sec.
-        let sad_ssr = self.sad_net.sub_sampling_ratio();
-        let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
-            self.driver_cfg.window_size_sec,
-            &mut self.window_shift_sec,
+        // The carry's preamble (#121): the stateful spectrum-shift quantization (`:208-210`),
+        // the input gates, getBLSTMParam (SAD window/shift + result-vec sizing) and the SAD
+        // time axis (`:696-706`, overlap OVERRIDES with _SpectrumShift).
+        apply_input_gates(audio, &self.feature_cfg);
+        let SpectralAxis {
+            ssif: spectrum_shift_in_frames,
+            spectrum_shift_sec,
+            window_size,
+            window_shift,
+            no_overlap,
+            real_vec_size,
+            time_step,
+            time_offset,
+        } = self.carry.advance(
             rate,
-            spectrum_shift_in_frames,
-            sad_ssr,
-            &self.sad_net.lstm_sub_sampling(),
-            &self.sad_net.output_sub_sampling(),
+            &self.driver_cfg,
+            &self.sad_net,
             audio.data.ncols(),
+            None,
         );
 
         // getLIDBLSTMParam (LID window/shift + LID_result_vec sizing); mutates
         // lid_window_shift_sec + resets the LID net derivs (`:87-137`).
         let lid_ssr = self.lid_net.sub_sampling_ratio();
-        let ssif = spectrum_shift_in_frames as f64;
-        let mut lid_window_size = f64::round(self.lid_window_size_sec * rate / 2.0 / ssif) as usize;
-        if lid_window_size != 0 && lid_window_size < lid_ssr {
-            lid_window_size = lid_ssr;
-        }
-        let mut lid_window_shift = f64::round(self.lid_window_shift_sec * rate / ssif) as i64;
-        let mut lid_no_overlap = false;
-        if lid_window_size != 0 && lid_window_shift < 1 {
-            lid_no_overlap = true;
-            let raw = f64::round(self.lid_window_size_sec * rate / ssif) as usize;
-            lid_window_size = (raw / lid_ssr) * lid_ssr;
-            if lid_window_size < 10 * lid_ssr {
-                lid_window_size = 10 * lid_ssr;
-            }
-        }
-        if lid_window_size == 0 || lid_window_shift < 1 {
-            lid_window_shift = 1;
-        }
-        self.lid_window_shift_sec =
-            (lid_window_shift * spectrum_shift_in_frames as i64) as f64 / rate;
+        let (lid_window_size, lid_window_shift, lid_no_overlap) = derive_lid_window(
+            self.lid_window_size_sec,
+            &mut self.lid_window_shift_sec,
+            lid_ssr,
+            spectrum_shift_in_frames,
+            rate,
+        );
         self.lid_net.reset_weights_derivatives();
         let frame_count = audio.data.ncols();
         let vec_size = if frame_count.is_multiple_of(spectrum_shift_in_frames) {
@@ -1506,21 +1449,7 @@ impl TwinBlstmSpectralLid {
                 lid_real_vec_size /= r;
             }
         }
-        let lid_window_shift = lid_window_shift as usize;
         self.sad_net.reset_weights_derivatives();
-
-        // SAD timeStep/timeOffset (`:696-706`): overlap OVERRIDES with _SpectrumShift.
-        let mut time_step = self.window_shift_sec * sad_ssr as f64;
-        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-        if window_size > 0 {
-            if no_overlap {
-                time_step = self.window_shift_sec * sad_ssr as f64;
-                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-            } else {
-                time_step = spectrum_shift_sec * sad_ssr as f64;
-                time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
-            }
-        }
 
         // LIDTimeStep/LIDTimeOffset (`:629-638`): overlap keeps _SpectrumShift * lidSsr.
         // `lid_window_shift_sec` is the POST-getLIDBLSTMParam value.
@@ -1922,14 +1851,48 @@ impl TwinBlstmSpectralLid {
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1);
         }
-        if no_overlap {
-            self.window_shift_sec = 0.0;
-        }
+        self.carry.reset_after(no_overlap);
         if lid_no_overlap {
             self.lid_window_shift_sec = 0.0;
         }
         Ok(())
     }
+}
+
+/// `getLIDBLSTMParam` (`TwinBLSTMSpectralLID.cpp:87-137`), the LID window derivation:
+/// `(lid_window_size, lid_window_shift, lid_no_overlap)` in periodogram frames, and the
+/// stateful `_LIDWindowShift` written back through `shift_sec` as `shift * ssif / rate`
+/// (`:102`), exactly like [`get_blstm_param`](crate::tasks::sad::get_blstm_param) writes
+/// `_WindowShift`. The one body of the three Twin modes (issue #121; the fast tree's plan
+/// calls it with a local it discards, the dropped carry of #84). The derivative reset the
+/// legacy does inside (`:110`) stays with the caller.
+pub fn derive_lid_window(
+    size_sec: f64,
+    shift_sec: &mut f64,
+    lid_ssr: usize,
+    ssif: usize,
+    rate: f64,
+) -> (usize, usize, bool) {
+    let ssifd = ssif as f64;
+    let mut lid_window_size = f64::round(size_sec * rate / 2.0 / ssifd) as usize;
+    if lid_window_size != 0 && lid_window_size < lid_ssr {
+        lid_window_size = lid_ssr;
+    }
+    let mut lid_window_shift = f64::round(*shift_sec * rate / ssifd) as i64;
+    let mut lid_no_overlap = false;
+    if lid_window_size != 0 && lid_window_shift < 1 {
+        lid_no_overlap = true;
+        let raw = f64::round(size_sec * rate / ssifd) as usize;
+        lid_window_size = (raw / lid_ssr) * lid_ssr;
+        if lid_window_size < 10 * lid_ssr {
+            lid_window_size = 10 * lid_ssr;
+        }
+    }
+    if lid_window_size == 0 || lid_window_shift < 1 {
+        lid_window_shift = 1;
+    }
+    *shift_sec = (lid_window_shift * ssif as i64) as f64 / rate;
+    (lid_window_size, lid_window_shift as usize, lid_no_overlap)
 }
 
 impl Segmenter for TwinBlstmSpectralLid {
@@ -1978,57 +1941,38 @@ impl Segmenter for TwinBlstmSpectralLid {
             ));
         }
 
-        // Stateful spectrum-shift quantization (`:208-210`).
-        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
-        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
-        let spectrum_shift_in_frames = self.spectrum_shift_in_frames;
-        let spectrum_shift_sec = self.spectrum_shift_sec;
-
-        // preemph -> noise (`initSpectralAnalysis` :216-227).
-        if self.feature_cfg.preemph_ratio > 0.0 {
-            audio.apply_preemph(self.feature_cfg.preemph_ratio);
-        }
-        if self.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(self.feature_cfg.noise_ratio);
-        }
-
-        // getBLSTMParam (`:300` -> `:439-500`): SAD window/shift + result-vec sizing;
-        // mutates self.window_shift_sec.
-        let sad_ssr = self.sad_net.sub_sampling_ratio();
-        let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
-            self.driver_cfg.window_size_sec,
-            &mut self.window_shift_sec,
+        // The carry's preamble (#121): the stateful spectrum-shift quantization (`:208-210`),
+        // the input gates (`initSpectralAnalysis` :216-227), getBLSTMParam (`:300` ->
+        // `:439-500`, SAD window/shift + result-vec sizing) and the SAD time axis
+        // (`:696-706`, overlap OVERRIDES with _SpectrumShift).
+        apply_input_gates(audio, &self.feature_cfg);
+        let SpectralAxis {
+            ssif: spectrum_shift_in_frames,
+            spectrum_shift_sec,
+            window_size,
+            window_shift,
+            no_overlap,
+            real_vec_size,
+            time_step,
+            time_offset,
+        } = self.carry.advance(
             rate,
-            spectrum_shift_in_frames,
-            sad_ssr,
-            &self.sad_net.lstm_sub_sampling(),
-            &self.sad_net.output_sub_sampling(),
+            &self.driver_cfg,
+            &self.sad_net,
             audio.data.ncols(),
+            None,
         );
 
         // getLIDBLSTMParam (`:306` -> `:87-137`): LID window/shift + LID_result_vec
         // sizing; mutates self.lid_window_shift_sec + resets the LID net derivs.
         let lid_ssr = self.lid_net.sub_sampling_ratio();
-        let ssif = spectrum_shift_in_frames as f64;
-        let mut lid_window_size = f64::round(self.lid_window_size_sec * rate / 2.0 / ssif) as usize;
-        if lid_window_size != 0 && lid_window_size < lid_ssr {
-            lid_window_size = lid_ssr;
-        }
-        let mut lid_window_shift = f64::round(self.lid_window_shift_sec * rate / ssif) as i64;
-        let mut lid_no_overlap = false;
-        if lid_window_size != 0 && lid_window_shift < 1 {
-            lid_no_overlap = true;
-            let raw = f64::round(self.lid_window_size_sec * rate / ssif) as usize;
-            lid_window_size = (raw / lid_ssr) * lid_ssr;
-            if lid_window_size < 10 * lid_ssr {
-                lid_window_size = 10 * lid_ssr;
-            }
-        }
-        if lid_window_size == 0 || lid_window_shift < 1 {
-            lid_window_shift = 1;
-        }
-        self.lid_window_shift_sec =
-            (lid_window_shift * spectrum_shift_in_frames as i64) as f64 / rate;
+        let (lid_window_size, lid_window_shift, lid_no_overlap) = derive_lid_window(
+            self.lid_window_size_sec,
+            &mut self.lid_window_shift_sec,
+            lid_ssr,
+            spectrum_shift_in_frames,
+            rate,
+        );
         self.lid_net.reset_weights_derivatives(); // :110
         let frame_count = audio.data.ncols();
         let vec_size = if frame_count.is_multiple_of(spectrum_shift_in_frames) {
@@ -2045,25 +1989,11 @@ impl Segmenter for TwinBlstmSpectralLid {
                 lid_real_vec_size /= r;
             }
         }
-        let lid_window_shift = lid_window_shift as usize;
 
         // resetWeightsDerivatives on the SAD net (`:234` via getBLSTMParam already reset,
         // but the base getBLSTMParam :473 resets -- our get_blstm_param does NOT, so reset
         // here to match).
         self.sad_net.reset_weights_derivatives();
-
-        // SAD timeStep/timeOffset (`:696-706`): overlap OVERRIDES with _SpectrumShift.
-        let mut time_step = self.window_shift_sec * sad_ssr as f64;
-        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-        if window_size > 0 {
-            if no_overlap {
-                time_step = self.window_shift_sec * sad_ssr as f64;
-                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-            } else {
-                time_step = spectrum_shift_sec * sad_ssr as f64;
-                time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
-            }
-        }
 
         let class_nb = self.lid_net.output_size().max(2);
 
@@ -2383,9 +2313,7 @@ impl Segmenter for TwinBlstmSpectralLid {
         for seg in seg_per_chan.iter_mut() {
             compute_errors(seg, None, -1); // :1394
         }
-        if no_overlap {
-            self.window_shift_sec = 0.0; // :1419
-        }
+        self.carry.reset_after(no_overlap); // :1419
         if lid_no_overlap {
             self.lid_window_shift_sec = 0.0; // :1420
         }

@@ -29,9 +29,10 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 use speech::audio::{Audio, read_audio};
 use speech::fast::driver::{FastNetShape, FastTwinLid};
-use speech::fast::plan::{FastLidPlan, MODE7_SSIF, derive_lid_window};
+use speech::fast::plan::{FastLidPlan, MODE7_SSIF};
 use speech::io::binary::read_weight_vector;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork, CellType};
+use speech::tasks::lid::derive_lid_window;
 use speech::tasks::sad::get_blstm_param;
 use speech::tasks::segmentation::Segmentation;
 use speech::tasks::segmenter::Segmenter;
@@ -316,14 +317,9 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
             assert_eq!(tl.lid_window_size, lw, "{rel}@{rate}: LID window");
             assert_eq!(tl.lid_window_shift, lsh, "{rel}@{rate}: LID shift");
             assert_eq!(tl.lid_no_overlap, lno, "{rel}@{rate}: LID no_overlap");
+            let mut lsec = plan.lid_window_shift_sec;
             assert_eq!(
-                derive_lid_window(
-                    plan.lid_window_size_sec,
-                    plan.lid_window_shift_sec,
-                    plan.lid.ssr,
-                    80,
-                    rate
-                ),
+                derive_lid_window(plan.lid_window_size_sec, &mut lsec, plan.lid.ssr, 80, rate),
                 (lw, lsh, lno)
             );
         }
@@ -369,16 +365,15 @@ fn shift_requantization_is_a_fixed_point_at_one_rate_reset_included() {
             for shift in shifts {
                 for ssr in ssrs {
                     // The LID carry: `_LIDWindowShift` written back as `shift * ssif / rate`.
-                    let (w1, s1, no1) = derive_lid_window(size, shift, ssr, ssif, rate);
-                    let sec1 = (s1 * ssif) as f64 / rate;
-                    let (w2, s2, no2) =
-                        derive_lid_window(size, carried(sec1, no1), ssr, ssif, rate);
+                    let mut sec1 = shift;
+                    let (w1, s1, no1) = derive_lid_window(size, &mut sec1, ssr, ssif, rate);
+                    let mut sec2 = carried(sec1, no1);
+                    let (w2, s2, no2) = derive_lid_window(size, &mut sec2, ssr, ssif, rate);
                     assert_eq!(
                         (w1, s1, no1),
                         (w2, s2, no2),
                         "LID at rate {rate} size {size} shift {shift} ssr {ssr}"
                     );
-                    let sec2 = (s2 * ssif) as f64 / rate;
                     assert_eq!(
                         sec1.to_bits(),
                         sec2.to_bits(),
