@@ -1,0 +1,21 @@
+mutation: SpectralCarry::advance hands get_blstm_param a copy of the window shift, so the carry's _WindowShift is never written (the fast tree's derive-from-config rule leaking into the exact tree)
+catcher: CAUGHT cargo --test phase2b_spectral_golden two_files_in_sequence_no_overlap_lifecycle
+catcher: MISSED cargo --test phase2b_spectral_golden real_variant_matches_dump
+catcher: CAUGHT cargo --test phase4b_twin_golden boundaries_match_dump
+catcher: CAUGHT cargo --test phase4b_lid5_golden sad_boundaries_match_dump
+
+diff --git a/src/rust/src/tasks/sad.rs b/src/rust/src/tasks/sad.rs
+--- a/src/rust/src/tasks/sad.rs
++++ b/src/rust/src/tasks/sad.rs
+@@ -1022,9 +1022,10 @@ impl SpectralCarry {
+ 
+         // getBLSTMParam (:439-500); mutates window_shift_sec (the stateful _WindowShift).
+         let ssr = net.sub_sampling_ratio();
++        let mut window_shift_copy = self.window_shift_sec;
+         let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
+             driver_cfg.window_size_sec,
+-            &mut self.window_shift_sec,
++            &mut window_shift_copy,
+             rate,
+             ssif,
+             ssr,

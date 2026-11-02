@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121)
 
 ## Context
 
@@ -63,7 +63,24 @@ copies of the speech-duration walk and the corpus processor's `top_rows` alias d
 nothing recomputed, the `.mat` goldens byte-identical, issue #94; the same class, 2026-10-29:
 `BlstmConfig::input_size()`, the legacy `getInputSize` rule stated on the parsed config and
 pinned equal to the built net's, read by the `speech_rs.blstm_config` seam where a config
-declares no `NNetInputSize`, the net's constructor and getter untouched, issue #90).
+declares no `NNetInputSize`, the net's constructor and getter untouched, issue #90; the
+stepwise hoist again, 2026-11-02: the exact spectral preamble -- the stateful `_SpectrumShift` /
+`_SpectrumShiftInFrames` / SAD `_WindowShift` re-quantization, `getBLSTMParam` and the SAD
+time axis -- is ONE body, `tasks/sad.rs::SpectralCarry::advance`, folded by the spectral SAD
+driver, the Algo 5 driver (its shared half: the signal-pattern scoring axis and the LTSV sizing
+stay its own) and the Twin's three modes (the `!hasReadWavFile -> 80` override an argument
+every caller keys on the audio, `non_wav_ssif`), the input gates one free function, the
+epilogue reset one method, and the Twin's inline `getLIDBLSTMParam`, written three times,
+`tasks/lid.rs::derive_lid_window` with the `&mut` write-back `get_blstm_param` has, which
+`fast/plan.rs` now imports instead of its copy (the #26 direction: the fast tree calls the exact
+body, never the reverse); the signal driver shares none of it and keeps its inline block;
+proven by the goldens byte-green and the four phase2b lifecycle pins passing UNMODIFIED through
+the spectral driver's delegating getters, issue #121 (the non-wav read those drivers never
+reproduced is no hoist: it is a port fix recorded in IMPROVEMENTS.md, Algo 5 now taking the
+legacy 80 and the spectral SAD driver and the Twin's modes 0-6 refusing it); and the
+caller-less class the same day: the write-only `ltsv_shift_sec` deleted on both drivers with
+its four per-file writes, the port's LTSV shift having derived from the config value since
+Phase 2b, issue #121).
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

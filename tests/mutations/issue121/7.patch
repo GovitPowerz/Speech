@@ -1,0 +1,16 @@
+mutation: BlstmSpectralLid passes no :209 override, so an Algo 5 non-wav read runs on the derived spectrum shift where the legacy forces 80 (BLSTMSpectralLID.cpp:52)
+catcher: CAUGHT cargo --test non_wav_spectral_input algo5_non_wav_read_takes_the_legacy_80
+catcher: MISSED cargo --test phase4b_lid5_golden ltsv_sad_row_matches_dump
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -235,7 +235,7 @@
+             &self.driver_cfg,
+             &self.net,
+             audio.data.ncols(),
+-            non_wav_ssif(audio),
++            None,
+         );
+ 
+         // Signal windowing coeffs (`:90`).

@@ -912,6 +912,45 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   candidate:* none -- documented legacy per-file mutable-state contract (spec S3.4),
   reproduced deliberately.
 
+- **[phase2b, recorded 2026-11-02 at issue #121] The `_LTSVWindowShift` cross-file carry is NOT
+  reproduced on the spectral drivers** (`BLSTMSpectralSegmenter.cpp:302-306`, the same
+  `getLTSVParam` on the Twin path, `TwinBLSTMSpectralLID.cpp:288`; the Algo 5 driver inlines its
+  own derivation, `BLSTMSpectralLID.cpp:157-160`, which reads `_LTSVWindowShift` and never writes
+  it back, so it carries nothing): the legacy re-quantizes the member per file
+  (`LTSV_window_shift = round(_LTSVWindowShift*rate/_SpectrumShiftInFrames)`, floored at 1,
+  then `_LTSVWindowShift = LTSV_window_shift*ssif/rate`) and the next file's LTSV shift derives
+  from that carried value. The port's LTSV shift derives from the CONFIG value on every file
+  (`features/pipeline.rs::SpectralParams::derive`, since Phase 2b); the drivers' `ltsv_shift_sec`
+  field mirrored the legacy write and was read by nothing, so issue #121 deleted it (ADR-0002,
+  the #94 class). Like the `_SpectrumShift` / `_WindowShift` carries the fast tree dropped
+  (RESULTS.md issue #24), the LTSV carry is a fixed point at one rate (`round(round(x*r)/r*r)
+  == round(x*r)` on the `ssif/rate` grid), so it is observable only across files of DIFFERENT
+  rates in one run, where the second file's LTSV window shift would be quantized off the
+  first's. Every committed spectral SAD and Twin config has `LTSVwindow 0` (no LTSV column), so
+  no golden can see it.
+  *Fix candidate:* none -- keep the port's stateless derivation; a mixed-rate corpus run that
+  needs the legacy's second-file LTSV shift would carry it on `SpectralCarry` beside the two
+  shifts it already holds.
+
+- **[phase2b/4b, recorded 2026-11-02 at issue #121] A non-wav read on the spectral SAD driver, Algo 5
+  and the Twin's modes 0-6 -- FIXED (issue #121; a port gap, not a legacy bug)**
+  (`BLSTMSpectralSegmenter.cpp:209`, `BLSTMSpectralLID.cpp:52`): the port applied the
+  `!hasReadWavFile() -> 80` spectrum-shift override in Twin Mode 7 only, while the bag accepts
+  `File_Type 1/2` (phSeq / cep) for any algo; such a read on Algo 3, Algo 5 or Twin modes 0-6
+  ran the wav arm over the zeroed waveform at the config's spectrum shift. **FIX:** the override
+  is keyed on the audio at every spectral driver (`tasks::sad::non_wav_ssif`, `Some(NON_WAV_SSIF)`
+  exactly when `periodogram` is set, which only the phSeq / cep readers do). Algo 5's only
+  non-wav branch is the override itself (its periodogram is computed off the waveform either
+  way), so it now reproduces the legacy's 80. The spectral SAD driver and the Twin's modes 0-6
+  have a whole non-wav arm the port never had (the precomputed features fed to the net,
+  `BLSTMSpectralSegmenter.cpp:564-567` / `:672`, `TwinBLSTMSpectralLID.cpp:354` / `:642`), so
+  they refuse the read before the carry moves, as Mode 7 refuses a wav; the fast SAD driver
+  refuses it in kind. Golden-neutral: no committed config pairs a non-wav `File_Type` with these
+  drivers (every one is Twin Mode 7). RED before the fix: Algo 5 sized 41 result rows off the
+  derived 200 frames where the legacy's 80 gives 34, and the three drivers ran instead of
+  refusing. *Pinned by:* `tests/non_wav_spectral_input.rs`. *Mutations:*
+  `tests/mutations/issue121/7.patch`-`11.patch` (RESULTS.md, issue #121).
+
 - **[phase2b] `ltsv_classify_sequence` over log-mel-scaled input can produce astronomically
   large scores, driving the decision to "always speech" on short excerpts** (observed while
   regenerating the `ltsv.config` golden, `LTSV_is_log_mel true`): the per-bin mean floor
@@ -2484,7 +2523,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   correct 80 it is 25 (`round(0.25*8000/2/80)=13 -> noOverlap -> 25`), which changes the
   TwoSweeps truncate row counts (nb_of_classif 39 vs 77 for a 7-row block) and every
   posterior. The port keys the override off `audio.periodogram.is_some()` (the phSeq ctor
-  populates it; the wav path leaves it `None`). *Why deferred:* faithful port; the 80 is a
+  populates it; the wav path leaves it `None`); since issue #121 that key is the Mode-7 wav bail,
+  past which the driver passes the override to `SpectralCarry::advance` unconditionally. *Why deferred:* faithful port; the 80 is a
   hardcoded legacy magic constant. *Fix candidate:* N/A. *Pinned by:*
   `mode7_integer_members_match_real_bitexact` + `mode7_continuous_members_match_real`
   (`tests/phase4b_twin_mode7.rs`, bit-exact vs the REAL compiled `getSegmentation`: nbclassif

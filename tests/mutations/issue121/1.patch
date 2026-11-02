@@ -1,0 +1,31 @@
+mutation: SpectralCarry::advance applies the Mode-7 ssif override AFTER get_blstm_param and the time axis, so both read the un-overridden shift (the grilling's first draft of decision 4, caught in round 2)
+catcher: MISSED cargo --test phase4b_twin_mode7 mode7_integer_members_match_real_bitexact
+catcher: CAUGHT cargo --test fast_lid_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: MISSED cargo --test phase2b_spectral_golden non_wav_spectrum_shift_80_fallback_persists
+catcher: MISSED cargo --test phase4b_twin_golden boundaries_match_dump
+
+diff --git a/src/rust/src/tasks/sad.rs b/src/rust/src/tasks/sad.rs
+--- a/src/rust/src/tasks/sad.rs
++++ b/src/rust/src/tasks/sad.rs
+@@ -1017,7 +1017,7 @@ impl SpectralCarry {
+         // :208 ssif = round(_SpectrumShift * rate), :209 the non-wav override,
+         // :210 _SpectrumShift = ssif / rate (the persistence).
+         let ssif = f64::round(self.spectrum_shift_sec * rate) as usize;
+-        self.set_ssif(ssif_override.unwrap_or(ssif), rate);
++        self.set_ssif(ssif, rate);
+         let ssif = self.spectrum_shift_in_frames;
+ 
+         // getBLSTMParam (:439-500); mutates window_shift_sec (the stateful _WindowShift).
+@@ -1048,8 +1048,11 @@ impl SpectralCarry {
+             }
+         }
+ 
++        if let Some(forced) = ssif_override {
++            self.set_ssif(forced, rate);
++        }
+         SpectralAxis {
+-            ssif,
++            ssif: self.spectrum_shift_in_frames,
+             spectrum_shift_sec: self.spectrum_shift_sec,
+             window_size,
+             window_shift,

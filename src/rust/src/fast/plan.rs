@@ -63,7 +63,8 @@ use crate::config::NnetSpec;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_opt};
 use crate::nn::blstm::{BlstmConfig, check_pack_len};
-use crate::tasks::sad::get_blstm_param;
+use crate::tasks::lid::derive_lid_window;
+use crate::tasks::sad::{NON_WAV_SSIF, get_blstm_param};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig};
 
 use super::cells::CellGeometry;
@@ -572,8 +573,8 @@ fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -
 
 /// The Mode-7 `_SpectrumShiftInFrames` (`BLSTMSpectralSegmenter.cpp:209`): the
 /// `!hasReadWavFile` override, always taken on the phSeq/cep arm the fast Twin runs, so the
-/// LID plan's `ssif` is this constant at every rate.
-pub const MODE7_SSIF: usize = 80;
+/// LID plan's `ssif` is this constant at every rate: the exact tree's [`NON_WAV_SSIF`].
+pub const MODE7_SSIF: usize = NON_WAV_SSIF;
 
 /// Everything an algo-6 Mode-7 fast LID run needs that does not depend on the sample
 /// rate, the target language or the audio: the rate-free half of the Twin's setup, parsed
@@ -785,9 +786,12 @@ impl FastLidPlan {
             spectrum_shift_sec,
             0,
         );
+        // The exact Twin's `getLIDBLSTMParam` body (`tasks::lid::derive_lid_window`); the
+        // `_LIDWindowShift` it writes back is the dropped carry, a local here.
+        let mut lid_window_shift_sec = self.lid_window_shift_sec;
         let (lid_window_size, lid_window_shift, lid_no_overlap) = derive_lid_window(
             self.lid_window_size_sec,
-            self.lid_window_shift_sec,
+            &mut lid_window_shift_sec,
             self.lid.ssr,
             ssif,
             rate,
@@ -879,36 +883,4 @@ pub struct LidTimeline {
     pub ti: usize,
     /// The per-channel scoring constants the shared kernel reads.
     pub(super) params: LidScoreParams,
-}
-
-/// LID window derivation (`getLIDBLSTMParam`, `TwinBLSTMSpectralLID.cpp:89-102`):
-/// `(lid_window_size, lid_window_shift, lid_no_overlap)`, the shift floored to 1 as the
-/// exact driver floors it before writing it back. `ssif` is the (mode-7 forced) spectrum
-/// shift in frames.
-pub fn derive_lid_window(
-    size_sec: f64,
-    shift_sec: f64,
-    lid_ssr: usize,
-    ssif: usize,
-    rate: f64,
-) -> (usize, usize, bool) {
-    let ssifd = ssif as f64;
-    let mut lid_window_size = f64::round(size_sec * rate / 2.0 / ssifd) as usize;
-    if lid_window_size != 0 && lid_window_size < lid_ssr {
-        lid_window_size = lid_ssr;
-    }
-    let mut lid_window_shift = f64::round(shift_sec * rate / ssifd) as i64;
-    let mut lid_no_overlap = false;
-    if lid_window_size != 0 && lid_window_shift < 1 {
-        lid_no_overlap = true;
-        let raw = f64::round(size_sec * rate / ssifd) as usize;
-        lid_window_size = (raw / lid_ssr) * lid_ssr;
-        if lid_window_size < 10 * lid_ssr {
-            lid_window_size = 10 * lid_ssr;
-        }
-    }
-    if lid_window_size == 0 || lid_window_shift < 1 {
-        lid_window_shift = 1;
-    }
-    (lid_window_size, lid_window_shift as usize, lid_no_overlap)
 }

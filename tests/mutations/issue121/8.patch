@@ -1,0 +1,18 @@
+mutation: non_wav_ssif answers None for every read, so no driver takes the :209 override (the Mode-7 phSeq read included)
+catcher: CAUGHT cargo --test non_wav_spectral_input algo5_non_wav_read_takes_the_legacy_80
+catcher: CAUGHT cargo --test phase4b_twin_mode7 mode7_integer_members_match_real_bitexact
+catcher: MISSED cargo --test fast_lid_plan timeline_reproduces_the_frozen_per_file_derivation
+
+diff --git a/src/rust/src/tasks/sad.rs b/src/rust/src/tasks/sad.rs
+--- a/src/rust/src/tasks/sad.rs
++++ b/src/rust/src/tasks/sad.rs
+@@ -974,7 +974,8 @@
+ /// `None` for a wav. Every spectral driver passes it, so the override is keyed on the audio
+ /// as the legacy keys it (Algo 5's inline copy, `BLSTMSpectralLID.cpp:52`, included).
+ pub fn non_wav_ssif(audio: &Audio) -> Option<usize> {
+-    audio.periodogram.as_ref().map(|_| NON_WAV_SSIF)
++    let _ = audio;
++    None
+ }
+ 
+ /// What [`SpectralCarry::advance`] derives for one file: the quantized spectrum shift,
