@@ -1,0 +1,23 @@
+mutation: SpectralCarry::advance drops the base pair's offset (time_offset = 0.0 on the plain and truncate branches)
+catcher: CAUGHT cargo --test phase2b_spectral_golden no_overlap_variant_matches_dump
+catcher: CAUGHT cargo --test phase4b_twin_golden boundaries_match_dump
+catcher: CAUGHT cargo --test fast_lid_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: MISSED cargo --test phase4b_lid5_golden sad_boundaries_match_dump
+
+diff --git a/src/rust/src/tasks/sad.rs b/src/rust/src/tasks/sad.rs
+--- a/src/rust/src/tasks/sad.rs
++++ b/src/rust/src/tasks/sad.rs
+@@ -1037,11 +1037,11 @@ impl SpectralCarry {
+         // _SpectrumShift (the asymmetry vs signal, which uses _WindowShift there).
+         // window_shift_sec here is the POST-getBLSTMParam mutated value.
+         let mut time_step = self.window_shift_sec * ssr as f64;
+-        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
++        let mut time_offset = 0.0;
+         if window_size > 0 {
+             if no_overlap {
+                 time_step = self.window_shift_sec * ssr as f64;
+-                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
++                time_offset = 0.0;
+             } else {
+                 time_step = self.spectrum_shift_sec * ssr as f64;
+                 time_offset = time_step / 2.0 - self.spectrum_shift_sec / 2.0;

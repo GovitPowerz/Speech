@@ -1,0 +1,20 @@
+mutation: SpectralCarry::advance takes the signal driver's overlap pair (time_step = window_shift_sec, time_offset = 0.0) where the spectral drivers override with _SpectrumShift
+catcher: CAUGHT cargo --test phase2b_spectral_golden overlap_variant_and_cross_channel_reuse
+catcher: CAUGHT cargo --test fast_sad_plan timeline_reproduces_the_frozen_per_file_derivation
+catcher: MISSED cargo --test phase4b_twin_golden boundaries_match_dump
+catcher: MISSED cargo --test phase4b_lid5_golden sad_boundaries_match_dump
+
+diff --git a/src/rust/src/tasks/sad.rs b/src/rust/src/tasks/sad.rs
+--- a/src/rust/src/tasks/sad.rs
++++ b/src/rust/src/tasks/sad.rs
+@@ -1043,8 +1043,8 @@ impl SpectralCarry {
+                 time_step = self.window_shift_sec * ssr as f64;
+                 time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+             } else {
+-                time_step = self.spectrum_shift_sec * ssr as f64;
+-                time_offset = time_step / 2.0 - self.spectrum_shift_sec / 2.0;
++                time_step = self.window_shift_sec;
++                time_offset = 0.0;
+             }
+         }
+ 

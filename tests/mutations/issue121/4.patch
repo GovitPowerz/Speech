@@ -1,0 +1,19 @@
+mutation: SpectralCarry::reset_after never resets _WindowShift (a truncate file no longer re-arms the noOverlap trigger for the next file)
+catcher: CAUGHT cargo --test phase2b_spectral_golden two_files_in_sequence_no_overlap_lifecycle
+catcher: MISSED cargo --test phase4b_twin_golden boundaries_match_dump
+catcher: MISSED cargo --test phase4b_lid5_golden sad_boundaries_match_dump
+
+diff --git a/src/rust/src/tasks/sad.rs b/src/rust/src/tasks/sad.rs
+--- a/src/rust/src/tasks/sad.rs
++++ b/src/rust/src/tasks/sad.rs
+@@ -1071,9 +1071,7 @@ impl SpectralCarry {
+     /// The epilogue (`:885`, the Twin's `:1419`): a truncate file re-arms the noOverlap
+     /// trigger by resetting `_WindowShift` to 0.0 (the genuine cross-file state).
+     pub fn reset_after(&mut self, no_overlap: bool) {
+-        if no_overlap {
+-            self.window_shift_sec = 0.0;
+-        }
++        let _ = no_overlap;
+     }
+ 
+     /// `_WindowShift` POST the last call.
