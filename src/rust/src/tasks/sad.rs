@@ -978,9 +978,12 @@ pub fn get_blstm_param(
 ///   in periodogram-frame units), then RESET to `0.0` when noOverlap fired, AFTER the
 ///   dumps (`:885`; the reset-order divergence vs signal's BEFORE-`compute_errors` reset
 ///   is cosmetic, ported as written).
-/// - `ltsv_shift_sec` (`_LTSVWindowShift`): re-quantized per call (`getLTSVParam`
-///   `:302-306`); DEAD for the Task-7 configs (LTSVwindow 0 -> no LTSV), tracked for
-///   S3.4 faithfulness.
+/// - `_LTSVWindowShift` (`getLTSVParam` `:302-306`) is NOT carried. The legacy re-quantizes
+///   it per call and reads the carried value back on the next file (`:304`); the port's LTSV
+///   shift derives from the CONFIG value in `SpectralParams::derive` on every file (since
+///   Phase 2b), a fixed point of the legacy carry at one rate. The port's `ltsv_shift_sec`
+///   field was a write-only mirror of that carry, read by nothing; issue #121 deleted it
+///   (the #94 class) and recorded the never-reproduced cross-rate carry in IMPROVEMENTS.md.
 ///
 /// PITCH SECOND PASS (`:757-805`, Task 8): gated on `s.tdc.half_window > 0` (TDCwindow
 /// != 0). For the Task-7 configs (TDCwindow 0) `s.tdc` is None -> skipped (byte-identical
@@ -1004,8 +1007,6 @@ pub struct BlstmSpectralSegmenter {
     spectrum_shift_in_frames: usize,
     /// Stateful `_WindowShift` (`:453/:885`).
     window_shift_sec: f64,
-    /// Stateful `_LTSVWindowShift` (`:306`); dead for Task-7 configs.
-    ltsv_shift_sec: f64,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// The ONE `result_vec` buffer reused across the channel loop (the cross-channel
@@ -1055,7 +1056,6 @@ impl BlstmSpectralSegmenter {
 
         let spectrum_shift_sec = feature_cfg.shift_sec;
         let window_shift_sec = driver_cfg.window_shift_sec;
-        let ltsv_shift_sec = feature_cfg.ltsv_shift;
 
         Ok(BlstmSpectralSegmenter {
             driver_cfg,
@@ -1065,7 +1065,6 @@ impl BlstmSpectralSegmenter {
             spectrum_shift_sec,
             spectrum_shift_in_frames: 0,
             window_shift_sec,
-            ltsv_shift_sec,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             result_buf: None,
@@ -1169,13 +1168,6 @@ impl Segmenter for BlstmSpectralSegmenter {
         if self.feature_cfg.noise_seed > 0 {
             audio.apply_noise(self.feature_cfg.noise_ratio);
         }
-
-        // getLTSVParam (:302-306): re-quantize the stateful _LTSVWindowShift (dead for
-        // Task-7 configs, LTSVwindow 0 -> ltsv_half_window 0 -> no LTSV column).
-        let ltsv_ws =
-            f64::round(self.feature_cfg.ltsv_shift * rate / spectrum_shift_in_frames as f64) as i64;
-        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
-        self.ltsv_shift_sec = (ltsv_ws * spectrum_shift_in_frames as i64) as f64 / rate;
 
         // getBLSTMParam (:439-500): window/shift derivation + result-vec sizing.
         // Mutates self.window_shift_sec (the stateful _WindowShift).

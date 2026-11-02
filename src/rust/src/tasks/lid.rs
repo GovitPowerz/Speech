@@ -740,8 +740,6 @@ pub struct TwinBlstmSpectralLid {
     spectrum_shift_in_frames: usize,
     /// Stateful SAD `_WindowShift` (`:453/:1419`).
     window_shift_sec: f64,
-    /// Stateful `_LTSVWindowShift` (`:306`); dead for the ported configs (LTSVwindow 0).
-    ltsv_shift_sec: f64,
     /// `seg._CumulativeError[chan]` (`:774`, then `*= LIDCostPonderation` `:1337`).
     cumulative_error: Vec<f64>,
     /// `seg._NbOfClassif[chan]` (`:775`).
@@ -816,7 +814,6 @@ impl TwinBlstmSpectralLid {
 
         let spectrum_shift_sec = feature_cfg.shift_sec;
         let window_shift_sec = driver_cfg.window_shift_sec;
-        let ltsv_shift_sec = feature_cfg.ltsv_shift;
 
         Ok(TwinBlstmSpectralLid {
             driver_cfg,
@@ -836,7 +833,6 @@ impl TwinBlstmSpectralLid {
             spectrum_shift_sec,
             spectrum_shift_in_frames: 0,
             window_shift_sec,
-            ltsv_shift_sec,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             last_result_rows: Vec::new(),
@@ -1077,11 +1073,6 @@ impl TwinBlstmSpectralLid {
         if self.feature_cfg.noise_seed > 0 {
             audio.apply_noise(self.feature_cfg.noise_ratio);
         }
-
-        // getLTSVParam re-quantize (dead for LTSVwindow 0).
-        let ltsv_ws = f64::round(self.feature_cfg.ltsv_shift * rate / ssif as f64) as i64;
-        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
-        self.ltsv_shift_sec = (ltsv_ws * ssif as i64) as f64 / rate;
 
         // getBLSTMParam (SAD result_vec sizing) + getLIDBLSTMParam.
         let sad_ssr = self.sad_net.sub_sampling_ratio();
@@ -1462,12 +1453,6 @@ impl TwinBlstmSpectralLid {
         if self.feature_cfg.noise_seed > 0 {
             audio.apply_noise(self.feature_cfg.noise_ratio);
         }
-
-        // getLTSVParam re-quantize (dead for LTSVwindow 0).
-        let ltsv_ws =
-            f64::round(self.feature_cfg.ltsv_shift * rate / spectrum_shift_in_frames as f64) as i64;
-        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
-        self.ltsv_shift_sec = (ltsv_ws * spectrum_shift_in_frames as i64) as f64 / rate;
 
         // getBLSTMParam (SAD window/shift + result-vec sizing); mutates window_shift_sec.
         let sad_ssr = self.sad_net.sub_sampling_ratio();
@@ -2006,12 +1991,6 @@ impl Segmenter for TwinBlstmSpectralLid {
         if self.feature_cfg.noise_seed > 0 {
             audio.apply_noise(self.feature_cfg.noise_ratio);
         }
-
-        // getLTSVParam re-quantize `_LTSVWindowShift` (`:288/:302-306`; dead for LTSVwindow 0).
-        let ltsv_ws =
-            f64::round(self.feature_cfg.ltsv_shift * rate / spectrum_shift_in_frames as f64) as i64;
-        let ltsv_ws = if ltsv_ws < 1 { 1 } else { ltsv_ws };
-        self.ltsv_shift_sec = (ltsv_ws * spectrum_shift_in_frames as i64) as f64 / rate;
 
         // getBLSTMParam (`:300` -> `:439-500`): SAD window/shift + result-vec sizing;
         // mutates self.window_shift_sec.
