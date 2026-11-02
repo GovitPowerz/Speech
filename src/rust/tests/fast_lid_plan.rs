@@ -33,7 +33,7 @@ use speech::fast::plan::{FastLidPlan, MODE7_SSIF};
 use speech::io::binary::read_weight_vector;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork, CellType};
 use speech::tasks::lid::derive_lid_window;
-use speech::tasks::sad::get_blstm_param;
+use speech::tasks::sad::{SpectralCarry, get_blstm_param};
 use speech::tasks::segmentation::Segmentation;
 use speech::tasks::segmenter::Segmenter;
 
@@ -170,8 +170,10 @@ fn plan_agrees_with_the_exact_twin_on_every_committed_config() {
 // The timeline reproduces the frozen per-file derivation, at two rates.
 // ---------------------------------------------------------------------------
 
-/// The exact Twin's `getLIDBLSTMParam` block (`tasks::lid::TwinBlstmSpectralLid::
-/// get_segmentation_mode7`), transcribed: `(lid_window_size, lid_window_shift, lid_no_overlap)`.
+/// The exact Twin's `getLIDBLSTMParam` block as the three modes inlined it before issue #121
+/// moved it to `tasks::lid::derive_lid_window`, transcribed: `(lid_window_size,
+/// lid_window_shift, lid_no_overlap)`. Kept as the body-independent pin of the moved function
+/// (the `issue84/4` catcher).
 fn exact_lid_window(
     size_sec: f64,
     shift_sec: f64,
@@ -200,29 +202,6 @@ fn exact_lid_window(
     (lid_window_size, lid_window_shift as usize, lid_no_overlap)
 }
 
-/// The exact Twin's SAD time axis (`get_segmentation_mode7`, the block it cites as legacy
-/// `:696-706`), transcribed: `window_shift_sec` is the POST-`get_blstm_param` value.
-fn exact_sad_axis(
-    window_shift_sec: f64,
-    spectrum_shift_sec: f64,
-    sad_ssr: usize,
-    window_size: usize,
-    no_overlap: bool,
-) -> (f64, f64) {
-    let mut time_step = window_shift_sec * sad_ssr as f64;
-    let mut time_offset = time_step / 2.0 - window_shift_sec / 2.0;
-    if window_size > 0 {
-        if no_overlap {
-            time_step = window_shift_sec * sad_ssr as f64;
-            time_offset = time_step / 2.0 - window_shift_sec / 2.0;
-        } else {
-            time_step = spectrum_shift_sec * sad_ssr as f64;
-            time_offset = time_step / 2.0 - spectrum_shift_sec / 2.0;
-        }
-    }
-    (time_step, time_offset)
-}
-
 #[test]
 fn timeline_reproduces_the_frozen_per_file_derivation() {
     for rel in [
@@ -246,37 +225,49 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
             );
             assert_eq!(tl.rate.to_bits(), rate.to_bits());
 
-            // The SAD half: `get_blstm_param` called directly off the config values on the
-            // never-run SAD net, then the spectral time axis.
-            let mut ws = plan.driver_cfg.window_shift_sec;
-            let (w, sh, no, rows0) = get_blstm_param(
-                plan.driver_cfg.window_size_sec,
-                &mut ws,
-                rate,
-                80,
-                plan.sad.ssr,
-                &plan.sad.spec.lstm_subsampling,
-                &plan.sad.spec.output_subsampling,
-                0,
+            // The SAD half: the EXACT tree's own carry (`tasks::sad::SpectralCarry`, what the
+            // exact Twin folds over since #121), driven from the config values on a fresh
+            // carry per file -- the first-file state, which is what the dropped carry equals
+            // at one rate -- with the Mode-7 override, on the never-run SAD net. The fast
+            // timeline is pinned to the exact body itself, not to a transcription of it.
+            let sad_net =
+                BlstmNetwork::from_config(BlstmConfig::from_legacy(&map, "BLSTM").unwrap())
+                    .unwrap();
+            let mut carry =
+                SpectralCarry::new(plan.feature_cfg.shift_sec, plan.driver_cfg.window_shift_sec);
+            let axis = carry.advance(rate, &plan.driver_cfg, &sad_net, 0, Some(80));
+            assert_eq!(tl.ssif, axis.ssif, "{rel}@{rate}: ssif vs the carry");
+            assert_eq!(
+                tl.spectrum_shift_sec.to_bits(),
+                axis.spectrum_shift_sec.to_bits(),
+                "{rel}@{rate}: spectrum shift vs the carry"
             );
-            assert_eq!(tl.sad.window_size, w, "{rel}@{rate}: SAD window");
-            assert_eq!(tl.sad.window_shift, sh, "{rel}@{rate}: SAD shift");
-            assert_eq!(tl.sad.no_overlap, no, "{rel}@{rate}: SAD no_overlap");
-            assert_eq!(tl.sad.rows, rows0);
+            assert_eq!(
+                tl.sad.window_size, axis.window_size,
+                "{rel}@{rate}: SAD window"
+            );
+            assert_eq!(
+                tl.sad.window_shift, axis.window_shift,
+                "{rel}@{rate}: SAD shift"
+            );
+            assert_eq!(
+                tl.sad.no_overlap, axis.no_overlap,
+                "{rel}@{rate}: SAD no_overlap"
+            );
+            assert_eq!(tl.sad.rows, axis.real_vec_size, "{rel}@{rate}: SAD rows");
             assert_eq!(
                 tl.sad.window_shift_sec.to_bits(),
-                ws.to_bits(),
+                carry.window_shift_sec().to_bits(),
                 "{rel}@{rate}: SAD shift sec"
             );
-            let (ts, to) = exact_sad_axis(ws, 80.0 / rate, plan.sad.ssr, w, no);
             assert_eq!(
                 tl.sad.time_step.to_bits(),
-                ts.to_bits(),
+                axis.time_step.to_bits(),
                 "{rel}@{rate}: time_step"
             );
             assert_eq!(
                 tl.sad.time_offset.to_bits(),
-                to.to_bits(),
+                axis.time_offset.to_bits(),
                 "{rel}@{rate}: time_offset"
             );
             // The committed Twin configs are `BLSTM_window 5.0` + `BLSTM_shift 0`: TRUNCATE on
@@ -285,20 +276,14 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
                 tl.sad.no_overlap && tl.sad.window_size > 0,
                 "{rel}@{rate}: SAD truncate"
             );
-            // `rows_for` is the frozen `real_vec_size`.
+            // `rows_for` is the frozen `real_vec_size`: the carry's, on a fresh carry.
             for frames in [0usize, 1, 79, 80, 81, 12345] {
-                let mut ws = plan.driver_cfg.window_shift_sec;
-                let rows = get_blstm_param(
-                    plan.driver_cfg.window_size_sec,
-                    &mut ws,
-                    rate,
-                    80,
-                    plan.sad.ssr,
-                    &plan.sad.spec.lstm_subsampling,
-                    &plan.sad.spec.output_subsampling,
-                    frames,
+                let rows = SpectralCarry::new(
+                    plan.feature_cfg.shift_sec,
+                    plan.driver_cfg.window_shift_sec,
                 )
-                .3;
+                .advance(rate, &plan.driver_cfg, &sad_net, frames, Some(80))
+                .real_vec_size;
                 assert_eq!(
                     plan.rows_for(&tl, frames),
                     rows,

@@ -29,7 +29,7 @@ use speech::fast::stream::StreamingSession;
 use speech::features::pipeline::SpectralParams;
 use speech::io::binary::read_weight_vector;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork, CellType};
-use speech::tasks::sad::get_blstm_param;
+use speech::tasks::sad::SpectralCarry;
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
@@ -190,63 +190,57 @@ fn timeline_reproduces_the_frozen_per_file_derivation() {
                 "{rel}@{rate}: spectrum shift"
             );
             assert_eq!(tl.rate.to_bits(), rate.to_bits());
-            // get_blstm_param, called directly off the config values.
-            let mut ws = plan.driver_cfg.window_shift_sec;
-            let (w, sh, no, _) = get_blstm_param(
-                plan.driver_cfg.window_size_sec,
-                &mut ws,
-                rate,
-                s.shift_frames,
-                plan.ssr,
-                &plan.spec.lstm_subsampling,
-                &plan.spec.output_subsampling,
-                0,
+            // The EXACT tree's own carry (`tasks::sad::SpectralCarry`, what the spectral SAD
+            // driver folds over since #121), driven from the config values on a fresh carry
+            // per file -- the first-file state, which is what the dropped carry equals at
+            // one rate -- on the exact net. The fast timeline is pinned to the exact body
+            // itself (the shift re-quantization, get_blstm_param, the time axis), not to a
+            // transcription of it.
+            let net = BlstmNetwork::from_config(BlstmConfig::from_legacy(&map, "BLSTM").unwrap())
+                .unwrap();
+            let mut carry =
+                SpectralCarry::new(plan.feature_cfg.shift_sec, plan.driver_cfg.window_shift_sec);
+            let axis = carry.advance(rate, &plan.driver_cfg, &net, 0, None);
+            assert_eq!(tl.ssif, axis.ssif, "{rel}@{rate}: ssif vs the carry");
+            assert_eq!(
+                tl.spectrum_shift_sec.to_bits(),
+                axis.spectrum_shift_sec.to_bits(),
+                "{rel}@{rate}: spectrum shift vs the carry"
             );
             assert_eq!(
                 (tl.window_size, tl.window_shift),
-                (w, sh),
+                (axis.window_size, axis.window_shift),
                 "{rel}@{rate}: window/shift"
             );
-            assert!(!no, "{rel}@{rate}: a built timeline is never truncate");
+            assert!(
+                !axis.no_overlap,
+                "{rel}@{rate}: a built timeline is never truncate"
+            );
             assert_eq!(
                 tl.window_shift_sec.to_bits(),
-                ws.to_bits(),
+                carry.window_shift_sec().to_bits(),
                 "{rel}@{rate}: the post-call window shift"
             );
             assert_eq!(tl.window_size > 0, overlap, "{rel}@{rate}: regime");
-            // The time axis: the OVERLAP branch overrides with the spectrum shift, the
-            // plain branch keeps the (mutated) window shift.
-            let ssr = plan.ssr as f64;
-            let (ts, to) = if overlap {
-                let ts = s.shift_sec * ssr;
-                (ts, ts / 2.0 - s.shift_sec / 2.0)
-            } else {
-                let ts = ws * ssr;
-                (ts, ts / 2.0 - ws / 2.0)
-            };
             assert_eq!(
                 tl.time_step.to_bits(),
-                ts.to_bits(),
+                axis.time_step.to_bits(),
                 "{rel}@{rate}: time_step"
             );
             assert_eq!(
                 tl.time_offset.to_bits(),
-                to.to_bits(),
+                axis.time_offset.to_bits(),
                 "{rel}@{rate}: time_offset"
             );
-            // rows_for is the frozen real_vec_size at every frame count.
+            // rows_for is the frozen real_vec_size at every frame count: the carry's, on a
+            // fresh carry.
             for n in [0usize, 1, 79, 80, 81, 8000, 16001, 123457] {
-                let mut ws2 = plan.driver_cfg.window_shift_sec;
-                let (_, _, _, rows) = get_blstm_param(
-                    plan.driver_cfg.window_size_sec,
-                    &mut ws2,
-                    rate,
-                    s.shift_frames,
-                    plan.ssr,
-                    &plan.spec.lstm_subsampling,
-                    &plan.spec.output_subsampling,
-                    n,
-                );
+                let rows = SpectralCarry::new(
+                    plan.feature_cfg.shift_sec,
+                    plan.driver_cfg.window_shift_sec,
+                )
+                .advance(rate, &plan.driver_cfg, &net, n, None)
+                .real_vec_size;
                 assert_eq!(plan.rows_for(&tl, n), rows, "{rel}@{rate}: rows_for({n})");
             }
         }
