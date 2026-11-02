@@ -945,6 +945,165 @@ pub fn get_blstm_param(
     )
 }
 
+/// The exact tree's per-file spectral carry (issue #121): the two stateful legacy
+/// members every spectral driver re-quantizes IN PLACE on each `getSegmentation`, from
+/// the previous file's value -- `_SpectrumShift` / `_SpectrumShiftInFrames`
+/// (`BLSTMSpectralSegmenter.cpp:208-210`) and the SAD `_WindowShift` (`:453`, reset
+/// `:885`) -- with [`SpectralCarry::advance`] the one body of the preamble that reads and
+/// writes them: the shift re-quantization, `getBLSTMParam`, the SAD time axis. Held by
+/// the spectral SAD driver (Algo 3), the Algo 5 LID driver and the Twin (Algo 6, all
+/// modes); the signal driver (Algo 4) shares none of it (window in signal samples, no
+/// ssif). The fast tree does NOT carry this state (`fast/plan.rs`: the timeline derives
+/// from the config value at each rate, the #24 adjudication), so the two trees keep
+/// separate bodies; this one is the frozen arithmetic, moved, not changed (ADR-0002, the
+/// stepwise hoist class).
+#[derive(Clone, Debug)]
+pub struct SpectralCarry {
+    /// Stateful `_SpectrumShift` (`:210`), self-quantizing per call.
+    spectrum_shift_sec: f64,
+    /// Stateful `_SpectrumShiftInFrames` (`:208-210`); ALWAYS recomputed from
+    /// `spectrum_shift_sec` each call, the non-wav override aside.
+    spectrum_shift_in_frames: usize,
+    /// Stateful SAD `_WindowShift` (`:453/:885`).
+    window_shift_sec: f64,
+}
+
+/// What [`SpectralCarry::advance`] derives for one file: the quantized spectrum shift,
+/// the `getBLSTMParam` outputs and the SAD decision layer's `(time_step, time_offset)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectralAxis {
+    /// `_SpectrumShiftInFrames` for this file.
+    pub ssif: usize,
+    /// `_SpectrumShift` for this file, `ssif / rate`.
+    pub spectrum_shift_sec: f64,
+    /// `getBLSTMParam`'s half window in periodogram frames (`0` = plain).
+    pub window_size: usize,
+    /// `getBLSTMParam`'s shift in periodogram frames.
+    pub window_shift: usize,
+    /// `getBLSTMParam`'s `noOverlap` (the truncate regime).
+    pub no_overlap: bool,
+    /// `getBLSTMParam`'s `real_vec_size` (the SAD result rows).
+    pub real_vec_size: usize,
+    /// The SAD decision layer's time step (`:724-734`).
+    pub time_step: f64,
+    /// The SAD decision layer's time offset (`:724-734`).
+    pub time_offset: f64,
+}
+
+impl SpectralCarry {
+    /// The construction-time state: `_SpectrumShift` from `<prefix>_spectrum_shift`
+    /// and `_WindowShift` from `<prefix>_shift`, `_SpectrumShiftInFrames` unset (0).
+    pub fn new(spectrum_shift_sec: f64, window_shift_sec: f64) -> Self {
+        SpectralCarry {
+            spectrum_shift_sec,
+            spectrum_shift_in_frames: 0,
+            window_shift_sec,
+        }
+    }
+
+    /// The per-file preamble over the carry (`initSpectralAnalysis` `:208-210`,
+    /// `getBLSTMParam` `:439-500`, the time axis `:724-734`), in the legacy order.
+    /// `ssif_override` is the `!hasReadWavFile() -> 80` branch (`:209`): `Some(80)` from
+    /// the Twin's Mode 7, whose wav arm has already bailed, `None` everywhere else.
+    /// `net` is the SAD net (its sub-sampling drives the sizing and the axis).
+    pub fn advance(
+        &mut self,
+        rate: f64,
+        driver_cfg: &DriverConfig,
+        net: &BlstmNetwork,
+        frame_count: usize,
+        ssif_override: Option<usize>,
+    ) -> SpectralAxis {
+        // :208 ssif = round(_SpectrumShift * rate), :209 the non-wav override,
+        // :210 _SpectrumShift = ssif / rate (the persistence).
+        let ssif = f64::round(self.spectrum_shift_sec * rate) as usize;
+        self.set_ssif(ssif_override.unwrap_or(ssif), rate);
+        let ssif = self.spectrum_shift_in_frames;
+
+        // getBLSTMParam (:439-500); mutates window_shift_sec (the stateful _WindowShift).
+        let ssr = net.sub_sampling_ratio();
+        let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
+            driver_cfg.window_size_sec,
+            &mut self.window_shift_sec,
+            rate,
+            ssif,
+            ssr,
+            &net.lstm_sub_sampling(),
+            &net.output_sub_sampling(),
+            frame_count,
+        );
+
+        // timeStep/timeOffset (:724-734): the OVERLAP branch OVERRIDES with
+        // _SpectrumShift (the asymmetry vs signal, which uses _WindowShift there).
+        // window_shift_sec here is the POST-getBLSTMParam mutated value.
+        let mut time_step = self.window_shift_sec * ssr as f64;
+        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+        if window_size > 0 {
+            if no_overlap {
+                time_step = self.window_shift_sec * ssr as f64;
+                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
+            } else {
+                time_step = self.spectrum_shift_sec * ssr as f64;
+                time_offset = time_step / 2.0 - self.spectrum_shift_sec / 2.0;
+            }
+        }
+
+        SpectralAxis {
+            ssif,
+            spectrum_shift_sec: self.spectrum_shift_sec,
+            window_size,
+            window_shift,
+            no_overlap,
+            real_vec_size,
+            time_step,
+            time_offset,
+        }
+    }
+
+    /// `_SpectrumShiftInFrames = ssif; _SpectrumShift = ssif / rate` (`:209-210`): the
+    /// one assignment body, reached by [`SpectralCarry::advance`] on every file and by
+    /// the spectral SAD driver's `force_non_wav_spectrum_shift` between files.
+    pub fn set_ssif(&mut self, ssif: usize, rate: f64) {
+        self.spectrum_shift_in_frames = ssif;
+        self.spectrum_shift_sec = ssif as f64 / rate;
+    }
+
+    /// The epilogue (`:885`, the Twin's `:1419`): a truncate file re-arms the noOverlap
+    /// trigger by resetting `_WindowShift` to 0.0 (the genuine cross-file state).
+    pub fn reset_after(&mut self, no_overlap: bool) {
+        if no_overlap {
+            self.window_shift_sec = 0.0;
+        }
+    }
+
+    /// `_WindowShift` POST the last call.
+    pub fn window_shift_sec(&self) -> f64 {
+        self.window_shift_sec
+    }
+
+    /// `_SpectrumShiftInFrames` POST the last call.
+    pub fn spectrum_shift_in_frames(&self) -> usize {
+        self.spectrum_shift_in_frames
+    }
+
+    /// `_SpectrumShift` POST the last call.
+    pub fn spectrum_shift_sec(&self) -> f64 {
+        self.spectrum_shift_sec
+    }
+}
+
+/// The preamble's input gates (`BLSTMSpectralSegmenter.cpp:216-227`): pre-emphasis when
+/// the ratio is positive, noise when the seed is. Shared by the spectral drivers; the
+/// signal driver reads its own fields.
+pub fn apply_input_gates(audio: &mut Audio, cfg: &FeatureConfig) {
+    if cfg.preemph_ratio > 0.0 {
+        audio.apply_preemph(cfg.preemph_ratio);
+    }
+    if cfg.noise_seed > 0 {
+        audio.apply_noise(cfg.noise_ratio);
+    }
+}
+
 /// BLSTM spectral-domain SAD segmenter (Algo 3; `BLSTMSpectralSegmenter.{h,cpp}`) --
 /// the REAL `1_worker_1.config`'s algorithm.
 ///
@@ -1000,13 +1159,8 @@ pub struct BlstmSpectralSegmenter {
     seg_cfg: SegmenterConfig,
     feature_cfg: FeatureConfig,
     net: BlstmNetwork,
-    /// Stateful `_SpectrumShift` (`:210`), self-quantizing per call.
-    spectrum_shift_sec: f64,
-    /// Stateful `_SpectrumShiftInFrames` (`:208-210`); ALWAYS recomputed from
-    /// `spectrum_shift_sec` each call, non-wav override aside (see the struct doc).
-    spectrum_shift_in_frames: usize,
-    /// Stateful `_WindowShift` (`:453/:885`).
-    window_shift_sec: f64,
+    /// The stateful `_SpectrumShift` / `_SpectrumShiftInFrames` / `_WindowShift` (#121).
+    carry: SpectralCarry,
     cumulative_error: Vec<f64>,
     nb_of_classif: Vec<i64>,
     /// The ONE `result_vec` buffer reused across the channel loop (the cross-channel
@@ -1054,17 +1208,14 @@ impl BlstmSpectralSegmenter {
             net.set_weights(flat)?;
         }
 
-        let spectrum_shift_sec = feature_cfg.shift_sec;
-        let window_shift_sec = driver_cfg.window_shift_sec;
+        let carry = SpectralCarry::new(feature_cfg.shift_sec, driver_cfg.window_shift_sec);
 
         Ok(BlstmSpectralSegmenter {
             driver_cfg,
             seg_cfg,
             feature_cfg,
             net,
-            spectrum_shift_sec,
-            spectrum_shift_in_frames: 0,
-            window_shift_sec,
+            carry,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
             result_buf: None,
@@ -1077,18 +1228,18 @@ impl BlstmSpectralSegmenter {
     /// `get_segmentation` call's mutation. Exposed so golden tests can pin the cross-
     /// file lifecycle observably.
     pub fn window_shift_sec(&self) -> f64 {
-        self.window_shift_sec
+        self.carry.window_shift_sec()
     }
 
     /// The stateful legacy `_SpectrumShiftInFrames` member (`:208-210`), POST the last
     /// call. Exposed for the two-files params golden + the non-wav-80 unit test.
     pub fn spectrum_shift_in_frames(&self) -> usize {
-        self.spectrum_shift_in_frames
+        self.carry.spectrum_shift_in_frames()
     }
 
     /// The stateful legacy `_SpectrumShift` member (`:210`), POST the last call.
     pub fn spectrum_shift_sec(&self) -> f64 {
-        self.spectrum_shift_sec
+        self.carry.spectrum_shift_sec()
     }
 
     /// The number of rows in the reused `result_vec` buffer (`real_vec_size`) POST the
@@ -1117,8 +1268,7 @@ impl BlstmSpectralSegmenter {
     /// a rate change after this call changes the observed value (e.g. force at 8000 then
     /// re-derive at 16000 gives `round((80/8000)*16000) = round(160.0) = 160`, not 80).
     pub fn force_non_wav_spectrum_shift(&mut self, rate: f64) {
-        self.spectrum_shift_in_frames = 80;
-        self.spectrum_shift_sec = 80.0 / rate;
+        self.carry.set_ssif(80, rate);
     }
 
     /// `<prefix>_weightsFile` load delegate: thin pass-through to the net's
@@ -1152,36 +1302,23 @@ impl Segmenter for BlstmSpectralSegmenter {
         // consistent (the non-wav 80 fallback is handled below + in the unit test).
         let s = SpectralParams::derive(&self.feature_cfg, rate);
 
-        // Stateful spectrum-shift quantization (:208-210). ALWAYS recompute from the
-        // CURRENT spectrum_shift_sec (there is no "sticky 80" -- the driver always reads
-        // a wav, so the non-wav override at :209 never fires here; it is exercised only
-        // via force_non_wav_spectrum_shift for the unit test). Persistence flows through
-        // spectrum_shift_sec exactly like the legacy's _SpectrumShift = ssif/rate (:210).
-        self.spectrum_shift_in_frames = f64::round(self.spectrum_shift_sec * rate) as usize;
-        self.spectrum_shift_sec = self.spectrum_shift_in_frames as f64 / rate;
-        let spectrum_shift_in_frames = self.spectrum_shift_in_frames;
-
-        // preemph -> noise (:216-227). Gated on ratio > 0 / seed > 0.
-        if self.feature_cfg.preemph_ratio > 0.0 {
-            audio.apply_preemph(self.feature_cfg.preemph_ratio);
-        }
-        if self.feature_cfg.noise_seed > 0 {
-            audio.apply_noise(self.feature_cfg.noise_ratio);
-        }
-
-        // getBLSTMParam (:439-500): window/shift derivation + result-vec sizing.
-        // Mutates self.window_shift_sec (the stateful _WindowShift).
-        let ssr = self.net.sub_sampling_ratio();
-        let (window_size, window_shift, no_overlap, real_vec_size) = get_blstm_param(
-            self.driver_cfg.window_size_sec,
-            &mut self.window_shift_sec,
-            rate,
-            spectrum_shift_in_frames,
-            ssr,
-            &self.net.lstm_sub_sampling(),
-            &self.net.output_sub_sampling(),
-            audio.data.ncols(),
-        );
+        // The carry's preamble (#121): the stateful spectrum-shift quantization (:208-210;
+        // the driver always reads a wav, so the :209 override never fires here, it is
+        // exercised only via force_non_wav_spectrum_shift for the unit test), the input
+        // gates (:216-227), getBLSTMParam (:439-500) and the time axis (:724-734).
+        apply_input_gates(audio, &self.feature_cfg);
+        let axis = self
+            .carry
+            .advance(rate, &self.driver_cfg, &self.net, audio.data.ncols(), None);
+        let SpectralAxis {
+            window_size,
+            window_shift,
+            no_overlap,
+            real_vec_size,
+            time_step,
+            time_offset,
+            ..
+        } = axis;
 
         // resetWeightsDerivatives ONCE per file (:473).
         self.net.reset_weights_derivatives();
@@ -1200,21 +1337,6 @@ impl Segmenter for BlstmSpectralSegmenter {
         // setProcessingType((window > 0), !noOverlap) ONCE (:739): flags are per-file
         // constants (do not change across channels).
         self.net.set_processing_type(window_size > 0, !no_overlap);
-
-        // timeStep/timeOffset (:724-734): the OVERLAP branch OVERRIDES with
-        // _SpectrumShift (the asymmetry vs signal, which uses _WindowShift there).
-        // window_shift_sec here is the POST-getBLSTMParam mutated value.
-        let mut time_step = self.window_shift_sec * ssr as f64;
-        let mut time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-        if window_size > 0 {
-            if no_overlap {
-                time_step = self.window_shift_sec * ssr as f64;
-                time_offset = time_step / 2.0 - self.window_shift_sec / 2.0;
-            } else {
-                time_step = self.spectrum_shift_sec * ssr as f64;
-                time_offset = time_step / 2.0 - self.spectrum_shift_sec / 2.0;
-            }
-        }
 
         // getTemporalConvolution (:615): the periodogram temporal-convolution kernel,
         // config-derived (constant across channels). conv_size 0 -> size 1 ->
@@ -1374,11 +1496,8 @@ impl Segmenter for BlstmSpectralSegmenter {
 
         // noOverlap `_WindowShift = 0.0` reset (:885), AFTER the dumps/compute_errors
         // (the reset-order divergence vs signal's BEFORE-compute_errors reset is
-        // cosmetic -- ported as written). Re-arms the noOverlap trigger for the next
-        // file (the genuine cross-file state).
-        if no_overlap {
-            self.window_shift_sec = 0.0;
-        }
+        // cosmetic -- ported as written).
+        self.carry.reset_after(no_overlap);
 
         Ok(())
     }
