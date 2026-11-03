@@ -2234,13 +2234,8 @@ impl Segmenter for TwinBlstmSpectralLid {
                     lid_real_vec_size
                 ];
 
-            let mut langid = vec![0.0f64; class_nb];
-            let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
-            for kk in 0..class_nb + 1 {
-                confusion[[0, kk]] = kk as f64;
-                confusion[[kk, 0]] = kk as f64;
-            }
-            let mut segments_count = 0i32;
+            // The scoring accumulator (`:787-790` seed): the one kernel, `LidChannelAcc`.
+            let mut acc = LidChannelAcc::new(class_nb, ti, self.lid_net.is_cost_modified());
             let mut lid_nn_cost = 0.0f64;
             let mut lid_nb_classif = 0i64;
 
@@ -2295,51 +2290,15 @@ impl Segmenter for TwinBlstmSpectralLid {
                 lid_nn_cost += self.lid_net.cost; // :1252
                 lid_nb_classif += self.lid_net.nb_of_classif; // :1253
 
-                // segLID = colwise sum / rows (`:1254`).
-                let out_rows = output_seq.nrows() as f64;
-                let mut seg_lid = vec![0.0f64; class_nb];
-                for (c, sv) in seg_lid.iter_mut().enumerate() {
-                    let mut acc = 0.0;
-                    for r in 0..output_seq.nrows() {
-                        acc += output_seq[[r, c]];
-                    }
-                    *sv = acc / out_rows;
-                }
-
-                // argmax j (`:1257-1258`), confusion (`:1265-1274`).
-                let mut j = 0usize;
-                let mut best = seg_lid[0];
-                for (c, &v) in seg_lid.iter().enumerate().skip(1) {
-                    if v > best {
-                        best = v;
-                        j = c;
-                    }
-                }
-                let pos_target = ti + 1;
-                if j == ti {
-                    confusion[[pos_target, pos_target]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_target]] += 1.0;
-                } else {
-                    let pos_best = j + 1;
-                    confusion[[pos_target, pos_best]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_best]] += 1.0;
-                }
-
-                // langID accumulation (`:1275-1279`): cost-modified += segLID; else
-                // += dur*segLID.
+                // segLID = colwise sum / rows (`:1254`), argmax j (`:1257-1258`) + confusion
+                // (`:1265-1274`), langID (`:1275-1279`: cost-modified += segLID, else
+                // += dur*segLID): the kernel.
                 let dur = scoring_segs[i + 1].begin - scoring_segs[i].begin;
-                if self.lid_net.is_cost_modified() {
-                    for (c, &v) in seg_lid.iter().enumerate() {
-                        langid[c] += v;
-                    }
-                } else {
-                    for (c, &v) in seg_lid.iter().enumerate() {
-                        langid[c] += dur * v;
-                    }
-                }
-                segments_count += 1;
+                acc.push(
+                    output_seq.view(),
+                    BlockScore::ColumnMean,
+                    BlockWeight::DurationUnlessCostModified { dur },
+                );
             }
 
             // segmentationLID /= 56 (`:1292`).
@@ -2347,46 +2306,30 @@ impl Segmenter for TwinBlstmSpectralLid {
                 *v /= 56.0;
             }
 
-            if segments_count > 0 {
-                // mode != 0 -> clearClassification + LID2Segmentation (`:1294-1298`).
-                if self.mode != 0 {
-                    seg.clear_hypothesis();
-                    lid_to_segmentation(
-                        seg,
-                        &segmentation_lid,
-                        SegClass::Speech,
-                        time_offset,
-                        time_step,
-                        self.lid_decision_thresh_rising,
-                    );
-                }
-                // langID normalization (`:1299-1303`).
-                if self.lid_net.is_cost_modified() {
-                    for v in langid.iter_mut() {
-                        *v /= segments_count as f64;
-                    }
-                } else {
-                    for v in langid.iter_mut() {
-                        *v /= total_speech_duration;
-                    }
-                }
-            } else {
-                langid[0] = 1.0; // :1305
+            // mode != 0 -> clearClassification + LID2Segmentation (`:1294-1298`), inside the
+            // `segmentsCount > 0` branch ahead of the normalization; it reads no langID, so
+            // it runs before `finalize` with nothing observable reordered.
+            if acc.segments_count() > 0 && self.mode != 0 {
+                seg.clear_hypothesis();
+                lid_to_segmentation(
+                    seg,
+                    &segmentation_lid,
+                    SegClass::Speech,
+                    time_offset,
+                    time_step,
+                    self.lid_decision_thresh_rising,
+                );
             }
 
-            // Member writes (`:1318-1337`).
-            let mut target_lid = vec![0.0f64; class_nb];
-            target_lid[ti] = -2.0; // :1319 (targetIndex >= 0 always)
+            // langID normalization (`:1299-1305`) + member writes (`:1318-1337`).
+            let agg = acc.finalize(LidNorm::Duration {
+                total_speech_duration,
+            });
             self.lid.cumulative_error[chan] = lid_nn_cost; // :1320
             self.lid.nb_of_classif[chan] = lid_nb_classif; // :1321
-            let mut lid_errors = vec![0.0f64; class_nb];
-            for c in 0..class_nb {
-                lid_errors[c] = 100.0 * (langid[c] - target_lid[c]); // :1322
-            }
-            self.lid.classification_errors[chan] = lid_errors;
-            self.lid.segments_confusion[chan] = confusion; // :1324
-            let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            self.lid.is_correct[chan] = if langid[ti] == max_langid { 100 } else { 0 }; // :1325-1329
+            self.lid.classification_errors[chan] = agg.classification_errors; // :1322
+            self.lid.segments_confusion[chan] = agg.confusion; // :1324
+            self.lid.is_correct[chan] = agg.is_lid_correct; // :1325-1329
 
             lid_cost_ponderation = self.lid_net.get_cost_ponderation(target_index as i64); // :1334
             self.lid_net.ponderate_weights_derivatives(audio_weight); // :1335
