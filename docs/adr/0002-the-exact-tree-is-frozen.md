@@ -91,7 +91,8 @@ never tested the sum; a unification would be a fix-protocol entry, not a hoist);
 per-entry body and the utterance stream drive the same struct on the widened posteriors, so
 `fast/driver.rs` lost its copy (the #26 direction again), and the target clamp is one body,
 `clamp_target_index`, read by the four drivers and the fast plan; proven by the four LID goldens
-byte-green and `phase7_parity_lid` / `phase8_stream_lid` passing UNMODIFIED, with the corollary
+byte-green and `phase7_parity_lid` / `phase8_stream_lid` passing with their assertions unmodified
+(one doc comment in the latter renamed to the moved symbol), with the corollary
 the `issue83` battery measures: once both trees run the one accumulator, the fast-vs-exact
 parity legs are self-consistent for it and its arithmetic is owned by the exact LID goldens
 alone, issue #83).

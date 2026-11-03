@@ -3683,16 +3683,23 @@ Twin's per-entry body and the utterance stream drive the same struct on the wide
 `fast/driver.rs` lost its copy. The target clamp is one body too, `clamp_target_index`, read by
 the four drivers and the fast plan. Each copy folded in its own commit, Mode 7 first, the fast
 tree last. Proof of the move: the four LID goldens byte-green after every commit and
-`phase7_parity_lid` / `phase8_stream_lid` passing UNMODIFIED (the ADR-0002 stepwise-hoist
-class, its third instance); the full battery below.
+`phase7_parity_lid` / `phase8_stream_lid` passing with their assertions unmodified (one doc
+comment in the latter renamed to the moved symbol; the ADR-0002 stepwise-hoist class, its third
+instance); the full battery below.
 
 Two corrections the code made to the issue: the per-block score is two copied bodies, not one
 variation point (the column mean twice, the three-arm `_PostProcessMode` scorer three times), and
 the PPM scorer mutates accumulator state (`numberOfFrames`), so it lives inside `push`; and the
 fast tree already accumulated in f64, so the fast caller hands the exact kernel the same matrix,
-bit-identical by construction -- the issue's decision 2 was a fact.
+bit-identical by construction -- the issue's decision 2 was a fact. One letter of decision 2
+dropped: `BlockWeight::MeanIfCostModified` carries no `rows` field, since `push` reads the block's
+row count off the matrix it is handed and a field could only disagree with it.
 
-THE SET IS NOT THE PRE-REGISTERED ONE, and the first run said so. `uv run python
+THE SET IS NOT THE PRE-REGISTERED ONE, and the first run said so. Before the first run, two
+shapes were already changed for a reason the fixtures gave: no committed config sets
+`BackPropWER`, so `cost_modified` is false everywhere and `MeanIfCostModified` IS `Plain` there;
+the `BlockWeight` swap decision 9 named for Mode 7 and for the fast call site would be an
+equivalent mutant, so rows 2 and 6 swap the `BlockScore` instead. `uv run python
 tests/mutations/run.py issue83` on macOS, first run: 16 verdicts, 8 differed from the
 expectations written before it. Three were re-recorded as measured (rows 3, 4 and the
 blindness of the parity and stream legs in row 5, below). Two patches were rewritten: row 1's

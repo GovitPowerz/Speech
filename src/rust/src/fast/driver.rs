@@ -1138,7 +1138,7 @@ impl Segmenter for FastTwinLid {
 // `StreamingLidSession` (`fast::stream_lid`) fold `external_features` entries through the
 // SAME per-entry body ([`score_lid_entry`]): the guard, the noise, the f32 forward and the
 // widen are the fast tree's; the `segLID`, the argmax, the confusion, the `langID` and the
-// epilogue are the exact tree's ONE kernel, `tasks/lid.rs::LidChannelAcc`, driven on the
+// epilogue are the exact tree's ONE kernel, `crate::tasks::lid::LidChannelAcc`, driven on the
 // widened posteriors (ADR-0002's stepwise hoist, the #26 / #121 direction: the fast tree
 // imports the exact kernel). Streaming is bit-identical to offline BY CONSTRUCTION; the
 // phase-7 LID parity legs (`phase7_parity_lid.rs`) are the no-offline-regression proof.
@@ -1167,7 +1167,8 @@ impl LidScoreParams {
         LidChannelAcc::new(self.class_nb, self.ti, self.cost_modified)
     }
 
-    /// Mode 7's normalization (`:1163-1179`): `PostProcess`, `exp` unless the vote mode.
+    /// Mode 7's normalization (`TwinBLSTMSpectralLID.cpp:1163-1179`): `PostProcess`, `exp`
+    /// unless the vote mode.
     pub(super) fn norm(&self) -> LidNorm {
         LidNorm::PostProcess {
             exp: self.post_process_mode != 2,

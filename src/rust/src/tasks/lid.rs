@@ -2377,6 +2377,7 @@ impl Segmenter for TwinBlstmSpectralLid {
 #[cfg(test)]
 mod twin_tests {
     use super::*;
+    use crate::tasks::segmentation::Segmentation;
 
     /// The kernel's argmax is FIRST-max (strict `>`): on a tied `segLID` the lower class
     /// wins the confusion cell, as every legacy copy's inline loop did. No committed fixture
@@ -2403,7 +2404,6 @@ mod twin_tests {
         assert_eq!(clamp_target_index(3, 3), 0);
         assert_eq!(clamp_target_index(-1, 3), 0);
     }
-    use crate::tasks::segmentation::Segmentation;
 
     /// `getTargetsLID` (`:170-219`) enforcement pattern with `TargetEnforcementStep 2`:
     /// SPEECH rows are `-0.5` until `counter == step` (EQUALITY), then the enforced row
