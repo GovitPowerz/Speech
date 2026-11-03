@@ -1,0 +1,16 @@
+mutation: the Twin's modes 0-3 weight each segment's `segLID` as algo 5 does (`Plain`) instead of by its duration (`DurationUnlessCostModified`; `cost_modified` is false on every committed fixture, so the legacy multiplies by `dur` there)
+catcher: CAUGHT cargo --test phase4b_twin_golden lid_classification_errors_match_dump
+catcher: MISSED cargo --test phase4b_twin_golden lid_confusion_matches_dump
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -2284,7 +2284,7 @@ impl Segmenter for TwinBlstmSpectralLid {
+                 acc.push(
+                     output_seq.view(),
+                     BlockScore::ColumnMean,
+-                    BlockWeight::DurationUnlessCostModified { dur },
++                    BlockWeight::Plain,
+                 );
+             }
+ 

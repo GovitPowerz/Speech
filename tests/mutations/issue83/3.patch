@@ -1,0 +1,18 @@
+mutation: the Twin's modes 4-6 finalize with the algo 5 normalization (`MeanOverSegments`: no sum guard, no exp, no sum-normalization) instead of their `PostProcess` (the call-site `LidNorm` swapped for a neighbour's)
+catcher: CAUGHT cargo --test phase4b_twin_golden lid_classification_errors_match_dump
+catcher: MISSED cargo --test phase4b_twin_golden members_match_dump
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -1899,9 +1899,7 @@ impl TwinBlstmSpectralLid {
+             self.nb_of_classif[chan] = nb_of_classif;
+ 
+             // post-loop reductions (`:887-902`) + member writes (`:1318-1337`).
+-            let agg = acc.finalize(LidNorm::PostProcess {
+-                exp: post_process_mode != 2,
+-            });
++            let agg = acc.finalize(LidNorm::MeanOverSegments);
+             self.lid.cumulative_error[chan] = lid_nn_cost;
+             self.lid.nb_of_classif[chan] = lid_nb_classif;
+             self.lid.classification_errors[chan] = agg.classification_errors;

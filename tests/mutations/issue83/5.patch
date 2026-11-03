@@ -1,0 +1,20 @@
+mutation: the shared kernel's argmax (`argmax_f64`, the per-block `j` and the predicted language) picks the LAST maximum (`>=`) instead of the first (strict `>`), on every copy at once
+catcher: CAUGHT cargo --lib tasks::lid::twin_tests::lid_channel_acc_argmax_is_first_max_on_a_tie
+catcher: MISSED cargo --test phase4b_lid5_golden lid_confusion_matches_dump
+catcher: MISSED cargo --test phase4b_twin_golden lid_confusion_matches_dump
+catcher: MISSED cargo --test phase4b_twin_mode7 mode7_integer_members_match_real_bitexact
+catcher: MISSED cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: MISSED cargo --test phase8_stream_lid per_utterance_equals_offline_phseq
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -245,7 +245,7 @@ fn argmax_f64(v: &[f64]) -> usize {
+     let mut j = 0usize;
+     let mut best = v[0];
+     for (c, &x) in v.iter().enumerate().skip(1) {
+-        if x > best {
++        if x >= best {
+             best = x;
+             j = c;
+         }

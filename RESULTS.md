@@ -3664,6 +3664,67 @@ why the pin exists.
 |---|---|---|---|
 | 1 | the batch stream derived as `seed + 3` | `test_batch_stream_is_derived_from_the_one_seed` | CAUGHT: `AssertionError: assert {'bit_generat...'uinteger': 0} == {'bit_generat...'uinteger': 0}` (the two PCG64 states differ in their seeded state words; pytest elides them) |
 
+## Issue #83 -- the LID scoring accumulator as one kernel: the mutation battery
+
+**Live:** `tests/mutations/issue83/` (6 patches); four older patches moved with their sites and
+were re-targeted in the same branch (`phase4b/1` and `phase4b/3` onto the kernel, where the
+in-band `-2.0` and the Mode-7 `_PostProcessMode` arms now live once; `phase4b/7` and `phase8/8`
+onto the folded call sites), verdicts unchanged.
+
+Branch `feature/issue-83-lid-accumulator`, off `main@70bbf03` (#121 merged). The per-channel LID
+scoring loop -- the confusion header seed, the per-block score, the strict `>` argmax with its
+six-line confusion update, the `langID` weighting, `segmentsCount`, the normalization and the
+member row -- was written four times on the exact tree (Algo 5, the Twin's modes 0-3, 4-6 and 7)
+and once more, f32-widened-to-f64, on the fast tree. It is one struct now,
+`tasks/lid.rs::LidChannelAcc` (`push` per scored block, `finalize` read-only), with three enums
+for the three things that varied (`BlockScore`, `BlockWeight`, `LidNorm`) and each `LidNorm`
+variant carrying its copy's guard literally (Algo 5 and modes 0-3 never tested the sum). The fast
+Twin's per-entry body and the utterance stream drive the same struct on the widened posteriors;
+`fast/driver.rs` lost its copy. The target clamp is one body too, `clamp_target_index`, read by
+the four drivers and the fast plan. Each copy folded in its own commit, Mode 7 first, the fast
+tree last. Proof of the move: the four LID goldens byte-green after every commit and
+`phase7_parity_lid` / `phase8_stream_lid` passing UNMODIFIED (the ADR-0002 stepwise-hoist
+class, its third instance); the full battery below.
+
+Two corrections the code made to the issue: the per-block score is two copied bodies, not one
+variation point (the column mean twice, the three-arm `_PostProcessMode` scorer three times), and
+the PPM scorer mutates accumulator state (`numberOfFrames`), so it lives inside `push`; and the
+fast tree already accumulated in f64, so the fast caller hands the exact kernel the same matrix,
+bit-identical by construction -- the issue's decision 2 was a fact.
+
+THE SET IS NOT THE PRE-REGISTERED ONE, and the first run said so. `uv run python
+tests/mutations/run.py issue83` on macOS, first run: 16 verdicts, 8 differed from the
+expectations written before it. Three were re-recorded as measured (rows 3, 4 and the
+blindness of the parity and stream legs in row 5, below). Two patches were rewritten: row 1's
+first draft swapped Algo 5's normalization for `Duration { 1.0 }` and was MISSED by both lid5
+goldens -- which can only mean every lid5 channel scores one segment or none, where
+`/ segmentsCount` and `/ 1.0` coincide -- so it now swaps the weight; row 6's first draft swapped
+the fast `BlockScore` for `ColumnMean`, which leaves `numberOfFrames` at 0, and the stream leg
+CAUGHT it for the wrong reason: both arms produce NaN and the leg compares f64 with `==`, so a
+NaN in both reads as a mismatch. It now swaps the mode for the vote. And row 5, the shared
+kernel's argmax strictness, was MISSED by every golden: no committed fixture ties exactly, so the
+first-max rule had no owner -- `tasks::lid::twin_tests::lid_channel_acc_argmax_is_first_max_on_a_tie`
+is the pin, added as #26's item 4 added its own. `uv run python tests/mutations/run.py
+--changed-since origin/main` after the rewrite (the six plus every mutation whose site the
+branch moved: `phase4b/1,3,7`, `phase7/6-*`, `phase8/8`, `phase10/8b`, `issue25/5`, `issue57/2,3`,
+`issue84/1-5`, `issue121/7,10,11`): 87 verdicts, 0 differ.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | Algo 5 weights each segment's `segLID` by its duration (modes 0-3's `DurationUnlessCostModified`) instead of `Plain` | `phase4b_lid5_golden::lid_classification_errors_match_dump`, `::lid_confusion_matches_dump` | CAUGHT by the errors row (`f1 liderr chan1` 200.278 vs 200.817). MISSED by the confusion golden, as expected: the confusion counts the per-block argmax BEFORE the weighting, so no `BlockWeight` reaches it. |
+| 2 | Mode 7 scores each entry by the column mean (`ColumnMean`) instead of its `_PostProcessMode` accumulator | `phase4b_twin_mode7::mode7_integer_members_match_real_bitexact`, `::mode7_continuous_members_match_real` | CAUGHT by both (`s1 is_lid_correct`; `s1 liderr` NaN vs 253.158: `numberOfFrames` stays 0 and the PostProcess epilogue divides by it). |
+| 3 | modes 4-6 finalize with Algo 5's `MeanOverSegments` instead of their `PostProcess` | `phase4b_twin_golden::lid_classification_errors_match_dump`, `::members_match_dump` | CAUGHT by the errors row (`mode4 f1 liderr chan1` -3621.0 vs 243.6). MISSED by the integer members, re-recorded: the exp and the sum-normalization are monotone, so `is_correct`'s argmax never moves; only the continuous row sees a normalization. |
+| 4 | modes 0-3 weight each segment `Plain` instead of by its duration | `phase4b_twin_golden::lid_classification_errors_match_dump`, `::lid_confusion_matches_dump` | CAUGHT by the errors row (`mode0 f1 liderr chan1` 315.8 vs 243.1). MISSED by the confusion golden, re-recorded: row 1's reason. |
+| 5 | the shared `argmax_f64` picks the LAST maximum (`>=`), on every copy at once | `tasks::lid::twin_tests::lid_channel_acc_argmax_is_first_max_on_a_tie`; `phase4b_lid5_golden::lid_confusion_matches_dump`, `phase4b_twin_golden::lid_confusion_matches_dump`, `phase4b_twin_mode7::mode7_integer_members_match_real_bitexact`; `phase7_parity_lid::lid_parity_phseq_exact_vs_fast`, `phase8_stream_lid::per_utterance_equals_offline_phseq` | CAUGHT by the new pin alone (`first max, not last`). MISSED by all three goldens (no exact tie on any fixture) and, as expected, by the parity and the stream legs: both trees run the one kernel, so the fast-vs-exact parity legs are self-consistent for the accumulator now, and the stream leg's oracle is the fast offline driver. |
+| 6 | the fast per-entry body always votes (`PostProcess(2)`) where the exact Mode 7 passes the configured mode | `phase7_parity_lid::lid_parity_phseq_exact_vs_fast`, `fast_twin_lid_matrix::lid_parity_exact_vs_fast_per_pair`; `phase8_stream_lid::per_utterance_equals_offline_phseq` | CAUGHT by both parity legs (`s2 chan 0: confusion matrix FLIP -- per-block argmax moved`; `twin_mode7_lid_slstm: no ladder rung is interior`). MISSED by the stream leg, as expected: the offline fast driver and the session move together. |
+
+The lesson, the fourth time measured (#26 item 4, #84 rows 1 and 2b, #121): a leg owns only
+what it reads. Once the two trees share the accumulator, the parity legs own the forward and
+the widen and nothing past them; the accumulator's arithmetic is the exact LID goldens' alone,
+and a kernel fact no golden exercises (a tie) needs its own pin. Two blind spots are structural
+and recorded on the patches: the confusion matrix is weight-blind (rows 1, 4) and the integer
+members are normalization-blind (row 3).
+
 ## Issue #121 -- the exact spectral preamble as one carry: the mutation battery
 
 **Live:** `tests/mutations/issue121/` (11 patches: 1-6 on `tasks/sad.rs::SpectralCarry`, 7-11 the
