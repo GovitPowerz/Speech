@@ -141,8 +141,9 @@ pub enum BlockScore {
     /// `segLID = colwise sum / rows` over the first `class_nb` columns (algo 5
     /// `BLSTMSpectralLID.cpp:372`, Twin modes 0-3 `TwinBLSTMSpectralLID.cpp:1254`). Reads
     /// `class_nb` columns as the copies did, so `out.ncols() >= class_nb` is the contract:
-    /// every committed algo 5 / modes 0-3 config has an output width `>= 2`; the width-1
-    /// LID nets run modes 5 and 7, the [`PostProcess`](Self::PostProcess) arm.
+    /// both callers score through `feed_forward_scoring` with the clamped `target_index >= 0`,
+    /// which expands a width-1 net to `[1-p, p]`, and skip a block shorter than `ssr` (the
+    /// one `(1, output_size)` zero return).
     ColumnMean,
     /// The three-arm `_PostProcessMode` accumulator over every row with `out[kk, 1] >= 0`
     /// (Twin mode 7 `:1073-1108`, modes 4-6 `:823-859`; the mode-7 `short_result_vec > 0.5`
@@ -181,6 +182,14 @@ pub enum LidNorm {
     /// Twin modes 0-3 (`:1299-1305`): under `segmentsCount > 0`, divide by `segmentsCount`
     /// (cost-modified) or `total_speech_duration`; else `langID(0) = 1`.
     Duration { total_speech_duration: f64 },
+}
+
+impl LidNorm {
+    /// The `_PostProcessMode` normalization (Twin modes 7 / 4-6): `exp` unless the vote mode
+    /// (`if (_PostProcessMode != 2)`, `:1169`, `:893`).
+    pub fn post_process(mode: i32) -> LidNorm {
+        LidNorm::PostProcess { exp: mode != 2 }
+    }
 }
 
 /// One scored block's per-entry observables: its `segLID` (post-[`BlockScore`]) and its
@@ -309,10 +318,9 @@ impl LidChannelAcc {
                         for kk in 0..rows {
                             if out[[kk, 1]] >= 0.0 {
                                 let mut entropy = 0.0;
-                                let mut log_out = vec![0.0f64; out_cols];
-                                for (ll, lo) in log_out.iter_mut().enumerate() {
-                                    *lo = f64::max(1e-24, out[[kk, ll]]).ln();
-                                    entropy -= out[[kk, ll]] * *lo;
+                                for ll in 0..out_cols {
+                                    let lo = f64::max(1e-24, out[[kk, ll]]).ln();
+                                    entropy -= out[[kk, ll]] * lo;
                                 }
                                 entropy /= 2.0f64.ln();
                                 if entropy < 1e-24 {
@@ -1529,9 +1537,7 @@ impl TwinBlstmSpectralLid {
             }
 
             // langID normalization (`:1163-1179`) + member writes (`:1318-1337`).
-            let agg = acc.finalize(LidNorm::PostProcess {
-                exp: post_process_mode != 2,
-            });
+            let agg = acc.finalize(LidNorm::post_process(post_process_mode));
             self.lid.cumulative_error[chan] = lid_nn_cost;
             self.lid.nb_of_classif[chan] = lid_nb_classif;
             self.lid.classification_errors[chan] = agg.classification_errors;
@@ -1885,8 +1891,9 @@ impl TwinBlstmSpectralLid {
                     }
                 }
 
-                // segLID per _PostProcessMode (`:823-859`), argmax + confusion (`:862-874`),
-                // langID (`:875-879`): the kernel.
+                // segLID per _PostProcessMode (`:823-859`), argmax + confusion (`:862-874`;
+                // `score` `:860-861` is a dead local, not reproduced), langID (`:875-879`):
+                // the kernel.
                 acc.push(
                     output_seq.view(),
                     BlockScore::PostProcess(post_process_mode),
@@ -1899,9 +1906,7 @@ impl TwinBlstmSpectralLid {
             self.nb_of_classif[chan] = nb_of_classif;
 
             // post-loop reductions (`:887-902`) + member writes (`:1318-1337`).
-            let agg = acc.finalize(LidNorm::PostProcess {
-                exp: post_process_mode != 2,
-            });
+            let agg = acc.finalize(LidNorm::post_process(post_process_mode));
             self.lid.cumulative_error[chan] = lid_nn_cost;
             self.lid.nb_of_classif[chan] = lid_nb_classif;
             self.lid.classification_errors[chan] = agg.classification_errors;
@@ -2257,13 +2262,13 @@ impl Segmenter for TwinBlstmSpectralLid {
                 }
 
                 // Scoring feedForward (`:1250`): modifier = timeStep / segment duration.
-                let modifier = time_step / (scoring_segs[i + 1].begin - scoring_segs[i].begin);
+                let dur = scoring_segs[i + 1].begin - scoring_segs[i].begin;
                 let output_seq = self.lid_net.feed_forward_scoring(
                     &mut input_seq_lid,
                     lid_window_size,
                     lid_window_shift,
                     target_index as i64,
-                    modifier,
+                    time_step / dur,
                 );
 
                 // segmentationLID block = InvLogistic(outputSeq.col(1)) (`:1251`).
@@ -2280,7 +2285,6 @@ impl Segmenter for TwinBlstmSpectralLid {
                 // segLID = colwise sum / rows (`:1254`), argmax j (`:1257-1258`) + confusion
                 // (`:1265-1274`), langID (`:1275-1279`: cost-modified += segLID, else
                 // += dur*segLID): the kernel.
-                let dur = scoring_segs[i + 1].begin - scoring_segs[i].begin;
                 acc.push(
                     output_seq.view(),
                     BlockScore::ColumnMean,

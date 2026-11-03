@@ -1170,9 +1170,7 @@ impl LidScoreParams {
     /// Mode 7's normalization (`TwinBLSTMSpectralLID.cpp:1163-1179`): `PostProcess`, `exp`
     /// unless the vote mode.
     pub(super) fn norm(&self) -> LidNorm {
-        LidNorm::PostProcess {
-            exp: self.post_process_mode != 2,
-        }
+        LidNorm::post_process(self.post_process_mode)
     }
 }
 
@@ -1220,7 +1218,8 @@ pub(super) fn score_lid_entry(
     );
     // The posteriors widened to f64 (row-major, as `FastMatrix` is), then the exact kernel:
     // :1073-1108 segLID per _PostProcessMode, :1113-1130 argmax + confusion, :1131-1135
-    // langID. Modes 1/2 stay transcribed-but-unpinned (the gate configs use mode 0).
+    // langID. The gate configs use mode 0; the kernel's mode 1/2 arms are the exact Mode 7's,
+    // pinned there (`phase4b_twin_mode7::post_process_mode_all_three_covered`).
     let out = Array2::from_shape_vec(
         (out_f32.rows, out_f32.cols),
         out_f32.data.iter().map(|&x| x as f64).collect(),
