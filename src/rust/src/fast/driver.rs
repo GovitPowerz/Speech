@@ -318,7 +318,11 @@ pub(crate) fn build_net(
 /// net's count and discarded, Mode 7 never running that net). Not the shapes' own
 /// `element_count`s: they size what `from_flat` reads, so they are the exact count only
 /// while their arithmetic tracks the exact tree's (#61 was such a drift), and none has an
-/// MLP arm for the Twin's never-run SAD net.
+/// MLP arm for the Twin's never-run SAD net. Building the net to read the count was
+/// weighed and kept (issue #91, 2026-11-03): the build allocates the zeroed weight and
+/// derivative arrays only (the caches are empty until the first forward), 40 us on the
+/// committed LSTM configs and under 0.35 ms on a 2.3M-weight transformer, once per net
+/// per plan since #84; a geometry walk would touch every layer constructor to save that.
 pub(crate) fn exact_pack_len(bc: &BlstmConfig) -> Result<usize> {
     Ok(BlstmNetwork::from_config(bc.clone())?.nb_of_weights())
 }
