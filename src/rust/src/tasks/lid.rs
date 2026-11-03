@@ -2378,6 +2378,24 @@ impl Segmenter for TwinBlstmSpectralLid {
 mod twin_tests {
     use super::*;
 
+    /// The kernel's argmax is FIRST-max (strict `>`): on a tied `segLID` the lower class
+    /// wins the confusion cell, as every legacy copy's inline loop did. No committed fixture
+    /// ties exactly (the `issue83/5` battery row), so the fact needs its own pin.
+    #[test]
+    fn lid_channel_acc_argmax_is_first_max_on_a_tie() {
+        let mut acc = LidChannelAcc::new(2, 1, false);
+        // Vote mode: row 0 votes class 0, row 1 votes class 1 -> segLID = [1, 1], a tie.
+        let out = ndarray::arr2(&[[0.9, 0.1], [0.1, 0.9]]);
+        let o = acc.push(out.view(), BlockScore::PostProcess(2), BlockWeight::Plain);
+        assert_eq!(o.seg_lid, vec![1.0, 1.0]);
+        assert_eq!(o.argmax, 0, "first max, not last");
+        // target 1 (row 2), predicted 0 (col 1): a miss cell, nothing on the diagonal.
+        let agg = acc.finalize(LidNorm::PostProcess { exp: false });
+        assert_eq!(agg.confusion[[2, 1]], 1.0);
+        assert_eq!(agg.confusion[[2, 2]], 0.0);
+        assert_eq!(agg.predicted_language, 0);
+    }
+
     #[test]
     fn clamp_target_index_folds_out_of_range_and_negative_to_zero() {
         assert_eq!(clamp_target_index(0, 3), 0);
