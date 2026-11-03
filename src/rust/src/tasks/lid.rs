@@ -213,6 +213,17 @@ pub struct LidAggregate {
     pub segments_count: i32,
 }
 
+/// `targetIndex = clamp(lang_index, [0, classNb))` (algo 5 `BLSTMSpectralLID.cpp:321-323`,
+/// the Twin `TwinBLSTMSpectralLID.cpp:626-628`): an out-of-range or negative reference
+/// language index scores as class 0. The one body every LID driver and the fast plan read.
+pub fn clamp_target_index(lang_index: i32, class_nb: usize) -> usize {
+    if lang_index >= class_nb as i32 || lang_index < 0 {
+        0
+    } else {
+        lang_index as usize
+    }
+}
+
 /// The per-channel LID scoring accumulator. [`new`](Self::new) seeds the confusion index
 /// header exactly as the copies do (algo 5 `:314-318`, Twin `:787-790`); [`push`](Self::push)
 /// folds one scored block; [`finalize`](Self::finalize) is read-only, so the offline drivers
@@ -772,14 +783,8 @@ impl Segmenter for BlstmSpectralLid {
             let mut nb_of_classif = 0i64;
 
             // targetIndex = clamp(audio.getRefLangIndex()) to [0, classNb) (`:321-323`).
-            let mut target_index = audio.lang_index;
-            if target_index >= class_nb as i32 {
-                target_index = 0;
-            }
-            if target_index < 0 {
-                target_index = 0;
-            }
-            let ti = target_index as usize;
+            let ti = clamp_target_index(audio.lang_index, class_nb);
+            let target_index = ti as i32;
             // The scoring accumulator (`:314-318` seed): the one kernel, `LidChannelAcc`.
             let mut acc = LidChannelAcc::new(class_nb, ti, self.net.is_cost_modified());
 
@@ -1415,14 +1420,8 @@ impl TwinBlstmSpectralLid {
 
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             // targetIndex = clamp(lang_index, [0, classNb)) (`:626-628`).
-            let mut target_index = audio.lang_index;
-            if target_index >= class_nb as i32 {
-                target_index = 0;
-            }
-            if target_index < 0 {
-                target_index = 0;
-            }
-            let ti = target_index as usize;
+            let ti = clamp_target_index(audio.lang_index, class_nb);
+            let target_index = ti as i32;
 
             // SAD else branch (`:725`): result_vec.setConstant(10.0); clear SAD outputs.
             let mut result_vec2 = vec![10.0f64; real_vec_size];
@@ -1694,14 +1693,8 @@ impl TwinBlstmSpectralLid {
                 temporal_conv.as_deref(),
             );
 
-            let mut target_index = audio.lang_index;
-            if target_index >= class_nb as i32 {
-                target_index = 0;
-            }
-            if target_index < 0 {
-                target_index = 0;
-            }
-            let ti = target_index as usize;
+            let ti = clamp_target_index(audio.lang_index, class_nb);
+            let target_index = ti as i32;
 
             // --- LID-train branch (`:640-692`) ---------------------------------
             let mut lid_result_vec = Array2::<f64>::zeros((lid_real_vec_size, lid_out_size));
@@ -2113,14 +2106,8 @@ impl Segmenter for TwinBlstmSpectralLid {
             );
 
             // targetIndex = clamp(audio.getRefLangIndex()) to [0, classNb) (`:626-628`).
-            let mut target_index = audio.lang_index;
-            if target_index >= class_nb as i32 {
-                target_index = 0;
-            }
-            if target_index < 0 {
-                target_index = 0;
-            }
-            let ti = target_index as usize;
+            let ti = clamp_target_index(audio.lang_index, class_nb);
+            let target_index = ti as i32;
 
             // SAD targetSeq (`:707-711`): built when a reference exists; :710 zeroes it
             // for a BINARY LID net when targetIndex != 1.
@@ -2390,6 +2377,14 @@ impl Segmenter for TwinBlstmSpectralLid {
 #[cfg(test)]
 mod twin_tests {
     use super::*;
+
+    #[test]
+    fn clamp_target_index_folds_out_of_range_and_negative_to_zero() {
+        assert_eq!(clamp_target_index(0, 3), 0);
+        assert_eq!(clamp_target_index(2, 3), 2);
+        assert_eq!(clamp_target_index(3, 3), 0);
+        assert_eq!(clamp_target_index(-1, 3), 0);
+    }
     use crate::tasks::segmentation::Segmentation;
 
     /// `getTargetsLID` (`:170-219`) enforcement pattern with `TargetEnforcementStep 2`:
