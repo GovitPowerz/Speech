@@ -9,9 +9,9 @@
 //! running aggregate after each push.
 //!
 //! BIT-IDENTICAL TO OFFLINE BY CONSTRUCTION (spec S2, the task gate). [`push_utterance`] folds
-//! through the SAME shared kernel the offline loop uses ([`super::driver::score_lid_entry`]),
+//! through the SAME per-entry body the offline loop uses ([`super::driver::score_lid_entry`]),
 //! and [`finish`](StreamingLidSession::finish) / the per-push running aggregate run the SAME
-//! epilogue ([`super::driver::finalize_lid_channel`]). So:
+//! epilogue ([`crate::tasks::lid::LidChannelAcc::finalize`], the exact tree's kernel since #83). So:
 //!  - [`finish`](StreamingLidSession::finish) == the offline `FastTwinLid` members on the same
 //!    entries, BIT-IDENTICAL (the `LidMembers` `classification_errors`/`segments_confusion`/
 //!    `is_correct`), and
@@ -63,10 +63,10 @@ use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
-pub use super::driver::LidAggregate;
-use super::driver::{
-    FastNet, LidChannelAcc, LidScoreParams, finalize_lid_channel, score_lid_entry,
-};
+pub use crate::tasks::lid::LidAggregate;
+use crate::tasks::lid::LidChannelAcc;
+
+use super::driver::{FastNet, LidScoreParams, score_lid_entry};
 use super::plan::FastLidPlan;
 
 /// One utterance's streaming LID score: the per-entry observables (the offline `seg_lid` +
@@ -143,7 +143,7 @@ impl StreamingLidSession {
             },
         };
         let params = plan.timeline(rate, lang_index).params;
-        let acc = LidChannelAcc::new(params.class_nb);
+        let acc = params.acc();
         Ok(StreamingLidSession { net, params, acc })
     }
 
@@ -154,7 +154,7 @@ impl StreamingLidSession {
     /// (`TwinBLSTMSpectralLID.cpp:981`).
     pub fn push_utterance(&mut self, feat: &Array2<f64>) -> UtteranceScore {
         let outcome = score_lid_entry(feat, &mut self.net, &self.params, &mut self.acc);
-        let running_aggregate = finalize_lid_channel(&self.acc, &self.params);
+        let running_aggregate = self.acc.finalize(self.params.norm());
         match outcome {
             Some(o) => UtteranceScore {
                 is_correct: Some(o.argmax == self.params.ti),
@@ -176,11 +176,11 @@ impl StreamingLidSession {
     /// accumulator (`== the last push's running aggregate`), so it is repeatable/idempotent and
     /// the session may keep folding after a call.
     pub fn finish(&self) -> LidAggregate {
-        finalize_lid_channel(&self.acc, &self.params)
+        self.acc.finalize(self.params.norm())
     }
 
     /// The number of scored (not skipped) utterances folded so far (the offline `segments_count`).
     pub fn scored_count(&self) -> i32 {
-        self.acc.segments_count
+        self.acc.segments_count()
     }
 }

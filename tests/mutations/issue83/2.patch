@@ -1,0 +1,16 @@
+mutation: the Twin's Mode 7 scores each entry by the algo 5 / modes 0-3 column mean instead of its `_PostProcessMode` accumulator (the call-site `BlockScore` swapped for a neighbour's; `numberOfFrames` stays 0 so the epilogue divides by it)
+catcher: CAUGHT cargo --test phase4b_twin_mode7 mode7_integer_members_match_real_bitexact
+catcher: CAUGHT cargo --test phase4b_twin_mode7 mode7_continuous_members_match_real
+
+diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+--- a/src/rust/src/tasks/lid.rs
++++ b/src/rust/src/tasks/lid.rs
+@@ -1497,7 +1497,7 @@ impl TwinBlstmSpectralLid {
+                 // langID (`:1131-1135`): the kernel.
+                 acc.push(
+                     output_seq.view(),
+-                    BlockScore::PostProcess(post_process_mode),
++                    BlockScore::ColumnMean,
+                     BlockWeight::MeanIfCostModified,
+                 );
+ 

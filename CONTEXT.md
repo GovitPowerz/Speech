@@ -163,7 +163,7 @@ _Avoid_: fast for anything merely quick
 A fast-tree cell's f32 counterpart of an exact cell (`FastLstm`, `FastSlstm`, `FastMamba`, `FastCfc`, `FastTransformer`).
 
 **Step kernel**:
-The explicit per-timestep `step(x_t, &mut State)` every fast cell exposes, and since issue #26 the decision layer's `HystStep::push` (one convolved value) and `audio::conv_at` (one convolution output) as well. The offline run loops it; the streaming session drives it; offline and streamed are therefore the same arithmetic.
+The explicit per-timestep `step(x_t, &mut State)` every fast cell exposes, since issue #26 the decision layer's `HystStep::push` (one convolved value) and `audio::conv_at` (one convolution output), and since issue #83 the LID scoring accumulator's `LidChannelAcc::push` (one scored block) as well. The offline run loops it; the streaming session drives it; offline and streamed are therefore the same arithmetic.
 
 **Fast SAD plan**:
 The one rate-free algo-3 setup of the fast tree (`fast::plan::FastSadPlan::from_map`): config structs, Fast shape, spec, Cell geometry, normalization type, pack length, fixed gain, weight-file key, and every refusal the config alone decides. The offline fast driver and the frame stream both consume it; the plan is the shared input, the Step kernel the shared arithmetic.

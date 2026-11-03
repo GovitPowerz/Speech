@@ -1,0 +1,17 @@
+mutation: the fast Twin's per-entry body always votes (`PostProcess(2)`) where the exact Mode 7 passes the configured `_PostProcessMode` (the fast call site's parameter swapped; the offline fast driver and the utterance stream move together, and `numberOfFrames` keeps counting so no NaN reaches a `==`)
+catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_phseq_exact_vs_fast
+catcher: CAUGHT cargo --test fast_twin_lid_matrix lid_parity_exact_vs_fast_per_pair
+catcher: MISSED cargo --test phase8_stream_lid per_utterance_equals_offline_phseq
+
+diff --git a/src/rust/src/fast/driver.rs b/src/rust/src/fast/driver.rs
+--- a/src/rust/src/fast/driver.rs
++++ b/src/rust/src/fast/driver.rs
+@@ -1227,7 +1227,7 @@ pub(super) fn score_lid_entry(
+     .expect("FastMatrix is rows x cols row-major");
+     Some(acc.push(
+         out.view(),
+-        BlockScore::PostProcess(p.post_process_mode),
++        BlockScore::PostProcess(2),
+         BlockWeight::MeanIfCostModified,
+     ))
+ }

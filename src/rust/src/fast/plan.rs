@@ -63,7 +63,7 @@ use crate::config::NnetSpec;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
 use crate::legacy_config::{get_f64, get_f64_default, get_f64_opt};
 use crate::nn::blstm::{BlstmConfig, check_pack_len};
-use crate::tasks::lid::derive_lid_window;
+use crate::tasks::lid::{clamp_target_index, derive_lid_window};
 use crate::tasks::sad::{NON_WAV_SSIF, get_blstm_param};
 use crate::tasks::segmenter::{DriverConfig, SegmenterConfig};
 
@@ -796,14 +796,9 @@ impl FastLidPlan {
             ssif,
             rate,
         );
-        // targetIndex = clamp(lang_index, [0, classNb)) (`TwinBLSTMSpectralLID.cpp:626-628`).
-        let mut ti = lang_index;
-        if ti >= self.class_nb as i32 {
-            ti = 0;
-        }
-        if ti < 0 {
-            ti = 0;
-        }
+        // targetIndex = clamp(lang_index, [0, classNb)) (`TwinBLSTMSpectralLID.cpp:626-628`),
+        // the exact drivers' one body.
+        let ti = clamp_target_index(lang_index, self.class_nb);
         let params = LidScoreParams {
             lid_ssr: self.lid.ssr,
             lid_lstm_sub: self.lid.spec.lstm_subsampling.clone(),
@@ -814,7 +809,7 @@ impl FastLidPlan {
             two_sweeps: self.two_sweeps,
             post_process_mode: self.post_process_mode,
             class_nb: self.class_nb,
-            ti: ti as usize,
+            ti,
             cost_modified: self.cost_modified,
         };
         LidTimeline {
@@ -825,7 +820,7 @@ impl FastLidPlan {
             lid_window_size,
             lid_window_shift,
             lid_no_overlap,
-            ti: ti as usize,
+            ti,
             params,
         }
     }

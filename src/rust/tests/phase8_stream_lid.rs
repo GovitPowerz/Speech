@@ -198,7 +198,7 @@ fn argmax(v: &[f64]) -> usize {
 /// The offline predicted language (oracle for `LidAggregate.predicted_language`): recover the
 /// normalized langID from the offline `classification_errors` (`errors[c] = 100*(langid[c] -
 /// target_lid[c])`, `target_lid[ti] = -2`, else 0), then take its first-max argmax -- the same
-/// argmax the driver's `finalize_lid_channel` computes, routed through the asserted errors row.
+/// argmax the kernel's `LidChannelAcc::finalize` computes, routed through the asserted errors row.
 fn offline_predicted_language(errors: &[f64], ti: usize) -> usize {
     let langid: Vec<f64> = errors
         .iter()
