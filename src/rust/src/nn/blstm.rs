@@ -1124,9 +1124,9 @@ impl BlstmNetwork {
     /// [`Self::weight_layout`] straight from a parsed config: builds the net (the one
     /// place the per-cell geometry is resolved -- `dt_rank` auto, the Mamba adapter, the
     /// sub-sampled fan-ins) and reads its layout. The `speech_rs.weight_layout` seam
-    /// calls this. The build is the cheap part and was kept on measurement (issue #91,
-    /// 2026-11-03): zeroed weight and derivative arrays only, 40 us on the committed
-    /// LSTM configs and under 0.35 ms on a 2.3M-weight transformer, seam overhead included.
+    /// calls this. The build is cheap and was kept on measurement (issue #91): zeroed
+    /// weight and derivative arrays only, 40 us on the committed LSTM configs and under
+    /// 0.5 ms on a 2.3M-weight transformer, seam overhead included.
     pub fn weight_layout_of(cfg: BlstmConfig) -> Result<Vec<WeightBlock>> {
         Ok(BlstmNetwork::from_config(cfg)?.weight_layout())
     }
