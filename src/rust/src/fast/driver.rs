@@ -82,7 +82,9 @@ use crate::constants::random_gauss;
 use crate::nn::blstm::{
     BlstmConfig, BlstmNetwork, CellType, Direction, check_pack_len, file_pack_head,
 };
-use crate::tasks::lid::LidMembers;
+use crate::tasks::lid::{
+    BlockScore, BlockWeight, LidChannelAcc, LidEntryOutcome, LidMembers, LidNorm,
+};
 use crate::tasks::sad::apply_input_gates;
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
@@ -1071,14 +1073,14 @@ impl Segmenter for FastTwinLid {
 
             // abs(_Mode)==7 external-features loop (`:980-1155`) + langID normalization
             // (`:1163-1179`) + member writes (`:1318-1337`), via the SHARED kernel
-            // (`score_lid_entry` / `finalize_lid_channel`) -- the SAME code the streaming
+            // (`score_lid_entry` over the exact tree's `LidChannelAcc`) -- the SAME code the streaming
             // session folds through, so streaming is bit-identical to this offline path by
             // construction (see the kernel section below `get_segmentation`).
-            let mut acc = LidChannelAcc::new(params.class_nb);
+            let mut acc = params.acc();
             for feat in &audio.external_features {
                 score_lid_entry(feat, net, params, &mut acc);
             }
-            let agg = finalize_lid_channel(&acc, params);
+            let agg = acc.finalize(params.norm());
 
             // Member writes (`:1318-1337`). Forward-only: the LID cumulative_error /
             // nb_of_classif stay 0 (documented divergence, the fast path never harvests
@@ -1130,37 +1132,17 @@ impl Segmenter for FastTwinLid {
 }
 
 // ===========================================================================
-// The shared Mode-7 LID scoring kernel (Phase 8 Task 7).
+// The Mode-7 per-entry body (Phase 8 Task 7; the accumulator the exact tree's since #83).
 //
 // The offline `FastTwinLid::get_segmentation` per-channel loop AND the per-utterance
 // `StreamingLidSession` (`fast::stream_lid`) fold `external_features` entries through the
-// SAME per-entry body ([`score_lid_entry`]) + epilogue ([`finalize_lid_channel`]) below, so
-// streaming is bit-identical to offline BY CONSTRUCTION (nothing is re-implemented) -- the
+// SAME per-entry body ([`score_lid_entry`]): the guard, the noise, the f32 forward and the
+// widen are the fast tree's; the `segLID`, the argmax, the confusion, the `langID` and the
+// epilogue are the exact tree's ONE kernel, `tasks/lid.rs::LidChannelAcc`, driven on the
+// widened posteriors (ADR-0002's stepwise hoist, the #26 / #121 direction: the fast tree
+// imports the exact kernel). Streaming is bit-identical to offline BY CONSTRUCTION; the
 // phase-7 LID parity legs (`phase7_parity_lid.rs`) are the no-offline-regression proof.
 // ===========================================================================
-
-/// The finalized per-channel LID members -- the offline `get_segmentation` writes these into
-/// its per-channel member vectors, and the streaming session returns this as its
-/// utterance-granular result. `classification_errors`/`confusion`/`is_lid_correct` are
-/// bit-identical to the offline [`LidMembers`] `classification_errors`/`segments_confusion`/
-/// `is_correct`; `predicted_language`/`segments_count` are the streaming-useful extras
-/// (the argmax of the normalized langID + the scored-utterance count so far).
-#[derive(Debug, Clone, PartialEq)]
-pub struct LidAggregate {
-    /// In-band `100*(langID - targetLID)` per class (the `.scr`/confusion column source) --
-    /// normalized langID, the offline `LidMembers::classification_errors` row.
-    pub classification_errors: Vec<f64>,
-    /// The per-block argmax-count confusion matrix accumulated so far (the offline
-    /// `LidMembers::segments_confusion`; NOT normalized by the epilogue).
-    pub confusion: Array2<f64>,
-    /// `100` iff the normalized langID argmax is the target, else `0` (offline
-    /// `LidMembers::is_correct`).
-    pub is_lid_correct: i32,
-    /// The predicted language: argmax of the normalized langID (first-max).
-    pub predicted_language: usize,
-    /// Scored (not skipped) utterances folded so far -- the offline `segments_count`.
-    pub segments_count: i32,
-}
 
 /// The per-channel LID scoring constants (derived once from config + rate + target
 /// language), invariant across a channel's external-features entries.
@@ -1179,55 +1161,22 @@ pub(super) struct LidScoreParams {
     pub(super) cost_modified: bool,
 }
 
-/// The per-channel LID accumulator the Mode-7 external-features loop folds each entry into.
-/// [`new`](Self::new) seeds the confusion index header exactly as the offline
-/// `TwinBLSTMSpectralLID.cpp:787-790`.
-pub(super) struct LidChannelAcc {
-    pub(super) langid: Vec<f64>,
-    pub(super) confusion: Array2<f64>,
-    pub(super) segments_count: i32,
-    pub(super) number_of_frames: i32,
-}
+impl LidScoreParams {
+    /// A fresh per-channel accumulator at this target (`TwinBLSTMSpectralLID.cpp:787-790`).
+    pub(super) fn acc(&self) -> LidChannelAcc {
+        LidChannelAcc::new(self.class_nb, self.ti, self.cost_modified)
+    }
 
-impl LidChannelAcc {
-    pub(super) fn new(class_nb: usize) -> LidChannelAcc {
-        let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
-        for kk in 0..class_nb + 1 {
-            confusion[[0, kk]] = kk as f64;
-            confusion[[kk, 0]] = kk as f64;
-        }
-        LidChannelAcc {
-            langid: vec![0.0f64; class_nb],
-            confusion,
-            segments_count: 0,
-            number_of_frames: 0,
+    /// Mode 7's normalization (`:1163-1179`): `PostProcess`, `exp` unless the vote mode.
+    pub(super) fn norm(&self) -> LidNorm {
+        LidNorm::PostProcess {
+            exp: self.post_process_mode != 2,
         }
     }
 }
 
-/// One scored utterance's per-entry observables: the offline `seg_lid` (post-
-/// `_PostProcessMode` accumulator) + its argmax `j`.
-pub(super) struct LidEntryOutcome {
-    pub(super) seg_lid: Vec<f64>,
-    pub(super) argmax: usize,
-}
-
-/// First-max argmax (strict `>`), matching the offline inline argmax
-/// (`TwinBLSTMSpectralLID.cpp:1113-1114`) and the `langID.maxCoeff()` pick (`:1325`).
-fn argmax_f64(v: &[f64]) -> usize {
-    let mut j = 0usize;
-    let mut best = v[0];
-    for (c, &x) in v.iter().enumerate().skip(1) {
-        if x > best {
-            best = x;
-            j = c;
-        }
-    }
-    j
-}
-
-/// Fold ONE external-features entry into `acc` -- the exact body of the Mode-7 loop
-/// (`TwinBLSTMSpectralLID.cpp:980-1155`; the `:NNN` here and in the body are its lines).
+/// Fold ONE external-features entry into `acc` -- the Mode-7 loop body
+/// (`TwinBLSTMSpectralLID.cpp:980-1135`; the `:NNN` here and in the body are its lines).
 /// Returns `None` if the entry is skipped (`nrows < lid_ssr` or `< MinNbOfFrames`,
 /// `:981`), else the per-entry observables. The noise `randinit` is fixed 0 PER ENTRY
 /// (the port's choice where `:1022-1032` seeds from the clock), NOT entry-order-dependent,
@@ -1268,140 +1217,17 @@ pub(super) fn score_lid_entry(
         p.lid_window_size,
         p.two_sweeps,
     );
-    let out_cols = out_f32.cols;
-    let output_seq: Vec<f64> = out_f32.data.iter().map(|&x| x as f64).collect();
-    let get = |r: usize, c: usize| output_seq[r * out_cols + c];
-
-    // :1073-1108 segLID accumulation per _PostProcessMode. Modes 1/2 stay transcribed-but-
-    // unpinned (the gate configs use mode 0), mirroring the offline driver.
-    let mut seg_lid = vec![0.0f64; out_cols];
-    match p.post_process_mode {
-        1 => {
-            for kk in 0..out_f32.rows {
-                if get(kk, 1) >= 0.0 {
-                    let mut entropy = 0.0;
-                    let mut log_out = vec![0.0f64; out_cols];
-                    for (ll, lo) in log_out.iter_mut().enumerate() {
-                        *lo = f64::max(1e-24, get(kk, ll)).ln();
-                        entropy -= get(kk, ll) * *lo;
-                    }
-                    entropy /= 2.0f64.ln();
-                    if entropy < 1e-24 {
-                        entropy = 1e-24;
-                    }
-                    for (ll, sl) in seg_lid.iter_mut().enumerate() {
-                        *sl += f64::max(1e-24, get(kk, ll) / entropy).ln();
-                    }
-                    acc.number_of_frames += 1;
-                }
-            }
-        }
-        2 => {
-            for kk in 0..out_f32.rows {
-                if get(kk, 1) >= 0.0 {
-                    let mut j = 0usize;
-                    let mut best = get(kk, 0);
-                    for c in 1..out_cols {
-                        if get(kk, c) > best {
-                            best = get(kk, c);
-                            j = c;
-                        }
-                    }
-                    seg_lid[j] += 1.0;
-                    acc.number_of_frames += 1;
-                }
-            }
-        }
-        _ => {
-            for kk in 0..out_f32.rows {
-                if get(kk, 1) >= 0.0 {
-                    for (ll, sl) in seg_lid.iter_mut().enumerate() {
-                        *sl += f64::max(1e-24, get(kk, ll)).ln();
-                    }
-                    acc.number_of_frames += 1;
-                }
-            }
-        }
-    }
-
-    // :1113-1114 argmax j, :1121-1130 confusion.
-    let j = argmax_f64(&seg_lid);
-    let pos_target = p.ti + 1;
-    if j == p.ti {
-        acc.confusion[[pos_target, pos_target]] += 1.0;
-        acc.confusion[[pos_target, p.class_nb + 1]] += 1.0;
-        acc.confusion[[p.class_nb + 1, pos_target]] += 1.0;
-    } else {
-        let pos_best = j + 1;
-        acc.confusion[[pos_target, pos_best]] += 1.0;
-        acc.confusion[[pos_target, p.class_nb + 1]] += 1.0;
-        acc.confusion[[p.class_nb + 1, pos_best]] += 1.0;
-    }
-
-    // :1131-1135 langID.
-    let rows = out_f32.rows as f64;
-    if p.cost_modified {
-        for (c, &v) in seg_lid.iter().enumerate() {
-            acc.langid[c] += v / rows;
-        }
-    } else {
-        for (c, &v) in seg_lid.iter().enumerate() {
-            acc.langid[c] += v;
-        }
-    }
-
-    acc.segments_count += 1;
-    Some(LidEntryOutcome { seg_lid, argmax: j })
-}
-
-/// The finalized per-channel members (`TwinBLSTMSpectralLID.cpp:1163-1179` + `:1318-1337`
-/// applied to `acc`): normalize a CLONE of langID (so a mid-stream snapshot never consumes
-/// the accumulator), then derive the in-band classification errors + is_lid_correct +
-/// predicted language. Read-only in `acc`, so the offline (once) and the streaming session
-/// (per push) both call it.
-pub(super) fn finalize_lid_channel(acc: &LidChannelAcc, p: &LidScoreParams) -> LidAggregate {
-    // :1163-1179 langID normalization (on a clone -- the offline mutated in place then read
-    // it; the values are identical, and the offline never reads langID after the epilogue).
-    let mut langid = acc.langid.clone();
-    if acc.segments_count > 0 && langid.iter().sum::<f64>() != 0.0 {
-        if p.cost_modified {
-            for v in langid.iter_mut() {
-                *v /= acc.segments_count as f64;
-            }
-        } else {
-            for v in langid.iter_mut() {
-                *v /= acc.number_of_frames as f64;
-            }
-        }
-        if p.post_process_mode != 2 {
-            for v in langid.iter_mut() {
-                *v = v.exp();
-            }
-        }
-        let adim: f64 = langid.iter().sum();
-        for v in langid.iter_mut() {
-            *v /= adim;
-        }
-    } else {
-        langid[0] = 1.0;
-    }
-
-    // :1318-1337 member writes.
-    let mut target_lid = vec![0.0f64; p.class_nb];
-    target_lid[p.ti] = -2.0;
-    let mut errors = vec![0.0f64; p.class_nb];
-    for c in 0..p.class_nb {
-        errors[c] = 100.0 * (langid[c] - target_lid[c]);
-    }
-    let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let is_lid_correct = if langid[p.ti] == max_langid { 100 } else { 0 };
-    let predicted_language = argmax_f64(&langid);
-
-    LidAggregate {
-        classification_errors: errors,
-        confusion: acc.confusion.clone(),
-        is_lid_correct,
-        predicted_language,
-        segments_count: acc.segments_count,
-    }
+    // The posteriors widened to f64 (row-major, as `FastMatrix` is), then the exact kernel:
+    // :1073-1108 segLID per _PostProcessMode, :1113-1130 argmax + confusion, :1131-1135
+    // langID. Modes 1/2 stay transcribed-but-unpinned (the gate configs use mode 0).
+    let out = Array2::from_shape_vec(
+        (out_f32.rows, out_f32.cols),
+        out_f32.data.iter().map(|&x| x as f64).collect(),
+    )
+    .expect("FastMatrix is rows x cols row-major");
+    Some(acc.push(
+        out.view(),
+        BlockScore::PostProcess(p.post_process_mode),
+        BlockWeight::MeanIfCostModified,
+    ))
 }
