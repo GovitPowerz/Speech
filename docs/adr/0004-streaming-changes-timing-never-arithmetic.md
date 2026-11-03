@@ -1,6 +1,6 @@
 # ADR-0004: Streaming changes timing, never arithmetic: the frozen-norm causality cut, shared step kernels, and emission with zero retractions
 
-**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9); the bidirectional refusal scoped to the frame stream 2026-10-09 (issue #57); the decision layer brought under the kernel rule 2026-10-12 (issue #26); the setup rule extended to the Twin 2026-10-31 (issue #84)
+**Status:** accepted | **Date:** 2026-07-20 (Phase 8, PR #14); the `pending_begin` term added 2026-07-31 (Phase 9 Task 9); the bidirectional refusal scoped to the frame stream 2026-10-09 (issue #57); the decision layer brought under the kernel rule 2026-10-12 (issue #26); the setup rule extended to the Twin 2026-10-31 (issue #84); the LID scoring accumulator brought under the kernel rule 2026-11-03 (issue #83)
 
 ## Context
 
@@ -39,7 +39,13 @@ Phase 0b-ii golden, the numpy oracle, the Phase 1 audio goldens), except the two
 stream reads: `pending_begin`'s `+ off` (pinned by
 `phase0bii_segmenter.rs::hyst_step_pending_begin_is_the_labeled_begin_in_audio_time`) and
 `conv_at`'s `src_base` (the batch passes 0; the trimming stream legs own it). The move is an
-ADR-0002 touch class, the stepwise hoist.
+ADR-0002 touch class, the stepwise hoist. Since issue #83 (2026-11-03) the utterance stream drives
+an exact-tree kernel the same way: `tasks/lid.rs::LidChannelAcc`, the per-channel LID scoring
+accumulator (`push` per scored block, `finalize` read-only), which the four exact LID drivers fold
+over and `StreamingLidSession` pushes one utterance into through the fast Twin's per-entry body;
+the fast tree's own copy is gone, and because both trees now run the one accumulator the
+fast-vs-exact parity legs are self-consistent for it -- its arithmetic is owned by the exact LID
+goldens alone.
 
 **Amendment (2026-10-31, issue #84):** the SETUP rule covers the Twin too -- one
 `fast::plan::FastLidPlan` (rate-free) and one `LidTimeline` (at the rate and target) are the

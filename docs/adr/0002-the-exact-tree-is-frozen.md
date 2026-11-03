@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83)
 
 ## Context
 
@@ -80,7 +80,21 @@ reproduced is no hoist: it is a port fix recorded in IMPROVEMENTS.md, Algo 5 now
 legacy 80 and the spectral SAD driver and the Twin's modes 0-6 refusing it); and the
 caller-less class the same day: the write-only `ltsv_shift_sec` deleted on both drivers with
 its four per-file writes, the port's LTSV shift having derived from the config value since
-Phase 2b, issue #121).
+Phase 2b, issue #121; the stepwise hoist a third time, 2026-11-03: the per-channel LID
+scoring accumulator -- the confusion header seed, the per-block score, the strict `>` argmax
+with its confusion update, the `langID` weighting, `segmentsCount`, the normalization and the
+member row -- written four times on the exact tree (Algo 5, the Twin's modes 0-3, 4-6 and 7)
+and once more on the fast tree, is ONE struct, `tasks/lid.rs::LidChannelAcc` (`push` per scored
+block, `finalize` read-only), its three variation points enums (`BlockScore`, `BlockWeight`,
+`LidNorm`), each `LidNorm` variant carrying its copy's guard literally (Algo 5 and modes 0-3
+never tested the sum; a unification would be a fix-protocol entry, not a hoist); the fast Twin's
+per-entry body and the utterance stream drive the same struct on the widened posteriors, so
+`fast/driver.rs` lost its copy (the #26 direction again), and the target clamp is one body,
+`clamp_target_index`, read by the four drivers and the fast plan; proven by the four LID goldens
+byte-green and `phase7_parity_lid` / `phase8_stream_lid` passing UNMODIFIED, with the corollary
+the `issue83` battery measures: once both trees run the one accumulator, the fast-vs-exact
+parity legs are self-consistent for it and its arithmetic is owned by the exact LID goldens
+alone, issue #83).
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),
