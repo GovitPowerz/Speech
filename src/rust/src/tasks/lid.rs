@@ -768,13 +768,6 @@ impl Segmenter for BlstmSpectralLid {
             );
 
             // --- LID scoring loop (`:346-401`) --------------------------------------
-            let mut langid = vec![0.0f64; class_nb];
-            let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
-            for kk in 0..class_nb + 1 {
-                confusion[[0, kk]] = kk as f64;
-                confusion[[kk, 0]] = kk as f64;
-            }
-            let mut segments_count = 0i32;
             let mut nn_cost = 0.0f64;
             let mut nb_of_classif = 0i64;
 
@@ -787,6 +780,8 @@ impl Segmenter for BlstmSpectralLid {
                 target_index = 0;
             }
             let ti = target_index as usize;
+            // The scoring accumulator (`:314-318` seed): the one kernel, `LidChannelAcc`.
+            let mut acc = LidChannelAcc::new(class_nb, ti, self.net.is_cost_modified());
 
             // Snapshot the SAD boundaries (the scoring loop does not mutate `seg`).
             let segs = seg.segments().to_vec();
@@ -859,67 +854,23 @@ impl Segmenter for BlstmSpectralLid {
                 nn_cost += self.net.cost; // NNCost += getCost() (`:370`)
                 nb_of_classif += self.net.nb_of_classif; // (`:371`)
 
-                // segLID = colwise sum / rows (`:372`).
-                let out_rows = output_seq.nrows() as f64;
-                let mut seg_lid = vec![0.0f64; class_nb];
-                for c in 0..class_nb {
-                    let mut acc = 0.0;
-                    for r in 0..output_seq.nrows() {
-                        acc += output_seq[[r, c]];
-                    }
-                    seg_lid[c] = acc / out_rows;
-                }
-
-                // costLID is a dead local (`:376`) -- not reproduced. argmax j (`:378`),
-                // confusion accumulation (`:379-389`). targetIndex >= 0 always.
-                let mut j = 0usize;
-                let mut best = seg_lid[0];
-                for (c, &v) in seg_lid.iter().enumerate().skip(1) {
-                    if v > best {
-                        best = v;
-                        j = c;
-                    }
-                }
-                let pos_target = ti + 1;
-                if j == ti {
-                    confusion[[pos_target, pos_target]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_target]] += 1.0;
-                } else {
-                    let pos_best = j + 1;
-                    confusion[[pos_target, pos_best]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_best]] += 1.0;
-                }
-
-                for c in 0..class_nb {
-                    langid[c] += seg_lid[c]; // langID += segLID (`:391`)
-                }
-                segments_count += 1;
+                // segLID = colwise sum / rows (`:372`), argmax j (`:378`) + confusion
+                // (`:379-389`; `costLID` `:376` is a dead local, not reproduced), langID +=
+                // segLID (`:391`): the kernel.
+                acc.push(
+                    output_seq.view(),
+                    BlockScore::ColumnMean,
+                    BlockWeight::Plain,
+                );
             }
 
-            // Post-loop reductions (`:403-411`).
-            if segments_count > 0 {
-                for v in langid.iter_mut() {
-                    *v /= segments_count as f64;
-                }
-            } else {
-                langid[0] = 1.0;
-            }
-
-            // targetLID (`:412-413`) + the member writes (`:414-426`).
-            let mut target_lid = vec![0.0f64; class_nb];
-            target_lid[ti] = -2.0;
+            // Post-loop reductions (`:403-411`) + the member writes (`:412-426`).
+            let agg = acc.finalize(LidNorm::MeanOverSegments);
             self.lid.cumulative_error[chan] = nn_cost;
             self.lid.nb_of_classif[chan] = nb_of_classif;
-            let mut lid_errors = vec![0.0f64; class_nb];
-            for c in 0..class_nb {
-                lid_errors[c] = 100.0 * (langid[c] - target_lid[c]);
-            }
-            self.lid.classification_errors[chan] = lid_errors;
-            self.lid.segments_confusion[chan] = confusion;
-            let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            self.lid.is_correct[chan] = if langid[ti] == max_langid { 100 } else { 0 };
+            self.lid.classification_errors[chan] = agg.classification_errors;
+            self.lid.segments_confusion[chan] = agg.confusion;
+            self.lid.is_correct[chan] = agg.is_lid_correct;
         }
 
         // seg.compute_errors() after the FULL channel loop (`:438`).
