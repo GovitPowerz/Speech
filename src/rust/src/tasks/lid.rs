@@ -1898,14 +1898,8 @@ impl TwinBlstmSpectralLid {
             // totalSpeechDuration (`:799-806`) is DEAD for this branch (the post-loop
             // normalizes by segmentsCount/numberOfFrames, `:888-892`) -- skipped.
             let segs = seg.segments().to_vec();
-            let mut langid = vec![0.0f64; class_nb];
-            let mut confusion = Array2::<f64>::zeros((class_nb + 2, class_nb + 2));
-            for kk in 0..class_nb + 1 {
-                confusion[[0, kk]] = kk as f64;
-                confusion[[kk, 0]] = kk as f64;
-            }
-            let mut segments_count = 0i32;
-            let mut number_of_frames = 0i32;
+            // The scoring accumulator (`:787-790` seed): the one kernel, `LidChannelAcc`.
+            let mut acc = LidChannelAcc::new(class_nb, ti, cost_modified);
             let lid_rows = lid_result_vec.nrows();
 
             for i in 0..segs.len().saturating_sub(1) {
@@ -1947,135 +1941,28 @@ impl TwinBlstmSpectralLid {
                     }
                 }
 
-                // segLID accumulation per _PostProcessMode (`:823-859`); each row gated by
-                // outputSeq(kk,1) >= 0.
-                let mut seg_lid = vec![0.0f64; out_cols];
-                match post_process_mode {
-                    1 => {
-                        for kk in 0..n_rows {
-                            if output_seq[[kk, 1]] >= 0.0 {
-                                let mut entropy = 0.0;
-                                let mut log_out = vec![0.0f64; out_cols];
-                                for ll in 0..out_cols {
-                                    log_out[ll] = f64::max(1e-24, output_seq[[kk, ll]]).ln();
-                                    entropy -= output_seq[[kk, ll]] * log_out[ll];
-                                }
-                                entropy /= 2.0f64.ln();
-                                if entropy < 1e-24 {
-                                    entropy = 1e-24;
-                                }
-                                for ll in 0..out_cols {
-                                    seg_lid[ll] +=
-                                        f64::max(1e-24, output_seq[[kk, ll]] / entropy).ln();
-                                }
-                                number_of_frames += 1;
-                            }
-                        }
-                    }
-                    2 => {
-                        for kk in 0..n_rows {
-                            if output_seq[[kk, 1]] >= 0.0 {
-                                let mut jm = 0usize;
-                                let mut best = output_seq[[kk, 0]];
-                                for c in 1..out_cols {
-                                    if output_seq[[kk, c]] > best {
-                                        best = output_seq[[kk, c]];
-                                        jm = c;
-                                    }
-                                }
-                                seg_lid[jm] += 1.0;
-                                number_of_frames += 1;
-                            }
-                        }
-                    }
-                    _ => {
-                        for kk in 0..n_rows {
-                            if output_seq[[kk, 1]] >= 0.0 {
-                                for ll in 0..out_cols {
-                                    seg_lid[ll] += f64::max(1e-24, output_seq[[kk, ll]]).ln();
-                                }
-                                number_of_frames += 1;
-                            }
-                        }
-                    }
-                }
-
-                // score (`:860-861`) is a dead local -- skipped. argmax j (`:862-863`),
-                // confusion (`:864-874`).
-                let mut j = 0usize;
-                let mut best = seg_lid[0];
-                for (c, &v) in seg_lid.iter().enumerate().skip(1) {
-                    if v > best {
-                        best = v;
-                        j = c;
-                    }
-                }
-                let pos_target = ti + 1;
-                if j == ti {
-                    confusion[[pos_target, pos_target]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_target]] += 1.0;
-                } else {
-                    let pos_best = j + 1;
-                    confusion[[pos_target, pos_best]] += 1.0;
-                    confusion[[pos_target, class_nb + 1]] += 1.0;
-                    confusion[[class_nb + 1, pos_best]] += 1.0;
-                }
-
-                // langID += isCostModified ? segLID/rows : segLID (`:875-879`).
-                if cost_modified {
-                    for c in 0..out_cols {
-                        langid[c] += seg_lid[c] / n_rows as f64;
-                    }
-                } else {
-                    for c in 0..out_cols {
-                        langid[c] += seg_lid[c];
-                    }
-                }
-                segments_count += 1;
+                // segLID per _PostProcessMode (`:823-859`), argmax + confusion (`:862-874`),
+                // langID (`:875-879`): the kernel.
+                acc.push(
+                    output_seq.view(),
+                    BlockScore::PostProcess(post_process_mode),
+                    BlockWeight::MeanIfCostModified,
+                );
             }
 
             // `:885-886` (redundant with `:774-775`).
             self.cumulative_error[chan] = nn_cost;
             self.nb_of_classif[chan] = nb_of_classif;
 
-            // post-loop reductions (`:887-902`).
-            if segments_count > 0 && langid.iter().sum::<f64>() != 0.0 {
-                if cost_modified {
-                    for v in langid.iter_mut() {
-                        *v /= segments_count as f64;
-                    }
-                } else {
-                    for v in langid.iter_mut() {
-                        *v /= number_of_frames as f64;
-                    }
-                }
-                if post_process_mode != 2 {
-                    for v in langid.iter_mut() {
-                        *v = v.exp();
-                    }
-                }
-                let adim: f64 = langid.iter().sum();
-                for v in langid.iter_mut() {
-                    *v /= adim;
-                }
-            } else {
-                langid[0] = 1.0;
-            }
-
-            // --- member writes (`:1318-1337`) ----------------------------------
-            let mut target_lid = vec![0.0f64; class_nb];
-            target_lid[ti] = -2.0;
+            // post-loop reductions (`:887-902`) + member writes (`:1318-1337`).
+            let agg = acc.finalize(LidNorm::PostProcess {
+                exp: post_process_mode != 2,
+            });
             self.lid.cumulative_error[chan] = lid_nn_cost;
             self.lid.nb_of_classif[chan] = lid_nb_classif;
-            let mut lid_errors = vec![0.0f64; class_nb];
-            for c in 0..class_nb {
-                lid_errors[c] = 100.0 * (langid[c] - target_lid[c]);
-            }
-            self.lid.classification_errors[chan] = lid_errors;
-            self.lid.segments_confusion[chan] = confusion;
-            let max_langid = langid.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            self.lid.is_correct[chan] = if langid[ti] == max_langid { 100 } else { 0 };
+            self.lid.classification_errors[chan] = agg.classification_errors;
+            self.lid.segments_confusion[chan] = agg.confusion;
+            self.lid.is_correct[chan] = agg.is_lid_correct;
 
             lid_cost_ponderation = self.lid_net.get_cost_ponderation(target_index as i64);
             self.lid_net.ponderate_weights_derivatives(audio_weight);
