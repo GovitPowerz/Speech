@@ -142,9 +142,13 @@ def _per_language_counts(groups: dict[str, list[dict[str, str]]], total: int) ->
     """Per-language quota for a PROPORTIONAL draw of `total` files -- each language gets
     `round(total * n_lang / n_all)`, floored at 1 (min 1/language present) and capped at its
     own count, so the draw preserves the source's per-language proportions AND keeps every
-    language (all 12 LID classes) represented even for a small `total`. Used by
-    `stratified_splits` for the valid/test quotas and for train when `n_train` is an explicit
-    count (the `n_train=None` full-run path derives train's quota as the remainder instead)."""
+    language (all 12 LID classes) represented even for a small `total`. A `total` of 0 is an
+    EMPTY draw on every language (issue #98: `0` means no held-out split on both arms, the
+    floor applies to positive sizes only). Used by `stratified_splits` for the valid/test
+    quotas and for train when `n_train` is an explicit count (the `n_train=None` full-run path
+    derives train's quota as the remainder instead)."""
+    if total == 0:
+        return dict.fromkeys(groups, 0)
     n_all = sum(len(v) for v in groups.values())
     return {lang: min(len(items), max(1, round(total * len(items) / n_all))) for lang, items in groups.items()}
 
@@ -1139,10 +1143,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--valid-size",
         type=int,
         default=_default("valid_size"),
-        help="held-out validation slice (files; LID allocates per language, min 1 each); a SAD 0 validates on the train listing",
+        help="held-out validation slice (files; LID allocates per language, min 1 each for a positive size); 0 validates on the train listing",
     )
     parser.add_argument(
-        "--test-size", type=int, default=_default("test_size"), help="held-out test slice (files; LID: min 1 per language) the final metric is scored on"
+        "--test-size",
+        type=int,
+        default=_default("test_size"),
+        help="held-out test slice (files; LID: min 1 per language for a positive size; 0 scores nothing) the final metric is scored on",
     )
     parser.add_argument(
         "--minibatch",

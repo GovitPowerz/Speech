@@ -66,6 +66,30 @@ def test_stratified_splits_proportional_to_source_and_floors_rare_language() -> 
     assert per["tam"] >= 1, "a rare language must not vanish from the training split"
 
 
+def test_a_zero_held_out_size_is_an_empty_split_on_both_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #98: `valid_size=0` / `test_size=0` mean NO held-out split on either arm (the Modern
+    loop then validates on the train listing); the LID one-per-language floor applies to
+    positive sizes only. Before the fix a LID 0 was a 12-file split and a SAD 0 an empty one."""
+    recs = _records({"ara": 10, "chi": 10, "tam": 10})
+    _, valid, test = B.stratified_splits(recs, n_train=9, n_valid=0, n_test=0, seed=0)
+    assert valid == [] and test == []
+    _, valid, test = B.stratified_splits(recs, n_train=9, n_valid=1, n_test=2, seed=0)
+    assert len(valid) == 3 and len(test) == 3, "a positive size still keeps every language (min 1 each)"
+
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
+    p = B.prepare(_spec("lid-phseq", root, out, subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1))
+    assert p.splits.valid == [] and p.splits.test == [] and p.params.valid_listing is None
+
+    sad_root = tmp_path / "sad_corpus"
+    _sad_corpus_tree(sad_root, 20)
+    _fake_engine(
+        monkeypatch,
+        {"Algo_choice": "3", "BLSTM_NNetInputSize": "23", "fileslisting": "x", "language2classmapping": "y", "BLSTM_weightsFile": "s", "numOuterThreads": "1"},
+    )
+    q = B.prepare(_spec("sad", sad_root, tmp_path / "sad_out", subset=4, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1))
+    assert q.splits.valid == [] and q.splits.test == [] and q.params.valid_listing is None
+
+
 def test_stratified_splits_seed_sensitive() -> None:
     recs = _records({"ara": 100, "chi": 100})
     a = [r["filename"] for r in B.stratified_splits(recs, 40, 0, 0, seed=0)[0]]
@@ -319,11 +343,6 @@ def _stub_train(monkeypatch: pytest.MonkeyPatch, hook: Callable[[object, ModernT
     monkeypatch.setattr(B, "train_modern", train)
 
 
-def _stub_score(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace the LID arm's held-out scorer (the eval state it builds needs the real config)."""
-    monkeypatch.setattr(B.LidArm, "score", lambda self, prepared, packs, tag: B.Scores())
-
-
 _LID_FEATURES_FLAT: dict[str, str] = {
     "Algo_choice": "6",
     "BLSTM_NNetInputSize": "11",
@@ -418,7 +437,8 @@ def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple
     return root, tmp_path / "out"
 
 
-# A run with no held-out split: `run_baseline` trains (the stub) and records, and scores nothing.
+# A run with no held-out split (issue #98: a 0 is an empty split on both arms): `run_baseline`
+# trains (the stub) and records, and scores nothing, so no scorer is stubbed.
 _NO_TEST: dict[str, object] = dict(subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1)
 
 
@@ -448,7 +468,6 @@ def test_run_baseline_records_the_provenance_of_the_tree_it_started_on(tmp_path:
     tree = {"state": ("a" * 40, False)}
     monkeypatch.setattr(B, "git_state", lambda repo: tree["state"])
     _stub_train(monkeypatch, hook=lambda run, params: tree.__setitem__("state", ("b" * 40, True)))
-    _stub_score(monkeypatch)
 
     res = B.run_baseline(_spec("lid-phseq", root, out, **_NO_TEST))
     record = json.loads((out / "record.json").read_text())
@@ -480,7 +499,6 @@ def test_a_dry_run_writes_its_manifest_but_no_record(tmp_path: Path, monkeypatch
     a 1-step run cannot be promoted as a launcher row is for it to leave no `record.json`."""
     root, out = _stub_phseq_engine(tmp_path, monkeypatch)
     _stub_train(monkeypatch)
-    _stub_score(monkeypatch)
     B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, valid_size=0, test_size=0))
     assert (out / "run_metadata.json").is_file() and not (out / "record.json").exists()
     out2 = tmp_path / "out2"
@@ -495,7 +513,6 @@ def test_record_is_built_from_the_value_not_the_manifest(tmp_path: Path, monkeyp
     root, out = _stub_phseq_engine(tmp_path, monkeypatch)
     monkeypatch.setattr(B, "git_state", lambda repo: ("c" * 40, False))
     _stub_train(monkeypatch)
-    _stub_score(monkeypatch)
     res = B.run_baseline(_spec("lid-phseq", root, out, **_NO_TEST))
     res.metadata_path.unlink()
     rec = res.record("gate", test="tests/x.py::t")
@@ -504,8 +521,7 @@ def test_record_is_built_from_the_value_not_the_manifest(tmp_path: Path, monkeyp
     assert rec.payload.source == "gate" and rec.payload.test == "tests/x.py::t" and rec.payload.resumed is False
     assert rec.payload.val_metric == "nn_cost_seg" and rec.payload.config_hash == res.prepared.config_hash
     assert rec.payload.config_name == "configs/training/lre03_lid_phseq.toml"
-    splits = res.prepared.splits
-    assert (rec.payload.n_train, rec.payload.n_valid, rec.payload.n_test) == (len(splits.train), len(splits.valid), len(splits.test))
+    assert (rec.payload.n_train, rec.payload.n_valid, rec.payload.n_test) == (12, 0, 0)
     assert rec.payload.epochs_run == 1 and rec.payload.first_val_cost is None and rec.payload.best_val_cost == 1.0
     assert rec.payload.dcf is None and rec.payload.lid_error is None and rec.payload.init_lid_error is None
     assert str(root) not in rec.model_dump_json() and str(out) not in rec.model_dump_json()
@@ -528,7 +544,6 @@ def test_an_out_dir_holding_a_run_is_refused_unless_resuming(tmp_path: Path, mon
     root, out = _stub_phseq_engine(tmp_path, monkeypatch)
     trained: list[int] = []
     _stub_train(monkeypatch, hook=lambda run, params: trained.append(params.seed))
-    _stub_score(monkeypatch)
     B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, valid_size=0, test_size=0))
     assert trained == [0]
     with pytest.raises(FileExistsError, match="out_dir|resume"):
