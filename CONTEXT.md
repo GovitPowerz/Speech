@@ -96,6 +96,10 @@ _Avoid_: evaluation, pass, scoring run
 The flat f64 vector of a net's weights in the legacy order (forward, backward, output MLP, normalize tail), post-adim. A `.bin` is its file form.
 _Avoid_: checkpoint (a checkpoint is a directory of packs plus a history)
 
+**Checkpoint**:
+A directory of packs plus a history, as a value: `drivers/checkpoint.py::Checkpoint(dir, nets)` names the packs (`best_<net>.bin` / `last_<net>.bin`, the legacy `<net>_weights.bin`), writes and resumes the Modern loop's `train_history.json`, and `packs()` resolves a directory to one complete scheme, never a mix (issue #82). The Launcher takes it off the run (`ModernRun.checkpoint`).
+_Avoid_: checkpoint directory (as a bare path a caller joins file names onto)
+
 **Weight layout**:
 The ordered block list of a pack, computed by Rust from a config map through `speech_rs.weight_layout`; a block is (stack, layer, name, kind, shape, fan_in, fan_out, offset, len), shapes in row-major storage order, the LSTM peephole bundle alone carrying its 12 column names. Python draws per block kind off it and holds no offset arithmetic (issue #27).
 _Avoid_: offsets table, walk
@@ -240,7 +244,11 @@ The object behind one of the four from-scratch baseline trainings (`sad`, `sad-v
 The one typed declaration of a launcher run (`drivers/spec.py`): every CLI flag is a field, the defaults are its, an invalid run fails at construction, and its projection is the ledger recipe.
 
 **Launcher**:
-`python -m speech.drivers.baseline <arm>`, the CLI that builds a baseline spec and runs it.
+`python -m speech.drivers.baseline <arm>`, the CLI that builds a baseline spec and runs it: `prepare(spec).train()`, `score()`, `record()`.
+
+**Prepared run**:
+The run directory as a frozen value, `drivers/baseline.py::PreparedRun`, what `prepare(spec)` fixed before any engine exists: the spec as it runs, the arm, the splits, the Modern loop's input and params, the seed packs, the config text, the provenance of the tree the run started on, the manifest path. `train()` and `score()` read it; the ledger record is its projection, never a re-read of the manifest (issue #82).
+_Avoid_: run state (that is the Legacy regime's `RunState`)
 _Avoid_: experiment (for a run; `experiments/` names the runners' directory only)
 
 **Runner**:
