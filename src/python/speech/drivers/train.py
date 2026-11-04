@@ -38,14 +38,15 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
-from speech.drivers.state import EpochRecord, ModernTrainParams, ModernTrainResult, RunState, TrainResult
+from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
+from speech.drivers.state import ModernTrainParams, RunState, TrainResult
 from speech.engine import ChannelResults, CostParams, compute_cost, forward_backward
 from speech.fold_run import FoldRun
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
 from speech.optimizers import QpsoParams, QpsoResult, Smorms3, quantum_pso
 from speech.scoring import confusion_matrix, masking_validation
-from speech.weight_bridge import read_bin, write_bin
+from speech.weight_bridge import write_bin
 
 # Modern-loop hook types (Phase 5 Task 8): the engine-backed defaults are injectable so the
 # state machine is unit-testable against a stub -- see `train_modern`.
@@ -581,31 +582,6 @@ def train(
 # fully capture the trainable state, which is what makes resume-from-`last_*.bin` clean).
 
 
-def _net_names(algo: int) -> list[str]:
-    """The per-net checkpoint suffixes: `[sad]` for the single-net algos, `[sad, lid]` for
-    the algo-6 Twin (same net count as `_tail_lengths`)."""
-    return ["sad", "lid"] if algo == 6 else ["sad"]
-
-
-def _save_ckpt(ckpt_dir: Path, prefix: str, weights: list[NDArray[np.float64]], net_names: list[str]) -> None:
-    """Write one `<prefix>_<net>.bin` per net (the column-major `.bin` codec, same as
-    `train`'s `sad_weights.bin`)."""
-    for name, w in zip(net_names, weights, strict=True):
-        arr = np.asarray(w, dtype=F64)
-        write_bin(arr.shape[0], 1, arr, ckpt_dir / f"{prefix}_{name}.bin")
-
-
-def _resume(resume_from: Path, algo: int) -> tuple[list[NDArray[np.float64]], list[EpochRecord], float, int, int]:
-    """Reload the checkpoint written by a prior `train_modern`: the `last_<net>.bin` weights
-    + the `train_history.json` bookkeeping (history, best cost/epoch, epochs already run).
-    Returns `(weights, history, best_val, best_epoch, start_epoch)`; `start_epoch` is the
-    number of epochs already run, so the loop continues toward `params.epochs` (the TOTAL)."""
-    rd = Path(resume_from)
-    prev = ModernTrainResult.model_validate_json((rd / "train_history.json").read_text())
-    weights = [np.asarray(read_bin(rd / f"last_{name}.bin")[2], dtype=F64) for name in _net_names(algo)]
-    return weights, list(prev.history), prev.best_val_cost, prev.best_epoch, prev.epochs_run
-
-
 def _init_weights_from_scratch(state: RunState, params: ModernTrainParams) -> list[NDArray[np.float64]]:
     """Seeded Xavier/He init (Task 3) for each net's flat pack -- `[sad]` for single-net
     algos, `[sad, lid]` for the Twin. One shared `Generator(params.seed)` draws both nets in
@@ -736,13 +712,12 @@ def train_modern(
     Early-stop: after `patience` epochs with no strict improvement in `val_cost`, stop.
     `best_<net>.bin` holds the argmin-val_cost epoch's weights; `last_<net>.bin` the latest."""
     algo = state.ps.algo
-    net_names = _net_names(algo)
-    ckpt_dir = Path(state.out_dir) / "checkpoint"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = Checkpoint(Path(state.out_dir) / "checkpoint", net_names(algo))
+    ckpt.dir.mkdir(parents=True, exist_ok=True)
     workdir = Path(state.config_path).parent
 
     if params.resume_from is not None:
-        weights, history, best_val, best_epoch, start_epoch = _resume(Path(params.resume_from), algo)
+        weights, history, best_val, best_epoch, start_epoch = Checkpoint(Path(params.resume_from), ckpt.nets).resume()
     elif init_weights_override is not None:
         weights = [np.asarray(w, dtype=F64) for w in init_weights_override]
         history, best_val, best_epoch, start_epoch = [], float("inf"), -1, 0
@@ -762,9 +737,9 @@ def train_modern(
             epochs_run=len(history),
             stopped_early=stopped,
             history=history,
-            checkpoint_dir=str(ckpt_dir),
+            checkpoint_dir=str(ckpt.dir),
         )
-        (ckpt_dir / "train_history.json").write_text(res.model_dump_json(indent=2))
+        ckpt.write_history(res)
         return res
 
     stopped_early = False
@@ -772,11 +747,11 @@ def train_modern(
         weights, train_cost = train_epoch(weights, epoch)
         val_cost, conf_err = validate(weights, epoch)
 
-        _save_ckpt(ckpt_dir, "last", weights, net_names)
+        ckpt.save("last", weights)
         is_best = val_cost < best_val
         if is_best:
             best_val, best_epoch = val_cost, epoch
-            _save_ckpt(ckpt_dir, "best", weights, net_names)
+            ckpt.save("best", weights)
 
         history.append(EpochRecord(epoch=epoch, train_cost=float(train_cost), val_cost=float(val_cost), confusion_error=conf_err, is_best=is_best))
         _write_history(stopped=False)  # per-epoch, so a resume sees the latest bookkeeping

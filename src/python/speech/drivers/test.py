@@ -19,7 +19,6 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.drivers.state import RunState
-from speech.drivers.train import _net_names
 from speech.fold_run import FoldRun
 from speech.weight_bridge import read_weight_vector
 
@@ -66,27 +65,9 @@ def _class_keys(mapping_path: Path) -> list[str]:
     return sorted(keys)
 
 
-def resolve_checkpoint_packs(checkpoint: Path, algo: int) -> list[Path]:
-    """A checkpoint directory's weight packs, one per net (`[sad]`, or `[sad, lid]` for the
-    algo-6 Twin) -- what the `test` subcommand hands `evaluate`. Two writers, two naming
-    schemes: the legacy `train` driver writes `<net>_weights.bin`, `train_modern` writes
-    `best_<net>.bin` (its `last_<net>.bin` is a resume point, not a scoring checkpoint). A
-    scheme resolves only when it holds EVERY net, so a `[sad, lid]` pair is never assembled
-    from two different runs; the legacy scheme wins when both are complete. Raises
-    `FileNotFoundError` naming both accepted pack sets when neither is complete (#29: the old
-    `all(exists)` guard skipped `set_weights` and scored the config's seed pack in silence)."""
-    nets = _net_names(algo)
-    schemes = [[checkpoint / f"{net}_weights.bin" for net in nets], [checkpoint / f"best_{net}.bin" for net in nets]]
-    for packs in schemes:
-        if all(p.exists() for p in packs):
-            return packs
-    expected = " or ".join(" + ".join(p.name for p in packs) for packs in schemes)
-    raise FileNotFoundError(f"checkpoint {checkpoint} has no complete weight-pack set: expected {expected}")
-
-
 def evaluate(state: RunState, packs: Sequence[Path], scores_dir: Path | None = None) -> Path:
     """Score the corpus at `packs` (`[sad]`, or `[sad, lid]` for the Twin -- a checkpoint
-    directory resolves to them through `resolve_checkpoint_packs`) and write per-file `.scr`
+    directory resolves to them through `drivers/checkpoint.py::Checkpoint.packs`) and write per-file `.scr`
     outputs to `scores_dir` (default `<out_dir>/scores/`). Returns the scores directory.
 
     `scores_dir`: override the output directory (Task 8 review fix). Callers that
