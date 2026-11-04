@@ -38,7 +38,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
-from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult
+from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
 from speech.drivers.state import BALANCE_BACKPROP, ModernRun, ModernTrainParams, RunState, TrainResult, default_balance
 from speech.engine import ChannelResults, CostParams, compute_cost, forward_backward
 from speech.fold_run import FoldRun
@@ -105,7 +105,7 @@ def _eval_overlay(base: dict[str, str], ponds: list[str], algo: int) -> dict[str
 
 def _mapping_path(workdir: Path, cfg: Mapping[str, str]) -> Path:
     """Resolve the `language2classmapping` CSV path, like every other corpus path
-    (relative to the config's own dir)."""
+    (relative to `workdir`, the directory the run's path keys resolve against)."""
     return workdir / cfg["language2classmapping"]
 
 
@@ -552,10 +552,9 @@ def train(
     _final_cost, final_w, inner_hist = _score_fold(final_cfg, workdir, balance, algo, bbp, inner_steps, tails, final_batch)
 
     _write_qpso_checkpoint(ckpt_dir, result, inner_hist)
-    write_bin(final_w[0].shape[0], 1, final_w[0], ckpt_dir / "sad_weights.bin")
-    if len(final_w) >= 2:
-        # legacy: only the algo-6 Twin trains a second (LID) net -- BackPropagation.m:11-13.
-        write_bin(final_w[1].shape[0], 1, final_w[1], ckpt_dir / "lid_weights.bin")
+    # legacy: only the algo-6 Twin trains a second (LID) net -- BackPropagation.m:11-13.
+    for path, w in zip(Checkpoint(ckpt_dir, net_names(algo)).legacy(), final_w, strict=True):
+        write_bin(w.shape[0], 1, w, path)
 
     tr = TrainResult(
         gbest=[float(x) for x in result.gbest],

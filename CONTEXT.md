@@ -245,11 +245,11 @@ The one typed declaration of a launcher run (`drivers/spec.py`): every CLI flag 
 
 **Launcher**:
 `python -m speech.drivers.baseline <arm>`, the CLI that builds a baseline spec and runs it: `prepare(spec).train()`, `score()`, `record()`.
+_Avoid_: experiment (for a run; `experiments/` names the runners' directory only)
 
 **Prepared run**:
 The run directory as a frozen value, `drivers/baseline.py::PreparedRun`, what `prepare(spec)` fixed before any engine exists: the spec as it runs, the arm, the splits, the Modern loop's input and params, the seed packs, the config text, the provenance of the tree the run started on, the manifest path. `train()` and `score()` read it; the ledger record is its projection, never a re-read of the manifest (issue #82).
 _Avoid_: run state (that is the Legacy regime's `RunState`)
-_Avoid_: experiment (for a run; `experiments/` names the runners' directory only)
 
 **Runner**:
 A committed script under `experiments/` that fires one study, one launcher invocation per row with the row's recipe hard-coded, and promotes each record.

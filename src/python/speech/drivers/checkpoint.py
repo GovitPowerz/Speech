@@ -3,8 +3,9 @@
 CONTEXT.md: a checkpoint is a directory of packs plus a history. Two writers, two naming
 schemes: the legacy `train` driver writes `<net>_weights.bin`, the Modern loop writes
 `best_<net>.bin` / `last_<net>.bin` and `train_history.json`. This module is the one place
-those names exist; `packs()` is the resolver the `test` subcommand and the Launcher score
-through (issue #29: a scheme resolves only when it holds EVERY net, never a mix).
+those names exist; `packs()` is the resolver the `test` subcommand scores through (issue #29:
+a scheme resolves only when it holds EVERY net, never a mix), while the Launcher scores its
+own run's `best()` set.
 """
 
 from __future__ import annotations
@@ -71,6 +72,10 @@ class Checkpoint:
     def pack(self, tag: str, net: str) -> Path:
         return self.dir / f"{tag}_{net}.bin"
 
+    def legacy(self) -> list[Path]:
+        """The legacy `train` driver's packs, `<net>_weights.bin`."""
+        return [self.dir / f"{n}_weights.bin" for n in self.nets]
+
     def best(self) -> list[Path]:
         return [self.pack("best", n) for n in self.nets]
 
@@ -107,7 +112,7 @@ class Checkpoint:
         complete; a `[sad, lid]` pair is never assembled from two schemes. Raises
         `FileNotFoundError` naming both accepted sets when neither is complete (#29: the old
         `all(exists)` guard skipped `set_weights` and scored the config's seed pack in silence)."""
-        schemes = [[self.dir / f"{net}_weights.bin" for net in self.nets], self.best()]
+        schemes = [self.legacy(), self.best()]
         for packs in schemes:
             if all(p.exists() for p in packs):
                 return packs

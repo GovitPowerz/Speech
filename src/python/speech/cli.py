@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         retrain(state, args.checkpoint, args.seed, qpso_particles=args.particles, qpso_epochs=args.epochs, inner_steps=args.inner_steps)
         return 0
     if args.command == "test":
-        evaluate(state, Checkpoint(Path(args.checkpoint), net_names(state.ps.algo)).packs())
+        evaluate(state, Checkpoint(args.checkpoint, net_names(state.ps.algo)).packs())
         return 0
     return 1
 

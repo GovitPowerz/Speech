@@ -996,9 +996,22 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
     if not splits.train:
         raise ValueError(f"empty train split (valid={len(splits.valid)} test={len(splits.test)}): lower --valid-size/--test-size or raise --subset")
 
-    # --- 2. training params + config assembly + seed packs -------------------------------
-    # Built here so the seed-pack init is handed the SAME init_scheme/forget_bias_one the
-    # training call will use (Task 8 review fix).
+    # --- 2. config assembly + the Modern run + training params + seed packs ---------------
+    import speech_rs  # local: the pyo3 module is only needed on the engine path
+
+    flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
+    # EMPTY at the default lstm/bidirectional knobs, so `extra` -- and therefore the whole
+    # config text -- is byte-identical to a pre-phase-9 run.
+    extra = dict(cell_overlay(flat, spec.cell, spec.direction, prefix=arm.prefix))
+    if spec.audio_max_duration is not None:
+        extra["Audio_max_duration"] = str(spec.audio_max_duration)
+    cfg = arm.assemble(flat, splits, spec, extra)
+    # The loop's listing rows are the written listing read back, not `splits.train`: the writer
+    # normalizes the records (`weight` / `file_id` defaults), and the batch scheduler must see
+    # the rows the engine reads (what `RunState.from_parsed` used to read for it).
+    run = ModernRun(cfg=cfg, workdir=out_dir, out_dir=out_dir, listing=read_listing(out_dir / splits.train_name))
+    # Built before the seed packs so their init is handed the SAME init_scheme/forget_bias_one
+    # the training call will use (Task 8 review fix); a resume reads the run's own checkpoint.
     params = ModernTrainParams(
         epochs=spec.epochs,
         patience=spec.patience,
@@ -1011,26 +1024,12 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
         # LID mapping would never draw class 11 into a batch.
         init_scheme=spec.init_scheme,
         seed=spec.seed,
-        resume_from=str(out_dir / "checkpoint") if spec.resume else None,
+        resume_from=str(run.checkpoint.dir) if spec.resume else None,
     )
-
-    import speech_rs  # local: the pyo3 module is only needed on the engine path
-
-    flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
-    # EMPTY at the default lstm/bidirectional knobs, so `extra` -- and therefore the whole
-    # config text -- is byte-identical to a pre-phase-9 run.
-    extra = dict(cell_overlay(flat, spec.cell, spec.direction, prefix=arm.prefix))
-    if spec.audio_max_duration is not None:
-        extra["Audio_max_duration"] = str(spec.audio_max_duration)
-    cfg = arm.assemble(flat, splits, spec, extra)
     seed_packs = arm.seed_packs(cfg, out_dir, spec, params)
     config_text = _config_text(cfg)
     # The hashed artefact (and the eval state's config path, until #86); never re-read here.
     (out_dir / "base.config").write_text(config_text)
-    # The loop's listing rows are the written listing read back, not `splits.train`: the writer
-    # normalizes the records (`weight` / `file_id` defaults), and the batch scheduler must see
-    # the rows the engine reads (what `RunState.from_parsed` used to read for it).
-    run = ModernRun(cfg=cfg, workdir=out_dir, out_dir=out_dir, listing=read_listing(out_dir / splits.train_name))
 
     # --- 3. run metadata -----------------------------------------------------------------
     # The spec as it ran (after the dry-run clamp; the paths are local-only, like `corpus_root`)
@@ -1083,7 +1082,7 @@ def _log_scores(console: Console, scores: Scores, init_scores: Scores | None) ->
         if init_scores is not None and init_scores.lid_error is not None:
             console.log(f"init baseline: lid_error={init_scores.lid_error:.2f}% (improvement {init_scores.lid_error - scores.lid_error:+.2f}pt)")
     else:
-        console.log("held-out: no scores produced (empty test split)")
+        console.log("held-out: the test split produced no scores (no VRCTS hyp / .scr files)")
 
 
 def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> BaselineResult:

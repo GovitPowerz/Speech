@@ -4,9 +4,10 @@ catcher: CAUGHT pytest tests/test_checkpoint.py::test_packs_never_mixes_schemes
 diff --git a/src/python/speech/drivers/checkpoint.py b/src/python/speech/drivers/checkpoint.py
 --- a/src/python/speech/drivers/checkpoint.py
 +++ b/src/python/speech/drivers/checkpoint.py
-@@ -107,7 +107,7 @@ class Checkpoint:
+@@ -113,8 +113,8 @@
+         `FileNotFoundError` naming both accepted sets when neither is complete (#29: the old
          `all(exists)` guard skipped `set_weights` and scored the config's seed pack in silence)."""
-         schemes = [[self.dir / f"{net}_weights.bin" for net in self.nets], self.best()]
+         schemes = [self.legacy(), self.best()]
 -        for packs in schemes:
 -            if all(p.exists() for p in packs):
 -                return packs

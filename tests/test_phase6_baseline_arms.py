@@ -24,7 +24,10 @@ from speech.batching import create_batches, get_new_batch
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.drivers import baseline as B
 from speech.drivers.spec import ARM_CONFIG, LID_ARMS, SAD_ARMS, BaselineSpec
-from speech.drivers.state import ModernRun, ModernTrainParams, ModernTrainResult
+from speech.drivers.state import EpochRecord, ModernRun, ModernTrainParams, ModernTrainResult
+from speech.evaluate import CollarScore as EvalCollar
+from speech.evaluate import DcfReport
+from speech.ledger.schema import CollarScore
 
 # --------------------------------------------------------------------------------------- #
 # synthetic records
@@ -82,10 +85,7 @@ def test_a_zero_held_out_size_is_an_empty_split_on_both_arms(tmp_path: Path, mon
 
     sad_root = tmp_path / "sad_corpus"
     _sad_corpus_tree(sad_root, 20)
-    _fake_engine(
-        monkeypatch,
-        {"Algo_choice": "3", "BLSTM_NNetInputSize": "23", "fileslisting": "x", "language2classmapping": "y", "BLSTM_weightsFile": "s", "numOuterThreads": "1"},
-    )
+    _fake_engine(monkeypatch, _SAD_FLAT)
     q = B.prepare(_spec("sad", sad_root, tmp_path / "sad_out", subset=4, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1))
     assert q.splits.valid == [] and q.splits.test == [] and q.params.valid_listing is None
 
@@ -536,6 +536,62 @@ def test_record_is_built_from_the_value_not_the_manifest(tmp_path: Path, monkeyp
     res2 = B.run_baseline(_spec("lid-phseq", root, tmp_path / "out2", lre_listing=listing, **_NO_TEST))
     rec2 = res2.record("launcher")
     assert rec2.recipe.listing == B.listing_hash(listing) and str(listing) not in rec2.model_dump_json()
+
+
+_SAD_FLAT: dict[str, str] = {
+    "Algo_choice": "3",
+    "BLSTM_NNetInputSize": "23",
+    "fileslisting": "x",
+    "language2classmapping": "y",
+    "BLSTM_weightsFile": "s",
+    "numOuterThreads": "1",
+}
+
+
+def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #82: with a test split, the trained score is the run's `best()` set under
+    `score_trained`, the init score the seed packs under `score_init`, and the record projects
+    both DCF reports and the cost trajectory (the off-corpus pin of what the gates read)."""
+    root = tmp_path / "sad_corpus"
+    _sad_corpus_tree(root, 20)
+    _fake_engine(monkeypatch, _SAD_FLAT)
+    hist = [
+        EpochRecord(epoch=0, train_cost=0.9, val_cost=0.8, confusion_error=None, is_best=True),
+        EpochRecord(epoch=1, train_cost=0.7, val_cost=0.6, confusion_error=None, is_best=True),
+    ]
+    monkeypatch.setattr(
+        B,
+        "train_modern",
+        lambda run, params: ModernTrainResult(
+            best_epoch=1, best_val_cost=0.6, epochs_run=2, stopped_early=False, history=hist, checkpoint_dir=str(run.checkpoint.dir)
+        ),
+    )
+    reports = {
+        tag: DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=pfa, dcf=pfa / 4) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
+        for tag, pfa in (("score_trained", 0.4), ("score_init", 1.0))
+    }
+    seen: list[tuple[Path, str, int, str]] = []
+
+    def score(
+        base_cfg: dict[str, str], workdir: Path, pack: Path, dump_dir: Path, test_records: list[dict[str, str]], test_name: str
+    ) -> tuple[DcfReport, Path]:
+        seen.append((pack, dump_dir.name, len(test_records), test_name))
+        return reports[dump_dir.name], dump_dir
+
+    monkeypatch.setattr(B, "_score_sad_pack_on_test", score)
+    out = tmp_path / "out"
+    res = B.run_baseline(_spec("sad", root, out, subset=4, valid_size=0, test_size=2, epochs=2, steps_per_epoch=1, score_init=True))
+
+    assert seen == [
+        (out / "checkpoint" / "best_sad.bin", "score_trained", 2, "sad_test_subset.flst"),
+        (out / "sad_seed.bin", "score_init", 2, "sad_test_subset.flst"),
+    ]
+    assert res.dcf is reports["score_trained"] and res.init_dcf is reports["score_init"] and res.scores_dir == out / "score_trained"
+    p = res.record("launcher").payload
+    assert p.collar(0.5) == CollarScore(collar=0.5, dcf=0.1, pmiss=0.0, pfa=0.4)
+    assert p.init_dcf is not None and [c.dcf for c in p.init_dcf] == [0.25] * 5
+    assert (p.first_val_cost, p.best_val_cost, p.first_train_cost, p.last_train_cost) == (0.8, 0.6, 0.9, 0.7)
+    assert (p.n_train, p.n_valid, p.n_test, p.epochs_run, p.best_epoch) == (4, 0, 2, 2, 1)
 
 
 def test_an_out_dir_holding_a_run_is_refused_unless_resuming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
