@@ -681,7 +681,7 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
 
     # --- self-describing run: metadata + the dumped VRCTS hyps landed ---
     assert res.metadata_path.is_file()
-    assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.xml"))) == res.n_test
+    assert res.scores.results is not None and len(res.scores.results) == res.n_test
     assert wall < 600.0, f"{cell}/{direction} gate took {wall:.0f}s, over the 10 min budget"
     gate_record(res)
 

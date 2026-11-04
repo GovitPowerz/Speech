@@ -3,7 +3,7 @@
 THE flagship end-to-end proof: a stratified seeded subset of the LRE03 `.plp8f0mvsdd` cep
 features (File_Type 2) trains the 12-class Twin (Algo 6, Mode 7) FROM SCRATCH via
 `train_modern` (val_metric=nn_cost_seg), then the trained model is scored on a disjoint
-held-out slice end to end -- `drivers/test.py::evaluate` -> `.scr` -> `read_scr_scores` ->
+held-out slice end to end -- one fold over the test listing, `lid_scores` / `lid_target` ->
 `lid_error` + `cavg` (Task 5). These are the phase's FIRST real headline numbers.
 
 WHY THE IMPROVEMENT SIGNAL IS ARGMAX ERROR, NOT THE CE VALIDATION COST (a Task-8 finding):
@@ -85,7 +85,7 @@ def test_lid_features_subset_trains_and_scores(tmp_path: Path, gate_record: Gate
     # --- the run is self-describing: metadata + both checkpoints + the .scr scores landed ---
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_lid.bin").is_file() and (res.checkpoint_dir / "best_sad.bin").is_file()
-    assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.scr"))) == res.n_test
+    assert res.scores.results is not None and len(res.scores.results) == res.n_test
     gate_record(res)
 
 
@@ -184,7 +184,7 @@ def test_sad_subset_trains_and_scores(tmp_path: Path, gate_record: GateRecorder)
     # --- self-describing run: metadata + checkpoint + the dumped VRCTS hyps landed ---
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_sad.bin").is_file() and (res.checkpoint_dir / "last_sad.bin").is_file()
-    assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.xml"))) == res.n_test
+    assert res.scores.results is not None and len(res.scores.results) == res.n_test
     gate_record(res)
 
 
@@ -304,7 +304,7 @@ def test_lid_phseq_subset_trains_and_scores(tmp_path: Path, gate_record: GateRec
     # --- the run is self-describing: metadata + both checkpoints + the .scr scores landed ---
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_lid.bin").is_file() and (res.checkpoint_dir / "best_sad.bin").is_file()
-    assert res.scores_dir is not None and len(list(res.scores_dir.glob("*.scr"))) == res.n_test
+    assert res.scores.results is not None and len(res.scores.results) == res.n_test
     gate_record(res)
 
 

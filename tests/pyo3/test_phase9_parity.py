@@ -84,6 +84,7 @@ from speech.batching import read_listing  # noqa: E402 -- after importorskip, ma
 from speech.config_bridge import parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import BaselineSpec  # noqa: E402
+from speech.engine import ChannelResults  # noqa: E402
 from speech.evaluate import load_vrcts_hyp  # noqa: E402
 from speech.weight_bridge import read_weight_vector  # noqa: E402
 
@@ -592,16 +593,11 @@ def test_causality_cost_dcf_on_corpus(cell: str) -> None:
     frozen_cfg = _inference_cfg(arm, _frozen_overlay(gain))
 
     t0 = time.time()
-    native_rep, _ = B._score_sad_pack_on_test(
-        native_cfg, arm.out_dir, arm.ckpt / "best_sad.bin", arm.out_dir / f"_t9_cc_native_{cell}", arm.test_records, arm.test_listing.name
-    )
+    native_rep = B._sad_dcf(B._score_fold(native_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
     native_s = time.time() - t0
     t0 = time.time()
-    frozen_rep, _ = B._score_sad_pack_on_test(
-        frozen_cfg, arm.out_dir, arm.ckpt / "best_sad.bin", arm.out_dir / f"_t9_cc_frozen_{cell}", arm.test_records, arm.test_listing.name
-    )
+    frozen_rep = B._sad_dcf(B._score_fold(frozen_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
     frozen_s = time.time() - t0
-    assert native_rep is not None and frozen_rep is not None, f"{cell}: both regimes must produce held-out VRCTS hyps"
 
     native_dcf = {c: native_rep.by_collar(c).dcf for c in _COLLARS}
     frozen_dcf = {c: frozen_rep.by_collar(c).dcf for c in _COLLARS}
@@ -624,24 +620,19 @@ def test_causality_cost_dcf_on_corpus(cell: str) -> None:
 # ======================================================================================= #
 
 
-def _score_causal(arm: _CausalArm, inference_path: str) -> tuple[B.DcfReport, Path]:
+def _score_causal(arm: _CausalArm, inference_path: str) -> tuple[B.DcfReport, ChannelResults]:
     """Score the trained causal pack on the held-out slice under `inference_path`, in the
     arm's NATIVE config (type -1, `BLSTM_window 0`, no fixed gain) -- so exact and fast
-    configs are identical except `Inference_Path` and the per-path `Dump_Directory`
-    `_score_sad_pack_on_test` writes its VRCTS hyps into (a write TARGET, read by nothing in the
-    compute path, and necessarily distinct or the two runs would clobber each other's output), so
-    the comparison isolates the f32 causal kernels.
-    `_score_sad_pack_on_test` `set_weights`-injects the same pack on both paths (redundant:
-    the config repoint already did it; on fast since issue #62)."""
+    configs are identical except `Inference_Path`, and the comparison isolates the f32
+    causal kernels. The Launcher's `_score_fold` `set_weights`-injects the same pack on both
+    paths (redundant: the config repoint already did it; on fast since issue #62); the rows
+    carry the decided boundaries (issue #86)."""
     cfg = _inference_cfg(arm, {"Inference_Path": inference_path})
-    dump_dir = arm.out_dir / f"_t9_par_{inference_path}"
-    if dump_dir.exists():
-        shutil.rmtree(dump_dir)
     t0 = time.time()
-    report, dump = B._score_sad_pack_on_test(cfg, arm.out_dir, arm.ckpt / "best_sad.bin", dump_dir, arm.test_records, arm.test_listing.name)
+    res = B._score_fold(cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name)
     arm.timings[f"score_{inference_path}_s"] = time.time() - t0
-    assert report is not None, f"{arm.cell}/{inference_path}: no VRCTS hyps produced (empty held-out slice)"
-    return report, dump
+    assert len(res) > 0, f"{arm.cell}/{inference_path}: nothing scored (empty held-out slice)"
+    return B._sad_dcf(res, arm.test_records), res
 
 
 @pytest.mark.slow
@@ -649,34 +640,27 @@ def _score_causal(arm: _CausalArm, inference_path: str) -> tuple[B.DcfReport, Pa
 @pytest.mark.parametrize("cell", _CELLS)
 def test_causal_fast_vs_exact_metric_parity(cell: str) -> None:
     """The phase-7 SAD metric-parity leg, on the phase-9 CAUSAL cells: the T8 checkpoint
-    scored on its own held-out slice under `Inference_Path exact` vs `fast`. Per-file VRCTS
-    boundaries IDENTICAL (count + types + times); pooled DCF delta EXACTLY 0.0 at every
-    collar. The exact-path DCF@0.5 is additionally pinned against T8's own gate number -- the
-    checkpoint-provenance guard (see `_EXPECTED_EXACT_DCF_AT_0_5`).
-
-    `n_scored` counts files that produced a hyp xml on BOTH paths; it is a SCORED-file count,
-    not an assertion that every `test_records` entry was covered (the coverage gate is
-    `n_scored > 0`) -- the phase-7 T11 note, verbatim."""
+    scored on its own held-out slice under `Inference_Path exact` vs `fast`. Per-file
+    boundaries IDENTICAL (count + classes + times, the raw `hypothesis` rows, issue #86);
+    pooled DCF delta EXACTLY 0.0 at every collar. The exact-path DCF@0.5 is additionally
+    pinned against T8's own gate number -- the checkpoint-provenance guard (see
+    `_EXPECTED_EXACT_DCF_AT_0_5`). `n_scored` is the row count: every held-out file scored
+    on both paths."""
     arm = _ensure_causal_arm(cell)
-    rep_e, dump_e = _score_causal(arm, "exact")
-    rep_f, dump_f = _score_causal(arm, "fast")
+    rep_e, r_e = _score_causal(arm, "exact")
+    rep_f, r_f = _score_causal(arm, "fast")
 
-    n_scored = 0
+    assert np.array_equal(r_e.file, r_f.file) and np.array_equal(r_e.chan, r_f.chan), f"{cell}: fast/exact scored different rows"
+    n_scored = len(r_e)
     type_or_count_disagree = 0
     max_dt = 0.0
-    for rec in arm.test_records:
-        xe = B._hyp_xml_for(rec["filename"], dump_e)
-        xf = B._hyp_xml_for(rec["filename"], dump_f)
-        if not (xe.is_file() and xf.is_file()):
-            continue
-        ie = load_vrcts_hyp(xe)
-        if_ = load_vrcts_hyp(xf)
-        n_scored += 1
-        if [k for _, _, k in ie] != [k for _, _, k in if_]:
+    for (dur_e, rows_e), (dur_f, rows_f) in zip(r_e.hypothesis, r_f.hypothesis, strict=True):
+        max_dt = max(max_dt, abs(dur_e - dur_f))
+        if [c for _, c in rows_e] != [c for _, c in rows_f]:
             type_or_count_disagree += 1
             continue
-        for (se, ee, _), (sf, ef, _) in zip(ie, if_, strict=True):
-            max_dt = max(max_dt, abs(se - sf), abs(ee - ef))
+        for (be, _), (bf, _) in zip(rows_e, rows_f, strict=True):
+            max_dt = max(max_dt, abs(be - bf))
 
     dcf_deltas = {c: abs(rep_f.by_collar(c).dcf - rep_e.by_collar(c).dcf) for c in _COLLARS}
     print(
@@ -693,7 +677,7 @@ def test_causal_fast_vs_exact_metric_parity(cell: str) -> None:
     assert round(exact_dcf, 6) == expected, f"{cell}: exact-path DCF@0.5={exact_dcf:.6f} != T8-pinned {expected} (stale/mismatched checkpoint cache?)"
 
     # (R1 drift detector): identical decisions, EXACTLY-0.0 metric delta. STOP on any move.
-    assert n_scored > 0, f"{cell}: no held-out hyp xmls to compare"
+    assert n_scored > 0, f"{cell}: no held-out rows to compare"
     assert type_or_count_disagree == 0, f"{cell}: {type_or_count_disagree}/{n_scored} files differ in segment count/types fast-vs-exact"
     assert max_dt == 0.0, f"{cell}: boundary times moved fast-vs-exact (max_dt={max_dt:.3e}s)"
     for c in _COLLARS:

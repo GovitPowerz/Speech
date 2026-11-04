@@ -12,7 +12,8 @@ the metric deltas are EXACTLY 0.0. This file asserts that hard:
   - LID (features + phSeq): per-file argmax IDENTICAL fast-vs-exact (the drift detector);
     `lid_error` and `cavg` deltas EXACTLY 0.0 (both are argmax-only functions -- softmax is
     monotone -- so identical argmax => bit-identical metric, `evaluate.py` docstrings).
-  - SAD: per-file VRCTS hypothesis boundaries IDENTICAL (count + types + times); the pooled
+  - SAD: per-file hypothesis boundaries IDENTICAL (count + types + times, read off the fold
+    result's `hypothesis` rows, issue #86); the pooled
     held-out DCF delta EXACTLY 0.0 at every collar (identical boundaries => identical DCF).
 The score/posterior VALUES still differ by the f32 tolerance (reported as a diagnostic); it
 is the DECISIONS that must not move. If a genuine divergence ever appears, the R1 discipline
@@ -53,9 +54,8 @@ from speech.batching import read_listing  # noqa: E402 -- after importorskip, ma
 from speech.config_bridge import parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import BaselineSpec  # noqa: E402
-from speech.drivers.state import RunState  # noqa: E402
-from speech.drivers.test import _class_keys  # noqa: E402
-from speech.evaluate import load_vrcts_hyp, read_scr_scores  # noqa: E402
+from speech.engine import ChannelResults  # noqa: E402
+from speech.evaluate import cavg, lid_error  # noqa: E402
 
 # The five DCF collars the SAD arm pools over (baseline._DCF_COLLARS).
 _COLLARS: tuple[float, ...] = B._DCF_COLLARS
@@ -160,7 +160,7 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
     `BagOfProcessors::set_weights` was a SILENT NO-OP on them, then a loud bail (T6b) -- the
     seam would otherwise have scored the config's SEED weights while exact scored the
     injected TRAINED ones, a 100%-divergence artefact, NOT a real parity failure. Since
-    issue #62 `evaluate()`/`_score_packs_on_test`/`_score_sad_pack_on_test` inject through
+    issue #62 `evaluate()` and the Launcher's `_score_fold` inject through
     `fold_run.FoldRun`'s `set_weights` on both paths (a fast processor rebuilds its net from
     the pack), so the repoint is redundant with the fold run and kept for the
     apples-to-apples config: loading trained weights from the config is how a real fast
@@ -186,32 +186,27 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
 # --------------------------------------------------------------------------------------- #
 
 
-def _score_lid(a: _Arm, inference_path: str, tag: str) -> tuple[float, float, np.ndarray, list[str]]:
+def _score_lid(a: _Arm, inference_path: str, tag: str) -> tuple[float, float, ChannelResults]:
     """Score the `[best_sad, best_lid]` checkpoint on the held-out slice under `inference_path`
-    (`exact`/`fast`) end to end via baseline's own `_score_packs_on_test` (-> `.scr` ->
-    `lid_error`/`cavg`), then read the `.scr` scores back for the per-file argmax."""
+    (`exact`/`fast`) through the Launcher's own `_score_fold` (one fold, the metrics off
+    `lid_scores` / `lid_target`, issue #86); the rows carry the per-file argmax."""
     eval_config = _eval_config(a, inference_path, tag, twin=True)
-    eval_state = RunState.from_config(eval_config, a.out_dir)
-    score_dir = a.out_dir / f"parity_lid_{tag}"
-    if score_dir.exists():
-        shutil.rmtree(score_dir)
+    cfg = dict(parse_legacy_config(eval_config.read_text()))
     t0 = time.time()
-    lid_err, cavg_val, scores_dir = B._score_packs_on_test(eval_state, a.ckpt / "best_sad.bin", a.ckpt / "best_lid.bin", score_dir, a.test_records)
+    res = B._score_fold(cfg, a.out_dir, [a.ckpt / "best_sad.bin", a.ckpt / "best_lid.bin"], a.test_listing.name)
     a.timings[f"score_{tag}_s"] = time.time() - t0
-    assert lid_err is not None and cavg_val is not None, f"{a.arm}/{tag}: no .scr scores produced (empty held-out slice)"
-
-    keys = _class_keys(a.out_dir / eval_state.base_config["language2classmapping"])
-    scores, files = read_scr_scores(scores_dir, keys)
-    return lid_err, cavg_val, scores, files
+    assert len(res) > 0, f"{a.arm}/{tag}: nothing scored (empty held-out slice)"
+    return lid_error(res.lid_scores, res.lid_target), cavg(res.lid_scores, res.lid_target), res
 
 
 def _run_lid_parity(arm: str) -> None:
     a = _ensure_arm(arm)
-    err_e, cavg_e, sc_e, files_e = _score_lid(a, "exact", "exact")
-    err_f, cavg_f, sc_f, files_f = _score_lid(a, "fast", "fast")
+    err_e, cavg_e, r_e = _score_lid(a, "exact", "exact")
+    err_f, cavg_f, r_f = _score_lid(a, "fast", "fast")
 
-    # Same held-out file set, same sorted order (read_scr_scores sorts by glob).
-    assert files_e == files_f, f"{arm}: fast/exact scored different files ({len(files_e)} vs {len(files_f)})"
+    # Same held-out file set, same listing order (the rows are the listing's).
+    assert np.array_equal(r_e.file, r_f.file), f"{arm}: fast/exact scored different files ({len(r_e)} vs {len(r_f)})"
+    sc_e, sc_f = r_e.lid_scores, r_f.lid_scores
 
     argmax_e = sc_e.argmax(axis=1)
     argmax_f = sc_f.argmax(axis=1)
@@ -219,7 +214,7 @@ def _run_lid_parity(arm: str) -> None:
     score_max_abs = float(np.max(np.abs(sc_e - sc_f))) if sc_e.size else 0.0
 
     print(
-        f"\n[PARITY {arm}] files={len(files_e)} argmax_disagree={len(disagree)} "
+        f"\n[PARITY {arm}] files={len(r_e)} argmax_disagree={len(disagree)} "
         f"score_max_abs={score_max_abs:.3e} lid_error exact={err_e:.4f} fast={err_f:.4f} "
         f"d={abs(err_f - err_e):.3e} cavg exact={cavg_e:.6f} fast={cavg_f:.6f} d={abs(cavg_f - cavg_e):.3e} "
         f"train_s={a.train_s:.1f} (cold={a.trained_now}) score_exact_s={a.timings.get('score_exact_s', 0):.2f} "
@@ -235,7 +230,7 @@ def _run_lid_parity(arm: str) -> None:
 
     # HARD (R1 drift detector): identical per-file argmax fast-vs-exact. If this ever fails,
     # STOP and adjudicate with the printed disagree count + files -- do NOT widen.
-    assert len(disagree) == 0, f"{arm}: {len(disagree)} of {len(files_e)} files flipped argmax fast-vs-exact (indices {disagree.tolist()[:20]})"
+    assert len(disagree) == 0, f"{arm}: {len(disagree)} of {len(r_e)} files flipped argmax fast-vs-exact (indices {disagree.tolist()[:20]})"
 
     # Identical argmax => bit-identical argmax-only metrics: EXACTLY 0.0 delta (the prediction).
     assert err_f == err_e, f"{arm}: lid_error moved {err_e} -> {err_f} despite identical argmax"
@@ -259,66 +254,53 @@ def test_lid_phseq_metric_parity() -> None:
 
 
 # --------------------------------------------------------------------------------------- #
-# SAD arm (algo-3 spectral): score the checkpoint under both paths, compare VRCTS boundaries
+# SAD arm (algo-3 spectral): score the checkpoint under both paths, compare the boundaries
 # --------------------------------------------------------------------------------------- #
 
 
-def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, Path]:
+def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, ChannelResults]:
     """Score the `best_sad` checkpoint on the held-out slice under `inference_path` end to
-    end via baseline's own `_score_sad_pack_on_test` (engine dumps one VRCTS hyp xml/file ->
-    pooled `dcf` over the windowed `.part.xml` refs). Returns the pooled DcfReport + the dump
-    dir (the per-file hyp xmls, for the boundary comparison)."""
+    end through the Launcher's own `_score_fold` + `_sad_dcf` (one fold, the decided
+    segmentation off the fold result's `hypothesis` rows, pooled `dcf` over the windowed
+    `.part.xml` refs, issue #86). Returns the pooled DcfReport + the rows (the per-file
+    boundaries, for the comparison)."""
     cfg = dict(parse_legacy_config(a.base_config.read_text()))
     # Point the weight-file key at the TRAINED checkpoint so the base config itself names the
-    # net under test on both paths. `_score_sad_pack_on_test`'s fold run injects the same
-    # pack again through `set_weights` on both paths (issue #62), so this repoint is redundant
-    # with the fold run and kept so the config is the same apples-to-apples file
-    # `_eval_config` builds for the LID arms.
+    # net under test on both paths. `_score_fold` injects the same pack again through
+    # `set_weights` on both paths (issue #62), so this repoint is redundant with the fold run
+    # and kept so the config is the same apples-to-apples file `_eval_config` builds for the
+    # LID arms.
     cfg["BLSTM_weightsFile"] = str((a.ckpt / "best_sad.bin").resolve())
     cfg["Inference_Path"] = inference_path
-    dump_dir = a.out_dir / f"parity_sad_{tag}"
-    if dump_dir.exists():
-        shutil.rmtree(dump_dir)
     t0 = time.time()
-    report, dump = B._score_sad_pack_on_test(cfg, a.out_dir, a.ckpt / "best_sad.bin", dump_dir, a.test_records, a.test_listing.name)
+    res = B._score_fold(cfg, a.out_dir, [a.ckpt / "best_sad.bin"], a.test_listing.name)
     a.timings[f"score_{tag}_s"] = time.time() - t0
-    assert report is not None, f"{a.arm}/{tag}: no VRCTS hyps produced (empty held-out slice)"
-    return report, dump
+    assert len(res) > 0, f"{a.arm}/{tag}: nothing scored (empty held-out slice)"
+    return B._sad_dcf(res, a.test_records), res
 
 
 @pytest.mark.slow
 @requires_corpus
 def test_sad_metric_parity() -> None:
     """SAD (algo-3 spectral, File_Type 0 wav): fast vs exact on the phase-6 subset checkpoint.
-    Per-file VRCTS boundaries IDENTICAL (count + types + times); pooled DCF delta EXACTLY 0.0
-    at every collar.
-
-    T11 note: `n_scored` counts files that produced a hyp xml on BOTH paths (a file missing
-    a hyp on either path is skipped via `continue`); it is a SCORED-file count, not an
-    assertion that every `test_records` entry was covered -- the only coverage gate is
-    `n_scored > 0`."""
+    Per-file boundaries IDENTICAL (count + classes + times, the raw `hypothesis` rows, no
+    4-decimal print in between); pooled DCF delta EXACTLY 0.0 at every collar. `n_scored` is
+    the row count, every held-out file scored on both paths."""
     a = _ensure_arm("sad")
-    rep_e, dump_e = _score_sad(a, "exact", "exact")
-    rep_f, dump_f = _score_sad(a, "fast", "fast")
+    rep_e, r_e = _score_sad(a, "exact", "exact")
+    rep_f, r_f = _score_sad(a, "fast", "fast")
 
-    n_scored = 0
+    assert np.array_equal(r_e.file, r_f.file) and np.array_equal(r_e.chan, r_f.chan), "sad: fast/exact scored different rows"
+    n_scored = len(r_e)
     type_or_count_disagree = 0
     max_dt = 0.0
-    for rec in a.test_records:
-        xe = B._hyp_xml_for(rec["filename"], dump_e)
-        xf = B._hyp_xml_for(rec["filename"], dump_f)
-        if not (xe.is_file() and xf.is_file()):
-            continue
-        ie = load_vrcts_hyp(xe)
-        if_ = load_vrcts_hyp(xf)
-        n_scored += 1
-        kinds_e = [k for _, _, k in ie]
-        kinds_f = [k for _, _, k in if_]
-        if kinds_e != kinds_f:
+    for (dur_e, rows_e), (dur_f, rows_f) in zip(r_e.hypothesis, r_f.hypothesis, strict=True):
+        max_dt = max(max_dt, abs(dur_e - dur_f))
+        if [c for _, c in rows_e] != [c for _, c in rows_f]:
             type_or_count_disagree += 1
             continue
-        for (se, ee, _), (sf, ef, _) in zip(ie, if_, strict=True):
-            max_dt = max(max_dt, abs(se - sf), abs(ee - ef))
+        for (be, _), (bf, _) in zip(rows_e, rows_f, strict=True):
+            max_dt = max(max_dt, abs(be - bf))
 
     dcf_deltas = {c: abs(rep_f.by_collar(c).dcf - rep_e.by_collar(c).dcf) for c in _COLLARS}
     print(
@@ -340,7 +322,7 @@ def test_sad_metric_parity() -> None:
 
     # HARD (R1 drift detector): identical per-file segment count+types, identical boundary
     # times, EXACTLY-0.0 pooled DCF delta at every collar. If any ever moves, STOP + adjudicate.
-    assert n_scored > 0, "sad: no held-out hyp xmls to compare"
+    assert n_scored > 0, "sad: no held-out rows to compare"
     assert type_or_count_disagree == 0, f"sad: {type_or_count_disagree}/{n_scored} files differ in segment count/types fast-vs-exact"
     assert max_dt == 0.0, f"sad: boundary times moved fast-vs-exact (max_dt={max_dt:.3e}s)"
     for c in _COLLARS:

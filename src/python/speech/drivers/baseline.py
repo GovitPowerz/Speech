@@ -45,9 +45,10 @@ segmenter; `train_modern` descends the NNCostSeg objective (SAD = NNCostSeg alon
 single-net). The listings come from `dataprep.lre.derive_sad_listings` (the seeded 70/15/15
 split of the 2066 wav+xml pairs); the references are the corpus `.part.xml` VRCTS files
 (routed through the engine's `.xml` reference dispatch, Task 2b). The held-out slice is
-scored end to end with the T4 DCF harness: the engine dumps one VRCTS hypothesis xml per
-test file (`Dump_Directory`), those are read back via `evaluate.load_vrcts_hyp`, the
-`.part.xml` references via `evaluate.load_vrcts_ref` (windowed to the capped-audio span),
+scored end to end with the T4 DCF harness: one forward-only fold over the test listing, the
+engine's decided segmentation read off its channel results (`evaluate.hyp_intervals`, issue
+#86; the VRCTS dump it replaced is reproduced at the same quantum), the `.part.xml`
+references via `evaluate.load_vrcts_ref` (windowed to the capped-audio span),
 and pooled through `evaluate.dcf` -> the first real DCF numbers (trained vs its own
 from-scratch init). The corpus wavs are 576-1800 s CallFriend recordings (median ~600 s), so
 `Audio_max_duration` caps them; the reference is windowed to the same span (matching the engine's own
@@ -84,7 +85,7 @@ import hashlib
 import json
 import time
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
@@ -97,9 +98,10 @@ from speech.batching import read_listing
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
 from speech.drivers.spec import ARM_CONFIG, BaselineSpec, listing_hash
-from speech.drivers.state import ModernRun, ModernTrainParams, ModernTrainResult, RunState
+from speech.drivers.state import ModernRun, ModernTrainParams, ModernTrainResult
 from speech.drivers.train import train_modern
-from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
+from speech.engine import ChannelResults
+from speech.evaluate import DcfReport, Interval, cavg, dcf, hyp_intervals, lid_error, load_vrcts_ref
 from speech.fold_run import FoldRun, _config_text
 from speech.init_weights import Scheme, init_weights
 from speech.ledger.schema import Arm, BaselinePayload, BaselineRecord, git_state, host_info, now_utc, seam_build_info, write_record
@@ -120,8 +122,8 @@ _SPEECH_STM = "s 1 s 0.0 100000 speech seg\n"
 
 # The 12 LRE03 languages the mapping/head cover (dialect fixed "non"), alphabetical -- the
 # order `dataprep.lre.write_lre_mapping` + `drivers/test.py::_class_keys` both use, so the
-# mapping's class ids, the engine's lang_index, the `.scr` columns, and the argmax refs all
-# share one index base.
+# mapping's class ids, the engine's lang_index (`lid_target`) and the score columns all share
+# one index base.
 _LANGS: tuple[str, ...] = tuple(sorted(LRE03_LANGUAGES))
 _CLASS_OF: dict[str, int] = {lang: i for i, lang in enumerate(_LANGS)}
 
@@ -440,58 +442,24 @@ def write_sad_mapping(path: Path) -> None:
 
 
 # --------------------------------------------------------------------------------------- #
-# Scoring (delegates to evaluate.py's .scr writer + the Task-5 LID metrics)
+# Scoring: one forward-only fold on the held-out listing, the metrics read off its results
 # --------------------------------------------------------------------------------------- #
 
 
-def _score_packs_on_test(
-    eval_state: RunState,
-    sad_pack: Path,
-    lid_pack: Path,
-    score_dir: Path,
-    test_records: Sequence[dict[str, str]],
-) -> tuple[float | None, float | None, Path]:
-    """Score one `[sad, lid]` weight-pack pair on the held-out test split end to end:
-    `evaluate` -> per-file `.scr` -> `read_scr_scores` -> `lid_error` + `cavg`. `evaluate`
-    takes the packs themselves (a trained `best_<net>.bin` pair or the untrained
-    `<net>_seed.bin` pair alike), so the SAME scorer measures both the trained model and its
-    own from-scratch init on the identical test set (the direction-safe improvement).
-
-    Returns `(lid_error_pct, cavg, scores_dir)`; the metrics are `None` only if the test
-    split produced no `.scr` files (a structurally empty held-out set)."""
-    from speech.drivers.test import _class_keys, evaluate
-
-    # Nested under score_dir (already distinct per pass -- "score_trained" vs "score_init")
-    # so the trained and init `.scr` outputs never share one directory (Task 8 review fix:
-    # `evaluate`'s default output dir is fixed per `eval_state`, so two calls against the
-    # SAME eval_state used to clobber each other's `.scr` files on disk).
-    scores_dir = evaluate(eval_state, [sad_pack, lid_pack], scores_dir=score_dir / "scores")
-
-    mapping_path = Path(eval_state.config_path).parent / eval_state.base_config["language2classmapping"]
-    class_keys = _class_keys(mapping_path)
-    scores, files = read_scr_scores(scores_dir, class_keys)
-    if scores.shape[0] == 0:
-        return None, None, scores_dir
-
-    # Align each scored file (`.scr` stem = the cep basename) to its true class via the test
-    # records, so `refs[i]` shares the alphabetical class base with the score columns.
-    lang_by_name = {Path(r["filename"]).name: r["lang"] for r in test_records}
-    refs = np.array([_CLASS_OF[lang_by_name[f]] for f in files], dtype=np.int_)
-    return lid_error(scores, refs), cavg(scores, refs), scores_dir
+def _score_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_listing_name: str) -> ChannelResults:
+    """One forward-only `FoldRun` over the held-out listing at `packs` (a trained `best_<net>`
+    set or the untrained `<net>_seed` set alike, injected through `set_weights` on either
+    `Inference_Path`, issue #62), returning its config-0 channel results: the SAME scorer
+    measures the trained model and its own from-scratch init on the identical test set (the
+    direction-safe improvement). Nothing is written and nothing is read back (issue #86): the
+    LID metrics come off `lid_scores` / `lid_target`, the SAD DCF off `hypothesis`."""
+    nets = [read_weight_vector(p) for p in packs]
+    return FoldRun(cfg, workdir, backprop=False, listing=test_listing_name).run(nets).results.for_config(0)
 
 
 # --------------------------------------------------------------------------------------- #
-# SAD scoring: the engine's VRCTS hyp dumps vs the xml-derived refs -> the T4 DCF harness
+# SAD scoring: the engine's decided segmentation vs the xml-derived refs -> the T4 DCF harness
 # --------------------------------------------------------------------------------------- #
-
-
-def _hyp_xml_for(wav_filename: str, dump_dir: Path) -> Path:
-    """The VRCTS hypothesis xml the engine writes for `wav_filename` under `dump_dir`. The
-    engine's dump target is the audio basename with its 4-char extension stripped, then
-    `.xml` (`bag_of_processors.rs::base_from_last_slash` -> `strip_last_4`; the corpus is
-    mono so there is no `_chan_<n>` fan-out). `[:-4]` mirrors `strip_last_4` exactly (drop
-    the last 4 chars of `.wav`), so `zz_0000_a.MT1.mp1.wav -> zz_0000_a.MT1.mp1.xml`."""
-    return dump_dir / (Path(wav_filename).name[:-4] + ".xml")
 
 
 def _windowed_vrcts_ref(ref_xml: Path, end: float) -> list[Interval]:
@@ -520,7 +488,7 @@ def _pool_dcf(pairs: Sequence[tuple[list[Interval], list[Interval]]], collars: S
     intervals are offset by the running sum of the preceding files' spans, then scored with a
     single `dcf` call (the duration-weighted pooled DCF -- the single-number analogue of the
     LID arm's pooled argmax error). Contiguity holds because every `_windowed_vrcts_ref` +
-    `load_vrcts_hyp` pair spans exactly `[0, span]` and starts at 0, so file i+1 begins where
+    `hyp_intervals` pair spans exactly `[0, span]` and starts at 0, so file i+1 begins where
     file i ended -- no gap for `dcf`'s reference walk to reject. The only cross-file artifact
     is that a collar may straddle a file boundary, a negligible fraction of a multi-file
     timeline and identical across the trained/init passes (so the direction is unaffected)."""
@@ -535,44 +503,19 @@ def _pool_dcf(pairs: Sequence[tuple[list[Interval], list[Interval]]], collars: S
     return dcf(all_ref, all_hyp, collars)
 
 
-def _score_sad_pack_on_test(
-    base_cfg: dict[str, str],
-    workdir: Path,
-    pack_path: Path,
-    dump_dir: Path,
-    test_records: Sequence[dict[str, str]],
-    test_listing_name: str,
-) -> tuple[DcfReport | None, Path]:
-    """Score one SAD weight pack on the held-out test split end to end: one forward-only
-    `FoldRun` (scored `-m`) over the test listing with `Dump_Directory` set so the engine
-    writes one VRCTS hypothesis xml per file, then pool `dcf` over (`.part.xml` ref windowed
-    to the hyp span, engine hyp). The pack (a trained `best_sad.bin` or the untrained
-    `sad_seed.bin`) goes in through the fold run's `set_weights` on either `Inference_Path`
-    (issue #62) -- so the SAME scorer measures both the trained model and its own
-    from-scratch init on the identical test set (the direction-safe DCF improvement), on
-    either path.
-
-    Returns `(DcfReport | None, dump_dir)`; `None` only if no hyp xml was produced (a
-    structurally empty test set)."""
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    cfg = dict(base_cfg)
-    cfg["Dump_Directory"] = str(dump_dir.resolve())
-    FoldRun(cfg, workdir, backprop=False, listing=test_listing_name).run([read_weight_vector(pack_path)])
-
+def _sad_dcf(results: ChannelResults, test_records: Sequence[dict[str, str]]) -> DcfReport:
+    """The pooled DCF of one SAD fold: per channel result, the engine's decided segmentation
+    (`hyp_intervals`, the fold-result door of the hypothesis, at the VRCTS quantum the dumped
+    xml carried) against the `.part.xml` reference windowed to its span. `results.file` is the
+    row's index into the held-out listing, i.e. into `test_records` (`_write_listing_rows`
+    writes them in order); a stereo file scores each channel against the same reference."""
     pairs: list[tuple[list[Interval], list[Interval]]] = []
-    for rec in test_records:
-        hyp_xml = _hyp_xml_for(rec["filename"], dump_dir)
-        if not hyp_xml.is_file():
-            continue
-        hyp = load_vrcts_hyp(hyp_xml)
-        if not hyp:
-            continue
+    for i in range(len(results)):
+        hyp = hyp_intervals(*results.hypothesis[i])
         span = hyp[-1][1]
-        ref = _windowed_vrcts_ref(Path(rec["refseg"]), span)
+        ref = _windowed_vrcts_ref(Path(test_records[int(results.file[i])]["refseg"]), span)
         pairs.append((ref, hyp))
-    if not pairs:
-        return None, dump_dir
-    return _pool_dcf(pairs, _DCF_COLLARS), dump_dir
+    return _pool_dcf(pairs, _DCF_COLLARS)
 
 
 # --------------------------------------------------------------------------------------- #
@@ -663,10 +606,6 @@ class BaselineResult:
     @property
     def dcf(self) -> DcfReport | None:
         return self.scores.dcf
-
-    @property
-    def scores_dir(self) -> Path | None:
-        return self.scores.scores_dir
 
     @property
     def init_lid_error(self) -> float | None:
@@ -795,14 +734,17 @@ class Splits:
 
 @dataclass(frozen=True)
 class Scores:
-    """One pack set's held-out scoring: the LID pair or the SAD DCF report, plus where the
-    `.scr` files / VRCTS hyp dumps landed. The trained checkpoint and (when `score_init`) the
-    seed packs are scored by two calls on the identical test set."""
+    """One pack set's held-out scoring (issue #86): the config-0 channel results of ONE
+    forward-only fold on the test listing, and the metrics read off them -- the LID pair
+    (`lid_scores` / `lid_target` -> `lid_error` + `cavg`) or the SAD DCF report (`hypothesis`
+    -> `dcf`). The trained checkpoint and (when `score_init`) the seed packs are scored by two
+    calls on the identical test set; the parity legs take their per-file argmax and boundaries
+    off `results`."""
 
+    results: ChannelResults | None = None
     lid_error: float | None = None
     cavg: float | None = None
     dcf: DcfReport | None = None
-    scores_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -830,18 +772,16 @@ class SadArm:
     def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> list[Path]:
         return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one, [("BLSTM", "sad_seed.bin")])
 
-    def score(self, prepared: PreparedRun, packs: Sequence[Path], tag: str) -> Scores:
-        dcf_rep, dump_dir = _score_sad_pack_on_test(
-            prepared.cfg, prepared.out_dir, packs[0], prepared.out_dir / tag, prepared.splits.test, prepared.splits.test_name
-        )
-        return Scores(dcf=dcf_rep, scores_dir=dump_dir)
+    def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
+        res = _score_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
+        return Scores(results=res, dcf=_sad_dcf(res, prepared.splits.test))
 
 
 @dataclass(frozen=True)
 class LidArm:
     """A LID arm (`lid-features`, `lid-phseq`): the 12-class Twin (Algo 6) in Mode 7 over
     precomputed features, both nets seeded, only the LID net training (the frozen-SAD
-    contract), scored `.scr` -> `lid_error` + `cavg`. The two instances differ only in the
+    contract), scored `lid_scores` / `lid_target` -> `lid_error` + `cavg`. The two instances differ only in the
     corpus tree they glob (`derive`) and the File_Type their TOML declares."""
 
     stem: str
@@ -886,15 +826,9 @@ class LidArm:
             cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")]
         )
 
-    def score(self, prepared: PreparedRun, packs: Sequence[Path], tag: str) -> Scores:
-        # The eval state over the TEST listing (the `.scr` filenames come off the state's
-        # listing records); the same `base.config` stands for it, no second file is written.
-        # Issue #86 scores over the fold result and retires this state.
-        eval_cfg = dict(prepared.cfg)
-        eval_cfg["fileslisting"] = prepared.splits.test_name
-        eval_state = RunState.from_parsed(eval_cfg, prepared.out_dir / "base.config", prepared.out_dir)
-        lid_err, cavg_val, scores_dir = _score_packs_on_test(eval_state, packs[0], packs[1], prepared.out_dir / tag, prepared.splits.test)
-        return Scores(lid_error=lid_err, cavg=cavg_val, scores_dir=scores_dir)
+    def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
+        res = _score_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
+        return Scores(results=res, lid_error=lid_error(res.lid_scores, res.lid_target), cavg=cavg(res.lid_scores, res.lid_target))
 
 
 #: The four arms, keyed by the spec's `arm`. The config and lineage are the declarations in
@@ -945,10 +879,10 @@ class PreparedRun:
     def train(self) -> ModernTrainResult:
         return train_modern(self.run, self.params)
 
-    def score(self, packs: Sequence[Path], tag: str) -> Scores:
-        """The arm's held-out scoring of one pack set (`[sad]`, or `[sad, lid]` on the Twin),
-        its `.scr` files / hyp dumps under `out_dir / tag`."""
-        return self.arm.score(self, packs, tag)
+    def score(self, packs: Sequence[Path]) -> Scores:
+        """The arm's held-out scoring of one pack set (`[sad]`, or `[sad, lid]` on the Twin):
+        one fold over the test listing, nothing written (issue #86)."""
+        return self.arm.score(self, packs)
 
 
 def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRun:
@@ -1082,7 +1016,7 @@ def _log_scores(console: Console, scores: Scores, init_scores: Scores | None) ->
         if init_scores is not None and init_scores.lid_error is not None:
             console.log(f"init baseline: lid_error={init_scores.lid_error:.2f}% (improvement {init_scores.lid_error - scores.lid_error:+.2f}pt)")
     else:
-        console.log("held-out: the test split produced no scores (no VRCTS hyp / .scr files)")
+        console.log("held-out: nothing scored (no test split)")
 
 
 def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> BaselineResult:
@@ -1100,9 +1034,9 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> Basel
 
     scores, init_scores = Scores(), None
     if prepared.splits.test:
-        scores = prepared.score(prepared.run.checkpoint.best(), "score_trained")
+        scores = prepared.score(prepared.run.checkpoint.best())
         if spec.score_init:
-            init_scores = prepared.score(prepared.seed_packs, "score_init")
+            init_scores = prepared.score(prepared.seed_packs)
         _log_scores(console, scores, init_scores)
 
     wall_s = time.time() - t0
@@ -1132,7 +1066,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="from-scratch baseline training arms")
     parser.add_argument("arm", choices=sorted(ARM_CONFIG), help="the training arm")
     parser.add_argument("--corpus-root", type=Path, required=True, help="the LRE03/07 corpus root (data/LRE03-LRE07)")
-    parser.add_argument("--out-dir", type=Path, required=True, help="run directory for listings/config/checkpoints/scores")
+    parser.add_argument("--out-dir", type=Path, required=True, help="run directory for listings/config/checkpoints")
     parser.add_argument("--seed", type=int, default=_default("seed"))
     parser.add_argument("--lanes", type=int, default=_default("lanes"), help="engine numOuterThreads fold width (N=1 is the parity mode)")
     parser.add_argument("--subset", type=int, default=_default("subset"), help="stratified subset size (omit for the full corpus)")

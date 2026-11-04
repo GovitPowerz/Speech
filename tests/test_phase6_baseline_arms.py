@@ -15,8 +15,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -570,23 +571,29 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
         tag: DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=pfa, dcf=pfa / 4) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
         for tag, pfa in (("score_trained", 0.4), ("score_init", 1.0))
     }
-    seen: list[tuple[Path, str, int, str]] = []
+    folds: dict[str, object] = {"score_trained": object(), "score_init": object()}
+    seen: list[tuple[tuple[Path, ...], str, int]] = []
 
-    def score(
-        base_cfg: dict[str, str], workdir: Path, pack: Path, dump_dir: Path, test_records: list[dict[str, str]], test_name: str
-    ) -> tuple[DcfReport, Path]:
-        seen.append((pack, dump_dir.name, len(test_records), test_name))
-        return reports[dump_dir.name], dump_dir
+    def score_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_name: str) -> Any:
+        seen.append((tuple(packs), test_name, len(cfg)))
+        return folds["score_trained" if packs[0].name == "best_sad.bin" else "score_init"]
 
-    monkeypatch.setattr(B, "_score_sad_pack_on_test", score)
+    def sad_dcf(res: Any, test_records: Sequence[dict[str, str]]) -> DcfReport:
+        assert len(test_records) == 2
+        return next(reports[tag] for tag, fold in folds.items() if fold is res)
+
+    monkeypatch.setattr(B, "_score_fold", score_fold)
+    monkeypatch.setattr(B, "_sad_dcf", sad_dcf)
     out = tmp_path / "out"
     res = B.run_baseline(_spec("sad", root, out, subset=4, valid_size=0, test_size=2, epochs=2, steps_per_epoch=1, score_init=True))
 
-    assert seen == [
-        (out / "checkpoint" / "best_sad.bin", "score_trained", 2, "sad_test_subset.flst"),
-        (out / "sad_seed.bin", "score_init", 2, "sad_test_subset.flst"),
+    assert [(packs, name) for packs, name, _ in seen] == [
+        ((out / "checkpoint" / "best_sad.bin",), "sad_test_subset.flst"),
+        ((out / "sad_seed.bin",), "sad_test_subset.flst"),
     ]
-    assert res.dcf is reports["score_trained"] and res.init_dcf is reports["score_init"] and res.scores_dir == out / "score_trained"
+    assert all(n > 0 for _, _, n in seen), "the fold is run on the prepared config map"
+    assert res.dcf is reports["score_trained"] and res.init_dcf is reports["score_init"]
+    assert res.scores.results is folds["score_trained"] and res.init_scores is not None and res.init_scores.results is folds["score_init"]
     p = res.record("launcher").payload
     assert p.collar(0.5) == CollarScore(collar=0.5, dcf=0.1, pmiss=0.0, pfa=0.4)
     assert p.init_dcf is not None and [c.dcf for c in p.init_dcf] == [0.25] * 5
@@ -718,14 +725,6 @@ def test_write_sad_mapping(tmp_path: Path) -> None:
     p = tmp_path / "sad_mapping.csv"
     B.write_sad_mapping(p)
     assert p.read_text() == "unk;unk;0\n"
-
-
-def test_hyp_xml_for_strips_extension() -> None:
-    d = Path("/scores")
-    # strip_last_4 (drop the 4-char .wav), then .xml -- the engine's own dump-target rule.
-    # (synthetic names: multi-dot LRE03-style + single-dot LRE07-style, no real corpus file.)
-    assert B._hyp_xml_for("/a/b/zz_0000_a.MT1.mp1.wav", d) == d / "zz_0000_a.MT1.mp1.xml"
-    assert B._hyp_xml_for("ZZ-000000-A-con.wav", d) == d / "ZZ-000000-A-con.xml"
 
 
 def test_windowed_vrcts_ref_clips_and_pads(tmp_path: Path) -> None:
