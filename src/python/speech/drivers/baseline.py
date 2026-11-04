@@ -919,7 +919,6 @@ class PreparedRun:
 
     spec: BaselineSpec
     arm: SadArm | LidArm
-    out_dir: Path
     splits: Splits
     run: ModernRun
     params: ModernTrainParams
@@ -934,6 +933,10 @@ class PreparedRun:
     @property
     def cfg(self) -> dict[str, str]:
         return self.run.cfg
+
+    @property
+    def out_dir(self) -> Path:
+        return self.run.out_dir
 
     @property
     def config_hash(self) -> str:
@@ -1024,7 +1027,9 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
     config_text = _config_text(cfg)
     # The hashed artefact (and the eval state's config path, until #86); never re-read here.
     (out_dir / "base.config").write_text(config_text)
-    # The loop reads the training listing as the engine will (the rows as written).
+    # The loop's listing rows are the written listing read back, not `splits.train`: the writer
+    # normalizes the records (`weight` / `file_id` defaults), and the batch scheduler must see
+    # the rows the engine reads (what `RunState.from_parsed` used to read for it).
     run = ModernRun(cfg=cfg, workdir=out_dir, out_dir=out_dir, listing=read_listing(out_dir / splits.train_name))
 
     # --- 3. run metadata -----------------------------------------------------------------
@@ -1050,7 +1055,6 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
     return PreparedRun(
         spec=spec,
         arm=arm,
-        out_dir=out_dir,
         splits=splits,
         run=run,
         params=params,
@@ -1064,24 +1068,22 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
     )
 
 
-def _log_scores(console: Console, arm: SadArm | LidArm, scores: Scores, init_scores: Scores | None) -> None:
-    if isinstance(arm, SadArm):
-        if scores.dcf is None:
-            console.log("held-out: no VRCTS hyps produced (empty test split)")
-        else:
-            c = scores.dcf.by_collar(0.5)
-            console.log(f"held-out DCF@0.5={c.dcf:.4f} (Pmiss={c.pmiss:.4f} Pfa={c.pfa:.4f})")
-            if init_scores is not None and init_scores.dcf is not None:
-                init = init_scores.dcf.by_collar(0.5).dcf
-                console.log(f"init baseline: DCF@0.5={init:.4f} (improvement {init - c.dcf:+.4f})")
-        return
-    if scores.lid_error is None or scores.cavg is None:
-        console.log("held-out: no .scr scores produced (empty test split)")
-        return
-    chance = 100.0 * (1.0 - 1.0 / len(_LANGS))
-    console.log(f"held-out: lid_error={scores.lid_error:.2f}% (chance {chance:.2f}%) cavg={scores.cavg:.4f}")
-    if init_scores is not None and init_scores.lid_error is not None:
-        console.log(f"init baseline: lid_error={init_scores.lid_error:.2f}% (improvement {init_scores.lid_error - scores.lid_error:+.2f}pt)")
+def _log_scores(console: Console, scores: Scores, init_scores: Scores | None) -> None:
+    """Log the held-out numbers an arm produced: the DCF report (SAD) or the LID pair, and the
+    seed packs' gain when `score_init` scored them; keyed on what `Scores` holds."""
+    if scores.dcf is not None:
+        c = scores.dcf.by_collar(0.5)
+        console.log(f"held-out DCF@0.5={c.dcf:.4f} (Pmiss={c.pmiss:.4f} Pfa={c.pfa:.4f})")
+        if init_scores is not None and init_scores.dcf is not None:
+            init = init_scores.dcf.by_collar(0.5).dcf
+            console.log(f"init baseline: DCF@0.5={init:.4f} (improvement {init - c.dcf:+.4f})")
+    elif scores.lid_error is not None and scores.cavg is not None:
+        chance = 100.0 * (1.0 - 1.0 / len(_LANGS))
+        console.log(f"held-out: lid_error={scores.lid_error:.2f}% (chance {chance:.2f}%) cavg={scores.cavg:.4f}")
+        if init_scores is not None and init_scores.lid_error is not None:
+            console.log(f"init baseline: lid_error={init_scores.lid_error:.2f}% (improvement {init_scores.lid_error - scores.lid_error:+.2f}pt)")
+    else:
+        console.log("held-out: no scores produced (empty test split)")
 
 
 def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> BaselineResult:
@@ -1102,7 +1104,7 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> Basel
         scores = prepared.score(prepared.run.checkpoint.best(), "score_trained")
         if spec.score_init:
             init_scores = prepared.score(prepared.seed_packs, "score_init")
-        _log_scores(console, prepared.arm, scores, init_scores)
+        _log_scores(console, scores, init_scores)
 
     wall_s = time.time() - t0
     console.log(f"[green]done[/green] in {wall_s:.1f}s")

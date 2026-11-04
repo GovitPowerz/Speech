@@ -708,7 +708,6 @@ def train_modern(
     `best_<net>.bin` holds the argmin-val_cost epoch's weights; `last_<net>.bin` the latest."""
     algo = run.algo
     ckpt = run.checkpoint
-    ckpt.dir.mkdir(parents=True, exist_ok=True)
 
     if params.resume_from is not None:
         weights, history, best_val, best_epoch, start_epoch = Checkpoint(Path(params.resume_from), ckpt.nets).resume()

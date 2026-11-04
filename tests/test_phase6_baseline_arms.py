@@ -24,7 +24,7 @@ from speech.batching import create_batches, get_new_batch
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.drivers import baseline as B
 from speech.drivers.spec import ARM_CONFIG, LID_ARMS, SAD_ARMS, BaselineSpec
-from speech.drivers.state import ModernTrainParams, ModernTrainResult
+from speech.drivers.state import ModernRun, ModernTrainParams, ModernTrainResult
 
 # --------------------------------------------------------------------------------------- #
 # synthetic records
@@ -329,14 +329,14 @@ def _fake_engine(monkeypatch: pytest.MonkeyPatch, flat: dict[str, str]) -> None:
     monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one, nets: [out / name for _, name in nets])
 
 
-def _stub_train(monkeypatch: pytest.MonkeyPatch, hook: Callable[[object, ModernTrainParams], object] | None = None) -> None:
+def _stub_train(monkeypatch: pytest.MonkeyPatch, hook: Callable[[ModernRun, ModernTrainParams], object] | None = None) -> None:
     """Replace `train_modern` with a one-epoch no-op that leaves an empty checkpoint directory
     (what `run_baseline` reads back); `hook` runs mid-"training"."""
 
-    def train(run: object, params: ModernTrainParams) -> ModernTrainResult:
+    def train(run: ModernRun, params: ModernTrainParams) -> ModernTrainResult:
         if hook is not None:
             hook(run, params)
-        ckpt = run.checkpoint.dir  # type: ignore[attr-defined]
+        ckpt = run.checkpoint.dir
         ckpt.mkdir(parents=True, exist_ok=True)
         return ModernTrainResult(best_epoch=0, best_val_cost=1.0, epochs_run=1, stopped_early=False, history=[], checkpoint_dir=str(ckpt))
 

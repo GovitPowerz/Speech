@@ -60,8 +60,8 @@ class BaselineSpec(BaseModel):
     patience: PositiveInt = 6
     steps_per_epoch: PositiveInt = 8
     init_scheme: Scheme = "xavier"
-    valid_size: NonNegativeInt = 12
-    test_size: NonNegativeInt = 48
+    valid_size: NonNegativeInt = 12  # 0: no held-out validation on any arm, the loop validates on the train listing (#98)
+    test_size: NonNegativeInt = 48  # 0: no held-out test split on any arm, nothing is scored (#98)
     minibatch: NonNegativeInt = 0
     audio_max_duration: PositiveFloat | None = None
     cell: CellType = "lstm"

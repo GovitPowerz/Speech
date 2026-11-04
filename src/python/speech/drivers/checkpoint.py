@@ -61,8 +61,9 @@ class ModernTrainResult(BaseModel):
 @dataclass(frozen=True)
 class Checkpoint:
     """`dir` holds one pack per net in `nets` order under a tag (`best`, `last`), plus the
-    Modern loop's history. Construct it from the run (`ModernRun.checkpoint`), never from
-    a rebuilt path."""
+    Modern loop's history. The Launcher takes it off the run (`ModernRun.checkpoint`); a
+    directory the user names (the `test` subcommand, `resume_from`) is wrapped with the run's
+    nets. No caller rebuilds a pack file name."""
 
     dir: Path
     nets: list[str]
