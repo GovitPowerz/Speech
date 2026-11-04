@@ -100,11 +100,13 @@ def test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts(tmp_path: Path) -> 
     """The two doors of the held-out scorer (issue #86): per row, `hyp_intervals` over the
     seam's `hypothesis` equals `load_vrcts_hyp` over the xml the same run dumped
     (`Dump_Directory vrcts_tier2`, the `_chan_<n>` fan-out), bit for bit. The audio cap is
-    overlaid to a value with more than two decimals so the `sigdur` sliver exists here and a
-    dropped rounding is caught."""
+    overlaid to a value with more than two decimals at which every decision is a speech run
+    then an `Other` tail (probed: 1.2345 s decides all-speech, 2.4321 s all-other), so the
+    `sigdur` sliver exists on the xml door, a dropped rounding is caught, and an `Other` row
+    counted as speech is caught."""
     _seed_tier2_spectral(tmp_path)
     cfg = speech_rs.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
-    cfg["Audio_max_duration"] = "1.2345"
+    cfg["Audio_max_duration"] = "1.7654"
     with chdir(tmp_path):
         eng = speech_rs.Engine.from_map([cfg], "-m")
         eng.run()
@@ -116,7 +118,7 @@ def test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts(tmp_path: Path) -> 
         assert rows[0][0] == 0.0 and rows[-1] == (duration, "End")
         xml = tmp_path / "vrcts_tier2" / f"f{named.file[i] + 1}_chan_{named.chan[i] + 1}.xml"
         assert hyp_intervals(duration, rows) == load_vrcts_hyp(xml), f"row {i}: the two doors differ"
-    assert any(cls == "Speech" for _, rows in named.hypothesis for _, cls in rows), "a decided speech boundary is needed for the pin to bite"
+    assert all([c for _, c in rows] == ["Speech", "Other", "End"] for _, rows in named.hypothesis), "the cap must decide speech then an Other tail"
 
 
 def test_twin_train_names_match_the_wire(tmp_path: Path) -> None:

@@ -64,6 +64,18 @@ engine exists, whose `record()` is built from it. The `base.config` re-parse tha
 `train_modern` was the last file round trip on the Python side and is gone; the file is
 written and hashed only, and the manifest stays written and never read (ADR-0009 unchanged).
 
+Amendment (issue #86): the seam carries the decision too. `ChannelResult` retains the decided
+`Segmentation` (`hypothesis`, the sanitized list `compute_errors` left; not on the wire) and
+`channel_results()` hands it to Python as the `hypothesis` key, boundary rows in the stream
+session's `(begin_s, class)` shape; `ChannelResults.hypothesis` wraps it. Held-out scoring is
+then one forward-only `FoldRun` over the test listing with the metrics read off its channel
+results: `lid_error` / `cavg` over `lid_scores` / `lid_target` (the target decoded on the seam
+since #23), the pooled DCF over `evaluate.hyp_intervals`, which reads the rows at the VRCTS
+quantum the dumped xml carried (`sigdur` at two decimals, the `End` sentinel at four) through
+the one `_fill_gaps` body `load_vrcts_hyp` shares, so the DCF is bit-identical to the xml path
+it replaced and no ledger record moves. The Launcher writes no score file and sets no
+`Dump_Directory`; `drivers/test.py::evaluate` stays as the `test` subcommand's `.scr` writer.
+
 ## Consequences
 
 - The eight production sites (`drivers/train.py`, `drivers/test.py`, `drivers/baseline.py`)

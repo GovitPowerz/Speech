@@ -115,8 +115,9 @@ init) -- not the CE. Genuine 12-way discrimination is the full-corpus launcher's
 
 From-scratch algo-3 spectral SAD on the `train/audio` wav+xml pairs (the seeded 70/15/15 split
 of the 2066 pairs, `dataprep.lre.derive_sad_listings`). The held-out slice is scored END TO END
-with the T4 DCF harness: the engine dumps one VRCTS hypothesis xml per test file
-(`Dump_Directory`), read back via `evaluate.load_vrcts_hyp`; the `.part.xml` references via
+with the T4 DCF harness: the engine's decided segmentation per test file (read off the fold
+result since issue #86, `evaluate.hyp_intervals`, at the quantum of the VRCTS xml the Phase 6
+scorer dumped and read back, so the numbers are unchanged); the `.part.xml` references via
 `evaluate.load_vrcts_ref` (windowed to the capped-audio span, matching the engine's own
 `_AudioDuration` reference windowing); pooled through `evaluate.dcf`. These are the FIRST REAL
 DCF numbers under this protocol. DCF pooled per-collar over the whole held-out slice (Pmiss/Pfa
@@ -288,8 +289,8 @@ Omit `--subset` to train on the whole split (SAD: the full 70% train split of th
 pairs; LID: the whole localized corpus); the SAD runners pass `--audio-max-duration 120` (the
 corpus wavs are 576-1800 s CallFriend files, median ~600 s). The run writes `run_metadata.json`
 (the spec as it ran plus the config hash and the start-of-run git SHA + dirty flag), `checkpoint/`
-(best/last packs + `train_history.json`), the held-out scores -- LID `scores/` (`.scr`) ->
-`lid_error`/`cavg`; SAD `score_trained/` (VRCTS hyp xml) -> pooled `dcf` -- and `record.json`,
+(best/last packs + `train_history.json`), the held-out metrics (LID `lid_error`/`cavg`, SAD the
+pooled `dcf`, read off one fold's channel results since issue #86, no score files) and `record.json`,
 the promotable record (not on `--dry-run`). A run directory that already holds a manifest is
 refused unless `--resume` continues it.
 

@@ -1,0 +1,18 @@
+mutation: hyp_intervals scores the raw audio duration instead of the 2-decimal VRCTS sigdur the dumped xml carried (issue #86: the fold-result door must agree with the xml door bit for bit)
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_hyp_intervals_sentinel_below_sigdur_leaves_a_sliver
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_hyp_intervals_rounds_the_span_to_sigdur
+catcher: CAUGHT pytest tests/pyo3/test_channel_results.py::test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts
+catcher: MISSED pytest tests/test_phase6_evaluate.py::test_hyp_intervals_matches_the_xml_door
+
+diff --git a/src/python/speech/evaluate.py b/src/python/speech/evaluate.py
+--- a/src/python/speech/evaluate.py
++++ b/src/python/speech/evaluate.py
+@@ -166,7 +166,7 @@ def hyp_intervals(audio_duration: float, rows: Sequence[tuple[float, str]]) -> l
+     sentinel) and the channel span at 2 (`sigdur`). Python's `round` and Rust's `{:.N}`
+     are both correctly rounded, half-even on the binary value, so they agree."""
+     speech = [(round(begin, VRCTS_TIME_DECIMALS), round(rows[i + 1][0], VRCTS_TIME_DECIMALS)) for i, (begin, cls) in enumerate(rows[:-1]) if cls == "Speech"]
+-    return _fill_gaps(speech, round(audio_duration, VRCTS_SIGDUR_DECIMALS))
++    return _fill_gaps(speech, audio_duration)
+ 
+ 
+ def _fill_gaps(speech: Sequence[tuple[float, float]], sigdur: float) -> list[Interval]:

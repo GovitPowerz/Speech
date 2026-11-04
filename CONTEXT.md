@@ -17,7 +17,7 @@ The per-file language task. Always gated by a SAD stage, never run alone: the SA
 A net's per-frame output row before any decision: one speech probability (SAD), one score per language (LID).
 
 **Segmentation**:
-The engine's decision output: an ordered boundary list seeded `[Other@0, End@duration]`, carrying its own reference when one is attached.
+The engine's decision output: an ordered boundary list seeded `[Other@0, End@duration]`, carrying its own reference when one is attached. Retained on the Channel result and read off the seam as `hypothesis` (issue #86).
 _Avoid_: mask, labels
 
 **Boundary**:
@@ -73,7 +73,7 @@ _Avoid_: processor for the engine as a whole
 `BagOfProcessors`: the per-config set of drivers plus the result assembly and best-weight save gate.
 
 **Channel result**:
-The engine's outcome for one (file, config, channel): the scoring errors, the timing and durations, each net's cost and count, and for a LID driver the target class and per-class scores. Its wire form is the result row.
+The engine's outcome for one (file, config, channel): the scoring errors, the timing and durations, each net's cost and count, for a LID driver the target class and per-class scores, and the decided Segmentation (issue #86). Its wire form is the result row, which the segmentation is not on.
 _Avoid_: result record (a Record is a ledger entry), Error_vad row
 
 **Result row**:
