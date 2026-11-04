@@ -1,0 +1,22 @@
+mutation: prepare() stamps the git provenance after the arm wrote its listings (a listing is on disk before the SHA is read), instead of before the run directory exists (issue #82 keeps issue #40's rule inside the value)
+catcher: CAUGHT pytest tests/test_phase6_baseline_arms.py::test_prepare_fails_on_git_before_any_file
+
+diff --git a/src/python/speech/drivers/baseline.py b/src/python/speech/drivers/baseline.py
+--- a/src/python/speech/drivers/baseline.py
++++ b/src/python/speech/drivers/baseline.py
+@@ -974,7 +974,6 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRun:
+     # The record's provenance is the tree the run STARTS on (issue #40): stamped after training it
+     # would name an edit or a commit made during the run, and a git failure would lose the run.
+     # Read before `out_dir` exists, so a failed check leaves no half-started run directory.
+-    git_sha, git_dirty = git_state(repo_root)
+     out_dir = spec.out_dir.resolve()
+     if not spec.resume and (out_dir / "run_metadata.json").is_file():
+         raise FileExistsError(f"out_dir {out_dir} already holds a run: pass resume to continue it, or choose a fresh directory (an overwritten run is lost)")
+@@ -989,6 +988,7 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRun:
+ 
+     # --- 1. listings + mapping (+ reference) synthesized under out_dir --------------------
+     splits = arm.prepare(spec, out_dir, console)
++    git_sha, git_dirty = git_state(repo_root)
+     console.log(f"split: train={len(splits.train)} valid={len(splits.valid)} test={len(splits.test)}")
+     if not splits.train:
+         raise ValueError(f"empty train split (valid={len(splits.valid)} test={len(splits.test)}): lower --valid-size/--test-size or raise --subset")

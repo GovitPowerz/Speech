@@ -21,10 +21,11 @@ import numpy as np
 import pytest
 from speech.cli import _build_parser
 from speech.cli import main as cli_main
+from speech.drivers.checkpoint import Checkpoint, net_names
 from speech.drivers.init import init_run
 from speech.drivers.retrain import retrain, seed_from_checkpoint
 from speech.drivers.state import RunConfig, RunState
-from speech.drivers.test import evaluate, resolve_checkpoint_packs, write_scores
+from speech.drivers.test import evaluate, write_scores
 from speech.drivers.train import DEFAULT_INNER_STEPS, _qpso_params, train, train_hyperparam_search
 from speech.genome import genome_length
 from speech.optimizers import QpsoParams
@@ -57,7 +58,7 @@ def test_run_state_json_roundtrip(tmp_path: Path) -> None:
 
     assert isinstance(state.ps, RunConfig)
     assert state.ps.algo == 6
-    assert state.balance == 10
+    assert state.ps.balance == 10
     assert len(state.listing) == 2, "the twin listing has 2 files"
     assert state.base_config["Algo_choice"] == "6"
     state_file = out_dir / "run_state.json"
@@ -197,50 +198,6 @@ def test_legacy_cli_defaults_are_the_qpso_defaults(capsys: pytest.CaptureFixture
 # --------------------------------------------------------------------------------------- #
 
 
-def test_resolve_checkpoint_packs_accepts_both_naming_schemes(tmp_path: Path) -> None:
-    """`train` writes `<net>_weights.bin`; `train_modern` writes `best_<net>.bin`. Either
-    complete scheme resolves, and the legacy scheme wins when both are complete."""
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
-    (legacy / "sad_weights.bin").write_bytes(b"")
-    (legacy / "lid_weights.bin").write_bytes(b"")
-    assert resolve_checkpoint_packs(legacy, 6) == [legacy / "sad_weights.bin", legacy / "lid_weights.bin"]
-
-    modern = tmp_path / "modern"
-    modern.mkdir()
-    (modern / "best_sad.bin").write_bytes(b"")
-    (modern / "best_lid.bin").write_bytes(b"")
-    (modern / "last_sad.bin").write_bytes(b"")
-    assert resolve_checkpoint_packs(modern, 6) == [modern / "best_sad.bin", modern / "best_lid.bin"]
-    assert resolve_checkpoint_packs(modern, 3) == [modern / "best_sad.bin"]
-
-    both = tmp_path / "both"
-    both.mkdir()
-    (both / "sad_weights.bin").write_bytes(b"")
-    (both / "best_sad.bin").write_bytes(b"")
-    assert resolve_checkpoint_packs(both, 3) == [both / "sad_weights.bin"]
-
-
-def test_resolve_checkpoint_packs_never_mixes_schemes(tmp_path: Path) -> None:
-    """A legacy SAD pack beside a `train_modern` LID pack is two runs, not one checkpoint."""
-    (tmp_path / "sad_weights.bin").write_bytes(b"")
-    (tmp_path / "best_lid.bin").write_bytes(b"")
-    with pytest.raises(FileNotFoundError, match="no complete weight-pack set"):
-        resolve_checkpoint_packs(tmp_path, 6)
-
-
-def test_resolve_checkpoint_packs_missing_net_raises(tmp_path: Path) -> None:
-    """A checkpoint with the SAD pack but no LID pack (algo 6) names the missing net and
-    both accepted filenames; `last_<net>.bin` alone is not a scoring checkpoint."""
-    ckpt = tmp_path / "ckpt"
-    ckpt.mkdir()
-    (ckpt / "sad_weights.bin").write_bytes(b"")
-    (ckpt / "last_lid.bin").write_bytes(b"")
-    with pytest.raises(FileNotFoundError, match=r"lid_weights\.bin.*best_lid\.bin") as exc:
-        resolve_checkpoint_packs(ckpt, 6)
-    assert str(ckpt) in str(exc.value)
-
-
 def test_cli_test_missing_pack_fails_loudly(tmp_path: Path) -> None:
     """The #29 regression at the CLI: `test` on a checkpoint directory that lacks its packs
     used to skip `set_weights` and score the config's seed pack silently. The resolution is
@@ -304,7 +261,7 @@ def test_evaluate_exact_injects_resolved_packs(tmp_path: Path, monkeypatch: pyte
     seen = _fake_speech_rs(monkeypatch)
     state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
 
-    evaluate(state, resolve_checkpoint_packs(ckpt, state.algo))
+    evaluate(state, Checkpoint(ckpt, net_names(state.ps.algo)).packs())
 
     assert seen["weights"] == [[1.0, 2.0], [3.0]]
     assert seen["config"]["Neural_Networks_BackPropagation_Epochs"] == "0"
@@ -322,7 +279,7 @@ def test_evaluate_fast_injects_through_set_weights(tmp_path: Path, monkeypatch: 
     state.base_config["Inference_Path"] = "fast"
     before = set((tmp_path / "cfg").iterdir())
 
-    evaluate(state, resolve_checkpoint_packs(ckpt, state.algo))
+    evaluate(state, Checkpoint(ckpt, net_names(state.ps.algo)).packs())
 
     assert seen["weights"] == [[1.0, 2.0], [3.0]]
     assert seen["config"]["Inference_Path"] == "fast"

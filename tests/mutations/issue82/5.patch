@@ -1,0 +1,13 @@
+mutation: ModernRun.algo defaults an absent Algo_choice to 3 instead of raising (issue #82: the loop's algo is read off the map, never defaulted)
+catcher: CAUGHT pytest tests/test_phase5_train_modern.py::test_modern_run_derives_algo_and_checkpoint_off_the_map
+
+diff --git a/src/python/speech/drivers/state.py b/src/python/speech/drivers/state.py
+--- a/src/python/speech/drivers/state.py
++++ b/src/python/speech/drivers/state.py
+@@ -224,5 +224,5 @@ class ModernRun:
+ 
+     @property
+     def algo(self) -> int:
+-        return int(self.cfg["Algo_choice"])
++        return int(self.cfg.get("Algo_choice", "3"))
+ 

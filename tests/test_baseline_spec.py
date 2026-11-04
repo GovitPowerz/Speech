@@ -101,3 +101,12 @@ def test_every_arm_declares_the_lineage_its_config_name_carries() -> None:
     for arm, config in ARM_CONFIG.items():
         assert ARM_LINEAGE[arm] == lineage_of(config), arm
         assert (Path(__file__).resolve().parents[1] / config).is_file(), config
+
+
+@pytest.mark.parametrize("arm", ["sad", "lid-phseq"])
+def test_a_zero_held_out_size_is_one_contract_on_every_arm(arm: str) -> None:
+    """Issue #98: `0` is accepted on both arm kinds and means no held-out split (the arm's
+    floor applies to positive sizes only, pinned on the arms in `test_phase6_baseline_arms`)."""
+    spec = BaselineSpec(arm=arm, corpus_root=Path("/c"), out_dir=Path("/o"), valid_size=0, test_size=0)  # type: ignore[arg-type]
+    assert (spec.valid_size, spec.test_size) == (0, 0)
+    assert (spec.recipe(listing=None).valid_size, spec.recipe(listing=None).test_size) == (0, 0)

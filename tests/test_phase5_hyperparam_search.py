@@ -16,6 +16,7 @@ hook (unlike `train_modern`'s `train_epoch`/`validate`, Task 8's stub-testabilit
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -23,11 +24,22 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.drivers import train as train_module
+from speech.drivers.init import init_run
 from speech.drivers.state import RunState, TrainResult
 from speech.drivers.train import _HYPERPARAM_PENALTY, train, train_hyperparam_search
 from speech.genome import weight_block_mask
 
-from tests.test_phase5_train_modern import _algo3_state
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PHASE4A = REPO_ROOT / "tests" / "reference_data" / "phase4a"
+
+
+def _algo3_state(tmp: Path) -> RunState:
+    """A real single-net (Algo 3) `RunState` via `init_run` (no pyo3): the committed spectral
+    config + its listing/mapping parsed into the Legacy regime's typed state."""
+    tmp.mkdir(parents=True, exist_ok=True)
+    for f in ("tier2_spectral.config", "language2classmapping.csv", "tier2_fileslisting.csv"):
+        shutil.copy(PHASE4A / f, tmp / f)
+    return init_run(tmp / "tier2_spectral.config", tmp / "run")
 
 
 @pytest.mark.parametrize("driver", [train, train_hyperparam_search], ids=["train", "narrowed"])

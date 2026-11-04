@@ -15,9 +15,6 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from speech.drivers import baseline as B
-from speech.evaluate import CollarScore as EvalCollar
-from speech.evaluate import DcfReport
 from speech.ledger import cli, prose, schema
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file, render_text, table_names
@@ -415,94 +412,6 @@ def test_render_text_rewrites_between_markers_and_rejects_bad_markers() -> None:
         render_text("<!-- ledger:table nope -->\n<!-- ledger:end -->\n", [])
     with pytest.raises(ValueError, match="no end marker"):
         render_text("<!-- ledger:table phase6_sad_v1 -->\n| x |\n", [])
-
-
-# --------------------------------------------------------------------------------------- #
-# The producer side: BaselineResult.to_record without an engine
-# --------------------------------------------------------------------------------------- #
-
-
-def test_to_record_reads_the_recipe_from_run_metadata(tmp_path: Path) -> None:
-    meta = {
-        "arm": "sad-v2",
-        "seed": 3,
-        "lanes": 1,
-        "subset": 10,
-        "epochs": 3,
-        "patience": 99,
-        "steps_per_epoch": 10,
-        "minibatch": 0,
-        "valid_size": 8,
-        "test_size": 24,
-        "init_scheme": "xavier",
-        "val_metric": "nn_cost_seg",
-        "audio_max_duration": 20.0,
-        "cell": "cfc",
-        "direction": "forward",
-        "config_hash": "feedface01234567",
-        "config_toml": "configs/training/lre_sad_v2.toml",
-        "corpus_root": str(CORPUS_ROOT),  # the manifest may hold it; the record must not
-        "out_dir": str(tmp_path),
-        "dry_run": False,
-        "score_init": True,
-        "git_sha": "c" * 40,
-        "git_dirty": False,
-        "lre_listing": None,
-        "lre_listing_hash": None,
-        "resume": False,
-    }
-    path = B.write_run_metadata(tmp_path, meta)
-    rep = DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=1.0, dcf=0.25) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
-    res = B.BaselineResult(
-        arm="sad-v2",
-        out_dir=tmp_path,
-        checkpoint_dir=tmp_path / "checkpoint",
-        metadata_path=path,
-        epochs_run=3,
-        best_epoch=2,
-        best_val_cost=0.1,
-        first_val_cost=float("nan"),
-        val_costs=[float("nan"), 0.2, 0.1],
-        train_costs=[0.6, 0.3, 0.1],
-        dcf=rep,
-        init_dcf=None,
-        n_train=10,
-        n_valid=8,
-        n_test=24,
-        wall_s=15.5,
-    )
-    rec = res.to_record("gate", test="tests/pyo3/test_phase10_gates.py::test_subset_gate_beats_own_init[cfc-forward]")
-    assert rec.recipe == BaselineRecipe(
-        arm="sad-v2",
-        lineage="v2",
-        cell="cfc",
-        direction="forward",
-        subset=10,
-        valid_size=8,
-        test_size=24,
-        audio_max_duration=20.0,
-        epochs=3,
-        steps_per_epoch=10,
-        patience=99,
-        minibatch=0,
-        init_scheme="xavier",
-        seed=3,
-        lanes=1,
-        listing=None,
-    )
-    assert rec.payload.resumed is False
-    assert rec.payload.source == "gate" and rec.payload.first_val_cost is None and rec.payload.best_val_cost == 0.1
-    assert rec.payload.first_train_cost == 0.6 and rec.payload.last_train_cost == 0.1 and rec.payload.wall_s == 15.5
-    assert rec.payload.collar(0.5) == CollarScore(collar=0.5, dcf=0.25, pmiss=0.0, pfa=1.0) and rec.payload.init_dcf is None
-    assert rec.git_sha == "c" * 40 and not rec.git_dirty, "the provenance is the run's start, read from the manifest"
-    assert rec.host.cores > 0 and rec.build.profile in ("release", "debug", "unavailable")
-    assert str(CORPUS_ROOT) not in schema.canonical_json(rec)
-    # A localized listing is its content hash in the recipe (never its path); a resumed call is flagged in the payload.
-    localized = {**meta, "arm": "lid-phseq", "audio_max_duration": None, "config_toml": "configs/training/lre03_lid_phseq.toml", "resume": True}
-    B.write_run_metadata(tmp_path, {**localized, "lre_listing": str(tmp_path / "lre03_train.csv"), "lre_listing_hash": "feedfacefeedface"})
-    rec2 = res.to_record("launcher")
-    assert rec2.recipe.listing == "feedfacefeedface" and rec2.payload.resumed is True
-    assert str(tmp_path) not in schema.canonical_json(rec2)
 
 
 # --------------------------------------------------------------------------------------- #

@@ -14,6 +14,7 @@ benefit (the task brief's stated preference).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -21,18 +22,30 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from speech.batching import read_listing
 from speech.config_bridge import parse_legacy_config, read_flag
+from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
 from speech.genome import LidNetSpec, RunConfig
 
 __all__ = [
+    "BALANCE_BACKPROP",
     "EpochRecord",
     "LidNetSpec",
+    "ModernRun",
     "ModernTrainParams",
     "ModernTrainResult",
     "RunConfig",
     "RunState",
     "TrainResult",
+    "default_balance",
     "ps_from_config",
 ]
+
+# The two outer-optimizer knobs that are NOT engine config keys (Train_BLSTM.m defaults):
+# the balance law (algo 5/6 -> 10, the LID calibration objective; else 5) and PS.VP.BalanceBackProp.
+BALANCE_BACKPROP = 0.5
+
+
+def default_balance(algo: int) -> int:
+    return 10 if algo in (5, 6) else 5
 
 
 def _ints(cfg: dict[str, str], key: str) -> list[int]:
@@ -90,7 +103,7 @@ def ps_from_config(
     calibration objective). NNType 0 only (SRN/CWRNN unported)."""
     algo = int(cfg["Algo_choice"])
     if balance is None:
-        balance = 10 if algo in (5, 6) else 5
+        balance = default_balance(algo)
     lid = _lid_from_config(cfg) if algo == 6 else None
     return RunConfig(
         numOuterThreads=int(cfg.get("numOuterThreads", "1")),
@@ -124,7 +137,7 @@ def ps_from_config(
         OutputSubSampling=_ints(cfg, "BLSTM_OutputSubSampling"),
         LSTM_MaxSat=float(cfg.get("BLSTM_Forward_MaxSaturation", "-10.0")),
         BackPropWER=float(cfg.get("BLSTM_BackPropWER", "-1.0")),
-        BalanceBackProp=0.5,
+        BalanceBackProp=BALANCE_BACKPROP,
         InputNormalizationType=int(cfg.get("BLSTM_InputNormalizationType", "0")),
         IsCellsPeepholesActive=_peephole(cfg, "BLSTM", "IsCellsPeepholesActive"),
         IsGatesPeepholesActive=_peephole(cfg, "BLSTM", "IsGatesPeepholesActive"),
@@ -141,8 +154,6 @@ class RunState(BaseModel):
 
     config_path: str  # absolute path to the engine .config (its dir holds the corpus)
     out_dir: str  # where checkpoints land
-    algo: int
-    balance: int
     base_config: dict[str, str]  # the parsed engine config (the byte-known-good base)
     ps: RunConfig  # the vec2struct genome spec
     listing: list[dict[str, str]]  # read_listing records
@@ -172,8 +183,6 @@ class RunState(BaseModel):
         return cls(
             config_path=str(config),
             out_dir=str(Path(out_dir).resolve()),
-            algo=ps.algo,
-            balance=ps.balance,
             base_config=cfg,
             ps=ps,
             listing=listing,
@@ -199,6 +208,27 @@ class TrainResult(BaseModel):
     checkpoint_dir: str
     penalized_evals: int = 0
     penalized_types: dict[str, int] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ModernRun:
+    """The Modern loop's input (issue #82): what `train_modern` actually reads. The flat
+    config map `FoldRun` takes, the workdir its path keys resolve against, the out dir the
+    checkpoint lands under, and the training listing rows (batch mode). No genome: the
+    Legacy regime keeps `RunState`."""
+
+    cfg: dict[str, str]
+    workdir: Path
+    out_dir: Path
+    listing: list[dict[str, str]]
+
+    @property
+    def algo(self) -> int:
+        return int(self.cfg["Algo_choice"])
+
+    @property
+    def checkpoint(self) -> Checkpoint:
+        return Checkpoint(self.out_dir / "checkpoint", net_names(self.algo))
 
 
 class ModernTrainParams(BaseModel):
@@ -232,33 +262,3 @@ class ModernTrainParams(BaseModel):
     seed: int = 0  # the loop's ONE seed: the init draw, and the mini-batch stream as `seed + 2`
     forget_bias_one: bool = True
     resume_from: str | None = None  # checkpoint dir to resume from (loads last_*.bin + train_history.json); None -> from-scratch
-
-
-class EpochRecord(BaseModel):
-    """One epoch's recorded metrics in `train_history.json`. `confusion_error` is the
-    FIXED (F5) confusion misclassification rate on the validation set (algo 6 only; `None`
-    for the single-net SAD algos, which carry no LID confusion)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    epoch: int
-    train_cost: float
-    val_cost: float
-    confusion_error: float | None
-    is_best: bool
-
-
-class ModernTrainResult(BaseModel):
-    """`train_modern`'s outcome + the checkpoint location (also serialized to
-    `train_history.json` for resume). Distinct from `TrainResult` (the QPSO-shaped legacy
-    outcome): the modern loop has no genome, so `gbest`/`gbestval` would be meaningless --
-    this carries the best-epoch selection, the per-epoch history, and the early-stop flag."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    best_epoch: int
-    best_val_cost: float
-    epochs_run: int
-    stopped_early: bool
-    history: list[EpochRecord]
-    checkpoint_dir: str

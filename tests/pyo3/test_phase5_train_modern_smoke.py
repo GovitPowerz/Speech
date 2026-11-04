@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from speech.drivers.init import init_run
-from speech.drivers.state import ModernTrainParams, ModernTrainResult, RunState
+from speech.drivers.state import ModernRun, ModernTrainParams, ModernTrainResult, RunState
 from speech.drivers.train import train_modern
 
 pytest.importorskip("speech_rs")
@@ -78,11 +78,11 @@ def _seed_twin_train(dst: Path) -> Path:
 def test_train_modern_algo3_smoke(tmp_path: Path) -> None:
     config = _seed_tier2_spectral(tmp_path)
     state = init_run(config, tmp_path / "run")
-    assert state.algo == 3 and state.ps.lid is None
+    assert state.ps.algo == 3 and state.ps.lid is None
 
     params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="xavier", seed=7)
     with chdir(tmp_path):
-        res = train_modern(state, params=params)
+        res = train_modern(_modern_run(state), params=params)
 
     assert res.epochs_run == 2
     assert len(res.history) == 2
@@ -101,11 +101,11 @@ def test_train_modern_algo3_smoke(tmp_path: Path) -> None:
 def test_train_modern_twin_smoke_writes_both_nets(tmp_path: Path) -> None:
     config = _seed_twin_train(tmp_path)
     state = init_run(config, tmp_path / "run")
-    assert state.algo == 6 and state.ps.lid is not None
+    assert state.ps.algo == 6 and state.ps.lid is not None
 
     params = ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, init_scheme="he", seed=3)
     with chdir(tmp_path):
-        res = train_modern(state, params=params)
+        res = train_modern(_modern_run(state), params=params)
 
     assert res.epochs_run == 2
     for r in res.history:
@@ -123,9 +123,9 @@ def test_train_modern_resume_smoke(tmp_path: Path) -> None:
     config = _seed_tier2_spectral(tmp_path)
     state = init_run(config, tmp_path / "run")
     with chdir(tmp_path):
-        train_modern(state, params=ModernTrainParams(epochs=1, patience=99, steps_per_epoch=2, seed=7))
-        ckpt = str(Path(state.out_dir) / "checkpoint")
-        res = train_modern(state, params=ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, resume_from=ckpt))
+        run = _modern_run(state)
+        train_modern(run, params=ModernTrainParams(epochs=1, patience=99, steps_per_epoch=2, seed=7))
+        res = train_modern(run, params=ModernTrainParams(epochs=2, patience=99, steps_per_epoch=2, resume_from=str(run.checkpoint.dir)))
     assert res.epochs_run == 2
     assert [r.epoch for r in res.history] == [0, 1]
 
@@ -143,6 +143,11 @@ def test_train_modern_resume_smoke(tmp_path: Path) -> None:
 # (no stubs), which is where the moving-vs-stuck contrast only exists.
 
 
+def _modern_run(state: RunState) -> ModernRun:
+    """The Modern loop's input off the `init_run` state the Legacy-regime tests share."""
+    return ModernRun(cfg=state.base_config, workdir=Path(state.config_path).parent, out_dir=Path(state.out_dir), listing=state.listing)
+
+
 def _sad_state(dst: Path) -> RunState:
     """Seed + `init_run` the tier2 (algo-3 SAD) fixture into `dst`; returns the RunState."""
     config = _seed_tier2_spectral(dst)
@@ -153,7 +158,7 @@ def _train_sad(dst: Path, params: ModernTrainParams) -> ModernTrainResult:
     """`train_modern` on a fresh tier2 state in `dst`, with the cwd there (relative rows)."""
     state = _sad_state(dst)
     with chdir(dst):
-        return train_modern(state, params=params)
+        return train_modern(_modern_run(state), params=params)
 
 
 @pytest.mark.slow

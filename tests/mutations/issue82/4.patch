@@ -1,0 +1,14 @@
+mutation: BaselineResult.record() builds the recipe with listing=None instead of the localized listing's hash, so a 2015-listing run's identity loses its listing (issue #82: the record is a projection of the value, the hash carried on PreparedRun)
+catcher: CAUGHT pytest tests/test_phase6_baseline_arms.py::test_record_is_built_from_the_value_not_the_manifest
+
+diff --git a/src/python/speech/drivers/baseline.py b/src/python/speech/drivers/baseline.py
+--- a/src/python/speech/drivers/baseline.py
++++ b/src/python/speech/drivers/baseline.py
+@@ -730,6 +730,6 @@ class BaselineResult:
+             git_dirty=p.git_dirty,
+             build=seam_build_info(),
+             host=host_info(),
+-            recipe=p.spec.recipe(listing=p.listing_hash),
++            recipe=p.spec.recipe(listing=None),
+             payload=payload,
+         )

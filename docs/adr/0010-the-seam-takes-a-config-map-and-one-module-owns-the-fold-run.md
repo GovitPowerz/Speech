@@ -54,8 +54,15 @@ Three things, each owned once.
   already names the CLI flag axis in Rust.
 
 Checkpoints stay outside the module: a `FoldRun` takes weights, a checkpoint is a directory of
-packs (CONTEXT.md), and `resolve_checkpoint_packs` is the one resolver of the two naming
-schemes; `evaluate(state, packs, scores_dir)` takes the packs.
+packs (CONTEXT.md), and one resolver reads the two naming schemes; `evaluate(state, packs,
+scores_dir)` takes the packs. Amendment (issue #82): the resolver is
+`drivers/checkpoint.py::Checkpoint.packs()` and the checkpoint is a value, `Checkpoint(dir,
+nets)`, which the Modern loop writes and resumes through; the loop's input is `ModernRun` (the
+map, the workdir, the out dir, the listing rows), the Legacy regime keeps `RunState`; and the
+Launcher's run directory is a value too, `PreparedRun`, built by `prepare(spec)` before any
+engine exists, whose `record()` is built from it. The `base.config` re-parse that fed
+`train_modern` was the last file round trip on the Python side and is gone; the file is
+written and hashed only, and the manifest stays written and never read (ADR-0009 unchanged).
 
 ## Consequences
 

@@ -24,7 +24,10 @@ from speech.batching import create_batches, get_new_batch
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.drivers import baseline as B
 from speech.drivers.spec import ARM_CONFIG, LID_ARMS, SAD_ARMS, BaselineSpec
-from speech.drivers.state import ModernTrainParams
+from speech.drivers.state import EpochRecord, ModernRun, ModernTrainParams, ModernTrainResult
+from speech.evaluate import CollarScore as EvalCollar
+from speech.evaluate import DcfReport
+from speech.ledger.schema import CollarScore
 
 # --------------------------------------------------------------------------------------- #
 # synthetic records
@@ -64,6 +67,27 @@ def test_stratified_splits_proportional_to_source_and_floors_rare_language() -> 
     per = {lang: sum(1 for r in train if r["lang"] == lang) for lang in ("ara", "chi", "tam")}
     assert per["ara"] > per["chi"] > per["tam"], f"train quotas must track source proportion, got {per}"
     assert per["tam"] >= 1, "a rare language must not vanish from the training split"
+
+
+def test_a_zero_held_out_size_is_an_empty_split_on_both_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #98: `valid_size=0` / `test_size=0` mean NO held-out split on either arm (the Modern
+    loop then validates on the train listing); the LID one-per-language floor applies to
+    positive sizes only. Before the fix a LID 0 was a 12-file split and a SAD 0 an empty one."""
+    recs = _records({"ara": 10, "chi": 10, "tam": 10})
+    _, valid, test = B.stratified_splits(recs, n_train=9, n_valid=0, n_test=0, seed=0)
+    assert valid == [] and test == []
+    _, valid, test = B.stratified_splits(recs, n_train=9, n_valid=1, n_test=2, seed=0)
+    assert len(valid) == 3 and len(test) == 3, "a positive size still keeps every language (min 1 each)"
+
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
+    p = B.prepare(_spec("lid-phseq", root, out, subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1))
+    assert p.splits.valid == [] and p.splits.test == [] and p.params.valid_listing is None
+
+    sad_root = tmp_path / "sad_corpus"
+    _sad_corpus_tree(sad_root, 20)
+    _fake_engine(monkeypatch, _SAD_FLAT)
+    q = B.prepare(_spec("sad", sad_root, tmp_path / "sad_out", subset=4, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1))
+    assert q.splits.valid == [] and q.splits.test == [] and q.params.valid_listing is None
 
 
 def test_stratified_splits_seed_sensitive() -> None:
@@ -293,80 +317,88 @@ def _spec(arm: str, corpus_root: Path, out_dir: Path, **over: object) -> Baselin
     return BaselineSpec(**{"arm": arm, "corpus_root": corpus_root, "out_dir": out_dir, **over})  # type: ignore[arg-type]
 
 
-def _stub_run_state() -> type:
-    """A `RunState` stand-in for the engine-free plumbing tests: both constructors return a bare
-    object (nothing downstream reads it once the trainer and the scorers are stubbed)."""
-    return type("RS", (), {"from_config": staticmethod(lambda *a, **k: object()), "from_parsed": staticmethod(lambda *a, **k: object())})
+def _fake_engine(monkeypatch: pytest.MonkeyPatch, flat: dict[str, str]) -> None:
+    """Stub the engine boundary `prepare` touches: a fake `speech_rs` whose `load_toml_config`
+    returns `flat`, and seed packs that are paths only (no `init_weights`, so no engine layout)."""
+    import sys
+    import types
+
+    fake_rs = types.ModuleType("speech_rs")
+    setattr(fake_rs, "load_toml_config", lambda p: flat)  # noqa: B010 -- dynamic attr on a fake module
+    monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
+    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one, nets: [out / name for _, name in nets])
 
 
-def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The dry_run OVERRIDES (subset/epochs/steps/patience) + metadata recording, exercised
-    with a synthetic corpus tree + stubbed engine boundary: `speech_rs.load_toml_config`,
-    `train_modern` (via `_train_fn`), and the held-out scorer are all replaced, so no engine
-    or corpus is touched. Proves run_baseline wires the flags into the metadata + params."""
+def _stub_train(monkeypatch: pytest.MonkeyPatch, hook: Callable[[ModernRun, ModernTrainParams], object] | None = None) -> None:
+    """Replace `train_modern` with a one-epoch no-op that leaves an empty checkpoint directory
+    (what `run_baseline` reads back); `hook` runs mid-"training"."""
+
+    def train(run: ModernRun, params: ModernTrainParams) -> ModernTrainResult:
+        if hook is not None:
+            hook(run, params)
+        ckpt = run.checkpoint.dir
+        ckpt.mkdir(parents=True, exist_ok=True)
+        return ModernTrainResult(best_epoch=0, best_val_cost=1.0, epochs_run=1, stopped_early=False, history=[], checkpoint_dir=str(ckpt))
+
+    monkeypatch.setattr(B, "train_modern", train)
+
+
+_LID_FEATURES_FLAT: dict[str, str] = {
+    "Algo_choice": "6",
+    "BLSTM_NNetInputSize": "11",
+    "BLSTM_LID_NNetInputSize": "23",
+    "fileslisting": "x",
+    "language2classmapping": "y",
+    "BLSTM_weightsFile": "s",
+    "BLSTM_LID_weightsFile": "l",
+    "numOuterThreads": "1",
+}
+
+
+def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The dry_run OVERRIDES (subset/epochs/steps/patience) + the manifest + the Modern loop's
+    params, exercised on a synthetic corpus tree with the engine boundary stubbed: `prepare`
+    builds no engine and trains nothing, so the value is read directly."""
     root = tmp_path / "corpus"
     lre = root / "train" / "LID_Features" / "plp8f0mvsdd" / "LRE03"
     lre.mkdir(parents=True)
     for lang in B._LANGS:
         for i in range(4):
             (lre / f"{lang}_{i}.plp8f0mvsdd").write_bytes(b"")
-
-    # stub the engine boundary: a fake speech_rs module + a stub trainer + a no-op scorer.
-    import sys
-    import types
-
-    fake_rs = types.ModuleType("speech_rs")
-    fake_flat = {
-        "Algo_choice": "6",
-        "BLSTM_NNetInputSize": "11",
-        "BLSTM_LID_NNetInputSize": "23",
-        "fileslisting": "x",
-        "language2classmapping": "y",
-        "BLSTM_weightsFile": "s",
-        "BLSTM_LID_weightsFile": "l",
-        "numOuterThreads": "1",
-    }
-    setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
-    monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
-    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one: None)
-    monkeypatch.setattr(B, "RunState", _stub_run_state())
-
-    class _Res:
-        checkpoint_dir = str(tmp_path / "out" / "checkpoint")
-        epochs_run, best_epoch, best_val_cost = 1, 0, 1.0
-        history: list[object] = []
-
-    monkeypatch.setattr(B, "_score_packs_on_test", lambda *a, **k: (None, None, None))
+    _fake_engine(monkeypatch, _LID_FEATURES_FLAT)
 
     out = tmp_path / "out"
-    (tmp_path / "out" / "checkpoint").mkdir(parents=True)
-    seen: list[ModernTrainParams] = []
-
-    def stub_train(state: object, params: ModernTrainParams) -> _Res:
-        seen.append(params)
-        return _Res()
-
-    res = B.run_baseline(_spec("lid-features", root, out, dry_run=True, seed=5, lanes=2, minibatch=4, score_init=True), _train_fn=stub_train)
+    p = B.prepare(_spec("lid-features", root, out, dry_run=True, seed=5, lanes=2, minibatch=4, score_init=True))
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["seed"] == 5 and meta["lanes"] == 2
     assert meta["minibatch"] == 4 and meta["valid_size"] == 12 and meta["test_size"] == 24 and meta["score_init"] is True
     assert meta["lre_listing"] is None and meta["lre_listing_hash"] is None and meta["resume"] is False
-    assert res.n_train > 0  # a tiny subset was drawn from the synthetic tree
+    assert meta["val_metric"] == p.params.val_metric == "nn_cost_seg" and meta["config_hash"] == p.config_hash
+    assert len(p.splits.train) > 0  # a tiny subset was drawn from the synthetic tree
+    # the params carry the spec, the clamp included; the run is the map over the out dir.
+    assert (p.params.epochs, p.params.steps_per_epoch, p.params.patience) == (1, 1, 99)
+    assert p.params.minibatch == 4 and p.params.seed == 5 and p.params.nb_classes == len(B._LANGS)
+    assert p.params.valid_listing == p.splits.valid_name and p.params.resume_from is None
+    assert p.run.workdir == p.run.out_dir == out and p.run.cfg is p.cfg
+    assert p.seed_packs == [out / "sad_seed.bin", out / "lid_seed.bin"]
+    assert p.run.checkpoint.dir == out / "checkpoint" and p.run.checkpoint.nets == ["sad", "lid"]
 
     # A localized listing: the manifest keeps its path (local only) and its content hash (the recipe's `listing`).
+    import types
+
     listing = tmp_path / "lre03_train.csv"
     listing.write_text("a,b\n")
     monkeypatch.setattr(B, "localize_listing", lambda src, corpus_root, out: types.SimpleNamespace(rows_found=1, rows_total=1, rows_missing=0))
     monkeypatch.setattr(B, "_records_from_localized", lambda localized, ref_stm: B.derive_lid_features_records(root, ref_stm))
-    B.run_baseline(_spec("lid-features", root, tmp_path / "out2", dry_run=True, lre_listing=listing), _train_fn=stub_train)
+    p2 = B.prepare(_spec("lid-features", root, tmp_path / "out2", dry_run=True, lre_listing=listing))
     meta2 = json.loads((tmp_path / "out2" / "run_metadata.json").read_text())
-    assert meta2["lre_listing"] == str(listing) and meta2["lre_listing_hash"] == B.listing_hash(listing)
+    assert meta2["lre_listing"] == str(listing) and meta2["lre_listing_hash"] == B.listing_hash(listing) == p2.listing_hash
 
     # The mini-batch rotation built from these params draws every one of the 12 classes (the
     # multilingual layout parked class 11 in a never-read aggregate slot: `vie` never trained).
-    params = seen[0]
+    params = p.params
     fv = np.repeat(np.arange(len(B._LANGS), dtype=np.float64), 3).reshape(-1, 1)
     batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, np.random.default_rng(0))
     drawn: set[int] = set()
@@ -376,21 +408,16 @@ def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch:
     assert drawn == set(range(len(B._LANGS)))
 
 
-def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, type]:
-    """A synthetic phSeq tree plus the engine boundary stubbed (a fake `speech_rs`, no seed packs, no
-    RunState, no scorer): `(corpus root, out dir, a train-result class for a `_train_fn` stub)`."""
-    import sys
-    import types
-
+def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """A synthetic phSeq tree plus the engine boundary stubbed (a fake `speech_rs`, no seed
+    packs): `(corpus root, out dir)`."""
     root = tmp_path / "corpus"
     phseq = root / "train" / "phSeq"
     phseq.mkdir(parents=True)
     for prefix in ("ar", "ma", "en", "sp", "vi", "ta", "ko", "ja", "hi", "ge", "fr", "fa"):
         for i in range(4):
             (phseq / f"{prefix}_{i}.file.phSeqbis").write_text(".a.\n")  # synthetic (fake id), no real corpus filename
-
-    fake_rs = types.ModuleType("speech_rs")
-    fake_flat = {
+    flat = {
         "Algo_choice": "6",
         "File_Type": "1",
         "BLSTM_NNetInputSize": "11",
@@ -406,99 +433,180 @@ def _stub_phseq_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple
         "BLSTM_LID_weightsFile": "l",
         "numOuterThreads": "1",
     }
-    setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
-    monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
-    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one: None)
-    monkeypatch.setattr(B, "RunState", _stub_run_state())
-    monkeypatch.setattr(B, "_score_packs_on_test", lambda *a, **k: (None, None, None))
-
-    class _Res:
-        checkpoint_dir = str(tmp_path / "out" / "checkpoint")
-        epochs_run, best_epoch, best_val_cost = 1, 0, 1.0
-        history: list[object] = []
-
-    out = tmp_path / "out"
-    (out / "checkpoint").mkdir(parents=True)
-    return root, out, _Res
+    _fake_engine(monkeypatch, flat)
+    return root, tmp_path / "out"
 
 
-def test_run_baseline_lid_phseq_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# A run with no held-out split (issue #98: a 0 is an empty split on both arms): `run_baseline`
+# trains (the stub) and records, and scores nothing, so no scorer is stubbed.
+_NO_TEST: dict[str, object] = dict(subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1)
+
+
+def test_prepare_lid_phseq_assembles_the_phonotactic_twin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The lid-phseq dispatch (phSeq tree glob, 12-class Twin, File_Type 1, LID input 38) +
-    dry_run overrides + metadata, with the engine boundary stubbed. Proves run_baseline routes
-    the phonotactic arm through the shared LID path (both nets seeded, `.scr` scorer) without
-    touching the engine/corpus, and that the config it assembles carries File_Type 1."""
-    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, seed=5, lanes=2), _train_fn=lambda state, params: _Res())
+    dry_run overrides + metadata, with the engine boundary stubbed: the phonotactic arm goes
+    through the shared LID path (both nets seeded) and the config it assembles carries File_Type 1."""
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
+    p = B.prepare(_spec("lid-phseq", root, out, dry_run=True, seed=5, lanes=2))
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["arm"] == "lid-phseq" and meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["seed"] == 5 and meta["lanes"] == 2
-    assert meta["config_toml"] == "configs/training/lre03_lid_phseq.toml"
-    assert res.n_train > 0
-    # the phonotactic arm is a Twin (both nets seeded) at File_Type 1.
-    cfg_text = (out / "base.config").read_text()
-    assert "File_Type 1" in cfg_text and "BLSTM_LID_weightsFile lid_seed.bin" in cfg_text
+    assert meta["config_toml"] == "configs/training/lre03_lid_phseq.toml" == p.config_toml
+    assert len(p.splits.train) > 0
+    # the phonotactic arm is a Twin (both nets seeded) at File_Type 1; base.config is the text the hash is of.
+    assert "File_Type 1" in p.config_text and "BLSTM_LID_weightsFile lid_seed.bin" in p.config_text
+    assert (out / "base.config").read_text() == p.config_text
     # listings carry the phseq stem.
-    assert (out / "lre03_lid_phseq_train.flst").is_file()
+    assert (out / "lre03_lid_phseq_train.flst").is_file() and p.splits.train_name == "lre03_lid_phseq_train.flst"
 
 
 def test_run_baseline_records_the_provenance_of_the_tree_it_started_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #40: a commit made while the run trains must not become the record's SHA. The stub
-    trainer moves the tree's state mid-run; `record.json` and the manifest keep the start's."""
-    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+    trainer moves the tree's state mid-run; the value, `record.json` and the manifest keep the start's."""
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
     tree = {"state": ("a" * 40, False)}
     monkeypatch.setattr(B, "git_state", lambda repo: tree["state"])
+    _stub_train(monkeypatch, hook=lambda run, params: tree.__setitem__("state", ("b" * 40, True)))
 
-    def train_then_commit(state: object, params: object) -> object:
-        tree["state"] = ("b" * 40, True)
-        return _Res()
-
-    res = B.run_baseline(_spec("lid-phseq", root, out, subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1), _train_fn=train_then_commit)
+    res = B.run_baseline(_spec("lid-phseq", root, out, **_NO_TEST))
     record = json.loads((out / "record.json").read_text())
     meta = json.loads(res.metadata_path.read_text())
+    assert (res.prepared.git_sha, res.prepared.git_dirty) == ("a" * 40, False)
     assert (record["git_sha"], record["git_dirty"]) == ("a" * 40, False)
     assert (meta["git_sha"], meta["git_dirty"]) == ("a" * 40, False)
 
 
-def test_run_baseline_fails_on_git_before_training(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_fails_on_git_before_any_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Issue #40: a tree whose provenance cannot be read stops the run before any training, and
-    before the run directory exists (no half-started run on disk)."""
-    root, _, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
+    before the run directory exists (no half-started run on disk): the SHA is read first."""
+    root, _ = _stub_phseq_engine(tmp_path, monkeypatch)
 
     def no_git(repo: Path) -> tuple[str, bool]:
         raise RuntimeError("git unavailable")
 
     trained: list[int] = []
     monkeypatch.setattr(B, "git_state", no_git)
+    _stub_train(monkeypatch, hook=lambda run, params: trained.append(params.seed))
     out = tmp_path / "never_created"
     with pytest.raises(RuntimeError, match="git unavailable"):
-        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, params: trained.append(params.seed))
+        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, valid_size=0, test_size=0))
     assert trained == [] and not out.exists()
 
 
 def test_a_dry_run_writes_its_manifest_but_no_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A dry run is a smoke, not a measurement: the ledger has no dry-run field, so the only way
     a 1-step run cannot be promoted as a launcher row is for it to leave no `record.json`."""
-    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    train = lambda state, params: _Res()  # noqa: E731
-    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=train)
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
+    _stub_train(monkeypatch)
+    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, valid_size=0, test_size=0))
     assert (out / "run_metadata.json").is_file() and not (out / "record.json").exists()
     out2 = tmp_path / "out2"
-    B.run_baseline(_spec("lid-phseq", root, out2, subset=12, valid_size=0, test_size=0, epochs=1, steps_per_epoch=1), _train_fn=train)
+    B.run_baseline(_spec("lid-phseq", root, out2, **_NO_TEST))
     assert (out2 / "record.json").is_file()
+
+
+def test_record_is_built_from_the_value_not_the_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #82: the record is a projection of the `PreparedRun` and the training result.
+    With the manifest deleted, `record()` still yields the spec's recipe, the start's
+    provenance, the one `val_metric`, the config hash and the localized listing's hash."""
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
+    monkeypatch.setattr(B, "git_state", lambda repo: ("c" * 40, False))
+    _stub_train(monkeypatch)
+    res = B.run_baseline(_spec("lid-phseq", root, out, **_NO_TEST))
+    res.metadata_path.unlink()
+    rec = res.record("gate", test="tests/x.py::t")
+    assert rec.recipe == res.prepared.spec.recipe(listing=None) and rec.recipe.arm == "lid-phseq" and rec.recipe.listing is None
+    assert (rec.git_sha, rec.git_dirty) == ("c" * 40, False)
+    assert rec.payload.source == "gate" and rec.payload.test == "tests/x.py::t" and rec.payload.resumed is False
+    assert rec.payload.val_metric == "nn_cost_seg" and rec.payload.config_hash == res.prepared.config_hash
+    assert rec.payload.config_name == "configs/training/lre03_lid_phseq.toml"
+    assert (rec.payload.n_train, rec.payload.n_valid, rec.payload.n_test) == (12, 0, 0)
+    assert rec.payload.epochs_run == 1 and rec.payload.first_val_cost is None and rec.payload.best_val_cost == 1.0
+    assert rec.payload.dcf is None and rec.payload.lid_error is None and rec.payload.init_lid_error is None
+    assert str(root) not in rec.model_dump_json() and str(out) not in rec.model_dump_json()
+
+    # A localized listing is its content hash in the recipe (never its path).
+    import types
+
+    listing = tmp_path / "lre03_train.csv"
+    listing.write_text("a,b\n")
+    monkeypatch.setattr(B, "localize_listing", lambda src, corpus_root, o: types.SimpleNamespace(rows_found=1, rows_total=1, rows_missing=0))
+    monkeypatch.setattr(B, "_records_from_localized", lambda localized, ref_stm: B.derive_lid_phseq_records(root, ref_stm))
+    res2 = B.run_baseline(_spec("lid-phseq", root, tmp_path / "out2", lre_listing=listing, **_NO_TEST))
+    rec2 = res2.record("launcher")
+    assert rec2.recipe.listing == B.listing_hash(listing) and str(listing) not in rec2.model_dump_json()
+
+
+_SAD_FLAT: dict[str, str] = {
+    "Algo_choice": "3",
+    "BLSTM_NNetInputSize": "23",
+    "fileslisting": "x",
+    "language2classmapping": "y",
+    "BLSTM_weightsFile": "s",
+    "numOuterThreads": "1",
+}
+
+
+def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #82: with a test split, the trained score is the run's `best()` set under
+    `score_trained`, the init score the seed packs under `score_init`, and the record projects
+    both DCF reports and the cost trajectory (the off-corpus pin of what the gates read)."""
+    root = tmp_path / "sad_corpus"
+    _sad_corpus_tree(root, 20)
+    _fake_engine(monkeypatch, _SAD_FLAT)
+    hist = [
+        EpochRecord(epoch=0, train_cost=0.9, val_cost=0.8, confusion_error=None, is_best=True),
+        EpochRecord(epoch=1, train_cost=0.7, val_cost=0.6, confusion_error=None, is_best=True),
+    ]
+    monkeypatch.setattr(
+        B,
+        "train_modern",
+        lambda run, params: ModernTrainResult(
+            best_epoch=1, best_val_cost=0.6, epochs_run=2, stopped_early=False, history=hist, checkpoint_dir=str(run.checkpoint.dir)
+        ),
+    )
+    reports = {
+        tag: DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=pfa, dcf=pfa / 4) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
+        for tag, pfa in (("score_trained", 0.4), ("score_init", 1.0))
+    }
+    seen: list[tuple[Path, str, int, str]] = []
+
+    def score(
+        base_cfg: dict[str, str], workdir: Path, pack: Path, dump_dir: Path, test_records: list[dict[str, str]], test_name: str
+    ) -> tuple[DcfReport, Path]:
+        seen.append((pack, dump_dir.name, len(test_records), test_name))
+        return reports[dump_dir.name], dump_dir
+
+    monkeypatch.setattr(B, "_score_sad_pack_on_test", score)
+    out = tmp_path / "out"
+    res = B.run_baseline(_spec("sad", root, out, subset=4, valid_size=0, test_size=2, epochs=2, steps_per_epoch=1, score_init=True))
+
+    assert seen == [
+        (out / "checkpoint" / "best_sad.bin", "score_trained", 2, "sad_test_subset.flst"),
+        (out / "sad_seed.bin", "score_init", 2, "sad_test_subset.flst"),
+    ]
+    assert res.dcf is reports["score_trained"] and res.init_dcf is reports["score_init"] and res.scores_dir == out / "score_trained"
+    p = res.record("launcher").payload
+    assert p.collar(0.5) == CollarScore(collar=0.5, dcf=0.1, pmiss=0.0, pfa=0.4)
+    assert p.init_dcf is not None and [c.dcf for c in p.init_dcf] == [0.25] * 5
+    assert (p.first_val_cost, p.best_val_cost, p.first_train_cost, p.last_train_cost) == (0.8, 0.6, 0.9, 0.7)
+    assert (p.n_train, p.n_valid, p.n_test, p.epochs_run, p.best_epoch) == (4, 0, 2, 2, 1)
 
 
 def test_an_out_dir_holding_a_run_is_refused_unless_resuming(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An overwritten full run is a lost record: the launcher refuses a run directory that
     already holds a run's manifest unless the call resumes from it."""
-    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    train = lambda state, params: _Res()  # noqa: E731
-    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=train)
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
     trained: list[int] = []
+    _stub_train(monkeypatch, hook=lambda run, params: trained.append(params.seed))
+    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, valid_size=0, test_size=0))
+    assert trained == [0]
     with pytest.raises(FileExistsError, match="out_dir|resume"):
-        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True), _train_fn=lambda state, params: trained.append(params.seed))
-    assert trained == []
-    B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, resume=True), _train_fn=train)
+        B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, valid_size=0, test_size=0))
+    assert trained == [0]
+    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, valid_size=0, test_size=0, resume=True))
+    assert trained == [0, 0] and res.prepared.params.resume_from == str(out / "checkpoint")
 
 
 # --------------------------------------------------------------------------------------- #
@@ -547,15 +655,15 @@ def test_cell_overlay_targets_the_lid_net_under_its_prefix() -> None:
 
 
 def test_lid_arm_knob_lands_on_the_lid_net_and_leaves_the_sad_net_lstm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root, out, _Res = _stub_phseq_engine(tmp_path, monkeypatch)
-    res = B.run_baseline(_spec("lid-phseq", root, out, dry_run=True, cell="mamba", direction="forward"), _train_fn=lambda state, params: _Res())
-    cfg_text = (out / "base.config").read_text()
+    root, out = _stub_phseq_engine(tmp_path, monkeypatch)
+    res = B.prepare(_spec("lid-phseq", root, out, dry_run=True, cell="mamba", direction="forward"))
+    cfg_text = res.config_text
     assert "BLSTM_LID_Cell_Type mamba" in cfg_text and "BLSTM_LID_Direction forward" in cfg_text
     assert "BLSTM_LID_OutputNeuronNb 24,12" in cfg_text and "BLSTM_LID_window 0" in cfg_text
     assert "BLSTM_Cell_Type" not in cfg_text and "BLSTM_Direction" not in cfg_text
     assert "BLSTM_OutputNeuronNb 24,1\n" in cfg_text and "BLSTM_window 5.0\n" in cfg_text
-    meta = json.loads(res.metadata_path.read_text())
-    assert meta["cell"] == "mamba" and meta["direction"] == "forward"
+    meta = json.loads(res.manifest_path.read_text())
+    assert meta["cell"] == "mamba" and meta["direction"] == "forward" and (res.spec.cell, res.spec.direction) == ("mamba", "forward")
 
 
 def test_sad_seed_pack_is_byte_identical_across_lid_cells(tmp_path: Path) -> None:
@@ -569,7 +677,7 @@ def test_sad_seed_pack_is_byte_identical_across_lid_cells(tmp_path: Path) -> Non
             cfg = {**_TWIN_FLAT, **B.cell_overlay(_TWIN_FLAT, cell, direction, prefix="BLSTM_LID")}
             out = tmp_path / f"{cell}_{direction}"
             out.mkdir()
-            B._generate_seed_packs(cfg, out, 0, "xavier", True)
+            B._generate_seed_packs(cfg, out, 0, "xavier", True, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")])
             sad_packs[cell, direction] = (out / "sad_seed.bin").read_bytes()
             lid_lengths[cell, direction] = len((out / "lid_seed.bin").read_bytes())
     assert len(set(sad_packs.values())) == 1
@@ -671,48 +779,34 @@ def test_prepare_sad_listings_split_plumbing(tmp_path: Path) -> None:
     assert all(r["refseg"].endswith(".part.xml") for r in tr), "SAD refs are the corpus VRCTS .part.xml files"
 
 
-def test_run_baseline_sad_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_sad_assembles_the_single_net(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The SAD arm dispatch (single-net config, no LID seed, audio cap) + dry_run overrides +
-    metadata, with the engine boundary stubbed (`speech_rs`, seed-pack init, `RunState`, the
-    DCF scorer). Proves run_baseline routes the sad arm without touching the engine/corpus."""
-    import sys
-    import types
-
+    metadata, with the engine boundary stubbed (`speech_rs`, seed-pack init)."""
     root = tmp_path / "corpus"
     _sad_corpus_tree(root, 12)
-
-    fake_rs = types.ModuleType("speech_rs")
-    fake_flat = {
-        "Algo_choice": "3",
-        "BLSTM_NNetInputSize": "23",
-        "fileslisting": "x",
-        "language2classmapping": "y",
-        "BLSTM_weightsFile": "s",
-        "numOuterThreads": "1",
-        "Audio_max_duration": "120",
-    }
-    setattr(fake_rs, "load_toml_config", lambda p: fake_flat)  # noqa: B010 -- dynamic attr on a fake module
-    monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
-    monkeypatch.setattr(B, "_generate_sad_seed_pack", lambda flat, out, seed, scheme, forget: None)
-    monkeypatch.setattr(B, "RunState", _stub_run_state())
-    monkeypatch.setattr(B, "_score_sad_pack_on_test", lambda *a, **k: (None, None))
-
-    class _Res:
-        checkpoint_dir = str(tmp_path / "out" / "checkpoint")
-        epochs_run, best_epoch, best_val_cost = 1, 0, 1.0
-        history: list[object] = []
-
+    _fake_engine(
+        monkeypatch,
+        {
+            "Algo_choice": "3",
+            "BLSTM_NNetInputSize": "23",
+            "fileslisting": "x",
+            "language2classmapping": "y",
+            "BLSTM_weightsFile": "s",
+            "numOuterThreads": "1",
+            "Audio_max_duration": "120",
+        },
+    )
     out = tmp_path / "out"
-    (out / "checkpoint").mkdir(parents=True)
-    res = B.run_baseline(_spec("sad", root, out, dry_run=True, seed=5, lanes=2, audio_max_duration=15.0), _train_fn=lambda state, params: _Res())
+    p = B.prepare(_spec("sad", root, out, dry_run=True, seed=5, lanes=2, audio_max_duration=15.0))
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["arm"] == "sad" and meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
     assert meta["seed"] == 5 and meta["lanes"] == 2 and meta["audio_max_duration"] == 15.0
-    assert res.n_train > 0
-    # single-net config: no LID weight-file key, and the audio cap threaded into base.config.
-    cfg_text = (out / "base.config").read_text()
-    assert "BLSTM_LID_weightsFile" not in cfg_text and "Audio_max_duration 15.0" in cfg_text
+    assert len(p.splits.train) > 0
+    # single-net config: no LID weight-file key, one seed pack, and the audio cap threaded into base.config.
+    assert "BLSTM_LID_weightsFile" not in p.config_text and "Audio_max_duration 15.0" in p.config_text
+    assert p.seed_packs == [out / "sad_seed.bin"] and p.run.checkpoint.nets == ["sad"]
+    assert p.params.valid_listing == "sad_valid_subset.flst" and p.params.nb_classes == 1
 
 
 def test_build_parser_sad_audio_cap_wiring() -> None:

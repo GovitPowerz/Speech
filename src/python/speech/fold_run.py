@@ -31,7 +31,7 @@ was repeated at every driver site. This module is that recipe, written once:
     plus lid on the Twin). L2 stays with `engine.forward_backward`.
 
 Checkpoints are outside this module: it takes weights, and a checkpoint is a directory of
-packs (CONTEXT.md) resolved by `drivers/test.py::resolve_checkpoint_packs`.
+packs (CONTEXT.md), `drivers/checkpoint.py::Checkpoint`.
 """
 
 from __future__ import annotations

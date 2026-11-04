@@ -49,7 +49,7 @@ def gate_record(request: pytest.FixtureRequest) -> GateRecorder:
     stage: pathlib.Path | None = request.config.getoption("--ledger-stage")
 
     def record(res: BaselineResult) -> pathlib.Path:
-        rec = res.to_record("gate", test=request.node.nodeid)
+        rec = res.record("gate", test=request.node.nodeid)
         path = write_record(rec, res.out_dir / "record.json")
         if stage is not None:
             stage.mkdir(parents=True, exist_ok=True)
