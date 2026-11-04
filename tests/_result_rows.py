@@ -73,12 +73,8 @@ def channel_results_from_matrix(mcr: NDArray[np.float64]) -> ChannelResults:
         seg_count=res[:, -1].astype(np.int64),
         # The matrix carries no segmentation: the empty list at the row's duration, as the
         # Rust `from_row` seeds it (issue #86).
-        hypothesis=[_empty_hypothesis(float(d)) for d in res[:, 5]],
+        hypothesis=[(float(d), [(0.0, "Other"), (float(d), "End")]) for d in res[:, 5]],
     )
-
-
-def _empty_hypothesis(audio_duration: float) -> Hypothesis:
-    return (audio_duration, [(0.0, "Other"), (audio_duration, "End")])
 
 
 def _empty() -> dict[str, NDArray[np.float64] | NDArray[np.int64] | NDArray[np.bool_] | list[Hypothesis]]:

@@ -510,10 +510,10 @@ def _sad_dcf(results: ChannelResults, test_records: Sequence[dict[str, str]]) ->
     row's index into the held-out listing, i.e. into `test_records` (`_write_listing_rows`
     writes them in order); a stereo file scores each channel against the same reference."""
     pairs: list[tuple[list[Interval], list[Interval]]] = []
-    for i in range(len(results)):
-        hyp = hyp_intervals(*results.hypothesis[i])
+    for file_idx, (audio_duration, rows) in zip(results.file, results.hypothesis, strict=True):
+        hyp = hyp_intervals(audio_duration, rows)
         span = hyp[-1][1]
-        ref = _windowed_vrcts_ref(Path(test_records[int(results.file[i])]["refseg"]), span)
+        ref = _windowed_vrcts_ref(Path(test_records[int(file_idx)]["refseg"]), span)
         pairs.append((ref, hyp))
     return _pool_dcf(pairs, _DCF_COLLARS)
 
@@ -1015,8 +1015,6 @@ def _log_scores(console: Console, scores: Scores, init_scores: Scores | None) ->
         console.log(f"held-out: lid_error={scores.lid_error:.2f}% (chance {chance:.2f}%) cavg={scores.cavg:.4f}")
         if init_scores is not None and init_scores.lid_error is not None:
             console.log(f"init baseline: lid_error={init_scores.lid_error:.2f}% (improvement {init_scores.lid_error - scores.lid_error:+.2f}pt)")
-    else:
-        console.log("held-out: nothing scored (no test split)")
 
 
 def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> BaselineResult:

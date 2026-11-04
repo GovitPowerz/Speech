@@ -2,6 +2,8 @@ mutation: the bag retains the empty [Other@0, End@duration] list on the channel 
 catcher: CAUGHT cargo --test phase4a_segfn dump_dir_vrcts
 catcher: CAUGHT pytest tests/pyo3/test_channel_results.py::test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts
 catcher: MISSED pytest tests/pyo3/test_channel_results.py::test_tier2_spectral_names_match_the_wire
+catcher: CAUGHT pytest tests/pyo3/test_phase7_parity.py::test_sad_metric_parity
+requires: corpus
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
 --- a/src/rust/src/engine/bag_of_processors.rs

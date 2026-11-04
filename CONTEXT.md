@@ -272,6 +272,9 @@ The degenerate all-one-class operating point a from-scratch SAD net reaches on a
 **Collar**:
 The scoring tolerance around each reference boundary: 0, 0.25, 0.5, 1 and 2 s.
 
+**Door**:
+One of the two readers of the engine's decided Segmentation that must agree bit for bit over one shared body (`evaluate._fill_gaps`): the dumped VRCTS xml (`load_vrcts_hyp`) and the fold result's `hypothesis` rows (`hyp_intervals`), issue #86.
+
 **Validation signal**:
 The per-epoch held-out metric early stopping reads. `NNCostSeg` moves from scratch; the balance cost plateaus.
 

@@ -2,7 +2,7 @@ mutation: hyp_intervals scores the raw audio duration instead of the 2-decimal V
 catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_hyp_intervals_sentinel_below_sigdur_leaves_a_sliver
 catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_hyp_intervals_rounds_the_span_to_sigdur
 catcher: CAUGHT pytest tests/pyo3/test_channel_results.py::test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts
-catcher: MISSED pytest tests/test_phase6_evaluate.py::test_hyp_intervals_matches_the_xml_door
+catcher: MISSED pytest tests/test_phase6_evaluate.py::test_hyp_intervals_speech_rows_span_to_the_next_begin
 
 diff --git a/src/python/speech/evaluate.py b/src/python/speech/evaluate.py
 --- a/src/python/speech/evaluate.py

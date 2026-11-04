@@ -259,8 +259,9 @@ impl ChannelResult {
     /// The inverse of [`Self::to_row`] for the fold tests and the round-trip
     /// proptest: never production-reachable. `lid` is `Some` when the row is
     /// wider than 18 or any of its three LID slots is non-zero, so a canonical
-    /// struct round-trips exactly and a crafted 18-wide row with LID numbers
-    /// (the Phase 4a aggregation tests) keeps them.
+    /// struct round-trips exactly on its columns and a crafted 18-wide row with LID
+    /// numbers (the Phase 4a aggregation tests) keeps them. `hypothesis` is not a
+    /// column: it comes back as the empty list at the row's duration (issue #86).
     #[cfg(any(test, feature = "test-support"))]
     pub fn from_row(row: &[f64]) -> Self {
         assert!(row.len() >= 18, "a result row is at least 18 columns");

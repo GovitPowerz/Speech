@@ -1,6 +1,6 @@
 mutation: hyp_intervals counts every non-End row as speech, Other included (issue #86: only a Speech row is a speech span, as the VRCTS writer prints it)
 catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_hyp_intervals_only_speech_rows_are_speech
-catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_hyp_intervals_matches_the_xml_door
+catcher: CAUGHT pytest tests/test_phase6_evaluate.py::test_hyp_intervals_speech_rows_span_to_the_next_begin
 catcher: CAUGHT pytest tests/pyo3/test_channel_results.py::test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts
 
 diff --git a/src/python/speech/evaluate.py b/src/python/speech/evaluate.py

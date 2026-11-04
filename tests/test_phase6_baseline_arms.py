@@ -571,16 +571,15 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
         tag: DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=pfa, dcf=pfa / 4) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
         for tag, pfa in (("score_trained", 0.4), ("score_init", 1.0))
     }
-    folds: dict[str, object] = {"score_trained": object(), "score_init": object()}
     seen: list[tuple[tuple[Path, ...], str, int]] = []
 
     def score_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_name: str) -> Any:
         seen.append((tuple(packs), test_name, len(cfg)))
-        return folds["score_trained" if packs[0].name == "best_sad.bin" else "score_init"]
+        return "score_trained" if packs[0].name == "best_sad.bin" else "score_init"  # the fake fold is its tag
 
     def sad_dcf(res: Any, test_records: Sequence[dict[str, str]]) -> DcfReport:
         assert len(test_records) == 2
-        return next(reports[tag] for tag, fold in folds.items() if fold is res)
+        return reports[res]
 
     monkeypatch.setattr(B, "_score_fold", score_fold)
     monkeypatch.setattr(B, "_sad_dcf", sad_dcf)
@@ -593,7 +592,7 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
     ]
     assert all(n > 0 for _, _, n in seen), "the fold is run on the prepared config map"
     assert res.dcf is reports["score_trained"] and res.init_dcf is reports["score_init"]
-    assert res.scores.results is folds["score_trained"] and res.init_scores is not None and res.init_scores.results is folds["score_init"]
+    assert res.scores.results == "score_trained" and res.init_scores is not None and res.init_scores.results == "score_init"
     p = res.record("launcher").payload
     assert p.collar(0.5) == CollarScore(collar=0.5, dcf=0.1, pmiss=0.0, pfa=0.4)
     assert p.init_dcf is not None and [c.dcf for c in p.init_dcf] == [0.25] * 5

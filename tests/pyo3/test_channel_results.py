@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.engine import ChannelResults
-from speech.evaluate import hyp_intervals, load_vrcts_hyp
+from speech.evaluate import dcf, hyp_intervals, load_vrcts_hyp
 
 from tests._result_rows import channel_results_from_matrix
 
@@ -117,7 +117,10 @@ def test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts(tmp_path: Path) -> 
         assert duration == named.audio_duration[i] and round(duration, 2) != duration, "the cap must leave a sigdur sliver"
         assert rows[0][0] == 0.0 and rows[-1] == (duration, "End")
         xml = tmp_path / "vrcts_tier2" / f"f{named.file[i] + 1}_chan_{named.chan[i] + 1}.xml"
-        assert hyp_intervals(duration, rows) == load_vrcts_hyp(xml), f"row {i}: the two doors differ"
+        seam, dumped = hyp_intervals(duration, rows), load_vrcts_hyp(xml)
+        assert seam == dumped, f"row {i}: the two doors differ"
+        ref = [(0.0, 1.0, "S"), (1.0, seam[-1][1], "NS")]  # a synthetic reference over the hyp's span
+        assert dcf(ref, seam) == dcf(ref, dumped)
     assert all([c for _, c in rows] == ["Speech", "Other", "End"] for _, rows in named.hypothesis), "the cap must decide speech then an Other tail"
 
 

@@ -216,7 +216,7 @@ def _both_doors(tmp_path: Path, audio_duration: float, rows: list[tuple[float, s
     return hyp_intervals(audio_duration, rows), load_vrcts_hyp(xml)
 
 
-def test_hyp_intervals_matches_the_xml_door() -> None:
+def test_hyp_intervals_speech_rows_span_to_the_next_begin() -> None:
     rows = [(0.0, "Other"), (0.5, "Speech"), (1.0, "Other"), (1.2345, "Speech"), (1.5, "Other"), (2.0, "End")]
     assert hyp_intervals(2.0, rows) == [
         (0.0, 0.5, "non-speech"),
