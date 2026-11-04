@@ -230,8 +230,7 @@ re-run (`-k transformer`, all six selected sub-legs): 96.43 s, exit 0, 6/6 PASSE
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -245,7 +244,6 @@ pytest.importorskip("speech_rs")
 
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import ARM_CONFIG, BaselineSpec  # noqa: E402
-from speech.drivers.state import ModernRun, ModernTrainParams  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
 from speech.engine import average_derivs  # noqa: E402
 from speech.fold_run import FoldRun  # noqa: E402
@@ -422,62 +420,38 @@ def _weak_columns(grad: NDArray[np.float64], arch: _Arch) -> dict[int, list[tupl
 # ------------------------------------------------------------------------------------- #
 
 
-@dataclass
-class _Rec:
-    val_cost: float
-    train_cost: float
-
-
-@dataclass
-class _Shim:
-    """The minimal `ModernTrainResult` surface `run_baseline` reads back; the probe never
-    trains, so the history is a single record carrying the measured init cost."""
-
-    checkpoint_dir: str
-    history: list[_Rec] = field(default_factory=list)
-    epochs_run: int = 0
-    best_epoch: int = -1
-    best_val_cost: float = float("nan")
-
-
-def _probe(out: dict[str, Any]) -> Callable[[ModernRun, ModernTrainParams], _Shim]:
-    """A `run_baseline(_train_fn=...)` stub that MEASURES the from-scratch init instead of
-    training: it re-uses the training loop's OWN seeded-init and config builders
-    (`_init_weights_from_scratch`, a gradient `FoldRun` on the base config), so what it probes
+def _probe(spec: BaselineSpec) -> dict[str, Any]:
+    """Measure the from-scratch init instead of training: `prepare(spec)` then the training
+    loop's OWN seeded init and a gradient `FoldRun` on the prepared config, so what it probes
     is exactly the theta and the fold epoch 0 would start from -- not a re-derivation that
-    could silently drift from the real path. (Phase 9's `_probe`, plus the raw gradient so
-    the inverse guard can slice it.)"""
+    could silently drift from the real path. (Phase 9's probe, plus the raw gradient so the
+    inverse guard can slice it.)"""
+    p = B.prepare(spec)
+    weights = _init_weights_from_scratch(p.run, p.params)
+    # ONE gradient fold at the init: `nn_cost` is forward_backward's `f` on this single-net
+    # arm and `average_derivs` its count normalization; the channel results come with it.
+    res = FoldRun(p.run.cfg, p.run.workdir, backprop=True).run(weights)
+    cost = res.nn_cost
+    grads = [average_derivs(d) for d in res.derivs]
+    results = res.results.for_config(0)
 
-    def probe(run: ModernRun, params: ModernTrainParams) -> _Shim:
-        weights = _init_weights_from_scratch(run, params)
-        # ONE gradient fold at the init: `nn_cost` is forward_backward's `f` on this single-net
-        # arm and `average_derivs` its count normalization; the channel results come with it.
-        res = FoldRun(run.cfg, run.workdir, backprop=True).run(weights)
-        cost = res.nn_cost
-        grads = [average_derivs(d) for d in res.derivs]
-        results = res.results.for_config(0)
-
-        grad = np.asarray(grads[0], dtype=np.float64)
-        out["grad"] = grad
-        out["pack_len"] = int(len(weights[0]))
-        out["init_cost"] = float(cost)
-        out["grad_l2"] = float(np.linalg.norm(grad))
-        out["grad_linf"] = float(np.max(np.abs(grad)))
-        out["dead"] = int(np.count_nonzero(grad == 0.0))
-        # PER-FILE normalized cost: the `seg_cost` / `seg_count` pair `_nn_cost_seg` sums,
-        # read by name off the seam (issue #23). This file once read the wrong column off
-        # the prefixed matrix (100*Pmiss); the `mean <= max` invariant in the test below is
-        # what catches that class of slip.
-        out["per_file_cost_max"] = float(np.max(results.seg_cost / np.maximum(1.0, results.seg_count)))
-        ckpt = run.checkpoint.dir
-        ckpt.mkdir(parents=True, exist_ok=True)
-        return _Shim(checkpoint_dir=str(ckpt), history=[_Rec(float(cost), float(cost))], best_val_cost=float(cost))
-
-    return probe
+    grad = np.asarray(grads[0], dtype=np.float64)
+    out: dict[str, Any] = {}
+    out["grad"] = grad
+    out["pack_len"] = int(len(weights[0]))
+    out["init_cost"] = float(cost)
+    out["grad_l2"] = float(np.linalg.norm(grad))
+    out["grad_linf"] = float(np.max(np.abs(grad)))
+    out["dead"] = int(np.count_nonzero(grad == 0.0))
+    # PER-FILE normalized cost: the `seg_cost` / `seg_count` pair `_nn_cost_seg` sums,
+    # read by name off the seam (issue #23). This file once read the wrong column off
+    # the prefixed matrix (100*Pmiss); the `mean <= max` invariant in the test below is
+    # what catches that class of slip.
+    out["per_file_cost_max"] = float(np.max(results.seg_cost / np.maximum(1.0, results.seg_count)))
+    return out
 
 
 def _run_probe(tmp_path: Path, arm: str, cell: str, direction: str) -> dict[str, Any]:
-    out: dict[str, Any] = {}
     spec = BaselineSpec(
         arm=arm,  # type: ignore[arg-type]
         corpus_root=CORPUS_ROOT,
@@ -493,8 +467,7 @@ def _run_probe(tmp_path: Path, arm: str, cell: str, direction: str) -> dict[str,
         cell=cell,  # type: ignore[arg-type]
         direction=direction,  # type: ignore[arg-type]
     )
-    B.run_baseline(spec, _train_fn=_probe(out))
-    return out
+    return _probe(spec)
 
 
 # ------------------------------------------------------------------------------------- #

@@ -25,9 +25,6 @@ identity per file and a LID error delta of exactly 0.0 -- the real-data companio
 
 from __future__ import annotations
 
-import shutil
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -42,7 +39,7 @@ from speech.batching import read_listing  # noqa: E402
 from speech.config_bridge import CELL_TYPES, DIRECTIONS, parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import Arm, BaselineSpec  # noqa: E402
-from speech.drivers.state import ModernRun, ModernTrainParams, RunState  # noqa: E402
+from speech.drivers.state import RunState  # noqa: E402
 from speech.drivers.test import _class_keys  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
 from speech.engine import average_derivs  # noqa: E402
@@ -104,42 +101,20 @@ _DET: dict[str, dict[str, object]] = {
 }
 
 
-@dataclass
-class _Rec:
-    val_cost: float
-    train_cost: float
-
-
-@dataclass
-class _Shim:
-    checkpoint_dir: str
-    history: list[_Rec] = field(default_factory=list)
-    epochs_run: int = 0
-    best_epoch: int = -1
-    best_val_cost: float = float("nan")
-
-
-def _probe(out: dict[str, float]) -> Callable[[ModernRun, ModernTrainParams], _Shim]:
-    """A `run_baseline(_train_fn=...)` stub measuring the from-scratch init instead of
-    training, through the loop's OWN seeded init and a gradient `FoldRun` on the base config
-    (the Phase-9 probe). The seed packs stand in as the checkpoint so the held-out scoring
-    that follows runs on the init (LID allocates at least one test file per language)."""
-
-    def probe(run: ModernRun, params: ModernTrainParams) -> _Shim:
-        weights = _init_weights_from_scratch(run, params)
-        res = FoldRun(run.cfg, run.workdir, backprop=True).run(weights)
-        grads = [average_derivs(d) for d in res.derivs]
-        out["sad_len"], out["lid_len"] = float(len(weights[0])), float(len(weights[1]))
-        out["init_cost"] = float(res.nn_cost)
-        out["sad_grad_linf"] = float(np.max(np.abs(grads[0])))
-        out["lid_grad_l2"] = float(np.linalg.norm(grads[1]))
-        ckpt = run.checkpoint.dir
-        ckpt.mkdir(parents=True, exist_ok=True)
-        for net in ("sad", "lid"):
-            shutil.copyfile(run.out_dir / f"{net}_seed.bin", ckpt / f"best_{net}.bin")
-        return _Shim(checkpoint_dir=str(ckpt), history=[_Rec(float(res.nn_cost), float(res.nn_cost))], best_val_cost=float(res.nn_cost))
-
-    return probe
+def _probe(spec: BaselineSpec) -> dict[str, float]:
+    """Measure the from-scratch init instead of training: `prepare(spec)` then the loop's OWN
+    seeded init and a gradient `FoldRun` on the prepared config (the Phase-9 probe). No
+    `train_modern`, no checkpoint, no scoring (the spec has no test split)."""
+    p = B.prepare(spec)
+    weights = _init_weights_from_scratch(p.run, p.params)
+    res = FoldRun(p.run.cfg, p.run.workdir, backprop=True).run(weights)
+    grads = [average_derivs(d) for d in res.derivs]
+    out: dict[str, float] = {}
+    out["sad_len"], out["lid_len"] = float(len(weights[0])), float(len(weights[1]))
+    out["init_cost"] = float(res.nn_cost)
+    out["sad_grad_linf"] = float(np.max(np.abs(grads[0])))
+    out["lid_grad_l2"] = float(np.linalg.norm(grads[1]))
+    return out
 
 
 @pytest.mark.slow
@@ -166,7 +141,6 @@ def test_lid_init_is_trainable(tmp_path: Path, arm: str, cell: str, direction: s
     constant 55.26; the bound below is 20%, 3.4x headroom over the worst) and every LID
     gradient is far from zero (worst 0.133 against a 1e-3 pin). The SAD gradient is exactly
     zero on all 20 legs: Mode 7 never runs that net."""
-    out: dict[str, float] = {}
     spec = BaselineSpec(
         arm=arm,  # type: ignore[arg-type]
         corpus_root=CORPUS_ROOT,
@@ -181,7 +155,7 @@ def test_lid_init_is_trainable(tmp_path: Path, arm: str, cell: str, direction: s
         cell=cell,  # type: ignore[arg-type]
         direction=direction,  # type: ignore[arg-type]
     )
-    B.run_baseline(spec, _train_fn=_probe(out))
+    out = _probe(spec)
     base = (tmp_path / "probe" / "base.config").read_text()
 
     # The overlay landed under the LID prefix and nowhere else.
