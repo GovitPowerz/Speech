@@ -1,0 +1,14 @@
+mutation: the LID per-language floor applied at a held-out size of 0 (a 0 draws one file per language again, the pre-#98 contract)
+catcher: CAUGHT pytest tests/test_phase6_baseline_arms.py::test_a_zero_held_out_size_is_an_empty_split_on_both_arms
+
+diff --git a/src/python/speech/drivers/baseline.py b/src/python/speech/drivers/baseline.py
+--- a/src/python/speech/drivers/baseline.py
++++ b/src/python/speech/drivers/baseline.py
+@@ -147,7 +147,5 @@ def _per_language_counts(groups: dict[str, list[dict[str, str]]], total: int) -> dict[str, int]:
+     floor applies to positive sizes only). Used by `stratified_splits` for the valid/test
+     quotas and for train when `n_train` is an explicit count (the `n_train=None` full-run path
+     derives train's quota as the remainder instead)."""
+-    if total == 0:
+-        return dict.fromkeys(groups, 0)
+     n_all = sum(len(v) for v in groups.values())
+     return {lang: min(len(items), max(1, round(total * len(items) / n_all))) for lang, items in groups.items()}

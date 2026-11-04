@@ -1,0 +1,14 @@
+mutation: Checkpoint.resume() restarts at epochs_run + 1 instead of epochs_run, so a resumed run skips one epoch of the total (issue #82: _resume folded into the checkpoint value)
+catcher: CAUGHT pytest tests/test_phase5_train_modern.py::test_resume_from_last_equivalence
+catcher: CAUGHT pytest tests/test_checkpoint.py::test_resume_reloads_last_packs_and_continues_at_epochs_run
+
+diff --git a/src/python/speech/drivers/checkpoint.py b/src/python/speech/drivers/checkpoint.py
+--- a/src/python/speech/drivers/checkpoint.py
++++ b/src/python/speech/drivers/checkpoint.py
+@@ -97,5 +97,5 @@ class Checkpoint:
+         number of epochs already run, so the loop continues toward `params.epochs` (the TOTAL)."""
+         prev = self.history()
+         weights = [np.asarray(read_bin(p)[2], dtype=F64) for p in self.last()]
+-        return weights, list(prev.history), prev.best_val_cost, prev.best_epoch, prev.epochs_run
++        return weights, list(prev.history), prev.best_val_cost, prev.best_epoch, prev.epochs_run + 1
+ 

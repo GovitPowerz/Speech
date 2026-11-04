@@ -1,0 +1,17 @@
+mutation: Checkpoint.packs() assembles a pack set across the two naming schemes (the first existing file per net) instead of requiring one complete scheme (issue #82: the resolver moved into the checkpoint value, its #29 rule kept)
+catcher: CAUGHT pytest tests/test_checkpoint.py::test_packs_never_mixes_schemes
+
+diff --git a/src/python/speech/drivers/checkpoint.py b/src/python/speech/drivers/checkpoint.py
+--- a/src/python/speech/drivers/checkpoint.py
++++ b/src/python/speech/drivers/checkpoint.py
+@@ -107,7 +107,7 @@ class Checkpoint:
+         `all(exists)` guard skipped `set_weights` and scored the config's seed pack in silence)."""
+         schemes = [[self.dir / f"{net}_weights.bin" for net in self.nets], self.best()]
+-        for packs in schemes:
+-            if all(p.exists() for p in packs):
+-                return packs
++        mixed = [next((p for p in (legacy, modern) if p.exists()), legacy) for legacy, modern in zip(schemes[0], schemes[1], strict=True)]
++        if all(p.exists() for p in mixed):
++            return mixed
+         expected = " or ".join(" + ".join(p.name for p in packs) for packs in schemes)
+         raise FileNotFoundError(f"checkpoint {self.dir} has no complete weight-pack set: expected {expected}")
