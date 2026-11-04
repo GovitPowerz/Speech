@@ -426,7 +426,7 @@ def test_causality_cost_boundary_on_corpus() -> None:
 @requires_corpus
 def test_causality_cost_dcf_on_corpus() -> None:
     """Score the phase-6 SAD held-out slice (the recipe's test records) under BOTH modes via the
-    established `_score_sad_pack_on_test` flow, and REPORT the pooled DCF delta. Self-norm is the
+    Launcher's `_held_out_fold` + `_sad_dcf` flow, and REPORT the pooled DCF delta. Self-norm is the
     trained-net baseline (== the phase-7 fast SAD score); frozen is the same net under the frozen
     stats. The single `Audio_fixed_gain` is DECISION-INVARIANT for this `IgnoreFirstDCT`/no-LTSV/TDC
     net (the DCT cancellation), so one global gain scores all test files consistently. REPORTED,
@@ -442,16 +442,11 @@ def test_causality_cost_dcf_on_corpus() -> None:
     froz_cfg = _frozen_cfg(arm, gain, fileslisting=arm.test_listing.name, dump_dir=None)
 
     t0 = time.time()
-    self_rep, _ = B._score_sad_pack_on_test(
-        self_cfg, arm.out_dir, arm.ckpt / "best_sad.bin", arm.out_dir / "_t8_dcf_self", arm.test_records, arm.test_listing.name
-    )
+    self_rep = B._sad_dcf(B._held_out_fold(self_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
     self_s = time.time() - t0
     t0 = time.time()
-    froz_rep, _ = B._score_sad_pack_on_test(
-        froz_cfg, arm.out_dir, arm.ckpt / "best_sad.bin", arm.out_dir / "_t8_dcf_frozen", arm.test_records, arm.test_listing.name
-    )
+    froz_rep = B._sad_dcf(B._held_out_fold(froz_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
     froz_s = time.time() - t0
-    assert self_rep is not None and froz_rep is not None, "both modes must produce held-out VRCTS hyps"
 
     self_dcf = {c: self_rep.by_collar(c).dcf for c in _COLLARS}
     froz_dcf = {c: froz_rep.by_collar(c).dcf for c in _COLLARS}

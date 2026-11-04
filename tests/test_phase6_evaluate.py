@@ -23,7 +23,19 @@ from typing import Any
 import numpy as np
 import pytest
 from speech.drivers.test import write_scores
-from speech.evaluate import CollarScore, DcfReport, Interval, cavg, dcf, lid_error, load_tab_ref, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
+from speech.evaluate import (
+    CollarScore,
+    DcfReport,
+    Interval,
+    cavg,
+    dcf,
+    hyp_intervals,
+    lid_error,
+    load_tab_ref,
+    load_vrcts_hyp,
+    load_vrcts_ref,
+    read_scr_scores,
+)
 
 DCF_DIR = Path(__file__).resolve().parent / "reference_data" / "phase6" / "dcf"
 GOLDENS = sorted(p for p in DCF_DIR.glob("*.json") if p.name != "dcf_manifest.json")
@@ -188,6 +200,59 @@ def test_load_vrcts_hyp_no_speech_is_all_nonspeech(tmp_path: Path) -> None:
     xml = tmp_path / "hyp.xml"
     xml.write_text(_vrcts(5.0, []))
     assert load_vrcts_hyp(xml) == [(0.0, 5.0, "non-speech")]
+
+
+# --- hyp_intervals: the fold-result door, at the xml door's quantum (issue #86) ----------
+#
+# `_vrcts` prints what `to_vrcts_string_chan` prints: stime/etime at 4 decimals, sigdur at 2
+# (its `{sigdur:.2f}`). Feeding one boundary list through both doors must give the same
+# intervals bit for bit; the sentinel cases below are where the two roundings show.
+
+
+def _both_doors(tmp_path: Path, audio_duration: float, rows: list[tuple[float, str]]) -> tuple[list[Interval], list[Interval]]:
+    speech = [(b, rows[i + 1][0]) for i, (b, c) in enumerate(rows[:-1]) if c == "Speech"]
+    xml = tmp_path / "hyp.xml"
+    xml.write_text(_vrcts(audio_duration, speech))
+    return hyp_intervals(audio_duration, rows), load_vrcts_hyp(xml)
+
+
+def test_hyp_intervals_speech_rows_span_to_the_next_begin() -> None:
+    rows = [(0.0, "Other"), (0.5, "Speech"), (1.0, "Other"), (1.2345, "Speech"), (1.5, "Other"), (2.0, "End")]
+    assert hyp_intervals(2.0, rows) == [
+        (0.0, 0.5, "non-speech"),
+        (0.5, 1.0, "speech"),
+        (1.0, 1.2345, "non-speech"),
+        (1.2345, 1.5, "speech"),
+        (1.5, 2.0, "non-speech"),
+    ]
+
+
+def test_hyp_intervals_sentinel_below_sigdur_leaves_a_sliver(tmp_path: Path) -> None:
+    """A final speech segment closes at the raw `End` (4 decimals, 1.98765 being below the
+    tie in binary) while the span is the 2-decimal `sigdur`: the xml door reads a trailing
+    non-speech sliver, so must this one."""
+    rows = [(0.0, "Other"), (0.5, "Speech"), (1.98765, "End")]
+    seam, xml = _both_doors(tmp_path, 1.98765, rows)
+    assert seam == xml == [(0.0, 0.5, "non-speech"), (0.5, 1.9876, "speech"), (1.9876, 1.99, "non-speech")]
+
+
+def test_hyp_intervals_sentinel_above_sigdur_has_no_trailing_pad(tmp_path: Path) -> None:
+    rows = [(0.0, "Other"), (0.5, "Speech"), (1.9849, "End")]
+    seam, xml = _both_doors(tmp_path, 1.9849, rows)
+    assert seam == xml == [(0.0, 0.5, "non-speech"), (0.5, 1.9849, "speech")]
+
+
+def test_hyp_intervals_rounds_the_span_to_sigdur(tmp_path: Path) -> None:
+    """An `Other` tail: the span is the 2-decimal `sigdur`, not the raw duration."""
+    rows = [(0.0, "Speech"), (1.0, "Other"), (2.00499, "End")]
+    seam, xml = _both_doors(tmp_path, 2.00499, rows)
+    assert seam == xml == [(0.0, 1.0, "speech"), (1.0, 2.0, "non-speech")]
+
+
+def test_hyp_intervals_only_speech_rows_are_speech(tmp_path: Path) -> None:
+    rows = [(0.0, "Other"), (0.5, "Ring"), (1.0, "Other"), (3.0, "End")]
+    seam, xml = _both_doors(tmp_path, 3.0, rows)
+    assert seam == xml == [(0.0, 3.0, "non-speech")]
 
 
 def test_load_vrcts_ref_maps_to_nist_kinds(tmp_path: Path) -> None:

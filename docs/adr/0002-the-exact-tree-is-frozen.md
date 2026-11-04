@@ -44,7 +44,12 @@ then driving the same struct and the same function, issue #26; introspection: a 
 reads layer state and writes nothing -- the `weight_layout()` of every layer type in
 `nn/layers.rs` and `nn/cells/`, `Network::layers()`, and `BlstmNetwork::weight_layout`, the
 block list the `speech_rs.weight_layout` seam exports, proven behaviour-free by the goldens
-byte-green and pinned to `set_weights` by one-hot probes per cell, issue #27; the driver
+byte-green and pinned to `set_weights` by one-hot probes per cell, issue #27, and the decided
+segmentation retained on `engine/channel_result.rs::ChannelResult::hypothesis` (the sanitized
+list `compute_errors` left, cloned in at the row's assembly, not on the wire) and read by the
+`channel_results()` seam's `hypothesis` key, proven behaviour-free by the goldens byte-green
+and pinned to the VRCTS dump by a byte-identical reprint, with `tasks/segmentation.rs::Segmentation`
+deriving `Debug` and `PartialEq` for it (a derive, no body), issue #86; the driver
 interface: `tasks/segmenter.rs::Segmenter` as the one surface the bag reaches every driver
 through -- methods returning state a driver already holds (its trainable nets, its pack count,
 one channel's result members, its posteriors) plus `set_packs`, the pass-through it replaces --

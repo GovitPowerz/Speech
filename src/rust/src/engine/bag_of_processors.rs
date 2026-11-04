@@ -1124,9 +1124,18 @@ impl BagOfProcessors {
                         speech_dur,
                         members.nb_of_classif,
                         lid,
+                        // issue #86: the decided list rides on the result (the VRCTS
+                        // write below still reads `seg_per_chan`, hence the clone).
+                        seg_per_chan[chan].clone(),
                     )
                 } else {
-                    ChannelResult::unscored(time_per_hour, audio_duration, speech_dur, lid)
+                    ChannelResult::unscored(
+                        time_per_hour,
+                        audio_duration,
+                        speech_dur,
+                        lid,
+                        seg_per_chan[chan].clone(),
+                    )
                 };
                 chan_map.insert(chan, result);
             }

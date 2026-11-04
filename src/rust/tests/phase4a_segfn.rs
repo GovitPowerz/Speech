@@ -13,7 +13,9 @@ use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::BagOfProcessors;
 use speech::engine::corpus::CorpusItem;
 use speech::tasks::segmentation::Segmentation;
-use speech::tasks::segmentation_io::{compute_errors, load_ref_csv, load_ref_stm};
+use speech::tasks::segmentation_io::{
+    compute_errors, load_ref_csv, load_ref_stm, write_vrcts_multichannel,
+};
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
@@ -295,7 +297,7 @@ fn dump_dir_vrcts() {
     let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)).unwrap();
 
     let it = item(wav.to_str().unwrap(), stm.to_str().unwrap());
-    bag.segmentation_function(&it, multi_mode()).unwrap();
+    let results = bag.segmentation_function(&it, multi_mode()).unwrap();
 
     // basename = last path component minus the 4-char extension, under dumpDir; the
     // multi-channel fan-out writes <base>_chan_<n>.xml per channel (Task 8 fix).
@@ -305,6 +307,28 @@ fn dump_dir_vrcts() {
             expected.exists(),
             "scored VRCTS chan {chan} should be written under dumpDir at {}",
             expected.display()
+        );
+    }
+
+    // issue #86: each channel result carries the decided segmentation the dump printed;
+    // re-printing it through the same writer reproduces the dump byte for byte (the
+    // two doors of the held-out scorer).
+    let hyps: Vec<Segmentation> = (0..2).map(|c| results[&0][&c].hypothesis.clone()).collect();
+    let reprint = dir.path().join("reprint");
+    std::fs::create_dir(&reprint).unwrap();
+    write_vrcts_multichannel(
+        &hyps,
+        "excerpt_2ch_8k",
+        wav.to_str().unwrap(),
+        &reprint.join("excerpt_2ch_8k"),
+    )
+    .unwrap();
+    for chan in [1, 2] {
+        let name = format!("excerpt_2ch_8k_chan_{chan}.xml");
+        assert_eq!(
+            std::fs::read_to_string(reprint.join(&name)).unwrap(),
+            std::fs::read_to_string(dump.join(&name)).unwrap(),
+            "chan {chan}: the retained hypothesis must reprint the dump byte-identically"
         );
     }
 }

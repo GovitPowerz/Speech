@@ -315,6 +315,9 @@ impl Engine {
     /// target, `lid_scores` is `n x N` with the target column already decoded
     /// (`N == 0` on a run without LID; a row without a LID block, impossible in
     /// a well-formed bag, is zero-filled), `lid_correct` is a bool array.
+    /// `hypothesis` (issue #86) is a Python list aligned with the arrays: per row
+    /// `(audio_duration, [(begin_s, class), ...])`, the decided boundary list in
+    /// the stream session's row shape (the last row is the `End` sentinel).
     /// EMPTY arrays before the first `run()`. COPY: every array is freshly
     /// allocated; `speech.engine.ChannelResults.from_seam` is the Python wrapper.
     fn channel_results<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
@@ -341,6 +344,7 @@ impl Engine {
         let mut lid_scores = numpy::ndarray::Array2::<f64>::zeros((n, n_classes));
         let mut lid_count = Vec::with_capacity(n);
         let mut seg_count = Vec::with_capacity(n);
+        let mut hypothesis: Vec<(f64, Vec<SegRow>)> = Vec::with_capacity(n);
         for (i, (f, c, ch, r)) in rows.into_iter().enumerate() {
             file.push(f as i64);
             conf.push(c as i64);
@@ -353,6 +357,14 @@ impl Engine {
             audio_duration.push(r.audio_duration);
             speech_duration.push(r.speech_duration);
             seg_count.push(r.seg_count);
+            hypothesis.push((
+                r.hypothesis.audio_duration(),
+                r.hypothesis
+                    .segments()
+                    .iter()
+                    .map(|s| (s.begin, class_str(s.ty)))
+                    .collect(),
+            ));
             lid_cost.push(r.lid_cost());
             lid_count.push(r.lid_count());
             lid_correct.push(r.lid.as_ref().is_some_and(|l| l.correct));
@@ -385,6 +397,7 @@ impl Engine {
         d.set_item("lid_scores", lid_scores.into_pyarray(py))?;
         d.set_item("lid_count", lid_count.into_pyarray(py))?;
         d.set_item("seg_count", seg_count.into_pyarray(py))?;
+        d.set_item("hypothesis", hypothesis)?;
         Ok(d)
     }
 

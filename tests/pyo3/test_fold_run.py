@@ -76,8 +76,9 @@ def _seed_tier2_spectral(dst: Path) -> dict[str, str]:
 def _assert_same_results(a: ChannelResults, b: ChannelResults) -> None:
     """Every field bit-identical except `time_per_hour`, the one wall-clock column (it
     differs between two runs of the SAME engine)."""
+    assert a.hypothesis == b.hypothesis, "hypothesis differs"
     for f in fields(ChannelResults):
-        if f.name == "time_per_hour":
+        if f.name in ("time_per_hour", "hypothesis"):
             continue
         x, y = getattr(a, f.name), getattr(b, f.name)
         assert x.shape == y.shape, f.name

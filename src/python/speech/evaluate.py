@@ -18,6 +18,11 @@ Reference kinds are the raw NIST tab kinds (S / RI count as speech; NS / NT / RS
 non-speech); hypothesis kinds are `speech` / `non-speech` (`nonspeech` also accepted, as
 the perl does). `Interval` is `(start, end, kind)`.
 
+The hypothesis has two doors (issue #86): `load_vrcts_hyp` reads the xml the engine dumped,
+`hyp_intervals` reads the decided segmentation off the fold result (`ChannelResults.hypothesis`)
+at the same VRCTS quantum, so the two give bit-identical intervals; `_fill_gaps` is the one
+body behind both.
+
 The LID half -- `lid_error()` / `read_scr_scores()` / `cavg()` -- scores spoken-language
 identification. `lid_error` is the argmax error percentage per `compare_scores.m`;
 `read_scr_scores` adapts the engine's `.scr` outputs (drivers/test.py's writer) into a
@@ -51,6 +56,12 @@ _REF_SPEECH = frozenset({"S", "RI"})
 # Hyp-side kind spellings (:326 accepts both non-speech spellings; :334 speech).
 _HYP_NONSPEECH = frozenset({"non-speech", "nonspeech"})
 _HYP_SPEECH = frozenset({"speech"})
+
+# The VRCTS writer's quanta (`tasks/segmentation_io.rs::to_vrcts_string_chan`): the channel
+# `sigdur` is printed `{:.2}`, every segment time `{:.4}` (the boundaries are already at 1e-4 in
+# memory, `Segmentation::sanitize`; the `End` sentinel is not). `hyp_intervals` reproduces both.
+VRCTS_SIGDUR_DECIMALS = 2
+VRCTS_TIME_DECIMALS = 4
 
 _SIGDUR_RE = re.compile(r'<Channel\b[^>]*\bsigdur="([^"]*)"')
 _SEG_RE = re.compile(r'<SpeechSegment\b[^>]*\bstime="([^"]*)"[^>]*\betime="([^"]*)"')
@@ -142,7 +153,27 @@ def load_vrcts_hyp(path: Path) -> list[Interval]:
 
     sig = _SIGDUR_RE.search(text)
     sigdur = float(sig.group(1)) if sig else (speech[-1][1] if speech else 0.0)
+    return _fill_gaps(speech, sigdur)
 
+
+def hyp_intervals(audio_duration: float, rows: Sequence[tuple[float, str]]) -> list[Interval]:
+    """The engine's decided segmentation (`ChannelResults.hypothesis`: `(begin_s, class)` rows
+    ending with the `End` sentinel at `audio_duration`) as `dcf` hypothesis intervals, EXACTLY
+    what `load_vrcts_hyp` reads off the xml the engine would have dumped (issue #86): a
+    `Speech` row spans to the next row's begin, every other class is non-speech. The VRCTS
+    quantum is reproduced so the two doors agree bit for bit and no recorded DCF moves: the
+    span ends at 4 decimals (identity on the sanitized boundaries, a rounding of the `End`
+    sentinel) and the channel span at 2 (`sigdur`). Python's `round` and Rust's `{:.N}`
+    are both correctly rounded, half-even on the binary value, so they agree."""
+    speech = [(round(begin, VRCTS_TIME_DECIMALS), round(rows[i + 1][0], VRCTS_TIME_DECIMALS)) for i, (begin, cls) in enumerate(rows[:-1]) if cls == "Speech"]
+    return _fill_gaps(speech, round(audio_duration, VRCTS_SIGDUR_DECIMALS))
+
+
+def _fill_gaps(speech: Sequence[tuple[float, float]], sigdur: float) -> list[Interval]:
+    """Contiguous speech/non-speech intervals from ordered speech spans over `[0, sigdur]`:
+    the gaps between spans (the leading one from 0, the trailing one up to `sigdur`) are
+    non-speech. Mirrors ComputeDCF.py's gap-filling, the channel `sigdur` playing the role
+    of its ref-tab `duration`. The one body behind both hypothesis doors."""
     out: list[Interval] = []
     cursor = 0.0
     for begin, end in speech:

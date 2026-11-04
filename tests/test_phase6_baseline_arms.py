@@ -13,10 +13,13 @@ tree of empty `.plp8f0mvsdd` files) -- nothing from `data/LRE03-LRE07/` is read 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 import pytest
@@ -28,6 +31,8 @@ from speech.drivers.state import EpochRecord, ModernRun, ModernTrainParams, Mode
 from speech.evaluate import CollarScore as EvalCollar
 from speech.evaluate import DcfReport
 from speech.ledger.schema import CollarScore
+
+from tests._result_rows import channel_results_from_matrix
 
 # --------------------------------------------------------------------------------------- #
 # synthetic records
@@ -549,8 +554,8 @@ _SAD_FLAT: dict[str, str] = {
 
 
 def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #82: with a test split, the trained score is the run's `best()` set under
-    `score_trained`, the init score the seed packs under `score_init`, and the record projects
+    """Issue #82: with a test split, the trained score is the run's `best()` set, the
+    init score the seed packs, and the record projects
     both DCF reports and the cost trajectory (the off-corpus pin of what the gates read)."""
     root = tmp_path / "sad_corpus"
     _sad_corpus_tree(root, 20)
@@ -570,23 +575,28 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
         tag: DcfReport(scores=[EvalCollar(collar=c, pmiss=0.0, pfa=pfa, dcf=pfa / 4) for c in (0.0, 0.25, 0.5, 1.0, 2.0)])
         for tag, pfa in (("score_trained", 0.4), ("score_init", 1.0))
     }
-    seen: list[tuple[Path, str, int, str]] = []
+    seen: list[tuple[tuple[Path, ...], str, int]] = []
 
-    def score(
-        base_cfg: dict[str, str], workdir: Path, pack: Path, dump_dir: Path, test_records: list[dict[str, str]], test_name: str
-    ) -> tuple[DcfReport, Path]:
-        seen.append((pack, dump_dir.name, len(test_records), test_name))
-        return reports[dump_dir.name], dump_dir
+    def held_out_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_name: str) -> Any:
+        seen.append((tuple(packs), test_name, len(cfg)))
+        return "score_trained" if packs[0].name == "best_sad.bin" else "score_init"  # the fake fold is its tag
 
-    monkeypatch.setattr(B, "_score_sad_pack_on_test", score)
+    def sad_dcf(res: Any, test_records: Sequence[dict[str, str]]) -> DcfReport:
+        assert len(test_records) == 2
+        return reports[res]
+
+    monkeypatch.setattr(B, "_held_out_fold", held_out_fold)
+    monkeypatch.setattr(B, "_sad_dcf", sad_dcf)
     out = tmp_path / "out"
     res = B.run_baseline(_spec("sad", root, out, subset=4, valid_size=0, test_size=2, epochs=2, steps_per_epoch=1, score_init=True))
 
-    assert seen == [
-        (out / "checkpoint" / "best_sad.bin", "score_trained", 2, "sad_test_subset.flst"),
-        (out / "sad_seed.bin", "score_init", 2, "sad_test_subset.flst"),
+    assert [(packs, name) for packs, name, _ in seen] == [
+        ((out / "checkpoint" / "best_sad.bin",), "sad_test_subset.flst"),
+        ((out / "sad_seed.bin",), "sad_test_subset.flst"),
     ]
-    assert res.dcf is reports["score_trained"] and res.init_dcf is reports["score_init"] and res.scores_dir == out / "score_trained"
+    assert all(n > 0 for _, _, n in seen), "the fold is run on the prepared config map"
+    assert res.dcf is reports["score_trained"] and res.init_dcf is reports["score_init"]
+    assert res.scores.results == "score_trained" and res.init_scores is not None and res.init_scores.results == "score_init"
     p = res.record("launcher").payload
     assert p.collar(0.5) == CollarScore(collar=0.5, dcf=0.1, pmiss=0.0, pfa=0.4)
     assert p.init_dcf is not None and [c.dcf for c in p.init_dcf] == [0.25] * 5
@@ -720,14 +730,6 @@ def test_write_sad_mapping(tmp_path: Path) -> None:
     assert p.read_text() == "unk;unk;0\n"
 
 
-def test_hyp_xml_for_strips_extension() -> None:
-    d = Path("/scores")
-    # strip_last_4 (drop the 4-char .wav), then .xml -- the engine's own dump-target rule.
-    # (synthetic names: multi-dot LRE03-style + single-dot LRE07-style, no real corpus file.)
-    assert B._hyp_xml_for("/a/b/zz_0000_a.MT1.mp1.wav", d) == d / "zz_0000_a.MT1.mp1.xml"
-    assert B._hyp_xml_for("ZZ-000000-A-con.wav", d) == d / "ZZ-000000-A-con.xml"
-
-
 def test_windowed_vrcts_ref_clips_and_pads(tmp_path: Path) -> None:
     x = tmp_path / "ref.xml"
     x.write_text(_vrcts_xml(100.0, [(10.0, 20.0), (30.0, 40.0)]))
@@ -747,6 +749,39 @@ def test_pool_dcf_perfect_and_false_alarm() -> None:
     f2 = ([(0.0, 10.0, "NS")], [(0.0, 10.0, "speech")])
     c = B._pool_dcf([f1, f2], (0.0,)).by_collar(0.0)
     assert abs(c.pmiss - 0.0) < 1e-9 and abs(c.pfa - 1.0) < 1e-9 and abs(c.dcf - 0.25) < 1e-9
+
+
+def _fold_results(n: int, **fields: Any) -> Any:
+    """`n` synthetic config-0 mono rows (file ids 0..n-1) with `fields` replaced."""
+    mcr = np.zeros((n, 3 + 18))
+    mcr[:, 0] = np.arange(1, n + 1)
+    mcr[:, 1:3] = 1.0
+    mcr[:, 3 + 5] = 10.0
+    return dataclasses.replace(channel_results_from_matrix(mcr), **fields)
+
+
+def test_sad_dcf_pairs_each_row_with_its_listing_record(tmp_path: Path) -> None:
+    """`results.file` indexes `test_records`: each hypothesis meets its own reference (a
+    perfect decision per file, DCF 0), and the swapped listing is not."""
+    records = []
+    for i, speech in enumerate([(0.0, 4.0), (6.0, 10.0)]):
+        ref = tmp_path / f"ref{i}.xml"
+        ref.write_text(_vrcts_xml(10.0, [speech]))
+        records.append({"filename": f"f{i}.wav", "refseg": str(ref)})
+    hyps = [(10.0, [(0.0, "Speech"), (4.0, "Other"), (10.0, "End")]), (10.0, [(0.0, "Other"), (6.0, "Speech"), (10.0, "End")])]
+    res = _fold_results(2, hypothesis=hyps)
+    assert all(c.dcf == 0.0 for c in B._sad_dcf(res, records).scores)
+    assert B._sad_dcf(res, records[::-1]).by_collar(0.0).dcf > 0.0
+
+
+def test_lid_arm_scores_against_the_engine_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`LidArm.score` takes the reference off `lid_target`: one of two rows argmaxes its
+    target, so the held-out error is 50%."""
+    res = _fold_results(2, lid_scores=np.array([[0.9, 0.1], [0.8, 0.2]]), lid_target=np.array([0, 1], dtype=np.int64))
+    monkeypatch.setattr(B, "_held_out_fold", lambda cfg, workdir, packs, name: res)
+    prepared: Any = SimpleNamespace(cfg={}, out_dir=Path("."), splits=SimpleNamespace(test_name="t.flst"))
+    scores = B.ARMS["lid-features"].score(prepared, [Path("sad.bin"), Path("lid.bin")])
+    assert scores.results is res and scores.lid_error == 50.0
 
 
 def _sad_corpus_tree(root: Path, n: int) -> None:

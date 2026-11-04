@@ -53,7 +53,7 @@ pub struct Segment {
 }
 
 /// Boundary-list segmentation over `[0.0, audio_duration]`.
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Segmentation {
     segs: Vec<Segment>,
     audio_duration: f64,
