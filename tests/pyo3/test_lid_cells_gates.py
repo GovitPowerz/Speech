@@ -42,7 +42,7 @@ from speech.batching import read_listing  # noqa: E402
 from speech.config_bridge import CELL_TYPES, DIRECTIONS, parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import Arm, BaselineSpec  # noqa: E402
-from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
+from speech.drivers.state import ModernRun, ModernTrainParams, RunState  # noqa: E402
 from speech.drivers.test import _class_keys  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
 from speech.engine import average_derivs  # noqa: E402
@@ -119,24 +119,24 @@ class _Shim:
     best_val_cost: float = float("nan")
 
 
-def _probe(out: dict[str, float]) -> Callable[[RunState, ModernTrainParams], _Shim]:
+def _probe(out: dict[str, float]) -> Callable[[ModernRun, ModernTrainParams], _Shim]:
     """A `run_baseline(_train_fn=...)` stub measuring the from-scratch init instead of
     training, through the loop's OWN seeded init and a gradient `FoldRun` on the base config
     (the Phase-9 probe). The seed packs stand in as the checkpoint so the held-out scoring
     that follows runs on the init (LID allocates at least one test file per language)."""
 
-    def probe(state: RunState, params: ModernTrainParams) -> _Shim:
-        weights = _init_weights_from_scratch(state, params)
-        res = FoldRun(state.base_config, Path(state.config_path).parent, backprop=True).run(weights)
+    def probe(run: ModernRun, params: ModernTrainParams) -> _Shim:
+        weights = _init_weights_from_scratch(run, params)
+        res = FoldRun(run.cfg, run.workdir, backprop=True).run(weights)
         grads = [average_derivs(d) for d in res.derivs]
         out["sad_len"], out["lid_len"] = float(len(weights[0])), float(len(weights[1]))
         out["init_cost"] = float(res.nn_cost)
         out["sad_grad_linf"] = float(np.max(np.abs(grads[0])))
         out["lid_grad_l2"] = float(np.linalg.norm(grads[1]))
-        ckpt = Path(state.out_dir) / "checkpoint"
+        ckpt = run.checkpoint.dir
         ckpt.mkdir(parents=True, exist_ok=True)
         for net in ("sad", "lid"):
-            shutil.copyfile(Path(state.out_dir) / f"{net}_seed.bin", ckpt / f"best_{net}.bin")
+            shutil.copyfile(run.out_dir / f"{net}_seed.bin", ckpt / f"best_{net}.bin")
         return _Shim(checkpoint_dir=str(ckpt), history=[_Rec(float(res.nn_cost), float(res.nn_cost))], best_val_cost=float(res.nn_cost))
 
     return probe

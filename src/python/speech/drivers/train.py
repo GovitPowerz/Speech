@@ -30,7 +30,7 @@ the returned gradient, so SMORMS3 only ever steps the trainable head.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,8 +38,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
-from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
-from speech.drivers.state import ModernTrainParams, RunState, TrainResult
+from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult
+from speech.drivers.state import BALANCE_BACKPROP, ModernRun, ModernTrainParams, RunState, TrainResult, default_balance
 from speech.engine import ChannelResults, CostParams, compute_cost, forward_backward
 from speech.fold_run import FoldRun
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
@@ -103,10 +103,10 @@ def _eval_overlay(base: dict[str, str], ponds: list[str], algo: int) -> dict[str
 #     per step (`_BatchStep.next_fold`, consumed by `_backprop_inner`).
 
 
-def _mapping_path(state: RunState) -> Path:
+def _mapping_path(workdir: Path, cfg: Mapping[str, str]) -> Path:
     """Resolve the `language2classmapping` CSV path, like every other corpus path
     (relative to the config's own dir)."""
-    return Path(state.config_path).parent / state.base_config["language2classmapping"]
+    return workdir / cfg["language2classmapping"]
 
 
 def _parse_class_mapping(path: Path) -> dict[tuple[str, str], int]:
@@ -122,12 +122,7 @@ def _parse_class_mapping(path: Path) -> dict[tuple[str, str], int]:
     return mapping
 
 
-def _read_class_mapping(state: RunState) -> dict[tuple[str, str], int]:
-    """`PS.Corpora.langMap` for `state`'s corpus -- see `_mapping_path`/`_parse_class_mapping`."""
-    return _parse_class_mapping(_mapping_path(state))
-
-
-def _files_values(state: RunState) -> NDArray[np.float64]:
+def _files_values(listing: list[dict[str, str]], mapping_path: Path) -> NDArray[np.float64]:
     """Build `Corpora.filesValues`'s two batch-relevant columns from the listing records:
     col0 = class index (mapping lookup, legacy unknown -> -1), col1 = per-file RAW weight
     (`filesValues(:,2)` as loaded by `processListing.m`, pre-rescale). `create_batches`
@@ -135,9 +130,9 @@ def _files_values(state: RunState) -> NDArray[np.float64]:
     listing (Phase 5, F3, IMPROVEMENTS.md -- FIXED, this commit): `_BatchRunner.next_listing`
     now derives the WRITTEN weight per eval via `class_balance_values` + the algo/
     nb_target_classes gate, matching `ComputeGradient.m:59-76`, instead of reading this raw
-    column directly."""
-    mapping = _read_class_mapping(state)
-    rows = [(float(mapping.get((rec["lang"], rec["dial"]), -1)), float(rec["weight"])) for rec in state.listing]
+    column directly. `mapping_path` is `PS.Corpora.langMap`'s file (`_mapping_path`)."""
+    mapping = _parse_class_mapping(mapping_path)
+    rows = [(float(mapping.get((rec["lang"], rec["dial"]), -1)), float(rec["weight"])) for rec in listing]
     return np.array(rows, dtype=np.float64) if rows else np.zeros((0, 2), dtype=np.float64)
 
 
@@ -395,7 +390,7 @@ def score_genome(
     ponds, out_param = _ponderations(genome, mask, state)
     tails = _tail_lengths(state.base_config, state.ps.algo)
     cfg = _eval_overlay(state.base_config, ponds, state.ps.algo)
-    cost, _w, _h = _score_fold(cfg, workdir, state.balance, state.ps.algo, state.ps.BalanceBackProp, None, tails)
+    cost, _w, _h = _score_fold(cfg, workdir, state.ps.balance, state.ps.algo, state.ps.BalanceBackProp, None, tails)
     return cost, out_param
 
 
@@ -494,7 +489,7 @@ def train(
     (`ComputeGradient.m` cadence); the outer QPSO scoring stays full-corpus."""
     ps = state.ps
     base = state.base_config
-    balance = state.balance
+    balance = ps.balance
     algo = ps.algo
     bbp = ps.BalanceBackProp
 
@@ -519,10 +514,11 @@ def train(
     # 1`) streams. `runner is None` <=> batch mode off <=> the 4c full-corpus path.
     runner: _BatchRunner | None = None
     if minibatch > 0:
-        fv = _files_values(state)
+        mapping_path = _mapping_path(workdir, base)
+        fv = _files_values(state.listing, mapping_path)
         batch_rng = np.random.default_rng(seed + 2)
         batches = create_batches(fv, minibatch, nb_worst, multilingual, nb_classes, batch_rng)
-        runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
+        runner = _BatchRunner(state.listing, fv, batches, workdir, mapping_path, algo)
 
     def cost_fn(positions: NDArray[np.float64], _mode: int) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         pos = np.atleast_2d(np.asarray(positions, dtype=F64))
@@ -582,15 +578,15 @@ def train(
 # fully capture the trainable state, which is what makes resume-from-`last_*.bin` clean).
 
 
-def _init_weights_from_scratch(state: RunState, params: ModernTrainParams) -> list[NDArray[np.float64]]:
+def _init_weights_from_scratch(run: ModernRun, params: ModernTrainParams) -> list[NDArray[np.float64]]:
     """Seeded Xavier/He init (Task 3) for each net's flat pack -- `[sad]` for single-net
     algos, `[sad, lid]` for the Twin. One shared `Generator(params.seed)` draws both nets in
     order (deterministic)."""
     rng = np.random.default_rng(params.seed)
-    prefixes = ["BLSTM"] + (["BLSTM_LID"] if state.ps.algo == 6 else [])
+    prefixes = ["BLSTM"] + (["BLSTM_LID"] if run.algo == 6 else [])
     weights: list[NDArray[np.float64]] = []
     for prefix in prefixes:
-        weights += init_weights(state.base_config, prefix, rng, params.init_scheme, params.forget_bias_one)
+        weights += init_weights(run.cfg, prefix, rng, params.init_scheme, params.forget_bias_one)
     return weights
 
 
@@ -616,22 +612,22 @@ def _confusion_error(results: ChannelResults, algo: int) -> float | None:
     return None if trials <= 0.0 else 1.0 - hits / trials
 
 
-def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdir: Path, tails: list[int]) -> TrainEpochFn:
+def _make_default_train_epoch(run: ModernRun, params: ModernTrainParams, tails: list[int]) -> TrainEpochFn:
     """The engine-backed per-epoch trainer: `steps_per_epoch` SMORMS3 steps over
     `forward_backward` (backprop ON), seeded from the CURRENT weights. When `minibatch > 0`
     a persistent `_BatchRunner` (built ONCE here, cursors rotating across epochs) drives the
     per-step hard-example batch listing; else every step folds the full training corpus.
     The `create_batches` shuffle uses `params.seed + 2` (matching `train`'s derivation off
     its master seed); the weight init draws from `params.seed` itself -- one seed, two streams."""
-    base = state.base_config
-    algo = state.ps.algo
+    base, workdir, algo = run.cfg, run.workdir, run.algo
 
     runner: _BatchRunner | None = None
     if params.minibatch > 0:
-        fv = _files_values(state)
+        mapping_path = _mapping_path(workdir, base)
+        fv = _files_values(run.listing, mapping_path)
         batch_rng = np.random.default_rng(params.seed + 2)
         batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, batch_rng)
-        runner = _BatchRunner(state.listing, fv, batches, workdir, _mapping_path(state), algo)
+        runner = _BatchRunner(run.listing, fv, batches, workdir, mapping_path, algo)
 
     # One gradient fold for the whole run, reused across every epoch's steps (each run injects
     # its own weights); in batch mode each step builds its own fold on the rotated listing and
@@ -646,7 +642,7 @@ def _make_default_train_epoch(state: RunState, params: ModernTrainParams, workdi
     return train_epoch
 
 
-def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: Path) -> ValidateFn:
+def _make_default_validate(run: ModernRun, params: ModernTrainParams) -> ValidateFn:
     """The engine-backed forward-only validator: a forward-only fold on `valid_listing`
     (defaults to the training listing when unset) at the current weights, then the
     validation cost + the FIXED confusion metric off its results.
@@ -669,10 +665,9 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
 
     Both metrics run the identical forward-only fold on `valid_listing`; only the cost read
     off the results differs."""
-    base = state.base_config
-    algo = state.ps.algo
-    balance = state.balance
-    bbp = state.ps.BalanceBackProp
+    base, workdir, algo = run.cfg, run.workdir, run.algo
+    balance = default_balance(algo)
+    bbp = BALANCE_BACKPROP
     valid_listing = params.valid_listing if params.valid_listing is not None else base["fileslisting"]
     metric = params.val_metric
     fold = FoldRun(base, workdir, backprop=False, listing=valid_listing)
@@ -689,7 +684,7 @@ def _make_default_validate(state: RunState, params: ModernTrainParams, workdir: 
 
 
 def train_modern(
-    state: RunState,
+    run: ModernRun,
     params: ModernTrainParams,
     *,
     train_epoch: TrainEpochFn | None = None,
@@ -711,10 +706,9 @@ def train_modern(
 
     Early-stop: after `patience` epochs with no strict improvement in `val_cost`, stop.
     `best_<net>.bin` holds the argmin-val_cost epoch's weights; `last_<net>.bin` the latest."""
-    algo = state.ps.algo
-    ckpt = Checkpoint(Path(state.out_dir) / "checkpoint", net_names(algo))
+    algo = run.algo
+    ckpt = run.checkpoint
     ckpt.dir.mkdir(parents=True, exist_ok=True)
-    workdir = Path(state.config_path).parent
 
     if params.resume_from is not None:
         weights, history, best_val, best_epoch, start_epoch = Checkpoint(Path(params.resume_from), ckpt.nets).resume()
@@ -722,13 +716,13 @@ def train_modern(
         weights = [np.asarray(w, dtype=F64) for w in init_weights_override]
         history, best_val, best_epoch, start_epoch = [], float("inf"), -1, 0
     else:
-        weights = _init_weights_from_scratch(state, params)
+        weights = _init_weights_from_scratch(run, params)
         history, best_val, best_epoch, start_epoch = [], float("inf"), -1, 0
 
     if train_epoch is None:
-        train_epoch = _make_default_train_epoch(state, params, workdir, _tail_lengths(state.base_config, algo))
+        train_epoch = _make_default_train_epoch(run, params, _tail_lengths(run.cfg, algo))
     if validate is None:
-        validate = _make_default_validate(state, params, workdir)
+        validate = _make_default_validate(run, params)
 
     def _write_history(stopped: bool) -> ModernTrainResult:
         res = ModernTrainResult(
@@ -842,7 +836,7 @@ def score_hyperparam_genome(
     cfg, reduced_out = _decode_hyperparam(state, reduced, mask, searchable)
     fold = FoldRun(cfg, workdir, backprop=False)
     res = fold.run()
-    cost, _ = compute_cost(res.results, 0, state.balance, CostParams(mode=0, balance_backprop=state.ps.BalanceBackProp, algo=state.ps.algo))
+    cost, _ = compute_cost(res.results, 0, state.ps.balance, CostParams(mode=0, balance_backprop=state.ps.BalanceBackProp, algo=state.ps.algo))
     return float(cost), reduced_out, fold.config_text
 
 

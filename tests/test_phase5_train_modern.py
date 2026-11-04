@@ -22,8 +22,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 from pydantic import ValidationError
-from speech.drivers.init import init_run
-from speech.drivers.state import ModernTrainParams, RunState
+from speech.batching import read_listing
+from speech.config_bridge import parse_legacy_config
+from speech.drivers.state import ModernRun, ModernTrainParams
 from speech.drivers.train import train_modern
 from speech.weight_bridge import read_bin
 
@@ -31,14 +32,29 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PHASE4A = REPO_ROOT / "tests" / "reference_data" / "phase4a"
 
 
-def _algo3_state(tmp: Path) -> RunState:
-    """A real single-net (Algo 3) RunState via `init_run` (no pyo3): the committed spectral
-    config + its listing/mapping parsed into a typed state. The stub hooks + init override
-    mean only the config PARSE is exercised, never the engine."""
+def _algo3_run(tmp: Path) -> ModernRun:
+    """A real single-net (Algo 3) `ModernRun` (no pyo3): the committed spectral config map,
+    its listing rows, the fixture dir as workdir. The stub hooks + init override mean only
+    the config PARSE is exercised, never the engine."""
     tmp.mkdir(parents=True, exist_ok=True)
     for f in ("tier2_spectral.config", "language2classmapping.csv", "tier2_fileslisting.csv"):
         shutil.copy(PHASE4A / f, tmp / f)
-    return init_run(tmp / "tier2_spectral.config", tmp / "run")
+    cfg = parse_legacy_config((tmp / "tier2_spectral.config").read_text())
+    return ModernRun(cfg=cfg, workdir=tmp, out_dir=tmp / "run", listing=read_listing(tmp / cfg["fileslisting"]))
+
+
+def test_modern_run_derives_algo_and_checkpoint_off_the_map(tmp_path: Path) -> None:
+    """Issue #82: the loop's input is the map, the workdir, the out dir and the listing rows;
+    `algo` is read off `Algo_choice` (absent -> KeyError, never a default) and the
+    checkpoint is the run's `checkpoint/` with the algo's net names."""
+    run = _algo3_run(tmp_path)
+    assert run.algo == 3
+    assert run.checkpoint.dir == tmp_path / "run" / "checkpoint"
+    assert run.checkpoint.nets == ["sad"]
+    twin = ModernRun(cfg={**run.cfg, "Algo_choice": "6"}, workdir=tmp_path, out_dir=tmp_path / "run", listing=[])
+    assert twin.checkpoint.nets == ["sad", "lid"]
+    with pytest.raises(KeyError):
+        _ = ModernRun(cfg={}, workdir=tmp_path, out_dir=tmp_path, listing=[]).algo
 
 
 def _epoch_encoding_stub() -> Callable[[list[np.ndarray], int], tuple[list[np.ndarray], float]]:
@@ -62,12 +78,12 @@ def _ckpt_vec(ckpt_dir: str, name: str) -> list[float]:
 
 
 def test_early_stop_patience_triggers_at_crafted_epoch(tmp_path: Path) -> None:
-    state = _algo3_state(tmp_path)
+    run = _algo3_run(tmp_path)
     # val falls to its min at epoch 2, then rises; patience=2 -> stop after epoch 4
     # (epoch 4 - best_epoch 2 == 2). epochs 0..4 run, epochs 5,6 never do.
     val_seq = [5.0, 4.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     res = train_modern(
-        state,
+        run,
         params=ModernTrainParams(epochs=7, patience=2),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
@@ -90,10 +106,10 @@ def test_early_stop_patience_triggers_at_crafted_epoch(tmp_path: Path) -> None:
 
 
 def test_no_early_stop_runs_every_epoch(tmp_path: Path) -> None:
-    state = _algo3_state(tmp_path)
+    run = _algo3_run(tmp_path)
     val_seq = [5.0, 4.0, 3.0, 2.0]  # monotonically improving -> best updates every epoch
     res = train_modern(
-        state,
+        run,
         params=ModernTrainParams(epochs=4, patience=2),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
@@ -108,11 +124,11 @@ def test_no_early_stop_runs_every_epoch(tmp_path: Path) -> None:
 
 
 def test_best_checkpoint_is_argmin_not_last(tmp_path: Path) -> None:
-    state = _algo3_state(tmp_path)
+    run = _algo3_run(tmp_path)
     # min at epoch 1; epochs 2,3 worse but within patience -> full run, best != last.
     val_seq = [5.0, 2.0, 3.0, 4.0]
     res = train_modern(
-        state,
+        run,
         params=ModernTrainParams(epochs=4, patience=10),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
@@ -141,14 +157,14 @@ def test_resume_from_last_equivalence(tmp_path: Path) -> None:
     init = [np.array([0.0])]
 
     # continuous 5 epochs (patience high -> no early stop)
-    cont_state = _algo3_state(tmp_path / "cont")
-    cont = train_modern(cont_state, params=ModernTrainParams(epochs=5, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
+    cont_run = _algo3_run(tmp_path / "cont")
+    cont = train_modern(cont_run, params=ModernTrainParams(epochs=5, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
 
     # split: 3 epochs, then resume IN PLACE (same out_dir) toward the total of 5
-    split_state = _algo3_state(tmp_path / "split")
-    train_modern(split_state, params=ModernTrainParams(epochs=3, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
-    resume_ckpt = str(Path(split_state.out_dir) / "checkpoint")
-    split = train_modern(split_state, params=ModernTrainParams(epochs=5, patience=99, resume_from=resume_ckpt), train_epoch=train_epoch, validate=validate)
+    split_run = _algo3_run(tmp_path / "split")
+    train_modern(split_run, params=ModernTrainParams(epochs=3, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
+    resume_ckpt = str(split_run.checkpoint.dir)
+    split = train_modern(split_run, params=ModernTrainParams(epochs=5, patience=99, resume_from=resume_ckpt), train_epoch=train_epoch, validate=validate)
 
     # same total, same trajectory, same checkpoints -- resuming is transparent.
     assert split.epochs_run == cont.epochs_run == 5
@@ -162,17 +178,17 @@ def test_resume_from_last_equivalence(tmp_path: Path) -> None:
 
 def test_resume_toward_already_reached_total_is_a_noop(tmp_path: Path) -> None:
     # Resuming with epochs <= epochs already run runs no new epoch (range is empty).
-    state = _algo3_state(tmp_path)
+    run = _algo3_run(tmp_path)
     train_modern(
-        state,
+        run,
         params=ModernTrainParams(epochs=3, patience=99),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([3.0, 2.0, 1.0]),
         init_weights_override=[np.array([0.0])],
     )
-    ckpt = str(Path(state.out_dir) / "checkpoint")
+    ckpt = str(run.checkpoint.dir)
     res = train_modern(
-        state,
+        run,
         params=ModernTrainParams(epochs=3, patience=99, resume_from=ckpt),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([3.0, 2.0, 1.0]),
@@ -186,9 +202,9 @@ def test_missing_hook_without_engine_is_the_only_engine_dependency(tmp_path: Pat
     # Guard: with BOTH hooks stubbed, train_modern never imports speech_rs (the state
     # machine is engine-free). If a default hook were built, this would ImportError only
     # when speech_rs is absent -- here it must simply not be reached.
-    state = _algo3_state(tmp_path)
+    run = _algo3_run(tmp_path)
     res = train_modern(
-        state,
+        run,
         params=ModernTrainParams(epochs=2, patience=99),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([1.0, 0.5]),
@@ -225,9 +241,9 @@ def test_batch_stream_is_derived_from_the_one_seed(tmp_path: Path, monkeypatch: 
     captured: list[np.random.Generator] = []
     monkeypatch.setattr(T, "create_batches", lambda *a: captured.append(a[-1]))
     monkeypatch.setattr(T, "FoldRun", lambda *a, **k: None)
-    state = _algo3_state(tmp_path)
+    run = _algo3_run(tmp_path)
     for s in (0, 7, 123):
-        T._make_default_train_epoch(state, ModernTrainParams(seed=s, minibatch=2), tmp_path, tails=[0])
+        T._make_default_train_epoch(run, ModernTrainParams(seed=s, minibatch=2), tails=[0])
         assert captured[-1].bit_generator.state == np.random.default_rng(s + 2).bit_generator.state
     assert len(captured) == 3
     # `seed` is the only seed the model accepts: the old field name is refused.

@@ -245,7 +245,7 @@ pytest.importorskip("speech_rs")
 
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import ARM_CONFIG, BaselineSpec  # noqa: E402
-from speech.drivers.state import ModernTrainParams, RunState  # noqa: E402
+from speech.drivers.state import ModernRun, ModernTrainParams  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
 from speech.engine import average_derivs  # noqa: E402
 from speech.fold_run import FoldRun  # noqa: E402
@@ -440,7 +440,7 @@ class _Shim:
     best_val_cost: float = float("nan")
 
 
-def _probe(out: dict[str, Any]) -> Callable[[RunState, ModernTrainParams], _Shim]:
+def _probe(out: dict[str, Any]) -> Callable[[ModernRun, ModernTrainParams], _Shim]:
     """A `run_baseline(_train_fn=...)` stub that MEASURES the from-scratch init instead of
     training: it re-uses the training loop's OWN seeded-init and config builders
     (`_init_weights_from_scratch`, a gradient `FoldRun` on the base config), so what it probes
@@ -448,11 +448,11 @@ def _probe(out: dict[str, Any]) -> Callable[[RunState, ModernTrainParams], _Shim
     could silently drift from the real path. (Phase 9's `_probe`, plus the raw gradient so
     the inverse guard can slice it.)"""
 
-    def probe(state: RunState, params: ModernTrainParams) -> _Shim:
-        weights = _init_weights_from_scratch(state, params)
+    def probe(run: ModernRun, params: ModernTrainParams) -> _Shim:
+        weights = _init_weights_from_scratch(run, params)
         # ONE gradient fold at the init: `nn_cost` is forward_backward's `f` on this single-net
         # arm and `average_derivs` its count normalization; the channel results come with it.
-        res = FoldRun(state.base_config, Path(state.config_path).parent, backprop=True).run(weights)
+        res = FoldRun(run.cfg, run.workdir, backprop=True).run(weights)
         cost = res.nn_cost
         grads = [average_derivs(d) for d in res.derivs]
         results = res.results.for_config(0)
@@ -469,7 +469,7 @@ def _probe(out: dict[str, Any]) -> Callable[[RunState, ModernTrainParams], _Shim
         # the prefixed matrix (100*Pmiss); the `mean <= max` invariant in the test below is
         # what catches that class of slip.
         out["per_file_cost_max"] = float(np.max(results.seg_cost / np.maximum(1.0, results.seg_count)))
-        ckpt = Path(state.out_dir) / "checkpoint"
+        ckpt = run.checkpoint.dir
         ckpt.mkdir(parents=True, exist_ok=True)
         return _Shim(checkpoint_dir=str(ckpt), history=[_Rec(float(cost), float(cost))], best_val_cost=float(cost))
 

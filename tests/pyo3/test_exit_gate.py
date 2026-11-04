@@ -43,7 +43,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.drivers.init import init_run
-from speech.drivers.state import ModernTrainParams
+from speech.drivers.state import ModernRun, ModernTrainParams
 from speech.drivers.train import (
     _HYPERPARAM_PENALTY,
     _backprop_inner,
@@ -161,7 +161,7 @@ def _seed_tier2_spectral(dst: Path) -> Path:
 def _run_once_algo3(tmp: Path, seed: int) -> dict[str, bytes]:
     config = _seed_tier2_spectral(tmp)
     state = init_run(config, tmp / "run")
-    assert state.algo == 3 and state.ps.lid is None, "the smoke must exercise the single-net path"
+    assert state.ps.algo == 3 and state.ps.lid is None, "the smoke must exercise the single-net path"
     with chdir(tmp):
         result = train(state, seed=seed, qpso_particles=2, qpso_epochs=2, inner_steps=2)
     ckpt = Path(result.checkpoint_dir)
@@ -281,7 +281,7 @@ def test_hyperparam_search_narrowed_distinct_configs_and_costs(tmp_path_factory:
     tmp = tmp_path_factory.mktemp("hyperparam_nonvac")
     config = _seed_tier2_spectral(tmp)
     state = init_run(config, tmp / "run")
-    assert state.algo == 3, "the non-vacuity smoke uses the single-net spectral corpus (real audio)"
+    assert state.ps.algo == 3, "the non-vacuity smoke uses the single-net spectral corpus (real audio)"
     workdir = Path(state.config_path).parent
 
     mask, searchable = weight_block_mask(state.ps)
@@ -428,7 +428,7 @@ def _sad_from_scratch(tmp: Path, seed: int) -> _SadRun:
     (tmp / "heldout_f2.csv").write_text(lines[1] + "\n")  # f2: unmapped (held out of training)
 
     state = init_run(tmp / "tier2_spectral.config", tmp / "run")
-    assert state.algo == 3 and state.ps.lid is None, "the SAD gate must exercise the single-net path"
+    assert state.ps.algo == 3 and state.ps.lid is None, "the SAD gate must exercise the single-net path"
     base = state.base_config
     workdir = Path(state.config_path).parent
     init_pack = init_weights(base, "BLSTM", np.random.default_rng(seed), "xavier", True)
@@ -499,7 +499,7 @@ def _twin_mechanical(tmp: Path, seed: int, n_steps: int) -> _TwinRun:
     would otherwise route `run()` to gradCheck instead of a forward/backward fold)."""
     config = _seed_twin_gradcheck(tmp)
     state = init_run(config, tmp / "run")
-    assert state.algo == 6 and state.ps.lid is not None, "the twin gate must exercise the two-net path"
+    assert state.ps.algo == 6 and state.ps.lid is not None, "the twin gate must exercise the two-net path"
     base = dict(state.base_config)
     base["Neural_Networks_Gradient_Check_Epsilon"] = "0"  # run_solo (a fold at theta), not gradCheck
     workdir = Path(state.config_path).parent
@@ -573,10 +573,11 @@ def test_early_stop_triggers(tmp_path: Path) -> None:
     shutil.copy(PHASE0 / "NNweights_config1.bin", tmp_path / "NNweights_config1.bin")
     (tmp_path / "vrcts_tier2").mkdir()
 
-    state = init_run(tmp_path / "tier2_spectral.config", tmp_path / "run")
+    cfg = init_run(tmp_path / "tier2_spectral.config", tmp_path / "run").base_config
+    run = ModernRun(cfg=cfg, workdir=tmp_path, out_dir=tmp_path / "run", listing=[])
     params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", seed=7, val_metric="balance")
     with chdir(tmp_path):
-        res = train_modern(state, params=params)
+        res = train_modern(run, params=params)
 
     assert res.stopped_early is True, "early-stop must fire on the stuck-validation plateau"
     assert res.epochs_run < params.epochs, f"early-stop must halt before the {params.epochs}-epoch budget, ran {res.epochs_run}"

@@ -58,7 +58,7 @@ def test_run_state_json_roundtrip(tmp_path: Path) -> None:
 
     assert isinstance(state.ps, RunConfig)
     assert state.ps.algo == 6
-    assert state.balance == 10
+    assert state.ps.balance == 10
     assert len(state.listing) == 2, "the twin listing has 2 files"
     assert state.base_config["Algo_choice"] == "6"
     state_file = out_dir / "run_state.json"
@@ -261,7 +261,7 @@ def test_evaluate_exact_injects_resolved_packs(tmp_path: Path, monkeypatch: pyte
     seen = _fake_speech_rs(monkeypatch)
     state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
 
-    evaluate(state, Checkpoint(ckpt, net_names(state.algo)).packs())
+    evaluate(state, Checkpoint(ckpt, net_names(state.ps.algo)).packs())
 
     assert seen["weights"] == [[1.0, 2.0], [3.0]]
     assert seen["config"]["Neural_Networks_BackPropagation_Epochs"] == "0"
@@ -279,7 +279,7 @@ def test_evaluate_fast_injects_through_set_weights(tmp_path: Path, monkeypatch: 
     state.base_config["Inference_Path"] = "fast"
     before = set((tmp_path / "cfg").iterdir())
 
-    evaluate(state, Checkpoint(ckpt, net_names(state.algo)).packs())
+    evaluate(state, Checkpoint(ckpt, net_names(state.ps.algo)).packs())
 
     assert seen["weights"] == [[1.0, 2.0], [3.0]]
     assert seen["config"]["Inference_Path"] == "fast"

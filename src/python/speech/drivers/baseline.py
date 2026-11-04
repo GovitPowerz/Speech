@@ -97,7 +97,7 @@ from speech.batching import read_listing
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
 from speech.drivers.spec import ARM_CONFIG, BaselineSpec, listing_hash
-from speech.drivers.state import ModernTrainParams, RunState
+from speech.drivers.state import ModernRun, ModernTrainParams, RunState
 from speech.drivers.train import train_modern
 from speech.evaluate import DcfReport, Interval, cavg, dcf, lid_error, load_vrcts_hyp, load_vrcts_ref, read_scr_scores
 from speech.fold_run import FoldRun, _config_text
@@ -977,9 +977,10 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None, _train_f
 
     # --- 4. train (from scratch or resume) -----------------------------------------------
     state = RunState.from_config(base_config, out_dir)
+    run = ModernRun(cfg=state.base_config, workdir=Path(state.config_path).parent, out_dir=Path(state.out_dir), listing=state.listing)
     train = _train_fn if _train_fn is not None else train_modern
     console.log(f"training: {spec.epochs} epochs x {spec.steps_per_epoch} steps (patience {spec.patience})")
-    res = train(state, params)  # type: ignore[operator]
+    res = train(run, params)  # type: ignore[operator]
     val_costs = [r.val_cost for r in res.history]  # type: ignore[attr-defined]
     train_costs = [r.train_cost for r in res.history]  # type: ignore[attr-defined]
     console.log(f"trained {res.epochs_run} epochs; best_epoch={res.best_epoch} best_val={res.best_val_cost:.5f}")  # type: ignore[attr-defined]

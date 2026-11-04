@@ -17,6 +17,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -295,8 +296,9 @@ def _spec(arm: str, corpus_root: Path, out_dir: Path, **over: object) -> Baselin
 
 def _stub_run_state() -> type:
     """A `RunState` stand-in for the engine-free plumbing tests: both constructors return a bare
-    object (nothing downstream reads it once the trainer and the scorers are stubbed)."""
-    return type("RS", (), {"from_config": staticmethod(lambda *a, **k: object()), "from_parsed": staticmethod(lambda *a, **k: object())})
+    record (only the four `ModernRun` fields are read once the trainer and the scorers are stubbed)."""
+    rs = SimpleNamespace(base_config={}, config_path="stub/base.config", out_dir="stub", listing=[])
+    return type("RS", (), {"from_config": staticmethod(lambda *a, **k: rs), "from_parsed": staticmethod(lambda *a, **k: rs)})
 
 
 def test_run_baseline_flag_plumbing_with_stub_train(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
