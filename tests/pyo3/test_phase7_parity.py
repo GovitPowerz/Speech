@@ -147,7 +147,7 @@ def _ensure_arm(arm: str) -> _Arm:
     return _Arm(arm, out_dir, ckpt, out_dir / "base.config", test_listing, records, train_s, trained_now)
 
 
-def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
+def _eval_config(a: _Arm, inference_path: str, *, twin: bool) -> dict[str, str]:
     """An inference-shaped eval config: the trained base config, repointed at the held-out
     test listing, with backprop OFF + `Neural_Networks_BackPropagation_Epochs 0` (so the
     fast+training construction bail never fires -- the config is genuinely inference-shaped)
@@ -160,7 +160,7 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
     `BagOfProcessors::set_weights` was a SILENT NO-OP on them, then a loud bail (T6b) -- the
     seam would otherwise have scored the config's SEED weights while exact scored the
     injected TRAINED ones, a 100%-divergence artefact, NOT a real parity failure. Since
-    issue #62 `evaluate()` and the Launcher's `_score_fold` inject through
+    issue #62 `evaluate()` and the Launcher's `_held_out_fold` inject through
     `fold_run.FoldRun`'s `set_weights` on both paths (a fast processor rebuilds its net from
     the pack), so the repoint is redundant with the fold run and kept for the
     apples-to-apples config: loading trained weights from the config is how a real fast
@@ -176,9 +176,7 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
         cfg["BLSTM_LID_BackPropagationActivated"] = "false"
     cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
     cfg["Inference_Path"] = inference_path
-    path = a.out_dir / f"parity_eval_{tag}.config"
-    path.write_text(B._config_text(cfg))
-    return path
+    return cfg
 
 
 # --------------------------------------------------------------------------------------- #
@@ -188,12 +186,11 @@ def _eval_config(a: _Arm, inference_path: str, tag: str, *, twin: bool) -> Path:
 
 def _score_lid(a: _Arm, inference_path: str, tag: str) -> tuple[float, float, ChannelResults]:
     """Score the `[best_sad, best_lid]` checkpoint on the held-out slice under `inference_path`
-    (`exact`/`fast`) through the Launcher's own `_score_fold` (one fold, the metrics off
+    (`exact`/`fast`) through the Launcher's own `_held_out_fold` (one fold, the metrics off
     `lid_scores` / `lid_target`, issue #86); the rows carry the per-file argmax."""
-    eval_config = _eval_config(a, inference_path, tag, twin=True)
-    cfg = dict(parse_legacy_config(eval_config.read_text()))
+    cfg = _eval_config(a, inference_path, twin=True)
     t0 = time.time()
-    res = B._score_fold(cfg, a.out_dir, [a.ckpt / "best_sad.bin", a.ckpt / "best_lid.bin"], a.test_listing.name)
+    res = B._held_out_fold(cfg, a.out_dir, [a.ckpt / "best_sad.bin", a.ckpt / "best_lid.bin"], a.test_listing.name)
     a.timings[f"score_{tag}_s"] = time.time() - t0
     assert len(res) > 0, f"{a.arm}/{tag}: nothing scored (empty held-out slice)"
     return lid_error(res.lid_scores, res.lid_target), cavg(res.lid_scores, res.lid_target), res
@@ -260,20 +257,20 @@ def test_lid_phseq_metric_parity() -> None:
 
 def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, ChannelResults]:
     """Score the `best_sad` checkpoint on the held-out slice under `inference_path` end to
-    end through the Launcher's own `_score_fold` + `_sad_dcf` (one fold, the decided
+    end through the Launcher's own `_held_out_fold` + `_sad_dcf` (one fold, the decided
     segmentation off the fold result's `hypothesis` rows, pooled `dcf` over the windowed
     `.part.xml` refs, issue #86). Returns the pooled DcfReport + the rows (the per-file
     boundaries, for the comparison)."""
     cfg = dict(parse_legacy_config(a.base_config.read_text()))
     # Point the weight-file key at the TRAINED checkpoint so the base config itself names the
-    # net under test on both paths. `_score_fold` injects the same pack again through
+    # net under test on both paths. `_held_out_fold` injects the same pack again through
     # `set_weights` on both paths (issue #62), so this repoint is redundant with the fold run
-    # and kept so the config is the same apples-to-apples file `_eval_config` builds for the
+    # and kept so the config is the same apples-to-apples map `_eval_config` builds for the
     # LID arms.
     cfg["BLSTM_weightsFile"] = str((a.ckpt / "best_sad.bin").resolve())
     cfg["Inference_Path"] = inference_path
     t0 = time.time()
-    res = B._score_fold(cfg, a.out_dir, [a.ckpt / "best_sad.bin"], a.test_listing.name)
+    res = B._held_out_fold(cfg, a.out_dir, [a.ckpt / "best_sad.bin"], a.test_listing.name)
     a.timings[f"score_{tag}_s"] = time.time() - t0
     assert len(res) > 0, f"{a.arm}/{tag}: nothing scored (empty held-out slice)"
     return B._sad_dcf(res, a.test_records), res

@@ -679,7 +679,7 @@ def test_subset_gate_beats_own_init(tmp_path: Path, cell: str, direction: str, p
     packs = {(res.checkpoint_dir / n).stat().st_size for n in ("best_sad.bin", "last_sad.bin")}
     assert packs == {16 + 8 * pack_len}, f"{cell}/{direction} checkpoint is not the {pack_len}-element v2 pack: {packs}"
 
-    # --- self-describing run: metadata + the dumped VRCTS hyps landed ---
+    # --- self-describing run: metadata + the held-out rows ---
     assert res.metadata_path.is_file()
     assert res.scores.results is not None and len(res.scores.results) == res.n_test
     assert wall < 600.0, f"{cell}/{direction} gate took {wall:.0f}s, over the 10 min budget"

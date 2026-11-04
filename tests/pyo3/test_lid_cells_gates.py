@@ -203,7 +203,7 @@ def test_lid_slstm_forward_trains_and_scores(tmp_path: Path, arm: str, gate_reco
     packs = (res.checkpoint_dir / "best_sad.bin", res.checkpoint_dir / "best_lid.bin")
     scored: dict[str, ChannelResults] = {}
     for path, extra in (("exact", {}), ("fast", {"Inference_Path": "fast"})):
-        scored[path] = B._score_fold({**cfg, **extra}, res.out_dir, packs, test_name)
+        scored[path] = B._held_out_fold({**cfg, **extra}, res.out_dir, packs, test_name)
     r_exact, r_fast = scored["exact"], scored["fast"]
     err_exact = lid_error(r_exact.lid_scores, r_exact.lid_target)
     err_fast = lid_error(r_fast.lid_scores, r_fast.lid_target)

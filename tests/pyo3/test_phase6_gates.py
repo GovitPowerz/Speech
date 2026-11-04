@@ -82,7 +82,7 @@ def test_lid_features_subset_trains_and_scores(tmp_path: Path, gate_record: Gate
     # --- cavg RECORDED (a valid closed-set Cavg in [0, 1]); no hard pin (not stable at this scale) ---
     assert res.cavg is not None and 0.0 <= res.cavg <= 1.0, f"cavg must be a valid closed-set value, got {res.cavg}"
 
-    # --- the run is self-describing: metadata + both checkpoints + the .scr scores landed ---
+    # --- the run is self-describing: metadata + both checkpoints + the held-out rows ---
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_lid.bin").is_file() and (res.checkpoint_dir / "best_sad.bin").is_file()
     assert res.scores.results is not None and len(res.scores.results) == res.n_test
@@ -181,7 +181,7 @@ def test_sad_subset_trains_and_scores(tmp_path: Path, gate_record: GateRecorder)
     assert tr.dcf <= 0.5, f"trained DCF {tr.dcf:.4f} must beat the all-non-speech baseline (0.75) with headroom"
     assert ini.dcf >= 0.6, f"untrained init should sit near the all-non-speech baseline, got {ini.dcf:.4f}"
 
-    # --- self-describing run: metadata + checkpoint + the dumped VRCTS hyps landed ---
+    # --- self-describing run: metadata + checkpoint + the held-out rows ---
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_sad.bin").is_file() and (res.checkpoint_dir / "last_sad.bin").is_file()
     assert res.scores.results is not None and len(res.scores.results) == res.n_test
@@ -301,7 +301,7 @@ def test_lid_phseq_subset_trains_and_scores(tmp_path: Path, gate_record: GateRec
     # --- cavg RECORDED (a valid closed-set Cavg in [0, 1]); no hard pin (not stable at this scale) ---
     assert res.cavg is not None and 0.0 <= res.cavg <= 1.0, f"cavg must be a valid closed-set value, got {res.cavg}"
 
-    # --- the run is self-describing: metadata + both checkpoints + the .scr scores landed ---
+    # --- the run is self-describing: metadata + both checkpoints + the held-out rows ---
     assert res.metadata_path.is_file()
     assert (res.checkpoint_dir / "best_lid.bin").is_file() and (res.checkpoint_dir / "best_sad.bin").is_file()
     assert res.scores.results is not None and len(res.scores.results) == res.n_test

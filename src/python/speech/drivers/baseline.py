@@ -446,13 +446,14 @@ def write_sad_mapping(path: Path) -> None:
 # --------------------------------------------------------------------------------------- #
 
 
-def _score_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_listing_name: str) -> ChannelResults:
+def _held_out_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_listing_name: str) -> ChannelResults:
     """One forward-only `FoldRun` over the held-out listing at `packs` (a trained `best_<net>`
     set or the untrained `<net>_seed` set alike, injected through `set_weights` on either
     `Inference_Path`, issue #62), returning its config-0 channel results: the SAME scorer
     measures the trained model and its own from-scratch init on the identical test set (the
-    direction-safe improvement). Nothing is written and nothing is read back (issue #86): the
-    LID metrics come off `lid_scores` / `lid_target`, the SAD DCF off `hypothesis`."""
+    direction-safe improvement). No score file is written or read back (issue #86; the `-m`
+    engine still rewrites `<workdir>/MultiConfigResults.mat`): the LID metrics come off
+    `lid_scores` / `lid_target`, the SAD DCF off `hypothesis`."""
     nets = [read_weight_vector(p) for p in packs]
     return FoldRun(cfg, workdir, backprop=False, listing=test_listing_name).run(nets).results.for_config(0)
 
@@ -508,7 +509,8 @@ def _sad_dcf(results: ChannelResults, test_records: Sequence[dict[str, str]]) ->
     (`hyp_intervals`, the fold-result door of the hypothesis, at the VRCTS quantum the dumped
     xml carried) against the `.part.xml` reference windowed to its span. `results.file` is the
     row's index into the held-out listing, i.e. into `test_records` (`_write_listing_rows`
-    writes them in order); a stereo file scores each channel against the same reference."""
+    writes them in order). Mono only, as the corpus is: `load_vrcts_ref` reads every
+    `<SpeechSegment>` whatever its `ch`, where the engine slices the reference per channel."""
     pairs: list[tuple[list[Interval], list[Interval]]] = []
     for file_idx, (audio_duration, rows) in zip(results.file, results.hypothesis, strict=True):
         hyp = hyp_intervals(audio_duration, rows)
@@ -773,7 +775,7 @@ class SadArm:
         return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one, [("BLSTM", "sad_seed.bin")])
 
     def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
-        res = _score_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
+        res = _held_out_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
         return Scores(results=res, dcf=_sad_dcf(res, prepared.splits.test))
 
 
@@ -827,7 +829,7 @@ class LidArm:
         )
 
     def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
-        res = _score_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
+        res = _held_out_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
         return Scores(results=res, lid_error=lid_error(res.lid_scores, res.lid_target), cavg=cavg(res.lid_scores, res.lid_target))
 
 

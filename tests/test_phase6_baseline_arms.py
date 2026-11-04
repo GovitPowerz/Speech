@@ -13,10 +13,12 @@ tree of empty `.plp8f0mvsdd` files) -- nothing from `data/LRE03-LRE07/` is read 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -29,6 +31,8 @@ from speech.drivers.state import EpochRecord, ModernRun, ModernTrainParams, Mode
 from speech.evaluate import CollarScore as EvalCollar
 from speech.evaluate import DcfReport
 from speech.ledger.schema import CollarScore
+
+from tests._result_rows import channel_results_from_matrix
 
 # --------------------------------------------------------------------------------------- #
 # synthetic records
@@ -550,8 +554,8 @@ _SAD_FLAT: dict[str, str] = {
 
 
 def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #82: with a test split, the trained score is the run's `best()` set under
-    `score_trained`, the init score the seed packs under `score_init`, and the record projects
+    """Issue #82: with a test split, the trained score is the run's `best()` set, the
+    init score the seed packs, and the record projects
     both DCF reports and the cost trajectory (the off-corpus pin of what the gates read)."""
     root = tmp_path / "sad_corpus"
     _sad_corpus_tree(root, 20)
@@ -573,7 +577,7 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
     }
     seen: list[tuple[tuple[Path, ...], str, int]] = []
 
-    def score_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_name: str) -> Any:
+    def held_out_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path], test_name: str) -> Any:
         seen.append((tuple(packs), test_name, len(cfg)))
         return "score_trained" if packs[0].name == "best_sad.bin" else "score_init"  # the fake fold is its tag
 
@@ -581,7 +585,7 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
         assert len(test_records) == 2
         return reports[res]
 
-    monkeypatch.setattr(B, "_score_fold", score_fold)
+    monkeypatch.setattr(B, "_held_out_fold", held_out_fold)
     monkeypatch.setattr(B, "_sad_dcf", sad_dcf)
     out = tmp_path / "out"
     res = B.run_baseline(_spec("sad", root, out, subset=4, valid_size=0, test_size=2, epochs=2, steps_per_epoch=1, score_init=True))
@@ -745,6 +749,39 @@ def test_pool_dcf_perfect_and_false_alarm() -> None:
     f2 = ([(0.0, 10.0, "NS")], [(0.0, 10.0, "speech")])
     c = B._pool_dcf([f1, f2], (0.0,)).by_collar(0.0)
     assert abs(c.pmiss - 0.0) < 1e-9 and abs(c.pfa - 1.0) < 1e-9 and abs(c.dcf - 0.25) < 1e-9
+
+
+def _fold_results(n: int, **fields: Any) -> Any:
+    """`n` synthetic config-0 mono rows (file ids 0..n-1) with `fields` replaced."""
+    mcr = np.zeros((n, 3 + 18))
+    mcr[:, 0] = np.arange(1, n + 1)
+    mcr[:, 1:3] = 1.0
+    mcr[:, 3 + 5] = 10.0
+    return dataclasses.replace(channel_results_from_matrix(mcr), **fields)
+
+
+def test_sad_dcf_pairs_each_row_with_its_listing_record(tmp_path: Path) -> None:
+    """`results.file` indexes `test_records`: each hypothesis meets its own reference (a
+    perfect decision per file, DCF 0), and the swapped listing is not."""
+    records = []
+    for i, speech in enumerate([(0.0, 4.0), (6.0, 10.0)]):
+        ref = tmp_path / f"ref{i}.xml"
+        ref.write_text(_vrcts_xml(10.0, [speech]))
+        records.append({"filename": f"f{i}.wav", "refseg": str(ref)})
+    hyps = [(10.0, [(0.0, "Speech"), (4.0, "Other"), (10.0, "End")]), (10.0, [(0.0, "Other"), (6.0, "Speech"), (10.0, "End")])]
+    res = _fold_results(2, hypothesis=hyps)
+    assert all(c.dcf == 0.0 for c in B._sad_dcf(res, records).scores)
+    assert B._sad_dcf(res, records[::-1]).by_collar(0.0).dcf > 0.0
+
+
+def test_lid_arm_scores_against_the_engine_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`LidArm.score` takes the reference off `lid_target`: one of two rows argmaxes its
+    target, so the held-out error is 50%."""
+    res = _fold_results(2, lid_scores=np.array([[0.9, 0.1], [0.8, 0.2]]), lid_target=np.array([0, 1], dtype=np.int64))
+    monkeypatch.setattr(B, "_held_out_fold", lambda cfg, workdir, packs, name: res)
+    prepared: Any = SimpleNamespace(cfg={}, out_dir=Path("."), splits=SimpleNamespace(test_name="t.flst"))
+    scores = B.ARMS["lid-features"].score(prepared, [Path("sad.bin"), Path("lid.bin")])
+    assert scores.results is res and scores.lid_error == 50.0
 
 
 def _sad_corpus_tree(root: Path, n: int) -> None:

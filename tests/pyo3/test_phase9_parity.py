@@ -593,10 +593,10 @@ def test_causality_cost_dcf_on_corpus(cell: str) -> None:
     frozen_cfg = _inference_cfg(arm, _frozen_overlay(gain))
 
     t0 = time.time()
-    native_rep = B._sad_dcf(B._score_fold(native_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
+    native_rep = B._sad_dcf(B._held_out_fold(native_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
     native_s = time.time() - t0
     t0 = time.time()
-    frozen_rep = B._sad_dcf(B._score_fold(frozen_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
+    frozen_rep = B._sad_dcf(B._held_out_fold(frozen_cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name), arm.test_records)
     frozen_s = time.time() - t0
 
     native_dcf = {c: native_rep.by_collar(c).dcf for c in _COLLARS}
@@ -624,12 +624,12 @@ def _score_causal(arm: _CausalArm, inference_path: str) -> tuple[B.DcfReport, Ch
     """Score the trained causal pack on the held-out slice under `inference_path`, in the
     arm's NATIVE config (type -1, `BLSTM_window 0`, no fixed gain) -- so exact and fast
     configs are identical except `Inference_Path`, and the comparison isolates the f32
-    causal kernels. The Launcher's `_score_fold` `set_weights`-injects the same pack on both
+    causal kernels. The Launcher's `_held_out_fold` `set_weights`-injects the same pack on both
     paths (redundant: the config repoint already did it; on fast since issue #62); the rows
     carry the decided boundaries (issue #86)."""
     cfg = _inference_cfg(arm, {"Inference_Path": inference_path})
     t0 = time.time()
-    res = B._score_fold(cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name)
+    res = B._held_out_fold(cfg, arm.out_dir, [arm.ckpt / "best_sad.bin"], arm.test_listing.name)
     arm.timings[f"score_{inference_path}_s"] = time.time() - t0
     assert len(res) > 0, f"{arm.cell}/{inference_path}: nothing scored (empty held-out slice)"
     return B._sad_dcf(res, arm.test_records), res
