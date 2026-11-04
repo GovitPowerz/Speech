@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
-from speech.engine import ChannelResults
+from speech.engine import ChannelResults, Hypothesis
 
 F64 = np.float64
 
@@ -71,10 +71,17 @@ def channel_results_from_matrix(mcr: NDArray[np.float64]) -> ChannelResults:
         lid_scores=scores,
         lid_count=res[:, -2].astype(np.int64),
         seg_count=res[:, -1].astype(np.int64),
+        # The matrix carries no segmentation: the empty list at the row's duration, as the
+        # Rust `from_row` seeds it (issue #86).
+        hypothesis=[_empty_hypothesis(float(d)) for d in res[:, 5]],
     )
 
 
-def _empty() -> dict[str, NDArray[np.float64] | NDArray[np.int64] | NDArray[np.bool_]]:
+def _empty_hypothesis(audio_duration: float) -> Hypothesis:
+    return (audio_duration, [(0.0, "Other"), (audio_duration, "End")])
+
+
+def _empty() -> dict[str, NDArray[np.float64] | NDArray[np.int64] | NDArray[np.bool_] | list[Hypothesis]]:
     z = np.zeros(0, dtype=F64)
     return {
         "file": np.zeros(0, dtype=np.int64),
@@ -93,4 +100,5 @@ def _empty() -> dict[str, NDArray[np.float64] | NDArray[np.int64] | NDArray[np.b
         "lid_scores": np.zeros((0, 0), dtype=F64),
         "lid_count": np.zeros(0, dtype=np.int64),
         "seg_count": np.zeros(0, dtype=np.int64),
+        "hypothesis": [],
     }

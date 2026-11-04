@@ -44,6 +44,15 @@
 //! 400`), so `(v - 200) + 200 == v` bit for bit and the `.mat` goldens are
 //! unmoved. The frozen tree keeps producing the encoding (ADR-0002).
 //!
+//! # The hypothesis (issue #86)
+//!
+//! The decided segmentation itself (the sanitized boundary list `compute_errors`
+//! left, the one the VRCTS dump prints) rides on the result as `hypothesis`. It is
+//! NOT on the wire: `to_row` ignores it, `from_row` seeds the empty
+//! `[Other@0, End@audio_duration]` list, and the seam hands it to Python as the
+//! `hypothesis` key of `channel_results()`, so the held-out scorer reads the
+//! decision off the fold result instead of a dumped xml.
+//!
 //! # The unscored asymmetry (`:358-392`)
 //!
 //! An unscored row zeroes the three error columns, `seg_cost` and BOTH trailing
@@ -53,7 +62,7 @@
 //! holds that asymmetry; nothing downstream distinguishes "unscored" from
 //! "scored as zero", so the struct does not either.
 
-use crate::tasks::segmentation::SegClass;
+use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::{ScoreReport, WerStats};
 
 /// The scored/unscored LID block of one channel: `seg._LID*` members, written
@@ -134,10 +143,14 @@ pub struct ChannelResult {
     pub lid: Option<LidResult>,
     /// Column len-1, `_NbOfClassif`: the SAD net's cost denominator.
     pub seg_count: i64,
+    /// Not a column: the decided segmentation (sanitized, the list the VRCTS dump
+    /// prints), read by the seam's `hypothesis` key (issue #86).
+    pub hypothesis: Segmentation,
 }
 
 impl ChannelResult {
     /// The scored row (`:313-350`).
+    #[allow(clippy::too_many_arguments)] // the row's own columns plus the hypothesis
     pub fn scored(
         report: &ScoreReport,
         time_per_hour: f64,
@@ -146,6 +159,7 @@ impl ChannelResult {
         speech_duration: f64,
         seg_count: i64,
         lid: Option<LidResult>,
+        hypothesis: Segmentation,
     ) -> Self {
         let speech = report.per_class[SegClass::Speech as usize];
         let mut global_error_rate = 0.0;
@@ -167,6 +181,7 @@ impl ChannelResult {
             wer,
             lid,
             seg_count,
+            hypothesis,
         }
     }
 
@@ -178,6 +193,7 @@ impl ChannelResult {
         audio_duration: f64,
         speech_duration: f64,
         lid: Option<LidResult>,
+        hypothesis: Segmentation,
     ) -> Self {
         ChannelResult {
             pfa: 0.0,
@@ -191,6 +207,7 @@ impl ChannelResult {
             // legacy: :390 -- the LID counter is a hard 0 in the unscored branch.
             lid: lid.map(|l| LidResult { count: 0, ..l }),
             seg_count: 0,
+            hypothesis,
         }
     }
 
@@ -276,6 +293,7 @@ impl ChannelResult {
             },
             lid,
             seg_count: row[row.len() - 1] as i64,
+            hypothesis: Segmentation::new(row[5]),
         }
     }
 }
@@ -304,14 +322,26 @@ mod tests {
     fn row_width_and_slots() {
         let report = empty_report();
 
-        let plain = ChannelResult::scored(&report, 1.0, 2.0, 3.0, 4.0, 9, None).to_row();
+        let plain =
+            ChannelResult::scored(&report, 1.0, 2.0, 3.0, 4.0, 9, None, Segmentation::new(3.0))
+                .to_row();
         assert_eq!(plain.len(), 18);
         assert_eq!(plain[14], 0.0);
         assert_eq!(plain[15], 0.0);
         assert_eq!(plain[16], 0.0); // len-2 lid count
         assert_eq!(plain[17], 9.0); // len-1 seg count
 
-        let wide = ChannelResult::scored(&report, 1.0, 2.0, 3.0, 4.0, 9, Some(lid3())).to_row();
+        let wide = ChannelResult::scored(
+            &report,
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            9,
+            Some(lid3()),
+            Segmentation::new(3.0),
+        )
+        .to_row();
         assert_eq!(wide.len(), 21, "18 + N(3)");
         assert_eq!(wide[14], 7.5);
         assert_eq!(wide[15], 100.0);
@@ -320,7 +350,8 @@ mod tests {
         assert_eq!(wide[20], 9.0); // len-1
 
         // Unscored: same LID block, hard-0 trailing counters (:390-391), WER default.
-        let unscored = ChannelResult::unscored(1.0, 3.0, 4.0, Some(lid3())).to_row();
+        let unscored =
+            ChannelResult::unscored(1.0, 3.0, 4.0, Some(lid3()), Segmentation::new(3.0)).to_row();
         assert_eq!(unscored.len(), 21);
         assert_eq!(unscored[14], 7.5);
         assert_eq!(&unscored[16..19], &[210.0, 30.0, 60.0]);
@@ -342,9 +373,19 @@ mod tests {
     #[test]
     fn from_row_inverts_to_row() {
         let report = empty_report();
-        let wide = ChannelResult::scored(&report, 1.0, 2.0, 3.0, 4.0, 9, Some(lid3()));
+        let wide = ChannelResult::scored(
+            &report,
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            9,
+            Some(lid3()),
+            Segmentation::new(3.0),
+        );
         assert_eq!(ChannelResult::from_row(&wide.to_row()), wide);
-        let plain = ChannelResult::scored(&report, 1.0, 2.0, 3.0, 4.0, 9, None);
+        let plain =
+            ChannelResult::scored(&report, 1.0, 2.0, 3.0, 4.0, 9, None, Segmentation::new(3.0));
         assert_eq!(ChannelResult::from_row(&plain.to_row()), plain);
         // A crafted 18-wide row with live LID slots keeps them (the aggregation tests).
         let mut row = plain.to_row();

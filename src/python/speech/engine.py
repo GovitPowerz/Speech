@@ -82,6 +82,12 @@ class CostBreakdown:
     cutoff: float | None = None
 
 
+#: One decided segmentation as the seam hands it (issue #86): `(audio_duration, rows)`, the
+#: rows `(begin_s, class)` ending with the `End` sentinel at `audio_duration` -- the stream
+#: session's row shape. `evaluate.hyp_intervals` turns it into `dcf` intervals.
+Hypothesis = tuple[float, list[tuple[float, str]]]
+
+
 @dataclass(frozen=True, eq=False)
 class ChannelResults:
     """The engine's channel results by name, one entry per (file, config, channel) in
@@ -92,6 +98,9 @@ class ChannelResults:
     already decoded (`N == 0` on a run without LID). `lid_correct` is the `_IsLIDCorrect`
     flag (100 / 0 on the wire). The wire layout itself lives in Rust
     (`engine/channel_result.rs`) and, for the Octave goldens only, in `tests/_result_rows.py`.
+
+    `hypothesis` (issue #86) is NOT on the wire: one `Hypothesis` per row, the decided
+    segmentation the engine would have dumped as VRCTS, aligned with the arrays.
     """
 
     file: NDArray[np.int64]
@@ -110,11 +119,14 @@ class ChannelResults:
     lid_scores: NDArray[np.float64]
     lid_count: NDArray[np.int64]
     seg_count: NDArray[np.int64]
+    hypothesis: list[Hypothesis]
 
     @classmethod
-    def from_seam(cls, d: Mapping[str, NDArray[Any]]) -> ChannelResults:
-        """Wrap the seam's dict (one array per field; every crossing is already a copy)."""
-        return cls(**{f.name: np.asarray(d[f.name]) for f in fields(cls)})
+    def from_seam(cls, d: Mapping[str, Any]) -> ChannelResults:
+        """Wrap the seam's dict (one array per field, a list for `hypothesis`; every crossing
+        is already a copy)."""
+        arrays = {f.name: np.asarray(d[f.name]) for f in fields(cls) if f.name != "hypothesis"}
+        return cls(**arrays, hypothesis=list(d["hypothesis"]))
 
     def __len__(self) -> int:
         return int(self.file.shape[0])
@@ -125,7 +137,8 @@ class ChannelResults:
         sel = self.conf == pos
         if not np.any(sel):
             raise ValueError(f"channel results: no row for config {pos} (configs present: {sorted(set(self.conf.tolist()))})")
-        return ChannelResults(**{f.name: getattr(self, f.name)[sel] for f in fields(self)})
+        arrays = {f.name: getattr(self, f.name)[sel] for f in fields(self) if f.name != "hypothesis"}
+        return ChannelResults(**arrays, hypothesis=[h for h, keep in zip(self.hypothesis, sel, strict=True) if keep])
 
 
 # ---- Pure results-derived pieces (shared by compute_cost + forward_backward) ------------

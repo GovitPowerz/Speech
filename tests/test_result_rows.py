@@ -80,5 +80,8 @@ def test_from_seam_round_trips_the_dict() -> None:
     r = channel_results_from_matrix(np.array([_row(1, 1, 1, res)]))
     back = ChannelResults.from_seam(asdict(r))
     for k, v in asdict(r).items():
+        if k == "hypothesis":
+            assert getattr(back, k) == v == [(0.0, [(0.0, "Other"), (0.0, "End")])]
+            continue
         assert np.array_equal(getattr(back, k), v), k
         assert getattr(back, k).dtype == v.dtype, k
