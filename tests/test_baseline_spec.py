@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 from speech.drivers.spec import ARM_CONFIG, ARM_LINEAGE, LID_ARMS, RECIPE_DERIVED, SAD_ARMS, BaselineSpec
+from speech.drivers.state import ModernTrainParams
 from speech.ledger.schema import BaselineRecipe
 
 
@@ -79,6 +80,20 @@ def test_the_recipe_model_is_the_tag() -> None:
     s = s.model_copy(update={"epochs": 11, "steps_per_epoch": 13, "patience": 17, "init_scheme": "he"})
     recipe = s.recipe(listing="fedcba9876543210").model_dump()
     assert {k: recipe[k] for k in projected} == {k: getattr(s, k) for k in projected}
+
+
+def test_spec_named_train_params_are_required_and_take_the_spec_values() -> None:
+    """Issue #85: `ModernTrainParams` is the Modern loop's input, not a spec copy, so a knob the
+    spec declares under the same name carries no default there (the spec is the one default
+    set) and the spec's value validates into it unchanged."""
+    shared = set(ModernTrainParams.model_fields) & set(BaselineSpec.model_fields)
+    assert shared == {"epochs", "patience", "steps_per_epoch", "minibatch", "init_scheme", "seed"}
+    assert all(ModernTrainParams.model_fields[name].is_required() for name in shared)
+    for name in set(ModernTrainParams.model_fields) - shared:
+        assert not ModernTrainParams.model_fields[name].is_required(), name
+    s = _spec(seed=5, minibatch=6).model_copy(update={"epochs": 11, "steps_per_epoch": 13, "patience": 17, "init_scheme": "he"})
+    params = ModernTrainParams(**{name: getattr(s, name) for name in shared})
+    assert {name: getattr(params, name) for name in shared} == {name: getattr(s, name) for name in shared}
 
 
 def test_recipe_projection() -> None:

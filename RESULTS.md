@@ -294,9 +294,10 @@ pooled `dcf`, read off one fold's channel results since issue #86, no score file
 the promotable record (not on `--dry-run`). A run directory that already holds a manifest is
 refused unless `--resume` continues it.
 
-Known limitation (machinery): `forget_bias_one` (the LSTM forget-gate 1.0 init, default on) is
-threaded correctly through `ModernTrainParams` end to end but has NO CLI flag on `python -m speech.drivers.baseline`
--- only its default (`True`) is exercised; a `False` sweep would need the flag added.
+Known limitation (machinery): the LSTM forget-gate 1.0 init (`init_weights`' `forget_bias_one`,
+default on) has NO knob on the Modern loop or `python -m speech.drivers.baseline` (issue #85 removed
+the never-set `ModernTrainParams` field) -- only `True` is exercised; a `False` sweep would need a
+spec field, which is a recipe field and so a schema bump.
 
 ---
 

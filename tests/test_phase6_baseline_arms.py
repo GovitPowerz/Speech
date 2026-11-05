@@ -331,7 +331,7 @@ def _fake_engine(monkeypatch: pytest.MonkeyPatch, flat: dict[str, str]) -> None:
     fake_rs = types.ModuleType("speech_rs")
     setattr(fake_rs, "load_toml_config", lambda p: flat)  # noqa: B010 -- dynamic attr on a fake module
     monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
-    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one, nets: [out / name for _, name in nets])
+    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, nets: [out / name for _, name in nets])
 
 
 def _stub_train(monkeypatch: pytest.MonkeyPatch, hook: Callable[[ModernRun, ModernTrainParams], object] | None = None) -> None:
@@ -405,7 +405,7 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
     # multilingual layout parked class 11 in a never-read aggregate slot: `vie` never trained).
     params = p.params
     fv = np.repeat(np.arange(len(B._LANGS), dtype=np.float64), 3).reshape(-1, 1)
-    batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, np.random.default_rng(0))
+    batches = create_batches(fv, params.minibatch, 0, False, params.nb_classes, np.random.default_rng(0))
     drawn: set[int] = set()
     for _ in range(20):
         idx, batches = get_new_batch(batches)
@@ -687,7 +687,7 @@ def test_sad_seed_pack_is_byte_identical_across_lid_cells(tmp_path: Path) -> Non
             cfg = {**_TWIN_FLAT, **B.cell_overlay(_TWIN_FLAT, cell, direction, prefix="BLSTM_LID")}
             out = tmp_path / f"{cell}_{direction}"
             out.mkdir()
-            B._generate_seed_packs(cfg, out, 0, "xavier", True, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")])
+            B._generate_seed_packs(cfg, out, 0, "xavier", [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")])
             sad_packs[cell, direction] = (out / "sad_seed.bin").read_bytes()
             lid_lengths[cell, direction] = len((out / "lid_seed.bin").read_bytes())
     assert len(set(sad_packs.values())) == 1

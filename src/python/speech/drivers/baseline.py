@@ -411,22 +411,21 @@ def cell_overlay(flat: dict[str, str], cell: str, direction: str, *, prefix: str
     return overlay
 
 
-def _generate_seed_packs(
-    flat: dict[str, str], out_dir: Path, seed: int, init_scheme: str, forget_bias_one: bool, nets: Sequence[tuple[str, str]]
-) -> list[Path]:
+def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_scheme: str, nets: Sequence[tuple[str, str]]) -> list[Path]:
     """Write the seed weight packs the engine loads at construction (`BLSTM_weightsFile` /
     `BLSTM_LID_weightsFile`), one per `(prefix, filename)` in `nets` (`[sad]`, or `[sad, lid]`
     for the Twin), drawn in order from ONE `Generator(seed)` through the SAME `init_weights`
     the training loop uses. `train_modern` re-inits from scratch and overrides them, but the
     engine still needs a loadable, correctly-sized pack to build the net; the pack ALSO
-    doubles as the scored `score_init` baseline, so `init_scheme` / `forget_bias_one` MUST be
-    the `ModernTrainParams` the training call uses (Task 8 review fix) -- otherwise the
-    held-out gain would compare a trained net against an init drawn under another scheme.
+    doubles as the scored `score_init` baseline, so `init_scheme` MUST be the
+    `ModernTrainParams` the training call uses (Task 8 review fix) -- otherwise the held-out
+    gain would compare a trained net against an init drawn under another scheme; the forget
+    gate starts open on both paths through `init_weights`' default (no knob since #85).
     Returns the pack paths."""
     rng = np.random.default_rng(seed)
     paths: list[Path] = []
     for prefix, name in nets:
-        pack = init_weights(flat, prefix, rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
+        pack = init_weights(flat, prefix, rng, init_scheme)[0]  # type: ignore[arg-type]
         write_bin(pack.shape[0], 1, pack, out_dir / name)
         paths.append(out_dir / name)
     return paths
@@ -772,7 +771,7 @@ class SadArm:
         return assemble_flat_config(flat, fileslisting=splits.train_name, mapping=splits.mapping_name, sad_seed="sad_seed.bin", lanes=spec.lanes, extra=extra)
 
     def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> list[Path]:
-        return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one, [("BLSTM", "sad_seed.bin")])
+        return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, [("BLSTM", "sad_seed.bin")])
 
     def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
         res = _held_out_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
@@ -824,9 +823,7 @@ class LidArm:
         )
 
     def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> list[Path]:
-        return _generate_seed_packs(
-            cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")]
-        )
+        return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")])
 
     def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
         res = _held_out_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
@@ -946,7 +943,7 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
     # normalizes the records (`weight` / `file_id` defaults), and the batch scheduler must see
     # the rows the engine reads (what `RunState.from_parsed` used to read for it).
     run = ModernRun(cfg=cfg, workdir=out_dir, out_dir=out_dir, listing=read_listing(out_dir / splits.train_name))
-    # Built before the seed packs so their init is handed the SAME init_scheme/forget_bias_one
+    # Built before the seed packs so their init is handed the SAME init_scheme
     # the training call will use (Task 8 review fix); a resume reads the run's own checkpoint.
     params = ModernTrainParams(
         epochs=spec.epochs,
@@ -955,9 +952,6 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
         valid_listing=splits.valid_name if splits.valid else None,
         minibatch=spec.minibatch,
         nb_classes=splits.n_classes,
-        # NOT multilingual: that legacy layout reads class values 1..nb_classes-1 as targets and
-        # sends class nb_classes-1 to the aggregate slot's never-read `.index`, so the 0..11
-        # LID mapping would never draw class 11 into a batch.
         init_scheme=spec.init_scheme,
         seed=spec.seed,
         resume_from=str(run.checkpoint.dir) if spec.resume else None,

@@ -236,13 +236,19 @@ class ModernTrainParams(BaseModel):
     seeded init + SMORMS3 epochs + forward-only validation + early-stop). These are ALL
     driver-side (there are NO engine `.config`/TOML keys for them; the `[training]` section
     in `configs/lid/lid_blstm.toml` is a commented CONVENTION example only, never parsed by
-    the engine). `epochs` is the TOTAL target (resume continues toward it, not `+epochs`)."""
+    the engine). `epochs` is the TOTAL target (resume continues toward it, not `+epochs`).
+
+    The loop's input, not a copy of the launcher spec (issue #85): a field the `BaselineSpec`
+    declares under the same name is REQUIRED here, so the spec holds the one default set and
+    `prepare` passes every knob through; the fields with a default are the ones the launcher
+    derives (`valid_listing`, `nb_classes`, `resume_from`) or that only a test sets
+    (`val_metric`, the early-stop gate's "balance")."""
 
     model_config = ConfigDict(extra="forbid")
 
-    epochs: int = 50  # total epochs (resume continues toward this)
-    patience: int = 5  # early-stop after this many epochs with no validation-cost improvement
-    steps_per_epoch: int = 10  # SMORMS3 steps per epoch (no LR schedule; fresh optimizer per epoch)
+    epochs: int  # total epochs (resume continues toward this)
+    patience: int  # early-stop after this many epochs with no validation-cost improvement
+    steps_per_epoch: int  # SMORMS3 steps per epoch (no LR schedule; fresh optimizer per epoch)
     valid_listing: str | None = None  # validation fileslisting (rel to config dir); None -> reuse the training listing
     # The forward-only validation cost the early-stop follows (Phase 6 Task 6, a Phase-5 carry-forward).
     # "nn_cost_seg" (DEFAULT): the CONTINUOUS NNCostSeg objective (the same `f` forward_backward descends,
@@ -253,12 +259,10 @@ class ModernTrainParams(BaseModel):
     # f = NNCostSeg + NNCostLID, train.py:775-779) -- the metric name names only the SAD half.
     val_metric: Literal["nn_cost_seg", "balance"] = "nn_cost_seg"
     # hard-example mini-batching (Task 4/5 fixed batching); minibatch == 0 -> full-corpus training per epoch.
-    minibatch: int = 0
-    nb_worst: int = 0
+    # The Modern loop draws no worst cases and is never multilingual (`_make_default_train_epoch`).
+    minibatch: int
     nb_classes: int = 1
-    multilingual: bool = False
-    # from-scratch seeded init (Task 3 `init_weights`); ignored when `resume_from` is set.
-    init_scheme: Literal["xavier", "he"] = "xavier"
-    seed: int = 0  # the loop's ONE seed: the init draw, and the mini-batch stream as `seed + 2`
-    forget_bias_one: bool = True
+    # from-scratch seeded init (Task 3 `init_weights`, forget gate open); ignored when `resume_from` is set.
+    init_scheme: Literal["xavier", "he"]
+    seed: int  # the loop's ONE seed: the init draw, and the mini-batch stream as `seed + 2`
     resume_from: str | None = None  # checkpoint dir to resume from (loads last_*.bin + train_history.json); None -> from-scratch
