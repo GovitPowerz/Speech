@@ -210,7 +210,7 @@ fn bench_realfft(c: &mut Criterion) {
 fn bench_mel_apply_f32(c: &mut Criterion) {
     // Same arguments as `bench_mel_apply`'s f64 bank, in the same order (this
     // is the point of the comparison -- only the kernel precision differs).
-    let bank = FastMelBank::new(
+    let bank = FastMelBank::from_exact(&MelFilterBank::new(
         186.1001763856132,
         2502.400490895474,
         20,
@@ -223,7 +223,7 @@ fn bench_mel_apply_f32(c: &mut Criterion) {
         false,
         0,
         0,
-    );
+    ));
     let rows = 100_usize;
     let bins = 513_usize;
     let perio_f32: Vec<f32> = (0..rows * bins)

@@ -33,7 +33,7 @@
 //! - Branch B (`ignoreFirst && deltas_nb >= 0`) computes into a `T x (width+1)`
 //!   temp then drops the FIRST column (static c0 only; delta-of-c0 kept).
 
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 /// `Hz2Mel(f) = 1125 * ln(1 + f/700)` (plain double std math).
 pub fn hz_to_mel(f: f64) -> f64 {
@@ -58,6 +58,21 @@ pub struct MelFilterBank {
     index_begin: Vec<usize>,
     coeffs: Vec<Vec<f64>>,
     coeffs_dct: Array2<f64>,
+}
+
+/// [`MelFilterBank::tables`]: the private tables and their indexing scalars, borrowed.
+pub(crate) struct MelTables<'a> {
+    pub(crate) is_log: bool,
+    pub(crate) ignore_first_dct: bool,
+    pub(crate) nb_filters: usize,
+    pub(crate) nb_dct: i32,
+    pub(crate) compute_deltas_nb: i32,
+    pub(crate) compute_delta_deltas_nb: i32,
+    pub(crate) beg_freq: usize,
+    pub(crate) index_begin: &'a [usize],
+    pub(crate) coeffs: &'a [Vec<f64>],
+    /// `nb_filters x nb_dct` (`(0, 0)` when the DCT is off).
+    pub(crate) coeffs_dct: ArrayView2<'a, f64>,
 }
 
 impl MelFilterBank {
@@ -191,6 +206,27 @@ impl MelFilterBank {
             index_begin,
             coeffs,
             coeffs_dct,
+        }
+    }
+
+    /// The bank's tables and the scalars that index them, borrowed (issue #88, the
+    /// ADR-0002 introspection class: a read, no write). The one reader is
+    /// `fast::mel32::FastMelBank::from_exact`, which narrows the three tables to f32
+    /// once so the fast tree carries no second copy of this constructor's walk.
+    /// `nb_filters` / `nb_dct` are the RAW stored counts (the clamped `nb_dct`), not the
+    /// output column counts the public `nb_filters()` / `nb_dct()` derive from them.
+    pub(crate) fn tables(&self) -> MelTables<'_> {
+        MelTables {
+            is_log: self.is_log,
+            ignore_first_dct: self.ignore_first_dct,
+            nb_filters: self.nb_filters,
+            nb_dct: self.nb_dct,
+            compute_deltas_nb: self.compute_deltas_nb,
+            compute_delta_deltas_nb: self.compute_delta_deltas_nb,
+            beg_freq: self.beg_freq,
+            index_begin: &self.index_begin,
+            coeffs: &self.coeffs,
+            coeffs_dct: self.coeffs_dct.view(),
         }
     }
 

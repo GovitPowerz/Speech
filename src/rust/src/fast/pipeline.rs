@@ -110,7 +110,7 @@ use realfft::{RealFftPlanner, RealToComplex};
 
 use super::mel32::{FastMelBank, assemble_input_sequence_f32};
 use super::nn::FastMatrix;
-use crate::features::pipeline::{FeatureConfig, SpectralParams};
+use crate::features::pipeline::{FeatureConfig, SpectralParams, build_mel_bank};
 
 /// f32 feature pipeline: windowing -> one real FFT per frame -> periodogram -> f32
 /// mel/DCT (`fast::mel32`) -> f32 assembled input sequence, f32 END TO END. Banks +
@@ -209,28 +209,10 @@ impl FastPipeline {
             crate::audio::windowing_coefficients(&cfg.win_type, false, buffer_size, cfg.win_param)
                 .map(|v| v.iter().map(|&x| x as f32).collect());
 
-        // Mel filterbank + DCT table, built ONCE (f32 -- `FastMelBank::new` runs the
-        // exact ctor's f64 geometry walk and narrows only the coefficient values). Args
-        // match `features::pipeline::build_mel_bank` (the exact path's
-        // canonical MelFilterBank::new site since the Task 8 hoist) exactly.
-        let bank = if cfg.nb_bins > 0 {
-            Some(FastMelBank::new(
-                cfg.min_mel,
-                cfg.max_mel,
-                cfg.nb_bins,
-                params.min_freq,
-                params.max_freq,
-                rate,
-                params.bins - 1,
-                cfg.is_log,
-                cfg.nb_dct,
-                cfg.ignore_first,
-                cfg.deltas_nb,
-                cfg.dd_nb,
-            ))
-        } else {
-            None
-        };
+        // Mel filterbank + DCT table, built ONCE: the exact bank from the exact path's one
+        // construction site (`build_mel_bank`, the Task 8 hoist), its tables narrowed to
+        // f32 once (`FastMelBank::from_exact`, issue #88). No second geometry walk.
+        let bank = build_mel_bank(cfg, params, rate).map(|b| FastMelBank::from_exact(&b));
 
         let mut planner = RealFftPlanner::<f32>::new();
         let r2c = planner.plan_fft_forward(window_size);
