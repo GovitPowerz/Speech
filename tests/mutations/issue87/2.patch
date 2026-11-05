@@ -1,0 +1,20 @@
+mutation: parse_token stops trimming (the pre-#87 shape of features/pipeline.rs's, nn/blstm.rs's bool/i16 and the string readers' copies): a padded in-memory value must still read, the one visible contract change of #87
+catcher: CAUGHT cargo --lib legacy_config::token_reader_tests::parse_token_per_type
+catcher: CAUGHT cargo --test config_readers driver_config_reads_scalars_through_the_family
+catcher: CAUGHT cargo --test config_readers feature_config_reads_scalars_through_the_family
+catcher: CAUGHT cargo --test config_readers corpus_reads_the_listing_key_through_the_family
+catcher: MISSED cargo --test config_readers bag_of_processors_rejects_trailing_junk_on_scalar_keys
+
+diff --git a/src/rust/src/legacy_config.rs b/src/rust/src/legacy_config.rs
+index 4227c4c..0834c2d 100644
+--- a/src/rust/src/legacy_config.rs
++++ b/src/rust/src/legacy_config.rs
+@@ -45,7 +45,7 @@ pub(crate) fn parse_token<T: FromStr>(s: &str, key: &str) -> Result<T>
+ where
+     T::Err: Display,
+ {
+-    s.trim().parse::<T>().map_err(|e| {
++    s.parse::<T>().map_err(|e| {
+         anyhow!(
+             "cannot read '{s}' as {} for '{key}': {e}",
+             type_name_short::<T>()
