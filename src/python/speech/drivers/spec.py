@@ -102,15 +102,19 @@ class BaselineSpec(BaseModel):
         run by construction. Only the annotation kinds the spec uses are mapped; a new kind
         raises here rather than parse as a string."""
         for name, field in cls.model_fields.items():
-            kind, choices = _flag_kind(field.annotation)
             if name == "arm":
                 parser.add_argument("arm", choices=sorted(ARM_CONFIG), help=field.description)
-            elif kind is bool:
-                parser.add_argument(f"--{name.replace('_', '-')}", action="store_true", help=field.description)
+                continue
+            flag = f"--{name.replace('_', '-')}"
+            kind, choices = _flag_kind(field.annotation)
+            if kind is bool:
+                if field.default is not False:
+                    raise TypeError(f"a bool spec field is a store_true flag, so its default is False: {name}={field.default!r}")
+                parser.add_argument(flag, action="store_true", help=field.description)
             elif field.is_required():
-                parser.add_argument(f"--{name.replace('_', '-')}", type=kind, choices=choices, required=True, help=field.description)
+                parser.add_argument(flag, type=kind, choices=choices, required=True, help=field.description)
             else:
-                parser.add_argument(f"--{name.replace('_', '-')}", type=kind, choices=choices, default=field.default, help=field.description)
+                parser.add_argument(flag, type=kind, choices=choices, default=field.default, help=field.description)
         return parser
 
     @classmethod
@@ -141,10 +145,12 @@ def _flag_kind(annotation: object) -> tuple[type, tuple[str, ...] | None]:
     if origin is Annotated:
         return _flag_kind(get_args(annotation)[0])
     if origin is UnionType:
-        (inner,) = (a for a in get_args(annotation) if a is not type(None))
-        return _flag_kind(inner)
+        members = [a for a in get_args(annotation) if a is not type(None)]
+        if len(members) != 1:
+            raise TypeError(f"no CLI flag kind for a spec field annotated {annotation!r}: one member besides None")
+        return _flag_kind(members[0])
     if origin is Literal:
         return str, tuple(get_args(annotation))
-    if annotation in (int, float, Path, bool):
-        return annotation, None  # type: ignore[return-value]
+    if isinstance(annotation, type) and annotation in (int, float, Path, bool):
+        return annotation, None
     raise TypeError(f"no CLI flag kind for a spec field annotated {annotation!r}")

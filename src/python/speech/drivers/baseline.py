@@ -830,9 +830,9 @@ class LidArm:
         return Scores(results=res, lid_error=lid_error(res.lid_scores, res.lid_target), cavg=cavg(res.lid_scores, res.lid_target))
 
 
-#: The four arms, keyed by the spec's `arm`. The config and lineage are the declarations in
-#: `drivers/spec.py` (`ARM_CONFIG` / `ARM_LINEAGE`, pinned against `lineage_of` there); the
-#: behaviour is the class, and a unit test pins that `SadArm` instances are exactly `SAD_ARMS`.
+#: The four arms, keyed by the spec's `arm`. The config is the declaration in `drivers/spec.py`
+#: (`ARM_CONFIG`; `ARM_LINEAGE` is read off it through `lineage_of`, #85); the behaviour is the
+#: class, and a unit test pins that `SadArm` instances are exactly `SAD_ARMS`.
 ARMS: dict[Arm, SadArm | LidArm] = {
     "sad": SadArm(),
     "sad-v2": SadArm(),

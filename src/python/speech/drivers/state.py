@@ -24,6 +24,7 @@ from speech.batching import read_listing
 from speech.config_bridge import parse_legacy_config, read_flag
 from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
 from speech.genome import LidNetSpec, RunConfig
+from speech.init_weights import Scheme
 
 __all__ = [
     "BALANCE_BACKPROP",
@@ -263,6 +264,6 @@ class ModernTrainParams(BaseModel):
     minibatch: int
     nb_classes: int = 1
     # from-scratch seeded init (Task 3 `init_weights`, forget gate open); ignored when `resume_from` is set.
-    init_scheme: Literal["xavier", "he"]
+    init_scheme: Scheme
     seed: int  # the loop's ONE seed: the init draw, and the mini-batch stream as `seed + 2`
     resume_from: str | None = None  # checkpoint dir to resume from (loads last_*.bin + train_history.json); None -> from-scratch
