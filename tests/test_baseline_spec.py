@@ -98,7 +98,7 @@ def test_spec_named_train_params_are_required_and_take_the_spec_values() -> None
     assert {name: getattr(params, name) for name in shared} == {name: getattr(s, name) for name in shared}
 
 
-@pytest.mark.parametrize("annotation", [str, int | str, Path | None | int, list[int]], ids=repr)
+@pytest.mark.parametrize("annotation", [str, int | str, Path | None | int, list[int], Literal[1, 2], Literal["a", 1]], ids=repr)
 def test_the_flag_generator_refuses_an_annotation_kind_the_spec_does_not_use(annotation: object) -> None:
     with pytest.raises(TypeError, match="no CLI flag kind"):
         _flag_kind(annotation)

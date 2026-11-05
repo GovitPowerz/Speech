@@ -225,13 +225,13 @@ def test_val_metric_field_default_and_literal() -> None:
     Engine-free: pins the field, its new default, and the `Literal` + `extra="forbid"` guard.
 
     This is part of the RED for the carry-forward fix: before the field lands,
-    `_params(1, 1, val_metric=...)` raises `ValidationError` (extra="forbid") and the
+    `ModernTrainParams(val_metric=...)` raises `ValidationError` (extra="forbid") and the
     default assertion has no field to read."""
     assert _params(1, 1).val_metric == "nn_cost_seg"  # the NEW default
     assert _params(1, 1, val_metric="balance").val_metric == "balance"
     assert _params(1, 1, val_metric="nn_cost_seg").val_metric == "nn_cost_seg"
     with pytest.raises(ValidationError):  # the Literal + extra="forbid" rejects an out-of-set value
-        _params(1, 1, val_metric="bogus")  # type: ignore[arg-type]
+        _params(1, 1, val_metric="bogus")
 
 
 def test_batch_stream_is_derived_from_the_one_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,4 +253,4 @@ def test_batch_stream_is_derived_from_the_one_seed(tmp_path: Path, monkeypatch: 
     assert len(captured) == 3
     # `seed` is the only seed the model accepts: the old field name is refused.
     with pytest.raises(ValidationError):
-        _params(1, 1, init_seed=7)  # type: ignore[call-arg]
+        _params(1, 1, init_seed=7)

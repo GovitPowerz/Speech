@@ -382,9 +382,16 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
         for i in range(4):
             (lre / f"{lang}_{i}.plp8f0mvsdd").write_bytes(b"")
     _fake_engine(monkeypatch, _LID_FEATURES_FLAT)
+    drawn_under: list[tuple[int, str]] = []
+
+    def seed_packs(flat: dict[str, str], out: Path, seed: int, init_scheme: str, nets: list[tuple[str, str]]) -> list[Path]:
+        drawn_under.append((seed, init_scheme))
+        return [out / name for _, name in nets]
+
+    monkeypatch.setattr(B, "_generate_seed_packs", seed_packs)
 
     out = tmp_path / "out"
-    p = B.prepare(_spec("lid-features", root, out, dry_run=True, seed=5, lanes=2, minibatch=4, score_init=True))
+    p = B.prepare(_spec("lid-features", root, out, dry_run=True, seed=5, lanes=2, minibatch=4, score_init=True, init_scheme="he"))
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
@@ -397,6 +404,8 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
     assert (p.params.epochs, p.params.steps_per_epoch, p.params.patience) == (1, 1, 99)
     assert p.params.minibatch == 4 and p.params.seed == 5 and p.params.nb_classes == len(B._LANGS)
     assert p.params.valid_listing == p.splits.valid_name and p.params.resume_from is None
+    # the seed packs (the scored `score_init` baseline) draw under the training call's seed and scheme
+    assert p.params.init_scheme == meta["init_scheme"] == "he" and drawn_under == [(5, "he")]
     assert p.run.workdir == p.run.out_dir == out and p.run.cfg is p.cfg
     assert p.seed_packs == [out / "sad_seed.bin", out / "lid_seed.bin"]
     assert p.run.checkpoint.dir == out / "checkpoint" and p.run.checkpoint.nets == ["sad", "lid"]

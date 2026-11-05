@@ -103,7 +103,7 @@ from speech.drivers.train import train_modern
 from speech.engine import ChannelResults
 from speech.evaluate import DcfReport, Interval, cavg, dcf, hyp_intervals, lid_error, load_vrcts_ref
 from speech.fold_run import FoldRun, _config_text
-from speech.init_weights import init_weights
+from speech.init_weights import Scheme, init_weights
 from speech.ledger.schema import Arm, BaselinePayload, BaselineRecord, git_state, host_info, now_utc, seam_build_info, write_record
 from speech.ledger.schema import CollarScore as LedgerCollar
 from speech.weight_bridge import read_weight_vector, write_bin
@@ -411,7 +411,7 @@ def cell_overlay(flat: dict[str, str], cell: str, direction: str, *, prefix: str
     return overlay
 
 
-def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_scheme: str, nets: Sequence[tuple[str, str]]) -> list[Path]:
+def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_scheme: Scheme, nets: Sequence[tuple[str, str]]) -> list[Path]:
     """Write the seed weight packs the engine loads at construction (`BLSTM_weightsFile` /
     `BLSTM_LID_weightsFile`), one per `(prefix, filename)` in `nets` (`[sad]`, or `[sad, lid]`
     for the Twin), drawn in order from ONE `Generator(seed)` through the SAME `init_weights`
@@ -425,7 +425,7 @@ def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_sc
     rng = np.random.default_rng(seed)
     paths: list[Path] = []
     for prefix, name in nets:
-        pack = init_weights(flat, prefix, rng, init_scheme)[0]  # type: ignore[arg-type]
+        pack = init_weights(flat, prefix, rng, init_scheme)[0]
         write_bin(pack.shape[0], 1, pack, out_dir / name)
         paths.append(out_dir / name)
     return paths

@@ -139,7 +139,7 @@ class BaselineSpec(BaseModel):
 
 def _flag_kind(annotation: object) -> tuple[type, tuple[str, ...] | None]:
     """The argparse `type` and `choices` of a spec field's annotation: `Annotated[X, ...]` and
-    `X | None` unwrap to `X`; a `Literal` is `str` with its values as choices; `int`, `float`,
+    `X | None` unwrap to `X`; a `Literal` of strings is `str` with its values as choices; `int`, `float`,
     `Path` and `bool` are themselves. Anything else is refused."""
     origin = get_origin(annotation)
     if origin is Annotated:
@@ -150,7 +150,10 @@ def _flag_kind(annotation: object) -> tuple[type, tuple[str, ...] | None]:
             raise TypeError(f"no CLI flag kind for a spec field annotated {annotation!r}: one member besides None")
         return _flag_kind(members[0])
     if origin is Literal:
-        return str, tuple(get_args(annotation))
+        values = get_args(annotation)
+        if not all(isinstance(v, str) for v in values):
+            raise TypeError(f"no CLI flag kind for a spec field annotated {annotation!r}: a Literal flag parses as str, so its values must be")
+        return str, values
     if isinstance(annotation, type) and annotation in (int, float, Path, bool):
         return annotation, None
     raise TypeError(f"no CLI flag kind for a spec field annotated {annotation!r}")
