@@ -3862,3 +3862,39 @@ the expectations written before the run. The review's re-run with patch 2: 6 ver
 |---|---|---|---|
 | 1 | `from_exact` copies the DCT table transposed (iterates `coeffs_dct.t()`) | `fast::mel32::tests::filter_bank_and_dct_match_the_exact_path_at_tolerance`, `phase7_fast_pipeline::pipeline_parity_prcts_60s`, `::pipeline_parity_excerpt_3s`, `::pipeline_parity_dc_offset_branch` | CAUGHT by all four: `dct rel 13.087 exceeds pin (nb_bins=20 log=true nb_dct=4 ig=true d=5 dd=3)`, `rel 121.52 exceeds pin (chan=0)`, `rel 99.48 exceeds pin (chan=0)`, `dc-branch rel 99.48 exceeds pin (chan=0)`. |
 | 2 | `nb_dct()` takes multiplier 3 on the deltas-without-delta-deltas branch | `fast::mel32::tests::derived_widths_agree_with_the_exact_bank`, `::filter_bank_and_dct_match_the_exact_path_at_tolerance` | CAUGHT by the width cross-check: `nb_dct (nb_bins=20 nb_dct=4 ig=false d=5 dd=0)`; MISSED by the tolerance leg (no row runs deltas without delta-deltas), as expected. |
+
+## Issue #85 -- the launcher spec's projections: the mutation battery
+
+**Live:** `tests/mutations/issue85/` (4 patches).
+
+Issue #21 made `BaselineSpec` the one typed declaration of a launcher run; the same knobs still
+existed as hand-maintained copies, each held equal to the spec by a test or by nothing. The
+recipe is now read off `BaselineRecipe.model_fields` (the recipe MODEL is the identity tag: a
+knob is identity exactly when ADR-0009's schema names it, `RECIPE_DERIVED` the two fields
+`recipe()` derives), `ARM_LINEAGE` and the arm sets are read off the arm configs through the
+ledger's one `lineage_of`, the parser is generated from the spec's fields (`add_arguments`, the
+help on the fields as `Field(description=)`, `arm` the one positional), and `ModernTrainParams`
+is the Modern loop's input rather than a spec copy: its three setter-less fields (`nb_worst`,
+`multilingual`, `forget_bias_one`) are gone and every spec-named field is required there, so the
+spec holds the one default set (issue #21 decision 3's residual `50 / 10 / 5` with it). The
+payload was already built from the value (#82) and the manifest is written, never read (#86);
+both untouched. No ledger record changed, the schema stays at 2, `render --check` is green, and a
+`--dry-run` of both arm kinds on `main` and on the branch wrote byte-identical `run_metadata.json`
+(minus the git provenance) and byte-identical seed packs.
+
+Measured 2026-11-05 (`uv run python tests/mutations/run.py issue85`, 8 verdicts, 0 differ; the close run
+`--changed-since origin/main` covered 19 patches across `issue22`, `issue82`, `issue85`, `issue97`,
+`issue98`, `issue99`, `phase4d`, `phase5`, `phase6`: 41 verdicts, 0 differ, `issue97/1` and `phase6/6`
+re-targeted to the shrunk `ModernTrainParams`):
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `recipe()` hard-codes `lanes=1` instead of reading the spec's `lanes` | `test_baseline_spec::test_the_recipe_model_is_the_tag`; `::test_recipe_projection` | CAUGHT by the structural pin (the projected dict differs at `lanes`); MISSED by the value pin, whose spec sits at the default `lanes=1` -- the reason the structural pin exists. |
+| 2 | the generated parser maps a `bool` field to `store_false` | `test_phase6_baseline_arms::test_the_parser_is_the_spec` | CAUGHT (`dry_run=True` on an all-default parse). |
+| 3 | `prepare` builds `ModernTrainParams` with `epochs` and `patience` swapped | `test_phase6_baseline_arms::test_prepare_wires_the_flags_into_the_params_and_the_manifest` | CAUGHT (`(99, 1, 1) == (1, 1, 99)`); the one copy of the spec's knobs into the loop's input keeps its pin, it is not waste. |
+| 4 | `lineage_of` reads `lre_sad_v2` as no lineage | `test_ledger::test_lineage_of_config_names`; `test_baseline_spec::test_every_arm_names_a_committed_config_and_the_arm_sets_follow_the_lineage`, `::test_recipe_projection`, `::test_arm_cross_checks` | CAUGHT by all four: the parse (`None == 'v2'`), the arm sets (`sad-v2` leaves `SAD_ARMS`), and the two spec tests that build a `sad-v2` run with an audio cap, now refused as a LID-arm knob. |
+
+The issue's own write-up asked for "skips one recipe field" and "returns `v1` for `lre_sad_v2`";
+the first would be a `ValidationError` every recipe test catches (a crash, not a drift), and the
+second leaves both SAD arms in `SAD_ARMS`, so neither would have exercised the pin it was meant
+for. The two shipped mutations are the drift class each pin owns.
