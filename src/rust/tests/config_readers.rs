@@ -4,7 +4,7 @@
 //! grammar (the trailing comma, the `*` repeater). Issue #87: every i32 / bool / String /
 //! usize read, so a parseable prefix with trailing junk (`1O`, `True`) errors naming the key
 //! instead of reading the prefix as the legacy `ss >> val` did (the #32 tightening), and a
-//! padded value trims through the in-memory map seam. One pin per migrated module, driven
+//! padded value trims (an in-memory map, or a quoted TOML string; the `.config` parser trims). One pin per migrated module, driven
 //! through that module's public constructor on a committed fixture; the parsers themselves
 //! are unit-pinned in `legacy_config::{f64_reader_tests, token_reader_tests}`.
 
@@ -333,4 +333,31 @@ fn twin_lid_drivers_reject_trailing_junk_on_scalar_keys() {
         err.contains("cannot read '7x' as i32") && err.contains("BLSTM_LID_Mode"),
         "{err}"
     );
+}
+
+/// Issue #87: `FeatureConfig`'s i64 / i32 / bool / String reads take the family's token
+/// parser, and trim: the module's getters were untrimmed (with `nn/blstm.rs`'s `get_bool` /
+/// `get_i16` and the string readers), so a padded in-memory value now reads as every other key's does.
+#[test]
+fn feature_config_reads_scalars_through_the_family() {
+    let base = load("phase4a/tier2_spectral.config");
+    for (key, bad) in [
+        ("BLSTM_nb_bins", "4O"),
+        ("BLSTM_is_log_mel", "True"),
+        ("BLSTM_spectrum_order", "1O"),
+    ] {
+        let err = err_of(
+            FeatureConfig::from_legacy(&with(base.clone(), key, bad), "BLSTM"),
+            key,
+        );
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+    let plain = FeatureConfig::from_legacy(&base, "BLSTM").unwrap();
+    let padded = format!(" {} ", base["BLSTM_nb_bins"]);
+    let trimmed =
+        FeatureConfig::from_legacy(&with(base, "BLSTM_nb_bins", &padded), "BLSTM").unwrap();
+    assert_eq!(trimmed.nb_bins, plain.nb_bins);
 }
