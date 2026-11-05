@@ -514,8 +514,14 @@ pub fn assemble_input_sequence(
 /// config disables mel binning (`nb_bins <= 0` -> the raw-band path). The bank is a
 /// PURE function of `(cfg, s, rate)` (config-time constants; `MelFilterBank::new` reads
 /// only its args -- no shared/mutable state), so every site that needs it can share ONE
-/// construction instead of rebuilding an identical bank (Phase 7 Task 8 hoist).
-fn build_mel_bank(cfg: &FeatureConfig, s: &SpectralParams, rate: f64) -> Option<MelFilterBank> {
+/// construction instead of rebuilding an identical bank (Phase 7 Task 8 hoist). The fast
+/// tree builds its f32 bank from this one too (`fast::mel32::FastMelBank::from_exact`,
+/// issue #88), so the two trees cannot be handed different arguments.
+pub(crate) fn build_mel_bank(
+    cfg: &FeatureConfig,
+    s: &SpectralParams,
+    rate: f64,
+) -> Option<MelFilterBank> {
     if cfg.nb_bins > 0 {
         Some(MelFilterBank::new(
             cfg.min_mel,

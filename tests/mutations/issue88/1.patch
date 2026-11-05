@@ -1,0 +1,19 @@
+mutation: FastMelBank::from_exact copies the exact DCT table transposed (iterates coeffs_dct.t(), so the row-major layout dct_product indexes reads nb_dct x nb_filters)
+catcher: CAUGHT cargo --lib fast::mel32::tests::filter_bank_and_dct_match_the_exact_path_at_tolerance
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_prcts_60s
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_excerpt_3s
+catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_dc_offset_branch
+
+diff --git a/src/rust/src/fast/mel32.rs b/src/rust/src/fast/mel32.rs
+index 2cba9c6..853fcf5 100644
+--- a/src/rust/src/fast/mel32.rs
++++ b/src/rust/src/fast/mel32.rs
+@@ -117,7 +117,7 @@
+                 .iter()
+                 .map(|row| row.iter().map(|&c| c as f32).collect())
+                 .collect(),
+-            coeffs_dct: t.coeffs_dct.iter().map(|&v| v as f32).collect(),
++            coeffs_dct: t.coeffs_dct.t().iter().map(|&v| v as f32).collect(),
+             dct_rows: t.coeffs_dct.nrows(),
+             dct_cols: t.coeffs_dct.ncols(),
+         }

@@ -7,28 +7,31 @@
 //! and the per-call `T x bins` f64 widen buffer (the ~23.5 MiB peak-RSS term the phase-7
 //! SAD bench measured) is GONE.
 //!
-//! THE EXACT `features/mel.rs` STAYS BYTE-UNTOUCHED -- it is the transcription ORACLE for
-//! every KERNEL here, not a source of them. (Precisely: this module does not reuse
-//! `mel.rs`'s private coefficient tables, its ctor, or any of its apply kernels; the one
-//! thing it does call is the pair of `pub` scalar `hz_to_mel`/`mel_to_hz` conversions --
-//! see the note at the import below, and read the "not a dependency" claim as scoped to
-//! the kernels, which is what the parity argument rests on.)
-//! Every kernel below is transcribed OP-FOR-OP from it:
-//! ascending loops in the same order over the same terms, f32 in place of f64. The
-//! phase-9 `fast/cells.rs` precedent governs (every reduction an ascending loop over a
-//! contiguous slice); no batched/BLAS product is used anywhere here, because the DCT
-//! product's ascending order is itself a parity contract
-//! (`features::mel::MelFilterBank::dct_product`).
+//! THE KERNELS ARE TRANSCRIBED, THE TABLE IS READ. The exact `features/mel.rs` is the
+//! transcription ORACLE for every apply KERNEL here, not a source of them: every kernel
+//! below is transcribed OP-FOR-OP from it, ascending loops in the same order over the same
+//! terms, f32 in place of f64. The phase-9 `fast/cells.rs` precedent governs (every
+//! reduction an ascending loop over a contiguous slice); no batched/BLAS product is used
+//! anywhere here, because the DCT product's ascending order is itself a parity contract
+//! (`features::mel::MelFilterBank::dct_product`). The BANK itself is not a kernel, it is
+//! a table: since issue #88 [`FastMelBank::from_exact`] reads the exact bank's tables
+//! through `MelFilterBank::tables` (the ADR-0002 introspection class) and narrows the
+//! coefficient values `as f32` once, so there is no second copy of the constructor's
+//! walk to drift. The "not a dependency" claim the parity argument rests on is scoped to
+//! the kernels. The corollary the #83 close named applies: once both trees read one
+//! table, the fast-vs-exact parity legs are self-consistent for the bank's GEOMETRY
+//! (`phase7_fast_pipeline` can no longer see a membership drift), which is owned by the
+//! exact mel goldens alone (`phase1_mel_golden`); the legs still own the f32 APPLY.
 //!
 //! DELIBERATE DIVERGENCE (spec S4; documented here + `RESULTS.md`, NEVER
 //! `IMPROVEMENTS.md` -- this is the f32/f64 split, not legacy debt): f32 arithmetic with
-//! the op ORDER preserved element-for-element. The BANK GEOMETRY is still derived in f64
-//! (`FastMelBank::new` transcribes `MelFilterBank::new`'s grid/triangle/fallback walk
-//! verbatim, including the sequential `freq += freq_step` accumulation whose FP error is
-//! part of the contract) and only the resulting COEFFICIENT VALUES are narrowed `as f32`
-//! ONCE at construction -- deriving the geometry in f32 would move filter membership
-//! (an `is_valid_bank` flip or a triangle-edge inclusion flip), which is a structural
-//! change, not a precision one. Banks are built ONCE per pipeline, as in phase 7.
+//! the op ORDER preserved element-for-element. The BANK GEOMETRY is the exact
+//! constructor's in f64 by construction (the sequential `freq += freq_step` grid whose FP
+//! error is part of the contract, the `floor`/`ceil` band round-trip, the inclusive
+//! triangle edges, the whole-bank fallback) and only the COEFFICIENT VALUES are narrowed
+//! `as f32` ONCE -- deriving the geometry in f32 would move filter membership (an
+//! `is_valid_bank` flip or a triangle-edge inclusion flip), which is a structural change,
+//! not a precision one. Banks are built ONCE per pipeline, as in phase 7.
 //!
 //! THE LOAD-BEARING QUIRKS CARRIED (each named against its `features::mel` symbol, the
 //! list `features::mel`'s own module doc enumerates):
@@ -66,14 +69,11 @@
 //! is transcribed alone.
 
 use super::nn::FastMatrix;
-// The two mel-scale conversions are `pub` on the exact bank and are PURE f64 scalar
-// math with no state, so this module CALLS them rather than re-transcribing: the
-// "mel.rs has no accessors" rationale covers its PRIVATE coefficient tables, not these.
-use crate::features::mel::{hz_to_mel, mel_to_hz};
+use crate::features::mel::MelFilterBank;
 
-/// f32 triangular mel filterbank + DCT table, geometry-identical to
-/// [`crate::features::mel::MelFilterBank`] (same f64 ctor walk) with the coefficient
-/// values narrowed to f32 once at construction.
+/// f32 triangular mel filterbank + DCT table: the exact
+/// [`crate::features::mel::MelFilterBank`]'s tables with the coefficient values
+/// narrowed to f32 once at construction ([`FastMelBank::from_exact`]).
 pub struct FastMelBank {
     is_log: bool,
     is_mel: bool,
@@ -93,144 +93,33 @@ pub struct FastMelBank {
 }
 
 impl FastMelBank {
-    /// Transcription of `features::mel::MelFilterBank::new`. The grid /
-    /// triangle / fallback walk runs in f64 EXACTLY as the exact ctor does (sequential
-    /// `freq += freq_step`, `floor`/`ceil` band round-trip, inclusive edges, whole-bank
-    /// fallback); only the coefficient VALUES are narrowed to f32 at the end.
-    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
-    pub fn new(
-        min_mel: f64,
-        max_mel: f64,
-        nb_bins: i32,
-        min_freq: f64,
-        max_freq: f64,
-        rate: f64,
-        spectrum_size: usize,
-        is_log: bool,
-        nb_dct: i32,
-        ignore_first: bool,
-        deltas_nb: i32,
-        delta_deltas_nb: i32,
-    ) -> FastMelBank {
-        // freqs grid: SEQUENTIAL accumulation `freq += freqStep` while <= rate/2.
-        let freq_step = rate / 2.0 / spectrum_size as f64;
-        let mut freqs = Vec::new();
-        let mut freq = 0.0;
-        let freq_limit = rate / 2.0;
-        while freq <= freq_limit {
-            freqs.push(freq);
-            freq += freq_step;
-        }
-
-        let mut is_valid_bank = true;
-        let beg_freq = (min_freq.max(0.0) / freq_step).floor() as usize;
-        let end_freq = (max_freq.min(rate / 2.0) / freq_step).ceil() as usize;
-
-        let nb_filters: usize;
-        let is_mel: bool;
-        let mut index_begin: Vec<usize> = Vec::new();
-        let mut coeffs: Vec<Vec<f32>> = Vec::new();
-
-        if nb_bins > 0 {
-            // mels grid: down-then-up walk, melStep floored at Hz2Mel(1.0).
-            let mut mels: Vec<f64> = Vec::new();
-            let min_mel_v = hz_to_mel(min_mel);
-            let max_mel_v = hz_to_mel(max_mel);
-            let mut mel_step = (max_mel_v - min_mel_v) / (nb_bins as f64 + 1.0);
-            if mel_step < hz_to_mel(1.0) {
-                mel_step = hz_to_mel(1.0);
-            }
-            let mut mel = min_mel_v;
-            while mel > hz_to_mel(min_freq.max(0.0)) - mel_step {
-                mel -= mel_step;
-            }
-            let limit = hz_to_mel(max_freq.min(rate / 2.0));
-            while mel < limit + 2.0 * mel_step {
-                mels.push(mel_to_hz(mel));
-                mel += mel_step;
-            }
-
-            // Triangles: INCLUSIVE edges, center bin -> FALLING branch.
-            let mut ii: usize = 1;
-            while is_valid_bank && ii <= mels.len() - 2 {
-                let mut tmp: Vec<f32> = Vec::new();
-                for jj in beg_freq..=end_freq {
-                    if freqs[jj] >= mels[ii - 1] && freqs[jj] <= mels[ii + 1] {
-                        if tmp.is_empty() {
-                            index_begin.push(jj);
-                        }
-                        let coeff = if freqs[jj] < mels[ii] {
-                            (freqs[jj] - mels[ii - 1]) / (mels[ii] - mels[ii - 1])
-                        } else {
-                            (mels[ii + 1] - freqs[jj]) / (mels[ii + 1] - mels[ii])
-                        };
-                        tmp.push(coeff as f32);
-                    }
-                }
-                if !tmp.is_empty() {
-                    coeffs.push(tmp);
-                } else {
-                    is_valid_bank = false;
-                }
-                ii += 1;
-            }
-            // WHOLE-BANK FALLBACK.
-            if is_valid_bank {
-                nb_filters = index_begin.len();
-                is_mel = true;
-            } else {
-                nb_filters = end_freq - beg_freq + 1;
-                is_mel = false;
-            }
-        } else {
-            nb_filters = end_freq - beg_freq + 1;
-            is_mel = false;
-        }
-
-        // DCT coefficient table, narrowed once.
-        let mut nb_dct = nb_dct;
-        let is_dct_activated;
-        let mut coeffs_dct: Vec<f32> = Vec::new();
-        let dct_rows;
-        let dct_cols;
-        if nb_dct <= 0 {
-            is_dct_activated = false;
-            dct_rows = 0;
-            dct_cols = 0;
-        } else {
-            is_dct_activated = true;
-            if nb_dct > nb_filters as i32 {
-                nb_dct = nb_filters as i32;
-            }
-            dct_rows = nb_filters;
-            dct_cols = nb_dct as usize;
-            coeffs_dct.resize(dct_rows * dct_cols, 0.0);
-            for col in 0..nb_filters {
-                for row in 0..nb_dct as usize {
-                    let v = (std::f64::consts::PI / nb_filters as f64
-                        * (col as f64 + 0.5)
-                        * row as f64)
-                        .cos();
-                    coeffs_dct[col * dct_cols + row] = v as f32;
-                }
-            }
-        }
-
+    /// The exact bank's tables, narrowed to f32 once (issue #88). The geometry (the
+    /// sequential `freq += freq_step` grid, the `floor`/`ceil` band round-trip, the
+    /// inclusive triangle edges, the whole-bank fallback) is the exact constructor's by
+    /// construction: this reads `MelFilterBank::tables` and copies, so there is no second
+    /// walk to drift. The DCT table is the exact `(nb_filters, nb_dct)` matrix in
+    /// row-major order, the layout `dct_product` indexes.
+    pub fn from_exact(bank: &MelFilterBank) -> FastMelBank {
+        let t = bank.tables();
         FastMelBank {
-            is_log,
-            is_mel,
-            is_dct_activated,
-            ignore_first_dct: ignore_first,
-            nb_filters,
-            nb_dct,
-            compute_deltas_nb: deltas_nb,
-            compute_delta_deltas_nb: delta_deltas_nb,
-            beg_freq,
-            index_begin,
-            coeffs,
-            coeffs_dct,
-            dct_rows,
-            dct_cols,
+            is_log: t.is_log,
+            is_mel: t.is_mel,
+            is_dct_activated: t.is_dct_activated,
+            ignore_first_dct: t.ignore_first_dct,
+            nb_filters: t.nb_filters,
+            nb_dct: t.nb_dct,
+            compute_deltas_nb: t.compute_deltas_nb,
+            compute_delta_deltas_nb: t.compute_delta_deltas_nb,
+            beg_freq: t.beg_freq,
+            index_begin: t.index_begin.to_vec(),
+            coeffs: t
+                .coeffs
+                .iter()
+                .map(|row| row.iter().map(|&c| c as f32).collect())
+                .collect(),
+            coeffs_dct: t.coeffs_dct.iter().map(|&v| v as f32).collect(),
+            dct_rows: t.coeffs_dct.nrows(),
+            dct_cols: t.coeffs_dct.ncols(),
         }
     }
 
@@ -580,7 +469,6 @@ pub fn assemble_input_sequence_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::mel::MelFilterBank;
     use ndarray::Array2;
 
     /// A deterministic pseudo-periodogram (positive, spanning ~5 decades so the log-mel
@@ -647,36 +535,22 @@ mod tests {
     ) -> (MelFilterBank, FastMelBank) {
         let (min_mel, max_mel, rate) = (0.0, 4000.0, 8000.0);
         let (min_freq, max_freq) = band;
-        (
-            MelFilterBank::new(
-                min_mel,
-                max_mel,
-                nb_bins,
-                min_freq,
-                max_freq,
-                rate,
-                spectrum_size,
-                is_log,
-                nb_dct,
-                ignore_first,
-                deltas_nb,
-                dd_nb,
-            ),
-            FastMelBank::new(
-                min_mel,
-                max_mel,
-                nb_bins,
-                min_freq,
-                max_freq,
-                rate,
-                spectrum_size,
-                is_log,
-                nb_dct,
-                ignore_first,
-                deltas_nb,
-                dd_nb,
-            ),
-        )
+        let e = MelFilterBank::new(
+            min_mel,
+            max_mel,
+            nb_bins,
+            min_freq,
+            max_freq,
+            rate,
+            spectrum_size,
+            is_log,
+            nb_dct,
+            ignore_first,
+            deltas_nb,
+            dd_nb,
+        );
+        let f = FastMelBank::from_exact(&e);
+        (e, f)
     }
 
     /// Max relative delta with the phase-7 comparator's denominator convention
@@ -696,31 +570,28 @@ mod tests {
     }
 
     #[test]
-    fn shape_functions_agree_with_the_exact_bank() {
-        // The three public shape functions carry the whole-bank fallback, the deltas-
-        // no-DCT column multiplier and the nb_dct branch table. If the f32 ctor's
-        // geometry walk drifted from `mel.rs`'s, these disagree BEFORE any value pin.
+    fn derived_widths_agree_with_the_exact_bank() {
+        // `from_exact` copies the stored scalars, but `nb_filters()` / `nb_dct()` are
+        // still transcribed width FORMULAS (the deltas-no-DCT 2F/3F multiplier, the
+        // mult/SDC/ignoreFirst table). Every committed config runs delta-deltas 3, so the
+        // deltas-without-dd rows below are the only pin on the `2` branches.
         let bins = 65usize;
         for &(nb_bins, nb_dct, ignore, dn, ddn) in &[
             (20i32, 4i32, true, 5i32, 3i32),
             (20, 4, false, 5, 3),
-            (20, 0, false, 5, 3),
+            (20, 4, false, 5, 0), // DCT, deltas, no dd: nb_dct() mult 2
+            (20, 4, true, 5, 0),
+            (20, 0, false, 5, 3), // no DCT: nb_filters() 3F
+            (20, 0, false, 5, 0), // no DCT, no dd: nb_filters() 2F
             (20, 0, false, 0, 0),
-            (20, 4, true, -3, 0),
+            (20, 4, true, -3, 0), // SDC
             (20, 4, false, -3, 0),
-            (0, 4, false, 0, 0),    // nb_bins <= 0 -> raw band, no mel
-            (4000, 4, false, 0, 0), // absurd bin count -> whole-bank FALLBACK
-            (20, 4, false, 5, 0),   // deltas, no delta-deltas
+            (0, 4, false, 0, 0),    // nb_bins <= 0 -> raw band
+            (4000, 4, false, 0, 0), // whole-bank FALLBACK
             (20, 512, false, 0, 0), // nb_dct clamped to nb_filters
         ] {
             let (e, f) = banks(nb_bins, bins - 1, true, nb_dct, ignore, dn, ddn);
             let tag = format!("nb_bins={nb_bins} nb_dct={nb_dct} ig={ignore} d={dn} dd={ddn}");
-            assert_eq!(e.is_mel(), f.is_mel(), "is_mel ({tag})");
-            assert_eq!(
-                e.is_dct_activated(),
-                f.is_dct_activated(),
-                "is_dct_activated ({tag})"
-            );
             assert_eq!(e.nb_filters(), f.nb_filters(), "nb_filters ({tag})");
             assert_eq!(e.nb_dct(), f.nb_dct(), "nb_dct ({tag})");
         }

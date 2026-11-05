@@ -49,7 +49,14 @@ segmentation retained on `engine/channel_result.rs::ChannelResult::hypothesis` (
 list `compute_errors` left, cloned in at the row's assembly, not on the wire) and read by the
 `channel_results()` seam's `hypothesis` key, proven behaviour-free by the goldens byte-green
 and pinned to the VRCTS dump by a byte-identical reprint, with `tasks/segmentation.rs::Segmentation`
-deriving `Debug` and `PartialEq` for it (a derive, no body), issue #86; the driver
+deriving `Debug` and `PartialEq` for it (a derive, no body), issue #86, and the exact mel bank's
+tables read once, `features/mel.rs::MelFilterBank::tables() -> MelTables<'_>` (`pub(crate)`, a
+borrowed view of the private tables and their indexing scalars, nothing computed), the one
+reader being `fast/mel32.rs::FastMelBank::from_exact`, which replaces the fast tree's f64
+re-transcription of the constructor, with `features/pipeline.rs::build_mel_bank` widened to
+`pub(crate)` so the fast pipeline builds the exact bank at the exact path's one site, proven
+behaviour-free by the goldens byte-green and the two constructors measured bit-equal before
+the deletion, issue #88; the driver
 interface: `tasks/segmenter.rs::Segmenter` as the one surface the bag reaches every driver
 through -- methods returning state a driver already holds (its trainable nets, its pack count,
 one channel's result members, its posteriors) plus `set_packs`, the pass-through it replaces --

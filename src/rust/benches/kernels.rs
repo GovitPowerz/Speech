@@ -71,13 +71,15 @@ fn bench_gfft(c: &mut Criterion) {
     });
 }
 
-fn bench_mel_apply(c: &mut Criterion) {
-    // Params read verbatim off tier2_spectral.config; spectrum_size = 512
-    // (`bins - 1` where `bins == periodogram_length == 513`, the SAME
-    // convention `features/pipeline.rs:544-563`'s real `build_mel_bank`
-    // `MelFilterBank::new` call site uses) -- the periodogram INPUT itself stays 513 columns wide
-    // (indices 0..=512), matching `mel_apply_513x20`'s name.
-    let bank = MelFilterBank::new(
+/// The bank both mel benches apply (f64 as is, f32 through `FastMelBank::from_exact`), so
+/// the precision comparison cannot be handed two different banks. Params read verbatim off
+/// tier2_spectral.config; spectrum_size = 512 (`bins - 1` where
+/// `bins == periodogram_length == 513`, the SAME convention
+/// `features::pipeline::build_mel_bank`, the real `MelFilterBank::new` call site, uses) --
+/// the periodogram INPUT itself stays 513 columns wide (indices 0..=512), matching
+/// `mel_apply_513x20`'s name.
+fn tier2_mel_bank() -> MelFilterBank {
+    MelFilterBank::new(
         186.1001763856132, // BLSTM_minMelFreq
         2502.400490895474, // BLSTM_maxMelFreq
         20,                // BLSTM_nb_bins
@@ -90,7 +92,11 @@ fn bench_mel_apply(c: &mut Criterion) {
         false,             // ignore_first: irrelevant when nb_dct == 0
         0,                 // deltas_nb: 0 -- keep the log+mel branch delta-overwrite-free
         0,                 // delta_deltas_nb
-    );
+    )
+}
+
+fn bench_mel_apply(c: &mut Criterion) {
+    let bank = tier2_mel_bank();
     let p = Array2::from_shape_fn((100, 513), |(i, j)| {
         1.0 + (i as f64 * 0.1) + (j as f64 * 0.01)
     });
@@ -208,22 +214,9 @@ fn bench_realfft(c: &mut Criterion) {
 /// measures the f32 apply alone, so the two rows are NOT comparable across the
 /// rename.
 fn bench_mel_apply_f32(c: &mut Criterion) {
-    // Same arguments as `bench_mel_apply`'s f64 bank, in the same order (this
-    // is the point of the comparison -- only the kernel precision differs).
-    let bank = FastMelBank::new(
-        186.1001763856132,
-        2502.400490895474,
-        20,
-        100.0,
-        3800.0,
-        8000.0,
-        512,
-        true,
-        0,
-        false,
-        0,
-        0,
-    );
+    // `bench_mel_apply`'s bank narrowed (this is the point of the comparison -- only
+    // the kernel precision differs).
+    let bank = FastMelBank::from_exact(&tier2_mel_bank());
     let rows = 100_usize;
     let bins = 513_usize;
     let perio_f32: Vec<f32> = (0..rows * bins)
