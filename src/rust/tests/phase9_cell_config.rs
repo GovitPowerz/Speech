@@ -298,7 +298,7 @@ fn a_malformed_cfc_geometry_bails_on_the_tier2_fixture() {
             "0",
             "'Cfc_Backbone_Layers' must be >= 1 (got 0)",
         ),
-        ("Cfc_Backbone_Units", "wide", "cannot read 'wide' as a size"),
+        ("Cfc_Backbone_Units", "wide", "cannot read 'wide' as usize"),
     ] {
         let mut map = tier2_map();
         map.insert("BLSTM_Cell_Type".into(), "cfc".into());
@@ -405,7 +405,7 @@ fn a_malformed_transformer_geometry_bails_on_the_tier2_fixture() {
             "0",
             "'Transformer_D_Ff' must be >= 1 (got 0)",
         ),
-        ("Transformer_Window", "wide", "cannot read 'wide' as a size"),
+        ("Transformer_Window", "wide", "cannot read 'wide' as usize"),
     ] {
         let mut map = tier2_map();
         map.insert("BLSTM_Cell_Type".into(), "transformer".into());

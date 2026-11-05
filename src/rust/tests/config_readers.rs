@@ -15,6 +15,7 @@ use speech::fast::driver::{FastTwinLid, build_aligned_spec};
 use speech::fast::stream::StreamingSession;
 use speech::features::pipeline::FeatureConfig;
 use speech::legacy_config::parse_legacy_config;
+use speech::nn::blstm::BlstmConfig;
 use speech::tasks::lid::TwinBlstmSpectralLid;
 use speech::tasks::sad::TdcSegmenter;
 use speech::tasks::segmenter::{DriverConfig, SegmenterConfig};
@@ -229,6 +230,32 @@ fn nnet_spec_reads_the_list_grammar() {
         err.contains("BLSTM_NNetInputSize") && err.contains("23x"),
         "{err}"
     );
+}
+
+/// Issue #87: `BlstmConfig`'s i16 / bool / i32 reads and the port-only geometry keys take
+/// the family's token parser, the geometry minimum still enforced on top.
+#[test]
+fn blstm_config_rejects_trailing_junk_on_scalar_keys() {
+    let base = load("phase4a/tier2_spectral.config");
+    for (key, bad) in [
+        ("BLSTM_InputNormalizationType", "1O"),
+        ("BLSTM_TwoSweeps", "True"),
+        ("BLSTM_TargetEnforcementStep", "0.0"),
+        ("BLSTM_Forward_IsCellsPeepholesActive", "yes"),
+        ("Mamba_D_State", "16x"),
+    ] {
+        let err = BlstmConfig::from_legacy(&with(base.clone(), key, bad), "BLSTM")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+    let err = BlstmConfig::from_legacy(&with(base, "Transformer_Heads", "0"), "BLSTM")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("'Transformer_Heads' must be >= 1"), "{err}");
 }
 
 /// The fast spec injects the absent `NNetInputSize` from the PARSED `LSTMNeuronNb[0]`,

@@ -63,51 +63,13 @@ use ndarray::Array2;
 
 use crate::cost::CostLaw;
 use crate::features::stats::InputStatistics;
-use crate::legacy_config::{get_f64_default, get_usize_list};
+use crate::legacy_config::{get, get_default, get_f64_default, get_usize_list};
 
 use super::cells::CellLayer;
 use super::layers::NeuronLayer;
 use super::layout::{BlockKind, LayerBlock, Stack, WeightBlock, place};
 use super::network::Network;
 use super::train::Rprop;
-
-fn get_bool(map: &IndexMap<String, String>, key: &str) -> Result<bool> {
-    let s = map
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("param '{key}' not found in config"))?;
-    s.parse::<bool>()
-        .map_err(|e| anyhow::anyhow!("cannot read '{s}' as bool for '{key}': {e}"))
-}
-
-/// Missing key -> `default`; present but malformed -> error (issue #32).
-fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<bool>()
-            .map_err(|e| anyhow::anyhow!("cannot read '{s}' as bool for '{key}': {e}")),
-    }
-}
-
-fn get_i16(map: &IndexMap<String, String>, key: &str) -> Result<i16> {
-    let s = map
-        .get(key)
-        .ok_or_else(|| anyhow::anyhow!("param '{key}' not found in config"))?;
-    s.parse::<i16>()
-        .map_err(|e| anyhow::anyhow!("cannot read '{s}' as i16 for '{key}': {e}"))
-}
-
-/// Missing key -> `default`; present but malformed -> error (issue #32).
-fn get_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow::anyhow!("cannot read '{s}' as i32 for '{key}': {e}")),
-    }
-}
 
 /// Per-direction peephole activation flags (`{prefix}_{Forward,Backward}_Is{...}
 /// PeepholesActive`, each default `true`).
@@ -121,9 +83,9 @@ pub struct PeepholeFlags {
 impl PeepholeFlags {
     fn from_legacy(map: &IndexMap<String, String>, dir_prefix: &str) -> Result<PeepholeFlags> {
         Ok(PeepholeFlags {
-            cells: get_bool_default(map, &format!("{dir_prefix}_IsCellsPeepholesActive"), true)?,
-            gates: get_bool_default(map, &format!("{dir_prefix}_IsGatesPeepholesActive"), true)?,
-            gates_recurrent: get_bool_default(
+            cells: get_default::<bool>(map, &format!("{dir_prefix}_IsCellsPeepholesActive"), true)?,
+            gates: get_default::<bool>(map, &format!("{dir_prefix}_IsGatesPeepholesActive"), true)?,
+            gates_recurrent: get_default::<bool>(
                 map,
                 &format!("{dir_prefix}_IsGatesRecurrentPeepholesActive"),
                 true,
@@ -255,31 +217,34 @@ impl Default for MambaParams {
     }
 }
 
+/// One port-only geometry key (`Mamba_*`, `Cfc_*`, `Transformer_*`): missing -> `default`,
+/// present but unparseable -> a HARD error (`legacy_config::get_default`), below `min` -> an
+/// error naming the key. A silently-defaulted or silently-clamped geometry would change the
+/// weight-pack LENGTH without telling anyone; these keys have no legacy source to stay
+/// bug-compatible with.
+fn geometry_key(
+    map: &IndexMap<String, String>,
+    key: &str,
+    default: usize,
+    min: usize,
+) -> Result<usize> {
+    let v = get_default::<usize>(map, key, default)?;
+    if v < min {
+        bail!("'{key}' must be >= {min} (got {v})");
+    }
+    Ok(v)
+}
+
 impl MambaParams {
-    /// Read the four keys. A present-but-unparseable value is a HARD error, like the
-    /// module's `get_*_default` getters: a silently-defaulted geometry would change
-    /// the weight-pack LENGTH without telling anyone. `d_state`/`d_conv`/`expand` must be `>= 1`; `dt_rank` may be
-    /// `0` (auto).
+    /// Read the four keys by [`geometry_key`]: `d_state`/`d_conv`/`expand` must be `>= 1`;
+    /// `dt_rank` may be `0` (auto).
     fn from_legacy(map: &IndexMap<String, String>) -> Result<MambaParams> {
         let d = MambaParams::default();
-        let read = |key: &str, default: usize, min: usize| -> Result<usize> {
-            let v = match map.get(key) {
-                Some(s) => s
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|e| anyhow::anyhow!("cannot read '{s}' as a size for '{key}': {e}"))?,
-                None => return Ok(default),
-            };
-            if v < min {
-                bail!("'{key}' must be >= {min} (got {v})");
-            }
-            Ok(v)
-        };
         Ok(MambaParams {
-            d_state: read("Mamba_D_State", d.d_state, 1)?,
-            d_conv: read("Mamba_D_Conv", d.d_conv, 1)?,
-            expand: read("Mamba_Expand", d.expand, 1)?,
-            dt_rank: read("Mamba_Dt_Rank", d.dt_rank, 0)?,
+            d_state: geometry_key(map, "Mamba_D_State", d.d_state, 1)?,
+            d_conv: geometry_key(map, "Mamba_D_Conv", d.d_conv, 1)?,
+            expand: geometry_key(map, "Mamba_Expand", d.expand, 1)?,
+            dt_rank: geometry_key(map, "Mamba_Dt_Rank", d.dt_rank, 0)?,
         })
     }
 }
@@ -323,27 +288,14 @@ impl Default for CfcParams {
 
 impl CfcParams {
     /// Read the two keys. A present-but-unparseable or `< 1` value is a HARD error,
-    /// for exactly [`MambaParams::from_legacy`]'s reason: these keys have no legacy
+    /// for exactly [`geometry_key`]'s reason: these keys have no legacy
     /// source to stay bug-compatible with, and a silently-defaulted geometry would
     /// change the weight-pack LENGTH without telling anyone.
     fn from_legacy(map: &IndexMap<String, String>) -> Result<CfcParams> {
         let d = CfcParams::default();
-        let read = |key: &str, default: usize| -> Result<usize> {
-            let v = match map.get(key) {
-                Some(s) => s
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|e| anyhow::anyhow!("cannot read '{s}' as a size for '{key}': {e}"))?,
-                None => return Ok(default),
-            };
-            if v < 1 {
-                bail!("'{key}' must be >= 1 (got {v})");
-            }
-            Ok(v)
-        };
         Ok(CfcParams {
-            backbone_units: read("Cfc_Backbone_Units", d.backbone_units)?,
-            backbone_layers: read("Cfc_Backbone_Layers", d.backbone_layers)?,
+            backbone_units: geometry_key(map, "Cfc_Backbone_Units", d.backbone_units, 1)?,
+            backbone_layers: geometry_key(map, "Cfc_Backbone_Layers", d.backbone_layers, 1)?,
         })
     }
 }
@@ -429,29 +381,16 @@ impl Default for TransformerParams {
 
 impl TransformerParams {
     /// Read the three keys. A present-but-unparseable or `< 1` value is a HARD error,
-    /// for exactly [`MambaParams::from_legacy`]'s reason: these keys have no legacy
+    /// for exactly [`geometry_key`]'s reason: these keys have no legacy
     /// source to stay bug-compatible with, and a silently-defaulted geometry would
     /// change the weight-pack LENGTH (`d_ff`) or the attention span (`window`) without
     /// telling anyone.
     fn from_legacy(map: &IndexMap<String, String>) -> Result<TransformerParams> {
         let d = TransformerParams::default();
-        let read = |key: &str, default: usize| -> Result<usize> {
-            let v = match map.get(key) {
-                Some(s) => s
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|e| anyhow::anyhow!("cannot read '{s}' as a size for '{key}': {e}"))?,
-                None => return Ok(default),
-            };
-            if v < 1 {
-                bail!("'{key}' must be >= 1 (got {v})");
-            }
-            Ok(v)
-        };
         Ok(TransformerParams {
-            window: read("Transformer_Window", d.window)?,
-            heads: read("Transformer_Heads", d.heads)?,
-            d_ff: read("Transformer_D_Ff", d.d_ff)?,
+            window: geometry_key(map, "Transformer_Window", d.window, 1)?,
+            heads: geometry_key(map, "Transformer_Heads", d.heads, 1)?,
+            d_ff: geometry_key(map, "Transformer_D_Ff", d.d_ff, 1)?,
         })
     }
 }
@@ -505,11 +444,11 @@ impl BlstmConfig {
         // Port-only structural keys (spec S6). Absent means the legacy shape, so
         // every committed config decodes exactly as before.
         let cell_type = match map.get(&k("_Cell_Type")) {
-            Some(v) => CellType::parse(v)?,
+            Some(v) => CellType::parse(v.trim())?,
             None => CellType::Lstm,
         };
         let direction = match map.get(&k("_Direction")) {
-            Some(v) => Direction::parse(v)?,
+            Some(v) => Direction::parse(v.trim())?,
             None => Direction::Bidirectional,
         };
         // UNPREFIXED by design (spec S6: one mamba geometry per config). Read
@@ -592,13 +531,13 @@ impl BlstmConfig {
         let forward_peep = PeepholeFlags::from_legacy(map, &k("_Forward"))?;
         let backward_peep = PeepholeFlags::from_legacy(map, &k("_Backward"))?;
 
-        let input_normalization_type = get_i16(map, &k("_InputNormalizationType"))?;
-        let two_sweeps = get_bool(map, &k("_TwoSweeps"))?;
+        let input_normalization_type = get::<i16>(map, &k("_InputNormalizationType"))?;
+        let two_sweeps = get::<bool>(map, &k("_TwoSweeps"))?;
         let back_propagation_activated =
-            get_bool_default(map, &k("_BackPropagationActivated"), false)?;
+            get_default::<bool>(map, &k("_BackPropagationActivated"), false)?;
         let back_prop_output_network_only =
-            get_bool_default(map, &k("_BackPropOutputNetworkOnly"), false)?;
-        let target_enforcement_step = get_i32_default(map, &k("_TargetEnforcementStep"), 0)?;
+            get_default::<bool>(map, &k("_BackPropOutputNetworkOnly"), false)?;
+        let target_enforcement_step = get_default::<i32>(map, &k("_TargetEnforcementStep"), 0)?;
         // `_CostFunction = CostLaw(conf, prefix)` (:104). Built from the same prefix;
         // all cost-law keys have defaults, so a config lacking them is valid.
         let cost_law = CostLaw::from_config(map, prefix)?;
@@ -1377,16 +1316,14 @@ impl BlstmNetwork {
         map: &IndexMap<String, String>,
         prefix: &str,
     ) -> Result<()> {
-        let weights_file = map
-            .get(&format!("{prefix}_weightsFile"))
-            .map(String::as_str)
-            .unwrap_or("");
+        let weights_file =
+            get_default::<String>(map, &format!("{prefix}_weightsFile"), String::new())?;
         if weights_file.is_empty() {
             return Ok(()); // :123 size() != 0 guard
         }
-        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(weights_file))?; // :132
+        let flat = crate::io::binary::read_weight_vector(std::path::Path::new(&weights_file))?; // :132
         // :144-148 too-many (head) and exact both setWeights.
-        self.set_weights(file_pack_head(&flat, self.nb_of_weights(), weights_file)?)
+        self.set_weights(file_pack_head(&flat, self.nb_of_weights(), &weights_file)?)
     }
 
     /// `analyseInputSeq` (`BLSTMNeuralNetwork.cpp:385-417`): fold the input's per-dim
@@ -3331,35 +3268,6 @@ mod inference_only_tests {
 #[cfg(test)]
 mod config_getter_tests {
     use super::*;
-
-    fn map(key: &str, value: &str) -> IndexMap<String, String> {
-        let mut m = IndexMap::new();
-        m.insert(key.to_string(), value.to_string());
-        m
-    }
-
-    #[test]
-    fn i32_default_missing_present_malformed() {
-        let m = map("K", "1O");
-        assert_eq!(get_i32_default(&m, "absent", 7).unwrap(), 7);
-        assert_eq!(get_i32_default(&map("K", "12"), "K", 7).unwrap(), 12);
-        assert_eq!(get_i32_default(&map("K", " -1 "), "K", 7).unwrap(), -1);
-        let err = get_i32_default(&m, "K", 7).unwrap_err().to_string();
-        assert!(err.contains("K") && err.contains("1O"), "{err}");
-    }
-
-    #[test]
-    fn bool_default_missing_present_malformed() {
-        assert!(get_bool_default(&map("K", "x"), "absent", true).unwrap());
-        assert!(get_bool_default(&map("K", "true"), "K", false).unwrap());
-        assert!(!get_bool_default(&map("K", "false"), "K", true).unwrap());
-        for bad in ["True", "1", "yes", "ture"] {
-            let err = get_bool_default(&map("K", bad), "K", true)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("K") && err.contains(bad), "{bad}: {err}");
-        }
-    }
 
     /// Issue #90: the width the net is built at, off the parsed config alone -- the legacy
     /// `getInputSize` (`:177-183`) rule, `OutputNeuronNb[0]` in MLP mode, else
