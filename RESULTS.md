@@ -2235,7 +2235,9 @@ stopped, with the reason and the shape of the work.
   ONE-HOT periodogram through `apply_filter_bank` and the output IS a single bank coefficient,
   recoverable bit-for-bit through the public surface with no accessor. Repeating that per
   filter would pin the f32 coefficient TABLE exactly (against the exact table narrowed `as
-  f32`), turning a tolerance comparison into an equality one.
+  f32`), turning a tolerance comparison into an equality one. Closed by issue #88, equality by
+  construction: `FastMelBank::from_exact` reads the exact bank's tables and narrows them, so
+  there is no second table to pin; the shape cross-check went with the deleted constructor.
 - **A `Cfc_Backbone_Layers >= 2` streaming fixture** (Task 6, M4; re-confirmed by Task 11's
   rider 9). Both committed CfC fixtures are `L = 1`, so the multi-layer backbone chain is
   exercised by the exact cell's unit/FD tiers and the Python reconstruction pins but NOT by
@@ -3809,3 +3811,40 @@ issue121/11` on macOS: 10 verdicts, 0 differ from the expectations written befor
 | 9 | the spectral SAD driver runs a non-wav read | `non_wav_spectral_input::spectral_sad_refuses_a_non_wav_read_before_the_carry`, `phase2b_spectral_golden::real_variant_matches_dump` | CAUGHT by the pin (`algo 3: a non-wav read must be refused`); MISSED by the wav golden, as expected. |
 | 10 | the Twin's modes 0-6 run a non-wav read | `non_wav_spectral_input::twin_modes_0_to_6_refuse_a_non_wav_read`, `phase4b_twin_golden::boundaries_match_dump` | CAUGHT by the pin (`twin mode 0: a non-wav read must be refused`); MISSED by the wav golden, as expected. |
 | 11 | the fast SAD driver runs a non-wav read | `non_wav_spectral_input::fast_spectral_sad_refuses_a_non_wav_read` | CAUGHT (`fast SAD net has no weights loaded`: the unrefused read falls through to the next check). |
+
+## Issue #88 -- the fast mel bank read off the exact one: the mutation battery
+
+**Live:** `tests/mutations/issue88/` (1 patch).
+
+`FastMelBank::new` re-transcribed `MelFilterBank::new`'s 140-line f64 grid / triangle /
+fallback / DCT walk to narrow three tables; the two differed at `coeff as f32` and `v as f32`.
+Now `FastMelBank::from_exact(&MelFilterBank)` reads the exact bank's tables through the one new
+`pub(crate)` method `MelFilterBank::tables() -> MelTables<'_>` (the ADR-0002 introspection
+class: a borrowed view of the seven indexing scalars, `index_begin`, `coeffs`, `coeffs_dct`,
+nothing computed) and narrows the coefficient values once; `features::pipeline::build_mel_bank`
+is `pub(crate)` so `FastPipeline::new` builds the exact bank at the exact path's one site, and
+the inline test helper and `benches/kernels.rs` narrow their own. The apply kernels are
+untouched: they stay transcribed twins (ADR-0002), the bank is a table, not a kernel.
+
+The identity was measured, not argued: a scratch test compared the two constructors over the
+10-config table (whole-bank fallback and `nb_dct` clamp rows included), every f32 coefficient by
+`to_bits`, every index, shape and flag, green at the intermediate tree state, then deleted with
+`new` in the same commit. The shape cross-check (`is_mel` / `is_dct_activated` / `nb_filters` /
+`nb_dct` against the exact bank) went too: the four functions now read the fields the exact bank
+handed over. The Phase 10 follow-on "f32 mel bank-table pin upgraded to VALUES" closes by
+construction (its bullet above says so). `phase7_fast_pipeline`, `phase1_mel_golden`,
+`phase7_parity_sad`, `phase9_fast_parity`, `phase10_bicell_parity` and `fast_doc_citations` ran
+unedited and green; `phase10/4` re-applies below the deleted constructor at its new offset.
+
+One patch, because the new constructor carries one piece of arithmetic: the exact `coeffs_dct`
+is an `Array2` of shape `(nb_filters, nb_dct)` and the fast table is that matrix row-major,
+the layout `dct_product` indexes. The row copies (`index_begin`, `coeffs`) carry no index
+arithmetic, so an `index_begin` shift would mutate a plain `to_vec()`, which proves nothing a
+reader would not see.
+
+`uv run python tests/mutations/run.py issue88` on macOS, first run: 4 verdicts, 0 differ from
+the expectations written before the run.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `from_exact` copies the DCT table transposed (iterates `coeffs_dct.t()`) | `fast::mel32::tests::filter_bank_and_dct_match_the_exact_path_at_tolerance`, `phase7_fast_pipeline::pipeline_parity_prcts_60s`, `::pipeline_parity_excerpt_3s`, `::pipeline_parity_dc_offset_branch` | CAUGHT by all four: `dct rel 13.087 exceeds pin (nb_bins=20 log=true nb_dct=4 ig=true d=5 dd=3)`, `rel 121.52 exceeds pin (chan=0)`, `rel 99.48 exceeds pin (chan=0)`, `dc-branch rel 99.48 exceeds pin (chan=0)`. |
