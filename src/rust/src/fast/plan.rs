@@ -61,7 +61,7 @@ use indexmap::IndexMap;
 
 use crate::config::NnetSpec;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
-use crate::legacy_config::{get_f64, get_f64_default, get_f64_opt};
+use crate::legacy_config::{get_default, get_f64, get_f64_default, get_f64_opt};
 use crate::nn::blstm::{BlstmConfig, check_pack_len};
 use crate::tasks::lid::{clamp_target_index, derive_lid_window};
 use crate::tasks::sad::{NON_WAV_SSIF, get_blstm_param};
@@ -143,11 +143,8 @@ impl FastNetPlan {
         let ssr = spec.lstm_subsampling.iter().product::<usize>()
             * spec.output_subsampling.iter().product::<usize>();
         let pack_len = exact_pack_len(bc)?;
-        let weights_file = map
-            .get(&format!("{prefix}_weightsFile"))
-            .map(String::as_str)
-            .unwrap_or("")
-            .to_string();
+        let weights_file =
+            get_default::<String>(map, &format!("{prefix}_weightsFile"), String::new())?;
         Ok(FastNetPlan {
             spec,
             shape,
@@ -549,28 +546,6 @@ pub struct SadTimeline {
 // (`fast::stream_lid::StreamingLidSession`).
 // ===========================================================================
 
-/// Read one `i32` config scalar with a default (the Twin's reader, a copy of `tasks/lid.rs`'s; #87 retires both).
-fn twin_i32_default(map: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
-    }
-}
-
-/// Read one `bool` config scalar with a default (the Twin's reader, a copy of `tasks/lid.rs`'s; #87 retires both).
-fn twin_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<bool>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}")),
-    }
-}
-
 /// The Mode-7 `_SpectrumShiftInFrames` (`BLSTMSpectralSegmenter.cpp:209`): the
 /// `!hasReadWavFile` override, always taken on the phSeq/cep arm the fast Twin runs, so the
 /// LID plan's `ssif` is this constant at every rate: the exact tree's [`NON_WAV_SSIF`].
@@ -635,7 +610,7 @@ impl FastLidPlan {
 
         let (seg_cfg, driver_cfg, feature_cfg) = blstm_configs(map)?;
 
-        let mode = twin_i32_default(map, "BLSTM_LID_Mode", 0)?;
+        let mode = get_default::<i32>(map, "BLSTM_LID_Mode", 0)?;
         if mode != 7 {
             bail!(
                 "fast TwinLid: only Mode 7 (phSeq/cep external-features LID) is supported on the \
@@ -651,7 +626,7 @@ impl FastLidPlan {
             );
         }
 
-        if twin_bool_default(map, "BLSTM_LID_DumpInternals", false)? {
+        if get_default::<bool>(map, "BLSTM_LID_DumpInternals", false)? {
             bail!(
                 "fast TwinLid: BLSTM_LID_DumpInternals is unsupported on the fast path (the LID \
                  hidden states the dump emits are not tracked); the gate configs use false"
@@ -701,8 +676,8 @@ impl FastLidPlan {
         if lid_window_shift_sec < 0.0 {
             lid_window_shift_sec = 0.0;
         }
-        let post_process_mode = twin_i32_default(map, "BLSTM_LID_PostProcessMode", 0)?;
-        let min_nb_of_frames = twin_i32_default(map, "BLSTM_LID_MinNbOfFrames", 0)?;
+        let post_process_mode = get_default::<i32>(map, "BLSTM_LID_PostProcessMode", 0)?;
+        let min_nb_of_frames = get_default::<i32>(map, "BLSTM_LID_MinNbOfFrames", 0)?;
         let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
 
         let plan = FastLidPlan {
