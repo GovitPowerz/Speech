@@ -61,7 +61,7 @@ use indexmap::IndexMap;
 
 use crate::config::NnetSpec;
 use crate::features::pipeline::{FeatureConfig, SpectralParams};
-use crate::legacy_config::{get_default, get_f64, get_f64_default, get_f64_opt};
+use crate::legacy_config::{get, get_default, get_f64, get_f64_default, get_f64_opt};
 use crate::nn::blstm::{BlstmConfig, check_pack_len};
 use crate::tasks::lid::{clamp_target_index, derive_lid_window};
 use crate::tasks::sad::{NON_WAV_SSIF, get_blstm_param};
@@ -174,11 +174,7 @@ impl FastNetPlan {
 
 /// `Algo_choice`, the one key both plans dispatch on; `who` prefixes a parse error.
 fn read_algo(map: &IndexMap<String, String>, who: &str) -> Result<i32> {
-    map.get("Algo_choice")
-        .ok_or_else(|| anyhow!("param 'Algo_choice' not found in config"))?
-        .trim()
-        .parse::<i32>()
-        .map_err(|e| anyhow!("{who}: Algo_choice parse: {e}"))
+    get::<i32>(map, "Algo_choice").map_err(|e| anyhow!("{who}: {e}"))
 }
 
 /// The three `BLSTM` config structs every fast plan reads (the SAD net's segmenter,

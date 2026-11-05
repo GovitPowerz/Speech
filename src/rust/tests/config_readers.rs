@@ -395,3 +395,31 @@ fn corpus_reads_the_listing_key_through_the_family() {
     let m = with(m, "files", "a.wav,b.wav");
     assert_eq!(Corpus::from_config(&m).unwrap().nb_of_files(), 2);
 }
+
+/// Issue #87: the last three one-off parses -- `NnetSpec`'s peephole flags and
+/// `NNetInputSize`, and the fast plans' `Algo_choice` -- read through the family too.
+#[test]
+fn nnet_spec_and_fast_plan_read_their_one_off_scalars_through_the_family() {
+    let base = load("phase4a/tier2_spectral.config");
+    for (key, bad) in [
+        ("BLSTM_Forward_IsCellsPeepholesActive", "True"),
+        ("BLSTM_NNetInputSize", "23x"),
+    ] {
+        let err = NnetSpec::from_legacy(&with(base.clone(), key, bad), "BLSTM")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+    let fast = with(load("phase4b/twin_mode7.config"), "Algo_choice", "6x");
+    let err = err_of(
+        FastTwinLid::from_legacy(&fast, None, None),
+        "Algo_choice 6x",
+    );
+    assert!(
+        err.contains("cannot read '6x' as i32 for 'Algo_choice'"),
+        "{err}"
+    );
+}
