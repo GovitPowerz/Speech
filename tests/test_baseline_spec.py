@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from speech.drivers.spec import ARM_CONFIG, ARM_LINEAGE, RECIPE_DERIVED, BaselineSpec
-from speech.ledger.schema import BaselineRecipe, lineage_of
+from speech.drivers.spec import ARM_CONFIG, ARM_LINEAGE, LID_ARMS, RECIPE_DERIVED, SAD_ARMS, BaselineSpec
+from speech.ledger.schema import BaselineRecipe
 
 
 def _spec(**over: object) -> BaselineSpec:
@@ -108,11 +108,11 @@ def test_recipe_projection() -> None:
     assert _spec(arm="lid-features").recipe(listing=None).full and not _spec(arm="lid-features", subset=5).recipe(listing=None).full
 
 
-def test_every_arm_declares_the_lineage_its_config_name_carries() -> None:
+def test_every_arm_names_a_committed_config_and_the_arm_sets_follow_the_lineage() -> None:
     assert set(ARM_CONFIG) == set(ARM_LINEAGE) == {"sad", "sad-v2", "lid-features", "lid-phseq"}
-    for arm, config in ARM_CONFIG.items():
-        assert ARM_LINEAGE[arm] == lineage_of(config), arm
+    for config in ARM_CONFIG.values():
         assert (Path(__file__).resolve().parents[1] / config).is_file(), config
+    assert {"sad", "sad-v2"} == SAD_ARMS and {"lid-features", "lid-phseq"} == LID_ARMS
 
 
 @pytest.mark.parametrize("arm", ["sad", "lid-phseq"])

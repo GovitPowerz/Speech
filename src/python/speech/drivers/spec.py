@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveFloat, Posit
 
 from speech.config_bridge import CellType, Direction
 from speech.init_weights import Scheme
-from speech.ledger.schema import Arm, BaselineRecipe, Lineage
+from speech.ledger.schema import Arm, BaselineRecipe, Lineage, lineage_of
 
 #: The committed canonical TOML for each arm, relative to the repo root.
 ARM_CONFIG: dict[Arm, str] = {
@@ -31,9 +31,9 @@ ARM_CONFIG: dict[Arm, str] = {
     "lid-features": "configs/training/lre03_lid_features.toml",
     "lid-phseq": "configs/training/lre03_lid_phseq.toml",
 }
-#: The SAD lineage each arm trains (ADR-0008); a LID arm has none. Declared, and pinned against
-#: `lineage_of(ARM_CONFIG[arm])` by a test, so the parse is a check rather than the source.
-ARM_LINEAGE: dict[Arm, Lineage | None] = {"sad": "v1", "sad-v2": "v2", "lid-features": None, "lid-phseq": None}
+#: The SAD lineage each arm trains (ADR-0008); a LID arm has none. Read off the arm's config
+#: name by the ledger's one lineage rule, `lineage_of` (issue #85): the parse is the source.
+ARM_LINEAGE: dict[Arm, Lineage | None] = {arm: lineage_of(config) for arm, config in ARM_CONFIG.items()}
 SAD_ARMS: frozenset[str] = frozenset(arm for arm, lineage in ARM_LINEAGE.items() if lineage is not None)
 LID_ARMS: frozenset[str] = frozenset(ARM_LINEAGE) - SAD_ARMS
 #: The recipe fields `recipe()` derives rather than reads off a spec field of the same name.
