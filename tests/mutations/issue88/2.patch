@@ -1,0 +1,17 @@
+mutation: FastMelBank::nb_dct() takes multiplier 3 on the deltas-without-delta-deltas branch (the `else { 2 }` of `mult`), so a ComputeDeltaDeltasNb <= 0 DCT config gets one nb_dct block too many
+catcher: CAUGHT cargo --lib fast::mel32::tests::derived_widths_agree_with_the_exact_bank
+catcher: MISSED cargo --lib fast::mel32::tests::filter_bank_and_dct_match_the_exact_path_at_tolerance
+
+diff --git a/src/rust/src/fast/mel32.rs b/src/rust/src/fast/mel32.rs
+index 2cba9c6..a429595 100644
+--- a/src/rust/src/fast/mel32.rs
++++ b/src/rust/src/fast/mel32.rs
+@@ -153,7 +153,7 @@
+             let mult = if self.compute_delta_deltas_nb > 0 {
+                 3
+             } else {
+-                2
++                3
+             };
+             mult * nb - usize::from(self.ignore_first_dct)
+         } else if self.compute_deltas_nb < 0 {

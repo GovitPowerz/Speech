@@ -127,7 +127,6 @@ pub struct FastPipeline {
 
     // Mel/DCT (built ONCE, f32 -- `fast::mel32`).
     bank: Option<FastMelBank>,
-    use_dct: bool,
     freq_beg: usize,
     freq_end: usize,
 
@@ -234,7 +233,6 @@ impl FastPipeline {
             flag_dc_offset: cfg.flag_dc_offset,
             win_coeffs,
             bank,
-            use_dct: cfg.nb_dct > 0,
             freq_beg: params.freq_beg,
             freq_end: params.freq_end,
             r2c,
@@ -290,7 +288,7 @@ impl FastPipeline {
         let (mel, dct) = match &self.bank {
             Some(bank) => {
                 let fb = bank.apply_filter_bank(perio, rows, self.bins);
-                if self.use_dct {
+                if bank.is_dct_activated() {
                     let d = bank.apply_dct(&fb);
                     (Some(fb), Some(d))
                 } else {
@@ -464,7 +462,7 @@ impl FastPipeline {
     /// EXTRACTED row's `regression_deltas` reach lands on real neighbours (interior) or
     /// on the true sequence start/end (clamped edge), making the extracted rows
     /// bit-identical to the whole-sequence assembly. `&self` (read-only: reuses
-    /// `bank`/`use_dct`/`freq_beg`/`freq_end`, never the whole-sequence `perio`/`input`
+    /// `bank`/`freq_beg`/`freq_end`, never the whole-sequence `perio`/`input`
     /// buffers).
     pub fn assemble_perio_window(
         &self,

@@ -5,10 +5,10 @@ catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_excerpt_3s
 catcher: CAUGHT cargo --test phase7_fast_pipeline pipeline_parity_dc_offset_branch
 
 diff --git a/src/rust/src/fast/mel32.rs b/src/rust/src/fast/mel32.rs
-index e0fe9dc..6691ff1 100644
+index 2cba9c6..853fcf5 100644
 --- a/src/rust/src/fast/mel32.rs
 +++ b/src/rust/src/fast/mel32.rs
-@@ -114,7 +114,7 @@ impl FastMelBank {
+@@ -117,7 +117,7 @@
                  .iter()
                  .map(|row| row.iter().map(|&c| c as f32).collect())
                  .collect(),

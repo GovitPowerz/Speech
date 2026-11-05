@@ -570,6 +570,34 @@ mod tests {
     }
 
     #[test]
+    fn derived_widths_agree_with_the_exact_bank() {
+        // `from_exact` copies the stored scalars, but `nb_filters()` / `nb_dct()` are
+        // still transcribed width FORMULAS (the deltas-no-DCT 2F/3F multiplier, the
+        // mult/SDC/ignoreFirst table). Every committed config runs delta-deltas 3, so the
+        // deltas-without-dd rows below are the only pin on the `2` branches.
+        let bins = 65usize;
+        for &(nb_bins, nb_dct, ignore, dn, ddn) in &[
+            (20i32, 4i32, true, 5i32, 3i32),
+            (20, 4, false, 5, 3),
+            (20, 4, false, 5, 0), // DCT, deltas, no dd: nb_dct() mult 2
+            (20, 4, true, 5, 0),
+            (20, 0, false, 5, 3), // no DCT: nb_filters() 3F
+            (20, 0, false, 5, 0), // no DCT, no dd: nb_filters() 2F
+            (20, 0, false, 0, 0),
+            (20, 4, true, -3, 0), // SDC
+            (20, 4, false, -3, 0),
+            (0, 4, false, 0, 0),    // nb_bins <= 0 -> raw band
+            (4000, 4, false, 0, 0), // whole-bank FALLBACK
+            (20, 512, false, 0, 0), // nb_dct clamped to nb_filters
+        ] {
+            let (e, f) = banks(nb_bins, bins - 1, true, nb_dct, ignore, dn, ddn);
+            let tag = format!("nb_bins={nb_bins} nb_dct={nb_dct} ig={ignore} d={dn} dd={ddn}");
+            assert_eq!(e.nb_filters(), f.nb_filters(), "nb_filters ({tag})");
+            assert_eq!(e.nb_dct(), f.nb_dct(), "nb_dct ({tag})");
+        }
+    }
+
+    #[test]
     fn filter_bank_and_dct_match_the_exact_path_at_tolerance() {
         // MEASURED on this box (M4 Pro): worst max_rel over the NINE configs below is
         // 1.861e-6 -- the f32 kernels reproduce the exact f64 mel/DCT to ~2e-6 on a

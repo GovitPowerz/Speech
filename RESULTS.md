@@ -2237,7 +2237,8 @@ stopped, with the reason and the shape of the work.
   filter would pin the f32 coefficient TABLE exactly (against the exact table narrowed `as
   f32`), turning a tolerance comparison into an equality one. Closed by issue #88, equality by
   construction: `FastMelBank::from_exact` reads the exact bank's tables and narrows them, so
-  there is no second table to pin; the shape cross-check went with the deleted constructor.
+  there is no second table to pin. The two derived widths (`nb_filters()` / `nb_dct()`) are
+  still transcribed formulas and keep their cross-check against the exact bank.
 - **A `Cfc_Backbone_Layers >= 2` streaming fixture** (Task 6, M4; re-confirmed by Task 11's
   rider 9). Both committed CfC fixtures are `L = 1`, so the multi-layer backbone chain is
   exercised by the exact cell's unit/FD tiers and the Python reconstruction pins but NOT by
@@ -3814,7 +3815,7 @@ issue121/11` on macOS: 10 verdicts, 0 differ from the expectations written befor
 
 ## Issue #88 -- the fast mel bank read off the exact one: the mutation battery
 
-**Live:** `tests/mutations/issue88/` (1 patch).
+**Live:** `tests/mutations/issue88/` (2 patches).
 
 `FastMelBank::new` re-transcribed `MelFilterBank::new`'s 140-line f64 grid / triangle /
 fallback / DCT walk to narrow three tables; the two differed at `coeff as f32` and `v as f32`.
@@ -3829,9 +3830,11 @@ untouched: they stay transcribed twins (ADR-0002), the bank is a table, not a ke
 The identity was measured, not argued: a scratch test compared the two constructors over the
 10-config table (whole-bank fallback and `nb_dct` clamp rows included), every f32 coefficient by
 `to_bits`, every index, shape and flag, green at the intermediate tree state, then deleted with
-`new` in the same commit. The shape cross-check (`is_mel` / `is_dct_activated` / `nb_filters` /
-`nb_dct` against the exact bank) went too: the four functions now read the fields the exact bank
-handed over. The Phase 10 follow-on "f32 mel bank-table pin upgraded to VALUES" closes by
+`new` in the same commit. Of the shape cross-check, `is_mel` / `is_dct_activated` went (they
+now return the flags the exact bank handed over); `nb_filters()` / `nb_dct()` derive the output
+widths by a transcribed formula, so the review restored their cross-check against the exact bank
+(`derived_widths_agree_with_the_exact_bank`, 12 rows, adding the deltas-without-delta-deltas
+rows that no committed config runs and the old table lacked for `nb_filters()`). The Phase 10 follow-on "f32 mel bank-table pin upgraded to VALUES" closes by
 construction (its bullet above says so). `phase7_fast_pipeline`, `phase1_mel_golden`,
 `phase7_parity_sad`, `phase9_fast_parity`, `phase10_bicell_parity` and `fast_doc_citations` ran
 unedited and green; `phase10/4` re-applies below the deleted constructor at its new offset.
@@ -3841,17 +3844,20 @@ fast-vs-exact parity legs are self-consistent for the bank's GEOMETRY (a members
 `MelFilterBank::new` would move both trees together and `phase7_fast_pipeline` would not see
 it), so the geometry is owned by the exact mel goldens alone (`phase1_mel_golden`, bit-for-bit
 against the legacy dumps); the parity legs keep owning the f32 APPLY kernels, which is what the
-one patch below exercises.
+first patch below exercises.
 
-One patch, because the new constructor carries one piece of arithmetic: the exact `coeffs_dct`
+Patch 1, because the new constructor carries one piece of arithmetic: the exact `coeffs_dct`
 is an `Array2` of shape `(nb_filters, nb_dct)` and the fast table is that matrix row-major,
 the layout `dct_product` indexes. The row copies (`index_begin`, `coeffs`) carry no index
 arithmetic, so an `index_begin` shift would mutate a plain `to_vec()`, which proves nothing a
-reader would not see.
+reader would not see. Patch 2 came with the review: it mutates the `nb_dct()` width formula's
+deltas-without-delta-deltas multiplier, a branch no committed config and no tolerance row runs,
+so the restored width cross-check is its only catcher.
 
 `uv run python tests/mutations/run.py issue88` on macOS, first run: 4 verdicts, 0 differ from
-the expectations written before the run.
+the expectations written before the run. The review's re-run with patch 2: 6 verdicts, 0 differ.
 
 | # | mutation | named catchers | verdict (first failure line) |
 |---|---|---|---|
 | 1 | `from_exact` copies the DCT table transposed (iterates `coeffs_dct.t()`) | `fast::mel32::tests::filter_bank_and_dct_match_the_exact_path_at_tolerance`, `phase7_fast_pipeline::pipeline_parity_prcts_60s`, `::pipeline_parity_excerpt_3s`, `::pipeline_parity_dc_offset_branch` | CAUGHT by all four: `dct rel 13.087 exceeds pin (nb_bins=20 log=true nb_dct=4 ig=true d=5 dd=3)`, `rel 121.52 exceeds pin (chan=0)`, `rel 99.48 exceeds pin (chan=0)`, `dc-branch rel 99.48 exceeds pin (chan=0)`. |
+| 2 | `nb_dct()` takes multiplier 3 on the deltas-without-delta-deltas branch | `fast::mel32::tests::derived_widths_agree_with_the_exact_bank`, `::filter_bank_and_dct_match_the_exact_path_at_tolerance` | CAUGHT by the width cross-check: `nb_dct (nb_bins=20 nb_dct=4 ig=false d=5 dd=0)`; MISSED by the tolerance leg (no row runs deltas without delta-deltas), as expected. |
