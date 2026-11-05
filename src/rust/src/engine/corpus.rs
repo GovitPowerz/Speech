@@ -9,7 +9,7 @@ use std::fs;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
-use crate::legacy_config::{expand_repeat, splitstr};
+use crate::legacy_config::{expand_repeat, get_default, splitstr};
 
 /// One corpus entry (audio path + refs + language/dialect/class metadata).
 ///
@@ -23,12 +23,6 @@ pub struct CorpusItem {
     pub class_index: i32,
     pub file_id: i32,
     pub weight: f64,
-}
-
-/// Read a string from a config value, with a default for a missing key (legacy
-/// `conf.get<string>(name, default)`).
-fn parse_string_default(m: &IndexMap<String, String>, key: &str, default: &str) -> String {
-    m.get(key).cloned().unwrap_or_else(|| default.to_string())
 }
 
 /// Legacy `read<string>` (Helpers.hpp:1602-1608): `ss << data; ss >> val`
@@ -113,7 +107,7 @@ impl Corpus {
         let mut corpus = Corpus::default();
 
         // legacy: Corpus.cpp:16-39 (language2classmapping load).
-        let mapping_file = parse_string_default(map, "language2classmapping", "");
+        let mapping_file = get_default::<String>(map, "language2classmapping", String::new())?;
         let mapping_text = match fs::read_to_string(&mapping_file) {
             Ok(text) => text,
             Err(_) => bail!("The language->class mapping file {mapping_file} cannot be opened."),
@@ -147,7 +141,7 @@ impl Corpus {
         }
 
         // legacy: Corpus.cpp:42-101 (listing load, both branches).
-        let listing_file = parse_string_default(map, "fileslisting", "");
+        let listing_file = get_default::<String>(map, "fileslisting", String::new())?;
         if listing_file.is_empty() {
             // legacy: Corpus.cpp:44-57 (no-listing fallback via comma-lists).
             let files_names = get_list_string(map, "files", ',')?;

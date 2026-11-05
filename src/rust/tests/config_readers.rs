@@ -11,6 +11,7 @@
 use indexmap::IndexMap;
 use speech::config::NnetSpec;
 use speech::engine::bag_of_processors::BagOfProcessors;
+use speech::engine::corpus::Corpus;
 use speech::fast::driver::{FastTwinLid, build_aligned_spec};
 use speech::fast::stream::StreamingSession;
 use speech::features::pipeline::FeatureConfig;
@@ -375,4 +376,22 @@ fn vrcts_part_rejects_trailing_junk_on_bool_keys() {
         err.contains("cannot read 'falsey' as bool") && err.contains("VRCTS_force"),
         "{err}"
     );
+}
+
+/// Issue #87: the corpus's two defaulted String reads take the family's token parser, so a
+/// padded in-memory `fileslisting` trims to the absence sentinel and the comma-list branch
+/// runs (it used to be opened as a path).
+#[test]
+fn corpus_reads_the_listing_key_through_the_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let mapping = dir.path().join("language2classmapping.csv");
+    std::fs::write(&mapping, "unk;unk;0\n").unwrap();
+    let m = with(
+        IndexMap::new(),
+        "language2classmapping",
+        mapping.to_str().unwrap(),
+    );
+    let m = with(m, "fileslisting", "  ");
+    let m = with(m, "files", "a.wav,b.wav");
+    assert_eq!(Corpus::from_config(&m).unwrap().nb_of_files(), 2);
 }
