@@ -18,7 +18,10 @@
 //! through `MelFilterBank::tables` (the ADR-0002 introspection class) and narrows the
 //! coefficient values `as f32` once, so there is no second copy of the constructor's
 //! walk to drift. The "not a dependency" claim the parity argument rests on is scoped to
-//! the kernels.
+//! the kernels. The corollary the #83 close named applies: once both trees read one
+//! table, the fast-vs-exact parity legs are self-consistent for the bank's GEOMETRY
+//! (`phase7_fast_pipeline` can no longer see a membership drift), which is owned by the
+//! exact mel goldens alone (`phase1_mel_golden`); the legs still own the f32 APPLY.
 //!
 //! DELIBERATE DIVERGENCE (spec S4; documented here + `RESULTS.md`, NEVER
 //! `IMPROVEMENTS.md` -- this is the f32/f64 split, not legacy debt): f32 arithmetic with
@@ -100,8 +103,8 @@ impl FastMelBank {
         let t = bank.tables();
         FastMelBank {
             is_log: t.is_log,
-            is_mel: bank.is_mel(),
-            is_dct_activated: bank.is_dct_activated(),
+            is_mel: t.is_mel,
+            is_dct_activated: t.is_dct_activated,
             ignore_first_dct: t.ignore_first_dct,
             nb_filters: t.nb_filters,
             nb_dct: t.nb_dct,

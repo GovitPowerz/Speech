@@ -63,6 +63,8 @@ pub struct MelFilterBank {
 /// [`MelFilterBank::tables`]: the private tables and their indexing scalars, borrowed.
 pub(crate) struct MelTables<'a> {
     pub(crate) is_log: bool,
+    pub(crate) is_mel: bool,
+    pub(crate) is_dct_activated: bool,
     pub(crate) ignore_first_dct: bool,
     pub(crate) nb_filters: usize,
     pub(crate) nb_dct: i32,
@@ -209,15 +211,19 @@ impl MelFilterBank {
         }
     }
 
-    /// The bank's tables and the scalars that index them, borrowed (issue #88, the
-    /// ADR-0002 introspection class: a read, no write). The one reader is
-    /// `fast::mel32::FastMelBank::from_exact`, which narrows the three tables to f32
-    /// once so the fast tree carries no second copy of this constructor's walk.
-    /// `nb_filters` / `nb_dct` are the RAW stored counts (the clamped `nb_dct`), not the
-    /// output column counts the public `nb_filters()` / `nb_dct()` derive from them.
+    /// The whole of the constructor's stored state, borrowed: the three tables and the
+    /// nine scalars (issue #88, the ADR-0002 introspection class: a read, no write). The
+    /// one reader is `fast::mel32::FastMelBank::from_exact`, which narrows the three
+    /// tables to f32 once so the fast tree carries no second copy of this constructor's
+    /// walk; it reads every field here and nothing through the public getters, so the
+    /// view is the one source. `nb_filters` / `nb_dct` are the RAW stored counts (the
+    /// clamped `nb_dct`), not the output column counts the public `nb_filters()` /
+    /// `nb_dct()` derive from them.
     pub(crate) fn tables(&self) -> MelTables<'_> {
         MelTables {
             is_log: self.is_log,
+            is_mel: self.is_mel,
+            is_dct_activated: self.is_dct_activated,
             ignore_first_dct: self.ignore_first_dct,
             nb_filters: self.nb_filters,
             nb_dct: self.nb_dct,

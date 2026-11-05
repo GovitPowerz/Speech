@@ -3820,8 +3820,8 @@ issue121/11` on macOS: 10 verdicts, 0 differ from the expectations written befor
 fallback / DCT walk to narrow three tables; the two differed at `coeff as f32` and `v as f32`.
 Now `FastMelBank::from_exact(&MelFilterBank)` reads the exact bank's tables through the one new
 `pub(crate)` method `MelFilterBank::tables() -> MelTables<'_>` (the ADR-0002 introspection
-class: a borrowed view of the seven indexing scalars, `index_begin`, `coeffs`, `coeffs_dct`,
-nothing computed) and narrows the coefficient values once; `features::pipeline::build_mel_bank`
+class: a borrowed view of the constructor's whole stored state, nine scalars and
+`index_begin`, `coeffs`, `coeffs_dct`, nothing computed, nothing read through the public getters) and narrows the coefficient values once; `features::pipeline::build_mel_bank`
 is `pub(crate)` so `FastPipeline::new` builds the exact bank at the exact path's one site, and
 the inline test helper and `benches/kernels.rs` narrow their own. The apply kernels are
 untouched: they stay transcribed twins (ADR-0002), the bank is a table, not a kernel.
@@ -3835,6 +3835,13 @@ handed over. The Phase 10 follow-on "f32 mel bank-table pin upgraded to VALUES" 
 construction (its bullet above says so). `phase7_fast_pipeline`, `phase1_mel_golden`,
 `phase7_parity_sad`, `phase9_fast_parity`, `phase10_bicell_parity` and `fast_doc_citations` ran
 unedited and green; `phase10/4` re-applies below the deleted constructor at its new offset.
+
+The corollary the #83 close named holds here too: once both trees read one table, the
+fast-vs-exact parity legs are self-consistent for the bank's GEOMETRY (a membership drift in
+`MelFilterBank::new` would move both trees together and `phase7_fast_pipeline` would not see
+it), so the geometry is owned by the exact mel goldens alone (`phase1_mel_golden`, bit-for-bit
+against the legacy dumps); the parity legs keep owning the f32 APPLY kernels, which is what the
+one patch below exercises.
 
 One patch, because the new constructor carries one piece of arithmetic: the exact `coeffs_dct`
 is an `Array2` of shape `(nb_filters, nb_dct)` and the fast table is that matrix row-major,
