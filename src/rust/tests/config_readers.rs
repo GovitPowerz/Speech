@@ -269,3 +269,23 @@ fn fast_spec_injects_the_parsed_input_width() {
     );
     assert_eq!(build_aligned_spec(&m, "BLSTM_LID").unwrap().input_size, 36);
 }
+
+/// Issue #87: `DriverConfig`'s usize and String reads take the family's token parser; a
+/// padded in-memory value trims.
+#[test]
+fn driver_config_reads_scalars_through_the_family() {
+    let base = tdc_bag_config();
+    let err = err_of(
+        DriverConfig::from_config(
+            &with(base.clone(), "TDC_convolution_window_size", "3x"),
+            "TDC",
+        ),
+        "TDC_convolution_window_size 3x",
+    );
+    assert!(
+        err.contains("cannot read '3x' as usize") && err.contains("TDC_convolution_window_size"),
+        "{err}"
+    );
+    let cfg = DriverConfig::from_config(&with(base, "Dump_Directory", " d "), "TDC").unwrap();
+    assert_eq!(cfg.dump_dir, "d");
+}

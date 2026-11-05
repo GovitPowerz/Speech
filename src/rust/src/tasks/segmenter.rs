@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use indexmap::IndexMap;
 
 use crate::audio::{Audio, convolution_horiz_slice, windowing_coefficients};
-use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
+use crate::legacy_config::{get, get_default, get_f64, get_f64_default, get_f64_list};
 use crate::nn::blstm::BlstmNetwork;
 
 use super::segmentation::{SegClass, Segmentation};
@@ -167,22 +167,6 @@ impl SegmenterConfig {
     }
 }
 
-/// Read a scalar `usize` from a config value (legacy `conf.get<vector<double>::
-/// size_type>(name)`, no default).
-fn parse_usize(m: &IndexMap<String, String>, key: &str) -> Result<usize> {
-    m.get(key)
-        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
-        .trim()
-        .parse::<usize>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
-}
-
-/// Read a string from a config value, with a default for a missing key (legacy
-/// `conf.get<string>(name, default)`).
-fn parse_string_default(m: &IndexMap<String, String>, key: &str, default: &str) -> String {
-    m.get(key).cloned().unwrap_or_else(|| default.to_string())
-}
-
 /// The legacy warning text for an unsupported windowing type
 /// (`Segmenter::verifyWindowingType`, `Segmenter.cpp:61-70`).
 fn windowing_type_warning(parameter_name: &str) -> String {
@@ -234,7 +218,7 @@ impl DriverConfig {
     /// 0.83333)`, the legacy `getWindowingCoefficients` default extra param,
     /// `Helpers.hpp:222`); `{prefix}_BackPropWER` (default `-1.0`).
     pub fn from_config(m: &IndexMap<String, String>, prefix: &str) -> Result<DriverConfig> {
-        let dump_dir = parse_string_default(m, "Dump_Directory", "");
+        let dump_dir = get_default::<String>(m, "Dump_Directory", String::new())?;
 
         let mut window_size_sec = get_f64(m, &format!("{prefix}_window"))?;
         if window_size_sec < 0.0 {
@@ -245,14 +229,9 @@ impl DriverConfig {
             window_shift_sec = 0.0;
         }
 
-        let conv_window_size = parse_usize(m, &format!("{prefix}_convolution_window_size"))?;
+        let conv_window_size = get::<usize>(m, &format!("{prefix}_convolution_window_size"))?;
         let conv_type = if conv_window_size > 0 {
-            let ty = m
-                .get(&format!("{prefix}_convolution_window_type"))
-                .ok_or_else(|| {
-                    anyhow!("param '{prefix}_convolution_window_type' not found in config")
-                })?
-                .clone();
+            let ty = get::<String>(m, &format!("{prefix}_convolution_window_type"))?;
             // verifyWindowingType is called for its logging side effect only (the
             // by-value no-fix quirk): the stored type is used as-is either way.
             let _ = verify_windowing_type(&ty);
