@@ -289,3 +289,19 @@ fn driver_config_reads_scalars_through_the_family() {
     let cfg = DriverConfig::from_config(&with(base, "Dump_Directory", " d "), "TDC").unwrap();
     assert_eq!(cfg.dump_dir, "d");
 }
+
+/// Issue #87: the TDC segmenter's bool / i32 / String reads take the family's token parser.
+#[test]
+fn tdc_segmenter_rejects_trailing_junk_on_scalar_keys() {
+    let base = tdc_bag_config();
+    for (key, bad) in [("TDC_noise_seed", "1O"), ("TDC_flag_DCOffset", "True")] {
+        let err = err_of(
+            TdcSegmenter::from_legacy(&with(base.clone(), key, bad)),
+            key,
+        );
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+}

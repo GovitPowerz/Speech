@@ -27,36 +27,13 @@ use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{
     FeatureConfig, SpectralParams, build_input_sequence_parts, derive_freq_band_ltsv_variant,
 };
-use crate::legacy_config::{get_f64, get_f64_list};
+use crate::legacy_config::{get, get_f64, get_f64_list};
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::segmentation::{SegClass, Segmentation};
 use crate::tasks::segmentation_io::compute_errors;
 use crate::tasks::segmenter::{
     ChannelMembers, DriverConfig, Segmenter, SegmenterConfig, get_targets, results_to_segmentation,
 };
-
-fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
-    // legacy `conf.get<bool>` uses std::boolalpha: the strings "true"/"false".
-    m.get(key)
-        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
-        .trim()
-        .parse::<bool>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}"))
-}
-
-fn parse_i32(m: &IndexMap<String, String>, key: &str) -> Result<i32> {
-    m.get(key)
-        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
-        .trim()
-        .parse::<i32>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse: {e}"))
-}
-
-fn parse_string(m: &IndexMap<String, String>, key: &str) -> Result<String> {
-    m.get(key)
-        .cloned()
-        .ok_or_else(|| anyhow!("param '{key}' not found in config"))
-}
 
 /// Time-domain correlation SAD segmenter (Algo 1; `TimeDomainCorrel.{h,cpp}`).
 ///
@@ -102,11 +79,11 @@ impl TdcSegmenter {
         }
         let balance = get_f64(map, "TDC_balance")?;
 
-        let flag_dc_offset = parse_bool(map, "TDC_flag_DCOffset")?;
+        let flag_dc_offset = get::<bool>(map, "TDC_flag_DCOffset")?;
         let preemph_ratio = get_f64(map, "TDC_preemph_ratio")?;
-        let noise_seed = parse_i32(map, "TDC_noise_seed")?;
+        let noise_seed = get::<i32>(map, "TDC_noise_seed")?;
         let noise_ratio = get_f64(map, "TDC_noise_ratio")?;
-        let windowing_type = parse_string(map, "TDC_windowing_type")?;
+        let windowing_type = get::<String>(map, "TDC_windowing_type")?;
         let windowing_param = get_f64(map, "TDC_windowing_param")?;
 
         let window_shift_sec = driver_cfg.window_shift_sec;
@@ -565,13 +542,13 @@ impl BlstmSignalSegmenter {
             net.set_weights(flat)?;
         }
 
-        let two_sweeps = parse_bool(map, "BLSTM_TwoSweeps")?;
+        let two_sweeps = get::<bool>(map, "BLSTM_TwoSweeps")?;
 
-        let flag_dc_offset = parse_bool(map, "BLSTM_flag_DCOffset")?;
+        let flag_dc_offset = get::<bool>(map, "BLSTM_flag_DCOffset")?;
         let preemph_ratio = get_f64(map, "BLSTM_preemph_ratio")?;
-        let noise_seed = parse_i32(map, "BLSTM_noise_seed")?;
+        let noise_seed = get::<i32>(map, "BLSTM_noise_seed")?;
         let noise_ratio = get_f64(map, "BLSTM_noise_ratio")?;
-        let windowing_type = parse_string(map, "BLSTM_windowing_type")?;
+        let windowing_type = get::<String>(map, "BLSTM_windowing_type")?;
         let windowing_param = get_f64(map, "BLSTM_windowing_param")?;
 
         let window_shift_sec = driver_cfg.window_shift_sec;
