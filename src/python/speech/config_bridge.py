@@ -35,8 +35,8 @@ def parse_legacy_config(text: str) -> dict[str, str]:
 
 def read_flag(cfg: dict[str, str], key: str, default: bool) -> bool:
     """A boolean config key: missing -> `default`; exactly `true`/`false` (trimmed) otherwise,
-    anything else raises -- the engine's rule (`bag_of_processors.rs::get_bool_default`, issue
-    #32), so a `True`/`1`/typo cannot read as one value here and fail or flip in the engine."""
+    anything else raises -- the engine's rule (`legacy_config.rs::get_default::<bool>`, issues
+    #32 and #87), so a `True`/`1`/typo cannot read as one value here and fail or flip in the engine."""
     if key not in cfg:
         return default
     value = cfg[key].strip()

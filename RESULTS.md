@@ -3898,3 +3898,46 @@ The issue's own write-up asked for "skips one recipe field" and "returns `v1` fo
 the first would be a `ValidationError` every recipe test catches (a crash, not a drift), and the
 second leaves both SAD arms in `SAD_ARMS`, so neither would have exercised the pin it was meant
 for. The two shipped mutations are the drift class each pin owns.
+
+## Issue #87 -- the scalar config readers as one family: the mutation battery
+
+**Live:** `tests/mutations/issue87/` (2 patches).
+
+Issue #50 routed every f64 and list config read through `legacy_config.rs`; the i32 / bool /
+string / usize half stayed private, 24 functions and closures across 10 files with three error
+vocabularies, and `features/pipeline.rs`'s four did not trim while every other copy did. The
+family now carries the legacy's own shape, one generic trio: `parse_token<T: FromStr>` (trim,
+whole-string parse, one wording naming the type, the key and the text), `get<T>` (required) and
+`get_default<T>`; the 24 copies are gone, the three cross-module imports of the bag's reader
+read the family, the nine port-only geometry keys read one `nn/blstm.rs::geometry_key` over
+`get_default::<usize>` (the `>= min` rule kept in the module), and the three one-off parses
+(`config.rs`'s peephole `flag`, `cost.rs::get_law`, `fast/plan.rs::read_algo`) fold too.
+Two decisions moved at implementation: the recorded trio's `get_opt<T>` has no caller in the
+crate and was not written (the `Audio_fixed_gain` shape stays the f64 family's `get_f64_opt`), and
+the family landed in the bag's commit rather than alone, since a reader with no caller is a
+clippy error under `-D warnings`. `cost.rs` has no seam pin of its own: `get_law` trimmed before
+and after, so nothing new is observable there (`phase2_blstm_golden::from_legacy_err_malformed_cost_law_key`
+stays its guard). Behaviour-free on every committed config (every committed value is canonical),
+the golden suite byte-green as the proof; the one visible contract change, the untrimmed copies
+now trimming (the pipeline's four, `nn/blstm.rs`'s `get_bool` / `get_i16`, the four string
+readers and the two `_weightsFile` reads), is observable only through the in-memory
+`Engine.from_map` seam or a padded quoted string in a `.toml` (the `.config` parser trims every
+value, `toml_to_map` copies a TOML string as written) and is recorded in ADR-0002's touch-class list. The string LIST element
+parser `engine/corpus.rs::read_string` (the legacy first-token rule) is not a scalar reader and
+stays.
+
+Measured 2026-11-05 (`uv run python tests/mutations/run.py issue87`, 15 verdicts, 0 differ; the close run
+`--changed-since origin/main` covered the 58 patches whose patched or catcher files the branch touched, across
+`issue25`, `issue26`, `issue57`, `issue68`, `issue83`, `issue84`, `issue86`, `issue87`, `issue92`, `issue121`,
+`phase4a`, `phase4b`, `phase5`, `phase7`, `phase9`, `phase10`: 196 verdicts, 0 differ, `issue92/4` and `phase7/4`
+re-targeted to the bag's migrated reads):
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `parse_token` reads the longest parseable prefix, the legacy `ss >> val` (`1O` reads 1, `falsey` reads false) | `legacy_config::token_reader_tests::parse_token_per_type`; `config_readers::{bag_of_processors, blstm_config, tdc_segmenter, twin_lid_drivers, vrcts_part}_rejects_trailing_junk_on_*_keys`, `::driver_config_reads_scalars_through_the_family`, `::feature_config_reads_scalars_through_the_family`, `::nnet_spec_and_fast_plan_read_their_one_off_scalars_through_the_family`; `::corpus_reads_the_listing_key_through_the_family` | CAUGHT by the unit pin (`1O` reads `Ok(1)`) and by all eight module pins (`must not build` / `unwrap_err` on an `Ok`: `File_Type 1O`, `BLSTM_InputNormalizationType 1O`, `TDC_convolution_window_size 3x`, `TDC_noise_seed 1O`, `BLSTM_LID_Mode 0x`, `BLSTM_nb_bins 4O`, `VRCTS_force falsey`, `BLSTM_NNetInputSize 23x`); MISSED by the corpus pin as declared. |
+| 2 | `parse_token` stops trimming (the pre-#87 shape of the pipeline's and the string readers' copies) | `legacy_config::token_reader_tests::parse_token_per_type`; `config_readers::driver_config_reads_scalars_through_the_family`, `::feature_config_reads_scalars_through_the_family`, `::corpus_reads_the_listing_key_through_the_family`; `::bag_of_processors_rejects_trailing_junk_on_scalar_keys` | CAUGHT by the unit pin (`' -2 '` errors), the driver config (`dump_dir` reads `' d '`), the pipeline (`' 20 '` errors on `BLSTM_nb_bins`) and the corpus (`'  '` opened as the listing path); MISSED by the bag's `1 2` pin as declared. |
+
+The first patch is the seam proof: one parser mutated, one pin per migrated module red. The
+corpus pin is its declared MISSED (a `String` has no junk to read past) and the catcher of the
+second patch instead, where the bag's `1 2` pin is the declared MISSED (an inner space is junk
+with or without the trim).
