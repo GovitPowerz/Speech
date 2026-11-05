@@ -19,6 +19,7 @@ use speech::nn::blstm::BlstmConfig;
 use speech::tasks::lid::TwinBlstmSpectralLid;
 use speech::tasks::sad::TdcSegmenter;
 use speech::tasks::segmenter::{DriverConfig, SegmenterConfig};
+use speech::tasks::vrcts::VrctsPart;
 
 fn load(rel: &str) -> IndexMap<String, String> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -360,4 +361,18 @@ fn feature_config_reads_scalars_through_the_family() {
     let trimmed =
         FeatureConfig::from_legacy(&with(base, "BLSTM_nb_bins", &padded), "BLSTM").unwrap();
     assert_eq!(trimmed.nb_bins, plain.nb_bins);
+}
+
+/// Issue #87: the VRCTS adapter's two required bool reads take the family's token parser.
+#[test]
+fn vrcts_part_rejects_trailing_junk_on_bool_keys() {
+    let base = with(load("phase4c/genome_algo0.config"), "VRCTS_isFast", "true");
+    let err = err_of(
+        VrctsPart::from_legacy(&with(base, "VRCTS_force", "falsey")),
+        "VRCTS_force falsey",
+    );
+    assert!(
+        err.contains("cannot read 'falsey' as bool") && err.contains("VRCTS_force"),
+        "{err}"
+    );
 }
