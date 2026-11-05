@@ -36,6 +36,8 @@ ARM_CONFIG: dict[Arm, str] = {
 ARM_LINEAGE: dict[Arm, Lineage | None] = {"sad": "v1", "sad-v2": "v2", "lid-features": None, "lid-phseq": None}
 SAD_ARMS: frozenset[str] = frozenset(arm for arm, lineage in ARM_LINEAGE.items() if lineage is not None)
 LID_ARMS: frozenset[str] = frozenset(ARM_LINEAGE) - SAD_ARMS
+#: The recipe fields `recipe()` derives rather than reads off a spec field of the same name.
+RECIPE_DERIVED: frozenset[str] = frozenset({"lineage", "listing"})
 
 
 def listing_hash(path: Path) -> str:
@@ -85,24 +87,15 @@ class BaselineSpec(BaseModel):
         return cls(**vars(args))
 
     def recipe(self, *, listing: str | None) -> BaselineRecipe:
-        """The run's ledger identity. `listing` is the hash of `lre_listing`'s bytes as stamped
-        when the run started (`listing_hash`), never recomputed here: a listing edited during
-        a run must not rename the record of the bytes that trained."""
+        """The run's ledger identity. The recipe model is the tag (issue #85): every
+        `BaselineRecipe` field but the two derived here (`lineage` off the arm, `listing`) is
+        read off the spec by name, so a knob is identity exactly when the ledger schema says
+        so (ADR-0009) and a spec field the schema does not name is run-site by construction.
+        `listing` is the hash of `lre_listing`'s bytes as stamped when the run started
+        (`listing_hash`), never recomputed here: a listing edited during a run must not rename
+        the record of the bytes that trained."""
         return BaselineRecipe(
-            arm=self.arm,
+            **{name: getattr(self, name) for name in BaselineRecipe.model_fields if name not in RECIPE_DERIVED},
             lineage=ARM_LINEAGE[self.arm],
-            cell=self.cell,
-            direction=self.direction,
-            subset=self.subset,
-            valid_size=self.valid_size,
-            test_size=self.test_size,
-            audio_max_duration=self.audio_max_duration,
-            epochs=self.epochs,
-            steps_per_epoch=self.steps_per_epoch,
-            patience=self.patience,
-            minibatch=self.minibatch,
-            init_scheme=self.init_scheme,
-            seed=self.seed,
-            lanes=self.lanes,
             listing=listing,
         )

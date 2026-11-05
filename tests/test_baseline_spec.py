@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from speech.drivers.spec import ARM_CONFIG, ARM_LINEAGE, BaselineSpec
+from speech.drivers.spec import ARM_CONFIG, ARM_LINEAGE, RECIPE_DERIVED, BaselineSpec
 from speech.ledger.schema import BaselineRecipe, lineage_of
 
 
@@ -67,6 +67,18 @@ def test_arm_cross_checks(tmp_path: Path) -> None:
         _spec(arm="lid-phseq", audio_max_duration=20.0)
     assert _spec(arm="lid-features", lre_listing=tmp_path / "l.csv").lre_listing == tmp_path / "l.csv"
     assert _spec(arm="sad-v2", audio_max_duration=20.0).audio_max_duration == 20.0
+
+
+def test_the_recipe_model_is_the_tag() -> None:
+    """Issue #85: a recipe field is a spec field of the same name unless `recipe()` derives it,
+    so identity is declared once, in the ledger schema, and the projection cannot drift."""
+    assert {"lineage", "listing"} == RECIPE_DERIVED
+    projected = set(BaselineRecipe.model_fields) - RECIPE_DERIVED
+    assert projected <= set(BaselineSpec.model_fields)
+    s = _spec(arm="lid-features", cell="mamba", direction="forward", seed=5, lanes=3, subset=7, valid_size=2, test_size=4, minibatch=6)
+    s = s.model_copy(update={"epochs": 11, "steps_per_epoch": 13, "patience": 17, "init_scheme": "he"})
+    recipe = s.recipe(listing="fedcba9876543210").model_dump()
+    assert {k: recipe[k] for k in projected} == {k: getattr(s, k) for k in projected}
 
 
 def test_recipe_projection() -> None:
