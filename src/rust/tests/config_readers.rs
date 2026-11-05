@@ -1,9 +1,12 @@
-//! Issue #50: every f64 and list config reader in the crate goes through the shared
-//! `legacy_config` family, so a non-finite value (`nan`, `inf`, `1e400`) on any of its keys
-//! errors naming the key instead of flowing into the engine, and every list takes the one
-//! grammar (the trailing comma, the `*` repeater). One pin per migrated module,
-//! driven through that module's public constructor on a committed fixture; the shared
-//! grammar itself is unit-pinned in `legacy_config::f64_reader_tests`.
+//! Every config reader in the crate goes through the shared `legacy_config` family. Issue
+//! #50: every f64 and list read, so a non-finite value (`nan`, `inf`, `1e400`) on any of its
+//! keys errors naming the key instead of flowing into the engine, and every list takes the one
+//! grammar (the trailing comma, the `*` repeater). Issue #87: every i32 / bool / String /
+//! usize read, so a parseable prefix with trailing junk (`1O`, `True`) errors naming the key
+//! instead of reading the prefix as the legacy `ss >> val` did (the #32 tightening), and a
+//! padded value trims through the in-memory map seam. One pin per migrated module, driven
+//! through that module's public constructor on a committed fixture; the parsers themselves
+//! are unit-pinned in `legacy_config::{f64_reader_tests, token_reader_tests}`.
 
 use indexmap::IndexMap;
 use speech::config::NnetSpec;
@@ -52,6 +55,27 @@ fn bag_of_processors_rejects_non_finite_audio_offset() {
         "Audio_offset nan",
     );
     assert!(err.contains("Audio_offset") && err.contains("nan"), "{err}");
+}
+
+/// Issue #87: the bag's i32 / bool / String reads take the family's token parser.
+#[test]
+fn bag_of_processors_rejects_trailing_junk_on_scalar_keys() {
+    for (key, bad) in [
+        ("File_Type", "1O"),
+        ("numOuterThreads", "1 2"),
+        ("exclude_nontrans", "True"),
+        ("Algo_choice", "1.0"),
+    ] {
+        let mut cfg = with(tdc_bag_config(), key, bad);
+        let err = err_of(
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)),
+            key,
+        );
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
 }
 
 #[test]

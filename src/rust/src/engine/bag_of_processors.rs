@@ -18,7 +18,7 @@ use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
 use crate::fast::driver::{FastSpectralSegmenter, FastTwinLid};
 use crate::features::stats::InputStatistics;
-use crate::legacy_config::{get_f64_default, get_f64_opt};
+use crate::legacy_config::{get, get_default, get_f64_default, get_f64_opt};
 use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
     BlstmSignalSegmenter, BlstmSpectralSegmenter, LtsvSegmenter, TdcSegmenter,
@@ -30,46 +30,6 @@ use crate::tasks::segmentation_io::{
 };
 use crate::tasks::segmenter::Segmenter;
 use crate::tasks::vrcts::VrctsPart;
-
-/// `conf.get<int>(name)` (required, no default): missing key is an error.
-fn get_i32(map: &IndexMap<String, String>, key: &str) -> Result<i32> {
-    map.get(key)
-        .ok_or_else(|| anyhow::anyhow!("param '{key}' not found in config"))?
-        .trim()
-        .parse::<i32>()
-        .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as i32: {e}"))
-}
-
-/// `conf.get<int>(name, default)`: missing key -> default.
-pub(crate) fn get_i32_default(
-    map: &IndexMap<String, String>,
-    key: &str,
-    default: i32,
-) -> Result<i32> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as i32: {e}")),
-    }
-}
-
-/// `conf.get<string>(name, default)`: missing key -> default.
-fn get_string_default(map: &IndexMap<String, String>, key: &str, default: &str) -> String {
-    map.get(key).cloned().unwrap_or_else(|| default.to_string())
-}
-
-/// `conf.get<bool>(name, default)`: missing key -> default (legacy std::boolalpha).
-fn get_bool_default(map: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
-    match map.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<bool>()
-            .map_err(|e| anyhow::anyhow!("`{key}`: cannot parse as bool: {e}")),
-    }
-}
 
 /// One per-config driver, replacing the legacy `_ConfigIndex` + 7 parallel typed
 /// vectors: `processors[pos]` IS the config-`pos` driver directly (the enum tag
@@ -357,23 +317,23 @@ impl BagOfProcessors {
             bail!("BagOfProcessors::from_configs: at least one config is required");
         }
 
-        let num_outer_threads = get_i32(&configs[0], "numOuterThreads")?;
+        let num_outer_threads = get::<i32>(&configs[0], "numOuterThreads")?;
         let offset_begin = get_f64_default(&configs[0], "Audio_offset", 0.0)?;
         let duration_max = get_f64_default(&configs[0], "Audio_max_duration", 3.6e6)?;
-        let file_type = get_i32_default(&configs[0], "File_Type", 0)?;
+        let file_type = get_default::<i32>(&configs[0], "File_Type", 0)?;
         // Phase 8 S1.1: `Audio_fixed_gain`, config-0-only like its Audio_* siblings
         // above. Absent (every pre-phase-8 config) -> `None` -> read_audio's legacy
         // normalize_channels path, byte-identical to before this key existed: absence
         // is a fallback MODE, not a fallback value, hence `get_f64_opt`.
         let fixed_gain = get_f64_opt(&configs[0], "Audio_fixed_gain")?;
-        let lock_files_dir = get_string_default(&configs[0], "LockFilesDir", "");
-        let exclude_nontrans = get_bool_default(&configs[0], "exclude_nontrans", false)?;
+        let lock_files_dir = get_default::<String>(&configs[0], "LockFilesDir", String::new())?;
+        let exclude_nontrans = get_default::<bool>(&configs[0], "exclude_nontrans", false)?;
 
         // Inference_Path (Phase 7 Task 4): `exact` (default, absent) selects the exact
         // f64 drivers; `fast` selects the f32 fast-inference counterparts. A global
         // key (read from configs[0], like File_Type/Audio_offset); any other value is
         // a construction error (loud, not a silent fallback).
-        let inference_path = get_string_default(&configs[0], "Inference_Path", "exact");
+        let inference_path = get_default::<String>(&configs[0], "Inference_Path", "exact".into())?;
         let use_fast = match inference_path.as_str() {
             "exact" => false,
             "fast" => true,
@@ -387,7 +347,7 @@ impl BagOfProcessors {
         // value still errors where it did, after the mode's output-file truncation, ADR-0002).
         let (epochs, epsilon) = match use_fast {
             true => (
-                get_i32_default(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?,
+                get_default::<i32>(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?,
                 get_f64_default(&configs[0], "Neural_Networks_Gradient_Check_Epsilon", 0.0)?,
             ),
             false => (0, 0.0),
@@ -413,7 +373,7 @@ impl BagOfProcessors {
             map.insert("refsegfiles".to_string(), String::new());
             map.insert("reflangfiles".to_string(), String::new());
 
-            let algo = get_i32(map, "Algo_choice")?;
+            let algo = get::<i32>(map, "Algo_choice")?;
             algo_types.push(algo);
             let pruning_thresh = get_f64_default(map, "Pruning_Threshold", 0.0)?;
             pruning_thresholds.push(pruning_thresh);
@@ -432,8 +392,8 @@ impl BagOfProcessors {
             // 6; a run whose tail is Epochs 0, epsilon 0 and every flag off drives inference
             // over the same configs in every mode.
             if use_fast {
-                let bp_sad = get_bool_default(map, "BLSTM_BackPropagationActivated", false)?;
-                let bp_lid = get_bool_default(map, "BLSTM_LID_BackPropagationActivated", false)?;
+                let bp_sad = get_default::<bool>(map, "BLSTM_BackPropagationActivated", false)?;
+                let bp_lid = get_default::<bool>(map, "BLSTM_LID_BackPropagationActivated", false)?;
                 refuse_fast_training(i64::from(epochs), epsilon, (bp_sad, bp_lid))?;
                 let processor = match algo {
                     3 => {
