@@ -246,37 +246,48 @@ def _forwarded(monkeypatch: pytest.MonkeyPatch, entry: Callable[[list[str]], int
     return seen[0]
 
 
-def test_both_entries_build_the_same_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #28: the `speech.cli` mount once dropped --cell-type/--direction. Both entries hand
-    the parsed namespace to the one builder, `BaselineSpec.from_args`, so the parser is the one
-    place a flag is defined and the spec the one place it is validated."""
+def test_the_parser_is_the_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #85: the flags are generated from `BaselineSpec.model_fields`, so the round trip is
+    the pin. Every dest is a field and an all-default parse is an all-default spec; every flag
+    lands in its field, through both entries (the `speech.cli` mount once dropped two, issue #28)."""
     import speech.cli as cli
 
-    argv = ["sad", "--corpus-root", "/c", "--out-dir", "/o", "--cell", "cfc", "--direction", "forward"]
-    argv += ["--score-init", "--valid-size", "5", "--test-size", "7", "--minibatch", "3", "--lanes", "2", "--audio-max-duration", "30.0"]
+    ns = vars(B.build_parser().parse_args(["sad", "--corpus-root", "/c", "--out-dir", "/o"]))
+    assert set(ns) == set(BaselineSpec.model_fields)
+    assert BaselineSpec.from_args(argparse.Namespace(**ns)) == BaselineSpec(arm="sad", corpus_root=Path("/c"), out_dir=Path("/o"))
+
+    argv = ["sad", "--corpus-root", "/c", "--out-dir", "/o", "--cell", "cfc", "--direction", "forward", "--init-scheme", "he", "--seed", "9"]
+    argv += ["--score-init", "--resume", "--dry-run", "--valid-size", "5", "--test-size", "7", "--minibatch", "3", "--lanes", "2", "--subset", "11"]
+    argv += ["--epochs", "4", "--patience", "2", "--steps-per-epoch", "6", "--audio-max-duration", "30.0"]
     expected = BaselineSpec(
         arm="sad",
         corpus_root=Path("/c"),
         out_dir=Path("/o"),
         cell="cfc",
         direction="forward",
+        init_scheme="he",
+        seed=9,
         score_init=True,
+        resume=True,
+        dry_run=True,
         valid_size=5,
         test_size=7,
         minibatch=3,
         lanes=2,
+        subset=11,
+        epochs=4,
+        patience=2,
+        steps_per_epoch=6,
         audio_max_duration=30.0,
     )
     assert _forwarded(monkeypatch, B.main, argv) == expected
     assert _forwarded(monkeypatch, cli.main, ["baseline", *argv]) == expected
-
-
-def test_parser_dests_and_defaults_are_the_specs() -> None:
-    """Both ways: every parser dest is a spec field and every field a dest, and an all-default
-    parse equals an all-default spec, so the CLI and a direct call train the same run."""
-    ns = vars(B.build_parser().parse_args(["sad", "--corpus-root", "/c", "--out-dir", "/o"]))
-    assert set(ns) == set(BaselineSpec.model_fields)
-    assert BaselineSpec.from_args(argparse.Namespace(**ns)) == BaselineSpec(arm="sad", corpus_root=Path("/c"), out_dir=Path("/o"))
+    lid = _forwarded(monkeypatch, B.main, ["lid-phseq", "--corpus-root", "/c", "--out-dir", "/o", "--lre-listing", "/l.csv"])
+    assert lid == BaselineSpec(arm="lid-phseq", corpus_root=Path("/c"), out_dir=Path("/o"), lre_listing=Path("/l.csv"))
+    # the help is the field's description, so a flag is documented where it is declared
+    helps = {a.dest: a.help for a in B.build_parser()._actions}
+    assert helps["dry_run"] == BaselineSpec.model_fields["dry_run"].description is not None
+    assert helps["arm"] == BaselineSpec.model_fields["arm"].description is not None
 
 
 @pytest.mark.parametrize(

@@ -88,7 +88,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal, get_args
+from typing import ClassVar, Literal
 
 import numpy as np
 from pydantic import ValidationError
@@ -103,7 +103,7 @@ from speech.drivers.train import train_modern
 from speech.engine import ChannelResults
 from speech.evaluate import DcfReport, Interval, cavg, dcf, hyp_intervals, lid_error, load_vrcts_ref
 from speech.fold_run import FoldRun, _config_text
-from speech.init_weights import Scheme, init_weights
+from speech.init_weights import init_weights
 from speech.ledger.schema import Arm, BaselinePayload, BaselineRecord, git_state, host_info, now_utc, seam_build_info, write_record
 from speech.ledger.schema import CollarScore as LedgerCollar
 from speech.weight_bridge import read_weight_vector, write_bin
@@ -1048,56 +1048,13 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> Basel
 # --------------------------------------------------------------------------------------- #
 
 
-def _default(name: str) -> object:
-    return BaselineSpec.model_fields[name].default
-
-
 def build_parser() -> argparse.ArgumentParser:
     """The `baseline <arm>` argument parser -- also mounted as the `baseline` subcommand in
-    `speech.cli`. Every dest is a `BaselineSpec` field and every default is the field's, so
-    the CLI and a direct call train the same run (pinned both ways by a unit test). Counts and
-    vocabulary are validated by the spec, not here."""
-    parser = argparse.ArgumentParser(description="from-scratch baseline training arms")
-    parser.add_argument("arm", choices=sorted(ARM_CONFIG), help="the training arm")
-    parser.add_argument("--corpus-root", type=Path, required=True, help="the LRE03/07 corpus root (data/LRE03-LRE07)")
-    parser.add_argument("--out-dir", type=Path, required=True, help="run directory for listings/config/checkpoints")
-    parser.add_argument("--seed", type=int, default=_default("seed"))
-    parser.add_argument("--lanes", type=int, default=_default("lanes"), help="engine numOuterThreads fold width (N=1 is the parity mode)")
-    parser.add_argument("--subset", type=int, default=_default("subset"), help="stratified subset size (omit for the full corpus)")
-    parser.add_argument("--epochs", type=int, default=_default("epochs"))
-    parser.add_argument("--patience", type=int, default=_default("patience"))
-    parser.add_argument("--steps-per-epoch", type=int, default=_default("steps_per_epoch"))
-    parser.add_argument("--init-scheme", choices=get_args(Scheme), default=_default("init_scheme"))
-    parser.add_argument(
-        "--valid-size",
-        type=int,
-        default=_default("valid_size"),
-        help="held-out validation slice (files; LID allocates per language, min 1 each for a positive size); 0 validates on the train listing",
-    )
-    parser.add_argument(
-        "--test-size",
-        type=int,
-        default=_default("test_size"),
-        help="held-out test slice (files; LID: min 1 per language for a positive size; 0 scores nothing) the final metric is scored on",
-    )
-    parser.add_argument(
-        "--minibatch",
-        type=int,
-        default=_default("minibatch"),
-        help="training files drawn per SMORMS3 step, class-stratified round-robin (0 = the whole train listing)",
-    )
-    parser.add_argument("--score-init", action="store_true", help="also score the from-scratch seed pack on the test slice (the init-baseline row)")
-    parser.add_argument("--cell", choices=CELL_TYPES, default=_default("cell"), help="the recurrent cell of the net that trains (default = the peephole BLSTM)")
-    parser.add_argument(
-        "--direction", choices=DIRECTIONS, default=_default("direction"), help="forward drops the backward stack (and halves the output MLP's input width)"
-    )
-    parser.add_argument("--lre-listing", type=Path, default=None, help="LID arm: localize this 2015 listing instead of deriving from the corpus tree")
-    parser.add_argument(
-        "--audio-max-duration", type=float, default=None, help="SAD arm: cap Audio_max_duration (s); the corpus wavs are 576-1800 s (median ~600 s)"
-    )
-    parser.add_argument("--resume", action="store_true", help="continue from out_dir/checkpoint")
-    parser.add_argument("--dry-run", action="store_true", help="1-step smoke: tiny subset, 1 epoch, 1 step, still scored")
-    return parser
+    `speech.cli`. Generated from the spec's fields (`BaselineSpec.add_arguments`, issue #85): every
+    dest is a field and every default the field's, so the CLI and a direct call train the same run
+    by construction (one round-trip test pins it). Counts and vocabulary are validated by the spec,
+    not here."""
+    return BaselineSpec.add_arguments(argparse.ArgumentParser(description="from-scratch baseline training arms"))
 
 
 def run_baseline_from_args(args: argparse.Namespace) -> BaselineResult:
