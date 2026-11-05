@@ -1,0 +1,17 @@
+mutation: recipe() hard-codes lanes=1 instead of reading the spec's lanes (issue #85: every projected recipe field is the spec's value of the same name)
+catcher: CAUGHT pytest tests/test_baseline_spec.py::test_the_recipe_model_is_the_tag
+catcher: MISSED pytest tests/test_baseline_spec.py::test_recipe_projection
+
+diff --git a/src/python/speech/drivers/spec.py b/src/python/speech/drivers/spec.py
+index e04ca1e..6491e34 100644
+--- a/src/python/speech/drivers/spec.py
++++ b/src/python/speech/drivers/spec.py
+@@ -127,7 +127,7 @@ class BaselineSpec(BaseModel):
+         (`listing_hash`), never recomputed here: a listing edited during a run must not rename
+         the record of the bytes that trained."""
+         return BaselineRecipe(
+-            **{name: getattr(self, name) for name in BaselineRecipe.model_fields if name not in RECIPE_DERIVED},
++            **{name: (1 if name == "lanes" else getattr(self, name)) for name in BaselineRecipe.model_fields if name not in RECIPE_DERIVED},
+             lineage=ARM_LINEAGE[self.arm],
+             listing=listing,
+         )

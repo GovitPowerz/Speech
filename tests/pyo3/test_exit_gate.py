@@ -575,7 +575,7 @@ def test_early_stop_triggers(tmp_path: Path) -> None:
 
     cfg = init_run(tmp_path / "tier2_spectral.config", tmp_path / "run").base_config
     run = ModernRun(cfg=cfg, workdir=tmp_path, out_dir=tmp_path / "run", listing=[])
-    params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, init_scheme="xavier", seed=7, val_metric="balance")
+    params = ModernTrainParams(epochs=4, patience=1, steps_per_epoch=2, minibatch=0, init_scheme="xavier", seed=7, val_metric="balance")
     with chdir(tmp_path):
         res = train_modern(run, params=params)
 

@@ -4,12 +4,15 @@ run before any directory exists, and the projection to the ledger recipe. Engine
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
-from speech.drivers.spec import ARM_CONFIG, ARM_LINEAGE, BaselineSpec
-from speech.ledger.schema import BaselineRecipe, lineage_of
+from speech.drivers.spec import ARM_CONFIG, ARM_LINEAGE, LID_ARMS, RECIPE_DERIVED, SAD_ARMS, BaselineSpec, _flag_kind
+from speech.drivers.state import ModernTrainParams
+from speech.ledger.schema import BaselineRecipe
 
 
 def _spec(**over: object) -> BaselineSpec:
@@ -69,6 +72,57 @@ def test_arm_cross_checks(tmp_path: Path) -> None:
     assert _spec(arm="sad-v2", audio_max_duration=20.0).audio_max_duration == 20.0
 
 
+def test_the_recipe_model_is_the_tag() -> None:
+    """Issue #85: a recipe field is a spec field of the same name unless `recipe()` derives it,
+    so identity is declared once, in the ledger schema, and the projection cannot drift."""
+    assert {"lineage", "listing"} == RECIPE_DERIVED
+    projected = set(BaselineRecipe.model_fields) - RECIPE_DERIVED
+    assert projected <= set(BaselineSpec.model_fields)
+    s = _spec(arm="lid-features", cell="mamba", direction="forward", seed=5, lanes=3, subset=7, valid_size=2, test_size=4, minibatch=6)
+    s = s.model_copy(update={"epochs": 11, "steps_per_epoch": 13, "patience": 17, "init_scheme": "he"})
+    recipe = s.recipe(listing="fedcba9876543210").model_dump()
+    assert {k: recipe[k] for k in projected} == {k: getattr(s, k) for k in projected}
+
+
+def test_spec_named_train_params_are_required_and_take_the_spec_values() -> None:
+    """Issue #85: `ModernTrainParams` is the Modern loop's input, not a spec copy, so a knob the
+    spec declares under the same name carries no default there (the spec is the one default
+    set) and the spec's value validates into it unchanged."""
+    shared = set(ModernTrainParams.model_fields) & set(BaselineSpec.model_fields)
+    assert shared == {"epochs", "patience", "steps_per_epoch", "minibatch", "init_scheme", "seed"}
+    assert all(ModernTrainParams.model_fields[name].is_required() for name in shared)
+    for name in set(ModernTrainParams.model_fields) - shared:
+        assert not ModernTrainParams.model_fields[name].is_required(), name
+    s = _spec(seed=5, minibatch=6).model_copy(update={"epochs": 11, "steps_per_epoch": 13, "patience": 17, "init_scheme": "he"})
+    params = ModernTrainParams(**{name: getattr(s, name) for name in shared})
+    assert {name: getattr(params, name) for name in shared} == {name: getattr(s, name) for name in shared}
+
+
+@pytest.mark.parametrize("annotation", [str, int | str, Path | None | int, list[int], Literal[1, 2], Literal["a", 1]], ids=repr)
+def test_the_flag_generator_refuses_an_annotation_kind_the_spec_does_not_use(annotation: object) -> None:
+    with pytest.raises(TypeError, match="no CLI flag kind"):
+        _flag_kind(annotation)
+
+
+def test_the_flag_generator_unwraps_what_the_spec_uses() -> None:
+    assert _flag_kind(BaselineSpec.model_fields["subset"].annotation) == (int, None)
+    assert _flag_kind(BaselineSpec.model_fields["audio_max_duration"].annotation) == (float, None)
+    assert _flag_kind(BaselineSpec.model_fields["lre_listing"].annotation) == (Path, None)
+    assert _flag_kind(BaselineSpec.model_fields["cell"].annotation) == (str, ("lstm", "slstm", "mamba", "cfc", "transformer"))
+    assert _flag_kind(Literal["a"] | None) == (str, ("a",))
+    assert _flag_kind(BaselineSpec.model_fields["dry_run"].annotation) == (bool, None)
+
+
+def test_the_flag_generator_refuses_a_true_bool_default() -> None:
+    """A bool flag is a `store_true`, so a `True` default could not round-trip: refused at generation."""
+
+    class Spec(BaselineSpec):
+        verbose: bool = True
+
+    with pytest.raises(TypeError, match="store_true"):
+        Spec.add_arguments(argparse.ArgumentParser())
+
+
 def test_recipe_projection() -> None:
     s = _spec(arm="sad-v2", cell="cfc", direction="forward", seed=3, subset=10, valid_size=8, test_size=24, audio_max_duration=20.0)
     s = s.model_copy(update={"epochs": 3, "steps_per_epoch": 10, "patience": 99})
@@ -96,11 +150,11 @@ def test_recipe_projection() -> None:
     assert _spec(arm="lid-features").recipe(listing=None).full and not _spec(arm="lid-features", subset=5).recipe(listing=None).full
 
 
-def test_every_arm_declares_the_lineage_its_config_name_carries() -> None:
+def test_every_arm_names_a_committed_config_and_the_arm_sets_follow_the_lineage() -> None:
     assert set(ARM_CONFIG) == set(ARM_LINEAGE) == {"sad", "sad-v2", "lid-features", "lid-phseq"}
-    for arm, config in ARM_CONFIG.items():
-        assert ARM_LINEAGE[arm] == lineage_of(config), arm
+    for config in ARM_CONFIG.values():
         assert (Path(__file__).resolve().parents[1] / config).is_file(), config
+    assert {"sad", "sad-v2"} == SAD_ARMS and {"lid-features", "lid-phseq"} == LID_ARMS
 
 
 @pytest.mark.parametrize("arm", ["sad", "lid-phseq"])

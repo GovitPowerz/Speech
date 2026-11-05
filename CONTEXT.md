@@ -241,7 +241,7 @@ The vec2struct parameter vector the outer search decodes into a config.
 The object behind one of the four from-scratch baseline trainings (`sad`, `sad-v2`, `lid-features`, `lid-phseq`): what varies per training (the listings, the nets it seeds, the net the cell knob targets, the held-out scoring) behind the launcher's shared skeleton.
 
 **Baseline spec**:
-The one typed declaration of a launcher run (`drivers/spec.py`): every CLI flag is a field, the defaults are its, an invalid run fails at construction, and its projection is the ledger recipe.
+The one typed declaration of a launcher run (`drivers/spec.py`): every CLI flag is a field (the parser is generated from the fields, issue #85), the defaults are its (the Modern loop's input requires every knob the spec names), an invalid run fails at construction, and its projection is the ledger recipe, read off the recipe model's own fields.
 
 **Launcher**:
 `python -m speech.drivers.baseline <arm>`, the CLI that builds a baseline spec and runs it: `prepare(spec).train()`, `score()`, `record()`.

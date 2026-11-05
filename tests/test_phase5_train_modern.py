@@ -57,6 +57,11 @@ def test_modern_run_derives_algo_and_checkpoint_off_the_map(tmp_path: Path) -> N
         _ = ModernRun(cfg={}, workdir=tmp_path, out_dir=tmp_path, listing=[]).algo
 
 
+def _params(epochs: int, patience: int, **over: object) -> ModernTrainParams:
+    """The loop's input with the spec-named knobs stated (they carry no default since #85)."""
+    return ModernTrainParams(**{"epochs": epochs, "patience": patience, "steps_per_epoch": 1, "minibatch": 0, "init_scheme": "xavier", "seed": 0, **over})  # type: ignore[arg-type]
+
+
 def _epoch_encoding_stub() -> Callable[[list[np.ndarray], int], tuple[list[np.ndarray], float]]:
     """train hook: weights ENCODE the epoch (ignores input) so checkpoints are predictable."""
 
@@ -84,7 +89,7 @@ def test_early_stop_patience_triggers_at_crafted_epoch(tmp_path: Path) -> None:
     val_seq = [5.0, 4.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     res = train_modern(
         run,
-        params=ModernTrainParams(epochs=7, patience=2),
+        params=_params(7, 2),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
         init_weights_override=[np.array([0.0])],
@@ -110,7 +115,7 @@ def test_no_early_stop_runs_every_epoch(tmp_path: Path) -> None:
     val_seq = [5.0, 4.0, 3.0, 2.0]  # monotonically improving -> best updates every epoch
     res = train_modern(
         run,
-        params=ModernTrainParams(epochs=4, patience=2),
+        params=_params(4, 2),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
         init_weights_override=[np.array([0.0])],
@@ -129,7 +134,7 @@ def test_best_checkpoint_is_argmin_not_last(tmp_path: Path) -> None:
     val_seq = [5.0, 2.0, 3.0, 4.0]
     res = train_modern(
         run,
-        params=ModernTrainParams(epochs=4, patience=10),
+        params=_params(4, 10),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub(val_seq),
         init_weights_override=[np.array([0.0])],
@@ -158,13 +163,13 @@ def test_resume_from_last_equivalence(tmp_path: Path) -> None:
 
     # continuous 5 epochs (patience high -> no early stop)
     cont_run = _algo3_run(tmp_path / "cont")
-    cont = train_modern(cont_run, params=ModernTrainParams(epochs=5, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
+    cont = train_modern(cont_run, params=_params(5, 99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
 
     # split: 3 epochs, then resume IN PLACE (same out_dir) toward the total of 5
     split_run = _algo3_run(tmp_path / "split")
-    train_modern(split_run, params=ModernTrainParams(epochs=3, patience=99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
+    train_modern(split_run, params=_params(3, 99), train_epoch=train_epoch, validate=validate, init_weights_override=init)
     resume_ckpt = str(split_run.checkpoint.dir)
-    split = train_modern(split_run, params=ModernTrainParams(epochs=5, patience=99, resume_from=resume_ckpt), train_epoch=train_epoch, validate=validate)
+    split = train_modern(split_run, params=_params(5, 99, resume_from=resume_ckpt), train_epoch=train_epoch, validate=validate)
 
     # same total, same trajectory, same checkpoints -- resuming is transparent.
     assert split.epochs_run == cont.epochs_run == 5
@@ -181,7 +186,7 @@ def test_resume_toward_already_reached_total_is_a_noop(tmp_path: Path) -> None:
     run = _algo3_run(tmp_path)
     train_modern(
         run,
-        params=ModernTrainParams(epochs=3, patience=99),
+        params=_params(3, 99),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([3.0, 2.0, 1.0]),
         init_weights_override=[np.array([0.0])],
@@ -189,7 +194,7 @@ def test_resume_toward_already_reached_total_is_a_noop(tmp_path: Path) -> None:
     ckpt = str(run.checkpoint.dir)
     res = train_modern(
         run,
-        params=ModernTrainParams(epochs=3, patience=99, resume_from=ckpt),
+        params=_params(3, 99, resume_from=ckpt),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([3.0, 2.0, 1.0]),
     )
@@ -205,7 +210,7 @@ def test_missing_hook_without_engine_is_the_only_engine_dependency(tmp_path: Pat
     run = _algo3_run(tmp_path)
     res = train_modern(
         run,
-        params=ModernTrainParams(epochs=2, patience=99),
+        params=_params(2, 99),
         train_epoch=_epoch_encoding_stub(),
         validate=_val_stub([1.0, 0.5]),
         init_weights_override=[np.array([0.0])],
@@ -222,11 +227,11 @@ def test_val_metric_field_default_and_literal() -> None:
     This is part of the RED for the carry-forward fix: before the field lands,
     `ModernTrainParams(val_metric=...)` raises `ValidationError` (extra="forbid") and the
     default assertion has no field to read."""
-    assert ModernTrainParams().val_metric == "nn_cost_seg"  # the NEW default
-    assert ModernTrainParams(val_metric="balance").val_metric == "balance"
-    assert ModernTrainParams(val_metric="nn_cost_seg").val_metric == "nn_cost_seg"
+    assert _params(1, 1).val_metric == "nn_cost_seg"  # the NEW default
+    assert _params(1, 1, val_metric="balance").val_metric == "balance"
+    assert _params(1, 1, val_metric="nn_cost_seg").val_metric == "nn_cost_seg"
     with pytest.raises(ValidationError):  # the Literal + extra="forbid" rejects an out-of-set value
-        ModernTrainParams(val_metric="bogus")  # type: ignore[arg-type]
+        _params(1, 1, val_metric="bogus")
 
 
 def test_batch_stream_is_derived_from_the_one_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,9 +248,9 @@ def test_batch_stream_is_derived_from_the_one_seed(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(T, "FoldRun", lambda *a, **k: None)
     run = _algo3_run(tmp_path)
     for s in (0, 7, 123):
-        T._make_default_train_epoch(run, ModernTrainParams(seed=s, minibatch=2), tails=[0])
+        T._make_default_train_epoch(run, _params(1, 1, seed=s, minibatch=2), tails=[0])
         assert captured[-1].bit_generator.state == np.random.default_rng(s + 2).bit_generator.state
     assert len(captured) == 3
     # `seed` is the only seed the model accepts: the old field name is refused.
     with pytest.raises(ValidationError):
-        ModernTrainParams(init_seed=7)  # type: ignore[call-arg]
+        _params(1, 1, init_seed=7)

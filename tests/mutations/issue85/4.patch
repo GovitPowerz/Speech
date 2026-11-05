@@ -1,0 +1,17 @@
+mutation: lineage_of reads lre_sad_v2 as no lineage (issue #85: the parse is the one source, so the arm sets and the recipe's lineage move with it)
+catcher: CAUGHT pytest tests/test_ledger.py::test_lineage_of_config_names
+catcher: CAUGHT pytest tests/test_baseline_spec.py::test_every_arm_names_a_committed_config_and_the_arm_sets_follow_the_lineage
+catcher: CAUGHT pytest tests/test_baseline_spec.py::test_recipe_projection
+catcher: CAUGHT pytest tests/test_baseline_spec.py::test_arm_cross_checks
+
+diff --git a/src/python/speech/ledger/schema.py b/src/python/speech/ledger/schema.py
+index c83c504..d218c78 100644
+--- a/src/python/speech/ledger/schema.py
++++ b/src/python/speech/ledger/schema.py
+@@ -334,5 +334,5 @@ def lineage_of(config_name: str) -> Lineage | None:
+     if stem == "lre_sad":
+         return "v1"
+     if stem == "lre_sad_v2":
+-        return "v2"
++        return None
+     return None

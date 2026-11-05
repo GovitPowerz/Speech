@@ -585,7 +585,7 @@ def _init_weights_from_scratch(run: ModernRun, params: ModernTrainParams) -> lis
     prefixes = ["BLSTM"] + (["BLSTM_LID"] if run.algo == 6 else [])
     weights: list[NDArray[np.float64]] = []
     for prefix in prefixes:
-        weights += init_weights(run.cfg, prefix, rng, params.init_scheme, params.forget_bias_one)
+        weights += init_weights(run.cfg, prefix, rng, params.init_scheme)  # forget gate open: init_weights' default, no knob (#85)
     return weights
 
 
@@ -625,7 +625,10 @@ def _make_default_train_epoch(run: ModernRun, params: ModernTrainParams, tails: 
         mapping_path = _mapping_path(workdir, base)
         fv = _files_values(run.listing, mapping_path)
         batch_rng = np.random.default_rng(params.seed + 2)
-        batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, batch_rng)
+        # No worst cases, NOT multilingual: that legacy layout reads class values 1..nb_classes-1 as
+        # targets and sends class nb_classes-1 to the aggregate slot's never-read `.index`, so the
+        # 0..11 LID mapping would never draw class 11 into a batch (issue #85: literals, not knobs).
+        batches = create_batches(fv, params.minibatch, 0, False, params.nb_classes, batch_rng)
         runner = _BatchRunner(run.listing, fv, batches, workdir, mapping_path, algo)
 
     # One gradient fold for the whole run, reused across every epoch's steps (each run injects

@@ -88,7 +88,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal, get_args
+from typing import ClassVar, Literal
 
 import numpy as np
 from pydantic import ValidationError
@@ -411,22 +411,21 @@ def cell_overlay(flat: dict[str, str], cell: str, direction: str, *, prefix: str
     return overlay
 
 
-def _generate_seed_packs(
-    flat: dict[str, str], out_dir: Path, seed: int, init_scheme: str, forget_bias_one: bool, nets: Sequence[tuple[str, str]]
-) -> list[Path]:
+def _generate_seed_packs(flat: dict[str, str], out_dir: Path, seed: int, init_scheme: Scheme, nets: Sequence[tuple[str, str]]) -> list[Path]:
     """Write the seed weight packs the engine loads at construction (`BLSTM_weightsFile` /
     `BLSTM_LID_weightsFile`), one per `(prefix, filename)` in `nets` (`[sad]`, or `[sad, lid]`
     for the Twin), drawn in order from ONE `Generator(seed)` through the SAME `init_weights`
     the training loop uses. `train_modern` re-inits from scratch and overrides them, but the
     engine still needs a loadable, correctly-sized pack to build the net; the pack ALSO
-    doubles as the scored `score_init` baseline, so `init_scheme` / `forget_bias_one` MUST be
-    the `ModernTrainParams` the training call uses (Task 8 review fix) -- otherwise the
-    held-out gain would compare a trained net against an init drawn under another scheme.
+    doubles as the scored `score_init` baseline, so `init_scheme` MUST be the
+    `ModernTrainParams` the training call uses (Task 8 review fix) -- otherwise the held-out
+    gain would compare a trained net against an init drawn under another scheme; the forget
+    gate starts open on both paths through `init_weights`' default (no knob since #85).
     Returns the pack paths."""
     rng = np.random.default_rng(seed)
     paths: list[Path] = []
     for prefix, name in nets:
-        pack = init_weights(flat, prefix, rng, init_scheme, forget_bias_one)[0]  # type: ignore[arg-type]
+        pack = init_weights(flat, prefix, rng, init_scheme)[0]
         write_bin(pack.shape[0], 1, pack, out_dir / name)
         paths.append(out_dir / name)
     return paths
@@ -772,7 +771,7 @@ class SadArm:
         return assemble_flat_config(flat, fileslisting=splits.train_name, mapping=splits.mapping_name, sad_seed="sad_seed.bin", lanes=spec.lanes, extra=extra)
 
     def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> list[Path]:
-        return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one, [("BLSTM", "sad_seed.bin")])
+        return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, [("BLSTM", "sad_seed.bin")])
 
     def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
         res = _held_out_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
@@ -824,18 +823,16 @@ class LidArm:
         )
 
     def seed_packs(self, cfg: dict[str, str], out_dir: Path, spec: BaselineSpec, params: ModernTrainParams) -> list[Path]:
-        return _generate_seed_packs(
-            cfg, out_dir, spec.seed, params.init_scheme, params.forget_bias_one, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")]
-        )
+        return _generate_seed_packs(cfg, out_dir, spec.seed, params.init_scheme, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")])
 
     def score(self, prepared: PreparedRun, packs: Sequence[Path]) -> Scores:
         res = _held_out_fold(prepared.cfg, prepared.out_dir, packs, prepared.splits.test_name)
         return Scores(results=res, lid_error=lid_error(res.lid_scores, res.lid_target), cavg=cavg(res.lid_scores, res.lid_target))
 
 
-#: The four arms, keyed by the spec's `arm`. The config and lineage are the declarations in
-#: `drivers/spec.py` (`ARM_CONFIG` / `ARM_LINEAGE`, pinned against `lineage_of` there); the
-#: behaviour is the class, and a unit test pins that `SadArm` instances are exactly `SAD_ARMS`.
+#: The four arms, keyed by the spec's `arm`. The config is the declaration in `drivers/spec.py`
+#: (`ARM_CONFIG`; `ARM_LINEAGE` is read off it through `lineage_of`, #85); the behaviour is the
+#: class, and a unit test pins that `SadArm` instances are exactly `SAD_ARMS`.
 ARMS: dict[Arm, SadArm | LidArm] = {
     "sad": SadArm(),
     "sad-v2": SadArm(),
@@ -946,7 +943,7 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
     # normalizes the records (`weight` / `file_id` defaults), and the batch scheduler must see
     # the rows the engine reads (what `RunState.from_parsed` used to read for it).
     run = ModernRun(cfg=cfg, workdir=out_dir, out_dir=out_dir, listing=read_listing(out_dir / splits.train_name))
-    # Built before the seed packs so their init is handed the SAME init_scheme/forget_bias_one
+    # Built before the seed packs so their init is handed the SAME init_scheme
     # the training call will use (Task 8 review fix); a resume reads the run's own checkpoint.
     params = ModernTrainParams(
         epochs=spec.epochs,
@@ -955,9 +952,6 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
         valid_listing=splits.valid_name if splits.valid else None,
         minibatch=spec.minibatch,
         nb_classes=splits.n_classes,
-        # NOT multilingual: that legacy layout reads class values 1..nb_classes-1 as targets and
-        # sends class nb_classes-1 to the aggregate slot's never-read `.index`, so the 0..11
-        # LID mapping would never draw class 11 into a batch.
         init_scheme=spec.init_scheme,
         seed=spec.seed,
         resume_from=str(run.checkpoint.dir) if spec.resume else None,
@@ -1054,56 +1048,13 @@ def run_baseline(spec: BaselineSpec, *, console: Console | None = None) -> Basel
 # --------------------------------------------------------------------------------------- #
 
 
-def _default(name: str) -> object:
-    return BaselineSpec.model_fields[name].default
-
-
 def build_parser() -> argparse.ArgumentParser:
     """The `baseline <arm>` argument parser -- also mounted as the `baseline` subcommand in
-    `speech.cli`. Every dest is a `BaselineSpec` field and every default is the field's, so
-    the CLI and a direct call train the same run (pinned both ways by a unit test). Counts and
-    vocabulary are validated by the spec, not here."""
-    parser = argparse.ArgumentParser(description="from-scratch baseline training arms")
-    parser.add_argument("arm", choices=sorted(ARM_CONFIG), help="the training arm")
-    parser.add_argument("--corpus-root", type=Path, required=True, help="the LRE03/07 corpus root (data/LRE03-LRE07)")
-    parser.add_argument("--out-dir", type=Path, required=True, help="run directory for listings/config/checkpoints")
-    parser.add_argument("--seed", type=int, default=_default("seed"))
-    parser.add_argument("--lanes", type=int, default=_default("lanes"), help="engine numOuterThreads fold width (N=1 is the parity mode)")
-    parser.add_argument("--subset", type=int, default=_default("subset"), help="stratified subset size (omit for the full corpus)")
-    parser.add_argument("--epochs", type=int, default=_default("epochs"))
-    parser.add_argument("--patience", type=int, default=_default("patience"))
-    parser.add_argument("--steps-per-epoch", type=int, default=_default("steps_per_epoch"))
-    parser.add_argument("--init-scheme", choices=get_args(Scheme), default=_default("init_scheme"))
-    parser.add_argument(
-        "--valid-size",
-        type=int,
-        default=_default("valid_size"),
-        help="held-out validation slice (files; LID allocates per language, min 1 each for a positive size); 0 validates on the train listing",
-    )
-    parser.add_argument(
-        "--test-size",
-        type=int,
-        default=_default("test_size"),
-        help="held-out test slice (files; LID: min 1 per language for a positive size; 0 scores nothing) the final metric is scored on",
-    )
-    parser.add_argument(
-        "--minibatch",
-        type=int,
-        default=_default("minibatch"),
-        help="training files drawn per SMORMS3 step, class-stratified round-robin (0 = the whole train listing)",
-    )
-    parser.add_argument("--score-init", action="store_true", help="also score the from-scratch seed pack on the test slice (the init-baseline row)")
-    parser.add_argument("--cell", choices=CELL_TYPES, default=_default("cell"), help="the recurrent cell of the net that trains (default = the peephole BLSTM)")
-    parser.add_argument(
-        "--direction", choices=DIRECTIONS, default=_default("direction"), help="forward drops the backward stack (and halves the output MLP's input width)"
-    )
-    parser.add_argument("--lre-listing", type=Path, default=None, help="LID arm: localize this 2015 listing instead of deriving from the corpus tree")
-    parser.add_argument(
-        "--audio-max-duration", type=float, default=None, help="SAD arm: cap Audio_max_duration (s); the corpus wavs are 576-1800 s (median ~600 s)"
-    )
-    parser.add_argument("--resume", action="store_true", help="continue from out_dir/checkpoint")
-    parser.add_argument("--dry-run", action="store_true", help="1-step smoke: tiny subset, 1 epoch, 1 step, still scored")
-    return parser
+    `speech.cli`. Generated from the spec's fields (`BaselineSpec.add_arguments`, issue #85): every
+    dest is a field and every default the field's, so the CLI and a direct call train the same run
+    by construction (one round-trip test pins it). Counts and vocabulary are validated by the spec,
+    not here."""
+    return BaselineSpec.add_arguments(argparse.ArgumentParser(description="from-scratch baseline training arms"))
 
 
 def run_baseline_from_args(args: argparse.Namespace) -> BaselineResult:

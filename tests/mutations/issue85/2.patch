@@ -1,0 +1,16 @@
+mutation: the generated parser maps a bool field to store_false (issue #85: an all-default parse must be an all-default spec)
+catcher: CAUGHT pytest tests/test_phase6_baseline_arms.py::test_the_parser_is_the_spec
+
+diff --git a/src/python/speech/drivers/spec.py b/src/python/speech/drivers/spec.py
+index 9b12dc7..38fe8d7 100644
+--- a/src/python/speech/drivers/spec.py
++++ b/src/python/speech/drivers/spec.py
+@@ -110,7 +110,7 @@ class BaselineSpec(BaseModel):
+             if kind is bool:
+                 if field.default is not False:
+                     raise TypeError(f"a bool spec field is a store_true flag, so its default is False: {name}={field.default!r}")
+-                parser.add_argument(flag, action="store_true", help=field.description)
++                parser.add_argument(flag, action="store_false", help=field.description)
+             elif field.is_required():
+                 parser.add_argument(flag, type=kind, choices=choices, required=True, help=field.description)
+             else:

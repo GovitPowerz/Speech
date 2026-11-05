@@ -246,37 +246,48 @@ def _forwarded(monkeypatch: pytest.MonkeyPatch, entry: Callable[[list[str]], int
     return seen[0]
 
 
-def test_both_entries_build_the_same_spec(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Issue #28: the `speech.cli` mount once dropped --cell-type/--direction. Both entries hand
-    the parsed namespace to the one builder, `BaselineSpec.from_args`, so the parser is the one
-    place a flag is defined and the spec the one place it is validated."""
+def test_the_parser_is_the_spec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #85: the flags are generated from `BaselineSpec.model_fields`, so the round trip is
+    the pin. Every dest is a field and an all-default parse is an all-default spec; every flag
+    lands in its field, through both entries (the `speech.cli` mount once dropped two, issue #28)."""
     import speech.cli as cli
 
-    argv = ["sad", "--corpus-root", "/c", "--out-dir", "/o", "--cell", "cfc", "--direction", "forward"]
-    argv += ["--score-init", "--valid-size", "5", "--test-size", "7", "--minibatch", "3", "--lanes", "2", "--audio-max-duration", "30.0"]
+    ns = vars(B.build_parser().parse_args(["sad", "--corpus-root", "/c", "--out-dir", "/o"]))
+    assert set(ns) == set(BaselineSpec.model_fields)
+    assert BaselineSpec.from_args(argparse.Namespace(**ns)) == BaselineSpec(arm="sad", corpus_root=Path("/c"), out_dir=Path("/o"))
+
+    argv = ["sad", "--corpus-root", "/c", "--out-dir", "/o", "--cell", "cfc", "--direction", "forward", "--init-scheme", "he", "--seed", "9"]
+    argv += ["--score-init", "--resume", "--dry-run", "--valid-size", "5", "--test-size", "7", "--minibatch", "3", "--lanes", "2", "--subset", "11"]
+    argv += ["--epochs", "4", "--patience", "2", "--steps-per-epoch", "6", "--audio-max-duration", "30.0"]
     expected = BaselineSpec(
         arm="sad",
         corpus_root=Path("/c"),
         out_dir=Path("/o"),
         cell="cfc",
         direction="forward",
+        init_scheme="he",
+        seed=9,
         score_init=True,
+        resume=True,
+        dry_run=True,
         valid_size=5,
         test_size=7,
         minibatch=3,
         lanes=2,
+        subset=11,
+        epochs=4,
+        patience=2,
+        steps_per_epoch=6,
         audio_max_duration=30.0,
     )
     assert _forwarded(monkeypatch, B.main, argv) == expected
     assert _forwarded(monkeypatch, cli.main, ["baseline", *argv]) == expected
-
-
-def test_parser_dests_and_defaults_are_the_specs() -> None:
-    """Both ways: every parser dest is a spec field and every field a dest, and an all-default
-    parse equals an all-default spec, so the CLI and a direct call train the same run."""
-    ns = vars(B.build_parser().parse_args(["sad", "--corpus-root", "/c", "--out-dir", "/o"]))
-    assert set(ns) == set(BaselineSpec.model_fields)
-    assert BaselineSpec.from_args(argparse.Namespace(**ns)) == BaselineSpec(arm="sad", corpus_root=Path("/c"), out_dir=Path("/o"))
+    lid = _forwarded(monkeypatch, B.main, ["lid-phseq", "--corpus-root", "/c", "--out-dir", "/o", "--lre-listing", "/l.csv"])
+    assert lid == BaselineSpec(arm="lid-phseq", corpus_root=Path("/c"), out_dir=Path("/o"), lre_listing=Path("/l.csv"))
+    # the help is the field's description, so a flag is documented where it is declared
+    helps = {a.dest: a.help for a in B.build_parser()._actions}
+    assert helps["dry_run"] == BaselineSpec.model_fields["dry_run"].description is not None
+    assert helps["arm"] == BaselineSpec.model_fields["arm"].description is not None
 
 
 @pytest.mark.parametrize(
@@ -331,7 +342,7 @@ def _fake_engine(monkeypatch: pytest.MonkeyPatch, flat: dict[str, str]) -> None:
     fake_rs = types.ModuleType("speech_rs")
     setattr(fake_rs, "load_toml_config", lambda p: flat)  # noqa: B010 -- dynamic attr on a fake module
     monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
-    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, forget_bias_one, nets: [out / name for _, name in nets])
+    monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, nets: [out / name for _, name in nets])
 
 
 def _stub_train(monkeypatch: pytest.MonkeyPatch, hook: Callable[[ModernRun, ModernTrainParams], object] | None = None) -> None:
@@ -371,9 +382,16 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
         for i in range(4):
             (lre / f"{lang}_{i}.plp8f0mvsdd").write_bytes(b"")
     _fake_engine(monkeypatch, _LID_FEATURES_FLAT)
+    drawn_under: list[tuple[int, str]] = []
+
+    def seed_packs(flat: dict[str, str], out: Path, seed: int, init_scheme: str, nets: list[tuple[str, str]]) -> list[Path]:
+        drawn_under.append((seed, init_scheme))
+        return [out / name for _, name in nets]
+
+    monkeypatch.setattr(B, "_generate_seed_packs", seed_packs)
 
     out = tmp_path / "out"
-    p = B.prepare(_spec("lid-features", root, out, dry_run=True, seed=5, lanes=2, minibatch=4, score_init=True))
+    p = B.prepare(_spec("lid-features", root, out, dry_run=True, seed=5, lanes=2, minibatch=4, score_init=True, init_scheme="he"))
 
     meta = json.loads((out / "run_metadata.json").read_text())
     assert meta["dry_run"] is True and meta["epochs"] == 1 and meta["steps_per_epoch"] == 1
@@ -386,6 +404,8 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
     assert (p.params.epochs, p.params.steps_per_epoch, p.params.patience) == (1, 1, 99)
     assert p.params.minibatch == 4 and p.params.seed == 5 and p.params.nb_classes == len(B._LANGS)
     assert p.params.valid_listing == p.splits.valid_name and p.params.resume_from is None
+    # the seed packs (the scored `score_init` baseline) draw under the training call's seed and scheme
+    assert p.params.init_scheme == meta["init_scheme"] == "he" and drawn_under == [(5, "he")]
     assert p.run.workdir == p.run.out_dir == out and p.run.cfg is p.cfg
     assert p.seed_packs == [out / "sad_seed.bin", out / "lid_seed.bin"]
     assert p.run.checkpoint.dir == out / "checkpoint" and p.run.checkpoint.nets == ["sad", "lid"]
@@ -405,7 +425,7 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
     # multilingual layout parked class 11 in a never-read aggregate slot: `vie` never trained).
     params = p.params
     fv = np.repeat(np.arange(len(B._LANGS), dtype=np.float64), 3).reshape(-1, 1)
-    batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, np.random.default_rng(0))
+    batches = create_batches(fv, params.minibatch, 0, False, params.nb_classes, np.random.default_rng(0))
     drawn: set[int] = set()
     for _ in range(20):
         idx, batches = get_new_batch(batches)
@@ -687,7 +707,7 @@ def test_sad_seed_pack_is_byte_identical_across_lid_cells(tmp_path: Path) -> Non
             cfg = {**_TWIN_FLAT, **B.cell_overlay(_TWIN_FLAT, cell, direction, prefix="BLSTM_LID")}
             out = tmp_path / f"{cell}_{direction}"
             out.mkdir()
-            B._generate_seed_packs(cfg, out, 0, "xavier", True, [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")])
+            B._generate_seed_packs(cfg, out, 0, "xavier", [("BLSTM", "sad_seed.bin"), ("BLSTM_LID", "lid_seed.bin")])
             sad_packs[cell, direction] = (out / "sad_seed.bin").read_bytes()
             lid_lengths[cell, direction] = len((out / "lid_seed.bin").read_bytes())
     assert len(set(sad_packs.values())) == 1

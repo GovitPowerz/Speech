@@ -2,14 +2,15 @@ mutation: the mini-batch stream derived as seed + 3 instead of seed + 2 (issue #
 catcher: CAUGHT pytest tests/test_phase5_train_modern.py::test_batch_stream_is_derived_from_the_one_seed
 
 diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index 6e83a08..41c0c02 100644
 --- a/src/python/speech/drivers/train.py
 +++ b/src/python/speech/drivers/train.py
-@@ -625,7 +625,7 @@ def _make_default_train_epoch(run: ModernRun, params: ModernTrainParams, tails:
+@@ -624,7 +624,7 @@ def _make_default_train_epoch(run: ModernRun, params: ModernTrainParams, tails:
      if params.minibatch > 0:
          mapping_path = _mapping_path(workdir, base)
          fv = _files_values(run.listing, mapping_path)
 -        batch_rng = np.random.default_rng(params.seed + 2)
 +        batch_rng = np.random.default_rng(params.seed + 3)
-         batches = create_batches(fv, params.minibatch, params.nb_worst, params.multilingual, params.nb_classes, batch_rng)
-         runner = _BatchRunner(run.listing, fv, batches, workdir, mapping_path, algo)
- 
+         # No worst cases, NOT multilingual: that legacy layout reads class values 1..nb_classes-1 as
+         # targets and sends class nb_classes-1 to the aggregate slot's never-read `.index`, so the
+         # 0..11 LID mapping would never draw class 11 into a batch (issue #85: literals, not knobs).
