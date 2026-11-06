@@ -775,7 +775,7 @@ impl BagOfProcessors {
     /// best-cost gate (the legacy's `bestNNWeight_<pos+1>_<filename>` save, issue #136:
     /// no file), and the `costLID = -1.0` gate (`:465`) applied AFTER the best-cost gate
     /// and BEFORE `update_weights` -- order is load-bearing (the save criterion sees the
-    /// real costLID; the update criterion sees the gated one; the [`BestPack`] capture
+    /// real costLID; the update criterion sees the gated one; the `BestPack` capture
     /// sees the pre-update pack).
     ///
     /// The legacy summed the result-row COLUMNS (`:411-412`); here each field is

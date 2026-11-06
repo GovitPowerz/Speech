@@ -2806,8 +2806,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   Two items share a site with an older or newer live patch and have none of their own: item 4's
   `save_weights_lid` prefix moved into `training_policy`'s algo 6 arm in 46dd6d2 (#25), where
   `issue25/2` applied the same edit against the same catcher until issue #136 retired the prefix
-  with the files (the patch now hands the LID net the SAD net's fold at the best-pack capture,
-  same catcher); item 6's gate is `phase4a/6`, which
+  with the files (the patch now keeps only the first net's pack at the best-pack capture,
+  dropping the LID net's, same catcher); item 6's gate is `phase4a/6`, which
   carries this item's catcher too. Item 2's `> 150` decode moved from `confusion_from_results` to
   `LidResult::from_encoded` (e767121, b489687, #23) and is mutated there; its error leg now reads
   MISSED: the two rows that lose their target are skipped since the F5 fix (53de2ca), their
