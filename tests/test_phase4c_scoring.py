@@ -1,131 +1,31 @@
-"""Phase 4c Task 10: check_grad, masking_validation, confusion_matrix.
+"""Phase 4c Task 10: masking_validation, confusion_matrix.
 
-check_grad/masking_validation goldens (`tests/reference_data/phase4c/{checkgrad,
-masking}_*.bin`) are dumped by GNU Octave running the REAL `legacy/Optimizer_V6.2.2/
-functions/{CheckGrad,MaskingValidation,vec2struct}.m` (see
-`tools/octave_harness/stage_{checkgrad,masking}.m`). confusion_matrix has no Octave
-golden (the brief scopes only GetNewBatch/CheckGrad/MaskingValidation as Octave stages);
-its tests are direct unit tests hand-verified against `confusionThresh.m`'s logic.
+masking_validation goldens (`tests/reference_data/phase4c/masking_*.bin`) are dumped by
+GNU Octave running the REAL `legacy/Optimizer_V6.2.2/functions/{MaskingValidation,
+vec2struct}.m` (see `tools/octave_harness/stage_masking.m`). confusion_matrix has no Octave
+golden; its tests are direct unit tests hand-verified against `confusionThresh.m`'s logic.
+(The check_grad pin that shared this file was retired in issue #103.)
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 from speech.genome import RunConfig
-from speech.scoring import check_grad, confusion_matrix, masking_validation
+from speech.scoring import confusion_matrix, masking_validation
 from speech.weight_bridge import read_bin
-
-from tests._libm_gate import assert_f64_matrix_close
 
 PHASE4C = Path(__file__).resolve().parent / "reference_data" / "phase4c"
 MANIFEST = PHASE4C / "manifest.json"
-
-CostFn = Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]]
 
 
 def _load(name: str) -> NDArray[np.float64]:
     rows, cols, flat = read_bin(PHASE4C / f"{name}.bin")
     return np.asarray(flat, dtype=np.float64).reshape((rows, cols), order="F")
-
-
-# --------------------------------------------------------------------------- #
-# check_grad (vs the checkgrad_shadow/CostFunction.m quadratic surrogate golden)
-# --------------------------------------------------------------------------- #
-
-
-def _surrogate_cost_fn(kw: int) -> tuple[NDArray[np.float64], NDArray[np.float64], CostFn]:
-    """Reproduces checkgrad_shadow/CostFunction.m's quadratic surrogate exactly:
-    f(w) = 0.5*sum(c.*(w-target)^2), df/dw = c.*(w-target), with
-    target = 0.1*sin(0.37*idx), c = 1+0.05*mod(idx,5), idx 1-based 1..Kw."""
-    idx = np.arange(1, kw + 1, dtype=np.float64)
-    target = 0.1 * np.sin(0.37 * idx)
-    c = 1.0 + 0.05 * np.mod(idx, 5)
-
-    def cost_fn(w: NDArray[np.float64]) -> tuple[float, NDArray[np.float64]]:
-        d = w - target
-        return float(0.5 * np.sum(c * d * d)), c * d
-
-    return target, c, cost_fn
-
-
-def test_checkgrad_manifest_present() -> None:
-    assert MANIFEST.is_file()
-    m = json.loads(MANIFEST.read_text())
-    assert m["checkgrad"]["Kw"] == 53
-    assert m["checkgrad"]["n"] == 107
-
-
-def test_check_grad_analytic_matches_golden() -> None:
-    """The analytic gradient (one cost_fn call, mirroring CheckGrad.m:36) matches the
-    real CheckGrad.m's MultiDeriv_BackProp -- traverses `sin`, so canary-gated close."""
-    weights0 = _load("checkgrad_MultiWeights").reshape(-1)
-    golden_analytic = _load("checkgrad_MultiDeriv_BackProp").reshape(-1)
-    _, _, cost_fn = _surrogate_cost_fn(weights0.size)
-
-    report = check_grad(cost_fn, weights0, epsilon=1e-5)
-    assert_f64_matrix_close(report.analytic, golden_analytic, "check_grad analytic vs CheckGrad.m MultiDeriv_BackProp")
-
-
-def test_check_grad_numeric_matches_golden_well_behaved_prefix() -> None:
-    """The central-diff numeric derivative matches CheckGrad.m's MultiDeriv_Num for the
-    51 weight entries the legacy round trip actually perturbs.
-
-    ALWAYS-TOLERANT (not the libm canary comparator): Octave's numeric column is a
-    central diff over `weights` re-derived through the FULL legacy
-    vec2struct/nnet2MatFile/weights2nnet/network2config round trip for every perturbed
-    point, while this port's `cost_fn` perturbs `weights` directly -- two genuinely
-    different computational paths, not a same-path libm split, so bit/ULP exactness is
-    not the right bar even on the oracle env. Measured max abs diff ~1e-8 (float
-    round-trip noise through the adim/coeff scale-unscale chain, not truncation error --
-    the surrogate is an exact quadratic form)."""
-    weights0 = _load("checkgrad_MultiWeights").reshape(-1)
-    golden_numeric = _load("checkgrad_MultiDeriv_Num").reshape(-1)
-    _, _, cost_fn = _surrogate_cost_fn(weights0.size)
-
-    report = check_grad(cost_fn, weights0, epsilon=1e-5)
-    assert np.allclose(report.numeric[:-2], golden_numeric[:-2], atol=1e-6, rtol=1e-6), (
-        f"check_grad numeric[:-2] vs CheckGrad.m MultiDeriv_Num[:-2]: max diff {np.max(np.abs(report.numeric[:-2] - golden_numeric[:-2]))}"
-    )
-
-
-def test_check_grad_normalize_tail_quirk_documented_not_reproduced() -> None:
-    """`weights2nnet.m` (:150-186) never writes back the normalize mean/std tail
-    `nnet2MatFile.m` (:140-141) appends to `weights` -- so the REAL CheckGrad.m's last 2
-    numeric derivatives are always exactly 0 (golden), despite a nonzero analytic value.
-    This port's `check_grad` perturbs `weights` DIRECTLY (no config round trip), so it
-    does NOT reproduce that bug: both tail entries get a proper nonzero numeric gradient,
-    matching the analytic one almost exactly (central diff on an exact quadratic form
-    carries no truncation error). See IMPROVEMENTS.md."""
-    weights0 = _load("checkgrad_MultiWeights").reshape(-1)
-    golden_numeric = _load("checkgrad_MultiDeriv_Num").reshape(-1)
-    golden_analytic = _load("checkgrad_MultiDeriv_BackProp").reshape(-1)
-    assert golden_numeric[-2:].tolist() == [0.0, 0.0], "golden fixture must exhibit the quirk (numeric==0)"
-    assert golden_analytic[-2] != 0.0 and golden_analytic[-1] != 0.0
-
-    _, _, cost_fn = _surrogate_cost_fn(weights0.size)
-    report = check_grad(cost_fn, weights0, epsilon=1e-5)
-    assert np.all(report.numeric[-2:] != 0.0), "the generic port must NOT reproduce the weights2nnet.m tail-drop bug"
-    assert np.allclose(report.numeric[-2:], report.analytic[-2:], atol=1e-6)
-
-
-def test_check_grad_denom_floor_matches_lid_guard_formula() -> None:
-    """CheckGrad.m:148's LID-branch divisor `max(1e-24, 2*epsilon)`; for epsilon=1e-5 the
-    floor never actually binds (2e-5 > 1e-24), so denom_floor is a documented no-op here
-    -- this pins the FORMULA, not a distinguishing numeric outcome."""
-
-    def cost_fn(w: NDArray[np.float64]) -> tuple[float, NDArray[np.float64]]:
-        return float(0.5 * np.sum(w * w)), w
-
-    w0 = np.array([1.0, -2.0, 3.0])
-    plain = check_grad(cost_fn, w0, epsilon=1e-5)
-    floored = check_grad(cost_fn, w0, epsilon=1e-5, denom_floor=1e-24)
-    assert np.allclose(plain.numeric, floored.numeric)
 
 
 # --------------------------------------------------------------------------- #

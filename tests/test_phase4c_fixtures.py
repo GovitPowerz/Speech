@@ -72,7 +72,7 @@ def test_smorms3_roundtrip_offset_nonzero() -> None:
     assert any(v != 0.0 for v in offset), "round-trip offset must be nonzero"
 
 
-# --- Task 10: batching + CheckGrad + MaskingValidation fixtures ---
+# --- Task 10: batching + MaskingValidation fixtures ---
 
 
 def test_batching_manifest_present() -> None:
@@ -93,23 +93,6 @@ def test_batching_bins_exist_and_match_manifest_shapes() -> None:
 def test_batching_clobber_quirk_recorded() -> None:
     _, _, clobber = _read_bin(PHASE4C / "batching_clobber_case3_index.bin")
     assert sorted(clobber) == [5.0, 6.0], "clobber_case3_index must be class-2's data, not class-0's (the quirk)"
-
-
-def test_checkgrad_manifest_present_and_kw() -> None:
-    m = _manifest()
-    assert "checkgrad" in m, "phase4c manifest.json missing the checkgrad section"
-    cg = cast(dict[str, object], m["checkgrad"])
-    assert cg["Kw"] == 53 and cg["n"] == 107
-
-
-def test_checkgrad_normalize_tail_quirk_recorded() -> None:
-    """The last 2 (2*len(normalize.mean)) numeric derivatives are always exactly 0
-    (weights2nnet.m never writes back the normalize tail), while the analytic ones are
-    genuinely nonzero -- else the quirk fixture would be vacuous."""
-    _, _, analytic = _read_bin(PHASE4C / "checkgrad_MultiDeriv_BackProp.bin")
-    _, _, numeric = _read_bin(PHASE4C / "checkgrad_MultiDeriv_Num.bin")
-    assert numeric[-2:] == [0.0, 0.0]
-    assert analytic[-2] != 0.0 and analytic[-1] != 0.0
 
 
 def test_masking_manifest_present_and_pass_fail_split() -> None:
